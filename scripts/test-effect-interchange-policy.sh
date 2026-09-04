@@ -67,10 +67,13 @@ cp "$root/tools/bench/src/effect_interchange.rs" \
     "$temp/tools/bench/src/effect_interchange.rs"
 
 # B2: the qualification gate must police the real matrix in check-cross-targets.sh, not a
-# decorative copy of its literals -- dropping a required target triple must fail.
-sed -i 's/aarch64-linux-android aarch64-apple-ios/aarch64-linux-android/' \
+# decorative copy of its literals -- dropping a required target triple must fail. #378 retired the
+# aarch64 rows this used to mutate (owner ruling: native AArch64 is unsupported, no claim); the
+# equivalent mutation on a remaining target is erasing wasm32-unknown-unknown everywhere it
+# appears in the real matrix, which the qualification gate's target-row loop must still catch.
+sed -i 's/wasm32-unknown-unknown/wasm-target-erased/g' \
     "$temp/scripts/check-cross-targets.sh"
-expect_failure cross-target-dropped-ios
+expect_failure cross-target-dropped-wasm
 cp "$root/scripts/check-cross-targets.sh" "$temp/scripts/check-cross-targets.sh"
 
 # B2: turning the Wasm simd leg scalar (dropping the +simd128 feature row from the real matrix)
