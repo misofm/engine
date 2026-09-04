@@ -65,8 +65,11 @@ def builtins_identity_lane_ops: 22;
 # same 63 adds into the cohort chain's epilogue, in the order `route_fold` proves at bind.
 def plumbing_lane_ops: 3 + 1;
 def eq_lane_ops: 51;
-def compressor_lane_ops: 94;
-def limiter_lane_ops: 138;
+# Current-lowering recount (#368): max/min are one lane-op on x86 and wasm; the shared stereo
+# link contributes a fractional half-op per channel sample. exp2_int_in_range is two operations
+# after #367. These are inventories, not runtime measurements.
+def compressor_lane_ops: 81.5;
+def limiter_lane_ops: 129.5;
 # Nine tracks is one full eight-lane bank plus a one-track tail, and the tail costs a whole vector
 # operation per lane-sample: `(8 + 8) / 9` of the full-bank floor.
 def ragged_nine_track_width_factor: 16 / 9;

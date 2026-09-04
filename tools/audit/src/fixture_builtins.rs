@@ -2609,7 +2609,7 @@ fn verify_graph_tap_output_relation(root: &Path) -> Result<(), String> {
                 .ok_or_else(|| "graph tap record is not LF terminated".to_owned())
         })
         .collect::<Result<_, _>>()?;
-    let expected_taps = BTreeSet::from([
+    let expected_taps: BTreeSet<String> = [
         "Input",
         "PostInputBuiltins",
         "PostSimd1",
@@ -2617,8 +2617,11 @@ fn verify_graph_tap_output_relation(root: &Path) -> Result<(), String> {
         "PostSimd2PreFader",
         "PostFader",
         "PostMatrix",
-    ]);
-    let actual_taps: BTreeSet<_> = records
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    let actual_taps: BTreeSet<String> = records
         .iter()
         .map(|record| json_string_field(record, "tap"))
         .collect::<Result<_, _>>()?;
@@ -2629,7 +2632,7 @@ fn verify_graph_tap_output_relation(root: &Path) -> Result<(), String> {
     }
     let post_matrix = records
         .iter()
-        .find(|record| json_string_field(record, "tap") == Ok("PostMatrix"))
+        .find(|record| json_string_field(record, "tap").as_deref() == Ok("PostMatrix"))
         .ok_or_else(|| "graph-taps has no PostMatrix record".to_owned())?;
     if json_string_field(post_matrix, "case")? != "graph-taps"
         || json_u64_field(post_matrix, "frames")? != 128
@@ -2672,35 +2675,42 @@ fn verify_graph_lane_summary(record: &str, lane: &str, words: &[u32]) -> Result<
     Ok(())
 }
 
-fn json_string_field<'a>(record: &'a str, key: &str) -> Result<&'a str, String> {
-    let prefix = format!("\"{key}\":\"");
-    let value = record
-        .split_once(&prefix)
-        .map(|(_, value)| value)
-        .and_then(|value| value.split_once('"').map(|(value, _)| value))
-        .ok_or_else(|| format!("JSONL record is missing string field: {key}"))?;
-    Ok(value)
+/// The first value of `key` found in `object`, searched top level first, then depth-first through
+/// nested objects -- the same "anywhere in the record" reach the substring search it replaces had.
+fn find_json_field<'a>(
+    object: &'a BTreeMap<String, JsonValue>,
+    key: &str,
+) -> Option<&'a JsonValue> {
+    if let Some(found) = object.get(key) {
+        return Some(found);
+    }
+    object.values().find_map(|value| match value {
+        JsonValue::Object(nested) => find_json_field(nested, key),
+        _ => None,
+    })
+}
+
+fn json_string_field(record: &str, key: &str) -> Result<String, String> {
+    match find_json_field(&JsonParser::object(record)?, key) {
+        Some(JsonValue::String(value)) => Ok(value.clone()),
+        _ => Err(format!("JSONL record is missing string field: {key}")),
+    }
 }
 
 fn json_u64_field(record: &str, key: &str) -> Result<u64, String> {
-    let prefix = format!("\"{key}\":");
-    let value = record
-        .split_once(&prefix)
-        .map(|(_, value)| value)
-        .and_then(|value| value.split([',', '}']).next())
-        .ok_or_else(|| format!("JSONL record is missing numeric field: {key}"))?;
-    value
-        .parse()
-        .map_err(|_| format!("JSONL field is not a decimal u64: {key}"))
+    match find_json_field(&JsonParser::object(record)?, key) {
+        Some(JsonValue::Unsigned(value)) => Ok(*value),
+        _ => Err(format!("JSONL record is missing numeric field: {key}")),
+    }
 }
 
 fn json_u32_hex_field(record: &str, key: &str) -> Result<u32, String> {
-    u32::from_str_radix(json_string_field(record, key)?, 16)
+    u32::from_str_radix(&json_string_field(record, key)?, 16)
         .map_err(|_| format!("JSONL field is not a u32 hex word: {key}"))
 }
 
 fn json_u64_hex_field(record: &str, key: &str) -> Result<u64, String> {
-    u64::from_str_radix(json_string_field(record, key)?, 16)
+    u64::from_str_radix(&json_string_field(record, key)?, 16)
         .map_err(|_| format!("JSONL field is not a u64 hex word: {key}"))
 }
 

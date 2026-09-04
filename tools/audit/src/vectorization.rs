@@ -25,6 +25,7 @@ struct Rule {
     symbol: String,
     required: Vec<Vec<String>>,
     forbidden: Vec<String>,
+    forbidden_calls: Vec<String>,
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -41,10 +42,15 @@ const ACTIVE_REGISTRY: &[&str] = &["probe_gain_simd4", "probe_sum2_simd4", "prob
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 const ACTIVE_REGISTRY: &[&str] = &[];
 
+// The gain value stays opaque (`black_box`) so the probe measures the kernel on a runtime
+// gain instead of a folded constant, and the typed rebind keeps the array's static length so
+// `Simd8::load`'s in-range check stays provable: no `slice_index_fail` trampoline enters the
+// captured body, which the allowlist's no-call assertion forbids (issue #372).
 #[cfg(target_arch = "x86_64")]
 #[inline(never)]
 fn probe_gain_simd8(io: &mut [f32; PROBE_FRAMES * 8], gain: &[f32; 8]) {
-    gain_block::<lane::Simd8>(io, PROBE_FRAMES, lane::Simd8::load(black_box(gain)));
+    let gain: &[f32; 8] = black_box(gain);
+    gain_block::<lane::Simd8>(io, PROBE_FRAMES, lane::Simd8::load(gain));
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -67,10 +73,12 @@ fn probe_svf_simd8(
     svf_block::<lane::Simd8>(io, PROBE_FRAMES, black_box(coefficients), black_box(state));
 }
 
+// Same rationale as the x86 gain probe above: opaque value, static length (issue #372).
 #[cfg(target_arch = "aarch64")]
 #[inline(never)]
 fn probe_gain_simd4(io: &mut [f32; PROBE_FRAMES * 4], gain: &[f32; 4]) {
-    gain_block::<lane::Simd4>(io, PROBE_FRAMES, lane::Simd4::load(black_box(gain)));
+    let gain: &[f32; 4] = black_box(gain);
+    gain_block::<lane::Simd4>(io, PROBE_FRAMES, lane::Simd4::load(gain));
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -164,9 +172,9 @@ fn parse_allowlist(text: &str) -> Result<Vec<Rule>, String> {
             continue;
         }
         let fields: Vec<&str> = line.split('\t').collect();
-        if fields.len() != 5 {
+        if fields.len() != 6 {
             return Err(format!(
-                "allowlist line {} has {} fields, expected 5",
+                "allowlist line {} has {} fields, expected 6",
                 line_index + 1,
                 fields.len()
             ));
@@ -185,7 +193,8 @@ fn parse_allowlist(text: &str) -> Result<Vec<Rule>, String> {
         }
         let required = split_required(fields[3]);
         let forbidden = split_forbidden(fields[4]);
-        if required.is_empty() || forbidden.is_empty() {
+        let forbidden_calls = split_forbidden(fields[5]);
+        if required.is_empty() || forbidden.is_empty() || forbidden_calls.is_empty() {
             return Err(format!(
                 "allowlist line {} has an empty policy",
                 line_index + 1
@@ -197,6 +206,7 @@ fn parse_allowlist(text: &str) -> Result<Vec<Rule>, String> {
             symbol: fields[2].to_owned(),
             required,
             forbidden,
+            forbidden_calls,
         });
     }
     Ok(rules)
@@ -269,15 +279,58 @@ fn certify(disassembly: &str, rules: &[Rule]) -> Vec<String> {
             }
         }
         for token in &rule.forbidden {
-            if body.contains(token) {
+            if token_hits(body, token) {
                 failures.push(format!(
                     "{} / {}: forbidden scalar fallback '{token}' is present",
                     rule.family, rule.symbol
                 ));
             }
         }
+        for token in &rule.forbidden_calls {
+            if body.lines().any(|line| line_has_mnemonic(line, token)) {
+                failures.push(format!(
+                    "{} / {}: forbidden call '{token}' is present",
+                    rule.family, rule.symbol
+                ));
+            }
+        }
     }
     failures
+}
+
+/// A forbidden token is a `|`-separated set of alternatives: the body is in violation when any
+/// alternative occurs. The plain mnemonics of the original rows keep their literal meaning.
+fn token_hits(body: &str, token: &str) -> bool {
+    token
+        .split('|')
+        .any(|alternative| body.contains(alternative))
+}
+
+/// A forbidden-call token is a `|`-separated set of **exact** mnemonics. Matching is anchored on
+/// the mnemonic token of each disassembly line, never a substring: an unanchored search fires on
+/// `tbl` (which contains `bl`), on jump-target annotations such as
+/// `<core::ops::function::FnOnce::call_once+0x10>`, and on every `*_block` kernel symbol name.
+fn line_has_mnemonic(line: &str, token: &str) -> bool {
+    mnemonic(line)
+        .is_some_and(|mnemonic| token.split('|').any(|alternative| mnemonic == alternative))
+}
+
+/// The first mnemonic-like token of a normalized disassembly line: the `addr:` prefix and the
+/// instruction-encoding tokens are skipped, and the first remaining token is the mnemonic
+/// (everything after it is operands and annotations). Lines that carry nothing but encoding
+/// tokens have no mnemonic.
+fn mnemonic(line: &str) -> Option<&str> {
+    line.split_whitespace()
+        .find(|token| !token.ends_with(':') && !is_encoding_token(token))
+}
+
+/// Instruction encodings are hex tokens of an architecture-specific length: x86 objdump prints
+/// the encoding as two-character hex bytes, and AArch64 objdump (llvm, GNU, and Apple, on Linux
+/// and Darwin) prints it as one eight-character hex word. A token is an encoding token only when
+/// it is all hex digits AND its length is 2 or 8 -- never "all hex, any length": `add`, `fadd`,
+/// `dec`, and the branch `b` are real mnemonics made only of hex digits.
+fn is_encoding_token(token: &str) -> bool {
+    (token.len() == 2 || token.len() == 8) && token.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn sha256(bytes: &[u8]) -> String {
@@ -288,10 +341,6 @@ fn sha256(bytes: &[u8]) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
-}
-
-fn json_string(value: &str) -> String {
-    format!("\"{}\"", value.replace('\\', "\\\\").replace('\"', "\\\""))
 }
 
 struct Args {
@@ -378,7 +427,7 @@ pub(crate) fn main() {
         .count();
     let failure_json = failures
         .iter()
-        .map(|failure| json_string(failure))
+        .map(|failure| format!("\"{}\"", bench_support::json::escape(failure)))
         .collect::<Vec<_>>()
         .join(",");
     println!(
@@ -409,6 +458,7 @@ mod tests {
                 symbol: (*symbol).to_owned(),
                 required: vec![vec!["vector-op".to_owned()]],
                 forbidden: vec!["scalar-op".to_owned()],
+                forbidden_calls: vec!["call-op".to_owned()],
             })
             .collect()
     }
@@ -437,6 +487,100 @@ mod tests {
             failures
                 .iter()
                 .any(|failure| failure.contains("forbidden scalar fallback"))
+        );
+    }
+
+    #[test]
+    fn fused_multiply_add_is_red() {
+        let mut rules = active_rules();
+        rules[0].forbidden = vec!["vfmadd|vfnmadd".to_owned()];
+        let failures = certify(
+            &synthetic_bodies("vector-op vmulps vaddps vfmadd213ps"),
+            &rules,
+        );
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("forbidden scalar fallback")
+                    && failure.contains("vfmadd|vfnmadd"))
+        );
+    }
+
+    fn rules_with_forbidden_calls(index: usize, calls: &str) -> Vec<Rule> {
+        let mut rules = active_rules();
+        rules[index].forbidden_calls = vec![calls.to_owned()];
+        rules
+    }
+
+    #[test]
+    fn call_inside_kernel_body_is_red() {
+        let failures = certify(
+            &synthetic_bodies("0000: 48 83 fa 07 call 0x1000"),
+            &rules_with_forbidden_calls(0, "call|callq"),
+        );
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("forbidden call")
+                    && failure.contains("'call|callq'"))
+        );
+        // The matcher is anchored on the mnemonic token: a `call` that occurs only inside a
+        // jump-target annotation, and a `bl` that occurs only inside the mnemonic `tbl`, are
+        // not calls (the pre-#372-review substring matcher fired on both).
+        let annotated = certify(
+            &synthetic_bodies("0000: 75 10 jmp 0x20 <core::ops::function::FnOnce::call_once+0x10>"),
+            &rules_with_forbidden_calls(0, "call|callq"),
+        );
+        assert!(
+            !annotated
+                .iter()
+                .any(|failure| failure.contains("forbidden call"))
+        );
+        let table = certify(
+            &synthetic_bodies("0001: 4e 06 01 tbl v0.16b, { v1.16b }, v2.16b"),
+            &rules_with_forbidden_calls(0, "bl|blr"),
+        );
+        assert!(
+            !table
+                .iter()
+                .any(|failure| failure.contains("forbidden call"))
+        );
+        // AArch64 objdump prints the encoding as one eight-character hex word, not two-character
+        // bytes; the word is skipped as an encoding token, so the mnemonic still matches.
+        let branch = certify(
+            &synthetic_bodies("c78e8: 94000000 bl 0x1000 <_memset_pattern16>"),
+            &rules_with_forbidden_calls(0, "bl|blr"),
+        );
+        assert!(
+            branch
+                .iter()
+                .any(|failure| failure.contains("forbidden call") && failure.contains("'bl|blr'"))
+        );
+        // Non-call instructions with eight-hex-word encodings are not calls.
+        let sub = certify(
+            &synthetic_bodies("c78e4: d10043ff sub sp, sp, #0x10"),
+            &rules_with_forbidden_calls(0, "bl|blr"),
+        );
+        assert!(!sub.iter().any(|failure| failure.contains("forbidden call")));
+        let table_neon = certify(
+            &synthetic_bodies("c7900: 4e040d40 tbl v0.16b, { v1.16b }, v2.16b"),
+            &rules_with_forbidden_calls(0, "bl|blr"),
+        );
+        assert!(
+            !table_neon
+                .iter()
+                .any(|failure| failure.contains("forbidden call"))
+        );
+        // The encoding test is the length set {2, 8}, not "all hex, any length": the branch
+        // mnemonic `b` is a one-character all-hex word and must still match.
+        let branch_short = certify(
+            &synthetic_bodies("c7a00: 14000000 b 0x100"),
+            &rules_with_forbidden_calls(0, "b"),
+        );
+        assert!(
+            branch_short
+                .iter()
+                .any(|failure| failure.contains("forbidden call") && failure.contains("'b'"))
         );
     }
 

@@ -76,6 +76,7 @@ use bench_support::digest::{Sha256Sink, sha256_hex};
 use bench_support::json::escape as json_escape;
 use bench_support::metadata::Metadata;
 use bench_support::stats;
+use bench_support::stats::{Percentiles, format_f64, microseconds};
 use bench_support::timing;
 use console_workload::{
     QUANTUM, SAMPLE_RATE_HZ, SessionRuntime, WORKLOADS, Workload, source_block,
@@ -819,39 +820,4 @@ fn paired_ratio_median(numerator: &[u64], denominator: &[u64]) -> f64 {
     quotients.sort_by(f64::total_cmp);
     assert!(!quotients.is_empty(), "paired observations");
     stats::nearest_rank(&quotients, 50, 100)
-}
-
-/// Nearest-rank percentiles over one leg's per-block nanoseconds.
-struct Percentiles {
-    min: u64,
-    p50: u64,
-    p95: u64,
-    p99: u64,
-    max: u64,
-}
-
-impl Percentiles {
-    fn from_samples(samples: &[u64]) -> Self {
-        let mut sorted = samples.to_vec();
-        sorted.sort_unstable();
-        assert!(!sorted.is_empty(), "measured observations");
-        let rank = |numerator: usize, denominator: usize| {
-            stats::nearest_rank(&sorted, numerator, denominator)
-        };
-        Self {
-            min: sorted[0],
-            p50: rank(50, 100),
-            p95: rank(95, 100),
-            p99: rank(99, 100),
-            max: *sorted.last().expect("nonempty"),
-        }
-    }
-}
-
-fn microseconds(nanoseconds: u64) -> String {
-    format_f64(nanoseconds as f64 / 1_000.0)
-}
-
-fn format_f64(value: f64) -> String {
-    format!("{value:.3}")
 }

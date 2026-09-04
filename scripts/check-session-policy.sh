@@ -12,7 +12,7 @@ allowlist=scripts/session-policy-historical-allowlist.txt
 [[ -f "$allowlist" ]] || fail "missing explicit historical allowlist"
 ! rg -q '^session\.workspace = true$' crates/engine/Cargo.toml || fail "engine must not depend on session"
 rg -qx 'engine\.workspace = true' "$session_manifest" || fail "session must depend on engine"
-rg -qx 'jstrict = \{ version = "=0\.14\.0", default-features = false \}' "$session_manifest" || fail "session must exact-pin jstrict 0.14.0 without default features"
+rg -qx 'json-syntax = \{ version = "=0\.12\.5", default-features = false \}' "$session_manifest" || fail "session must exact-pin json-syntax 0.12.5 without default features"
 ! rg -n '^[[:space:]]*(toml|serde)[[:space:]]*=' "$session_manifest" || fail "session runtime parser baggage returned"
 ! rg -n 'use engine::.*(PreparedRenderPlan|PlanPublisher)|PlanPublisher<' "$session_source" || fail "session may not import plan publication APIs"
 ! rg -n 'format!|\.to_owned\(|\.to_string\(|String::with_capacity|Vec::with_capacity|\.collect::' "$session_source/estimate.rs" || fail "successful resource preflight may not allocate temporary diagnostics or collections"

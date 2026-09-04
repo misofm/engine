@@ -130,7 +130,23 @@ fn snapshot() -> Snapshot {
     }
 }
 
+/// Initialize the process-lifetime statics that the JSON frontend's dependencies create lazily,
+/// so the first observed window is not charged for them.
+///
+/// `json-syntax` 0.12.5 indexes every object through `hashbrown` 0.12's `DefaultHashBuilder`,
+/// which is `ahash` 0.7's `RandomState`. Its first construction in a process boxes three
+/// `once_cell::race::OnceBox` statics (`RAND_SOURCE`, its inner `Box<dyn RandomSource>`, and the
+/// `SEEDS` array: 8 + 16 + 64 bytes) that live until process exit and belong to no capi owner.
+/// ahash's `build.rs` forces `runtime-rng` on every hosted target, so no Cargo feature removes
+/// them. They land on whichever thread parses the first object, which under the parallel
+/// harness is a race between this file's tests; parsing a trivial object here makes every
+/// window start after that initialization on this thread, independent of sibling scheduling.
+fn warm_process_lifetime_statics() {
+    let _ = session::parse_session_json(r#"{"warm":0}"#);
+}
+
 fn begin() {
+    warm_process_lifetime_statics();
     // Initialize the thread-local keys before observation is armed.
     ACTIVE.set(false);
     ALLOCATIONS.set(0);

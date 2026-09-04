@@ -8,7 +8,7 @@ This manifest records Issue 005 non-benchmark evidence and its limits. The norma
 | typed mutation/property corpus | one million deterministic mutations select command, response, event, or transaction decoder; truncation, malformed values, ordering, limits, and PCM-forbidden cases are represented by conformance tests | does not prove every future adapter or provider implementation |
 | native fuzz | invocation 4 used nightly-2026-08-20 and cargo-fuzz 0.13.2: four typed targets × 10,000 runs, no crash; 40,000 new executions and 140,000 cumulative including two older-schema runs | bounded execution evidence, not proof of absence of defects; 80,000 executions are the current four-target schema runs |
 | Wasm | scalar and `simd128` artifacts execute and validate the same complete corpus | not browser/AudioWorklet deployment evidence |
-| Android/iOS | Rust `cargo check` metadata artifacts for `aarch64-linux-android` and `aarch64-apple-ios` were recorded | neither target was linked, installed, or run on a device |
+| Android/iOS | unsupported, deferred | native AArch64 is downgraded to unsupported, no claim (#378, owner ruling 2026-09-04); see the deferred-defect register in `docs/TARGET_MATRIX.md` |
 
 The native audit's forwarding allocator exists only in its standalone executable and forwards to `System`; the workspace policy/mutation test rejects unsafe code outside that narrow audit scope. The generic borrowed outer decoder and borrowed automation decoder are audited; allocating typed convenience decoders intentionally run on control threads.
 

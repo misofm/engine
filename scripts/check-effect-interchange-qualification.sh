@@ -155,7 +155,7 @@ rg -q 'exact_portable_migration_qualification_matrix' \
 # The real per-mode flags and target triples now live in scripts/check-cross-targets.sh (B2): the
 # decorative loop that used to carry these literals in check-effect-interchange-targets.sh has been
 # deleted, and this gate must police the matrix that actually runs, not a copy of its literals.
-for target in x86_64-unknown-linux-gnu aarch64-linux-android aarch64-apple-ios wasm32-unknown-unknown; do
+for target in x86_64-unknown-linux-gnu wasm32-unknown-unknown; do
     rg -q "$target" scripts/check-cross-targets.sh ||
         fail "target row missing: $target"
 done
