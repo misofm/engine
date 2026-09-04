@@ -335,6 +335,17 @@ macro_rules! impl_lane_for_wide {
                     $crate::Lane::max(n, <$simd>::splat($crate::bits::EXP2_INT_MIN)),
                     <$simd>::splat($crate::bits::EXP2_INT_MAX),
                 );
+                $crate::Lane::exp2_int_in_range(n)
+            }
+
+            #[inline(always)]
+            fn exp2_int_in_range(n: Self) -> Self {
+                debug_assert!(!<$simd as $crate::Lane>::mask_any(
+                    <$simd as $crate::Lane>::mask_not(<$simd as $crate::Lane>::mask_and(
+                        <$simd as $crate::Lane>::ge(n, <$simd>::splat($crate::bits::EXP2_INT_MIN),),
+                        <$simd as $crate::Lane>::le(n, <$simd>::splat($crate::bits::EXP2_INT_MAX),),
+                    )),
+                ));
                 let biased = n + <$simd>::splat($crate::bits::EXP2_INT_MAGIC);
                 <$simd>::from_bits(biased.to_bits() << $crate::bits::MANTISSA_BITS)
             }

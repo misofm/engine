@@ -92,7 +92,7 @@ const SQRT2: f32 = core::f32::consts::SQRT_2;
 ///
 /// Operation order, frozen (any change re-opens gate M1):
 /// clamp; `xi = floor(x)`; `f = x - xi`; fold `f > 0.5` into `xi + 1`, `f - 1`; six-term Horner in
-/// `f` with mul/add; `p = 1 + f * p`; `p * exp2_int(xi)`.
+/// `f` with mul/add; `p = 1 + f * p`; `p * exp2_int_in_range(xi)`.
 #[inline(always)]
 pub fn exp2_lane<L: Lane>(x: L) -> L {
     let x = x.max(L::splat(-126.0)).min(L::splat(127.0));
@@ -112,7 +112,7 @@ pub fn exp2_lane<L: Lane>(x: L) -> L {
     }
     let p = L::splat(1.0).add(f.mul(p));
 
-    p.mul(L::exp2_int(xi))
+    p.mul(L::exp2_int_in_range(xi))
 }
 
 /// `log2(x)`, lane-wide, for positive `x`.
