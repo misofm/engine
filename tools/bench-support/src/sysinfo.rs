@@ -1,8 +1,15 @@
 //! The one physical-core-count probe.
 //!
-//! Audit #104 F4 found this same `lscpu -p=CORE,SOCKET` probe, byte-identical, duplicated between
-//! the session and conformance benchmarks. One definition, so a change to how a physical core is
-//! counted is a change to one function, not two.
+//! Audit #104 F4 found this same `lscpu -p=CORE,SOCKET` probe duplicated between the session and
+//! conformance benchmarks. The two copies were *not* byte-identical -- `session.rs` dispatched
+//! through a local `command()` that returns the `"unknown"` sentinel on any failure, while
+//! `conformance.rs` dispatched through a local `command_allow_empty()` that returns `Option<String>`
+//! -- but the parsing downstream of that dispatch (trim, split into `(core, socket)` pairs, dedupe,
+//! count) was identical in both. This merges the two: one dispatch, written out here rather than
+//! reused from either file's now-deleted helper, and the identical parsing tail.
+//!
+//! One definition, so a change to how a physical core is counted is a change to one function, not
+//! two.
 
 use std::collections::BTreeSet;
 use std::process::Command;
@@ -17,6 +24,8 @@ pub fn physical_core_count() -> String {
         .ok()
         .filter(|output| output.status.success())
         .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|output| output.trim().to_owned())
+        .filter(|output| !output.is_empty())
     else {
         return "unknown".to_owned();
     };

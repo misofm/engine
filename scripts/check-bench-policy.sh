@@ -27,30 +27,57 @@ sole_owner() {
 }
 
 # Like `sole_owner`, but a function outside `owner` matching `def_pattern` is not itself a
-# violation if its whole body (brace-depth tracked from the definition line) calls the shared
-# `escape(`: a one-line `format!("\"{}\"", escape(value))` wrapper is a caller, not a second
-# escaper. A function whose body never calls `escape(` -- the original defect this rule targets,
-# `vectorization.rs`'s `json_string` before this issue -- still fails.
+# violation if it delegates to the shared `escape(`. Brace-depth tracking turned out to be the
+# wrong tool for this (four different ways to desynchronise it, caught in review): this instead
+# takes the window from the definition line to the first following line that is exactly `}` (or a
+# 12-line cap, whichever comes first -- if the window runs out at EOF first, it is still judged on
+# what it saw) and calls the window a delegate iff it contains `escape(` on a non-comment line and
+# contains neither `.replace(` nor the char literal `'\'` -- the shape of the exact partial-escaper
+# defect this rule exists to catch (`vectorization.rs`'s old `json_string`: it called nothing and
+# hand-escaped `\` and `"` itself). The definition line's own signature is exempt from the
+# `escape(` search up through its matched prefix, so a function literally named `json_escape` does
+# not "delegate" to itself by spelling `escape(` in its own name -- but any call after that prefix,
+# including on a one-line signature-and-body, still counts.
 sole_owner_or_delegate() {
     local label=$1 owner=$2 def_pattern=$3
     grep -qE "$def_pattern" "$owner" 2>/dev/null || fail "$label (the shared definition in $owner is gone)"
     local matches offenders=()
     matches="$(grep -rlE "$def_pattern" tools --include='*.rs' 2>/dev/null | LC_ALL=C sort || true)"
     local file awk_pattern="${def_pattern//\\/\\\\}"
+    # The 3-character Rust char literal `'\'` (apostrophe, backslash, apostrophe): the exact
+    # partial-escaper's own `.replace('\\', ...)` needle. Built here and handed to awk through
+    # `-v` rather than spelled inside the awk script text below, because that script is itself
+    # inside a single-quoted bash string and an embedded apostrophe would close it early.
+    # Passed through `-v`, which applies awk's own C-style escape processing to the value, so the
+    # two backslashes below collapse to the one the needle needs.
+    local backslash_char_literal="'\\\\'"
     while IFS= read -r file; do
         [[ -z "$file" || "$file" == "$owner" ]] && continue
-        if [[ "$(awk -v pat="$awk_pattern" '
-            # The definition line itself is never checked for a delegating call: a function named
-            # `json_escape` spells "escape(" in its own signature, which is not a call to anything.
-            !in_fn && $0 ~ pat {
-                in_fn = 1
-                depth = gsub(/\{/, "{") - gsub(/\}/, "}")
-                next
-            }
-            in_fn {
-                if ($0 ~ /::escape\(|[^a-zA-Z0-9_]escape\(/) delegates = 1
-                depth += gsub(/\{/, "{") - gsub(/\}/, "}")
-                if (depth <= 0) { print (delegates ? "delegate" : "own"); in_fn = 0; delegates = 0 }
+        if [[ "$(awk -v pat="$awk_pattern" -v needle="$backslash_char_literal" '
+            { lines[NR] = $0 }
+            $0 ~ pat { starts[NR] = 1 }
+            END {
+                for (i = 1; i <= NR; i++) {
+                    if (!(i in starts)) continue
+                    escapes = 0; replaces = 0; backslash_literal = 0
+                    for (j = i; j < i + 12 && j <= NR; j++) {
+                        line = lines[j]
+                        search_from = 1
+                        if (j == i) {
+                            match(line, pat)
+                            search_from = RSTART + RLENGTH
+                        }
+                        rest = substr(line, search_from)
+                        trimmed = line
+                        sub(/^[ \t]+/, "", trimmed)
+                        is_comment = (trimmed ~ /^\/\//)
+                        if (!is_comment && index(rest, "escape(") > 0) escapes = 1
+                        if (index(line, ".replace(") > 0) replaces = 1
+                        if (index(line, needle) > 0) backslash_literal = 1
+                        if (trimmed == "}") break
+                    }
+                    print (escapes && !replaces && !backslash_literal ? "delegate" : "own")
+                }
             }
         ' "$file")" == *own* ]]; then
             offenders+=("$file")
@@ -64,8 +91,8 @@ sole_owner_or_delegate() {
 }
 
 # Unlike `sole_owner`, this one names nothing that is allowed to hold the pattern: `bench-support`
-# hashes through the `sha2` crate, not a hand-rolled round-constant table, so the pattern below
-# must appear nowhere at all under `tools/`.
+# hashes through the `sha2` crate, not a hand-rolled initial-hash-word/round-constant table, so the
+# pattern below must appear nowhere at all under `tools/`.
 forbidden_under_tools() {
     local label=$1 pattern=$2
     local found
@@ -84,12 +111,12 @@ sole_owner 'the audited allocator has more than one implementation' \
 sole_owner 'more than one global allocator is registered under tools/' \
     "$support/src/alloc.rs" '^#\[global_allocator\]'
 sole_owner_or_delegate 'the JSON string escaper has more than one implementation' \
-    "$support/src/json.rs" '^(pub )?fn (json_(escape|string|quote)|escape)\('
+    "$support/src/json.rs" '^\s*(pub(\([a-z]+\))? )?fn (json_(escape|string|quote)|escape)\('
 sole_owner 'the nearest-rank percentile has more than one implementation' \
     "$support/src/stats.rs" '^(pub )?fn (percentile|nearest_rank|per_mille|percentile_nearest_rank)'
 sole_owner 'the counted SHA-256 sink has more than one implementation' \
     "$support/src/digest.rs" '^(pub )?struct Sha256Sink'
-forbidden_under_tools 'a private SHA-256 round-constant table reappeared under tools/' \
+forbidden_under_tools 'a private SHA-256 initial hash word (H0) or round-constant table (K) reappeared under tools/' \
     '0x6a09_?e667|const K: ?\[u32; ?64\]'
 
 # Subjects converted to the shared timer (#104 F1, made structural). `timing::timed` samples the

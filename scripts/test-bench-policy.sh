@@ -54,6 +54,58 @@ expect_failure second-json-string-name
 # and `tools/bench/src/effect_interchange.rs` both carry one); the baseline case above already
 # proves that shape stays green.
 
+# A delegating wrapper whose signature rustfmt has wrapped across multiple lines is still a
+# delegate, not a reimplementation: the window scan has to reach the line that actually calls
+# `escape(`, however many signature lines come first.
+new_case json-string-multiline-signature-delegate-stays-green
+printf '\nfn json_string(\n    value: &str,\n) -> String {\n    format!("\\"{}\\"", json::escape(value))\n}\n' \
+    >>"$case_root/tools/bench/src/conformance.rs"
+check >/dev/null || {
+    printf 'bench policy rejects a delegating json_string whose signature spans multiple lines\n' >&2
+    exit 1
+}
+
+# A one-line delegating wrapper immediately followed by unrelated code must still read as a
+# delegate: the window closes on the next lone `}` line or a 12-line cap, not on brace balance.
+new_case json-string-one-liner-delegate-followed-by-other-code-stays-green
+printf '\nfn json_string(value: &str) -> String { format!("\\"{}\\"", json::escape(value)) }\n\nfn something_else() -> u32 {\n    1\n}\n' \
+    >>"$case_root/tools/bench/src/conformance.rs"
+check >/dev/null || {
+    printf 'bench policy rejects a one-line delegating json_string followed by other code\n' >&2
+    exit 1
+}
+
+new_case json-string-non-delegating-one-liner-as-last-item
+printf '\nfn json_string(value: &str) -> String { value.to_owned() }\n' \
+    >>"$case_root/tools/bench/src/conformance.rs"
+expect_failure json-string-non-delegating-one-liner-as-last-item
+
+# The exact partial-escaper shape this rule exists to catch: it calls the shared `escape` and then
+# keeps hand-rolling more escaping of its own, same as `vectorization.rs`'s old `json_string` did
+# with `.replace('\\', ...)`.
+new_case json-string-delegates-then-replaces
+printf '\nfn json_string(value: &str) -> String {\n    let escaped = json::escape(value);\n    escaped.replace("<", "&lt;")\n}\n' \
+    >>"$case_root/tools/bench/src/conformance.rs"
+expect_failure json-string-delegates-then-replaces
+
+# `escape(` appearing only in a comment is not a delegating call.
+new_case json-string-escape-mentioned-only-in-a-comment
+printf '\nfn json_string(value: &str) -> String {\n    // escape(value) used to be called here\n    value.to_owned()\n}\n' \
+    >>"$case_root/tools/bench/src/conformance.rs"
+expect_failure json-string-escape-mentioned-only-in-a-comment
+
+# The widened definition anchor (`^\s*(pub(\([a-z]+\))? )?fn`) has to see a reimplementation that
+# is indented (inside a module) or spelled `pub(crate)`, not just a column-zero `pub`/bare `fn`.
+new_case json-string-indented-inside-a-module
+printf '\nmod scratch {\n    fn json_string(value: &str) -> String {\n        value.to_owned()\n    }\n}\n' \
+    >>"$case_root/tools/bench/src/conformance.rs"
+expect_failure json-string-indented-inside-a-module
+
+new_case json-string-pub-crate-non-delegating
+printf '\npub(crate) fn json_string(value: &str) -> String {\n    value.to_owned()\n}\n' \
+    >>"$case_root/tools/bench/src/conformance.rs"
+expect_failure json-string-pub-crate-non-delegating
+
 # #380: the private SHA-256 round-constant table `tools/bench/src/session.rs` used to carry.
 new_case second-sha256-round-constant
 printf '\nconst K: [u32; 64] = [0; 64];\n' \
