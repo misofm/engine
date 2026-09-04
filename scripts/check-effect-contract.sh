@@ -9,8 +9,24 @@
 # none is given.
 set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$root"
+
+# S3: resolve a relative bench path against the caller's cwd BEFORE `cd "$root"` below.
 bench_binary="${1:-}"
+if [[ -n "$bench_binary" ]]; then
+    case "$bench_binary" in
+        /*) : ;;
+        *) bench_binary="$(realpath -m -- "$bench_binary")" ;;
+    esac
+    # S1/S2: an explicit path must be an existing executable file, never a directory or a missing
+    # path -- and being explicit-but-missing is a hard error, never a fallback trigger (the only
+    # fallback this script has, `cargo run`, only ever fires when no path is given at all).
+    [[ -f "$bench_binary" && -x "$bench_binary" ]] || {
+        printf 'effect contract failure: missing bench binary %s\n' "$bench_binary" >&2
+        exit 1
+    }
+fi
+
+cd "$root"
 bash scripts/check-effect-runtime-policy.sh .
 bash scripts/test-effect-runtime-policy.sh .
 bash scripts/check-effect-runtime-fixtures.sh .
@@ -49,14 +65,19 @@ done < <(rg -l 'impl NativeEffectFactory for' crates --glob 'crates/*/src/**.rs'
     exit 1
 }
 
+# B1: `bench effect-contract --conformance` prints one JSON record on success; assert its shape
+# so a stand-in binary (or a stale one) that exits 0 with nothing meaningful is caught rather than
+# trusted.
 if [[ -n "$bench_binary" ]]; then
-    [[ -x "$bench_binary" ]] || {
-        printf 'effect contract failure: missing bench binary %s\n' "$bench_binary" >&2
-        exit 1
-    }
-    "$bench_binary" effect-contract --conformance
+    conformance_output="$("$bench_binary" effect-contract --conformance)"
 else
-    cargo run --locked --release -q -p bench -- effect-contract --conformance
+    conformance_output="$(cargo run --locked --release -q -p bench -- effect-contract --conformance)"
 fi
+printf '%s\n' "$conformance_output"
+jq -e '.schema_version == 1 and .kind == "effect_conformance" and .launch_failed_gates == 0' \
+    <<<"$conformance_output" >/dev/null || {
+    printf 'effect contract failure: bench conformance output missing expected record\n' >&2
+    exit 1
+}
 printf 'effect runtime contract/conformance: ok (%s production factories on the harness)\n' \
     "${#conformance_crates[@]}"
