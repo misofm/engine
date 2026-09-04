@@ -190,14 +190,19 @@ a real per-node scalar instance.
 
 ### E7 — the cost classes, measured
 
-`observation_cost_classes_are_what_they_claim` has a deterministic half and a descriptive one.
+`observation_cost_classes_are_what_they_claim` (deterministic) and
+`observation_cost_classes_are_separated_from_a_computed_scan_in_release` (`--ignored`, release
+only) are the deterministic and descriptive halves of this claim, as two separate test functions.
 
 The deterministic half counts reads through the same `wants` gate the runtime uses: **0** reads
 over 4 096 blocks with capacity but nothing armed, exactly **4 096** with one tap armed, and back
 to zero the moment it is disarmed.
 
-The descriptive half renders a real eight-compressor plan for 256 blocks in each of the four legs
-(debug profile, `x86_64` Zen 5, one shared machine — evidence, not a pin):
+The release-only half renders a real eight-compressor plan for 256 blocks in each of the four legs.
+The table below is a debug-profile capture kept for the general shape; the test's actual gate is
+release-only: `armed <= unarmed_with_console * 1.10 + 50 µs`, i.e. arming eight taps is not
+measurably slower than an attached-but-unarmed console (debug profile, `x86_64` Zen 5, one shared
+machine — evidence, not a pin):
 
 | leg | 256 blocks | per block |
 |---|---|---|
