@@ -65,11 +65,19 @@ for target in aarch64-linux-android aarch64-apple-ios; do
     CARGO_TARGET_DIR="$target_dir" \
         cargo check --quiet --locked --release --target "$target" \
         -p parametric-eq -p builtins -p builtins-compiler
-    # effect-package + effect-compiler + conformance: `check --all-targets`, debug (issue #081's
-    # android/ios rows; the original script never passed --release here).
+    # effect-package + effect-compiler: `check --all-targets`, debug (issue #081's android/ios
+    # rows; the original script never passed --release here). Split from the conformance row below
+    # (N1): effect-package ships a cdylib, so one invocation naming it together with the evidence
+    # crate conformance would unify conformance's feature/dependency edges into the artifact build
+    # -- exactly what scripts/check-artifact-evidence-leak.sh exists to catch. Both invocations
+    # share $target_dir, so the split costs no extra fetch/compile work on an incremental rerun.
     CARGO_TARGET_DIR="$target_dir" \
         cargo check --quiet --locked --all-targets --target "$target" \
-        -p effect-package -p effect-compiler -p conformance
+        -p effect-package -p effect-compiler
+    # conformance: `check --all-targets`, debug -- evidence-only, no shipped package (N1).
+    CARGO_TARGET_DIR="$target_dir" \
+        cargo check --quiet --locked --all-targets --target "$target" \
+        -p conformance
 done
 
 for mode in scalar simd; do
@@ -93,10 +101,17 @@ for mode in scalar simd; do
         cargo build --quiet --locked --release --target wasm32-unknown-unknown \
         -p builtins -p builtins-compiler
 
-    # effect-package + effect-compiler + conformance: `check --all-targets`, debug (issue #081).
+    # effect-package + effect-compiler: `check --all-targets`, debug (issue #081). Split from the
+    # conformance row below (N1): see the android/ios loop above for why a shipped cdylib crate
+    # and an evidence crate must never share one invocation. Both share $target_dir, so the split
+    # costs no extra fetch/compile work on an incremental rerun.
     CARGO_TARGET_DIR="$target_dir" RUSTFLAGS="$flags" \
         cargo check --quiet --locked --all-targets --target wasm32-unknown-unknown \
-        -p effect-package -p effect-compiler -p conformance
+        -p effect-package -p effect-compiler
+    # conformance: `check --all-targets`, debug -- evidence-only, no shipped package (N1).
+    CARGO_TARGET_DIR="$target_dir" RUSTFLAGS="$flags" \
+        cargo check --quiet --locked --all-targets --target wasm32-unknown-unknown \
+        -p conformance
 
     # effect-package cdylib object + export/SIMD assertions (issue #081's wasm row).
     CARGO_TARGET_DIR="$target_dir" RUSTFLAGS="$flags" \

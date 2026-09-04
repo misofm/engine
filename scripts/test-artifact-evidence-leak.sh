@@ -14,6 +14,7 @@ new_case() {
     [[ -f "$root/.github/workflows/qualification.yml" ]] &&
         cp "$root/.github/workflows/qualification.yml" "$case_root/.github/workflows/"
     cp "$root/scripts/check-artifact-evidence-leak.sh" "$case_root/scripts/"
+    cp "$root/scripts/check-cross-targets.sh" "$case_root/scripts/"
 }
 
 check() { bash "$case_root/scripts/check-artifact-evidence-leak.sh" "$case_root"; }
@@ -69,5 +70,20 @@ if [[ -f "$root/.github/workflows/qualification.yml" ]]; then
     sed -i '/Evidence crates compile for Wasm/,+3d' "$case_root/.github/workflows/qualification.yml"
     expect_failure qualification-wasm-compile-coverage-deleted
 fi
+
+# 6. N1: scripts/check-cross-targets.sh mixes the shipped cdylib crate effect-package with the
+#    evidence crate conformance in one invocation (the exact regression the split under N1 fixed).
+new_case cross-targets-script-mixes-effect-package-with-conformance
+sed -i 's|-p effect-package -p effect-compiler$|-p effect-package -p effect-compiler -p conformance|' \
+    "$case_root/scripts/check-cross-targets.sh"
+expect_failure cross-targets-script-mixes-effect-package-with-conformance
+
+# 7. The same regression, but in a workflow YAML cargo line rather than check-cross-targets.sh --
+#    proves effect-package's membership in `shipped` is enforced wherever a cross-target invocation
+#    names it, not only inside the script this gate was extended to scan.
+new_case workflow-mixes-effect-package-with-conformance
+sed -i 's|-p host-web -p lane|-p host-web -p effect-package -p conformance -p lane|' \
+    "$case_root/.github/workflows/ci.yml"
+expect_failure workflow-mixes-effect-package-with-conformance
 
 printf 'artifact evidence gate mutations: ok\n'
