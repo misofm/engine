@@ -130,7 +130,8 @@ are the current ruling.
    stall/deployment gates with no decoder job; CI invokes no deleted script.
 8. Publication successor #357 builds and pins only the Engine AudioWorklet
    closure and publishes only a newly qualified exact archive.
-9. Fresh Sol-high adversarial review returns PASS before #354 resumes.
+9. Fresh Sol-high adversarial review returns PASS before #357 implementation
+   or qualification resumes.
 
 ## Required mutations
 
