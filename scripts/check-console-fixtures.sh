@@ -1,16 +1,23 @@
 #!/usr/bin/env bash
 # Regenerate the derived JSON sessions and prove their semantic witness shapes.
+# Usage: check-console-fixtures.sh [path/to/session-validator]
 set -euo pipefail
-[[ "$#" == 0 ]] || { printf 'usage: %s\n' "$0" >&2; exit 2; }
+[[ "$#" -le 1 ]] || { printf 'usage: %s [path/to/session-validator]\n' "$0" >&2; exit 2; }
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"
 export LC_ALL=C
 tmp_dir=$(mktemp -d)
 trap 'rm -rf "$tmp_dir"' EXIT
 
-python3 -I -B scripts/derive-intended-console-fixture.py >"$tmp_dir/intended.json"
+validator_args=()
+if [[ -n "${1:-}" ]]; then
+    [[ -x "$1" ]] || { printf 'missing session-validator binary: %s\n' "$1" >&2; exit 1; }
+    validator_args=(--validator "$1")
+fi
+
+python3 -I -B scripts/derive-intended-console-fixture.py "${validator_args[@]}" >"$tmp_dir/intended.json"
 cmp "$tmp_dir/intended.json" fixtures/session/v1/console-sixty-four-track-intended.json
-python3 -I -B scripts/derive-mono-console-fixture.py >"$tmp_dir/mono.json"
+python3 -I -B scripts/derive-mono-console-fixture.py "${validator_args[@]}" >"$tmp_dir/mono.json"
 cmp "$tmp_dir/mono.json" fixtures/session/v1/console-sixty-four-track-mono.json
 
 python3 -I -B - <<'PY'
