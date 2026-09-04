@@ -316,15 +316,21 @@ fn line_has_mnemonic(line: &str, token: &str) -> bool {
 }
 
 /// The first mnemonic-like token of a normalized disassembly line: the `addr:` prefix and the
-/// hex-byte tokens are skipped, and the first remaining token is the mnemonic (everything after
-/// it is operands and annotations). Lines that carry nothing but hex bytes have no mnemonic.
+/// instruction-encoding tokens are skipped, and the first remaining token is the mnemonic
+/// (everything after it is operands and annotations). Lines that carry nothing but encoding
+/// tokens have no mnemonic.
 fn mnemonic(line: &str) -> Option<&str> {
     line.split_whitespace()
-        .find(|token| !token.ends_with(':') && !is_hex_byte(token))
+        .find(|token| !token.ends_with(':') && !is_encoding_token(token))
 }
 
-fn is_hex_byte(token: &str) -> bool {
-    token.len() == 2 && token.bytes().all(|byte| byte.is_ascii_hexdigit())
+/// Instruction encodings are hex tokens of an architecture-specific length: x86 objdump prints
+/// the encoding as two-character hex bytes, and AArch64 objdump (llvm, GNU, and Apple, on Linux
+/// and Darwin) prints it as one eight-character hex word. A token is an encoding token only when
+/// it is all hex digits AND its length is 2 or 8 -- never "all hex, any length": `add`, `fadd`,
+/// `dec`, and the branch `b` are real mnemonics made only of hex digits.
+fn is_encoding_token(token: &str) -> bool {
+    (token.len() == 2 || token.len() == 8) && token.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn sha256(bytes: &[u8]) -> String {
@@ -542,6 +548,43 @@ mod tests {
             !table
                 .iter()
                 .any(|failure| failure.contains("forbidden call"))
+        );
+        // AArch64 objdump prints the encoding as one eight-character hex word, not two-character
+        // bytes; the word is skipped as an encoding token, so the mnemonic still matches.
+        let branch = certify(
+            &synthetic_bodies("c78e8: 94000000 bl 0x1000 <_memset_pattern16>"),
+            &rules_with_forbidden_calls(0, "bl|blr"),
+        );
+        assert!(
+            branch
+                .iter()
+                .any(|failure| failure.contains("forbidden call") && failure.contains("'bl|blr'"))
+        );
+        // Non-call instructions with eight-hex-word encodings are not calls.
+        let sub = certify(
+            &synthetic_bodies("c78e4: d10043ff sub sp, sp, #0x10"),
+            &rules_with_forbidden_calls(0, "bl|blr"),
+        );
+        assert!(!sub.iter().any(|failure| failure.contains("forbidden call")));
+        let table_neon = certify(
+            &synthetic_bodies("c7900: 4e040d40 tbl v0.16b, { v1.16b }, v2.16b"),
+            &rules_with_forbidden_calls(0, "bl|blr"),
+        );
+        assert!(
+            !table_neon
+                .iter()
+                .any(|failure| failure.contains("forbidden call"))
+        );
+        // The encoding test is the length set {2, 8}, not "all hex, any length": the branch
+        // mnemonic `b` is a one-character all-hex word and must still match.
+        let branch_short = certify(
+            &synthetic_bodies("c7a00: 14000000 b 0x100"),
+            &rules_with_forbidden_calls(0, "b"),
+        );
+        assert!(
+            branch_short
+                .iter()
+                .any(|failure| failure.contains("forbidden call") && failure.contains("'b'"))
         );
     }
 
