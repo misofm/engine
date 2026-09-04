@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
+# Usage: trace-graph-audit.sh [path/to/audit] [blocks]
 set -euo pipefail
 
 workspace_dir=$(cd "$(dirname "$0")/.." && pwd)
-binary="$workspace_dir/target/release/audit"
-blocks="${1:-1000000}"
+binary="${1:-$workspace_dir/target/release/audit}"
+blocks="${2:-1000000}"
 trace_root="$workspace_dir/target/issue6/strace"
 
-cargo build --quiet --locked --release --manifest-path "$workspace_dir/Cargo.toml" \
-  -p audit
+if [[ ! -x "$binary" ]]; then
+  cargo build --quiet --locked --release --manifest-path "$workspace_dir/Cargo.toml" \
+    -p audit
+fi
 command -v strace >/dev/null 2>&1 || {
   printf 'strace is required for the graph realtime syscall gate\n' >&2
   exit 1

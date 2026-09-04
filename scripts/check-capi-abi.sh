@@ -14,12 +14,12 @@ capi_abi_self_test() {
     workspace_root="$(cd "$script_directory/.." && pwd)"
     scratch_root="$(mktemp -d)"
     trap 'rm -rf -- "$scratch_root"' RETURN
-    cargo build --locked -p capi --manifest-path "$workspace_root/Cargo.toml" >/dev/null
+    cargo build --locked --release -p capi --manifest-path "$workspace_root/Cargo.toml" >/dev/null
 
     host_triple="$(rustc -vV | sed -n 's/^host: //p')"
     case "$host_triple" in
-        *-linux-*) library="$workspace_root/target/debug/libcapi.so" ;;
-        *-apple-*) library="$workspace_root/target/debug/libcapi.dylib" ;;
+        *-linux-*) library="$workspace_root/target/release/libcapi.so" ;;
+        *-apple-*) library="$workspace_root/target/release/libcapi.dylib" ;;
         *) printf 'unsupported pinned native host: %s\n' "$host_triple" >&2; exit 1 ;;
     esac
 
@@ -121,13 +121,13 @@ cpp_fixture="${MISO_ENGINE_CAPI_CPP_FIXTURE:-crates/capi/tests/c/header_smoke.cp
 [[ -f "$cpp_fixture" ]] || fail "missing C++17 fixture: $cpp_fixture"
 
 if [[ "${MISO_ENGINE_CAPI_SKIP_BUILD:-0}" != 1 ]]; then
-    cargo build --locked -p capi
+    cargo build --locked --release -p capi
 fi
 
 host_triple="$(rustc -vV | sed -n 's/^host: //p')"
 case "$host_triple" in
-    *-linux-*) default_library="target/debug/libcapi.so" ;;
-    *-apple-*) default_library="target/debug/libcapi.dylib" ;;
+    *-linux-*) default_library="target/release/libcapi.so" ;;
+    *-apple-*) default_library="target/release/libcapi.dylib" ;;
     *) fail "unsupported pinned native host for ABI seal: $host_triple" ;;
 esac
 library="${MISO_ENGINE_CAPI_LIBRARY:-$default_library}"
@@ -136,7 +136,10 @@ library="${MISO_ENGINE_CAPI_LIBRARY:-$default_library}"
 # never automated either -- it only grepped its own now-deleted runner script's source for the
 # words "static"/"shared"). `crates/capi`'s crate-type list includes `staticlib`, so this actually
 # links and runs, rather than asserting a string appears in a script nobody ran.
-static_library="${MISO_ENGINE_CAPI_STATIC_LIBRARY:-target/debug/libcapi.a}"
+#
+# Release, not debug: release is the shipped profile, and the shared/static objects this script
+# links against must be the ones a consumer actually gets (WP-3, #359).
+static_library="${MISO_ENGINE_CAPI_STATIC_LIBRARY:-target/release/libcapi.a}"
 [[ -f "$static_library" ]] || fail "missing native static library: $static_library"
 
 scratch_root="$(mktemp -d)"

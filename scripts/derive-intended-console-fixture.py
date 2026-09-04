@@ -30,14 +30,18 @@ def limiter(index: int) -> dict:
     }
 
 
-def canonicalise(document: dict) -> str:
+def canonicalise(document: dict, validator: str | None) -> str:
     with tempfile.TemporaryDirectory() as directory:
         draft = Path(directory) / "draft.json"
         draft.write_text(json.dumps(document, ensure_ascii=False))
-        result = subprocess.run(
-            ["cargo", "run", "-q", "-p", "session-validator", "--", "validate", "--canonical", str(draft)],
-            cwd=ROOT, capture_output=True, text=True, check=False,
-        )
+        if validator:
+            command = [validator, "validate", "--canonical", str(draft)]
+        else:
+            command = [
+                "cargo", "run", "-q", "-p", "session-validator", "--",
+                "validate", "--canonical", str(draft),
+            ]
+        result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, check=False)
     if result.returncode != 0:
         sys.stderr.write(result.stderr)
         raise SystemExit(f"session validator refused the derived draft (exit {result.returncode})")
@@ -45,6 +49,12 @@ def canonicalise(document: dict) -> str:
 
 
 def main() -> int:
+    validator = None
+    args = sys.argv[1:]
+    if args:
+        if args[0] != "--validator" or len(args) != 2:
+            raise SystemExit("usage: derive-intended-console-fixture.py [--validator <path>]")
+        validator = args[1]
     document = json.loads(STANDING.read_text())
     document["session_id"] = "console-sixty-four-track-intended"
     tracks = document["tracks"]
@@ -56,7 +66,7 @@ def main() -> int:
         assert len(dynamic) == 1 and dynamic[0]["identity"]["effect_id"] == "miso.compressor"
         simd1.append(dynamic.pop())
         track["simd2"]["effects"] = [limiter(index)]
-    sys.stdout.write(canonicalise(document))
+    sys.stdout.write(canonicalise(document, validator))
     return 0
 
 

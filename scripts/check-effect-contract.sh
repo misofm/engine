@@ -1,11 +1,20 @@
 #!/usr/bin/env bash
+# Usage: check-effect-contract.sh [path/to/bench]
+#
+# WP-3 (#359): drops `cargo test --locked -p effect-contract -p effect-compiler -p conformance` and
+# the per-effect `cargo test --locked -p <effect> --test conformance` loop that used to close this
+# script -- both are exact subsets of the workspace test run. The `bench effect-contract
+# --conformance` step stays (nothing else runs it) and now accepts a prebuilt `bench` binary as this
+# script's first positional argument, falling back to `cargo run --locked --release -p bench` when
+# none is given.
 set -euo pipefail
-cd "${1:-.}"
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$root"
+bench_binary="${1:-}"
 bash scripts/check-effect-runtime-policy.sh .
 bash scripts/test-effect-runtime-policy.sh .
 bash scripts/check-effect-runtime-fixtures.sh .
 bash scripts/test-effect-runtime-fixtures.sh .
-cargo test --locked -p effect-contract -p effect-compiler -p conformance
 
 # #105 phase 2 F1: the conformance harness runs against EVERY production `NativeEffectFactory`,
 # not just against its own reference mock. This loop is what stops the ninth effect from shipping
@@ -40,11 +49,14 @@ done < <(rg -l 'impl NativeEffectFactory for' crates --glob 'crates/*/src/**.rs'
     exit 1
 }
 
-packages=()
-for crate_dir in "${conformance_crates[@]}"; do
-    packages+=(-p "${crate_dir#crates/}")
-done
-cargo test --locked "${packages[@]}" --test conformance
-cargo run --locked --release -q -p bench -- effect-contract --conformance
+if [[ -n "$bench_binary" ]]; then
+    [[ -x "$bench_binary" ]] || {
+        printf 'effect contract failure: missing bench binary %s\n' "$bench_binary" >&2
+        exit 1
+    }
+    "$bench_binary" effect-contract --conformance
+else
+    cargo run --locked --release -q -p bench -- effect-contract --conformance
+fi
 printf 'effect runtime contract/conformance: ok (%s production factories on the harness)\n' \
     "${#conformance_crates[@]}"

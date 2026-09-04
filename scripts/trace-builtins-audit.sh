@@ -1,18 +1,21 @@
 #!/usr/bin/env bash
+# Usage: trace-builtins-audit.sh [path/to/audit]
 set -euo pipefail
 
 workspace_dir=$(cd "$(dirname "$0")/.." && pwd)
-binary="$workspace_dir/target/release/audit"
+binary="${1:-$workspace_dir/target/release/audit}"
 trace_root="$workspace_dir/target/issue7/strace"
 validator="$workspace_dir/scripts/validate-realtime-trace.sh"
 
-[[ "$#" -eq 0 ]] || {
-  printf 'trace-builtins-audit.sh accepts no arguments\n' >&2
+[[ "$#" -le 1 ]] || {
+  printf 'usage: trace-builtins-audit.sh [path/to/audit]\n' >&2
   exit 2
 }
 
-cargo build --quiet --locked --release --manifest-path "$workspace_dir/Cargo.toml" \
-  -p audit
+if [[ ! -x "$binary" ]]; then
+  cargo build --quiet --locked --release --manifest-path "$workspace_dir/Cargo.toml" \
+    -p audit
+fi
 command -v strace >/dev/null 2>&1 || {
   printf 'strace is required for the builtins realtime syscall gate\n' >&2
   exit 1

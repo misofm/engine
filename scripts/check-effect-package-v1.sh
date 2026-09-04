@@ -1,5 +1,18 @@
 #!/usr/bin/env bash
 # Check the independent canonical package corpus and native/scalar-Wasm package surface.
+#
+# WP-3 (#359): the cold scratch-dir `cargo test -p effect-package` this script used to run is gone
+# -- it is an exact subset of the workspace debug test run. The five precondition re-runs
+# (check/test-workspace-policy, check/test-realtime-policy, check-effect-runtime-policy) are gone
+# too: each is its own separate CI step, and re-running them here bought nothing beyond ordering. The
+# wasm `--emit=obj` build now uses a shared `target/ci/effect-v1` dir (honouring CARGO_TARGET_DIR as
+# a base) instead of a private mktemp dir, so scripts/check-effect-descriptor-v1.sh's identical
+# build (same RUSTFLAGS, same crate, same features) is incremental when it runs after this one.
+#
+# The `cargo check --manifest-path fuzz/Cargo.toml --bins` step stays: fuzz.yml runs the identical
+# command whenever effect-package's dependency closure changes, but fuzz.yml is not a required
+# status check (design doc #359 6.8/6.1), so this is the only required-check assertion that the
+# fuzz binaries still build against the current effect-package surface.
 set -euo pipefail
 
 workspace_root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -16,14 +29,10 @@ done
 PYTHONDONTWRITEBYTECODE=1 python3 -I -B \
     "$workspace_root/scripts/effect-package-v1-reference.py"
 
-CARGO_TARGET_DIR="$scratch_directory/native-target" \
-    cargo test --quiet --locked --manifest-path "$workspace_root/Cargo.toml" \
-        -p effect-package --lib --tests -- --test-threads=1
-
 CARGO_TARGET_DIR="$scratch_directory/fuzz-target" \
     cargo check --quiet --locked --manifest-path "$workspace_root/fuzz/Cargo.toml" --bins
 
-wasm_target="$scratch_directory/wasm-target"
+wasm_target="${CARGO_TARGET_DIR:-$workspace_root/target}/ci/effect-v1"
 RUSTFLAGS='-C target-feature=-simd128' CARGO_TARGET_DIR="$wasm_target" \
     cargo rustc --quiet --locked --manifest-path "$workspace_root/Cargo.toml" \
         -p effect-package --features c-abi --lib --release --target wasm32-unknown-unknown -- \
@@ -97,12 +106,6 @@ if rg -n 'effect_package|effect-package' \
     printf 'effect package V1 check failure: package is render reachable\n' >&2
     exit 1
 fi
-
-bash "$workspace_root/scripts/check-workspace-policy.sh" "$workspace_root"
-bash "$workspace_root/scripts/test-workspace-policy.sh" "$workspace_root"
-bash "$workspace_root/scripts/check-realtime-policy.sh" "$workspace_root"
-bash "$workspace_root/scripts/test-realtime-policy.sh" "$workspace_root"
-bash "$workspace_root/scripts/check-effect-runtime-policy.sh" "$workspace_root"
 
 if find "$workspace_root" \( -type d -name __pycache__ -o -type f -name '*.pyc' \) | rg .; then
     printf 'effect package V1 check failure: generated Python artifact\n' >&2
