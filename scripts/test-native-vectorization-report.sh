@@ -56,6 +56,26 @@ printf '%s\n' \
 chmod +x "$scalar_objdump"
 expect_red scalar-fallback "$allowlist" "$scalar_objdump"
 
+fused_objdump="$scratch_root/fused-objdump"
+printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'set -euo pipefail' \
+    "real_objdump='$objdump'" \
+    '"$real_objdump" "$@" | awk '\''/probe_svf_simd8>:/ { print; print "  0: vfmadd213ps %ymm0, %ymm1, %ymm2"; next } { print }'\''' \
+    >"$fused_objdump"
+chmod +x "$fused_objdump"
+expect_red fused-multiply-add "$allowlist" "$fused_objdump"
+
+call_objdump="$scratch_root/call-objdump"
+printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'set -euo pipefail' \
+    "real_objdump='$objdump'" \
+    '"$real_objdump" "$@" | awk '\''/probe_svf_simd8>:/ { print; print "  0: call   0x1000"; next } { print }'\''' \
+    >"$call_objdump"
+chmod +x "$call_objdump"
+expect_red call-inside-kernel "$allowlist" "$call_objdump"
+
 incomplete="$scratch_root/incomplete.tsv"
 awk -F '\t' '$3 != "probe_sum2_simd8"' "$allowlist" >"$incomplete"
 expect_red incomplete-registry "$incomplete"

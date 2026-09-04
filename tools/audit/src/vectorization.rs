@@ -25,6 +25,7 @@ struct Rule {
     symbol: String,
     required: Vec<Vec<String>>,
     forbidden: Vec<String>,
+    forbidden_calls: Vec<String>,
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -41,10 +42,13 @@ const ACTIVE_REGISTRY: &[&str] = &["probe_gain_simd4", "probe_sum2_simd4", "prob
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 const ACTIVE_REGISTRY: &[&str] = &[];
 
+// The gain argument is loaded without `black_box`: an opaque slice makes the wrapper's own
+// in-range check emit a `slice_index_fail` trampoline into the captured body, which is wrapper
+// plumbing, not kernel code, and would defeat the allowlist's no-call assertion (issue #372).
 #[cfg(target_arch = "x86_64")]
 #[inline(never)]
 fn probe_gain_simd8(io: &mut [f32; PROBE_FRAMES * 8], gain: &[f32; 8]) {
-    gain_block::<lane::Simd8>(io, PROBE_FRAMES, lane::Simd8::load(black_box(gain)));
+    gain_block::<lane::Simd8>(io, PROBE_FRAMES, lane::Simd8::load(gain));
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -67,10 +71,11 @@ fn probe_svf_simd8(
     svf_block::<lane::Simd8>(io, PROBE_FRAMES, black_box(coefficients), black_box(state));
 }
 
+// Same rationale as the x86 gain probe above: no `black_box` on the gain argument (issue #372).
 #[cfg(target_arch = "aarch64")]
 #[inline(never)]
 fn probe_gain_simd4(io: &mut [f32; PROBE_FRAMES * 4], gain: &[f32; 4]) {
-    gain_block::<lane::Simd4>(io, PROBE_FRAMES, lane::Simd4::load(black_box(gain)));
+    gain_block::<lane::Simd4>(io, PROBE_FRAMES, lane::Simd4::load(gain));
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -164,9 +169,9 @@ fn parse_allowlist(text: &str) -> Result<Vec<Rule>, String> {
             continue;
         }
         let fields: Vec<&str> = line.split('\t').collect();
-        if fields.len() != 5 {
+        if fields.len() != 6 {
             return Err(format!(
-                "allowlist line {} has {} fields, expected 5",
+                "allowlist line {} has {} fields, expected 6",
                 line_index + 1,
                 fields.len()
             ));
@@ -185,7 +190,8 @@ fn parse_allowlist(text: &str) -> Result<Vec<Rule>, String> {
         }
         let required = split_required(fields[3]);
         let forbidden = split_forbidden(fields[4]);
-        if required.is_empty() || forbidden.is_empty() {
+        let forbidden_calls = split_forbidden(fields[5]);
+        if required.is_empty() || forbidden.is_empty() || forbidden_calls.is_empty() {
             return Err(format!(
                 "allowlist line {} has an empty policy",
                 line_index + 1
@@ -197,6 +203,7 @@ fn parse_allowlist(text: &str) -> Result<Vec<Rule>, String> {
             symbol: fields[2].to_owned(),
             required,
             forbidden,
+            forbidden_calls,
         });
     }
     Ok(rules)
@@ -269,15 +276,31 @@ fn certify(disassembly: &str, rules: &[Rule]) -> Vec<String> {
             }
         }
         for token in &rule.forbidden {
-            if body.contains(token) {
+            if token_hits(body, token) {
                 failures.push(format!(
                     "{} / {}: forbidden scalar fallback '{token}' is present",
                     rule.family, rule.symbol
                 ));
             }
         }
+        for token in &rule.forbidden_calls {
+            if token_hits(body, token) {
+                failures.push(format!(
+                    "{} / {}: forbidden call '{token}' is present",
+                    rule.family, rule.symbol
+                ));
+            }
+        }
     }
     failures
+}
+
+/// A forbidden token is a `|`-separated set of alternatives: the body is in violation when any
+/// alternative occurs. The plain mnemonics of the original rows keep their literal meaning.
+fn token_hits(body: &str, token: &str) -> bool {
+    token
+        .split('|')
+        .any(|alternative| body.contains(alternative))
 }
 
 fn sha256(bytes: &[u8]) -> String {
@@ -409,6 +432,7 @@ mod tests {
                 symbol: (*symbol).to_owned(),
                 required: vec![vec!["vector-op".to_owned()]],
                 forbidden: vec!["scalar-op".to_owned()],
+                forbidden_calls: vec!["call-op".to_owned()],
             })
             .collect()
     }
@@ -437,6 +461,34 @@ mod tests {
             failures
                 .iter()
                 .any(|failure| failure.contains("forbidden scalar fallback"))
+        );
+    }
+
+    #[test]
+    fn fused_multiply_add_is_red() {
+        let mut rules = active_rules();
+        rules[0].forbidden = vec!["vfmadd|vfnmadd".to_owned()];
+        let failures = certify(
+            &synthetic_bodies("vector-op vmulps vaddps vfmadd213ps"),
+            &rules,
+        );
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("forbidden scalar fallback")
+                    && failure.contains("vfmadd|vfnmadd"))
+        );
+    }
+
+    #[test]
+    fn call_inside_kernel_body_is_red() {
+        let mut rules = active_rules();
+        rules[0].forbidden_calls = vec!["call".to_owned()];
+        let failures = certify(&synthetic_bodies("vector-op vmulps call <memset>"), &rules);
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("forbidden call") && failure.contains("'call'"))
         );
     }
 

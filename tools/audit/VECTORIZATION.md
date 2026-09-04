@@ -5,8 +5,15 @@ three production lane-kernel families: feed-forward gain, feed-forward sum, and 
 The explicit registry is `vectorization-allowlist.tsv`:
 
 - x86-64-v3 W8 requires AVX/AVX2 packed-single families and YMM operands;
-- AArch64 W4 requires NEON `.4s` families; and
-- both reject scalar floating-point arithmetic mnemonics inside the named probe bodies.
+- AArch64 W4 requires NEON `.4s` families;
+- both reject scalar floating-point arithmetic mnemonics inside the named probe bodies;
+- the recursive-SVF rows are the codegen leg of the unfused contract (issue #163 phase 2): the
+  required groups are the separate multiply and add (`vmulps` + `vaddps` on x86, `fmul` + `fadd`
+  on AArch64) and the fused mnemonics (`vfmadd`/`vfnmadd`, `fmla`/`fmls`) are forbidden, so the
+  report fails if `Lane::fma` ever fuses again; and
+- every row forbids call instructions (`call` on x86, `bl` on AArch64) inside the named probe
+  bodies, so a helper call emitted into a kernel body (the LANE-1 `bl _memset_pattern16` shape)
+  fails the report instead of passing silently.
 
 The subject artifact is intentionally reported as
 `release_probe_instantiations_of_production_kernels`. It is the release
