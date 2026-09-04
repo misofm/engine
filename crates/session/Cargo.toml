@@ -14,7 +14,7 @@ default = []
 
 [dependencies]
 engine.workspace = true
-jstrict = { version = "=0.14.0", default-features = false }
+json-syntax = { version = "=0.12.5", default-features = false }
 
 [dev-dependencies]
 jsonschema = { version = "=0.33.0", default-features = false }

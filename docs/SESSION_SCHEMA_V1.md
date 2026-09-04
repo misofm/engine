@@ -1,6 +1,6 @@
 # Session schema V1
 
-`session` accepts strict RFC 8259 JSON through exact-pinned `jstrict 0.14.0`, after a
+`session` accepts strict RFC 8259 JSON through exact-pinned `json-syntax 0.12.5`, after a
 contract-owned duplicate-key and nesting-depth preflight. Comments, trailing commas, multiple
 top-level values, BOMs, invalid escapes, unpaired surrogates and non-JSON numeric tokens refuse.
 A duplicate member refuses before its value is parsed or retained, at the decoded member path,
@@ -190,6 +190,6 @@ validation after the model shape has been read. Typed canonicalization and compi
 text, so their otherwise matching code/path diagnostics have `span = None`. Every model `u64`
 field supports the full unsigned domain and serializes as a canonical decimal string.
 
-The runtime manifest exact-pins `jstrict = 0.14.0` without default features and has no runtime
+The runtime manifest exact-pins `json-syntax = 0.12.5` without default features and has no runtime
 serde or runtime `serde_json` dependency. `serde_json` is dev-only for order and unknown-key
 mutations; it is neither the acceptance parser nor the canonical writer.
