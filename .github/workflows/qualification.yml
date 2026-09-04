@@ -77,6 +77,10 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install ripgrep (not on the runner image; every policy script greps with rg)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ripgrep
       # dsp-research/**/*.md joined the evidence family (design §2); its own validators move here
       # so a research-note edit does not ride the full route. Hermetic: no cargo, no clock.
       - name: DSP research corpus and listening-evidence packet validators
@@ -187,7 +191,7 @@ jobs:
         run: |
           rustup toolchain install 1.97.1 --profile minimal
           sudo apt-get update
-          sudo apt-get install -y wabt
+          sudo apt-get install -y ripgrep wabt
       - name: Download shipped artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -510,7 +514,7 @@ jobs:
         run: |
           rustup toolchain install 1.97.1 --profile minimal
           sudo apt-get update
-          sudo apt-get install -y strace
+          sudo apt-get install -y ripgrep strace
       # One release build backs every audit/trace/probe/fixture/capi/determinism step below,
       # instead of each re-paying its own release compile (design §5: this is what moves 470s of
       # tools/audit unit-test execution and ~330s of per-crate release re-runs out of the debug
@@ -592,7 +596,7 @@ jobs:
           rustup toolchain install 1.97.1 --profile minimal
           rustup target add --toolchain 1.97.1 wasm32-unknown-unknown
           sudo apt-get update
-          sudo apt-get install -y wabt
+          sudo apt-get install -y ripgrep wabt
       # Builds its own wasmtime runner rather than depending on test-release, so nothing
       # serializes between the two jobs (design deliverable B).
       - name: Build the wasmtime runner
@@ -648,7 +652,7 @@ jobs:
           rustup toolchain install 1.97.1 --profile minimal
           rustup target add --toolchain 1.97.1 wasm32-unknown-unknown aarch64-linux-android aarch64-apple-ios
           sudo apt-get update
-          sudo apt-get install -y wabt
+          sudo apt-get install -y ripgrep wabt
       # Replaces check-parametric-eq-targets.sh, check-builtins-targets.sh, and
       # check-effect-interchange-targets.sh's cargo halves with one script, one cached target dir
       # per triple (WP-3 contract). The render-contract rg half moved to lint.
@@ -667,6 +671,10 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install ripgrep (not on the runner image; every policy script greps with rg)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ripgrep
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: release-shape
