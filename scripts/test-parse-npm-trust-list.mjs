@@ -5,7 +5,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const parser = fileURLToPath(new URL("./parse-npm-trust-list.mjs", import.meta.url));
-const exact = JSON.stringify({ id: "publisher-123", type: "github", file: "npm-publish.yml", repository: "misofm/engine", permissions: ["createPackage"] });
+const exact = JSON.stringify({ id: "publisher-123", type: "github", file: "npm-publish.yml", repository: "misofm/engine", permissions: ["createPackage", "createStagedPackage"] });
 
 function run(input) {
   return spawnSync(process.execPath, [parser], { input, encoding: "utf8" });
@@ -37,6 +37,7 @@ rejects("wrong provider", exact.replace('"github"', '"gitlab"'));
 rejects("wrong file", exact.replace('"npm-publish.yml"', '"release.yml"'));
 rejects("wrong repository", exact.replace('"misofm/engine"', '"misofm/other"'));
 rejects("wrong permission", exact.replace('"createPackage"', '"publish"'));
-rejects("extra permission", exact.replace('["createPackage"]', '["createPackage","other"]'));
+rejects("missing staged permission", exact.replace(',"createStagedPackage"', ''));
+rejects("extra permission", exact.replace('"createStagedPackage"]', '"createStagedPackage","other"]'));
 
 process.stdout.write("npm trust list parser fixtures and mutations: ok\n");
