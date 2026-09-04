@@ -343,7 +343,12 @@ Parser allocation and diagnostic formatting are expected control-plane behavior.
 returns typed diagnostics; arithmetic and configured-cap preflight runs before the canonical string,
 model clone, normalized indexes, or downstream plan work. JSON string and duplicate-key
 fixtures, the strict unknown-key matrix, target compilation, and parser/compiler fuzz targets are
-the compatibility and failure-mode evidence for this dependency choice.
+the compatibility and failure-mode evidence for this dependency choice. `json-syntax`'s object
+indexing goes through `hashbrown` 0.12's default hasher, `ahash` 0.7's `RandomState`, which on its
+first construction in a process lazily allocates 88 bytes of process-lifetime heap and seeds from
+OS entropy per process -- harmless to every shipped cap (they are explicit row sums), but relevant
+to any exact allocator oracle that arms across the first object parse in a process (see
+`crates/capi/tests/resource_lifecycle.rs`).
 
 The earlier issue-004 cross-target archive sizes are historical measurements for the retired
 parser stack and are not projected onto the JSON implementation. Current size and allocation
