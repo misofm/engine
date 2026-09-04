@@ -76,6 +76,7 @@ jobs:
         with:
           name: native-vectorization-report
           path: target/ci/native-vectorization/report.json
+          overwrite: true
 
 
   benchmark:
@@ -125,6 +126,7 @@ jobs:
             target/session-benchmark.jsonl
             target/fp-environment-benchmark.jsonl
             target/issue11/effect-contract-benchmark.jsonl
+          overwrite: true
 
   deep-fuzz:
     name: deep fuzzing over every target
@@ -201,6 +203,7 @@ jobs:
           name: nightly-fuzz
           path: target/ci/nightly-fuzz
           if-no-files-found: ignore
+          overwrite: true
 
   release-link-proof:
     name: workspace release link proof (moved off the per-PR path)

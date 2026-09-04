@@ -102,6 +102,7 @@ jobs:
           name: audioworklet-${{ github.sha }}
           path: target/ci/qualification-artifacts/
           if-no-files-found: error
+          overwrite: true
 
   sdk:
     name: SDK package and generated-surface qualification
@@ -605,6 +606,8 @@ jobs:
         with:
           name: wasm-gates
           path: target/ci/wasm-gates/wasm-gates.jsonl
+          if-no-files-found: error
+          overwrite: true
 
   cross-target:
     name: android, iOS, and wasm cross-target checks
@@ -749,6 +752,7 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: ci-telemetry-${{ github.run_id }}
+          name: ci-telemetry-${{ github.run_id }}-${{ github.run_attempt }}
           path: ci-telemetry.json
           if-no-files-found: ignore
+          overwrite: true
