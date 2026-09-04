@@ -17,19 +17,14 @@ set -euo pipefail
 root="${1:-.}"
 facade_manifest="$root/crates/host-core/Cargo.toml"
 facade_source="$root/crates/host-core/src"
-# Hosts still carrying their own copy of the pipeline. Each entry names the issue that removes it;
-# the entry is deleted in the same commit that converts the host, and nothing may be added here.
-pending_conversion=("hosts/host-web") # issue #106
+# Every host under hosts/*/src is scanned; there is no exemption list. host-web was the last
+# holdout (tracked as "pending #106") and already depends on host-core
+# (hosts/host-web/Cargo.toml), so the exemption is dead and removing it only tightens the gate.
 
 host_sources=("$root/crates/capi/src")
 for host in "$root"/hosts/*/src; do
     [ -d "$host" ] || continue
-    relative="${host#"$root"/}"
-    exempt=""
-    for pending in "${pending_conversion[@]}"; do
-        [ "${relative%/src}" = "$pending" ] && exempt="yes"
-    done
-    [ -n "$exempt" ] || host_sources+=("$host")
+    host_sources+=("$host")
 done
 
 pipeline_entry_points='(^|[^_[:alnum:]])compile_session\(|prepare_native_session_effects\(|prepare_session_builtins\(|compile_with_builtins\(|prepare_graph_source_set\(|into_bound_with_source_set\(|PcmSourceRing::prepare_host_region\('
