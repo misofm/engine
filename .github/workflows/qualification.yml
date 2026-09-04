@@ -143,10 +143,16 @@ jobs:
           expected="$(cat hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256)"
           actual="$(sha256sum target/ci/qualification-artifacts/miso-engine-v1-audio-worklet.simd128.wasm | awk '{print $1}')"
           [[ "$actual" == "$expected" ]] || { echo "downloaded artifact sha256 mismatch: expected $expected, got $actual" >&2; exit 1; }
+      # S7: check-sdk-deletions.py's 37-mutation --self-test (design §6.6) was never wired in --
+      # only the bare gate ran. test-sdk-artifact-builder-output-contract.sh (also design §6.6) is
+      # not added separately: sdk-package.sh check already runs it as its own first step (see
+      # scripts/sdk-package.sh:29-30) before the `sdk-package.sh check` call below, so adding it
+      # here again would be a duplicate invocation, not a new gate.
       - name: Qualify the SDK package against the shared artifact
         run: |
           bash scripts/check-sdk-generated.sh
           python3 -B scripts/check-sdk-deletions.py
+          python3 -B scripts/check-sdk-deletions.py --self-test
           bash scripts/check-sdk-types.sh
           bash scripts/check-sdk-headless.sh target/ci/qualification-artifacts
           bash scripts/sdk-package.sh check target/ci/qualification-artifacts
