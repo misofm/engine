@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 # Exact Issue 081 five-row native/compile/object target matrix. Do not use as a smoke test.
 #
-# The cargo/wasm-objdump matrix itself, and the qualification-policy call, now live in
-# scripts/check-cross-targets.sh (one cached target dir per target triple, deduplicated against
-# scripts/check-parametric-eq-targets.sh and scripts/check-builtins-targets.sh). This file keeps:
+# The cargo/wasm-objdump matrix itself, the qualification-policy call, and the literal
+# target-triple/Wasm-feature-flag strings scripts/check-effect-interchange-qualification.sh
+# polices, now all live in scripts/check-cross-targets.sh (one cached target dir per target
+# triple, deduplicated against scripts/check-parametric-eq-targets.sh and
+# scripts/check-builtins-targets.sh; B2 removed this file's own decorative copy of the per-mode
+# loop, which the qualification gate used to police instead of the real matrix). This file keeps:
 #   * `validate_wasm_exports`, sourced directly by
 #     scripts/test-effect-interchange-target-export-parser.sh's synthetic regression -- it is the
 #     one live implementation, not a copy;
-#   * the tool/target preconditions and the literal target-triple and Wasm-feature-flag strings
-#     scripts/check-effect-interchange-qualification.sh polices by grepping this file's source;
+#   * the tool/target preconditions;
 # and delegates the rest to scripts/check-cross-targets.sh, which runs the qualification check
 # exactly once, at its own start (this file used to run it twice: once here, once at its own end).
 set -euo pipefail
@@ -64,16 +66,9 @@ for target in x86_64-unknown-linux-gnu aarch64-linux-android aarch64-apple-ios w
     }
 done
 
-# scripts/check-effect-interchange-qualification.sh polices these two Wasm feature spellings by
-# grepping this file's source; scripts/check-cross-targets.sh applies them to the actual per-mode
-# android/ios/wasm builds now.
-for mode in scalar simd; do
-    if [[ "$mode" == scalar ]]; then
-        feature=-simd128
-    else
-        feature=+simd128
-    fi
-done
-
+# scripts/check-effect-interchange-qualification.sh now polices the target-triple and Wasm
+# feature-flag spellings directly against scripts/check-cross-targets.sh, which is where the
+# per-mode android/ios/wasm builds actually run (B2) -- this file no longer carries a decorative
+# copy of that loop.
 bash "$root/scripts/check-cross-targets.sh"
 printf 'effect interchange five-target matrix: ok\n'
