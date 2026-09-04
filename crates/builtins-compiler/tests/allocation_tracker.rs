@@ -162,13 +162,85 @@ fn caps() -> BuiltinCompileCaps {
 /// phase-two window. See the diagnosis on `TEST_PHASE_TWO_LAYOUTS` in `src/lib.rs`: the #358 CI
 /// failure showed four extra retained layouts, one allocation each, present only on the first and
 /// only prepare in the process.
+///
+/// The discarded snapshot is returned, not thrown away: callers must characterise it with
+/// [`assert_first_touch_delta_is_bounded`] against the first steady-state measured snapshot taken
+/// with the same session/requests/caps, so a retained engine allocation of meaningful size hiding
+/// on the first prepare still fails the test instead of being silently absorbed by the warm-up.
 fn settle_phase_two_first_touch(
     session: &session::CompiledSession,
     requests: &[MeterRequest],
     caps: BuiltinCompileCaps,
-) {
+) -> builtins_compiler::TestPhaseTwoAllocationSnapshot {
     test_only_reset_phase_two_allocation_tracker();
     let _ = prepare_session_builtins(session, requests, caps).expect("prepare (warm-up)");
+    test_only_phase_two_allocation_snapshot()
+}
+
+/// Characterises what the first-touch warm-up in [`settle_phase_two_first_touch`] discards: the
+/// warm-up's layout multiset must be a superset of the steady-state measured one (nothing the
+/// measured prepare allocated can be missing from the warm-up), and the difference (warm-up minus
+/// measured) must consist only of one-off allocations (`allocation_count == 1` per layout class)
+/// totalling at most 4096 bytes. This turns "discarded" into "characterised as small first-touch
+/// one-offs": a retained engine allocation of meaningful size that only shows up on the first
+/// prepare now fails here instead of vanishing with the warm-up snapshot.
+fn assert_first_touch_delta_is_bounded(
+    warmup: &builtins_compiler::TestPhaseTwoAllocationSnapshot,
+    measured: &builtins_compiler::TestPhaseTwoAllocationSnapshot,
+) {
+    for measured_layout in &measured.layouts {
+        let warmup_count = warmup
+            .layouts
+            .iter()
+            .find(|candidate| {
+                candidate.size_bytes == measured_layout.size_bytes
+                    && candidate.align_bytes == measured_layout.align_bytes
+            })
+            .map_or(0, |candidate| candidate.allocation_count);
+        assert!(
+            warmup_count >= measured_layout.allocation_count,
+            "the warm-up's layout multiset must be a superset of the measured one: measured has \
+             {measured_layout:?} but the warm-up only has {warmup_count} of that layout class \
+             (warm-up={:?}, measured={:?})",
+            warmup.layouts,
+            measured.layouts
+        );
+    }
+
+    let mut difference = Vec::new();
+    let mut difference_bytes = 0_u64;
+    for warmup_layout in &warmup.layouts {
+        let measured_count = measured
+            .layouts
+            .iter()
+            .find(|candidate| {
+                candidate.size_bytes == warmup_layout.size_bytes
+                    && candidate.align_bytes == warmup_layout.align_bytes
+            })
+            .map_or(0, |candidate| candidate.allocation_count);
+        let extra = warmup_layout
+            .allocation_count
+            .saturating_sub(measured_count);
+        if extra > 0 {
+            difference.push(builtins_compiler::BuiltinRetainedLayout {
+                size_bytes: warmup_layout.size_bytes,
+                align_bytes: warmup_layout.align_bytes,
+                allocation_count: extra,
+            });
+            difference_bytes += warmup_layout.size_bytes.saturating_mul(extra);
+        }
+    }
+
+    assert!(
+        difference.iter().all(|layout| layout.allocation_count == 1),
+        "the discarded first-touch delta must consist only of one-off allocations \
+         (allocation_count == 1 per layout class): difference={difference:?}"
+    );
+    assert!(
+        difference_bytes <= 4096,
+        "the discarded first-touch delta must total at most 4096 bytes: difference={difference:?} \
+         total_bytes={difference_bytes}"
+    );
 }
 
 #[test]
@@ -177,8 +249,11 @@ fn phase_two_allocator_layouts_match_the_checked_resource_report() {
     // measurement session (reset through snapshot); see `TEST_PHASE_TWO_SESSION`.
     let _session_guard = test_only_begin_phase_two_measurement_session();
     // One discarded prepare, ahead of every measured combination below, settles first-touch
-    // process/thread state once so no measured window ever observes it.
-    settle_phase_two_first_touch(&session(1), &requests(0), caps());
+    // process/thread state once so no measured window ever observes it. Its snapshot is not
+    // thrown away: the very first measured combination below repeats the same
+    // session/requests/caps, and the two are compared by `assert_first_touch_delta_is_bounded`.
+    let warmup_snapshot = settle_phase_two_first_touch(&session(1), &requests(0), caps());
+    let mut first_touch_delta_checked = false;
     for track_count in [1, 4, 65_537] {
         let session = session(track_count);
         for meter_count in [0, 1, 7] {
@@ -188,6 +263,10 @@ fn phase_two_allocator_layouts_match_the_checked_resource_report() {
             let snapshot = test_only_phase_two_allocation_snapshot();
             let report = prepared.resource_report();
             assert!(!snapshot.overflowed);
+            if !first_touch_delta_checked {
+                assert_first_touch_delta_is_bounded(&warmup_snapshot, &snapshot);
+                first_touch_delta_checked = true;
+            }
             assert_eq!(
                 snapshot.total_bytes,
                 report.engine_owned_retained_payload_bytes,
@@ -265,6 +344,10 @@ fn phase_two_allocator_layouts_match_the_checked_resource_report() {
             }
         }
     }
+    assert!(
+        first_touch_delta_checked,
+        "the first-touch delta check must have run against the first measured combination"
+    );
 }
 
 /// Repeats a measured prepare three times in-process (after the same first-touch warm-up) and
@@ -279,7 +362,7 @@ fn phase_two_allocator_layouts_are_stable_across_repeated_measured_prepares() {
     let _session_guard = test_only_begin_phase_two_measurement_session();
     let session = session(4);
     let requests = requests(3);
-    settle_phase_two_first_touch(&session, &requests, caps());
+    let warmup_snapshot = settle_phase_two_first_touch(&session, &requests, caps());
 
     let mut snapshots = Vec::with_capacity(3);
     for _ in 0..3 {
@@ -299,4 +382,5 @@ fn phase_two_allocator_layouts_are_stable_across_repeated_measured_prepares() {
             "measured prepare #{index} observed different phase-two layouts than #0"
         );
     }
+    assert_first_touch_delta_is_bounded(&warmup_snapshot, first);
 }
