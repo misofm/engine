@@ -1,0 +1,746 @@
+name: qualification
+
+# Design #359 WP-4 (stage 1): one PR workflow, one required status context (the `verdict` job,
+# whose own `name:` is `qualification`), thirteen leaf jobs behind one router, one aggregate.
+# Not yet required on `main` -- ci.yml, sdk.yml, browser-qualification.yml and release-build.yml
+# stay the required contexts until this workflow has reported on >= 10 PRs and the routing
+# policy checker's new qualification.yml rules (below) pass. See design §4/§5/§7/§12.
+#
+# No `paths:`/`paths-ignore:` anywhere in this file, by design and by policy check: a required
+# workflow that can be skipped by a path filter leaves a PR pending forever. Every job below is
+# itself gated by the router's `route` output instead, and the verdict enforces that every job's
+# result matches a static expectation table -- a leaf `if:` that drifts from the table fails the
+# verdict in both directions.
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: qualification-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTUP_TOOLCHAIN: 1.97.1
+
+jobs:
+  route:
+    name: classify qualification paths and step conditions
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      route: ${{ steps.classify.outputs.route }}
+      math_closure: ${{ steps.classify.outputs.math_closure }}
+      release_inputs: ${{ steps.classify.outputs.release_inputs }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - name: Validate path-routing policy and mutations
+        run: |
+          python3 -B scripts/check-ci-path-routing.py
+          python3 -B scripts/test-ci-path-routing.py
+      - id: classify
+        name: Select fail-safe qualification route and step conditions
+        run: |
+          python3 -B scripts/ci-path-router.py --flags \
+            --event "${{ github.event_name }}" \
+            --base "${{ github.event.pull_request.base.sha || github.event.before }}" \
+            --head "${{ github.event.pull_request.head.sha || github.sha }}" \
+            | tail -n 3 >> "$GITHUB_OUTPUT"
+
+  docs-gates:
+    name: docs and research evidence gates
+    needs: route
+    if: needs.route.outputs.route == 'evidence'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      # dsp-research/**/*.md joined the evidence family (design §2); its own validators move here
+      # so a research-note edit does not ride the full route. Hermetic: no cargo, no clock.
+      - name: DSP research corpus and listening-evidence packet validators
+        run: |
+          bash scripts/check-dsp-research.sh
+          bash scripts/check-builtins-listening.sh
+
+  artifact:
+    name: shipped AudioWorklet artifact
+    needs: route
+    if: needs.route.outputs.route == 'sdk' || needs.route.outputs.route == 'full'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: artifact
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install pinned Rust toolchain and Wasm standard library
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal
+          rustup target add --toolchain 1.97.1 wasm32-unknown-unknown
+      # build-web-audioworklet.sh already pin-checks its own sha256 against
+      # hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256 and refuses to write on a
+      # mismatch. Built exactly once here; every consumer downloads it and re-hashes.
+      - name: Build the exact shipped artifact
+        run: |
+          mkdir -p target/ci/qualification-artifacts
+          bash scripts/build-web-audioworklet.sh target/ci/qualification-artifacts
+      - name: Upload shipped artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: audioworklet-${{ github.sha }}
+          path: target/ci/qualification-artifacts/
+          if-no-files-found: error
+
+  sdk:
+    name: SDK package and generated-surface qualification
+    needs: [route, artifact]
+    if: needs.route.outputs.route == 'sdk' || needs.route.outputs.route == 'full'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: sdk/package-lock.json
+      # check-sdk-generated.sh still shells out to the parameter-metadata/session-schema
+      # generators itself, so this job still needs a Rust toolchain even though it consumes the
+      # artifact job's build rather than building its own (design §5/§6.6: moving
+      # check-sdk-generated.sh to compare against the artifact job's JSON documents instead, so
+      # this job needs no toolchain at all, is an implementation issue, not done here).
+      - name: Install pinned Rust toolchain and Wasm standard library
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal
+          rustup target add --toolchain 1.97.1 wasm32-unknown-unknown
+      - name: Install SDK dependencies
+        working-directory: sdk
+        run: npm ci --no-audit --no-fund --prefer-offline
+      - name: Download shipped artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: audioworklet-${{ github.sha }}
+          path: target/ci/qualification-artifacts
+      - name: Verify the downloaded artifact against its source pin
+        run: |
+          expected="$(cat hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256)"
+          actual="$(sha256sum target/ci/qualification-artifacts/miso-engine-v1-audio-worklet.simd128.wasm | awk '{print $1}')"
+          [[ "$actual" == "$expected" ]] || { echo "downloaded artifact sha256 mismatch: expected $expected, got $actual" >&2; exit 1; }
+      - name: Qualify the SDK package against the shared artifact
+        run: |
+          bash scripts/check-sdk-generated.sh
+          python3 -B scripts/check-sdk-deletions.py
+          bash scripts/check-sdk-types.sh
+          bash scripts/check-sdk-headless.sh target/ci/qualification-artifacts
+          bash scripts/sdk-package.sh check target/ci/qualification-artifacts
+
+  artifact-gates:
+    name: AudioWorklet artifact gates
+    needs: [route, artifact]
+    if: needs.route.outputs.route == 'full'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: artifact-gates
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install pinned Rust toolchain and wabt
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal
+          sudo apt-get update
+          sudo apt-get install -y wabt
+      - name: Download shipped artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: audioworklet-${{ github.sha }}
+          path: target/ci/qualification-artifacts
+      - name: Verify the downloaded artifact against its source pin
+        run: |
+          expected="$(cat hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256)"
+          actual="$(sha256sum target/ci/qualification-artifacts/miso-engine-v1-audio-worklet.simd128.wasm | awk '{print $1}')"
+          [[ "$actual" == "$expected" ]] || { echo "downloaded artifact sha256 mismatch: expected $expected, got $actual" >&2; exit 1; }
+      # #106 E1/E2/E5/E7 and the F4 native<->simd128 session parity, over the artifact that ships.
+      # check-web-audioworklet.sh asserts the frozen export set, no imports, no shared memory, no
+      # atomics or relaxed SIMD, the render export's allocation-free/trap-free closure, and the
+      # vector-kernel ratchet. check-browser-expected-resources.py --artifacts runs the same
+      # direct-oracle.mjs digest parity and unconditionally self-tests before returning (design
+      # §6.3: subsumes the retired web-audioworklet-browser-correctness.py --check and its own
+      # --self-test step).
+      - name: Browser AudioWorklet artifact gates and native parity
+        run: |
+          bash scripts/check-web-audioworklet.sh target/ci/qualification-artifacts
+          python3 -B scripts/check-browser-expected-resources.py --artifacts target/ci/qualification-artifacts
+      - name: Hermetic browser host and worklet tests
+        run: bash scripts/test-web-audioworklet.sh
+
+  browser:
+    name: ${{ matrix.browser }} — browser qualification gates
+    needs: [route, artifact]
+    if: needs.route.outputs.route == 'full'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, firefox, webkit]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: hosts/host-web/qualification/package-lock.json
+      - name: Download shipped artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: audioworklet-${{ github.sha }}
+          path: target/ci/qualification-artifacts
+      - name: Verify the downloaded artifact against its source pin
+        run: |
+          expected="$(cat hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256)"
+          actual="$(sha256sum target/ci/qualification-artifacts/miso-engine-v1-audio-worklet.simd128.wasm | awk '{print $1}')"
+          [[ "$actual" == "$expected" ]] || { echo "downloaded artifact sha256 mismatch: expected $expected, got $actual" >&2; exit 1; }
+      - name: Cache Playwright browser binaries
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ hashFiles('hosts/host-web/qualification/package-lock.json') }}-${{ matrix.browser }}-${{ runner.os }}
+      - name: Install pinned browser
+        working-directory: hosts/host-web/qualification
+        run: |
+          npm ci
+          npx playwright install "${{ matrix.browser }}"
+          npx playwright install-deps "${{ matrix.browser }}"
+      - name: ${{ matrix.browser }} — attestation, AudioWorklet, native digest, and stall gates
+        working-directory: hosts/host-web/qualification
+        run: npm run qualify -- --artifacts "$GITHUB_WORKSPACE/target/ci/qualification-artifacts" --browser "${{ matrix.browser }}" --check-matrix --self-test-mutations
+
+  lint:
+    name: fmt, clippy, doc, and hermetic policy gates
+    needs: route
+    if: needs.route.outputs.route == 'full'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: lint
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal --component clippy --component rustfmt
+          sudo apt-get update
+          sudo apt-get install -y ripgrep
+      # fmt first: the fastest possible first failure.
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+      - name: Documentation
+        run: RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps
+      - name: Workspace policy
+        run: bash scripts/check-workspace-policy.sh
+      - name: Workspace policy mutation tests
+        run: bash scripts/test-workspace-policy.sh
+      - name: Session dependency and compiler boundary policy
+        run: bash scripts/check-session-policy.sh
+      - name: Environment and marker vocabulary policy and mutation tests
+        run: |
+          bash scripts/check-env-vocabulary.sh
+          bash scripts/test-env-vocabulary.sh
+      - name: Bench harness duplication policy and mutation tests
+        run: |
+          bash scripts/check-bench-policy.sh
+          bash scripts/test-bench-policy.sh
+      - name: Console and rack benchmark fixture integrity
+        run: |
+          bash scripts/check-console-benchmark-fixture.sh
+          bash scripts/check-rack-benchmark-fixture.sh
+      # check-console-fixtures.sh and check-builtins-fixtures.sh split (design §6.2): the
+      # manifest-only half (no binary argument) is hermetic and belongs here; audit-native runs
+      # them again with the release audit/session-validator binaries for the full audit half.
+      - name: Standing console and builtins fixture manifests
+        run: |
+          bash scripts/check-console-fixtures.sh
+          bash scripts/check-builtins-fixtures.sh .
+          bash scripts/test-builtins-fixtures.sh
+      - name: Wasm console benchmark validator mutation tests
+        run: bash scripts/test-wasm-console-benchmark.sh
+      # test-builtins-benchmark.sh and test-graph-benchmark.sh moved to nightly's
+      # moved-mutation-suites job (design §6.2/deliverable C); everything else in this bundle is
+      # a hermetic validator self-test.
+      - name: Benchmark preconditions and validator mutation tests
+        run: |
+          bash scripts/check-bench-preconditions.sh
+          bash scripts/test-console-benchmark.sh
+          bash scripts/test-rack-benchmark.sh
+          bash scripts/test-wasm-kernel-timing.sh
+      - name: Shared host facade policy and mutation tests
+        run: |
+          bash scripts/check-host-core-policy.sh
+          bash scripts/test-host-core-policy.sh
+      - name: Protocol control typed-boundary policy and mutation tests
+        run: |
+          bash scripts/check-protocol-control-policy.sh
+          bash scripts/test-protocol-control-policy.sh
+      - name: Realtime source policy and mutation tests
+        run: |
+          bash scripts/check-realtime-policy.sh
+          bash scripts/test-realtime-policy.sh
+          bash scripts/check-realtime-audit-leak.sh
+          bash scripts/test-realtime-audit-leak.sh
+          bash scripts/check-artifact-evidence-leak.sh
+          bash scripts/test-artifact-evidence-leak.sh
+      - name: Realtime trace validator mutation tests
+        run: bash scripts/test-realtime-trace-validator.sh
+      - name: Lane numeric-boundary policy and mutation tests
+        run: |
+          bash scripts/check-lane-policy.sh
+          bash scripts/test-lane-policy.sh
+      - name: Unfused multiply-add seal and self-test
+        run: |
+          bash scripts/check-unfused-seal.sh
+          bash scripts/check-unfused-seal.sh --self-test
+      - name: Rack, builtins and graph dependency-boundary policy and mutation tests
+        run: |
+          bash scripts/check-rack-policy.sh
+          bash scripts/test-rack-policy.sh
+          bash scripts/check-builtins-policy.sh
+          bash scripts/test-builtins-policy.sh
+          bash scripts/check-graph-policy.sh
+      - name: Effect runtime dependency-boundary and fixture policy and mutation tests
+        run: |
+          bash scripts/check-effect-runtime-policy.sh
+          bash scripts/test-effect-runtime-policy.sh
+          bash scripts/check-effect-runtime-fixtures.sh
+          bash scripts/test-effect-runtime-fixtures.sh
+      # Effect-interchange qualification boundary and its own policy-test mutation suite (design
+      # §5 lint content: "effect-interchange qualification + policy test"); the cross-target job
+      # re-runs the qualification check as check-cross-targets.sh's own precondition.
+      - name: Effect interchange qualification and policy mutation tests
+        run: |
+          bash scripts/check-effect-interchange-qualification.sh
+          bash scripts/test-effect-interchange-policy.sh
+      # check-effect-contract.sh's preconditions and factory-count grep, without a bench binary:
+      # the release conformance-bench half runs in audit-native once the binary exists (design
+      # §6.2 split).
+      - name: Native effect runtime contract preconditions
+        run: bash scripts/check-effect-contract.sh
+      - name: Native PCM runner static seal and mutation tests
+        run: |
+          bash scripts/check-native-pcm-runner.sh
+          bash scripts/test-native-pcm-runner-v1-policy.sh
+          bash scripts/test-native-pcm-runner-portability-v1-policy.sh
+      - name: Conformance boundaries
+        run: bash scripts/check-conformance-boundaries.sh
+      - name: Step vocabulary uniformity and self-test
+        run: |
+          python3 -B scripts/check-step-vocabulary.py
+          python3 -B scripts/check-step-vocabulary.py --self-test
+      # The rg half of the former parametric-eq target script (design §6.2/implementation issue
+      # 5): a hermetic render-contract seal with no cargo build.
+      - name: Parametric EQ render-contract seal
+        run: bash scripts/check-parametric-eq-render-contract.sh
+      - name: Release shape policy self-test
+        run: python3 -B scripts/check-release-shape.py --self-test
+      - name: Stem store V1 gate (mutation ledger moved to nightly)
+        run: node scripts/check-stem-store-v1.mjs
+      # x86-probes job folded in (design §6.2): three distinct sub-v3-refusal claims, dominated by
+      # toolchain install, which lint already paid for.
+      - name: Sub-v3 builds are refused by the lane guard (scalar)
+        run: |
+          ! CARGO_TARGET_DIR=target/ci/x86-scalar RUSTFLAGS='-C target-cpu=x86-64 -C target-feature=-avx2,-fma' cargo check --locked -p engine -p target-smoke -p math 2>/tmp/ci-scalar-probe.log
+          grep -q 'requires x86-64-v3' /tmp/ci-scalar-probe.log
+          ! rustc --print cfg -C target-cpu=x86-64 -C target-feature=-avx2,-fma | grep -qx 'target_feature="avx2"'
+          ! rustc --print cfg -C target-cpu=x86-64 -C target-feature=-avx2,-fma | grep -qx 'target_feature="fma"'
+      - name: Sub-v3 builds are refused by the lane guard (AVX2 without FMA)
+        run: |
+          ! CARGO_TARGET_DIR=target/ci/x86-avx2 RUSTFLAGS='-C target-cpu=x86-64 -C target-feature=+avx2,-fma' cargo check --locked -p engine -p target-smoke -p math 2>/tmp/ci-avx2-probe.log
+          grep -q 'requires x86-64-v3' /tmp/ci-avx2-probe.log
+          rustc --print cfg -C target-cpu=x86-64 -C target-feature=+avx2,-fma | grep -qx 'target_feature="avx2"'
+          ! rustc --print cfg -C target-cpu=x86-64 -C target-feature=+avx2,-fma | grep -qx 'target_feature="fma"'
+      - name: AVX2 with FMA compile probe and cfg assertion
+        run: |
+          CARGO_TARGET_DIR=target/ci/x86-avx2fma RUSTFLAGS='-C target-cpu=x86-64 -C target-feature=+avx2,+fma' cargo check --locked -p engine -p target-smoke -p math -p builtins -p builtins-compiler -p effect-runtime -p gate-expander -p multiband-compressor -p parametric-eq -p soft-clip
+          rustc --print cfg -C target-cpu=x86-64 -C target-feature=+avx2,+fma | grep -qx 'target_feature="avx2"'
+          rustc --print cfg -C target-cpu=x86-64 -C target-feature=+avx2,+fma | grep -qx 'target_feature="fma"'
+
+  test-debug-a:
+    name: workspace debug tests (minus DSP crates and evidence tools)
+    needs: route
+    if: needs.route.outputs.route == 'full'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: test-debug-a
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal
+      # Every DSP crate moves to test-debug-b; audit/bench/console-workload/wasm-* move to
+      # audit-native and wasm-guests in release. Explicit --features (design §10 finding 1): under
+      # --workspace these features are unified in regardless, so naming them here keeps this
+      # invocation's compiled program identical to what the failure message's local reproduction
+      # command must also name explicitly.
+      - name: Workspace debug tests (excluding DSP crates, audit, and wasm evidence tools)
+        run: |
+          cargo test --locked --workspace --all-targets \
+            --exclude lane --exclude math --exclude effect-runtime --exclude delay \
+            --exclude compressor --exclude multiband-compressor --exclude gate-expander \
+            --exclude true-peak-limiter --exclude transient-shaper --exclude soft-clip \
+            --exclude parametric-eq --exclude builtins --exclude dsp-reference \
+            --exclude conformance --exclude audit --exclude bench --exclude console-workload \
+            --exclude wasm-gates --exclude wasm-console --exclude wasm-gate-guest \
+            --exclude wasm-console-guest --exclude wasm-gate-corpus \
+            --features builtins-compiler/test-support,source/test-support,graph/test-support,engine/realtime-audit
+      - name: Native host smoke
+        run: cargo run --locked -p host-native
+
+  test-debug-b:
+    name: DSP crates debug tests
+    needs: route
+    if: needs.route.outputs.route == 'full'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: test-debug-b
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal
+      - name: DSP crates debug tests (lane feature unification pinned explicitly)
+        run: |
+          cargo test --locked --all-targets \
+            -p lane -p math -p effect-runtime -p delay -p compressor -p multiband-compressor \
+            -p gate-expander -p true-peak-limiter -p transient-shaper -p soft-clip \
+            -p parametric-eq -p builtins -p dsp-reference -p conformance --features math/lane
+      - name: Conformance research-fixture completeness
+        run: cargo run --locked -p conformance --example conformance_fixtures -- --check
+
+  test-release:
+    name: release-mode lane, math, and wasm-gates digest gates
+    needs: route
+    if: needs.route.outputs.route == 'full'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: test-release
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal
+      - name: Lane and math gates (G1-G4, G6, P1, M1-M3) and wasm-gates G5/G6 in release
+        run: cargo test --locked --release -p lane -p math -p wasm-gates --features math/lane
+      # Own CARGO_TARGET_DIR per distinct RUSTFLAGS (design §8): a per-crate override must not
+      # invalidate the shared release target dir's fingerprints for every step after it.
+      - name: Math M3 digests on an FMA-enabled build
+        run: CARGO_TARGET_DIR=target/ci/m3-fma RUSTFLAGS='-C target-feature=+fma' cargo test --locked --release -p math --test m3_determinism
+      - name: Realtime race model (engine SPSC loom leg)
+        run: CARGO_TARGET_DIR=target/ci/loom RUSTFLAGS='--cfg loom --check-cfg=cfg(loom)' cargo test --locked --release -p engine --lib spsc_loom
+      - name: Math M1 exhaustive sweep
+        if: needs.route.outputs.math_closure == 'true'
+        run: cargo test --locked --release -p math --features lane --test m1_exhaustive -- --ignored
+      - name: Fast dB tier gate F1, exhaustive over both operating domains
+        if: needs.route.outputs.math_closure == 'true'
+        run: cargo test --locked --release -p math --features lane --test f1_fast_db_bounds -- --ignored
+
+  audit-native:
+    name: release audit, trace, and fixture gates
+    needs: route
+    if: needs.route.outputs.route == 'full'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: audit-native
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install pinned Rust toolchain and strace
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal
+          sudo apt-get update
+          sudo apt-get install -y strace
+      # One release build backs every audit/trace/probe/fixture/capi/determinism step below,
+      # instead of each re-paying its own release compile (design §5: this is what moves 470s of
+      # tools/audit unit-test execution and ~330s of per-crate release re-runs out of the debug
+      # workspace run without losing their claims).
+      - name: Build release audit, bench, capi, and session-validator binaries
+        run: cargo build --locked --release -p audit -p bench -p capi -p session-validator
+      - name: Audit and console-workload unit tests in release
+        run: cargo test --locked --release -p audit -p console-workload
+      - name: Delay realtime allocation and syscall audit
+        run: ./target/release/audit delay --blocks 100000
+      - name: Compressor realtime allocation and syscall audit
+        run: ./target/release/audit compressor --blocks 100000
+      - name: Parametric EQ realtime allocation and syscall audit
+        run: ./target/release/audit parametric-eq --blocks 100000
+      - name: Gate/expander realtime audit (100,000 blocks, W8 bank and connected scalar)
+        run: |
+          ./target/release/audit gate-expander | tee target/gate-expander-audit.json
+          grep -q '"total_violations":0' target/gate-expander-audit.json
+      - name: Builtins realtime audit (1,000,000 blocks, direct chain and graph)
+        run: |
+          bash scripts/trace-builtins-audit.sh target/release/audit
+          bash scripts/trace-builtins-graph-audit.sh target/release/audit
+      - name: Source and graph realtime audits
+        run: |
+          bash scripts/trace-source-audit.sh target/release/audit
+          bash scripts/trace-graph-audit.sh target/release/audit
+      - name: Protocol caller-buffer allocation audit
+        run: bash scripts/run-protocol-allocation-audit.sh target/release/audit
+      - name: Realtime audit hooks and syscall trace
+        run: |
+          bash scripts/test-realtime-audit-probes.sh realtime target/release/audit
+          timeout 120s bash scripts/trace-realtime-audit.sh target/release/audit 1000000
+      - name: Builtins and builtins-graph audit probe mutation tests
+        run: |
+          bash scripts/test-realtime-audit-probes.sh builtins target/release/audit
+          bash scripts/test-realtime-audit-probes.sh builtins-graph target/release/audit
+      - name: Native effect one-million-call allocation and syscall audit
+        run: timeout 180s bash scripts/trace-effect-contract-audit.sh target/release/bench 1000000
+      # G1: compiles a C++17 header consumer and a C11 fixture at -Wall -Wextra -Werror
+      # -pedantic, links the real libcapi.so, diffs its exported symbols against the frozen ABI V1
+      # list, and executes the fixture. Builds capi in release itself (the shipped-crate link
+      # proof, design §6.7); the release build above already primed the target dir.
+      - name: C ABI linkage, frozen symbol set, native consumer smoke test, and self-test
+        run: |
+          bash scripts/check-capi-abi.sh
+          bash scripts/check-capi-abi.sh --self-test
+      # G2: HashMap iteration order is per-process, so this runs `graph_fixture` fresh 100 times.
+      - name: Graph fresh-process determinism (100 fresh processes)
+        run: bash scripts/check-graph-determinism.sh
+      # Full audit half of the fixture checks (design §6.2 split): lint already ran the
+      # manifest-only half; this half exercises the release audit/session-validator binaries.
+      - name: Builtins fixture corpus audit
+        run: bash scripts/check-builtins-fixtures.sh . target/release/audit
+      - name: Standing console fixtures against the release session-validator
+        run: bash scripts/check-console-fixtures.sh target/release/session-validator
+      # The release conformance-bench half of check-effect-contract.sh (design §6.2 split): lint
+      # already ran its preconditions and factory-count grep without a binary.
+      - name: Native effect runtime conformance bench
+        run: bash scripts/check-effect-contract.sh target/release/bench
+      - name: Protocol benchmark runner build and negative argument checks (no benchmark)
+        run: |
+          cargo check --locked -p bench --all-targets
+          bash scripts/test-protocol-benchmark.sh
+
+  wasm-guests:
+    name: wasm guest legs and cross-target wasm checks under wasmtime
+    needs: route
+    if: needs.route.outputs.route == 'full'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: wasm-guests
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install pinned Rust toolchain, Wasm standard library, and wabt
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal
+          rustup target add --toolchain 1.97.1 wasm32-unknown-unknown
+          sudo apt-get update
+          sudo apt-get install -y wabt
+      # Builds its own wasmtime runner rather than depending on test-release, so nothing
+      # serializes between the two jobs (design deliverable B).
+      - name: Build the wasmtime runner
+        run: cargo build --locked --release -p wasm-gates
+      - name: Browser-local realtime path has no atomic opcodes
+        run: bash scripts/check-wasm-realtime-atomics.sh
+      - name: Scalar Wasm build (lane's scalar wasm path)
+        run: |
+          CARGO_TARGET_DIR=target/ci/wasm-scalar RUSTFLAGS='-C target-feature=-simd128' cargo build --locked --release --target wasm32-unknown-unknown -p engine -p session -p effect-contract -p effect-compiler -p protocol -p target-smoke -p host-core -p host-web -p lane -p math -p builtins -p builtins-compiler -p effect-runtime -p gate-expander -p delay -p multiband-compressor -p parametric-eq -p soft-clip
+          ! rustc --print cfg --target wasm32-unknown-unknown -C target-feature=-simd128 | grep -qx 'target_feature="simd128"'
+      # SIMD128 18-package build deleted (design §6.3: host-web's simd128 closure is already built
+      # by the artifact job); only the compile-probe claim over target-smoke/protocol survives.
+      - name: SIMD128 compile probe (target-smoke and protocol)
+        run: |
+          CARGO_TARGET_DIR=target/ci/wasm-simd RUSTFLAGS='-C target-feature=+simd128' cargo check --locked --target wasm32-unknown-unknown -p target-smoke -p protocol
+          rustc --print cfg --target wasm32-unknown-unknown -C target-feature=+simd128 | grep -qx 'target_feature="simd128"'
+      - name: Evidence crates compile for Wasm (not an artifact)
+        run: |
+          CARGO_TARGET_DIR=target/ci/wasm-scalar RUSTFLAGS='-C target-feature=-simd128' cargo check --locked --target wasm32-unknown-unknown -p dsp-reference -p conformance
+          CARGO_TARGET_DIR=target/ci/wasm-simd RUSTFLAGS='-C target-feature=+simd128' cargo check --locked --target wasm32-unknown-unknown -p dsp-reference -p conformance
+      - name: Issue-005 scalar and SIMD protocol golden parity
+        run: bash scripts/check-protocol-wasm-parity.sh
+      # Gate G5 (native corpus, every scalar/SIMD4/SIMD8 target) and the wasm replay of gates M3
+      # and D1 under wasmtime, plus G6's detector-residency pin. Kept as one atomic invocation:
+      # run-wasm-gates.sh is not in this work package's edit scope, so its native and guest legs
+      # cannot be split the way design §6.4 describes without a script change owned elsewhere.
+      - name: Native and WebAssembly cross-target digest gates
+        run: bash scripts/run-wasm-gates.sh
+      - name: Upload cross-target gate evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: wasm-gates
+          path: target/ci/wasm-gates/wasm-gates.jsonl
+
+  cross-target:
+    name: android, iOS, and wasm cross-target checks
+    needs: route
+    if: needs.route.outputs.route == 'full'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: cross-target
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install pinned Rust toolchain, cross targets, and wabt
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal
+          rustup target add --toolchain 1.97.1 wasm32-unknown-unknown aarch64-linux-android aarch64-apple-ios
+          sudo apt-get update
+          sudo apt-get install -y wabt
+      # Replaces check-parametric-eq-targets.sh, check-builtins-targets.sh, and
+      # check-effect-interchange-targets.sh's cargo halves with one script, one cached target dir
+      # per triple (WP-3 contract). The render-contract rg half moved to lint.
+      - name: Cross-target cargo checks (parametric-eq, builtins, effect-interchange)
+        run: bash scripts/check-cross-targets.sh
+      - name: Effect package V1 corpus and inspection surface
+        run: bash scripts/check-effect-package-v1.sh
+      - name: Effect descriptor V1 corpus and inspection surface
+        run: bash scripts/check-effect-descriptor-v1.sh
+
+  release-shape:
+    name: release shape and panic-clobber policy
+    needs: route
+    if: needs.route.outputs.route == 'full' && needs.route.outputs.release_inputs == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: release-shape
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal
+      # cargo-metadata asserts the cdylib/staticlib set is exactly {capi, effect-package,
+      # host-web, wasm-gate-guest, wasm-console-guest} and [profile.release].panic == "abort".
+      - name: Release shape policy
+        run: python3 -B scripts/check-release-shape.py
+      # The panic-variant filename clobber (docs/REALTIME_DEPENDENCY_POLICY.md) is prevented by
+      # construction by the release panic=abort override; this proves the workspace still links
+      # under the override, metadata-only + check-only, no fat-LTO link (design §6.7).
+      - name: Workspace release check under the unwind override
+        run: CARGO_PROFILE_RELEASE_PANIC=unwind cargo check --locked --release --workspace --all-targets
+
+  verdict:
+    name: qualification
+    if: always()
+    needs: [route, docs-gates, artifact, sdk, artifact-gates, browser, lint, test-debug-a, test-debug-b, test-release, audit-native, wasm-guests, cross-target, release-shape]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    env:
+      ROUTE_RESULT: ${{ needs.route.result }}
+      ROUTE: ${{ needs.route.outputs.route }}
+      RELEASE_INPUTS: ${{ needs.route.outputs.release_inputs }}
+      DOCS_GATES_RESULT: ${{ needs.docs-gates.result }}
+      ARTIFACT_RESULT: ${{ needs.artifact.result }}
+      SDK_RESULT: ${{ needs.sdk.result }}
+      ARTIFACT_GATES_RESULT: ${{ needs.artifact-gates.result }}
+      BROWSER_RESULT: ${{ needs.browser.result }}
+      LINT_RESULT: ${{ needs.lint.result }}
+      TEST_DEBUG_A_RESULT: ${{ needs.test-debug-a.result }}
+      TEST_DEBUG_B_RESULT: ${{ needs.test-debug-b.result }}
+      TEST_RELEASE_RESULT: ${{ needs.test-release.result }}
+      AUDIT_NATIVE_RESULT: ${{ needs.audit-native.result }}
+      WASM_GUESTS_RESULT: ${{ needs.wasm-guests.result }}
+      CROSS_TARGET_RESULT: ${{ needs.cross-target.result }}
+      RELEASE_SHAPE_RESULT: ${{ needs.release-shape.result }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      # A static expectation table, not a leaf `if:` echoed back at itself: a leaf whose `if:`
+      # drifts from this table fails the verdict in both directions -- a job that ran when it
+      # should not have, and a job that was skipped when it should have run (design §7).
+      - name: Enforce the qualification expectation table
+        run: |
+          set -euo pipefail
+          [[ "$ROUTE_RESULT" == success ]] || { echo "router result: $ROUTE_RESULT" >&2; exit 1; }
+          case "$ROUTE" in
+            evidence|sdk|full) ;;
+            *) echo "unknown route: $ROUTE" >&2; exit 1 ;;
+          esac
+          docs_expected=skipped
+          artifact_expected=skipped
+          full_expected=skipped
+          release_shape_expected=skipped
+          case "$ROUTE" in
+            evidence)
+              docs_expected=success
+              ;;
+            sdk)
+              artifact_expected=success
+              ;;
+            full)
+              artifact_expected=success
+              full_expected=success
+              [[ "$RELEASE_INPUTS" == "true" ]] && release_shape_expected=success
+              ;;
+          esac
+          failed=0
+          check() {
+            local name=$1 actual=$2 expected=$3
+            [[ "$actual" == "$expected" ]] || { echo "$name: expected $expected, got $actual" >&2; failed=1; }
+          }
+          check docs-gates "$DOCS_GATES_RESULT" "$docs_expected"
+          check artifact "$ARTIFACT_RESULT" "$artifact_expected"
+          check sdk "$SDK_RESULT" "$artifact_expected"
+          check artifact-gates "$ARTIFACT_GATES_RESULT" "$full_expected"
+          check browser "$BROWSER_RESULT" "$full_expected"
+          check lint "$LINT_RESULT" "$full_expected"
+          check test-debug-a "$TEST_DEBUG_A_RESULT" "$full_expected"
+          check test-debug-b "$TEST_DEBUG_B_RESULT" "$full_expected"
+          check test-release "$TEST_RELEASE_RESULT" "$full_expected"
+          check audit-native "$AUDIT_NATIVE_RESULT" "$full_expected"
+          check wasm-guests "$WASM_GUESTS_RESULT" "$full_expected"
+          check cross-target "$CROSS_TARGET_RESULT" "$full_expected"
+          check release-shape "$RELEASE_SHAPE_RESULT" "$release_shape_expected"
+          [[ "$failed" == 0 ]] || exit 1
+      # Best-effort observability (design §11): never masks the verdict above, which has already
+      # exited by the time this runs on a failing route.
+      - name: Publish per-job CI telemetry
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" > jobs.json
+          python3 -B scripts/ci-telemetry.py --jobs jobs.json --route "$ROUTE" \
+            --attempt "${{ github.run_attempt }}" --out ci-telemetry.json >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload CI telemetry artifact
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ci-telemetry-${{ github.run_id }}
+          path: ci-telemetry.json
+          if-no-files-found: ignore

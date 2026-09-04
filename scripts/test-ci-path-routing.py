@@ -180,7 +180,8 @@ def workspace() -> pathlib.Path:
     root = pathlib.Path(tempfile.mkdtemp(prefix="ci-path-routing-"))
     (root / ".github/workflows").mkdir(parents=True)
     (root / "scripts").mkdir()
-    for name in ("ci.yml", "browser-qualification.yml", "release-build.yml", "sdk.yml"):
+    for name in ("ci.yml", "browser-qualification.yml", "release-build.yml", "sdk.yml",
+                 "qualification.yml"):
         shutil.copy2(ROOT / ".github/workflows" / name, root / ".github/workflows" / name)
     shutil.copy2(ROUTER, root / "scripts/ci-path-router.py")
     shutil.copy2(CHECKER, root / "scripts/check-ci-path-routing.py")
@@ -556,6 +557,52 @@ def main() -> int:
         mutate(root / ".github/workflows/browser-qualification.yml", "    branches:\n      - main\n  workflow_dispatch:",
                "    branches:\n      - main\n    paths:\n      - 'sdk/**'\n  workflow_dispatch:")
         checker_fails(root)  # path-filtered required PR workflow would leave its context pending
+    finally:
+        shutil.rmtree(root)
+
+    # qualification.yml (issue #359 WP-4 deliverable B): a path filter on any trigger, a relaxed
+    # top-level permissions default, a verdict `needs:` that drifts from the job set, a missing
+    # timeout, or an expectation table silently dropping a job must all fail the checker.
+    root = workspace()
+    try:
+        mutate(root / ".github/workflows/qualification.yml",
+               "  pull_request:\n    branches:\n      - main\n",
+               "  pull_request:\n    branches:\n      - main\n    paths:\n      - 'sdk/**'\n")
+        checker_fails(root)  # a path filter on the always-required workflow leaves it pending
+    finally:
+        shutil.rmtree(root)
+    root = workspace()
+    try:
+        mutate(root / ".github/workflows/qualification.yml",
+               "permissions:\n  contents: read\n",
+               "permissions:\n  contents: read\n  actions: read\n")
+        checker_fails(root)  # top-level permissions must stay exactly contents: read
+    finally:
+        shutil.rmtree(root)
+    root = workspace()
+    try:
+        mutate(root / ".github/workflows/qualification.yml",
+               "    needs: [route, docs-gates, artifact, sdk, artifact-gates, browser, lint, "
+               "test-debug-a, test-debug-b, test-release, audit-native, wasm-guests, "
+               "cross-target, release-shape]",
+               "    needs: [route, docs-gates, artifact, sdk, artifact-gates, browser, lint, "
+               "test-debug-a, test-debug-b, test-release, audit-native, wasm-guests, "
+               "cross-target]")
+        checker_fails(root)  # a job dropped from verdict's needs: escapes the aggregate entirely
+    finally:
+        shutil.rmtree(root)
+    root = workspace()
+    try:
+        mutate(root / ".github/workflows/qualification.yml",
+               "    timeout-minutes: 10\n    strategy:", "    strategy:")
+        checker_fails(root)  # a leaf job without timeout-minutes can pend forever behind the gate
+    finally:
+        shutil.rmtree(root)
+    root = workspace()
+    try:
+        mutate(root / ".github/workflows/qualification.yml",
+               'check cross-target "$CROSS_TARGET_RESULT" "$full_expected"\n', "")
+        checker_fails(root)  # a job dropped from the expectation table can drift silently
     finally:
         shutil.rmtree(root)
 

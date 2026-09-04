@@ -376,6 +376,80 @@ def check_shared_license_ownership(ci: str, sdk: str) -> None:
     ), "sdk.yml: full-route SDK package qualification step drifted or was suppressed")
 
 
+def check_qualification_no_path_filter(text: str) -> None:
+    """qualification.yml is the always-reporting required workflow (design #359 §4/§7): a
+    `paths:`/`paths-ignore:` filter on any of its triggers could leave a PR's required context
+    pending forever, so every leaf job is gated by the router's `if:` instead."""
+    on_block = section(text, "on:", ("concurrency:",))
+    require("paths:" not in on_block and "paths-ignore:" not in on_block,
+            "qualification.yml: on: must carry no paths:/paths-ignore: filter on any trigger")
+    require("pull_request:" in on_block and "push:" in on_block and "workflow_dispatch:" in on_block,
+            "qualification.yml: must trigger on pull_request, push, and workflow_dispatch")
+
+
+def check_qualification_permissions(text: str) -> None:
+    """The workflow-wide default must itself be read-only; a job-level override (verdict's
+    `actions: read` addition) does not relax this, because check_mapping_structure has already
+    pinned the top-level key order to name/on/concurrency/permissions/env/jobs."""
+    head = text.split("\njobs:\n", 1)[0]
+    match = re.search(r"^permissions:\n((?:  .+\n)+)", head, re.MULTILINE)
+    require(match is not None, "qualification.yml: missing top-level permissions:")
+    require(match.group(1) == "  contents: read\n",
+            "qualification.yml: top-level permissions must be exactly contents: read")
+
+
+def qualification_job_names(text: str) -> list[str]:
+    jobs_block = section(text, "jobs:", ())
+    names = [
+        line.strip()[:-1] for line in jobs_block.splitlines()
+        if line.startswith("  ") and not line.startswith("    ") and line.strip()
+        and not line.lstrip().startswith("#") and line.rstrip().endswith(":")
+    ]
+    require(len(names) >= 2, "qualification.yml: could not enumerate any jobs")
+    return names
+
+
+def check_qualification_timeouts(text: str, names: list[str]) -> None:
+    """Every leaf has a timeout (design §7): a hung runner must fail the verdict, not pend for
+    six hours behind a required context."""
+    for name in names:
+        block = job(text, name)
+        require(re.search(r"^    timeout-minutes: \d+$", block, re.MULTILINE) is not None,
+                f"qualification.yml: job {name!r} is missing timeout-minutes")
+
+
+def check_qualification_verdict_needs(text: str, names: list[str]) -> None:
+    verdict = job(text, "verdict")
+    others = [name for name in names if name != "verdict"]
+    match = re.search(r"^    needs: \[(.+)\]$", verdict, re.MULTILINE)
+    require(match is not None, "qualification.yml: verdict must declare needs: [...]")
+    needs = [item.strip() for item in match.group(1).split(",")]
+    require(needs == others,
+            "qualification.yml: verdict's needs must equal the set of every other job, in job order")
+
+
+def check_qualification_expectation_table(text: str, names: list[str]) -> None:
+    """The static expectation table -- not a leaf `if:` echoed back at itself -- must mention
+    every job so a leaf's `if:` drifting from it fails the verdict in both directions (design §7).
+    `route` drives the table rather than being checked by it, so it is exempt."""
+    verdict = job(text, "verdict")
+    for name in names:
+        if name in ("route", "verdict"):
+            continue
+        require(re.search(rf'check {re.escape(name)} "\$', verdict) is not None,
+                f"qualification.yml: expectation table does not mention job {name!r}")
+
+
+def check_qualification_workflow(root: pathlib.Path) -> None:
+    text = (root / ".github/workflows/qualification.yml").read_text(encoding="utf-8")
+    check_qualification_no_path_filter(text)
+    check_qualification_permissions(text)
+    names = qualification_job_names(text)
+    check_qualification_timeouts(text, names)
+    check_qualification_verdict_needs(text, names)
+    check_qualification_expectation_table(text, names)
+
+
 def check(root: pathlib.Path) -> None:
     workflows = root / ".github/workflows"
     ci = (workflows / "ci.yml").read_text(encoding="utf-8")
@@ -449,6 +523,7 @@ def check(root: pathlib.Path) -> None:
     check_sdk_closure(sdk)
     check_classifier_contract(root)
     check_shared_license_ownership(ci, sdk)
+    check_qualification_workflow(root)
     require("check-sdk-generated" not in job(ci, "host"),
             "ci.yml: generated SDK ownership must be in sdk.yml")
     require("check-sdk-headless" not in job(ci, "wasm") and "sdk-package.sh" not in job(ci, "wasm"),

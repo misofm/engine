@@ -11,6 +11,8 @@ new_case() {
     case_root="$scratch/$1"
     mkdir -p "$case_root/.github/workflows" "$case_root/scripts"
     cp "$root/.github/workflows/ci.yml" "$case_root/.github/workflows/"
+    [[ -f "$root/.github/workflows/qualification.yml" ]] &&
+        cp "$root/.github/workflows/qualification.yml" "$case_root/.github/workflows/"
     cp "$root/scripts/check-artifact-evidence-leak.sh" "$case_root/scripts/"
 }
 
@@ -52,5 +54,20 @@ expect_failure wasm-compile-coverage-deleted
 
 # 4. RETIRED by #66 for the same reason as case 2: this mutated the android coverage invocation,
 #    which no longer exists in ci.yml.
+
+# 5. The same two regressions, over qualification.yml's wasm-guests job (design #359 WP-4
+#    deliverable B: this gate must cover both workflows the same way). Skipped when
+#    qualification.yml has not landed yet in this checkout, so this script keeps working before
+#    and after it is added.
+if [[ -f "$root/.github/workflows/qualification.yml" ]]; then
+    new_case qualification-conformance-back-in-the-scalar-wasm-artifact
+    sed -i 's|-p host-web -p lane|-p host-web -p conformance -p lane|' \
+        "$case_root/.github/workflows/qualification.yml"
+    expect_failure qualification-conformance-back-in-the-scalar-wasm-artifact
+
+    new_case qualification-wasm-compile-coverage-deleted
+    sed -i '/Evidence crates compile for Wasm/,+3d' "$case_root/.github/workflows/qualification.yml"
+    expect_failure qualification-wasm-compile-coverage-deleted
+fi
 
 printf 'artifact evidence gate mutations: ok\n'
