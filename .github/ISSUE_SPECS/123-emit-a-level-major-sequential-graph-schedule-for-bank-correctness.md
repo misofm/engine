@@ -479,7 +479,8 @@ terminal STOP.
 
 Required green evidence is the focused source-set test, all builtins-compiler library tests,
 graph-audit all-target tests, one three-block functional audit and
-`bash scripts/trace-graph-audit.sh 3`, graph/graph-compiler package tests, full workspace all-target
+`bash scripts/trace-graph-audit.sh target/release/audit 3` (the script's positional order is now
+`[path/to/audit] [blocks]`), graph/graph-compiler package tests, full workspace all-target
 tests, formatting, warning-denied Clippy/rustdoc, graph/realtime/workspace policies, diff check and
 an exact two-helper production fence. The three-block failed preflight and correction run are not
 the historical 100,000-render audit, a benchmark or timing run.

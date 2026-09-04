@@ -29,9 +29,10 @@ create_fixture() {
     printf '%s\n' \
         'fn compile_children() { host_core::prepare_host_runtime(); }' \
         >"$root/crates/capi/src/runtime.rs"
-    # host-web is the one host still exempt (issue #106); it may still carry the pipeline.
+    # host-web is no longer exempt (issue #106 is done: it depends on host-core like every
+    # other host) and must use the facade exactly as host-native does below.
     printf '%s\n' \
-        'fn compile() { let _ = compile_session(&model, caps); }' \
+        'fn compile() { host_core::prepare_host_runtime(); }' \
         >"$root/hosts/host-web/src/lib.rs"
     printf '%s\n' \
         'fn compile() { host_core::prepare_host_runtime(); }' \
@@ -74,5 +75,20 @@ expect_failure facade-exports-a-c-symbol \
     'printf "%s\n" "#[unsafe(no_mangle)] pub extern \"C\" fn miso_engine_v1_prepare() {}" >>"$root/crates/host-core/src/lib.rs"'
 expect_failure facade-becomes-a-cdylib \
     'sed -i "s/crate-type = \[\"rlib\"\]/crate-type = [\"rlib\", \"cdylib\"]/" "$root/crates/host-core/Cargo.toml"'
+
+# Issue #106/#359: host-web is no longer exempt. The stale "pending #106" allowance is gone, so
+# host-web recompiling the pipeline directly must fail exactly like any other host.
+expect_failure host-web-recompiles-the-pipeline \
+    'printf "%s\n" "fn x() { let _ = compile_with_builtins(&model, caps); }" >>"$root/hosts/host-web/src/lib.rs"'
+expect_failure host-web-reinvents-the-identity-processor \
+    'printf "%s\n" "struct IdentityBinding;" >>"$root/hosts/host-web/src/lib.rs"'
+
+# S9: `! rg ...` fails open on rg exit 2 (a missing search root), and `[ -d "$host" ] || continue`
+# silently drops a host whose src/ directory disappears -- both must now be hard failures rather
+# than a vacuous "ok".
+expect_failure host-web-src-directory-deleted \
+    'rm -rf -- "$root/hosts/host-web/src"'
+expect_failure capi-src-directory-deleted \
+    'rm -rf -- "$root/crates/capi/src"'
 
 printf 'host-core policy mutation tests: ok\n'

@@ -61,6 +61,7 @@ on:
       - 'scripts/run-protocol-fuzz.sh'
       - 'Cargo.toml'
       - 'rust-toolchain.toml'
+      - '.cargo/config.toml'
       - '.github/workflows/fuzz.yml'
   pull_request:
     branches:
@@ -78,6 +79,7 @@ on:
       - 'scripts/run-protocol-fuzz.sh'
       - 'Cargo.toml'
       - 'rust-toolchain.toml'
+      - '.cargo/config.toml'
       - '.github/workflows/fuzz.yml'
   workflow_dispatch:
 
@@ -97,7 +99,7 @@ jobs:
     name: bounded session parser and compiler fuzzing
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Install pinned Rust toolchain
         run: |
           rustup toolchain install 1.97.1 --profile minimal
@@ -120,7 +122,7 @@ jobs:
     name: bounded issue-005 protocol decoder fuzzing
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Install pinned Rust and cargo-fuzz toolchains
         run: |
           rustup toolchain install 1.97.1 --profile minimal
@@ -131,7 +133,7 @@ jobs:
       - name: Run fixed-count native sanitizer fuzzing
         run: bash scripts/run-protocol-fuzz.sh
       - name: Upload protocol fuzz evidence
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: protocol-fuzz-evidence
           path: target/ci/protocol-fuzz/evidence.json

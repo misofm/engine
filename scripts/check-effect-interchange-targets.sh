@@ -1,5 +1,18 @@
 #!/usr/bin/env bash
 # Exact Issue 081 five-row native/compile/object target matrix. Do not use as a smoke test.
+#
+# The cargo/wasm-objdump matrix itself, the qualification-policy call, and the literal
+# target-triple/Wasm-feature-flag strings scripts/check-effect-interchange-qualification.sh
+# polices, now all live in scripts/check-cross-targets.sh (one cached target dir per target
+# triple, deduplicated against scripts/check-parametric-eq-targets.sh and
+# scripts/check-builtins-targets.sh; B2 removed this file's own decorative copy of the per-mode
+# loop, which the qualification gate used to police instead of the real matrix). This file keeps:
+#   * `validate_wasm_exports`, sourced directly by
+#     scripts/test-effect-interchange-target-export-parser.sh's synthetic regression -- it is the
+#     one live implementation, not a copy;
+#   * the tool/target preconditions;
+# and delegates the rest to scripts/check-cross-targets.sh, which runs the qualification check
+# exactly once, at its own start (this file used to run it twice: once here, once at its own end).
 set -euo pipefail
 
 validate_wasm_exports() {
@@ -32,12 +45,6 @@ fi
 [[ $# -eq 0 ]] || { printf 'usage: check-effect-interchange-targets.sh\n' >&2; exit 2; }
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
-bash scripts/check-effect-interchange-qualification.sh . >/dev/null
-packages=(
-    -p effect-package
-    -p effect-compiler
-    -p conformance
-)
 for tool in awk cargo rustc rustup wasm-objdump rg uname; do
     command -v "$tool" >/dev/null 2>&1 || {
         printf 'effect interchange target matrix: missing tool %s\n' "$tool" >&2
@@ -59,37 +66,9 @@ for target in x86_64-unknown-linux-gnu aarch64-linux-android aarch64-apple-ios w
     }
 done
 
-cargo test --locked "${packages[@]}" --lib --tests
-bash scripts/test-effect-descriptor-capi.sh
-
-for target in aarch64-linux-android aarch64-apple-ios; do
-    cargo check --locked --all-targets --target "$target" "${packages[@]}"
-done
-
-scratch="$(mktemp -d)"
-trap 'rm -rf -- "$scratch"' EXIT
-for mode in scalar simd; do
-    if [[ "$mode" == scalar ]]; then
-        feature=-simd128
-    else
-        feature=+simd128
-    fi
-    target_dir="$scratch/$mode"
-    CARGO_TARGET_DIR="$target_dir" RUSTFLAGS="-C target-feature=$feature" \
-        cargo check --locked --all-targets --target wasm32-unknown-unknown "${packages[@]}"
-    CARGO_TARGET_DIR="$target_dir" RUSTFLAGS="-C target-feature=$feature" \
-        cargo rustc --locked -p effect-package --features c-abi \
-        --target wasm32-unknown-unknown --lib -- --crate-type=cdylib
-    wasm="$(find "$target_dir/wasm32-unknown-unknown/debug" -maxdepth 1 -name '*.wasm' -type f -print -quit)"
-    [[ -n "$wasm" ]] || { printf 'effect interchange target matrix: missing Wasm object\n' >&2; exit 1; }
-    metadata="$scratch/$mode.wasm-metadata.txt"
-    wasm-objdump -x "$wasm" >"$metadata"
-    validate_wasm_exports "$metadata" "$mode"
-    if [[ "$mode" == scalar ]] && wasm-objdump -d "$wasm" | rg -q \
-        'v128|f32x4|f64x2|i8x16|i16x8|i32x4|i64x2'; then
-        printf 'effect interchange target matrix: SIMD opcode in scalar object\n' >&2
-        exit 1
-    fi
-done
-bash scripts/check-effect-interchange-qualification.sh . >/dev/null
+# scripts/check-effect-interchange-qualification.sh now polices the target-triple and Wasm
+# feature-flag spellings directly against scripts/check-cross-targets.sh, which is where the
+# per-mode android/ios/wasm builds actually run (B2) -- this file no longer carries a decorative
+# copy of that loop.
+bash "$root/scripts/check-cross-targets.sh"
 printf 'effect interchange five-target matrix: ok\n'

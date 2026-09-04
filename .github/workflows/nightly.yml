@@ -55,8 +55,9 @@ jobs:
   native-vectorization-report:
     name: native production-kernel release-probe report (non-blocking)
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Install pinned Rust toolchain and disassembler
         run: |
           rustup toolchain install 1.97.1 --profile minimal
@@ -72,17 +73,19 @@ jobs:
             target/release/audit
       - name: Upload native vectorization evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: native-vectorization-report
           path: target/ci/native-vectorization/report.json
+          overwrite: true
 
 
   benchmark:
     name: bounded descriptive benchmarks
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.97.1 --profile minimal
       - name: Run one descriptive two-round benchmark
@@ -116,7 +119,7 @@ jobs:
           bash scripts/run-fp-environment-benchmark.sh 2 1000000 | tee target/fp-environment-benchmark.jsonl
           test -s target/fp-environment-benchmark.jsonl
       - name: Upload benchmark evidence
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: conformance-benchmark
           path: |
@@ -125,13 +128,14 @@ jobs:
             target/session-benchmark.jsonl
             target/fp-environment-benchmark.jsonl
             target/issue11/effect-contract-benchmark.jsonl
+          overwrite: true
 
   deep-fuzz:
     name: deep fuzzing over every target
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Install pinned Rust and cargo-fuzz toolchains
         run: |
           rustup toolchain install 1.97.1 --profile minimal
@@ -196,17 +200,99 @@ jobs:
           exit "$status"
       - name: Upload crash reproducers and the accumulated corpus
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: nightly-fuzz
           path: target/ci/nightly-fuzz
           if-no-files-found: ignore
+          overwrite: true
+
+  release-link-proof:
+    name: workspace release link proof (moved off the per-PR path)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal
+      # The former release-build.yml's unconditional main-push leg (design §6.7/§12 stage 4):
+      # release-build.yml is retired once qualification.yml carries the required context, and
+      # release-shape's cargo check --release --workspace --all-targets (metadata-only + check-
+      # only, no link) is not a substitute for actually linking every test/bench/example target
+      # in release. This is that link proof, at full 21-minute cost, once a day instead of on
+      # every PR and every main push.
+      - name: Workspace release build (single panic variant, --no-run)
+        run: bash scripts/run-release-workspace-tests.sh --no-run
+
+  math-sweeps:
+    name: math exhaustive sweeps and wasm-console guest check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install pinned Rust toolchain and Wasm standard library
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal
+          rustup target add --toolchain 1.97.1 wasm32-unknown-unknown
+      # M1 exhaustive and F1 exhaustive run PR-side only when the diff touches math's tiny
+      # reverse closure (math_closure, design §2); nightly runs both unconditionally so a
+      # closure-missed regression is still found within a day.
+      - name: Math M1 exhaustive sweep
+        run: cargo test --locked --release -p math --features lane --test m1_exhaustive -- --ignored
+      - name: Fast dB tier gate F1, exhaustive over both operating domains
+        run: cargo test --locked --release -p math --features lane --test f1_fast_db_bounds -- --ignored
+      # design §6.3: the wasm-console-guest build moved off the per-PR wasm job to nightly as a
+      # `cargo check` -- it exists so the nightly measurement does not discover a broken input,
+      # and this is that nightly.
+      - name: Wasm console benchmark guest compiles for Wasm (not an artifact)
+        run: |
+          CARGO_TARGET_DIR=target/ci/wasm-console RUSTFLAGS='-C target-feature=+simd128' cargo check --locked --release --target wasm32-unknown-unknown -p wasm-console-guest -p console-workload
+
+  moved-mutation-suites:
+    name: benchmark-lifecycle and stem-store mutation ledgers
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install ripgrep
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ripgrep
+      # design §6.2: these validator mutation suites moved off the per-PR lint job. Each is
+      # hermetic (no cargo, no clock) and never launches the real workload it guards.
+      - name: Benchmark-lifecycle mutation suites
+        run: |
+          bash scripts/test-builtins-benchmark.sh
+          bash scripts/test-graph-benchmark.sh
+      - name: Stem store V1 mutation ledger
+        run: node scripts/check-stem-store-v1.mjs --self-test --budgets
+
+  release-budgets:
+    name: release-mode wall-clock budgets (host-web, host-core, effect-package)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal
+      # design §10 finding 3: the deterministic half of each wall-clock test stays blocking on
+      # PRs; the timing half becomes `#[ignore]` and runs here, in release, once a day, with the
+      # number recorded against a product budget instead of a debug-build guess.
+      #
+      # `-- --ignored` over these three crates selects exactly the four
+      # `#[ignore = "release-mode budget; runs nightly"]` tests (verified by `--list --ignored`
+      # at the time of writing); if an unrelated `#[ignore]` test is ever added to one of them,
+      # narrow this to an explicit test-name list.
+      - name: Release-mode wall-clock budget tests
+        run: cargo test --locked --release -p host-web -p host-core -p effect-package -- --ignored
 
   failure-notice:
     name: report nightly failure as an issue
-    needs: [native-vectorization-report, benchmark, deep-fuzz]
+    needs: [native-vectorization-report, benchmark, deep-fuzz, release-link-proof, math-sweeps,
+            moved-mutation-suites, release-budgets]
     if: ${{ always() && contains(needs.*.result, 'failure') }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     permissions:
       issues: write
     steps:
@@ -230,11 +316,16 @@ jobs:
           REPORT_RESULT: ${{ needs.native-vectorization-report.result }}
           BENCHMARK_RESULT: ${{ needs.benchmark.result }}
           DEEP_FUZZ_RESULT: ${{ needs.deep-fuzz.result }}
+          RELEASE_LINK_PROOF_RESULT: ${{ needs.release-link-proof.result }}
+          MATH_SWEEPS_RESULT: ${{ needs.math-sweeps.result }}
+          MOVED_MUTATION_SUITES_RESULT: ${{ needs.moved-mutation-suites.result }}
+          RELEASE_BUDGETS_RESULT: ${{ needs.release-budgets.result }}
         run: |
           set -euo pipefail
           title='nightly workflow is failing'
-          body=$(printf 'The scheduled nightly workflow failed.\n\n| job | result |\n| --- | --- |\n| native production-kernel release-probe report | %s |\n| bounded descriptive benchmarks | %s |\n| deep fuzzing over every target | %s |\n\nRun: %s\n\nClose this issue once the failure is dealt with. The next failing night after that opens a fresh one; while it is open, further failures are added as comments.\n' \
-            "$REPORT_RESULT" "$BENCHMARK_RESULT" "$DEEP_FUZZ_RESULT" "$RUN_URL")
+          body=$(printf 'The scheduled nightly workflow failed.\n\n| job | result |\n| --- | --- |\n| native production-kernel release-probe report | %s |\n| bounded descriptive benchmarks | %s |\n| deep fuzzing over every target | %s |\n| workspace release link proof | %s |\n| math exhaustive sweeps and wasm-console guest check | %s |\n| benchmark-lifecycle and stem-store mutation ledgers | %s |\n| release-mode wall-clock budgets | %s |\n\nRun: %s\n\nClose this issue once the failure is dealt with. The next failing night after that opens a fresh one; while it is open, further failures are added as comments.\n' \
+            "$REPORT_RESULT" "$BENCHMARK_RESULT" "$DEEP_FUZZ_RESULT" "$RELEASE_LINK_PROOF_RESULT" \
+            "$MATH_SWEEPS_RESULT" "$MOVED_MUTATION_SUITES_RESULT" "$RELEASE_BUDGETS_RESULT" "$RUN_URL")
           existing=$(gh issue list --state open --search "$title in:title" --json number,title \
             --jq "[.[] | select(.title == \"$title\") | .number] | first // empty")
           if [ -n "$existing" ]; then

@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 # Check the independent V1 descriptor corpus plus native and scalar-Wasm inspection surfaces.
+#
+# WP-3 (#359): the wasm `--emit=obj` build below is byte-identical to
+# scripts/check-effect-package-v1.sh's (same RUSTFLAGS, crate, features, target); both now use a
+# shared `target/ci/effect-v1` dir (honouring CARGO_TARGET_DIR as a base) instead of a private
+# mktemp dir, so whichever of the two scripts runs second gets an incremental build.
 set -euo pipefail
 
 workspace_root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -19,7 +24,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -I -B \
 CARGO_TARGET_DIR="$scratch_directory/native-target" \
     bash "$workspace_root/scripts/test-effect-descriptor-capi.sh"
 
-wasm_target="$scratch_directory/wasm-target"
+wasm_target="${CARGO_TARGET_DIR:-$workspace_root/target}/ci/effect-v1"
 RUSTFLAGS='-C target-feature=-simd128' CARGO_TARGET_DIR="$wasm_target" \
     cargo rustc --quiet --locked --manifest-path "$workspace_root/Cargo.toml" \
         -p effect-package --features c-abi --lib --release --target wasm32-unknown-unknown -- \

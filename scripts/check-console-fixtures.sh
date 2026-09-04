@@ -1,16 +1,38 @@
 #!/usr/bin/env bash
 # Regenerate the derived JSON sessions and prove their semantic witness shapes.
+# Usage: check-console-fixtures.sh [path/to/session-validator]
 set -euo pipefail
-[[ "$#" == 0 ]] || { printf 'usage: %s\n' "$0" >&2; exit 2; }
+[[ "$#" -le 1 ]] || { printf 'usage: %s [path/to/session-validator]\n' "$0" >&2; exit 2; }
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+
+# S3: resolve a relative validator path against the caller's cwd BEFORE `cd "$root"` below.
+validator="${1:-}"
+if [[ -n "$validator" ]]; then
+    case "$validator" in
+        /*) : ;;
+        *) validator="$(realpath -m -- "$validator")" ;;
+    esac
+    # S1/S2: an explicit path must be an existing executable file, never a directory or a missing
+    # path -- and being explicit-but-missing is a hard error here, never a build trigger.
+    [[ -f "$validator" && -x "$validator" ]] || {
+        printf 'missing session-validator binary: %s\n' "$validator" >&2
+        exit 1
+    }
+fi
+
 cd "$root"
 export LC_ALL=C
 tmp_dir=$(mktemp -d)
 trap 'rm -rf "$tmp_dir"' EXIT
 
-python3 -I -B scripts/derive-intended-console-fixture.py >"$tmp_dir/intended.json"
+validator_args=()
+if [[ -n "$validator" ]]; then
+    validator_args=(--validator "$validator")
+fi
+
+python3 -I -B scripts/derive-intended-console-fixture.py "${validator_args[@]}" >"$tmp_dir/intended.json"
 cmp "$tmp_dir/intended.json" fixtures/session/v1/console-sixty-four-track-intended.json
-python3 -I -B scripts/derive-mono-console-fixture.py >"$tmp_dir/mono.json"
+python3 -I -B scripts/derive-mono-console-fixture.py "${validator_args[@]}" >"$tmp_dir/mono.json"
 cmp "$tmp_dir/mono.json" fixtures/session/v1/console-sixty-four-track-mono.json
 
 python3 -I -B - <<'PY'

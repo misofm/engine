@@ -65,6 +65,7 @@ for path in \
     scripts/run-effect-interchange-reference-processes.sh \
     scripts/test-effect-interchange-reference-runner.sh \
     scripts/check-effect-interchange-targets.sh \
+    scripts/check-cross-targets.sh \
     scripts/test-effect-interchange-target-export-parser.sh \
     scripts/effect-interchange-benchmark-validator.py \
     scripts/effect-interchange-benchmark-108-validator.py \
@@ -131,9 +132,17 @@ rg -q '^if __name__ == "__main__":' scripts/effect-interchange-v1-reference.py |
     fail 'aggregator is not import-safe'
 rg -q 'range\(0, ?100\)|seq 0 99' scripts/run-effect-interchange-reference-processes.sh ||
     fail 'runner does not freeze indexes 0..99'
-rg -q 'TRIALS: usize = 10_000' \
+# WP-2 deleted the print-only 10_000-trial campaign binary and its `TRIALS` constant, replacing
+# it with a parametrized `campaigns(trials)` helper and a fixed-trial-count `#[test]`. The seal's
+# purpose was "the mutation campaign exists and runs deterministically", not the literal 10_000;
+# assert the smoke test that now stands in for it is present, still a test, and still exercises a
+# fixed, non-trivial trial count.
+rg -qU -- '#\[test\]\nfn tiny_deterministic_mutation_smoke\(\) \{' \
     crates/effect-package/tests/effect_interchange_mutation.rs ||
-    fail 'mutation trial count changed'
+    fail 'mutation campaign smoke test missing or renamed'
+rg -Fq 'campaigns(4)' \
+    crates/effect-package/tests/effect_interchange_mutation.rs ||
+    fail 'mutation campaign smoke test trial count changed'
 for seed in 0001 0002 0003; do
     rg -q "0x081d_e5c0_0000_$seed" \
         crates/effect-package/tests/effect_interchange_mutation.rs ||
@@ -143,12 +152,15 @@ rg -q 'exact_portable_migration_qualification_matrix' \
     crates/effect-compiler/tests/migration_terminal.rs ||
     fail 'missing exact migration matrix'
 
+# The real per-mode flags and target triples now live in scripts/check-cross-targets.sh (B2): the
+# decorative loop that used to carry these literals in check-effect-interchange-targets.sh has been
+# deleted, and this gate must police the matrix that actually runs, not a copy of its literals.
 for target in x86_64-unknown-linux-gnu aarch64-linux-android aarch64-apple-ios wasm32-unknown-unknown; do
-    rg -q "$target" scripts/check-effect-interchange-targets.sh ||
+    rg -q "$target" scripts/check-cross-targets.sh ||
         fail "target row missing: $target"
 done
 for feature in 'feature=-simd128' 'feature=+simd128'; do
-    rg -Fq -- "$feature" scripts/check-effect-interchange-targets.sh ||
+    rg -Fq -- "$feature" scripts/check-cross-targets.sh ||
         fail "Wasm target feature row missing: $feature"
 done
 rg -Fq '/^Export\[/' scripts/check-effect-interchange-targets.sh ||

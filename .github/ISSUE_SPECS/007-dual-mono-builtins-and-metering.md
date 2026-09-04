@@ -417,7 +417,9 @@ deallocation, lock, log, file I/O, network I/O, and syscall each terminated as r
 the detector path is armed.
 
 PASS: `cargo test -p miso-engine-builtins-compiler --test scale`, release
-`miso-engine-builtins-audit --blocks 1000000`, `trace-builtins-audit.sh 1000000`, and
+`miso-engine-builtins-audit --blocks 1000000`, `trace-builtins-audit.sh target/release/audit`
+(the 1,000,000-call count is fixed inside the binary; the script's sole positional is now
+`[path/to/audit]`), and
 `test-builtins-audit-probes.sh`; focused warning-denied Clippy, fixture/policy checks and mutation
 checks also pass. This is still not a whole-render-plan/swap audit of the sealed graph artifact,
 nor full workspace/target/listening qualification. Benchmark invocation count remains **0**.

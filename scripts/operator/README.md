@@ -14,10 +14,11 @@ for everything above this directory:
 > **Every script under `scripts/` is reachable from a GitHub workflow.**
 
 That rule is mechanically checkable, and it exists because it was previously
-false in a way nobody could see. `scripts/sweep.sh` ran 102 gate rows and was
-invoked by no workflow and by no human — so a crate move silently blinded five
-gates while the suite printed 101/101 PASS, and a rename left a C-ABI evidence
-ledger verifying 0 of its 26 rows. Both were invisible for days.
+false in a way nobody could see. The retired `scripts/sweep.sh` ran 102 gate
+rows and was invoked by no workflow and by no human — so a crate move
+silently blinded five gates while the suite printed 101/101 PASS, and a
+rename left a C-ABI evidence ledger verifying 0 of its 26 rows. Both were
+invisible for days. Every one of those rows now runs from CI instead.
 
 Keeping operator tools inside `scripts/` would make that rule unenforceable,
 because every future audit would have to re-derive which unreachable scripts

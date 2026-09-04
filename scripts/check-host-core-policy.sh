@@ -14,52 +14,85 @@
 #      them would push the C ABI's exports into the browser artifact's frozen export set.
 set -euo pipefail
 
+fail() {
+    printf 'host-core policy failure: %s\n' "$1" >&2
+    exit 1
+}
+
+# `rg` exits 0 on a match, 1 when the pattern is clean, and 2 (or higher) on a search error --
+# most commonly a search root that does not exist. The old `! rg ...` idiom reads both 1 and 2 as
+# "no violation" (S9): a host source directory that silently stops existing (a rename, a fixture
+# missing a mkdir) would read as a clean pass instead of the scan never having run. This mirrors
+# scripts/check-workspace-policy.sh's scan_forbidden.
+scan_forbidden() {
+    local description="$1" pattern="$2"
+    shift 2
+    local paths=("$@")
+    local output rc
+    if output="$(rg -n "$pattern" "${paths[@]}" 2>&1)"; then
+        rc=0
+    else
+        rc=$?
+    fi
+    case "$rc" in
+        0)
+            printf '%s\n' "$output" >&2
+            fail "$description"
+            ;;
+        1)
+            ;;
+        *)
+            printf '%s\n' "$output" >&2
+            fail "$description scan errored (rg exit $rc)"
+            ;;
+    esac
+}
+
 root="${1:-.}"
 facade_manifest="$root/crates/host-core/Cargo.toml"
 facade_source="$root/crates/host-core/src"
-# Hosts still carrying their own copy of the pipeline. Each entry names the issue that removes it;
-# the entry is deleted in the same commit that converts the host, and nothing may be added here.
-pending_conversion=("hosts/host-web") # issue #106
+# Every host under hosts/*/src is scanned; there is no exemption list. host-web was the last
+# holdout (tracked as "pending #106") and already depends on host-core
+# (hosts/host-web/Cargo.toml), so the exemption is dead and removing it only tightens the gate.
 
 host_sources=("$root/crates/capi/src")
-for host in "$root"/hosts/*/src; do
-    [ -d "$host" ] || continue
-    relative="${host#"$root"/}"
-    exempt=""
-    for pending in "${pending_conversion[@]}"; do
-        [ "${relative%/src}" = "$pending" ] && exempt="yes"
-    done
-    [ -n "$exempt" ] || host_sources+=("$host")
+[[ -d "$root/crates/capi/src" ]] || fail "expected host source directory is missing: $root/crates/capi/src"
+
+[[ -d "$root/hosts" ]] || fail "expected hosts/ directory is missing: $root/hosts"
+host_count=0
+for host in "$root"/hosts/*/; do
+    [[ -d "$host" ]] || continue
+    host_count=$((host_count + 1))
+    host="${host%/}"
+    # S9: a missing `src` under a host directory that does exist is a failure, not a silent skip
+    # -- the whole point of this gate is that every host is scanned, so a host quietly losing its
+    # source directory (and thus its coverage) must not read as "nothing to scan here".
+    [[ -d "$host/src" ]] || fail "expected host source directory is missing: $host/src"
+    host_sources+=("$host/src")
 done
+[[ "$host_count" -gt 0 ]] || fail "no host directories found under $root/hosts"
 
 pipeline_entry_points='(^|[^_[:alnum:]])compile_session\(|prepare_native_session_effects\(|prepare_session_builtins\(|compile_with_builtins\(|prepare_graph_source_set\(|into_bound_with_source_set\(|PcmSourceRing::prepare_host_region\('
-! rg -n "$pipeline_entry_points" "${host_sources[@]}" || {
-    printf 'a host calls the compile pipeline directly; use host-core\n' >&2
-    exit 1
-}
+scan_forbidden 'a host calls the compile pipeline directly; use host-core' \
+    "$pipeline_entry_points" "${host_sources[@]}"
 
-! rg -n 'impl +GraphRuntimeProcessor|struct +Identity(Processor|Binding)' "${host_sources[@]}" || {
-    printf 'a host defines a pass-through processor; use GraphNodeBinding::identity\n' >&2
-    exit 1
-}
+scan_forbidden 'a host defines a pass-through processor; use GraphNodeBinding::identity' \
+    'impl +GraphRuntimeProcessor|struct +Identity(Processor|Binding)' "${host_sources[@]}"
 
-! rg -n 'MISOCTL|ReplayEntryRecord|fn +protocol_u(16|32|64)|fn +correlatable_command_header' "${host_sources[@]}" || {
-    printf 'a host hand-decodes the control wire format; use protocol\n' >&2
-    exit 1
-}
+scan_forbidden 'a host hand-decodes the control wire format; use protocol' \
+    'MISOCTL|ReplayEntryRecord|fn +protocol_u(16|32|64)|fn +correlatable_command_header' \
+    "${host_sources[@]}"
 
-! rg -n 'protocol' "$facade_manifest" || {
-    printf 'the host facade must not depend on the control protocol\n' >&2
-    exit 1
-}
+[[ -f "$facade_manifest" ]] || fail "expected host-core manifest is missing: $facade_manifest"
+scan_forbidden 'the host facade must not depend on the control protocol' \
+    'protocol' "$facade_manifest"
 
-! rg -n '^[^/]*no_mangle' "$facade_source" || {
-    printf 'the host facade must export no C symbols; it links into every host cdylib\n' >&2
-    exit 1
-}
+[[ -d "$facade_source" ]] || fail "expected host-core source directory is missing: $facade_source"
+scan_forbidden 'the host facade must export no C symbols; it links into every host cdylib' \
+    '^[^/]*no_mangle' "$facade_source"
 
 grep -Fqx 'crate-type = ["rlib"]' "$facade_manifest" || {
-    printf 'the host facade must be an rlib only\n' >&2
+    printf 'host-core policy failure: the host facade must be an rlib only\n' >&2
     exit 1
 }
 

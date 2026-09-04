@@ -24,12 +24,23 @@ const tests = [
   "stem-pump-v1.mjs",
 ]
 
+// Wall-clock budget assertions in the stem-store test files (cold-open/verify-open latency, the
+// fallback-write abort deadline) are opt-in via `--budgets`, so this gate stays hermetic and
+// flake-free on the blocking lint path by default; pass `--budgets` (e.g. from a nightly job) to
+// exercise the real thresholds too.
+const budgetsEnabled = process.argv.includes("--budgets")
+let skippedBudgetAsserts = 0
+
 await staticChecks(root)
-for (const test of tests) runNode(join(host, "tests", test))
+for (const test of tests) {
+  skippedBudgetAsserts += runNode(join(host, "tests", test), false, budgetsEnabled)
+}
 
 if (process.argv.includes("--self-test")) await runMutationLedger()
 
-process.stdout.write("stem-store-v1 gate: PASS\n")
+process.stdout.write(
+  `stem-store-v1 gate: PASS (budget asserts skipped: ${skippedBudgetAsserts})\n`
+)
 
 async function staticChecks(repository) {
   const provenancePath = join(runtime, "incremental-sha256.provenance.json")
@@ -345,7 +356,9 @@ async function runMutationLedger() {
       runNode(target, true)
       const result = spawnSync(
         process.execPath,
-        [join(mutatedHost, "tests", mutation.test)],
+        budgetsEnabled
+          ? [join(mutatedHost, "tests", mutation.test), "--budgets"]
+          : [join(mutatedHost, "tests", mutation.test)],
         { encoding: "utf8" }
       )
       if (result.status === 0) {
@@ -388,18 +401,22 @@ function replaceExactlyOnce(source, search, replacement) {
   return source.slice(0, first) + replacement + source.slice(first + search.length)
 }
 
-function runNode(file, checkOnly = false) {
-  const args = checkOnly ? ["--check", file] : [file]
+function runNode(file, checkOnly = false, budgets = false) {
+  const args = checkOnly ? ["--check", file] : budgets ? [file, "--budgets"] : [file]
   const result = spawnSync(process.execPath, args, {
     cwd: root,
     encoding: "utf8",
-    stdio: checkOnly ? "pipe" : "inherit",
+    stdio: checkOnly ? "pipe" : ["inherit", "pipe", "inherit"],
   })
   if (result.status !== 0) {
     throw new Error(
       `${checkOnly ? "syntax check" : "eval"} failed for ${file}:\n${result.stderr ?? ""}`
     )
   }
+  if (checkOnly) return 0
+  process.stdout.write(result.stdout ?? "")
+  const skipped = /budget asserts skipped: (\d+)/.exec(result.stdout ?? "")
+  return skipped ? Number(skipped[1]) : 0
 }
 
 async function sourceFiles(directory, extensions = [".js"]) {

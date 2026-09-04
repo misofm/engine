@@ -147,6 +147,22 @@ while IFS= read -r manifest; do
             ;;
     esac
 
+    # Issue #356/#359: the in-repository FLAC delivery stack (and its migration tooling) was
+    # retired; PCM is this repository's output and delivery codecs live outside it. This was
+    # `scripts/check-delivery-codec-boundary.py`, folded in here because #358's claim ("no
+    # retired delivery-codec identity in the live workspace") is a name-absence claim over
+    # exactly the same manifests, lockfile and tree this loop already walks.
+    case "$package_name" in
+        flac-decoder | stem-publisher | catalog-migrate | flacenc | symphonia)
+            fail "$manifest package name is a retired delivery-codec identity: $package_name"
+            ;;
+    esac
+    # N15: a directory-name case here is dead code -- by this point in the loop the earlier
+    # `[[ "$package_directory" == "$package_name" ]]` check (above) has already exited unless the
+    # two are equal, so any input that could trip a directory-name match here already tripped the
+    # package-name case immediately above it. The bare-directory-stub scan below (no Cargo.toml at
+    # all) is what actually catches a retired directory name.
+
     expected_crate_name="${package_name//-/_}"
 
     lib_name="$(toml_name lib "$manifest")"
@@ -166,6 +182,73 @@ done < <(find crates hosts tools sidecars -name Cargo.toml -type f | sort)
 scan_forbidden "hardware ISA Cargo features are forbidden" \
     '^[[:space:]]*(simd128|neon|avx2|fma)[[:space:]]*=' Cargo.toml \
     crates hosts tools sidecars
+
+# S8: every tracked (or freshly added, untracked-but-not-ignored) path in the tree, used below to
+# find every Cargo.toml regardless of location -- not the prior six hard-coded roots, which missed
+# a nested manifest under e.g. sdk/. `git ls-files` is the tree's own ground truth for "what exists
+# here"; the `find` fallback keeps this working against a synthetic (non-git) fixture tree, exactly
+# as `scripts/check-env-vocabulary.sh`'s `sources()` does.
+tracked_paths() {
+    if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        git ls-files -z --cached --others --exclude-standard
+    else
+        find . -type f -not -path './.git/*' -not -path './target/*' -print0
+    fi | tr '\0' '\n' | sed 's|^\./||'
+}
+
+# Issue #356/#359: a bare retired-directory stub (no Cargo.toml, so invisible to the manifest
+# loop above) is still a regression -- these five names carried the retired FLAC delivery stack
+# and its migration tooling. A whole-tree `find -type d` (N16), not `-mindepth 1 -maxdepth 2`
+# under four hard-coded roots: it reaches the repo root, sdk/, and any depth, and -- unlike a scan
+# derived from `git ls-files`/tracked file paths -- it also catches a directory with nothing
+# tracked inside it yet, which is exactly the shape of a freshly-created leftover stub.
+while IFS= read -r retired_directory; do
+    [[ -z "$retired_directory" ]] && continue
+    fail "retired delivery-codec directory remains: ${retired_directory#./}"
+done < <(find . \( -path './.git' -o -path './target' \) -prune -o -type d \( \
+    -name flac-decoder -o -name stem-publisher -o -name catalog-migrate \
+    -o -name flacenc -o -name symphonia \) -print 2>/dev/null)
+
+# Every Cargo.toml in the tree (S8: every tracked path named `Cargo.toml`, at any depth,
+# excluding nothing -- not the prior six hard-coded roots) and the lockfile: a retired identity
+# can also appear as a dependency key, a `package = "..."` rename, or (in Cargo.lock) a resolved
+# package entry, none of which the manifest loop above sees.
+retired_delivery_codec_pattern='\b(flac-decoder|stem-publisher|catalog-migrate|flacenc|symphonia)\b'
+
+# N17: strip TOML comments before matching, line by line, tracking whether each character is
+# inside a quoted string -- a retired name's mere mention in prose ("# we deliberately do not
+# depend on symphonia") must not trip this gate, while a real dependency/rename entry (which is
+# never itself preceded by an unquoted '#' on its own line) still does. This is intentionally
+# line-oriented: Cargo.toml does not use multi-line strings for dependency names or package
+# identifiers, which is everything this scan cares about.
+strip_toml_comments() {
+    awk '
+        {
+            in_string = 0
+            out = ""
+            for (i = 1; i <= length($0); i++) {
+                c = substr($0, i, 1)
+                if (c == "\"") { in_string = !in_string }
+                if (c == "#" && !in_string) { break }
+                out = out c
+            }
+            print out
+        }
+    '
+}
+
+while IFS= read -r manifest_path; do
+    [[ -z "$manifest_path" ]] && continue
+    [[ -f "$manifest_path" ]] || continue
+    if match="$(strip_toml_comments <"$manifest_path" | rg -n "$retired_delivery_codec_pattern")"; then
+        printf '%s\n' "$match" >&2
+        fail "retired delivery-codec Cargo identity is forbidden: $manifest_path"
+    fi
+done < <(tracked_paths | awk -F/ '$NF == "Cargo.toml"' | LC_ALL=C sort)
+
+scan_forbidden "retired delivery-codec Cargo identity is forbidden in the lockfile" \
+    "$retired_delivery_codec_pattern" 'Cargo.lock' \
+    Cargo.lock
 
 scan_forbidden "compiled track-capacity identifiers are forbidden" \
     '\b(MAX_TRACKS|MAX_TRACK_COUNT|DEFAULT_MAX_TRACKS|TRACK_LIMIT)\b' '*.rs' \

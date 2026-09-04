@@ -1,18 +1,40 @@
 #!/usr/bin/env bash
+# Usage: trace-builtins-audit.sh [path/to/audit]
 set -euo pipefail
 
 workspace_dir=$(cd "$(dirname "$0")/.." && pwd)
-binary="$workspace_dir/target/release/audit"
 trace_root="$workspace_dir/target/issue7/strace"
 validator="$workspace_dir/scripts/validate-realtime-trace.sh"
 
-[[ "$#" -eq 0 ]] || {
-  printf 'trace-builtins-audit.sh accepts no arguments\n' >&2
+[[ "$#" -le 1 ]] || {
+  printf 'usage: trace-builtins-audit.sh [path/to/audit]\n' >&2
   exit 2
 }
 
-cargo build --quiet --locked --release --manifest-path "$workspace_dir/Cargo.toml" \
-  -p audit
+# S3: this script never `cd`s, so a relative path already resolves against the caller's cwd; still
+# normalize to absolute for consistency with the scripts in this family that do `cd`.
+binary="${1:-}"
+if [[ -n "$binary" ]]; then
+    case "$binary" in
+        /*) : ;;
+        *) binary="$(realpath -m -- "$binary")" ;;
+    esac
+    # S1/S2: an explicit path must be an existing executable file, never a directory or a missing
+    # path -- and being explicit-but-missing is a hard error; only the defaulted path may trigger
+    # a build.
+    [[ -f "$binary" && -x "$binary" ]] || {
+        printf 'trace-builtins-audit.sh: explicit binary path must be an existing executable file: %s\n' \
+            "$binary" >&2
+        exit 1
+    }
+else
+    binary="$workspace_dir/target/release/audit"
+fi
+
+if [[ ! -x "$binary" ]]; then
+  cargo build --quiet --locked --release --manifest-path "$workspace_dir/Cargo.toml" \
+    -p audit
+fi
 command -v strace >/dev/null 2>&1 || {
   printf 'strace is required for the builtins realtime syscall gate\n' >&2
   exit 1
