@@ -1,6 +1,0 @@
-schema_version	1
-name	identity	channels	bit_depth	frames	pcm_bytes
-pcm16-mono-boundaries	sha256:fcb43b1422c229cd71924caa31f362c27b83aae62cebcb96b52fc1537c2d5712	1	16	4096	8192
-pcm16-stereo-boundaries	sha256:1a62c3a4b637f379595ed514cabc9a12ab7864c2c0672c92d793ddcd0835ca36	2	16	4096	16384
-pcm24-mono-boundaries	sha256:7e12cf347f64eaacb81bdc61a3ae3e66c914261899b477551190c34252e33032	1	24	4096	12288
-pcm24-stereo-boundaries	sha256:f5868e05edf12c6032419ce0d7d786c9dc781989ac69ed17e8a4a374341f92f3	2	24	4096	24576

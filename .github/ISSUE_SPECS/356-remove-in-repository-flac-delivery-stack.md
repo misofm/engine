@@ -150,3 +150,17 @@ engine ownership boundary.
 Sol xhigh: APPROVE. Terra inventory independently confirmed the current npm
 tarball embeds the decoder and that deletion must cover its workspace, SDK,
 enginectl, browser, CI, fixture, documentation, and release dependencies.
+
+## Attempt 1 workspace-deletion checkpoint (Terra, pending root checkpoint)
+
+- Approved deletion removed the FLAC sidecar, publisher, catalog migration, and
+  FLAC fixture directories. Cargo workspace membership and dependencies for
+  those products plus `flacenc` and `symphonia` were removed, and `Cargo.lock`
+  was mechanically regenerated. `sidecars/README.md` now states the delivery
+  codec boundary.
+- `cargo metadata --locked --no-deps` and the Cargo/lock/metadata inventory
+  absence check passed. The focused `cargo test --locked -p stem-hasher` could
+  not start because this sandbox could not resolve `static.crates.io` while
+  downloading `cpufeatures 0.3.1`; no test result is claimed. Per the one-WIP
+  rule, SDK/CLI/browser/release deletion is not layered onto this uncommitted,
+  not-yet-green workspace tranche.

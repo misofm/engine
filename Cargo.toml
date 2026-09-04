@@ -38,8 +38,6 @@ members = [
     "tools/audit",
     "tools/native-pcm-runner",
     "tools/stem-hasher",
-    "tools/stem-publisher",
-    "tools/catalog-migrate",
     "tools/wasm-gate-corpus",
     "tools/wasm-gate-guest",
     "tools/wasm-console-guest",
@@ -47,7 +45,6 @@ members = [
     "tools/parameter-metadata",
     "tools/session-validator",
     "tools/wasm-gates",
-    "sidecars/flac-decoder",
 ]
 resolver = "3"
 
@@ -65,7 +62,6 @@ math = { path = "crates/math", version = "0.1.0" }
 target-smoke = { path = "crates/target-smoke", version = "0.1.0" }
 dsp-reference = { path = "crates/dsp-reference", version = "0.1.0" }
 conformance = { path = "crates/conformance", version = "0.1.0" }
-flac-decoder = { path = "sidecars/flac-decoder", version = "0.1.0" }
 session = { path = "crates/session", version = "0.1.0" }
 source = { path = "crates/source", version = "0.1.0" }
 protocol = { path = "crates/protocol", version = "0.1.0" }
@@ -95,9 +91,7 @@ console-workload = { path = "tools/console-workload", version = "0.1.0" }
 wasm-gate-corpus = { path = "tools/wasm-gate-corpus", version = "0.1.0" }
 wasm-gate-guest = { path = "tools/wasm-gate-guest", version = "0.1.0" }
 stem-hasher = { path = "tools/stem-hasher", version = "0.1.0" }
-flacenc = { version = "=0.5.1", default-features = false }
 sha2 = { version = "=0.11.0", default-features = false }
-symphonia = { version = "=0.6.1", default-features = false, features = ["flac"] }
 wide = { version = "=1.6.1", default-features = false }
 
 [workspace.lints.rust]
