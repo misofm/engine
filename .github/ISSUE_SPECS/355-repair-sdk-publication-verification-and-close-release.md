@@ -36,6 +36,8 @@ or ambiguity-recovery gates.
 
 ## Allowed paths
 
+- `.github/ISSUE_SPECS/354-publish-engine-sdk-0-1-0.md` (successor and final
+  closure evidence only)
 - `.github/ISSUE_SPECS/355-repair-sdk-publication-verification-and-close-release.md`
 - `.github/workflows/npm-publish.yml`
 
@@ -74,4 +76,36 @@ If registry bytes differ, stop. If a published package is defective, deprecate
 
 ## Brief and evidence record
 
-Pending Sol brief.
+Sol found this a legitimate bounded successor and required the following frozen
+contract before approval. npm 11.12.1 provenance verification must require:
+
+- no target package in `invalid` or `missing` and exactly one `verified` entry
+  named `@misofm/engine@0.1.0`;
+- exactly one `verified[0].attestationBundles` entry whose predicate type is
+  `https://slsa.dev/provenance/v1`;
+- DSSE payload type `application/vnd.in-toto+json`, decoded statement type
+  `https://in-toto.io/Statement/v1`, exact subject PURL
+  `pkg:npm/%40misofm/engine@0.1.0`, and subject SHA-512 equal to the qualified
+  tarball's hexadecimal SHA-512; and
+- exact repository `https://github.com/misofm/engine`, workflow path
+  `.github/workflows/npm-publish.yml`, ref `refs/heads/main`, and exactly one
+  matching resolved dependency whose `gitCommit` is the explicitly exported
+  `expected_sha`.
+
+Successful `npm audit signatures` supplies cryptographic envelope verification;
+the parser fail-closes on identity and statement contents.
+
+Post-publication closure must prove the selected run is a successful
+`workflow_dispatch` of this exact workflow and expected publish/verify job. A
+publish run's `head_sha` must equal the release SHA. The exact named, unexpired
+artifact must belong to that run. Closure rechecks its tarball digests, registry
+integrity/access/latest, and provenance before creating references.
+
+Repository closure begins on clean local `main` synchronized with `origin/main`.
+It refuses conflicting references, verifies the remote peeled tag and the
+release's tag/title/non-draft/non-prerelease/target, appends PASS evidence to
+#355 plus a successor-closure note to #354, pushes and proves that exact evidence
+commit is in `origin/main`, refreshes both GitHub issue bodies from the local
+specs, then closes and rereads both issues. Configure npm trusted publishing for
+this repository/workflow and remove/revoke the temporary token before final
+issue closure.
