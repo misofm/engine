@@ -232,3 +232,11 @@ This reconciliation is approved for the final Sol revision, conditional on root 
 The corrected eq+comp isolate percentages and ragged floor now calculate correctly; retrospective repricing is labeled and the mono/select debt wording is corrected. Fixed core throughput remains unchanged. The shared expression derivation is now recorded. The operator preflight's `scripts/operator/../..` root is the correct repository path, and the namespace addition is minimal. No benchmark has run. Existing preflight evidence names old HEAD57a while exercising the working edits; root should rerun the non-timed preflight against the final committed head once the proof is fixed, so the final candidate identity is exact.
 
 No cargo tests, benchmark, source edits, GitHub actions or spawned agents were used by this review. Full workspace is root-owned and pending; a workspace PASS cannot remedy the two evidence defects above. Actual PR still requires Astra review before merge.
+
+## Final local gate evidence (2026-09-04)
+
+Astra attempt-3 checkpoint PASS at `6d64f11eded121761b5e835e7f98ce41dda6b892`; full historical-schema record/aggregate proof and its assertion self-mutations pass. Current console validator suite, 30 bench tests, formatting, realtime policy and workspace clippy pass. Candidate workspace: 1546 passed, 0 failed, 24 ignored versus baseline 1545/0/24; +1 floor test.
+
+The final committed-head preflight passed with zero workload launches. The sole runner invocation passed with one warmup, two measured rounds and 46 records accepted by the CURRENT full record/aggregate validators. Disposition is controlled (CPU63, quiet sibling, loadavg0.32); cycle fields honestly absent because hardware counters were unavailable. Historical measured cycle-bearing repricing is proven separately under its recorded full schema, with only the three authorized floor fields changed. Durable output, preflight metadata, provenance and limits are in `artifacts/issue368-floor-recount/`. No rendered arithmetic or runtime speedup claim changed.
+
+Actual PR Astra review and required CI remain pending before merge.

@@ -27,3 +27,13 @@ validator pair and library accept the originals, and then changes only the compr
 inventory constants in a temporary library copy. Both full validators accept the repriced copy.
 Explicit status checks prove stale floors and an unrelated measured-field mutation reject, valid
 records make each negative assertion fail, and broken jq programs report execution failure.
+
+## Final qualification
+
+Astra passed attempt 3 at `6d64f11eded121761b5e835e7f98ce41dda6b892`. Committed-head operator preflight passed with zero workload launches, including workspace all-target/all-feature clippy. Formatting, realtime policy and diff checks passed. Workspace tests at implementation `5a156c46` passed 1546/0/24 (passed/failed/ignored), versus baseline `87926988` 1545/0/24: one new floor test. Later changes touch only evidence and its shell verifier.
+
+The sole `--issue368-floor-recount` runner invocation at `6d64f11e` passed: one warmup, two measured rounds, 46 accepted records, raw and accepted bytes identical. Current full record and aggregate validators passed in the runner. CPU 63 was pinned with its sibling quiet; load average was 0.32, within the 0.50 ceiling, so the actual disposition is controlled even though the operator permitted an uncontrolled fallback. Hardware cycle counters were unavailable; the fresh records omit the complete optional cycle/floor group. The historical full-schema proof separately validates measured cycle-bearing repricing. No current cycle values or runtime speedup are claimed.
+
+The preflight hashes its ordinary release binary; the runner explicitly freezes opt-level=3, LTO=false and codegen-units=16 before building and hashes that binary separately. Both identities are retained in preflight.json and the disposition; they are not asserted equal. No workload, source, validator or inventory changed between preflight and timing.
+
+See console-benchmark.disposition.json for exact candidate/binary/artifact identities. The single run is consumed and must not be repeated.
