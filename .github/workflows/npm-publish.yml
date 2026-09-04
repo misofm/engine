@@ -63,7 +63,6 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
-          registry-url: https://registry.npmjs.org
           cache: npm
           cache-dependency-path: sdk/package-lock.json
 
@@ -111,7 +110,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          [[ "$QUALIFICATION_RUN_ID" =~ ^[0-9]+$ ]] || { echo "publish requires qualification_run_id" >&2; exit 1; }
+          [[ "$QUALIFICATION_RUN_ID" =~ ^[0-9]+$ ]] || { echo "publish and verify require qualification_run_id" >&2; exit 1; }
           qualification_run=$(mktemp)
           qualification_jobs=$(mktemp)
           qualification_artifacts=$(mktemp)
@@ -127,7 +126,7 @@ jobs:
           const expectedArtifact = `engine-sdk-qualify-${process.env.EXPECTED_SHA}`;
           const qualificationJobs = Array.isArray(jobs.jobs) ? jobs.jobs.filter((job) => job.name === "qualify @misofm/engine 0.1.0" && job.conclusion === "success") : [];
           const namedArtifacts = Array.isArray(artifacts.artifacts) ? artifacts.artifacts.filter((artifact) => artifact.name === expectedArtifact && artifact.expired === false) : [];
-          if (run.conclusion !== "success" || run.event !== "workflow_dispatch" || run.head_sha !== process.env.EXPECTED_SHA || run.name !== "Publish @misofm/engine" || run.path !== ".github/workflows/npm-publish.yml@main" || qualificationJobs.length !== 1 || namedArtifacts.length !== 1) {
+          if (run.conclusion !== "success" || run.event !== "workflow_dispatch" || run.head_sha !== process.env.EXPECTED_SHA || run.name !== "Publish @misofm/engine" || run.path !== ".github/workflows/npm-publish.yml" || qualificationJobs.length !== 1 || namedArtifacts.length !== 1) {
             throw new Error("qualification run is not a successful manual npm-publish run for expected_sha");
           }
           NODE
