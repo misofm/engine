@@ -68,3 +68,52 @@ identity: applying only the host-core `Cargo.toml`/`Cargo.lock` change to main b
 source change is refreshed from `6dcd9ced…61e5` to `d02f6fbb…f238`.
 
 Final command outputs and commit/PR identity are recorded in the pull request.
+
+
+## Current-head Astra review and recovery brief (2026-09-04)
+
+# Astra current-head review: #375 / #369 (IO-4)
+
+**VERDICT: FAIL at `da1e4cc0d3ca3c2f206caf86dc91a70f0baf73ed`.** This is a current-head review, not inheritance of the older pre-rebase approvals. One bounded lineage/integration correction is needed; the reviewed provider implementation itself has no new blocking finding from this review.
+
+## Concrete blocker
+
+The rebase refreshed the shipped source pin, browser qualification results and generated matrix to `635b3e08247b6161d0c24ca178afeeb5895a236c548a930ffa4f8f2a43fcb72f`, but `.github/workflows/npm-publish.yml:33` still declares `EXPECTED_WORKLET_SHA256` as `d02f6fbbdf00036479c31933647bb394854244bdd12428264f9392334164f238`. That workflow's own `Assert the worklet sha256 pin matches its source-of-truth file` step (lines 69–78) deterministically fails. Independently compared the exact values: unequal. Required qualification was green at this head, but it does not prove this publication assertion.
+
+`docs/C_ABI_V1_QUALIFICATION.md:114–116` likewise describes d02f6fbb as the refreshed reproducible current identity, and the local issue decision record leaves that older final identity unqualified. Complete the lineage update, identifying earlier hashes as historical where retained. Do not merely update the three generated merge-conflict files and repeat this partial refresh.
+
+Separately, GitHub reports `mergeable: CONFLICTING`, `mergeStateStatus: DIRTY`. Root's merge-tree proof identifies exactly three generated conflicts against current main: BROWSER_DEPLOYMENT_MATRIX.md, qualification/results.json, and the worklet artifact.sha256. Old-head CI cannot substitute for current-base integration qualification.
+
+## Independently reviewed evidence
+
+Read current issue/PR bodies and previous adversarial reviews, the cumulative implementation, provider mapping/resource code, catalog publication in CAPI transactions, diagnostic/sample bridge, feature edges and mutation gates. Catalog construction uses the accepted EffectPreparedEntry descriptor and initial_values authority before graph consumption; handle/channel/rack mappings, initial-state snapshots, candidate replacement, minimum three counter slots and active/candidate accounting match the local reconciled contract. The transport snapshot is endpoint-local as explicitly recorded; this is not a render automation-drain implementation. Existing initial-state and effect-only catalog limitations are disclosed, not hidden by this verdict.
+
+Current-head independent reruns:
+
+- `cargo test --locked -p capi`: 35 passed (31 unit + 4 lifecycle), 0 failed.
+- `cargo test --locked -p host-core --features control-provider`: 72 passed, 0 failed, 2 ignored.
+- host-core policy and its mutation suite: PASS.
+- realtime policy: PASS (7 marked regions at this old head).
+- ABI layout self-test: PASS (17 mutations).
+- `git diff --check origin/main...HEAD`: PASS.
+- Inspected host-web dependency tree and optional/non-default protocol edge; no production host-web protocol edge introduced.
+
+Logs: `/tmp/astra-369-capi.log`, `/tmp/astra-369-host-core.log`, `/tmp/astra-369-abi.log`, `/tmp/astra-369-host-web-tree.log`. Existing exact-head qualification run 33892033679 is green, including browser checks, but this does not cover the mismatch above. No source edits, publication, GitHub mutation, benchmark or subagents were used by this reviewer.
+
+## Executable minimal recovery brief — Luna
+
+Authority: current user explicitly authorizes resolving blocked work; existing claimed labels do not prevent this coordinated recovery. Root preserves original worktree/history and owns Git/GitHub mutations. This is a bounded integration/lineage repair, not a new provider implementation attempt or a restart of the prior design.
+
+1. Root creates an isolated recovery worktree/branch from exact PR head da1e4cc0. Merge the synchronized default branch normally; no rebase or force-push. Use the latest explicit main commit (root's current proof used 0e248bb0). Preserve all source changes from both histories. Resolve only the three generated conflicts initially with main's versions, documenting that they are placeholders pending regeneration. Root commits the coherent compiling merge checkpoint before further implementation is layered on it. Any additional semantic conflict stops this brief for a bounded amendment rather than speculative conflict resolution.
+
+2. Synchronize the local #369 spec and GitHub issue with this brief, current model roles and actual recovery baseline. Preserve prior evidence as historical. No changes to accepted provider behavior, protocol identities, realtime rules, DSP, dependencies, target support or test gates. Allowed recovery outputs: the three generated conflict paths; `.github/workflows/npm-publish.yml` expected worklet digest only; `docs/C_ABI_V1_QUALIFICATION.md`; the #369 evidence/spec and necessary generated lineage strictly required by the existing current-main build/qualification scripts. Report any unexpectedly broader regeneration before accepting it.
+
+3. On the merged candidate, use the existing current build script with a fresh EMPTY output directory: `MISO_ENGINE_WEB_AUDIOWORKLET_REPIN=1 bash scripts/build-web-audioworklet.sh <empty-dir>`. Use the produced actual SHA-256 as the one current identity, synchronize the npm workflow expectation and current C-ABI qualification prose. Root commits the coherent candidate/pin checkpoint so browser qualification can name an immutable candidate. Rebuild without repin into a second fresh output directory and require exact digest reproducibility; no artificial pin edits or historical hash substitution.
+
+4. Run the existing qualification commands in `hosts/host-web/qualification` using that artifact directory and immutable candidate: `npm run qualify -- --artifacts <dir> --browser all --self-test-mutations --record-matrix --candidate-commit <candidate>`; then separate `--browser chromium|firefox|webkit --check-matrix --self-test-mutations` invocations as the established pipeline requires. Regenerate the matrix from the actual results. The candidate source identity must match the artifact; final evidence commit may differ because generated qualification results refer to the already-built candidate. No publishing npm workflow invocation is required for this repair.
+
+5. Required proportional gates on the merged candidate: capi tests and explicit resource_lifecycle suite; host-core control-provider tests; host-core/protocol/realtime policies and changed-script mutation suites; C ABI native linkage; ABI-layout self-test and generated-layout validation using the existing emitter; fmt, focused all-feature clippy; current AudioWorklet static/resource and all-three-browser checks; complete workspace tests compared against the chosen current-main baseline, with only the established five IO-4 tests as expected delta unless current main independently changed counts. Run the npm workflow's EXACT read-only digest equality assertion locally so the current blocker is directly proved closed. No benchmark or optimization pass.
+
+6. Pause at a green coherent checkpoint and send root exact paths and logs. Root commits/pushes normally to the existing PR branch, refreshes PR #375's complete lineage/Before-after/Gates/Skipped sections, and requests Astra review at the final pushed head. Required qualification must pass again against current integration; the old green run is historical evidence only. Merge/close #369/post #349 only after exact-head Astra PASS and required CI. If artifact tooling reveals a new unrelated defect after one bounded correction, preserve its evidence and separate the tooling issue; do not let this become another broad qualification framework project.
+
+Recovery worktree: `/home/bl/misofm/engine-369-recovery`, branch `codex/369-recovery`, starting PR head `da1e4cc0d3ca3c2f206caf86dc91a70f0baf73ed`. Integration baseline: `0e248bb07cfbf7dd136ec48649ec61ee9171d15b`. Root owns commits/pushes, Luna receives the bounded recovery implementation, Astra reviews the resulting PR; Sol is the retry if Luna fails. This section supersedes older conflicting model/checkout instructions.
