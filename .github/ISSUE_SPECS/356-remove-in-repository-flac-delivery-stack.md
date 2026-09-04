@@ -112,7 +112,8 @@ are the current ruling.
 
 1. Removed code and fixture directories no longer exist.
 2. Cargo metadata contains no `flac-decoder`, `stem-publisher`,
-   `catalog-migrate`, `flacenc`, or `symphonia`; `Cargo.lock` is regenerated.
+   `catalog-migrate`, `flacenc`, or `symphonia`; the reconciled `Cargo.lock`
+   changes from `2fbbf66f` only by deleting the retired dependency graph.
 3. Workspace policy/mutations and proportional workspace tests pass;
    `stem-hasher` canonical PCM vectors/mutations remain green.
 4. Request-mode `enginectl` preserves help, canonical JSON, receipt, failure,
@@ -151,16 +152,44 @@ Sol xhigh: APPROVE. Terra inventory independently confirmed the current npm
 tarball embeds the decoder and that deletion must cover its workspace, SDK,
 enginectl, browser, CI, fixture, documentation, and release dependencies.
 
-## Attempt 1 workspace-deletion checkpoint (Terra, pending root checkpoint)
+## Attempt 1 workspace-deletion checkpoint (Terra, root checkpoints complete)
 
 - Approved deletion removed the FLAC sidecar, publisher, catalog migration, and
   FLAC fixture directories. Cargo workspace membership and dependencies for
-  those products plus `flacenc` and `symphonia` were removed, and `Cargo.lock`
-  was mechanically regenerated. `sidecars/README.md` now states the delivery
+  those products plus `flacenc` and `symphonia` were removed. The initial
+  `cargo generate-lockfile` checkpoint also upgraded unrelated live
+  dependencies and changed the sealed Engine Wasm; corrective checkpoint
+  `0568f1e5` restored the prior resolution and let Cargo reconcile only the
+  removed graph. The cumulative lock diff from `2fbbf66f` is exactly 0
+  additions and 173 deletions. `sidecars/README.md` now states the delivery
   codec boundary.
-- `cargo metadata --locked --no-deps` and the Cargo/lock/metadata inventory
-  absence check passed. The focused `cargo test --locked -p stem-hasher` could
-  not start because this sandbox could not resolve `static.crates.io` while
-  downloading `cpufeatures 0.3.1`; no test result is claimed. Per the one-WIP
-  rule, SDK/CLI/browser/release deletion is not layered onto this uncommitted,
-  not-yet-green workspace tranche.
+- Locked Cargo metadata and inventory checks pass, `cargo test --locked -p
+  stem-hasher` passes all 11 library/conformance tests, and the Engine-only
+  AudioWorklet rebuild retains the frozen digest. No dependency or Engine
+  artifact pin changed.
+
+## Attempt 1 SDK/package checkpoint (Terra, resolved lockfile causality)
+
+- Removed SDK decoder asset keys, decoder staging, the `cli/stems.ts` importer,
+  and the `enginectl` stems/session-id/quantum-flags path. The package builder
+  accepts only one Engine artifact directory; focused request-mode CLI tests now
+  assert `--stems` is an unknown usage flag that creates no output, and archive
+  smoke checks reject any decoder/stems payload. SDK type and single-directory
+  builder-contract gates pass.
+- The initial Engine-only build observed
+  `4f1d6ce6e6408df1ca6fb8b16947e8f51b7f78c97f20c2c9226cb9716f416f1f`,
+  rather than the frozen AudioWorklet digest
+  `6dcd9ced2daeb886843a764bcc6abc0b4f1b2c7a50af1ed91151a5ab366461e5`.
+  Root resolved this without a repin by restoring the prior lockfile and using
+  normal `cargo metadata` to remove only the retired FLAC graph while preserving
+  the active resolved versions. Against `2fbbf66f`, the cumulative lock diff is
+  0 additions and 173 removals: surviving entries are byte-identical.
+  `cargo generate-lockfile`, dependency upgrades, and artifact repinning remain
+  out of scope; later Cargo gates use `--locked`. A subsequent Engine-only
+  build matches the frozen digest exactly; no artifact pin changed.
+- Focused completion gates passed: `build-web-audioworklet.sh` matched the
+  frozen digest; generated and TypeScript checks passed; the 133-pass SDK
+  headless/public suite retained its Engine-Wasm mutation refusal; the explicit
+  one-directory builder-contract and `enginectl --stems`/no-output negatives
+  passed; and `sdk-package.sh check` packed one archive whose extracted smoke
+  test imported every public entry and rejected decoder/stems payloads.

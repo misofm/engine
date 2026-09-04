@@ -16,29 +16,16 @@ const here = dirname(fileURLToPath(import.meta.url));
 const sdkRoot = resolve(here, "..");
 const repoRoot = resolve(sdkRoot, "..");
 
-if (process.argv.length !== 4) {
-  throw new Error("usage: node sdk/codegen/stage-package.mjs ENGINE_ARTIFACT_DIRECTORY FLAC_ARTIFACT_DIRECTORY");
+if (process.argv.length !== 3) {
+  throw new Error("usage: node sdk/codegen/stage-package.mjs ENGINE_ARTIFACT_DIRECTORY");
 }
 const source = resolve(process.argv[2]);
-const flacSource = resolve(process.argv[3]);
 const destination = resolve(sdkRoot, "dist", "assets");
 const expected = [...PROVENANCE.artifacts];
 const actual = (await readdir(source)).sort();
 if (JSON.stringify(actual) !== JSON.stringify([...expected].sort())) {
   throw new Error(
     `artifact closure differs from generated provenance\nexpected=${expected.join(",")}\nactual=${actual.join(",")}`,
-  );
-}
-const flacExpected = [
-  "decoder-artifact.sha256",
-  "flac-decoder.d.ts",
-  "flac-decoder.js",
-  "flac-decoder.wasm",
-];
-const flacActual = (await readdir(flacSource)).sort();
-if (JSON.stringify(flacActual) !== JSON.stringify(flacExpected)) {
-  throw new Error(
-    `FLAC artifact closure differs\nexpected=${flacExpected.join(",")}\nactual=${flacActual.join(",")}`,
   );
 }
 
@@ -52,14 +39,6 @@ for (const name of expected) {
     sha256: createHash("sha256").update(bytes).digest("hex"),
   };
   await copyFile(resolve(source, name), resolve(destination, name));
-}
-for (const name of flacExpected) {
-  const bytes = await readFile(resolve(flacSource, name));
-  artifacts[name] = {
-    bytes: bytes.byteLength,
-    sha256: createHash("sha256").update(bytes).digest("hex"),
-  };
-  await copyFile(resolve(flacSource, name), resolve(destination, name));
 }
 
 const manifest = {
@@ -82,4 +61,4 @@ await copyFile(
   resolve(sdkRoot, "dist", "browser", "shipped-host.d.ts"),
 );
 await copyFile(resolve(repoRoot, "LICENSE"), resolve(sdkRoot, "dist", "LICENSE"));
-console.log(`staged ${expected.length} Engine V1 artifacts, ${flacExpected.length} FLAC decoder artifacts, and package manifest`);
+console.log(`staged ${expected.length} Engine V1 artifacts and package manifest`);

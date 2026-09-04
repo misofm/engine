@@ -18,7 +18,6 @@ printf '%s\n' "$*" >>"$(dirname "$0")/cargo.log"
 if [[ $1 == build ]]; then
   case " $* " in
     *" -p host-web "*) artifact=host_web ;;
-    *" -p flac-decoder "*) artifact=flac_decoder ;;
     *) echo "unexpected cargo build invocation" >&2; exit 1 ;;
   esac
   output="$CARGO_TARGET_DIR/wasm32-unknown-unknown/release/$artifact.wasm"
@@ -41,7 +40,6 @@ cat >"$mock_bin/sha256sum" <<EOF
 set -euo pipefail
 case "\$1" in
   */host_web.wasm) printf '%s  %s\\n' "$(tr -d '\n' <"$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256")" "\$1" ;;
-  */flac_decoder.wasm) printf '%s  %s\\n' "$(tr -d '\n' <"$repo_root/sidecars/flac-decoder/decoder-artifact.sha256")" "\$1" ;;
   *) echo "unexpected sha256sum input" >&2; exit 1 ;;
 esac
 EOF
@@ -120,13 +118,6 @@ check_builder() {
         "$output/miso-engine-v1-audio-worklet-host.d.ts"
       cmp -s <(printf 'parameter metadata fixture\n') "$output/parameter-metadata.json"
       ;;
-    build-flac-decoder.sh)
-      cmp -s <(printf 'flac_decoder fixture\n') "$output/flac-decoder.wasm"
-      cmp -s "$repo_root/sidecars/flac-decoder/flac-decoder.js" "$output/flac-decoder.js"
-      cmp -s "$repo_root/sidecars/flac-decoder/flac-decoder.d.ts" "$output/flac-decoder.d.ts"
-      cmp -s "$repo_root/sidecars/flac-decoder/decoder-artifact.sha256" \
-        "$output/decoder-artifact.sha256"
-      ;;
   esac
 
   local non_empty="$scratch/$prefix-non-empty"
@@ -164,5 +155,12 @@ check_builder() {
 }
 
 check_builder build-web-audioworklet.sh web
-check_builder build-flac-decoder.sh flac
-echo "SDK artifact builder output-directory contract passed"
+if bash "$repo_root/scripts/sdk-package.sh" build first second >/dev/null 2>&1; then
+  echo "sdk package builder accepted a retired second codec artifact directory" >&2
+  exit 1
+fi
+if node "$repo_root/sdk/codegen/stage-package.mjs" first second >/dev/null 2>&1; then
+  echo "package staging accepted a retired second codec artifact directory" >&2
+  exit 1
+fi
+echo "SDK artifact builder output-directory and single-directory contract passed"

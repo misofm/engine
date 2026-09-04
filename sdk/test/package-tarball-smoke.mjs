@@ -2,7 +2,7 @@
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { access, copyFile, mkdir, readFile, readdir, symlink, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, readdir, symlink, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import ts from "typescript";
@@ -51,10 +51,7 @@ for (const assetUrl of Object.values(imported["./assets"].BUNDLED_ENGINE_ASSETS)
 
 const files = await readdir(packageRoot, { recursive: true });
 assert.ok(files.includes("dist/assets/miso-engine-v1-audio-worklet.simd128.wasm"));
-assert.ok(files.includes("dist/assets/flac-decoder.wasm"));
-assert.ok(files.includes("dist/assets/flac-decoder.js"));
-assert.ok(files.includes("dist/assets/flac-decoder.d.ts"));
-assert.ok(files.includes("dist/assets/decoder-artifact.sha256"));
+assert.equal(files.some((name) => /flac|decoder|cli\/stems/i.test(name)), false, "the archive has no retired delivery payload");
 assert.ok(files.includes("dist/LICENSE"));
 assert.equal(files.some((name) => name.includes("node_modules")), false);
 assert.equal(files.some((name) => name.startsWith("test") || name.includes("/test/")), false);
@@ -213,40 +210,6 @@ async function bootSnapshotSubmitRender(document, sourceId, channels) {
 
 await bootSnapshotSubmitRender(cliDocument, "stem", 2);
 
-// The extracted executable imports a FLAC leaf using only this package's decoder closure. The
-// fixture is copied before launch; the command runs with the package as cwd and never discovers
-// repository tools or files.
-const stemsRoot = resolve(packageRoot, "..", "packed-stems");
-await mkdir(stemsRoot);
-await copyFile(
-  resolve(import.meta.dirname, "../../fixtures/flac-delivery/v1/flac/pcm24-stereo-boundaries-b32.flac"),
-  resolve(stemsRoot, "Packed Stem.flac"),
-);
-const stemsOutput = resolve(packageRoot, "..", "packed.session.json");
-const stemsCli = spawn(
-  process.execPath,
-  [resolve(packageRoot, manifest.bin.enginectl), "session", "build", "--stems", stemsRoot, "--output", stemsOutput],
-  { cwd: packageRoot, env: { PATH: "", HOME: resolve(packageRoot, "..", "no-home") }, stdio: ["ignore", "pipe", "pipe"] },
-);
-const stemsStdout = [];
-const stemsStderr = [];
-stemsCli.stdout.on("data", (chunk) => stemsStdout.push(chunk));
-stemsCli.stderr.on("data", (chunk) => stemsStderr.push(chunk));
-const stemsStatus = await new Promise((accept, reject) => {
-  stemsCli.once("error", reject);
-  stemsCli.once("close", accept);
-});
-assert.equal(stemsStatus, 0, Buffer.concat(stemsStderr).toString("utf8"));
-assert.equal(Buffer.concat(stemsStderr).byteLength, 0);
-const stemsReceipt = JSON.parse(Buffer.concat(stemsStdout).toString("utf8"));
-assert.deepEqual(stemsReceipt.session, {
-  id: "packed-stems", revision: 0, sampleRateHz: 48_000, quantumFrames: 128, sources: 1, tracks: 1,
-});
-assert.equal(stemsReceipt.stems[0].content, "sha256:f5868e05edf12c6032419ce0d7d786c9dc781989ac69ed17e8a4a374341f92f3");
-const stemsDocument = await readFile(stemsOutput, "utf8");
-assert.match(stemsDocument, /^\{\n  "schema_version": 1,\n/);
-await bootSnapshotSubmitRender(stemsDocument, stemsReceipt.stems[0].sourceId, 2);
-
 // Red mutation: the package manifest still names the original digest, so one changed byte must be
 // rejected before WebAssembly.compile can see it.
 const wasmUrl = imported["./assets"].BUNDLED_ENGINE_ASSETS.wasm;
@@ -261,38 +224,4 @@ try {
   );
 } finally {
   await writeFile(wasmUrl, original);
-}
-
-// The decoder is independently sealed. Mutation must fail internally before a generated session
-// can be published, with no repository decoder or media subprocess available as a fallback.
-const decoderUrl = imported["./assets"].BUNDLED_ENGINE_ASSETS.flacDecoderWasm;
-const decoderOriginal = await readFile(decoderUrl);
-const decoderChanged = Buffer.from(decoderOriginal);
-decoderChanged[decoderChanged.length - 1] ^= 1;
-await writeFile(decoderUrl, decoderChanged);
-try {
-  const rejectedOutput = resolve(packageRoot, "..", "decoder-mutation.session.json");
-  const rejected = spawn(
-    process.execPath,
-    [resolve(packageRoot, manifest.bin.enginectl), "session", "build", "--stems", stemsRoot, "--output", rejectedOutput],
-    {
-      cwd: packageRoot,
-      env: { PATH: "", HOME: resolve(packageRoot, "..", "no-home") },
-      stdio: ["ignore", "pipe", "pipe"],
-    },
-  );
-  const rejectedStdout = [];
-  const rejectedStderr = [];
-  rejected.stdout.on("data", (chunk) => rejectedStdout.push(chunk));
-  rejected.stderr.on("data", (chunk) => rejectedStderr.push(chunk));
-  const rejectedStatus = await new Promise((accept, reject) => {
-    rejected.once("error", reject);
-    rejected.once("close", accept);
-  });
-  assert.equal(rejectedStatus, 70);
-  assert.equal(Buffer.concat(rejectedStdout).byteLength, 0);
-  assert.match(Buffer.concat(rejectedStderr).toString("utf8"), /internal\.packaged_decoder/);
-  await assert.rejects(access(rejectedOutput), (error) => error?.code === "ENOENT");
-} finally {
-  await writeFile(decoderUrl, decoderOriginal);
 }

@@ -10,8 +10,7 @@ npm install @misofm/engine
 ```
 
 The published package is a self-contained Engine V1 release: compiled ESM, declarations, the
-simd128 Wasm engine, the pinned FLAC decoder Wasm and loader, the AudioWorklet modules, parameter
-metadata, ABI layout, and a manifest with
+simd128 Wasm engine, the AudioWorklet modules, parameter metadata, ABI layout, and a manifest with
 the byte length and SHA-256 of every artifact. A Node or Bun headless consumer needs neither a Rust
 toolchain nor a separate engine download. Browser consumers receive package-relative artifact URLs,
 so the host and Wasm cannot silently come from different releases.
@@ -35,31 +34,18 @@ compilation if one stops being reachable or starts resolving to a different decl
 
 ## `enginectl session build`
 
-The package installs `enginectl`, a Node 20+ machine interface for producing one canonical,
-engine-accepted Session V1 file. It can consume either a bounded JSON request for fully authored
-sessions or a leaf directory of local FLAC stems:
+The package installs `enginectl`, a Node 20+ machine interface for producing one
+canonical, engine-accepted Session V1 file from a bounded JSON request:
 
 ```sh
 enginectl session build --request request.json --output session.json
 enginectl session build --request - --output - < request.json
-enginectl session build --stems ./song-stems --output song.session.json
 ```
 
-`--stems` examines only the directory's directly owned regular `.flac` files and refuses nested
-directories, symlinks, non-FLAC entries, empty leaves, and mixed or unsupported sample rates. It
-does not recurse: a parent containing several song directories is a collection, and its typed
-`stems.collection` refusal reports sorted child-directory names so an agent can issue one call per
-child. The report does not assert that any reported child is itself a valid stems leaf.
-Each FLAC becomes one source and one unity-routed track feeding the single `main` output. Mono is
-duplicated across the track's two lanes; stereo maps channels 0 and 1. Filenames determine stable
-IDs only—they never imply gain, pan, effects, categories, or any other audio decision.
-
-The session ID defaults deterministically from the leaf directory name and the quantum defaults to
-128. `--session-id` and `--quantum-frames` override those values only in stems mode. Metadata and
-canonical PCM identities come from the packaged decoder: identities are SHA-256 over verified,
-source-depth, interleaved PCM rather than over FLAC transport bytes. The command compiles one
-decoder instance, reuses it across the sorted files, reads each FLAC once, and never retains the
-complete decoded PCM.
+`--request` is required. `--stems`, `--session-id`, and `--quantum-frames`
+are unknown flags: they exit 2 without loading an engine asset or publishing output. Callers
+resolve, decode, verify, and retain transport bytes outside this package, then submit decoded PCM
+through the generic source APIs.
 
 The request has `schemaVersion: 1`, a required `session` object, and optional `sources`, `tracks`,
 `submixes`, `outputs`, `routes`, and `automation` arrays. Sources and tracks are `{ id, spec }`;
@@ -73,10 +59,9 @@ empty. No receipt shares stdout in this mode. A path writes a same-directory tem
 publishes it atomically only after the embedded Wasm engine has accepted the document; stdout then
 receives one compact JSON receipt plus LF. Existing files, directories, and symlinks are preserved
 by default. `--overwrite` authorizes replacement of one filesystem destination and is invalid with
-stdout. In stems mode the output is refused if its parent is physically the stems directory,
-including when a symlink or case alias makes differently spelled paths refer to that same directory.
+stdout.
 
-A successful stems file receipt has this exact shape (values shown are illustrative):
+A successful request-mode file receipt has this exact shape (values shown are illustrative):
 
 ```json
 {
@@ -84,52 +69,19 @@ A successful stems file receipt has this exact shape (values shown are illustrat
   "command": "session.build",
   "output": {
     "path": "../sessions/song.session.json",
-    "resolvedPath": "/work/sessions/song.session.json",
     "bytes": 7642,
     "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-  },
-  "input": {
-    "kind": "stems",
-    "path": "./song-stems",
-    "resolvedPath": "/work/project/song-stems"
-  },
-  "session": {
-    "id": "song-stems",
-    "revision": 0,
-    "sampleRateHz": 44100,
-    "quantumFrames": 128,
-    "sources": 1,
-    "tracks": 1
-  },
-  "stems": [
-    {
-      "filename": "Lead Vocal.flac",
-      "sourceId": "lead-vocal",
-      "trackId": "lead-vocal",
-      "content": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-      "channels": 2,
-      "bitDepth": 24,
-      "frames": 4096
-    }
-  ]
+  }
 }
 ```
 
-`path` preserves the exact argument string. `resolvedPath` is Node's host-native lexical
-`path.resolve()` result against the invocation working directory: it removes lexical `.` and `..`
-components but does not resolve symlinks, case aliases, Unicode aliases, or filesystem identity.
-It is useful after changing local working directories, but is not a physical canonical identity or
-a portable cross-machine locator. Request-mode file receipts retain only `output.path`, `bytes`, and
-`sha256`; neither request-mode receipts nor raw-output mode adds a `resolvedPath`. `stems` follows
-the importer's stable direct-child filename byte ordering, and each `filename` is relative to
-`input.resolvedPath`.
+`path` preserves the exact argument string. Raw-output mode adds no receipt.
 
 The executable is always non-interactive: it never prompts, pages, opens another program, reads
 configuration or credentials, loads plugins, invokes media subprocesses, emits telemetry, or uses
 the network. Machine
 failures leave stdout empty and write one compact JSON document to stderr. Exit status is `2` for
-command/flag usage, `3` for request, stem discovery, FLAC, or builder refusal, `4` for
-embedded-engine refusal, `5` for output refusal, and `70` for an unexpected internal or packaged-
+command/flag usage, `3` for request or builder refusal, `4` for embedded-engine refusal, `5` for output refusal, and `70` for an unexpected internal or packaged-
 asset failure. Success, help, and version use `0`.
 
 ### Pinning the embedded engine
