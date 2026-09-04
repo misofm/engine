@@ -170,6 +170,7 @@ impl AoSoaScratch {
         self.quantum
     }
 
+    // REALTIME_POLICY_BEGIN
     /// Copy frames `[from, frames)` of one planar track into its stable AoSoA lane. Shape is a
     /// `debug_assert`: the compiler fixed it once (master plan §4.3).
     ///
@@ -196,7 +197,9 @@ impl AoSoaScratch {
             chunk[lane] = sample;
         }
     }
+    // REALTIME_POLICY_END
 
+    // REALTIME_POLICY_BEGIN
     /// [`AoSoaScratch::gather_lane`] for the left plane alone: the collapsed cohort's move.
     fn gather_lane_left(&mut self, lane: usize, left: &[f32], from: usize, frames: u32) {
         let lanes = self.width.lanes() as usize;
@@ -212,7 +215,9 @@ impl AoSoaScratch {
             chunk[lane] = sample;
         }
     }
+    // REALTIME_POLICY_END
 
+    // REALTIME_POLICY_BEGIN
     /// Copy frames `[from, frames)` of one stable AoSoA lane back into its planar graph buffer.
     fn scatter_lane(
         &self,
@@ -241,8 +246,10 @@ impl AoSoaScratch {
             *sample = chunk[lane];
         }
     }
+    // REALTIME_POLICY_END
 }
 
+// REALTIME_POLICY_BEGIN
 /// One plane's tiled planar -> AoSoA gather.
 ///
 /// Per `W`-frame tile: `W` contiguous vector loads (one per planar lane), one whole-tile shuffle
@@ -269,7 +276,9 @@ fn tile_gather<const W: usize>(
         }
     }
 }
+// REALTIME_POLICY_END
 
+// REALTIME_POLICY_BEGIN
 /// One plane's tiled AoSoA -> lane-major scatter, into an owned staging block of `W` lanes at
 /// `stride` words each.
 ///
@@ -296,6 +305,7 @@ fn tile_scatter<const W: usize>(
         }
     }
 }
+// REALTIME_POLICY_END
 
 /// The resident AoSoA block handed to one stage. `left.len() == right.len() == frames * lanes`.
 pub struct BankBlock<'a> {
@@ -517,6 +527,7 @@ impl BankStage for EffectBankStage {
         self.processor.channels_agree()
     }
 
+    // REALTIME_POLICY_BEGIN
     fn process_mono(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
         let block = EffectBankProcessBlock::new(
             block.left,
@@ -533,7 +544,9 @@ impl BankStage for EffectBankStage {
         let _ = self.processor.process_bank_mono(block);
         Ok(())
     }
+    // REALTIME_POLICY_END
 
+    // REALTIME_POLICY_BEGIN
     fn process(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
         let block = EffectBankProcessBlock::new(
             block.left,
@@ -552,6 +565,7 @@ impl BankStage for EffectBankStage {
         let _ = self.processor.process_bank(block);
         Ok(())
     }
+    // REALTIME_POLICY_END
 }
 
 /// The live-console twin of [`EffectBankStage`] (issue #140 A).
@@ -826,6 +840,7 @@ impl BankStage for ConsoleEffectBankStage {
         Ok(())
     }
 
+    // REALTIME_POLICY_BEGIN
     /// [`ConsoleEffectBankStage::process`] with the bank call collapsed onto the left plane.
     ///
     /// Every other step is the dual one, in the same order and on the same words: the drain runs
@@ -842,6 +857,7 @@ impl BankStage for ConsoleEffectBankStage {
     fn process_mono(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
         self.process_inner::<true>(block)
     }
+    // REALTIME_POLICY_END
 
     fn observation_binding_counts(&self) -> [u64; 3] {
         let Some(lanes) = self.observations.as_deref() else {
@@ -860,9 +876,11 @@ impl BankStage for ConsoleEffectBankStage {
         ConsoleEffectBankStage::disarm_observations(self);
     }
 
+    // REALTIME_POLICY_BEGIN
     fn process(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
         self.process_inner::<false>(block)
     }
+    // REALTIME_POLICY_END
 }
 
 impl ConsoleEffectBankStage {
@@ -893,6 +911,7 @@ impl ConsoleEffectBankStage {
         self.staged_spans = packed;
     }
 
+    // REALTIME_POLICY_BEGIN
     /// The one console-slot body, dual or collapsed.
     ///
     /// `MONO` is a const generic rather than an argument so the two monomorphise: the dual
@@ -1057,6 +1076,7 @@ impl ConsoleEffectBankStage {
         }
         Ok(())
     }
+    // REALTIME_POLICY_END
 }
 
 /// One slot of a chain: a stage plus the lanes for which it is *not* an identity.
@@ -1546,6 +1566,7 @@ impl BankChain {
         &self.fold
     }
 
+    // REALTIME_POLICY_BEGIN
     /// Gather every active lane, run every non-identity slot over the resident block, scatter every
     /// active lane back. No allocation, no shape `Result`, one transpose round-trip.
     pub fn run<M: BankMembers + ?Sized>(
@@ -1725,6 +1746,7 @@ impl BankChain {
         }
         Ok(())
     }
+    // REALTIME_POLICY_END
 
     /// The disengage boundary: restore every collapsed stage's right-channel state and retire.
     ///
@@ -1766,6 +1788,7 @@ impl BankChain {
         self.collapse_channels_agree = true;
     }
 
+    // REALTIME_POLICY_BEGIN
     /// Planar -> AoSoA for the **left plane only**: the collapsed cohort's gather.
     ///
     /// [`Self::gather`]'s two shapes, one plane each. The right plane is not read and the right
@@ -1789,7 +1812,9 @@ impl BankChain {
             }
         }
     }
+    // REALTIME_POLICY_END
 
+    // REALTIME_POLICY_BEGIN
     #[inline(always)]
     fn gather_mono_tiled<M: BankMembers + ?Sized, const W: usize>(
         &mut self,
@@ -1813,6 +1838,7 @@ impl BankChain {
             }
         }
     }
+    // REALTIME_POLICY_END
 
     /// Record the structural half of this cohort's witness: the `SOURCE` term, joined at bind.
     ///
@@ -1890,6 +1916,7 @@ impl BankChain {
         self.transitions
     }
 
+    // REALTIME_POLICY_BEGIN
     /// Adds every armed lane's resident result into its auxiliary destination.
     ///
     /// Reads the resident block rather than the scattered planes, so it is unaffected by whether
@@ -1918,7 +1945,9 @@ impl BankChain {
             }
         }
     }
+    // REALTIME_POLICY_END
 
+    // REALTIME_POLICY_BEGIN
     /// Planar -> AoSoA for the whole bank: one tiled transpose per plane when every lane is
     /// active, the per-lane scalar move otherwise.
     ///
@@ -1940,7 +1969,9 @@ impl BankChain {
             }
         }
     }
+    // REALTIME_POLICY_END
 
+    // REALTIME_POLICY_BEGIN
     #[inline(always)]
     fn gather_tiled<M: BankMembers + ?Sized, const W: usize>(
         &mut self,
@@ -1979,7 +2010,9 @@ impl BankChain {
             }
         }
     }
+    // REALTIME_POLICY_END
 
+    // REALTIME_POLICY_BEGIN
     /// AoSoA -> planar for the whole bank, the inverse of [`Self::gather`] under the same rule.
     ///
     /// A folded lane (see [`BankChain::arm_fold`]) takes the same transpose and then goes to
@@ -2029,7 +2062,9 @@ impl BankChain {
             }
         }
     }
+    // REALTIME_POLICY_END
 
+    // REALTIME_POLICY_BEGIN
     #[inline(always)]
     fn scatter_tiled<M: BankMembers + ?Sized, const W: usize>(
         &mut self,
@@ -2093,6 +2128,7 @@ impl BankChain {
             }
         }
     }
+    // REALTIME_POLICY_END
 
     /// Take the per-lane scalar path even on a full bank.
     ///

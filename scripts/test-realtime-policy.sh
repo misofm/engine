@@ -14,39 +14,204 @@ create_fixture() {
         "$root/crates/capi/src" \
         "$root/crates/capi/tests" \
         "$root/crates/effect-compiler/tests" \
+        "$root/crates/effect-contract/src" \
         "$root/crates/effect-package/src" \
         "$root/crates/effect-package/tests" \
+        "$root/crates/graph/src" \
+        "$root/crates/rack/src" \
+        "$root/crates/builtins/src" \
         "$root/crates/session/tests" \
         "$root/hosts/host-web/src" \
         "$root/hosts/host-web/tests" \
         "$root/tools/bench-support/src" \
         "$root/tools/audit/src" \
         "$root/tools/native-pcm-runner/src" \
-        "$root/tools/bench/src"
+        "$root/tools/bench/src" \
+        "$root/sidecars"
+    # The marked file set mirrors the real tree after #371 (RT-16/IO-14): twelve files and
+    # forty-two regions across crates/ and hosts/, so the floors in the gate and the discovery
+    # walk are exercised against the same shape the gate sees on main. Column-zero markers and
+    # indented markers (as in the real `impl`-block regions) both appear.
     printf '%s\n' \
         '// REALTIME_POLICY_BEGIN' \
         'fn render() {}' \
         '// REALTIME_POLICY_END' \
-        '// REALTIME_POLICY_BEGIN' \
-        'fn queue() {}' \
-        '// REALTIME_POLICY_END' \
-        '// REALTIME_POLICY_BEGIN' \
-        'fn buffer() {}' \
-        '// REALTIME_POLICY_END' \
-        '// REALTIME_POLICY_BEGIN' \
-        'fn exchange() {}' \
-        '// REALTIME_POLICY_END' \
-        >"$root/crates/engine/src/realtime/mod.rs"
+        >"$root/crates/engine/src/realtime/buffer.rs"
     printf '%s\n' \
         '#![allow(unsafe_code)]' \
         'unsafe impl Send for Allowed {}' \
         'struct Allowed;' \
+        '// REALTIME_POLICY_BEGIN' \
+        'fn push() {}' \
+        '// REALTIME_POLICY_END' \
+        '// REALTIME_POLICY_BEGIN' \
+        'fn pop() {}' \
+        '// REALTIME_POLICY_END' \
         >"$root/crates/engine/src/realtime/spsc.rs"
     printf '%s\n' \
         '#![allow(unsafe_code)]' \
         'unsafe impl Sync for DisjointArena {}' \
         'struct DisjointArena;' \
+        '// REALTIME_POLICY_BEGIN' \
+        'fn queue() {}' \
+        '// REALTIME_POLICY_END' \
         >"$root/crates/engine/src/realtime/disjoint.rs"
+    printf '%s\n' \
+        '// REALTIME_POLICY_BEGIN' \
+        'fn buffer() {}' \
+        '// REALTIME_POLICY_END' \
+        >"$root/crates/engine/src/realtime/observe.rs"
+    printf '%s\n' \
+        '// REALTIME_POLICY_BEGIN' \
+        'fn exchange() {}' \
+        '// REALTIME_POLICY_END' \
+        >"$root/crates/engine/src/realtime/plan.rs"
+    printf '%s\n' \
+        '// REALTIME_POLICY_BEGIN' \
+        'fn exchange_plane() {}' \
+        '// REALTIME_POLICY_END' \
+        >"$root/crates/engine/src/realtime/plan_exchange.rs"
+    # Indented markers, the shape the real region in crates/graph/src/lib.rs carries.
+    printf '%s\n' \
+        'struct GraphPlan;' \
+        '' \
+        'impl GraphPlan {' \
+        '    // REALTIME_POLICY_BEGIN' \
+        '    fn lowered() {}' \
+        '    // REALTIME_POLICY_END' \
+        '}' \
+        >"$root/crates/graph/src/lib.rs"
+    # Eight regions, mirroring the real crates/graph/src/runtime.rs after #371; the
+    # `execute_op` region keeps its indented markers, as in the real `impl Runtime` block.
+    printf '%s\n' \
+        'struct Runtime;' \
+        '' \
+        'impl Runtime {' \
+        '    // REALTIME_POLICY_BEGIN' \
+        '    fn execute_op() {}' \
+        '    // REALTIME_POLICY_END' \
+        '}' \
+        '' \
+        '// REALTIME_POLICY_BEGIN' \
+        'fn reduce_plane() {}' \
+        '// REALTIME_POLICY_END' \
+        '// REALTIME_POLICY_BEGIN' \
+        'fn compensation_delay_process() {}' \
+        '// REALTIME_POLICY_END' \
+        '// REALTIME_POLICY_BEGIN' \
+        'fn track_delay_process() {}' \
+        '// REALTIME_POLICY_END' \
+        '// REALTIME_POLICY_BEGIN' \
+        'fn publish_observations() {}' \
+        '// REALTIME_POLICY_END' \
+        '// REALTIME_POLICY_BEGIN' \
+        'fn buffer_mut() {}' \
+        '// REALTIME_POLICY_END' \
+        '// REALTIME_POLICY_BEGIN' \
+        'fn arena_members_fold_plane() {}' \
+        '// REALTIME_POLICY_END' \
+        '// REALTIME_POLICY_BEGIN' \
+        'fn observe() {}' \
+        '// REALTIME_POLICY_END' \
+        >"$root/crates/graph/src/runtime.rs"
+    # Two regions, mirroring the real crates/effect-contract/src/live.rs after #371: the
+    # pre-existing ObservationLane region and the new impl EffectControlLane region.
+    printf '%s\n' \
+        '// REALTIME_POLICY_BEGIN' \
+        'impl ObservationLane {' \
+        '    fn accumulate() {}' \
+        '}' \
+        '// REALTIME_POLICY_END' \
+        '' \
+        '// REALTIME_POLICY_BEGIN' \
+        'impl EffectControlLane {' \
+        '    fn stage() {}' \
+        '}' \
+        '// REALTIME_POLICY_END' \
+        >"$root/crates/effect-contract/src/live.rs"
+    # Eighteen regions, mirroring the real crates/rack/src/lib.rs after #371: the chain's run,
+    # every gather*/scatter* body, accumulate_aux and the BankStage process bodies.
+    printf '%s\n' \
+        '// REALTIME_POLICY_BEGIN' \
+        'fn gather_lane() {}' \
+        '// REALTIME_POLICY_END' \
+        '// REALTIME_POLICY_BEGIN' \
+        'fn gather_lane_left() {}' \
+        '// REALTIME_POLICY_END' \
+        '// REALTIME_POLICY_BEGIN' \
+        'fn scatter_lane() {}' \
+        '// REALTIME_POLICY_END' \
+        '// REALTIME_POLICY_BEGIN' \
+        'fn tile_gather() {}' \
+        '// REALTIME_POLICY_END' \
+        '// REALTIME_POLICY_BEGIN' \
+        'fn tile_scatter() {}' \
+        '// REALTIME_POLICY_END' \
+        '// REALTIME_POLICY_BEGIN' \
+        'fn effect_bank_process_mono() {}' \
+        '// REALTIME_POLICY_END' \
+        '// REALTIME_POLICY_BEGIN' \
+        'fn effect_bank_process() {}' \
+        '// REALTIME_POLICY_END' \
+        '// REALTIME_POLICY_BEGIN' \
+        'fn console_process_mono() {}' \
+        '// REALTIME_POLICY_END' \
+        '// REALTIME_POLICY_BEGIN' \
+        'fn console_process() {}' \
+        '// REALTIME_POLICY_END' \
+        '// REALTIME_POLICY_BEGIN' \
+        'fn process_inner() {}' \
+        '// REALTIME_POLICY_END' \
+        '// REALTIME_POLICY_BEGIN' \
+        'fn run() {}' \
+        '// REALTIME_POLICY_END' \
+        '// REALTIME_POLICY_BEGIN' \
+        'fn gather_mono() {}' \
+        '// REALTIME_POLICY_END' \
+        '// REALTIME_POLICY_BEGIN' \
+        'fn gather_mono_tiled() {}' \
+        '// REALTIME_POLICY_END' \
+        '// REALTIME_POLICY_BEGIN' \
+        'fn accumulate_aux() {}' \
+        '// REALTIME_POLICY_END' \
+        '// REALTIME_POLICY_BEGIN' \
+        'fn gather() {}' \
+        '// REALTIME_POLICY_END' \
+        '// REALTIME_POLICY_BEGIN' \
+        'fn gather_tiled() {}' \
+        '// REALTIME_POLICY_END' \
+        '// REALTIME_POLICY_BEGIN' \
+        'fn scatter() {}' \
+        '// REALTIME_POLICY_END' \
+        '// REALTIME_POLICY_BEGIN' \
+        'fn scatter_tiled() {}' \
+        '// REALTIME_POLICY_END' \
+        >"$root/crates/rack/src/lib.rs"
+    # Five regions, mirroring the real crates/builtins/src/lib.rs after #371.
+    printf '%s\n' \
+        '// REALTIME_POLICY_BEGIN' \
+        'fn input_process() {}' \
+        '// REALTIME_POLICY_END' \
+        '// REALTIME_POLICY_BEGIN' \
+        'fn input_process_mono() {}' \
+        '// REALTIME_POLICY_END' \
+        '// REALTIME_POLICY_BEGIN' \
+        'fn fader_process() {}' \
+        'fn fader_process_plane() {}' \
+        '// REALTIME_POLICY_END' \
+        '// REALTIME_POLICY_BEGIN' \
+        'fn matrix_process() {}' \
+        '// REALTIME_POLICY_END' \
+        '// REALTIME_POLICY_BEGIN' \
+        'fn meter_observe() {}' \
+        '// REALTIME_POLICY_END' \
+        >"$root/crates/builtins/src/lib.rs"
+    # One region, mirroring the real hosts/host-web/src/lib.rs `render_next` after #371.
+    printf '%s\n' \
+        '// REALTIME_POLICY_BEGIN' \
+        'fn render_next() {}' \
+        '// REALTIME_POLICY_END' \
+        >"$root/hosts/host-web/src/lib.rs"
     printf '%s\n' \
         '#![allow(unsafe_code)]' \
         'unsafe fn read_mxcsr() {}' \
@@ -122,74 +287,126 @@ create_fixture() {
 
 expect_failure() {
     local name="$1"
+    local expected_class="$2"
+    local mutation="$3"
     local root="$scratch_root/$name"
-    local mutation="$2"
+    local output
     create_fixture "$root"
     eval "$mutation"
-    if bash "$policy_script" "$root" >/dev/null 2>&1; then
+    if output="$(bash "$policy_script" "$root" 2>&1)"; then
         printf 'realtime policy mutation unexpectedly passed: %s\n' "$name" >&2
         exit 1
     fi
+    # The failure must be the class this mutation exists to catch, not merely non-zero:
+    # a gate that reds on an unrelated assertion is not the gate the row claims.
+    if ! printf '%s\n' "$output" | rg -qF -- "$expected_class"; then
+        printf 'realtime policy mutation failed with the wrong class: %s\n%s\n' "$name" "$output" >&2
+        exit 1
+    fi
 }
+
+# Drop the first marked region of a fixture file, leaving every other marker matched, so the
+# per-file check passes and only the region floor can red.
+drop_first_marked_region() {
+    local file="$1"
+    awk '
+        !started && /REALTIME_POLICY_BEGIN/ { started = 1; dropping = 1; next }
+        dropping && /REALTIME_POLICY_END/ { dropping = 0; next }
+        dropping { next }
+        { print }
+    ' "$file" >"$file.tmp"
+    mv -- "$file.tmp" "$file"
+}
+
+alloc_class='marked realtime code contains an allocation, lock, I/O, log, wait, syscall or panic surface'
+unsafe_class='unsafe code exists outside the issue-approved ownership/audit files'
 
 valid="$scratch_root/valid"
 create_fixture "$valid"
 bash "$policy_script" "$valid" >/dev/null
 
-expect_failure allocation \
-    'sed -i "s/fn render() {}/fn render() { let _ = Vec::new(); }/" "$root/crates/engine/src/realtime/mod.rs"'
-expect_failure lock \
-    'sed -i "s/fn queue() {}/fn queue() { let _ = Mutex::new(0); }/" "$root/crates/engine/src/realtime/mod.rs"'
-expect_failure log \
-    'sed -i "s/fn buffer() {}/fn buffer() { println!(\"bad\"); }/" "$root/crates/engine/src/realtime/mod.rs"'
+# The forbidden-surface rules, on the file the gate has always scanned.
+expect_failure allocation "$alloc_class" \
+    'sed -i "s/fn render() {}/fn render() { let _ = Vec::new(); }/" "$root/crates/engine/src/realtime/buffer.rs"'
+expect_failure lock "$alloc_class" \
+    'sed -i "s/fn queue() {}/fn queue() { let _ = Mutex::new(0); }/" "$root/crates/engine/src/realtime/disjoint.rs"'
+expect_failure log "$alloc_class" \
+    'sed -i "s/fn buffer() {}/fn buffer() { println!(\"bad\"); }/" "$root/crates/engine/src/realtime/observe.rs"'
 # #84 phase B (F12): a panic path is a realtime violation like an allocation is. `LocalRing`'s
 # `.take().expect("prepared local ring slot")` was the only hit inside a marked region; it is gone,
 # and the regex now keeps it gone.
-expect_failure panic-path-expect \
-    'sed -i "s/fn exchange() {}/fn exchange() { None::<u8>.expect(\"x\"); }/" "$root/crates/engine/src/realtime/mod.rs"'
-expect_failure panic-path-macro \
-    'sed -i "s/fn exchange() {}/fn exchange() { unreachable!(); }/" "$root/crates/engine/src/realtime/mod.rs"'
-expect_failure unsafe-scope \
-    'printf "%s\n" "unsafe fn bad() {}" >>"$root/crates/engine/src/realtime/mod.rs"'
-expect_failure unsafe-outside-exact-allowlist \
+expect_failure panic-path-expect "$alloc_class" \
+    'sed -i "s/fn exchange() {}/fn exchange() { None::<u8>.expect(\"x\"); }/" "$root/crates/engine/src/realtime/plan.rs"'
+expect_failure panic-path-macro "$alloc_class" \
+    'sed -i "s/fn exchange() {}/fn exchange() { unreachable!(); }/" "$root/crates/engine/src/realtime/plan.rs"'
+expect_failure unsafe-scope "$unsafe_class" \
+    'printf "%s\n" "unsafe fn bad() {}" >>"$root/crates/engine/src/realtime/buffer.rs"'
+expect_failure unsafe-outside-exact-allowlist "$unsafe_class" \
     'printf "%s\n" "unsafe fn bad() {}" >"$root/tools/bench/src/other.rs"'
-expect_failure unsafe-outside-capi-audit-main \
+expect_failure unsafe-outside-capi-audit-main "$unsafe_class" \
     'printf "%s\n" "unsafe fn bad() {}" >"$root/tools/audit/src/other.rs"'
-expect_failure unsafe-outside-native-pcm-runner-lib \
+expect_failure unsafe-outside-native-pcm-runner-lib "$unsafe_class" \
     'printf "%s\n" "unsafe fn bad() {}" >"$root/tools/native-pcm-runner/src/other.rs"'
 # #84 phase A deleted `crates/engine/src/arch/`; its unsafe exemption went with it, so
 # unsafe code re-appearing under that path is now rejected like any other unlisted file.
-expect_failure unsafe-in-deleted-core-arch \
+expect_failure unsafe-in-deleted-core-arch "$unsafe_class" \
     'mkdir -p "$root/crates/engine/src/arch"; printf "%s\n" "unsafe fn bad() {}" >"$root/crates/engine/src/arch/x86.rs"'
-expect_failure unsafe-outside-rack-benchmark-main \
+expect_failure unsafe-outside-rack-benchmark-main "$unsafe_class" \
     'printf "%s\n" "unsafe fn bad() {}" >"$root/tools/bench/src/other.rs"'
-expect_failure unsafe-outside-capi-ffi \
+expect_failure unsafe-outside-capi-ffi "$unsafe_class" \
     'printf "%s\n" "pub unsafe extern \"C\" fn bad() {}" >"$root/crates/capi/src/lib.rs"'
-expect_failure unsafe-in-second-capi-ffi-path \
+expect_failure unsafe-in-second-capi-ffi-path "$unsafe_class" \
     'mkdir -p "$root/crates/capi/src/ffi"; printf "%s\n" "unsafe fn bad() {}" >"$root/crates/capi/src/ffi/other.rs"'
-expect_failure unsafe-outside-capi-lifecycle-audit \
+expect_failure unsafe-outside-capi-lifecycle-audit "$unsafe_class" \
     'printf "%s\n" "unsafe fn bad() {}" >"$root/crates/capi/tests/other.rs"'
-expect_failure unsafe-outside-effect-package-ffi \
+expect_failure unsafe-outside-effect-package-ffi "$unsafe_class" \
     'printf "%s\n" "pub unsafe extern \"C\" fn bad() {}" >"$root/crates/effect-package/src/lib.rs"'
-expect_failure unsafe-in-second-effect-package-ffi-path \
+expect_failure unsafe-in-second-effect-package-ffi-path "$unsafe_class" \
     'mkdir -p "$root/crates/effect-package/src/ffi"; printf "%s\n" "unsafe fn bad() {}" >"$root/crates/effect-package/src/ffi/other.rs"'
-expect_failure unsafe-outside-package-allocation-audit \
+expect_failure unsafe-outside-package-allocation-audit "$unsafe_class" \
     'printf "%s\n" "unsafe fn bad() {}" >"$root/crates/effect-package/tests/other.rs"'
-expect_failure unsafe-outside-migration-allocation-audit \
+expect_failure unsafe-outside-migration-allocation-audit "$unsafe_class" \
     'printf "%s\n" "unsafe fn bad() {}" >"$root/crates/effect-compiler/tests/other.rs"'
-expect_failure unsafe-outside-session-allocation-budget \
+expect_failure unsafe-outside-session-allocation-budget "$unsafe_class" \
     'printf "%s\n" "unsafe fn bad() {}" >"$root/crates/session/tests/other.rs"'
-expect_failure unsafe-outside-web-ffi \
+expect_failure unsafe-outside-web-ffi "$unsafe_class" \
     'printf "%s\n" "pub unsafe extern \"C\" fn bad() {}" >"$root/hosts/host-web/src/lib.rs"'
-expect_failure unsafe-in-second-web-ffi-path \
+expect_failure unsafe-in-second-web-ffi-path "$unsafe_class" \
     'mkdir -p "$root/hosts/host-web/src/ffi"; printf "%s\n" "unsafe fn bad() {}" >"$root/hosts/host-web/src/ffi/other.rs"'
-expect_failure unsafe-outside-web-peak-audit \
+expect_failure unsafe-outside-web-peak-audit "$unsafe_class" \
     'printf "%s\n" "unsafe fn bad() {}" >"$root/hosts/host-web/tests/other.rs"'
-expect_failure unsafe-outside-disjoint-arena \
+expect_failure unsafe-outside-disjoint-arena "$unsafe_class" \
     'printf "%s\n" "unsafe fn bad() {}" >"$root/crates/engine/src/realtime/disjoint_extra.rs"'
-expect_failure unsafe-outside-lane-softfma \
+expect_failure unsafe-outside-lane-softfma "$unsafe_class" \
     'printf "%s\n" "unsafe fn bad() {}" >"$root/crates/lane/src/kernels.rs"'
-expect_failure unsafe-outside-lane-fpenv \
+expect_failure unsafe-outside-lane-fpenv "$unsafe_class" \
     'printf "%s\n" "unsafe fn bad() {}" >"$root/crates/lane/src/fpenv_extra.rs"'
+
+# #371 (RT-16/IO-14): the walk is root-agnostic. A marked region outside
+# crates/engine/src/realtime is now scanned, in the marker shapes the real files carry.
+expect_failure marked-outside-realtime-root "$alloc_class" \
+    'sed -i "s/fn render_next() {}/fn render_next() { let _ = vec![0u8; 1]; }/" "$root/hosts/host-web/src/lib.rs"'
+# RT-16's verification gate, in the harness: the per-block render body's marked region.
+expect_failure marked-runtime-execute-op "$alloc_class" \
+    'sed -i "s/fn execute_op() {}/fn execute_op() { let _ = vec![0u8; 1]; }/" "$root/crates/graph/src/runtime.rs"'
+# IO-14's verification gate, in the harness: the live parameter-application body's marked region.
+expect_failure marked-effect-control-lane-stage "$alloc_class" \
+    'sed -i "s/fn stage() {}/fn stage() { let _ = vec![0u8; 1]; }/" "$root/crates/effect-contract/src/live.rs"'
+# The discovery set reaches every root, not just crates/ and hosts/: a newly marked tools/ file
+# with a violation is found and red.
+expect_failure marked-tools-root-scanned "$alloc_class" \
+    'printf "%s\n" "// REALTIME_POLICY_BEGIN" "fn tool() { let _ = vec![0u8; 1]; }" "// REALTIME_POLICY_END" >"$root/tools/audit/src/marker_probe.rs"'
+# Deleting every marker of one file to silence the gate drops it out of the discovered set and
+# trips the file floor instead of passing with less coverage.
+expect_failure marked-file-count-floor 'expected at least twelve marked realtime files' \
+    'sed -i "/REALTIME_POLICY/d" "$root/crates/builtins/src/lib.rs"'
+# Deleting one marked region of a multi-region file leaves every marker matched and trips the
+# region floor.
+expect_failure marked-region-count-floor 'expected at least forty-two marked realtime regions' \
+    'drop_first_marked_region "$root/crates/rack/src/lib.rs"'
+# The unmatched-marker check reaches files outside the old root too: the region keeps its
+# BEGIN and loses its END, so the per-file count check, not the floors, must red.
+expect_failure unmatched-markers-outside-root 'unmatched realtime policy markers' \
+    'sed -i "/REALTIME_POLICY_END/d" "$root/hosts/host-web/src/lib.rs"'
 
 printf 'realtime policy mutation tests: ok\n'

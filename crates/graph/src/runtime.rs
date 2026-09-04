@@ -1232,10 +1232,12 @@ use crate::{
 /// Adapter that lets a compiler-owned builtin bank act as a chain slot.
 struct BuiltinStage(Box<dyn GraphPreparedBuiltinBankProcessor>);
 impl BankStage for BuiltinStage {
+    // REALTIME_POLICY_BEGIN
     fn process(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
         self.0
             .process(block.left, block.right, block.frames, block.first_sample)
     }
+    // REALTIME_POLICY_END
     /// The drain, forwarded. `BankChain::run` calls this on every slot before it reads the
     /// collapse witness, which is the ordering the input bank's trim/polarity drain depends on.
     fn begin_block(&mut self, first_sample: u64) -> Result<(), RenderError> {

@@ -1199,6 +1199,7 @@ impl AudioWorkletEngineHost {
         self.record(code)
     }
 
+    // REALTIME_POLICY_BEGIN
     /// Render exactly one prepared quantum at the next absolute sample time.
     pub fn render_next(&mut self) -> u32 {
         if self.status.state != STATE_READY {
@@ -1264,6 +1265,7 @@ impl AudioWorkletEngineHost {
             Err(_) => self.fail(RESULT_RENDER_REJECTED, b"web.render.rejected\t$\n"),
         }
     }
+    // REALTIME_POLICY_END
 
     /// Admit one staged `miso.command.v1` submission as a single transaction (issue #137 D1).
     ///
