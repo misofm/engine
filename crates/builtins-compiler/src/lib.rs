@@ -5856,7 +5856,10 @@ mod tests {
         let _guard = PAIR_WITNESS_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        struct WrongOwner(u64);
+        struct WrongOwner {
+            tag: u64,
+            calls: Arc<AtomicUsize>,
+        }
         impl GraphPreparedBuiltinBankProcessor for WrongOwner {
             fn as_any(&self) -> &dyn std::any::Any {
                 self
@@ -5866,20 +5869,47 @@ mod tests {
             }
             fn process(
                 &mut self,
-                _: &mut [f32],
-                _: &mut [f32],
+                left: &mut [f32],
+                right: &mut [f32],
                 _: u32,
                 _: u64,
             ) -> Result<(), RenderError> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                left[0] += self.tag as f32;
+                right[0] -= self.tag as f32;
                 Ok(())
             }
         }
-        let wrong = match make_fader_matrix(Box::new(WrongOwner(7)), Box::new(WrongOwner(9))) {
+        let left_calls = Arc::new(AtomicUsize::new(0));
+        let right_calls = Arc::new(AtomicUsize::new(0));
+        let wrong = match make_fader_matrix(
+            Box::new(WrongOwner {
+                tag: 7,
+                calls: Arc::clone(&left_calls),
+            }),
+            Box::new(WrongOwner {
+                tag: 9,
+                calls: Arc::clone(&right_calls),
+            }),
+        ) {
             Err(owners) => owners,
             Ok(_) => panic!("wrong concrete owners"),
         };
-        assert_eq!(wrong.0.as_any().downcast_ref::<WrongOwner>().unwrap().0, 7);
-        assert_eq!(wrong.1.as_any().downcast_ref::<WrongOwner>().unwrap().0, 9);
+        let mut wrong_left = wrong.0.into_any().downcast::<WrongOwner>().unwrap();
+        let mut wrong_right = wrong.1.into_any().downcast::<WrongOwner>().unwrap();
+        assert_eq!((wrong_left.tag, wrong_right.tag), (7, 9));
+        let mut left = [1.0_f32];
+        let mut right = [-1.0_f32];
+        wrong_left.process(&mut left, &mut right, 1, 0).unwrap();
+        wrong_right.process(&mut left, &mut right, 1, 0).unwrap();
+        assert_eq!(
+            (
+                left_calls.load(Ordering::Relaxed),
+                right_calls.load(Ordering::Relaxed)
+            ),
+            (1, 1)
+        );
+        assert_eq!((left[0], right[0]), (17.0, -17.0));
 
         let fixture = pair_fixture(Backend::Simd4, 4);
         let reversed = match make_fader_matrix(
@@ -5916,6 +5946,162 @@ mod tests {
         };
         assert!(shape.0.as_any().is::<FaderBankProcessor>());
         assert!(shape.1.as_any().is::<MatrixBankProcessor>());
+    }
+
+    fn assert_late_decline_preserves_real_owners(
+        fader_backend: Backend,
+        fader_members: usize,
+        matrix_backend: Backend,
+        matrix_members: usize,
+        concurrent_matrix: bool,
+    ) {
+        let mut fader_fixture = pair_fixture(fader_backend, fader_members);
+        let mut matrix_fixture = pair_fixture(matrix_backend, matrix_members);
+        let mut fader_oracle = pair_fixture(fader_backend, fader_members);
+        let mut matrix_oracle = pair_fixture(matrix_backend, matrix_members);
+        let fader_record = TrackFaderRecord::FaderDb {
+            lanes: BuiltinLaneSelector::Left,
+            db: -9.0,
+            smoothing_samples: 3,
+        };
+        let matrix_record = TrackControlRecord {
+            matrix: Matrix2x2 {
+                ll: 0.5,
+                lr: 0.25,
+                rl: -0.5,
+                rr: 0.75,
+            },
+            smoothing_samples: 3,
+        };
+        fader_fixture
+            .separate_fader_tx
+            .try_push(fader_record)
+            .unwrap();
+        fader_oracle
+            .separate_fader_tx
+            .try_push(fader_record)
+            .unwrap();
+        matrix_fixture
+            .separate_matrix_tx
+            .try_push(matrix_record)
+            .unwrap();
+        matrix_oracle
+            .separate_matrix_tx
+            .try_push(matrix_record)
+            .unwrap();
+        if concurrent_matrix {
+            matrix_fixture.separate_matrix.control_delivery = BuiltinControlDelivery::Concurrent;
+        }
+        let saved_fader =
+            builtins::test_support::fader_bank_lane_words(&fader_fixture.separate_fader.bank, 0);
+        let saved_matrix =
+            builtins::test_support::matrix_bank_lane_words(&matrix_fixture.separate_matrix.bank, 0);
+        let returned = make_fader_matrix(
+            Box::new(fader_fixture.separate_fader),
+            Box::new(matrix_fixture.separate_matrix),
+        )
+        .err()
+        .expect("late guard declines");
+        let mut fader = returned
+            .0
+            .into_any()
+            .downcast::<FaderBankProcessor>()
+            .unwrap();
+        let mut matrix = returned
+            .1
+            .into_any()
+            .downcast::<MatrixBankProcessor>()
+            .unwrap();
+        assert_eq!(
+            builtins::test_support::fader_bank_lane_words(&fader.bank, 0),
+            saved_fader
+        );
+        assert_eq!(
+            builtins::test_support::matrix_bank_lane_words(&matrix.bank, 0),
+            saved_matrix
+        );
+
+        let mut fader_left = vec![0.25_f32; fader_backend.width() * 2];
+        let mut fader_right = vec![-0.5_f32; fader_backend.width() * 2];
+        let mut fader_oracle_left = fader_left.clone();
+        let mut fader_oracle_right = fader_right.clone();
+        fader
+            .process(&mut fader_left, &mut fader_right, 2, 0)
+            .unwrap();
+        fader_oracle
+            .separate_fader
+            .process(&mut fader_oracle_left, &mut fader_oracle_right, 2, 0)
+            .unwrap();
+        assert_eq!(
+            fader_left
+                .iter()
+                .map(|sample| sample.to_bits())
+                .collect::<Vec<_>>(),
+            fader_oracle_left
+                .iter()
+                .map(|sample| sample.to_bits())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            fader_right
+                .iter()
+                .map(|sample| sample.to_bits())
+                .collect::<Vec<_>>(),
+            fader_oracle_right
+                .iter()
+                .map(|sample| sample.to_bits())
+                .collect::<Vec<_>>()
+        );
+
+        let mut matrix_left = vec![0.25_f32; matrix_backend.width() * 2];
+        let mut matrix_right = vec![-0.5_f32; matrix_backend.width() * 2];
+        let mut matrix_oracle_left = matrix_left.clone();
+        let mut matrix_oracle_right = matrix_right.clone();
+        matrix
+            .process(&mut matrix_left, &mut matrix_right, 2, 0)
+            .unwrap();
+        matrix_oracle
+            .separate_matrix
+            .process(&mut matrix_oracle_left, &mut matrix_oracle_right, 2, 0)
+            .unwrap();
+        assert_eq!(
+            matrix_left
+                .iter()
+                .map(|sample| sample.to_bits())
+                .collect::<Vec<_>>(),
+            matrix_oracle_left
+                .iter()
+                .map(|sample| sample.to_bits())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            matrix_right
+                .iter()
+                .map(|sample| sample.to_bits())
+                .collect::<Vec<_>>(),
+            matrix_oracle_right
+                .iter()
+                .map(|sample| sample.to_bits())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            builtins::test_support::fader_bank_lane_words(&fader.bank, 0),
+            builtins::test_support::fader_bank_lane_words(&fader_oracle.separate_fader.bank, 0)
+        );
+        assert_eq!(
+            builtins::test_support::matrix_bank_lane_words(&matrix.bank, 0),
+            builtins::test_support::matrix_bank_lane_words(&matrix_oracle.separate_matrix.bank, 0)
+        );
+    }
+
+    #[test]
+    fn late_factory_guards_return_live_policy_width_and_population_owners() {
+        let _guard = PAIR_WITNESS_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_late_decline_preserves_real_owners(Backend::Simd4, 4, Backend::Simd4, 4, true);
+        assert_late_decline_preserves_real_owners(Backend::Simd4, 4, Backend::Simd8, 8, false);
+        assert_late_decline_preserves_real_owners(Backend::Simd4, 3, Backend::Simd4, 4, false);
     }
 
     #[test]
