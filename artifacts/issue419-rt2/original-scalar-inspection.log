@@ -1,0 +1,66 @@
+   Compiling version_check v0.9.5
+   Compiling lexical-util v1.0.7
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.47
+   Compiling bytemuck v1.25.2
+   Compiling syn v1.0.109
+   Compiling once_cell v1.21.4
+   Compiling engine v0.1.0 (/home/bl/misofm/engine-419/crates/engine)
+   Compiling autocfg v1.5.1
+   Compiling smallvec v1.15.2
+   Compiling math v0.1.0 (/home/bl/misofm/engine-419/crates/math)
+   Compiling decoded-char v0.1.1
+   Compiling utf8-decode v1.0.1
+   Compiling locspan v0.8.2
+   Compiling wide v1.6.1
+   Compiling smallstr v0.3.1
+   Compiling ahash v0.7.8
+   Compiling proc-macro-error-attr v1.0.4
+   Compiling proc-macro-error v1.0.4
+   Compiling indexmap v1.9.3
+   Compiling hashbrown v0.12.3
+   Compiling lexical-parse-integer v1.0.6
+   Compiling lexical-write-integer v1.0.6
+   Compiling lexical-parse-float v1.0.6
+   Compiling lexical-write-float v1.0.6
+   Compiling lexical-core v1.0.6
+   Compiling lexical v7.0.5
+   Compiling json-number v0.4.10
+   Compiling locspan-derive v0.6.0
+   Compiling json-syntax v0.12.5
+   Compiling session v0.1.0 (/home/bl/misofm/engine-419/crates/session)
+   Compiling lane v0.1.0 (/home/bl/misofm/engine-419/crates/lane)
+   Compiling effect-contract v0.1.0 (/home/bl/misofm/engine-419/crates/effect-contract)
+   Compiling target-smoke v0.1.0 (/home/bl/misofm/engine-419/crates/target-smoke)
+   Compiling rack v0.1.0 (/home/bl/misofm/engine-419/crates/rack)
+   Compiling graph v0.1.0 (/home/bl/misofm/engine-419/crates/graph)
+   Compiling source v0.1.0 (/home/bl/misofm/engine-419/crates/source)
+    Finished `release` profile [optimized + debuginfo] target(s) in 9.20s
+cfg_status=0
+scalar_cfg_simd128=absent scan_status=1
+extraction_root=/tmp/sol419-objects.0jjST0
+archive_family=engine enumeration_status=0 count=1
+archive=/tmp/sol419-nonlto-target.ORPqmw/wasm32-unknown-unknown/release/deps/libengine-43010e1ae45ff1b3.rlib
+archive_list_status=0 members=3
+archive_extract_status=0 family=engine
+archive_family=source enumeration_status=0 count=1
+archive=/tmp/sol419-nonlto-target.ORPqmw/wasm32-unknown-unknown/release/deps/libsource-0fdfa2234eb4bd89.rlib
+archive_list_status=0 members=3
+archive_extract_status=0 family=source
+archive_family=target_smoke enumeration_status=0 count=1
+archive=/tmp/sol419-nonlto-target.ORPqmw/wasm32-unknown-unknown/release/deps/libtarget_smoke-f8895a03d6c8d18b.rlib
+archive_list_status=0 members=3
+archive_extract_status=0 family=target_smoke
+object_enumeration_status=0 object_count=3 identities=/tmp/sol-419-nonlto-objects.txt
+object=/tmp/sol419-objects.0jjST0/engine/engine-43010e1ae45ff1b3.engine.3cdc5b765e4ae52f-cgu.0.rcgu.o decoder_status=0 diagnostic_bytes=0
+object=/tmp/sol419-objects.0jjST0/engine/engine-43010e1ae45ff1b3.engine.3cdc5b765e4ae52f-cgu.0.rcgu.o atomic_scan_status=1
+object=/tmp/sol419-objects.0jjST0/source/source-0fdfa2234eb4bd89.source.7b5fcfd726247e1-cgu.0.rcgu.o decoder_status=0 diagnostic_bytes=0
+object=/tmp/sol419-objects.0jjST0/source/source-0fdfa2234eb4bd89.source.7b5fcfd726247e1-cgu.0.rcgu.o atomic_scan_status=1
+object=/tmp/sol419-objects.0jjST0/target_smoke/target_smoke-f8895a03d6c8d18b.target_smoke.d196ae6c3bbfe597-cgu.0.rcgu.o decoder_status=0 diagnostic_bytes=0
+object=/tmp/sol419-objects.0jjST0/target_smoke/target_smoke-f8895a03d6c8d18b.target_smoke.d196ae6c3bbfe597-cgu.0.rcgu.o atomic_scan_status=1
+complete opcode inspection PASS: named scalar non-LTO engine/source/target_smoke object set, objects=3
+observation_object=/tmp/sol419-objects.0jjST0/engine/engine-43010e1ae45ff1b3.engine.3cdc5b765e4ae52f-cgu.0.rcgu.o scan_status=0
+observation_object=/tmp/sol419-objects.0jjST0/source/source-0fdfa2234eb4bd89.source.7b5fcfd726247e1-cgu.0.rcgu.o scan_status=0
+observation_object=/tmp/sol419-objects.0jjST0/target_smoke/target_smoke-f8895a03d6c8d18b.target_smoke.d196ae6c3bbfe597-cgu.0.rcgu.o scan_status=1
+observation_object_matches=2

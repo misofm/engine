@@ -47,8 +47,10 @@ use effect_contract::{
     BypassShunt, ChannelSymmetryWitness, EffectControlLane, EffectProcessBlock, ObservationLane,
     ObservationSample, PreparedAutomationSpan, PreparedNativeEffect,
 };
-use lane::kernels::{mix2x2_block, pdc_delay_block, sum_into_block, sum2_block};
-use rack::{BankChain, BankMembers, BankPlaneViews};
+use lane::kernels::{
+    mix2x2_block, ordered_accumulate_block, pdc_delay_block, sum_into_block, sum2_block,
+};
+use rack::{BankChain, BankMembers, BankPlaneViews, FoldCohort};
 
 use crate::{
     GraphBindingBlock, GraphNodeObserverBinding, GraphObservationBlock, GraphPreparedEffect,
@@ -712,6 +714,80 @@ impl BankMembers for ArenaMembers<'_> {
             sum_into_block::<FrameLane>(master_left, left);
             sum_into_block::<FrameLane>(master_right, right);
         }
+    }
+
+    fn fold_cohort(&mut self, cohort: FoldCohort<'_>) {
+        let lane_ids = cohort.lane_ids();
+        let count = lane_ids.len();
+        let frames = cohort.frames();
+        let stride = cohort.stride();
+        let Some(max_lane) = lane_ids.iter().copied().max() else {
+            return;
+        };
+        if lane_ids
+            .iter()
+            .enumerate()
+            .any(|(index, lane)| lane_ids[..index].contains(lane))
+        {
+            return;
+        }
+        let Some(required) = max_lane
+            .checked_add(1)
+            .and_then(|lanes| lanes.checked_mul(stride))
+        else {
+            return;
+        };
+        if count == 0
+            || count > 8
+            || stride < frames
+            || cohort.left().len() < required
+            || cohort.right().len() < required
+            || frames > self.lease.frames()
+            || !self.lease.writes(self.master)
+        {
+            return;
+        }
+        let mut coefficients = [[0.0; 4]; 8];
+        let mut stores = [false; 8];
+        let mut ids = [0usize; 8];
+        for (index, &lane) in lane_ids.iter().enumerate() {
+            ids[index] = lane;
+            let Some(fold) = self.fold.get(lane).copied() else {
+                return;
+            };
+            if index != 0 && fold.store {
+                return;
+            }
+            coefficients[index] = fold.coefficients;
+            stores[index] = fold.store;
+        }
+        let mut left = cohort;
+        for (index, coefficient) in coefficients[..count].iter().enumerate() {
+            let Some((left_plane, right_plane)) = left.planes_mut(ids[index]) else {
+                return;
+            };
+            mix2x2_block::<FrameLane>(left_plane, right_plane, *coefficient);
+        }
+        let mut left_inputs: [&[f32]; 8] = [&[]; 8];
+        let mut right_inputs: [&[f32]; 8] = [&[]; 8];
+        for index in 0..count {
+            let start = ids[index] * stride;
+            left_inputs[index] = &left.left()[start..start + frames];
+            right_inputs[index] = &left.right()[start..start + frames];
+        }
+        let (master_left, master_right) = self.lease.write_stereo(self.master);
+        let initial_store = stores[0];
+        let valid_left = ordered_accumulate_block::<FrameLane>(
+            &mut master_left[..frames],
+            &left_inputs[..count],
+            initial_store,
+        );
+        let valid_right = ordered_accumulate_block::<FrameLane>(
+            &mut master_right[..frames],
+            &right_inputs[..count],
+            initial_store,
+        );
+        debug_assert!(valid_left && valid_right);
     }
 }
 
@@ -2972,6 +3048,103 @@ mod tests {
         leases.pop().expect("the lease")
     }
 
+    /// The compatibility callback is deliberately unusable here: a regression to per-lane
+    /// dispatch must fail rather than quietly producing the same sum.
+    #[test]
+    fn all_active_folded_bank_chain_dispatches_the_real_graph_cohort() {
+        struct Identity;
+        impl BankStage for Identity {
+            fn process(&mut self, _block: BankBlock<'_>) -> Result<(), RenderError> {
+                Ok(())
+            }
+        }
+        struct Probe<'a> {
+            inner: ArenaMembers<'a>,
+            cohorts: usize,
+        }
+        impl BankMembers for Probe<'_> {
+            fn plane(&self, lane: usize) -> (&[f32], &[f32]) {
+                self.inner.plane(lane)
+            }
+            fn plane_mut(&mut self, lane: usize) -> (&mut [f32], &mut [f32]) {
+                self.inner.plane_mut(lane)
+            }
+            fn fold_plane(&mut self, _lane: usize, _left: &mut [f32], _right: &mut [f32]) {
+                panic!("cohort dispatch regressed to fold_plane")
+            }
+            fn fold_cohort(&mut self, cohort: FoldCohort<'_>) {
+                self.cohorts += 1;
+                self.inner.fold_cohort(cohort);
+            }
+        }
+        const FRAMES: usize = 2;
+        let mut lease = stereo_lease(FRAMES, 10);
+        let inputs = [2, 3, 4, 5];
+        let outputs = [6, 7, 8, 9];
+        let coefficients = [1.0, 0.0, 0.0, 1.0];
+        for (lane, input) in inputs.iter().copied().enumerate() {
+            let (left, right) = lease.write_stereo(input);
+            left.fill(lane as f32 + 1.0);
+            right.fill(-(lane as f32 + 1.0));
+        }
+        let mut oracle_lease = stereo_lease(FRAMES, 5);
+        let oracle_routes = [
+            ARENA_BASE + 1,
+            ARENA_BASE + 2,
+            ARENA_BASE + 3,
+            ARENA_BASE + 4,
+        ];
+        for (lane, route) in oracle_routes.iter().copied().enumerate() {
+            let (left, right) = oracle_lease.write_stereo(route);
+            left.fill(lane as f32 + 1.0);
+            right.fill(-(lane as f32 + 1.0));
+            mix2x2_block::<FrameLane>(left, right, coefficients);
+        }
+        reduce_plane(&mut oracle_lease, 0, ARENA_BASE, &oracle_routes);
+        reduce_plane(&mut oracle_lease, 1, ARENA_BASE, &oracle_routes);
+        let (oracle_left, oracle_right) = oracle_lease.read_stereo(ARENA_BASE);
+        let expected_left = oracle_left.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        let expected_right = oracle_right.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        let fold: Vec<FoldLane> = (0..4)
+            .map(|lane| FoldLane {
+                coefficients,
+                store: lane == 0,
+            })
+            .collect();
+        let active = vec![true; 4].into_boxed_slice();
+        let mut chain = BankChain::new(
+            AoSoaScratch::new(BankWidth::Four, FRAMES as u32).expect("scratch"),
+            active.clone(),
+            vec![BankSlot {
+                stage: Box::new(Identity),
+                active_lanes: active.clone(),
+            }],
+        )
+        .expect("chain");
+        chain.arm_fold(active).expect("fold mask");
+        let mut members = Probe {
+            inner: ArenaMembers {
+                lease: &mut lease,
+                inputs: &inputs,
+                outputs: &outputs,
+                fold: &fold,
+                master: ARENA_BASE,
+            },
+            cohorts: 0,
+        };
+        chain.run(&mut members, FRAMES as u32, 0).expect("run");
+        assert_eq!(members.cohorts, 1);
+        let (left, right) = members.inner.lease.read_stereo(ARENA_BASE);
+        assert_eq!(
+            left.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+            expected_left
+        );
+        assert_eq!(
+            right.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+            expected_right
+        );
+    }
+
     /// RT-1: real graph arena members gather one buffer set and scatter directly into another.
     #[test]
     fn arena_members_direct_scatter_preserves_redirected_identity_bits() {
@@ -3099,7 +3272,7 @@ mod tests {
                 oracle_right.iter().map(|value| value.to_bits()).collect(),
             );
 
-            // The epilogue: the same tiles, folded lane by lane in the same order.
+            // The epilogue: the same tiles, in an opening cohort and a continuation cohort.
             let mut folded_lease = stereo_lease(frames, 1);
             let fold: Vec<FoldLane> = coefficients
                 .iter()
@@ -3116,11 +3289,22 @@ mod tests {
                 fold: &fold,
                 master,
             };
-            for (index, tile) in tiles.iter().enumerate() {
-                let mut left = tile.0.clone();
-                let mut right = tile.1.clone();
-                members.fold_plane(index, &mut left, &mut right);
-            }
+            let mut staged_left: Vec<f32> = tiles
+                .iter()
+                .flat_map(|tile| tile.0.iter().copied())
+                .collect();
+            let mut staged_right: Vec<f32> = tiles
+                .iter()
+                .flat_map(|tile| tile.1.iter().copied())
+                .collect();
+            members.fold_cohort(
+                FoldCohort::new(&[0, 1], &mut staged_left, &mut staged_right, frames, frames)
+                    .expect("valid opening cohort"),
+            );
+            members.fold_cohort(
+                FoldCohort::new(&[2], &mut staged_left, &mut staged_right, frames, frames)
+                    .expect("valid continuation cohort"),
+            );
             let (folded_left, folded_right) = folded_lease.read_stereo(master);
             assert_eq!(
                 (
@@ -3137,6 +3321,156 @@ mod tests {
                 "{frames} frames: the epilogue is not the route plus the reduction"
             );
         }
+    }
+
+    #[test]
+    fn a_later_folded_cohort_continues_from_the_live_master_in_d9_order() {
+        for frames in [1_usize, 3, 8, 11] {
+            let master = ARENA_BASE;
+            let fold = [
+                FoldLane {
+                    coefficients: [1.0, 0.0, 0.0, 1.0],
+                    store: true,
+                },
+                FoldLane {
+                    coefficients: [1.0, 0.0, 0.0, 1.0],
+                    store: false,
+                },
+                FoldLane {
+                    coefficients: [1.0, 0.0, 0.0, 1.0],
+                    store: false,
+                },
+            ];
+            let mut lease = stereo_lease(frames, 1);
+            let mut left = [
+                vec![16_777_216.0; frames],
+                vec![1.0; frames],
+                vec![-16_777_216.0; frames],
+            ]
+            .concat();
+            let mut right = [
+                vec![-16_777_216.0; frames],
+                vec![-1.0; frames],
+                vec![16_777_216.0; frames],
+            ]
+            .concat();
+            let mut members = ArenaMembers {
+                lease: &mut lease,
+                inputs: &[],
+                outputs: &[],
+                fold: &fold,
+                master,
+            };
+            members.fold_cohort(
+                FoldCohort::new(&[0], &mut left, &mut right, frames, frames)
+                    .expect("opening cohort"),
+            );
+            members.fold_cohort(
+                FoldCohort::new(&[1, 2], &mut left, &mut right, frames, frames)
+                    .expect("continuation cohort"),
+            );
+            let (actual_left, actual_right) = lease.read_stereo(master);
+            assert!(
+                actual_left
+                    .iter()
+                    .all(|sample| sample.to_bits() == 0.0_f32.to_bits())
+            );
+            assert!(
+                actual_right
+                    .iter()
+                    .all(|sample| sample.to_bits() == 0.0_f32.to_bits())
+            );
+            assert_eq!(
+                (16_777_216.0_f32 + (1.0 - 16_777_216.0)).to_bits(),
+                1.0_f32.to_bits()
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_folded_cohorts_are_rejected_before_route_or_master_mutation() {
+        const FRAMES: usize = 4;
+        let fold = [
+            FoldLane {
+                coefficients: [2.0, 0.0, 0.0, 2.0],
+                store: true,
+            },
+            FoldLane {
+                coefficients: [3.0, 0.0, 0.0, 3.0],
+                store: true,
+            },
+        ];
+        for ids in [&[0, 1][..], &[2][..]] {
+            let mut lease = stereo_lease(FRAMES, 1);
+            let (master_left, master_right) = lease.write_stereo(ARENA_BASE);
+            master_left.fill(19.0);
+            master_right.fill(-23.0);
+            let mut left = vec![5.0_f32; FRAMES * 3];
+            let mut right = vec![-7.0_f32; FRAMES * 3];
+            let before_left: Vec<u32> = left.iter().map(|x| x.to_bits()).collect();
+            let before_right: Vec<u32> = right.iter().map(|x| x.to_bits()).collect();
+            let mut members = ArenaMembers {
+                lease: &mut lease,
+                inputs: &[],
+                outputs: &[],
+                fold: &fold,
+                master: ARENA_BASE,
+            };
+            members.fold_cohort(
+                FoldCohort::new(ids, &mut left, &mut right, FRAMES, FRAMES)
+                    .expect("representable invalid graph metadata"),
+            );
+            assert_eq!(
+                left.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                before_left
+            );
+            assert_eq!(
+                right.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                before_right
+            );
+            let (master_left, master_right) = lease.read_stereo(ARENA_BASE);
+            assert!(
+                master_left
+                    .iter()
+                    .all(|x| x.to_bits() == 19.0_f32.to_bits())
+            );
+            assert!(
+                master_right
+                    .iter()
+                    .all(|x| x.to_bits() == (-23.0_f32).to_bits())
+            );
+        }
+
+        let mut lease = stereo_lease(FRAMES, 1);
+        let (master_left, master_right) = lease.write_stereo(ARENA_BASE);
+        master_left.fill(29.0);
+        master_right.fill(-31.0);
+        let mut left = vec![11.0_f32; FRAMES + 1];
+        let mut right = vec![-13.0_f32; FRAMES + 1];
+        let mut members = ArenaMembers {
+            lease: &mut lease,
+            inputs: &[],
+            outputs: &[],
+            fold: &fold,
+            master: ARENA_BASE,
+        };
+        members.fold_cohort(
+            FoldCohort::new(&[0], &mut left, &mut right, FRAMES + 1, FRAMES + 1)
+                .expect("shape is valid at the public boundary"),
+        );
+        assert!(left.iter().all(|x| x.to_bits() == 11.0_f32.to_bits()));
+        assert!(right.iter().all(|x| x.to_bits() == (-13.0_f32).to_bits()));
+        let (master_left, master_right) = lease.read_stereo(ARENA_BASE);
+        assert!(
+            master_left
+                .iter()
+                .all(|x| x.to_bits() == 29.0_f32.to_bits())
+        );
+        assert!(
+            master_right
+                .iter()
+                .all(|x| x.to_bits() == (-31.0_f32).to_bits())
+        );
     }
 
     /// The first contributor **stores**: a master whose only summand is `-0.0` stays `-0.0`.
@@ -3190,6 +3524,45 @@ mod tests {
                 "frame {frame}: the first contributor's sign was lost on the right"
             );
         }
+
+        let mut cohort_lease = stereo_lease(FRAMES, 1);
+        let (poison_left, poison_right) = cohort_lease.write_stereo(ARENA_BASE);
+        poison_left.fill(17.0);
+        poison_right.fill(-19.0);
+        let mut cohort_members = ArenaMembers {
+            lease: &mut cohort_lease,
+            inputs: &[],
+            outputs: &[],
+            fold: &fold,
+            master: ARENA_BASE,
+        };
+        let mut cohort_left = vec![-0.0_f32; FRAMES];
+        let mut cohort_right = vec![-0.0_f32; FRAMES];
+        cohort_members.fold_cohort(
+            FoldCohort::new(&[0], &mut cohort_left, &mut cohort_right, FRAMES, FRAMES)
+                .expect("valid signed-zero cohort"),
+        );
+        assert!(
+            cohort_left
+                .iter()
+                .all(|value| value.to_bits() == 0x8000_0000)
+        );
+        assert!(
+            cohort_right
+                .iter()
+                .all(|value| value.to_bits() == 0x8000_0000)
+        );
+        let (master_left, master_right) = cohort_lease.read_stereo(ARENA_BASE);
+        assert!(
+            master_left
+                .iter()
+                .all(|value| value.to_bits() == 0x8000_0000)
+        );
+        assert!(
+            master_right
+                .iter()
+                .all(|value| value.to_bits() == 0x8000_0000)
+        );
     }
 
     /// The fan-in-zero fill is skipped under a bound source and kept everywhere else.

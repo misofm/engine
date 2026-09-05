@@ -512,6 +512,54 @@ pub fn sum_into_block<L: Lane>(acc: &mut [f32], x: &[f32]) {
     }
 }
 
+/// Ordered accumulation of one to eight contributors into one planar block.
+///
+/// When `initial_store` is true, the first contributor is copied before the remaining contributors
+/// are added. Otherwise the existing output is the prior master and every contributor is added in
+/// order. All shape checks happen before the first write, and the bounded contributor count keeps
+/// the render path free of unbounded work.
+#[inline(always)]
+pub fn ordered_accumulate_block<L: Lane>(
+    out: &mut [f32],
+    contributors: &[&[f32]],
+    initial_store: bool,
+) -> bool {
+    if contributors.is_empty() || contributors.len() > 8 {
+        return false;
+    }
+    if contributors.iter().any(|input| input.len() != out.len()) {
+        return false;
+    }
+    let vectored = out.len() - out.len() % L::WIDTH;
+    let first = usize::from(initial_store);
+    let mut index = 0;
+    while index < vectored {
+        let mut value = if initial_store {
+            L::load(&contributors[0][index..])
+        } else {
+            L::load(&out[index..])
+        };
+        for input in &contributors[first..] {
+            value = value.add(L::load(&input[index..]));
+        }
+        value.store(&mut out[index..]);
+        index += L::WIDTH;
+    }
+    while index < out.len() {
+        let mut value = if initial_store {
+            <f32 as Lane>::load(&contributors[0][index..])
+        } else {
+            <f32 as Lane>::load(&out[index..])
+        };
+        for input in &contributors[first..] {
+            value = value.add(<f32 as Lane>::load(&input[index..]));
+        }
+        value.store(&mut out[index..]);
+        index += 1;
+    }
+    true
+}
+
 /// Integer-sample plugin-delay compensation over one block: a two-segment slice exchange.
 ///
 /// `ring` is a delay line of `ring.len()` sample words, `cursor` is its write position, and `io` is
