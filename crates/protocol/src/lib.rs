@@ -7,6 +7,7 @@
 mod btlv;
 mod conformance;
 mod controller;
+mod delivery;
 mod message_wire;
 mod model;
 mod queue;
@@ -79,6 +80,11 @@ pub use controller::{
     PreparedStructuralCommand, ProtocolController, ProtocolControllerConfig, ProviderFeatures,
     ReplayCache, ReplayCacheConfig, ReplayCacheError, ReplayCacheResourceReport, ReplayDecision,
     ReplayHit,
+};
+pub use delivery::{
+    AutomationDeliveryControl, AutomationDeliveryRender, CancelComplete, DeliveryError,
+    DeliveryTicket, HandoffResult, PendingAutomation, PreparedAutomationDelivery,
+    PreparedDeliveryCapabilities, TerminalAutomation,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use controller::{MockProvider, MockProviderConfig};
