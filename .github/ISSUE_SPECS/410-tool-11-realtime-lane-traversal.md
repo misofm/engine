@@ -97,3 +97,7 @@ Read-only numbered spec, readiness and checkpoint metadata inspection. No tests,
 ## Luna attempt 1 assignment
 
 Root checkpointed and pushed the independent #420 tranche before this assignment. Luna now owns one coherent implementation pass in the dedicated #410 worktree on the frozen post-#426 base and approved exact producer/consumer tables. Shared-helper implementation remains serialized; no other gate implementation overlaps.
+
+## Luna attempt 1 evidence
+
+Updated realtime and lane gates to source the existing checked helper from the physical script root and preserve producer statuses for unsafe scans, lane-source discovery/sort, and workspace manifest discovery. Existing exclusions, marker floors (12 files/42 regions), lane grammar, lock pins, and dependency semantics remain unchanged. Real realtime and lane checkers plus both mutation suites pass; logs are `/tmp/luna-410-check-realtime.log`, `/tmp/luna-410-test-realtime.log`, `/tmp/luna-410-check-lane.log`, and `/tmp/luna-410-test-lane.log`. No Rust, marker, workflow, artifact, timing, Cargo, Git, or GitHub changes were made.

@@ -9,6 +9,9 @@
 set -euo pipefail
 
 workspace_root="${1:-.}"
+script_directory="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+GATE_FAILURE_PREFIX='lane policy failure'
+source "$script_directory/lib/gate.sh"
 cd "$workspace_root"
 
 fail() {
@@ -92,6 +95,8 @@ detection_matches="$({
 # `min` and `mul_add` are the ones that actually diverge (§3.3); the trait forms are the default.
 # The marker may sit on the call or in the four lines above it, so that it can carry a reason.
 marker_hits=""
+lane_sources_raw="$(gate_find_collect 'lane source discovery' crates/lane/src -name '*.rs' -type f)" || exit $?
+lane_sources="$(gate_sort_lines 'lane source discovery' "$lane_sources_raw")" || exit $?
 while IFS= read -r source; do
     hits="$(awk -v file="$source" '
         {
@@ -110,7 +115,7 @@ while IFS= read -r source; do
         }
     ' "$source")"
     [[ -z "$hits" ]] || marker_hits="$marker_hits$hits"$'\n'
-done < <(find crates/lane/src -name '*.rs' -type f 2>/dev/null | sort)
+done <<<"$lane_sources"
 marker_hits="$(printf '%s' "$marker_hits")"
 [[ -z "$marker_hits" ]] || {
     printf '%s\n' "$marker_hits" >&2
@@ -161,6 +166,9 @@ done
 # hermetic fixture's absent sidecars/, does not exist) as the whole pipeline's status, which
 # would trip `set -e` even though the while loop itself completed and produced correct output
 # from the roots that do exist.
+workspace_roots=(crates hosts tools)
+[[ -d sidecars ]] && workspace_roots+=(sidecars)
+workspace_manifests="$(gate_find_collect 'workspace manifest discovery' "${workspace_roots[@]}" -name Cargo.toml -type f)" || exit $?
 workspace_crate_names="$(
     while IFS= read -r crate_manifest; do
         awk '
@@ -173,7 +181,7 @@ workspace_crate_names="$(
                 print value
             }
         ' "$crate_manifest"
-    done < <(find crates hosts tools sidecars -name Cargo.toml -type f 2>/dev/null)
+    done <<<"$workspace_manifests"
 )"
 while IFS= read -r dependency; do
     [[ -n "$dependency" ]] || continue

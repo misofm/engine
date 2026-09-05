@@ -3,6 +3,9 @@
 set -euo pipefail
 
 workspace_root="${1:-.}"
+script_directory="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+GATE_FAILURE_PREFIX='realtime policy failure'
+source "$script_directory/lib/gate.sh"
 cd "$workspace_root"
 
 fail() {
@@ -22,10 +25,8 @@ realtime_root="crates/engine/src/realtime"
 # it can measure the parser/model-builder high-water mark; it changes no allocation operation and
 # is the only non-FFI web-host file admitted here.
 # `docs/REALTIME_DEPENDENCY_POLICY.md`, "Unsafe-code ownership", carries the full justification.
-unsafe_matches="$({
-    rg -n 'unsafe[[:space:]]+(impl|fn|extern)|unsafe[[:space:]]*\{' \
-        crates hosts tools sidecars --glob '*.rs' || true
-} | rg -v '^crates/engine/src/realtime/spsc.rs:|^crates/engine/src/realtime/disjoint.rs:|^crates/lane/src/softfma.rs:|^crates/lane/src/fpenv.rs:|^crates/builtins-compiler/tests/allocation_tracker.rs:|^crates/session/tests/allocation_budget.rs:|^crates/soft-clip/tests/allocation.rs:|^crates/transient-shaper/tests/allocation.rs:|^crates/capi/src/ffi.rs:|^crates/capi/tests/resource_lifecycle.rs:|^crates/effect-package/src/ffi.rs:|^crates/effect-package/tests/package_allocation.rs:|^crates/true-peak-limiter/tests/allocation.rs:|^crates/multiband-compressor/tests/no_alloc_render.rs:|^crates/effect-compiler/tests/migration_terminal.rs:|^hosts/host-web/src/ffi.rs:|^hosts/host-web/tests/boot_transient_budget.rs:|^tools/bench-support/src/alloc.rs:|^tools/audit/src/capi.rs:|^tools/native-pcm-runner/src/lib.rs:|^tools/bench/src/protocol.rs:|^tools/wasm-gate-guest/src/lib.rs:|^tools/wasm-console-guest/src/lib.rs:' || true)"
+unsafe_raw="$(gate_scan_collect 'unsafe source scan' 'unsafe[[:space:]]+(impl|fn|extern)|unsafe[[:space:]]*\{' '*.rs' crates hosts tools sidecars)" || exit $?
+unsafe_matches="$(gate_filter_exclude 'unsafe source exclusions' '^crates/engine/src/realtime/spsc.rs:|^crates/engine/src/realtime/disjoint.rs:|^crates/lane/src/softfma.rs:|^crates/lane/src/fpenv.rs:|^crates/builtins-compiler/tests/allocation_tracker.rs:|^crates/session/tests/allocation_budget.rs:|^crates/soft-clip/tests/allocation.rs:|^crates/transient-shaper/tests/allocation.rs:|^crates/capi/src/ffi.rs:|^crates/capi/tests/resource_lifecycle.rs:|^crates/effect-package/src/ffi.rs:|^crates/effect-package/tests/package_allocation.rs:|^crates/true-peak-limiter/tests/allocation.rs:|^crates/multiband-compressor/tests/no_alloc_render.rs:|^crates/effect-compiler/tests/migration_terminal.rs:|^hosts/host-web/src/ffi.rs:|^hosts/host-web/tests/boot_transient_budget.rs:|^tools/bench-support/src/alloc.rs:|^tools/audit/src/capi.rs:|^tools/native-pcm-runner/src/lib.rs:|^tools/bench/src/protocol.rs:|^tools/wasm-gate-guest/src/lib.rs:|^tools/wasm-console-guest/src/lib.rs:' "$unsafe_raw")" || exit $?
 [[ -z "$unsafe_matches" ]] || {
     printf '%s\n' "$unsafe_matches" >&2
     fail "unsafe code exists outside the issue-approved ownership/audit files"
