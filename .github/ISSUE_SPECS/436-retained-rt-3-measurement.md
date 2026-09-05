@@ -36,3 +36,7 @@ Allowed changes: this numbered spec/evidence, reciprocal #420/tracker accounting
 ## Delivered product and frozen execution checkout
 
 PR #437 delivered #420 as `c7469e28d52a716339b6f3119a57b69afb3411f1` after exact-head Astra PASS and required qualification SUCCESS. Root verified the merged tree is byte-identical to the reviewed product head `cb8cc2bf55ae78f83548e9479dc86dde5a885626` and reuses the isolated `/home/bl/misofm/engine-420` checkout on `codex/436-retained-rt3-measurement`, retaining its existing prepared binary. This evidence-only checkpoint precedes fresh source/binary/manifest/readiness verification and the sole authorized invocation. #429 implementation has not started and local test/build work is terminal; root coordinates this bounded quiet window. Authority remains unused at this checkpoint.
+
+## Post-delivery readiness observation
+
+At execution checkpoint `100d51205571ce97b40af87f7486f79f695509b3`, checked source comparison and all 48 retained manifest entries passed. The existing runner binary matched SHA-256 `53dce85d8ff683693598da8dce79195ecfad1ad76300b68bb348196c00f81bab`; it was 2,304 seconds old and CPU 63 affinity was available. Load then read 1.18, above the unchanged 0.50 ceiling, so readiness terminated exit 1 before sibling sampling or runner invocation. Root ended this bounded quiet window and released independent #429 implementation. Runner and workload invocations remain zero. Exact observation is retained in `artifacts/issue420-qualification/readiness-436-deferred.log`; no timing result or refusal disposition exists.
