@@ -77,3 +77,19 @@ Review performed source/spec inspection only: no tests, Cargo, timing, repositor
 ## Post-prerequisite base freeze
 
 PR #426 merged as `4557865ee1fa8f8381ed75e7eace91d15b649d27`; #423 and parent #401 are verified CLOSED. Root freezes this merged main as the #410 source base and integrates it normally into the existing dedicated branch. Checked marker enumeration on this base finds exactly 12 marked Rust files, 42 BEGIN and 42 END markers, so the frozen floors remain 12/42. Preserve all four accepted dependency modes and existing helper tests. Sol reviewed base readiness in `/tmp/sol-410-base-readiness.md`; Astra reconfirms this numbered amendment before Luna assignment. Luna is currently completing the independently scoped #420 attempt; no #410 implementation has begun.
+
+## Astra frozen-base approval
+
+# Astra #410 frozen-base approval
+
+**PASS for numbered planning checkpoint `5e0cf62e6e036eaa536790f2c22659bf1494e366`. Root may assign the bounded Luna attempt after its current tranche is checkpointed.** This is scope/base approval, not source or qualification acceptance.
+
+The post-prerequisite amendment freezes merged main `4557865ee1fa8f8381ed75e7eace91d15b649d27`, records #423/#401 closure and retains the approved #417 → #423 → #410 → #411 → #412 serialization. The catalog now correctly includes rack/default, plain, plain-target and graph; #417's no-helper-change fact and #423's narrow graph extension replace the stale anticipation. Existing graph-mode source/tests must remain intact.
+
+The two-gate smallest outcome and exact producer/consumer tables remain valid. Lock/package-name extraction is bespoke grammar, not a dependency-mode substitution; rg filename/count/fixed/membership modes retain explicit checked local handling. Valid empty populations, required roots/aggregates, marker grammar and five-line lane window remain as briefed. Root's current 12-file/42-BEGIN/42-END enumeration supports unchanged 12/42 floors; no new runtime markers are authorized.
+
+Sol's readiness findings introduce no source/API gap or new scope. Preserve operation/tool-status diagnostics while respecting existing helper return conventions. Selective late-consumer/otherwise-valid partial failures and actual intended-assertion counter-mutants remain mandatory; generic first-tool errors or output-inequality controls do not substitute. Both focused suites and helper tests already have required CI wiring, so no workflow edit or duplicate call is needed.
+
+No further split or permission step is required after root assignment. Luna gets one coherent implementation attempt, root checkpoints/pushes, Astra reviews; Sol retries only after FAIL, three attempts maximum. Full unchanged-count workspace and actual-head PR/CI gates follow focused PASS. No runtime, manifest, artifact or timing work belongs here.
+
+Read-only numbered spec, readiness and checkpoint metadata inspection. No tests, Cargo, timing, source or GitHub mutation performed.
