@@ -121,3 +121,37 @@ Sol added the frozen plain-section dependency declaration mode for effect-runtim
 Directed fixtures now cover compact/spaced bare/workspace declarations with dev/target exclusion, default-parser stability, collect/required/filter error classes with partial output, protocol required and optional-empty surfaces plus both predicate failures, host required roots, non-Cargo TOML exclusion and partial grep failure, effect package and helper filter failures, and builtins required root plus unsafe producer/filter failures. Existing mutations remain green.
 
 Focused evidence is green in `/tmp/engine-406-attempt2-{gate-lib,protocol,effect,host,builtins}.log`; real-tree checks are green in `/tmp/engine-406-attempt2-check-{protocol,effect,host,builtins}.log`. `bash -n` over the five implementation scripts and five affected suites and `git diff --check` pass. No full workspace, benchmark, artifact, Git, or GitHub operation was performed. This is a checkpoint-ready implementation record awaiting root's exact-path commit/push and Astra attempt 2 verdict; it is not acceptance.
+
+## Astra attempt 2 verdict — FAIL; final Sol attempt 3
+
+# Astra #406 attempt 2 adversarial review
+
+**FAIL at exact pushed `da899780e893cef7767d00190b46424a6faf8d75`: the source correction is substantially complete, but the frozen directed error/counter-mutation acceptance is still incomplete. One final bounded Sol attempt remains.** Preserve this checkpoint; no full-workspace/PR promotion yet.
+
+## What is resolved
+
+The plain declaration mode now handles compact/spaced bare/workspace keys and excludes subsequent dev/target sections, while retaining the original rack default. Both protocol predicates check their producers. The assigned effect and builtins source bans, allowlist/exemption filters and positive queries now use checked operations. Effect helper source/count operations and both host occurrence counts are checked; the host glob is restored to `Cargo.toml`, and its exact grep queries reject an error even after an expected `1`. Source/error paths examined do not reveal another silent-pass defect. Existing real/focused green logs corroborate these corrections.
+
+## Remaining acceptance failures
+
+1. **Required-search execution failure is untested and its counter-mutation escapes.** `test-gate-lib.sh` tests required no-match only, with no required match/read-error/partial-output case. I copied only the relevant scripts to a disposable tree and counter-mutated `gate_scan_required` to return success on every rg status >=2. The helper suite still exited 0 (`gate library tests: ok`), recorded in `/tmp/astra-406-required-counter.log`. The frozen contract explicitly requires discriminating this mechanism; mere failure assertions on unrelated fixtures are insufficient. No repository mutation was made.
+
+2. **The new count producer has no directed failure coverage.** Neither helper tests nor host/effect fixtures inject `wc` failure after emitting the expected count. Host's new grep stub covers only the first exact grep query; no directed failure reaches either rg occurrence producer. Effect's helper fixture reaches the exemption filter, but not a helper source failure on a zero-count row or the downstream count producer. These are specifically named acceptance risks: useful partial output must not satisfy a count.
+
+3. **Several required boundary fixtures still do not reach their claimed surface.** Protocol deletes the whole controller file instead of also removing the required trait from an otherwise-valid file; it lacks the present-but-unreadable optional message source and checked awk failures. Builtins deletes the entire crate including its manifest, so its red case exits at dependency extraction rather than proving traversal of a missing required source surface. Its reverse and two positive search operations have no directed search-error fixtures. Effect has no otherwise-valid required-root deletion fixture. Existing tests and new producer/filter cases do not cover these missing branches.
+
+4. **The reported partial-output fixtures mostly emit a diagnostic, not usable producer output.** Several gate stubs print the literal `valid partial output` to stderr. Because the new helpers combine stderr/stdout this does exercise error classification, but it does not prove the specific old downstream behavior of accepting a correct allowlisted row/count before a failed producer. Use a real plausible matching row on stdout followed by nonzero exit for representative source/filter cases, and an exact expected count followed by error for count cases. The shared collect/filter error cases are useful; retain them.
+
+5. **No new-helper counter-mutation evidence is delivered.** Existing mutation tests insert forbidden source text; those are policy mutations, not counter-mutations of the changed error handling. Add or record one intentional acceptance mutant for each new failure mechanism (collect, required, filter, count, and the plain-mode/default distinction where appropriate), demonstrating that the focused assertions reject it. The required-search mutant above currently does not. Extraction's existing error checks remain useful, but the frozen plain-mode/sort requirement also needs a sort stub emitting valid partial sorted output before failing, under both caller pipefail settings and conditional invocation.
+
+## Final Sol pass: bounded completion only
+
+Keep the accepted gate/helper implementation unless a directed fixture demonstrates a concrete defect. Complete the missing directed cases in the existing five suites, with only minimal correction if one exposes a bug. No new test framework, gate, workflow entry point, package scan expansion, parser generalization, shared #407 functionality, Rust, artifact or benchmark work. The required helper-suite CI wiring already exists.
+
+Use targeted shims that delegate every unrelated invocation to the real tool, so the named operation is reached with otherwise-valid metadata. Assert the intended diagnostic class and explicitly reject unexpected success. Cover the two host source-count operations, helper source/zero pin and count error, required match/absent/read-error behavior, protocol trait deletion/optional-present read failure/awk failure, and builtins reverse/positive search errors. Delete only source paths when proving source traversal. A small table of same-mechanism cases is sufficient; no requirement to duplicate all 17 diagnostic strings or every manifest row. Preserve optional-empty positives, current positive scopes and all existing tests.
+
+Counter-mutate the implementation in disposable copies or a restored test fixture, prove each newly asserted error mechanism goes red, and record exact outcomes. Run the five affected suites and four real gates, syntax and diff checks, then stop for root's checkpoint and ONE final Astra verdict. Attempt 3 FAIL means hard stop/rescope, not a fourth repair. Full workspace and actual PR/required CI remain later gates.
+
+Review used source, completed logs and the tiny disposable shell counter-mutation only; no Cargo, Git, GitHub, timing or repository edits.
+
+Root authorizes this bounded final test-completion pass. No other implementation expansion or full-workspace promotion is authorized.
