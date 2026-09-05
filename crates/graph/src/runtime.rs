@@ -3040,8 +3040,12 @@ mod tests {
     use super::*;
     use core::any::Any;
     use lane::kernels::sum2_block;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
 
-    struct DecliningPairOwner;
+    struct DecliningPairOwner(Arc<AtomicUsize>);
     fn decline_pair(
         left: crate::BuiltinProcessor,
         right: crate::BuiltinProcessor,
@@ -3060,15 +3064,19 @@ mod tests {
         }
         fn process(
             &mut self,
-            _: &mut [f32],
-            _: &mut [f32],
+            left: &mut [f32],
+            right: &mut [f32],
             _: u32,
             _: u64,
         ) -> Result<(), RenderError> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            for sample in left.iter_mut().chain(right.iter_mut()) {
+                *sample += 1.0;
+            }
             Ok(())
         }
     }
-    struct PlainPairOwner;
+    struct PlainPairOwner(Arc<AtomicUsize>);
     impl GraphPreparedBuiltinBankProcessor for PlainPairOwner {
         fn as_any(&self) -> &dyn Any {
             self
@@ -3078,11 +3086,15 @@ mod tests {
         }
         fn process(
             &mut self,
-            _: &mut [f32],
-            _: &mut [f32],
+            left: &mut [f32],
+            right: &mut [f32],
             _: u32,
             _: u64,
         ) -> Result<(), RenderError> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            for sample in left.iter_mut().chain(right.iter_mut()) {
+                *sample *= 2.0;
+            }
             Ok(())
         }
     }
@@ -3122,6 +3134,8 @@ mod tests {
                 scratch: AoSoaScratch::new(effect_contract::BankWidth::Four, 8).expect("scratch"),
             }
         };
+        let first_calls = Arc::new(AtomicUsize::new(0));
+        let second_calls = Arc::new(AtomicUsize::new(0));
         let mut parts = RuntimeParts::new(
             &spec,
             Vec::new(),
@@ -3130,8 +3144,11 @@ mod tests {
             Vec::new(),
             Vec::new(),
             vec![
-                bank(fader, Box::new(DecliningPairOwner)),
-                bank(matrix, Box::new(PlainPairOwner)),
+                bank(
+                    fader,
+                    Box::new(DecliningPairOwner(Arc::clone(&first_calls))),
+                ),
+                bank(matrix, Box::new(PlainPairOwner(Arc::clone(&second_calls)))),
             ],
             Vec::new(),
             Vec::new(),
@@ -3139,11 +3156,37 @@ mod tests {
             Vec::new(),
             8,
         );
-        let _chain = parts.chain_for(&[Membership::Builtin(0), Membership::Builtin(1)], 1);
+        let mut chain = parts.chain_for(&[Membership::Builtin(0), Membership::Builtin(1)], 1);
         assert!(
             parts.builtin_banks.iter().all(Option::is_none),
             "both original owners moved once"
         );
+        const FRAMES: usize = 2;
+        let mut lease = stereo_lease(FRAMES, 3);
+        lease.write_stereo(1).0.copy_from_slice(&[1.0, 2.0]);
+        lease.write_stereo(1).1.copy_from_slice(&[-1.0, -2.0]);
+        let mut members = ArenaMembers {
+            lease: &mut lease,
+            inputs: &[1],
+            outputs: &[2],
+            fold: &[],
+            master: 0,
+        };
+        chain
+            .run(&mut members, FRAMES as u32, 0)
+            .expect("declined chain render");
+        assert_eq!(
+            first_calls.load(Ordering::Relaxed),
+            1,
+            "first returned owner executes"
+        );
+        assert_eq!(
+            second_calls.load(Ordering::Relaxed),
+            1,
+            "second returned owner executes"
+        );
+        assert_eq!(members.lease.read_stereo(2).0, &[4.0, 6.0]);
+        assert_eq!(members.lease.read_stereo(2).1, &[0.0, -2.0]);
     }
 
     /// The node's cached witness and the line's own answer are the same fact (#210 phase 2).

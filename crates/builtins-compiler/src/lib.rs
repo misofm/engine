@@ -5529,6 +5529,102 @@ mod tests {
     }
 
     #[test]
+    fn declined_factory_owners_keep_queued_state_and_render_in_original_order() {
+        let _guard = PAIR_WITNESS_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut declined = pair_fixture(Backend::Simd4, 4);
+        let mut oracle = pair_fixture(Backend::Simd4, 4);
+        let fader_record = TrackFaderRecord::FaderDb {
+            lanes: BuiltinLaneSelector::Left,
+            db: -9.0,
+            smoothing_samples: 3,
+        };
+        let matrix_record = TrackControlRecord {
+            matrix: Matrix2x2 {
+                ll: 0.5,
+                lr: 0.25,
+                rl: -0.5,
+                rr: 0.75,
+            },
+            smoothing_samples: 3,
+        };
+        declined.separate_fader_tx.try_push(fader_record).unwrap();
+        declined.separate_matrix_tx.try_push(matrix_record).unwrap();
+        oracle.separate_fader_tx.try_push(fader_record).unwrap();
+        oracle.separate_matrix_tx.try_push(matrix_record).unwrap();
+        let saved_fader =
+            builtins::test_support::fader_bank_lane_words(&declined.separate_fader.bank, 0);
+        let saved_matrix =
+            builtins::test_support::matrix_bank_lane_words(&declined.separate_matrix.bank, 0);
+        let returned = make_fader_matrix(
+            Box::new(declined.separate_matrix),
+            Box::new(declined.separate_fader),
+        )
+        .err()
+        .expect("reversed concrete owners decline");
+        let mut matrix = returned
+            .0
+            .into_any()
+            .downcast::<MatrixBankProcessor>()
+            .expect("same matrix owner");
+        let mut fader = returned
+            .1
+            .into_any()
+            .downcast::<FaderBankProcessor>()
+            .expect("same fader owner");
+        assert_eq!(
+            builtins::test_support::fader_bank_lane_words(&fader.bank, 0),
+            saved_fader,
+            "decline does not reconstruct fader state"
+        );
+        assert_eq!(
+            builtins::test_support::matrix_bank_lane_words(&matrix.bank, 0),
+            saved_matrix,
+            "decline does not reconstruct matrix state"
+        );
+
+        let mut returned_left = [0.25_f32; 8];
+        let mut returned_right = [-0.5_f32; 8];
+        let mut oracle_left = returned_left;
+        let mut oracle_right = returned_right;
+        fader
+            .process(&mut returned_left, &mut returned_right, 2, 0)
+            .unwrap();
+        matrix
+            .process(&mut returned_left, &mut returned_right, 2, 0)
+            .unwrap();
+        oracle
+            .separate_fader
+            .process(&mut oracle_left, &mut oracle_right, 2, 0)
+            .unwrap();
+        oracle
+            .separate_matrix
+            .process(&mut oracle_left, &mut oracle_right, 2, 0)
+            .unwrap();
+        assert_eq!(
+            returned_left.map(f32::to_bits),
+            oracle_left.map(f32::to_bits),
+            "returned owners preserve left PCM and order"
+        );
+        assert_eq!(
+            returned_right.map(f32::to_bits),
+            oracle_right.map(f32::to_bits),
+            "returned owners preserve right PCM and order"
+        );
+        assert_eq!(
+            builtins::test_support::fader_bank_lane_words(&fader.bank, 0),
+            builtins::test_support::fader_bank_lane_words(&oracle.separate_fader.bank, 0),
+            "queued fader record remains owned"
+        );
+        assert_eq!(
+            builtins::test_support::matrix_bank_lane_words(&matrix.bank, 0),
+            builtins::test_support::matrix_bank_lane_words(&oracle.separate_matrix.bank, 0),
+            "queued matrix record remains owned"
+        );
+    }
+
+    #[test]
     fn control_delivery_metadata_reaches_both_sealed_strip_bank_owners() {
         let compiled = n_track_session(8);
         let classes = SessionPoolClasses::from_session(&compiled);
