@@ -211,3 +211,25 @@ The active implementation separately captures the main find/sort/SHA/awk/jq/ISA 
 Review was source/diff/spec inspection only. Root's retained existing-suite result is credited only as baseline regression evidence. No tests, builds, timing, source changes or Git/GitHub mutations were performed by this reviewer. Only this /tmp verdict was written. Luna attempt1 is now one FAIL; Sol attempts2/3 remain under the existing hard stop. #404/#306/#349 remain open and delivered #427 is not reopened.
 
 Root assigns Sol attempt 2 for these four finite correction groups under the original complete workspace scope. One coherent pass and one adversarial verdict; attempt 3 remains available only after a FAIL, then hard stop/rescope. No further Luna revision is authorized under the current user workflow. Root owns the exact-path checkpoint and push before additional work.
+
+## Sol attempt 2 implementation evidence
+
+Sol completed the four assigned correction groups from source `839b21eb0e9d16bdd4938b5546ab20568d255eeb` on `codex/404-workspace-discovery`, with changes confined to the checker, its existing suite, and this record. Root still owns the checkpoint, push, remote synchronization, and integration of the later documentation-only main commit.
+
+The checker now keeps discovery results in checked capture files rather than unchecked `cat`/command-substitution exports. Collective Cargo emptiness is tested on the completed find output before sorting, while optional npm populations remain empty-valid. An absent `[[bin]]` produces no rows and remains valid; an explicit empty bin name produces a row and is rejected. Manifest directory names use shell path expansion. The disabled duplicate implementation, unused checked sort/search helpers, and duplicate comment stripper were removed.
+
+All required positive searches now run to completion without quiet mode while retaining their original expressions and whole-line behavior. Git fallback uses `LC_ALL=C`, exact exit-128/stdout/stderr classification, and rejects explicit `GIT_DIR`/`GIT_WORK_TREE`; tracked manifest sorting is again `LC_ALL=C`. Scratch capture storage is fixed outside the inspected fixture. The NUL listing stays file-backed through conversion, normalization, filtering, and sorting, with each stage checked independently.
+
+The expanded fixture suite binds directed failures to all five discovery populations and their sorts where applicable; SHA/digest extraction; both jq predicates; workspace, fuzz, inventory, later package and ISA target positive searches; package/lib/bin extraction; Git classification/listing and non-Git fallback; NUL conversion, normalization, manifest filtering/sorting; comment stripping and retired scan; and each optional ISA source/filter/allowlist/late-build stage. Each assertion requires its operation-specific diagnostic, injected status 73, and unique stderr sentinel. Complete-valid-output/error cases are used where meaningful; empty/error is used for intrinsically empty valid results. Positive cases cover non-Git and real Git NUL listings, a nested manifest, absent/empty/comment-only/approved ISA configurations, optional lib/bin absence, one empty Cargo root with a nonempty collective population, and explicit empty-bin rejection. Missing hosts/tools/sidecars are real traversal failures. Because the required legal prelude itself is `crates/math/LICENSE-libm.txt`, a physically absent `crates/` cannot reach Cargo discovery; that single logically unreachable branch uses the same find wrapper after a valid prelude and records the precise discovery failure rather than invalidating LICENSE evidence first.
+
+Two disposable copies of the actual production checker swallow, respectively, a clean-looking collective Cargo discovery failure and a late global-build scan error. The same targeted directed assertion returns the reserved unexpected-success status 97 for each mutant; the suite verifies both exact patches before execution. No shared-helper mutant campaign was added.
+
+Focused verification, all with `PATH=/home/bl/.cargo/bin:$PATH`, is retained in `/tmp/engine-404-sol2-*.log` where output applies:
+
+- `bash -n scripts/check-workspace-policy.sh scripts/test-workspace-policy.sh` — exit 0.
+- `bash scripts/check-workspace-policy.sh .` — exit 0, `workspace policy: ok` (`/tmp/engine-404-sol2-workspace.log`).
+- `bash scripts/test-workspace-policy.sh` — exit 0, including both production status-97 controls and the unchanged helper suite (`/tmp/engine-404-sol2-suite.log`).
+- `bash scripts/test-gate-lib.sh` — exit 0 independently (`/tmp/engine-404-sol2-helper.log`).
+- `git diff --check` — exit 0.
+
+No Rust/full-workspace, Wasm, browser, artifact, benchmark, timing, Git, GitHub, push, or CI action was performed. This is a coherent focused-green source checkpoint awaiting root commit/push and Astra source review; it does not claim PASS, merge, remote synchronization, or issue closure.

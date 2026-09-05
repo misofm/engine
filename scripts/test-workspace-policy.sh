@@ -470,6 +470,216 @@ allow_approved_isa_pin "$scratch_root/approved-isa-pin"
 allow_sidecar_valid "$scratch_root/sidecar-valid"
 allow_retired_name_in_comment "$scratch_root/retired-name-comment"
 
+# Issue #404's finite producer table. Each row names one external stage and injects exit 73 after
+# either no output or the real tool's complete, policy-valid output. Unselected calls always run
+# the saved real executable. The checker must report the selected operation, status and sentinel;
+# an unrelated rejection cannot satisfy the assertion.
+make_fault_shim() {
+    local shim="$1" tool="$2" match="$3" occurrence="$4" mode="$5" label="$6"
+    local real_tool
+    real_tool="$(command -v "$tool")"
+    mkdir -p "$shim"
+    printf '%s\n' \
+        '#!/usr/bin/env bash' \
+        'set -u' \
+        "real_tool='$real_tool'" \
+        "match='$match'" \
+        "occurrence='$occurrence'" \
+        "mode='$mode'" \
+        "label='$label'" \
+        'state=${WORKSPACE_FAULT_STATE:?}' \
+        'args="$*"' \
+        'if [[ "$args" == *"$match"* ]]; then' \
+        '  count=0; [[ ! -f "$state" ]] || count=$(<"$state")' \
+        '  count=$((count + 1)); printf "%s\n" "$count" >"$state"' \
+        '  if (( count == occurrence )); then' \
+        '    [[ "$mode" != complete ]] || "$real_tool" "$@"' \
+        '    printf "WORKSPACE_FAULT:%s:status=73\n" "$label" >&2' \
+        '    exit 73' \
+        '  fi' \
+        'fi' \
+        'exec "$real_tool" "$@"' \
+        >"$shim/$tool"
+    chmod +x "$shim/$tool"
+}
+
+assert_fault_rejected() {
+    local name="$1" tool="$2" match="$3" occurrence="$4" mode="$5" expected="$6"
+    local root="$scratch_root/fault-$name" shim="$scratch_root/shim-$name" output rc
+    create_valid_fixture "$root"
+    [[ "$name" != isa-* ]] || {
+        mkdir -p "$root/.cargo"
+        printf '%s\n' "[target.'cfg(target_arch = \"x86_64\")']" \
+            'rustflags = ["-C", "target-feature=+avx2,+fma"]' >"$root/.cargo/config.toml"
+    }
+    [[ "$name" != npm-* ]] || {
+        mkdir -p "$root/sdk"
+        printf '%s\n' '{"name":"fixture","license":"Apache-2.0"}' >"$root/sdk/package.json"
+        printf '%s\n' '{"packages":{"":{"license":"Apache-2.0"}}}' >"$root/sdk/package-lock.json"
+    }
+    [[ "$name" != git-list ]] || { git -C "$root" init -q; git -C "$root" add .; }
+    make_fault_shim "$shim" "$tool" "$match" "$occurrence" "$mode" "$name"
+    output="$(WORKSPACE_FAULT_STATE="$shim/state" PATH="$shim:$PATH" \
+        bash "$policy_script" "$root" 2>&1)" && rc=0 || rc=$?
+    if (( rc == 0 )); then
+        printf 'directed fault unexpectedly passed: %s\n' "$name" >&2
+        return 97
+    fi
+    [[ "$output" == *"$expected"* && "$output" == *"status 73"* && \
+       "$output" == *"WORKSPACE_FAULT:$name:status=73"* ]] || {
+        printf 'directed fault %s had wrong payload/status: %s\n' "$name" "$output" >&2
+        exit 96
+    }
+}
+
+# Population discovery and sorting: npm manifests, npm locks, collective Cargo manifests,
+# retired directory stubs and shallow fingerprints. Empty/error is used for intrinsically empty
+# valid populations; complete/error proves a valid prefix cannot override producer failure.
+fault_cases=(
+ 'npm-find-empty|find|-name package.json|1|empty|find npm-manifests failed'
+ 'npm-find-complete|find|-name package.json|1|complete|find npm-manifests failed'
+ 'npm-sort|sort|npm-manifests.out|1|complete|sort npm manifests failed'
+ 'npm-lock-find|find|-name package-lock.json|1|complete|find npm-locks failed'
+ 'npm-lock-sort|sort|npm-locks.out|1|complete|sort npm locks failed'
+ 'cargo-find-empty|find|crates hosts tools sidecars|1|empty|find cargo-manifests failed'
+ 'cargo-find-complete|find|crates hosts tools sidecars|1|complete|find cargo-manifests failed'
+ 'cargo-sort|sort|cargo-manifests.out|1|complete|sort Cargo manifests failed'
+ 'retired-find|find|-name flac-decoder|1|empty|retired-directory discovery failed'
+ 'fingerprint-find|find|-mindepth 2 -maxdepth 2|1|empty|fingerprint discovery failed'
+ 'sha-producer|sha256sum|LICENSE|1|complete|sha256sum LICENSE failed'
+ 'sha-extractor|awk|license_sha256.out|1|complete|LICENSE digest extraction failed'
+ 'npm-jq|jq|.license ==|1|complete|jq ./sdk/package.json failed'
+ 'npm-lock-jq|jq|.packages[""].license|1|complete|jq ./sdk/package-lock.json failed'
+ 'workspace-search|rg|license = "Apache-2.0" Cargo.toml|1|complete|rg workspace-license failed'
+ 'fuzz-search|rg|license = "Apache-2.0" fuzz/Cargo.toml|1|complete|rg fuzz-license failed'
+ 'inventory-search|rg|LICENSE-libm|1|complete|rg libm-inventory failed'
+ 'package-search-late|rg|hosts/binary/Cargo.toml|1|complete|rg package-license-'
+ 'package-extract-late|awk|-v section=package|2|complete|package name extraction hosts/binary/Cargo.toml failed'
+ 'lib-extract|awk|-v section=lib|1|empty|lib name extraction crates/library/Cargo.toml failed'
+ 'bin-extract|awk|-v section=bin|2|complete|bin name extraction hosts/binary/Cargo.toml failed'
+ 'git-classify|git|rev-parse --is-inside-work-tree|1|empty|git repository classification failed'
+ 'git-list|git|ls-files -z|1|complete|git tracked-path listing failed'
+ 'fallback-list|find|-type f -not -path ./.git/*|1|complete|fallback tracked-path find failed'
+ 'nul-convert|tr|\0|1|complete|tracked-path NUL conversion failed'
+ 'path-normalize|sed|nul-to-lines.out|1|complete|tracked-path normalization failed'
+ 'manifest-filter|awk|-F/|1|complete|tracked Cargo manifest filter failed'
+ 'manifest-sort|sort|cargo-path-filter.out|1|complete|tracked Cargo manifest sort failed'
+ 'comment-strip|awk|in_string=0; out=|2|complete|comment stripping crates/library/Cargo.toml failed'
+ 'retired-scan|rg|strip-comments.out|1|complete|retired identity scan Cargo.toml failed'
+ 'isa-source|rg|target-cpu|1|complete|ISA directive search failed'
+ 'isa-comment-filter|rg|:[0-9]+:[[:space:]]*#|1|complete|ISA comment filtering failed'
+ 'isa-allowlist|rg|^\.cargo/config|1|complete|ISA allowlist filtering failed'
+ 'isa-target-search|rg|target_arch = "x86_64"|1|complete|rg isa-target-scope failed'
+ 'isa-build-late|rg|^\[build\]|1|empty|global build-table search failed'
+)
+for fault_case in "${fault_cases[@]}"; do
+    IFS='|' read -r name tool match occurrence mode expected <<<"$fault_case"
+    assert_fault_rejected "$name" "$tool" "$match" "$occurrence" "$mode" "$expected"
+done
+
+# Empty optional sections differ from an explicitly empty name: absence is valid, while a parsed
+# empty [[bin]] name remains a policy violation. One required root may contain no package while
+# the collective Cargo population remains nonempty.
+no_sections="$scratch_root/no-sections"
+create_valid_fixture "$no_sections"
+sed -i '/^\[lib\]$/,/^\[features\]$/ { /^\[features\]$/!d; }' "$no_sections/crates/library/Cargo.toml"
+bash "$policy_script" "$no_sections" >/dev/null
+
+empty_root="$scratch_root/empty-root"
+create_valid_fixture "$empty_root"
+rm -rf -- "$empty_root/hosts/binary"
+bash "$policy_script" "$empty_root" >/dev/null
+
+mutate_empty_bin_name() { sed -i '/^\[\[bin\]\]$/,$ s/name = "binary"/name = ""/' "$1/hosts/binary/Cargo.toml"; }
+expect_failure_with_message empty-bin-name 'bin name must be binary' mutate_empty_bin_name
+
+for required_root in crates hosts tools sidecars; do
+    missing="$scratch_root/missing-${required_root//\//-}"
+    create_valid_fixture "$missing"
+    if [[ "$required_root" == crates ]]; then
+        # crates/math/LICENSE-libm.txt is itself part of the valid legal prelude, so an on-disk
+        # missing crates/ cannot get past that earlier contract. Inject find's real missing-root
+        # outcome after the valid prelude to exercise the otherwise unreachable discovery branch.
+        shim="$scratch_root/shim-missing-crates"
+        make_fault_shim "$shim" find 'crates hosts tools sidecars' 1 empty missing-crates
+        output="$(WORKSPACE_FAULT_STATE="$shim/state" PATH="$shim:$PATH" bash "$policy_script" "$missing" 2>&1)" && rc=0 || rc=$?
+    else
+        rm -rf -- "$missing/$required_root"
+        output="$(bash "$policy_script" "$missing" 2>&1)" && rc=0 || rc=$?
+    fi
+    [[ "$rc" -ne 0 && "$output" == *"find cargo-manifests failed"* ]] || {
+        printf 'missing Cargo root was not a discovery failure: %s: %s\n' "$required_root" "$output" >&2; exit 1;
+    }
+done
+
+collective_empty="$scratch_root/collective-empty"
+create_valid_fixture "$collective_empty"
+rm -rf -- "$collective_empty/crates/library" "$collective_empty/hosts/binary"
+output="$(bash "$policy_script" "$collective_empty" 2>&1)" && rc=0 || rc=$?
+[[ "$rc" -ne 0 && "$output" == *'Cargo manifest discovery returned an empty workspace'* ]] || {
+    printf 'collective empty Cargo population had wrong result: %s\n' "$output" >&2; exit 1;
+}
+
+# Explicit repository mode covers the NUL-producing Git listing and an actual non-ignored nested
+# manifest. The ordinary fixtures above cover exact non-repository fallback.
+git_fixture="$scratch_root/git-positive"
+create_valid_fixture "$git_fixture"
+mkdir -p "$git_fixture/sdk/nested"
+printf '%s\n' '[package]' 'name = "nested"' >"$git_fixture/sdk/nested/Cargo.toml"
+git -C "$git_fixture" init -q
+git -C "$git_fixture" add .
+bash "$policy_script" "$git_fixture" >/dev/null
+
+for isa_positive in empty comment-only; do
+    isa_root="$scratch_root/isa-positive-$isa_positive"
+    create_valid_fixture "$isa_root"
+    mkdir -p "$isa_root/.cargo"
+    if [[ "$isa_positive" == comment-only ]]; then
+        printf '%s\n' '# target-feature and rustflags are documentation only' >"$isa_root/.cargo/config.toml"
+    fi
+    bash "$policy_script" "$isa_root" >/dev/null
+done
+
+invalid_git="$scratch_root/not-a-repository"
+output="$(GIT_DIR="$invalid_git" bash "$policy_script" "$valid_root" 2>&1)" && rc=0 || rc=$?
+[[ "$rc" -ne 0 && "$output" == *'git repository classification failed (status 128)'* ]] || {
+    printf 'explicit GIT_DIR did not reject classification: %s\n' "$output" >&2; exit 1;
+}
+
+# Two disposable production mutations prove the same targeted assertions distinguish a swallowed
+# producer/parser error from an ordinary checker rejection. Status 97 is reserved for the exact
+# unexpected-success path in assert_fault_rejected.
+production_policy="$policy_script"
+mkdir -p "$scratch_root/mutants/scripts/lib"
+cp "$script_directory/lib/gate.sh" "$scratch_root/mutants/scripts/lib/gate.sh"
+population_mutant="$scratch_root/mutants/scripts/check-workspace-population-mutant.sh"
+cp "$production_policy" "$population_mutant"
+sed -i "s/(( CAPTURE_STATUS == 0 )) || execution_failure \"find \$label\" \"\$CAPTURE_STATUS\" \"\$CAPTURE_OUT\" \"\$CAPTURE_ERR\"/: # MUTANT swallow selected population failure/" "$population_mutant"
+rg -qF ': # MUTANT swallow selected population failure' "$population_mutant" || {
+    printf 'population mutant patch did not apply\n' >&2; exit 1;
+}
+policy_script="$population_mutant"
+set +e
+assert_fault_rejected mutant-population find 'crates hosts tools sidecars' 1 complete 'find cargo-manifests failed'
+mutant_status=$?
+set -e
+[[ "$mutant_status" == 97 ]] || { printf 'population mutant assertion status %s, expected 97\n' "$mutant_status" >&2; exit 1; }
+
+late_mutant="$scratch_root/mutants/scripts/check-workspace-late-mutant.sh"
+cp "$production_policy" "$late_mutant"
+sed -i "s/\*) execution_failure 'global build-table search' \"\$CAPTURE_STATUS\" \"\$CAPTURE_OUT\" \"\$CAPTURE_ERR\";;/*) : # MUTANT swallow selected late scan failure/" "$late_mutant"
+rg -qF '*) : # MUTANT swallow selected late scan failure' "$late_mutant" || {
+    printf 'late scan mutant patch did not apply\n' >&2; exit 1;
+}
+policy_script="$late_mutant"
+set +e
+assert_fault_rejected isa-build-late rg '^\[build\]' 1 empty 'global build-table search failed'
+mutant_status=$?
+set -e
+[[ "$mutant_status" == 97 ]] || { printf 'late scan mutant assertion status %s, expected 97\n' "$mutant_status" >&2; exit 1; }
+policy_script="$production_policy"
+printf 'workspace production counter-mutants rejected by same assertions (status 97)\n'
+
 # Keep the shared helper contract on the existing required-CI mutation entry point.
 bash "$script_directory/test-gate-lib.sh" || exit "$?"
 
