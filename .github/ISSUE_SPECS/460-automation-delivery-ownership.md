@@ -286,3 +286,8 @@ Stay in protocol queue internals, one narrow shared delivery service/exports, ex
 Review was read-only source/Git inspection. No tests, builds, timing, repository or GitHub mutations were performed. This is the complete bounded first-attempt FAIL and Sol2 correction list.
 
 Root assigns one coherent Sol attempt 2 against these five finite groups. Preserve the compiling prototype history; consolidate the adapter onto the same core and complete the original gates without host enablement or scope expansion. Pause at coherent compiling checkpoints for root commits; one final Astra verdict follows the complete pass.
+
+
+## Sol attempt 2 checkpoint 1: generic ownership error preservation
+
+The generic core now preserves pending/terminal ownership on wrong-ticket finish/collection, advances serial only after successful publication and uses a representable usize core slot. Focused tests add wrong-identity preservation and capacity above u16: `cargo test --locked -p protocol --lib delivery::tests -- --nocapture` passed 5 tests. Test/fmt/diff statuses are all 0 under `/tmp/460-sol2-tranche1-*`. Root checkpoints only delivery.rs and this evidence before continuation. The concrete automation adapter is not yet consolidated onto this core; full Sol2 scope and final review remain outstanding.

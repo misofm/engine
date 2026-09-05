@@ -134,7 +134,8 @@ pub struct DeliveryResourceReport {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CoreTicket {
-    pub slot: u16,
+    /// Exact prepared ledger index; valid capacities are never narrowed.
+    pub slot: usize,
     pub serial: u64,
 }
 
@@ -158,6 +159,7 @@ pub struct DeliveryCoreControl<P: Copy + Send + 'static> {
     terminal_consumer: Consumer<CoreTerminal>,
     entries: Box<[Option<(CoreTicket, P)>]>,
     serial: u64,
+    terminal_head: Option<CoreTerminal>,
 }
 
 pub struct DeliveryCoreRender<P: Copy + Send + 'static> {
@@ -178,6 +180,7 @@ impl<P: Copy + Send + 'static> PreparedDelivery<P> {
                 terminal_consumer,
                 entries: vec![None; capacity.get()].into_boxed_slice(),
                 serial: 1,
+                terminal_head: None,
             },
             DeliveryCoreRender {
                 consumer,
@@ -195,35 +198,44 @@ impl<P: Copy + Send + 'static> DeliveryCoreControl<P> {
             .iter()
             .position(Option::is_none)
             .ok_or(DeliveryError::Full)?;
-        let ticket = CoreTicket {
-            slot: slot as u16,
-            serial: self.serial,
-        };
-        self.serial = self
+        let next_serial = self
             .serial
             .checked_add(1)
             .ok_or(DeliveryError::SequenceOverflow)?;
+        let ticket = CoreTicket {
+            slot,
+            serial: self.serial,
+        };
         self.producer
             .try_push(CoreMessage { ticket, payload })
             .map_err(|_| DeliveryError::Full)?;
         self.entries[slot] = Some((ticket, payload));
+        self.serial = next_serial;
         Ok(ticket)
     }
 
     pub fn collect(&mut self, ticket: CoreTicket) -> Result<P, DeliveryError> {
-        let terminal = self
-            .terminal_consumer
-            .try_pop()
-            .map_err(|_| DeliveryError::Empty)?;
+        let entry = self
+            .entries
+            .get(ticket.slot)
+            .and_then(|entry| *entry)
+            .filter(|entry| entry.0 == ticket)
+            .ok_or(DeliveryError::StaleTicket)?;
+        let terminal = if let Some(terminal) = self.terminal_head {
+            terminal
+        } else {
+            let terminal = self
+                .terminal_consumer
+                .try_pop()
+                .map_err(|_| DeliveryError::Empty)?;
+            self.terminal_head = Some(terminal);
+            terminal
+        };
         if terminal.ticket != ticket {
             return Err(DeliveryError::StaleTicket);
         }
-        let entry = self.entries[usize::from(ticket.slot)]
-            .take()
-            .ok_or(DeliveryError::StaleTicket)?;
-        if entry.0 != ticket {
-            return Err(DeliveryError::StaleTicket);
-        }
+        self.terminal_head = None;
+        self.entries[ticket.slot] = None;
         Ok(entry.1)
     }
 }
@@ -240,13 +252,15 @@ impl<P: Copy + Send + 'static> DeliveryCoreRender<P> {
     }
 
     pub fn finish(&mut self, ticket: CoreTicket) -> Result<(), DeliveryError> {
-        let message = self.pending.take().ok_or(DeliveryError::Empty)?;
+        let message = self.pending.as_ref().ok_or(DeliveryError::Empty)?;
         if message.ticket != ticket {
             return Err(DeliveryError::StaleTicket);
         }
         self.terminal_producer
             .try_push(CoreTerminal { ticket })
-            .map_err(|_| DeliveryError::Full)
+            .map_err(|_| DeliveryError::Full)?;
+        self.pending = None;
+        Ok(())
     }
 }
 
@@ -778,5 +792,32 @@ mod tests {
         assert_eq!(render.begin().unwrap(), (ticket, 0xfeed_beef));
         render.finish(ticket).unwrap();
         assert_eq!(control.collect(ticket).unwrap(), 0xfeed_beef);
+    }
+
+    #[test]
+    fn generic_core_rejected_identities_preserve_pending_and_terminal_owner() {
+        let (mut control, mut render) =
+            PreparedDelivery::<u32>::prepare(NonZeroUsize::new(2).unwrap()).unwrap();
+        let first = control.try_publish(11).unwrap();
+        let second = control.try_publish(22).unwrap();
+        assert_eq!(render.begin().unwrap(), (first, 11));
+        assert_eq!(render.finish(second), Err(DeliveryError::StaleTicket));
+        render.finish(first).unwrap();
+        assert_eq!(control.collect(second), Err(DeliveryError::StaleTicket));
+        assert_eq!(control.collect(first), Ok(11));
+        assert_eq!(render.begin().unwrap(), (second, 22));
+        render.finish(second).unwrap();
+        assert_eq!(control.collect(second), Ok(22));
+    }
+
+    #[test]
+    fn generic_core_slot_identity_covers_capacity_above_u16() {
+        let capacity = NonZeroUsize::new(usize::from(u16::MAX) + 2).unwrap();
+        let (mut control, _render) = PreparedDelivery::<u8>::prepare(capacity).unwrap();
+        let mut last = None;
+        for _ in 0..capacity.get() {
+            last = Some(control.try_publish(1).unwrap());
+        }
+        assert_eq!(last.unwrap().slot, usize::from(u16::MAX) + 1);
     }
 }
