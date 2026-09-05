@@ -40,3 +40,7 @@ Focused evidence: `node --test sdk/test/browser-pcm-evals.mjs` PASS (8 tests, `/
 - Direct byte comparison: all six staged generated engine artifacts equal the approved input directory; the PCM prelude equals both baseline `e3a52dce` and its staged copy (`/private/tmp/dx434-bytes.log`). No Wasm rebuild or repin. Production/source paths remained clean throughout full validation.
 
 Implementation and required evidence are ready for the separate independent Astra review; this record does not claim review PASS or issue closure.
+
+## Dedicated Astra medium PASS
+
+Independent review at7e1713ec passes focused/type/package checks. Removing only the post-copy live-interval guard causes the existing slot-reuse regression to fail while sequence/generation guards remain; read-only race protection is discriminating. Six generated artifacts and PCM prelude are unchanged. Report attached to the observation PR. This completes SDK source observation, not adapter mapping or app adoption.
