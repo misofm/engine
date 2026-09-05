@@ -97,3 +97,7 @@ PR #440 delivered #411/#438 as `e7e1a37f36fe8a22c237d0bfcd3737373c6d4deb` after 
 ## Frozen-base approval and attempt 1 assignment
 
 Astra reviewed exact head `b4a3a5d6866a9600910b593c03dd431a025aa7f7` on delivered main `e7e1a37f36fe8a22c237d0bfcd3737373c6d4deb` and recorded PASS. The three target gates, shared helper, existing suites and workflow are unchanged by #411/#438; the approved selective fault controls, NUL preservation, grammar and single research-suite CI invocation remain binding. Root authorizes Luna attempt 1 within this frozen scope. Review: `/tmp/astra-412-frozen-base-review.md`.
+
+## Luna attempt 1 checkpoint
+
+Luna implemented the three scoped gates, two existing suites, new research suite and one adjacent CI invocation. The shared helper now terminates rg options before patterns, permitting the research bibliography pattern beginning with a hyphen; conditional helper scope was used. Luna reports three production gates, three affected suites, Bash syntax and diff checks passing in `/tmp/luna-412-*`. Root additionally ran the required shared helper suite successfully in `/tmp/engine-412-root-helper-suite.log`. This is a compiling/green checkpoint for adversarial review, not an acceptance claim: Astra must verify complete selective producer/consumer coverage and actual same-assertion counter controls against the frozen brief. No workspace, benchmark, artifact or browser run is claimed for this tooling checkpoint.

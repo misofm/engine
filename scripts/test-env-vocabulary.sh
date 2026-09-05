@@ -74,4 +74,21 @@ printf '\nexport %sGOVERNOR=performance\n' "$family" \
     >>"$case_root/scripts/run-rack-benchmark.sh"
 expect_failure reintroduced-synonym
 
+# Git discovery and listing are separate checked callsites.  A real initialized fixture is a
+# positive; a valid listing followed by an error must remain a failure.
+new_case git-positive
+(cd "$case_root" && git init -q && git config user.email test@example.invalid && git config user.name test && git add .)
+check "$case_root" >/dev/null
+mkdir "$scratch/git-list-fail"
+cat >"$scratch/git-list-fail/git" <<EOF
+#!/usr/bin/env bash
+if [[ "\$*" == 'ls-files -z --cached --others --exclude-standard' ]]; then git.real "\$@"; exit 7; fi
+exec git.real "\$@"
+EOF
+ln -s "$(command -v git)" "$scratch/git-list-fail/git.real"
+chmod +x "$scratch/git-list-fail/git"
+if PATH="$scratch/git-list-fail:$PATH" check "$case_root" >/dev/null 2>&1; then
+    printf 'Git listing counter-control escaped\n' >&2; exit 1
+fi
+
 printf 'env vocabulary mutations: ok\n'

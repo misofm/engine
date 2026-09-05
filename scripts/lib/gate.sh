@@ -12,9 +12,9 @@ gate_scan_forbidden() {
     shift 3
     local roots=("$@") output rc missing root
     if [[ -n "$glob" ]]; then
-        if output="$(rg -n "$pattern" --glob "$glob" "${roots[@]}" 2>&1)"; then rc=0; else rc=$?; fi
+        if output="$(rg -n --glob "$glob" -- "$pattern" "${roots[@]}" 2>&1)"; then rc=0; else rc=$?; fi
     else
-        if output="$(rg -n "$pattern" "${roots[@]}" 2>&1)"; then rc=0; else rc=$?; fi
+        if output="$(rg -n -- "$pattern" "${roots[@]}" 2>&1)"; then rc=0; else rc=$?; fi
     fi
     case "$rc" in
         0) printf '%s\n' "$output" >&2; gate_fail "$description"; return 1 ;;
@@ -73,9 +73,9 @@ gate_scan_required() {
     shift 3
     local output rc
     if [[ -n "$glob" ]]; then
-        if output="$(rg -n "$pattern" --glob "$glob" "$@" 2>&1)"; then rc=0; else rc=$?; fi
+        if output="$(rg -n --glob "$glob" -- "$pattern" "$@" 2>&1)"; then rc=0; else rc=$?; fi
     else
-        if output="$(rg -n "$pattern" "$@" 2>&1)"; then rc=0; else rc=$?; fi
+        if output="$(rg -n -- "$pattern" "$@" 2>&1)"; then rc=0; else rc=$?; fi
     fi
     if [[ "$rc" == 0 ]]; then
         printf '%s\n' "$output"

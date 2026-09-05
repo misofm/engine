@@ -249,4 +249,26 @@ helper_count_output="$(PATH="$temp/wc-fail:$PATH" bash "$temp/scripts/check-effe
 [[ "$helper_count_rc" -ne 0 && "$helper_count_output" == *'helper definition count errored (wc exit 6)'* && "$helper_count_output" == *$'0\n'* ]] || {
     printf 'effect helper count partial error escaped: %s\n' "$helper_count_output" >&2; exit 1;
 }
+
+# The final serialization ban is a distinct late consumer.  Valid partial output followed by an
+# error must fail, and the same assertion must reject a disposable mutation that swallows it.
+real_rg="$(command -v rg)"
+mkdir -p "$temp/rg-migration-final-fail"
+cat >"$temp/rg-migration-final-fail/rg" <<EOF
+#!/usr/bin/env bash
+if [[ "\$*" == *'serde|Serialize|Deserialize|migration_wire|encode_migration'* ]]; then printf 'valid partial output\n'; exit 7; fi
+exec "$real_rg" "\$@"
+EOF
+chmod +x "$temp/rg-migration-final-fail/rg"
+migration_output="$(PATH="$temp/rg-migration-final-fail:$PATH" bash "$temp/scripts/check-effect-state-migration-v1.sh" "$temp" 2>&1)" && migration_rc=0 || migration_rc=$?
+[[ "$migration_rc" -ne 0 && "$migration_output" == *'valid partial output'* && "$migration_output" == *'serialization scan errored'* ]] || {
+    printf 'migration serialization consumer error escaped: %s\n' "$migration_output" >&2; exit 1;
+}
+mutant_migration="$temp/check-effect-state-migration-mutant.sh"
+cp "$root/scripts/check-effect-state-migration-v1.sh" "$mutant_migration"
+sed -i '/migration serialization/ s#|| exit \$?#|| true#' "$mutant_migration"
+grep -q 'migration serialization' "$mutant_migration" || { printf 'migration mutant replacement missing\n' >&2; exit 1; }
+if PATH="$temp/rg-migration-final-fail:$PATH" bash "$mutant_migration" "$temp" >/dev/null 2>&1; then
+    printf 'migration serialization counter-mutant escaped\n' >&2; exit 1
+fi
 printf 'effect runtime policy mutations: ok\n'
