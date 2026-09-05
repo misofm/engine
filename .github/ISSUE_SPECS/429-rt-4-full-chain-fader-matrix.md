@@ -104,3 +104,7 @@ Root owns coherent checkpoint/push, Astra source verdict, Sol only following FAI
 Read-only source/commit/spec inspection; no tests, Cargo, timing, repository/GitHub mutation or implementation performed. No further scope amendment is needed beyond recording the concrete allocator clarification.
 
 Root records this allocator clarification and assigns Luna attempt 1 on the approved merged RT-3 base. The bounded #436 readiness window ended before invocation when load exceeded 0.50; its measurement remains unconsumed. #429 is the sole active feature implementation and must preserve the separate #430/#431/#436 obligations.
+
+## Luna attempt 1 checkpoint
+
+Root committed and pushed Luna's four-path tranche at `40de16521bae514150fe6729e052866c5ab1899e`: lane kernel and focused lane test, public builtin dispatch/tests, and existing bench unit-test seam. Luna reports focused debug/release, full lane/builtins release, bench unit tests, formatting, lane/realtime/unfused policies and focused clippy passing. Retained logs are `/tmp/luna-429-focused-final.log`, `/tmp/luna-429-release-tests.log`, `/tmp/luna-429-bench-tests.log` and `/tmp/luna-429-clippy.log`. No benchmark was invoked. These are implementation-supplied results; Astra is reviewing the complete frozen arithmetic, public dispatch/state/recovery and repeated-render allocation obligations before source acceptance. No compiler/bank integration, runtime performance claim or artifact qualification is earned by this checkpoint.
