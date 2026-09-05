@@ -1116,6 +1116,39 @@ function createFakeExports(quantum, backend = 1) {
   return { exports, calls, trackIds, sourceRows, meterFrameFloats };
 }
 
+function createTelemetryClock(elapsedMsByBlock) {
+  let reads = 0;
+  let timeMs = 0;
+  return {
+    now() {
+      const block = Math.floor(reads / 2);
+      if (block >= elapsedMsByBlock.length) throw new Error("telemetry clock read past fixture");
+      if (reads % 2 === 1) timeMs += elapsedMsByBlock[block];
+      reads += 1;
+      return timeMs;
+    },
+    get reads() {
+      return reads;
+    },
+  };
+}
+
+function withTelemetryClock(clock, callback) {
+  const originalPerformance = Object.getOwnPropertyDescriptor(globalThis, "performance");
+  Object.defineProperty(globalThis, "performance", {
+    configurable: true,
+    enumerable: originalPerformance?.enumerable ?? true,
+    writable: true,
+    value: { now: clock.now },
+  });
+  try {
+    return callback();
+  } finally {
+    if (originalPerformance === undefined) delete globalThis.performance;
+    else Object.defineProperty(globalThis, "performance", originalPerformance);
+  }
+}
+
 async function testProcessor() {
   const originalProcessor = globalThis.AudioWorkletProcessor;
   const originalRegister = globalThis.registerProcessor;
@@ -1481,33 +1514,60 @@ async function testProcessor() {
 
     {
       // Issue #137 D3: a full telemetry window posts exactly one frame, and the frame is honest
-      // about the resolution of the clock it actually found.
-      const { processor } = makeProcessor();
-      processor.receive({ tag: "miso.telemetry.v1", requestId: 1, enabled: true });
-      assert.deepEqual(processor.port.posts.at(-1).message, {
-        tag: "miso.ack.v1", requestId: 1, result: 0,
-      });
-      const left = new Float32Array(64);
-      const right = new Float32Array(64);
-      let frames = 0;
-      for (let block = 0; block < 128; block += 1) {
-        assert.equal(processor.process([], [[left, right]]), true);
-        const last = processor.port.posts.at(-1).message;
-        if (last.tag === "miso.telemetry.v1") frames += 1;
-      }
-      assert.equal(frames, 1, "one frame per 128-block window and no more");
-      const telemetry = processor.port.posts.at(-1).message;
-      assert.equal(telemetry.blocks, 128);
-      assert.equal(telemetry.sequence, 1);
-      assert.equal(telemetry.deadlineMisses, 0);
-      assert(telemetry.budgetMs > 1.3 && telemetry.budgetMs < 1.4, telemetry.budgetMs);
-      assert(telemetry.resolutionMs > 0);
-      assert.equal(typeof telemetry.belowResolution, "boolean");
-      assert(telemetry.cpuPercent >= 0);
-      processor.receive({ tag: "miso.telemetry.v1", requestId: 2, enabled: false });
-      const quiet = processor.port.posts.length;
-      for (let block = 0; block < 200; block += 1) processor.process([], [[left, right]]);
-      assert.equal(processor.port.posts.length, quiet, "a released lease reads no clock");
+      // about the resolution of the clock it actually found. The real process clock made the
+      // zero-miss assertion scheduler-sensitive, so each window uses a local monotonic fixture.
+      const belowBudgetMs = 0.5;
+      const aboveBudgetMs = 2;
+      const noMissWindow = Array.from({ length: 128 }, () => belowBudgetMs);
+      const oneMissWindow = noMissWindow.map((duration, block) => block === 64
+        ? aboveBudgetMs
+        : duration);
+      const runTelemetryWindow = (elapsedMsByBlock, expectedDeadlineMisses) => {
+        const clock = createTelemetryClock(elapsedMsByBlock);
+        return withTelemetryClock(clock, () => {
+          const { processor } = makeProcessor();
+          processor.receive({ tag: "miso.telemetry.v1", requestId: 1, enabled: true });
+          assert.deepEqual(processor.port.posts.at(-1).message, {
+            tag: "miso.ack.v1", requestId: 1, result: 0,
+          });
+          const left = new Float32Array(64);
+          const right = new Float32Array(64);
+          let frames = 0;
+          let telemetry;
+          for (let block = 0; block < 128; block += 1) {
+            assert.equal(processor.process([], [[left, right]]), true);
+            const last = processor.port.posts.at(-1).message;
+            if (last.tag === "miso.telemetry.v1") {
+              frames += 1;
+              telemetry = last;
+            }
+          }
+          assert.equal(frames, 1, "one frame per 128-block window and no more");
+          assert.equal(telemetry.blocks, 128);
+          assert.equal(telemetry.sequence, 1);
+          assert.equal(telemetry.deadlineMisses, expectedDeadlineMisses);
+          assert(telemetry.budgetMs > 1.3 && telemetry.budgetMs < 1.4, telemetry.budgetMs);
+          assert(telemetry.resolutionMs > 0);
+          assert.equal(typeof telemetry.belowResolution, "boolean");
+          for (const field of ["cpuPercent", "peakBlockMs", "meanBlockMs"]) {
+            assert(Number.isFinite(telemetry[field]) && telemetry[field] >= 0, field);
+          }
+          assert.equal(clock.reads, 256, "two clock reads per leased rendered block");
+          processor.receive({ tag: "miso.telemetry.v1", requestId: 2, enabled: false });
+          const quiet = processor.port.posts.length;
+          const readsAfterRelease = clock.reads;
+          for (let block = 0; block < 200; block += 1) {
+            assert.equal(processor.process([], [[left, right]]), true);
+          }
+          assert.equal(clock.reads, readsAfterRelease, "a released lease reads no clock");
+          assert.equal(processor.port.posts.length, quiet, "a released lease posts nothing");
+        });
+      };
+
+      // The first fresh processor has 128 positive sub-budget blocks; the second has exactly one
+      // over-budget block, preserving the behavioral deadline-miss discriminator.
+      runTelemetryWindow(noMissWindow, 0);
+      runTelemetryWindow(oneMissWindow, 1);
     }
 
     {
