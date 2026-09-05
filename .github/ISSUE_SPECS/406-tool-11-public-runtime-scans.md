@@ -78,3 +78,38 @@ Astra approved the full stateless brief and exact dependency tables. Root assign
 ## Luna attempt 1 checkpoint — pending adversarial verdict
 
 Luna migrated the four gates to checked helper operations and shared dependency extraction, and completed an effect-runtime fixture root needed by the checked scan. Existing affected suites and real checks pass in `/tmp/engine-406-{gate-lib,protocol,effect,host,builtins}.log` and `/tmp/engine-406-check-{protocol,effect,host,builtins}.log`; shell syntax and diff checks pass. This is a coherent checkpoint, not acceptance. The helper and three existing mutation suites have no new directed tests yet; the frozen declaration-mode/partial-output/error-class and counter-mutation acceptance must be assessed by Astra before completion is claimed. No full-workspace, artifact or benchmark operation was performed.
+
+## Astra attempt 1 verdict — FAIL
+
+# Astra #406 attempt 1 review
+
+**FAIL — bounded Sol revision required at exact pushed `e6d3218a83018533fdffc55e5be37ab76e1258bc`.** Existing-suite green does not satisfy the frozen four-gate contract. Luna attempt 1 is consumed; preserve checkpoint and queue Sol after its active #399 tranche, without another Luna correction.
+
+## Actual correctness/contract failures
+
+1. **Explicitly required declaration mode was not implemented.** effect-runtime/builtins now call unchanged #400 `$1` parsing, which is not their original full-line-before-equals parser. Independently calling the helper on `engine.workspace=true` and `lane="1"` yields `engine.workspace=true` and `lane="1"`, not `engine`/`lane`. Those forms were valid under both old local parsers and the #406 frozen contract. Add the narrow plain-section full-key mode and select it for these two callers, retaining #400 default rack semantics. No target-section extension (#407), universal TOML parser or expectation-table change.
+
+2. **Protocol still silently passes predicate execution errors.** Only payload and trait extraction were hardened. The ControlProvider raw-byte and MockProvider field scans remain `if printf | rg ...; then fail`, accepting rg errors. I independently ran a disposable valid-shaped protocol fixture containing both raw-byte violations while a targeted rg stub returned status 2 for these two predicates: the checker printed both injected errors then `protocol control policy: ok` with exit 0. Check these predicates and both extractors explicitly before interpreting absence. Preserve optional message files and empty MockProvider public fields; require the named ControlProvider surface. No broad parser rewrite.
+
+3. **Multiple assigned source bans are untouched.** effect-runtime reverse-dependency, wire/hash vocabulary, repr(C), and runtime-migration scans still use unchecked conditional rg; its required-diagnostic reads need explicit status classification. Builtins reverse-dependency scan remains unchecked. These are exact rows in the stateless brief, not newly discovered scope. Complete each row rather than describing the whole gates as migrated.
+
+4. **Filter failures remain clean.** Every effect-package allowlist stage still uses `rg -v ... || true`; helper_definitions' exemption filter does too, as does builtins unsafe filtering. A failed filter can erase a violation or provide an apparently correct count even after the upstream scan was checked. Capture source AND filter status, allow rg 1 only as successful empty output, and reject >=2 including partial output. Check helper definition count consumers before comparing every frozen row; do not let a zero pin conceal producer failure. Preserve source/filter text formatting and all exceptions.
+
+5. **Host scan scope changed.** The control-provider occurrence scan changed glob `Cargo.toml` to `*.toml`, so unrelated TOML files can now contribute occurrences and reject a previously valid tree. Restore exact `Cargo.toml` traversal. The exact-count grep substitutions also still discard their producer exit status inside `[[ ... == 1 ]]`; an injected grep emitting `1` then failing can satisfy them. Explicitly capture every required exact-count/presence operation before comparing its result. Keep all four host bans, existing roots, optional/non-default protocol rules and current diagnostics.
+
+6. **Directed acceptance is not delivered.** Only one effect fixture mkdir was added; no new declaration/helper tests or four-gate partial-producer/read/optional cases were added. The old suites cannot qualify these new helpers or detect the concrete regressions above. The fixture mkdir is fine when it declares a required empty population, but it is not a substitute for the deliberately missing-root red case.
+
+## Sol attempt 2 brief
+
+One coherent pass limited to #406's four gates, four named existing suites, shared helper/tests and issue evidence. Complete the frozen per-site inventory including all omitted producers above; preserve names/regexes/globs/roots/prefixes, defaults and allowlists. No graph/session/conformance (#407), deferred workspace (#404), effect arithmetic, artifacts or benchmark work. Keep #400's required-CI helper-suite entry point; extend it without duplicate wiring.
+
+Add a directed case for each new failure mechanism: collect match/no-match/execution error and partial output; required match/absent/read error; forbidden predicate errors; filtering allowed-empty versus filter execution failure; compact/spaced bare/workspace declaration output and dev/target exclusion; extraction/sorting failures with pipefail off/on and conditional callers. Keep #400 default parser output exactly unchanged. Preserve scalar plain-section grammar and actual four dependency tables.
+
+Gate fixtures must prove real required-root/surface deletion with surrounding metadata valid, optional protocol files absent and present-unreadable, empty MockProvider fields, host fourth ban and both rg counts plus exact grep queries, effect package/filter/helper-count failures including zero-count rows, and builtins unsafe/reverse/positive operations. Include a harmless non-Cargo .toml containing control-provider as a host positive control. Inject failure after valid partial output, not only empty/error output. Assert expected diagnostic class and explicitly reject unexpected success; counter-mutate each new helper failure mechanism so the assertions demonstrably reject old behavior. Controlled read-error injection is acceptable under privileged execution. Preserve physical-script library sourcing from a foreign fixture cwd.
+
+Gate_scan_collect/required are reasonable small seams, but their clean-output and diagnostic behavior needs tests; don't introduce a generic command/fixture framework. Avoid output pollution where the original positive queries were quiet, or explicitly retain their prior redirected caller output. Check status directly rather than relying on errexit or a conditional invocation's shell settings.
+
+After one coherent pass: root exact-path checkpoint/push, all affected real gates and existing/new focused suites, bash syntax/diff, then one Astra verdict. Full workspace and actual PR/required CI follow focused acceptance. Sol has at most two attempts remaining (three total across Luna/Sol); stop/rescope after attempt three FAIL. No Cargo or timing was run by this review; only two tiny disposable shell fixtures established the protocol silent-pass and parser regression, leaving repository files unchanged.
+
+
+Root queues attempt 2 for Sol after its current #399 tranche. The worktree remains checkpointed; Luna receives no correction pass. No final qualification or completion is claimed.
