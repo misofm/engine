@@ -1,6 +1,10 @@
 /** Issue #322 compile-time red probes for the catalog-derived live console. */
 
 import { ConsoleEdits } from "../src/core/console.ts";
+import type { MisoCommandRequest } from "../src/browser/shipped-host.d.ts";
+
+// @ts-expect-error request IDs belong to the host, never to public request payloads
+const oldBrowserRequest: MisoCommandRequest = { requestId: 1, commands: [] };
 
 const edits = new ConsoleEdits({
   tracks: ["t"],

@@ -219,7 +219,7 @@ async function testMainRealm() {
     right.set([3, 4]);
     holdSource = true;
     const sourcePromise = host.submitSource({
-      requestId: 1, sourceId: "source", generation: 1n, startFrame: 0n,
+      sourceId: "source", generation: 1n, startFrame: 0n,
       sampleRateHz: 48000, planes: [left, right], frames: 2, endOfRegion: false,
     });
     assert.equal(storage.byteLength, 0, "postMessage transfers caller ownership");
@@ -241,7 +241,7 @@ async function testMainRealm() {
 
     // Request 2 was consumed by the status above, which now settles independently.
     const seek = await host.seekSource({
-      requestId: 3, sourceId: "source", generation: 2n, sourceFrame: 10n,
+      sourceId: "source", generation: 2n, sourceFrame: 10n,
     });
     assert.deepEqual(seek, { tag: "miso.ack.v1", requestId: 3, result: 0 });
     const status = await host.status();
@@ -250,7 +250,7 @@ async function testMainRealm() {
     failSource = true;
     const failedStorage = new ArrayBuffer(16);
     const failedSource = host.submitSource({
-      requestId: 5, sourceId: "source", generation: 3n, startFrame: 2n,
+      sourceId: "source", generation: 3n, startFrame: 2n,
       sampleRateHz: 48000, planes: [new Float32Array(failedStorage)], frames: 4,
       endOfRegion: true,
     });
@@ -310,7 +310,7 @@ async function testMainRealm() {
     });
     const malformedStorage = new ArrayBuffer(16);
     await errorResult(planeHost.submitSource({
-      requestId: 1, sourceId: "source", generation: 1n, startFrame: 0n,
+      sourceId: "source", generation: 1n, startFrame: 0n,
       sampleRateHz: 48000, planes: [new Float32Array(malformedStorage)], frames: 4,
       endOfRegion: false,
     }), 255);
@@ -329,14 +329,13 @@ async function testMainRealm() {
     });
     failSource = false;
     holdAll = true;
-    const chunk = (requestId, sourceId) => {
+    const chunk = (sourceId, startFrame) => {
       const buffer = new ArrayBuffer(8);
       return {
         request: pipelineHost.submitSource({
-          requestId,
           sourceId,
           generation: 1n,
-          startFrame: BigInt(requestId),
+          startFrame: BigInt(startFrame),
           sampleRateHz: 48000,
           planes: [new Float32Array(buffer)],
           frames: 2,
@@ -345,11 +344,11 @@ async function testMainRealm() {
         buffer,
       };
     };
-    const inFlight = [1, 2, 3, 4].map((requestId) => chunk(requestId, "source"));
+    const inFlight = [1, 2, 3, 4].map((startFrame) => chunk("source", startFrame));
     for (const [index, entry] of inFlight.entries()) {
       assert.equal(entry.buffer.byteLength, 0, `chunk ${index} was transferred`);
     }
-    const overflow = chunk(5, "source");
+    const overflow = chunk("source", 5);
     await errorResult(overflow.request, 6);
     assert.equal(
       overflow.buffer.byteLength,
@@ -357,14 +356,14 @@ async function testMainRealm() {
       "a locally refused chunk keeps its planes: nothing is transferred and the caller can retry",
     );
     // A different source has its own budget and is accepted while the first is saturated.
-    const other = chunk(6, "other-source");
+    const other = chunk("other-source", 6);
     assert.equal(other.buffer.byteLength, 0, "the bound is per source, not per host");
     // One unsettled seek per source: the ring carries a single command slot.
     const firstSeek = pipelineHost.seekSource({
-      requestId: 7, sourceId: "source", generation: 2n, sourceFrame: 0n,
+      sourceId: "source", generation: 2n, sourceFrame: 0n,
     });
     await errorResult(pipelineHost.seekSource({
-      requestId: 8, sourceId: "source", generation: 3n, sourceFrame: 0n,
+      sourceId: "source", generation: 3n, sourceFrame: 0n,
     }), 6);
     holdAll = false;
     for (const respond of heldAll) respond();
@@ -376,11 +375,11 @@ async function testMainRealm() {
     ]);
     assert.deepEqual(
       settled.map((message) => message.requestId),
-      [1, 2, 3, 4, 6, 7],
+      [1, 2, 3, 4, 5, 6],
       "acknowledgements arrive in request order",
     );
     // With the budget released the source accepts chunks again.
-    const again = chunk(9, "source");
+    const again = chunk("source", 9);
     assert.equal(again.buffer.byteLength, 0);
     await again.request;
     await pipelineHost.dispose();
@@ -436,7 +435,7 @@ async function testMainRealm() {
       kind: 1, rack: 255, channel: 255, trackIndex: 1, effectIndex: 0, parameterId: 0,
       smoothingSamples: 64, values: [-0.5, 0.5, 0, 0],
     };
-    const commandAck = await consoleHost.command({ requestId: 200, commands: [pan] });
+    const commandAck = await consoleHost.command({ commands: [pan] });
     assert.equal(commandAck.tag, "miso.ack.v1");
     assert.equal(commandAck.result, 0);
     assert.equal(commandAck.admitted, 1);
@@ -459,19 +458,20 @@ async function testMainRealm() {
     // A malformed command never reaches the port.
     const beforeMalformed = events.length;
     await errorResult(
-      consoleHost.command({ requestId: 201, commands: [{ ...pan, kind: 99 }] }),
+      consoleHost.command({ commands: [{ ...pan, kind: 99 }] }),
       1,
     );
     await errorResult(
-      consoleHost.command({ requestId: 202, commands: [{ ...pan, values: [0, 0, 0, NaN] }] }),
+      consoleHost.command({ commands: [{ ...pan, values: [0, 0, 0, NaN] }] }),
       1,
     );
-    await errorResult(consoleHost.command({ requestId: 203, commands: [] }), 1);
+    await errorResult(consoleHost.command({ commands: [] }), 1);
+    await errorResult(consoleHost.command({ requestId: 999, commands: [pan] }), 1);
     assert.equal(events.length, beforeMalformed, "a malformed batch costs no message");
 
     // Engine backpressure is a resolved acknowledgement that admits nothing.
     commandResult = 6;
-    const refused = await consoleHost.command({ requestId: 204, commands: [pan] });
+    const refused = await consoleHost.command({ commands: [pan] });
     assert.equal(refused.result, 6);
     assert.equal(refused.admitted, 0);
     assert.equal(refused.reason, 8);
@@ -480,9 +480,8 @@ async function testMainRealm() {
     // Local backpressure: the worklet-side queue depth is 4, so a fifth unsettled batch is
     // refused here, before any transfer, and the caller keeps its records.
     holdAll = true;
-    const held4 = [205, 206, 207, 208].map((requestId) =>
-      consoleHost.command({ requestId, commands: [pan] }));
-    await errorResult(consoleHost.command({ requestId: 209, commands: [pan] }), 6);
+    const held4 = Array.from({ length: 4 }, () => consoleHost.command({ commands: [pan] }));
+    await errorResult(consoleHost.command({ commands: [pan] }), 6);
     holdAll = false;
     for (const respond of heldAll) respond();
     heldAll.length = 0;
@@ -492,11 +491,11 @@ async function testMainRealm() {
     const meterFrames = [];
     const telemetryFrames = [];
     assert.equal(
-      (await consoleHost.meters({ requestId: 210, enabled: true, onFrame: (frame) => meterFrames.push(frame) })).result,
+      (await consoleHost.meters({ enabled: true, onFrame: (frame) => meterFrames.push(frame) })).result,
       0,
     );
     assert.equal(
-      (await consoleHost.telemetry({ requestId: 211, enabled: true, onFrame: (frame) => telemetryFrames.push(frame) })).result,
+      (await consoleHost.telemetry({ enabled: true, onFrame: (frame) => telemetryFrames.push(frame) })).result,
       0,
     );
     const node = FakeNode.latest;
@@ -578,7 +577,6 @@ async function testMainRealm() {
     // is canonically ordered, `windowBlocks: 0` resolves to the plan default, and an unsubscribe
     // removes exactly one entry.
     const observeAck = await consoleHost.observe({
-      requestId: 213,
       subscriptions: [
         { trackIndex: 1, rack: 1, effectIndex: 0, tapId: 1, windowBlocks: 0, armed: true },
         { trackIndex: 0, rack: 1, effectIndex: 0, tapId: 1, windowBlocks: 8, armed: true },
@@ -595,7 +593,6 @@ async function testMainRealm() {
       "`windowBlocks: 0` resolves to the plan default, and the map says which one it got");
     assert.equal(Object.isFrozen(observeAck.bindings), true);
     const unsubscribed = await consoleHost.observe({
-      requestId: 214,
       subscriptions: [
         { trackIndex: 1, rack: 1, effectIndex: 0, tapId: 1, windowBlocks: 0, armed: false },
       ],
@@ -606,14 +603,13 @@ async function testMainRealm() {
       { trackIndex: -1 }, { rack: 3 }, { tapId: 0 }, { armed: "yes" }, { windowBlocks: -1 },
     ]) {
       await errorResult(consoleHost.observe({
-        requestId: 215,
         subscriptions: [{
           trackIndex: 0, rack: 1, effectIndex: 0, tapId: 1, windowBlocks: 0, armed: true,
           ...broken,
         }],
       }), 1);
     }
-    await errorResult(consoleHost.observe({ requestId: 216, subscriptions: [] }), 1);
+    await errorResult(consoleHost.observe({ subscriptions: [] }), 1);
 
     // Issue #143's two reasons, and the #151 defect they exposed: a refused subscription is a
     // typed *per-request* rejection and costs the host nothing.
@@ -629,8 +625,6 @@ async function testMainRealm() {
     // every assertion below fails with the sticky signature, starting with `refused.tag` because
     // the promise rejects with `{tag: "miso.error.v1", result: 255}` instead of settling.
     // `scripts/test-web-audioworklet.sh` runs exactly that mutation and requires this file red.
-    let refusalRequestId = 240;
-    const nextRequestId = () => (refusalRequestId += 10);
     const mapBeforeRefusal = unsubscribed.bindings;
     for (const { reason, result, what } of [
       // The address resolves and the tap id does not. A bad address, like every other unknown, so
@@ -643,7 +637,6 @@ async function testMainRealm() {
       commandResult = result;
       commandMutation = (response) => ({ ...response, reason, rejectedIndex: 0, admitted: 0 });
       const refused = await consoleHost.observe({
-        requestId: nextRequestId(),
         subscriptions: [
           { trackIndex: 0, rack: 1, effectIndex: 0, tapId: 9, windowBlocks: 0, armed: true },
         ],
@@ -664,7 +657,7 @@ async function testMainRealm() {
       // have failed with `{tag: "miso.error.v1", result: 255}`.
       assert.equal((await consoleHost.status()).result, 0, `${what}: status still answers`);
       const laterCommand = await consoleHost.command({
-        requestId: nextRequestId(), commands: [pan],
+        commands: [pan],
       });
       assert.equal(laterCommand.result, 0, `${what}: the command path still admits a batch`);
       assert.equal(laterCommand.admitted, 1);
@@ -691,7 +684,6 @@ async function testMainRealm() {
 
       // And a *correct* subscription still arms, so nothing about the map machinery was poisoned.
       const recovered = await consoleHost.observe({
-        requestId: nextRequestId(),
         subscriptions: [
           { trackIndex: 1, rack: 1, effectIndex: 0, tapId: 1, windowBlocks: 4, armed: true },
         ],
@@ -700,7 +692,6 @@ async function testMainRealm() {
       assert.equal(recovered.reason, 0);
       assert.deepEqual(recovered.bindings.map((binding) => binding.trackIndex), [0, 1]);
       const undo = await consoleHost.observe({
-        requestId: nextRequestId(),
         subscriptions: [
           { trackIndex: 1, rack: 1, effectIndex: 0, tapId: 1, windowBlocks: 4, armed: false },
         ],
@@ -710,7 +701,7 @@ async function testMainRealm() {
 
     // A released lease detaches the callback: a late frame is delivered nowhere.
     const framesAtRelease = meterFrames.length;
-    await consoleHost.meters({ requestId: nextRequestId(), enabled: false, onFrame: null });
+    await consoleHost.meters({ enabled: false, onFrame: null });
     node.port.onmessage({
       data: {
         tag: "miso.meter.v1", sequence: 2, windows: 1, trackCount: 2,
@@ -757,7 +748,7 @@ async function testMainRealm() {
 
     const beforeEdit = await prepare("{\"schema_version\":0}");
     const armedBefore = await beforeEdit.observe({
-      requestId: 1, subscriptions: [tap(0, 0, true), tap(1, 0, true)],
+      subscriptions: [tap(0, 0, true), tap(1, 0, true)],
     });
     assert.equal(armedBefore.result, 0);
     assert.deepEqual(armedBefore.bindings.map((binding) => binding.trackIndex), [0, 1]);
@@ -769,7 +760,7 @@ async function testMainRealm() {
     commandResult = 1;
     commandMutation = (response) => ({ ...response, reason: 10, rejectedIndex: 0, admitted: 0 });
     const staleRearm = await afterEdit.observe({
-      requestId: 1, subscriptions: [tap(0, 0, true), tap(1, 0, true)],
+      subscriptions: [tap(0, 0, true), tap(1, 0, true)],
     });
     commandMutation = null;
     commandResult = 0;
@@ -781,7 +772,7 @@ async function testMainRealm() {
     // second call rather than a rebuild.
     assert.deepEqual((await afterEdit.sessionMap()).tracks, ["kick", "snare"]);
     const rearmed = await afterEdit.observe({
-      requestId: 3, subscriptions: [tap(0, 1, true), tap(1, 1, true)],
+      subscriptions: [tap(0, 1, true), tap(1, 1, true)],
     });
     assert.equal(rearmed.result, 0, "the replacement plan re-arms after the refusal");
     assert.deepEqual(rearmed.bindings.map((binding) => binding.effectIndex), [1, 1],
@@ -794,7 +785,7 @@ async function testMainRealm() {
     const rearmedFrames = [];
     assert.equal(
       (await afterEdit.meters({
-        requestId: 4, enabled: true, onFrame: (frame) => rearmedFrames.push(frame),
+        enabled: true, onFrame: (frame) => rearmedFrames.push(frame),
       })).result,
       0,
     );
@@ -807,7 +798,7 @@ async function testMainRealm() {
     });
     assert.equal(rearmedFrames.length, 1, "the replacement's meter sequence restarts at 1");
     assert.deepEqual([...rearmedFrames[0].trackGrDb], [1.5, 2.5]);
-    assert.equal((await afterEdit.command({ requestId: 5, commands: [pan] })).result, 0);
+    assert.equal((await afterEdit.command({ commands: [pan] })).result, 0);
     assert.equal((await afterEdit.status()).result, 0);
     await afterEdit.dispose();
   } finally {

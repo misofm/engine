@@ -68,3 +68,24 @@ Generated package staging output and untracked build output are evidence, not co
 ## Delivery record
 
 Root must first synchronize this approved body to the correctly named local issue spec and GitHub issue #393, then commit that issue-only checkpoint. Luna may implement only after that checkpoint. One coherent implementation tranche is followed by a root status/commit audit and Astra adversarial review; the standard three-attempt stop remains in force.
+
+## Luna attempt 1 implementation evidence (commit-ready, not yet reviewed)
+
+Changed only the approved host, SDK declaration/consumer, and qualification paths. The browser
+host now validates payloads and saturation before allocating one private strictly increasing safe
+integer, stamps that ID immediately before `postMessage`, and returns request ID zero for local
+refusals. `observe()` delegates to `command()` with no second allocation. The SDK console and
+qualification consumers no longer carry a caller counter or request ID in public requests.
+
+Evidence so far:
+
+- `./sdk/node_modules/.bin/tsc -p sdk/tsconfig.json --noEmit` passed.
+- `bash scripts/check-sdk-types.sh` passed, including the shipped-host mirror pin.
+- `node scripts/test-web-audioworklet.mjs` passed; output is saved at
+  `/private/tmp/dx-393-evidence/test-web-audioworklet.log`.
+- `node --check` passed for changed JavaScript/ESM files and `git diff --check` passed.
+- The full `scripts/test-web-audioworklet.sh` reached its browser-harness checks but stopped in the
+  environment WebDriver self-test because binding `127.0.0.1` is denied (`PermissionError`); no
+  source workaround was made. The direct hermetic runtime gate passed independently.
+
+Root must checkpoint these exact paths before further edits; Astra review remains pending.
