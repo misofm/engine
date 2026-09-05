@@ -1,0 +1,3 @@
+refusing an uncontrolled measurement: loadavg_above_ceiling
+loadavg 1.06 2.89 2.43 1/2438 669425; affinity cpu 63; smt siblings 31 cpu31=0.00%
+set MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED=1 to record an uncontrolled run instead.

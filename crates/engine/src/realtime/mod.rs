@@ -16,8 +16,8 @@ pub use buffer::{
     BufferArena, BufferArenaError, BufferIndex, PlanarBufferMut, PlanarBufferRef, PlanarBufferSpec,
 };
 pub use disjoint::{
-    ARENA_SILENCE_BUFFER, ArenaLease, ArenaLeaseSetBuilder, ArenaStereoPair, DisjointArena,
-    DisjointArenaError,
+    ARENA_SILENCE_BUFFER, ArenaLease, ArenaLeaseSetBuilder, ArenaStereoPair, ArenaStereoPlanes,
+    DisjointArena, DisjointArenaError,
 };
 pub use observe::{
     ObservationPublisher, ObservationReader, ObservationSlot, ObservationWindow, observation_slot,

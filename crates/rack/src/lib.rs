@@ -305,6 +305,34 @@ fn tile_scatter<const W: usize>(
         }
     }
 }
+
+#[inline(always)]
+fn tile_scatter_direct_plane<const W: usize>(
+    source: &[f32],
+    destinations: &mut [BankPlanePair<'_>; W],
+    frames: usize,
+    right_plane: bool,
+    transpose: impl Fn([[f32; W]; W]) -> [[f32; W]; W],
+) {
+    let tiled = (frames / W) * W;
+    for (tile, block) in source[..tiled * W].chunks_exact(W * W).enumerate() {
+        let base = tile * W;
+        let mut rows = [[0.0_f32; W]; W];
+        for (row, chunk) in rows.iter_mut().zip(block.chunks_exact(W)) {
+            row.copy_from_slice(chunk);
+        }
+        for ((left, right), row) in destinations.iter_mut().zip(transpose(rows)) {
+            let plane = if right_plane { right } else { left };
+            plane[base..base + W].copy_from_slice(&row);
+        }
+    }
+    for frame in tiled..frames {
+        for (lane, (left, right)) in destinations.iter_mut().enumerate() {
+            let plane = if right_plane { right } else { left };
+            plane[frame] = source[frame * W + lane];
+        }
+    }
+}
 // REALTIME_POLICY_END
 
 /// The resident AoSoA block handed to one stage. `left.len() == right.len() == frames * lanes`.
@@ -314,6 +342,45 @@ pub struct BankBlock<'a> {
     pub frames: u32,
     pub first_sample: u64,
     pub lanes: usize,
+}
+
+/// Mutably borrowed, pairwise-disjoint planar destinations for one complete bank.
+///
+/// Providers construct this only after validating ownership and capacities.  The fixed upper
+/// bound is the two launch bank widths and keeps the render path allocation-free.
+pub type BankPlanePair<'a> = (&'a mut [f32], &'a mut [f32]);
+
+pub struct BankPlaneViews<'a>(BankPlaneViewsInner<'a>);
+
+enum BankPlaneViewsInner<'a> {
+    Four([BankPlanePair<'a>; 4], usize),
+    Eight([BankPlanePair<'a>; 8], usize),
+}
+
+impl<'a> BankPlaneViews<'a> {
+    fn capacity<const W: usize>(pairs: &[BankPlanePair<'_>; W], frames: usize) -> bool {
+        if pairs
+            .iter()
+            .any(|(left, right)| left.len() < frames || right.len() < frames)
+        {
+            return false;
+        }
+        true
+    }
+
+    pub fn from_four(pairs: [BankPlanePair<'a>; 4], frames: usize) -> Option<Self> {
+        Self::capacity(&pairs, frames).then_some(Self(BankPlaneViewsInner::Four(pairs, frames)))
+    }
+
+    pub fn from_eight(pairs: [BankPlanePair<'a>; 8], frames: usize) -> Option<Self> {
+        Self::capacity(&pairs, frames).then_some(Self(BankPlaneViewsInner::Eight(pairs, frames)))
+    }
+
+    #[inline(always)]
+    fn supports(&self, width: usize, frames: usize) -> bool {
+        matches!(&self.0, BankPlaneViewsInner::Four(_, capacity) if width == 4 && *capacity >= frames)
+            || matches!(&self.0, BankPlaneViewsInner::Eight(_, capacity) if width == 8 && *capacity >= frames)
+    }
 }
 
 /// One stage of a bank chain.
@@ -1089,6 +1156,13 @@ pub struct BankSlot {
 pub trait BankMembers {
     fn plane(&self, lane: usize) -> (&[f32], &[f32]);
     fn plane_mut(&mut self, lane: usize) -> (&mut [f32], &mut [f32]);
+
+    /// Borrow every destination of a complete bank at once, or decline to use direct scatter.
+    /// Implementors must validate IDs, pairwise disjointness, and capacities before creating any
+    /// references. The default preserves the staged path for providers without that capability.
+    fn distinct_planes_mut(&mut self, _lanes: usize, _frames: usize) -> Option<BankPlaneViews<'_>> {
+        None
+    }
 
     /// One lane's **accumulating auxiliary destination**, or `None` when it has none.
     ///
@@ -2075,6 +2149,49 @@ impl BankChain {
         debug_assert_eq!(self.lanes, W);
         let frames_used = frames as usize;
         let stride = self.scratch.quantum as usize;
+        if self.fold.is_empty()
+            && let Some(mut destinations) = members.distinct_planes_mut(W, frames_used)
+        {
+            if !destinations.supports(W, frames_used) {
+                // Drop every view before taking the established staged fallback.
+            } else {
+                match &mut destinations.0 {
+                    BankPlaneViewsInner::Four(pairs, _) => {
+                        tile_scatter_direct_plane(
+                            &self.scratch.left,
+                            pairs,
+                            frames_used,
+                            false,
+                            transpose_tile_4,
+                        );
+                        tile_scatter_direct_plane(
+                            &self.scratch.right,
+                            pairs,
+                            frames_used,
+                            true,
+                            transpose_tile_4,
+                        );
+                    }
+                    BankPlaneViewsInner::Eight(pairs, _) => {
+                        tile_scatter_direct_plane(
+                            &self.scratch.left,
+                            pairs,
+                            frames_used,
+                            false,
+                            transpose_tile_8,
+                        );
+                        tile_scatter_direct_plane(
+                            &self.scratch.right,
+                            pairs,
+                            frames_used,
+                            true,
+                            transpose_tile_8,
+                        );
+                    }
+                }
+                return;
+            }
+        }
         let tiled = (frames_used / W) * W;
         tile_scatter(
             &self.scratch.left[..tiled * W],
@@ -2218,6 +2335,153 @@ mod tests {
         fn plane_mut(&mut self, lane: usize) -> (&mut [f32], &mut [f32]) {
             (&mut self.left[lane], &mut self.right[lane])
         }
+        fn distinct_planes_mut(
+            &mut self,
+            lanes: usize,
+            frames: usize,
+        ) -> Option<BankPlaneViews<'_>> {
+            if lanes != self.left.len()
+                || lanes != self.right.len()
+                || (lanes != 4 && lanes != 8)
+                || self.left.iter().any(|p| p.len() < frames)
+                || self.right.iter().any(|p| p.len() < frames)
+            {
+                return None;
+            }
+            let (left, right) = (&mut self.left, &mut self.right);
+            if lanes == 4 {
+                let mut left = left.iter_mut();
+                let mut right = right.iter_mut();
+                let pairs: [BankPlanePair<'_>; 4] = std::array::from_fn(|_| {
+                    (
+                        &mut **left.next().expect("validated lane"),
+                        &mut **right.next().expect("validated lane"),
+                    )
+                });
+                BankPlaneViews::from_four(pairs, frames)
+            } else {
+                let mut left = left.iter_mut();
+                let mut right = right.iter_mut();
+                let pairs: [BankPlanePair<'_>; 8] = std::array::from_fn(|_| {
+                    (
+                        &mut **left.next().expect("validated lane"),
+                        &mut **right.next().expect("validated lane"),
+                    )
+                });
+                BankPlaneViews::from_eight(pairs, frames)
+            }
+        }
+    }
+
+    struct StagedPlanes(Planes);
+    impl BankMembers for StagedPlanes {
+        fn plane(&self, lane: usize) -> (&[f32], &[f32]) {
+            self.0.plane(lane)
+        }
+        fn plane_mut(&mut self, lane: usize) -> (&mut [f32], &mut [f32]) {
+            self.0.plane_mut(lane)
+        }
+    }
+
+    struct WrongWidthPlanes {
+        planes: Planes,
+        per_lane_writes: usize,
+    }
+    impl BankMembers for WrongWidthPlanes {
+        fn plane(&self, lane: usize) -> (&[f32], &[f32]) {
+            self.planes.plane(lane)
+        }
+        fn plane_mut(&mut self, lane: usize) -> (&mut [f32], &mut [f32]) {
+            self.per_lane_writes += 1;
+            self.planes.plane_mut(lane)
+        }
+        fn distinct_planes_mut(
+            &mut self,
+            _lanes: usize,
+            frames: usize,
+        ) -> Option<BankPlaneViews<'_>> {
+            let mut left = self.planes.left.iter_mut().take(4);
+            let mut right = self.planes.right.iter_mut().take(4);
+            let pairs: [BankPlanePair<'_>; 4] = core::array::from_fn(|_| {
+                (
+                    left.next()
+                        .expect("four malicious left lanes")
+                        .as_mut_slice(),
+                    right
+                        .next()
+                        .expect("four malicious right lanes")
+                        .as_mut_slice(),
+                )
+            });
+            BankPlaneViews::from_four(pairs, frames)
+        }
+    }
+
+    struct ShortClaimPlanes {
+        planes: Planes,
+        per_lane_writes: usize,
+    }
+    impl BankMembers for ShortClaimPlanes {
+        fn plane(&self, lane: usize) -> (&[f32], &[f32]) {
+            self.planes.plane(lane)
+        }
+        fn plane_mut(&mut self, lane: usize) -> (&mut [f32], &mut [f32]) {
+            self.per_lane_writes += 1;
+            self.planes.plane_mut(lane)
+        }
+        fn distinct_planes_mut(
+            &mut self,
+            lanes: usize,
+            frames: usize,
+        ) -> Option<BankPlaneViews<'_>> {
+            assert_eq!(lanes, 4);
+            let mut left = self.planes.left.iter_mut();
+            let mut right = self.planes.right.iter_mut();
+            let pairs: [BankPlanePair<'_>; 4] = core::array::from_fn(|_| {
+                (
+                    left.next().expect("four left lanes").as_mut_slice(),
+                    right.next().expect("four right lanes").as_mut_slice(),
+                )
+            });
+            BankPlaneViews::from_four(pairs, frames.saturating_sub(1))
+        }
+    }
+
+    struct CountedDirectPlanes {
+        planes: Planes,
+        per_lane_writes: usize,
+    }
+    impl BankMembers for CountedDirectPlanes {
+        fn plane(&self, lane: usize) -> (&[f32], &[f32]) {
+            self.planes.plane(lane)
+        }
+        fn plane_mut(&mut self, lane: usize) -> (&mut [f32], &mut [f32]) {
+            self.per_lane_writes += 1;
+            self.planes.plane_mut(lane)
+        }
+        fn distinct_planes_mut(
+            &mut self,
+            lanes: usize,
+            frames: usize,
+        ) -> Option<BankPlaneViews<'_>> {
+            if lanes != 4
+                || self.planes.left.len() != 4
+                || self.planes.right.len() != 4
+                || self.planes.left.iter().any(|plane| plane.len() < frames)
+                || self.planes.right.iter().any(|plane| plane.len() < frames)
+            {
+                return None;
+            }
+            let mut left = self.planes.left.iter_mut();
+            let mut right = self.planes.right.iter_mut();
+            let pairs: [BankPlanePair<'_>; 4] = core::array::from_fn(|_| {
+                (
+                    left.next().expect("validated left lane").as_mut_slice(),
+                    right.next().expect("validated right lane").as_mut_slice(),
+                )
+            });
+            BankPlaneViews::from_four(pairs, frames)
+        }
     }
 
     fn seeded(state: &mut u64) -> f32 {
@@ -2295,6 +2559,149 @@ mod tests {
         }
     }
 
+    #[test]
+    fn direct_plane_views_encode_width_and_reject_short_capacity() {
+        let mut left4: [Vec<f32>; 4] = core::array::from_fn(|_| vec![0.0; 7]);
+        let mut right4: [Vec<f32>; 4] = core::array::from_fn(|_| vec![0.0; 8]);
+        let mut left_iter = left4.iter_mut();
+        let mut right_iter = right4.iter_mut();
+        let short: [BankPlanePair<'_>; 4] = core::array::from_fn(|_| {
+            (
+                left_iter.next().expect("four left planes").as_mut_slice(),
+                right_iter.next().expect("four right planes").as_mut_slice(),
+            )
+        });
+        assert!(BankPlaneViews::from_four(short, 8).is_none());
+
+        let mut left4: [Vec<f32>; 4] = core::array::from_fn(|_| vec![0.0; 8]);
+        let mut right4: [Vec<f32>; 4] =
+            core::array::from_fn(|lane| vec![0.0; if lane == 3 { 7 } else { 8 }]);
+        let mut left_iter = left4.iter_mut();
+        let mut right_iter = right4.iter_mut();
+        let late_short_right: [BankPlanePair<'_>; 4] = core::array::from_fn(|_| {
+            (
+                left_iter.next().expect("four left planes").as_mut_slice(),
+                right_iter.next().expect("four right planes").as_mut_slice(),
+            )
+        });
+        assert!(BankPlaneViews::from_four(late_short_right, 8).is_none());
+
+        let mut left4: [Vec<f32>; 4] = core::array::from_fn(|_| vec![0.0; 8]);
+        let mut right4: [Vec<f32>; 4] = core::array::from_fn(|_| vec![0.0; 8]);
+        let mut left_iter = left4.iter_mut();
+        let mut right_iter = right4.iter_mut();
+        let complete: [BankPlanePair<'_>; 4] = core::array::from_fn(|_| {
+            (
+                left_iter.next().expect("four left planes").as_mut_slice(),
+                right_iter.next().expect("four right planes").as_mut_slice(),
+            )
+        });
+        let views = BankPlaneViews::from_four(complete, 8).expect("complete four-wide view");
+        assert!(views.supports(4, 8));
+        assert!(!views.supports(8, 8));
+        assert!(!views.supports(4, 9));
+    }
+
+    #[test]
+    fn direct_scatter_never_calls_the_per_lane_fallback() {
+        let mut state = 0x3990_3991_3992_3993;
+        let source = hostile_planes(4, 11, &mut state);
+        let expected = Planes {
+            left: source.left.clone(),
+            right: source.right.clone(),
+        };
+        let mut members = CountedDirectPlanes {
+            planes: source,
+            per_lane_writes: 0,
+        };
+        let active = vec![true; 4].into_boxed_slice();
+        let mut chain = BankChain::new(
+            AoSoaScratch::new(BankWidth::Four, 11).expect("scratch"),
+            active.clone(),
+            vec![slot(active.to_vec(), Box::new(PassThrough))],
+        )
+        .expect("chain");
+        chain.run(&mut members, 11, 0).expect("run");
+        assert_eq!(members.per_lane_writes, 0);
+        assert_planes_bit_equal(&members.planes, &expected, "direct call sentinel");
+    }
+
+    #[test]
+    fn wrong_width_provider_is_dropped_before_complete_staged_fallback() {
+        let mut state = 0x3994_3995_3996_3997;
+        let source = hostile_planes(8, 11, &mut state);
+        let expected = Planes {
+            left: source.left.clone(),
+            right: source.right.clone(),
+        };
+        let mut malformed = WrongWidthPlanes {
+            planes: Planes {
+                left: source
+                    .left
+                    .into_iter()
+                    .chain([vec![f32::from_bits(0x7fc0_3998); 11]])
+                    .collect(),
+                right: source
+                    .right
+                    .into_iter()
+                    .chain([vec![f32::from_bits(0x7fc0_3999); 11]])
+                    .collect(),
+            },
+            per_lane_writes: 0,
+        };
+        let active = vec![true; 8].into_boxed_slice();
+        let mut chain = BankChain::new(
+            AoSoaScratch::new(BankWidth::Eight, 11).expect("scratch"),
+            active.clone(),
+            vec![slot(active.to_vec(), Box::new(PassThrough))],
+        )
+        .expect("chain");
+        chain.run(&mut malformed, 11, 0).expect("staged fallback");
+        assert_planes_bit_equal(
+            &Planes {
+                left: malformed.planes.left[..8].to_vec(),
+                right: malformed.planes.right[..8].to_vec(),
+            },
+            &expected,
+            "wrong-width staged fallback",
+        );
+        assert_eq!(malformed.per_lane_writes, 8);
+        assert!(
+            malformed.planes.left[8]
+                .iter()
+                .all(|word| word.to_bits() == 0x7fc0_3998)
+        );
+        assert!(
+            malformed.planes.right[8]
+                .iter()
+                .all(|word| word.to_bits() == 0x7fc0_3999)
+        );
+    }
+
+    #[test]
+    fn inadequate_claimed_capacity_takes_complete_staged_fallback() {
+        let mut state = 0x399a_399b_399c_399d;
+        let source = hostile_planes(4, 11, &mut state);
+        let expected = Planes {
+            left: source.left.clone(),
+            right: source.right.clone(),
+        };
+        let mut malformed = ShortClaimPlanes {
+            planes: source,
+            per_lane_writes: 0,
+        };
+        let active = vec![true; 4].into_boxed_slice();
+        let mut chain = BankChain::new(
+            AoSoaScratch::new(BankWidth::Four, 11).expect("scratch"),
+            active.clone(),
+            vec![slot(active.to_vec(), Box::new(PassThrough))],
+        )
+        .expect("chain");
+        chain.run(&mut malformed, 11, 0).expect("staged fallback");
+        assert_eq!(malformed.per_lane_writes, 4);
+        assert_planes_bit_equal(&malformed.planes, &expected, "short-claim staged fallback");
+    }
+
     /// T1b: on a **full** bank -- the tiled whole-bank transpose -- the round trip is bit-exact at
     /// both widths and at every frame shape, ragged tails included.
     ///
@@ -2318,6 +2725,8 @@ mod tests {
                     vec![slot(active, Box::new(PassThrough))],
                 )
                 .expect("chain");
+                chain.staging_left.fill(f32::from_bits(0x7fc0_3991));
+                chain.staging_right.fill(f32::from_bits(0x7fc0_3992));
                 chain.run(&mut planes, frames, 0).expect("run");
                 assert_planes_bit_equal(
                     &planes,
@@ -2325,6 +2734,18 @@ mod tests {
                     &format!("{lanes} lanes, {frames} frames"),
                 );
                 assert_eq!(chain.transposes(), 1);
+                assert!(
+                    chain
+                        .staging_left
+                        .iter()
+                        .all(|word| word.to_bits() == 0x7fc0_3991)
+                );
+                assert!(
+                    chain
+                        .staging_right
+                        .iter()
+                        .all(|word| word.to_bits() == 0x7fc0_3992)
+                );
             }
         }
     }
@@ -2376,10 +2797,29 @@ mod tests {
                     chain.run(&mut planes, frames, 0).expect("run");
                     outcomes.push(planes);
                 }
+                let mut staged = StagedPlanes(Planes {
+                    left: source.left.clone(),
+                    right: source.right.clone(),
+                });
+                let active = vec![true; lanes];
+                let mut staged_chain = BankChain::new(
+                    AoSoaScratch::new(width, 128).expect("scratch"),
+                    active.clone().into_boxed_slice(),
+                    vec![slot(active, Box::new(IndexXor))],
+                )
+                .expect("chain");
+                staged_chain
+                    .run(&mut staged, frames, 0)
+                    .expect("staged run");
                 assert_planes_bit_equal(
                     &outcomes[0],
                     &outcomes[1],
                     &format!("tiled vs scalar, {lanes} lanes, {frames} frames"),
+                );
+                assert_planes_bit_equal(
+                    &outcomes[0],
+                    &staged.0,
+                    &format!("direct vs staged, {lanes} lanes, {frames} frames"),
                 );
             }
         }
