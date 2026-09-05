@@ -203,6 +203,13 @@ pub struct GraphBuiltinBankResourceEstimate {
     pub largest_allocation_bytes: u64,
 }
 
+/// Checked retained storage for live scalar fader/matrix owners lowered after preparation.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct GraphScalarOwnerResourceEstimate {
+    pub total_bytes: u64,
+    pub largest_allocation_bytes: u64,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GraphBuiltinBankAttachError {
     InvalidMembers,
@@ -212,6 +219,21 @@ pub enum GraphBuiltinBankAttachError {
 }
 
 impl GraphResourceEstimate {
+    pub fn checked_add_scalar_owners(
+        &mut self,
+        resource: GraphScalarOwnerResourceEstimate,
+    ) -> Option<()> {
+        let mut next = self.clone();
+        next.graph_metadata_bytes = next.graph_metadata_bytes.checked_add(resource.total_bytes)?;
+        next.incremental_plan_bytes = next.incremental_plan_bytes.checked_add(resource.total_bytes)?;
+        next.session_plus_plan_bytes = next.session_plus_plan_bytes.checked_add(resource.total_bytes)?;
+        next.largest_allocation_bytes = next
+            .largest_allocation_bytes
+            .max(resource.largest_allocation_bytes);
+        *self = next;
+        Some(())
+    }
+
     /// Fold exact prepared builtin-bank storage into the graph estimate before publication.
     pub fn checked_add_builtin_banks(
         &mut self,

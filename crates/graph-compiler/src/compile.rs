@@ -569,6 +569,26 @@ impl GraphCompiler {
                 )],
             ));
         }
+        if let Some(builtins) = prepared_builtins {
+            let Some(resource) = builtins.graph_scalar_owner_resource(dispatch) else {
+                return Err(failure(
+                    effects,
+                    vec![diag(
+                        "graph.resource.arithmetic_overflow",
+                        "$.graph.scalar_owners",
+                    )],
+                ));
+            };
+            if estimate.checked_add_scalar_owners(resource).is_none() {
+                return Err(failure(
+                    effects,
+                    vec![diag(
+                        "graph.resource.arithmetic_overflow",
+                        "$.graph.scalar_owners",
+                    )],
+                ));
+            }
+        }
         let mut capped_estimate = estimate.clone();
         if let Some(builtins) = prepared_builtins {
             let Some(resource) =

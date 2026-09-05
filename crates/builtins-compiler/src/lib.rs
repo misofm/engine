@@ -1938,6 +1938,32 @@ impl PreparedBuiltinsSession {
         Some(total)
     }
 
+    /// Exact pre-bind charge for live scalar owners. Vector backends consume every strip into
+    /// banks, so only the scalar backend retains these concrete per-node boxes.
+    pub fn graph_scalar_owner_resource(
+        &self,
+        dispatch: Backend,
+    ) -> Option<graph::GraphScalarOwnerResourceEstimate> {
+        if dispatch != Backend::Scalar {
+            return Some(graph::GraphScalarOwnerResourceEstimate::default());
+        }
+        let fader = u64::try_from(core::mem::size_of::<ConsoleFaderProcessor>()).ok()?;
+        let matrix = u64::try_from(core::mem::size_of::<ConsoleMatrixProcessor>()).ok()?;
+        let outer = u64::try_from(core::mem::size_of::<ScalarPairProcessor>()).ok()?;
+        let count = u64::try_from(self.strips.iter().filter(|strip| strip.control.is_some()).count()).ok()?;
+        let owners = fader.checked_add(matrix)?.checked_mul(count)?;
+        let outer_total = if self.control_delivery == BuiltinControlDelivery::BetweenRenderCalls {
+            outer.checked_mul(count)?
+        } else {
+            0
+        };
+        let total_bytes = owners.checked_add(outer_total)?;
+        Some(graph::GraphScalarOwnerResourceEstimate {
+            total_bytes,
+            largest_allocation_bytes: fader.max(matrix).max(outer),
+        })
+    }
+
     /// Materialize post-input builtin banks using the already-selected host dispatch.
     ///
     /// Every post-input node in a level with a vector backend is banked; the last bank of a
