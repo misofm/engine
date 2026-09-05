@@ -328,6 +328,7 @@ case "$FAULT_KIND:$tool" in
   discovery-sort:sort) [[ $(counter sort) == 2 ]] && hit=1 ;;
   occurrence-late:rg) [[ "$args" == *" -o "* ]] && [[ $(counter occurrence) == 2 ]] && hit=1 ;;
   occurrence-registered:rg) [[ "$args" == *" -o "* ]] && [[ $(counter occurrence) == 4 ]] && hit=1 ;;
+  occurrence-registered:wc) [[ -f "$FAULT_STATE/registered-rg-seen" ]] && hit=1 ;;
   count-late:wc) [[ $(counter wc) == 2 ]] && hit=1 ;;
   membership-late:grep) [[ "$args" == *g5_native_corpus.rs* ]] && hit=1 ;;
   marker-late:awk) [[ "$args" == *g5_native_corpus.rs* ]] && hit=1 ;;
@@ -339,12 +340,23 @@ if [[ "$hit" == 1 ]]; then
     if [[ "${FAULT_EMPTY:-0}" != 1 ]]; then
         if [[ "$FAULT_KIND" == retired ]]; then
             printf '99:fn fma_f32_via_f64(a: f32, b: f32, c: f32) -> f32\n'
+        elif [[ "$FAULT_KIND" == occurrence-registered && "$tool" == rg ]]; then
+            real_output="$($real "$@" || true)"
+            printf '%s\n' "$real_output" >&2
+            printf 'EVIDENCE registered rg stdout: %s\n' "$real_output" >&2
+            : >"$FAULT_STATE/registered-rg-seen"
+            printf '%s\n' "$real_output"
+        elif [[ "$FAULT_KIND" == occurrence-registered && "$tool" == wc ]]; then
+            input=$(cat)
+            real_output="$(printf '%s\n' "$input" | "$real" "$@")"
+            printf 'EVIDENCE registered wc result: %s\n' "$real_output" >&2
+            printf '%s\n' "$real_output"
         else
             "$real" "$@" || true
         fi
     fi
     printf 'INJECTED-%s\n' "$FAULT_KIND" >&2
-    exit 9
+    if [[ "$FAULT_KIND" == occurrence-registered && "$tool" == wc ]]; then exit 0; else exit 9; fi
 fi
 exec "$real" "$@"
 EOF
@@ -363,6 +375,9 @@ expect_producer_failure() {
         [[ "$mode" != empty || -z "$full_payload" || "$output" != *"$full_payload"* ]] || payload_ok=0
         if [[ "$rc" != 0 && "$payload_ok" == 1 && "$output" == *"INJECTED-$kind"* && "$output" == *"$diagnostic"* ]]; then
             printf 'producer red %s/%s\n' "$kind" "$mode"; passed=$((passed + 1))
+            if [[ "$kind" == occurrence-registered && "$mode" == full ]]; then
+                printf 'evidence registered original payload/error:\n%s\n' "$output"
+            fi
         else
             printf 'PRODUCER FAIL %s/%s status=%s output=%s\n' "$kind" "$mode" "$rc" "$output" >&2
             failed=$((failed + 1))
@@ -400,20 +415,27 @@ prove_status_mutant() {
     sed -i "$edit" "$mutant"
     after=$(cksum <"$mutant")
     [[ "$before" != "$after" ]] || { printf 'COUNTER FAIL %s edit did not apply\n' "$label" >&2; failed=$((failed+1)); return; }
-    diff=$(diff -u "$root/scripts/check-unfused-seal.sh" "$mutant" || true)
+    diff=$(diff -U 12 "$root/scripts/check-unfused-seal.sh" "$mutant" || true)
     if [[ "$label" == late-registered ]]; then
         [[ $(grep -c '^@@ ' <<<"$diff") == 1 \
-            && $(grep -cF -- '-    [[ "$rc" == 0 ]] || exit "$rc"' <<<"$diff") == 1 \
-            && $(grep -cF -- '+    [[ "$rc" == 0 ]] || actual="$count"' <<<"$diff") == 1 ]] || {
+            && $(grep -cF -- '-        0|1) ;;' <<<"$diff") == 1 \
+            && $(grep -cF -- '+        0|1|9) ;;' <<<"$diff") == 1 \
+            && "$diff" == *'count_calls() {'* \
+            && "$diff" == *'case "$rc" in'* \
+            && "$diff" != *'actual="$count"'* ]] || {
             printf 'COUNTER FAIL %s changed the wrong production call site:\n%s\n' "$label" "$diff" >&2
             failed=$((failed+1)); return
         }
+        printf 'evidence late-registered mutant diff:\n%s\n' "$diff"
     fi
     state="$scratch_root/state-control-$label"; mkdir -p "$state"
     output="$(FAULT_KIND="$kind" FAULT_EMPTY="$fault_empty" FAULT_STATE="$state" PATH="$shim:$PATH" bash "$root/scripts/check-unfused-seal.sh" "$tree" 2>&1)" && rc=0 || rc=$?
     [[ "$rc" != 0 && "$output" == *"INJECTED-$kind"* && "$output" == *"$diagnostic"* ]] || { printf 'COUNTER FAIL %s original status=%s output=%s\n' "$label" "$rc" "$output" >&2; failed=$((failed+1)); return; }
     rm -rf "$state"; mkdir -p "$state"
     output="$(FAULT_KIND="$kind" FAULT_EMPTY="$fault_empty" FAULT_STATE="$state" PATH="$shim:$PATH" bash -c 'if bash "$1" "$2"; then printf "ASSERT %s unexpected success\\n" "$3" >&2; exit 97; fi; exit $?' _ "$mutant" "$tree" "$label" 2>&1)" && rc=0 || rc=$?
+    if [[ "$label" == late-registered ]]; then
+        printf 'evidence registered mutant payload/count:\n%s\n' "$output"
+    fi
     if [[ "$rc" == 97 && "$output" == *"ASSERT $label unexpected success"* ]]; then
         printf 'counter red %s (status 97)\n' "$label"; passed=$((passed+1))
     else
@@ -424,7 +446,7 @@ prove_status_mutant() {
 prove_status_mutant discovery discovery 'candidate discovery errored (rg status 9)' \
     '/if candidates_raw=/,/esac/{s/\*) printf .*candidate discovery errored.* ;;/\*) rc=0 ;;/}'
 prove_status_mutant late-registered occurrence-registered 'fused-call search failed for tools/wasm-gates/tests/g5_native_corpus.rs (rg status 9)' \
-    '/^if \[\[ "${1:-}" == "--self-test" \]\]/,$ { /while read -r file count/,/done <<<"$registry_raw"/{s/\[\[ "$rc" == 0 \]\] || exit "$rc"/[[ "$rc" == 0 ]] || actual="$count"/; } }'
+    '/^count_calls() [{]/,$ { s/^        0|1) ;;$/        0|1|9) ;;/; }'
 prove_status_mutant retired retired 'retired software-FMA search errored (rg status 9)' \
     '/if retired_match=/,/^fi$/{s/elif \[\[ "$rc" != 1 \]\]; then/elif false; then/}' 1
 

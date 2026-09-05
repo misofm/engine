@@ -212,3 +212,15 @@ Root stops this implementation series. The source and all three verdicts remain 
 Successor #438, “Prove the unfused seal rejects a complete failed occurrence search at registered validation,” owns only replacement of the remaining defective counter-mutant and its bounded evidence. It must mutate the actual count_calls occurrence-status classification while preserving captured matches into the ordinary count operation, using the existing selected fourth-occurrence full-output/error injection and exact unexpected-success assertion. Registry-answer fallback and caller/count-comparison bypass are excluded. Accepted production source and all existing directed/semantic coverage remain intact.
 
 This successor restarts only that proof outcome under a numbered Astra-approved brief and the Luna attempt 1 / Sol attempts 2–3 workflow. #411 remains OPEN. The successor does not waive #411's original frozen acceptance gates: #411 closes only after the successor proof passes and its evidence is upstream, the original qualification and actual-PR/required-CI delivery are complete, and GitHub evidence/state is synchronized. #412 still follows #411; broader parent obligations remain open as required.
+
+## #438 Luna attempt 1 evidence amendment
+
+The bounded successor proof is implemented in the existing embedded self-test only. Its verified
+late-registered mutant changes the actual `count_calls` occurrence-status case from `0|1) ;;` to
+`0|1|9) ;;`, preserving the delegated `mul_add(` payload into the unchanged `wc -l` count path;
+the observed registered count is `1`. The original injected phase-4 run retains status 9, the
+sentinel and exact producer diagnostic. The mutant reaches the focused `ASSERT late-registered
+unexpected success` assertion at status 97. Evidence and focused results are retained in
+`/tmp/luna-438-selftest.log` and `/tmp/luna-438-checker.log`; the self-test reports `62 passed,
+0 failed`, and the real checker reports 8 registered audit calls. Astra's attempt-1 verdict is
+pending; #411 remains OPEN.

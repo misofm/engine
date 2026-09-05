@@ -67,3 +67,20 @@ This is explicitly the new Luna attempt 1 / Sol attempts 2–3 series after #411
 No scope correction or additional split is needed. No implementation, tests, timing, repository or Git/GitHub mutation performed.
 
 Root assigns Luna attempt 1 for this bounded proof outcome from approved planning checkpoint `320f90c8bdff66b20f9b1e7f8da5cbea0e27401e`. The stopped #411 series is not resumed. Only the disposable self-test mutation and its direct proof/evidence may change; production behavior and all inherited gates remain fixed.
+
+## Luna attempt 1 implementation evidence
+
+Luna changed only the embedded proof in `scripts/check-unfused-seal.sh`. The late-registered
+disposable mutation is the production `count_calls` occurrence-status case `0|1) ;;` to
+`0|1|9) ;;`, selected from the `count_calls` function and verified with a single diff hunk whose
+context includes the function and `case "$rc" in`; the diff contains no caller fallback or
+`actual="$count"`. The existing producer payload remains `mul_add(` and the ordinary `wc -l`
+path observes the numeric result `1`. The original phase-4 control reports status 9 with the
+sentinel and exact diagnostic; the verified mutant reaches `ASSERT late-registered unexpected
+success` at status 97.
+
+Focused evidence is retained in `/tmp/luna-438-selftest.log` and `/tmp/luna-438-checker.log`.
+`bash -n scripts/check-unfused-seal.sh`, the embedded self-test (`62 passed, 0 failed`), the real
+checker (`8 registered audit calls`), and `git diff --check` all pass. No production source,
+helper, framework, registry, parser, Rust, workflow, Cargo, benchmark, Git or GitHub mutation was
+performed.
