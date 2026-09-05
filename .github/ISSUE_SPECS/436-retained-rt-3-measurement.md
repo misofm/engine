@@ -32,3 +32,7 @@ A refusal/failure is an honest terminal consumed-authority record, not successfu
 
 Allowed changes: this numbered spec/evidence, reciprocal #420/tracker accounting, and capture evidence in the existing issue420 namespace. No runner/helper/workload/validator production edit, new framework, Rust/artifact rebuild or publication belongs in this transferred qualification slice. If a real tooling defect surfaces, preserve the consumed outcome and seek a separately justified bounded ruling; no implicit repair-and-rerun.
 
+
+## Delivered product and frozen execution checkout
+
+PR #437 delivered #420 as `c7469e28d52a716339b6f3119a57b69afb3411f1` after exact-head Astra PASS and required qualification SUCCESS. Root verified the merged tree is byte-identical to the reviewed product head `cb8cc2bf55ae78f83548e9479dc86dde5a885626` and reuses the isolated `/home/bl/misofm/engine-420` checkout on `codex/436-retained-rt3-measurement`, retaining its existing prepared binary. This evidence-only checkpoint precedes fresh source/binary/manifest/readiness verification and the sole authorized invocation. #429 implementation has not started and local test/build work is terminal; root coordinates this bounded quiet window. Authority remains unused at this checkpoint.
