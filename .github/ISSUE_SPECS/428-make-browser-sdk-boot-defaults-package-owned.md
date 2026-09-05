@@ -66,3 +66,7 @@ The existing app intentionally vendors exact reviewed package archives with hash
 ## Execution record
 
 Matching issue misofm/engine#428. Isolated branch codex/dx-sdk-boot starts from approved PCM boundary a0493021. Astra medium implements; separate Astra medium review follows. This SDK ownership slice is independent of the adapter OPFS correction, with no shared checkout, files or build outputs. Root checkpoints coherent exact-path tranches before further implementation.
+
+### Narrow worker packaging amendment
+
+Root approves adding a pinned build-only esbuild development dependency in sdk/package.json and sdk/package-lock.json and using sdk/codegen/stage-package.mjs to bundle emitted dist/browser/scratch-worker.js in place as an import-complete browser ES module. Existing TypeScript alone cannot preserve the worker dependency graph when a public URL is relocated by an app bundler. This preserves the public entry name, has no runtime package dependency, does not touch the six generated artifact bytes, and must make both default and forwarding custom Worker factories work in the packed browser. Preserve provenance/NOTICE.
