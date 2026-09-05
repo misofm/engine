@@ -262,3 +262,55 @@ Final focused commands all exited 0 with `PATH=/home/bl/.cargo/bin:$PATH` and `C
 - `cargo fmt --all -- --check` and `git diff --check`: PASS; `/tmp/sol459-final-{fmt,diff-check}.log`.
 
 The realtime, builtins and workspace scripts are repository files without executable bits: their first direct invocation returned shell status 126 (`Permission denied`), retained in the tool transcript, so the actual gates were run through `bash` and passed. Lane and unfused scripts are executable and passed directly. No full workspace, target/browser/artifact matrix or benchmark was run. This is the completed Sol attempt-2 source submission for one consolidated Astra verdict, not self-acceptance or parent #430 qualification.
+
+
+## Sol attempt 2 verdict and FINAL Sol attempt 3
+
+# Astra #459 Sol attempt 2 — FAIL
+
+Exact reviewed head `3a9d3ea4e5dc2adabe9faa4a8528240cdcca9e38`; source freeze2253eeb58c983435c41b49aef425b87936b01663, `/home/bl/misofm/engine-live-pair-proof`. ONE consolidated attempt2 verdict against full original Cases A/B/C and the prior finite FAIL. Preserve progress and assign one final coherent Sol3 revision below. No full parent qualification or timing is authorized. A further FAIL requires hard stop/rescope, not another repair.
+
+## Accepted progress and retained evidence
+
+Normal pairing/factory/drain/arithmetic/resource decisions remain frozen; source changes are the approved private instrumentation and existing tests/support, with delivered main tooling/evidence integration. The final retained debug/release logs report compiler27, allocation4, graph53 and host62 with1 existing ignored in each mode. Policy/hygiene logs and candid initial script-mode errors are recorded; no broader qualification is claimed.
+
+The private PairFixture now asserts per-call exact branch choice, PCM words, state words and logical counters. The3-sample queued ramp still discriminates fallback/fallback/fused across2/2/2-frame calls. Matrix-error outcome compares the actual completed fader owner sequence. Native W4/W8 graph positives identify the one-lane accepted population and actual fusion. Meter window fields/bits and postmatrix PCM match separate references; true tail fusion is now asserted. The send fixture now uses explicit asymmetric crossfeed and compares actual nonzero route/output words to separate rendering. Full-cohort output-guard limitations are candid: do not claim the meter/send predicates were independently isolated where output ownership already refuses.
+
+Alias topology now targets the otherwise-eligible tail and correctly observes acceptance1→0 when its observer is added. This establishes the previously missing structural discriminator; no production alias defect is indicated.
+
+First-slot decline now renders the actual constructed chain and checks both owners' call effects/order. Actual queued graph allocation audit now uses returned real controls and render plans, drives eligible/ramp/retarget/observed phases, checks actual true/fallback/population witnesses and zero alloc/free counters. The separate reserve_exact liveness scope and independent free scope correctly discriminate realloc accounting. Preserve these accepted mechanisms; no new allocator or allocation framework is requested.
+
+## 1. Complete actual host commanded-owner linkage
+
+`acknowledged_pair_render_records_the_same_live_dispatch` now supplies the second nonzero block and asserts the original application sample/PCM relation. However its actual selected-owner linkage remains unproven: paired_console_host clones9 tracks, routes only track0, commands track_index0, then checks only total process_calls1/fused_calls1. It never checks process_members or identifies which track/cohort supplied that call. The emitted PCM belongs to routed track0; the count can belong to an unrelated eligible cohort. Source assertions labelling these “the commanded paired cohort” do not establish that ownership relationship.
+
+This is the exact original missing host claim, not a new timing/host feature. Complete it through the already-approved private feature witness and finite fixture: identify the commanded owner in the selected composite, or expose a fixed test-only count demonstrating that the actual composite drains the admitted fader AND matrix records on that measured call. Do not infer ownership from a total count elsewhere in the graph. Keep admission2, exact application sample, actual nonzero PCM relation and true fused call together. No wire/public diagnostic, new host preparation API or production decision change is permitted. If actual source inspection shows the routed cohort cannot pair in this fixture, adjust only the existing test session/route/command fixture to an eligible arrangement and prove its identity explicitly; do not waive the linkage.
+
+## 2. Compare actual alias-observer PCM, not only observer calls
+
+`AliasObserver::observe` still ignores `_block` and increments a counter. `serialized_alias_observer_is_the_decline_boundary` compares eligible versus observed POSTMATRIX captures but does not capture the observed alias samples or compare them to the same boundary under original separate owners. A callback at the wrong boundary could satisfy the current assertions. The frozen representation ruling and attempt1 revision explicitly required actual tap PCM.
+
+Use the existing Capture pattern outside audited render to record both alias planes. Compare the observed tail's tap words with the original separate graph at that same alias; retain the existing no-observer/observer factory1→0 and three callback assertions. Keep postmatrix identity checks. No graph lowering or observation policy change is needed. Only this missing data assertion remains for the otherwise-correct alias construction.
+
+## 3. Make mono/recovery evidence pass through the selected pair
+
+`actual_graph_mono_collapse_disengages_on_input_command_and_recovers_nonfinite_input` builds BOTH variables via prepared_pair_graph_fixture, which always prepares BetweenRenderCalls owners. The variable named separate merely forces mono collapse off; it is not a forced-separate fader/matrix reference. The test identifies the selected composite as the one-lane tail, but renders only graph output from t00 and sends the asymmetric input command to t00. Thus its compared output and disengagement concern an independently ineligible full cohort, while its fusion count comes from t08. This does not establish the assigned seam preservation around the selected pair.
+
+Keep the same small fixture, but capture/compare the selected t08 postmatrix words (PostMatrix capture is an allowed downstream observer), direct the asymmetric input record to that selected track, and use an actual original/Concurrent separate-owner reference with collapse forced off. Compare initial/after-command words and right-plane change while proving real collapse and disengagement and the selected pair's branch/population. The allocation fixture must continue to disable allocating captures; share preparation rather than adding an independent simulated pipeline.
+
+The recovery leg also checks only finite t00 output with no old/separate reference or selected-pair witness. Its SeededInput injects NaN/infinity at index0 on EVERY block, so the “following” block is still hostile; it is not clean recovery evidence. For the existing representative case, inject the already-chosen hostile block then clean input and compare selected-tail output with the unchanged separate owner path, retaining finite/nonvacuous outcome and actual selected dispatch. No new hostile corpus or recovery arithmetic is requested.
+
+## 4. Finish the explicitly retained decline variants
+
+`declined_factory_owners_keep_queued_state_and_render_in_original_order` adds a sound state/queue/render proof for REVERSED owners. Other original guards still only check downcast tags: wrong concrete, Concurrent delivery and width/backend mismatch. A same-width DIFFERENT active population case is absent despite the existing active_lanes predicate and frozen member-population control. The generic reversed-type early-return case does not exercise the later downcast-and-return guards.
+
+Extend the same finite returned-owner helper to the existing policy and width guards and the explicitly required same-width member-population mismatch. Preserve original state and queued consequences, then render each returned real owner over its own valid width/population buffer against its unchanged counterpart in original signal order where shapes are compatible; do not render malformed shared slices merely to get a panic. For wrong concrete test owners, make their retained tag/call effect observable as already done in the first-slot graph fixture. No new acceptance policy, owner class or factory arithmetic change. These are the original five controls, not a combinatorial matrix.
+
+## Final revision boundary
+
+These four finite omissions complete original A/B/C obligations. Accepted code/data/allocation proof above is retained; no new mutation campaign, tool framework, corpus, public host API or product redesign. Stay within the seven approved file categories. Correct evidence claims so “separate,” “commanded cohort,” “observed samples” and “recovery” refer to paths actually observed. Execute the already frozen focused debug/release cases and policy/hygiene gates after the coherent Sol3 pass, retaining command/status/logs. Do not repeat old qualification or timing before source PASS. Parent430 retains full workspace/targets/artifact/browser/actual-PR/CI and no fourth430 repair is authorized.
+
+Review performed read-only source/Git/log inspection; no tests/builds, Cargo resolution, timing or repository/GitHub mutation. No additional unenumerated proof expansion is requested.
+
+
+Root adopts exactly these four remaining groups for FINAL Sol attempt3. Preserve accepted allocation, returned first-slot, queue/state, route/meter and structural alias proof. Any failed consolidated final verdict is a hard stop; no disguised fourth revision.
