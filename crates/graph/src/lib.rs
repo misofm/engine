@@ -1284,7 +1284,12 @@ pub struct GraphBindingBlock<'a> {
     pub right: &'a mut [f32],
     pub first_sample: u64,
 }
-pub trait GraphRuntimeProcessor: Send {
+pub type ScalarPairFactory = fn(
+    Box<dyn GraphRuntimeProcessor>,
+    Box<dyn GraphRuntimeProcessor>,
+) -> Result<Box<dyn GraphRuntimeProcessor>, (Box<dyn GraphRuntimeProcessor>, Box<dyn GraphRuntimeProcessor>)>;
+
+pub trait GraphRuntimeProcessor: Send + Any {
     /// Process one block in place.
     ///
     /// # The contract for a node with no graph inputs (issue #218)
@@ -1307,6 +1312,17 @@ pub trait GraphRuntimeProcessor: Send {
     /// therefore declines: nothing has compared its two channels' words.
     fn channel_symmetry(&self) -> ChannelSymmetryWitness {
         ChannelSymmetryWitness::DECLINED
+    }
+
+    /// Preparation-only hook for the serialized scalar fader/matrix pair.
+    /// Render never queries this metadata.
+    fn scalar_pair_factory(&self) -> Option<ScalarPairFactory> {
+        None
+    }
+
+    /// Preparation-only compatibility marker for the scalar pair factory.
+    fn scalar_pair_accepts(&self) -> bool {
+        false
     }
 }
 /// Immutable post-node observation input. Observers cannot alter graph audio.

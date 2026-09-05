@@ -1830,6 +1830,7 @@ impl PreparedBuiltinsSession {
     /// its consumer to a bank.
     fn strip_bindings(&mut self) -> Vec<graph::GraphNodeBinding> {
         let mut bindings = Vec::with_capacity(self.strips.len() * 3);
+        let control_delivery = self.control_delivery;
         for strip in core::mem::take(&mut self.strips) {
             let StripPreparation {
                 graph_id,
@@ -1868,12 +1869,14 @@ impl PreparedBuiltinsSession {
                             control: control
                                 .fader
                                 .expect("a strip is banked on all three stages or on none"),
+                            control_delivery,
                         }),
                         Box::new(ConsoleMatrixProcessor {
                             matrix,
                             control: control
                                 .matrix
                                 .expect("a strip is banked on all three stages or on none"),
+                            control_delivery,
                         }),
                     )
                 }
@@ -3418,6 +3421,7 @@ impl GraphRuntimeProcessor for ConsoleInputProcessor {
 struct ConsoleMatrixProcessor {
     matrix: MatrixBuiltins,
     control: Consumer<TrackControlRecord>,
+    control_delivery: BuiltinControlDelivery,
 }
 impl GraphRuntimeProcessor for ConsoleMatrixProcessor {
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
@@ -3431,6 +3435,9 @@ impl GraphRuntimeProcessor for ConsoleMatrixProcessor {
         self.matrix.process(block);
         Ok(())
     }
+    fn scalar_pair_accepts(&self) -> bool {
+        self.control_delivery == BuiltinControlDelivery::BetweenRenderCalls
+    }
 }
 /// The fader/mute stage of one track that a live console drives (issue #140 B).
 ///
@@ -3442,6 +3449,7 @@ impl GraphRuntimeProcessor for ConsoleMatrixProcessor {
 struct ConsoleFaderProcessor {
     fader: FaderMuteRampBuiltins,
     control: Consumer<TrackFaderRecord>,
+    control_delivery: BuiltinControlDelivery,
 }
 impl GraphRuntimeProcessor for ConsoleFaderProcessor {
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
@@ -3467,6 +3475,42 @@ impl GraphRuntimeProcessor for ConsoleFaderProcessor {
         self.fader.process(block);
         Ok(())
     }
+    fn scalar_pair_factory(&self) -> Option<graph::ScalarPairFactory> {
+        (self.control_delivery == BuiltinControlDelivery::BetweenRenderCalls).then_some(make_scalar_pair)
+    }
+}
+
+/// The live scalar pair owns the two original processors and their consumers. The graph keeps the
+/// original matrix op as an identity, so this owner is invoked exactly at the fader boundary.
+struct ScalarPairProcessor {
+    fader: Box<dyn GraphRuntimeProcessor>,
+    matrix: Box<dyn GraphRuntimeProcessor>,
+}
+
+impl GraphRuntimeProcessor for ScalarPairProcessor {
+    fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
+        let GraphBindingBlock { left, right, first_sample } = block;
+        self.fader.process(GraphBindingBlock {
+            left,
+            right,
+            first_sample,
+        })?;
+        self.matrix.process(GraphBindingBlock {
+            left,
+            right,
+            first_sample,
+        })
+    }
+}
+
+fn make_scalar_pair(
+    fader: Box<dyn GraphRuntimeProcessor>,
+    matrix: Box<dyn GraphRuntimeProcessor>,
+) -> Result<Box<dyn GraphRuntimeProcessor>, (Box<dyn GraphRuntimeProcessor>, Box<dyn GraphRuntimeProcessor>)> {
+    if !matrix.scalar_pair_accepts() {
+        return Err((fader, matrix));
+    }
+    Ok(Box::new(ScalarPairProcessor { fader, matrix }))
 }
 struct MeterObserver(MeterAccumulator);
 impl GraphRuntimeObserver for MeterObserver {

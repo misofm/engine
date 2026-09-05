@@ -1882,8 +1882,77 @@ pub(crate) fn build_sequential(
         &run_units,
     )
     .into_iter()
-    .filter(|(run, _, _)| !folded_runs.contains(run))
-    .collect();
+        .filter(|(run, _, _)| !folded_runs.contains(run))
+        .collect();
+
+    // Serialized scalar fader/matrix pairing is decided while both original owners and the
+    // lowered graph are still available.  The schedule is intentionally left untouched: the
+    // matrix binding becomes an identity at its original slot, while the composite runs from the
+    // fader slot and the existing reduction/observer boundaries remain in place.
+    let (readers, first_producer) = op_dataflow(program);
+    for pair in run_units.windows(2) {
+        let (first_membership, first_ops) = &pair[0];
+        let (second_membership, second_ops) = &pair[1];
+        if !first_membership.is_empty()
+            || !second_membership.is_empty()
+            || first_ops.len() != 1
+            || second_ops.len() != 1
+        {
+            continue;
+        }
+        let first = first_ops[0];
+        let second = second_ops[0];
+        if second != first.saturating_add(1)
+            || program.inputs_of(&program.ops[first]).is_empty()
+            || program.inputs_of(&program.ops[second]).is_empty()
+        {
+            continue;
+        }
+        let first_node = &spec.nodes[program.ops[first].node as usize].id;
+        let second_node = &spec.nodes[program.ops[second].node as usize].id;
+        let (
+            GraphNodeId::TrackStage { track_id: first_track, stage: TrackStage::PostFader },
+            GraphNodeId::TrackStage { track_id: second_track, stage: TrackStage::PostMatrix },
+        ) = (first_node, second_node)
+        else {
+            continue;
+        };
+        if first_track != second_track
+            || !chains_into(
+                program,
+                spec,
+                &parts,
+                &readers,
+                &first_producer,
+                &[first],
+                &[second],
+            )
+        {
+            continue;
+        }
+        let Some(Some(fader)) = parts.bindings.remove(first_node) else {
+            continue;
+        };
+        let Some(Some(matrix)) = parts.bindings.remove(second_node) else {
+            parts.bindings.insert(first_node.clone(), Some(fader));
+            continue;
+        };
+        let Some(factory) = fader.scalar_pair_factory() else {
+            parts.bindings.insert(first_node.clone(), Some(fader));
+            parts.bindings.insert(second_node.clone(), Some(matrix));
+            continue;
+        };
+        match factory(fader, matrix) {
+            Ok(composite) => {
+                parts.bindings.insert(first_node.clone(), Some(composite));
+                parts.bindings.insert(second_node.clone(), None);
+            }
+            Err((fader, matrix)) => {
+                parts.bindings.insert(first_node.clone(), Some(fader));
+                parts.bindings.insert(second_node.clone(), Some(matrix));
+            }
+        }
+    }
     // Where each op's `RuntimeOp` ended up, so a redirect can neutralise the consumer's reduction.
     let mut op_slot: Vec<Option<(usize, usize)>> = vec![None; program.ops.len()];
     // Run unit -> the unit index it was emitted at, for the chains the fold arms.
