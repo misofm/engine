@@ -1,0 +1,6 @@
+2026-09-05T04:02:17Z
+9cd6ba25c7a3b7f80788cd04789a10d36ee10e92
+binary_age_seconds=236 loadavg_one=0.32 affinity_cpu=63 siblings=31
+e0d9e2752e50df486c4622e1b7d80de46ac59d5cd698e4da81cdfe45d462227a  target/release/bench
+sibling=31 busy_percent=0.00
+READINESS PASS; no workload invoked
