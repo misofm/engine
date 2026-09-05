@@ -161,3 +161,9 @@ I independently reran the complete conformance suite and shared helper suite. Bo
 No remaining source-attempt blocker was identified. Preserve existing Session separation: #417 stays queued until this issue merges, and #401/#306 remain open until their full child obligations complete. Remaining gates are root-owned baseline/candidate workspace comparison, synchronized final evidence, actual pushed PR Astra review and required CI. No new source repair, runtime, artifact or benchmark work is requested.
 
 Review used read-only source/log inspection and two existing shell suites; no Cargo, timing, Git, repository or GitHub mutation.
+
+## Integrated delivery qualification
+
+Source integration candidate `423b06d3aeccf51fecae8c79c38221a48afbf262` includes current main `d8304664e8015e764285b55837c2970577abbc51`. Both complete `cargo test --locked --workspace` runs exited 0: 274 suites, 1,559 passed, zero failed, 24 ignored for baseline and candidate, with no count drift. Logs: `/tmp/engine-d830-workspace-baseline.log` and `/tmp/engine-407-candidate-workspace.log`. The runs were sequential in the same target directory; no concurrent Cargo or test-binary rebuild occurred there.
+
+Both real gates, both direct fixture suites and the shared helper suite pass after main integration (`/tmp/engine-407-integrated-{real-graph,real-conformance,test-graph,test-conformance,test-helper}.log`); diff hygiene passes. The cumulative PR changes no Rust source, manifest, artifact or benchmark. Astra source PASS is recorded above; actual PR head review and required CI remain before merge. #417 retains its finalized queued brief; #401/#306 remain open.
