@@ -71,3 +71,7 @@ Finite directed cases retain empty/error and meaningful matching/delegate/Cargo-
 The four scopes retain the parent's original standing contract and unchanged-count workspace/actual-PR/CI delivery, while the later sibling briefs remain queued for their own current-base reviews. No benchmark executable is authorized. Start #453 only after #404 delivery and a proportional source/helper comparison against that actual merged base; unchanged source would not justify reopening this design. #403/#306/#349 remain OPEN until all retained outcomes are delivered and reconciled.
 
 Read-only source/Git comparisons and scope inspection only. No implementation, tests, builds, timing, repository/spec or Git/GitHub mutation; only this /tmp verdict was written.
+
+## Delivered #404 base integration
+
+Root integrated delivered main `60519995c37f95e3f91abb45f45790ecad1ed244` after PR #458 merged and #404 was verified CLOSED. The two assigned checkers, their two existing suites, shared helper directory and helper suite have no source delta from approved planning `9119c6c65ea198e2eb7a6c6a07903a92b6ca1f19`. The branch differs from main only in the five #403/#453-456 planning specs. Root requests the proportional actual-base Astra approval before Luna assignment; no implementation has started.
