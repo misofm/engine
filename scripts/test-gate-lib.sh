@@ -124,12 +124,19 @@ check_extractor_failures() {
 check_extractor_failures +o
 check_extractor_failures -o
 
+mkdir -p "$scratch/find-fail"
+cat >"$scratch/find-fail/find" <<'EOF'
+#!/usr/bin/env bash
+printf 'plausible/path.rs\n'
+exit 7
+EOF
+chmod +x "$scratch/find-fail/find"
 for pipefail_setting in +o -o; do
     for invocation in direct conditional; do
         command_text='set '"$pipefail_setting"' pipefail; source "$1"; GATE_FAILURE_PREFIX="gate test"; gate_find_collect find-check "$2"'
         [[ $invocation == direct ]] || command_text='set '"$pipefail_setting"' pipefail; source "$1"; GATE_FAILURE_PREFIX="gate test"; if gate_find_collect find-check "$2"; then exit 0; else exit $?; fi'
-        find_output=$(PATH="$scratch/rg-partial:$PATH" bash -c "$command_text" _ "$root/scripts/lib/gate.sh" "$scratch/missing" 2>&1) && find_rc=0 || find_rc=$?
-        [[ $find_rc -ne 0 && $find_output == *'find-check traversal errored'* ]] || { echo "find status lost ($pipefail_setting/$invocation): $find_output" >&2; exit 1; }
+        find_output=$(PATH="$scratch/find-fail:$PATH" bash -c "$command_text" _ "$root/scripts/lib/gate.sh" "$scratch/src" 2>&1) && find_rc=0 || find_rc=$?
+        [[ $find_rc -eq 7 && $find_output == *'plausible/path.rs'* && $find_output == *'find-check traversal errored'* ]] || { echo "find status lost ($pipefail_setting/$invocation): $find_output" >&2; exit 1; }
     done
 done
 
@@ -154,6 +161,14 @@ exit 8
 EOF
 chmod +x "$scratch/awk-fail/awk" "$scratch/awk-fail/sort" "$scratch/sort-fail/awk" "$scratch/sort-fail/sort"
 for pipefail_setting in +o -o; do
+    for invocation in direct conditional; do
+        sort_command='set '"$pipefail_setting"' pipefail; source "$1"; GATE_FAILURE_PREFIX="gate test"; gate_sort_lines sort-check "$2"'
+        [[ $invocation == direct ]] || sort_command='set '"$pipefail_setting"' pipefail; source "$1"; GATE_FAILURE_PREFIX="gate test"; if gate_sort_lines sort-check "$2"; then exit 0; else exit $?; fi'
+        direct_sort=$(PATH="$scratch/sort-fail:$PATH" bash -c "$sort_command" _ "$root/scripts/lib/gate.sh" $'zeta\nalpha' 2>&1) && direct_sort_rc=0 || direct_sort_rc=$?
+        [[ $direct_sort_rc -eq 8 && $direct_sort == *$'alpha\nzeta'* && $direct_sort == *'sort-check sort errored (sort status 8)'* ]] || { echo "direct sort status lost ($pipefail_setting/$invocation): $direct_sort" >&2; exit 1; }
+    done
+done
+for pipefail_setting in +o -o; do
     awk_output="$(PATH="$scratch/awk-fail:$PATH" GATE_FAILURE_PREFIX='gate test' bash -c "set $pipefail_setting pipefail; source \"\$1\"; if gate_toml_dependencies \"\$2\"; then exit 0; else exit \$?; fi" _ "$root/scripts/lib/gate.sh" "$manifest" 2>&1)" && awk_rc=0 || awk_rc=$?
     [[ "$awk_rc" -eq 7 && "$awk_output" == *'awk status 7'* && "$awk_output" != *'partial'* ]] || { echo "awk failure leaked partial output or was not explicit: $awk_output" >&2; exit 1; }
     sort_output="$(PATH="$scratch/sort-fail:$PATH" GATE_FAILURE_PREFIX='gate test' bash -c "set $pipefail_setting pipefail; source \"\$1\"; if gate_toml_dependencies \"\$2\"; then exit 0; else exit \$?; fi" _ "$root/scripts/lib/gate.sh" "$manifest" 2>&1)" && sort_rc=0 || sort_rc=$?
@@ -171,6 +186,7 @@ EOF
 chmod +x "$scratch/paste-fail/paste"
 join_output=$(PATH="$scratch/paste-fail:$PATH" GATE_FAILURE_PREFIX='gate test' bash -c 'source "$1"; gate_join_lines join "|" "$2"' _ "$root/scripts/lib/gate.sh" $'engine\nlane' 2>&1) && join_rc=0 || join_rc=$?
 [[ $join_rc -eq 9 && $join_output == *'join errored (paste status 9)' ]] || { echo "join failure not explicit: $join_output" >&2; exit 1; }
+[[ "$(gate_sort_lines empty-sort '')" == '' ]] || { echo 'empty sort result changed' >&2; exit 1; }
 
 # Acceptance counter-mutants: each simulates the historic fail-open result. The same assertions
 # above must classify the forged success/output as rejection evidence rather than silently accept it.
@@ -190,6 +206,24 @@ if PATH="$scratch/rg-partial:$PATH" bash -c 'source "$1"; gate_filter_exclude mu
 [[ "$(PATH="$scratch/wc-fail:$PATH" bash -c 'source "$1"; gate_count_lines mutant "$2"' _ "$counter_dir/count.sh" $'one\ntwo')" == 2 ]] || { echo 'count counter-mutant did not forge expected count' >&2; exit 1; }
 [[ "$(bash -c 'source "$1"; gate_toml_dependencies "$2" plain' _ "$counter_dir/plain.sh" "$plain_manifest")" != $'alpha\nlane\nzeta' ]] || { echo 'plain parser counter-mutant escaped acceptance' >&2; exit 1; }
 printf 'counter-mutant controls exercised: collect required filter count plain\n'
+
+# New #407 mechanisms: run the same acceptance assertions against fail-open/misparse copies and
+# require the assertions themselves to go red at the intended check.
+new_counter="$scratch/new-counter-mutants"; mkdir -p "$new_counter"
+for mechanism in find sort text unique join target; do cp "$root/scripts/lib/gate.sh" "$new_counter/$mechanism.sh"; done
+sed -i '/gate_find_collect()/,/gate_sort_lines()/ s/return "$rc"/return 0/' "$new_counter/find.sh"
+sed -i '/gate_sort_lines()/,/gate_unique_nonempty_lines()/ s/return "$rc"/return 0/' "$new_counter/sort.sh"
+sed -i '/gate_scan_text_collect()/,/gate_scan_required()/ s/return "$rc"/return 0/' "$new_counter/text.sh"
+sed -i '/gate_unique_nonempty_lines()/,/gate_join_lines()/ s/return "$rc"/return 0/' "$new_counter/unique.sh"
+sed -i '/gate_join_lines()/,/gate_filter_exclude()/ s/return "$rc"/return 0/' "$new_counter/join.sh"
+sed -i 's/"$mode" == "plain-target"/false/' "$new_counter/target.sh"
+assert_mutant_red() { local label=$1 expected=$2; shift 2; local output rc; output=$("$@" 2>&1) && rc=0 || rc=$?; [[ $rc -ne 0 && $output == *"$expected"* ]] || { echo "$label mutant was not rejected at intended assertion: $output" >&2; exit 1; }; printf 'counter-mutant rejected: %s (status %s)\n' "$label" "$rc"; }
+assert_mutant_red find 'ASSERT find accepted failed producer' env PATH="$scratch/find-fail:$PATH" bash -c 'source "$1"; if gate_find_collect x "$2" >/dev/null; then echo "ASSERT find accepted failed producer"; exit 1; fi' _ "$new_counter/find.sh" "$scratch/src"
+assert_mutant_red sort 'ASSERT sort accepted failed producer' env PATH="$scratch/sort-fail:$PATH" bash -c 'source "$1"; if gate_sort_lines x "$2" >/dev/null; then echo "ASSERT sort accepted failed producer"; exit 1; fi' _ "$new_counter/sort.sh" $'zeta\nalpha'
+assert_mutant_red text 'ASSERT text accepted failed predicate' env PATH="$scratch/rg-partial:$PATH" bash -c 'source "$1"; if gate_scan_text_collect x y z >/dev/null; then echo "ASSERT text accepted failed predicate"; exit 1; fi' _ "$new_counter/text.sh"
+assert_mutant_red unique 'ASSERT unique accepted failed filter' env PATH="$scratch/awk-fail:$PATH" bash -c 'source "$1"; if gate_unique_nonempty_lines x "$2" >/dev/null; then echo "ASSERT unique accepted failed filter"; exit 1; fi' _ "$new_counter/unique.sh" $'engine\nlane'
+assert_mutant_red join 'ASSERT join accepted failed aggregation' env PATH="$scratch/paste-fail:$PATH" bash -c 'source "$1"; if gate_join_lines x "|" "$2" >/dev/null; then echo "ASSERT join accepted failed aggregation"; exit 1; fi' _ "$new_counter/join.sh" $'engine\nlane'
+assert_mutant_red target 'ASSERT target mode lost target dependency' bash -c 'source "$1"; [[ "$(gate_toml_dependencies "$2" plain-target)" == $'"'"'alpha\ntarget_only\nzeta'"'"' ]] || { echo "ASSERT target mode lost target dependency"; exit 1; }' _ "$new_counter/target.sh" "$plain_manifest"
 
 [[ "$PWD" == "$before_pwd" ]] || { echo 'gate changed caller cwd' >&2; exit 1; }
 [[ "$(set -o)" == "$before_opts" ]] || { echo 'gate changed caller shell options' >&2; exit 1; }
