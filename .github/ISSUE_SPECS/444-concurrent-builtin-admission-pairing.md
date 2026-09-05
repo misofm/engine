@@ -72,3 +72,7 @@ Disposition: keep #444 queued. Reuse and number the existing #140 A prerequisite
 Adopt the common #140 ownership/reservation service as an explicit undelivered prerequisite. Do not create a second accepted-work ledger or use current dequeue as a safe transfer. This planning record does not approve the new native endpoint's exact payload, cutoff/late or lifecycle-publication contract; those remain finite decisions to freeze against the delivered common service before integration assignment. Native bank and concurrent scalar pairing both remain required under this issue. Existing raw Concurrent endpoints and canonical mutation semantics are preserved.
 
 Root is obtaining a stateless, exact-API child brief for the common #140 prerequisite before numbering it. #444 remains queued with no implementation, benchmark or parent-closure authority. The active #430 runtime and #404 tooling revisions remain independent and untouched.
+
+## Numbered common service dependency #460
+
+#460 now owns the prepared ownership/reservation prerequisite shared with #140. Root verified its number/title/body and adopted the exact standalone sequence/publication contract before implementation. The service remains queued and undelivered. It does not establish a builtin application cutoff, enable a production host, or implement native pairing; this issue retains all endpoint/late/lifecycle decisions and both bank/scalar outcomes. No second ledger for the same accepted ticket is authorized.
