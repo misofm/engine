@@ -254,3 +254,7 @@ This approves implementation scope and base, not an unimplemented fusion result.
 No repository/spec edits, Git/GitHub mutations, builds, tests, benchmark or legacy inspection were performed. Only this /tmp review was written.
 
 Root assigns Luna attempt 1 after this approval checkpoint is pushed and synchronized. #430 is the sole active runtime feature; #427 runs independent immutable tooling qualification. Exact scope, public-API decisions, accounting and five finite gates remain binding. Root owns the coherent checkpoint, push and GitHub evidence; Astra issues one consolidated verdict before broader qualification or any Sol retry.
+
+## Luna attempt 1 compiling checkpoint
+
+Luna returned a five-source-path implementation of the owner factory/composite, narrow settled bridge and graph bind-time selection. Its reported checks were cargo check and graph/builtins-compiler test compilation with --no-run; these are not executed semantic tests and do not establish the five finite product gates. Root independently ran `cargo check --locked -p builtins-compiler -p graph` on this exact source with exit0, retained in `/tmp/engine-430-attempt1-check.log`. No source acceptance, real live-dispatch proof, capi resource qualification, full workspace or timing is claimed. This compiling checkpoint is preserved for one consolidated Astra review of the whole attempt before further implementation.

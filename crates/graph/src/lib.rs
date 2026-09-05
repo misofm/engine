@@ -9,6 +9,7 @@ mod runtime;
 
 use core::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::any::Any;
 
 use effect_contract::{
     ChannelSymmetryWitness, EffectControlLane, LatencySamples, ObservationLane,
@@ -543,10 +544,22 @@ pub enum BuiltinControlDelivery {
     BetweenRenderCalls,
 }
 /// Render contract for an already-prepared builtin bank.
-pub trait GraphPreparedBuiltinBankProcessor: Send {
+pub type BuiltinProcessor = Box<dyn GraphPreparedBuiltinBankProcessor>;
+pub type BuiltinPairFactory = fn(
+    BuiltinProcessor,
+    BuiltinProcessor,
+) -> Result<BuiltinProcessor, (BuiltinProcessor, BuiltinProcessor)>;
+
+pub trait GraphPreparedBuiltinBankProcessor: Send + Any {
+    fn as_any(&self) -> &dyn Any;
+    fn into_any(self: Box<Self>) -> Box<dyn Any>;
     /// Preparation metadata only; render never reads this policy.
     fn control_delivery(&self) -> BuiltinControlDelivery {
         BuiltinControlDelivery::Concurrent
+    }
+    /// Preparation-only pairing hook. Render never queries or uses this metadata.
+    fn pair_factory(&self) -> Option<BuiltinPairFactory> {
+        None
     }
     fn process(
         &mut self,
@@ -1654,6 +1667,8 @@ mod tests {
         calls: u64,
     }
     impl GraphPreparedBuiltinBankProcessor for CountingIdentityBuiltin {
+        fn as_any(&self) -> &dyn Any { self }
+        fn into_any(self: Box<Self>) -> Box<dyn Any> { self }
         fn process(
             &mut self,
             _left: &mut [f32],

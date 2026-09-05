@@ -31,7 +31,7 @@ use engine::realtime::{
 };
 use graph::{
     BuiltinControlDelivery, DependencyLevel, GraphBindingBlock, GraphBuiltinBankResourceEstimate,
-    GraphNodeId, GraphNodeObserverBinding, GraphObservationBlock, GraphPreparedBuiltinBank,
+    BuiltinPairFactory, BuiltinProcessor, GraphNodeId, GraphNodeObserverBinding, GraphObservationBlock, GraphPreparedBuiltinBank,
     GraphPreparedBuiltinBankInfo, GraphPreparedBuiltinBankProcessor, GraphPreparedSourceSet,
     GraphRuntimeBindings, GraphRuntimeObserver, GraphRuntimeProcessor, PreparedGraphPlan,
     StableGraphId, TrackStage,
@@ -387,6 +387,8 @@ struct BuiltinBankProcessor {
 const MAXIMUM_BANK_LANES: usize = 8;
 
 impl GraphPreparedBuiltinBankProcessor for BuiltinBankProcessor {
+    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> { self }
     /// The third drain. Runs before the collapse dispatch reads the witness -- see the type's
     /// documentation for why that ordering is the whole reason this is not folded into `process`.
     fn begin_block(&mut self, first_sample: u64) -> Result<(), RenderError> {
@@ -547,6 +549,9 @@ struct FaderBankProcessor {
 }
 
 impl GraphPreparedBuiltinBankProcessor for FaderBankProcessor {
+    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> { self }
+    fn pair_factory(&self) -> Option<BuiltinPairFactory> { Some(make_fader_matrix) }
     fn control_delivery(&self) -> BuiltinControlDelivery {
         self.control_delivery
     }
@@ -622,6 +627,8 @@ struct MatrixBankProcessor {
 }
 
 impl GraphPreparedBuiltinBankProcessor for MatrixBankProcessor {
+    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> { self }
     fn control_delivery(&self) -> BuiltinControlDelivery {
         self.control_delivery
     }
@@ -667,6 +674,66 @@ impl GraphPreparedBuiltinBankProcessor for MatrixBankProcessor {
     }
 }
 
+struct FaderMatrixBankProcessor {
+    fader: Box<FaderBankProcessor>,
+    matrix: Box<MatrixBankProcessor>,
+}
+
+fn make_fader_matrix(
+    fader: BuiltinProcessor,
+    matrix: BuiltinProcessor,
+) -> Result<BuiltinProcessor, (BuiltinProcessor, BuiltinProcessor)> {
+    if !fader.as_any().is::<FaderBankProcessor>() || !matrix.as_any().is::<MatrixBankProcessor>() {
+        return Err((fader, matrix));
+    }
+    let fader = fader.into_any().downcast::<FaderBankProcessor>().expect("checked fader type");
+    let matrix = matrix.into_any().downcast::<MatrixBankProcessor>().expect("checked matrix type");
+    if fader.control_delivery != BuiltinControlDelivery::BetweenRenderCalls
+        || matrix.control_delivery != BuiltinControlDelivery::BetweenRenderCalls
+        || fader.bank.backend() != matrix.bank.backend()
+        || fader.bank.width() != matrix.bank.width()
+        || fader.bank.active_lanes() != matrix.bank.active_lanes()
+    { return Err((fader, matrix)); }
+    Ok(Box::new(FaderMatrixBankProcessor { fader, matrix }))
+}
+
+impl GraphPreparedBuiltinBankProcessor for FaderMatrixBankProcessor {
+    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> { self }
+    fn control_delivery(&self) -> BuiltinControlDelivery { BuiltinControlDelivery::BetweenRenderCalls }
+    fn process(&mut self, left: &mut [f32], right: &mut [f32], frames: u32, first_sample: u64) -> Result<(), RenderError> {
+        let Self { fader, matrix } = self;
+        for (lane, control) in fader.controls.iter_mut().enumerate() {
+            if let Some(control) = control.as_mut() { while let Ok(record) = control.try_pop() { match record {
+                TrackFaderRecord::FaderDb { lanes, db, smoothing_samples } => fader.bank.set_fader_db(lane, lanes, db, smoothing_samples).map_err(render_error)?,
+                TrackFaderRecord::Mute { lanes, muted, smoothing_samples } => fader.bank.set_mute(lane, lanes, muted, smoothing_samples).map_err(render_error)?,
+            } } }
+        }
+        for (lane, control) in matrix.controls.iter_mut().enumerate() {
+            if let Some(control) = control.as_mut() { while let Ok(record) = control.try_pop() {
+                if let Err(error) = matrix.bank.set_target_smoothed(lane, record.matrix, record.smoothing_samples) {
+                    fader.bank.process(left, right, frames);
+                    fader.process_calls = fader.process_calls.saturating_add(1);
+                    fader.frames_processed = fader.frames_processed.saturating_add(u64::from(frames));
+                    return Err(render_error(error));
+                }
+            } }
+        }
+        if !fader.bank.try_process_settled_with_matrix(&mut matrix.bank, left, right, frames) {
+            fader.bank.process(left, right, frames);
+            matrix.bank.process(left, right, frames);
+        }
+        fader.process_calls = fader.process_calls.saturating_add(1);
+        fader.frames_processed = fader.frames_processed.saturating_add(u64::from(frames));
+        matrix.process_calls = matrix.process_calls.saturating_add(1);
+        matrix.frames_processed = matrix.frames_processed.saturating_add(u64::from(frames));
+        let _ = first_sample;
+        Ok(())
+    }
+    fn qualification_counters(&self) -> [u64; 2] { [self.fader.process_calls.saturating_add(self.matrix.process_calls), self.fader.frames_processed.saturating_add(self.matrix.frames_processed)] }
+    fn seam_side(&self) -> SeamSide { SeamSide::SeamSide }
+}
+
 /// Retained bytes of one strip bank's per-lane console-consumer array.
 ///
 /// Charged whether or not a console is attached: the array is `lanes` long either way, and a lane
@@ -693,7 +760,9 @@ fn strip_processor_bytes(stage: TrackStage, width: effect_contract::BankWidth) -
             inline.checked_add(strip_control_bytes::<TrackInputRecord>(width)?)
         }
         TrackStage::PostFader => {
-            inline.checked_add(strip_control_bytes::<TrackFaderRecord>(width)?)
+            inline
+                .checked_add(strip_control_bytes::<TrackFaderRecord>(width)?)?
+                .checked_add(core::mem::size_of::<FaderMatrixBankProcessor>() as u64)
         }
         _ => inline.checked_add(strip_control_bytes::<TrackControlRecord>(width)?),
     }

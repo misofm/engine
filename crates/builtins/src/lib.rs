@@ -2937,6 +2937,39 @@ impl BuiltinFaderBank {
         BuiltinProcessReport::default()
     }
 
+    /// Runs the settled fader and matrix stages in one traversal when their shapes and ramps
+    /// agree. Returns false without touching either stage when a ramp is still active.
+    pub fn try_process_settled_with_matrix(
+        &mut self,
+        matrix: &mut BuiltinMatrixBank,
+        left: &mut [f32],
+        right: &mut [f32],
+        frames: u32,
+    ) -> bool {
+        if self.backend != matrix.backend || self.width != matrix.width || self.members != matrix.members
+            || self.remaining_nonzero() || matrix.remaining_nonzero()
+        {
+            return false;
+        }
+        match (&self.stage, &matrix.stage) {
+            (FaderStageKernel::Simd4(fader), MatrixStageKernel::Simd4(matrix)) => {
+                fader_matrix_block::<Simd4>(left, right, frames as usize, fader.ramp[0].current, fader.ramp[0].mute, fader.ramp[1].current, fader.ramp[1].mute, &matrix.coef);
+            }
+            (FaderStageKernel::Simd8(fader), MatrixStageKernel::Simd8(matrix)) => {
+                fader_matrix_block::<Simd8>(left, right, frames as usize, fader.ramp[0].current, fader.ramp[0].mute, fader.ramp[1].current, fader.ramp[1].mute, &matrix.coef);
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    fn remaining_nonzero(&self) -> bool {
+        match &self.stage {
+            FaderStageKernel::Simd4(stage) => stage.remaining.iter().flatten().any(|v| *v != 0),
+            FaderStageKernel::Simd8(stage) => stage.remaining.iter().flatten().any(|v| *v != 0),
+        }
+    }
+
     /// Snaps every lane to its target and cancels any ramp in flight.
     pub fn reset(&mut self) {
         match &mut self.stage {
@@ -3068,6 +3101,13 @@ impl BuiltinMatrixBank {
             MatrixStageKernel::Simd8(stage) => stage.process(left, right, frames),
         }
         BuiltinProcessReport::default()
+    }
+
+    fn remaining_nonzero(&self) -> bool {
+        match &self.stage {
+            MatrixStageKernel::Simd4(stage) => stage.remaining.iter().any(|v| *v != 0),
+            MatrixStageKernel::Simd8(stage) => stage.remaining.iter().any(|v| *v != 0),
+        }
     }
 
     /// Snaps every lane to its target and cancels any ramp in flight.
