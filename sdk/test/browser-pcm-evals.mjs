@@ -13,6 +13,8 @@ import {
   createMsb1Ring,
   msb1RingBytes,
   Msb1RingWriter,
+  Msb1RingObserver,
+  MSB1_WRAP,
 } from "../src/browser/pcm-ring.ts";
 import { attachEngineFeed, PcmFeedError, prepareEngineFeed } from "../src/browser/pcm-feed.ts";
 import { BUNDLED_ENGINE_ASSETS } from "../src/assets.ts";
@@ -369,4 +371,144 @@ test("moved prelude drains odd mono/stereo rings and allocation mutation turns r
   mutantWriter.commit({ generation: 1n, startFrame: 4n, frames: 4, endOfRegion: false });
   mutant.process();
   assert.ok(mutant.allocations.includes("Float32Array"), "runtime mutation must be caught by constructor instrumentation");
+});
+
+function observedFixture(channels = 2, capacity = 4, frameCapacity = 4) {
+  const ring = createMsb1Ring({ sourceId: "observation", channels, capacity, frameCapacity });
+  const writer = new Msb1RingWriter(ring);
+  writer.engage(1n);
+  return { ring, writer, c: controls(ring), write(startFrame, frames = frameCapacity, generation = 1n) {
+    const planes = writer.reserve(frames);
+    assert.ok(planes);
+    for (let ch = 0; ch < channels; ch++) for (let f = 0; f < frames; f++) planes[ch][f] = Number(startFrame) + ch * 100 + f;
+    writer.commit({ startFrame: BigInt(startFrame), frames, generation, endOfRegion: frames < frameCapacity });
+  } };
+}
+
+test("observer borrows reusable mono/stereo scratch without altering any shared byte", (t) => {
+  for (const channels of [1, 2]) {
+    const f = observedFixture(channels);
+    f.write(10); f.write(20, 2);
+    for (const [word, value] of [[MSB1_CONTROL.UNDERRUNS, 7], [MSB1_CONTROL.DRAIN_BLOCKS, 8], [MSB1_CONTROL.DEPTH, 9]]) Atomics.store(f.c, word, value);
+    const before = Buffer.from(new Uint8Array(f.ring));
+    const observer = new Msb1RingObserver(f.ring), independent = new Msb1RingObserver(f.ring);
+    assert.equal(observer.channels, channels); assert.equal(observer.frameCapacity, 4);
+    let metadata, planes, calls = 0;
+    const native = globalThis.Float32Array;
+    const constructor = t.mock.method(globalThis, "Float32Array", new Proxy(native, { construct() { throw new Error("pull allocated PCM"); } }));
+    const subarray = t.mock.method(native.prototype, "subarray", () => { throw new Error("pull allocated a view"); });
+    const slice = t.mock.method(native.prototype, "slice", () => { throw new Error("pull allocated PCM"); });
+    try {
+      assert.equal(observer.pull((chunk) => {
+        if (!metadata) { metadata = chunk; planes = [...chunk.planes]; }
+        else assert.equal(chunk, metadata);
+        const start = calls++ === 0 ? 10 : 20;
+        assert.equal(chunk.generation, 1n); assert.equal(chunk.startFrame, BigInt(start));
+        assert.equal(chunk.frames, start === 10 ? 4 : 2); assert.equal(chunk.endOfRegion, start === 20);
+        chunk.planes.forEach((plane, ch) => {
+          assert.equal(plane, planes[ch]); assert.notEqual(plane.buffer, f.ring);
+          assert.deepEqual([...plane], start === 10 ? [10 + ch * 100, 11 + ch * 100, 12 + ch * 100, 13 + ch * 100] : [20 + ch * 100, 21 + ch * 100, 0, 0]);
+        });
+      }, 1), 1);
+      assert.equal(observer.pull((chunk) => {
+        assert.equal(chunk, metadata); assert.equal(chunk.planes[0], planes[0]);
+        assert.equal(chunk.frames, 2); assert.equal(chunk.endOfRegion, true);
+        assert.deepEqual([...chunk.planes[0]], [20, 21, 0, 0]);
+      }), 1);
+    } finally { constructor.mock.restore(); subarray.mock.restore(); slice.mock.restore(); }
+    assert.equal(independent.pull(() => {}), 2);
+    assert.equal(observer.pull(() => assert.fail("already observed")), 0);
+    assert.deepEqual(observer.counters(), { wrote: 2, overflow: 0, submitted: 0, stale: 0, refused: 0, lastResult: 0, underruns: 7, drainBlocks: 8, depth: 9, seeksApplied: 0, torn: 0, errors: 0, occupancy: 2, generationTag: 1, submittedGenerationTag: 0 });
+    const finalCounters = observer.counters();
+    observer.close(); observer.close(); independent.close();
+    assert.equal(observer.pull(() => assert.fail("closed")), 0);
+    assert.deepEqual(observer.counters(), finalCounters);
+    assert.deepEqual(Buffer.from(new Uint8Array(f.ring)), before);
+  }
+  assert.throws(() => new Msb1RingObserver(new ArrayBuffer(128)), /SharedArrayBuffer/);
+  const bad = createMsb1Ring({ sourceId: "bad", channels: 1, capacity: 2, frameCapacity: 4 });
+  controls(bad)[MSB1_CONTROL.MAGIC] = 0;
+  assert.throws(() => new Msb1RingObserver(bad), /MSB1/);
+});
+
+test("observer bounds candidate work, catches up, wraps and remains independent of audio consumption", () => {
+  const f = observedFixture(1, 64, 1);
+  for (let i = 0; i < 40; i++) f.write(i);
+  const observer = new Msb1RingObserver(f.ring);
+  for (const invalid of [0, -1, 33, 1.5, NaN, Infinity]) assert.throws(() => observer.pull(() => {}, invalid), /maximumChunks/);
+  const starts = [];
+  assert.equal(observer.pull((chunk) => starts.push(chunk.startFrame)), 32);
+  assert.equal(observer.pull((chunk) => starts.push(chunk.startFrame)), 8);
+  assert.deepEqual(starts, Array.from({ length: 40 }, (_, i) => BigInt(i)));
+  assert.equal(f.c[MSB1_CONTROL.READ_INDEX], 0);
+  const wrapped = observedFixture(1, 2, 1);
+  Atomics.store(wrapped.c, MSB1_CONTROL.READ_INDEX, MSB1_WRAP - 1);
+  Atomics.store(wrapped.c, MSB1_CONTROL.WRITE_INDEX, MSB1_WRAP - 1);
+  wrapped.write(1); wrapped.write(2);
+  const slow = new Msb1RingObserver(wrapped.ring);
+  assert.equal(slow.pull((chunk) => assert.equal(chunk.startFrame, 1n), 1), 1);
+  Atomics.store(wrapped.c, MSB1_CONTROL.READ_INDEX, 1);
+  wrapped.write(3); wrapped.write(4);
+  const caught = [];
+  assert.equal(slow.pull((chunk) => caught.push(chunk.startFrame)), 2);
+  assert.deepEqual(caught, [3n, 4n]);
+  const fresh = new Msb1RingObserver(wrapped.ring);
+  assert.equal(fresh.pull((chunk) => { assert.equal(chunk.startFrame, 3n); fresh.close(); }), 1);
+  assert.equal(fresh.pull(() => assert.fail("closed in callback")), 0);
+  const bounded = new Msb1RingObserver(f.ring);
+  headers(f.ring, 64)[2] = 0; // Invalid first candidate still consumes the explicit budget.
+  assert.equal(bounded.pull(() => assert.fail("invalid candidate"), 1), 0);
+  assert.equal(bounded.pull((chunk) => assert.equal(chunk.startFrame, 1n), 1), 1);
+});
+
+test("observer rejects stale, invalid and torn slots and follows full seek generations", () => {
+  const f = observedFixture(1, 8, 1);
+  for (let i = 0; i < 5; i++) f.write(i);
+  const h = headers(f.ring, 8);
+  h[1] = 2; // Stale tag.
+  h[8] = 0; // Torn sequence.
+  h[18] = 2; // Frames exceed capacity.
+  headers64(f.ring, 8)[14] = 2n; // Full generation disagrees with tag.
+  const observer = new Msb1RingObserver(f.ring);
+  assert.equal(observer.pull((chunk) => assert.equal(chunk.startFrame, 4n)), 1);
+  const generation = (1n << 32n) + 1n; // Same low tag, new seek epoch.
+  f.writer.seek(generation, 5n);
+  f.write(5, 1, generation);
+  assert.equal(observer.pull((chunk) => { assert.equal(chunk.generation, generation); assert.equal(chunk.startFrame, 5n); }), 1);
+  const signed = 0x80000001n;
+  f.writer.seek(signed, 6n); f.write(6, 1, signed);
+  assert.equal(observer.pull((chunk) => { assert.equal(chunk.generation, signed); assert.equal(chunk.startFrame, 6n); }), 1);
+  assert.throws(() => new Msb1RingObserver(f.ring).pull(() => { observer.pull(() => {}); throw new Error("consumer failure"); }), /consumer failure/);
+  const reentrant = new Msb1RingObserver(f.ring);
+  assert.equal(reentrant.pull(() => assert.throws(() => reentrant.pull(() => {}), /reentered/)), 1);
+});
+
+test("observer drops PCM reused during copy before sequence publication, and seeks during copy", (t) => {
+  for (const mode of ["reuse", "seek"]) {
+    const f = observedFixture(2, 1, 4);
+    f.write(10);
+    const observer = new Msb1RingObserver(f.ring);
+    const originalSet = Float32Array.prototype.set;
+    let mutated = false, afterMutation;
+    const hook = t.mock.method(Float32Array.prototype, "set", function (source, offset) {
+      originalSet.call(this, source, offset);
+      if (!mutated && source.buffer === f.ring && this.buffer !== f.ring) {
+        mutated = true;
+        if (mode === "reuse") {
+          Atomics.store(f.c, MSB1_CONTROL.READ_INDEX, 1);
+          assert.ok(f.writer.reserve(4)); // Zeroes both shared planes WITHOUT publishing a new sequence.
+          assert.equal(headers(f.ring, 1)[0], 0);
+        } else f.writer.seek(2n, 20n);
+        afterMutation = Buffer.from(new Uint8Array(f.ring));
+      }
+    });
+    try { assert.equal(observer.pull(() => assert.fail("delivered raced PCM")), 0); }
+    finally { hook.mock.restore(); }
+    assert.equal(mutated, true);
+    assert.deepEqual(Buffer.from(new Uint8Array(f.ring)), afterMutation);
+    if (mode === "reuse") {
+      f.writer.commit({ generation: 1n, startFrame: 20n, frames: 4, endOfRegion: false });
+      assert.equal(observer.pull((chunk) => { assert.equal(chunk.startFrame, 20n); assert.deepEqual([...chunk.planes[0]], [0, 0, 0, 0]); }), 1);
+    }
+  }
 });

@@ -108,8 +108,8 @@ const consumer = resolve(consumerRoot, "index.ts");
 await writeFile(consumer, `
 import { CATALOG, session } from "@misofm/engine";
 import { createOfflineEngine, loadBundledEngineAsset } from "@misofm/engine/headless";
-import { createEngine, prepareEngineFeed, attachEngineFeed, Msb1RingWriter } from "@misofm/engine/browser";
-import type { BrowserEngine } from "@misofm/engine/browser";
+import { createEngine, prepareEngineFeed, attachEngineFeed, Msb1RingWriter, Msb1RingObserver } from "@misofm/engine/browser";
+import type { BrowserEngine, PcmSourceChunk } from "@misofm/engine/browser";
 import { BUNDLED_ENGINE_ASSETS } from "@misofm/engine/assets";
 // @ts-expect-error arbitrary-model canonical serialization is intentionally not public
 import { canonicalSessionJson } from "@misofm/engine";
@@ -128,6 +128,18 @@ void packedFeed.rings;
 const packedWriter = new Msb1RingWriter(packedFeed.rings[0]);
 packedWriter.engage(1n);
 void packedWriter;
+const packedObserver = new Msb1RingObserver(packedFeed.rings[0]);
+packedObserver.pull((chunk: PcmSourceChunk) => {
+  const generation: bigint = chunk.generation;
+  const planes: readonly Float32Array[] = chunk.planes;
+  const frames: number = chunk.frames;
+  // @ts-expect-error Borrowed metadata is read-only.
+  chunk.frames = 3;
+  void [generation, planes, frames];
+}, 1);
+const observedCounters: number[] = [packedObserver.counters().underruns, packedObserver.counters().drainBlocks, packedObserver.counters().depth];
+void observedCounters;
+packedObserver.close();
 void prepareEngineFeed(domContext, BUNDLED_ENGINE_ASSETS.pcmFeedWorklet);
 async function defaultBrowserContext() {
   const engine = await createEngine({ document: "opaque" });
@@ -198,6 +210,23 @@ assert.deepEqual(packedAttach.rings, packedFeedRuntime.rings);
 assert.deepEqual(packedFeedRuntime.rings.map((ring) => new Int32Array(ring)[2]), [64, 64]);
 for (const ring of packedFeedRuntime.rings) Atomics.store(new Int32Array(ring), 13, 1);
 await packedFeedRuntime.ready();
+const publicWriter = new imported["./browser"].Msb1RingWriter(packedFeedRuntime.rings[0]);
+publicWriter.engage(1n);
+publicWriter.reserve(3)[0].set([1, 2, 3]);
+publicWriter.commit({ generation: 1n, startFrame: 11n, frames: 3, endOfRegion: true });
+const observationBefore = Buffer.from(new Uint8Array(packedFeedRuntime.rings[0]));
+const publicObserver = new imported["./browser"].Msb1RingObserver(packedFeedRuntime.rings[0]);
+assert.equal(publicObserver.pull((chunk) => {
+  assert.equal(chunk.generation, 1n);
+  assert.equal(chunk.startFrame, 11n);
+  assert.equal(chunk.frames, 3);
+  assert.equal(chunk.endOfRegion, true);
+  assert.deepEqual([...chunk.planes[0]], [1, 2, 3, 0]);
+}), 1);
+assert.deepEqual([publicObserver.counters().underruns, publicObserver.counters().drainBlocks, publicObserver.counters().depth], [0, 0, 0]);
+publicObserver.close();
+assert.equal(publicObserver.pull(() => assert.fail("closed observer")), 0);
+assert.deepEqual(Buffer.from(new Uint8Array(packedFeedRuntime.rings[0])), observationBefore);
 packedFeedRuntime.close();
 packedFeedRuntime.close();
 assert.equal(packedDisconnects, 1);
