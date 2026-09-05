@@ -91,3 +91,27 @@ Root assigns Luna attempt 1 on this approved base. #435 is the sole active runti
 ## Luna attempt 1 source checkpoint
 
 Luna changed only disjoint lease implementation/tests, graph mute-specific test legs and realtime dependency prose. Reported focused disjoint debug/release 9/9 each and graph runtime debug/release 16/16 each; realtime, graph and workspace policies, fmt, clippy and diff checks passed. Clippy retained pre-existing configuration notices. Logs are `/tmp/luna-435-*`; no full workspace, target/artifact qualification or measurement is claimed. Root checkpoints this coherent source and will run the existing repeated render allocation fixture before adversarial review. Acceptance remains pending.
+
+## Astra attempt 1 verdict and bounded Sol attempt 2
+
+# Astra #435 Luna attempt 1 review
+
+**FAIL at `057f44fe98921c77cb0894ea477843d4b8b93599`.** One finite blocker remains: the changed unsafe-code documentation no longer states the retained synchronization/nonconcurrency obligation correctly. Assign one bounded Sol revision within the existing disjoint-module/realtime-policy prose scope; no new API repair or runtime feature is required.
+
+Reviewed the complete frozen spec/approval and exact implementation diff. Runtime ArenaLease wave storage/accessor and mute state/accessors/selection are removed as explicitly authorized. PendingLease wave, builder argument/order validation/errors, access WRITE table, checked_write and all slice/alias operations are unchanged. The new `let _ = self.access[index]` guard remains before index use in unsafe read paths; it does not use the byte to select input. The valid stereo lease test calls plane 0 with the first unreserved buffer ID and catches refusal; its supplied release log explicitly shows panic at disjoint.rs:177's checked access, so it is not passing only through a debug assertion. No invalid old lease/plane oracle or new unsafe appears.
+
+Graph changes are confined to the retired muting legs/name: repeated/silence inputs, old reducer comparison, asymmetric planes, poison/sentinels and legal self-alias remain. The public retirement and historical #420 distinction are documented in the numbered record and realtime policy. Supplied focused logs show disjoint debug/release 9 passing and graph runtime debug/release 16 passing; root's isolated release allocation fixture and lane-policy logs pass. Broader workspace/targets/artifact/browser qualification remains pending and is not claimed here.
+
+## Blocking safety-proof correction
+
+At disjoint.rs:79-82, the new unsafe impl Sync justification says `Under I1 no two leases can mutably alias, and under I2 no read can overlap a write`. I2 is a builder ordering relation, not a runtime synchronization mechanism. The public builder still returns multiple Send leases, and a smaller wave number alone cannot stop a producer from writing while another lease reads. The sequential production executor satisfies the requirement by exclusive execution, but that fact does not establish the condition for every retained general lease-set use or the multi-thread tests.
+
+The module also deletes I3/I4 definitions entirely, while read/write_read/write_read2/write_read_stereo and the multi-output safety comment still cite I1--I4 (lines 198,291,312,346,385). Its introductory prose still says workers consume producer buffers and a coordinator has recovered earlier parcels (lines 6-7,18-20); those are not current production enforcement. This is precisely the frozen instruction to preserve and accurately state retained ordering/nonconcurrency obligations, not a cosmetic request to rewrite historical prose.
+
+Correct the module and affected SAFETY comments coherently: distinguish builder-proved unique ownership/read ordering from the required execution happens-before and no-overlapping-write/shared-read discipline; state that the actual sequential single-lease runtime discharges the latter by exclusive execution, while any retained multi-lease use must obey that discipline. The concurrency fixture writes disjoint sets and joins writers before inspection, which is a valid source example. Do not claim the removed scheduler or retired mute API enforces it, and do not present wave numbers as synchronization. Either retain clearly defined current obligation labels or update all references consistently. Align the realtime policy's explanatory references if labels change. No runtime enforcement redesign, new unsafe, signature changes, test deletion or unrelated safety repair is authorized.
+
+Accepted code/test work should remain. After this one coherent correction, root checkpoints the exact paths for Astra re-review; source/docs checks are proportional to the correction, with full immutable qualification still owned by root after PASS. This consumes Luna attempt 1; Sol attempts 2 and 3 remain under the existing hard-stop rule.
+
+No source/Git/GitHub mutation, builds/tests or timing performed during this review.
+
+Root authorizes Sol attempt 2 for this safety-proof correction only. Runtime and test behavior remain accepted; source/docs checks are proportional, followed by immutable qualification only after Astra PASS. Root additional allocation/lane logs are `/tmp/engine-435-root-allocation.log` and `/tmp/engine-435-root-lane-policy.log`.
