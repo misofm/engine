@@ -178,6 +178,8 @@ pub enum Op {
     Min,
     /// `exp2_int(a)`.
     Exp2Int,
+    /// `exp2_int_in_range(a)` for integer-valued `a` in `[-126, 127]`.
+    Exp2IntInRange,
     /// Significand of `frexp(a)`.
     FrexpSignificand,
     /// Exponent of `frexp(a)`.
@@ -210,6 +212,7 @@ pub const ALL_OPS: &[Op] = &[
     Op::Max,
     Op::Min,
     Op::Exp2Int,
+    Op::Exp2IntInRange,
     Op::FrexpSignificand,
     Op::FrexpExponent,
     Op::Flush,
@@ -242,6 +245,7 @@ impl Op {
             Self::Max => "max",
             Self::Min => "min",
             Self::Exp2Int => "exp2_int",
+            Self::Exp2IntInRange => "exp2_int_in_range",
             Self::FrexpSignificand => "frexp.significand",
             Self::FrexpExponent => "frexp.exponent",
             Self::Flush => "flush",
@@ -272,6 +276,7 @@ impl Op {
             | Self::Abs
             | Self::Floor
             | Self::Exp2Int
+            | Self::Exp2IntInRange
             | Self::FrexpSignificand
             | Self::FrexpExponent
             | Self::Flush => 1,
@@ -312,6 +317,7 @@ pub fn apply<L: Lane>(op: Op, a: L, b: L, c: L) -> L {
         Op::Max => a.max(b),
         Op::Min => a.min(b),
         Op::Exp2Int => L::exp2_int(a),
+        Op::Exp2IntInRange => L::exp2_int_in_range(a),
         Op::FrexpSignificand => a.frexp().0,
         Op::FrexpExponent => a.frexp().1,
         Op::Flush => lane::flush(a),

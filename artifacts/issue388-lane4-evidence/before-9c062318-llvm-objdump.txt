@@ -1,0 +1,126 @@
+LANE-4 caller disassembly evidence
+commit: 9c0623186943d97bf8949986cce72928b8631596
+probe: artifacts/issue388-lane4-evidence/lane4_codegen_probe.rs
+command: llvm-objdump -d --demangle --no-show-raw-insn --disassemble-symbols='lane4_codegen_probe::issue388_exp2_lane_simd8,lane4_codegen_probe::issue388_fast_gain_from_db_simd8' /tmp/engine-367-main-baseline/target-issue388/release/examples/lane4_codegen_probe
+exp2_lane wrapper counts: 2 vmaxps, 2 vminps
+fast_gain_from_db wrapper counts: 2 vmaxps, 2 vminps
+
+Tool and input identities:
+LLVM (http://llvm.org/):
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+binary: rustc
+commit-hash: 8bab26f4f68e0e26f0bb7960be334d5b520ea452
+commit-date: 2026-07-14
+host: x86_64-unknown-linux-gnu
+release: 1.97.1
+LLVM version: 22.1.6
+9573c59072c8913e7716c027c8a8ea36cc56ad310533b9a3ed3b2b53e9bbc4eb  artifacts/issue388-lane4-evidence/lane4_codegen_probe.rs
+97b327e33e2ed8d49c8bef6b5fb894da9c30be63a888a97be3916b4e2a9ae3c1  /tmp/engine-367-main-baseline/target-issue388/release/examples/lane4_codegen_probe
+99300bf3c2f5bc7a296a27a0a85525bf38e3662eb3e4ded4cc672f7163c635ef  /tmp/engine-388-after/target-issue388/release/examples/lane4_codegen_probe
+
+Full command output:
+
+/tmp/engine-367-main-baseline/target-issue388/release/examples/lane4_codegen_probe:	file format elf64-x86-64
+
+Disassembly of section .text:
+
+000000000000e340 <lane4_codegen_probe::issue388_exp2_lane_simd8>:
+    e340:      	vbroadcastss	-0xb5b1(%rip), %ymm1 # 0x2d98 <write+0x2d98>
+    e349:      	vmaxps	%ymm1, %ymm0, %ymm0
+    e34d:      	vbroadcastss	-0xb58a(%rip), %ymm2 # 0x2dcc <write+0x2dcc>
+    e356:      	vminps	%ymm2, %ymm0, %ymm0
+    e35a:      	vroundps	$0x9, %ymm0, %ymm3
+    e360:      	vsubps	%ymm3, %ymm0, %ymm0
+    e364:      	vbroadcastss	-0xb5bd(%rip), %ymm4 # 0x2db0 <write+0x2db0>
+    e36d:      	vcmpgt_oqps	%ymm4, %ymm0, %ymm4
+    e372:      	vbroadcastss	-0xb5d7(%rip), %ymm5 # 0x2da4 <write+0x2da4>
+    e37b:      	vaddps	%ymm5, %ymm0, %ymm5
+    e37f:      	vblendvps	%ymm4, %ymm5, %ymm0, %ymm0
+    e385:      	vbroadcastss	-0xb5e6(%rip), %ymm5 # 0x2da8 <write+0x2da8>
+    e38e:      	vmulps	%ymm5, %ymm0, %ymm5
+    e392:      	vbroadcastss	-0xb5a3(%rip), %ymm6 # 0x2df8 <write+0x2df8>
+    e39b:      	vaddps	%ymm6, %ymm5, %ymm5
+    e39f:      	vmulps	%ymm5, %ymm0, %ymm5
+    e3a3:      	vbroadcastss	-0xb5f8(%rip), %ymm6 # 0x2db4 <write+0x2db4>
+    e3ac:      	vaddps	%ymm6, %ymm5, %ymm5
+    e3b0:      	vmulps	%ymm5, %ymm0, %ymm5
+    e3b4:      	vbroadcastss	-0xb5fd(%rip), %ymm6 # 0x2dc0 <write+0x2dc0>
+    e3bd:      	vaddps	%ymm6, %ymm5, %ymm5
+    e3c1:      	vmulps	%ymm5, %ymm0, %ymm5
+    e3c5:      	vbroadcastss	-0xb622(%rip), %ymm6 # 0x2dac <write+0x2dac>
+    e3ce:      	vaddps	%ymm6, %ymm5, %ymm5
+    e3d2:      	vmulps	%ymm5, %ymm0, %ymm5
+    e3d6:      	vbroadcastss	-0xb657(%rip), %ymm6 # 0x2d88 <write+0x2d88>
+    e3df:      	vaddps	%ymm6, %ymm5, %ymm5
+    e3e3:      	vbroadcastss	-0xb67c(%rip), %ymm6 # 0x2d70 <write+0x2d70>
+    e3ec:      	vaddps	%ymm6, %ymm3, %ymm7
+    e3f0:      	vblendvps	%ymm4, %ymm7, %ymm3, %ymm3
+    e3f6:      	vmaxps	%ymm1, %ymm3, %ymm1
+    e3fa:      	vminps	%ymm2, %ymm1, %ymm1
+    e3fe:      	vmulps	%ymm5, %ymm0, %ymm0
+    e402:      	vaddps	%ymm6, %ymm0, %ymm0
+    e406:      	vbroadcastss	-0xb693(%rip), %ymm2 # 0x2d7c <write+0x2d7c>
+    e40f:      	vaddps	%ymm2, %ymm1, %ymm1
+    e413:      	vpslld	$0x17, %ymm1, %ymm1
+    e418:      	vmulps	%ymm1, %ymm0, %ymm0
+    e41c:      	vmovaps	%ymm0, (%rdi)
+    e420:      	vzeroupper
+    e423:      	retq
+    e424:      	int3
+    e425:      	int3
+    e426:      	int3
+    e427:      	int3
+    e428:      	int3
+    e429:      	int3
+    e42a:      	int3
+    e42b:      	int3
+    e42c:      	int3
+    e42d:      	int3
+    e42e:      	int3
+    e42f:      	int3
+
+000000000000e430 <lane4_codegen_probe::issue388_fast_gain_from_db_simd8>:
+    e430:      	vbroadcastss	-0xb681(%rip), %ymm1 # 0x2db8 <write+0x2db8>
+    e439:      	vmulps	%ymm1, %ymm0, %ymm0
+    e43d:      	vbroadcastss	-0xb6ae(%rip), %ymm1 # 0x2d98 <write+0x2d98>
+    e446:      	vmaxps	%ymm1, %ymm0, %ymm0
+    e44a:      	vbroadcastss	-0xb687(%rip), %ymm2 # 0x2dcc <write+0x2dcc>
+    e453:      	vminps	%ymm2, %ymm0, %ymm0
+    e457:      	vroundps	$0x9, %ymm0, %ymm3
+    e45d:      	vsubps	%ymm3, %ymm0, %ymm0
+    e461:      	vbroadcastss	-0xb68a(%rip), %ymm4 # 0x2de0 <write+0x2de0>
+    e46a:      	vmulps	%ymm4, %ymm0, %ymm4
+    e46e:      	vbroadcastss	-0xb6a3(%rip), %ymm5 # 0x2dd4 <write+0x2dd4>
+    e477:      	vaddps	%ymm5, %ymm4, %ymm4
+    e47b:      	vmulps	%ymm4, %ymm0, %ymm4
+    e47f:      	vbroadcastss	-0xb6fc(%rip), %ymm5 # 0x2d8c <write+0x2d8c>
+    e488:      	vaddps	%ymm5, %ymm4, %ymm4
+    e48c:      	vmulps	%ymm4, %ymm0, %ymm4
+    e490:      	vbroadcastss	-0xb6a5(%rip), %ymm5 # 0x2df4 <write+0x2df4>
+    e499:      	vaddps	%ymm5, %ymm4, %ymm4
+    e49d:      	vmulps	%ymm4, %ymm0, %ymm4
+    e4a1:      	vbroadcastss	-0xb6a2(%rip), %ymm5 # 0x2e08 <write+0x2e08>
+    e4aa:      	vaddps	%ymm5, %ymm4, %ymm4
+    e4ae:      	vmaxps	%ymm1, %ymm3, %ymm1
+    e4b2:      	vminps	%ymm2, %ymm1, %ymm1
+    e4b6:      	vbroadcastss	-0xb74f(%rip), %ymm2 # 0x2d70 <write+0x2d70>
+    e4bf:      	vmulps	%ymm4, %ymm0, %ymm0
+    e4c3:      	vaddps	%ymm2, %ymm0, %ymm0
+    e4c7:      	vbroadcastss	-0xb754(%rip), %ymm2 # 0x2d7c <write+0x2d7c>
+    e4d0:      	vaddps	%ymm2, %ymm1, %ymm1
+    e4d4:      	vpslld	$0x17, %ymm1, %ymm1
+    e4d9:      	vmulps	%ymm1, %ymm0, %ymm0
+    e4dd:      	vmovaps	%ymm0, (%rdi)
+    e4e1:      	vzeroupper
+    e4e4:      	retq
+    e4e5:      	int3
+    e4e6:      	int3
+    e4e7:      	int3
+    e4e8:      	int3
+    e4e9:      	int3
+    e4ea:      	int3
+    e4eb:      	int3
+    e4ec:      	int3
+    e4ed:      	int3
+    e4ee:      	int3
+    e4ef:      	int3
