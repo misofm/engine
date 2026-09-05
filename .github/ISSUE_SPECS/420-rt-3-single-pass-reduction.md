@@ -169,3 +169,30 @@ Generate buffers from these rows, execute the unchanged old sum2 followed by sev
 The only other completion from the attempt2 report is a concise honest workload-link record: name the console fixture's64 tracks and64 ordered post-matrix routes to main-out, the PlumbingOnly transformation's preserved routing, the track-count assertion/unbanked compiler arm and the representative private64-input lowering test. Checked read-only source/fixture evidence is sufficient; no public runtime inspection API or additional workload is required. Do not describe the synthetic lowering test as if it directly instantiated SessionRuntime.
 
 Retain accepted ownership/sentinel/allocation/source tests. Run the proportional affected debug/release proof after the single coherent revision; root owns checkpoint and final Astra review. No source, timing, artifact or runner work is authorized by this clarification. Read-only current FP policy and old kernel inspection only; no tests/Cargo/timing or repository/GitHub mutation performed.
+
+## Sol final implementation evidence
+
+The width-specific old-primitive comparison now runs six independent nine-contributor families
+under `CanonicalFpEnv`: finite/order, all-negative-zero, small-normal, subnormal, signed infinity
+without invalid cancellation, and NaN. It asserts each old result's required exact bits (or NaN
+category before same-width bit comparison) before comparing every DUT output bit, at the frozen
+frame lengths for scalar, Simd4 and Simd8. Production code is unchanged.
+
+The named `SixtyFourTrackPlumbingOnly` model loads
+`console-sixty-four-track-intended.json`, whose 64 tracks have 64 ordered post-matrix routes
+`ch00-main` through `ch63-main`, each targeting `main-out`. `apply_strip(PlumbingOnly)` clears the
+effect racks but retains that routing; `SessionRuntime::build_full` asserts the model has 64 tracks
+and selects the unbanked `GraphCompiler::compile` arm. The existing `chain_shape` assertions pin
+zero banks, transposes and folds. Separately, the private `program.rs` lowering test represents the
+same plain graph shape and proves an ordered, non-aliasing 64-input master reduction; it does not
+instantiate `SessionRuntime` or inspect the benchmark's prepared plan.
+
+Final-source focused qualification passes: graph debug and release each run 52 unit tests plus the
+one isolated allocation integration test; release console `chain_shape` runs 21 tests. Graph,
+realtime (42 marked regions in 12 files), lane, workspace and realtime-audit-leak policies and their
+mutation/control suites pass. The lane mutation suite still prints the known missing-`sidecars`
+diagnostics owned by #410 before reporting success; this revision does not claim to repair them.
+Formatting, diff hygiene and graph all-target clippy pass; clippy retains the existing unreachable
+`math::fast_db` allow-list warnings. Logs are `/tmp/sol-420-final-graph-debug.log`,
+`/tmp/sol-420-final-graph-release.log`, `/tmp/sol-420-final-console-release.log`,
+`/tmp/sol-420-final-policies.log`, and `/tmp/sol-420-final-hygiene.log`.

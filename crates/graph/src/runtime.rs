@@ -3090,18 +3090,17 @@ mod tests {
     }
 
     fn assert_width_matches_old<L: Lane>() {
-        let hostile = [
-            -0.0,
-            0.0,
-            f32::from_bits(1),
-            f32::from_bits(0x8000_0001),
-            f32::INFINITY,
-            f32::NEG_INFINITY,
-            f32::from_bits(0x7fc0_4201),
-            16_777_216.0,
-            1.0,
-            -16_777_216.0,
-        ];
+        #[derive(Clone, Copy, Debug)]
+        enum Family {
+            Finite,
+            NegativeZero,
+            SmallNormal,
+            Subnormal,
+            Infinity,
+            Nan,
+        }
+
+        let _fp_env = lane::fpenv::CanonicalFpEnv::enter();
         for frames in [
             1,
             L::WIDTH.saturating_sub(1).max(1),
@@ -3110,42 +3109,111 @@ mod tests {
             L::WIDTH * 3 + 1,
             128,
         ] {
-            let inputs: Vec<Vec<f32>> = (0..9)
-                .map(|input| {
-                    (0..frames)
-                        .map(|frame| hostile[(input + frame) % hostile.len()])
-                        .collect()
-                })
-                .collect();
-            let mut actual = single_lease(frames, 11);
-            let mut old = single_lease(frames, 11);
-            let ids: Vec<u32> = (2..11).collect();
-            for (index, values) in inputs.iter().enumerate() {
-                actual.write(0, ids[index]).copy_from_slice(values);
-                old.write(0, ids[index]).copy_from_slice(values);
+            for family in [
+                Family::Finite,
+                Family::NegativeZero,
+                Family::SmallNormal,
+                Family::Subnormal,
+                Family::Infinity,
+                Family::Nan,
+            ] {
+                let inputs: Vec<Vec<f32>> = (0..9)
+                    .map(|input| {
+                        (0..frames)
+                            .map(|frame| match family {
+                                Family::Finite => match (frame % 2, input) {
+                                    (0, 0) => 2.0,
+                                    (0, 1) => -0.5,
+                                    (0, 2) => 0.25,
+                                    (1, 0) => 16_777_216.0,
+                                    (1, 1) => 1.0,
+                                    (1, 2) => -16_777_216.0,
+                                    _ => 0.0,
+                                },
+                                Family::NegativeZero => -0.0,
+                                Family::SmallNormal => {
+                                    if input < 2 {
+                                        f32::MIN_POSITIVE
+                                    } else {
+                                        0.0
+                                    }
+                                }
+                                Family::Subnormal => {
+                                    if input < 2 {
+                                        f32::from_bits(1)
+                                    } else {
+                                        0.0
+                                    }
+                                }
+                                Family::Infinity => match (frame % 2, input) {
+                                    (0, 0) => f32::INFINITY,
+                                    (0, 1) => 1.0,
+                                    (1, 0) => f32::NEG_INFINITY,
+                                    (1, 1) => -1.0,
+                                    _ => 0.0,
+                                },
+                                Family::Nan => {
+                                    if input == 0 {
+                                        f32::from_bits(0x7fc0_4201)
+                                    } else {
+                                        0.0
+                                    }
+                                }
+                            })
+                            .collect()
+                    })
+                    .collect();
+                let mut actual = single_lease(frames, 11);
+                let mut old = single_lease(frames, 11);
+                let ids: Vec<u32> = (2..11).collect();
+                for (index, values) in inputs.iter().enumerate() {
+                    actual.write(0, ids[index]).copy_from_slice(values);
+                    old.write(0, ids[index]).copy_from_slice(values);
+                }
+                reduce_many::<L>(&mut actual, 0, 1, ids[0], ids[1], &ids[2..]);
+                {
+                    let (output, first, second) = old.write_read2(0, 1, ids[0], ids[1]);
+                    sum2_block::<L>(output, first, second);
+                }
+                for id in &ids[2..] {
+                    let (output, input) = old.write_read(0, 1, *id);
+                    sum_into_block::<L>(output, input);
+                }
+                for (frame, expected) in old.read(0, 1).iter().enumerate() {
+                    let expected_bits = match family {
+                        Family::Finite if frame % 2 == 0 => 1.75_f32.to_bits(),
+                        Family::Finite => 0.0_f32.to_bits(),
+                        Family::NegativeZero => (-0.0_f32).to_bits(),
+                        Family::SmallNormal => 0x0100_0000,
+                        Family::Subnormal => 2,
+                        Family::Infinity if frame % 2 == 0 => f32::INFINITY.to_bits(),
+                        Family::Infinity => f32::NEG_INFINITY.to_bits(),
+                        Family::Nan => {
+                            assert!(expected.is_nan(), "old NaN family output at frame {frame}");
+                            expected.to_bits()
+                        }
+                    };
+                    assert_eq!(
+                        expected.to_bits(),
+                        expected_bits,
+                        "old {family:?} category at width {} frames {frames} frame {frame}",
+                        L::WIDTH
+                    );
+                }
+                assert_eq!(
+                    actual
+                        .read(0, 1)
+                        .iter()
+                        .map(|x| x.to_bits())
+                        .collect::<Vec<_>>(),
+                    old.read(0, 1)
+                        .iter()
+                        .map(|x| x.to_bits())
+                        .collect::<Vec<_>>(),
+                    "{family:?} width {} frames {frames}",
+                    L::WIDTH
+                );
             }
-            reduce_many::<L>(&mut actual, 0, 1, ids[0], ids[1], &ids[2..]);
-            {
-                let (output, first, second) = old.write_read2(0, 1, ids[0], ids[1]);
-                sum2_block::<L>(output, first, second);
-            }
-            for id in &ids[2..] {
-                let (output, input) = old.write_read(0, 1, *id);
-                sum_into_block::<L>(output, input);
-            }
-            assert_eq!(
-                actual
-                    .read(0, 1)
-                    .iter()
-                    .map(|x| x.to_bits())
-                    .collect::<Vec<_>>(),
-                old.read(0, 1)
-                    .iter()
-                    .map(|x| x.to_bits())
-                    .collect::<Vec<_>>(),
-                "width {} frames {frames}",
-                L::WIDTH
-            );
         }
     }
 
