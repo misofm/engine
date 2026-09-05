@@ -137,3 +137,27 @@ No additional amendment is needed before assignment. Luna gets one coherent pass
 Review was read-only apart from this /tmp report. No tests, builds, timing or repository/GitHub mutations were performed.
 
 Root assigns Luna attempt 1 on this approved delivered base. One coherent implementation pass is authorized in the two named workspace scripts and this spec, followed by a root checkpoint and Astra verdict. No further implementation may layer onto a ready checkpoint before root commits and pushes it.
+
+## Luna attempt 1 implementation evidence
+
+The workspace checker now captures each find/sort population before consumption, checks producer
+and parser statuses, and preserves stdout/stderr in operation-specific diagnostics. The Cargo
+manifest population requires all four roots to exist and at least one discovered manifest. The
+tracked-path chain checks Git classification, Git/non-Git listing, NUL conversion, normalization,
+manifest filtering and sorting before scanning quote-aware stripped manifests. Optional ISA
+searches distinguish clean status 1 from execution errors, including the late global `[build]`
+search. Existing primary/suffixed tool-bin naming semantics and all prior policy predicates remain
+unchanged.
+
+Validation from the dedicated worktree, with `PATH=/home/bl/.cargo/bin:$PATH`:
+
+* `bash -n scripts/check-workspace-policy.sh scripts/test-workspace-policy.sh` — PASS.
+* `bash scripts/test-workspace-policy.sh` — PASS (`workspace policy mutation tests: ok`; shared
+  gate-library tests also PASS).
+* `bash scripts/check-workspace-policy.sh .` — PASS (`workspace policy: ok`).
+* `git diff --check` — PASS.
+
+This is an implementation checkpoint awaiting Astra source review. No commit, push, GitHub mutation, build, benchmark,
+Wasm qualification, or browser/artifact rebuild was performed in this attempt.
+
+Root checkpoint audit: the attempt changes the checker and this record only; the existing workspace suite has no delta. The reported existing-suite positives are not evidence that the new finite directed failure table or two actual production same-assertion counter-controls have been implemented. No source PASS or complete acceptance is claimed. Astra will issue one consolidated verdict against the full frozen scope.
