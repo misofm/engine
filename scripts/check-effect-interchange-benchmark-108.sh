@@ -78,7 +78,8 @@ cd "$root"
 
 benchmark=tools/bench/src/effect_interchange.rs
 [[ -f "$benchmark" && ! -L "$benchmark" ]] || fail "missing benchmark source: $benchmark"
-validate_benchmark_source "$benchmark"
+if validate_benchmark_source "$benchmark"; then status=0; else status=$?; fi
+[[ "$status" -eq 0 ]] || fail "benchmark source validation failed (status $status)"
 for path in \
     scripts/effect-interchange-benchmark-108-validator.py \
     scripts/check-effect-interchange-benchmark-108.sh \
@@ -86,7 +87,7 @@ for path in \
     [[ -f "$path" && ! -L "$path" ]] || fail "missing Issue-108 authority: $path"
 done
 
-python3 -I -B - "$benchmark" \
+if python3 -I -B - "$benchmark" \
     scripts/effect-interchange-benchmark-108-validator.py \
     scripts/check-effect-interchange-benchmark-108.sh <<'PY'
 import pathlib, re, sys
@@ -110,6 +111,8 @@ for path_text in sys.argv[2:]:
         if compact not in text and spaced not in text and not (workload in text and digest in text):
             raise SystemExit(f"output authority missing: {path_text}: {workload}")
 PY
+then status=0; else status=$?; fi
+[[ "$status" -eq 0 ]] || fail "cross-file output authority validation failed (status $status)"
 
 validate_successor_namespace scripts/effect-interchange-benchmark-108-validator.py
 if [[ -e target/issue108 ]]; then

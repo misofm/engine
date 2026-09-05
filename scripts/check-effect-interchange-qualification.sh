@@ -152,8 +152,8 @@ if [[ "$issue_branch" == 108 ]]; then
         validate_successor_namespace scripts/effect-interchange-benchmark-108-validator.py || exit $?
     ) || { status=$?; fail "current Issue-108 benchmark source policy failed (status $status)"; }
 else
-python3 -I -B - "$benchmark" scripts/preflight-effect-interchange-benchmark.sh \
-    scripts/run-effect-interchange-benchmark.sh <<'PY' || fail 'terminal Issue-081 benchmark output identities diverged'
+if python3 -I -B - "$benchmark" scripts/preflight-effect-interchange-benchmark.sh \
+    scripts/run-effect-interchange-benchmark.sh <<'PY'
 import pathlib, re, sys
 expected = [
     ("descriptor_verify_identity_a", "865a0a5a01ba157bea7f3279ad68cc17db0296655998a9b5307cf759c38656f1"),
@@ -175,6 +175,8 @@ for path_text in sys.argv[2:]:
         if f'"{workload}":"{digest}"' not in text:
             raise SystemExit(1)
 PY
+then status=0; else status=$?; fi
+if [[ "$status" -ne 0 ]]; then fail "terminal Issue-081 benchmark output identities diverged (status $status)"; fi
 fi
 required_scan 'validator observation scan' rg 'OBSERVATIONS = 256' scripts/effect-interchange-benchmark-validator.py
 forbidden_scan 'benchmark dependency scan' rg -n 'serde|criterion|iai|rand' tools/bench/Cargo.toml

@@ -16,6 +16,15 @@ expect_failure() {
 
 check
 
+# Exercise the clean no-match 081 branch with its original terminal migration digest.
+cp "$temp/tools/bench/src/effect_interchange.rs" "$temp/tools/bench/src/effect_interchange.rs.current108"
+sed -i \
+    -e 's/\\"issue\\":108/\\"issue\\":81/' \
+    -e 's/5f23e630182137426fdfe01b74861bdff779b6738bfae8f670359ad0e9ea2777/350acfa6e348c27a01afcb9efbd40c51a697aac8bbb6a5fe19dc1eb3c52bf441/' \
+    "$temp/tools/bench/src/effect_interchange.rs"
+check
+mv "$temp/tools/bench/src/effect_interchange.rs.current108" "$temp/tools/bench/src/effect_interchange.rs"
+
 # Every producer below is selected by its real argv and, where a command is reused, its matching
 # occurrence. The wrapper first verifies the delegate's real clean status and can preserve its
 # complete output before injecting a distinctive failure. This exercises the checker's consumers,
@@ -23,7 +32,7 @@ check
 fault_bin="$temp/fault-bin"
 mkdir -p "$fault_bin"
 producer_failure() {
-    local label=$1 tool=$2 needle=$3 occurrence=$4 expected=$5 mode=${6:-complete}
+    local label=$1 tool=$2 needle=$3 occurrence=$4 expected=$5 mode=$6 operation=$7 shape=$8
     local real log status
     real=$(command -v "$tool")
     find "$fault_bin" -mindepth 1 -maxdepth 1 -type f -delete
@@ -35,15 +44,15 @@ if [[ "$args" == *"$MISO_FAULT_NEEDLE"* ]]; then
     [[ ! -f "$MISO_FAULT_STATE" ]] || read -r count <"$MISO_FAULT_STATE"
     count=$((count + 1)); printf '%s\n' "$count" >"$MISO_FAULT_STATE"
     if [[ "$count" -eq "$MISO_FAULT_OCCURRENCE" ]]; then
-        if [[ "$MISO_FAULT_MODE" == complete ]]; then
-            if "$MISO_REAL_TOOL" "$@"; then delegate=0; else delegate=$?; fi
-            if [[ "$delegate" -ne "$MISO_EXPECT_DELEGATE" ]]; then
-                printf 'producer-wrapper-wrong-delegate expected=%s actual=%s\n' "$MISO_EXPECT_DELEGATE" "$delegate" >&2
-                exit 72
-            fi
-        elif [[ "$MISO_FAULT_MODE" == violation ]]; then
-            printf 'producer-wrapper-prohibited-row\n'
+        if "$MISO_REAL_TOOL" "$@" >"$MISO_DELEGATE_OUTPUT" 2>"$MISO_DELEGATE_ERROR"; then delegate=0; else delegate=$?; fi
+        if [[ "$delegate" -ne "$MISO_EXPECT_DELEGATE" ]]; then
+            printf 'producer-wrapper-wrong-delegate expected=%s actual=%s\n' "$MISO_EXPECT_DELEGATE" "$delegate" >&2
+            exit 72
         fi
+        [[ "$MISO_OUTPUT_SHAPE" != nonempty || -s "$MISO_DELEGATE_OUTPUT" ]] || { printf 'producer-wrapper-empty-delegate\n' >&2; exit 72; }
+        [[ "$MISO_OUTPUT_SHAPE" != empty || ! -s "$MISO_DELEGATE_OUTPUT" ]] || { printf 'producer-wrapper-nonempty-delegate\n' >&2; exit 72; }
+        cat "$MISO_DELEGATE_ERROR" >&2
+        [[ "$MISO_FAULT_MODE" != complete ]] || cat "$MISO_DELEGATE_OUTPUT"
         printf 'producer-error-sentinel:%s\n' "$MISO_FAULT_LABEL" >&2
         exit 73
     fi
@@ -55,26 +64,36 @@ SH
     log="$temp/fault-$label.log"
     if MISO_REAL_TOOL="$real" MISO_FAULT_NEEDLE="$needle" MISO_FAULT_OCCURRENCE="$occurrence" \
         MISO_EXPECT_DELEGATE="$expected" MISO_FAULT_MODE="$mode" MISO_FAULT_LABEL="$label" \
+        MISO_OUTPUT_SHAPE="$shape" MISO_DELEGATE_OUTPUT="$temp/delegate-output" MISO_DELEGATE_ERROR="$temp/delegate-error" \
         MISO_FAULT_STATE="$temp/fault-state" PATH="$fault_bin:$PATH" check >"$log" 2>&1; then
         printf 'effect interchange producer failure escaped: %s\n' "$label" >&2; exit 97
     else status=$?; fi
     if [[ "$status" -ne 1 ]] || ! rg -F "producer-error-sentinel:$label" "$log" >/dev/null || \
-        ! rg -F '(status 73)' "$log" >/dev/null; then
+        ! rg -F '(status 73)' "$log" >/dev/null || ! rg -F "$operation" "$log" >/dev/null; then
         printf 'effect interchange producer failure setup/diagnostic mismatch: %s status=%s\n' "$label" "$status" >&2
         cat "$log" >&2; exit 96
+    fi
+    if [[ "$mode" == complete ]]; then
+        python3 -I -B - "$temp/delegate-output" "$log" <<'PY' || exit 96
+import collections, pathlib, sys
+expected = collections.Counter(pathlib.Path(sys.argv[1]).read_text().splitlines())
+actual = collections.Counter(pathlib.Path(sys.argv[2]).read_text().splitlines())
+if any(actual[line] < count for line, count in expected.items()):
+    raise SystemExit("complete producer payload was not preserved")
+PY
     fi
 }
 
 for mode in empty complete; do
-    producer_failure manifest-sha256sum-$mode sha256sum 'fixtures/effect-interchange/v1/ACCEPTED.sha256' 1 0 "$mode"
-    producer_failure manifest-awk-$mode awk '{print $1}' 1 0 "$mode"
-    producer_failure manifest-sort-$mode sort 'fixtures/effect-interchange/v1/ACCEPTED.sha256' 1 0 "$mode"
-    producer_failure manifest-check-$mode sha256sum '--check' 1 0 "$mode"
-    producer_failure manifest-wc-$mode wc '-l' 1 0 "$mode"
-    producer_failure manifest-tr-$mode tr '-d' 1 0 "$mode"
-    producer_failure export-rg-$mode rg 'no_mangle' 1 0 "$mode"
-    producer_failure export-wc-$mode wc '-l' 2 0 "$mode"
-    producer_failure export-tr-$mode tr '-d' 2 0 "$mode"
+    producer_failure manifest-sha256sum-$mode sha256sum 'fixtures/effect-interchange/v1/ACCEPTED.sha256' 1 0 "$mode" 'manifest hash production' nonempty
+    producer_failure manifest-awk-$mode awk '{print $1}' 1 0 "$mode" 'manifest hash extraction' nonempty
+    producer_failure manifest-sort-$mode sort 'fixtures/effect-interchange/v1/ACCEPTED.sha256' 1 0 "$mode" 'baseline manifest sort' empty
+    producer_failure manifest-check-$mode sha256sum '--check' 1 0 "$mode" 'accepted baseline check' nonempty
+    producer_failure manifest-wc-$mode wc '-l' 1 0 "$mode" 'manifest line count' nonempty
+    producer_failure manifest-tr-$mode tr '-d' 1 0 "$mode" 'manifest line count filtering' nonempty
+    producer_failure export-rg-$mode rg 'no_mangle' 1 0 "$mode" 'descriptor export scan' nonempty
+    producer_failure export-wc-$mode wc '-l' 2 0 "$mode" 'descriptor export count' nonempty
+    producer_failure export-tr-$mode tr '-d' 2 0 "$mode" 'descriptor export count filtering' nonempty
 done
 
 for row in \
@@ -94,47 +113,102 @@ for row in \
     'export-presence|rg|fn miso_engine_effect_descriptor_v1_inspect|1|0' \
     'late-api|rg|restore_unpublished_effect_bank_track_state_with_migration|1|0'; do
     IFS='|' read -r label tool needle occurrence expected <<<"$row"
-    producer_failure "$label" "$tool" "$needle" "$occurrence" "$expected" complete
+    case "$label" in
+        observations) operation='benchmark observation count scan' ;;
+        workload) operation='benchmark workload scan' ;;
+        rounds) operation='benchmark rounds scan' ;;
+        records) operation='benchmark record count scan' ;;
+        import-safe) operation='aggregator import-safe scan' ;;
+        reference-bounds) operation='reference process bounds scan' ;;
+        multiline-campaign) operation='mutation campaign declaration scan' ;;
+        campaign-count) operation='mutation campaign trial scan' ;;
+        seed) operation='mutation seed scan' ;;
+        matrix) operation='exact migration matrix scan' ;;
+        target) operation='target row scan' ;;
+        simd) operation='Wasm target feature scan' ;;
+        export-syntax) operation='Wasm Export-section scan' ;;
+        export-presence) operation='descriptor export presence scan' ;;
+        late-api) operation='public API scan' ;;
+    esac
+    for mode in empty complete; do
+        producer_failure "$label-$mode" "$tool" "$needle" "$occurrence" "$expected" "$mode" "$operation" nonempty
+    done
 done
 
-producer_failure dependency-error rg 'Cargo.toml' 1 1 empty
-producer_failure reference-error rg 'effect-descriptor-v1-reference.py' 1 1 empty
-producer_failure render-error rg 'rack-compiler' 1 1 empty
-producer_failure fixture-find-error find 'fixtures/effect-interchange/v1' 1 0 empty
-producer_failure fixture-find-violation-error find 'fixtures/effect-interchange/v1' 1 0 violation
-producer_failure artifact-find-error find './target' 1 0 empty
-producer_failure artifact-find-violation-error find './target' 1 0 violation
-producer_failure issue-branch-error rg '\"issue\":108' 1 0 complete
-producer_failure source-python-error python3 'tools/bench/src/effect_interchange.rs' 1 0 complete
+producer_failure dependency-error rg 'tools/bench/Cargo.toml' 1 1 empty 'benchmark dependency scan' empty
+producer_failure production-manifest-error rg 'hosts/' 1 1 empty 'production dependency scan' empty
+producer_failure reference-error rg 'effect-state-v1-reference.py' 1 1 empty 'accepted reference child-process scan' empty
+producer_failure render-error rg 'rack-compiler' 2 1 empty 'render-owned source scan' empty
+producer_failure fixture-find-error find 'fixtures/effect-interchange/v1' 1 0 empty 'interchange fixture traversal' empty
+printf 'real fixture violation\n' >"$temp/fixtures/effect-interchange/v1/actual-violation.tmp"
+producer_failure fixture-find-violation-error find 'fixtures/effect-interchange/v1' 1 0 complete 'interchange fixture traversal' nonempty
+rm "$temp/fixtures/effect-interchange/v1/actual-violation.tmp"
+producer_failure artifact-find-error find './target' 1 0 empty 'generated artifact traversal' empty
+printf 'real artifact violation\n' >"$temp/actual-violation.o"
+producer_failure artifact-find-violation-error find './target' 1 0 complete 'generated artifact traversal' nonempty
+rm "$temp/actual-violation.o"
+producer_failure issue-branch-error-empty rg '\"issue\":108' 1 0 empty 'Issue-108 branch search' nonempty
+producer_failure issue-branch-error-complete rg '\"issue\":108' 1 0 complete 'Issue-108 branch search' nonempty
+producer_failure source-python-error python3 'tools/bench/src/effect_interchange.rs' 1 0 complete 'current Issue-108 benchmark source policy' empty
+
+cp "$temp/tools/bench/src/effect_interchange.rs" "$temp/tools/bench/src/effect_interchange.rs.current108"
+sed -i \
+    -e 's/\\"issue\\":108/\\"issue\\":81/' \
+    -e 's/5f23e630182137426fdfe01b74861bdff779b6738bfae8f670359ad0e9ea2777/350acfa6e348c27a01afcb9efbd40c51a697aac8bbb6a5fe19dc1eb3c52bf441/' \
+    "$temp/tools/bench/src/effect_interchange.rs"
+producer_failure issue081-python-error python3 'tools/bench/src/effect_interchange.rs' 1 0 complete 'terminal Issue-081 benchmark output identities diverged' empty
+chmod 000 "$temp/scripts/preflight-effect-interchange-benchmark.sh"
+expect_precise_081_log="$temp/issue081-read-error.log"
+if check >"$expect_precise_081_log" 2>&1; then printf 'effect interchange Issue-081 read fault unexpectedly succeeded\n' >&2; exit 97; fi
+rg -F 'terminal Issue-081 benchmark output identities diverged (status 1)' "$expect_precise_081_log" >/dev/null || exit 96
+rg -F 'preflight-effect-interchange-benchmark.sh' "$expect_precise_081_log" >/dev/null || exit 96
+chmod 755 "$temp/scripts/preflight-effect-interchange-benchmark.sh"
+mv "$temp/tools/bench/src/effect_interchange.rs.current108" "$temp/tools/bench/src/effect_interchange.rs"
 
 # The late migration scan has its own status guard so this causal control mutates only that guard.
-producer_failure migration-original rg 'migration_wire' 1 1 empty
+producer_failure migration-original rg 'migration_wire' 1 1 empty 'migration serialization scan' empty
 migration_mutant="$temp/check-effect-interchange-qualification-migration-mutant.sh"
 cp "$temp/scripts/check-effect-interchange-qualification.sh" "$migration_mutant"
 sed -i 's/if \[\[ "$migration_status" -gt 1 \]\]; then/if [[ "$migration_status" -gt 73 ]]; then/' "$migration_mutant"
+[[ "$(rg -F -c 'if [[ "$migration_status" -gt 1 ]]; then' "$temp/scripts/check-effect-interchange-qualification.sh")" -eq 1 ]] || exit 96
+[[ "$(rg -F -c 'if [[ "$migration_status" -gt 73 ]]; then' "$migration_mutant")" -eq 1 ]] || exit 96
+[[ "$(rg -F -c 'if [[ "$migration_status" -gt 1 ]]; then' "$migration_mutant")" -eq 0 ]] || exit 96
 assert_migration_error() {
     local checker=$1 log="$temp/migration-control.log" status
     : >"$temp/fault-state"
     if MISO_REAL_TOOL="$(command -v rg)" MISO_FAULT_NEEDLE=migration_wire MISO_FAULT_OCCURRENCE=1 \
         MISO_EXPECT_DELEGATE=1 MISO_FAULT_MODE=empty MISO_FAULT_LABEL=migration-control \
+        MISO_OUTPUT_SHAPE=empty MISO_DELEGATE_OUTPUT="$temp/migration-delegate-output" MISO_DELEGATE_ERROR="$temp/migration-delegate-error" \
         MISO_FAULT_STATE="$temp/fault-state" PATH="$fault_bin:$PATH" bash "$checker" "$temp" >"$log" 2>&1; then status=0; else status=$?; fi
-    [[ "$status" -ne 0 ]] || return 97
+    if [[ "$status" -eq 0 ]]; then
+        printf 'effect interchange qualification policy: migration status-loss unexpectedly succeeded\n' >&2
+        return 97
+    fi
     [[ "$status" -eq 1 ]] || return 96
     rg -F producer-error-sentinel:migration-control "$log" >/dev/null || return 96
     rg -F '(status 73)' "$log" >/dev/null || return 96
+    rg -F 'migration serialization scan' "$log" >/dev/null || return 96
 }
-producer_failure migration-restored rg 'migration_wire' 1 1 empty
+producer_failure migration-restored rg 'migration_wire' 1 1 empty 'migration serialization scan' empty
 assert_migration_error "$temp/scripts/check-effect-interchange-qualification.sh" || exit $?
 
 # Required inputs remain fail-closed after the otherwise-valid fixture tree has passed.
+expect_precise_failure() {
+    local label=$1 diagnostic=$2 log="$temp/precise-$1.log" status
+    if check >"$log" 2>&1; then
+        printf 'effect interchange precise mutation unexpectedly succeeded: %s\n' "$label" >&2; exit 97
+    else status=$?; fi
+    [[ "$status" -eq 1 ]] || { printf 'effect interchange precise mutation wrong status: %s=%s\n' "$label" "$status" >&2; exit 96; }
+    rg -F "$diagnostic" "$log" >/dev/null || { cat "$log" >&2; exit 96; }
+}
 mv "$temp/fixtures/effect-interchange/v1/ACCEPTED.sha256" "$temp/fixtures/effect-interchange/v1/ACCEPTED.sha256.saved"
-expect_failure missing-manifest
+expect_precise_failure missing-manifest 'missing immutable baseline manifest'
 mv "$temp/fixtures/effect-interchange/v1/ACCEPTED.sha256.saved" "$temp/fixtures/effect-interchange/v1/ACCEPTED.sha256"
 mv "$temp/tools/bench/src/effect_interchange.rs" "$temp/tools/bench/src/effect_interchange.rs.saved"
-expect_failure missing-benchmark-source
+expect_precise_failure missing-benchmark-source 'missing qualification path tools/bench/src/effect_interchange.rs'
 mv "$temp/tools/bench/src/effect_interchange.rs.saved" "$temp/tools/bench/src/effect_interchange.rs"
 mv "$temp/crates/effect-compiler/src" "$temp/crates/effect-compiler/src.saved"
-expect_failure missing-required-root
+expect_precise_failure missing-required-root 'migration serialization scan failed (status 2)'
 mv "$temp/crates/effect-compiler/src.saved" "$temp/crates/effect-compiler/src"
 if assert_migration_error "$migration_mutant"; then
     printf 'effect interchange qualification policy: migration status-loss mutant did not escape\n' >&2

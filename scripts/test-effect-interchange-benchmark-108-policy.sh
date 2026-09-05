@@ -74,7 +74,10 @@ assert_namespace_error() {
     if env PATH="$scratch/namespace-bin:$PATH" bash -c \
         'source "$1"; (validate_benchmark_source "$2" || exit $?; validate_successor_namespace "$3" || exit $?)' \
         _ "$checker" "$root/tools/bench/src/effect_interchange.rs" "$namespace_error" >"$log" 2>&1; then status=0; else status=$?; fi
-    [[ "$status" -ne 0 ]] || return 97
+    if [[ "$status" -eq 0 ]]; then
+        printf 'effect interchange benchmark 108 policy: namespace status-loss unexpectedly succeeded\n' >&2
+        return 97
+    fi
     [[ "$status" -eq 73 ]] || return 96
     rg -F namespace-error-sentinel "$log" >/dev/null || return 96
     rg -F 'namespace scan failed (rg status 73)' "$log" >/dev/null || return 96
@@ -83,6 +86,9 @@ assert_namespace_error "$root/scripts/check-effect-interchange-benchmark-108.sh"
 mutant="$scratch/check-effect-interchange-benchmark-108-mutant.sh"
 cp "$root/scripts/check-effect-interchange-benchmark-108.sh" "$mutant"
 sed -i 's/if \[\[ "$status" -ne 1 \]\]; then/if [[ "$status" -eq 0 ]]; then/' "$mutant"
+[[ "$(rg -F -c 'if [[ "$status" -ne 1 ]]; then' "$root/scripts/check-effect-interchange-benchmark-108.sh")" -eq 1 ]] || exit 96
+[[ "$(rg -F -c 'if [[ "$status" -eq 0 ]]; then' "$mutant")" -eq 1 ]] || exit 96
+[[ "$(rg -F -c 'if [[ "$status" -ne 1 ]]; then' "$mutant")" -eq 0 ]] || exit 96
 if assert_namespace_error "$mutant"; then
     printf 'effect interchange benchmark 108 policy: namespace status-loss mutant did not escape\n' >&2
     exit 96
@@ -115,6 +121,51 @@ cp "$root/tools/bench/src/effect_interchange.rs" "$standalone/tools/bench/src/"
 bash "$standalone/scripts/check-effect-interchange-benchmark-108.sh" "$standalone" >/dev/null
 mkdir -p "$standalone/target/issue108"
 bash "$standalone/scripts/check-effect-interchange-benchmark-108.sh" "$standalone" >/dev/null
+
+mkdir -p "$scratch/python-bin"
+python_bin=$(command -v python3)
+cat >"$scratch/python-bin/python3" <<EOF
+#!/usr/bin/env bash
+count=0
+[[ ! -f "$scratch/python-count" ]] || read -r count <"$scratch/python-count"
+count=\$((count + 1)); printf '%s\\n' "\$count" >"$scratch/python-count"
+if [[ "\$count" -eq "\$MISO_PYTHON_OCCURRENCE" ]]; then
+    output="\$(mktemp)"; error="\$(mktemp)"
+    if "$python_bin" "\$@" >"\$output" 2>"\$error"; then status=0; else status=\$?; fi
+    if [[ "\$status" -ne 0 || -s "\$output" || -s "\$error" ]]; then
+        printf 'standalone-python-wrapper-setup status=%s\\n' "\$status" >&2; exit 72
+    fi
+    printf 'standalone-python-error-sentinel\\n' >&2
+    exit 75
+fi
+exec "$python_bin" "\$@"
+EOF
+chmod 755 "$scratch/python-bin/python3"
+for row in '1|benchmark source validation failed (status 75)' '2|cross-file output authority validation failed (status 75)'; do
+    IFS='|' read -r occurrence operation <<<"$row"
+    printf '0\n' >"$scratch/python-count"
+    python_log="$scratch/python-$occurrence.log"
+    if MISO_PYTHON_OCCURRENCE="$occurrence" PATH="$scratch/python-bin:$PATH" \
+        bash "$standalone/scripts/check-effect-interchange-benchmark-108.sh" "$standalone" >"$python_log" 2>&1; then
+        printf 'effect interchange benchmark 108 Python fault unexpectedly succeeded: %s\n' "$occurrence" >&2; exit 97
+    fi
+    rg -F standalone-python-error-sentinel "$python_log" >/dev/null || exit 96
+    rg -F "$operation" "$python_log" >/dev/null || exit 96
+done
+
+precise_standalone_failure() {
+    local label=$1 diagnostic=$2 log="$scratch/deletion-$1.log" status
+    if bash "$standalone/scripts/check-effect-interchange-benchmark-108.sh" "$standalone" >"$log" 2>&1; then
+        printf 'effect interchange benchmark 108 deletion unexpectedly succeeded: %s\n' "$label" >&2; exit 97
+    else status=$?; fi
+    [[ "$status" -eq 1 ]] && rg -F "$diagnostic" "$log" >/dev/null || { cat "$log" >&2; exit 96; }
+}
+mv "$standalone/tools/bench/src/effect_interchange.rs" "$standalone/tools/bench/src/effect_interchange.rs.saved"
+precise_standalone_failure benchmark-source 'missing benchmark source'
+mv "$standalone/tools/bench/src/effect_interchange.rs.saved" "$standalone/tools/bench/src/effect_interchange.rs"
+mv "$standalone/scripts/effect-interchange-benchmark-108-validator.py" "$standalone/scripts/effect-interchange-benchmark-108-validator.py.saved"
+precise_standalone_failure validator 'missing Issue-108 authority'
+mv "$standalone/scripts/effect-interchange-benchmark-108-validator.py.saved" "$standalone/scripts/effect-interchange-benchmark-108-validator.py"
 mkdir -p "$scratch/find-bin"
 find_bin=$(command -v find)
 cat >"$scratch/find-bin/find" <<EOF
@@ -122,9 +173,12 @@ cat >"$scratch/find-bin/find" <<EOF
 if [[ "\$1" == target/issue108 ]]; then
     output="\$(mktemp)"
     if "$find_bin" "\$@" >"\$output"; then status=0; else status=\$?; fi
-    if [[ "\$status" -ne 0 || -s "\$output" ]]; then printf 'optional-find-wrapper-setup status=%s\\n' "\$status" >&2; rm -f "\$output"; exit 72; fi
-    rm -f "\$output"
-    [[ "\${MISO_OPTIONAL_FIND_MODE:-empty}" != violation ]] || printf 'optional-prohibited-row\\n'
+    if [[ "\$status" -ne 0 ]]; then printf 'optional-find-wrapper-setup status=%s\\n' "\$status" >&2; rm -f "\$output"; exit 72; fi
+    if [[ "\${MISO_OPTIONAL_FIND_MODE:-empty}" == empty && -s "\$output" ]] || \
+       [[ "\${MISO_OPTIONAL_FIND_MODE:-empty}" == violation && ! -s "\$output" ]]; then
+        printf 'optional-find-wrapper-wrong-shape\\n' >&2; rm -f "\$output"; exit 72
+    fi
+    cat "\$output"; rm -f "\$output"
     printf 'optional-find-error-sentinel\\n' >&2
     exit 74
 fi
@@ -132,6 +186,7 @@ exec "$find_bin" "\$@"
 EOF
 chmod 755 "$scratch/find-bin/find"
 for mode in empty violation; do
+    if [[ "$mode" == violation ]]; then printf 'real optional violation\n' >"$standalone/target/issue108/actual-entry"; fi
     optional_log="$scratch/optional-find-$mode.log"
     if MISO_OPTIONAL_FIND_MODE="$mode" PATH="$scratch/find-bin:$PATH" \
         bash "$standalone/scripts/check-effect-interchange-benchmark-108.sh" "$standalone" >"$optional_log" 2>&1; then
@@ -139,6 +194,10 @@ for mode in empty violation; do
     fi
     rg -F optional-find-error-sentinel "$optional_log" >/dev/null || exit 96
     rg -F 'artifact traversal failed (status 74)' "$optional_log" >/dev/null || exit 96
+    if [[ "$mode" == violation ]]; then
+        rg -F 'target/issue108/actual-entry' "$optional_log" >/dev/null || exit 96
+        rm "$standalone/target/issue108/actual-entry"
+    fi
 done
 
 # The accepted-manifest identity and payload mutations moved to

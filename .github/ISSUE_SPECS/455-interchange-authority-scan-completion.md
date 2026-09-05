@@ -206,6 +206,35 @@ reference-process campaign, build, timing, Git or GitHub operation ran. The Luna
 recovery evidence and earlier root failure/corrected-PATH evidence remain unchanged.
 
 
+## Sol attempt 3 final finite evidence pass
+
+The final bounded pass keeps the accepted scan implementation and adds operation-specific status
+diagnostics only where directed faults demonstrated they were absent: standalone108 source and
+cross-file Python authority, and the existing081 Python authority block. The suites now run the
+selected required scan table in both error-only and complete-real-output/error modes. Each wrapper
+first runs the exact real delegate, checks its expected status and empty/nonempty payload shape,
+and records the complete stdout/stderr before forwarding or suppressing stdout. Complete-mode
+assertions compare line multisets, retaining duplicate counts, and require the checker operation
+label, injected status and sentinel.
+
+The remaining finite cases now include production-manifest and later-reference faults; current108
+match error-only and complete modes; a clean valid081 no-match branch with its original digest;
+current108 sourced Python, standalone108 source and cross-file Python faults; an081 Python fault
+and real unreadable required input; and precise manifest/source/root and standalone108 deletions
+with unexpected-success97 and wrong-diagnostic/setup96. Qualification and optional108
+violation-plus-error tests create one real in-scope entry, run the unchanged exact find to obtain
+its complete output, then inject the error and remove the entry. Clean empty counterparts run the
+same real find and prove empty output.
+
+Exactly the two frozen controls remain. Both validate the real no-match status1/empty predicate,
+require their operation-specific diagnostic, emit a named unexpected-success message, and verify
+the mutant replaces one unique guard. Original/restored assertions return0, the intended mutant
+returns97, and setup/diagnostic mismatch returns96. Final exact commands, logs, statuses and the
+two unique diffs are retained as `/tmp/455-sol3-*`. All focused runs use
+`PATH=/home/bl/.cargo/bin:$PATH`; no build, timing, real runner, reference-process campaign, Git or
+GitHub operation is part of this pass.
+
+
 ## Sol attempt 2 verdict and final Sol attempt 3 assignment
 
 # Astra #455 Sol attempt 2
