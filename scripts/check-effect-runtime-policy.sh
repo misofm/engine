@@ -1,41 +1,36 @@
 #!/usr/bin/env bash
 set -euo pipefail
+script_directory="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$script_directory/lib/gate.sh"
 cd "${1:-.}"
+GATE_FAILURE_PREFIX='effect runtime policy failure'
 fail() { printf 'effect runtime policy failure: %s\n' "$1" >&2; exit 1; }
-dependencies() {
-    awk '/^\[dependencies\]$/ { in_deps=1; next } /^\[/ { in_deps=0 } in_deps && /^[A-Za-z0-9_-]+(\.workspace)?[[:space:]]*=/ { line=$0; sub(/[[:space:]]*=.*/, "", line); sub(/\.workspace$/, "", line); print line }' "$1" | sort
-}
+dependencies() { gate_toml_dependencies "$1" plain; }
 # #84 phase A: PrepareEffectBankRequest.backend is lane::Backend now.
 expected_contract=$'engine\nlane\nmath'
 [[ "$(dependencies crates/effect-contract/Cargo.toml)" == "$expected_contract" ]] || fail 'effect-contract dependency boundary changed'
 expected_compiler=$'compressor\ndelay\neffect-contract\neffect-package\nengine\ngate-expander\nlane\nmultiband-compressor\nparametric-eq\nsession\nsoft-clip\ntransient-shaper\ntrue-peak-limiter'
 [[ "$(dependencies crates/effect-compiler/Cargo.toml)" == "$expected_compiler" ]] || fail 'effect-compiler dependency boundary changed'
-if rg -n 'effect-(contract|compiler)' crates/{engine,session}/Cargo.toml; then fail 'core/session reverse dependency'; fi
-package_references="$(
-    rg -n 'effect_package|effect-package' crates hosts tools fuzz sidecars 2>/dev/null |
-        rg -v '^crates/effect-package/' |
-        rg -v '^crates/effect-compiler/(Cargo.toml|src/(prepare|migration)[.]rs|tests/(scalar_state|bank_state|migration|migration_terminal|observation_identity|symmetry_restore)[.]rs):' |
-        rg -v '/tests/MUTATIONS[.]md:' || true
-)"
-package_references="$(printf '%s\n' "$package_references" |
-    rg -v '^fuzz/(Cargo.toml|Cargo.lock|fuzz_targets/effect_(package|state)[.]rs):' || true)"
-package_references="$(printf '%s\n' "$package_references" |
-    rg -v '^tools/bench/(Cargo.toml|src/effect_interchange[.]rs):' || true)"
+gate_scan_forbidden 'core/session reverse dependency' 'effect-(contract|compiler)' '' crates/{engine,session}/Cargo.toml || exit 1
+if package_references="$(gate_scan_collect 'effect-package reference scan' 'effect_package|effect-package' '' crates hosts tools fuzz sidecars)"; then :; else exit 1; fi
+for filter in '^crates/effect-package/' '^crates/effect-compiler/(Cargo.toml|src/(prepare|migration)[.]rs|tests/(scalar_state|bank_state|migration|migration_terminal|observation_identity|symmetry_restore)[.]rs):' '/tests/MUTATIONS[.]md:' '^fuzz/(Cargo.toml|Cargo.lock|fuzz_targets/effect_(package|state)[.]rs):' '^tools/bench/(Cargo.toml|src/effect_interchange[.]rs):'; do
+    package_references="$(gate_filter_exclude 'effect-package allowlist' "$filter" "$package_references")" || exit 1
+done
 if [[ -n "$package_references" ]]; then
     printf '%s\n' "$package_references" >&2
     fail 'effect-package reference escaped the issue-079/080 compiler state boundary'
 fi
-if rg -n 'descriptor_schema_hash|EffectProgramSignature|canonical_effect_descriptor|encode_lane_payload' crates/effect-contract/src crates/effect-compiler/src; then fail 'wire/hash/persistence identity leaked into runtime API'; fi
+gate_scan_forbidden 'wire/hash/persistence identity leaked into runtime API' 'descriptor_schema_hash|EffectProgramSignature|canonical_effect_descriptor|encode_lane_payload' '' crates/effect-contract/src crates/effect-compiler/src || exit 1
 # Issue #95 finding F6: the root `include/miso_engine_effect_contract_v1.h` had no Rust mirror and
 # disagreed with the real wire ABI (it claimed 32-byte ports and 48-byte quality rows against the
 # implemented 24 and 64). The contract crate's Rust types are deliberately not `repr(C)`; the only
 # C ABI for descriptors is the effect-package header, which `check-effect-descriptor-v1.sh` gates.
 [[ ! -e include/miso_engine_effect_contract_v1.h ]] || fail 'orphan contract header is back (issue #95 F6)'
 [[ ! -d include ]] || fail 'root include/ is the deleted orphan header directory (issue #95 F6)'
-if rg -n 'repr\(C\)' crates/effect-contract/src; then fail 'the contract crate has no C ABI; descriptors are effect-package'"'"'s'; fi
-if rg -n 'effect_state_migration|EffectStateMigration' crates/{engine,session,graph,builtins-compiler,rack-compiler}/src 2>/dev/null; then fail 'effect-state migration reached a runtime/render-owned crate'; fi
+gate_scan_forbidden 'the contract crate has no C ABI; descriptors are effect-package'"'"'s' 'repr\(C\)' '' crates/effect-contract/src || exit 1
+gate_scan_forbidden 'effect-state migration reached a runtime/render-owned crate' 'effect_state_migration|EffectStateMigration' '' crates/{engine,session,graph,builtins-compiler,rack-compiler}/src || exit 1
 for required in effect.native.unavailable effect.descriptor.invalid effect.quality.unsupported effect.link_mode.unsupported effect.parameter.unknown effect.parameter.unit_mismatch effect.parameter.domain effect.parameter.channel effect.parameter.duplicate_channel effect.sidechain.missing effect.sidechain.unknown_port effect.sidechain.unexpected effect.resource.limit effect.prepare.failed effect.metadata.mismatch effect.state.invalid effect.third_party.unavailable_at_launch; do
-    rg -q "$required" crates/effect-{contract,compiler} docs/EFFECT_CONTRACT_V1.md || fail "missing diagnostic $required"
+    gate_scan_required "missing diagnostic $required" "$required" '' crates/effect-{contract,compiler} docs/EFFECT_CONTRACT_V1.md >/dev/null || exit 1
 done
 # ---------------------------------------------------------------------------------------------
 # Issue #95 eval E4: the audit's duplicated-helper list has one home each.
@@ -99,11 +94,15 @@ fi
 
 helper_exempt='^crates/(effect-package|dsp-reference)/'
 helper_definitions() {
-    { rg -n --glob '*.rs' "$1" crates/*/src 2>/dev/null || true; } | { rg -v "$helper_exempt" || true; }
+    local found
+    found="$(gate_scan_collect 'helper definition scan' "$1" '*.rs' crates/*/src)" || return $?
+    [[ -n "$found" ]] || return 0
+    gate_filter_exclude 'helper definition exemption' "$helper_exempt" "$found"
 }
 while read -r pattern expected owner; do
     [[ -n "$pattern" ]] || continue
-    found="$(helper_definitions "$pattern" | wc -l | tr -d ' ')"
+    definitions="$(helper_definitions "$pattern")" || exit 1
+    found="$(gate_count_lines 'helper definition' "$definitions")" || exit 1
     if [[ "$found" -gt "$expected" ]]; then
         helper_definitions "$pattern" >&2
         fail "$pattern has $found definitions, the manifest pins at most $expected (issue #$owner)"
