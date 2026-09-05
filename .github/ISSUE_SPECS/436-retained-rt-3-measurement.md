@@ -40,3 +40,10 @@ PR #437 delivered #420 as `c7469e28d52a716339b6f3119a57b69afb3411f1` after exact
 ## Post-delivery readiness observation
 
 At execution checkpoint `100d51205571ce97b40af87f7486f79f695509b3`, checked source comparison and all 48 retained manifest entries passed. The existing runner binary matched SHA-256 `53dce85d8ff683693598da8dce79195ecfad1ad76300b68bb348196c00f81bab`; it was 2,304 seconds old and CPU 63 affinity was available. Load then read 1.18, above the unchanged 0.50 ceiling, so readiness terminated exit 1 before sibling sampling or runner invocation. Root ended this bounded quiet window and released independent #429 implementation. Runner and workload invocations remain zero. Exact observation is retained in `artifacts/issue420-qualification/readiness-436-deferred.log`; no timing result or refusal disposition exists.
+
+
+## Controlled measurement captured; review pending
+
+At execution HEAD `1fc6ed1ed3fe57ccac0b47899a1cbe36c9050571`, root verified all 48 retained manifest entries and the exact frozen binary hash, source changes against the reviewed allowlist, absent output paths, and unchanged controls. Local agent commands were paused. Readiness sampled CPU63 and sibling31 at 0.00% and load0.24; the runner recorded load0.14 and sibling0.00%. The sole authorized command completed exit0, with controlled PASS, one warmup and two measured rounds (three workload launches). The authority is now consumed; no retry is permitted.
+
+Raw/accepted records, stderr, disposition, readiness identity/load, command output and terminal status are retained in `artifacts/issue420-rt3/`. The runner validated all46 records with the unchanged aggregate validator before promotion. Plumbing-only p50 observations are 6.67 and 6.71 us/block. These are descriptive observations, not a causal speedup claim against different hosts/profiles. Independent Astra evidence review and normal PR/CI delivery remain pending; #436 stays open.
