@@ -1,0 +1,69 @@
+{
+  "profile": "release; CARGO_PROFILE_RELEASE_LTO=false; -simd128",
+  "directory": "/tmp/engine-399-scalar-objects.sozdblbr",
+  "archives": [
+    {
+      "path": "/home/bl/misofm/engine-rt1/target/issue399-wasm-scalar-inspect/wasm32-unknown-unknown/release/deps/libengine-43010e1ae45ff1b3.rlib",
+      "sha256": "a831f0564b3f48d4a14f7552d9ea97e487b517d84cd7d226b2448e3ce66358f7",
+      "members": [
+        "lib.rmeta",
+        "lib.rmeta-link",
+        "engine-43010e1ae45ff1b3.engine.3cdc5b765e4ae52f-cgu.0.rcgu.o"
+      ],
+      "objects": 1,
+      "list_status": 0,
+      "extract_status": 0
+    },
+    {
+      "path": "/home/bl/misofm/engine-rt1/target/issue399-wasm-scalar-inspect/wasm32-unknown-unknown/release/deps/libsource-0fdfa2234eb4bd89.rlib",
+      "sha256": "f06f52dba57423d200b8722dd0907404dbeea6ec434384f0f908aaeb6f2f9054",
+      "members": [
+        "lib.rmeta",
+        "lib.rmeta-link",
+        "source-0fdfa2234eb4bd89.source.7b5fcfd726247e1-cgu.0.rcgu.o"
+      ],
+      "objects": 1,
+      "list_status": 0,
+      "extract_status": 0
+    },
+    {
+      "path": "/home/bl/misofm/engine-rt1/target/issue399-wasm-scalar-inspect/wasm32-unknown-unknown/release/deps/libtarget_smoke-f8895a03d6c8d18b.rlib",
+      "sha256": "9d18e276568cbb750bbbf09b5a8f9b2225358d652b05d0643dd6c9f913f86721",
+      "members": [
+        "lib.rmeta",
+        "lib.rmeta-link",
+        "target_smoke-f8895a03d6c8d18b.target_smoke.d196ae6c3bbfe597-cgu.0.rcgu.o"
+      ],
+      "objects": 1,
+      "list_status": 0,
+      "extract_status": 0
+    }
+  ],
+  "objects": [
+    {
+      "path": "/tmp/engine-399-scalar-objects.sozdblbr/libengine-43010e1ae45ff1b3.rlib/engine-43010e1ae45ff1b3.engine.3cdc5b765e4ae52f-cgu.0.rcgu.o",
+      "sha256": "60f7e9a07b4297a224dee3dae8d1ad6eaa247cd9906024115299ae4e19565f87",
+      "decode_status": 0,
+      "atomic_scan_status": 1,
+      "atomic_scan_stdout": "",
+      "atomic_scan_stderr": ""
+    },
+    {
+      "path": "/tmp/engine-399-scalar-objects.sozdblbr/libsource-0fdfa2234eb4bd89.rlib/source-0fdfa2234eb4bd89.source.7b5fcfd726247e1-cgu.0.rcgu.o",
+      "sha256": "79a6a6d78bbde299df8b5e0a088b918d57b1d27162817cc93232b7abd2349052",
+      "decode_status": 0,
+      "atomic_scan_status": 1,
+      "atomic_scan_stdout": "",
+      "atomic_scan_stderr": ""
+    },
+    {
+      "path": "/tmp/engine-399-scalar-objects.sozdblbr/libtarget_smoke-f8895a03d6c8d18b.rlib/target_smoke-f8895a03d6c8d18b.target_smoke.d196ae6c3bbfe597-cgu.0.rcgu.o",
+      "sha256": "49aebc53cd563761c697640ea191a28529385ccc00e971dbabdd760dd063f0c9",
+      "decode_status": 0,
+      "atomic_scan_status": 1,
+      "atomic_scan_stdout": "",
+      "atomic_scan_stderr": ""
+    }
+  ],
+  "complete": true
+}
