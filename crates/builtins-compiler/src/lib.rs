@@ -30,8 +30,8 @@ use engine::realtime::{
     bounded_spsc, bounded_spsc_retained_payload,
 };
 use graph::{
-    DependencyLevel, GraphBindingBlock, GraphBuiltinBankResourceEstimate, GraphNodeId,
-    GraphNodeObserverBinding, GraphObservationBlock, GraphPreparedBuiltinBank,
+    BuiltinControlDelivery, DependencyLevel, GraphBindingBlock, GraphBuiltinBankResourceEstimate,
+    GraphNodeId, GraphNodeObserverBinding, GraphObservationBlock, GraphPreparedBuiltinBank,
     GraphPreparedBuiltinBankInfo, GraphPreparedBuiltinBankProcessor, GraphPreparedSourceSet,
     GraphRuntimeBindings, GraphRuntimeObserver, GraphRuntimeProcessor, PreparedGraphPlan,
     StableGraphId, TrackStage,
@@ -295,6 +295,7 @@ struct StripPreparation {
 
 /// Opaque, sealed builtin payload. It can only be lowered into a graph once.
 pub struct PreparedBuiltinsSession {
+    control_delivery: BuiltinControlDelivery,
     seal: BuiltinSessionSeal,
     /// Post-input builtin bindings, one per track.
     ///
@@ -542,9 +543,13 @@ struct FaderBankProcessor {
     controls: Box<[Option<Consumer<TrackFaderRecord>>]>,
     process_calls: u64,
     frames_processed: u64,
+    control_delivery: BuiltinControlDelivery,
 }
 
 impl GraphPreparedBuiltinBankProcessor for FaderBankProcessor {
+    fn control_delivery(&self) -> BuiltinControlDelivery {
+        self.control_delivery
+    }
     fn process(
         &mut self,
         left: &mut [f32],
@@ -613,9 +618,13 @@ struct MatrixBankProcessor {
     controls: Box<[Option<Consumer<TrackControlRecord>>]>,
     process_calls: u64,
     frames_processed: u64,
+    control_delivery: BuiltinControlDelivery,
 }
 
 impl GraphPreparedBuiltinBankProcessor for MatrixBankProcessor {
+    fn control_delivery(&self) -> BuiltinControlDelivery {
+        self.control_delivery
+    }
     fn process(
         &mut self,
         left: &mut [f32],
@@ -1732,6 +1741,7 @@ impl PreparedBuiltinsSession {
                             controls: controls.into_boxed_slice(),
                             process_calls: 0,
                             frames_processed: 0,
+                            control_delivery: self.control_delivery,
                         })
                     }
                     TrackStage::PostMatrix => {
@@ -1758,6 +1768,7 @@ impl PreparedBuiltinsSession {
                             controls: controls.into_boxed_slice(),
                             process_calls: 0,
                             frames_processed: 0,
+                            control_delivery: self.control_delivery,
                         })
                     }
                     _ => unreachable!("planned_strip_banks yields only bankable stages"),
@@ -2301,6 +2312,38 @@ pub fn prepare_session_builtins_with_console(
     controls: &[TrackControlRequest],
     caps: BuiltinCompileCaps,
 ) -> Result<PreparedBuiltinsSession, BuiltinDiagnosticSet> {
+    prepare_session_builtins_with_console_and_policy(
+        session,
+        requests,
+        controls,
+        caps,
+        BuiltinControlDelivery::Concurrent,
+    )
+}
+
+/// Prepare builtins for a host that retains exclusive control ownership between render calls.
+pub fn prepare_session_builtins_between_render_calls(
+    session: &CompiledSession,
+    requests: &[MeterRequest],
+    controls: &[TrackControlRequest],
+    caps: BuiltinCompileCaps,
+) -> Result<PreparedBuiltinsSession, BuiltinDiagnosticSet> {
+    prepare_session_builtins_with_console_and_policy(
+        session,
+        requests,
+        controls,
+        caps,
+        BuiltinControlDelivery::BetweenRenderCalls,
+    )
+}
+
+fn prepare_session_builtins_with_console_and_policy(
+    session: &CompiledSession,
+    requests: &[MeterRequest],
+    controls: &[TrackControlRequest],
+    caps: BuiltinCompileCaps,
+    control_delivery: BuiltinControlDelivery,
+) -> Result<PreparedBuiltinsSession, BuiltinDiagnosticSet> {
     let mut diagnostics = Vec::new();
     if [
         caps.maximum_total_state_bytes,
@@ -2534,6 +2577,7 @@ pub fn prepare_session_builtins_with_console(
     let processor_seal = processor_seal(&tracks);
     let (observer_seal, consumer_seal) = actual_meter_seals(&observers, &meter_consumers);
     Ok(PreparedBuiltinsSession {
+        control_delivery,
         seal: BuiltinSessionSeal {
             session_sha256: session_identity(session),
             sample_rate: session.sample_rate().0,
@@ -4287,6 +4331,50 @@ mod tests {
             })
             .collect();
         (bits, bank_count)
+    }
+
+    #[test]
+    fn control_delivery_metadata_reaches_both_sealed_strip_bank_owners() {
+        let compiled = n_track_session(8);
+        let classes = SessionPoolClasses::from_session(&compiled);
+        let collect = |prepared: PreparedBuiltinsSession| {
+            let (graph, levels) = track_graph(8);
+            prepared
+                .into_graph_artifact_with_banks(graph, (), Backend::Simd4, &levels, &classes)
+                .prepared_builtin_banks()
+                .map(|bank| (bank.stage, bank.members.len(), bank.control_delivery))
+                .collect::<Vec<_>>()
+        };
+        let default = collect(prepare_session_builtins(&compiled, &[], caps()).expect("default"));
+        let raw = collect(
+            prepare_session_builtins_with_console(&compiled, &[], &[], caps()).expect("raw"),
+        );
+        let between = collect(
+            prepare_session_builtins_between_render_calls(&compiled, &[], &[], caps())
+                .expect("between"),
+        );
+        for banks in [&default, &raw] {
+            assert!(banks.iter().any(|(stage, members, delivery)| {
+                *stage == TrackStage::PostFader
+                    && *members > 1
+                    && *delivery == BuiltinControlDelivery::Concurrent
+            }));
+            assert!(banks.iter().any(|(stage, members, delivery)| {
+                *stage == TrackStage::PostMatrix
+                    && *members > 1
+                    && *delivery == BuiltinControlDelivery::Concurrent
+            }));
+        }
+        assert!(between.iter().any(|(stage, members, delivery)| {
+            *stage == TrackStage::PostFader
+                && *members > 1
+                && *delivery == BuiltinControlDelivery::BetweenRenderCalls
+        }));
+        assert!(between.iter().any(|(stage, members, delivery)| {
+            *stage == TrackStage::PostMatrix
+                && *members > 1
+                && *delivery == BuiltinControlDelivery::BetweenRenderCalls
+        }));
     }
 
     struct HarnessSink;

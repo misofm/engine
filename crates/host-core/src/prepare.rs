@@ -10,7 +10,8 @@ use std::collections::BTreeSet;
 use builtins::{MeterConfig, MeterHandle, MeterTap};
 use builtins_compiler::{
     BuiltinCompileCaps, MeterConsumer, MeterRequest, TrackControlProducer, TrackControlRequest,
-    prepare_session_builtins_with_console, session_structural_symmetry,
+    prepare_session_builtins_between_render_calls, prepare_session_builtins_with_console,
+    session_structural_symmetry,
 };
 use effect_compiler::{
     EffectCompileCaps, EffectControlProducer, EffectObservationHandle, attach_effect_console,
@@ -481,6 +482,26 @@ pub fn prepare_host_runtime_with_console(
     caps: &HostPrepareCaps,
     console: &HostConsoleRequest,
 ) -> Result<(PreparedHost, HostConsoleHandles), PrepareDiagnostics> {
+    prepare_host_runtime_with_console_policy(compiled, caps, console, false)
+}
+
+/// Prepare a host whose control producers are exclusively retained between render calls.
+#[allow(clippy::too_many_lines)]
+pub fn prepare_host_runtime_between_render_calls(
+    compiled: &CompiledSession,
+    caps: &HostPrepareCaps,
+    console: &HostConsoleRequest,
+) -> Result<(PreparedHost, HostConsoleHandles), PrepareDiagnostics> {
+    prepare_host_runtime_with_console_policy(compiled, caps, console, true)
+}
+
+#[allow(clippy::too_many_lines)]
+fn prepare_host_runtime_with_console_policy(
+    compiled: &CompiledSession,
+    caps: &HostPrepareCaps,
+    console: &HostConsoleRequest,
+    between_render_calls: bool,
+) -> Result<(PreparedHost, HostConsoleHandles), PrepareDiagnostics> {
     let model = compiled.normalized_model();
     let track_count = u64::try_from(model.tracks.len()).map_err(|_| platform("host.count"))?;
     let source_count = u64::try_from(model.sources.len()).map_err(|_| platform("host.count"))?;
@@ -702,22 +723,32 @@ pub fn prepare_host_runtime_with_console(
             })
             .collect::<Result<Vec<_>, PrepareDiagnostics>>()?,
     };
-    let builtins = prepare_session_builtins_with_console(
-        compiled,
-        &meter_requests,
-        &control_requests,
-        BuiltinCompileCaps {
-            maximum_total_state_bytes: caps.maximum_builtin_retained_bytes,
-            maximum_total_retained_payload_bytes: caps.maximum_builtin_retained_bytes,
-            maximum_total_meter_items: caps.maximum_meter_items,
-            maximum_total_meter_bytes: caps.maximum_meter_bytes,
-            maximum_single_allocation_bytes: caps.maximum_named_allocation_bytes,
-            maximum_meter_streams: caps.maximum_meter_streams,
-            maximum_period_frames: u32::MAX,
-            maximum_peak_hold_frames: u32::MAX,
-            maximum_smoothing_samples: u32::MAX,
-        },
-    )
+    let builtin_caps = BuiltinCompileCaps {
+        maximum_total_state_bytes: caps.maximum_builtin_retained_bytes,
+        maximum_total_retained_payload_bytes: caps.maximum_builtin_retained_bytes,
+        maximum_total_meter_items: caps.maximum_meter_items,
+        maximum_total_meter_bytes: caps.maximum_meter_bytes,
+        maximum_single_allocation_bytes: caps.maximum_named_allocation_bytes,
+        maximum_meter_streams: caps.maximum_meter_streams,
+        maximum_period_frames: u32::MAX,
+        maximum_peak_hold_frames: u32::MAX,
+        maximum_smoothing_samples: u32::MAX,
+    };
+    let builtins = if between_render_calls {
+        prepare_session_builtins_between_render_calls(
+            compiled,
+            &meter_requests,
+            &control_requests,
+            builtin_caps,
+        )
+    } else {
+        prepare_session_builtins_with_console(
+            compiled,
+            &meter_requests,
+            &control_requests,
+            builtin_caps,
+        )
+    }
     .map_err(|diagnostics| {
         PrepareDiagnostics::new(
             PrepareRejection::Builtin,
