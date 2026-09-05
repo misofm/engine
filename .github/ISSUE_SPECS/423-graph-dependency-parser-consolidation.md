@@ -82,3 +82,7 @@ Only extend existing helper/graph tests and correct the numbered evidence. Keep 
 Then real graph check, complete helper/graph suites, syntax/diff, root checkpoint and one Astra attempt-2 verdict. Parent #401 stays open until this residual completion and final delivery are accepted upstream; broad #306 remains open. Do not use this evidence gap to reopen other policy work or alter extraction grammar. Sol has at most two coherent revisions, then hard stop/rescope.
 
 Review inspected exact diff, mode implementation, all five call sites, focused suite mechanics and numbered evidence. No Cargo, timing, shell test, repository/GitHub mutation or broader qualification run occurred.
+
+## Sol attempt 2 evidence revision
+
+Production helper and graph policy source remain unchanged. The compact graph grammar fixture now includes a repeated identical selected row, an ignored build section, and a selected suffix-looking key with exact `$1` output. Graph-mode awk failures run error-only and after the complete otherwise-accepted graph output; graph-mode sort failures emit the correctly sorted accepted output before failing. Both producers are exercised through direct and conditional helper calls with caller pipefail on and off, preserving operation/status diagnostics. The actual graph fixture adds both selective awk cases while retaining its selective sort cases. A narrowly scoped valid helper mutant strips `.workspace` only from returned fields; the original graph grammar assertion executes it successfully and rejects the semantic result with assertion status 97.
