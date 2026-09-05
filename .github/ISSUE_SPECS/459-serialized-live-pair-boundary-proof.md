@@ -334,3 +334,30 @@ The shared fixture optionally captures actual t08 PostMatrix; allocation auditin
 ## Final Sol attempt 3 recovery checkpoint: declined-owner variants
 
 Wrong-concrete owners retain observable tags, call counters and ordered PCM effects. Real-owner reference comparisons now cover Concurrent policy, W4/W8 backend-width mismatch and same-width active population3/4 mismatch: queued records and private state survive return, each owner renders on its own valid shape against its unchanged matching reference, with PCM words and final state equal. Compatible reversed owners retain the combined original-order proof. Compiler28/28 debug and fmt/diff passed; `/tmp/sol459-attempt3-declines-debug-builtins-compiler-lib.log`. All four final groups are submitted as implemented; final focused debug/release/policies and one consolidated Astra verdict remain.
+
+
+## Final Sol attempt 3 source candidate and focused evidence
+
+Exact candidate: `2a152bf829e769e14fb650b78b2d4ea799b89b3b`, with this evidence record as the only subsequent repository edit. Production pairing arithmetic, factory/drain behavior and resource accounting remain unchanged by #459.
+
+The four omissions from the consolidated attempt-2 review are now represented by executable evidence. The host case identifies t08 as the selected one-member composite and, on the same acknowledged application call, proves admission2, exact application sample, fader/matrix drains1+1, fused call1/member1 and the composite's private nonzero output words (right exactly twice left). Routed t0 PCM is asserted only as nonzero route identity. The alias case captures both actual tap planes and compares their words with the same alias under Concurrent separate owners while retaining the otherwise-eligible tail's factory acceptance1->0, three observer callbacks and PostMatrix identity.
+
+The mono/recovery case captures selected t08 PostMatrix. It compares BetweenRenderCalls pairing with actual Concurrent separate owners whose collapse is forced off, commands asymmetric right input on selected t08, and proves collapse, disengagement, output equality/right-plane change and selected member1 dispatch. NaN/infinity occurs only in the first hostile block; its selected output and a genuinely clean nonzero following block remain finite and match the separate reference while the paired path dispatches member1. Allocation evidence keeps captures disabled.
+
+Decline evidence observes wrong-concrete tags, call counters and PCM effects. Real policy, W4/W8 backend-width and same-width active-population3/4 mismatches preserve queues and private state, then render each returned owner on its own valid shape against its unchanged matching reference. The compatible reversed-owner case retains its combined original-order proof; malformed shared slices are not rendered.
+
+Final focused commands used `PATH=/home/bl/.cargo/bin:$PATH` and `CARGO_TARGET_DIR=/tmp/sol459-target` and exited 0:
+
+- Debug `cargo test --locked -p builtins-compiler --features test-support --lib`: 28 passed; `/tmp/sol459-attempt3-final-debug-builtins-compiler-lib.log`.
+- Debug `cargo test --locked -p builtins-compiler --features test-support --test allocation_tracker`: 4 passed; `/tmp/sol459-attempt3-final-debug-allocation.log`.
+- Debug `cargo test --locked -p graph --lib`: 53 passed; `/tmp/sol459-attempt3-final-debug-graph.log`.
+- Debug `cargo test --locked -p host-web --features test-support --lib`: 62 passed, 1 existing nightly-only ignored; `/tmp/sol459-attempt3-final-debug-host-web.log`.
+- The same four commands with `--release`: respectively 28 passed; 4 passed; 53 passed; 62 passed and 1 ignored. Logs are `/tmp/sol459-attempt3-final-release-{builtins-compiler-lib,allocation,graph,host-web}.log`.
+- `bash scripts/check-realtime-policy.sh`: PASS, 42 marked regions in 12 files; `/tmp/sol459-attempt3-final-policy-realtime.log`.
+- `bash scripts/check-builtins-policy.sh`: PASS; `/tmp/sol459-attempt3-final-policy-builtins.log`.
+- `bash scripts/check-workspace-policy.sh`: PASS; `/tmp/sol459-attempt3-final-policy-workspace.log`.
+- `scripts/check-lane-policy.sh`: PASS; `/tmp/sol459-attempt3-final-policy-lane.log`.
+- `scripts/check-unfused-seal.sh`: PASS, 8 registered audit calls; `/tmp/sol459-attempt3-final-policy-unfused.log`.
+- `cargo fmt --all -- --check` and `git diff --check`: PASS; `/tmp/sol459-attempt3-final-{fmt,diff-check}.log`.
+
+The first policy-shell batch inherited a minimal PATH, so its builtins-policy and rustfmt entries returned command-not-found and were not counted. Both were rerun with the required PATH and passed; `/tmp/sol459-attempt3-final-rerun-statuses.log` records their zero statuses. No full workspace, target/browser/artifact matrix or benchmark was run. This completes the final Sol attempt-3 source submission for one consolidated Astra verdict; it is not a self-PASS.
