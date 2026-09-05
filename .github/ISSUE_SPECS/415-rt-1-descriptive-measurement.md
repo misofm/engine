@@ -29,3 +29,15 @@ The frozen environment ceiling is 0.50 load average, with 60-second binary coold
 ## Attempt 1 implementation evidence
 
 Luna registered `--issue415-rt1-measurement` in both the runner and operator preflight dispatch and usage lists. The arm maps exclusively to `artifacts/issue415-rt1-measurement`; no artifact directory was created and the existing #399 directory was untouched. Validation was limited to `bash -n` and a focused dispatch/usage diff check; no preflight, runner, workload, timing, or qualification invocation was made.
+
+## Astra registration attempt 1 verdict
+
+# Astra #415 registration attempt 1 review
+
+**PASS at exact pushed `a0385e8d02a4e6ee5cf8d58c084dcc947af19926` for root-owned committed-head preflight and subsequent controlled readiness decision.** This is registration acceptance, not measurement or final PR acceptance.
+
+The actual GitHub comparison against merged #399 `1fa4424d732b0d9150dda5512da80cb95d76a33e` contains only the two matching dispatch/usage registrations and the #415 spec. Both `--issue415-rt1-measurement` arms select the independent `issue415-rt1-measurement` namespace. That artifact directory does not yet exist. Existing #399 refusal evidence remains intact. No workload, fixture, validator, floor, production code or threshold changes are present.
+
+The frozen ceiling remains 0.50 with 60-second binary cooldown and existing affinity/sibling checks. Preparing the exact runner build profile without launching the workload is permitted before readiness assessment. Do not invoke the runner to test readiness or enable the uncontrolled override. After successful zero-workload preflight at the committed head and root's readiness decision, only one controlled invocation is allowed, with one warmup and two measured rounds. Any refusal/failure is preserved and consumes it; no automatic retry or successor chain. Successful evidence still needs all 46 current record/aggregate validations, exact provenance and actual PR review/required CI.
+
+Review used read-only source/filesystem/GitHub comparison; no local test, Cargo, Git command, benchmark, source or GitHub mutation was performed.
