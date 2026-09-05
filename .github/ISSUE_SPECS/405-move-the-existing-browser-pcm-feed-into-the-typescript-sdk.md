@@ -94,3 +94,7 @@ Implementation starts only after the current OPFS tranche is checkpointed. Imple
 ## Luna attempt 1 — source checkpoint, review pending
 
 Luna moved the current ring/feed/prelude into the approved SDK files, exported the codec-neutral primitives and asset URL, staged the separate prelude and NOTICE, and reported passing TypeScript/build/package checks against `/private/tmp/dx-393-current-artifacts`. The six generated engine artifact files remain unchanged. This is a recoverable source checkpoint only: required focused ring/feed, allocation, DOM-consumer and packed-consumer regressions remain pending, as does Astra review. A direct browser-eval invocation omitted its artifact environment; use the existing `scripts/check-sdk-headless.sh ARTIFACT_DIRECTORY` wrapper for proper qualification. No PASS or completed SDK ownership claim is made yet.
+
+## Luna attempt 1 — focused test checkpoint
+
+Added the focused PCM eval file and packed-consumer asset/export/NOTICE assertions. Luna reports `scripts/check-sdk-headless.sh /private/tmp/dx-393-current-artifacts`: 137 pass, one platform skip, zero failures; package check passes with the separate prelude and NOTICE and unchanged six generated artifacts. Dedicated Astra review remains pending and will assess whether every frozen lifecycle, layout, allocation and real DOM-consumer discriminator is complete. No review PASS is inferred from the suite count.

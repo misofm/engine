@@ -32,7 +32,11 @@ for (const subpath of [".", "./headless", "./browser", "./assets"]) {
 assert.equal(typeof imported["."].session, "function");
 assert.equal(typeof imported["./headless"].createOfflineEngine, "function");
 assert.equal(typeof imported["./browser"].createEngine, "function");
+assert.equal(typeof imported["./browser"].attachEngineFeed, "function");
+assert.equal(typeof imported["./browser"].prepareEngineFeed, "function");
 assert.ok(imported["./assets"].BUNDLED_ENGINE_ASSETS.wasm instanceof URL);
+assert.ok(imported["./assets"].BUNDLED_ENGINE_ASSETS.pcmFeedWorklet instanceof URL);
+assert.match(await readFile(resolve(packageRoot, "dist/NOTICE"), "utf8"), /engine-web-adapter/);
 for (const [subpath, module] of Object.entries(imported)) {
   assert.equal(
     "canonicalSessionJson" in module,
@@ -66,6 +70,8 @@ const files = await readdir(packageRoot, { recursive: true });
 assert.ok(files.includes("dist/assets/miso-engine-v1-audio-worklet.simd128.wasm"));
 assert.equal(files.some((name) => /flac|decoder|cli\/stems/i.test(name)), false, "the archive has no retired delivery payload");
 assert.ok(files.includes("dist/LICENSE"));
+assert.ok(files.includes("dist/NOTICE"));
+assert.ok(files.includes("dist/assets/miso-engine-v1-pcm-feed-worklet.js"));
 assert.equal(files.some((name) => name.includes("node_modules")), false);
 assert.equal(files.some((name) => name.startsWith("test") || name.includes("/test/")), false);
 assert.equal(files.includes("dist/effect.js"), false);
