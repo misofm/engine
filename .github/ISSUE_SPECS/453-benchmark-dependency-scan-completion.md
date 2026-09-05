@@ -299,3 +299,8 @@ One evidence-only child: complete the four remaining execution-error rows for th
 Run syntax, both affected suites and both existing non-timed real checkers plus diff hygiene, retaining logs/statuses. Existing two mutant97/restored0 controls must remain green. Parent#453 retains the full original outcome and subsequent workspace/actual-PR/CI delivery; #403/#306/#349 remain open. Number and synchronize this child before assigning a fresh bounded Luna pass. The four-mode completion must not be made informally on this stopped series.
 
 Review used read-only source/Git/log inspection; no tests, builds, Cargo resolution, timing or repository/GitHub mutation were performed. No other finite blocker is being reserved for an unbounded follow-up review.
+
+
+## Numbered completion child #462
+
+#462 owns exactly the four missing empty-output/execution-error test rows after the hard stop above. Its scope freezes accepted production and both genuine mutation controls. #453 retains the complete original scanner outcome and all workspace/PR/CI delivery obligations; neither issue is complete until that proof and remote delivery are accepted. Other #403 children remain queued.
