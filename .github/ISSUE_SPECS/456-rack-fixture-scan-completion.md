@@ -138,3 +138,20 @@ Parameterize the original assertion by checker path. Execute that unchanged asse
 The reported syntax/real checker/suite/environment statuses0 and suite's audio-workload-launches0 are retained genuine baseline regressions. They do not establish the absent table or causal controls. After the coherent correction run the existing proportional syntax, real checker, complete rack suite and environment vocabulary check, retain exact commands/terminal output/statuses, then request one Sol2 adversarial verdict. Parent full workspace/actual-PR/requiredCI remain after source acceptance. #403/#306/#349 closure obligations stay unchanged; no pins, helper, workflow, runtime or benchmark changes.
 
 Root assigns one coherent Sol2 revision in this worktree against these four finite original requirements. Preserve the failed source/evidence and original scope. Pause at compiling/focused-green checkpoints; root owns Git/GitHub.
+
+## Sol attempt 2 correction evidence
+
+The checker now exits explicitly after every failed captured producer or required predicate, including when its process is invoked as a conditional command. Status-1 required-literal no-match has its own refusal; higher statuses retain the operation, exact status, complete bounded stdout and stderr. Capture-directory creation and cleanup also have explicit failure paths. The CLI, pins, read grammar, literal predicates, immediate regular-file discovery, and optional fixture-root policy are unchanged.
+
+The rack suite now covers the full frozen selected table: both manifest hash stages; find and sort with complete two-name output/error and empty/error; header, line count and record reads; incomplete builtin read and malformed fields; payload count and both hash stages; all three quiet literal predicates; and the final workload count. Each injected command fault first invokes a separately resolved real delegate and the assertion validates its exact bounded payload (with order-independent two-name validation for find), empty real stderr, injected status, and a unique sentinel. Required capture values retain empty and malformed rejection cases. Status-1 grep no-match is distinguished from higher operational failure.
+
+Exactly two production mutants remain. Each changes one status-assignment line, is verified as a unique one-hunk one-line replacement, and is passed through the same parameterized assertion in original, mutant and restored order. Original/restored reject the faithful injected producer failure; each mutant reaches only the named unexpected-success branch with status 97, while setup, payload, diagnostic, status, or sentinel errors return 96. The existing validator mutations and lifecycle cases remain, and every valid lifecycle call verifies that cargo, git and rustc resolve to its scratch fakes and that the synthetic emitter is executable before invocation. No real runner, benchmark or timed workload was invoked.
+
+Raw commands, combined stdout/stderr, and statuses:
+
+- `/tmp/456-sol2-syntax.{command,log,status}`: status 0.
+- `/tmp/456-sol2-checker.{command,log,status}`: status 0.
+- `/tmp/456-sol2-suite.{command,log,status}`: status 0; `rack benchmark validators/lifecycle: PASS (audio workload launches: 0)`.
+- `/tmp/456-sol2-env.{command,log,status}`: status 0; `env vocabulary: ok (114 names, one MISO_ENGINE_ prefix)`.
+
+Only the two authorized rack scripts and this numbered evidence record changed. No helper, runner, workflow, runtime, fixture, seal or pin changed. Root retains all Git/GitHub operations and the later workspace/actual-PR/required-CI boundary.

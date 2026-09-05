@@ -21,6 +21,23 @@ if bash "$fixture_checker" "$fixture_copy" >/dev/null 2>&1; then
     exit 1
 fi
 cp "$scratch/workloads.original" "$fixture_copy/workloads.toml"
+
+# Preserve the exact regular-file policy and optional fixture-root semantics.
+mv "$fixture_copy/MANIFEST.tsv" "$scratch/manifest.saved"
+if missing_manifest_output=$(bash "$fixture_checker" "$fixture_copy" 2>&1); then exit 96; else missing_manifest_status=$?; fi
+[[ "$missing_manifest_status" == 1 && "$missing_manifest_output" == 'missing regular Issue-038 manifest' ]] || exit 96
+mv "$scratch/manifest.saved" "$fixture_copy/MANIFEST.tsv"
+if missing_root_output=$(bash "$fixture_checker" "$scratch/absent-fixture" 2>&1); then exit 96; else missing_root_status=$?; fi
+[[ "$missing_root_status" == 1 && "$missing_root_output" == 'missing regular Issue-038 manifest' ]] || exit 96
+mv "$fixture_copy/MANIFEST.tsv" "$scratch/manifest.saved"; ln -s "$scratch/manifest.saved" "$fixture_copy/MANIFEST.tsv"
+if bash "$fixture_checker" "$fixture_copy" >/dev/null 2>&1; then exit 96; fi
+rm "$fixture_copy/MANIFEST.tsv"; mv "$scratch/manifest.saved" "$fixture_copy/MANIFEST.tsv"
+mv "$fixture_copy/workloads.toml" "$scratch/workloads.saved"; ln -s "$scratch/workloads.saved" "$fixture_copy/workloads.toml"
+if bash "$fixture_checker" "$fixture_copy" >/dev/null 2>&1; then exit 96; fi
+rm "$fixture_copy/workloads.toml"; mv "$scratch/workloads.saved" "$fixture_copy/workloads.toml"
+mkdir "$fixture_copy/unrelated-directory"; ln -s unrelated-directory "$fixture_copy/unrelated-symlink"
+bash "$fixture_checker" "$fixture_copy"
+rm "$fixture_copy/unrelated-symlink"; rmdir "$fixture_copy/unrelated-directory"
 cp "$fixture_copy/MANIFEST.tsv" "$scratch/manifest.original"
 printf 'mutation\n' >>"$fixture_copy/MANIFEST.tsv"
 if bash "$fixture_checker" "$fixture_copy" >/dev/null 2>&1; then
@@ -41,74 +58,183 @@ if bash "$fixture_checker" "$fixture_copy" >/dev/null 2>&1; then
 fi
 cp "$scratch/workloads.original" "$fixture_copy/workloads.toml"
 
-# Exercise the two selected producer status controls against complete real output plus an
-# injected command failure.  The delegates are fixed system commands; the test mode is part of
-# the registered MISO_ENGINE_TEST_BENCH_MODE shim vocabulary.
+# Exercise every frozen producer/predicate after all earlier checks have succeeded.  Each shim
+# first runs the resolved real command, records its complete result, and only then injects the
+# selected failure.  The mode is a private scratch file, not a runtime environment surface.
 scan_bin="$scratch/scan-bin"
 mkdir -p "$scan_bin"
-cat >"$scan_bin/find" <<'EOF'
+for scan_tool in sha256sum awk find sort sed wc grep rg; do
+    scan_real=$(command -v "$scan_tool")
+    [[ -x "$scan_real" ]] || { printf 'missing real scan delegate: %s\n' "$scan_tool" >&2; exit 96; }
+    printf '%s\n' "$scan_real" >"$scan_bin/real-$scan_tool"
+done
+cat >"$scan_bin/scan-shim" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-/usr/bin/find "$@"
-if [[ "${MISO_ENGINE_TEST_BENCH_MODE:-}" == discovery_fail ]]; then
-    printf 'FIND_SENTINEL delegate_status=0 rows=2 mode=discovery_fail\n' >&2
-    exit 73
+shim_root=$(cd "$(dirname "$0")" && pwd)
+tool=$(basename "$0")
+real=$(<"$shim_root/real-$tool")
+count_file="$shim_root/count-$tool"
+count=0; [[ ! -f "$count_file" ]] || count=$(<"$count_file")
+count=$((count + 1)); printf '%s\n' "$count" >"$count_file"
+delegate_out="$shim_root/delegate-$tool.stdout"
+delegate_err="$shim_root/delegate-$tool.stderr"
+if "$real" "$@" >"$delegate_out" 2>"$delegate_err"; then delegate_status=0; else delegate_status=$?; fi
+[[ "$delegate_status" == 0 ]] || { cat "$delegate_out"; cat "$delegate_err" >&2; exit 95; }
+mode=none mode_tool= mode_nth= behavior=full injected_status=0 sentinel=
+[[ ! -f "$shim_root/mode" ]] || read -r mode mode_tool mode_nth behavior injected_status sentinel <"$shim_root/mode"
+if [[ "$tool" == "$mode_tool" && "$count" == "$mode_nth" ]]; then
+    case "$behavior" in full) cat "$delegate_out" ;; empty) : ;; bad) printf 'malformed\n' ;; *) exit 94 ;; esac
+    cat "$delegate_err" >&2
+    printf '%s delegate_status=%s\n' "$sentinel" "$delegate_status" >&2
+    exit "$injected_status"
 fi
+cat "$delegate_out"
+cat "$delegate_err" >&2
 EOF
-cat >"$scan_bin/wc" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-/usr/bin/wc "$@"
-if [[ "${MISO_ENGINE_TEST_BENCH_MODE:-}" == payload_wc_fail && "${1:-}" == -c ]]; then
-    printf 'WC_SENTINEL delegate_status=0 value=456 mode=payload_wc_fail\n' >&2
-    exit 74
-fi
-EOF
-chmod 755 "$scan_bin/find" "$scan_bin/wc"
-assert_checker_rejects_producer_failure() {
-    local mode=$1 diagnostic=$2
-    local output status
-    if output=$(MISO_ENGINE_TEST_BENCH_MODE="$mode" PATH="$scan_bin:$PATH" bash "$fixture_checker" "$fixture_copy" 2>&1); then
-        printf 'checker swallowed %s producer failure\n%s\n' "$mode" "$output" >&2
-        return 97
-    else
-        status=$?
-    fi
-    [[ "$status" != 0 ]] || return 96
-    [[ "$output" == *"$diagnostic"* ]] || { printf 'wrong %s producer diagnostic\n%s\n' "$mode" "$output" >&2; return 96; }
-    [[ "$output" == *SENTINEL* ]] || { printf 'missing %s producer sentinel\n%s\n' "$mode" "$output" >&2; return 96; }
-}
-assert_checker_rejects_producer_failure discovery_fail 'Issue-038 fixture discovery failed (status 73)'
-assert_checker_rejects_producer_failure payload_wc_fail 'Issue-038 workload length wc failed (status 74)'
+chmod 755 "$scan_bin/scan-shim"
+for scan_tool in sha256sum awk find sort sed wc grep rg; do ln -s scan-shim "$scan_bin/$scan_tool"; done
 
-counter_checker_mutant() {
-    local label=$1 mutation=$2 mode=$3
-    local mutant="$scratch/checker-$label.sh" output status
-    sed "$mutation" "$fixture_checker" >"$mutant"
-    chmod 755 "$mutant"
-    if output=$(MISO_ENGINE_TEST_BENCH_MODE="$mode" PATH="$scan_bin:$PATH" bash "$mutant" "$fixture_copy" 2>&1); then
-        printf 'ASSERT %s unexpected success\n' "$label" >&2
+configure_scan_failure() {
+    local mode=$1 tool=$2 nth=$3 behavior=$4 status=$5 sentinel=$6
+    rm -f "$scan_bin"/count-* "$scan_bin"/delegate-*
+    printf '%s %s %s %s %s %s\n' "$mode" "$tool" "$nth" "$behavior" "$status" "$sentinel" >"$scan_bin/mode"
+}
+validate_delegate_payload() {
+    local mode=$1 tool=$2 payload=$3 normalized
+    [[ ! -s "$scan_bin/delegate-$tool.stderr" ]] || return 1
+    case "$mode" in
+        manifest_sha) [[ "$payload" == "2d6b8c4b11bb00a17185d7777300194bf53ab30d86cf581a55886f07c5273985  $fixture_copy/MANIFEST.tsv" ]] ;;
+        manifest_awk) [[ "$payload" == 2d6b8c4b11bb00a17185d7777300194bf53ab30d86cf581a55886f07c5273985 ]] ;;
+        find_full|find_empty|conditional_find|discovery_mutant)
+            normalized=$(printf '%s\n' "$payload" | sort)
+            [[ "$normalized" == $'MANIFEST.tsv\nworkloads.toml' && "$(printf '%s\n' "$payload" | wc -l)" == 2 ]]
+            ;;
+        sort_full|sort_empty) [[ "$payload" == $'MANIFEST.tsv\nworkloads.toml' ]] ;;
+        header_sed) [[ "$payload" == $'path\tlength\tsha256' ]] ;;
+        manifest_wc) [[ "$payload" =~ ^[[:space:]]*2[[:space:]]*$ ]] ;;
+        record_sed) [[ "$payload" == $'workloads.toml\t456\t1f67ed9960e5a6728f02442b65af70704957d5f6056865d8b44555637273188d' ]] ;;
+        payload_wc|payload_wc_mutant) [[ "$payload" =~ ^[[:space:]]*456[[:space:]]*$ ]] ;;
+        payload_sha) [[ "$payload" == "1f67ed9960e5a6728f02442b65af70704957d5f6056865d8b44555637273188d  $fixture_copy/workloads.toml" ]] ;;
+        payload_awk) [[ "$payload" == 1f67ed9960e5a6728f02442b65af70704957d5f6056865d8b44555637273188d ]] ;;
+        observations_grep|sample_rate_grep|quantum_grep|grep_nomatch) [[ -z "$payload" ]] ;;
+        workload_rg) [[ "$payload" == 3 ]] ;;
+        *) return 1 ;;
+    esac
+}
+assert_checker_rejects_producer_failure() {
+    local checker=$1 mode=$2 tool=$3 nth=$4 behavior=$5 injected_status=$6 description=$7 sentinel=$8
+    local output status delegate_payload expected
+    configure_scan_failure "$mode" "$tool" "$nth" "$behavior" "$injected_status" "$sentinel"
+    if output=$(PATH="$scan_bin:$PATH" bash "$checker" "$fixture_copy" 2>&1); then
+        printf 'ASSERT %s unexpected checker success\n' "$mode" >&2
         return 97
     else
         status=$?
     fi
-    printf 'ASSERT %s wrong rejection status=%s\n%s\n' "$label" "$status" "$output" >&2
-    return 96
+    [[ "$status" == 1 ]] || { printf 'ASSERT %s wrong checker status=%s\n%s\n' "$mode" "$status" "$output" >&2; return 96; }
+    delegate_payload=$(<"$scan_bin/delegate-$tool.stdout")
+    validate_delegate_payload "$mode" "$tool" "$delegate_payload" || { printf 'ASSERT %s unfaithful delegate payload\n' "$mode" >&2; return 96; }
+    if [[ "$behavior" == empty ]]; then delegate_payload=; fi
+    expected="$description failed (status $injected_status)"
+    [[ -z "$delegate_payload" ]] || expected+=$'\nstdout:\n'"$delegate_payload"
+    expected+=$'\nstderr:\n'"$sentinel delegate_status=0"
+    [[ "$output" == "$expected" ]] || { printf 'ASSERT %s wrong exact diagnostic\nEXPECTED:\n%s\nACTUAL:\n%s\n' "$mode" "$expected" "$output" >&2; return 96; }
 }
+
+# Complete full-output/error table.  The command occurrence is fixed by the checker sequence.
+while IFS='|' read -r mode tool nth behavior injected_status description sentinel; do
+    assert_checker_rejects_producer_failure "$fixture_checker" "$mode" "$tool" "$nth" "$behavior" "$injected_status" "$description" "$sentinel"
+done <<'PRODUCER_FAILURES'
+manifest_sha|sha256sum|1|full|71|Issue-038 manifest sha256sum|MANIFEST_SHA_SENTINEL
+manifest_awk|awk|1|full|72|Issue-038 manifest sha256sum awk|MANIFEST_AWK_SENTINEL
+find_full|find|1|full|73|Issue-038 fixture discovery|FIND_FULL_SENTINEL
+find_empty|find|1|empty|74|Issue-038 fixture discovery|FIND_EMPTY_SENTINEL
+sort_full|sort|1|full|75|Issue-038 fixture discovery sort|SORT_FULL_SENTINEL
+sort_empty|sort|1|empty|76|Issue-038 fixture discovery sort|SORT_EMPTY_SENTINEL
+header_sed|sed|1|full|77|Issue-038 manifest header sed|HEADER_SED_SENTINEL
+manifest_wc|wc|1|full|78|Issue-038 manifest cardinality wc|MANIFEST_WC_SENTINEL
+record_sed|sed|2|full|79|Issue-038 manifest record sed|RECORD_SED_SENTINEL
+payload_wc|wc|2|full|80|Issue-038 workload length wc|PAYLOAD_WC_SENTINEL
+payload_sha|sha256sum|2|full|81|Issue-038 workload sha256sum|PAYLOAD_SHA_SENTINEL
+payload_awk|awk|2|full|82|Issue-038 workload sha256sum awk|PAYLOAD_AWK_SENTINEL
+observations_grep|grep|1|empty|83|observations|OBSERVATIONS_GREP_SENTINEL
+sample_rate_grep|grep|2|empty|84|sample-rate|SAMPLE_RATE_GREP_SENTINEL
+quantum_grep|grep|3|empty|85|quantum|QUANTUM_GREP_SENTINEL
+workload_rg|rg|1|full|86|Issue-038 workload name count rg|WORKLOAD_RG_SENTINEL
+PRODUCER_FAILURES
+
+assert_bad_capture_value() {
+    local mode=$1 tool=$2 nth=$3 behavior=$4 expected=$5 output status
+    configure_scan_failure "$mode" "$tool" "$nth" "$behavior" 0 VALUE_SENTINEL
+    if output=$(PATH="$scan_bin:$PATH" bash "$fixture_checker" "$fixture_copy" 2>&1); then exit 96; else status=$?; fi
+    [[ "$status" == 1 && "$output" == "$expected" ]] || { printf 'ASSERT %s wrong value rejection\n%s\n' "$mode" "$output" >&2; exit 96; }
+}
+assert_bad_capture_value manifest_hash_empty awk 1 empty 'Issue-038 manifest identity mismatch'
+assert_bad_capture_value manifest_hash_malformed awk 1 bad 'Issue-038 manifest identity mismatch'
+assert_bad_capture_value header_empty sed 1 empty 'Issue-038 manifest header mismatch'
+assert_bad_capture_value header_malformed sed 1 bad 'Issue-038 manifest header mismatch'
+assert_bad_capture_value lines_empty wc 1 empty 'Issue-038 manifest cardinality mismatch'
+assert_bad_capture_value lines_malformed wc 1 bad 'Issue-038 manifest cardinality mismatch'
+assert_bad_capture_value payload_count_empty wc 2 empty 'Issue-038 workload length mismatch'
+assert_bad_capture_value payload_count_malformed wc 2 bad 'Issue-038 workload length mismatch'
+assert_bad_capture_value payload_hash_empty awk 2 empty 'Issue-038 workload hash mismatch'
+assert_bad_capture_value payload_hash_malformed awk 2 bad 'Issue-038 workload hash mismatch'
+assert_bad_capture_value workload_count_empty rg 1 empty ''
+assert_bad_capture_value workload_count_malformed rg 1 bad ''
+
+# A status-1 required predicate is a missing literal, distinct from an operational failure.
+configure_scan_failure grep_nomatch grep 3 empty 1 GREP_NOMATCH_SENTINEL
+if grep_nomatch_output=$(PATH="$scan_bin:$PATH" bash "$fixture_checker" "$fixture_copy" 2>&1); then exit 96; else grep_nomatch_status=$?; fi
+[[ "$grep_nomatch_status" == 1 && "$grep_nomatch_output" == 'Issue-038 required literal missing: quantum' ]] || exit 96
+
+# The builtin read and its field predicates reject incomplete and malformed successful records.
+for record_mode in incomplete malformed; do
+    rm -f "$scan_bin"/count-* "$scan_bin"/delegate-*; printf 'none x 0 full 0 NONE\n' >"$scan_bin/mode"
+    record_checker="$scratch/checker-record-$record_mode.sh"
+    cp "$fixture_checker" "$record_checker"
+    if [[ "$record_mode" == incomplete ]]; then
+        sed -i '/IFS=.*read -r path/i\\printf '\''workloads.toml\\t456'\'' >"$record_stdout"' "$record_checker"
+        expected_record='Issue-038 manifest record is incomplete'
+    else
+        sed -i '/IFS=.*read -r path/i\\printf '\''workloads.toml\\tbad\\tnot-a-hash\\n'\'' >"$record_stdout"' "$record_checker"
+        expected_record='Issue-038 manifest record mismatch'
+    fi
+    if record_output=$(PATH="$scan_bin:$PATH" bash "$record_checker" "$fixture_copy" 2>&1); then exit 96; else record_status=$?; fi
+    [[ "$record_status" == 1 && "$record_output" == "$expected_record" ]] || exit 96
+done
+
+# The checker must preserve failure when its invocation itself is a conditional command.
+configure_scan_failure conditional_find find 1 full 87 CONDITIONAL_FIND_SENTINEL
+if PATH="$scan_bin:$PATH" bash "$fixture_checker" "$fixture_copy" >/dev/null 2>&1; then
+    printf 'conditional checker invocation swallowed discovery failure\n' >&2; exit 96
+fi
+
+# Exactly two one-site production mutants use the same assertion as original and restored runs.
 discovery_line=$(rg -n -F '    discovery_status=$?' "$fixture_checker" | cut -d: -f1)
-if counter_checker_mutant discovery-status "${discovery_line}c\\    :" discovery_fail >/dev/null 2>&1; then
-    exit 96
-else
-    mutant_status=$?
-fi
-[[ "$mutant_status" == 97 ]] || { printf 'discovery producer mutant assertion status %s, expected 97\n' "$mutant_status" >&2; exit 96; }
 payload_wc_line=$(rg -n -F '    payload_wc_status=$?' "$fixture_checker" | cut -d: -f1)
-if counter_checker_mutant payload-wc-status "${payload_wc_line}c\\    :" payload_wc_fail >/dev/null 2>&1; then
-    exit 96
-else
-    mutant_status=$?
-fi
-[[ "$mutant_status" == 97 ]] || { printf 'payload wc producer mutant assertion status %s, expected 97\n' "$mutant_status" >&2; exit 96; }
+[[ "$(printf '%s\n' "$discovery_line" | wc -l)" == 1 && -n "$discovery_line" ]] || exit 96
+[[ "$(printf '%s\n' "$payload_wc_line" | wc -l)" == 1 && -n "$payload_wc_line" ]] || exit 96
+for mutant_case in discovery payload_wc; do
+    if [[ "$mutant_case" == discovery ]]; then
+        mutant="$scratch/checker-discovery-status.sh"; sed "${discovery_line}c\\    :" "$fixture_checker" >"$mutant"
+        mode=discovery_mutant tool=find nth=1 injected=73 description='Issue-038 fixture discovery' sentinel=DISCOVERY_MUTANT_SENTINEL
+        expected_assignment='-    discovery_status=$?'
+    else
+        mutant="$scratch/checker-payload-wc-status.sh"; sed "${payload_wc_line}c\\    :" "$fixture_checker" >"$mutant"
+        mode=payload_wc_mutant tool=wc nth=2 injected=74 description='Issue-038 workload length wc' sentinel=PAYLOAD_WC_MUTANT_SENTINEL
+        expected_assignment='-    payload_wc_status=$?'
+    fi
+    chmod 755 "$mutant"
+    mutant_diff=$(diff -U0 "$fixture_checker" "$mutant" || :)
+    [[ "$(printf '%s\n' "$mutant_diff" | rg -c '^@@')" == 1 ]] || exit 96
+    [[ "$(printf '%s\n' "$mutant_diff" | rg -Fxc -- "$expected_assignment")" == 1 ]] || exit 96
+    [[ "$(printf '%s\n' "$mutant_diff" | rg -Fxc -- '+    :')" == 1 ]] || exit 96
+    assert_checker_rejects_producer_failure "$fixture_checker" "$mode" "$tool" "$nth" full "$injected" "$description" "$sentinel"
+    if mutant_output=$(assert_checker_rejects_producer_failure "$mutant" "$mode" "$tool" "$nth" full "$injected" "$description" "$sentinel" 2>&1); then exit 96; else mutant_status=$?; fi
+    [[ "$mutant_status" == 97 && "$mutant_output" == "ASSERT $mode unexpected checker success" ]] || exit 96
+    assert_checker_rejects_producer_failure "$fixture_checker" "$mode" "$tool" "$nth" full "$injected" "$description" "$sentinel"
+done
 
 reject_single() {
     local mutation=$1
@@ -305,6 +431,12 @@ new_case() {
 }
 run_case() {
     local mode=$1
+    local selected
+    for selected_tool in cargo git rustc; do
+        selected=$(PATH="$case_root/bin:$PATH" command -v "$selected_tool")
+        [[ "$selected" == "$case_root/bin/$selected_tool" ]] || { printf 'lifecycle selected non-fake %s: %s\n' "$selected_tool" "$selected" >&2; exit 96; }
+    done
+    [[ -x "$case_root/scripts/fixtures/fake-bench.sh" ]] || { printf 'missing synthetic emitter\n' >&2; exit 96; }
     MISO_ENGINE_TEST_BENCH_MODE="$mode" \
     MISO_ENGINE_TEST_LAUNCH_LOG="$launch_log" \
     MISO_ENGINE_TEST_FAKE_BENCH="$case_root/scripts/fixtures/fake-bench.sh" \
