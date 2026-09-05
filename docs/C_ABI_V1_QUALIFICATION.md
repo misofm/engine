@@ -149,8 +149,9 @@ to issue #369's implementation pull request.
 
 The fresh SIMD AudioWorklet digest build from immutable source candidate
 `7951736605fa64870bc1d91342d00d5fdb6417c5` produced SHA-256
-`a08a868cf1b62bb466a8fa5b826b214fa708265669fc730398706c869c9e43bd`. This is the current candidate pin; independent
-rebuild, artifact/resource gates and browser qualification remain pending. The initial
+`a08a868cf1b62bb466a8fa5b826b214fa708265669fc730398706c869c9e43bd`. Independent rebuild, static/resource gates, hermetic worklet tests, and
+Chromium/Firefox/WebKit qualification with matrix checks passed. The resource
+expectations include one additional eight-byte graph owner on Wasm; PCM digests are unchanged. The initial
 builder invocation refused a missing output directory before compilation (exit 2);
 the corrected invocation with an existing empty directory completed successfully.
 Historical artifact and qualification records above retain their original identities.

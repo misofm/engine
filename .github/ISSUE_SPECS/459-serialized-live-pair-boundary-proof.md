@@ -393,3 +393,10 @@ Review was read-only source/Git/log inspection. No tests/builds, timing, reposit
 
 
 Root integrated delivered main b6836835 (PR #464) before qualification. Compared with reviewed e6f54b5f, crates/hosts/tools/sidecars/fixtures/Cargo/configuration inputs are byte-identical; integration adds only accepted scanner changes and evidence. Full workspace command is `PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/engine-430-workspace-qualified cargo test --locked --workspace`, retaining `/tmp/engine-430-candidate-workspace.log` and actual terminal status at the immutable checkpoint. No tracked source/evidence/pin edits during the run. Supported native/Wasm and shipped artifact/static/browser qualification remain mandatory; #431 owns measurement and no timing is authorized here. #443 scalar, #444 concurrent admission and broad RT-4 remain open.
+
+
+## Parent target and browser qualification completed
+
+The immutable runtime candidate remains `7951736605fa64870bc1d91342d00d5fdb6417c5`; rebuilt artifact SHA-256 is `a08a868cf1b62bb466a8fa5b826b214fa708265669fc730398706c869c9e43bd`. Native/workspace, supported Wasm, protocol and artifact checks recorded in #430 passed. The justified two-row resource correction passed the existing checker and 26 red controls; hermetic worklet tests passed. Locked npm ci resolved the preserved missing-Playwright setup failure without lockfile changes. The all-browser record and separate Chromium, Firefox and WebKit matrix checks with self-test mutations all exited 0, as did matrix generation. Current results and deployment matrix identify the immutable candidate and rebuilt artifact. Logs/statuses are `/tmp/engine-430-browser-*`; artifact/resource logs are `/tmp/engine-430-worklet-*`.
+
+Evidence packaging, actual-head Astra PR review and required CI remain before delivery. #443/#444/#431 and the broader RT-4 audit remain open. No timing or speedup claim is made.

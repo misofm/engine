@@ -550,3 +550,10 @@ The allocation allowance is graph payload, so builtinRetainedBytes985, graphMeta
 Root reports the actual resource gate failed only on these two +8 differences, while its26 red controls passed, and the direct oracle independently confirms all other fields and PCM unchanged. That report is consistent with the source derivation above; it is not used to invent the allowance. Preserve the original failure/oracle and rerun the existing resource comparator after the narrowly justified two-row correction. No PCM/digest/timeline/status pin, numeric tolerance, comparator partition, historical resource record or production algorithm change is authorized by this accounting note.
 
 The first browser invocation stopped before execution because this worktree lacked the locked Playwright dependency; its failure is preserved and npm ci setup is in progress. Browser qualification remains pending.
+
+
+## Parent target and browser qualification completed
+
+The immutable runtime candidate remains `7951736605fa64870bc1d91342d00d5fdb6417c5`; rebuilt artifact SHA-256 is `a08a868cf1b62bb466a8fa5b826b214fa708265669fc730398706c869c9e43bd`. Native/workspace, supported Wasm, protocol and artifact checks recorded in #430 passed. The justified two-row resource correction passed the existing checker and 26 red controls; hermetic worklet tests passed. Locked npm ci resolved the preserved missing-Playwright setup failure without lockfile changes. The all-browser record and separate Chromium, Firefox and WebKit matrix checks with self-test mutations all exited 0, as did matrix generation. Current results and deployment matrix identify the immutable candidate and rebuilt artifact. Logs/statuses are `/tmp/engine-430-browser-*`; artifact/resource logs are `/tmp/engine-430-worklet-*`.
+
+Evidence packaging, actual-head Astra PR review and required CI remain before delivery. #443/#444/#431 and the broader RT-4 audit remain open. No timing or speedup claim is made.
