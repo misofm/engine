@@ -291,3 +291,10 @@ Root assigns one coherent Sol attempt 2 against these five finite groups. Preser
 ## Sol attempt 2 checkpoint 1: generic ownership error preservation
 
 The generic core now preserves pending/terminal ownership on wrong-ticket finish/collection, advances serial only after successful publication and uses a representable usize core slot. Focused tests add wrong-identity preservation and capacity above u16: `cargo test --locked -p protocol --lib delivery::tests -- --nocapture` passed 5 tests. Test/fmt/diff statuses are all 0 under `/tmp/460-sol2-tranche1-*`. Root checkpoints only delivery.rs and this evidence before continuation. The concrete automation adapter is not yet consolidated onto this core; full Sol2 scope and final review remain outstanding.
+
+
+## Sol attempt 2 checkpoint 2: common core and ordered cancellation
+
+The automation adapter now uses the generic core ticket/ledger/transport/terminal lifecycle; unsupported reserved FIFO heads are not published to render. The mutable raw-queue escape is removed. Cancellation uses a typed token, committed handoff frontier and actual boundary sample acknowledgement; covered handoffs terminalize before acknowledgement. Adapter reservation metadata follows exact tickets and admission order. A focused handed-off/partial case checks actual-boundary cancellation and repeated/stale behavior.
+
+The complete protocol library run passed 130 tests, zero failed; fmt/diff checks also exited0. Retained evidence is `/tmp/460-sol2-tranche2-{test,fmt,diffcheck}.{log,status}`. Root checkpoints the two source paths and this record before the remaining full frozen cancellation/credit/resource/realtime and causal-control proof. This is progress within Sol2, not final source acceptance.
