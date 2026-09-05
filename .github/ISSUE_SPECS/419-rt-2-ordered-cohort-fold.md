@@ -204,3 +204,7 @@ Ready-to-number bounded successor brief: `/tmp/astra-419-cohort-completion-brief
 ## Rescoped dependency #422
 
 The three source attempts are exhausted and preserved. #422 now owns the remaining validated public-cohort capacity agreement and actual graph dispatch mechanism proof under Astra's separately frozen completion brief. No fourth correction is authorized under this issue's exhausted attempt sequence. This parent remains OPEN and retains every RT-2 arithmetic, binding, realtime, identity, allocation, workspace, supported-target, immutable-artifact/browser, one-invocation descriptive measurement and final PR/CI obligation. One integrated final PR may close #422 and #419 only after both complete contracts pass; there is no standalone runtime merge bypass.
+
+## Source completion accepted through #422
+
+Astra PASS at `1958120d829d8a2f6144ed9020ee8ebbc6f07d49` resolves the preserved source blockers via separately briefed #422. Its full verdict is recorded there. Root now registers only the existing runner/preflight namespace `--issue419-rt2` and freezes this checkpoint for retained qualification. No workload, validator, readiness limit or invocation count changes. Workspace, supported targets, immutable artifact/browser, one controlled descriptive invocation and actual PR/CI remain pending. Neither issue is closed.

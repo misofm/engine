@@ -84,3 +84,25 @@ Review used read-only source/spec inspection and root-supplied focused results; 
 ## Sol attempt 2 evidence revision
 
 The accepted complete-stride formula and graph cohort dispatch remain unchanged. Inline tests now prove exact four-element one-lane acceptance, distinct checked-add and checked-multiply overflow rejection, and bit-preserved poisoned capacity arrays. A paired table drives the actual default provider and cohort override across contiguous/holey IDs and exact/excess capacities with frames below stride, comparing both planes, call order/count and every tail, hole and padding sentinel bitwise. The graph wrapper still rejects compatibility dispatch and records one cohort call; its expected master is now produced by the existing `mix2x2_block` and `reduce_plane` route/reduction primitives and compared by `to_bits`.
+
+## Astra attempt 2 acceptance
+
+# Astra #422 attempt 2 review
+
+**PASS at exact pushed `1958120d829d8a2f6144ed9020ee8ebbc6f07d49` for source completion and the remaining parent #419 delivery gates.** This resolves #422's bounded semantic acceptance and the preserved RT-2 source blockers; it is not issue closure, actual PR approval or a timing result.
+
+The production formula accepted in attempt 1 is unchanged. Public construction, default delegation and graph validation agree on checked complete-stride `(max_id + 1) * stride`, with bounded nonempty unique physical IDs, nonzero frames, stride/capacity checks and private metadata. The accessor remains checked. Existing fully padded chain staging satisfies this boundary, and mixed masks retain the compatibility ordering. No new unsafe, arithmetic reassociation, lane algorithm, eligibility change or render allocation appears.
+
+The exact missing tests are now supplied. One-lane four-element capacity succeeds; one-sided two-element and two-lane six-element undercapacity reject. Newly tested arrays use poison and have their own bitwise before/after checks. Separate maximum-ID checked-add overflow and representable-ID-times-three multiplication overflow inputs exercise the two arithmetic failures. Existing malformed-shape tests remain.
+
+A compact actual default-versus-override table covers contiguous/holey IDs at exact and excess capacities with frames smaller than stride. Both providers receive complete validated views, both planes compare by bits, callback ID sequences are exact, and unselected hole/stride-tail/extra words retain their sentinels. Since full output arrays also compare bitwise, the untouched-default sentinels establish preservation for the override too. This directly exercises the accepted domain that the earlier padded-only case missed.
+
+The real graph-wrapper mechanism test retains its explicit fold_plane failure, counts one cohort dispatch and delegates to actual ArenaMembers::fold_cohort. Its expected output now comes from independent existing mix2x2 and unchanged reduce_plane kernels, compared with to_bits on both planes. Combined with the preserved prepared-plan zero/four bank_route_folds assertions and one serialized, live thread-audited direct/folded allocation test, this establishes admission, dispatch, arithmetic and zero render allocations separately. The earlier handoff-only compatibility claim has been replaced by an actual committed discriminator.
+
+Retained parent source evidence still includes opening and later-cohort D9 association, finite nonzero-master cancellation, first-store negative zero with poisoned master, scalar/W4/W8 ragged/hostile lane identity, full/partial/holey/default/mixed behavior, graph nonpartial invalid metadata and unchanged binding/decline witnesses. No RT-3 change or benchmark-floor/workload change was introduced.
+
+I inspected the exact attempt delta: only rack/graph inline tests and #422 evidence changed after attempt 1. Completed debug/release logs show 41 rack and 50 graph passing results in each profile, with zero failures/ignored; graph includes the isolated allocation test, and the new paired-capacity and graph-dispatch tests are named in both profiles. Existing policy/fixture/mutation checks and clippy completion are green. Root's earlier unchanged lane/console evidence remains applicable; no extra Cargo run was needed for this read-only review.
+
+Root may now perform retained #419 immutable workspace/supported-target/artifact/browser qualification, freeze the existing workload/validators, complete non-timed runner/preflight registration and then the one controlled descriptive invocation under the existing conditions. This does not waive preflight, quiet readiness, overwrite protection or the one-invocation limit. Actual integrated PR head requires Astra review and required CI before merging/closing either issue. Parent #419 remains open until all its retained obligations are fulfilled and remotely synchronized.
+
+No blocking source finding remains. Review used read-only source/spec/Git/log inspection; no repository/GitHub mutation, Cargo, tests or timing.
