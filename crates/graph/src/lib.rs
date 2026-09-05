@@ -224,9 +224,15 @@ impl GraphResourceEstimate {
         resource: GraphScalarOwnerResourceEstimate,
     ) -> Option<()> {
         let mut next = self.clone();
-        next.graph_metadata_bytes = next.graph_metadata_bytes.checked_add(resource.total_bytes)?;
-        next.incremental_plan_bytes = next.incremental_plan_bytes.checked_add(resource.total_bytes)?;
-        next.session_plus_plan_bytes = next.session_plus_plan_bytes.checked_add(resource.total_bytes)?;
+        next.graph_metadata_bytes = next
+            .graph_metadata_bytes
+            .checked_add(resource.total_bytes)?;
+        next.incremental_plan_bytes = next
+            .incremental_plan_bytes
+            .checked_add(resource.total_bytes)?;
+        next.session_plus_plan_bytes = next
+            .session_plus_plan_bytes
+            .checked_add(resource.total_bytes)?;
         next.largest_allocation_bytes = next
             .largest_allocation_bytes
             .max(resource.largest_allocation_bytes);
@@ -1309,7 +1315,13 @@ pub struct GraphBindingBlock<'a> {
 pub type ScalarPairFactory = fn(
     Box<dyn GraphRuntimeProcessor>,
     Box<dyn GraphRuntimeProcessor>,
-) -> Result<Box<dyn GraphRuntimeProcessor>, (Box<dyn GraphRuntimeProcessor>, Box<dyn GraphRuntimeProcessor>)>;
+) -> Result<
+    Box<dyn GraphRuntimeProcessor>,
+    (
+        Box<dyn GraphRuntimeProcessor>,
+        Box<dyn GraphRuntimeProcessor>,
+    ),
+>;
 
 pub trait GraphRuntimeProcessor: Send + Any {
     /// Process one block in place.

@@ -1882,8 +1882,8 @@ pub(crate) fn build_sequential(
         &run_units,
     )
     .into_iter()
-        .filter(|(run, _, _)| !folded_runs.contains(run))
-        .collect();
+    .filter(|(run, _, _)| !folded_runs.contains(run))
+    .collect();
 
     // Serialized scalar fader/matrix pairing is decided while both original owners and the
     // lowered graph are still available.  The schedule is intentionally left untouched: the
@@ -1911,8 +1911,14 @@ pub(crate) fn build_sequential(
         let first_node = &spec.nodes[program.ops[first].node as usize].id;
         let second_node = &spec.nodes[program.ops[second].node as usize].id;
         let (
-            GraphNodeId::TrackStage { track_id: first_track, stage: TrackStage::PostFader },
-            GraphNodeId::TrackStage { track_id: second_track, stage: TrackStage::PostMatrix },
+            GraphNodeId::TrackStage {
+                track_id: first_track,
+                stage: TrackStage::PostFader,
+            },
+            GraphNodeId::TrackStage {
+                track_id: second_track,
+                stage: TrackStage::PostMatrix,
+            },
         ) = (first_node, second_node)
         else {
             continue;

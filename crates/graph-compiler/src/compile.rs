@@ -570,7 +570,9 @@ impl GraphCompiler {
             ));
         }
         if let Some(builtins) = prepared_builtins {
-            let Some(resource) = builtins.graph_scalar_owner_resource(dispatch) else {
+            let Some(resource) =
+                builtins.graph_scalar_owner_resource(dispatch, &levels, &pool_classes)
+            else {
                 return Err(failure(
                     effects,
                     vec![diag(

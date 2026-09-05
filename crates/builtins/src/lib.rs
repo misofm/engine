@@ -1853,9 +1853,12 @@ impl<L: Lane> FaderRampStage<L> {
 
     #[inline(always)]
     fn is_settled(&self) -> bool {
-        self.remaining
-            .iter()
-            .all(|channel| channel.iter().take(L::WIDTH).all(|&remaining| remaining == 0))
+        self.remaining.iter().all(|channel| {
+            channel
+                .iter()
+                .take(L::WIDTH)
+                .all(|&remaining| remaining == 0)
+        })
     }
 
     /// Retargets one lane of one channel. D11: one division per event, never per sample.

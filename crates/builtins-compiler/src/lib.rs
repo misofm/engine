@@ -25,7 +25,6 @@ use builtins::{
 use effect_contract::{
     BankWidth, ChannelSymmetryWitness, LiveConsoleRecord, SeamSide, SymmetryEvent,
 };
-use std::any::Any;
 use engine::realtime::{
     Consumer, PreparedRenderPlan, Producer, QueueGeneration, RenderEnvelope, RenderError,
     bounded_spsc, bounded_spsc_retained_payload,
@@ -41,6 +40,7 @@ use lane::Backend;
 use rack::{AoSoaScratch, BankSlotKey, RackLocation, RackProgram};
 use rack_compiler::{CohortCandidate, CohortLevel, CohortPoolClass, plan_bank_groups};
 use session::{CompiledSession, MatrixOrPan, Track};
+use std::any::Any;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BuiltinCompileCaps {
@@ -1943,14 +1943,36 @@ impl PreparedBuiltinsSession {
     pub fn graph_scalar_owner_resource(
         &self,
         dispatch: Backend,
+        levels: &[DependencyLevel],
+        classes: &SessionPoolClasses,
     ) -> Option<graph::GraphScalarOwnerResourceEstimate> {
-        if dispatch != Backend::Scalar {
-            return Some(graph::GraphScalarOwnerResourceEstimate::default());
-        }
         let fader = u64::try_from(core::mem::size_of::<ConsoleFaderProcessor>()).ok()?;
         let matrix = u64::try_from(core::mem::size_of::<ConsoleMatrixProcessor>()).ok()?;
         let outer = u64::try_from(core::mem::size_of::<ScalarPairProcessor>()).ok()?;
-        let count = u64::try_from(self.strips.iter().filter(|strip| strip.control.is_some()).count()).ok()?;
+        let banked: std::collections::BTreeSet<_> =
+            planned_strip_banks(&self.seal.tracks, dispatch, levels, classes)
+                .into_iter()
+                .find(|(stage, _)| *stage == TrackStage::PostFader)
+                .map(|(_, groups)| {
+                    groups
+                        .into_iter()
+                        .flat_map(|group| group.into_vec())
+                        .filter_map(|node| match node {
+                            GraphNodeId::TrackStage { track_id, .. } => {
+                                Some(Box::<str>::from(track_id.as_str()))
+                            }
+                            _ => None,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+        let count = u64::try_from(
+            self.strips
+                .iter()
+                .filter(|strip| strip.control.is_some() && !banked.contains(&strip.track_id))
+                .count(),
+        )
+        .ok()?;
         let owners = fader.checked_add(matrix)?.checked_mul(count)?;
         let outer_total = if self.control_delivery == BuiltinControlDelivery::BetweenRenderCalls {
             outer.checked_mul(count)?
@@ -1960,7 +1982,13 @@ impl PreparedBuiltinsSession {
         let total_bytes = owners.checked_add(outer_total)?;
         Some(graph::GraphScalarOwnerResourceEstimate {
             total_bytes,
-            largest_allocation_bytes: fader.max(matrix).max(outer),
+            largest_allocation_bytes: if count == 0 {
+                0
+            } else {
+                fader
+                    .max(matrix)
+                    .max(if outer_total == 0 { 0 } else { outer })
+            },
         })
     }
 
@@ -3493,20 +3521,27 @@ impl GraphRuntimeProcessor for ConsoleFaderProcessor {
         Ok(())
     }
     fn scalar_pair_factory(&self) -> Option<graph::ScalarPairFactory> {
-        (self.control_delivery == BuiltinControlDelivery::BetweenRenderCalls).then_some(make_scalar_pair)
+        (self.control_delivery == BuiltinControlDelivery::BetweenRenderCalls)
+            .then_some(make_scalar_pair)
     }
 }
 impl ConsoleFaderProcessor {
     fn drain_controls(&mut self) -> Result<(), RenderError> {
         while let Ok(record) = self.control.try_pop() {
             match record {
-                TrackFaderRecord::FaderDb { lanes, db, smoothing_samples } => self
+                TrackFaderRecord::FaderDb {
+                    lanes,
+                    db,
+                    smoothing_samples,
+                } => self
                     .fader
                     .set_fader_db(lanes, db, smoothing_samples)
                     .map_err(render_error)?,
-                TrackFaderRecord::Mute { lanes, muted, smoothing_samples } => {
-                    self.fader.set_mute(lanes, muted, smoothing_samples)
-                }
+                TrackFaderRecord::Mute {
+                    lanes,
+                    muted,
+                    smoothing_samples,
+                } => self.fader.set_mute(lanes, muted, smoothing_samples),
             }
         }
         Ok(())
@@ -3522,7 +3557,11 @@ struct ScalarPairProcessor {
 
 impl GraphRuntimeProcessor for ScalarPairProcessor {
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
-        let GraphBindingBlock { left, right, first_sample } = block;
+        let GraphBindingBlock {
+            left,
+            right,
+            first_sample,
+        } = block;
         self.fader.drain_controls()?;
         let matrix_error = self.matrix.drain_controls().err();
         if let Some(error) = matrix_error {
@@ -3532,8 +3571,8 @@ impl GraphRuntimeProcessor for ScalarPairProcessor {
             self.fader.fader.process(block);
             return Err(error);
         }
-        let mut fused_block = DualMonoBlock::new(&mut *left, &mut *right, first_sample)
-            .map_err(render_error)?;
+        let mut fused_block =
+            DualMonoBlock::new(&mut *left, &mut *right, first_sample).map_err(render_error)?;
         if self
             .fader
             .fader
@@ -3555,7 +3594,13 @@ impl GraphRuntimeProcessor for ScalarPairProcessor {
 fn make_scalar_pair(
     fader: Box<dyn GraphRuntimeProcessor>,
     matrix: Box<dyn GraphRuntimeProcessor>,
-) -> Result<Box<dyn GraphRuntimeProcessor>, (Box<dyn GraphRuntimeProcessor>, Box<dyn GraphRuntimeProcessor>)> {
+) -> Result<
+    Box<dyn GraphRuntimeProcessor>,
+    (
+        Box<dyn GraphRuntimeProcessor>,
+        Box<dyn GraphRuntimeProcessor>,
+    ),
+> {
     if !matrix.scalar_pair_accepts() {
         return Err((fader, matrix));
     }
@@ -3567,7 +3612,10 @@ fn make_scalar_pair(
     let matrix = matrix_any
         .downcast::<ConsoleMatrixProcessor>()
         .expect("only ConsoleMatrixProcessor accepts scalar pairing");
-    Ok(Box::new(ScalarPairProcessor { fader: *fader, matrix: *matrix }))
+    Ok(Box::new(ScalarPairProcessor {
+        fader: *fader,
+        matrix: *matrix,
+    }))
 }
 struct MeterObserver(MeterAccumulator);
 impl GraphRuntimeObserver for MeterObserver {
