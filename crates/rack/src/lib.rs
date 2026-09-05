@@ -307,10 +307,11 @@ fn tile_scatter<const W: usize>(
 }
 
 #[inline(always)]
-fn tile_scatter_direct<const W: usize>(
+fn tile_scatter_direct_plane<const W: usize>(
     source: &[f32],
-    destinations: &mut BankPlaneViews<'_>,
+    destinations: &mut [BankPlanePair<'_>; W],
     frames: usize,
+    right_plane: bool,
     transpose: impl Fn([[f32; W]; W]) -> [[f32; W]; W],
 ) {
     let tiled = (frames / W) * W;
@@ -320,19 +321,15 @@ fn tile_scatter_direct<const W: usize>(
         for (row, chunk) in rows.iter_mut().zip(block.chunks_exact(W)) {
             row.copy_from_slice(chunk);
         }
-        for (lane, row) in transpose(rows).into_iter().enumerate() {
-            let (left, _) = destinations.pairs[lane]
-                .as_mut()
-                .expect("direct destination present");
-            left[base..base + W].copy_from_slice(&row);
+        for ((left, right), row) in destinations.iter_mut().zip(transpose(rows)) {
+            let plane = if right_plane { right } else { left };
+            plane[base..base + W].copy_from_slice(&row);
         }
     }
     for frame in tiled..frames {
-        for lane in 0..W {
-            let (left, _) = destinations.pairs[lane]
-                .as_mut()
-                .expect("direct destination present");
-            left[frame] = source[frame * W + lane];
+        for (lane, (left, right)) in destinations.iter_mut().enumerate() {
+            let plane = if right_plane { right } else { left };
+            plane[frame] = source[frame * W + lane];
         }
     }
 }
@@ -353,21 +350,34 @@ pub struct BankBlock<'a> {
 /// bound is the two launch bank widths and keeps the render path allocation-free.
 pub type BankPlanePair<'a> = (&'a mut [f32], &'a mut [f32]);
 
-pub struct BankPlaneViews<'a> {
-    pairs: [Option<BankPlanePair<'a>>; 8],
+pub enum BankPlaneViews<'a> {
+    Four([BankPlanePair<'a>; 4], usize),
+    Eight([BankPlanePair<'a>; 8], usize),
 }
 
 impl<'a> BankPlaneViews<'a> {
-    /// Construct views in stable lane order. `W` is restricted to a supported bank width.
-    pub fn from_pairs<const W: usize>(pairs: [BankPlanePair<'a>; W]) -> Option<Self> {
-        if W != 4 && W != 8 {
-            return None;
+    fn capacity<const W: usize>(pairs: &[BankPlanePair<'_>; W], frames: usize) -> bool {
+        if pairs
+            .iter()
+            .any(|(left, right)| left.len() < frames || right.len() < frames)
+        {
+            return false;
         }
-        let mut slots: [Option<BankPlanePair<'a>>; 8] = core::array::from_fn(|_| None);
-        for (slot, pair) in slots.iter_mut().zip(pairs) {
-            *slot = Some(pair);
-        }
-        Some(Self { pairs: slots })
+        true
+    }
+
+    pub fn from_four(pairs: [BankPlanePair<'a>; 4], frames: usize) -> Option<Self> {
+        Self::capacity(&pairs, frames).then_some(Self::Four(pairs, frames))
+    }
+
+    pub fn from_eight(pairs: [BankPlanePair<'a>; 8], frames: usize) -> Option<Self> {
+        Self::capacity(&pairs, frames).then_some(Self::Eight(pairs, frames))
+    }
+
+    #[inline(always)]
+    fn supports(&self, width: usize, frames: usize) -> bool {
+        matches!(self, Self::Four(_, capacity) if width == 4 && *capacity >= frames)
+            || matches!(self, Self::Eight(_, capacity) if width == 8 && *capacity >= frames)
     }
 }
 
@@ -2137,37 +2147,44 @@ impl BankChain {
         debug_assert_eq!(self.lanes, W);
         let frames_used = frames as usize;
         let stride = self.scratch.quantum as usize;
-        if self.fold.is_empty() {
-            if let Some(mut destinations) = members.distinct_planes_mut(W, frames_used) {
-                tile_scatter_direct::<W>(
-                    &self.scratch.left,
-                    &mut destinations,
-                    frames_used,
-                    transpose,
-                );
-                // The views are independent for each lane, while the two planes remain paired.
-                // Reborrow the same validated views for the right plane is impossible by design;
-                // providers therefore return both planes and this helper writes the left plane
-                // above and the right plane through the paired view below.
-                for (lane, pair) in destinations.pairs.iter_mut().enumerate().take(W) {
-                    let (_, right) = pair.as_mut().expect("direct destination present");
-                    // Reconstruct the right-plane transpose from the resident block with the
-                    // same exact permutation, without arithmetic or staging.
-                    let tiled = (frames_used / W) * W;
-                    for (tile, block) in self.scratch.right[..tiled * W]
-                        .chunks_exact(W * W)
-                        .enumerate()
-                    {
-                        let base = tile * W;
-                        let mut rows = [[0.0_f32; W]; W];
-                        for (row, chunk) in rows.iter_mut().zip(block.chunks_exact(W)) {
-                            row.copy_from_slice(chunk);
-                        }
-                        let row = transpose(rows)[lane];
-                        right[base..base + W].copy_from_slice(&row);
+        if self.fold.is_empty()
+            && let Some(mut destinations) = members.distinct_planes_mut(W, frames_used)
+        {
+            if !destinations.supports(W, frames_used) {
+                // Drop every view before taking the established staged fallback.
+            } else {
+                match &mut destinations {
+                    BankPlaneViews::Four(pairs, _) => {
+                        tile_scatter_direct_plane(
+                            &self.scratch.left,
+                            pairs,
+                            frames_used,
+                            false,
+                            transpose_tile_4,
+                        );
+                        tile_scatter_direct_plane(
+                            &self.scratch.right,
+                            pairs,
+                            frames_used,
+                            true,
+                            transpose_tile_4,
+                        );
                     }
-                    for frame in tiled..frames_used {
-                        right[frame] = self.scratch.right[frame * W + lane];
+                    BankPlaneViews::Eight(pairs, _) => {
+                        tile_scatter_direct_plane(
+                            &self.scratch.left,
+                            pairs,
+                            frames_used,
+                            false,
+                            transpose_tile_8,
+                        );
+                        tile_scatter_direct_plane(
+                            &self.scratch.right,
+                            pairs,
+                            frames_used,
+                            true,
+                            transpose_tile_8,
+                        );
                     }
                 }
                 return;
@@ -2339,7 +2356,7 @@ mod tests {
                         &mut **right.next().expect("validated lane"),
                     )
                 });
-                BankPlaneViews::from_pairs::<4>(pairs)
+                BankPlaneViews::from_four(pairs, frames)
             } else {
                 let mut left = left.iter_mut();
                 let mut right = right.iter_mut();
@@ -2349,8 +2366,55 @@ mod tests {
                         &mut **right.next().expect("validated lane"),
                     )
                 });
-                BankPlaneViews::from_pairs::<8>(pairs)
+                BankPlaneViews::from_eight(pairs, frames)
             }
+        }
+    }
+
+    struct StagedPlanes(Planes);
+    impl BankMembers for StagedPlanes {
+        fn plane(&self, lane: usize) -> (&[f32], &[f32]) {
+            self.0.plane(lane)
+        }
+        fn plane_mut(&mut self, lane: usize) -> (&mut [f32], &mut [f32]) {
+            self.0.plane_mut(lane)
+        }
+    }
+
+    struct CountedDirectPlanes {
+        planes: Planes,
+        per_lane_writes: usize,
+    }
+    impl BankMembers for CountedDirectPlanes {
+        fn plane(&self, lane: usize) -> (&[f32], &[f32]) {
+            self.planes.plane(lane)
+        }
+        fn plane_mut(&mut self, lane: usize) -> (&mut [f32], &mut [f32]) {
+            self.per_lane_writes += 1;
+            self.planes.plane_mut(lane)
+        }
+        fn distinct_planes_mut(
+            &mut self,
+            lanes: usize,
+            frames: usize,
+        ) -> Option<BankPlaneViews<'_>> {
+            if lanes != 4
+                || self.planes.left.len() != 4
+                || self.planes.right.len() != 4
+                || self.planes.left.iter().any(|plane| plane.len() < frames)
+                || self.planes.right.iter().any(|plane| plane.len() < frames)
+            {
+                return None;
+            }
+            let mut left = self.planes.left.iter_mut();
+            let mut right = self.planes.right.iter_mut();
+            let pairs: [BankPlanePair<'_>; 4] = core::array::from_fn(|_| {
+                (
+                    left.next().expect("validated left lane").as_mut_slice(),
+                    right.next().expect("validated right lane").as_mut_slice(),
+                )
+            });
+            BankPlaneViews::from_four(pairs, frames)
         }
     }
 
@@ -2429,6 +2493,60 @@ mod tests {
         }
     }
 
+    #[test]
+    fn direct_plane_views_encode_width_and_reject_short_capacity() {
+        let mut left4: [Vec<f32>; 4] = core::array::from_fn(|_| vec![0.0; 7]);
+        let mut right4: [Vec<f32>; 4] = core::array::from_fn(|_| vec![0.0; 8]);
+        let mut left_iter = left4.iter_mut();
+        let mut right_iter = right4.iter_mut();
+        let short: [BankPlanePair<'_>; 4] = core::array::from_fn(|_| {
+            (
+                left_iter.next().expect("four left planes").as_mut_slice(),
+                right_iter.next().expect("four right planes").as_mut_slice(),
+            )
+        });
+        assert!(BankPlaneViews::from_four(short, 8).is_none());
+
+        let mut left4: [Vec<f32>; 4] = core::array::from_fn(|_| vec![0.0; 8]);
+        let mut right4: [Vec<f32>; 4] = core::array::from_fn(|_| vec![0.0; 8]);
+        let mut left_iter = left4.iter_mut();
+        let mut right_iter = right4.iter_mut();
+        let complete: [BankPlanePair<'_>; 4] = core::array::from_fn(|_| {
+            (
+                left_iter.next().expect("four left planes").as_mut_slice(),
+                right_iter.next().expect("four right planes").as_mut_slice(),
+            )
+        });
+        let views = BankPlaneViews::from_four(complete, 8).expect("complete four-wide view");
+        assert!(views.supports(4, 8));
+        assert!(!views.supports(8, 8));
+        assert!(!views.supports(4, 9));
+    }
+
+    #[test]
+    fn direct_scatter_never_calls_the_per_lane_fallback() {
+        let mut state = 0x3990_3991_3992_3993;
+        let source = hostile_planes(4, 11, &mut state);
+        let expected = Planes {
+            left: source.left.clone(),
+            right: source.right.clone(),
+        };
+        let mut members = CountedDirectPlanes {
+            planes: source,
+            per_lane_writes: 0,
+        };
+        let active = vec![true; 4].into_boxed_slice();
+        let mut chain = BankChain::new(
+            AoSoaScratch::new(BankWidth::Four, 11).expect("scratch"),
+            active.clone(),
+            vec![slot(active.to_vec(), Box::new(PassThrough))],
+        )
+        .expect("chain");
+        chain.run(&mut members, 11, 0).expect("run");
+        assert_eq!(members.per_lane_writes, 0);
+        assert_planes_bit_equal(&members.planes, &expected, "direct call sentinel");
+    }
+
     /// T1b: on a **full** bank -- the tiled whole-bank transpose -- the round trip is bit-exact at
     /// both widths and at every frame shape, ragged tails included.
     ///
@@ -2452,6 +2570,8 @@ mod tests {
                     vec![slot(active, Box::new(PassThrough))],
                 )
                 .expect("chain");
+                chain.staging_left.fill(f32::from_bits(0x7fc0_3991));
+                chain.staging_right.fill(f32::from_bits(0x7fc0_3992));
                 chain.run(&mut planes, frames, 0).expect("run");
                 assert_planes_bit_equal(
                     &planes,
@@ -2459,6 +2579,18 @@ mod tests {
                     &format!("{lanes} lanes, {frames} frames"),
                 );
                 assert_eq!(chain.transposes(), 1);
+                assert!(
+                    chain
+                        .staging_left
+                        .iter()
+                        .all(|word| word.to_bits() == 0x7fc0_3991)
+                );
+                assert!(
+                    chain
+                        .staging_right
+                        .iter()
+                        .all(|word| word.to_bits() == 0x7fc0_3992)
+                );
             }
         }
     }
@@ -2510,10 +2642,29 @@ mod tests {
                     chain.run(&mut planes, frames, 0).expect("run");
                     outcomes.push(planes);
                 }
+                let mut staged = StagedPlanes(Planes {
+                    left: source.left.clone(),
+                    right: source.right.clone(),
+                });
+                let active = vec![true; lanes];
+                let mut staged_chain = BankChain::new(
+                    AoSoaScratch::new(width, 128).expect("scratch"),
+                    active.clone().into_boxed_slice(),
+                    vec![slot(active, Box::new(IndexXor))],
+                )
+                .expect("chain");
+                staged_chain
+                    .run(&mut staged, frames, 0)
+                    .expect("staged run");
                 assert_planes_bit_equal(
                     &outcomes[0],
                     &outcomes[1],
                     &format!("tiled vs scalar, {lanes} lanes, {frames} frames"),
+                );
+                assert_planes_bit_equal(
+                    &outcomes[0],
+                    &staged.0,
+                    &format!("direct vs staged, {lanes} lanes, {frames} frames"),
                 );
             }
         }

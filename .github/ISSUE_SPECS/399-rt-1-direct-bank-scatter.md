@@ -113,3 +113,11 @@ Root checkpoints this failed attempt intact and assigns Sol, not another Luna co
 
 
 Root assigns attempt 2 to Sol against this complete bounded revision. Timing remains unauthorized.
+
+## Sol attempt 2 semantic source checkpoint — pending adversarial verdict
+
+Sol added release plane-count validation before arena pointer arithmetic, documented the allocation range and I1–I4 lifetime proof, and added a release rejection suite covering one plane, unsupported width, duplicate/silence/unknown/reserved-unwritable IDs and excess frames without changing sentinels. Direct destination views now encode width and validated frame capacity in a private complete representation; graph output slicing is checked before conversion. Marked render code contains no new expect/unwrap/panic surface.
+
+Direct scatter now transposes each tile exactly once per plane and writes all resulting lane rows, with the existing ragged-tail arithmetic. Rack release tests compare direct, provider-declined staged, and forced-scalar IndexXor results by `to_bits` at W4/W8 over all standing frame shapes and hostile words; direct identity leaves both staging planes' sentinels untouched. A real graph `ArenaMembers` fixture gathers IDs 1–4 and scatters redirected outputs 5–8, rejecting prior output sentinels and matching independent input bits. Existing fold/partial/aux/mono tests remain unchanged and green.
+
+Focused logs: `/tmp/engine-399-sol-engine-release.log` (9 release disjoint tests), `/tmp/engine-399-sol-rack-release.log` (22 release rack tests), `/tmp/engine-399-sol-graph-release.log` (46 release graph tests), `/tmp/engine-399-sol-realtime.log`, `/tmp/engine-399-sol-realtime-mutations.log`, `/tmp/engine-399-sol-rack-policy.log`, `/tmp/engine-399-sol-workspace-policy.log`, and `/tmp/engine-399-sol-clippy.log`. Realtime policy retains 42 regions in 12 files. Formatting and diff hygiene pass. No benchmark arm, timing, full workspace or artifact operation is claimed at this source checkpoint. The remaining source-evidence item is an explicit repeated-render allocation/free-zero assertion using an existing allocation-probe mechanism; this checkpoint does not substitute syntax-policy evidence for that runtime allocation gate.

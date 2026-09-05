@@ -302,7 +302,9 @@ impl ArenaLease {
         buffers: &[u32; W],
         frames: usize,
     ) -> Option<[ArenaStereoPlanes<'_>; W]> {
-        if W != 4 && W != 8 || frames > self.arena.frames {
+        // Stereo access is part of this safe API's shape, not a convention imposed on callers.
+        // Reject it before computing either plane offset or forming any reference.
+        if self.arena.planes < 2 || (W != 4 && W != 8) || frames > self.arena.frames {
             return None;
         }
         for (i, buffer) in buffers.iter().copied().enumerate() {
@@ -319,14 +321,20 @@ impl ArenaLease {
         let arena_frames = self.arena.frames;
         let pairs = core::array::from_fn(|lane| {
             let buffer = buffers[lane] as usize;
-            let left = (buffer * arena_frames) as isize;
-            let right = (buffer_count * arena_frames + buffer * arena_frames) as isize;
+            let left = buffer * arena_frames;
+            let right = buffer_count * arena_frames + left;
             // SAFETY: all buffers were checked writable, in bounds, and pairwise distinct above;
-            // the two plane ranges are disjoint by construction and remain under this lease.
+            // W <= 8 bounds this fixed construction. `finish` allocated
+            // `planes * buffer_count * arena_frames` cells, `planes >= 2`, buffer is strictly
+            // below buffer_count, and frames <= arena_frames, so both [offset, offset + frames)
+            // ranges lie inside that allocation. Distinct buffer IDs make every lane range
+            // spatially disjoint (I1); different planes are disjoint too. `&mut self` ties every
+            // returned lifetime to this exclusive lease borrow, while the lease's checked write
+            // set and builder construction retain I1--I4 for the plan lifetime.
             unsafe {
                 (
-                    core::slice::from_raw_parts_mut((*cells.offset(left)).get(), frames),
-                    core::slice::from_raw_parts_mut((*cells.offset(right)).get(), frames),
+                    core::slice::from_raw_parts_mut((*cells.add(left)).get(), frames),
+                    core::slice::from_raw_parts_mut((*cells.add(right)).get(), frames),
                 )
             }
         });
@@ -730,6 +738,79 @@ mod tests {
         let (out, input) = lease.write_read(0, other, own);
         out.copy_from_slice(input);
         assert_eq!(lease.read(0, other), &[0.5; 4]);
+    }
+
+    fn many_lease(planes: usize, frames: usize) -> (Vec<u32>, u32, ArenaLease) {
+        let mut build = ArenaLeaseSetBuilder::new(
+            NonZeroUsize::new(planes).expect("nonzero test planes"),
+            NonZeroUsize::new(frames).expect("nonzero test frames"),
+        );
+        let writable: Vec<u32> = (0..8).map(|_| build.reserve()).collect();
+        let reserved_unwritable = build.reserve();
+        build.lease(0, writable.clone(), Vec::new());
+        let (_arena, mut leases) = build.finish().expect("test arena");
+        (writable, reserved_unwritable, leases.remove(0))
+    }
+
+    fn assert_many_rejection_keeps_plane_zero(
+        lease: &mut ArenaLease,
+        observed: &[u32; 4],
+        attempted: &[u32; 4],
+        frames: usize,
+    ) {
+        for buffer in observed {
+            lease.write(0, *buffer).fill(f32::from_bits(0x7fc0_3990));
+        }
+        assert!(lease.write_stereo_many(attempted, frames).is_none());
+        for buffer in observed {
+            assert!(
+                lease
+                    .read(0, *buffer)
+                    .iter()
+                    .all(|word| word.to_bits() == 0x7fc0_3990)
+            );
+        }
+    }
+
+    /// RT-1: every safe multi-borrow rejection happens before a reference or write is produced.
+    #[test]
+    fn stereo_many_rejects_every_invalid_shape_without_partial_writes() {
+        let (ids, _, mut mono) = many_lease(1, 8);
+        let four: [u32; 4] = ids[..4].try_into().expect("four ids");
+        assert_many_rejection_keeps_plane_zero(&mut mono, &four, &four, 8);
+
+        let (ids, unwritable, mut lease) = many_lease(2, 8);
+        let four: [u32; 4] = ids[..4].try_into().expect("four ids");
+        assert_many_rejection_keeps_plane_zero(
+            &mut lease,
+            &four,
+            &[four[0], four[0], four[2], four[3]],
+            8,
+        );
+        assert_many_rejection_keeps_plane_zero(
+            &mut lease,
+            &four,
+            &[0, four[1], four[2], four[3]],
+            8,
+        );
+        assert_many_rejection_keeps_plane_zero(
+            &mut lease,
+            &four,
+            &[unwritable, four[1], four[2], four[3]],
+            8,
+        );
+        assert_many_rejection_keeps_plane_zero(
+            &mut lease,
+            &four,
+            &[u32::MAX, four[1], four[2], four[3]],
+            8,
+        );
+        assert_many_rejection_keeps_plane_zero(&mut lease, &four, &four, 9);
+
+        let unsupported = [ids[0], ids[1], ids[2]];
+        assert!(lease.write_stereo_many(&unsupported, 8).is_none());
+        let eight: [u32; 8] = ids[..8].try_into().expect("eight ids");
+        assert!(lease.write_stereo_many(&eight, 8).is_some());
     }
 
     /// E8. Concurrent leases never touch each other's words.

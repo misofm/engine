@@ -668,18 +668,20 @@ impl BankMembers for ArenaMembers<'_> {
     fn distinct_planes_mut(&mut self, lanes: usize, frames: usize) -> Option<BankPlaneViews<'_>> {
         match lanes {
             4 => {
-                let buffers: [u32; 4] = self.outputs[..4].try_into().ok()?;
-                Some(BankPlaneViews::from_pairs(
+                let buffers: [u32; 4] = self.outputs.get(..4)?.try_into().ok()?;
+                Some(BankPlaneViews::from_four(
                     self.lease.write_stereo_many(&buffers, frames)?,
+                    frames,
                 )?)
             }
             8 => {
-                let buffers: [u32; 8] = self.outputs[..8].try_into().ok()?;
-                Some(BankPlaneViews::from_pairs(
+                let buffers: [u32; 8] = self.outputs.get(..8)?.try_into().ok()?;
+                Some(BankPlaneViews::from_eight(
                     self.lease.write_stereo_many(&buffers, frames)?,
+                    frames,
                 )?)
             }
-            _ => return None,
+            _ => None,
         }
     }
     /// The route and the master accumulation, in the lane's own transposed tile (issue #218).
@@ -2968,6 +2970,83 @@ mod tests {
         builder.lease(0, owned.clone(), owned);
         let (_arena, mut leases) = builder.finish().expect("one disjoint lease");
         leases.pop().expect("the lease")
+    }
+
+    /// RT-1: real graph arena members gather one buffer set and scatter directly into another.
+    #[test]
+    fn arena_members_direct_scatter_preserves_redirected_identity_bits() {
+        struct Identity;
+        impl BankStage for Identity {
+            fn process(&mut self, _block: BankBlock<'_>) -> Result<(), RenderError> {
+                Ok(())
+            }
+        }
+
+        const FRAMES: usize = 11;
+        let mut lease = stereo_lease(FRAMES, 8);
+        let inputs = [1, 2, 3, 4];
+        let outputs = [5, 6, 7, 8];
+        let mut expected = Vec::new();
+        for (lane, input) in inputs.iter().copied().enumerate() {
+            let left: Vec<f32> = (0..FRAMES)
+                .map(|frame| f32::from_bits(0x7fc0_0000 | ((lane * FRAMES + frame) as u32 + 1)))
+                .collect();
+            let right: Vec<f32> = left
+                .iter()
+                .map(|word| f32::from_bits(word.to_bits() ^ 0x8000_3990))
+                .collect();
+            lease.write(0, input).copy_from_slice(&left);
+            lease.write(1, input).copy_from_slice(&right);
+            expected.push((left, right));
+        }
+        for output in outputs {
+            lease.write(0, output).fill(f32::from_bits(0x7f80_3991));
+            lease.write(1, output).fill(f32::from_bits(0x7f80_3992));
+        }
+
+        let active = vec![true; 4].into_boxed_slice();
+        let mut chain = BankChain::new(
+            AoSoaScratch::new(BankWidth::Four, FRAMES as u32).expect("scratch"),
+            active.clone(),
+            vec![BankSlot {
+                stage: Box::new(Identity),
+                active_lanes: active,
+            }],
+        )
+        .expect("chain");
+        {
+            let mut members = ArenaMembers {
+                lease: &mut lease,
+                inputs: &inputs,
+                outputs: &outputs,
+                fold: &[],
+                master: 0,
+            };
+            chain
+                .run(&mut members, FRAMES as u32, 0)
+                .expect("direct graph run");
+        }
+
+        for (lane, output) in outputs.iter().copied().enumerate() {
+            let (left, right) = lease.read_stereo(output);
+            assert_eq!(
+                left.iter().map(|word| word.to_bits()).collect::<Vec<_>>(),
+                expected[lane]
+                    .0
+                    .iter()
+                    .map(|word| word.to_bits())
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                right.iter().map(|word| word.to_bits()).collect::<Vec<_>>(),
+                expected[lane]
+                    .1
+                    .iter()
+                    .map(|word| word.to_bits())
+                    .collect::<Vec<_>>()
+            );
+        }
+        assert_eq!(chain.transposes(), 1);
     }
 
     /// The folded epilogue is the route op followed by the D9 reduction, word for word.
