@@ -681,7 +681,7 @@ static FADER_MATRIX_FALLBACK_CALLS: core::sync::atomic::AtomicUsize =
 // diagnostic surface or interference from another test thread.
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
-    static FADER_MATRIX_LIVE_WITNESS: std::cell::Cell<[u64; 4]> = const { std::cell::Cell::new([0; 4]) };
+    static FADER_MATRIX_LIVE_WITNESS: std::cell::Cell<[u64; 6]> = const { std::cell::Cell::new([0; 6]) };
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -692,12 +692,14 @@ pub struct TestOnlyFaderMatrixWitness {
     pub fused_calls: u64,
     pub fallback_calls: u64,
     pub factory_calls: u64,
+    pub process_members: u64,
+    pub factory_members: u64,
 }
 
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub fn test_only_reset_fader_matrix_witness() {
-    FADER_MATRIX_LIVE_WITNESS.with(|value| value.set([0; 4]));
+    FADER_MATRIX_LIVE_WITNESS.with(|value| value.set([0; 6]));
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -710,6 +712,8 @@ pub fn test_only_fader_matrix_witness() -> TestOnlyFaderMatrixWitness {
         fused_calls: values[1],
         fallback_calls: values[2],
         factory_calls: values[3],
+        process_members: values[4],
+        factory_members: values[5],
     }
 }
 
@@ -788,6 +792,7 @@ fn make_fader_matrix(
     FADER_MATRIX_LIVE_WITNESS.with(|value| {
         let mut counters = value.get();
         counters[3] = counters[3].saturating_add(1);
+        counters[5] = counters[5].saturating_add(fader.bank.active_lanes() as u64);
         value.set(counters);
     });
     Ok(Box::new(FaderMatrixBankProcessor { fader, matrix }))
@@ -816,6 +821,7 @@ impl GraphPreparedBuiltinBankProcessor for FaderMatrixBankProcessor {
         FADER_MATRIX_LIVE_WITNESS.with(|value| {
             let mut counters = value.get();
             counters[0] = counters[0].saturating_add(1);
+            counters[4] = counters[4].saturating_add(self.fader.bank.active_lanes() as u64);
             value.set(counters);
         });
         let Self { fader, matrix } = self;
@@ -4380,9 +4386,11 @@ mod tests {
         seed: u64,
     }
 
+    static ALIAS_OBSERVATIONS: AtomicUsize = AtomicUsize::new(0);
     struct AliasObserver;
     impl GraphRuntimeObserver for AliasObserver {
         fn observe(&mut self, _block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
+            ALIAS_OBSERVATIONS.fetch_add(1, Ordering::Relaxed);
             Ok(())
         }
     }
@@ -4453,7 +4461,11 @@ mod tests {
         let route = GraphNodeId::Route {
             route_id: StableGraphId::parse("proof-send").expect("harness ID"),
         };
-        let alias = stage(0, TrackStage::PostDynamic);
+        // Track 0 is already ineligible because its post-matrix buffer is the graph output.
+        // Put the synthetic alias on the otherwise-eligible trailing cohort so toggling its
+        // observer independently discriminates the observer barrier.
+        let alias_track = n - 1;
+        let alias = stage(alias_track, TrackStage::PostDynamic);
         let stages = [
             TrackStage::Input,
             TrackStage::PostInputBuiltins,
@@ -4543,7 +4555,7 @@ mod tests {
                     target: alias.clone(),
                 },
                 source: GraphPortId {
-                    node: stage(0, TrackStage::PostFader),
+                    node: stage(alias_track, TrackStage::PostFader),
                     kind: GraphPortKind::MainOutput,
                     effect_port: None,
                 },
@@ -4552,8 +4564,18 @@ mod tests {
                     kind: GraphPortKind::MainInput,
                     effect_port: None,
                 },
-                path: "$.tracks[0].alias".to_owned(),
+                path: format!("$.tracks[{alias_track}].alias"),
             });
+            let edge = edges.last().expect("alias edge");
+            assert_eq!(
+                edge.source.node,
+                stage(n - 1, TrackStage::PostFader),
+                "the proof alias reads the otherwise-eligible trailing cohort"
+            );
+            assert_eq!(
+                edge.destination.node, alias,
+                "the proof edge targets the alias"
+            );
         }
         let mut levels = Vec::new();
         for (level, kind) in stages.iter().enumerate() {
@@ -4694,16 +4716,10 @@ mod tests {
                 queue_capacity: NonZeroUsize::new(4).expect("queue"),
             })
             .collect::<Vec<_>>();
-        let meter_requests = (post_fader_barrier
-            || matches!(variant, BoundaryVariant::AliasObserved))
-        .then(|| MeterRequest {
+        let meter_requests = post_fader_barrier.then(|| MeterRequest {
             handle: MeterHandle(NonZeroU64::new(0x430).expect("handle")),
             track_id: track_name(0),
-            tap: if matches!(variant, BoundaryVariant::AliasObserved) {
-                MeterTap::PostDynamic
-            } else {
-                MeterTap::PostFader
-            },
+            tap: MeterTap::PostFader,
             config: MeterConfig {
                 period_frames: NonZeroU32::new(HARNESS_QUANTUM).expect("period"),
                 peak_hold_frames: 0,
@@ -4986,7 +5002,7 @@ mod tests {
         let _guard = PAIR_WITNESS_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        FADER_MATRIX_FACTORY_CALLS.store(0, Ordering::Relaxed);
+        test_only_reset_fader_matrix_witness();
         let (eligible, _, _) = render_post_input_bits_with_variant(
             9,
             Backend::Simd8,
@@ -4994,8 +5010,9 @@ mod tests {
             false,
             BoundaryVariant::Alias,
         );
-        let eligible_factory = FADER_MATRIX_FACTORY_CALLS.load(Ordering::Relaxed);
-        FADER_MATRIX_FACTORY_CALLS.store(0, Ordering::Relaxed);
+        let eligible_witness = test_only_fader_matrix_witness();
+        test_only_reset_fader_matrix_witness();
+        ALIAS_OBSERVATIONS.store(0, Ordering::Relaxed);
         let (observed, _, _) = render_post_input_bits_with_variant(
             9,
             Backend::Simd8,
@@ -5004,8 +5021,24 @@ mod tests {
             BoundaryVariant::AliasObserved,
         );
         assert_eq!(eligible, observed, "alias observer preserves PCM words");
-        assert_eq!(eligible_factory, 1);
-        assert_eq!(FADER_MATRIX_FACTORY_CALLS.load(Ordering::Relaxed), 1);
+        let observed_witness = test_only_fader_matrix_witness();
+        assert_eq!(
+            ALIAS_OBSERVATIONS.load(Ordering::Relaxed),
+            HARNESS_BLOCKS as usize,
+            "the lowered alias observer executes on every block"
+        );
+        assert_eq!(
+            eligible_witness.factory_calls, 1,
+            "the unobserved alias leaves the tail eligible"
+        );
+        assert_eq!(
+            eligible_witness.factory_members, 1,
+            "the accepted cohort is the one-lane tail"
+        );
+        assert_eq!(
+            observed_witness.factory_calls, 0,
+            "observing that same lowered alias rejects the otherwise-eligible tail"
+        );
     }
 
     struct PairFixture {
@@ -5097,7 +5130,7 @@ mod tests {
         }
     }
 
-    fn assert_pair_call(fixture: &mut PairFixture, frames: u32, seed: u32) {
+    fn assert_pair_call(fixture: &mut PairFixture, frames: u32, seed: u32, expect_fused: bool) {
         FADER_MATRIX_FUSED_CALLS.store(0, Ordering::Relaxed);
         FADER_MATRIX_FALLBACK_CALLS.store(0, Ordering::Relaxed);
         let samples = fixture.lanes * frames as usize;
@@ -5115,8 +5148,11 @@ mod tests {
             .expect("paired process");
         let fused = FADER_MATRIX_FUSED_CALLS.load(Ordering::Relaxed);
         let fallback = FADER_MATRIX_FALLBACK_CALLS.load(Ordering::Relaxed);
-        assert_eq!(fused + fallback, 1, "one actual dispatch branch per call");
-        assert!(fused == 1 || fallback == 1, "branch witness is exclusive");
+        assert_eq!(
+            (fused, fallback),
+            if expect_fused { (1, 0) } else { (0, 1) },
+            "the named call must take its expected actual dispatch branch"
+        );
         fixture
             .separate_fader
             .process(&mut separate_l, &mut separate_r, frames, 0)
@@ -5125,8 +5161,28 @@ mod tests {
             .separate_matrix
             .process(&mut separate_l, &mut separate_r, frames, 0)
             .expect("separate matrix");
-        assert_eq!(paired_l, separate_l, "post-matrix left PCM");
-        assert_eq!(paired_r, separate_r, "post-matrix right PCM");
+        assert_eq!(
+            paired_l
+                .iter()
+                .map(|sample| sample.to_bits())
+                .collect::<Vec<_>>(),
+            separate_l
+                .iter()
+                .map(|sample| sample.to_bits())
+                .collect::<Vec<_>>(),
+            "post-matrix left PCM words"
+        );
+        assert_eq!(
+            paired_r
+                .iter()
+                .map(|sample| sample.to_bits())
+                .collect::<Vec<_>>(),
+            separate_r
+                .iter()
+                .map(|sample| sample.to_bits())
+                .collect::<Vec<_>>(),
+            "post-matrix right PCM words"
+        );
         assert_ne!(
             paired_l, paired_r,
             "crossfeed preserves asymmetric right-plane output"
@@ -5170,7 +5226,7 @@ mod tests {
             let mut fixture = pair_fixture(backend, members);
             FADER_MATRIX_FUSED_CALLS.store(0, Ordering::Relaxed);
             FADER_MATRIX_FALLBACK_CALLS.store(0, Ordering::Relaxed);
-            assert_pair_call(&mut fixture, 3, 1);
+            assert_pair_call(&mut fixture, 3, 1, true);
 
             for db in [-6.0, -12.0] {
                 push_both(
@@ -5196,7 +5252,7 @@ mod tests {
                     smoothing_samples: 0,
                 },
             );
-            assert_pair_call(&mut fixture, 2, 2);
+            assert_pair_call(&mut fixture, 2, 2, true);
 
             push_both(
                 &mut fixture.paired_fader_tx,
@@ -5249,7 +5305,7 @@ mod tests {
                 builtins::test_support::matrix_bank_lane_words(&fixture.paired.matrix.bank, 0),
                 before_matrix
             );
-            assert_pair_call(&mut fixture, 2, 3);
+            assert_pair_call(&mut fixture, 2, 3, false);
             push_both(
                 &mut fixture.paired_fader_tx,
                 &mut fixture.separate_fader_tx,
@@ -5259,8 +5315,8 @@ mod tests {
                     smoothing_samples: 2,
                 },
             );
-            assert_pair_call(&mut fixture, 2, 4);
-            assert_pair_call(&mut fixture, 1, 5);
+            assert_pair_call(&mut fixture, 2, 4, false);
+            assert_pair_call(&mut fixture, 1, 5, true);
 
             push_both(
                 &mut fixture.paired_fader_tx,
@@ -5271,7 +5327,7 @@ mod tests {
                     smoothing_samples: 0,
                 },
             );
-            assert_pair_call(&mut fixture, 1, 6);
+            assert_pair_call(&mut fixture, 1, 6, true);
             fixture
                 .paired
                 .fader
@@ -5298,7 +5354,7 @@ mod tests {
             fixture.paired.matrix.bank.reset();
             fixture.separate_fader.bank.reset();
             fixture.separate_matrix.bank.reset();
-            assert_pair_call(&mut fixture, 1, 7);
+            assert_pair_call(&mut fixture, 1, 7, true);
             assert_eq!(fixture.paired.lane_symmetry(0), SEAM_SIDE_WITNESS);
             assert_eq!(fixture.paired.seam_side(), SeamSide::SeamSide);
             assert!(!fixture.paired.supports_mono_collapse());
@@ -5394,13 +5450,13 @@ mod tests {
                 smoothing_samples: 3,
             },
         );
-        assert_pair_call(&mut fixture, 2, 0x4590);
+        assert_pair_call(&mut fixture, 2, 0x4590, false);
         assert_eq!(FADER_MATRIX_FUSED_CALLS.load(Ordering::Relaxed), 0);
         assert_eq!(FADER_MATRIX_FALLBACK_CALLS.load(Ordering::Relaxed), 1);
-        assert_pair_call(&mut fixture, 2, 0x4591);
+        assert_pair_call(&mut fixture, 2, 0x4591, false);
         assert_eq!(FADER_MATRIX_FUSED_CALLS.load(Ordering::Relaxed), 0);
         assert_eq!(FADER_MATRIX_FALLBACK_CALLS.load(Ordering::Relaxed), 1);
-        assert_pair_call(&mut fixture, 2, 0x4592);
+        assert_pair_call(&mut fixture, 2, 0x4592, true);
         assert_eq!(FADER_MATRIX_FUSED_CALLS.load(Ordering::Relaxed), 1);
         assert_eq!(FADER_MATRIX_FALLBACK_CALLS.load(Ordering::Relaxed), 0);
     }

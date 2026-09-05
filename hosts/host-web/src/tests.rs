@@ -1835,8 +1835,11 @@ fn acknowledged_pair_render_records_the_same_live_dispatch() {
     assert_eq!(report.admitted, 2);
     assert_eq!(report.applied_at_sample, u64::from(QUANTUM));
 
+    // The nine tracks share this bounded source ring, so explicitly seek/refill the second
+    // render's source generation after the first block has exercised every reader.
+    assert_eq!(host.seek_source(b"fixture-source", 2, 0), RESULT_OK);
     builtins_compiler::test_only_reset_fader_matrix_witness();
-    assert_eq!(host.render_next(), RESULT_OK);
+    feed_and_render(&mut host, 2, 0, 0.5);
     let witness = builtins_compiler::test_only_fader_matrix_witness();
     assert_eq!(witness.process_calls, 1);
     assert_eq!(witness.fused_calls + witness.fallback_calls, 1);
@@ -1845,6 +1848,22 @@ fn acknowledged_pair_render_records_the_same_live_dispatch() {
         "acknowledged commands settle before this call"
     );
     assert_eq!(report.applied_at_sample, u64::from(QUANTUM));
+    let output = host.output_pcm().expect("output");
+    let quantum = QUANTUM as usize;
+    let expected_left = output[0];
+    assert!(expected_left > 0.11 && expected_left < 0.14);
+    assert!(
+        output[..quantum]
+            .iter()
+            .all(|sample| sample.to_bits() == expected_left.to_bits()),
+        "the commanded paired cohort applies both records on the acknowledged block"
+    );
+    assert!(
+        output[quantum..]
+            .iter()
+            .all(|sample| sample.to_bits() == (expected_left * 2.0).to_bits()),
+        "the commanded paired cohort preserves its asymmetric output relation"
+    );
 }
 
 /// A console host over the *command* fixture: the identity session plus one dynamic-rack

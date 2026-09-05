@@ -124,17 +124,16 @@ fn actual_serialized_composite_render_allocates_and_frees_nothing() {
     let mut left = [0.25_f32; 4 * 8];
     let mut right = [-0.5_f32; 4 * 8];
 
+    let mut probe = Vec::<u8>::with_capacity(core::hint::black_box(64));
     LIVE_ALLOCS.set(0);
     LIVE_FREES.set(0);
-    armed(|| {
-        let mut probe = Vec::<u8>::with_capacity(core::hint::black_box(64));
-        probe.reserve(128);
-        drop(probe);
-    });
-    assert!(
-        LIVE_ALLOCS.get() > 0 && LIVE_FREES.get() > 0,
-        "installed allocator liveness"
-    );
+    armed(|| probe.reserve_exact(core::hint::black_box(128)));
+    assert!(LIVE_ALLOCS.get() > 0, "realloc allocation liveness");
+    LIVE_ALLOCS.set(0);
+    LIVE_FREES.set(0);
+    armed(|| drop(probe));
+    assert_eq!(LIVE_ALLOCS.get(), 0, "drop is not allocation activity");
+    assert!(LIVE_FREES.get() > 0, "independent free liveness");
 
     LIVE_ALLOCS.set(0);
     LIVE_FREES.set(0);
