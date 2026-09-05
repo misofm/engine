@@ -80,3 +80,42 @@ This brief resolves Sol's readiness questions without changing the original Sess
 ## Luna attempt 1 evidence
 
 The frozen checker and focused disposable fixture suite are implemented. `bash scripts/check-session-policy.sh` passes against the repository, and `bash scripts/test-session-policy.sh` passes direct predicate violations, required-input removals, five anchor removals, strict order and duplicate anchors, six-root discovery, allowlisted TOML, retired spelling, and selective nonzero producer shims. The checker retains the physical `$0` root, exact search/find patterns and exclusions, explicit producer statuses, complete first-match anchor output, positive ASCII-decimal validation, one checked sort, and clean-empty handling. The existing workflow step runs the checker followed immediately by the focused suite.
+
+## Astra attempt 1 verdict — FAIL; Sol attempt 2
+
+# Astra #417 attempt 1 review
+
+**FAIL at exact pushed `18ba7c3d09e3494fa9f21a41619971cbd347c3cf`.** Luna's first attempt is consumed. Assign one bounded Sol evidence revision; no workspace/PR promotion yet.
+
+## Source worth preserving
+
+The checker now explicitly checks complete producer results before interpretation. Both required manifest rows are anchored, retaining old full-line behavior and original policy messages. Anchor scans capture complete numbered output, select the first occurrence and reject absent/nonpositive/nondecimal line fields before strict ordering. The allowlist sed status is explicitly checked, including partial-output failure; clean comment-only input remains valid. All four find producers complete before the checked sort and path loop, with empty captures omitted. Retired-name search checks its status before historical exclusions. Existing roots, patterns, allowlist equality, physical $0 root and CLI are preserved. The CI change is exactly checker then focused suite in the existing step. No concrete source-policy regression was identified in this read-only pass; do not rewrite the checker merely to make tests easier.
+
+## The suite does not yet prove its frozen claims
+
+`check()` redirects BOTH output streams to /dev/null, and `red()` accepts any nonzero result. Every producer test therefore accepts unrelated syntax, earlier policy or missing-tool failure. This is explicitly excluded by the complete brief.
+
+The four find shims emit `fixtures/session/partial.toml` then exit 9. That path is not allowlisted. Even a checker that ignores the find failure will reject the emitted path as live TOML, so these tests cannot distinguish error propagation from ordinary violation detection. The anchor shims similarly emit `1:partial` for every target: for caps/validate/canonical/clone this breaks ordinary ordering even if the execution failure is swallowed. A plausible row must carry that anchor's actual otherwise-valid first line.
+
+No counter-mutant is implemented or separately recorded: there are no faulty checker/helper variants, intended assertion results or five required counter-check statuses. The green suite log is consequently not evidence for those gates.
+
+## Bounded Sol attempt 2: complete the existing suite
+
+Keep this to the existing four paths, preferably suite plus candid spec evidence only. Use one small diagnostic-preserving runner/assertion pair with explicit unexpected-success rejection and expected operation/class checks. Selective shims must delegate unrelated calls to real tools; preserve a sentinel/status showing that the intended producer was reached. Keep shim output with retired words outside the scanned fixture except deliberate policy cases. No generic harness or shared-helper change is needed.
+
+| Required surface | Exact remaining completion |
+|---|---|
+| Six direct predicates | Add a distinct actual json-syntax pin violation (currently absent), plus selective partial-output/error injection for ALL six predicates (currently none). Preserve valid preceding metadata. Both required rows need exact-line positives/extra-material negatives; test json pin separately from a missing engine row. Capture the original violation message or operation/error class. |
+| Five anchors | Keep removal loop and later-duplicate positive. Use the correct actual first `line:text` per anchor for partial-error tests, not constant line 1. Add malformed and zero line fields; add the specified early duplicate of clone before estimate and assert ordering failure. Keep an order inversion with the intended ordering diagnostic. |
+| Allowlist | Add missing-file failure and error-only sed failure; retain comment-only positive and useful-partial sed failure. Assert operation plus sed status, and separately prove the shim emitted its partial row without requiring the checker to echo that row. |
+| Four find producers | Keep six-root removal loop with traversal-specific diagnostics. For EACH invocation test error-only and useful allowed-looking partial paths then failure, using a real exact allowlist entry so ignored status would otherwise pass. Earlier invocations must succeed. Add .session.toml and nested session-directory .toml violations alongside the existing plain .toml case. |
+| Sort | Add two paths whose reported first violation proves sorting; add sorted otherwise-allowlisted partial paths then sort error and require the sort diagnostic before path processing. Preserve the empty discovery positive. |
+| Retired-name search | Keep real forbidden/clean-empty tests; add exact historically allowlisted retired-path positive, error-only and useful partial-output failure. Verify the existing checker/SDK-deletion exclusions without broadening them. Select this final query only, allowing all earlier producers to succeed. |
+
+Retain required manifest/source removals, foreign-working-directory execution and existing policy violations, but stop discarding their diagnostics. Do not add Cargo fixtures or normalize allowlist strings. Construct banned fixture spellings from separated fragments as the current suite already does.
+
+Execute the five frozen disposable counter-mutants THROUGH THE SAME assertions: ignored anchor failure, ignored find failure, ignored sort failure, ignored allowlist-read failure, ignored retired-search failure. Anchor mutation must preserve missing-anchor rejection and differ only on execution failure with usable output. Find/sort/retired counter inputs must otherwise pass their actual policy, so a lost error cannot still be caught as a TOML/retired violation. Require each faulty variant to fail the test assertion intended to catch its newly accepted error, record the real status and assertion name, and reject accidental syntax/other-check failure. No label-only or constructed-but-unexecuted controls.
+
+Run the real checker, complete focused suite and bash syntax/diff; shared helper is unchanged, so no extra helper work is requested. Root checkpoints/pushes and Astra gives one attempt-2 verdict. At most one subsequent Sol attempt remains if necessary; full workspace comparison and actual PR/required CI follow focused acceptance. Do not weaken or defer these explicitly assigned selective/error/counter gates to claim the present green suite satisfies them.
+
+This verdict used source, complete brief, workflow and completed-log inspection. No tests, Cargo, timing, repository/Git or GitHub mutation were performed.
