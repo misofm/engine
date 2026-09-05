@@ -71,3 +71,40 @@ Issue #419 implements finding RT-2 in #349. Astra supplied the frozen brief abov
 Implemented the bounded ordered cohort path in `crates/lane/src/kernels.rs`, `crates/rack/src/lib.rs`, and `crates/graph/src/runtime.rs`. The callback validates IDs, widths, strides, capacities, and store mode before routing; the graph override routes each physical lane once, holds each frame-vector accumulator across the ordered cohort, and stores once, while the default callback preserves original per-lane `fold_plane` behavior. Added scalar/W4/W8 D9, continuation, negative-zero, and pre-write shape rejection witnesses in `crates/lane/tests/g2_kernel_identity.rs`.
 
 Focused debug and release lane/rack/graph suites, graph allocation fixture, and console workload chain-shape fixtures passed. Lane, rack, graph, and realtime policy checks passed; focused clippy passed with only the repository's existing invalid-path configuration warnings. No benchmark or runner invocation was made. Root owns the exact-path checkpoint and subsequent Astra review.
+
+## Astra attempt 1 verdict — FAIL; Sol attempt 2
+
+# Astra #419 RT-2 attempt 1 review
+
+**FAIL at exact pushed `ea240a377bfa63420e953f1f7b2fb06fa53ee3de`. Luna's one attempt is consumed; assign the bounded correction/evidence pass to Sol.** No timing, runner, artifact or full-workspace promotion is authorized from this source checkpoint.
+
+## Concrete contract regression
+
+Both `BankChain::scatter` and `scatter_tiled` now gather folded lane IDs while immediately scattering every unfolded lane, then invoke all folds afterward. For a mixed mask folding lanes0/2 with lane1 unfolded, the old observable callback sequence is `fold_plane(0), plane_mut(1), fold_plane(2)`; the new default path is `plane_mut(1), fold_plane(0), fold_plane(2)`. This violates the explicitly frozen mixed-mask callback/scatter order, even though a provider that only sums its passed slices can still produce equal PCM. A stateful safe provider may observe or use the intervening scatter. Current old rack tests check results, not this ordering.
+
+Restore the old per-lane path when any active lane is unfolded, in both full/tiled and partial paths. Use the cohort callback only when every active lane is folded. Full unfolded RT-1 direct scatter stays intact. No new graph partial-fold eligibility or ordering generalization is approved.
+
+## Evidence absent from the coherent pass
+
+The actual cumulative diff adds no rack tests, graph tests, console chain-shape tests or folded allocation fixture. Only three lane tests were added. They establish useful finite cancellation/continuation/negative-zero examples, but all use lengths equal to nine times the vector width, so the new scalar-tail/sub-width arms are not exercised. They compare simple expected values rather than the required old primitive-sequence oracle. The rejection test covers only a two-input length mismatch at scalar width.
+
+Consequently the existing green graph/rack counts do not prove default-versus-override equivalence, full/partial/holey physical IDs, mixed ordering, cohort shape rejection before route mutation, real graph opening versus continuation, actual optimized graph callback selection, or repeated folded render zero allocations. The existing isolated `rt1_direct_bank_alloc.rs` graph has no prepared routes and proves the direct path only; rerunning it cannot qualify the new folded callback.
+
+## Useful source to preserve
+
+The new lane kernel has the correct high-level initial-copy/continuation-load ordered accumulation and checks contributor count/lengths before writing. The graph override transforms routes separately, retains physical IDs and first-store semantics, checks metadata/capacities before its route loop, and keeps fixed stack arrays. No new unsafe or arena ownership API is introduced. The private FoldCohort construction constrains representable requests; source review found no new aliasing defect. These findings do not replace the missing integration/rejection evidence. The default callback's silent invalid-shape return must not be described as a proven complete fallback; the numbered contract requires either impossible invalid shapes or explicit nonpartial rejection before any PCM mutation.
+
+## Bounded Sol attempt 2
+
+Keep the same approved source paths/API boundary and implement the mixed-mask correction first. Complete the frozen representative evidence in the existing files, not a new corpus/framework:
+
+- Rack: a trace or equivalent observer differentiates the exact old mixed sequence above for tiled and partial paths; full/holey all-active-folded masks select the cohort override, pass original physical IDs, preserve inactive outputs/staging and default providers' fold_plane order. Empty active/fold sets produce no callback. Compare default old per-lane behavior and optimized provider PCM/counters on repeated blocks. Test representable malformed shape rejection before writes; if construction makes a shape impossible, explicitly test/document that boundary instead of inventing unsafe metadata.
+- Lane: use existing sum2/sum_into primitives as an independent same-width D9 oracle, covering Scalar/Simd4/Simd8, 1/subwidth/exact/ragged/128 lengths, counts1..8 representative endpoints and invalid0/>8/late-short shapes with poisoned output. Preserve asymmetric/signed-zero/hostile cases under existing primitive semantics. Include the nonzero prior-master continuation witness and prove the wrong subtotal/reversed result differs. No tolerance relaxation or new FP rule.
+- Graph: a real folded opening and later cohort must execute the new override, match the independent existing route-transform-plus-D9 oracle on both planes and preserve counters/declines. Exercise the explicit continuation witness through routing, not only directly in the lane kernel. Prove malformed lane/store/length metadata is either unrepresentable or rejected before any route or master mutation; no partially routed then retried fallback. Retain old fold_plane as the compatibility path.
+- Extend the existing isolated graph allocation test's ONE serialized function with an actually folded prepared graph and repeated renders, preserving its direct proof, positive allocator liveness and thread-local zero allocation/free accounting. No process-global test-mode races, allocator framework or ordinary-unit allocator attachment. Show fold/callback mechanism evidence, not just a successful render of a nonfolding graph.
+
+Use source/mechanism evidence to show one master load on continuation and one store per output vector/sample, retaining route transforms and addition order. Keep bind eligibility witnesses unchanged. Do not touch queued #420 general reduction or benchmark rows/validators/floors. Preparation/shape checks remain bounded by W<=8 and allocate no render memory.
+
+After one coherent pass, focused lane/rack/graph debug/release, isolated direct+fold allocation proof, existing console chain/identity and applicable realtime/lane/rack/graph policies, fmt/diff/clippy. Root checkpoints/pushes before further edits and Astra gives one attempt-2 verdict. At most one subsequent Sol attempt remains if that fails; attempt3 failure is a hard stop/rescope. Timing/target/artifact/full-workspace qualification and actual PR review follow only semantic PASS.
+
+This verdict used read-only source/spec/diff inspection and prior completed evidence; no Cargo, benchmark, repository or GitHub mutation.
