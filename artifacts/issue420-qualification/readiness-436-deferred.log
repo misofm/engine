@@ -1,0 +1,5 @@
+candidate=100d51205571ce97b40af87f7486f79f695509b3
+source-equivalence=PASS manifest_entries=48 binary_sha256=53dce85d8ff683693598da8dce79195ecfad1ad76300b68bb348196c00f81bab
+binary_age_seconds=2304
+affinity_cpu=63
+load=1.18 ceiling=0.50
