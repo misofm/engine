@@ -151,3 +151,9 @@ Required next evidence: real workspace/rack gates, all three named mutation/help
 
 
 Root assigns the bounded second attempt to Sol. #404 is the separately numbered parent discovery successor and remains outside this implementation.
+
+## Sol attempt 2 focused checkpoint — pending adversarial verdict
+
+Sol separated dependency extraction and sorting into independently status-checked operations, without changing caller shell options or relying on caller `pipefail`. Focused tests now preserve a real match alongside a missing root and assert both facts; exercise match, clean, missing-path and non-path scan outcomes; cover dependency sorting/section scope plus missing, partial-output awk and sort failures with `pipefail` on/off and conditional invocation; and retain caller cwd/options. Rack mutations now directly reach unsafe, control/I/O, feature detection, missing `crates/rack/src`, manifest and extractor error classes, plus a valid foreign-CWD fixture that cannot substitute its own helper.
+
+Focused PASS logs: `/tmp/engine-400-sol-gate-lib.log`, `/tmp/engine-400-sol-rack-mutations.log`, `/tmp/engine-400-sol-workspace-mutations.log`, `/tmp/engine-400-sol-rack.log`, `/tmp/engine-400-sol-workspace.log`. Shell syntax passed for the shared library, both gates and all three affected suites. This is an uncommitted focused-green checkpoint for root to inspect and commit before Astra review; no full workspace run, benchmark or artifact work is claimed.

@@ -34,19 +34,27 @@ gate_scan_forbidden() {
 }
 
 gate_toml_dependencies() {
-    local manifest="$1" output rc
-    if output="$(awk '
+    local manifest="$1" extracted output rc
+    if extracted="$(awk '
         /^\[dependencies\]$/ { in_dependencies = 1; next }
         /^\[/ { in_dependencies = 0 }
         in_dependencies && /^[A-Za-z0-9_-]+(\.workspace)?[[:space:]]*=/ {
             value = $1; sub(/\.workspace$/, "", value); print value
         }
-    ' "$manifest" | sort)"; then
+    ' "$manifest")"; then
+        :
+    else
+        rc=$?
+        gate_fail "dependency extraction failed for $manifest (awk status $rc)"
+        return "$rc"
+    fi
+
+    if output="$(printf '%s\n' "$extracted" | sort)"; then
         printf '%s\n' "$output"
         return 0
     else
         rc=$?
-        gate_fail "dependency extraction failed for $manifest (status $rc)"
+        gate_fail "dependency extraction failed for $manifest (sort status $rc)"
         return "$rc"
     fi
 }
