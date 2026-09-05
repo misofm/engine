@@ -1,0 +1,185 @@
+{
+  "candidate": "26913f2bad33fdd162f2ce40ffbf1d2cdc072053",
+  "files": [
+    {
+      "path": "artifacts/issue448-environment-proof/astra-412-attempt1-review.md",
+      "bytes": 7722,
+      "sha256": "18e6c58bfd8b8b9adda8215e58ad83b11f34a1a92a6a5d4235d730130c94692d"
+    },
+    {
+      "path": "artifacts/issue448-environment-proof/astra-412-attempt2-probes.log",
+      "bytes": 218,
+      "sha256": "2f8c5ace76b8384ebb43fb88e8fea0e920cb4329483e09fd062d299f46efa7d0"
+    },
+    {
+      "path": "artifacts/issue448-environment-proof/astra-412-attempt2-review.md",
+      "bytes": 7044,
+      "sha256": "908aad82fc2ee2540e6241b1cbe0050a16e9e3de31be22449311b20aa8442dbd"
+    },
+    {
+      "path": "artifacts/issue448-environment-proof/astra-412-attempt3-review.md",
+      "bytes": 4371,
+      "sha256": "0e0423c7200a50dc1d9e3031a09e946b2187fb19131c53d48b97efbeb8d9489a"
+    },
+    {
+      "path": "artifacts/issue448-environment-proof/astra-412-final-brief.md",
+      "bytes": 9745,
+      "sha256": "b8ad9f730a28fd31f773de8ee1dec04e0688972f1cb0ce2b2a891d402f85f69f"
+    },
+    {
+      "path": "artifacts/issue448-environment-proof/astra-412-frozen-base-review.md",
+      "bytes": 1526,
+      "sha256": "8d4b684818d55770bb4ef997fe7891adad3001cef1c04c8afeab3ede145fda78"
+    },
+    {
+      "path": "artifacts/issue448-environment-proof/astra-448-attempt1-review.md",
+      "bytes": 2225,
+      "sha256": "77e3da1606004ada5817c5e2bdc0b0e4f98e385dc6b4507405d7d8d619c36b48"
+    },
+    {
+      "path": "artifacts/issue448-environment-proof/astra-448-numbered-review.md",
+      "bytes": 1598,
+      "sha256": "43449acb86bdd1bfeb0ce21b2ccd08b4d7c641fec5a451d7f808d4a7d9941bd2"
+    },
+    {
+      "path": "artifacts/issue448-environment-proof/engine-412-root-helper-suite.log",
+      "bytes": 631,
+      "sha256": "4807663d6b2e18cb82d0e009cfa0ad465e8209e8f9f47fd1b2717850b5a1315d"
+    },
+    {
+      "path": "artifacts/issue448-environment-proof/engine-448-candidate-workspace.log",
+      "bytes": 186151,
+      "sha256": "a2e2cb0169783108d2630bad4e337c25053ca7ba7faef1c84fcd3379c3dfc8eb"
+    },
+    {
+      "path": "artifacts/issue448-environment-proof/engine-448-integrated-gates.log",
+      "bytes": 1514,
+      "sha256": "506ead9b9fad03aaf444bda81b7f834005b337c6e99a15f68ffa4cae507d9f4a"
+    },
+    {
+      "path": "artifacts/issue448-environment-proof/engine-448-runtime-input-identity.json",
+      "bytes": 502,
+      "sha256": "c734ee6070ade8e41ad4046511397aa680e1dabd03138648606f0c0b23b68400"
+    },
+    {
+      "path": "artifacts/issue448-environment-proof/luna-412-effect-suite.log",
+      "bytes": 36,
+      "sha256": "5587a620efcf476ce633b781a1b8f2e106f62666b9beff74ea79a81c08cde567"
+    },
+    {
+      "path": "artifacts/issue448-environment-proof/luna-412-env-suite.log",
+      "bytes": 29,
+      "sha256": "bde4d1ba55f6ffc66fc53e9682c22f660a14dc95f684aef9e43d7ace3466d651"
+    },
+    {
+      "path": "artifacts/issue448-environment-proof/luna-412-env.log",
+      "bytes": 55,
+      "sha256": "b4607ab52dd0e2170b995dad76222bb168e4097c8ba8e1a95d4bd127307255dc"
+    },
+    {
+      "path": "artifacts/issue448-environment-proof/luna-412-migration.log",
+      "bytes": 34,
+      "sha256": "09b32a4f7589405539a927c175cfddf330ec21fe6bb1372aa4b21c54f991ac94"
+    },
+    {
+      "path": "artifacts/issue448-environment-proof/luna-412-research-suite.log",
+      "bytes": 27,
+      "sha256": "af57d441e9003ffff289b1f8fe6d28a592a03024bd36fc34ce7faa06491363ad"
+    },
+    {
+      "path": "artifacts/issue448-environment-proof/luna-412-research.log",
+      "bytes": 24,
+      "sha256": "1d0d2ae6ba2af59a2cfa7b3471be418bf7715e45cb4b1ed099d6201d588bd9af"
+    },
+    {
+      "path": "artifacts/issue448-environment-proof/luna-448-diff.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "artifacts/issue448-environment-proof/luna-448-env-suite-final.log",
+      "bytes": 294,
+      "sha256": "5b47a8ee68bd686f0e916451e244b945f1fb2184d953df8a45b0b7243eaee31a"
+    },
+    {
+      "path": "artifacts/issue448-environment-proof/luna-448-env-suite.log",
+      "bytes": 29,
+      "sha256": "bde4d1ba55f6ffc66fc53e9682c22f660a14dc95f684aef9e43d7ace3466d651"
+    },
+    {
+      "path": "artifacts/issue448-environment-proof/luna-448-modes.log",
+      "bytes": 71,
+      "sha256": "472ad7270efa09d36908dd675d612b93811fe08e8c6e57a1ac3f2d6da023760f"
+    },
+    {
+      "path": "artifacts/issue448-environment-proof/luna-448-real-checker-final.log",
+      "bytes": 55,
+      "sha256": "b4607ab52dd0e2170b995dad76222bb168e4097c8ba8e1a95d4bd127307255dc"
+    },
+    {
+      "path": "artifacts/issue448-environment-proof/luna-448-real-checker.log",
+      "bytes": 55,
+      "sha256": "b4607ab52dd0e2170b995dad76222bb168e4097c8ba8e1a95d4bd127307255dc"
+    },
+    {
+      "path": "artifacts/issue448-environment-proof/luna-448-syntax.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "artifacts/issue448-environment-proof/sol-412-env.log",
+      "bytes": 13113,
+      "sha256": "7ae511f66f66492b4cedbd23f2f2626c753af49d8e7a7b2e8673a0180151ba12"
+    },
+    {
+      "path": "artifacts/issue448-environment-proof/sol-412-final-env.log",
+      "bytes": 29,
+      "sha256": "bde4d1ba55f6ffc66fc53e9682c22f660a14dc95f684aef9e43d7ace3466d651"
+    },
+    {
+      "path": "artifacts/issue448-environment-proof/sol-412-final-focused-tail.log",
+      "bytes": 658,
+      "sha256": "2c5bee049acf2269de3b0a136eb93388e9ef0b84aa23fdefdc82060e8340b103"
+    },
+    {
+      "path": "artifacts/issue448-environment-proof/sol-412-final-focused.log",
+      "bytes": 836,
+      "sha256": "6486b47a85b607ce4e6280d5ff88f84c96242f252c61caf88c5a291d79ded1b0"
+    },
+    {
+      "path": "artifacts/issue448-environment-proof/sol-412-final-policy.log",
+      "bytes": 666,
+      "sha256": "b5c4a1078417b25bbb70466cffb46ccee5200b6d29fc0ba3ee3d6f186910dd5c"
+    },
+    {
+      "path": "artifacts/issue448-environment-proof/sol-412-final-research.log",
+      "bytes": 27,
+      "sha256": "af57d441e9003ffff289b1f8fe6d28a592a03024bd36fc34ce7faa06491363ad"
+    },
+    {
+      "path": "artifacts/issue448-environment-proof/sol-412-final-runtime.log",
+      "bytes": 36,
+      "sha256": "5587a620efcf476ce633b781a1b8f2e106f62666b9beff74ea79a81c08cde567"
+    },
+    {
+      "path": "artifacts/issue448-environment-proof/sol-412-focused.log",
+      "bytes": 836,
+      "sha256": "6486b47a85b607ce4e6280d5ff88f84c96242f252c61caf88c5a291d79ded1b0"
+    },
+    {
+      "path": "artifacts/issue448-environment-proof/sol-412-policy.log",
+      "bytes": 795,
+      "sha256": "efc05ff80f32de2e8e248019f3c91bca4ffcfdea56e306afc75a27c3499d0ad9"
+    },
+    {
+      "path": "artifacts/issue448-environment-proof/sol-412-research.log",
+      "bytes": 335,
+      "sha256": "cb017a52d33325502633dc488e72bea1180157d85c6ac22cb4735728b6e5250c"
+    },
+    {
+      "path": "artifacts/issue448-environment-proof/sol-412-runtime.log",
+      "bytes": 230,
+      "sha256": "7884196535dca9f7a0801c29a67ba0db5b767188bbd6c14150cd0141bd1a1e4f"
+    }
+  ]
+}

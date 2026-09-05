@@ -1,0 +1,18 @@
+{
+  "candidate": "26913f2bad33fdd162f2ce40ffbf1d2cdc072053",
+  "delivered_base": "99df5cf6c639f0909f82e116eb776e95c172536c",
+  "compared_paths": [
+    "crates",
+    "hosts",
+    "tools",
+    "sidecars",
+    "Cargo.toml",
+    "Cargo.lock",
+    ".cargo",
+    "rust-toolchain.toml",
+    "scripts/build-web-audioworklet.sh",
+    "scripts/check-web-audioworklet.sh"
+  ],
+  "diff_exit": 0,
+  "limit": "No new artifact/browser qualification claimed; unchanged runtime inputs retain delivered #435 lineage."
+}

@@ -1,63 +1,93 @@
 #!/usr/bin/env bash
-# One environment/marker vocabulary for the whole repository (#104 phase C).
-#
-# Rule 1: no tracked file contains a `MISO_`-prefixed identifier that does not continue
-#         `MISO_ENGINE_`.
-# Rule 2: every `MISO_ENGINE_*` identifier under `tools/` or `scripts/` is a row of the table in
-#         `docs/ENGINE_ENV_VOCABULARY.md`, and every row of that table is used under `tools/` or
-#         `scripts/`.
-#
-# Rule 2 is bidirectional on purpose. An undocumented name is how a runner and its binary drift
-# apart (#104 F2: the sole authorized builtins runner exported none of the sixteen names the binary
-# read, so every accepted record carried all-null metadata). An unused row is the same defect seen
-# from the other side: it is a name nobody agreed to stop using.
 set -euo pipefail
-
 root="$(cd "${1:-$(dirname "${BASH_SOURCE[0]}")/..}" && pwd)"
 cd "$root"
-
 fail() { printf 'env vocabulary failure: %s\n' "$1" >&2; exit 1; }
-
 vocabulary=docs/ENGINE_ENV_VOCABULARY.md
 [[ -f "$vocabulary" && ! -L "$vocabulary" ]] || fail "missing vocabulary: $vocabulary"
-
-# The scan covers tracked and not-yet-ignored files when this is a git worktree, and the tree
-# otherwise, so the mutation test can run it against a scratch copy. Two paths are excluded from rule 1
-# and both have to be: `$vocabulary`, which documents which prefixes were retired, and
-# `.github/ISSUE_SPECS/`, whose whole job is to record what a name used to be. No source,
-# configuration or script file is excluded -- `scripts/test-env-vocabulary.sh` assembles the names
-# it feeds this checker rather than spelling them, so it is scanned like every other file.
-sources() {
-    if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-        git ls-files -z --cached --others --exclude-standard
+[[ -d tools ]] || fail 'missing required source root: tools'
+[[ -d scripts ]] || fail 'missing required source root: scripts'
+tmp="$(mktemp -d)"; trap 'rm -rf -- "$tmp"' EXIT
+paths0="$tmp/paths0"; classification="$tmp/git-classification"
+if git rev-parse --is-inside-work-tree >"$classification" 2>&1; then
+    [[ "$(<"$classification")" == true ]] || fail 'Git classification returned unexpected output'
+    git ls-files -z --cached --others --exclude-standard >"$paths0" 2>"$tmp/git-listing-error" || {
+        tr '\0' '\n' <"$paths0" >&2 || true
+        cat "$tmp/git-listing-error" >&2; fail 'Git file listing failed'
+    }
+else
+    rc=$?; classification_output="$(<"$classification")"
+    if [[ "$rc" == 128 && -z "${GIT_DIR+x}" && -z "${GIT_WORK_TREE+x}" &&
+          "$classification_output" == 'fatal: not a git repository (or any of the parent directories): .git' ]]; then
+        find . -type f -not -path './.git/*' -not -path './target/*' -print0 >"$paths0" 2>"$tmp/find-error" || {
+            tr '\0' '\n' <"$paths0" >&2 || true
+            cat "$tmp/find-error" >&2; fail 'fallback file traversal failed'
+        }
     else
-        find . -type f -not -path './.git/*' -not -path './target/*' -print0
-    fi | tr '\0' '\n' | sed 's|^\./||' |
-        grep -v -x -F -e "$vocabulary" | grep -v '^\.github/ISSUE_SPECS/' | tr '\n' '\0'
-}
-
-# Rule 1.
-stray="$(sources | xargs -0 grep -hoE 'MISO_[A-Z0-9_]+' 2>/dev/null | sort -u | grep -v '^MISO_ENGINE_' || true)"
-if [[ -n "$stray" ]]; then
-    printf '%s\n' "$stray" >&2
-    fail 'identifier outside the MISO_ENGINE_ prefix'
+        printf '%s\n' "$classification_output" >&2
+        fail "Git classification failed (status $rc)"
+    fi
 fi
-
-# Rule 2. A match ending in an underscore is a prose fragment naming a family, not a name; a real
-# variable or marker never ends in one.
-used="$(grep -rhoE 'MISO_ENGINE_[A-Z0-9_]+' tools scripts | grep -v '_$' | sort -u)"
-documented="$(grep -oE '^\| `MISO_ENGINE_[A-Z0-9_]+`' "$vocabulary" | tr -d '|` ' | sort -u)"
-
-undocumented="$(comm -23 <(printf '%s\n' "$used") <(printf '%s\n' "$documented"))"
-if [[ -n "$undocumented" ]]; then
-    printf '%s\n' "$undocumented" >&2
+paths="$tmp/paths"; normalised="$tmp/normalised"
+filtered_once="$tmp/filtered-once"; filtered="$tmp/filtered"
+tr '\0' '\n' <"$paths0" >"$paths" 2>"$tmp/path-tr-error" || { rc=$?; cat "$paths" "$tmp/path-tr-error" >&2; fail "path NUL conversion failed (tr status $rc)"; }
+sed 's|^\./||' "$paths" >"$normalised" 2>"$tmp/path-sed-error" || { rc=$?; cat "$normalised" "$tmp/path-sed-error" >&2; fail "path normalization failed (sed status $rc)"; }
+if grep -v -x -F -e "$vocabulary" "$normalised" >"$filtered_once"; then :; else
+    rc=$?; [[ "$rc" == 1 ]] || { cat "$filtered_once" >&2; fail "vocabulary path exclusion failed (grep status $rc)"; }
+    : >"$filtered_once"
+fi
+if grep -v '^\.github/ISSUE_SPECS/' "$filtered_once" >"$filtered"; then :; else
+    rc=$?; [[ "$rc" == 1 ]] || { cat "$filtered" >&2; fail "issue-spec path exclusion failed (grep status $rc)"; }
+    : >"$filtered"
+fi
+stray="$tmp/stray"; : >"$stray"
+while IFS= read -r path; do
+    [[ -n "$path" ]] || continue
+    output=''; if output="$(grep -hoE 'MISO_[A-Z0-9_]+' -- "$path" 2>&1)"; then rc=0; else rc=$?; fi
+    case "$rc" in
+        0) printf '%s\n' "$output" >>"$stray" ;;
+        1) ;;
+        *) printf '%s\n' "$output" >&2; fail "source scan failed for $path (grep status $rc)" ;;
+    esac
+done <"$filtered"
+sort -u "$stray" >"$tmp/stray-sorted" 2>"$tmp/stray-sort-error" || { rc=$?; cat "$tmp/stray-sorted" "$tmp/stray-sort-error" >&2; fail "stray-name sort failed (sort status $rc)"; }
+if grep -v '^MISO_ENGINE_' "$tmp/stray-sorted" >"$tmp/stray-names"; then
+    cat "$tmp/stray-names" >&2; fail 'identifier outside the MISO_ENGINE_ prefix'
+else
+    rc=$?; [[ "$rc" == 1 ]] || { cat "$tmp/stray-names" >&2; fail "stray-name prefix filter failed (grep status $rc)"; }
+fi
+used_raw="$tmp/used-raw"; used_filtered="$tmp/used-filtered"; used="$tmp/used"
+if grep -rhoE 'MISO_ENGINE_[A-Z0-9_]+' tools scripts >"$used_raw" 2>"$tmp/used-error"; then :; else
+    rc=$?; cat "$used_raw" >&2; cat "$tmp/used-error" >&2
+    [[ "$rc" == 1 ]] || fail "tools/scripts source scan failed (grep status $rc)"
+    fail 'no environment names used under tools/ or scripts/'
+fi
+if grep -v '_$' "$used_raw" >"$used_filtered"; then :; else
+    rc=$?; [[ "$rc" == 1 ]] || { cat "$used_filtered" >&2; fail "used-name fragment filter failed (grep status $rc)"; }
+    fail 'no complete environment names used under tools/ or scripts/'
+fi
+sort -u "$used_filtered" >"$used" 2>"$tmp/used-sort-error" || { rc=$?; cat "$used" "$tmp/used-sort-error" >&2; fail "used-name sort failed (sort status $rc)"; }
+[[ -s "$used" ]] || fail 'no complete environment names used under tools/ or scripts/'
+documented_rows="$tmp/documented-rows"; documented_trimmed="$tmp/documented-trimmed"
+documented="$tmp/documented"
+if grep -oE '^\| `MISO_ENGINE_[A-Z0-9_]+`' "$vocabulary" >"$documented_rows" 2>"$tmp/vocabulary-error"; then :; else
+    rc=$?; cat "$documented_rows" >&2; cat "$tmp/vocabulary-error" >&2
+    [[ "$rc" == 1 ]] || fail "vocabulary scan failed (grep status $rc)"
+    fail 'no documented environment names'
+fi
+tr -d '|` ' <"$documented_rows" >"$documented_trimmed" 2>"$tmp/documented-tr-error" || { rc=$?; cat "$documented_trimmed" "$tmp/documented-tr-error" >&2; fail "vocabulary delimiter removal failed (tr status $rc)"; }
+sort -u "$documented_trimmed" >"$documented" 2>"$tmp/documented-sort-error" || { rc=$?; cat "$documented" "$tmp/documented-sort-error" >&2; fail "documented-name sort failed (sort status $rc)"; }
+[[ -s "$documented" ]] || fail 'no documented environment names'
+comm -23 "$used" "$documented" >"$tmp/undocumented" 2>"$tmp/comm-23-error" || { rc=$?; cat "$tmp/undocumented" "$tmp/comm-23-error" >&2; fail "undocumented-name comparison failed (comm status $rc)"; }
+if [[ -s "$tmp/undocumented" ]]; then
+    cat "$tmp/undocumented" >&2
     fail "name used under tools/ or scripts/ but absent from $vocabulary"
 fi
-
-unused="$(comm -13 <(printf '%s\n' "$used") <(printf '%s\n' "$documented"))"
-if [[ -n "$unused" ]]; then
-    printf '%s\n' "$unused" >&2
+comm -13 "$used" "$documented" >"$tmp/unused" 2>"$tmp/comm-13-error" || { rc=$?; cat "$tmp/unused" "$tmp/comm-13-error" >&2; fail "unused-name comparison failed (comm status $rc)"; }
+if [[ -s "$tmp/unused" ]]; then
+    cat "$tmp/unused" >&2
     fail "name documented in $vocabulary but unused under tools/ or scripts/"
 fi
-
-printf 'env vocabulary: ok (%s names, one MISO_ENGINE_ prefix)\n' "$(printf '%s\n' "$documented" | wc -l | tr -d ' ')"
+wc -l <"$documented" >"$tmp/count" 2>"$tmp/count-error" || { rc=$?; cat "$tmp/count" "$tmp/count-error" >&2; fail "documented-name count failed (wc status $rc)"; }
+tr -d ' ' <"$tmp/count" >"$tmp/count-trimmed" 2>"$tmp/count-tr-error" || { rc=$?; cat "$tmp/count-trimmed" "$tmp/count-tr-error" >&2; fail "documented-name count formatting failed (tr status $rc)"; }
+printf 'env vocabulary: ok (%s names, one MISO_ENGINE_ prefix)\n' "$(<"$tmp/count-trimmed")"
