@@ -1,0 +1,159 @@
+{
+  "schema": "miso.web.browser.direct-oracle.v1",
+  "simd128": {
+    "initialStatus": {
+      "state": 2,
+      "lastResult": 0,
+      "backend": 1,
+      "sampleRateHz": 48000,
+      "quantumFrames": 128,
+      "nextAbsoluteSample": "0",
+      "renderedQuanta": "0",
+      "memoryBytes": 1310720
+    },
+    "beforeDisposeStatus": {
+      "state": 2,
+      "lastResult": 0,
+      "backend": 1,
+      "sampleRateHz": 48000,
+      "quantumFrames": 128,
+      "nextAbsoluteSample": "384",
+      "renderedQuanta": "3",
+      "memoryBytes": 1310720
+    },
+    "resources": {
+      "sampleRateHz": 48000,
+      "quantumFrames": 128,
+      "backend": 1,
+      "optionsBytes": "64",
+      "statusBytes": "80",
+      "sessionDocumentBytes": "1919",
+      "diagnosticBytes": "16384",
+      "idStagingBytes": "14",
+      "sourcePcmStagingBytes": "1024",
+      "outputPcmBytes": "1024",
+      "bridgeMetadataBytes": "4235",
+      "bridgeRetainedBytes": "24744",
+      "largestBridgeAllocationBytes": "16384",
+      "sourceTotalBytes": "2206",
+      "sourceOverheadBytes": "1182",
+      "effectScalarStateBytes": "0",
+      "effectScalarScratchBytes": "0",
+      "builtinRetainedBytes": "985",
+      "graphSessionPlusPlanBytes": "29294",
+      "graphIncrementalPlanBytes": "29294",
+      "graphMetadataBytes": "3455",
+      "graphDelayBytes": "0",
+      "largestNamedAllocationBytes": "16384",
+      "observationRetainedBytes": "0"
+    },
+    "results": {
+      "first": 0,
+      "initialBackpressure": 6,
+      "seek": 0,
+      "repeat": 0,
+      "repeatBackpressure": 6,
+      "final": 0
+    },
+    "pcmF32leSha256": "d8506bebd2f049265ef105a8346a85c919a0596b892a1afefd382173a360f58e"
+  },
+  "nativePcmF32leSha256": "d8506bebd2f049265ef105a8346a85c919a0596b892a1afefd382173a360f58e",
+  "commandTimeline": {
+    "reports": {
+      "matrix": {
+        "result": 0,
+        "reason": 0,
+        "rejectedIndex": 0,
+        "admitted": 1,
+        "appliedAtSample": "128"
+      },
+      "unknownTrack": {
+        "result": 1,
+        "reason": 2,
+        "rejectedIndex": 0,
+        "admitted": 0,
+        "appliedAtSample": "256"
+      },
+      "flood": {
+        "result": 6,
+        "reason": 8,
+        "rejectedIndex": 0,
+        "admitted": 0,
+        "appliedAtSample": "256"
+      },
+      "unknownParameter": {
+        "result": 1,
+        "reason": 5,
+        "rejectedIndex": 0,
+        "admitted": 0,
+        "appliedAtSample": "256"
+      },
+      "pan": {
+        "result": 0,
+        "reason": 0,
+        "rejectedIndex": 0,
+        "admitted": 1,
+        "appliedAtSample": "384"
+      },
+      "fader": {
+        "result": 0,
+        "reason": 0,
+        "rejectedIndex": 0,
+        "admitted": 1,
+        "appliedAtSample": "512"
+      },
+      "mute": {
+        "result": 0,
+        "reason": 0,
+        "rejectedIndex": 0,
+        "admitted": 1,
+        "appliedAtSample": "640"
+      },
+      "effectParam": {
+        "result": 0,
+        "reason": 0,
+        "rejectedIndex": 0,
+        "admitted": 1,
+        "appliedAtSample": "768"
+      },
+      "effectBypass": {
+        "result": 0,
+        "reason": 0,
+        "rejectedIndex": 0,
+        "admitted": 1,
+        "appliedAtSample": "896"
+      },
+      "mixedBatch": {
+        "result": 0,
+        "reason": 0,
+        "rejectedIndex": 0,
+        "admitted": 2,
+        "appliedAtSample": "1024"
+      }
+    },
+    "beforeDisposeStatus": {
+      "state": 2,
+      "lastResult": 0,
+      "backend": 1,
+      "sampleRateHz": 48000,
+      "quantumFrames": 128,
+      "nextAbsoluteSample": "1280",
+      "renderedQuanta": "10",
+      "memoryBytes": 1310720
+    },
+    "pcmF32leSha256": "fc760629464396730a4716027e59ba89a80fbe9c4f47aa103c68b0b6bde847b7"
+  },
+  "nativeCommandTimelinePcmF32leSha256": "fc760629464396730a4716027e59ba89a80fbe9c4f47aa103c68b0b6bde847b7",
+  "observationTimeline": {
+    "armedTrackGrDbPositive": true,
+    "armedMasterEqualsTrack": true,
+    "armedWindowSamples": "256",
+    "disarmedTrackGrDb": 0,
+    "unobservedMasterGrDb": null,
+    "subscribeReason": 0,
+    "unknownTapReason": 10,
+    "unboundReason": 11,
+    "pcmF32leSha256": "502dae9637eb11e7e79bac4232296ad68584dcf408727b3387860c38c5a2f4ab"
+  },
+  "nativeObservationPcmF32leSha256": "502dae9637eb11e7e79bac4232296ad68584dcf408727b3387860c38c5a2f4ab"
+}

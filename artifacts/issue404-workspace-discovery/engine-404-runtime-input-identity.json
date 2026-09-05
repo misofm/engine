@@ -1,0 +1,16 @@
+{
+  "candidate_commit": "6834d35187c4723eda7e1d75e598832edc4762d4",
+  "comparison_commit": "3faf89adea25e32e85a27d744c643a79cd80ce31",
+  "paths": [
+    "crates",
+    "hosts",
+    "tools",
+    "sidecars",
+    "Cargo.toml",
+    "Cargo.lock",
+    ".cargo",
+    "scripts/build-web-audioworklet.sh"
+  ],
+  "changed_paths": [],
+  "claim": "Runtime and artifact build inputs unchanged; no new target/artifact/browser/timing execution claimed."
+}
