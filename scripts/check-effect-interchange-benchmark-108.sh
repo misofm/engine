@@ -13,7 +13,9 @@
 # What survives is the live half: the benchmark source must still declare the four-rate migration
 # envelope, the four workloads with their expected output digests, and the focused regression
 # tokens. `scripts/test-effect-interchange-benchmark-108-policy.sh` proves each of those red.
-set -euo pipefail
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    set -euo pipefail
+fi
 
 fail() { printf 'effect interchange benchmark 108 policy failure: %s\n' "$1" >&2; return 1; }
 
@@ -49,6 +51,8 @@ for token in (
     if token not in source:
         raise SystemExit(f"missing focused regression token: {token}")
 PY
+    local status=$?
+    [[ "$status" -eq 0 ]] || return "$status"
 }
 
 validate_successor_namespace() {
@@ -109,12 +113,12 @@ PY
 
 validate_successor_namespace scripts/effect-interchange-benchmark-108-validator.py
 if [[ -e target/issue108 ]]; then
-    [[ -d target/issue108 && ! -L target/issue108 ]] || fail 'Issue-108 artifact path is not a directory'
     issue108_entries=$(mktemp)
     trap 'rm -f -- "$issue108_entries"' EXIT
-    if ! find target/issue108 -mindepth 1 -maxdepth 1 -print >"$issue108_entries" 2>/dev/null; then
-        fail 'Issue-108 artifact traversal failed'
-    fi
+    issue108_error=$(mktemp)
+    trap 'rm -f -- "$issue108_entries" "$issue108_error"' EXIT
+    if find target/issue108 -mindepth 1 -maxdepth 1 -print >"$issue108_entries" 2>"$issue108_error"; then status=0; else status=$?; fi
+    if [[ "$status" -ne 0 ]]; then cat "$issue108_entries" "$issue108_error" >&2; fail "Issue-108 artifact traversal failed (status $status)"; fi
     if [[ -s "$issue108_entries" ]]; then
         fail 'Issue-108 persistent artifact appeared before authorization'
     fi

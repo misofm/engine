@@ -173,3 +173,34 @@ Retain all pins/fixtures, existing lifecycle isolation and two-call CI wiring; c
 This review ran only the tiny two-function conditional reproduction above; no builds, full suite, real runner, timing, repository edits or Git/GitHub mutations were performed.
 
 Root assigns one coherent Sol attempt 2 against these four finite original-scope groups. The only implementation worktree is `/home/bl/misofm/engine-455-plan`; the shared root is not authorized. Preserve recovery/failed evidence, exact source predicates and accepted CI wiring. Pause focused-green for root checkpoint and one final Astra verdict.
+
+
+## Sol attempt 2 focused checkpoint
+
+Sol completed the bounded source repair in the assigned worktree at base
+`ca648dec85ba1ac8c1b79485e40f19322e979b69`. The qualification checker now completes every
+required scan before accepting its result, distinguishes forbidden no-match from producer error,
+preserves producer stdout/stderr and status in diagnostics, cleans its introduced captures as one
+owned scratch directory, explicitly propagates both sourced108 calls, and retains the exact
+081/108 predicate and all original regex/text/multiline flags. The optional108 traversal again
+accepts absence and an empty traversal without adding a symlink/directory policy, while preserving
+find output and errors on failure. Sourcing108 no longer changes the caller's shell options.
+
+The policy suites exercise the finite producer groups with selective wrappers that first validate
+the real delegate's expected status and, for nonempty producers, its complete real output. They
+cover the manifest and export pipelines stage by stage, required source scans through the final
+API, forbidden dependency/reference/render/serialization populations, both qualification finds,
+and optional108 absence/empty/error-plus-empty/error-plus-violation cases. The preceding Python
+source failure is exercised in the actual sourced conditional sequence. The two frozen causal
+controls use the same assertion for original, mutant and restored code: namespace status loss
+returns original/restored0 and mutant97; late migration-serialization status loss returns
+original/restored0 and mutant97. Setup or diagnostic mismatch is96. Unique diffs are retained at
+`/tmp/455-sol2-namespace-mutant.diff` and `/tmp/455-sol2-migration-mutant.diff`.
+
+Focused non-timed verification used `PATH=/home/bl/.cargo/bin:$PATH`. Syntax, both real checkers,
+the parent policy suite, the standalone108 suite and the fake-only lifecycle suite all exited0.
+Exact commands, logs and statuses are retained under `/tmp/455-sol2-{syntax,qualification,108,policy,108-policy,lifecycle}.{command,log,status}`.
+Before lifecycle execution, Sol verified its copied fake cargo/git and synthetic emitter routing and
+the `MISO_ENGINE_BENCH_HERMETIC_CHILD=1` preflight guard. No real runner, preflight workload,
+reference-process campaign, build, timing, Git or GitHub operation ran. The Luna wrong-worktree
+recovery evidence and earlier root failure/corrected-PATH evidence remain unchanged.
