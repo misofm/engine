@@ -1,0 +1,36 @@
+   Compiling builtins-compiler v0.1.0 (/home/bl/misofm/engine-live-pair-proof/crates/builtins-compiler)
+    Finished `release` profile [optimized + debuginfo] target(s) in 19.73s
+     Running unittests src/lib.rs (/tmp/sol459-target/release/deps/builtins_compiler-03e0ab50495dda00)
+
+running 28 tests
+test tests::builtin_bank_resource_charges_two_planes_and_actual_members ... ok
+test tests::builtin_bank_layout_regroups_by_dependency_wave_and_scalar_falls_back ... ok
+test tests::a_prepared_session_that_lost_a_strip_fails_validation ... ok
+test tests::console_control_requests_are_validated_sealed_and_charged_per_track ... ok
+test tests::delegated_source_rejection_restores_private_and_external_ownership ... ok
+test tests::cutoff_boundaries_match_compiler_diagnostics_at_every_launch_rate_and_section ... ok
+test tests::prepares_three_sections_and_each_named_meter_tap ... ok
+test tests::rejects_duplicate_and_unknown_meter_transactionally ... ok
+test tests::resource_estimate_enforces_the_actual_largest_retained_payload ... ok
+test tests::source_set_bind_prevalidation_returns_all_ownership_for_each_code ... ok
+test tests::source_set_bind_succeeds_with_private_builtin_and_external_ownership ... ok
+test tests::control_delivery_metadata_reaches_both_sealed_strip_bank_owners ... ok
+test tests::the_per_node_console_input_processor_drains_and_folds_its_witness ... ok
+test tests::retained_payload_boundaries_reject_in_phase_one ... ok
+test tests::a_post_fader_meter_declines_its_cohort_while_the_tail_pair_still_fuses ... ok
+test tests::actual_graph_mono_collapse_disengages_on_input_command_and_recovers_nonfinite_input ... ok
+test tests::composite_raw_record_errors_preserve_the_frozen_arithmetic_order ... ok
+test tests::track_bits_do_not_depend_on_session_track_count ... ok
+test tests::composite_live_sequence_matches_original_owners_and_discriminates_both_branches ... ok
+test tests::declined_factory_owners_keep_queued_state_and_render_in_original_order ... ok
+test tests::pair_factory_declines_wrong_order_policy_and_shape_with_original_owners ... ok
+test tests::late_factory_guards_return_live_policy_width_and_population_owners ... ok
+test tests::queued_three_sample_ramp_crosses_call_boundary_before_fusing ... ok
+test tests::banked_tracks_are_bit_identical_to_their_scalar_tails ... ok
+test tests::serialized_alias_observer_is_the_decline_boundary ... ok
+test tests::serialized_live_fader_matrix_is_selected_by_the_bound_render_path ... ok
+test tests::serialized_send_reader_declines_crossing_fader_while_pcm_matches_separate ... ok
+test tests::deterministic_builtin_compiler_mutation_matrix_has_exactly_ten_thousand_cases ... ok
+
+test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+

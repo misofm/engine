@@ -1,0 +1,47 @@
+{
+  "source_candidate": "7951736605fa64870bc1d91342d00d5fdb6417c5",
+  "packaging_parent": "a59c372b1a7f2b60a01833823d25d6f411d8dd26",
+  "source_to_packaging_changes": [
+    ".github/ISSUE_SPECS/430-rt-4-live-fader-matrix-integration.md",
+    ".github/ISSUE_SPECS/459-serialized-live-pair-boundary-proof.md",
+    ".github/workflows/npm-publish.yml",
+    "docs/C_ABI_V1_QUALIFICATION.md",
+    "hosts/host-web/BROWSER_DEPLOYMENT_MATRIX.md",
+    "hosts/host-web/qualification/results.json",
+    "hosts/host-web/tests/browser-v1/expected.json",
+    "hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256"
+  ],
+  "worklet_sha256": "a08a868cf1b62bb466a8fa5b826b214fa708265669fc730398706c869c9e43bd",
+  "worklet_bytes": 2666694,
+  "status_files": {
+    "engine-430-browser-webkit.status": 0,
+    "engine-430-browser-oracle-actual.status": 0,
+    "engine-430-worklet-repin-build.status": 0,
+    "engine-430-wasm-simd.status": 0,
+    "engine-430-browser-record-installed.status": 0,
+    "engine-430-worklet-repin.status": 2,
+    "engine-430-native-capi-build.status": 0,
+    "engine-430-wasm-scalar.status": 0,
+    "engine-430-browser-npm-ci.status": 0,
+    "engine-430-worklet-resource.status": 1,
+    "engine-430-worklet-resource-corrected.status": 0,
+    "engine-430-worklet-hermetic.status": 0,
+    "engine-430-worklet-build.status": 0,
+    "engine-430-native-resource.status": 0,
+    "engine-430-protocol-wasm.status": 0,
+    "engine-430-browser-record.status": 1,
+    "engine-430-browser-firefox.status": 0,
+    "engine-430-capi-abi.status": 0,
+    "engine-430-worklet-static.status": 0,
+    "engine-430-browser-matrix.status": 0,
+    "engine-430-browser-chromium.status": 0,
+    "engine-430-browser-native-resources.status": 0,
+    "engine-430-wasm-inspection.status": 0
+  },
+  "expected_preserved_failures": {
+    "engine-430-worklet-repin.status": 2,
+    "engine-430-worklet-resource.status": 1,
+    "engine-430-browser-record.status": 1
+  },
+  "timing_authorized": false
+}

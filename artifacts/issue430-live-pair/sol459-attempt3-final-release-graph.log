@@ -1,0 +1,60 @@
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.03s
+     Running unittests src/lib.rs (/tmp/sol459-target/release/deps/graph-82147ccc67a4cb2f)
+
+running 53 tests
+test observation_size_accounting::the_observation_lane_costs_one_nullable_pointer_in_the_console_effect ... ok
+test observation_size_accounting::no_reported_runtime_byte_moved ... ok
+test program::tests::a_delayed_stage_boundary_is_not_elided ... ok
+test program::tests::chain_of_seven_stages_lowers_to_six_ops_three_taps_and_two_buffers ... ok
+test program::tests::delayed_edge_gets_staging_buffer_and_blocks_in_place ... ok
+test program::tests::fan_out_blocks_in_place_and_fan_in_keeps_its_reduction ... ok
+test program::tests::malformed_inputs_are_rejected_rather_than_lowered ... ok
+test program::tests::a_bank_window_never_recycles_a_physical_slot ... ok
+test program::tests::taps_are_not_readers_so_an_alias_chain_still_folds_into_its_producer ... ok
+test runtime::tests::a_declined_first_pair_retains_the_first_slots_scratch ... ok
+test runtime::tests::a_folded_epilogue_is_the_route_and_the_reduction_bit_for_bit ... ok
+test runtime::tests::a_later_folded_cohort_continues_from_the_live_master_in_d9_order ... ok
+test runtime::tests::a_delay_line_is_a_pure_shift_at_every_partitioning ... ok
+test program::tests::no_slot_is_recycled_inside_a_merged_bank_window ... ok
+test runtime::tests::a_single_in_place_input_is_left_untouched ... ok
+test runtime::tests::all_active_folded_bank_chain_dispatches_the_real_graph_cohort ... ok
+test runtime::tests::arena_members_direct_scatter_preserves_redirected_identity_bits ... ok
+test runtime::tests::bank_gather_source_admits_only_the_dedication_copy ... ok
+test runtime::tests::malformed_folded_cohorts_are_rejected_before_route_or_master_mutation ... ok
+test runtime::tests::reduction_preserves_repeated_silence_self_and_unrelated_buffers ... ok
+test runtime::tests::every_lane_width_matches_the_frozen_old_kernel_on_hostile_values ... ok
+test runtime::tests::route_applies_folded_gain_with_frozen_op_order ... ok
+test runtime::tests::the_fan_in_zero_fill_is_dead_only_under_a_bound_source ... ok
+test runtime::tests::the_first_contributor_stores_so_a_negative_zero_master_keeps_its_sign ... ok
+test runtime::tests::the_node_witness_agrees_with_its_line ... ok
+test tests::a_console_parameter_command_applies_at_the_next_block_boundary ... ok
+test tests::binding_rejects_duplicates_and_returns_all_ownership ... ok
+test tests::attaching_builtin_banks_re_derives_the_program_that_bind_will_use ... ok
+test tests::an_idle_console_changes_no_rendered_bit ... ok
+test tests::aliased_identity_stages_do_not_change_audio ... ok
+test tests::builtin_bank_resource_overflow_leaves_the_graph_estimate_unchanged ... ok
+test tests::delay_is_exact_and_lane_independent ... ok
+test tests::compile_request_plan_id_survives_binding ... ok
+test tests::executor_applies_exact_pdc_then_fixed_pairwise_reduction ... ok
+test runtime::tests::reduction_is_left_to_right_bit_identical_to_scalar_reference ... ok
+test runtime::tests::compensation_delay_is_partition_invariant_and_matches_per_sample_reference ... ok
+test tests::faster_main_and_faster_sidechain_align_on_their_typed_ports ... ok
+test tests::id_ordered_bank_plan_rejects_transactionally_and_returned_ownership_is_reusable ... ok
+test tests::identity_binding_acknowledges_without_a_processor ... ok
+test tests::live_bypass_is_latency_preserving_and_reversible ... ok
+test tests::reduction_is_left_to_right ... ok
+test tests::left_to_right_reduction_meets_analytic_bound_and_ignores_completion_order ... ok
+test tests::level_major_w4_builtin_bank_is_analytic_for_three_blocks ... ok
+test tests::structural_layout_rejects_node_level_edge_and_bank_corruptions ... ok
+test tests::structural_layout_rejection_is_shared_after_binding_validation_for_source_families ... ok
+test tests::the_console_effect_drops_nothing_within_its_prepared_capacity ... ok
+test tests::with_builtin_banks_accepts_padded_members_and_rejects_empty_or_oversized ... ok
+test tests::enabled_and_bypass_pdc_align_at_launch_rates_and_quanta ... ok
+test tests::fifty_random_dag_sessions_render_deterministic_nonsilent_pcm ... ok
+test program::tests::lowering_preserves_dataflow_and_bounds_the_arena_on_random_graphs ... ok
+test program::tests::sixty_four_plain_tracks_keep_one_ordered_non_aliasing_master_reduction ... ok
+test program::tests::bank_window_hoisting_preserves_dataflow_on_random_graphs ... ok
+test program::tests::cohort_chain_merging_preserves_dataflow_on_random_graphs ... ok
+
+test result: ok. 53 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.61s
+

@@ -1,0 +1,1 @@
+['npm', 'run', 'qualify', '--', '--artifacts', '/tmp/engine-430-worklet-current', '--browser', 'all', '--record-matrix', '--candidate-commit', '7951736605fa64870bc1d91342d00d5fdb6417c5', '--self-test-mutations']

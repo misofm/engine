@@ -1,0 +1,78 @@
+    Blocking waiting for file lock on package cache
+   Compiling bytemuck v1.25.2
+   Compiling engine v0.1.0 (/home/bl/misofm/engine-live-pair-proof/crates/engine)
+   Compiling version_check v0.9.5
+   Compiling lexical-util v1.0.7
+   Compiling proc-macro2 v1.0.107
+   Compiling cfg-if v1.0.4
+   Compiling libc v0.2.189
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.24
+   Compiling syn v1.0.109
+   Compiling autocfg v1.5.1
+   Compiling once_cell v1.21.4
+   Compiling typenum v1.20.1
+   Compiling smallvec v1.15.2
+   Compiling utf8-decode v1.0.1
+   Compiling decoded-char v0.1.1
+   Compiling locspan v0.8.2
+   Compiling cpufeatures v0.3.0
+   Compiling safe_arch v1.2.0
+   Compiling ahash v0.7.8
+   Compiling proc-macro-error-attr v1.0.4
+   Compiling proc-macro-error v1.0.4
+   Compiling smallstr v0.3.1
+   Compiling indexmap v1.9.3
+   Compiling lexical-write-integer v1.0.6
+   Compiling lexical-parse-integer v1.0.6
+   Compiling wide v1.6.1
+   Compiling lexical-parse-float v1.0.6
+   Compiling hybrid-array v0.4.14
+   Compiling lexical-write-float v1.0.6
+   Compiling getrandom v0.2.17
+   Compiling lexical-core v1.0.6
+   Compiling hashbrown v0.12.3
+   Compiling lexical v7.0.5
+   Compiling block-buffer v0.12.1
+   Compiling crypto-common v0.2.2
+   Compiling json-number v0.4.10
+   Compiling digest v0.11.3
+   Compiling sha2 v0.11.0
+   Compiling locspan-derive v0.6.0
+   Compiling json-syntax v0.12.5
+   Compiling session v0.1.0 (/home/bl/misofm/engine-live-pair-proof/crates/session)
+   Compiling protocol v0.1.0 (/home/bl/misofm/engine-live-pair-proof/crates/protocol)
+   Compiling lane v0.1.0 (/home/bl/misofm/engine-live-pair-proof/crates/lane)
+   Compiling math v0.1.0 (/home/bl/misofm/engine-live-pair-proof/crates/math)
+   Compiling effect-contract v0.1.0 (/home/bl/misofm/engine-live-pair-proof/crates/effect-contract)
+   Compiling effect-runtime v0.1.0 (/home/bl/misofm/engine-live-pair-proof/crates/effect-runtime)
+   Compiling rack v0.1.0 (/home/bl/misofm/engine-live-pair-proof/crates/rack)
+   Compiling parametric-eq v0.1.0 (/home/bl/misofm/engine-live-pair-proof/crates/parametric-eq)
+   Compiling soft-clip v0.1.0 (/home/bl/misofm/engine-live-pair-proof/crates/soft-clip)
+   Compiling true-peak-limiter v0.1.0 (/home/bl/misofm/engine-live-pair-proof/crates/true-peak-limiter)
+   Compiling gate-expander v0.1.0 (/home/bl/misofm/engine-live-pair-proof/crates/gate-expander)
+   Compiling multiband-compressor v0.1.0 (/home/bl/misofm/engine-live-pair-proof/crates/multiband-compressor)
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-live-pair-proof/crates/compressor)
+   Compiling transient-shaper v0.1.0 (/home/bl/misofm/engine-live-pair-proof/crates/transient-shaper)
+   Compiling delay v0.1.0 (/home/bl/misofm/engine-live-pair-proof/crates/delay)
+   Compiling builtins v0.1.0 (/home/bl/misofm/engine-live-pair-proof/crates/builtins)
+   Compiling graph v0.1.0 (/home/bl/misofm/engine-live-pair-proof/crates/graph)
+   Compiling rack-compiler v0.1.0 (/home/bl/misofm/engine-live-pair-proof/crates/rack-compiler)
+   Compiling builtins-compiler v0.1.0 (/home/bl/misofm/engine-live-pair-proof/crates/builtins-compiler)
+   Compiling source v0.1.0 (/home/bl/misofm/engine-live-pair-proof/crates/source)
+   Compiling effect-package v0.1.0 (/home/bl/misofm/engine-live-pair-proof/crates/effect-package)
+   Compiling effect-compiler v0.1.0 (/home/bl/misofm/engine-live-pair-proof/crates/effect-compiler)
+   Compiling graph-compiler v0.1.0 (/home/bl/misofm/engine-live-pair-proof/crates/graph-compiler)
+   Compiling host-core v0.1.0 (/home/bl/misofm/engine-live-pair-proof/crates/host-core)
+   Compiling capi v0.1.0 (/home/bl/misofm/engine-live-pair-proof/crates/capi)
+    Finished `release` profile [optimized + debuginfo] target(s) in 39.38s
+     Running tests/resource_lifecycle.rs (/tmp/engine-430-native-qualified/release/deps/resource_lifecycle-c3764b7a4fd38077)
+
+running 4 tests
+test render_diagnostic_egress_reuses_eager_capi_storage_without_allocation ... ok
+test tiny_control_frame_still_accounts_three_provider_counters_exactly ... ok
+test exported_c_candidates_replay_render_and_both_destroy_orders_balance_exactly ... ok
+test external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+

@@ -557,3 +557,8 @@ The first browser invocation stopped before execution because this worktree lack
 The immutable runtime candidate remains `7951736605fa64870bc1d91342d00d5fdb6417c5`; rebuilt artifact SHA-256 is `a08a868cf1b62bb466a8fa5b826b214fa708265669fc730398706c869c9e43bd`. Native/workspace, supported Wasm, protocol and artifact checks recorded in #430 passed. The justified two-row resource correction passed the existing checker and 26 red controls; hermetic worklet tests passed. Locked npm ci resolved the preserved missing-Playwright setup failure without lockfile changes. The all-browser record and separate Chromium, Firefox and WebKit matrix checks with self-test mutations all exited 0, as did matrix generation. Current results and deployment matrix identify the immutable candidate and rebuilt artifact. Logs/statuses are `/tmp/engine-430-browser-*`; artifact/resource logs are `/tmp/engine-430-worklet-*`.
 
 Evidence packaging, actual-head Astra PR review and required CI remain before delivery. #443/#444/#431 and the broader RT-4 audit remain open. No timing or speedup claim is made.
+
+
+## Retained delivery evidence
+
+The final source review, focused debug/release logs, full workspace terminal provenance, supported-target/CAPI/artifact checks, independent resource derivation, browser results and corrected-failure records are retained under `artifacts/issue430-live-pair/`. Its manifest binds 94 files by exact bytes and SHA-256; raw logs are preserved verbatim, including trailing blank lines. `provenance.json` identifies immutable source, current artifact and evidence-only packaging changes. Actual PR review and required CI remain pending; neither issue is closed by this checkpoint.
