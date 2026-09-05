@@ -49,3 +49,17 @@ Astra revalidated all three briefs against main a9e801fea91dc49a4d2acc9bea939d3f
 ## Updated queue after compiler gate delivery
 
 #407 is merged and CLOSED via PR #421. Astra revalidated #410 against main `a0e4d123a038160b4f5934dac14aacc72c9fbbf2`; its complete current brief preserves exact producer policies, directed failure cases and existing CI wiring. #410 remains queued until active #417 and the remaining graph extractor completion #423 merge. #411 and #412 keep their original serial dependencies and complete assigned scope. This scheduling update changes no closure obligation or implementation gate.
+
+## Delivered-child reconciliation for parent closure review
+
+Current review base is delivered main `5a4a7d2071194cf6118241e24d073824668e3387`. On 2026-09-05 root verified all five child/successor issues below are remotely CLOSED. This is a bounded parent completion review, not authorization for another implementation tranche or a claim that parent #306 is complete.
+
+| Original gate obligation | Delivered issue(s) | Merged PR and commit |
+| --- | --- | --- |
+| Realtime and lane complete traversal | #410 | #433, `1af76181490a623675960c244a6c677c06aae745` |
+| Unfused seal complete searches and recount | #411 and proof successor #438 | #440, `e7e1a37f36fe8a22c237d0bfcd3737373c6d4deb` |
+| Environment vocabulary, effect-state migration, DSP research reads/discovery | #412 and proof successor #448 | #449, `39da065507beb822ef70a1552ff5dcc363938dd4` |
+
+Astra must verify the complete six-gate parent obligations against current source, the child decision records, retained actual failure controls and delivered qualification evidence. Closed child state alone is insufficient. Preserve the candid three-attempt histories and bounded successor proofs. Check that subsequent main changes have not invalidated those claims. Any actual omission remains open and receives a bounded correction scope; do not weaken the parent's original contract.
+
+No runtime, checker, fixture, helper or workflow change is proposed in this reconciliation. Existing delivered workspace and CI evidence can substantiate unchanged code; no benchmark, artifact/browser rebuild or redundant broad test campaign is authorized merely for this parent record. Actual PR Astra approval and required CI still apply to a delivery commit. Parent #306, #403, #404 and broad #349 remain OPEN regardless of this parent's outcome.
