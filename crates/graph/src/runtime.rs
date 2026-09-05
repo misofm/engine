@@ -1775,6 +1775,21 @@ fn taps_by_op(program: &ExecutionProgram, spec: &GraphSpec) -> BTreeMap<u32, Vec
     by_op
 }
 
+/// The buffer-identity half of serialized scalar fader/matrix admission.
+///
+/// The composite receives one in-place block at the fader slot. It can preserve the later matrix
+/// op only when that op's reduction was already a self-copy: one undelayed input, the same input
+/// and output buffer as the fader, and the lowering's own `in_place` witness.
+fn scalar_pair_is_in_place(program: &ExecutionProgram, fader: usize, matrix: usize) -> bool {
+    let fader = &program.ops[fader];
+    let matrix = &program.ops[matrix];
+    let inputs = program.inputs_of(matrix);
+    matches!(inputs, [input] if input.delay.is_none()
+        && input.buffer == fader.output
+        && matrix.output == fader.output
+        && matrix.in_place)
+}
+
 /// Groups the program's ops into units: a bank's members become one unit at the first member's
 /// position, which the level-major schedule proves is after every member's producers (#98 F1).
 ///
@@ -1904,7 +1919,7 @@ pub(crate) fn build_sequential(
         let second = second_ops[0];
         if second != first.saturating_add(1)
             || program.inputs_of(&program.ops[first]).is_empty()
-            || program.inputs_of(&program.ops[second]).is_empty()
+            || !scalar_pair_is_in_place(program, first, second)
         {
             continue;
         }
@@ -3113,12 +3128,77 @@ fn cohort_runs(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::program::{BufferRef, DelayRef, InputRef};
     use core::any::Any;
     use lane::kernels::sum2_block;
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
+
+    #[test]
+    fn synthetic_distinct_matrix_destination_is_the_scalar_pair_identity_decline() {
+        // This is a deliberately synthetic lowered program. It isolates the defensive identity
+        // gate; #476 owns the separate question of whether production lowering can emit it.
+        let mut program = ExecutionProgram {
+            ops: vec![
+                Op {
+                    node: 0,
+                    level: 0,
+                    inputs: (0, 1),
+                    sidechain: None,
+                    output: BufferRef(1),
+                    in_place: true,
+                },
+                Op {
+                    node: 1,
+                    level: 1,
+                    inputs: (1, 2),
+                    sidechain: None,
+                    output: BufferRef(2),
+                    in_place: false,
+                },
+            ]
+            .into_boxed_slice(),
+            inputs: vec![
+                InputRef {
+                    buffer: BufferRef(1),
+                    delay: None,
+                },
+                InputRef {
+                    buffer: BufferRef(1),
+                    delay: None,
+                },
+            ]
+            .into_boxed_slice(),
+            delays: Box::new([]),
+            node_buffer: vec![BufferRef(1), BufferRef(2)].into_boxed_slice(),
+            node_op: vec![Some(0), Some(1)].into_boxed_slice(),
+            taps: Box::new([]),
+            buffers: 3,
+            output: BufferRef(2),
+        };
+        assert!(
+            !scalar_pair_is_in_place(&program, 0, 1),
+            "an otherwise valid single undelayed edge declines on its distinct destination"
+        );
+
+        program.ops[1].output = BufferRef(1);
+        program.ops[1].in_place = true;
+        program.node_buffer[1] = BufferRef(1);
+        assert!(
+            scalar_pair_is_in_place(&program, 0, 1),
+            "the same fixture admits only after the exact identity facts are restored"
+        );
+        program.inputs[1].delay = Some(DelayRef {
+            line: 0,
+            staging: BufferRef(2),
+        });
+        assert!(
+            !scalar_pair_is_in_place(&program, 0, 1),
+            "the explicit undelayed-input guard remains independent"
+        );
+    }
 
     struct DecliningPairOwner(Arc<AtomicUsize>);
     fn decline_pair(

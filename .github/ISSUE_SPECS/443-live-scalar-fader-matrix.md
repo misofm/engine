@@ -354,3 +354,7 @@ If no supported distinct-output case exists, the child may close as an explicit 
 Root records this ruling in #443, creates/synchronizes the new numbered retention and reciprocal #349/#470 references, then authorizes this bounded graph guard and its fixtures within the ongoing Sol2 pass. Do not reset attempt numbering. All remaining attempt1 correction groups and original #443 same-output product gates stay mandatory. No timing or delivery qualification is authorized by this ruling.
 
 Root adopts this exact guard and proof amendment. Distinct-output applicability/product work is now numbered #476 and synchronized; #470 retains nonadjacency unchanged. Sol may implement same-output, same single undelayed input and matrix.in_place checks within attempt2, plus the labeled defensive distinct-output decline and real compiled positive proofs. No broader runtime/error architecture is authorized.
+
+## Sol2 buffer guard checkpoint
+
+The runtime selection now explicitly requires identical fader/matrix output, one undelayed matrix input naming that buffer, and matrix.in_place, while retaining previous guards. A labeled synthetic lowered fixture discriminates distinct destination and delay refusal; the actual compiled positive still selects. Corrected focused statuses are0 at `/tmp/443-sol2-tranche3-distinct-guard-2.*` and `...positive-2.*`; initial missing-import compilation101 remains retained. Only graph/runtime.rs changes. Remaining actual graph/error/host/resource-cap/allocation and full focused qualification obligations remain before source review.
