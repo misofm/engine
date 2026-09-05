@@ -45,3 +45,7 @@ Parent #401 expressly retains the previously missed fifth-extractor consolidatio
 Root may assign Luna only after #417 merges and records the exact base. This approves the numbered scope and objective gates, not source completion, qualification or issue closure. Three-attempt rules and actual-head Astra/required-CI review remain intact.
 
 Read-only local numbered spec and parent amendment review. Remote synchronization and reciprocal queued-branch checkpoint are root-recorded; no tests, Cargo, Git/GitHub operation, source edit or timing performed.
+
+## Implementation assignment
+
+PR #424 merged and #417 closed. Root freezes merged main `1cfd49d2929b2a75f6054badebfa9979c069ae71` as the implementation base. Luna owns attempt 1 in the isolated `codex/423-graph-parser` worktree. The approved order remains #417 → #423 → #410 → #411 → #412.
