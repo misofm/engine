@@ -46,6 +46,45 @@ cp "$root/scripts/effect-interchange-benchmark-108-validator.py" "$namespace"
 printf '\n# artifact_dir=target/issue081\n' >>"$namespace"
 expect_failure issue081-namespace validate_successor_namespace "$namespace"
 
+# The sourced namespace function must preserve a real rg execution error even when its caller is
+# a conditional subshell. The wrapper emits a sentinel and status 2 only for this candidate.
+namespace_error="$scratch/effect-interchange-benchmark-108-validator-error.py"
+cp "$root/scripts/effect-interchange-benchmark-108-validator.py" "$namespace_error"
+printf '\n# namespace-error-sentinel\n' >>"$namespace_error"
+rg_bin="$(command -v rg)"
+mkdir -p "$scratch/namespace-bin"
+cat >"$scratch/namespace-bin/rg" <<EOF
+#!/usr/bin/env bash
+if "$rg_bin" -q namespace-error-sentinel "\${@: -1}" >/dev/null 2>&1; then
+    printf '%s\\n' namespace-error-sentinel >&2
+    exit 2
+fi
+exec "$rg_bin" "\$@"
+EOF
+chmod 755 "$scratch/namespace-bin/rg"
+assert_namespace_error() {
+    if "$@"; then
+        return 97
+    else
+        local status=$?
+    fi
+    [[ "$status" -eq 1 || "$status" -eq 2 ]] || return 96
+}
+assert_namespace_error env PATH="$scratch/namespace-bin:$PATH" bash -c \
+    'source "$1"; validate_successor_namespace "$2"' _ \
+    "$root/scripts/check-effect-interchange-benchmark-108.sh" "$namespace_error"
+mutant="$scratch/check-effect-interchange-benchmark-108-mutant.sh"
+cp "$root/scripts/check-effect-interchange-benchmark-108.sh" "$mutant"
+sed -i 's/local status=\$?/local status=1/' "$mutant"
+if assert_namespace_error env PATH="$scratch/namespace-bin:$PATH" bash -c \
+    'source "$1"; validate_successor_namespace "$2"' _ "$mutant" "$namespace_error"; then
+    printf 'effect interchange benchmark 108 policy: namespace status-loss mutant escaped\n' >&2
+    exit 96
+else
+    mutant_status=$?
+    [[ "$mutant_status" -eq 97 ]] || exit 96
+fi
+
 # The accepted-manifest identity and payload mutations moved to
 # `scripts/test-effect-interchange-policy.sh` together with the manifest itself (#104 phase A):
 # `check-effect-interchange-qualification.sh` owns that seal and this checker no longer duplicates

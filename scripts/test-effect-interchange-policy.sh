@@ -84,3 +84,8 @@ expect_failure cross-target-simd-leg-scalar
 cp "$root/scripts/check-cross-targets.sh" "$temp/scripts/check-cross-targets.sh"
 
 printf 'effect interchange qualification policy mutations: ok\n'
+
+# Required CI reaches the successor authority and the hermetic lifecycle from this original
+# repository root. Both suites use their own scratch roots; neither is run against a mutation.
+bash "$root/scripts/test-effect-interchange-benchmark-108-policy.sh"
+bash "$root/scripts/test-effect-interchange-benchmark.sh"

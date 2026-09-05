@@ -54,6 +54,13 @@ PY
 validate_successor_namespace() {
     if rg -n 'artifact_dir=.*target/issue081|effect-interchange-benchmark-validator[.]py|preflight-effect-interchange-benchmark[.]sh|run-effect-interchange-benchmark[.]sh|test-effect-interchange-benchmark[.]sh' "$@"; then
         fail 'Issue-108 authority reaches the Issue-081 lifecycle or namespace'
+        return 1
+    else
+        local status=$?
+        if [[ "$status" -ne 1 ]]; then
+            printf 'effect interchange benchmark 108 policy failure: Issue-108 namespace scan failed (rg status %s)\n' "$status" >&2
+            return "$status"
+        fi
     fi
 }
 
@@ -101,7 +108,15 @@ for path_text in sys.argv[2:]:
 PY
 
 validate_successor_namespace scripts/effect-interchange-benchmark-108-validator.py
-if find target/issue108 -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null | grep -q .; then
-    fail 'Issue-108 persistent artifact appeared before authorization'
+if [[ -e target/issue108 ]]; then
+    [[ -d target/issue108 && ! -L target/issue108 ]] || fail 'Issue-108 artifact path is not a directory'
+    issue108_entries=$(mktemp)
+    trap 'rm -f -- "$issue108_entries"' EXIT
+    if ! find target/issue108 -mindepth 1 -maxdepth 1 -print >"$issue108_entries" 2>/dev/null; then
+        fail 'Issue-108 artifact traversal failed'
+    fi
+    if [[ -s "$issue108_entries" ]]; then
+        fail 'Issue-108 persistent artifact appeared before authorization'
+    fi
 fi
 printf 'effect interchange benchmark 108 policy: ok counters=0/0/0/0\n'

@@ -53,12 +53,20 @@ fail() { printf 'effect interchange qualification policy failure: %s\n' "$1" >&2
 manifest=fixtures/effect-interchange/v1/ACCEPTED.sha256
 accepted_manifest_sha256=e3896726979aa746cfda50fc10c1985c0ecef117f87b39e692f18226b7b4fa14
 [[ -f "$manifest" && ! -L "$manifest" ]] || fail 'missing immutable baseline manifest'
-[[ "$(sha256sum "$manifest" | awk '{print $1}')" == "$accepted_manifest_sha256" ]] ||
+if ! manifest_sha256_output=$(sha256sum "$manifest"); then
+    fail 'manifest hash production failed'
+fi
+if ! manifest_sha256=$(awk '{print $1}' <<<"$manifest_sha256_output"); then
+    fail 'manifest hash extraction failed'
+fi
+[[ "$manifest_sha256" == "$accepted_manifest_sha256" ]] ||
     fail 'immutable baseline manifest changed or was refreshed'
 LC_ALL=C sort -c -k2,2 "$manifest" || fail 'baseline manifest is not path-sorted'
 sha256sum --check --strict "$manifest" >/dev/null || fail 'accepted baseline changed'
 # 24 corpus/reference-script rows plus the three `comprehensive-c` rows issue #143 added.
-[[ $(wc -l <"$manifest" | tr -d ' ') -eq 27 ]] || fail 'baseline membership changed'
+if ! manifest_lines=$(wc -l <"$manifest"); then fail 'manifest line count failed'; fi
+if ! manifest_count=$(tr -d ' ' <<<"$manifest_lines"); then fail 'manifest line count filtering failed'; fi
+[[ "$manifest_count" -eq 27 ]] || fail 'baseline membership changed'
 
 for path in \
     scripts/effect-interchange-v1-reference.py \
@@ -87,6 +95,16 @@ done
 rg -q 'for round in 1\.\.=2' "$benchmark" || fail 'benchmark rounds changed'
 rg -Fq 'assert_eq!(records.len(), 8);' "$benchmark" || fail 'benchmark record count changed'
 if rg -Fq '\"issue\":108' "$benchmark"; then
+    issue_branch=108
+else
+    issue_status=$?
+    if [[ "$issue_status" -eq 1 ]]; then
+        issue_branch=081
+    else
+        fail 'Issue-108 branch search failed'
+    fi
+fi
+if [[ "$issue_branch" == 108 ]]; then
     (
         source scripts/check-effect-interchange-benchmark-108.sh
         validate_benchmark_source "$benchmark"
@@ -117,21 +135,32 @@ for path_text in sys.argv[2:]:
             raise SystemExit(1)
 PY
 fi
-rg -q 'OBSERVATIONS = 256' scripts/effect-interchange-benchmark-validator.py ||
-    fail 'validator observation contract changed'
+if rg -q 'OBSERVATIONS = 256' scripts/effect-interchange-benchmark-validator.py; then :; else
+    validator_status=$?
+    [[ "$validator_status" -eq 1 ]] && fail 'validator observation contract changed' ||
+        fail 'validator observation scan failed'
+fi
 if rg -n 'serde|criterion|iai|rand' tools/bench/Cargo.toml; then
     fail 'benchmark gained a new dependency family'
+else
+    dependency_status=$?
+    [[ "$dependency_status" -eq 1 ]] || fail 'benchmark dependency scan failed'
 fi
 
 for reference in scripts/effect-{descriptor,package,state}-v1-reference.py; do
     if rg -n 'subprocess|os[.]system|Popen|spawn' "$reference"; then
         fail "accepted reference launches a child: $reference"
+    else
+        reference_status=$?
+        [[ "$reference_status" -eq 1 ]] || fail "reference scan failed: $reference"
     fi
 done
-rg -q '^if __name__ == "__main__":' scripts/effect-interchange-v1-reference.py ||
-    fail 'aggregator is not import-safe'
-rg -q 'range\(0, ?100\)|seq 0 99' scripts/run-effect-interchange-reference-processes.sh ||
-    fail 'runner does not freeze indexes 0..99'
+if rg -q '^if __name__ == "__main__":' scripts/effect-interchange-v1-reference.py; then :; else
+    status=$?; [[ "$status" -eq 1 ]] && fail 'aggregator is not import-safe' || fail 'aggregator scan failed'
+fi
+if rg -q 'range\(0, ?100\)|seq 0 99' scripts/run-effect-interchange-reference-processes.sh; then :; else
+    status=$?; [[ "$status" -eq 1 ]] && fail 'runner does not freeze indexes 0..99' || fail 'runner scan failed'
+fi
 # WP-2 deleted the print-only 10_000-trial campaign binary and its `TRIALS` constant, replacing
 # it with a parametrized `campaigns(trials)` helper and a fixed-trial-count `#[test]`. The seal's
 # purpose was "the mutation campaign exists and runs deterministically", not the literal 10_000;
@@ -171,32 +200,52 @@ rg -Fq -- '-> "' scripts/check-effect-interchange-targets.sh ||
 if rg -n 'miso-engine-effect-interchange|^bench([.]workspace)?[[:space:]]*=|effect_interchange_qualification' \
     crates/*/Cargo.toml hosts/*/Cargo.toml 2>/dev/null; then
     fail 'qualification dependency reached a production package'
+else
+    status=$?; [[ "$status" -eq 1 ]] || fail 'production dependency scan failed'
 fi
 if rg -n 'effect_interchange|EffectInterchange|effect_state_migration|EffectStateMigration' \
     crates/{engine,session,graph,rack-compiler,builtins-compiler}/src 2>/dev/null; then
     fail 'interchange qualification or migration reached render-owned source'
+else
+    status=$?; [[ "$status" -eq 1 ]] || fail 'render-owned source scan failed'
 fi
 if rg -n 'Serialize|Deserialize|serde|migration_wire|encode_migration' \
     crates/effect-compiler/src/migration.rs; then
     fail 'migration registry serialization appeared'
+else
+    status=$?
+    [[ "$status" -eq 1 ]] || fail 'migration serialization scan failed'
 fi
 # Anchored at the start of the attribute so the prose in `ffi.rs`'s doc comment, which names the
 # attribute, is not counted as a second export (#104 phase A).
 # Issue #143 added exactly one additive export, `..._inspect_observations`; the frozen
 # `..._inspect` signature, its summary struct and its record layouts are untouched. The count is
 # still exact, so a *third* export is still a failure.
-exports="$(rg -n '^[[:space:]]*#\[(unsafe\()?no_mangle' \
-    crates/effect-package/src | wc -l | tr -d ' ')"
+export_scan=$(mktemp)
+trap 'rm -f -- "$export_scan"' EXIT
+if rg -n '^[[:space:]]*#\[(unsafe\()?no_mangle' crates/effect-package/src >"$export_scan"; then :; else
+    status=$?; [[ "$status" -eq 1 ]] && fail 'descriptor export scan found no exports' || fail 'descriptor export scan failed'
+fi
+if ! export_lines=$(wc -l <"$export_scan"); then fail 'descriptor export count failed'; fi
+if ! exports=$(tr -d ' ' <<<"$export_lines"); then fail 'descriptor export count filtering failed'; fi
 [[ "$exports" -eq 2 ]] || fail 'descriptor package gained a C export'
 rg -q 'fn miso_engine_effect_descriptor_v1_inspect' \
     crates/effect-package/src/ffi.rs || fail 'sole descriptor export missing'
-if find fixtures/effect-interchange/v1 -mindepth 1 -maxdepth 1 -type f \
-    ! -name ACCEPTED.sha256 -print -quit | grep -q .; then
+fixture_scan=$(mktemp)
+if ! find fixtures/effect-interchange/v1 -mindepth 1 -maxdepth 1 -type f \
+    ! -name ACCEPTED.sha256 -print >"$fixture_scan"; then
+    fail 'interchange fixture traversal failed'
+fi
+if [[ -s "$fixture_scan" ]]; then
     fail 'untracked/generated corpus appeared in interchange fixture directory'
 fi
-if find . -path './target' -prune -o -type f \
+artifact_scan=$(mktemp)
+if ! find . -path './target' -prune -o -type f \
     \( -name '*.o' -o -name '*.a' -o -name '*.so' -o -name '*.dylib' -o -name '*.wasm' \
-       -o -name '*.profraw' -o -name '*.jsonl.raw' \) -print | grep -q .; then
+       -o -name '*.profraw' -o -name '*.jsonl.raw' \) -print >"$artifact_scan"; then
+    fail 'generated artifact traversal failed'
+fi
+if [[ -s "$artifact_scan" ]]; then
     fail 'generated artifact exists under a source path'
 fi
 for api in verify_effect_descriptor_wire verify_effect_package inspect_effect_state_selector resolve_effect_state_migration restore_scalar_effect_state_with_migration restore_unpublished_effect_bank_track_state_with_migration; do
