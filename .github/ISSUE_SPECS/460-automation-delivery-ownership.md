@@ -191,3 +191,10 @@ The approved finite identity/capacity/overlap/density/cancellation/backpressure/
 #140 retains exact Point/segment DSP application, controller sequence/lifecycle integration, canonical/transient semantics and host rollout. #444 retains native endpoint/cutoff/late behavior and native bank plus concurrent scalar pairing. Neither parent nor IO-5/RT-4 closes from #460's ownership service. After PR466 actually merges, root should record the resulting exact integrated base and confirm no intervening relevant source delta before Luna attempt1. The standard Astra review, Sol2/3 fallback and hard stop remain unchanged.
 
 No repository/spec/Git/GitHub mutations, integration, tests, builds or timing were performed; only this /tmp report was written.
+
+
+## Delivered integration and Luna attempt 1 assignment
+
+PR #466 merged as `6589c5185411d51bce7d0a0aafab4df63a5e47db` after exact-head Astra PASS and required CI success; #430/#459 are remotely closed. Root integrated delivered main at `1e58ecc365ff166a244fc338c2ea0a11d88b8f56`. All runtime/build inputs are identical to main; the only differences are the retained approved #140/#444 planning records and this #460 spec. An initial root assertion expecting only the #460 spec was too narrow and stopped before writing assignment; the explicit three-spec comparison passed. The approved source preflight applies without runtime drift.
+
+Root assigns Luna attempt 1 on the complete frozen contract and final cancellation amendment. Only the narrow protocol service, necessary queue internals, exports, focused tests and this evidence are authorized. Do not enable production hosts/controllers, alter wire grammar, SPSC implementation or dependencies. Preserve the sole ownership/sequence authority and all finite acceptance gates. Pause at each coherent compiling focused-green tranche for root checkpoint before layering more changes; final attempt receives one Astra verdict, with Sol fallback only after FAIL.
