@@ -180,3 +180,9 @@ and remove its already-listed encoded-record bridge independently.
 
 Final README/spec evidence awaits root checkpoint. A dedicated independent
 Astra medium review is in progress; no independent verdict is claimed here.
+
+## Independent review and delivery
+
+Dedicated independent Astra medium review records **PASS** at `48c026b8` (source `edfe7431`). Independent type checks, all **16** real-engine writer tests, and ordinary package/generated/fresh-consumer checks pass (77 package files). Review confirms one callback dispatch over the existing queue, unchanged admission/backpressure behavior, semantic edits without encoding, and legacy WriterOptions compatibility. Record: `/private/tmp/dx-445-astra-medium-review.md`. Author headless evidence is 163 PASS with one existing skip.
+
+This completes the SDK submission seam required to remove the app’s encoded-record bridge. App adoption and browser acceptance remain in misofm/app#101. No Rust, ABI, artifact or dependency changes.
