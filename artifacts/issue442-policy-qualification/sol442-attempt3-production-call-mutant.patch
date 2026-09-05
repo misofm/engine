@@ -1,0 +1,11 @@
+--- a/hosts/host-web/src/lib.rs
++++ b/hosts/host-web/src/lib.rs
+@@ -2627,7 +2627,7 @@
+ ) -> Result<(ReadyOwnership, WebResourceReport), BootFailure> {
+     let console = console_request(options, session.quantum().0)
+         .ok_or_else(|| fixed_diagnostic("web.console.config"))?;
+-    let (host, handles) = prepare_host_runtime_between_render_calls(&session, caps, &console)
++    let (host, handles) = host_core::prepare_host_runtime_with_console(&session, caps, &console)
+         .map_err(BootFailure::preparation)?;
+     let engine = host.report;
+ 

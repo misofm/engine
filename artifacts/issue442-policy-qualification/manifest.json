@@ -1,0 +1,370 @@
+{
+  "candidate_commit": "dc55baf97074edf98abbfc9477aa6c420f0599af",
+  "files": [
+    {
+      "path": "README.md",
+      "bytes": 2088,
+      "sha256": "fe937f2f4a1e7e8eee86d84f8482b21f2d6d8d9ac058d0527c014a008c78153f"
+    },
+    {
+      "path": "astra-442-attempt1-review.md",
+      "bytes": 6495,
+      "sha256": "2abdee5a870b3defad7196f63bcb319e2655ed5de24d8add3d3860d2317680f0"
+    },
+    {
+      "path": "astra-442-attempt2-review.md",
+      "bytes": 7496,
+      "sha256": "1b54abeb881bd3c67d0e0439e3c59eb928e0dcd8c465550408cc5a0d89eac3f2"
+    },
+    {
+      "path": "astra-442-attempt3-review.md",
+      "bytes": 4698,
+      "sha256": "6db43802e96e5d50e2081e5b88baf445d5b6d4a3d0a70ae8498b657db4880ead"
+    },
+    {
+      "path": "astra-442-frozen-base-review.md",
+      "bytes": 5048,
+      "sha256": "d86c6791a9f16f3b01d034ba56dcd38b2e4c61ba7c2681d4eaa550bf87591844"
+    },
+    {
+      "path": "astra-442-numbered-scope-review.md",
+      "bytes": 2396,
+      "sha256": "65a49beb993e7edfad6db435598e58e1ecacdaba99d92a216f898fb4bfdaee2d"
+    },
+    {
+      "path": "engine-442-attempt3-normalized-prebind-probe.patch",
+      "bytes": 1079,
+      "sha256": "b401a6e01101c650c2ff3a65ce9cea90a233df2764788bdfec51f1d9acdad3a8"
+    },
+    {
+      "path": "engine-442-browser-all-record.log",
+      "bytes": 565,
+      "sha256": "19866a9fbd085c2eba3133d0781613dbd6eb72ac533ac73bb8b28588f54ddbb5"
+    },
+    {
+      "path": "engine-442-browser-chromium-check.log",
+      "bytes": 282,
+      "sha256": "f8b3f881f06cbf414fc6877946d4b334a0520fdc0e01ff6358399f38c20735e7"
+    },
+    {
+      "path": "engine-442-browser-firefox-check.log",
+      "bytes": 272,
+      "sha256": "a29c4200dbbe82ba8eb4d1c31a4881322f8c1b414d9fed55dd0bfd00efb73d4e"
+    },
+    {
+      "path": "engine-442-browser-webkit-check.log",
+      "bytes": 269,
+      "sha256": "77a3e794a9d6195642bf63d9d8b6d621c1606f3f704bc34c4e882ac3767aaed3"
+    },
+    {
+      "path": "engine-442-candidate-workspace.log",
+      "bytes": 185577,
+      "sha256": "6d63266263ce38ca710fabda7d4a68280b64deb76b3c7422fd0e2e9e5d3603cc"
+    },
+    {
+      "path": "engine-442-check-web.log",
+      "bytes": 2666,
+      "sha256": "046016668dd6aa4fbe016002f60eadaa23ab65f1fb4d255438723a60413bf6a8"
+    },
+    {
+      "path": "engine-442-exact-checkpoint-check.log",
+      "bytes": 1544,
+      "sha256": "aa560a2a85c69610cd5d2d13418a2dadccaa38925c172ef779a946f171da7a0f"
+    },
+    {
+      "path": "engine-442-expected-resources.log",
+      "bytes": 228,
+      "sha256": "7439da57c4b6ca834bef3a33c94a721419f2d4d3526ad20d2ab139d19f701ebb"
+    },
+    {
+      "path": "engine-442-hermetic-worklet-mutations.log",
+      "bytes": 5057,
+      "sha256": "bd875434bc25a15ba12eb2abcde152b9254243583d0784eb2b7ece0d8d0cde53"
+    },
+    {
+      "path": "engine-442-root-host-web-attempt2.log",
+      "bytes": 4784,
+      "sha256": "6fe13fd4e969be4d565917ec2dd8835668a17baef44227d511aa48088760c086"
+    },
+    {
+      "path": "engine-442-supported-hash-check.log",
+      "bytes": 620,
+      "sha256": "8667fecdfada5e1255f08bee3839d48af80c36fb6b5540a9d5cea3198d9e880b"
+    },
+    {
+      "path": "engine-442-worklet-repin.log",
+      "bytes": 3339,
+      "sha256": "2173bd678da80fe609116888bc299a1dff1ca3931b5475b56eebd1a773ead21d"
+    },
+    {
+      "path": "engine-442-worklet-repin.sha256",
+      "bytes": 65,
+      "sha256": "faa27afa742132e20ecbf3b14877d37d22b3dcff2c2d1f8bb167e1428a54b098"
+    },
+    {
+      "path": "engine-442-worklet-verify.log",
+      "bytes": 3339,
+      "sha256": "f299497f9703c2f8b4b0c9a55fc7e2a5507d9df09f1612092839dfc5abb11cda"
+    },
+    {
+      "path": "engine-442-workspace-summary.json",
+      "bytes": 206,
+      "sha256": "c53f591b840e21f045c7d5dd4ac7253e420bc1f8885cc971164ff0e57c1e258c"
+    },
+    {
+      "path": "luna-442-graph.log",
+      "bytes": 5118,
+      "sha256": "844b5e18151e09a4cc939bc67efbcd94fbcc61098b60095956fbc44c6552db88"
+    },
+    {
+      "path": "sol-442-nonlto-build.log",
+      "bytes": 1713,
+      "sha256": "c8f8fa56fa35f3c930ea92b500c2e1766e0bacfa577409ea2360b6961e5a06df"
+    },
+    {
+      "path": "sol-442-nonlto-build.status",
+      "bytes": 129,
+      "sha256": "bcd070fc719e1deef599ffa468dd47d6cf8c70a14caa7e93c418545f23cab0f7"
+    },
+    {
+      "path": "sol-442-nonlto-inspect.py",
+      "bytes": 5949,
+      "sha256": "e3c7bcb269781717f9414b1b3c0db2957997f1db0f3fd18a7ff6ddd379ad6ec1"
+    },
+    {
+      "path": "sol-442-nonlto-inspection.log",
+      "bytes": 3254,
+      "sha256": "7fb0e4ffad2dc187d1d5825ba443404fe1a8015836205daf88dec29deb58e409"
+    },
+    {
+      "path": "sol-442-nonlto-inspection.status",
+      "bytes": 84,
+      "sha256": "e7130c7223e7f7e039e55915ebac15369a0965ae347f60ebf72b15b5eeb934c7"
+    },
+    {
+      "path": "sol-442-supported-cfg.status",
+      "bytes": 155,
+      "sha256": "afe3a5e595f64755686096a040883d0c1650efad708410f5cde63f178d3458fe"
+    },
+    {
+      "path": "sol-442-supported-final-head.log",
+      "bytes": 41,
+      "sha256": "fbefa1af0ae23e258a7dd69031200dab10254d2560eccfd3353d6eb80aed888f"
+    },
+    {
+      "path": "sol-442-supported-final-status.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "sol-442-supported-host-availability.log",
+      "bytes": 93,
+      "sha256": "205313c722c0789c2a0305f4b3a6db0870e4fe4309fe65eac59c705142a96680"
+    },
+    {
+      "path": "sol-442-supported-protocol-scalar-build.log",
+      "bytes": 1196,
+      "sha256": "4c038954caf3a5843a0e4a644bdd12a89f8f0f7cc089c4aeac7f93c7d138f5fa"
+    },
+    {
+      "path": "sol-442-supported-protocol-scalar-expected.log",
+      "bytes": 28,
+      "sha256": "e09e066df3b2e3968b7f3041982ec8d10ffa537f4b9610cbd3db9d3c94242ed1"
+    },
+    {
+      "path": "sol-442-supported-protocol-scalar-exports.log",
+      "bytes": 402135,
+      "sha256": "2f91a6dfb06edc66c11c73aee0d1b274a1db53a5d75e1da9e728bfd6426ada72"
+    },
+    {
+      "path": "sol-442-supported-protocol-scalar-main-export.log",
+      "bytes": 30,
+      "sha256": "3a44064cd6d1b0730c9a48e53bdc115e47048482acad7963a56f601bfa01841b"
+    },
+    {
+      "path": "sol-442-supported-protocol-scalar-run.log",
+      "bytes": 28,
+      "sha256": "e09e066df3b2e3968b7f3041982ec8d10ffa537f4b9610cbd3db9d3c94242ed1"
+    },
+    {
+      "path": "sol-442-supported-protocol-scalar.status",
+      "bytes": 142,
+      "sha256": "44a36548e9774cea8122caa5b976d4209cc73dfa8790878f1f37e8d18a65f79d"
+    },
+    {
+      "path": "sol-442-supported-protocol-simd-build.log",
+      "bytes": 1196,
+      "sha256": "3daf555d2453eeaece7d1d682fe44db4e86dbd4c219f5d314e169d507c03f238"
+    },
+    {
+      "path": "sol-442-supported-protocol-simd-expected.log",
+      "bytes": 28,
+      "sha256": "e09e066df3b2e3968b7f3041982ec8d10ffa537f4b9610cbd3db9d3c94242ed1"
+    },
+    {
+      "path": "sol-442-supported-protocol-simd-exports.log",
+      "bytes": 402152,
+      "sha256": "b90c440f8152c15819601c874038514d00975327f19c50882afaaae5957ec45b"
+    },
+    {
+      "path": "sol-442-supported-protocol-simd-main-export.log",
+      "bytes": 30,
+      "sha256": "3a44064cd6d1b0730c9a48e53bdc115e47048482acad7963a56f601bfa01841b"
+    },
+    {
+      "path": "sol-442-supported-protocol-simd-run.log",
+      "bytes": 28,
+      "sha256": "e09e066df3b2e3968b7f3041982ec8d10ffa537f4b9610cbd3db9d3c94242ed1"
+    },
+    {
+      "path": "sol-442-supported-protocol-simd.status",
+      "bytes": 140,
+      "sha256": "bef8465f6d15d57fc34e4dd135bec2c7c6505879db8d7d1da1de8aea7c4f0107"
+    },
+    {
+      "path": "sol-442-supported-scalar.cfg",
+      "bytes": 710,
+      "sha256": "97b895d31fc0f8d305d113f271007e5529e9af06d72d2e0c57a550a6aa962d39"
+    },
+    {
+      "path": "sol-442-supported-scalar18-package-presence.log",
+      "bytes": 706,
+      "sha256": "39d8ce7b4a4cb8033d90c3fca90998d1917d6900d841677a7f195eb92714d0e0"
+    },
+    {
+      "path": "sol-442-supported-scalar18.log",
+      "bytes": 3505,
+      "sha256": "c7ff453d770a3ea7a449c6cf80f65b8693fbeabefb51175720801f59efded71e"
+    },
+    {
+      "path": "sol-442-supported-scalar18.status",
+      "bytes": 97,
+      "sha256": "401ea36be148d12bde3e73db823657da56228f2ee31439103549634db633d865"
+    },
+    {
+      "path": "sol-442-supported-simd-smoke.log",
+      "bytes": 1407,
+      "sha256": "b94c90edbf9297bbea559195e87f45c4ef570c586f0dae713908c12df315a517"
+    },
+    {
+      "path": "sol-442-supported-simd.cfg",
+      "bytes": 735,
+      "sha256": "44d5c2cd402a5810a08f0aa6213c1c132bcfc52213d3d5c7a6bd0020bc28023b"
+    },
+    {
+      "path": "sol-442-supported-wasm-hashes.txt",
+      "bytes": 1488,
+      "sha256": "d9702e6421565ca9026ac5bb09f3cae878ef00cccc8a56cedef19bbe63ca6826"
+    },
+    {
+      "path": "sol-442-supported-wasm-summary.log",
+      "bytes": 2203,
+      "sha256": "1d414ebe4439c31282ebe27a363b52972544822b7150a9794f25cb95dcc77e26"
+    },
+    {
+      "path": "sol442-attempt3-disposable-prebind-probe.patch",
+      "bytes": 904,
+      "sha256": "7e18f9a789204bf20401b49b79e8decc5f242eb5ad83c3399ffe80375c60f3d7"
+    },
+    {
+      "path": "sol442-attempt3-final-builtins-policy.log",
+      "bytes": 1456,
+      "sha256": "c2210215920806eff247ce61581ca76415733db7857f992f8076c0b1907971ee"
+    },
+    {
+      "path": "sol442-attempt3-final-capi-resource.log",
+      "bytes": 779,
+      "sha256": "dd3c5f9e04757aa57fa4231413faec6d05449f612956ee813cc6871a4b4f5fe5"
+    },
+    {
+      "path": "sol442-attempt3-final-fmt.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "sol442-attempt3-final-graph-check.log",
+      "bytes": 72,
+      "sha256": "736e2582f563605dd272e5fb977840b0c0767377d27b6940c440caf75eec7157"
+    },
+    {
+      "path": "sol442-attempt3-final-graph-tests.log",
+      "bytes": 4543,
+      "sha256": "17d036a2630cce41954e56c0c96495643394189c05430960ce2fcdf2103b38c6"
+    },
+    {
+      "path": "sol442-attempt3-final-host-core-check.log",
+      "bytes": 153,
+      "sha256": "6e067c6d2f1006ae7b113a9b691ec8b8d61d3114c41ae554942ca2e5c31cd3f4"
+    },
+    {
+      "path": "sol442-attempt3-final-host-default-live.log",
+      "bytes": 441,
+      "sha256": "ad1163c260e64a3e9c59e621db169e88d68abe5e8360416ae8c1bb837383e281"
+    },
+    {
+      "path": "sol442-attempt3-final-host-no-console.log",
+      "bytes": 341,
+      "sha256": "57d073179eefce9960f8e7890b8e51b5062152ea80f552218c4dd61fe52c64fd"
+    },
+    {
+      "path": "sol442-attempt3-final-host-web.log",
+      "bytes": 665,
+      "sha256": "06087a0e27daa70fc8c3401bd7d87ffdcfa08595e5cfb6fdeea48006fc8eb5f3"
+    },
+    {
+      "path": "sol442-attempt3-final-workspace-policy.log",
+      "bytes": 72,
+      "sha256": "0af88aeafa22e62f16cd649c9883471284ed4d2648642c968330e2a6a5e9b235"
+    },
+    {
+      "path": "sol442-attempt3-probe-mutant.exit",
+      "bytes": 4,
+      "sha256": "39b8dc3fc8b44765c8e6f1adee04c5b465e555ab791cc42d0d9e810d5b64297c"
+    },
+    {
+      "path": "sol442-attempt3-probe-mutant.log",
+      "bytes": 1514,
+      "sha256": "a0b5e62845ebcf71d4a22a1b75d5365cbc25a3576621513f06ac491a92d5b2fc"
+    },
+    {
+      "path": "sol442-attempt3-probe-original.exit",
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "sol442-attempt3-probe-original.log",
+      "bytes": 746,
+      "sha256": "b79fd7d116e5ebbfcfc93f1df023f6b538f7f7f4d7234851eae7953bcda34018"
+    },
+    {
+      "path": "sol442-attempt3-production-call-mutant.patch",
+      "bytes": 554,
+      "sha256": "c2c36615609433afb3482a8e1df9707afe747efce222bfc13d353d162ced5f13"
+    },
+    {
+      "path": "sol442-host-web-production-policy-mutant.exit",
+      "bytes": 4,
+      "sha256": "39b8dc3fc8b44765c8e6f1adee04c5b465e555ab791cc42d0d9e810d5b64297c"
+    },
+    {
+      "path": "sol442-host-web-production-policy-mutant.log",
+      "bytes": 1428,
+      "sha256": "0274028678e96a77ee5eb249891b76c8a08a164c10e09394419b075db7364a87"
+    },
+    {
+      "path": "sol442-host-web-production-policy-original.log",
+      "bytes": 665,
+      "sha256": "de3d4452b6df8a362c81069115dbb09e6750a453d128146a0ad885f51849f522"
+    },
+    {
+      "path": "sol442-host-web-production-policy-restored.log",
+      "bytes": 665,
+      "sha256": "03344a851e56d7dc74f16e34b59291455942a4e6abd14e554867a219f8f5ae26"
+    },
+    {
+      "path": "sol442-production-wrong-wrapper-full-diff.patch",
+      "bytes": 1123,
+      "sha256": "e89c20e6d958011fd7b2c5b85fe2f9b0f482581efab23664e1ce589112fa99d0"
+    }
+  ]
+}
