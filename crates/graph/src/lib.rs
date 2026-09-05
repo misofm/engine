@@ -8,8 +8,8 @@ pub mod program;
 mod runtime;
 
 use core::cell::Cell;
-use std::collections::{BTreeMap, BTreeSet};
 use std::any::Any;
+use std::collections::{BTreeMap, BTreeSet};
 
 use effect_contract::{
     ChannelSymmetryWitness, EffectControlLane, LatencySamples, ObservationLane,
@@ -1667,8 +1667,12 @@ mod tests {
         calls: u64,
     }
     impl GraphPreparedBuiltinBankProcessor for CountingIdentityBuiltin {
-        fn as_any(&self) -> &dyn Any { self }
-        fn into_any(self: Box<Self>) -> Box<dyn Any> { self }
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn into_any(self: Box<Self>) -> Box<dyn Any> {
+            self
+        }
         fn process(
             &mut self,
             _left: &mut [f32],

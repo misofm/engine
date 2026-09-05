@@ -30,11 +30,11 @@ use engine::realtime::{
     bounded_spsc, bounded_spsc_retained_payload,
 };
 use graph::{
-    BuiltinControlDelivery, DependencyLevel, GraphBindingBlock, GraphBuiltinBankResourceEstimate,
-    BuiltinPairFactory, BuiltinProcessor, GraphNodeId, GraphNodeObserverBinding, GraphObservationBlock, GraphPreparedBuiltinBank,
-    GraphPreparedBuiltinBankInfo, GraphPreparedBuiltinBankProcessor, GraphPreparedSourceSet,
-    GraphRuntimeBindings, GraphRuntimeObserver, GraphRuntimeProcessor, PreparedGraphPlan,
-    StableGraphId, TrackStage,
+    BuiltinControlDelivery, BuiltinPairFactory, BuiltinProcessor, DependencyLevel,
+    GraphBindingBlock, GraphBuiltinBankResourceEstimate, GraphNodeId, GraphNodeObserverBinding,
+    GraphObservationBlock, GraphPreparedBuiltinBank, GraphPreparedBuiltinBankInfo,
+    GraphPreparedBuiltinBankProcessor, GraphPreparedSourceSet, GraphRuntimeBindings,
+    GraphRuntimeObserver, GraphRuntimeProcessor, PreparedGraphPlan, StableGraphId, TrackStage,
 };
 use lane::Backend;
 use rack::{AoSoaScratch, BankSlotKey, RackLocation, RackProgram};
@@ -387,8 +387,12 @@ struct BuiltinBankProcessor {
 const MAXIMUM_BANK_LANES: usize = 8;
 
 impl GraphPreparedBuiltinBankProcessor for BuiltinBankProcessor {
-    fn as_any(&self) -> &dyn std::any::Any { self }
-    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> { self }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> {
+        self
+    }
     /// The third drain. Runs before the collapse dispatch reads the witness -- see the type's
     /// documentation for why that ordering is the whole reason this is not folded into `process`.
     fn begin_block(&mut self, first_sample: u64) -> Result<(), RenderError> {
@@ -549,9 +553,15 @@ struct FaderBankProcessor {
 }
 
 impl GraphPreparedBuiltinBankProcessor for FaderBankProcessor {
-    fn as_any(&self) -> &dyn std::any::Any { self }
-    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> { self }
-    fn pair_factory(&self) -> Option<BuiltinPairFactory> { Some(make_fader_matrix) }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> {
+        self
+    }
+    fn pair_factory(&self) -> Option<BuiltinPairFactory> {
+        Some(make_fader_matrix)
+    }
     fn control_delivery(&self) -> BuiltinControlDelivery {
         self.control_delivery
     }
@@ -564,29 +574,7 @@ impl GraphPreparedBuiltinBankProcessor for FaderBankProcessor {
     ) -> Result<(), RenderError> {
         let _ = first_sample;
         let Self { bank, controls, .. } = self;
-        for (lane, control) in controls.iter_mut().enumerate() {
-            let Some(control) = control.as_mut() else {
-                continue;
-            };
-            while let Ok(record) = control.try_pop() {
-                match record {
-                    TrackFaderRecord::FaderDb {
-                        lanes,
-                        db,
-                        smoothing_samples,
-                    } => bank
-                        .set_fader_db(lane, lanes, db, smoothing_samples)
-                        .map_err(render_error)?,
-                    TrackFaderRecord::Mute {
-                        lanes,
-                        muted,
-                        smoothing_samples,
-                    } => bank
-                        .set_mute(lane, lanes, muted, smoothing_samples)
-                        .map_err(render_error)?,
-                }
-            }
-        }
+        drain_fader_controls(bank, controls)?;
         bank.process(left, right, frames);
         self.process_calls = self.process_calls.saturating_add(1);
         self.frames_processed = self.frames_processed.saturating_add(u64::from(frames));
@@ -627,8 +615,12 @@ struct MatrixBankProcessor {
 }
 
 impl GraphPreparedBuiltinBankProcessor for MatrixBankProcessor {
-    fn as_any(&self) -> &dyn std::any::Any { self }
-    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> { self }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> {
+        self
+    }
     fn control_delivery(&self) -> BuiltinControlDelivery {
         self.control_delivery
     }
@@ -641,15 +633,7 @@ impl GraphPreparedBuiltinBankProcessor for MatrixBankProcessor {
     ) -> Result<(), RenderError> {
         let _ = first_sample;
         let Self { bank, controls, .. } = self;
-        for (lane, control) in controls.iter_mut().enumerate() {
-            let Some(control) = control.as_mut() else {
-                continue;
-            };
-            while let Ok(record) = control.try_pop() {
-                bank.set_target_smoothed(lane, record.matrix, record.smoothing_samples)
-                    .map_err(render_error)?;
-            }
-        }
+        drain_matrix_controls(bank, controls)?;
         bank.process(left, right, frames);
         self.process_calls = self.process_calls.saturating_add(1);
         self.frames_processed = self.frames_processed.saturating_add(u64::from(frames));
@@ -679,47 +663,118 @@ struct FaderMatrixBankProcessor {
     matrix: Box<MatrixBankProcessor>,
 }
 
+#[cfg(test)]
+static FADER_MATRIX_PROCESS_CALLS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+static FADER_MATRIX_FACTORY_CALLS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+fn drain_fader_controls(
+    bank: &mut BuiltinFaderBank,
+    controls: &mut [Option<Consumer<TrackFaderRecord>>],
+) -> Result<(), RenderError> {
+    for (lane, control) in controls.iter_mut().enumerate() {
+        let Some(control) = control.as_mut() else {
+            continue;
+        };
+        while let Ok(record) = control.try_pop() {
+            match record {
+                TrackFaderRecord::FaderDb {
+                    lanes,
+                    db,
+                    smoothing_samples,
+                } => bank
+                    .set_fader_db(lane, lanes, db, smoothing_samples)
+                    .map_err(render_error)?,
+                TrackFaderRecord::Mute {
+                    lanes,
+                    muted,
+                    smoothing_samples,
+                } => bank
+                    .set_mute(lane, lanes, muted, smoothing_samples)
+                    .map_err(render_error)?,
+            }
+        }
+    }
+    Ok(())
+}
+
+fn drain_matrix_controls(
+    bank: &mut BuiltinMatrixBank,
+    controls: &mut [Option<Consumer<TrackControlRecord>>],
+) -> Result<(), RenderError> {
+    for (lane, control) in controls.iter_mut().enumerate() {
+        let Some(control) = control.as_mut() else {
+            continue;
+        };
+        while let Ok(record) = control.try_pop() {
+            bank.set_target_smoothed(lane, record.matrix, record.smoothing_samples)
+                .map_err(render_error)?;
+        }
+    }
+    Ok(())
+}
+
 fn make_fader_matrix(
     fader: BuiltinProcessor,
     matrix: BuiltinProcessor,
 ) -> Result<BuiltinProcessor, (BuiltinProcessor, BuiltinProcessor)> {
+    #[cfg(test)]
+    FADER_MATRIX_FACTORY_CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     if !fader.as_any().is::<FaderBankProcessor>() || !matrix.as_any().is::<MatrixBankProcessor>() {
         return Err((fader, matrix));
     }
-    let fader = fader.into_any().downcast::<FaderBankProcessor>().expect("checked fader type");
-    let matrix = matrix.into_any().downcast::<MatrixBankProcessor>().expect("checked matrix type");
+    let fader = fader
+        .into_any()
+        .downcast::<FaderBankProcessor>()
+        .expect("checked fader type");
+    let matrix = matrix
+        .into_any()
+        .downcast::<MatrixBankProcessor>()
+        .expect("checked matrix type");
     if fader.control_delivery != BuiltinControlDelivery::BetweenRenderCalls
         || matrix.control_delivery != BuiltinControlDelivery::BetweenRenderCalls
         || fader.bank.backend() != matrix.bank.backend()
         || fader.bank.width() != matrix.bank.width()
         || fader.bank.active_lanes() != matrix.bank.active_lanes()
-    { return Err((fader, matrix)); }
+    {
+        return Err((fader, matrix));
+    }
     Ok(Box::new(FaderMatrixBankProcessor { fader, matrix }))
 }
 
 impl GraphPreparedBuiltinBankProcessor for FaderMatrixBankProcessor {
-    fn as_any(&self) -> &dyn std::any::Any { self }
-    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> { self }
-    fn control_delivery(&self) -> BuiltinControlDelivery { BuiltinControlDelivery::BetweenRenderCalls }
-    fn process(&mut self, left: &mut [f32], right: &mut [f32], frames: u32, first_sample: u64) -> Result<(), RenderError> {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> {
+        self
+    }
+    fn control_delivery(&self) -> BuiltinControlDelivery {
+        BuiltinControlDelivery::BetweenRenderCalls
+    }
+    fn process(
+        &mut self,
+        left: &mut [f32],
+        right: &mut [f32],
+        frames: u32,
+        first_sample: u64,
+    ) -> Result<(), RenderError> {
+        #[cfg(test)]
+        FADER_MATRIX_PROCESS_CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         let Self { fader, matrix } = self;
-        for (lane, control) in fader.controls.iter_mut().enumerate() {
-            if let Some(control) = control.as_mut() { while let Ok(record) = control.try_pop() { match record {
-                TrackFaderRecord::FaderDb { lanes, db, smoothing_samples } => fader.bank.set_fader_db(lane, lanes, db, smoothing_samples).map_err(render_error)?,
-                TrackFaderRecord::Mute { lanes, muted, smoothing_samples } => fader.bank.set_mute(lane, lanes, muted, smoothing_samples).map_err(render_error)?,
-            } } }
+        drain_fader_controls(&mut fader.bank, &mut fader.controls)?;
+        if let Err(error) = drain_matrix_controls(&mut matrix.bank, &mut matrix.controls) {
+            fader.bank.process(left, right, frames);
+            fader.process_calls = fader.process_calls.saturating_add(1);
+            fader.frames_processed = fader.frames_processed.saturating_add(u64::from(frames));
+            return Err(error);
         }
-        for (lane, control) in matrix.controls.iter_mut().enumerate() {
-            if let Some(control) = control.as_mut() { while let Ok(record) = control.try_pop() {
-                if let Err(error) = matrix.bank.set_target_smoothed(lane, record.matrix, record.smoothing_samples) {
-                    fader.bank.process(left, right, frames);
-                    fader.process_calls = fader.process_calls.saturating_add(1);
-                    fader.frames_processed = fader.frames_processed.saturating_add(u64::from(frames));
-                    return Err(render_error(error));
-                }
-            } }
-        }
-        if !fader.bank.try_process_settled_with_matrix(&mut matrix.bank, left, right, frames) {
+        if !fader
+            .bank
+            .try_process_settled_with_matrix(&mut matrix.bank, left, right, frames)
+        {
             fader.bank.process(left, right, frames);
             matrix.bank.process(left, right, frames);
         }
@@ -730,8 +785,23 @@ impl GraphPreparedBuiltinBankProcessor for FaderMatrixBankProcessor {
         let _ = first_sample;
         Ok(())
     }
-    fn qualification_counters(&self) -> [u64; 2] { [self.fader.process_calls.saturating_add(self.matrix.process_calls), self.fader.frames_processed.saturating_add(self.matrix.frames_processed)] }
-    fn seam_side(&self) -> SeamSide { SeamSide::SeamSide }
+    fn qualification_counters(&self) -> [u64; 2] {
+        [
+            self.fader
+                .process_calls
+                .saturating_add(self.matrix.process_calls),
+            self.fader
+                .frames_processed
+                .saturating_add(self.matrix.frames_processed),
+        ]
+    }
+    fn lane_symmetry(&self, lane: usize) -> ChannelSymmetryWitness {
+        let _ = lane;
+        SEAM_SIDE_WITNESS
+    }
+    fn seam_side(&self) -> SeamSide {
+        SeamSide::SeamSide
+    }
 }
 
 /// Retained bytes of one strip bank's per-lane console-consumer array.
@@ -759,11 +829,9 @@ fn strip_processor_bytes(stage: TrackStage, width: effect_contract::BankWidth) -
         TrackStage::PostInputBuiltins => {
             inline.checked_add(strip_control_bytes::<TrackInputRecord>(width)?)
         }
-        TrackStage::PostFader => {
-            inline
-                .checked_add(strip_control_bytes::<TrackFaderRecord>(width)?)?
-                .checked_add(core::mem::size_of::<FaderMatrixBankProcessor>() as u64)
-        }
+        TrackStage::PostFader => inline
+            .checked_add(strip_control_bytes::<TrackFaderRecord>(width)?)?
+            .checked_add(core::mem::size_of::<FaderMatrixBankProcessor>() as u64),
         _ => inline.checked_add(strip_control_bytes::<TrackControlRecord>(width)?),
     }
 }
@@ -4329,9 +4397,24 @@ mod tests {
     }
 
     /// Renders `HARNESS_BLOCKS` blocks and returns the post-input-builtins output bits per track.
-    fn render_post_input_bits(n: usize, dispatch: Backend) -> (Vec<Vec<u32>>, usize) {
+    fn render_post_input_bits_with_delivery(
+        n: usize,
+        dispatch: Backend,
+        between_render_calls: bool,
+    ) -> (Vec<Vec<u32>>, usize) {
         let compiled = n_track_session(n);
-        let builtins = prepare_session_builtins(&compiled, &[], caps()).expect("harness builtins");
+        let controls = (0..n)
+            .map(|index| TrackControlRequest {
+                track_id: track_name(index),
+                queue_capacity: NonZeroUsize::new(4).expect("queue"),
+            })
+            .collect::<Vec<_>>();
+        let builtins = if between_render_calls {
+            prepare_session_builtins_between_render_calls(&compiled, &[], &controls, caps())
+        } else {
+            prepare_session_builtins(&compiled, &[], caps())
+        }
+        .expect("harness builtins");
         let (graph, levels) = track_graph(n);
         let classes = SessionPoolClasses::from_session(&compiled);
         let mut artifact =
@@ -4404,6 +4487,42 @@ mod tests {
             })
             .collect();
         (bits, bank_count)
+    }
+
+    fn render_post_input_bits(n: usize, dispatch: Backend) -> (Vec<Vec<u32>>, usize) {
+        render_post_input_bits_with_delivery(n, dispatch, false)
+    }
+
+    /// #430 gate 1: the production compiler and graph binder select the live composite only for
+    /// the declared between-render-calls owners. The PCM stays identical to the forced-separate
+    /// Concurrent control, while this same assertion fails if graph pairing is replaced by the
+    /// old separate dispatch.
+    #[test]
+    fn serialized_live_fader_matrix_is_selected_by_the_bound_render_path() {
+        for (tracks, backend, pairs) in [(5, Backend::Simd4, 1), (9, Backend::Simd8, 1)] {
+            FADER_MATRIX_PROCESS_CALLS.store(0, Ordering::Relaxed);
+            FADER_MATRIX_FACTORY_CALLS.store(0, Ordering::Relaxed);
+            let (separate, _) = render_post_input_bits_with_delivery(tracks, backend, false);
+            assert_eq!(FADER_MATRIX_PROCESS_CALLS.load(Ordering::Relaxed), 0);
+            FADER_MATRIX_FACTORY_CALLS.store(0, Ordering::Relaxed);
+
+            let (paired, bank_count) = render_post_input_bits_with_delivery(tracks, backend, true);
+            assert_eq!(
+                FADER_MATRIX_FACTORY_CALLS.load(Ordering::Relaxed),
+                pairs,
+                "graph binding must offer every eligible adjacent pair to the factory"
+            );
+            assert_eq!(paired, separate, "pairing preserves exact stage arithmetic");
+            assert!(
+                bank_count >= pairs * 3,
+                "the actual strip banks were compiled"
+            );
+            assert_eq!(
+                FADER_MATRIX_PROCESS_CALLS.load(Ordering::Relaxed),
+                pairs * HARNESS_BLOCKS as usize,
+                "every full or partial live pair must execute once per rendered block"
+            );
+        }
     }
 
     #[test]

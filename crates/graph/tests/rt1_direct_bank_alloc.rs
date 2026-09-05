@@ -28,8 +28,12 @@ impl GraphRuntimeProcessor for Source {
 #[derive(Default)]
 struct IdentityBank(u64);
 impl GraphPreparedBuiltinBankProcessor for IdentityBank {
-    fn as_any(&self) -> &dyn std::any::Any { self }
-    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> { self }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> {
+        self
+    }
     fn process(
         &mut self,
         _left: &mut [f32],

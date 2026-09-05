@@ -1714,6 +1714,63 @@ fn command_ack_names_the_exact_application_sample() {
     );
 }
 
+/// #430 gate 2: WebEngine declares between-render delivery for both actual owners. A fader and
+/// matrix command admitted together must therefore drain from their distinct queues onto the
+/// same acknowledged first sample before the paired stage decides whether it is settled.
+#[test]
+fn paired_fader_and_matrix_commands_share_the_acknowledged_application_sample() {
+    const QUANTUM: u32 = 128;
+    let mut host = console_host(QUANTUM, 0);
+    let quantum = QUANTUM as usize;
+
+    feed_and_render(&mut host, 1, 0, 0.5);
+    stage_command(
+        &mut host,
+        0,
+        COMMAND_FADER_DB,
+        255,
+        2,
+        0,
+        0,
+        0,
+        0,
+        [-6.0, 0.0, 0.0, 0.0],
+    );
+    stage_command(
+        &mut host,
+        1,
+        COMMAND_MATRIX,
+        255,
+        255,
+        0,
+        0,
+        0,
+        0,
+        [0.5, 0.0, 0.0, 1.0],
+    );
+    assert_eq!(host.submit_commands(2), RESULT_OK);
+    let report = *host.command_report();
+    assert_eq!(report.admitted, 2);
+    assert_eq!(report.applied_at_sample, u64::from(QUANTUM));
+
+    feed_and_render(&mut host, 1, 1, 0.5);
+    let output = host.output_pcm().expect("output");
+    let expected_left = output[0];
+    assert!(expected_left > 0.11 && expected_left < 0.14);
+    assert!(
+        output[..quantum]
+            .iter()
+            .all(|sample| sample.to_bits() == expected_left.to_bits()),
+        "both immediate records apply before sample one"
+    );
+    assert!(
+        output[quantum..]
+            .iter()
+            .all(|sample| sample.to_bits() == (expected_left * 2.0).to_bits()),
+        "the matrix leaves the right plane at the fader output"
+    );
+}
+
 /// A console host over the *command* fixture: the identity session plus one dynamic-rack
 /// parametric EQ, so an effect-addressed command has something real to address (issue #140 A).
 fn effect_console_host(quantum: u32, depth: u64) -> AudioWorkletEngineHost {

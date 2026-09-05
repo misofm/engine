@@ -2946,17 +2946,38 @@ impl BuiltinFaderBank {
         right: &mut [f32],
         frames: u32,
     ) -> bool {
-        if self.backend != matrix.backend || self.width != matrix.width || self.members != matrix.members
-            || self.remaining_nonzero() || matrix.remaining_nonzero()
+        if self.backend != matrix.backend
+            || self.width != matrix.width
+            || self.members != matrix.members
+            || self.remaining_nonzero()
+            || matrix.remaining_nonzero()
         {
             return false;
         }
         match (&self.stage, &matrix.stage) {
             (FaderStageKernel::Simd4(fader), MatrixStageKernel::Simd4(matrix)) => {
-                fader_matrix_block::<Simd4>(left, right, frames as usize, fader.ramp[0].current, fader.ramp[0].mute, fader.ramp[1].current, fader.ramp[1].mute, &matrix.coef);
+                fader_matrix_block::<Simd4>(
+                    left,
+                    right,
+                    frames as usize,
+                    fader.ramp[0].current,
+                    fader.ramp[0].mute,
+                    fader.ramp[1].current,
+                    fader.ramp[1].mute,
+                    &matrix.coef,
+                );
             }
             (FaderStageKernel::Simd8(fader), MatrixStageKernel::Simd8(matrix)) => {
-                fader_matrix_block::<Simd8>(left, right, frames as usize, fader.ramp[0].current, fader.ramp[0].mute, fader.ramp[1].current, fader.ramp[1].mute, &matrix.coef);
+                fader_matrix_block::<Simd8>(
+                    left,
+                    right,
+                    frames as usize,
+                    fader.ramp[0].current,
+                    fader.ramp[0].mute,
+                    fader.ramp[1].current,
+                    fader.ramp[1].mute,
+                    &matrix.coef,
+                );
             }
             _ => return false,
         }

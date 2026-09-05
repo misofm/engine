@@ -310,3 +310,27 @@ Read the full #430 spec including binding scope/base approval and root's candid 
 Attempt1 is now a single recorded FAIL. Sol has attempts2 and3 available only under the existing workflow; a third FAIL requires hard stop/rescope. #443, #444, #431 and broad RT-4/#349 remain retained, and #427's independent delivery is unaffected.
 
 Root authorizes Sol attempt 2 for these four finite correction groups. The compiling Luna checkpoint is retained candidly; no semantic acceptance is implied. Preserve the accepted route and complete the original five product gates with executed proof in one coherent pass. No new framework, arithmetic, host policy, timing or retained-scope reduction is authorized. Root owns the next checkpoint before further work.
+
+## Sol attempt 2 implementation and focused evidence
+
+Sol corrected the four finite Astra groups on clean pushed base `f0dac1071c3eb1e6daab14275dde080fbf1cb8c8`. Graph pairing now compares equal-length ordered track identities while validating PostFader/PostMatrix on every lane; the impossible full-node equality is gone. The unchanged `chains_into` proof still decides adjacency. Both factory-decline arms initialize the chain from the first fader slot's scratch and active mask before retaining the original processors in order.
+
+The separate and composite owners now call one local helper per queue. The composite drains fader then matrix exactly once, preserves the established matrix-error ordering, decides settlement only after both drains, and calls bank arithmetic directly for whole-call fallback. It restores `SEAM_SIDE_WITNESS`, does not add one-plane processing, and retains two logical stage counter contributions. The settled builtins bridge and its arithmetic are unchanged from attempt 1.
+
+The independent C-API primitive oracle now restates the outer owner as two typed box pointers and charges one actual mirror per potentially pairable fader bank while retaining both original processor and consumer-array rows. The resulting 32 bytes per nine-track prepared candidate are graph-plan payload; builtin preparation ownership remains independently 9,963 bytes.
+
+Two focused product witnesses were added. The compiler test renders actual serialized W4 and W8 tail cohorts through preparation, graph binding and `PreparedRenderPlan::render`, compares exact PCM with Concurrent forced-separate plans, and observes both factory selection and composite execution. The exact temporary mutation `&& left.members == right.members` restored Luna's unreachable predicate; the same mechanism assertion failed `left: 0, right: 1` with exit 101. The mutation was removed and the final source passed; the failure log is `/tmp/sol430-pair-mutation.log`. The WebEngine test submits real fader and matrix records in one batch and proves both affect the first sample of the single acknowledged application block.
+
+Focused executed evidence, all with `PATH=/home/bl/.cargo/bin:$PATH` and `CARGO_TARGET_DIR=/tmp/sol430-target`:
+
+- `cargo test --locked -p builtins-compiler --lib`: exit 0, 18 tests, including actual selection, W4/W8 tail bit identity, delivery metadata and resource boundaries.
+- `cargo test --locked -p builtins --test stage --test fader_ramp --test matrix --test input_liveness_mono`: exit 0, 35 tests covering full W4/W8 arithmetic, tails, immediate/ramped/mid-ramp/reset/mute/unmute state and PCM, false bridge fallback, recovery and seam behavior.
+- `cargo test --locked -p builtins-compiler --features test-support --test allocation_tracker`: exit 0, 2 tests; the installed tracker observed the preparation allocations/frees and matched retained layouts/caps.
+- `cargo test --locked -p host-web --lib` focused command acknowledgement, fader, mute, backpressure, paired fader+matrix and meter cases: each executed test exit 0. The new paired case passed in debug and release.
+- `cargo test --locked -p host-core --test input_liveness_console --test symmetry_witness`: exit 0, 21 tests; asymmetric seam output, live drain/disengagement and recovery remained green.
+- `cargo test --locked -p console-workload --test chain_shape`: exit 0, 21 tests; observed/aliased/collapsed cohorts and compatible unobserved cohorts remained green.
+- `cargo test --locked -p graph --lib` and `cargo test --locked -p graph --test rt1_direct_bank_alloc`: exit 0, 52 and 1 tests; structural declines, ownership reuse, observation/dataflow barriers, exact PCM and zero render allocation remained green.
+- `cargo test --locked -p capi --test resource_lifecycle`: debug and release exit 0, 4 tests each; retained/peak/largest coverage, exact-cap/one-below refusal, and positive allocation plus deallocation disposal balance passed.
+- Release actual-selection test: exit 0. `cargo fmt --all -- --check`, `bash scripts/check-realtime-policy.sh`, `bash scripts/check-builtins-policy.sh`, and `bash scripts/check-workspace-policy.sh`: exit 0. The realtime policy counted 42 marked regions in 12 files.
+
+The first policy invocation without `bash` returned 126 because the script is not executable, and a second builtins-policy invocation without the Cargo PATH returned 127; both invocation errors were corrected as shown above and do not represent a source failure. No full workspace, supported-target, artifact, benchmark, Git or GitHub action was performed. Root still owns the exact-path checkpoint and immutable qualification after Astra source review.

@@ -1350,8 +1350,8 @@ use rack::{AoSoaScratch, BankBlock, BankSlot, BankStage, ConsoleEffectBankStage,
 
 use crate::{
     GraphNodeBinding, GraphNodeId, GraphPreparedBuiltinBank, GraphPreparedBuiltinBankProcessor,
-    GraphPreparedEffectBank, GraphSpec, PreparedRoute, RouteTransform,
-    program::{ExecutionProgram, Op}, TrackStage,
+    GraphPreparedEffectBank, GraphSpec, PreparedRoute, RouteTransform, TrackStage,
+    program::{ExecutionProgram, Op},
 };
 
 /// Adapter that lets a compiler-owned builtin bank act as a chain slot.
@@ -1622,28 +1622,47 @@ impl RuntimeParts {
                     (Membership::Builtin(a), Membership::Builtin(b)) => {
                         let left = self.builtin_banks[a].as_ref().expect("builtin owner");
                         let right = self.builtin_banks[b].as_ref().expect("builtin owner");
-                        let left_stage = left.members.first().and_then(|n| match n { GraphNodeId::TrackStage { stage, .. } => Some(*stage), _ => None });
-                        let right_stage = right.members.first().and_then(|n| match n { GraphNodeId::TrackStage { stage, .. } => Some(*stage), _ => None });
-                        left_stage == Some(TrackStage::PostFader)
-                            && right_stage == Some(TrackStage::PostMatrix)
+                        let same_tracks = left.members.len() == right.members.len()
+                            && left.members.iter().zip(right.members.iter()).all(|(left, right)| {
+                                matches!((left, right),
+                                    (GraphNodeId::TrackStage { track_id: left_id, stage: TrackStage::PostFader },
+                                     GraphNodeId::TrackStage { track_id: right_id, stage: TrackStage::PostMatrix })
+                                    if left_id == right_id)
+                            });
+                        same_tracks
                             && left.backend == right.backend
                             && left.scratch.width() == right.scratch.width()
                             && left.scratch.quantum() == right.scratch.quantum()
-                            && left.members == right.members
                     }
                     _ => false,
                 }
-            } else { false };
+            } else {
+                false
+            };
             if pair {
-                let a = match run[index] { Membership::Builtin(i) => self.builtin_banks[i].take().expect("builtin owner"), _ => unreachable!() };
-                let b = match run[index + 1] { Membership::Builtin(i) => self.builtin_banks[i].take().expect("builtin owner"), _ => unreachable!() };
+                let a = match run[index] {
+                    Membership::Builtin(i) => self.builtin_banks[i].take().expect("builtin owner"),
+                    _ => unreachable!(),
+                };
+                let b = match run[index + 1] {
+                    Membership::Builtin(i) => self.builtin_banks[i].take().expect("builtin owner"),
+                    _ => unreachable!(),
+                };
                 let scratch_a = a.scratch;
                 let active_a = trailing_active_mask(members, scratch_a.width());
                 let factory = a.processor.pair_factory();
                 let (slot_scratch, slot_active, stage) = match factory {
                     Some(factory) => match factory(a.processor, b.processor) {
-                        Ok(processor) => (scratch_a, active_a, Box::new(BuiltinStage(processor)) as Box<dyn BankStage>),
+                        Ok(processor) => (
+                            scratch_a,
+                            active_a,
+                            Box::new(BuiltinStage(processor)) as Box<dyn BankStage>,
+                        ),
                         Err((left, right)) => {
+                            if scratch.is_none() {
+                                scratch = Some(scratch_a);
+                                active = Some(active_a);
+                            }
                             stages.push(Box::new(BuiltinStage(left)) as Box<dyn BankStage>);
                             stages.push(Box::new(BuiltinStage(right)) as Box<dyn BankStage>);
                             index += 2;
@@ -1651,6 +1670,10 @@ impl RuntimeParts {
                         }
                     },
                     None => {
+                        if scratch.is_none() {
+                            scratch = Some(scratch_a);
+                            active = Some(active_a);
+                        }
                         stages.push(Box::new(BuiltinStage(a.processor)) as Box<dyn BankStage>);
                         stages.push(Box::new(BuiltinStage(b.processor)) as Box<dyn BankStage>);
                         index += 2;
