@@ -49,3 +49,7 @@ Read-only local numbered spec and parent amendment review. Remote synchronizatio
 ## Implementation assignment
 
 PR #424 merged and #417 closed. Root freezes merged main `1cfd49d2929b2a75f6054badebfa9979c069ae71` as the implementation base. Luna owns attempt 1 in the isolated `codex/423-graph-parser` worktree. The approved order remains #417 → #423 → #410 → #411 → #412.
+
+## Luna attempt 1 evidence
+
+Added the frozen `graph` mode to `gate_toml_dependencies` and switched `check-graph-policy.sh` to it. The mode preserves exact header, regex and `$1` behavior, including compact/no-equals rows, while existing rack/default, plain and plain-target modes remain covered. Helper tests include graph grammar, duplicate output, suffix-preserving semantic counter-mutant, checked awk/sort failures and shell-option modes; the real graph checker and graph fixture suite pass. No Rust, workflow, artifact, timing, Cargo, Git or GitHub changes were made.

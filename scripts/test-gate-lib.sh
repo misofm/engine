@@ -91,6 +91,24 @@ alpha = "1"
 ignored.workspace = true
 EOF
 [[ "$(gate_toml_dependencies "$manifest")" == $'alpha\nzeta' ]] || { echo 'dependency output is not sorted/scoped' >&2; exit 1; }
+graph_manifest="$scratch/graph.toml"
+cat >"$graph_manifest" <<'EOF'
+[dependencies]
+zeta.workspace = true
+engine.workspace=true
+engine.workspace
+bare = "1"
+  lane.workspace = true
+effect-contract.workspace = true
+[target.'cfg(unix)'.dependencies]
+target_only.workspace = true
+[dev-dependencies]
+dev.workspace = true
+EOF
+[[ "$(gate_toml_dependencies "$graph_manifest" graph)" == $'effect-contract.workspace\nengine.workspace\nengine.workspace=true\nzeta.workspace' ]] || { echo 'graph mode grammar changed' >&2; exit 1; }
+graph_mutant="$scratch/graph-strip.sh"; cp "$root/scripts/lib/gate.sh" "$graph_mutant"
+sed -i 's/\[.\]workspace//g' "$graph_mutant"
+[[ "$(bash -c 'source "$1"; gate_toml_dependencies "$2" graph' _ "$graph_mutant" "$graph_manifest")" != $'effect-contract.workspace\nengine.workspace\nengine.workspace=true\nzeta.workspace' ]] || { echo 'graph suffix-stripping counter-mutant escaped' >&2; exit 1; }
 plain_manifest="$scratch/plain.toml"
 cat >"$plain_manifest" <<'EOF'
 [dependencies]

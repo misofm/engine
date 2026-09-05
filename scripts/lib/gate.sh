@@ -161,7 +161,13 @@ gate_count_lines() {
 
 gate_toml_dependencies() {
     local manifest="$1" mode="${2:-rack}" extracted output rc awk_program
-    if [[ "$mode" == plain || "$mode" == plain-target ]]; then
+    if [[ "$mode" == graph ]]; then
+        awk_program='
+            /^\[dependencies\]$/ { in_dependencies = 1; next }
+            /^\[/ { in_dependencies = 0 }
+            in_dependencies && /^[a-zA-Z0-9_-]+[.]workspace/ { print $1 }
+        '
+    elif [[ "$mode" == plain || "$mode" == plain-target ]]; then
         awk_program='
             /^\[dependencies\]$/ || ("'"$mode"'" == "plain-target" && /^\[target[.].*[.]dependencies\]$/) { in_dependencies = 1; next }
             /^\[/ { in_dependencies = 0 }
