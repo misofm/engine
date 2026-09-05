@@ -1851,6 +1851,13 @@ impl<L: Lane> FaderRampStage<L> {
         self.ramp[channel].mute = mask_from_flags::<L>(&flags[..L::WIDTH]);
     }
 
+    #[inline(always)]
+    fn is_settled(&self) -> bool {
+        self.remaining
+            .iter()
+            .all(|channel| channel.iter().take(L::WIDTH).all(|&remaining| remaining == 0))
+    }
+
     /// Retargets one lane of one channel. D11: one division per event, never per sample.
     fn retarget(&mut self, lane: usize, channel: usize, target: f32, smoothing_samples: u32) {
         let current = lane_read::<L>(self.ramp[channel].current);
@@ -3266,6 +3273,32 @@ impl FaderMuteRampBuiltins {
         let frames = block.left.len();
         self.stage.process(block.left, block.right, frames);
         BuiltinProcessReport::default()
+    }
+
+    /// Runs the settled fader and matrix stages with the established fused scalar kernel.
+    /// Returns `false` when either stage is ramping; callers must then run the original two-stage
+    /// arithmetic for the whole block.
+    pub fn process_fader_matrix(
+        &mut self,
+        matrix: &mut MatrixBuiltins,
+        block: &mut DualMonoBlock<'_>,
+    ) -> bool {
+        if !self.stage.is_settled() || !matrix.stage.is_settled() {
+            return false;
+        }
+        let DualMonoBlock { left, right, .. } = block;
+        let frames = left.len();
+        fader_matrix_block::<f32>(
+            left,
+            right,
+            frames,
+            self.stage.ramp[0].current,
+            self.stage.ramp[0].mute,
+            self.stage.ramp[1].current,
+            self.stage.ramp[1].mute,
+            &matrix.stage.coef,
+        );
+        true
     }
 
     /// Snaps both lanes to their targets and cancels any ramp in flight.
