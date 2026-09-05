@@ -1,0 +1,60 @@
+   Compiling engine v0.1.0 (/home/bl/misofm/engine-420/crates/engine)
+   Compiling semver v1.0.28
+   Compiling dsp-reference v0.1.0 (/home/bl/misofm/engine-420/crates/dsp-reference)
+   Compiling bitflags v2.13.1
+   Compiling math v0.1.0 (/home/bl/misofm/engine-420/crates/math)
+   Compiling rustc_version v0.4.1
+   Compiling effect-runtime v0.1.0 (/home/bl/misofm/engine-420/crates/effect-runtime)
+   Compiling flatbuffers v25.12.19
+   Compiling effect-contract v0.1.0 (/home/bl/misofm/engine-420/crates/effect-contract)
+   Compiling session v0.1.0 (/home/bl/misofm/engine-420/crates/session)
+   Compiling bench-support v0.1.0 (/home/bl/misofm/engine-420/tools/bench-support)
+   Compiling rack v0.1.0 (/home/bl/misofm/engine-420/crates/rack)
+   Compiling parametric-eq v0.1.0 (/home/bl/misofm/engine-420/crates/parametric-eq)
+   Compiling transient-shaper v0.1.0 (/home/bl/misofm/engine-420/crates/transient-shaper)
+   Compiling true-peak-limiter v0.1.0 (/home/bl/misofm/engine-420/crates/true-peak-limiter)
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-420/crates/compressor)
+   Compiling builtins v0.1.0 (/home/bl/misofm/engine-420/crates/builtins)
+   Compiling gate-expander v0.1.0 (/home/bl/misofm/engine-420/crates/gate-expander)
+   Compiling multiband-compressor v0.1.0 (/home/bl/misofm/engine-420/crates/multiband-compressor)
+   Compiling delay v0.1.0 (/home/bl/misofm/engine-420/crates/delay)
+   Compiling soft-clip v0.1.0 (/home/bl/misofm/engine-420/crates/soft-clip)
+   Compiling conformance v0.1.0 (/home/bl/misofm/engine-420/crates/conformance)
+   Compiling protocol v0.1.0 (/home/bl/misofm/engine-420/crates/protocol)
+   Compiling graph v0.1.0 (/home/bl/misofm/engine-420/crates/graph)
+   Compiling rack-compiler v0.1.0 (/home/bl/misofm/engine-420/crates/rack-compiler)
+   Compiling effect-package v0.1.0 (/home/bl/misofm/engine-420/crates/effect-package)
+   Compiling builtins-compiler v0.1.0 (/home/bl/misofm/engine-420/crates/builtins-compiler)
+   Compiling effect-compiler v0.1.0 (/home/bl/misofm/engine-420/crates/effect-compiler)
+   Compiling graph-compiler v0.1.0 (/home/bl/misofm/engine-420/crates/graph-compiler)
+   Compiling console-workload v0.1.0 (/home/bl/misofm/engine-420/tools/console-workload)
+   Compiling bench v0.1.0 (/home/bl/misofm/engine-420/tools/bench)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.53s
+     Running unittests src/main.rs (target/debug/deps/bench-c884e76c7a7f3be8)
+scripts/operator/preflight-console-benchmark.sh: line 130: 1479484 Aborted                 (core dumped) MISO_ENGINE_BENCH_ROUND= "$binary" console > /dev/null 2>&1
+scripts/operator/preflight-console-benchmark.sh: line 133: 1479490 Aborted                 (core dumped) "$binary" console extra-argument > /dev/null 2>&1
+{
+  "aggregate_validator_sha256": "d4160668c3947d7ee5d3b7522673342c64429e6cff47f87344ab71cfdc2556f5",
+  "benchmark_source_sha256": "bd46ad7993e13032ea2151d1e3292e98a85ecfc236dbe7b0916c12912962a153",
+  "binary_sha256": "74b90fc015896c77be94cdd6ba37946307bdf01fa1b3f456e343e79cf78e02a0",
+  "candidate_commit": "51e2aed211b30523076e0e8dd07973b13b57dc11",
+  "candidate_commit_sha256": "616b5739d208c22b5868a54443fa36050e17522b81775f2434a08ba631c80857",
+  "fixture_generator_sha256": "28659cc563dd8e2c483f068320283c473435b68ca52667aaec90911b9f7b037e",
+  "fixture_sha256": "778d05b710510c5610fa79d63929e5af28e8717f1118f66f4c8d14947b6286d2",
+  "floor_table_sha256": "489e360c5022c56a858bbc171660c26521032c670a65c1fb8a9b473f8925000a",
+  "issue": 149,
+  "kind": "console_benchmark_preflight",
+  "measured_rounds": 2,
+  "mono_fixture_generator_sha256": "08b19ae3e3ba09586f0cca00d6053d293bc0814463200707014b3e50269abe99",
+  "mono_fixture_sha256": "17ec550da664d1fefd5b9adf10c032d70e2cb5cbc14f9af44cedeee72a3ded01",
+  "preconditions_sha256": "f90a9ae8bbe4358b33fe3f18067e849439de704baf961681a7ed75e751075626",
+  "record_validator_sha256": "bfadf1b47e079246f86e7a6c676f466d48da720e9fbdd35a12b918e1dfc58162",
+  "records_required": 46,
+  "runner_sha256": "b4e22cdd4c4081217a24e0c93d4f654d7fe17aa0215312686931d2513a15a7ea",
+  "schema_version": 1,
+  "standing_fixture_sha256": "bc1e8b0dae69a1d334180185229ab78f707361fc5d51925b2143b201e1a3d042",
+  "validator_library_sha256": "f55cbf586e57fa8d6fdfe205899941ed33810c698c319fda17d379aeff5a3251",
+  "warmup_rounds": 1,
+  "workload_launches": 0
+}
+console benchmark preflight: PASS (workload launches 0)
