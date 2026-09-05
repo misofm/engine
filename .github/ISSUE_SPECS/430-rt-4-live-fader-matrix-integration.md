@@ -334,3 +334,55 @@ Focused executed evidence, all with `PATH=/home/bl/.cargo/bin:$PATH` and `CARGO_
 - Release actual-selection test: exit 0. `cargo fmt --all -- --check`, `bash scripts/check-realtime-policy.sh`, `bash scripts/check-builtins-policy.sh`, and `bash scripts/check-workspace-policy.sh`: exit 0. The realtime policy counted 42 marked regions in 12 files.
 
 The first policy invocation without `bash` returned 126 because the script is not executable, and a second builtins-policy invocation without the Cargo PATH returned 127; both invocation errors were corrected as shown above and do not represent a source failure. No full workspace, supported-target, artifact, benchmark, Git or GitHub action was performed. Root still owns the exact-path checkpoint and immutable qualification after Astra source review.
+
+## Astra attempt 2 verdict and final Sol assignment
+
+# Astra #430 Sol attempt 2 — FAIL
+
+Exact checkpoint: `46188a3ad68c01294a461c6b784afc1a3c4431bb`, `/home/bl/misofm/engine-430-live`. Reviewed against the complete numbered #430 contract, approved post-policy five finite product gates, and `/tmp/astra-430-attempt1-review.md`.
+
+FAIL: the production corrections substantially address the prior source defects, but the new tests do not establish the frozen live product contract. The following is one bounded final Sol revision, not permission to expand scope or add a framework. Attempt 3 is the last pass; a further FAIL requires the documented hard stop/rescope.
+
+## Accepted corrections to preserve
+
+The graph now compares every ordered track identity with its corresponding PostFader/PostMatrix role, backend, width and quantum inside the existing run. It no longer compares unlike full GraphNodeIds. Both factory-decline arms initialize scratch/active from the first fader slot when necessary and retain the owners in order. `chains_into` is unchanged. The composite restores SEAM_SIDE_WITNESS without a one-plane implementation. Shared local drain helpers are used by both separate owners and the composite, preserving separate Concurrent drain locations and the stated fader-error / matrix-error arithmetic ordering. The narrow settled bridge's arithmetic remains unchanged.
+
+The resource mirror now represents the outer owner as two typed boxes, adds its actual mirror size to the existing fader charge, and retains both original owners and consumer charges. Frozen totals incorporate the conservative allowance, rather than calling the production estimator as the independent oracle. The recorded executed capi resource tests and allocation-tracker results can be retained; no new accounting redesign is required.
+
+The actual graph-selection mutation has useful causal evidence: `/tmp/sol430-pair-mutation.log` records the original positive fixture failing its factory-selection assertion (0 versus 1, cargo exit101). Current graph source no longer has that impossible predicate. Preserve that actual control and the restored positive. It proves factory reachability, not all arithmetic/state obligations below.
+
+## 1. Observe the product output and distinguish fused arithmetic
+
+`render_post_input_bits_with_delivery` attaches Capture observers at PostInputBuiltins (compiler lib.rs around4431), and returns only those upstream captures. Its new `assert_eq!(paired, separate)` therefore compares audio BEFORE the fader/matrix pair. Corrupting or skipping the composite arithmetic can leave that assertion green. Capture post-matrix/output PCM for the actual eligible pair, with nontrivial asymmetric gain/mute and crossfeed, and compare the original forced-separate arithmetic after every block. Keep any upstream capture only for its original input-stage claim.
+
+FADER_MATRIX_PROCESS_CALLS increments at entry to composite process, before either drain and before `try_process_settled_with_matrix`. It cannot distinguish the combined traversal from always taking the separate fallback. Add a private/test-only discriminator at the actual true/false arithmetic branch, retaining logical counters separately. Prove eligible W4/W8 and legal trailing population actually fuse, and ramp calls remain separate until the next settled call. Keep the actual graph-pairing-to-separate SAME-assertion control; an output-only assertion or direct helper call does not replace that live dispatch proof. Inspect actual paired membership, rather than inferring which cohort fused from the total track count.
+
+## 2. Exercise live state and both queue drains through the composite
+
+The compiler fixture constructs requests but submits no records and compares no moved-owner state or logical counters. The inherited builtins stage/fader_ramp/matrix tests do not reference `try_process_settled_with_matrix` or FaderMatrixBankProcessor. They remain useful old-arithmetic tests, not execution proof of this owner integration.
+
+Complete the already-frozen compact command sequence on actual serialized paired owners versus identical separate owners: same-queue FIFO, both queues, immediate commands, positive ramps, mid-ramp retarget, ramp ending inside the call followed by next-call fusion, gain changes while muted/unmute, and reset. Compare PCM and existing/private remembered gain/mute, matrix current/target/countdown and logical stage counters after each call. Prove false bridge fallback leaves state/DSP untouched before the old sequence runs. Include the two explicit raw-record failure-order cases using these same owners: fader error before arithmetic, and matrix error preserving completed fader arithmetic/counters without matrix arithmetic. No new public readback API is required.
+
+The new WebEngine test earns its actual two-command admission/sample observation; do not discard it. A one-track fixture can form a legal partial builtin bank, so it is not rejected merely for its track count. However the test does not assert composite/combined selection or connect the live sequence to the new mechanism. Add the smallest existing-fixture witness/link needed to prove the acknowledged two-queue block reaches the paired path. Retain existing rejection/backpressure tests without redesigning admission.
+
+## 3. Make the frozen observation/decline and seam controls applicable
+
+Only two new semantic tests were added (compiler selection and WebEngine batch); no new factory/graph-decline or meter/send paired controls appear in this checkpoint. Old structural tests cannot by themselves prove the newly reachable factory's successful or declined ownership route.
+
+Complete the named controls from attempt1: wrong concrete type/shape/policy returns the original owners unchanged and in order; graph member/order/hole declines preserve separate execution; first-pair factory decline must execute with scratch initialized when the chain starts at PostFader (not hidden by an earlier input stage). Preserve the existing dataflow predicate; no new graph architecture is needed.
+
+Extend the existing post-fader meter/send/alias fixtures using serialized owners: nonempty published meter windows and post-fader-send PCM against the original separate reference, while another compatible unobserved cohort demonstrably fuses. Retain nonunity send plus crossfeed, aliased observer refusal and allowed post-matrix observation. Existing host-core input_liveness_console and symmetry_witness fixtures prepare through `prepare_host_session_with_console`, the default Concurrent path; their green results preserve that fallback but do not prove composite seam/recovery behavior. Apply the existing recovery/mono/asymmetric-right cases to an actually selected pair as required by the frozen gate.
+
+## 4. Audit allocations on this actual product and retain focused evidence
+
+`crates/graph/tests/rt1_direct_bank_alloc.rs` installs a real allocator and proves positive alloc/free liveness, but its prepared processor is the local IdentityBank. The only #430 change there forwards Any; it never executes this composite. Similarly preparation allocation tracking is not a repeated render allocation proof.
+
+Reuse the installed audit in an existing appropriately isolated fixture to render actual selected serialized pairs repeatedly, including eligible, ramp and observation-fallback calls; prove zero allocations AND frees and retain positive allocator liveness outside render. Avoid shared process-global test interference and do not arm allocation counting around allocating capture observers (the current compiler Capture uses Mutex/Vec). No second framework is needed.
+
+Execute the affected compact tests in debug/release plus the already-required realtime/lane/unfused/workspace/resource checks, saving command/status/source evidence. The spec currently records broad passing inherited suites; relabel their exact coverage candidly instead of claiming they execute composite state, seam or allocation paths. During this read-only review the readily named retained #430 files were the root attempt1 check log and the actual selection-mutant log; preserve the final pass's positive logs rather than depending solely on a handoff summary. Do not claim a missing log itself is a runtime defect.
+
+These four groups complete previously frozen claims; no new arithmetic, host policy, unsafe code, observation API, resource framework or timing is authorized. Full immutable workspace/targets/artifact/browser qualification remains root-owned and follows source PASS. #443/#444/#431 and broad RT-4/#349 stay retained.
+
+Review actions: inspected full numbered scope/prior verdict, cumulative source and final revision, actual compiler/host fixtures, old allocator and Concurrent recovery seams, resource mirrors, and retained mutation evidence. No tests/builds/timing, source changes or Git/GitHub mutations were performed. Only this /tmp report was written.
+
+Root integrated delivered main `5a4a7d2071194cf6118241e24d073824668e3387` after the clean attempt-2 checkpoint and review. The incoming #427 delta is tooling/evidence only; the reviewed runtime source is unchanged. Root assigns Sol attempt 3 for the four original-contract correction groups above. This is the final coherent pass in this series; a FAIL requires preserving the checkpoint, hard stop and explicit bounded rescope. No fourth retry, new product scope or weaker acceptance is authorized. Previous broad inherited test results retain only their actual coverage, as corrected by this verdict.
