@@ -55,3 +55,28 @@ Review inspected the numbered local spec, parent hard-stop amendment and worktre
 ## Luna attempt 1 source evidence
 
 Implemented complete-stride capacity `(max_id + 1) * stride` with checked arithmetic, retaining existing validation and fold consumers. Added exact [0]/[0,1] boundaries, one-sided capacity cases, and a graph test-only provider wrapper whose `fold_plane` panics while delegating `fold_cohort` to `ArenaMembers`; an all-active `BankChain` dispatches once and matches the reduction oracle bit-for-bit. Focused rack and graph debug/release tests, release console chain fixtures, release lane identity tests, rack/graph/realtime policies, and clippy passed. No runner, artifact, timing, workspace-wide, or Git operation was performed.
+
+## Astra attempt 1 verdict — FAIL; bounded Sol evidence revision
+
+# Astra #422 attempt 1 review
+
+**FAIL at exact pushed `1750d02948ee296369eba472b55c65b0e4545490`.** Luna's fresh bounded attempt is consumed; Sol may complete the specifically missing evidence in one revision. No timing/full-workspace/artifact promotion yet.
+
+The source correction is sound by inspection: constructor, default callback and graph callback now agree on checked `(max_id + 1) * stride` capacity. Count/uniqueness/frames/stride checks and checked accessor remain. No new unsafe, arithmetic change, producer witness change or render allocation is introduced. The actual graph-wrapper test now records cohort calls and panics if BankChain selects fold_plane, while delegating fold_cohort to the real ArenaMembers implementation. This is the previously missing dispatch discriminator and should be preserved.
+
+The very small numbered completion nevertheless explicitly assigned exact boundary and provider-equivalence cases that are not present:
+
+- The `[0]`, stride4, frames2 successful test passes both EIGHT-element arrays. It does not test the required exact FOUR-element accepted boundary. The new two-element/one-sided rejections and `[0,1]` eight-element success are useful, but do not establish that an overstrict minimum cannot reject a legal one-lane request.
+- The only overflow input remains `[usize::MAX]`, stride2: after this change it fails checked addition first. There is no distinct multiplication-overflow input with max_id+1 representable.
+- No new paired default/override exact-capacity/excess-padding/holey-stride test was added. The old repeated bank matrix uses frames equal to stride, and the old strided-tail test exercises only the default provider at two contiguous IDs. Neither proves the numbered strided/excess-padded accepted-domain equivalence and untouched padding for both providers. New boundary arrays are zeros and have no before/after assertion; the poison assertions still refer to different arrays from the new capacity cases.
+- The graph wrapper test's expected values are manually accumulated from zero and compared with float equality. The numbered gate explicitly required the existing route/reduction oracle with bitwise comparison. Preserve its dispatch panic/counter, but derive expected output using existing mix2x2 plus sum2/sum_into or unchanged reduce_plane in the existing test style. This is a minimal test adjustment, not a new numeric corpus.
+
+## Bounded Sol revision
+
+Keep the working capacity formula and wrapper source. Complete only the named existing inline tests: exact `[0]` length4 acceptance; distinct checked-add and checked-multiply overflow controls; poisoned new rejection arrays with to_bits preservation; one compact table covering contiguous and holey IDs, exact and excess-padded capacities with frames<stride, using the ACTUAL default-only provider and cohort override. Compare both-plane PCM/call order/count bitwise and assert stride-tail/hole/extra sentinels where present. Constructor failures happen before either callback. Keep earlier cases rather than replacing them with these boundaries.
+
+Adjust the graph wrapper's oracle as above while retaining the explicit fold_plane rejection and exactly one actual cohort call. No production telemetry, helper, dependency or lane-kernel changes. These are precisely the numbered acceptance cases, not wider coverage added at review.
+
+Run the frozen focused suites/policies/fmt/clippy proportionally, checkpoint and obtain one attempt-2 verdict. Root retains all parent #419 qualification and delivery obligations. Do not reinterpret this source-only correction as full RT-2 acceptance; no benchmark or artifact work yet. Two Sol attempts maximum remain under #422, with the same hard-stop rule.
+
+Review used read-only source/spec inspection and root-supplied focused results; no Cargo, tests, timing, Git/GitHub or repository mutation.
