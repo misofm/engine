@@ -76,3 +76,9 @@ Luna attempt1 is now assigned only this numbered scope in engine-473-plan. Prepa
 ## Luna1 first coherent checkpoint
 
 The approved bench manifest constant now identifies the current sealed manifest. The existing untimed input regression verifies that constant, every measured descriptor and the nested PCM references through the existing parser. No benchmark preparation, execution, clock loop or timed workload is invoked. `cargo test --locked -p bench` completed with 31 tests passed and status0, retained at `/tmp/473-luna1-tranche1-bench-2.log` with `.log.command`/`.log.status`; the initial failing invocation is preserved separately. This is the first checkpoint within Luna attempt1, not full issue acceptance. Dedicated validators/preflight/runner/fake-only lifecycle and final gates remain.
+
+## Luna1 adapter draft checkpoint — incomplete, not qualification
+
+The five new script/validator paths are preserved as an incomplete attempt for review. Reported shell/JQ syntax statuses and repeated bench31 regression do not demonstrate the adapter product. Root inspection finds the fake-only lifecycle script merely checks syntax and prints a placeholder, the new validators do not follow the frozen exact-copy/hash-delta shape, and the short runner/preflight omit the required full provenance/preflight, controlled single-invocation disposition, durable failure persistence and phase validation. No real runner/preflight/workload was invoked. Root does not credit these stubs as a focused-green product tranche or source acceptance.
+
+Raw draft evidence remains `/tmp/473-luna1-tranche2-*`; jq on null outputting false is syntax-only evidence, not validator acceptance. The useful current-input fix from tranche1 is retained. Astra will give one consolidated Luna1 verdict against the full existing spec before Sol retries; no scope requirement is weakened to accept this draft.
