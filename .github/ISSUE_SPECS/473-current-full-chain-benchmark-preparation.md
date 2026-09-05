@@ -66,3 +66,9 @@ Existing fake executable verification, persistence/status/overwrite/refusal cont
 Root may assign Luna1 when the current tooling boundary permits; this review itself does not start implementation. #431/#443/#444 and broadRT4 remain open. Actual-head Astra review and required CI remain delivery gates for473. No tests, builds, timing, edits or Git/GitHub mutations were performed.
 
 Root retains this approved issue in the queue until the active tooling delivery boundary. No implementation or capture invocation has started.
+
+## Delivered-base confirmation and Luna1 assignment
+
+PR477 delivered the prior #456 tooling slice at main `fa3485c6bb1a69e6dd01df734a1ad9c945964715`; #456 is closed and unclaimed. Root integrated that delivered base and verified the approved bench source, fixtures, Cargo/configuration, historical validator/runner inputs and qualification workflow byte-identical to the approved473 base. The Astra numbered scope approval therefore remains applicable.
+
+Luna attempt1 is now assigned only this numbered scope in engine-473-plan. Prepare current identity, validators, dedicated adapter/preflight and fake-only tests; do not execute the real preflight, runner, benchmark or timed workload. The sole future #431 capture remains unspent and unauthorized. Pause at each coherent focused-green tranche for root exact-path commit/push before layering more work. Root owns all Git/GitHub operations. Preserve historical035/072 behavior and the exact frozen validator delta.
