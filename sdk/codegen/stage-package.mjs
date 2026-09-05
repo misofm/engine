@@ -61,4 +61,9 @@ await copyFile(
   resolve(sdkRoot, "dist", "browser", "shipped-host.d.ts"),
 );
 await copyFile(resolve(repoRoot, "LICENSE"), resolve(sdkRoot, "dist", "LICENSE"));
+await copyFile(
+  resolve(sdkRoot, "src", "browser-assets", "miso-engine-v1-pcm-feed-worklet.js"),
+  resolve(destination, "miso-engine-v1-pcm-feed-worklet.js"),
+);
+await copyFile(resolve(repoRoot, "NOTICE"), resolve(sdkRoot, "dist", "NOTICE"));
 console.log(`staged ${expected.length} Engine V1 artifacts and package manifest`);
