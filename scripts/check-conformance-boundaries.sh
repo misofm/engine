@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 # Enforce the issue-002 oracle boundary: production code cannot use the f64 reference/harness.
 set -euo pipefail
+script_directory="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$script_directory/lib/gate.sh"
 cd "${1:-.}"
+GATE_FAILURE_PREFIX='conformance boundary failure'
 
-if rg -q '^\[dependencies\]' crates/dsp-reference/Cargo.toml; then
+reference_dependency_heading="$(gate_scan_collect 'reference dependency heading scan' '^\[dependencies\]' '' crates/dsp-reference/Cargo.toml)" || exit $?
+if [[ -n "$reference_dependency_heading" ]]; then
     printf 'conformance boundary failure: f64 reference must have zero dependencies\n' >&2
     exit 1
 fi
@@ -14,16 +18,22 @@ fi
 # `use` scan below are driven off the workspace's own manifests instead of a hand-maintained
 # string -- a hardcoded list here would just be a new instance of the same staleness hazard.
 workspace_crate_dir() {
-    local crate="$1" candidate
+    local crate="$1" candidate matches=''
     for candidate in crates hosts tools sidecars; do
-        [[ -d "$candidate/$crate" ]] && { printf '%s\n' "$candidate/$crate"; return; }
+        [[ -d "$candidate/$crate" ]] && matches+="$candidate/$crate"$'\n'
     done
-    return 1
+    matches="${matches%$'\n'}"
+    [[ -n "$matches" && "$matches" != *$'\n'* ]] || return 1
+    printf '%s\n' "$matches"
 }
 
 workspace_lib_names() {
+    local manifests manifest found rc names=''
+    manifests="$(gate_find_collect 'workspace library manifest discovery' crates hosts tools sidecars -name Cargo.toml -type f)" || return $?
+    [[ -n "$manifests" ]] || { gate_fail 'workspace library manifest discovery returned no manifests'; return 1; }
+    manifests="$(gate_sort_lines 'workspace library manifest discovery' "$manifests")" || return $?
     while IFS= read -r manifest; do
-        awk '
+        if found="$(awk '
             /^\[lib\]$/ { in_lib = 1; next }
             /^\[/ { in_lib = 0 }
             in_lib && /^name[[:space:]]*=/ {
@@ -33,8 +43,12 @@ workspace_lib_names() {
                 print value
                 exit
             }
-        ' "$manifest"
-    done < <(find crates hosts tools sidecars -name Cargo.toml -type f) | sort -u
+        ' "$manifest")"; then rc=0; else rc=$?; fi
+        [[ "$rc" == 0 ]] || { gate_fail "library name extraction failed for $manifest (awk status $rc)"; return "$rc"; }
+        [[ -z "$found" ]] || names+="$found"$'\n'
+    done <<<"$manifests"
+    names="$(gate_sort_lines 'workspace library name aggregation' "$names")" || return $?
+    gate_unique_nonempty_lines 'workspace library name aggregation' "$names"
 }
 
 # Manifests carry the package name (hyphens); code carries the crate identifier (underscores).
@@ -49,8 +63,14 @@ for production in "${production_crates[@]}"; do
         exit 1
     }
     manifest="$crate_dir/Cargo.toml"
-    [[ -f "$manifest" ]] || continue
-    if rg -n '^(dsp-reference|conformance)([[:space:]]|\.workspace)' "$manifest"; then
+    [[ -f "$manifest" ]] || { printf 'conformance boundary failure: missing manifest for %s\n' "$production" >&2; exit 1; }
+    [[ -d "$crate_dir/src" ]] || { printf 'conformance boundary failure: unreadable source root for %s\n' "$production" >&2; exit 1; }
+    source_files_raw="$(gate_find_collect "$production source discovery" "$crate_dir/src" -maxdepth 1 -name '*.rs' -type f -readable)" || exit $?
+    [[ -n "$source_files_raw" ]] || { printf 'conformance boundary failure: unreadable source root for %s\n' "$production" >&2; exit 1; }
+    manifest_harness="$(gate_scan_collect "$production manifest harness predicate" \
+      '^(dsp-reference|conformance)([[:space:]]|\.workspace)' '' "$manifest")" || exit $?
+    if [[ -n "$manifest_harness" ]]; then
+        printf '%s\n' "$manifest_harness" >&2
         printf 'conformance boundary failure: %s must not depend on a harness crate\n' \
             "$manifest" >&2
         exit 1
@@ -66,15 +86,21 @@ for production in "${production_crates[@]}"; do
     harness_names=(dsp_reference conformance)
     filtered_harness_names=()
     for harness_name in "${harness_names[@]}"; do
-        if rg -q "^[[:space:]]*(pub(\([^)]*\))?[[:space:]]+)?mod[[:space:]]+${harness_name}\\b" \
-            "$crate_dir/src"/*.rs 2>/dev/null; then
+        module_probe="$(gate_scan_collect "${production} ${harness_name} module probe" \
+            "^[[:space:]]*(pub(\\([^)]*\\))?[[:space:]]+)?mod[[:space:]]+${harness_name}\\b" '' ${crate_dir}/src/*.rs)" || exit $?
+        if [[ -n "$module_probe" ]]; then
             continue
         fi
         filtered_harness_names+=("$harness_name")
     done
     harness_pattern="$(IFS='|'; printf '%s' "${filtered_harness_names[*]}")"
-    if [[ -n "$harness_pattern" ]] && { rg -n "\\b(${harness_pattern})::" "$crate_dir/src" 2>/dev/null || true; } |
-        rg -v ':[0-9]+:[[:space:]]*//'; then
+    if [[ -n "$harness_pattern" ]]; then
+        harness_uses="$(gate_scan_collect "${production} harness use scan" "\\b(${harness_pattern})::" '' "$crate_dir/src")" || exit $?
+        filtered_uses="$(gate_filter_exclude "${production} harness comment filter" ':[0-9]+:[[:space:]]*//' "$harness_uses")" || exit $?
+    else
+        filtered_uses=''
+    fi
+    if [[ -n "$filtered_uses" ]]; then
         printf 'conformance boundary failure: %s production code must not use a harness crate\n' \
             "$crate_dir" >&2
         exit 1
@@ -83,7 +109,8 @@ done
 # Captured rather than gated directly on rg's own exit code: `rg` exits 2 (not just the usual
 # 0/1) when a search root does not exist, e.g. a hermetic fixture with no sidecars/, and a bare
 # `if rg ...; then` reads that the same as "no match" instead of "the scan could not run".
-harness_matches="$(rg -n '\b(dsp-reference|dsp_reference|conformance)\b' hosts sidecars || true)"
+[[ -d hosts && -d sidecars ]] || { printf 'conformance boundary failure: required hosts/sidecars roots missing\n' >&2; exit 1; }
+harness_matches="$(gate_scan_collect 'hosts/sidecars harness scan' '\b(dsp-reference|dsp_reference|conformance)\b' '' hosts sidecars)" || exit $?
 if [[ -n "$harness_matches" ]]; then
     printf '%s\n' "$harness_matches" >&2
     printf 'conformance boundary failure: hosts/sidecars must not depend on harness crates\n' >&2
@@ -95,24 +122,14 @@ fi
 # `dsp-reference` and `conformance` are excluded: the former is itself, the latter is the harness
 # that is allowed to depend on the reference (never the reverse), so neither belongs in a list of
 # crates the reference must not call.
-forbidden_uses="$(workspace_lib_names | rg -v '^(dsp_reference|conformance)$' | paste -sd '|' -)"
-if rg -n "^use[[:space:]]+($forbidden_uses)\\b" crates/dsp-reference/src; then
-    printf 'conformance boundary failure: reference must not call a production kernel\n' >&2
-    exit 1
-fi
+library_names="$(workspace_lib_names)" || exit $?
+[[ -n "$library_names" ]] || { printf 'conformance boundary failure: no workspace library names found\n' >&2; exit 1; }
+forbidden_uses="$(gate_filter_exclude 'reference library-name filter' '^(dsp_reference|conformance)$' "$library_names")" || exit $?
+forbidden_uses="$(gate_join_lines 'reference library-name pattern aggregation' '|' "$forbidden_uses")" || exit $?
+[[ -n "$forbidden_uses" ]] || { printf 'conformance boundary failure: no production library names found\n' >&2; exit 1; }
+gate_scan_forbidden 'reference production use scan' "^use[[:space:]]+($forbidden_uses)\\b" '' crates/dsp-reference/src || exit $?
 
-dependency_names() {
-    awk '
-        /^\[dependencies\]$/ || /^\[target[.].*[.]dependencies\]$/ { dependencies = 1; next }
-        /^\[/ { dependencies = 0 }
-        dependencies && /^[A-Za-z0-9_-]+(\.workspace)?[[:space:]]*=/ {
-            name = $0
-            sub(/[[:space:]]*=.*/, "", name)
-            sub(/\.workspace$/, "", name)
-            print name
-        }
-    ' "$1" | sort
-}
+dependency_names() { gate_toml_dependencies "$1" plain-target; }
 
 # #84 phase A: conformance drives lane-generic effect checks, so the Lane trait is in-boundary.
 # Sorted alphabetically by the *current* (post-prefix-strip) name -- `engine` (formerly `core`,
