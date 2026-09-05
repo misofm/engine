@@ -163,3 +163,31 @@ No scope outcome was lost: #140 retains production controller sequence transfer/
 Allowed implementation remains protocol queue internals, one narrow service/module/export surface and focused protocol tests/evidence. No host/controller enablement, SPSC implementation change, new dependency, native endpoint, wire change, runtime DSP or timing is authorized. Current #459 and independent tooling retain ownership until their delivery boundary. After the future base check, normal Luna1/Sol2–3 and hard-stop review rules apply.
 
 No implementation, tests, builds, timing, repository/spec changes or Git/GitHub mutations were performed; only this /tmp review was written.
+
+
+## Delivery-base preflight while PR #466 awaits CI
+
+# Astra #460 delivery-base preflight — sufficient, no scope adjustment
+
+Read-only comparison of queued planning head `7508478b507ad9b6acc0fc2cf4fbf9ff78adcbf9` in `/home/bl/misofm/engine-140-ownership` against accepted PR466 head `a2bc849514724c8c85e41afa48970a281818d088`. The planning tree is clean. This is readiness conditional on actual #430/#459 delivery and root freezing/integrating that delivered base; it does not authorize implementation before the runtime WIP boundary.
+
+No relevant source drift was found. Protocol sources (including queue/controller/control types), engine SPSC, host-core control provider, workspace/package Cargo and configuration inputs are unchanged between these trees. PR466 changes live builtin/graph pairing, existing tests and host test-support/artifact consumers; it does not change #460's admission, reliable reservation, control ownership or transport seam. The queued #460 changes since its earlier numbered approval are confined to its own spec. No implementation is hidden in the planning tree.
+
+The concrete source seams remain exactly those briefed: queue.rs807 admits/validates fixed batches;835 is the legacy reservation-releasing dequeue;920 reserves reliable-event capacity;944 commits reserved reliable slots;1101 supplies the existing admission grammar/density/interval validation. Controller owns ProtocolQueues and exposes its existing queues_mut at2538, which is why the new owner must be exclusive and cannot expose that raw escape or also be installed in the controller. Engine SPSC still allocates physical capacity+1 and provides actual separate producer/consumer endpoints. No graph/builtin API migration is needed for this service.
+
+## Effective frozen contract for assignment
+
+Read the whole numbered body with its final cancellation amendment and root adoption taking precedence over preliminary signatures:
+
+- The opt-in control owner exclusively owns ProtocolQueues and the sole admission/reservation ledger. B bounds outstanding tickets until terminal consumption, not resident SPSC occupancy. Handed-off/full/partially applied batches retain original full-ticket density/interval reservations until their exact terminal disposition is consumed. Unsupported mixed batches remain whole, owned, FIFO-blocking and cancelable.
+- The narrow generic `P: Copy + Send + 'static` core is the one ticket/credit lifecycle. The automation adapter indexes its existing metadata by that same ticket and cannot independently retire/reuse it. Use actual preallocated SPSC ownership and fixed render pending data; no mutable raw automation escape, callback-driven admission or second validation table.
+- Effective preparation includes `initial_reliable_event_sequence`, validated before publication. This is the sole standalone reliable sequence authority, not a second cursor alongside an active controller. Future production integration must transfer/unify the existing authority explicitly; it is outside #460.
+- Effective begin_cancel takes reason AND event_revision, validates M-event headroom, reserves M actual reliable credits plus barrier request/ack credit before committing anything, and leaves state unchanged on refusal. Control retains ReliableEventReservations; render never receives its Arc or a protocol/event producer.
+- Pending cancellation freezes/reconciles the original ticket set, including terminal returns not yet collected. Complete follows the actual matching boundary ack AND control-side publication of K existing automation_canceled slots in admission order, with exactly K consecutive sequences. Applied-only tickets emit none. Release unused credits and each original admission reservation exactly once after reconciliation; collect_terminal and copied-token drop cannot bypass publication.
+- Charge all real physical storage, copies, ledgers, pending arrays, SPSC capacity+1 backing and maximum single allocation. No default host/CAPI allocation increase merely from defining this opt-in service. Preserve legacy dequeue/controller/wire/admission behavior and production host enablement state.
+
+The approved finite identity/capacity/overlap/density/cancellation/backpressure/sequence/actual two-owner/zero-allocation and SAME-assertion controls remain sufficient. No new tests, framework, target matrix or architecture decision is added by this preflight. Allowed work remains narrow protocol queue internals/service/export/tests/evidence; no SPSC implementation change, dependency expansion, native endpoint, builtins/DSP application, host/controller enablement or wire change.
+
+#140 retains exact Point/segment DSP application, controller sequence/lifecycle integration, canonical/transient semantics and host rollout. #444 retains native endpoint/cutoff/late behavior and native bank plus concurrent scalar pairing. Neither parent nor IO-5/RT-4 closes from #460's ownership service. After PR466 actually merges, root should record the resulting exact integrated base and confirm no intervening relevant source delta before Luna attempt1. The standard Astra review, Sol2/3 fallback and hard stop remain unchanged.
+
+No repository/spec/Git/GitHub mutations, integration, tests, builds or timing were performed; only this /tmp report was written.
