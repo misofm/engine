@@ -1,0 +1,11 @@
+--- scripts/check-effect-interchange-benchmark-108.sh	2026-09-05 13:05:59.828998577 +0000
++++ /tmp/tmp.hozvH88A9J	2026-09-05 13:09:50.937164121 +0000
+@@ -61,7 +61,7 @@
+         return 1
+     else
+         local status=$?
+-        if [[ "$status" -ne 1 ]]; then
++        if [[ "$status" -eq 0 ]]; then
+             printf 'effect interchange benchmark 108 policy failure: Issue-108 namespace scan failed (rg status %s)\n' "$status" >&2
+             return "$status"
+         fi

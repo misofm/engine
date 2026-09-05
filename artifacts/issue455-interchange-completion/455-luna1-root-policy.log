@@ -1,0 +1,6 @@
+effect interchange qualification policy mutations: ok
+namespace-error-sentinel
+effect interchange benchmark 108 policy failure: Issue-108 namespace scan failed (rg status 2)
+namespace-error-sentinel
+effect interchange benchmark 108 policy mutations: ok synthetic_only=1
+effect interchange benchmark runner: missing tool rustc

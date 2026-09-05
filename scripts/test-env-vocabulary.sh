@@ -219,8 +219,8 @@ VOCAB_TR|vocabulary delimiter removal failed (tr status 7)|${family}CPU_MODEL
 DOCUMENTED_SORT|documented-name sort failed (sort status 7)|${family}CPU_MODEL
 COMM23|undocumented-name comparison failed (comm status 7)|
 COMM13|unused-name comparison failed (comm status 7)|
-COUNT|documented-name count failed (wc status 7)|99
-COUNT_TR|documented-name count formatting failed (tr status 7)|99
+COUNT|documented-name count failed (wc status 7)|114
+COUNT_TR|documented-name count formatting failed (tr status 7)|114
 EOF
 
 saved_case_root="$case_root"; case_root="$scratch/non-git-operation"; cp -R "$saved_case_root" "$case_root"; rm -rf "$case_root/.git"
