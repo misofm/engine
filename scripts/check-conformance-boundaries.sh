@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Enforce the issue-002 oracle boundary: production code cannot use the f64 reference/harness.
 set -euo pipefail
-cd "${1:-.}"
 script_directory="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$script_directory/lib/gate.sh"
+cd "${1:-.}"
 GATE_FAILURE_PREFIX='conformance boundary failure'
 
-if gate_scan_collect 'reference dependency heading scan' '^\[dependencies\]' '' crates/dsp-reference/Cargo.toml >/dev/null; then :; else rc=$?; exit "$rc"; fi
-if rg -q '^\[dependencies\]' crates/dsp-reference/Cargo.toml; then
+reference_dependency_heading="$(gate_scan_collect 'reference dependency heading scan' '^\[dependencies\]' '' crates/dsp-reference/Cargo.toml)" || exit $?
+if [[ -n "$reference_dependency_heading" ]]; then
     printf 'conformance boundary failure: f64 reference must have zero dependencies\n' >&2
     exit 1
 fi
@@ -18,11 +18,13 @@ fi
 # `use` scan below are driven off the workspace's own manifests instead of a hand-maintained
 # string -- a hardcoded list here would just be a new instance of the same staleness hazard.
 workspace_crate_dir() {
-    local crate="$1" candidate
+    local crate="$1" candidate matches=''
     for candidate in crates hosts tools sidecars; do
-        [[ -d "$candidate/$crate" ]] && { printf '%s\n' "$candidate/$crate"; return; }
+        [[ -d "$candidate/$crate" ]] && matches+="$candidate/$crate"$'\n'
     done
-    return 1
+    matches="${matches%$'\n'}"
+    [[ -n "$matches" && "$matches" != *$'\n'* ]] || return 1
+    printf '%s\n' "$matches"
 }
 
 workspace_lib_names() {
@@ -45,7 +47,8 @@ workspace_lib_names() {
         [[ "$rc" == 0 ]] || { gate_fail "library name extraction failed for $manifest (awk status $rc)"; return "$rc"; }
         [[ -z "$found" ]] || names+="$found"$'\n'
     done <<<"$manifests"
-    gate_sort_lines 'workspace library name aggregation' "$names" | awk 'NF && !seen[$0]++'
+    names="$(gate_sort_lines 'workspace library name aggregation' "$names")" || return $?
+    gate_unique_nonempty_lines 'workspace library name aggregation' "$names"
 }
 
 # Manifests carry the package name (hyphens); code carries the crate identifier (underscores).
@@ -61,8 +64,13 @@ for production in "${production_crates[@]}"; do
     }
     manifest="$crate_dir/Cargo.toml"
     [[ -f "$manifest" ]] || { printf 'conformance boundary failure: missing manifest for %s\n' "$production" >&2; exit 1; }
-    [[ -r "$crate_dir/src" ]] || { printf 'conformance boundary failure: unreadable source root for %s\n' "$production" >&2; exit 1; }
-    if rg -n '^(dsp-reference|conformance)([[:space:]]|\.workspace)' "$manifest"; then
+    [[ -d "$crate_dir/src" ]] || { printf 'conformance boundary failure: unreadable source root for %s\n' "$production" >&2; exit 1; }
+    source_files_raw="$(gate_find_collect "$production source discovery" "$crate_dir/src" -maxdepth 1 -name '*.rs' -type f -readable)" || exit $?
+    [[ -n "$source_files_raw" ]] || { printf 'conformance boundary failure: unreadable source root for %s\n' "$production" >&2; exit 1; }
+    manifest_harness="$(gate_scan_collect "$production manifest harness predicate" \
+      '^(dsp-reference|conformance)([[:space:]]|\.workspace)' '' "$manifest")" || exit $?
+    if [[ -n "$manifest_harness" ]]; then
+        printf '%s\n' "$manifest_harness" >&2
         printf 'conformance boundary failure: %s must not depend on a harness crate\n' \
             "$manifest" >&2
         exit 1
@@ -79,7 +87,7 @@ for production in "${production_crates[@]}"; do
     filtered_harness_names=()
     for harness_name in "${harness_names[@]}"; do
         module_probe="$(gate_scan_collect "${production} ${harness_name} module probe" \
-            "^[[:space:]]*(pub(\\([^)]*\\))?[[:space:]]+)?mod[[:space:]]+${harness_name}\\b" '*.rs' "$crate_dir/src")" || exit $?
+            "^[[:space:]]*(pub(\\([^)]*\\))?[[:space:]]+)?mod[[:space:]]+${harness_name}\\b" '' ${crate_dir}/src/*.rs)" || exit $?
         if [[ -n "$module_probe" ]]; then
             continue
         fi
@@ -117,7 +125,7 @@ fi
 library_names="$(workspace_lib_names)" || exit $?
 [[ -n "$library_names" ]] || { printf 'conformance boundary failure: no workspace library names found\n' >&2; exit 1; }
 forbidden_uses="$(gate_filter_exclude 'reference library-name filter' '^(dsp_reference|conformance)$' "$library_names")" || exit $?
-forbidden_uses="$(printf '%s\n' "$forbidden_uses" | paste -sd '|' -)"
+forbidden_uses="$(gate_join_lines 'reference library-name pattern aggregation' '|' "$forbidden_uses")" || exit $?
 [[ -n "$forbidden_uses" ]] || { printf 'conformance boundary failure: no production library names found\n' >&2; exit 1; }
 gate_scan_forbidden 'reference production use scan' "^use[[:space:]]+($forbidden_uses)\\b" '' crates/dsp-reference/src || exit $?
 

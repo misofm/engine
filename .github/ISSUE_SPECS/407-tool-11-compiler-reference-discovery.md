@@ -98,3 +98,11 @@ Then run both real gates, both complete fixture suites and shared helper suite, 
 Review used source and two tiny disposable shell probes only. No Cargo, timing, Git, repository or GitHub mutation occurred.
 
 The #415 measurement window is terminal and its complete capture is checkpointed. Root authorizes the bounded Sol attempt 2 above; no Session or other scope expansion.
+
+## Sol attempt 2 source checkpoint — pending adversarial verdict
+
+Sol completed the bounded graph/conformance revision after Astra's attempt-1 FAIL. Both gates now source the physical helper before changing directory; graph checks publication and per-source executor predicates before interpreting absence and checks the final owner sort; conformance reuses its checked reference-heading result, proves unique crate-directory resolution, requires readable immediate Rust sources, restores the top-level-only module probe, and checks manifest, unique-name and pattern-join producers. The shared additions are limited to checked text scanning, nonempty uniqueness filtering and line joining.
+
+The two focused suites now build standalone valid policy trees and exercise the real checkers across required surfaces, graph parser behavior, both graph discovery populations, publication/executor predicates, sole ownership, conformance target/bin-only behavior, unique production resolution, top-level module exemption versus nested nonexemption, clean empty host/sidecar scans, harness/reference violations, and injected find/read/sort/extractor/filter/join errors with useful partial output. Shared helper tests cover the added producer status paths with caller pipefail modes.
+
+Focused evidence is green: both real gates, both direct suites, the shared helper suite, Bash syntax, and diff hygiene. Logs are `/tmp/engine-407-sol-real-graph.log`, `/tmp/engine-407-sol-real-conformance.log`, `/tmp/engine-407-sol-test-graph.log`, `/tmp/engine-407-sol-test-conformance.log`, and `/tmp/engine-407-sol-test-helper.log`. No Cargo, timing, Session, runtime, manifest, artifact, benchmark, Git, GitHub, or workflow change was made. Astra must supply the attempt-2 verdict before any broader qualification.

@@ -124,6 +124,15 @@ check_extractor_failures() {
 check_extractor_failures +o
 check_extractor_failures -o
 
+for pipefail_setting in +o -o; do
+    for invocation in direct conditional; do
+        command_text='set '"$pipefail_setting"' pipefail; source "$1"; GATE_FAILURE_PREFIX="gate test"; gate_find_collect find-check "$2"'
+        [[ $invocation == direct ]] || command_text='set '"$pipefail_setting"' pipefail; source "$1"; GATE_FAILURE_PREFIX="gate test"; if gate_find_collect find-check "$2"; then exit 0; else exit $?; fi'
+        find_output=$(PATH="$scratch/rg-partial:$PATH" bash -c "$command_text" _ "$root/scripts/lib/gate.sh" "$scratch/missing" 2>&1) && find_rc=0 || find_rc=$?
+        [[ $find_rc -ne 0 && $find_output == *'find-check traversal errored'* ]] || { echo "find status lost ($pipefail_setting/$invocation): $find_output" >&2; exit 1; }
+    done
+done
+
 mkdir -p "$scratch/awk-fail" "$scratch/sort-fail"
 cat >"$scratch/awk-fail/awk" <<'EOF'
 #!/usr/bin/env bash
@@ -150,6 +159,18 @@ for pipefail_setting in +o -o; do
     sort_output="$(PATH="$scratch/sort-fail:$PATH" GATE_FAILURE_PREFIX='gate test' bash -c "set $pipefail_setting pipefail; source \"\$1\"; if gate_toml_dependencies \"\$2\"; then exit 0; else exit \$?; fi" _ "$root/scripts/lib/gate.sh" "$manifest" 2>&1)" && sort_rc=0 || sort_rc=$?
     [[ "$sort_rc" -eq 8 && "$sort_output" == *'sort status 8'* && "$sort_output" != *$'alpha\nzeta'* ]] || { echo "sort failure not explicit or leaked partial output: $sort_output" >&2; exit 1; }
 done
+
+unique_output=$(PATH="$scratch/awk-fail:$PATH" GATE_FAILURE_PREFIX='gate test' bash -c 'source "$1"; gate_unique_nonempty_lines unique "$2"' _ "$root/scripts/lib/gate.sh" $'engine\nlane' 2>&1) && unique_rc=0 || unique_rc=$?
+[[ $unique_rc -eq 7 && $unique_output == *'uniqueness filter errored (awk status 7)' ]] || { echo "unique failure not explicit: $unique_output" >&2; exit 1; }
+mkdir -p "$scratch/paste-fail"
+cat >"$scratch/paste-fail/paste" <<'EOF'
+#!/usr/bin/env bash
+printf 'engine|lane\n'
+exit 9
+EOF
+chmod +x "$scratch/paste-fail/paste"
+join_output=$(PATH="$scratch/paste-fail:$PATH" GATE_FAILURE_PREFIX='gate test' bash -c 'source "$1"; gate_join_lines join "|" "$2"' _ "$root/scripts/lib/gate.sh" $'engine\nlane' 2>&1) && join_rc=0 || join_rc=$?
+[[ $join_rc -eq 9 && $join_output == *'join errored (paste status 9)' ]] || { echo "join failure not explicit: $join_output" >&2; exit 1; }
 
 # Acceptance counter-mutants: each simulates the historic fail-open result. The same assertions
 # above must classify the forged success/output as rejection evidence rather than silently accept it.

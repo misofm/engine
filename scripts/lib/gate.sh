@@ -55,6 +55,19 @@ gate_scan_collect() {
     esac
 }
 
+gate_scan_text_collect() {
+    local description="$1" pattern="$2" input="$3" output rc
+    if output="$(rg -n "$pattern" <<<"$input" 2>&1)"; then rc=0; else rc=$?; fi
+    case "$rc" in
+        0|1) printf '%s' "$output"; return 0 ;;
+        *)
+            printf '%s\n' "$output" >&2
+            gate_fail "$description scan errored (rg exit $rc)"
+            return "$rc"
+            ;;
+    esac
+}
+
 gate_scan_required() {
     local description="$1" pattern="$2" glob="$3"
     shift 3
@@ -99,6 +112,20 @@ gate_sort_lines() {
     printf '%s\n' "$output" >&2
     gate_fail "$description sort errored (sort status $rc)"
     return "$rc"
+}
+
+gate_unique_nonempty_lines() {
+    local description="$1" input="$2" output rc
+    if output="$(printf '%s\n' "$input" | awk 'NF && !seen[$0]++')"; then rc=0; else rc=$?; fi
+    [[ "$rc" == 0 ]] || { gate_fail "$description uniqueness filter errored (awk status $rc)"; return "$rc"; }
+    printf '%s' "$output"
+}
+
+gate_join_lines() {
+    local description="$1" delimiter="$2" input="$3" output rc
+    if output="$(printf '%s\n' "$input" | paste -sd "$delimiter" -)"; then rc=0; else rc=$?; fi
+    [[ "$rc" == 0 ]] || { gate_fail "$description join errored (paste status $rc)"; return "$rc"; }
+    printf '%s' "$output"
 }
 
 # Exclude allowlisted rows from already-collected text. An empty result is valid, but an rg

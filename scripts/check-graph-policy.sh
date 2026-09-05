@@ -2,9 +2,9 @@
 set -euo pipefail
 
 workspace_root="${1:-.}"
-cd "$workspace_root"
 script_directory="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$script_directory/lib/gate.sh"
+cd "$workspace_root"
 GATE_FAILURE_PREFIX='graph policy failure'
 
 fail() {
@@ -38,8 +38,11 @@ while IFS= read -r source; do
   stripped="$(sed '/^#\[cfg(test)\]/,$d' "$source")" || fail "graph source read failed: $source"
   printf '%s\n' "$stripped" >>"$production_sources"
 done <<<"$graph_sources"
-if rg -n 'PlanPublisher|plan_exchange|std::fs|std::net|std::thread|std::sync::(Mutex|RwLock|Condvar|mpsc)|log::|tracing::' \
-  "$production_sources"; then
+publication_matches="$(gate_scan_collect 'graph publication predicate' \
+  'PlanPublisher|plan_exchange|std::fs|std::net|std::thread|std::sync::(Mutex|RwLock|Condvar|mpsc)|log::|tracing::' '' \
+  "$production_sources")" || exit $?
+if [[ -n "$publication_matches" ]]; then
+  printf '%s\n' "$publication_matches" >&2
   fail 'publication, I/O, threading, synchronization, or logging leaked into graph path'
 fi
 # The MAX_TRACKS ban lives once, in scripts/check-workspace-policy.sh (P12): it scans the whole
@@ -50,16 +53,17 @@ fi
 all_sources_raw="$(gate_find_collect 'workspace Rust discovery' crates -name '*.rs' -type f)" || exit $?
 [[ -n "$all_sources_raw" ]] || fail 'workspace Rust discovery returned no Rust files'
 all_sources="$(gate_sort_lines 'workspace Rust discovery' "$all_sources_raw")" || exit $?
-implementations=$(
-  while IFS= read -r source; do
+implementations_raw=''
+while IFS= read -r source; do
     # No pipeline here: `rg -q` exits on its first match, and under `pipefail` sed's SIGPIPE
     # would make the whole condition read as false.
     stripped=$(sed '/^#\[cfg(test)\]/,$d' "$source") || fail "workspace source read failed: $source"
-    if rg -q 'impl PreparedPlanExecutor for' <<<"$stripped"; then
-      printf '%s\n' "$source"
-    fi
-  done <<<"$all_sources" | sort
-)
+    executor_matches="$(gate_scan_text_collect "prepared-plan executor predicate for $source" \
+      'impl PreparedPlanExecutor for' "$stripped")" || exit $?
+    [[ -z "$executor_matches" ]] || implementations_raw+="$source"$'\n'
+done <<<"$all_sources"
+implementations_raw="${implementations_raw%$'\n'}"
+implementations="$(gate_sort_lines 'prepared-plan executor owner aggregation' "$implementations_raw")" || exit $?
 [[ "$implementations" == 'crates/graph/src/lib.rs' ]] ||
   fail 'production prepared-plan executor must remain graph-owned'
 
