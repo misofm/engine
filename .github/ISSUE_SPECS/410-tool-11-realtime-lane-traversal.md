@@ -93,3 +93,7 @@ Sol's readiness findings introduce no source/API gap or new scope. Preserve oper
 No further split or permission step is required after root assignment. Luna gets one coherent implementation attempt, root checkpoints/pushes, Astra reviews; Sol retries only after FAIL, three attempts maximum. Full unchanged-count workspace and actual-head PR/CI gates follow focused PASS. No runtime, manifest, artifact or timing work belongs here.
 
 Read-only numbered spec, readiness and checkpoint metadata inspection. No tests, Cargo, timing, source or GitHub mutation performed.
+
+## Luna attempt 1 assignment
+
+Root checkpointed and pushed the independent #420 tranche before this assignment. Luna now owns one coherent implementation pass in the dedicated #410 worktree on the frozen post-#426 base and approved exact producer/consumer tables. Shared-helper implementation remains serialized; no other gate implementation overlaps.
