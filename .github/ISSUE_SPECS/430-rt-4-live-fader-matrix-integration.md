@@ -258,3 +258,55 @@ Root assigns Luna attempt 1 after this approval checkpoint is pushed and synchro
 ## Luna attempt 1 compiling checkpoint
 
 Luna returned a five-source-path implementation of the owner factory/composite, narrow settled bridge and graph bind-time selection. Its reported checks were cargo check and graph/builtins-compiler test compilation with --no-run; these are not executed semantic tests and do not establish the five finite product gates. Root independently ran `cargo check --locked -p builtins-compiler -p graph` on this exact source with exit0, retained in `/tmp/engine-430-attempt1-check.log`. No source acceptance, real live-dispatch proof, capi resource qualification, full workspace or timing is claimed. This compiling checkpoint is preserved for one consolidated Astra review of the whole attempt before further implementation.
+
+## Astra attempt 1 verdict and bounded Sol attempt 2
+
+# Astra #430 Luna attempt1 source review — FAIL
+
+Exact clean checkpoint: `742722a14076201c3d4d1dc6d2310ffe95a7f2a7`, `/home/bl/misofm/engine-430-live`, compared with approved planning base `d8a570f8e2b01ab8ce112c5fb26426a353dfae3d`.
+
+FAIL. The checkpoint compiles but does not implement reachable live pairing and has no executed semantic proof of the frozen product. The following four finite groups constitute one consolidated correction for Sol attempt2; preserve the accepted narrow approach and do not add a framework or broaden the issue.
+
+## 1. Make actual graph pairing reachable and preserve decline ownership/scratch
+
+In `crates/graph/src/runtime.rs`, the new condition requires the first left member to be PostFader and the first right member to be PostMatrix, then requires `left.members == right.members`. Those members are GraphNodeIds whose TrackStage variant includes the stage. The first elements cannot simultaneously have different stages and be equal. Every legitimate live pair therefore remains separate. Compare each ordered member's track identity while validating the respective stage for every lane, with equal population, width/backend/quantum and existing contiguous/run eligibility. Keep chains_into unchanged; do not substitute common track membership for its observation/dataflow proof.
+
+Correct the adjacent decline paths at the same time: both `Err((left, right))` and `None` currently push stages and `continue` before the common scratch/active initialization. Once the impossible predicate is repaired, a run starting at such a declined pair can reach `scratch.expect` with None. Preserve the first slot's scratch/active exactly as ordinary separate stage construction does, including when the run starts at PostFader after an upstream boundary. Return/retain original processors in order and do not lose another slot or scratch ownership on any decline. Exercise that first-pair decline, not only an input-prefixed run that masks the omission.
+
+The required actual compiled/rendered selection witness and same-assertion old/separate-dispatch control must prove this route is selected; direct helper tests or equal PCM from two separate plans cannot do so.
+
+## 2. Preserve composite seam and shared drain semantics
+
+`FaderMatrixBankProcessor` overrides seam_side but omits lane_symmetry, inheriting GraphPreparedBuiltinBankProcessor's DECLINED witness. Both original owners return SEAM_SIDE_WITNESS, and the frozen contract explicitly requires that same neutral seam-side witness. Restore it without enabling one-plane processing. Retain upstream collapse/duplication and prove asymmetric right-plane behavior under the existing mono/seam fixtures.
+
+The new composite duplicates both original drain loops while the approved route calls for small local shared drain helpers using the same setter logic. Extract those helpers and use them from the separate owners and composite, retaining every original Concurrent drain at its original process point. The paired path must drain each queue exactly once, fader then matrix, before settlement; whole-call fallback must invoke bank arithmetic directly, not redrain through wrappers. Preserve the current attempted error ordering: a fader drain error precedes arithmetic, while a matrix drain error after successful fader drain completes fader arithmetic/counters before returning without matrix arithmetic. Verify these behaviors along with logical two-stage counter sums and state, rather than treating the new code's presence as proof.
+
+The narrow builtins bridge's use of the existing kernel and integer countdown checks is the accepted approach. Preserve false-without-mutation, current gain/mute/matrix operand order, whole-call ramp fallback and next-call settled dispatch. No new arithmetic or sanitization is needed.
+
+## 3. Complete the already-authorized resource proof and mirrors
+
+Adding actual size_of<FaderMatrixBankProcessor> to the conservative per-fader processor charge is consistent with the approved two-box design. The old owners and consumer allocations remain charged. Existing resource folding propagates this aggregate into retained totals and the maximum-allocation bound, conservatively. Do not replace this with guessed savings or remove old-owner charges.
+
+However `crates/capi/tests/resource_lifecycle.rs` and its independent primitive owner rows still describe only the old fader/matrix owners, and neither the CAPI mirror nor relevant executed resource/cap tests was supplied. Add the actual two-box outer-owner mirror/allowance to those existing independent expectations, preserving the explicit conservative charge for all fader banks (including Concurrent plans). Prove retained/peak/maximum-single allocation coverage and exact-cap acceptance/one-below refusal through the existing resource fixtures. Do not make the oracle merely call the production estimator or pin a magic composite size.
+
+## 4. Supply and execute the frozen finite product gates
+
+The six-path delta adds no semantic test: the only existing test edits are required Any forwarding implementations. Cargo check and tests --no-run cannot establish any of the five approved product gates. Implement the already-numbered finite cases using the existing fixtures and execute focused debug/release tests before the next coherent handoff:
+
+- Actual serialized W4/W8 live owner pairs, legal partial population, and forced-separate reference: PCM bits plus fader/mute and matrix current/target/ramp state and logical counters after each call. The reference retains original separate arithmetic. Include true live dispatch and the actual pairing-to-separate production mutation failing the SAME mechanism assertion.
+- Both actual queues at one acknowledged application sample, same-queue FIFO, immediate commands, ramps, mid-ramp retarget, ramp ending inside the call and next-call fusion, gain changes while muted/unmute, reset and existing rejection/backpressure behavior. Use focused state/PCM/dispatch assertions that discriminate delayed/dropped drains or pre-drain settlement. Include the actual serialized WebEngine acknowledgement/application-sample route; preserve Concurrent structural/state/PCM fallback.
+- Nonempty post-fader meter windows and PCM against the separate reference, with another compatible unobserved cohort still fusing; nonunity post-fader send plus crossfeed, aliased observer and allowed post-matrix observation. Cover factory wrong-type/shape/policy and graph order/member/hole declines with untouched owners, including the scratch case above.
+- Existing input nonfinite recovery and mono seam/disengagement, and the installed allocator audit's positive allocation AND free liveness off render plus repeated eligible/ramp/observation-fallback renders with zero allocations/frees on render.
+- The resource tests in group3 and proportional formatting/realtime/lane/unfused/workspace policy gates. Retain actual commands, statuses and source identity. Do not substitute compilation for execution, software W8 for native target qualification, or an unexecuted mutant patch for causal evidence.
+
+These are the original five finite gates consolidated around the concrete corrections, not a new corpus. Full immutable workspace/supported-target/artifact qualification follows source PASS under root ownership; no benchmark is authorized.
+
+## Accepted boundaries and evidence
+
+The preparation-only graph-owned factory alias, default-None hook, safe concrete type checks/downcasts and two retained typed boxes respect the approved dependency direction. Both actual delivery fields guard the factory; no runtime policy lookup, host admission change, queue format change, unsafe cast, rack renderer rewrite or HostConsoleHandles storage addition appears. Existing chains_into remains unchanged. The existing settled kernel is reused and no coefficient precombination/FMA or alternate identity/mute arithmetic was introduced. Preserve these decisions rather than redesigning them during correction.
+
+Read the full #430 spec including binding scope/base approval and root's candid attempt record, the exact cumulative six-path delta, affected source and resource mirrors, and `/tmp/engine-430-attempt1-check.log`. Root's exact `cargo check --locked -p builtins-compiler -p graph` exit0 is accepted as compilation evidence only. No semantic execution or product acceptance is credited. No source edits, Git/GitHub mutations, builds, tests or timing were performed in this review; only this /tmp verdict was written.
+
+Attempt1 is now a single recorded FAIL. Sol has attempts2 and3 available only under the existing workflow; a third FAIL requires hard stop/rescope. #443, #444, #431 and broad RT-4/#349 remain retained, and #427's independent delivery is unaffected.
+
+Root authorizes Sol attempt 2 for these four finite correction groups. The compiling Luna checkpoint is retained candidly; no semantic acceptance is implied. Preserve the accepted route and complete the original five product gates with executed proof in one coherent pass. No new framework, arithmetic, host policy, timing or retained-scope reduction is authorized. Root owns the next checkpoint before further work.
