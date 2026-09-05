@@ -244,6 +244,11 @@
       "sha256": "d7dea9038290e4afaaba7ce902a6d0c86fa414405146abb3528758eec80ef881"
     },
     {
+      "path": "artifacts/issue453-dependency-discovery/astra-462-ci-order-portability-ruling.md",
+      "bytes": 5322,
+      "sha256": "0098f3a3ebf7b65301071974d6fdc39f5d6ac48a124638af31863b3e02a6d0cc"
+    },
+    {
       "path": "artifacts/issue453-dependency-discovery/astra-462-numbered-scope-review.md",
       "bytes": 2029,
       "sha256": "aa69bb4164e0fcef093e6231b14e462965d4de94111ed9d52093c45d1a0b1ece"
@@ -267,6 +272,11 @@
       "path": "artifacts/issue453-dependency-discovery/engine-462-workspace-summary.json",
       "bytes": 215,
       "sha256": "f930fda5e04d57d1e1d352d04091da526f0689a6c156f6468921f652ee49e652"
+    },
+    {
+      "path": "artifacts/issue453-dependency-discovery/engine-464-policy-ci.log",
+      "bytes": 50850,
+      "sha256": "8c28a23123841741f22d31758504ec829950f0b2e283ed5ec904889295a0b42c"
     }
   ]
 }
