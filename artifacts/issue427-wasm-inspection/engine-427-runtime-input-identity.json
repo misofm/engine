@@ -1,0 +1,22 @@
+{
+  "candidate_commit": "284e27ccd1b223c301cffa73918ae4dc595924cd",
+  "delivered_baseline": "452a327881bfd883c6c569b6606009a40b981e22",
+  "compared_paths": [
+    "crates",
+    "hosts",
+    "tools",
+    "sidecars",
+    "Cargo.toml",
+    "Cargo.lock",
+    ".cargo",
+    "scripts/build-web-audioworklet.sh"
+  ],
+  "changed_paths": [],
+  "runtime_and_artifact_inputs_unchanged": true,
+  "baseline_workspace_result_blocks": 275,
+  "baseline_workspace_passed": 1576,
+  "baseline_workspace_failed": 0,
+  "baseline_workspace_ignored": 24,
+  "baseline_evidence": "artifacts/issue442-policy-qualification/engine-442-workspace-summary.json",
+  "scope": "Source identity only; does not claim a new artifact/browser execution."
+}
