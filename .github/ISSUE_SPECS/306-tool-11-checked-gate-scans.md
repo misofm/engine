@@ -105,3 +105,22 @@ No repository/GitHub edits, claims, implementations or tests were performed whil
 ### Preserved parent accounting from #400 inventory
 
 #400 intentionally leaves workspace positive queries, filtered ISA/retired-codec scans and discovery loops unchanged. Before parent closure, assign or explicitly rule the five current workspace find-backed loop groups and map them against the original nine-loop debt. The historical `check-fast-db-seal.sh` name has no current file: establish removal/rename provenance or create a stateless successor if an obligation survives. These are open accounting requirements, not implicit passes and not blockers for the bounded foundation.
+
+## Final accounting ruling and bounded successor #404
+
+# Astra #306 accounting ruling — 2026-09-05
+
+Read-only review of `/tmp/sol-306-parent-accounting.md`, parent #306 and children #400–#403, and current `/home/bl/misofm/engine-400` scripts. No tests or implementation performed; #400 remains unblocked and unchanged.
+
+1. **Fast-dB historical row: retired/replaced, not an omitted migration.** Repository commit `c41adf56ee4f57e4bf36e509ea0f7588ef440197` explicitly replaces `check-fast-db-seal.sh` (and math-policy) with Clippy resolved `disallowed-methods`; its record covers new-crate, missing-expect and stale-expect mutations. Cite this provenance in #306. The old private-visibility constraint was consciously not reproduced there; do not resurrect it as a #306 scanner task.
+
+2. **Nine non-workspace find-loop mapping confirmed:** #401 owns graph-policy's two and conformance's one; #402 owns lane-policy's two; #403 owns bench-policy's one and realtime-audit-leak's two. The ninth is `check-wasm-realtime-atomics.sh`'s object loop. These are distinct from the five additional workspace-policy find loops. Symbol/call-site identity is authoritative because #400 changes line numbers.
+
+3. **Correction to Sol's ninth-loop disposition:** `object_count > 0` solves only successful-but-empty discovery. `done < <(find ... | sort)` discards producer status. If find prints one legitimate object and then fails, the body can inspect that object, increment the counter and print success. The observation-presence precheck does not cure this: it is a separate pipeline, and its source-level ObservationSlot fallback can also accept after object search failure. Therefore the original ninth-loop completeness/error-propagation obligation survives. Record it as unresolved, not already fixed. This is a static shell-control-flow conclusion, not a claim that an injected mutation was executed during this review.
+
+4. **Root's empty-set policy is sound and adopted:** npm package/lock discovery is optional (clean empty sets pass, preserving Rust-only fixture roots); workspace Cargo manifest discovery across required crates/hosts/tools/sidecars is required and nonempty in aggregate; successful empty retired-directory and root-fingerprint searches are the healthy result. Optional *results* never make producer failure optional. Do not require a package in every individual root; empty sidecars is legitimate. `.cargo` retains its existing optional-directory policy, but any scan actually attempted there must report errors. Known required Cargo/license files stay required.
+
+5. **One bounded successor is warranted**, attached at `.github/ISSUE_SPECS/404-tool-11-complete-discovery.md`. It owns the five workspace discovery loops plus the expressly deferred workspace positive/filtered query producers and the demonstrably surviving ninth Wasm producer. This is the remainder of two gate scripts, not another broad roster. Grouping them closes the parent accounting gap while keeping #400's foundation frozen. It depends on #400; no new dependency or pause is imposed on #400. Root must number/synchronize it before implementation and before closing #306; #401–#403 remain responsible for their eight loops. Parent closure still requires all original scanner obligations, including the existing tracked_paths/awk/filter pipelines, to be resolved with evidence.
+
+
+#404 now owns the remaining workspace producers/queries and the surviving ninth Wasm loop, depends on merged #400, and is required before parent closure alongside #400–#403. It is queued; no implementation has started. The earlier zero-count-only disposition is corrected explicitly above.
