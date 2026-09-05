@@ -312,6 +312,10 @@ impl Default for HostConsoleRequest {
 /// host addresses a track by its index in this vector, and `track_controls[i]` / `meters[i]`
 /// belong to `tracks[i]` whenever they are present.
 pub struct HostConsoleHandles {
+    /// Delivery policy read back from the actual sealed post-fader owners during preparation.
+    post_fader_control_delivery: graph::BuiltinControlDelivery,
+    /// Delivery policy read back from the actual sealed post-matrix owners during preparation.
+    post_matrix_control_delivery: graph::BuiltinControlDelivery,
     /// Canonical normalized track identities.
     pub tracks: Vec<Box<str>>,
     /// One control producer per track, in `tracks` order; empty when no channel was requested.
@@ -333,6 +337,22 @@ pub struct HostConsoleHandles {
     pub effect_observations: Vec<EffectObservationHandle>,
     /// The designated master track index, echoed back after validation against `tracks`.
     pub master_track: Option<u32>,
+}
+
+impl HostConsoleHandles {
+    /// Whether the actual sealed post-fader owners carry the between-render-call declaration.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn post_fader_controls_are_between_render_calls(&self) -> bool {
+        self.post_fader_control_delivery == graph::BuiltinControlDelivery::BetweenRenderCalls
+    }
+
+    /// Whether the actual sealed post-matrix owners carry the between-render-call declaration.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn post_matrix_controls_are_between_render_calls(&self) -> bool {
+        self.post_matrix_control_delivery == graph::BuiltinControlDelivery::BetweenRenderCalls
+    }
 }
 
 /// One prepared session: the render plan, the control-side source set, and the resource report.
@@ -485,7 +505,11 @@ pub fn prepare_host_runtime_with_console(
     prepare_host_runtime_with_console_policy(compiled, caps, console, false)
 }
 
-/// Prepare a host whose control producers are exclusively retained between render calls.
+/// Prepare a host whose caller retains every returned producer endpoint and admits records only
+/// between exclusive render calls, with no concurrent enqueue while render is running.
+///
+/// Selecting this entry is the caller's declaration of that ownership and scheduling contract; it
+/// does not add synchronization or enforce the contract at runtime.
 #[allow(clippy::too_many_lines)]
 pub fn prepare_host_runtime_between_render_calls(
     compiled: &CompiledSession,
@@ -794,6 +818,15 @@ fn prepare_host_runtime_with_console_policy(
     })?;
     let graph_report = artifact.report().clone();
     let graph_resources = artifact.graph_resource_estimate().clone();
+    let stage_delivery = |stage| {
+        artifact
+            .prepared_builtin_banks()
+            .find(|bank| bank.stage == stage)
+            .map(|bank| bank.control_delivery)
+            .unwrap_or_default()
+    };
+    let post_fader_control_delivery = stage_delivery(TrackStage::PostFader);
+    let post_matrix_control_delivery = stage_delivery(TrackStage::PostMatrix);
     let session_resources = compiled.resource_estimate();
     let admitted_graph_and_model = graph_resources
         .session_plus_plan_bytes
@@ -952,6 +985,8 @@ fn prepare_host_runtime_with_console_policy(
             control_catalog,
         },
         HostConsoleHandles {
+            post_fader_control_delivery,
+            post_matrix_control_delivery,
             tracks: console_tracks,
             track_controls,
             effect_controls,

@@ -149,3 +149,36 @@ No production queue drain, record, acknowledgement, application sample, callback
 Reviewed the full numbered contract/frozen-base approval, cumulative source changes and existing evidence. No source changes, builds/tests, benchmarks or Git/GitHub mutations were performed. Only this `/tmp` verdict was written. #442 remains the sole feature; #430/#443/#444/#431 retain their separate outcomes. This verdict is one consolidated adversarial review, not authorization for additional Luna sub-attempts.
 
 Root records that the exact committed graph test configuration fails compilation (exit101), superseding Luna’s reported compiling checkpoint. Earlier PASS logs are not evidence for those later malformed constructors. Sol attempt 2 is authorized for the three finite groups above; no other feature or API expansion is authorized. Preserve exact failed-source evidence and produce fresh checks for the corrected coherent checkpoint.
+
+## Sol attempt 2 correction evidence
+
+Sol attempt 2 restored the three damaged `TrackStage` fixtures and their original
+`PostInputBuiltins` membership filter. The policy proof now uses populated eight-track live-console
+requests for both the general/raw Concurrent and explicit BetweenRenderCalls preparations, retains
+the no-console Concurrent control, and observes both real multi-member PostFader and PostMatrix
+owners. Host preparation separately reads both stage policies back from the sealed artifact owners
+before binding; absence defaults to Concurrent and therefore cannot satisfy WebEngine's
+BetweenRenderCalls assertion. WebEngine's private production construction asserts both stage
+observations in its existing test build.
+The dedicated host and builtin entry documentation now requires retained producer endpoints,
+admission only between exclusive render calls, and no concurrent enqueue during render, while
+stating that selection is a caller declaration rather than runtime enforcement.
+
+Focused causal control: changing only WebEngine `compile_ready`'s production preparation call to
+the well-formed old Concurrent wrapper compiled, then the same
+`source_backpressure_seek_render_and_stable_output_are_bounded` assertion failed with
+`WebEngine construction must seal between-render-call post-fader owners`. The source was restored
+before final checks. Complete records are `/tmp/sol442-production-wrong-wrapper-full-diff.patch`,
+`/tmp/sol442-host-web-production-policy-mutant.log` and its exit record. An earlier invocation used
+`--exact` without the module-qualified name and ran zero tests; it is retained but does not
+qualify any claim.
+
+Final-source focused records use `CARGO_TARGET_DIR=/tmp/sol442-target` and are listed in the Sol
+handoff. This local evidence is not an Astra PASS, pushed evidence, GitHub synchronization, target
+qualification, artifact qualification, or required CI.
+
+API consequence for Astra review: the two stage-specific observations are retained as private
+fields of the public `HostConsoleHandles` aggregate and exposed only through hidden read-only
+queries. Because the aggregate previously had only public fields, adding private fields prevents
+external struct-literal construction. No repository caller constructs it outside host-core, but
+this source-compatibility consequence is real and is not claimed as pre-approved by this attempt.

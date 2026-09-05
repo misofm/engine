@@ -2629,6 +2629,16 @@ fn compile_ready(
         .ok_or_else(|| fixed_diagnostic("web.console.config"))?;
     let (host, handles) = prepare_host_runtime_between_render_calls(&session, caps, &console)
         .map_err(BootFailure::preparation)?;
+    #[cfg(test)]
+    assert!(
+        handles.post_fader_controls_are_between_render_calls(),
+        "WebEngine construction must seal between-render-call post-fader owners"
+    );
+    #[cfg(test)]
+    assert!(
+        handles.post_matrix_controls_are_between_render_calls(),
+        "WebEngine construction must seal between-render-call post-matrix owners"
+    );
     let engine = host.report;
 
     let control_table = control_table_bytes(engine.source_count as usize)

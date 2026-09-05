@@ -2321,7 +2321,11 @@ pub fn prepare_session_builtins_with_console(
     )
 }
 
-/// Prepare builtins for a host that retains exclusive control ownership between render calls.
+/// Prepare builtins for a host that retains every returned producer endpoint and admits records
+/// only between its exclusive render calls, with no concurrent enqueue while render is running.
+///
+/// Selecting this entry is the caller's declaration of that ownership and scheduling contract; it
+/// does not add synchronization or enforce the contract at runtime.
 pub fn prepare_session_builtins_between_render_calls(
     session: &CompiledSession,
     requests: &[MeterRequest],
@@ -4337,6 +4341,12 @@ mod tests {
     fn control_delivery_metadata_reaches_both_sealed_strip_bank_owners() {
         let compiled = n_track_session(8);
         let classes = SessionPoolClasses::from_session(&compiled);
+        let controls = (0..8)
+            .map(|index| TrackControlRequest {
+                track_id: track_name(index),
+                queue_capacity: NonZeroUsize::new(4).expect("nonzero queue"),
+            })
+            .collect::<Vec<_>>();
         let collect = |prepared: PreparedBuiltinsSession| {
             let (graph, levels) = track_graph(8);
             prepared
@@ -4347,10 +4357,10 @@ mod tests {
         };
         let default = collect(prepare_session_builtins(&compiled, &[], caps()).expect("default"));
         let raw = collect(
-            prepare_session_builtins_with_console(&compiled, &[], &[], caps()).expect("raw"),
+            prepare_session_builtins_with_console(&compiled, &[], &controls, caps()).expect("raw"),
         );
         let between = collect(
-            prepare_session_builtins_between_render_calls(&compiled, &[], &[], caps())
+            prepare_session_builtins_between_render_calls(&compiled, &[], &controls, caps())
                 .expect("between"),
         );
         for banks in [&default, &raw] {

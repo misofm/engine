@@ -1972,7 +1972,15 @@ mod tests {
             let members: Vec<_> = plan
                 .required_bindings
                 .iter()
-                .filter(|node| matches!(node, GraphNodeId::TrackStage { .. }))
+                .filter(|node| {
+                    matches!(
+                        node,
+                        GraphNodeId::TrackStage {
+                            stage: TrackStage::PostInputBuiltins,
+                            ..
+                        }
+                    )
+                })
                 .cloned()
                 .collect();
             assert_eq!(members.len(), 4);
@@ -1983,6 +1991,7 @@ mod tests {
                         .cloned()
                         .unwrap_or(GraphNodeId::TrackStage {
                             track_id: StableGraphId::parse(&format!("extra{index}")).expect("id"),
+                            stage: TrackStage::PostInputBuiltins,
                         })
                 })
                 .collect();
@@ -2025,6 +2034,7 @@ mod tests {
             members: (0..4)
                 .map(|lane| GraphNodeId::TrackStage {
                     track_id: StableGraphId::parse(&format!("track{lane}")).expect("track id"),
+                    stage: TrackStage::PostInputBuiltins,
                 })
                 .collect(),
             processor: Box::<CountingIdentityBuiltin>::default(),
@@ -2070,6 +2080,7 @@ mod tests {
         let members: Vec<_> = (0..4)
             .map(|lane| GraphNodeId::TrackStage {
                 track_id: StableGraphId::parse(&format!("track{lane}")).expect("track id"),
+                stage: TrackStage::PostInputBuiltins,
             })
             .collect();
         let output = GraphNodeId::Output {

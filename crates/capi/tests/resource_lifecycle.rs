@@ -2303,9 +2303,9 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
     // bank, and this oracle is double-live -- so +16 here and +8 in the single-plan report. The
     // live oracle and the primitive model both move, which is the property this pair of pins
     // exists to check: a struct that grew is reported by both or by neither.
-        // #210 phase 3: +2_688, the two input banks' growth over two live plans; the immutable
-        // builtin control-delivery metadata adds the corresponding concrete-owner layout bytes.
-        // See
+    // #210 phase 3: +2_688, the two input banks' growth over two live plans; the immutable
+    // builtin control-delivery metadata adds the corresponding concrete-owner layout bytes.
+    // See
     // `primitive_replacement_oracle` for the per-bank arithmetic.
     // #241: 510_720 - 2 x (4_096 queue + 8_192 ring) - 2 x 200 = 485_744.
     assert_eq!(oracle.graph, 502_164);
