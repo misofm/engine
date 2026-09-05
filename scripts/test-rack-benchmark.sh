@@ -41,6 +41,75 @@ if bash "$fixture_checker" "$fixture_copy" >/dev/null 2>&1; then
 fi
 cp "$scratch/workloads.original" "$fixture_copy/workloads.toml"
 
+# Exercise the two selected producer status controls against complete real output plus an
+# injected command failure.  The delegates are fixed system commands; the test mode is part of
+# the registered MISO_ENGINE_TEST_BENCH_MODE shim vocabulary.
+scan_bin="$scratch/scan-bin"
+mkdir -p "$scan_bin"
+cat >"$scan_bin/find" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+/usr/bin/find "$@"
+if [[ "${MISO_ENGINE_TEST_BENCH_MODE:-}" == discovery_fail ]]; then
+    printf 'FIND_SENTINEL delegate_status=0 rows=2 mode=discovery_fail\n' >&2
+    exit 73
+fi
+EOF
+cat >"$scan_bin/wc" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+/usr/bin/wc "$@"
+if [[ "${MISO_ENGINE_TEST_BENCH_MODE:-}" == payload_wc_fail && "${1:-}" == -c ]]; then
+    printf 'WC_SENTINEL delegate_status=0 value=456 mode=payload_wc_fail\n' >&2
+    exit 74
+fi
+EOF
+chmod 755 "$scan_bin/find" "$scan_bin/wc"
+assert_checker_rejects_producer_failure() {
+    local mode=$1 diagnostic=$2
+    local output status
+    if output=$(MISO_ENGINE_TEST_BENCH_MODE="$mode" PATH="$scan_bin:$PATH" bash "$fixture_checker" "$fixture_copy" 2>&1); then
+        printf 'checker swallowed %s producer failure\n%s\n' "$mode" "$output" >&2
+        return 97
+    else
+        status=$?
+    fi
+    [[ "$status" != 0 ]] || return 96
+    [[ "$output" == *"$diagnostic"* ]] || { printf 'wrong %s producer diagnostic\n%s\n' "$mode" "$output" >&2; return 96; }
+    [[ "$output" == *SENTINEL* ]] || { printf 'missing %s producer sentinel\n%s\n' "$mode" "$output" >&2; return 96; }
+}
+assert_checker_rejects_producer_failure discovery_fail 'Issue-038 fixture discovery failed (status 73)'
+assert_checker_rejects_producer_failure payload_wc_fail 'Issue-038 workload length wc failed (status 74)'
+
+counter_checker_mutant() {
+    local label=$1 mutation=$2 mode=$3
+    local mutant="$scratch/checker-$label.sh" output status
+    sed "$mutation" "$fixture_checker" >"$mutant"
+    chmod 755 "$mutant"
+    if output=$(MISO_ENGINE_TEST_BENCH_MODE="$mode" PATH="$scan_bin:$PATH" bash "$mutant" "$fixture_copy" 2>&1); then
+        printf 'ASSERT %s unexpected success\n' "$label" >&2
+        return 97
+    else
+        status=$?
+    fi
+    printf 'ASSERT %s wrong rejection status=%s\n%s\n' "$label" "$status" "$output" >&2
+    return 96
+}
+discovery_line=$(rg -n -F '    discovery_status=$?' "$fixture_checker" | cut -d: -f1)
+if counter_checker_mutant discovery-status "${discovery_line}c\\    :" discovery_fail >/dev/null 2>&1; then
+    exit 96
+else
+    mutant_status=$?
+fi
+[[ "$mutant_status" == 97 ]] || { printf 'discovery producer mutant assertion status %s, expected 97\n' "$mutant_status" >&2; exit 96; }
+payload_wc_line=$(rg -n -F '    payload_wc_status=$?' "$fixture_checker" | cut -d: -f1)
+if counter_checker_mutant payload-wc-status "${payload_wc_line}c\\    :" payload_wc_fail >/dev/null 2>&1; then
+    exit 96
+else
+    mutant_status=$?
+fi
+[[ "$mutant_status" == 97 ]] || { printf 'payload wc producer mutant assertion status %s, expected 97\n' "$mutant_status" >&2; exit 96; }
+
 reject_single() {
     local mutation=$1
     jq "$mutation" "$record" >"$scratch/mutated.json"

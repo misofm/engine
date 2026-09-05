@@ -88,6 +88,19 @@ No tests, builds, timing, repository edits or GitHub mutations were performed fo
 
 Root adopts this exact finite scope and two selected controls. Planning base remains delivered aba905c0; parent #403/#306 accounting updates on this branch introduce no checker/source changes. No implementation authority before #455 delivery and actual-base confirmation.
 
+## Luna1 attempt 1 evidence
+
+Implemented the scoped checker and validator controls on `codex/456-rack-scan-scope`. The checker now captures each selected producer's complete stdout, stderr, and status before consuming output, including manifest/payload hashes and `awk`, discovery and `sort`, header/cardinality/record reads, payload byte count, required quiet `grep` predicates, and final workload-name count. Fixture policy, CLI, paths, pins, and source/helper/workflow boundaries remain unchanged.
+
+Commands and raw combined logs:
+
+- `/tmp/456-luna1-syntax.{command,log,status}` — shell syntax status 0.
+- `/tmp/456-luna1-checker.{command,log,status}` — real fixture checker status 0.
+- `/tmp/456-luna1-suite.{command,log,status}` — `PATH=/home/bl/.cargo/bin:$PATH bash scripts/test-rack-benchmark.sh`, status 0, including fake-only lifecycle and both selected controls.
+- `/tmp/456-luna1-env.{command,log,status}` — real environment vocabulary gate status 0 (`114 names, one MISO_ENGINE_ prefix`).
+
+The two actual checker mutants replace only the discovery status assignment and late payload `wc -c` status assignment with a no-op, while shims delegate to the real `/usr/bin/find` and `/usr/bin/wc`, preserve complete correct output, append status/stderr sentinels, and return 73/74. Each reaches its named unexpected-checker-success assertion with status 97; wrong setup/rejection returns 96. No real runner, benchmark, timing, source, helper, workflow, pin, Git, or GitHub operation was performed.
+
 ## Delivered-base confirmation and Luna attempt 1
 
 #455/#471 delivered via PR474; latest main660fce8f is integrated. Root verified exact checker, test, shared helper and entire fixture tree unchanged from approved #456 inputs before integration. The Astra numbered scope approval remains applicable. Assign Luna attempt1 only in `/home/bl/misofm/engine-456-plan`, branch `codex/456-rack-scan-scope`. Only the two named rack checker/test scripts and this issue evidence may change; root owns Git/GitHub and checkpoint pushes. Preserve actual two causal producer controls, exact policy/CLI/output semantics and fake-only lifecycle. Retain actual command stdout/stderr/status, not authored summaries. Existing environment vocabulary applies to test shims too; use compliant registered names or private scratch configuration without introducing a runtime environment surface, and include the real vocabulary gate before final checkpoint. No source/helper/workflow/pin/runner edits or timing. Pause at a coherent focused-green checkpoint before further implementation.
