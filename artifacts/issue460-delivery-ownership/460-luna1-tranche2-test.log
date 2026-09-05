@@ -1,0 +1,22 @@
+   Compiling protocol v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/protocol)
+warning: field `generation` is never read
+   --> crates/protocol/src/delivery.rs:104:14
+    |
+104 |     Cancel { generation: u64 },
+    |     ------   ^^^^^^^^^^
+    |     |
+    |     field in this variant
+    |
+    = note: `BoundaryMessage` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `protocol` (lib test) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.55s
+     Running unittests src/lib.rs (/tmp/engine-460-luna-target/debug/deps/protocol-8d85afa28ae00720)
+
+running 2 tests
+test delivery::tests::retained_admission_survives_handoff_until_terminal_consumption ... ok
+test delivery::tests::unsupported_head_blocks_fifo_and_cancel_ack_publishes_event ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 124 filtered out; finished in 0.00s
+
