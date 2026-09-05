@@ -278,3 +278,30 @@ Update evidence only to claims actually enforced by these final assertions. The 
 These are the remaining original-scope proof corrections. Keep the accepted production changes, helper/workflow/runner/fixture pins frozen unless a focused case demonstrates a concrete defect in those accepted checker changes. One coherent Sol3 pass gets one final verdict; another FAIL requires hard stop and an explicit numbered rebrief.
 
 Root assigns one final Sol attempt 3 against these three finite evidence groups. Preserve the accepted production semantics and two existing controls. No additional population, framework, runner work or fourth repair is authorized. A failed final verdict requires hard stop and an explicit bounded rebrief.
+
+
+## Final Sol attempt 3 verdict: hard stop
+
+# Astra #455 final Sol attempt 3 review
+
+**FAIL — hard stop; preserve this checkpoint and rebrief the remaining bounded proof work before any further edits.** Exact head `c7172f12e13f07c00edbe1c50309a52b94c00a19`, `engine-455-plan`. Reviewed the full frozen contract and the three final correction groups. All six retained focused statuses are0. No reviewer test/build/runner/timing or repository/Git/GitHub mutation occurred.
+
+## Accepted implementation and completed proof
+
+Production retains the previously accepted completed scans, individual producer status capture, original predicates and optional path-kind behavior. Final production changes narrowly label the two Python authority failures and preserve their actual statuses. Pins/fixtures, shared helper, workflow and actual runner/lifecycle implementation are unchanged. The existing two-call CI wiring remains correct.
+
+The suite now pairs error-only/complete modes for the frozen required-scan rows; checks real delegate status and expected empty/nonempty shape in both modes; adds the production-manifest and later reference target; proves valid081 and108 branches; and exercises the late standalone Python invocation separately. Required deletion assertions identify their actual interception point. Qualification find cases now create real scoped violations and replay real traversal output; optional108 has corresponding real empty/entry cases. These are substantial completions, not grounds to redo the whole matrix.
+
+Both actual namespace/migration one-guard mutants retain original/restored acceptance and named unexpected-success97, with setup/diagnostic96 separated. Preserve exactly these controls and their unique diffs. No additional production mutation campaign is required.
+
+## Remaining finite blockers
+
+1. **The frozen complete-payload comparison is still a containment test, not complete multiset equality.** `producer_failure` constructs Counters for captured delegate stdout and the entire diagnostic log, then rejects only when `actual[line] < expected_count`. Any number of extra copies of a producer row, or extra unrelated producer rows, pass. This preserves every expected row but does not satisfy the explicitly frozen complete multiset comparison without discarding duplicates. It must identify the bounded actual payload portion in the diagnostic (excluding only the known operation/sentinel/error framing), then compare the full Counter to the independently captured real stdout. Preserve order insensitivity, duplicate multiplicity and both payload modes. This is one existing assertion correction; do not add new producer rows or a third production mutant. A tiny assertion-level check with one duplicated/extra and one missing expected row is enough to distinguish equality from the current containment rule.
+
+2. **Standalone108 cross-file authority has no actual late read-failure fixture.** Its new Python wrapper proves the real second invocation succeeds silently, then injects75. Its validator deletion is caught at the earlier `missing Issue-108 authority` check, before Python reads it. Those establish tool-status and required-path refusal, not the frozen actual cross-file Python read-error case. The actual081 chmod/read case is present and should remain. Complete the one missing standalone108 case by keeping its required regular file present and initial benchmark validation valid, then making a specific later Python authority read fail; assert the actual path/read diagnostic and `cross-file output authority validation failed (status 1)` with97/96 separation. Do not call the intercepted deletion a Python-read proof or introduce a new authority policy. Use a deterministic disposable fixture/injection if permission-based refusal is not reliable on the test host.
+
+## Delivery disposition
+
+These are two proof-surface omissions within the final attempt-2 requirements; no new production bug or wider checker framework is alleged. Source implementation, all other table rows, two actual controls and historical recovery/evidence remain accepted progress. Because this was attempt3, root must preserve the failure and number/synchronize one narrowly bounded successor before another implementation pass. That successor can own only the two existing suite assertions/cases and evidence, with production checkers/helper/runner/pins/CI wiring frozen. Parent #455 retains its full acceptance, workspace/actual-PR/required-CI and closure obligations until the successor and inherited qualification complete. #403/#306/#349 remain open. No fourth informal repair or qualification is authorized by this verdict.
+
+Root preserves this completed three-attempt series. No further implementation or workspace qualification is authorized on this branch. A separately numbered two-suite proof successor will retain complete payload equality and one actual late standalone108 cross-file read failure; all accepted production semantics and existing controls remain frozen. Parent #455 is open and retains its full original delivery obligations.
