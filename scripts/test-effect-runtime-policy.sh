@@ -7,6 +7,7 @@ cp -R "$root/crates" "$root/tools" "$root/docs" "$root/scripts" "$temp/"
 mkdir "$temp/fuzz"
 cp "$root/fuzz/Cargo.toml" "$root/fuzz/Cargo.lock" "$temp/fuzz/"
 cp -R "$root/fuzz/fuzz_targets" "$temp/fuzz/"
+mkdir -p "$temp/hosts" "$temp/sidecars"
 compiler_manifest="$temp/crates/effect-compiler/Cargo.toml"
 contract_manifest="$temp/crates/effect-contract/Cargo.toml"
 

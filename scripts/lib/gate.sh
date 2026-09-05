@@ -33,6 +33,46 @@ gate_scan_forbidden() {
     esac
 }
 
+# Capture a search where both match and clean no-match are valid results. Exit 0 for either
+# predicate result and nonzero only when the search itself could not run, preserving partial output
+# in the diagnostic while keeping callers independent of pipefail.
+gate_scan_collect() {
+    local description="$1" pattern="$2" glob="$3"
+    shift 3
+    local roots=("$@") output rc
+    if [[ -n "$glob" ]]; then
+        if output="$(rg -n "$pattern" --glob "$glob" "${roots[@]}" 2>&1)"; then rc=0; else rc=$?; fi
+    else
+        if output="$(rg -n "$pattern" "${roots[@]}" 2>&1)"; then rc=0; else rc=$?; fi
+    fi
+    case "$rc" in
+        0|1) printf '%s' "$output"; return 0 ;;
+        *)
+            printf '%s\n' "$output" >&2
+            gate_fail "$description scan errored (rg exit $rc)"
+            return "$rc"
+            ;;
+    esac
+}
+
+gate_scan_required() {
+    local description="$1" pattern="$2" glob="$3"
+    shift 3
+    local output rc
+    if [[ -n "$glob" ]]; then
+        if output="$(rg -n "$pattern" --glob "$glob" "$@" 2>&1)"; then rc=0; else rc=$?; fi
+    else
+        if output="$(rg -n "$pattern" "$@" 2>&1)"; then rc=0; else rc=$?; fi
+    fi
+    if [[ "$rc" == 0 ]]; then
+        printf '%s\n' "$output"
+        return 0
+    fi
+    printf '%s\n' "$output" >&2
+    gate_fail "$description search failed (rg exit $rc)"
+    return "$rc"
+}
+
 gate_toml_dependencies() {
     local manifest="$1" extracted output rc
     if extracted="$(awk '

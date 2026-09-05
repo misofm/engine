@@ -1,22 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
+script_directory="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$script_directory/lib/gate.sh"
 cd "${1:-.}"
+GATE_FAILURE_PREFIX='effect runtime policy failure'
 fail() { printf 'effect runtime policy failure: %s\n' "$1" >&2; exit 1; }
-dependencies() {
-    awk '/^\[dependencies\]$/ { in_deps=1; next } /^\[/ { in_deps=0 } in_deps && /^[A-Za-z0-9_-]+(\.workspace)?[[:space:]]*=/ { line=$0; sub(/[[:space:]]*=.*/, "", line); sub(/\.workspace$/, "", line); print line }' "$1" | sort
-}
+dependencies() { gate_toml_dependencies "$1"; }
 # #84 phase A: PrepareEffectBankRequest.backend is lane::Backend now.
 expected_contract=$'engine\nlane\nmath'
 [[ "$(dependencies crates/effect-contract/Cargo.toml)" == "$expected_contract" ]] || fail 'effect-contract dependency boundary changed'
 expected_compiler=$'compressor\ndelay\neffect-contract\neffect-package\nengine\ngate-expander\nlane\nmultiband-compressor\nparametric-eq\nsession\nsoft-clip\ntransient-shaper\ntrue-peak-limiter'
 [[ "$(dependencies crates/effect-compiler/Cargo.toml)" == "$expected_compiler" ]] || fail 'effect-compiler dependency boundary changed'
 if rg -n 'effect-(contract|compiler)' crates/{engine,session}/Cargo.toml; then fail 'core/session reverse dependency'; fi
-package_references="$(
-    rg -n 'effect_package|effect-package' crates hosts tools fuzz sidecars 2>/dev/null |
-        rg -v '^crates/effect-package/' |
-        rg -v '^crates/effect-compiler/(Cargo.toml|src/(prepare|migration)[.]rs|tests/(scalar_state|bank_state|migration|migration_terminal|observation_identity|symmetry_restore)[.]rs):' |
-        rg -v '/tests/MUTATIONS[.]md:' || true
-)"
+if package_references="$(gate_scan_collect 'effect-package reference scan' 'effect_package|effect-package' '' crates hosts tools fuzz sidecars)"; then :; else exit 1; fi
+package_references="$(printf '%s\n' "$package_references" | rg -v '^crates/effect-package/' || true)"
+package_references="$(printf '%s\n' "$package_references" | rg -v '^crates/effect-compiler/(Cargo.toml|src/(prepare|migration)[.]rs|tests/(scalar_state|bank_state|migration|migration_terminal|observation_identity|symmetry_restore)[.]rs):' || true)"
+package_references="$(printf '%s\n' "$package_references" | rg -v '/tests/MUTATIONS[.]md:' || true)"
 package_references="$(printf '%s\n' "$package_references" |
     rg -v '^fuzz/(Cargo.toml|Cargo.lock|fuzz_targets/effect_(package|state)[.]rs):' || true)"
 package_references="$(printf '%s\n' "$package_references" |
@@ -99,7 +98,10 @@ fi
 
 helper_exempt='^crates/(effect-package|dsp-reference)/'
 helper_definitions() {
-    { rg -n --glob '*.rs' "$1" crates/*/src 2>/dev/null || true; } | { rg -v "$helper_exempt" || true; }
+    local found
+    found="$(gate_scan_collect 'helper definition scan' "$1" '*.rs' crates/*/src)" || return $?
+    [[ -n "$found" ]] || return 0
+    printf '%s\n' "$found" | rg -v "$helper_exempt" || true
 }
 while read -r pattern expected owner; do
     [[ -n "$pattern" ]] || continue
