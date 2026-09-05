@@ -220,14 +220,14 @@ def check_observe_typing(js: str, dts: str) -> None:
         f"declared {declared}, implemented {implemented}",
     )
     require(
-        dts_interface_fields(dts, "MisoObservationRequest") == ["requestId", "subscriptions"],
+        dts_interface_fields(dts, "MisoObservationRequest") == ["subscriptions"],
         "MisoObservationRequest does not match observe()'s accepted request fields",
     )
     body = block_after(js, "async observe(request) ", "{", "}")
     request_fields = js_string_array(body, "hasExactFields(request, ")
     require(
-        request_fields == ["requestId", "subscriptions"],
-        f"observe() no longer accepts exactly requestId/subscriptions: {request_fields}",
+        request_fields == ["subscriptions"],
+        f"observe() no longer accepts exactly subscriptions: {request_fields}",
     )
 
     # The response shapes are whatever `observe()` actually builds, exactly.
@@ -363,6 +363,22 @@ def self_test() -> int:
                 HOST_JS,
                 "reason < COMMAND_REASONS.length;",
                 "reason <= 11;",
+            ),
+        ),
+        (
+            "the observation declaration restores caller requestId",
+            mutate(
+                HOST_DTS,
+                "export interface MisoObservationRequest {\n  ///",
+                "export interface MisoObservationRequest {\n  requestId: number;\n  ///",
+            ),
+        ),
+        (
+            "the observation guard restores caller requestId",
+            mutate(
+                HOST_JS,
+                'hasExactFields(request, ["subscriptions"])',
+                'hasExactFields(request, ["requestId", "subscriptions"])',
             ),
         ),
         (

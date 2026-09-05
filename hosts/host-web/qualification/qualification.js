@@ -132,9 +132,8 @@ function corpusPlanes(description) {
   return [left, right];
 }
 
-function corpusRequest(requestId, description) {
+function corpusRequest(description) {
   return {
-    requestId,
     sourceId: "fixture-source",
     generation: 1n,
     startFrame: BigInt(description.startFrame),
@@ -158,7 +157,7 @@ async function renderCorpusSegment(createHost, sessionDocument, descriptions) {
   if (host.backend !== "simd128") throw new Error("corpus worklet backend mismatch");
   host.node.connect(context.destination);
   for (const [index, description] of descriptions.entries()) {
-    const acknowledgement = await host.submitSource(corpusRequest(index + 1, description));
+    const acknowledgement = await host.submitSource(corpusRequest(description));
     if (acknowledgement.result !== 0) throw new Error("corpus prefill rejected");
   }
   const rendered = await context.startRendering();
@@ -296,7 +295,6 @@ async function runConsoleQualification(createHost, sessionDocument) {
       inputPeak = Math.max(inputPeak, Math.abs(planes[0][frame]), Math.abs(planes[1][frame]));
     }
     const acknowledgement = await host.submitSource({
-      requestId: block + 1,
       sourceId: "console-source",
       generation: 1n,
       startFrame: BigInt(block * QUANTUM_FRAMES),
@@ -312,18 +310,15 @@ async function runConsoleQualification(createHost, sessionDocument) {
   // taken after the prefill they will be observed over.
   const map = await host.sessionMap();
   const meterLease = await host.meters({
-    requestId: 10001,
     enabled: true,
     onFrame: (frame) => meterFrames.push(frame),
   });
   const telemetryLease = await host.telemetry({
-    requestId: 10002,
     enabled: true,
     onFrame: (frame) => telemetryFrames.push(frame),
   });
 
   const command = await host.command({
-    requestId: 20001,
     commands: [{
       kind: COMMAND_MATRIX,
       rack: 255,
@@ -405,7 +400,6 @@ async function runObservationRun(createHost, sessionDocument, armed) {
   const frames = [];
   for (let block = 0; block < OBSERVATION_BLOCKS; block += 1) {
     const acknowledgement = await host.submitSource({
-      requestId: block + 1,
       sourceId: "console-source",
       generation: 1n,
       startFrame: BigInt(block * QUANTUM_FRAMES),
@@ -418,7 +412,6 @@ async function runObservationRun(createHost, sessionDocument, armed) {
   }
 
   const meterLease = await host.meters({
-    requestId: 30001,
     enabled: true,
     onFrame: (frame) => frames.push({
       trackGrDb: Array.from(frame.trackGrDb),
@@ -436,11 +429,10 @@ async function runObservationRun(createHost, sessionDocument, armed) {
     windowBlocks: Number(CONSOLE_METER_BLOCKS),
     armed: true,
   };
-  const subscribed = await host.observe({ requestId: 30002, subscriptions: [subscription] });
+  const subscribed = await host.observe({ subscriptions: [subscription] });
   let unsubscribed = null;
   if (!armed) {
     unsubscribed = await host.observe({
-      requestId: 30003,
       subscriptions: [{ ...subscription, armed: false }],
     });
   }
@@ -514,7 +506,6 @@ async function runStallQualification(createHost, sessionDocument) {
     expected[0].set(planes[0], block * QUANTUM_FRAMES);
     expected[1].set(planes[1], block * QUANTUM_FRAMES);
     const acknowledgement = await host.submitSource({
-      requestId: block + 1,
       sourceId: "stall-source",
       generation: 1n,
       startFrame: BigInt(block * QUANTUM_FRAMES),
@@ -527,7 +518,6 @@ async function runStallQualification(createHost, sessionDocument) {
   }
 
   const meterLease = await host.meters({
-    requestId: 30001,
     enabled: true,
     onFrame: (frame) => stallMeterFrames.push(frame),
   });
@@ -536,7 +526,6 @@ async function runStallQualification(createHost, sessionDocument) {
   // digest still applies, while the control path, its queue and the meter fold are all live
   // across the stall.
   const stallCommand = await host.command({
-    requestId: 30002,
     commands: [{
       kind: COMMAND_MATRIX,
       rack: 255,

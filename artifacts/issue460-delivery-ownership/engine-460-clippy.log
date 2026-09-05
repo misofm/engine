@@ -1,0 +1,76 @@
+    Checking engine v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/engine)
+    Checking session v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/session)
+    Checking protocol v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/protocol)
+error: very complex type used. Consider factoring parts into `type` definitions
+   --> crates/protocol/src/delivery.rs:156:14
+    |
+156 |     entries: Box<[Option<(CoreTicket, P, bool, u16)>]>,
+    |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#type_complexity
+    = note: `-D clippy::type-complexity` implied by `-D clippy::all`
+    = help: to override `-D clippy::all` add `#[allow(clippy::type_complexity)]`
+
+error: this `if` statement can be collapsed
+   --> crates/protocol/src/delivery.rs:885:9
+    |
+885 | /         if self.deferred_cancel.is_none() {
+886 | |             if let Ok(BoundaryMessage::Cancel { token, frontier }) = self.barrier_consumer.try_pop()
+887 | |             {
+888 | |                 self.deferred_cancel = Some((token, frontier));
+889 | |             }
+890 | |         }
+    | |_________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#collapsible_if
+    = note: `-D clippy::collapsible-if` implied by `-D clippy::all`
+    = help: to override `-D clippy::all` add `#[allow(clippy::collapsible_if)]`
+help: collapse nested if block
+    |
+885 ~         if self.deferred_cancel.is_none()
+886 ~             && let Ok(BoundaryMessage::Cancel { token, frontier }) = self.barrier_consumer.try_pop()
+887 |             {
+888 |                 self.deferred_cancel = Some((token, frontier));
+889 ~             }
+    |
+
+error: this `if` statement can be collapsed
+   --> crates/protocol/src/delivery.rs:893:17
+    |
+893 | /                 if let Some(message) = self.core.pending {
+894 | |                     if message.ticket.serial <= frontier {
+895 | |                         let prefix = self.core.pending_prefix;
+896 | |                         if self
+...   |
+905 | |                 }
+    | |_________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#collapsible_if
+help: collapse nested if block
+    |
+893 ~                 if let Some(message) = self.core.pending
+894 ~                     && message.ticket.serial <= frontier {
+895 |                         let prefix = self.core.pending_prefix;
+...
+903 |                         continue;
+904 ~                     }
+    |
+
+error: this `if` statement can be collapsed
+   --> crates/protocol/src/delivery.rs:935:9
+    |
+935 | /         if self.core.pending.is_none() {
+936 | |             if self.core.begin().is_ok() {}
+937 | |         }
+    | |_________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#collapsible_if
+help: collapse nested if block
+    |
+935 ~         if self.core.pending.is_none()
+936 ~             && self.core.begin().is_ok() {}
+    |
+
+error: could not compile `protocol` (lib) due to 4 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `protocol` (lib test) due to 4 previous errors

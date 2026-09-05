@@ -3,7 +3,30 @@ set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 if command -v node >/dev/null; then
+node "$repo_root/scripts/test-web-audioworklet.mjs"
+
+# Issue #393: exercise the private allocator boundary through a transformed test module. The
+# production host has no counter accessor or test hook; this copy starts at MAX_SAFE_INTEGER - 1.
+safe_host=$(mktemp "${TMPDIR:-/tmp}/miso-engine-host.XXXXXX")
+mv "$safe_host" "$safe_host.mjs"
+safe_host="$safe_host.mjs"
+unchecked_host=$(mktemp "${TMPDIR:-/tmp}/miso-engine-host.XXXXXX")
+mv "$unchecked_host" "$unchecked_host.mjs"
+unchecked_host="$unchecked_host.mjs"
+cleanup_safe() { rm -f -- "$safe_host" "$unchecked_host"; }
+trap cleanup_safe EXIT
+sed 's/#lastRequestId = 0;/#lastRequestId = Number.MAX_SAFE_INTEGER - 1;/' \
+  "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-host.js" >"$safe_host"
+MISO_ENGINE_WEB_HOST_TEST_MODULE="$safe_host" MISO_ENGINE_WEB_HOST_MAX_SAFE_TEST=1 \
   node "$repo_root/scripts/test-web-audioworklet.mjs"
+sed 's/if (this.#lastRequestId >= Number.MAX_SAFE_INTEGER) return null;//' "$safe_host" >"$unchecked_host"
+if MISO_ENGINE_WEB_HOST_TEST_MODULE="$unchecked_host" MISO_ENGINE_WEB_HOST_MAX_SAFE_TEST=1 \
+  node "$repo_root/scripts/test-web-audioworklet.mjs" >/dev/null 2>&1; then
+  echo "unchecked safe-integer allocator mutation escaped the red test" >&2
+  exit 1
+fi
+rm -f -- "$safe_host" "$unchecked_host"
+echo "safe-integer allocator boundary and red mutation passed"
 elif command -v bun >/dev/null; then
   bun "$repo_root/scripts/test-web-audioworklet.mjs"
 else

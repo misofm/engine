@@ -434,11 +434,13 @@ describe("the writer contract -- the async submit boundary", () => {
    * The episode deliberately covers all three paths: admitted flushes, the refusal that fills a
    * paused queue, and the drain that lands the rest once the transport moves.
    */
-  async function episode(wrap) {
+  async function episode(wrap, semantic = false) {
     const engine = await pausedEngine();
     try {
       const writer = new ConsoleWriter({
-        submit: wrap((records, count) => engine.submitCommands(records, count)),
+        ...(semantic
+          ? { submitEdits: edits => engine.console().submit(...edits) }
+          : { submit: wrap((records, count) => engine.submitCommands(records, count)) }),
         maximumBatch: 4,
       });
       const outcomes = [];
@@ -471,6 +473,7 @@ describe("the writer contract -- the async submit boundary", () => {
   test("an async submit produces the same outcomes and the same stats as a sync one", async () => {
     const sync = await episode(immediately);
     const async_ = await episode(nextMicrotask);
+    const semantic = await episode(undefined, true);
 
     // Guard the fixture itself: a transcript that never refused and never admitted would compare
     // equal for the wrong reason.
@@ -481,6 +484,7 @@ describe("the writer contract -- the async submit boundary", () => {
     assert.deepEqual(async_.outcomes, sync.outcomes, "outcome sequences must not differ by timing");
     assert.deepEqual(async_.stats, sync.stats, "stat sequences must not differ by timing");
     assert.equal(async_.pending, sync.pending);
+    assert.deepEqual(semantic, sync, "semantic transport preserves actual admission, backpressure and coalescing");
   });
 
   test("two flushes entered without awaiting the first serialize into two disjoint batches", async () => {
@@ -576,7 +580,7 @@ describe("the writer contract -- races the async boundary opens", () => {
     });
   };
 
-  test("an edit staged while its own batch is in flight is not deleted by that batch's success", async () => {
+  for (const semantic of [false, true]) test(`an edit staged while its own batch is in flight is not deleted by that batch's success (${semantic ? "semantic" : "encoded"})`, async () => {
     // The drag-during-round-trip case, which is the case the widening exists for. The hand does
     // not stop moving while a batch crosses the port: a newer value for an address already in
     // flight is staged before the report comes back.
@@ -595,16 +599,15 @@ describe("the writer contract -- races the async boundary opens", () => {
       let held = false;
 
       const writer = new ConsoleWriter({
-        submit: async (records, count) => {
+        ...(semantic ? { submitEdits: async edits => {
+          submissions.push(edits.map(edit => ({ address: `${edit.channel}/${edit.parameterId}`, value: edit.values[0] })));
+          if (!held) { held = true; announceEntry(); await gate; }
+          return engine.console().submit(...edits);
+        } } : { submit: async (records, count) => {
           submissions.push(decode(records, count));
-          if (!held) {
-            // Hold the FIRST submit open, so the stage below lands strictly inside the round trip.
-            held = true;
-            announceEntry();
-            await gate;
-          }
+          if (!held) { held = true; announceEntry(); await gate; }
           return engine.submitCommands(records, count);
-        },
+        } }),
         maximumBatch: 4,
       });
 
@@ -615,6 +618,8 @@ describe("the writer contract -- races the async boundary opens", () => {
 
       // The hand keeps moving while the batch is out.
       writer.stage(gainEdit(address, 0, -9.9));
+      const queued = semantic ? writer.flush() : undefined;
+      assert.equal(submissions.length, 1, "a second flush cannot submit before the first report");
       openGate();
 
       const first = await inFlight;
@@ -627,10 +632,10 @@ describe("the writer contract -- races the async boundary opens", () => {
       );
       assert.equal(writer.pending, 1);
 
-      const second = await writer.flush();
+      const second = await (queued ?? writer.flush());
       assert.deepEqual(
         submissions[1],
-        [{ address: `0/${address}`, value: Math.fround(-9.9) }],
+        [{ address: `0/${address}`, value: semantic ? -9.9 : Math.fround(-9.9) }],
         "the value the hand actually reached goes out on the next flush",
       );
       assert.equal(second.admitted, 1);
@@ -651,7 +656,7 @@ describe("the writer contract -- races the async boundary opens", () => {
     }
   });
 
-  test("an escalation rejects its own caller and does not poison later flushes", async () => {
+  for (const semantic of [false, true]) test(`an escalation rejects its own caller and does not poison later flushes (${semantic ? "semantic" : "encoded"})`, async () => {
     // The chain that serializes flushes is a promise, and a promise that is left rejected
     // propagates to everything chained behind it. An escalation must reject the call that caused
     // it and nothing else: the writer is as usable afterwards as a synchronous one, which throws
@@ -665,7 +670,14 @@ describe("the writer contract -- races the async boundary opens", () => {
       let calls = 0;
       const corrupt = new Set([1, 3]);
       const writer = new ConsoleWriter({
-        submit: async (records, count) => {
+        ...(semantic ? { submitEdits: async edits => {
+          await Promise.resolve();
+          calls += 1;
+          const submitted = corrupt.has(calls)
+            ? edits.map((edit, index) => index === 0 ? { ...edit, trackIndex: 99 } : edit)
+            : edits;
+          return engine.console().submit(...submitted);
+        } } : { submit: async (records, count) => {
           await Promise.resolve();
           calls += 1;
           if (corrupt.has(calls)) {
@@ -673,7 +685,7 @@ describe("the writer contract -- races the async boundary opens", () => {
               .setUint32(at("trackIndex"), 99, true);
           }
           return engine.submitCommands(records, count);
-        },
+        } }),
         maximumBatch: 1,
       });
 
@@ -748,4 +760,14 @@ describe("the writer contract -- races the async boundary opens", () => {
       engine.dispose();
     }
   });
+});
+
+
+test("writer construction requires exactly one callable submission path", () => {
+  const submit = () => { throw new Error("constructor must not submit"); };
+  for (const options of [{}, { submit, submitEdits: submit }, { submit: 1 }, { submitEdits: null }]) {
+    assert.throws(() => new ConsoleWriter(options), MisoUsageError);
+  }
+  assert.doesNotThrow(() => new ConsoleWriter({ submit }));
+  assert.doesNotThrow(() => new ConsoleWriter({ submitEdits: submit }));
 });
