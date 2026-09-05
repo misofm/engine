@@ -53,3 +53,32 @@ PR #424 merged and #417 closed. Root freezes merged main `1cfd49d2929b2a75f6054b
 ## Luna attempt 1 evidence
 
 Added the frozen `graph` mode to `gate_toml_dependencies` and switched `check-graph-policy.sh` to it. The mode preserves exact header, regex and `$1` behavior, including compact/no-equals rows, while existing rack/default, plain and plain-target modes remain covered. Helper tests include graph grammar, duplicate output, suffix-preserving semantic counter-mutant, checked awk/sort failures and shell-option modes; the real graph checker and graph fixture suite pass. No Rust, workflow, artifact, timing, Cargo, Git or GitHub changes were made.
+
+## Astra attempt 1 verdict
+
+# Astra #423 attempt 1 review
+
+**FAIL at exact pushed `725eb5f7`.** Luna's coherent first attempt is consumed; assign a bounded Sol evidence revision. No workspace/PR promotion yet.
+
+## Source accepted by inspection
+
+The new graph helper mode transcribes the old exact header/selection/$1 grammar without normalization. Its shared awk and sort results are checked, and the graph caller explicitly propagates failures. The other branches are unchanged. All FIVE original consumers now use gate_toml_dependencies: rack/default, effect-runtime/plain, builtins/plain, conformance/plain-target, graph/graph. Graph's local dependency awk copy is removed. This fulfills the structural consolidation shape, subject to the missing acceptance evidence below. No new source-policy bug was identified; preserve the small implementation.
+
+## Missing or misleading evidence
+
+1. The graph semantic “counter-mutant” runs `sed 's/[.]workspace//g'` on helper source. This removes the SELECTION REGEX fragment; it does not strip a returned suffix as its label says. The subsequent assertion merely requires mutant output to differ from expected, without checking command status or running the original acceptance assertion. A syntax/execution error producing empty output would satisfy the inequality. It therefore does not meet the explicit same-assertion rejecting-counter contract.
+2. The existing checked awk/sort helper tests still invoke the DEFAULT mode and its alpha/zeta fixture. No graph-mode awk error-only/otherwise-correct-partial case was added. The graph fixture suite has no awk shim. Its sort shim now correctly targets the first dependency sort and checks the precise error; keep that useful change. Both modes of a graph-specific awk failure remain missing, and graph helper-mode direct/conditional status evidence is not supplied.
+3. The graph grammar fixture covers spaced, compact, no-equals, bare/indented, target and dev rows, but contains no duplicate OUTPUT row despite the evidence claiming duplicate coverage. Its two engine declarations produce different strings. It also lacks the frozen build-section and selected suffix-looking-key examples. Add these to the same compact table; no larger corpus is needed.
+
+## Bounded Sol attempt 2
+
+Only extend existing helper/graph tests and correct the numbered evidence. Keep production helper/checker semantics and all earlier test modes unchanged.
+
+- Complete the compact graph expected-output table with an identical selected row repeated, ignored build-section row and selected workspace-prefix/suffix-looking key, retaining exact old `$1` outputs. Preserve real graph compact rejection and existing default/plain/plain-target checks.
+- Run graph extraction with targeted awk error-only and correctly formatted full/partial graph-output then nonzero; unrelated tools and earlier operations must succeed. Include the actual graph checker path or demonstrate the new mode through the shared extraction assertion with operation/status diagnostics. Verify graph-mode checked awk/sort paths with caller pipefail on/off and direct/conditional invocation using the existing small test style. Reuse the valid graph fixture; no generic harness.
+- Replace the inequality-only counter with a narrowly scoped semantic fault (strip returned .workspace suffix OR normalize compact graph keys). Execute it through the SAME graph grammar or real graph acceptance assertion, require the intended assertion's nonzero status/message, and distinguish bad syntax/tool failure from semantic rejection. Record the actual result. Existing checked-helper failure mutants need no duplicate framework.
+- Keep the current graph sort error-only/real-sorted-output-then-error fixture. Correct the evidence to list what actually ran; do not claim default-mode error tests were graph-mode coverage or a changed selector was suffix stripping.
+
+Then real graph check, complete helper/graph suites, syntax/diff, root checkpoint and one Astra attempt-2 verdict. Parent #401 stays open until this residual completion and final delivery are accepted upstream; broad #306 remains open. Do not use this evidence gap to reopen other policy work or alter extraction grammar. Sol has at most two coherent revisions, then hard stop/rescope.
+
+Review inspected exact diff, mode implementation, all five call sites, focused suite mechanics and numbered evidence. No Cargo, timing, shell test, repository/GitHub mutation or broader qualification run occurred.
