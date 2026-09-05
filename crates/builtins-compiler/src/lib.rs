@@ -5963,6 +5963,248 @@ mod tests {
         );
     }
 
+    fn scalar_console_owners(
+        fader_delivery: BuiltinControlDelivery,
+        matrix_delivery: BuiltinControlDelivery,
+    ) -> (
+        Box<dyn GraphRuntimeProcessor>,
+        Box<dyn GraphRuntimeProcessor>,
+        Producer<TrackFaderRecord>,
+        Producer<TrackControlRecord>,
+    ) {
+        let parameters = BuiltinParameters {
+            left: builtins::ChannelParameters {
+                fader_db: -3.0,
+                ..Default::default()
+            },
+            right: builtins::ChannelParameters {
+                fader_db: -7.0,
+                ..Default::default()
+            },
+            matrix: Matrix2x2 {
+                ll: 0.75,
+                lr: 0.125,
+                rl: -0.25,
+                rr: 0.5,
+            },
+            smoothing_samples: 0,
+        };
+        let (_, _, matrix) = BuiltinChain::new(48_000, parameters)
+            .expect("scalar sections")
+            .into_sections();
+        let (fader_tx, fader_rx) =
+            bounded_spsc(NonZeroUsize::new(4).expect("queue"), QueueGeneration(0))
+                .expect("fader queue");
+        let (matrix_tx, matrix_rx) =
+            bounded_spsc(NonZeroUsize::new(4).expect("queue"), QueueGeneration(0))
+                .expect("matrix queue");
+        (
+            Box::new(ConsoleFaderProcessor {
+                fader: FaderMuteRampBuiltins::new(parameters).expect("fader"),
+                control: fader_rx,
+                control_delivery: fader_delivery,
+            }),
+            Box::new(ConsoleMatrixProcessor {
+                matrix,
+                control: matrix_rx,
+                control_delivery: matrix_delivery,
+            }),
+            fader_tx,
+            matrix_tx,
+        )
+    }
+
+    #[test]
+    fn scalar_factory_checks_both_exact_owners_and_policies_without_consuming_state() {
+        struct AdvertisedWrongOwner {
+            calls: Arc<AtomicUsize>,
+        }
+        impl GraphRuntimeProcessor for AdvertisedWrongOwner {
+            fn process(&mut self, _: GraphBindingBlock<'_>) -> Result<(), RenderError> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+            fn scalar_pair_factory(&self) -> Option<graph::ScalarPairFactory> {
+                Some(make_scalar_pair)
+            }
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (fader, matrix, _, _) = scalar_console_owners(
+            BuiltinControlDelivery::BetweenRenderCalls,
+            BuiltinControlDelivery::BetweenRenderCalls,
+        );
+        let wrong_first = make_scalar_pair(
+            Box::new(AdvertisedWrongOwner {
+                calls: Arc::clone(&calls),
+            }),
+            matrix,
+        )
+        .err()
+        .expect("wrong first owner declines");
+        assert_eq!(
+            wrong_first.0.as_ref().type_id(),
+            core::any::TypeId::of::<AdvertisedWrongOwner>()
+        );
+        assert_eq!(
+            wrong_first.1.as_ref().type_id(),
+            core::any::TypeId::of::<ConsoleMatrixProcessor>()
+        );
+        let wrong_second = make_scalar_pair(
+            fader,
+            Box::new(AdvertisedWrongOwner {
+                calls: Arc::clone(&calls),
+            }),
+        )
+        .err()
+        .expect("wrong second owner declines");
+        assert_eq!(
+            wrong_second.0.as_ref().type_id(),
+            core::any::TypeId::of::<ConsoleFaderProcessor>()
+        );
+        assert_eq!(
+            wrong_second.1.as_ref().type_id(),
+            core::any::TypeId::of::<AdvertisedWrongOwner>()
+        );
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            0,
+            "factory never invokes owners"
+        );
+
+        for (fader_policy, matrix_policy) in [
+            (
+                BuiltinControlDelivery::Concurrent,
+                BuiltinControlDelivery::BetweenRenderCalls,
+            ),
+            (
+                BuiltinControlDelivery::BetweenRenderCalls,
+                BuiltinControlDelivery::Concurrent,
+            ),
+        ] {
+            let (fader, matrix, mut fader_tx, mut matrix_tx) =
+                scalar_console_owners(fader_policy, matrix_policy);
+            fader_tx
+                .try_push(TrackFaderRecord::Mute {
+                    lanes: BuiltinLaneSelector::Left,
+                    muted: true,
+                    smoothing_samples: 0,
+                })
+                .unwrap();
+            matrix_tx
+                .try_push(TrackControlRecord {
+                    matrix: Matrix2x2::IDENTITY,
+                    smoothing_samples: 0,
+                })
+                .unwrap();
+            let returned = make_scalar_pair(fader, matrix)
+                .err()
+                .expect("either concurrent owner declines");
+            let mut fader = (returned.0 as Box<dyn Any>)
+                .downcast::<ConsoleFaderProcessor>()
+                .unwrap();
+            let mut matrix = (returned.1 as Box<dyn Any>)
+                .downcast::<ConsoleMatrixProcessor>()
+                .unwrap();
+            let mut left = [1.0_f32, 0.5];
+            let mut right = [-0.25_f32, -0.75];
+            fader
+                .process(GraphBindingBlock {
+                    left: &mut left,
+                    right: &mut right,
+                    first_sample: 0,
+                })
+                .unwrap();
+            matrix
+                .process(GraphBindingBlock {
+                    left: &mut left,
+                    right: &mut right,
+                    first_sample: 0,
+                })
+                .unwrap();
+            assert_eq!(left, [0.0, 0.0], "queued fader state stayed with owner");
+        }
+    }
+
+    #[test]
+    fn scalar_invalid_envelope_leaves_the_later_matrix_queue_untouched() {
+        let make = || {
+            let (fader, matrix, fader_tx, matrix_tx) = scalar_console_owners(
+                BuiltinControlDelivery::BetweenRenderCalls,
+                BuiltinControlDelivery::BetweenRenderCalls,
+            );
+            let pair = match make_scalar_pair(fader, matrix) {
+                Ok(pair) => pair,
+                Err(_) => panic!("serialized scalar pair"),
+            };
+            (pair, fader_tx, matrix_tx)
+        };
+        let (mut interrupted, mut interrupted_fader, mut interrupted_matrix) = make();
+        let (mut reference, mut reference_fader, mut reference_matrix) = make();
+        let fader_record = TrackFaderRecord::FaderDb {
+            lanes: BuiltinLaneSelector::Both,
+            db: -12.0,
+            smoothing_samples: 0,
+        };
+        let matrix_record = TrackControlRecord {
+            matrix: Matrix2x2 {
+                ll: 0.25,
+                lr: 0.5,
+                rl: -0.75,
+                rr: 1.0,
+            },
+            smoothing_samples: 0,
+        };
+        interrupted_fader.try_push(fader_record).unwrap();
+        interrupted_matrix.try_push(matrix_record).unwrap();
+        reference_fader.try_push(fader_record).unwrap();
+        reference_matrix.try_push(matrix_record).unwrap();
+
+        let mut short_left = [0.5_f32];
+        let mut long_right = [-0.25_f32, -0.5];
+        assert_eq!(
+            interrupted.process(GraphBindingBlock {
+                left: &mut short_left,
+                right: &mut long_right,
+                first_sample: 0,
+            }),
+            Err(RenderError::InvalidEnvelope)
+        );
+        assert_eq!((short_left, long_right), ([0.5], [-0.25, -0.5]));
+
+        let mut interrupted_left = [0.5_f32, 0.25];
+        let mut interrupted_right = [-0.25_f32, -0.5];
+        let mut reference_left = interrupted_left;
+        let mut reference_right = interrupted_right;
+        interrupted
+            .process(GraphBindingBlock {
+                left: &mut interrupted_left,
+                right: &mut interrupted_right,
+                first_sample: 2,
+            })
+            .unwrap();
+        reference
+            .process(GraphBindingBlock {
+                left: &mut reference_left,
+                right: &mut reference_right,
+                first_sample: 2,
+            })
+            .unwrap();
+        assert_eq!(
+            interrupted_left.map(f32::to_bits),
+            reference_left.map(f32::to_bits)
+        );
+        assert_eq!(
+            interrupted_right.map(f32::to_bits),
+            reference_right.map(f32::to_bits)
+        );
+        assert_ne!(
+            interrupted_left,
+            [0.5, 0.25],
+            "queued matrix command applied on retry"
+        );
+    }
+
     /// #459 Case A: a three-sample queued ramp crossing two-sample render calls remains on the
     /// fallback path until the following call, where the settled serialized pair fuses.
     #[test]
@@ -6401,6 +6643,65 @@ mod tests {
                 && *members > 1
                 && *delivery == BuiltinControlDelivery::BetweenRenderCalls
         }));
+    }
+
+    #[test]
+    fn scalar_owner_resource_is_independent_two_boxes_plus_two_pointer_outer() {
+        let compiled = n_track_session(3);
+        let controls = (0..3)
+            .map(|index| TrackControlRequest {
+                track_id: track_name(index),
+                queue_capacity: NonZeroUsize::new(4).expect("queue"),
+            })
+            .collect::<Vec<_>>();
+        let (_, levels) = track_graph(3);
+        let classes = SessionPoolClasses::from_session(&compiled);
+        let fader = core::mem::size_of::<ConsoleFaderProcessor>() as u64;
+        let matrix = core::mem::size_of::<ConsoleMatrixProcessor>() as u64;
+        let outer = core::mem::size_of::<ScalarPairProcessor>() as u64;
+        assert_eq!(
+            outer,
+            2 * core::mem::size_of::<usize>() as u64,
+            "the composite allocation contains exactly the two retained typed boxes"
+        );
+
+        let serialized =
+            prepare_session_builtins_between_render_calls(&compiled, &[], &controls, caps())
+                .expect("serialized owners")
+                .graph_scalar_owner_resource(Backend::Scalar, &levels, &classes)
+                .expect("checked scalar estimate");
+        assert_eq!(serialized.total_bytes, 3 * (fader + matrix + outer));
+        assert_eq!(
+            serialized.largest_allocation_bytes,
+            fader.max(matrix).max(outer)
+        );
+
+        let concurrent = prepare_session_builtins_with_console(&compiled, &[], &controls, caps())
+            .expect("concurrent owners")
+            .graph_scalar_owner_resource(Backend::Scalar, &levels, &classes)
+            .expect("checked scalar estimate");
+        assert_eq!(concurrent.total_bytes, 3 * (fader + matrix));
+        assert_eq!(concurrent.largest_allocation_bytes, fader.max(matrix));
+
+        let no_console = prepare_session_builtins(&compiled, &[], caps())
+            .expect("no-console owners")
+            .graph_scalar_owner_resource(Backend::Scalar, &levels, &classes)
+            .expect("checked scalar estimate");
+        assert_eq!(
+            no_console,
+            graph::GraphScalarOwnerResourceEstimate::default()
+        );
+
+        let bank_selected =
+            prepare_session_builtins_between_render_calls(&compiled, &[], &controls, caps())
+                .expect("bank candidates")
+                .graph_scalar_owner_resource(Backend::Simd8, &levels, &classes)
+                .expect("checked vector estimate");
+        assert_eq!(
+            bank_selected,
+            graph::GraphScalarOwnerResourceEstimate::default(),
+            "planned banks consume both controlled post-fader and post-matrix owners"
+        );
     }
 
     struct HarnessSink;

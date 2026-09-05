@@ -40,3 +40,7 @@ This is the smallest honest split: the adjacent capability is independently usef
 ## Numbered retained obligation
 
 This is #470. #443 retains adjacent serialized scalar integration; #470 retains otherwise compatible nonadjacent serialized scalar scheduling/error-order completion; #444 retains Concurrent admission and scalar/bank rollout. #431 retains measurement. Numbering supplies no implementation or timing authority. The actual delivered #443 base and explicit design decision remain prerequisites.
+
+## Orthogonal buffer-identity retention
+
+New #476 classifies and retains distinct-output serialized scalar pairing. It does not replace or narrow this issue: #470 remains about nonadjacent scheduling and intervening errors. #443 now requires explicit same-output/in-place eligibility in its adjacent slice. Neither retained issue claims a measured improvement or authorizes speculative architecture.

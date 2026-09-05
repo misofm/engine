@@ -1353,7 +1353,6 @@ pub trait GraphRuntimeProcessor: Send + Any {
     fn scalar_pair_factory(&self) -> Option<ScalarPairFactory> {
         None
     }
-
 }
 /// Immutable post-node observation input. Observers cannot alter graph audio.
 pub struct GraphObservationBlock<'a> {
