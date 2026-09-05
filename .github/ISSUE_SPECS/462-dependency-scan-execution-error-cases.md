@@ -41,3 +41,21 @@ Review used read-only source/Git/log inspection; no tests, builds, Cargo resolut
 Exactly four additional rows in the two existing suites: empty stdout plus selected later delegate awk exit6; empty stdout plus final wc exit9; empty stdout plus final tr exit10 retaining input6; and later Cargo tree exit8 with no stdout after the earlier real package succeeds. Each row requires exact operation/status/<empty>/unique stderr diagnostics through existing97 unexpected-success and96 setup/diagnostic assertions. Preserve real-output/error counterparts and both existing production mutants unchanged.
 
 No additional packages/framework/helper/checker/Cargo flags/benchmark/runtime/workflow changes. Root owns commits, pushes, issues, PR and merging. Retain six focused command logs/statuses, with both mutation97 outcomes and restored fixture0. Source PASS precedes parent full `cargo test --locked --workspace` (including doctests and unchanged population), actual PR exact-head Astra review and required qualification. Only after evidence is upstream and reviewed/merged may this child and #453 close; #403/#306/#349 retain other children.
+
+
+## Numbered scope PASS and Luna attempt 1
+
+# Astra #462 numbered/current-base review — PASS
+
+Exact checkpoint `d0455213a223cbec553258807ac4d1fedf615b5e`, `/home/bl/misofm/engine-dependency-error-cases`. PASS for fresh Luna attempt1 within the four-row tests-only scope. No further amendment is required.
+
+Live GitHub issue462 is OPEN, title “Complete four dependency-scan execution-error cases”; its body exactly matches `.github/ISSUE_SPECS/462-dependency-scan-execution-error-cases.md`. The numbered adoption preserves all four final453 omissions: selected later delegate awk empty/error6, final wc empty/error9, final tr empty/error10 with successful input6, and later-package Cargo empty/error8 after earlier real resolution. Existing97 unexpected-success versus96 diagnostic/setup assertions, precise operation/status/empty/sentinel checks, real-output counterparts, both actual production mutants and restored0 are retained unchanged.
+
+Cumulative comparison to accepted production checkpointad489984 shows only the453 hard-stop/462 planning records plus the14 delivered RT3 evidence/spec files from main integration. Scripts, suites, shared helpers, production/runtime and configuration are unchanged. Thus no accepted parser/predicate/Cargo semantics or mutation control drift is hidden in the recovery base.
+
+Implementation remains only the two existing suites and child/parent evidence, with no new packages, checker/helper/workflow/framework or mutation campaign. Root owns checkpoints and remote writes. Execute/retain the six frozen focused commands/statuses; source PASS then full inherited workspace including doctests, actual-head Astra PR review and required qualification. Parent453 retains full original outcome; #403/#306/#349 remain open for their other obligations. This is an explicitly numbered bounded restart after a preserved hard stop, not permission to continue the stopped series.
+
+Read-only Git/GitHub/spec/source comparison only; no tests, builds, timing or repository/GitHub mutations. Root may record this approval and assign Luna1.
+
+
+Root assigns one coherent Luna attempt1 for precisely the four missing rows above. No production/helper/other-test mutation. Stop after six focused commands with retained logs/statuses; no workspace/PR/CI before source review.
