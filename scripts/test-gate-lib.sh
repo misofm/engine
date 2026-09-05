@@ -168,7 +168,7 @@ if PATH="$scratch/rg-partial:$PATH" bash -c 'source "$1"; gate_scan_required mut
 if PATH="$scratch/rg-partial:$PATH" bash -c 'source "$1"; gate_filter_exclude mutant x y >/dev/null' _ "$counter_dir/filter.sh"; then :; else echo 'filter counter-mutant did not forge success' >&2; exit 1; fi
 [[ "$(PATH="$scratch/wc-fail:$PATH" bash -c 'source "$1"; gate_count_lines mutant "$2"' _ "$counter_dir/count.sh" $'one\ntwo')" == 2 ]] || { echo 'count counter-mutant did not forge expected count' >&2; exit 1; }
 [[ "$(bash -c 'source "$1"; gate_toml_dependencies "$2" plain' _ "$counter_dir/plain.sh" "$plain_manifest")" != $'alpha\nlane\nzeta' ]] || { echo 'plain parser counter-mutant escaped acceptance' >&2; exit 1; }
-printf 'counter-mutants rejected: collect required filter count plain\n'
+printf 'counter-mutant controls exercised: collect required filter count plain\n'
 
 [[ "$PWD" == "$before_pwd" ]] || { echo 'gate changed caller cwd' >&2; exit 1; }
 [[ "$(set -o)" == "$before_opts" ]] || { echo 'gate changed caller shell options' >&2; exit 1; }
