@@ -39,3 +39,9 @@ Prerequisite #371 is merged as `2a18b315067898a94fdc02e8f8b80f07b788ff89` and ve
 ## Program closure
 
 Parent #306 and the broad #349 TOOL-11 finding remain OPEN until #400, #401, #402 and #403 are upstream and all original 21-gate, five-extractor and nine-loop obligations are resolved. Each child closes only its named outcome; any discovered original-scope site outside the roster requires a numbered successor before parent closure.
+
+## Astra bounded-child readiness ruling
+
+The six-gate implementation is split before coding into three stateless children, retaining every original gate and producer obligation. #410 owns realtime/lane traversal and follows merged #406. #411 owns the unfused seal and follows merged #410. #412 owns environment vocabulary, effect-state migration and DSP research input scans and follows merged #411 (and #406). This serialized order prevents overlapping shared-helper and effect-runtime-suite changes.
+
+Astra revalidated all three briefs against main a9e801fea91dc49a4d2acc9bea939d3fdc38dec9. Existing required CI covers #410/#411; #412 may add only its focused research suite beside the existing research checker. Each child retains unchanged-count workspace qualification, existing policy semantics and directed execution-failure tests. This parent remains OPEN until all three children are merged, reviewed PASS and remotely synchronized. Publishing queued briefs authorizes no implementation ahead of dependencies.
