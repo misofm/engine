@@ -47,3 +47,9 @@ Review used read-only source/filesystem/GitHub comparison; no local test, Cargo,
 At committed candidate a74477c68eaf8650fdc86ec6d0f3ac04a18cb880, zero-workload preflight passed. Root prepared the exact runner profile without workload launch, then assessed unchanged readiness limits: load0.20, binary age113seconds, CPU63 affinity, sibling31 busy0.00%. The one authorized controlled invocation completed: disposition PASS, invocation1, workload3, warmup1, measured rounds2, records46. No retry or uncontrolled override occurred.
 
 The unchanged production record and aggregate validators independently pass; raw/accepted hashes and byte counts, stderr and every candidate/control field were verified. Durable artifacts/issue415-rt1-measurement contains disposition, raw/accepted records, original stderr, preflight, readiness and README. Full comparison/evidence review and actual PR/required CI remain before closure. Issue399's refused directory remains intact.
+
+## Completed evidence comparison
+
+Luna analyzed all 46 unique `(record, workload_kind, round)` keys against both #368 and #388. Root independently confirmed every key and all 160 output-digest/transpose/error fields against each authority, with zero mismatches. Stable fixture/layout/configuration fields also match. Current runner, validator and floor hashes match frozen preflight. The README records idle, console, ragged and mono p50 observations, exact profile/control/provenance, no emitted cycle fields and no inferred speedup. #388's uncontrolled status is explicit; historical timing is not treated as a causal baseline.
+
+The capture/evidence are complete for actual PR review. No additional full-workspace or artifact build is needed for the registration/evidence-only successor; committed-head preflight already exercised the required existing contracts and workspace clippy. Required CI and Astra's actual PR review remain before closure.
