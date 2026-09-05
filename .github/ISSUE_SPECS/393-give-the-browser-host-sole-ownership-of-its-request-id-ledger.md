@@ -216,3 +216,7 @@ Root browser evidence on `beeb8557`: existing qualification passed in Playwright
 ## Final Astra verdict — PASS
 
 Astra independently reviewed attempt 3 at the exact pushed commit `bed7634c7bb86ede24b577dc09ab9895208d803f` and verified that remote head with `git ls-remote`. Hermetic and type gates passed independently. Restoring source backpressure in the successful-source fixture makes its new assertion red; permitting optional meter/telemetry caller IDs makes both negative and key-exclusion type probes red. The final tranche changes only tests/spec, with product code unchanged from the fully qualified attempt 2. Astra found no remaining mandatory evidence gap. Full review is attached to PR #398; local copy `/private/tmp/dx-393-astra-review-attempt3.md`. The feature is implemented and reviewed upstream; npm publication is outside this issue and no registry-release claim is made.
+
+## Delivery isolation (2026-09-05)
+
+The approved request-ID capability and independently approved #409 CI fixture correction are isolated on codex/dx-host-control for a focused PR. This branch excludes all unqualified #405 PCM changes. No host implementation changed during isolation; source remains the Astra-reviewed #393 checkpoint. Existing PR #398 preserves the unqualified PCM branch and review evidence. No merge or publication is claimed.

@@ -242,3 +242,9 @@ Final evidence:
 - `git diff --check`: PASS. Exact working-tree diff contains only `sdk/test/browser-pcm-evals.mjs` and this issue evidence file; log `/private/tmp/dx-405-luna-attempt3-diff.log`.
 
 No production, package, adapter, generated artifact, ABI, workflow, dependency, runner, or CI-#409 paths changed. No Rust rebuild or Darwin baseline repin was performed. This is the third and final attempt; root must checkpoint and push these two exact paths for dedicated Astra review. No PASS or issue closure is claimed by Luna.
+
+## Dedicated Astra attempt 3 verdict — FAIL; implementation STOPPED (2026-09-05)
+
+Astra reviewed `2473cfdf`. All three prior escaping mutants now fail at their intended assertions, and focused tests and packed consumer pass. Two required discriminators still escape: a retained-slot retry may skip the actual submission, and the writer may accept malformed non-power-of-two capacity. These are test-evidence gaps; the reviewed production corrections remain unchanged. The final review is attached to PR #398. The three-attempt budget is consumed: no fourth implementation/test revision is authorized here. Claims requiring these regressions remain unqualified.
+
+For delivery isolation, approved host request-ID and CI-fixture work is now on PR #413. This stopped PCM branch merges that reviewed base without changing its PCM implementation and is preserved as a separate dependent PR. This administrative isolation is not a new implementation attempt. No merge, publication or PCM qualification PASS is claimed.
