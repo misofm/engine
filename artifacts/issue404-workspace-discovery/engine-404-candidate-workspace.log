@@ -1,0 +1,3495 @@
+   Compiling cfg-if v1.0.4
+   Compiling engine v0.1.0 (/home/bl/misofm/engine-404-workspace/crates/engine)
+   Compiling bytemuck v1.25.2
+   Compiling typenum v1.20.1
+   Compiling cpufeatures v0.3.0
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.24
+   Compiling serde_core v1.0.228
+   Compiling serde v1.0.228
+   Compiling version_check v0.9.5
+   Compiling libc v0.2.189
+   Compiling once_cell v1.21.4
+   Compiling autocfg v1.5.1
+   Compiling lexical-util v1.0.7
+   Compiling syn v1.0.109
+   Compiling utf8-decode v1.0.1
+   Compiling decoded-char v0.1.1
+   Compiling locspan v0.8.2
+   Compiling dsp-reference v0.1.0 (/home/bl/misofm/engine-404-workspace/crates/dsp-reference)
+   Compiling memchr v2.8.3
+   Compiling foldhash v0.2.0
+   Compiling zmij v1.0.23
+   Compiling stable_deref_trait v1.2.1
+   Compiling libm v0.2.16
+   Compiling serde_json v1.0.151
+   Compiling itoa v1.0.18
+   Compiling regex-syntax v0.8.11
+   Compiling lazy_static v1.5.0
+   Compiling writeable v0.6.4
+   Compiling litemap v0.8.3
+   Compiling log v0.4.33
+   Compiling icu_properties_data v2.3.0
+   Compiling utf8_iter v1.0.4
+   Compiling icu_normalizer_data v2.3.0
+   Compiling zerocopy v0.8.56
+   Compiling getrandom v0.3.4
+   Compiling ref-cast v1.0.27
+   Compiling wasmtime-internal-core v47.0.3
+   Compiling parking_lot_core v0.9.12
+   Compiling cranelift-srcgen v0.134.4
+   Compiling scopeguard v1.2.0
+   Compiling borrow-or-share v0.2.4
+   Compiling bit-vec v0.8.0
+   Compiling thiserror v2.0.20
+   Compiling outref v0.5.2
+   Compiling vsimd v0.8.0
+   Compiling percent-encoding v2.3.2
+   Compiling uuid v1.26.0
+   Compiling shlex v2.0.1
+   Compiling find-msvc-tools v0.1.11
+   Compiling equivalent v1.0.2
+   Compiling bytecount v0.6.9
+   Compiling cranelift-isle v0.134.3
+   Compiling num-cmp v0.1.0
+   Compiling base64 v0.22.1
+   Compiling bitflags v2.13.1
+   Compiling target-lexicon v0.13.5
+   Compiling heck v0.5.0
+   Compiling cranelift-codegen-shared v0.134.4
+   Compiling fnv v1.0.7
+   Compiling cpufeatures v0.2.17
+   Compiling hashbrown v0.16.1
+   Compiling allocator-api2 v0.2.21
+   Compiling arbitrary v1.4.2
+   Compiling safe_arch v1.2.0
+   Compiling rustc-hash v2.1.3
+   Compiling lock_api v0.4.14
+   Compiling hashbrown v0.17.1
+   Compiling cc v1.4.3
+   Compiling anyhow v1.0.104
+   Compiling crc32fast v1.5.1
+   Compiling object v0.39.1
+   Compiling termcolor v1.4.1
+   Compiling leb128fmt v0.1.0
+   Compiling ahash v0.7.8
+   Compiling proc-macro-error-attr v1.0.4
+   Compiling proc-macro-error v1.0.4
+   Compiling ahash v0.8.12
+   Compiling generic-array v0.14.7
+   Compiling indexmap v1.9.3
+   Compiling num-traits v0.2.19
+   Compiling cranelift-assembler-x64-meta v0.134.4
+   Compiling bit-set v0.8.0
+   Compiling bumpalo v3.20.3
+   Compiling rustix v1.1.4
+   Compiling wasmtime-internal-component-util v47.0.3
+   Compiling wasmtime-internal-unwinder v47.0.3
+   Compiling either v1.18.0
+   Compiling wasmtime-internal-cranelift v47.0.3
+   Compiling linux-raw-sys v0.12.1
+   Compiling rustversion v1.0.23
+   Compiling aho-corasick v1.1.5
+   Compiling wasm-encoder v0.252.0
+   Compiling tracing-core v0.1.36
+   Compiling pin-project-lite v0.2.17
+   Compiling sharded-slab v0.1.7
+   Compiling thread_local v1.1.10
+   Compiling nu-ansi-term v0.50.3
+   Compiling semver v1.0.28
+   Compiling scoped-tls v1.0.1
+   Compiling lexical-write-integer v1.0.6
+   Compiling lexical-parse-integer v1.0.6
+   Compiling uuid-simd v0.8.0
+   Compiling wide v1.6.1
+   Compiling cranelift-control v0.134.4
+   Compiling itertools v0.14.0
+   Compiling hybrid-array v0.4.14
+   Compiling rustc_version v0.4.1
+   Compiling lexical-parse-float v1.0.6
+   Compiling lexical-write-float v1.0.6
+   Compiling tracing-log v0.2.0
+   Compiling tracing v0.1.44
+   Compiling flatbuffers v25.12.19
+   Compiling syn v2.0.119
+   Compiling syn v3.0.3
+   Compiling lexical-core v1.0.6
+   Compiling lexical v7.0.5
+   Compiling block-buffer v0.12.1
+   Compiling crypto-common v0.2.2
+   Compiling generator v0.8.9
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.1.7
+   Compiling digest v0.10.7
+   Compiling getrandom v0.2.17
+   Compiling num-integer v0.1.47
+   Compiling num-complex v0.4.6
+   Compiling cranelift-assembler-x64 v0.134.4
+   Compiling sha2 v0.10.9
+   Compiling hashbrown v0.12.3
+   Compiling num-bigint v0.4.8
+   Compiling num-iter v0.1.46
+   Compiling digest v0.11.3
+   Compiling cranelift-bitset v0.134.3
+   Compiling regex-automata v0.4.18
+   Compiling sha2 v0.11.0
+   Compiling bench-support v0.1.0 (/home/bl/misofm/engine-404-workspace/tools/bench-support)
+   Compiling locspan-derive v0.6.0
+   Compiling num-rational v0.4.2
+   Compiling memfd v0.6.5
+   Compiling num v0.4.3
+   Compiling indexmap v2.14.0
+   Compiling fraction v0.15.4
+   Compiling gimli v0.33.0
+   Compiling synstructure v0.13.2
+   Compiling zerovec-derive v0.11.6
+   Compiling displaydoc v0.2.7
+   Compiling ref-cast-impl v1.0.27
+   Compiling thiserror-impl v2.0.20
+   Compiling async-trait v0.1.92
+   Compiling serde_derive v1.0.228
+   Compiling zerofrom-derive v0.1.7
+   Compiling yoke-derive v0.8.2
+   Compiling pulley-macros v47.0.3
+   Compiling wasmtime-internal-versioned-export-macros v47.0.3
+   Compiling fancy-regex v0.16.2
+   Compiling regex v1.13.1
+   Compiling matchers v0.2.0
+   Compiling wasmtime v47.0.3
+   Compiling pulley-interpreter v47.0.3
+   Compiling zerofrom v0.1.8
+   Compiling yoke v0.8.3
+   Compiling cobs v0.3.0
+   Compiling zerovec v0.11.8
+   Compiling zerotrie v0.2.5
+   Compiling tinystr v0.8.4
+   Compiling potential_utf v0.1.6
+   Compiling icu_collections v2.3.0
+   Compiling lane v0.1.0 (/home/bl/misofm/engine-404-workspace/crates/lane)
+   Compiling icu_locale_core v2.3.0
+   Compiling math v0.1.0 (/home/bl/misofm/engine-404-workspace/crates/math)
+   Compiling target-smoke v0.1.0 (/home/bl/misofm/engine-404-workspace/crates/target-smoke)
+   Compiling host-mobile v0.1.0 (/home/bl/misofm/engine-404-workspace/hosts/host-mobile)
+   Compiling host-native v0.1.0 (/home/bl/misofm/engine-404-workspace/hosts/host-native)
+   Compiling cranelift-codegen-meta v0.134.3
+   Compiling effect-contract v0.1.0 (/home/bl/misofm/engine-404-workspace/crates/effect-contract)
+   Compiling effect-runtime v0.1.0 (/home/bl/misofm/engine-404-workspace/crates/effect-runtime)
+   Compiling icu_provider v2.3.1
+   Compiling icu_properties v2.3.0
+   Compiling smallvec v1.15.2
+   Compiling fluent-uri v0.3.2
+   Compiling email_address v0.2.9
+   Compiling postcard v1.1.3
+   Compiling wasmparser v0.252.0
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-404-workspace/crates/compressor)
+   Compiling builtins v0.1.0 (/home/bl/misofm/engine-404-workspace/crates/builtins)
+   Compiling soft-clip v0.1.0 (/home/bl/misofm/engine-404-workspace/crates/soft-clip)
+   Compiling parametric-eq v0.1.0 (/home/bl/misofm/engine-404-workspace/crates/parametric-eq)
+   Compiling conformance v0.1.0 (/home/bl/misofm/engine-404-workspace/crates/conformance)
+   Compiling multiband-compressor v0.1.0 (/home/bl/misofm/engine-404-workspace/crates/multiband-compressor)
+   Compiling transient-shaper v0.1.0 (/home/bl/misofm/engine-404-workspace/crates/transient-shaper)
+   Compiling true-peak-limiter v0.1.0 (/home/bl/misofm/engine-404-workspace/crates/true-peak-limiter)
+   Compiling gate-expander v0.1.0 (/home/bl/misofm/engine-404-workspace/crates/gate-expander)
+   Compiling delay v0.1.0 (/home/bl/misofm/engine-404-workspace/crates/delay)
+   Compiling rack v0.1.0 (/home/bl/misofm/engine-404-workspace/crates/rack)
+   Compiling smallstr v0.3.1
+   Compiling json-number v0.4.10
+   Compiling icu_normalizer v2.3.0
+   Compiling regalloc2 v0.15.2
+   Compiling tracing-subscriber v0.3.23
+   Compiling json-syntax v0.12.5
+   Compiling parking_lot v0.12.5
+   Compiling wasmtime-internal-jit-icache-coherence v47.0.3
+   Compiling graph v0.1.0 (/home/bl/misofm/engine-404-workspace/crates/graph)
+   Compiling rack-compiler v0.1.0 (/home/bl/misofm/engine-404-workspace/crates/rack-compiler)
+   Compiling referencing v0.33.0
+   Compiling cranelift-entity v0.134.3
+   Compiling effect-package v0.1.0 (/home/bl/misofm/engine-404-workspace/crates/effect-package)
+   Compiling wasm-gate-corpus v0.1.0 (/home/bl/misofm/engine-404-workspace/tools/wasm-gate-corpus)
+   Compiling session v0.1.0 (/home/bl/misofm/engine-404-workspace/crates/session)
+   Compiling idna_adapter v1.2.2
+   Compiling cranelift-bforest v0.134.3
+   Compiling idna v1.1.0
+   Compiling jsonschema v0.33.0
+   Compiling loom v0.7.2
+   Compiling cranelift-codegen v0.134.3
+   Compiling builtins-compiler v0.1.0 (/home/bl/misofm/engine-404-workspace/crates/builtins-compiler)
+   Compiling protocol v0.1.0 (/home/bl/misofm/engine-404-workspace/crates/protocol)
+   Compiling source v0.1.0 (/home/bl/misofm/engine-404-workspace/crates/source)
+   Compiling wasm-gate-guest v0.1.0 (/home/bl/misofm/engine-404-workspace/tools/wasm-gate-guest)
+   Compiling stem-hasher v0.1.0 (/home/bl/misofm/engine-404-workspace/tools/stem-hasher)
+   Compiling session-validator v0.1.0 (/home/bl/misofm/engine-404-workspace/tools/session-validator)
+   Compiling effect-compiler v0.1.0 (/home/bl/misofm/engine-404-workspace/crates/effect-compiler)
+   Compiling graph-compiler v0.1.0 (/home/bl/misofm/engine-404-workspace/crates/graph-compiler)
+   Compiling host-core v0.1.0 (/home/bl/misofm/engine-404-workspace/crates/host-core)
+   Compiling console-workload v0.1.0 (/home/bl/misofm/engine-404-workspace/tools/console-workload)
+   Compiling host-web v0.1.0 (/home/bl/misofm/engine-404-workspace/hosts/host-web)
+   Compiling capi v0.1.0 (/home/bl/misofm/engine-404-workspace/crates/capi)
+   Compiling bench v0.1.0 (/home/bl/misofm/engine-404-workspace/tools/bench)
+   Compiling wasm-console-guest v0.1.0 (/home/bl/misofm/engine-404-workspace/tools/wasm-console-guest)
+   Compiling wasmprinter v0.252.0
+   Compiling parameter-metadata v0.1.0 (/home/bl/misofm/engine-404-workspace/tools/parameter-metadata)
+   Compiling native-pcm-runner v0.1.0 (/home/bl/misofm/engine-404-workspace/tools/native-pcm-runner)
+   Compiling audit v0.1.0 (/home/bl/misofm/engine-404-workspace/tools/audit)
+   Compiling wasmtime-environ v47.0.3
+   Compiling cranelift-native v0.134.3
+   Compiling cranelift-frontend v0.134.3
+   Compiling wasm-gates v0.1.0 (/home/bl/misofm/engine-404-workspace/tools/wasm-gates)
+   Compiling wasm-console v0.1.0 (/home/bl/misofm/engine-404-workspace/tools/wasm-console)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 21.86s
+     Running unittests src/main.rs (/tmp/engine-404-workspace-qualified/debug/deps/audit-02611fef8a36fbc1)
+
+running 31 tests
+test builtins_graph::tests::issue070_retirement_worker_source_is_limited_to_nonblocking_primitives ... ok
+test capi::tests::serializer_names_all_nine_forbidden_counters_exactly ... ok
+test builtins_fixture_check::tests::issue069_author_is_not_reachable_from_audit_mains ... ok
+test capi::tests::audit_plan_is_fixed_non_timed_and_calls_the_c_entrypoint ... ok
+test fixture_builtins_listening::tests::level_match_attenuates_only_and_caps_peak ... ok
+test fixture_builtins::tests::owned_jsonl_parsers_reject_duplicate_extra_reordered_and_wrong_variants ... ok
+test source::tests::asserted_worker_lifecycle_counter_and_pcm_transcript_is_canonical ... ok
+test vectorization::tests::fused_multiply_add_is_red ... ok
+test vectorization::tests::scalar_fallback_is_red ... ok
+test vectorization::tests::incomplete_allowlist_is_red ... ok
+test vectorization::tests::missing_vector_family_is_red ... ok
+test vectorization::tests::call_inside_kernel_body_is_red ... ok
+test source_duration::tests::exact_duration_independent_accounting_serialization_is_canonical ... ok
+test builtins_fixture_check::tests::issue069_checker_is_read_only_and_rejects_payload_mutation ... ok
+test fixture_builtins::tests::issue061_unsuffixed_ramp_and_reset_script_have_frozen_semantics ... ok
+test fixture_builtins_listening::tests::probe_seed_and_cli_rejections_are_exact ... ok
+test source_fixture::tests::generated_fixtures_match_manifest_oracles_and_mutation_policy ... ok
+test builtins_graph::tests::issue069_two_graph_instances_prove_success_and_saturation_without_duplicates ... ok
+test builtins_graph::tests::issue070_retirement_worker_is_ready_quiescent_and_owns_only_a ... ok
+test capi::tests::lifecycle_prepares_and_destroys_without_entering_render ... ok
+test fixture_builtins::tests::issue061_response_tuples_decimals_and_partitions_reject_semantic_mutations ... ok
+test fixture_builtins_listening::tests::block_events_wave_and_repeat_are_exact ... ok
+test fixture_builtins_listening::tests::output_is_closed_and_no_clobber ... ok
+test fixture_builtins_listening::tests::strict_source_shape_edges_peak_and_finite_reject ... ok
+test fixture_builtins::tests::issue064_checked_corpus_is_read_only_complete_and_has_no_authoring_reachability ... ok
+test fixture_builtins::tests::issue064_checked_corpus_rejects_exactly_twenty_four_corruptions ... ok
+test fixture_builtins::tests::check_rejects_all_twenty_four_format_mutations has been running for over 60 seconds
+test fixture_builtins::tests::check_rejects_benchmark_identity_parameter_and_pcm_hash_mutations has been running for over 60 seconds
+test fixture_builtins::tests::check_rejects_manifest_grammar has been running for over 60 seconds
+test fixture_builtins::tests::check_rejects_owned_jsonl_tuple_mutations has been running for over 60 seconds
+test fixture_builtins::tests::issue067_graph_pdc_and_dependent_identity_mutations_are_rejected has been running for over 60 seconds
+test fixture_builtins::tests::check_rejects_manifest_grammar ... ok
+test fixture_builtins::tests::check_rejects_all_twenty_four_format_mutations ... ok
+test fixture_builtins::tests::issue067_graph_pdc_and_dependent_identity_mutations_are_rejected ... ok
+test fixture_builtins::tests::check_rejects_benchmark_identity_parameter_and_pcm_hash_mutations ... ok
+test fixture_builtins::tests::check_rejects_owned_jsonl_tuple_mutations ... ok
+
+test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 83.72s
+
+     Running unittests src/main.rs (/tmp/engine-404-workspace-qualified/debug/deps/bench-df01d09e92a9181b)
+
+running 31 tests
+test builtins::tests::audited_allocator_is_live_outside_the_render_scope ... ok
+test builtins::tests::measured_plan_is_the_frozen_twenty_row_cartesian_set ... ok
+test builtins::tests::matrix_targets_alternate_by_global_operation_across_batch_boundaries ... ok
+test conformance::tests::percentile_is_nearest_rank_and_escape_is_json_safe ... ok
+test floor::tests::a_control_row_is_always_cheaper_than_the_row_it_isolates ... ok
+test floor::tests::every_derived_row_names_its_ruling_and_composes_a_positive_floor ... ok
+test builtins::tests::issue035_preparation_record_uses_only_required_null_and_not_applicable_values ... ok
+test builtins::tests::benchmark_inputs_take_their_hashes_from_the_checked_manifest_rows ... ok
+test builtins::tests::issue035_record_has_exact_render_identity_shape_and_typed_missing_metadata ... ok
+test floor::tests::the_compressor_isolate_is_the_compressor_inventory ... ok
+test floor::tests::the_current_effect_recount_keeps_fractional_link_work_and_composes_the_strip ... ok
+test floor::tests::the_mono_rows_carry_the_standing_strips_floor ... ok
+test floor::tests::the_overhead_inventories_differ_by_the_scaffolding_and_neither_row_claims_an_isolate ... ok
+test floor::tests::the_plumbing_row_is_the_floor_of_the_table_and_the_identity_pair_shares_one_inventory ... ok
+test floor::tests::the_sixty_four_track_block_has_the_lane_sample_count_the_rulings_quote ... ok
+test graph::tests::nearest_rank_is_ordered_at_all_frozen_percentiles ... ok
+test builtins::tests::checked_toml_and_referenced_pcm_drive_render_configuration_bit_exactly ... ok
+test rack::tests::nearest_rank_uses_the_frozen_one_thousand_observation_indices ... ok
+test session::tests::percentile_and_sha256_are_contract_stable ... ok
+test effect_interchange::tests::exact_four_rate_migration_envelope_without_timing ... ok
+test protocol::tests::jsonl_schema_record_carries_frozen_corpus_and_environment_fields ... ok
+test builtins::tests::real_meter_tap_plans_use_the_compiled_seven_taps_and_preserve_full_queue_state ... ok
+test protocol::tests::frozen_corpus_has_required_cardinality_and_checksum ... ok
+test protocol::tests::actual_flatbuffer_builder_and_bounded_verifier_agree ... ok
+test builtins::tests::preparation_projection_is_complete_address_free_and_deterministic ... ok
+test rack::tests::zero_launch_preflight_prepares_each_exact_production_workload ... ok
+test protocol::tests::btlv_sources_encode_and_decode_without_schema_escapes ... ok
+test graph::tests::canonical_benchmark_fixture_prepares_and_compiles ... ok
+test session::tests::representative_fixture_has_the_frozen_workload_and_stable_bytes ... ok
+test rack::tests::semantic_input_identity_is_layout_independent_and_workload_specific ... ok
+test builtins::tests::all_render_workloads_arm_only_product_render_without_timing ... ok
+
+test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.49s
+
+     Running unittests src/lib.rs (/tmp/engine-404-workspace-qualified/debug/deps/bench_support-e15bfd8a9bc9d9e9)
+
+running 28 tests
+test alloc::tests::default_mode_is_abort ... ok
+test alloc::tests::the_installed_allocator_assertion_holds_here ... ok
+test alloc::tests::delta_saturates_below_its_mark ... ok
+test alloc::tests::the_installed_allocator_is_the_audited_one ... ok
+test digest::tests::every_update_is_counted_and_a_one_shot_digest_is_not ... ok
+test digest::tests::incremental_updates_match_a_one_shot_digest ... ok
+test digest::tests::matches_the_published_vectors ... ok
+test digest::tests::snapshot_does_not_consume_the_sink ... ok
+test json::tests::escapes_every_rfc_8259_two_character_form ... ok
+test json::tests::escapes_remaining_control_characters_as_four_hex_digits ... ok
+test json::tests::leaves_ordinary_text_alone ... ok
+test json::tests::passes_non_ascii_through_unchanged ... ok
+test stats::tests::a_single_observation_is_every_percentile ... ok
+test metadata::tests::gather_is_memoized_and_matches_the_process_environment ... ok
+test stats::tests::frozen_indices_over_one_thousand_observations ... ok
+test stats::tests::is_monotone_in_the_position ... ok
+test stats::tests::small_samples_round_up_to_the_next_rank ... ok
+test stats::tests::the_numerator_denominator_form_matches_the_per_mille_form ... ok
+test stats::tests::rejects_an_empty_sample - should panic ... ok
+test sysinfo::tests::distinct_core_socket_pairs_are_counted_once_each ... ok
+test sysinfo::tests::empty_output_is_unknown ... ok
+test sysinfo::tests::header_only_output_is_unknown ... ok
+test sysinfo::tests::whitespace_only_output_is_unknown ... ok
+test timing::tests::a_pure_body_is_accepted ... ok
+test timing::tests::hashing_inside_the_timer_is_a_harness_defect - should panic ... ok
+test timing::tests::hashing_outside_the_timer_is_how_it_is_done ... ok
+test timing::tests::returns_the_operation_result ... ok
+test sysinfo::tests::returns_a_decimal_count_or_the_unknown_sentinel ... ok
+
+test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src/lib.rs (/tmp/engine-404-workspace-qualified/debug/deps/builtins-e199633334b728a2)
+
+running 2 tests
+test tests::full_public_chain_matches_the_three_section_reference ... ok
+test tests::eligibility_sequence_uses_whole_call_fallback_then_fuses_the_next_call ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/contract.rs (/tmp/engine-404-workspace-qualified/debug/deps/contract-4393a298aea28ff0)
+
+running 4 tests
+test descriptor_domains_are_exhaustive_at_launch_rates ... ok
+test compatibility_fallback_is_limited_to_the_exact_extended_rate_tier ... ok
+test parameter_descriptors_have_complete_stable_contracts ... ok
+test representable_cutoff_domain_is_shared_by_descriptors_and_preparation ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/determinism.rs (/tmp/engine-404-workspace-qualified/debug/deps/determinism-b1cbf76b3ba05233)
+
+running 2 tests
+test no_corpus_case_is_vacuous_or_carries_a_nan ... ok
+test every_corpus_case_matches_its_pin_at_every_width ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/fader_ramp.rs (/tmp/engine-404-workspace-qualified/debug/deps/fader_ramp-f1790f2e1775f4da)
+
+running 8 tests
+test a_cross_block_ramp_is_partition_invariant ... ok
+test a_move_made_while_muted_applies_on_unmute ... ok
+test a_zero_window_move_takes_effect_on_the_first_sample ... ok
+test a_windowed_move_is_monotone_and_lands_exactly_on_its_target ... ok
+test a_zero_window_mute_is_the_exact_prepared_mute ... ok
+test the_fader_domain_is_enforced_at_the_setter ... ok
+test mute_is_a_fader_endpoint_and_settles_to_exact_positive_zero ... ok
+test an_uncommanded_live_fader_is_bit_identical_to_the_prepared_one ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/input_liveness.rs (/tmp/engine-404-workspace-qualified/debug/deps/input_liveness-36c7767e8835920c)
+
+running 13 tests
+test a_lane_selector_addresses_exactly_the_lanes_it_names ... ok
+test a_bank_refuses_a_retarget_addressed_past_its_members ... ok
+test the_live_trim_domain_is_the_declared_one ... ok
+test trim_and_polarity_do_not_overwrite_each_other ... ok
+test an_uncommanded_bank_keeps_its_elision_plan ... ok
+test the_settled_arm_leaves_the_ramp_words_untouched ... ok
+test a_ramping_block_leaves_an_elidable_banks_integrators_at_positive_zero ... ok
+test the_trim_ramp_is_partition_invariant ... ok
+test a_banked_lane_ramps_exactly_as_the_same_track_alone ... ok
+test an_uncommanded_live_input_renders_the_prepared_coefficients ... ok
+test settled_and_ramping_paths_agree_on_an_elided_bank ... ok
+test a_polarity_flip_crosses_zero_and_settles_at_the_reprepared_coefficient ... ok
+test the_trim_ramp_is_bit_identical_to_the_parameter_smoother ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/input_liveness_mono.rs (/tmp/engine-404-workspace-qualified/debug/deps/input_liveness_mono-9f8aa6f0d7109817)
+
+running 8 tests
+test re_equalising_the_words_restores_the_designed_term_and_nothing_more ... ok
+test an_asymmetric_retarget_declines_the_lane_on_the_admitting_block ... ok
+test channels_agree_covers_the_trim_ramp_record ... ok
+test a_collapsed_block_keeps_the_two_channels_ramp_records_equal ... ok
+test a_symmetric_retarget_keeps_the_lane_eligible ... ok
+test the_disengage_copy_still_restores_the_integrators ... ok
+test a_symmetric_ride_through_a_collapse_renders_never_collapsed_bits ... ok
+test a_retarget_between_a_collapsed_block_and_the_disengage_survives_the_copy ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/matrix.rs (/tmp/engine-404-workspace-qualified/debug/deps/matrix-52a3575866254045)
+
+running 7 tests
+test explicit_window_retarget_ramps_over_the_requested_window_and_is_adopted ... ok
+test matrix_ramp_reaches_target ... ok
+test settled_identity_matrix_preserves_signed_zero ... ok
+test zero_window_snaps_and_reset_cancels_a_ramp ... ok
+test matrix_retarget_mid_ramp_matches_the_reference ... ok
+test matrix_ramp_tracks_the_f64_interpolation ... ok
+test matrix_ramp_matches_reference_d11_law ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/meter.rs (/tmp/engine-404-workspace-qualified/debug/deps/meter-3f6305517d757e65)
+
+running 7 tests
+test a_settled_silent_block_is_bit_identical_through_the_early_out ... ok
+test meter_peak_of_signed_zeros_is_positive_zero ... ok
+test meter_windows_are_exact ... ok
+test meter_windows_discontinuities_resets_and_drops_are_exact ... ok
+test silence_against_a_nonzero_held_peak_still_decays ... ok
+test meter_segment_law_is_exact ... ok
+test ten_thousand_deterministic_meter_mutations_remain_bounded_and_finite ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/mono_collapse.rs (/tmp/engine-404-workspace-qualified/debug/deps/mono_collapse-1b6804b571a17a06)
+
+running 2 tests
+test the_collapsed_body_publishes_the_dual_bodys_report ... ok
+test a_desymmetrized_bank_is_a_never_collapsed_bank ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/response.rs (/tmp/engine-404-workspace-qualified/debug/deps/response-468cadb41f2d4f5c)
+
+running 8 tests
+test launch_and_extended_compatibility_rates_match_the_independent_f64_rbj_oracle ... ok
+test launch_and_extended_compatibility_rate_sweeps_match_f64_magnitude ... ok
+test cast_tpt_state_space_matches_independent_rbj_transfer_at_compatibility_rates ... ok
+test ten_thousand_bounded_parameter_and_block_mutations_stay_finite ... ok
+test production_order_hpf_lpf_cascade_meets_all_launch_response_gates ... ok
+test representable_cutoff_domain_prepares_everywhere_and_rejects_successor ... ok
+test coherent_sustained_sines_cover_launch_and_extended_compatibility_rates ... ok
+test one_second_impulse_dfts_match_rbj_at_launch_and_extended_compatibility_rates ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 16.68s
+
+     Running tests/speed.rs (/tmp/engine-404-workspace-qualified/debug/deps/speed-6548b5cc277bdfd7)
+
+running 1 test
+test bench_input_stage_ns_per_track_frame ... ignored, descriptive timing, run by hand
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/stage.rs (/tmp/engine-404-workspace-qualified/debug/deps/stage-e6c249b90d6913d2)
+
+running 12 tests
+test a_settled_banked_mute_is_exactly_positive_zero ... ok
+test polarity_trim_fader_and_matrix_are_exact ... ok
+test prepared_sections_match_reference_coefficients ... ok
+test signed_zero_and_mute_laws ... ok
+test bank_construction_accepts_one_to_width_members_only ... ok
+test boundary_check_is_lane_local_per_block ... ok
+test identity_sections_are_elided_only_when_every_lane_and_word_says_so ... ok
+test partition_invariance_over_master_plan_quanta ... ok
+test engine_tan_agrees_with_the_platform_to_one_ulp_over_the_cutoff_domain ... ok
+test bank_is_bit_identical_to_scalar_stage_at_every_width ... ok
+test banked_fader_and_matrix_are_bit_identical_to_the_per_track_sections ... ok
+test scalar_stage_is_bit_identical_to_reference_recurrence ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+     Running unittests src/lib.rs (/tmp/engine-404-workspace-qualified/debug/deps/builtins_compiler-09d1b1f305bb830e)
+
+running 17 tests
+test tests::builtin_bank_resource_charges_two_planes_and_actual_members ... ok
+test tests::builtin_bank_layout_regroups_by_dependency_wave_and_scalar_falls_back ... ok
+test tests::delegated_source_rejection_restores_private_and_external_ownership ... ok
+test tests::the_per_node_console_input_processor_drains_and_folds_its_witness ... ok
+test tests::source_set_bind_prevalidation_returns_all_ownership_for_each_code ... ok
+test tests::source_set_bind_succeeds_with_private_builtin_and_external_ownership ... ok
+test tests::a_prepared_session_that_lost_a_strip_fails_validation ... ok
+test tests::rejects_duplicate_and_unknown_meter_transactionally ... ok
+test tests::prepares_three_sections_and_each_named_meter_tap ... ok
+test tests::console_control_requests_are_validated_sealed_and_charged_per_track ... ok
+test tests::resource_estimate_enforces_the_actual_largest_retained_payload ... ok
+test tests::retained_payload_boundaries_reject_in_phase_one ... ok
+test tests::cutoff_boundaries_match_compiler_diagnostics_at_every_launch_rate_and_section ... ok
+test tests::control_delivery_metadata_reaches_both_sealed_strip_bank_owners ... ok
+test tests::track_bits_do_not_depend_on_session_track_count ... ok
+test tests::banked_tracks_are_bit_identical_to_their_scalar_tails ... ok
+test tests::deterministic_builtin_compiler_mutation_matrix_has_exactly_ten_thousand_cases ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.26s
+
+     Running tests/allocation_tracker.rs (/tmp/engine-404-workspace-qualified/debug/deps/allocation_tracker-352c0b6698949641)
+
+running 2 tests
+test phase_two_allocator_layouts_are_stable_across_repeated_measured_prepares ... ok
+test phase_two_allocator_layouts_match_the_checked_resource_report ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 17.84s
+
+     Running tests/builtin_automation_targets.rs (/tmp/engine-404-workspace-qualified/debug/deps/builtin_automation_targets-253140acbc1e6d04)
+
+running 3 tests
+test the_builtin_automation_effect_id_is_the_strip ... ok
+test refused_targets_are_exactly_the_prepared_only_rows ... ok
+test builtin_automation_targets_match_the_parameter_abi ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/input_drain.rs (/tmp/engine-404-workspace-qualified/debug/deps/input_drain-9d18b6a59cac7fa3)
+
+running 5 tests
+test a_per_lane_record_desymmetrizes_and_a_both_record_preserves ... ok
+test both_variants_answer_the_hook_identically_for_the_same_selector ... ok
+test re_equalising_the_words_does_not_re_arm_the_live_term ... ok
+test the_input_record_is_upstream_of_the_seam ... ok
+test the_live_term_survives_a_symmetric_ride_and_not_a_one_lane_one ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/scale.rs (/tmp/engine-404-workspace-qualified/debug/deps/scale-094844ceff632213)
+
+running 1 test
+test prepares_65_537_tracks_or_rejects_only_the_configured_resource ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.23s
+
+     Running tests/track_delay_domain.rs (/tmp/engine-404-workspace-qualified/debug/deps/track_delay_domain-4b1a9fbe8da90b18)
+
+running 2 tests
+test the_descriptor_and_the_schema_publish_the_same_delay_domain ... ok
+test a_declared_delay_changes_no_prepared_builtin_byte ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/tmp/engine-404-workspace-qualified/debug/deps/capi-73ee5587372b5c1c)
+
+running 31 tests
+test abi::tests::masks_and_result_codes_are_frozen ... ok
+test abi::tests::frozen_sizes_alignments_and_representative_offsets_match ... ok
+test ffi::tests::compile_diagnostics_query_is_atomic_and_handle_local ... ok
+test ffi::tests::engine_creation_is_transactional_and_validates ... ok
+test ffi::tests::engine_last_error_uses_empty_query_result ... ok
+test ffi::tests::query_rejects_null_and_wrong_size_without_a_write ... ok
+test ffi::tests::version_and_capabilities_are_exact ... ok
+test ffi::tests::wrong_live_handle_kind_is_rejected_by_stub ... ok
+test runtime::tests::fp_environment::the_fp_environment_refusal_names_its_own_check ... ok
+test ffi::tests::ffi_never_forms_a_whole_plan_reference ... ok
+test runtime::tests::barrier_schedule_separates_one_source_producer_from_exclusive_render ... ok
+test runtime::tests::fp_environment::a_rejected_c_render_also_restores_the_callers_word ... ok
+test ffi::tests::render_rejections_name_their_single_check ... ok
+test ffi::tests::oversized_borrowed_lengths_are_rejected_before_any_read ... ok
+test runtime::tests::generated_session_prepares_independent_source_and_plan_ownership ... ok
+test ffi::tests::plan_resources_does_not_clear_the_render_diagnostic ... ok
+test ffi::tests::source_rejections_reach_the_c_host_as_their_own_diagnostic ... ok
+test runtime::tests::plan_first_destroy_guards_structural_publication_without_visible_mutation ... ok
+test ffi::tests::misaligned_planes_and_output_are_rejected ... ok
+test runtime::tests::c_commands_observe_the_rendered_plan_sample ... ok
+test runtime::tests::c_commands_publish_the_replacement_parameter_catalog ... ok
+test runtime::tests::capi_controller_dispatches_every_advertised_command_family ... ok
+test ffi::tests::compile_publishes_both_children_and_source_control_is_region_checked ... ok
+test runtime::tests::ring_zero_derives_from_the_document_and_matches_the_explicit_value ... ok
+test runtime::tests::all_six_event_families_cross_c_dequeue_with_exact_oracle_bytes ... ok
+test runtime::tests::exported_c_replay_revision_event_and_publication_pressure_statuses_are_exact ... ok
+test runtime::tests::structural_command_keeps_protocol_plan_provider_and_event_epochs_atomic ... ok
+test runtime::tests::fp_environment::the_c_render_entry_is_canonical_under_a_caller_that_set_ftz_and_daz ... ok
+test runtime::tests::direct_and_c_render_match_one_and_ten_tracks_across_launch_rates ... ok
+test runtime::tests::every_structural_phase_and_ordered_dual_fault_preserves_owners_and_credits ... ok
+test ffi::tests::plan_queries_are_pure_and_concurrent_with_render ... ok
+
+test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.34s
+
+     Running tests/resource_lifecycle.rs (/tmp/engine-404-workspace-qualified/debug/deps/resource_lifecycle-16c0c834bc92af12)
+
+running 4 tests
+test render_diagnostic_egress_reuses_eager_capi_storage_without_allocation ... ok
+test tiny_control_frame_still_accounts_three_provider_counters_exactly ... ok
+test exported_c_candidates_replay_render_and_both_destroy_orders_balance_exactly ... ok
+test external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s
+
+     Running unittests src/lib.rs (/tmp/engine-404-workspace-qualified/debug/deps/compressor-80bd63f116d0655c)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/conformance.rs (/tmp/engine-404-workspace-qualified/debug/deps/conformance-8aabad45177d5df2)
+
+running 1 test
+test passes_effect_contract_conformance ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.04s
+
+     Running tests/contract.rs (/tmp/engine-404-workspace-qualified/debug/deps/contract-e202103b5428a3bb)
+
+running 7 tests
+test descriptor_rows_and_resource_envelope_are_frozen ... ok
+test preparation_has_expected_metadata_and_one_byte_below_rejects ... ok
+test bank_fallback_never_hides_malformed_or_incompatible_requests ... ok
+test a_malformed_bank_block_is_rejected_before_it_is_indexed ... ok
+test every_descriptor_row_admits_exactly_its_own_domain ... ok
+test lookahead_taps_are_derived_only_at_prepare_restore_and_full_reset ... ok
+test links_are_exact_and_connected_sidechain_is_distinct_from_main_detection ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/cross_target.rs (/tmp/engine-404-workspace-qualified/debug/deps/cross_target-56a9b3382b5f791a)
+
+running 3 tests
+test the_corpus_is_finite ... ok
+test no_case_is_vacuous ... ok
+test the_corpus_matches_its_pins_at_every_width ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/identity.rs (/tmp/engine-404-workspace-qualified/debug/deps/identity-8eb8f2a38f0173ed)
+
+running 6 tests
+test a_unit_mix_is_the_wet_signal_exactly ... ok
+test a_unity_gain_stage_is_the_dry_signal ... ok
+test bypass_preserves_exact_dry_bits_at_fixed_latency ... ok
+test the_average_link_is_two_products_and_an_add ... ok
+test a_zero_mix_is_the_dry_signal_while_gain_reduction_runs ... ok
+test every_identity_keeps_the_state_warm ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/lane_identity.rs (/tmp/engine-404-workspace-qualified/debug/deps/lane_identity-cb2d3c3ec014615c)
+
+running 2 tests
+test bank_matches_scalar_per_lane_bits ... ok
+test every_width_produces_the_same_words ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/mono_collapse.rs (/tmp/engine-404-workspace-qualified/debug/deps/mono_collapse-74764ddc5c4b77b3)
+
+running 4 tests
+test a_halved_subnormal_does_not_come_back ... ok
+test a_statically_bypassed_bank_collapses_to_the_dual_bits ... ok
+test a_desymmetrized_bank_is_a_never_collapsed_bank ... ok
+test the_collapsed_body_renders_the_dual_bodys_left_plane ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+     Running tests/nonfinite.rs (/tmp/engine-404-workspace-qualified/debug/deps/nonfinite-9250e8cdaafbdd70)
+
+running 4 tests
+test a_nan_in_the_sidechain_alone_is_clamped_to_the_level_floor ... ok
+test the_boundary_limit_rejects_a_finite_but_absurd_value ... ok
+test a_nan_is_caught_at_the_block_boundary_not_per_sample ... ok
+test the_recursive_word_flushes_to_exactly_zero ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/observation.rs (/tmp/engine-404-workspace-qualified/debug/deps/observation-bef71b37a5c44a48)
+
+running 6 tests
+test the_compressor_declares_one_resident_gain_reduction_tap ... ok
+test a_resident_read_is_repeatable_to_the_bit ... ok
+test a_full_reset_returns_the_reading_to_zero ... ok
+test the_reading_follows_the_smoother_rather_than_the_instantaneous_curve ... ok
+test the_compressor_reports_the_reduction_its_kernel_smoothed ... ok
+test every_bank_lane_reads_its_own_reduction ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running tests/oracle.rs (/tmp/engine-404-workspace-qualified/debug/deps/oracle-27772373c02f9d5f)
+
+running 1 test
+test scalar_output_matches_the_independent_f64_oracle ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/partition.rs (/tmp/engine-404-workspace-qualified/debug/deps/partition-8dff0cc66330f3d4)
+
+running 2 tests
+test block_partitions_are_invariant ... ok
+test bank_block_partitions_are_invariant ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+
+     Running tests/payload.rs (/tmp/engine-404-workspace-qualified/debug/deps/payload-4e3020f6b2d1b5c8)
+
+running 5 tests
+test preparation_legal_parameter_states_round_trip ... ok
+test a_mid_ramp_restore_arrives_on_the_same_sample ... ok
+test a_restore_is_transactional_across_both_channels ... ok
+test resets_clear_state_and_only_the_full_one_restores_defaults ... ok
+test an_idle_restore_is_bit_exact ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/ramps.rs (/tmp/engine-404-workspace-qualified/debug/deps/ramps-59be8201d9c57c14)
+
+running 9 tests
+test a_restarting_point_ramps_from_the_current_value ... ok
+test a_ramp_that_finishes_mid_block_is_invisible_to_the_partition ... ok
+test automation_validation_is_unchanged ... ok
+test block_point_steps_by_a_precomputed_increment_and_snaps_exactly ... ok
+test a_finished_ramp_equals_a_fresh_preparation ... ok
+test a_restated_point_leaves_every_lane_on_the_idle_body ... ok
+test a_ramp_onto_an_identity_boundary_lands_on_the_identity ... ok
+test an_idle_lane_is_untouched_by_a_neighbours_ramp ... ok
+test a_ramp_inside_the_silent_fixed_point_withdraws_it_and_moves_no_bit ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.23s
+
+     Running tests/silent_fixed_point.rs (/tmp/engine-404-workspace-qualified/debug/deps/silent_fixed_point-eaeb8ef78aaf4ff5)
+
+running 5 tests
+test the_trailing_tone_is_actually_rendered ... ok
+test silence_shorter_than_the_lookahead_line_still_drains_it ... ok
+test a_detector_still_releasing_through_the_silence_is_never_frozen ... ok
+test a_negative_zero_input_block_is_not_treated_as_silence ... ok
+test a_settled_silent_bank_renders_exactly_the_never_fast_path ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+
+     Running tests/staged_idle.rs (/tmp/engine-404-workspace-qualified/debug/deps/staged_idle-060f462a18ac4922)
+
+running 4 tests
+test a_left_only_rejection_diverges_the_cursors_and_the_staged_body_still_agrees ... ok
+test every_partition_agrees_with_the_per_frame_body ... ok
+test the_link_laws_bypass_and_a_sidechain_all_agree ... ok
+test a_ragged_bank_agrees_with_the_per_frame_body ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.31s
+
+     Running tests/static_curve.rs (/tmp/engine-404-workspace-qualified/debug/deps/static_curve-31b19b39e335f57c)
+
+running 3 tests
+test a_hard_knee_is_exact_at_the_threshold ... ok
+test the_knee_is_continuous_at_both_edges ... ok
+test eq4_static_curve_matches_f64_within_1e4_db ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/tmp/engine-404-workspace-qualified/debug/deps/conformance-1c4ad374f1e78973)
+
+running 7 tests
+test tests::block_metrics_and_repeat_bits_cover_boundaries ... ok
+test compare::tests::scaled_sum_squares_handles_extreme_finite_values ... ok
+test tests::fixture_header_limits_and_exact_length_reject ... ok
+test tests::crc32c_known_vector ... ok
+test tests::manifest_rejects_invalid_classes ... ok
+test tests::prng_vectors_and_range_are_frozen ... ok
+test tests::fixture_preserves_bits_and_detects_every_bit_flip ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/api_metrics.rs (/tmp/engine-404-workspace-qualified/debug/deps/api_metrics-50bcd390259e41b0)
+
+running 2 tests
+test invalid_rates_shapes_tolerances_and_nonfinite_values_are_typed ... ok
+test tolerance_boundary_tie_and_snr_cases_are_explicit ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/effect_contract.rs (/tmp/engine-404-workspace-qualified/debug/deps/effect_contract-471cb5f6800167e0)
+
+running 8 tests
+test correct_factory_binds_distinguishable_four_lane_bank ... ok
+test normalized_mapping_endpoints_ties_and_round_trips_are_stable ... ok
+test smoothers_and_segments_finish_on_the_exact_update_or_endpoint ... ok
+test descriptor_requires_launch_rows_and_accepts_optional_extended_rows ... ok
+test extended_rate_failures_are_reported_but_do_not_fail_launch_gates ... ok
+test correct_mock_passes_every_enabled_conformance_gate ... ok
+test ten_thousand_descriptor_and_span_mutations_reject_without_panic ... ok
+test every_faulty_mock_is_detected ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.69s
+
+     Running tests/fixture_corruption.rs (/tmp/engine-404-workspace-qualified/debug/deps/fixture_corruption-bf1513bbbfbdcb49)
+
+running 3 tests
+test every_header_field_limit_overflow_truncation_and_eof_is_rejected ... ok
+test manifest_rejects_all_noncanonical_text_and_path_classes ... ok
+test every_bit_and_4096_seeded_mutations_are_panic_free_and_detected ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/fixtures.rs (/tmp/engine-404-workspace-qualified/debug/deps/fixtures-39f47630aaf10193)
+
+running 3 tests
+test fixture_trailing_and_truncated_bytes_fail_before_decode ... ok
+test planar_blocks_group_launch_gates_and_extended_compatibility_inputs ... ok
+test checked_in_manifest_lists_only_valid_exact_fixtures ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/tmp/engine-404-workspace-qualified/debug/deps/console_workload-32e2623e9bf5e93f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/automation.rs (/tmp/engine-404-workspace-qualified/debug/deps/automation-a5b2e3073d3f3bd8)
+
+running 4 tests
+test the_automated_track_is_the_stable_minimum ... ok
+test a_plan_without_a_control_channel_resolves_nothing ... ok
+test moving_the_threshold_moves_rendered_bits_on_every_block ... ok
+test restating_the_threshold_moves_no_rendered_bit ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.20s
+
+     Running tests/chain_shape.rs (/tmp/engine-404-workspace-qualified/debug/deps/chain_shape-3b9ecd9117634743)
+
+running 21 tests
+test a_seam_side_only_chain_reads_as_vacuous_rather_than_eligible ... ok
+test the_plumbing_row_binds_no_strip_at_all ... ok
+test the_switch_coming_back_re_engages_and_renders_the_never_collapsed_bits ... ok
+test the_ragged_tail_banks_like_any_other_cohort_and_pays_one_chain_for_it ... ok
+test the_intended_strip_is_one_chain_per_cohort ... ok
+test an_armed_observation_lane_on_a_fused_chain_still_publishes ... ok
+test the_two_placements_realise_the_same_chain_shape ... ok
+test a_run_that_starts_collapsing_renders_what_an_always_collapsed_run_renders ... ok
+test every_standing_workload_folds_one_route_per_track ... ok
+test the_mono_row_pair_renders_one_session ... ok
+test a_collapsed_cohorts_right_channel_taps_read_what_a_dual_runs_do ... ok
+test re_equal_designed_words_after_a_one_channel_retarget_never_re_engage ... ok
+test a_live_one_channel_retarget_disengages_on_the_block_it_lands ... ok
+test a_run_that_stops_collapsing_renders_what_a_never_collapsed_run_renders ... ok
+test the_half_mono_cohort_banks_like_a_uniform_one ... ok
+test a_lifted_bypass_re_engages_the_collapse_and_renders_the_dual_bits ... ok
+test console_facilities_do_not_change_the_chain_shape_or_the_bits ... ok
+test a_bypass_engaged_after_a_collapsed_run_renders_the_dual_bits ... ok
+test no_workload_transitions_unless_something_moves_the_switch ... ok
+test the_collapse_fires_on_every_mono_cohort_and_no_other ... ok
+test the_folded_master_is_the_reductions_own_bits ... ok
+
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 20.73s
+
+     Running tests/placement.rs (/tmp/engine-404-workspace-qualified/debug/deps/placement-c138e4e9862fa55c)
+
+running 3 tests
+test the_two_placements_agree_block_by_block ... ok
+test merging_the_compressor_into_the_simd1_chain_moves_no_rendered_bit ... ok
+test the_intended_strips_limiter_moves_rendered_bits ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.99s
+
+     Running unittests src/lib.rs (/tmp/engine-404-workspace-qualified/debug/deps/delay-5b589aceac7cca47)
+
+running 13 tests
+test tests::descriptor_and_specs_agree ... ok
+test tests::bank_fallback_validates_every_member ... ok
+test tests::crossfade_updates_are_exact_and_queued_retarget_completes ... ok
+test tests::damping_mapping_is_rate_invariant_and_monotone ... ok
+test tests::dry_identities_warm_histories_with_canonical_zero_state ... ok
+test tests::malformed_automation_is_counted_and_never_applied ... ok
+test tests::damped_matrix_tail_matches_reference_oracle ... ok
+test tests::descriptor_exact_resources_caps_and_integer_mapping_are_frozen ... ok
+test tests::nonfinite_state_recovers_per_block_lane_locally_at_p_zero ... ok
+test tests::tap_timing_is_sample_exact ... ok
+test tests::ramp_updates_retarget_and_partition_are_exact ... ok
+test tests::invalid_restore_is_atomic_and_both_resets_are_word_exact ... ok
+test tests::partition_invariance_over_1_7_64_128_512 ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.27s
+
+     Running tests/conformance.rs (/tmp/engine-404-workspace-qualified/debug/deps/conformance-35e1f15dfdf2a810)
+
+running 1 test
+test passes_effect_contract_conformance ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.50s
+
+     Running tests/determinism.rs (/tmp/engine-404-workspace-qualified/debug/deps/determinism-4f3b54639ee401a5)
+
+running 3 tests
+test print_pins ... ignored, regeneration helper; run with --ignored to print the pins
+test corpus_digests_match_their_pins ... ok
+test corpus_cases_are_finite_distinct_and_alive ... ok
+
+test result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running unittests src/lib.rs (/tmp/engine-404-workspace-qualified/debug/deps/dsp_reference-4e471b03f7e5feed)
+
+running 25 tests
+test gate_expander::tests::a_non_finite_sample_is_rejected ... ok
+test gate_expander::tests::curve_is_identity_at_ratio_one_and_range_limited_when_closed ... ok
+test gate_expander::tests::hand_computed_curve_point_is_range_clamped ... ok
+test gate_expander::tests::a_level_exactly_at_the_threshold_opens_a_closed_gate ... ok
+test lr4::tests::crossover_domain_is_enforced ... ok
+test gate_expander::tests::a_level_inside_the_hysteresis_band_keeps_reloading_the_hold ... ok
+test parametric_eq::tests::all_families_design_stably_and_have_finite_analytic_response ... ok
+test gate_expander::tests::hold_expiry_closes_exactly_one_sample_after_the_countdown_reaches_zero ... ok
+test gate_expander::tests::the_dry_path_is_delayed_by_the_fixed_latency ... ok
+test ramp::tests::a_zero_window_snaps ... ok
+test parametric_eq::tests::identity_section_returns_input_and_warms_independent_history ... ok
+test ramp::tests::the_step_is_computed_once_and_the_last_sample_is_an_assignment ... ok
+test svf::tests::zero_gain_bell_and_shelves_are_exact_identity ... ok
+test tests::identity_and_direct_dft_oracles_are_bounded_and_correct ... ok
+test tests::sine_frequency_and_silence_are_finite ... ok
+test tpt::tests::cast_coefficient_transfer_is_bit_identical_to_the_replaced_model ... ok
+test true_peak_limiter::tests::a_unit_impulse_reproduces_the_annex2_table_rows ... ok
+test true_peak_limiter::tests::out_of_domain_construction_is_rejected ... ok
+test true_peak_limiter::tests::the_estimate_of_a_scaled_impulse_is_the_scale ... ok
+test true_peak_limiter::tests::ramp_windows_follow_the_w_min_floor ... ok
+test lr4::tests::lr4_sum_is_allpass_and_crossing_is_half ... ok
+test true_peak_limiter::tests::impulse_emerges_at_the_declared_latency ... ok
+test lr4::tests::lr4_impulse_matches_cascaded_state_space ... ok
+test svf::tests::svf_transfer_matches_rbj_cookbook ... ok
+test svf::tests::svf_recurrence_matches_state_space_impulse ... ok
+
+test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s
+
+     Running tests/reference.rs (/tmp/engine-404-workspace-qualified/debug/deps/reference-d2a965a71f97ce7c)
+
+running 3 tests
+test independent_identity_oracle_round_trips_noise ... ok
+test signal_and_spectrum_domains_are_strict ... ok
+test delayed_delta_and_exact_bin_sine_have_known_spectra ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/tmp/engine-404-workspace-qualified/debug/deps/effect_compiler-7d4b31800536a799)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/bank_state.rs (/tmp/engine-404-workspace-qualified/debug/deps/bank_state-0937466e904061ec)
+
+running 6 tests
+test bank_snapshot_one_short_never_calls_hook_or_publishes_output ... ok
+test bank_restore_is_serial_and_isolates_siblings ... ok
+test preparation_admits_every_sibling_before_one_bind_and_none_is_failure ... ok
+test scalar_and_bank_payloads_interchange_and_continue_exactly ... ok
+test bank_failures_drop_partial_ownership_and_preserve_first_error_order ... ok
+test production_soft_clip_w8_member_restores_and_isolates_siblings ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/migration.rs (/tmp/engine-404-workspace-qualified/debug/deps/migration-8cbdb86070a9d288)
+
+running 6 tests
+test diagnostics_and_step_report_layouts_are_exact ... ok
+test registry_rejects_edges_duplicates_caps_and_host_overflow_in_order ... ok
+test zero_one_and_two_step_resolution_have_exact_workspace_and_zero_hooks ... ok
+test nested_state_diagnostics_and_current_admission_are_preserved_without_hooks ... ok
+test resolution_rejects_missing_downgrade_terminal_caps_and_overflow_exactly ... ok
+test dependency_and_render_boundaries_remain_one_way ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/migration_terminal.rs (/tmp/engine-404-workspace-qualified/debug/deps/migration_terminal-9b56af5eaf447a88)
+
+running 9 tests
+test exact_portable_migration_qualification_matrix ... ignored, Issue 081 exact 48-row migration qualification matrix
+test intermediate_identity_and_replay_mutation_are_unreachable_by_construction ... ok
+test one_portable_migration_qualification_row_smoke ... ok
+test registry_resolution_and_bank_execution_allocation_boundaries_are_isolated ... ok
+test terminal_factory_and_partial_restore_failures_publish_nothing ... ok
+test two_step_scalar_and_bank_restore_publish_identical_current_state ... ok
+test zero_step_scalar_and_serial_one_step_bank_restores_are_exact_and_isolated ... ok
+test workspace_and_step_failures_precede_hooks_and_drop_banks ... ok
+test every_workspace_and_bank_destination_failure_is_pre_hook_and_exact ... ok
+
+test result: ok. 8 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/native_session.rs (/tmp/engine-404-workspace-qualified/debug/deps/native_session-0c30d887e9e1ce86)
+
+running 4 tests
+test preparation_is_complete_sorted_and_preserves_cached_metadata ... ok
+test unavailable_factory_and_resource_caps_return_no_partial_session ... ok
+test launch_registry_prepares_the_accepted_nine_track_parametric_eq_fixture ... ok
+test ten_thousand_session_parameter_mutations_reject_transactionally_without_panic ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.05s
+
+     Running tests/observation_identity.rs (/tmp/engine-404-workspace-qualified/debug/deps/observation_identity-e88a45133bd06f91)
+
+running 3 tests
+test launch_native_state_layouts_are_v1 ... ok
+test a_declared_tap_moves_contract_minor_and_leaves_the_state_layout_alone ... ok
+test every_declared_tap_costs_exactly_its_record_and_its_two_strings ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/parameter_lattice.rs (/tmp/engine-404-workspace-qualified/debug/deps/parameter_lattice-737b982b24540b31)
+
+running 10 tests
+test the_appended_pan_row_is_the_persisted_pan_authority ... ok
+test the_launch_catalog_is_not_empty_and_every_row_is_swept ... ok
+test a_rate_keyed_cutoff_ceiling_is_a_clamp_and_never_a_lattice_member ... ok
+test every_log_row_steps_geometrically_and_every_linear_row_arithmetically ... ok
+test every_ladder_is_integer_multiples_of_the_step_and_stays_on_the_lattice ... ok
+test the_prepared_word_of_a_default_is_bit_identical_to_the_descriptor ... ok
+test every_declared_bound_and_default_is_a_lattice_member ... ok
+test every_shipped_row_declares_a_lawful_lattice ... ok
+test every_lattice_point_reaches_the_engine_through_the_one_blessed_conversion ... ok
+test every_builtin_row_declares_a_lawful_lattice_at_every_launch_rate ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+     Running tests/scalar_state.rs (/tmp/engine-404-workspace-qualified/debug/deps/scalar_state-ee4a785b528082a9)
+
+running 7 tests
+test binding_and_snapshot_metadata_failures_are_exact_and_atomic ... ok
+test malformed_replay_is_rejected_before_initial_scratch ... ok
+test snapshot_and_restore_failures_publish_nothing ... ok
+test every_restore_admission_owner_rejects_before_prepare ... ok
+test scalar_restore_is_transactional_and_admission_precedes_prepare ... ok
+test production_delay_active_common_and_lane_state_continues_exactly ... ok
+test production_delay_state_round_trips_at_every_launch_rate ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.27s
+
+     Running tests/symmetry_designed_words.rs (/tmp/engine-404-workspace-qualified/debug/deps/symmetry_designed_words-3b370e27b2365b3e)
+
+running 2 tests
+test each_launch_effect_sees_its_own_designed_words_disagree ... ok
+test a_bank_declines_exactly_the_asymmetric_lane ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/symmetry_restore.rs (/tmp/engine-404-workspace-qualified/debug/deps/symmetry_restore-d795ee524afb99ae)
+
+running 3 tests
+test a_scalar_restore_declines_exactly_when_the_channel_sections_differ ... ok
+test one_declining_restore_does_not_contaminate_a_sibling ... ok
+test a_bank_restore_declines_exactly_the_lane_whose_sections_differ ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/tmp/engine-404-workspace-qualified/debug/deps/effect_contract-b5c22c49f0aeed2c)
+
+running 12 tests
+test bank_width_tests::bank_width_for_backend_is_total ... ok
+test step::tests::an_index_lattice_is_ordinal_indexed_and_choice_value_spelled ... ok
+test symmetry::tests::a_declined_witness_names_every_term_it_is_missing ... ok
+test symmetry::tests::a_left_channel_parameter_desymmetrises_and_a_both_channel_one_does_not ... ok
+test symmetry::tests::a_seam_side_record_never_moves_the_witness ... ok
+test symmetry::tests::bypass_is_reversible_and_asymmetric_parameters_are_not ... ok
+test symmetry::tests::a_subscription_never_moves_the_witness ... ok
+test symmetry::tests::every_single_missing_term_declines_the_conjunction ... ok
+test symmetry::tests::payload_sections_agree_is_a_bitwise_comparison ... ok
+test symmetry::tests::the_conjunction_declines_when_either_operand_declines ... ok
+test step::tests::ratio_lattice_retains_butterworth_default ... ok
+test step::tests::cents_lattice_retains_round_endpoint_and_declared_default ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/lattice.rs (/tmp/engine-404-workspace-qualified/debug/deps/lattice-60f417e1855d2e9b)
+
+running 12 tests
+test a_boolean_lattice_admits_exactly_its_two_encodings ... ok
+test a_bound_the_pinned_precision_cannot_spell_is_a_declaration_error ... ok
+test an_enumeration_lattice_is_spelled_in_choice_values_and_indexed_by_ordinal ... ok
+test decimal_matching_refuses_what_an_f32_comparison_would_admit ... ok
+test a_negative_zero_spelling_names_the_zero_lattice_point ... ok
+test equivalent_spellings_of_one_lattice_point_are_one_value ... ok
+test arithmetic_rows_step_by_exactly_one_declared_unit ... ok
+test geometric_ratio_row_keeps_its_round_maximum_and_meaningful_default ... ok
+test every_ladder_size_lands_on_a_lattice_point_and_clamps_at_the_ends ... ok
+test declared_bounds_and_default_are_always_members ... ok
+test refusal_names_the_two_nearest_legal_values ... ok
+test cents_rows_are_geometric_and_never_equal_hertz ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/live_control.rs (/tmp/engine-404-workspace-qualified/debug/deps/live_control-b16eb6894398b8ec)
+
+running 7 tests
+test a_drain_emits_the_contract_canonical_span_order ... ok
+test a_drained_queue_stages_nothing_on_the_next_block ... ok
+test a_repeated_target_collapses_last_wins ... ok
+test bypass_is_retained_state_and_produces_no_span ... ok
+test a_full_window_counts_the_overflow_instead_of_overrunning ... ok
+test the_shunt_preserves_signed_zero ... ok
+test the_shunt_reproduces_the_dry_signal_at_the_declared_latency ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/observation_lane.rs (/tmp/engine-404-workspace-qualified/debug/deps/observation_lane-6b1d7f6914ea80ba)
+
+running 9 tests
+test a_lane_refuses_a_publisher_count_that_does_not_match_the_menu ... ok
+test a_second_subscribe_takes_the_newer_window_length ... ok
+test an_observe_record_rides_the_parameter_queue_and_emits_no_span ... ok
+test an_observe_record_against_an_incapable_plan_is_reported_unbound ... ok
+test an_unarmed_tap_is_never_read_and_publishes_nothing ... ok
+test disarming_all_stops_every_tap_without_disturbing_published_windows ... ok
+test retained_bytes_are_a_formula_over_the_declared_menu ... ok
+test the_latest_fold_publishes_the_last_block_verbatim ... ok
+test windows_tile_exactly_and_fold_by_the_declared_rule ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/tmp/engine-404-workspace-qualified/debug/deps/effect_package-cc30e8a0f41c6e5b)
+
+running 34 tests
+test cid::tests::official_hello_vector_and_fixed_layout_are_exact ... ok
+test cid::tests::binary_codec_rejects_length_prefix_codec_hash_and_digest_length ... ok
+test cid::tests::writer_is_atomic_and_preserves_trailing_canary ... ok
+test ffi::tests::c_records_have_the_frozen_sizes_alignments_and_offsets ... ok
+test diagnostic::tests::descriptor_wire_diagnostic_codes_and_strings_are_frozen ... ok
+test ffi::tests::mandatory_null_publishes_only_zero_counts_and_null_diagnostic ... ok
+test ffi::tests::null_diagnostic_returns_null_without_dereferencing_other_arguments ... ok
+test wire::tests::accepted_enum_numbers_are_the_wire_numbers ... ok
+test package::tests::fixed_header_length_truncation_trailing_and_overflow_diagnostics ... ok
+test cid::tests::package_creation_and_expected_verification_are_strict ... ok
+test package::tests::round_trip_layout_and_borrows ... ok
+test package::tests::authoring_grammar_and_limit ... ok
+test package::tests::permutation_and_short_atomic ... ok
+test wire::tests::diagnostic_phase_order_and_wire_only_rejections_are_frozen ... ok
+test package::tests::diagnostic_layout_and_mutations ... ok
+test wire::tests::issue011_absent_rules_rates_and_control_scalars_are_not_strengthened ... ok
+test package::tests::selection_has_no_feature_kind_or_target_implication ... ok
+test package::tests::selection_rehash_detects_post_verification_content_tamper ... ok
+test package::tests::selection_baselines_supersets_and_total_ties_are_exact ... ok
+test wire::tests::representative_layout_roundtrip_and_identity_are_exact ... ok
+test wire::tests::exact_size_and_one_short_have_complete_canaries ... ok
+test wire::tests::field_overflow_offsets_and_within_phase_tie_breaks_are_exact ... ok
+test wire::tests::port_order_is_canonical_and_legal_fields_change_identity ... ok
+test package::tests::selection_request_capabilities_are_canonical_and_strict ... ok
+test package::tests::authoring_duplicate_source_invariant_and_native_feature_grammars ... ok
+test package::tests::selection_is_permutation_stable_and_returns_borrowed_content ... ok
+test cid::tests::text_codec_rejects_every_alphabet_prefix_length_and_pad_bit_class ... ok
+test package::tests::structural_counts_offsets_lengths_and_padding_are_count_driven ... ok
+test package::tests::every_table_grammar_padding_order_hash_and_source_class_rejects ... ok
+test package::tests::exact_and_one_below_limits_cover_all_five_caps ... ok
+test wire::tests::bound_descriptor_comparison_reports_earliest_semantic_wire_field ... ok
+test wire::tests::safe_constructor_semantic_differential_parity_is_exact ... ok
+test package::tests::descriptor_mapping_and_phase_priority_are_exact ... ok
+test wire::tests::constructor_sealed_id_and_link_mutations_have_raw_wire_diagnostics ... ok
+
+test result: ok. 34 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/descriptor_v1_qualification.rs (/tmp/engine-404-workspace-qualified/debug/deps/descriptor_v1_qualification-65091476ef203d3c)
+
+running 6 tests
+test raw_closed_values_and_field_overflows_have_exact_public_diagnostics ... ok
+test observation_section_is_additive_and_stale_readers_refuse_it ... ok
+test an_explicitly_spelled_derived_lattice_is_refused_as_a_second_spelling ... ok
+test checked_vectors_match_independent_wire_identity_and_port_permutation ... ok
+test every_current_production_descriptor_encodes_and_verifies ... ok
+test every_legally_mutable_semantic_field_class_changes_identity ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/effect_interchange_abi.rs (/tmp/engine-404-workspace-qualified/debug/deps/effect_interchange_abi-4d9dca0bd4389f69)
+
+running 2 tests
+test rust_only_package_and_state_diagnostics_retain_exact_c_layouts ... ok
+test six_descriptor_c_records_have_exact_rust_layouts_and_offsets ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/effect_interchange_mutation.rs (/tmp/engine-404-workspace-qualified/debug/deps/effect_interchange_mutation-ec4dc8feac736e0b)
+
+running 1 test
+test tiny_deterministic_mutation_smoke ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/package_allocation.rs (/tmp/engine-404-workspace-qualified/debug/deps/package_allocation-522e1b972d1066d1)
+
+running 6 tests
+test encode_at_the_frozen_artifact_cap_finishes_in_ten_milliseconds_in_release ... ignored, release-mode budget; runs nightly
+test c_inspect_reports_a_wire_diagnostic_for_an_empty_null_wire ... ok
+test prebound_state_selection_verification_replay_requirements_and_encode_allocate_nothing ... ok
+test c_inspect_performs_exactly_one_nested_descriptor_pass ... ok
+test each_package_publication_has_one_nested_descriptor_pass_and_no_native_allocation ... ok
+test encode_at_the_frozen_artifact_cap_has_one_nested_descriptor_pass_and_no_native_allocation ... ok
+
+test result: ok. 5 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/package_v1_qualification.rs (/tmp/engine-404-workspace-qualified/debug/deps/package_v1_qualification-b96408734bb4a602)
+
+running 3 tests
+test enum_discriminants_used_by_the_manifest_are_frozen ... ok
+test legal_content_and_descriptor_changes_accept_and_change_cid ... ok
+test python_authored_vectors_match_every_frozen_identity_and_selection ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/package_vectors.rs (/tmp/engine-404-workspace-qualified/debug/deps/package_vectors-f304b4501f3020c6)
+
+running 2 tests
+test official_hello_cid_primitive_vector ... ok
+test accepted_descriptor_package_round_trip_and_raw_cid_mutation ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/state_vectors.rs (/tmp/engine-404-workspace-qualified/debug/deps/state_vectors-16985c58b8231c3c)
+
+running 15 tests
+test diagnostic_layout_and_default_limits_are_frozen ... ok
+test binding_distinguishes_external_wire_from_static_mismatch ... ok
+test checked_scratch_arithmetic_reports_exact_overflow_before_layout ... ok
+test borrowed_verification_enforces_each_caller_cap ... ok
+test every_authoring_cap_and_one_short_output_are_atomic ... ok
+test exact_wire_round_trip_preserves_independent_sections_and_suffixes ... ok
+test independent_reference_malformed_oracle_matches_exact_diagnostics ... ok
+test replay_configuration_is_independent_of_layout_and_prepared_resources ... ok
+test independent_reference_vector_binds_verifies_and_reencodes_byte_identically ... ok
+test representative_mutations_have_exact_phase_order_and_diagnostics ... ok
+test the_state_envelope_binds_the_effect_identity_it_names ... ok
+test selector_and_registry_paths_perform_no_descriptor_validation_pass ... ok
+test every_state_header_field_and_payload_class_has_an_exact_diagnostic ... ok
+test migration_edges_are_adjacent_compatible_and_preserve_exact_provenance ... ok
+test structural_selector_is_diagnostic_equivalent_until_descriptor_binding ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/tmp/engine-404-workspace-qualified/debug/deps/effect_runtime-d92aaf50e4574ada)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/bank.rs (/tmp/engine-404-workspace-qualified/debug/deps/bank-08d1328699dca6b6)
+
+running 10 tests
+test a_rejected_block_is_zeroed_reset_and_counted ... ok
+test a_finite_block_is_accepted ... ok
+test a_diverging_bank_is_caught_and_reset ... ok
+test reset_clears_state_and_keeps_coefficients ... ok
+test an_identity_slot_passes_the_block_through_unchanged ... ok
+test finish_channel_is_per_channel_and_reports_its_lanes ... ok
+test the_lane_mask_names_the_failing_lanes ... ok
+test the_check_rejects_at_the_threshold ... ok
+test the_counter_counts_blocks ... ok
+test the_two_channels_fail_together ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/contract_ramp_identity.rs (/tmp/engine-404-workspace-qualified/debug/deps/contract_ramp_identity-a238f9c090f5e1bf)
+
+running 3 tests
+test no_smoothing_snaps_and_one_pole_uses_a_precomputed_coefficient ... ok
+test linear_smoother_is_bit_identical_to_the_linear_ramp ... ok
+test the_precomputed_increment_is_the_declared_one_and_the_last_update_assigns ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/determinism.rs (/tmp/engine-404-workspace-qualified/debug/deps/determinism-4e3fedb85172c2f6)
+
+running 4 tests
+test print_digests ... ignored, re-pinning helper
+test the_corpus_is_nan_free ... ok
+test every_case_has_a_wide_output_spread ... ok
+test the_corpus_matches_its_pins ... ok
+
+test result: ok. 3 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.31s
+
+     Running tests/dynamics.rs (/tmp/engine-404-workspace-qualified/debug/deps/dynamics-e234f51f5747622f)
+
+running 9 tests
+test a_nan_level_stays_a_nan ... ok
+test a_hard_knee_is_exact_at_the_threshold ... ok
+test silence_gives_a_finite_floor ... ok
+test a_non_positive_knee_is_a_hard_knee ... ok
+test below_the_knee_is_the_exact_identity ... ok
+test the_knee_is_continuous_at_both_edges ... ok
+test the_db_conversions_agree ... ok
+test the_ratio_sets_the_slope ... ok
+test the_curve_matches_the_paper ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/envelope.rs (/tmp/engine-404-workspace-qualified/debug/deps/envelope-60d5b055f0592c33)
+
+running 15 tests
+test ar_coefficient_complements_are_exact ... ok
+test ar_one_pole_step_flushes_the_recurrence ... ok
+test ar_one_pole_step_is_the_two_product_form ... ok
+test ar_one_pole_step_is_width_independent ... ok
+test ar_one_pole_step_switches_strictly_on_rising ... ok
+test coefficients_are_in_range_and_correctly_signed ... ok
+test follower_extremes_are_exact ... ok
+test degenerate_coefficient_arguments_are_instantaneous ... ok
+test hysteresis_lanes_are_independent ... ok
+test hysteresis_opens_holds_and_closes ... ok
+test peak_follow_max_follows_d8 ... ok
+test the_countdown_clamps_at_zero ... ok
+test the_hold_delays_closing ... ok
+test rms_follow_matches_the_unfused_f64_restatement ... ok
+test peak_follow_matches_the_unfused_f64_restatement ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/lane_identity.rs (/tmp/engine-404-workspace-qualified/debug/deps/lane_identity-bd8b9ec63d7df11b)
+
+running 4 tests
+test ramp_segments_are_width_independent ... ok
+test the_lane_mask_agrees_across_widths ... ok
+test the_boundary_check_is_width_independent ... ok
+test the_corpus_is_width_independent ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+
+     Running tests/params.rs (/tmp/engine-404-workspace-qualified/debug/deps/params-9275f320b843561c)
+
+running 9 tests
+test a_degenerate_range_has_no_position ... ok
+test a_logarithmic_mapping_is_constant_ratio ... ok
+test boolean_and_enumeration_domains_are_exact ... ok
+test continuous_domains_are_inclusive_and_reject_non_finite ... ok
+test clamping_always_lands_in_the_domain ... ok
+test defaults_are_clamped_and_counted ... ok
+test negative_zero_is_accepted_and_normalised ... ok
+test mapping_is_exact_at_the_ends_and_monotone ... ok
+test the_mapping_inverse_round_trips ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/partition.rs (/tmp/engine-404-workspace-qualified/debug/deps/partition-ccf695060b8b012a)
+
+running 4 tests
+test the_composition_is_partition_invariant_at_width_one ... ok
+test the_composition_is_width_independent ... ok
+test the_composition_is_partition_invariant_at_width_four ... ok
+test the_composition_is_partition_invariant_at_width_eight ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/ramp.rs (/tmp/engine-404-workspace-qualified/debug/deps/ramp-75acada377fdcb19)
+
+running 7 tests
+test a_resting_ramp_is_a_constant_segment ... ok
+test the_last_sample_is_exactly_the_target ... ok
+test the_state_after_a_block_is_partition_invariant ... ok
+test the_rest_invariant_holds ... ok
+test the_step_is_computed_once ... ok
+test zero_length_ramps_snap ... ok
+test block_driving_matches_the_scalar_sequence ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/state_payload.rs (/tmp/engine-404-workspace-qualified/debug/deps/state_payload-a6f742a3839a1ead)
+
+running 9 tests
+test expected_sizes_account_for_the_header ... ok
+test float_words_round_trip_by_bits ... ok
+test snapshot_then_restore_returns_every_word ... ok
+test rejected_restore_writes_nothing ... ok
+test word_slice_lengths_are_checked ... ok
+test words_are_little_endian ... ok
+test wrong_section_lengths_are_rejected ... ok
+test wrong_version_is_rejected ... ok
+test wrong_word_count_is_a_length_error ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/stationary_hoist.rs (/tmp/engine-404-workspace-qualified/debug/deps/stationary_hoist-9d27b2757875756a)
+
+running 11 tests
+test a_one_ulp_move_is_never_hoisted ... ok
+test a_redundant_change_arriving_mid_block_is_partition_invariant ... ok
+test a_redundant_retarget_renders_the_same_bits_as_the_window_it_skips ... ok
+test a_window_that_closes_on_a_block_boundary_hoists_on_the_next_block ... ok
+test a_retarget_to_the_value_in_force_mid_ramp_agrees_with_the_armed_arm ... ok
+test negative_zero_is_excluded_because_the_two_arms_really_do_differ ... ok
+test non_finite_values_are_excluded ... ok
+test signed_zeros_are_distinct_targets ... ok
+test subnormal_targets_are_hoisted_and_both_arms_agree ... ok
+test the_contract_smoother_hoists_linear_and_refuses_one_pole ... ok
+test the_rest_invariant_survives_the_hoist ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/tmp/engine-404-workspace-qualified/debug/deps/engine-470110242f23818e)
+
+running 34 tests
+test realtime::audit::tests::armed_panic_is_counted_before_it_escapes ... ok
+test realtime::audit::tests::forbidden_hooks_are_armed_only_inside_render ... ok
+test realtime::disjoint::tests::a_lease_may_read_the_buffers_it_writes_itself ... ok
+test realtime::disjoint::tests::a_read_from_the_same_wave_is_rejected ... ok
+test realtime::disjoint::tests::a_write_to_the_silence_buffer_is_rejected ... ok
+test realtime::disjoint::tests::a_write_then_a_later_wave_read_carries_the_audio ... ok
+test realtime::disjoint::tests::an_unproduced_read_is_rejected ... ok
+test realtime::disjoint::tests::overlapping_writes_are_rejected ... ok
+test realtime::disjoint::tests::release_read_id_bounds_check_rejects_unreserved_buffer ... ok
+test realtime::disjoint::tests::stereo_many_rejects_every_invalid_shape_without_partial_writes ... ok
+test realtime::spsc::tests::endpoint_drop_order_is_safe_and_queued_values_drop_once ... ok
+test realtime::spsc::tests::ring_header_is_arc_counts_plus_three_cache_lines ... ok
+test realtime::spsc::tests::wrap_increment_agrees_with_remainder ... ok
+test realtime::tests::arena_is_fixed_and_disjoint ... ok
+test realtime::tests::exchange_defers_without_retirement_capacity_then_applies ... ok
+test realtime::tests::enter_block_moves_the_executor_handover_and_returns_a_refused_one ... ok
+test realtime::tests::extended_and_unrelated_rates_reject_before_plan_publication ... ok
+test realtime::tests::local_ring_supports_capacity_one_and_wraparound ... ok
+test realtime::tests::move_only_spsc_preserves_full_value_and_drops_once_after_transfer ... ok
+test realtime::tests::launch_sample_rates_prepare_and_render ... ok
+test realtime::tests::native_spsc_preserves_value_on_full_and_fifo_wrap ... ok
+test realtime::tests::plan_exchange_resource_projection_covers_both_queues_and_checks_overflow ... ok
+test realtime::tests::render_contiguous_rejects_stale_and_accepts_next ... ok
+test realtime::tests::concurrent_plan_publication_is_complete_and_retirement_drops_off_render ... ok
+test realtime::tests::replacement_cancel_releases_both_credits_without_consuming_epoch ... ok
+test realtime::tests::replacement_reservation_freezes_failure_precedence_and_serial_order ... ok
+test realtime::tests::reservation_never_strands_a_pending_legacy_predecessor ... ok
+test realtime::tests::reservation_never_strands_a_queued_legacy_predecessor ... ok
+test realtime::tests::reserved_replacement_preowns_publication_epoch_and_retirement_credit ... ok
+test tests::sample_rate_tiers_are_exact_sorted_disjoint_and_classified ... ok
+test tests::version_is_stable_for_bootstrap ... ok
+test tests::quantum_is_a_lossless_carrier ... ok
+test realtime::disjoint::tests::concurrent_leases_never_write_a_foreign_word ... ok
+test realtime::spsc::tests::concurrent_spsc_stress ... ok
+
+test result: ok. 34 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/observation_transport.rs (/tmp/engine-404-workspace-qualified/debug/deps/observation_transport-4911028e7a0ce60c)
+
+running 3 tests
+test published_words_are_bit_exact ... ok
+test a_stalled_reader_resumes_on_the_newest_window_with_a_counted_gap ... ok
+test a_million_windows_are_read_whole_and_in_order ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
+
+     Running unittests src/lib.rs (/tmp/engine-404-workspace-qualified/debug/deps/gate_expander-568cd71602912dfe)
+
+running 2 tests
+test tests::the_runtime_parameter_specs_agree_with_the_frozen_descriptor ... ok
+test tests::injected_nonfinite_gain_has_scalar_w8_parity ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/conformance.rs (/tmp/engine-404-workspace-qualified/debug/deps/conformance-cd8e68eaf40eb8bc)
+
+running 1 test
+test passes_effect_contract_conformance ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.05s
+
+     Running tests/contract.rs (/tmp/engine-404-workspace-qualified/debug/deps/contract-a7b69bade72b6c59)
+
+running 9 tests
+test descriptor_and_exact_resources_are_frozen ... ok
+test the_payload_header_names_the_layout ... ok
+test bank_validation_precedes_fallback_and_unavailable_w4_is_legal ... ok
+test active_sidechain_and_exact_automation_state_are_observable ... ok
+test independent_curve_and_exact_hold_transitions_agree ... ok
+test an_open_gate_rearms_at_a_level_exactly_equal_to_the_close_threshold ... ok
+test a_closed_gate_opens_at_a_level_exactly_equal_to_the_threshold ... ok
+test the_lookahead_tap_lands_the_detector_exactly_where_the_brief_says ... ok
+test all_rate_caps_lookahead_and_fixed_latency_are_exact ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/determinism.rs (/tmp/engine-404-workspace-qualified/debug/deps/determinism-4c2cd1ca17d202fd)
+
+running 2 tests
+test no_case_is_vacuous ... ok
+test every_case_agrees_at_every_width_and_matches_its_pin ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+
+     Running tests/identity.rs (/tmp/engine-404-workspace-qualified/debug/deps/identity-569acb1688dbd896)
+
+running 3 tests
+test signed_zero_identity_is_bit_exact ... ok
+test lane_identity_scalar_w8 ... ok
+test partition_invariance ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.38s
+
+     Running tests/oracle.rs (/tmp/engine-404-workspace-qualified/debug/deps/oracle-679f6a5d0368d754)
+
+running 3 tests
+test every_decision_is_at_least_one_decibel_clear_of_a_threshold ... ok
+test oracle_pcm_within_derived_tolerance_scalar ... ok
+test oracle_pcm_within_derived_tolerance_w8 ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.88s
+
+     Running tests/state.rs (/tmp/engine-404-workspace-qualified/debug/deps/state-8be55eb5b09784d1)
+
+running 8 tests
+test a_malformed_phase_word_rejects_and_leaves_both_lanes_untouched ... ok
+test reset_kinds_are_word_exact ... ok
+test nonfinite_input_recovers_lane_locally_at_the_block_boundary ... ok
+test reset_kinds_are_word_exact_for_every_lane_of_a_bank ... ok
+test the_gain_word_is_flushed_to_zero_once_it_decays_below_the_band ... ok
+test active_restore_continues_against_uninterrupted ... ok
+test a_track_restores_into_a_bank_whose_cursor_is_elsewhere ... ok
+test nonfinite_input_recovers_one_lane_of_a_bank ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src/lib.rs (/tmp/engine-404-workspace-qualified/debug/deps/graph-89c70a494b045b57)
+
+running 52 tests
+test observation_size_accounting::no_reported_runtime_byte_moved ... ok
+test observation_size_accounting::the_observation_lane_costs_one_nullable_pointer_in_the_console_effect ... ok
+test program::tests::a_delayed_stage_boundary_is_not_elided ... ok
+test program::tests::chain_of_seven_stages_lowers_to_six_ops_three_taps_and_two_buffers ... ok
+test program::tests::delayed_edge_gets_staging_buffer_and_blocks_in_place ... ok
+test program::tests::malformed_inputs_are_rejected_rather_than_lowered ... ok
+test program::tests::fan_out_blocks_in_place_and_fan_in_keeps_its_reduction ... ok
+test program::tests::taps_are_not_readers_so_an_alias_chain_still_folds_into_its_producer ... ok
+test runtime::tests::a_later_folded_cohort_continues_from_the_live_master_in_d9_order ... ok
+test runtime::tests::a_single_in_place_input_is_left_untouched ... ok
+test runtime::tests::bank_gather_source_admits_only_the_dedication_copy ... ok
+test runtime::tests::all_active_folded_bank_chain_dispatches_the_real_graph_cohort ... ok
+test runtime::tests::a_folded_epilogue_is_the_route_and_the_reduction_bit_for_bit ... ok
+test runtime::tests::arena_members_direct_scatter_preserves_redirected_identity_bits ... ok
+test runtime::tests::malformed_folded_cohorts_are_rejected_before_route_or_master_mutation ... ok
+test runtime::tests::reduction_preserves_repeated_silence_self_and_unrelated_buffers ... ok
+test runtime::tests::the_fan_in_zero_fill_is_dead_only_under_a_bound_source ... ok
+test program::tests::a_bank_window_never_recycles_a_physical_slot ... ok
+test runtime::tests::a_delay_line_is_a_pure_shift_at_every_partitioning ... ok
+test runtime::tests::the_first_contributor_stores_so_a_negative_zero_master_keeps_its_sign ... ok
+test runtime::tests::the_node_witness_agrees_with_its_line ... ok
+test tests::binding_rejects_duplicates_and_returns_all_ownership ... ok
+test tests::builtin_bank_resource_overflow_leaves_the_graph_estimate_unchanged ... ok
+test tests::delay_is_exact_and_lane_independent ... ok
+test tests::a_console_parameter_command_applies_at_the_next_block_boundary ... ok
+test program::tests::no_slot_is_recycled_inside_a_merged_bank_window ... ok
+test runtime::tests::route_applies_folded_gain_with_frozen_op_order ... ok
+test tests::attaching_builtin_banks_re_derives_the_program_that_bind_will_use ... ok
+test tests::compile_request_plan_id_survives_binding ... ok
+test tests::an_idle_console_changes_no_rendered_bit ... ok
+test tests::executor_applies_exact_pdc_then_fixed_pairwise_reduction ... ok
+test tests::aliased_identity_stages_do_not_change_audio ... ok
+test tests::faster_main_and_faster_sidechain_align_on_their_typed_ports ... ok
+test tests::reduction_is_left_to_right ... ok
+test tests::live_bypass_is_latency_preserving_and_reversible ... ok
+test tests::identity_binding_acknowledges_without_a_processor ... ok
+test tests::structural_layout_rejection_is_shared_after_binding_validation_for_source_families ... ok
+test tests::id_ordered_bank_plan_rejects_transactionally_and_returned_ownership_is_reusable ... ok
+test tests::with_builtin_banks_accepts_padded_members_and_rejects_empty_or_oversized ... ok
+test tests::the_console_effect_drops_nothing_within_its_prepared_capacity ... ok
+test tests::structural_layout_rejects_node_level_edge_and_bank_corruptions ... ok
+test tests::level_major_w4_builtin_bank_is_analytic_for_three_blocks ... ok
+test runtime::tests::every_lane_width_matches_the_frozen_old_kernel_on_hostile_values ... ok
+test tests::left_to_right_reduction_meets_analytic_bound_and_ignores_completion_order ... ok
+test tests::enabled_and_bypass_pdc_align_at_launch_rates_and_quanta ... ok
+test runtime::tests::reduction_is_left_to_right_bit_identical_to_scalar_reference ... ok
+test runtime::tests::compensation_delay_is_partition_invariant_and_matches_per_sample_reference ... ok
+test tests::fifty_random_dag_sessions_render_deterministic_nonsilent_pcm ... ok
+test program::tests::lowering_preserves_dataflow_and_bounds_the_arena_on_random_graphs ... ok
+test program::tests::sixty_four_plain_tracks_keep_one_ordered_non_aliasing_master_reduction ... ok
+test program::tests::bank_window_hoisting_preserves_dataflow_on_random_graphs ... ok
+test program::tests::cohort_chain_merging_preserves_dataflow_on_random_graphs ... ok
+
+test result: ok. 52 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 15.90s
+
+     Running tests/rt1_direct_bank_alloc.rs (/tmp/engine-404-workspace-qualified/debug/deps/rt1_direct_bank_alloc-0e3dbe6db7e0f16b)
+
+running 1 test
+test direct_bank_graph_render_is_allocation_free_and_bit_exact ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/tmp/engine-404-workspace-qualified/debug/deps/graph_compiler-bd0d8f7107cd321e)
+
+running 60 tests
+test tests::buffer_coloring_aliases_identity_and_preserves_fanout_liveness ... ok
+test tests::cycle_witness_skips_acyclic_residual_nodes_downstream_of_cycle ... ok
+test tests::every_cyclic_scc_has_one_closed_sorted_witness_and_edge_paths ... ok
+test tests::accepted_session_compiles_binds_and_renders_direct_route ... ok
+test tests::timing_applies_declared_tail_after_node_latency ... ok
+test tests::builtins_replace_only_the_three_internal_track_bindings ... ok
+test tests::timing_reports_the_checked_sole_output_arrival_and_extent ... ok
+test tests::level_major_compiler_coloring_matches_independent_live_intervals ... ok
+test tests::route_transform_uses_the_canonical_db_to_gain_conversion ... ok
+test tests::direct_graph_report_exposes_zero_output_latency_and_tail_without_identity_change ... ok
+test tests::chains_of_different_depths_share_a_cohort_through_identity_slots ... ok
+test tests::route_transform_bits_participate_in_semantic_hash ... ok
+test tests::node_text_len_matches_node_text_for_every_variant ... ok
+test tests::multi_slot_rack_chains_form_one_cohort_and_bind_every_slot ... ok
+test tests::third_party_dynamic_effects_are_never_bank_candidates ... ok
+test tests::a_dynamic_slot_that_differs_from_its_bank_mates_falls_back_per_node ... ok
+test tests::a_sidechain_lifted_chain_slot_falls_back_instead_of_failing_the_compile ... ok
+test tests::bank_membership_is_independent_of_entry_order ... ok
+test tests::compiled_plans_always_lower_to_a_smaller_executable_program ... ok
+test tests::issue122_reverse_route_ids_emit_sorted_levels_and_bind ... ok
+test tests::post_bank_graph_cap_rejects_transactionally_with_both_prepared_inputs ... ok
+test tests::each_forged_builtin_seal_tuple_is_rejected_before_graph_attachment ... ok
+test tests::scalar_dispatch_compiles_without_banks_on_any_host ... ok
+test tests::production_builtin_banks_replace_full_post_input_groups_and_render ... ok
+test tests::mixed_twelve_track_plan_binds_renders_full_banks_and_scalar_tails_without_graph_changes ... ok
+test tests::launch_parametric_eq_fixture_retains_banks_and_matches_scalar_across_blocks ... ok
+test tests::launch_transient_shaper_fixture_closes_banks_tails_pdc_and_transactional_caps ... ok
+test tests::launch_gate_expander_fixture_retains_width_correct_banks_and_scalar_fallbacks ... ok
+test tests::launch_compressor_fixture_retains_bank_tail_and_connected_scalar_without_pdc_change ... ok
+test tests::add_a_track_keeps_existing_track_bits_and_one_transpose_per_chain ... ok
+test tests::dynamic_rack_compressors_bank_and_render_bit_identically_to_the_per_node_path ... ok
+test tests::launch_delay_fixture_closes_scalar_state_tail_pdc_and_transactional_caps ... ok
+test tests::launch_soft_clip_fixture_closes_banks_tails_pdc_support_and_transactional_caps ... ok
+test tests::rack_placement_changes_the_bank_but_never_the_samples ... ok
+test tests::launch_true_peak_limiter_fixture_retains_banks_tails_latency_and_transactional_caps ... ok
+test tests::canonical_artifacts_are_complete_and_repeatable_100_times ... ok
+test tests::launch_multiband_compressor_fixture_closes_bank_graph_and_transactional_caps ... ok
+test tests::banking_a_dynamic_rack_costs_no_arena_buffers ... ok
+test tests::console_sixty_four_track_fixture_banks_its_dynamic_compressor_bit_identically ... ok
+test tests::the_two_planners_agree_on_every_track_class ... ok
+test tests::random_dags_have_strictly_ascending_levels_and_level_major_schedule ... ok
+test tests::intended_placement_merges_two_chains_into_one_bit_identically ... ok
+test tests::a_meter_on_a_bank_member_declines_that_lanes_scatter_redirect ... ok
+test tests::ten_thousand_graph_mutations_are_panic_free_and_repeatable ... ok
+test tests::the_intended_strip_fuses_the_whole_signal_path_into_one_chain_per_cohort ... ok
+test tests::misaligned_lane_sets_decline_the_merge ... ok
+test tests::a_meter_leased_at_post_fader_splits_the_chain_and_still_meters ... ok
+test tests::a_send_from_the_last_slots_alias_declines_that_lanes_scatter_redirect ... ok
+test tests::a_leased_stage_meter_declines_the_merge_and_still_meters ... ok
+test tests::a_send_from_a_rack_boundary_declines_the_merge ... ok
+test tests::an_observed_alias_on_the_last_slot_declines_that_lanes_scatter_redirect ... ok
+test tests::route_ids_ordered_against_the_cohorts_decline_the_route_fold ... ok
+test tests::a_subsequence_program_track_binds_instead_of_panicking ... ok
+test tests::a_meter_on_the_matrix_declines_the_route_fold_and_still_meters ... ok
+test tests::frozen_issue_037_seeded_builtin_bank_layouts_have_exact_membership_and_counters ... ok
+test tests::a_second_route_from_a_tracks_matrix_declines_the_route_fold ... ok
+test tests::the_intended_strip_folds_every_route_into_its_cohorts_epilogue ... ok
+test tests::class_pooling_forfeits_the_route_fold_only_on_an_interleaved_session ... ok
+test tests::a_single_odd_track_strands_both_pools_remainders ... ok
+test tests::a_banked_fader_command_lands_on_the_block_it_was_admitted_in ... ok
+
+test result: ok. 60 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.07s
+
+     Running unittests src/bin/graph_fixture.rs (/tmp/engine-404-workspace-qualified/debug/deps/graph_fixture-d6e7bc0fe547640e)
+
+running 1 test
+test tests::check_rejects_fixture_manifest_missing_and_unlisted_corruption ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/rack_fixture.rs (/tmp/engine-404-workspace-qualified/debug/deps/rack_fixture-76dd787e07d70a09)
+
+running 1 test
+test tests::checker_rejects_content_manifest_missing_and_unlisted_corruption ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/route_gain.rs (/tmp/engine-404-workspace-qualified/debug/deps/route_gain-800842e69c755230)
+
+running 3 tests
+test the_replaced_platform_conversion_had_different_bits_at_the_pinned_witness ... ok
+test route_gain_matches_f64_oracle_within_two_ulp ... ok
+test unity_route_gain_is_exactly_one ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/scale.rs (/tmp/engine-404-workspace-qualified/debug/deps/scale-be548d46c36c6791)
+
+running 1 test
+test compiles_65_537_tracks_or_rejects_only_a_configured_resource ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 21.43s
+
+     Running tests/track_delay.rs (/tmp/engine-404-workspace-qualified/debug/deps/track_delay-099b0e1f9a785bc3)
+
+running 8 tests
+test the_zero_delay_plan_digest_is_the_pre_feature_digest ... ok
+test a_zero_delay_session_lowers_no_delay_node ... ok
+test a_delayed_session_is_a_different_plan ... ok
+test a_ring_is_a_named_allocation ... ok
+test the_pdc_counts_are_untouched ... ok
+test an_oversized_delay_is_rejected_by_the_caps ... ok
+test a_track_delay_moves_no_pdc_row ... ok
+test the_estimate_charges_each_lane_its_own_ring ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running unittests src/lib.rs (/tmp/engine-404-workspace-qualified/debug/deps/host_core-613add0ca0003a7a)
+
+running 9 tests
+test solo::tests::a_two_record_delta_is_exactly_the_disagreeing_case ... ok
+test solo::tests::an_unknown_track_is_refused ... ok
+test solo::tests::engaging_solo_mutes_the_complement_and_only_the_complement ... ok
+test solo::tests::mute_while_soloed_survives_the_un_solo ... ok
+test solo::tests::per_lane_user_mute_restores_as_two_records ... ok
+test solo::tests::rollback_restores_every_word ... ok
+test solo::tests::solo_count_tracks_engaged_bits_exactly ... ok
+test control_provider::tests::catalog_state_clock_transport_counters_and_diagnostics_are_session_backed ... ok
+test control_provider::tests::every_launch_effect_and_rack_matches_the_accepted_preparation_authority ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/effect_console.rs (/tmp/engine-404-workspace-qualified/debug/deps/effect_console-d6df9653690fe764)
+
+running 2 tests
+test a_banked_effect_applies_each_lanes_own_command_and_no_others ... ok
+test two_lanes_of_one_bank_take_two_different_commands ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/effect_observation.rs (/tmp/engine-404-workspace-qualified/debug/deps/effect_observation-7a7ea7beeef61cec)
+
+running 11 tests
+test observation_cost_classes_are_separated_from_a_computed_scan_in_release ... ignored, release-mode budget; runs nightly
+test observation_cost_classes_are_what_they_claim ... ok
+test the_per_node_scalar_path_publishes_its_own_block ... ok
+test observation_without_a_control_channel_is_refused ... ok
+test observation_retained_bytes_are_the_declared_menu_times_one_row_and_one_slot ... ok
+test a_session_that_asked_for_no_observation_holds_none ... ok
+test a_plan_replacement_drops_every_subscription ... ok
+test the_first_window_at_or_after_applied_at_sample_reflects_the_command ... ok
+test every_bank_lane_publishes_its_own_reduction ... ok
+test observation_is_identical_across_rack_placement ... ok
+test every_observation_leg_renders_the_corpus_to_the_same_bytes ... ok
+
+test result: ok. 10 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.18s
+
+     Running tests/fp_environment.rs (/tmp/engine-404-workspace-qualified/debug/deps/fp_environment-deffd00cf14466f6)
+
+running 3 tests
+test a_started_session_hands_the_plan_back_when_it_stops ... ok
+test x86::the_callers_word_is_restored_bit_exactly_after_every_block ... ok
+test x86::a_caller_with_ftz_and_daz_renders_the_canonical_bytes ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running tests/input_liveness_console.rs (/tmp/engine-404-workspace-qualified/debug/deps/input_liveness_console-3be4f88322589728)
+
+running 10 tests
+test a_command_takes_effect_on_the_whole_block_that_drains_it ... ok
+test two_commands_are_not_interchangeable ... ok
+test the_stereo_arm_is_a_never_collapsed_oracle ... ok
+test a_both_lane_record_drained_while_collapsed_keeps_the_collapse ... ok
+test a_symmetric_ride_renders_the_same_bits_collapsed_or_not ... ok
+test re_equalising_after_a_disengaging_drain_holds_the_never_collapsed_bits ... ok
+test the_collapse_census_follows_the_commands ... ok
+test an_uncommanded_console_renders_the_console_free_bytes ... ok
+test a_command_moves_exactly_the_addressed_track ... ok
+test a_per_lane_record_drained_on_the_disengaging_block_reaches_one_channel ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.30s
+
+     Running tests/prepare.rs (/tmp/engine-404-workspace-qualified/debug/deps/prepare-d827362dcf48dca0)
+
+running 13 tests
+test dense_refusal_diagnostics_finish_under_one_second_in_release ... ignored, release-mode budget; runs nightly
+test contract_types_are_send_and_not_sync ... ok
+test default_ring_derivation_covers_the_stall_and_two_in_flight_quanta ... ok
+test dense_refusal_diagnostics_are_count_bounded ... ok
+test source_control_errors_are_typed ... ok
+test retained_bytes_projection_matches_the_live_set ... ok
+test prepare_reports_the_session_shape_and_feeds_sources_independently ... ok
+test console_attaches_bounded_control_and_meter_halves_in_canonical_track_order ... ok
+test source_channel_cap_is_optional ... ok
+test no_console_request_attaches_nothing_and_charges_nothing ... ok
+test shape_policy_pins_rate_and_quantum ... ok
+test session_validation_owns_the_launch_rate_set ... ok
+test every_byte_cap_admits_its_reported_row_and_rejects_one_byte_below ... ok
+
+test result: ok. 12 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+     Running tests/source_diagnostics.rs (/tmp/engine-404-workspace-qualified/debug/deps/source_diagnostics-6338276019bea857)
+
+running 3 tests
+test every_source_rejection_reports_its_own_pinned_diagnostic ... ok
+test classification_partitions_the_table ... ok
+test only_the_documented_pairs_share_a_code ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/symmetry_witness.rs (/tmp/engine-404-workspace-qualified/debug/deps/symmetry_witness-a2731ef138f35b6c)
+
+running 11 tests
+test an_observe_record_never_moves_the_witness ... ok
+test a_left_channel_command_declines_exactly_one_lane ... ok
+test seam_side_console_traffic_leaves_every_lane_eligible ... ok
+test a_prepare_time_bypass_seeds_the_unbypassed_term_before_any_render ... ok
+test a_live_bypass_declines_its_lane_and_lifting_it_re_earns_the_term ... ok
+test a_both_channel_command_preserves_every_lane_including_mid_ramp ... ok
+test the_scalar_console_effect_arm_maintains_its_own_live_terms ... ok
+test two_per_lane_writes_that_agree_still_decline_the_lane ... ok
+test the_two_halves_of_the_witness_are_decided_independently ... ok
+test an_asymmetric_input_builtin_declines_its_own_track_only ... ok
+test the_structural_witness_follows_the_source_mapping ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/track_delay.rs (/tmp/engine-404-workspace-qualified/debug/deps/track_delay-ee8f887b85af83ae)
+
+running 8 tests
+test a_zero_delay_arm_never_lowers_a_delay_node ... ok
+test an_asymmetric_delay_declines_exactly_its_own_track ... ok
+test the_pre_delay_region_is_exactly_positive_zero ... ok
+test the_two_lanes_carry_independent_delays ... ok
+test a_symmetric_delay_keeps_every_track_eligible ... ok
+test the_delay_survives_the_banked_path ... ok
+test a_symmetric_delay_renders_the_same_bits_collapsed_as_dual ... ok
+test a_declared_delay_is_exactly_a_pre_padded_source ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+     Running unittests src/lib.rs (/tmp/engine-404-workspace-qualified/debug/deps/host_mobile-e7598718437e127d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (/tmp/engine-404-workspace-qualified/debug/deps/host_native-ecfc7fd0cda90eb2)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/tmp/engine-404-workspace-qualified/debug/deps/host_web-a39388673db77f5c)
+
+running 61 tests
+test tests::a_computed_tap_is_refused_with_unsupported_kind ... ok
+test tests::default_ring_covers_stall_tolerance ... ok
+test tests::maximum_document_dense_invalid_boot_finishes_under_one_second_in_release ... ignored, release-mode budget; runs nightly
+test tests::observation_unit_conversion_is_declared_and_clamped ... ok
+test tests::the_observation_fields_account_for_the_moved_bridge_rows ... ok
+test tests::console_track_id_longer_than_every_source_id_boots_and_round_trips ... ok
+test tests::native_identity_session_digest_pins_the_wasm_parity ... ok
+test tests::a_console_that_never_solos_renders_what_it_always_did ... ok
+test tests::malformed_config_and_atomic_compile_failure_are_sticky ... ok
+test tests::a_console_free_host_refuses_every_live_kind_as_unsupported ... ok
+test tests::command_ack_names_the_exact_application_sample ... ok
+test tests::a_fader_command_names_the_exact_application_sample ... ok
+test tests::a_mute_command_is_a_fader_endpoint_not_a_discontinuity ... ok
+test tests::raw_ffi_source_introspection_mirrors_the_track_queries ... ok
+test tests::a_solo_that_changes_nothing_emits_nothing ... ok
+test tests::a_solo_gate_is_a_bounded_ramp_and_a_zero_window_snaps ... ok
+test tests::session_source_introspection_is_canonical_ordered_shaped_and_bounded ... ok
+test tests::an_effect_bypass_command_returns_the_dry_signal ... ok
+test tests::a_trim_is_not_a_mute_and_solo_does_not_move_it ... ok
+test tests::compile_resource_caps_are_inclusive_and_one_below_rejects ... ok
+test tests::retained_projection_budget_diagnostic_names_projected_bytes ... ok
+test tests::unknown_targets_are_typed_and_leave_the_engine_untouched ... ok
+test tests::each_boot_option_rule_has_its_own_typed_refusal ... ok
+test tests::mute_and_solo_are_separate_states ... ok
+test tests::a_subscription_without_capacity_is_observation_unbound ... ok
+test tests::facade_source_rules_reach_the_browser_host ... ok
+test tests::solo_records_are_shape_checked_like_mute_records ... ok
+test tests::frozen_layouts_and_values_are_exact ... ok
+test tests::output_mismatch_and_disposal_are_sticky_and_idempotent ... ok
+test tests::native_command_timeline_digest_pins_the_wasm_parity ... ok
+test tests::an_effect_parameter_command_names_the_exact_application_sample ... ok
+test tests::a_refused_batch_pushes_no_trim_record ... ok
+test tests::raw_ffi_validates_handle_layout_overflow_and_transactional_failure ... ok
+test tests::command_flood_is_typed_backpressure_and_leaves_the_render_untouched ... ok
+test tests::a_mixed_batch_is_one_transaction_across_every_queue ... ok
+test tests::observation_configuration_words_are_validated ... ok
+test tests::a_trim_command_reaches_the_render_plane ... ok
+test tests::render_failure_retains_ownership_and_silences ... ok
+test tests::source_backpressure_seek_render_and_stable_output_are_bounded ... ok
+test tests::the_input_queue_is_a_destination_of_its_own ... ok
+test tests::observation_misuse_is_typed_and_all_or_nothing ... ok
+test tests::the_decode_staging_holds_a_full_batch_plus_a_solo_transition ... ok
+test tests::trim_and_polarity_leave_the_solo_transaction_closed ... ok
+test tests::raw_ffi_uses_stable_staging_and_exact_output_quantum_without_growth ... ok
+test tests::meter_frames_equal_an_offline_fold_and_cost_the_render_nothing ... ok
+test tests::quoted_root_shape_keys_self_configure_without_a_second_parser ... ok
+test tests::native_observation_timeline_digest_pins_the_wasm_parity ... ok
+test tests::ring_prefill_survives_stall ... ok
+test tests::a_refused_solo_submission_leaves_the_console_untouched ... ok
+test tests::a_both_lane_trim_command_is_one_record_and_one_queue_slot ... ok
+test tests::un_solo_restores_the_exact_per_lane_user_mute_set ... ok
+test tests::preparation_accepts_explicit_64_128_and_256_quanta_with_stable_buffers ... ok
+test tests::a_batch_of_alternating_solo_toggles_coalesces_to_its_net_effect ... ok
+test tests::exact_retained_total_is_checked_as_one_budget_not_independent_caps ... ok
+test tests::the_meter_frame_carries_the_app_shaped_gain_reduction ... ok
+test tests::trim_and_polarity_are_admitted_on_every_lane_selector ... ok
+test tests::trim_and_polarity_refuse_on_the_declared_terms ... ok
+test tests::solo_is_bit_identically_mute_on_the_complement ... ok
+test tests::representative_retained_projection_tracks_the_post_prepare_exact_aggregate ... ok
+test tests::maximum_document_dense_invalid_boot_is_typed_and_bounded ... ok
+test tests::maximum_document_dense_invalid_fixture_reaches_bounded_semantic_validation ... ok
+
+test result: ok. 60 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.21s
+
+     Running tests/boot_transient_budget.rs (/tmp/engine-404-workspace-qualified/debug/deps/boot_transient_budget-cda9507d363ca0b5)
+
+running 1 test
+test pinned_multiplier_bounds_the_worst_accepted_parse_and_model_build_peak ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s
+
+     Running unittests src/lib.rs (/tmp/engine-404-workspace-qualified/debug/deps/lane-d7c29e699773f118)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/b1_speed.rs (/tmp/engine-404-workspace-qualified/debug/deps/b1_speed-7e20693005d98fbf)
+
+running 1 test
+test b1_block_kernel_against_a_per_sample_path ... ignored, descriptive benchmark, not a gate; run with --ignored --nocapture
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/b2_interleave.rs (/tmp/engine-404-workspace-qualified/debug/deps/b2_interleave-2d55a558ae78be8a)
+
+running 1 test
+test b2_interleave_sweep ... ignored, descriptive sweep, not a gate; run with --ignored --nocapture
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/fader_matrix.rs (/tmp/engine-404-workspace-qualified/debug/deps/fader_matrix-5c9f2b258aa039fe)
+
+running 3 tests
+test holey_populations_keep_neutral_wide_padding ... ok
+test wrong_equations_are_distinguished_before_the_dut_is_checked ... ok
+test settled_fader_matrix_matches_the_two_primitive_oracle ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/fp_env.rs (/tmp/engine-404-workspace-qualified/debug/deps/fp_env-852d8e7a42214586)
+
+running 8 tests
+test attestation_passes_on_this_thread ... ok
+test the_canonical_word_is_the_word_inside_the_guard ... ok
+test the_target_declares_whether_it_pins ... ok
+test x86::a_hostile_caller_word_is_normalised_and_returned_bit_exactly ... ok
+test x86::attestation_passes_from_a_hostile_caller_word ... ok
+test x86::sticky_status_flags_do_not_fail_the_attestation_but_a_control_bit_does ... ok
+test x86::denormal_arithmetic_is_correct_inside_the_guard_and_flushed_outside_it ... ok
+test x86::the_caller_word_survives_an_unwind_through_the_guard ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/g1_op_identity.rs (/tmp/engine-404-workspace-qualified/debug/deps/g1_op_identity-e8b035c21b797213)
+
+running 9 tests
+test g1_fma_is_unfused_on_every_backend ... ok
+test g1_mask_any_matches_the_oracle ... ok
+test g1_exp2_int_is_exact_on_the_integer_range ... ok
+test g1_nan_max_and_min_follow_d8 ... ok
+test g1_max_and_min_lowerings_match_the_oracle ... ok
+test g1_signed_zero_max_and_min_follow_d8 ... ok
+test g1_frexp_reconstructs_positive_normals ... ok
+test g1_directed_edge_pool_is_lane_identical ... ok
+test g1_random_vectors_are_lane_identical ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.51s
+
+     Running tests/g2_kernel_identity.rs (/tmp/engine-404-workspace-qualified/debug/deps/g2_kernel_identity-b008d5690fc4ed67)
+
+running 6 tests
+test ordered_accumulation_matches_the_existing_d9_primitives_and_rejects_shapes ... ok
+test g2_subnormal_state_is_flushed_at_every_width ... ok
+test g2_svf_step_yields_both_taps_of_one_state ... ok
+test g2_idle_ramped_svf_equals_the_plain_svf ... ok
+test g2_kernels_are_bit_identical_at_every_width ... ok
+test g2_interleaved_cascade_equals_a_chain_of_blocks ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+
+     Running tests/g4_flush.rs (/tmp/engine-404-workspace-qualified/debug/deps/g4_flush-1894276a5013722d)
+
+running 2 tests
+test g4_flush_is_lane_wise ... ok
+test g4_flush_law_holds_at_every_width ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/g6_ftz_inert.rs (/tmp/engine-404-workspace-qualified/debug/deps/g6_ftz_inert-d966997a39af08cf)
+
+running 1 test
+test g6_flush_makes_hardware_ftz_inert ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/halfband.rs (/tmp/engine-404-workspace-qualified/debug/deps/halfband-5b1052f909f1d263)
+
+running 3 tests
+test the_even_tap_table_is_the_symmetric_half_band ... ok
+test the_double_written_history_addresses_every_age_at_every_position ... ok
+test interpolation_and_decimation_are_width_independent ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.64s
+
+     Running tests/input_chain_elision.rs (/tmp/engine-404-workspace-qualified/debug/deps/input_chain_elision-279cc198c72ace52)
+
+running 5 tests
+test identity_coefficients_over_non_zero_state_are_not_elidable ... ok
+test negative_zero_mix_words_are_not_the_identity ... ok
+test a_single_non_identity_lane_blocks_the_whole_section ... ok
+test negative_zero_state_words_are_inert_but_still_fail_the_bitwise_gate ... ok
+test elision_is_bit_identical_at_every_width_and_section_pattern ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.70s
+
+     Running tests/p1_partition.rs (/tmp/engine-404-workspace-qualified/debug/deps/p1_partition-98587a2af6ea4e71)
+
+running 1 test
+test p1_every_kernel_is_partition_invariant ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.30s
+
+     Running tests/sanitise_counter.rs (/tmp/engine-404-workspace-qualified/debug/deps/sanitise_counter-71a4b3592a2c02e3)
+
+running 2 tests
+test the_and_form_is_the_select_form_on_every_lane_subset ... ok
+test every_copy_of_the_sanitise_prologue_counts_what_the_policy_counts ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.17s
+
+     Running unittests src/lib.rs (/tmp/engine-404-workspace-qualified/debug/deps/math-fc6a2da64c272405)
+
+running 1 test
+test vendored::exp2::i0_wrap_test ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/f1_fast_db_bounds.rs (/tmp/engine-404-workspace-qualified/debug/deps/f1_fast_db_bounds-553ebee96cb4c06e)
+
+running 14 tests
+test f1_fast_tier_stays_within_twice_the_exact_tier ... ignored, full-domain sweep: run with --release -- --ignored
+test f1_gain_from_db_exhaustive ... ignored, full-domain sweep: run with --release -- --ignored
+test f1_level_db_exhaustive ... ignored, full-domain sweep: run with --release -- --ignored
+test f1_domain_and_clamping ... ok
+test f1_identity_anchors_are_exact ... ok
+test f1_the_container_pins_exactly_six_crossings ... ok
+test f1_level_db_subsample ... ok
+test f1_gain_from_db_subsample ... ok
+test f1_crossing_x1_compressor_detector_level ... ok
+test f1_crossing_x5_multiband_detector_level ... ok
+test f1_crossing_x3_gate_detector_level ... ok
+test f1_crossing_x4_gate_applied_gain ... ok
+test f1_crossing_x6_multiband_applied_gain ... ok
+test f1_crossing_x2_compressor_applied_gain ... ok
+
+test result: ok. 11 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+     Running tests/m1_exhaustive.rs (/tmp/engine-404-workspace-qualified/debug/deps/m1_exhaustive-3943155a65254bcb)
+
+running 6 tests
+test m1_exp2_lane_exhaustive ... ignored, 2^32 sweep: run with --release -- --ignored
+test m1_log2_lane_exhaustive ... ignored, 2^32 sweep: run with --release -- --ignored
+test m1_anchors_and_clamping ... ok
+test m1_measured_worst_points ... ok
+test m1_log2_lane_subsample ... ok
+test m1_exp2_lane_subsample ... ok
+
+test result: ok. 4 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/m2_lane_identity.rs (/tmp/engine-404-workspace-qualified/debug/deps/m2_lane_identity-ed99f568e41ab1d3)
+
+running 4 tests
+test m2_exp2_callers_directed_edges_are_lane_identical ... ok
+test m2_corpus_reaches_every_branch ... ok
+test m2_exp2_lane_identity ... ok
+test m2_log2_lane_identity ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.51s
+
+     Running tests/m3_determinism.rs (/tmp/engine-404-workspace-qualified/debug/deps/m3_determinism-894f399f46e8e004)
+
+running 5 tests
+test m3_no_unsafe_or_force_eval_in_vendored_source ... ok
+test m3_no_target_conditional_source ... ok
+test m3_corpus_is_nan_free ... ok
+test m3_corpus_digests_match_pins ... ok
+test m3_corpus_exercises_each_domain ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.06s
+
+     Running tests/scalar_accuracy.rs (/tmp/engine-404-workspace-qualified/debug/deps/scalar_accuracy-42e8f8618a303ed0)
+
+running 9 tests
+test extreme_scaling_paths ... ok
+test exact_anchors ... ok
+test sqrtf_is_correctly_rounded_exhaustive ... ignored, 2^31 sweep: run with --release -- --ignored
+test huge_argument_reduction ... ok
+test f32_functions_match_platform_libm_in_f64 ... ok
+test f64_functions_match_platform_libm ... ok
+test floor_matches_platform ... ok
+test sqrtf_is_correctly_rounded ... ok
+test sqrt_is_correctly_rounded ... ok
+
+test result: ok. 8 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.19s
+
+     Running unittests src/lib.rs (/tmp/engine-404-workspace-qualified/debug/deps/multiband_compressor-d7fa5ded05fdb86e)
+
+running 16 tests
+test shim::tests::the_link_combines_the_pair_per_mode ... ok
+test shim::tests::the_smoother_has_exact_ends ... ok
+test shim::tests::the_shims_are_width_independent ... ok
+test split::the_split_costs_what_it_costs ... ignored, descriptive measurement, not a gate
+test shim::tests::the_smoother_picks_the_attack_direction_and_matches_the_unfused_restatement ... ok
+test split::a_window_lands_on_its_target_on_the_exact_sample ... ok
+test split::a_settled_bank_meets_the_flat_paths_precondition ... ok
+test split::the_split_is_partition_invariant ... ok
+test split::a_ramp_in_flight_when_a_block_opens_stays_in_flight ... ok
+test split::a_ramp_arriving_on_a_block_boundary_arrives_on_the_same_sample ... ok
+test split::a_ramp_arriving_mid_block_arrives_on_the_same_sample ... ok
+test split::a_settled_bank_renders_what_the_ramped_path_rendered ... ok
+test split::a_restated_parameter_stays_on_the_flat_path ... ok
+test split::the_ramped_path_advances_both_channels ... ok
+test split::a_restatement_mid_flight_agrees ... ok
+test split::overlapping_windows_on_different_tracks_agree ... ok
+
+test result: ok. 15 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.12s
+
+     Running tests/conformance.rs (/tmp/engine-404-workspace-qualified/debug/deps/conformance-8ac9b0e10df0fb42)
+
+running 1 test
+test passes_effect_contract_conformance ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.87s
+
+     Running tests/cross_target_digest.rs (/tmp/engine-404-workspace-qualified/debug/deps/cross_target_digest-83af2054564d6686)
+
+running 1 test
+test the_corpus_digests_are_pinned_and_width_independent ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+     Running tests/crossover.rs (/tmp/engine-404-workspace-qualified/debug/deps/crossover-a2c14a3daec79216)
+
+running 3 tests
+test the_design_guards_its_domain ... ok
+test the_recursive_words_are_flushed ... ok
+test the_two_stage_split_matches_the_reference_and_recombines_flat ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.45s
+
+     Running tests/descriptive_frame_cost.rs (/tmp/engine-404-workspace-qualified/debug/deps/descriptive_frame_cost-ac5eea64d434f3d4)
+
+running 1 test
+test descriptive_frame_cost ... ignored, descriptive measurement, not a gate
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/identity.rs (/tmp/engine-404-workspace-qualified/debug/deps/identity-edb08f00da434ccb)
+
+running 4 tests
+test resets_agree_across_widths ... ok
+test a_restored_track_is_rotated_into_the_receiving_cursor ... ok
+test partition_invariance ... ok
+test lane_identity_across_widths ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+
+     Running tests/lr4_two_section_mapping_f64.rs (/tmp/engine-404-workspace-qualified/debug/deps/lr4_two_section_mapping_f64-4db988d24d6e884a)
+
+running 2 tests
+test two_section_bands_match_the_four_section_reference ... ok
+test the_band_sum_is_the_butterworth_allpass ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.68s
+
+     Running tests/no_alloc_render.rs (/tmp/engine-404-workspace-qualified/debug/deps/no_alloc_render-249c7406eb7c01a4)
+
+running 2 tests
+test the_scalar_render_path_allocates_nothing ... ok
+test the_bank_render_path_allocates_nothing ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/nonfinite.rs (/tmp/engine-404-workspace-qualified/debug/deps/nonfinite-977d86c0dfc223f3)
+
+running 3 tests
+test recovery_restores_a_fresh_instance ... ok
+test a_nonfinite_block_is_zeroed_reset_and_counted ... ok
+test the_boundary_is_the_shared_limit_and_a_bank_shares_its_reset ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/product.rs (/tmp/engine-404-workspace-qualified/debug/deps/product-c1a18e8ac26ee3ad)
+
+running 7 tests
+test descriptor_preparation_and_exact_four_rate_resources_are_frozen ... ok
+test bypass_latency_automation_and_restore_are_transactional ... ok
+test a_rejected_restore_changes_nothing ... ok
+test bank_requests_are_validated_before_any_fallback ... ok
+test unity_gain_output_is_the_delayed_lr4_sum ... ok
+test isolated_low_and_high_band_compression_reduce_only_the_selected_band ... ok
+test unity_gain_transition_has_no_step_at_crossover ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src/lib.rs (/tmp/engine-404-workspace-qualified/debug/deps/native_pcm_runner-7bbf5ed1af5701e1)
+
+running 19 tests
+test tests::cli_is_closed_and_exact ... ok
+test tests::identity_grammar_is_closed ... ok
+test tests::portable_publication_state_machine_freezes_every_race_and_failure ... ok
+test tests::encoder_preserves_signed_zero_and_publication_is_no_clobber ... ok
+test tests::post_create_partial_replacements_are_preserved_and_never_published ... ok
+test tests::final_collisions_inserted_immediately_before_publication_are_preserved ... ok
+test tests::unsupported_platform_stops_before_output_source_engine_or_publication ... ok
+test tests::source_symlink_is_rejected_and_sentinel_preserved ... ok
+test tests::reversed_source_declarations_submit_in_canonical_id_order ... ok
+test tests::preflight_and_resolution_fail_before_compile_or_output ... ok
+test tests::scalar_caps_precede_resolution_and_cover_overflow_and_unsupported_rate ... ok
+test tests::resolver_rejects_integer_and_float_depth_mismatches_both_directions_precompile ... ok
+test tests::missing_mismatched_and_truncated_riff_sources_are_exact_precompile_failures ... ok
+test tests::injected_create_write_and_publish_failures_are_terminal ... ok
+test tests::shared_runner_orders_short_final_submission_and_terminal_failures ... ok
+test tests::resolver_rejects_identity_shape_file_shape_and_declaration_mismatches_precompile ... ok
+test tests::publication_refuses_every_preexisting_final_and_partial_kind ... ok
+test tests::real_output_faults_remove_only_the_owned_partial ... ok
+test tests::real_c_abi_riff_and_rf64_render_exact_block_planar_outputs ... ok
+
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.28s
+
+     Running unittests src/main.rs (/tmp/engine-404-workspace-qualified/debug/deps/native_pcm_runner-b05a8da610839bc7)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/tmp/engine-404-workspace-qualified/debug/deps/parameter_metadata-49bd8dd704f2b5bc)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (/tmp/engine-404-workspace-qualified/debug/deps/parameter_metadata-1d936ad7ae2b23f5)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/lattice_oracle.rs (/tmp/engine-404-workspace-qualified/debug/deps/parameter_metadata_lattice_oracle-c11e4f3641f68413)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/abi_layout.rs (/tmp/engine-404-workspace-qualified/debug/deps/abi_layout-96f556cf63c0aa9c)
+
+running 7 tests
+test the_checked_in_self_test_fixture_is_current ... ok
+test the_boot_alias_table_is_exactly_the_three_alias_constants ... ok
+test rendering_is_deterministic ... ok
+test the_published_source_ring_rule_reproduces_the_engine_derivation ... ok
+test the_published_export_set_is_the_frozen_artifact_set ... ok
+test the_document_carries_its_whole_schema_and_the_engine_s_offsets ... ok
+test the_emitted_command_record_offsets_are_the_engine_s_own_decode_rule ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/round_trip.rs (/tmp/engine-404-workspace-qualified/debug/deps/round_trip-726650b507bbde9b)
+
+running 3 tests
+test every_published_sidechain_port_prepares_and_an_unpublished_one_does_not ... ok
+test every_metadata_observation_tap_resolves_through_a_command_acknowledgement ... ok
+test every_metadata_id_resolves_through_a_command_acknowledgement ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src/lib.rs (/tmp/engine-404-workspace-qualified/debug/deps/parametric_eq-6ea40f580f0b7b18)
+
+running 13 tests
+test interleave_identity::the_tuned_depth_is_per_backend_and_divides_the_cascade ... ok
+test elision::a_negative_zero_state_in_a_live_section_refuses_elision ... ok
+test elision::a_non_zero_state_in_a_dead_section_refuses_elision ... ok
+test elision::the_shipped_shape_actually_elides ... ok
+test elision::a_non_finite_or_oversized_input_refuses_elision ... ok
+test elision::the_negative_zero_refusal_is_load_bearing ... ok
+test elision::a_negative_zero_input_refuses_elision ... ok
+test elision::a_section_live_on_one_lane_is_not_elided ... ok
+test elision::a_discontinuity_reset_mid_ramp_refreshes_the_identity_flag ... ok
+test elision::a_mid_session_enable_or_disable_stays_bit_exact ... ok
+test interleave_identity::the_interleaved_cascade_renders_the_per_section_path_bit_for_bit ... ok
+test elision::an_elided_cascade_is_the_full_cascade_bit_for_bit ... ok
+test elision::the_two_channels_are_judged_together ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.67s
+
+     Running tests/analytic.rs (/tmp/engine-404-workspace-qualified/debug/deps/analytic-28eb1995d5764604)
+
+running 7 tests
+test the_spectral_norm_predicate_separates_contractive_from_expansive_words ... ok
+test the_pcm_fixture_rows_are_oracle_bounded ... ok
+test ten_thousand_seeded_legal_designs_are_finite_and_reference_bounded ... ok
+test frequency_searches_cover_cutoff_center_midpoint_and_notch_minimum ... ok
+test word_ramps_are_contractive_on_every_grid_row ... ok
+test svf_words_match_the_independent_oracle_on_the_complete_grid ... ok
+test the_f64_mapping_reproduces_the_verified_reference_mapping ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.48s
+
+     Running tests/bank.rs (/tmp/engine-404-workspace-qualified/debug/deps/bank-2d1a65c63a787be7)
+
+running 6 tests
+test descriptive_bank_throughput ... ignored, descriptive measurement
+test bank_binding_rejects_malformed_shapes_and_declines_a_foreign_width ... ok
+test bank_binding_declines_a_heterogeneous_cohort ... ok
+test bank_lane_and_track_changes_do_not_leak ... ok
+test bank_rendering_is_partition_invariant ... ok
+test every_width_matches_the_scalar_instantiation ... ok
+
+test result: ok. 5 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/conformance.rs (/tmp/engine-404-workspace-qualified/debug/deps/conformance-2b8cae5696f8210a)
+
+running 1 test
+test passes_effect_contract_conformance ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/contract.rs (/tmp/engine-404-workspace-qualified/debug/deps/contract-daa398f2e0b21f0a)
+
+running 16 tests
+test a_payload_of_the_wrong_length_is_rejected ... ok
+test a_negative_zero_automation_value_is_accepted_as_zero ... ok
+test a_payload_with_a_stale_header_is_rejected_on_its_own_evidence ... ok
+test an_invalid_version_payload_is_rejected ... ok
+test a_malformed_payload_is_rejected_without_touching_either_channel ... ok
+test an_over_capacity_automation_block_is_rejected_whole ... ok
+test descriptor_is_frozen ... ok
+test disabled_and_zero_db_sections_return_dry_bits_with_zero_state_growth ... ok
+test automation_starts_a_64_sample_word_ramp ... ok
+test prepare_refuses_an_unknown_family ... ok
+test bypass_copies_dry_bits_and_leaves_the_state_alone ... ok
+test snapshot_rejects_bad_output_without_touching_either_lane ... ok
+test resets_restore_defaults_or_only_clear_history ... ok
+test malformed_automation_rejects_each_span_without_losing_valid_targets ... ok
+test state_restore_continues_active_ramp_bit_exactly ... ok
+test automation_is_partition_invariant ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/determinism.rs (/tmp/engine-404-workspace-qualified/debug/deps/determinism-af62e5c6eed06fa7)
+
+running 3 tests
+test print_pins ... ignored, pin generator
+test the_corpus_is_finite_and_discriminating ... ok
+test the_corpus_digests_match_the_pins_at_every_width ... ok
+
+test result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/mono_collapse.rs (/tmp/engine-404-workspace-qualified/debug/deps/mono_collapse-0e3ee362cada3849)
+
+running 2 tests
+test a_desymmetrized_bank_is_a_never_collapsed_bank ... ok
+test the_collapsed_body_renders_the_dual_bodys_left_plane ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/silent_fixed_point.rs (/tmp/engine-404-workspace-qualified/debug/deps/silent_fixed_point-31a5a2749e2fe516)
+
+running 3 tests
+test the_settled_stretch_is_exactly_positive_zero ... ok
+test a_negative_zero_input_block_is_not_treated_as_silence ... ok
+test a_settled_silent_bank_renders_exactly_the_bank_that_never_fast_paths ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/stationary_hoist.rs (/tmp/engine-404-workspace-qualified/debug/deps/stationary_hoist-15f40815b540bd95)
+
+running 4 tests
+test a_band_restated_mid_flight_still_settles_at_the_designed_words ... ok
+test a_real_automation_point_still_ramps ... ok
+test a_redundant_automation_point_renders_exactly_the_unautomated_bank ... ok
+test a_restated_band_is_indistinguishable_from_no_automation_over_many_blocks ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/time_domain.rs (/tmp/engine-404-workspace-qualified/debug/deps/time_domain-a27bd57d840542df)
+
+running 5 tests
+test a_non_launch_sample_rate_is_not_a_legal_design ... ok
+test a_non_finite_input_block_is_zeroed_counted_once_and_leaves_the_next_block_clean ... ok
+test flush_keeps_decaying_state_out_of_the_subnormal_range ... ok
+test one_second_impulse_dfts_match_the_independent_oracle_at_all_frozen_edges ... ok
+test forty_eight_frozen_million_sample_sequences_remain_valid_without_recovery ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.66s
+
+     Running unittests src/lib.rs (/tmp/engine-404-workspace-qualified/debug/deps/protocol-9fdbedae104e3a3a)
+
+running 124 tests
+test btlv::tests::canonical_fields_constructors_share_count_frame_reserved_and_depth_limits ... ok
+test btlv::tests::nested_count_mismatch_restores_parent_counter ... ok
+test btlv::tests::nested_body_runs_once_per_sink_and_patches_length ... ok
+test btlv::tests::nested_sinks_enforce_depth_and_restore_it_after_body_errors ... ok
+test btlv::tests::sinks_reject_under_and_over_emission_against_declared_count ... ok
+test btlv::tests::schema_fields_stream_optional_and_nested_values_once_per_sink ... ok
+test controller::tests::fixed_replay_arena_reports_response_and_reservation_bounds ... ok
+test controller::tests::fixed_replay_arena_returns_exact_hits_and_compacts_one_evicted_prefix ... ok
+test controller::tests::b3a_transport_btlv_is_typed_idempotent_and_emits_reliable_state ... ok
+test controller::tests::compatibility_response_uses_one_frame_backing_and_cached_header_only_decode ... ok
+test controller::tests::b3b2_diagnostics_btlv_pages_are_typed_nondestructive_and_expire_old_cursors ... ok
+test controller::tests::b3b1_btlv_telemetry_echo_and_counters_are_typed_and_nondestructive ... ok
+test controller::tests::committed_transaction_emits_typed_zero_header_id_event ... ok
+test controller::tests::c2b2_disabled_configuration_emits_nothing_and_reliable_full_returns_original ... ok
+test controller::tests::backpressure_is_cached_without_second_enqueue ... ok
+test controller::tests::counter_egress_splits_nonascending_staged_snapshots_without_stalling ... ok
+test controller::tests::decoded_route_edit_reaches_same_atomic_session_store ... ok
+test controller::tests::decoded_invalid_automation_rolls_back_after_final_compilation ... ok
+test controller::tests::edit_rejections_use_typed_operation_diagnostics_not_protocol_failure ... ok
+test controller::tests::decoded_btlv_transaction_reaches_same_atomic_session_store ... ok
+test controller::tests::endpoint_owned_current_sample_rejects_past_automation_without_client_time ... ok
+test controller::tests::decoded_track_edit_reaches_same_atomic_session_store ... ok
+test controller::tests::replay_admission_rejects_before_provider_execution ... ok
+test controller::tests::replay_layout_stays_within_the_capi_resource_oracle ... ok
+test controller::tests::identical_replay_changed_reuse_eviction_and_expiry_are_deterministic ... ok
+test controller::tests::b2b_btlv_automation_uses_header_identity_typed_domains_and_backpressure ... ok
+test controller::tests::replay_prefix_derives_length_retained_bytes_and_highest_pending_id ... ok
+test controller::tests::full_frame_ingress_preserves_output_ownership_and_correlates_payload_errors ... ok
+test controller::tests::full_frame_ingress_replays_exact_bytes_and_rejects_changed_request_reuse ... ok
+test controller::tests::mutations_require_exact_revision_and_roll_back_on_validation ... ok
+test controller::tests::replay_resource_projection_is_bounded_and_overflow_checked ... ok
+test controller::tests::replay_reservation_binds_exact_request_bytes ... ok
+test controller::tests::session_diagnostic_path_segments_preserve_field_index_and_stable_id_variants ... ok
+test controller::tests::c2b2_short_buffers_retain_pending_reliable_order_and_diagnostic_storage ... ok
+test controller::tests::c2b2_event_egress_emits_all_six_schema_closed_full_frames ... ok
+test controller::tests::public_immediate_frame_path_never_builds_a_prepared_vec ... ok
+test message_wire::tests::b1b_fixed_goldens_and_every_byte_truncation ... ok
+test controller::tests::session_commit_reserves_reliable_event_before_replacing_store ... ok
+test message_wire::tests::capability_id_views_reject_order_allocation_and_session_family_identically ... ok
+test controller::tests::snapshot_pagination_has_exact_revision_conflict_and_eof_boundaries ... ok
+test message_wire::tests::descriptor_invariant_rejects_encode_and_decode_identically ... ok
+test message_wire::tests::common_error_payload_is_canonical_and_caller_owned ... ok
+test message_wire::tests::direct_common_decoder_enforces_counts_strings_and_nesting ... ok
+test message_wire::tests::b2a_metadata_and_state_are_typed_bounded_and_strict ... ok
+test message_wire::tests::path_tags_and_registered_mandatory_flags_are_exact ... ok
+test message_wire::tests::unknown_optional_skips_but_required_and_wrong_variant_reject ... ok
+test controller::tests::transport_state_only_preserves_automation_and_locate_starts_new_ordering_epoch ... ok
+test controller::tests::validation_diagnostics_preserve_operation_paths_and_exact_omission_count ... ok
+test message_wire::tests::b3a_transport_goldens_truncation_and_direct_codec_are_strict ... ok
+test message_wire::tests::b3b1_telemetry_and_counters_are_typed_canonical_and_bounded ... ok
+test message_wire::tests::every_common_golden_truncation_rejects_and_bounded_count_is_exact ... ok
+test queue::tests::lossy_coalesce_and_drop_counters_saturate_under_fault_injection ... ok
+test queue::tests::transient_record_has_exact_manual_le_codec ... ok
+test queue::tests::reliable_never_coalesces_and_lossy_telemetry_is_explicit ... ok
+test queue::tests::overlap_is_rejected_across_separately_queued_batches ... ok
+test schema::tests::parameter_enum_wire_mappings_are_exhaustive_and_roundtrip ... ok
+test schema::tests::top_level_counts_derive_required_optional_and_repeated_occurrences ... ok
+test schema::tests::wire_registry_covers_every_frozen_code ... ok
+test queue::tests::zero_record_and_aggregate_frontier_density_reject_wholly ... ok
+test message_wire::tests::b4_event_payloads_are_typed_canonical_and_truncation_safe ... ok
+test session_wire::tests::deleted_source_and_limits_opcodes_are_typed_refusals ... ok
+test model::tests::opcode_registry_covers_noneditable_revision_and_schema_exclusion ... ok
+test message_wire::tests::b3b2_diagnostics_pages_are_canonical_bounded_and_strict ... ok
+test model::tests::any_and_maximum_revision_are_rejected_without_replacement ... ok
+test queue::tests::invalid_and_out_of_order_slots_return_whole_unchanged_batches ... ok
+test message_wire::tests::direct_common_encoder_is_byte_stable_in_caller_storage ... ok
+test queue::tests::past_order_overlap_and_density_reject_wholly ... ok
+test queue::tests::reliable_event_reservation_excludes_commit_capacity ... ok
+test model::tests::effects_and_parameters_follow_exact_key_rules ... ok
+test queue::tests::full_empty_wrap_and_generation_preserve_original_items ... ok
+test session_wire::tests::every_byte_of_transaction_golden_truncates ... ok
+test model::tests::failed_edit_and_final_validation_roll_back_wholly ... ok
+test queue::tests::queue_resource_projection_is_nonzero_and_shares_prepare_overflow_rules ... ok
+test session_wire::tests::exact_set_session_id_golden_and_no_partial_output ... ok
+test model::tests::transaction_revisions_and_snapshot_are_authoritative ... ok
+test schema::tests::migrated_specs_are_sorted_unique_and_structurally_consistent ... ok
+test session_wire::tests::every_send_tap_tag_is_typed_and_canonical ... ok
+test session_wire::tests::route_and_automation_unknown_optional_fields_are_canonicalized_away ... ok
+test session_wire::tests::optional_fields_skip_but_required_and_corrupt_nested_fields_reject ... ok
+test session_wire::tests::tagged_pan_rejects_optional_field_known_only_to_matrix_variant ... ok
+test session_wire::tests::track_effect_schema_rejects_duplicate_type_order_and_variant_errors ... ok
+test session_wire::tests::source_variants_decode_and_reencode_canonically ... ok
+test session_wire::tests::transaction_outer_header_uses_sizing_sink_repeated_count ... ok
+test session_wire::tests::transaction_requires_exact_nonempty_edits_and_repeated_message_wire_type ... ok
+test session_wire::tests::transaction_descendants_retain_string_limits ... ok
+test model::tests::temporary_extended_rate_is_permitted_when_final_candidate_is_launch_rate ... ok
+test session_wire::tests::transaction_repeated_fields_match_schema_derived_count ... ok
+test session_wire::tests::direct_encoder_limits_and_short_buffers_preserve_caller_ownership ... ok
+test message_wire::tests::b1b_success_schemas_round_trip_and_truncate ... ok
+test session_wire::tests::transaction_encoder_reserves_envelope_depth_for_frozen_deep_fixture ... ok
+test session_wire::tests::five_session_edit_encoders_are_canonical_and_ordered ... ok
+test controller::tests::structural_prepare_is_invisible_until_commit_and_byte_identical_to_one_call ... ok
+test typed_frame::tests::complete_frame_encoders_preserve_prepared_typed_values ... ok
+test typed_frame::tests::complete_frame_header_uses_sizing_sink_optional_and_repeated_counts ... ok
+test controller::tests::frozen_deep_transaction_reaches_public_b1b_process_path ... ok
+test session_wire::tests::every_track_effect_opcode_and_nested_variant_round_trips_canonically ... ok
+test model::tests::every_launch_rate_initializes_store_and_commits_as_the_final_candidate ... ok
+test typed_frame::tests::full_event_frames_cover_every_registered_event_and_reject_pcm_reachability ... ok
+test wire::tests::every_golden_truncation_rejects ... ok
+test wire::tests::exact_empty_capabilities_golden_round_trips ... ok
+test wire::tests::kind_specific_request_and_revision_carriers_reject_cross_kind_forms ... ok
+test typed_frame::tests::full_success_response_frames_cover_every_registered_command_response ... ok
+test wire::tests::media_range_is_semantically_forbidden ... ok
+test typed_frame::tests::full_non_ok_frames_cover_every_status_and_backpressure_is_exclusive ... ok
+test wire::tests::public_command_header_peek_stops_before_payload_validation ... ok
+test wire::tests::output_too_small_does_not_mutate_caller_memory ... ok
+test wire::tests::response_and_event_goldens_use_kind_specific_correlation_and_revision ... ok
+test wire::tests::malformed_tlv_forms_reject_without_overread ... ok
+test wire::tests::revision_any_requires_zero_and_command_context ... ok
+test typed_frame::tests::full_command_frames_cover_every_registered_command_without_payload_escape ... ok
+test controller::tests::structural_token_cancel_owner_generation_and_serial_rules_are_affine ... ok
+test session_wire::tests::every_route_and_automation_opcode_round_trips_canonically ... ok
+test controller::tests::provider_feature_matrix_derives_capabilities_and_refuses_disabled_dispatch ... ok
+test controller::tests::one_call_transaction_success_and_fallbacks_avoid_owned_preparation ... ok
+test model::tests::launch_rate_final_validation_is_atomic_and_uses_session_diagnostic ... ok
+test session_wire::tests::direct_full_schema_encoder_is_byte_identical_in_caller_storage ... ok
+test controller::tests::full_frame_ingress_dispatches_every_registered_command_through_typed_frames ... ok
+test controller::tests::public_b1b_uses_exactly_the_typed_reader_passes_and_replays_identical_bytes ... ok
+test controller::tests::every_non_ok_status_has_a_canonical_common_response_payload ... ok
+test controller::tests::rejected_engine_rates_have_identical_typed_and_btlv_rollback_diagnostics ... ok
+test message_wire::tests::b2a_goldens_truncations_malformed_matrix_and_encoder_audit ... ok
+test controller::tests::canonical_json_snapshots_reparse_before_and_after_commit_across_utf8_split_pages ... ok
+test message_wire::tests::b2b_automation_goldens_truncation_and_malformed_cases_are_functional ... ok
+test queue::tests::ten_thousand_events_fit_as_exactly_forty_atomic_batches ... ok
+
+test result: ok. 124 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.52s
+
+     Running unittests src/bin/protocol_wasm_golden.rs (/tmp/engine-404-workspace-qualified/debug/deps/protocol_wasm_golden-3f9c9bbeb69090ef)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/conformance_corpus.rs (/tmp/engine-404-workspace-qualified/debug/deps/conformance_corpus-1fd04f4861d49c6c)
+
+running 3 tests
+test descriptor_handle_required_flag_is_frozen ... ok
+test frozen_deep_transaction_uses_typed_command_dispatch ... ok
+test frozen_corpus_bytes_and_typed_decoders_are_unchanged ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/controller_response_api.rs (/tmp/engine-404-workspace-qualified/debug/deps/controller_response_api-fd621e4f21f5d9af)
+
+running 1 test
+test complete_canonical_response_frame_is_publicly_accessible ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/mutation_million.rs (/tmp/engine-404-workspace-qualified/debug/deps/mutation_million-42b63879e06d8a20)
+
+running 1 test
+test one_million_deterministic_mutations_cover_complete_schema_closed_dispatch ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.49s
+
+     Running tests/session_edit_builtins_rack.rs (/tmp/engine-404-workspace-qualified/debug/deps/session_edit_builtins_rack-1edb341bbc90b010)
+
+running 3 tests
+test the_strip_is_still_editable_through_set_track_builtins ... ok
+test the_same_edits_against_a_real_rack_are_applied ... ok
+test rack_addressed_edits_refuse_the_builtins_token ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/tmp/engine-404-workspace-qualified/debug/deps/rack-940cbe1e0fec5aab)
+
+running 27 tests
+test tests::a_partial_agreement_slot_declines_the_collapse ... ok
+test tests::a_collapsed_seam_keeps_the_matrixs_operation_order ... ok
+test tests::an_armed_seam_side_only_chain_renders_the_dual_bits ... ok
+test tests::arming_an_auxiliary_destination_refuses_an_unrenderable_mask ... ok
+test tests::an_ineligible_armed_chain_renders_the_dual_bits ... ok
+test tests::arming_a_fold_refuses_an_unrenderable_mask ... ok
+test tests::an_unarmed_chain_never_collapses ... ok
+test tests::chain_new_rejects_mask_shape_and_lane_implication ... ok
+test tests::all_active_folded_masks_use_one_cohort_with_physical_lane_ids ... ok
+test tests::default_and_override_fold_identical_complete_strided_cohorts ... ok
+test tests::direct_plane_views_encode_width_and_reject_short_capacity ... ok
+test tests::direct_scatter_never_calls_the_per_lane_fallback ... ok
+test tests::disengaging_copies_the_prefixs_state_once ... ok
+test tests::fold_cohort_constructor_rejects_every_invalid_shape_without_writes ... ok
+test tests::inactive_lanes_are_never_gathered_or_scattered ... ok
+test tests::identity_everywhere_slot_is_not_executed ... ok
+test tests::inadequate_claimed_capacity_takes_complete_staged_fallback ... ok
+test tests::gather_scatter_round_trip_is_bit_exact ... ok
+test tests::only_a_seam_suffix_over_a_collapsible_prefix_can_collapse ... ok
+test tests::scratch_allocates_exactly_two_planes ... ok
+test tests::stage_sees_frame_major_layout ... ok
+test tests::wrong_width_provider_is_dropped_before_complete_staged_fallback ... ok
+test tests::the_auxiliary_destination_seam_is_absent_by_default_and_accumulates_when_armed ... ok
+test tests::the_fold_epilogue_is_absent_by_default_and_replaces_the_lane_write_when_armed ... ok
+test tests::full_bank_gather_scatter_round_trip_is_bit_exact ... ok
+test tests::tiled_transpose_matches_the_scalar_path_bit_for_bit ... ok
+test tests::chain_run_is_partition_invariant ... ok
+
+test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/console_bank.rs (/tmp/engine-404-workspace-qualified/debug/deps/console_bank-0a269cc844e25631)
+
+running 10 tests
+test a_command_applies_at_the_block_boundary_and_persists ... ok
+test a_stage_with_no_controlled_lane_allocates_no_shunt ... ok
+test a_command_timeline_is_partition_invariant ... ok
+test a_mid_session_bypass_emits_the_delayed_dry_signal_captured_while_wet ... ok
+test stage_construction_rejects_a_lane_count_or_quantum_mismatch ... ok
+test an_unobserved_bank_slot_reports_no_observation_state_at_all ... ok
+test a_zero_latency_bypass_emits_the_current_block_dry ... ok
+test each_lane_receives_only_its_own_commands ... ok
+test un_bypassing_returns_the_current_wet_signal ... ok
+test bypass_is_per_lane_and_preserves_the_declared_latency ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/mono_reengage.rs (/tmp/engine-404-workspace-qualified/debug/deps/mono_reengage-88a403391f7762fd)
+
+running 4 tests
+test a_bypass_episode_re_engages_because_it_never_moved_the_channels_apart ... ok
+test re_equal_words_after_a_desymmetrised_episode_do_not_re_engage ... ok
+test the_forced_off_window_re_engages_and_renders_the_never_collapsed_bits ... ok
+test an_earned_agreement_proof_re_engages_a_chain_the_witness_could_not ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/tmp/engine-404-workspace-qualified/debug/deps/rack_compiler-a0eb226f6f989b0b)
+
+running 13 tests
+test tests::duplicate_ids_are_rejected_across_levels ... ok
+test tests::empty_programs_and_connected_sidechains_never_bank ... ok
+test tests::longest_program_leads_and_full_programs_fill_first ... ok
+test tests::program_comparison_is_a_total_order ... ok
+test tests::a_subsequence_program_still_emits_ascending_banks ... ok
+test tests::subsequence_uses_program_equality_not_occurrence ... ok
+test tests::the_pool_class_rests_on_the_two_prepare_time_terms ... ok
+test tests::the_pool_class_partitions_cohorts_and_leaves_a_uniform_session_alone ... ok
+test tests::output_is_input_order_invariant ... ok
+test tests::every_slot_cohort_is_homogeneous ... ok
+test tests::invariants_hold_on_seeded_corpus ... ok
+test tests::pooling_is_exhaustive_so_no_member_is_stranded ... ok
+test tests::single_slot_programs_reproduce_exact_equal_chunking ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src/lib.rs (/tmp/engine-404-workspace-qualified/debug/deps/session-9d1e94e8bf906f5a)
+
+running 7 tests
+test value::tests::exhaustive_f32_round_trip ... ignored, authorized one-shot exhaustive release qualification
+test canonical::tests::canonical_string_escaping_is_frozen ... ok
+test value::tests::known_double_rounding_values_and_signed_zero_round_trip ... ok
+test tests::compile_is_transactional_and_non_publishable ... ok
+test tests::canonical_round_trip_is_byte_stable ... ok
+test canonical::tests::canonical_writer_corpus_is_rust_generated_and_current ... ok
+test value::tests::ten_million_deterministic_f32_patterns_round_trip ... ok
+
+test result: ok. 6 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 17.28s
+
+     Running tests/allocation_budget.rs (/tmp/engine-404-workspace-qualified/debug/deps/allocation_budget-ec75a2f2a1bb1495)
+
+running 1 test
+test allocation_calls_stay_within_linear_phase_budgets ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.92s
+
+     Running tests/canonical_schema.rs (/tmp/engine-404-workspace-qualified/debug/deps/canonical_schema-89a776a0c194d9c9)
+
+running 5 tests
+test parametric_eq_session_fixture_bytes_are_immutable ... ok
+test maximal_float_spellings_fit_the_canonical_size_estimate ... ok
+test checked_in_fixtures_are_exact_canonical_bytes ... ok
+test full_tagged_surface_round_trips_without_field_loss ... ok
+test signed_zero_and_double_rounding_values_survive_session_compilation ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/descriptive_scale.rs (/tmp/engine-404-workspace-qualified/debug/deps/descriptive_scale-c95bb3d9db8eb00e)
+
+running 1 test
+test canonical_compile_parse_timings_at_32768_and_65536_tracks ... ignored, descriptive release qualification; run exactly once with --ignored --exact
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/diagnostic_parity.rs (/tmp/engine-404-workspace-qualified/debug/deps/diagnostic_parity-4748100b614fee1a)
+
+running 1 test
+test parse_canonical_and_compile_diagnostics_have_code_path_and_span_parity ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/fuzz_smoke.rs (/tmp/engine-404-workspace-qualified/debug/deps/fuzz_smoke-2443a2b036917d3b)
+
+running 1 test
+test deterministic_parser_compiler_mutation_smoke ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.05s
+
+     Running tests/invalid_matrix.rs (/tmp/engine-404-workspace-qualified/debug/deps/invalid_matrix-cd062e9982b3c423)
+
+running 14 tests
+test corpus_distribution_totals_124_cases ... ok
+test compile_caps_reject_before_semantic_validation ... ok
+test configured_resource_category_has_4_distinct_cases ... ok
+test empty_third_party_cid_is_reported_at_the_identity_leaf ... ok
+test dead_resource_caps_cannot_refuse_any_session ... ok
+test tagged_route_roles_are_structurally_closed ... ok
+test parser_registry_covers_right_lane_and_f32_representation ... ok
+test u64_model_fields_accept_the_full_unsigned_domain ... ok
+test schema_version_and_type_category_has_16_distinct_cases ... ok
+test automation_category_has_20_distinct_cases ... ok
+test source_identity_and_shape_category_has_20_distinct_cases ... ok
+test stable_id_category_has_20_distinct_cases ... ok
+test schema_owned_reference_category_has_20_distinct_cases ... ok
+test finite_unit_and_local_range_category_has_24_distinct_cases ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/json_contract_artifacts.rs (/tmp/engine-404-workspace-qualified/debug/deps/json_contract_artifacts-8ad9b373fb7d8b2e)
+
+running 3 tests
+test migration_inventory_keeps_all_four_classifications_and_reproducible_audit ... ok
+test session_schema_is_draft_2020_12_and_closes_every_object ... ok
+test session_schema_u64_pattern_executes_the_exact_unsigned_64_bit_domain ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+     Running tests/json_grammar.rs (/tmp/engine-404-workspace-qualified/debug/deps/json_grammar-21cf12676cc38d7a)
+
+running 9 tests
+test decoded_duplicate_path_and_second_key_span_are_exact ... ok
+test bom_comments_trailing_commas_and_multiple_values_refuse_as_syntax ... ok
+test syntax_and_typed_spans_are_exact_after_multibyte_text_and_newlines ... ok
+test duplicates_refuse_at_root_records_and_array_items_before_their_value ... ok
+test depth_128_accepts_and_opening_depth_129_refuses ... ok
+test insignificant_whitespace_and_shuffled_keys_canonicalize ... ok
+test every_u64_leaf_accepts_the_full_unsigned_domain ... ok
+test numeric_lexemes_reach_typed_rules_without_f64_preprocessing ... ok
+test u64_decimal_strings_cover_full_domain_and_reject_noncanonical_forms ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/json_unicode.rs (/tmp/engine-404-workspace-qualified/debug/deps/json_unicode-c475adf9c64cd72d)
+
+running 2 tests
+test invalid_escape_and_unpaired_surrogate_refuse ... ok
+test escaped_and_direct_unicode_decode_equally_and_emit_directly ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/render_mode_tiers.rs (/tmp/engine-404-workspace-qualified/debug/deps/render_mode_tiers-351b7f132c6df25a)
+
+running 3 tests
+test single_thread_parses_compiles_and_canonicalizes ... ok
+test dependency_waves_is_still_a_known_token_and_not_an_unknown_enum ... ok
+test dependency_waves_rejects_with_one_stable_diagnostic_at_every_entry_point ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/sample_rate_tiers.rs (/tmp/engine-404-workspace-qualified/debug/deps/sample_rate_tiers-1b876d35890e5397)
+
+running 2 tests
+test launch_rates_parse_compile_and_canonicalize ... ok
+test extended_and_unrelated_engine_rates_reject_with_one_stable_diagnostic ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/scale_transaction.rs (/tmp/engine-404-workspace-qualified/debug/deps/scale_transaction-9ab771ce97271d97)
+
+running 3 tests
+test preflight_resource_failure_precedes_clone_and_index_construction ... ok
+test failed_compile_does_not_mutate_input_or_construct_a_partial_artifact ... ok
+test compiles_65_537_tracks_without_a_product_track_limit ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.53s
+
+     Running tests/strict_unknowns.rs (/tmp/engine-404-workspace-qualified/debug/deps/strict_unknowns-58d204dc6b485a3b)
+
+running 1 test
+test every_nested_object_family_rejects_an_exact_unknown_leaf ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/token_tables.rs (/tmp/engine-404-workspace-qualified/debug/deps/token_tables-6655d8619be1755d)
+
+running 2 tests
+test source_bit_depth_wire_table_is_closed_at_both_edges ... ok
+test all_closed_tokens_round_trip_in_declaration_and_wire_order ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/visit_model.rs (/tmp/engine-404-workspace-qualified/debug/deps/visit_model-1b0ffaf66796b86c)
+
+running 1 test
+test visitor_counts_keys_tags_and_conditional_canonical_order_are_exact ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/tmp/engine-404-workspace-qualified/debug/deps/session_validator-020fde03b52eb4cc)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (/tmp/engine-404-workspace-qualified/debug/deps/session_validator-bcd50b80fb09d892)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/skill.rs (/tmp/engine-404-workspace-qualified/debug/deps/skill-efc0e4d04e80479e)
+
+running 1 test
+test the_shipped_skill_names_the_real_commands ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/validate.rs (/tmp/engine-404-workspace-qualified/debug/deps/validate-69f1b0d104ea56cd)
+
+running 8 tests
+test the_duplicate_key_fixture_fails_the_grammar_stage ... ok
+test canonical_output_reproduces_the_checked_in_canonical_fixtures ... ok
+test the_report_is_deterministic ... ok
+test parse_stage_diagnostics_carry_a_source_location_and_preparation_diagnostics_do_not ... ok
+test source_identity_format_diagnostics_are_byte_identical_at_validator_and_web_boot ... ok
+test canonicalization_normalizes_and_is_a_fixed_point ... ok
+test each_mutation_is_attributed_to_the_stage_that_rejects_it ... ok
+test every_valid_session_fixture_passes_every_stage ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+
+     Running unittests src/lib.rs (/tmp/engine-404-workspace-qualified/debug/deps/soft_clip-36b049196328a215)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/allocation.rs (/tmp/engine-404-workspace-qualified/debug/deps/allocation-0d47b2c8fd1c6be5)
+
+running 3 tests
+test preparation_allocates_a_bounded_number_of_times ... ok
+test the_scalar_render_path_never_allocates ... ok
+test the_bank_render_path_never_allocates ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.69s
+
+     Running tests/boundary_check.rs (/tmp/engine-404-workspace-qualified/debug/deps/boundary_check-516345abf142c062)
+
+running 3 tests
+test a_finite_but_out_of_range_block_also_fails ... ok
+test a_non_finite_block_is_zeroed_reset_and_counted_once ... ok
+test a_bank_block_fails_and_recovers_as_a_unit ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/conformance.rs (/tmp/engine-404-workspace-qualified/debug/deps/conformance-f20b40eb9c5571a7)
+
+running 1 test
+test passes_effect_contract_conformance ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.55s
+
+     Running tests/contract.rs (/tmp/engine-404-workspace-qualified/debug/deps/contract-63ed55dff8cc278a)
+
+running 7 tests
+test descriptor_resources_and_independent_fir_design_are_frozen ... ok
+test automation_rejects_everything_but_canonical_ordered_points ... ok
+test bank_binding_validates_before_declining_an_unavailable_width ... ok
+test wet_impulse_has_exact_group_delay_and_final_causal_support ... ok
+test scalar_matches_independent_oracle_after_warmup ... ok
+test identity_and_bypass_emit_the_delayed_dry_signal_bit_for_bit ... ok
+test frozen_alias_claim_improves_over_independent_naive_cubic ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.32s
+
+     Running tests/descriptive_bench.rs (/tmp/engine-404-workspace-qualified/debug/deps/descriptive_bench-32f05e3076778247)
+
+running 1 test
+test descriptive_bank_throughput ... ignored, descriptive benchmark; run explicitly in release
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/determinism.rs (/tmp/engine-404-workspace-qualified/debug/deps/determinism-46872f28a64983a6)
+
+running 2 tests
+test the_corpus_is_not_vacuous ... ok
+test every_case_matches_its_pin_at_every_width ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+
+     Running tests/lane_identity.rs (/tmp/engine-404-workspace-qualified/debug/deps/lane_identity-a8186148ba728e5a)
+
+running 1 test
+test the_hosts_bank_width_matches_the_scalar_instantiation ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.44s
+
+     Running tests/partition_invariance.rs (/tmp/engine-404-workspace-qualified/debug/deps/partition_invariance-90ac2c413e82bf99)
+
+running 1 test
+test every_partition_renders_the_one_shot_bits_and_state ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+
+     Running tests/polyphase_identity.rs (/tmp/engine-404-workspace-qualified/debug/deps/polyphase_identity-f1a7d6d37ab714d5)
+
+running 1 test
+test polyphase_matches_the_frozen_63_tap_graph ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.88s
+
+     Running tests/ramp_law.rs (/tmp/engine-404-workspace-qualified/debug/deps/ramp_law-b78cf8918b56d81f)
+
+running 3 tests
+test a_new_point_restarts_from_the_current_value ... ok
+test the_driver_reproduces_the_runtime_ramp_law_bit_for_bit ... ok
+test the_ramp_divides_once_and_snaps_exactly_whatever_the_block_size ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/state_roundtrip.rs (/tmp/engine-404-workspace-qualified/debug/deps/state_roundtrip-761ef560bb783eb8)
+
+running 4 tests
+test a_restore_rejects_a_stale_version_a_wrong_length_and_every_invalid_word ... ok
+test both_resets_are_word_exact ... ok
+test a_snapshot_restores_into_a_fresh_instance_and_continues_bit_for_bit ... ok
+test a_bank_track_restore_is_position_independent_and_lane_local ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/tmp/engine-404-workspace-qualified/debug/deps/source-b9376415cbb0b698)
+
+running 58 tests
+test native_source::tests::controller_first_drop_does_not_detach_the_retirement_stop_owner ... ok
+test native_source::tests::compiled_sourceless_session_returns_collection_diagnostic_without_resolving ... ok
+test native_source::tests::compiled_session_source_failure_collects_sorted_diagnostics_before_worker_start ... ok
+test native_source::tests::controller_snapshot_and_terminal_watermarks_are_exact_and_monotonic ... ok
+test native_source::tests::invalid_graph_mapping_stops_carried_worker_before_consumer_cleanup ... ok
+test native_source::tests::engine_boundary_refuses_declared_versus_decoded_depth_in_both_directions ... ok
+test native_source::tests::compiled_multi_source_session_uses_one_exact_shared_worker ... ok
+test native_source::tests::native_queue_layout_and_per_source_caps_use_exact_requests ... ok
+test native_source::tests::prepared_source_job_is_inert_until_the_single_start_boundary ... ok
+test native_source::tests::render_wait_is_half_the_prepared_ring_and_bounded ... ok
+test native_source::tests::decoder_failure_after_accepted_seek_keeps_typed_terminal ... ok
+test native_source::tests::native_worker_and_host_provider_produce_identical_prepared_ring_pcm ... ok
+test native_source::tests::compiled_session_sources_prepare_once_and_publish_one_graph_source_set ... ok
+test native_source::tests::provider_seek_admission_precedes_decoder_reposition ... ok
+test native_source::tests::retained_layout_grid_is_checked_without_source_duration_storage ... ok
+test native_source::tests::graph_set_driver_retains_all_native_workers_until_set_drop ... ok
+test native_source::tests::multiblock_native_watermark_does_not_readd_the_cumulative_decoder_report ... ok
+test native_source::tests::compiled_session_source_mismatch_and_cap_fail_without_publication ... ok
+test native_source::tests::resolver_preparation_validates_identity_rate_channels_region_and_fixed_caps ... ok
+test native_source::tests::launch_rates_prepare_and_extended_rate_mismatch_is_rejected ... ok
+test native_source::tests::native_sanitation_reaches_after_disarm_source_set_telemetry_and_drop_retires_worker ... ok
+test native_source::tests::combined_retained_cap_accepts_exactly_and_rejects_one_byte_short ... ok
+test native_wave::tests::buffered_quanta_seek_and_straddled_refill_preserve_exact_pcm ... ok
+test native_wave::tests::classic_formats_decode_with_exact_pcm_scaling_and_float_sanitation ... ok
+test native_wave::tests::extensible_and_rf64_metadata_are_accepted_with_checked_sizes ... ok
+test native_source::tests::seek_continuation_pcm_reads_are_preceded_by_audit_acknowledgements ... ok
+test native_source::tests::worker_seek_stop_wake_and_join_are_bounded_and_typed ... ok
+test native_wave::tests::invalid_native_containers_and_regions_have_frozen_diagnostics ... ok
+test native_wave::tests::failed_io_forgets_reader_position_and_retry_reseeks ... ok
+test native_source::tests::pending_seek_stops_without_render_drain_and_controller_backpressure_does_not_advance ... ok
+test native_wave::tests::mask_sanitizers_freeze_float_boundary_bits_and_counts ... ok
+test native_source::tests::native_worker_idle_paths_do_not_use_active_spin_primitives ... ok
+test native_wave::tests::malformed_ds64_byte_rate_duplicate_data_and_metadata_cap_reject_without_payload_retention ... ok
+test native_wave::tests::prepared_quantum_decode_uses_contiguous_planar_worker_storage ... ok
+test native_source::tests::reserved_event_slot_preserves_terminal_after_ready_and_snapshot ... ok
+test tests::copy_channel_zeroes_only_the_tail_the_full_fill_used_to_reach ... ok
+test tests::graph_driver_last_claim_recycles_in_call_and_incomplete_paths_recycle_next_begin ... ok
+test tests::host_and_native_submission_share_exact_short_eof_metadata_and_validation_order ... ok
+test native_source::tests::retired_graph_plan_is_the_native_worker_join_owner ... ok
+test tests::host_region_preparation_preserves_resources_and_absolute_ownership ... ok
+test tests::host_submission_is_fifo_wraparound_and_never_accepts_a_prefix ... ok
+test native_source::tests::single_worker_seek_resumes_contiguously_at_the_exact_frame ... ok
+test tests::prepare_rejects_invalid_fixed_ring_shape ... ok
+test tests::prepared_contiguous_native_submission_matches_planar_ring_shape ... ok
+test tests::registry_and_host_shape_errors_are_stable ... ok
+test tests::report_separates_session_pcm_from_source_overhead ... ok
+test native_wave::tests::plane_and_strided_sinks_match_every_encoding_across_chunks_refills_and_seek ... ok
+test tests::retained_played_block_supports_repeat_fanout_and_auto_recycles_once ... ok
+test tests::seek_switches_at_boundary_and_discards_older_queued_audio ... ok
+test tests::stamped_native_watermark_survives_seek_stale_discard_and_saturates ... ok
+test tests::underrun_is_positive_zero_and_eof_is_not_an_underrun ... ok
+test tests::graph_driver_zero_claims_recycles_in_begin_and_retains_no_plane_class ... ok
+test tests::set_driver_declares_worker_tokens_before_source_consumers ... ok
+test native_source::tests::terminal_event_carries_decode_failure_and_other_sources_continue ... ok
+test tests::producer_submission_has_one_stamping_and_copy_body ... ok
+test tests::one_four_channel_source_fans_out_to_three_inputs_in_the_sequential_executor ... ok
+test native_source::tests::worker_coalesces_provider_backpressure_to_latest_exact_frame_without_intermediate_pcm ... ok
+test native_source::tests::idle_decode_thread_cpu_is_bounded_and_one_thread_serves_a_set ... ok
+
+test result: ok. 58 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.02s
+
+     Running unittests src/lib.rs (/tmp/engine-404-workspace-qualified/debug/deps/stem_hasher-a7eebae7bd598149)
+
+running 3 tests
+test tests::cli_is_closed_and_raw_shape_is_exact ... ok
+test tests::wave_depth_set_rejects_integer_pcm32_but_accepts_float32 ... ok
+test tests::raw_length_is_total_and_output_is_canonical ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (/tmp/engine-404-workspace-qualified/debug/deps/stem_hasher-9c0d517a23ac2dd1)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/conformance.rs (/tmp/engine-404-workspace-qualified/debug/deps/conformance-836264406c6049ff)
+
+running 8 tests
+test vector_matrix_covers_integer_boundaries_and_float_edge_bits ... ok
+test stdout_mode_keeps_canonical_bytes_and_identity_separate ... ok
+test pcm16_mono_boundary_pin_matches_library_and_cli ... ok
+test f32_mono_edge_bit_pin_matches_library_and_cli ... ok
+test pcm24_mono_boundary_pin_matches_library_and_cli ... ok
+test pcm16_stereo_boundary_pin_matches_library_cli_and_engine_wave_parser ... ok
+test pcm24_stereo_boundary_pin_matches_library_cli_and_engine_wave_parser ... ok
+test f32_stereo_edge_bit_pin_matches_library_cli_and_engine_wave_parser ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/tmp/engine-404-workspace-qualified/debug/deps/target_smoke-d46f5536aa0467f4)
+
+running 2 tests
+test tests::local_realtime_ring_round_trips ... ok
+test tests::smoke_values_are_canonical ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/tmp/engine-404-workspace-qualified/debug/deps/transient_shaper-a611d5d17dfa48af)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/allocation.rs (/tmp/engine-404-workspace-qualified/debug/deps/allocation-ff35785caf098a68)
+
+running 3 tests
+test the_counter_observes_same_thread_allocation_and_free ... ok
+test foreign_thread_allocations_do_not_enter_the_callers_counts ... ok
+test the_render_path_allocates_nothing ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.78s
+
+     Running tests/bank.rs (/tmp/engine-404-workspace-qualified/debug/deps/bank-83c66c6b2525bfc0)
+
+running 2 tests
+test bank_snapshot_restore_and_resets_are_track_local ... ok
+test bank_matches_scalar_pcm_state_and_reports_for_every_link_mode ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/boundary.rs (/tmp/engine-404-workspace-qualified/debug/deps/boundary-fd1a0a0fee935844)
+
+running 3 tests
+test a_subnormal_input_renders_and_flushes_the_envelope ... ok
+test a_nonfinite_block_is_zeroed_and_the_envelopes_are_reset ... ok
+test a_nonfinite_bank_block_is_rejected_as_a_unit ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/conformance.rs (/tmp/engine-404-workspace-qualified/debug/deps/conformance-7ab9d17372cbfc26)
+
+running 1 test
+test passes_effect_contract_conformance ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.31s
+
+     Running tests/contract.rs (/tmp/engine-404-workspace-qualified/debug/deps/contract-59c0e7f57fceafc9)
+
+running 8 tests
+test both_resets_have_word_exact_parameter_and_envelope_states ... ok
+test automation_updates_one_sixty_three_sixty_four_retargets_and_restores_exactly ... ok
+test descriptor_coefficients_resources_and_transactional_caps_are_frozen ... ok
+test bank_resources_and_validation_precede_legal_unavailable_fallback ... ok
+test identity_rules_are_bit_exact_and_the_followers_still_warm ... ok
+test independent_coefficients_time_constants_layout_and_both_caps_are_exact ... ok
+test state_restore_validates_version_length_envelope_and_parameters ... ok
+test link_modes_drive_the_detector_as_specified ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/cross_target.rs (/tmp/engine-404-workspace-qualified/debug/deps/cross_target-edbf72cf4ec5ef9d)
+
+running 2 tests
+test the_pinned_digests_hold ... ok
+test every_width_produces_the_same_words ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/oracle.rs (/tmp/engine-404-workspace-qualified/debug/deps/oracle-1c7d34e238c63e17)
+
+running 2 tests
+test scalar_matches_the_independent_f64_oracle ... ok
+test impulse_step_and_decay_cover_both_attack_and_sustain_signs ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/partition.rs (/tmp/engine-404-workspace-qualified/debug/deps/partition-1192d3115c6c152f)
+
+running 2 tests
+test the_scalar_product_is_partition_invariant ... ok
+test the_bank_is_partition_invariant ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running unittests src/lib.rs (/tmp/engine-404-workspace-qualified/debug/deps/true_peak_limiter-ccc5d17c76c12159)
+
+running 29 tests
+test tests::an_open_window_is_never_stationary ... ok
+test tests::a_nonfinite_block_is_zeroed_reset_and_counted ... ok
+test tests::automation_retargets_linear_coefficients_and_counts_invalid_spans ... ok
+test tests::descriptor_metadata_and_exact_resource_rows_are_frozen ... ok
+test tests::bank_binding_validates_before_fallback_and_retains_exact_width_bytes ... ok
+test tests::automation_withdraws_the_claim_and_the_resident_tap_keeps_up ... ok
+test tests::the_lane_ramp_reproduces_the_scalar_ramp_bit_for_bit ... ok
+test tests::both_resets_return_the_runtime_state_to_a_silent_lane ... ok
+test tests::the_stationary_hoist_reads_what_advancing_would_have_produced ... ok
+test tests::the_gain_ramp_falls_gradually_and_arrives_at_the_requirement ... ok
+test tests::state_round_trips_and_rejects_corruption ... ok
+test tests::phase_outputs_match_the_frozen_scalar_order ... ok
+test tests::partition_invariance_holds_over_block_sizes ... ok
+test tests::fixed_latency_guarded_ceiling_and_bypass_bits_hold ... ok
+test tests::a_restore_withdraws_the_silence_claim ... ok
+test tests::automation_withdraws_the_claim_on_the_bank_path_too ... ok
+test tests::a_uniform_cohort_renders_exactly_the_per_lane_path ... ok
+test tests::a_mixed_lookahead_cohort_falls_back_bit_identically ... ok
+test tests::a_restore_that_desyncs_the_phase_falls_back ... ok
+test tests::a_de_zipper_window_open_across_a_block_boundary_refuses_the_claim ... ok
+test tests::the_segment_walk_visits_the_slots_a_frame_at_a_time_walk_visits ... ok
+test tests::bs1770_annex2_conformance_is_unchanged ... ok
+test tests::the_two_channels_of_a_uniform_cohort_keep_their_own_phases ... ok
+test tests::lane_identity_holds_across_widths ... ok
+test tests::silence_restores_exact_identity_including_signed_zero ... ok
+test tests::a_limiter_still_releasing_through_the_silence_is_never_frozen ... ok
+test tests::a_settled_silent_limiter_renders_exactly_the_never_fast_path ... ok
+test tests::a_negative_zero_input_block_is_not_treated_as_silence ... ok
+test tests::a_stale_detector_history_refuses_the_claim ... ok
+
+test result: ok. 29 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.19s
+
+     Running tests/allocation.rs (/tmp/engine-404-workspace-qualified/debug/deps/allocation-73edab74ea9dd7c3)
+
+running 1 test
+test the_render_path_allocates_nothing ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+     Running tests/bench.rs (/tmp/engine-404-workspace-qualified/debug/deps/bench-fed822bba511395c)
+
+running 1 test
+test bench_w8_ns_per_lane_sample ... ignored, descriptive benchmark, run by hand (AGENTS.md benchmark protocol)
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/conformance.rs (/tmp/engine-404-workspace-qualified/debug/deps/conformance-d6e48becd81f6760)
+
+running 1 test
+test passes_effect_contract_conformance ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.94s
+
+     Running tests/determinism.rs (/tmp/engine-404-workspace-qualified/debug/deps/determinism-d9bda6b41ae4dcff)
+
+running 1 test
+test every_case_has_one_digest_at_every_width ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+
+     Running tests/gain_law.rs (/tmp/engine-404-workspace-qualified/debug/deps/gain_law-da1b3e21269ba288)
+
+running 2 tests
+test production_tracks_the_f64_oracle ... ok
+test output_true_peak_never_exceeds_the_ceiling ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.06s
+
+     Running tests/mono_collapse.rs (/tmp/engine-404-workspace-qualified/debug/deps/mono_collapse-98a81bb19b0f1091)
+
+running 2 tests
+test a_desymmetrized_bank_is_a_never_collapsed_bank ... ok
+test the_collapsed_body_renders_the_dual_bodys_left_plane ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running tests/observation.rs (/tmp/engine-404-workspace-qualified/debug/deps/observation-cd836c752eed6503)
+
+running 3 tests
+test a_resident_read_is_repeatable_to_the_bit ... ok
+test the_limiter_reads_the_reduction_word_the_envelope_persists ... ok
+test observing_between_blocks_does_not_move_a_single_output_sample ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (/tmp/engine-404-workspace-qualified/debug/deps/wasm_console-29fafd7e3c379b5a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/tmp/engine-404-workspace-qualified/debug/deps/wasm_console_guest-acdfc7b7fedbeecf)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/tmp/engine-404-workspace-qualified/debug/deps/wasm_gate_corpus-942fa29dd3223392)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/tmp/engine-404-workspace-qualified/debug/deps/wasm_gate_guest-ea588739d34133df)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/tmp/engine-404-workspace-qualified/debug/deps/wasm_gates-f92c883e35d78743)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (/tmp/engine-404-workspace-qualified/debug/deps/wasm_gates-ac4717469a191f55)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/g5_native_corpus.rs (/tmp/engine-404-workspace-qualified/debug/deps/g5_native_corpus-5b395e53f940841f)
+
+running 7 tests
+test g5_delegated_cases_use_the_owning_crates_pins ... ok
+test g5_case_digests_are_distinct ... ok
+test g5_idle_ramped_svf_equals_the_plain_svf ... ok
+test g5_fma_case_is_unfused_and_the_case_is_not_vacuous ... ok
+test g5_no_case_is_vacuously_zero ... ok
+test g5_lane_corpus_is_finite ... ok
+test g5_native_digests_match_pins ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.92s
+
+     Running tests/g6_full_corpus_ftz.rs (/tmp/engine-404-workspace-qualified/debug/deps/g6_full_corpus_ftz-c77cc0d280bf2533)
+
+running 2 tests
+test x86::g6_the_guard_is_an_identity_for_a_caller_who_never_set_ftz ... ok
+test x86::g6_full_wasm_gate_corpus_is_canonical_under_caller_ftz ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 26.59s
+
+   Doc-tests bench_support
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests builtins
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests builtins_compiler
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests capi
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests compressor
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests conformance
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests console_workload
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests delay
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests dsp_reference
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests effect_compiler
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests effect_contract
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests effect_package
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests effect_runtime
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests engine
+
+running 1 test
+test crates/engine/src/realtime/plan.rs - realtime::plan::PreparedRenderPlan (line 421) - compile fail ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+   Doc-tests gate_expander
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests graph
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests graph_compiler
+
+running 6 tests
+test crates/graph-compiler/src/lib.rs - PreparedGraphBuiltinsArtifact (line 79) - compile fail ... ok
+test crates/graph-compiler/src/lib.rs - PreparedGraphBuiltinsArtifact (line 87) - compile fail ... ok
+test crates/graph-compiler/src/lib.rs - PreparedGraphBuiltinsArtifact (line 105) - compile fail ... ok
+test crates/graph-compiler/src/lib.rs - PreparedGraphBuiltinsArtifact (line 93) - compile fail ... ok
+test crates/graph-compiler/src/lib.rs - PreparedGraphBuiltinsArtifact (line 111) - compile fail ... ok
+test crates/graph-compiler/src/lib.rs - PreparedGraphBuiltinsArtifact (line 99) - compile fail ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+   Doc-tests host_core
+
+running 1 test
+test crates/host-core/src/prepare.rs - prepare::PreparedHost (line 355) ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 3 tests
+test crates/host-core/src/render_session.rs - render_session::StartedRenderSession (line 54) - compile fail ... ok
+test crates/host-core/src/render_session.rs - render_session::StartedRenderSession (line 49) - compile fail ... ok
+test crates/host-core/src/prepare.rs - prepare::PreparedHost (line 348) - compile fail ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+all doctests ran in 0.21s; merged doctests compilation took 0.18s
+   Doc-tests host_mobile
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests host_web
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests lane
+
+running 2 tests
+test crates/lane/src/fpenv.rs - fpenv::CanonicalFpEnv (line 286) - compile fail ... ok
+test crates/lane/src/fpenv.rs - fpenv::CanonicalFpEnv (line 281) - compile fail ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+   Doc-tests math
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests multiband_compressor
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests native_pcm_runner
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests parameter_metadata
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests parametric_eq
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests protocol
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests rack
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests rack_compiler
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests session
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests session_validator
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests soft_clip
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests source
+
+running 1 test
+test crates/source/src/native_source.rs - native_source::prepare_native_source (line 836) - compile fail ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+   Doc-tests stem_hasher
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests target_smoke
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests transient_shaper
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests true_peak_limiter
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests wasm_gate_corpus
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests wasm_gates
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

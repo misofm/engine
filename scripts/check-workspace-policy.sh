@@ -13,6 +13,35 @@ fail() {
     exit 1
 }
 
+scratch_dir="$(mktemp -d /tmp/workspace-policy.XXXXXX)"
+trap 'rm -rf -- "$scratch_dir"' EXIT
+
+# Run a producer to completion while keeping its stdout and stderr separate.  Callers inspect the
+# status explicitly; a clean-looking partial result is never evidence that the producer finished.
+capture() {
+    local label="$1" out="$scratch_dir/$1.out" err="$scratch_dir/$1.err"
+    shift
+    if "$@" >"$out" 2>"$err"; then
+        CAPTURE_STATUS=0
+    else
+        CAPTURE_STATUS=$?
+    fi
+    CAPTURE_OUT="$out"
+    CAPTURE_ERR="$err"
+}
+
+execution_failure() {
+    local operation="$1" status="$2" out="$3" err="$4"
+    fail "$operation failed (status $status): stdout=$(<"$out") stderr=$(<"$err")"
+}
+
+checked_find() {
+    local label="$1"; shift
+    capture "$label" find "$@"
+    (( CAPTURE_STATUS == 0 )) || execution_failure "find $label" "$CAPTURE_STATUS" "$CAPTURE_OUT" "$CAPTURE_ERR"
+    CHECKED_FIND_OUT="$CAPTURE_OUT"
+}
+
 # `rg` exits 0 on a match, 1 when the pattern is clean, and 2 (or higher) on a search error --
 # most commonly a search root that does not exist. `if rg ...; then fail; fi` reads both 1 and 2
 # as "no violation", so a scan root that silently stops existing (a directory rename, a fixture
@@ -61,97 +90,89 @@ apache_license_sha256='cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417b
 for required_license_file in LICENSE NOTICE THIRD_PARTY_LICENSES.md crates/math/LICENSE-libm.txt; do
     [[ -s "$required_license_file" ]] || fail "required license artifact is missing or empty: $required_license_file"
 done
-actual_license_sha256="$(sha256sum LICENSE | awk '{print $1}')"
+capture license_sha256 sha256sum LICENSE
+(( CAPTURE_STATUS == 0 )) || execution_failure 'sha256sum LICENSE' "$CAPTURE_STATUS" "$CAPTURE_OUT" "$CAPTURE_ERR"
+capture license_digest awk '{print $1}' "$CAPTURE_OUT"
+(( CAPTURE_STATUS == 0 )) || execution_failure 'LICENSE digest extraction' "$CAPTURE_STATUS" "$CAPTURE_OUT" "$CAPTURE_ERR"
+actual_license_sha256="$(<"$CAPTURE_OUT")"
 [[ "$actual_license_sha256" == "$apache_license_sha256" ]] || {
     fail "LICENSE is not the canonical Apache License 2.0 text"
 }
-rg -qx 'license = "Apache-2.0"' Cargo.toml || {
-    fail 'Cargo.toml workspace package license must be Apache-2.0'
+required_search() {
+    local label="$1" message="$2"; shift 2
+    capture "$label" rg "$@"
+    case "$CAPTURE_STATUS" in
+        0) ;;
+        1) fail "$message" ;;
+        *) execution_failure "rg $label" "$CAPTURE_STATUS" "$CAPTURE_OUT" "$CAPTURE_ERR" ;;
+    esac
 }
-rg -qx 'license = "Apache-2.0"' fuzz/Cargo.toml || {
-    fail 'fuzz/Cargo.toml license must be Apache-2.0'
-}
-rg -q 'crates/math/LICENSE-libm\.txt' THIRD_PARTY_LICENSES.md || {
-    fail 'third-party inventory must retain the vendored libm license record'
-}
+required_search workspace-license 'Cargo.toml workspace package license must be Apache-2.0' -x 'license = "Apache-2.0"' Cargo.toml
+required_search fuzz-license 'fuzz/Cargo.toml license must be Apache-2.0' -x 'license = "Apache-2.0"' fuzz/Cargo.toml
+required_search libm-inventory 'third-party inventory must retain the vendored libm license record' 'crates/math/LICENSE-libm\.txt' THIRD_PARTY_LICENSES.md
 
+checked_find npm-manifests . -name package.json -type f -not -path '*/node_modules/*'
+capture npm-manifests-sort sort "$CHECKED_FIND_OUT"
+(( CAPTURE_STATUS == 0 )) || execution_failure 'sort npm manifests' "$CAPTURE_STATUS" "$CAPTURE_OUT" "$CAPTURE_ERR"
+sorted_npm_manifests="$CAPTURE_OUT"
 while IFS= read -r npm_manifest; do
-    jq -e '.license == "Apache-2.0"' "$npm_manifest" >/dev/null || {
-        fail "$npm_manifest license must be Apache-2.0"
-    }
-done < <(find . -name package.json -type f -not -path '*/node_modules/*' | sort)
+    [[ -n "$npm_manifest" ]] || continue
+    capture "jq-npm-$RANDOM" jq -e '.license == "Apache-2.0"' "$npm_manifest"
+    case "$CAPTURE_STATUS" in
+        0) ;;
+        1) fail "$npm_manifest license must be Apache-2.0" ;;
+        *) execution_failure "jq $npm_manifest" "$CAPTURE_STATUS" "$CAPTURE_OUT" "$CAPTURE_ERR" ;;
+    esac
+done <"$sorted_npm_manifests"
 
+checked_find npm-locks . -name package-lock.json -type f -not -path '*/node_modules/*'
+capture npm-locks-sort sort "$CHECKED_FIND_OUT"
+(( CAPTURE_STATUS == 0 )) || execution_failure 'sort npm locks' "$CAPTURE_STATUS" "$CAPTURE_OUT" "$CAPTURE_ERR"
+sorted_npm_locks="$CAPTURE_OUT"
 while IFS= read -r npm_lock; do
-    jq -e '.packages[""].license == "Apache-2.0"' "$npm_lock" >/dev/null || {
-        fail "$npm_lock root package license must be Apache-2.0"
-    }
-done < <(find . -name package-lock.json -type f -not -path '*/node_modules/*' | sort)
+    [[ -n "$npm_lock" ]] || continue
+    capture "jq-lock-$RANDOM" jq -e '.packages[""].license == "Apache-2.0"' "$npm_lock"
+    case "$CAPTURE_STATUS" in
+        0) ;;
+        1) fail "$npm_lock root package license must be Apache-2.0" ;;
+        *) execution_failure "jq $npm_lock" "$CAPTURE_STATUS" "$CAPTURE_OUT" "$CAPTURE_ERR" ;;
+    esac
+done <"$sorted_npm_locks"
 
+checked_find cargo-manifests crates hosts tools sidecars -name Cargo.toml -type f
+[[ -s "$CHECKED_FIND_OUT" ]] || fail 'Cargo manifest discovery returned an empty workspace'
+capture cargo-manifests-sort sort "$CHECKED_FIND_OUT"
+(( CAPTURE_STATUS == 0 )) || execution_failure 'sort Cargo manifests' "$CAPTURE_STATUS" "$CAPTURE_OUT" "$CAPTURE_ERR"
+sorted_cargo_manifests="$CAPTURE_OUT"
 while IFS= read -r manifest; do
-    package_directory="$(basename "$(dirname "$manifest")")"
-    package_name="$(toml_name package "$manifest")"
+    package_parent="${manifest%/*}"
+    package_directory="${package_parent##*/}"
+    capture "toml-package-$RANDOM" toml_name package "$manifest"
+    (( CAPTURE_STATUS == 0 )) || execution_failure "package name extraction $manifest" "$CAPTURE_STATUS" "$CAPTURE_OUT" "$CAPTURE_ERR"
+    package_name="$(<"$CAPTURE_OUT")"
 
-    rg -qx 'license\.workspace = true' "$manifest" || {
-        fail "$manifest must inherit the Apache-2.0 workspace license"
-    }
+    required_search "package-license-$RANDOM" "$manifest must inherit the Apache-2.0 workspace license" -x 'license\.workspace = true' "$manifest"
 
-    # The `miso-engine-` prefix convention was retired by the prefix-strip rename (see
-    # docs/rulings/prefix-strip-inventory.md): every package under crates/, hosts/, tools/ and
-    # sidecars/ now carries a short, unprefixed name, and the directory basename equals the
-    # package name exactly -- there is no longer a sidecars/-only exemption to reason about,
-    # because there is no prefix left for it to be exempt from. This also forbids regressing
-    # back to the old prefix on a new or renamed crate.
-    [[ "$package_name" != miso-engine-* && "$package_name" != miso_engine_* ]] || {
-        fail "$manifest package name must not carry the retired miso-engine- prefix"
-    }
-    [[ "$package_directory" == "$package_name" ]] || {
-        fail "$manifest directory ($package_directory) must equal its package name ($package_name)"
-    }
-
-    # `core` silently shadows Rust's sysroot `core` crate for every dependent: it compiles, then
-    # fails downstream with no diagnostic that explains itself, and collapses the prelude and the
-    # `derive` attribute outright in a `no_std` crate -- proven when this repo chose `engine` over
-    # `core` for its former `miso-engine-core` (docs/rulings/prefix-strip-inventory.md). Neither
-    # `::core::` nor `extern crate core as x` escapes it: cargo's `--extern core=<path>` overrides
-    # the sysroot crate of that name unconditionally. `std`, `alloc`, `proc_macro` and `test` are
-    # the same hazard in kind (sysroot/prelude crate names), so they are forbidden alongside it.
-    case "$package_name" in
-        core | std | alloc | proc_macro | test)
-            fail "$manifest package name '$package_name' collides with a Rust sysroot/prelude crate name"
-            ;;
-    esac
-
-    # Issue #356/#359: the in-repository FLAC delivery stack (and its migration tooling) was
-    # retired; PCM is this repository's output and delivery codecs live outside it. This was
-    # `scripts/check-delivery-codec-boundary.py`, folded in here because #358's claim ("no
-    # retired delivery-codec identity in the live workspace") is a name-absence claim over
-    # exactly the same manifests, lockfile and tree this loop already walks.
-    case "$package_name" in
-        flac-decoder | stem-publisher | catalog-migrate | flacenc | symphonia)
-            fail "$manifest package name is a retired delivery-codec identity: $package_name"
-            ;;
-    esac
-    # N15: a directory-name case here is dead code -- by this point in the loop the earlier
-    # `[[ "$package_directory" == "$package_name" ]]` check (above) has already exited unless the
-    # two are equal, so any input that could trip a directory-name match here already tripped the
-    # package-name case immediately above it. The bare-directory-stub scan below (no Cargo.toml at
-    # all) is what actually catches a retired directory name.
-
+    # The retired prefix has no root-specific exemption: package and directory names are the
+    # same short identity everywhere in the four package roots.
+    [[ "$package_name" != miso-engine-* && "$package_name" != miso_engine_* ]] || fail "$manifest package name must not carry the retired miso-engine- prefix"
+    [[ "$package_directory" == "$package_name" ]] || fail "$manifest directory ($package_directory) must equal its package name ($package_name)"
+    # These names shadow Rust sysroot/prelude crates through Cargo's --extern binding.
+    case "$package_name" in core|std|alloc|proc_macro|test) fail "$manifest package name '$package_name' collides with a Rust sysroot/prelude crate name";; esac
+    # Delivery codecs and their retired migration tooling remain outside this PCM engine.
+    case "$package_name" in flac-decoder|stem-publisher|catalog-migrate|flacenc|symphonia) fail "$manifest package name is a retired delivery-codec identity: $package_name";; esac
     expected_crate_name="${package_name//-/_}"
-
-    lib_name="$(toml_name lib "$manifest")"
-    if [[ -n "$lib_name" ]]; then
-        [[ "$lib_name" == "$expected_crate_name" ]] || {
-            fail "$manifest lib name must be $expected_crate_name"
-        }
-    fi
-
+    capture "toml-lib-$RANDOM" toml_name lib "$manifest"
+    (( CAPTURE_STATUS == 0 )) || execution_failure "lib name extraction $manifest" "$CAPTURE_STATUS" "$CAPTURE_OUT" "$CAPTURE_ERR"
+    lib_name="$(<"$CAPTURE_OUT")"
+    [[ -z "$lib_name" || "$lib_name" == "$expected_crate_name" ]] || fail "$manifest lib name must be $expected_crate_name"
+    capture "toml-bin-$RANDOM" toml_array_names bin "$manifest"
+    (( CAPTURE_STATUS == 0 )) || execution_failure "bin name extraction $manifest" "$CAPTURE_STATUS" "$CAPTURE_OUT" "$CAPTURE_ERR"
+    bin_names="$CAPTURE_OUT"
     while IFS= read -r bin_name; do
-        [[ "$bin_name" == "$expected_crate_name" || "$bin_name" == "$expected_crate_name"_* ]] || {
-            fail "$manifest bin name must be $expected_crate_name or its underscored audit/tool suffix"
-        }
-    done < <(toml_array_names bin "$manifest")
-done < <(find crates hosts tools sidecars -name Cargo.toml -type f | sort)
+        [[ "$bin_name" == "$expected_crate_name" || "$bin_name" == "$expected_crate_name"_* ]] || fail "$manifest bin name must be $expected_crate_name or its underscored audit/tool suffix"
+    done <"$bin_names"
+done <"$sorted_cargo_manifests"
 
 scan_forbidden "hardware ISA Cargo features are forbidden" \
     '^[[:space:]]*(simd128|neon|avx2|fma)[[:space:]]*=' Cargo.toml \
@@ -163,11 +184,32 @@ scan_forbidden "hardware ISA Cargo features are forbidden" \
 # here"; the `find` fallback keeps this working against a synthetic (non-git) fixture tree, exactly
 # as `scripts/check-env-vocabulary.sh`'s `sources()` does.
 tracked_paths() {
-    if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-        git ls-files -z --cached --others --exclude-standard
+    local classify_status
+    capture git-classify env LC_ALL=C git rev-parse --is-inside-work-tree
+    classify_status="$CAPTURE_STATUS"
+    if (( classify_status == 0 )); then
+        capture git-list git ls-files -z --cached --others --exclude-standard
+        (( CAPTURE_STATUS == 0 )) || execution_failure 'git tracked-path listing' "$CAPTURE_STATUS" "$CAPTURE_OUT" "$CAPTURE_ERR"
+        local nul_file="$CAPTURE_OUT"
+    elif (( classify_status == 128 )) && [[ -z "${GIT_DIR+x}" && -z "${GIT_WORK_TREE+x}" &&
+        "$(<"$CAPTURE_OUT")" == '' && "$(<"$CAPTURE_ERR")" == 'fatal: not a git repository (or any of the parent directories): .git' ]]; then
+        capture fallback-list find . -type f -not -path './.git/*' -not -path './target/*' -print0
+        (( CAPTURE_STATUS == 0 )) || execution_failure 'fallback tracked-path find' "$CAPTURE_STATUS" "$CAPTURE_OUT" "$CAPTURE_ERR"
+        local nul_file="$CAPTURE_OUT"
     else
-        find . -type f -not -path './.git/*' -not -path './target/*' -print0
-    fi | tr '\0' '\n' | sed 's|^\./||'
+        execution_failure 'git repository classification' "$classify_status" "$CAPTURE_OUT" "$CAPTURE_ERR"
+    fi
+    capture nul-to-lines tr '\0' '\n' <"$nul_file"
+    (( CAPTURE_STATUS == 0 )) || execution_failure 'tracked-path NUL conversion' "$CAPTURE_STATUS" "$CAPTURE_OUT" "$CAPTURE_ERR"
+    local lines="$CAPTURE_OUT"
+    capture normalize-paths sed 's|^\./||' "$lines"
+    (( CAPTURE_STATUS == 0 )) || execution_failure 'tracked-path normalization' "$CAPTURE_STATUS" "$CAPTURE_OUT" "$CAPTURE_ERR"
+    local normalized="$CAPTURE_OUT"
+    capture cargo-path-filter awk -F/ '$NF == "Cargo.toml"' "$normalized"
+    (( CAPTURE_STATUS == 0 )) || execution_failure 'tracked Cargo manifest filter' "$CAPTURE_STATUS" "$CAPTURE_OUT" "$CAPTURE_ERR"
+    capture tracked-path-sort env LC_ALL=C sort "$CAPTURE_OUT"
+    (( CAPTURE_STATUS == 0 )) || execution_failure 'tracked Cargo manifest sort' "$CAPTURE_STATUS" "$CAPTURE_OUT" "$CAPTURE_ERR"
+    TRACKED_PATHS_OUT="$CAPTURE_OUT"
 }
 
 # Issue #356/#359: a bare retired-directory stub (no Cargo.toml, so invisible to the manifest
@@ -176,12 +218,14 @@ tracked_paths() {
 # under four hard-coded roots: it reaches the repo root, sdk/, and any depth, and -- unlike a scan
 # derived from `git ls-files`/tracked file paths -- it also catches a directory with nothing
 # tracked inside it yet, which is exactly the shape of a freshly-created leftover stub.
+capture retired-dirs find . \( -path './.git' -o -path './target' \) -prune -o -type d \( \
+    -name flac-decoder -o -name stem-publisher -o -name catalog-migrate \
+    -o -name flacenc -o -name symphonia \) -print
+(( CAPTURE_STATUS == 0 )) || execution_failure 'retired-directory discovery' "$CAPTURE_STATUS" "$CAPTURE_OUT" "$CAPTURE_ERR"
 while IFS= read -r retired_directory; do
     [[ -z "$retired_directory" ]] && continue
     fail "retired delivery-codec directory remains: ${retired_directory#./}"
-done < <(find . \( -path './.git' -o -path './target' \) -prune -o -type d \( \
-    -name flac-decoder -o -name stem-publisher -o -name catalog-migrate \
-    -o -name flacenc -o -name symphonia \) -print 2>/dev/null)
+done <"$CAPTURE_OUT"
 
 # Every Cargo.toml in the tree (S8: every tracked path named `Cargo.toml`, at any depth,
 # excluding nothing -- not the prior six hard-coded roots) and the lockfile: a retired identity
@@ -195,30 +239,24 @@ retired_delivery_codec_pattern='\b(flac-decoder|stem-publisher|catalog-migrate|f
 # never itself preceded by an unquoted '#' on its own line) still does. This is intentionally
 # line-oriented: Cargo.toml does not use multi-line strings for dependency names or package
 # identifiers, which is everything this scan cares about.
-strip_toml_comments() {
-    awk '
-        {
-            in_string = 0
-            out = ""
-            for (i = 1; i <= length($0); i++) {
-                c = substr($0, i, 1)
-                if (c == "\"") { in_string = !in_string }
-                if (c == "#" && !in_string) { break }
-                out = out c
-            }
-            print out
-        }
-    '
-}
-
+tracked_paths
+tracked_manifest_paths="$TRACKED_PATHS_OUT"
 while IFS= read -r manifest_path; do
     [[ -z "$manifest_path" ]] && continue
     [[ -f "$manifest_path" ]] || continue
-    if match="$(strip_toml_comments <"$manifest_path" | rg -n "$retired_delivery_codec_pattern")"; then
-        printf '%s\n' "$match" >&2
-        fail "retired delivery-codec Cargo identity is forbidden: $manifest_path"
-    fi
-done < <(tracked_paths | awk -F/ '$NF == "Cargo.toml"' | LC_ALL=C sort)
+    capture strip-comments awk ' {
+        in_string=0; out=""
+        for (i=1; i<=length($0); i++) { c=substr($0,i,1); if (c=="\"") in_string=!in_string; if (c=="#" && !in_string) break; out=out c }
+        print out
+    }' "$manifest_path"
+    (( CAPTURE_STATUS == 0 )) || execution_failure "comment stripping $manifest_path" "$CAPTURE_STATUS" "$CAPTURE_OUT" "$CAPTURE_ERR"
+    capture retired-scan rg -n "$retired_delivery_codec_pattern" "$CAPTURE_OUT"
+    case "$CAPTURE_STATUS" in
+      0) printf '%s\n' "$(<"$CAPTURE_OUT")" >&2; fail "retired delivery-codec Cargo identity is forbidden: $manifest_path";;
+      1) ;;
+      *) execution_failure "retired identity scan $manifest_path" "$CAPTURE_STATUS" "$CAPTURE_OUT" "$CAPTURE_ERR";;
+    esac
+done <"$tracked_manifest_paths"
 
 scan_forbidden "retired delivery-codec Cargo identity is forbidden in the lockfile" \
     "$retired_delivery_codec_pattern" 'Cargo.lock' \
@@ -249,25 +287,29 @@ scan_forbidden "AudioWorklet processor implementation classes must be unversione
 # forbidden: it would make the shipped ISA implicit again.
 approved_isa_pin='^\.cargo/config\.toml:[0-9]+:rustflags = \["-C", "target-feature=\+avx2,\+fma"\]$'
 if [[ -d .cargo ]]; then
-    isa_directives="$({
-        rg -n '(target-cpu|target-feature|rustflags|RUSTFLAGS)' .cargo || true
-    } | rg -v ':[0-9]+:[[:space:]]*#' || true)"
-
-    unapproved_directives="$(printf '%s' "$isa_directives" | rg -v "$approved_isa_pin" || true)"
+    capture isa-directives rg -n '(target-cpu|target-feature|rustflags|RUSTFLAGS)' .cargo
+    (( CAPTURE_STATUS == 0 || CAPTURE_STATUS == 1 )) || execution_failure 'ISA directive search' "$CAPTURE_STATUS" "$CAPTURE_OUT" "$CAPTURE_ERR"
+    capture isa-comments-filter rg -v ':[0-9]+:[[:space:]]*#' "$CAPTURE_OUT"
+    (( CAPTURE_STATUS == 0 || CAPTURE_STATUS == 1 )) || execution_failure 'ISA comment filtering' "$CAPTURE_STATUS" "$CAPTURE_OUT" "$CAPTURE_ERR"
+    isa_directives="$(<"$CAPTURE_OUT")"
+    capture isa-allowlist-filter rg -v "$approved_isa_pin" <<<"$isa_directives"
+    (( CAPTURE_STATUS == 0 || CAPTURE_STATUS == 1 )) || execution_failure 'ISA allowlist filtering' "$CAPTURE_STATUS" "$CAPTURE_OUT" "$CAPTURE_ERR"
+    unapproved_directives="$(<"$CAPTURE_OUT")"
     [[ -z "$unapproved_directives" ]] || {
         printf '%s\n' "$unapproved_directives" >&2
         fail "global native CPU or ISA configuration is forbidden outside the approved x86-64-v3 pin"
     }
 
     if [[ -n "$isa_directives" ]]; then
-        rg -q "^\[target\.'cfg\(target_arch = \"x86_64\"\)'\]\$" .cargo/config.toml || {
-            fail "the approved ISA pin must stay scoped to [target.'cfg(target_arch = \"x86_64\")']"
-        }
+        required_search isa-target-scope "the approved ISA pin must stay scoped to [target.'cfg(target_arch = \"x86_64\")']" "^\[target\.'cfg\(target_arch = \"x86_64\"\)'\]\$" .cargo/config.toml
     fi
 
-    if rg -n '^\[build\]' .cargo; then
-        fail "a global [build] rustflags table is forbidden"
-    fi
+    capture build-table rg -n '^\[build\]' .cargo
+    case "$CAPTURE_STATUS" in
+      0) fail "a global [build] rustflags table is forbidden";;
+      1) ;;
+      *) execution_failure 'global build-table search' "$CAPTURE_STATUS" "$CAPTURE_OUT" "$CAPTURE_ERR";;
+    esac
 fi
 
 
@@ -279,9 +321,11 @@ fi
 for marker in .rustc_info.json CACHEDIR.TAG; do
     [[ ! -e "$marker" ]] || fail "cargo target-dir spill at the workspace root: $marker"
 done
+capture fingerprints find . -mindepth 2 -maxdepth 2 -type d -name .fingerprint -not -path './target/*' -printf '%P\n'
+(( CAPTURE_STATUS == 0 )) || execution_failure 'fingerprint discovery' "$CAPTURE_STATUS" "$CAPTURE_OUT" "$CAPTURE_ERR"
 while IFS= read -r fingerprint; do
     [[ -z "$fingerprint" ]] && continue
     fail "cargo target-dir spill at the workspace root: ${fingerprint%/.fingerprint}"
-done < <(find . -mindepth 2 -maxdepth 2 -type d -name .fingerprint -not -path './target/*' -printf '%P\n')
+done <"$CAPTURE_OUT"
 
 printf 'workspace policy: ok\n'
