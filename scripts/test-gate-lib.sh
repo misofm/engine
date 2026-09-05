@@ -91,6 +91,37 @@ alpha = "1"
 ignored.workspace = true
 EOF
 [[ "$(gate_toml_dependencies "$manifest")" == $'alpha\nzeta' ]] || { echo 'dependency output is not sorted/scoped' >&2; exit 1; }
+graph_manifest="$scratch/graph.toml"
+cat >"$graph_manifest" <<'EOF'
+[dependencies]
+zeta.workspace = true
+zeta.workspace = true
+engine.workspace=true
+engine.workspace
+prefix.workspace-suffix = true
+bare = "1"
+  lane.workspace = true
+effect-contract.workspace = true
+[target.'cfg(unix)'.dependencies]
+target_only.workspace = true
+[dev-dependencies]
+dev.workspace = true
+[build-dependencies]
+build.workspace = true
+EOF
+graph_expected=$'effect-contract.workspace\nengine.workspace\nengine.workspace=true\nprefix.workspace-suffix\nzeta.workspace\nzeta.workspace'
+assert_graph_grammar() {
+    local helper=$1 output rc
+    output="$(bash -c 'source "$1"; gate_toml_dependencies "$2" graph' _ "$helper" "$graph_manifest" 2>&1)" && rc=0 || rc=$?
+    [[ $rc == 0 ]] || { printf 'graph grammar helper execution failed (status %s): %s\n' "$rc" "$output" >&2; return 98; }
+    [[ "$output" == "$graph_expected" ]] || { printf 'graph mode grammar changed\n' >&2; return 97; }
+}
+assert_graph_grammar "$root/scripts/lib/gate.sh" || exit $?
+graph_mutant="$scratch/graph-strip.sh"; cp "$root/scripts/lib/gate.sh" "$graph_mutant"
+sed -i 's/{ print \$1 }/{ value = \$1; sub(\/[.]workspace\$\/, "", value); print value }/' "$graph_mutant"
+set +e; assert_graph_grammar "$graph_mutant" >/dev/null 2>&1; graph_mutant_rc=$?; set -e
+[[ $graph_mutant_rc == 97 ]] || { printf 'graph suffix-stripping counter-mutant failed outside semantic assertion (status %s)\n' "$graph_mutant_rc" >&2; exit 1; }
+printf 'graph suffix-stripping counter-mutant rejected by grammar assertion (status %s)\n' "$graph_mutant_rc"
 plain_manifest="$scratch/plain.toml"
 cat >"$plain_manifest" <<'EOF'
 [dependencies]
@@ -140,6 +171,22 @@ for pipefail_setting in +o -o; do
     done
 done
 
+mkdir -p "$scratch/awk-fail"
+# Graph mode itself preserves checked awk/sort failures for direct and conditional callers,
+# regardless of the caller's pipefail setting. The useful partial rows are the exact full graph
+# result, so ignoring either producer status would otherwise accept them.
+for partial in '' "$graph_expected"; do
+    printf '#!/usr/bin/env bash\n[[ -z ${GRAPH_PARTIAL:-} ]] || printf "%%s\\n" "$GRAPH_PARTIAL"\nexit 7\n' >"$scratch/awk-fail/awk"
+    chmod +x "$scratch/awk-fail/awk"
+    for pipefail_setting in +o -o; do for invocation in direct conditional; do
+        command='set '"$pipefail_setting"' pipefail; source "$1"; GATE_FAILURE_PREFIX="gate test"; gate_toml_dependencies "$2" graph'
+        [[ $invocation == direct ]] || command='set '"$pipefail_setting"' pipefail; source "$1"; GATE_FAILURE_PREFIX="gate test"; if gate_toml_dependencies "$2" graph; then exit 0; else exit $?; fi'
+        graph_awk=$(GRAPH_PARTIAL="$partial" PATH="$scratch/awk-fail:$PATH" bash -c "$command" _ "$root/scripts/lib/gate.sh" "$graph_manifest" 2>&1) && graph_awk_rc=0 || graph_awk_rc=$?
+        [[ $graph_awk_rc == 7 && $graph_awk == *'dependency extraction failed'*'awk status 7'* ]] || { echo "graph awk status lost ($pipefail_setting/$invocation): $graph_awk" >&2; exit 1; }
+    done; done
+done
+printf '#!/usr/bin/env bash\nexec /usr/bin/awk "$@"\n' >"$scratch/awk-fail/awk"
+
 mkdir -p "$scratch/awk-fail" "$scratch/sort-fail"
 cat >"$scratch/awk-fail/awk" <<'EOF'
 #!/usr/bin/env bash
@@ -160,6 +207,23 @@ printf 'alpha\nzeta\n'
 exit 8
 EOF
 chmod +x "$scratch/awk-fail/awk" "$scratch/awk-fail/sort" "$scratch/sort-fail/awk" "$scratch/sort-fail/sort"
+# Exercise the graph extractor's own checked sort through both invocation shapes and shell modes.
+cat >"$scratch/sort-fail/sort" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' 'effect-contract.workspace' 'engine.workspace' 'engine.workspace=true' 'prefix.workspace-suffix' 'zeta.workspace' 'zeta.workspace'
+exit 8
+EOF
+for pipefail_setting in +o -o; do for invocation in direct conditional; do
+    graph_sort_command='set '"$pipefail_setting"' pipefail; source "$1"; GATE_FAILURE_PREFIX="gate test"; gate_toml_dependencies "$2" graph'
+    [[ $invocation == direct ]] || graph_sort_command='set '"$pipefail_setting"' pipefail; source "$1"; GATE_FAILURE_PREFIX="gate test"; if gate_toml_dependencies "$2" graph; then exit 0; else exit $?; fi'
+    graph_sort=$(PATH="$scratch/sort-fail:$PATH" bash -c "$graph_sort_command" _ "$root/scripts/lib/gate.sh" "$graph_manifest" 2>&1) && graph_sort_rc=0 || graph_sort_rc=$?
+    [[ $graph_sort_rc == 8 && $graph_sort == *'dependency extraction failed'*'sort status 8'* ]] || { echo "graph sort status lost ($pipefail_setting/$invocation): $graph_sort" >&2; exit 1; }
+done; done
+cat >"$scratch/sort-fail/sort" <<'EOF'
+#!/usr/bin/env bash
+printf 'alpha\nzeta\n'
+exit 8
+EOF
 for pipefail_setting in +o -o; do
     for invocation in direct conditional; do
         sort_command='set '"$pipefail_setting"' pipefail; source "$1"; GATE_FAILURE_PREFIX="gate test"; gate_sort_lines sort-check "$2"'
