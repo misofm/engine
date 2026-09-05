@@ -1,0 +1,33 @@
+   Compiling builtins v0.1.0 (/home/bl/misofm/engine-429/crates/builtins)
+warning: unused import: `fader_matrix_block`
+  --> crates/builtins/src/lib.rs:37:43
+   |
+37 |             Matrix2x2Coef, Matrix2x2Ramp, fader_matrix_block, gain_mute_block,
+   |                                           ^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `builtins` (lib test) generated 1 warning (run `cargo fix --lib -p builtins --tests` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.20s
+     Running unittests src/lib.rs (/tmp/engine-429-sol-target/debug/deps/builtins-b28151c824699de5)
+
+running 1 test
+test tests::full_public_chain_matches_the_three_section_reference ... FAILED
+
+failures:
+
+---- tests::full_public_chain_matches_the_three_section_reference stdout ----
+
+thread 'tests::full_public_chain_matches_the_three_section_reference' (1677364) panicked at crates/builtins/src/lib.rs:3937:9:
+assertion `left == right` failed: selected path witness
+  left: 0
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::full_public_chain_matches_the_three_section_reference
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p builtins --lib`

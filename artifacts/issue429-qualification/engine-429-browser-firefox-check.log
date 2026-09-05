@@ -1,0 +1,6 @@
+
+> @miso/engine-v1-browser-qualification@0.0.0 qualify
+> node ./run.mjs --artifacts /tmp/engine-429-worklet-verify.k1qTWv --browser firefox --check-matrix
+
+session identities: 3 qualification documents declare their fed PCM
+firefox: all qualification gates passed (153.0)

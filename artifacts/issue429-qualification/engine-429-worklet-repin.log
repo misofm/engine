@@ -1,0 +1,67 @@
+CANDIDATE e4bcaa2feae13c9f016bb7b2e1eaff8bd7314547
+COMMAND MISO_ENGINE_WEB_AUDIOWORKLET_REPIN=1 bash scripts/build-web-audioworklet.sh /tmp/engine-429-worklet-repin.jwfIHM
+    Blocking waiting for file lock on package cache
+   Compiling bytemuck v1.25.2
+   Compiling engine v0.1.0 (/home/bl/misofm/engine-429/crates/engine)
+   Compiling version_check v0.9.5
+   Compiling lexical-util v1.0.7
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.47
+   Compiling syn v1.0.109
+   Compiling autocfg v1.5.1
+   Compiling once_cell v1.21.4
+   Compiling typenum v1.20.1
+   Compiling smallvec v1.15.2
+   Compiling utf8-decode v1.0.1
+   Compiling decoded-char v0.1.1
+   Compiling locspan v0.8.2
+   Compiling cfg-if v1.0.4
+   Compiling wide v1.6.1
+   Compiling smallstr v0.3.1
+   Compiling proc-macro-error-attr v1.0.4
+   Compiling ahash v0.7.8
+   Compiling proc-macro-error v1.0.4
+   Compiling indexmap v1.9.3
+   Compiling hashbrown v0.12.3
+   Compiling lexical-write-integer v1.0.6
+   Compiling lexical-parse-integer v1.0.6
+   Compiling lexical-parse-float v1.0.6
+   Compiling lexical-write-float v1.0.6
+   Compiling hybrid-array v0.4.14
+   Compiling lexical-core v1.0.6
+   Compiling lexical v7.0.5
+   Compiling json-number v0.4.10
+   Compiling block-buffer v0.12.1
+   Compiling crypto-common v0.2.2
+   Compiling digest v0.11.3
+   Compiling sha2 v0.11.0
+   Compiling locspan-derive v0.6.0
+   Compiling json-syntax v0.12.5
+   Compiling session v0.1.0 (/home/bl/misofm/engine-429/crates/session)
+   Compiling lane v0.1.0 (/home/bl/misofm/engine-429/crates/lane)
+   Compiling math v0.1.0 (/home/bl/misofm/engine-429/crates/math)
+   Compiling effect-contract v0.1.0 (/home/bl/misofm/engine-429/crates/effect-contract)
+   Compiling effect-runtime v0.1.0 (/home/bl/misofm/engine-429/crates/effect-runtime)
+   Compiling rack v0.1.0 (/home/bl/misofm/engine-429/crates/rack)
+   Compiling soft-clip v0.1.0 (/home/bl/misofm/engine-429/crates/soft-clip)
+   Compiling delay v0.1.0 (/home/bl/misofm/engine-429/crates/delay)
+   Compiling transient-shaper v0.1.0 (/home/bl/misofm/engine-429/crates/transient-shaper)
+   Compiling parametric-eq v0.1.0 (/home/bl/misofm/engine-429/crates/parametric-eq)
+   Compiling builtins v0.1.0 (/home/bl/misofm/engine-429/crates/builtins)
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-429/crates/compressor)
+   Compiling true-peak-limiter v0.1.0 (/home/bl/misofm/engine-429/crates/true-peak-limiter)
+   Compiling gate-expander v0.1.0 (/home/bl/misofm/engine-429/crates/gate-expander)
+   Compiling multiband-compressor v0.1.0 (/home/bl/misofm/engine-429/crates/multiband-compressor)
+   Compiling graph v0.1.0 (/home/bl/misofm/engine-429/crates/graph)
+   Compiling rack-compiler v0.1.0 (/home/bl/misofm/engine-429/crates/rack-compiler)
+   Compiling builtins-compiler v0.1.0 (/home/bl/misofm/engine-429/crates/builtins-compiler)
+   Compiling source v0.1.0 (/home/bl/misofm/engine-429/crates/source)
+   Compiling effect-package v0.1.0 (/home/bl/misofm/engine-429/crates/effect-package)
+   Compiling effect-compiler v0.1.0 (/home/bl/misofm/engine-429/crates/effect-compiler)
+   Compiling graph-compiler v0.1.0 (/home/bl/misofm/engine-429/crates/graph-compiler)
+   Compiling host-core v0.1.0 (/home/bl/misofm/engine-429/crates/host-core)
+   Compiling host-web v0.1.0 (/home/bl/misofm/engine-429/hosts/host-web)
+    Finished `release` profile [optimized + debuginfo] target(s) in 15.22s
+10b0581f72d921b520e4066b82dc32cb7bea90b757c20ccca3dfc52cf7b9e098
+REPIN TERMINAL PASS

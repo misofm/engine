@@ -122,11 +122,17 @@ The RT-2 (#419/#422) artifact from source candidate
 `518b5aa864c0a825cd324112b24270a7e0714fc63db6bd1029779f21066ea9de`.
 The independent rebuild, static/resource checks and three-browser matrix passed;
 retained workspace and descriptive measurement delivery are recorded in #419.
-The current RT-3 (#420) artifact from source candidate
+The RT-3 (#420) artifact from source candidate
 `51e2aed211b30523076e0e8dd07973b13b57dc11` has SHA-256
 `24f81af304e541ba0e734de5c7a3dc5221e71fa4de73f2545edea3c2960761fe`.
 Independent builds, static/resource/mutation checks and all three browser engines passed;
-workspace and descriptive measurement evidence belong to #420.
+workspace evidence belongs to #420; its uninvoked descriptive measurement is tracked by #436.
+The current RT-4 public full-chain (#429) artifact from source candidate
+`e4bcaa2feae13c9f016bb7b2e1eaff8bd7314547` has SHA-256
+`10b0581f72d921b520e4066b82dc32cb7bea90b757c20ccca3dfc52cf7b9e098`.
+Independent builds, static/resource/mutation checks and all three browser engines passed;
+workspace and supported-Wasm evidence are retained in `artifacts/issue429-qualification`.
+Live integration and descriptive full-chain measurement remain in #430 and #431.
 
 Refresh gates: `cargo test -p capi`; `cargo test -p capi --test resource_lifecycle`;
 `scripts/check-capi-abi.sh`; `scripts/check-abi-layout-v1.py`; and `cargo test --workspace` against
