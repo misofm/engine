@@ -287,7 +287,9 @@ jobs:
       - name: Workspace policy mutation tests
         run: bash scripts/test-workspace-policy.sh
       - name: Session dependency and compiler boundary policy
-        run: bash scripts/check-session-policy.sh
+        run: |
+          bash scripts/check-session-policy.sh
+          bash scripts/test-session-policy.sh
       - name: Environment and marker vocabulary policy and mutation tests
         run: |
           bash scripts/check-env-vocabulary.sh

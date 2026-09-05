@@ -58,11 +58,12 @@ Parent #306 and the broad #349 TOOL-11 finding remain OPEN until #400, #401, #40
 
 ## Numbered implementation slices
 
-The seven-gate umbrella remains OPEN until all three children close:
+The seven-gate umbrella remains OPEN until all four children close:
 
 - #406: protocol-control, effect-runtime, host-core and builtins. Merged as PR #414 / 882277b65ff64780f57c4df33dee127abc6a33e2; verified CLOSED.
-- #407: graph and conformance, after merged #406. Owns graph's two and conformance's one original find loops and their exact parser/discovery obligations. Two focused suites are wired beside their current checkers in required CI.
+- #407: graph and conformance. Merged as PR #421 / `a0e4d123a038160b4f5934dac14aacc72c9fbbf2`; verified CLOSED. Owns graph's two and conformance's one original find loops and their exact parser/discovery obligations. Two focused suites are wired beside their current checkers in required CI.
 - #417: Session format/compile-order policy, after merged #407. Owns the four grouped find producers over six required populations, first-match ordering, allowlists and its focused suite/CI wiring.
+- #423: the remaining graph dependency-parser consolidation, after merged #417 and before #410. Preserves graph’s exact workspace-prefix/full-first-field grammar while moving the fifth original parser body into the existing shared helper.
 
 Astra invoked #407's explicit pre-code split because Session's independent fixture scope made the three-gate pass too broad for half a working day. No gate, extractor or producer debt is removed from this parent. Shared-helper and workflow edits remain serialized.
 
@@ -70,9 +71,29 @@ Astra invoked #407's explicit pre-code split because Session's independent fixtu
 
 For each changed gate: real-tree positive check, all existing relevant violations, explicit required-root/required-surface deletion, clean optional-empty positive, injected producer error with otherwise-valid metadata, and failure AFTER valid partial output. Check producer status before filtering, counting or looping. Test direct/no-match/positive queries separately; filters may validly leave nothing. Error assertions require the intended class, explicit rejection of unexpected success and one counter-mutation per new helper failure mechanism. Preserve physical-script library sourcing, CLI defaults, diagnostics, caller shell state, exact roots/globs/allowlists and no runtime/source changes.
 
-Final gates are affected shell suites, bash syntax, real policy scripts, existing workspace unchanged-count comparison and required CI. No benchmark, artifact regeneration or publication. Root checkpoints one coherent pass; Luna first attempt, Sol only following Astra FAIL (three total maximum), Astra actual PR review before merge. #401 closes only after all three children and all seven gate/extractor obligations are upstream/closed; broad #306/TOOL-11 remain open for the rest of their program.
+Final gates are affected shell suites, bash syntax, real policy scripts, existing workspace unchanged-count comparison and required CI. No benchmark, artifact regeneration or publication. Root checkpoints one coherent pass; Luna first attempt, Sol only following Astra FAIL (three total maximum), Astra actual PR review before merge. #401 closes only after all four children and all seven gate/extractor obligations are upstream/closed; broad #306/TOOL-11 remain open for the rest of their program.
 
 No implementation, Cargo, benchmark, policy mutation run or GitHub change was performed in this readiness review.
 
 
 Root synchronized the final #406 evidence and the amended #407 / new #417 stateless briefs before next implementation. #407's base is 882277b6; Session keeps the exact first-match and optional-empty semantics in #417. This parent stays OPEN until all remaining assigned gates are upstream and CLOSED.
+
+## Current delivered boundary coverage
+
+Six of the seven assigned gates are upstream through closed #406 and #407. The remaining Session gate is active in #417, whose first source checkpoint awaits Astra review. #401 stays OPEN until Session and the residual parser consolidation #423 pass their complete contracts, actual PR reviews and required CI, and are merged/synchronized. This status does not close broader #306 or remove any original extractor or discovery obligation.
+
+## Residual extractor closure ruling
+
+# Astra #401 remaining extractor obligation
+
+**Keep #401 OPEN. Graph's local parser is a remaining consolidation obligation, not an approved exception.**
+
+The parent explicitly requires all five original production-dependency awk copies to consolidate into the shared helper. Current rack uses gate_toml_dependencies default; effect-runtime and builtins use plain; conformance uses plain-target. Graph alone retains `graph_dependencies_raw=$(awk ...)` followed by gate_sort_lines. Its statuses are checked, so #407 delivered the reviewed traversal/error-handling behavior, but the broader DRY obligation is not thereby fulfilled.
+
+The approved child briefing deliberately preserved graph's distinct regex and `$1` output; it did not exempt that parser from consolidation. My actual #407 review did not identify this residual parent accounting gap. Preserve the accepted child history and accurately record this remaining parent obligation rather than inventing retrospective approval or closing #401 on #417 alone.
+
+Root should number/synchronize the bounded successor in `/tmp/astra-401-graph-extractor-successor.md` before #417 closure. #417's own Session capability may still merge/close after its complete review/CI gates; this is parent closure debt, not a new Session code dependency. Serialize the small successor after #417 and preferably before #410; update #410 scheduling only once root chooses/numbers that order. #306 and broad TOOL-11 remain open through all their other children.
+
+Read-only inspection of parent/child specs, earlier approval and current five gate call sites; no implementation, tests, Cargo, Git or GitHub operations.
+
+Numbered successor #423 preserves this obligation without reopening accepted #407 scan correctness or expanding #417. The serialized order is #417, #423, #410, #411, #412.

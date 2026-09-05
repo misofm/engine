@@ -72,3 +72,80 @@ Reuse the SAME operation assertions to counter-test disposable faulty checker/he
 Once one coherent implementation pass is ready: real checker, full focused suite, shared helper tests only if changed, Bash syntax/diff. Root checkpoints/pushes before more edits; Astra gives one adversarial verdict. Full workspace unchanged-count comparison remains a delivery-boundary gate, followed by actual PR review and required CI. Luna attempt 1; Sol only after Astra FAIL, at most two revisions; after three failed attempts hard stop/rescope. No timing or benchmark tooling belongs here.
 
 This brief resolves Sol's readiness questions without changing the original Session policy. #417 remains queued until #407 merges; root must synchronize this amended existing issue/spec and freeze the actual base before assignment.
+
+## Frozen implementation assignment
+
+#407 is merged and verified CLOSED at `a0e4d123a038160b4f5934dac14aacc72c9fbbf2`; this is the fresh implementation base for #417. Astra's final brief above is synchronized before Luna attempt 1. The six direct predicates, all five anchor patterns, allowlist parsing, four find argument sets and final retired-name search are frozen to `scripts/check-session-policy.sh` at that base. Root owns exact-path checkpoints, upstream synchronization, workspace comparison, final PR and merge. No current benchmark quiet window is active.
+
+## Luna attempt 1 evidence
+
+The frozen checker and focused disposable fixture suite are implemented. `bash scripts/check-session-policy.sh` passes against the repository, and `bash scripts/test-session-policy.sh` passes direct predicate violations, required-input removals, five anchor removals, strict order and duplicate anchors, six-root discovery, allowlisted TOML, retired spelling, and selective nonzero producer shims. The checker retains the physical `$0` root, exact search/find patterns and exclusions, explicit producer statuses, complete first-match anchor output, positive ASCII-decimal validation, one checked sort, and clean-empty handling. The existing workflow step runs the checker followed immediately by the focused suite.
+
+## Astra attempt 1 verdict — FAIL; Sol attempt 2
+
+# Astra #417 attempt 1 review
+
+**FAIL at exact pushed `18ba7c3d09e3494fa9f21a41619971cbd347c3cf`.** Luna's first attempt is consumed. Assign one bounded Sol evidence revision; no workspace/PR promotion yet.
+
+## Source worth preserving
+
+The checker now explicitly checks complete producer results before interpretation. Both required manifest rows are anchored, retaining old full-line behavior and original policy messages. Anchor scans capture complete numbered output, select the first occurrence and reject absent/nonpositive/nondecimal line fields before strict ordering. The allowlist sed status is explicitly checked, including partial-output failure; clean comment-only input remains valid. All four find producers complete before the checked sort and path loop, with empty captures omitted. Retired-name search checks its status before historical exclusions. Existing roots, patterns, allowlist equality, physical $0 root and CLI are preserved. The CI change is exactly checker then focused suite in the existing step. No concrete source-policy regression was identified in this read-only pass; do not rewrite the checker merely to make tests easier.
+
+## The suite does not yet prove its frozen claims
+
+`check()` redirects BOTH output streams to /dev/null, and `red()` accepts any nonzero result. Every producer test therefore accepts unrelated syntax, earlier policy or missing-tool failure. This is explicitly excluded by the complete brief.
+
+The four find shims emit `fixtures/session/partial.toml` then exit 9. That path is not allowlisted. Even a checker that ignores the find failure will reject the emitted path as live TOML, so these tests cannot distinguish error propagation from ordinary violation detection. The anchor shims similarly emit `1:partial` for every target: for caps/validate/canonical/clone this breaks ordinary ordering even if the execution failure is swallowed. A plausible row must carry that anchor's actual otherwise-valid first line.
+
+No counter-mutant is implemented or separately recorded: there are no faulty checker/helper variants, intended assertion results or five required counter-check statuses. The green suite log is consequently not evidence for those gates.
+
+## Bounded Sol attempt 2: complete the existing suite
+
+Keep this to the existing four paths, preferably suite plus candid spec evidence only. Use one small diagnostic-preserving runner/assertion pair with explicit unexpected-success rejection and expected operation/class checks. Selective shims must delegate unrelated calls to real tools; preserve a sentinel/status showing that the intended producer was reached. Keep shim output with retired words outside the scanned fixture except deliberate policy cases. No generic harness or shared-helper change is needed.
+
+| Required surface | Exact remaining completion |
+|---|---|
+| Six direct predicates | Add a distinct actual json-syntax pin violation (currently absent), plus selective partial-output/error injection for ALL six predicates (currently none). Preserve valid preceding metadata. Both required rows need exact-line positives/extra-material negatives; test json pin separately from a missing engine row. Capture the original violation message or operation/error class. |
+| Five anchors | Keep removal loop and later-duplicate positive. Use the correct actual first `line:text` per anchor for partial-error tests, not constant line 1. Add malformed and zero line fields; add the specified early duplicate of clone before estimate and assert ordering failure. Keep an order inversion with the intended ordering diagnostic. |
+| Allowlist | Add missing-file failure and error-only sed failure; retain comment-only positive and useful-partial sed failure. Assert operation plus sed status, and separately prove the shim emitted its partial row without requiring the checker to echo that row. |
+| Four find producers | Keep six-root removal loop with traversal-specific diagnostics. For EACH invocation test error-only and useful allowed-looking partial paths then failure, using a real exact allowlist entry so ignored status would otherwise pass. Earlier invocations must succeed. Add .session.toml and nested session-directory .toml violations alongside the existing plain .toml case. |
+| Sort | Add two paths whose reported first violation proves sorting; add sorted otherwise-allowlisted partial paths then sort error and require the sort diagnostic before path processing. Preserve the empty discovery positive. |
+| Retired-name search | Keep real forbidden/clean-empty tests; add exact historically allowlisted retired-path positive, error-only and useful partial-output failure. Verify the existing checker/SDK-deletion exclusions without broadening them. Select this final query only, allowing all earlier producers to succeed. |
+
+Retain required manifest/source removals, foreign-working-directory execution and existing policy violations, but stop discarding their diagnostics. Do not add Cargo fixtures or normalize allowlist strings. Construct banned fixture spellings from separated fragments as the current suite already does.
+
+Execute the five frozen disposable counter-mutants THROUGH THE SAME assertions: ignored anchor failure, ignored find failure, ignored sort failure, ignored allowlist-read failure, ignored retired-search failure. Anchor mutation must preserve missing-anchor rejection and differ only on execution failure with usable output. Find/sort/retired counter inputs must otherwise pass their actual policy, so a lost error cannot still be caught as a TOML/retired violation. Require each faulty variant to fail the test assertion intended to catch its newly accepted error, record the real status and assertion name, and reject accidental syntax/other-check failure. No label-only or constructed-but-unexecuted controls.
+
+Run the real checker, complete focused suite and bash syntax/diff; shared helper is unchanged, so no extra helper work is requested. Root checkpoints/pushes and Astra gives one attempt-2 verdict. At most one subsequent Sol attempt remains if necessary; full workspace comparison and actual PR/required CI follow focused acceptance. Do not weaken or defer these explicitly assigned selective/error/counter gates to claim the present green suite satisfies them.
+
+This verdict used source, complete brief, workflow and completed-log inspection. No tests, Cargo, timing, repository/Git or GitHub mutation were performed.
+
+## Sol attempt 2 evidence revision
+
+The focused disposable suite now preserves checker diagnostics and requires each negative case to fail for its assigned operation or policy class. It covers the distinct JSON pin, exact required rows, all six selectively failed direct scans, all five plausible anchor partial failures, malformed and zero line fields, early-clone first-match ordering, missing/error-only/partial allowlist reads, both failure modes for each of four find calls with an exactly allowlisted partial path, all three discovery shapes, sorted first reporting and checked sort failure, exact retired allowlisting/exclusions and both retired-search failure modes. Five executed disposable counter-mutants accept only the injected incomplete result; the same unexpected-success assertion rejects each with recorded assertion status 97.
+
+## Astra attempt 2 source verdict — PASS
+
+# Astra #417 attempt 2 review
+
+**PASS at exact pushed `646673f68c196126870a0d3744ab3527abddfa7f` for remaining workspace/PR qualification.** Source/evidence checkpoint is `29a53cdb663d55a49cc7eec7c4795d10387b5747`; the final checkpoint restores the suite's executable mode without changing logic. This is focused attempt acceptance, not actual PR approval or issue closure.
+
+The accepted checker implementation is preserved: exact manifest predicates and original violation text, full successful anchor output with first positive-decimal position, checked allowlist sed, four completed find producers before one checked sort, and checked final retired-name scan before exemptions. No parser, helper, production-checker or workflow repair is introduced by this revision.
+
+The new diagnostic-complete cases address all six direct producer failures separately; the required pin and extra-material cases distinguish both exact rows. Five anchor partial-error cases now use their actual valid first positions, so ordinary ordering does not substitute for status rejection. Malformed/zero fields and early-clone ordering supplement retained absent/later-duplicate cases. The anchor mutant changes only the helper's execution-error branch; clean absent anchors still reach the unchanged missing-anchor rejection.
+
+The four find invocations each receive error-only and an explicitly allowlisted partial path after unrelated calls delegate to real tools. The sort partial rows are also exactly allowlisted. Ignoring these statuses would otherwise permit the checker to pass, which is independently demonstrated by the actual mutants. Missing roots and required files, three TOML pattern shapes, sorted first reporting, comment-only and missing allowlists, sed error-only/partial output, actual retired violations, exact retired allowlisting and original exclusions remain covered. The clean copied checker itself contains the retired vocabulary, so its successful base control also exercises the unchanged self-exclusion; the dedicated SDK-deletion case covers the other checker exclusion.
+
+I independently ran the complete suite at this checkpoint: exit 0, log `/tmp/astra-417-attempt2-suite.log`. All five actual counter-mutants (anchor, find, sort, allowlist, retired) caused the SAME red assertion to return 97 for unexpected checker success. The counter harness requires that exact status, rejecting ordinary checker failures, wrong-class status 98 and unrelated harness failure. These are executed rejecting assertions, not printed untested controls. The new selective producer cases assert operation/tool-status diagnostics; the retained early legacy cases still use the general session-policy prefix and are not counted as the operation-specific error evidence.
+
+Root's real checker log is green; the local suite has executable mode 775. Shared helpers and Rust are unchanged. No further source-attempt repair is requested. Preserve #401/#306 closure accounting and proceed with root-owned unchanged-count workspace comparison, integrated final evidence, actual PR Astra review and required qualification before merge/closure. In final evidence, describe operation-specific diagnostics as supplied by the new selective table rather than claiming every retained legacy assertion now checks a unique operation.
+
+Review used source/spec/log inspection and the existing focused shell suite only; no Cargo, timing, Git or GitHub operation or repository source mutation occurred.
+
+## Final workspace and delivery evidence
+
+Candidate `54748778d2a6943f8c07a6e367ef93c1e4f5933e` completed `cargo test --locked --workspace` with exit 0: 274 suites, 1,559 passed, zero failed, 24 ignored. This matches the accepted #407 baseline `423b06d3aeccf51fecae8c79c38221a48afbf262` delivered as main `a0e4d123a038160b4f5934dac14aacc72c9fbbf2`; the only baseline-to-squash file difference is #407's final prose evidence. Logs are `/tmp/engine-407-candidate-workspace.log` and `/tmp/engine-417-candidate-workspace.log`. No concurrent Cargo used the shared target.
+
+The accepted checker, suite and CI wiring are unchanged after the tested candidate; subsequent changes synchronize parent/numbered successor evidence. The final real Session gate passes after those document additions (`/tmp/engine-417-final-real.log`), and diff hygiene passes. Astra's source review independently confirms the five actual counter-mutant assertions. Legacy negatives retain their general prefix assertions; only the new directed error table claims distinct operation/status evidence.
+
+Residual parent consolidation is explicitly retained in #423, with numbered Astra approval and serialized assignment after this issue. #401/#306 remain OPEN. Actual PR head review and required qualification precede this issue's merge/closure.
