@@ -36,3 +36,292 @@ During #399 qualification at source e46bc0d1a7917de8c65204cdee931877aea671d8, th
 ## Bounded Wasm child #427
 
 #427 now owns the independently useful Wasm object population and decoder/scan correctness outcome. Its explicit amended inspection contract uses a fresh gate-owned child target and scalar non-LTO build for the same engine/source/target_smoke families; this resolves the demonstrated fat-LTO decoder incompatibility without changing the shipped artifact or old opcode/observation policy. Complete checked producers/consumers and real-toolchain qualification remain mandatory. Root queues #427 after #412 to serialize workflow edits. This parent remains OPEN for every five workspace find populations, tracked-path pipeline, predicate/parser/filter and optional-result obligation above, plus #427 delivery. No obligation is waived and no implementation has begun.
+
+## Workspace remainder executable scope
+
+Root adopts the following bounded workspace-only implementation scope. #427 is separately source-approved and qualifying; its Wasm implementation and CI placement are not reopened here. This branch is planning only until #427 is delivered and Astra approves the actual merged base.
+
+# #404 workspace-policy remainder — bounded implementation brief
+
+Recommendation: implement the remaining workspace checker directly under amended #404 after #427 delivery. No further product split is necessary: all remaining operations feed one workspace-policy success verdict and one existing hermetic suite. #427 exclusively owns Wasm population/decoder/observation work and its CI step; do not edit or duplicate it. #404 remains OPEN until this remainder and #427 are delivered, while #306/#349 retain their other accounting.
+
+Read the full parent #404 and approved/assigned #427 specs, current `scripts/check-workspace-policy.sh`, `scripts/test-workspace-policy.sh`, shared `scripts/lib/gate.sh`, and existing workflow suite invocation in `/home/bl/misofm/engine-404-plan` on supplied delivered main `39da065507beb822ef70a1552ff5dcc363938dd4` (use root's exact frozen identity before assignment). No implementation, builds, tests, timing, legacy source or Git/GitHub mutation. This document is a proposed stateless parent amendment, not an implementation assignment; #442 is the sole feature and #427 is active independent tooling.
+
+## Product and exact scope
+
+A workspace-policy success must mean every applicable original population was completely enumerated and every invoked original reader/parser/filter completed before its semantic predicate was accepted. Preserve the existing CLI/root selection, policies, patterns, diagnostics for genuine violations, manifest/comment interpretation and optional-result semantics. Add operation/status-specific execution-error diagnostics with original stderr/partial output, rather than reporting failed positive searches as missing content.
+
+Edit only check-workspace-policy.sh, existing test-workspace-policy.sh and #404's decision/evidence record. The already-required CI runs this suite; no workflow change is needed. Existing shared helpers are sufficient for ordinary searches; explicit local checked captures are sufficient for compound/NUL producers. No helper change is justified by the inspected sites, and no generic harness/parser framework or new corpus is needed. Preserve existing executable modes. Keep the existing canonical LICENSE digest: it protects actual legal text, not new prose byte-pinning.
+
+Source the real physical helper path before entering a fixture root, as today. Preserve all four required Cargo roots; never discard absent roots or create them to make a scan succeed. Temporary scratch belongs outside the inspected fixture tree so it cannot contaminate whole-tree file discovery. Do not rely on set-e, process substitution, pipeline conditional status, pipefail alone, `|| true`, or quiet-search early success as proof of producer completion.
+
+## Five original find populations — retain each scope
+
+| Population / current site | Exact membership | Successful empty | Required checked stages |
+| --- | --- | --- | --- |
+| npm manifests, checker :78–82 | `find . -name package.json -type f -not -path '*/node_modules/*'` | Valid | find, sort, each jq license predicate |
+| npm locks, :84–88 | same search for package-lock.json | Valid | find, sort, each jq root-package license predicate |
+| package manifests, :90–166 | `find crates hosts tools sidecars -name Cargo.toml -type f` | Invalid collectively; each individual root may contain none | four roots exist, find, sort, every manifest reader/extractor |
+| retired directory stubs, :189–199 | whole-tree directories with the existing five retired names; prune only .git and target as today | Valid | find before interpreting rows; do not suppress its stderr |
+| shallow fingerprint spills, final loop | existing depth-2 `.fingerprint` directories excluding ./target/*, existing `%P` output | Valid | find before interpreting rows |
+
+Capture each population to completion once before its consumer loop. A nonempty list never overrides find/sort failure. Retain paths with spaces via the existing line consumer; do not introduce a new filename grammar. A valid empty list must not become a synthetic blank item that calls jq or a manifest reader. The Cargo minimum is one package manifest across all four required roots, not one manifest per root.
+
+Retired-directory and fingerprint nonempty rows are intrinsically policy violations. They have no nonempty nonviolating payload. Their partial-output/error cases must verify the traversal-error status/diagnostic wins over early violation handling; do not fabricate a supposedly clean row or require an impossible unexpected-success mutant for these classes.
+
+## Remaining producers, predicates and empty-result contracts
+
+1. **License chain and positive required searches.** Keep required nonempty LICENSE/NOTICE/THIRD_PARTY_LICENSES.md/math-license artifacts. Capture/check sha256sum before its existing awk digest-field extraction, and check awk separately; require the existing digest equality. Check the workspace and fuzz Apache license searches, per-package license.workspace inheritance, third-party libm-reference search and conditional ISA target-table search with completed nonquiet rg invocations. Status 0 satisfies the exact existing predicate, 1 is its existing missing-content policy failure, >=2 is a distinct execution failure. Partial matching output followed by error must fail; do not credit `-q` success after a matching prefix.
+2. **npm JSON predicates.** Keep the exact two `jq -e` expressions. Status 0 passes, false/null status 1 is the existing license policy failure; parsing/read/usage/system errors are execution failures, not another clean or optional-empty result. The files themselves are not optional after successful discovery. Do not redesign JSON validation or introduce extra fields.
+3. **TOML name extraction.** Retain current line-oriented awk bodies for [package], [lib] and [[bin]] names. Capture/check each invocation before using its stdout; failed optional extraction cannot masquerade as no section. Package name remains required through existing directory/name semantics. A successful empty lib result and successful empty bin-name list remain allowed. Consume all bin rows only after successful extraction. Preserve the currently accepted primary/suffixed tool-bin naming rule, even if another repository statement phrases the broader naming goal differently. Preserve package-name/directory equality, sysroot/prefix/retired-codec bans. Derive dirname/basename using shell expansion or individually checked commands; neither is grounds for a new path policy.
+4. **Tracked paths, including non-Git fixtures.** Preserve `git ls-files -z --cached --others --exclude-standard` as the Git population and the existing non-Git `find . -type f` fallback excluding .git/target. Git classification must distinguish actual non-repository absence from execution errors; never use arbitrary nonzero or an error substring to enable fallback. The delivered env-vocabulary check supplies the existing bounded model: exact ordinary not-a-repository classification, exit128, no explicit GIT_DIR/GIT_WORK_TREE override, with deterministic locale for that classification. A configured invalid repository selector or fatal/error with plausible output must fail. Check the actual Git listing/fallback find independently, preserving NUL bytes in a file through that stage, then individually check the existing NUL-to-newline tr, leading-./ sed normalization, basename-Cargo.toml awk filter and LC_ALL=C sort. Keep existing tracked/untracked-not-ignored scope and its any-depth nested-manifest coverage. Successful empty filtered list is permitted by this stage; the separate required Cargo population still prevents certifying an empty package workspace. Preserve today's explicit skip of non-file listed paths (e.g. tracked deletions); do not silently expand this into a filesystem-race policy.
+5. **Per-tracked-manifest retired-codec scan.** Keep exact existing quote-aware line-comment stripping and the retired identity regex. Capture/check the file redirection/read and strip_toml_comments awk before invoking rg over the captured result. rg0 means the existing violation with its matching rows; rg1 means clean; >=2 means scan failure. Successful empty/comment-only stripped text is allowed. Failed awk or rg cannot be hidden by a successful clean downstream search. Preserve current comment behavior rather than introducing a TOML parser or escaping-rule repair.
+6. **Optional .cargo ISA chain.** Missing .cargo remains valid. If present, check the original directives search, comment-row exclusion, approved-pin exclusion, conditional exact target-table positive search and global `[build]` negative search independently. Each collection/exclusion rg accepts 0/1 as predicate results and rejects >=2; complete clean absence/all-filtered output is valid. Any remaining non-allowlisted directive is the existing ISA violation. The required scoped target table is consulted only when non-comment ISA directives exist. The `[build]` scan is still required even with no directives: match is forbidden, absence clean, errors fatal. Do not change regexes or introduce a new requirement that every repository contain .cargo/config.toml.
+7. **Already checked forbidden scans.** Preserve shared scan_forbidden consumers for Cargo ISA features, lockfile codec identity, compiled track caps, prelaunch generations and versioned worklet implementation names. Their source roots and existing 0/1/error contract remain. No migration of neighboring checker families or changed bans is needed.
+
+Every producer/reader error fails regardless of empty, clean-looking or violating output. Binary/NUL streams must not pass through shell command substitution before decoding. Complete stdout and stderr should remain distinguishable for parser input; success stderr is not another data row.
+
+## Finite directed evidence
+
+Extend the existing valid fixture and suite; the baseline already supplies real required license artifacts, all four Cargo roots, correctly named library/bin packages and a lockfile. Keep all old policy mutations. Add optional valid npm/lock and ISA/nested-manifest files only when a case needs those later sites. No Cargo build is necessary for any hermetic case.
+
+Maintain one small case table keyed to the operations above, with saved real tools executing every unselected operation. For each invoked failure-prone stage in the five populations and compound parser chains, exercise empty output/error and otherwise-valid output/error where that result class exists. Reuse the same tiny fixture and wrapper mechanism; this is a finite operation table, not a combinatorial corpus. Select later package/manifest invocations to prove previous successful rows do not make later failures invisible.
+
+Required directed distinctions:
+
+- Positive Rust-only root with empty npm/locks, no retired stubs/fingerprints and no .cargo; positive roots with approved ISA/comment-only optional results, no lib/[[bin]], and one empty Cargo root but a nonempty collective package population.
+- Missing each required Cargo root (parameterized) and collective successful-empty package discovery must fail at discovery, after the valid license prelude. Never create a deliberately invalid license fixture as that proof.
+- Git and non-Git positives; explicit invalid GIT_DIR and classification execution failure; listing/fallback failures; NUL conversion, normalization, manifest filter/sort failures. Preserve and test nested Cargo.toml coverage with a real non-ignored nested manifest. NUL producers must emit actual NUL bytes, not an invented newline listing.
+- Required search clean-missing versus execution-error diagnostics, including complete matching payload/error; optional lib/bin empty success versus extractor error; per-manifest comment-strip failure and retired scan failure with clean content; existing quoted-name/comment semantics.
+- .cargo empty/comment-only/approved-pin positive, forbidden directive and `[build]` negatives, and each source/filter/table-search failure, including a late global-build search error after earlier clean results. Distinguish rg1 from >=2 explicitly.
+- SHA producer/extractor and jq predicate/read failures remain distinct from content mismatch, using valid canonical digest/valid license result payloads for the positive-looking error variants.
+
+For faults whose real successful result is empty (including retired/fingerprint discovery and exclusion-to-empty), empty/error is the otherwise-valid failed result. A nonempty violation/error case may additionally prove error precedence; label it honestly. For clean manifest/npm/path rows, prefer delegated real valid output, including a complete-looking list before an injected nonzero exit. A fake path or wrong package name that already fails policy cannot prove status-loss resistance.
+
+New assertions must require the intended operation, injected exit status and sentinel stderr. Give unexpected checker success a distinct assertion exit (e.g. 97), separate from setup/missing-diagnostic failure. Execute two bounded actual production counter-controls: (a) swallow a selected clean-looking manifest/npm population producer failure, (b) swallow a selected late parser/filter/scan failure whose ordinary output permits the whole valid fixture to pass. Verify the exact intended production mutation and require the SAME targeted unexpected-success assertion to reject each mutant. Do not count missing fields, syntax errors, failed fixture setup or an arbitrary nonzero harness result. No extra shared-helper mutant campaign is required when that helper is unchanged.
+
+## Delivery and accounting
+
+After focused source PASS, run syntax/diff hygiene, actual workspace policy, the expanded existing suite and unchanged helper suite. At the coherent delivery boundary retain the inherited unchanged-count full-workspace comparison; shell-only work does not warrant new Rust tests or browser/artifact rebuilds. #427 owns its one real scalar non-LTO Wasm qualification and its own hermetic suite. Do not rerun or redesign that work for this remainder.
+
+Root should amend/synchronize #404 with this exact workspace-only execution scope and #427 ownership, then obtain Astra numbered/frozen-base approval after #427 delivery before assigning the next tooling attempt. Keep Luna1/Sol2–3 only after FAIL and hard stop after three failures. Actual PR Astra review and required CI precede merge/closure. A completed #404 closes its five workspace populations, tracked-path/parser/predicate obligations and delivered #427 accounting; it cannot close unrelated #306/#349 children.
+
+Only this `/tmp` brief was written. No source/spec changes, Git/GitHub mutations, tests/builds or timing were performed.
+
+## Root scope and sequencing decision
+
+Keep this cohesive remaining checker repair directly in #404; no new successor or framework is needed. The exact five populations, producer/predicate/parser and optional-empty contracts and finite directed cases above are binding. The task repairs completion/error handling without expanding or weakening existing semantic predicates; any separate naming-policy discrepancy with the standing agent guide must be reported for a distinct ruling rather than silently changing the scanner contract. Preserve canonical license text validation and existing legal artifacts.
+
+Do not modify the current qualifying #427 worktree, checker, suite or CI leg. After #427 delivery, integrate the actual default branch into this dedicated workspace-discovery branch, confirm the stateless numbered body and source base with Astra, then assign Luna attempt 1. Root owns checkpoints/pushes/remote synchronization, Astra each consolidated verdict, Sol attempts 2/3 only after FAIL, then hard stop/rescope. #404 closure requires both this full workspace remainder and delivered #427; #306/#349 retain their other obligations. No source implementation, build, artifact or benchmark is authorized by this planning checkpoint.
+
+## Delivered Wasm child and current implementation boundary
+
+PR #451 delivered #427 as main `5a4a7d2071194cf6118241e24d073824668e3387` after actual-head Astra PASS and required CI SUCCESS. #427 is verified CLOSED. Root integrated that delivered base, preserving this parent amendment and the complete delivered child evidence in the document merge conflicts. This branch differs from main only in the #404 scope record. The workspace remainder is ready for Astra numbered/current-base approval; source implementation is still unassigned. #430 remains the sole runtime feature in its isolated worktree.
+
+## Numbered current-base approval and Luna attempt 1
+
+# Astra numbered/current-base review — #404
+
+PASS for Luna attempt 1 at `2d57d4efd2881d28af805271a3d21fd53159fccc`, based on delivered main `5a4a7d2071194cf6118241e24d073824668e3387`. This is scope/base approval, not implementation or qualification acceptance.
+
+I checked the complete amended parent, the adopted `/tmp/astra-404-workspace-remainder-brief.md`, current workspace checker, existing fixture and helper seams, and required CI invocation. The worktree is clean and the cumulative delta from delivered main is only the #404 spec (81 added lines). The adopted brief is present verbatim. Live GitHub #404 is OPEN with matching title and exact body; #427 is CLOSED.
+
+The current source still has the five identified populations and the specified unchecked license, manifest extraction, tracked-path/comment-strip and ISA chains. Membership and existing predicates in the brief match those sites. Empty npm/lock discovery, lib/bin extraction and optional ISA results remain valid; Cargo discovery requires a collectively nonempty population across four existing roots, not a manifest per root. Retired-directory/fingerprint output is intrinsically violating, so its error precedence proof correctly does not demand a fictitious nonviolating row. The complete Git/NUL conversion/filter/sort chain and late parser/search sites remain explicitly assigned.
+
+The root adoption is faithful and resolves the historical sequencing text through the final delivered-child/current-boundary section. For the forthcoming assignment the controlling checkout/base is the one above, not the older planning checkout or earlier active-feature descriptions quoted inside the historical brief. Only `scripts/check-workspace-policy.sh`, `scripts/test-workspace-policy.sh` and #404 evidence/spec are authorized. No Wasm checker/suite, workflow or shared-helper change is needed. The existing workflow invokes the workspace suite at qualification.yml:289, and that suite already invokes test-gate-lib.sh at its end. Checked local captures can preserve separate stdout/stderr and NUL streams where existing ordinary-search helpers do not provide those exact representations; do not feed merged helper diagnostics into parser input or expand the helper API for this slice.
+
+The finite directed table and two actual production counter-controls are sufficiently explicit: otherwise-valid real payloads, late-stage selection, operation/status/sentinel diagnostics, and the SAME unexpected-success assertion distinguish status-loss acceptance from setup or unrelated policy failure. Existing semantic tests and executable modes remain. Retain the current primary/suffixed bin-name predicate in this status repair; this approval does not resolve or waive the separate standing naming-policy discrepancy.
+
+No additional amendment is needed before assignment. Luna gets one coherent pass; any failed verdict routes the bounded retry to Sol, with the existing three-attempt hard stop. Focused acceptance, inherited full-workspace comparison, actual PR Astra review and required CI remain outstanding. Closing #404 will require this complete workspace remainder plus already delivered #427, without closing unrelated #306/#349 obligations or rerunning Wasm/artifact/browser qualification.
+
+Review was read-only apart from this /tmp report. No tests, builds, timing or repository/GitHub mutations were performed.
+
+Root assigns Luna attempt 1 on this approved delivered base. One coherent implementation pass is authorized in the two named workspace scripts and this spec, followed by a root checkpoint and Astra verdict. No further implementation may layer onto a ready checkpoint before root commits and pushes it.
+
+## Luna attempt 1 implementation evidence
+
+The workspace checker now captures each find/sort population before consumption, checks producer
+and parser statuses, and preserves stdout/stderr in operation-specific diagnostics. The Cargo
+manifest population requires all four roots to exist and at least one discovered manifest. The
+tracked-path chain checks Git classification, Git/non-Git listing, NUL conversion, normalization,
+manifest filtering and sorting before scanning quote-aware stripped manifests. Optional ISA
+searches distinguish clean status 1 from execution errors, including the late global `[build]`
+search. Existing primary/suffixed tool-bin naming semantics and all prior policy predicates remain
+unchanged.
+
+Validation from the dedicated worktree, with `PATH=/home/bl/.cargo/bin:$PATH`:
+
+* `bash -n scripts/check-workspace-policy.sh scripts/test-workspace-policy.sh` — PASS.
+* `bash scripts/test-workspace-policy.sh` — PASS (`workspace policy mutation tests: ok`; shared
+  gate-library tests also PASS).
+* `bash scripts/check-workspace-policy.sh .` — PASS (`workspace policy: ok`).
+* `git diff --check` — PASS.
+
+This is an implementation checkpoint awaiting Astra source review. No commit, push, GitHub mutation, build, benchmark,
+Wasm qualification, or browser/artifact rebuild was performed in this attempt.
+
+Root checkpoint audit: the attempt changes the checker and this record only; the existing workspace suite has no delta. The reported existing-suite positives are not evidence that the new finite directed failure table or two actual production same-assertion counter-controls have been implemented. No source PASS or complete acceptance is claimed. Astra will issue one consolidated verdict against the full frozen scope.
+
+## Astra attempt 1 verdict and Sol attempt 2 assignment
+
+# Astra #404 Luna attempt 1 — FAIL
+
+Exact checkpoint: `70ff15b26558477fdf5b97b2cdc9dd1a850c1f46`, `/home/bl/misofm/engine-404-workspace`, against approved scope/base `2d57d4efd2881d28af805271a3d21fd53159fccc` and the complete adopted workspace remainder brief.
+
+FAIL. Capturing the main external operations separately is useful progress, but several concrete acceptance defects remain and the mandatory new directed suite/control evidence is entirely absent. These four finite groups define one coherent Sol attempt 2; do not broaden policy, change the shared helper/workflow, or duplicate delivered #427.
+
+## 1. Correct required population and unchanged empty-name semantics
+
+`capture cargo-manifests-sort sort <<<"$cargo_manifests"` writes a newline even when successful discovery returned zero paths. The following `[[ -s "$CAPTURE_OUT" ]]` therefore passes. The consumer skips that blank line, so a successful empty Cargo population can reach success: file byte size is not proof of a manifest row. Require the actual nonempty population before consuming it, while retaining optional empty npm/locks and requiring all four original roots. Do not impose a manifest per root.
+
+The new bin loop also skips every empty row. Successful extraction of NO bin rows is valid, but the existing extractor prints an empty row for an explicit `name = ""`; the old predicate rejected that row. Preserve that distinction by consuming the actual captured extractor file without manufacturing/ignoring a blank name. Do not change the original line-oriented TOML grammar or introduce a new parser. Keep package/lib and primary/suffixed bin policy as frozen.
+
+## 2. Complete positive searches and Git classification
+
+Every required_search call still supplies `-q` (`-qx` for license checks, `-q` for inventory and scoped ISA table). Checking rg's returned status does not prove complete search when quiet mode can stop after a match. The brief expressly requires nonquiet completed positive searches. Remove only quiet behavior while preserving each exact existing expression and whole-line `-x` where present; distinguish predicate absence1 from execution failure>=2 with full status/diagnostic evidence, including a matching valid payload followed by error.
+
+Git fallback is not the frozen delivered environment-checker classification. It uses `grep -Fxq` to find one matching line in stderr, without deterministic locale or rejecting explicit GIT_DIR/GIT_WORK_TREE overrides. An error containing the ordinary message plus another fatal line can enable fallback; an explicit repository selector must never be treated as ordinary absence. Use the already-approved exact ordinary exit128 classification with no explicit overrides and exact diagnostic content under deterministic locale. Check any external classifier operation or use shell equality; do not hide classifier errors as a different clean mode. Preserve ordinary Git and non-Git fixtures and the existing tracked-deletion skip.
+
+Restore the original `LC_ALL=C` for the tracked manifest sort. Source and parser stdout/stderr must stay separate throughout the NUL-to-lines, normalize, manifest-filter and sort chain.
+
+## 3. Finish explicit local producer handling without dead duplicate paths
+
+`package_directory="$(basename "$(dirname "$manifest")")"` remains an unchecked nested producer chain. A failed dirname can be masked by a successful basename; both are explicitly named in the frozen scope. Use equivalent shell path expansion or individually checked commands, preserving the current path policy.
+
+The new checked_find and tracked_paths functions export captured data with unchecked `cat`, and their caller assignments rely on surrounding errexit for rejection. Retain explicit caller-status handling for these local compound producers (or consume their captured files directly), rather than claiming producer completion from set-e. Preserve original stdout/stderr/status if an invoked reader fails. Keep scratch outside the inspected tree, as required by the brief; `${TMPDIR}` must not silently place the gate's own discovery intermediates under the fixture being enumerated.
+
+Remove the disabled `if false` duplicate npm/Cargo implementation and unused checked_sort/checked_rg or obsolete duplicate stripping code when consolidating this repair. This is local completion of the single checker, not permission for a generic framework. The old explanatory policy comments should remain attached to the actual predicates, not stranded inside disabled code. Existing scanner regexes, legal artifacts, root scope, optional ISA interpretation and helper forbidden scans remain unchanged.
+
+## 4. Implement the already-frozen finite fixture table and two SAME-assertion controls
+
+The only changes are checker/spec. The unchanged workspace suite (including root's independently observed exit0 `/tmp/engine-404-root-attempt1-suite.log`) preserves prior behavior but proves none of the new operation table or actual production counter-controls. Extend the existing suite and its valid fixture; no new corpus/helper campaign/workflow is required.
+
+Use the binding table in the adopted brief as the finite inventory: all five find populations and their sort/readers; required roots and collective-empty Cargo; SHA/digest and jq truth/read errors; each required positive search; package/lib/bin extraction including later manifests; Git classification, NUL listing/fallback, conversion/normalization/filter/sort; per-manifest comment reader and retired scan; optional ISA source/comment/allowlist/conditional table and late global-build query. For each invoked failure-prone stage exercise empty/error and otherwise-valid complete-looking output/error when that result exists. Retired/fingerprint nonempty rows are inherently violations; test error precedence honestly, not a fictitious valid nonempty row.
+
+Retain Rust-only/no npm, optional lib/bin absence, optional .cargo absent/empty/comment-only/approved-pin positives; Git/non-Git and nested tracked-manifest coverage; precise missing-root and empty-Cargo diagnostics after valid licenses. Preserve explicit empty-name rejection described above. Inject actual NUL bytes for NUL producers. Use saved real tools for unselected calls, target later consumers, and demand the intended operation, injected status and stderr sentinel. A broad any-nonzero assertion is insufficient.
+
+Execute the two authorized disposable mutations of the actual production checker: swallow a selected otherwise-valid population failure, and swallow one late parser/filter/scan error whose ordinary output permits the fixture to pass. The SAME original targeted assertion must reject each at the distinct unexpected-success status (e.g.97), not setup/missing-diagnostic failure. Retain exact patches, commands, statuses and restored positive evidence. No extra shared-helper mutants are needed because it is unchanged.
+
+After completing this single coherent pass run the affected existing suite, actual checker, unchanged helper suite, shell syntax and diff hygiene; record failures and final source identity honestly. Full-workspace delivery comparison and actual PR/required CI remain after source acceptance. No Wasm rerun, Rust tests, artifact/browser work or timing is part of this revision.
+
+## Accepted boundaries
+
+The active implementation separately captures the main find/sort/SHA/awk/jq/ISA operations and correctly rejects many nonzero statuses before loops; optional empty npm populations are skipped rather than passed as fabricated jq filenames. Retired-directory/fingerprint traversal status is checked before policy interpretation. The shared helper and CI are unchanged. Preserve that narrow approach while correcting the concrete holes above.
+
+Review was source/diff/spec inspection only. Root's retained existing-suite result is credited only as baseline regression evidence. No tests, builds, timing, source changes or Git/GitHub mutations were performed by this reviewer. Only this /tmp verdict was written. Luna attempt1 is now one FAIL; Sol attempts2/3 remain under the existing hard stop. #404/#306/#349 remain open and delivered #427 is not reopened.
+
+Root assigns Sol attempt 2 for these four finite correction groups under the original complete workspace scope. One coherent pass and one adversarial verdict; attempt 3 remains available only after a FAIL, then hard stop/rescope. No further Luna revision is authorized under the current user workflow. Root owns the exact-path checkpoint and push before additional work.
+
+## Sol attempt 2 implementation evidence
+
+Sol completed the four assigned correction groups from source `839b21eb0e9d16bdd4938b5546ab20568d255eeb` on `codex/404-workspace-discovery`, with changes confined to the checker, its existing suite, and this record. Root still owns the checkpoint, push, remote synchronization, and integration of the later documentation-only main commit.
+
+The checker now keeps discovery results in checked capture files rather than unchecked `cat`/command-substitution exports. Collective Cargo emptiness is tested on the completed find output before sorting, while optional npm populations remain empty-valid. An absent `[[bin]]` produces no rows and remains valid; an explicit empty bin name produces a row and is rejected. Manifest directory names use shell path expansion. The disabled duplicate implementation, unused checked sort/search helpers, and duplicate comment stripper were removed.
+
+All required positive searches now run to completion without quiet mode while retaining their original expressions and whole-line behavior. Git fallback uses `LC_ALL=C`, exact exit-128/stdout/stderr classification, and rejects explicit `GIT_DIR`/`GIT_WORK_TREE`; tracked manifest sorting is again `LC_ALL=C`. Scratch capture storage is fixed outside the inspected fixture. The NUL listing stays file-backed through conversion, normalization, filtering, and sorting, with each stage checked independently.
+
+The expanded fixture suite binds directed failures to all five discovery populations and their sorts where applicable; SHA/digest extraction; both jq predicates; workspace, fuzz, inventory, later package and ISA target positive searches; package/lib/bin extraction; Git classification/listing and non-Git fallback; NUL conversion, normalization, manifest filtering/sorting; comment stripping and retired scan; and each optional ISA source/filter/allowlist/late-build stage. Each assertion requires its operation-specific diagnostic, injected status 73, and unique stderr sentinel. Complete-valid-output/error cases are used where meaningful; empty/error is used for intrinsically empty valid results. Positive cases cover non-Git and real Git NUL listings, a nested manifest, absent/empty/comment-only/approved ISA configurations, optional lib/bin absence, one empty Cargo root with a nonempty collective population, and explicit empty-bin rejection. Missing hosts/tools/sidecars are real traversal failures. Because the required legal prelude itself is `crates/math/LICENSE-libm.txt`, a physically absent `crates/` cannot reach Cargo discovery; that single logically unreachable branch uses the same find wrapper after a valid prelude and records the precise discovery failure rather than invalidating LICENSE evidence first.
+
+Two disposable copies of the actual production checker swallow, respectively, a clean-looking collective Cargo discovery failure and a late global-build scan error. The same targeted directed assertion returns the reserved unexpected-success status 97 for each mutant; the suite verifies both exact patches before execution. No shared-helper mutant campaign was added.
+
+Focused verification, all with `PATH=/home/bl/.cargo/bin:$PATH`, is retained in `/tmp/engine-404-sol2-*.log` where output applies:
+
+- `bash -n scripts/check-workspace-policy.sh scripts/test-workspace-policy.sh` — exit 0.
+- `bash scripts/check-workspace-policy.sh .` — exit 0, `workspace policy: ok` (`/tmp/engine-404-sol2-workspace.log`).
+- `bash scripts/test-workspace-policy.sh` — exit 0, including both production status-97 controls and the unchanged helper suite (`/tmp/engine-404-sol2-suite.log`).
+- `bash scripts/test-gate-lib.sh` — exit 0 independently (`/tmp/engine-404-sol2-helper.log`).
+- `git diff --check` — exit 0.
+
+No Rust/full-workspace, Wasm, browser, artifact, benchmark, timing, Git, GitHub, push, or CI action was performed. This is a coherent focused-green source checkpoint awaiting root commit/push and Astra source review; it does not claim PASS, merge, remote synchronization, or issue closure.
+
+## Astra attempt 2 verdict and final Sol attempt
+
+# Astra #404 Sol attempt 2 — FAIL
+
+Exact checkpoint `8283bd0fbf74b44073a694989e07a53048078f92`, `/home/bl/misofm/engine-404-workspace`.
+
+FAIL for completion of the frozen directed evidence contract. The prior concrete production defects are corrected; retain this production source. The final Sol attempt should complete the bounded existing suite/evidence below, without another helper, framework, workflow or Wasm change. This is the second consolidated verdict; attempt3 is final.
+
+## Accepted source and existing proof
+
+Cargo discovery now consumes the actual captured file and requires it nonempty before sort, avoiding the synthetic-newline acceptance. Optional npm populations remain empty-valid. Explicit empty bin-name rows again reach the original rejecting predicate, while absent sections remain valid. The new positive/negative fixture cases exercise those distinctions and collective-empty Cargo. Shell expansion replaces nested dirname/basename; captured population files replace unchecked cat/substitution output. Quiet flags are removed from required searches while original whole-line matching is retained. Git classification uses deterministic locale, exact ordinary diagnostic/empty stdout, and rejects explicit GIT_DIR/GIT_WORK_TREE selectors; tracked sort restores LC_ALL=C. Dead duplicate implementations are removed and current semantic predicates remain.
+
+The existing suite now has a useful operation table whose assertions require the selected operation, status73 and fault sentinel. Its actual population and late-build production mutations are copied beside the real helper, patch presence is checked, and both invoke the same assertion implementation that uniquely returns97 on unexpected checker success. `/tmp/engine-404-sol2-suite.log` records both intended unexpected-success messages and the final successful suite. These are meaningful controls, not arbitrary nonzero results; retain them. Independent real checker/helper logs are green.
+
+The physical missing-crates fixture cannot reach discovery because crates/math/LICENSE-libm.txt is an earlier required artifact. The candid valid-prelude producer injection plus actual missing hosts/tools/sidecars cases is appropriate; do not manufacture another physical missing-crates claim.
+
+## Final bounded gap 1: complete both frozen result modes at the named operations
+
+The binding brief and attempt1 verdict require empty-output/error AND otherwise-valid complete-looking-output/error for each invoked failure-prone stage where both result shapes exist. The table currently gives both only to npm-manifest find and Cargo find. Most other rows exercise only complete mode; the lib extractor exercises only empty mode. This is not satisfied by the comment saying each row uses either mode, nor by other operations sharing capture().
+
+Extend the existing table/loop, preserving selective call matching and later-consumer occurrences, for these already-named sites:
+
+- Both npm sorts, lock find, Cargo sort, SHA producer and digest extractor, both jq predicates.
+- Workspace/fuzz/inventory and late package positive searches; late package extraction, lib extraction and bin extraction.
+- Git listing and non-Git fallback listing, NUL conversion, normalization, tracked manifest filter and sort, later comment stripping.
+- ISA directive source, comment filter and conditional target-table search.
+
+For each of those, retain a valid fixture and real delegated output in the complete leg, and add its missing empty/error leg (or complete/error leg for lib extraction). Git classification also needs its otherwise-valid success-output/error leg in an actual Git fixture: delegating rev-parse in a non-repository fixture yields another real failure, not the required valid success payload. Preserve actual NUL output for listing legs.
+
+For retired-directory/fingerprint discovery, retired-codec no-match scan, ISA exclusion-to-empty and the late absent global-build query, the successful clean result is empty. Their existing empty/clean-complete error cases can be reused; do not invent a nonempty nonviolating row or duplicate identical empty cases solely to inflate counts. If adding a violating-output/error case, label it only as error precedence. No new operation family is requested.
+
+Ensure a complete-mode shim confirms that its delegated real operation produced its expected legitimate status (0, or1 only for an allowed clean no-match), so an unrelated real-tool failure cannot masquerade as the promised valid payload. Keep operation-specific diagnostics and sentinel/status requirements. A small table expansion is sufficient; do not introduce a generic fault framework.
+
+## Final bounded gap 2: prove the already-assigned predicate/classification distinctions
+
+The current ordinary non-Git positive and invalid nonexistent GIT_DIR case do not directly discriminate all prior classification defects. In a valid fixture, exercise the exact ordinary exit128 diagnostic plus an additional error line, and a plausible stdout/error result; both must remain execution failures. Exercise the exact ordinary diagnostic with an explicit repository selector so the no-override branch is actually tested, including GIT_WORK_TREE as well as GIT_DIR. Keep deterministic-locale behavior visible to the controlled classifier. These are the named prior exact-content/override/locale obligations, not new Git semantics.
+
+Complete the frozen predicate-missing versus execution-error distinctions using targeted diagnostics. Existing broad missing-license/content tests may be retained, but cannot substitute for the required positive-search diagnostic assertions at the workspace/fuzz/inventory/package/conditional-ISA sites. The table already provides matching-payload/status73 errors; pair them with clean status1 missing-content cases reaching those same sites.
+
+Likewise the original npm MIT test only establishes an undifferentiated failure, and there is no lock predicate-negative or explicit parser/read-error distinction. Reuse the optional npm fixture to assert the existing license-policy diagnostic for jq false/null status1 at each of the two expressions, and the execution diagnostic for parser/read failures (the controlled status73 error rows can supply the reader-failure leg; a tiny malformed JSON input can supply actual parser failure). Do not redesign either jq expression or add fields to the policy.
+
+## Delivery of final attempt
+
+Keep the accepted production source and current two actual production counter-controls. Extend only the existing suite/spec/evidence for these finite missing legs unless a directed case exposes a concrete defect. Do not add a new counter-mutant campaign. Re-run the existing affected suite, actual checker and unchanged helper suite, syntax and diff hygiene, retaining exact commands/statuses and positive/control outputs. Distinguish original history from final proof. Source PASS then permits root's inherited full-workspace delivery comparison and actual PR/required CI; no runtime/artifact/browser/timing work is authorized here.
+
+Read-only review covered the exact production/suite delta, complete frozen brief/prior verdict, current evidence record and supplied real/suite/helper logs. No tests, builds, timing or repository/GitHub mutations were performed; only this /tmp report was written. #404 remains open; #427 remains delivered and #306/#349 retain their other obligations.
+
+Root integrated delivered main `3faf89adea25e32e85a27d744c643a79cd80ce31` after the clean attempt-2 checkpoint and review; the incoming delta is only the #402 parent evidence record. Root authorizes Sol attempt 3 to complete the two finite suite/evidence gaps above while preserving accepted production and both accepted counter-controls. This is the final coherent attempt in this series; a FAIL requires hard stop, preserved evidence and explicit bounded rescope. No fourth retry, weaker gates or new production/framework scope is authorized.
+
+## Sol attempt 3 implementation evidence
+
+Sol completed only the two final directed-evidence groups from clean pushed source `ffd277b2628c618ed014dd7c62a7666d318ad9cc`. The accepted production checker and both accepted production status-97 controls are unchanged. Source changes in this attempt are limited to the existing workspace-policy suite and this record.
+
+The finite table now pairs empty-output/status-73 and faithful complete-output/status-73 legs for both npm sorts, npm-lock discovery, Cargo sort, SHA and digest extraction, both jq predicates, all four unconditional required searches plus the later package search, later package/lib/bin extraction, Git listing, fallback listing, NUL conversion, normalization, manifest filtering/sorting, later comment stripping, ISA source/comment filtering, and conditional target-table search. Git classification has a complete leg backed by an actual initialized repository and real `true` output. Complete legs capture the delegated real tool separately and require status 0 plus nonempty stdout before replaying it and injecting status 73. The two legitimate clean-no-match legs (retired identity scan and ISA approved-pin exclusion) instead require real status 1 and empty stdout. Intrinsically empty retired/fingerprint/global-build cases remain single honest empty/error cases.
+
+Targeted status-1 predicate cases now assert the specific existing diagnostic for workspace, fuzz, third-party inventory, later package-license inheritance, and conditional ISA target-table absence. Both jq expressions have explicit false and null status-1 policy cases, actual malformed-JSON parser-error cases with execution diagnostics, and the paired controlled complete/empty status-73 reader failures in the table.
+
+Git classification cases now reject exact ordinary exit-128 stderr plus an extra error line, plausible stdout plus ordinary stderr, and exact ordinary stderr under each explicit `GIT_DIR` and `GIT_WORK_TREE` override. A controlled classifier requires and records `LC_ALL=C` before returning its similar-looking failure, making deterministic locale part of the exercised input. The physical missing-`crates/` limitation and its candid valid-prelude injected traversal case remain as accepted in attempt 2.
+
+The expanded suite passed once before final record update. Final focused evidence, all with `PATH=/home/bl/.cargo/bin:$PATH`, is retained as follows: `bash -n scripts/check-workspace-policy.sh scripts/test-workspace-policy.sh` exit 0 (`/tmp/engine-404-sol3-syntax.log`); actual `bash scripts/check-workspace-policy.sh .` exit 0 (`/tmp/engine-404-sol3-workspace.log`); expanded `bash scripts/test-workspace-policy.sh` exit 0 including both unchanged actual-production status-97 controls (`/tmp/engine-404-sol3-suite.log`); unchanged `bash scripts/test-gate-lib.sh` exit 0 independently (`/tmp/engine-404-sol3-helper.log`); and `git diff --check` exit 0 (`/tmp/engine-404-sol3-diff-check.log`, rerun after this record update). No full-workspace, Rust, Wasm, browser, artifact, benchmark, timing, Git/GitHub, push, PR, or CI operation belongs to this attempt. This is the final-attempt focused-green checkpoint awaiting root commit/push and Astra review; it does not claim source PASS, remote synchronization, merge, or closure.
+
+## Astra final source PASS and immutable qualification freeze
+
+# Astra #404 final Sol attempt 3 — PASS
+
+PASS at exact checkpoint `366be2c0b1ae161bd87c72a77dc5baca12c8abd1`, `/home/bl/misofm/engine-404-workspace`. This accepts the scoped workspace-policy source and focused evidence and permits root's remaining immutable qualification. It is not actual PR approval, CI completion or issue closure.
+
+Reviewed the full frozen workspace remainder contract, previous two verdicts, final suite delta, current production checker and supplied focused records. Production source and the two accepted actual-production counter-controls are unchanged from attempt2. Since that reviewed checkpoint, the only additional file outside suite/#404 is the delivered-main #402 accounting record, explicitly documented by root; no runtime/helper/workflow/Wasm implementation delta is introduced.
+
+The two final evidence groups are satisfied:
+
+- The existing selective table now supplies the missing empty/error and otherwise-valid complete/error legs for the named population/sort, SHA/digest, jq, required-search, TOML, Git/NUL/normalization/filter, comment and ISA operations. Later package/bin/comment occurrences remain targeted. Complete-mode execution independently captures the real tool, requires status0 and nonempty stdout, replays actual bytes and then injects73; invalid delegation gets74 and cannot satisfy the required73 assertion. Git success classification/listing runs in initialized repositories. NUL listing bytes remain in files and are replayed without shell substitution. The two clean-no-match modes require actual status1 and zero stdout before73; intrinsically empty retired/fingerprint/global-build cases are not falsely described as nonempty valid data.
+- Required-search clean absence now has the original specific policy diagnostic at workspace/fuzz/inventory/later-package/conditional-target sites, distinct from the matching-payload execution errors. Both jq expressions have false/null-input policy cases, actual malformed JSON parser failures and controlled complete/empty reader-failure legs. Git cases directly test an extra stderr line, plausible stdout/error, exact ordinary absence under each explicit GIT_DIR/GIT_WORK_TREE selector, and a classifier that requires LC_ALL=C. They demand the intended classification status128 and identifying payload. Ordinary non-Git/Git positives and nested-manifest coverage remain.
+
+Prior accepted semantics remain: required collective Cargo population with all four roots, valid optional npm/lib/bin/ISA populations, explicit blank-bin-name rejection, unchanged line-oriented TOML/comment interpretation and naming predicates, separate captured producer streams, nonquiet required searches, deterministic tracked sort, and unchanged forbidden scans. The missing-crates case is candidly an injected traversal failure after the required math-license prelude; physical hosts/tools/sidecars removal remains separately exercised.
+
+The two actual checker mutations still reach the SAME targeted unexpected-success assertion and require status97, distinct from wrong diagnostic/setup96. The retained final suite log contains both intended unexpected-success messages followed by the production-control success message and overall workspace/helper suite success. No additional mutant campaign or framework was introduced.
+
+Accepted focused evidence: `/tmp/engine-404-sol3-{syntax,workspace,suite,helper,diff-check}.log`, with the exact commands and exit0 statuses recorded in #404. The real checker prints `workspace policy: ok`; the expanded suite and independent unchanged helper suite complete successfully. Empty syntax/diff logs are interpreted with their recorded command statuses, not as standalone execution proof. I did not rerun tests unnecessarily.
+
+No remaining source-acceptance blocker was found within the frozen finite contract. Root may freeze qualification on integrated delivered main `3faf89adea25e32e85a27d744c643a79cd80ce31`, retain the inherited full-workspace comparison and then request actual-head Astra PR review; required CI must pass before merge/closure. Delivered #427 is not reopened, and unrelated #306/#349 accounting remains open. No artifact/browser/timing work is justified by this shell-only source change.
+
+This review performed read-only source/Git/log inspection and wrote only this /tmp report. No source changes, tests/builds/timing or Git/GitHub mutations were performed.
+
+Root freezes this source on delivered main `3faf89adea25e32e85a27d744c643a79cd80ce31`. Remaining qualification is the complete locked workspace including doctests against the delivered baseline of 275 result blocks, 1,576 passed, zero failed and 24 ignored, then evidence retention, actual PR Astra review and required CI. Runtime, supported-target and artifact inputs are unchanged; no new Wasm/artifact/browser or timing claim is made. Source remains immutable through the workspace run.
+
+## Completed immutable qualification
+
+Candidate `6834d35187c4723eda7e1d75e598832edc4762d4` completed the full locked workspace including doctests with terminal exit 0: 275 result blocks, 1,576 passed, zero failed and 24 ignored, matching delivered main `3faf89adea25e32e85a27d744c643a79cd80ce31`. Root verified the tree stayed clean and parsed every test-result block. Accepted source and runtime/artifact inputs are unchanged.
+
+Focused final and failed-attempt evidence, all Astra scope/verdict records, the complete workspace log/summary and input-identity comparison are retained under `artifacts/issue404-workspace-discovery/` with an 18-entry byte/SHA-256 manifest. No Wasm/artifact/browser rebuild or timing was performed. Actual-head PR review and required CI remain before merge and remote closure; #427 is already delivered and #306/#403/#349 remain open.
