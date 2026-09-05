@@ -31,3 +31,17 @@ Astra approves the numbered synchronized scope before assignment. Luna one coher
 ## Numbered successor
 
 This is #423, created before #417 closure after the explicit parent #401 consolidation audit. Implementation stays queued until #417 merges; it then precedes #410 to serialize shared-helper changes. Root freezes the actual merged base and obtains Astra numbered approval before assigning Luna.
+
+## Astra numbered scope approval
+
+# Astra numbered #423 scope approval
+
+**PASS for numbered planning checkpoint `9f7b288ec6c64b3d5a4ecf1fd19a50fab83212aa`. Implementation remains queued until #417 merges and root freezes that actual source base.**
+
+The actual #423 spec matches the approved bounded successor: one explicit graph mode in the existing shared extractor, exact historical regex/$1/suffix/header/compact behavior, checked extraction and sort, direct backward-mode evidence and one live semantic counter-mutant. Its path scope excludes unrelated policy, workflow, runtime and artifact changes. Existing CI already reaches the suites. No extra framework or parser policy is introduced.
+
+Parent #401 expressly retains the previously missed fifth-extractor consolidation obligation through #423; it does not invent a retrospective exception or reopen accepted #407 traversal correctness. #417 may close its own Session outcome after its required gates while the parent remains open. Root records reciprocal scheduling #417 → #423 → #410 → #411 → #412, preventing shared-helper overlap.
+
+Root may assign Luna only after #417 merges and records the exact base. This approves the numbered scope and objective gates, not source completion, qualification or issue closure. Three-attempt rules and actual-head Astra/required-CI review remain intact.
+
+Read-only local numbered spec and parent amendment review. Remote synchronization and reciprocal queued-branch checkpoint are root-recorded; no tests, Cargo, Git/GitHub operation, source edit or timing performed.

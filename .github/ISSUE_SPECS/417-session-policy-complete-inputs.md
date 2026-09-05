@@ -141,3 +141,11 @@ I independently ran the complete suite at this checkpoint: exit 0, log `/tmp/ast
 Root's real checker log is green; the local suite has executable mode 775. Shared helpers and Rust are unchanged. No further source-attempt repair is requested. Preserve #401/#306 closure accounting and proceed with root-owned unchanged-count workspace comparison, integrated final evidence, actual PR Astra review and required qualification before merge/closure. In final evidence, describe operation-specific diagnostics as supplied by the new selective table rather than claiming every retained legacy assertion now checks a unique operation.
 
 Review used source/spec/log inspection and the existing focused shell suite only; no Cargo, timing, Git or GitHub operation or repository source mutation occurred.
+
+## Final workspace and delivery evidence
+
+Candidate `54748778d2a6943f8c07a6e367ef93c1e4f5933e` completed `cargo test --locked --workspace` with exit 0: 274 suites, 1,559 passed, zero failed, 24 ignored. This matches the accepted #407 baseline `423b06d3aeccf51fecae8c79c38221a48afbf262` delivered as main `a0e4d123a038160b4f5934dac14aacc72c9fbbf2`; the only baseline-to-squash file difference is #407's final prose evidence. Logs are `/tmp/engine-407-candidate-workspace.log` and `/tmp/engine-417-candidate-workspace.log`. No concurrent Cargo used the shared target.
+
+The accepted checker, suite and CI wiring are unchanged after the tested candidate; subsequent changes synchronize parent/numbered successor evidence. The final real Session gate passes after those document additions (`/tmp/engine-417-final-real.log`), and diff hygiene passes. Astra's source review independently confirms the five actual counter-mutant assertions. Legacy negatives retain their general prefix assertions; only the new directed error table claims distinct operation/status evidence.
+
+Residual parent consolidation is explicitly retained in #423, with numbered Astra approval and serialized assignment after this issue. #401/#306 remain OPEN. Actual PR head review and required qualification precede this issue's merge/closure.
