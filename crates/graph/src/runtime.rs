@@ -3055,6 +3055,17 @@ mod tests {
         lease.read(0, 1).to_vec()
     }
 
+    fn old_reduce_case(frames: usize, inputs: &[Vec<f32>]) -> Vec<f32> {
+        let mut lease = single_lease(frames, inputs.len() + 1);
+        let refs: Vec<u32> = (2..=inputs.len() as u32 + 1).collect();
+        lease.write(0, 1).fill(f32::from_bits(0x7f7f_7f7f));
+        for (index, input) in inputs.iter().enumerate() {
+            lease.write(0, refs[index]).copy_from_slice(input);
+        }
+        old_reduce_plane(&mut lease, 0, 1, &refs);
+        lease.read(0, 1).to_vec()
+    }
+
     /// Frozen pre-RT-3 oracle: the old two-kernel left-associated reduction.
     fn old_reduce_plane(lease: &mut ArenaLease, plane: usize, out: u32, inputs: &[u32]) {
         match inputs {
@@ -3076,6 +3087,138 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn assert_width_matches_old<L: Lane>() {
+        let hostile = [
+            -0.0,
+            0.0,
+            f32::from_bits(1),
+            f32::from_bits(0x8000_0001),
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::from_bits(0x7fc0_4201),
+            16_777_216.0,
+            1.0,
+            -16_777_216.0,
+        ];
+        for frames in [
+            1,
+            L::WIDTH.saturating_sub(1).max(1),
+            L::WIDTH,
+            L::WIDTH + 1,
+            L::WIDTH * 3 + 1,
+            128,
+        ] {
+            let inputs: Vec<Vec<f32>> = (0..9)
+                .map(|input| {
+                    (0..frames)
+                        .map(|frame| hostile[(input + frame) % hostile.len()])
+                        .collect()
+                })
+                .collect();
+            let mut actual = single_lease(frames, 11);
+            let mut old = single_lease(frames, 11);
+            let ids: Vec<u32> = (2..11).collect();
+            for (index, values) in inputs.iter().enumerate() {
+                actual.write(0, ids[index]).copy_from_slice(values);
+                old.write(0, ids[index]).copy_from_slice(values);
+            }
+            reduce_many::<L>(&mut actual, 0, 1, ids[0], ids[1], &ids[2..]);
+            {
+                let (output, first, second) = old.write_read2(0, 1, ids[0], ids[1]);
+                sum2_block::<L>(output, first, second);
+            }
+            for id in &ids[2..] {
+                let (output, input) = old.write_read(0, 1, *id);
+                sum_into_block::<L>(output, input);
+            }
+            assert_eq!(
+                actual
+                    .read(0, 1)
+                    .iter()
+                    .map(|x| x.to_bits())
+                    .collect::<Vec<_>>(),
+                old.read(0, 1)
+                    .iter()
+                    .map(|x| x.to_bits())
+                    .collect::<Vec<_>>(),
+                "width {} frames {frames}",
+                L::WIDTH
+            );
+        }
+    }
+
+    #[test]
+    fn every_lane_width_matches_the_frozen_old_kernel_on_hostile_values() {
+        assert_width_matches_old::<f32>();
+        assert_width_matches_old::<lane::Simd4>();
+        assert_width_matches_old::<lane::Simd8>();
+    }
+
+    #[test]
+    fn reduction_preserves_repeated_silence_muted_self_and_unrelated_buffers() {
+        const FRAMES: usize = 5;
+        let build = || stereo_lease(FRAMES, 6);
+        let mut actual = build();
+        let mut old = build();
+        for lease in [&mut actual, &mut old] {
+            lease
+                .write(0, 2)
+                .copy_from_slice(&[1.0, 2.0, 3.0, 4.0, 5.0]);
+            lease
+                .write(1, 2)
+                .copy_from_slice(&[-1.0, -2.0, -3.0, -4.0, -5.0]);
+            lease.write(0, 3).fill(99.0);
+            lease.write(1, 3).fill(-99.0);
+            lease.write(0, 4).fill(0.5);
+            lease.write(1, 4).fill(-0.25);
+            lease.write(0, 1).fill(f32::from_bits(0x7fc0_4202));
+            lease.write(1, 1).fill(f32::from_bits(0xffc0_4202));
+            lease.write(0, 5).fill(f32::from_bits(0x7fc0_4203));
+            lease.write(1, 5).fill(f32::from_bits(0xffc0_4203));
+            lease.set_muted(3, true);
+        }
+        let ids = [2, 2, 0, 3, 4];
+        for plane in 0..2 {
+            reduce_plane(&mut actual, plane, 1, &ids);
+            old_reduce_plane(&mut old, plane, 1, &ids);
+        }
+        for plane in 0..2 {
+            assert_eq!(
+                actual
+                    .read(plane, 1)
+                    .iter()
+                    .map(|x| x.to_bits())
+                    .collect::<Vec<_>>(),
+                old.read(plane, 1)
+                    .iter()
+                    .map(|x| x.to_bits())
+                    .collect::<Vec<_>>()
+            );
+            assert!(
+                actual
+                    .read(plane, 5)
+                    .iter()
+                    .all(|x| x.to_bits() == if plane == 0 { 0x7fc0_4203 } else { 0xffc0_4203 })
+            );
+        }
+        let mut self_alias = single_lease(2, 2);
+        self_alias
+            .write(0, 2)
+            .copy_from_slice(&[-0.0, f32::from_bits(0x7fc0_4204)]);
+        reduce_plane(&mut self_alias, 0, 2, &[2]);
+        self_alias.set_muted(2, true);
+        reduce_plane(&mut self_alias, 0, 2, &[2]);
+        self_alias.set_muted(2, false);
+        assert_eq!(
+            self_alias
+                .read(0, 2)
+                .iter()
+                .map(|x| x.to_bits())
+                .collect::<Vec<_>>(),
+            vec![(-0.0f32).to_bits(), 0x7fc0_4204]
+        );
     }
 
     /// One lease that owns `buffers` buffers of one plane, as the sequential executor does.
@@ -3786,6 +3929,54 @@ mod tests {
                 "left-to-right must round away the second epsilon"
             );
         }
+
+        let order = [16_777_216.0_f32, 1.0, -16_777_216.0];
+        let old = (order[0] + order[1]) + order[2];
+        let wrong = order[0] + (order[1] + order[2]);
+        assert_ne!(old.to_bits(), wrong.to_bits());
+        let got = reduce_case(1, &order.map(|value| vec![value]));
+        let old_kernel = old_reduce_case(1, &order.map(|value| vec![value]));
+        assert_eq!(old_kernel[0].to_bits(), old.to_bits());
+        assert_eq!(got[0].to_bits(), old_kernel[0].to_bits());
+
+        let many = [
+            16_777_216.0_f32,
+            1.0,
+            -16_777_216.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            16_777_216.0,
+            1.0,
+            -16_777_216.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        ];
+        let old = many.into_iter().reduce(|a, b| a + b).expect("inputs");
+        let first = many[..8]
+            .iter()
+            .copied()
+            .reduce(|a, b| a + b)
+            .expect("group");
+        let second = many[8..]
+            .iter()
+            .copied()
+            .reduce(|a, b| a + b)
+            .expect("group");
+        let wrong_subtotal = first + second;
+        assert_ne!(old.to_bits(), wrong_subtotal.to_bits());
+        let inputs = many.map(|value| vec![value]);
+        let old_kernel = old_reduce_case(1, &inputs);
+        assert_eq!(old_kernel[0].to_bits(), old.to_bits());
+        assert_eq!(
+            reduce_case(1, &inputs)[0].to_bits(),
+            old_kernel[0].to_bits()
+        );
 
         // (b) Seeded corpora at several fan-ins, against the one-line scalar reference.
         let mut state = 0x6d69_736fu32;
