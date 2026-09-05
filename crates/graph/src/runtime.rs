@@ -47,9 +47,8 @@ use effect_contract::{
     BypassShunt, ChannelSymmetryWitness, EffectControlLane, EffectProcessBlock, ObservationLane,
     ObservationSample, PreparedAutomationSpan, PreparedNativeEffect,
 };
-use lane::kernels::{
-    mix2x2_block, ordered_accumulate_block, pdc_delay_block, sum_into_block, sum2_block,
-};
+use lane::Lane;
+use lane::kernels::{mix2x2_block, ordered_accumulate_block, pdc_delay_block, sum_into_block};
 use rack::{BankChain, BankMembers, BankPlaneViews, FoldCohort};
 
 use crate::{
@@ -98,15 +97,46 @@ fn reduce_plane(lease: &mut ArenaLease, plane: usize, out: u32, inputs: &[u32]) 
             }
         }
         [first, second, rest @ ..] => {
-            {
-                let (output, a, b) = lease.write_read2(plane, out, *first, *second);
-                sum2_block::<FrameLane>(output, a, b);
-            }
-            for next in rest {
-                let (output, input) = lease.write_read(plane, out, *next);
-                sum_into_block::<FrameLane>(output, input);
-            }
+            reduce_many::<FrameLane>(lease, plane, out, *first, *second, rest);
         }
+    }
+}
+
+#[inline(always)]
+fn reduce_many<L: lane::Lane>(
+    lease: &mut ArenaLease,
+    plane: usize,
+    out: u32,
+    first: u32,
+    second: u32,
+    rest: &[u32],
+) {
+    let frames = lease.frames();
+    let vectored = frames - frames % L::WIDTH;
+    let mut index = 0;
+    while index < vectored {
+        let mut acc = {
+            let source = lease.read(plane, first);
+            L::load(&source[index..])
+        };
+        for input in std::iter::once(second).chain(rest.iter().copied()) {
+            let value = {
+                let source = lease.read(plane, input);
+                L::load(&source[index..])
+            };
+            acc = acc.add(value);
+        }
+        acc.store(&mut lease.write(plane, out)[index..]);
+        index += L::WIDTH;
+    }
+    while index < frames {
+        let mut acc = <f32 as lane::Lane>::load(&lease.read(plane, first)[index..]);
+        for input in std::iter::once(second).chain(rest.iter().copied()) {
+            let value = <f32 as lane::Lane>::load(&lease.read(plane, input)[index..]);
+            acc = acc.add(value);
+        }
+        acc.store(&mut lease.write(plane, out)[index..]);
+        index += 1;
     }
 }
 
@@ -2935,6 +2965,7 @@ fn cohort_runs(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lane::kernels::sum2_block;
 
     /// The node's cached witness and the line's own answer are the same fact (#210 phase 2).
     ///
@@ -3024,6 +3055,240 @@ mod tests {
         lease.read(0, 1).to_vec()
     }
 
+    fn old_reduce_case(frames: usize, inputs: &[Vec<f32>]) -> Vec<f32> {
+        let mut lease = single_lease(frames, inputs.len() + 1);
+        let refs: Vec<u32> = (2..=inputs.len() as u32 + 1).collect();
+        lease.write(0, 1).fill(f32::from_bits(0x7f7f_7f7f));
+        for (index, input) in inputs.iter().enumerate() {
+            lease.write(0, refs[index]).copy_from_slice(input);
+        }
+        old_reduce_plane(&mut lease, 0, 1, &refs);
+        lease.read(0, 1).to_vec()
+    }
+
+    /// Frozen pre-RT-3 oracle: the old two-kernel left-associated reduction.
+    fn old_reduce_plane(lease: &mut ArenaLease, plane: usize, out: u32, inputs: &[u32]) {
+        match inputs {
+            [] => lease.write(plane, out).fill(0.0),
+            [single] => {
+                if *single != out {
+                    let (output, input) = lease.write_read(plane, out, *single);
+                    output.copy_from_slice(input);
+                }
+            }
+            [first, second, rest @ ..] => {
+                {
+                    let (output, a, b) = lease.write_read2(plane, out, *first, *second);
+                    sum2_block::<FrameLane>(output, a, b);
+                }
+                for next in rest {
+                    let (output, input) = lease.write_read(plane, out, *next);
+                    sum_into_block::<FrameLane>(output, input);
+                }
+            }
+        }
+    }
+
+    fn assert_width_matches_old<L: Lane>() {
+        #[derive(Clone, Copy, Debug)]
+        enum Family {
+            Finite,
+            NegativeZero,
+            SmallNormal,
+            Subnormal,
+            Infinity,
+            Nan,
+        }
+
+        let _fp_env = lane::fpenv::CanonicalFpEnv::enter();
+        for frames in [
+            1,
+            L::WIDTH.saturating_sub(1).max(1),
+            L::WIDTH,
+            L::WIDTH + 1,
+            L::WIDTH * 3 + 1,
+            128,
+        ] {
+            for family in [
+                Family::Finite,
+                Family::NegativeZero,
+                Family::SmallNormal,
+                Family::Subnormal,
+                Family::Infinity,
+                Family::Nan,
+            ] {
+                let inputs: Vec<Vec<f32>> = (0..9)
+                    .map(|input| {
+                        (0..frames)
+                            .map(|frame| match family {
+                                Family::Finite => match (frame % 2, input) {
+                                    (0, 0) => 2.0,
+                                    (0, 1) => -0.5,
+                                    (0, 2) => 0.25,
+                                    (1, 0) => 16_777_216.0,
+                                    (1, 1) => 1.0,
+                                    (1, 2) => -16_777_216.0,
+                                    _ => 0.0,
+                                },
+                                Family::NegativeZero => -0.0,
+                                Family::SmallNormal => {
+                                    if input < 2 {
+                                        f32::MIN_POSITIVE
+                                    } else {
+                                        0.0
+                                    }
+                                }
+                                Family::Subnormal => {
+                                    if input < 2 {
+                                        f32::from_bits(1)
+                                    } else {
+                                        0.0
+                                    }
+                                }
+                                Family::Infinity => match (frame % 2, input) {
+                                    (0, 0) => f32::INFINITY,
+                                    (0, 1) => 1.0,
+                                    (1, 0) => f32::NEG_INFINITY,
+                                    (1, 1) => -1.0,
+                                    _ => 0.0,
+                                },
+                                Family::Nan => {
+                                    if input == 0 {
+                                        f32::from_bits(0x7fc0_4201)
+                                    } else {
+                                        0.0
+                                    }
+                                }
+                            })
+                            .collect()
+                    })
+                    .collect();
+                let mut actual = single_lease(frames, 11);
+                let mut old = single_lease(frames, 11);
+                let ids: Vec<u32> = (2..11).collect();
+                for (index, values) in inputs.iter().enumerate() {
+                    actual.write(0, ids[index]).copy_from_slice(values);
+                    old.write(0, ids[index]).copy_from_slice(values);
+                }
+                reduce_many::<L>(&mut actual, 0, 1, ids[0], ids[1], &ids[2..]);
+                {
+                    let (output, first, second) = old.write_read2(0, 1, ids[0], ids[1]);
+                    sum2_block::<L>(output, first, second);
+                }
+                for id in &ids[2..] {
+                    let (output, input) = old.write_read(0, 1, *id);
+                    sum_into_block::<L>(output, input);
+                }
+                for (frame, expected) in old.read(0, 1).iter().enumerate() {
+                    let expected_bits = match family {
+                        Family::Finite if frame % 2 == 0 => 1.75_f32.to_bits(),
+                        Family::Finite => 0.0_f32.to_bits(),
+                        Family::NegativeZero => (-0.0_f32).to_bits(),
+                        Family::SmallNormal => 0x0100_0000,
+                        Family::Subnormal => 2,
+                        Family::Infinity if frame % 2 == 0 => f32::INFINITY.to_bits(),
+                        Family::Infinity => f32::NEG_INFINITY.to_bits(),
+                        Family::Nan => {
+                            assert!(expected.is_nan(), "old NaN family output at frame {frame}");
+                            expected.to_bits()
+                        }
+                    };
+                    assert_eq!(
+                        expected.to_bits(),
+                        expected_bits,
+                        "old {family:?} category at width {} frames {frames} frame {frame}",
+                        L::WIDTH
+                    );
+                }
+                assert_eq!(
+                    actual
+                        .read(0, 1)
+                        .iter()
+                        .map(|x| x.to_bits())
+                        .collect::<Vec<_>>(),
+                    old.read(0, 1)
+                        .iter()
+                        .map(|x| x.to_bits())
+                        .collect::<Vec<_>>(),
+                    "{family:?} width {} frames {frames}",
+                    L::WIDTH
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_lane_width_matches_the_frozen_old_kernel_on_hostile_values() {
+        assert_width_matches_old::<f32>();
+        assert_width_matches_old::<lane::Simd4>();
+        assert_width_matches_old::<lane::Simd8>();
+    }
+
+    #[test]
+    fn reduction_preserves_repeated_silence_muted_self_and_unrelated_buffers() {
+        const FRAMES: usize = 5;
+        let build = || stereo_lease(FRAMES, 6);
+        let mut actual = build();
+        let mut old = build();
+        for lease in [&mut actual, &mut old] {
+            lease
+                .write(0, 2)
+                .copy_from_slice(&[1.0, 2.0, 3.0, 4.0, 5.0]);
+            lease
+                .write(1, 2)
+                .copy_from_slice(&[-1.0, -2.0, -3.0, -4.0, -5.0]);
+            lease.write(0, 3).fill(99.0);
+            lease.write(1, 3).fill(-99.0);
+            lease.write(0, 4).fill(0.5);
+            lease.write(1, 4).fill(-0.25);
+            lease.write(0, 1).fill(f32::from_bits(0x7fc0_4202));
+            lease.write(1, 1).fill(f32::from_bits(0xffc0_4202));
+            lease.write(0, 5).fill(f32::from_bits(0x7fc0_4203));
+            lease.write(1, 5).fill(f32::from_bits(0xffc0_4203));
+            lease.set_muted(3, true);
+        }
+        let ids = [2, 2, 0, 3, 4];
+        for plane in 0..2 {
+            reduce_plane(&mut actual, plane, 1, &ids);
+            old_reduce_plane(&mut old, plane, 1, &ids);
+        }
+        for plane in 0..2 {
+            assert_eq!(
+                actual
+                    .read(plane, 1)
+                    .iter()
+                    .map(|x| x.to_bits())
+                    .collect::<Vec<_>>(),
+                old.read(plane, 1)
+                    .iter()
+                    .map(|x| x.to_bits())
+                    .collect::<Vec<_>>()
+            );
+            assert!(
+                actual
+                    .read(plane, 5)
+                    .iter()
+                    .all(|x| x.to_bits() == if plane == 0 { 0x7fc0_4203 } else { 0xffc0_4203 })
+            );
+        }
+        let mut self_alias = single_lease(2, 2);
+        self_alias
+            .write(0, 2)
+            .copy_from_slice(&[-0.0, f32::from_bits(0x7fc0_4204)]);
+        reduce_plane(&mut self_alias, 0, 2, &[2]);
+        self_alias.set_muted(2, true);
+        reduce_plane(&mut self_alias, 0, 2, &[2]);
+        self_alias.set_muted(2, false);
+        assert_eq!(
+            self_alias
+                .read(0, 2)
+                .iter()
+                .map(|x| x.to_bits())
+                .collect::<Vec<_>>(),
+            vec![(-0.0f32).to_bits(), 0x7fc0_4204]
+        );
+    }
+
     /// One lease that owns `buffers` buffers of one plane, as the sequential executor does.
     fn single_lease(frames: usize, buffers: usize) -> ArenaLease {
         let mut builder = ArenaLeaseSetBuilder::new(
@@ -3100,8 +3365,8 @@ mod tests {
             right.fill(-(lane as f32 + 1.0));
             mix2x2_block::<FrameLane>(left, right, coefficients);
         }
-        reduce_plane(&mut oracle_lease, 0, ARENA_BASE, &oracle_routes);
-        reduce_plane(&mut oracle_lease, 1, ARENA_BASE, &oracle_routes);
+        old_reduce_plane(&mut oracle_lease, 0, ARENA_BASE, &oracle_routes);
+        old_reduce_plane(&mut oracle_lease, 1, ARENA_BASE, &oracle_routes);
         let (oracle_left, oracle_right) = oracle_lease.read_stereo(ARENA_BASE);
         let expected_left = oracle_left.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
         let expected_right = oracle_right.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
@@ -3264,8 +3529,8 @@ mod tests {
                 right.copy_from_slice(&tiles[index].1);
                 mix2x2_block::<FrameLane>(left, right, coefficients[index]);
             }
-            reduce_plane(&mut lease, 0, master, &routes);
-            reduce_plane(&mut lease, 1, master, &routes);
+            old_reduce_plane(&mut lease, 0, master, &routes);
+            old_reduce_plane(&mut lease, 1, master, &routes);
             let (oracle_left, oracle_right) = lease.read_stereo(master);
             let oracle: (Vec<u32>, Vec<u32>) = (
                 oracle_left.iter().map(|value| value.to_bits()).collect(),
@@ -3733,9 +3998,57 @@ mod tests {
             );
         }
 
+        let order = [16_777_216.0_f32, 1.0, -16_777_216.0];
+        let old = (order[0] + order[1]) + order[2];
+        let wrong = order[0] + (order[1] + order[2]);
+        assert_ne!(old.to_bits(), wrong.to_bits());
+        let got = reduce_case(1, &order.map(|value| vec![value]));
+        let old_kernel = old_reduce_case(1, &order.map(|value| vec![value]));
+        assert_eq!(old_kernel[0].to_bits(), old.to_bits());
+        assert_eq!(got[0].to_bits(), old_kernel[0].to_bits());
+
+        let many = [
+            16_777_216.0_f32,
+            1.0,
+            -16_777_216.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            16_777_216.0,
+            1.0,
+            -16_777_216.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        ];
+        let old = many.into_iter().reduce(|a, b| a + b).expect("inputs");
+        let first = many[..8]
+            .iter()
+            .copied()
+            .reduce(|a, b| a + b)
+            .expect("group");
+        let second = many[8..]
+            .iter()
+            .copied()
+            .reduce(|a, b| a + b)
+            .expect("group");
+        let wrong_subtotal = first + second;
+        assert_ne!(old.to_bits(), wrong_subtotal.to_bits());
+        let inputs = many.map(|value| vec![value]);
+        let old_kernel = old_reduce_case(1, &inputs);
+        assert_eq!(old_kernel[0].to_bits(), old.to_bits());
+        assert_eq!(
+            reduce_case(1, &inputs)[0].to_bits(),
+            old_kernel[0].to_bits()
+        );
+
         // (b) Seeded corpora at several fan-ins, against the one-line scalar reference.
         let mut state = 0x6d69_736fu32;
-        for count in [1usize, 2, 3, 5, 9, 64] {
+        for count in [1usize, 2, 3, 5, 8, 9, 64, 65, 129] {
             for frames in [1usize, 7, 64, 128, 512] {
                 let inputs: Vec<Vec<f32>> = (0..count)
                     .map(|_| (0..frames).map(|_| lcg(&mut state)).collect())

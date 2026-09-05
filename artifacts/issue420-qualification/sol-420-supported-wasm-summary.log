@@ -1,0 +1,12 @@
+source_sha=51e2aed211b30523076e0e8dd07973b13b57dc11
+scalar18_target=/tmp/sol420-scalar18.A9wwJl terminal_status=0 packages=18 profile=release flags=-simd128
+scalar_cfg_rustc_status=0 simd128_absence_scan_status=1
+simd_smoke_target=/tmp/sol420-simd-smoke.ReuSrB terminal_status=0 packages=target-smoke,protocol profile=dev flags=+simd128
+simd_cfg_rustc_status=0 simd128_presence_scan_status=0
+scalar=/tmp/sol420-protocol-scalar.DRt9zz
+simd=/tmp/sol420-protocol-simd.h3rqpF
+protocol_scalar_build=0 export_decoder=0 export_scan=0 execution=0 exact_result=i32:0
+protocol_simd_build=0 export_decoder=0 export_scan=0 execution=0 exact_result=i32:0
+nonlto_target=/tmp/sol420-nonlto.m3INqF build_status=0 profile=release CARGO_PROFILE_RELEASE_LTO=false flags=-simd128
+nonlto_population families=3 archives=3 objects=3 find_statuses=0 sort_statuses=0 list_statuses=0 member_reads=0 decoders=0 atomic_scan_statuses=1(clean-no-match) reconciliation=0
+scope_limit=atomic inspection applies only to complete named non-LTO engine/source/target_smoke rlib object populations; no claim about fat-LTO binaries/full AudioWorklet

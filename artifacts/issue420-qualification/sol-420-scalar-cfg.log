@@ -1,0 +1,2 @@
+cfg_status=0
+scalar_cfg_simd128_scan_status=1 (1=required absence)
