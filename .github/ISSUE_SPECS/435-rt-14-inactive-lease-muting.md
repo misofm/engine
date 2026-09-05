@@ -115,3 +115,7 @@ Accepted code/test work should remain. After this one coherent correction, root 
 No source/Git/GitHub mutation, builds/tests or timing performed during this review.
 
 Root authorizes Sol attempt 2 for this safety-proof correction only. Runtime and test behavior remain accepted; source/docs checks are proportional, followed by immutable qualification only after Astra PASS. Root additional allocation/lane logs are `/tmp/engine-435-root-allocation.log` and `/tmp/engine-435-root-lane-policy.log`.
+
+## Sol attempt 2 safety-proof correction
+
+Sol changed only disjoint-module and realtime-policy prose: I1/I2 are builder-proved structural invariants, and E1 separately requires execution happens-before and no foreign write/shared-read overlap. Production satisfies E1 through exclusive sequential execution; retained multi-lease users must establish it independently. Unsafe citations and obsolete worker/coordinator prose are updated consistently. Runtime and test behavior are unchanged. Root retained proportional fmt/diff/realtime-policy PASS in `/tmp/engine-435-sol2-prose-checks.log`. Exact source is checkpointed for Astra re-review; full qualification remains pending.

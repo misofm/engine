@@ -33,12 +33,12 @@ can be reintroduced by accident; a future multicore render must re-argue this ex
 scratch, and the burden is the same one #100 carried.
 
 What survives, because the *sequential* executor depends on it: the plan-owned disjoint audio
-arena in `crates/engine/src/realtime/disjoint.rs` and its lease API. Invariants I1 and
+arena in `crates/engine/src/realtime/disjoint.rs` and its lease API. Structural invariants I1 and
 I2 are still proved at bind by `ArenaLeaseSetBuilder::finish`, and they are still what makes node
-semantics have exactly one implementation of *where the audio is*. I3 and I4 described a
-multi-wave issue discipline and a coordinator that could decline to own a parcel; with one
-executor and one lease over the whole coloured arena, both are trivially satisfied rather than
-enforced.
+semantics have exactly one implementation of *where the audio is*. The separate E1 execution
+obligation requires a foreign writer to finish and happen-before its consumer reads. Production
+satisfies E1 through exclusive sequential lease execution; any retained multi-lease use must
+provide the same ordering and prevent shared reads from overlapping foreign writes.
 
 The sequential lease no longer carries scheduler-era wave or mute state: `ArenaLease::wave`,
 `set_muted`, and `is_muted` are retired public Rust methods. The builder's wave remains because
@@ -97,8 +97,11 @@ arena, which the sequential executor still renders through. Its `unsafe impl Syn
 slice construction are justified by invariants stated in the module documentation and proved once
 at bind by `ArenaLeaseSetBuilder::finish`: **I1** every buffer is writable by at most one lease for
 the life of the plan (buffers are never recycled) and **I2** a lease reads only buffers produced
-strictly earlier or by itself. I3 and I4 constrained the removed multi-wave scheduler and are now
-trivially satisfied: there is one executor holding one lease. `crates/graph` remains
+strictly earlier or by itself. Wave order expresses a dependency but does not synchronize access.
+**E1** therefore requires a foreign writer's exclusive access to end and happen-before a consumer
+reads that buffer. The single-thread executor meets E1 by exclusive sequential execution; retained
+multi-lease uses must establish it independently. Concurrent leases may write I1-disjoint sets and
+join before any inspection. `crates/graph` remains
 entirely free of unsafe code. A second test-only exception is
 `tools/audit/src/realtime.rs`, whose audited global allocator forwards unchanged
 layouts to `System` and terminates without unwinding if allocation/free is attempted in render.

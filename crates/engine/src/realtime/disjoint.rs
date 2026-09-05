@@ -1,23 +1,25 @@
 //! Plan-owned disjoint audio arena for the sequential render executor.
 //!
-//! The render executor consumes one prepared lease sequentially. Before
-//! issue #100 each parcel owned a private arena and the coordinator copied every inter-parcel
-//! edge between waves, which serialised all data movement onto the render thread. The pull model
-//! instead gives the whole plan **one** arena and lets each consuming parcel read its producers'
-//! buffers in place, on the worker that needs them.
+//! The render executor consumes one prepared lease sequentially. Before issue #100, plans used
+//! separate arenas and copied edges between them. The pull model instead gives the whole plan
+//! **one** arena and lets consumers read producer buffers in place.
 //!
-//! That requires one allocation to be reachable, mutably, from several threads at once, which is
-//! why this module owns the only `unsafe` on the render path. Soundness does not depend on any
-//! worker being on time; it is a property of the lease set, proved once at bind by
-//! [`ArenaLeaseSetBuilder::finish`]:
+//! That requires one allocation to be reachable through several leases, which is why this module
+//! owns the only `unsafe` on the render path. [`ArenaLeaseSetBuilder::finish`] proves the two
+//! structural invariants:
 //!
 //! * **I1 — writes are globally unique.** Every buffer is writable by at most one lease, for the
 //!   whole life of the plan. Buffers are never recycled, so no two leases (in the same wave or in
 //!   different waves) can ever address the same words mutably.
 //! * **I2 — reads are strictly earlier.** A lease may read a buffer only if that buffer is
-//!   written by a lease of a strictly smaller wave, or by the reading lease itself. A producer of
-//!   an earlier wave has finished, and its parcel has been recovered by the coordinator, before
-//!   any consumer of a later wave is issued.
+//!   written by a lease of a strictly smaller wave, or by the reading lease itself. Wave order is
+//!   a dependency relation; it is not by itself synchronization.
+//!
+//! All execution must also satisfy **E1 — ordered access**: a foreign writer's exclusive access
+//! ends and happens-before a consuming lease reads that buffer. The production executor
+//! discharges E1 by using its single prepared lease exclusively and sequentially. Any retained
+//! multi-lease use must provide the same happens-before edge and must not overlap a foreign write
+//! with a read. Concurrent leases may write their I1-disjoint sets and join before inspection.
 //!
 //! Buffer `0` is the silence buffer. No lease may write it, so it stays zero for the life of the
 //! arena.
@@ -65,7 +67,7 @@ pub enum DisjointArenaError {
     CapacityOverflow,
 }
 
-/// Flat planar `f32` storage shared by every parcel of one prepared plan.
+/// Flat planar `f32` storage shared by every lease of one prepared plan.
 ///
 /// See the module documentation for the invariants that make the shared mutable access sound.
 /// Instances are produced only by [`ArenaLeaseSetBuilder::finish`].
@@ -77,9 +79,10 @@ pub struct DisjointArena {
 }
 
 // SAFETY: the arena hands out access only through `ArenaLease`, and a lease set is constructed
-// only by `ArenaLeaseSetBuilder::finish`, which proves I1 and I2 (module documentation). The
-// sequential executor retains the lease while it reads and writes, so no concurrent access is
-// introduced. Under I1 no two leases can mutably alias, and under I2 no read can overlap a write.
+// only by `ArenaLeaseSetBuilder::finish`, which proves I1 and I2 (module documentation). I1
+// prevents write/write aliasing. E1 is the separate execution obligation that prevents a foreign
+// write from overlapping a read; the production executor meets it through exclusive sequential
+// lease use, and any retained multi-lease executor must establish the documented happens-before.
 unsafe impl Sync for DisjointArena {}
 // SAFETY: `f32` is `Send`, and a lease carries no thread-affine state.
 unsafe impl Send for DisjointArena {}
@@ -131,10 +134,9 @@ pub type ArenaStereoPair<'a> = ((&'a mut [f32], &'a mut [f32]), (&'a [f32], &'a 
 /// Both writable planes of one arena buffer.
 pub type ArenaStereoPlanes<'a> = (&'a mut [f32], &'a mut [f32]);
 
-/// One parcel's checked view of the shared arena.
+/// One executor step's checked view of the shared arena.
 ///
-/// The lease is the only way to reach arena storage. It is `Send` (it travels with its parcel to
-/// an auxiliary worker) and deliberately not `Sync`.
+/// The lease is the only way to reach arena storage. It is `Send` and deliberately not `Sync`.
 pub struct ArenaLease {
     arena: Arc<DisjointArena>,
     /// Per buffer: bit 0 writable by this lease.
@@ -195,11 +197,11 @@ impl ArenaLease {
     #[must_use]
     pub fn read(&self, plane: usize, buffer: u32) -> &[f32] {
         let start = self.arena.offset(plane, self.effective(buffer));
-        // SAFETY: I1/I2/I3/I4. `start..start + frames` is in bounds by construction (the builder
+        // SAFETY: I1/I2/E1. `start..start + frames` is in bounds by construction (the builder
         // reserved every buffer and sized the allocation `planes * buffers * frames`), and no
         // other lease may write those words while this shared reference lives: either the buffer
-        // is this lease's own, or it belongs to a strictly earlier wave whose parcels have been
-        // recovered, or it is the never-written silence buffer.
+        // is this lease's own, E1 has ended and ordered its foreign writer's access, or it is the
+        // never-written silence buffer.
         unsafe {
             core::slice::from_raw_parts(
                 self.arena.cells[start].get().cast_const().cast::<f32>(),
@@ -288,7 +290,8 @@ impl ArenaLease {
             // ranges lie inside that allocation. Distinct buffer IDs make every lane range
             // spatially disjoint (I1); different planes are disjoint too. `&mut self` ties every
             // returned lifetime to this exclusive lease borrow, while the lease's checked write
-            // set and builder construction retain I1--I4 for the plan lifetime.
+            // set retains I1, while exclusive borrowing prevents references from this lease from
+            // overlapping these writes; E1 governs any foreign reads and writes.
             unsafe {
                 (
                     core::slice::from_raw_parts_mut((*cells.add(left)).get(), frames),
@@ -309,7 +312,7 @@ impl ArenaLease {
             self.arena.offset(plane, out_index),
             self.arena.offset(plane, in_index),
         );
-        // SAFETY: I1 for the mutable range and I2/I3/I4 for the shared range, as in `write` and
+        // SAFETY: I1 for the mutable range and I2/E1 for the shared range, as in `write` and
         // `read`; the `debug_assert` above plus distinct buffer indices make the two ranges
         // disjoint (buffers never overlap within a plane).
         unsafe {
@@ -343,7 +346,7 @@ impl ArenaLease {
             self.arena.offset(plane, first_index),
             self.arena.offset(plane, second_index),
         );
-        // SAFETY: I1 for the mutable range, I2/I3/I4 for the two shared ranges. The two shared
+        // SAFETY: I1 for the mutable range, I2/E1 for the two shared ranges. The two shared
         // ranges may be the same buffer, which is sound: they are shared references. Neither
         // can be the output buffer.
         unsafe {
@@ -382,7 +385,7 @@ impl ArenaLease {
             self.arena.offset(0, in_index),
             self.arena.offset(1, in_index),
         ];
-        // SAFETY: I1 for the two mutable ranges (same buffer, two planes: disjoint), I2/I3/I4 for
+        // SAFETY: I1 for the two mutable ranges (same buffer, two planes: disjoint), I2/E1 for
         // the two shared ranges, and `out_index != in_index` keeps the two pairs apart.
         unsafe {
             (
@@ -424,7 +427,7 @@ struct PendingLease {
     reads: Vec<u32>,
 }
 
-/// Builds one plan's arena and its per-parcel leases, proving I1 and I2 before publication.
+/// Builds one plan's arena and its execution leases, proving I1 and I2 before publication.
 pub struct ArenaLeaseSetBuilder {
     planes: usize,
     frames: usize,
@@ -459,7 +462,7 @@ impl ArenaLeaseSetBuilder {
         self.reserved
     }
 
-    /// Declare one parcel's lease and return its index in the finished set.
+    /// Declare one execution lease and return its index in the finished set.
     pub fn lease(&mut self, wave: usize, writes: Vec<u32>, reads: Vec<u32>) -> usize {
         self.leases.push(PendingLease {
             wave,
@@ -784,7 +787,7 @@ mod tests {
     /// E8. Concurrent leases never touch each other's words.
     ///
     /// Every lease fills every word it owns with its own tag, on its own thread, with staggered
-    /// spins so the writes genuinely overlap. Once the wave is joined the coordinator checks the
+    /// spins so the writes genuinely overlap. Once all writers join, the test checks the
     /// whole arena word by word: each buffer must carry exactly its owner's tag, and the silence
     /// buffer must still be zero. Under Miri or a thread sanitiser this is also the data-race
     /// probe for `unsafe impl Sync`.
@@ -832,7 +835,7 @@ mod tests {
                 .collect();
             leases = handles
                 .into_iter()
-                .map(|handle| handle.join().expect("lease worker"))
+                .map(|handle| handle.join().expect("lease writer"))
                 .collect();
             for (index, buffers) in owned.iter().enumerate() {
                 let tag = (round * LEASES + index) as f32;
