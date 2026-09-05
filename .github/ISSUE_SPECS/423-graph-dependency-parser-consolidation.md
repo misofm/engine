@@ -104,3 +104,7 @@ I independently ran the complete helper suite: exit 0, `/tmp/astra-423-attempt2-
 Root may proceed with retained unchanged-count workspace qualification, synchronized final evidence, actual pushed PR Astra review and required CI. #423 remains open until delivery is accepted upstream. Parent #401 may close only when the accepted seven-gate children plus this residual consolidation are all remotely complete; #306 and the broader audit remain open for their other obligations. No new CI call, artifact or timing work is needed for this tooling change.
 
 Review used read-only source/spec/Git/log inspection and the existing focused helper shell suite. No Cargo, timing, repository/GitHub mutation or additional framework.
+
+## Completed workspace delivery evidence
+
+Root `cargo test --locked --workspace` at accepted source/evidence candidate `4a56e74d` terminated exit 0: 274 successful result blocks, 1,559 passed, zero failed, 24 ignored, exactly matching the delivered #417 baseline (`54748778` source, merged main `1cfd49d2929b2a75f6054badebfa9979c069ae71`). Logs `/tmp/engine-423-candidate-workspace.log` and `/tmp/engine-417-candidate-workspace.log` reach their final doctests. Later changes are numbered evidence/parent accounting only; the focused suite evidence and source PASS remain applicable. All five actual parser callers were checked in the delivered tree. Actual PR Astra review and required CI remain before closing #423 and parent #401 jointly.
