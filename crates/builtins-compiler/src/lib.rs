@@ -4535,7 +4535,7 @@ mod tests {
         dispatch: Backend,
         between_render_calls: bool,
         post_fader_barrier: bool,
-    ) -> (Vec<Vec<u32>>, usize) {
+    ) -> (Vec<Vec<u32>>, usize, Vec<MeterSnapshot>) {
         let compiled = n_track_session(n);
         let controls = (0..n)
             .map(|index| TrackControlRequest {
@@ -4633,11 +4633,24 @@ mod tests {
         }
         if post_fader_barrier {
             let meter = bound.meter_consumers.first_mut().expect("post-fader meter");
-            let mut windows = 0;
-            while meter.consumer.try_pop().is_ok() {
-                windows += 1;
+            let mut windows = Vec::new();
+            while let Ok(snapshot) = meter.consumer.try_pop() {
+                windows.push(snapshot);
             }
-            assert!(windows > 0, "post-fader meter published nonempty windows");
+            assert!(
+                !windows.is_empty(),
+                "post-fader meter published nonempty windows"
+            );
+            let meter_snapshots = windows;
+            let bits = captures
+                .into_iter()
+                .map(|capture| {
+                    let taken = capture.lock().expect("harness capture").clone();
+                    assert_eq!(taken.len(), frames * 2 * HARNESS_BLOCKS as usize);
+                    taken
+                })
+                .collect();
+            return (bits, bank_count, meter_snapshots);
         }
         let bits = captures
             .into_iter()
@@ -4647,11 +4660,12 @@ mod tests {
                 taken
             })
             .collect();
-        (bits, bank_count)
+        (bits, bank_count, Vec::new())
     }
 
     fn render_post_input_bits(n: usize, dispatch: Backend) -> (Vec<Vec<u32>>, usize) {
-        render_post_input_bits_with_delivery(n, dispatch, false, false)
+        let (bits, banks, _) = render_post_input_bits_with_delivery(n, dispatch, false, false);
+        (bits, banks)
     }
 
     /// #430 gate 1: the production compiler and graph binder select the live composite only for
@@ -4668,11 +4682,12 @@ mod tests {
         {
             FADER_MATRIX_PROCESS_CALLS.store(0, Ordering::Relaxed);
             FADER_MATRIX_FACTORY_CALLS.store(0, Ordering::Relaxed);
-            let (separate, _) = render_post_input_bits_with_delivery(tracks, backend, false, false);
+            let (separate, _, _) =
+                render_post_input_bits_with_delivery(tracks, backend, false, false);
             assert_eq!(FADER_MATRIX_PROCESS_CALLS.load(Ordering::Relaxed), 0);
             FADER_MATRIX_FACTORY_CALLS.store(0, Ordering::Relaxed);
 
-            let (paired, bank_count) =
+            let (paired, bank_count, _) =
                 render_post_input_bits_with_delivery(tracks, backend, true, false);
             assert_eq!(
                 FADER_MATRIX_FACTORY_CALLS.load(Ordering::Relaxed),
@@ -4699,9 +4714,78 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         FADER_MATRIX_PROCESS_CALLS.store(0, Ordering::Relaxed);
         FADER_MATRIX_FACTORY_CALLS.store(0, Ordering::Relaxed);
-        let (observed, banks) = render_post_input_bits_with_delivery(9, Backend::Simd8, true, true);
+        let (observed, banks, paired_windows) =
+            render_post_input_bits_with_delivery(9, Backend::Simd8, true, true);
+        let (separate, _, separate_windows) =
+            render_post_input_bits_with_delivery(9, Backend::Simd8, false, true);
         assert_eq!(observed.len(), 9);
         assert!(observed.iter().all(|track| !track.is_empty()));
+        assert_eq!(observed, separate, "observed post-matrix PCM words");
+        assert_eq!(paired_windows.len(), separate_windows.len());
+        for (paired, separate) in paired_windows.iter().zip(separate_windows.iter()) {
+            assert_eq!(paired.handle, separate.handle);
+            assert_eq!(
+                (
+                    paired.reset_generation,
+                    paired.window_sequence,
+                    paired.start_sample,
+                    paired.end_sample,
+                    paired.frames
+                ),
+                (
+                    separate.reset_generation,
+                    separate.window_sequence,
+                    separate.start_sample,
+                    separate.end_sample,
+                    separate.frames
+                ),
+                "meter identity/time/frame fields"
+            );
+            assert_eq!(
+                (
+                    paired.left.clipped_samples,
+                    paired.left.sanitized_samples,
+                    paired.right.clipped_samples,
+                    paired.right.sanitized_samples,
+                    paired.cumulative_clipped_samples,
+                    paired.cumulative_sanitized_samples,
+                    paired.cumulative_discontinuities,
+                    paired.cumulative_dropped_snapshots
+                ),
+                (
+                    separate.left.clipped_samples,
+                    separate.left.sanitized_samples,
+                    separate.right.clipped_samples,
+                    separate.right.sanitized_samples,
+                    separate.cumulative_clipped_samples,
+                    separate.cumulative_sanitized_samples,
+                    separate.cumulative_discontinuities,
+                    separate.cumulative_dropped_snapshots
+                ),
+                "meter counter fields"
+            );
+            assert_eq!(
+                paired.left.sample_peak.to_bits(),
+                separate.left.sample_peak.to_bits()
+            );
+            assert_eq!(paired.left.energy.to_bits(), separate.left.energy.to_bits());
+            assert_eq!(
+                paired.left.held_peak.to_bits(),
+                separate.left.held_peak.to_bits()
+            );
+            assert_eq!(
+                paired.right.sample_peak.to_bits(),
+                separate.right.sample_peak.to_bits()
+            );
+            assert_eq!(
+                paired.right.energy.to_bits(),
+                separate.right.energy.to_bits()
+            );
+            assert_eq!(
+                paired.right.held_peak.to_bits(),
+                separate.right.held_peak.to_bits()
+            );
+        }
         assert_eq!(banks, 6);
         assert_eq!(FADER_MATRIX_FACTORY_CALLS.load(Ordering::Relaxed), 1);
         assert_eq!(
