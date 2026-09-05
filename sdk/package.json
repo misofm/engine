@@ -1,6 +1,6 @@
 {
   "name": "@misofm/engine",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Typed Engine V1 SDK for agentic music production",
   "license": "Apache-2.0",
   "type": "module",
@@ -46,6 +46,7 @@
   },
   "devDependencies": {
     "@types/node": "22.20.1",
+    "esbuild": "0.28.1",
     "typescript": "5.9.3"
   },
   "scripts": {

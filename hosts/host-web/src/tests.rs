@@ -830,12 +830,73 @@ fn source_backpressure_seek_render_and_stable_output_are_bounded() {
         RESULT_OK
     );
     assert_eq!(host.seek_source(b"fixture-source", 2, 0), RESULT_OK);
-    assert_eq!(
-        host.seek_source(b"fixture-source", 3, 0),
-        RESULT_BACKPRESSURE
-    );
+    assert_eq!(host.seek_source(b"fixture-source", 3, 0), RESULT_OK);
     assert_eq!(host.render_next(), RESULT_OK);
     assert_eq!(host.status().rendered_quanta, 2);
+}
+
+#[test]
+fn paused_seek_recycles_full_internal_queue_before_first_target_quantum() {
+    let quantum = 128;
+    let document = identity_session(quantum, 512, 480_000);
+    let options = WebBootOptions {
+        source_ring_frames: 512,
+        ..boot_options(quantum)
+    };
+    let mut host = AudioWorkletEngineHost::boot(document.as_bytes(), options).unwrap();
+    let old = [0.25; 128];
+    for block in 0..4 {
+        assert_eq!(
+            host.submit_source(
+                b"fixture-source",
+                1,
+                block * 128,
+                48_000,
+                &[&old, &old],
+                quantum,
+                false
+            ),
+            RESULT_OK
+        );
+    }
+    assert_eq!(
+        host.submit_source(
+            b"fixture-source",
+            1,
+            512,
+            48_000,
+            &[&old, &old],
+            quantum,
+            false
+        ),
+        RESULT_BACKPRESSURE
+    );
+    assert_eq!(
+        host.seek_source(b"unknown", 2, 10_000),
+        RESULT_INVALID_ARGUMENT
+    );
+    assert_eq!(host.seek_source(b"fixture-source", 2, 10_000), RESULT_OK);
+    assert_eq!(host.status().next_absolute_sample, 0);
+    assert_eq!(host.status().rendered_quanta, 0);
+    let left = core::array::from_fn::<_, 128, _>(|index| (index + 1) as f32 / 256.0);
+    let right = core::array::from_fn::<_, 128, _>(|index| -(index as f32 + 1.0) / 512.0);
+    assert_eq!(
+        host.submit_source(
+            b"fixture-source",
+            2,
+            10_000,
+            48_000,
+            &[&left, &right],
+            quantum,
+            false
+        ),
+        RESULT_OK
+    );
+    assert_eq!(host.render_next(), RESULT_OK);
+    let output = host.output_pcm().unwrap();
+    assert_eq!(&output[..128], &left);
+    assert_eq!(&output[128..256], &right);
+    assert_eq!(host.status().next_absolute_sample, 128);
 }
 
 #[test]
