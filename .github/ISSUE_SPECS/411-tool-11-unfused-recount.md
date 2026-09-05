@@ -1,6 +1,6 @@
 # Complete the unfused seal's searches before accepting its recount
 
-**BRIEF APPROVED on merged #410 base; assignment waits for the #420 measurement quiet window to end.** This refresh preserves the numbered one-checker outcome and parent #402/#306/#349 obligations. No implementation is authorized by this planning record. Current shared foundation includes the rack/default, plain, plain-target and graph dependency modes; none parses this seal's grammar. #410 is active; do not edit its worktree/helper. Actual merged API wins over stale speculation.
+**IN PROGRESS: Luna attempt 1 on the approved merged #410 base.** This refresh preserves the numbered one-checker outcome and parent #402/#306/#349 obligations. No implementation is authorized by this planning record. Current shared foundation includes the rack/default, plain, plain-target and graph dependency modes; none parses this seal's grammar. #410 is active; do not edit its worktree/helper. Actual merged API wins over stale speculation.
 
 ## Smallest scope and delivery
 
@@ -75,3 +75,7 @@ No scope correction or further split is needed. Preserve the exact7+1 registry/8
 Implementation remains one coherent Luna pass, root checkpoint, Astra verdict; Sol only after FAIL, hard stop after three failed attempts. Root performs final qualification and actual-head PR/required-CI delivery. #412 follows #411 and #427 follows #412; #402/#306/#349 stay open through remaining obligations.
 
 Read-only spec/source/helper/commit inspection. No tests, Cargo, timing or repository/GitHub mutation; the measurement quiet window was preserved.
+
+## Implementation assignment
+
+Root releases Luna attempt 1 from approved checkpoint `efc87b691abcaf4368bfef249863b2c33057af17`. The bounded #420 readiness monitor terminated without meeting its load ceiling; no runner or workload was invoked. Its quiet window has ended, so this independent tooling implementation may proceed. #420 measurement remains pending with its invocation authority unconsumed. Exact scope and acceptance gates above are unchanged.
