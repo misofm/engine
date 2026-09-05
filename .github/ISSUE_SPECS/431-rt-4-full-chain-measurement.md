@@ -57,3 +57,29 @@ If tooling fails after launch, retain raw evidence and disposition and allocate 
 #431 can close only its fresh descriptive capture/promotion obligation. #443/#444 and all unearned RT-4 populations remain open. Its tooling preparation must not displace active #460 or #455; no AArch64 revival, source arithmetic change, public host admission, broad corpus or second benchmark framework belongs here.
 
 Root adopts these claim limits and keeps the capture authority unspent. Astra is reconciling all ten current workload/rate input identities before a separately numbered tooling preparation can be frozen. No runner code, guard/validator pin change, build or timing is authorized by this checkpoint. #460/#455 retain active priority.
+
+
+## Current input reconciliation and root preparation ruling
+
+# #431 partial current-input reconciliation — paused for #460 final review
+
+Read-only stable aba905c0. No builds, probes, timing or pins generated. This is not implementation approval.
+
+Actual manifest b244da45d88d670951205098b7516af20387a141eccb3bf60edb61e8ba57a919 originates at14c72edd07bb3e4838b55aec248a1a2a22dcc2cd (#338 JSON migration). Stale workload guard ad034b8880acd13e6144fd00c515dc5fa83ca3b044c2a2472453cc6cad9934d1 matches b454b230e7bf8db46e983bd9a22c3c8c1baf4cc9. Historical validator manifest ddb4b201dcd4cc00ad445013c9a1b29d9d5f6071f018e649748963c74af4c55b matches477dc15ee096401c5d28e5c199466376454643ee and6fa5453a1377ad211536a7cb2842aae8f3319b48.
+
+Independently read/hash/size-checked ALL ten current benchmark rows against actual files: all match current manifest. Eight render fixture TOMLs are byte-identical to477dc15e; two prepare TOMLs differ only in session_template_path/hash (canonical.toml→canonical.json). Relative to ad034 tree, likewise only those two preparation descriptors changed. Current canonical.json actual SHA a240547d7e57f76a087c7c43cffc2c54944f96e7ac88a1a19158f65a4a0bc77b equals their declared reference. #241 previously changed its template hash, #338 changed representation/path/hash. All other TOML workload parameters remain byte-identical to those baselines. This is NOT envelope-only across the full20-row workload: preparation input representation/content genuinely changed.
+
+Current descriptor rows (48k,96k respectively):
+- full_chain_filters,616bytes:6a1633442678cfdecb2872deacd053e727c47f0bc94039a84b4e950949e195d0;ac9e825b5051a161ca731b04bd9b9b825bad6484c3a3f911551051e316224fa0.
+- identity_chain,596bytes:15dfc8b6d918d01a5d6e46417e37a10023d31a85391e8fb2371af0cdc055dd95;962bc24d4104cb5a30e3a5aa158a5ca1075cae01f08433d2c7cbe8c1271cd99a.
+- matrix_ramp,700bytes:f0d94928bed16804a26befde5eaabd3a8c233afa194a5cdcb259141af78c831b;ef5bf8c4e954c1e497eea997bffeb85fabad69ac6966f2798bd34ce2fa5ced6f.
+- meter_success_full,768bytes:ded3579ee8ffbf79d920648a33a7e2f35fa9c9b386e98ef469d583830ef992de;aa1c4d8835753ce290d7abcf1cbf3ffdb98b79a58f0ec6cd0cce6614f5befef9.
+- prepare_256_tracks,963bytes:a1dec8525c20505a9b440e6cf93fa6ffa1144896c889fa3abd94f76224f3e210;880faace46cfa2e9f454d625e54206aa752a9947292057a6b58f64224ea13f30.
+
+The historical validator's FOUR full-chain/identity descriptor hashes are stale even relative to its own ddb4 tree. Its matrix/meter four pins equal current bytes. Its two prepare pins also differ. Thus a current adapter needs SIX justified descriptor-pin changes, not just manifest substitution. Historical efcfa0f4 changed full-chain/identity descriptors' PCM hash fields, with later corpus updates; no corresponding rate/filter/gain/matrix parameter changes appear in the inspected historical diffs. The exact validator-era underlying PCM comparison remains to be completed before claiming historical input equivalence.
+
+Decision proposal, not yet adopted: accept fresh current delivered20-row inputs for descriptive capture, expressly no historical matched-input speedup comparison for preparation (and no historical output equivalence inferred for changed PCM references). Preserve all old scripts/validators/artifacts; current guard and dedicated validator may bind these proven current bytes only after root records that input-authority ruling. No timing-derived input/output pins or numeric gate relaxation. Implementation filenames/adapter brief still pending this precise ruling; #431 authority remains unspent.
+
+Root adopts fresh CURRENT delivered inputs as the authority for the eventual 20-row descriptive capture. This is not an envelope-only repair: two preparation descriptors changed representation/path/hash, and six historical validator descriptor pins require justified current-byte bindings. No historical matched-input speedup comparison or old PCM/output equivalence is authorized by this ruling. The eight current render descriptors and two current preparation descriptors must retain their verified bytes and unchanged workload parameters; no timing-derived pin or numeric relaxation is allowed.
+
+This ruling authorizes completing the stateless tooling preparation brief only. Astra must still freeze exact files, current per-record/aggregate validation and zero-launch adapter gates before any implementation assignment. Historical 072/035 scripts, validators and artifacts remain unchanged. No benchmark, build, guard/pin edit or capture-authority consumption occurs in this checkpoint; #460/#455 final reviews retain priority.
