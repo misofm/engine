@@ -295,7 +295,15 @@ cp -R "$tree" "$spaced_tree"
 expect_success root-path-with-spaces "$spaced_tree"
 relative_parent=$(dirname "$spaced_tree")
 relative_name=$(basename "$spaced_tree")
-(cd "$relative_parent" && expect_success relative-fixture-root "$relative_name")
+if (cd "$relative_parent" && bash "$root/scripts/check-unfused-seal.sh" "$relative_name" >/dev/null 2>&1); then
+    printf 'green ok   relative-fixture-root\n'
+    passed=$((passed + 1))
+else
+    printf 'GREEN FAIL relative-fixture-root -- the seal refuses a relative fixture root\n' >&2
+    (cd "$relative_parent" && bash "$root/scripts/check-unfused-seal.sh" "$relative_name" 2>&1) | \
+        sed 's/^/           /' >&2
+    failed=$((failed + 1))
+fi
 
 # Every fallible producer is driven through both failure shapes. The shim delegates first, so its
 # payload is exactly what an otherwise-valid fixture would produce; FAULT_EMPTY suppresses that
@@ -309,6 +317,7 @@ counter() { local key=$1 n=0 file; file="$FAULT_STATE/$key"; [[ -f "$file" ]] &&
 case "$FAULT_KIND:$tool" in
   strip-wide:sed) [[ "$args" == *wide_impl.rs* ]] && hit=1 ;;
   strip-late:sed) [[ "$args" == *g5_native_corpus.rs* ]] && hit=1 ;;
+  strip-registered:sed) [[ "$args" == *g5_native_corpus.rs* ]] && [[ $(counter g5strip) == 2 ]] && hit=1 ;;
   dispatch-scalar:rg) [[ "$args" == *" -F "* && "$args" == *"(self * b) + c"* ]] && [[ $(counter dispatch) == 2 ]] && hit=1 ;;
   body-scalar:awk) [[ "$args" == *"fn fma"* ]] && [[ $(counter body) == 2 ]] && hit=1 ;;
   predicate-scalar:rg) [[ "$args" == *target_feature* ]] && [[ $(counter predicate) == 2 ]] && hit=1 ;;
@@ -318,6 +327,7 @@ case "$FAULT_KIND:$tool" in
   discovery:rg) [[ "$args" == *" -l "* ]] && hit=1 ;;
   discovery-sort:sort) [[ $(counter sort) == 2 ]] && hit=1 ;;
   occurrence-late:rg) [[ "$args" == *" -o "* ]] && [[ $(counter occurrence) == 2 ]] && hit=1 ;;
+  occurrence-registered:rg) [[ "$args" == *" -o "* ]] && [[ $(counter occurrence) == 4 ]] && hit=1 ;;
   count-late:wc) [[ $(counter wc) == 2 ]] && hit=1 ;;
   membership-late:grep) [[ "$args" == *g5_native_corpus.rs* ]] && hit=1 ;;
   marker-late:awk) [[ "$args" == *g5_native_corpus.rs* ]] && hit=1 ;;
@@ -326,7 +336,13 @@ case "$FAULT_KIND:$tool" in
   retired:rg) [[ "$args" == *fma_f32_via_f64* && "$args" == *softfma.rs* ]] && hit=1 ;;
 esac
 if [[ "$hit" == 1 ]]; then
-    [[ "${FAULT_EMPTY:-0}" == 1 ]] || "$real" "$@" || true
+    if [[ "${FAULT_EMPTY:-0}" != 1 ]]; then
+        if [[ "$FAULT_KIND" == retired ]]; then
+            printf '99:fn fma_f32_via_f64(a: f32, b: f32, c: f32) -> f32\n'
+        else
+            "$real" "$@" || true
+        fi
+    fi
     printf 'INJECTED-%s\n' "$FAULT_KIND" >&2
     exit 9
 fi
@@ -336,13 +352,16 @@ chmod +x "$shim/tool"
 for tool in sed rg awk sort wc grep cat; do ln -s tool "$shim/$tool"; done
 
 expect_producer_failure() {
-    local kind=$1 diagnostic=$2 mode output rc
+    local kind=$1 diagnostic=$2 full_payload=${3:-} mode output rc payload_ok
     for mode in full empty; do
         tree=$(create_fixture); state="$scratch_root/state-$kind-$mode"; mkdir -p "$state"
         if [[ "$mode" == empty ]]; then empty=1; else empty=0; fi
         if output="$(FAULT_KIND="$kind" FAULT_EMPTY="$empty" FAULT_STATE="$state" \
             PATH="$shim:$PATH" bash "$root/scripts/check-unfused-seal.sh" "$tree" 2>&1)"; then rc=0; else rc=$?; fi
-        if [[ "$rc" != 0 && "$output" == *"INJECTED-$kind"* && "$output" == *"$diagnostic"* ]]; then
+        payload_ok=1
+        [[ "$mode" != full || -z "$full_payload" || "$output" == *"$full_payload"* ]] || payload_ok=0
+        [[ "$mode" != empty || -z "$full_payload" || "$output" != *"$full_payload"* ]] || payload_ok=0
+        if [[ "$rc" != 0 && "$payload_ok" == 1 && "$output" == *"INJECTED-$kind"* && "$output" == *"$diagnostic"* ]]; then
             printf 'producer red %s/%s\n' "$kind" "$mode"; passed=$((passed + 1))
         else
             printf 'PRODUCER FAIL %s/%s status=%s output=%s\n' "$kind" "$mode" "$rc" "$output" >&2
@@ -353,6 +372,7 @@ expect_producer_failure() {
 
 expect_producer_failure strip-wide 'comment stripping failed for crates/lane/src/wide_impl.rs (sed status 9)'
 expect_producer_failure strip-late 'comment stripping failed for tools/wasm-gates/tests/g5_native_corpus.rs (sed status 9)'
+expect_producer_failure strip-registered 'comment stripping failed for tools/wasm-gates/tests/g5_native_corpus.rs (sed status 9)'
 expect_producer_failure dispatch-scalar 'crates/lane/src/scalar.rs dispatch search errored (rg status 9)'
 expect_producer_failure body-scalar 'crates/lane/src/scalar.rs fma-body extraction errored (awk status 9)'
 expect_producer_failure predicate-scalar 'crates/lane/src/scalar.rs fma-body predicate errored (rg status 9)'
@@ -362,27 +382,38 @@ expect_producer_failure registry-sort 'exemption registry sort failed (sort stat
 expect_producer_failure discovery 'candidate discovery errored (rg status 9)'
 expect_producer_failure discovery-sort 'candidate discovery sort failed (sort status 9)'
 expect_producer_failure occurrence-late 'fused-call search failed for tools/wasm-gates/tests/g5_native_corpus.rs (rg status 9)'
+expect_producer_failure occurrence-registered 'fused-call search failed for tools/wasm-gates/tests/g5_native_corpus.rs (rg status 9)'
 expect_producer_failure count-late 'fused-call count failed for tools/wasm-gates/tests/g5_native_corpus.rs (wc status 9)'
 expect_producer_failure membership-late 'registration membership search errored for tools/wasm-gates/tests/g5_native_corpus.rs (grep status 9)'
 expect_producer_failure marker-late 'tools/wasm-gates/tests/g5_native_corpus.rs marker-window validation errored (awk status 9)'
 expect_producer_failure aggregate 'registry aggregate parser failed (awk status 9)'
 expect_producer_failure recount-late 'fused-call search failed for tools/wasm-gates/tests/g5_native_corpus.rs (rg status 9)'
-expect_producer_failure retired 'retired software-FMA search errored (rg status 9)'
+expect_producer_failure retired 'retired software-FMA search errored (rg status 9)' \
+    '99:fn fma_f32_via_f64(a: f32, b: f32, c: f32) -> f32'
 
 # Prove three exact status checks matter. The original checker must emit the focused diagnostic;
 # after one verified call-site edit, the same injected run must reach unexpected success (exit 97).
 prove_status_mutant() {
-    local label=$1 kind=$2 diagnostic=$3 edit=$4 mutant output rc
+    local label=$1 kind=$2 diagnostic=$3 edit=$4 fault_empty=${5:-0} mutant output rc before after diff
     tree=$(create_fixture); mutant="$scratch_root/mutant-$label.sh"; cp "$root/scripts/check-unfused-seal.sh" "$mutant"
     before=$(cksum <"$mutant")
     sed -i "$edit" "$mutant"
     after=$(cksum <"$mutant")
     [[ "$before" != "$after" ]] || { printf 'COUNTER FAIL %s edit did not apply\n' "$label" >&2; failed=$((failed+1)); return; }
+    diff=$(diff -u "$root/scripts/check-unfused-seal.sh" "$mutant" || true)
+    if [[ "$label" == late-registered ]]; then
+        [[ $(grep -c '^@@ ' <<<"$diff") == 1 \
+            && $(grep -cF -- '-    [[ "$rc" == 0 ]] || exit "$rc"' <<<"$diff") == 1 \
+            && $(grep -cF -- '+    [[ "$rc" == 0 ]] || actual="$count"' <<<"$diff") == 1 ]] || {
+            printf 'COUNTER FAIL %s changed the wrong production call site:\n%s\n' "$label" "$diff" >&2
+            failed=$((failed+1)); return
+        }
+    fi
     state="$scratch_root/state-control-$label"; mkdir -p "$state"
-    output="$(FAULT_KIND="$kind" FAULT_EMPTY=0 FAULT_STATE="$state" PATH="$shim:$PATH" bash "$root/scripts/check-unfused-seal.sh" "$tree" 2>&1)" && rc=0 || rc=$?
+    output="$(FAULT_KIND="$kind" FAULT_EMPTY="$fault_empty" FAULT_STATE="$state" PATH="$shim:$PATH" bash "$root/scripts/check-unfused-seal.sh" "$tree" 2>&1)" && rc=0 || rc=$?
     [[ "$rc" != 0 && "$output" == *"INJECTED-$kind"* && "$output" == *"$diagnostic"* ]] || { printf 'COUNTER FAIL %s original status=%s output=%s\n' "$label" "$rc" "$output" >&2; failed=$((failed+1)); return; }
     rm -rf "$state"; mkdir -p "$state"
-    output="$(FAULT_KIND="$kind" FAULT_EMPTY=0 FAULT_STATE="$state" PATH="$shim:$PATH" bash -c 'if bash "$1" "$2"; then printf "ASSERT %s unexpected success\\n" "$3" >&2; exit 97; fi; exit $?' _ "$mutant" "$tree" "$label" 2>&1)" && rc=0 || rc=$?
+    output="$(FAULT_KIND="$kind" FAULT_EMPTY="$fault_empty" FAULT_STATE="$state" PATH="$shim:$PATH" bash -c 'if bash "$1" "$2"; then printf "ASSERT %s unexpected success\\n" "$3" >&2; exit 97; fi; exit $?' _ "$mutant" "$tree" "$label" 2>&1)" && rc=0 || rc=$?
     if [[ "$rc" == 97 && "$output" == *"ASSERT $label unexpected success"* ]]; then
         printf 'counter red %s (status 97)\n' "$label"; passed=$((passed+1))
     else
@@ -392,10 +423,10 @@ prove_status_mutant() {
 
 prove_status_mutant discovery discovery 'candidate discovery errored (rg status 9)' \
     '/if candidates_raw=/,/esac/{s/\*) printf .*candidate discovery errored.* ;;/\*) rc=0 ;;/}'
-prove_status_mutant late-occurrence occurrence-late 'fused-call search failed for tools/wasm-gates/tests/g5_native_corpus.rs (rg status 9)' \
-    '/while read -r file count/,/done <<<"$registry_raw"/{s/\[\[ "$rc" == 0 \]\] || exit "$rc"/[[ "$rc" == 0 ]] || rc=0/}'
+prove_status_mutant late-registered occurrence-registered 'fused-call search failed for tools/wasm-gates/tests/g5_native_corpus.rs (rg status 9)' \
+    '/^if \[\[ "${1:-}" == "--self-test" \]\]/,$ { /while read -r file count/,/done <<<"$registry_raw"/{s/\[\[ "$rc" == 0 \]\] || exit "$rc"/[[ "$rc" == 0 ]] || actual="$count"/; } }'
 prove_status_mutant retired retired 'retired software-FMA search errored (rg status 9)' \
-    '/if retired_match=/,/^fi$/{s/elif \[\[ "$rc" != 1 \]\]; then/elif false; then/}'
+    '/if retired_match=/,/^fi$/{s/elif \[\[ "$rc" != 1 \]\]; then/elif false; then/}' 1
 
 # -------------------------------------------------------------------------------------------
 printf '\nunfused seal mutations: %s passed, %s failed\n' "$passed" "$failed"

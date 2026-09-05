@@ -158,3 +158,28 @@ The source retains exact 7+1/8 registry, call/comment/body grammar, marker-on-ca
 One bounded final Sol pass should correct these existing proof sites and evidence only. No new parser, registry, shared framework, workflow, Rust, target matrix or benchmark work is called for. Then root checkpoints the coherent tranche and obtains one final adversarial verdict before broader qualification; do not perform intermediate repair/re-review rounds or weaken the frozen contract.
 
 Root assigns the FINAL Sol attempt 3 to these three bounded proof/evidence corrections. Preserve accepted production grammar and completion behavior. After one coherent checkpoint, Astra supplies the final verdict; a third failure triggers the hard stop and explicit rescope, not another revision disguised as evidence work.
+
+## Sol attempt 3 implementation evidence
+
+Sol made only the three assigned proof corrections. The selective shim now targets both the later
+registered file read and occurrence search at phase 4, with error-only and otherwise-valid full-
+output/error cases. The late-registered counter-mutant is restricted below the production self-test
+boundary, changes exactly the registered-validation status line from `exit "$rc"` to the deliberately
+unsafe expected-count fallback, and asserts its actual unified diff contains one hunk with exactly
+that removal/addition before the same phase-4 injection must reach `ASSERT late-registered unexpected
+success` at exit 97. This avoids matching the embedded edit text or either other caller.
+
+The retired full-output/error injection now emits and requires a plausible nonempty matching search
+line, its sentinel, and the exact execution-error diagnostic. Its separate counter-mutant retains a
+valid tree and the empty-output/error injection. The relative fixture-root case now runs in a
+subshell only for directory isolation; its result increments the parent counters and a refusal
+necessarily makes the suite fail.
+
+Final focused results: embedded self-test PASS (62 passed, 0 failed), real checker PASS (8 registered
+audit calls), lane-policy PASS, workspace-policy PASS, Bash syntax PASS and diff hygiene PASS.
+Distinct retained logs are `/tmp/sol-411-final-selftest.log`, `/tmp/sol-411-final-checker.log`,
+`/tmp/sol-411-final-lane-policy.log`, `/tmp/sol-411-final-workspace-policy.log`,
+`/tmp/sol-411-final-syntax.log` and `/tmp/sol-411-final-diff-check.log`. Accepted production grammar
+and completion behavior were unchanged in this attempt. No framework, helper, Rust, workflow,
+benchmark, Cargo, Git or GitHub action was performed. Root owns the exact-path checkpoint/push and
+Astra owns the final verdict.
