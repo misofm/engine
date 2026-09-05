@@ -145,3 +145,19 @@ Attempt 3 preserves the attempt-2 gate implementation and completes the missing 
 The helper suite now exercises actual partial-output `gate_find_collect` and `gate_sort_lines` failures under pipefail on/off and direct/conditional invocation. Disposable fail-open or semantic mutants for module consumption, find, sort, text scanning, uniqueness, joining, and plain-target parsing are run through the real focused assertions; each is required to fail at its named assertion and records its nonzero status. Graph producer tests now distinguish error-only from plausible-partial failure for discovery, sed, sort, publication, and executor predicates.
 
 Final focused evidence is captured in `/tmp/engine-407-sol3-real-graph.log`, `/tmp/engine-407-sol3-real-conformance.log`, `/tmp/engine-407-sol3-test-graph.log`, `/tmp/engine-407-sol3-test-conformance.log`, and `/tmp/engine-407-sol3-test-helper.log`. Bash syntax and diff hygiene are also required before checkpoint. No gate source, shared helper implementation, workflow, Session, Rust, manifest, artifact, benchmark, Cargo, timing, Git, or GitHub work belongs to this revision. Attempt 3 is the hard-stop attempt and requires Astra's final verdict before broader qualification.
+
+## Astra final source verdict — PASS
+
+# Astra #407 final attempt 3 review
+
+**PASS at exact pushed `7dada0f41bd68ab796535dc677386fa5cef7895a` for remaining workspace/PR qualification.** This resolves the final source-attempt contract; it is not actual PR approval or issue closure.
+
+The accepted attempt-2 source is retained. Both gates resolve their helper before fixture-root changes; graph checks complete discovery, source reads, publication/executor predicates and owner aggregation. Conformance checks unique production resolution, the exact dependency-heading policy, top-level module exemptions, manifest/source predicates and complete library/filter/join/dependency producers. Parser quirks, valid bin-only/individual-empty populations and required aggregate production names remain as scoped.
+
+The final suite now reaches previously missing operations selectively: production manifest/module/harness-source and hosts/sidecars errors; later workspace manifest discovery; library extraction and uniqueness; target dependency extraction/sort; comment/reference filtering and pattern joining. Error-only and plausible-partial-output cases delegate earlier operations to real tools and assert their intended classes. Every mandatory roster manifest, missing source root and empty source root is loop-tested. Aggregate no-library/no-production-pattern cases distinguish valid bin-only positives. Graph retains its actual valid fixture, parser/ownership/CLI and staged producer cases.
+
+I independently reran the complete conformance suite and shared helper suite. Both passed (`/tmp/astra-407-final-conformance.log`, `/tmp/astra-407-final-helper.log`). The exact previously escaped module-consumer mutant now fails the real suite at the intended module-probe assertion. New find/sort/text/unique/join/target mutants execute failure assertions and report the intended nonzero result. Find and sort partial-output errors are tested with pipefail on/off and direct/conditional calls. This is measured assertion rejection rather than merely constructing controls. Root's graph suite and both real-gate logs are green.
+
+No remaining source-attempt blocker was identified. Preserve existing Session separation: #417 stays queued until this issue merges, and #401/#306 remain open until their full child obligations complete. Remaining gates are root-owned baseline/candidate workspace comparison, synchronized final evidence, actual pushed PR Astra review and required CI. No new source repair, runtime, artifact or benchmark work is requested.
+
+Review used read-only source/log inspection and two existing shell suites; no Cargo, timing, Git, repository or GitHub mutation.
