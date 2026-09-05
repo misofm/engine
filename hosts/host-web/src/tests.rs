@@ -1600,6 +1600,34 @@ fn console_host(quantum: u32, meter_blocks: u64) -> AudioWorkletEngineHost {
     AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("console boot")
 }
 
+#[cfg(feature = "test-support")]
+fn paired_console_host(quantum: u32) -> AudioWorkletEngineHost {
+    let mut model = parse_session_json(include_str!("../tests/browser-v1/session.json"))
+        .expect("accepted identity fixture");
+    model.quantum_frames = quantum;
+    model.sources[0].frames = u64::from(quantum) * 2;
+    let template = model.tracks[0].clone();
+    model.tracks.clear();
+    for index in 0..9 {
+        let mut track = template.clone();
+        track.id = session::StableId::parse(&format!("track-{index}")).expect("track id");
+        model.tracks.push(track);
+    }
+    model.routes[0].source = session::RouteSource::Track {
+        track_id: session::StableId::parse("track-0").expect("route track"),
+        tap: session::SendTap::PostMatrix,
+    };
+    let document = canonical_session_json(&model).expect("canonical paired fixture");
+    let options = WebBootOptions {
+        require_sample_rate_hz: 48_000,
+        require_quantum_frames: quantum,
+        source_ring_frames: quantum,
+        console_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
+        ..WebBootOptions::explicit_defaults()
+    };
+    AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("paired console boot")
+}
+
 /// Feed one full quantum of a constant left plane and render it.
 fn feed_and_render(host: &mut AudioWorkletEngineHost, generation: u64, block: u64, value: f32) {
     let quantum = host.status().quantum_frames as usize;
@@ -1711,6 +1739,140 @@ fn command_ack_names_the_exact_application_sample() {
         (ramping[quantum - 1] - 0.5).abs() < 1e-6,
         "a one-quantum window settles by the end of that block: {}",
         ramping[quantum - 1]
+    );
+}
+
+/// #430 gate 2: WebEngine declares between-render delivery for both actual owners. A fader and
+/// matrix command admitted together must therefore drain from their distinct queues onto the
+/// same acknowledged first sample before the paired stage decides whether it is settled.
+#[test]
+fn paired_fader_and_matrix_commands_share_the_acknowledged_application_sample() {
+    const QUANTUM: u32 = 128;
+    let mut host = console_host(QUANTUM, 0);
+    let quantum = QUANTUM as usize;
+
+    feed_and_render(&mut host, 1, 0, 0.5);
+    stage_command(
+        &mut host,
+        0,
+        COMMAND_FADER_DB,
+        255,
+        2,
+        0,
+        0,
+        0,
+        0,
+        [-6.0, 0.0, 0.0, 0.0],
+    );
+    stage_command(
+        &mut host,
+        1,
+        COMMAND_MATRIX,
+        255,
+        255,
+        0,
+        0,
+        0,
+        0,
+        [0.5, 0.0, 0.0, 1.0],
+    );
+    assert_eq!(host.submit_commands(2), RESULT_OK);
+    let report = *host.command_report();
+    assert_eq!(report.admitted, 2);
+    assert_eq!(report.applied_at_sample, u64::from(QUANTUM));
+
+    feed_and_render(&mut host, 1, 1, 0.5);
+    let output = host.output_pcm().expect("output");
+    let expected_left = output[0];
+    assert!(expected_left > 0.11 && expected_left < 0.14);
+    assert!(
+        output[..quantum]
+            .iter()
+            .all(|sample| sample.to_bits() == expected_left.to_bits()),
+        "both immediate records apply before sample one"
+    );
+    assert!(
+        output[quantum..]
+            .iter()
+            .all(|sample| sample.to_bits() == (expected_left * 2.0).to_bits()),
+        "the matrix leaves the right plane at the fader output"
+    );
+}
+
+/// #459: the acknowledgement and the actual serialized composite belong to one render call.
+#[cfg(feature = "test-support")]
+#[test]
+fn acknowledged_pair_render_records_the_same_live_dispatch() {
+    const QUANTUM: u32 = 128;
+    let mut host = paired_console_host(QUANTUM);
+    feed_and_render(&mut host, 1, 0, 0.5);
+    stage_command(
+        &mut host,
+        0,
+        COMMAND_FADER_DB,
+        255,
+        2,
+        8,
+        0,
+        0,
+        0,
+        [-6.0, 0.0, 0.0, 0.0],
+    );
+    stage_command(
+        &mut host,
+        1,
+        COMMAND_MATRIX,
+        255,
+        255,
+        8,
+        0,
+        0,
+        0,
+        [0.5, 0.0, 0.0, 1.0],
+    );
+    assert_eq!(host.submit_commands(2), RESULT_OK);
+    let report = *host.command_report();
+    assert_eq!(report.admitted, 2);
+    assert_eq!(report.applied_at_sample, u64::from(QUANTUM));
+
+    // The nine tracks share this bounded source ring, so explicitly seek/refill the second
+    // render's source generation after the first block has exercised every reader.
+    assert_eq!(host.seek_source(b"fixture-source", 2, 0), RESULT_OK);
+    builtins_compiler::test_only_reset_fader_matrix_witness();
+    feed_and_render(&mut host, 2, 0, 0.5);
+    let witness = builtins_compiler::test_only_fader_matrix_witness();
+    assert_eq!(witness.process_calls, 1);
+    assert_eq!(
+        witness.process_members, 1,
+        "the selected composite is track-8 tail"
+    );
+    assert_eq!(witness.fader_records_drained, 1);
+    assert_eq!(witness.matrix_records_drained, 1);
+    let selected_left = f32::from_bits(witness.first_left_bits);
+    let selected_right = f32::from_bits(witness.first_right_bits);
+    assert!(selected_left > 0.11 && selected_left < 0.14);
+    assert_eq!(selected_right.to_bits(), (selected_left * 2.0).to_bits());
+    assert_eq!(witness.fused_calls + witness.fallback_calls, 1);
+    assert_eq!(
+        witness.fused_calls, 1,
+        "acknowledged commands settle before this call"
+    );
+    assert_eq!(report.applied_at_sample, u64::from(QUANTUM));
+    let output = host.output_pcm().expect("output");
+    let quantum = QUANTUM as usize;
+    let expected_left = output[0];
+    assert_eq!(expected_left.to_bits(), 0.5_f32.to_bits());
+    assert!(
+        output[..quantum]
+            .iter()
+            .all(|sample| sample.to_bits() == expected_left.to_bits()),
+        "the routed reference remains nonzero on the acknowledged block"
+    );
+    assert!(
+        output[quantum..]
+            .iter()
+            .all(|sample| sample.to_bits() == expected_left.to_bits()),
+        "the routed reference remains dual-mono identity"
     );
 }
 

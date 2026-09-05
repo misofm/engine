@@ -2937,6 +2937,60 @@ impl BuiltinFaderBank {
         BuiltinProcessReport::default()
     }
 
+    /// Runs the settled fader and matrix stages in one traversal when their shapes and ramps
+    /// agree. Returns false without touching either stage when a ramp is still active.
+    pub fn try_process_settled_with_matrix(
+        &mut self,
+        matrix: &mut BuiltinMatrixBank,
+        left: &mut [f32],
+        right: &mut [f32],
+        frames: u32,
+    ) -> bool {
+        if self.backend != matrix.backend
+            || self.width != matrix.width
+            || self.members != matrix.members
+            || self.remaining_nonzero()
+            || matrix.remaining_nonzero()
+        {
+            return false;
+        }
+        match (&self.stage, &matrix.stage) {
+            (FaderStageKernel::Simd4(fader), MatrixStageKernel::Simd4(matrix)) => {
+                fader_matrix_block::<Simd4>(
+                    left,
+                    right,
+                    frames as usize,
+                    fader.ramp[0].current,
+                    fader.ramp[0].mute,
+                    fader.ramp[1].current,
+                    fader.ramp[1].mute,
+                    &matrix.coef,
+                );
+            }
+            (FaderStageKernel::Simd8(fader), MatrixStageKernel::Simd8(matrix)) => {
+                fader_matrix_block::<Simd8>(
+                    left,
+                    right,
+                    frames as usize,
+                    fader.ramp[0].current,
+                    fader.ramp[0].mute,
+                    fader.ramp[1].current,
+                    fader.ramp[1].mute,
+                    &matrix.coef,
+                );
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    fn remaining_nonzero(&self) -> bool {
+        match &self.stage {
+            FaderStageKernel::Simd4(stage) => stage.remaining.iter().flatten().any(|v| *v != 0),
+            FaderStageKernel::Simd8(stage) => stage.remaining.iter().flatten().any(|v| *v != 0),
+        }
+    }
+
     /// Snaps every lane to its target and cancels any ramp in flight.
     pub fn reset(&mut self) {
         match &mut self.stage {
@@ -3068,6 +3122,13 @@ impl BuiltinMatrixBank {
             MatrixStageKernel::Simd8(stage) => stage.process(left, right, frames),
         }
         BuiltinProcessReport::default()
+    }
+
+    fn remaining_nonzero(&self) -> bool {
+        match &self.stage {
+            MatrixStageKernel::Simd4(stage) => stage.remaining.iter().any(|v| *v != 0),
+            MatrixStageKernel::Simd8(stage) => stage.remaining.iter().any(|v| *v != 0),
+        }
     }
 
     /// Snaps every lane to its target and cancels any ramp in flight.
@@ -3748,8 +3809,9 @@ fn zero(value: f32) -> f32 {
 #[doc(hidden)]
 pub mod test_support {
     use super::{
-        BuiltinChain, BuiltinInputBank, BuiltinParameterError, InputBuiltins, InputStageKernel,
-        Matrix2x2, MatrixBuiltins, SvfSection,
+        BuiltinChain, BuiltinFaderBank, BuiltinInputBank, BuiltinMatrixBank, BuiltinParameterError,
+        FaderStageKernel, InputBuiltins, InputStageKernel, Matrix2x2, MatrixBuiltins,
+        MatrixStageKernel, SvfSection,
     };
 
     /// The seven words `[c1, a2, a3, k, m0, m1, m2]` of one designed section.
@@ -3871,6 +3933,65 @@ pub mod test_support {
     #[must_use]
     pub fn matrix_current(matrix: &MatrixBuiltins) -> Matrix2x2 {
         matrix.stage.read_current()[0]
+    }
+
+    /// Exact retained words for one fader-bank lane: per channel current/target/step/ramp word,
+    /// authoritative countdown and remembered gain, followed by both mute flags.
+    #[must_use]
+    pub fn fader_bank_lane_words(bank: &BuiltinFaderBank, lane: usize) -> [u32; 14] {
+        fn words<L: crate::Lane>(stage: &crate::FaderRampStage<L>, lane: usize) -> [u32; 14] {
+            let mut out = [0; 14];
+            for channel in 0..2 {
+                let base = channel * 6;
+                out[base] = crate::lane_read::<L>(stage.ramp[channel].current)[lane].to_bits();
+                out[base + 1] = crate::lane_read::<L>(stage.ramp[channel].target)[lane].to_bits();
+                out[base + 2] = crate::lane_read::<L>(stage.ramp[channel].step)[lane].to_bits();
+                out[base + 3] =
+                    crate::lane_read::<L>(stage.ramp[channel].remaining)[lane].to_bits();
+                out[base + 4] = stage.remaining[channel][lane];
+                out[base + 5] = stage.fader_gain[channel][lane].to_bits();
+            }
+            out[12] = u32::from(stage.muted[0][lane]);
+            out[13] = u32::from(stage.muted[1][lane]);
+            out
+        }
+        match &bank.stage {
+            FaderStageKernel::Simd4(stage) => words(stage, lane),
+            FaderStageKernel::Simd8(stage) => words(stage, lane),
+        }
+    }
+
+    /// Exact current/target/step/ramp/countdown words for one matrix-bank lane.
+    #[must_use]
+    pub fn matrix_bank_lane_words(bank: &BuiltinMatrixBank, lane: usize) -> [u32; 15] {
+        fn words<L: crate::Lane>(stage: &crate::MatrixStage<L>, lane: usize) -> [u32; 15] {
+            let current = stage.read_current();
+            let target = stage.read_target();
+            let step = stage.ramp.step.map(crate::lane_read::<L>);
+            let remaining = crate::lane_read::<L>(stage.ramp.remaining);
+            let mut out = [0; 15];
+            for (coefficient, (current, target)) in [
+                (current[lane].ll, target[lane].ll),
+                (current[lane].lr, target[lane].lr),
+                (current[lane].rl, target[lane].rl),
+                (current[lane].rr, target[lane].rr),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                out[coefficient] = current.to_bits();
+                out[4 + coefficient] = target.to_bits();
+                out[8 + coefficient] = step[coefficient][lane].to_bits();
+            }
+            out[12] = remaining[lane].to_bits();
+            out[13] = stage.remaining[lane];
+            out[14] = stage.smoothing_samples[lane];
+            out
+        }
+        match &bank.stage {
+            MatrixStageKernel::Simd4(stage) => words(stage, lane),
+            MatrixStageKernel::Simd8(stage) => words(stage, lane),
+        }
     }
 
     /// The input section of a chain, for state injection.

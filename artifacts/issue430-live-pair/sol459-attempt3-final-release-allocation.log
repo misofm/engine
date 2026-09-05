@@ -1,0 +1,12 @@
+   Compiling builtins-compiler v0.1.0 (/home/bl/misofm/engine-live-pair-proof/crates/builtins-compiler)
+    Finished `release` profile [optimized + debuginfo] target(s) in 17.08s
+     Running tests/allocation_tracker.rs (/tmp/sol459-target/release/deps/allocation_tracker-45e4ec73ece87ec8)
+
+running 4 tests
+test actual_queued_graph_phases_allocate_and_free_nothing ... ok
+test phase_two_allocator_layouts_are_stable_across_repeated_measured_prepares ... ok
+test actual_serialized_composite_render_allocates_and_frees_nothing ... ok
+test phase_two_allocator_layouts_match_the_checked_resource_report ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.86s
+
