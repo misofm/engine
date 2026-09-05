@@ -1,10 +1,34 @@
 /** Issue #322 compile-time red probes for the catalog-derived live console. */
 
 import { ConsoleEdits } from "../src/core/console.ts";
-import type { MisoCommandRequest } from "../src/browser/shipped-host.d.ts";
+import type {
+  MisoCommandAck,
+  MisoCommandRequest,
+  MisoObservationRequest,
+  MisoSeekRequest,
+  MisoSourceRequest,
+  MisoStatus,
+} from "../src/browser/shipped-host.d.ts";
 
 // @ts-expect-error request IDs belong to the host, never to public request payloads
 const oldBrowserRequest: MisoCommandRequest = { requestId: 1, commands: [] };
+// @ts-expect-error observation request IDs belong to the host
+const oldObservationRequest: MisoObservationRequest = { requestId: 1, subscriptions: [] };
+const oldSourceRequest: MisoSourceRequest = {
+  // @ts-expect-error source request IDs belong to the host
+  requestId: 1, sourceId: "s", generation: 1n, startFrame: 0n, sampleRateHz: 48_000,
+  planes: [new Float32Array()], frames: 0, endOfRegion: true,
+};
+// @ts-expect-error seek request IDs belong to the host
+const oldSeekRequest: MisoSeekRequest = { requestId: 1, sourceId: "s", generation: 1n, sourceFrame: 0n };
+void [oldBrowserRequest, oldObservationRequest, oldSourceRequest, oldSeekRequest];
+
+declare const commandAck: MisoCommandAck;
+declare const status: MisoStatus;
+// @ts-expect-error response request IDs remain readonly
+commandAck.requestId = 1;
+// @ts-expect-error response request IDs remain readonly
+status.requestId = 1;
 
 const edits = new ConsoleEdits({
   tracks: ["t"],

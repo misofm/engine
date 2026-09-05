@@ -92,11 +92,23 @@ await writeFile(consumer, `
 import { CATALOG, session } from "@misofm/engine";
 import { createOfflineEngine, loadBundledEngineAsset } from "@misofm/engine/headless";
 import { createEngine } from "@misofm/engine/browser";
+import type { BrowserEngine } from "@misofm/engine/browser";
 import { BUNDLED_ENGINE_ASSETS } from "@misofm/engine/assets";
 // @ts-expect-error arbitrary-model canonical serialization is intentionally not public
 import { canonicalSessionJson } from "@misofm/engine";
 void [CATALOG, session, createOfflineEngine, loadBundledEngineAsset, createEngine,
   BUNDLED_ENGINE_ASSETS, canonicalSessionJson];
+declare const browser: BrowserEngine;
+const host = browser.host;
+void host.command({ commands: [] });
+void host.observe({ subscriptions: [] });
+void host.submitSource({
+  sourceId: "s", generation: 1n, startFrame: 0n, sampleRateHz: 48_000,
+  planes: [new Float32Array()], frames: 0, endOfRegion: true,
+});
+void host.seekSource({ sourceId: "s", generation: 1n, sourceFrame: 0n });
+void host.meters({ enabled: false, onFrame: null });
+void host.telemetry({ enabled: false, onFrame: null });
 `, "utf8");
 const program = ts.createProgram([consumer], {
   module: ts.ModuleKind.NodeNext,
