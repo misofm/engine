@@ -52,7 +52,7 @@ const INPUT_MANIFEST: &[u8] = include_bytes!("../../../fixtures/builtins/v1/MANI
 /// benchmark's `main` path, which `test-builtins-benchmark.sh` (the swept, hermetic half) does not
 /// execute. That gap is a real finding about the gate, not about this feature.
 const INPUT_MANIFEST_SHA256: &str =
-    "ad034b8880acd13e6144fd00c515dc5fa83ca3b044c2a2472453cc6cad9934d1";
+    "b244da45d88d670951205098b7516af20387a141eccb3bf60edb61e8ba57a919";
 const SESSION: &str = include_str!("../../../fixtures/session/v1/canonical.json");
 
 const WORKLOADS: [Workload; 5] = [
@@ -2008,14 +2008,14 @@ mod tests {
 
     #[test]
     fn benchmark_inputs_take_their_hashes_from_the_checked_manifest_rows() {
+        assert_eq!(sha256(INPUT_MANIFEST), INPUT_MANIFEST_SHA256);
         for plan in measured_record_plans() {
             let input = input_fixture(plan.workload, plan.rate_hz);
             assert_eq!(sha256(input.bytes), manifest_input_sha256(input.id));
+            if !plan.workload.is_prepare() {
+                let _ = input.pcm();
+            }
         }
-        assert_eq!(
-            manifest_input_sha256("fixtures/builtins/v1/benchmark/meter_success_full-48000.toml"),
-            "ded3579ee8ffbf79d920648a33a7e2f35fa9c9b386e98ef469d583830ef992de"
-        );
     }
 
     #[test]
