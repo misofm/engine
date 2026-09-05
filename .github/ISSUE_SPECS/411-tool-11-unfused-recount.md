@@ -111,3 +111,28 @@ Extend the embedded fixture with narrowly delegating tool shims. Each partial pa
 Run real checker, full corrected self-test, syntax/diff and relevant existing policies; record source/evidence candidly in the spec before root checkpoint. Only after Astra focused PASS may root run workspace/actual-PR qualification. Luna attempt1 is consumed; Sol attempt2 and, only if necessary, final attempt3 remain. No intermediate repair rounds or gate weakening.
 
 Root assigns Sol attempt 2 to this bounded correction. Preserve the accepted production work, complete the original selective fault table and replace the three unsound counter-mutant controls. One coherent pass, root checkpoint, then Astra verdict; no further work may be layered on a coherent green tranche before the checkpoint.
+
+## Sol attempt 2 implementation evidence
+
+Sol completed one bounded revision in `scripts/check-unfused-seal.sh`. The checker now captures and
+classifies full fixed/body/membership/retired predicate output, preserves producer stderr, and
+explicitly propagates `count_calls` failure at all three consumers. Its embedded fixture retains the
+exact 7+1 registry and eight-call tree, required roots/files, prose/empty candidate and two-calls-on-
+one-line behavior, and directly proves marker-on-call/six-prior acceptance and seven-prior refusal.
+
+The selective matrix runs both error-only and otherwise-valid full-output/error injections for
+comment stripping (including a later file), late dispatch/body predicates, registry production,
+filename extraction and sort, candidate discovery and sort, late occurrence/count/membership,
+late marker validation, aggregate parsing, late recount and the final retired search. Every row
+requires its `INJECTED-*` sentinel and exact operation/status diagnostic. Three verified disposable
+call-site mutants then use those same focused injections; candidate discovery status loss, late
+registered occurrence status loss and retired-search status loss each reached only `ASSERT <label>
+unexpected success` with distinguished exit 97.
+
+Focused results: embedded self-test PASS (57 passed, 0 failed), real checker PASS (8 registered
+audit calls), lane-policy PASS, workspace-policy PASS, Bash syntax PASS and diff hygiene PASS.
+Logs are retained as `/tmp/sol-411-selftest.log`, `/tmp/sol-411-checker.log`,
+`/tmp/sol-411-lane-policy.log`, `/tmp/sol-411-workspace-policy.log`,
+`/tmp/sol-411-syntax.log` and `/tmp/sol-411-diff-check.log`. No helper, Rust, workflow, Cargo,
+benchmark, timing, Git or GitHub mutation was performed. These are implementation-supplied results;
+root owns the exact-path checkpoint/push and Astra owns the attempt-2 verdict.
