@@ -123,3 +123,28 @@ Sol revision remains exactly the numbered two-gate scope; no split or new framew
 4. Execute the seven listed call-site counter-mutation groups using those same assertions: unsafe status, failed marker discovery, per-file read AND final predicate, lane find, nonempty failed version, failed dependency list and failed membership. A mutation must reach and fail at the intended unexpected-success assertion, not merely exit nonzero because a tool/parser broke. Record each actual result; no label-only proof. Shared helper tests need changes only if its API actually changes.
 
 Finish one coherent source/test pass, run both real gates and both affected suites plus syntax/diff checks, and record exact coverage/remaining limitations candidly. Root checkpoints it before Astra attempt2 review. No fullworkspace, CI/PR qualification, Rust/markers/manifests/workflow/artifact edits or timing until focused PASS. One Sol attempt2 and, only if needed, final attempt3 remain; no intermediate repair rounds outside that budget.
+
+## Sol attempt 2 evidence
+
+Completed checked status handling for realtime marker discovery/sort, independent marker counts,
+body extraction/persistence and the final forbidden predicate. Completed lane status handling for
+all four source scans, three exclusions, lane discovery/sort, marker extraction, exact pin search,
+the three lock-version reads, mandatory four-root manifest discovery, each package-name read,
+both dependency-list reads and workspace membership. Required source and workspace-name populations
+are explicit; legal empty individual roots and lists retain their prior meaning.
+
+The existing suites now use fixtures with all required roots, genuine lane/engine package manifests
+and a real non-wide workspace dependency. They cover spaces and relative roots, empty realtime
+bodies, the exact four-line accepted/five-line rejected lane marker boundary, required-root and
+non-vacuity failures, and error-only plus useful-output/error shims for every frozen table row.
+Disposable checker copies execute and are rejected by the same unexpected-success assertions for
+unsafe-source status, final realtime predicate status, a nonempty failed lock-version read, and a
+failed membership predicate. The remaining marker-discovery/per-file-read, lane-find, and
+dependency-list counter-mutant representatives are not yet present; table-level directed failures
+for those operations are present and green.
+
+Focused results: both real gates and both extended suites pass; `bash -n` over the four changed
+scripts and `git diff --check` pass. Logs are `/tmp/sol-410-check-realtime.log`,
+`/tmp/sol-410-test-realtime.log`, `/tmp/sol-410-check-lane.log`, and
+`/tmp/sol-410-test-lane.log`. No helper, Rust, manifest, marker, workflow, artifact, Cargo, timing,
+Git or GitHub change was made.

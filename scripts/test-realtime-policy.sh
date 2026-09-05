@@ -318,12 +318,24 @@ drop_first_marked_region() {
     mv -- "$file.tmp" "$file"
 }
 
-alloc_class='marked realtime code contains an allocation, lock, I/O, log, wait, syscall or panic surface'
+alloc_class='marked realtime forbidden-body predicate'
 unsafe_class='unsafe code exists outside the issue-approved ownership/audit files'
 
 valid="$scratch_root/valid"
 create_fixture "$valid"
 bash "$policy_script" "$valid" >/dev/null
+(cd "$scratch_root" && bash "$policy_script" valid >/dev/null)
+
+empty_bodies="$scratch_root/empty-bodies"
+create_fixture "$empty_bodies"
+sed -i -E '/^[[:space:]]*fn [a-z_]+\(\) \{\}[[:space:]]*$/d' \
+    "$empty_bodies/crates/engine/src/realtime/"*.rs \
+    "$empty_bodies/crates/graph/src/"*.rs \
+    "$empty_bodies/crates/effect-contract/src/live.rs" \
+    "$empty_bodies/crates/rack/src/lib.rs" \
+    "$empty_bodies/crates/builtins/src/lib.rs" \
+    "$empty_bodies/hosts/host-web/src/lib.rs"
+bash "$policy_script" "$empty_bodies" >/dev/null
 
 # The forbidden-surface rules, on the file the gate has always scanned.
 expect_failure allocation "$alloc_class" \
@@ -408,5 +420,72 @@ expect_failure marked-region-count-floor 'expected at least forty-two marked rea
 # BEGIN and loses its END, so the per-file count check, not the floors, must red.
 expect_failure unmatched-markers-outside-root 'unmatched realtime policy markers' \
     'sed -i "/REALTIME_POLICY_END/d" "$root/hosts/host-web/src/lib.rs"'
+
+# Selective executable-tool failures prove late statuses are observed after useful output. Each
+# shim delegates every unrelated invocation to the physical tool.
+expect_tool_error() {
+    local name="$1" tool="$2" mode="$3" expected="$4" partial="$5"
+    local root="$scratch_root/tool-$name" shim="$scratch_root/shim-$name" output
+    create_fixture "$root"
+    mkdir -p "$shim"
+    cat >"$shim/$tool" <<'SHIM'
+#!/usr/bin/env bash
+set -u
+joined="$*"
+hit=0
+case "$INJECT_MODE:$TOOL_NAME" in
+  unsafe-scan:rg) [[ "$joined" == *unsafe*crates*hosts*tools*sidecars* && "$joined" != '-v '* ]] && hit=1 ;;
+  unsafe-filter:rg) [[ "$1" == '-v' ]] && hit=1 ;;
+  marker-discovery:rg) [[ "$joined" == *'-l REALTIME_POLICY_BEGIN'* ]] && hit=1 ;;
+  begin-count:rg) [[ "$joined" == *'-c REALTIME_POLICY_BEGIN'*runtime.rs* ]] && hit=1 ;;
+  end-count:rg) [[ "$joined" == *'-c REALTIME_POLICY_END'*runtime.rs* ]] && hit=1 ;;
+  final-predicate:rg) [[ "$joined" == *'Vec::'* ]] && hit=1 ;;
+  marker-sort:sort) hit=1 ;;
+  body-read:awk) [[ "$joined" == *runtime.rs* ]] && hit=1 ;;
+esac
+if (( hit )); then
+    if [[ "$PARTIAL" == 1 ]]; then "$REAL_TOOL" "$@" || true; fi
+    printf 'injected-%s-error\n' "$INJECT_MODE" >&2
+    exit 2
+fi
+exec "$REAL_TOOL" "$@"
+SHIM
+    chmod +x "$shim/$tool"
+    if output="$(env PATH="$shim:$PATH" TOOL_NAME="$tool" REAL_TOOL="$(command -v "$tool")" INJECT_MODE="$mode" PARTIAL="$partial" bash "$policy_script" "$root" 2>&1)"; then
+        printf 'realtime injected failure unexpectedly passed: %s\n' "$name" >&2; exit 1
+    fi
+    printf '%s\n' "$output" | rg -qF "injected-$mode-error" || { printf 'missing injected diagnostic: %s\n%s\n' "$name" "$output" >&2; exit 1; }
+    printf '%s\n' "$output" | rg -qF "$expected" || { printf 'wrong injected failure class: %s\n%s\n' "$name" "$output" >&2; exit 1; }
+}
+
+for partial in 0 1; do
+    expect_tool_error "unsafe-scan-$partial" rg unsafe-scan 'unsafe source scan' "$partial"
+    expect_tool_error "unsafe-filter-$partial" rg unsafe-filter 'unsafe source exclusions' "$partial"
+    expect_tool_error "marker-discovery-$partial" rg marker-discovery 'realtime marker discovery failed' "$partial"
+    expect_tool_error "marker-sort-$partial" sort marker-sort 'realtime marker discovery sort errored' "$partial"
+    expect_tool_error "begin-count-$partial" rg begin-count 'BEGIN marker count failed' "$partial"
+    expect_tool_error "end-count-$partial" rg end-count 'END marker count failed' "$partial"
+    expect_tool_error "body-read-$partial" awk body-read 'realtime body extraction failed' "$partial"
+    expect_tool_error "final-predicate-$partial" rg final-predicate 'marked realtime forbidden-body predicate' "$partial"
+done
+
+# Counter-mutants must fail at this suite's unexpected-success assertion. These disposable
+# copies prove that the assertions distinguish a swallowed producer status from the hardened gate.
+prove_realtime_mutant_rejected() {
+    local name="$1" edit="$2" mode="$3"
+    local mutant_dir="$scratch_root/mutant-$name" output status
+    mkdir -p "$mutant_dir/lib"; cp "$policy_script" "$mutant_dir/check.sh"
+    ln -s "$script_directory/lib/gate.sh" "$mutant_dir/lib/gate.sh"
+    sed -i "$edit" "$mutant_dir/check.sh"
+    set +e
+    output="$(policy_script="$mutant_dir/check.sh"; expect_tool_error "mutant-$name" rg "$mode" ignored 0 2>&1)"
+    status=$?
+    set -e
+    [[ $status == 1 ]] && printf '%s\n' "$output" | rg -qF 'unexpectedly passed' || {
+        printf 'realtime counter-mutant did not reach intended assertion: %s\n%s\n' "$name" "$output" >&2; exit 1;
+    }
+}
+prove_realtime_mutant_rejected unsafe-status 's/)" || exit \$?/)" || true/' unsafe-scan
+prove_realtime_mutant_rejected final-predicate '/scratch_file.*exit/s/exit.*$/true/' final-predicate
 
 printf 'realtime policy mutation tests: ok\n'
