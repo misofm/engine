@@ -15,3 +15,7 @@ export * from "./policy.ts";
 export * from "./host-mirror.ts";
 export * from "./pcm-ring.ts";
 export * from "./pcm-feed.ts";
+
+export { scratchBootWithWorker } from "./scratch.ts";
+export type { ScratchWorker, ScratchWorkerFactory } from "./scratch.ts";
+export { createDefaultHost, BrowserBootError } from "./default-host.ts";
