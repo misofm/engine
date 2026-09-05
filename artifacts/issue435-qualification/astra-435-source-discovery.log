@@ -1,0 +1,60 @@
+crates/host-core/src/solo.rs:178:    pub fn effective_mute(&self, track: usize, lane: usize) -> bool {
+crates/engine/src/realtime/mod.rs:19:    ARENA_SILENCE_BUFFER, ArenaLease, ArenaLeaseSetBuilder, ArenaStereoPair, ArenaStereoPlanes,
+crates/engine/src/realtime/disjoint.rs:13://! [`ArenaLeaseSetBuilder::finish`]:
+crates/engine/src/realtime/disjoint.rs:26://!   deadline the coordinator marks its buffers muted ([`ArenaLease::set_muted`]); a muted read
+crates/engine/src/realtime/disjoint.rs:78:/// Instances are produced only by [`ArenaLeaseSetBuilder::finish`].
+crates/engine/src/realtime/disjoint.rs:86:// SAFETY: the arena hands out access only through `ArenaLease`, and a lease set is constructed
+crates/engine/src/realtime/disjoint.rs:87:// only by `ArenaLeaseSetBuilder::finish`, which proves I1 and I2 (module documentation). I3 and
+crates/engine/src/realtime/disjoint.rs:147:pub struct ArenaLease {
+crates/engine/src/realtime/disjoint.rs:155:const ACCESS_MUTED: u8 = 0b10;
+crates/engine/src/realtime/disjoint.rs:157:impl core::fmt::Debug for ArenaLease {
+crates/engine/src/realtime/disjoint.rs:160:            .debug_struct("ArenaLease")
+crates/engine/src/realtime/disjoint.rs:167:impl ArenaLease {
+crates/engine/src/realtime/disjoint.rs:195:                *access |= ACCESS_MUTED;
+crates/engine/src/realtime/disjoint.rs:197:                *access &= !ACCESS_MUTED;
+crates/engine/src/realtime/disjoint.rs:207:            .is_some_and(|access| access & ACCESS_MUTED != 0)
+crates/engine/src/realtime/disjoint.rs:213:    fn effective(&self, buffer: u32) -> usize {
+crates/engine/src/realtime/disjoint.rs:216:        if self.access[index] & ACCESS_MUTED == 0 {
+crates/engine/src/realtime/disjoint.rs:224:    fn checked_write(&self, buffer: u32) -> usize {
+crates/engine/src/realtime/disjoint.rs:470:pub struct ArenaLeaseSetBuilder {
+crates/engine/src/realtime/disjoint.rs:477:impl ArenaLeaseSetBuilder {
+crates/engine/src/realtime/disjoint.rs:527:    pub fn finish(self) -> Result<(Arc<DisjointArena>, Vec<ArenaLease>), DisjointArenaError> {
+crates/engine/src/realtime/disjoint.rs:606:                ArenaLease {
+crates/engine/src/realtime/disjoint.rs:621:    fn builder() -> ArenaLeaseSetBuilder {
+crates/engine/src/realtime/disjoint.rs:622:        ArenaLeaseSetBuilder::new(
+crates/engine/src/realtime/disjoint.rs:721:        consumer.set_muted(produced, true);
+crates/engine/src/realtime/disjoint.rs:722:        assert!(consumer.is_muted(produced));
+crates/engine/src/realtime/disjoint.rs:724:        consumer.set_muted(produced, false);
+crates/engine/src/realtime/disjoint.rs:743:    fn many_lease(planes: usize, frames: usize) -> (Vec<u32>, u32, ArenaLease) {
+crates/engine/src/realtime/disjoint.rs:744:        let mut build = ArenaLeaseSetBuilder::new(
+crates/engine/src/realtime/disjoint.rs:756:        lease: &mut ArenaLease,
+crates/engine/src/realtime/disjoint.rs:849:        let mut build = ArenaLeaseSetBuilder::new(
+crates/builtins/src/lib.rs:2915:            FaderStageKernel::Simd4(stage) => stage.is_muted(lane, channel % 2),
+crates/builtins/src/lib.rs:2916:            FaderStageKernel::Simd8(stage) => stage.is_muted(lane, channel % 2),
+crates/builtins/src/lib.rs:3200:        self.stage.is_muted(0, lane % 2)
+crates/builtins/tests/fader_ramp.rs:184:    assert!(live.is_muted(0) && live.is_muted(1));
+crates/builtins/tests/fader_ramp.rs:204:    assert!(!live.is_muted(0));
+crates/protocol/src/message_wire.rs:4053:fn checked_writer_len(sink: &dyn Sink, required: usize) -> Result<usize, EncodeError> {
+crates/effect-package/tests/descriptor_v1_qualification.rs:209:static PORTS_PERMUTED: [PortDescriptor; 3] = [MAIN_IN, SIDECHAIN, MAIN_OUT];
+crates/effect-package/tests/descriptor_v1_qualification.rs:495:static DESCRIPTOR_A_PERMUTED: EffectDescriptor = EffectDescriptor {
+crates/effect-package/tests/descriptor_v1_qualification.rs:496:    ports: &PORTS_PERMUTED,
+crates/effect-package/tests/descriptor_v1_qualification.rs:600:    assert_eq!(encoded(&DESCRIPTOR_A), encoded(&DESCRIPTOR_A_PERMUTED));
+crates/graph/src/runtime.rs:18://! [`ArenaLease`]. The lease API is the one implementation of *where the audio is* as well as
+crates/graph/src/runtime.rs:41:use engine::realtime::{ArenaLease, ArenaLeaseSetBuilder, RenderError};
+crates/graph/src/runtime.rs:90:fn reduce_plane(lease: &mut ArenaLease, plane: usize, out: u32, inputs: &[u32]) {
+crates/graph/src/runtime.rs:107:    lease: &mut ArenaLease,
+crates/graph/src/runtime.rs:667:    lease: &'a mut ArenaLease,
+crates/graph/src/runtime.rs:883:    pub(crate) lease: ArenaLease,
+crates/graph/src/runtime.rs:972:        lease: ArenaLease,
+crates/graph/src/runtime.rs:1131:    lease: &mut ArenaLease,
+crates/graph/src/runtime.rs:1312:fn observe(op: &mut RuntimeOp, lease: &ArenaLease, first_sample: u64) -> Result<(), RenderError> {
+crates/graph/src/runtime.rs:1903:    let mut builder = ArenaLeaseSetBuilder::new(
+crates/graph/src/runtime.rs:3070:    fn old_reduce_plane(lease: &mut ArenaLease, plane: usize, out: u32, inputs: &[u32]) {
+crates/graph/src/runtime.rs:3248:            lease.set_muted(3, true);
+crates/graph/src/runtime.rs:3279:        self_alias.set_muted(2, true);
+crates/graph/src/runtime.rs:3281:        self_alias.set_muted(2, false);
+crates/graph/src/runtime.rs:3293:    fn single_lease(frames: usize, buffers: usize) -> ArenaLease {
+crates/graph/src/runtime.rs:3294:        let mut builder = ArenaLeaseSetBuilder::new(
+crates/graph/src/runtime.rs:3305:    fn stereo_lease(frames: usize, buffers: usize) -> ArenaLease {
+crates/graph/src/runtime.rs:3306:        let mut builder = ArenaLeaseSetBuilder::new(
+crates/protocol/src/controller.rs:3437:    fn effective_maximum_transaction_edits(&self) -> u32 {

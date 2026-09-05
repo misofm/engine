@@ -1,0 +1,1 @@
+run_command=wasm-interp --run-export=main --argument=i32:0 --argument=i32:0 interp=0 exact=0 prior_run_all_status=0_empty_output=true build_not_repeated=true

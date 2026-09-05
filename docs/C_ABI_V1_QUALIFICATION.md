@@ -127,12 +127,18 @@ The RT-3 (#420) artifact from source candidate
 `24f81af304e541ba0e734de5c7a3dc5221e71fa4de73f2545edea3c2960761fe`.
 Independent builds, static/resource/mutation checks and all three browser engines passed;
 workspace evidence belongs to #420; its uninvoked descriptive measurement is tracked by #436.
-The current RT-4 public full-chain (#429) artifact from source candidate
+The RT-4 public full-chain (#429) artifact from source candidate
 `e4bcaa2feae13c9f016bb7b2e1eaff8bd7314547` has SHA-256
 `10b0581f72d921b520e4066b82dc32cb7bea90b757c20ccca3dfc52cf7b9e098`.
 Independent builds, static/resource/mutation checks and all three browser engines passed;
 workspace and supported-Wasm evidence are retained in `artifacts/issue429-qualification`.
 Live integration and descriptive full-chain measurement remain in #430 and #431.
+The current RT-14 lease cleanup (#435) artifact from source candidate
+`69fd0bfb0504075db4d302df08ff480faab4102e` has SHA-256
+`766848a4688b2ec34c96e81c243286216a7d7e647b6b42f842c0f85a654fc326`.
+Independent builds, static/resource/hermetic checks and all three browser engines passed;
+workspace and supported-Wasm evidence are retained in `artifacts/issue435-qualification`.
+This is an intentional public Rust lease API retirement; wire/C ABI identities are unchanged.
 
 Refresh gates: `cargo test -p capi`; `cargo test -p capi --test resource_lifecycle`;
 `scripts/check-capi-abi.sh`; `scripts/check-abi-layout-v1.py`; and `cargo test --workspace` against
