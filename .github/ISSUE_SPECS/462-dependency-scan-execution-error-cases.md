@@ -100,3 +100,13 @@ Read-only source inspection only; no tests, builds, source/spec/Git/GitHub mutat
 
 
 Root adopts this exact amendment and assigns Sol attempt2. Earlier source PASS is withdrawn; full workspace qualification remains blocked on revised source acceptance, not user input.
+
+## Sol attempt 2 portability correction
+
+Resolved executable Cargo once from the incoming PATH before any fixture shim is injected. The setup rejects a missing/non-executable result with status96, converts a relative executable lookup to an absolute path without resolving away the Cargo/rustup proxy name, and embeds that path with Bash `printf %q` in exactly the five existing delegates: `status-loss-cargo`, `status-loss-cargo-empty`, `status-loss-cargo-matching`, `cargo-empty-success`, and `status-loss-grep`. Their selectors, payloads, runtime `"$@"`, expected diagnostics, statuses, both actual production mutants and restored-positive behavior are unchanged. An explicit source search found no remaining `/home/bl/.cargo/bin/cargo` in the suite.
+
+Focused evidence is retained under `/tmp/462-sol2-*`. `bash -n scripts/test-realtime-audit-leak.sh` exited0 (`syntax`). The tool runner's original stripped PATH contains no Cargo and exercised the new explicit status96 setup diagnostic; supplying its installed incoming Cargo directory, `PATH="/home/bl/.cargo/bin:$PATH" bash scripts/test-realtime-audit-leak.sh`, exited0 (`ordinary-suite`). The log retains both actual mutant outcomes97, restored fixture0 and final `OK`.
+
+The disposable relocation proof saved the real Cargo proxy first, then used `/tmp/462-sol2-relocation/cargo wrapper/cargo`. Its retained wrapper text logs quoted cwd plus every argument to a fixed trace and executes `/home/bl/.cargo/bin/cargo` with unchanged `"$@"`. Running `PATH="/tmp/462-sol2-relocation/cargo wrapper:$PATH" bash scripts/test-realtime-audit-leak.sh` exited0 (`relocation-suite`). The retained assertion command exited0 and verifies exactly one earlier-package forwarding hit for each of the five named fixtures with `tree --locked --offline -p fixture -e features,no-dev --target all`. The relocation log also retains both actual mutant outcomes97, restored fixture0 and final `OK`.
+
+`git diff --check` exited0. Only this suite and this #462 evidence record changed in Sol attempt2; production scanners, helpers, benchmark suite and benchmark inputs are unchanged, so the earlier real-scanner and benchmark-suite evidence remains applicable. No build, benchmark or full workspace gate was run. Root owns checkpoint/GitHub mutation; revised source review remains required before parent qualification.

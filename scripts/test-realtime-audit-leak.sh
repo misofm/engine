@@ -3,6 +3,14 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
+actual_cargo="$(type -P cargo || true)"
+[[ -n "$actual_cargo" && -x "$actual_cargo" ]] || {
+    echo 'test-realtime-audit-leak: executable cargo not found in incoming PATH' >&2
+    exit 96
+}
+if [[ "$actual_cargo" != /* ]]; then
+    actual_cargo="$(cd "$(dirname "$actual_cargo")" && pwd -P)/$(basename "$actual_cargo")"
+fi
 scratch_root="$(mktemp -d)"
 trap 'rm -rf -- "$scratch_root"' EXIT
 
@@ -163,32 +171,32 @@ run_targeted_error unnamed-package "$copy/shim" 'unnamed package manifest: hosts
 
 new_fixture status-loss-cargo
 mkdir -p "$copy/shim"
-printf '#!/usr/bin/env bash\nif [[ " $* " == *" -p later-fixture "* ]]; then printf "later-fixture v0.1.0 (resolved)\\n"; printf "cargo-partial-sentinel\\n" >&2; exit 8; fi\nexec /home/bl/.cargo/bin/cargo "$@"\n' >"$copy/shim/cargo"
+printf '#!/usr/bin/env bash\nif [[ " $* " == *" -p later-fixture "* ]]; then printf "later-fixture v0.1.0 (resolved)\\n"; printf "cargo-partial-sentinel\\n" >&2; exit 8; fi\nsaved_cargo=%q\nexec "$saved_cargo" "$@"\n' "$actual_cargo" >"$copy/shim/cargo"
 chmod +x "$copy/shim/cargo"
 run_targeted_error cargo-tree "$copy/shim" 'cargo tree failed for later-fixture with status 8; output: later-fixture v0.1.0 (resolved); stderr: cargo-partial-sentinel' || exit $?
 
 new_fixture status-loss-cargo-empty
 mkdir -p "$copy/shim"
-printf '#!/usr/bin/env bash\nif [[ " $* " == *" -p later-fixture "* ]]; then printf "cargo-empty-error-sentinel\\n" >&2; exit 8; fi\nexec /home/bl/.cargo/bin/cargo "$@"\n' >"$copy/shim/cargo"
+printf '#!/usr/bin/env bash\nif [[ " $* " == *" -p later-fixture "* ]]; then printf "cargo-empty-error-sentinel\\n" >&2; exit 8; fi\nsaved_cargo=%q\nexec "$saved_cargo" "$@"\n' "$actual_cargo" >"$copy/shim/cargo"
 chmod +x "$copy/shim/cargo"
 run_targeted_error cargo-tree-empty "$copy/shim" 'cargo tree failed for later-fixture with status 8; output: <empty>; stderr: cargo-empty-error-sentinel' || exit $?
 
 new_fixture status-loss-cargo-matching
 mkdir -p "$copy/shim"
-printf '#!/usr/bin/env bash\nif [[ " $* " == *" -p later-fixture "* ]]; then printf "later-fixture v0.1.0 (resolved) realtime-audit\\n"; printf "cargo-matching-error-sentinel\\n" >&2; exit 8; fi\nexec /home/bl/.cargo/bin/cargo "$@"\n' >"$copy/shim/cargo"
+printf '#!/usr/bin/env bash\nif [[ " $* " == *" -p later-fixture "* ]]; then printf "later-fixture v0.1.0 (resolved) realtime-audit\\n"; printf "cargo-matching-error-sentinel\\n" >&2; exit 8; fi\nsaved_cargo=%q\nexec "$saved_cargo" "$@"\n' "$actual_cargo" >"$copy/shim/cargo"
 chmod +x "$copy/shim/cargo"
 run_targeted_error cargo-tree-matching "$copy/shim" 'cargo tree failed for later-fixture with status 8; output: later-fixture v0.1.0 (resolved) realtime-audit; stderr: cargo-matching-error-sentinel' || exit $?
 
 new_fixture cargo-empty-success
 mkdir -p "$copy/shim"
-printf '#!/usr/bin/env bash\nif [[ " $* " == *" -p later-fixture "* ]]; then exit 0; fi\nexec /home/bl/.cargo/bin/cargo "$@"\n' >"$copy/shim/cargo"
+printf '#!/usr/bin/env bash\nif [[ " $* " == *" -p later-fixture "* ]]; then exit 0; fi\nsaved_cargo=%q\nexec "$saved_cargo" "$@"\n' "$actual_cargo" >"$copy/shim/cargo"
 chmod +x "$copy/shim/cargo"
 run_targeted_error cargo-empty-success "$copy/shim" 'cargo tree produced no graph for later-fixture' || exit $?
 
 # A successful Cargo producer followed by a failing graph grep remains an execution error.
 new_fixture status-loss-grep
 mkdir -p "$copy/shim"
-printf '#!/usr/bin/env bash\nif [[ " $* " == *" -p later-fixture "* ]]; then printf "later-fixture v0.1.0 (resolved) realtime-audit\\n"; exit 0; fi\nexec /home/bl/.cargo/bin/cargo "$@"\n' >"$copy/shim/cargo"
+printf '#!/usr/bin/env bash\nif [[ " $* " == *" -p later-fixture "* ]]; then printf "later-fixture v0.1.0 (resolved) realtime-audit\\n"; exit 0; fi\nsaved_cargo=%q\nexec "$saved_cargo" "$@"\n' "$actual_cargo" >"$copy/shim/cargo"
 chmod +x "$copy/shim/cargo"
 printf '#!/usr/bin/env bash\nfor arg in "$@"; do if [[ "$arg" == *realtime-audit* ]] && /usr/bin/grep -q later-fixture "${@: -1}"; then /usr/bin/grep "$@"; printf "grep-error-sentinel\\n" >&2; exit 9; fi; done\nexec /usr/bin/grep "$@"\n' >"$copy/shim/grep"
 chmod +x "$copy/shim/grep"
