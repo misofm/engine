@@ -355,6 +355,12 @@
       "retained_path": "artifacts/issue420-qualification/readiness-deferred.log",
       "bytes": 555,
       "sha256": "cf63a4599a0e32cdad49256e46c24b89ca6ab247f1d34fe86afaa356ceebd8fd"
+    },
+    {
+      "path": "/tmp/engine-420-post410-policies.log",
+      "retained_path": "artifacts/issue420-qualification/engine-420-post410-policies.log",
+      "bytes": 134,
+      "sha256": "0cf769a06578a51fdb87831008a1eb46c18a8a21270dd0640172bae43560b7a3"
     }
   ],
   "untimed_runner_profile_binary_sha256": "53dce85d8ff683693598da8dce79195ecfad1ad76300b68bb348196c00f81bab",

@@ -228,3 +228,7 @@ Existing operator preflight terminated exit 0 with zero workload launches (`/tmp
 ## Retained qualification and deferred readiness
 
 Original qualification logs/procedures and accepted versus historical source reviews are now retained under `artifacts/issue420-qualification/`, with byte/hash manifest and exact main455 workspace baseline. A bounded readiness monitor at candidate `66827b87b7210931c0a76a6dfcbcd00419ca3683` completed twelve probes with load above 0.50 and terminated exit 1. No runner or workload was invoked; the sole measurement authority remains unconsumed. The quiet window ended and independent #411 implementation resumed. No source, workload, validator, profile, controls or gates changed.
+
+## Integration of delivered policy traversal repair
+
+Normal merge `c2bcd21907bfce50bef2b9742e67cd6c148955a0` integrates main `1af76181490a623675960c244a6c677c06aae745` (#410). Its delta is confined to the realtime/lane checkers and their mutation suites plus issue records; runtime, workspace test population, workload, validators and artifact source are unchanged. Both actual policies and both mutation suites terminated exit 0 against the integrated RT-3 tree, including realtime 42 marked regions in 12 files. The exact log is retained as `artifacts/issue420-qualification/engine-420-post410-policies.log`. This completes the known missing-sidecars fixture repair through its own accepted delivery; the earlier immutable-source logs remain historical evidence. The sole controlled descriptive invocation and actual PR/required-CI delivery remain pending.
