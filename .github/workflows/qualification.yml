@@ -86,6 +86,7 @@ jobs:
       - name: DSP research corpus and listening-evidence packet validators
         run: |
           bash scripts/check-dsp-research.sh
+          bash scripts/test-dsp-research.sh
           bash scripts/check-builtins-listening.sh
 
   artifact:
