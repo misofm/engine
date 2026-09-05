@@ -267,3 +267,30 @@ Focused evidence (2026-09-05) is retained under `/tmp/454-sol3-*`: syntax; actua
 `portability`, `all`, and invalid-subject status 2; both policy suites; source diff checks; and the
 two original/mutant/restored mutation diffs. No generator write, fixture-byte change, Cargo/native
 runner/build, benchmark, timing, Git, or GitHub operation was performed.
+
+
+## Final source PASS and delivered-base qualification freeze
+
+# Astra #454 FINAL Sol attempt 3 — PASS
+
+Exact reviewed clean head `7724a581e320a3e080e4d0276efb928382065e83`, `/home/bl/misofm/engine-454-plan`. One consolidated source verdict against the complete numbered contract and the three finite attempt-2 groups. PASS permits root to integrate delivered #466, freeze the actual candidate and perform retained parent workspace/PR/required-CI qualification. It is not delivery approval or a claim that the older runtime base has already been qualified against current main.
+
+## Final finite corrections
+
+1. The six nonempty producer sites now cover both suppressed-output/error and full-real-output/error: RIFF find, RIFF wc, bypass source, four-root reachability source, FileIdentity count and O_NOFOLLOW count. The full reachability leg is the retained SAME-assertion control, while its empty leg is independently directed. Delegates check expected real status before injecting failure. Find verifies all four actual filenames as an order-independent exact set; wc verifies actual four existing path rows and real count4; bypass and reachability retain complete real numbered allowed output; both count full legs validate actual numeric values before publication. Quiet required reads and genuinely empty forbidden/filtered populations keep their appropriate real0/1 outcomes rather than inventing prohibited output. No extra producer or corpus was added.
+
+2. Actual verifier and late Python read failures are now discriminating. V1 retains valid initial surfaces then removes referenced riff-96000.json, requiring the real FileNotFound diagnostic and python status1. Portability leaves earlier source/contract scans intact and changes only the real Python read argument to a missing path, requiring that actual read diagnostic/status; its controlled exit8 remains separate. Newly introduced missing source/contract cases now require the precise surface failure. Count clean absence1 has a policy diagnostic distinct from execution failure, preserving >=2/exact4 thresholds.
+
+   The committed suites invoke checker executables inside assertions but do not themselves source the functions under a conditional. To verify the explicitly assigned errexit-independent claim without changing source or extending the implementation pass, Astra independently executed the unchanged checker both normally and via `if source CHECKER ROOT MODE; then ...; fi` for the corrected bypass source and O_NOFOLLOW count faults. Each shim first ran the exact real producer, required status0/nonempty valid output, emitted that complete output plus ASTRA_VALID_PAYLOAD_ERROR and exited7. All four checks exited1 with the intended operation/status7 diagnostic and sentinel. Retain `/tmp/astra-454-attempt3-conditional-proof.log` as REVIEWER evidence in final packaging; do not attribute it to Sol or claim it is a committed suite case. No source edit or additional repair was involved.
+
+3. New directed assertions distinguish unexpected checker success97 from wrong/setup outcome96 and correct rejection0. The two existing actual production mutations remain exactly the reachability source-status guard and the late forbidden-status guard; retained diffs confirm those changes. ORIGINAL, mutant and byte-restored checker paths run through the SAME respective assertion. Logs show the intended named unexpected-success branch, the suite requires97, and restored calls pass. The full/empty output controls and real delegate checks avoid attributing setup failure to the intended scan. No third mutation campaign is required or claimed.
+
+## Retained scope and evidence
+
+The only production delta after attempt2 is the two count-status1 diagnostic branches. Previously accepted source fixes remain: bypass source/exclusion checked separately, independent find/wc and count statuses, explicit scratch/Python/required-read failures, checked four-root source and each exclusion. Required paths, exact generator --check, RIFF/RF64 identity, dependency/ABI/regex/glob/comment/Python/count policies, portability-only isolation and both prefixes are preserved. Existing semantic mutation fixtures and valid empty/allowed populations remain intact. No helper, workflow, runner, generator, fixture-source bytes or runtime change.
+
+Independent retained status files report syntax/v1/portability/all/v1-suite/port-suite/diff0 and invalid mode2. Reviewed the two mutant diffs and suite terminal logs. The worktree is clean. No full workspace, Cargo/build, native runner, benchmark or timing was performed by this review; only the four tiny unchanged-source normal/conditional probes above supplemented read-only Git/source/log inspection.
+
+Root must preserve failed-attempt history and this reviewer supplement, integrate actual delivered main after source PASS, then run the retained immutable workspace and actual-head PR/required-CI gates. #403/#306/#349 and sibling outcomes remain open. No further implementation repair is requested.
+
+Root integrated delivered main `6589c5185411d51bce7d0a0aafab4df63a5e47db`; all three accepted scripts remain byte-identical to reviewed `7724a581`. The upcoming immutable workspace command uses `/tmp/engine-454-workspace-qualified`, includes doctests, and compares its population with delivered #430 (275 result blocks, 1,591 passed, zero failed, 24 ignored). No source/evidence edits while it runs. Final actual PR review and required CI remain mandatory.
