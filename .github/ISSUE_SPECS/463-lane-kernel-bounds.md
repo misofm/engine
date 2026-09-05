@@ -144,3 +144,18 @@ This is the root-selected minimal execution-evidence completion for the same thr
 All previous arithmetic, debug equality/release prefix/short rejection, zeroalloc, real reachability and qualification restrictions remain. No existing pin can be changed to obtain green output. Final numbered issue must adopt this amendment and exact base before Luna1. Root remains responsible for scope synchronization, checkpoints, later qualification, actual PR Astra review and required CI; #349 unrelated findings remain open.
 
 
+
+
+## Numbered scope PASS; queued
+
+# Astra #463 numbered scope — PASS, queued only
+
+Exact planning checkpoint `b7ef921e8d568bdaacf11341249ff32862eff974`, `/home/bl/misofm/engine-lane2-plan`, base29a8c88b82de8660a5d573e75b7e67d977496576. PASS for numbered scope and synchronization, not implementation authorization.
+
+Live issue463 is OPEN with exact title “Prove block-slice bounds once in three lane kernels”; body exactly matches `.github/ISSUE_SPECS/463-lane-kernel-bounds.md`. Only that spec differs from the planning base. All three adopted /tmp documents are included verbatim. The introductory precedence clause explicitly selects the FINAL amendment over the earlier scalar-Wasm disassembly-only option.
+
+Scope preserves all three kernels, original two-rounding operand order and matrix snapshots, debug equality/release checked-prefix/short rejection, exact native graph filters and the pre-edit honest-null code-generation checkpoint. Final mandatory gates correctly include the real ArenaMembers::fold_plane store=false extension and one Mix2x2 variant with four existing signal cases. Both output halves feed the unchanged corpus digest mechanism. New scalar-baseline pins precede ANY kernel rewrite; all existing named pin bytes remain immutable despite index shifts. Existing G5 must execute both scalar-Wasm and simd128 matrix cases. No new corpus/runner/framework/timing authority or production graph change is added.
+
+Queue remains behind active459 and queued460; current462 delivery is also recorded. Historical draft references to older heads/issue states are contextual and superseded by the explicit planning-base/queue paragraph. Root must perform a separate actual implementation-base review, synchronize that freeze and assign Luna1 only when ordering permits. No feature implementation, qualification or timing follows merely from this numbered approval.
+
+Read-only Git/GitHub/spec inspection; no tests, builds, timing or repository/Git/GitHub mutations.
