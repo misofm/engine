@@ -290,7 +290,31 @@ A refusal that is *not* flow control throws instead: backpressure succeeds on re
 thread drains, an unknown address never will, and retrying it silently would be an infinite loop
 wearing the costume of resilience.
 
-`submit` may answer synchronously or with a `Promise` — in-process the engine answers immediately,
+Choose exactly one submission callback. Encoded `submit(records, count)` keeps the existing
+`WriterOptions` contract. Semantic `submitEdits(edits)` accepts the selected readonly `LaneEdit[]`
+without an encode/decode round trip and is typed by `SemanticWriterOptions`:
+
+```ts
+const console = engine.console();
+const writer = new ConsoleWriter({
+  submitEdits: (edits) => console.submit(...edits),
+  maximumBatch: 32,
+});
+
+// Existing encoded integrations remain supported:
+const encodedWriter = new ConsoleWriter({
+  submit: (records, count) => engine.submitCommands(records, count),
+  maximumBatch: 32,
+});
+```
+
+Both callbacks return the actual `CommandReport` or a promise for it. Both use the same pending
+map, batch sizing and serialized flush chain; semantic submission adds no queue. Providing both
+callbacks or neither rejects. `maximumBatch` retains its existing default and positive-integer
+validation. The callback owns transport-specific encoding and validation; `FlushOutcome` remains
+the writer's admission/pending summary.
+
+`submit` and `submitEdits` may answer synchronously or with a `Promise` — in-process the engine answers immediately,
 but a browser host reaches it over a worklet port, where the answer is a promise by construction —
 so `flush()` and `drain()` are async. Flushes serialize: a call entered while a prior submit is
 still outstanding waits for it rather than picking its batch out of a map the earlier flush has not

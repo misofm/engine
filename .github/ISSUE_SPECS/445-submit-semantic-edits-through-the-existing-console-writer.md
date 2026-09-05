@@ -133,3 +133,50 @@ A fresh independent Astra medium review follows the completed evidence, with
 root handling checkpoint pushes and GitHub synchronization.
 
 Matching issue: misofm/engine#445. Root approval: preserve existing WriterOptions interface, add the separate semantic option and one callback dispatch over the same queue.
+
+
+## Attempt 1 implementation and evidence
+
+Astra medium implemented the approved slice. Root source checkpoint `edfe7431`
+contains only `sdk/src/core/writer.ts`, `sdk/test/writer-evals.mjs` and
+`sdk/test/barrel-surface.ts`. The existing exported `WriterOptions` interface
+remains intact. `SemanticWriterOptions` extends its non-submit options and
+provides `submitEdits(readonly LaneEdit[])`; the constructor excludes mixed
+modes at both the type and runtime boundaries.
+
+Constructor dispatch normalizes the selected callback once. Only encoded mode
+calls `encodeLaneEdits`; both modes continue through the same pending map,
+serialized flush chain, batch selection, identity-based removal, adaptive
+backpressure split and actual CommandReport handling. No additional writer,
+queue, report synthesis, host protocol or app implementation was introduced.
+
+The existing real-engine paused episode now compares semantic async admission,
+backpressure, drain outcomes and stats with encoded synchronous/asynchronous
+submission. Existing in-flight latest-wins and non-flow refusal/recovery
+fixtures run in both modes. The semantic in-flight case queues another flush
+before the first report, confirms no early second submission, and observes the
+unencoded addressed value on its later callback. Type proofs preserve legacy
+annotated/extended WriterOptions while rejecting mixed/neither modes, mutable
+semantic batches and callbacks without CommandReport results.
+
+Validation in `/private/tmp/miso-dx-sdk-writer`:
+
+- `bash scripts/check-sdk-types.sh`: PASS, including the existing host mirror
+  and root-barrel identities plus semantic/legacy constructor proofs.
+- Artifact-backed `node --test sdk/test/writer-evals.mjs`: **16/16 PASS**;
+  log `/private/tmp/dx445-writer-focused.log`.
+- `bash scripts/check-sdk-headless.sh /private/tmp/dx-393-current-artifacts`:
+  **163 PASS, 1 existing skip, 0 failures** (164 tests total);
+  log `/private/tmp/dx445-headless.log`.
+- `bash scripts/sdk-package.sh check /private/tmp/dx-393-current-artifacts`:
+  PASS, including generated-policy checks and the existing fresh packed-consumer
+  gate (77 package files); log `/private/tmp/dx445-package.log`.
+
+All gates used the existing reviewed artifact directory. No Rust/Wasm rebuild,
+generated artifact edit, dependency/package metadata change, new harness or
+browser matrix occurred. README now documents both mutually exclusive callback
+modes and their common queue/receipt behavior. App #101 can adopt submitEdits
+and remove its already-listed encoded-record bridge independently.
+
+Final README/spec evidence awaits root checkpoint. A dedicated independent
+Astra medium review is in progress; no independent verdict is claimed here.
