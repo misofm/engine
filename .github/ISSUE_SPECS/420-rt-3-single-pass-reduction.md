@@ -196,3 +196,21 @@ Formatting, diff hygiene and graph all-target clippy pass; clippy retains the ex
 `math::fast_db` allow-list warnings. Logs are `/tmp/sol-420-final-graph-debug.log`,
 `/tmp/sol-420-final-graph-release.log`, `/tmp/sol-420-final-console-release.log`,
 `/tmp/sol-420-final-policies.log`, and `/tmp/sol-420-final-hygiene.log`.
+
+## Final source acceptance and qualification freeze
+
+# Astra #420 FINAL attempt 3 source review
+
+**PASS at exact pushed head `a7549425c2f1be34c259c6253eee79b5084f5565`.** Root may proceed with the remaining frozen delivery qualification. This is semantic/focused-evidence acceptance, not a benchmark launch or merge approval. Reviewed complete frozen contract, prior verdicts/final clarification, current source and final two-file delta plus named logs. No Cargo, tests, timing or repository/GitHub mutation performed.
+
+The final revision resolves the sole remaining arithmetic discriminator gap. Each f32/Simd4/Simd8 comparison now runs six separate nine-contributor families across the frozen sub-width/exact/ragged/multiple-vector-tail/128 lengths. The old primitive outputs are checked before DUT equality: finite1.75/order0, negative-zero bits, small-normal0x01000000, subnormal bits2, signed infinity without invalid cancellation, and separate NaN category. Both computations share the existing CanonicalFpEnv guard, which restores the caller's environment and provides the actual non-flushing render contract. NaN output bits are compared only against the same-width old result, without invented universal payload pins. The families can no longer all disappear into NaN.
+
+Production remains the previously reviewed bounded owned-Lane accumulation: original zero/one arms, original contributor order, no initial zero seed/subtotals, arbitrary configured fan-in and one write per vector/sample after all contributor reads. No new unsafe, access API, allocation, alias policy or arithmetic change has been introduced. The repeated lease/muting checks remain the candid simplicity cost; no machine-instruction or timing claim is earned by source inspection.
+
+All previously accepted focused obligations remain present: finite65/129-input coverage; explicit association and eight-input-subtotal wrong-result witnesses; repeated/silence/muted IDs, both legal single self-alias states, asymmetric planes, poison and unrelated sentinels; both RT-2 folded oracle sites redirected to the independent old algorithm; real64-input non-aliasing/stable-order private lowering fixture. The final record accurately links the unchanged console fixture/model transformation and unbanked path without pretending that the representative lowering test directly instantiated SessionRuntime.
+
+Final supplied logs establish graph52 unit tests plus the SAME isolated allocation integration test1 in both debug/release, and release console chain_shape21. The allocation fixture retains positive allocator/free liveness, repeated actual nonfolded N4 prepared renders and zero audited alloc/free counts alongside the existing folded proof. Current realtime42/12, relevant policies, fmt/diff and clippy pass. Known historical lane fixture missing-sidecars diagnostics remain explicitly owned by #410; no repair is claimed here. Existing clippy allow-list warnings are recorded rather than suppressed.
+
+No remaining frozen source acceptance blocker was found. Preserve source while root completes baseline/candidate fullworkspace, supported targets and immutable artifact/current consumers/browser/static/resource qualification, then matching runner/preflight registration and the ONE controlled descriptive invocation under the frozen contract. Zero-launch preflight and quiet readiness precede timing; refusal/failure consumes its authority and is preserved. Exact final PR Astra review and required CI remain mandatory before merge/closure. #349's other findings remain open.
+
+Root normally integrated merged main `4557865ee1fa8f8381ed75e7eace91d15b649d27` and registers only the matching `--issue420-rt3` runner/preflight arm and usage. Workload, validators, floors, controls and invocation budget remain unchanged. This checkpoint freezes the source for retained workspace, supported-target, immutable artifact/browser and one controlled descriptive capture. None of those pending gates is presumed complete by source PASS.
