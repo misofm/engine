@@ -1917,7 +1917,9 @@ pub(crate) fn build_sequential(
         }
         let first = first_ops[0];
         let second = second_ops[0];
-        if second != first.saturating_add(1)
+        if retired.contains(&first)
+            || retired.contains(&second)
+            || second != first.saturating_add(1)
             || program.inputs_of(&program.ops[first]).is_empty()
             || !scalar_pair_is_in_place(program, first, second)
         {

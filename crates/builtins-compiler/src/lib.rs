@@ -5202,6 +5202,33 @@ mod tests {
         backend: Backend,
         n: usize,
     ) -> PreparedBuiltinsGraphBound {
+        prepared_pair_graph_variant(
+            post_fader_observed,
+            symmetric_input,
+            nonfinite_input,
+            between_render_calls,
+            post_matrix_capture,
+            backend,
+            n,
+            BoundaryVariant::Plain,
+            n - 1,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepared_pair_graph_variant(
+        post_fader_observed: bool,
+        symmetric_input: bool,
+        nonfinite_input: bool,
+        between_render_calls: bool,
+        post_matrix_capture: Option<Arc<std::sync::Mutex<Vec<u32>>>>,
+        backend: Backend,
+        n: usize,
+        variant: BoundaryVariant,
+        meter_track: usize,
+        extra_post_matrix_capture: Option<(usize, Arc<std::sync::Mutex<Vec<u32>>>)>,
+    ) -> PreparedBuiltinsGraphBound {
         let compiled = n_track_session_with_symmetry(n, symmetric_input);
         let controls = (0..n)
             .map(|index| TrackControlRequest {
@@ -5211,7 +5238,11 @@ mod tests {
             .collect::<Vec<_>>();
         let meter = post_fader_observed.then(|| MeterRequest {
             handle: MeterHandle(NonZeroU64::new(0x459).expect("handle")),
-            track_id: track_name(if backend == Backend::Scalar { n - 1 } else { 0 }),
+            track_id: track_name(if backend == Backend::Scalar {
+                meter_track
+            } else {
+                0
+            }),
             tap: MeterTap::PostFader,
             config: MeterConfig {
                 period_frames: NonZeroU32::new(HARNESS_QUANTUM).expect("period"),
@@ -5232,8 +5263,8 @@ mod tests {
             prepare_session_builtins_with_console(&compiled, meter.as_slice(), &controls, caps())
         }
         .expect("prepared builtins");
-        let (mut graph, mut levels) = track_graph(n);
-        if backend == Backend::Scalar && n == 2 {
+        let (mut graph, mut levels) = track_graph_variant(n, variant);
+        if backend == Backend::Scalar && n >= 2 {
             let stage = |index: usize, stage: TrackStage| GraphNodeId::TrackStage {
                 track_id: StableGraphId::parse(&track_name(index)).expect("scalar track"),
                 stage,
@@ -5246,6 +5277,12 @@ mod tests {
                     stage(index, TrackStage::PostFader),
                     stage(index, TrackStage::PostMatrix),
                 ]);
+            }
+            if matches!(
+                variant,
+                BoundaryVariant::Alias | BoundaryVariant::AliasObserved
+            ) {
+                schedule.push(stage(n - 1, TrackStage::PostDynamic));
             }
             schedule.push(GraphNodeId::Output {
                 output_id: StableGraphId::parse("main-out").expect("output"),
@@ -5261,13 +5298,13 @@ mod tests {
             graph.sequential_schedule = schedule;
             graph.dependency_levels = levels.clone();
         }
-        if backend == Backend::Scalar && n == 2 {
+        if backend == Backend::Scalar && n >= 2 {
             let fader = GraphNodeId::TrackStage {
-                track_id: StableGraphId::parse("t01").expect("selected scalar track"),
+                track_id: StableGraphId::parse(&track_name(n - 1)).expect("selected scalar track"),
                 stage: TrackStage::PostFader,
             };
             let matrix = GraphNodeId::TrackStage {
-                track_id: StableGraphId::parse("t01").expect("selected scalar track"),
+                track_id: StableGraphId::parse(&track_name(n - 1)).expect("selected scalar track"),
                 stage: TrackStage::PostMatrix,
             };
             let slot = graph
@@ -5284,6 +5321,18 @@ mod tests {
         let classes = SessionPoolClasses::from_session(&compiled);
         let mut artifact =
             builtins.into_graph_artifact_with_banks(graph, (), backend, &levels, &classes);
+        if matches!(variant, BoundaryVariant::AliasObserved) {
+            artifact
+                .builtin_observers
+                .push(GraphNodeObserverBinding::new(
+                    GraphNodeId::TrackStage {
+                        track_id: StableGraphId::parse(&track_name(n - 1)).expect("selected tail"),
+                        stage: TrackStage::PostDynamic,
+                    },
+                    0x4599,
+                    Box::new(AliasObserver),
+                ));
+        }
         if let Some(capture) = post_matrix_capture {
             artifact
                 .builtin_observers
@@ -5293,6 +5342,18 @@ mod tests {
                         stage: TrackStage::PostMatrix,
                     },
                     0x4598,
+                    Box::new(Capture(capture)),
+                ));
+        }
+        if let Some((track, capture)) = extra_post_matrix_capture {
+            artifact
+                .builtin_observers
+                .push(GraphNodeObserverBinding::new(
+                    GraphNodeId::TrackStage {
+                        track_id: StableGraphId::parse(&track_name(track)).expect("captured track"),
+                        stage: TrackStage::PostMatrix,
+                    },
+                    0x459a,
                     Box::new(Capture(capture)),
                 ));
         }
@@ -5755,6 +5816,121 @@ mod tests {
         assert_eq!(
             retry.matrix_records_drained, 1,
             "the queued tail survived the error"
+        );
+    }
+
+    #[test]
+    fn actual_scalar_extra_reader_declines_and_retains_separate_owner_pcm() {
+        let _guard = PAIR_WITNESS_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let declined_capture = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let reference_capture = Arc::new(std::sync::Mutex::new(Vec::new()));
+        test_only_reset_fader_matrix_witness();
+        let mut declined = prepared_pair_graph_variant(
+            false,
+            false,
+            false,
+            true,
+            Some(Arc::clone(&declined_capture)),
+            Backend::Scalar,
+            2,
+            BoundaryVariant::AliasObserved,
+            1,
+            None,
+        );
+        let prepared = test_only_fader_matrix_witness();
+        let mut reference = prepared_pair_graph_variant(
+            false,
+            false,
+            false,
+            false,
+            Some(Arc::clone(&reference_capture)),
+            Backend::Scalar,
+            2,
+            BoundaryVariant::AliasObserved,
+            1,
+            None,
+        );
+        assert_eq!(
+            (prepared.factory_calls, prepared.factory_members),
+            (0, 0),
+            "the selected scalar fader's real extra reader declines before ownership transfer"
+        );
+        test_only_reset_fader_matrix_witness();
+        let _ = render_bound(&mut declined, 0);
+        let rendered = test_only_fader_matrix_witness();
+        let _ = render_bound(&mut reference, 0);
+        assert_eq!((rendered.process_calls, rendered.factory_calls), (0, 0));
+        assert_eq!(
+            std::mem::take(&mut *declined_capture.lock().unwrap()),
+            std::mem::take(&mut *reference_capture.lock().unwrap()),
+            "decline keeps the original separate-owner post-matrix PCM"
+        );
+    }
+
+    #[test]
+    fn staggered_observed_scalar_track_stays_separate_while_eligible_peer_pairs() {
+        let _guard = PAIR_WITNESS_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let eligible = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let eligible_reference = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed_reference = Arc::new(std::sync::Mutex::new(Vec::new()));
+        test_only_reset_fader_matrix_witness();
+        let mut paired = prepared_pair_graph_variant(
+            true,
+            false,
+            false,
+            true,
+            Some(Arc::clone(&eligible)),
+            Backend::Scalar,
+            3,
+            BoundaryVariant::Plain,
+            1,
+            Some((1, Arc::clone(&observed))),
+        );
+        let prepared = test_only_fader_matrix_witness();
+        let mut reference = prepared_pair_graph_variant(
+            true,
+            false,
+            false,
+            false,
+            Some(Arc::clone(&eligible_reference)),
+            Backend::Scalar,
+            3,
+            BoundaryVariant::Plain,
+            1,
+            Some((1, Arc::clone(&observed_reference))),
+        );
+        assert_eq!((prepared.factory_calls, prepared.factory_members), (1, 1));
+        test_only_reset_fader_matrix_witness();
+        let _ = render_bound(&mut paired, 0);
+        let rendered = test_only_fader_matrix_witness();
+        let _ = render_bound(&mut reference, 0);
+        assert_eq!((rendered.process_calls, rendered.process_members), (1, 1));
+        assert_eq!(
+            std::mem::take(&mut *eligible.lock().unwrap()),
+            std::mem::take(&mut *eligible_reference.lock().unwrap()),
+            "the unobserved staggered peer executes the selected scalar pair"
+        );
+        let observed = std::mem::take(&mut *observed.lock().unwrap());
+        assert_eq!(
+            observed,
+            std::mem::take(&mut *observed_reference.lock().unwrap()),
+            "the observed crossfeeding matrix track retains separate-owner PCM"
+        );
+        assert!(
+            observed
+                .iter()
+                .any(|word| *word != 0 && *word != 0x8000_0000)
+        );
+        let frames = HARNESS_QUANTUM as usize;
+        assert_ne!(&observed[..frames], &observed[frames..]);
+        assert!(
+            paired.meter_consumers[0].consumer.try_pop().is_ok(),
+            "the observed separate track publishes a nonempty meter window"
         );
     }
 
@@ -6748,6 +6924,7 @@ mod tests {
         reference_fader.try_push(fader_record).unwrap();
         reference_matrix.try_push(matrix_record).unwrap();
 
+        test_only_reset_fader_matrix_witness();
         let mut short_left = [0.5_f32];
         let mut long_right = [-0.25_f32, -0.5];
         assert_eq!(
@@ -6759,6 +6936,12 @@ mod tests {
             Err(RenderError::InvalidEnvelope)
         );
         assert_eq!((short_left, long_right), ([0.5], [-0.25, -0.5]));
+        let failed = test_only_fader_matrix_witness();
+        assert_eq!(failed.fader_records_drained, 1);
+        assert_eq!(
+            failed.matrix_records_drained, 0,
+            "invalid envelope returns before the later matrix queue is touched"
+        );
 
         let mut interrupted_left = [0.5_f32, 0.25];
         let mut interrupted_right = [-0.25_f32, -0.5];
