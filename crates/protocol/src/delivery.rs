@@ -150,10 +150,12 @@ pub struct PreparedDelivery<P: Copy + Send + 'static> {
     _marker: core::marker::PhantomData<P>,
 }
 
+type DeliveryEntry<P> = Option<(CoreTicket, P, bool, u16)>;
+
 pub struct DeliveryCoreControl<P: Copy + Send + 'static> {
     producer: Producer<CoreMessage<P>>,
     terminal_consumer: Consumer<CoreTerminal>,
-    entries: Box<[Option<(CoreTicket, P, bool, u16)>]>,
+    entries: Box<[DeliveryEntry<P>]>,
     serial: u64,
     generation: u64,
     terminal_head: Option<CoreTerminal>,
@@ -882,26 +884,25 @@ pub struct AutomationDeliveryRender {
 
 impl AutomationDeliveryRender {
     pub fn begin_boundary(&mut self, first_sample: SampleTime) -> Option<PendingAutomation<'_>> {
-        if self.deferred_cancel.is_none() {
-            if let Ok(BoundaryMessage::Cancel { token, frontier }) = self.barrier_consumer.try_pop()
-            {
-                self.deferred_cancel = Some((token, frontier));
-            }
+        if self.deferred_cancel.is_none()
+            && let Ok(BoundaryMessage::Cancel { token, frontier }) = self.barrier_consumer.try_pop()
+        {
+            self.deferred_cancel = Some((token, frontier));
         }
         if let Some((token, frontier)) = self.deferred_cancel {
             for _ in 0..self.boundary_limit {
-                if let Some(message) = self.core.pending {
-                    if message.ticket.serial <= frontier {
-                        let prefix = self.core.pending_prefix;
-                        if self
-                            .core
-                            .finish_with_progress(message.ticket, prefix, message.payload.len)
-                            .is_err()
-                        {
-                            return None;
-                        }
-                        continue;
+                if let Some(message) = self.core.pending
+                    && message.ticket.serial <= frontier
+                {
+                    let prefix = self.core.pending_prefix;
+                    if self
+                        .core
+                        .finish_with_progress(message.ticket, prefix, message.payload.len)
+                        .is_err()
+                    {
+                        return None;
                     }
+                    continue;
                 }
                 match self.core.begin() {
                     Ok((ticket, batch)) if ticket.serial <= frontier => {
@@ -933,7 +934,7 @@ impl AutomationDeliveryRender {
             return None;
         }
         if self.core.pending.is_none() {
-            if self.core.begin().is_ok() {}
+            let _ = self.core.begin();
         }
         self.core.pending.as_ref().map(|message| PendingAutomation {
             ticket: message.ticket,

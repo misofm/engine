@@ -20,8 +20,11 @@ thread_local! {
     static LARGEST: Cell<u64> = const { Cell::new(0) };
 }
 
+// SAFETY: Allocation and deallocation delegate unchanged pointers and layouts to
+// System; the thread-local counters do not access or alter allocation storage.
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        // SAFETY: The caller supplies the valid layout required by GlobalAlloc.
         let pointer = unsafe { System.alloc(layout) };
         if !pointer.is_null() {
             ACTIVE.with(|active| {
@@ -40,6 +43,8 @@ unsafe impl GlobalAlloc for CountingAllocator {
                 FREES.set(FREES.get() + 1)
             }
         });
+        // SAFETY: The caller supplies a live allocation from this allocator and its
+        // original layout; allocation was delegated to System without modification.
         unsafe { System.dealloc(pointer, layout) }
     }
 }
