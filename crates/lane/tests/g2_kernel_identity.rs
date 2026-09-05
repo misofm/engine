@@ -14,7 +14,7 @@
 
 mod support;
 
-use lane::kernels::{SvfState, svf_step};
+use lane::kernels::{SvfState, ordered_accumulate_block, sum_into_block, svf_step};
 use lane::{Lane, Simd4, Simd8, flush};
 use support::{
     ALL_KERNELS, ALL_SIGNALS, Kernel, MAX_WIDTH, Signal, deinterleave, interleave, run_kernel,
@@ -83,6 +83,92 @@ fn compare(
             );
         }
     }
+}
+
+fn check_ordered_accumulation<L: Lane>() {
+    for len in [
+        1,
+        L::WIDTH.saturating_sub(1).max(1),
+        L::WIDTH,
+        L::WIDTH + 3,
+        128,
+    ] {
+        for count in [1, 3, 8] {
+            let contributors: Vec<Vec<f32>> = (0..count)
+                .map(|lane| {
+                    (0..len)
+                        .map(|frame| match (lane + frame) % 7 {
+                            0 => -0.0,
+                            1 => f32::from_bits(1),
+                            2 => 16_777_216.0,
+                            3 => 1.0,
+                            4 => -16_777_216.0,
+                            5 => f32::INFINITY,
+                            _ => f32::from_bits(0x7fc0_4190),
+                        })
+                        .collect()
+                })
+                .collect();
+            let refs: Vec<&[f32]> = contributors.iter().map(Vec::as_slice).collect();
+            for initial in [true, false] {
+                let mut expected = vec![16777216.0; len];
+                if initial {
+                    expected.copy_from_slice(&contributors[0]);
+                }
+                for input in &refs[usize::from(initial)..] {
+                    sum_into_block::<L>(&mut expected, input);
+                }
+                let mut actual = vec![16777216.0; len];
+                assert!(ordered_accumulate_block::<L>(&mut actual, &refs, initial));
+                assert_eq!(
+                    block_bits(&actual),
+                    block_bits(&expected),
+                    "width {} len {len} count {count} initial {initial}",
+                    L::WIDTH
+                );
+            }
+        }
+    }
+
+    let one = vec![1.0; L::WIDTH + 1];
+    let negative = vec![-16_777_216.0; L::WIDTH + 1];
+    let refs: [&[f32]; 2] = [&one, &negative];
+    let mut actual = vec![16_777_216.0; L::WIDTH + 1];
+    assert!(ordered_accumulate_block::<L>(&mut actual, &refs, false));
+    assert!(actual.iter().all(|value| value.to_bits() == 0));
+    let wrong = 16_777_216.0_f32 + (1.0_f32 + -16_777_216.0_f32);
+    assert_eq!(wrong.to_bits(), 1.0_f32.to_bits());
+
+    let minus_zero = vec![-0.0; L::WIDTH + 1];
+    let mut initial = vec![f32::from_bits(0x7fc0_4190); L::WIDTH + 1];
+    assert!(ordered_accumulate_block::<L>(
+        &mut initial,
+        &[&minus_zero],
+        true
+    ));
+    assert!(initial.iter().all(|value| value.to_bits() == 0x8000_0000));
+
+    for inputs in [
+        Vec::<&[f32]>::new(),
+        vec![&one[..]; 9],
+        vec![&one[..], &one[..one.len() - 1]],
+    ] {
+        let mut poisoned = vec![f32::from_bits(0x7fc0_4190); one.len()];
+        let before = block_bits(&poisoned);
+        assert!(!ordered_accumulate_block::<L>(
+            &mut poisoned,
+            &inputs,
+            false
+        ));
+        assert_eq!(block_bits(&poisoned), before);
+    }
+}
+
+#[test]
+fn ordered_accumulation_matches_the_existing_d9_primitives_and_rejects_shapes() {
+    check_ordered_accumulation::<f32>();
+    check_ordered_accumulation::<Simd4>();
+    check_ordered_accumulation::<Simd8>();
 }
 
 #[test]

@@ -114,9 +114,14 @@ build and available only to unit tests or consumers explicitly selecting `protoc
 The exact AudioWorklet rebuild remains protocol-free but changes crate identity because host-core's
 declared feature surface changed. The subsequent #371 marker-only integration was rebuilt
 and reproducibly qualified as `a89c9606bfa72d69ced42b606cc4b7000d1b53f2b419b12ec63649a385b3eaf1`.
-The current RT-1 (#399) artifact from source candidate
+The RT-1 (#399) artifact from source candidate
 `e46bc0d1a7917de8c65204cdee931877aea671d8` has SHA-256
 `60c23ee23e7f16c1f71c503baa07a462a8ce94c5287bec4580060e27a4651503`; its reproducibility and browser evidence are recorded in #399.
+The current RT-2 (#419/#422) artifact from source candidate
+`0a0e39e42e4ae2585d5f5ee507a4cb9aaf7b741a` has SHA-256
+`518b5aa864c0a825cd324112b24270a7e0714fc63db6bd1029779f21066ea9de`.
+The independent rebuild, static/resource checks and three-browser matrix passed;
+retained workspace and descriptive measurement delivery are recorded in #419.
 
 Refresh gates: `cargo test -p capi`; `cargo test -p capi --test resource_lifecycle`;
 `scripts/check-capi-abi.sh`; `scripts/check-abi-layout-v1.py`; and `cargo test --workspace` against
