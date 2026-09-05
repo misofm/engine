@@ -3082,17 +3082,29 @@ mod tests {
         let inputs = [2, 3, 4, 5];
         let outputs = [6, 7, 8, 9];
         let coefficients = [1.0, 0.0, 0.0, 1.0];
-        let mut expected_left = vec![0.0; FRAMES];
-        let mut expected_right = vec![0.0; FRAMES];
         for (lane, input) in inputs.iter().copied().enumerate() {
             let (left, right) = lease.write_stereo(input);
             left.fill(lane as f32 + 1.0);
             right.fill(-(lane as f32 + 1.0));
-            for frame in 0..FRAMES {
-                expected_left[frame] += lane as f32 + 1.0;
-                expected_right[frame] -= lane as f32 + 1.0;
-            }
         }
+        let mut oracle_lease = stereo_lease(FRAMES, 5);
+        let oracle_routes = [
+            ARENA_BASE + 1,
+            ARENA_BASE + 2,
+            ARENA_BASE + 3,
+            ARENA_BASE + 4,
+        ];
+        for (lane, route) in oracle_routes.iter().copied().enumerate() {
+            let (left, right) = oracle_lease.write_stereo(route);
+            left.fill(lane as f32 + 1.0);
+            right.fill(-(lane as f32 + 1.0));
+            mix2x2_block::<FrameLane>(left, right, coefficients);
+        }
+        reduce_plane(&mut oracle_lease, 0, ARENA_BASE, &oracle_routes);
+        reduce_plane(&mut oracle_lease, 1, ARENA_BASE, &oracle_routes);
+        let (oracle_left, oracle_right) = oracle_lease.read_stereo(ARENA_BASE);
+        let expected_left = oracle_left.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        let expected_right = oracle_right.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
         let fold: Vec<FoldLane> = (0..4)
             .map(|lane| FoldLane {
                 coefficients,
@@ -3123,8 +3135,14 @@ mod tests {
         chain.run(&mut members, FRAMES as u32, 0).expect("run");
         assert_eq!(members.cohorts, 1);
         let (left, right) = members.inner.lease.read_stereo(ARENA_BASE);
-        assert_eq!(left, expected_left);
-        assert_eq!(right, expected_right);
+        assert_eq!(
+            left.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+            expected_left
+        );
+        assert_eq!(
+            right.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+            expected_right
+        );
     }
 
     /// RT-1: real graph arena members gather one buffer set and scatter directly into another.

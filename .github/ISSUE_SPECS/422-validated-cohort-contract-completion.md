@@ -80,3 +80,7 @@ Adjust the graph wrapper's oracle as above while retaining the explicit fold_pla
 Run the frozen focused suites/policies/fmt/clippy proportionally, checkpoint and obtain one attempt-2 verdict. Root retains all parent #419 qualification and delivery obligations. Do not reinterpret this source-only correction as full RT-2 acceptance; no benchmark or artifact work yet. Two Sol attempts maximum remain under #422, with the same hard-stop rule.
 
 Review used read-only source/spec inspection and root-supplied focused results; no Cargo, tests, timing, Git/GitHub or repository mutation.
+
+## Sol attempt 2 evidence revision
+
+The accepted complete-stride formula and graph cohort dispatch remain unchanged. Inline tests now prove exact four-element one-lane acceptance, distinct checked-add and checked-multiply overflow rejection, and bit-preserved poisoned capacity arrays. A paired table drives the actual default provider and cohort override across contiguous/holey IDs and exact/excess capacities with frames below stride, comparing both planes, call order/count and every tail, hole and padding sentinel bitwise. The graph wrapper still rejects compatibility dispatch and records one cohort call; its expected master is now produced by the existing `mix2x2_block` and `reduce_plane` route/reduction primitives and compared by `to_bits`.

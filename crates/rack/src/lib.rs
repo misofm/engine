@@ -3437,11 +3437,23 @@ mod tests {
         assert!(FoldCohort::new(&ids, &mut left, &mut right, 3, 4).is_err());
         assert!(FoldCohort::new(&ids, &mut left[..7], &mut right, 4, 4).is_err());
         assert!(FoldCohort::new(&ids, &mut left, &mut right[..7], 4, 4).is_err());
-        let mut boundary_left = [0.0_f32; 8];
-        let mut boundary_right = [0.0_f32; 8];
+        let poison = f32::from_bits(0x7fc0_4220);
+        let mut boundary_left = [poison; 8];
+        let mut boundary_right = [poison; 8];
+        let boundary_left_before = boundary_left.map(f32::to_bits);
+        let boundary_right_before = boundary_right.map(f32::to_bits);
         assert!(FoldCohort::new(&[0], &mut boundary_left[..2], &mut boundary_right, 4, 2).is_err());
         assert!(FoldCohort::new(&[0], &mut boundary_left, &mut boundary_right[..2], 4, 2).is_err());
-        assert!(FoldCohort::new(&[0], &mut boundary_left, &mut boundary_right, 4, 2).is_ok());
+        assert!(
+            FoldCohort::new(
+                &[0],
+                &mut boundary_left[..4],
+                &mut boundary_right[..4],
+                4,
+                2
+            )
+            .is_ok()
+        );
         assert!(
             FoldCohort::new(&[0, 1], &mut boundary_left[..6], &mut boundary_right, 4, 2).is_err()
         );
@@ -3450,9 +3462,12 @@ mod tests {
         );
         assert!(FoldCohort::new(&[0, 1], &mut boundary_left, &mut boundary_right, 4, 2).is_ok());
         assert!(FoldCohort::new(&[usize::MAX], &mut left, &mut right, 2, 1).is_err());
+        assert!(FoldCohort::new(&[usize::MAX / 2], &mut left, &mut right, 3, 1).is_err());
         assert!(FoldCohort::new(&[0], &mut left[..0], &mut right[..0], 0, 0).is_err());
         assert_eq!(left.map(f32::to_bits), left_before);
         assert_eq!(right.map(f32::to_bits), right_before);
+        assert_eq!(boundary_left.map(f32::to_bits), boundary_left_before);
+        assert_eq!(boundary_right.map(f32::to_bits), boundary_right_before);
 
         let mut staged_left = [1.0, 2.0, 91.0, 92.0, 3.0, 4.0, 93.0, 94.0];
         let mut staged_right = [-1.0, -2.0, -91.0, -92.0, -3.0, -4.0, -93.0, -94.0];
@@ -3491,6 +3506,109 @@ mod tests {
             ],
             [-91.0, -92.0, -93.0, -94.0]
         );
+    }
+
+    #[test]
+    fn default_and_override_fold_identical_complete_strided_cohorts() {
+        for (ids, extra) in [
+            (&[0usize, 1][..], 0usize),
+            (&[0, 1][..], 3),
+            (&[0, 2][..], 0),
+            (&[0, 2][..], 3),
+        ] {
+            let capacity = (ids.iter().copied().max().unwrap() + 1) * 4 + extra;
+            let make = || PlanesWithFold {
+                planes: Planes {
+                    left: vec![vec![0.0; 2]; 3],
+                    right: vec![vec![0.0; 2]; 3],
+                },
+                gains: vec![2.0, 3.0, 4.0],
+                bus_left: vec![0.0; 2],
+                bus_right: vec![0.0; 2],
+                taken: Vec::new(),
+                trace: Vec::new(),
+                cohorts: Vec::new(),
+            };
+            let sentinel = f32::from_bits(0x7fc0_4221);
+            let mut default_left = vec![sentinel; capacity];
+            let mut default_right = vec![sentinel; capacity];
+            let mut override_left = default_left.clone();
+            let mut override_right = default_right.clone();
+            for &id in ids {
+                default_left[id * 4..id * 4 + 2]
+                    .copy_from_slice(&[id as f32 + 1.0, id as f32 + 2.0]);
+                default_right[id * 4..id * 4 + 2]
+                    .copy_from_slice(&[-(id as f32) - 1.0, -(id as f32) - 2.0]);
+            }
+            override_left.copy_from_slice(&default_left);
+            override_right.copy_from_slice(&default_right);
+            let before_left = default_left.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+            let before_right = default_right
+                .iter()
+                .map(|x| x.to_bits())
+                .collect::<Vec<_>>();
+            let mut default = DefaultFoldProvider(make());
+            let mut optimized = make();
+            default.fold_cohort(
+                FoldCohort::new(ids, &mut default_left, &mut default_right, 4, 2)
+                    .expect("default shape"),
+            );
+            optimized.fold_cohort(
+                FoldCohort::new(ids, &mut override_left, &mut override_right, 4, 2)
+                    .expect("override shape"),
+            );
+            assert_eq!(default.0.taken, ids);
+            assert_eq!(optimized.taken, ids);
+            assert_eq!(
+                default
+                    .0
+                    .bus_left
+                    .iter()
+                    .map(|x| x.to_bits())
+                    .collect::<Vec<_>>(),
+                optimized
+                    .bus_left
+                    .iter()
+                    .map(|x| x.to_bits())
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                default
+                    .0
+                    .bus_right
+                    .iter()
+                    .map(|x| x.to_bits())
+                    .collect::<Vec<_>>(),
+                optimized
+                    .bus_right
+                    .iter()
+                    .map(|x| x.to_bits())
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                default_left.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                override_left
+                    .iter()
+                    .map(|x| x.to_bits())
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                default_right
+                    .iter()
+                    .map(|x| x.to_bits())
+                    .collect::<Vec<_>>(),
+                override_right
+                    .iter()
+                    .map(|x| x.to_bits())
+                    .collect::<Vec<_>>()
+            );
+            for index in 0..capacity {
+                if !ids.iter().any(|id| index >= id * 4 && index < id * 4 + 2) {
+                    assert_eq!(default_left[index].to_bits(), before_left[index]);
+                    assert_eq!(default_right[index].to_bits(), before_right[index]);
+                }
+            }
+        }
     }
 
     /// The fold refuses a mask it cannot render, exactly as the auxiliary seam does.
