@@ -228,3 +228,7 @@ The exact runner profile (opt-level 3, LTO false, codegen-units 16) build termin
 ## Single controlled measurement completed
 
 The sole `--issue419-rt2` invocation terminated exit 0 at candidate `9cd6ba25c7a3b7f80788cd04789a10d36ee10e92`: controlled CPU63, one warmup, two measured rounds, 46 accepted records. Aggregate and all 46 individual record validators pass. Raw/accepted SHA-256 `f2ed6356ebda8e936c41a2af74a6e6e2de2cd6109094889557f9c598b34b8299` (79,187 bytes); binary SHA-256 `e0d9e2752e50df486c4622e1b7d80de46ac59d5cd698e4da81cdfe45d462227a`. Readiness load0.32, runner load0.27, binaryage236s, sibling0.00%, unchanged limits and no override. Evidence is in `artifacts/issue419-rt2/`; matching prior-capture comparison and final PR review remain. No further timing is authorized.
+
+## Final capture comparison and integration
+
+Root and Luna compared all 46 unique keys with delivered #415: every emitted output digest, transpose counter, render-error and forbidden-operation field agrees in presence and value, along with named stable fixture/layout/target fields. The 42 emitted error/forbidden rows are zero; four hoist rows omit them. `artifacts/issue419-rt2/compare-rt1.py` retains exact checks. No causal speedup or absent cycle/fold telemetry is claimed. Main #424 was integrated afterward without runtime/workload/validator changes; artifact and measured source identities remain their original frozen commits. All local delivery gates are complete; actual PR Astra review and required CI remain.

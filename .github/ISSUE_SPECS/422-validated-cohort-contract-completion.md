@@ -106,3 +106,7 @@ I inspected the exact attempt delta: only rack/graph inline tests and #422 evide
 Root may now perform retained #419 immutable workspace/supported-target/artifact/browser qualification, freeze the existing workload/validators, complete non-timed runner/preflight registration and then the one controlled descriptive invocation under the existing conditions. This does not waive preflight, quiet readiness, overwrite protection or the one-invocation limit. Actual integrated PR head requires Astra review and required CI before merging/closing either issue. Parent #419 remains open until all its retained obligations are fulfilled and remotely synchronized.
 
 No blocking source finding remains. Review used read-only source/spec/Git/log inspection; no repository/GitHub mutation, Cargo, tests or timing.
+
+## Integrated qualification complete locally
+
+Parent #419 records full workspace (1,566 passed, zero failed, 24 ignored), supported scalar/SIMD targets, independently reproduced AudioWorklet and three-browser qualification, corrected checked non-LTO evidence and one controlled 46-record descriptive capture with unchanged output identities. These fulfill retained local qualification without changing accepted source. Final integrated PR Astra review and required CI remain before joint closure.

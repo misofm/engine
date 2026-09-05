@@ -18,3 +18,7 @@ These are descriptive observations, not a causal speedup claim. Plumbing-only ha
 ## Supported scalar inspection correction
 
 `original-scalar-inspection.sh` and its original log are preserved as historical execution evidence. Astra found its archive enumeration reported mapfile status rather than the find/sort producers. `confirm-scalar-population.py` and `scalar-population.log` independently check find, sort, archive listing and member reads against the existing target. They prove exactly one archive per named family, the complete three-object manifest and byte/hash identity with every object previously decoded and scanned successfully. No rebuild was needed. This evidence covers scalar non-LTO engine/source/target_smoke objects only; it does not claim fat-LTO inspection or repair issue #404.
+
+## Comparison with prior capture
+
+All 46 unique `(record, workload_kind, round)` keys match #415. Every emitted output digest, transpose counter, render-error and forbidden-operation field has identical presence and value, along with the named stable fixture/layout/target fields. Error fields are emitted on 42 rows and are zero; four hoist rows omit them. `compare-rt1.py` reproduces this comparison and rejects missing/duplicate keys or mismatches. No absent field is interpreted as zero. Plumbing-only prior p50 was 6.710/6.790 µs; gain/pan-only was 8.332/8.503 µs. These separate captures do not isolate a causal RT-2 timing effect.
