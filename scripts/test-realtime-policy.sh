@@ -412,6 +412,8 @@ expect_failure marked-tools-root-scanned "$alloc_class" \
 # trips the file floor instead of passing with less coverage.
 expect_failure marked-file-count-floor 'expected at least twelve marked realtime files' \
     'sed -i "/REALTIME_POLICY/d" "$root/crates/builtins/src/lib.rs"'
+expect_failure no-marked-files-uses-floor 'expected at least twelve marked realtime files' \
+    'find "$root/crates" "$root/hosts" "$root/tools" -name "*.rs" -type f -exec sed -i "/REALTIME_POLICY/d" {} +'
 # Deleting one marked region of a multi-region file leaves every marker matched and trips the
 # region floor.
 expect_failure marked-region-count-floor 'expected at least forty-two marked realtime regions' \
@@ -472,13 +474,13 @@ done
 # Counter-mutants must fail at this suite's unexpected-success assertion. These disposable
 # copies prove that the assertions distinguish a swallowed producer status from the hardened gate.
 prove_realtime_mutant_rejected() {
-    local name="$1" edit="$2" mode="$3"
+    local name="$1" edit="$2" mode="$3" partial="${4:-0}"
     local mutant_dir="$scratch_root/mutant-$name" output status
     mkdir -p "$mutant_dir/lib"; cp "$policy_script" "$mutant_dir/check.sh"
     ln -s "$script_directory/lib/gate.sh" "$mutant_dir/lib/gate.sh"
     sed -i "$edit" "$mutant_dir/check.sh"
     set +e
-    output="$(policy_script="$mutant_dir/check.sh"; expect_tool_error "mutant-$name" rg "$mode" ignored 0 2>&1)"
+    output="$(policy_script="$mutant_dir/check.sh"; expect_tool_error "mutant-$name" "${5:-rg}" "$mode" ignored "$partial" 2>&1)"
     status=$?
     set -e
     [[ $status == 1 ]] && printf '%s\n' "$output" | rg -qF 'unexpectedly passed' || {
@@ -486,6 +488,12 @@ prove_realtime_mutant_rejected() {
     }
 }
 prove_realtime_mutant_rejected unsafe-status 's/)" || exit \$?/)" || true/' unsafe-scan
+prove_realtime_mutant_rejected marker-discovery \
+  '/marked_files_rc -le 1.*fail/c\[[ $marked_files_rc -le 1 ]] || marked_files_raw="${marked_files_raw%$'\''\n'\''injected-marker-discovery-error}"' \
+  marker-discovery 1
+prove_realtime_mutant_rejected per-file-read \
+  '/realtime body extraction failed/c\    '\'' "$source" 2>\&1)"; then :; else :; fi' \
+  body-read 1 awk
 prove_realtime_mutant_rejected final-predicate '/scratch_file.*exit/s/exit.*$/true/' final-predicate
 
 printf 'realtime policy mutation tests: ok\n'

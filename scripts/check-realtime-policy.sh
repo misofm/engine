@@ -48,6 +48,7 @@ if marked_files_raw="$(rg -l 'REALTIME_POLICY_BEGIN' crates hosts tools sidecars
 [[ $marked_files_rc == 1 ]] && marked_files_raw=''
 [[ $marked_files_rc -le 1 ]] || { printf '%s\n' "$marked_files_raw" >&2; fail "realtime marker discovery failed (rg exit $marked_files_rc)"; }
 marked_files="$(gate_sort_lines 'realtime marker discovery' "$marked_files_raw")" || exit $?
+if [[ -n "$marked_files" ]]; then
 while IFS= read -r source; do
     if begins="$(rg -c 'REALTIME_POLICY_BEGIN' "$source" 2>&1)"; then :; else rc=$?; [[ $rc == 1 ]] && begins=0 || { printf '%s\n' "$begins" >&2; fail "BEGIN marker count failed for $source (rg exit $rc)"; }; fi
     if ends="$(rg -c 'REALTIME_POLICY_END' "$source" 2>&1)"; then :; else rc=$?; [[ $rc == 1 ]] && ends=0 || { printf '%s\n' "$ends" >&2; fail "END marker count failed for $source (rg exit $rc)"; }; fi
@@ -61,6 +62,7 @@ while IFS= read -r source; do
     ' "$source" 2>&1)"; then :; else rc=$?; printf '%s\n' "$body" >&2; fail "realtime body extraction failed for $source (awk status $rc)"; fi
     [[ -z "$body" ]] || printf '%s\n' "$body" >>"$scratch_file" || fail "realtime body persistence failed for $source"
 done <<<"$marked_files"
+fi
 
 # The floors are the tree's own counts when #371 landed the last marker: twelve files and
 # forty-two regions. Deleting a marker to silence the gate now fails here -- the file leaves

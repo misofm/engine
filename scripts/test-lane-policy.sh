@@ -246,6 +246,11 @@ prove_lane_mutant_rejected() {
 }
 prove_lane_mutant_rejected nonempty-version \
   '/versions=.*locked_version/,/\[\[ -n "$versions"/s/|| {.*}/|| true/' awk version-bytemuck
+prove_lane_mutant_rejected failed-lane-find \
+  '/lane_sources_raw=.*gate_find_collect/c\lane_sources_raw="$(gate_find_collect '\''lane source discovery'\'' crates/lane/src -name '\''*.rs'\'' -type f)" || lane_sources_raw="$(/usr/bin/find crates/lane/src -name '\''*.rs'\'' -type f)"' \
+  find lane-find
+prove_lane_mutant_rejected failed-dependency-list \
+  '/lane_dependencies=.*locked_dependencies/s/|| {.*}/|| true/' awk deps-lane
 prove_lane_mutant_rejected failed-membership \
   '/membership_rc == 1/s/|| .*$/|| continue/' rg membership
 

@@ -138,10 +138,10 @@ and a real non-wide workspace dependency. They cover spaces and relative roots, 
 bodies, the exact four-line accepted/five-line rejected lane marker boundary, required-root and
 non-vacuity failures, and error-only plus useful-output/error shims for every frozen table row.
 Disposable checker copies execute and are rejected by the same unexpected-success assertions for
-unsafe-source status, final realtime predicate status, a nonempty failed lock-version read, and a
-failed membership predicate. The remaining marker-discovery/per-file-read, lane-find, and
-dependency-list counter-mutant representatives are not yet present; table-level directed failures
-for those operations are present and green.
+all seven frozen groups: unsafe-source status; complete-looking failed marker discovery; a failed
+per-file body read and the final realtime predicate; lane find; a nonempty failed lock-version
+read; an allowed failed dependency list; and a failed membership predicate. Each uses the same
+selective shim and reaches the assertion that would otherwise report the mutant's policy success.
 
 Focused results: both real gates and both extended suites pass; `bash -n` over the four changed
 scripts and `git diff --check` pass. Logs are `/tmp/sol-410-check-realtime.log`,
