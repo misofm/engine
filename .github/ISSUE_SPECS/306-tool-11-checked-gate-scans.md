@@ -128,3 +128,12 @@ Read-only review of `/tmp/sol-306-parent-accounting.md`, parent #306 and childre
 ### #401 execution refinement
 
 Astra split its seven-gate implementation into #406 (four public/runtime gates, after #400) and #407 (three compiler/reference gates, after #406). #401 remains their umbrella and cannot close after only one child. This refines execution without dropping any gate, extractor or producer obligation. Both children are queued.
+
+
+## Current program delivery reconciliation after PR #467
+
+Remote closure is verified for #400 (foundation), #401 (its #406/#407 compiler/runtime children), #402 (realtime/numeric/contract gates), #404 (workspace discovery remainder), and #427 (the separated ninth Wasm-loop completion). Historical queued-state statements above describe earlier checkpoints, not current status. The ninth-loop obligation was delivered through #427/PR #451; it is not treated as fixed merely by the old object-count check.
+
+#403 remains open: its benchmark/dependency pair (#453/#462, PR #464) and native PCM checker (#454, PR #467) are delivered. The two interchange checkers remain active under #455, and rack fixture inspection remains queued under #456. The #403 body records these exact six-path dispositions.
+
+This parent remains open. After those final children deliver, final closure still requires the original 21-path and nine-loop/extra-workspace inventory reconciliation, extractor consolidation evidence, preserved predicates/mutations and synchronized remote outcomes. This record does not declare the broader TOOL-11 finding complete or authorize its separate declarative-policy/framework proposals.
