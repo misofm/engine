@@ -244,3 +244,7 @@ One bounded successor for environment acceptance-table completion is sufficient 
 Read-only inspection of complete frozen contract, actual source/suites and retained logs; no builds/tests/timing or repository/GitHub mutations were performed. No requirement beyond the named final attempt2 table and original same-assertion rule was added.
 
 Root records the hard stop and preserves the accepted source/test improvements at this checkpoint. No further implementation under this series is authorized. A separately numbered, synchronized and Astra-approved environment acceptance-table successor is required before the two remaining suite changes. #412/#402 remain OPEN; full delivery qualification remains outstanding.
+
+## Explicit bounded successor
+
+#448, “Complete environment discovery and required-root acceptance controls”, owns only the two remaining environment acceptance-table obligations under a new Astra-approved brief. The old #412 series remains stopped. Accepted production and other suites are inherited unchanged; #412/#402 remain OPEN until successor completion and required qualification/remote delivery.
