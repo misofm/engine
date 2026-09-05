@@ -1,0 +1,1 @@
+bash scripts/check-protocol-wasm-parity.sh 

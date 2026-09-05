@@ -1,0 +1,11 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running tests/allocation_tracker.rs (/tmp/sol459-target/debug/deps/allocation_tracker-b6767a1ad7cc8a1e)
+
+running 4 tests
+test actual_queued_graph_phases_allocate_and_free_nothing ... ok
+test actual_serialized_composite_render_allocates_and_frees_nothing ... ok
+test phase_two_allocator_layouts_are_stable_across_repeated_measured_prepares ... ok
+test phase_two_allocator_layouts_match_the_checked_resource_report ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 17.96s
+

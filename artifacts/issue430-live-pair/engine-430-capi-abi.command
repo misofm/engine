@@ -1,0 +1,1 @@
+env MISO_ENGINE_CAPI_SKIP_BUILD=1 MISO_ENGINE_CAPI_LIBRARY=/tmp/engine-430-native-qualified/release/libcapi.so MISO_ENGINE_CAPI_STATIC_LIBRARY=/tmp/engine-430-native-qualified/release/libcapi.a bash scripts/check-capi-abi.sh 

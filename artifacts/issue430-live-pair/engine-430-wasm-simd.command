@@ -1,0 +1,1 @@
+env CARGO_TARGET_DIR=/tmp/engine-430-wasm-simd RUSTFLAGS=-C\ target-feature=+simd128 cargo check --locked --target wasm32-unknown-unknown -p target-smoke -p protocol 

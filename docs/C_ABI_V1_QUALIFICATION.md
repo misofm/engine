@@ -144,3 +144,14 @@ Refresh gates: `cargo test -p capi`; `cargo test -p capi --test resource_lifecyc
 `scripts/check-capi-abi.sh`; `scripts/check-abi-layout-v1.py`; and `cargo test --workspace` against
 both the issue worktree and `origin/main`. Exact outcomes and the worktree comparison are attached
 to issue #369's implementation pull request.
+
+## Live fader/matrix qualification candidate (#430/#459)
+
+The fresh SIMD AudioWorklet digest build from immutable source candidate
+`7951736605fa64870bc1d91342d00d5fdb6417c5` produced SHA-256
+`a08a868cf1b62bb466a8fa5b826b214fa708265669fc730398706c869c9e43bd`. Independent rebuild, static/resource gates, hermetic worklet tests, and
+Chromium/Firefox/WebKit qualification with matrix checks passed. The resource
+expectations include one additional eight-byte graph owner on Wasm; PCM digests are unchanged. The initial
+builder invocation refused a missing output directory before compilation (exit 2);
+the corrected invocation with an existing empty directory completed successfully.
+Historical artifact and qualification records above retain their original identities.
