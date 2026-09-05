@@ -11,12 +11,14 @@ use core::{
 use std::alloc::{GlobalAlloc, System};
 use std::sync::Mutex;
 
-use builtins::{MeterConfig, MeterTap};
+use builtins::{BuiltinLaneSelector, Matrix2x2, MeterConfig, MeterTap};
 use builtins_compiler::{
-    BuiltinCompileCaps, MeterRequest, TestOnlyFaderMatrixPair, prepare_session_builtins,
+    BuiltinCompileCaps, MeterRequest, TestOnlyFaderMatrixPair, TrackControlRecord,
+    TrackFaderRecord, prepare_session_builtins, test_only_fader_matrix_witness,
     test_only_phase_two_allocation_snapshot, test_only_record_phase_two_allocation,
-    test_only_reset_phase_two_allocation_tracker,
+    test_only_reset_fader_matrix_witness, test_only_reset_phase_two_allocation_tracker,
 };
+use engine::realtime::{PlanarBufferMut, RenderIo, RenderTime};
 use session::{CompileCaps, RouteSource, SendTap, StableId, compile_session, parse_session_json};
 
 /// Serializes the two tests below (each measures the process-global phase-two tracker) so no
@@ -143,6 +145,125 @@ fn actual_serialized_composite_render_allocates_and_frees_nothing() {
         }
     });
     assert_eq!((LIVE_ALLOCS.get(), LIVE_FREES.get()), (0, 0));
+}
+
+fn audit_graph_render(
+    bound: &mut builtins_compiler::PreparedBuiltinsGraphBound,
+    output: &mut [f32],
+    absolute_sample: u64,
+) -> builtins_compiler::TestOnlyFaderMatrixWitness {
+    LIVE_ALLOCS.set(0);
+    LIVE_FREES.set(0);
+    test_only_reset_fader_matrix_witness();
+    armed(|| {
+        bound
+            .plan
+            .render(
+                RenderIo {
+                    input: None,
+                    output: PlanarBufferMut::try_new(output, 2, 64, 64).expect("output"),
+                },
+                RenderTime { absolute_sample },
+            )
+            .expect("actual graph render");
+    });
+    let activity = (LIVE_ALLOCS.get(), LIVE_FREES.get());
+    let witness = test_only_fader_matrix_witness();
+    assert_eq!(
+        activity,
+        (0, 0),
+        "actual queued graph render allocation/free gate"
+    );
+    witness
+}
+
+#[test]
+fn actual_queued_graph_phases_allocate_and_free_nothing() {
+    let _session_guard = SESSION
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut output = [0.0_f32; 128];
+    test_only_reset_fader_matrix_witness();
+    let mut eligible = builtins_compiler::test_only_prepared_pair_graph(false);
+    let prepared = test_only_fader_matrix_witness();
+    assert_eq!((prepared.factory_calls, prepared.factory_members), (1, 1));
+
+    let settled = audit_graph_render(&mut eligible, &mut output, 0);
+    assert_eq!((settled.fused_calls, settled.fallback_calls), (1, 0));
+    assert_eq!(settled.process_members, 1);
+
+    {
+        let tail = eligible
+            .track_controls
+            .iter_mut()
+            .find(|control| control.track_id.as_ref() == "t08")
+            .expect("eligible tail controls");
+        tail.fader
+            .try_push(TrackFaderRecord::FaderDb {
+                lanes: BuiltinLaneSelector::Both,
+                db: -12.0,
+                smoothing_samples: 3,
+            })
+            .unwrap();
+        tail.producer
+            .try_push(TrackControlRecord {
+                matrix: Matrix2x2 {
+                    ll: 0.5,
+                    lr: 0.25,
+                    rl: -0.25,
+                    rr: 0.75,
+                },
+                smoothing_samples: 3,
+            })
+            .unwrap();
+    }
+    let ramp_a = audit_graph_render(&mut eligible, &mut output, 64);
+    assert_eq!((ramp_a.fused_calls, ramp_a.fallback_calls), (0, 1));
+    let ramp_b = audit_graph_render(&mut eligible, &mut output, 128);
+    assert_eq!((ramp_b.fused_calls, ramp_b.fallback_calls), (1, 0));
+
+    eligible
+        .track_controls
+        .iter_mut()
+        .find(|control| control.track_id.as_ref() == "t08")
+        .expect("eligible tail controls")
+        .fader
+        .try_push(TrackFaderRecord::FaderDb {
+            lanes: BuiltinLaneSelector::Left,
+            db: -3.0,
+            smoothing_samples: 2,
+        })
+        .unwrap();
+    let retarget = audit_graph_render(&mut eligible, &mut output, 192);
+    assert_eq!((retarget.fused_calls, retarget.fallback_calls), (0, 1));
+    let resettled = audit_graph_render(&mut eligible, &mut output, 256);
+    assert_eq!((resettled.fused_calls, resettled.fallback_calls), (1, 0));
+
+    test_only_reset_fader_matrix_witness();
+    let mut observed = builtins_compiler::test_only_prepared_pair_graph(true);
+    let observed_prepared = test_only_fader_matrix_witness();
+    assert_eq!(
+        (
+            observed_prepared.factory_calls,
+            observed_prepared.factory_members
+        ),
+        (1, 1),
+        "the observed full cohort declines while the tail is prepared"
+    );
+    let observed_call = audit_graph_render(&mut observed, &mut output, 0);
+    assert_eq!(
+        (observed_call.fused_calls, observed_call.fallback_calls),
+        (1, 0)
+    );
+    assert_eq!(observed_call.process_members, 1);
+    let meter = observed
+        .meter_consumers
+        .first_mut()
+        .expect("observed cohort meter");
+    assert!(
+        meter.consumer.try_pop().is_ok(),
+        "meter drains only after disarming"
+    );
 }
 
 fn session(track_count: u32) -> session::CompiledSession {

@@ -3628,7 +3628,12 @@ fn meter_diagnostic(request: &MeterRequest, error: MeterConfigError) -> BuiltinD
     )
 }
 
-#[cfg(test)]
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub use tests::test_only_prepared_pair_graph;
+
+#[cfg(any(test, feature = "test-support"))]
+#[cfg_attr(not(test), allow(dead_code))]
 mod tests {
     use super::*;
     use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
@@ -4319,6 +4324,10 @@ mod tests {
 
     /// One session of `n` tracks with deliberately distinct per-track builtins.
     fn n_track_session(n: usize) -> CompiledSession {
+        n_track_session_with_symmetry(n, false)
+    }
+
+    fn n_track_session_with_symmetry(n: usize, symmetric_input: bool) -> CompiledSession {
         let mut model =
             parse_session_json(include_str!("../../../fixtures/session/v1/canonical.json"))
                 .expect("fixture parse");
@@ -4348,6 +4357,9 @@ mod tests {
             };
             track.builtins.right.polarity_invert = index % 2 == 1;
             track.builtins.right.trim_db = 1.0 - 0.25 * scale;
+            if symmetric_input {
+                track.builtins.right = track.builtins.left.clone();
+            }
             track.fader.left_db = -1.0 + 0.125 * scale;
             track.fader.right_db = 0.5 - 0.125 * scale;
             track.matrix_or_pan = session::MatrixOrPan::Matrix {
@@ -4391,6 +4403,8 @@ mod tests {
     /// test sees byte-identical input.
     struct SeededInput {
         seed: u64,
+        symmetric: bool,
+        nonfinite: bool,
     }
 
     static ALIAS_OBSERVATIONS: AtomicUsize = AtomicUsize::new(0);
@@ -4412,9 +4426,18 @@ mod tests {
                 let unit = ((state >> 40) as f32) / ((1_u32 << 24) as f32);
                 (unit * 2.0 - 1.0) * 0.8
             };
-            for (left, right) in block.left.iter_mut().zip(block.right.iter_mut()) {
+            for (index, (left, right)) in block
+                .left
+                .iter_mut()
+                .zip(block.right.iter_mut())
+                .enumerate()
+            {
                 *left = next();
-                *right = next();
+                *right = if self.symmetric { *left } else { next() };
+                if self.nonfinite && index == 0 {
+                    *left = f32::NAN;
+                    *right = f32::INFINITY;
+                }
             }
             Ok(())
         }
@@ -4777,6 +4800,8 @@ mod tests {
                     },
                     Box::new(SeededInput {
                         seed: 0x5eed_0000 ^ index as u64,
+                        symmetric: false,
+                        nonfinite: false,
                     }) as Box<dyn GraphRuntimeProcessor>,
                 )
             })
@@ -4843,6 +4868,178 @@ mod tests {
             .collect();
         let output = pcm.iter().map(|sample| sample.to_bits()).collect();
         (bits, bank_count, Vec::new(), output)
+    }
+
+    /// Actual queued nine-track graph without allocating capture observers, for the installed
+    /// allocator's render-only audit. Construction, binding and queue ownership stay off render.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn test_only_prepared_pair_graph(post_fader_observed: bool) -> PreparedBuiltinsGraphBound {
+        prepared_pair_graph_fixture(post_fader_observed, false, false)
+    }
+
+    fn prepared_pair_graph_fixture(
+        post_fader_observed: bool,
+        symmetric_input: bool,
+        nonfinite_input: bool,
+    ) -> PreparedBuiltinsGraphBound {
+        let n = 9;
+        let compiled = n_track_session_with_symmetry(n, symmetric_input);
+        let controls = (0..n)
+            .map(|index| TrackControlRequest {
+                track_id: track_name(index),
+                queue_capacity: NonZeroUsize::new(8).expect("queue"),
+            })
+            .collect::<Vec<_>>();
+        let meter = post_fader_observed.then(|| MeterRequest {
+            handle: MeterHandle(NonZeroU64::new(0x459).expect("handle")),
+            track_id: track_name(0),
+            tap: MeterTap::PostFader,
+            config: MeterConfig {
+                period_frames: NonZeroU32::new(HARNESS_QUANTUM).expect("period"),
+                peak_hold_frames: 0,
+                peak_decay_db_per_second: 0.0,
+                queue_capacity: NonZeroUsize::new(8).expect("queue"),
+                reset_generation: 0,
+            },
+        });
+        let builtins = prepare_session_builtins_between_render_calls(
+            &compiled,
+            meter.as_slice(),
+            &controls,
+            caps(),
+        )
+        .expect("prepared builtins");
+        let (graph, levels) = track_graph(n);
+        let classes = SessionPoolClasses::from_session(&compiled);
+        let artifact =
+            builtins.into_graph_artifact_with_banks(graph, (), Backend::Simd8, &levels, &classes);
+        let envelope = artifact.graph.envelope;
+        let mut nodes = (0..n)
+            .map(|index| {
+                GraphNodeBinding::new(
+                    GraphNodeId::TrackStage {
+                        track_id: StableGraphId::parse(&track_name(index)).expect("track"),
+                        stage: TrackStage::Input,
+                    },
+                    Box::new(SeededInput {
+                        seed: 0x4590_0000 ^ index as u64,
+                        symmetric: symmetric_input,
+                        nonfinite: nonfinite_input,
+                    }) as Box<dyn GraphRuntimeProcessor>,
+                )
+            })
+            .collect::<Vec<_>>();
+        nodes.push(GraphNodeBinding::new(
+            GraphNodeId::Output {
+                output_id: StableGraphId::parse("main-out").expect("output"),
+            },
+            Box::new(HarnessSink) as Box<dyn GraphRuntimeProcessor>,
+        ));
+        artifact
+            .into_bound(GraphRuntimeBindings {
+                envelope,
+                nodes,
+                observers: Vec::new(),
+            })
+            .unwrap_or_else(|failure| panic!("fixture bind: {}", failure.code))
+    }
+
+    fn render_bound(bound: &mut PreparedBuiltinsGraphBound, sample: u64) -> Vec<u32> {
+        let mut pcm = vec![0.0_f32; HARNESS_QUANTUM as usize * 2];
+        bound
+            .plan
+            .render(
+                engine::realtime::RenderIo {
+                    input: None,
+                    output: engine::realtime::PlanarBufferMut::try_new(
+                        &mut pcm,
+                        2,
+                        HARNESS_QUANTUM as usize,
+                        HARNESS_QUANTUM as usize,
+                    )
+                    .expect("output"),
+                },
+                engine::realtime::RenderTime {
+                    absolute_sample: sample,
+                },
+            )
+            .expect("fixture render");
+        pcm.into_iter().map(f32::to_bits).collect()
+    }
+
+    #[test]
+    fn actual_graph_mono_collapse_disengages_on_input_command_and_recovers_nonfinite_input() {
+        let _guard = PAIR_WITNESS_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut collapsed = prepared_pair_graph_fixture(false, true, false);
+        let mut separate = prepared_pair_graph_fixture(false, true, false);
+        collapsed.plan.arm_mono_collapse(&|_| true);
+        separate.plan.arm_mono_collapse(&|_| true);
+        separate.plan.force_mono_collapse_off(true);
+
+        test_only_reset_fader_matrix_witness();
+        let collapsed_initial = render_bound(&mut collapsed, 0);
+        let pair_witness = test_only_fader_matrix_witness();
+        let separate_initial = render_bound(&mut separate, 0);
+        assert_eq!(collapsed_initial, separate_initial);
+        assert!(
+            collapsed.plan.bank_collapse_counters()[0] > 0,
+            "real input bank collapsed"
+        );
+        assert_eq!(separate.plan.bank_collapse_counters()[0], 0);
+        assert_eq!(
+            (pair_witness.fused_calls, pair_witness.fallback_calls),
+            (1, 0)
+        );
+        assert_eq!(
+            pair_witness.process_members, 1,
+            "the selected tail pair executed"
+        );
+
+        let command = TrackInputRecord::TrimDb {
+            lanes: BuiltinLaneSelector::Right,
+            db: -6.0,
+            smoothing_samples: 0,
+        };
+        for bound in [&mut collapsed, &mut separate] {
+            bound
+                .track_controls
+                .iter_mut()
+                .find(|control| control.track_id.as_ref() == "t00")
+                .expect("track zero controls")
+                .input
+                .try_push(command)
+                .unwrap();
+        }
+        let collapsed_asymmetric = render_bound(&mut collapsed, HARNESS_QUANTUM as u64);
+        let separate_asymmetric = render_bound(&mut separate, HARNESS_QUANTUM as u64);
+        assert_eq!(collapsed_asymmetric, separate_asymmetric);
+        assert!(
+            collapsed.plan.bank_collapse_transitions()[0] > 0,
+            "input command disengages"
+        );
+        let frames = HARNESS_QUANTUM as usize;
+        assert_ne!(
+            &collapsed_asymmetric[..frames],
+            &collapsed_asymmetric[frames..],
+            "asymmetric right input reaches real output"
+        );
+
+        let mut recovered = prepared_pair_graph_fixture(false, true, true);
+        recovered.plan.arm_mono_collapse(&|_| true);
+        let hostile = render_bound(&mut recovered, 0);
+        assert!(
+            hostile.iter().all(|word| f32::from_bits(*word).is_finite()),
+            "the real input bank sanitizes representative NaN/infinity"
+        );
+        let following = render_bound(&mut recovered, HARNESS_QUANTUM as u64);
+        assert!(
+            following
+                .iter()
+                .all(|word| f32::from_bits(*word).is_finite())
+        );
     }
 
     fn render_post_input_bits(n: usize, dispatch: Backend) -> (Vec<Vec<u32>>, usize) {
