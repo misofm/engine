@@ -33,7 +33,9 @@ fault_bin="$temp/fault-bin"
 mkdir -p "$fault_bin"
 producer_failure() {
     local label=$1 tool=$2 needle=$3 occurrence=$4 expected=$5 mode=$6 operation=$7 shape=$8
-    local real log status
+    local real log status diagnostic
+    diagnostic=${9:-"effect interchange qualification policy failure: $operation failed (status 73)"}
+    diagnostic+=$'\n'
     real=$(command -v "$tool")
     find "$fault_bin" -mindepth 1 -maxdepth 1 -type f -delete
     cat >"$fault_bin/$tool" <<'SH'
@@ -74,38 +76,40 @@ SH
         cat "$log" >&2; exit 96
     fi
     expected_payload="$temp/delegate-$label.out"
-    cp "$temp/delegate-output" "$expected_payload"
+    if [[ "$mode" == complete ]]; then
+        cp "$temp/delegate-output" "$expected_payload"
+    else
+        : >"$expected_payload"
+    fi
     expected_error="$temp/delegate-$label.err"
     cp "$temp/delegate-error" "$expected_error"
-    if [[ "$mode" == complete ]]; then
-        payload_assertion="$temp/payload-assertion.py"
-        if [[ ! -f "$payload_assertion" ]]; then
-            cat >"$payload_assertion" <<'PY'
+    payload_assertion="$temp/payload-assertion.py"
+    if [[ ! -f "$payload_assertion" ]]; then
+        cat >"$payload_assertion" <<'PY'
 import collections, pathlib, sys
-expected_path, log_path, delegate_error_path, label, operation = sys.argv[1:]
+expected_path, log_path, delegate_error_path, label, diagnostic = sys.argv[1:]
 expected = pathlib.Path(expected_path).read_bytes()
 log = pathlib.Path(log_path).read_bytes()
 delegate_error = pathlib.Path(delegate_error_path).read_bytes()
 sentinel = f"producer-error-sentinel:{label}\n".encode()
-lines = log.splitlines(keepends=True)
-if not lines or operation.encode() not in lines[-1] or b"(status 73)" not in lines[-1]:
+diagnostic = diagnostic.encode()
+if not diagnostic.endswith(b"\n"):
     raise SystemExit("producer operation/status framing mismatch")
-tail = sentinel + lines[-1]
-if log.count(tail) != 1 or not log.endswith(tail):
-    raise SystemExit(f"producer diagnostic framing mismatch: {expected_path}")
-prefix = log[:-len(tail)] if tail else log
+tail = sentinel + diagnostic
+if log.count(sentinel) != 1 or log.count(diagnostic) != 1 or not log.endswith(tail):
+    raise SystemExit(
+        f"producer diagnostic framing mismatch: {expected_path}: tail={log[-len(tail):]!r}"
+    )
+prefix = log[:-len(tail)]
 if delegate_error and (prefix.count(delegate_error) != 1 or not prefix.endswith(delegate_error)):
     raise SystemExit("producer stderr framing mismatch")
 payload = prefix[:-len(delegate_error)] if delegate_error else prefix
 if collections.Counter(payload.splitlines(keepends=True)) != collections.Counter(expected.splitlines(keepends=True)):
     raise SystemExit("complete producer payload did not match exactly")
 PY
-        fi
-        diagnostic="effect interchange qualification policy failure: $operation failed (status 73)"
-        diagnostic+=$'\n'
-        python3 -I -B "$payload_assertion" "$expected_payload" "$log" "$expected_error" \
-            "$label" "$operation" || exit 96
     fi
+    python3 -I -B "$payload_assertion" "$expected_payload" "$log" "$expected_error" \
+        "$label" "$diagnostic" || exit 96
 }
 
 for mode in empty complete; do
@@ -139,20 +143,20 @@ for row in \
     IFS='|' read -r label tool needle occurrence expected <<<"$row"
     case "$label" in
         observations) operation='benchmark observation count scan' ;;
-        workload) operation='benchmark workload scan' ;;
+        workload) operation='benchmark workload scan: descriptor_verify_identity_a' ;;
         rounds) operation='benchmark rounds scan' ;;
         records) operation='benchmark record count scan' ;;
         import-safe) operation='aggregator import-safe scan' ;;
         reference-bounds) operation='reference process bounds scan' ;;
         multiline-campaign) operation='mutation campaign declaration scan' ;;
         campaign-count) operation='mutation campaign trial scan' ;;
-        seed) operation='mutation seed scan' ;;
+        seed) operation='mutation seed scan: 0001' ;;
         matrix) operation='exact migration matrix scan' ;;
-        target) operation='target row scan' ;;
-        simd) operation='Wasm target feature scan' ;;
+        target) operation='target row scan: x86_64-unknown-linux-gnu' ;;
+        simd) operation='Wasm target feature scan: feature=+simd128' ;;
         export-syntax) operation='Wasm Export-section scan' ;;
         export-presence) operation='descriptor export presence scan' ;;
-        late-api) operation='public API scan' ;;
+        late-api) operation='public API scan: restore_unpublished_effect_bank_track_state_with_migration' ;;
     esac
     for mode in empty complete; do
         producer_failure "$label-$mode" "$tool" "$needle" "$occurrence" "$expected" "$mode" "$operation" nonempty
@@ -163,38 +167,60 @@ done
 # real nonempty capture and its real stderr/sentinel/status framing.
 producer_failure export-rg-complete-controls rg 'no_mangle' 1 0 complete 'descriptor export scan' nonempty
 payload_expected="$temp/delegate-export-rg-complete-controls.out"
-payload_error="$temp/delegate-error"
+payload_error="$temp/delegate-export-rg-complete-controls.err"
 payload_assertion="$temp/payload-assertion.py"
-payload_control_log="$temp/payload-control.log"
-payload_sentinel=$'producer-error-sentinel:export-rg-complete-controls\n'
+payload_valid_log="$temp/fault-export-rg-complete-controls.log"
 payload_diagnostic=$'effect interchange qualification policy failure: descriptor export scan failed (status 73)\n'
-cat "$payload_expected" "$payload_error" >"$payload_control_log"
-printf '%s%s' "$payload_sentinel" "$payload_diagnostic" >>"$payload_control_log"
+python3 -I -B "$payload_assertion" "$payload_expected" "$payload_valid_log" "$payload_error" \
+    export-rg-complete-controls "$payload_diagnostic" || exit 96
 payload_control() {
-    local label=$1 payload=$2
-    if python3 -I -B "$payload_assertion" "$payload" "$payload_control_log" "$payload_error" \
-        export-rg-complete-controls 'descriptor export scan' >/dev/null 2>&1; then
+    local label=$1 actual_log=$2 assertion_log="$temp/payload-$1-assertion.log" status
+    if python3 -I -B "$payload_assertion" "$payload_expected" "$actual_log" "$payload_error" \
+        export-rg-complete-controls "$payload_diagnostic" >"$assertion_log" 2>&1; then
         printf 'effect interchange payload control unexpectedly passed: %s\n' "$label" >&2
+        exit 96
+    else
+        status=$?
+    fi
+    if [[ "$status" -ne 1 ]] || ! rg -Fx 'complete producer payload did not match exactly' "$assertion_log" >/dev/null; then
+        printf 'effect interchange payload control setup/framing mismatch: %s status=%s\n' "$label" "$status" >&2
+        cat "$assertion_log" >&2
         exit 96
     fi
 }
-cp "$payload_expected" "$temp/payload-duplicate"
-head -n 1 "$payload_expected" >>"$temp/payload-duplicate"
-cp "$payload_expected" "$temp/payload-extra"
-printf 'payload-extra-row\n' >>"$temp/payload-extra"
-awk 'NR > 1' "$payload_expected" >"$temp/payload-missing"
-payload_control duplicate "$temp/payload-duplicate"
-payload_control extra "$temp/payload-extra"
-payload_control missing "$temp/payload-missing"
+python3 -I -B - "$payload_valid_log" "$payload_error" "$payload_diagnostic" "$temp" <<'PY'
+import pathlib, sys
+log_path, error_path, diagnostic, output_dir = sys.argv[1:]
+log = pathlib.Path(log_path).read_bytes()
+error = pathlib.Path(error_path).read_bytes()
+tail = error + b"producer-error-sentinel:export-rg-complete-controls\n" + diagnostic.encode()
+if not log.endswith(tail):
+    raise SystemExit("payload control source framing mismatch")
+payload = log[:-len(tail)]
+rows = payload.splitlines(keepends=True)
+if not rows:
+    raise SystemExit("payload control source was empty")
+variants = {
+    "duplicate": rows + rows[:1],
+    "extra": rows + [b"payload-extra-row\n"],
+    "missing": rows[1:],
+    "reversed": list(reversed(rows)),
+}
+for name, variant in variants.items():
+    pathlib.Path(output_dir, f"payload-{name}.log").write_bytes(b"".join(variant) + tail)
+PY
+payload_control duplicate "$temp/payload-duplicate.log"
+payload_control extra "$temp/payload-extra.log"
+payload_control missing "$temp/payload-missing.log"
 if [[ "$(wc -l <"$payload_expected")" -gt 1 ]]; then
-    tac "$payload_expected" >"$temp/payload-reversed"
-    python3 -I -B "$payload_assertion" "$temp/payload-reversed" "$payload_control_log" "$payload_error" \
-        export-rg-complete-controls 'descriptor export scan' >/dev/null 2>&1 || exit 96
+    python3 -I -B "$payload_assertion" "$payload_expected" "$temp/payload-reversed.log" "$payload_error" \
+        export-rg-complete-controls "$payload_diagnostic" || exit 96
 fi
 
 producer_failure dependency-error rg 'tools/bench/Cargo.toml' 1 1 empty 'benchmark dependency scan' empty
 producer_failure production-manifest-error rg 'hosts/' 1 1 empty 'production dependency scan' empty
-producer_failure reference-error rg 'effect-state-v1-reference.py' 1 1 empty 'accepted reference child-process scan' empty
+producer_failure reference-error rg 'effect-state-v1-reference.py' 1 1 empty \
+    'accepted reference child-process scan: scripts/effect-state-v1-reference.py' empty
 producer_failure render-error rg 'rack-compiler' 2 1 empty 'render-owned source scan' empty
 producer_failure fixture-find-error find 'fixtures/effect-interchange/v1' 1 0 empty 'interchange fixture traversal' empty
 printf 'real fixture violation\n' >"$temp/fixtures/effect-interchange/v1/actual-violation.tmp"
@@ -213,7 +239,9 @@ sed -i \
     -e 's/\\"issue\\":108/\\"issue\\":81/' \
     -e 's/5f23e630182137426fdfe01b74861bdff779b6738bfae8f670359ad0e9ea2777/350acfa6e348c27a01afcb9efbd40c51a697aac8bbb6a5fe19dc1eb3c52bf441/' \
     "$temp/tools/bench/src/effect_interchange.rs"
-producer_failure issue081-python-error python3 'tools/bench/src/effect_interchange.rs' 1 0 complete 'terminal Issue-081 benchmark output identities diverged' empty
+producer_failure issue081-python-error python3 'tools/bench/src/effect_interchange.rs' 1 0 complete \
+    'terminal Issue-081 benchmark output identities diverged' empty \
+    'effect interchange qualification policy failure: terminal Issue-081 benchmark output identities diverged (status 73)'
 chmod 000 "$temp/scripts/preflight-effect-interchange-benchmark.sh"
 expect_precise_081_log="$temp/issue081-read-error.log"
 if check >"$expect_precise_081_log" 2>&1; then printf 'effect interchange Issue-081 read fault unexpectedly succeeded\n' >&2; exit 97; fi

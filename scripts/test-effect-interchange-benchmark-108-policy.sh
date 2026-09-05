@@ -205,6 +205,7 @@ rg -F "$standalone/scripts/effect-interchange-benchmark-108-validator.py" "$hook
 [[ -s "$hook_marker" ]] || exit 96
 rg -F reached-read-hook "$hook_marker" >/dev/null || exit 96
 rm -f "$scratch/python-bin/python3"
+bash "$standalone/scripts/check-effect-interchange-benchmark-108.sh" "$standalone" >/dev/null
 
 precise_standalone_failure() {
     local label=$1 diagnostic=$2 log="$scratch/deletion-$1.log" status

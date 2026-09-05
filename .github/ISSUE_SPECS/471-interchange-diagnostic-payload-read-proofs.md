@@ -99,3 +99,30 @@ The payload implementation now uses Counter equality and retains duplicates, whi
 These are small corrections to the two selected proof surfaces; no wider table, production scan, new helper/framework or third production mutant is authorized. Retain existing namespace/migration controls and all inherited #455 coverage. Record exact focused statuses and causal assertion diagnostics. Root should consolidate one Sol2 pass, checkpoint and request one verdict. #455 remains open with its full workspace/actual-PR/required-CI boundary; no qualification is authorized from this incomplete child checkpoint.
 
 Root assigns one coherent Sol attempt 2 against the complete retained contract and these finite findings, in this worktree only. Preserve the accepted actual read hook and frozen production/table/control paths. Pause after focused-green checkpoint notification; root owns Git and GitHub.
+
+## Sol attempt 2 focused evidence
+
+The shared payload assertion now receives and requires the exact full
+`effect interchange qualification policy failure: <operation> failed (status 73)` line. It
+validates exactly one sentinel and diagnostic at the end of the combined log, removes only that
+fixed framing and the independently captured delegate stderr suffix, and compares the remaining
+payload multiset with independently captured expected stdout. Complete mode expects the real
+delegate stdout; error-only mode expects empty forwarded stdout, while the wrapper still executes
+and validates the real delegate first.
+
+The unmodified real complete diagnostic is checked by that same assertion. Duplicate, extra,
+missing and reversed controls are copies of its actual diagnostic with only payload rows changed;
+the expected nonempty real stdout stays fixed. Duplicate, extra and missing require status 1 and
+the exact `complete producer payload did not match exactly` assertion diagnostic, so framing,
+syntax or setup failures cannot satisfy them. The reversed copy passes when multiple rows exist.
+
+The accepted second-Python read hook remains unchanged. After its exact status, operation,
+PermissionError, target path and reached-read marker checks, the shim is removed and the standalone
+checker is run clean before any deletion or traversal fault case.
+
+Exact commands, raw logs and statuses are retained as
+`/tmp/471-sol2-{syntax,qualification,108,108-policy,policy,diff-check}.{command,log,status}`.
+With `PATH=/home/bl/.cargo/bin:$PATH`, syntax, both production checkers, the focused standalone108
+policy and the parent policy all returned status 0. The parent recorded both inherited child
+completions, including the fake-only lifecycle. No real runner, timing, build, Git or GitHub
+operation ran.
