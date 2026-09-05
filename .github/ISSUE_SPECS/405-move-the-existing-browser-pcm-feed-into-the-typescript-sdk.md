@@ -98,3 +98,9 @@ Luna moved the current ring/feed/prelude into the approved SDK files, exported t
 ## Luna attempt 1 — focused test checkpoint
 
 Added the focused PCM eval file and packed-consumer asset/export/NOTICE assertions. Luna reports `scripts/check-sdk-headless.sh /private/tmp/dx-393-current-artifacts`: 137 pass, one platform skip, zero failures; package check passes with the separate prelude and NOTICE and unchanged six generated artifacts. Dedicated Astra review remains pending and will assess whether every frozen lifecycle, layout, allocation and real DOM-consumer discriminator is complete. No review PASS is inferred from the suite count.
+
+## Astra attempt 1 verdict — FAIL (2026-09-05)
+
+Dedicated Astra reviewed pushed `a86f3cf4`. Required corrections: close must reject every pending ready caller even when its injected wait is blocked; restore the original monotonic timeout clock; preserve ID/channels source inputs and real DOM context/factory assignability; complete the frozen ring, lifecycle, runtime prelude allocation and packed consumer regressions; preserve earlier source provenance in NOTICE. No prelude algorithm change is warranted: Astra independently verified copied bytes, bounded submit/seek/backpressure behavior and zero instrumented render allocations. Six generated artifacts remain identical. Advertised headless (137 pass, 1 skip) and package gates passed but do not satisfy these missing contracts.
+
+This is the first failed implementation attempt. The full review is attached to PR #398. A separately briefed attempt 2 must keep this issue's product scope unchanged. PR #398 also has independent required CI failures (environment vocabulary and a pre-existing real-clock telemetry assertion), which are not authorized implementation paths in this issue. No merge or release readiness is claimed.
