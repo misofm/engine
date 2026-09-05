@@ -123,3 +123,52 @@ logs. Local logs: `/private/tmp/dx428-final-package-browser.log`,
 `/private/tmp/dx428-headless.log`. Dedicated independent review and root's final upstream/issue
 synchronization remain pending. These gates prove a packed SDK capability, not npm publication or
 completion of the downstream adapter/app integration.
+
+### Attempt 2 bounded revision evidence (Astra medium, 2026-09-05)
+
+Attempt 1 received independent **FAIL at `56bbd518`**, preserved in
+`/private/tmp/dx-428-astra-medium-review.md`: its Worker transport erased typed engine refusal
+fields, and its resource fixture did not detect removal of settlement `clearTimeout`.
+
+Checkpoint `2da95d23` addresses those two findings in the existing scratch client, entry and
+focused test file only. The reply carries an explicit engine/usage discriminator; an actual
+`MisoEngineError` carries phase, code, result and diagnostics, while `MisoUsageError` retains its
+existing usage identity. The client constructs the corresponding SDK error class and preserves
+the original formatted message verbatim without parsing it or decorating it twice. The generic
+name/message fallback remains available for other Worker failures. No public engine authority,
+context type, policy, generated artifact or PCM behavior changed.
+
+The focused test runs the actual scratch primitive against the approved real Wasm and document
+`{}`, then routes that same refusal through the actual Worker entry, structured-cloned messages
+and actual one-shot client. It verifies `instanceof MisoEngineError`, name/message, phase/code/
+result/diagnostics and diagnostic getters against the direct refusal; usage reconstruction is
+also exercised through the entry/client. Compact local timer and AbortSignal listener accounting
+requires zero active resources after success/abort/error. Captured removed Worker, abort and timer
+callbacks are actually invoked after settlement; they remain inert with one termination/request
+and one observed settlement.
+
+Validation after the correction:
+
+- `bash scripts/check-sdk-types.sh`: PASS.
+- `MISO_ENGINE_SDK_ARTIFACTS_HEX=2f707269766174652f746d702f64782d3339332d63757272656e742d617274696661637473
+  node --test sdk/test/browser-defaults-evals.mjs`: PASS, **19/19**. The artifact input is now
+  required for the real-Wasm refusal regression, following the existing SDK fixture convention.
+- Exact requested red mutation: remove only `clearTimeout(timer)` from `finish` in an isolated
+  source copy. The focused run exits **1**, failing `no scratch deadline survives settlement`
+  with actual 1 / expected 0. Source copy:
+  `/private/tmp/dx428-attempt2-timer-9uffw4ye`; log:
+  `/private/tmp/dx428-attempt2-timer-mutant.log`. The unmodified baseline exits 0.
+- `bash scripts/check-sdk-headless.sh /private/tmp/dx-393-current-artifacts`: PASS,
+  **156 passed / one existing skip** (157 total).
+- `MISO_ENGINE_SDK_BROWSER_TOOLS=/private/tmp/miso-dx-app/node_modules bash
+  scripts/sdk-package.sh check /private/tmp/dx-393-current-artifacts`: PASS, including its
+  generated-surface gate, strict packed consumer types, standalone Worker/package checks and
+  retained real Vite/Chromium default and forwarding-factory boot. Both paths report 48000 Hz,
+  128 frames, status result 0 and closed contexts; all observed network responses are 200.
+- Direct comparison again confirms all six generated artifacts equal the approved input bytes,
+  their six-entry manifest lengths/digests match, and the staged PCM feed is unchanged.
+
+Logs: `/private/tmp/dx428-attempt2-focused.log`,
+`/private/tmp/dx428-attempt2-headless.log`, and
+`/private/tmp/dx428-attempt2-package-browser.log`. Independent attempt-two review and final remote
+issue synchronization remain pending; the first FAIL is retained rather than rewritten.
