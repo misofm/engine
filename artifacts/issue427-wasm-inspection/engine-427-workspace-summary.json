@@ -1,0 +1,9 @@
+{
+  "candidate": "284e27ccd1b223c301cffa73918ae4dc595924cd",
+  "command": "cargo test --locked --workspace",
+  "terminal_exit": 0,
+  "result_blocks": 275,
+  "passed": 1576,
+  "failed": 0,
+  "ignored": 24
+}
