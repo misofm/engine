@@ -1,6 +1,6 @@
 # Complete the unfused seal's searches before accepting its recount
 
-**IN PROGRESS: Sol attempt 2 after Astra rejected Luna attempt 1.** This refresh preserves the numbered one-checker outcome and parent #402/#306/#349 obligations. No implementation is authorized by this planning record. Current shared foundation includes the rack/default, plain, plain-target and graph dependency modes; none parses this seal's grammar. #410 is active; do not edit its worktree/helper. Actual merged API wins over stale speculation.
+**IN PROGRESS: final Sol attempt 3 after two rejected implementation attempts.** This refresh preserves the numbered one-checker outcome and parent #402/#306/#349 obligations. No implementation is authorized by this planning record. Current shared foundation includes the rack/default, plain, plain-target and graph dependency modes; none parses this seal's grammar. #410 is active; do not edit its worktree/helper. Actual merged API wins over stale speculation.
 
 ## Smallest scope and delivery
 
@@ -136,3 +136,25 @@ Logs are retained as `/tmp/sol-411-selftest.log`, `/tmp/sol-411-checker.log`,
 `/tmp/sol-411-syntax.log` and `/tmp/sol-411-diff-check.log`. No helper, Rust, workflow, Cargo,
 benchmark, timing, Git or GitHub mutation was performed. These are implementation-supplied results;
 root owns the exact-path checkpoint/push and Astra owns the attempt-2 verdict.
+
+## Astra attempt 2 verdict and final Sol assignment
+
+# Astra #411 Sol attempt 2 review
+
+**FAIL at `f22bc6187b0e14b20dfa154ddb7709a2e679685e`.** Production completion checks improve on attempt 1, but the frozen late registered-consumer proof and counter-mutant contract remain unmet. This consumes attempt 2; only Sol attempt 3 remains before the prescribed hard stop/rescope. No repository, Git or GitHub mutation, Cargo or timing performed.
+
+Independently ran the embedded self-test (reported 57 passed/0 failed), real checker (8 registered calls) and Bash syntax successfully. Read the full issue/attempt record and implementation. The real tree remains clean. Retained evidence: `/tmp/astra-411-attempt2-selftest.log`, `/tmp/astra-411-late-mutant.diff`, `/tmp/astra-411-phase-proof.log`.
+
+The source retains exact 7+1/8 registry, call/comment/body grammar, marker-on-call/six-prior window, independent registry sum and tree recount, required inputs, and legal prose/empty candidates. Full predicate captures replace quiet searches; producer stderr remains separate; all three count callers now explicitly propagate failure. Those useful changes should remain.
+
+## Blocking gaps within the frozen scope
+
+1. **The registered-phase proof is missing, and its claimed counter-mutant exercises the wrong phase.** At lines 320-321, occurrence-late/count-late select invocation 2, which is the later file in initial candidate membership validation. Registered validation is invocations 3/4; recount is 5/6. No focused injected registered count/read case reaches invocation 4. Worse, the late-occurrence sed address at line 394 first matches its own quoted edit in the embedded self-test; its range runs through the initial candidate loop and registered loop. The actual mutant changes BOTH caller checks at production lines 594 and 623, rather than one claimed registered call site. Its green result comes from ignoring the initial membership count failure: count_calls has emitted its complete occurrence payload to stderr and returns empty stdout; membership validation does not compare that empty count with 1, and later clean registered/recount passes repair the information loss. Independent reproduction proves original phase 2 exits 9 and actual mutant phase 2 exits 0; target the intended registered phase 4 and the mutant exits 1 with `has  fused calls, the registry says 1`. Thus the expected status-97 control would not pass for the assigned registered consumer. Add the missing full/error-only phase-4 directed case and an exact verified production mutation that preserves the otherwise-valid failed producer payload, swallows its status at that late registered/recount operation, and causes the same focused assertion's exact unexpected-success result. Inspect the actual changed lines rather than relying only on checksum inequality.
+
+2. **The retired full-output/error case is another empty/error case.** The shim at lines 328-331 runs the real retired predicate on the valid fixture, which has no retired definition and emits no stdout. Both full and empty variants therefore inject exactly empty stdout plus status 9. The frozen retired row explicitly requires plausible output/error as well as error-only, including preservation of the execution error when the payload looks like a forbidden match. Supply a plausible nonempty search-result payload for that directed case and retain its exact sentinel/status/operation assertion. The existing clean-tree empty-output retired counter-mutant remains a useful distinct control; do not add a real forbidden definition that causes an earlier registration failure.
+
+3. **The relative-root positive still cannot fail the suite.** Line 298 runs expect_success in a subshell. Its failed increment is lost to the parent, and its last arithmetic assignment returns success; a refusal of only relative fixture roots is printed but leaves the suite's failed counter at zero. This was explicitly identified in attempt 1 and remains unchanged. Propagate this actual case's status/failure to the parent and account for its result accurately. The current successful run prints 58 individual successes but reports 57; reporting the executed case separately is also acceptable if its failure truly propagates.
+
+One bounded final Sol pass should correct these existing proof sites and evidence only. No new parser, registry, shared framework, workflow, Rust, target matrix or benchmark work is called for. Then root checkpoints the coherent tranche and obtains one final adversarial verdict before broader qualification; do not perform intermediate repair/re-review rounds or weaken the frozen contract.
+
+Root assigns the FINAL Sol attempt 3 to these three bounded proof/evidence corrections. Preserve accepted production grammar and completion behavior. After one coherent checkpoint, Astra supplies the final verdict; a third failure triggers the hard stop and explicit rescope, not another revision disguised as evidence work.
