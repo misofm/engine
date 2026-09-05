@@ -114,6 +114,8 @@ pub struct CancelComplete {
     pub generation: u64,
     pub effective_sample: SampleTime,
     pub canceled_events: u16,
+    pub canceled_records: u32,
+    pub applied_records: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -163,9 +165,43 @@ pub struct DeliveryCoreRender<P: Copy + Send + 'static> {
 }
 
 impl<P: Copy + Send + 'static> PreparedDelivery<P> {
+    pub fn resource_report(
+        capacity: NonZeroUsize,
+    ) -> Result<DeliveryResourceReport, crate::ProtocolQueueError> {
+        let mut total = 0u64;
+        let mut largest = 0u64;
+        for payload in [
+            bounded_spsc_retained_payload::<CoreMessage<P>>(capacity)?,
+            bounded_spsc_retained_payload::<CoreTerminal>(capacity)?,
+        ] {
+            for bytes in [payload.ring_header_bytes, payload.slot_payload_bytes] {
+                let bytes = u64::try_from(bytes)
+                    .map_err(|_| crate::ProtocolQueueError::CapacityOverflow)?;
+                total = total
+                    .checked_add(bytes)
+                    .ok_or(crate::ProtocolQueueError::CapacityOverflow)?;
+                largest = largest.max(bytes);
+            }
+        }
+        let entries = core::alloc::Layout::array::<Option<(CoreTicket, P, bool)>>(capacity.get())
+            .map_err(|_| crate::ProtocolQueueError::CapacityOverflow)?
+            .size();
+        let entries =
+            u64::try_from(entries).map_err(|_| crate::ProtocolQueueError::CapacityOverflow)?;
+        total = total
+            .checked_add(entries)
+            .ok_or(crate::ProtocolQueueError::CapacityOverflow)?;
+        largest = largest.max(entries);
+        Ok(DeliveryResourceReport {
+            retained_payload_bytes: total,
+            largest_allocation_bytes: largest,
+        })
+    }
+
     pub fn prepare(
         capacity: NonZeroUsize,
     ) -> Result<(DeliveryCoreControl<P>, DeliveryCoreRender<P>), crate::ProtocolQueueError> {
+        let _ = Self::resource_report(capacity)?;
         let (producer, consumer) = bounded_spsc(capacity, QueueGeneration(1))?;
         let (terminal_producer, terminal_consumer) = bounded_spsc(capacity, QueueGeneration(2))?;
         Ok((
@@ -474,7 +510,11 @@ impl AutomationDeliveryControl {
         current_sample: SampleTime,
         batch: AutomationBatchSlot,
     ) -> Result<(), AutomationEnqueueError> {
-        if self.cancel.is_some() || self.core.outstanding() == self.owners.len() {
+        let resident = usize::try_from(self.queues.report(QueueKind::Automation).occupancy)
+            .unwrap_or(usize::MAX);
+        if self.cancel.is_some()
+            || self.core.outstanding().saturating_add(resident) >= self.owners.len()
+        {
             return Err(AutomationEnqueueError::Full {
                 batch,
                 report: self.queues.report(QueueKind::Automation),
@@ -688,13 +728,26 @@ impl AutomationDeliveryControl {
         {
             return Err(DeliveryError::StaleTicket);
         }
-        let mut order: Vec<_> = self.owners.iter().flatten().copied().collect();
-        order.sort_unstable_by_key(|owner| owner.order);
         let sample = self.cancel.as_ref().unwrap().effective_sample.unwrap();
         let mut published = 0u16;
-        for owner in order {
+        let mut canceled_records = 0u32;
+        let mut applied_records = 0u32;
+        let mut last_order = 0u64;
+        for _ in 0..self.owners.len() {
+            let Some(owner) = self
+                .owners
+                .iter()
+                .flatten()
+                .copied()
+                .filter(|owner| owner.order > last_order)
+                .min_by_key(|owner| owner.order)
+            else {
+                break;
+            };
+            last_order = owner.order;
             let batch = self.core.payload(owner.ticket)?;
             let remaining = batch.len.saturating_sub(owner.applied_prefix);
+            applied_records = applied_records.saturating_add(u32::from(owner.applied_prefix));
             if remaining != 0 {
                 let state = self.cancel.as_mut().unwrap();
                 let event = ReliableSlot::automation_canceled(
@@ -710,6 +763,7 @@ impl AutomationDeliveryControl {
                     .commit_reserved_reliable_event(state.reservations.as_mut().unwrap(), event);
                 self.sequence += 1;
                 published += 1;
+                canceled_records = canceled_records.saturating_add(u32::from(remaining));
             }
             self.release(owner.ticket, batch);
         }
@@ -718,10 +772,13 @@ impl AutomationDeliveryControl {
             .release_reliable_events(state.reservations.take().unwrap());
         self.staged = None;
         self.queues.reset_automation_ordering_after_cancellation();
+        self.core.generation = self.next_generation;
         Ok(Some(CancelComplete {
             generation: token.generation,
             effective_sample: sample,
             canceled_events: published,
+            canceled_records,
+            applied_records,
         }))
     }
 
@@ -732,7 +789,10 @@ impl AutomationDeliveryControl {
         &self.queues
     }
     pub fn outstanding(&self) -> usize {
-        self.core.outstanding()
+        self.core.outstanding().saturating_add(
+            usize::try_from(self.queues.report(QueueKind::Automation).occupancy)
+                .unwrap_or(usize::MAX),
+        )
     }
     pub fn resident_automation(&self) -> u64 {
         self.queues.report(QueueKind::Automation).occupancy
@@ -863,6 +923,7 @@ impl AutomationDeliveryRender {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ReliablePayload;
     use core::num::NonZeroUsize;
 
     fn config(slots: usize) -> ProtocolQueueConfig {
@@ -892,6 +953,26 @@ mod tests {
             }],
         )
         .unwrap()
+    }
+
+    fn cancellation_payload(slot: ReliableSlot) -> (u64, RequestId, u16, SampleTime) {
+        match slot.payload {
+            ReliablePayload::AutomationCanceled {
+                event_sequence,
+                origin_request_id,
+                canceled_records,
+                effective_sample: Some(sample),
+                ..
+            } => (event_sequence, origin_request_id, canceled_records, sample),
+            other => panic!("unexpected event {other:?}"),
+        }
+    }
+
+    fn two_record_batch(id: u64, handle: u32) -> AutomationBatchSlot {
+        let mut records = [batch(id, handle).records[0]; 2];
+        records[1].start = SampleTime(id + 1);
+        records[1].end = SampleTime(id + 1);
+        AutomationBatchSlot::new(SessionRevision(1), RequestId::new(id).unwrap(), &records).unwrap()
     }
 
     #[test]
@@ -954,8 +1035,10 @@ mod tests {
     #[test]
     fn ordered_cancel_reconciles_handed_off_and_partial_at_actual_boundary() {
         let (mut control, mut render) = PreparedAutomationDelivery::prepare(config(2), 41).unwrap();
-        control.try_admit(SampleTime(0), batch(1, 7)).unwrap();
-        control.try_admit(SampleTime(2), batch(2, 7)).unwrap();
+        control
+            .try_admit(SampleTime(0), two_record_batch(1, 7))
+            .unwrap();
+        control.try_admit(SampleTime(3), batch(3, 7)).unwrap();
         let first = match control
             .try_handoff_next(
                 &PreparedDeliveryCapabilities::new_exact(&[(
@@ -971,8 +1054,7 @@ mod tests {
         };
         let pending = render.begin_boundary(SampleTime(8)).unwrap();
         assert_eq!(pending.ticket, first);
-        // Zero is a valid monotonic partial prefix and leaves the whole batch cancelable.
-        render.mark_applied(first, 0).unwrap();
+        render.mark_applied(first, 1).unwrap();
         let token = control
             .begin_cancel(
                 AutomationCancellationReason::EndpointShutdown,
@@ -985,10 +1067,247 @@ mod tests {
         let complete = control.poll_cancel_boundary(token).unwrap().unwrap();
         assert_eq!(complete.effective_sample, SampleTime(1234));
         assert_eq!(complete.canceled_events, 2);
+        assert_eq!(complete.canceled_records, 2);
+        assert_eq!(complete.applied_records, 1);
         assert_eq!(control.outstanding(), 0);
         assert_eq!(
             control.poll_cancel_boundary(token),
             Err(DeliveryError::StaleTicket)
+        );
+    }
+
+    #[test]
+    fn total_outstanding_bound_and_terminal_collection_are_the_only_reuse_credit() {
+        let (mut control, mut render) = PreparedAutomationDelivery::prepare(config(2), 1).unwrap();
+        let capabilities = PreparedDeliveryCapabilities::new(&[ParameterHandle(7)]).unwrap();
+        control.try_admit(SampleTime(0), batch(1, 7)).unwrap();
+        control.try_admit(SampleTime(2), batch(2, 7)).unwrap();
+        let first = match control.try_handoff_next(&capabilities).unwrap() {
+            HandoffResult::HandedOff(t) => t,
+            _ => unreachable!(),
+        };
+        assert_eq!(control.outstanding(), 2);
+        assert_eq!(control.resident_automation(), 1);
+        assert!(control.try_admit(SampleTime(3), batch(3, 7)).is_err());
+        render.begin_boundary(SampleTime(0));
+        render.mark_applied(first, 1).unwrap();
+        render.finish_applied(first, 1).unwrap();
+        assert!(control.try_admit(SampleTime(3), batch(3, 7)).is_err());
+        control.collect_terminal(first).unwrap();
+        control.try_admit(SampleTime(3), batch(3, 7)).unwrap();
+    }
+
+    #[test]
+    fn rejected_admission_preserves_the_exact_batch_and_service_state() {
+        let (mut control, _render) = PreparedAutomationDelivery::prepare(config(2), 1).unwrap();
+        let past = batch(1, 7);
+        match control.try_admit(SampleTime(2), past) {
+            Err(AutomationEnqueueError::Invalid { batch, .. }) => assert_eq!(batch, past),
+            other => panic!("unexpected result {other:?}"),
+        }
+        assert_eq!(
+            (control.outstanding(), control.resident_automation()),
+            (0, 0)
+        );
+
+        let accepted = two_record_batch(4, 7);
+        control.try_admit(SampleTime(0), accepted).unwrap();
+        let overlap = batch(5, 7);
+        match control.try_admit(SampleTime(0), overlap) {
+            Err(AutomationEnqueueError::Invalid { batch, .. }) => assert_eq!(batch, overlap),
+            other => panic!("unexpected result {other:?}"),
+        }
+        let backwards = batch(3, 8);
+        match control.try_admit(SampleTime(0), backwards) {
+            Err(AutomationEnqueueError::Invalid { batch, .. }) => assert_eq!(batch, backwards),
+            other => panic!("unexpected result {other:?}"),
+        }
+        assert_eq!(
+            (control.outstanding(), control.resident_automation()),
+            (1, 1)
+        );
+
+        let mut dense_cfg = config(2);
+        dense_cfg.per_block_automation_density = NonZeroUsize::new(1).unwrap();
+        let (mut dense, _) = PreparedAutomationDelivery::prepare(dense_cfg, 1).unwrap();
+        let too_dense = two_record_batch(1, 9);
+        match dense.try_admit(SampleTime(0), too_dense) {
+            Err(AutomationEnqueueError::Invalid { batch, .. }) => assert_eq!(batch, too_dense),
+            other => panic!("unexpected result {other:?}"),
+        }
+        assert_eq!(dense.outstanding(), 0);
+    }
+
+    #[test]
+    fn cancellation_refusals_are_transactional_and_events_keep_admission_order() {
+        let mut cfg = config(2);
+        cfg.reliable_event_slots = NonZeroUsize::new(1).unwrap();
+        let (mut control, _render) = PreparedAutomationDelivery::prepare(cfg, 9).unwrap();
+        control.try_admit(SampleTime(0), batch(1, 7)).unwrap();
+        control.try_admit(SampleTime(2), batch(2, 7)).unwrap();
+        let before = (
+            control.outstanding(),
+            control.resident_automation(),
+            control.sequence,
+        );
+        assert!(matches!(
+            control.begin_cancel(
+                AutomationCancellationReason::EndpointShutdown,
+                SessionRevision(2)
+            ),
+            Err(DeliveryError::ReliableFull(_))
+        ));
+        assert_eq!(
+            (
+                control.outstanding(),
+                control.resident_automation(),
+                control.sequence
+            ),
+            before
+        );
+        control.sequence = u64::MAX;
+        assert_eq!(
+            control.begin_cancel(
+                AutomationCancellationReason::EndpointShutdown,
+                SessionRevision(2)
+            ),
+            Err(DeliveryError::SequenceOverflow)
+        );
+        assert_eq!(
+            (control.outstanding(), control.resident_automation()),
+            (2, 2)
+        );
+
+        let (mut control, mut render) = PreparedAutomationDelivery::prepare(config(2), 9).unwrap();
+        control.try_admit(SampleTime(0), batch(1, 7)).unwrap();
+        control.try_admit(SampleTime(2), batch(2, 7)).unwrap();
+        let token = control
+            .begin_cancel(
+                AutomationCancellationReason::EndpointShutdown,
+                SessionRevision(2),
+            )
+            .unwrap();
+        render.begin_boundary(SampleTime(55));
+        let done = control.poll_cancel_boundary(token).unwrap().unwrap();
+        assert_eq!((done.canceled_events, done.canceled_records), (2, 2));
+        assert_eq!(
+            cancellation_payload(control.try_dequeue_event().unwrap()),
+            (9, RequestId::new(1).unwrap(), 1, SampleTime(55))
+        );
+        assert_eq!(
+            cancellation_payload(control.try_dequeue_event().unwrap()),
+            (10, RequestId::new(2).unwrap(), 1, SampleTime(55))
+        );
+    }
+
+    #[test]
+    fn applied_only_cancel_emits_zero_and_resets_generation_and_ordering() {
+        let (mut control, mut render) = PreparedAutomationDelivery::prepare(config(1), 17).unwrap();
+        control.try_admit(SampleTime(0), batch(5, 7)).unwrap();
+        let first = match control
+            .try_handoff_next(&PreparedDeliveryCapabilities::new(&[ParameterHandle(7)]).unwrap())
+            .unwrap()
+        {
+            HandoffResult::HandedOff(t) => t,
+            _ => unreachable!(),
+        };
+        render.begin_boundary(SampleTime(0));
+        render.mark_applied(first, 1).unwrap();
+        render.finish_applied(first, 1).unwrap();
+        let token = control
+            .begin_cancel(
+                AutomationCancellationReason::EndpointShutdown,
+                SessionRevision(3),
+            )
+            .unwrap();
+        render.begin_boundary(SampleTime(88));
+        let done = control.poll_cancel_boundary(token).unwrap().unwrap();
+        assert_eq!(
+            (
+                done.canceled_events,
+                done.canceled_records,
+                done.applied_records
+            ),
+            (0, 0, 1)
+        );
+        assert!(control.try_dequeue_event().is_err());
+        control.try_admit(SampleTime(0), batch(1, 7)).unwrap();
+        let second = match control
+            .try_handoff_next(&PreparedDeliveryCapabilities::new(&[ParameterHandle(7)]).unwrap())
+            .unwrap()
+        {
+            HandoffResult::HandedOff(t) => t,
+            _ => unreachable!(),
+        };
+        assert_ne!(first.generation, second.generation);
+    }
+
+    #[test]
+    fn logical_record_bounds_and_resource_report_are_exactly_composed() {
+        let one = crate::AutomationRecord {
+            kind: crate::AutomationKind::Point,
+            handle: ParameterHandle(1),
+            start: SampleTime(1),
+            end: SampleTime(1),
+            start_value: 0.0,
+            end_value: 0.0,
+        };
+        assert!(
+            AutomationBatchSlot::new(SessionRevision(1), RequestId::new(1).unwrap(), &[one])
+                .is_ok()
+        );
+        let mut maximum = [one; 256];
+        for (index, record) in maximum.iter_mut().enumerate() {
+            record.start = SampleTime(index as u64 + 1);
+            record.end = record.start;
+        }
+        assert!(
+            AutomationBatchSlot::new(SessionRevision(1), RequestId::new(2).unwrap(), &maximum)
+                .is_ok()
+        );
+        let mut over = Vec::from(maximum);
+        over.push(crate::AutomationRecord {
+            start: SampleTime(257),
+            end: SampleTime(257),
+            ..one
+        });
+        assert!(
+            AutomationBatchSlot::new(SessionRevision(1), RequestId::new(3).unwrap(), &over)
+                .is_err()
+        );
+        let cfg = config(2);
+        let report = PreparedAutomationDelivery::resource_report_for_config(cfg).unwrap();
+        let base = ProtocolQueues::resource_report_for_config(cfg).unwrap();
+        let mut expected = base.retained_payload_bytes;
+        let mut largest = base.largest_allocation_bytes;
+        for retained in [
+            bounded_spsc_retained_payload::<CoreMessage<AutomationBatchSlot>>(
+                cfg.automation_batch_slots,
+            )
+            .unwrap(),
+            bounded_spsc_retained_payload::<CoreTerminal>(cfg.automation_batch_slots).unwrap(),
+            bounded_spsc_retained_payload::<BoundaryMessage>(NonZeroUsize::new(1).unwrap())
+                .unwrap(),
+            bounded_spsc_retained_payload::<CancelAck>(NonZeroUsize::new(1).unwrap()).unwrap(),
+        ] {
+            for bytes in [retained.ring_header_bytes, retained.slot_payload_bytes] {
+                expected += bytes as u64;
+                largest = largest.max(bytes as u64);
+            }
+        }
+        for bytes in [
+            core::mem::size_of::<Option<(CoreTicket, AutomationBatchSlot, bool)>>()
+                * cfg.automation_batch_slots.get(),
+            core::mem::size_of::<Option<AdmissionOwner>>() * cfg.automation_batch_slots.get(),
+        ] {
+            expected += bytes as u64;
+            largest = largest.max(bytes as u64);
+        }
+        assert_eq!(report.retained_payload_bytes, expected);
+        assert_eq!(report.largest_allocation_bytes, largest);
+        assert_eq!(
+            PreparedAutomationDelivery::resource_report_for_config(cfg),
+            PreparedAutomationDelivery::resource_report_for_config(cfg)
         );
     }
 
