@@ -180,7 +180,11 @@ consumer that reads its rate from it cannot be told 48000 by a fallback that nev
 ## Browser
 
 ```ts
-import { createEngine, scratchBootInWorker } from "@misofm/engine/browser";
+import { createEngine } from "@misofm/engine/browser";
+
+const engine = await createEngine({ document });
+await engine.context.resume();
+engine.host.node.connect(engine.context.destination);
 ```
 
 The order matters, and each step exists because the next is expensive to undo: refuse what web
@@ -190,9 +194,21 @@ verify and if necessary close-and-retry the `AudioContext` → refuse a quantum 
 
 Both boots read the same policy object, so the ring, the memory budget and all four console words
 are identical by construction; the two `require_*` words are role-defined (zero in the scratch boot,
-physical in the worklet). Source plumbing is bring-your-own: SDK core has no opinions about audio
-plumbing — no OPFS, no fetch, no Workers — so the Worker boot and the context constructor are
-injected rather than reached for.
+physical in the worklet). The browser entry supplies a packaged scratch module Worker, a guarded
+`AudioContext` constructor, and the shipped host factory. Source delivery remains caller-owned.
+
+`createContext`, `scratchBoot`, and `createHost` are optional independent overrides. An injected
+context factory preserves its exact return type; a default DOM consumer receives its native
+`AudioContext` type. The `simd128ModuleUrl`, `workletModuleUrl`, `hostModuleUrl`, and
+`scratchWorkerModuleUrl` overrides select individual assets. `createWorker(url, { type })` can
+forward the exported package Worker URL directly to `new Worker`; the packaged entry contains its
+imports, including after Vite copies it. `requestDeadlineMs` (default 5000) bounds each scratch
+handshake/request phase, and `signal` cancels scratch work. Every outcome terminates the Worker.
+
+For callers that compose boot explicitly, `scratchBootWithWorker` performs one scratch request
+and `createDefaultHost` imports and invokes the shipped host with `toWebBootOptions` mapping.
+`scratchBootInWorker` remains the low-level primitive for custom Worker entries. The browser
+helpers install no PCM feed or storage service.
 
 `await engine.console()` binds the same semantic console shown above to the shipped browser host.
 It resolves the browser session map once, then submits the same whole-batch edits over MessagePort.

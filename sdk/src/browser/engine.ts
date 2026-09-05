@@ -261,9 +261,8 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
 /**
  * The scratch boot's body, to be run inside a Worker.
  *
- * Exported rather than inlined because the Worker's module is the caller's to write -- the SDK core
- * has no opinions about audio plumbing, and bundling a Worker would be one (ruling #207/5448359546).
- * A caller's Worker imports this, calls it, and posts the result back.
+ * The packaged Worker calls this primitive. Custom Workers may also import it, call it, and post
+ * the result back; context/host ownership remains with the browser entry.
  */
 export async function scratchBootInWorker(request: {
   readonly moduleBytes: Uint8Array<ArrayBuffer>;

@@ -11,3 +11,7 @@ mechanism were adapted from misofm/app at commit
 7485693e9bbcf2f65a91a4e5950e22d678d99062.
 The TypeScript ring/feed move and packaged asset are retained under the
 engine-web-adapter lineage above; this notice applies to both sources.
+
+The browser scratch Worker client/entry and default host construction are
+adapted from misofm/engine-web-adapter at commit
+63b4ee6212287000ff85e1cfa969d385f6246d2d, under Apache-2.0.

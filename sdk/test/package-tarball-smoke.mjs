@@ -32,6 +32,13 @@ for (const subpath of [".", "./headless", "./browser", "./assets"]) {
 assert.equal(typeof imported["."].session, "function");
 assert.equal(typeof imported["./headless"].createOfflineEngine, "function");
 assert.equal(typeof imported["./browser"].createEngine, "function");
+assert.equal(typeof imported["./browser"].scratchBootWithWorker, "function");
+assert.equal(typeof imported["./browser"].createDefaultHost, "function");
+const workerText = await readFile(imported["./assets"].BUNDLED_ENGINE_ASSETS.scratchWorkerModule, "utf8");
+const workerAst = ts.createSourceFile("scratch-worker.js", workerText, ts.ScriptTarget.ES2022, true, ts.ScriptKind.JS);
+assert.equal(workerAst.statements.some(statement => ts.isImportDeclaration(statement)
+  || (ts.isExportDeclaration(statement) && statement.moduleSpecifier !== undefined)), false,
+"the exported Worker URL is import-complete when a consumer bundler copies it");
 assert.equal(typeof imported["./browser"].attachEngineFeed, "function");
 assert.equal(typeof imported["./browser"].prepareEngineFeed, "function");
 assert.ok(imported["./assets"].BUNDLED_ENGINE_ASSETS.wasm instanceof URL);
@@ -122,6 +129,24 @@ const packedWriter = new Msb1RingWriter(packedFeed.rings[0]);
 packedWriter.engage(1n);
 void packedWriter;
 void prepareEngineFeed(domContext, BUNDLED_ENGINE_ASSETS.pcmFeedWorklet);
+async function defaultBrowserContext() {
+  const engine = await createEngine({ document: "opaque" });
+  await engine.context.resume();
+  await engine.context.suspend();
+  engine.host.node.connect(engine.context.destination);
+  const nativeContext: AudioContext = engine.context;
+  const forwarded = await createEngine({ document: "opaque", createWorker: (url, options) => new Worker(url, options) });
+  await forwarded.context.resume();
+  const thin = await createEngine({ document: "opaque", createContext: () => ({
+    sampleRate: 48000, state: "suspended", close: async () => {},
+    audioWorklet: { addModule: async (_url: string) => {} }, marker: "thin" as const,
+  }) });
+  const marker: "thin" = thin.context.marker;
+  // @ts-expect-error Thin injected contexts never acquire DOM capabilities.
+  thin.context.resume();
+  void [nativeContext, marker];
+}
+void defaultBrowserContext;
 declare const browser: BrowserEngine;
 const host = browser.host;
 void host.command({ commands: [] });
