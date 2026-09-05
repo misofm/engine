@@ -215,9 +215,13 @@
     "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
   },
   {
-    "path": "455-sol3-debug.log",
-    "bytes": 124156,
-    "sha256": "6455c8155681c727e656d5455c769a09019a4b2ffb9a4ca6ddcb36d5e8a4eff6"
+    "path": "455-sol3-debug.log.base64",
+    "bytes": 167723,
+    "sha256": "36f73322af774438e86eafd4bf42cd6e13c520aef183d93efc207afe5831bd56",
+    "encoding": "base64",
+    "original_path": "455-sol3-debug.log",
+    "decoded_bytes": 124156,
+    "decoded_sha256": "6455c8155681c727e656d5455c769a09019a4b2ffb9a4ca6ddcb36d5e8a4eff6"
   },
   {
     "path": "455-sol3-lifecycle.command",
@@ -288,6 +292,91 @@
     "path": "455-sol3-syntax.status",
     "bytes": 2,
     "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "471-ci-corrected-diff.command",
+    "bytes": 48,
+    "sha256": "607997ff787c0c5410b07621627330a40c9e58e9f37cdded65b5d101b8c4f1fa"
+  },
+  {
+    "path": "471-ci-corrected-diff.log",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "471-ci-corrected-diff.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "471-ci-corrected-parent.command",
+    "bytes": 78,
+    "sha256": "67a035590345296f24b7f1d1dbbb0cd00c571ad49898a3f720b3ccb82b87efd7"
+  },
+  {
+    "path": "471-ci-corrected-parent.log",
+    "bytes": 388,
+    "sha256": "935dacb5ee17e25a0238655fd338699364a0baa782b63806db2e14da7c9d17f8"
+  },
+  {
+    "path": "471-ci-corrected-parent.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "471-ci-corrected-syntax.command",
+    "bytes": 168,
+    "sha256": "5de4397c41a51d70836a6f8150ef7422f0e50efbaff2ee28a875ea16bc46961d"
+  },
+  {
+    "path": "471-ci-corrected-syntax.log",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "471-ci-corrected-syntax.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "471-ci-corrected-vocabulary-mutations.command",
+    "bytes": 67,
+    "sha256": "c5d72c83b9895c664e4779d2de79d37b0abf22a81f95f560c74bb842b0bf553f"
+  },
+  {
+    "path": "471-ci-corrected-vocabulary-mutations.log",
+    "bytes": 294,
+    "sha256": "5b47a8ee68bd686f0e916451e244b945f1fb2184d953df8a45b0b7243eaee31a"
+  },
+  {
+    "path": "471-ci-corrected-vocabulary-mutations.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "471-ci-corrected-vocabulary.command",
+    "bytes": 68,
+    "sha256": "3035a9a664d7a36b5210f5a4e050bca0afc752470b4e5eabdb06cd550cc934de"
+  },
+  {
+    "path": "471-ci-corrected-vocabulary.log",
+    "bytes": 56,
+    "sha256": "81db7ded215a305c3764c15edd04fb83bc4eff3edf4df40df2f4b306c419a756"
+  },
+  {
+    "path": "471-ci-corrected-vocabulary.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "471-ci-vocabulary-archive-equivalence.json",
+    "bytes": 239,
+    "sha256": "c9d4c1e8a7c0d57cc2e766e73eca74b2950ae3227190a43833daa9d1b5560b49"
+  },
+  {
+    "path": "471-ci-vocabulary-equivalence.json",
+    "bytes": 300,
+    "sha256": "2008b899e831167b9fc434e057668da67a6218eadcdf01dd8be6f63130241e7f"
   },
   {
     "path": "471-luna1-108-policy.command",
@@ -456,8 +545,8 @@
   },
   {
     "path": "README.md",
-    "bytes": 926,
-    "sha256": "0edfe4d9333bb70c077ab76d452b614e801af9708289cbe4c3a0326368839165"
+    "bytes": 1389,
+    "sha256": "1add8fb6f1ec24afc7ad68718b5f309817a4e61de71cd5590ba0b6c9ca3bde19"
   },
   {
     "path": "astra-455-attempt1-review.md",

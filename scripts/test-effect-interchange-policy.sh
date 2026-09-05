@@ -41,33 +41,33 @@ producer_failure() {
     cat >"$fault_bin/$tool" <<'SH'
 #!/usr/bin/env bash
 args=$(printf '%s\034' "$@")
-if [[ "$args" == *"$MISO_FAULT_NEEDLE"* ]]; then
+if [[ "$args" == *"$MISO_ENGINE_INTERCHANGE_TEST_FAULT_NEEDLE"* ]]; then
     count=0
-    [[ ! -f "$MISO_FAULT_STATE" ]] || read -r count <"$MISO_FAULT_STATE"
-    count=$((count + 1)); printf '%s\n' "$count" >"$MISO_FAULT_STATE"
-    if [[ "$count" -eq "$MISO_FAULT_OCCURRENCE" ]]; then
-        if "$MISO_REAL_TOOL" "$@" >"$MISO_DELEGATE_OUTPUT" 2>"$MISO_DELEGATE_ERROR"; then delegate=0; else delegate=$?; fi
-        if [[ "$delegate" -ne "$MISO_EXPECT_DELEGATE" ]]; then
-            printf 'producer-wrapper-wrong-delegate expected=%s actual=%s\n' "$MISO_EXPECT_DELEGATE" "$delegate" >&2
+    [[ ! -f "$MISO_ENGINE_INTERCHANGE_TEST_FAULT_STATE" ]] || read -r count <"$MISO_ENGINE_INTERCHANGE_TEST_FAULT_STATE"
+    count=$((count + 1)); printf '%s\n' "$count" >"$MISO_ENGINE_INTERCHANGE_TEST_FAULT_STATE"
+    if [[ "$count" -eq "$MISO_ENGINE_INTERCHANGE_TEST_FAULT_OCCURRENCE" ]]; then
+        if "$MISO_ENGINE_INTERCHANGE_TEST_REAL_TOOL" "$@" >"$MISO_ENGINE_INTERCHANGE_TEST_DELEGATE_OUTPUT" 2>"$MISO_ENGINE_INTERCHANGE_TEST_DELEGATE_ERROR"; then delegate=0; else delegate=$?; fi
+        if [[ "$delegate" -ne "$MISO_ENGINE_INTERCHANGE_TEST_EXPECT_DELEGATE" ]]; then
+            printf 'producer-wrapper-wrong-delegate expected=%s actual=%s\n' "$MISO_ENGINE_INTERCHANGE_TEST_EXPECT_DELEGATE" "$delegate" >&2
             exit 72
         fi
-        [[ "$MISO_OUTPUT_SHAPE" != nonempty || -s "$MISO_DELEGATE_OUTPUT" ]] || { printf 'producer-wrapper-empty-delegate\n' >&2; exit 72; }
-        [[ "$MISO_OUTPUT_SHAPE" != empty || ! -s "$MISO_DELEGATE_OUTPUT" ]] || { printf 'producer-wrapper-nonempty-delegate\n' >&2; exit 72; }
-        cat "$MISO_DELEGATE_ERROR" >&2
-        [[ "$MISO_FAULT_MODE" != complete ]] || cat "$MISO_DELEGATE_OUTPUT"
-        printf 'producer-error-sentinel:%s\n' "$MISO_FAULT_LABEL" >&2
+        [[ "$MISO_ENGINE_INTERCHANGE_TEST_OUTPUT_SHAPE" != nonempty || -s "$MISO_ENGINE_INTERCHANGE_TEST_DELEGATE_OUTPUT" ]] || { printf 'producer-wrapper-empty-delegate\n' >&2; exit 72; }
+        [[ "$MISO_ENGINE_INTERCHANGE_TEST_OUTPUT_SHAPE" != empty || ! -s "$MISO_ENGINE_INTERCHANGE_TEST_DELEGATE_OUTPUT" ]] || { printf 'producer-wrapper-nonempty-delegate\n' >&2; exit 72; }
+        cat "$MISO_ENGINE_INTERCHANGE_TEST_DELEGATE_ERROR" >&2
+        [[ "$MISO_ENGINE_INTERCHANGE_TEST_FAULT_MODE" != complete ]] || cat "$MISO_ENGINE_INTERCHANGE_TEST_DELEGATE_OUTPUT"
+        printf 'producer-error-sentinel:%s\n' "$MISO_ENGINE_INTERCHANGE_TEST_FAULT_LABEL" >&2
         exit 73
     fi
 fi
-exec "$MISO_REAL_TOOL" "$@"
+exec "$MISO_ENGINE_INTERCHANGE_TEST_REAL_TOOL" "$@"
 SH
     chmod 755 "$fault_bin/$tool"
     : >"$temp/fault-state"
     log="$temp/fault-$label.log"
-    if MISO_REAL_TOOL="$real" MISO_FAULT_NEEDLE="$needle" MISO_FAULT_OCCURRENCE="$occurrence" \
-        MISO_EXPECT_DELEGATE="$expected" MISO_FAULT_MODE="$mode" MISO_FAULT_LABEL="$label" \
-        MISO_OUTPUT_SHAPE="$shape" MISO_DELEGATE_OUTPUT="$temp/delegate-output" MISO_DELEGATE_ERROR="$temp/delegate-error" \
-        MISO_FAULT_STATE="$temp/fault-state" PATH="$fault_bin:$PATH" check >"$log" 2>&1; then
+    if MISO_ENGINE_INTERCHANGE_TEST_REAL_TOOL="$real" MISO_ENGINE_INTERCHANGE_TEST_FAULT_NEEDLE="$needle" MISO_ENGINE_INTERCHANGE_TEST_FAULT_OCCURRENCE="$occurrence" \
+        MISO_ENGINE_INTERCHANGE_TEST_EXPECT_DELEGATE="$expected" MISO_ENGINE_INTERCHANGE_TEST_FAULT_MODE="$mode" MISO_ENGINE_INTERCHANGE_TEST_FAULT_LABEL="$label" \
+        MISO_ENGINE_INTERCHANGE_TEST_OUTPUT_SHAPE="$shape" MISO_ENGINE_INTERCHANGE_TEST_DELEGATE_OUTPUT="$temp/delegate-output" MISO_ENGINE_INTERCHANGE_TEST_DELEGATE_ERROR="$temp/delegate-error" \
+        MISO_ENGINE_INTERCHANGE_TEST_FAULT_STATE="$temp/fault-state" PATH="$fault_bin:$PATH" check >"$log" 2>&1; then
         printf 'effect interchange producer failure escaped: %s\n' "$label" >&2; exit 97
     else status=$?; fi
     if [[ "$status" -ne 1 ]] || ! rg -F "producer-error-sentinel:$label" "$log" >/dev/null || \
@@ -261,10 +261,10 @@ sed -i 's/if \[\[ "$migration_status" -gt 1 \]\]; then/if [[ "$migration_status"
 assert_migration_error() {
     local checker=$1 log="$temp/migration-control.log" status
     : >"$temp/fault-state"
-    if MISO_REAL_TOOL="$(command -v rg)" MISO_FAULT_NEEDLE=migration_wire MISO_FAULT_OCCURRENCE=1 \
-        MISO_EXPECT_DELEGATE=1 MISO_FAULT_MODE=empty MISO_FAULT_LABEL=migration-control \
-        MISO_OUTPUT_SHAPE=empty MISO_DELEGATE_OUTPUT="$temp/migration-delegate-output" MISO_DELEGATE_ERROR="$temp/migration-delegate-error" \
-        MISO_FAULT_STATE="$temp/fault-state" PATH="$fault_bin:$PATH" bash "$checker" "$temp" >"$log" 2>&1; then status=0; else status=$?; fi
+    if MISO_ENGINE_INTERCHANGE_TEST_REAL_TOOL="$(command -v rg)" MISO_ENGINE_INTERCHANGE_TEST_FAULT_NEEDLE=migration_wire MISO_ENGINE_INTERCHANGE_TEST_FAULT_OCCURRENCE=1 \
+        MISO_ENGINE_INTERCHANGE_TEST_EXPECT_DELEGATE=1 MISO_ENGINE_INTERCHANGE_TEST_FAULT_MODE=empty MISO_ENGINE_INTERCHANGE_TEST_FAULT_LABEL=migration-control \
+        MISO_ENGINE_INTERCHANGE_TEST_OUTPUT_SHAPE=empty MISO_ENGINE_INTERCHANGE_TEST_DELEGATE_OUTPUT="$temp/migration-delegate-output" MISO_ENGINE_INTERCHANGE_TEST_DELEGATE_ERROR="$temp/migration-delegate-error" \
+        MISO_ENGINE_INTERCHANGE_TEST_FAULT_STATE="$temp/fault-state" PATH="$fault_bin:$PATH" bash "$checker" "$temp" >"$log" 2>&1; then status=0; else status=$?; fi
     if [[ "$status" -eq 0 ]]; then
         printf 'effect interchange qualification policy: migration status-loss unexpectedly succeeded\n' >&2
         return 97

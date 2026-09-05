@@ -148,3 +148,77 @@ Root integrated delivered main 4a814f348136bc5ba1d77bd04388a3c7163a0e10 before q
 ## Combined integrated qualification complete; PR review pending
 
 Astra accepted child source c950ce45 after Sol attempt2, retaining the original #455 production/table/control contract. Integrated candidate1171d0e44710010125c0f6c4571b29a2fdc6754a passed full workspace: {"head": "1171d0e44710010125c0f6c4571b29a2fdc6754a", "exit_code": 0, "blocks": 276, "passed": 1611, "failed": 0, "ignored": 24}. Named test population is identical to the delivered #460 integrated baseline; complete runtime/build/fixture inputs match current main4a814f34. Focused checker/suite statuses pass, with original namespace/migration production mutants and exact payload/read proof retained. Evidence is tracked under `artifacts/issue455-interchange-completion/` with exact hash/byte manifest and candidate provenance. Actual-head Astra review and required CI must pass before #455/#471 close together; #403/#306/#349 remain open. No timing or artifact regeneration occurred.
+
+## CI vocabulary qualification amendment
+
+# #471 CI vocabulary qualification ruling
+
+APPROVE the narrow mechanical correction before a renewed actual-PR review. PR474 head b15e2e992e2c6a5cb73c7952dafbc9df10335c48 cannot be approved for merge after the failed required CI. Reviewed the actual failure in /tmp/engine-474-policy-ci.log and the two suite sources; no tests/builds executed.
+
+Job 101318847530 fails check-env-vocabulary.sh with 15 concrete names outside MISO_ENGINE_. The vocabulary's first rule applies to all tracked scripts; its second requires every tool/script name to be registered. Test shims are not exempt. This is a qualification defect in the delivered tests, not a runtime or diagnostic-proof redesign.
+
+Root must amend/synchronize #471 before editing. Allow precisely the two existing suites, docs/ENGINE_ENV_VOCABULARY.md, and numbered qualification/evidence records. Replace each complete identifier below consistently in assignments, expanded and escaped generated shell, exec delegates, and Python os.environ lookups. Keep every value, quoting/escaping level, operation label, occurrence selector, assertion, test population and production mutant unchanged:
+
+| Old identifier | Required new identifier |
+|---|---|
+| MISO_DELEGATE_ERROR | MISO_ENGINE_INTERCHANGE_TEST_DELEGATE_ERROR |
+| MISO_DELEGATE_OUTPUT | MISO_ENGINE_INTERCHANGE_TEST_DELEGATE_OUTPUT |
+| MISO_EXPECT_DELEGATE | MISO_ENGINE_INTERCHANGE_TEST_EXPECT_DELEGATE |
+| MISO_FAULT_LABEL | MISO_ENGINE_INTERCHANGE_TEST_FAULT_LABEL |
+| MISO_FAULT_MODE | MISO_ENGINE_INTERCHANGE_TEST_FAULT_MODE |
+| MISO_FAULT_NEEDLE | MISO_ENGINE_INTERCHANGE_TEST_FAULT_NEEDLE |
+| MISO_FAULT_OCCURRENCE | MISO_ENGINE_INTERCHANGE_TEST_FAULT_OCCURRENCE |
+| MISO_FAULT_STATE | MISO_ENGINE_INTERCHANGE_TEST_FAULT_STATE |
+| MISO_OPTIONAL_FIND_MODE | MISO_ENGINE_INTERCHANGE_TEST_OPTIONAL_FIND_MODE |
+| MISO_OUTPUT_SHAPE | MISO_ENGINE_INTERCHANGE_TEST_OUTPUT_SHAPE |
+| MISO_PYTHON_OCCURRENCE | MISO_ENGINE_INTERCHANGE_TEST_PYTHON_OCCURRENCE |
+| MISO_READ_MARKER | MISO_ENGINE_INTERCHANGE_TEST_READ_MARKER |
+| MISO_READ_PROGRAM | MISO_ENGINE_INTERCHANGE_TEST_READ_PROGRAM |
+| MISO_READ_TARGET | MISO_ENGINE_INTERCHANGE_TEST_READ_TARGET |
+| MISO_REAL_TOOL | MISO_ENGINE_INTERCHANGE_TEST_REAL_TOOL |
+
+Register exactly these 15 names in the vocabulary with their actual test-only meanings: captured delegate stderr/stdout, expected real delegate exit, fault diagnostic label/output mode/argv selector/selected occurrence/counter file, optional-find shape, expected output shape, selected Python invocation, read-hook reachability marker/original program/target path, and resolved real executable. They do not authorize a runtime environment surface, benchmark override, policy exemption or compatibility aliases.
+
+Mechanical equivalence proof: compare both new scripts after applying the inverse exact-token mapping with their pre-correction versions; require byte equality. This checks escaping and logic preservation without re-running Rust qualification. Confirm no old names remain in the actual scripts and exactly the 15 new registered names are consumed. Do not rewrite historical artifact bytes to make the scan pass.
+
+Proportional gates after the checkpoint: bash -n on both suites; bash scripts/check-env-vocabulary.sh; bash scripts/test-env-vocabulary.sh; bash scripts/test-effect-interchange-policy.sh with the established Rust PATH (it must finish its #108 child and fake-only lifecycle); git diff --check on changed source/prose. Retain terminal statuses and complete outputs, including both original production mutant assertions and child completion. No timed runner, workspace rebuild, target rebuild or artifact/browser rerun is justified by this rename-only delta. Existing workspace/runtime equivalence remains applicable once the inverse comparison passes.
+
+Preserve the authentic failed CI log at /tmp/engine-474-policy-ci.log and cite the job https://github.com/misofm/engine/actions/runs/<actual-run-id>/job/101318847530 using the actual run ID obtained from the PR (do not publish the placeholder). Keep the local raw log intact. It contains rejected historical identifiers, so do not copy it into normally scanned tracked artifact paths. The numbered issue record may quote the diagnostic and names under the existing documented historical-spec exemption; that is not a new exemption. Existing 107 retained artifacts remain immutable. Store this ruling with old spellings in /tmp or the numbered spec, not as a newly scanned artifact copy.
+
+This is a bounded qualification repair within #471, not another #455 implementation attempt and not a waiver of its hardstop. Full inherited #455/#471 evidence and closure obligations remain. Root checkpoints/pushes the corrected head, requests renewed exact-head Astra actual-PR review, and waits for required qualification SUCCESS on that unchanged head before merge.
+
+Actual failed run: https://github.com/misofm/engine/actions/runs/33970786546/job/101318847530 . Root retains its raw log at `/tmp/engine-474-policy-ci.log`; no historical artifacts are rewritten.
+
+## Lossless historical log representation
+
+# #471 historical debug-log representation ruling
+
+APPROVE one lossless historical-log representation change, before re-running qualification and renewed actual-PR review. This is separate from the already approved mechanical rename of live test shims; it does not exempt live code from the vocabulary policy.
+
+The remaining material is an authentic shell trace, artifacts/issue455-interchange-completion/455-sol3-debug.log. Inspection shows historical environment assignments in traced commands, not new executable configuration. Its original manifest agrees with the actual bytes: size 124156, SHA-256 6455c8155681c727e656d5455c769a09019a4b2ffb9a4ca6ddcb36d5e8a4eff6. No established base64 archive convention was found in the bounded path search. Authorize a one-file encoding record, not a generic archive framework or blanket historical policy exclusion.
+
+Root may replace that tracked plaintext representation with exactly 455-sol3-debug.log.base64 in the same artifact directory. Encode the complete original bytes without editing, redaction, name substitution, newline normalization or truncation. Preserve an untouched original outside the repository and its existing committed history. Decode into a disposable path outside the scanned checkout, compare byte-for-byte with the preserved original, and independently verify the decoded size and SHA above. Keep the encoded file tracked and record its own actual size/SHA in the manifest as usual.
+
+Replace only this manifest entry's path/encoded size/encoded SHA; augment it with encoding="base64", original_path="455-sol3-debug.log", decoded_bytes=124156 and decoded_sha256="6455c8155681c727e656d5455c769a09019a4b2ffb9a4ca6ddcb36d5e8a4eff6". The manifest's ordinary fields continue to describe stored bytes. Add a concise artifact README note with the source commit containing the original plaintext, decoding instructions, and this representation-only reason. Use the actual commit, not a guessed provenance hash. A reader must be able to recover and authenticate the original without using the current suite or regenerating the historical run.
+
+Report accurately: all original logical evidence is retained, one historical payload now has a different stored representation; do not say every stored artifact byte is unchanged. Prior counts describe the pre-correction package. Recount the final package after fresh evidence is added. Verify all other existing manifest payloads remain byte-identical and all final paths are tracked. Do not create a second plaintext copy under another tracked path or encode executable scripts to conceal violations.
+
+No source, helper, scanner, vocabulary exemption, production checker, runner, pin, CI wiring or acceptance assertion changes are authorized by this ruling. The old failed CI and the first local vocabulary failure remain authentic historical failures, with the remote job link and local raw logs preserved. Do not copy those raw logs into scanned artifact paths; a concise numbered-spec failure record and authentic remote link suffice. This report also remains in /tmp or the existing numbered-spec historical record.
+
+After encoding, run the already frozen proportional gates: syntax, real vocabulary checker, its mutation suite, the complete interchange parent policy suite including #108 and fake-only lifecycle, and source/prose diff checks. The live-code inverse-renaming byte-equivalence proof remains required. No Rust/workspace/target/artifact build or timed execution is justified. Renew actual-PR exact-head Astra review and require current qualification SUCCESS before merge; earlier PR review cannot override the observed CI failure.
+
+Root encoded the one historical debug log, verified exact decoded identity and preserved the original locally and in Git history. The first local vocabulary check found that historical trace after live names were corrected; the original failure stays at `/tmp/471-ci-vocabulary-vocabulary.log`. The separate environment mutation suite exposed two fixed old catalog-count expectations after adding the fifteen names; this is pending its narrow count ruling. No historical execution is regenerated.
+
+## Exact vocabulary-count integration amendment
+
+# #471 vocabulary fixture count integration
+
+APPROVE exactly two expected payload-token changes in scripts/test-env-vocabulary.sh, plus the numbered scope/evidence record. Independently read the current rows: COUNT|documented-name count failed (wc status 7)|99 and COUNT_TR|documented-name count formatting failed (tr status 7)|99, at lines 222–223. The retained mutation log demonstrates the real completed producer now emits 114 before the injected wc status 7; the assertion still expects 99 and fails with “dropped partial output”. The approved registry adds exactly 15 valid consumed test names: 99+15=114.
+
+Change only these two final expected tokens from 99 to 114. Keep the operations, actual producer capture/delegation, injected exit status, diagnostics, paired error/full modes and all assertions unchanged. This updates the exact successful-output expectation to the new registry population; it does not accept arbitrary output or suppress a producer error. Confirm the final registry count is 114 and these are the only test-env-vocabulary.sh changes. If the actual count differs, investigate rather than adjust it again by guesswork.
+
+Add this one existing mutation-suite path to #471's qualification amendment before editing. Preserve the failed local mutation log as historical evidence. Re-run real environment vocabulary and its complete mutation suite, then the already required interchange parent suite (including #108 and fake-only lifecycle), syntax and source/prose diff checks. No production helper/scanner, CI wiring, framework, other table cases or Rust/workspace/target/timing change is authorized. Retain the inverse-rename proof and lossless historical-log proof. A renewed exact-head PR review and required qualification SUCCESS remain necessary before merge.
+
+## Corrected vocabulary qualification terminal evidence
+
+All five proportional checks pass: syntax, real vocabulary, existing vocabulary mutation suite, complete interchange parent (including108 and fake-only lifecycle), and diff. Two existing expected count payloads now match the fifteen-name registry addition, with status/payload assertions intact. Exact inverse token mapping proves both policy suites are byte-identical to b15e2e99 after undoing names alone. The archived trace decodes to its original124156bytes/SHA; all other preexisting evidence payloads except the explanatory README remain byte-identical. Final package contains 123 manifest-listed files plus manifest.json. Raw failed CI/local logs remain locally and the authentic GitHub job is linked above; no historical log is redacted or regenerated. Renewed actual-head review and required CI remain pending.
