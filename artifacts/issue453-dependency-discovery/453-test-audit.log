@@ -1,0 +1,21 @@
+check-realtime-audit-leak: non-dev feature enable: crates/conformance/Cargo.toml: engine = { workspace = true, features = ["realtime-audit"] }
+test-realtime-audit-leak: red as required: conformance-regular-enable
+check-realtime-audit-leak: non-dev feature enable: crates/capi/Cargo.toml: engine = { workspace = true, features = ["realtime-audit"] }
+test-realtime-audit-leak: red as required: capi-direct-enable
+test-realtime-audit-leak: targeted original status 1: manifest-discovery
+test-realtime-audit-leak: targeted original status 1: manifest-discovery-empty
+test-realtime-audit-leak: targeted original status 1: manifest-sort
+test-realtime-audit-leak: targeted original status 1: manifest-sort-empty
+test-realtime-audit-leak: targeted original status 1: structural-parser
+test-realtime-audit-leak: targeted original status 1: package-parser
+test-realtime-audit-leak: targeted original status 1: package-parser-empty
+test-realtime-audit-leak: targeted original status 1: unnamed-package
+test-realtime-audit-leak: targeted original status 1: cargo-tree
+test-realtime-audit-leak: targeted original status 1: cargo-tree-matching
+test-realtime-audit-leak: targeted original status 1: cargo-empty-success
+test-realtime-audit-leak: targeted original status 1: cargo-graph-grep
+test-realtime-audit-leak: targeted original status 1: cargo-graph-grep-empty
+test-realtime-audit-leak: manifest status mutant distinguished status 97
+test-realtime-audit-leak: Cargo status mutant distinguished status 97
+test-realtime-audit-leak: restored positive status 0
+test-realtime-audit-leak: OK
