@@ -212,3 +212,10 @@ Luna reported cargo check and protocol library tests (124 passed) without retain
 The second tranche adds exact handle/kind capabilities, resource projection, retained unsupported FIFO heads, queued-batch cancellation reconciliation and render partial-prefix cancellation. Two focused tests now exercise retained admission through handoff/terminal consumption and unsupported-head cancellation followed by event publication. `cargo test -p protocol --lib delivery::tests -- --nocapture` with the existing isolated target exited 0 (2 passed, 124 filtered); `/tmp/460-luna1-tranche2-test.{log,status}` retains evidence. Luna also ran cargo fmt successfully; root diff check passed.
 
 This remains an incomplete checkpoint within Luna attempt 1. The full frozen generic ownership, physical resource, cancellation/backpressure/sequence/identity and realtime proof contract remains required before final review; these two tests do not substitute for it. Root checkpoints the two changed source paths and this record before continuation.
+
+
+## Luna attempt 1 checkpoint 3: generic transport prototype, integration incomplete
+
+The third compiling tranche adds generic PreparedDelivery<P> control/render endpoints and an independent u32 payload transfer test. Focused delivery tests report 3 passed, 124 filtered, exit 0 in `/tmp/460-luna1-tranche3-test.{log,status}`; formatting and root diff checks pass.
+
+Root inspection finds that the concrete automation service still owns a separate ledger and transport implementation rather than instantiating the new generic core. This is NOT the frozen same-core contract and cannot receive acceptance as generic reuse. The next pass must consolidate the concrete adapter onto the generic ticket/credit lifecycle, then complete the retained capacity/cancellation/resources/realtime and two SAME-assertion gates. This useful compiling prototype is preserved as a recovery checkpoint, not a delivered capability or final attempt verdict. No additional parallel ownership model is accepted.

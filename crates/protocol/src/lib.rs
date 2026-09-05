@@ -84,7 +84,8 @@ pub use controller::{
 #[cfg(any(test, feature = "test-support"))]
 pub use controller::{MockProvider, MockProviderConfig};
 pub use delivery::{
-    AutomationDeliveryControl, AutomationDeliveryRender, CancelComplete, DeliveryError,
-    DeliveryResourceReport, DeliveryTicket, HandoffResult, PendingAutomation,
-    PreparedAutomationDelivery, PreparedDeliveryCapabilities, TerminalAutomation,
+    AutomationDeliveryControl, AutomationDeliveryRender, CancelComplete, CoreTicket,
+    DeliveryCoreControl, DeliveryCoreRender, DeliveryError, DeliveryResourceReport, DeliveryTicket,
+    HandoffResult, PendingAutomation, PreparedAutomationDelivery, PreparedDelivery,
+    PreparedDeliveryCapabilities, TerminalAutomation,
 };

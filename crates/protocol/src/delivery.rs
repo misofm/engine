@@ -132,6 +132,124 @@ pub struct DeliveryResourceReport {
     pub largest_allocation_bytes: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CoreTicket {
+    pub slot: u16,
+    pub serial: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CoreMessage<P: Copy + Send + 'static> {
+    ticket: CoreTicket,
+    payload: P,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CoreTerminal {
+    ticket: CoreTicket,
+}
+
+pub struct PreparedDelivery<P: Copy + Send + 'static> {
+    _marker: core::marker::PhantomData<P>,
+}
+
+pub struct DeliveryCoreControl<P: Copy + Send + 'static> {
+    producer: Producer<CoreMessage<P>>,
+    terminal_consumer: Consumer<CoreTerminal>,
+    entries: Box<[Option<(CoreTicket, P)>]>,
+    serial: u64,
+}
+
+pub struct DeliveryCoreRender<P: Copy + Send + 'static> {
+    consumer: Consumer<CoreMessage<P>>,
+    terminal_producer: Producer<CoreTerminal>,
+    pending: Option<CoreMessage<P>>,
+}
+
+impl<P: Copy + Send + 'static> PreparedDelivery<P> {
+    pub fn prepare(
+        capacity: NonZeroUsize,
+    ) -> Result<(DeliveryCoreControl<P>, DeliveryCoreRender<P>), crate::ProtocolQueueError> {
+        let (producer, consumer) = bounded_spsc(capacity, QueueGeneration(1))?;
+        let (terminal_producer, terminal_consumer) = bounded_spsc(capacity, QueueGeneration(2))?;
+        Ok((
+            DeliveryCoreControl {
+                producer,
+                terminal_consumer,
+                entries: vec![None; capacity.get()].into_boxed_slice(),
+                serial: 1,
+            },
+            DeliveryCoreRender {
+                consumer,
+                terminal_producer,
+                pending: None,
+            },
+        ))
+    }
+}
+
+impl<P: Copy + Send + 'static> DeliveryCoreControl<P> {
+    pub fn try_publish(&mut self, payload: P) -> Result<CoreTicket, DeliveryError> {
+        let slot = self
+            .entries
+            .iter()
+            .position(Option::is_none)
+            .ok_or(DeliveryError::Full)?;
+        let ticket = CoreTicket {
+            slot: slot as u16,
+            serial: self.serial,
+        };
+        self.serial = self
+            .serial
+            .checked_add(1)
+            .ok_or(DeliveryError::SequenceOverflow)?;
+        self.producer
+            .try_push(CoreMessage { ticket, payload })
+            .map_err(|_| DeliveryError::Full)?;
+        self.entries[slot] = Some((ticket, payload));
+        Ok(ticket)
+    }
+
+    pub fn collect(&mut self, ticket: CoreTicket) -> Result<P, DeliveryError> {
+        let terminal = self
+            .terminal_consumer
+            .try_pop()
+            .map_err(|_| DeliveryError::Empty)?;
+        if terminal.ticket != ticket {
+            return Err(DeliveryError::StaleTicket);
+        }
+        let entry = self.entries[usize::from(ticket.slot)]
+            .take()
+            .ok_or(DeliveryError::StaleTicket)?;
+        if entry.0 != ticket {
+            return Err(DeliveryError::StaleTicket);
+        }
+        Ok(entry.1)
+    }
+}
+
+impl<P: Copy + Send + 'static> DeliveryCoreRender<P> {
+    pub fn begin(&mut self) -> Result<(CoreTicket, P), DeliveryError> {
+        if self.pending.is_some() {
+            return Err(DeliveryError::AlreadyPending);
+        }
+        let message = self.consumer.try_pop().map_err(|_| DeliveryError::Empty)?;
+        let result = (message.ticket, message.payload);
+        self.pending = Some(message);
+        Ok(result)
+    }
+
+    pub fn finish(&mut self, ticket: CoreTicket) -> Result<(), DeliveryError> {
+        let message = self.pending.take().ok_or(DeliveryError::Empty)?;
+        if message.ticket != ticket {
+            return Err(DeliveryError::StaleTicket);
+        }
+        self.terminal_producer
+            .try_push(CoreTerminal { ticket })
+            .map_err(|_| DeliveryError::Full)
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct LedgerEntry {
     ticket: DeliveryTicket,
@@ -650,5 +768,15 @@ mod tests {
             2
         );
         assert!(control.queues_mut().try_dequeue_event().is_ok());
+    }
+
+    #[test]
+    fn generic_copy_core_transfers_layout_independent_payload() {
+        let (mut control, mut render) =
+            PreparedDelivery::<u32>::prepare(NonZeroUsize::new(1).unwrap()).unwrap();
+        let ticket = control.try_publish(0xfeed_beef).unwrap();
+        assert_eq!(render.begin().unwrap(), (ticket, 0xfeed_beef));
+        render.finish(ticket).unwrap();
+        assert_eq!(control.collect(ticket).unwrap(), 0xfeed_beef);
     }
 }
