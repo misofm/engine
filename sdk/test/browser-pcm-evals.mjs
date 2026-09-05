@@ -20,6 +20,7 @@ import { attachEngineFeed, PcmFeedError, prepareEngineFeed } from "../src/browse
 import { BUNDLED_ENGINE_ASSETS } from "../src/assets.ts";
 import { MisoEngineAsset } from "../src/core/asset.ts";
 import { WasmBoundary } from "../src/core/boundary.ts";
+import { constantValue } from "../src/core/abi.ts";
 import { moduleBytes, sessionDocument } from "./support.mjs";
 
 const context = { audioWorklet: { addModule: async () => {} } };
@@ -343,6 +344,139 @@ function preludeHarness(source, { tracking = false } = {}) {
   vm.runInNewContext(source, sandbox);
   return { sandbox, registrations, allocations, arm: () => { armed = true; } };
 }
+
+test("actual Wasm control-port preparation releases full stale SAB before exact first target render", async () => {
+  const source = await readFile(new URL("../src/browser-assets/miso-engine-v1-pcm-feed-worklet.js", import.meta.url), "utf8");
+  const asset = await MisoEngineAsset.load(await moduleBytes());
+  const instance = await asset.instantiate();
+  let handle;
+  const exports = { ...instance.exports, miso_engine_web_v1_boot(...args) { handle = instance.exports.miso_engine_web_v1_boot(...args); return handle; } };
+  const document = new TextEncoder().encode(sessionDocument({ frames: 480_000 }));
+  const boundary = await WasmBoundary.boot({ instantiate: async () => ({ exports }) }, document, { sourceRingFrames: 512 });
+  const { sandbox, registrations } = preludeHarness(source);
+  let first;
+  class Engine {
+    constructor() {
+      this.quantumFrames = 128; this.maximumSourceChannels = 2;
+      this.exports = exports; this.handle = handle; this.memoryBuffer = exports.memory.buffer;
+      this.sourceIdPointer = exports.miso_engine_web_v1_buffer_ptr(handle, constantValue("bufferKinds", "sourceId"));
+      this.sourceIdCapacity = exports.miso_engine_web_v1_buffer_capacity(handle, constantValue("bufferKinds", "sourceId"));
+      this.sourcePcm = new Float32Array(this.memoryBuffer, exports.miso_engine_web_v1_buffer_ptr(handle, constantValue("bufferKinds", "sourcePcm")), 256);
+      this.ready = true; this.disposed = false; this.stickyResult = 0;
+    }
+    process() { first = boundary.render(128); return true; }
+  }
+  sandbox.registerProcessor("miso-engine-v1-audio-worklet", Engine);
+  const engine = new (registrations.get("miso-engine-v1-audio-worklet"))();
+  const attach = new (registrations.get("miso-sab-feed-attach"))();
+  const port = { onmessage: null, postMessage(data) { queueMicrotask(() => attach.port.onmessage({ data })); } };
+  attach.port.postMessage = (data) => queueMicrotask(() => port.onmessage?.({ data }));
+  const suspended = { ...context, state: "suspended" };
+  const feed = attachEngineFeed({ context: suspended, sources: [{ sourceId: "s", channels: 2 }], quantumFrames: 128, createNode: () => ({ port, disconnect() {} }) });
+  try {
+    await feed.ready();
+    const writer = new Msb1RingWriter(feed.rings[0]); writer.engage(1n);
+    const old = [new Float32Array(128).fill(0.25), new Float32Array(128).fill(-0.25)];
+    for (let index = 0; index < 4; index++) assert.equal(boundary.submitSource({ sourceId: "s", generation: 1n, startFrame: BigInt(index * 128), planes: old, endOfRegion: false }).ok, true);
+    assert.equal(boundary.submitSource({ sourceId: "s", generation: 1n, startFrame: 512n, planes: old, endOfRegion: false }).code, "backpressure");
+    for (let index = 0; index < writer.capacity; index++) {
+      const planes = writer.reserve(128); planes[0].set(old[0]); planes[1].set(old[1]);
+      writer.commit({ generation: 1n, startFrame: BigInt(512 + index * 128), frames: 128, endOfRegion: false });
+    }
+    writer.seek(2n, 10_000n);
+    await feed.prepareSeek();
+    assert.equal(suspended.state, "suspended");
+    assert.equal(writer.occupancy, 0);
+    assert.equal(boundary.status().nextAbsoluteSample, 0n);
+    const c = controls(feed.rings[0]);
+    assert.equal(c[MSB1_CONTROL.STALE], 64);
+    assert.equal(c[MSB1_CONTROL.DRAIN_BLOCKS], 0);
+    assert.equal(c[MSB1_CONTROL.UNDERRUNS], 0);
+    assert.equal(c[MSB1_CONTROL.SEEKS_APPLIED], 1);
+    const target = [Float32Array.from({ length: 128 }, (_, i) => (i + 1) / 256), Float32Array.from({ length: 128 }, (_, i) => -(i + 1) / 512)];
+    for (let index = 0; index < 4; index++) {
+      const planes = writer.reserve(128); planes[0].set(target[0]); planes[1].set(target[1]);
+      writer.commit({ generation: 2n, startFrame: BigInt(10_000 + index * 128), frames: 128, endOfRegion: false });
+    }
+    await feed.prepareSeek(); // Same proof retains all fresh queued work.
+    assert.equal(writer.occupancy, 4);
+    engine.process([], []);
+    assert.deepEqual(first.left, target[0]); assert.deepEqual(first.right, target[1]);
+    assert.equal(c[MSB1_CONTROL.UNDERRUNS], 0);
+    assert.equal(c[MSB1_CONTROL.SUBMITTED_GENERATION_TAG], 2);
+    assert.equal(c[MSB1_CONTROL.SEEKS_APPLIED], 1);
+  } finally { feed.close(); boundary.dispose(); }
+});
+
+test("prepareSeek bounds requests and rejects supersession, refusal, close and timeout", async () => {
+  const requests = [];
+  const port = { onmessage: null, postMessage(message) {
+    if (message.op === "attach") for (const ring of message.rings) Atomics.store(controls(ring), MSB1_CONTROL.ATTACHED, 1);
+    else if (message.op === "prepare-seek") requests.push(message);
+  } };
+  const suspended = { ...context, state: "suspended" };
+  const feed = attachEngineFeed({ context: suspended, sources: [{ sourceId: "s", channels: 1 }], quantumFrames: 4, createNode: () => ({ port, disconnect() {} }) });
+  const writer = new Msb1RingWriter(feed.rings[0]); writer.engage(1n); writer.seek(2n, 4n);
+  const reply = (message, changes = {}) => port.onmessage?.({ data: { op: "seek-prepared", requestId: message.requestId, kind: "prepared", seeks: message.seeks, ...changes } });
+  const first = feed.prepareSeek();
+  await assert.rejects(feed.prepareSeek(), (error) => error.operation === "prepareBusy");
+  assert.equal(requests.length, 1);
+  writer.seek(0x1_0000_0002n, 8n); // Same low-word tag still supersedes the full identity.
+  reply(requests[0]);
+  await assert.rejects(first, (error) => error.operation === "prepareSuperseded");
+  const refused = feed.prepareSeek(); reply(requests[1], { kind: "refused", result: 6 });
+  await assert.rejects(refused, (error) => error instanceof PcmFeedError && error.operation === "prepareRefused" && error.result === 6);
+  const pending = feed.prepareSeek(); feed.close();
+  await assert.rejects(pending, (error) => error.operation === "closed");
+  reply(requests[2]);
+  assert.equal(feed.state, "closed");
+  const timed = attachEngineFeed({ context: suspended, sources: [{ sourceId: "s", channels: 1 }], quantumFrames: 4, createNode: () => ({ port, disconnect() {} }) });
+  new Msb1RingWriter(timed.rings[0]).seek(2n, 4n);
+  await assert.rejects(timed.prepareSeek({ timeoutMs: 1 }), (error) => error.operation === "prepareTimeout");
+  assert.equal(timed.state, "closed");
+});
+
+test("control preparation never discards or applies a superseding producer generation", async () => {
+  const source = await readFile(new URL("../src/browser-assets/miso-engine-v1-pcm-feed-worklet.js", import.meta.url), "utf8");
+  const run = runPrelude(source);
+  const ring = run.rings[0], writer = run.writers[0];
+  writer.seek(2n, 12n);
+  const snapshot = { epoch: 1, generation: 2n, frame: 12n };
+  const applied = [];
+  run.engine.exports.miso_engine_web_v1_source_seek = (_handle, _id, generation, frame) => {
+    applied.push([generation, frame]);
+    if (generation === 2n) {
+      writer.seek(3n, 16n);
+      const planes = writer.reserve(4); planes[0].fill(0.75);
+      writer.commit({ generation: 3n, startFrame: 16n, frames: 4, endOfRegion: false });
+    }
+    return 0;
+  };
+  assert.equal(run.engine.prepareSharedSeeks([ring], [snapshot]).kind, "superseded");
+  assert.deepEqual(applied, [[2n, 12n]]);
+  assert.equal(writer.occupancy, 1, "future PCM must survive the rejected old request");
+  assert.equal(run.engine.prepareSharedSeeks([ring], [{ epoch: 2, generation: 3n, frame: 16n }]).kind, "prepared");
+  assert.deepEqual(applied, [[2n, 12n], [3n, 16n]]);
+  assert.equal(writer.occupancy, 1);
+  assert.equal(run.ringControls[0][MSB1_CONTROL.STALE], 1);
+  assert.equal(run.ringControls[0][MSB1_CONTROL.DRAIN_BLOCKS], 0);
+  run.process();
+  assert.equal(run.submissions[0].generation, 3n);
+  assert.equal(run.submissions[0].pcm[0], 0.75);
+
+  const raced = runPrelude(source);
+  const racedWriter = raced.writers[0]; racedWriter.seek(2n, 12n);
+  const apply = raced.engine.applySharedSeek.bind(raced.engine);
+  let advance = true;
+  raced.engine.applySharedSeek = (ring, ...identity) => {
+    if (advance) { advance = false; racedWriter.seek(3n, 16n); }
+    return apply(ring, ...identity);
+  };
+  assert.equal(raced.engine.prepareSharedSeeks([raced.rings[0]], [snapshot]).kind, "superseded");
+  assert.deepEqual(raced.seeks, [[2n, 12n]], "apply the captured tuple, never mixed live epoch/generation words");
+  assert.equal(raced.engine.prepareSharedSeeks([raced.rings[0]], [{ epoch: 2, generation: 3n, frame: 16n }]).kind, "prepared");
+  assert.deepEqual(raced.seeks, [[2n, 12n], [3n, 16n]]);
+});
 
 function runPrelude(source, { tracking = false, mutate = false } = {}) {
   const mutated = mutate ? source.replace(
