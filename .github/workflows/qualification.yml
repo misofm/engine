@@ -217,15 +217,11 @@ jobs:
         run: bash scripts/test-web-audioworklet.sh
 
   browser:
-    name: ${{ matrix.browser }} — browser qualification gates
+    name: all browsers — temporary Linux matrix recording
     needs: [route, artifact]
     if: needs.route.outputs.route == 'full'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        browser: [chromium, firefox, webkit]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -247,16 +243,25 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/.cache/ms-playwright
-          key: playwright-${{ hashFiles('hosts/host-web/qualification/package-lock.json') }}-${{ matrix.browser }}-${{ runner.os }}
+          key: playwright-${{ hashFiles('hosts/host-web/qualification/package-lock.json') }}-all-${{ runner.os }}
       - name: Install pinned browser
         working-directory: hosts/host-web/qualification
         run: |
           npm ci
-          npx playwright install "${{ matrix.browser }}"
-          npx playwright install-deps "${{ matrix.browser }}"
-      - name: ${{ matrix.browser }} — attestation, AudioWorklet, native digest, and stall gates
+          npx playwright install chromium firefox webkit
+          npx playwright install-deps chromium firefox webkit
+      - name: Record actual all-browser qualification with mutation proofs
         working-directory: hosts/host-web/qualification
-        run: npm run qualify -- --artifacts "$GITHUB_WORKSPACE/target/ci/qualification-artifacts" --browser "${{ matrix.browser }}" --check-matrix --self-test-mutations
+        run: npm run qualify -- --artifacts "$GITHUB_WORKSPACE/target/ci/qualification-artifacts" --browser all --record-matrix --candidate-commit "$GITHUB_SHA" --self-test-mutations
+
+      - name: Upload actual generated Linux matrix records
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: browser-matrix-${{ github.sha }}
+          path: |
+            hosts/host-web/qualification/results.json
+            hosts/host-web/BROWSER_DEPLOYMENT_MATRIX.md
+          if-no-files-found: error
 
   lint:
     name: fmt, clippy, doc, and hermetic policy gates
