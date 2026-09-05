@@ -1,5 +1,90 @@
 [
   {
+    "path": "460-ci-policy-diff.command",
+    "bytes": 17,
+    "sha256": "d9ef3d1695645413cdc098707c0b447cc19275eb61556bf9d84a09633cf075a6"
+  },
+  {
+    "path": "460-ci-policy-diff.log",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "460-ci-policy-diff.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "460-ci-policy-mutations.command",
+    "bytes": 37,
+    "sha256": "4af1af4ce16e79670c111b0b12e5b3a74837bd9e6dd419c3640ff5ed662f4a59"
+  },
+  {
+    "path": "460-ci-policy-mutations.log",
+    "bytes": 35,
+    "sha256": "9ddd615ea2c19bae6ce028d9d2b9c2eee8bd0861593bcde27cb6261068e67b78"
+  },
+  {
+    "path": "460-ci-policy-mutations.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "460-ci-policy-neighbor-nonsource-setup.log",
+    "bytes": 334,
+    "sha256": "9e1b1bcbb52f5fb2321edcae7b4df2d648bf8a75c20595b0cdc90df5be580192"
+  },
+  {
+    "path": "460-ci-policy-neighbor-nonsource-setup.status",
+    "bytes": 2,
+    "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+  },
+  {
+    "path": "460-ci-policy-neighbor-proof.py",
+    "bytes": 1089,
+    "sha256": "22a4de495b6665a601125ddfeff5acfe128654f071f77da0c314745b26f6fad5"
+  },
+  {
+    "path": "460-ci-policy-neighbor.log",
+    "bytes": 650,
+    "sha256": "3e5c47ff0519978af1cb0979142380e3eeffc488240360f2a1c8459853dc3f24"
+  },
+  {
+    "path": "460-ci-policy-neighbor.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "460-ci-policy-real.command",
+    "bytes": 40,
+    "sha256": "2ad8ca58ccabe5cdb265ce29737d5801dd79eac88efba5e81a27818a6f09ec55"
+  },
+  {
+    "path": "460-ci-policy-real.log",
+    "bytes": 52,
+    "sha256": "df6e4f25e60994df7ea568d80ad9bea2caa821c5cad110007f742ffe00847331"
+  },
+  {
+    "path": "460-ci-policy-real.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "460-ci-policy-syntax.command",
+    "bytes": 41,
+    "sha256": "3c628e951d1aa94c42cc4cf2c843da0ae2cbe3e47f2fb9fc90c307e64848af92"
+  },
+  {
+    "path": "460-ci-policy-syntax.log",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "460-ci-policy-syntax.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
     "path": "460-luna1-root-tranche1-test.log",
     "bytes": 12384,
     "sha256": "ea08104ea74a5c2a74ac6ebc1eddfccc757a2b436f044613fd565338ee147cfe"
@@ -320,9 +405,19 @@
     "sha256": "122da275eabf9d9187395c3fa00c337c2353033288cc8a3a95ae787c468f94e0"
   },
   {
+    "path": "astra-460-ci-policy-ruling.md",
+    "bytes": 2254,
+    "sha256": "ebb807c0efdbb7ac7a7fe5d2d44266fde4a454d3e668c45ee97db43a37f5812b"
+  },
+  {
     "path": "astra-460-delivery-base-preflight.md",
     "bytes": 5231,
     "sha256": "2e4b5aa8c530ea5c37bba0ece3564590439fc5ae3bc738b97a4d350456e08665"
+  },
+  {
+    "path": "astra-460-final-pr-review.md",
+    "bytes": 3627,
+    "sha256": "f0c9fae5fcd7f6076e13e6ec4558614ba6fbbec94eb7478fd95317fb8b8ff475"
   },
   {
     "path": "astra-460-final-qualification-scope.md",
@@ -478,6 +573,11 @@
     "path": "engine-460-workspace-summary.json",
     "bytes": 149,
     "sha256": "291b3345ed92526046bd5548646badecc73c11e7dd260f564e432e844906ddf8"
+  },
+  {
+    "path": "engine-472-policy-ci.log",
+    "bytes": 61998,
+    "sha256": "22eede5bbf59350705d2827efd17e42369c52ab8bea5db5b1809e0e1b013968f"
   },
   {
     "path": "provenance.json",
