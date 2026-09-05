@@ -148,3 +148,27 @@ scripts and `git diff --check` pass. Logs are `/tmp/sol-410-check-realtime.log`,
 `/tmp/sol-410-test-realtime.log`, `/tmp/sol-410-check-lane.log`, and
 `/tmp/sol-410-test-lane.log`. No helper, Rust, manifest, marker, workflow, artifact, Cargo, timing,
 Git or GitHub change was made.
+
+## Astra complete attempt 2 acceptance
+
+# Astra #410 complete Sol attempt 2 review
+
+**PASS for focused source acceptance at `ab082422f4ae8ed90ea725d9c395a8dcd054da01`.** Root may proceed to frozen workspace/PR qualification; this is not merge authorization. Reviewed the full cumulative change from Luna's failed checkpoint and the complete numbered table. The earlier ef5efd81 was an explicitly incomplete recovery checkpoint, not a separately reviewed attempt.
+
+The implementation completes the intended status boundary without changing the runtime or shared helper API. Realtime captures filename discovery and sort before iteration, independently interprets BEGIN/END count0/1/error, checks each body extraction and append, preserves clean-empty bodies/zero-file floor handling, and distinguishes final forbidden-scan errors from no match. The12/42 floors and original regex/unsafe-owner scope remain intact.
+
+Lane captures all four source scans and three exclusion filters, required nonempty lane discovery/sort, per-file marker extraction, exact manifest pin, all three version reads, all-four-root manifest enumeration, each package-name read, complete dependency lists and non-wide membership before acceptance. The optional-sidecars regression is removed. Exact lock/package regexes, five-line marker window, lane/workspace dependency and wide allowlist semantics remain. Per-manifest no-name output and empty dependency lists are allowed while aggregate names remain required. No quiet search or unobserved process-substitution producer remains in the modified checkers.
+
+The selective shims target distinct scan/filter/count/extractor/package/file operations and delegate earlier nontargeted calls. Valid fixtures actually reach filters and workspace membership. The later runtime.rs body/count and engine manifest cases exercise late consumers. Partial mode delegates the genuine operation then fails, giving its otherwise-valid payload, including legitimately empty clean scan/filter results; diagnostic and operation-class assertions establish reachability. Count/no-match handling and missing/nonempty populations are separately represented.
+
+All seven frozen counter-mutation groups execute against disposable real checker copies and invoke the same focused assertions. Realtime's per-file-read and final-predicate representatives both run; the other controls cover unsafe status, failed discovery, lane find, nonempty failed version, failed dependency list and failed membership. The control wrappers require status1 AND the intended `unexpectedly passed` assertion text, so arbitrary shell/tool failure is not accepted as a live control. Restoring status loss actually makes the selected gate pass and the original assertion reject it.
+
+Independent focused verification on this head:
+
+- `bash scripts/test-realtime-policy.sh`: exit0, `/tmp/astra-410-attempt2-realtime.log`.
+- `bash scripts/test-lane-policy.sh`: exit0, `/tmp/astra-410-attempt2-lane.log`.
+- A tiny disposable extension using the same lane fixture confirms empty lane AND wide dependency lists, then an individual no-name manifest beside a valid aggregate: exit0, `/tmp/astra-410-empty-positives.log`; script `/tmp/astra-410-empty-positives.sh`.
+
+The last positives supplement the committed suite; do not claim they were added to it. Existing source semantics and this direct review evidence establish their preservation without another implementation tranche. Both owner real-gate logs and syntax/diff evidence also pass. No helper, workflow, Rust, marker or artifact changes are present. Historical comments about process substitution are stale explanatory prose, not active behavior or an acceptance blocker; no cleanup-only retry is needed.
+
+No material correctness or frozen acceptance blocker remains. Root retains the required baseline/candidate workspace comparison, synchronized final evidence and actual-head Astra PR review plus required CI before merge. #411/#412 and parent #402/#306/#349 obligations remain open. No Cargo, timing or repository/GitHub mutation was performed in this review.
