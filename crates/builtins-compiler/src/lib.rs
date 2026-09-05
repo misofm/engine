@@ -726,8 +726,6 @@ fn make_fader_matrix(
     fader: BuiltinProcessor,
     matrix: BuiltinProcessor,
 ) -> Result<BuiltinProcessor, (BuiltinProcessor, BuiltinProcessor)> {
-    #[cfg(test)]
-    FADER_MATRIX_FACTORY_CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     if !fader.as_any().is::<FaderBankProcessor>() || !matrix.as_any().is::<MatrixBankProcessor>() {
         return Err((fader, matrix));
     }
@@ -747,6 +745,8 @@ fn make_fader_matrix(
     {
         return Err((fader, matrix));
     }
+    #[cfg(test)]
+    FADER_MATRIX_FACTORY_CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     Ok(Box::new(FaderMatrixBankProcessor { fader, matrix }))
 }
 
@@ -3582,6 +3582,8 @@ mod tests {
     use session::{CompileCaps, compile_session, parse_session_json};
     use std::sync::Arc;
 
+    static PAIR_WITNESS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn session() -> CompiledSession {
         let document = include_str!("../../../fixtures/session/v1/canonical.json");
         compile_session(
@@ -4471,6 +4473,7 @@ mod tests {
         n: usize,
         dispatch: Backend,
         between_render_calls: bool,
+        post_fader_barrier: bool,
     ) -> (Vec<Vec<u32>>, usize) {
         let compiled = n_track_session(n);
         let controls = (0..n)
@@ -4479,10 +4482,28 @@ mod tests {
                 queue_capacity: NonZeroUsize::new(4).expect("queue"),
             })
             .collect::<Vec<_>>();
+        let meter_requests = post_fader_barrier.then(|| MeterRequest {
+            handle: MeterHandle(NonZeroU64::new(0x430).expect("handle")),
+            track_id: track_name(0),
+            tap: MeterTap::PostFader,
+            config: MeterConfig {
+                period_frames: NonZeroU32::new(HARNESS_QUANTUM).expect("period"),
+                peak_hold_frames: 0,
+                peak_decay_db_per_second: 0.0,
+                queue_capacity: NonZeroUsize::new(4).expect("queue"),
+                reset_generation: 0,
+            },
+        });
+        let meter_requests = meter_requests.as_slice();
         let builtins = if between_render_calls {
-            prepare_session_builtins_between_render_calls(&compiled, &[], &controls, caps())
+            prepare_session_builtins_between_render_calls(
+                &compiled,
+                meter_requests,
+                &controls,
+                caps(),
+            )
         } else {
-            prepare_session_builtins(&compiled, &[], caps())
+            prepare_session_builtins(&compiled, meter_requests, caps())
         }
         .expect("harness builtins");
         let (graph, levels) = track_graph(n);
@@ -4525,14 +4546,15 @@ mod tests {
             },
             Box::new(HarnessSink) as Box<dyn GraphRuntimeProcessor>,
         ));
-        let mut plan = match artifact.into_bound(GraphRuntimeBindings {
+        let mut bound = match artifact.into_bound(GraphRuntimeBindings {
             envelope,
             nodes,
             observers: Vec::new(),
         }) {
-            Ok(bound) => bound.plan,
+            Ok(bound) => bound,
             Err(failure) => panic!("harness bind: {}", failure.code),
         };
+        let mut plan = bound.plan;
         let frames = HARNESS_QUANTUM as usize;
         let mut pcm = vec![0.0_f32; frames * 2];
         for block in 0..HARNESS_BLOCKS {
@@ -4548,6 +4570,14 @@ mod tests {
             )
             .expect("harness render");
         }
+        if post_fader_barrier {
+            let meter = bound.meter_consumers.first_mut().expect("post-fader meter");
+            let mut windows = 0;
+            while meter.consumer.try_pop().is_ok() {
+                windows += 1;
+            }
+            assert!(windows > 0, "post-fader meter published nonempty windows");
+        }
         let bits = captures
             .into_iter()
             .map(|capture| {
@@ -4560,7 +4590,7 @@ mod tests {
     }
 
     fn render_post_input_bits(n: usize, dispatch: Backend) -> (Vec<Vec<u32>>, usize) {
-        render_post_input_bits_with_delivery(n, dispatch, false)
+        render_post_input_bits_with_delivery(n, dispatch, false, false)
     }
 
     /// #430 gate 1: the production compiler and graph binder select the live composite only for
@@ -4569,30 +4599,55 @@ mod tests {
     /// old separate dispatch.
     #[test]
     fn serialized_live_fader_matrix_is_selected_by_the_bound_render_path() {
-        for (tracks, backend, pairs) in [(5, Backend::Simd4, 1), (9, Backend::Simd8, 1)] {
+        let _guard = PAIR_WITNESS_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (tracks, backend, offers, executed) in
+            [(5, Backend::Simd4, 1, 1), (9, Backend::Simd8, 1, 1)]
+        {
             FADER_MATRIX_PROCESS_CALLS.store(0, Ordering::Relaxed);
             FADER_MATRIX_FACTORY_CALLS.store(0, Ordering::Relaxed);
-            let (separate, _) = render_post_input_bits_with_delivery(tracks, backend, false);
+            let (separate, _) = render_post_input_bits_with_delivery(tracks, backend, false, false);
             assert_eq!(FADER_MATRIX_PROCESS_CALLS.load(Ordering::Relaxed), 0);
             FADER_MATRIX_FACTORY_CALLS.store(0, Ordering::Relaxed);
 
-            let (paired, bank_count) = render_post_input_bits_with_delivery(tracks, backend, true);
+            let (paired, bank_count) =
+                render_post_input_bits_with_delivery(tracks, backend, true, false);
             assert_eq!(
                 FADER_MATRIX_FACTORY_CALLS.load(Ordering::Relaxed),
-                pairs,
+                offers,
                 "graph binding must offer every eligible adjacent pair to the factory"
             );
             assert_eq!(paired, separate, "pairing preserves exact stage arithmetic");
             assert!(
-                bank_count >= pairs * 3,
+                bank_count >= offers * 3,
                 "the actual strip banks were compiled"
             );
             assert_eq!(
                 FADER_MATRIX_PROCESS_CALLS.load(Ordering::Relaxed),
-                pairs * HARNESS_BLOCKS as usize,
-                "every full or partial live pair must execute once per rendered block"
+                executed * HARNESS_BLOCKS as usize,
+                "every reachable live pair must execute once per rendered block"
             );
         }
+    }
+
+    #[test]
+    fn a_post_fader_meter_declines_its_cohort_while_the_tail_pair_still_fuses() {
+        let _guard = PAIR_WITNESS_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        FADER_MATRIX_PROCESS_CALLS.store(0, Ordering::Relaxed);
+        FADER_MATRIX_FACTORY_CALLS.store(0, Ordering::Relaxed);
+        let (observed, banks) = render_post_input_bits_with_delivery(9, Backend::Simd8, true, true);
+        assert_eq!(observed.len(), 9);
+        assert!(observed.iter().all(|track| !track.is_empty()));
+        assert_eq!(banks, 6);
+        assert_eq!(FADER_MATRIX_FACTORY_CALLS.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            FADER_MATRIX_PROCESS_CALLS.load(Ordering::Relaxed),
+            HARNESS_BLOCKS as usize,
+            "the compatible unobserved trailing cohort remains paired"
+        );
     }
 
     struct PairFixture {
@@ -4708,6 +4763,10 @@ mod tests {
             .expect("separate matrix");
         assert_eq!(paired_l, separate_l, "post-matrix left PCM");
         assert_eq!(paired_r, separate_r, "post-matrix right PCM");
+        assert_ne!(
+            paired_l, paired_r,
+            "crossfeed preserves asymmetric right-plane output"
+        );
         for lane in 0..fixture.paired.fader.bank.active_lanes() {
             assert_eq!(
                 builtins::test_support::fader_bank_lane_words(&fixture.paired.fader.bank, lane),
@@ -4740,6 +4799,9 @@ mod tests {
 
     #[test]
     fn composite_live_sequence_matches_original_owners_and_discriminates_both_branches() {
+        let _guard = PAIR_WITNESS_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for (backend, members) in [(Backend::Simd4, 4), (Backend::Simd8, 5)] {
             let mut fixture = pair_fixture(backend, members);
             FADER_MATRIX_FUSED_CALLS.store(0, Ordering::Relaxed);
@@ -4883,6 +4945,9 @@ mod tests {
 
     #[test]
     fn composite_raw_record_errors_preserve_the_frozen_arithmetic_order() {
+        let _guard = PAIR_WITNESS_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut fader_error = pair_fixture(Backend::Simd4, 4);
         fader_error
             .paired_fader_tx
@@ -4939,6 +5004,9 @@ mod tests {
 
     #[test]
     fn pair_factory_declines_wrong_order_policy_and_shape_with_original_owners() {
+        let _guard = PAIR_WITNESS_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         struct WrongOwner(u64);
         impl GraphPreparedBuiltinBankProcessor for WrongOwner {
             fn as_any(&self) -> &dyn std::any::Any {
