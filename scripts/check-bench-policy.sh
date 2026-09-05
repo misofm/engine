@@ -14,12 +14,25 @@ set -euo pipefail
 root="$(cd "${1:-$(dirname "${BASH_SOURCE[0]}")/..}" && pwd)"
 cd "$root"
 
+scratch="$(mktemp -d)"
+trap 'rm -rf -- "$scratch"' EXIT
+
 fail() { printf 'bench policy failure: %s\n' "$1" >&2; exit 1; }
+
+captured() {
+    local path=$1
+    [[ -s "$path" ]] && printf '%s' "$(<"$path")" || printf '<empty>'
+}
 
 sole_owner() {
     local label=$1 owner=$2 pattern=$3
     local found
-    found="$(grep -rlE "$pattern" tools --include='*.rs' 2>/dev/null | LC_ALL=C sort || true)"
+    local grep_status
+    if grep -rlE --include='*.rs' "$pattern" tools >"$scratch/grep" 2>"$scratch/grep.err"; then grep_status=0; else grep_status=$?; fi
+    ((grep_status <= 1)) || fail "$label (grep failed with status $grep_status; output: $(captured "$scratch/grep"); stderr: $(captured "$scratch/grep.err"))"
+    if LC_ALL=C sort "$scratch/grep" >"$scratch/sort" 2>"$scratch/sort.err"; then sort_status=0; else sort_status=$?; fi
+    ((sort_status == 0)) || fail "$label (sort failed with status $sort_status; output: $(captured "$scratch/sort"); input: $(captured "$scratch/grep"); stderr: $(captured "$scratch/sort.err"))"
+    found="$(<"$scratch/sort")"
     [[ "$found" == "$owner" ]] || {
         printf 'expected only %s\nfound:\n%s\n' "$owner" "$found" >&2
         fail "$label"
@@ -45,9 +58,19 @@ sole_owner() {
 # after that prefix, including on a one-line signature-and-body, still counts.
 sole_owner_or_delegate() {
     local label=$1 owner=$2 def_pattern=$3
-    grep -qE "$def_pattern" "$owner" 2>/dev/null || fail "$label (the shared definition in $owner is gone)"
+    if grep -nE "$def_pattern" "$owner" >"$scratch/owner-grep" 2>"$scratch/owner-grep.err"; then
+        owner_status=0
+    else
+        owner_status=$?
+    fi
+    ((owner_status == 0)) || fail "$label (shared-definition grep failed or is empty for $owner; status $owner_status; output: $(captured "$scratch/owner-grep"); stderr: $(captured "$scratch/owner-grep.err"))"
     local matches offenders=()
-    matches="$(grep -rlE "$def_pattern" tools --include='*.rs' 2>/dev/null | LC_ALL=C sort || true)"
+    local grep_status
+    if grep -rlE --include='*.rs' "$def_pattern" tools >"$scratch/grep" 2>"$scratch/grep.err"; then grep_status=0; else grep_status=$?; fi
+    ((grep_status <= 1)) || fail "$label (grep failed with status $grep_status; output: $(captured "$scratch/grep"); stderr: $(captured "$scratch/grep.err"))"
+    if LC_ALL=C sort "$scratch/grep" >"$scratch/sort" 2>"$scratch/sort.err"; then sort_status=0; else sort_status=$?; fi
+    ((sort_status == 0)) || fail "$label (sort failed with status $sort_status; output: $(captured "$scratch/sort"); input: $(captured "$scratch/grep"); stderr: $(captured "$scratch/sort.err"))"
+    matches="$(<"$scratch/sort")"
     local file awk_pattern="${def_pattern//\\/\\\\}"
     # The 4-character Rust *source* spelling of the backslash char literal -- apostrophe,
     # backslash, backslash, apostrophe, as it appears in `.replace('\\', ...)` -- built from
@@ -61,7 +84,7 @@ sole_owner_or_delegate() {
     local backslash_char_literal="$sq$bs$bs$sq"
     while IFS= read -r file; do
         [[ -z "$file" || "$file" == "$owner" ]] && continue
-        if [[ "$(MISO_ENGINE_BENCH_POLICY_NEEDLE="$backslash_char_literal" awk -v pat="$awk_pattern" '
+        if MISO_ENGINE_BENCH_POLICY_NEEDLE="$backslash_char_literal" awk -v pat="$awk_pattern" '
             BEGIN { needle = ENVIRON["MISO_ENGINE_BENCH_POLICY_NEEDLE"] }
             { lines[NR] = $0 }
             $0 ~ pat { starts[NR] = 1 }
@@ -90,7 +113,9 @@ sole_owner_or_delegate() {
                     print (escapes && !replaces && !backslash_literal ? "delegate" : "own")
                 }
             }
-        ' "$file")" == *own* ]]; then
+        ' "$file" >"$scratch/awk" 2>"$scratch/awk.err"; then awk_status=0; else awk_status=$?; fi
+        ((awk_status == 0)) || fail "$label (delegate parser failed for $file with status $awk_status; output: $(captured "$scratch/awk"); stderr: $(captured "$scratch/awk.err"))"
+        if [[ "$(<"$scratch/awk")" == *own* ]]; then
             offenders+=("$file")
         fi
     done <<<"$matches"
@@ -107,7 +132,12 @@ sole_owner_or_delegate() {
 forbidden_under_tools() {
     local label=$1 pattern=$2
     local found
-    found="$(grep -rlE "$pattern" tools --include='*.rs' 2>/dev/null | LC_ALL=C sort || true)"
+    local grep_status
+    if grep -rlE --include='*.rs' "$pattern" tools >"$scratch/grep" 2>"$scratch/grep.err"; then grep_status=0; else grep_status=$?; fi
+    ((grep_status <= 1)) || fail "$label (grep failed with status $grep_status; output: $(captured "$scratch/grep"); stderr: $(captured "$scratch/grep.err"))"
+    if LC_ALL=C sort "$scratch/grep" >"$scratch/sort" 2>"$scratch/sort.err"; then sort_status=0; else sort_status=$?; fi
+    ((sort_status == 0)) || fail "$label (sort failed with status $sort_status; output: $(captured "$scratch/sort"); input: $(captured "$scratch/grep"); stderr: $(captured "$scratch/sort.err"))"
+    found="$(<"$scratch/sort")"
     [[ -z "$found" ]] || {
         printf 'found:\n%s\n' "$found" >&2
         fail "$label"
@@ -116,6 +146,16 @@ forbidden_under_tools() {
 
 support=tools/bench-support
 [[ -d "$support" ]] || fail "missing the shared harness: $support"
+
+for required_root in crates hosts sidecars; do
+    [[ -d "$required_root" ]] || fail "missing required root: $required_root"
+done
+
+if find crates hosts sidecars -mindepth 2 -maxdepth 2 -name Cargo.toml >"$scratch/manifests" 2>"$scratch/find.err"; then find_status=0; else find_status=$?; fi
+((find_status == 0)) || fail "manifest discovery failed with status $find_status; output: $(captured "$scratch/manifests"); stderr: $(captured "$scratch/find.err")"
+if LC_ALL=C sort "$scratch/manifests" >"$scratch/manifests.sorted" 2>"$scratch/sort.err"; then sort_status=0; else sort_status=$?; fi
+((sort_status == 0)) || fail "manifest sort failed with status $sort_status; output: $(captured "$scratch/manifests.sorted"); input: $(captured "$scratch/manifests"); stderr: $(captured "$scratch/sort.err")"
+[[ -s "$scratch/manifests.sorted" ]] || fail 'manifest discovery produced no packages'
 
 sole_owner 'the audited allocator has more than one implementation' \
     "$support/src/alloc.rs" '^unsafe impl GlobalAlloc'
@@ -145,9 +185,15 @@ timed_subjects=(tools/bench/src/rack.rs tools/audit/src/fp_env.rs
     tools/wasm-console/src/main.rs)
 for subject in "${timed_subjects[@]}"; do
     [[ -f "$subject" ]] || fail "converted subject is missing: $subject"
-    grep -q 'timing::timed' "$subject" ||
-        fail "converted subject does not measure through timing::timed: $subject"
-    if grep -nE 'Instant::now|Sha256::new|sha2::' "$subject"; then
+    if grep -n 'timing::timed' "$subject" >"$scratch/subject-timer" 2>"$scratch/subject-timer.err"; then
+        timer_status=0
+    else
+        timer_status=$?
+    fi
+    ((timer_status == 0)) || fail "converted subject timer scan failed or is empty for $subject; status $timer_status; output: $(captured "$scratch/subject-timer"); stderr: $(captured "$scratch/subject-timer.err")"
+    if grep -nE 'Instant::now|Sha256::new|sha2::' "$subject" >"$scratch/subject" 2>"$scratch/subject.err"; then subject_status=0; else subject_status=$?; fi
+    ((subject_status <= 1)) || fail "subject scan failed with status $subject_status; output: $(captured "$scratch/subject"); stderr: $(captured "$scratch/subject.err")"
+    if ((subject_status == 0)); then
         fail "converted subject owns a clock or a digest of its own: $subject"
     fi
 done
@@ -164,14 +210,20 @@ done
 # links either. This is not a new *kind* of exception; it is a second instance of the one already
 # approved, and it is named here rather than absorbed by a pattern so that a genuinely new
 # boundary still has to come back for a decision.
-expected_unsafe="$(printf '%s\n' \
+if printf '%s\n' \
     tools/bench-support/src/alloc.rs \
     tools/audit/src/capi.rs \
     tools/native-pcm-runner/src/lib.rs \
     tools/bench/src/protocol.rs \
     tools/wasm-gate-guest/src/lib.rs \
-    tools/wasm-console-guest/src/lib.rs | LC_ALL=C sort)"
-actual_unsafe="$(grep -rlE '^#!\[allow\(unsafe_code\)\]' tools --include='*.rs' 2>/dev/null | LC_ALL=C sort || true)"
+    tools/wasm-console-guest/src/lib.rs | LC_ALL=C sort >"$scratch/expected-unsafe" 2>"$scratch/sort.err"; then sort_status=0; else sort_status=$?; fi
+((sort_status == 0)) || fail "unsafe expected-owner sort failed with status $sort_status; output: $(captured "$scratch/expected-unsafe"); stderr: $(captured "$scratch/sort.err")"
+expected_unsafe="$(<"$scratch/expected-unsafe")"
+if grep -rlE --include='*.rs' '^#!\[allow\(unsafe_code\)\]' tools >"$scratch/grep" 2>"$scratch/grep.err"; then grep_status=0; else grep_status=$?; fi
+((grep_status <= 1)) || fail "unsafe-owner scan failed with status $grep_status; output: $(captured "$scratch/grep"); stderr: $(captured "$scratch/grep.err")"
+if LC_ALL=C sort "$scratch/grep" >"$scratch/actual-unsafe" 2>"$scratch/sort.err"; then sort_status=0; else sort_status=$?; fi
+((sort_status == 0)) || fail "unsafe-owner sort failed with status $sort_status; output: $(captured "$scratch/actual-unsafe"); input: $(captured "$scratch/grep"); stderr: $(captured "$scratch/sort.err")"
+actual_unsafe="$(<"$scratch/actual-unsafe")"
 [[ "$actual_unsafe" == "$expected_unsafe" ]] || {
     diff -u <(printf '%s\n' "$expected_unsafe") <(printf '%s\n' "$actual_unsafe") >&2 || true
     fail 'the approved unsafe ownership set under tools/ changed'
@@ -179,11 +231,16 @@ actual_unsafe="$(grep -rlE '^#!\[allow\(unsafe_code\)\]' tools --include='*.rs' 
 
 # F2's metadata boundary: only the two dispatchers may inspect their private re-exec selector.
 # Every subject reads runner metadata from one memoized in-process `Metadata::gather()` snapshot.
-expected_environment_readers="$(printf '%s\n' \
+if printf '%s\n' \
     tools/audit/src/main.rs \
-    tools/bench/src/main.rs | LC_ALL=C sort)"
-actual_environment_readers="$(grep -rlE '(std::)?env::var\(' tools/{audit,bench,bench-support}/src \
-    --include='*.rs' 2>/dev/null | LC_ALL=C sort || true)"
+    tools/bench/src/main.rs | LC_ALL=C sort >"$scratch/expected-environment" 2>"$scratch/sort.err"; then sort_status=0; else sort_status=$?; fi
+((sort_status == 0)) || fail "environment expected-owner sort failed with status $sort_status; output: $(captured "$scratch/expected-environment"); stderr: $(captured "$scratch/sort.err")"
+expected_environment_readers="$(<"$scratch/expected-environment")"
+if grep -rlE --include='*.rs' '(std::)?env::var\(' tools/{audit,bench,bench-support}/src >"$scratch/grep" 2>"$scratch/grep.err"; then grep_status=0; else grep_status=$?; fi
+((grep_status <= 1)) || fail "environment-reader scan failed with status $grep_status; output: $(captured "$scratch/grep"); stderr: $(captured "$scratch/grep.err")"
+if LC_ALL=C sort "$scratch/grep" >"$scratch/actual-environment" 2>"$scratch/sort.err"; then sort_status=0; else sort_status=$?; fi
+((sort_status == 0)) || fail "environment-reader sort failed with status $sort_status; output: $(captured "$scratch/actual-environment"); input: $(captured "$scratch/grep"); stderr: $(captured "$scratch/sort.err")"
+actual_environment_readers="$(<"$scratch/actual-environment")"
 [[ "$actual_environment_readers" == "$expected_environment_readers" ]] || {
     diff -u <(printf '%s\n' "$expected_environment_readers") \
         <(printf '%s\n' "$actual_environment_readers") >&2 || true
@@ -203,15 +260,25 @@ actual_environment_readers="$(grep -rlE '(std::)?env::var\(' tools/{audit,bench,
 # load-bearing rather than convenient. `hosts/` and `sidecars/` keep the absolute ban in both
 # sections: a host adapter and a sidecar are each the artifact that ships.
 while IFS= read -r manifest; do
-    violation="$(awk -v file="$manifest" '
+    if awk -v file="$manifest" '
         /^\[/ { section = $0 }
         /bench-support/ {
             dev = section ~ /dev-dependencies/ && file ~ /^crates\//
             if (!dev) { print file ": " $0; exit }
         }
-    ' "$manifest")"
+    ' "$manifest" >"$scratch/awk" 2>"$scratch/awk.err"; then
+        awk_status=0
+    else
+        awk_status=$?
+    fi
+    ((awk_status == 0)) || fail "dependency parser failed for $manifest with status $awk_status; output: $(captured "$scratch/awk"); stderr: $(captured "$scratch/awk.err")"
+    violation="$(<"$scratch/awk")"
     [[ -z "$violation" ]] || fail "a production package depends on the bench support crate: $violation"
-done < <(find crates hosts sidecars -mindepth 2 -maxdepth 2 -name Cargo.toml 2>/dev/null | sort)
+done < "$scratch/manifests.sorted"
 
+if printf '%s\n' "$expected_unsafe" | wc -l >"$scratch/count" 2>"$scratch/count.err"; then count_status=0; else count_status=$?; fi
+((count_status == 0)) || fail "unsafe-owner count failed with status $count_status; output: $(captured "$scratch/count"); stderr: $(captured "$scratch/count.err")"
+if tr -d ' ' <"$scratch/count" >"$scratch/count.formatted" 2>"$scratch/count.err"; then format_status=0; else format_status=$?; fi
+((format_status == 0)) || fail "unsafe-owner count formatter failed with status $format_status; output: $(captured "$scratch/count.formatted"); input: $(captured "$scratch/count"); stderr: $(captured "$scratch/count.err")"
 printf 'bench policy: ok (1 allocator, 1 escaper, 1 percentile, 1 digest sink, %s unsafe owners, %s subjects on the shared timer)\n' \
-    "$(printf '%s\n' "$expected_unsafe" | wc -l | tr -d ' ')" "${#timed_subjects[@]}"
+    "$(<"$scratch/count.formatted")" "${#timed_subjects[@]}"
