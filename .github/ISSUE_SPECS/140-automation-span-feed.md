@@ -46,11 +46,11 @@ For the first Point-capable native effect path, process the prefix before the ea
 
 Use a configured density bound to bound subdivisions and scans. No per-sample controller call, whole-graph rescheduling, new interpolation or altered FMA/association. Point catch-up applies an already admitted late point at the next available render boundary and increments a saturating per-record late counter once; already rejected past-at-admission batches stay rejected. That proposed catch-up detail must be explicitly recorded rather than invented in implementation. Distinct already-late same-parameter points need a deterministic ordered application rule, not silent coalescing; test their state transition semantics.
 
-### D5: Transient automation leaves canonical base model unchanged
+### D5: Existing transient enqueue versus persistent typed session mutations
 
-Recommended ruling: admitted transient automation changes runtime/applied-state readback, not canonical SessionModel or its revision. Canonical snapshot stays the structural/base configuration before/during/after transient execution. ParameterStatePage's existing observed_sample identifies the coherent sampled live values. Prepare bounded applied-state publication outside the renderer's structural model; control reads it without asking render to allocate or mutate JSON. Pending targets are not falsely reported as already applied. Structural edits still produce replacement plans and cancel prior-generation work according to D3.
+D5 applies exclusively to the existing transient AutomationEnqueue operation. Its pending/applied runtime overlay does not edit the canonical base SessionModel or increment its revision; ParameterStatePage reports the coherent observed live value and sample. This does not change persistent protocol mutation semantics. SessionTransactionApply, including persistent parameter/fader/matrix edits and automation upsert/remove/target/segments, must update the same typed SessionModel transactionally and remain snapshot-able as canonical JSON. No host/controller shadow document may substitute for that model.
 
-This distinction is explicit semantics, not “model synchronization” by assertion. If root instead requires automation to persist in canonical snapshots, scope off-render typed model commits/revision behavior separately; it cannot be smuggled into Point render delivery.
+Preserve both sides in the integration proof: transient enqueue/application/cancellation leaves the canonical base snapshot and revision unchanged while readback changes at the specified observed sample; a representative persistent typed edit changes the same canonical model/snapshot and revision as specified. Pending values must not be reported as already applied. Any future conversion of transient automation into stored session automation must use the existing typed transaction semantics, not mutate JSON or session structure on render. Existing persistent-edit/snapshot tests may supply that proof with an exact link to their unchanged behavior; no new corpus is required.
 
 ## Smallest concrete children and serial dependency
 
@@ -87,3 +87,28 @@ Root adopts or amends D1–D5 in the mirrored parent, numbers children with reci
 ## Adopted-decision precedence
 
 The current disposition adopts the proposed D1–D5 recommendations, superseding proposal wording that asks root to choose those semantics. All exact-child API/base/numbered approvals remain pending. The original issue scope is preserved in its GitHub history; the historical empty-span and gain-reduction statements are superseded by the delivered-console and #143 accounting above, not revived as missing work. No original capability outcome is dropped.
+
+## Canonical-model contract clarification
+
+# #140 canonical-model ruling
+
+**D5 is consistent only as the narrowly defined existing AutomationEnqueue transient-delivery contract. It is not an exception to the user's rule for canonical session mutations. Amend its wording to make that distinction explicit before child briefs; no new wire or runtime implementation is required by this clarification.** Root adoption alone would not authorize overriding the user architecture.
+
+The existing protocol deliberately has two distinct typed operations:
+
+- `docs/CONTROL_PROTOCOL_SEMANTICS.md:7` defines SessionTransactionApply as atomic replacement of SessionModel/CompiledSession/revision, with canonical snapshot of the committed model. `docs/CONTROL_PROTOCOL_REGISTRY.md:64–74` includes persistent parameter/fader/matrix edits AND automation upsert/remove/target/segments opcodes0600–0603. `crates/protocol/src/model.rs:356–369,667–684` implements those typed automation edits; snapshot at801 returns compiled canonical JSON. `crates/session/src/model.rs:512–521` identifies stored Automation by stable ID with segments preserved canonically. These operations remain governed without qualification by the user's same-model/snapshot rule.
+- `docs/CONTROL_PROTOCOL_SEMANTICS.md:13` explicitly says AutomationEnqueue does not increment revision, and15/17 distinguish queued delivery/cancellation from structural transactions. `crates/protocol/src/queue.rs:31` expressly describes its kinds as transient automation. Controller dispatch at3107 validates/adopts fixed queue records; it does not call SessionEdit application. The wire registry at30 gives admission count/occupancy/capacity/generation, while parameter-state pages separately carry observed_sample and live records. A transient runtime overlay is therefore an existing distinct operation, not a second persistent session model invented by D5.
+
+The no-revision fact alone would be insufficient justification; the explicit distinct queue operation plus existing canonical automation-edit route establishes the distinction. Conversely, a live readback cache is not proof that a persistent protocol mutation is snapshot-able. D5 cannot be applied to SessionTransactionApply, persistent parameter edits or stored session automation merely because they eventually affect render parameters.
+
+## Exact bounded wording correction
+
+Replace D5's open-ended “recommended ruling / if root instead requires” choice with this binding clarification:
+
+> D5 applies exclusively to the existing transient AutomationEnqueue operation. Its pending/applied runtime overlay does not edit the canonical base SessionModel or increment its revision; ParameterStatePage reports the coherent observed live value and sample. This does not change persistent protocol mutation semantics. SessionTransactionApply, including persistent parameter/fader/matrix edits and automation upsert/remove/target/segments, must update the same typed SessionModel transactionally and remain snapshot-able as canonical JSON. No host/controller shadow document may substitute for that model.
+>
+> Preserve both sides in the integration proof: transient enqueue/application/cancellation leaves the canonical base snapshot and revision unchanged while readback changes at the specified observed sample; a representative persistent typed edit changes the same canonical model/snapshot and revision as specified. Pending values must not be reported as already applied. Any future conversion of transient automation into stored session automation must use the existing typed transaction semantics, not mutate JSON or session structure on render.
+
+The existing persistent-edit/snapshot tests can supply the second proof if their exact unchanged behavior is linked; no new corpus or duplicated mutation mechanism is requested. D1–D4 pending ownership/cancellation, actual sample-offset PCM delivery and child queue remain unaffected. This is a narrow interpretation of the existing command categories, not permission to waive the user rule for a newly introduced “live” mutation.
+
+Read-only adopted parent and current protocol/session source/document inspection. No edits, Git/GitHub operations, builds/tests or timing performed.
