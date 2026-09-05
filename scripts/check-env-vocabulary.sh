@@ -17,8 +17,10 @@ if git rev-parse --is-inside-work-tree >"$classification" 2>&1; then
     }
 else
     rc=$?; classification_output="$(<"$classification")"
-    if [[ "$rc" == 128 && "$classification_output" == *'not a git repository'* ]]; then
+    if [[ "$rc" == 128 && -z "${GIT_DIR+x}" && -z "${GIT_WORK_TREE+x}" &&
+          "$classification_output" == 'fatal: not a git repository (or any of the parent directories): .git' ]]; then
         find . -type f -not -path './.git/*' -not -path './target/*' -print0 >"$paths0" 2>"$tmp/find-error" || {
+            tr '\0' '\n' <"$paths0" >&2 || true
             cat "$tmp/find-error" >&2; fail 'fallback file traversal failed'
         }
     else
@@ -28,14 +30,14 @@ else
 fi
 paths="$tmp/paths"; normalised="$tmp/normalised"
 filtered_once="$tmp/filtered-once"; filtered="$tmp/filtered"
-tr '\0' '\n' <"$paths0" >"$paths" || fail 'path NUL conversion failed'
-sed 's|^\./||' "$paths" >"$normalised" || fail 'path normalization failed'
+tr '\0' '\n' <"$paths0" >"$paths" 2>"$tmp/path-tr-error" || { rc=$?; cat "$paths" "$tmp/path-tr-error" >&2; fail "path NUL conversion failed (tr status $rc)"; }
+sed 's|^\./||' "$paths" >"$normalised" 2>"$tmp/path-sed-error" || { rc=$?; cat "$normalised" "$tmp/path-sed-error" >&2; fail "path normalization failed (sed status $rc)"; }
 if grep -v -x -F -e "$vocabulary" "$normalised" >"$filtered_once"; then :; else
-    rc=$?; [[ "$rc" == 1 ]] || fail "vocabulary path exclusion failed (grep status $rc)"
+    rc=$?; [[ "$rc" == 1 ]] || { cat "$filtered_once" >&2; fail "vocabulary path exclusion failed (grep status $rc)"; }
     : >"$filtered_once"
 fi
 if grep -v '^\.github/ISSUE_SPECS/' "$filtered_once" >"$filtered"; then :; else
-    rc=$?; [[ "$rc" == 1 ]] || fail "issue-spec path exclusion failed (grep status $rc)"
+    rc=$?; [[ "$rc" == 1 ]] || { cat "$filtered" >&2; fail "issue-spec path exclusion failed (grep status $rc)"; }
     : >"$filtered"
 fi
 stray="$tmp/stray"; : >"$stray"
@@ -48,11 +50,11 @@ while IFS= read -r path; do
         *) printf '%s\n' "$output" >&2; fail "source scan failed for $path (grep status $rc)" ;;
     esac
 done <"$filtered"
-sort -u "$stray" >"$tmp/stray-sorted" || fail 'stray-name sort failed'
+sort -u "$stray" >"$tmp/stray-sorted" 2>"$tmp/stray-sort-error" || { rc=$?; cat "$tmp/stray-sorted" "$tmp/stray-sort-error" >&2; fail "stray-name sort failed (sort status $rc)"; }
 if grep -v '^MISO_ENGINE_' "$tmp/stray-sorted" >"$tmp/stray-names"; then
     cat "$tmp/stray-names" >&2; fail 'identifier outside the MISO_ENGINE_ prefix'
 else
-    rc=$?; [[ "$rc" == 1 ]] || fail "stray-name prefix filter failed (grep status $rc)"
+    rc=$?; [[ "$rc" == 1 ]] || { cat "$tmp/stray-names" >&2; fail "stray-name prefix filter failed (grep status $rc)"; }
 fi
 used_raw="$tmp/used-raw"; used_filtered="$tmp/used-filtered"; used="$tmp/used"
 if grep -rhoE 'MISO_ENGINE_[A-Z0-9_]+' tools scripts >"$used_raw" 2>"$tmp/used-error"; then :; else
@@ -61,10 +63,10 @@ if grep -rhoE 'MISO_ENGINE_[A-Z0-9_]+' tools scripts >"$used_raw" 2>"$tmp/used-e
     fail 'no environment names used under tools/ or scripts/'
 fi
 if grep -v '_$' "$used_raw" >"$used_filtered"; then :; else
-    rc=$?; [[ "$rc" == 1 ]] || fail "used-name fragment filter failed (grep status $rc)"
+    rc=$?; [[ "$rc" == 1 ]] || { cat "$used_filtered" >&2; fail "used-name fragment filter failed (grep status $rc)"; }
     fail 'no complete environment names used under tools/ or scripts/'
 fi
-sort -u "$used_filtered" >"$used" || fail 'used-name sort failed'
+sort -u "$used_filtered" >"$used" 2>"$tmp/used-sort-error" || { rc=$?; cat "$used" "$tmp/used-sort-error" >&2; fail "used-name sort failed (sort status $rc)"; }
 [[ -s "$used" ]] || fail 'no complete environment names used under tools/ or scripts/'
 documented_rows="$tmp/documented-rows"; documented_trimmed="$tmp/documented-trimmed"
 documented="$tmp/documented"
@@ -73,19 +75,19 @@ if grep -oE '^\| `MISO_ENGINE_[A-Z0-9_]+`' "$vocabulary" >"$documented_rows" 2>"
     [[ "$rc" == 1 ]] || fail "vocabulary scan failed (grep status $rc)"
     fail 'no documented environment names'
 fi
-tr -d '|` ' <"$documented_rows" >"$documented_trimmed" || fail 'vocabulary delimiter removal failed'
-sort -u "$documented_trimmed" >"$documented" || fail 'documented-name sort failed'
+tr -d '|` ' <"$documented_rows" >"$documented_trimmed" 2>"$tmp/documented-tr-error" || { rc=$?; cat "$documented_trimmed" "$tmp/documented-tr-error" >&2; fail "vocabulary delimiter removal failed (tr status $rc)"; }
+sort -u "$documented_trimmed" >"$documented" 2>"$tmp/documented-sort-error" || { rc=$?; cat "$documented" "$tmp/documented-sort-error" >&2; fail "documented-name sort failed (sort status $rc)"; }
 [[ -s "$documented" ]] || fail 'no documented environment names'
-comm -23 "$used" "$documented" >"$tmp/undocumented" || fail 'undocumented-name comparison failed'
+comm -23 "$used" "$documented" >"$tmp/undocumented" 2>"$tmp/comm-23-error" || { rc=$?; cat "$tmp/undocumented" "$tmp/comm-23-error" >&2; fail "undocumented-name comparison failed (comm status $rc)"; }
 if [[ -s "$tmp/undocumented" ]]; then
     cat "$tmp/undocumented" >&2
     fail "name used under tools/ or scripts/ but absent from $vocabulary"
 fi
-comm -13 "$used" "$documented" >"$tmp/unused" || fail 'unused-name comparison failed'
+comm -13 "$used" "$documented" >"$tmp/unused" 2>"$tmp/comm-13-error" || { rc=$?; cat "$tmp/unused" "$tmp/comm-13-error" >&2; fail "unused-name comparison failed (comm status $rc)"; }
 if [[ -s "$tmp/unused" ]]; then
     cat "$tmp/unused" >&2
     fail "name documented in $vocabulary but unused under tools/ or scripts/"
 fi
-wc -l <"$documented" >"$tmp/count" || fail 'documented-name count failed'
-tr -d ' ' <"$tmp/count" >"$tmp/count-trimmed" || fail 'documented-name count formatting failed'
+wc -l <"$documented" >"$tmp/count" 2>"$tmp/count-error" || { rc=$?; cat "$tmp/count" "$tmp/count-error" >&2; fail "documented-name count failed (wc status $rc)"; }
+tr -d ' ' <"$tmp/count" >"$tmp/count-trimmed" 2>"$tmp/count-tr-error" || { rc=$?; cat "$tmp/count-trimmed" "$tmp/count-tr-error" >&2; fail "documented-name count formatting failed (tr status $rc)"; }
 printf 'env vocabulary: ok (%s names, one MISO_ENGINE_ prefix)\n' "$(<"$tmp/count-trimmed")"

@@ -256,7 +256,7 @@ mkdir -p "$temp/rg-migration-fault"
 cat >"$temp/rg-migration-fault/rg" <<EOF
 #!/usr/bin/env bash
 if [[ "\$*" == *"\$MIGRATION_PATTERN"* ]]; then
-    [[ "\$MIGRATION_MODE" == partial ]] && printf 'intended partial row\n'
+    [[ "\$MIGRATION_MODE" == partial ]] && "$real_rg" "\$@" || true
     exit 7
 fi
 exec "$real_rg" "\$@"
@@ -265,14 +265,14 @@ chmod +x "$temp/rg-migration-fault/rg"
 assert_migration_fault() {
     local checker=$1 pattern=$2 diagnostic=$3 mode=$4 output rc
     output="$(MIGRATION_PATTERN="$pattern" MIGRATION_MODE="$mode" PATH="$temp/rg-migration-fault:$PATH" bash "$checker" "$temp" 2>&1)" && rc=0 || rc=$?
-    [[ "$rc" -ne 0 && "$output" == *"$diagnostic"* ]] || {
+    if [[ "$rc" == 0 ]]; then
+        printf 'migration checker unexpectedly succeeded (%s/%s)\n' "$pattern" "$mode" >&2
+        return 86
+    fi
+    [[ "$output" == *"$diagnostic"* ]] || {
         printf 'migration selective fault escaped (%s/%s): %s\n' "$pattern" "$mode" "$output" >&2
         return 1
     }
-    if [[ "$mode" == partial && "$output" != *'intended partial row'* ]]; then
-        printf 'migration partial output missing (%s): %s\n' "$pattern" "$output" >&2
-        return 1
-    fi
 }
 while IFS='|' read -r pattern diagnostic; do
     assert_migration_fault "$temp/scripts/check-effect-state-migration-v1.sh" "$pattern" "$diagnostic" error
@@ -296,7 +296,8 @@ sed -i "/gate_scan_forbidden 'migration serialization'/ s/|| exit \$?/|| true/" 
 grep -F "gate_scan_forbidden 'migration serialization'" "$mutant_migration" | grep -Fq '|| true' || {
     printf 'migration mutant replacement missing\n' >&2; exit 1;
 }
-if counter_output="$(assert_migration_fault "$mutant_migration" serde 'migration serialization scan errored (rg exit 7)' partial 2>&1)"; then
+set +e; counter_output="$(assert_migration_fault "$mutant_migration" serde 'migration serialization scan errored (rg exit 7)' partial 2>&1)"; counter_rc=$?; set -e
+if [[ "$counter_rc" != 86 || "$counter_output" != *'unexpectedly succeeded'* ]]; then
     printf 'migration serialization same-assertion counter-mutant escaped\n' >&2
     exit 1
 fi

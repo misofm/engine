@@ -46,6 +46,7 @@ populate; sed -i 's/DUMMY-B/DUMMY-A/' "$fixture/dsp-research/filters.md"; expect
 populate; printf '\n[UNRESOLVED-OUTSIDE]\n' >>"$fixture/dsp-research/filters.md"; expect_failure unresolved-outside 'bibliography key UNRESOLVED-OUTSIDE'
 populate; sed -i '/Sound-quality claim: none/d' "$fixture/dsp-research/listening/FORMAT_EXAMPLE.md"; expect_failure listening 'listening literal Sound-quality claim: none'
 populate
+printf '\n[OUTSIDE-KEY]\n' >>"$fixture/dsp-research/filters.md"
 
 real_rg="$(command -v rg)"
 mkdir -p "$temp/rg-fault"
@@ -58,7 +59,7 @@ case "\$RESEARCH_SELECTOR" in
     *) [[ "\$*" == *"\$RESEARCH_SELECTOR"* ]] && matched=1 ;;
 esac
 if [[ "\$matched" == 1 ]]; then
-    [[ "\$RESEARCH_MODE" == partial ]] && printf '%s\n' "\$RESEARCH_PARTIAL"
+    [[ "\$RESEARCH_MODE" == partial ]] && "$real_rg" "\$@" || true
     exit 7
 fi
 exec "$real_rg" "\$@"
@@ -67,7 +68,11 @@ chmod +x "$temp/rg-fault/rg"
 assert_rg_fault() {
     local checker=$1 selector=$2 partial=$3 diagnostic=$4 mode=$5 output rc
     output="$(RESEARCH_SELECTOR="$selector" RESEARCH_PARTIAL="$partial" RESEARCH_MODE="$mode" PATH="$temp/rg-fault:$PATH" bash "$checker" "$fixture" 2>&1)" && rc=0 || rc=$?
-    [[ "$rc" -ne 0 && "$output" == *"$diagnostic"* ]] || {
+    if [[ "$rc" == 0 ]]; then
+        printf 'research checker unexpectedly succeeded (%s/%s)\n' "$selector" "$mode" >&2
+        return 86
+    fi
+    [[ "$output" == *"$diagnostic"* ]] || {
         printf 'research selective fault escaped (%s/%s): %s\n' "$selector" "$mode" "$output" >&2; return 1;
     }
     [[ "$mode" != partial || "$output" == *"$partial"* ]] || return 1
@@ -79,10 +84,10 @@ done <<'EOF'
 ^## Scope and engineering question$|1:## Scope and engineering question|heading Scope and engineering question in dsp-research/filters.md search failed (rg exit 7)
 PRIMARY_RG|[DUMMY-A]|Primary key extraction failed in dsp-research/filters.md (rg exit 7)
 WHOLE_RG|[DUMMY-A]|whole-note key extraction failed in dsp-research/filters.md (rg exit 7)
-- `[DUMMY-A]`|1:- `[DUMMY-A]`|bibliography key DUMMY-A search failed (rg exit 7)
-DiGiCo|1:DiGiCo|console/DAW literal DiGiCo search failed (rg exit 7)
-dsp-research/NOTE_TEMPLATE.md|1:## Scope and engineering question|note template heading Scope and engineering question search failed (rg exit 7)
-Sound-quality claim: none|1:Sound-quality claim: none|listening literal Sound-quality claim: none search failed (rg exit 7)
+- `[DUMMY-A]`|[DUMMY-A]|bibliography key DUMMY-A search failed (rg exit 7)
+DiGiCo|DiGiCo|console/DAW literal DiGiCo search failed (rg exit 7)
+dsp-research/NOTE_TEMPLATE.md|Scope and engineering question|note template heading Scope and engineering question search failed (rg exit 7)
+Sound-quality claim: none|Sound-quality claim: none|listening literal Sound-quality claim: none search failed (rg exit 7)
 EOF
 
 real_awk="$(command -v awk)"
@@ -94,16 +99,55 @@ case "\$RESEARCH_AWK_SELECTOR" in
     SECTION_AWK) [[ "\$*" == *"-v heading="* ]] && matched=1 ;;
     PRIMARY_AWK) [[ "\$*" == *"Primary and official sources"* && "\$*" != *"-v heading="* ]] && matched=1 ;;
 esac
-if [[ "\$matched" == 1 ]]; then printf 'awk partial\n'; exit 7; fi
+if [[ "\$matched" == 1 ]]; then
+    [[ "\${RESEARCH_AWK_MODE:-full}" == full ]] && "$real_awk" "\$@" || true
+    exit 7
+fi
 exec "$real_awk" "\$@"
 EOF
 chmod +x "$temp/awk-fault/awk"
 for row in 'SECTION_AWK|section content check failed' 'PRIMARY_AWK|Primary section extraction failed'; do
     selector=${row%%|*}; diagnostic=${row#*|}
-    output="$(RESEARCH_AWK_SELECTOR="$selector" PATH="$temp/awk-fault:$PATH" check "$fixture" 2>&1)" && rc=0 || rc=$?
-    [[ "$rc" -ne 0 && "$output" == *'awk partial'* && "$output" == *"$diagnostic"* ]] || {
-        printf 'research awk fault escaped (%s): %s\n' "$selector" "$output" >&2; exit 1;
-    }
+    for mode in error full; do
+        output="$(RESEARCH_AWK_SELECTOR="$selector" RESEARCH_AWK_MODE="$mode" PATH="$temp/awk-fault:$PATH" check "$fixture" 2>&1)" && rc=0 || rc=$?
+        [[ "$rc" -ne 0 && "$output" == *"$diagnostic"* ]] || {
+            printf 'research awk fault escaped (%s/%s): %s\n' "$selector" "$mode" "$output" >&2; exit 1;
+        }
+        [[ "$mode" != full || "$selector" != PRIMARY_AWK || "$output" == *'[DUMMY-A]'* && "$output" == *'[DUMMY-B]'* ]] || {
+            printf 'research Primary awk full payload missing: %s\n' "$output" >&2; exit 1;
+        }
+    done
+done
+
+for command in tr sort; do
+    real_command="$(command -v "$command")"; bin_dir="$temp/$command-fault"; mkdir "$bin_dir"
+    cat >"$bin_dir/$command" <<EOF
+#!/usr/bin/env bash
+input="\$(cat)"
+matched=0
+case "\$RESEARCH_TRANSFORM" in
+    PRIMARY) { [[ "\$input" == *DUMMY-A* && "\$input" != *OUTSIDE-KEY* ]] || [[ "\$*" == *filters-primary-keys* ]]; } && matched=1 ;;
+    WHOLE) { [[ "\$input" == *OUTSIDE-KEY* ]] || [[ "\$*" == *filters-whole-keys* ]]; } && matched=1 ;;
+esac
+if [[ "\$matched" == 1 ]]; then
+    [[ "\$RESEARCH_TRANSFORM_MODE" == full ]] && printf '%s\n' "\$input" | "$real_command" "\$@" || true
+    exit 7
+fi
+printf '%s\n' "\$input" | "$real_command" "\$@"
+EOF
+    chmod +x "$bin_dir/$command"
+    for phase in PRIMARY WHOLE; do
+        if [[ "$command" == tr && "$phase" == PRIMARY ]]; then diagnostic='Primary key delimiter conversion failed'; fi
+        if [[ "$command" == sort && "$phase" == PRIMARY ]]; then diagnostic='Primary key sort failed'; fi
+        if [[ "$command" == tr && "$phase" == WHOLE ]]; then diagnostic='whole-note key delimiter conversion failed'; fi
+        if [[ "$command" == sort && "$phase" == WHOLE ]]; then diagnostic='whole-note key sort failed'; fi
+        for mode in error full; do
+            output="$(RESEARCH_TRANSFORM="$phase" RESEARCH_TRANSFORM_MODE="$mode" PATH="$bin_dir:$PATH" check "$fixture" 2>&1)" && rc=0 || rc=$?
+            [[ "$rc" -ne 0 && "$output" == *"$diagnostic"* ]] || {
+                printf 'research %s fault escaped (%s/%s): %s\n' "$command" "$phase" "$mode" "$output" >&2; exit 1;
+            }
+        done
+    done
 done
 
 # Same-assertion actual counter for the whole-note producer.
@@ -115,7 +159,8 @@ mutant="$temp/mutant-scripts/check-dsp-research.sh"
 [[ "$(grep -Fc '[[ "$rc" == 1 ]] || fail "whole-note key extraction failed' "$mutant")" == 1 ]] || exit 1
 sed -i '/whole-note key extraction failed/ s/\[\[ "$rc" == 1 \]\]/[[ "$rc" == 1 || "$rc" == 7 ]]/' "$mutant"
 grep -Fq '[[ "$rc" == 1 || "$rc" == 7 ]]' "$mutant" || exit 1
-if counter_output="$(assert_rg_fault "$mutant" WHOLE_RG '[DUMMY-A]' 'whole-note key extraction failed in dsp-research/filters.md (rg exit 7)' partial 2>&1)"; then
+set +e; counter_output="$(assert_rg_fault "$mutant" WHOLE_RG '[DUMMY-A]' 'whole-note key extraction failed in dsp-research/filters.md (rg exit 7)' partial 2>&1)"; counter_rc=$?; set -e
+if [[ "$counter_rc" != 86 || "$counter_output" != *'unexpectedly succeeded'* ]]; then
     printf 'whole-note same-assertion counter-mutant escaped\n' >&2; exit 1
 fi
 
@@ -124,7 +169,8 @@ cp "$root/scripts/check-dsp-research.sh" "$mutant"
 [[ "$(grep -Fc 'gate_scan_required "listening literal $literal"' "$mutant")" == 1 ]] || exit 1
 sed -i '/gate_scan_required "listening literal \$literal"/ s/|| exit \$?/|| true/' "$mutant"
 grep -F 'gate_scan_required "listening literal $literal"' "$mutant" | grep -Fq '|| true' || exit 1
-if counter_output="$(assert_rg_fault "$mutant" 'Sound-quality claim: none' '1:Sound-quality claim: none' 'listening literal Sound-quality claim: none search failed (rg exit 7)' partial 2>&1)"; then
+set +e; counter_output="$(assert_rg_fault "$mutant" 'Sound-quality claim: none' '1:Sound-quality claim: none' 'listening literal Sound-quality claim: none search failed (rg exit 7)' partial 2>&1)"; counter_rc=$?; set -e
+if [[ "$counter_rc" != 86 || "$counter_output" != *'unexpectedly succeeded'* ]]; then
     printf 'listening same-assertion counter-mutant escaped\n' >&2; exit 1
 fi
 check "$fixture" >/dev/null

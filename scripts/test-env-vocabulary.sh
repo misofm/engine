@@ -107,7 +107,11 @@ fi
 assert_fault() {
     local checker=$1 bin_dir=$2 expected=$3 partial=${4:-} output rc
     output="$(PATH="$bin_dir:$PATH" bash "$checker" "$case_root" 2>&1)" && rc=0 || rc=$?
-    [[ "$rc" -ne 0 && "$output" == *"$expected"* ]] || {
+    if [[ "$rc" == 0 ]]; then
+        printf 'env checker unexpectedly succeeded (%s)\n' "$expected" >&2
+        return 86
+    fi
+    [[ "$output" == *"$expected"* ]] || {
         printf 'env selective fault escaped (%s): %s\n' "$expected" "$output" >&2; return 1;
     }
     [[ -z "$partial" || "$output" == *"$partial"* ]] || {
@@ -119,17 +123,17 @@ real_git="$(command -v git)"; real_grep="$(command -v grep)"; real_comm="$(comma
 mkdir "$scratch/classification-fail" "$scratch/source-fail" "$scratch/vocabulary-fail" "$scratch/late-comm-fail"
 cat >"$scratch/classification-fail/git" <<EOF
 #!/usr/bin/env bash
-if [[ "\$1" == rev-parse ]]; then printf 'classification partial\n'; exit 7; fi
+if [[ "\$1" == rev-parse ]]; then [[ "\${ENV_MODE:-error}" == full ]] && "$real_git" "\$@" || true; exit 7; fi
 exec "$real_git" "\$@"
 EOF
 cat >"$scratch/source-fail/grep" <<EOF
 #!/usr/bin/env bash
-if [[ "\$*" == *'scripts/run-rack-benchmark.sh'* ]]; then printf 'source partial\n'; exit 7; fi
+if [[ "\$*" == *'scripts/run-rack-benchmark.sh'* ]]; then [[ "\${ENV_MODE:-full}" == full ]] && "$real_grep" "\$@" || true; exit 7; fi
 exec "$real_grep" "\$@"
 EOF
 cat >"$scratch/vocabulary-fail/grep" <<EOF
 #!/usr/bin/env bash
-if [[ "\$1" == -oE && "\$*" == *'ENGINE_ENV_VOCABULARY.md'* ]]; then printf '| \`${family}PARTIAL\`\n'; exit 7; fi
+if [[ "\$1" == -oE && "\$*" == *'ENGINE_ENV_VOCABULARY.md'* ]]; then [[ "\${ENV_MODE:-full}" == full ]] && "$real_grep" "\$@" || true; exit 7; fi
 exec "$real_grep" "\$@"
 EOF
 cat >"$scratch/late-comm-fail/comm" <<EOF
@@ -138,26 +142,110 @@ if [[ "\$1" == -13 ]]; then exit 7; fi
 exec "$real_comm" "\$@"
 EOF
 chmod +x "$scratch"/{classification-fail/git,source-fail/grep,vocabulary-fail/grep,late-comm-fail/comm}
-assert_fault "$case_root/scripts/check-env-vocabulary.sh" "$scratch/classification-fail" 'Git classification failed (status 7)' 'classification partial'
-assert_fault "$case_root/scripts/check-env-vocabulary.sh" "$scratch/source-fail" 'source scan failed for scripts/run-rack-benchmark.sh (grep status 7)' 'source partial'
-assert_fault "$case_root/scripts/check-env-vocabulary.sh" "$scratch/vocabulary-fail" 'vocabulary scan failed (grep status 7)' "${family}PARTIAL"
+for mode in error full; do
+    ENV_MODE=$mode assert_fault "$case_root/scripts/check-env-vocabulary.sh" "$scratch/classification-fail" 'Git classification failed (status 7)' "$([[ $mode == full ]] && printf true)"
+    ENV_MODE=$mode assert_fault "$case_root/scripts/check-env-vocabulary.sh" "$scratch/source-fail" 'source scan failed for scripts/run-rack-benchmark.sh (grep status 7)' "$([[ $mode == full ]] && printf '%sCPU_MODEL' "$family")"
+    ENV_MODE=$mode assert_fault "$case_root/scripts/check-env-vocabulary.sh" "$scratch/vocabulary-fail" 'vocabulary scan failed (grep status 7)' "$([[ $mode == full ]] && printf '%sCPU_MODEL' "$family")"
+done
 assert_fault "$case_root/scripts/check-env-vocabulary.sh" "$scratch/late-comm-fail" 'unused-name comparison failed'
+
+# Every retained environment transform/consumer is selected independently. In full mode the
+# wrapper delegates first, so the checker receives the operation's complete real output and then
+# the injected error.
+multi="$scratch/env-operation-fault"; mkdir "$multi"
+for command in find tr sed grep sort comm wc; do
+    real_command="$(command -v "$command")"
+    cat >"$multi/$command" <<EOF
+#!/usr/bin/env bash
+matched=0
+case "\$ENV_STAGE:$command" in
+  FIND:find) matched=1 ;;
+  PATH_TR:tr) [[ "\$*" == *"\\0"* ]] && matched=1 ;;
+  COUNT_TR:tr) [[ "\$*" == *"-d  "* ]] && matched=1 ;;
+  VOCAB_TR:tr) [[ "\$1" == -d && "\$2" == *'|'* ]] && matched=1 ;;
+  NORMALIZE:sed) matched=1 ;;
+  PATH_EXCLUDE:grep) [[ "\$*" == *'ENGINE_ENV_VOCABULARY.md'* && "\$1" == -v ]] && matched=1 ;;
+  ISSUE_EXCLUDE:grep) [[ "\$*" == *'ISSUE_SPECS'* ]] && matched=1 ;;
+  PREFIX_FILTER:grep) [[ "\$*" == *'^MISO_ENGINE_'* && "\$1" == -v ]] && matched=1 ;;
+  USED_READ:grep) [[ "\$1" == -rhoE ]] && matched=1 ;;
+  FRAGMENT_FILTER:grep) [[ "\$*" == *'_$'* ]] && matched=1 ;;
+  STRAY_SORT:sort) [[ "\$*" == */stray ]] && matched=1 ;;
+  USED_SORT:sort) [[ "\$*" == */used-filtered ]] && matched=1 ;;
+  DOCUMENTED_SORT:sort) [[ "\$*" == */documented-trimmed ]] && matched=1 ;;
+  COMM23:comm) [[ "\$1" == -23 ]] && matched=1 ;;
+  COMM13:comm) [[ "\$1" == -13 ]] && matched=1 ;;
+  COUNT:wc) matched=1 ;;
+esac
+if [[ "\$matched" == 1 ]]; then
+  [[ "\$ENV_MODE" == full ]] && "$real_command" "\$@" || true
+  exit 7
+fi
+exec "$real_command" "\$@"
+EOF
+    chmod +x "$multi/$command"
+done
+while IFS='|' read -r stage diagnostic payload; do
+    for mode in error full; do
+        expected_payload=''; [[ "$mode" == full ]] && expected_payload="$payload"
+        ENV_STAGE="$stage" ENV_MODE="$mode" assert_fault "$case_root/scripts/check-env-vocabulary.sh" "$multi" "$diagnostic" "$expected_payload"
+    done
+done <<EOF
+PATH_TR|path NUL conversion failed (tr status 7)|scripts/check-env-vocabulary.sh
+NORMALIZE|path normalization failed (sed status 7)|scripts/check-env-vocabulary.sh
+PATH_EXCLUDE|vocabulary path exclusion failed (grep status 7)|scripts/check-env-vocabulary.sh
+ISSUE_EXCLUDE|issue-spec path exclusion failed (grep status 7)|scripts/check-env-vocabulary.sh
+STRAY_SORT|stray-name sort failed (sort status 7)|${family}CPU_MODEL
+PREFIX_FILTER|stray-name prefix filter failed (grep status 7)|
+USED_READ|tools/scripts source scan failed (grep status 7)|${family}CPU_MODEL
+FRAGMENT_FILTER|used-name fragment filter failed (grep status 7)|${family}CPU_MODEL
+USED_SORT|used-name sort failed (sort status 7)|${family}CPU_MODEL
+VOCAB_TR|vocabulary delimiter removal failed (tr status 7)|${family}CPU_MODEL
+DOCUMENTED_SORT|documented-name sort failed (sort status 7)|${family}CPU_MODEL
+COMM23|undocumented-name comparison failed (comm status 7)|
+COMM13|unused-name comparison failed (comm status 7)|
+COUNT|documented-name count failed (wc status 7)|98
+COUNT_TR|documented-name count formatting failed (tr status 7)|98
+EOF
+
+saved_case_root="$case_root"; case_root="$scratch/non-git-operation"; cp -R "$saved_case_root" "$case_root"; rm -rf "$case_root/.git"
+for mode in error full; do ENV_STAGE=FIND ENV_MODE=$mode assert_fault "$case_root/scripts/check-env-vocabulary.sh" "$multi" 'fallback file traversal failed' "$([[ $mode == full ]] && printf './scripts/check-env-vocabulary.sh')"; done
+case_root="$saved_case_root"
 
 # Actual callsite counters use the same assertions that reject the production checker.
 mutant="$scratch/check-env-mutant.sh"
 cp "$case_root/scripts/check-env-vocabulary.sh" "$mutant"
 [[ "$(grep -Fc "fail 'Git file listing failed'" "$mutant")" == 1 ]] || exit 1
 sed -i "s/fail 'Git file listing failed'/:/" "$mutant"
-if counter_output="$(assert_fault "$mutant" "$scratch/git-list-fail" 'Git file listing failed' 2>&1)"; then
+set +e; counter_output="$(assert_fault "$mutant" "$scratch/git-list-fail" 'Git file listing failed' 2>&1)"; counter_rc=$?; set -e
+if [[ "$counter_rc" != 86 || "$counter_output" != *'unexpectedly succeeded'* ]]; then
     printf 'Git listing same-assertion counter-mutant escaped\n' >&2; exit 1
 fi
 cp "$case_root/scripts/check-env-vocabulary.sh" "$mutant"
 [[ "$(grep -Fc "comm -13 \"\$used\" \"\$documented\"" "$mutant")" == 1 ]] || exit 1
-sed -i "/comm -13 / s/|| fail 'unused-name comparison failed'/|| true/" "$mutant"
-if counter_output="$(assert_fault "$mutant" "$scratch/late-comm-fail" 'unused-name comparison failed' 2>&1)"; then
+sed -i '/fail "unused-name comparison failed (comm status \$rc)"/s/fail .*/:; }/' "$mutant"
+set +e; counter_output="$(assert_fault "$mutant" "$scratch/late-comm-fail" 'unused-name comparison failed' 2>&1)"; counter_rc=$?; set -e
+if [[ "$counter_rc" != 86 || "$counter_output" != *'unexpectedly succeeded'* ]]; then
     printf 'late comparison same-assertion counter-mutant escaped\n' >&2; exit 1
 fi
 
 check "$case_root" >/dev/null
+
+invalid_git="$scratch/invalid-git-dir"
+output="$(GIT_DIR="$invalid_git" bash "$case_root/scripts/check-env-vocabulary.sh" "$case_root" 2>&1)" && rc=0 || rc=$?
+[[ "$rc" -ne 0 && "$output" == *'Git classification failed (status 128)'* && "$output" == *'not a git repository'* ]] || {
+    printf 'invalid configured Git repository escaped: %s\n' "$output" >&2; exit 1;
+}
+
+empty_root="$scratch/empty-populations"
+mkdir -p "$empty_root"/{docs,scripts,tools}
+printf 'table\n' >"$empty_root/docs/ENGINE_ENV_VOCABULARY.md"
+printf 'plain source\n' >"$empty_root/scripts/plain.sh"
+output="$(bash "$root/scripts/check-env-vocabulary.sh" "$empty_root" 2>&1)" && rc=0 || rc=$?
+[[ "$rc" -ne 0 && "$output" == *'no environment names used under tools/ or scripts/'* ]] || {
+    printf 'empty used population escaped: %s\n' "$output" >&2; exit 1;
+}
+printf '%sX\n' "$family" >"$empty_root/scripts/plain.sh"
+output="$(bash "$root/scripts/check-env-vocabulary.sh" "$empty_root" 2>&1)" && rc=0 || rc=$?
+[[ "$rc" -ne 0 && "$output" == *'no documented environment names'* ]] || { printf 'empty documented population escaped: %s\n' "$output" >&2; exit 1; }
 
 printf 'env vocabulary mutations: ok\n'

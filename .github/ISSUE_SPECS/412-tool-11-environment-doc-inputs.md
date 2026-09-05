@@ -162,6 +162,16 @@ Actual same-assertion disposable counter controls target environment Git listing
 
 Focused evidence at this checkpoint: all three real checkers, all three affected mutation suites and the shared helper suite pass together in `/tmp/sol-412-focused.log` (`focused_rc=0`). Individual research, runtime and environment runs are retained in `/tmp/sol-412-research.log`, `/tmp/sol-412-runtime.log` and `/tmp/sol-412-env.log`. No Cargo, workspace, benchmark, artifact, browser, Git or GitHub mutation was run by Sol.
 
+## Sol attempt 3 final checkpoint
+
+The final bounded revision narrows non-Git fallback to Git's exact ordinary no-repository result when neither `GIT_DIR` nor `GIT_WORK_TREE` is configured. The environment suite now proves ordinary non-Git and initialized-Git positives, a selective fatal probe, and a real initialized fixture with an invalid configured `GIT_DIR`; the configured-repository failure is retained and rejected.
+
+The environment operation table selects find, path NUL conversion, normalization, both exclusions, source scans, stray sorting/prefix filtering, used-name scan/fragment filtering/sort, vocabulary scan/delimiter conversion/sort, both `comm` consumers, count and count formatting. Each selected operation runs once error-only and once after delegating the complete real fixture operation; the checker retains the delegated output before reporting the exact stage/status. Research similarly runs error-only and delegated-real-output cases for its two awk producers and both Primary/whole-note `tr` and `sort` stages, in addition to its rg/helper table. Migration required queries delegate their real matching rows before failure, while negative bans delegate their correct empty result before failure.
+
+All five disposable counter groups now distinguish unexpected checker success with status 86. The production assertion returns zero only for the intended diagnostic and payload; wrong diagnostics, missing payloads, syntax/setup failures and unrelated policy failures return a different status. Each mutant replacement count remains exactly one, and the counter accepts only status 86 plus the named `unexpectedly succeeded` result: environment Git listing and final `comm -13`, migration serialization, research whole-note extraction and final listening lookup. Positive physical fixtures pass after the controls. The env checker and research suite executable modes are restored to 100755.
+
+Final focused evidence is split only to keep each command below the execution watchdog: the three real gates and env/migration suites are green in `/tmp/sol-412-final-focused.log`; research and the shared helper suite are green with `focused_tail_rc=0` in `/tmp/sol-412-final-focused-tail.log`. Individual complete suite logs are `/tmp/sol-412-final-env.log`, `/tmp/sol-412-final-runtime.log` and `/tmp/sol-412-final-research.log`. No Cargo, workspace, benchmark, artifact, browser, Git or GitHub mutation was run by Sol.
+
 ## Astra attempt 2 verdict and final Sol attempt 3
 
 # Astra #412 Sol attempt 2 review
