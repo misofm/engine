@@ -506,3 +506,10 @@ Review was read-only source/Git/log inspection. No tests/builds, timing, reposit
 
 
 Root integrated delivered main b6836835 (PR #464) before qualification. Compared with reviewed e6f54b5f, crates/hosts/tools/sidecars/fixtures/Cargo/configuration inputs are byte-identical; integration adds only accepted scanner changes and evidence. Full workspace command is `PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/engine-430-workspace-qualified cargo test --locked --workspace`, retaining `/tmp/engine-430-candidate-workspace.log` and actual terminal status at the immutable checkpoint. No tracked source/evidence/pin edits during the run. Supported native/Wasm and shipped artifact/static/browser qualification remain mandatory; #431 owns measurement and no timing is authorized here. #443 scalar, #444 concurrent admission and broad RT-4 remain open.
+
+
+## Parent qualification checkpoint: fresh artifact
+
+Immutable source `7951736605fa64870bc1d91342d00d5fdb6417c5` completed workspace qualification (275 result blocks, 1,591 passed, zero failed, 24 ignored, including doctests), scalar18 Wasm release build, SIMD target check, executed scalar/SIMD protocol parity, current #427 inspection (three non-LTO objects), release CAPI resource lifecycle (four passed), and shared/static ABI checks. Logs and terminal statuses are retained under `/tmp/engine-430-*` for final artifact packaging.
+
+The digest build and independent normal build both completed successfully and agree on `a08a868cf1b62bb466a8fa5b826b214fa708265669fc730398706c869c9e43bd`. The first digest setup invocation refused a nonexistent output directory before build with exit 2; its output is preserved separately from the corrected successful invocation. Current pin and publisher expectation now identify the candidate. Static/resource/hermetic and actual browser qualification are in progress; no PR approval, completed delivery, or performance measurement is claimed.
