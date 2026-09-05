@@ -146,3 +146,45 @@ Root baseline qualification ruling: unchanged base `0e248bb0` and PR `f21c426e` 
 Corrected the authoritative host declaration and the observation-shape validator, with its old-shape mutations retained as red discriminators. Added all-six type/runtime probes, readonly response IDs, 250 mixed real-host calls and real SDK-console/direct-host interleaving, bounded-class no-send/no-burn and disposal assertions, malformed-source ownership, and safe-integer exhaustion with the unchecked-increment red mutation. Packed consumer probes cover all six payload categories.
 
 Focused host tests, full `scripts/test-web-audioworklet.sh`, observation validator/self-test, SDK types, SDK generated surface and `git diff --check` pass. Headless evals: 133 pass, one platform-capability skip. `scripts/sdk-package.sh check /private/tmp/dx-393-current-artifacts` passes the freshly staged and packed consumer gate using the verified CI Wasm closure described above, overlaid only with current host JS/declaration. Logs are under `/private/tmp/dx-393-evidence/attempt2-*`. Raw worklet, Rust, Wasm, ABI assets and artifact pin are unchanged. Browser qualification and Astra attempt 2 verdict remain pending; this checkpoint is not a PASS claim.
+# Issue #393 — attempt 3 test-only addendum (Sol approved)
+
+**Attempt 2 verdict:** FAIL at `beeb8557` for two missing persistent evidence cases only. Astra found no remaining production defect; review: `/private/tmp/dx-393-astra-review-attempt2.md`.  
+**Implementer/reviewer:** Luna adds the bounded tests after adapter issue #19 reaches its checkpoint; Astra performs the final adversarial review. This is attempt 3, so failure triggers the mandatory stop/rescope.  
+
+## Authorized work
+
+Integrate the same proof demonstrated by Astra's temporary probes into existing repository tests. Do not alter production logic.
+
+1. Complete `sdk/test/console-types.ts`:
+   - add negative old-shape probes for `meters({requestId,...})` and `telemetry({requestId,...})`;
+   - assert `requestId` is absent from all six public request parameter types;
+   - add readonly-assignment failures for `MisoAck`, `MisoCommandAck`, `MisoObservationAck`, `MisoStatus`, `MisoSessionMap`, and `MisoError` (covering source/seek/lease acknowledgements through `MisoAck`).
+   Astra's `/private/tmp/dx-393-astra-types.mts` is the behavioral template; adapt it to repository-relative imports and existing style.
+2. Complete `scripts/test-web-audioworklet.mjs`:
+   - make at least one source submission in the committed mixed-call fixture receive `result === 0`;
+   - assert its input buffer transfers exactly once, returned planes restore ownership with the expected shared buffer/offsets, and the acknowledgement is result zero;
+   - retain the existing separate result-6 backpressure, processor-error, malformed-source, and saturated-source ownership cases;
+   - compare the mixed acknowledgements directly with recorded outbound send IDs, require adjacent IDs to differ by exactly one, and explicitly prove `observe()` consumed one allocation.
+   Astra's `/private/tmp/dx-393-astra-mixed.mjs` demonstrates the required result: 250 result-zero calls, send IDs 2 through 251, and one observe allocation. Integrate the proof without copying its absolute paths or weakening other cases.
+3. Update the issue spec evidence/attempt record truthfully after gates run.
+
+## Exact allowed paths
+
+- `.github/ISSUE_SPECS/393-give-the-browser-host-sole-ownership-of-its-request-id-ledger.md`
+- `sdk/test/console-types.ts`
+- `scripts/test-web-audioworklet.mjs`
+- `sdk/test/package-tarball-smoke.mjs` only if the existing packed type probe cannot exercise the readonly/negative request assertions; prefer the source type test and do not duplicate it unnecessarily
+
+No production `.js`, `.ts`, `.d.ts`, Python gate, worklet, Rust, Wasm, ABI asset, artifact pin, qualification code, or package surface may change.
+
+## Validation and evidence
+
+- Run `scripts/check-sdk-types.sh` and show the added `@ts-expect-error` probes are consumed. A red mutation restoring meter/telemetry caller IDs or writable response IDs must fail typecheck.
+- Run `node scripts/test-web-audioworklet.mjs`; report total mixed calls, result-zero count, exact first/last send ID, consecutive ordering, observe allocation count, and successful-source transfer/return assertions.
+- Run the existing safe-integer/source/backpressure mutations through `scripts/test-web-audioworklet.sh`; no gate is weakened.
+- Re-run the already proportional issue gates needed for the final evidence record. Existing full result was 133 pass/1 platform skip, packed SDK passed, and Chromium 151 qualification passed; record fresh results if code/test changes cause those gates to rerun. No additional browser matrix is required.
+- Diff proof must show test/spec-only changes and zero production or artifact-pin changes.
+
+Attempt 3 passes only when both missing persistent regressions are committed and all frozen gates remain green. No fourth attempt is permitted.
+
+Root browser evidence on `beeb8557`: existing qualification passed in Playwright Chromium 151.0.7922.34, Firefox 153.0, and WebKit 26.5 against the verified pinned CI Wasm plus current host JS/declaration. Logs are `/private/tmp/dx-393-evidence/attempt2-chromium-qualification.log`, `firefox-qualification.log`, and `webkit-qualification.log`. These are automated browser-engine results, not shipping Safari/iOS/device qualification. Attempt 2's 250-call fixture contained 225 result-zero replies and 25 resolved source-backpressure replies; attempt 3 adds the missing persistent successful-source case and corrects that evidence claim. All product code is unchanged by attempt 3.
