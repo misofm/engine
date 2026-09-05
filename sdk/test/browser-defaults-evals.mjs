@@ -83,3 +83,19 @@ test("default host failures close accepted context and preserve factory refusal"
     assert.equal(candidate.closed, 1);
   }
 });
+
+test("default host suspends a running native context before construction", async () => {
+  const candidate = context(); candidate.state = "running";
+  const calls = [];
+  candidate.suspend = async () => { calls.push("suspend"); candidate.state = "suspended"; };
+  const url = hostUrl('export async function createMisoAudioWorkletHost(request) { if (request.context.state !== "suspended") throw new Error("running"); return { async dispose() {} }; }');
+  const engine = await createEngine({ document: "opaque", scratchBoot: async () => shape, createContext: () => candidate, hostModuleUrl: url });
+  assert.deepEqual(calls, ["suspend"]); await engine.close(); assert.equal(candidate.closed, 1);
+});
+test("suspension failure closes the accepted context and retains the error", async () => {
+  const candidate = context(); candidate.state = "running";
+  const error = new Error("suspend failed");
+  candidate.suspend = async () => { throw error; };
+  await assert.rejects(createEngine({ document: "opaque", scratchBoot: async () => shape, createContext: () => candidate, hostModuleUrl: "not-an-importable-url" }), failure => failure === error);
+  assert.equal(candidate.closed, 1);
+});

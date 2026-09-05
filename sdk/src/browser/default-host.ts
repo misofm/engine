@@ -6,7 +6,7 @@ import { toWebBootOptions } from "./host-mirror.ts";
 
 /** Failures in package-owned browser construction, before an engine refusal is available. */
 export class BrowserBootError extends Error {
-  readonly operation: "context-unavailable" | "scratch-start" | "scratch-load" | "scratch-deadline" | "host-import" | "host-create";
+  readonly operation: "context-unavailable" | "scratch-start" | "scratch-load" | "scratch-deadline" | "host-import";
   constructor(operation: BrowserBootError["operation"], message: string, cause?: unknown) {
     super(message, { cause });
     this.name = "BrowserBootError";
@@ -16,13 +16,16 @@ export class BrowserBootError extends Error {
 
 /** Import the shipped host and forward the existing boot request without installing a feed. */
 export async function createDefaultHost(request: {
-  readonly context: AudioContextLike;
+  readonly context: AudioContextLike & { suspend?(): Promise<void> };
   readonly document: Uint8Array;
   readonly options: BootOptions;
   readonly simd128ModuleUrl: string;
   readonly workletModuleUrl: string;
   readonly hostModuleUrl?: string;
 }): Promise<MisoAudioWorkletHost> {
+  // Native contexts constructed after user activation may start running. The shipped host
+  // requires suspension before it installs its worklet; this is the adapter's existing prelude.
+  if (request.context.state === "running") await request.context.suspend?.();
   const options = toWebBootOptions(request.options);
   const url = request.hostModuleUrl ?? BUNDLED_ENGINE_ASSETS.hostModule.href;
   let module: typeof import("./shipped-host.d.ts");
