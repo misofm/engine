@@ -1,7 +1,7 @@
 #![allow(missing_docs)]
 
 use lane::{
-    Lane, Simd4, Simd8,
+    CanonicalFpEnv, Lane, Simd4, Simd8,
     kernels::builtins::{
         Matrix2x2Coef, fader_matrix_block, gain_mute_block, mask_from_flags, matrix2x2_block,
     },
@@ -105,9 +105,91 @@ fn compare_width<L: Lane>() {
 
 #[test]
 fn settled_fader_matrix_matches_the_two_primitive_oracle() {
+    let _canonical = CanonicalFpEnv::enter();
     compare_width::<f32>();
     compare_width::<Simd4>();
     compare_width::<Simd8>();
+}
+
+fn compare_holey_population<L: Lane>() {
+    let frames = 3;
+    let mut active = [false; WIDTH];
+    active[0] = true;
+    active[2] = true;
+    if L::WIDTH == 8 {
+        active[5] = true;
+    }
+    let mut left = vec![0.0; frames * L::WIDTH];
+    let mut right = vec![0.0; frames * L::WIDTH];
+    let mut gain_left = [1.0; WIDTH];
+    let mut gain_right = [1.0; WIDTH];
+    let mut mute_left = [0.0; WIDTH];
+    let mut mute_right = [0.0; WIDTH];
+    let mut ll = [1.0; WIDTH];
+    let mut lr = [0.0; WIDTH];
+    let mut rl = [0.0; WIDTH];
+    let mut rr = [1.0; WIDTH];
+    let mut identity = [1.0; WIDTH];
+    for lane in 0..L::WIDTH {
+        if active[lane] {
+            for frame in 0..frames {
+                left[frame * L::WIDTH + lane] = (frame as f32 + 1.0) * (lane as f32 + 0.5);
+                right[frame * L::WIDTH + lane] = -(frame as f32 + 0.25) * (lane as f32 + 1.0);
+            }
+            gain_left[lane] = 0.5 + lane as f32 * 0.125;
+            gain_right[lane] = 1.25 - lane as f32 * 0.0625;
+            mute_left[lane] = f32::from(lane == 2);
+            mute_right[lane] = f32::from(lane == 5);
+            ll[lane] = 0.75;
+            lr[lane] = -0.25;
+            rl[lane] = 0.5;
+            rr[lane] = 0.25;
+            identity[lane] = 0.0;
+        }
+    }
+    let gl = L::load(&gain_left[..L::WIDTH]);
+    let gr = L::load(&gain_right[..L::WIDTH]);
+    let ml = mask_from_flags::<L>(&mute_left[..L::WIDTH]);
+    let mr = mask_from_flags::<L>(&mute_right[..L::WIDTH]);
+    let matrix = Matrix2x2Coef {
+        ll: L::load(&ll[..L::WIDTH]),
+        lr: L::load(&lr[..L::WIDTH]),
+        rl: L::load(&rl[..L::WIDTH]),
+        rr: L::load(&rr[..L::WIDTH]),
+        identity: mask_from_flags::<L>(&identity[..L::WIDTH]),
+    };
+    let mut old_left = left.clone();
+    let mut old_right = right.clone();
+    gain_mute_block(&mut old_left, frames, gl, ml);
+    gain_mute_block(&mut old_right, frames, gr, mr);
+    matrix2x2_block(&mut old_left, &mut old_right, frames, &matrix);
+    fader_matrix_block(&mut left, &mut right, frames, gl, ml, gr, mr, &matrix);
+    for frame in 0..frames {
+        for (lane, populated) in active.iter().copied().enumerate().take(L::WIDTH) {
+            let index = frame * L::WIDTH + lane;
+            assert_eq!(left[index].to_bits(), old_left[index].to_bits());
+            assert_eq!(right[index].to_bits(), old_right[index].to_bits());
+            if !populated {
+                assert_eq!(
+                    left[index].to_bits(),
+                    0.0_f32.to_bits(),
+                    "left padding lane {lane}"
+                );
+                assert_eq!(
+                    right[index].to_bits(),
+                    0.0_f32.to_bits(),
+                    "right padding lane {lane}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn holey_populations_keep_neutral_wide_padding() {
+    let _canonical = CanonicalFpEnv::enter();
+    compare_holey_population::<Simd4>();
+    compare_holey_population::<Simd8>();
 }
 
 fn run_scalar(
@@ -147,6 +229,7 @@ fn run_scalar(
 
 #[test]
 fn wrong_equations_are_distinguished_before_the_dut_is_checked() {
+    let _canonical = CanonicalFpEnv::enter();
     let identity = Matrix2x2Coef {
         ll: 1.0,
         lr: 0.0,

@@ -4147,20 +4147,4 @@ mod tests {
             true,
         );
     }
-
-    #[test]
-    #[should_panic(expected = "selected path witness")]
-    fn old_dispatch_fails_the_actual_fused_path_assertion() {
-        let parameters = BuiltinParameters::default();
-        let mut old_dispatch = BuiltinChain::new(48_000, parameters).unwrap();
-        let independent_reference = BuiltinChain::new(48_000, parameters).unwrap();
-        let mut left = vec![0.25; 4];
-        let mut right = vec![-0.5; 4];
-        process_reference(&mut old_dispatch, &mut left, &mut right, 0);
-        assert_eq!(
-            old_dispatch.fused_dispatches - independent_reference.fused_dispatches,
-            1,
-            "selected path witness",
-        );
-    }
 }

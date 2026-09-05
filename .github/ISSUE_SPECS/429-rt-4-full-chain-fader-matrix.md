@@ -203,3 +203,55 @@ These are the final finite revision groups, not an invitation to expand runtime/
 Sol attempt 2 is consumed. Attempt 3 is the final coherent revision; a FAIL then requires preserved evidence and explicit rescope, never a fourth repair.
 
 Root assigns FINAL Sol attempt 3 to these three finite proof corrections only. Accepted arithmetic, public-chain equivalence and allocation evidence remain intact. Any temporary public-dispatch mutation must be restored before checkpoint and final focused green run; no mutant is committed. A third FAIL triggers the hard stop and explicit rescope, not another repair under this series.
+
+## Sol attempt 3 final evidence
+
+The permanent evidence delta closes the two lane-test gaps. Each raw lane-test entry point now
+holds `CanonicalFpEnv::enter()` across both the old primitive oracle and fused DUT. On this x86
+host, all same-width finite, signed-zero, subnormal and nonfinite comparisons pass under that
+canonical environment; this records no cross-target NaN payload or unflushed-subnormal claim.
+`holey_populations_keep_neutral_wide_padding` adds one W4 and one W8 active/holey shape. Active
+lanes carry nontrivial input/gain/mute/matrix words and match the old oracle bitwise. Every unused
+lane carries zero input, gain one, unmuted masks and identity coefficients/mask, and is asserted
+both against the old oracle and exact positive-zero padding output. The prior frame/category matrix
+is unchanged. The redundant permanent expected-panic reference-only test was removed.
+
+The actual public-dispatch mutation control used the existing positive
+`full_public_chain_matches_the_three_section_reference` fixture unchanged. In the eligible branch
+of `BuiltinChain::process_dual_mono`, the temporary patch replaced the test counter increment plus
+`fader_matrix_block::<f32>(...)` call exactly with:
+
+```rust
+self.fader_mute.stage.process(left, right, frames);
+self.matrix.stage.process(left, right, frames);
+```
+
+Thus the mutant was the real old public section dispatch and naturally omitted the fused counter
+update. The authoritative command was
+`cargo test -p builtins --lib tests::full_public_chain_matches_the_three_section_reference -- --exact`
+with the issue target directory and toolchain PATH. It exited 101 at
+`assertion left == right failed: selected path witness`, with `left: 0`, `right: 1`. The complete
+failure transcript is `/tmp/sol-429-final-dispatch-mutant.log`; a second unpiped invocation
+confirmed terminal status 101. The inverse source patch restored the exact fused branch. Running
+the same command and unchanged fixture then exited 0 with one passed test; transcript
+`/tmp/sol-429-final-dispatch-restored.log`. The final diff contains no mutant.
+
+Final focused results:
+
+- `cargo test -p lane -p builtins`: PASS, including the accepted public state/recovery/ramp
+  fixtures and retained fader-ramp/partition gates; `/tmp/sol-429-final-focused-debug.log`.
+- `cargo test --release -p lane -p builtins`: PASS;
+  `/tmp/sol-429-final-focused-release.log`.
+- After the last lint-only loop correction, the three-test lane file passes in debug and release;
+  `/tmp/sol-429-final-lane-{debug,release}.log`.
+- Lane, builtins, realtime and unfused policy checks: PASS;
+  `/tmp/sol-429-final-{lane,builtins,realtime,unfused}-policy.log`.
+- `cargo clippy -p lane -p builtins --tests -- -D warnings`: exit 0, with only the pre-existing
+  unreachable disallowed-method configuration notices; `/tmp/sol-429-final-clippy.log`.
+- `cargo fmt --all -- --check`: PASS; `/tmp/sol-429-final-fmt.log`.
+
+Attempt 2's accepted ten-test non-timed bench proof remains unchanged: real
+FullChainFilters/IdentityChain/MatrixRamp repeated render scopes report zero forbidden operations,
+and the outside-render held/dropped allocation proves allocator allocation/free liveness. No
+benchmark, timing, full workspace, target matrix or artifact qualification was run. Production
+arithmetic is unchanged, and #430/#431 remain separate while RT-4/#349 stays open.
