@@ -18,8 +18,59 @@ import {
 } from "../src/browser/pcm-ring.ts";
 import { attachEngineFeed, PcmFeedError, prepareEngineFeed } from "../src/browser/pcm-feed.ts";
 import { BUNDLED_ENGINE_ASSETS } from "../src/assets.ts";
+import { MisoEngineAsset } from "../src/core/asset.ts";
+import { WasmBoundary } from "../src/core/boundary.ts";
+import { moduleBytes, sessionDocument } from "./support.mjs";
 
 const context = { audioWorklet: { addModule: async () => {} } };
+
+test("actual Wasm paused seek accepts target PCM before the first quantum with old queues full", async () => {
+  const asset = await MisoEngineAsset.load(await moduleBytes());
+  const document = new TextEncoder().encode(sessionDocument({ frames: 480_000 }));
+  const options = { sourceRingFrames: 512 };
+  const engine = await WasmBoundary.boot(asset, document, options);
+  const oracle = await WasmBoundary.boot(asset, document, options);
+  try {
+    const shape = engine.shape(), sourceId = shape.sources[0].id, quantum = shape.quantumFrames;
+    const oldPlanes = [new Float32Array(quantum).fill(0.25), new Float32Array(quantum).fill(-0.25)];
+    for (let block = 0; block < options.sourceRingFrames / quantum; block += 1) {
+      assert.equal(engine.submitSource({ sourceId, generation: 1n, startFrame: BigInt(block * quantum), planes: oldPlanes, endOfRegion: false }).ok, true);
+    }
+    assert.equal(engine.submitSource({ sourceId, generation: 1n, startFrame: BigInt(options.sourceRingFrames), planes: oldPlanes, endOfRegion: false }).code, "backpressure");
+    const ring = createMsb1Ring({ sourceId, channels: 2, frameCapacity: quantum, capacity: 64 });
+    const writer = new Msb1RingWriter(ring);
+    writer.engage(1n);
+    for (let block = 0; block < writer.capacity; block += 1) {
+      const planes = writer.reserve(quantum);
+      planes[0].set(oldPlanes[0]); planes[1].set(oldPlanes[1]);
+      writer.commit({ generation: 1n, startFrame: BigInt(options.sourceRingFrames + block * quantum), frames: quantum, endOfRegion: false });
+    }
+    writer.seek(2n, 10_000n);
+    assert.equal(writer.occupancy, writer.capacity, "the SAB still holds a full stale generation");
+    const before = engine.status();
+    const seek = { sourceId, generation: 2n, sourceFrame: 10_000n };
+    assert.equal(engine.seekSource(seek).ok, true);
+    assert.equal(engine.status().nextAbsoluteSample, before.nextAbsoluteSample);
+    assert.equal(engine.status().renderedQuanta, before.renderedQuanta);
+    const target = {
+      sourceId, generation: 2n, startFrame: 10_000n, endOfRegion: false,
+      planes: [Float32Array.from({ length: quantum }, (_, i) => (i + 1) / 256), Float32Array.from({ length: quantum }, (_, i) => -(i + 1) / 512)],
+    };
+    // This is the Rust prerequisite, not a claim that the SDK control port already
+    // releases SAB slots: direct admission must work even before the next render.
+    const admitted = engine.submitSource(target);
+    const first = engine.render(quantum);
+    assert.equal(oracle.seekSource(seek).ok, true);
+    assert.equal(oracle.submitSource(target).ok, true);
+    const expected = oracle.render(quantum);
+    assert.ok(expected.left.some((sample) => sample !== 0));
+    assert.deepEqual(first, expected, `first target quantum; admission was ${admitted.code}`);
+    assert.equal(admitted.ok, true);
+    writer.release();
+  } finally {
+    engine.dispose(); oracle.dispose();
+  }
+});
 
 function controls(ring) { return new Int32Array(ring, 0, MSB1_CONTROL_BYTES / 4); }
 function headers(ring, capacity) { return new Int32Array(ring, MSB1_HEADER_OFFSET, capacity * MSB1_SLOT_HEADER_BYTES / 4); }
