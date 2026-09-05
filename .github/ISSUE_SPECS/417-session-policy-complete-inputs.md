@@ -76,3 +76,7 @@ This brief resolves Sol's readiness questions without changing the original Sess
 ## Frozen implementation assignment
 
 #407 is merged and verified CLOSED at `a0e4d123a038160b4f5934dac14aacc72c9fbbf2`; this is the fresh implementation base for #417. Astra's final brief above is synchronized before Luna attempt 1. The six direct predicates, all five anchor patterns, allowlist parsing, four find argument sets and final retired-name search are frozen to `scripts/check-session-policy.sh` at that base. Root owns exact-path checkpoints, upstream synchronization, workspace comparison, final PR and merge. No current benchmark quiet window is active.
+
+## Luna attempt 1 evidence
+
+The frozen checker and focused disposable fixture suite are implemented. `bash scripts/check-session-policy.sh` passes against the repository, and `bash scripts/test-session-policy.sh` passes direct predicate violations, required-input removals, five anchor removals, strict order and duplicate anchors, six-root discovery, allowlisted TOML, retired spelling, and selective nonzero producer shims. The checker retains the physical `$0` root, exact search/find patterns and exclusions, explicit producer statuses, complete first-match anchor output, positive ASCII-decimal validation, one checked sort, and clean-empty handling. The existing workflow step runs the checker followed immediately by the focused suite.
