@@ -366,3 +366,47 @@ A new Backend::Scalar controlled-vs-no-console compile fixture checks matching n
 ## Sol2 final debug/source checkpoint
 
 The labeled synthetic distinct-destination fixture now checks defensive decline and original separate source/destination copy before matrix error, processor state and retained queued record. Compiler/block scoping and aliases satisfy strict affected Clippy. Full affected all-feature debug suites/integrations/docs pass; strict Clippy, format, realtime/lane/unfused/workspace policy pass on corrected invocations, with earlier failures retained under `/tmp/443-sol2-final-*`. Source changes are graph/runtime.rs, builtins-compiler/lib.rs and graph-compiler/lib.rs. Release evidence is not complete: the reported duplicate effect-contract identity failure needs diagnosis; it is not accepted as pre-existing without comparison. Remaining full product proof and actual source verdict are still required.
+
+## Astra Sol2 FAIL and final Sol3 assignment
+
+# Astra #443 Sol attempt2 consolidated review
+
+FAIL at exact pushed85108496f235c9e76c1937e308c36cc3bdeaa96f. One consolidated verdict against the full numbered #443 contract, prior Luna FAIL, and adopted same-buffer restriction/#476 retention. No reviewer builds/tests or repository/Git/GitHub mutations performed. Root should preserve this useful source checkpoint and assign ONE final Sol3 pass; no informal additional attempt or qualification from this checkpoint.
+
+The smallest complete product remains actual adjacent, same-output/in-place, serialized live scalar pairing. #470 nonadjacent, #476 distinct-output classification and #444 Concurrent remain open. A direct factory/bridge plus old bank tests is not that product. The finite remaining work fits the existing compact scalar fixture and its host/allocator adapters; do not construct a second matrix or drop original claims.
+
+## Accepted production corrections and limited proof
+
+The composite now retains the two original typed Boxes. Public boolean type trust is removed; both exact Any concrete types and both policies are checked, and declines return original owners. The fader drains and validates its envelope before matrix admission. The graph guard now checks identical output/input buffers and the matrix in_place flag, while retaining the old topology checks. The synthetic distinct-output defensive fixture is correctly labeled; it does not pretend production lowering emits that case. Current typed outer size is explicitly asserted as two pointers.
+
+Scalar resource bytes are added before caps and retained in the plan estimate. Existing scalar compiler cap tests check graph/plan/largest exact and one-below refusal and ownership return. No-console/bank zero-addition controls and Concurrent no-outer checks exist. These are useful but not the complete independent/post-bind/overflow proof below.
+
+## Final group A — one actual compiled scalar command/state/mechanism fixture
+
+Complete the previously specified real Backend::Scalar prepared graph with an independently prepared OLD separate-owner reference, actual adjacent op schedule and equal buffers asserted. Add private per-call selected/fused/fallback witness and the ONE actual selection-to-separate source mutation whose SAME positive assertion fails while PCM identity still holds. Direct bridge or synthetic runtime tests cannot substitute.
+
+Use the frozen compact sequence on both real consumers: same-sample multiple FIFO commands, immediate retargets, positive ramps and mid-ramp retarget, ramp ending within a call remains fallback for that whole call, next call fused, gain/mute/remembered gain/unmute/reset; compare exact PCM AND relevant private state/queue effects each call. Include the retained asymmetric/recovery/mono limits and separate Concurrent reference. Do not use a final all-zero/NaN output as evidence that every command applied. This is one sequence, not a combinatorial test expansion.
+
+Strengthen the new invalid-envelope test: it currently compares only a later retry against another composite. With immediate commands, prematurely draining the matrix can produce exactly the same retry PCM, so its name overclaims untouched-queue proof. Immediately after the invalid call, inspect the actual matrix queue/state or make queue occupancy a discriminator, and compare with old separate semantics. Prove a valid-prefix matrix command followed by failure at the actual scheduled same-buffer boundary: completed fader PCM/state, matrix state at failure, remaining queue and first error match old execution. No distinct-output implementation is required in #443; preserve #476.
+
+## Final group B — actual host linkage and preserved observations/declines
+
+hosts/host-web/src/tests.rs is unchanged; its current bank ack/output tests do not feed the new scalar path. Extend the approved existing host fixture so actual acknowledged commands/application samples reach the selected scalar prepared graph, with its mechanism witness and PCM/state. Do not feed an unrelated static clone of parameters or introduce a new host production backend/admission route.
+
+Complete the original staggered-depth two-track scalar fixture: assert real adjacency for the eligible track; prove nonempty post-fader meter DATA/windows and nonunity-send/crossfeeding-matrix output on the observed separate track versus the old reference, while the eligible track actually pairs. Add the frozen finite direct/alias observation, extra-reader, sidechain/delay, stage/order/default-hook/type/policy decline and permitted post-matrix observation assertions, preserving old-owner state. Existing exact-type/policy factory tests remain useful and need not be duplicated; actual graph conditions must be reached rather than rejected earlier for unrelated topology. Address unretired/unredirected eligibility with the source invariant or explicit guard plus its targeted fixture. No scheduling reorder or new routing framework.
+
+## Final group C — independent resource, post-bind and actual allocation proof
+
+The new resource test obtains fader/matrix sizes from the SAME production types used by the estimator. It checks arithmetic, but does not independently restate the required live ramped state/consumer/policy field layout or compare observed allocated sizes. Supply that bounded independent layout/observed-allocation proof; preserve the accepted two-pointer assertion and existing zero/Concurrent/bank controls. Verify the actual graph estimate survives binding unchanged, including its individual-allocation maximum, and directly test checked overflow refusal without partial estimate mutation. The existing cap test only observes pre-bind artifacts, and a one-below maximum derived from the production report alone does not establish the actual owner maximum.
+
+Update ONLY the approved builtins-compiler/tests/allocation_tracker.rs fixture: repeated actual queued scalar selected, ramp fallback and observed fallback renders, positive independent allocation/free liveness, zero render allocation AND frees. Its unchanged four existing bank tests do not cover this product. Preparation observations can support the independent owner-size proof without a new allocator. No ring double charge or blanket CAPI pin update. The nine-track CAPI oracle remains bank-selected and unchanged; only add scalar mirror support there if needed for this independent proof, not a host scalar override or a separate CAPI feature.
+
+## Final group D — honest focused/qualification gates
+
+Retain all successful debug/release regressions. Reviewed reported release statuses0 for graph, builtins-compiler, host and allocation; these remain mostly old population evidence until the new fixtures are present. After the coherent final source/test pass, execute the new named fixtures and affected original debug/release suites, strict clippy, fmt and frozen realtime/lane/unfused/workspace policies with actual statuses/names/counts. No zero-filter or unchanged bank-fixture credit.
+
+The graph-compiler release failure is separately reproduced on exact delivered baseline: /tmp/443-sol2-exact-baseline-release.log ends E0463 cannot find effect_compiler, status101. This is not proof of a #443 runtime regression and does not authorize production changes to fix build tooling. Preserve the baseline/feature attempts. Root must resolve the bounded qualification execution/tooling issue or record an explicit appropriate successor/ruling; do not claim that release gate passed or silently waive mandatory supported correctness. No new retry loop, feature repair or benchmark is authorized by that infrastructure failure.
+
+These four groups consolidate the ORIGINAL remaining acceptance, not a new scope. Previously fixed safe ownership, same-buffer guard and completed finite cap/decline tests remain. Final Sol3 should produce the one coherent actual scalar product proof and request one adversarial verdict. On another FAIL preserve and explicitly rescope; no fourth repair. Full immutable workspace/targets/artifact/browser/actual PR and requiredCI remain root delivery work after source acceptance; no timing authority.
+
+Root assigns one final Sol3 implementation pass covering these four original groups in the same authorized paths. Pause at each coherent focused-green tranche for an immediate root exact-path checkpoint and push; this is one attempt, not additional review rounds. No changes to baseline release profiles or unrelated tooling. Root retains Git/GitHub and qualification ownership.
