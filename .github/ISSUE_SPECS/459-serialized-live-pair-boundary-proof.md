@@ -319,3 +319,8 @@ Root adopts exactly these four remaining groups for FINAL Sol attempt3. Preserve
 ## Final Sol attempt 3 recovery checkpoint: host queues and alias data
 
 The private host witness records the selected one-member tail consuming both admitted fader/matrix records on the actual fused application call. Actual alias observer captures both planes' words and compares them against the same lowered boundary with Concurrent separate owners, retaining postmatrix equality and eligible/observed1→0 refusal. Focused compiler27/27 and host62/1ignored debug tests plus fmt/diff passed; `/tmp/sol459-attempt3-host-alias-debug-{builtins-compiler-lib,host-web}.log`. This remains incomplete final attempt3: selected-tail mono/clean recovery and decline variants remain. Root also asks final host claims to distinguish routed t0's static PCM relation from actual commanded t08 output; drain ownership must not be presented as proof of an inaudible command's PCM effect.
+
+
+## Final Sol attempt 3 recovery checkpoint: commanded composite PCM
+
+Removed the static routed-track imitation. The private witness now records the selected composite's own first left/right output words after arithmetic. The real host application call proves tail member1, admitted fader/matrix drains1+1 and true fusion together with selected output near0.125 and right exactly twice left. Routed t0 is only a nonzero identity-output check, not evidence of commanded audio. Compiler27/27 and host62/1ignored debug tests plus fmt/diff passed; `/tmp/sol459-attempt3-host-capture-debug-{builtins-compiler-lib,host-web}.log`. Same final attempt3 continues with selected-tail mono/recovery and decline variants.

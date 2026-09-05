@@ -682,6 +682,7 @@ static FADER_MATRIX_FALLBACK_CALLS: core::sync::atomic::AtomicUsize =
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static FADER_MATRIX_LIVE_WITNESS: std::cell::Cell<[u64; 8]> = const { std::cell::Cell::new([0; 8]) };
+    static FADER_MATRIX_OUTPUT_WITNESS: std::cell::Cell<[u32; 2]> = const { std::cell::Cell::new([0; 2]) };
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -696,12 +697,15 @@ pub struct TestOnlyFaderMatrixWitness {
     pub factory_members: u64,
     pub fader_records_drained: u64,
     pub matrix_records_drained: u64,
+    pub first_left_bits: u32,
+    pub first_right_bits: u32,
 }
 
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub fn test_only_reset_fader_matrix_witness() {
     FADER_MATRIX_LIVE_WITNESS.with(|value| value.set([0; 8]));
+    FADER_MATRIX_OUTPUT_WITNESS.with(|value| value.set([0; 2]));
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -718,6 +722,8 @@ pub fn test_only_fader_matrix_witness() -> TestOnlyFaderMatrixWitness {
         factory_members: values[5],
         fader_records_drained: values[6],
         matrix_records_drained: values[7],
+        first_left_bits: FADER_MATRIX_OUTPUT_WITNESS.with(std::cell::Cell::get)[0],
+        first_right_bits: FADER_MATRIX_OUTPUT_WITNESS.with(std::cell::Cell::get)[1],
     }
 }
 
@@ -876,6 +882,13 @@ impl GraphPreparedBuiltinBankProcessor for FaderMatrixBankProcessor {
         fader.frames_processed = fader.frames_processed.saturating_add(u64::from(frames));
         matrix.process_calls = matrix.process_calls.saturating_add(1);
         matrix.frames_processed = matrix.frames_processed.saturating_add(u64::from(frames));
+        #[cfg(any(test, feature = "test-support"))]
+        FADER_MATRIX_OUTPUT_WITNESS.with(|value| {
+            value.set([
+                left.first().copied().unwrap_or(0.0).to_bits(),
+                right.first().copied().unwrap_or(0.0).to_bits(),
+            ]);
+        });
         let _ = first_sample;
         Ok(())
     }

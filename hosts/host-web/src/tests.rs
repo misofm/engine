@@ -1611,17 +1611,6 @@ fn paired_console_host(quantum: u32) -> AudioWorkletEngineHost {
     for index in 0..9 {
         let mut track = template.clone();
         track.id = session::StableId::parse(&format!("track-{index}")).expect("track id");
-        if index == 0 {
-            track.fader.left_db = -6.0;
-            track.fader.right_db = -6.0;
-            track.matrix_or_pan = session::MatrixOrPan::Matrix {
-                ll: 0.5,
-                lr: 0.0,
-                rl: 0.0,
-                rr: 1.0,
-                smoothing_samples: 0,
-            };
-        }
         model.tracks.push(track);
     }
     model.routes[0].source = session::RouteSource::Track {
@@ -1859,6 +1848,10 @@ fn acknowledged_pair_render_records_the_same_live_dispatch() {
     );
     assert_eq!(witness.fader_records_drained, 1);
     assert_eq!(witness.matrix_records_drained, 1);
+    let selected_left = f32::from_bits(witness.first_left_bits);
+    let selected_right = f32::from_bits(witness.first_right_bits);
+    assert!(selected_left > 0.11 && selected_left < 0.14);
+    assert_eq!(selected_right.to_bits(), (selected_left * 2.0).to_bits());
     assert_eq!(witness.fused_calls + witness.fallback_calls, 1);
     assert_eq!(
         witness.fused_calls, 1,
@@ -1868,18 +1861,18 @@ fn acknowledged_pair_render_records_the_same_live_dispatch() {
     let output = host.output_pcm().expect("output");
     let quantum = QUANTUM as usize;
     let expected_left = output[0];
-    assert!(expected_left > 0.11 && expected_left < 0.14);
+    assert_eq!(expected_left.to_bits(), 0.5_f32.to_bits());
     assert!(
         output[..quantum]
             .iter()
             .all(|sample| sample.to_bits() == expected_left.to_bits()),
-        "the commanded paired cohort applies both records on the acknowledged block"
+        "the routed reference remains nonzero on the acknowledged block"
     );
     assert!(
         output[quantum..]
             .iter()
-            .all(|sample| sample.to_bits() == (expected_left * 2.0).to_bits()),
-        "the commanded paired cohort preserves its asymmetric output relation"
+            .all(|sample| sample.to_bits() == expected_left.to_bits()),
+        "the routed reference remains dual-mono identity"
     );
 }
 
