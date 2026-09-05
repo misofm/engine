@@ -67,7 +67,7 @@ export function attachEngineFeed<Context extends FeedContext>(options: FeedOptio
       pending.finish(new PcmFeedError("prepareState", "AudioContext resumed during seek preparation"));
     } else if (data.kind === "superseded" || !sameSeeks(rings, pending.seeks)) {
       pending.finish(new PcmFeedError("prepareSuperseded", "PCM seek changed during preparation"));
-    } else if (data.kind !== "prepared" || !Array.isArray(data.seeks) || !equalSeeks(data.seeks, pending.seeks)) {
+    } else if (data.kind !== "confirmed" || !Array.isArray(data.seeks) || !equalSeeks(data.seeks, pending.seeks)) {
       pending.finish(new PcmFeedError("prepareRefused", "PCM consumer refused seek preparation", undefined, typeof data.result === "number" ? data.result : undefined));
     } else {
       pending.finish();

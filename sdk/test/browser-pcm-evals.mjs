@@ -417,7 +417,7 @@ test("prepareSeek bounds requests and rejects supersession, refusal, close and t
   const suspended = { ...context, state: "suspended" };
   const feed = attachEngineFeed({ context: suspended, sources: [{ sourceId: "s", channels: 1 }], quantumFrames: 4, createNode: () => ({ port, disconnect() {} }) });
   const writer = new Msb1RingWriter(feed.rings[0]); writer.engage(1n); writer.seek(2n, 4n);
-  const reply = (message, changes = {}) => port.onmessage?.({ data: { op: "seek-prepared", requestId: message.requestId, kind: "prepared", seeks: message.seeks, ...changes } });
+  const reply = (message, changes = {}) => port.onmessage?.({ data: { op: "seek-prepared", requestId: message.requestId, kind: "confirmed", seeks: message.seeks, ...changes } });
   const first = feed.prepareSeek();
   await assert.rejects(feed.prepareSeek(), (error) => error.operation === "prepareBusy");
   assert.equal(requests.length, 1);
@@ -455,7 +455,7 @@ test("control preparation never discards or applies a superseding producer gener
   assert.equal(run.engine.prepareSharedSeeks([ring], [snapshot]).kind, "superseded");
   assert.deepEqual(applied, [[2n, 12n]]);
   assert.equal(writer.occupancy, 1, "future PCM must survive the rejected old request");
-  assert.equal(run.engine.prepareSharedSeeks([ring], [{ epoch: 2, generation: 3n, frame: 16n }]).kind, "prepared");
+  assert.equal(run.engine.prepareSharedSeeks([ring], [{ epoch: 2, generation: 3n, frame: 16n }]).kind, "confirmed");
   assert.deepEqual(applied, [[2n, 12n], [3n, 16n]]);
   assert.equal(writer.occupancy, 1);
   assert.equal(run.ringControls[0][MSB1_CONTROL.STALE], 1);
@@ -474,7 +474,7 @@ test("control preparation never discards or applies a superseding producer gener
   };
   assert.equal(raced.engine.prepareSharedSeeks([raced.rings[0]], [snapshot]).kind, "superseded");
   assert.deepEqual(raced.seeks, [[2n, 12n]], "apply the captured tuple, never mixed live epoch/generation words");
-  assert.equal(raced.engine.prepareSharedSeeks([raced.rings[0]], [{ epoch: 2, generation: 3n, frame: 16n }]).kind, "prepared");
+  assert.equal(raced.engine.prepareSharedSeeks([raced.rings[0]], [{ epoch: 2, generation: 3n, frame: 16n }]).kind, "confirmed");
   assert.deepEqual(raced.seeks, [[2n, 12n], [3n, 16n]]);
 });
 

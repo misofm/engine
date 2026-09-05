@@ -478,7 +478,7 @@ function wrapEngineProcessor(Base) {
         if (result !== RESULT_OK) return { kind: "refused", result }
         if (!this.releaseStaleSharedSlots(ring, seeks[index].generation)) return { kind: "refused", result: 1 }
       }
-      return rings.every((ring, index) => matches(ring, seeks[index])) ? { kind: "prepared", seeks } : { kind: "superseded" }
+      return rings.every((ring, index) => matches(ring, seeks[index])) ? { kind: "confirmed", seeks } : { kind: "superseded" }
     }
 
     releaseStaleSharedSlots(ring, generation) {
