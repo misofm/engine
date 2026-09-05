@@ -82,3 +82,7 @@ This is #429. #429 owns the independently closable public full-chain product, #4
 Completing #429 alone does not close RT-4/#349. Both retained outcomes are numbered before implementation; original bank integration and evidence obligations are visible and not silently discarded. No material correction required. The earlier draft wording “ready for root to number” is historical context superseded by the explicit numbered accounting and need not block the queue.
 
 Read-only local diff/spec and remote identity inspection. No tests, Cargo, timing, repository/GitHub mutation or implementation performed.
+
+## Post-RT-3 implementation base
+
+PR #437 merged as `c7469e28d52a716339b6f3119a57b69afb3411f1`, delivering #420 after exact-head Astra PASS and required qualification SUCCESS. Root freezes that exact main as the first full-chain product base. The descriptive RT-3 measurement is separately retained in #436 and does not own new source implementation. This feature remains unassigned until Astra reconfirms the actual builtin/lane/allocator seam against this merged base. #430/#431 retain their separate obligations; no compiler pairing or benchmark work is authorized here.
