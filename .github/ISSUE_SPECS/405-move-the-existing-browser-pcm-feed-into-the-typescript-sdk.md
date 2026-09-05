@@ -228,3 +228,17 @@ Use `/private/tmp/dx-405-astra-mutations-attempt2.mjs` and `/private/tmp/dx-405-
 Implement one coherent test tranche. Run the focused PCM eval, then `bash scripts/check-sdk-headless.sh /private/tmp/dx-393-current-artifacts`, and the existing packed/package gate from `sdk` against that same artifact directory. Also run `git diff --check` and exact-path audit. Record subtest names/counts and prove each of the three reviewer mutants turns red. Do not alter production to satisfy a test.
 
 Root must checkpoint the exact allowed paths before any further Luna work and push the review commit. Dedicated Astra then reviews that exact commit for the three blockers and scope conservation. On PASS, root synchronizes issue/PR evidence; on FAIL, stop and rescope under the three-attempt rule. Adapter migration remains paused until PASS.
+
+## Luna attempt 3 — final focused-test correction (2026-09-05)
+
+Luna made the final authorized test-only correction in `sdk/test/browser-pcm-evals.mjs`. The ring fixture now freezes the literal layout/control words through the final control words, decodes the exact 128-byte multibyte ID boundary, distinguishes signed generation tags from full generations, proves malformed magic and zero/non-power-of-two shapes, snapshots queued headers/planar PCM/write index across full-ring backpressure, and exercises index wrap/occupancy. The lifecycle fixture observes all engaged writer states inside disconnect, counts one detach/disconnect under throwing cleanup, covers typed `nodeCreate`, and bounds both blocked-ready and deterministic timeout ownership with ordered `readyTimeout`/`closed` results. The prelude fixture keeps allocation tracking armed across first, later successful, backpressure retry, partial, seek retry, stale-drop, and underrun processing, and captures submit/seek metadata while proving the stale slot is never submitted.
+
+Final evidence:
+
+- `node --test sdk/test/browser-pcm-evals.mjs`: 4 pass / 0 fail; log `/private/tmp/dx-405-luna-attempt3-focused.log`.
+- Exact Astra reproductions from `/private/tmp/dx-405-astra-mutations-attempt2.mjs`: all three exit 1 as intended — steady populated-drain allocation, full-ring PCM corruption, and release-after-disconnect; summary `/private/tmp/dx-405-luna-attempt3-mutants.log`, isolated logs under `/private/tmp/dx-405-mutations-g5osC2/`.
+- `bash scripts/check-sdk-headless.sh /private/tmp/dx-393-current-artifacts`: 137 pass / 1 platform skip / 0 fail; log `/private/tmp/dx-405-luna-attempt3-headless.log`.
+- From `sdk`, `npm run check:package -- /private/tmp/dx-393-current-artifacts`: PASS, including the fresh packed consumer and package artifact checks; log `/private/tmp/dx-405-luna-attempt3-package.log`.
+- `git diff --check`: PASS. Exact working-tree diff contains only `sdk/test/browser-pcm-evals.mjs` and this issue evidence file; log `/private/tmp/dx-405-luna-attempt3-diff.log`.
+
+No production, package, adapter, generated artifact, ABI, workflow, dependency, runner, or CI-#409 paths changed. No Rust rebuild or Darwin baseline repin was performed. This is the third and final attempt; root must checkpoint and push these two exact paths for dedicated Astra review. No PASS or issue closure is claimed by Luna.
