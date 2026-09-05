@@ -16,12 +16,8 @@ graph_manifest="crates/graph/Cargo.toml"
 compiler_manifest="crates/graph-compiler/Cargo.toml"
 [[ -f "$graph_manifest" && -f "$compiler_manifest" ]] || fail 'missing graph manifests'
 
-graph_dependencies_raw="$(awk '
-  /^\[dependencies\]$/ { in_dependencies = 1; next }
-  /^\[/ { in_dependencies = 0 }
-  in_dependencies && /^[a-zA-Z0-9_-]+[.]workspace/ { print $1 }
-' "$graph_manifest")" || { rc=$?; fail "graph dependency extraction failed (awk status $rc)"; }
-production_graph_dependencies="$(gate_sort_lines 'graph dependency extraction' "$graph_dependencies_raw")" || exit $?
+graph_dependencies_raw="$(gate_toml_dependencies "$graph_manifest" graph)" || exit $?
+production_graph_dependencies="$graph_dependencies_raw"
 [[ "$production_graph_dependencies" == $'effect-contract.workspace\nengine.workspace\nlane.workspace\nrack.workspace' ]] ||
   fail 'render graph dependency boundary changed'
 
