@@ -113,3 +113,11 @@ After one coherent pass: root exact-path checkpoint/push, all affected real gate
 
 
 Root queues attempt 2 for Sol after its current #399 tranche. The worktree remains checkpointed; Luna receives no correction pass. No final qualification or completion is claimed.
+
+## Sol attempt 2 checkpoint — pending adversarial verdict
+
+Sol added the frozen plain-section dependency declaration mode for effect-runtime and builtins while preserving the rack/default parser, converted every assigned forbidden, required, filter, and count producer to explicit status classification, restored the exact `Cargo.toml` host occurrence scope, and made partial-output execution failures red. Protocol now separately checks both extracted surfaces and both raw-byte predicates; effect-runtime checks all direct bans, diagnostic presence, package allowlists, helper exclusions and helper counts; host-core checks all exact declarations and both occurrence counts; builtins checks its reverse dependency, unsafe producer/filter, and quiet positive declarations.
+
+Directed fixtures now cover compact/spaced bare/workspace declarations with dev/target exclusion, default-parser stability, collect/required/filter error classes with partial output, protocol required and optional-empty surfaces plus both predicate failures, host required roots, non-Cargo TOML exclusion and partial grep failure, effect package and helper filter failures, and builtins required root plus unsafe producer/filter failures. Existing mutations remain green.
+
+Focused evidence is green in `/tmp/engine-406-attempt2-{gate-lib,protocol,effect,host,builtins}.log`; real-tree checks are green in `/tmp/engine-406-attempt2-check-{protocol,effect,host,builtins}.log`. `bash -n` over the five implementation scripts and five affected suites and `git diff --check` pass. No full workspace, benchmark, artifact, Git, or GitHub operation was performed. This is a checkpoint-ready implementation record awaiting root's exact-path commit/push and Astra attempt 2 verdict; it is not acceptance.

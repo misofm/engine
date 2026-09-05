@@ -27,21 +27,23 @@ if control_provider="$({
 })"; then :; else gate_fail "ControlProvider scan errored"; exit 1; fi
 [[ -n "$control_provider" ]] || { gate_fail 'missing or empty ControlProvider declaration'; exit 1; }
 
-if printf '%s\n' "$control_provider" | rg -n \
-    '(Vec[[:space:]]*<[[:space:]]*u8|&[[:space:]]*(mut[[:space:]]*)?\[[[:space:]]*u8[[:space:]]*\]|\b(Bytes|ByteBuf)\b)'; then
+if provider_bytes="$(gate_scan_collect 'ControlProvider raw-byte predicate' \
+    '(Vec[[:space:]]*<[[:space:]]*u8|&[[:space:]]*(mut[[:space:]]*)?\[[[:space:]]*u8[[:space:]]*\]|\b(Bytes|ByteBuf)\b)' '' /dev/stdin <<<"$control_provider")"; then :; else exit 1; fi
+if [[ -n "$provider_bytes" ]]; then
     fail "public ControlProvider methods must use typed values, never raw bytes"
 fi
 
-mock_provider_fields="$({
+if mock_provider_fields="$({
     awk '
         /^pub struct MockProvider[[:space:]]*\{/ { in_struct = 1; next }
         in_struct && /^\}/ { exit }
         in_struct && /^[[:space:]]*pub[[:space:]]/ { print }
     ' "$source_file"
-})"
+})"; then :; else gate_fail 'MockProvider scan errored'; exit 1; fi
 
-if [[ -n "$mock_provider_fields" ]] && printf '%s\n' "$mock_provider_fields" | rg -n \
-    '(Vec[[:space:]]*<|&[[:space:]]*(mut[[:space:]]*)?\[|\[[[:space:]]*u8|\b(Bytes|ByteBuf)\b|bytes)'; then
+if mock_bytes="$(gate_scan_collect 'MockProvider raw-byte predicate' \
+    '(Vec[[:space:]]*<|&[[:space:]]*(mut[[:space:]]*)?\[|\[[[:space:]]*u8|\b(Bytes|ByteBuf)\b|bytes)' '' /dev/stdin <<<"$mock_provider_fields")"; then :; else exit 1; fi
+if [[ -n "$mock_bytes" ]]; then
     fail "MockProvider public fields must not expose vectors or raw byte storage"
 fi
 

@@ -66,23 +66,29 @@ gate_scan_forbidden 'a host hand-decodes the control wire format; use protocol' 
 
 [[ -f "$facade_manifest" ]] || fail "expected host-core manifest is missing: $facade_manifest"
 [[ -f "$capi_manifest" ]] || fail "expected capi manifest is missing: $capi_manifest"
-[[ "$(grep -Fxc 'default = []' "$facade_manifest")" == 1 ]] ||
+exact_count() {
+    local description="$1" text="$2" file="$3" output rc
+    if output="$(grep -Fxc "$text" "$file" 2>&1)"; then rc=0; else rc=$?; fi
+    [[ "$rc" == 0 || "$rc" == 1 ]] || { printf '%s\n' "$output" >&2; fail "$description scan errored (grep exit $rc)"; }
+    [[ "$output" == 1 ]]
+}
+exact_count 'empty default feature' 'default = []' "$facade_manifest" ||
     fail 'host-core must have an empty default feature set'
-[[ "$(grep -Fxc 'control-provider = ["dep:protocol"]' "$facade_manifest")" == 1 ]] ||
+exact_count 'control-provider feature' 'control-provider = ["dep:protocol"]' "$facade_manifest" ||
     fail 'host-core must gate protocol behind exactly control-provider'
-[[ "$(grep -Fxc 'protocol = { workspace = true, optional = true }' "$facade_manifest")" == 1 ]] ||
+exact_count 'optional protocol edge' 'protocol = { workspace = true, optional = true }' "$facade_manifest" ||
     fail 'host-core protocol dependency must be workspace-scoped and optional'
-[[ "$(grep -Fxc 'host-core = { workspace = true, features = ["control-provider"] }' "$capi_manifest")" == 1 ]] ||
+exact_count 'capi control-provider edge' 'host-core = { workspace = true, features = ["control-provider"] }' "$capi_manifest" ||
     fail 'capi must explicitly enable the host-core control-provider adapter'
 
 # The feature name may appear in exactly the host-core declaration and capi's dependency. This
 # closes the browser/default-host leak while leaving comments and unrelated feature names free.
-feature_matches="$(gate_scan_collect 'control-provider declaration scan' 'control-provider' '*.toml' "$root")" || exit 1
-if [[ -n "$feature_matches" ]]; then feature_occurrences=$(printf '%s\n' "$feature_matches" | wc -l); else feature_occurrences=0; fi
+feature_matches="$(gate_scan_collect 'control-provider declaration scan' 'control-provider' 'Cargo.toml' "$root")" || exit 1
+feature_occurrences="$(gate_count_lines 'control-provider declaration' "$feature_matches")" || exit 1
 [[ "$feature_occurrences" == 2 ]] ||
     fail 'only host-core may declare and capi may enable control-provider'
 protocol_matches="$(gate_scan_collect 'host-core protocol dependency scan' '^[[:space:]]*protocol[[:space:]]*=' '' "$facade_manifest")" || exit 1
-if [[ -n "$protocol_matches" ]]; then protocol_dependencies=$(printf '%s\n' "$protocol_matches" | wc -l); else protocol_dependencies=0; fi
+protocol_dependencies="$(gate_count_lines 'host-core protocol dependency' "$protocol_matches")" || exit 1
 [[ "$protocol_dependencies" == 1 ]] ||
     fail 'host-core must contain exactly one protocol dependency edge'
 
@@ -90,7 +96,7 @@ if [[ -n "$protocol_matches" ]]; then protocol_dependencies=$(printf '%s\n' "$pr
 gate_scan_forbidden 'the host facade must export no C symbols; it links into every host cdylib' \
     '^[^/]*no_mangle' '' "$facade_source"
 
-grep -Fqx 'crate-type = ["rlib"]' "$facade_manifest" || {
+exact_count 'rlib crate type' 'crate-type = ["rlib"]' "$facade_manifest" || {
     printf 'host-core policy failure: the host facade must be an rlib only\n' >&2
     exit 1
 }

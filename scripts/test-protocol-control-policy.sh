@@ -64,6 +64,43 @@ valid_root="$scratch_root/valid"
 create_fixture "$valid_root"
 bash "$policy_script" "$valid_root" >/dev/null
 
+missing_surface="$scratch_root/missing-surface"
+create_fixture "$missing_surface"
+rm "$missing_surface/crates/protocol/src/controller.rs"
+if bash "$policy_script" "$missing_surface" >/dev/null 2>&1; then
+    printf 'protocol control policy missing required surface unexpectedly passed\n' >&2; exit 1
+fi
+
+# Optional message sources may be absent, and an empty public-field population is valid.
+empty_fields="$scratch_root/empty-fields"
+create_fixture "$empty_fields"
+sed -i '/pub struct MockProvider {/,/^}/c\pub struct MockProvider {\n}' "$empty_fields/crates/protocol/src/controller.rs"
+bash "$policy_script" "$empty_fields" >/dev/null
+
+expect_predicate_error() {
+    local name="$1" surface="$2" expected="$3" fixture shim
+    fixture="$scratch_root/$name"
+    shim="$scratch_root/$name-bin"
+    create_fixture "$fixture"
+    if [[ "$name" == mock-predicate ]]; then
+        sed -i '/replay_bytes/a\    pub diagnostics: TypedValue,' "$fixture/crates/protocol/src/controller.rs"
+    fi
+    mkdir -p "$shim"
+    cat >"$shim/rg" <<EOF
+#!/usr/bin/env bash
+input=\$(cat)
+if [[ "\$input" == *'$surface'* ]]; then printf 'valid partial output\n' >&2; exit 7; fi
+printf '%s\n' "\$input" | "$(command -v rg)" "\$@"
+EOF
+    chmod +x "$shim/rg"
+    output="$(PATH="$shim:$PATH" bash "$policy_script" "$fixture" 2>&1)" && rc=0 || rc=$?
+    [[ "$rc" -ne 0 && "$output" == *"$expected"* && "$output" == *'valid partial output'* ]] || {
+        printf 'protocol predicate error misclassified: %s: %s\n' "$name" "$output" >&2; exit 1;
+    }
+}
+expect_predicate_error provider-predicate 'pub trait ControlProvider' 'ControlProvider raw-byte predicate scan errored'
+expect_predicate_error mock-predicate 'pub diagnostics' 'MockProvider raw-byte predicate scan errored'
+
 expect_failure provider-raw-bytes mutate_provider_raw_bytes
 expect_failure mock-public-vector mutate_mock_public_vector
 expect_failure public-payload mutate_public_payload

@@ -66,6 +66,8 @@ expect_failure() {
 valid="$scratch_root/valid"
 create_fixture "$valid"
 bash "$policy_script" "$valid" >/dev/null
+printf 'control-provider\n' >"$valid/notes.toml"
+bash "$policy_script" "$valid" >/dev/null
 
 expect_failure capi-recompiles-the-pipeline \
     'printf "%s\n" "fn x() { let _ = compile_session(&model, caps); }" >>"$root/crates/capi/src/runtime.rs"'
@@ -108,5 +110,22 @@ expect_failure host-web-src-directory-deleted \
     'rm -rf -- "$root/hosts/host-web/src"'
 expect_failure capi-src-directory-deleted \
     'rm -rf -- "$root/crates/capi/src"'
+expect_failure hosts-directory-deleted 'rm -rf -- "$root/hosts"'
+expect_failure no-host-directories 'rm -rf -- "$root/hosts"/*'
+
+# A count producer that emits the expected value and then errors must still be red.
+grep_fixture="$scratch_root/grep-partial"
+create_fixture "$grep_fixture"
+mkdir -p "$scratch_root/grep-bin"
+cat >"$scratch_root/grep-bin/grep" <<EOF
+#!/usr/bin/env bash
+printf '1\n'
+exit 7
+EOF
+chmod +x "$scratch_root/grep-bin/grep"
+grep_output="$(PATH="$scratch_root/grep-bin:$PATH" bash "$policy_script" "$grep_fixture" 2>&1)" && grep_rc=0 || grep_rc=$?
+[[ "$grep_rc" -ne 0 && "$grep_output" == *'scan errored (grep exit 7)'* ]] || {
+    printf 'host-core partial grep error escaped: %s\n' "$grep_output" >&2; exit 1;
+}
 
 printf 'host-core policy mutation tests: ok\n'

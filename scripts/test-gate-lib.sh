@@ -46,6 +46,25 @@ execution_output=$(expect_failure execution-error 'gate test: execution-error sc
     env PATH="$scratch/bin:$PATH" GATE_FAILURE_PREFIX='gate test' bash -c \
     'source "$1"; gate_scan_forbidden execution-error forbidden "" "$2"' _ "$root/scripts/lib/gate.sh" "$scratch/src")
 
+mkdir -p "$scratch/rg-partial"
+cat >"$scratch/rg-partial/rg" <<'EOF'
+#!/usr/bin/env bash
+printf 'valid partial output\n'
+exit 9
+EOF
+chmod +x "$scratch/rg-partial/rg"
+collect_output=$(expect_failure collect-partial 'valid partial output' env PATH="$scratch/rg-partial:$PATH" GATE_FAILURE_PREFIX='gate test' bash -c \
+    'source "$1"; gate_scan_collect collect-partial anything "" "$2"' _ "$root/scripts/lib/gate.sh" "$scratch/src")
+[[ "$collect_output" == *'collect-partial scan errored (rg exit 9)'* ]] || exit 1
+filter_output=$(expect_failure filter-partial 'valid partial output' env PATH="$scratch/rg-partial:$PATH" GATE_FAILURE_PREFIX='gate test' bash -c \
+    'source "$1"; gate_filter_exclude filter-partial allow "kept"' _ "$root/scripts/lib/gate.sh")
+[[ "$filter_output" == *'filter-partial filter errored (rg exit 9)'* ]] || exit 1
+[[ -z "$(gate_filter_exclude empty-filter forbidden '')" ]] || { echo 'empty filter input was not empty' >&2; exit 1; }
+[[ -z "$(gate_filter_exclude allowed-empty clean 'clean')" ]] || { echo 'allowed-empty filter retained a row' >&2; exit 1; }
+
+required_output=$(expect_failure required-absent 'required-absent search failed (rg exit 1)' env GATE_FAILURE_PREFIX='gate test' bash -c \
+    'source "$1"; gate_scan_required required-absent missing "" "$2"' _ "$root/scripts/lib/gate.sh" "$scratch/src")
+
 manifest="$scratch/dependencies.toml"
 cat >"$manifest" <<'EOF'
 [dependencies]
@@ -55,6 +74,21 @@ alpha = "1"
 ignored.workspace = true
 EOF
 [[ "$(gate_toml_dependencies "$manifest")" == $'alpha\nzeta' ]] || { echo 'dependency output is not sorted/scoped' >&2; exit 1; }
+plain_manifest="$scratch/plain.toml"
+cat >"$plain_manifest" <<'EOF'
+[dependencies]
+zeta.workspace=true
+alpha = "1"
+lane="1"
+[dev-dependencies]
+ignored.workspace=true
+[target.'cfg(unix)'.dependencies]
+target_only.workspace=true
+EOF
+[[ "$(gate_toml_dependencies "$plain_manifest" plain)" == $'alpha\nlane\nzeta' ]] || { echo 'plain dependency mode changed compact/spaced declaration semantics' >&2; exit 1; }
+# The default mode is intentionally frozen for rack callers: compact declarations remain the
+# complete first field rather than being reinterpreted by the narrow plain-section mode.
+[[ "$(gate_toml_dependencies "$plain_manifest")" == $'alpha\nlane="1"\nzeta.workspace=true' ]] || { echo 'default dependency parser changed' >&2; exit 1; }
 
 check_extractor_failures() {
     local pipefail_setting=$1

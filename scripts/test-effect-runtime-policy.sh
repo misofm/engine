@@ -185,4 +185,38 @@ if bash "$temp/scripts/check-effect-runtime-policy.sh" "$temp" >/dev/null 2>&1; 
     printf 'effect runtime identity mutation escaped\n' >&2
     exit 1
 fi
+cp "$root/crates/effect-contract/src/lib.rs" "$temp/crates/effect-contract/src/lib.rs"
+
+real_rg="$(command -v rg)"
+mkdir -p "$temp/rg-producer-fail" "$temp/rg-filter-fail"
+cat >"$temp/rg-producer-fail/rg" <<EOF
+#!/usr/bin/env bash
+if [[ "\$*" == *'effect_package|effect-package'* ]]; then printf 'valid partial output\n' >&2; exit 7; fi
+exec "$real_rg" "\$@"
+EOF
+cat >"$temp/rg-filter-fail/rg" <<EOF
+#!/usr/bin/env bash
+if [[ "\$1" == -v ]]; then cat >/dev/null; printf 'valid partial output\n' >&2; exit 8; fi
+exec "$real_rg" "\$@"
+EOF
+chmod +x "$temp/rg-producer-fail/rg" "$temp/rg-filter-fail/rg"
+producer_output="$(PATH="$temp/rg-producer-fail:$PATH" bash "$temp/scripts/check-effect-runtime-policy.sh" "$temp" 2>&1)" && producer_rc=0 || producer_rc=$?
+[[ "$producer_rc" -ne 0 && "$producer_output" == *'effect-package reference scan scan errored (rg exit 7)'* && "$producer_output" == *'valid partial output'* ]] || {
+    printf 'effect package producer error escaped: %s\n' "$producer_output" >&2; exit 1;
+}
+filter_output="$(PATH="$temp/rg-filter-fail:$PATH" bash "$temp/scripts/check-effect-runtime-policy.sh" "$temp" 2>&1)" && filter_rc=0 || filter_rc=$?
+[[ "$filter_rc" -ne 0 && "$filter_output" == *'effect-package allowlist filter errored (rg exit 8)'* && "$filter_output" == *'valid partial output'* ]] || {
+    printf 'effect package filter error escaped: %s\n' "$filter_output" >&2; exit 1;
+}
+mkdir -p "$temp/rg-helper-filter-fail"
+cat >"$temp/rg-helper-filter-fail/rg" <<EOF
+#!/usr/bin/env bash
+if [[ "\$1" == -v && "\$2" == '^crates/(effect-package|dsp-reference)/' ]]; then cat >/dev/null; printf 'valid partial output\n' >&2; exit 9; fi
+exec "$real_rg" "\$@"
+EOF
+chmod +x "$temp/rg-helper-filter-fail/rg"
+helper_output="$(PATH="$temp/rg-helper-filter-fail:$PATH" bash "$temp/scripts/check-effect-runtime-policy.sh" "$temp" 2>&1)" && helper_rc=0 || helper_rc=$?
+[[ "$helper_rc" -ne 0 && "$helper_output" == *'helper definition exemption filter errored (rg exit 9)'* && "$helper_output" == *'valid partial output'* ]] || {
+    printf 'effect helper filter error escaped: %s\n' "$helper_output" >&2; exit 1;
+}
 printf 'effect runtime policy mutations: ok\n'

@@ -73,14 +73,58 @@ gate_scan_required() {
     return "$rc"
 }
 
+# Exclude allowlisted rows from already-collected text. An empty result is valid, but an rg
+# execution error is not. Keeping this separate from the source scan makes both producer statuses
+# observable even when the failing command emitted useful partial output.
+gate_filter_exclude() {
+    local description="$1" pattern="$2" input="$3" output rc
+    [[ -n "$input" ]] || return 0
+    if output="$(printf '%s\n' "$input" | rg -v "$pattern" 2>&1)"; then rc=0; else rc=$?; fi
+    case "$rc" in
+        0) printf '%s' "$output" ;;
+        1) return 0 ;;
+        *)
+            printf '%s\n' "$output" >&2
+            gate_fail "$description filter errored (rg exit $rc)"
+            return "$rc"
+            ;;
+    esac
+}
+
+gate_count_lines() {
+    local description="$1" input="$2" output rc
+    [[ -n "$input" ]] || { printf '0'; return 0; }
+    if output="$(printf '%s\n' "$input" | wc -l)"; then rc=0; else rc=$?; fi
+    if [[ "$rc" == 0 ]]; then
+        printf '%s' "${output//[[:space:]]/}"
+    else
+        printf '%s\n' "$output" >&2
+        gate_fail "$description count errored (wc exit $rc)"
+        return "$rc"
+    fi
+}
+
 gate_toml_dependencies() {
-    local manifest="$1" extracted output rc
+    local manifest="$1" mode="${2:-rack}" extracted output rc awk_program
+    if [[ "$mode" == plain ]]; then
+        awk_program='
+            /^\[dependencies\]$/ { in_dependencies = 1; next }
+            /^\[/ { in_dependencies = 0 }
+            in_dependencies && /^[A-Za-z0-9_-]+(\.workspace)?[[:space:]]*=/ {
+                value = $0; sub(/[[:space:]]*=.*$/, "", value); sub(/\.workspace$/, "", value); print value
+            }
+        '
+    else
+        awk_program='
+            /^\[dependencies\]$/ { in_dependencies = 1; next }
+            /^\[/ { in_dependencies = 0 }
+            in_dependencies && /^[A-Za-z0-9_-]+(\.workspace)?[[:space:]]*=/ {
+                value = $1; sub(/\.workspace$/, "", value); print value
+            }
+        '
+    fi
     if extracted="$(awk '
-        /^\[dependencies\]$/ { in_dependencies = 1; next }
-        /^\[/ { in_dependencies = 0 }
-        in_dependencies && /^[A-Za-z0-9_-]+(\.workspace)?[[:space:]]*=/ {
-            value = $1; sub(/\.workspace$/, "", value); print value
-        }
+        '"$awk_program"'
     ' "$manifest")"; then
         :
     else
