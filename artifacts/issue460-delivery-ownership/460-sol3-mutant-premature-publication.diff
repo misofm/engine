@@ -1,0 +1,620 @@
+diff --git a/crates/protocol/src/delivery.rs b/crates/protocol/src/delivery.rs
+index ee2c420e..5683b1c0 100644
+--- a/crates/protocol/src/delivery.rs
++++ b/crates/protocol/src/delivery.rs
+@@ -113,9 +113,9 @@ pub struct TerminalAutomation {
+ pub struct CancelComplete {
+     pub generation: u64,
+     pub effective_sample: SampleTime,
+-    pub canceled_events: u16,
+-    pub canceled_records: u32,
+-    pub applied_records: u32,
++    pub canceled_events: usize,
++    pub canceled_records: u64,
++    pub applied_records: u64,
+ }
+ 
+ #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+@@ -136,6 +136,7 @@ pub struct CoreTicket {
+ struct CoreMessage<P: Copy + Send + 'static> {
+     ticket: CoreTicket,
+     payload: P,
++    logical_count: u16,
+ }
+ 
+ #[derive(Clone, Copy, Debug)]
+@@ -152,7 +153,7 @@ pub struct PreparedDelivery<P: Copy + Send + 'static> {
+ pub struct DeliveryCoreControl<P: Copy + Send + 'static> {
+     producer: Producer<CoreMessage<P>>,
+     terminal_consumer: Consumer<CoreTerminal>,
+-    entries: Box<[Option<(CoreTicket, P, bool)>]>,
++    entries: Box<[Option<(CoreTicket, P, bool, u16)>]>,
+     serial: u64,
+     generation: u64,
+     terminal_head: Option<CoreTerminal>,
+@@ -162,6 +163,15 @@ pub struct DeliveryCoreRender<P: Copy + Send + 'static> {
+     consumer: Consumer<CoreMessage<P>>,
+     terminal_producer: Producer<CoreTerminal>,
+     pending: Option<CoreMessage<P>>,
++    pending_prefix: u16,
++}
++
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub struct CoreCompletion<P: Copy + Send + 'static> {
++    pub ticket: CoreTicket,
++    pub payload: P,
++    pub applied_prefix: u16,
++    pub logical_count: u16,
+ }
+ 
+ impl<P: Copy + Send + 'static> PreparedDelivery<P> {
+@@ -183,9 +193,10 @@ impl<P: Copy + Send + 'static> PreparedDelivery<P> {
+                 largest = largest.max(bytes);
+             }
+         }
+-        let entries = core::alloc::Layout::array::<Option<(CoreTicket, P, bool)>>(capacity.get())
+-            .map_err(|_| crate::ProtocolQueueError::CapacityOverflow)?
+-            .size();
++        let entries =
++            core::alloc::Layout::array::<Option<(CoreTicket, P, bool, u16)>>(capacity.get())
++                .map_err(|_| crate::ProtocolQueueError::CapacityOverflow)?
++                .size();
+         let entries =
+             u64::try_from(entries).map_err(|_| crate::ProtocolQueueError::CapacityOverflow)?;
+         total = total
+@@ -217,14 +228,19 @@ impl<P: Copy + Send + 'static> PreparedDelivery<P> {
+                 consumer,
+                 terminal_producer,
+                 pending: None,
++                pending_prefix: 0,
+             },
+         ))
+     }
+ }
+ 
+ impl<P: Copy + Send + 'static> DeliveryCoreControl<P> {
+-    pub fn try_publish(&mut self, payload: P) -> Result<CoreTicket, DeliveryError> {
+-        let ticket = self.reserve_payload(payload)?;
++    pub fn try_publish(
++        &mut self,
++        payload: P,
++        logical_count: u16,
++    ) -> Result<CoreTicket, DeliveryError> {
++        let ticket = self.reserve_payload(payload, logical_count)?;
+         if let Err(error) = self.publish_reserved(ticket) {
+             self.entries[ticket.slot] = None;
+             return Err(error);
+@@ -232,7 +248,14 @@ impl<P: Copy + Send + 'static> DeliveryCoreControl<P> {
+         Ok(ticket)
+     }
+ 
+-    fn reserve_payload(&mut self, payload: P) -> Result<CoreTicket, DeliveryError> {
++    fn reserve_payload(
++        &mut self,
++        payload: P,
++        logical_count: u16,
++    ) -> Result<CoreTicket, DeliveryError> {
++        if logical_count == 0 || usize::from(logical_count) > MAX_RECORDS {
++            return Err(DeliveryError::InvalidPrefix);
++        }
+         let slot = self
+             .entries
+             .iter()
+@@ -247,13 +270,13 @@ impl<P: Copy + Send + 'static> DeliveryCoreControl<P> {
+             slot,
+             serial: self.serial,
+         };
+-        self.entries[slot] = Some((ticket, payload, false));
++        self.entries[slot] = Some((ticket, payload, false, logical_count));
+         self.serial = next_serial;
+         Ok(ticket)
+     }
+ 
+     fn publish_reserved(&mut self, ticket: CoreTicket) -> Result<(), DeliveryError> {
+-        let (owned, payload, published) = self
++        let (owned, payload, published, logical_count) = self
+             .entries
+             .get(ticket.slot)
+             .and_then(|entry| *entry)
+@@ -263,13 +286,17 @@ impl<P: Copy + Send + 'static> DeliveryCoreControl<P> {
+             return Err(DeliveryError::StaleTicket);
+         }
+         self.producer
+-            .try_push(CoreMessage { ticket, payload })
++            .try_push(CoreMessage {
++                ticket,
++                payload,
++                logical_count,
++            })
+             .map_err(|_| DeliveryError::Full)?;
+-        self.entries[ticket.slot] = Some((owned, payload, true));
++        self.entries[ticket.slot] = Some((owned, payload, true, logical_count));
+         Ok(())
+     }
+ 
+-    pub fn collect(&mut self, ticket: CoreTicket) -> Result<P, DeliveryError> {
++    pub fn collect(&mut self, ticket: CoreTicket) -> Result<CoreCompletion<P>, DeliveryError> {
+         let entry = self
+             .entries
+             .get(ticket.slot)
+@@ -291,7 +318,12 @@ impl<P: Copy + Send + 'static> DeliveryCoreControl<P> {
+         }
+         self.terminal_head = None;
+         self.entries[ticket.slot] = None;
+-        Ok(entry.1)
++        Ok(CoreCompletion {
++            ticket,
++            payload: entry.1,
++            applied_prefix: terminal.applied_prefix,
++            logical_count: terminal.record_count,
++        })
+     }
+ 
+     fn poll_terminal(&mut self) -> Result<CoreTerminal, DeliveryError> {
+@@ -331,22 +363,43 @@ impl<P: Copy + Send + 'static> DeliveryCoreRender<P> {
+         let message = self.consumer.try_pop().map_err(|_| DeliveryError::Empty)?;
+         let result = (message.ticket, message.payload);
+         self.pending = Some(message);
++        self.pending_prefix = 0;
+         Ok(result)
+     }
+ 
+-    pub fn finish(&mut self, ticket: CoreTicket) -> Result<(), DeliveryError> {
++    pub fn mark_progress(
++        &mut self,
++        ticket: CoreTicket,
++        new_prefix: u16,
++    ) -> Result<(), DeliveryError> {
++        let message = self.pending.as_ref().ok_or(DeliveryError::Empty)?;
++        if message.ticket != ticket {
++            return Err(DeliveryError::StaleTicket);
++        }
++        if new_prefix < self.pending_prefix || new_prefix > message.logical_count {
++            return Err(DeliveryError::InvalidPrefix);
++        }
++        self.pending_prefix = new_prefix;
++        Ok(())
++    }
++
++    pub fn finish(&mut self, ticket: CoreTicket, applied_prefix: u16) -> Result<(), DeliveryError> {
+         let message = self.pending.as_ref().ok_or(DeliveryError::Empty)?;
+         if message.ticket != ticket {
+             return Err(DeliveryError::StaleTicket);
+         }
++        if applied_prefix != self.pending_prefix || applied_prefix != message.logical_count {
++            return Err(DeliveryError::InvalidPrefix);
++        }
+         self.terminal_producer
+             .try_push(CoreTerminal {
+                 ticket,
+-                applied_prefix: 0,
+-                record_count: 0,
++                applied_prefix,
++                record_count: message.logical_count,
+             })
+             .map_err(|_| DeliveryError::Full)?;
+         self.pending = None;
++        self.pending_prefix = 0;
+         Ok(())
+     }
+ }
+@@ -359,7 +412,13 @@ impl<P: Copy + Send + 'static> DeliveryCoreRender<P> {
+         record_count: u16,
+     ) -> Result<(), DeliveryError> {
+         let message = self.pending.as_ref().ok_or(DeliveryError::Empty)?;
+-        if message.ticket != ticket || applied_prefix > record_count {
++        if message.ticket != ticket {
++            return Err(DeliveryError::StaleTicket);
++        }
++        if record_count != message.logical_count
++            || applied_prefix != self.pending_prefix
++            || applied_prefix > record_count
++        {
+             return Err(DeliveryError::InvalidPrefix);
+         }
+         self.terminal_producer
+@@ -370,6 +429,7 @@ impl<P: Copy + Send + 'static> DeliveryCoreRender<P> {
+             })
+             .map_err(|_| DeliveryError::Full)?;
+         self.pending = None;
++        self.pending_prefix = 0;
+         Ok(())
+     }
+ }
+@@ -404,6 +464,17 @@ struct CancelAck {
+ 
+ pub struct PreparedAutomationDelivery;
+ 
++fn cancellation_headroom(total: usize, sequence: u64) -> Result<(u64, u64), DeliveryError> {
++    let total = u64::try_from(total).map_err(|_| DeliveryError::SequenceOverflow)?;
++    let next_sequence = sequence
++        .checked_add(total)
++        .ok_or(DeliveryError::SequenceOverflow)?;
++    let records = total
++        .checked_mul(MAX_RECORDS as u64)
++        .ok_or(DeliveryError::SequenceOverflow)?;
++    Ok((next_sequence, records))
++}
++
+ impl PreparedAutomationDelivery {
+     pub fn resource_report_for_config(
+         config: ProtocolQueueConfig,
+@@ -432,7 +503,7 @@ impl PreparedAutomationDelivery {
+             add(payload.slot_payload_bytes)?;
+         }
+         add(
+-            core::alloc::Layout::array::<Option<(CoreTicket, AutomationBatchSlot, bool)>>(
++            core::alloc::Layout::array::<Option<(CoreTicket, AutomationBatchSlot, bool, u16)>>(
+                 config.automation_batch_slots.get(),
+             )
+             .map_err(|_| crate::ProtocolQueueError::CapacityOverflow)?
+@@ -528,7 +599,7 @@ impl AutomationDeliveryControl {
+         let next_order = order
+             .checked_add(1)
+             .ok_or(DeliveryError::SequenceOverflow)?;
+-        let ticket = self.core.reserve_payload(batch)?;
++        let ticket = self.core.reserve_payload(batch, batch.len)?;
+         self.owners[ticket.slot] = Some(AdmissionOwner {
+             ticket,
+             order,
+@@ -651,10 +722,7 @@ impl AutomationDeliveryControl {
+             .outstanding()
+             .checked_add(queued)
+             .ok_or(DeliveryError::SequenceOverflow)?;
+-        let total_u64 = u64::try_from(total).map_err(|_| DeliveryError::SequenceOverflow)?;
+-        self.sequence
+-            .checked_add(total_u64)
+-            .ok_or(DeliveryError::SequenceOverflow)?;
++        let _ = cancellation_headroom(total, self.sequence)?;
+         self.next_order
+             .checked_add(u64::try_from(queued).map_err(|_| DeliveryError::SequenceOverflow)?)
+             .ok_or(DeliveryError::SequenceOverflow)?;
+@@ -729,9 +797,9 @@ impl AutomationDeliveryControl {
+             return Err(DeliveryError::StaleTicket);
+         }
+         let sample = self.cancel.as_ref().unwrap().effective_sample.unwrap();
+-        let mut published = 0u16;
+-        let mut canceled_records = 0u32;
+-        let mut applied_records = 0u32;
++        let mut published = 0usize;
++        let mut canceled_records = 0u64;
++        let mut applied_records = 0u64;
+         let mut last_order = 0u64;
+         for _ in 0..self.owners.len() {
+             let Some(owner) = self
+@@ -747,7 +815,9 @@ impl AutomationDeliveryControl {
+             last_order = owner.order;
+             let batch = self.core.payload(owner.ticket)?;
+             let remaining = batch.len.saturating_sub(owner.applied_prefix);
+-            applied_records = applied_records.saturating_add(u32::from(owner.applied_prefix));
++            applied_records = applied_records
++                .checked_add(u64::from(owner.applied_prefix))
++                .expect("prevalidated frozen record total");
+             if remaining != 0 {
+                 let state = self.cancel.as_mut().unwrap();
+                 let event = ReliableSlot::automation_canceled(
+@@ -759,11 +829,14 @@ impl AutomationDeliveryControl {
+                     self.queues.report(QueueKind::Automation).generation.0,
+                     Some(sample),
+                 );
+-                self.queues
+-                    .commit_reserved_reliable_event(state.reservations.as_mut().unwrap(), event);
++                let _premature_complete_mutant = (state.reservations.as_mut().unwrap(), event);
+                 self.sequence += 1;
+-                published += 1;
+-                canceled_records = canceled_records.saturating_add(u32::from(remaining));
++                published = published
++                    .checked_add(1)
++                    .expect("frozen ticket population is representable");
++                canceled_records = canceled_records
++                    .checked_add(u64::from(remaining))
++                    .expect("prevalidated frozen record total");
+             }
+             self.release(owner.ticket, batch);
+         }
+@@ -897,6 +970,7 @@ impl AutomationDeliveryRender {
+         if new_prefix < self.pending_prefix || new_prefix > message.payload.len {
+             return Err(DeliveryError::InvalidPrefix);
+         }
++        self.core.mark_progress(ticket, new_prefix)?;
+         self.pending_prefix = new_prefix;
+         Ok(())
+     }
+@@ -956,14 +1030,20 @@ mod tests {
+     }
+ 
+     fn cancellation_payload(slot: ReliableSlot) -> (u64, RequestId, u16, SampleTime) {
++        assert_eq!(slot.revision, SessionRevision(2));
+         match slot.payload {
+             ReliablePayload::AutomationCanceled {
+                 event_sequence,
+                 origin_request_id,
+                 canceled_records,
++                reason,
++                queue_generation,
+                 effective_sample: Some(sample),
+-                ..
+-            } => (event_sequence, origin_request_id, canceled_records, sample),
++            } => {
++                assert_eq!(reason, AutomationCancellationReason::EndpointShutdown);
++                assert_ne!(queue_generation, 0);
++                (event_sequence, origin_request_id, canceled_records, sample)
++            }
+             other => panic!("unexpected event {other:?}"),
+         }
+     }
+@@ -996,6 +1076,30 @@ mod tests {
+         control.try_admit(SampleTime(2), batch(2, 7)).unwrap();
+     }
+ 
++    #[test]
++    fn automation_progress_rejections_preserve_exact_pending_and_terminal_ownership() {
++        let (mut control, mut render) = PreparedAutomationDelivery::prepare(config(1), 1).unwrap();
++        control.try_admit(SampleTime(0), two_record_batch(1, 7)).unwrap();
++        let ticket = match control.try_handoff_next(&PreparedDeliveryCapabilities::new(&[ParameterHandle(7)]).unwrap()).unwrap() {
++            HandoffResult::HandedOff(ticket) => ticket, other => panic!("{other:?}"),
++        };
++        render.begin_boundary(SampleTime(0)).unwrap();
++        assert_eq!(render.mark_applied(CoreTicket { generation: ticket.generation + 1, ..ticket }, 1), Err(DeliveryError::StaleTicket));
++        assert_eq!(render.pending(CoreTicket { serial: ticket.serial + 1, ..ticket }), Err(DeliveryError::StaleTicket));
++        assert_eq!(render.pending(CoreTicket { slot: ticket.slot + 1, ..ticket }), Err(DeliveryError::StaleTicket));
++        render.mark_applied(ticket, 1).unwrap();
++        assert_eq!(render.mark_applied(ticket, 0), Err(DeliveryError::InvalidPrefix));
++        assert_eq!(render.mark_applied(ticket, 3), Err(DeliveryError::InvalidPrefix));
++        assert_eq!(render.finish_applied(ticket, 1), Err(DeliveryError::InvalidPrefix));
++        assert_eq!(render.pending(ticket).unwrap().applied_prefix, 1);
++        render.mark_applied(ticket, 2).unwrap(); render.finish_applied(ticket, 2).unwrap();
++        assert_eq!(render.finish_applied(ticket, 2), Err(DeliveryError::Empty));
++        assert_eq!(control.collect_terminal(CoreTicket { generation: ticket.generation + 1, ..ticket }), Err(DeliveryError::StaleTicket));
++        assert_eq!(control.outstanding(), 1);
++        assert_eq!(control.collect_terminal(ticket).unwrap().record_count, 2);
++        assert_eq!(control.outstanding(), 0);
++    }
++
+     #[test]
+     fn unsupported_head_blocks_fifo_and_cancel_ack_publishes_event() {
+         let (mut control, mut render) = PreparedAutomationDelivery::prepare(config(2), 1).unwrap();
+@@ -1240,6 +1344,28 @@ mod tests {
+             _ => unreachable!(),
+         };
+         assert_ne!(first.generation, second.generation);
++        render.begin_boundary(SampleTime(90));
++        let token = control
++            .begin_cancel(
++                AutomationCancellationReason::EndpointShutdown,
++                SessionRevision(4),
++            )
++            .unwrap();
++        render.begin_boundary(SampleTime(91));
++        assert_eq!(
++            control
++                .poll_cancel_boundary(token)
++                .unwrap()
++                .unwrap()
++                .canceled_events,
++            1
++        );
++        match control.try_dequeue_event().unwrap().payload {
++            ReliablePayload::AutomationCanceled { event_sequence, .. } => {
++                assert_eq!(event_sequence, 17)
++            }
++            other => panic!("unexpected event {other:?}"),
++        }
+     }
+ 
+     #[test]
+@@ -1275,6 +1401,38 @@ mod tests {
+             AutomationBatchSlot::new(SessionRevision(1), RequestId::new(3).unwrap(), &over)
+                 .is_err()
+         );
++        let maximum_batch =
++            AutomationBatchSlot::new(SessionRevision(1), RequestId::new(22).unwrap(), &maximum)
++                .unwrap();
++        let (mut maximum_control, mut maximum_render) =
++            PreparedAutomationDelivery::prepare(config(1), 1).unwrap();
++        maximum_control
++            .try_admit(SampleTime(0), maximum_batch)
++            .unwrap();
++        let maximum_ticket = match maximum_control
++            .try_handoff_next(&PreparedDeliveryCapabilities::new(&[ParameterHandle(1)]).unwrap())
++            .unwrap()
++        {
++            HandoffResult::HandedOff(ticket) => ticket,
++            other => panic!("{other:?}"),
++        };
++        assert_eq!(
++            maximum_render
++                .begin_boundary(SampleTime(0))
++                .unwrap()
++                .records
++                .len(),
++            256
++        );
++        maximum_render.mark_applied(maximum_ticket, 256).unwrap();
++        maximum_render.finish_applied(maximum_ticket, 256).unwrap();
++        assert_eq!(
++            maximum_control
++                .collect_terminal(maximum_ticket)
++                .unwrap()
++                .record_count,
++            256
++        );
+         let cfg = config(2);
+         let report = PreparedAutomationDelivery::resource_report_for_config(cfg).unwrap();
+         let base = ProtocolQueues::resource_report_for_config(cfg).unwrap();
+@@ -1296,7 +1454,7 @@ mod tests {
+             }
+         }
+         for bytes in [
+-            core::mem::size_of::<Option<(CoreTicket, AutomationBatchSlot, bool)>>()
++            core::mem::size_of::<Option<(CoreTicket, AutomationBatchSlot, bool, u16)>>()
+                 * cfg.automation_batch_slots.get(),
+             core::mem::size_of::<Option<AdmissionOwner>>() * cfg.automation_batch_slots.get(),
+         ] {
+@@ -1315,26 +1473,44 @@ mod tests {
+     fn generic_copy_core_transfers_layout_independent_payload() {
+         let (mut control, mut render) =
+             PreparedDelivery::<u32>::prepare(NonZeroUsize::new(1).unwrap()).unwrap();
+-        let ticket = control.try_publish(0xfeed_beef).unwrap();
++        assert_eq!(control.try_publish(7, 0), Err(DeliveryError::InvalidPrefix));
++        assert_eq!(
++            control.try_publish(7, 257),
++            Err(DeliveryError::InvalidPrefix)
++        );
++        let ticket = control.try_publish(0xfeed_beef, 3).unwrap();
+         assert_eq!(render.begin().unwrap(), (ticket, 0xfeed_beef));
+-        render.finish(ticket).unwrap();
+-        assert_eq!(control.collect(ticket).unwrap(), 0xfeed_beef);
++        render.mark_progress(ticket, 2).unwrap();
++        assert_eq!(render.finish(ticket, 2), Err(DeliveryError::InvalidPrefix));
++        render.mark_progress(ticket, 3).unwrap();
++        render.finish(ticket, 3).unwrap();
++        assert_eq!(
++            control.collect(ticket).unwrap(),
++            CoreCompletion {
++                ticket,
++                payload: 0xfeed_beef,
++                applied_prefix: 3,
++                logical_count: 3
++            }
++        );
+     }
+ 
+     #[test]
+     fn generic_core_rejected_identities_preserve_pending_and_terminal_owner() {
+         let (mut control, mut render) =
+             PreparedDelivery::<u32>::prepare(NonZeroUsize::new(2).unwrap()).unwrap();
+-        let first = control.try_publish(11).unwrap();
+-        let second = control.try_publish(22).unwrap();
++        let first = control.try_publish(11, 1).unwrap();
++        let second = control.try_publish(22, 1).unwrap();
+         assert_eq!(render.begin().unwrap(), (first, 11));
+-        assert_eq!(render.finish(second), Err(DeliveryError::StaleTicket));
+-        render.finish(first).unwrap();
++        assert_eq!(render.finish(second, 1), Err(DeliveryError::StaleTicket));
++        render.mark_progress(first, 1).unwrap();
++        render.finish(first, 1).unwrap();
+         assert_eq!(control.collect(second), Err(DeliveryError::StaleTicket));
+-        assert_eq!(control.collect(first), Ok(11));
++        assert_eq!(control.collect(first).unwrap().payload, 11);
+         assert_eq!(render.begin().unwrap(), (second, 22));
+-        render.finish(second).unwrap();
+-        assert_eq!(control.collect(second), Ok(22));
++        render.mark_progress(second, 1).unwrap();
++        render.finish(second, 1).unwrap();
++        assert_eq!(control.collect(second).unwrap().payload, 22);
+     }
+ 
+     #[test]
+@@ -1343,8 +1519,110 @@ mod tests {
+         let (mut control, _render) = PreparedDelivery::<u8>::prepare(capacity).unwrap();
+         let mut last = None;
+         for _ in 0..capacity.get() {
+-            last = Some(control.try_publish(1).unwrap());
++            last = Some(control.try_publish(1, 1).unwrap());
+         }
+         assert_eq!(last.unwrap().slot, usize::from(u16::MAX) + 1);
+     }
++
++    #[test]
++    fn wide_cancellation_accounting_has_no_u16_boundary_or_saturation() {
++        assert_eq!(
++            cancellation_headroom(usize::from(u16::MAX) + 2, 7)
++                .unwrap()
++                .0,
++            7 + u64::from(u16::MAX) + 2
++        );
++        if usize::BITS >= 64 {
++            let overflowing = usize::try_from(u64::MAX / MAX_RECORDS as u64 + 1).unwrap();
++            assert_eq!(
++                cancellation_headroom(overflowing, 0),
++                Err(DeliveryError::SequenceOverflow)
++            );
++        }
++        assert_eq!(
++            cancellation_headroom(1, u64::MAX),
++            Err(DeliveryError::SequenceOverflow)
++        );
++    }
++
++    #[test]
++    fn cancellation_publication_uses_admission_order_after_physical_slot_reuse() {
++        let (mut control, mut render) = PreparedAutomationDelivery::prepare(config(2), 31).unwrap();
++        let capabilities = PreparedDeliveryCapabilities::new(&[ParameterHandle(7)]).unwrap();
++        control.try_admit(SampleTime(0), batch(1, 7)).unwrap();
++        control.try_admit(SampleTime(2), batch(2, 7)).unwrap();
++        let first = match control.try_handoff_next(&capabilities).unwrap() {
++            HandoffResult::HandedOff(t) => t,
++            _ => unreachable!(),
++        };
++        let second = match control.try_handoff_next(&capabilities).unwrap() {
++            HandoffResult::HandedOff(t) => t,
++            _ => unreachable!(),
++        };
++        render.begin_boundary(SampleTime(0));
++        render.mark_applied(first, 1).unwrap();
++        render.finish_applied(first, 1).unwrap();
++        control.collect_terminal(first).unwrap();
++        control.try_admit(SampleTime(3), batch(3, 7)).unwrap();
++        let third = match control.try_handoff_next(&capabilities).unwrap() {
++            HandoffResult::HandedOff(t) => t,
++            _ => unreachable!(),
++        };
++        assert_eq!(first.slot, third.slot);
++        assert_ne!(second.slot, third.slot);
++        let token = control
++            .begin_cancel(
++                AutomationCancellationReason::EndpointShutdown,
++                SessionRevision(2),
++            )
++            .unwrap();
++        render.begin_boundary(SampleTime(70));
++        control.poll_cancel_boundary(token).unwrap().unwrap();
++        assert_eq!(
++            cancellation_payload(control.try_dequeue_event().unwrap()),
++            (31, RequestId::new(2).unwrap(), 1, SampleTime(70))
++        );
++        assert_eq!(
++            cancellation_payload(control.try_dequeue_event().unwrap()),
++            (32, RequestId::new(3).unwrap(), 1, SampleTime(70))
++        );
++    }
++
++    #[test]
++    fn occupied_reliable_capacity_refuses_next_cancel_without_mutation() {
++        let mut cfg = config(2);
++        cfg.reliable_event_slots = NonZeroUsize::new(2).unwrap();
++        let (mut control, mut render) = PreparedAutomationDelivery::prepare(cfg, 1).unwrap();
++        control.try_admit(SampleTime(0), batch(1, 7)).unwrap();
++        control.try_admit(SampleTime(2), batch(2, 7)).unwrap();
++        let first = control
++            .begin_cancel(
++                AutomationCancellationReason::EndpointShutdown,
++                SessionRevision(2),
++            )
++            .unwrap();
++        render.begin_boundary(SampleTime(9));
++        control.poll_cancel_boundary(first).unwrap().unwrap();
++        control.try_admit(SampleTime(0), batch(3, 7)).unwrap();
++        let before = (
++            control.outstanding(),
++            control.resident_automation(),
++            control.sequence,
++        );
++        assert!(matches!(
++            control.begin_cancel(
++                AutomationCancellationReason::EndpointShutdown,
++                SessionRevision(3)
++            ),
++            Err(DeliveryError::ReliableFull(_))
++        ));
++        assert_eq!(
++            (
++                control.outstanding(),
++                control.resident_automation(),
++                control.sequence
++            ),
++            before
++        );
++    }
+ }
