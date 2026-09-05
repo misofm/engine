@@ -11,6 +11,7 @@ name = "protocol"
 
 [features]
 default = []
+test-support = []
 
 [dependencies]
 engine.workspace = true

@@ -10,6 +10,10 @@ publish.workspace = true
 name = "host_core"
 crate-type = ["rlib"]
 
+[features]
+default = []
+control-provider = ["dep:protocol"]
+
 [dependencies]
 builtins.workspace = true
 builtins-compiler.workspace = true
@@ -22,6 +26,7 @@ graph-compiler.workspace = true
 # The lane crate is already in every host's link graph; naming it here is what lets the facade own
 # the one started-session handle instead of each host re-deriving the pin.
 lane.workspace = true
+protocol = { workspace = true, optional = true }
 session.workspace = true
 source.workspace = true
 

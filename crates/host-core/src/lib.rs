@@ -15,8 +15,10 @@
 //! * **Result codes.** The C ABI and the browser ABI number their results differently, so the
 //!   facade returns typed values ([`PrepareRejection`], [`SourceControlError`]) and each host maps
 //!   them onto its own frozen numbering.
-//! * **The control protocol.** `protocol` is a host-specific transport; this crate
-//!   never depends on it, so a host that does not speak it does not pay for it.
+//! * **Control transport orchestration.** Protocol queues, replay and command dispatch remain
+//!   host-specific. This crate supplies only [`SessionControlProvider`], the shared typed adapter
+//!   from a compiled session and live plan sample projection to the transport-neutral provider
+//!   trait; a host still owns whether and how that provider is transported.
 //! * **Unsafe code and FFI.** This crate is a plain `rlib` with no `#[unsafe(no_mangle)]` items: a
 //!   `cdylib` re-exports every `no_mangle` symbol it links, so a facade that carried them would
 //!   push the C ABI's exports into the browser artifact and break its frozen export gate.
@@ -87,6 +89,8 @@
 //!   attested. [`PreparedHost`] stays `Send`, because moving *preparation* to the render thread is
 //!   the supported hand-off.
 
+#[cfg(feature = "control-provider")]
+pub mod control_provider;
 pub mod diagnostics;
 pub mod prepare;
 pub mod render_session;
@@ -94,6 +98,11 @@ pub mod shape;
 pub mod solo;
 pub mod source;
 
+#[cfg(feature = "control-provider")]
+pub use control_provider::{
+    PlanSampleSource, PreparedSessionControlCatalog, SessionControlProvider,
+    SessionControlProviderError, SessionControlProviderResources,
+};
 pub use diagnostics::{
     PrepareDiagnostics, PrepareRejection, diagnostic_lines, fixed_diagnostic_line,
 };

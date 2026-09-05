@@ -16,7 +16,7 @@ default = []
 [dependencies]
 engine.workspace = true
 effect-contract.workspace = true
-host-core.workspace = true
+host-core = { workspace = true, features = ["control-provider"] }
 lane.workspace = true
 protocol.workspace = true
 session.workspace = true

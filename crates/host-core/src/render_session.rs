@@ -202,6 +202,8 @@ impl PreparedHost {
             plan,
             sources,
             report,
+            #[cfg(feature = "control-provider")]
+            control_catalog,
         } = self;
         match StartedRenderSession::start(plan) {
             Ok(started) => Ok((started, sources, report)),
@@ -210,6 +212,8 @@ impl PreparedHost {
                     plan,
                     sources,
                     report,
+                    #[cfg(feature = "control-provider")]
+                    control_catalog,
                 },
                 rejection,
             )),

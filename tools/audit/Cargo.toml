@@ -27,7 +27,7 @@ graph = { workspace = true, features = ["test-support"] }
 graph-compiler.workspace = true
 lane.workspace = true
 parametric-eq.workspace = true
-protocol.workspace = true
+protocol = { workspace = true, features = ["test-support"] }
 session.workspace = true
 source = { workspace = true, features = ["test-support"] }
 sha2.workspace = true
