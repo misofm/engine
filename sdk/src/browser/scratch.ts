@@ -1,6 +1,7 @@
 import type { BootOptions } from "../core/abi.ts";
 import type { SessionShape } from "../core/boundary.ts";
-import { MisoUsageError } from "../core/errors.ts";
+import type { MisoEngineErrorInit } from "../core/errors.ts";
+import { MisoEngineError, MisoUsageError } from "../core/errors.ts";
 import { BUNDLED_ENGINE_ASSETS } from "../assets.ts";
 import { BrowserBootError } from "./default-host.ts";
 
@@ -8,10 +9,15 @@ export interface ScratchBootRequest {
   readonly type: "scratch"; readonly requestId: number; readonly moduleUrl: string;
   readonly document: Uint8Array; readonly options: BootOptions;
 }
+type ScratchFailure = { readonly name: string; readonly message: string } & (
+  | { readonly kind: "engine"; readonly detail: MisoEngineErrorInit }
+  | { readonly kind: "usage" }
+  | { readonly kind?: undefined }
+);
 export type ScratchBootReply =
   | { readonly type: "worker-ready" }
   | { readonly type: "scratch-result"; readonly requestId: number; readonly ok: true; readonly shape: SessionShape }
-  | { readonly type: "scratch-result"; readonly requestId: number; readonly ok: false; readonly error: { readonly name: string; readonly message: string } };
+  | { readonly type: "scratch-result"; readonly requestId: number; readonly ok: false; readonly error: ScratchFailure };
 
 /** Only the Worker operations used by a one-shot scratch boot. */
 export interface ScratchWorker {
@@ -83,7 +89,17 @@ export async function scratchBootWithWorker(options: {
       } else if (reply.type === "scratch-result" && requested && reply.requestId === 1) {
         if (options.signal?.aborted) { abort(); return; }
         if (reply.ok) finish(undefined, reply.shape);
-        else finish(Object.assign(new Error(reply.error.message), { name: reply.error.name }));
+        else {
+          const failure = reply.error;
+          const error = failure.kind === "engine"
+            ? new MisoEngineError("", failure.detail)
+            : failure.kind === "usage" ? new MisoUsageError(failure.message) : new Error(failure.message);
+          // The engine message is already formatted in the Worker. Preserve it verbatim rather
+          // than applying the constructor's phase/diagnostic decoration twice or parsing it.
+          error.message = failure.message;
+          error.name = failure.name;
+          finish(error);
+        }
       }
     };
     worker.addEventListener("message", message);

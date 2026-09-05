@@ -1,3 +1,4 @@
+import { MisoEngineError, MisoUsageError } from "../core/errors.ts";
 import { scratchBootInWorker } from "./engine.ts";
 
 import type { ScratchBootReply, ScratchBootRequest } from "./scratch.ts";
@@ -27,7 +28,14 @@ async function run(request: ScratchBootRequest): Promise<ScratchBootReply> {
   } catch (error) {
     return {
       type: "scratch-result", requestId: request.requestId, ok: false,
-      error: { name: error instanceof Error ? error.name : "Error", message: error instanceof Error ? error.message : String(error) },
+      error: {
+        name: error instanceof Error ? error.name : "Error",
+        message: error instanceof Error ? error.message : String(error),
+        ...(error instanceof MisoEngineError ? {
+          kind: "engine" as const,
+          detail: { phase: error.phase, code: error.code, result: error.result, diagnostics: error.diagnostics },
+        } : error instanceof MisoUsageError ? { kind: "usage" as const } : {}),
+      },
     };
   }
 }

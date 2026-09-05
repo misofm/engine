@@ -1,14 +1,17 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createEngine, scratchBootWithWorker, BrowserBootError, scratchBootOptions, workletBootOptions, toWebBootOptions } from "../src/browser/index.ts";
+import { createEngine, scratchBootInWorker, scratchBootWithWorker, BrowserBootError, scratchBootOptions, workletBootOptions, toWebBootOptions } from "../src/browser/index.ts";
+import { MisoEngineError, MisoUsageError } from "../src/core/errors.ts";
+import { moduleBytes } from "./support.mjs";
 import { BUNDLED_ENGINE_ASSETS } from "../src/assets.ts";
 
 const shape = { sampleRateHz: 48000, quantumFrames: 128 };
 class FakeWorker {
-  listeners = new Map(); terminated = 0; requests = [];
-  addEventListener(type, listener) { const set = this.listeners.get(type) ?? new Set(); set.add(listener); this.listeners.set(type, set); }
+  listeners = new Map(); history = new Map(); terminated = 0; requests = [];
+  addEventListener(type, listener) { const set = this.listeners.get(type) ?? new Set(); set.add(listener); this.listeners.set(type, set); const historical = this.history.get(type) ?? []; historical.push(listener); this.history.set(type, historical); }
   removeEventListener(type, listener) { this.listeners.get(type)?.delete(listener); }
   emit(type, data) { for (const listener of [...(this.listeners.get(type) ?? [])]) listener(type === "message" ? { data } : data); }
+  emitHistorical(type, data) { for (const listener of this.history.get(type) ?? []) listener(type === "message" ? { data } : data); }
   postMessage(request) { this.requests.push(request); this.onPost?.(request); }
   terminate() { this.terminated++; }
   assertClosed() { assert.equal(this.terminated, 1); assert.equal([...this.listeners.values()].reduce((n,s) => n+s.size,0), 0); }
@@ -25,7 +28,7 @@ test("scratch succeeds once after ready, correlates and ignores late events", as
   worker.emit("message", { type: "worker-ready" }); worker.emit("message", { type: "worker-ready" });
   assert.equal(worker.requests.length, 1); assert.equal(worker.requests[0].moduleUrl, "wasm");
   worker.emit("message", { ...result, requestId: 2 }); worker.emit("message", result);
-  assert.equal(await pending, shape); worker.emit("message", result); worker.assertClosed();
+  assert.equal(await pending, shape); worker.emitHistorical("message", result); worker.assertClosed();
 });
 for (const phase of ["handshake", "request"]) {
   for (const fault of ["timeout", "abort", "error", "messageerror", "post", "reject"]) {
@@ -40,7 +43,7 @@ for (const phase of ["handshake", "request"]) {
       if (fault === "messageerror") worker.emit("messageerror", {});
       if (fault === "reject") worker.emit("message", { ...result, ok: false, error: { name: "Failure", message: "refused" } });
       await assert.rejects(pending, error => fault === "abort" || fault === "post" ? error === reason : error instanceof Error);
-      worker.emit("message", result); worker.assertClosed();
+      worker.emitHistorical("message", result); worker.assertClosed();
     });
   }
 }
@@ -98,4 +101,83 @@ test("suspension failure closes the accepted context and retains the error", asy
   candidate.suspend = async () => { throw error; };
   await assert.rejects(createEngine({ document: "opaque", scratchBoot: async () => shape, createContext: () => candidate, hostModuleUrl: "not-an-importable-url" }), failure => failure === error);
   assert.equal(candidate.closed, 1);
+});
+
+
+test("scratch settlement clears timers and abort listeners; removed callbacks remain inert", async (t) => {
+  const timers = new Map(); const historicalTimers = [];
+  t.mock.method(globalThis, "setTimeout", (callback) => { const handle = {}; timers.set(handle, callback); historicalTimers.push(callback); return handle; });
+  t.mock.method(globalThis, "clearTimeout", handle => timers.delete(handle));
+  for (const outcome of ["success", "abort", "error"]) {
+    const worker = new FakeWorker(); const controller = new AbortController();
+    const abortListeners = new Set(); const historicalAbort = [];
+    const add = controller.signal.addEventListener.bind(controller.signal);
+    const remove = controller.signal.removeEventListener.bind(controller.signal);
+    t.mock.method(controller.signal, "addEventListener", (type, listener, options) => {
+      if (type === "abort") { abortListeners.add(listener); historicalAbort.push(listener); } add(type, listener, options);
+    });
+    t.mock.method(controller.signal, "removeEventListener", (type, listener) => {
+      if (type === "abort") abortListeners.delete(listener); remove(type, listener);
+    });
+    let settlements = 0;
+    const pending = boot(worker, { signal: controller.signal }).then(() => { settlements++; }, () => { settlements++; });
+    assert.equal(timers.size, 1); assert.equal(abortListeners.size, 1);
+    worker.emit("message", { type: "worker-ready" }); assert.equal(timers.size, 1);
+    if (outcome === "success") worker.emit("message", result);
+    else if (outcome === "abort") controller.abort(new Error("stop"));
+    else worker.emit("error", { error: new Error("failed") });
+    await pending;
+    assert.equal(timers.size, 0, "no scratch deadline survives settlement");
+    assert.equal(abortListeners.size, 0, "no abort listener survives settlement");
+    worker.emitHistorical("message", { type: "worker-ready" });
+    worker.emitHistorical("message", result);
+    worker.emitHistorical("error", { error: new Error("late") });
+    worker.emitHistorical("messageerror", {});
+    for (const callback of historicalAbort) callback();
+    for (const callback of historicalTimers) callback();
+    await Promise.resolve();
+    assert.equal(settlements, 1); assert.equal(worker.requests.length, 1);
+    assert.equal(timers.size, 0); assert.equal(abortListeners.size, 0); worker.assertClosed();
+  }
+});
+
+test("actual scratch entry and client retain real Wasm refusal and usage error types", async () => {
+  const bytes = await moduleBytes();
+  const document = new TextEncoder().encode("{}");
+  const options = scratchBootOptions({});
+  let direct;
+  await assert.rejects(scratchBootInWorker({ moduleBytes: bytes, document, options }), error => {
+    assert.ok(error instanceof MisoEngineError); direct = error; return true;
+  });
+  const oldSelf = globalThis.self; const oldFetch = globalThis.fetch;
+  let worker;
+  const scope = { onmessage: null, postMessage(reply) { worker?.emit("message", structuredClone(reply)); } };
+  globalThis.self = scope;
+  globalThis.fetch = async () => new Response(bytes);
+  try {
+    await import("../src/browser/scratch-worker.ts");
+    async function refused() {
+      worker = new FakeWorker();
+      worker.onPost = request => scope.onmessage({ data: structuredClone(request) });
+      const pending = scratchBootWithWorker({ document, options, moduleUrl: "wasm", createWorker: () => worker });
+      worker.emit("message", { type: "worker-ready" });
+      let refusal;
+      await assert.rejects(pending, error => { refusal = error; return true; });
+      worker.assertClosed(); return refusal;
+    }
+    const transported = await refused();
+    assert.ok(transported instanceof MisoEngineError);
+    for (const key of ["name", "message", "phase", "code", "result", "diagnostics", "diagnosticCode", "diagnosticPath"]) {
+      assert.deepEqual(transported[key], direct[key], key);
+    }
+    assert.ok(Object.isFrozen(transported.diagnostics));
+    const usage = new MisoUsageError("Worker-side SDK usage refusal");
+    globalThis.fetch = async () => { throw usage; };
+    const transportedUsage = await refused();
+    assert.ok(transportedUsage instanceof MisoUsageError);
+    assert.equal(transportedUsage.name, usage.name); assert.equal(transportedUsage.message, usage.message);
+  } finally {
+    if (oldSelf === undefined) delete globalThis.self; else globalThis.self = oldSelf;
+    globalThis.fetch = oldFetch;
+  }
 });
