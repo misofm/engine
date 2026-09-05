@@ -97,3 +97,9 @@ Root should number/synchronize the bounded successor in `/tmp/astra-401-graph-ex
 Read-only inspection of parent/child specs, earlier approval and current five gate call sites; no implementation, tests, Cargo, Git or GitHub operations.
 
 Numbered successor #423 preserves this obligation without reopening accepted #407 scan correctness or expanding #417. The serialized order is #417, #423, #410, #411, #412.
+
+## Final child accounting for #423 delivery
+
+All seven gate implementations and five original dependency extractors are now covered without policy exceptions. Foundation #400 supplied the checked helper. Closed #406 (PR #414, merge `882277b65ff64780f57c4df33dee127abc6a33e2`) delivered protocol-control, effect-runtime, host-core and builtins; closed #407 (PR #421, merge `a0e4d123a038160b4f5934dac14aacc72c9fbbf2`) delivered graph/conformance scan correctness; closed #417 (PR #424, merge `1cfd49d2929b2a75f6054badebfa9979c069ae71`) delivered Session policy completeness. Astra accepted #423 source at `58729f9853f5a724a2cb843b61e48d33cfa156fd`, preserving graph grammar and completing the remaining extractor.
+
+The five shared-helper modes are rack/default, effect-runtime/plain, builtins/plain, conformance/plain-target and graph/graph; no local production dependency parser remains at these sites. Sol independently checked this original-obligation accounting in `/tmp/sol-401-final-accounting.md`. #423 owns the remaining unchanged-count workspace comparison and actual PR Astra/required-CI delivery. This parent may close jointly with #423 only when those pass and the accepted evidence is upstream; #306 and broader TOOL-11 remain open for their separate obligations. Final delivery evidence is recorded in #423 and the remote merge/closure comments.
