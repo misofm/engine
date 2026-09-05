@@ -29,14 +29,14 @@ concurrency:
 
 env:
   PACKAGE_NAME: "@misofm/engine"
-  PACKAGE_VERSION: "0.1.0"
-  EXPECTED_WORKLET_SHA256: "a08a868cf1b62bb466a8fa5b826b214fa708265669fc730398706c869c9e43bd"
+  PACKAGE_VERSION: "0.2.0"
+  EXPECTED_WORKLET_SHA256: "97a83d452ad09b3140423ac3465aae846ce468b12fc1a6472dd820f330e8bfd3"
   RUSTUP_TOOLCHAIN: "1.97.1"
   NPM_CONFIG_REGISTRY: "https://registry.npmjs.org"
 
 jobs:
   release:
-    name: ${{ inputs.mode }} @misofm/engine 0.1.0
+    name: ${{ inputs.mode }} @misofm/engine 0.2.0
     runs-on: ubuntu-24.04
     steps:
       - name: Refuse non-main dispatches before checkout
@@ -124,7 +124,7 @@ jobs:
           const jobs = JSON.parse(fs.readFileSync(process.argv[3], "utf8"));
           const artifacts = JSON.parse(fs.readFileSync(process.argv[4], "utf8"));
           const expectedArtifact = `engine-sdk-qualify-${process.env.EXPECTED_SHA}`;
-          const qualificationJobs = Array.isArray(jobs.jobs) ? jobs.jobs.filter((job) => job.name === "qualify @misofm/engine 0.1.0" && job.conclusion === "success") : [];
+          const qualificationJobs = Array.isArray(jobs.jobs) ? jobs.jobs.filter((job) => job.name === "qualify @misofm/engine 0.2.0" && job.conclusion === "success") : [];
           const namedArtifacts = Array.isArray(artifacts.artifacts) ? artifacts.artifacts.filter((artifact) => artifact.name === expectedArtifact && artifact.expired === false) : [];
           if (run.conclusion !== "success" || run.event !== "workflow_dispatch" || run.head_sha !== process.env.EXPECTED_SHA || run.name !== "Publish @misofm/engine" || run.path !== ".github/workflows/npm-publish.yml" || qualificationJobs.length !== 1 || namedArtifacts.length !== 1) {
             throw new Error("qualification run is not a successful manual npm-publish run for expected_sha");
@@ -200,7 +200,7 @@ jobs:
           const entries = JSON.parse(fs.readFileSync(packJson, "utf8"));
           if (!Array.isArray(entries) || entries.length !== 1) throw new Error("npm pack did not report exactly one archive");
           const item = entries[0];
-          if (item.name !== "@misofm/engine" || item.version !== "0.1.0") throw new Error("packed package identity differs");
+          if (item.name !== "@misofm/engine" || item.version !== "0.2.0") throw new Error("packed package identity differs");
           if (typeof item.integrity !== "string" || !item.integrity.startsWith("sha512-")) throw new Error("npm did not report SHA-512 integrity");
           const bytes = fs.readFileSync(archive);
           const sha1 = crypto.createHash("sha1").update(bytes).digest("hex");
@@ -336,7 +336,7 @@ jobs:
           let statement;
           try { statement = JSON.parse(Buffer.from(envelope.payload, "base64").toString("utf8")); } catch { throw new Error("verified attestation DSSE payload is not valid base64 JSON"); }
           if (statement?._type !== "https://in-toto.io/Statement/v1" || statement?.predicateType !== "https://slsa.dev/provenance/v1") throw new Error("DSSE statement is not SLSA provenance v1");
-          const subjects = Array.isArray(statement.subject) ? statement.subject.filter((subject) => subject?.name === "pkg:npm/%40misofm/engine@0.1.0" && subject?.digest?.sha512 === local.sha512) : [];
+          const subjects = Array.isArray(statement.subject) ? statement.subject.filter((subject) => subject?.name === "pkg:npm/%40misofm/engine@0.2.0" && subject?.digest?.sha512 === local.sha512) : [];
           if (subjects.length !== 1) throw new Error("DSSE statement does not uniquely bind the package PURL and tarball SHA-512");
           const workflow = statement?.predicate?.buildDefinition?.externalParameters?.workflow;
           if (workflow?.repository !== "https://github.com/misofm/engine" || workflow?.path !== ".github/workflows/npm-publish.yml" || workflow?.ref !== "refs/heads/main") throw new Error("DSSE workflow identity differs from the trusted publisher");

@@ -1,0 +1,17 @@
+{
+  "integrated_source_candidate": "4df68ff104ac8bf0f5c86c78cd5e1a636ef1d480",
+  "pre_style_workspace_candidate": "97f8b94a33564b33bfff5413fbd9d831ae6dbd1b",
+  "mechanical_correction": "35987a690fc3f5b86645fdbf60b1c94addd7a616",
+  "delivered_main": "bb5ed498a2c0934498d964befb2cd5b7c2a45264",
+  "workspace": {
+    "head": "4df68ff104ac8bf0f5c86c78cd5e1a636ef1d480",
+    "exit_code": 0,
+    "result_blocks": 276,
+    "passed": 1611,
+    "failed": 0,
+    "ignored": 24
+  },
+  "timing_authorized": false,
+  "worklet": "Inherited latest delivered artifact; normal host-web excludes protocol. See input-equivalence record. No artifact/browser rerun claimed.",
+  "mutation_reconstruction": "Sol2 release diff reconstructed for review from agent-recovered tool history, not a contemporaneous executed diff. Authentic mutant/restored logs retained. Earlier unsuccessful premature-complete control is historical only, superseded by Sol3 actual-publication control."
+}

@@ -154,3 +154,33 @@ export type BarrelSurfacePins = [
   NoHeadlessCanonicalSessionJson,
   NoBrowserCanonicalSessionJson,
 ];
+
+
+// Both constructor modes share the writer; legacy annotated/extended options remain valid.
+type SemanticWriterOptionsType = Assert<Exact<barrel.SemanticWriterOptions, writer.SemanticWriterOptions>>;
+interface ExistingWriterOptions extends barrel.WriterOptions { readonly label?: string }
+function writerSubmissionTypes(report: barrel.CommandReport) {
+  const encoded: ExistingWriterOptions = { submit: (_records, _count) => report };
+  const legacyCallback: barrel.WriterOptions["submit"] = encoded.submit;
+  const semantic: barrel.SemanticWriterOptions = { maximumBatch: 4, submitEdits: async edits => {
+    // @ts-expect-error the selected batch is readonly
+    edits.push({});
+    if (edits[0] !== undefined) {
+      // @ts-expect-error addressed edits are readonly
+      edits[0].trackIndex = 2;
+      // @ts-expect-error values are readonly
+      edits[0].values[0] = 1;
+    }
+    return report;
+  } };
+  new barrel.ConsoleWriter(encoded);
+  new barrel.ConsoleWriter(semantic);
+  // @ts-expect-error both callbacks are ambiguous
+  new barrel.ConsoleWriter({ submit: legacyCallback, submitEdits: semantic.submitEdits });
+  // @ts-expect-error one callback is required
+  new barrel.ConsoleWriter({ maximumBatch: 4 });
+  // @ts-expect-error actual CommandReport is required
+  new barrel.ConsoleWriter({ submitEdits: async () => undefined });
+}
+void writerSubmissionTypes;
+export type _SemanticWriterOptionsType = SemanticWriterOptionsType;
