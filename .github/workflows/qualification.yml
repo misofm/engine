@@ -611,10 +611,12 @@ jobs:
         run: |
           CARGO_TARGET_DIR=target/ci/wasm-scalar RUSTFLAGS='-C target-feature=-simd128' cargo build --locked --release --target wasm32-unknown-unknown -p engine -p session -p effect-contract -p effect-compiler -p protocol -p target-smoke -p host-core -p host-web -p lane -p math -p builtins -p builtins-compiler -p effect-runtime -p gate-expander -p delay -p multiband-compressor -p parametric-eq -p soft-clip
           ! rustc --print cfg --target wasm32-unknown-unknown -C target-feature=-simd128 | grep -qx 'target_feature="simd128"'
-      # Shares the scalar target dir just populated above (design §5/§6.3), so the three
-      # rlibs it inspects are incremental rather than a second full scalar closure build.
+      # The checker owns a fresh scalar NON-LTO child beneath this caller cache, so stale
+      # fat-LTO/SIMD objects from the eighteen-package build cannot enter its population.
       - name: Browser-local realtime path has no atomic opcodes
-        run: bash scripts/check-wasm-realtime-atomics.sh target/ci/wasm-scalar
+        run: |
+          bash scripts/test-wasm-realtime-atomics.sh
+          bash scripts/check-wasm-realtime-atomics.sh target/ci/wasm-scalar
       # SIMD128 18-package build deleted (design §6.3: host-web's simd128 closure is already built
       # by the artifact job); only the compile-probe claim over target-smoke/protocol survives.
       - name: SIMD128 compile probe (target-smoke and protocol)
