@@ -294,3 +294,8 @@ Independent retained status files report syntax/v1/portability/all/v1-suite/port
 Root must preserve failed-attempt history and this reviewer supplement, integrate actual delivered main after source PASS, then run the retained immutable workspace and actual-head PR/required-CI gates. #403/#306/#349 and sibling outcomes remain open. No further implementation repair is requested.
 
 Root integrated delivered main `6589c5185411d51bce7d0a0aafab4df63a5e47db`; all three accepted scripts remain byte-identical to reviewed `7724a581`. The upcoming immutable workspace command uses `/tmp/engine-454-workspace-qualified`, includes doctests, and compares its population with delivered #430 (275 result blocks, 1,591 passed, zero failed, 24 ignored). No source/evidence edits while it runs. Final actual PR review and required CI remain mandatory.
+
+
+## Immutable workspace PASS and retained evidence
+
+Candidate `8b9d0ade4a1480a2992f503c41a669ed6dd9648f` completed the full locked workspace including doctests: 275 result blocks, 1,591 passed, zero failed, 24 ignored. The named test population matches delivered #430 exactly; runtime/build/fixture inputs remain byte-identical to main6589c518. `artifacts/issue454-native-scans/` retains 54 manifest-bound review/focused/workspace files, including Astra’s separate conditional-sourcing evidence, prior failed attempts and exact terminal provenance. Raw evidence is preserved verbatim. Actual PR review and required CI remain before closure.
