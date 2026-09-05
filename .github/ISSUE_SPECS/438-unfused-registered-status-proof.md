@@ -84,3 +84,21 @@ Focused evidence is retained in `/tmp/luna-438-selftest.log` and `/tmp/luna-438-
 checker (`8 registered audit calls`), and `git diff --check` all pass. No production source,
 helper, framework, registry, parser, Rust, workflow, Cargo, benchmark, Git or GitHub mutation was
 performed.
+
+## Astra source acceptance and integrated qualification freeze
+
+# Astra #438 Luna attempt 1 review
+
+**PASS at `3f8e5dd0c06414dcf5a6f6b9dc5c68c48297fc1a`.** The bounded successor now demonstrates the missing payload-preserving status-loss control. This is focused implementation acceptance for #438, not completion of #411's remaining workspace, actual-PR, required-CI or remote-delivery obligations.
+
+Reviewed the complete #438 brief, retained #411 contract and exact implementation/evidence diff. Independently ran the embedded self-test (62 passed, 0 failed, including real-tree acceptance), Bash syntax, lane policy and workspace policy successfully. Compared the actual production section against frozen `59f5dce23ffa1d3873162c9b964a12d60a8ddbf9`: unchanged. Only embedded proof and numbered evidence changed; inherited grammar, registry/counts, marker/empty boundaries, completion checks and existing directed cases remain intact.
+
+The actual disposable diff has one changed line inside the production count_calls occurrence-status case: `0|1) ;;` becomes `0|1|9) ;;`. It does not edit either other caller or the registry/count comparison, and introduces no answer fallback. The selected fourth occurrence search is the later registered file after earlier real operations complete. Its saved real rg stdout is `mul_add(`. Accepting status 9 leaves that captured matches value intact; the existing count operation computes 1, and the unchanged registered comparison and later recount succeed. Shim evidence derives from delegated tool output, not a fabricated count. The first wc evidence line is the selected registered result 1; the subsequent 7 and 1 evidence lines are the later tree recount, not additional registered injections.
+
+Independently reconstructed and executed the submitted exact mutant and shim on the existing fixture. The original exits 9 with the injected sentinel and exact registered-file rg-status-9 diagnostic. The actual mutant exits 0 with the same injected producer payload and derived count. The full embedded run then reaches exactly `ASSERT late-registered unexpected success` and exits 97 through its focused assertion wrapper. Discovery and retired controls also reach their required distinguished assertions. This resolves the causality failure from the stopped #411 series rather than merely relabeling a different error or accepting a generic nonzero.
+
+Evidence retained: `/tmp/astra-438-attempt1-selftest.log`, `/tmp/astra-438-mutant.diff`, `/tmp/astra-438-attempt1-status-proof.log`. No blocking gap found within the frozen successor scope. No repository/Git/GitHub mutation, Cargo or timing performed.
+
+Root may record this PASS and proceed with inherited serialized qualification and actual-head PR/required-CI delivery. Synchronize #438's evidence/state only when its evidence is upstream; keep #411 OPEN until all its original preserved delivery obligations are satisfied. #412 and broader parent obligations retain their established ordering and scope.
+
+Root normally integrated current main `c7469e28d52a716339b6f3119a57b69afb3411f1` at `497259b867f5d91cb2ee6edb3a70fb9ce86671fd`. Complete checked diff against main contains only the unfused checker and the #411/#438 records; Rust, Cargo configuration, test population, fixtures and artifact consumers are unchanged. The retained RT-3 workspace baseline (source `51e2aed211b30523076e0e8dd07973b13b57dc11`, delivered by byte-equivalent product merge `c7469e28d52a716339b6f3119a57b69afb3411f1` plus reviewed policy/evidence integration) is 274 result blocks, 1,569 passed, zero failed, 24 ignored. Root will run one fresh isolated `cargo test --locked --workspace` including doctests on this integrated candidate before actual PR review and required CI. Lane/realtime/workspace policies and syntax/diff already passed after the accepted source (`/tmp/engine-438-policy-checks.log`). No timing, target/artifact rebuild or production arithmetic change is needed for this shell-only delivery.
