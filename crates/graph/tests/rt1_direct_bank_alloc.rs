@@ -295,6 +295,11 @@ fn direct_bank_graph_render_is_allocation_free_and_bit_exact() {
     assert!(live.allocations > 0 && live.deallocations > 0);
 
     let mut plan = prepared_plan(false);
+    assert_eq!(
+        plan.bank_route_folds(),
+        0,
+        "direct fixture must retain its routes"
+    );
     let mut pcm = [f32::from_bits(0x7fc0_3990); FRAMES * 2];
     realtime::audit::reset();
     for block in 0..16 {
@@ -325,6 +330,11 @@ fn direct_bank_graph_render_is_allocation_free_and_bit_exact() {
     assert_eq!(plan.qualification_counters(), [16, 16]);
 
     let mut folded = prepared_plan(true);
+    assert_eq!(
+        folded.bank_route_folds(),
+        4,
+        "folded fixture must retire all four routes"
+    );
     realtime::audit::reset();
     for block in 0..16 {
         let output = PlanarBufferMut::try_new(&mut pcm, 2, FRAMES, FRAMES).expect("output");
@@ -356,4 +366,5 @@ fn direct_bank_graph_render_is_allocation_free_and_bit_exact() {
             .all(|sample| sample.to_bits() == (-15.0_f32).to_bits())
     );
     assert_eq!(folded.qualification_counters(), [16, 16]);
+    assert_eq!(folded.bank_route_folds(), 4);
 }

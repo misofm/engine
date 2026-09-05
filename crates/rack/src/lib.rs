@@ -1168,14 +1168,35 @@ impl<'a> FoldCohort<'a> {
         right: &'a mut [f32],
         stride: usize,
         frames: usize,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, RackError> {
+        if lane_ids.is_empty() || lane_ids.len() > 8 || frames == 0 || stride < frames {
+            return Err(RackError::Shape);
+        }
+        if lane_ids
+            .iter()
+            .enumerate()
+            .any(|(index, lane)| lane_ids[..index].contains(lane))
+        {
+            return Err(RackError::Shape);
+        }
+        let required = lane_ids
+            .iter()
+            .try_fold(0usize, |required, lane| {
+                lane.checked_mul(stride)
+                    .and_then(|start| start.checked_add(frames))
+                    .map(|end| required.max(end))
+            })
+            .ok_or(RackError::Overflow)?;
+        if left.len() < required || right.len() < required {
+            return Err(RackError::Shape);
+        }
+        Ok(Self {
             lane_ids,
             left,
             right,
             stride,
             frames,
-        }
+        })
     }
 
     #[must_use]
@@ -1210,14 +1231,12 @@ impl<'a> FoldCohort<'a> {
         if !self.lane_ids.contains(&index) {
             return None;
         }
-        let start = index * self.stride;
-        if start + self.frames > self.left.len() || start + self.frames > self.right.len() {
+        let start = index.checked_mul(self.stride)?;
+        let end = start.checked_add(self.frames)?;
+        if end > self.left.len() || end > self.right.len() {
             return None;
         }
-        Some((
-            &mut self.left[start..start + self.frames],
-            &mut self.right[start..start + self.frames],
-        ))
+        Some((&mut self.left[start..end], &mut self.right[start..end]))
     }
 }
 
@@ -2251,14 +2270,16 @@ impl BankChain {
                 scratch.scatter_lane(lane, left, right, 0, frames);
             }
         }
-        if folded_count != 0 {
-            members.fold_cohort(FoldCohort::new(
+        if folded_count != 0
+            && let Ok(cohort) = FoldCohort::new(
                 &folded_lanes[..folded_count],
                 staging_left,
                 staging_right,
                 stride,
                 used,
-            ));
+            )
+        {
+            members.fold_cohort(cohort);
         }
     }
     // REALTIME_POLICY_END
@@ -2378,14 +2399,16 @@ impl BankChain {
                 plane_right.copy_from_slice(right);
             }
         }
-        if folded_count != 0 {
-            members.fold_cohort(FoldCohort::new(
+        if folded_count != 0
+            && let Ok(cohort) = FoldCohort::new(
                 &folded_lanes[..folded_count],
                 staging_left,
                 staging_right,
                 stride,
                 frames_used,
-            ));
+            )
+        {
+            members.fold_cohort(cohort);
         }
     }
     // REALTIME_POLICY_END
@@ -3147,6 +3170,19 @@ mod tests {
         }
     }
 
+    struct DefaultFoldProvider(PlanesWithFold);
+    impl BankMembers for DefaultFoldProvider {
+        fn plane(&self, lane: usize) -> (&[f32], &[f32]) {
+            self.0.plane(lane)
+        }
+        fn plane_mut(&mut self, lane: usize) -> (&mut [f32], &mut [f32]) {
+            self.0.plane_mut(lane)
+        }
+        fn fold_plane(&mut self, lane: usize, left: &mut [f32], right: &mut [f32]) {
+            self.0.fold_plane(lane, left, right);
+        }
+    }
+
     /// The fold epilogue: absent by default, and when armed it *replaces* the lane's plane write
     /// with the same words handed over.
     ///
@@ -3291,13 +3327,18 @@ mod tests {
         let frames = 13_u32;
         for (width, active) in [
             (BankWidth::Four, vec![true, true, true, true]),
+            (BankWidth::Eight, vec![true; 8]),
             (
                 BankWidth::Eight,
                 vec![true, false, true, false, false, true, false, false],
             ),
+            (
+                BankWidth::Eight,
+                vec![false, false, true, false, false, false, false, false],
+            ),
         ] {
             let lanes = width.lanes() as usize;
-            let mut members = PlanesWithFold {
+            let build = || PlanesWithFold {
                 planes: Planes {
                     left: (0..lanes)
                         .map(|lane| vec![lane as f32 + 1.0; frames as usize])
@@ -3313,23 +3354,49 @@ mod tests {
                 trace: Vec::new(),
                 cohorts: Vec::new(),
             };
-            let mut chain = BankChain::new(
-                AoSoaScratch::new(width, frames).expect("scratch"),
-                active.clone().into_boxed_slice(),
-                vec![slot(active.clone(), Box::new(ScaleByLane))],
-            )
-            .expect("chain");
-            chain
+            let chain = || {
+                BankChain::new(
+                    AoSoaScratch::new(width, frames).expect("scratch"),
+                    active.clone().into_boxed_slice(),
+                    vec![slot(active.clone(), Box::new(ScaleByLane))],
+                )
+                .expect("chain")
+            };
+            let mut members = build();
+            let mut default = DefaultFoldProvider(build());
+            let mut optimized_chain = chain();
+            let mut default_chain = chain();
+            optimized_chain
+                .arm_fold(active.clone().into_boxed_slice())
+                .expect("fold");
+            default_chain
                 .arm_fold(active.clone().into_boxed_slice())
                 .expect("fold");
             for block in 0..2 {
-                chain
+                optimized_chain
                     .run(&mut members, frames, block * u64::from(frames))
                     .expect("run");
+                default_chain
+                    .run(&mut default, frames, block * u64::from(frames))
+                    .expect("default run");
             }
             let ids: Vec<usize> = (0..lanes).filter(|lane| active[*lane]).collect();
-            assert_eq!(members.cohorts, vec![ids.clone(), ids]);
+            let expected_cohorts = if ids.is_empty() {
+                Vec::new()
+            } else {
+                vec![ids.clone(), ids]
+            };
+            assert_eq!(members.cohorts, expected_cohorts);
             assert!(members.trace.iter().all(|(kind, _)| *kind == 'f'));
+            assert!(
+                default.0.cohorts.is_empty(),
+                "trait default delegates lane by lane"
+            );
+            assert_eq!(members.taken, default.0.taken);
+            assert_eq!(members.bus_left, default.0.bus_left);
+            assert_eq!(members.bus_right, default.0.bus_right);
+            assert_eq!(members.planes.left, default.0.planes.left);
+            assert_eq!(members.planes.right, default.0.planes.right);
             for (lane, is_active) in active.iter().copied().enumerate() {
                 if !is_active {
                     assert!(
@@ -3337,9 +3404,82 @@ mod tests {
                             .iter()
                             .all(|x| x.to_bits() == (lane as f32 + 1.0).to_bits())
                     );
+                    assert!(
+                        members.planes.right[lane]
+                            .iter()
+                            .all(|x| x.to_bits() == (-(lane as f32) - 1.0).to_bits())
+                    );
                 }
             }
         }
+    }
+
+    #[test]
+    fn fold_cohort_constructor_rejects_every_invalid_shape_without_writes() {
+        let ids = [0usize, 1];
+        let mut left = [f32::from_bits(0x7fc0_4190); 8];
+        let mut right = [f32::from_bits(0x7fc0_4191); 8];
+        let left_before = left.map(f32::to_bits);
+        let right_before = right.map(f32::to_bits);
+        assert!(
+            matches!(
+                BankChain::new(
+                    AoSoaScratch::new(BankWidth::Four, 4).expect("scratch"),
+                    vec![false; 4].into_boxed_slice(),
+                    vec![slot(vec![false; 4], Box::new(PassThrough))],
+                ),
+                Err(RackError::Shape)
+            ),
+            "an empty active set is unrepresentable and cannot invoke a callback"
+        );
+        assert!(FoldCohort::new(&[], &mut left, &mut right, 4, 4).is_err());
+        assert!(FoldCohort::new(&[0; 9], &mut left, &mut right, 4, 4).is_err());
+        assert!(FoldCohort::new(&[0, 0], &mut left, &mut right, 4, 4).is_err());
+        assert!(FoldCohort::new(&ids, &mut left, &mut right, 3, 4).is_err());
+        assert!(FoldCohort::new(&ids, &mut left[..7], &mut right, 4, 4).is_err());
+        assert!(FoldCohort::new(&ids, &mut left, &mut right[..7], 4, 4).is_err());
+        assert!(FoldCohort::new(&[usize::MAX], &mut left, &mut right, 2, 1).is_err());
+        assert!(FoldCohort::new(&[0], &mut left[..0], &mut right[..0], 0, 0).is_err());
+        assert_eq!(left.map(f32::to_bits), left_before);
+        assert_eq!(right.map(f32::to_bits), right_before);
+
+        let mut staged_left = [1.0, 2.0, 91.0, 92.0, 3.0, 4.0, 93.0, 94.0];
+        let mut staged_right = [-1.0, -2.0, -91.0, -92.0, -3.0, -4.0, -93.0, -94.0];
+        let mut provider = DefaultFoldProvider(PlanesWithFold {
+            planes: Planes {
+                left: vec![vec![0.0; 2]; 2],
+                right: vec![vec![0.0; 2]; 2],
+            },
+            gains: vec![1.0; 2],
+            bus_left: vec![0.0; 2],
+            bus_right: vec![0.0; 2],
+            taken: Vec::new(),
+            trace: Vec::new(),
+            cohorts: Vec::new(),
+        });
+        provider.fold_cohort(
+            FoldCohort::new(&ids, &mut staged_left, &mut staged_right, 4, 2)
+                .expect("valid strided cohort"),
+        );
+        assert_eq!(provider.0.taken, vec![0, 1]);
+        assert_eq!(
+            [
+                staged_left[2],
+                staged_left[3],
+                staged_left[6],
+                staged_left[7]
+            ],
+            [91.0, 92.0, 93.0, 94.0]
+        );
+        assert_eq!(
+            [
+                staged_right[2],
+                staged_right[3],
+                staged_right[6],
+                staged_right[7]
+            ],
+            [-91.0, -92.0, -93.0, -94.0]
+        );
     }
 
     /// The fold refuses a mask it cannot render, exactly as the auxiliary seam does.

@@ -3200,20 +3200,14 @@ mod tests {
                 .iter()
                 .flat_map(|tile| tile.1.iter().copied())
                 .collect();
-            members.fold_cohort(FoldCohort::new(
-                &[0, 1],
-                &mut staged_left,
-                &mut staged_right,
-                frames,
-                frames,
-            ));
-            members.fold_cohort(FoldCohort::new(
-                &[2],
-                &mut staged_left,
-                &mut staged_right,
-                frames,
-                frames,
-            ));
+            members.fold_cohort(
+                FoldCohort::new(&[0, 1], &mut staged_left, &mut staged_right, frames, frames)
+                    .expect("valid opening cohort"),
+            );
+            members.fold_cohort(
+                FoldCohort::new(&[2], &mut staged_left, &mut staged_right, frames, frames)
+                    .expect("valid continuation cohort"),
+            );
             let (folded_left, folded_right) = folded_lease.read_stereo(master);
             assert_eq!(
                 (
@@ -3270,14 +3264,14 @@ mod tests {
                 fold: &fold,
                 master,
             };
-            members.fold_cohort(FoldCohort::new(&[0], &mut left, &mut right, frames, frames));
-            members.fold_cohort(FoldCohort::new(
-                &[1, 2],
-                &mut left,
-                &mut right,
-                frames,
-                frames,
-            ));
+            members.fold_cohort(
+                FoldCohort::new(&[0], &mut left, &mut right, frames, frames)
+                    .expect("opening cohort"),
+            );
+            members.fold_cohort(
+                FoldCohort::new(&[1, 2], &mut left, &mut right, frames, frames)
+                    .expect("continuation cohort"),
+            );
             let (actual_left, actual_right) = lease.read_stereo(master);
             assert!(
                 actual_left
@@ -3309,7 +3303,7 @@ mod tests {
                 store: true,
             },
         ];
-        for ids in [&[0, 0][..], &[0, 1][..], &[2][..]] {
+        for ids in [&[0, 1][..], &[2][..]] {
             let mut lease = stereo_lease(FRAMES, 1);
             let (master_left, master_right) = lease.write_stereo(ARENA_BASE);
             master_left.fill(19.0);
@@ -3325,7 +3319,10 @@ mod tests {
                 fold: &fold,
                 master: ARENA_BASE,
             };
-            members.fold_cohort(FoldCohort::new(ids, &mut left, &mut right, FRAMES, FRAMES));
+            members.fold_cohort(
+                FoldCohort::new(ids, &mut left, &mut right, FRAMES, FRAMES)
+                    .expect("representable invalid graph metadata"),
+            );
             assert_eq!(
                 left.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
                 before_left
@@ -3346,6 +3343,37 @@ mod tests {
                     .all(|x| x.to_bits() == (-23.0_f32).to_bits())
             );
         }
+
+        let mut lease = stereo_lease(FRAMES, 1);
+        let (master_left, master_right) = lease.write_stereo(ARENA_BASE);
+        master_left.fill(29.0);
+        master_right.fill(-31.0);
+        let mut left = vec![11.0_f32; FRAMES + 1];
+        let mut right = vec![-13.0_f32; FRAMES + 1];
+        let mut members = ArenaMembers {
+            lease: &mut lease,
+            inputs: &[],
+            outputs: &[],
+            fold: &fold,
+            master: ARENA_BASE,
+        };
+        members.fold_cohort(
+            FoldCohort::new(&[0], &mut left, &mut right, FRAMES + 1, FRAMES + 1)
+                .expect("shape is valid at the public boundary"),
+        );
+        assert!(left.iter().all(|x| x.to_bits() == 11.0_f32.to_bits()));
+        assert!(right.iter().all(|x| x.to_bits() == (-13.0_f32).to_bits()));
+        let (master_left, master_right) = lease.read_stereo(ARENA_BASE);
+        assert!(
+            master_left
+                .iter()
+                .all(|x| x.to_bits() == 29.0_f32.to_bits())
+        );
+        assert!(
+            master_right
+                .iter()
+                .all(|x| x.to_bits() == (-31.0_f32).to_bits())
+        );
     }
 
     /// The first contributor **stores**: a master whose only summand is `-0.0` stays `-0.0`.
@@ -3399,6 +3427,45 @@ mod tests {
                 "frame {frame}: the first contributor's sign was lost on the right"
             );
         }
+
+        let mut cohort_lease = stereo_lease(FRAMES, 1);
+        let (poison_left, poison_right) = cohort_lease.write_stereo(ARENA_BASE);
+        poison_left.fill(17.0);
+        poison_right.fill(-19.0);
+        let mut cohort_members = ArenaMembers {
+            lease: &mut cohort_lease,
+            inputs: &[],
+            outputs: &[],
+            fold: &fold,
+            master: ARENA_BASE,
+        };
+        let mut cohort_left = vec![-0.0_f32; FRAMES];
+        let mut cohort_right = vec![-0.0_f32; FRAMES];
+        cohort_members.fold_cohort(
+            FoldCohort::new(&[0], &mut cohort_left, &mut cohort_right, FRAMES, FRAMES)
+                .expect("valid signed-zero cohort"),
+        );
+        assert!(
+            cohort_left
+                .iter()
+                .all(|value| value.to_bits() == 0x8000_0000)
+        );
+        assert!(
+            cohort_right
+                .iter()
+                .all(|value| value.to_bits() == 0x8000_0000)
+        );
+        let (master_left, master_right) = cohort_lease.read_stereo(ARENA_BASE);
+        assert!(
+            master_left
+                .iter()
+                .all(|value| value.to_bits() == 0x8000_0000)
+        );
+        assert!(
+            master_right
+                .iter()
+                .all(|value| value.to_bits() == 0x8000_0000)
+        );
     }
 
     /// The fan-in-zero fill is skipped under a bound source and kept everywhere else.

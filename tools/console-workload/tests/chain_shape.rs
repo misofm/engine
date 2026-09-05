@@ -321,7 +321,7 @@ fn the_ragged_tail_banks_like_any_other_cohort_and_pays_one_chain_for_it() {
 /// -- so a bind that silently stopped admitting the fold would be invisible to a digest gate and
 /// would only show up as a slower row, which is the failure mode this file exists for.
 ///
-/// One fold per *track*, not per cohort: the epilogue is per lane. The 128-track stretch row
+/// One retired route per *track*, accumulated by each cohort's ordered epilogue. The 128-track stretch row
 /// therefore folds twice what the 64-track console row does, which is where the doubled absolute
 /// saving on that row comes from.
 #[test]
