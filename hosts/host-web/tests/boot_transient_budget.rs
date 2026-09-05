@@ -19,6 +19,8 @@ thread_local! {
     static ARMED: Cell<bool> = const { Cell::new(false) };
     static LIVE: Cell<usize> = const { Cell::new(0) };
     static PEAK: Cell<usize> = const { Cell::new(0) };
+    static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
+    static DEALLOCATIONS: Cell<usize> = const { Cell::new(0) };
 }
 
 struct PeakAllocator;
@@ -30,6 +32,7 @@ fn allocated(bytes: usize) {
     if !ARMED.try_with(Cell::get).unwrap_or(false) {
         return;
     }
+    ALLOCATIONS.with(|count| count.set(count.get() + 1));
     LIVE.with(|live| {
         let next = live.get().saturating_add(bytes);
         live.set(next);
@@ -41,6 +44,7 @@ fn deallocated(bytes: usize) {
     if !ARMED.try_with(Cell::get).unwrap_or(false) {
         return;
     }
+    DEALLOCATIONS.with(|count| count.set(count.get() + 1));
     LIVE.with(|live| live.set(live.get().saturating_sub(bytes)));
 }
 
@@ -89,11 +93,84 @@ fn measured_peak<T>(operation: impl FnOnce() -> T) -> (T, usize) {
     ARMED.with(|armed| armed.set(false));
     LIVE.with(|live| live.set(0));
     PEAK.with(|peak| peak.set(0));
+    ALLOCATIONS.with(|count| count.set(0));
+    DEALLOCATIONS.with(|count| count.set(0));
     ARMED.with(|armed| armed.set(true));
     let result = operation();
     ARMED.with(|armed| armed.set(false));
     let peak = PEAK.with(Cell::get);
     (result, peak)
+}
+
+#[test]
+fn paused_seek_recycles_without_allocating_or_freeing() {
+    use host_web::{RESULT_BACKPRESSURE, RESULT_OK};
+    let mut model = parse_session_json(include_str!("browser-v1/session.json")).unwrap();
+    model.sources[0].frames = 480_000;
+    let document = canonical_session_json(&model).unwrap();
+    let options = WebBootOptions {
+        source_ring_frames: 512,
+        ..WebBootOptions::explicit_defaults()
+    };
+    let mut host = AudioWorkletEngineHost::boot(document.as_bytes(), options).unwrap();
+    let samples = [0.25; 128];
+    let planes: [&[f32]; 2] = [&samples, &samples];
+    for generation in 1..=3 {
+        let origin = (generation - 1) * 10_000;
+        for block in 0..4 {
+            assert_eq!(
+                host.submit_source(
+                    b"fixture-source",
+                    generation,
+                    origin + block * 128,
+                    48_000,
+                    &planes,
+                    128,
+                    false
+                ),
+                RESULT_OK
+            );
+        }
+        assert_eq!(
+            host.submit_source(
+                b"fixture-source",
+                generation,
+                origin + 512,
+                48_000,
+                &planes,
+                128,
+                false
+            ),
+            RESULT_BACKPRESSURE
+        );
+        if generation == 2 {
+            // Exercise recycled/retained storage after a real render, then refill it.
+            assert_eq!(host.render_next(), RESULT_OK);
+            assert_eq!(
+                host.submit_source(
+                    b"fixture-source",
+                    generation,
+                    origin + 512,
+                    48_000,
+                    &planes,
+                    128,
+                    false
+                ),
+                RESULT_OK
+            );
+        }
+        let clock = host.status().next_absolute_sample;
+        let rendered = host.status().rendered_quanta;
+        let (result, peak) = measured_peak(|| {
+            host.seek_source(b"fixture-source", generation + 1, generation * 10_000)
+        });
+        assert_eq!(result, RESULT_OK);
+        assert_eq!(peak, 0);
+        assert_eq!(ALLOCATIONS.with(Cell::get), 0);
+        assert_eq!(DEALLOCATIONS.with(Cell::get), 0);
+        assert_eq!(host.status().next_absolute_sample, clock);
+        assert_eq!(host.status().rendered_quanta, rendered);
+    }
 }
 
 fn unlimited_caps() -> CompileCaps {

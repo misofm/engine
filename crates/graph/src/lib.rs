@@ -1138,6 +1138,12 @@ impl GraphSourceSetResourceReport {
 /// Implementors own prepared source consumers and source-plane storage. The graph invokes this
 /// only on its coordinator before ordinary nodes or native dependency waves begin.
 pub trait GraphPreparedSourceSetDriver: Send {
+    fn can_prepare_source_seek(&self, _source_index: usize) -> bool {
+        false
+    }
+    fn prepare_source_seek(&mut self, _source_index: usize, _generation: u64, _frame: u64) -> bool {
+        false
+    }
     fn claim_count(&self) -> usize;
     fn begin_block(&mut self, first_sample: u64, frames: u32) -> Result<(), RenderError>;
     fn copy_track_input(
@@ -1425,6 +1431,19 @@ impl GraphExecutor {
 }
 
 impl PreparedPlanExecutor for GraphExecutor {
+    fn can_prepare_source_seek(&self, source_index: usize) -> bool {
+        self.source_set
+            .as_ref()
+            .is_some_and(|set| set.driver.can_prepare_source_seek(source_index))
+    }
+
+    fn prepare_source_seek(&mut self, source_index: usize, generation: u64, frame: u64) -> bool {
+        self.source_set.as_mut().is_some_and(|set| {
+            set.driver
+                .prepare_source_seek(source_index, generation, frame)
+        })
+    }
+
     // REALTIME_POLICY_BEGIN
     fn render(
         &mut self,
