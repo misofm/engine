@@ -2975,6 +2975,9 @@ mod tests {
     /// RT-1: real graph arena members gather one buffer set and scatter directly into another.
     #[test]
     fn arena_members_direct_scatter_preserves_redirected_identity_bits() {
+        use bench_support::alloc::{Mode, assert_installed, counters, delta_since, set_mode};
+        use engine::realtime::audit;
+
         struct Identity;
         impl BankStage for Identity {
             fn process(&mut self, _block: BankBlock<'_>) -> Result<(), RenderError> {
@@ -3014,18 +3017,44 @@ mod tests {
             }],
         )
         .expect("chain");
-        {
-            let mut members = ArenaMembers {
-                lease: &mut lease,
-                inputs: &inputs,
-                outputs: &outputs,
-                fold: &[],
-                master: 0,
-            };
-            chain
-                .run(&mut members, FRAMES as u32, 0)
-                .expect("direct graph run");
-        }
+        assert_installed();
+        set_mode(Mode::Count);
+        audit::warm_up();
+        audit::reset();
+        let live_mark = counters();
+        audit::in_render_scope(|| {
+            let probe = Vec::<u8>::with_capacity(core::hint::black_box(64));
+            core::hint::black_box(&probe);
+            drop(probe);
+        });
+        let live_delta = delta_since(live_mark);
+        let live_audit = audit::snapshot();
+        assert!(live_delta.allocations > 0 && live_delta.deallocations > 0);
+        assert!(live_audit.allocations > 0 && live_audit.deallocations > 0);
+
+        audit::reset();
+        let render_mark = counters();
+        audit::in_render_scope(|| {
+            for block in 0..16 {
+                let mut members = ArenaMembers {
+                    lease: &mut lease,
+                    inputs: &inputs,
+                    outputs: &outputs,
+                    fold: &[],
+                    master: 0,
+                };
+                chain
+                    .run(&mut members, FRAMES as u32, block * FRAMES as u64)
+                    .expect("direct graph run");
+            }
+        });
+        let render_delta = delta_since(render_mark);
+        let render_audit = audit::snapshot();
+        assert_eq!(render_delta.allocations, 0);
+        assert_eq!(render_delta.deallocations, 0);
+        assert_eq!(render_delta.reallocations, 0);
+        assert_eq!(render_audit.allocations, 0);
+        assert_eq!(render_audit.deallocations, 0);
 
         for (lane, output) in outputs.iter().copied().enumerate() {
             let (left, right) = lease.read_stereo(output);
@@ -3046,7 +3075,7 @@ mod tests {
                     .collect::<Vec<_>>()
             );
         }
-        assert_eq!(chain.transposes(), 1);
+        assert_eq!(chain.transposes(), 16);
     }
 
     /// The folded epilogue is the route op followed by the D9 reduction, word for word.

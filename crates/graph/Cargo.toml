@@ -19,6 +19,7 @@ lane.workspace = true
 rack.workspace = true
 
 [dev-dependencies]
+bench-support.workspace = true
 conformance = { workspace = true, features = ["realtime-audit"] }
 
 [lints]
