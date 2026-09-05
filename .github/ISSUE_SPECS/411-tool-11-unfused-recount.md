@@ -79,3 +79,7 @@ Read-only spec/source/helper/commit inspection. No tests, Cargo, timing or repos
 ## Implementation assignment
 
 Root releases Luna attempt 1 from approved checkpoint `efc87b691abcaf4368bfef249863b2c33057af17`. The bounded #420 readiness monitor terminated without meeting its load ceiling; no runner or workload was invoked. Its quiet window has ended, so this independent tooling implementation may proceed. #420 measurement remains pending with its invocation authority unconsumed. Exact scope and acceptance gates above are unchanged.
+
+## Luna attempt 1 checkpoint
+
+Luna supplied one checker-only tranche at `96935ec623133781973177f2a083b106e0bf1cba`. Root committed and pushed it before review. Luna reports syntax, real checker (8 calls: 7+1), embedded self-test (15 passed/0 failed), lane policy and diff hygiene exit 0, and three disposable counter-mutant executions. These are implementation-supplied results, not acceptance: Astra is adversarially checking the full frozen selective producer/consumer table and the actual same-assertion counter-mutant discrimination. No helper, Rust, workflow or benchmark changed.
