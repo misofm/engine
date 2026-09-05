@@ -5067,6 +5067,47 @@ mod tests {
         assert_eq!(matrix_error.paired.qualification_counters(), [1, 2]);
     }
 
+    /// #459 Case A: a three-sample queued ramp crossing two-sample render calls remains on the
+    /// fallback path until the following call, where the settled serialized pair fuses.
+    #[test]
+    fn queued_three_sample_ramp_crosses_call_boundary_before_fusing() {
+        let _guard = PAIR_WITNESS_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut fixture = pair_fixture(Backend::Simd4, 4);
+        push_both(
+            &mut fixture.paired_fader_tx,
+            &mut fixture.separate_fader_tx,
+            TrackFaderRecord::FaderDb {
+                lanes: BuiltinLaneSelector::Both,
+                db: -12.0,
+                smoothing_samples: 3,
+            },
+        );
+        push_both(
+            &mut fixture.paired_matrix_tx,
+            &mut fixture.separate_matrix_tx,
+            TrackControlRecord {
+                matrix: Matrix2x2 {
+                    ll: 0.5,
+                    lr: 0.25,
+                    rl: -0.25,
+                    rr: 0.75,
+                },
+                smoothing_samples: 3,
+            },
+        );
+        assert_pair_call(&mut fixture, 2, 0x4590);
+        assert_eq!(FADER_MATRIX_FUSED_CALLS.load(Ordering::Relaxed), 0);
+        assert_eq!(FADER_MATRIX_FALLBACK_CALLS.load(Ordering::Relaxed), 1);
+        assert_pair_call(&mut fixture, 2, 0x4591);
+        assert_eq!(FADER_MATRIX_FUSED_CALLS.load(Ordering::Relaxed), 0);
+        assert_eq!(FADER_MATRIX_FALLBACK_CALLS.load(Ordering::Relaxed), 1);
+        assert_pair_call(&mut fixture, 2, 0x4592);
+        assert_eq!(FADER_MATRIX_FUSED_CALLS.load(Ordering::Relaxed), 1);
+        assert_eq!(FADER_MATRIX_FALLBACK_CALLS.load(Ordering::Relaxed), 0);
+    }
+
     #[test]
     fn pair_factory_declines_wrong_order_policy_and_shape_with_original_owners() {
         let _guard = PAIR_WITNESS_LOCK

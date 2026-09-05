@@ -106,3 +106,9 @@ Luna paused at a focused-green tranche, not a completed proof outcome. The four 
 Luna reports passing builtins-compiler library with test-support, allocation tracker tests, the focused host acknowledgement test, normal host-web check, formatting and diff hygiene. Root verified the exact-path delta and clean diff hygiene before checkpointing. Final retained commands/status/logs and all remaining Case A/B/C obligations are still required; this record does not infer complete graph, observation, seam or allocation coverage from the reported focused passes.
 
 Root commits/pushes this recovery tranche before resuming the SAME Luna attempt 1. No interim adversarial verdict, new retry, source PASS or qualification authority is created. Production policy/arithmetic/resource behavior remains frozen.
+
+## Luna attempt 1 queued-ramp recovery checkpoint
+
+The same attempt adds queued_three_sample_ramp_crosses_call_boundary_before_fusing with real paired/separate queues, ramp length 3 and calls of 2, 2 and 2 frames. It asserts fallback for the first two calls and true fusion for the next, retaining per-call PCM/state/logical-counter comparisons. Root verified the only source delta is the existing builtins-compiler lib test before checkpointing.
+
+Luna retained `/tmp/luna459-{debug,release}-{builtins-compiler-lib,allocation,graph,host-web}.log` and reports each specified focused command passed (23 compiler, 3 allocation, 53 graph and 62 host-web tests, with ignored cases recorded in logs). Formatting and diff hygiene passed. This preserves the exact queued transition proof; Case B's meter/send/alias/mono/recovery/declined-owner comparisons and Case C's actual queued graph allocation phases remain explicitly unfinished. No source PASS or complete attempt is claimed. Root pushes this checkpoint before continuation of the same attempt.
