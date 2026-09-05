@@ -166,4 +166,30 @@ These four groups are the frozen producer table and two existing counter-control
 
 Review used read-only Git/source/log inspection plus two tiny disposable shell probes; no Cargo/builds, native runner, benchmark, repository or GitHub mutation was performed.
 
+## Sol attempt 2 implementation record
+
+The checker now captures completion status before consuming every assigned source, exclusion, and
+count result. In particular, the tool bypass source scan is separated from its exact ABI exclusion,
+and both portability counts reject valid-looking numeric output from a failed producer. Required
+dependency, ABI, contract, and ownership queries retain their operation identity and returned
+status. Python verifier/import failures and scratch creation also report their actual status.
+
+The V1 suite exercises the complete frozen fault classes with otherwise-valid fixtures: verifier,
+find and wc, required and forbidden dependencies, required ABI, bypass source/exclusion, four-root
+reachability source and both filters, missing surfaces/roots, valid empty roots, and allowed
+own-package/comment-only populations. The portability suite retains its nine mutations and adds
+required source/contract deletion plus selective required, forbidden, Python, count, and three late
+ownership failures. Delegating shims use the discovered real executable and preserve real payloads
+before injecting a sentinel and nonzero status.
+
+Exactly two actual source mutants remain. Each is verified by a retained unified diff and is passed
+to the same directed assertion as the original and byte-restored checker. Original/restored reject
+the injected operation failure; the unique mutant reaches the distinguished unexpected-success
+branch with status 97, while setup or diagnostic mismatch returns 96.
+
+Focused evidence (2026-09-05): syntax, real `v1`, `portability`, and `all`, invalid-subject exit 2,
+and both policy suites passed. Exact command logs and independent status files are retained under
+`/tmp/454-sol2-*`, including the two mutation diffs. No Cargo build, native runner, fixture
+generation, benchmark, timing, Git, or GitHub operation was run.
+
 Root assigns Sol attempt 2 for one coherent pass over these four frozen groups. Preserve the accepted checkpoint and all existing gates; pause when the exact three scripts and this evidence record are ready for root checkpoint and Astra review. No workspace build, timing, shared helper, or sibling changes are authorized.
