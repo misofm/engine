@@ -1162,7 +1162,7 @@ pub struct FoldCohort<'a> {
 }
 
 impl<'a> FoldCohort<'a> {
-    fn new(
+    pub fn new(
         lane_ids: &'a [usize],
         left: &'a mut [f32],
         right: &'a mut [f32],
@@ -2217,6 +2217,8 @@ impl BankChain {
             }
             return;
         }
+        let all_active_folded = (0..self.lanes).any(|lane| self.active[lane])
+            && (0..self.lanes).all(|lane| !self.active[lane] || self.fold[lane]);
         let Self {
             scratch,
             lanes,
@@ -2238,8 +2240,12 @@ impl BankChain {
                 let left = &mut staging_left[lane * stride..lane * stride + used];
                 let right = &mut staging_right[lane * stride..lane * stride + used];
                 scratch.scatter_lane(lane, left, right, 0, frames);
-                folded_lanes[folded_count] = lane;
-                folded_count += 1;
+                if all_active_folded {
+                    folded_lanes[folded_count] = lane;
+                    folded_count += 1;
+                } else {
+                    members.fold_plane(lane, left, right);
+                }
             } else {
                 let (left, right) = members.plane_mut(lane);
                 scratch.scatter_lane(lane, left, right, 0, frames);
@@ -2345,6 +2351,8 @@ impl BankChain {
             }
             return;
         }
+        let all_active_folded = (0..W).any(|lane| self.active[lane])
+            && (0..W).all(|lane| !self.active[lane] || self.fold[lane]);
         let Self {
             staging_left,
             staging_right,
@@ -2357,8 +2365,12 @@ impl BankChain {
             let left = &mut staging_left[lane * stride..lane * stride + frames_used];
             let right = &mut staging_right[lane * stride..lane * stride + frames_used];
             if fold[lane] {
-                folded_lanes[folded_count] = lane;
-                folded_count += 1;
+                if all_active_folded {
+                    folded_lanes[folded_count] = lane;
+                    folded_count += 1;
+                } else {
+                    members.fold_plane(lane, left, right);
+                }
             } else {
                 let (plane_left, plane_right) = members.plane_mut(lane);
                 debug_assert!(plane_left.len() == frames_used && plane_right.len() == frames_used);
@@ -3101,16 +3113,20 @@ mod tests {
         bus_right: Vec<f32>,
         /// Lanes `fold_plane` was called for, in call order.
         taken: Vec<usize>,
+        trace: Vec<(char, usize)>,
+        cohorts: Vec<Vec<usize>>,
     }
     impl BankMembers for PlanesWithFold {
         fn plane(&self, lane: usize) -> (&[f32], &[f32]) {
             self.planes.plane(lane)
         }
         fn plane_mut(&mut self, lane: usize) -> (&mut [f32], &mut [f32]) {
+            self.trace.push(('s', lane));
             self.planes.plane_mut(lane)
         }
         fn fold_plane(&mut self, lane: usize, left: &mut [f32], right: &mut [f32]) {
             self.taken.push(lane);
+            self.trace.push(('f', lane));
             let gain = self.gains[lane];
             for (frame, sample) in left.iter_mut().enumerate() {
                 *sample *= gain;
@@ -3119,6 +3135,14 @@ mod tests {
             for (frame, sample) in right.iter_mut().enumerate() {
                 *sample *= gain;
                 self.bus_right[frame] += *sample;
+            }
+        }
+        fn fold_cohort(&mut self, mut cohort: FoldCohort<'_>) {
+            let ids = cohort.lane_ids().to_vec();
+            self.cohorts.push(ids.clone());
+            for lane in ids {
+                let (left, right) = cohort.planes_mut(lane).expect("valid cohort plane");
+                self.fold_plane(lane, left, right);
             }
         }
     }
@@ -3165,6 +3189,8 @@ mod tests {
                 bus_left: vec![0.0; frames as usize],
                 bus_right: vec![0.0; frames as usize],
                 taken: Vec::new(),
+                trace: Vec::new(),
+                cohorts: Vec::new(),
             };
             let chain = |active: &[bool]| {
                 BankChain::new(
@@ -3202,6 +3228,18 @@ mod tests {
             // (4) Ascending lane order.
             let expected: Vec<usize> = (0..lanes).filter(|lane| mask[*lane]).collect();
             assert_eq!(armed.taken, expected, "the epilogue visits lanes in order");
+            let expected_trace: Vec<(char, usize)> = (0..lanes)
+                .filter(|lane| active[*lane])
+                .map(|lane| (if mask[lane] { 'f' } else { 's' }, lane))
+                .collect();
+            assert_eq!(
+                armed.trace, expected_trace,
+                "mixed folds retain callback/scatter order"
+            );
+            assert!(
+                armed.cohorts.is_empty(),
+                "mixed masks retain the per-lane callback path"
+            );
 
             for lane in 0..lanes {
                 if !active[lane] {
@@ -3244,6 +3282,62 @@ mod tests {
                     expected_right.to_bits(),
                     "frame {frame}: a folded lane received words the scatter would not have written"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn all_active_folded_masks_use_one_cohort_with_physical_lane_ids() {
+        let frames = 13_u32;
+        for (width, active) in [
+            (BankWidth::Four, vec![true, true, true, true]),
+            (
+                BankWidth::Eight,
+                vec![true, false, true, false, false, true, false, false],
+            ),
+        ] {
+            let lanes = width.lanes() as usize;
+            let mut members = PlanesWithFold {
+                planes: Planes {
+                    left: (0..lanes)
+                        .map(|lane| vec![lane as f32 + 1.0; frames as usize])
+                        .collect(),
+                    right: (0..lanes)
+                        .map(|lane| vec![-(lane as f32) - 1.0; frames as usize])
+                        .collect(),
+                },
+                gains: vec![1.0; lanes],
+                bus_left: vec![0.0; frames as usize],
+                bus_right: vec![0.0; frames as usize],
+                taken: Vec::new(),
+                trace: Vec::new(),
+                cohorts: Vec::new(),
+            };
+            let mut chain = BankChain::new(
+                AoSoaScratch::new(width, frames).expect("scratch"),
+                active.clone().into_boxed_slice(),
+                vec![slot(active.clone(), Box::new(ScaleByLane))],
+            )
+            .expect("chain");
+            chain
+                .arm_fold(active.clone().into_boxed_slice())
+                .expect("fold");
+            for block in 0..2 {
+                chain
+                    .run(&mut members, frames, block * u64::from(frames))
+                    .expect("run");
+            }
+            let ids: Vec<usize> = (0..lanes).filter(|lane| active[*lane]).collect();
+            assert_eq!(members.cohorts, vec![ids.clone(), ids]);
+            assert!(members.trace.iter().all(|(kind, _)| *kind == 'f'));
+            for (lane, is_active) in active.iter().copied().enumerate() {
+                if !is_active {
+                    assert!(
+                        members.planes.left[lane]
+                            .iter()
+                            .all(|x| x.to_bits() == (lane as f32 + 1.0).to_bits())
+                    );
+                }
             }
         }
     }

@@ -3175,7 +3175,7 @@ mod tests {
                 oracle_right.iter().map(|value| value.to_bits()).collect(),
             );
 
-            // The epilogue: the same tiles, folded lane by lane in the same order.
+            // The epilogue: the same tiles, in an opening cohort and a continuation cohort.
             let mut folded_lease = stereo_lease(frames, 1);
             let fold: Vec<FoldLane> = coefficients
                 .iter()
@@ -3192,11 +3192,28 @@ mod tests {
                 fold: &fold,
                 master,
             };
-            for (index, tile) in tiles.iter().enumerate() {
-                let mut left = tile.0.clone();
-                let mut right = tile.1.clone();
-                members.fold_plane(index, &mut left, &mut right);
-            }
+            let mut staged_left: Vec<f32> = tiles
+                .iter()
+                .flat_map(|tile| tile.0.iter().copied())
+                .collect();
+            let mut staged_right: Vec<f32> = tiles
+                .iter()
+                .flat_map(|tile| tile.1.iter().copied())
+                .collect();
+            members.fold_cohort(FoldCohort::new(
+                &[0, 1],
+                &mut staged_left,
+                &mut staged_right,
+                frames,
+                frames,
+            ));
+            members.fold_cohort(FoldCohort::new(
+                &[2],
+                &mut staged_left,
+                &mut staged_right,
+                frames,
+                frames,
+            ));
             let (folded_left, folded_right) = folded_lease.read_stereo(master);
             assert_eq!(
                 (
@@ -3211,6 +3228,122 @@ mod tests {
                 ),
                 oracle,
                 "{frames} frames: the epilogue is not the route plus the reduction"
+            );
+        }
+    }
+
+    #[test]
+    fn a_later_folded_cohort_continues_from_the_live_master_in_d9_order() {
+        for frames in [1_usize, 3, 8, 11] {
+            let master = ARENA_BASE;
+            let fold = [
+                FoldLane {
+                    coefficients: [1.0, 0.0, 0.0, 1.0],
+                    store: true,
+                },
+                FoldLane {
+                    coefficients: [1.0, 0.0, 0.0, 1.0],
+                    store: false,
+                },
+                FoldLane {
+                    coefficients: [1.0, 0.0, 0.0, 1.0],
+                    store: false,
+                },
+            ];
+            let mut lease = stereo_lease(frames, 1);
+            let mut left = [
+                vec![16_777_216.0; frames],
+                vec![1.0; frames],
+                vec![-16_777_216.0; frames],
+            ]
+            .concat();
+            let mut right = [
+                vec![-16_777_216.0; frames],
+                vec![-1.0; frames],
+                vec![16_777_216.0; frames],
+            ]
+            .concat();
+            let mut members = ArenaMembers {
+                lease: &mut lease,
+                inputs: &[],
+                outputs: &[],
+                fold: &fold,
+                master,
+            };
+            members.fold_cohort(FoldCohort::new(&[0], &mut left, &mut right, frames, frames));
+            members.fold_cohort(FoldCohort::new(
+                &[1, 2],
+                &mut left,
+                &mut right,
+                frames,
+                frames,
+            ));
+            let (actual_left, actual_right) = lease.read_stereo(master);
+            assert!(
+                actual_left
+                    .iter()
+                    .all(|sample| sample.to_bits() == 0.0_f32.to_bits())
+            );
+            assert!(
+                actual_right
+                    .iter()
+                    .all(|sample| sample.to_bits() == 0.0_f32.to_bits())
+            );
+            assert_eq!(
+                (16_777_216.0_f32 + (1.0 - 16_777_216.0)).to_bits(),
+                1.0_f32.to_bits()
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_folded_cohorts_are_rejected_before_route_or_master_mutation() {
+        const FRAMES: usize = 4;
+        let fold = [
+            FoldLane {
+                coefficients: [2.0, 0.0, 0.0, 2.0],
+                store: true,
+            },
+            FoldLane {
+                coefficients: [3.0, 0.0, 0.0, 3.0],
+                store: true,
+            },
+        ];
+        for ids in [&[0, 0][..], &[0, 1][..], &[2][..]] {
+            let mut lease = stereo_lease(FRAMES, 1);
+            let (master_left, master_right) = lease.write_stereo(ARENA_BASE);
+            master_left.fill(19.0);
+            master_right.fill(-23.0);
+            let mut left = vec![5.0_f32; FRAMES * 3];
+            let mut right = vec![-7.0_f32; FRAMES * 3];
+            let before_left: Vec<u32> = left.iter().map(|x| x.to_bits()).collect();
+            let before_right: Vec<u32> = right.iter().map(|x| x.to_bits()).collect();
+            let mut members = ArenaMembers {
+                lease: &mut lease,
+                inputs: &[],
+                outputs: &[],
+                fold: &fold,
+                master: ARENA_BASE,
+            };
+            members.fold_cohort(FoldCohort::new(ids, &mut left, &mut right, FRAMES, FRAMES));
+            assert_eq!(
+                left.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                before_left
+            );
+            assert_eq!(
+                right.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                before_right
+            );
+            let (master_left, master_right) = lease.read_stereo(ARENA_BASE);
+            assert!(
+                master_left
+                    .iter()
+                    .all(|x| x.to_bits() == 19.0_f32.to_bits())
+            );
+            assert!(
+                master_right
+                    .iter()
+                    .all(|x| x.to_bits() == (-23.0_f32).to_bits())
             );
         }
     }
