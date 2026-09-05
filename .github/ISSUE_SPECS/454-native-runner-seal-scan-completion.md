@@ -240,3 +240,30 @@ Exactly the checker, two existing suites and issue evidence remain allowed. Most
 Review used read-only source/Git/log/status inspection. No tests, builds, timing, repository or GitHub mutations were performed. This is the complete finite final revision list; no further unenumerated matrix is requested.
 
 Root assigns the final Sol attempt 3 against precisely these three groups. Retain accepted source and both counter-controls. Pause focused-green for exact-path checkpoint and one final Astra verdict; no fourth repair is authorized after a failed verdict.
+
+## Sol attempt 3 implementation record
+
+The accepted scanner corrections and exactly two source mutants are preserved. Production changes
+are limited to distinguishing a clean count absence (`rg` status 1) from a count execution failure
+(status greater than 1), while retaining the original `>=2` and exact-four predicates and captured
+stderr.
+
+The six named nonempty producers now have paired empty/error and faithful full-output/error cases:
+RIFF discovery, RIFF count, bypass source, four-root reachability source, FileIdentity count, and
+O_NOFOLLOW count. Before injection, each shim checks the real executable's expected status. Full
+cases additionally validate the actual four fixture paths, four-row wc input/count, complete
+numbered allowed source populations, FileIdentity value `>=2`, or O_NOFOLLOW value `4`, and report
+the checked payload evidence with the sentinel. Other selective required, forbidden, and filter
+cases check the real delegate's expected status before injecting their error.
+
+The real fixture verifier read-failure case removes only a referenced session JSON while preserving
+the verifier, manifest, and tool surface. The late portability read case leaves source and contract
+intact for all earlier scans and passes the actual Python predicate a missing source path. Missing
+source/contract diagnostics, count clean absence, execution failures, and conditional checker
+invocations are distinguished. New directed assertions map unexpected checker success to 97 and
+wrong operation/status/sentinel/payload or setup to 96.
+
+Focused evidence (2026-09-05) is retained under `/tmp/454-sol3-*`: syntax; actual `v1`,
+`portability`, `all`, and invalid-subject status 2; both policy suites; source diff checks; and the
+two original/mutant/restored mutation diffs. No generator write, fixture-byte change, Cargo/native
+runner/build, benchmark, timing, Git, or GitHub operation was performed.

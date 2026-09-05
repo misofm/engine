@@ -68,6 +68,7 @@ PY
     then :; else status=$?; fail "Unix imports are not explicitly guarded (python3 status $status)"; fi
     if rg -c 'FileIdentity::from_file\(&file\)' "$source" >"$portability_tmp/identity-count" 2>"$portability_tmp/identity-count.err"; then status=0; else status=$?; fi
     identity_count=$(<"$portability_tmp/identity-count")
+    [[ "$status" != 1 ]] || fail "held and post-publication handle identities are not both checked (rg status 1: no matches): $(<"$portability_tmp/identity-count.err")"
     [[ "$status" == 0 ]] || fail "FileIdentity count scan failed (rg status $status): $(<"$portability_tmp/identity-count.err")"
     [[ "$identity_count" =~ ^[0-9]+$ && "$identity_count" -ge 2 ]] || fail 'held and post-publication handle identities are not both checked'
     for ownership in 'if !adapter.partial_is_absent() || !adapter.final_is_owned()' 'if self.path_is_owned(&self.partial_path)' 'if self.path_is_owned(&self.final_path)'; do
@@ -75,6 +76,7 @@ PY
     done
     if rg -c 'O_NOFOLLOW' "$source" >"$portability_tmp/nofollow-count" 2>"$portability_tmp/nofollow-count.err"; then status=0; else status=$?; fi
     nofollow_count=$(<"$portability_tmp/nofollow-count")
+    [[ "$status" != 1 ]] || fail "both Linux/Android and Apple path identity checks must be no-follow (rg status 1: no matches): $(<"$portability_tmp/nofollow-count.err")"
     [[ "$status" == 0 ]] || fail "O_NOFOLLOW count scan failed (rg status $status): $(<"$portability_tmp/nofollow-count.err")"
     [[ "$nofollow_count" =~ ^[0-9]+$ && "$nofollow_count" -eq 4 ]] || fail 'both Linux/Android and Apple path identity checks must be no-follow'
     printf 'native PCM runner portability check: ok\n'
