@@ -137,6 +137,8 @@ impl DisjointArena {
 
 /// Both planes of one written buffer plus both planes of one read buffer.
 pub type ArenaStereoPair<'a> = ((&'a mut [f32], &'a mut [f32]), (&'a [f32], &'a [f32]));
+/// Both writable planes of one arena buffer.
+pub type ArenaStereoPlanes<'a> = (&'a mut [f32], &'a mut [f32]);
 
 /// One parcel's checked view of the shared arena.
 ///
@@ -289,6 +291,46 @@ impl ArenaLease {
                 ),
             )
         }
+    }
+
+    /// Borrow the complete set of pairwise-disjoint stereo outputs for a full bank.
+    ///
+    /// All access and shape checks happen before any reference is formed. This is the sole
+    /// mutable multi-plane seam used by the direct bank scatter path.
+    pub fn write_stereo_many<const W: usize>(
+        &mut self,
+        buffers: &[u32; W],
+        frames: usize,
+    ) -> Option<[ArenaStereoPlanes<'_>; W]> {
+        if W != 4 && W != 8 || frames > self.arena.frames {
+            return None;
+        }
+        for (i, buffer) in buffers.iter().copied().enumerate() {
+            let index = buffer as usize;
+            if index == 0 || index >= self.arena.buffers || !self.writes(buffer) {
+                return None;
+            }
+            if buffers[..i].contains(&buffer) {
+                return None;
+            }
+        }
+        let cells = self.arena.cells.as_ptr();
+        let buffer_count = self.arena.buffers;
+        let arena_frames = self.arena.frames;
+        let pairs = core::array::from_fn(|lane| {
+            let buffer = buffers[lane] as usize;
+            let left = (buffer * arena_frames) as isize;
+            let right = (buffer_count * arena_frames + buffer * arena_frames) as isize;
+            // SAFETY: all buffers were checked writable, in bounds, and pairwise distinct above;
+            // the two plane ranges are disjoint by construction and remain under this lease.
+            unsafe {
+                (
+                    core::slice::from_raw_parts_mut((*cells.offset(left)).get(), frames),
+                    core::slice::from_raw_parts_mut((*cells.offset(right)).get(), frames),
+                )
+            }
+        });
+        Some(pairs)
     }
 
     /// One written buffer and one read buffer in `plane`. The two must be distinct.

@@ -305,6 +305,37 @@ fn tile_scatter<const W: usize>(
         }
     }
 }
+
+#[inline(always)]
+fn tile_scatter_direct<const W: usize>(
+    source: &[f32],
+    destinations: &mut BankPlaneViews<'_>,
+    frames: usize,
+    transpose: impl Fn([[f32; W]; W]) -> [[f32; W]; W],
+) {
+    let tiled = (frames / W) * W;
+    for (tile, block) in source[..tiled * W].chunks_exact(W * W).enumerate() {
+        let base = tile * W;
+        let mut rows = [[0.0_f32; W]; W];
+        for (row, chunk) in rows.iter_mut().zip(block.chunks_exact(W)) {
+            row.copy_from_slice(chunk);
+        }
+        for (lane, row) in transpose(rows).into_iter().enumerate() {
+            let (left, _) = destinations.pairs[lane]
+                .as_mut()
+                .expect("direct destination present");
+            left[base..base + W].copy_from_slice(&row);
+        }
+    }
+    for frame in tiled..frames {
+        for lane in 0..W {
+            let (left, _) = destinations.pairs[lane]
+                .as_mut()
+                .expect("direct destination present");
+            left[frame] = source[frame * W + lane];
+        }
+    }
+}
 // REALTIME_POLICY_END
 
 /// The resident AoSoA block handed to one stage. `left.len() == right.len() == frames * lanes`.
@@ -314,6 +345,30 @@ pub struct BankBlock<'a> {
     pub frames: u32,
     pub first_sample: u64,
     pub lanes: usize,
+}
+
+/// Mutably borrowed, pairwise-disjoint planar destinations for one complete bank.
+///
+/// Providers construct this only after validating ownership and capacities.  The fixed upper
+/// bound is the two launch bank widths and keeps the render path allocation-free.
+pub type BankPlanePair<'a> = (&'a mut [f32], &'a mut [f32]);
+
+pub struct BankPlaneViews<'a> {
+    pairs: [Option<BankPlanePair<'a>>; 8],
+}
+
+impl<'a> BankPlaneViews<'a> {
+    /// Construct views in stable lane order. `W` is restricted to a supported bank width.
+    pub fn from_pairs<const W: usize>(pairs: [BankPlanePair<'a>; W]) -> Option<Self> {
+        if W != 4 && W != 8 {
+            return None;
+        }
+        let mut slots: [Option<BankPlanePair<'a>>; 8] = core::array::from_fn(|_| None);
+        for (slot, pair) in slots.iter_mut().zip(pairs) {
+            *slot = Some(pair);
+        }
+        Some(Self { pairs: slots })
+    }
 }
 
 /// One stage of a bank chain.
@@ -1089,6 +1144,13 @@ pub struct BankSlot {
 pub trait BankMembers {
     fn plane(&self, lane: usize) -> (&[f32], &[f32]);
     fn plane_mut(&mut self, lane: usize) -> (&mut [f32], &mut [f32]);
+
+    /// Borrow every destination of a complete bank at once, or decline to use direct scatter.
+    /// Implementors must validate IDs, pairwise disjointness, and capacities before creating any
+    /// references. The default preserves the staged path for providers without that capability.
+    fn distinct_planes_mut(&mut self, _lanes: usize, _frames: usize) -> Option<BankPlaneViews<'_>> {
+        None
+    }
 
     /// One lane's **accumulating auxiliary destination**, or `None` when it has none.
     ///
@@ -2075,6 +2137,42 @@ impl BankChain {
         debug_assert_eq!(self.lanes, W);
         let frames_used = frames as usize;
         let stride = self.scratch.quantum as usize;
+        if self.fold.is_empty() {
+            if let Some(mut destinations) = members.distinct_planes_mut(W, frames_used) {
+                tile_scatter_direct::<W>(
+                    &self.scratch.left,
+                    &mut destinations,
+                    frames_used,
+                    transpose,
+                );
+                // The views are independent for each lane, while the two planes remain paired.
+                // Reborrow the same validated views for the right plane is impossible by design;
+                // providers therefore return both planes and this helper writes the left plane
+                // above and the right plane through the paired view below.
+                for (lane, pair) in destinations.pairs.iter_mut().enumerate().take(W) {
+                    let (_, right) = pair.as_mut().expect("direct destination present");
+                    // Reconstruct the right-plane transpose from the resident block with the
+                    // same exact permutation, without arithmetic or staging.
+                    let tiled = (frames_used / W) * W;
+                    for (tile, block) in self.scratch.right[..tiled * W]
+                        .chunks_exact(W * W)
+                        .enumerate()
+                    {
+                        let base = tile * W;
+                        let mut rows = [[0.0_f32; W]; W];
+                        for (row, chunk) in rows.iter_mut().zip(block.chunks_exact(W)) {
+                            row.copy_from_slice(chunk);
+                        }
+                        let row = transpose(rows)[lane];
+                        right[base..base + W].copy_from_slice(&row);
+                    }
+                    for frame in tiled..frames_used {
+                        right[frame] = self.scratch.right[frame * W + lane];
+                    }
+                }
+                return;
+            }
+        }
         let tiled = (frames_used / W) * W;
         tile_scatter(
             &self.scratch.left[..tiled * W],
@@ -2217,6 +2315,42 @@ mod tests {
         }
         fn plane_mut(&mut self, lane: usize) -> (&mut [f32], &mut [f32]) {
             (&mut self.left[lane], &mut self.right[lane])
+        }
+        fn distinct_planes_mut(
+            &mut self,
+            lanes: usize,
+            frames: usize,
+        ) -> Option<BankPlaneViews<'_>> {
+            if lanes != self.left.len()
+                || lanes != self.right.len()
+                || (lanes != 4 && lanes != 8)
+                || self.left.iter().any(|p| p.len() < frames)
+                || self.right.iter().any(|p| p.len() < frames)
+            {
+                return None;
+            }
+            let (left, right) = (&mut self.left, &mut self.right);
+            if lanes == 4 {
+                let mut left = left.iter_mut();
+                let mut right = right.iter_mut();
+                let pairs: [BankPlanePair<'_>; 4] = std::array::from_fn(|_| {
+                    (
+                        &mut **left.next().expect("validated lane"),
+                        &mut **right.next().expect("validated lane"),
+                    )
+                });
+                BankPlaneViews::from_pairs::<4>(pairs)
+            } else {
+                let mut left = left.iter_mut();
+                let mut right = right.iter_mut();
+                let pairs: [BankPlanePair<'_>; 8] = std::array::from_fn(|_| {
+                    (
+                        &mut **left.next().expect("validated lane"),
+                        &mut **right.next().expect("validated lane"),
+                    )
+                });
+                BankPlaneViews::from_pairs::<8>(pairs)
+            }
         }
     }
 

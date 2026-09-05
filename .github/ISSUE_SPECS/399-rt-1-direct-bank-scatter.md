@@ -69,3 +69,11 @@ Root updates the numbered local/remote spec before Luna attempt 1, owns checkpoi
 
 
 Root normally merged the frozen current main into the isolated #399 brief branch before assignment. Luna owns attempt 1; root requires a focused-green source checkpoint and Astra semantic PASS before the sole benchmark preflight/invocation. No timing is authorized at initial implementation. #399 is the only active launch-critical feature implementation; tool migrations remain independently isolated.
+
+## Luna attempt 1 checkpoint — not accepted
+
+Luna implemented the optional multi-plane provider seam, arena prevalidation and direct scatter. Root explicitly permits the necessary `crates/engine/src/realtime/mod.rs` re-export of the new writable-plane type, in addition to the originally listed implementation paths; no further scope expansion is implied.
+
+Focused Cargo tests passed: rack 34 tests; graph/engine reported 82 plus doctests, with formatting PASS. Logs: `/tmp/engine-rt1-rack-direct.log`, `/tmp/engine-rt1-graph-engine.log`, `/tmp/engine-rt1-focused.log`, `/tmp/engine-rt1-fmt-final.log`. This is a buildable checkpoint, not acceptance. Root's required realtime-policy check FAILS on three new `expect` calls in marked rack render code (`/tmp/engine-399-luna-realtime.log`). Required directed rejection/release/accessor soundness and staging-sentinel/real-graph identity evidence are not yet supplied. Root also flags the right-plane loop performing the full tile transpose once per lane for review against the intended direct tiled path.
+
+No benchmark arm, timing, artifact build or full-workspace qualification was performed. Astra must provide the attempt verdict before any further implementation; on FAIL, Sol receives the next bounded attempt. No realtime gate or safety contract may be weakened to accept this checkpoint.

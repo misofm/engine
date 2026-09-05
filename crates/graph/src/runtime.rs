@@ -48,7 +48,7 @@ use effect_contract::{
     ObservationSample, PreparedAutomationSpan, PreparedNativeEffect,
 };
 use lane::kernels::{mix2x2_block, pdc_delay_block, sum_into_block, sum2_block};
-use rack::{BankChain, BankMembers};
+use rack::{BankChain, BankMembers, BankPlaneViews};
 
 use crate::{
     GraphBindingBlock, GraphNodeObserverBinding, GraphObservationBlock, GraphPreparedEffect,
@@ -664,6 +664,23 @@ impl BankMembers for ArenaMembers<'_> {
     }
     fn plane_mut(&mut self, lane: usize) -> (&mut [f32], &mut [f32]) {
         self.lease.write_stereo(self.outputs[lane])
+    }
+    fn distinct_planes_mut(&mut self, lanes: usize, frames: usize) -> Option<BankPlaneViews<'_>> {
+        match lanes {
+            4 => {
+                let buffers: [u32; 4] = self.outputs[..4].try_into().ok()?;
+                Some(BankPlaneViews::from_pairs(
+                    self.lease.write_stereo_many(&buffers, frames)?,
+                )?)
+            }
+            8 => {
+                let buffers: [u32; 8] = self.outputs[..8].try_into().ok()?;
+                Some(BankPlaneViews::from_pairs(
+                    self.lease.write_stereo_many(&buffers, frames)?,
+                )?)
+            }
+            _ => return None,
+        }
     }
     /// The route and the master accumulation, in the lane's own transposed tile (issue #218).
     ///
