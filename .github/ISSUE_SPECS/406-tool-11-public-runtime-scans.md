@@ -68,3 +68,9 @@ Final gates are affected shell suites, bash syntax, real policy scripts, existin
 ## Numbered program and approved scope
 
 Astra approved this exact brief on 2026-09-05 after the recorded declaration/first-match corrections. #401 remains OPEN until #406 and #407 are upstream and CLOSED; #306 retains its full program obligations. #406 depends on merged #400; #407 depends on merged #406. The actual base and shared API are frozen at assignment. No implementation has started.
+
+## Frozen assignment — 2026-09-05
+
+#400 is merged as `a9e801fea91dc49a4d2acc9bea939d3fdc38dec9` and verified CLOSED. This is the implementation base. The shared API is `gate_fail`, `gate_scan_forbidden(description, pattern, optional_glob, roots...)`, and `gate_toml_dependencies(manifest)`; preserve their accepted default behavior while adding only the explicitly scoped declaration mode/checked-result capability. `test-gate-lib.sh` is already invoked once by required-CI `test-workspace-policy.sh`; extend that suite without adding duplicate wiring. All four existing affected mutation suites already have required-CI entry points.
+
+Astra approved the full stateless brief and exact dependency tables. Root assigns Luna attempt 1 in an isolated worktree. RT-1/#399 is the only active launch-critical feature and has disjoint Rust paths; this tooling slice must not edit its source or artifacts. Pause at the first coherent focused-green tranche for a root checkpoint and Astra verdict. No benchmark or artifact work is authorized.
