@@ -324,3 +324,8 @@ The private host witness records the selected one-member tail consuming both adm
 ## Final Sol attempt 3 recovery checkpoint: commanded composite PCM
 
 Removed the static routed-track imitation. The private witness now records the selected composite's own first left/right output words after arithmetic. The real host application call proves tail member1, admitted fader/matrix drains1+1 and true fusion together with selected output near0.125 and right exactly twice left. Routed t0 is only a nonzero identity-output check, not evidence of commanded audio. Compiler27/27 and host62/1ignored debug tests plus fmt/diff passed; `/tmp/sol459-attempt3-host-capture-debug-{builtins-compiler-lib,host-web}.log`. Same final attempt3 continues with selected-tail mono/recovery and decline variants.
+
+
+## Final Sol attempt 3 recovery checkpoint: selected-tail mono and clean recovery
+
+The shared fixture optionally captures actual t08 PostMatrix; allocation auditing disables that capture. The paired arm uses BetweenRenderCalls owners and the reference uses actual Concurrent separate owners with collapse forced off. Initial selected words match with actual collapse and member1 fusion; asymmetric right input commands go to selected t08 in both, verify matching changed right-plane output and disengagement. Recovery injects NaN/infinity only in the first hostile block, compares finite selected output against separate owners, then compares a genuinely clean nonzero following block with member1 fusion. Compiler27/27 and allocation4/4 debug tests plus fmt/diff passed; `/tmp/sol459-attempt3-mono-debug-{builtins-compiler-lib,allocation}.log`. Only original decline variants and final focused evidence remain in this same final attempt3.

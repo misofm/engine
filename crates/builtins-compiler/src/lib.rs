@@ -4476,6 +4476,7 @@ mod tests {
                     *right = f32::INFINITY;
                 }
             }
+            self.nonfinite = false;
             Ok(())
         }
     }
@@ -4915,13 +4916,15 @@ mod tests {
     #[cfg(feature = "test-support")]
     #[must_use]
     pub fn test_only_prepared_pair_graph(post_fader_observed: bool) -> PreparedBuiltinsGraphBound {
-        prepared_pair_graph_fixture(post_fader_observed, false, false)
+        prepared_pair_graph_fixture(post_fader_observed, false, false, true, None)
     }
 
     fn prepared_pair_graph_fixture(
         post_fader_observed: bool,
         symmetric_input: bool,
         nonfinite_input: bool,
+        between_render_calls: bool,
+        post_matrix_capture: Option<Arc<std::sync::Mutex<Vec<u32>>>>,
     ) -> PreparedBuiltinsGraphBound {
         let n = 9;
         let compiled = n_track_session_with_symmetry(n, symmetric_input);
@@ -4943,17 +4946,33 @@ mod tests {
                 reset_generation: 0,
             },
         });
-        let builtins = prepare_session_builtins_between_render_calls(
-            &compiled,
-            meter.as_slice(),
-            &controls,
-            caps(),
-        )
+        let builtins = if between_render_calls {
+            prepare_session_builtins_between_render_calls(
+                &compiled,
+                meter.as_slice(),
+                &controls,
+                caps(),
+            )
+        } else {
+            prepare_session_builtins_with_console(&compiled, meter.as_slice(), &controls, caps())
+        }
         .expect("prepared builtins");
         let (graph, levels) = track_graph(n);
         let classes = SessionPoolClasses::from_session(&compiled);
-        let artifact =
+        let mut artifact =
             builtins.into_graph_artifact_with_banks(graph, (), Backend::Simd8, &levels, &classes);
+        if let Some(capture) = post_matrix_capture {
+            artifact
+                .builtin_observers
+                .push(GraphNodeObserverBinding::new(
+                    GraphNodeId::TrackStage {
+                        track_id: StableGraphId::parse("t08").expect("selected tail"),
+                        stage: TrackStage::PostMatrix,
+                    },
+                    0x4598,
+                    Box::new(Capture(capture)),
+                ));
+        }
         let envelope = artifact.graph.envelope;
         let mut nodes = (0..n)
             .map(|index| {
@@ -5013,16 +5032,31 @@ mod tests {
         let _guard = PAIR_WITNESS_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut collapsed = prepared_pair_graph_fixture(false, true, false);
-        let mut separate = prepared_pair_graph_fixture(false, true, false);
+        let collapsed_capture = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let separate_capture = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut collapsed = prepared_pair_graph_fixture(
+            false,
+            true,
+            false,
+            true,
+            Some(Arc::clone(&collapsed_capture)),
+        );
+        let mut separate = prepared_pair_graph_fixture(
+            false,
+            true,
+            false,
+            false,
+            Some(Arc::clone(&separate_capture)),
+        );
         collapsed.plan.arm_mono_collapse(&|_| true);
-        separate.plan.arm_mono_collapse(&|_| true);
         separate.plan.force_mono_collapse_off(true);
 
         test_only_reset_fader_matrix_witness();
-        let collapsed_initial = render_bound(&mut collapsed, 0);
+        let _ = render_bound(&mut collapsed, 0);
         let pair_witness = test_only_fader_matrix_witness();
-        let separate_initial = render_bound(&mut separate, 0);
+        let _ = render_bound(&mut separate, 0);
+        let collapsed_initial = std::mem::take(&mut *collapsed_capture.lock().unwrap());
+        let separate_initial = std::mem::take(&mut *separate_capture.lock().unwrap());
         assert_eq!(collapsed_initial, separate_initial);
         assert!(
             collapsed.plan.bank_collapse_counters()[0] > 0,
@@ -5047,14 +5081,16 @@ mod tests {
             bound
                 .track_controls
                 .iter_mut()
-                .find(|control| control.track_id.as_ref() == "t00")
-                .expect("track zero controls")
+                .find(|control| control.track_id.as_ref() == "t08")
+                .expect("selected tail controls")
                 .input
                 .try_push(command)
                 .unwrap();
         }
-        let collapsed_asymmetric = render_bound(&mut collapsed, HARNESS_QUANTUM as u64);
-        let separate_asymmetric = render_bound(&mut separate, HARNESS_QUANTUM as u64);
+        let _ = render_bound(&mut collapsed, HARNESS_QUANTUM as u64);
+        let collapsed_asymmetric = std::mem::take(&mut *collapsed_capture.lock().unwrap());
+        let _ = render_bound(&mut separate, HARNESS_QUANTUM as u64);
+        let separate_asymmetric = std::mem::take(&mut *separate_capture.lock().unwrap());
         assert_eq!(collapsed_asymmetric, separate_asymmetric);
         assert!(
             collapsed.plan.bank_collapse_transitions()[0] > 0,
@@ -5067,18 +5103,62 @@ mod tests {
             "asymmetric right input reaches real output"
         );
 
-        let mut recovered = prepared_pair_graph_fixture(false, true, true);
+        let recovered_capture = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let reference_capture = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut recovered = prepared_pair_graph_fixture(
+            false,
+            true,
+            true,
+            true,
+            Some(Arc::clone(&recovered_capture)),
+        );
+        let mut recovery_reference = prepared_pair_graph_fixture(
+            false,
+            true,
+            true,
+            false,
+            Some(Arc::clone(&reference_capture)),
+        );
         recovered.plan.arm_mono_collapse(&|_| true);
-        let hostile = render_bound(&mut recovered, 0);
+        recovery_reference.plan.force_mono_collapse_off(true);
+        test_only_reset_fader_matrix_witness();
+        let _ = render_bound(&mut recovered, 0);
+        let hostile_witness = test_only_fader_matrix_witness();
+        let _ = render_bound(&mut recovery_reference, 0);
+        let hostile = std::mem::take(&mut *recovered_capture.lock().unwrap());
+        let hostile_reference = std::mem::take(&mut *reference_capture.lock().unwrap());
+        assert_eq!(hostile, hostile_reference);
         assert!(
             hostile.iter().all(|word| f32::from_bits(*word).is_finite()),
             "the real input bank sanitizes representative NaN/infinity"
         );
-        let following = render_bound(&mut recovered, HARNESS_QUANTUM as u64);
+        assert_eq!(
+            (hostile_witness.fused_calls, hostile_witness.process_members),
+            (1, 1)
+        );
+        test_only_reset_fader_matrix_witness();
+        let _ = render_bound(&mut recovered, HARNESS_QUANTUM as u64);
+        let clean_witness = test_only_fader_matrix_witness();
+        let _ = render_bound(&mut recovery_reference, HARNESS_QUANTUM as u64);
+        let following = std::mem::take(&mut *recovered_capture.lock().unwrap());
+        let following_reference = std::mem::take(&mut *reference_capture.lock().unwrap());
+        assert_eq!(
+            following, following_reference,
+            "clean recovery matches separate owners"
+        );
         assert!(
             following
                 .iter()
                 .all(|word| f32::from_bits(*word).is_finite())
+        );
+        assert!(
+            following
+                .iter()
+                .any(|word| *word != 0 && *word != 0x8000_0000)
+        );
+        assert_eq!(
+            (clean_witness.fused_calls, clean_witness.process_members),
+            (1, 1)
         );
     }
 
