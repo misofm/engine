@@ -1,29 +1,74 @@
 # Make Session format and compile-order policy reject incomplete inputs
 
-Parent #401; grandparents #306/#349 TOOL-11. Depends on merged #407, which serializes shared-helper and workflow edits. This is the pre-implementation Session split Astra required under #407's half-day rule; no original obligation is removed. #401 closes only after #406, amended #407 and this child all land.
+This is the complete amended #417 brief, ready to synchronize to its existing numbered issue before assignment. Parent #401; grandparents #306/#349 TOOL-11. Depends on merged #407 and its final helper API. Root freezes the actual merge base before Luna begins. #401 closes only after #406, #407 and #417 all land; all original obligations remain.
 
-## Closable outcome and allowed paths
+## Smallest closable outcome and paths
 
-The existing Session format and compile-order policy rejects incomplete inputs without changing its format, order or allowlists. Only scripts/check-session-policy.sh, new scripts/test-session-policy.sh, minimal scripts/lib/gate.sh and scripts/test-gate-lib.sh changes if still necessary, this numbered spec/evidence, and .github/workflows/qualification.yml solely to add its new test immediately after the existing Session checker. Preserve job/router/triggers/expectations and all other steps. No runtime, manifest, artifact, benchmark or generic harness.
+The existing Session format/ordering checker rejects every failed or incomplete input operation while preserving its existing policy, first-match order, exact historical exemptions and valid-empty populations. One checker, one small direct fixture suite and one existing CI step are the whole outcome.
 
-No CLI expansion: copy the checker/helper into a disposable fixture repository and preserve physical-script-root behavior.
+Allowed: `scripts/check-session-policy.sh`, new `scripts/test-session-policy.sh`, this numbered spec/evidence, and `.github/workflows/qualification.yml` only to convert the existing Session checker run into a block that runs that same checker then the new suite immediately afterward. No job/router/trigger/expectation changes. `scripts/lib/gate.sh` and `scripts/test-gate-lib.sh` may change only if a concrete necessary capability is absent after #407; the existing forbidden/required/collect/find/sort helpers should suffice. Prefer a small local anchor function to another shared parser. No runtime, manifests, artifact, benchmark, other gate, generic command framework or historical allowlist edit.
 
-## Frozen semantics
+Preserve the physical script root derived from `$0`; source its shared library using that root. Do not add a fixture-root argument or change the CLI. Tests execute copies of checker/helper in a disposable repository, including from a foreign working directory.
 
-Preserve the physical script-root behavior and required allowlist/session manifest/source. Check every direct negative and positive rg operation separately (engine reverse edge, session engine/json-syntax presence, parser baggage, publication APIs, allocation vocabulary). Each of the five compile-order anchors must have at least one match from a successful complete scan; use its first numeric line as before, then enforce the existing strict order. Multiple matches retain the existing first-match behavior. Capture the successful scan before selecting its first result; missing/error values must not coerce to zero.
+## Exact policy and input contract
 
-The grouped producer at lines 38–43 contains four independent `find` invocations over six required repository populations: `fixtures/session`, `fixtures/native-pcm-runner`, `hosts/host-web/qualification`, `hosts/host-web/tests/browser-v1`, `sdk`, and `fuzz`. Capture every producer and sort status before looping. Zero TOML matches after a complete traversal is valid because the policy forbids non-allowlisted live Session TOML. Preserve historical allowlist parsing and exact patterns. The retired-spelling rg producer at line 51 may validly filter to empty; its search, glob exclusions, self exclusions, and allowlist handling must complete successfully first.
+All current violation messages retain the `session policy:` prefix and their existing text. Producer errors add operation-specific context and actual tool status; clean required absence must be distinguishable from inability to search. Capture success/error status explicitly before parsing, filtering or counting. No `! rg`/unchecked conditional/process-substitution pipeline may conflate absence and failure.
 
-## Directed acceptance
+Six direct predicates, each independently checked:
 
-The focused hermetic suite needs a clean positive control, existing violations, all six required roots, each of five ordering anchors, duplicate-anchor first-match positives, expected-empty TOML and retired-spelling results, allowlist read failures, and find/sort/read/rg failures AFTER plausible valid output. Each intended operation must be reached with other metadata intact; missing/error line values never become zero. The four find producers and all filters/consumers must have checked completion.
+1. Engine manifest must not contain the exact reverse dependency row selected by `^session\.workspace = true$`.
+2. Session manifest must contain the exact full line `engine.workspace = true`.
+3. Session manifest must contain the exact full line `json-syntax = { version = "=0.12.5", default-features = false }`.
+4. Its existing beginning-of-line whitespace-aware `toml`/`serde` dependency ban remains unchanged.
+5. The existing publication-API pattern over all `crates/session/src` remains unchanged.
+6. The existing allocation-vocabulary pattern over `crates/session/src/estimate.rs` remains unchanged.
 
-The new suite itself is scanned by the retired-spelling rule. Construct forbidden fixture words from separated shell fragments so the committed suite does not self-match. Do not broaden exemptions, glob exclusions or historical allowlists. Keep the current scan domain.
+For rules 2/3, the old `rg -x` full-line behavior must survive helper substitution: add equivalent anchors when using a helper without `-x`. Do not accidentally permit extra leading/trailing material. Freeze all six current regexes and roots from the unchanged checker when recording the assignment; no broadening/grouping that hides a producer is authorized.
 
-Every assertion must explicitly reject unexpected success and match the intended error class. Counter-mutations must run the actual acceptance assertions against a faulty implementation and show rejection; constructing a bad control alone is insufficient. Preserve shared helper/parser defaults, caller shell state, diagnostics, exact patterns and allowed emptiness.
+`crates/session/src/compile.rs` supplies five separate required scans, in this exact order:
 
-## Gates and delivery
+- `let estimate = estimate_session\(session\)`
+- `check_caps\(session, estimate, caps\)`
+- `validate_session\(session\)`
+- `let canonical_json = write_canonical\(session\)`
+- `let mut normalized = session\.clone\(\)`
 
-Real Session checker, complete focused suite, helper tests if changed, syntax/diff and required CI; retain the full workspace unchanged-count comparison at the coherent delivery boundary. No Cargo build or timing is needed for the implementation pass. Astra scopes and adversarially reviews; Luna attempt 1, Sol only after FAIL, three total maximum then hard stop/rescope. Root owns isolated checkout, exact-path checkpoints/pushes, local/remote synchronization and actual PR merge after Astra PASS and required CI. Publishing a queued brief does not authorize implementation before dependencies. Parent #401 and the broader #306 program remain OPEN until their full assigned obligations are upstream.
+Scan one explicit file, capture the COMPLETE successful `rg -n` output, then select the first row and its leading line field. Require a positive ASCII-decimal line number before arithmetic; interpret it as decimal, never shell expression text or an absent value coerced to zero. Retain strict `estimate < caps < validate < canonical < clone`. Later duplicates remain valid if the first occurrences satisfy the order. Do not impose uniqueness, use early `head`, or treat a failed scan's plausible first row as an anchor.
 
-Assigned number: #417. Parent closure is #406 + #407 + #417; this issue remains queued until #407 merges.
+The exact allowlist `scripts/session-policy-historical-allowlist.txt` is required. Apply the existing two sed expressions removing whitespace-prefixed comments and blank lines, with explicit read/parser status. Empty/comment-only content is valid. No whitespace normalization of surviving entries: equality remains exact. A failed read after plausible output cannot yield a usable partial allowlist. Diagnostics need the operation and sed status, not an echo of partial allowlist contents. Tests prove the shim produced output and the checker rejects its status; preserved partial stdout is not required here.
+
+Capture each of these four find invocations separately, retaining its arguments:
+
+```
+find fixtures/session -type f -name '*.toml'
+find fixtures/native-pcm-runner -type f -name '*.toml'
+find hosts/host-web/qualification hosts/host-web/tests/browser-v1 -type f -name '*.toml'
+find sdk fuzz -type f \( -name '*.session.toml' -o -path '*/session_*/*.toml' \)
+```
+
+All six roots are required. Each successful invocation may return zero paths. All four must finish successfully before any path is considered for exemption or violation. Append only nonempty captures, then perform one checked sort; preserve duplicates as the original sort does. Empty aggregate is valid and must not manufacture a blank violation. Remove suppressed find stderr so errors remain observable. Keep exact path comparisons for TOML findings.
+
+The final retired-name search keeps its exact existing regex, root `.`, and exclusions for target, .git, sdk/node_modules, the checker itself and the SDK-deletion checker. Capture the complete search and reject execution errors before any allowlist filtering. Successful empty output is valid. Parse path/line/rest with shell builtins, remove a leading `./` from candidate paths exactly as before, and apply the same exact historical entries. Do not expand exclusions or normalize allowlist entries. Shell-only path parsing/is_historical needs no external helper.
+
+## Minimal direct fixture and objective cases
+
+Use one small base fixture copied per mutation: checker/helper; normally comment-only allowlist; minimal engine/Session manifests with the exact required rows; clean estimate source; a synthetic compile source with the five ordered anchors; and all six discovery roots. It need not compile. Its default has zero TOML matches, zero retired matches and an empty historical list, and MUST pass. Add one valid allowlisted-path positive. Do not copy the entire repository or run Cargo.
+
+A bounded table/loop of the following operation cases is the acceptance contract. Each error shim delegates unrelated calls to the real tool, so earlier checks stay valid. Assert intended operation/class plus nonzero result and explicitly reject unexpected success. Do not use a generic first failing rg shim as evidence for a later operation.
+
+- All six predicates: one true policy violation each; distinct search-error injection selected by the actual pattern/input for each, with useful partial output before failure. Test required exact-line semantics against a line containing the required text plus extra material. Remove engine manifest, Session manifest, estimate source and compile source in otherwise-valid cases to prove required inputs.
+- All five anchors: remove each in a loop; inject each search's error after a plausible valid `line:text` row; reject malformed/zero line text. One adjacent-order swap is sufficient for the common strict-order comparison. Duplicate all five anchors later in the file as one positive preserving their first occurrences. Add a duplicate of the last anchor before the first anchor and require the existing ordering failure; this discriminates first-match selection from last-match selection without inventing duplicate rejection.
+- Allowlist: missing-file red, comment-only positive, checked sed failure with no output and after plausible allowlisted rows. Use controlled read failure rather than privileged chmod-only tests.
+- Four find calls: remove each of the six roots in a loop, preserving other metadata. Inject error-only and useful partial output then error at EACH distinct invocation. Earlier find calls must delegate successfully. Include a non-allowlisted TOML finding from each of the three pattern shapes (plain .toml, .session.toml, nested session-directory .toml); the two ordinary roots share the same pattern and need no redundant corpus. Include exact allowlisted TOML positive.
+- Sort: a two-path ordering fixture checks the first reported violation follows existing sorted order; a shim emitting sorted valid-looking paths then failing must report sort error before the loop. Empty combined discovery remains positive.
+- Retired search: clean empty, actual forbidden spelling, exact allowlisted-path positive, error-only, and allowed-looking or violating partial stdout then error. Confirm original self/SDK-deletion exclusions using the disposable fixture. Keep scope unchanged.
+
+The new suite itself is in the real checker’s scan domain: construct forbidden retired fixture words from separated shell fragments. Do not put whole forbidden tokens in committed comments, labels, heredocs or mutation names. Do not alter the historical allowlist/exclusions to hide the suite. Temporary tool shims and captured outputs containing these words must remain outside the scanned fixture except the deliberately targeted case.
+
+## Counter-checks and delivery
+
+Reuse the SAME operation assertions to counter-test disposable faulty checker/helper variants: ignored anchor failure, ignored find failure, ignored sort failure, ignored allowlist-read failure and ignored retired-search failure. Each must be rejected at its intended assertion. The anchor mutant must still reject ordinary missing anchors while accepting only execution errors, proving the partial-error case actually matters. Record the real assertion/status; building a mutant or printing that it was rejected is not evidence. Keep this bounded inside the new suite or record an independently executed disposable acceptance run, not a new harness framework.
+
+Once one coherent implementation pass is ready: real checker, full focused suite, shared helper tests only if changed, Bash syntax/diff. Root checkpoints/pushes before more edits; Astra gives one adversarial verdict. Full workspace unchanged-count comparison remains a delivery-boundary gate, followed by actual PR review and required CI. Luna attempt 1; Sol only after Astra FAIL, at most two revisions; after three failed attempts hard stop/rescope. No timing or benchmark tooling belongs here.
+
+This brief resolves Sol's readiness questions without changing the original Session policy. #417 remains queued until #407 merges; root must synchronize this amended existing issue/spec and freeze the actual base before assignment.
