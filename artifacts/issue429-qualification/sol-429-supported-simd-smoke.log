@@ -1,0 +1,37 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+   Compiling version_check v0.9.5
+    Checking lexical-util v1.0.7
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.24
+   Compiling syn v1.0.109
+    Checking once_cell v1.21.4
+   Compiling autocfg v1.5.1
+    Checking smallvec v1.15.2
+    Checking utf8-decode v1.0.1
+    Checking engine v0.1.0 (/home/bl/misofm/engine-429/crates/engine)
+    Checking decoded-char v0.1.1
+    Checking locspan v0.8.2
+    Checking bytemuck v1.25.2
+    Checking wide v1.6.1
+    Checking smallstr v0.3.1
+   Compiling proc-macro-error-attr v1.0.4
+   Compiling ahash v0.7.8
+   Compiling proc-macro-error v1.0.4
+   Compiling indexmap v1.9.3
+    Checking hashbrown v0.12.3
+    Checking lexical-parse-integer v1.0.6
+    Checking lexical-write-integer v1.0.6
+    Checking lexical-parse-float v1.0.6
+    Checking lexical-write-float v1.0.6
+    Checking lexical-core v1.0.6
+    Checking lexical v7.0.5
+    Checking json-number v0.4.10
+   Compiling locspan-derive v0.6.0
+    Checking json-syntax v0.12.5
+    Checking session v0.1.0 (/home/bl/misofm/engine-429/crates/session)
+    Checking protocol v0.1.0 (/home/bl/misofm/engine-429/crates/protocol)
+    Checking lane v0.1.0 (/home/bl/misofm/engine-429/crates/lane)
+    Checking target-smoke v0.1.0 (/home/bl/misofm/engine-429/crates/target-smoke)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.72s

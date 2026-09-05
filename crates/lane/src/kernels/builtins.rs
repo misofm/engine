@@ -276,6 +276,46 @@ pub fn matrix2x2_block<L: Lane>(
     }
 }
 
+/// Applies the settled fader/mute and 2x2 matrix in one frame traversal.
+///
+/// Frozen operation order, per frame:
+/// 1. `l = load(left) * gain_left`, `r = load(right) * gain_right`, then clear each muted lane
+/// 2. `yl = select(identity, l, ll * l + lr * r)` and `yr = select(identity, r, rl * l + rr * r)`
+/// 3. store both planes
+///
+/// Both input planes are loaded before either is written. The fader products retain sample before
+/// gain operand order; coefficient-before-sample applies to the matrix products. Both matrix arms
+/// are evaluated before the identity select.
+/// This is the settled equivalent of [`gain_mute_block`] followed by [`matrix2x2_block`].
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+pub fn fader_matrix_block<L: Lane>(
+    left: &mut [f32],
+    right: &mut [f32],
+    frames: usize,
+    gain_left: L,
+    mute_left: L::Mask,
+    gain_right: L,
+    mute_right: L::Mask,
+    matrix: &Matrix2x2Coef<L>,
+) {
+    debug_assert_eq!(left.len(), frames * L::WIDTH);
+    debug_assert_eq!(right.len(), frames * L::WIDTH);
+    for (left_frame, right_frame) in left
+        .chunks_exact_mut(L::WIDTH)
+        .zip(right.chunks_exact_mut(L::WIDTH))
+    {
+        let left_input = L::load(left_frame);
+        let right_input = L::load(right_frame);
+        let l = left_input.mul(gain_left).andnot(mute_left);
+        let r = right_input.mul(gain_right).andnot(mute_right);
+        let yl = L::select(matrix.identity, l, matrix.ll.mul(l).add(matrix.lr.mul(r)));
+        let yr = L::select(matrix.identity, r, matrix.rl.mul(l).add(matrix.rr.mul(r)));
+        yl.store(left_frame);
+        yr.store(right_frame);
+    }
+}
+
 /// State of a ramping 2x2 channel matrix, one set per lane. Coefficient order is `[ll, lr, rl, rr]`.
 #[derive(Clone, Copy)]
 pub struct Matrix2x2Ramp<L: Lane> {

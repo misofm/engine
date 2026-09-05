@@ -1,0 +1,282 @@
+   Compiling builtins v0.1.0 (/home/bl/misofm/engine-429/crates/builtins)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.23s
+     Running unittests src/lib.rs (/tmp/engine-429-sol-target/debug/deps/builtins-b28151c824699de5)
+
+running 2 tests
+test tests::full_public_chain_matches_the_three_section_reference ... ok
+test tests::eligibility_sequence_uses_whole_call_fallback_then_fuses_the_next_call ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/contract.rs (/tmp/engine-429-sol-target/debug/deps/contract-a5fbf794f5b4dec3)
+
+running 4 tests
+test descriptor_domains_are_exhaustive_at_launch_rates ... ok
+test compatibility_fallback_is_limited_to_the_exact_extended_rate_tier ... ok
+test parameter_descriptors_have_complete_stable_contracts ... ok
+test representable_cutoff_domain_is_shared_by_descriptors_and_preparation ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/determinism.rs (/tmp/engine-429-sol-target/debug/deps/determinism-8ccc73ba27bae5b7)
+
+running 2 tests
+test no_corpus_case_is_vacuous_or_carries_a_nan ... ok
+test every_corpus_case_matches_its_pin_at_every_width ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/fader_ramp.rs (/tmp/engine-429-sol-target/debug/deps/fader_ramp-d14d256711783b34)
+
+running 8 tests
+test a_cross_block_ramp_is_partition_invariant ... ok
+test a_move_made_while_muted_applies_on_unmute ... ok
+test a_zero_window_move_takes_effect_on_the_first_sample ... ok
+test a_windowed_move_is_monotone_and_lands_exactly_on_its_target ... ok
+test a_zero_window_mute_is_the_exact_prepared_mute ... ok
+test mute_is_a_fader_endpoint_and_settles_to_exact_positive_zero ... ok
+test the_fader_domain_is_enforced_at_the_setter ... ok
+test an_uncommanded_live_fader_is_bit_identical_to_the_prepared_one ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/input_liveness.rs (/tmp/engine-429-sol-target/debug/deps/input_liveness-6ee03b49c9e0a288)
+
+running 13 tests
+test a_lane_selector_addresses_exactly_the_lanes_it_names ... ok
+test a_bank_refuses_a_retarget_addressed_past_its_members ... ok
+test the_settled_arm_leaves_the_ramp_words_untouched ... ok
+test the_live_trim_domain_is_the_declared_one ... ok
+test an_uncommanded_live_input_renders_the_prepared_coefficients ... ok
+test an_uncommanded_bank_keeps_its_elision_plan ... ok
+test trim_and_polarity_do_not_overwrite_each_other ... ok
+test the_trim_ramp_is_partition_invariant ... ok
+test a_ramping_block_leaves_an_elidable_banks_integrators_at_positive_zero ... ok
+test settled_and_ramping_paths_agree_on_an_elided_bank ... ok
+test a_banked_lane_ramps_exactly_as_the_same_track_alone ... ok
+test a_polarity_flip_crosses_zero_and_settles_at_the_reprepared_coefficient ... ok
+test the_trim_ramp_is_bit_identical_to_the_parameter_smoother ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/input_liveness_mono.rs (/tmp/engine-429-sol-target/debug/deps/input_liveness_mono-0796052268188f73)
+
+running 8 tests
+test re_equalising_the_words_restores_the_designed_term_and_nothing_more ... ok
+test an_asymmetric_retarget_declines_the_lane_on_the_admitting_block ... ok
+test channels_agree_covers_the_trim_ramp_record ... ok
+test a_collapsed_block_keeps_the_two_channels_ramp_records_equal ... ok
+test a_symmetric_retarget_keeps_the_lane_eligible ... ok
+test the_disengage_copy_still_restores_the_integrators ... ok
+test a_symmetric_ride_through_a_collapse_renders_never_collapsed_bits ... ok
+test a_retarget_between_a_collapsed_block_and_the_disengage_survives_the_copy ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/matrix.rs (/tmp/engine-429-sol-target/debug/deps/matrix-83f2b9bcdce9a300)
+
+running 7 tests
+test explicit_window_retarget_ramps_over_the_requested_window_and_is_adopted ... ok
+test matrix_ramp_reaches_target ... ok
+test settled_identity_matrix_preserves_signed_zero ... ok
+test zero_window_snaps_and_reset_cancels_a_ramp ... ok
+test matrix_retarget_mid_ramp_matches_the_reference ... ok
+test matrix_ramp_tracks_the_f64_interpolation ... ok
+test matrix_ramp_matches_reference_d11_law ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/meter.rs (/tmp/engine-429-sol-target/debug/deps/meter-f100978644158888)
+
+running 7 tests
+test a_settled_silent_block_is_bit_identical_through_the_early_out ... ok
+test meter_peak_of_signed_zeros_is_positive_zero ... ok
+test meter_windows_are_exact ... ok
+test meter_windows_discontinuities_resets_and_drops_are_exact ... ok
+test silence_against_a_nonzero_held_peak_still_decays ... ok
+test meter_segment_law_is_exact ... ok
+test ten_thousand_deterministic_meter_mutations_remain_bounded_and_finite ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/mono_collapse.rs (/tmp/engine-429-sol-target/debug/deps/mono_collapse-98fa8edef7f7c754)
+
+running 2 tests
+test the_collapsed_body_publishes_the_dual_bodys_report ... ok
+test a_desymmetrized_bank_is_a_never_collapsed_bank ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/response.rs (/tmp/engine-429-sol-target/debug/deps/response-c788ae4005cd4935)
+
+running 8 tests
+test launch_and_extended_compatibility_rates_match_the_independent_f64_rbj_oracle ... ok
+test launch_and_extended_compatibility_rate_sweeps_match_f64_magnitude ... ok
+test cast_tpt_state_space_matches_independent_rbj_transfer_at_compatibility_rates ... ok
+test ten_thousand_bounded_parameter_and_block_mutations_stay_finite ... ok
+test production_order_hpf_lpf_cascade_meets_all_launch_response_gates ... ok
+test representable_cutoff_domain_prepares_everywhere_and_rejects_successor ... ok
+test coherent_sustained_sines_cover_launch_and_extended_compatibility_rates ... ok
+test one_second_impulse_dfts_match_rbj_at_launch_and_extended_compatibility_rates ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 16.64s
+
+     Running tests/speed.rs (/tmp/engine-429-sol-target/debug/deps/speed-1b80a48a4c3c0421)
+
+running 1 test
+test bench_input_stage_ns_per_track_frame ... ignored, descriptive timing, run by hand
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/stage.rs (/tmp/engine-429-sol-target/debug/deps/stage-a2b7dc308dbb43bc)
+
+running 12 tests
+test a_settled_banked_mute_is_exactly_positive_zero ... ok
+test polarity_trim_fader_and_matrix_are_exact ... ok
+test prepared_sections_match_reference_coefficients ... ok
+test signed_zero_and_mute_laws ... ok
+test bank_construction_accepts_one_to_width_members_only ... ok
+test boundary_check_is_lane_local_per_block ... ok
+test identity_sections_are_elided_only_when_every_lane_and_word_says_so ... ok
+test partition_invariance_over_master_plan_quanta ... ok
+test engine_tan_agrees_with_the_platform_to_one_ulp_over_the_cutoff_domain ... ok
+test bank_is_bit_identical_to_scalar_stage_at_every_width ... ok
+test banked_fader_and_matrix_are_bit_identical_to_the_per_track_sections ... ok
+test scalar_stage_is_bit_identical_to_reference_recurrence ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+     Running unittests src/lib.rs (/tmp/engine-429-sol-target/debug/deps/lane-d7c29e699773f118)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/b1_speed.rs (/tmp/engine-429-sol-target/debug/deps/b1_speed-7e20693005d98fbf)
+
+running 1 test
+test b1_block_kernel_against_a_per_sample_path ... ignored, descriptive benchmark, not a gate; run with --ignored --nocapture
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/b2_interleave.rs (/tmp/engine-429-sol-target/debug/deps/b2_interleave-2d55a558ae78be8a)
+
+running 1 test
+test b2_interleave_sweep ... ignored, descriptive sweep, not a gate; run with --ignored --nocapture
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/fader_matrix.rs (/tmp/engine-429-sol-target/debug/deps/fader_matrix-5c9f2b258aa039fe)
+
+running 3 tests
+test holey_populations_keep_neutral_wide_padding ... ok
+test wrong_equations_are_distinguished_before_the_dut_is_checked ... ok
+test settled_fader_matrix_matches_the_two_primitive_oracle ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/fp_env.rs (/tmp/engine-429-sol-target/debug/deps/fp_env-852d8e7a42214586)
+
+running 8 tests
+test attestation_passes_on_this_thread ... ok
+test the_canonical_word_is_the_word_inside_the_guard ... ok
+test the_target_declares_whether_it_pins ... ok
+test x86::a_hostile_caller_word_is_normalised_and_returned_bit_exactly ... ok
+test x86::attestation_passes_from_a_hostile_caller_word ... ok
+test x86::denormal_arithmetic_is_correct_inside_the_guard_and_flushed_outside_it ... ok
+test x86::sticky_status_flags_do_not_fail_the_attestation_but_a_control_bit_does ... ok
+test x86::the_caller_word_survives_an_unwind_through_the_guard ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/g1_op_identity.rs (/tmp/engine-429-sol-target/debug/deps/g1_op_identity-e8b035c21b797213)
+
+running 9 tests
+test g1_fma_is_unfused_on_every_backend ... ok
+test g1_mask_any_matches_the_oracle ... ok
+test g1_exp2_int_is_exact_on_the_integer_range ... ok
+test g1_nan_max_and_min_follow_d8 ... ok
+test g1_max_and_min_lowerings_match_the_oracle ... ok
+test g1_signed_zero_max_and_min_follow_d8 ... ok
+test g1_frexp_reconstructs_positive_normals ... ok
+test g1_directed_edge_pool_is_lane_identical ... ok
+test g1_random_vectors_are_lane_identical ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.50s
+
+     Running tests/g2_kernel_identity.rs (/tmp/engine-429-sol-target/debug/deps/g2_kernel_identity-b008d5690fc4ed67)
+
+running 6 tests
+test ordered_accumulation_matches_the_existing_d9_primitives_and_rejects_shapes ... ok
+test g2_subnormal_state_is_flushed_at_every_width ... ok
+test g2_svf_step_yields_both_taps_of_one_state ... ok
+test g2_idle_ramped_svf_equals_the_plain_svf ... ok
+test g2_kernels_are_bit_identical_at_every_width ... ok
+test g2_interleaved_cascade_equals_a_chain_of_blocks ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+
+     Running tests/g4_flush.rs (/tmp/engine-429-sol-target/debug/deps/g4_flush-1894276a5013722d)
+
+running 2 tests
+test g4_flush_is_lane_wise ... ok
+test g4_flush_law_holds_at_every_width ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/g6_ftz_inert.rs (/tmp/engine-429-sol-target/debug/deps/g6_ftz_inert-d966997a39af08cf)
+
+running 1 test
+test g6_flush_makes_hardware_ftz_inert ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/halfband.rs (/tmp/engine-429-sol-target/debug/deps/halfband-5b1052f909f1d263)
+
+running 3 tests
+test the_even_tap_table_is_the_symmetric_half_band ... ok
+test the_double_written_history_addresses_every_age_at_every_position ... ok
+test interpolation_and_decimation_are_width_independent ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.62s
+
+     Running tests/input_chain_elision.rs (/tmp/engine-429-sol-target/debug/deps/input_chain_elision-279cc198c72ace52)
+
+running 5 tests
+test identity_coefficients_over_non_zero_state_are_not_elidable ... ok
+test negative_zero_mix_words_are_not_the_identity ... ok
+test a_single_non_identity_lane_blocks_the_whole_section ... ok
+test negative_zero_state_words_are_inert_but_still_fail_the_bitwise_gate ... ok
+test elision_is_bit_identical_at_every_width_and_section_pattern ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.70s
+
+     Running tests/p1_partition.rs (/tmp/engine-429-sol-target/debug/deps/p1_partition-98587a2af6ea4e71)
+
+running 1 test
+test p1_every_kernel_is_partition_invariant ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.30s
+
+     Running tests/sanitise_counter.rs (/tmp/engine-429-sol-target/debug/deps/sanitise_counter-71a4b3592a2c02e3)
+
+running 2 tests
+test the_and_form_is_the_select_form_on_every_lane_subset ... ok
+test every_copy_of_the_sanitise_prologue_counts_what_the_policy_counts ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.17s
+
+   Doc-tests builtins
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests lane
+
+running 2 tests
+test crates/lane/src/fpenv.rs - fpenv::CanonicalFpEnv (line 286) - compile fail ... ok
+test crates/lane/src/fpenv.rs - fpenv::CanonicalFpEnv (line 281) - compile fail ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
