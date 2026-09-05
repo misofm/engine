@@ -19,3 +19,9 @@ A failure after launch preserves raw output and stops; runner defects go to sepa
 Astra scopes and reviews the evidence and actual PR; root owns checkpoints, pushes, issue synchronization and merge after required CI. Luna may implement the minimal registration/evidence pass, with Sol retrying only according to the standing bounded-attempt rule; neither may run timing without root's explicit committed-head authorization. This is not another implementation attempt for #399's accepted source. #399 closure must cite this still-outstanding descriptive obligation. This successor closes only after an upstream successful measured result, evidence PASS and verified remote state.
 
 Assigned identity: #415; its future dedicated registration is `--issue415-rt1-measurement`, writing only `artifacts/issue415-rt1-measurement`. This queued brief authorizes no invocation before the frozen preflight and root readiness decision.
+
+## Assignment freeze
+
+#399 is merged as 1fa4424d732b0d9150dda5512da80cb95d76a33e and verified CLOSED. This is the accepted source base for #415. Root reuses the clean, closed RT-1 checkout and its build cache on dedicated branch codex/415-rt1-measurement; the old branch/refusal evidence remain intact. Luna's initial implementation is limited to the declared matching dispatch/usage registration in both existing scripts and this evidence. No workload, fixture, validator, floor, Rust, artifact or other gate changes are allowed. Root alone runs committed-head preflight and decides readiness.
+
+The frozen environment ceiling is 0.50 load average, with 60-second binary cooldown and existing affinity/sibling checks; thresholds must not change. Non-timed compilation may prepare the exact runner profile before read-only readiness assessment. Do not invoke the runner merely to probe readiness. Exactly one controlled invocation remains available here; #399's refused invocation is never repeated.
