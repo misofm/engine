@@ -248,3 +248,7 @@ Root records the hard stop and preserves the accepted source/test improvements a
 ## Explicit bounded successor
 
 #448, “Complete environment discovery and required-root acceptance controls”, owns only the two remaining environment acceptance-table obligations under a new Astra-approved brief. The old #412 series remains stopped. Accepted production and other suites are inherited unchanged; #412/#402 remain OPEN until successor completion and required qualification/remote delivery.
+
+## Integrated successor delivery qualification
+
+#448 source PASS and delivered main `99df5cf6c639f0909f82e116eb776e95c172536c` are integrated at immutable candidate `26913f2bad33fdd162f2ce40ffbf1d2cdc072053`. Three production gates, three affected suites and shared helper suite all completed with exit0. Full locked workspace including doctests: 275 blocks / 1,575 passed / 0 failed / 24 ignored, matching delivered baseline. Evidence and complete earlier attempt history are retained in `artifacts/issue448-environment-proof`. Runtime/artifact inputs are unchanged; no new artifact/browser execution or timing is claimed. Actual PR-head Astra review and required CI remain pending; #412/#448 stay OPEN until remote delivery.

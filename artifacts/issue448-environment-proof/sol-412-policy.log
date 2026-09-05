@@ -1,0 +1,15 @@
+ M .github/ISSUE_SPECS/412-tool-11-environment-doc-inputs.md
+ M scripts/check-dsp-research.sh
+ M scripts/check-env-vocabulary.sh
+ M scripts/lib/gate.sh
+ M scripts/test-dsp-research.sh
+ M scripts/test-effect-runtime-policy.sh
+ M scripts/test-env-vocabulary.sh
+ .../412-tool-11-environment-doc-inputs.md          |  12 ++
+ scripts/check-dsp-research.sh                      |  83 +++++++++---
+ scripts/check-env-vocabulary.sh                    |  95 +++++++++++---
+ scripts/lib/gate.sh                                |   8 +-
+ scripts/test-dsp-research.sh                       | 144 +++++++++++++++++----
+ scripts/test-effect-runtime-policy.sh              |  60 ++++++---
+ scripts/test-env-vocabulary.sh                     |  69 ++++++++++
+ 7 files changed, 389 insertions(+), 82 deletions(-)
