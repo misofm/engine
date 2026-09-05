@@ -86,3 +86,21 @@ Review inspected exact diff, mode implementation, all five call sites, focused s
 ## Sol attempt 2 evidence revision
 
 Production helper and graph policy source remain unchanged. The compact graph grammar fixture now includes a repeated identical selected row, an ignored build section, and a selected suffix-looking key with exact `$1` output. Graph-mode awk failures run error-only and after the complete otherwise-accepted graph output; graph-mode sort failures emit the correctly sorted accepted output before failing. Both producers are exercised through direct and conditional helper calls with caller pipefail on and off, preserving operation/status diagnostics. The actual graph fixture adds both selective awk cases while retaining its selective sort cases. A narrowly scoped valid helper mutant strips `.workspace` only from returned fields; the original graph grammar assertion executes it successfully and rejects the semantic result with assertion status 97.
+
+## Astra attempt 2 acceptance
+
+# Astra #423 attempt 2 review
+
+**PASS at exact pushed `58729f9853f5a724a2cb843b61e48d33cfa156fd` for remaining delivery qualification and actual PR review.** This is not remote closure or approval of a future PR head.
+
+The previously inspected implementation is unchanged: graph mode preserves exact header/selection/$1 grammar and normal sorting, and graph calls the same checked helper as the other four original parsers. No local graph dependency awk remains. Default/rack, plain and plain-target branches and callers are unchanged. Parent #401's fifth-parser consolidation is now structurally implemented without adding a policy exception.
+
+The completed compact mode table includes actual duplicate output, selected workspace-prefix/suffix-looking key, ignored build/dev/target entries, leading-indented/bare rows, no-equals and compact-key behavior. The semantic mutant now changes returned suffix handling, not source selection. Both production helper and faulty helper execute the SAME grammar assertion; helper execution failure is status 98, semantic mismatch 97. The counter requires exactly 97, so an empty result caused by tool/syntax failure cannot pass as semantic rejection.
+
+New graph-mode awk error-only and exact expected-output/error cases cover direct and conditional calls with pipefail on/off. Its checked sort has equivalent invocation coverage with otherwise-correct output. Actual graph checker fixtures separately exercise error-only and the complete valid graph dependency roster followed by awk failure, and retain both dependency-sort failure cases. Thus failure status, not an unrelated roster mismatch, is the discriminating gate.
+
+I independently ran the complete helper suite: exit 0, `/tmp/astra-423-attempt2-helper.log`. The graph semantic counter reports intended assertion status 97; retained helper mode/failure/counter tests also pass. Root's real graph and full graph fixture logs are green. Exact attempt diff contains tests and numbered evidence only; no further implementation repair is requested.
+
+Root may proceed with retained unchanged-count workspace qualification, synchronized final evidence, actual pushed PR Astra review and required CI. #423 remains open until delivery is accepted upstream. Parent #401 may close only when the accepted seven-gate children plus this residual consolidation are all remotely complete; #306 and the broader audit remain open for their other obligations. No new CI call, artifact or timing work is needed for this tooling change.
+
+Review used read-only source/spec/Git/log inspection and the existing focused helper shell suite. No Cargo, timing, repository/GitHub mutation or additional framework.
