@@ -1,0 +1,13 @@
+   Compiling host-core v0.1.0 (/home/bl/misofm/engine-430-plan/crates/host-core)
+   Compiling capi v0.1.0 (/home/bl/misofm/engine-430-plan/crates/capi)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.30s
+     Running tests/resource_lifecycle.rs (/tmp/sol442-target/debug/deps/resource_lifecycle-0cec28eebe6161b8)
+
+running 4 tests
+test render_diagnostic_egress_reuses_eager_capi_storage_without_allocation ... ok
+test tiny_control_frame_still_accounts_three_provider_counters_exactly ... ok
+test exported_c_candidates_replay_render_and_both_destroy_orders_balance_exactly ... ok
+test external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s
+
