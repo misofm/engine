@@ -122,3 +122,9 @@ Current `done < <(find ...)` sites extend beyond #400 (notably graph, conformanc
 
 
 Root assigns Luna attempt 1 on the post-#371 source at `2a18b315067898a94fdc02e8f8b80f07b788ff89`, with planning checkpoint `cf4fcf64`. #388 has only immutable qualification outstanding and no overlapping implementation paths. No production Rust, artifacts, or other gate migrations are authorized in this slice.
+
+## Attempt 1 checkpoint — pending adversarial verdict
+
+Luna extracted the shared helper and migrated the five workspace and three rack calls. Root reran the real workspace/rack gates, both existing mutation suites, and new helper suite: all PASS. This is a useful buildable checkpoint, not acceptance. Root identified unresolved review concerns: the dependency helper still uses an awk/sort pipeline that may depend on caller pipefail; the combined match-plus-missing-root test removes the match first; diagnostic/error-class assertions, dependency extraction failure tests, and the required valid-fixture missing rack/src test are not yet demonstrated. Astra must review against the complete spec before any further implementation. On FAIL, Sol receives the next attempt under the user workflow.
+
+Focused logs: `/tmp/engine-400-luna-gate-lib.log`, `/tmp/engine-400-luna-workspace-mutations.log`, `/tmp/engine-400-luna-rack-mutations.log`, `/tmp/engine-400-luna-workspace.log`, `/tmp/engine-400-luna-rack.log`. No workspace-wide test, artifact rebuild or benchmark is claimed for this attempt.

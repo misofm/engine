@@ -4,10 +4,12 @@
 set -euo pipefail
 
 workspace_root="${1:-.}"
+script_directory="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$script_directory/lib/gate.sh"
 cd "$workspace_root"
 
 fail() {
-    printf 'workspace policy failure: %s\n' "$1" >&2
+    GATE_FAILURE_PREFIX='workspace policy failure' gate_fail "$1"
     exit 1
 }
 
@@ -18,35 +20,7 @@ fail() {
 # the three outcomes distinct: 0 is a real violation, 1 is genuinely clean, and >=2 is a scan
 # failure that must be loud, naming whichever of the given roots is actually missing.
 scan_forbidden() {
-    local description="$1" pattern="$2" glob="$3"
-    shift 3
-    local roots=("$@")
-    local output rc
-    if output="$(rg -n "$pattern" --glob "$glob" "${roots[@]}" 2>&1)"; then
-        rc=0
-    else
-        rc=$?
-    fi
-    case "$rc" in
-        0)
-            printf '%s\n' "$output" >&2
-            fail "$description"
-            ;;
-        1)
-            ;;
-        *)
-            local missing=() root
-            for root in "${roots[@]}"; do
-                [[ -e "$root" ]] || missing+=("$root")
-            done
-            printf '%s\n' "$output" >&2
-            if [[ "${#missing[@]}" -gt 0 ]]; then
-                fail "$description scan could not run (rg exit $rc): missing search path(s): ${missing[*]}"
-            else
-                fail "$description scan errored (rg exit $rc)"
-            fi
-            ;;
-    esac
+    GATE_FAILURE_PREFIX='workspace policy failure' gate_scan_forbidden "$@" || exit 1
 }
 
 toml_name() {
