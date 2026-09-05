@@ -76,6 +76,13 @@ new_case missing-tools
 rm -rf "$case_root/tools"
 expect_failure missing-tools
 
+new_case missing-scripts
+rm -rf "$case_root/scripts"
+missing_scripts_output="$(bash "$root/scripts/check-env-vocabulary.sh" "$case_root" 2>&1)" && missing_scripts_rc=0 || missing_scripts_rc=$?
+[[ "$missing_scripts_rc" -ne 0 && "$missing_scripts_output" == *'missing required source root: scripts'* ]] || {
+    printf 'missing-scripts root escaped: %s\n' "$missing_scripts_output" >&2; exit 1;
+}
+
 new_case malformed-row
 sed -i "0,/^| \`${family}CPU_MODEL\`/s/\` |/ |/" "$case_root/docs/ENGINE_ENV_VOCABULARY.md"
 expect_failure malformed-row
@@ -95,18 +102,21 @@ check "$case_root" >/dev/null
 mkdir "$scratch/git-list-fail"
 cat >"$scratch/git-list-fail/git" <<EOF
 #!/usr/bin/env bash
-if [[ "\$*" == 'ls-files -z --cached --others --exclude-standard' ]]; then git.real "\$@"; exit 7; fi
+if [[ "\$*" == 'ls-files -z --cached --others --exclude-standard' ]]; then
+    [[ "\${ENV_MODE:-error}" == full ]] && git.real "\$@"
+    exit 7
+fi
 exec git.real "\$@"
 EOF
 ln -s "$(command -v git)" "$scratch/git-list-fail/git.real"
 chmod +x "$scratch/git-list-fail/git"
-if PATH="$scratch/git-list-fail:$PATH" check "$case_root" >/dev/null 2>&1; then
-    printf 'Git listing counter-control escaped\n' >&2; exit 1
-fi
-
 assert_fault() {
     local checker=$1 bin_dir=$2 expected=$3 partial=${4:-} output rc
     output="$(PATH="$bin_dir:$PATH" bash "$checker" "$case_root" 2>&1)" && rc=0 || rc=$?
+    if [[ "$expected" == 'Git file listing failed' ]]; then
+        printf 'Git listing assertion: mode=%s checker_status=%s partial_required=%s\n' \
+            "${ENV_MODE:-unset}" "$rc" "${partial:-none}"
+    fi
     if [[ "$rc" == 0 ]]; then
         printf 'env checker unexpectedly succeeded (%s)\n' "$expected" >&2
         return 86
@@ -118,6 +128,12 @@ assert_fault() {
         printf 'env selective fault dropped partial output (%s): %s\n' "$expected" "$output" >&2; return 1;
     }
 }
+
+for mode in error full; do
+    expected_listing=''; [[ "$mode" == full ]] && expected_listing='scripts/check-env-vocabulary.sh'
+    ENV_MODE="$mode" assert_fault "$case_root/scripts/check-env-vocabulary.sh" "$scratch/git-list-fail" \
+        'Git file listing failed' "$expected_listing"
+done
 
 real_git="$(command -v git)"; real_grep="$(command -v grep)"; real_comm="$(command -v comm)"
 mkdir "$scratch/classification-fail" "$scratch/source-fail" "$scratch/vocabulary-fail" "$scratch/late-comm-fail"
@@ -216,10 +232,11 @@ mutant="$scratch/check-env-mutant.sh"
 cp "$case_root/scripts/check-env-vocabulary.sh" "$mutant"
 [[ "$(grep -Fc "fail 'Git file listing failed'" "$mutant")" == 1 ]] || exit 1
 sed -i "s/fail 'Git file listing failed'/:/" "$mutant"
-set +e; counter_output="$(assert_fault "$mutant" "$scratch/git-list-fail" 'Git file listing failed' 2>&1)"; counter_rc=$?; set -e
+set +e; counter_output="$(ENV_MODE=full assert_fault "$mutant" "$scratch/git-list-fail" 'Git file listing failed' 'scripts/check-env-vocabulary.sh' 2>&1)"; counter_rc=$?; set -e
 if [[ "$counter_rc" != 86 || "$counter_output" != *'unexpectedly succeeded'* ]]; then
     printf 'Git listing same-assertion counter-mutant escaped\n' >&2; exit 1
 fi
+printf 'Git listing mutant assertion: mode=full assertion_status=%s outcome=named-unexpected-success\n' "$counter_rc"
 cp "$case_root/scripts/check-env-vocabulary.sh" "$mutant"
 [[ "$(grep -Fc "comm -13 \"\$used\" \"\$documented\"" "$mutant")" == 1 ]] || exit 1
 sed -i '/fail "unused-name comparison failed (comm status \$rc)"/s/fail .*/:; }/' "$mutant"

@@ -37,3 +37,7 @@ The brief sufficiently freezes causal proof: successful earlier setup/discovery,
 #412/#402 remain open through inherited full qualification and remote delivery. Other checker/helper/workflow source remains unchanged; final integrated three-gate/three-suite, workspace, actual PR-head Astra and required CI gates are retained. Read-only numbered/parent spec inspection only; no builds/tests, Git/GitHub operations or mutations performed.
 
 Root assigns Luna attempt 1 within this bounded environment-suite scope. The prior #412 series remains stopped.
+
+## Luna attempt 1 source checkpoint
+
+Only the environment suite changed. The original listing assertion now runs error-only and full actual output/status7 modes with checker refusal, intended diagnostic and listing evidence in full mode. The existing actual disposable listing-status mutant is run through the same assertion and reaches its distinguished status86 unexpected-success outcome. Missing-scripts keeps valid tools/vocabulary and checks the exact root diagnostic. Luna reports affected suite, real environment checker, syntax/diff and executable mode checks passing; final logs are `/tmp/luna-448-env-suite-final.log` and `/tmp/luna-448-real-checker-final.log`. This coherent checkpoint awaits Astra source review; inherited #412 qualification and remote delivery remain outstanding.
