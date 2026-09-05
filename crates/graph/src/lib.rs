@@ -1354,10 +1354,6 @@ pub trait GraphRuntimeProcessor: Send + Any {
         None
     }
 
-    /// Preparation-only compatibility marker for the scalar pair factory.
-    fn scalar_pair_accepts(&self) -> bool {
-        false
-    }
 }
 /// Immutable post-node observation input. Observers cannot alter graph audio.
 pub struct GraphObservationBlock<'a> {

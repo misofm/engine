@@ -3486,9 +3486,6 @@ impl GraphRuntimeProcessor for ConsoleMatrixProcessor {
         self.matrix.process(block);
         Ok(())
     }
-    fn scalar_pair_accepts(&self) -> bool {
-        self.control_delivery == BuiltinControlDelivery::BetweenRenderCalls
-    }
 }
 impl ConsoleMatrixProcessor {
     fn drain_controls(&mut self) -> Result<(), RenderError> {
@@ -3551,8 +3548,8 @@ impl ConsoleFaderProcessor {
 /// The live scalar pair owns the two original processors and their consumers. The graph keeps the
 /// original matrix op as an identity, so this owner is invoked exactly at the fader boundary.
 struct ScalarPairProcessor {
-    fader: ConsoleFaderProcessor,
-    matrix: ConsoleMatrixProcessor,
+    fader: Box<ConsoleFaderProcessor>,
+    matrix: Box<ConsoleMatrixProcessor>,
 }
 
 impl GraphRuntimeProcessor for ScalarPairProcessor {
@@ -3563,16 +3560,17 @@ impl GraphRuntimeProcessor for ScalarPairProcessor {
             first_sample,
         } = block;
         self.fader.drain_controls()?;
+        // Preserve the original fader boundary: its queue is drained before the envelope is
+        // checked, and an invalid envelope stops before the later matrix owner consumes anything.
+        let mut fused_block =
+            DualMonoBlock::new(&mut *left, &mut *right, first_sample).map_err(render_error)?;
         let matrix_error = self.matrix.drain_controls().err();
         if let Some(error) = matrix_error {
             // Preserve the original failure order: the fader arithmetic completes even when a
             // later matrix command is invalid.
-            let block = DualMonoBlock::new(left, right, first_sample).map_err(render_error)?;
-            self.fader.fader.process(block);
+            self.fader.fader.process(fused_block);
             return Err(error);
         }
-        let mut fused_block =
-            DualMonoBlock::new(&mut *left, &mut *right, first_sample).map_err(render_error)?;
         if self
             .fader
             .fader
@@ -3601,21 +3599,27 @@ fn make_scalar_pair(
         Box<dyn GraphRuntimeProcessor>,
     ),
 > {
-    if !matrix.scalar_pair_accepts() {
+    // The factory is public through the graph trait. Check both exact concrete owners before
+    // consuming either erasure; an unrelated implementation cannot opt itself into a panic.
+    if fader.as_ref().type_id() != core::any::TypeId::of::<ConsoleFaderProcessor>()
+        || matrix.as_ref().type_id() != core::any::TypeId::of::<ConsoleMatrixProcessor>()
+    {
         return Err((fader, matrix));
     }
     let fader_any: Box<dyn Any> = fader;
     let matrix_any: Box<dyn Any> = matrix;
     let fader = fader_any
         .downcast::<ConsoleFaderProcessor>()
-        .expect("only ConsoleFaderProcessor advertises scalar pairing");
+        .unwrap_or_else(|_| unreachable!("type id was checked before ownership transfer"));
     let matrix = matrix_any
         .downcast::<ConsoleMatrixProcessor>()
-        .expect("only ConsoleMatrixProcessor accepts scalar pairing");
-    Ok(Box::new(ScalarPairProcessor {
-        fader: *fader,
-        matrix: *matrix,
-    }))
+        .unwrap_or_else(|_| unreachable!("type id was checked before ownership transfer"));
+    if fader.control_delivery != BuiltinControlDelivery::BetweenRenderCalls
+        || matrix.control_delivery != BuiltinControlDelivery::BetweenRenderCalls
+    {
+        return Err((fader, matrix));
+    }
+    Ok(Box::new(ScalarPairProcessor { fader, matrix }))
 }
 struct MeterObserver(MeterAccumulator);
 impl GraphRuntimeObserver for MeterObserver {
