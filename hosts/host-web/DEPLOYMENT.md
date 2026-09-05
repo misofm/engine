@@ -14,6 +14,12 @@ Use versioned or content-addressed release URLs. Those immutable files may use `
 
 This host does not need extra response headers for the qualification in [BROWSER_DEPLOYMENT_MATRIX.md](./BROWSER_DEPLOYMENT_MATRIX.md). That statement is limited to this shipped message-copy artifact: the matrix does not qualify cross-origin isolation, `SharedArrayBuffer`, or a shared-memory Wasm build.
 
+The matrix's `candidateCommit` is the immutable source candidate whose bytes produced the shipped
+artifact that was qualified. `qualification/generate-matrix.mjs` (run through `npm run matrix`)
+records that identity beside the artifact digest; later commits may regenerate evidence files, and a
+squash merge does not retroactively change the source candidate named by an existing qualification.
+Record the source candidate and any later evidence or merge commit together when publishing a matrix.
+
 For a local run:
 
 ```sh

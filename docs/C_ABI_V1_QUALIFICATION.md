@@ -112,8 +112,9 @@ allocation. The C response vectors now pin session-derived metadata/state and re
 counter rows. `MockProvider` and `MockProviderConfig` are absent from a normal protocol library
 build and available only to unit tests or consumers explicitly selecting `protocol/test-support`.
 The exact AudioWorklet rebuild remains protocol-free but changes crate identity because host-core's
-declared feature surface changed; its refreshed reproducible SHA-256 is
-`e48504a17e00334e7719ac9defd11c3f52e11802f66a68cc01115641fd8c91b0`.
+declared feature surface changed. The subsequent #371 marker-only integration was rebuilt
+and reproducibly qualified; the current artifact SHA-256 superseding the #369 artifact is
+`a89c9606bfa72d69ced42b606cc4b7000d1b53f2b419b12ec63649a385b3eaf1`.
 
 Refresh gates: `cargo test -p capi`; `cargo test -p capi --test resource_lifecycle`;
 `scripts/check-capi-abi.sh`; `scripts/check-abi-layout-v1.py`; and `cargo test --workspace` against

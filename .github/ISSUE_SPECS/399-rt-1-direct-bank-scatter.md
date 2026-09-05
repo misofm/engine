@@ -51,6 +51,21 @@ Astra briefs; Luna one coherent implementation attempt; Astra adversarial checkp
 
 ## Root delivery decision
 
-This is a queued implementation brief; no implementation is authorized until the current #371 recovery and ordered Wave-0 repairs are synchronized. The frozen implementation base will be recorded at assignment. Astra's retained-storage and release-safe borrowing scope is accepted. The direct path claim is reduced render memory traffic, not reduced retained plan memory.
+The frozen implementation base is post-#371/#388 main `0c2b283f86b199351b78be99784def7c614c0320`. Astra approved proceeding independently of the remaining #306 tooling family, while #400 has only immutable qualification outstanding. Astra's retained-storage and release-safe borrowing scope is accepted. The direct path claim is reduced render memory traffic, not reduced retained plan memory.
 
 If the actual changed Rust source invalidates the shipped artifact, the bounded delivery scope also permits the existing source digest pin, `.github/workflows/npm-publish.yml` expected digest, current artifact identity prose in `docs/C_ABI_V1_QUALIFICATION.md`, and generated `hosts/host-web/qualification/results.json` / `hosts/host-web/BROWSER_DEPLOYMENT_MATRIX.md`. Qualify the actual reproducible artifact from an immutable source candidate through the existing three-browser/static/resource pipeline. This permission does not authorize a new qualification framework, publication, additional benchmark runs or rewriting historical measurements.
+
+## Astra sequencing amendment — 2026-09-05
+
+# Astra #399 sequencing decision — APPROVED
+
+#399 RT-1 may begin as the single active launch-critical feature in a fresh isolated worktree while immutable #400 tooling qualification completes. #371's expanded realtime gate and #388 are merged; no RT-1 source, safety or evidence contract depends on completion of #306 or its remaining children. The earlier Wave-0 waiting paragraph is a sequencing preference, not a technical prerequisite, and root may explicitly amend/synchronize it before assigning Luna.
+
+Amendment: “After merged #371/#388, #399 may run independently of the remaining #306 tooling family. Keep one launch-critical feature implementation tranche, preserve isolated worktrees and existing history, and serialize any shared-target Cargo/artifact operations. Independent tooling qualification and read-only briefing/review may proceed. Merge current main and resolve actual integration conflicts before final PR review; do not assume an earlier gate result qualifies a changed head.”
+
+All frozen #399 scope and gates remain unchanged: safe release disjointness checks, exact rendered-word identity, retained fallback allocation, unchanged folded/partial behavior, applicable artifact/publisher/browser identity qualification, and precisely one descriptive benchmark after committed-source preflight and Astra checkpoint PASS. Run that timing only when concurrent qualification/build load is settled; do not consume it amid avoidable overlapping builds or retry it afterward. No new performance claim or skipped safety gate follows from this sequencing amendment.
+
+Root updates the numbered local/remote spec before Luna attempt 1, owns checkpoints/pushes and respects Astra review plus required CI before merge. #401 remains planning-only until #400 merges and the final helper API is frozen. No implementation or expanded scope was authorized by this decision beyond the existing #399 contract.
+
+
+Root normally merged the frozen current main into the isolated #399 brief branch before assignment. Luna owns attempt 1; root requires a focused-green source checkpoint and Astra semantic PASS before the sole benchmark preflight/invocation. No timing is authorized at initial implementation. #399 is the only active launch-critical feature implementation; tool migrations remain independently isolated.
