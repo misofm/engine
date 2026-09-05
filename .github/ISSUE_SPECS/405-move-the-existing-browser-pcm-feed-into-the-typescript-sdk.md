@@ -195,3 +195,36 @@ Evidence from this checkpoint: `bash scripts/check-sdk-types.sh` PASS; `bash scr
 - Does runtime evidence prove first and steady drain allocation behavior and turn red for an inserted typed-array allocation?
 - Does the installed package actually use PCM ingress and retain every relevant provenance source while its six generated artifacts remain unchanged?
 - Did any work expand into adapter behavior, progressive playback, boot defaults, storage/codec/pump policy, host messages, generated artifacts, or new test infrastructure?
+
+## Dedicated Astra attempt 2 verdict — FAIL (2026-09-05)
+
+Product corrections and packed DOM/runtime consumption pass independent review at `c3c2c972`. Three concrete escaping mutations prevent PASS: later populated-drain allocation, full-ring PCM corruption, and release after disconnect. The frozen related ring/lifecycle assertions remain incomplete. Full review and reproductions are attached to PR #398. Root approves the following Sol-authored final test-only brief. Issue #409 CI correction was independently reviewed and integrated separately; it changes no PCM source.
+
+## Attempt 3 authorization — final test-only correction
+
+## Authority and boundary
+
+Attempt 2 at clean pushed `c3c2c972` failed dedicated Astra review only because three required regressions remain ineffective or incomplete. The product correction, strict real-DOM consumer, normal package gate, headless gate, copied prelude, cleanup implementation, provenance, and six generated artifact bytes independently pass. Preserve them unchanged.
+
+This is the third and final attempt under the issue workflow. Luna may edit only:
+
+- `sdk/test/browser-pcm-evals.mjs` — focused test corrections below.
+- `.github/ISSUE_SPECS/405-move-the-existing-browser-pcm-feed-into-the-typescript-sdk.md` — truthful attempt-3 evidence after gates.
+
+No production, package, adapter, Rust, generated artifact, ABI, workflow, dependency, runner, or CI-#409 edit is authorized. Add no framework, broad matrix, new feature, or fourth attempt.
+
+## Exact remaining blockers
+
+1. **Allocation coverage over the complete populated-drain scenario.** Keep tracking armed only around `process()` execution, but assert the tracker remains empty after all first, later successful, result-6 retry, partial, seek, stale-drop, and underrun processing. Preserve the unconditional inserted-allocation red discriminator. Add direct assertions for captured submit generation/start/channels/frames/end and successful retry, captured seek generation/frame and retry, and that the stale queued slot is never submitted. Astra's exact escaping mutant inserts `if (control[CONTROL_WROTE] > 1) new Float32Array(4)` before `const staging = this.sourcePcm`; the focused suite must fail it.
+
+2. **Full-ring byte retention and already-frozen ring boundaries.** Immediately before a capacity-two full `reserve()`, snapshot queued slot headers, queued planar PCM, and write index. After `reserve()` returns `null`, assert all snapshots are unchanged and overflow advances exactly once. Astra's exact escaping mutant zeroes the first queued PCM plane in the full-ring null branch; the suite must fail it. In the same fixture complete only the original small boundary assertions: literal layout constants and every initialized control word including the last four; decoded bytes of a 128-byte multibyte ID; signed generation tag distinct from full generation; malformed writer-buffer magic plus zero/non-power-of-two shape; and explicit index wrap/occupancy. Use discriminating generation values, not 1/7/8. Do not add fuzzing or a reader implementation.
+
+3. **Observable cleanup ordering and deterministic lifecycle ownership.** In attach-post failure, capture all three engaged writer states inside `disconnect()` and require `[0,0,0]`; assert exactly one detach and one disconnect while both throw, and preserve `PcmFeedError("attachPost")`. Astra's exact escaping mutant moves ring release after disconnect; the suite must fail it. Add the missing typed `nodeCreate` failure. Replace the weak timeout case with an engaged ring, one explicitly controlled deadline-owner wait, and a second never-resolving wait; advance and resolve only the owner, then assert ordered results `readyTimeout`, `closed`, one release/detach/disconnect, and idempotent close. Bound both this observation and the existing two-blocked-caller close case with the test harness so a regression fails promptly.
+
+Use `/private/tmp/dx-405-astra-mutations-attempt2.mjs` and `/private/tmp/dx-405-astra-review-attempt2.md` as exact reviewer reproductions; do not copy them into the repository.
+
+## Handoff and gates
+
+Implement one coherent test tranche. Run the focused PCM eval, then `bash scripts/check-sdk-headless.sh /private/tmp/dx-393-current-artifacts`, and the existing packed/package gate from `sdk` against that same artifact directory. Also run `git diff --check` and exact-path audit. Record subtest names/counts and prove each of the three reviewer mutants turns red. Do not alter production to satisfy a test.
+
+Root must checkpoint the exact allowed paths before any further Luna work and push the review commit. Dedicated Astra then reviews that exact commit for the three blockers and scope conservation. On PASS, root synchronizes issue/PR evidence; on FAIL, stop and rescope under the three-attempt rule. Adapter migration remains paused until PASS.
