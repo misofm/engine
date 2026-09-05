@@ -76,3 +76,25 @@ This is a read-only draft, not an implementation assignment. No source/spec/Git/
 Root adopts this one bounded proof outcome after #430's explicit three-attempt hard stop. The preserved implementation remains `05896319fb6892b5af71758cf67bb8ebc26a5884`, with hard-stop record `14780ffeb1a1dfe495671d703b90a256a275c8e1`; the planning checkout also integrates delivered main `3faf89adea25e32e85a27d744c643a79cd80ce31` (additional #402 evidence only). No fourth repair of the stopped series is authorized.
 
 The nondefault feature-gated private witness and existing-fixture routes above are approved scope choices; normal production behavior and public host/wire interfaces stay frozen. Root must verify the actual number/title/body and obtain numbered-base Astra approval before assigning Luna attempt 1 in this new proof series. All original #430 acceptance and qualification remains binding through delivery of both issues; #443/#444/#431 and audit #349 remain open.
+
+## Astra numbered approval and Luna attempt 1
+
+# Astra #459 numbered/current-base review — PASS
+
+PASS for Luna attempt1 on clean planning checkpoint `c593c314dea63b63a71ed1ccf0c13195120586c8`, `/home/bl/misofm/engine-live-pair-proof`. This approves the new bounded proof series, not the stopped #430 series or its qualification.
+
+Live #459 is OPEN with title “Prove serialized live-pair dispatch and boundary preservation”; its body exactly matches `.github/ISSUE_SPECS/459-serialized-live-pair-boundary-proof.md`. Compared with the approved /tmp draft, the adopted body changes only the draft heading and appends root's explicit adoption. All three finite original correction groups and seven allowed path categories are preserved. Reciprocal #430 text retains the hard stop and full original product/qualification obligations.
+
+The source base is preserved `05896319fb6892b5af71758cf67bb8ebc26a5884`; the cumulative difference is only #402 delivered accounting plus #430/#459 planning records. No crate/host/script/workflow source changes are hidden in this base. Hard-stop record `14780ffeb1a1dfe495671d703b90a256a275c8e1` remains in history.
+
+The implementation route is sufficiently frozen: actual composite branch instrumentation behind cfg(test)/nondefault test-support; fixed thread-local counters initialized outside render; the existing PreparedBuiltinsGraphBound carries plan, track_controls and meter_consumers for the shared finite graph fixture; the existing allocation binary reuses that fixture without allocating Capture observers. The single host-web nondefault feature forwards builtins-compiler/test-support so its existing real acknowledgement fixture can observe the same render call directly. No production diagnostic API, dependency inversion, new allocator or workflow/helper framework is needed.
+
+CaseA requires per-call fused/fallback and word/state/counter identity with real queued ramps and host acknowledgement linkage. CaseB requires actual meter DATA/reference PCM, serialized send/alias/downstream boundaries, real mono/recovery transitions and unchanged returned owner effects. CaseC requires queued selected graph eligible/ramp/observed-fallback render auditing with live alloc/free/realloc coverage. Inherited separate-path tests cannot substitute for these named discriminators. The existing factory-to-separate SAME-assertion control is retained without a new mutation campaign.
+
+No scope amendment is required before assignment. The stop-if-existing-fixtures-cannot-represent-a-boundary clause is a guard against unauthorized production architecture changes, not discretion to omit a listed case or replace it with prose/inherited tests. Root should assign precisely these existing-fixture routes; if a concrete representation blocker emerges, preserve a coherent checkpoint and obtain a numbered scope ruling before expansion.
+
+Luna gets one coherent implementation pass in this new bounded child, followed by Astra's consolidated verdict; Sol2/3 only after FAIL and the normal hard stop. Child proof acceptance does not close #430 or authorize omitted gates: full parent qualification and actual PR Astra/required CI remain root-owned. #443/#444/#431 and broad RT-4/#349 remain retained.
+
+Review used read-only source/Git/GitHub inspection and wrote only this /tmp report. No tests/builds/timing or repository/GitHub mutations were performed.
+
+Root assigns Luna attempt 1 for this new bounded proof outcome. Execute all three finite cases through the approved existing fixtures and private feature path; inherited separate-path tests or prose cannot replace listed assertions. Stop at a coherent compiling focused-green checkpoint for root commit/push before layering. No production redesign, full qualification, timing or parent closure is authorized during this implementation pass.
