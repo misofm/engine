@@ -94,10 +94,11 @@ require one producer, one consumer, release publication after writes, acquire be
 shared `Arc` storage outliving both non-cloneable endpoints. `Arc` creation/destruction stays
 outside push, pop, and render. Issue 100 added `crates/engine/src/realtime/disjoint.rs`, the plan-owned disjoint audio
 arena, which the sequential executor still renders through. Its `unsafe impl Sync` and its raw
-slice construction are justified by invariants stated in the module documentation and proved once
-at bind by `ArenaLeaseSetBuilder::finish`: **I1** every buffer is writable by at most one lease for
-the life of the plan (buffers are never recycled) and **I2** a lease reads only buffers produced
-strictly earlier or by itself. Wave order expresses a dependency but does not synchronize access.
+slice construction are justified by the structural and execution invariants stated in the module
+documentation. `ArenaLeaseSetBuilder::finish` proves the structural invariants at bind: **I1**
+every buffer is writable by at most one lease for the life of the plan (buffers are never recycled)
+and **I2** a lease reads only buffers produced strictly earlier or by itself. Wave order expresses
+a dependency but does not synchronize access.
 **E1** therefore requires a foreign writer's exclusive access to end and happen-before a consumer
 reads that buffer. The single-thread executor meets E1 by exclusive sequential execution; retained
 multi-lease uses must establish it independently. Concurrent leases may write I1-disjoint sets and

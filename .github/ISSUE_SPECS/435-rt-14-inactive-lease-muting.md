@@ -145,3 +145,7 @@ The retained proportional fmt/diff/realtime check record is green (42 regions/12
 Sol attempt2 is consumed. One final attempt3 remains for this exact comment correction, then a further FAIL requires hard stop/rescope rather than a fourth repair.
 
 Root authorizes final Sol attempt 3 for exactly these write/write_stereo safety comments and the policy bind/execution distinction. No runtime, signatures, unsafe blocks or tests may change. A further FAIL is a hard stop with preserved evidence and explicit rebrief.
+
+## Final Sol attempt 3 checkpoint
+
+Sol corrected exactly the write and write_stereo SAFETY arguments to distinguish I1 foreign mutable ownership, E1 exclusion of overlapping foreign shared reads and the same-lease exclusivity of &mut self; the policy now separates bind-time structural I1/I2 from execution-time E1. Only comments/prose changed. `/tmp/sol-435-final-prose-checks.log` records fmt/diff/realtime PASS and exact-site inspection. Final Astra verdict remains required before immutable qualification.

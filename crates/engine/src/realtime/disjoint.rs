@@ -221,9 +221,9 @@ impl ArenaLease {
     #[inline]
     pub fn write(&mut self, plane: usize, buffer: u32) -> &mut [f32] {
         let start = self.arena.offset(plane, self.checked_write(buffer));
-        // SAFETY: I1 — `buffer` is writable by this lease alone, for the life of the plan, so no
-        // other lease can produce a reference to these words; `&mut self` excludes any other live
-        // reference from this lease.
+        // SAFETY: I1 gives this lease the only mutable ownership of `buffer`; E1 prevents a
+        // foreign lease's shared read from overlapping this write. `&mut self` excludes any live
+        // reference produced by this lease.
         unsafe {
             core::slice::from_raw_parts_mut(
                 self.arena.cells[start].get().cast::<f32>(),
@@ -237,8 +237,10 @@ impl ArenaLease {
     pub fn write_stereo(&mut self, buffer: u32) -> (&mut [f32], &mut [f32]) {
         let index = self.checked_write(buffer);
         let (left, right) = (self.arena.offset(0, index), self.arena.offset(1, index));
-        // SAFETY: I1 as in `write`; the two planes are disjoint ranges of the allocation because
-        // `offset` is plane-major and `index` is the same buffer in both.
+        // SAFETY: I1 excludes a foreign mutable owner, E1 excludes overlapping foreign shared
+        // reads, and `&mut self` excludes references from this lease, as in `write`. The two
+        // planes are disjoint ranges because `offset` is plane-major and `index` is the same
+        // buffer in both.
         unsafe {
             (
                 core::slice::from_raw_parts_mut(
