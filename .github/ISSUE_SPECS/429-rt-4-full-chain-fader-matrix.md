@@ -177,3 +177,29 @@ Focused results, all PASS:
 
 No full workspace, target matrix, artifact qualification, runner, allocator framework, global
 allocator mode change or timed benchmark was run. #430/#431/#436 remain separate.
+
+## Astra attempt 2 verdict and final Sol assignment
+
+# Astra #429 Sol attempt 2 review
+
+**FAIL at `2ea360c9120db101c38ffaecd6d1be6e532de9e4`.** One final bounded Sol evidence revision is needed. Production arithmetic remains accepted in approach; no new production defect was identified. Read complete frozen spec, cumulative source and supplied focused logs; no tests/builds/timing or repository/GitHub mutations performed.
+
+## Accepted completion
+
+The new paired public-chain fixture invokes actual process_dual_mono against an independently prepared three-section reference, comparing both PCM planes, complete report, input state and matrix readback. Enabled asymmetric input, disabled filters, NaN/infinity sanitization and injected nonfinite filter state are exercised. The eligibility sequence covers immediate target, a ramp crossing calls, mid-ramp retarget, whole-call fallback when completion is inside that call, following-call fusion, input trim ramp with settled matrix and reset. These are meaningful additions and need no second fixture framework.
+
+Lane tests now exercise f32/W4/W8 at all frozen frame lengths, false/true/mixed identity masks and independent finite, signed-zero, subnormal and nonfinite families, with prefix/suffix sentinels. This is no longer a vacuous all-NaN corpus. All three wrong alternatives first assert a different old result and then compare DUT against the unchanged primitives. The comment now correctly distinguishes sample*gain from coefficient*sample. Retained stage/ramp/partition tests were included in debug/release focused runs. The 10-test bench subset includes actual repeated product render zero-audit and positive allocator/free liveness; that accepted evidence remains sufficient.
+
+## Three concrete remaining gaps
+
+1. **The claimed actual dispatch mutation is not an actual mutation.** `old_dispatch_fails_the_actual_fused_path_assertion` calls process_reference directly and asserts its never-incremented counter is one under should_panic. It does not call a changed public process_dual_mono, does not run the existing assert_pair assertion against restored dispatch, and would still pass if the public method incorrectly counted fusion but used old separate processing. The spec's “disposable old-three-section-dispatch control” description overstates this permanent expected-panic test. Perform one disposable mutation replacing the eligible public branch with the old dispatch, including its natural absent fused counter update, and run the existing positive public fixture unchanged. Require failure at its `selected path witness` assertion, restore the source, rerun that focused fixture green, and retain commands/exact mutation/terminal statuses and assertion text. No generic mutation harness, new telemetry or committed mutant. Remove or accurately describe the redundant expected-panic example; it cannot earn this gate.
+
+2. **Claimed partial-population padding is not present.** In compare_case, every lane has real generated audio and non-neutral fader parameters; even the all-identity matrix case continues to fade/mute those lanes. No case represents unused lanes with zero input, gain one, unmuted mask and identity matrix coefficients/mask. Add one small W4/W8 representative with actual active/holey lane population and neutral padding following the frozen convention; assert padded lanes remain the old expected words and active lanes match the old oracle. Existing sentinel/length/category matrix stays; no Cartesian expansion, malformed-slice cases or invented temporal tails.
+
+3. **The requested canonical FP environment is not installed by the new lane tests.** Neither test enters the existing CanonicalFpEnv, while the prior verdict explicitly required the same canonical environment for the raw subnormal/nonfinite comparisons. Add the existing scoped guard to those entry points (no dependency or new environment API), retain separate categories and same-width old/new bits, and record only the actual platform's canonical denormal behavior. Do not add cross-target NaN payload assertions or require unflushed subnormal outputs on a flushing platform.
+
+These are the final finite revision groups, not an invitation to expand runtime/fixture scope. Keep production equations and accepted public sequence/audit evidence unchanged. Run affected focused lane/builtin debug/release checks and the actual disposable dispatch control plus restoration, with policy/hygiene proportional to changes. Record accurate evidence in #429. No broader workspace/target/artifact or benchmark work before source acceptance. #430/#431 remain separate and RT-4 remains open.
+
+Sol attempt 2 is consumed. Attempt 3 is the final coherent revision; a FAIL then requires preserved evidence and explicit rescope, never a fourth repair.
+
+Root assigns FINAL Sol attempt 3 to these three finite proof corrections only. Accepted arithmetic, public-chain equivalence and allocation evidence remain intact. Any temporary public-dispatch mutation must be restored before checkpoint and final focused green run; no mutant is committed. A third FAIL triggers the hard stop and explicit rescope, not another repair under this series.
