@@ -3898,33 +3898,269 @@ pub mod test_support {
 
 #[cfg(test)]
 mod tests {
-    use super::{BuiltinChain, BuiltinParameters, DualMonoBlock};
+    use super::{
+        BuiltinChain, BuiltinLaneSelector, BuiltinParameters, BuiltinProcessReport,
+        BuiltinResetKind, ChannelParameters, DualMonoBlock, Matrix2x2, test_support,
+    };
 
-    #[test]
-    fn settled_public_chain_selects_the_fused_post_input_path() {
-        let mut chain = BuiltinChain::new(48_000, BuiltinParameters::default()).unwrap();
-        let mut left = [0.25_f32; 8];
-        let mut right = [-0.5_f32; 8];
-        chain.process_dual_mono(DualMonoBlock::new(&mut left, &mut right, 0).unwrap());
-        assert_eq!(chain.fused_dispatches, 1);
+    fn process_reference(
+        chain: &mut BuiltinChain,
+        left: &mut [f32],
+        right: &mut [f32],
+        first_sample: u64,
+    ) -> BuiltinProcessReport {
+        let report = chain.process_input(DualMonoBlock::new(left, right, first_sample).unwrap());
+        chain.process_fader_mute(DualMonoBlock::new(left, right, first_sample).unwrap());
+        chain.process_matrix(DualMonoBlock::new(left, right, first_sample).unwrap());
+        report
+    }
+
+    fn assert_pair(
+        dut: &mut BuiltinChain,
+        reference: &mut BuiltinChain,
+        mut left: Vec<f32>,
+        mut right: Vec<f32>,
+        first_sample: u64,
+        fused: bool,
+    ) {
+        let mut old_left = left.clone();
+        let mut old_right = right.clone();
+        let before = dut.fused_dispatches;
+        let report =
+            dut.process_dual_mono(DualMonoBlock::new(&mut left, &mut right, first_sample).unwrap());
+        let old_report = process_reference(reference, &mut old_left, &mut old_right, first_sample);
+        assert_eq!(
+            left.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            old_left.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            right.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            old_right.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+        );
+        assert_eq!(report, old_report);
+        assert_eq!(
+            test_support::input_state_words(test_support::chain_input(dut)),
+            test_support::input_state_words(test_support::chain_input(reference)),
+        );
+        assert_eq!(
+            test_support::matrix_current(test_support::chain_matrix(dut)),
+            test_support::matrix_current(test_support::chain_matrix(reference)),
+        );
+        assert_eq!(
+            dut.fused_dispatches - before,
+            u32::from(fused),
+            "selected path witness"
+        );
+    }
+
+    fn set_matrix(
+        dut: &mut BuiltinChain,
+        reference: &mut BuiltinChain,
+        target: Matrix2x2,
+        samples: u32,
+    ) {
+        dut.matrix.set_target_smoothed(target, samples).unwrap();
+        reference
+            .matrix
+            .set_target_smoothed(target, samples)
+            .unwrap();
     }
 
     #[test]
-    fn matrix_ramp_keeps_the_whole_call_on_the_existing_fallback() {
-        let mut parameters = BuiltinParameters::default();
-        parameters.smoothing_samples = 2;
-        let mut chain = BuiltinChain::new(48_000, parameters).unwrap();
-        chain
-            .set_matrix_target(super::Matrix2x2 {
-                ll: 0.8,
-                lr: 0.2,
-                rl: -0.1,
+    fn full_public_chain_matches_the_three_section_reference() {
+        let enabled = BuiltinParameters {
+            left: ChannelParameters {
+                polarity_invert: true,
+                trim_db: -3.0,
+                hpf_hz: 80.0,
+                lpf_hz: 16_000.0,
+                fader_db: -4.0,
+                muted: false,
+            },
+            right: ChannelParameters {
+                polarity_invert: false,
+                trim_db: 2.0,
+                hpf_hz: 140.0,
+                lpf_hz: 12_000.0,
+                fader_db: -9.0,
+                muted: true,
+            },
+            matrix: Matrix2x2 {
+                ll: 0.75,
+                lr: -0.2,
+                rl: 0.35,
                 rr: 0.9,
-            })
+            },
+            smoothing_samples: 0,
+        };
+        let mut dut = BuiltinChain::new(48_000, enabled).unwrap();
+        let mut reference = BuiltinChain::new(48_000, enabled).unwrap();
+        assert_pair(
+            &mut dut,
+            &mut reference,
+            vec![
+                0.25,
+                -0.5,
+                f32::NAN,
+                0.75,
+                f32::INFINITY,
+                -0.0,
+                0.125,
+                -0.25,
+            ],
+            vec![-0.75, 0.5, 0.25, f32::NEG_INFINITY, 1.0, 0.0, -0.125, 0.375],
+            0,
+            true,
+        );
+
+        let bad = [f32::INFINITY.to_bits(); 8];
+        test_support::set_input_state_words(test_support::chain_input_mut(&mut dut), bad);
+        test_support::set_input_state_words(test_support::chain_input_mut(&mut reference), bad);
+        assert_pair(
+            &mut dut,
+            &mut reference,
+            vec![0.1, -0.2, 0.3, -0.4],
+            vec![0.4, -0.3, 0.2, -0.1],
+            8,
+            true,
+        );
+
+        let disabled = BuiltinParameters {
+            left: ChannelParameters {
+                fader_db: -6.0,
+                ..ChannelParameters::default()
+            },
+            right: ChannelParameters {
+                polarity_invert: true,
+                trim_db: 1.0,
+                fader_db: 3.0,
+                ..ChannelParameters::default()
+            },
+            matrix: Matrix2x2 {
+                ll: 0.6,
+                lr: 0.25,
+                rl: -0.4,
+                rr: 0.8,
+            },
+            smoothing_samples: 0,
+        };
+        let mut dut = BuiltinChain::new(96_000, disabled).unwrap();
+        let mut reference = BuiltinChain::new(96_000, disabled).unwrap();
+        assert_pair(
+            &mut dut,
+            &mut reference,
+            vec![-0.0, 0.0, 0.5, -0.25, 0.75],
+            vec![0.0, -0.0, -0.5, 0.25, -0.75],
+            100,
+            true,
+        );
+    }
+
+    #[test]
+    fn eligibility_sequence_uses_whole_call_fallback_then_fuses_the_next_call() {
+        let parameters = BuiltinParameters::default();
+        let mut dut = BuiltinChain::new(48_000, parameters).unwrap();
+        let mut reference = BuiltinChain::new(48_000, parameters).unwrap();
+        let a = Matrix2x2 {
+            ll: 0.8,
+            lr: 0.2,
+            rl: -0.1,
+            rr: 0.9,
+        };
+        let b = Matrix2x2 {
+            ll: 0.5,
+            lr: -0.3,
+            rl: 0.4,
+            rr: 0.7,
+        };
+
+        set_matrix(&mut dut, &mut reference, a, 0);
+        assert_pair(
+            &mut dut,
+            &mut reference,
+            vec![0.2; 3],
+            vec![-0.4; 3],
+            0,
+            true,
+        );
+
+        set_matrix(&mut dut, &mut reference, b, 6);
+        assert_pair(
+            &mut dut,
+            &mut reference,
+            vec![0.3; 2],
+            vec![-0.2; 2],
+            3,
+            false,
+        );
+        set_matrix(&mut dut, &mut reference, a, 5);
+        assert_pair(
+            &mut dut,
+            &mut reference,
+            vec![0.4; 2],
+            vec![0.1; 2],
+            5,
+            false,
+        );
+        assert_pair(
+            &mut dut,
+            &mut reference,
+            vec![-0.25; 7],
+            vec![0.5; 7],
+            7,
+            false,
+        );
+        assert_pair(
+            &mut dut,
+            &mut reference,
+            vec![0.75; 3],
+            vec![-0.5; 3],
+            14,
+            true,
+        );
+
+        dut.input
+            .set_trim_db(BuiltinLaneSelector::Left, -3.0, 4)
             .unwrap();
-        let mut left = [0.25_f32; 8];
-        let mut right = [-0.5_f32; 8];
-        chain.process_dual_mono(DualMonoBlock::new(&mut left, &mut right, 0).unwrap());
-        assert_eq!(chain.fused_dispatches, 0);
+        reference
+            .input
+            .set_trim_db(BuiltinLaneSelector::Left, -3.0, 4)
+            .unwrap();
+        assert_pair(
+            &mut dut,
+            &mut reference,
+            vec![0.1; 5],
+            vec![0.2; 5],
+            17,
+            true,
+        );
+
+        set_matrix(&mut dut, &mut reference, b, 9);
+        dut.reset(BuiltinResetKind::DiscontinuityKeepTargets);
+        reference.reset(BuiltinResetKind::DiscontinuityKeepTargets);
+        assert_pair(
+            &mut dut,
+            &mut reference,
+            vec![0.6; 4],
+            vec![-0.3; 4],
+            22,
+            true,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "selected path witness")]
+    fn old_dispatch_fails_the_actual_fused_path_assertion() {
+        let parameters = BuiltinParameters::default();
+        let mut old_dispatch = BuiltinChain::new(48_000, parameters).unwrap();
+        let independent_reference = BuiltinChain::new(48_000, parameters).unwrap();
+        let mut left = vec![0.25; 4];
+        let mut right = vec![-0.5; 4];
+        process_reference(&mut old_dispatch, &mut left, &mut right, 0);
+        assert_eq!(
+            old_dispatch.fused_dispatches - independent_reference.fused_dispatches,
+            1,
+            "selected path witness",
+        );
     }
 }

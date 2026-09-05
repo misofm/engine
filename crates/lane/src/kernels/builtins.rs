@@ -283,8 +283,9 @@ pub fn matrix2x2_block<L: Lane>(
 /// 2. `yl = select(identity, l, ll * l + lr * r)` and `yr = select(identity, r, rl * l + rr * r)`
 /// 3. store both planes
 ///
-/// Both input planes are loaded before either is written. The fader products retain coefficient
-/// before sample operand order, and the matrix arms are both evaluated before the identity select.
+/// Both input planes are loaded before either is written. The fader products retain sample before
+/// gain operand order; coefficient-before-sample applies to the matrix products. Both matrix arms
+/// are evaluated before the identity select.
 /// This is the settled equivalent of [`gain_mute_block`] followed by [`matrix2x2_block`].
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]

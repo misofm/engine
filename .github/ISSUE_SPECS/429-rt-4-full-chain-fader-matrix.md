@@ -134,3 +134,46 @@ The lane test compares against the correct independent gain/gain/matrix primitiv
 Record the actual focused results and the accepted existing zero-audit seam in the numbered spec. Retain source approach and useful current tests; complete these bounded groups in one coherent Sol pass within already allowed lane/builtin/bench test paths. Run affected debug/release and relevant policy/hygiene checks; no fullworkspace, targets/artifacts, runner or timing before focused acceptance. #430/#431 retain their separate integration/measurement obligations. Luna attempt1 is consumed; Sol gets attempt2 and only if needed final attempt3, then hard stop/rescope.
 
 Root assigns Sol attempt 2 to the bounded arithmetic/public-chain/eligibility proof completion above. The actual existing non-timed render audit is accepted and must be reused; no duplicate allocation harness is required. Production arithmetic stays unchanged except the stated comment correction unless a concrete correctness defect is demonstrated. One coherent checkpoint and one Astra verdict precede broader qualification.
+
+## Sol attempt 2 implementation evidence
+
+Sol completed the bounded evidence revision without changing production arithmetic. The kernel
+comment now states the actual frozen order: sample times gain for the fader and coefficient times
+sample for matrix products.
+
+The lane oracle now runs frames 1, 3, 8, 9 and 128 at f32, W4 and W8, with false, true and mixed
+matrix identity masks, asymmetric gains and mutes, padding conventions, and sentinels around every
+processed subslice. Finite, signed-zero, subnormal and nonfinite families remain separate. Three
+live witnesses first prove the old primitive differs from mute-by-zero-multiplication,
+left-overwrite-before-right, and zero-seeded matrix recombination, then prove the fused DUT equals
+the old primitive bits.
+
+The public fixture pairs an independent DUT and three-section reference chain and compares both
+planes, the complete report, retained input state and matrix readback after every call and reset.
+It covers enabled asymmetric filters/faders/matrix, disabled input sections, NaN/infinity input
+sanitization, injected nonfinite input state recovery before crossmix, zero-window retarget,
+cross-block ramp, mid-ramp retarget, a ramp ending inside a whole fallback call, fusion on the next
+call, input trim ramping under a settled matrix, and reset. Its per-instance dispatch counter
+asserts each selected path. A disposable old-three-section-dispatch control is a passing
+`should_panic` test because the same fused-path assertion fails under that dispatch.
+
+Focused results, all PASS:
+
+- `cargo test -p lane -p builtins` (includes retained fader-ramp, matrix and partition gates);
+  log `/tmp/sol-429-focused-debug.log`.
+- `cargo test --release -p lane -p builtins`; log
+  `/tmp/sol-429-focused-release.log`.
+- `cargo test -p bench --bin bench builtins::tests::`; 10 passed, including
+  `all_render_workloads_arm_only_product_render_without_timing` over real
+  FullChainFilters/IdentityChain/MatrixRamp renders and
+  `audited_allocator_is_live_outside_the_render_scope` with held allocation and drop;
+  log `/tmp/sol-429-bench-debug.log`.
+- Lane, builtins, realtime and unfused policy checks PASS; logs
+  `/tmp/sol-429-{lane,builtins,realtime,unfused}-policy.log`.
+- `cargo clippy -p lane -p builtins --tests -- -D warnings` exits zero; only the existing
+  unreachable clippy-disallowed-method configuration notices appear; log
+  `/tmp/sol-429-clippy.log`.
+- `cargo fmt --all -- --check` PASS; log `/tmp/sol-429-fmt.log`.
+
+No full workspace, target matrix, artifact qualification, runner, allocator framework, global
+allocator mode change or timed benchmark was run. #430/#431/#436 remain separate.
