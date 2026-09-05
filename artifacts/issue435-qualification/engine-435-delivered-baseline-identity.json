@@ -1,0 +1,12 @@
+{
+  "approved_pr_head": "d4cfde6b0b8a9eac06291b60573bdc50b1a05fa5",
+  "delivered_main": "4b352b36ba33334ea2e0c6847c0e3ecf6e8ab33a",
+  "full_tree_diff_exit": 0,
+  "baseline_executed_source": "e4bcaa2feae13c9f016bb7b2e1eaff8bd7314547",
+  "baseline_log": "/tmp/engine-429-candidate-workspace.log",
+  "result_blocks": 275,
+  "passed": 1575,
+  "failed": 0,
+  "ignored": 24,
+  "limit": "Reuses accepted #429 full workspace as delivered-main baseline; no new execution or #435 candidate qualification claimed."
+}

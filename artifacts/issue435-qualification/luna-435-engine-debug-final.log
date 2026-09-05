@@ -1,0 +1,27 @@
+   Compiling engine v0.1.0 (/home/bl/misofm/engine-435-plan/crates/engine)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.23s
+     Running unittests src/lib.rs (/tmp/luna435-target/debug/deps/engine-cecc5c57830c1cdc)
+
+running 9 tests
+test realtime::disjoint::tests::a_read_from_the_same_wave_is_rejected ... ok
+test realtime::disjoint::tests::a_lease_may_read_the_buffers_it_writes_itself ... ok
+test realtime::disjoint::tests::a_write_then_a_later_wave_read_carries_the_audio ... ok
+test realtime::disjoint::tests::a_write_to_the_silence_buffer_is_rejected ... ok
+test realtime::disjoint::tests::an_unproduced_read_is_rejected ... ok
+test realtime::disjoint::tests::overlapping_writes_are_rejected ... ok
+
+thread 'realtime::disjoint::tests::release_read_id_bounds_check_rejects_unreserved_buffer' (1902609) panicked at crates/engine/src/realtime/disjoint.rs:177:17:
+index out of bounds: the len is 2 but the index is 2
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test realtime::disjoint::tests::stereo_many_rejects_every_invalid_shape_without_partial_writes ... ok
+test realtime::disjoint::tests::release_read_id_bounds_check_rejects_unreserved_buffer ... ok
+test realtime::disjoint::tests::concurrent_leases_never_write_a_foreign_word ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 23 filtered out; finished in 0.02s
+
+     Running tests/observation_transport.rs (/tmp/luna435-target/debug/deps/observation_transport-c0e2653f32a413c2)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
