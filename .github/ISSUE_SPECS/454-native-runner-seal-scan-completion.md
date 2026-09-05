@@ -50,6 +50,22 @@ This issue owns only its explicitly named checker(s), affected existing suites a
 
 ## Astra numbered scope approval — queued
 
+## Luna attempt 1 implementation record
+
+The native runner checker now observes discovery, count, required and forbidden search statuses
+before evaluating payloads or applying the two reachability filters. It retains the exact
+`python3 -I -B .../generate.py --check` verifier invocation, requires `crates`, `hosts`, `tools`,
+and `sidecars` while permitting each root to be empty, and preserves the V1, portability, and all
+CLI modes. The affected suites cover missing roots, valid-output discovery failure, and the two
+approved status-loss counter-controls; the latter both reach the distinguished unexpected-success
+assertion with status 97.
+
+Focused evidence (2026-09-05): `bash -n` passed; checker `v1`, `portability`, and `all` modes
+passed; `scripts/test-native-pcm-runner-v1-policy.sh` and
+`scripts/test-native-pcm-runner-portability-v1-policy.sh` passed. Logs are retained at
+`/tmp/454-v1-check.log`, `/tmp/454-portability-check.log`, `/tmp/454-all-check.log`,
+`/tmp/454-v1-suite.log`, and `/tmp/454-port-suite.log`.
+
 # Astra #454 numbered scope review — PASS, queued
 
 Exact clean planning checkpoint `a63e302bab98b5db3f4c26f1bb0af6ecf53844d6`, `/home/bl/misofm/engine-454-plan`. Read the full numbered brief, actual combined checker, both existing suites and fixture generator's check/generate branches. Assigned checker/suites/fixture source is unchanged from inspected `5a4a7d20` and delivered `60519995`; the stale earlier planning-base sentence does not change this verified current-source premise.

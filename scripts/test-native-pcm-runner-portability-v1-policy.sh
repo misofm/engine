@@ -72,4 +72,38 @@ sed -i '0,/if self.path_is_owned(&self.final_path)/s//if true/' \
     "$case_root/tools/native-pcm-runner/src/lib.rs"
 reject 'unowned final cleanup'
 
+# Inject a late forbidden-scan error with clean output. The real checker must expose both status
+# and sentinel; swallowing that status in the production scan is caught as unexpected success.
+copy_case late-scan-error
+mkdir -p "$case_root/bin"
+cat >"$case_root/bin/rg" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$*" == *'FakeEntry::Owned'* ]]; then
+    printf 'LATE_PORTABILITY_SENTINEL\n' >&2
+    exit 9
+fi
+exec /usr/bin/rg "$@"
+EOF
+chmod +x "$case_root/bin/rg"
+output="$(PATH="$case_root/bin:$PATH" "$case_root/scripts/check-native-pcm-runner.sh" "$case_root" portability 2>&1)" && status=0 || status=$?
+[[ "$status" != 0 && "$output" == *'portability forbidden scan failed (rg status 9)'* && "$output" == *'LATE_PORTABILITY_SENTINEL'* ]] || { printf 'late scan error was misclassified: %s\n' "$output" >&2; exit 1; }
+mutant="$case_root/scripts/check-native-pcm-runner-mutant.sh"
+cp "$case_root/scripts/check-native-pcm-runner.sh" "$mutant"
+sed -i 's#fail "portability forbidden scan failed (rg status \$status)"#:#' "$mutant"
+assert_counter_mutant() {
+    if output="$(PATH="$case_root/bin:$PATH" "$mutant" "$case_root" portability 2>&1)"; then
+        printf 'counter-mutant unexpectedly passed: operation status was swallowed\n%s\n' "$output" >&2
+        return 97
+    fi
+    printf 'counter-mutant rejected before the targeted unexpected-success assertion: %s\n' "$output" >&2
+    return 0
+}
+if assert_counter_mutant; then
+    printf 'late scan counter-mutant did not reach unexpected-success assertion\n' >&2
+    exit 1
+else
+    status=$?
+fi
+[[ "$status" == 97 ]] || { printf 'late scan counter-mutant assertion status %s (expected 97)\n' "$status" >&2; exit 1; }
+
 printf 'native PCM runner portability policy mutations: ok\n'
