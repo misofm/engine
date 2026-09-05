@@ -117,3 +117,19 @@ Authority: current user explicitly authorizes resolving blocked work; existing c
 6. Pause at a green coherent checkpoint and send root exact paths and logs. Root commits/pushes normally to the existing PR branch, refreshes PR #375's complete lineage/Before-after/Gates/Skipped sections, and requests Astra review at the final pushed head. Required qualification must pass again against current integration; the old green run is historical evidence only. Merge/close #369/post #349 only after exact-head Astra PASS and required CI. If artifact tooling reveals a new unrelated defect after one bounded correction, preserve its evidence and separate the tooling issue; do not let this become another broad qualification framework project.
 
 Recovery worktree: `/home/bl/misofm/engine-369-recovery`, branch `codex/369-recovery`, starting PR head `da1e4cc0d3ca3c2f206caf86dc91a70f0baf73ed`. Integration baseline: `0e248bb07cfbf7dd136ec48649ec61ee9171d15b`. Root owns commits/pushes, Luna receives the bounded recovery implementation, Astra reviews the resulting PR; Sol is the retry if Luna fails. This section supersedes older conflicting model/checkout instructions.
+
+## Recovery execution evidence (2026-09-05)
+
+Normal merge `a3b987b1` integrates main `0e248bb0` while preserving original PR history. Luna's immutable artifact candidate `ee14a35990881eb4139cd0830129ad9821782560` produces reproducible worklet SHA-256 `e48504a17e00334e7719ac9defd11c3f52e11802f66a68cc01115641fd8c91b0`. Source pin, publication workflow expectation and current qualification prose agree. Browser evidence checkpoint `73751d63` records all-browser qualification and separate Chromium/Firefox/WebKit checked-matrix mutation passes against that candidate.
+
+- Integrated capi tests: 35 passed; explicit resource_lifecycle: 4 passed.
+- host-core with control-provider: 72 passed, 0 failed, 2 ignored.
+- host-core and protocol-control policies plus mutation harnesses, realtime policy, fmt and focused all-feature clippy: PASS.
+- C ABI shared/static native linkage and ABI-layout 17-mutation self-test: PASS; generated layout and AudioWorklet static/object gates: PASS.
+- Built browser/native resource agreement plus 26 red mutations: PASS.
+- Exact read-only publication/source-pin guard: PASS. No npm publication.
+- Fresh main baseline `0e248bb0`: 1546 passed, 0 failed, 24 ignored. Serial candidate workspace at `73751d63`: 1551 passed, 0 failed, 24 ignored; exactly +5 IO-4 tests.
+
+The first candidate workspace invocation passed executable suites but failed capi rustdoc dependency loading after other Cargo feature builds used the same target directory concurrently. The isolated capi doctest passed; a serialized complete workspace rerun passed. The failed log `/tmp/engine-369-recovery-workspace.log` is retained and is not counted as PASS; successful serial evidence is `/tmp/engine-369-recovery-workspace-serial.log`. Future same-target Cargo qualification is serialized. No source change or weakened test was used to resolve this orchestration error.
+
+Other logs are `/tmp/engine-369-{integration-capi,final-host-core,final-lifecycle,final-protocol-policy,final-realtime,final-clippy,final-browser-resources,final-publisher-guard,check-web-2,check-capi,check-abi,qualify-all,check-matrix-chromium,check-matrix-firefox,check-matrix-webkit}.log`. Runtime provider behavior is unchanged by recovery. Astra final PR review and fresh required CI remain pending before merge. Older digest/count records above are historical, not the current qualification identity.
