@@ -205,3 +205,10 @@ Root assigns Luna attempt 1 on the complete frozen contract and final cancellati
 Luna paused after adding the opt-in delivery module, exports and crate-private retained-admission dequeue/release helpers. Legacy dequeue still releases admission immediately. This is an incomplete compiling implementation tranche, not source acceptance: generic payload/core factoring, complete capability-kind semantics, cancellation/resource requirements and the frozen adversarial acceptance evidence remain to be completed.
 
 Luna reported cargo check and protocol library tests (124 passed) without retained log files. Root independently ran `PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/engine-460-luna-target cargo test --locked -p protocol --lib`, exit 0 with 124 passed, zero failed. Root log/status: `/tmp/460-luna1-root-tranche1-test.{log,status}`. These inherited tests prove this checkpoint compiles and preserves existing library tests; they do not prove the new service contract. The three source paths plus this record are checkpointed before further implementation.
+
+
+## Luna attempt 1 checkpoint 2: handoff and cancellation behavior
+
+The second tranche adds exact handle/kind capabilities, resource projection, retained unsupported FIFO heads, queued-batch cancellation reconciliation and render partial-prefix cancellation. Two focused tests now exercise retained admission through handoff/terminal consumption and unsupported-head cancellation followed by event publication. `cargo test -p protocol --lib delivery::tests -- --nocapture` with the existing isolated target exited 0 (2 passed, 124 filtered); `/tmp/460-luna1-tranche2-test.{log,status}` retains evidence. Luna also ran cargo fmt successfully; root diff check passed.
+
+This remains an incomplete checkpoint within Luna attempt 1. The full frozen generic ownership, physical resource, cancellation/backpressure/sequence/identity and realtime proof contract remains required before final review; these two tests do not substitute for it. Root checkpoints the two changed source paths and this record before continuation.

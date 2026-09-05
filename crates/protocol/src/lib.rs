@@ -81,10 +81,10 @@ pub use controller::{
     ReplayCache, ReplayCacheConfig, ReplayCacheError, ReplayCacheResourceReport, ReplayDecision,
     ReplayHit,
 };
-pub use delivery::{
-    AutomationDeliveryControl, AutomationDeliveryRender, CancelComplete, DeliveryError,
-    DeliveryTicket, HandoffResult, PendingAutomation, PreparedAutomationDelivery,
-    PreparedDeliveryCapabilities, TerminalAutomation,
-};
 #[cfg(any(test, feature = "test-support"))]
 pub use controller::{MockProvider, MockProviderConfig};
+pub use delivery::{
+    AutomationDeliveryControl, AutomationDeliveryRender, CancelComplete, DeliveryError,
+    DeliveryResourceReport, DeliveryTicket, HandoffResult, PendingAutomation,
+    PreparedAutomationDelivery, PreparedDeliveryCapabilities, TerminalAutomation,
+};
