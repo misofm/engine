@@ -483,11 +483,6 @@ fn console_attaches_bounded_control_and_meter_halves_in_canonical_track_order() 
         prepare_host_session_with_console(SESSION, &console_caps, &console).unwrap_or_else(
             |failure| panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes())),
         );
-    assert!(
-        !handles.post_fader_controls_are_between_render_calls(),
-        "the general live-console entry retains Concurrent post-fader owners"
-    );
-    assert!(!handles.post_matrix_controls_are_between_render_calls());
     let expected: Vec<String> = compiled
         .normalized_model()
         .tracks
@@ -548,8 +543,6 @@ fn no_console_request_attaches_nothing_and_charges_nothing() {
             });
     assert!(handles.track_controls.is_empty());
     assert!(handles.meters.is_empty());
-    assert!(!handles.post_fader_controls_are_between_render_calls());
-    assert!(!handles.post_matrix_controls_are_between_render_calls());
     assert_eq!(handles.tracks.len(), 9);
     assert_eq!(plain.report.builtin_meter_payload_bytes, 0);
     let baseline = prepare_host_runtime(&compiled, &caps())

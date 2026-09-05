@@ -220,3 +220,27 @@ Run only proportional final-source checks for the correction: restored graph/hos
 Reviewed full numbered contract/attempt history, final changes, actual source and supplied logs. No source edits, builds/tests, timing or Git/GitHub mutations by this review; only this `/tmp` verdict was written. Root's independently executed host-suite result is credited as such.
 
 Root authorizes the one final bounded correction above. Remove the proof-only public aggregate/API change and retain the same actual-host causal gate through the specified disposable pre-bind probe. No new production API, callback, framework, refusal, or arithmetic change is authorized. This is final attempt 3; further FAIL requires hard stop and explicit rescope.
+
+## Sol attempt 3 correction evidence
+
+Final source removes the proof-only fields and hidden queries from `HostConsoleHandles`, removes
+their collection and initializers, and removes all tests that depended on them. This restores the
+public aggregate's original construction and destructuring shape. No replacement production
+telemetry, callback, feature, refusal or runtime assertion remains.
+
+The bounded disposable probe was inserted immediately after the real `GraphCompiler` preparation
+returned its artifact and before report collection or binding. For the named one-track WebEngine
+fixture it required at least one actual PostFader owner and one actual PostMatrix owner, nonempty
+members for every inspected owner, and BetweenRenderCalls on every owner in both stage populations.
+The normal production call compiled and the named test passed. Changing only the unique
+`compile_ready` call to the old Concurrent wrapper compiled and made the same PostFader owner
+assertion fail with left `Concurrent` and right `BetweenRenderCalls` (exit 101). The production
+call and probe were both removed/restored before final-source checks.
+
+Reproducible evidence is `/tmp/sol442-attempt3-disposable-prebind-probe.patch`, the exact one-call
+diff `/tmp/sol442-attempt3-production-call-mutant.patch`, normal and mutant logs
+`/tmp/sol442-attempt3-probe-original.log` and `/tmp/sol442-attempt3-probe-mutant.log`, and their
+`.exit` records. The accepted populated eight-track owner test remains the multi-member proof and
+the default/raw/no-console discrimination. Final-source records are listed in the Sol handoff;
+they do not claim Astra PASS, pushed evidence, GitHub synchronization, target/artifact
+qualification or required CI.
