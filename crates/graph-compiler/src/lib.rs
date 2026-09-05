@@ -303,7 +303,8 @@ mod tests {
     use builtins_compiler::{
         BuiltinCompileCaps, MeterRequest, PreparedBuiltinsCorruption,
         PreparedBuiltinsCorruptionCase, TrackControlRequest, TrackFaderRecord,
-        prepare_session_builtins, prepare_session_builtins_with_console,
+        prepare_session_builtins, prepare_session_builtins_between_render_calls,
+        prepare_session_builtins_with_console,
     };
     use conformance::DualAccumulatorDelayFactory;
     use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
@@ -2026,6 +2027,121 @@ mod tests {
             GraphCompiler::evidence(&banked.graph, &banked.report).dot
         );
         assert_eq!(plain.report.rack_cohorts.dispatch, scalar);
+    }
+
+    #[test]
+    fn live_scalar_owner_bytes_are_published_and_capped_before_binding() {
+        let prepare = |caps: GraphCompileCaps, controlled: bool| {
+            let mut model = parse_session_json(SESSION_FIXTURE).expect("session fixture");
+            model.tracks[0].simd1.effects.clear();
+            model.tracks[0].dynamic.effects.clear();
+            model.tracks[0].simd2.effects.clear();
+            model.automation.clear();
+            let session = compile_session(
+                &model,
+                CompileCaps {
+                    max_compiled_model_bytes: u64::MAX,
+                    max_requested_runtime_bytes: u64::MAX,
+                    max_single_allocation_bytes: u64::MAX,
+                    max_queue_items: u64::MAX,
+                    max_source_ring_frames: u64::MAX,
+                    max_source_ring_bytes: u64::MAX,
+                },
+            )
+            .expect("compiled scalar session");
+            let controls = [TrackControlRequest {
+                track_id: model.tracks[0].id.as_str().to_owned(),
+                queue_capacity: NonZeroUsize::new(4).expect("queue"),
+            }];
+            let builtins = if controlled {
+                prepare_session_builtins_between_render_calls(
+                    &session,
+                    &[],
+                    &controls,
+                    BuiltinCompileCaps {
+                        maximum_total_state_bytes: u64::MAX,
+                        maximum_total_retained_payload_bytes: u64::MAX,
+                        maximum_total_meter_items: u64::MAX,
+                        maximum_total_meter_bytes: u64::MAX,
+                        maximum_single_allocation_bytes: u64::MAX,
+                        maximum_meter_streams: u64::MAX,
+                        maximum_period_frames: u32::MAX,
+                        maximum_peak_hold_frames: u32::MAX,
+                        maximum_smoothing_samples: u32::MAX,
+                    },
+                )
+            } else {
+                prepare_session_builtins(
+                    &session,
+                    &[],
+                    BuiltinCompileCaps {
+                        maximum_total_state_bytes: u64::MAX,
+                        maximum_total_retained_payload_bytes: u64::MAX,
+                        maximum_total_meter_items: u64::MAX,
+                        maximum_total_meter_bytes: u64::MAX,
+                        maximum_single_allocation_bytes: u64::MAX,
+                        maximum_meter_streams: u64::MAX,
+                        maximum_period_frames: u32::MAX,
+                        maximum_peak_hold_frames: u32::MAX,
+                        maximum_smoothing_samples: u32::MAX,
+                    },
+                )
+            }
+            .expect("prepared scalar builtins");
+            GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+                dispatch: Backend::Scalar,
+                plan_id: if controlled { 443_001 } else { 443_000 },
+                effects: EffectPreparedSession {
+                    session,
+                    entries: Vec::new(),
+                },
+                builtins,
+                caps,
+            })
+        };
+
+        let plain = prepare(integration_caps(), false)
+            .unwrap_or_else(|_| panic!("plain scalar graph"));
+        let live = prepare(integration_caps(), true)
+            .unwrap_or_else(|_| panic!("live scalar graph"));
+        let plain_resource = plain.graph_resource_estimate();
+        let live_resource = live.graph_resource_estimate();
+        let scalar_bytes = live_resource.graph_metadata_bytes - plain_resource.graph_metadata_bytes;
+        assert!(scalar_bytes > 0, "live scalar owners add retained graph bytes");
+        assert_eq!(
+            live_resource.incremental_plan_bytes - plain_resource.incremental_plan_bytes,
+            scalar_bytes
+        );
+        assert_eq!(
+            live_resource.session_plus_plan_bytes - plain_resource.session_plus_plan_bytes,
+            scalar_bytes
+        );
+        assert_eq!(live_resource.builtin_bank_count, 0);
+        assert_eq!(live.report().estimate, *live_resource, "published pre-bind estimate");
+
+        let mut exact = integration_caps();
+        exact.maximum_graph_bytes = live_resource.graph_metadata_bytes;
+        exact.maximum_plan_bytes = live_resource.incremental_plan_bytes;
+        exact.maximum_single_allocation_bytes = live_resource.largest_allocation_bytes;
+        let exact_artifact =
+            prepare(exact, true).unwrap_or_else(|_| panic!("exact scalar caps"));
+        assert_eq!(exact_artifact.graph_resource_estimate(), live_resource);
+
+        for field in ["graph", "plan", "largest"] {
+            let mut below = exact;
+            match field {
+                "graph" => below.maximum_graph_bytes -= 1,
+                "plan" => below.maximum_plan_bytes -= 1,
+                "largest" => below.maximum_single_allocation_bytes -= 1,
+                _ => unreachable!(),
+            }
+            let failure = prepare(below, true).err().expect("one below rejects");
+            assert!(failure.diagnostics.diagnostics().iter().any(|diagnostic| {
+                diagnostic.code == "graph.resource.limit"
+                    && diagnostic.path == "$.graph_compile_caps"
+            }));
+            assert_eq!(failure.builtins.tails().count(), 1, "{field} ownership returned");
+        }
     }
 
     /// `slots` bankable SIMD-1 effects per track, on `tracks` tracks, plus a route per track.

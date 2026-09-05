@@ -358,3 +358,7 @@ Root adopts this exact guard and proof amendment. Distinct-output applicability/
 ## Sol2 buffer guard checkpoint
 
 The runtime selection now explicitly requires identical fader/matrix output, one undelayed matrix input naming that buffer, and matrix.in_place, while retaining previous guards. A labeled synthetic lowered fixture discriminates distinct destination and delay refusal; the actual compiled positive still selects. Corrected focused statuses are0 at `/tmp/443-sol2-tranche3-distinct-guard-2.*` and `...positive-2.*`; initial missing-import compilation101 remains retained. Only graph/runtime.rs changes. Remaining actual graph/error/host/resource-cap/allocation and full focused qualification obligations remain before source review.
+
+## Sol2 actual scalar compiler cap checkpoint
+
+A new Backend::Scalar controlled-vs-no-console compile fixture checks matching nonzero scalar-owner deltas in metadata/incremental/session-plus-plan, zero builtin banks, published report equality with the actual graph estimate, exact graph/plan/largest caps, and each one-below refusal with returned sealed builtin ownership. Only graph-compiler/lib.rs test code changes. The named test passes at `/tmp/443-sol2-tranche4-scalar-caps-2.*`; initial Debug-bound compile failure101 remains in the unsuffixed log/status. Diff check passes. Full remaining scheduled graph/host/allocation and release/policy obligations remain before source verdict.
