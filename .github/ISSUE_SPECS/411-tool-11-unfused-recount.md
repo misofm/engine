@@ -1,6 +1,6 @@
 # Complete the unfused seal's searches before accepting its recount
 
-**READY to amend existing #411; QUEUED until #410 merges and root freezes the actual integrated base.** This refresh preserves the numbered one-checker outcome and parent #402/#306/#349 obligations. No implementation is authorized by this planning record. Current shared foundation includes the rack/default, plain, plain-target and graph dependency modes; none parses this seal's grammar. #410 is active; do not edit its worktree/helper. Actual merged API wins over stale speculation.
+**BRIEF APPROVED on merged #410 base; assignment waits for the #420 measurement quiet window to end.** This refresh preserves the numbered one-checker outcome and parent #402/#306/#349 obligations. No implementation is authorized by this planning record. Current shared foundation includes the rack/default, plain, plain-target and graph dependency modes; none parses this seal's grammar. #410 is active; do not edit its worktree/helper. Actual merged API wins over stale speculation.
 
 ## Smallest scope and delivery
 
@@ -61,3 +61,17 @@ This is the existing #411, with unchanged title and parent obligations. Root syn
 ## Frozen post-prerequisite base
 
 PR #433 merged as `1af76181490a623675960c244a6c677c06aae745`; #410 is remotely verified CLOSED. Root normally integrates this exact merged main and freezes it as #411's implementation base. #410 changed no shared helper API; preserve all four dependency modes while using explicit checked local operations for this distinct grammar. Astra confirms the numbered frozen-base scope before Luna assignment. Root will release implementation after #420's active measurement quiet window, avoiding competing test/build load.
+
+## Astra frozen-base approval
+
+# Astra #411 frozen-base review
+
+**PASS for planning head `d1a0a681185c337a0ea42c3abc775d6b00d81e63` on merged prerequisite base `1af76181490a623675960c244a6c677c06aae745`.** Root may assign Luna only after the active #420 capture/quiet window terminates. This is scope/base approval, not implementation acceptance.
+
+The numbered spec preserves `/tmp/astra-411-final-brief.md` verbatim and adds explicit numbered/queue and post-#410 freeze records. Since merged main, only this spec changed. The actual unfused checker retains exactly the inventoried unchecked occurrence, dispatch/body, registry, discovery, membership, marker and recount/retired-predicate sites; the premise remains valid. #410 changed no shared helper API, and all four dependency modes remain outside this seal's bespoke grammar.
+
+No scope correction or further split is needed. Preserve the exact7+1 registry/8 total, six-preceding-line marker window, literal dispatch and call/comment parsers, required roots/files, valid zero/prose populations and status distinctions. The complete selective late-consumer/otherwise-valid partial-output table and three actual same-assertion counter-mutant groups remain required. Existing checker/embedded-self-test CI wiring suffices; no workflow, Rust, artifact or benchmark work is authorized.
+
+Implementation remains one coherent Luna pass, root checkpoint, Astra verdict; Sol only after FAIL, hard stop after three failed attempts. Root performs final qualification and actual-head PR/required-CI delivery. #412 follows #411 and #427 follows #412; #402/#306/#349 stay open through remaining obligations.
+
+Read-only spec/source/helper/commit inspection. No tests, Cargo, timing or repository/GitHub mutation; the measurement quiet window was preserved.
