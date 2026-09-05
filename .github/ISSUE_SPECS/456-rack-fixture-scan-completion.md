@@ -181,3 +181,20 @@ Use a tiny selective scratch rm shim to exercise cleanup failure for (a) otherwi
 These are finite acceptance omissions from attempt1 group1, not a new policy or scan operation inventory. Preserve all accepted table rows, grammar, complete-output assertions, exact two controls and original seal/runner behavior. Final revision paths remain the same checker, suite and numbered evidence. Run the four existing proportional checks and retain genuine terminal logs, then request one final adversarial verdict. Full workspace/actual PR/requiredCI remain after source PASS; no timing is authorized.
 
 Root assigns the final Sol3 attempt to the same two authorized scripts and this evidence record. Preserve accepted coverage; implement only the bounded sourced-conditional and explicit cleanup status correction above. Pause after the four focused gates with real terminal evidence. Root owns all Git/GitHub operations.
+
+## Sol attempt 3 final correction evidence
+
+The checker cleanup trap now captures the pending shell status, removes its own EXIT trap, checks cleanup explicitly, and exits explicitly with the preserved primary failure or status 1 for cleanup failure after an otherwise successful check. Successful cleanup cannot erase a primary failure, and failed cleanup cannot leave an otherwise successful checker at status 0. The primary producer diagnostic remains unchanged.
+
+The suite replaces the external-child conditional approximation with an isolated child harness that sources the exact physical checker as the `if` condition and passes the valid fixture argument explicitly. A normal sourced invocation succeeds. The faithful complete find-output/status/sentinel case passes through the existing exact producer-failure assertion and is rejected with the original operation diagnostic.
+
+A selective scratch `rm` shim fails only removal of checker capture directories created under a dedicated scratch `TMPDIR`. It proves that an otherwise valid sourced checker returns status 1 with the cleanup diagnostic, and that an already failed sourced conditional find retains status 1 plus its exact primary operation/status/full-payload/sentinel diagnostic when cleanup also fails. The suite invokes the separately resolved real `rm` afterward to remove each intentionally retained capture directory. The previously accepted operation table, payload validation, and exactly two same-assertion 97/96 production mutants are unchanged. No real runner, benchmark, timing, or audio workload was invoked.
+
+Raw commands, combined stdout/stderr, and statuses:
+
+- `/tmp/456-sol3-syntax.{command,log,status}`: status 0.
+- `/tmp/456-sol3-checker.{command,log,status}`: status 0.
+- `/tmp/456-sol3-suite.{command,log,status}`: status 0; `rack benchmark validators/lifecycle: PASS (audio workload launches: 0)`.
+- `/tmp/456-sol3-env.{command,log,status}`: status 0; `env vocabulary: ok (114 names, one MISO_ENGINE_ prefix)`.
+
+Only the checker, its existing suite, and this numbered evidence record changed in the final pass. Root retains every Git/GitHub operation and the later workspace/actual-PR/required-CI boundary.

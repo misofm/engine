@@ -12,10 +12,15 @@ if capture_root=$(mktemp -d); then :; else
     exit 1
 fi
 cleanup_capture_root() {
-    rm -rf -- "$capture_root" || {
+    local pending_status=$? cleanup_status=0
+    trap - EXIT
+    if rm -rf -- "$capture_root"; then cleanup_status=0; else cleanup_status=$?; fi
+    if ((cleanup_status != 0)); then
         printf 'Issue-038 capture directory cleanup failed\n' >&2
-        return 1
-    }
+    fi
+    if ((pending_status != 0)); then exit "$pending_status"; fi
+    if ((cleanup_status != 0)); then exit 1; fi
+    exit 0
 }
 trap cleanup_capture_root EXIT
 run_capture() {

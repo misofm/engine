@@ -204,11 +204,66 @@ for record_mode in incomplete malformed; do
     [[ "$record_status" == 1 && "$record_output" == "$expected_record" ]] || exit 96
 done
 
-# The checker must preserve failure when its invocation itself is a conditional command.
-configure_scan_failure conditional_find find 1 full 87 CONDITIONAL_FIND_SENTINEL
-if PATH="$scan_bin:$PATH" bash "$fixture_checker" "$fixture_copy" >/dev/null 2>&1; then
-    printf 'conditional checker invocation swallowed discovery failure\n' >&2; exit 96
+# Source the exact checker as the conditional command in an isolated child shell.  This is the
+# context in which Bash disables inherited errexit for the sourced body.
+source_harness="$scratch/source-checker-conditionally.sh"
+printf '%s\n' "$root/$fixture_checker" >"$scratch/source-checker-path"
+cat >"$source_harness" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+harness_root=$(cd "$(dirname "$0")" && pwd)
+checker=$(<"$harness_root/source-checker-path")
+if source "$checker" "$@"; then
+    exit 0
+else
+    status=$?
+    exit "$status"
 fi
+EOF
+chmod 755 "$source_harness"
+bash "$source_harness" "$fixture_copy"
+assert_checker_rejects_producer_failure "$source_harness" conditional_find find 1 full 87 \
+    'Issue-038 fixture discovery' CONDITIONAL_FIND_SENTINEL
+
+# Cleanup has an explicit final-status rule.  The selective rm shim leaves only checker capture
+# directories behind; the resolved real rm removes them after each assertion.
+cleanup_bin="$scratch/cleanup-bin"
+cleanup_tmp="$scratch/cleanup-tmp"
+mkdir -p "$cleanup_bin" "$cleanup_tmp"
+real_rm=$(command -v rm)
+[[ -x "$real_rm" ]] || exit 96
+printf '%s\n' "$real_rm" >"$cleanup_bin/real-rm"
+printf '%s\n' "$cleanup_tmp" >"$cleanup_bin/target-root"
+cat >"$cleanup_bin/rm" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+shim_root=$(cd "$(dirname "$0")" && pwd)
+real=$(<"$shim_root/real-rm")
+target_root=$(<"$shim_root/target-root")
+if [[ "${1:-}" == -rf && "${2:-}" == -- && "${3:-}" == "$target_root"/* ]]; then
+    printf 'RM_CLEANUP_SENTINEL status=88\n' >&2
+    exit 88
+fi
+exec "$real" "$@"
+EOF
+chmod 755 "$cleanup_bin/rm"
+
+rm -f "$scan_bin"/count-* "$scan_bin"/delegate-*
+printf 'none x 0 full 0 NONE\n' >"$scan_bin/mode"
+if cleanup_valid_output=$(TMPDIR="$cleanup_tmp" PATH="$cleanup_bin:$scan_bin:$PATH" \
+    bash "$source_harness" "$fixture_copy" 2>&1); then exit 96; else cleanup_valid_status=$?; fi
+cleanup_valid_expected=$'RM_CLEANUP_SENTINEL status=88\nIssue-038 capture directory cleanup failed'
+[[ "$cleanup_valid_status" == 1 && "$cleanup_valid_output" == "$cleanup_valid_expected" ]] || exit 96
+"$real_rm" -rf -- "$cleanup_tmp"/*
+
+configure_scan_failure conditional_find_cleanup find 1 full 87 CONDITIONAL_FIND_CLEANUP_SENTINEL
+if cleanup_failed_output=$(TMPDIR="$cleanup_tmp" PATH="$cleanup_bin:$scan_bin:$PATH" \
+    bash "$source_harness" "$fixture_copy" 2>&1); then exit 96; else cleanup_failed_status=$?; fi
+cleanup_find_payload=$(<"$scan_bin/delegate-find.stdout")
+validate_delegate_payload conditional_find find "$cleanup_find_payload" || exit 96
+cleanup_failed_expected=$'Issue-038 fixture discovery failed (status 87)\nstdout:\n'"$cleanup_find_payload"$'\nstderr:\nCONDITIONAL_FIND_CLEANUP_SENTINEL delegate_status=0\nRM_CLEANUP_SENTINEL status=88\nIssue-038 capture directory cleanup failed'
+[[ "$cleanup_failed_status" == 1 && "$cleanup_failed_output" == "$cleanup_failed_expected" ]] || exit 96
+"$real_rm" -rf -- "$cleanup_tmp"/*
 
 # Exactly two one-site production mutants use the same assertion as original and restored runs.
 discovery_line=$(rg -n -F '    discovery_status=$?' "$fixture_checker" | cut -d: -f1)
