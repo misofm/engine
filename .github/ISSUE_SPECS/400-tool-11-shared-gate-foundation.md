@@ -184,3 +184,7 @@ Baseline synchronized main `0c2b283f86b199351b78be99784def7c614c0320` and integr
 Astra's attempt-2 focused PASS at `58e1575038c32696e4114dbbd253b985284793d3` independently reran all named shell gates and the old missing-manifest reproduction. Disposable-copy counter-mutations proved the assertions reject the old extractor, accepted forbidden match, altered error class and accepted sort failure. Those checks are assertion-liveness evidence, not production/source mutations. Root's conflict-free current-main merge preserves the accepted helper/caller/test implementation and passed the real workspace/rack gates again.
 
 No runtime Rust, artifact, benchmark or publication change is included. #306/#401/#402/#403/#404 and queued #406/#407 remain open for their separate obligations; this issue closes only shared-helper and workspace/rack adoption. Final actual PR review by Astra and required CI SUCCESS remain merge gates.
+
+### Required-CI helper-suite wiring
+
+Root found that the new helper suite was not yet invoked by an existing required-CI entry point. Astra approved one explicit call from `test-workspace-policy.sh`, using its script directory and propagating failure. The complete affected workspace mutation suite passes with the helper suite included. No workflow change or Rust source changed; the completed 1552/0/24 baseline/candidate comparison remains applicable. This is bounded test wiring, not another implementation retry. Final review applies to the new pushed head.
