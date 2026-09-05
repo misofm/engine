@@ -70,6 +70,13 @@ rm "$missing_surface/crates/protocol/src/controller.rs"
 if bash "$policy_script" "$missing_surface" >/dev/null 2>&1; then
     printf 'protocol control policy missing required surface unexpectedly passed\n' >&2; exit 1
 fi
+missing_trait="$scratch_root/missing-trait"
+create_fixture "$missing_trait"
+sed -i '/pub trait ControlProvider {/,/^}/d' "$missing_trait/crates/protocol/src/controller.rs"
+trait_output="$(bash "$policy_script" "$missing_trait" 2>&1)" && trait_rc=0 || trait_rc=$?
+[[ "$trait_rc" -ne 0 && "$trait_output" == *'missing or empty ControlProvider declaration'* ]] || {
+    printf 'protocol missing trait was misclassified: %s\n' "$trait_output" >&2; exit 1;
+}
 
 # Optional message sources may be absent, and an empty public-field population is valid.
 empty_fields="$scratch_root/empty-fields"
@@ -100,6 +107,36 @@ EOF
 }
 expect_predicate_error provider-predicate 'pub trait ControlProvider' 'ControlProvider raw-byte predicate scan errored'
 expect_predicate_error mock-predicate 'pub diagnostics' 'MockProvider raw-byte predicate scan errored'
+
+awk_fixture="$scratch_root/awk-error"
+create_fixture "$awk_fixture"
+mkdir -p "$scratch_root/awk-bin"
+cat >"$scratch_root/awk-bin/awk" <<'EOF'
+#!/usr/bin/env bash
+printf 'pub trait ControlProvider {\n' >&2
+exit 6
+EOF
+chmod +x "$scratch_root/awk-bin/awk"
+awk_output="$(PATH="$scratch_root/awk-bin:$PATH" bash "$policy_script" "$awk_fixture" 2>&1)" && awk_rc=0 || awk_rc=$?
+[[ "$awk_rc" -ne 0 && "$awk_output" == *'ControlProvider scan errored'* ]] || {
+    printf 'protocol awk error escaped: %s\n' "$awk_output" >&2; exit 1;
+}
+
+optional_fixture="$scratch_root/optional-read-error"
+create_fixture "$optional_fixture"
+printf 'pub struct Message { pub value: u32 }\n' >"$optional_fixture/crates/protocol/src/message_wire.rs"
+mkdir -p "$scratch_root/optional-rg-bin"
+real_rg="$(command -v rg)"
+cat >"$scratch_root/optional-rg-bin/rg" <<EOF
+#!/usr/bin/env bash
+if [[ "\$*" == *'message_wire.rs'* ]]; then printf 'crates/protocol/src/controller.rs:1:allowed partial row\n'; exit 7; fi
+exec "$real_rg" "\$@"
+EOF
+chmod +x "$scratch_root/optional-rg-bin/rg"
+optional_output="$(PATH="$scratch_root/optional-rg-bin:$PATH" bash "$policy_script" "$optional_fixture" 2>&1)" && optional_rc=0 || optional_rc=$?
+[[ "$optional_rc" -ne 0 && "$optional_output" == *'public arbitrary message payload storage is forbidden scan errored (rg exit 7)'* && "$optional_output" == *'allowed partial row'* ]] || {
+    printf 'protocol optional source read error escaped: %s\n' "$optional_output" >&2; exit 1;
+}
 
 expect_failure provider-raw-bytes mutate_provider_raw_bytes
 expect_failure mock-public-vector mutate_mock_public_vector

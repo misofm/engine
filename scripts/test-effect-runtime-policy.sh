@@ -14,6 +14,13 @@ contract_manifest="$temp/crates/effect-contract/Cargo.toml"
 bash "$temp/scripts/check-effect-runtime-policy.sh" "$temp" >/dev/null
 bash "$temp/scripts/check-effect-state-migration-v1.sh" "$temp" >/dev/null
 
+mv "$temp/crates/engine/src" "$temp/crates/engine/src.saved"
+missing_root_output="$(bash "$temp/scripts/check-effect-runtime-policy.sh" "$temp" 2>&1)" && missing_root_rc=0 || missing_root_rc=$?
+[[ "$missing_root_rc" -ne 0 && "$missing_root_output" == *'missing search path(s)'*'crates/engine/src'* ]] || {
+    printf 'effect runtime missing source root escaped: %s\n' "$missing_root_output" >&2; exit 1;
+}
+mv "$temp/crates/engine/src.saved" "$temp/crates/engine/src"
+
 restore_compiler_manifest() {
     cp "$root/crates/effect-compiler/Cargo.toml" "$compiler_manifest"
 }
@@ -218,5 +225,28 @@ chmod +x "$temp/rg-helper-filter-fail/rg"
 helper_output="$(PATH="$temp/rg-helper-filter-fail:$PATH" bash "$temp/scripts/check-effect-runtime-policy.sh" "$temp" 2>&1)" && helper_rc=0 || helper_rc=$?
 [[ "$helper_rc" -ne 0 && "$helper_output" == *'helper definition exemption filter errored (rg exit 9)'* && "$helper_output" == *'valid partial output'* ]] || {
     printf 'effect helper filter error escaped: %s\n' "$helper_output" >&2; exit 1;
+}
+mkdir -p "$temp/rg-helper-source-fail"
+cat >"$temp/rg-helper-source-fail/rg" <<EOF
+#!/usr/bin/env bash
+if [[ "\$*" == *'fn\\s+sanitize\\('* ]]; then printf 'crates/effect-package/src/lib.rs:1:fn sanitize(\n'; exit 7; fi
+exec "$real_rg" "\$@"
+EOF
+chmod +x "$temp/rg-helper-source-fail/rg"
+helper_source_output="$(PATH="$temp/rg-helper-source-fail:$PATH" bash "$temp/scripts/check-effect-runtime-policy.sh" "$temp" 2>&1)" && helper_source_rc=0 || helper_source_rc=$?
+[[ "$helper_source_rc" -ne 0 && "$helper_source_output" == *'helper definition scan scan errored (rg exit 7)'* && "$helper_source_output" == *'crates/effect-package/src/lib.rs'* ]] || {
+    printf 'effect zero-pin helper source error escaped: %s\n' "$helper_source_output" >&2; exit 1;
+}
+mkdir -p "$temp/wc-fail"
+cat >"$temp/wc-fail/wc" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+printf '0\n'
+exit 6
+EOF
+chmod +x "$temp/wc-fail/wc"
+helper_count_output="$(PATH="$temp/wc-fail:$PATH" bash "$temp/scripts/check-effect-runtime-policy.sh" "$temp" 2>&1)" && helper_count_rc=0 || helper_count_rc=$?
+[[ "$helper_count_rc" -ne 0 && "$helper_count_output" == *'helper definition count errored (wc exit 6)'* && "$helper_count_output" == *$'0\n'* ]] || {
+    printf 'effect helper count partial error escaped: %s\n' "$helper_count_output" >&2; exit 1;
 }
 printf 'effect runtime policy mutations: ok\n'

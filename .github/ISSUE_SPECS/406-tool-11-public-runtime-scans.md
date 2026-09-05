@@ -155,3 +155,11 @@ Counter-mutate the implementation in disposable copies or a restored test fixtur
 Review used source, completed logs and the tiny disposable shell counter-mutation only; no Cargo, Git, GitHub, timing or repository edits.
 
 Root authorizes this bounded final test-completion pass. No other implementation expansion or full-workspace promotion is authorized.
+
+## Sol attempt 3 checkpoint — pending final adversarial verdict
+
+The final bounded pass changed only the five existing focused suites. The helper suite now directly covers required match, clean absence, and execution failure with useful partial output; count failure after an exact expected count; sort failure after valid sorted output under both pipefail settings and conditional invocation; and disposable fail-open counter-mutants for collect, required, filter, count, and the plain/default parser distinction. Its log records `counter-mutants rejected: collect required filter count plain`.
+
+Gate fixtures now remove `ControlProvider` from an otherwise-valid controller, inject checked awk and optional-present source failures, delete an effect runtime source root while manifests remain present, exercise a zero-count helper source producer and helper `wc` failure, target both host occurrence producers plus partial exact-count failure, and target builtins reverse and both required-positive search errors. Partial-output shims emit plausible source rows or exact expected counts on stdout before failing and delegate unrelated tool invocations.
+
+All five suites pass in `/tmp/engine-406-attempt3-{gate-lib,protocol,effect,host,builtins}.log`. All four real gates pass in `/tmp/engine-406-attempt3-check-{protocol,effect,host,builtins}.log`; builtins used its frozen `MISO_ENGINE_BUILTINS_SKIP_METADATA=1` fixture switch because this final pass explicitly excludes Cargo. Shell syntax and `git diff --check` pass. No gate implementation, Rust, manifest, workflow, Cargo, timing, artifact, Git, or GitHub operation was performed. This is the final commit-ready checkpoint for root and one Astra verdict; a FAIL requires the mandated hard stop/rescope.

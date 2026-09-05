@@ -77,4 +77,27 @@ filter_output="$(PATH="$temp/rg-filter-fail:$PATH" MISO_ENGINE_BUILTINS_SKIP_MET
     printf 'builtins unsafe filter error escaped: %s\n' "$filter_output" >&2; exit 1;
 }
 
+for operation in reverse workspace-positive compiler-positive; do
+    fixture="$temp/$operation"; shim="$temp/$operation-bin"; make_fixture "$fixture"; mkdir -p "$shim"
+    cat >"$shim/rg" <<EOF
+#!/usr/bin/env bash
+case '$operation' in
+reverse) if [[ "\$*" == *'crates/engine/Cargo.toml crates/session/Cargo.toml crates/graph/Cargo.toml'* ]]; then printf 'crates/engine/Cargo.toml:1:plausible partial\n'; exit 7; fi ;;
+workspace-positive) if [[ "\$*" == *'Cargo.toml crates/builtins/Cargo.toml crates/builtins-compiler/Cargo.toml'* ]]; then printf 'Cargo.toml:1:builtins\n'; exit 7; fi ;;
+compiler-positive) if [[ "\$*" == *'crates/builtins/Cargo.toml crates/builtins-compiler/Cargo.toml'* && "\$*" != *' Cargo.toml '* ]]; then printf 'crates/builtins/Cargo.toml:1:builtins\n'; exit 7; fi ;;
+esac
+exec "$real_rg" "\$@"
+EOF
+    chmod +x "$shim/rg"
+    output="$(PATH="$shim:$PATH" MISO_ENGINE_BUILTINS_SKIP_METADATA=1 bash "$root/scripts/check-builtins-policy.sh" "$fixture" 2>&1)" && rc=0 || rc=$?
+    case "$operation" in
+        reverse) expected='reverse dependency scan errored (rg exit 7)' ;;
+        workspace-positive) expected='workspace builtins declaration is missing search failed (rg exit 7)' ;;
+        compiler-positive) expected='builtins compiler declarations are missing search failed (rg exit 7)' ;;
+    esac
+    [[ "$rc" -ne 0 && "$output" == *"$expected"* && "$output" == *'Cargo.toml'* ]] || {
+        printf 'builtins %s search error escaped: %s\n' "$operation" "$output" >&2; exit 1;
+    }
+done
+
 printf 'builtins policy mutations: ok\n'

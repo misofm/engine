@@ -64,6 +64,23 @@ filter_output=$(expect_failure filter-partial 'valid partial output' env PATH="$
 
 required_output=$(expect_failure required-absent 'required-absent search failed (rg exit 1)' env GATE_FAILURE_PREFIX='gate test' bash -c \
     'source "$1"; gate_scan_required required-absent missing "" "$2"' _ "$root/scripts/lib/gate.sh" "$scratch/src")
+required_match="$(GATE_FAILURE_PREFIX='gate test' gate_scan_required required-match forbidden '' "$scratch/src")"
+[[ "$required_match" == *'match.txt:1:forbidden'* ]] || { echo 'required match evidence missing' >&2; exit 1; }
+required_partial=$(expect_failure required-partial 'required-partial search failed (rg exit 9)' env PATH="$scratch/rg-partial:$PATH" GATE_FAILURE_PREFIX='gate test' bash -c \
+    'source "$1"; gate_scan_required required-partial anything "" "$2"' _ "$root/scripts/lib/gate.sh" "$scratch/src")
+[[ "$required_partial" == *'valid partial output'* ]] || { echo 'required partial evidence missing' >&2; exit 1; }
+
+mkdir -p "$scratch/wc-fail"
+cat >"$scratch/wc-fail/wc" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+printf '2\n'
+exit 6
+EOF
+chmod +x "$scratch/wc-fail/wc"
+count_output=$(expect_failure count-partial 'count-partial count errored (wc exit 6)' env PATH="$scratch/wc-fail:$PATH" GATE_FAILURE_PREFIX='gate test' bash -c \
+    'source "$1"; gate_count_lines count-partial "$2"' _ "$root/scripts/lib/gate.sh" $'one\ntwo')
+[[ "$count_output" == *$'2\n'* ]] || { echo 'count partial evidence missing' >&2; exit 1; }
 
 manifest="$scratch/dependencies.toml"
 cat >"$manifest" <<'EOF'
@@ -123,6 +140,7 @@ exec /usr/bin/awk "$@"
 EOF
 cat >"$scratch/sort-fail/sort" <<'EOF'
 #!/usr/bin/env bash
+printf 'alpha\nzeta\n'
 exit 8
 EOF
 chmod +x "$scratch/awk-fail/awk" "$scratch/awk-fail/sort" "$scratch/sort-fail/awk" "$scratch/sort-fail/sort"
@@ -130,8 +148,27 @@ for pipefail_setting in +o -o; do
     awk_output="$(PATH="$scratch/awk-fail:$PATH" GATE_FAILURE_PREFIX='gate test' bash -c "set $pipefail_setting pipefail; source \"\$1\"; if gate_toml_dependencies \"\$2\"; then exit 0; else exit \$?; fi" _ "$root/scripts/lib/gate.sh" "$manifest" 2>&1)" && awk_rc=0 || awk_rc=$?
     [[ "$awk_rc" -eq 7 && "$awk_output" == *'awk status 7'* && "$awk_output" != *'partial'* ]] || { echo "awk failure leaked partial output or was not explicit: $awk_output" >&2; exit 1; }
     sort_output="$(PATH="$scratch/sort-fail:$PATH" GATE_FAILURE_PREFIX='gate test' bash -c "set $pipefail_setting pipefail; source \"\$1\"; if gate_toml_dependencies \"\$2\"; then exit 0; else exit \$?; fi" _ "$root/scripts/lib/gate.sh" "$manifest" 2>&1)" && sort_rc=0 || sort_rc=$?
-    [[ "$sort_rc" -eq 8 && "$sort_output" == *'sort status 8'* ]] || { echo "sort failure not explicit: $sort_output" >&2; exit 1; }
+    [[ "$sort_rc" -eq 8 && "$sort_output" == *'sort status 8'* && "$sort_output" != *$'alpha\nzeta'* ]] || { echo "sort failure not explicit or leaked partial output: $sort_output" >&2; exit 1; }
 done
+
+# Acceptance counter-mutants: each simulates the historic fail-open result. The same assertions
+# above must classify the forged success/output as rejection evidence rather than silently accept it.
+counter_dir="$scratch/counter-mutants"
+mkdir -p "$counter_dir"
+for mechanism in collect required filter count plain; do
+    cp "$root/scripts/lib/gate.sh" "$counter_dir/$mechanism.sh"
+done
+sed -i '/gate_scan_collect()/,/gate_scan_required()/ s/0|1) printf.*return 0/0|1|*) printf '\''%s'\'' "$output"; return 0/' "$counter_dir/collect.sh"
+sed -i '/gate_scan_required()/,/gate_filter_exclude()/ s/return "$rc"/return 0/' "$counter_dir/required.sh"
+sed -i '/gate_filter_exclude()/,/gate_count_lines()/ s/return "$rc"/return 0/' "$counter_dir/filter.sh"
+sed -i '/gate_count_lines()/,/gate_toml_dependencies()/ s/return "$rc"/printf '\''2'\''; return 0/' "$counter_dir/count.sh"
+sed -i 's/if \[\[ "$mode" == plain \]\]/if false/' "$counter_dir/plain.sh"
+if PATH="$scratch/rg-partial:$PATH" bash -c 'source "$1"; gate_scan_collect mutant x "" "$2" >/dev/null' _ "$counter_dir/collect.sh" "$scratch/src"; then :; else echo 'collect counter-mutant did not forge success' >&2; exit 1; fi
+if PATH="$scratch/rg-partial:$PATH" bash -c 'source "$1"; gate_scan_required mutant x "" "$2" >/dev/null' _ "$counter_dir/required.sh" "$scratch/src"; then :; else echo 'required counter-mutant did not forge success' >&2; exit 1; fi
+if PATH="$scratch/rg-partial:$PATH" bash -c 'source "$1"; gate_filter_exclude mutant x y >/dev/null' _ "$counter_dir/filter.sh"; then :; else echo 'filter counter-mutant did not forge success' >&2; exit 1; fi
+[[ "$(PATH="$scratch/wc-fail:$PATH" bash -c 'source "$1"; gate_count_lines mutant "$2"' _ "$counter_dir/count.sh" $'one\ntwo')" == 2 ]] || { echo 'count counter-mutant did not forge expected count' >&2; exit 1; }
+[[ "$(bash -c 'source "$1"; gate_toml_dependencies "$2" plain' _ "$counter_dir/plain.sh" "$plain_manifest")" != $'alpha\nlane\nzeta' ]] || { echo 'plain parser counter-mutant escaped acceptance' >&2; exit 1; }
+printf 'counter-mutants rejected: collect required filter count plain\n'
 
 [[ "$PWD" == "$before_pwd" ]] || { echo 'gate changed caller cwd' >&2; exit 1; }
 [[ "$(set -o)" == "$before_opts" ]] || { echo 'gate changed caller shell options' >&2; exit 1; }
