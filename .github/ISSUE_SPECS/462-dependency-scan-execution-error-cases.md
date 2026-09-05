@@ -130,3 +130,8 @@ Review was read-only Git/source/evidence inspection. No tests, Cargo resolution,
 
 
 Root integrates the already approved #454 planning record before this freeze so its delivered local body matches the synchronized queued issue. That merge changes only the #454 spec; accepted checkers, suites, Rust, fixtures, targets and workspace population remain unchanged. Full parent qualification command is `PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/engine-404-workspace-qualified cargo test --locked --workspace`, retained at `/tmp/engine-462-candidate-workspace.log`. The target belongs to completed #404 and is idle; active live-pair work uses a separate target. Expected unchanged Rust population is275 result blocks,1576passed,0failed,24ignored, including doctests. Root will capture actual immutable HEAD and terminal status; no tracked source/evidence edits occur during the run.
+
+
+## Completed source and workspace qualification
+
+Astra accepted amended #462 Sol attempt2 at8d4520bd, completing the four missing rows and portable Cargo delegation while preserving #453's scanner semantics and existing controls. The immutable full-workspace candidate2c8e0c48646192ae1484e56356ff2a26279a403e completed `cargo test --locked --workspace` with exit0:275result blocks,1576passed,0failed,24ignored including doctests, identical to the unchanged Rust baseline. No runtime/fixture/configuration inputs changed against delivered29a8c88b. Evidence, terminal status, source identity, relocation proof and prior verdicts are retained under `artifacts/issue453-dependency-discovery/` with byte/hash manifest. Actual PR exact-head Astra review and required CI remain the final gates before #453/#462 closure; #403/#306/#349 remain open for other scopes.

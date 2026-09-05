@@ -304,3 +304,8 @@ Review used read-only source/Git/log inspection; no tests, builds, Cargo resolut
 ## Numbered completion child #462
 
 #462 owns exactly the four missing empty-output/execution-error test rows after the hard stop above. Its scope freezes accepted production and both genuine mutation controls. #453 retains the complete original scanner outcome and all workspace/PR/CI delivery obligations; neither issue is complete until that proof and remote delivery are accepted. Other #403 children remain queued.
+
+
+## Completed source and workspace qualification
+
+Astra accepted amended #462 Sol attempt2 at8d4520bd, completing the four missing rows and portable Cargo delegation while preserving #453's scanner semantics and existing controls. The immutable full-workspace candidate2c8e0c48646192ae1484e56356ff2a26279a403e completed `cargo test --locked --workspace` with exit0:275result blocks,1576passed,0failed,24ignored including doctests, identical to the unchanged Rust baseline. No runtime/fixture/configuration inputs changed against delivered29a8c88b. Evidence, terminal status, source identity, relocation proof and prior verdicts are retained under `artifacts/issue453-dependency-discovery/` with byte/hash manifest. Actual PR exact-head Astra review and required CI remain the final gates before #453/#462 closure; #403/#306/#349 remain open for other scopes.
