@@ -319,3 +319,9 @@ No remaining source-acceptance blocker was found within the frozen finite contra
 This review performed read-only source/Git/log inspection and wrote only this /tmp report. No source changes, tests/builds/timing or Git/GitHub mutations were performed.
 
 Root freezes this source on delivered main `3faf89adea25e32e85a27d744c643a79cd80ce31`. Remaining qualification is the complete locked workspace including doctests against the delivered baseline of 275 result blocks, 1,576 passed, zero failed and 24 ignored, then evidence retention, actual PR Astra review and required CI. Runtime, supported-target and artifact inputs are unchanged; no new Wasm/artifact/browser or timing claim is made. Source remains immutable through the workspace run.
+
+## Completed immutable qualification
+
+Candidate `6834d35187c4723eda7e1d75e598832edc4762d4` completed the full locked workspace including doctests with terminal exit 0: 275 result blocks, 1,576 passed, zero failed and 24 ignored, matching delivered main `3faf89adea25e32e85a27d744c643a79cd80ce31`. Root verified the tree stayed clean and parsed every test-result block. Accepted source and runtime/artifact inputs are unchanged.
+
+Focused final and failed-attempt evidence, all Astra scope/verdict records, the complete workspace log/summary and input-identity comparison are retained under `artifacts/issue404-workspace-discovery/` with an 18-entry byte/SHA-256 manifest. No Wasm/artifact/browser rebuild or timing was performed. Actual-head PR review and required CI remain before merge and remote closure; #427 is already delivered and #306/#403/#349 remain open.
