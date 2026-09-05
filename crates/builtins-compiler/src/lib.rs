@@ -4350,6 +4350,13 @@ mod tests {
             track.builtins.right.trim_db = 1.0 - 0.25 * scale;
             track.fader.left_db = -1.0 + 0.125 * scale;
             track.fader.right_db = 0.5 - 0.125 * scale;
+            track.matrix_or_pan = session::MatrixOrPan::Matrix {
+                ll: 0.75,
+                lr: 0.25,
+                rl: -0.125,
+                rr: 0.625,
+                smoothing_samples: 0,
+            };
             model.tracks.push(track);
         }
         model.routes.truncate(1);
@@ -4692,7 +4699,7 @@ mod tests {
         dispatch: Backend,
         between_render_calls: bool,
         post_fader_barrier: bool,
-    ) -> (Vec<Vec<u32>>, usize, Vec<MeterSnapshot>) {
+    ) -> (Vec<Vec<u32>>, usize, Vec<MeterSnapshot>, Vec<u32>) {
         render_post_input_bits_with_variant(
             n,
             dispatch,
@@ -4708,7 +4715,7 @@ mod tests {
         between_render_calls: bool,
         post_fader_barrier: bool,
         variant: BoundaryVariant,
-    ) -> (Vec<Vec<u32>>, usize, Vec<MeterSnapshot>) {
+    ) -> (Vec<Vec<u32>>, usize, Vec<MeterSnapshot>, Vec<u32>) {
         let compiled = n_track_session(n);
         let controls = (0..n)
             .map(|index| TrackControlRequest {
@@ -4823,7 +4830,8 @@ mod tests {
                     taken
                 })
                 .collect();
-            return (bits, bank_count, meter_snapshots);
+            let output = pcm.iter().map(|sample| sample.to_bits()).collect();
+            return (bits, bank_count, meter_snapshots, output);
         }
         let bits = captures
             .into_iter()
@@ -4833,11 +4841,12 @@ mod tests {
                 taken
             })
             .collect();
-        (bits, bank_count, Vec::new())
+        let output = pcm.iter().map(|sample| sample.to_bits()).collect();
+        (bits, bank_count, Vec::new(), output)
     }
 
     fn render_post_input_bits(n: usize, dispatch: Backend) -> (Vec<Vec<u32>>, usize) {
-        let (bits, banks, _) = render_post_input_bits_with_delivery(n, dispatch, false, false);
+        let (bits, banks, _, _) = render_post_input_bits_with_delivery(n, dispatch, false, false);
         (bits, banks)
     }
 
@@ -4855,13 +4864,15 @@ mod tests {
         {
             FADER_MATRIX_PROCESS_CALLS.store(0, Ordering::Relaxed);
             FADER_MATRIX_FACTORY_CALLS.store(0, Ordering::Relaxed);
-            let (separate, _, _) =
+            let (separate, _, _, _) =
                 render_post_input_bits_with_delivery(tracks, backend, false, false);
             assert_eq!(FADER_MATRIX_PROCESS_CALLS.load(Ordering::Relaxed), 0);
             FADER_MATRIX_FACTORY_CALLS.store(0, Ordering::Relaxed);
+            test_only_reset_fader_matrix_witness();
 
-            let (paired, bank_count, _) =
+            let (paired, bank_count, _, _) =
                 render_post_input_bits_with_delivery(tracks, backend, true, false);
+            let witness = test_only_fader_matrix_witness();
             assert_eq!(
                 FADER_MATRIX_FACTORY_CALLS.load(Ordering::Relaxed),
                 offers,
@@ -4877,6 +4888,14 @@ mod tests {
                 executed * HARNESS_BLOCKS as usize,
                 "every reachable live pair must execute once per rendered block"
             );
+            assert_eq!(witness.factory_calls, offers as u64);
+            assert_eq!(witness.factory_members, (tracks - backend.width()) as u64);
+            assert_eq!(witness.fused_calls, executed as u64 * HARNESS_BLOCKS);
+            assert_eq!(witness.fallback_calls, 0);
+            assert_eq!(
+                witness.process_members,
+                witness.fused_calls * witness.factory_members
+            );
         }
     }
 
@@ -4885,11 +4904,11 @@ mod tests {
         let _guard = PAIR_WITNESS_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        FADER_MATRIX_PROCESS_CALLS.store(0, Ordering::Relaxed);
-        FADER_MATRIX_FACTORY_CALLS.store(0, Ordering::Relaxed);
-        let (observed, banks, paired_windows) =
+        test_only_reset_fader_matrix_witness();
+        let (observed, banks, paired_windows, _) =
             render_post_input_bits_with_delivery(9, Backend::Simd8, true, true);
-        let (separate, _, separate_windows) =
+        let witness = test_only_fader_matrix_witness();
+        let (separate, _, separate_windows, _) =
             render_post_input_bits_with_delivery(9, Backend::Simd8, false, true);
         assert_eq!(observed.len(), 9);
         assert!(observed.iter().all(|track| !track.is_empty()));
@@ -4960,12 +4979,14 @@ mod tests {
             );
         }
         assert_eq!(banks, 6);
-        assert_eq!(FADER_MATRIX_FACTORY_CALLS.load(Ordering::Relaxed), 1);
+        assert_eq!(witness.factory_calls, 1);
         assert_eq!(
-            FADER_MATRIX_PROCESS_CALLS.load(Ordering::Relaxed),
-            HARNESS_BLOCKS as usize,
-            "the compatible unobserved trailing cohort remains paired"
+            witness.factory_members, 1,
+            "the observed full cohort declines"
         );
+        assert_eq!(witness.fused_calls, HARNESS_BLOCKS);
+        assert_eq!(witness.fallback_calls, 0);
+        assert_eq!(witness.process_members, HARNESS_BLOCKS);
     }
 
     #[test]
@@ -4975,14 +4996,16 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         FADER_MATRIX_PROCESS_CALLS.store(0, Ordering::Relaxed);
         FADER_MATRIX_FACTORY_CALLS.store(0, Ordering::Relaxed);
-        let (paired, _, _) = render_post_input_bits_with_variant(
+        test_only_reset_fader_matrix_witness();
+        let (paired, _, _, paired_output) = render_post_input_bits_with_variant(
             9,
             Backend::Simd8,
             true,
             false,
             BoundaryVariant::Send,
         );
-        let (separate, _, _) = render_post_input_bits_with_variant(
+        let paired_witness = test_only_fader_matrix_witness();
+        let (separate, _, _, separate_output) = render_post_input_bits_with_variant(
             9,
             Backend::Simd8,
             false,
@@ -4990,11 +5013,22 @@ mod tests {
             BoundaryVariant::Send,
         );
         assert_eq!(paired, separate, "nonunity send/crossfeed PCM words");
-        assert_eq!(FADER_MATRIX_FACTORY_CALLS.load(Ordering::Relaxed), 1);
         assert_eq!(
-            FADER_MATRIX_PROCESS_CALLS.load(Ordering::Relaxed),
-            HARNESS_BLOCKS as usize
+            paired_output, separate_output,
+            "actual route/output words match the separate owners"
         );
+        assert!(
+            paired_output
+                .iter()
+                .any(|word| *word != 0 && *word != 0x8000_0000)
+        );
+        assert_eq!(paired_witness.factory_calls, 1);
+        assert_eq!(
+            paired_witness.factory_members, 1,
+            "only the compatible tail pairs"
+        );
+        assert_eq!(paired_witness.fused_calls, HARNESS_BLOCKS);
+        assert_eq!(paired_witness.process_members, HARNESS_BLOCKS);
     }
 
     #[test]
@@ -5003,7 +5037,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         test_only_reset_fader_matrix_witness();
-        let (eligible, _, _) = render_post_input_bits_with_variant(
+        let (eligible, _, _, _) = render_post_input_bits_with_variant(
             9,
             Backend::Simd8,
             true,
@@ -5013,7 +5047,7 @@ mod tests {
         let eligible_witness = test_only_fader_matrix_witness();
         test_only_reset_fader_matrix_witness();
         ALIAS_OBSERVATIONS.store(0, Ordering::Relaxed);
-        let (observed, _, _) = render_post_input_bits_with_variant(
+        let (observed, _, _, _) = render_post_input_bits_with_variant(
             9,
             Backend::Simd8,
             true,
@@ -5388,13 +5422,19 @@ mod tests {
         assert_eq!(fader_error.paired.qualification_counters(), [0, 0]);
 
         let mut matrix_error = pair_fixture(Backend::Simd4, 4);
+        let mut matrix_error_oracle = pair_fixture(Backend::Simd4, 4);
+        let completed_fader = TrackFaderRecord::FaderDb {
+            lanes: BuiltinLaneSelector::Both,
+            db: -6.0,
+            smoothing_samples: 0,
+        };
         matrix_error
             .paired_fader_tx
-            .try_push(TrackFaderRecord::FaderDb {
-                lanes: BuiltinLaneSelector::Both,
-                db: -6.0,
-                smoothing_samples: 0,
-            })
+            .try_push(completed_fader)
+            .unwrap();
+        matrix_error_oracle
+            .separate_fader_tx
+            .try_push(completed_fader)
             .unwrap();
         matrix_error
             .paired_matrix_tx
@@ -5408,6 +5448,8 @@ mod tests {
             .unwrap();
         let mut left = [0.25; 8];
         let mut right = [-0.5; 8];
+        let mut oracle_left = left;
+        let mut oracle_right = right;
         assert!(
             matrix_error
                 .paired
@@ -5415,9 +5457,19 @@ mod tests {
                 .is_err()
         );
         assert_ne!(left, [0.25; 8], "fader arithmetic completed");
+        matrix_error_oracle
+            .separate_fader
+            .process(&mut oracle_left, &mut oracle_right, 2, 0)
+            .unwrap();
+        assert_eq!(left.map(f32::to_bits), oracle_left.map(f32::to_bits));
+        assert_eq!(right.map(f32::to_bits), oracle_right.map(f32::to_bits));
         assert_eq!(matrix_error.paired.fader.process_calls, 1);
         assert_eq!(matrix_error.paired.matrix.process_calls, 0);
         assert_eq!(matrix_error.paired.qualification_counters(), [1, 2]);
+        assert_eq!(
+            matrix_error.paired.qualification_counters(),
+            matrix_error_oracle.separate_fader.qualification_counters()
+        );
     }
 
     /// #459 Case A: a three-sample queued ramp crossing two-sample render calls remains on the

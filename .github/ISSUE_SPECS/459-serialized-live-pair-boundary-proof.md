@@ -230,3 +230,8 @@ Focused debug evidence: `/tmp/sol459-attempt2-debug-builtins-compiler-lib.log`25
 ## Sol attempt 2 recovery checkpoint: returned-owner execution
 
 The wrong-order factory decline now compares retained queued records, private state, owner identity/order, PCM words and post-render states against independent old owners. The existing graph first-slot decline test actually executes both returned processors in order and proves (x+1)*2 while retaining first-slot scratch assertions. Focused debug compiler26/26 and graph53/53 passed; logs `/tmp/sol459-attempt2-owners-debug-{builtins-compiler-lib,graph}.log`; fmt/diff hygiene passed. This remains the same incomplete attempt2; actual send output/crossfeed, mono/recovery, queued graph allocation phases, matrix-error oracle and final release/policies remain.
+
+
+## Sol attempt 2 recovery checkpoint: actual routed output
+
+The graph fixture now explicitly supplies asymmetric crossfeed and retains actual final Output PCM words. The send case compares those words and post-matrix captures against separate owners with a nonsilence guard, and records eligible one-member tail fusion. Plain W4/W8 and meter cases use thread-local population and true/fallback witnesses; the matrix-error case compares completed fader PCM and counters to an independent old-owner sequence. Compiler debug26/26 and fmt/diff hygiene passed; retained `/tmp/sol459-attempt2-dispatch-send-debug-builtins-compiler-lib.log`. Same attempt2 remains incomplete pending actual graph mono/recovery, queued graph allocation phases, and final release/policy evidence.
