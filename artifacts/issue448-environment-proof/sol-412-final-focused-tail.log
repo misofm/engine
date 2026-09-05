@@ -1,0 +1,16 @@
+dsp research mutations: ok
+graph suffix-stripping counter-mutant rejected by grammar assertion (status 97)
+valid partial output
+gate policy failure: mutant search failed (rg exit 9)
+valid partial output
+gate policy failure: mutant filter errored (rg exit 9)
+2
+gate policy failure: mutant count errored (wc exit 6)
+counter-mutant controls exercised: collect required filter count plain
+counter-mutant rejected: find (status 1)
+counter-mutant rejected: sort (status 1)
+counter-mutant rejected: text (status 1)
+counter-mutant rejected: unique (status 1)
+counter-mutant rejected: join (status 1)
+counter-mutant rejected: target (status 1)
+gate library tests: ok

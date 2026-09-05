@@ -1,0 +1,112 @@
+green ok   baseline-synthetic
+green ok   baseline-real-tree
+green ok   prose-may-name-the-vocabulary
+red ok     scalar-dispatch-no-longer-unfused
+red ok     wide-dispatch-loses-its-parentheses
+red ok     contract-split-by-target
+red ok     unregistered-fused-call
+red ok     unregistered-fused-intrinsic
+red ok     unregistered-relaxed-madd
+red ok     registered-exemption-deleted
+red ok     exemption-call-count-grew
+red ok     exemption-call-without-marker
+red ok     software-fma-restored
+green ok   marker-six-lines-before-call
+red ok     marker-seven-lines-before-call
+green ok   marker-on-call
+red ok     required-root-missing
+red ok     required-retired-source-missing
+green ok   prose-only-and-empty-root
+green ok   root-path-with-spaces
+green ok   relative-fixture-root
+producer red strip-wide/full
+producer red strip-wide/empty
+producer red strip-late/full
+producer red strip-late/empty
+producer red strip-registered/full
+producer red strip-registered/empty
+producer red dispatch-scalar/full
+producer red dispatch-scalar/empty
+producer red body-scalar/full
+producer red body-scalar/empty
+producer red predicate-scalar/full
+producer red predicate-scalar/empty
+producer red registry-cat/full
+producer red registry-cat/empty
+producer red registry-files/full
+producer red registry-files/empty
+producer red registry-sort/full
+producer red registry-sort/empty
+producer red discovery/full
+producer red discovery/empty
+producer red discovery-sort/full
+producer red discovery-sort/empty
+producer red occurrence-late/full
+producer red occurrence-late/empty
+producer red occurrence-registered/full
+evidence registered original payload/error:
+mul_add(
+EVIDENCE registered rg stdout: mul_add(
+INJECTED-occurrence-registered
+mul_add(
+unfused seal failure: fused-call search failed for tools/wasm-gates/tests/g5_native_corpus.rs (rg status 9)
+producer red occurrence-registered/empty
+producer red count-late/full
+producer red count-late/empty
+producer red membership-late/full
+producer red membership-late/empty
+producer red marker-late/full
+producer red marker-late/empty
+producer red aggregate/full
+producer red aggregate/empty
+producer red recount-late/full
+producer red recount-late/empty
+producer red retired/full
+producer red retired/empty
+counter red discovery (status 97)
+evidence late-registered mutant diff:
+--- /home/bl/misofm/engine-438/scripts/check-unfused-seal.sh	2026-09-05 05:50:04.514513834 +0000
++++ /tmp/tmp.7XmC9db5XU/mutant-late-registered.sh	2026-09-05 05:52:05.858681362 +0000
+@@ -531,25 +531,25 @@
+ 
+ # Keep the historical sed interpretation and count occurrences rather than matching lines.
+ # Every producer is captured before its consumer runs, including rg's legitimate no-match (1).
+ count_calls() {
+     local file="$1" stripped matches rc count
+     stripped="$(checked_strip "$file")" || return $?
+     if [[ -n "$stripped" ]]; then
+         if matches="$(rg -o -e "$call_pattern" <<<"$stripped")"; then rc=0; else rc=$?; fi
+     else
+         matches=''; rc=1
+     fi
+     case "$rc" in
+-        0|1) ;;
++        0|1|9) ;;
+         *)
+             printf '%s\n' "$matches" >&2
+             printf 'unfused seal failure: fused-call search failed for %s (rg status %s)\n' "$file" "$rc" >&2
+             return "$rc" ;;
+     esac
+     if [[ -z "$matches" ]]; then
+         printf '0'
+         return 0
+     fi
+     if count="$(wc -l <<<"$matches")"; then rc=0; else rc=$?; fi
+     if [[ "$rc" != 0 ]]; then
+         printf '%s\n' "$count" >&2
+evidence registered mutant payload/count:
+mul_add(
+EVIDENCE registered rg stdout: mul_add(
+INJECTED-occurrence-registered
+EVIDENCE registered wc result: 1
+INJECTED-occurrence-registered
+EVIDENCE registered wc result: 7
+INJECTED-occurrence-registered
+EVIDENCE registered wc result: 1
+INJECTED-occurrence-registered
+unfused seal: ok (no fused multiply-add on any path; 8 registered audit calls)
+ASSERT late-registered unexpected success
+counter red late-registered (status 97)
+counter red retired (status 97)
+
+unfused seal mutations: 62 passed, 0 failed

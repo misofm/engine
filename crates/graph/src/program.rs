@@ -1073,6 +1073,47 @@ mod tests {
         }
     }
 
+    #[test]
+    fn sixty_four_plain_tracks_keep_one_ordered_non_aliasing_master_reduction() {
+        let mut nodes = Vec::new();
+        let mut edges = Vec::new();
+        for index in 0..64 {
+            let track = format!("track{index:02}");
+            let route = format!("route{index:02}");
+            let (mut track_nodes, mut track_edges) = plain_track(&track, &[&route]);
+            track_nodes.retain(|node| !matches!(node.id, GraphNodeId::Output { .. }));
+            nodes.append(&mut track_nodes);
+            edges.append(&mut track_edges);
+        }
+        nodes.push(node(GraphNodeId::Output {
+            output_id: gid("out"),
+        }));
+        let (spec, schedule, levels) = build(nodes, edges);
+        let program = lower(&spec, &schedule, &levels, &[], &[]).expect("plumbing lowers");
+        let master = program.ops.last().expect("master output");
+        let inputs = program.inputs_of(master);
+        assert_eq!(inputs.len(), 64);
+        assert!(!master.in_place);
+        assert!(inputs.iter().all(|input| input.buffer != master.output));
+        let expected: Vec<_> = (0..64)
+            .map(|index| {
+                let id = GraphNodeId::Route {
+                    route_id: gid(&format!("route{index:02}")),
+                };
+                let node = spec
+                    .nodes
+                    .iter()
+                    .position(|candidate| candidate.id == id)
+                    .expect("route node");
+                program.node_buffer[node]
+            })
+            .collect();
+        assert_eq!(
+            inputs.iter().map(|input| input.buffer).collect::<Vec<_>>(),
+            expected
+        );
+    }
+
     /// A PDC edge stages into a scratch buffer that is returned to the arena after its op, and its
     /// consumer is never in place -- the delayed samples are not the producer's buffer.
     #[test]

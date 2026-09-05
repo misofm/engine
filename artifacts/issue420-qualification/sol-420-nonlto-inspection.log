@@ -1,0 +1,16 @@
+scope=named scalar non-LTO engine/source/target_smoke archives
+base=/tmp/sol420-nonlto.m3INqF/wasm32-unknown-unknown/release/deps
+family=engine find_status=0 find_bytes=94
+family=engine sort_status=0 archive_count=1 archives=['/tmp/sol420-nonlto.m3INqF/wasm32-unknown-unknown/release/deps/libengine-43010e1ae45ff1b3.rlib']
+family=engine archive_list_status=0 member_count=3 object_count=1 duplicate_objects=0
+{"family": "engine", "archive": "/tmp/sol420-nonlto.m3INqF/wasm32-unknown-unknown/release/deps/libengine-43010e1ae45ff1b3.rlib", "archive_member_index": 0, "member": "engine-43010e1ae45ff1b3.engine.3cdc5b765e4ae52f-cgu.0.rcgu.o", "member_read_status": 0, "member_bytes": 245013, "sha256": "2f6ea4ab8bbb9b474f4d499fb70d029d2ae1ea5ddec86acbfe516a3ac24ab687", "decoder_status": 0, "decoded_bytes": 419369, "atomic_scan_status": 1}
+family=source find_status=0 find_bytes=94
+family=source sort_status=0 archive_count=1 archives=['/tmp/sol420-nonlto.m3INqF/wasm32-unknown-unknown/release/deps/libsource-0fdfa2234eb4bd89.rlib']
+family=source archive_list_status=0 member_count=3 object_count=1 duplicate_objects=0
+{"family": "source", "archive": "/tmp/sol420-nonlto.m3INqF/wasm32-unknown-unknown/release/deps/libsource-0fdfa2234eb4bd89.rlib", "archive_member_index": 0, "member": "source-0fdfa2234eb4bd89.source.7b5fcfd726247e1-cgu.0.rcgu.o", "member_read_status": 0, "member_bytes": 196787, "sha256": "de8a478abc88d1ee7c379ee795e7c73f4d3b170e6df1e3dc5247a2edcc9c8353", "decoder_status": 0, "decoded_bytes": 409379, "atomic_scan_status": 1}
+family=target_smoke find_status=0 find_bytes=100
+family=target_smoke sort_status=0 archive_count=1 archives=['/tmp/sol420-nonlto.m3INqF/wasm32-unknown-unknown/release/deps/libtarget_smoke-f8895a03d6c8d18b.rlib']
+family=target_smoke archive_list_status=0 member_count=3 object_count=1 duplicate_objects=0
+{"family": "target_smoke", "archive": "/tmp/sol420-nonlto.m3INqF/wasm32-unknown-unknown/release/deps/libtarget_smoke-f8895a03d6c8d18b.rlib", "archive_member_index": 0, "member": "target_smoke-f8895a03d6c8d18b.target_smoke.d196ae6c3bbfe597-cgu.0.rcgu.o", "member_read_status": 0, "member_bytes": 3424, "sha256": "c9c2a2d4b51f0ed1e186057f1726d123e263487de37b42b69d67a3383009a5d0", "decoder_status": 0, "decoded_bytes": 361, "atomic_scan_status": 1}
+population_reconciliation_status=0 families=3 archives=3 decoded_objects=3 atomic_clean_objects=3
+PASS named scalar non-LTO complete archive/object population

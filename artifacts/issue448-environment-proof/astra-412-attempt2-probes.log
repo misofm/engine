@@ -1,0 +1,5 @@
+Initialized repository + invalid explicit GIT_DIR: exit 0
+env vocabulary: ok (1 names, one MISO_ENGINE_ prefix)
+
+Both research counter-mutants replaced by unconditional exit 23: suite exit 0
+dsp research mutations: ok

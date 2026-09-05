@@ -1,0 +1,55 @@
+web AudioWorklet hermetic tests passed
+web AudioWorklet opcode-policy mutations passed
+FAIL miso_engine_web_v1_render: the render closure reaches allocation or drop glue:
+  _ZN8dlmalloc4free17h0E
+FAIL miso_engine_web_v1_render: unexpected trap owner in the render closure:
+  render_next
+FAIL miso_engine_web_v1_render: unexpected trap owner in the render closure:
+  render_next
+FAIL miso_engine_web_v1_render: the render closure reaches allocation or drop glue:
+  _ZN8dlmalloc4free17h0E
+FAIL miso_engine_web_v1_render: the render closure reaches allocation or drop glue:
+  _ZN8dlmalloc4free17h0E
+FAIL roster partly: vector=100 scalar=40 budget=10.0 (ceiling 0.1 x vector, slack 8). This kernel moved arithmetic out of the vector family. The budget is scale free in the vector count, so a genuine op-count reduction never trips it and lowering the ceiling is never the fix.
+FAIL roster absent: 0 arithmetic-carrying kernels match 'no_such' (expected exactly one). A kernel that vanished, was renamed, or stopped carrying f32x4 arithmetic is a de-vectorisation, not a roster edit.
+FAIL roster ambiguous: 2 arithmetic-carrying kernels match 'render_next' (expected exactly one). A kernel that vanished, was renamed, or stopped carrying f32x4 arithmetic is a de-vectorisation, not a roster edit.
+FAIL roster soft-clip: vector=25 scalar=9 budget=8.0 (ceiling 0.1 x vector, slack 8). This kernel moved arithmetic out of the vector family. The budget is scale free in the vector count, so a genuine op-count reduction never trips it and lowering the ceiling is never the fix.
+FAIL kernel render_next: vector=3 scalar=3 (a vector instantiation must use strictly more vector than scalar arithmetic)
+FAIL kernel count: 1 arithmetic-carrying functions match 'render_next|write_lane_words' < 2. If a wave moved the kernels, update the pattern and RAISE the floor.
+FAIL kernel count: 1 arithmetic-carrying functions match 'render_next' < 2. If a wave moved the kernels, update the pattern and RAISE the floor.
+miso_engine_web_v1_render: closure=2 traps=0 trap_owners=[] entries=[]
+kernel shape: f32x4_arith=3 kernels=1 pattern='render_next'
+  roster ok   vector=3 scalar=0 budget=8.0 ceiling=0.1 render-next
+miso_engine_web_v1_render: closure=3 traps=0 trap_owners=[] entries=[]
+miso_engine_web_v1_render: closure=2 traps=1 trap_owners=['render_next'] entries=[]
+miso_engine_web_v1_render: closure=2 traps=1 trap_owners=['render_next'] entries=[]
+miso_engine_web_v1_render: closure=2 traps=1 trap_owners=['render_next'] entries=[]
+miso_engine_web_v1_render: closure=3 traps=0 trap_owners=[] entries=[]
+miso_engine_web_v1_render: closure=2 traps=1 trap_owners=['render_next'] entries=[]
+miso_engine_web_v1_render: closure=3 traps=0 trap_owners=[] entries=[]
+miso_engine_web_v1_render: closure=2 traps=1 trap_owners=['_ZN18PreparedRenderPlan12render_innerE'] entries=[]
+miso_engine_web_v1_render: closure=3 traps=1 trap_owners=[] entries=['_ZN4core9panicking16slice_index_failE']
+kernel shape: f32x4_arith=100 kernels=1 pattern='render_next'
+  roster FAIL vector=100 scalar=40 budget=10.0 ceiling=0.1 partly
+kernel shape: f32x4_arith=100 kernels=1 pattern='render_next'
+kernel shape: f32x4_arith=381 kernels=1 pattern='render_next'
+  roster ok   vector=381 scalar=72 budget=144.8 ceiling=0.38 transient-shaper
+kernel shape: f32x4_arith=3 kernels=1 pattern='render_next'
+kernel shape: f32x4_arith=80 kernels=2 pattern='render_next'
+kernel shape: f32x4_arith=25 kernels=1 pattern='render_next'
+  roster ok   vector=25 scalar=8 budget=8.0 ceiling=0.1 soft-clip
+kernel shape: f32x4_arith=25 kernels=1 pattern='render_next'
+  roster FAIL vector=25 scalar=9 budget=8.0 ceiling=0.1 soft-clip
+kernel shape: f32x4_arith=3 kernels=1 pattern='render_next'
+  roster ok   vector=3 scalar=3 budget=8.0 ceiling=0.1 render-next
+kernel shape: f32x4_arith=3 kernels=1 pattern='render_next|write_lane_words'
+  roster ok   vector=3 scalar=0 budget=8.0 ceiling=0.1 render-next
+kernel shape: f32x4_arith=3 kernels=1 pattern='render_next'
+  roster ok   vector=3 scalar=0 budget=8.0 ceiling=0.1 render-next
+web AudioWorklet call-graph analyser self-test passed
+web AudioWorklet WebDriver response tests passed
+web AudioWorklet WebDriver null-response mutation passed
+web AudioWorklet transitive process-policy mutations passed
+web AudioWorklet console policy mutations passed
+parameter metadata schema self-test passed
+scripts/test-web-audioworklet.sh: line 96: cargo: command not found

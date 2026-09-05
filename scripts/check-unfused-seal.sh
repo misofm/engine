@@ -38,7 +38,7 @@ set -euo pipefail
 # the precedent, and this file names every spelling. A seal that could be tripped by documenting
 # it would be unusable.
 unfused_seal_self_test() {
-        local scratch_root root
+    local scratch_root root
     root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
     scratch_root="$(mktemp -d)"
     trap 'rm -rf -- "$scratch_root"' RETURN
@@ -52,7 +52,7 @@ unfused_seal_self_test() {
         local tree
         tree="$(mktemp -d "$scratch_root/fixture-XXXXXX")"
 
-        mkdir -p "$tree/crates/lane/src" "$tree/tools/audit/src" "$tree/hosts"
+        mkdir -p "$tree/crates/lane/src" "$tree/tools/audit/src" "$tree/hosts" "$tree/sidecars"
 
         cat >"$tree/crates/lane/src/wide_impl.rs" <<'EOF'
     //! One `Lane` body for both `wide` widths. `mul_add` is never forwarded.
@@ -122,12 +122,12 @@ EOF
 
 expect_success() {
     local name=$1 tree=$2
-    if bash "$0" "$tree" >/dev/null 2>&1; then
+    if bash "$root/scripts/check-unfused-seal.sh" "$tree" >/dev/null 2>&1; then
         printf 'green ok   %s\n' "$name"
         passed=$((passed + 1))
     else
         printf 'GREEN FAIL %s -- the seal refuses a tree it should accept\n' "$name" >&2
-        bash "$0" "$tree" 2>&1 | sed 's/^/           /' >&2
+        bash "$root/scripts/check-unfused-seal.sh" "$tree" 2>&1 | sed 's/^/           /' >&2
         failed=$((failed + 1))
     fi
 }
@@ -246,6 +246,210 @@ pub fn fma_f32_via_f64(a: f32, b: f32, c: f32) -> f32 {
 EOF
 expect_failure software-fma-restored "$tree"
 
+# Exact marker boundary: the raw rolling window is the call line plus six preceding lines.
+tree=$(create_fixture)
+sed -i '0,/UNFUSED-SEAL-EXEMPT/{/UNFUSED-SEAL-EXEMPT/c\    // UNFUSED-SEAL-EXEMPT\
+    // one\
+    // two\
+    // three\
+    // four\
+    // five
+}' "$tree/tools/audit/src/unfused_fma.rs"
+expect_success marker-six-lines-before-call "$tree"
+
+tree=$(create_fixture)
+sed -i '0,/UNFUSED-SEAL-EXEMPT/{/UNFUSED-SEAL-EXEMPT/c\    // UNFUSED-SEAL-EXEMPT\
+    // one\
+    // two\
+    // three\
+    // four\
+    // five\
+    // six
+}' "$tree/tools/audit/src/unfused_fma.rs"
+expect_failure marker-seven-lines-before-call "$tree"
+
+tree=$(create_fixture)
+sed -i '0,/UNFUSED-SEAL-EXEMPT/{/UNFUSED-SEAL-EXEMPT/{N;s|.*\n.*|    let d1 = a.mul_add(b, c); // UNFUSED-SEAL-EXEMPT|;}}' \
+    "$tree/tools/audit/src/unfused_fma.rs"
+expect_success marker-on-call "$tree"
+
+tree=$(create_fixture)
+rm -rf "$tree/sidecars"
+expect_failure required-root-missing "$tree"
+
+tree=$(create_fixture)
+rm "$tree/crates/lane/src/softfma.rs"
+expect_failure required-retired-source-missing "$tree"
+
+# Bounded semantic controls for the frozen grammar and population rules.
+tree=$(create_fixture)
+mkdir -p "$tree/sidecars/empty"
+cat >>"$tree/hosts/prose.rs" <<'EOF'
+//! `mul_add(` and `_mm256_fmadd_ps(` are vocabulary in prose only.
+EOF
+expect_success prose-only-and-empty-root "$tree"
+
+tree=$(create_fixture)
+spaced_tree="$scratch_root/fixture with spaces"
+cp -R "$tree" "$spaced_tree"
+expect_success root-path-with-spaces "$spaced_tree"
+relative_parent=$(dirname "$spaced_tree")
+relative_name=$(basename "$spaced_tree")
+if (cd "$relative_parent" && bash "$root/scripts/check-unfused-seal.sh" "$relative_name" >/dev/null 2>&1); then
+    printf 'green ok   relative-fixture-root\n'
+    passed=$((passed + 1))
+else
+    printf 'GREEN FAIL relative-fixture-root -- the seal refuses a relative fixture root\n' >&2
+    (cd "$relative_parent" && bash "$root/scripts/check-unfused-seal.sh" "$relative_name" 2>&1) | \
+        sed 's/^/           /' >&2
+    failed=$((failed + 1))
+fi
+
+# Every fallible producer is driven through both failure shapes. The shim delegates first, so its
+# payload is exactly what an otherwise-valid fixture would produce; FAULT_EMPTY suppresses that
+# payload for the paired error-only case. Counters select late consumers after earlier calls pass.
+shim="$scratch_root/fault-shim"
+mkdir -p "$shim"
+cat >"$shim/tool" <<'EOF'
+#!/usr/bin/env bash
+tool=${0##*/}; real="/usr/bin/$tool"; args=" $* "; hit=0
+counter() { local key=$1 n=0 file; file="$FAULT_STATE/$key"; [[ -f "$file" ]] && n=$(<"$file"); n=$((n+1)); printf '%s' "$n" >"$file"; printf '%s' "$n"; }
+case "$FAULT_KIND:$tool" in
+  strip-wide:sed) [[ "$args" == *wide_impl.rs* ]] && hit=1 ;;
+  strip-late:sed) [[ "$args" == *g5_native_corpus.rs* ]] && hit=1 ;;
+  strip-registered:sed) [[ "$args" == *g5_native_corpus.rs* ]] && [[ $(counter g5strip) == 2 ]] && hit=1 ;;
+  dispatch-scalar:rg) [[ "$args" == *" -F "* && "$args" == *"(self * b) + c"* ]] && [[ $(counter dispatch) == 2 ]] && hit=1 ;;
+  body-scalar:awk) [[ "$args" == *"fn fma"* ]] && [[ $(counter body) == 2 ]] && hit=1 ;;
+  predicate-scalar:rg) [[ "$args" == *target_feature* ]] && [[ $(counter predicate) == 2 ]] && hit=1 ;;
+  registry-cat:cat) [[ $# == 0 ]] && hit=1 ;;
+  registry-files:awk) [[ "$args" == *'print $1'* ]] && hit=1 ;;
+  registry-sort:sort) [[ $(counter sort) == 1 ]] && hit=1 ;;
+  discovery:rg) [[ "$args" == *" -l "* ]] && hit=1 ;;
+  discovery-sort:sort) [[ $(counter sort) == 2 ]] && hit=1 ;;
+  occurrence-late:rg) [[ "$args" == *" -o "* ]] && [[ $(counter occurrence) == 2 ]] && hit=1 ;;
+  occurrence-registered:rg) [[ "$args" == *" -o "* ]] && [[ $(counter occurrence) == 4 ]] && hit=1 ;;
+  occurrence-registered:wc) [[ -f "$FAULT_STATE/registered-rg-seen" ]] && hit=1 ;;
+  count-late:wc) [[ $(counter wc) == 2 ]] && hit=1 ;;
+  membership-late:grep) [[ "$args" == *g5_native_corpus.rs* ]] && hit=1 ;;
+  marker-late:awk) [[ "$args" == *g5_native_corpus.rs* ]] && hit=1 ;;
+  aggregate:awk) [[ "$args" == *"total += $2"* ]] && hit=1 ;;
+  recount-late:rg) [[ "$args" == *" -o "* ]] && [[ $(counter occurrence) == 6 ]] && hit=1 ;;
+  retired:rg) [[ "$args" == *fma_f32_via_f64* && "$args" == *softfma.rs* ]] && hit=1 ;;
+esac
+if [[ "$hit" == 1 ]]; then
+    if [[ "${FAULT_EMPTY:-0}" != 1 ]]; then
+        if [[ "$FAULT_KIND" == retired ]]; then
+            printf '99:fn fma_f32_via_f64(a: f32, b: f32, c: f32) -> f32\n'
+        elif [[ "$FAULT_KIND" == occurrence-registered && "$tool" == rg ]]; then
+            real_output="$($real "$@" || true)"
+            printf '%s\n' "$real_output" >&2
+            printf 'EVIDENCE registered rg stdout: %s\n' "$real_output" >&2
+            : >"$FAULT_STATE/registered-rg-seen"
+            printf '%s\n' "$real_output"
+        elif [[ "$FAULT_KIND" == occurrence-registered && "$tool" == wc ]]; then
+            input=$(cat)
+            real_output="$(printf '%s\n' "$input" | "$real" "$@")"
+            printf 'EVIDENCE registered wc result: %s\n' "$real_output" >&2
+            printf '%s\n' "$real_output"
+        else
+            "$real" "$@" || true
+        fi
+    fi
+    printf 'INJECTED-%s\n' "$FAULT_KIND" >&2
+    if [[ "$FAULT_KIND" == occurrence-registered && "$tool" == wc ]]; then exit 0; else exit 9; fi
+fi
+exec "$real" "$@"
+EOF
+chmod +x "$shim/tool"
+for tool in sed rg awk sort wc grep cat; do ln -s tool "$shim/$tool"; done
+
+expect_producer_failure() {
+    local kind=$1 diagnostic=$2 full_payload=${3:-} mode output rc payload_ok
+    for mode in full empty; do
+        tree=$(create_fixture); state="$scratch_root/state-$kind-$mode"; mkdir -p "$state"
+        if [[ "$mode" == empty ]]; then empty=1; else empty=0; fi
+        if output="$(FAULT_KIND="$kind" FAULT_EMPTY="$empty" FAULT_STATE="$state" \
+            PATH="$shim:$PATH" bash "$root/scripts/check-unfused-seal.sh" "$tree" 2>&1)"; then rc=0; else rc=$?; fi
+        payload_ok=1
+        [[ "$mode" != full || -z "$full_payload" || "$output" == *"$full_payload"* ]] || payload_ok=0
+        [[ "$mode" != empty || -z "$full_payload" || "$output" != *"$full_payload"* ]] || payload_ok=0
+        if [[ "$rc" != 0 && "$payload_ok" == 1 && "$output" == *"INJECTED-$kind"* && "$output" == *"$diagnostic"* ]]; then
+            printf 'producer red %s/%s\n' "$kind" "$mode"; passed=$((passed + 1))
+            if [[ "$kind" == occurrence-registered && "$mode" == full ]]; then
+                printf 'evidence registered original payload/error:\n%s\n' "$output"
+            fi
+        else
+            printf 'PRODUCER FAIL %s/%s status=%s output=%s\n' "$kind" "$mode" "$rc" "$output" >&2
+            failed=$((failed + 1))
+        fi
+    done
+}
+
+expect_producer_failure strip-wide 'comment stripping failed for crates/lane/src/wide_impl.rs (sed status 9)'
+expect_producer_failure strip-late 'comment stripping failed for tools/wasm-gates/tests/g5_native_corpus.rs (sed status 9)'
+expect_producer_failure strip-registered 'comment stripping failed for tools/wasm-gates/tests/g5_native_corpus.rs (sed status 9)'
+expect_producer_failure dispatch-scalar 'crates/lane/src/scalar.rs dispatch search errored (rg status 9)'
+expect_producer_failure body-scalar 'crates/lane/src/scalar.rs fma-body extraction errored (awk status 9)'
+expect_producer_failure predicate-scalar 'crates/lane/src/scalar.rs fma-body predicate errored (rg status 9)'
+expect_producer_failure registry-cat 'exemption registry production failed (cat status 9)'
+expect_producer_failure registry-files 'exemption registry filename extraction failed (awk status 9)'
+expect_producer_failure registry-sort 'exemption registry sort failed (sort status 9)'
+expect_producer_failure discovery 'candidate discovery errored (rg status 9)'
+expect_producer_failure discovery-sort 'candidate discovery sort failed (sort status 9)'
+expect_producer_failure occurrence-late 'fused-call search failed for tools/wasm-gates/tests/g5_native_corpus.rs (rg status 9)'
+expect_producer_failure occurrence-registered 'fused-call search failed for tools/wasm-gates/tests/g5_native_corpus.rs (rg status 9)'
+expect_producer_failure count-late 'fused-call count failed for tools/wasm-gates/tests/g5_native_corpus.rs (wc status 9)'
+expect_producer_failure membership-late 'registration membership search errored for tools/wasm-gates/tests/g5_native_corpus.rs (grep status 9)'
+expect_producer_failure marker-late 'tools/wasm-gates/tests/g5_native_corpus.rs marker-window validation errored (awk status 9)'
+expect_producer_failure aggregate 'registry aggregate parser failed (awk status 9)'
+expect_producer_failure recount-late 'fused-call search failed for tools/wasm-gates/tests/g5_native_corpus.rs (rg status 9)'
+expect_producer_failure retired 'retired software-FMA search errored (rg status 9)' \
+    '99:fn fma_f32_via_f64(a: f32, b: f32, c: f32) -> f32'
+
+# Prove three exact status checks matter. The original checker must emit the focused diagnostic;
+# after one verified call-site edit, the same injected run must reach unexpected success (exit 97).
+prove_status_mutant() {
+    local label=$1 kind=$2 diagnostic=$3 edit=$4 fault_empty=${5:-0} mutant output rc before after diff
+    tree=$(create_fixture); mutant="$scratch_root/mutant-$label.sh"; cp "$root/scripts/check-unfused-seal.sh" "$mutant"
+    before=$(cksum <"$mutant")
+    sed -i "$edit" "$mutant"
+    after=$(cksum <"$mutant")
+    [[ "$before" != "$after" ]] || { printf 'COUNTER FAIL %s edit did not apply\n' "$label" >&2; failed=$((failed+1)); return; }
+    diff=$(diff -U 12 "$root/scripts/check-unfused-seal.sh" "$mutant" || true)
+    if [[ "$label" == late-registered ]]; then
+        [[ $(grep -c '^@@ ' <<<"$diff") == 1 \
+            && $(grep -cF -- '-        0|1) ;;' <<<"$diff") == 1 \
+            && $(grep -cF -- '+        0|1|9) ;;' <<<"$diff") == 1 \
+            && "$diff" == *'count_calls() {'* \
+            && "$diff" == *'case "$rc" in'* \
+            && "$diff" != *'actual="$count"'* ]] || {
+            printf 'COUNTER FAIL %s changed the wrong production call site:\n%s\n' "$label" "$diff" >&2
+            failed=$((failed+1)); return
+        }
+        printf 'evidence late-registered mutant diff:\n%s\n' "$diff"
+    fi
+    state="$scratch_root/state-control-$label"; mkdir -p "$state"
+    output="$(FAULT_KIND="$kind" FAULT_EMPTY="$fault_empty" FAULT_STATE="$state" PATH="$shim:$PATH" bash "$root/scripts/check-unfused-seal.sh" "$tree" 2>&1)" && rc=0 || rc=$?
+    [[ "$rc" != 0 && "$output" == *"INJECTED-$kind"* && "$output" == *"$diagnostic"* ]] || { printf 'COUNTER FAIL %s original status=%s output=%s\n' "$label" "$rc" "$output" >&2; failed=$((failed+1)); return; }
+    rm -rf "$state"; mkdir -p "$state"
+    output="$(FAULT_KIND="$kind" FAULT_EMPTY="$fault_empty" FAULT_STATE="$state" PATH="$shim:$PATH" bash -c 'if bash "$1" "$2"; then printf "ASSERT %s unexpected success\\n" "$3" >&2; exit 97; fi; exit $?' _ "$mutant" "$tree" "$label" 2>&1)" && rc=0 || rc=$?
+    if [[ "$label" == late-registered ]]; then
+        printf 'evidence registered mutant payload/count:\n%s\n' "$output"
+    fi
+    if [[ "$rc" == 97 && "$output" == *"ASSERT $label unexpected success"* ]]; then
+        printf 'counter red %s (status 97)\n' "$label"; passed=$((passed+1))
+    else
+        printf 'COUNTER FAIL %s status=%s output=%s\n' "$label" "$rc" "$output" >&2; failed=$((failed+1))
+    fi
+}
+
+prove_status_mutant discovery discovery 'candidate discovery errored (rg status 9)' \
+    '/if candidates_raw=/,/esac/{s/\*) printf .*candidate discovery errored.* ;;/\*) rc=0 ;;/}'
+prove_status_mutant late-registered occurrence-registered 'fused-call search failed for tools/wasm-gates/tests/g5_native_corpus.rs (rg status 9)' \
+    '/^count_calls() [{]/,$ { s/^        0|1) ;;$/        0|1|9) ;;/; }'
+prove_status_mutant retired retired 'retired software-FMA search errored (rg status 9)' \
+    '/if retired_match=/,/^fi$/{s/elif \[\[ "$rc" != 1 \]\]; then/elif false; then/}' 1
+
 # -------------------------------------------------------------------------------------------
 printf '\nunfused seal mutations: %s passed, %s failed\n' "$passed" "$failed"
 [[ "$failed" == "0" ]] || return 1
@@ -314,14 +518,45 @@ expected_fused_call_count=8
 call_pattern='\b(mul_add|mul_neg_add|mul_sub|mul_neg_sub|fmaf|fma_f32_via_f64|fma_f32x4_soft|fma_f32x8_soft|f32x4_relaxed_madd|f32x4_relaxed_nmadd|f64x2_relaxed_madd|_mm256_fmadd_ps|_mm256_fmsub_ps|_mm256_fnmadd_ps|_mm_fmadd_ps|_mm_fmadd_ss|vfmaq_f32|vfmsq_f32)\s*(::<[^>]*>)?\s*\('
 # The same pattern in POSIX ERE for `awk`, which has no `\s` and no PCRE escapes.
 awk_call_pattern='(mul_add|mul_neg_add|mul_sub|mul_neg_sub|fmaf|fma_f32_via_f64|fma_f32x4_soft|fma_f32x8_soft|f32x4_relaxed_madd|f32x4_relaxed_nmadd|f64x2_relaxed_madd|_mm256_fmadd_ps|_mm256_fmsub_ps|_mm256_fnmadd_ps|_mm_fmadd_ps|_mm_fmadd_ss|vfmaq_f32|vfmsq_f32)([[:space:]]*::<[^>]*>)?[[:space:]]*[(]'
-without_comments() { sed 's://.*::' "$1"; }
-# Occurrences, not matching lines. `rg -c` counts lines, and the audit's SVF output mix puts two
-# fused calls on one line -- counting lines would let a second call hide behind the first.
-# The `|| true` is load-bearing under `set -o pipefail`: `rg` exits 1 when it matches nothing,
-# which is the *normal* case for almost every file in the tree, and without it the seal would
-# exit silently -- passing only because every file it happened to look at contained a match.
+checked_strip() {
+    local file="$1" output rc
+    if output="$(sed 's://.*::' "$file")"; then rc=0; else rc=$?; fi
+    if [[ "$rc" != 0 ]]; then
+        printf '%s\n' "$output" >&2
+        printf 'unfused seal failure: comment stripping failed for %s (sed status %s)\n' "$file" "$rc" >&2
+        return "$rc"
+    fi
+    printf '%s' "$output"
+}
+
+# Keep the historical sed interpretation and count occurrences rather than matching lines.
+# Every producer is captured before its consumer runs, including rg's legitimate no-match (1).
 count_calls() {
-    without_comments "$1" | { rg -o -e "$call_pattern" 2>/dev/null || true; } | wc -l | tr -d ' '
+    local file="$1" stripped matches rc count
+    stripped="$(checked_strip "$file")" || return $?
+    if [[ -n "$stripped" ]]; then
+        if matches="$(rg -o -e "$call_pattern" <<<"$stripped")"; then rc=0; else rc=$?; fi
+    else
+        matches=''; rc=1
+    fi
+    case "$rc" in
+        0|1) ;;
+        *)
+            printf '%s\n' "$matches" >&2
+            printf 'unfused seal failure: fused-call search failed for %s (rg status %s)\n' "$file" "$rc" >&2
+            return "$rc" ;;
+    esac
+    if [[ -z "$matches" ]]; then
+        printf '0'
+        return 0
+    fi
+    if count="$(wc -l <<<"$matches")"; then rc=0; else rc=$?; fi
+    if [[ "$rc" != 0 ]]; then
+        printf '%s\n' "$count" >&2
+        printf 'unfused seal failure: fused-call count failed for %s (wc status %s)\n' "$file" "$rc" >&2
+        return "$rc"
+    fi
+    printf '%s' "${count//[[:space:]]/}"
 }
 
 [[ -f "$dispatch_wide" ]] || fail "the vector dispatch point $dispatch_wide is missing"
@@ -336,8 +571,15 @@ count_calls() {
 # reassociate.
 # ---------------------------------------------------------------------------------------------
 for dispatch in "$dispatch_wide" "$dispatch_scalar"; do
-    without_comments "$dispatch" | rg -q -F '(self * b) + c' ||
-        fail "$dispatch no longer states 'Lane::fma' as the unfused '(self * b) + c'"
+    dispatch_source="$(checked_strip "$dispatch")" || exit $?
+    if dispatch_match="$(rg -F '(self * b) + c' <<<"$dispatch_source")"; then rc=0; else rc=$?; fi
+    if [[ "$rc" != 0 ]]; then
+        printf '%s\n' "$dispatch_match" >&2
+        if [[ "$rc" == 1 ]]; then
+            fail "$dispatch no longer states 'Lane::fma' as the unfused '(self * b) + c'"
+        fi
+        fail "$dispatch dispatch search errored (rg status $rc)"
+    fi
 done
 
 # ---------------------------------------------------------------------------------------------
@@ -349,35 +591,72 @@ done
 # the fma body is required to contain no conditional compilation at all.
 # ---------------------------------------------------------------------------------------------
 for dispatch in "$dispatch_wide" "$dispatch_scalar"; do
-    body=$(without_comments "$dispatch" |
-        awk '/fn fma\(self, b: Self, c: Self\) -> Self \{/ { capture = 1 }
+    dispatch_source="$(checked_strip "$dispatch")" || exit $?
+    if body="$(awk '/fn fma\(self, b: Self, c: Self\) -> Self \{/ { capture = 1 }
              capture { print }
-             capture && /^ *\}$/ { capture = 0 }')
+             capture && /^ *\}$/ { capture = 0 }' <<<"$dispatch_source")"; then
+        :
+    else
+        rc=$?
+        printf '%s\n' "$body" >&2
+        fail "$dispatch fma-body extraction errored (awk status $rc)"
+    fi
     [[ -n "$body" ]] || fail "$dispatch has no recognisable 'Lane::fma' body"
-    if printf '%s\n' "$body" | rg -q 'cfg\s*\(|cfg!|target_arch|target_feature'; then
+    if forbidden_body="$(rg 'cfg\s*\(|cfg!|target_arch|target_feature' <<<"$body")"; then rc=0; else rc=$?; fi
+    if [[ "$rc" == 0 ]]; then
         fail "$dispatch conditions 'Lane::fma' on the target -- the contract must not be per-backend"
+    elif [[ "$rc" != 1 ]]; then
+        printf '%s\n' "$forbidden_body" >&2
+        fail "$dispatch fma-body predicate errored (rg status $rc)"
     fi
 done
 
 # ---------------------------------------------------------------------------------------------
 # 3. No unregistered file calls a fused multiply-add.
 # ---------------------------------------------------------------------------------------------
-registered_files=$(exemption_registry | awk '{ print $1 }' | sort)
+if registry_raw="$(exemption_registry)"; then rc=0; else rc=$?; fi
+if [[ "$rc" != 0 ]]; then
+    printf '%s\n' "$registry_raw" >&2
+    fail "exemption registry production failed (cat status $rc)"
+fi
+if registry_files_unsorted="$(awk '{ print $1 }' <<<"$registry_raw")"; then rc=0; else rc=$?; fi
+if [[ "$rc" != 0 ]]; then
+    printf '%s\n' "$registry_files_unsorted" >&2
+    fail "exemption registry filename extraction failed (awk status $rc)"
+fi
+if registered_files="$(sort <<<"$registry_files_unsorted")"; then rc=0; else rc=$?; fi
+if [[ "$rc" != 0 ]]; then
+    printf '%s\n' "$registered_files" >&2
+    fail "exemption registry sort failed (sort status $rc)"
+fi
 
-candidates=$(rg -l -e "$call_pattern" crates hosts tools sidecars --glob '*.rs' 2>/dev/null | sort || true)
+if candidates_raw="$(rg -l -e "$call_pattern" crates hosts tools sidecars --glob '*.rs')"; then rc=0; else rc=$?; fi
+case "$rc" in
+    0|1) ;;
+    *) printf '%s\n' "$candidates_raw" >&2; fail "candidate discovery errored (rg status $rc)" ;;
+esac
+if candidates="$(sort <<<"$candidates_raw")"; then rc=0; else rc=$?; fi
+if [[ "$rc" != 0 ]]; then
+    printf '%s\n' "$candidates" >&2
+    fail "candidate discovery sort failed (sort status $rc)"
+fi
 while IFS= read -r file; do
     [[ -n "$file" ]] || continue
     # Re-test against comment-stripped source: `rg -l` above matched prose too.
-    calls=$(count_calls "$file")
+    if calls="$(count_calls "$file")"; then rc=0; else rc=$?; fi
+    [[ "$rc" == 0 ]] || exit "$rc"
     # `[[ ... ]] && continue` would be a `set -e` trap here: when the test is false the list
     # returns non-zero and the shell exits silently, which is exactly the failure this seal must
     # never have (an exit code with no message reads as a refusal nobody can act on).
     if [[ "$calls" == "0" ]]; then
         continue
     fi
-    if ! printf '%s\n' "$registered_files" | grep -qxF "$file"; then
-        fail "fused multiply-add in $file -- the contract is unfused everywhere (#163 phase 2); \
+    if membership="$(grep -xF "$file" <<<"$registered_files")"; then rc=0; else rc=$?; fi
+    if [[ "$rc" != 0 ]]; then
+        printf '%s\n' "$membership" >&2
+        [[ "$rc" == 1 ]] && fail "fused multiply-add in $file -- the contract is unfused everywhere (#163 phase 2); \
 see docs/rulings/unfused-multiply-add-audit.md"
+        fail "registration membership search errored for $file (grep status $rc)"
     fi
 done <<<"$candidates"
 
@@ -393,11 +672,12 @@ while read -r file count; do
     [[ -f "$file" ]] ||
         fail "registered exemption file $file does not exist -- the registry has rotted"
 
-    actual=$(count_calls "$file")
+    if actual="$(count_calls "$file")"; then rc=0; else rc=$?; fi
+    [[ "$rc" == 0 ]] || exit "$rc"
     [[ "$actual" == "$count" ]] ||
         fail "$file has $actual fused calls, the registry says $count"
 
-    unmarked=$(awk -v pattern="$awk_call_pattern" '
+    if unmarked="$(awk -v pattern="$awk_call_pattern" '
         { source = $0; sub(/\/\/.*/, "", source) }
         { for (i = 6; i >= 1; i--) window[i + 1] = window[i]; window[1] = $0 }
         source ~ pattern {
@@ -405,10 +685,14 @@ while read -r file count; do
             for (i = 1; i <= 7; i++) if (window[i] ~ /UNFUSED-SEAL-EXEMPT/) marked = 1
             if (!marked) print FILENAME ":" FNR
         }
-    ' "$file")
+    ' "$file")"; then rc=0; else rc=$?; fi
+    if [[ "$rc" != 0 ]]; then
+        printf '%s\n' "$unmarked" >&2
+        fail "$file marker-window validation errored (awk status $rc)"
+    fi
     [[ -z "$unmarked" ]] ||
         fail "fused call without an UNFUSED-SEAL-EXEMPT marker within six lines: $unmarked"
-done < <(exemption_registry)
+done <<<"$registry_raw"
 
 # ---------------------------------------------------------------------------------------------
 # 5. N is what the container says it is, counted two independent ways.
@@ -417,16 +701,21 @@ done < <(exemption_registry)
 # other is what the tree contains. A seal that only ever consults its own roster is checking its
 # arithmetic, not the codebase.
 # ---------------------------------------------------------------------------------------------
-declared=$(exemption_registry | awk '{ total += $2 } END { print total + 0 }')
+if declared="$(awk '{ total += $2 } END { print total + 0 }' <<<"$registry_raw")"; then rc=0; else rc=$?; fi
+if [[ "$rc" != 0 ]]; then
+    printf '%s\n' "$declared" >&2
+    fail "registry aggregate parser failed (awk status $rc)"
+fi
 [[ "$declared" == "$expected_fused_call_count" ]] ||
     fail "the registry declares $declared fused calls, the container claims $expected_fused_call_count"
 
 counted=0
 while IFS= read -r file; do
     [[ -n "$file" ]] || continue
-    calls=$(count_calls "$file")
+    if calls="$(count_calls "$file")"; then rc=0; else rc=$?; fi
+    [[ "$rc" == 0 ]] || exit "$rc"
     counted=$((counted + calls))
-done < <(rg -l -e "$call_pattern" crates hosts tools sidecars --glob '*.rs' 2>/dev/null || true)
+done <<<"$candidates"
 [[ "$counted" == "$expected_fused_call_count" ]] ||
     fail "found $counted fused calls in the tree, expected $expected_fused_call_count"
 
@@ -437,8 +726,13 @@ done < <(rg -l -e "$call_pattern" crates hosts tools sidecars --glob '*.rs' 2>/d
 # because three policy files name that path. Keeping the name means the file could quietly regrow
 # the thing it was named for, so the definition is refused explicitly rather than left to rule 3.
 # ---------------------------------------------------------------------------------------------
-if rg -qn 'fn\s+fma_f32_via_f64\b|fn\s+fma_f32x[48]_soft\b' crates/lane/src/softfma.rs; then
+[[ -f crates/lane/src/softfma.rs ]] || fail 'the retired soft-fma source crates/lane/src/softfma.rs is missing'
+if retired_match="$(rg -n 'fn\s+fma_f32_via_f64\b|fn\s+fma_f32x[48]_soft\b' crates/lane/src/softfma.rs)"; then rc=0; else rc=$?; fi
+if [[ "$rc" == 0 ]]; then
     fail 'the software FMA is retired (#163 phase 2) -- restoring it needs a ruling, not a commit'
+elif [[ "$rc" != 1 ]]; then
+    printf '%s\n' "$retired_match" >&2
+    fail "retired software-FMA search errored (rg status $rc)"
 fi
 
 printf 'unfused seal: ok (no fused multiply-add on any path; %s registered audit calls)\n' \

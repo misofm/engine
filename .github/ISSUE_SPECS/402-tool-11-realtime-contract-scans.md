@@ -42,6 +42,10 @@ Parent #306 and the broad #349 TOOL-11 finding remain OPEN until #400, #401, #40
 
 ## Astra bounded-child readiness ruling
 
-The six-gate implementation is split before coding into three stateless children, retaining every original gate and producer obligation. #410 owns realtime/lane traversal and follows merged #406. #411 owns the unfused seal and follows merged #410. #412 owns environment vocabulary, effect-state migration and DSP research input scans and follows merged #411 (and #406). This serialized order prevents overlapping shared-helper and effect-runtime-suite changes.
+The six-gate implementation is split before coding into three stateless children, retaining every original gate and producer obligation. #410 owns realtime/lane traversal and follows merged #417 and then #423, preserving the completed #406/#407 helper work and serializing Session changes before the next helper tranche. #411 owns the unfused seal and follows merged #410. #412 owns environment vocabulary, effect-state migration and DSP research input scans and follows merged #411 (and #406). This serialized order prevents overlapping shared-helper and effect-runtime-suite changes.
 
 Astra revalidated all three briefs against main a9e801fea91dc49a4d2acc9bea939d3fdc38dec9. Existing required CI covers #410/#411; #412 may add only its focused research suite beside the existing research checker. Each child retains unchanged-count workspace qualification, existing policy semantics and directed execution-failure tests. This parent remains OPEN until all three children are merged, reviewed PASS and remotely synchronized. Publishing queued briefs authorizes no implementation ahead of dependencies.
+
+## Updated queue after compiler gate delivery
+
+#407 is merged and CLOSED via PR #421. Astra revalidated #410 against main `a0e4d123a038160b4f5934dac14aacc72c9fbbf2`; its complete current brief preserves exact producer policies, directed failure cases and existing CI wiring. #410 remains queued until active #417 and the remaining graph extractor completion #423 merge. #411 and #412 keep their original serial dependencies and complete assigned scope. This scheduling update changes no closure obligation or implementation gate.

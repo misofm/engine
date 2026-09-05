@@ -1,0 +1,183 @@
+crates/rack-compiler/src/lib.rs:111:/// because its members must all be ready in the same wave (#96 F12).
+tools/audit/src/fixture_builtins_listening.rs:57:    wave: Vec<u8>,
+tools/audit/src/fixture_builtins_listening.rs:154:        write_new_mode(&public.join(token), &role.wave, 0o444)?;
+tools/audit/src/fixture_builtins_listening.rs:158:            role.wave.len(),
+tools/audit/src/fixture_builtins_listening.rs:161:            sha256(&role.wave),
+tools/audit/src/fixture_builtins_listening.rs:201:            .map(|role| sha256(&role.wave))
+tools/audit/src/fixture_builtins_listening.rs:371:            wave: wave(&stereo)?,
+tools/audit/src/fixture_builtins_listening.rs:521:fn wave(stereo: &Stereo) -> Result<Vec<u8>, String> {
+tools/audit/src/fixture_builtins_listening.rs:523:        return Err("wave stereo shape mismatch".to_owned());
+tools/audit/src/fixture_builtins_listening.rs:529:        .ok_or("wave size overflow")?;
+tools/audit/src/fixture_builtins_listening.rs:530:    let data_u32 = u32::try_from(data_bytes).map_err(|_| "wave data exceeds RIFF")?;
+tools/audit/src/fixture_builtins_listening.rs:531:    let riff_size = 36_u32.checked_add(data_u32).ok_or("wave RIFF overflow")?;
+tools/audit/src/fixture_builtins_listening.rs:658:            assert_eq!(&role.wave[..4], b"RIFF");
+tools/audit/src/fixture_builtins_listening.rs:659:            assert_eq!(&role.wave[8..16], b"WAVEfmt ");
+tools/audit/src/fixture_builtins_listening.rs:660:            assert_eq!(u16::from_le_bytes(role.wave[20..22].try_into().unwrap()), 3);
+tools/audit/src/fixture_builtins_listening.rs:661:            assert_eq!(u16::from_le_bytes(role.wave[22..24].try_into().unwrap()), 2);
+tools/audit/src/fixture_builtins_listening.rs:663:                u32::from_le_bytes(role.wave[24..28].try_into().unwrap()),
+tools/audit/src/fixture_builtins_listening.rs:666:            assert_eq!(&role.wave[36..40], b"data");
+tools/audit/src/fixture_builtins_listening.rs:668:                u32::from_le_bytes(role.wave[16..20].try_into().unwrap()),
+tools/audit/src/fixture_builtins_listening.rs:672:                u32::from_le_bytes(role.wave[28..32].try_into().unwrap()),
+tools/audit/src/fixture_builtins_listening.rs:675:            assert_eq!(u16::from_le_bytes(role.wave[32..34].try_into().unwrap()), 8);
+tools/audit/src/fixture_builtins_listening.rs:677:                u16::from_le_bytes(role.wave[34..36].try_into().unwrap()),
+tools/audit/src/fixture_builtins_listening.rs:681:                u32::from_le_bytes(role.wave[40..44].try_into().unwrap()) as usize,
+tools/audit/src/fixture_builtins_listening.rs:684:            assert_eq!(role.wave.len(), WAVE_HEADER_BYTES + FRAMES * 8);
+tools/audit/src/fixture_builtins_listening.rs:687:        assert_ne!(first[2].wave, first[3].wave);
+tools/audit/src/source.rs:37:        locator: "audit:synthetic-wave".to_owned(),
+tools/audit/src/source.rs:254:        if locator != "audit:synthetic-wave" {
+tools/audit/src/source_duration.rs:113:            locator: "audit:actual-wave".to_owned(),
+tools/audit/src/source_duration.rs:114:            declared_identity: b"issue041-actual-wave".to_vec(),
+tools/audit/src/source_duration.rs:185:        if locator != "audit:actual-wave" || self.used {
+tools/audit/src/source_duration.rs:191:            observed_identity: b"issue041-actual-wave".to_vec(),
+tools/audit/src/source_duration.rs:331:            "issue041 accounting fnv1a64={:016x} bytes={} minute_identity=wave-f32le-mono-48000-2880000-11520044-materialized multi_hour_identity=wave-f32le-mono-48000-518400000-2073600044-sparse accounting={canonical}",
+tools/native-pcm-runner/src/lib.rs:477:        let wave = match parse_native_wave(
+tools/native-pcm-runner/src/lib.rs:484:            Ok(wave) => wave,
+tools/native-pcm-runner/src/lib.rs:488:        if hash_canonical_wave(&mut file, wave)? != expected {
+tools/native-pcm-runner/src/lib.rs:491:        let mismatch = if wave.sample_rate_hz.0 != session_rate {
+tools/native-pcm-runner/src/lib.rs:493:        } else if wave.channel_count != u16::from(declaration.channels) {
+tools/native-pcm-runner/src/lib.rs:495:        } else if wave_bit_depth(wave.encoding) != Some(declaration.bit_depth) {
+tools/native-pcm-runner/src/lib.rs:497:        } else if wave.total_frames != declaration.frames {
+tools/native-pcm-runner/src/lib.rs:506:        return Ok((file, wave));
+tools/native-pcm-runner/src/lib.rs:531:        let (file, wave) = open_declared_source(&root, declaration, model.sample_rate_hz)?;
+tools/native-pcm-runner/src/lib.rs:537:            NativeWaveDecoder::prepare(file, wave, region, quantum).map_err(map_wave_prepare)?;
+tools/native-pcm-runner/src/lib.rs:538:        let channels = usize::from(wave.channel_count);
+tools/native-pcm-runner/src/lib.rs:563:        NativeWaveError::Io(_) => "wave.io",
+tools/native-pcm-runner/src/lib.rs:564:        NativeWaveError::ContainerInvalid => "wave.container",
+tools/native-pcm-runner/src/lib.rs:565:        NativeWaveError::FormatUnsupported => "wave.format",
+tools/native-pcm-runner/src/lib.rs:566:        NativeWaveError::ArithmeticOverflow => "wave.overflow",
+tools/native-pcm-runner/src/lib.rs:567:        NativeWaveError::ResourceLimit => "wave.resource",
+tools/native-pcm-runner/src/lib.rs:568:        NativeWaveError::RegionOutOfBounds => "wave.region",
+tools/native-pcm-runner/src/lib.rs:569:        NativeWaveError::OutputShape => "wave.shape",
+tools/native-pcm-runner/src/lib.rs:1918:            "wave.container"
+tools/native-pcm-runner/src/lib.rs:2112:                Some(fs::read(Path::new(FIXTURES).join("riff-48000.wav")).expect("wave")),
+tools/native-pcm-runner/src/lib.rs:2123:                "wave.container",
+tools/audit/src/gate_expander.rs:169:    // A twelve-point quarter wave, mirrored: exact enough for an audit signal and constant.
+tools/stem-hasher/src/lib.rs:204:            return Err(StemHasherError::new("wave.bit_depth.unsupported"));
+tools/stem-hasher/src/lib.rs:215:        return Err(StemHasherError::new("wave.shape.mismatch"));
+tools/stem-hasher/src/lib.rs:295:        NativeWaveError::Io(_) => StemHasherError::new("wave.io"),
+tools/stem-hasher/src/lib.rs:296:        NativeWaveError::ContainerInvalid => StemHasherError::new("wave.container.invalid"),
+tools/stem-hasher/src/lib.rs:297:        NativeWaveError::FormatUnsupported => StemHasherError::new("wave.format.unsupported"),
+tools/stem-hasher/src/lib.rs:298:        NativeWaveError::ArithmeticOverflow => StemHasherError::new("wave.arithmetic.overflow"),
+tools/stem-hasher/src/lib.rs:299:        NativeWaveError::ResourceLimit => StemHasherError::new("wave.resource.limit"),
+tools/stem-hasher/src/lib.rs:300:        NativeWaveError::RegionOutOfBounds => StemHasherError::new("wave.region.out_of_bounds"),
+tools/stem-hasher/src/lib.rs:301:        NativeWaveError::OutputShape => StemHasherError::new("wave.output.shape"),
+tools/stem-hasher/src/lib.rs:346:/// Parse the closed `wave`/`raw` CLI.
+tools/stem-hasher/src/lib.rs:352:        Some("wave") => CliInput::Wave,
+tools/stem-hasher/src/lib.rs:393:                return Err(StemHasherError::new("cli.wave.shape.forbidden"));
+tools/stem-hasher/src/lib.rs:523:            parse_cli(["wave", "--input", "stem.wav"].map(OsString::from))
+tools/stem-hasher/src/lib.rs:524:                .expect("wave CLI")
+tools/stem-hasher/src/lib.rs:552:            vec!["wave", "--input", "x", "--channels", "1"],
+tools/stem-hasher/src/lib.rs:553:            vec!["wave", "--input", "x", "--input", "y"],
+tools/stem-hasher/src/lib.rs:588:        let mut wave = Vec::new();
+tools/stem-hasher/src/lib.rs:589:        wave.extend_from_slice(b"RIFF");
+tools/stem-hasher/src/lib.rs:590:        wave.extend_from_slice(&40_u32.to_le_bytes());
+tools/stem-hasher/src/lib.rs:591:        wave.extend_from_slice(b"WAVEfmt ");
+tools/stem-hasher/src/lib.rs:592:        wave.extend_from_slice(&16_u32.to_le_bytes());
+tools/stem-hasher/src/lib.rs:593:        wave.extend_from_slice(&format);
+tools/stem-hasher/src/lib.rs:594:        wave.extend_from_slice(b"data");
+tools/stem-hasher/src/lib.rs:595:        wave.extend_from_slice(&4_u32.to_le_bytes());
+tools/stem-hasher/src/lib.rs:596:        wave.extend_from_slice(&[0; 4]);
+tools/stem-hasher/src/lib.rs:597:        assert_eq!(wave.len(), 48);
+tools/stem-hasher/src/lib.rs:599:            canonicalize_wave(&mut io::Cursor::new(wave), &mut io::sink())
+tools/stem-hasher/src/lib.rs:602:            "wave.bit_depth.unsupported"
+crates/true-peak-limiter/src/lib.rs:9://! # The gain law (issue #90, wave 2)
+crates/true-peak-limiter/src/lib.rs:304:/// Bumped from 1 by #90: the wave-2 gain law needs a minimum-filter phase and prefix, an exact box
+tools/stem-hasher/tests/conformance.rs:156:        let mut wave = File::open(&wave_path).expect("open WAVE vector");
+tools/stem-hasher/tests/conformance.rs:159:            canonicalize_wave(&mut wave, &mut wave_canonical).expect("engine WAVE path");
+tools/stem-hasher/tests/conformance.rs:164:        let wave_output = temp.join(format!("{}-wave.pcm", vector.name));
+tools/stem-hasher/tests/conformance.rs:166:            .args([OsString::from("wave"), OsString::from("--input")])
+tools/stem-hasher/tests/conformance.rs:171:            .expect("run wave CLI");
+crates/effect-contract/src/lib.rs:1012:/// renamed them to what wave 2 already stores in them.
+crates/source/src/native_source.rs:1868:    fn resolver_wave(wave: Vec<u8>, identity: &[u8]) -> Resolver {
+crates/source/src/native_source.rs:1872:                reader: Cursor::new(wave),
+crates/source/src/native_source.rs:2789:        let wave = float32_wave(&(0_u16..28).map(f32::from).collect::<Vec<_>>());
+crates/source/src/native_source.rs:2792:            cursor: Cursor::new(wave),
+crates/source/src/native_source.rs:2840:        let wave = float32_wave(&samples);
+crates/source/src/native_source.rs:2849:                    cursor: Cursor::new(wave.clone()),
+crates/source/src/native_source.rs:2858:                    cursor: Cursor::new(wave),
+crates/source/src/native_source.rs:3129:        let wave = stereo_float32_wave(&vec![0.25; REGION_FRAMES as usize * 2]);
+crates/source/src/native_source.rs:3134:                    reader: Cursor::new(wave.clone()),
+crates/source/src/native_source.rs:4208:        let mut wave = Vec::new();
+crates/source/src/native_source.rs:4209:        wave.extend_from_slice(b"RIFF");
+crates/source/src/native_source.rs:4210:        wave.extend_from_slice(&0_u32.to_le_bytes());
+crates/source/src/native_source.rs:4211:        wave.extend_from_slice(b"WAVE");
+crates/source/src/native_source.rs:4212:        append_chunk(&mut wave, b"fmt ", &format);
+crates/source/src/native_source.rs:4213:        append_chunk(&mut wave, b"data", &data);
+crates/source/src/native_source.rs:4214:        let riff_size = u32::try_from(wave.len() - 8).expect("len");
+crates/source/src/native_source.rs:4215:        wave[4..8].copy_from_slice(&riff_size.to_le_bytes());
+crates/source/src/native_source.rs:4216:        wave
+crates/source/src/native_source.rs:4231:        let mut wave = Vec::new();
+crates/source/src/native_source.rs:4232:        wave.extend_from_slice(b"RIFF");
+crates/source/src/native_source.rs:4233:        wave.extend_from_slice(&0_u32.to_le_bytes());
+crates/source/src/native_source.rs:4234:        wave.extend_from_slice(b"WAVE");
+crates/source/src/native_source.rs:4235:        append_chunk(&mut wave, b"fmt ", &format);
+crates/source/src/native_source.rs:4236:        append_chunk(&mut wave, b"data", &data);
+crates/source/src/native_source.rs:4237:        let riff_size = u32::try_from(wave.len() - 8).expect("len");
+crates/source/src/native_source.rs:4238:        wave[4..8].copy_from_slice(&riff_size.to_le_bytes());
+crates/source/src/native_source.rs:4239:        wave
+crates/source/src/native_source.rs:4254:        let mut wave = Vec::new();
+crates/source/src/native_source.rs:4255:        wave.extend_from_slice(b"RIFF");
+crates/source/src/native_source.rs:4256:        wave.extend_from_slice(&0_u32.to_le_bytes());
+crates/source/src/native_source.rs:4257:        wave.extend_from_slice(b"WAVE");
+crates/source/src/native_source.rs:4258:        append_chunk(&mut wave, b"fmt ", &format);
+crates/source/src/native_source.rs:4259:        append_chunk(&mut wave, b"data", &data);
+crates/source/src/native_source.rs:4260:        let riff_size = u32::try_from(wave.len() - 8).expect("len");
+crates/source/src/native_source.rs:4261:        wave[4..8].copy_from_slice(&riff_size.to_le_bytes());
+crates/source/src/native_source.rs:4262:        wave
+crates/gate-expander/tests/oracle.rs:61:/// DC-free square-wave bursts: the sign flips every eight samples, and the amplitude alternates
+crates/parametric-eq/src/lib.rs:2098:        // crate used to answer `Ok(None)` to both, which was the other half of the wave-2
+crates/session/tests/render_mode_tiers.rs:5://! longer does is launch: the native dependency-wave executor it named was removed as
+crates/graph/src/lib.rs:3439:    /// This was the differential gate between the sequential and native dependency-wave
+crates/parametric-eq/tests/contract.rs:693:/// Five of the eight effect crates rejected it outright before wave 2. The lenient rule wins: a
+crates/parametric-eq/tests/bank.rs:350:/// Before #95 this crate answered `Ok(None)` to all three, which was the half of the wave-2
+crates/graph/src/runtime.rs:3://! The sequential executor and the native dependency-wave executor used to carry two copies of
+crates/graph/src/runtime.rs:1014:    /// by a strictly earlier wave.
+crates/graph/src/runtime.rs:3248:            lease.set_muted(3, true);
+crates/graph/src/runtime.rs:3279:        self_alias.set_muted(2, true);
+crates/graph/src/runtime.rs:3281:        self_alias.set_muted(2, false);
+crates/graph-compiler/src/lib.rs:1292:    /// #99 F1 (the property behind the wave-0 fix, gated here rather than assumed).
+crates/graph-compiler/src/lib.rs:2764:        .expect("reprepare same-wave fallback");
+crates/effect-runtime/src/lib.rs:6://! the single home for all of them (master plan for issue #83, §6). It has no consumer in wave 1;
+crates/effect-runtime/src/lib.rs:7://! wave 2 moves each effect onto it and deletes its copy.
+crates/engine/src/realtime/disjoint.rs:1://! Plan-owned disjoint audio arena for the native dependency-wave executor.
+crates/engine/src/realtime/disjoint.rs:3://! The native executor renders one dependency wave at a time. Inside a wave, several parcels run
+crates/engine/src/realtime/disjoint.rs:16://!   whole life of the plan. Buffers are never recycled, so no two leases (in the same wave or in
+crates/engine/src/realtime/disjoint.rs:19://!   written by a lease of a strictly smaller wave, or by the reading lease itself. A producer of
+crates/engine/src/realtime/disjoint.rs:20://!   an earlier wave has finished, and its parcel has been recovered by the coordinator, before
+crates/engine/src/realtime/disjoint.rs:21://!   any consumer of a later wave is issued.
+crates/engine/src/realtime/disjoint.rs:22://! * **I3 — waves are separated by a happens-before edge.** The scheduler issues one wave at a
+crates/engine/src/realtime/disjoint.rs:24://!   the next, so an earlier wave's writes are visible to a later wave's reads.
+crates/engine/src/realtime/disjoint.rs:26://!   deadline the coordinator marks its buffers muted ([`ArenaLease::set_muted`]); a muted read
+crates/engine/src/realtime/disjoint.rs:52:    /// A lease reads a buffer that is not produced by a strictly earlier wave, breaking I2.
+crates/engine/src/realtime/disjoint.rs:88:// I4 are discharged by the scheduler: one wave at a time with an acquire/release edge between
+crates/engine/src/realtime/disjoint.rs:151:    wave: usize,
+crates/engine/src/realtime/disjoint.rs:161:            .field("wave", &self.wave)
+crates/engine/src/realtime/disjoint.rs:168:    /// The wave this lease belongs to.
+crates/engine/src/realtime/disjoint.rs:170:    pub const fn wave(&self) -> usize {
+crates/engine/src/realtime/disjoint.rs:171:        self.wave
+crates/engine/src/realtime/disjoint.rs:192:    pub fn set_muted(&mut self, buffer: u32, muted: bool) {
+crates/engine/src/realtime/disjoint.rs:204:    pub fn is_muted(&self, buffer: u32) -> bool {
+crates/engine/src/realtime/disjoint.rs:243:        // is this lease's own, or it belongs to a strictly earlier wave whose parcels have been
+crates/engine/src/realtime/disjoint.rs:464:    wave: usize,
+crates/engine/src/realtime/disjoint.rs:505:    pub fn lease(&mut self, wave: usize, writes: Vec<u32>, reads: Vec<u32>) -> usize {
+crates/engine/src/realtime/disjoint.rs:507:            wave,
+crates/engine/src/realtime/disjoint.rs:555:        // I2: a read resolves to the reader's own lease, or to a strictly earlier wave.
+crates/engine/src/realtime/disjoint.rs:570:                    Some(producer) => self.leases[producer].wave < lease.wave,
+crates/engine/src/realtime/disjoint.rs:609:                    wave: lease.wave,
+crates/engine/src/realtime/disjoint.rs:721:        consumer.set_muted(produced, true);
+crates/engine/src/realtime/disjoint.rs:722:        assert!(consumer.is_muted(produced));
+crates/engine/src/realtime/disjoint.rs:724:        consumer.set_muted(produced, false);
+crates/engine/src/realtime/disjoint.rs:836:    /// spins so the writes genuinely overlap. Once the wave is joined the coordinator checks the
+crates/effect-runtime/tests/partition.rs:6://! processor — the shape every effect in wave 2 will have — and 512 frames are rendered once as a
+crates/multiband-compressor/tests/product.rs:32:/// `lane 4 * (43 + 3 * ring)`; the current shape is `lane 4 * (48 + 2 * ring)`. The common section stays empty: wave-2 decision W2-D2
+crates/multiband-compressor/src/lib.rs:365:            // and therefore descriptor identity, which is a coordinated change: wave-2 decision
+crates/builtins/src/lib.rs:1926:    const fn is_muted(&self, lane: usize, channel: usize) -> bool {
+crates/builtins/src/lib.rs:2913:    pub const fn is_muted(&self, lane: usize, channel: usize) -> bool {
+crates/builtins/src/lib.rs:2915:            FaderStageKernel::Simd4(stage) => stage.is_muted(lane, channel % 2),
+crates/builtins/src/lib.rs:2916:            FaderStageKernel::Simd8(stage) => stage.is_muted(lane, channel % 2),
+crates/builtins/src/lib.rs:3199:    pub const fn is_muted(&self, lane: usize) -> bool {
+crates/builtins/src/lib.rs:3200:        self.stage.is_muted(0, lane % 2)
+crates/multiband-compressor/tests/lr4_two_section_mapping_f64.rs:3://! Phase 0 of audit #94 wave 2: the LR4 sign and phase convention, proved in `f64` before any
+crates/builtins/tests/fader_ramp.rs:184:    assert!(live.is_muted(0) && live.is_muted(1));
+crates/builtins/tests/fader_ramp.rs:204:    assert!(!live.is_muted(0));
+crates/dsp-reference/src/true_peak_limiter.rs:9://! # The law (issue #90, wave 2)
