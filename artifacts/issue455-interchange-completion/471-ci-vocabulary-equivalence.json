@@ -1,0 +1,10 @@
+{
+  "before": "b15e2e992e2c6a5cb73c7952dafbc9df10335c48",
+  "paths": [
+    "scripts/test-effect-interchange-policy.sh",
+    "scripts/test-effect-interchange-benchmark-108-policy.sh"
+  ],
+  "exact_token_renames": 15,
+  "inverse_mapping_byte_equality": true,
+  "values_quoting_logic_preserved": true
+}

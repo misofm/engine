@@ -1,0 +1,169 @@
+host-web v0.1.0 (/home/bl/misofm/engine-140-ownership/hosts/host-web)
+builtins v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/builtins)
+effect-contract v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/effect-contract)
+engine v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/engine)
+lane v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/lane)
+wide v1.6.1
+bytemuck v1.25.2
+safe_arch v1.2.0
+bytemuck v1.25.2
+math v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/math)
+lane v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/lane) (*)
+engine v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/engine)
+lane v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/lane) (*)
+math v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/math) (*)
+builtins-compiler v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/builtins-compiler)
+builtins v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/builtins) (*)
+effect-contract v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/effect-contract) (*)
+engine v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/engine)
+graph v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/graph)
+effect-contract v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/effect-contract) (*)
+engine v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/engine)
+lane v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/lane) (*)
+rack v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/rack)
+effect-contract v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/effect-contract) (*)
+engine v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/engine)
+lane v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/lane) (*)
+rack v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/rack) (*)
+rack-compiler v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/rack-compiler)
+effect-contract v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/effect-contract) (*)
+engine v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/engine)
+rack v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/rack) (*)
+session v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/session)
+engine v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/engine)
+json-syntax v0.12.5
+decoded-char v0.1.1
+hashbrown v0.12.3
+ahash v0.7.8
+getrandom v0.2.17
+cfg-if v1.0.4
+libc v0.2.189
+once_cell v1.21.4
+indexmap v1.9.3
+hashbrown v0.12.3 (*)
+json-number v0.4.10
+lexical v7.0.5
+lexical-core v1.0.6
+lexical-parse-float v1.0.6
+lexical-parse-integer v1.0.6
+lexical-util v1.0.7
+lexical-util v1.0.7
+lexical-parse-integer v1.0.6 (*)
+lexical-util v1.0.7
+lexical-write-float v1.0.6
+lexical-util v1.0.7
+lexical-write-integer v1.0.6
+lexical-util v1.0.7
+lexical-write-integer v1.0.6 (*)
+smallvec v1.15.2
+locspan v0.8.2
+locspan-derive v0.6.0 (proc-macro)
+proc-macro-error v1.0.4
+proc-macro-error-attr v1.0.4 (proc-macro)
+proc-macro2 v1.0.107
+unicode-ident v1.0.24
+quote v1.0.47
+proc-macro2 v1.0.107 (*)
+proc-macro2 v1.0.107 (*)
+quote v1.0.47 (*)
+syn v1.0.109
+proc-macro2 v1.0.107 (*)
+quote v1.0.47 (*)
+unicode-ident v1.0.24
+proc-macro2 v1.0.107 (*)
+quote v1.0.47 (*)
+syn v1.0.109 (*)
+smallstr v0.3.1
+smallvec v1.15.2
+smallvec v1.15.2
+utf8-decode v1.0.1
+sha2 v0.11.0
+cfg-if v1.0.4
+cpufeatures v0.3.0
+digest v0.11.3
+block-buffer v0.12.1
+hybrid-array v0.4.14
+typenum v1.20.1
+crypto-common v0.2.2
+hybrid-array v0.4.14 (*)
+effect-contract v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/effect-contract) (*)
+engine v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/engine)
+host-core v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/host-core)
+builtins v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/builtins) (*)
+builtins-compiler v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/builtins-compiler) (*)
+effect-compiler v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/effect-compiler)
+compressor v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/compressor)
+effect-contract v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/effect-contract) (*)
+effect-runtime v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/effect-runtime)
+lane v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/lane) (*)
+math v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/math) (*)
+lane v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/lane) (*)
+math v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/math) (*)
+delay v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/delay)
+effect-contract v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/effect-contract) (*)
+effect-runtime v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/effect-runtime) (*)
+lane v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/lane) (*)
+math v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/math) (*)
+effect-contract v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/effect-contract) (*)
+effect-package v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/effect-package)
+effect-contract v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/effect-contract) (*)
+engine v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/engine)
+sha2 v0.11.0 (*)
+engine v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/engine)
+gate-expander v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/gate-expander)
+effect-contract v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/effect-contract) (*)
+effect-runtime v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/effect-runtime) (*)
+lane v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/lane) (*)
+math v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/math) (*)
+lane v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/lane) (*)
+multiband-compressor v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/multiband-compressor)
+effect-contract v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/effect-contract) (*)
+effect-runtime v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/effect-runtime) (*)
+lane v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/lane) (*)
+math v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/math) (*)
+parametric-eq v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/parametric-eq)
+effect-contract v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/effect-contract) (*)
+effect-runtime v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/effect-runtime) (*)
+engine v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/engine)
+lane v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/lane) (*)
+math v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/math) (*)
+session v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/session) (*)
+soft-clip v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/soft-clip)
+effect-contract v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/effect-contract) (*)
+effect-runtime v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/effect-runtime) (*)
+lane v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/lane) (*)
+math v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/math) (*)
+transient-shaper v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/transient-shaper)
+effect-contract v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/effect-contract) (*)
+effect-runtime v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/effect-runtime) (*)
+lane v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/lane) (*)
+math v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/math) (*)
+true-peak-limiter v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/true-peak-limiter)
+effect-contract v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/effect-contract) (*)
+effect-runtime v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/effect-runtime) (*)
+lane v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/lane) (*)
+math v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/math) (*)
+effect-contract v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/effect-contract) (*)
+engine v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/engine)
+graph v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/graph) (*)
+graph-compiler v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/graph-compiler)
+builtins v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/builtins) (*)
+builtins-compiler v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/builtins-compiler) (*)
+effect-compiler v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/effect-compiler) (*)
+effect-contract v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/effect-contract) (*)
+engine v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/engine)
+graph v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/graph) (*)
+lane v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/lane) (*)
+math v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/math) (*)
+rack v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/rack) (*)
+rack-compiler v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/rack-compiler) (*)
+session v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/session) (*)
+sha2 v0.11.0 (*)
+lane v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/lane) (*)
+session v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/session) (*)
+source v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/source)
+engine v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/engine)
+graph v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/graph) (*)
+session v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/session) (*)
+math v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/math) (*)
+session v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/session) (*)

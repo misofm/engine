@@ -1,0 +1,25 @@
+{
+  "baseline": "issue430 delivered workspace",
+  "candidate": "97f8b94a",
+  "removed_named_tests": [],
+  "added_named_tests": [
+    "delivery::tests::applied_only_cancel_emits_zero_and_resets_generation_and_ordering",
+    "delivery::tests::automation_progress_rejections_preserve_exact_pending_and_terminal_ownership",
+    "delivery::tests::cancellation_publication_uses_admission_order_after_physical_slot_reuse",
+    "delivery::tests::cancellation_refusals_are_transactional_and_events_keep_admission_order",
+    "delivery::tests::generic_copy_core_transfers_layout_independent_payload",
+    "delivery::tests::generic_core_rejected_identities_preserve_pending_and_terminal_owner",
+    "delivery::tests::generic_core_slot_identity_covers_capacity_above_u16",
+    "delivery::tests::logical_record_bounds_and_resource_report_are_exactly_composed",
+    "delivery::tests::occupied_reliable_capacity_refuses_next_cancel_without_mutation",
+    "delivery::tests::ordered_cancel_reconciles_handed_off_and_partial_at_actual_boundary",
+    "delivery::tests::rejected_admission_preserves_the_exact_batch_and_service_state",
+    "delivery::tests::retained_admission_survives_handoff_until_terminal_consumption",
+    "delivery::tests::total_outstanding_bound_and_terminal_collection_are_the_only_reuse_credit",
+    "delivery::tests::unsupported_head_blocks_fifo_and_cancel_ack_publishes_event",
+    "delivery::tests::wide_cancellation_accounting_has_no_u16_boundary_or_saturation",
+    "distinct_render_owner_reconciles_all_four_cancellation_positions_without_allocation",
+    "prepared_heaps_free_off_thread_and_realtime_owner_operations_are_zero_zero"
+  ],
+  "note": "Names deduplicated across test binaries; total result-block counters reported separately. This compares only initial460 to430; final integrated run pending."
+}

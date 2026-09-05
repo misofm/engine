@@ -1,0 +1,11 @@
+--- scripts/check-effect-interchange-qualification.sh	2026-09-05 12:54:19.438279548 +0000
++++ /tmp/tmp.cdK03k4Oyy	2026-09-05 12:57:16.808561953 +0000
+@@ -212,7 +212,7 @@
+ forbidden_scan 'render-owned source scan' rg -n 'effect_interchange|EffectInterchange|effect_state_migration|EffectStateMigration' crates/{engine,session,graph,rack-compiler,builtins-compiler}/src
+ migration_scan="$scratch/migration-serialization.out"; migration_error="$scratch/migration-serialization.err"
+ if rg -n 'Serialize|Deserialize|serde|migration_wire|encode_migration' crates/effect-compiler/src/migration.rs >"$migration_scan" 2>"$migration_error"; then migration_status=0; else migration_status=$?; fi
+-if [[ "$migration_status" -gt 1 ]]; then
++if [[ "$migration_status" -gt 73 ]]; then
+     cat "$migration_scan" "$migration_error" >&2
+     fail "migration serialization scan failed (status $migration_status)"
+ fi
