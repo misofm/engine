@@ -203,3 +203,12 @@ Independent execution with the same phase-4 full-output/error injection confirms
 Retain the useful production work and the now-correct directed cases as evidence. This verdict does not identify a newly observed production false pass. The remaining delivery failure is the frozen counter-mutant proof contract; the three-attempt rule now requires explicit rescope before further implementation rather than another local revision or closure based solely on the green suite.
 
 Root stops this implementation series. The source and all three verdicts remain committed; no fourth revision is assigned. Astra will scope the single remaining payload-preserving late-producer proof as a bounded successor, retaining #411's original acceptance obligations and evidence. #411 remains OPEN; no completed capability or complete proof is claimed.
+
+
+## Explicit rescope after the three-attempt hard stop
+
+#411's implementation series stopped after Astra FAIL at `2acf4ab22103cac67c95c8fae1aa03f679efc055`, recorded at `59f5dce23ffa1d3873162c9b964a12d60a8ddbf9`. All three attempt records and failure evidence remain retained. No fourth #411 revision is authorized.
+
+Successor #438, “Prove the unfused seal rejects a complete failed occurrence search at registered validation,” owns only replacement of the remaining defective counter-mutant and its bounded evidence. It must mutate the actual count_calls occurrence-status classification while preserving captured matches into the ordinary count operation, using the existing selected fourth-occurrence full-output/error injection and exact unexpected-success assertion. Registry-answer fallback and caller/count-comparison bypass are excluded. Accepted production source and all existing directed/semantic coverage remain intact.
+
+This successor restarts only that proof outcome under a numbered Astra-approved brief and the Luna attempt 1 / Sol attempts 2–3 workflow. #411 remains OPEN. The successor does not waive #411's original frozen acceptance gates: #411 closes only after the successor proof passes and its evidence is upstream, the original qualification and actual-PR/required-CI delivery are complete, and GitHub evidence/state is synchronized. #412 still follows #411; broader parent obligations remain open as required.
