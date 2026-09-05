@@ -369,9 +369,35 @@ if (process.env.MISO_ENGINE_SDK_BROWSER_TOOLS) {
   ]);
   const browserRoot = resolve(consumerRoot, "browser");
   await mkdir(browserRoot);
-  await writeFile(resolve(browserRoot, "index.html"), '<!doctype html><button id="default">Default boot</button><button id="forward">Forwarding factory</button><script type="module" src="/main.js"></script>');
+  const seekModel = JSON.parse(builtDocument);
+  seekModel.sources[0].frames = "480000";
+  const seekDocument = JSON.stringify(seekModel);
+  const target = [Float32Array.from({ length: 128 }, (_, i) => (i + 1) / 256), Float32Array.from({ length: 128 }, (_, i) => -(i + 1) / 512)];
+  const oracle = await imported["./headless"].createOfflineEngine(seekDocument);
+  const expectedSeek = (() => {
+    try {
+      assert.equal(oracle.seekSource({ sourceId: "stem", generation: 2n, sourceFrame: 10_000n }).ok, true);
+      assert.equal(oracle.submitSource({ sourceId: "stem", generation: 2n, startFrame: 10_000n, planes: target, endOfRegion: false }).ok, true);
+      const pcm = oracle.render(); return [[...pcm.left], [...pcm.right]];
+    } finally { oracle.dispose(); }
+  })();
+  await writeFile(resolve(browserRoot, "capture.js"), `
+class Capture extends AudioWorkletProcessor {
+  constructor() { super(); this.sent = false; }
+  process(inputs, outputs) {
+    const input = inputs[0];
+    if (!this.sent && input?.length === 2 && input[0].length === 128) {
+      this.sent = true; this.port.postMessage([Array.from(input[0]), Array.from(input[1])]);
+    }
+    for (let channel = 0; channel < outputs[0].length; channel++) if (input?.[channel]) outputs[0][channel].set(input[channel]);
+    return true;
+  }
+}
+registerProcessor('capture-first-quantum', Capture);
+`);
+  await writeFile(resolve(browserRoot, "index.html"), '<!doctype html><button id="default">Default boot</button><button id="forward">Forwarding factory</button><button id="seek">Paused seek</button><script type="module" src="/main.js"></script>');
   await writeFile(resolve(browserRoot, "main.js"), `
-import { createEngine } from '@misofm/engine/browser';
+import { createEngine, createDefaultHost, prepareEngineFeed, attachEngineFeed, Msb1RingWriter, Msb1RingObserver } from '@misofm/engine/browser';
 import { BUNDLED_ENGINE_ASSETS } from '@misofm/engine/assets';
 const sessionDocument = ${JSON.stringify(builtDocument)};
 window.proof = [];
@@ -393,6 +419,53 @@ for (const id of ['default', 'forward']) document.querySelector('#' + id).onclic
     window.proof.push({ id, calls, rate: engine.shape.sampleRateHz, quantum: engine.shape.quantumFrames, result: status.result, state: engine.context.state });
   } catch (error) { window.bootError = String(error?.stack ?? JSON.stringify(error)); }
 };
+document.querySelector('#seek').onclick = async () => {
+  let engine, feed;
+  try {
+    engine = await createEngine({ document: ${JSON.stringify(seekDocument)}, policy: { sourceRingFrames: 512 }, createHost: async request => {
+      if (request.context.state === 'running') await request.context.suspend();
+      await prepareEngineFeed(request.context); return createDefaultHost(request);
+    } });
+    const context = engine.context;
+    feed = attachEngineFeed({ context, sources: [{ sourceId: 'stem', channels: 2 }], quantumFrames: 128 });
+    await feed.ready();
+    const writer = new Msb1RingWriter(feed.rings[0]); writer.engage(1n);
+    const old = () => [new Float32Array(128).fill(.25), new Float32Array(128).fill(-.25)];
+    for (let index = 0; index < 4; index++) {
+      const ack = await engine.host.submitSource({ sourceId: 'stem', generation: 1n, startFrame: BigInt(index * 128), sampleRateHz: 48000, frames: 128, planes: old(), endOfRegion: false });
+      if (ack.result !== 0) throw new Error('old internal queue did not fill');
+    }
+    const refusal = await engine.host.submitSource({ sourceId: 'stem', generation: 1n, startFrame: 512n, sampleRateHz: 48000, frames: 128, planes: old(), endOfRegion: false }).catch(error => error);
+    if (refusal.result !== 6) throw new Error('internal queue was not full');
+    for (let index = 0; index < writer.capacity; index++) {
+      const planes = writer.reserve(128); planes[0].fill(.25); planes[1].fill(-.25);
+      writer.commit({ generation: 1n, startFrame: BigInt(512 + index * 128), frames: 128, endOfRegion: false });
+    }
+    const before = await engine.host.status();
+    const beforeTime = context.currentTime;
+    writer.seek(2n, 10_000n);
+    await feed.prepareSeek();
+    const after = await engine.host.status();
+    const prepared = { state: context.state, timeUnchanged: context.currentTime === beforeTime, sampleUnchanged: after.nextAbsoluteSample === before.nextAbsoluteSample, occupancy: writer.occupancy };
+    if (prepared.state !== 'suspended' || !prepared.timeUnchanged || !prepared.sampleUnchanged || prepared.occupancy !== 0) throw new Error('preparation rendered, advanced time or retained stale slots');
+    const target = ${JSON.stringify(target.map(plane => [...plane]))};
+    for (let index = 0; index < writer.capacity; index++) {
+      const planes = writer.reserve(128); planes[0].set(target[0]); planes[1].set(target[1]);
+      writer.commit({ generation: 2n, startFrame: BigInt(10_000 + index * 128), frames: 128, endOfRegion: false });
+    }
+    await context.audioWorklet.addModule(new URL('./capture.js', import.meta.url));
+    const capture = new AudioWorkletNode(context, 'capture-first-quantum', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2] });
+    const first = new Promise(resolve => { capture.port.onmessage = ({ data }) => resolve(data); });
+    engine.host.node.connect(capture); capture.connect(context.destination);
+    await context.resume();
+    const pcm = await first;
+    await context.suspend();
+    const observer = new Msb1RingObserver(feed.rings[0]);
+    const counters = observer.counters(); observer.close();
+    window.seekProof = { prepared, pcm, counters };
+  } catch (error) { window.bootError = String(error?.stack ?? JSON.stringify(error)); }
+  finally { feed?.close(); await engine?.close(); }
+};
 `);
   await build({ root: browserRoot, configFile: false, logLevel: "warn" });
   const network = [];
@@ -402,7 +475,7 @@ for (const id of ['default', 'forward']) document.querySelector('#' + id).onclic
     try {
       const bytes = await readFile(resolve(browserRoot, "dist", `.${pathname === "/" ? "/index.html" : pathname}`));
       const mime = pathname.endsWith(".js") ? "text/javascript" : pathname.endsWith(".wasm") ? "application/wasm" : "text/html";
-      response.writeHead(200, { "content-type": mime }); response.end(bytes);
+      response.writeHead(200, { "content-type": mime, "cross-origin-opener-policy": "same-origin", "cross-origin-embedder-policy": "require-corp" }); response.end(bytes);
     } catch { response.writeHead(404); response.end(); }
   });
   await new Promise((accept, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", accept); });
@@ -429,9 +502,18 @@ for (const id of ['default', 'forward']) document.querySelector('#' + id).onclic
     assert.equal(results[1].calls.length, 1);
     assert.equal(results[1].calls[0].url, results[1].calls[0].expected);
     assert.equal(results[1].calls[0].type, "module");
+    await page.locator('#seek').click();
+    await page.waitForFunction(() => window.seekProof || window.bootError, undefined, { timeout: 20000 });
+    assert.equal(await page.evaluate(() => window.bootError), undefined);
+    const seekProof = await page.evaluate(() => window.seekProof);
+    assert.deepEqual(seekProof.pcm, expectedSeek, 'first resumed browser quantum equals exact target PCM');
+    assert.equal(seekProof.counters.stale, 64);
+    assert.equal(seekProof.counters.underruns, 0);
+    assert.equal(seekProof.counters.seeksApplied, 1);
+    assert.equal(seekProof.counters.submittedGenerationTag, 2);
     assert.deepEqual(faults, []);
     assert.equal(network.some(response => response.status >= 400), false);
-    console.log(`packed Vite/Chromium browser boot passed: ${JSON.stringify({ results, network })}`);
+    console.log(`packed Vite/Chromium browser boot passed: ${JSON.stringify({ results, seekProof, network })}`);
   } finally {
     await browser?.close();
     await new Promise(accept => server.close(accept));

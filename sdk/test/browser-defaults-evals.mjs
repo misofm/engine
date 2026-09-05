@@ -30,14 +30,14 @@ test("scratch succeeds once after ready, correlates and ignores late events", as
   worker.emit("message", { ...result, requestId: 2 }); worker.emit("message", result);
   assert.equal(await pending, shape); worker.emitHistorical("message", result); worker.assertClosed();
 });
-for (const phase of ["handshake", "request"]) {
+for (const scratchStage of ["handshake", "request"]) {
   for (const fault of ["timeout", "abort", "error", "messageerror", "post", "reject"]) {
-    if (phase === "handshake" && ["post", "reject"].includes(fault)) continue;
-    test(`scratch closes on ${phase} ${fault}`, async () => {
+    if (scratchStage === "handshake" && ["post", "reject"].includes(fault)) continue;
+    test(`scratch closes on ${scratchStage} ${fault}`, async () => {
       const worker = new FakeWorker(); const controller = new AbortController(); const reason = new Error("stop");
       const pending = boot(worker, { signal: controller.signal });
       if (fault === "post") worker.onPost = () => { throw reason; };
-      if (phase === "request") worker.emit("message", { type: "worker-ready" });
+      if (scratchStage === "request") worker.emit("message", { type: "worker-ready" });
       if (fault === "abort") controller.abort(reason);
       if (fault === "error") worker.emit("error", { error: reason });
       if (fault === "messageerror") worker.emit("messageerror", {});

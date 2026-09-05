@@ -127,6 +127,7 @@ const FLAG_END_OF_REGION = 1
 
 const RESULT_OK = 0
 const RESULT_BACKPRESSURE = 6
+const RESULT_WRONG_STATE = 3
 
 /** The one engine processor in this scope, and any rings that arrived before
  *  it existed. Both nodes are constructed by the same main thread in a fixed
@@ -337,32 +338,7 @@ function wrapEngineProcessor(Base) {
       if (ring.idTargetBuffer !== this.memoryBuffer) return
       if (ring.idTarget.length !== ring.idLength) return
 
-      const epoch = Atomics.load(control, CONTROL_SEEK_EPOCH)
-      if (epoch !== ring.seenEpoch) {
-        ring.idTarget.set(ring.idBytes)
-        const result = this.exports.miso_engine_web_v1_source_seek(
-          this.handle,
-          ring.idLength,
-          ring.controlI64[CONTROL_I64_SEEK_GENERATION],
-          ring.controlI64[CONTROL_I64_SEEK_FRAME]
-        )
-        if (result === RESULT_BACKPRESSURE) {
-          // Ordinary flow control. Leave the epoch unseen and retry the same
-          // seek before touching any slots on the next process call.
-          return
-        }
-        if (result !== RESULT_OK) {
-          control[CONTROL_REFUSED] += 1
-          control[CONTROL_LAST_RESULT] = result
-          return
-        }
-        ring.seenEpoch = epoch
-        control[CONTROL_SEEKS_APPLIED] += 1
-        // The engine dropped everything it held for this source.
-        ring.depth = 0
-        ring.finished = false
-        control[CONTROL_FINISHED] = 0
-      }
+      if (this.applySharedSeek(ring) !== RESULT_OK) return
 
       const generationTag = Atomics.load(control, CONTROL_GENERATION_TAG)
       const write = Atomics.load(control, CONTROL_WRITE_INDEX)
@@ -455,6 +431,85 @@ function wrapEngineProcessor(Base) {
       }
       control[CONTROL_DEPTH] = ring.depth
     }
+
+    /** Shared by render and the between-block control handler; never consumes PCM. */
+    applySharedSeek(ring, epoch = Atomics.load(ring.control, CONTROL_SEEK_EPOCH), generation, frame) {
+      const control = ring.control
+      if (epoch !== ring.seenEpoch) {
+        ring.idTarget.set(ring.idBytes)
+        const result = this.exports.miso_engine_web_v1_source_seek(
+          this.handle,
+          ring.idLength,
+          generation ?? ring.controlI64[CONTROL_I64_SEEK_GENERATION],
+          frame ?? ring.controlI64[CONTROL_I64_SEEK_FRAME]
+        )
+        if (result === RESULT_BACKPRESSURE) {
+          // Ordinary flow control. Leave the epoch unseen and retry the same
+          // seek before touching any slots on the next process call.
+          return result
+        }
+        if (result !== RESULT_OK) {
+          control[CONTROL_REFUSED] += 1
+          control[CONTROL_LAST_RESULT] = result
+          return result
+        }
+        ring.seenEpoch = epoch
+        control[CONTROL_SEEKS_APPLIED] += 1
+        // The engine dropped everything it held for this source.
+        ring.depth = 0
+        ring.finished = false
+        control[CONTROL_FINISHED] = 0
+        control[CONTROL_DEPTH] = 0
+      }
+      return RESULT_OK
+    }
+
+    /** Consumer-owned stale release, called only by the attachment port between blocks. */
+    prepareSharedSeeks(delivered, seeks) {
+      if (!this.ready || this.disposed || this.stickyResult !== RESULT_OK || this.exports.memory.buffer !== this.memoryBuffer || !Array.isArray(seeks) || seeks.length !== delivered.length) return { kind: "refused", result: RESULT_WRONG_STATE }
+      const rings = delivered.map((shared) => this.sabRings.find((ring) => ring.shared === shared))
+      if (rings.some((ring) => !ring || ring.idTargetBuffer !== this.memoryBuffer || ring.idTarget.length !== ring.idLength)) return { kind: "refused", result: RESULT_WRONG_STATE }
+      const matches = (ring, seek) => seek && seek.epoch !== 0 && Atomics.load(ring.control, CONTROL_SEEK_EPOCH) === seek.epoch && Atomics.load(ring.controlI64, CONTROL_I64_SEEK_GENERATION) === seek.generation && Atomics.load(ring.controlI64, CONTROL_I64_SEEK_FRAME) === seek.frame
+      if (!rings.every((ring, index) => matches(ring, seeks[index]))) return { kind: "superseded" }
+      for (let index = 0; index < rings.length; index += 1) {
+        const ring = rings[index]
+        if (!matches(ring, seeks[index])) return { kind: "superseded" }
+        const result = this.applySharedSeek(ring, seeks[index].epoch, seeks[index].generation, seeks[index].frame)
+        if (result !== RESULT_OK) return { kind: "refused", result }
+        if (!this.releaseStaleSharedSlots(ring, seeks[index].generation)) return { kind: "refused", result: 1 }
+      }
+      return rings.every((ring, index) => matches(ring, seeks[index])) ? { kind: "confirmed", seeks } : { kind: "superseded" }
+    }
+
+    releaseStaleSharedSlots(ring, generation) {
+      const control = ring.control
+      const write = Atomics.load(control, CONTROL_WRITE_INDEX)
+      const capacityMask = ring.capacity - 1
+      let read = control[CONTROL_READ_INDEX]
+      for (let remaining = ring.capacity; read !== write && remaining > 0; remaining -= 1) {
+        const slot = read & capacityMask
+        const word = slot * (SLOT_HEADER_BYTES / 4)
+        if (ring.headers[word + SLOT_SEQUENCE] !== read) {
+          // The slot the index points at is not the chunk the index names.
+          // Only a second writer can do that; stop rather than submit it.
+          control[CONTROL_TORN] += 1
+          Atomics.store(control, CONTROL_READ_INDEX, read)
+          return false
+        }
+        const word64 = slot * (SLOT_HEADER_BYTES / 8)
+        // A producer may supersede this request while its control message runs.
+        // Future-generation PCM belongs to that seek and must never be discarded.
+        if (BigInt.asUintN(64, ring.headersI64[word64 + SLOT_I64_GENERATION]) < BigInt.asUintN(64, generation)) {
+          read = (read + 1) & SAB_WRAP_MASK
+          control[CONTROL_STALE] += 1
+          continue
+        }
+        // Retain current-generation work without submitting or consuming it.
+        break
+      }
+      Atomics.store(control, CONTROL_READ_INDEX, read)
+      return true
+    }
   }
 }
 
@@ -476,6 +531,9 @@ class MisoSabFeedAttachProcessor extends AudioWorkletProcessor {
       } else if (data.op === "detach") {
         withdraw(this.delivered)
         this.delivered = []
+      } else if (data.op === "prepare-seek") {
+        const result = registry.engine === null ? { kind: "refused", result: RESULT_WRONG_STATE } : registry.engine.prepareSharedSeeks(this.delivered, data.seeks)
+        this.port.postMessage({ op: "seek-prepared", requestId: data.requestId, ...result })
       }
     }
   }
