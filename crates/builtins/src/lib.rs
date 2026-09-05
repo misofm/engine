@@ -34,11 +34,11 @@ use lane::{
         SvfCoef,
         builtins::{
             GainMuteRamp, InputChainCoef, InputChainPlan, InputChainState, InputTrimRamp,
-            Matrix2x2Coef, Matrix2x2Ramp, gain_mute_block, gain_mute_ramp_block,
-            input_chain_block_elided, input_chain_block_mono_elided, input_chain_plan,
-            input_chain_ramp_block, input_chain_ramp_block_mono, lanes_below, mask_from_flags,
-            matrix2x2_block, matrix2x2_ramp_block, no_lanes, plan_is_channel_symmetric,
-            zero_lanes_block,
+            Matrix2x2Coef, Matrix2x2Ramp, fader_matrix_block, gain_mute_block,
+            gain_mute_ramp_block, input_chain_block_elided, input_chain_block_mono_elided,
+            input_chain_plan, input_chain_ramp_block, input_chain_ramp_block_mono, lanes_below,
+            mask_from_flags, matrix2x2_block, matrix2x2_ramp_block, no_lanes,
+            plan_is_channel_symmetric, zero_lanes_block,
         },
     },
 };
@@ -2173,6 +2173,14 @@ impl<L: Lane> MatrixStage<L> {
     }
 
     // REALTIME_POLICY_BEGIN
+    #[inline(always)]
+    fn is_settled(&self) -> bool {
+        self.remaining
+            .iter()
+            .take(L::WIDTH)
+            .all(|&remaining| remaining == 0)
+    }
+
     /// Renders one block of both channels.
     fn process(&mut self, left: &mut [f32], right: &mut [f32], frames: usize) {
         let maximum = self
@@ -2251,6 +2259,8 @@ pub struct BuiltinChain {
     input: InputBuiltins,
     fader_mute: FaderMuteBuiltins,
     matrix: MatrixBuiltins,
+    #[cfg(test)]
+    fused_dispatches: u32,
 }
 
 impl BuiltinChain {
@@ -2263,6 +2273,8 @@ impl BuiltinChain {
             input,
             fader_mute,
             matrix,
+            #[cfg(test)]
+            fused_dispatches: 0,
         })
     }
     pub fn process_input(&mut self, block: DualMonoBlock<'_>) -> BuiltinProcessReport {
@@ -2285,8 +2297,25 @@ impl BuiltinChain {
         } = block;
         let frames = left.len();
         let mut report = self.input.stage.process(left, right, frames);
-        self.fader_mute.stage.process(left, right, frames);
-        self.matrix.stage.process(left, right, frames);
+        if self.matrix.stage.is_settled() {
+            #[cfg(test)]
+            {
+                self.fused_dispatches += 1;
+            }
+            fader_matrix_block::<f32>(
+                left,
+                right,
+                frames,
+                self.fader_mute.stage.gain[0],
+                self.fader_mute.stage.mute[0],
+                self.fader_mute.stage.gain[1],
+                self.fader_mute.stage.mute[1],
+                &self.matrix.stage.coef,
+            );
+        } else {
+            self.fader_mute.stage.process(left, right, frames);
+            self.matrix.stage.process(left, right, frames);
+        }
         let _ = first_sample;
         report.sanitized_output = 0;
         report
@@ -3864,5 +3893,38 @@ pub mod test_support {
     /// The matrix section of a chain, mutably.
     pub fn chain_matrix_mut(chain: &mut BuiltinChain) -> &mut MatrixBuiltins {
         &mut chain.matrix
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BuiltinChain, BuiltinParameters, DualMonoBlock};
+
+    #[test]
+    fn settled_public_chain_selects_the_fused_post_input_path() {
+        let mut chain = BuiltinChain::new(48_000, BuiltinParameters::default()).unwrap();
+        let mut left = [0.25_f32; 8];
+        let mut right = [-0.5_f32; 8];
+        chain.process_dual_mono(DualMonoBlock::new(&mut left, &mut right, 0).unwrap());
+        assert_eq!(chain.fused_dispatches, 1);
+    }
+
+    #[test]
+    fn matrix_ramp_keeps_the_whole_call_on_the_existing_fallback() {
+        let mut parameters = BuiltinParameters::default();
+        parameters.smoothing_samples = 2;
+        let mut chain = BuiltinChain::new(48_000, parameters).unwrap();
+        chain
+            .set_matrix_target(super::Matrix2x2 {
+                ll: 0.8,
+                lr: 0.2,
+                rl: -0.1,
+                rr: 0.9,
+            })
+            .unwrap();
+        let mut left = [0.25_f32; 8];
+        let mut right = [-0.5_f32; 8];
+        chain.process_dual_mono(DualMonoBlock::new(&mut left, &mut right, 0).unwrap());
+        assert_eq!(chain.fused_dispatches, 0);
     }
 }
