@@ -69,3 +69,23 @@ After #442 delivery, root may choose this queued slice, sync the full amendment/
 ## Root adoption
 
 Root adopts the finite product contract, allowed paths, five objective gates, class-A limits, and closure accounting above. The inspected runtime source remains unchanged by tooling-only PR #449, delivered as `39da065507beb822ef70a1552ff5dcc363938dd4`, the base of this planning branch. Historical timing is retained solely as provenance; a current microseconds/block claim requires separately authorized measurement. Luna receives one implementation attempt only after Astra scope/base approval, Sol receives attempts 2/3 only after FAIL, and a third FAIL requires a preserved checkpoint and explicit rescope. Actual PR-head Astra PASS and required qualification CI precede merge and verified remote closure.
+
+## Astra numbered scope approval
+
+# Astra #238 numbered scope review — PASS
+
+Planning checkpoint supplied by root: `d5ecad07ab184a106c190a29072b9c508288dc35`, `/home/bl/misofm/engine-238-plan`, on delivered main `39da065507beb822ef70a1552ff5dcc363938dd4`.
+
+PASS for queued scope. Read the full numbered amendment against `/tmp/astra-349-rt5-current-scope.md`. GitHub issue #238 remains OPEN with its original exact title, “refresh_channel_symmetry is O(records×lanes) under sustained per-block record traffic”; its body matches the local spec. No duplicate issue identity or implementation owner is introduced.
+
+The root priority ruling explicitly brings the previously deferred repair into the audit queue while preserving the historical post-launch wording as provenance. Root adoption makes the embedded recommendation binding. It keeps #442 as the sole runtime feature and requires Astra approval of the actual implementation base before Luna assignment. This scope approval does not authorize immediate implementation or timing.
+
+The product remains exactly one lane's clear-and-set cached-bit update after a valid trim/polarity retarget. The unchanged comparison definition, all other mask bits, preparation/dual-ramp/collapsed-ramp/reset full refreshes, ramp/state/recovery arithmetic, LIVE/AGREEING/DESIGNED terms and collapse semantics are retained. The allowed builtins implementation/tests/mutation/spec paths and no-new-framework/no-public-probe/no-runtime-counter boundaries are faithful to the brief.
+
+All five finite gates remain intact: scalar/W4/W8 and partial-bank exact masks with both bit transitions and unaddressed-lane preservation; an actual addressed-lane-only predicate evaluation proof with the restored old full-refresh call failing the same frozen excess-comparison assertion; existing exact PCM/state/collapse/admission proofs and C-1/C-2 controls; honest C-3 equivalence and retained full refresh; debug/release and proportional immutable delivery qualification. No approximate arithmetic, relaxed bit equality, generic SIMD optimizer or speculative resource change enters this issue.
+
+Closure accounting is explicit: #235 already delivered stationary dispatch caching/short-circuit; #238 owns excess per-record cross-lane refresh only. Broader ramp-block extraction and descriptive sustained-record measurement remain retained audit obligations requiring their own bounded briefs. Historical timing is not promoted to a current estimate; #238 cannot close all RT-5/#349. No amendment is needed.
+
+After #442 delivery and root selection of this queued slice, recheck the actual integrated source base before Luna attempt 1, particularly if builtins or its production caller paths changed. Preserve the one-Luna/two-Sol-retries maximum and actual-head Astra/required-CI/remote-closure workflow.
+
+Read-only spec and remote identity/body review. No source/spec changes, Git/GitHub mutations, builds, tests or timing; only this `/tmp` review file was written. Supplied checkpoint/base identities were not independently re-queried with Git.
