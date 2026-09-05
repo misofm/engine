@@ -250,25 +250,55 @@ helper_count_output="$(PATH="$temp/wc-fail:$PATH" bash "$temp/scripts/check-effe
     printf 'effect helper count partial error escaped: %s\n' "$helper_count_output" >&2; exit 1;
 }
 
-# The final serialization ban is a distinct late consumer.  Valid partial output followed by an
-# error must fail, and the same assertion must reject a disposable mutation that swallows it.
+# Every semantic search class gets an error-only and partial-output error after valid setup.
 real_rg="$(command -v rg)"
-mkdir -p "$temp/rg-migration-final-fail"
-cat >"$temp/rg-migration-final-fail/rg" <<EOF
+mkdir -p "$temp/rg-migration-fault"
+cat >"$temp/rg-migration-fault/rg" <<EOF
 #!/usr/bin/env bash
-if [[ "\$*" == *'serde|Serialize|Deserialize|migration_wire|encode_migration'* ]]; then printf 'valid partial output\n'; exit 7; fi
+if [[ "\$*" == *"\$MIGRATION_PATTERN"* ]]; then
+    [[ "\$MIGRATION_MODE" == partial ]] && printf 'intended partial row\n'
+    exit 7
+fi
 exec "$real_rg" "\$@"
 EOF
-chmod +x "$temp/rg-migration-final-fail/rg"
-migration_output="$(PATH="$temp/rg-migration-final-fail:$PATH" bash "$temp/scripts/check-effect-state-migration-v1.sh" "$temp" 2>&1)" && migration_rc=0 || migration_rc=$?
-[[ "$migration_rc" -ne 0 && "$migration_output" == *'valid partial output'* && "$migration_output" == *'serialization scan errored'* ]] || {
-    printf 'migration serialization consumer error escaped: %s\n' "$migration_output" >&2; exit 1;
+chmod +x "$temp/rg-migration-fault/rg"
+assert_migration_fault() {
+    local checker=$1 pattern=$2 diagnostic=$3 mode=$4 output rc
+    output="$(MIGRATION_PATTERN="$pattern" MIGRATION_MODE="$mode" PATH="$temp/rg-migration-fault:$PATH" bash "$checker" "$temp" 2>&1)" && rc=0 || rc=$?
+    [[ "$rc" -ne 0 && "$output" == *"$diagnostic"* ]] || {
+        printf 'migration selective fault escaped (%s/%s): %s\n' "$pattern" "$mode" "$output" >&2
+        return 1
+    }
+    if [[ "$mode" == partial && "$output" != *'intended partial row'* ]]; then
+        printf 'migration partial output missing (%s): %s\n' "$pattern" "$output" >&2
+        return 1
+    fi
 }
-mutant_migration="$temp/check-effect-state-migration-mutant.sh"
-cp "$root/scripts/check-effect-state-migration-v1.sh" "$mutant_migration"
-sed -i '/migration serialization/ s#|| exit \$?#|| true#' "$mutant_migration"
-grep -q 'migration serialization' "$mutant_migration" || { printf 'migration mutant replacement missing\n' >&2; exit 1; }
-if PATH="$temp/rg-migration-final-fail:$PATH" bash "$mutant_migration" "$temp" >/dev/null 2>&1; then
-    printf 'migration serialization counter-mutant escaped\n' >&2; exit 1
+while IFS='|' read -r pattern diagnostic; do
+    assert_migration_fault "$temp/scripts/check-effect-state-migration-v1.sh" "$pattern" "$diagnostic" error
+    assert_migration_fault "$temp/scripts/check-effect-state-migration-v1.sh" "$pattern" "$diagnostic" partial
+done <<'EOF'
+56-byte|documentation 56-byte search failed (rg exit 7)
+inspect_effect_state_selector|API inspect_effect_state_selector search failed (rg exit 7)
+EffectStateMigration|runtime-owned migration scan scan errored (rg exit 7)
+validate_descriptor|migration descriptor validation scan scan errored (rg exit 7)
+serde|migration serialization scan errored (rg exit 7)
+EOF
+
+# Actual same-assertion counter: swallow only the final serialization result in a physical tree.
+mutant_scripts="$temp/mutant-scripts"
+cp -R "$temp/scripts" "$mutant_scripts"
+mutant_migration="$mutant_scripts/check-effect-state-migration-v1.sh"
+[[ "$(grep -Fc "gate_scan_forbidden 'migration serialization'" "$mutant_migration")" == 1 ]] || {
+    printf 'migration mutant callsite count is not one\n' >&2; exit 1;
+}
+sed -i "/gate_scan_forbidden 'migration serialization'/ s/|| exit \$?/|| true/" "$mutant_migration"
+grep -F "gate_scan_forbidden 'migration serialization'" "$mutant_migration" | grep -Fq '|| true' || {
+    printf 'migration mutant replacement missing\n' >&2; exit 1;
+}
+if counter_output="$(assert_migration_fault "$mutant_migration" serde 'migration serialization scan errored (rg exit 7)' partial 2>&1)"; then
+    printf 'migration serialization same-assertion counter-mutant escaped\n' >&2
+    exit 1
 fi
+bash "$temp/scripts/check-effect-state-migration-v1.sh" "$temp" >/dev/null
 printf 'effect runtime policy mutations: ok\n'
