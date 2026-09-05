@@ -1041,6 +1041,22 @@ pub struct PcmSourceConsumer {
 }
 
 impl PcmSourceConsumer {
+    /// Apply an already-admitted seek on the exclusive consumer owner between blocks.
+    /// Recycles stale storage and retains current-generation PCM without consuming a frame.
+    /// Native producers still only enqueue commands; this is not a shared controller handle.
+    pub fn prepare_seek(&mut self, generation: SourceGeneration, frame: SourceFrame) -> bool {
+        self.end_block();
+        self.flush_deferred_recycle();
+        // The prepared source command queue has one slot. Observe exactly that admitted
+        // command, then check the requested identity before granting readiness.
+        self.observe_seek_at_block_boundary();
+        if self.active_generation != generation || self.next_frame != frame {
+            return false;
+        }
+        self.acquire_current_block();
+        true
+    }
+
     /// Immutable prepared ring shape shared with the producer endpoint.
     #[must_use]
     pub const fn shape(&self) -> PcmSourceShape {
@@ -1532,6 +1548,19 @@ fn source_set_retained_resources(
 }
 
 impl GraphPreparedSourceSetDriver for SourceGraphSourceSetDriver {
+    fn can_prepare_source_seek(&self, source_index: usize) -> bool {
+        source_index < self.sources.len()
+    }
+
+    fn prepare_source_seek(&mut self, source_index: usize, generation: u64, frame: u64) -> bool {
+        let Some(generation) = SourceGeneration::new(generation) else {
+            return false;
+        };
+        self.sources
+            .get_mut(source_index)
+            .is_some_and(|source| source.consumer.prepare_seek(generation, SourceFrame(frame)))
+    }
+
     fn claim_count(&self) -> usize {
         self.mappings.len()
     }
@@ -1782,6 +1811,41 @@ mod tests {
             report.pcm_payload_already_charged_bytes + report.overhead_bytes
         );
         assert!(report.largest_allocation_bytes >= 32);
+    }
+
+    #[test]
+    fn paused_seek_prepares_full_queues_without_consuming_target() {
+        for retained in [false, true] {
+            let (producer, mut consumer, _) = PcmSourceRing::prepare(config(1, 4, 8)).unwrap();
+            let mut host = producer.into_host_chunk_provider(RATE);
+            let old = [0.25; 4];
+            host.submit(chunk(1, 0, &[&old], 4, false)).unwrap();
+            host.submit(chunk(1, 4, &[&old], 4, false)).unwrap();
+            if retained {
+                consumer.acquire_current_block();
+            }
+            host.try_seek(SourceCommand::Seek {
+                generation: SourceGeneration(2),
+                frame: SourceFrame(100),
+            })
+            .unwrap();
+            assert!(consumer.prepare_seek(SourceGeneration(2), SourceFrame(100)));
+            assert_eq!(consumer.next_frame, SourceFrame(100));
+            assert_eq!(consumer.cumulative_read_frames, 0);
+            assert_eq!(consumer.underrun_frames, 0);
+            assert_eq!(consumer.underrun_events, 0);
+            assert_eq!(consumer.stale_generation_discard_count, 2);
+            let target = [1.0, 2.0, 3.0, 4.0];
+            host.submit(chunk(2, 100, &[&target], 4, false)).unwrap();
+            // Preparing again retains current-generation PCM and never consumes it.
+            assert!(consumer.prepare_seek(SourceGeneration(2), SourceFrame(100)));
+            assert!(!consumer.prepare_seek(SourceGeneration(1), SourceFrame(100)));
+            let mut output = [0.0; 4];
+            let report = consumer.read_block(&mut [&mut output]).unwrap();
+            assert_eq!(output, target);
+            assert_eq!(report.underrun_frames, 0);
+            assert_eq!(consumer.next_frame, SourceFrame(104));
+        }
     }
 
     #[test]
