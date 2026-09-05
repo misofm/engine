@@ -493,7 +493,18 @@ make_fault_shim() {
         '  count=0; [[ ! -f "$state" ]] || count=$(<"$state")' \
         '  count=$((count + 1)); printf "%s\n" "$count" >"$state"' \
         '  if (( count == occurrence )); then' \
-        '    [[ "$mode" != complete ]] || "$real_tool" "$@"' \
+        '    if [[ "$mode" == complete || "$mode" == clean ]]; then' \
+        '      real_out=$(mktemp /tmp/workspace-real-out.XXXXXX)' \
+        '      real_err=$(mktemp /tmp/workspace-real-err.XXXXXX)' \
+        '      "$real_tool" "$@" >"$real_out" 2>"$real_err"; real_status=$?' \
+        '      /usr/bin/cat "$real_out"; /usr/bin/cat "$real_err" >&2' \
+        '      if [[ "$mode" == complete ]]; then' \
+        '        [[ "$real_status" == 0 && -s "$real_out" ]] || { printf "FAULT_DELEGATE_INVALID:%s:status=%s\n" "$label" "$real_status" >&2; rm -f "$real_out" "$real_err"; exit 74; }' \
+        '      else' \
+        '        [[ "$real_status" == 1 && ! -s "$real_out" ]] || { printf "FAULT_DELEGATE_INVALID:%s:status=%s\n" "$label" "$real_status" >&2; rm -f "$real_out" "$real_err"; exit 74; }' \
+        '      fi' \
+        '      rm -f "$real_out" "$real_err"' \
+        '    fi' \
         '    printf "WORKSPACE_FAULT:%s:status=73\n" "$label" >&2' \
         '    exit 73' \
         '  fi' \
@@ -517,7 +528,7 @@ assert_fault_rejected() {
         printf '%s\n' '{"name":"fixture","license":"Apache-2.0"}' >"$root/sdk/package.json"
         printf '%s\n' '{"packages":{"":{"license":"Apache-2.0"}}}' >"$root/sdk/package-lock.json"
     }
-    [[ "$name" != git-list ]] || { git -C "$root" init -q; git -C "$root" add .; }
+    case "$name" in git-list*|git-classify-valid) git -C "$root" init -q; git -C "$root" add .;; esac
     make_fault_shim "$shim" "$tool" "$match" "$occurrence" "$mode" "$name"
     output="$(WORKSPACE_FAULT_STATE="$shim/state" PATH="$shim:$PATH" \
         bash "$policy_script" "$root" 2>&1)" && rc=0 || rc=$?
@@ -539,37 +550,63 @@ fault_cases=(
  'npm-find-empty|find|-name package.json|1|empty|find npm-manifests failed'
  'npm-find-complete|find|-name package.json|1|complete|find npm-manifests failed'
  'npm-sort|sort|npm-manifests.out|1|complete|sort npm manifests failed'
+ 'npm-sort-empty|sort|npm-manifests.out|1|empty|sort npm manifests failed'
  'npm-lock-find|find|-name package-lock.json|1|complete|find npm-locks failed'
+ 'npm-lock-find-empty|find|-name package-lock.json|1|empty|find npm-locks failed'
  'npm-lock-sort|sort|npm-locks.out|1|complete|sort npm locks failed'
+ 'npm-lock-sort-empty|sort|npm-locks.out|1|empty|sort npm locks failed'
  'cargo-find-empty|find|crates hosts tools sidecars|1|empty|find cargo-manifests failed'
  'cargo-find-complete|find|crates hosts tools sidecars|1|complete|find cargo-manifests failed'
  'cargo-sort|sort|cargo-manifests.out|1|complete|sort Cargo manifests failed'
+ 'cargo-sort-empty|sort|cargo-manifests.out|1|empty|sort Cargo manifests failed'
  'retired-find|find|-name flac-decoder|1|empty|retired-directory discovery failed'
  'fingerprint-find|find|-mindepth 2 -maxdepth 2|1|empty|fingerprint discovery failed'
  'sha-producer|sha256sum|LICENSE|1|complete|sha256sum LICENSE failed'
+ 'sha-producer-empty|sha256sum|LICENSE|1|empty|sha256sum LICENSE failed'
  'sha-extractor|awk|license_sha256.out|1|complete|LICENSE digest extraction failed'
+ 'sha-extractor-empty|awk|license_sha256.out|1|empty|LICENSE digest extraction failed'
  'npm-jq|jq|.license ==|1|complete|jq ./sdk/package.json failed'
+ 'npm-jq-empty|jq|.license ==|1|empty|jq ./sdk/package.json failed'
  'npm-lock-jq|jq|.packages[""].license|1|complete|jq ./sdk/package-lock.json failed'
+ 'npm-lock-jq-empty|jq|.packages[""].license|1|empty|jq ./sdk/package-lock.json failed'
  'workspace-search|rg|license = "Apache-2.0" Cargo.toml|1|complete|rg workspace-license failed'
+ 'workspace-search-empty|rg|license = "Apache-2.0" Cargo.toml|1|empty|rg workspace-license failed'
  'fuzz-search|rg|license = "Apache-2.0" fuzz/Cargo.toml|1|complete|rg fuzz-license failed'
+ 'fuzz-search-empty|rg|license = "Apache-2.0" fuzz/Cargo.toml|1|empty|rg fuzz-license failed'
  'inventory-search|rg|LICENSE-libm|1|complete|rg libm-inventory failed'
+ 'inventory-search-empty|rg|LICENSE-libm|1|empty|rg libm-inventory failed'
  'package-search-late|rg|hosts/binary/Cargo.toml|1|complete|rg package-license-'
+ 'package-search-late-empty|rg|hosts/binary/Cargo.toml|1|empty|rg package-license-'
  'package-extract-late|awk|-v section=package|2|complete|package name extraction hosts/binary/Cargo.toml failed'
+ 'package-extract-late-empty|awk|-v section=package|2|empty|package name extraction hosts/binary/Cargo.toml failed'
  'lib-extract|awk|-v section=lib|1|empty|lib name extraction crates/library/Cargo.toml failed'
+ 'lib-extract-complete|awk|-v section=lib|1|complete|lib name extraction crates/library/Cargo.toml failed'
  'bin-extract|awk|-v section=bin|2|complete|bin name extraction hosts/binary/Cargo.toml failed'
+ 'bin-extract-empty|awk|-v section=bin|2|empty|bin name extraction hosts/binary/Cargo.toml failed'
  'git-classify|git|rev-parse --is-inside-work-tree|1|empty|git repository classification failed'
+ 'git-classify-valid|git|rev-parse --is-inside-work-tree|1|complete|git repository classification failed'
  'git-list|git|ls-files -z|1|complete|git tracked-path listing failed'
+ 'git-list-empty|git|ls-files -z|1|empty|git tracked-path listing failed'
  'fallback-list|find|-type f -not -path ./.git/*|1|complete|fallback tracked-path find failed'
+ 'fallback-list-empty|find|-type f -not -path ./.git/*|1|empty|fallback tracked-path find failed'
  'nul-convert|tr|\0|1|complete|tracked-path NUL conversion failed'
+ 'nul-convert-empty|tr|\0|1|empty|tracked-path NUL conversion failed'
  'path-normalize|sed|nul-to-lines.out|1|complete|tracked-path normalization failed'
+ 'path-normalize-empty|sed|nul-to-lines.out|1|empty|tracked-path normalization failed'
  'manifest-filter|awk|-F/|1|complete|tracked Cargo manifest filter failed'
+ 'manifest-filter-empty|awk|-F/|1|empty|tracked Cargo manifest filter failed'
  'manifest-sort|sort|cargo-path-filter.out|1|complete|tracked Cargo manifest sort failed'
+ 'manifest-sort-empty|sort|cargo-path-filter.out|1|empty|tracked Cargo manifest sort failed'
  'comment-strip|awk|in_string=0; out=|2|complete|comment stripping crates/library/Cargo.toml failed'
- 'retired-scan|rg|strip-comments.out|1|complete|retired identity scan Cargo.toml failed'
+ 'comment-strip-empty|awk|in_string=0; out=|2|empty|comment stripping crates/library/Cargo.toml failed'
+ 'retired-scan|rg|strip-comments.out|1|clean|retired identity scan Cargo.toml failed'
  'isa-source|rg|target-cpu|1|complete|ISA directive search failed'
+ 'isa-source-empty|rg|target-cpu|1|empty|ISA directive search failed'
  'isa-comment-filter|rg|:[0-9]+:[[:space:]]*#|1|complete|ISA comment filtering failed'
- 'isa-allowlist|rg|^\.cargo/config|1|complete|ISA allowlist filtering failed'
+ 'isa-comment-filter-empty|rg|:[0-9]+:[[:space:]]*#|1|empty|ISA comment filtering failed'
+ 'isa-allowlist|rg|^\.cargo/config|1|clean|ISA allowlist filtering failed'
  'isa-target-search|rg|target_arch = "x86_64"|1|complete|rg isa-target-scope failed'
+ 'isa-target-search-empty|rg|target_arch = "x86_64"|1|empty|rg isa-target-scope failed'
  'isa-build-late|rg|^\[build\]|1|empty|global build-table search failed'
 )
 for fault_case in "${fault_cases[@]}"; do
@@ -639,6 +676,77 @@ for isa_positive in empty comment-only; do
     fi
     bash "$policy_script" "$isa_root" >/dev/null
 done
+
+# Required-search status 1 is the policy predicate diagnostic, distinct from the paired status-73
+# execution rows above (which include otherwise-matching output).
+mutate_workspace_search_missing() { sed -i '/license = "Apache-2.0"/d' "$1/Cargo.toml"; }
+mutate_fuzz_search_missing() { sed -i '/license = "Apache-2.0"/d' "$1/fuzz/Cargo.toml"; }
+mutate_inventory_search_missing() { sed -i 's|crates/math/LICENSE-libm.txt|crates/math/other.txt|' "$1/THIRD_PARTY_LICENSES.md"; }
+mutate_late_package_search_missing() { sed -i '/license\.workspace = true/d' "$1/hosts/binary/Cargo.toml"; }
+mutate_isa_target_search_missing() {
+    mkdir -p "$1/.cargo"
+    printf '%s\n' 'rustflags = ["-C", "target-feature=+avx2,+fma"]' >"$1/.cargo/config.toml"
+}
+expect_failure_with_message workspace-search-status1 'Cargo.toml workspace package license must be Apache-2.0' mutate_workspace_search_missing
+expect_failure_with_message fuzz-search-status1 'fuzz/Cargo.toml license must be Apache-2.0' mutate_fuzz_search_missing
+expect_failure_with_message inventory-search-status1 'third-party inventory must retain the vendored libm license record' mutate_inventory_search_missing
+expect_failure_with_message package-search-status1 'hosts/binary/Cargo.toml must inherit the Apache-2.0 workspace license' mutate_late_package_search_missing
+expect_failure_with_message isa-target-search-status1 'approved ISA pin must stay scoped' mutate_isa_target_search_missing
+
+# jq false/null (status 1) retains each license-policy diagnostic. Actual malformed JSON proves a
+# parser error reaches the execution diagnostic; controlled read/status-73 errors are paired in
+# the table above for both expressions.
+write_npm_case() {
+    local root="$1" package_json="$2" lock_json="$3"
+    mkdir -p "$root/sdk"
+    printf '%s\n' "$package_json" >"$root/sdk/package.json"
+    printf '%s\n' "$lock_json" >"$root/sdk/package-lock.json"
+}
+mutate_npm_false() { write_npm_case "$1" '{"license":"MIT"}' '{"packages":{"":{"license":"Apache-2.0"}}}'; }
+mutate_npm_null() { write_npm_case "$1" '{"license":null}' '{"packages":{"":{"license":"Apache-2.0"}}}'; }
+mutate_lock_false() { write_npm_case "$1" '{"license":"Apache-2.0"}' '{"packages":{"":{"license":"MIT"}}}'; }
+mutate_lock_null() { write_npm_case "$1" '{"license":"Apache-2.0"}' '{"packages":{"":{"license":null}}}'; }
+mutate_npm_malformed() { write_npm_case "$1" '{broken' '{"packages":{"":{"license":"Apache-2.0"}}}'; }
+mutate_lock_malformed() { write_npm_case "$1" '{"license":"Apache-2.0"}' '{broken'; }
+expect_failure_with_message npm-false-status1 'sdk/package.json license must be Apache-2.0' mutate_npm_false
+expect_failure_with_message npm-null-status1 'sdk/package.json license must be Apache-2.0' mutate_npm_null
+expect_failure_with_message lock-false-status1 'sdk/package-lock.json root package license must be Apache-2.0' mutate_lock_false
+expect_failure_with_message lock-null-status1 'sdk/package-lock.json root package license must be Apache-2.0' mutate_lock_null
+expect_failure_with_message npm-parser-error 'jq ./sdk/package.json failed (status 5)' mutate_npm_malformed
+expect_failure_with_message lock-parser-error 'jq ./sdk/package-lock.json failed (status 5)' mutate_lock_malformed
+
+# Controlled classifier results distinguish exact ordinary absence from similar-looking failures.
+make_git_classifier_shim() {
+    local shim="$1" mode="$2" real_git
+    real_git="$(command -v git)"
+    mkdir -p "$shim"
+    printf '%s\n' '#!/usr/bin/env bash' "real_git='$real_git'" "mode='$mode'" \
+        'if [[ "$*" == "rev-parse --is-inside-work-tree" ]]; then' \
+        '  exact="fatal: not a git repository (or any of the parent directories): .git"' \
+        '  case "$mode" in' \
+        '    extra) printf "%s\nEXTRA_CLASSIFIER_ERROR\n" "$exact" >&2;;' \
+        '    plausible) printf "true\n"; printf "%s\n" "$exact" >&2;;' \
+        '    exact) printf "%s\n" "$exact" >&2;;' \
+        '    locale) [[ "${LC_ALL-}" == C ]] || { printf "LOCALE_NOT_C\n" >&2; exit 72; }; printf "%s\nLOCALE_C_PROOF\n" "$exact" >&2;;' \
+        '  esac; exit 128' \
+        'fi' \
+        'exec "$real_git" "$@"' >"$shim/git"
+    chmod +x "$shim/git"
+}
+assert_classifier_rejected() {
+    local name="$1" mode="$2" expected="$3"; shift 3
+    local shim="$scratch_root/classifier-$name" output rc
+    make_git_classifier_shim "$shim" "$mode"
+    output="$(PATH="$shim:$PATH" "$@" bash "$policy_script" "$valid_root" 2>&1)" && rc=0 || rc=$?
+    [[ "$rc" -ne 0 && "$output" == *'git repository classification failed (status 128)'* && "$output" == *"$expected"* ]] || {
+        printf 'classifier distinction failed: %s: %s\n' "$name" "$output" >&2; exit 1;
+    }
+}
+assert_classifier_rejected extra-line extra EXTRA_CLASSIFIER_ERROR env
+assert_classifier_rejected plausible-stdout plausible true env
+assert_classifier_rejected git-dir-override exact 'not a git repository' env GIT_DIR="$scratch_root/selected.git"
+assert_classifier_rejected git-work-tree-override exact 'not a git repository' env GIT_WORK_TREE="$valid_root"
+assert_classifier_rejected deterministic-locale locale LOCALE_C_PROOF env
 
 invalid_git="$scratch_root/not-a-repository"
 output="$(GIT_DIR="$invalid_git" bash "$policy_script" "$valid_root" 2>&1)" && rc=0 || rc=$?
