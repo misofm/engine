@@ -681,7 +681,7 @@ static FADER_MATRIX_FALLBACK_CALLS: core::sync::atomic::AtomicUsize =
 // diagnostic surface or interference from another test thread.
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
-    static FADER_MATRIX_LIVE_WITNESS: std::cell::Cell<[u64; 6]> = const { std::cell::Cell::new([0; 6]) };
+    static FADER_MATRIX_LIVE_WITNESS: std::cell::Cell<[u64; 8]> = const { std::cell::Cell::new([0; 8]) };
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -694,12 +694,14 @@ pub struct TestOnlyFaderMatrixWitness {
     pub factory_calls: u64,
     pub process_members: u64,
     pub factory_members: u64,
+    pub fader_records_drained: u64,
+    pub matrix_records_drained: u64,
 }
 
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub fn test_only_reset_fader_matrix_witness() {
-    FADER_MATRIX_LIVE_WITNESS.with(|value| value.set([0; 6]));
+    FADER_MATRIX_LIVE_WITNESS.with(|value| value.set([0; 8]));
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -714,6 +716,8 @@ pub fn test_only_fader_matrix_witness() -> TestOnlyFaderMatrixWitness {
         factory_calls: values[3],
         process_members: values[4],
         factory_members: values[5],
+        fader_records_drained: values[6],
+        matrix_records_drained: values[7],
     }
 }
 
@@ -726,6 +730,12 @@ fn drain_fader_controls(
             continue;
         };
         while let Ok(record) = control.try_pop() {
+            #[cfg(any(test, feature = "test-support"))]
+            FADER_MATRIX_LIVE_WITNESS.with(|value| {
+                let mut counters = value.get();
+                counters[6] = counters[6].saturating_add(1);
+                value.set(counters);
+            });
             match record {
                 TrackFaderRecord::FaderDb {
                     lanes,
@@ -756,6 +766,12 @@ fn drain_matrix_controls(
             continue;
         };
         while let Ok(record) = control.try_pop() {
+            #[cfg(any(test, feature = "test-support"))]
+            FADER_MATRIX_LIVE_WITNESS.with(|value| {
+                let mut counters = value.get();
+                counters[7] = counters[7].saturating_add(1);
+                value.set(counters);
+            });
             bank.set_target_smoothed(lane, record.matrix, record.smoothing_samples)
                 .map_err(render_error)?;
         }
@@ -4408,10 +4424,18 @@ mod tests {
     }
 
     static ALIAS_OBSERVATIONS: AtomicUsize = AtomicUsize::new(0);
+    thread_local! {
+        static ALIAS_CAPTURE: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
     struct AliasObserver;
     impl GraphRuntimeObserver for AliasObserver {
-        fn observe(&mut self, _block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
+        fn observe(&mut self, block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
             ALIAS_OBSERVATIONS.fetch_add(1, Ordering::Relaxed);
+            ALIAS_CAPTURE.with(|capture| {
+                let mut capture = capture.borrow_mut();
+                capture.extend(block.left.iter().map(|sample| sample.to_bits()));
+                capture.extend(block.right.iter().map(|sample| sample.to_bits()));
+            });
             Ok(())
         }
     }
@@ -4821,6 +4845,9 @@ mod tests {
             Err(failure) => panic!("harness bind: {}", failure.code),
         };
         let mut plan = bound.plan;
+        if matches!(variant, BoundaryVariant::AliasObserved) {
+            ALIAS_CAPTURE.with(|capture| capture.borrow_mut().clear());
+        }
         let frames = HARNESS_QUANTUM as usize;
         let mut pcm = vec![0.0_f32; frames * 2];
         for block in 0..HARNESS_BLOCKS {
@@ -5253,9 +5280,30 @@ mod tests {
         );
         assert_eq!(eligible, observed, "alias observer preserves PCM words");
         let observed_witness = test_only_fader_matrix_witness();
+        let observed_calls = ALIAS_OBSERVATIONS.load(Ordering::Relaxed);
+        let paired_alias = ALIAS_CAPTURE.with(|capture| capture.borrow().clone());
+        let (separate_observed, _, _, _) = render_post_input_bits_with_variant(
+            9,
+            Backend::Simd8,
+            false,
+            false,
+            BoundaryVariant::AliasObserved,
+        );
+        let separate_alias = ALIAS_CAPTURE.with(|capture| capture.borrow().clone());
         assert_eq!(
-            ALIAS_OBSERVATIONS.load(Ordering::Relaxed),
-            HARNESS_BLOCKS as usize,
+            observed, separate_observed,
+            "observed post-matrix words match separate"
+        );
+        assert_eq!(
+            paired_alias, separate_alias,
+            "both actual alias tap planes match separate"
+        );
+        assert_eq!(
+            paired_alias.len(),
+            HARNESS_QUANTUM as usize * 2 * HARNESS_BLOCKS as usize
+        );
+        assert_eq!(
+            observed_calls, HARNESS_BLOCKS as usize,
             "the lowered alias observer executes on every block"
         );
         assert_eq!(

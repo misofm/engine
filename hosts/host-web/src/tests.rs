@@ -1611,6 +1611,17 @@ fn paired_console_host(quantum: u32) -> AudioWorkletEngineHost {
     for index in 0..9 {
         let mut track = template.clone();
         track.id = session::StableId::parse(&format!("track-{index}")).expect("track id");
+        if index == 0 {
+            track.fader.left_db = -6.0;
+            track.fader.right_db = -6.0;
+            track.matrix_or_pan = session::MatrixOrPan::Matrix {
+                ll: 0.5,
+                lr: 0.0,
+                rl: 0.0,
+                rr: 1.0,
+                smoothing_samples: 0,
+            };
+        }
         model.tracks.push(track);
     }
     model.routes[0].source = session::RouteSource::Track {
@@ -1812,7 +1823,7 @@ fn acknowledged_pair_render_records_the_same_live_dispatch() {
         COMMAND_FADER_DB,
         255,
         2,
-        0,
+        8,
         0,
         0,
         0,
@@ -1824,7 +1835,7 @@ fn acknowledged_pair_render_records_the_same_live_dispatch() {
         COMMAND_MATRIX,
         255,
         255,
-        0,
+        8,
         0,
         0,
         0,
@@ -1842,6 +1853,12 @@ fn acknowledged_pair_render_records_the_same_live_dispatch() {
     feed_and_render(&mut host, 2, 0, 0.5);
     let witness = builtins_compiler::test_only_fader_matrix_witness();
     assert_eq!(witness.process_calls, 1);
+    assert_eq!(
+        witness.process_members, 1,
+        "the selected composite is track-8 tail"
+    );
+    assert_eq!(witness.fader_records_drained, 1);
+    assert_eq!(witness.matrix_records_drained, 1);
     assert_eq!(witness.fused_calls + witness.fallback_calls, 1);
     assert_eq!(
         witness.fused_calls, 1,
