@@ -89,3 +89,54 @@ Evidence so far:
   source workaround was made. The direct hermetic runtime gate passed independently.
 
 Root must checkpoint these exact paths before further edits; Astra review remains pending.
+# Issue #393 — attempt 2 addendum (Sol approved)
+
+**Attempt 1 verdict:** FAIL at `f21c426e`; Astra review: `/private/tmp/dx-393-astra-review.md`.  
+**Implementer/reviewer:** Luna performs this bounded revision under the user's explicit override; Astra re-reviews attempt 2.  
+**Scheduling:** do not begin while adapter issue #19 has an uncheckpointed tranche.  
+
+The approved product contract is unchanged: the shipped browser host alone allocates request IDs; public request payloads omit them; wire messages and acknowledgements retain them. No raw-worklet, Rust, ABI, render, receipt, or artifact-pin change is authorized.
+
+## Required corrections
+
+1. Update the authoritative `hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts` so command, observation, source, seek, meter, and telemetry request payloads exactly match the payload-only runtime. Keep every response `readonly requestId`. Keep `sdk/src/browser/shipped-host.d.ts` byte-identical to that authority.
+2. Narrowly update `scripts/check-command-reason-vocabulary.py` observation-shape assertions from `[requestId, subscriptions]` to `[subscriptions]`. Preserve every command-reason, subscription, binding, acknowledgement, and mutation discriminator. Add/adjust self-test mutations so restoring `requestId` in either the declaration or `observe()` exact-field guard turns the validator red; do not loosen comparison or delete a check.
+3. Complete the frozen regression evidence rather than substituting source inspection:
+   - compile-time and runtime old-shape refusal for all six caller-controlled request categories, each local refusal asserting `requestId === 0` and no post;
+   - at least 200 successful mixed calls on one real host fixture spanning command, observe, meters, telemetry, source, seek, status, and sessionMap, with strictly increasing unique acknowledgements in send order;
+   - both meter/command orderings and `createBrowserConsole(realHost) -> direct meters -> console.submit`, with no retry;
+   - every bounded response class: saturation refuses locally with ID zero/no send/no burn, then the next accepted request advances by exactly one; repeat after disposal;
+   - malformed source retains caller ownership, while accepted and engine-refused source paths preserve the existing transfer/return behavior;
+   - safe-integer boundary: a test-only transformed import starts the private counter at `MAX_SAFE_INTEGER - 1`, proves the last safe ID is emitted once, and proves repeated exhaustion rejects locally with invalid-request/ID zero, no post, wrap, or reuse. Do not add a production accessor or hook. The named mutation removing the exhaustion guard must fail this test.
+4. Extend the packed SDK consumer gate to compile payload-only calls for all six request categories against the staged declaration. Runtime packed-host coverage may reuse the existing host harness; no new browser matrix is required.
+
+## Meter callback note
+
+Attempt 1 removed caller IDs but did not intentionally redesign lease callbacks. Astra must compare the `meters()`/`telemetry()` callback assignment timing with `0e248bb0`. Tests for saturation/no-burn must not silently normalize unrelated pre-existing callback behavior. If attempt 1 introduced a callback-state regression, restore baseline behavior in the host JS; if baseline already mutates callbacks before admission, record it outside #393 and do not broaden this revision.
+
+## Amended exact allowed paths
+
+- `.github/ISSUE_SPECS/393-give-the-browser-host-sole-ownership-of-its-request-id-ledger.md` (attempt/evidence record only)
+- `hosts/host-web/web/miso-engine-v1-audio-worklet-host.js`
+- `hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts`
+- `sdk/src/browser/shipped-host.d.ts`
+- `sdk/src/browser/console.ts`
+- `hosts/host-web/qualification/qualification.js`
+- `scripts/test-web-audioworklet.mjs`
+- `scripts/test-web-audioworklet.sh` only for the safe-integer red mutation runner if the existing module override cannot express it in the `.mjs` test
+- `scripts/check-command-reason-vocabulary.py` (newly approved, narrow observation request-shape update plus discriminating mutations)
+- `sdk/test/console-evals.mjs`
+- `sdk/test/console-types.ts`
+- `sdk/test/package-tarball-smoke.mjs`
+
+No other path is authorized. In particular, do not touch `hosts/host-web/web/miso-engine-v1-audio-worklet.js`, any Rust/Wasm/generated ABI asset, or `hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256`. The artifact-pin mismatch is under separate baseline investigation and must not be repinned or attributed to #393.
+
+## Validation required before Astra re-review
+
+- Focused: `node scripts/test-web-audioworklet.mjs`; `python3 -B scripts/check-command-reason-vocabulary.py --self-test`; `python3 -B scripts/check-command-reason-vocabulary.py`; `scripts/check-sdk-types.sh`; `scripts/check-sdk-generated.sh`.
+- Full proportional gates from the frozen spec: `scripts/test-web-audioworklet.sh`, `scripts/check-sdk-headless.sh`, `scripts/check-sdk-deletions.py`, `scripts/sdk-package.sh check`, focused browser correctness, and browser qualification.
+- Attach the safe-integer red-mutation failure, exact mixed-call count, acknowledgement range/order, per-class saturation/no-burn table, all-six type/runtime shape results, packed-consumer result, and diff proof that raw worklet/Rust/Wasm/artifact pin remain unchanged.
+
+Attempt 2 passes only when both P1 findings are corrected and every previously missing frozen gate has executable evidence. Do not lower a gate because attempt 1 omitted it.
+
+Root baseline qualification ruling: unchanged base `0e248bb0` and PR `f21c426e` both rebuild on Darwin arm64/Rust 1.97.1 to digest `2f7941af57dbbee29f9407ee8a65cd58eac376f45f336ac40bd92690d415563b`, while the frozen pin is `22e4c25cba7f97b66db720ad8ac8cf653de0afcabe84101693f4fa166b90d4e6`. This repeats the existing cross-host reproducibility limitation recorded in #333/#345, not a Rust change in this issue. Use the exact successful baseline CI run `33930536895`, artifact `9958403991` (`audioworklet-0e248bb07cfbf7dd136ec48649ec61ee9171d15b`), retaining its unchanged pinned Wasm/worklet/metadata and overlaying only this PR's host JS/declaration for package/browser checks. Do not repin. Root retains baseline logs and downloaded originals separately.
