@@ -151,6 +151,11 @@
 # bank count, and #175 wrote its equality specifically so that the day the graph layer took the
 # saving, the equality would go red and say so.
 #
+# `--issue388-lane4-evidence` is the evidence-only, unconsumed arm for #388's fix-forward of
+# LANE-4. The original `compressor-round1` arm is a tracked one-shot authority and cannot be
+# overwritten from a clean checkout. This arm measures the merged class-A implementation once,
+# preserves its disposition beside the raw and accepted records, and makes no performance claim.
+#
 # `--round2-lane` and `--round2-lane-baseline` are the paired arms of round 2's lane lowerings:
 # `Lane::select` emitted as `blendv` instead of the three-instruction `bitselect`, and
 # `Lane::max`/`Lane::min` emitted as the one instruction x86 and wasm each have with the D8 rule
@@ -227,6 +232,7 @@ if [[ "$#" == 1 ]]; then
         --issue175) phase_directory=issue175 ;;
         --issue182) phase_directory=issue182 ;;
         --issue-loop-eq-r1) phase_directory=issue-loop-eq-r1 ;;
+        --issue388-lane4-evidence) phase_directory=issue388-lane4-evidence ;;
         --compressor-round1) phase_directory=compressor-round1 ;;
         --compressor-round1-baseline) phase_directory=compressor-round1-baseline ;;
         --round1-composed) phase_directory=round1-composed ;;
@@ -253,10 +259,10 @@ if [[ "$#" == 1 ]]; then
         --mono3) phase_directory=mono3 ;;
         --mono3-baseline) phase_directory=mono3-baseline ;;
         --issue368-floor-recount) phase_directory=issue368-floor-recount ;;
-        *) printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline|--strip2|--strip2-baseline|--strip3|--strip3-baseline|--strip4|--mono2|--mono3|--mono3-baseline|--issue368-floor-recount]\n' "$0" >&2; exit 2 ;;
+        *) printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--issue388-lane4-evidence|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline|--strip2|--strip2-baseline|--strip3|--strip3-baseline|--strip4|--mono2|--mono3|--mono3-baseline|--issue368-floor-recount]\n' "$0" >&2; exit 2 ;;
     esac
 elif [[ "$#" != 0 ]]; then
-    printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline|--strip2|--strip2-baseline|--strip3|--strip3-baseline|--strip4|--mono2|--mono3|--mono3-baseline|--issue368-floor-recount]\n' "$0" >&2
+    printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--issue388-lane4-evidence|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline|--strip2|--strip2-baseline|--strip3|--strip3-baseline|--strip4|--mono2|--mono3|--mono3-baseline|--issue368-floor-recount]\n' "$0" >&2
     exit 2
 fi
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)

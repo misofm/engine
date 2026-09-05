@@ -157,3 +157,22 @@ Root assigns the bounded second attempt to Sol. #404 is the separately numbered 
 Sol separated dependency extraction and sorting into independently status-checked operations, without changing caller shell options or relying on caller `pipefail`. Focused tests now preserve a real match alongside a missing root and assert both facts; exercise match, clean, missing-path and non-path scan outcomes; cover dependency sorting/section scope plus missing, partial-output awk and sort failures with `pipefail` on/off and conditional invocation; and retain caller cwd/options. Rack mutations now directly reach unsafe, control/I/O, feature detection, missing `crates/rack/src`, manifest and extractor error classes, plus a valid foreign-CWD fixture that cannot substitute its own helper.
 
 Focused PASS logs: `/tmp/engine-400-sol-gate-lib.log`, `/tmp/engine-400-sol-rack-mutations.log`, `/tmp/engine-400-sol-workspace-mutations.log`, `/tmp/engine-400-sol-rack.log`, `/tmp/engine-400-sol-workspace.log`. Shell syntax passed for the shared library, both gates and all three affected suites. This is an uncommitted focused-green checkpoint for root to inspect and commit before Astra review; no full workspace run, benchmark or artifact work is claimed.
+
+## Astra attempt 2 verdict — focused PASS
+
+# Astra #400 attempt 2 verdict
+
+**PASS for focused acceptance at exact pushed head `58e1575038c32696e4114dbbd253b985284793d3`.** Proceed to the full-workspace/final-delivery gates; no further source revision requested. This is Sol's successful second implementation attempt, not final PR approval.
+
+Reviewed the frozen #400 contract and four failures from abbab608. Extraction now checks awk before sorting and separately checks sort failure, independent of caller pipefail. The previous missing-manifest silent-success repro now fails explicitly with pipefail off. Source parsing, sorted output, no-glob behavior, caller cwd/options and existing workspace/rack policies remain unchanged. No deferred #404 scan was pulled into the implementation; parent/successor spec additions are root accounting work.
+
+Independent reruns PASS: test-gate-lib.sh, test-rack-policy.sh, test-workspace-policy.sh and both real policy gates. The combined scan now retains the actual forbidden match alongside the missing path and asserts both evidence and error class. Helper cases cover representative sorted dependencies and dev exclusion, missing input in direct/conditional invocation with pipefail off/on, partial-output awk status 7 and sort status 8. Rack tests now include the actual missing-src fixture, both omitted bans, explicit extraction errors and a foreign-CWD fixture whose fake helper must not be sourced.
+
+I additionally performed reviewer counter-mutations in disposable temporary copies, leaving repository files unchanged: restoring the old extractor is rejected by the missing-manifest assertion; accepting a real forbidden match is rejected as unexpected success; changing the missing-root diagnostic is rejected; accepting sort failure is rejected by the sort-status assertion. These supply the frozen assertion-liveness evidence absent from the implementation's recorded focused logs. Root should record these checks in the final issue/PR evidence; no new test framework or implementation attempt is needed to do so.
+
+Limits: the shell suites intentionally do not solve workspace's deferred positive queries/walkers (#404), other policy gates (#401–#403), or broaden the original dependency parser grammar. A printf feeding already captured text to sort is not the former unchecked external awk producer. No remaining behavior blocker was found within this API/shape.
+
+Root must now complete the unchanged-count full-workspace comparison, synchronize final evidence and open/update the actual PR. Astra exact pushed-head review and required qualification SUCCESS remain mandatory before merge. No Cargo, benchmark, artifact rebuild, repository edit or GitHub mutation was performed by this review.
+
+
+Root normally merged post-#388 main `0c2b283f86b199351b78be99784def7c614c0320` without conflicts after the focused PASS. The implementation is unchanged; final full-workspace comparison against this synchronized base is pending.
