@@ -119,3 +119,7 @@ Execute the five frozen disposable counter-mutants THROUGH THE SAME assertions: 
 Run the real checker, complete focused suite and bash syntax/diff; shared helper is unchanged, so no extra helper work is requested. Root checkpoints/pushes and Astra gives one attempt-2 verdict. At most one subsequent Sol attempt remains if necessary; full workspace comparison and actual PR/required CI follow focused acceptance. Do not weaken or defer these explicitly assigned selective/error/counter gates to claim the present green suite satisfies them.
 
 This verdict used source, complete brief, workflow and completed-log inspection. No tests, Cargo, timing, repository/Git or GitHub mutation were performed.
+
+## Sol attempt 2 evidence revision
+
+The focused disposable suite now preserves checker diagnostics and requires each negative case to fail for its assigned operation or policy class. It covers the distinct JSON pin, exact required rows, all six selectively failed direct scans, all five plausible anchor partial failures, malformed and zero line fields, early-clone first-match ordering, missing/error-only/partial allowlist reads, both failure modes for each of four find calls with an exactly allowlisted partial path, all three discovery shapes, sorted first reporting and checked sort failure, exact retired allowlisting/exclusions and both retired-search failure modes. Five executed disposable counter-mutants accept only the injected incomplete result; the same unexpected-success assertion rejects each with recorded assertion status 97.
