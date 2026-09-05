@@ -1,0 +1,16 @@
+original: exit 9
+INJECTED-occurrence-registered
+mul_add(
+unfused seal failure: fused-call search failed for tools/wasm-gates/tests/g5_native_corpus.rs (rg status 9)
+
+actual-mutant: exit 0
+unfused seal: ok (no fused multiply-add on any path; 8 registered audit calls)
+INJECTED-occurrence-registered
+mul_add(
+unfused seal failure: fused-call search failed for tools/wasm-gates/tests/g5_native_corpus.rs (rg status 9)
+
+status-loss-without-registry-substitution: exit 1
+INJECTED-occurrence-registered
+mul_add(
+unfused seal failure: fused-call search failed for tools/wasm-gates/tests/g5_native_corpus.rs (rg status 9)
+unfused seal failure: tools/wasm-gates/tests/g5_native_corpus.rs has  fused calls, the registry says 1

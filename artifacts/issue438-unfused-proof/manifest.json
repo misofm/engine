@@ -1,0 +1,98 @@
+{
+  "source_acceptance": "3f8e5dd0c06414dcf5a6f6b9dc5c68c48297fc1a",
+  "workspace_candidate": "67ac8993e087ab936b5d314b5d0aa68744095be8",
+  "workspace_command": "cargo test --locked --workspace",
+  "workspace_exit": 0,
+  "workspace_counts": {
+    "result_blocks": 274,
+    "passed": 1569,
+    "failed": 0,
+    "ignored": 24
+  },
+  "evidence": [
+    {
+      "source": "/tmp/astra-411-attempt1-review.md",
+      "retained_path": "artifacts/issue438-unfused-proof/astra-411-attempt1-review.md",
+      "bytes": 6300,
+      "sha256": "5b0313f5da64d87a3da6aa7b28638403272f02010fe0de495a32170803188f9b"
+    },
+    {
+      "source": "/tmp/astra-411-attempt2-review.md",
+      "retained_path": "artifacts/issue438-unfused-proof/astra-411-attempt2-review.md",
+      "bytes": 4594,
+      "sha256": "019ebc0ac0e94274eb3a1b01e07c002a5d56ecfecef81af78fe3c84dbae678e5"
+    },
+    {
+      "source": "/tmp/astra-411-attempt3-review.md",
+      "retained_path": "artifacts/issue438-unfused-proof/astra-411-attempt3-review.md",
+      "bytes": 3112,
+      "sha256": "4d210eecf4b4e92039d2db9b3d46356670797170e06054c1e870e1a2d767bc79"
+    },
+    {
+      "source": "/tmp/astra-411-phase-proof.log",
+      "retained_path": "artifacts/issue438-unfused-proof/astra-411-phase-proof.log",
+      "bytes": 899,
+      "sha256": "0fe998a3575da5ec48425c10591ccbad474577a7a12625b6bbe7e7e80960dd72"
+    },
+    {
+      "source": "/tmp/astra-411-attempt3-counter-proof.log",
+      "retained_path": "artifacts/issue438-unfused-proof/astra-411-attempt3-counter-proof.log",
+      "bytes": 717,
+      "sha256": "68a48a53424f27ad0e152e6b73c2e0a57c3f0962206c45179af84ecb03bf158d"
+    },
+    {
+      "source": "/tmp/astra-438-numbered-review.md",
+      "retained_path": "artifacts/issue438-unfused-proof/astra-438-numbered-review.md",
+      "bytes": 2372,
+      "sha256": "bcda68c3a5b3877e97e5dcc0b6e94aba36b8b5b28e195d0459d62aebb6f80e3f"
+    },
+    {
+      "source": "/tmp/astra-438-attempt1-review.md",
+      "retained_path": "artifacts/issue438-unfused-proof/astra-438-attempt1-review.md",
+      "bytes": 2936,
+      "sha256": "7b93dfa2ac13cfbaa731c858711d0373151074b44e9920196546230a8ed91ddf"
+    },
+    {
+      "source": "/tmp/astra-438-attempt1-selftest.log",
+      "retained_path": "artifacts/issue438-unfused-proof/astra-438-attempt1-selftest.log",
+      "bytes": 4021,
+      "sha256": "9829e88a1381c9cc8416b0f9d897f40b3eff73dfa3747c7b42cf49495a28304d"
+    },
+    {
+      "source": "/tmp/astra-438-attempt1-status-proof.log",
+      "retained_path": "artifacts/issue438-unfused-proof/astra-438-attempt1-status-proof.log",
+      "bytes": 588,
+      "sha256": "86eed78f75bd051a8857541ad2ba828d19de2c57b44f8209df0b49ef31e1fc81"
+    },
+    {
+      "source": "/tmp/astra-438-mutant.diff",
+      "retained_path": "artifacts/issue438-unfused-proof/astra-438-mutant.diff",
+      "bytes": 983,
+      "sha256": "b55ede784e2d30377c0393e3d41c27b1f4ddda818bb91f2fd89dd44ccd76fc48"
+    },
+    {
+      "source": "/tmp/luna-438-selftest.log",
+      "retained_path": "artifacts/issue438-unfused-proof/luna-438-selftest.log",
+      "bytes": 4021,
+      "sha256": "54607c21062f743307c0bfa0fa53eb4122c610e94d904bf68a9f6965f17b3a68"
+    },
+    {
+      "source": "/tmp/luna-438-checker.log",
+      "retained_path": "artifacts/issue438-unfused-proof/luna-438-checker.log",
+      "bytes": 79,
+      "sha256": "a27647555db8711d5b277f2b783641c44f413f0a2e3bb2725859c075c0077a70"
+    },
+    {
+      "source": "/tmp/engine-438-policy-checks.log",
+      "retained_path": "artifacts/issue438-unfused-proof/engine-438-policy-checks.log",
+      "bytes": 89,
+      "sha256": "339e17ece84c2860a26d745bb8a9d0294b5b1b830574d4166ca448966565e5c1"
+    },
+    {
+      "source": "/tmp/engine-438-candidate-workspace.log",
+      "retained_path": "artifacts/issue438-unfused-proof/engine-438-candidate-workspace.log",
+      "bytes": 184763,
+      "sha256": "375127f919f24233615d6f4cf57e3985f1a6e58268d310e13f4e8a015b27418b"
+    }
+  ]
+}
