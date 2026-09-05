@@ -1,0 +1,35 @@
+# Make validated folded-cohort capacity and dispatch contracts agree
+
+Ready to number after #419 attempt-three FAIL at aafa59a17c4292f8f1837eac557e06e47305f1a4. This is an explicitly rescoped completion, not a fourth correction under the exhausted attempt budget. Root must first create/synchronize the numbered successor and amend parent #419 with this dependency; no source editing is authorized by this draft alone.
+
+## Parent and delivery boundary
+
+Parent #419 remains OPEN and owns the complete RT-2 one-ordered-master-pass capability, unchanged D9/first-store/continuation and binding witnesses, realtime/identity/allocator gates, immutable workspace/target/artifact/browser qualification, one frozen descriptive benchmark and final actual-PR Astra review/required CI. Nothing is weakened or moved out of the audit. This successor owns only the remaining coherent public-cohort shape and dispatch acceptance gap. No RT-3, deferred routing eligibility, lane algorithm, benchmark machinery or new framework.
+
+Preserve the failed coherent checkpoint and all earlier evidence/history. Root freezes the successor's exact recovery base and integrates current main normally. Carry completion into parent RT-2 delivery; do not merge a runtime-changing standalone child while bypassing the parent's required source/artifact qualification. Child closure requires its accepted evidence upstream; parent closure additionally requires ALL retained delivery obligations. One eventual integrated PR may close both only when their respective contracts pass.
+
+## Smallest exact product slice
+
+One invariant makes all successful public cohort values consumable by the unchanged default and graph callbacks. Freeze COMPLETE STRIDE capacity because both existing consumers and every production chain already require/provide it: required capacity = `(max(lane_ids) + 1) * stride`, with checked addition and multiplication. Both left/right slices must have at least this length. This intentionally rejects currently accepted underpadded requests at construction; do not silently reinterpret the default to discard them after success.
+
+Retain nonempty bounded 1..8 unique IDs, nonzero frames, stride >= frames, private immutable metadata and checked planes_mut arithmetic. Validate count before traversal. IDs are physical IDs, not compacted indices. No maximum track count; this is the bounded bank seam. Keep existing graph lane/store/master/lease checks before ANY per-lane transform. Safe production staging construction remains full bank width times quantum with used frames <= quantum, so the stricter public check rejects no valid existing chain request. Document that invariant next to construction/contract, without new render panics or allocation.
+
+Allowed implementation paths: crates/rack/src/lib.rs and crates/graph/src/runtime.rs, including their existing inline tests; existing crates/graph/tests/rt1_direct_bank_alloc.rs only if the bounded mechanism assertion actually needs it. Child/parent numbered evidence is root-owned. No lane source changes, Cargo/dependency/helper/workflow changes, new unsafe, public instrumentation or allocator implementation.
+
+## Discriminating acceptance
+
+1. Constructor boundary: IDs [0], stride4, frames2, L/R length2 must return error with poison untouched; both exactly4 must succeed. IDs [0,1], stride4, frames2, lengths6 must reject; exactly8 must succeed. Test one-sided undercapacity for both planes and checked max-ID-plus-one/multiplication overflow. Retain all prior invalid-count/duplicate/zero-frame/stride/offset cases. No unsafe forged values.
+2. For accepted exactly-sized and excess-padded shapes, call both the actual DEFAULT provider (only fold_plane overridden) and the existing cohort override; assert exactly one call per physical ID, both-plane bitwise PCM equality, stable ID order, no writes to stride-tail/extra sentinels. Include a holey ID example using the same checked capacity formula. Newly invalid requests fail before either provider can see them. Debug/release must agree.
+3. Retain graph malformed-late-store/unknown-ID/frame-beyond-lease nonpartial rejection, signed-zero poisoned-master test and existing independent opening/continuation oracle. Constructor and both consumers now share the same public shape formula; graph-only metadata failures remain explicitly separate.
+4. Supply the missing graph dispatch mechanism witness without production telemetry. A minimal TEST-ONLY BankMembers wrapper around the actual private ArenaMembers is sufficient: delegate reads/scatters and fold_cohort to the actual graph implementation, record cohort calls, and make fold_plane explicitly fail in that test wrapper. Run an actual all-active-folded BankChain with this provider and compare its output to the old route/reduction oracle. If the dispatch regresses to per-lane compatibility, this test must fail. Preserve separate compatibility and mixed-mask tests. Combined with the existing prepared-plan bank_route_folds ==4 and zero-allocation repeated renders, this establishes bind eligibility, actual dispatch and actual graph override behavior without changing production counters or relying on the unsupported earlier handoff phrase.
+5. Keep all accepted D9, first-store negative zero, finite prior-master continuation, W4/W8/holey/default/mixed, allocation liveness/mode isolation and route decline tests. No tolerance change, new fixture corpus or performance retry. A fixture cannot count calls solely in an override which then calls fold_plane and claim that it excludes the compatibility route.
+
+Focused gates are existing rack/graph debug and release (including isolated allocation), lane identity and console chain release, realtime and existing relevant policies, fmt/diff/clippy. Root runs them proportionally and checkpoints before further work. Full workspace and immutable target/artifact/browser delivery remain parent-owned after source acceptance; no benchmark is authorized during this completion.
+
+## Restarted bounded workflow
+
+Astra approves this numbered, synchronized amendment before assignment. Under user roles, Luna owns one coherent fresh bounded attempt, then Sol at most two revisions only after explicit Astra FAIL. Root may arrange the available agents but may not label an unreviewed continuation of the exhausted Sol attempt as completion. Every pass gets one exact checkpoint and one adversarial verdict; third failure again hard-stops. No source mutation begins before root's numbered rebrief/checkpoint and assignment.
+
+## Numbered recovery assignment
+
+This is #422, created and synchronized after parent #419 exhausted its three attempts. Recovery source is `aafa59a17c4292f8f1837eac557e06e47305f1a4`; current main integration is frozen before assignment. Astra supplied the exact complete-stride capacity and dispatch contract above. Luna owns one fresh bounded attempt; root owns evidence/parent synchronization, checkpoints and the retained parent qualification/delivery. No source edits preceded this numbered brief.

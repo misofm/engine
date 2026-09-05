@@ -166,3 +166,41 @@ The public cohort boundary is now fallible and validates nonempty bounded lane c
 A provider overriding only `fold_plane` is paired with the cohort override for repeated full W4, full W8, holey W8 and single-active W8 blocks. Both planes, physical callback order/count, PCM, inactive outputs and callback selection are compared; an empty active chain is explicitly unrepresentable. Graph tests retain compatibility `fold_plane`, run signed zero through the actual cohort override with a poisoned master, reject later-store/unknown-lane/frame-beyond-lease metadata before route/master mutation, and retain the opening/continuation independent oracle. The serialized allocation test asserts existing prepared-plan `bank_route_folds()` is zero for the direct fixture and four for the routed folded fixture before measuring repeated zero-allocation/free renders. The standing console comment now describes per-track retired routes and cohort accumulation accurately.
 
 Focused debug and release lane/rack/graph suites, the isolated allocation test, release console chain shape, realtime mutations, lane/rack/graph/workspace policies, formatting, diff hygiene and focused clippy are the final local gates. No timing, runner, artifact, full-workspace, Git or GitHub operation belongs to this attempt. Attempt 3 is the hard stop and requires Astra's final verdict.
+
+## Final attempt verdict — FAIL; hard stop and numbered completion
+
+# Astra #419 final attempt 3 review
+
+**FAIL at exact pushed `aafa59a17c4292f8f1837eac557e06e47305f1a4`. This is the hard stop: preserve the checkpoint and rescope/rebrief before further implementation. No fourth repair, timing, artifact or workspace promotion is authorized from this verdict.**
+
+## Concrete remaining contract defect
+
+The fallible public constructor and its two production consumers disagree on which slice capacities are valid.
+
+`FoldCohort::new` validates `max(lane_id * stride + frames)`. It therefore successfully constructs a cohort with IDs `[0]`, stride 4, frames 2, and left/right slices of length 2. Its checked `planes_mut(0)` correctly returns those complete two-frame planes. However both the default `BankMembers::fold_cohort` and graph `ArenaMembers::fold_cohort` retain the older requirement `(max_lane + 1) * stride`, which is 4 for this same request. They silently return without any fold callback or accumulation.
+
+The same discrepancy occurs with IDs `[0,1]`, stride 4, frames 2 and six-element planes. The override test provider consumes such a constructor-approved cohort via planes_mut; the trait default silently drops it. Thus the promised default equivalence is not established for the public accepted domain. This is a deterministic API/semantic defect, not arithmetic reassociation or an unsafe-memory claim. The production chain currently allocates fully padded staging, so this finding does not claim that ordinary prepared renders currently lose samples.
+
+The new valid-stride fixture has eight-element planes and consequently covers padding preservation but not the exact accepted-capacity boundary. It misses this disagreement. There must be one explicit shape contract shared by construction, default delegation and graph validation: either require complete final stride padding at construction or accept only the actually accessed frame endpoints everywhere. A success value cannot mean “valid” for the accessor and “silently discarded” for default delegation. Choosing and proving that boundary belongs to the post-stop amended scope, not an unreviewed patch under attempt 3.
+
+## Improvements accepted and preserved
+
+The constructor rejects empty/over-eight/duplicate IDs, zero frames, stride-short requests, left/right short slices and overflowing offsets before returning a value. Its count bound precedes traversal, private fields prevent forging and planes_mut now uses checked arithmetic. Those address the earlier overflow/panic finding. Prepared dispatch handles constructor results without marked expect/unwrap. No new unsafe or unbounded fan-in change appears.
+
+The paired default-only and override providers now cover repeated full W4/W8, holey W8 and single-active W8 calls, both planes and physical IDs. Empty active chains are explicitly rejected at construction. Mixed callback order remains corrected. New strided sentinels cover unused tails. Graph shape tests cover late-store/unknown metadata and frames beyond the lease without route/master mutation. The new actual cohort signed-zero test poisons the old master and confirms the routed input and output preserve negative zero; compatibility coverage remains.
+
+The allocation integration remains one serialized function with positive thread-scoped liveness and mode restoration. It now asserts the direct plan has zero folded routes and the routed plan has four before measured renders, retaining four afterward, with zero allocations/frees. The independent D9 lane and routed opening/continuation oracles remain intact. Root corrected the handoff: its test-only compatibility-path rejection phrase was an inference, not evidence. No separate rejecting mechanism is present in the committed source/spec or named logs. Preserve the prepared fold count, but complete the explicitly assigned override-specific rejection witness in the numbered successor; do not inherit the unsupported claim.
+
+Completed logs show focused lane/rack/graph debug and release green (graph includes its isolated allocation test), console chain release 21 passing, realtime 42 regions/12 files and mutations, lane/rack/graph/workspace policies, and clippy completion with the recorded warnings. These checks did not include the accepted-domain counterexample above. No blanket qualification PASS follows from green existing cases.
+
+## Hard-stop disposition
+
+Preserve all three attempt checkpoints and candid evidence. Root should record the remaining accepted-shape disagreement, then amend/rebrief one bounded completion outcome before restarting the workflow. Keep ordered accumulation, corrected mixed dispatch and accepted representative tests; do not expand into RT-3, change D9 or introduce new tooling. The next bounded scope must freeze one capacity formula and test its exact boundary through constructor/accessor/default/graph consumers, plus record the outstanding mechanism evidence accurately. Broader qualification and the single frozen benchmark remain after semantic acceptance. This report is not permission for a fourth #419 correction under the current attempt budget.
+
+Review used source/spec and completed-log inspection only. The arithmetic counterexample was established directly from the checked formulas; no malformed Rust reproduction, Cargo, timing, repository/Git or GitHub mutation was executed.
+
+Ready-to-number bounded successor brief: `/tmp/astra-419-cohort-completion-brief.md`. Parent #419 keeps every original RT-2 product and qualification obligation until the completion and final delivery are accepted.
+
+## Rescoped dependency #422
+
+The three source attempts are exhausted and preserved. #422 now owns the remaining validated public-cohort capacity agreement and actual graph dispatch mechanism proof under Astra's separately frozen completion brief. No fourth correction is authorized under this issue's exhausted attempt sequence. This parent remains OPEN and retains every RT-2 arithmetic, binding, realtime, identity, allocation, workspace, supported-target, immutable-artifact/browser, one-invocation descriptive measurement and final PR/CI obligation. One integrated final PR may close #422 and #419 only after both complete contracts pass; there is no standalone runtime merge bypass.
