@@ -12,15 +12,31 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
 
+scratch="$(mktemp -d)"
+trap 'rm -rf -- "$scratch"' EXIT
+
 fail() {
     echo "check-realtime-audit-leak: $1" >&2
     exit 1
 }
 
+for required_root in crates hosts sidecars; do
+    [[ -d "$required_root" ]] || fail "missing required root: $required_root"
+done
+
+if find crates hosts sidecars -mindepth 2 -maxdepth 2 -name Cargo.toml >"$scratch/manifests" 2>"$scratch/find.err"; then
+    find_status=0
+else
+    find_status=$?
+fi
+((find_status == 0)) || fail "manifest discovery failed with status $find_status: $(<"$scratch/find.err")"
+LC_ALL=C sort "$scratch/manifests" >"$scratch/manifests.sorted" || fail 'manifest sort failed'
+[[ -s "$scratch/manifests.sorted" ]] || fail 'manifest discovery produced no packages'
+
 # Structural half: inside crates/ and hosts/ manifests, only dev-dependency sections (and the
 # forwarding `[features]` declaration in conformance itself) may mention the feature.
 while IFS= read -r manifest; do
-    violation="$(awk -v file="$manifest" '
+    if awk -v file="$manifest" '
         /^\[/ { section = $0 }
         /realtime-audit/ {
             dev = section ~ /dev-dependencies/
@@ -28,19 +44,40 @@ while IFS= read -r manifest; do
             declaration = file ~ /engine\/Cargo.toml/ && section == "[features]"
             if (!dev && !forwarding && !declaration) { print file ": " $0; exit }
         }
-    ' "$manifest")"
+    ' "$manifest" >"$scratch/awk" 2>"$scratch/awk.err"; then
+        awk_status=0
+    else
+        awk_status=$?
+    fi
+    ((awk_status == 0)) || fail "manifest parser failed for $manifest with status $awk_status: $(<"$scratch/awk.err")"
+    violation="$(<"$scratch/awk")"
     [[ -z "$violation" ]] || fail "non-dev feature enable: $violation"
-done < <(find crates hosts sidecars -mindepth 2 -maxdepth 2 -name Cargo.toml | sort)
+done < "$scratch/manifests.sorted"
 
 # Resolution half: the compiler's own answer. `-e features,no-dev` is the graph a shipped build
 # of the package resolves; `--target all` keeps target-gated edges visible.
 while IFS= read -r manifest; do
-    package="$(awk -F'"' '/^name = /{print $2; exit}' "$manifest")"
-    [[ -n "$package" ]] || fail "unnamed package manifest: $manifest"
-    if cargo tree --locked --offline -p "$package" -e features,no-dev --target all 2>/dev/null \
-        | grep -q 'realtime-audit'; then
-        fail "production graph of $package resolves core's realtime-audit feature"
+    if awk -F'"' '/^name = /{print $2; exit}' "$manifest" >"$scratch/package" 2>"$scratch/awk.err"; then
+        awk_status=0
+    else
+        awk_status=$?
     fi
-done < <(find crates hosts sidecars -mindepth 2 -maxdepth 2 -name Cargo.toml | sort)
+    ((awk_status == 0)) || fail "package-name parser failed for $manifest with status $awk_status: $(<"$scratch/awk.err")"
+    package="$(<"$scratch/package")"
+    [[ -n "$package" ]] || fail "unnamed package manifest: $manifest"
+    if cargo tree --locked --offline -p "$package" -e features,no-dev --target all >"$scratch/cargo" 2>"$scratch/cargo.err"; then
+        cargo_status=0
+    else
+        cargo_status=$?
+    fi
+    ((cargo_status == 0)) || fail "cargo tree failed for $package with status $cargo_status: $(<"$scratch/cargo.err")"
+    [[ -s "$scratch/cargo" ]] || fail "cargo tree produced no graph for $package"
+    if grep -q 'realtime-audit' "$scratch/cargo"; then
+        fail "production graph of $package resolves core's realtime-audit feature"
+    else
+        grep_status=$?
+        ((grep_status == 1)) || fail "cargo graph scan failed for $package with status $grep_status"
+    fi
+done < "$scratch/manifests.sorted"
 
 echo "check-realtime-audit-leak: OK"

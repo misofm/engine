@@ -11,7 +11,9 @@ new_case() {
     case_root="$scratch/$1"
     mkdir -p "$case_root/scripts"
     cp -R "$root/tools" "$case_root/"
-    mkdir -p "$case_root/crates" "$case_root/hosts"
+    mkdir -p "$case_root/crates/fixture" "$case_root/hosts/fixture" "$case_root/sidecars/fixture"
+    printf '[package]\nname = "fixture"\nversion = "0.1.0"\nedition = "2021"\n' \
+        >"$case_root/crates/fixture/Cargo.toml"
     cp "$root/scripts/check-bench-policy.sh" "$case_root/scripts/"
 }
 
@@ -24,8 +26,46 @@ expect_failure() {
     fi
 }
 
+expect_failure_with_path() {
+    local label="$1" shim="$2"
+    if PATH="$shim:$PATH" check >/dev/null 2>&1; then
+        printf 'bench policy mutation escaped: %s\n' "$label" >&2
+        exit 1
+    fi
+}
+
 new_case baseline
 check >/dev/null
+
+for required_root in crates hosts sidecars; do
+    new_case "missing-$required_root"
+    rm -rf "$case_root/$required_root"
+    expect_failure "missing-$required_root"
+done
+
+new_case empty-manifest-population
+rm -rf "$case_root/crates" "$case_root/hosts" "$case_root/sidecars"
+mkdir -p "$case_root/crates" "$case_root/hosts" "$case_root/sidecars"
+expect_failure empty-manifest-population
+
+new_case manifest-discovery-status-loss
+mkdir -p "$case_root/shim"
+printf '#!/usr/bin/env bash\nprintf "crates/fixture/Cargo.toml\\n"\nexit 1\n' \
+    >"$case_root/shim/find"
+chmod +x "$case_root/shim/find"
+expect_failure_with_path manifest-discovery-status-loss "$case_root/shim"
+
+new_case manifest-sort-error
+mkdir -p "$case_root/shim"
+printf '#!/usr/bin/env bash\nexit 2\n' >"$case_root/shim/sort"
+chmod +x "$case_root/shim/sort"
+expect_failure_with_path manifest-sort-error "$case_root/shim"
+
+new_case manifest-awk-error
+mkdir -p "$case_root/shim"
+printf '#!/usr/bin/env bash\nexit 2\n' >"$case_root/shim/awk"
+chmod +x "$case_root/shim/awk"
+expect_failure_with_path manifest-awk-error "$case_root/shim"
 
 new_case second-allocator
 printf '\nunsafe impl GlobalAlloc for Second {}\n' \

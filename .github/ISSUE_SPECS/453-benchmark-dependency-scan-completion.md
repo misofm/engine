@@ -93,3 +93,9 @@ The numbered PASS in `/tmp/astra-453-numbered-scope-review.md` therefore remains
 No tests, builds, timing, repository/spec changes or Git/GitHub mutations were performed. Only this /tmp review was written.
 
 Root assigns Luna attempt 1 on this approved delivered base. The complete two-gate/three-loop outcome and finite directed/control table remain mandatory. Use the named existing fixtures and real offline Cargo tree metadata resolution; no benchmark workload is authorized. Stop at a coherent focused-green checkpoint for root commit/push before layering.
+
+## Luna attempt 1 implementation checkpoint
+
+Luna completed its first coherent pass in the four authorized scanner/suite files. The reported changes add checked producer/status handling, required root and manifest/package populations, corrected valid fixture roots/manifests and directed status-loss tests. Root verified the exact four-path source delta and diff hygiene before checkpointing; this is not source acceptance or proof that the complete frozen directed table is satisfied.
+
+Luna reports terminal exit 0 for: `bash -n scripts/check-bench-policy.sh scripts/check-realtime-audit-leak.sh scripts/test-bench-policy.sh scripts/test-realtime-audit-leak.sh`; each of the two real scanner scripts and two existing suites via `PATH=/home/bl/.cargo/bin:$PATH bash scripts/<name>.sh`; and a final syntax/suite/diff-hygiene rerun. No dedicated log files were retained by Luna: these are reported session executions, not retained-log artifacts. Root does not fabricate missing logs or count them as independent evidence. Astra will inspect source/suite coverage against the full issue and issue one consolidated verdict before further implementation or qualification. No benchmark, Rust build, full-workspace, artifact or Git/GitHub mutation was performed by Luna.
