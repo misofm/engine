@@ -1,7 +1,6 @@
-//! Plan-owned disjoint audio arena for the native dependency-wave executor.
+//! Plan-owned disjoint audio arena for the sequential render executor.
 //!
-//! The native executor renders one dependency wave at a time. Inside a wave, several parcels run
-//! concurrently on auxiliary workers; between waves the coordinator owns every parcel. Before
+//! The render executor consumes one prepared lease sequentially. Before
 //! issue #100 each parcel owned a private arena and the coordinator copied every inter-parcel
 //! edge between waves, which serialised all data movement onto the render thread. The pull model
 //! instead gives the whole plan **one** arena and lets each consuming parcel read its producers'
@@ -19,16 +18,10 @@
 //!   written by a lease of a strictly smaller wave, or by the reading lease itself. A producer of
 //!   an earlier wave has finished, and its parcel has been recovered by the coordinator, before
 //!   any consumer of a later wave is issued.
-//! * **I3 — waves are separated by a happens-before edge.** The scheduler issues one wave at a
-//!   time and recovers every issued parcel through the SPSC release/acquire pair before it issues
-//!   the next, so an earlier wave's writes are visible to a later wave's reads.
-//! * **I4 — a parcel the coordinator does not own is never read.** When a worker misses its
-//!   deadline the coordinator marks its buffers muted ([`ArenaLease::set_muted`]); a muted read
-//!   returns the always-zero silence buffer instead. A late worker can therefore only ever write
-//!   its own unique slots, which nobody reads until its parcel is reaped.
 //!
 //! Buffer `0` is the silence buffer. No lease may write it, so it stays zero for the life of the
-//! arena and is what every muted read observes.
+//! arena.
+
 #![allow(unsafe_code)]
 
 use core::{cell::UnsafeCell, num::NonZeroUsize};
@@ -84,11 +77,9 @@ pub struct DisjointArena {
 }
 
 // SAFETY: the arena hands out access only through `ArenaLease`, and a lease set is constructed
-// only by `ArenaLeaseSetBuilder::finish`, which proves I1 and I2 (module documentation). I3 and
-// I4 are discharged by the scheduler: one wave at a time with an acquire/release edge between
-// waves, and no read of a parcel the coordinator does not own. Under I1 no two leases can
-// mutably alias, and under I2/I3/I4 no read can overlap a concurrent write, so sending leases to
-// worker threads never produces a data race.
+// only by `ArenaLeaseSetBuilder::finish`, which proves I1 and I2 (module documentation). The
+// sequential executor retains the lease while it reads and writes, so no concurrent access is
+// introduced. Under I1 no two leases can mutably alias, and under I2 no read can overlap a write.
 unsafe impl Sync for DisjointArena {}
 // SAFETY: `f32` is `Send`, and a lease carries no thread-affine state.
 unsafe impl Send for DisjointArena {}
@@ -146,31 +137,22 @@ pub type ArenaStereoPlanes<'a> = (&'a mut [f32], &'a mut [f32]);
 /// an auxiliary worker) and deliberately not `Sync`.
 pub struct ArenaLease {
     arena: Arc<DisjointArena>,
-    /// Per buffer: bit 0 writable by this lease, bit 1 muted for this lease.
+    /// Per buffer: bit 0 writable by this lease.
     access: Box<[u8]>,
-    wave: usize,
 }
 
 const ACCESS_WRITE: u8 = 0b01;
-const ACCESS_MUTED: u8 = 0b10;
 
 impl core::fmt::Debug for ArenaLease {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         formatter
             .debug_struct("ArenaLease")
-            .field("wave", &self.wave)
             .field("buffers", &self.arena.buffers)
             .finish()
     }
 }
 
 impl ArenaLease {
-    /// The wave this lease belongs to.
-    #[must_use]
-    pub const fn wave(&self) -> usize {
-        self.wave
-    }
-
     /// Frames in one buffer.
     #[must_use]
     pub fn frames(&self) -> usize {
@@ -185,39 +167,15 @@ impl ArenaLease {
             .is_some_and(|access| access & ACCESS_WRITE != 0)
     }
 
-    /// Redirect (or restore) this lease's reads of `buffer` to the silence buffer.
-    ///
-    /// The coordinator calls this while it owns the parcel, after a worker misses its deadline
-    /// and its outputs become unreadable (I4), and again once the parcel has been reaped.
-    pub fn set_muted(&mut self, buffer: u32, muted: bool) {
-        if let Some(access) = self.access.get_mut(buffer as usize) {
-            if muted {
-                *access |= ACCESS_MUTED;
-            } else {
-                *access &= !ACCESS_MUTED;
-            }
-        }
-    }
-
-    /// Whether reads of `buffer` currently return silence.
-    #[must_use]
-    pub fn is_muted(&self, buffer: u32) -> bool {
-        self.access
-            .get(buffer as usize)
-            .is_some_and(|access| access & ACCESS_MUTED != 0)
-    }
-
     // REALTIME_POLICY_BEGIN
 
     #[inline]
     fn effective(&self, buffer: u32) -> usize {
         let index = buffer as usize;
-        debug_assert!(index < self.arena.buffers, "read of an unreserved buffer");
-        if self.access[index] & ACCESS_MUTED == 0 {
-            index
-        } else {
-            ARENA_SILENCE_BUFFER as usize
-        }
+        // This checked access is a release-mode read-ID guard. Keep it before forming the
+        // unchecked arena slice below; debug_assert alone would remove the safety boundary.
+        let _ = self.access[index];
+        index
     }
 
     #[inline]
@@ -232,7 +190,7 @@ impl ArenaLease {
         index
     }
 
-    /// One buffer's frames in `plane`, shared. A muted buffer reads as silence.
+    /// One buffer's frames in `plane`, shared.
     #[inline]
     #[must_use]
     pub fn read(&self, plane: usize, buffer: u32) -> &[f32] {
@@ -250,7 +208,7 @@ impl ArenaLease {
         }
     }
 
-    /// Both planes of one buffer, shared. A muted buffer reads as silence.
+    /// Both planes of one buffer, shared.
     #[inline]
     #[must_use]
     pub fn read_stereo(&self, buffer: u32) -> (&[f32], &[f32]) {
@@ -386,8 +344,8 @@ impl ArenaLease {
             self.arena.offset(plane, second_index),
         );
         // SAFETY: I1 for the mutable range, I2/I3/I4 for the two shared ranges. The two shared
-        // ranges may be the same buffer (two muted reads both resolve to silence), which is
-        // sound: they are shared references. Neither can be the output buffer.
+        // ranges may be the same buffer, which is sound: they are shared references. Neither
+        // can be the output buffer.
         unsafe {
             (
                 core::slice::from_raw_parts_mut(
@@ -606,7 +564,6 @@ impl ArenaLeaseSetBuilder {
                 ArenaLease {
                     arena: Arc::clone(&arena),
                     access,
-                    wave: lease.wave,
                 }
             })
             .collect();
@@ -707,22 +664,16 @@ mod tests {
     }
 
     #[test]
-    fn a_muted_read_is_silence_and_unmuting_restores_it() {
+    fn release_read_id_bounds_check_rejects_unreserved_buffer() {
         let mut build = builder();
-        let produced = build.reserve();
-        let consumed = build.reserve();
-        build.lease(0, vec![produced], Vec::new());
-        build.lease(1, vec![consumed], vec![produced]);
+        let owned = build.reserve();
+        build.lease(0, vec![owned], vec![owned]);
         let (_arena, mut leases) = build.finish().expect("valid lease set");
-        let mut consumer = leases.pop().expect("consumer lease");
-        let mut producer = leases.pop().expect("producer lease");
-        producer.write(0, produced).fill(7.0);
-        assert_eq!(consumer.read(0, produced), &[7.0; 4]);
-        consumer.set_muted(produced, true);
-        assert!(consumer.is_muted(produced));
-        assert_eq!(consumer.read(0, produced), &[0.0; 4]);
-        consumer.set_muted(produced, false);
-        assert_eq!(consumer.read(0, produced), &[7.0; 4]);
+        let lease = leases.pop().expect("the lease");
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = lease.read(0, 2);
+        }));
+        assert!(result.is_err(), "unreserved read ID must be rejected");
     }
 
     #[test]

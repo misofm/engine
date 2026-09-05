@@ -40,6 +40,12 @@ multi-wave issue discipline and a coordinator that could decline to own a parcel
 executor and one lease over the whole coloured arena, both are trivially satisfied rather than
 enforced.
 
+The sequential lease no longer carries scheduler-era wave or mute state: `ArenaLease::wave`,
+`set_muted`, and `is_muted` are retired public Rust methods. The builder's wave remains because
+`finish` still rejects same-wave and later-wave reads. Read IDs continue to perform an explicit
+release-mode access-table bounds check before the arena's raw slice is formed; the access byte's
+WRITE bit and all write/alias proofs remain active.
+
 ## Unsafe-code ownership
 
 The workspace denies unsafe code. If a later approved issue needs a narrow exception, it is limited

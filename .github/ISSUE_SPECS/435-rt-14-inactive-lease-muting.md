@@ -87,3 +87,7 @@ The numbered ruling explicitly authorizes intentional removal of public Rust Are
 No implementation, builds, tests, timing, source edits or Git/GitHub mutation performed. The unrelated dirty root-main research checker was untouched; review used the clean dedicated planning worktree. Luna gets one coherent attempt, Sol only following Astra FAIL for at most two revisions, then the prescribed hard stop/rescope.
 
 Root assigns Luna attempt 1 on this approved base. #435 is the sole active runtime feature; #412 is independent tooling and #430/#442/#443/#444 remain planning work.
+
+## Luna attempt 1 source checkpoint
+
+Luna changed only disjoint lease implementation/tests, graph mute-specific test legs and realtime dependency prose. Reported focused disjoint debug/release 9/9 each and graph runtime debug/release 16/16 each; realtime, graph and workspace policies, fmt, clippy and diff checks passed. Clippy retained pre-existing configuration notices. Logs are `/tmp/luna-435-*`; no full workspace, target/artifact qualification or measurement is claimed. Root checkpoints this coherent source and will run the existing repeated render allocation fixture before adversarial review. Acceptance remains pending.
