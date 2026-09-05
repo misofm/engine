@@ -189,3 +189,7 @@ This briefing performed only source/issue inspection and the two non-timed polic
 ## Recovery checkpoint — 2026-09-05
 
 The remote PR head 20ea904d was normally merged with post-#369 main `1ef2375c0a9fa4b1481e844a1f68f48d22f8dc6f` without conflicts in a separate recovery worktree. Existing dirty/revised worktrees remain preserved. Artifact qualification is pending; inherited hashes are not claimed as this candidate’s evidence. Current user-assigned Astra/Luna/Sol roles supersede earlier implementation assignments.
+
+### Reproducible artifact checkpoint
+
+Luna recovery pass rebuilt the merged source twice: repin and no-repin builds agree at `a89c9606bfa72d69ced42b606cc4b7000d1b53f2b419b12ec63649a385b3eaf1`. Source pin, publisher expectation, and current qualification prose are synchronized; historical measurements are unchanged. Static AudioWorklet, realtime 42-region/12-file policy and mutations, workspace policy, formatting and publisher equality pass. Browser qualification is pending for the immutable candidate committed with this record.
