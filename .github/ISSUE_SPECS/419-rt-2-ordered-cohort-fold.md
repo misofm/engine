@@ -116,3 +116,45 @@ Corrected both rack scatter paths so the cohort callback runs only when every ac
 The ordered lane kernel is now checked against the independent existing `sum_into_block` D9 sequence at scalar/W4/W8 for one, sub-width, exact-width, ragged and 128-word blocks, representative contributor counts through eight, opening and continuation modes, hostile values, signed zero and the finite continuation discriminator. Zero, over-eight and late-short contributor shapes preserve poisoned output. Graph cohort tests now use existing route and reduction kernels as the oracle across an opening and later cohort, include the live-master cancellation witness on both planes, and show duplicate IDs, a later store and an unknown lane leave routed staging and master unchanged.
 
 The existing isolated allocator test's single serialized test function retains allocator liveness and the direct graph proof, then prepares a real four-route folded graph outside the measured scope and renders it repeatedly with zero allocations/frees and unchanged PCM/counters. Focused lane/rack/graph debug and release suites, release console chain-shape, realtime mutation tests, lane/rack/graph/workspace policies, focused clippy, formatting and diff hygiene pass. No benchmark runner, timing, artifact, target qualification, full workspace, Git or GitHub operation was performed by Sol.
+
+## Astra attempt 2 verdict — FAIL; final Sol attempt 3
+
+# Astra #419 RT-2 attempt 2 review
+
+**FAIL at exact pushed `f716b501eec2382ebbfb77def2053b22f99856d7`.** Preserve this coherent checkpoint. Sol has one final coherent revision, attempt 3; no timing, runner, artifact or full-workspace promotion is authorized yet.
+
+## Accepted corrections
+
+Both rack scatter paths now use the cohort seam only when every active lane is folded. Mixed masks immediately interleave fold_plane and plane_mut in original physical order. The changed trace test discriminates the original regression in both tiled and partial paths. The ordered kernel remains a single accumulator/store per vector/sample, with continuation loading the master before ordered additions. The new same-width old-sum_into oracle covers scalar/W4/W8, sub-width/exact/ragged/128 lengths, representative counts through eight, hostile values, initial negative zero, nonzero-master cancellation and poisoned-output shape rejection. Graph's direct cohort tests exercise opening/continuation using existing route/reduction primitives; its independent finite routing witness rejects subtotal association. The original binding eligibility logic remains intact.
+
+The isolated allocation fixture retains one test function, mode restoration, positive thread-scoped allocator liveness and the direct graph proof, and now prepares explicit routes outside the measured scope. Focused debug/release and policy logs are green. Those are useful results, but the following frozen obligations remain unresolved.
+
+## 1. Public shape boundary is unchecked
+
+`FoldCohort::new` is public and accepts arbitrary IDs, stride, frame count and slice capacities. Thus malformed shapes are representable; the earlier private-construction rationale is inapplicable. Its public `planes_mut` computes `index * stride` and `start + frames` without checked arithmetic before returning an optional slice. A safe caller can construct overflow metadata: debug arithmetic can panic; release arithmetic can wrap into an unrelated in-bounds window or a later slicing panic. This is a contract/realtime robustness defect, not a claim of memory unsafety. No malformed Rust reproduction was executed.
+
+The graph consumer checks capacity arithmetic before its normal routing loop, so this finding does not claim that the prepared graph currently routes forged IDs. Nevertheless the newly public API itself must meet the frozen inconsistent-shape contract. Also graph performs max/duplicate traversal before rejecting count >8; enforce the bounded count before traversing externally representable metadata.
+
+Use the smallest checked shape boundary: preferably a fallible constructor that validates bounded nonempty count, unique IDs, stride/frame relation, checked offset/end arithmetic and both complete capacities, retaining private fields. Alternatively keep public construction only with a complete checked accessor and explicit consumer validation contract; no unchecked wrap/panic or partially valid request may be presented as a valid view. Do not introduce unsafe, allocation or a generic borrowed-arena API. Define the zero-frame case explicitly. Production chain construction failures must be impossible by demonstrated staging invariants or handled before callbacks/writes, without expect/unwrap in marked render code.
+
+## 2. Required default and shape fixtures are still absent
+
+The only rack provider exercising folded cohorts, PlanesWithFold, now overrides fold_cohort. Consequently the added full/holey test does not execute the trait DEFAULT at all. It checks cohort IDs and fold traces but does not compare default versus override PCM/counters. There is no direct default malformed-shape fixture. Its full case is W4 and holey case W8; full W8, a one-active-lane cohort and empty-active callback behavior remain undiscriminated. Only left inactive planes are asserted, and staging sentinels are not checked.
+
+Add a minimal wrapper/provider overriding only fold_plane, paired with the existing override provider. Exercise full W4/W8, one representative holey/single partial case, mixed ordering and empty/inactive behavior; compare both planes, exact callback order/count and repeated-block PCM/counters. Assert inactive staging/output and unused used-frame/stride tail sentinels where the chosen shape exposes them. No new fixture corpus is necessary.
+
+The graph malformed fixture covers duplicate IDs, a nonfirst store and an unknown lane only. It does not cover representable short L/R capacity, stride < frames, frame count beyond lease, count >8/empty, or overflowing offsets. Cover these at the checked constructor/accessor when invalid shapes become unrepresentable; otherwise cover the actual consumer rejection before any staging route or master mutation. Keep late bad-metadata cases that would expose routing one valid lane before rejecting a later lane. Test the new boundary in debug and release with untouched poison on failure. The default callback must also be exercised at its actual validation/delegation boundary.
+
+## 3. Prepared-graph allocation proof lacks a fold mechanism assertion
+
+The isolated folded fixture asserts only PCM and `qualification_counters() == [16,16]`. Those values come from IdentityBank's process counter and are identical for its direct and folded configurations. They do not establish that bind admitted route folding or that the new override was selected; a nonfolding equivalent graph can pass them and the zero-allocation check.
+
+Before the measured scope, assert existing `bank_route_folds()` is exactly four for this four-route fixture and zero for its direct counterpart. Retain these assertions after rendering if useful. Combine this actual prepared eligibility assertion with a bounded callback/operation witness which fails if the eligible graph falls back to per-lane fold_plane. The existing rack cohort trace plus an actual graph override-specific test/counter or narrowly scoped test-only rejection of the compatibility path is sufficient; do not add production telemetry or a new framework. A direct unit invocation of ArenaMembers::fold_cohort proves its arithmetic, but alone cannot prove prepared execution selects it.
+
+The existing graph first-contributor signed-zero test still invokes only fold_plane. Extend it to the actual cohort override with poisoned old master and verify the routed oracle really retains negative zero. Preserve compatibility coverage. Existing console decline/digest/fold-count tests should remain green; correct their now-stale comment that the epilogue is per lane while retaining the route-count metric (one folded route per track, cohort accumulation traversal).
+
+## Final Sol attempt 3 scope
+
+This is one bounded API-and-directed-evidence completion in the already allowed rack/lane/graph test paths, with the existing console comment if needed. Preserve corrected mixed ordering, ordered arithmetic and binding witnesses. Do not touch RT-3, floors, benchmark workloads/validators, target/artifact tooling or unrelated source. Finish the validation boundary and these missing default/shape/mechanism tests in one coherent pass; run the frozen focused lane/rack/graph debug/release suites, isolated allocation proof, existing console chain identity/shape and applicable policies/fmt/clippy. Root checkpoints and pushes, then Astra supplies one final verdict. Attempt-3 FAIL is a hard stop/rescope, not permission for a fourth repair.
+
+Review used source/spec and completed-log inspection only; no Cargo, malformed-code execution, timing, repository or GitHub mutation. No performance claim or broad qualification acceptance is made.
