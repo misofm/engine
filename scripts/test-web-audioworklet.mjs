@@ -86,6 +86,7 @@ async function testMainRealm() {
   let statusMutation = null;
   let planeMutation = null;
   let commandResult = 0;
+  let mixedSuccess = false;
   let commandMutation = null;
 
   class FakePort {
@@ -107,7 +108,7 @@ async function testMainRealm() {
           response = {
             tag: failSource ? "miso.error.v1" : "miso.ack.v1",
             requestId: received.requestId,
-            result: failSource ? 1 : 6,
+            result: failSource ? 1 : (mixedSuccess ? 0 : 6),
             planes: received.planes,
           };
           responseTransfer = [...new Set(received.planes.map((plane) => plane.buffer))];
@@ -462,6 +463,7 @@ async function testMainRealm() {
     // Twenty-five rounds cover 250 successful calls, including both lease orderings around a
     // command and direct source/seek traffic. No caller-side ID is supplied anywhere in this loop.
     const mixedAcks = [];
+    const mixedSendStart = events.length;
     const mixedSubscription = {
       trackIndex: 0, rack: 1, effectIndex: 0, tapId: 1, windowBlocks: 1, armed: true,
     };
@@ -472,11 +474,27 @@ async function testMainRealm() {
       mixedAcks.push((await consoleHost.meters({ enabled: false, onFrame: null })).requestId);
       mixedAcks.push((await consoleHost.telemetry({ enabled: true, onFrame: null })).requestId);
       mixedAcks.push((await consoleHost.telemetry({ enabled: false, onFrame: null })).requestId);
-      const mixedBuffer = new ArrayBuffer(8);
-      mixedAcks.push((await consoleHost.submitSource({
+      const mixedBuffer = new ArrayBuffer(16);
+      const mixedLeft = new Float32Array(mixedBuffer, 0, 2);
+      const mixedRight = new Float32Array(mixedBuffer, 8, 2);
+      mixedLeft.set([round, round + 1]);
+      mixedRight.set([round + 2, round + 3]);
+      mixedSuccess = true;
+      const mixedSourceAck = await consoleHost.submitSource({
         sourceId: "mixed-source", generation: BigInt(round + 1), startFrame: 0n,
-        sampleRateHz: 48000, planes: [new Float32Array(mixedBuffer)], frames: 2, endOfRegion: true,
-      })).requestId);
+        sampleRateHz: 48000, planes: [mixedLeft, mixedRight], frames: 2, endOfRegion: true,
+      });
+      assert.equal(mixedSourceAck.result, 0, "mixed source admission succeeds");
+      assert.equal(mixedBuffer.byteLength, 0, "successful mixed source transfers its buffer");
+      assert.equal(mixedSourceAck.planes.length, 2);
+      assert.equal(mixedSourceAck.planes[0].byteOffset, 0);
+      assert.equal(mixedSourceAck.planes[1].byteOffset, 8);
+      assert.equal(mixedSourceAck.planes[0].buffer, mixedSourceAck.planes[1].buffer);
+      assert.equal(mixedSourceAck.planes[0].buffer.byteLength, 16);
+      const mixedSourceEvent = events.findLast((event) => event[1] === "miso.source.v1");
+      assert.equal(mixedSourceEvent[2], mixedSourceAck.requestId);
+      assert.equal(mixedSourceEvent[3], 1, "shared mixed source storage transfers once");
+      mixedAcks.push(mixedSourceAck.requestId);
       mixedAcks.push((await consoleHost.seekSource({
         sourceId: "mixed-source", generation: BigInt(round + 1), sourceFrame: 0n,
       })).requestId);
@@ -484,12 +502,16 @@ async function testMainRealm() {
       mixedAcks.push((await consoleHost.sessionMap()).requestId);
     }
     assert.equal(mixedAcks.length, 250, "mixed host regression covers 250 successful calls");
-    assert.deepEqual(
-      mixedAcks,
-      [...mixedAcks].sort((left, right) => left - right),
-      "mixed acknowledgements are strictly increasing in send order",
-    );
+    const mixedSendIds = events.slice(mixedSendStart).map((event) => event[2]);
+    assert.deepEqual(mixedAcks, mixedSendIds, "acknowledgements match actual outbound send order");
+    assert.equal(mixedAcks[0], 2, "sessionMap consumes the first host allocation");
+    assert.equal(mixedAcks.at(-1), 251, "250 mixed calls occupy IDs 2 through 251");
+    assert(mixedAcks.every((id, index) => index === 0 || id === mixedAcks[index - 1] + 1),
+      "mixed acknowledgements have adjacent IDs");
+    assert(mixedAcks.every((_id, index) => index % 10 !== 1 || mixedAcks[index] === mixedAcks[index - 1] + 1),
+      "observe delegates with exactly one allocation");
     assert.equal(new Set(mixedAcks).size, mixedAcks.length, "mixed acknowledgements are unique");
+    console.log("Issue393 mixed calls: 250 result-zero, send IDs 2..251, adjacent, observe single allocation");
     // The shipped SDK consumer uses the same real host: sessionMap -> direct meter lease ->
     // semantic console submit. This is the collision reproducer that the host-owned ledger fixes.
     const { createBrowserConsole } = await import(new URL("./sdk/src/browser/console.ts", root));

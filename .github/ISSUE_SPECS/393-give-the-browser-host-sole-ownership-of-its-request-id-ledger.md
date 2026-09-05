@@ -187,4 +187,28 @@ No production `.js`, `.ts`, `.d.ts`, Python gate, worklet, Rust, Wasm, ABI asset
 
 Attempt 3 passes only when both missing persistent regressions are committed and all frozen gates remain green. No fourth attempt is permitted.
 
+## Luna attempt 3 evidence
+
+This final attempt changes tests only. `sdk/test/console-types.ts` now covers negative caller IDs
+for all six request categories, type-level absence of `requestId` from every request parameter,
+and readonly assignment failures for all six response-ID families. The hermetic host fixture now
+records 250 result-zero mixed calls across command, observe, meters, telemetry, source, seek,
+status, and sessionMap; it compares acknowledgements directly with outbound send IDs 2 through
+251, requires adjacent IDs, and checks that observe consumes exactly one allocation. Each mixed
+source uses one shared transferred buffer, asserts caller detachment, returned plane offsets and
+shared returned storage, and exactly one transferred backing buffer. Existing source backpressure,
+processor-error, malformed-source, and saturated-source ownership cases remain in place.
+
+Fresh evidence:
+
+- `./sdk/node_modules/.bin/tsc -p sdk/tsconfig.json --noEmit` and `bash scripts/check-sdk-types.sh`
+  passed, consuming all new negative and readonly probes.
+- `node scripts/test-web-audioworklet.mjs` passed with the recorded line
+  `Issue393 mixed calls: 250 result-zero, send IDs 2..251, adjacent, observe single allocation`.
+- `PATH=/opt/homebrew/opt/gnu-sed/libexec/gnubin:$PATH bash scripts/test-web-audioworklet.sh`
+  passed, including the MAX_SAFE_INTEGER boundary and unchecked-increment red mutation. The log
+  is `/private/tmp/dx-393-evidence/attempt3-web-gate.log`.
+- `git diff --check` passed. The diff is limited to this evidence record and the two approved test
+  files; production host, declarations, worklet, Rust, Wasm and artifact pin are unchanged.
+
 Root browser evidence on `beeb8557`: existing qualification passed in Playwright Chromium 151.0.7922.34, Firefox 153.0, and WebKit 26.5 against the verified pinned CI Wasm plus current host JS/declaration. Logs are `/private/tmp/dx-393-evidence/attempt2-chromium-qualification.log`, `firefox-qualification.log`, and `webkit-qualification.log`. These are automated browser-engine results, not shipping Safari/iOS/device qualification. Attempt 2's 250-call fixture contained 225 result-zero replies and 25 resolved source-backpressure replies; attempt 3 adds the missing persistent successful-source case and corrects that evidence claim. All product code is unchanged by attempt 3.
