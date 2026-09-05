@@ -1,0 +1,13 @@
+# Astra #429 frozen-base confirmation
+
+**PASS for planning head `8a6a9baf8be3f147a01fdd3a93b94893976f7a2d`, based on merged main `c7469e28d52a716339b6f3119a57b69afb3411f1`.** Root may assign the single Luna product attempt. This is scope/base approval, not source or delivery acceptance.
+
+The post-RT-3 delta contains only the three approved planning specs. BuiltinChain, lane builtin kernels and tools/bench builtins allocator seam are unchanged from the inspected pre-RT-3 source. Actual full-chain processing still completes input then runs static left/right fader gains and matrix separately. Prepared FaderStage is static; MatrixStage owns the relevant countdown. Existing gain_mute_block and matrix2x2_block provide the exact independent primitive oracle and arithmetic vocabulary. The approved one-pass settled post-input scope therefore remains executable without compiler/graph ownership changes.
+
+One concrete allocator-use clarification before coding: tools/bench already links the audited allocator. Prove installation and positive allocation/free liveness OUTSIDE render using its existing counters and an actual held/dropped allocation; `assert_installed` alone only asserts allocation movement, so include the free. Then use the existing thread-scoped realtime audit around repeated real full-chain renders for the zero-operation proof. Do not assert process-global zero deltas amid parallel tests, and do not change the process-global Abort/Count mode merely to perform the positive probe. No new allocator, dependency, benchmark invocation or mode-sensitive parallel test is required. This stays within the approved bench unit-test seam.
+
+Retain exact arithmetic operand/mask/identity order, input recovery and reports, matrix ramp whole-call fallback, actual dispatch witness and category-preserving old-kernel identity tests. W4/W8 kernel tests do not imply a full-chain bank API. #430 retains live compiler pairing/queue/observation proof; #431 retains separately scoped measurement. #436's unused RT-3 measurement authority is independent and unchanged. #429 alone must not close RT-4/#349.
+
+Root owns coherent checkpoint/push, Astra source verdict, Sol only following FAIL with at most two revisions, then hard stop/rescope. Mandatory source/target/workspace/current-artifact delivery and actual-head PR/required-CI gates remain. Respect any later #436 quiet window; #429 is the sole active feature and isolated #411 tooling may proceed without overlapping edits.
+
+Read-only source/commit/spec inspection; no tests, Cargo, timing, repository/GitHub mutation or implementation performed. No further scope amendment is needed beyond recording the concrete allocator clarification.

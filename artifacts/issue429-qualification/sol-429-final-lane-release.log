@@ -1,0 +1,11 @@
+   Compiling lane v0.1.0 (/home/bl/misofm/engine-429/crates/lane)
+    Finished `release` profile [optimized + debuginfo] target(s) in 4.36s
+     Running tests/fader_matrix.rs (/tmp/engine-429-sol-target/release/deps/fader_matrix-b47b400ca5b0e6cf)
+
+running 3 tests
+test holey_populations_keep_neutral_wide_padding ... ok
+test wrong_equations_are_distinguished_before_the_dut_is_checked ... ok
+test settled_fader_matrix_matches_the_two_primitive_oracle ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

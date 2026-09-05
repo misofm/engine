@@ -1,0 +1,381 @@
+{
+  "schema_version": 1,
+  "candidate_worktree_head": "66827b87b7210931c0a76a6dfcbcd00419ca3683",
+  "accepted_source_freeze": "51e2aed211b30523076e0e8dd07973b13b57dc11",
+  "groups": {
+    "accepted_final_source": [
+      {
+        "path": "/tmp/sol-420-final-console-release.log",
+        "bytes": 1760,
+        "sha256": "7e16c855df68365287b65ae9fe001f6ed07ec7e3a65a0b4e66673363b1898673",
+        "terminal_excerpt": "",
+        "retained_path": "artifacts/issue420-qualification/sol-420-final-console-release.log"
+      },
+      {
+        "path": "/tmp/sol-420-final-graph-debug.log",
+        "bytes": 5006,
+        "sha256": "26d1fe216b5db8147520b442959c39ad13d4fd3b226d28a787c7dd92a25b4b85",
+        "terminal_excerpt": "",
+        "retained_path": "artifacts/issue420-qualification/sol-420-final-graph-debug.log"
+      },
+      {
+        "path": "/tmp/sol-420-final-graph-release.log",
+        "bytes": 5010,
+        "sha256": "23f830d3debf68155e95611ff468b9a6f09d28d5d4caa7c8f061a7f62f48b46f",
+        "terminal_excerpt": "",
+        "retained_path": "artifacts/issue420-qualification/sol-420-final-graph-release.log"
+      },
+      {
+        "path": "/tmp/sol-420-final-hygiene.log",
+        "bytes": 1512,
+        "sha256": "cf24309ef063353a38a9e22e2e9548dce546e36ada9d4ebdd3c5f21a0dd7a051",
+        "terminal_excerpt": "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.06s",
+        "retained_path": "artifacts/issue420-qualification/sol-420-final-hygiene.log"
+      },
+      {
+        "path": "/tmp/sol-420-final-policies.log",
+        "bytes": 1190,
+        "sha256": "f263c958469aab359079fa31f33274f0be9f8a666e41e2339c7980a6ce388336",
+        "terminal_excerpt": "test-realtime-audit-leak: OK",
+        "retained_path": "artifacts/issue420-qualification/sol-420-final-policies.log"
+      },
+      {
+        "path": "/tmp/sol-420-lane-identity.log",
+        "bytes": 804,
+        "sha256": "43adf95853dbcccf3261290de49221aaeefb89df6c082a39df035b494ce7f360",
+        "terminal_excerpt": "",
+        "retained_path": "artifacts/issue420-qualification/sol-420-lane-identity.log"
+      }
+    ],
+    "supported_wasm": [
+      {
+        "path": "/tmp/sol-420-scalar18.log",
+        "bytes": 3370,
+        "sha256": "090b28dc392940ab93cb3c8242b96cefb51abde29247910a31debf72dad654d2",
+        "terminal_excerpt": "    Finished `release` profile [optimized + debuginfo] target(s) in 12.79s",
+        "retained_path": "artifacts/issue420-qualification/sol-420-scalar18.log"
+      },
+      {
+        "path": "/tmp/sol-420-scalar-target.txt",
+        "bytes": 28,
+        "sha256": "d41a93eb31167b197ba4f11078a2ed063b8ddd94df3eb753b22fbf99cae64e6e",
+        "terminal_excerpt": "/tmp/sol420-scalar18.A9wwJl",
+        "retained_path": "artifacts/issue420-qualification/sol-420-scalar-target.txt"
+      },
+      {
+        "path": "/tmp/sol-420-scalar-cfg.log",
+        "bytes": 67,
+        "sha256": "bc412a7655dff05eac861d13b5307bba3de5422cde46cd5a3beba436a8618adf",
+        "terminal_excerpt": "scalar_cfg_simd128_scan_status=1 (1=required absence)",
+        "retained_path": "artifacts/issue420-qualification/sol-420-scalar-cfg.log"
+      },
+      {
+        "path": "/tmp/sol-420-simd-smoke.log",
+        "bytes": 1382,
+        "sha256": "b4488832ae8dc1435ebae1a22d5eec7e93effa34fc2fa8bfb648361d4612631d",
+        "terminal_excerpt": "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.55s",
+        "retained_path": "artifacts/issue420-qualification/sol-420-simd-smoke.log"
+      },
+      {
+        "path": "/tmp/sol-420-simd-target.txt",
+        "bytes": 30,
+        "sha256": "5426d35033ac947c80b0fc9793003f01669ec9234abb62aecc21d9ae1a2ad208",
+        "terminal_excerpt": "/tmp/sol420-simd-smoke.ReuSrB",
+        "retained_path": "artifacts/issue420-qualification/sol-420-simd-target.txt"
+      },
+      {
+        "path": "/tmp/sol-420-simd-cfg.log",
+        "bytes": 45,
+        "sha256": "feb3c883a94858ade27064a50a01ad8e1b3ffc93ded9dd193b56e07281a565ae",
+        "terminal_excerpt": "simd_cfg_presence_scan_status=0",
+        "retained_path": "artifacts/issue420-qualification/sol-420-simd-cfg.log"
+      },
+      {
+        "path": "/tmp/sol-420-protocol.log",
+        "bytes": 2644,
+        "sha256": "5b6d48f179ee66373df21f875698447358f66262dcde2a7a99be368fe32665a2",
+        "terminal_excerpt": "simd_run_status=0 result=main(i32:0, i32:0) => i32:0",
+        "retained_path": "artifacts/issue420-qualification/sol-420-protocol.log"
+      },
+      {
+        "path": "/tmp/sol-420-protocol-targets.txt",
+        "bytes": 80,
+        "sha256": "a2ff37f361fc5c15728e4c95a4f090f05b970c59a84c4200fe45ee0f59f61a37",
+        "terminal_excerpt": "simd=/tmp/sol420-protocol-simd.h3rqpF",
+        "retained_path": "artifacts/issue420-qualification/sol-420-protocol-targets.txt"
+      },
+      {
+        "path": "/tmp/sol-420-nonlto-build.log",
+        "bytes": 1668,
+        "sha256": "9cdab3a56d7a3e68d8bf04e3d980fbd16dbe60f7817d816fde39e4c54d2c1e19",
+        "terminal_excerpt": "    Finished `release` profile [optimized + debuginfo] target(s) in 9.13s",
+        "retained_path": "artifacts/issue420-qualification/sol-420-nonlto-build.log"
+      },
+      {
+        "path": "/tmp/sol-420-nonlto-target.txt",
+        "bytes": 26,
+        "sha256": "67f3492e3f824c619503772b5cd489c6ce6ef258c05ff85e07e9d44a484d4705",
+        "terminal_excerpt": "/tmp/sol420-nonlto.m3INqF",
+        "retained_path": "artifacts/issue420-qualification/sol-420-nonlto-target.txt"
+      },
+      {
+        "path": "/tmp/sol-420-nonlto-inspect.py",
+        "bytes": 2601,
+        "sha256": "ef771ed17e64c975ffd89de5ac6410a5ee4749bf0e585cfaa624655ebb6e03bf",
+        "terminal_excerpt": " log.write('PASS named scalar non-LTO complete archive/object population\\n')",
+        "retained_path": "artifacts/issue420-qualification/sol-420-nonlto-inspect.py"
+      },
+      {
+        "path": "/tmp/sol-420-nonlto-inspection.log",
+        "bytes": 2453,
+        "sha256": "d3c748951f4cadfd65591e5ffd0b650f6922a00445c6d70df77138b49e3f22ee",
+        "terminal_excerpt": "PASS named scalar non-LTO complete archive/object population",
+        "retained_path": "artifacts/issue420-qualification/sol-420-nonlto-inspection.log"
+      },
+      {
+        "path": "/tmp/sol-420-supported-wasm-summary.log",
+        "bytes": 1111,
+        "sha256": "512ed0c09375dd9d351ea388e5a4f9b704238273591a2cb6f03e883a6a666eee",
+        "terminal_excerpt": "scope_limit=atomic inspection applies only to complete named non-LTO engine/source/target_smoke rlib object populations; no claim about fat-LTO binaries/full AudioWorklet",
+        "retained_path": "artifacts/issue420-qualification/sol-420-supported-wasm-summary.log"
+      },
+      {
+        "path": "/tmp/sol-420-supported-wasm-hashes.txt",
+        "bytes": 2424,
+        "sha256": "00725449af74299785429c3d1a8cac64b4b6f31bd21b630d69a7e4581bee7d01",
+        "terminal_excerpt": "a2ff37f361fc5c15728e4c95a4f090f05b970c59a84c4200fe45ee0f59f61a37  /tmp/sol-420-protocol-targets.txt",
+        "retained_path": "artifacts/issue420-qualification/sol-420-supported-wasm-hashes.txt"
+      },
+      {
+        "path": "/tmp/sol-420-wasm-supplement.py",
+        "bytes": 2870,
+        "sha256": "c406e582e4945aaaea6c656e2a80a3845539c371984ca1f7cc6febf5de1f33df",
+        "terminal_excerpt": " f.write(f'observation_status=PASS scans={statuses} binary_matches={matches}\\n')",
+        "retained_path": "artifacts/issue420-qualification/sol-420-wasm-supplement.py"
+      },
+      {
+        "path": "/tmp/sol-420-wasm-supplement.log",
+        "bytes": 2241,
+        "sha256": "084fb2624e8919e4e1079a8bcf0a54a06c071deba235fedd03827400b8a9e78f",
+        "terminal_excerpt": "target_feature_atomics_absence_scan_status=1 expected=1",
+        "retained_path": "artifacts/issue420-qualification/sol-420-wasm-supplement.log"
+      },
+      {
+        "path": "/tmp/sol-420-wasm-supplement.cfg",
+        "bytes": 710,
+        "sha256": "97b895d31fc0f8d305d113f271007e5529e9af06d72d2e0c57a550a6aa962d39",
+        "terminal_excerpt": "target_vendor=\"unknown\"",
+        "retained_path": "artifacts/issue420-qualification/sol-420-wasm-supplement.cfg"
+      },
+      {
+        "path": "/tmp/sol-420-wasm-supplement.cfg.stderr",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "terminal_excerpt": "",
+        "retained_path": "artifacts/issue420-qualification/sol-420-wasm-supplement.cfg.stderr"
+      },
+      {
+        "path": "/tmp/sol-420-wasm-supplement.hashes",
+        "bytes": 402,
+        "sha256": "7996df3d256df8a6e6a9f98a627fbbe19b88bcaf15323dacba4a6a9b95294955",
+        "terminal_excerpt": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  /tmp/sol-420-wasm-supplement.cfg.stderr",
+        "retained_path": "artifacts/issue420-qualification/sol-420-wasm-supplement.hashes"
+      }
+    ],
+    "immutable_artifact_and_browser": [
+      {
+        "path": "/tmp/engine-420-worklet-repin.log",
+        "bytes": 3383,
+        "sha256": "f2b6f0c0a067492777c87fe7ba743b81bd42d7242086935430c29ef18aa650d3",
+        "terminal_excerpt": "24f81af304e541ba0e734de5c7a3dc5221e71fa4de73f2545edea3c2960761fe",
+        "retained_path": "artifacts/issue420-qualification/engine-420-worklet-repin.log"
+      },
+      {
+        "path": "/tmp/engine-420-worklet-verify.log",
+        "bytes": 3214,
+        "sha256": "7a445e6ecbdb6ce773360d4c5a501911f38b9c0efe8302e2a879233fe138e5fb",
+        "terminal_excerpt": "    Finished `release` profile [optimized + debuginfo] target(s) in 12.57s",
+        "retained_path": "artifacts/issue420-qualification/engine-420-worklet-verify.log"
+      },
+      {
+        "path": "/tmp/engine-420-check-web.log",
+        "bytes": 2666,
+        "sha256": "26effd6e2fe1607b696c6c7d00e6bb2f3f1d7b22f2bd086e32086f5f7d3513ce",
+        "terminal_excerpt": "web AudioWorklet static/object checks passed",
+        "retained_path": "artifacts/issue420-qualification/engine-420-check-web.log"
+      },
+      {
+        "path": "/tmp/engine-420-expected-resources.log",
+        "bytes": 63,
+        "sha256": "f6570ed4a8db017070a78a5795bb8f518e9065203966649ebf13981d1c26c49b",
+        "terminal_excerpt": "browser expected-resources self-test passed (26 red mutations)",
+        "retained_path": "artifacts/issue420-qualification/engine-420-expected-resources.log"
+      },
+      {
+        "path": "/tmp/engine-420-hermetic-worklet-mutations.log",
+        "bytes": 5057,
+        "sha256": "bd875434bc25a15ba12eb2abcde152b9254243583d0784eb2b7ece0d8d0cde53",
+        "terminal_excerpt": "web AudioWorklet UTF-8 byte-parity mutation passed",
+        "retained_path": "artifacts/issue420-qualification/engine-420-hermetic-worklet-mutations.log"
+      },
+      {
+        "path": "/tmp/engine-420-browser-all-record.log",
+        "bytes": 565,
+        "sha256": "478e990a9e68d44cdf901941b8a3f479ada00c985f31fd6b3dbbeefac7530728",
+        "terminal_excerpt": "recorded results.json and ../BROWSER_DEPLOYMENT_MATRIX.md",
+        "retained_path": "artifacts/issue420-qualification/engine-420-browser-all-record.log"
+      },
+      {
+        "path": "/tmp/engine-420-browser-chromium-check.log",
+        "bytes": 357,
+        "sha256": "33cbbd636b8ec992691068f37dc49b00d1129bc78a72479d9a1643891f99a05d",
+        "terminal_excerpt": "chromium: all qualification gates passed (151.0.7922.34)",
+        "retained_path": "artifacts/issue420-qualification/engine-420-browser-chromium-check.log"
+      },
+      {
+        "path": "/tmp/engine-420-browser-firefox-check.log",
+        "bytes": 347,
+        "sha256": "b5e3b3d9022d947ef95fb262486f56d15edc871abec60f31682a3fde0b18205e",
+        "terminal_excerpt": "firefox: all qualification gates passed (153.0)",
+        "retained_path": "artifacts/issue420-qualification/engine-420-browser-firefox-check.log"
+      },
+      {
+        "path": "/tmp/engine-420-browser-webkit-check.log",
+        "bytes": 344,
+        "sha256": "81001a55e288602ee44f21a5a6ab4543abf3012f7dfab86e62c0c219922678c2",
+        "terminal_excerpt": "webkit: all qualification gates passed (26.5)",
+        "retained_path": "artifacts/issue420-qualification/engine-420-browser-webkit-check.log"
+      }
+    ],
+    "workspace": [
+      {
+        "path": "/tmp/engine-420-candidate-workspace.log",
+        "bytes": 184657,
+        "sha256": "3f402be8c195a93e71eb6f2409ce3579175525f68ff18c6c2bda98159c40b821",
+        "terminal_excerpt": "",
+        "retained_path": "artifacts/issue420-qualification/engine-420-candidate-workspace.log"
+      }
+    ],
+    "zero_launch_and_exact_profile": [
+      {
+        "path": "/tmp/engine-420-benchmark-preflight.log",
+        "bytes": 4402,
+        "sha256": "1016d6ee34af79a07e371fd406750b05620c7b491c7132027c1f3d3900fb3002",
+        "terminal_excerpt": "console benchmark preflight: PASS (workload launches 0)",
+        "retained_path": "artifacts/issue420-qualification/engine-420-benchmark-preflight.log"
+      },
+      {
+        "path": "/tmp/engine-420-runner-profile-build.log",
+        "bytes": 3718,
+        "sha256": "5b7055cc78dbe3cab74a6a81166f25a4e88169e5c9d91e4ab7a13525208b32ca",
+        "terminal_excerpt": "    Finished `release` profile [optimized + debuginfo] target(s) in 8.23s",
+        "retained_path": "artifacts/issue420-qualification/engine-420-runner-profile-build.log"
+      }
+    ],
+    "accepted_reviews": [
+      {
+        "path": "/tmp/astra-420-attempt3-review.md",
+        "bytes": 3502,
+        "sha256": "2f6135aaf3aea9f17888a109f762219fc239054ccdc6da6045268bb363dd6621",
+        "terminal_excerpt": "No remaining frozen source acceptance blocker was found. Preserve source while root completes baseline/candidate fullworkspace, supported targets and immutable artifact/current consumers/browser/static/resource qualification, then matching runner/preflight registration and the ONE controlled descrip",
+        "retained_path": "artifacts/issue420-qualification/astra-420-attempt3-review.md"
+      },
+      {
+        "path": "/tmp/astra-420-final-case-clarification.md",
+        "bytes": 4418,
+        "sha256": "7c9d826dd935bab04b704ba4854dffe38b94701e94379726267212537ae860db",
+        "terminal_excerpt": "Retain accepted ownership/sentinel/allocation/source tests. Run the proportional affected debug/release proof after the single coherent revision; root owns checkpoint and final Astra review. No source, timing, artifact or runner work is authorized by this clarification. Read-only current FP policy a",
+        "retained_path": "artifacts/issue420-qualification/astra-420-final-case-clarification.md"
+      },
+      {
+        "path": "/tmp/astra-420-qualification-freeze-review.md",
+        "bytes": 1507,
+        "sha256": "1fa4f593ca9699c6d4414f46505505938d5d30171f66cdcdeb2beecdb3b04d49",
+        "terminal_excerpt": "This PASS does not state those pending gates are complete or authorize an immediate timed launch. Source inspection only; no tests, Cargo, timing or repository/GitHub mutation.",
+        "retained_path": "artifacts/issue420-qualification/astra-420-qualification-freeze-review.md"
+      },
+      {
+        "path": "/tmp/astra-420-supported-wasm-review.md",
+        "bytes": 4657,
+        "sha256": "e3b8cb224c31aedc52bddd3b738f66d33e69467ebd5843675dc6ea81a008b973",
+        "terminal_excerpt": "This accepts the ACTUALLY executed binary-match arm. The script's unexecuted source fallback uses quiet matching; it is not generic future checker qualification and should not be represented as a tested fallback-error harness. That path is unnecessary to this result; #427 retains the production comp",
+        "retained_path": "artifacts/issue420-qualification/astra-420-supported-wasm-review.md"
+      }
+    ],
+    "historical_failure_verdicts": [
+      {
+        "path": "/tmp/astra-420-attempt1-review.md",
+        "bytes": 4522,
+        "sha256": "1983ce158f985c1ab686e34a12b294ee20b0f844d6ed79889e9bb354a87bab30",
+        "terminal_excerpt": "Sol gets one coherent revision within the existing allowed runtime/test paths and spec. Correct the current evidence claim that preserved hostile cases satisfy the assigned new matrix; name actual coverage and final logs. Source approach, old oracle redirects, >64 corpus and current policy results c",
+        "retained_path": "artifacts/issue420-qualification/astra-420-attempt1-review.md"
+      },
+      {
+        "path": "/tmp/astra-420-attempt2-review.md",
+        "bytes": 4784,
+        "sha256": "b14e5db8178b3394c09591ad1ff29eb2b9e8a9fa41e143ae8736d15592121879",
+        "terminal_excerpt": "This is the coherent attempt2 verdict. Root may assign Sol the FINAL attempt3 above and checkpoint it before review. Source/evidence PASS must precede fullworkspace, targets/artifacts, runner work and the one descriptive invocation. Attempt3 failure is a hard stop/rescope, not permission for another",
+        "retained_path": "artifacts/issue420-qualification/astra-420-attempt2-review.md"
+      }
+    ]
+  },
+  "excluded": [
+    {
+      "path": "/tmp/engine-420-readiness.log",
+      "reason": "live readiness state; excluded by assignment"
+    },
+    {
+      "path": "/tmp/astra-420-readiness-confirmation.md",
+      "reason": "readiness-state review; excluded from retained success grouping"
+    },
+    {
+      "pattern": "/tmp/sol-420-{graph-debug,graph-release,console-debug,console-release,clippy,policies}.log",
+      "reason": "superseded intermediate attempt evidence; final logs retained instead"
+    }
+  ],
+  "limitations": [
+    "Manifest hashes files currently retained in /tmp; it does not preserve build targets or artifact directories.",
+    "Candidate workspace log contains 274 Cargo test-result blocks totaling 1569 passed, 0 failed, 24 ignored; the log itself does not embed its invoking command or Git SHA, so command/head provenance must be retained separately.",
+    "The supported-Wasm opcode/observation evidence is limited to the named scalar non-LTO engine/source/target_smoke archive members, not fat-LTO binaries or the shipped AudioWorklet.",
+    "The observation supplement executed its binary-match arm (statuses 0,0,1); its source fallback was not executed and is not claimed as tested.",
+    "Worklet repin prints digest 24f81af304e541ba0e734de5c7a3dc5221e71fa4de73f2545edea3c2960761fe; worklet-verify is a build transcript without a terminal digest line, so browser/static logs provide the retained downstream acceptance evidence.",
+    "Runner-profile build proves successful exact-profile compilation but does not itself record a binary hash; preserve separate recorded binary identity if timing proceeds.",
+    "Zero-launch preflight records workload_launches=0; no benchmark result or readiness state is included.",
+    "Historical attempt1/attempt2 reviews are indexed only as failure verdict provenance and are not members of any success group."
+  ],
+  "additional_root_evidence": [
+    {
+      "path": "/tmp/engine-main-455-workspace-baseline.log",
+      "retained_path": "artifacts/issue420-qualification/engine-main-455-workspace-baseline.log",
+      "bytes": 185071,
+      "sha256": "f935d5c8c5636021547e448e95214ffaf2b1c84fd0f1814c9da5a718e76a638f"
+    },
+    {
+      "path": "/tmp/engine-420-readiness.log",
+      "retained_path": "artifacts/issue420-qualification/readiness-deferred.log",
+      "bytes": 555,
+      "sha256": "cf63a4599a0e32cdad49256e46c24b89ca6ab247f1d34fe86afaa356ceebd8fd"
+    },
+    {
+      "path": "/tmp/engine-420-post410-policies.log",
+      "retained_path": "artifacts/issue420-qualification/engine-420-post410-policies.log",
+      "bytes": 134,
+      "sha256": "0cf769a06578a51fdb87831008a1eb46c18a8a21270dd0640172bae43560b7a3"
+    },
+    {
+      "path": "/tmp/engine-420-split-source-identity.json",
+      "retained_path": "artifacts/issue420-qualification/engine-420-split-source-identity.json",
+      "bytes": 4320,
+      "sha256": "7e27bc423a3da954a17d3e188023b44670199b21985da933d88f1f0ef8e1bc42"
+    },
+    {
+      "path": "/tmp/astra-420-delivery-split-ruling.md",
+      "retained_path": "artifacts/issue420-qualification/astra-420-delivery-split-ruling.md",
+      "bytes": 9945,
+      "sha256": "82552db71003f513faf980e2bbc6df24f9f25f0a5b74d40138feb478e86c7f43"
+    }
+  ],
+  "untimed_runner_profile_binary_sha256": "53dce85d8ff683693598da8dce79195ecfad1ad76300b68bb348196c00f81bab",
+  "measurement_status": "Uninvoked. Twelve readiness probes exceeded the frozen load ceiling; readiness ended exit 1. No benchmark artifact or disposition created.",
+  "measurement_owner_issue": 436
+}

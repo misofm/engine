@@ -1,0 +1,24 @@
+warning: `math::fast_db::fast_level_db` does not refer to a reachable function
+  --> /home/bl/misofm/engine-420/clippy.toml:81:5
+   |
+81 |     { path = "math::fast_db::fast_level_db", reason = "fast dB tier (#144 item 5); admitted only at a named FAST-DB-CROSSING site" },
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: add `allow-invalid = true` to the entry to suppress this warning
+
+warning: `math::fast_db::fast_gain_from_db` does not refer to a reachable function
+  --> /home/bl/misofm/engine-420/clippy.toml:82:5
+   |
+82 |     { path = "math::fast_db::fast_gain_from_db", reason = "fast dB tier (#144 item 5); admitted only at a named FAST-DB-CROSSING site" },
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: add `allow-invalid = true` to the entry to suppress this warning
+
+warning: `math` (lib) generated 2 warnings
+warning: `effect-contract` (lib) generated 2 warnings (2 duplicates)
+warning: `rack` (lib) generated 2 warnings (2 duplicates)
+warning: `conformance` (lib) generated 2 warnings (2 duplicates)
+warning: `graph` (lib) generated 2 warnings (2 duplicates)
+warning: `graph` (lib test) generated 2 warnings (2 duplicates)
+warning: `graph` (test "rt1_direct_bank_alloc") generated 2 warnings (2 duplicates)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.06s

@@ -1,0 +1,17 @@
+   Compiling lane v0.1.0 (/home/bl/misofm/engine-420/crates/lane)
+    Finished `release` profile [optimized + debuginfo] target(s) in 4.38s
+     Running tests/g1_op_identity.rs (/tmp/engine-420-sol-target/release/deps/g1_op_identity-9836be8a1a13e84c)
+
+running 9 tests
+test g1_exp2_int_is_exact_on_the_integer_range ... ok
+test g1_fma_is_unfused_on_every_backend ... ok
+test g1_mask_any_matches_the_oracle ... ok
+test g1_frexp_reconstructs_positive_normals ... ok
+test g1_max_and_min_lowerings_match_the_oracle ... ok
+test g1_nan_max_and_min_follow_d8 ... ok
+test g1_signed_zero_max_and_min_follow_d8 ... ok
+test g1_directed_edge_pool_is_lane_identical ... ok
+test g1_random_vectors_are_lane_identical ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.08s
+

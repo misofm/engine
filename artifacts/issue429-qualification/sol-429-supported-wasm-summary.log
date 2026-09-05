@@ -1,0 +1,51 @@
+qualification=issue429 supported Wasm bounded qualification
+started_source_sha=e4bcaa2feae13c9f016bb7b2e1eaff8bd7314547
+completed_utc=2026-09-05T06:18:56Z
+rustc=1.97.1 (8bab26f4f 2026-07-14) llvm=22.1.6
+wabt_wasm_objdump=1.0.34 wabt_wasm_interp=1.0.34
+repository_mutation=none
+
+producer=scalar18
+command=PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/sol429-scalar18.O8kePe RUSTFLAGS='-C target-feature=-simd128' cargo build --locked --release --target wasm32-unknown-unknown -p engine -p session -p effect-contract -p effect-compiler -p protocol -p target-smoke -p host-core -p host-web -p lane -p math -p builtins -p builtins-compiler -p effect-runtime -p gate-expander -p delay -p multiband-compressor -p parametric-eq -p soft-clip
+profile=release package_count=18 terminal_status=0
+log=/tmp/sol-429-supported-scalar18.log
+
+producer=scalar_cfg
+command=PATH=/home/bl/.cargo/bin:$PATH rustc --print cfg --target wasm32-unknown-unknown -C target-feature=-simd128
+terminal_status=0 output=/tmp/sol-429-supported-scalar.cfg
+simd128_absence_rg_status=1 expected=1
+target_has_atomic_ptr_presence_rg_status=0 expected=0
+target_feature_atomics_absence_rg_status=1 expected=1
+
+producer=simd_target_smoke_protocol
+command=PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/sol429-simd-smoke.S4URU4 RUSTFLAGS='-C target-feature=+simd128' cargo check --locked --target wasm32-unknown-unknown -p target-smoke -p protocol
+profile=dev terminal_status=0 log=/tmp/sol-429-supported-simd-smoke.log
+producer=simd_cfg
+command=PATH=/home/bl/.cargo/bin:$PATH rustc --print cfg --target wasm32-unknown-unknown -C target-feature=+simd128
+terminal_status=0 output=/tmp/sol-429-supported-simd.cfg simd128_presence_rg_status=0 expected=0
+
+producer=protocol_scalar
+target=/tmp/sol429-protocol-scalar.G11ERx
+command=PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/sol429-protocol-scalar.G11ERx RUSTFLAGS='-C target-feature=-simd128 -C link-arg=--export=main' cargo build --locked --release --target wasm32-unknown-unknown -p protocol --bin protocol_wasm_golden
+build_status=0 wasm_objdump_status=0 export_rg_status=0 wasm_interp_status=0 exact_result=main(i32:0, i32:0) => i32:0
+logs=/tmp/sol-429-supported-protocol-scalar-{build,exports,run}.log
+producer=protocol_simd
+target=/tmp/sol429-protocol-simd.nz7DKM
+command=PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/sol429-protocol-simd.nz7DKM RUSTFLAGS='-C target-feature=+simd128 -C link-arg=--export=main' cargo build --locked --release --target wasm32-unknown-unknown -p protocol --bin protocol_wasm_golden
+build_status=0 wasm_objdump_status=0 export_rg_status=0 wasm_interp_status=0 exact_result=main(i32:0, i32:0) => i32:0
+logs=/tmp/sol-429-supported-protocol-simd-{build,exports,run}.log
+
+producer=named_scalar_nonlto
+target=/tmp/sol429-nonlto.RfU22A
+command=PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/sol429-nonlto.RfU22A CARGO_PROFILE_RELEASE_LTO=false RUSTFLAGS='-C target-feature=-simd128' cargo build --locked --release --target wasm32-unknown-unknown -p engine -p source -p target-smoke
+build_status=0 profile=release lto=false log=/tmp/sol-429-nonlto-build.log
+inspection_command=python3 /tmp/sol-429-nonlto-inspect.py /tmp/sol429-nonlto.RfU22A /home/bl/misofm/engine-429 /tmp/sol-429-supported-scalar.cfg /tmp/sol-429-nonlto-inspection.log
+inspection_status=0 families=3 archives=3 objects=3 find_statuses=0,0,0 sort_statuses=0,0,0 archive_list_statuses=0,0,0 member_read_statuses=0,0,0 decoder_statuses=0,0,0 atomic_rg_statuses=1,1,1
+observation_rg_statuses=0,0,1 binary_matches=2 source_fallback_invoked=false
+population_reconciliation_status=0
+supplement_command=python3 /tmp/sol-429-wasm-supplement.py /tmp/sol-429-nonlto-inspection.log /home/bl/misofm/engine-429 /tmp/sol-429-supported-scalar.cfg /tmp/sol-429-supported-wasm-supplement.log
+supplement_status=0 same_member_hashes=true,true,true observation_rg_statuses=0,0,1 source_fallback_invoked=false ptr_atomic_presence_status=0 atomics_feature_absence_status=1
+scope_limit=atomic inspection covers the complete named non-LTO engine/source/target_smoke rlib object populations only; no fat-LTO, shipped AudioWorklet, or full artifact claim
+
+all_producers_rechecked_without_tee=true statuses=scalar18:0,simd_smoke:0,protocol_scalar:0,protocol_simd:0,nonlto:0,scalar_cfg:0,simd_cfg:0
+result=PASS

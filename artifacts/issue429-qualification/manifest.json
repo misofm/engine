@@ -1,0 +1,256 @@
+{
+  "source_candidate": "e4bcaa2feae13c9f016bb7b2e1eaff8bd7314547",
+  "artifact_sha256": "10b0581f72d921b520e4066b82dc32cb7bea90b757c20ccca3dfc52cf7b9e098",
+  "files": [
+    {
+      "path": "artifacts/issue429-qualification/astra-429-artifact-qualification-ruling.md",
+      "bytes": 5604,
+      "sha256": "670f4f58dd4b65733d3dc18a047ed3314a4490380a5d3fddd21d2336a5e4a5f5"
+    },
+    {
+      "path": "artifacts/issue429-qualification/astra-429-attempt1-review.md",
+      "bytes": 5407,
+      "sha256": "c9ee5b2e42925963705094698b64be16a035fa0494ebbffa25786a89db6a4584"
+    },
+    {
+      "path": "artifacts/issue429-qualification/astra-429-attempt2-review.md",
+      "bytes": 4748,
+      "sha256": "019324adc09843e2f5fcebea2931b399819fd0ddf1a2bc7c3cae57ec66663def"
+    },
+    {
+      "path": "artifacts/issue429-qualification/astra-429-attempt3-review.md",
+      "bytes": 3411,
+      "sha256": "6bf157833942eea6aa585862c8c6fe1104bd93bc26c3af064bd514f6b19ddca9"
+    },
+    {
+      "path": "artifacts/issue429-qualification/astra-429-frozen-base-review.md",
+      "bytes": 2701,
+      "sha256": "c09da2e3903b4ec5fd6d13a04ed4e2eca3425ecfd032bd1e58e40d2a36be9bab"
+    },
+    {
+      "path": "artifacts/issue429-qualification/astra-429-numbered-review.md",
+      "bytes": 2326,
+      "sha256": "b36d5bd81de13d1c550ef13e71f174388d64aaabe89f655a408e2261582580d8"
+    },
+    {
+      "path": "artifacts/issue429-qualification/astra-429-supported-wasm-review.md",
+      "bytes": 2976,
+      "sha256": "2e82999957163568073ffd6141143f474d7bc38d3fcc301f62bf82c1b63d0d6e"
+    },
+    {
+      "path": "artifacts/issue429-qualification/engine-429-browser-all-record.log",
+      "bytes": 595,
+      "sha256": "f8c5599b78353cb6c2f25106df4e24868794d483f9db6d38a8c7904f405be558"
+    },
+    {
+      "path": "artifacts/issue429-qualification/engine-429-browser-chromium-check.log",
+      "bytes": 282,
+      "sha256": "2a800754c2f47ef517d9c58781a3e2771cde977545f4074907c0ba5c985cc141"
+    },
+    {
+      "path": "artifacts/issue429-qualification/engine-429-browser-firefox-check.log",
+      "bytes": 272,
+      "sha256": "3f430374f67576b6a132742f75de1edab5ebba62e98418e91f227fd2e16c612e"
+    },
+    {
+      "path": "artifacts/issue429-qualification/engine-429-browser-missing-dependency.log",
+      "bytes": 1130,
+      "sha256": "b1ec5a9473b7eae5e2ec35cfe660ee3d1af0c8cb8afb17ffd7bc2fce59b1620e"
+    },
+    {
+      "path": "artifacts/issue429-qualification/engine-429-browser-npm-ci.log",
+      "bytes": 76,
+      "sha256": "ff6c10e3f7e1d74d0aa481ba8936f8908dadc2de9350a8b079f67e669c2fb47d"
+    },
+    {
+      "path": "artifacts/issue429-qualification/engine-429-browser-webkit-check.log",
+      "bytes": 306,
+      "sha256": "9aeac67a536dc19efb762c43d2fc86b0b9ca7570ed0f3136967e096597401ed0"
+    },
+    {
+      "path": "artifacts/issue429-qualification/engine-429-candidate-workspace.log",
+      "bytes": 185583,
+      "sha256": "a02b6797887cb685410365ea8a12fb4f1eab77b3b9fa394192ad19ed598aff41"
+    },
+    {
+      "path": "artifacts/issue429-qualification/engine-429-check-web-missing-path.log",
+      "bytes": 2266,
+      "sha256": "c986e998679b0bb47001b5c80f23e526a046111b750d0c5f22f39e4eced81598"
+    },
+    {
+      "path": "artifacts/issue429-qualification/engine-429-check-web.log",
+      "bytes": 2666,
+      "sha256": "eaf7415878989881f0dc22c695bff7040739c33fa393c66048a9e7a95a9798b0"
+    },
+    {
+      "path": "artifacts/issue429-qualification/engine-429-expected-resources.log",
+      "bytes": 63,
+      "sha256": "f6570ed4a8db017070a78a5795bb8f518e9065203966649ebf13981d1c26c49b"
+    },
+    {
+      "path": "artifacts/issue429-qualification/engine-429-hermetic-missing-path.log",
+      "bytes": 4448,
+      "sha256": "fb617fc3ec5d69ef11bd3f2f01c23742fc014d4f745810ad9975c8544a999c6e"
+    },
+    {
+      "path": "artifacts/issue429-qualification/engine-429-hermetic-worklet-mutations.log",
+      "bytes": 5097,
+      "sha256": "82207f1d0692a167bad670d11415445948ad2908fb529cbfe1e960167a249538"
+    },
+    {
+      "path": "artifacts/issue429-qualification/engine-429-worklet-repin.log",
+      "bytes": 3523,
+      "sha256": "df70ed99bf9f02987701e1a64ef8c6cdb492ab9912247dc0294abc82f2ec063e"
+    },
+    {
+      "path": "artifacts/issue429-qualification/engine-429-worklet-verify.log",
+      "bytes": 3236,
+      "sha256": "45b9a2962571cc92548601ed19232a2fe540eb996638b087aaed9558f877cc1c"
+    },
+    {
+      "path": "artifacts/issue429-qualification/sol-429-final-builtins-policy.log",
+      "bytes": 20,
+      "sha256": "234708181cfb58e0931dd586eb1dd5120358ca04fb9f88de9a5106d343e2889b"
+    },
+    {
+      "path": "artifacts/issue429-qualification/sol-429-final-clippy.log",
+      "bytes": 2281,
+      "sha256": "f94a352aca75307922c955962466eb3356372c46bebbe24c3f217a69b3900737"
+    },
+    {
+      "path": "artifacts/issue429-qualification/sol-429-final-dispatch-mutant.log",
+      "bytes": 1384,
+      "sha256": "89e305472444747e9a5e415417e80821b7e201cc7ac89af8c9fa037f16328255"
+    },
+    {
+      "path": "artifacts/issue429-qualification/sol-429-final-dispatch-restored.log",
+      "bytes": 432,
+      "sha256": "0bd7f6814543ef19cd64b57473f32ee3da60fb2dc0f8073e36e88c10b66d53af"
+    },
+    {
+      "path": "artifacts/issue429-qualification/sol-429-final-fmt.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "artifacts/issue429-qualification/sol-429-final-focused-debug.log",
+      "bytes": 13508,
+      "sha256": "70cc0836fb3a423a1b6060e8acbd701e60eb50bf02e1ffd726e5a9105f707371"
+    },
+    {
+      "path": "artifacts/issue429-qualification/sol-429-final-focused-release.log",
+      "bytes": 13624,
+      "sha256": "8846d2b3413b385b2f2145b02eedf7f488def77a60fce67e3032f2ec597b1bf1"
+    },
+    {
+      "path": "artifacts/issue429-qualification/sol-429-final-lane-debug.log",
+      "bytes": 551,
+      "sha256": "edff4bd02a5e4d2c4051ee52e5c047615f23b8a8d25b1db2bf3a7e4a22d8034b"
+    },
+    {
+      "path": "artifacts/issue429-qualification/sol-429-final-lane-policy.log",
+      "bytes": 16,
+      "sha256": "7edafffbedb2c4f2dccd833944aebbd4a912ef60f17e9265eadd3380aff899cd"
+    },
+    {
+      "path": "artifacts/issue429-qualification/sol-429-final-lane-release.log",
+      "bytes": 554,
+      "sha256": "35ce1723fbf6840922569c4b7a14685d4d3e459bd2fd30f09b521dbdabc4a01b"
+    },
+    {
+      "path": "artifacts/issue429-qualification/sol-429-final-realtime-policy.log",
+      "bytes": 52,
+      "sha256": "df6e4f25e60994df7ea568d80ad9bea2caa821c5cad110007f742ffe00847331"
+    },
+    {
+      "path": "artifacts/issue429-qualification/sol-429-final-unfused-policy.log",
+      "bytes": 79,
+      "sha256": "a27647555db8711d5b277f2b783641c44f413f0a2e3bb2725859c075c0077a70"
+    },
+    {
+      "path": "artifacts/issue429-qualification/sol-429-nonlto-build.log",
+      "bytes": 1668,
+      "sha256": "93aa7238ea8cdf1d101682dfd17fdd527e12134298748df333eca89ac3364b06"
+    },
+    {
+      "path": "artifacts/issue429-qualification/sol-429-nonlto-inspect.py",
+      "bytes": 5949,
+      "sha256": "ffde04e2d9a0021790acc5e1f296e78420e840173ebdf4f7a7bc6a8e5261b78c"
+    },
+    {
+      "path": "artifacts/issue429-qualification/sol-429-nonlto-inspection.log",
+      "bytes": 3247,
+      "sha256": "dee6f1665a65b7b0c320581fc9b4d18afba97189fc23f10b2db78afdeca19fa7"
+    },
+    {
+      "path": "artifacts/issue429-qualification/sol-429-supported-protocol-scalar-build.log",
+      "bytes": 1233,
+      "sha256": "41a569df9f3ddd585b6b377b745c106c0a3a426157743d2dce05e60add12c3ad"
+    },
+    {
+      "path": "artifacts/issue429-qualification/sol-429-supported-protocol-scalar-exports.log",
+      "bytes": 402135,
+      "sha256": "2f91a6dfb06edc66c11c73aee0d1b274a1db53a5d75e1da9e728bfd6426ada72"
+    },
+    {
+      "path": "artifacts/issue429-qualification/sol-429-supported-protocol-scalar-run.log",
+      "bytes": 28,
+      "sha256": "e09e066df3b2e3968b7f3041982ec8d10ffa537f4b9610cbd3db9d3c94242ed1"
+    },
+    {
+      "path": "artifacts/issue429-qualification/sol-429-supported-protocol-simd-build.log",
+      "bytes": 1233,
+      "sha256": "d579639bcb3332b53a7ffedee7ef2914baa57562a447089a031571f7ba4f9d2b"
+    },
+    {
+      "path": "artifacts/issue429-qualification/sol-429-supported-protocol-simd-exports.log",
+      "bytes": 402152,
+      "sha256": "b90c440f8152c15819601c874038514d00975327f19c50882afaaae5957ec45b"
+    },
+    {
+      "path": "artifacts/issue429-qualification/sol-429-supported-protocol-simd-run.log",
+      "bytes": 28,
+      "sha256": "e09e066df3b2e3968b7f3041982ec8d10ffa537f4b9610cbd3db9d3c94242ed1"
+    },
+    {
+      "path": "artifacts/issue429-qualification/sol-429-supported-scalar.cfg",
+      "bytes": 710,
+      "sha256": "97b895d31fc0f8d305d113f271007e5529e9af06d72d2e0c57a550a6aa962d39"
+    },
+    {
+      "path": "artifacts/issue429-qualification/sol-429-supported-scalar18.log",
+      "bytes": 3474,
+      "sha256": "23fc56e2a67cfe6744421d3c1710ed1de1dcccae31efe531874c468dd5b32b23"
+    },
+    {
+      "path": "artifacts/issue429-qualification/sol-429-supported-simd-smoke.log",
+      "bytes": 1486,
+      "sha256": "ca963f3cf2dee1d3100a95df87a71323f9d950977b0a4be6b0298459b1ae5c70"
+    },
+    {
+      "path": "artifacts/issue429-qualification/sol-429-supported-simd.cfg",
+      "bytes": 735,
+      "sha256": "44d5c2cd402a5810a08f0aa6213c1c132bcfc52213d3d5c7a6bd0020bc28023b"
+    },
+    {
+      "path": "artifacts/issue429-qualification/sol-429-supported-wasm-hashes.txt",
+      "bytes": 1695,
+      "sha256": "cc63c09293ce4bd0653b90225ecd74eff56b94a637ec269de3834aba4eb7d0b0"
+    },
+    {
+      "path": "artifacts/issue429-qualification/sol-429-supported-wasm-summary.log",
+      "bytes": 4319,
+      "sha256": "7b9412c9d89f0f2c7da0f044809f0d98c5d1dd72c54427e01db7950af2977f37"
+    },
+    {
+      "path": "artifacts/issue429-qualification/sol-429-supported-wasm-supplement.log",
+      "bytes": 2184,
+      "sha256": "41b1f622e148699ccb04bff27583b153476351be83c1b51ece879503ee6233ba"
+    },
+    {
+      "path": "artifacts/issue429-qualification/sol-429-wasm-supplement.py",
+      "bytes": 3776,
+      "sha256": "648e2a8fe8620044cce3b9b55e608f6ad042a897ab0ed126a1db813523324a39"
+    }
+  ]
+}

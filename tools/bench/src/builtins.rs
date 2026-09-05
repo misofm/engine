@@ -1989,6 +1989,24 @@ mod tests {
     }
 
     #[test]
+    fn audited_allocator_is_live_outside_the_render_scope() {
+        bench_alloc::assert_installed();
+        let before = bench_alloc::counters();
+        let held = Box::new([0_u8; 64]);
+        std::hint::black_box(&held);
+        drop(held);
+        let moved = bench_alloc::delta_since(before);
+        assert!(
+            moved.allocations > 0,
+            "positive allocation probe was optimized away"
+        );
+        assert!(
+            moved.deallocations > 0,
+            "positive deallocation probe was optimized away"
+        );
+    }
+
+    #[test]
     fn benchmark_inputs_take_their_hashes_from_the_checked_manifest_rows() {
         for plan in measured_record_plans() {
             let input = input_fixture(plan.workload, plan.rate_hz);

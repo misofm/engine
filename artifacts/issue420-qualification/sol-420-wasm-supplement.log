@@ -1,0 +1,14 @@
+source_sha=51e2aed211b30523076e0e8dd07973b13b57dc11
+nonlto_target=/tmp/sol420-nonlto.m3INqF
+observation_pattern=observe options=rg -l --binary
+{"family": "engine", "archive": "/tmp/sol420-nonlto.m3INqF/wasm32-unknown-unknown/release/deps/libengine-43010e1ae45ff1b3.rlib", "member": "engine-43010e1ae45ff1b3.engine.3cdc5b765e4ae52f-cgu.0.rcgu.o", "member_read_status": 0, "bytes": 245013, "expected_sha256": "2f6ea4ab8bbb9b474f4d499fb70d029d2ae1ea5ddec86acbfe516a3ac24ab687", "actual_sha256": "2f6ea4ab8bbb9b474f4d499fb70d029d2ae1ea5ddec86acbfe516a3ac24ab687", "hash_matches": true, "member_stderr": ""}
+{"family": "engine", "observation_scan_status": 0, "stdout": "/tmp/sol420-observe-engine-xs96ey03.o\n", "stderr": ""}
+{"family": "source", "archive": "/tmp/sol420-nonlto.m3INqF/wasm32-unknown-unknown/release/deps/libsource-0fdfa2234eb4bd89.rlib", "member": "source-0fdfa2234eb4bd89.source.7b5fcfd726247e1-cgu.0.rcgu.o", "member_read_status": 0, "bytes": 196787, "expected_sha256": "de8a478abc88d1ee7c379ee795e7c73f4d3b170e6df1e3dc5247a2edcc9c8353", "actual_sha256": "de8a478abc88d1ee7c379ee795e7c73f4d3b170e6df1e3dc5247a2edcc9c8353", "hash_matches": true, "member_stderr": ""}
+{"family": "source", "observation_scan_status": 0, "stdout": "/tmp/sol420-observe-source-q828g8sh.o\n", "stderr": ""}
+{"family": "target_smoke", "archive": "/tmp/sol420-nonlto.m3INqF/wasm32-unknown-unknown/release/deps/libtarget_smoke-f8895a03d6c8d18b.rlib", "member": "target_smoke-f8895a03d6c8d18b.target_smoke.d196ae6c3bbfe597-cgu.0.rcgu.o", "member_read_status": 0, "bytes": 3424, "expected_sha256": "c9c2a2d4b51f0ed1e186057f1726d123e263487de37b42b69d67a3383009a5d0", "actual_sha256": "c9c2a2d4b51f0ed1e186057f1726d123e263487de37b42b69d67a3383009a5d0", "hash_matches": true, "member_stderr": ""}
+{"family": "target_smoke", "observation_scan_status": 1, "stdout": "", "stderr": ""}
+{"source_fallback_invoked": false, "binary_match_count": 2, "reason": "at least one binary match and all three scans completed without error"}
+observation_status=PASS scans=[0, 0, 1] binary_matches=2
+cfg_query_status=0 target=wasm32-unknown-unknown flags=-simd128
+target_has_atomic_ptr_presence_scan_status=0 expected=0
+target_feature_atomics_absence_scan_status=1 expected=1
