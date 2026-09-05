@@ -232,3 +232,36 @@ Retain exact two original/mutant/restored controls. Complete these rows in the t
 Review inspected the complete issue/prior verdict, exact production/suite delta, current operation lists and supplied logs/status files. No tests/builds/timing or repository/GitHub mutations were performed. Only this /tmp verdict was written. Parent #403/#306/#349 remains open, and Sol attempt3 is the final pass under the standing hard stop.
 
 Root authorizes Sol attempt 3 for these finite table/payload/late-consumer and diagnostic-output gaps, preserving accepted production flow and both actual counter-controls. This is the final coherent pass in the series; a FAIL requires preserving evidence, hard stop and explicit bounded rescope. No fourth retry, new mutant campaign, helper/framework/runner expansion or weaker acceptance is authorized. Root owns exact-path checkpoints and remote synchronization.
+
+## Sol attempt 3 implementation checkpoint
+
+The final Sol pass preserves the accepted production flow and the two actual status-loss mutants.
+The only production adjustment adds already-captured partial stdout to sort, expected-set, count, and
+formatter failure diagnostics. No success-path, parser, pattern, owner set, exemption, Cargo flag,
+or policy semantics changed.
+
+The benchmark suite now uses two valid manifests so the dependency parser failure is selected at a
+later manifest. Its selective rows cover empty/error and faithful real-output/error modes for
+manifest find/sort; all four sole-owner discoveries and their individual sorts; shared-definition
+and candidate discovery/sort; the accepted later delegate parser; private-SHA discovery/sort; a
+later timed subject's real marker and clean forbidden scan; exact six-file unsafe and two-file
+environment scans plus both expected/discovered sorts; and real count/formatter output. Directed
+assertions require the named operation/status and injected sentinel, returning 97 for unexpected
+success and 96 for a wrong diagnostic or missing witness.
+
+The audit fixture now contains ordered `fixture` and `later-fixture` packages. Selective structural,
+name, Cargo, and graph-grep failures target `later-fixture` after the earlier package succeeds.
+Find/sort rows cover both complete real lists and empty output on error; parsers cover legitimate
+empty structural output and both valid/empty package-name output on error. Cargo rows retain the
+exact requested package name for clean and matching output/error, reject successful empty output,
+and graph-grep rows use the real grep over matching or clean Cargo payloads. Missing roots, empty
+aggregate, and unnamed later package assertions require their precise diagnostics. The uniquely
+verified manifest and Cargo production mutants still produce distinguished status 97, while the
+restored two-package fixture produces status 0.
+
+Final focused evidence is retained in `/tmp/453-*.log` with corresponding status files for the
+four-file syntax check, both real scanners, both suites, and diff hygiene. The audit scanner uses
+only locked offline Cargo-tree metadata resolution. No benchmark binary, runner, build,
+full-workspace gate, timing, artifact, Git, GitHub, workflow, runtime, or sibling-scope action was
+performed. This is the final implementation attempt; a failed adversarial verdict requires hard
+stop and bounded rescope.

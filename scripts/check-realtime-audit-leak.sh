@@ -33,7 +33,7 @@ else
 fi
 ((find_status == 0)) || fail "manifest discovery failed with status $find_status; output: $(captured "$scratch/manifests"); stderr: $(captured "$scratch/find.err")"
 if LC_ALL=C sort "$scratch/manifests" >"$scratch/manifests.sorted" 2>"$scratch/sort.err"; then sort_status=0; else sort_status=$?; fi
-((sort_status == 0)) || fail "manifest sort failed with status $sort_status; input: $(captured "$scratch/manifests"); stderr: $(captured "$scratch/sort.err")"
+((sort_status == 0)) || fail "manifest sort failed with status $sort_status; output: $(captured "$scratch/manifests.sorted"); input: $(captured "$scratch/manifests"); stderr: $(captured "$scratch/sort.err")"
 [[ -s "$scratch/manifests.sorted" ]] || fail 'manifest discovery produced no packages'
 
 # Structural half: inside crates/ and hosts/ manifests, only dev-dependency sections (and the

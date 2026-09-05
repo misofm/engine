@@ -31,7 +31,7 @@ sole_owner() {
     if grep -rlE --include='*.rs' "$pattern" tools >"$scratch/grep" 2>"$scratch/grep.err"; then grep_status=0; else grep_status=$?; fi
     ((grep_status <= 1)) || fail "$label (grep failed with status $grep_status; output: $(captured "$scratch/grep"); stderr: $(captured "$scratch/grep.err"))"
     if LC_ALL=C sort "$scratch/grep" >"$scratch/sort" 2>"$scratch/sort.err"; then sort_status=0; else sort_status=$?; fi
-    ((sort_status == 0)) || fail "$label (sort failed with status $sort_status; input: $(captured "$scratch/grep"); stderr: $(captured "$scratch/sort.err"))"
+    ((sort_status == 0)) || fail "$label (sort failed with status $sort_status; output: $(captured "$scratch/sort"); input: $(captured "$scratch/grep"); stderr: $(captured "$scratch/sort.err"))"
     found="$(<"$scratch/sort")"
     [[ "$found" == "$owner" ]] || {
         printf 'expected only %s\nfound:\n%s\n' "$owner" "$found" >&2
@@ -69,7 +69,7 @@ sole_owner_or_delegate() {
     if grep -rlE --include='*.rs' "$def_pattern" tools >"$scratch/grep" 2>"$scratch/grep.err"; then grep_status=0; else grep_status=$?; fi
     ((grep_status <= 1)) || fail "$label (grep failed with status $grep_status; output: $(captured "$scratch/grep"); stderr: $(captured "$scratch/grep.err"))"
     if LC_ALL=C sort "$scratch/grep" >"$scratch/sort" 2>"$scratch/sort.err"; then sort_status=0; else sort_status=$?; fi
-    ((sort_status == 0)) || fail "$label (sort failed with status $sort_status; input: $(captured "$scratch/grep"); stderr: $(captured "$scratch/sort.err"))"
+    ((sort_status == 0)) || fail "$label (sort failed with status $sort_status; output: $(captured "$scratch/sort"); input: $(captured "$scratch/grep"); stderr: $(captured "$scratch/sort.err"))"
     matches="$(<"$scratch/sort")"
     local file awk_pattern="${def_pattern//\\/\\\\}"
     # The 4-character Rust *source* spelling of the backslash char literal -- apostrophe,
@@ -136,7 +136,7 @@ forbidden_under_tools() {
     if grep -rlE --include='*.rs' "$pattern" tools >"$scratch/grep" 2>"$scratch/grep.err"; then grep_status=0; else grep_status=$?; fi
     ((grep_status <= 1)) || fail "$label (grep failed with status $grep_status; output: $(captured "$scratch/grep"); stderr: $(captured "$scratch/grep.err"))"
     if LC_ALL=C sort "$scratch/grep" >"$scratch/sort" 2>"$scratch/sort.err"; then sort_status=0; else sort_status=$?; fi
-    ((sort_status == 0)) || fail "$label (sort failed with status $sort_status; input: $(captured "$scratch/grep"); stderr: $(captured "$scratch/sort.err"))"
+    ((sort_status == 0)) || fail "$label (sort failed with status $sort_status; output: $(captured "$scratch/sort"); input: $(captured "$scratch/grep"); stderr: $(captured "$scratch/sort.err"))"
     found="$(<"$scratch/sort")"
     [[ -z "$found" ]] || {
         printf 'found:\n%s\n' "$found" >&2
@@ -154,7 +154,7 @@ done
 if find crates hosts sidecars -mindepth 2 -maxdepth 2 -name Cargo.toml >"$scratch/manifests" 2>"$scratch/find.err"; then find_status=0; else find_status=$?; fi
 ((find_status == 0)) || fail "manifest discovery failed with status $find_status; output: $(captured "$scratch/manifests"); stderr: $(captured "$scratch/find.err")"
 if LC_ALL=C sort "$scratch/manifests" >"$scratch/manifests.sorted" 2>"$scratch/sort.err"; then sort_status=0; else sort_status=$?; fi
-((sort_status == 0)) || fail "manifest sort failed with status $sort_status; input: $(captured "$scratch/manifests"); stderr: $(captured "$scratch/sort.err")"
+((sort_status == 0)) || fail "manifest sort failed with status $sort_status; output: $(captured "$scratch/manifests.sorted"); input: $(captured "$scratch/manifests"); stderr: $(captured "$scratch/sort.err")"
 [[ -s "$scratch/manifests.sorted" ]] || fail 'manifest discovery produced no packages'
 
 sole_owner 'the audited allocator has more than one implementation' \
@@ -217,12 +217,12 @@ if printf '%s\n' \
     tools/bench/src/protocol.rs \
     tools/wasm-gate-guest/src/lib.rs \
     tools/wasm-console-guest/src/lib.rs | LC_ALL=C sort >"$scratch/expected-unsafe" 2>"$scratch/sort.err"; then sort_status=0; else sort_status=$?; fi
-((sort_status == 0)) || fail "unsafe expected-owner sort failed with status $sort_status; stderr: $(captured "$scratch/sort.err")"
+((sort_status == 0)) || fail "unsafe expected-owner sort failed with status $sort_status; output: $(captured "$scratch/expected-unsafe"); stderr: $(captured "$scratch/sort.err")"
 expected_unsafe="$(<"$scratch/expected-unsafe")"
 if grep -rlE --include='*.rs' '^#!\[allow\(unsafe_code\)\]' tools >"$scratch/grep" 2>"$scratch/grep.err"; then grep_status=0; else grep_status=$?; fi
 ((grep_status <= 1)) || fail "unsafe-owner scan failed with status $grep_status; output: $(captured "$scratch/grep"); stderr: $(captured "$scratch/grep.err")"
 if LC_ALL=C sort "$scratch/grep" >"$scratch/actual-unsafe" 2>"$scratch/sort.err"; then sort_status=0; else sort_status=$?; fi
-((sort_status == 0)) || fail "unsafe-owner sort failed with status $sort_status; input: $(captured "$scratch/grep"); stderr: $(captured "$scratch/sort.err")"
+((sort_status == 0)) || fail "unsafe-owner sort failed with status $sort_status; output: $(captured "$scratch/actual-unsafe"); input: $(captured "$scratch/grep"); stderr: $(captured "$scratch/sort.err")"
 actual_unsafe="$(<"$scratch/actual-unsafe")"
 [[ "$actual_unsafe" == "$expected_unsafe" ]] || {
     diff -u <(printf '%s\n' "$expected_unsafe") <(printf '%s\n' "$actual_unsafe") >&2 || true
@@ -234,12 +234,12 @@ actual_unsafe="$(<"$scratch/actual-unsafe")"
 if printf '%s\n' \
     tools/audit/src/main.rs \
     tools/bench/src/main.rs | LC_ALL=C sort >"$scratch/expected-environment" 2>"$scratch/sort.err"; then sort_status=0; else sort_status=$?; fi
-((sort_status == 0)) || fail "environment expected-owner sort failed with status $sort_status; stderr: $(captured "$scratch/sort.err")"
+((sort_status == 0)) || fail "environment expected-owner sort failed with status $sort_status; output: $(captured "$scratch/expected-environment"); stderr: $(captured "$scratch/sort.err")"
 expected_environment_readers="$(<"$scratch/expected-environment")"
 if grep -rlE --include='*.rs' '(std::)?env::var\(' tools/{audit,bench,bench-support}/src >"$scratch/grep" 2>"$scratch/grep.err"; then grep_status=0; else grep_status=$?; fi
 ((grep_status <= 1)) || fail "environment-reader scan failed with status $grep_status; output: $(captured "$scratch/grep"); stderr: $(captured "$scratch/grep.err")"
 if LC_ALL=C sort "$scratch/grep" >"$scratch/actual-environment" 2>"$scratch/sort.err"; then sort_status=0; else sort_status=$?; fi
-((sort_status == 0)) || fail "environment-reader sort failed with status $sort_status; input: $(captured "$scratch/grep"); stderr: $(captured "$scratch/sort.err")"
+((sort_status == 0)) || fail "environment-reader sort failed with status $sort_status; output: $(captured "$scratch/actual-environment"); input: $(captured "$scratch/grep"); stderr: $(captured "$scratch/sort.err")"
 actual_environment_readers="$(<"$scratch/actual-environment")"
 [[ "$actual_environment_readers" == "$expected_environment_readers" ]] || {
     diff -u <(printf '%s\n' "$expected_environment_readers") \
@@ -277,8 +277,8 @@ while IFS= read -r manifest; do
 done < "$scratch/manifests.sorted"
 
 if printf '%s\n' "$expected_unsafe" | wc -l >"$scratch/count" 2>"$scratch/count.err"; then count_status=0; else count_status=$?; fi
-((count_status == 0)) || fail "unsafe-owner count failed with status $count_status; stderr: $(captured "$scratch/count.err")"
+((count_status == 0)) || fail "unsafe-owner count failed with status $count_status; output: $(captured "$scratch/count"); stderr: $(captured "$scratch/count.err")"
 if tr -d ' ' <"$scratch/count" >"$scratch/count.formatted" 2>"$scratch/count.err"; then format_status=0; else format_status=$?; fi
-((format_status == 0)) || fail "unsafe-owner count formatter failed with status $format_status; input: $(captured "$scratch/count"); stderr: $(captured "$scratch/count.err")"
+((format_status == 0)) || fail "unsafe-owner count formatter failed with status $format_status; output: $(captured "$scratch/count.formatted"); input: $(captured "$scratch/count"); stderr: $(captured "$scratch/count.err")"
 printf 'bench policy: ok (1 allocator, 1 escaper, 1 percentile, 1 digest sink, %s unsafe owners, %s subjects on the shared timer)\n' \
     "$(<"$scratch/count.formatted")" "${#timed_subjects[@]}"
