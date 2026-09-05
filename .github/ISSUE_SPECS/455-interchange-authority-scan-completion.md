@@ -309,3 +309,7 @@ Root preserves this completed three-attempt series. No further implementation or
 ## Bounded proof successor #471
 
 After final Sol attempt 3 failed its two retained proof requirements, #471 owns complete diagnostic payload equality and an actual late standalone108 authority-read refusal. Production checker changes and the inherited table/controls are frozen. This is not a fourth #455 implementation attempt. Both issues remain open until combined evidence, Astra PR review and required qualification succeed upstream.
+
+## Combined integrated qualification complete; PR review pending
+
+Astra accepted child source c950ce45 after Sol attempt2, retaining the original #455 production/table/control contract. Integrated candidate1171d0e44710010125c0f6c4571b29a2fdc6754a passed full workspace: {"head": "1171d0e44710010125c0f6c4571b29a2fdc6754a", "exit_code": 0, "blocks": 276, "passed": 1611, "failed": 0, "ignored": 24}. Named test population is identical to the delivered #460 integrated baseline; complete runtime/build/fixture inputs match current main4a814f34. Focused checker/suite statuses pass, with original namespace/migration production mutants and exact payload/read proof retained. Evidence is tracked under `artifacts/issue455-interchange-completion/` with exact hash/byte manifest and candidate provenance. Actual-head Astra review and required CI must pass before #455/#471 close together; #403/#306/#349 remain open. No timing or artifact regeneration occurred.
