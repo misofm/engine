@@ -1350,7 +1350,7 @@ use rack::{AoSoaScratch, BankBlock, BankSlot, BankStage, ConsoleEffectBankStage,
 
 use crate::{
     GraphNodeBinding, GraphNodeId, GraphPreparedBuiltinBank, GraphPreparedBuiltinBankProcessor,
-    GraphPreparedEffectBank, GraphSpec, PreparedRoute, RouteTransform,
+    GraphPreparedEffectBank, GraphSpec, PreparedRoute, RouteTransform, TrackStage,
     program::{ExecutionProgram, Op},
 };
 
@@ -1615,13 +1615,86 @@ impl RuntimeParts {
         let mut scratch = None;
         let mut active: Option<Box<[bool]>> = None;
         let mut stages = Vec::with_capacity(run.len());
-        for membership in run {
-            let (slot_scratch, slot_active, stage) = self.stage_for(*membership, members);
+        let mut index = 0;
+        while index < run.len() {
+            let pair = if index + 1 < run.len() {
+                match (run[index], run[index + 1]) {
+                    (Membership::Builtin(a), Membership::Builtin(b)) => {
+                        let left = self.builtin_banks[a].as_ref().expect("builtin owner");
+                        let right = self.builtin_banks[b].as_ref().expect("builtin owner");
+                        let same_tracks = left.members.len() == right.members.len()
+                            && left.members.iter().zip(right.members.iter()).all(|(left, right)| {
+                                matches!((left, right),
+                                    (GraphNodeId::TrackStage { track_id: left_id, stage: TrackStage::PostFader },
+                                     GraphNodeId::TrackStage { track_id: right_id, stage: TrackStage::PostMatrix })
+                                    if left_id == right_id)
+                            });
+                        same_tracks
+                            && left.backend == right.backend
+                            && left.scratch.width() == right.scratch.width()
+                            && left.scratch.quantum() == right.scratch.quantum()
+                    }
+                    _ => false,
+                }
+            } else {
+                false
+            };
+            if pair {
+                let a = match run[index] {
+                    Membership::Builtin(i) => self.builtin_banks[i].take().expect("builtin owner"),
+                    _ => unreachable!(),
+                };
+                let b = match run[index + 1] {
+                    Membership::Builtin(i) => self.builtin_banks[i].take().expect("builtin owner"),
+                    _ => unreachable!(),
+                };
+                let scratch_a = a.scratch;
+                let active_a = trailing_active_mask(members, scratch_a.width());
+                let factory = a.processor.pair_factory();
+                let (slot_scratch, slot_active, stage) = match factory {
+                    Some(factory) => match factory(a.processor, b.processor) {
+                        Ok(processor) => (
+                            scratch_a,
+                            active_a,
+                            Box::new(BuiltinStage(processor)) as Box<dyn BankStage>,
+                        ),
+                        Err((left, right)) => {
+                            if scratch.is_none() {
+                                scratch = Some(scratch_a);
+                                active = Some(active_a);
+                            }
+                            stages.push(Box::new(BuiltinStage(left)) as Box<dyn BankStage>);
+                            stages.push(Box::new(BuiltinStage(right)) as Box<dyn BankStage>);
+                            index += 2;
+                            continue;
+                        }
+                    },
+                    None => {
+                        if scratch.is_none() {
+                            scratch = Some(scratch_a);
+                            active = Some(active_a);
+                        }
+                        stages.push(Box::new(BuiltinStage(a.processor)) as Box<dyn BankStage>);
+                        stages.push(Box::new(BuiltinStage(b.processor)) as Box<dyn BankStage>);
+                        index += 2;
+                        continue;
+                    }
+                };
+                if scratch.is_none() {
+                    scratch = Some(slot_scratch);
+                    active = Some(slot_active);
+                }
+                stages.push(stage);
+                index += 2;
+                continue;
+            }
+            let (slot_scratch, slot_active, stage) = self.stage_for(run[index], members);
             if scratch.is_none() {
                 scratch = Some(slot_scratch);
                 active = Some(slot_active);
             }
             stages.push(stage);
+            index += 1;
         }
         bank_chain(
             scratch.expect("a unit has at least one slot"),
@@ -2965,7 +3038,156 @@ fn cohort_runs(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::any::Any;
     use lane::kernels::sum2_block;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    struct DecliningPairOwner(Arc<AtomicUsize>);
+    fn decline_pair(
+        left: crate::BuiltinProcessor,
+        right: crate::BuiltinProcessor,
+    ) -> Result<crate::BuiltinProcessor, (crate::BuiltinProcessor, crate::BuiltinProcessor)> {
+        Err((left, right))
+    }
+    impl GraphPreparedBuiltinBankProcessor for DecliningPairOwner {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn into_any(self: Box<Self>) -> Box<dyn Any> {
+            self
+        }
+        fn pair_factory(&self) -> Option<crate::BuiltinPairFactory> {
+            Some(decline_pair)
+        }
+        fn process(
+            &mut self,
+            left: &mut [f32],
+            right: &mut [f32],
+            _: u32,
+            _: u64,
+        ) -> Result<(), RenderError> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            for sample in left.iter_mut().chain(right.iter_mut()) {
+                *sample += 1.0;
+            }
+            Ok(())
+        }
+    }
+    struct PlainPairOwner(Arc<AtomicUsize>);
+    impl GraphPreparedBuiltinBankProcessor for PlainPairOwner {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn into_any(self: Box<Self>) -> Box<dyn Any> {
+            self
+        }
+        fn process(
+            &mut self,
+            left: &mut [f32],
+            right: &mut [f32],
+            _: u32,
+            _: u64,
+        ) -> Result<(), RenderError> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            for sample in left.iter_mut().chain(right.iter_mut()) {
+                *sample *= 2.0;
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_declined_first_pair_retains_the_first_slots_scratch() {
+        let track = crate::StableGraphId::parse("decline").expect("id");
+        let fader = GraphNodeId::TrackStage {
+            track_id: track.clone(),
+            stage: TrackStage::PostFader,
+        };
+        let matrix = GraphNodeId::TrackStage {
+            track_id: track,
+            stage: TrackStage::PostMatrix,
+        };
+        let spec = GraphSpec {
+            nodes: vec![
+                crate::GraphNode {
+                    id: fader.clone(),
+                    latency: effect_contract::LatencySamples(0),
+                    tail: effect_contract::TailSamples::Finite(0),
+                },
+                crate::GraphNode {
+                    id: matrix.clone(),
+                    latency: effect_contract::LatencySamples(0),
+                    tail: effect_contract::TailSamples::Finite(0),
+                },
+            ],
+            ports: Vec::new(),
+            edges: Vec::new(),
+        };
+        let bank = |member, processor: Box<dyn GraphPreparedBuiltinBankProcessor>| {
+            GraphPreparedBuiltinBank {
+                backend: lane::Backend::Simd4,
+                members: vec![member].into_boxed_slice(),
+                processor,
+                scratch: AoSoaScratch::new(effect_contract::BankWidth::Four, 8).expect("scratch"),
+            }
+        };
+        let first_calls = Arc::new(AtomicUsize::new(0));
+        let second_calls = Arc::new(AtomicUsize::new(0));
+        let mut parts = RuntimeParts::new(
+            &spec,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            vec![
+                bank(
+                    fader,
+                    Box::new(DecliningPairOwner(Arc::clone(&first_calls))),
+                ),
+                bank(matrix, Box::new(PlainPairOwner(Arc::clone(&second_calls)))),
+            ],
+            Vec::new(),
+            Vec::new(),
+            Default::default(),
+            Vec::new(),
+            8,
+        );
+        let mut chain = parts.chain_for(&[Membership::Builtin(0), Membership::Builtin(1)], 1);
+        assert!(
+            parts.builtin_banks.iter().all(Option::is_none),
+            "both original owners moved once"
+        );
+        const FRAMES: usize = 2;
+        let mut lease = stereo_lease(FRAMES, 3);
+        lease.write_stereo(1).0.copy_from_slice(&[1.0, 2.0]);
+        lease.write_stereo(1).1.copy_from_slice(&[-1.0, -2.0]);
+        let mut members = ArenaMembers {
+            lease: &mut lease,
+            inputs: &[1],
+            outputs: &[2],
+            fold: &[],
+            master: 0,
+        };
+        chain
+            .run(&mut members, FRAMES as u32, 0)
+            .expect("declined chain render");
+        assert_eq!(
+            first_calls.load(Ordering::Relaxed),
+            1,
+            "first returned owner executes"
+        );
+        assert_eq!(
+            second_calls.load(Ordering::Relaxed),
+            1,
+            "second returned owner executes"
+        );
+        assert_eq!(members.lease.read_stereo(2).0, &[4.0, 6.0]);
+        assert_eq!(members.lease.read_stereo(2).1, &[0.0, -2.0]);
+    }
 
     /// The node's cached witness and the line's own answer are the same fact (#210 phase 2).
     ///
