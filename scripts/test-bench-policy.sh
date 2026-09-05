@@ -292,6 +292,41 @@ grep_fault() {
     expect_failure_with_path "$label" "$case_root/shim" "$expected" 'grep-error-sentinel'
 }
 
+multifile_grep_fault() {
+    local label=$1 selector=$2 operation=$3 sentinel=$4 expected_files=$5 mode case_label
+    local output status prefix suffix bounded replay expected_sorted actual_sorted line_count
+    for mode in real reversed; do
+        case_label=$label
+        [[ "$mode" == real ]] || case_label="$label-reversed"
+        new_case "$case_label"
+        mkdir -p "$case_root/shim"
+        printf '#!/usr/bin/env bash\nselector=%q\nmode=%q\npayload=%q\nreplay=%q\nif [[ " $* " == *"--include=*.rs"* && " $* " == *"$selector"* ]]; then\n    if /usr/bin/grep "$@" >"$payload"; then producer_status=0; else producer_status=$?; fi\n    printf "%%s\\n" "$producer_status" >"$payload.status"\n    ((producer_status == 0)) || { printf "selected-grep-setup-status=%%s\\n" "$producer_status" >&2; exit 96; }\n    if [[ "$mode" == reversed ]]; then /usr/bin/tac "$payload" >"$replay"; else cp "$payload" "$replay"; fi\n    /usr/bin/cat "$replay"\n    printf "%%s\\n" %q >&2\n    exit 7\nfi\nexec /usr/bin/grep "$@"\n' \
+            "$selector" "$mode" "$case_root/selected.payload" "$case_root/replayed.payload" "$sentinel" \
+            >"$case_root/shim/grep"
+        chmod +x "$case_root/shim/grep"
+        if output="$(PATH="$case_root/shim:$PATH" check 2>&1)"; then status=0; else status=$?; fi
+        ((status != 0)) || { printf 'bench policy mutation escaped: %s\n' "$case_label" >&2; exit 97; }
+        [[ "$(<"$case_root/selected.payload.status")" == 0 ]] || { printf 'selected grep was not successful: %s\n' "$case_label" >&2; exit 96; }
+        replay="$(<"$case_root/replayed.payload")"
+        prefix="$operation failed with status 7; output: "
+        suffix="; stderr: $sentinel"
+        [[ "$output" == *"$prefix"*"$suffix"* ]] || { printf 'bench policy wrong diagnostic: %s\n%s\n' "$case_label" "$output" >&2; exit 96; }
+        bounded=${output#*"$prefix"}
+        bounded=${bounded%%"$suffix"*}
+        [[ "$bounded" == "$replay" ]] || { printf 'bench policy truncated/reordered diagnostic payload: %s\nexpected:\n%s\nactual:\n%s\n' "$case_label" "$replay" "$bounded" >&2; exit 96; }
+        expected_sorted="$(printf '%s\n' "$expected_files" | LC_ALL=C sort)"
+        actual_sorted="$(LC_ALL=C sort "$case_root/selected.payload")"
+        [[ "$actual_sorted" == "$expected_sorted" ]] || { printf 'bench policy incomplete selected grep payload: %s\nexpected:\n%s\nactual:\n%s\n' "$case_label" "$expected_sorted" "$actual_sorted" >&2; exit 96; }
+        line_count="$(wc -l <"$case_root/selected.payload" | tr -d ' ')"
+        if [[ "$mode" == reversed ]]; then
+            ((line_count > 1)) || { printf 'bench policy reversal needs multiple lines: %s\n' "$case_label" >&2; exit 96; }
+            [[ "$(<"$case_root/selected.payload")" != "$replay" ]] || { printf 'bench policy reversal did not change order: %s\n' "$case_label" >&2; exit 96; }
+        fi
+        printf 'bench policy selected grep evidence: %s producer-status=0 lines=%s\npayload:\n%s\nreplay:\n%s\ndiagnostic-output:\n%s\n' \
+            "$case_label" "$line_count" "$(<"$case_root/selected.payload")" "$replay" "$bounded"
+    done
+}
+
 grep_fault owner-grep-error '^unsafe impl GlobalAlloc' 'grep failed with status 7; output: tools/bench-support/src/alloc.rs; stderr: grep-error-sentinel'
 grep_fault owner-grep-empty-error '^unsafe impl GlobalAlloc' 'grep failed with status 7; output: <empty>; stderr: grep-error-sentinel' empty
 grep_fault allocator-registration-grep-error 'global_allocator' 'grep failed with status 7; output: tools/bench-support/src/alloc.rs; stderr: grep-error-sentinel'
@@ -302,20 +337,16 @@ grep_fault digest-grep-error 'Sha256Sink' 'grep failed with status 7; output: to
 grep_fault digest-grep-empty-error 'Sha256Sink' 'grep failed with status 7; output: <empty>; stderr: grep-error-sentinel' empty
 grep_fault escaper-presence-error 'tools/bench-support/src/json.rs' 'shared-definition grep failed or is empty for tools/bench-support/src/json.rs; status 7; output:'
 grep_fault escaper-presence-empty-error 'tools/bench-support/src/json.rs' 'shared-definition grep failed or is empty for tools/bench-support/src/json.rs; status 7; output: <empty>; stderr: grep-error-sentinel' empty
-new_case escaper-candidate-grep-error
-mkdir -p "$case_root/shim"
-printf '#!/usr/bin/env bash\nif [[ " $* " == *"--include=*.rs"* && " $* " == *"json_(escape|string|quote)"* ]]; then /usr/bin/grep "$@"; printf "grep-error-sentinel\\n" >&2; exit 7; fi\nexec /usr/bin/grep "$@"\n' >"$case_root/shim/grep"
-chmod +x "$case_root/shim/grep"
-expect_failure_with_path escaper-candidate-grep-error "$case_root/shim" 'grep failed with status 7; output: tools/bench/src/effect_interchange.rs' 'grep-error-sentinel'
+multifile_grep_fault escaper-candidate-grep-error 'json_(escape|string|quote)' grep grep-error-sentinel $'tools/bench/src/effect_interchange.rs\ntools/bench/src/builtins.rs\ntools/bench-support/src/json.rs'
 new_case escaper-candidate-grep-empty-error
 mkdir -p "$case_root/shim"
 printf '#!/usr/bin/env bash\nif [[ " $* " == *"--include=*.rs"* && " $* " == *"json_(escape|string|quote)"* ]]; then printf "grep-error-sentinel\\n" >&2; exit 7; fi\nexec /usr/bin/grep "$@"\n' >"$case_root/shim/grep"
 chmod +x "$case_root/shim/grep"
 expect_failure_with_path escaper-candidate-grep-empty-error "$case_root/shim" 'grep failed with status 7; output: <empty>; stderr: grep-error-sentinel'
 grep_fault private-sha-grep-error '0x6a09_' 'grep failed with status 7; output: <empty>; stderr: grep-error-sentinel' empty
-grep_fault unsafe-owner-grep-error 'unsafe_code' 'tools/audit/src/capi.rs; stderr: grep-error-sentinel' real
+multifile_grep_fault unsafe-owner-grep-error 'unsafe_code' 'unsafe-owner scan' grep-error-sentinel $'tools/bench-support/src/alloc.rs\ntools/audit/src/capi.rs\ntools/native-pcm-runner/src/lib.rs\ntools/bench/src/protocol.rs\ntools/wasm-gate-guest/src/lib.rs\ntools/wasm-console-guest/src/lib.rs'
 grep_fault unsafe-owner-grep-empty-error 'unsafe_code' 'unsafe-owner scan failed with status 7; output: <empty>; stderr: grep-error-sentinel' empty
-grep_fault environment-reader-grep-error 'env::var' 'tools/bench/src/main.rs; stderr: grep-error-sentinel' real
+multifile_grep_fault environment-reader-grep-error 'env::var' 'environment-reader scan' grep-error-sentinel $'tools/audit/src/main.rs\ntools/bench/src/main.rs'
 grep_fault environment-reader-grep-empty-error 'env::var' 'environment-reader scan failed with status 7; output: <empty>; stderr: grep-error-sentinel' empty
 
 new_case delegate-parser-output-error
