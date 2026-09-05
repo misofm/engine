@@ -1,0 +1,33 @@
+{
+  "source": "/home/bl/misofm/engine",
+  "destination": "/home/bl/misofm/engine-455-plan",
+  "paths": [
+    "scripts/check-effect-interchange-benchmark-108.sh",
+    "scripts/check-effect-interchange-qualification.sh",
+    "scripts/test-effect-interchange-benchmark-108-policy.sh",
+    "scripts/test-effect-interchange-policy.sh"
+  ],
+  "base_path_identity": [
+    [
+      "scripts/check-effect-interchange-benchmark-108.sh",
+      true
+    ],
+    [
+      "scripts/check-effect-interchange-qualification.sh",
+      true
+    ],
+    [
+      "scripts/test-effect-interchange-benchmark-108-policy.sh",
+      true
+    ],
+    [
+      "scripts/test-effect-interchange-policy.sh",
+      true
+    ]
+  ],
+  "patch_bytes": 12893,
+  "status": "moved verbatim; only four agent-owned shared-root files restored",
+  "unrelated_dsp_sha256": "f4bdf9b4d44ea8b36bef8ccc625af11b0dbec828a9fa867bb30c27d45d467536",
+  "agent_confirmed_exact_four_paths": true,
+  "no_agent_logs_retained": true
+}
