@@ -172,3 +172,7 @@ Logs: `/private/tmp/dx428-attempt2-focused.log`,
 `/private/tmp/dx428-attempt2-headless.log`, and
 `/private/tmp/dx428-attempt2-package-browser.log`. Independent attempt-two review and final remote
 issue synchronization remain pending; the first FAIL is retained rather than rewritten.
+
+## Dedicated Astra medium attempt2 PASS
+
+Independent review at9ab79d13 verifies typed scratch refusal classes/fields and meaningful timer cleanup regressions, plus headless and actual packed default/forwarding browser startup. Six generated artifacts and PCM bytes are unchanged. Report attached to PR432. Both first-review findings are resolved; historical FAIL retained. This completes package-owned startup, not downstream app integration or registry publication.
