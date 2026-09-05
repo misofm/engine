@@ -134,6 +134,9 @@ test("MSB1 layout and writer preserve frozen bytes, headers, counters and reuse"
   const zeroCapacity = createMsb1Ring({ sourceId: "bad", channels: 1, frameCapacity: 4, capacity: 2 });
   new Int32Array(zeroCapacity)[MSB1_CONTROL.CAPACITY] = 0;
   assert.throws(() => new Msb1RingWriter(zeroCapacity), /header is invalid/);
+  const nonPowerCapacity = createMsb1Ring({ sourceId: "bad", channels: 1, frameCapacity: 4, capacity: 4 });
+  controls(nonPowerCapacity)[MSB1_CONTROL.CAPACITY] = 3;
+  assert.throws(() => new Msb1RingWriter(nonPowerCapacity), /header is invalid/);
   const zeroFrameCapacity = createMsb1Ring({ sourceId: "bad", channels: 1, frameCapacity: 4, capacity: 2 });
   new Int32Array(zeroFrameCapacity)[MSB1_CONTROL.FRAME_CAPACITY] = 0;
   assert.throws(() => new Msb1RingWriter(zeroFrameCapacity), /header is invalid/);
@@ -344,7 +347,9 @@ test("moved prelude drains odd mono/stereo rings and allocation mutation turns r
   run.process();
   assert.equal(writer.occupancy, 1); assert.equal(run.ringControls[0][MSB1_CONTROL.REFUSED], 0);
   assert.deepEqual(run.submissions.at(-1), { generation: 1n, start: 3n, channels: 1, frames: 4, end: 0, pcm: [9, 8, 7, 6, 4, 5, 6, 0] });
+  assert.equal(run.submissions.length, 4, "backpressure must capture the refused submit attempt");
   run.setSubmitResult(0); run.process(); assert.equal(writer.occupancy, 0);
+  assert.equal(run.submissions.length, 5, "draining the retained slot must invoke source_submit again");
   assert.deepEqual(run.submissions.at(-1), { generation: 1n, start: 3n, channels: 1, frames: 4, end: 0, pcm: [9, 8, 7, 6, 4, 5, 6, 0] });
   writer.reserve(4)[0].fill(5); writer.commit({ generation: 1n, startFrame: 7n, frames: 4, endOfRegion: false });
   writer.seek(2n, 12n); run.setSeekResult(6); run.process(); assert.equal(run.ringControls[0][MSB1_CONTROL.SEEKS_APPLIED], 0); assert.equal(writer.occupancy, 1);

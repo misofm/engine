@@ -252,3 +252,21 @@ For delivery isolation, approved host request-ID and CI-fixture work is now on P
 ## Renewed execution — user-confirmed end-to-end plan
 
 After the historical attempt stop, the user explicitly confirmed the SDK/adapter ownership plan, requested execution of the rest with Astra medium, and set completion as the real misofm/app flow without shortcuts. This authorizes renewed completion of this existing boundary, preserving prior evidence and all functional/realtime requirements. Astra medium will correct the outstanding concrete retry-submission and malformed-writer-capacity test discriminators, run the existing focused/package gates, and submit a complete result to a separate Astra medium reviewer. No product feature, backend, protocol, or test framework is added. This is renewed user-directed work, not a claim that the earlier attempt passed.
+
+## Astra renewed completion checkpoint (2026-09-05)
+
+The renewed test-only correction closes the two concrete evidence gaps without changing production: the prelude fixture now requires four captured calls after refusal and five after retry, then checks the new call's exact generation, start frame, channels, frame count, end flag and PCM. The writer fixture supplies a capacity-four buffer whose capacity word is changed to three and requires constructor rejection. This distinguishes the writer boundary from the existing creator validation.
+
+Audit of the current ring, feed lifecycle, copied prelude, public exports and packed consumers found no additional product correction needed for the frozen SDK boundary. The existing evidence still covers literal layout/generation fields, full-ring retention, mono/stereo partial PCM, seek retry and stale-drop behavior, terminal readiness and cleanup ordering, allocation tracking over populated drains, real DOM assignability and installed-package consumption. App/adapter integration remains downstream and is not claimed by this checkpoint.
+
+Validation of the coherent tranche:
+
+- Focused PCM eval: all four named cases pass — `MSB1 layout and writer preserve frozen bytes, headers, counters and reuse`; `feed lifecycle preserves URL, typed seams, identity and terminal cleanup`; `attach-post cleanup releases engaged rings before throwing cleanup failures`; `moved prelude drains odd mono/stereo rings and allocation mutation turns red`. Log: `/private/tmp/dx-405-renewed-focused.log`.
+- All five exact reviewer mutants fail meaningfully. The three earlier reproductions from `/private/tmp/dx-405-astra-mutations-attempt2.mjs` fail at the complete allocation tracker, queued PCM snapshot and disconnect-time writer states respectively (logs `/private/tmp/dx-405-mutations-0X7KfD/`, summary `/private/tmp/dx-405-renewed-mutants.log`). The unchanged reviewer retry-drop worklet fails the new call-count assertion with `4 !== 5`; the unchanged non-power-of-two writer mutant fails with a missing constructor exception. Updated test copies reuse the reviewer sources under `/private/tmp/dx-405-final-boundaries-1DjM6m/renewed-{retry,writer}.mjs`; logs `/private/tmp/dx-405-renewed-{retry,writer}.log`.
+- Type and generated gates pass: `/private/tmp/dx-405-renewed-types.log`, `/private/tmp/dx-405-renewed-generated.log`.
+- Existing headless wrapper against `/private/tmp/dx-393-current-artifacts`: 137 pass, 1 platform skip, 0 fail; `/private/tmp/dx-405-renewed-headless.log`.
+- Existing package gate against the same artifact directory passes, including fresh packed strict DOM and runtime consumers; `/private/tmp/dx-405-renewed-package.log`.
+- All six staged generated artifacts are byte-identical to that reviewed baseline. Prelude hash remains `d81c2159b6ca088df97e76f09c4803540e6451920cc3af1b091336fa1bdba58d`; staged NOTICE is byte-identical and its three provenance identities pass the packed gate. `/private/tmp/dx-405-renewed-artifacts.log` records the comparison. No Rust rebuild or Darwin repin.
+- `git diff --check` passes; only this spec and `sdk/test/browser-pcm-evals.mjs` changed.
+
+Implementation is paused at this green exact-path checkpoint for root commit/push and separate Astra review. Historical FAIL verdicts stand; this record makes no independent-review PASS, remote closure, publication or app end-to-end claim.
