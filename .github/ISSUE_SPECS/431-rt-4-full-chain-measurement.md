@@ -87,3 +87,7 @@ This ruling authorizes completing the stateless tooling preparation brief only. 
 ## Current-input preparation successor #473
 
 Numbered #473 owns the bounded current manifest/descriptor identity correction and dedicated zero-launch-tested capture adapter. Its scope preserves historical035/072 tooling and all existing20-row workload/validation semantics, adopting current inputs without claiming historical output equivalence or a causal speedup. #431 remains open; its single controlled invocation is unspent and is not authorized by preparation or preflight readiness. The child is queued after active tooling delivery.
+#473 preparation status: the dedicated current-input adapter, exact current validator copies and
+zero-launch hermetic proof are implemented for source review. No real preflight, runner, benchmark,
+audio or timed workload was invoked by #473. This issue's sole controlled capture remains UNSPENT
+and UNAUTHORIZED until its own separately frozen root assignment.

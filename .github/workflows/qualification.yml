@@ -323,6 +323,7 @@ jobs:
           bash scripts/check-bench-preconditions.sh
           bash scripts/test-console-benchmark.sh
           bash scripts/test-rack-benchmark.sh
+          bash scripts/test-builtins-current-benchmark.sh
           bash scripts/test-wasm-kernel-timing.sh
       - name: Shared host facade policy and mutation tests
         run: |
