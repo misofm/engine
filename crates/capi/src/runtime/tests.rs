@@ -87,13 +87,13 @@ const ALL_COMMAND_RESPONSE_VECTORS: [&str; 11] = [
     "4d49534f43544c00010000003000020001000000c801000001000000000000002a000000000000001b000000000000000100020102000000010000000000000002000201020000000000000000000000030002010200000001000000000000000400020102000000000000000000000005000401080000000010000000000000060003010400000000080000000000000700040108000000001000000000000008000101010000000400000000000000090002010200000000010000000000000a0004010800000001000000000000000b0004010800000000100000000000000c0004010800000001000000000000000d0004010800000001000000000000000e0004010800000002000000000000000f00040108000000010000000000000010000401080000001000000000000000110004010800000000200000000000001200040108000000001000000000000013000401080000008000000000000000140004010800000080000000000000001500020102000000000100000000000016000201020000000001000000000000170002010200000000010000000000001800030104000000000800000000000019000c01160000000100020003000400050006000700080009000a000b0000001a000c010c000000018002801080208021803080000000001b00040108000000ff3f000000000000",
     // #338 re-pin: canonical JSON snapshot bytes are 16,712 (0x4148), beginning with `{`.
     "4d49534f43544c000100000030000200020000004000000002000000000000002a000000000000000400000000000000010004010800000048410000000000000200040108000000000000000000000003000a01010000007b0000000000000004000801010000000000000000000000",
-    "4d49534f43544c000100000030000200040000002000000003000000000000002a0000000000000002000000000000000100030104000000000000000000000002000801010000000100000000000000",
-    "4d49534f43544c00010000003000020005000d004800000004000000000000002a00000000000000020000000000000001000b01300000000200000000000000010009011000000070726f746f636f6c2e6661696c7572650200010101000000030000000000000002000301040000000000000000000000",
-    "4d49534f43544c00010000003000020006000d004800000005000000000000002a00000000000000020000000000000001000b01300000000200000000000000010009011000000070726f746f636f6c2e6661696c7572650200010101000000030000000000000002000301040000000000000000000000",
+    "4d49534f43544c000100000030000200040000003801000003000000000000002a000000000000000300000000000000010003010400000001000000000000000200080101000000000000000000000003000b011001000010000000000000000100030104000000010000000000000002000901030000006571300000000000030001010100000001000000000000000400090102000000657100000000000005000301040000000100000000000000060001010100000001000000000000000700010101000000010000000000000008000101010000000500000000000000090001010100000002000000000000000c0006010400000000000000000000000d0001010100000004000000000000000e0001010100000003000000000000000f00030104000000000000000000000010000301040000000500000000000000110009000e00000062616e642d312d656e61626c6564000012000900060000006f6e2f6f66660000",
+    "4d49534f43544c000100000030000200050000004800000004000000000000002a00000000000000040000000000000001000401080000000000000000000000020002010200000001000000000000000300020102000000100000000000000004000a011000000001000000010000000000803f00000000",
+    "4d49534f43544c000100000030000200060005004800000005000000000000002a00000000000000020000000000000001000b01300000000200000000000000010009011000000070726f746f636f6c2e6661696c7572650200010101000000030000000000000002000301040000000000000000000000",
     "4d49534f43544c000100000030000200070000003000000006000000000000002a000000000000000300000000000000010001010100000001000000000000000200040108000000000000000000000003000401080000000000000000000000",
     "4d49534f43544c000100000030000200080000003000000007000000000000002a000000000000000300000000000000010001010100000002000000000000000200040108000000000000000000000003000401080000000000000000000000",
     "4d49534f43544c000100000030000200090000005000000008000000000000002a00000000000000060000000000000001000d01000000000200030104000000000000000000000003000d0100000000040003010400000000000000000000000500080101000000000000000000000006000101010000000100000000000000",
-    "4d49534f43544c0001000000300002000a0000001000000009000000000000002a00000000000000010000000000000001000401080000000000000000000000",
+    "4d49534f43544c0001000000300002000a0000007000000009000000000000002a0000000000000003000000000000000100040108000000000000000000000002000b01280000000200000000000000010003010400000005000000000000000200040108000000000000000000000002000b012800000002000000000000000100030104000000060000000000000002000401080000000000000000000000",
     "4d49534f43544c0001000000300002000b000000200000000a000000000000002a0000000000000002000000000000000100040108000000000000000000000002000801010000000100000000000000",
     "4d49534f43544c00010000003000020003000000100000000b000000000000002b00000000000000010000000000000001000301040000000100000000000000",
 ];
@@ -209,6 +209,124 @@ fn command_c_capacity(
         storage.truncate(output.required_bytes as usize);
     }
     (result, output.required_bytes, storage)
+}
+
+#[test]
+fn c_commands_publish_the_replacement_parameter_catalog() {
+    let (c_session, c_plan) = boxed_c_children(SESSION);
+    let edit = protocol::SessionEdit::RemoveTrackEffect {
+        track_id: session::StableId::parse("eq0").expect("track ID"),
+        rack_name: session::RackName::Simd1,
+        effect_id: session::StableId::parse("eq").expect("effect ID"),
+    };
+    let replace = command_bytes_at_revision(
+        1,
+        ExpectedRevision::Exact(SessionRevision(42)),
+        protocol::CommandPayload::SessionTransactionApply(core::slice::from_ref(&edit)),
+    );
+    assert_eq!(command_c(c_session, &replace).0, crate::RESULT_OK);
+
+    let metadata = command_bytes_at_revision(
+        2,
+        ExpectedRevision::Exact(SessionRevision(43)),
+        protocol::CommandPayload::ParameterMetadataGet(protocol::ParameterMetadataRequest {
+            after_handle: 0,
+            limit: 1,
+        }),
+    );
+    let (result, response) = command_c(c_session, &metadata);
+    assert_eq!(result, crate::RESULT_OK);
+    let mut fields = [0_u16; 512];
+    let protocol::DecodedTypedResponseFrame::Success {
+        header,
+        payload: protocol::DecodedSuccessResponsePayload::ParameterMetadata(page),
+    } = ProtocolCodec::default()
+        .decode_typed_response(&response, &mut DecodeScratch::new(&mut fields))
+        .expect("replacement metadata response")
+    else {
+        panic!("expected replacement metadata success")
+    };
+    assert_eq!(header.revision, SessionRevision(43));
+    assert_eq!(page.descriptors.len(), 1);
+    assert_eq!(page.descriptors[0].handle, 1);
+    assert_eq!(page.descriptors[0].track_id, "eq1");
+    assert_eq!(page.descriptors[0].rack, protocol::ParameterRack::Simd1);
+
+    crate::ffi::test_plan_destroy(c_plan);
+    crate::ffi::test_session_destroy(c_session);
+}
+
+#[test]
+fn c_commands_observe_the_rendered_plan_sample() {
+    let (c_session, c_plan) = boxed_c_children(SESSION);
+    let codec = ProtocolCodec::default();
+    let initial_transport = command_bytes(1, protocol::CommandPayload::TransportGet);
+    let (result, response) = command_c(c_session, &initial_transport);
+    assert_eq!(result, crate::RESULT_OK);
+    let mut fields = [0_u16; 64];
+    let protocol::DecodedTypedResponseFrame::Success {
+        payload: protocol::DecodedSuccessResponsePayload::TransportGetSnapshot(initial),
+        ..
+    } = codec
+        .decode_typed_response(&response, &mut DecodeScratch::new(&mut fields))
+        .expect("initial transport response")
+    else {
+        panic!("expected initial transport success")
+    };
+    assert_eq!(initial.effective_sample, protocol::SampleTime(0));
+
+    let mut pcm = [f32::NAN; 256];
+    let output = crate::PlanarOutput {
+        struct_size: crate::PLANAR_OUTPUT_SIZE,
+        channels: 2,
+        samples: pcm.as_mut_ptr(),
+        sample_capacity: pcm.len() as u64,
+        frames: 128,
+        plane_stride_samples: 128,
+        reserved: [0; 2],
+    };
+    assert_eq!(
+        crate::ffi::test_render(c_plan, 0, &output),
+        crate::RESULT_OK
+    );
+
+    let state = command_bytes(
+        2,
+        protocol::CommandPayload::ParameterStateGet(&protocol::ParameterStateRequest {
+            handles: vec![1],
+        }),
+    );
+    let (result, response) = command_c(c_session, &state);
+    assert_eq!(result, crate::RESULT_OK);
+    let mut fields = [0_u16; 64];
+    let protocol::DecodedTypedResponseFrame::Success {
+        payload: protocol::DecodedSuccessResponsePayload::ParameterState(state),
+        ..
+    } = codec
+        .decode_typed_response(&response, &mut DecodeScratch::new(&mut fields))
+        .expect("rendered parameter-state response")
+    else {
+        panic!("expected parameter-state success")
+    };
+    assert_eq!(state.observed_sample, 128);
+
+    let transport = command_bytes(3, protocol::CommandPayload::TransportGet);
+    let (result, response) = command_c(c_session, &transport);
+    assert_eq!(result, crate::RESULT_OK);
+    let mut fields = [0_u16; 64];
+    let protocol::DecodedTypedResponseFrame::Success {
+        payload: protocol::DecodedSuccessResponsePayload::TransportGetSnapshot(transport),
+        ..
+    } = codec
+        .decode_typed_response(&response, &mut DecodeScratch::new(&mut fields))
+        .expect("rendered transport response")
+    else {
+        panic!("expected rendered transport success")
+    };
+    assert_eq!(transport.effective_sample, protocol::SampleTime(128));
+
+    crate::ffi::test_plan_destroy(c_plan);
+    crate::ffi::test_session_destroy(c_session);
 }
 
 fn event_c(session: *mut crate::Session, lane: u32) -> (u32, Vec<u8>) {
@@ -751,11 +869,11 @@ fn all_six_event_families_cross_c_dequeue_with_exact_oracle_bytes() {
 
     let record = protocol::AutomationRecord {
         kind: protocol::AutomationKind::Point,
-        handle: protocol::ParameterHandle(u32::MAX),
+        handle: protocol::ParameterHandle(5),
         start: protocol::SampleTime(1),
         end: protocol::SampleTime(1),
-        start_value: 0.0,
-        end_value: 0.0,
+        start_value: 100.0,
+        end_value: 100.0,
     };
     let automation = command_bytes_at_revision(
         3,
@@ -932,13 +1050,13 @@ fn plan_first_destroy_guards_structural_publication_without_visible_mutation() {
 #[test]
 fn every_structural_phase_and_ordered_dual_fault_preserves_owners_and_credits() {
     use TestStructuralFaultPhase::{
-        AfterAdmission, AfterPlanReservation, AfterProtocolPrepare, AfterResourceProjection,
-        AfterRuntimePrepare, BeforeProtocolCommit,
+        AfterAdmission, AfterPlanReservation, AfterProtocolPrepare, AfterRuntimePrepare,
+        BeforeProtocolCommit, BeforeRuntimePrepare,
     };
 
     const PHASES: [TestStructuralFaultPhase; 6] = [
         AfterProtocolPrepare,
-        AfterResourceProjection,
+        BeforeRuntimePrepare,
         AfterRuntimePrepare,
         AfterAdmission,
         AfterPlanReservation,
@@ -1204,7 +1322,7 @@ fn capi_controller_dispatches_every_advertised_command_family() {
         dispatch!(
             ExpectedRevision::Any,
             protocol::CommandPayload::ParameterStateGet(&state),
-            StatusCode::NotFound,
+            StatusCode::Ok,
             42,
             &[]
         ),
@@ -1224,7 +1342,7 @@ fn capi_controller_dispatches_every_advertised_command_family() {
             protocol::CommandPayload::AutomationEnqueue(protocol::AutomationEnqueue {
                 records: &automation,
             },),
-            StatusCode::NotFound,
+            StatusCode::InvalidField,
             42,
             &[]
         ),

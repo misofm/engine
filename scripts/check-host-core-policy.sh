@@ -9,9 +9,10 @@
 #      replaced. Three copies existed.
 #   3. A host re-implementing the control protocol's wire format by hand. capi carried a private
 #      header parser and replay cache until #102 made the protocol's own public.
-#   4. The facade depending on the control protocol, which is host-specific transport, or exporting
-#      a `no_mangle` symbol -- a `cdylib` re-exports every one it links, so a facade that carried
-#      them would push the C ABI's exports into the browser artifact's frozen export set.
+#   4. The facade making the host-specific control protocol mandatory/default, or any consumer
+#      except capi enabling its optional adapter. A default edge would push protocol into the
+#      browser artifact. The facade also exports no `no_mangle` symbol: a `cdylib` re-exports every
+#      one it links and would push the C ABI's exports into the browser artifact's frozen set.
 set -euo pipefail
 
 fail() {
@@ -51,6 +52,7 @@ scan_forbidden() {
 root="${1:-.}"
 facade_manifest="$root/crates/host-core/Cargo.toml"
 facade_source="$root/crates/host-core/src"
+capi_manifest="$root/crates/capi/Cargo.toml"
 # Every host under hosts/*/src is scanned; there is no exemption list. host-web was the last
 # holdout (tracked as "pending #106") and already depends on host-core
 # (hosts/host-web/Cargo.toml), so the exemption is dead and removing it only tightens the gate.
@@ -84,8 +86,24 @@ scan_forbidden 'a host hand-decodes the control wire format; use protocol' \
     "${host_sources[@]}"
 
 [[ -f "$facade_manifest" ]] || fail "expected host-core manifest is missing: $facade_manifest"
-scan_forbidden 'the host facade must not depend on the control protocol' \
-    'protocol' "$facade_manifest"
+[[ -f "$capi_manifest" ]] || fail "expected capi manifest is missing: $capi_manifest"
+[[ "$(grep -Fxc 'default = []' "$facade_manifest")" == 1 ]] ||
+    fail 'host-core must have an empty default feature set'
+[[ "$(grep -Fxc 'control-provider = ["dep:protocol"]' "$facade_manifest")" == 1 ]] ||
+    fail 'host-core must gate protocol behind exactly control-provider'
+[[ "$(grep -Fxc 'protocol = { workspace = true, optional = true }' "$facade_manifest")" == 1 ]] ||
+    fail 'host-core protocol dependency must be workspace-scoped and optional'
+[[ "$(grep -Fxc 'host-core = { workspace = true, features = ["control-provider"] }' "$capi_manifest")" == 1 ]] ||
+    fail 'capi must explicitly enable the host-core control-provider adapter'
+
+# The feature name may appear in exactly the host-core declaration and capi's dependency. This
+# closes the browser/default-host leak while leaving comments and unrelated feature names free.
+feature_occurrences=$(rg -n -g Cargo.toml 'control-provider' "$root" | wc -l)
+[[ "$feature_occurrences" == 2 ]] ||
+    fail 'only host-core may declare and capi may enable control-provider'
+protocol_dependencies=$(rg -n '^[[:space:]]*protocol[[:space:]]*=' "$facade_manifest" | wc -l)
+[[ "$protocol_dependencies" == 1 ]] ||
+    fail 'host-core must contain exactly one protocol dependency edge'
 
 [[ -d "$facade_source" ]] || fail "expected host-core source directory is missing: $facade_source"
 scan_forbidden 'the host facade must export no C symbols; it links into every host cdylib' \

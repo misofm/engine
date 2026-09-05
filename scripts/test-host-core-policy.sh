@@ -20,9 +20,21 @@ create_fixture() {
         '[lib]' \
         'crate-type = ["rlib"]' \
         '' \
+        '[features]' \
+        'default = []' \
+        'control-provider = ["dep:protocol"]' \
+        '' \
         '[dependencies]' \
         'graph.workspace = true' \
+        'protocol = { workspace = true, optional = true }' \
         >"$root/crates/host-core/Cargo.toml"
+    printf '%s\n' \
+        '[package]' \
+        'name = "capi"' \
+        '' \
+        '[dependencies]' \
+        'host-core = { workspace = true, features = ["control-provider"] }' \
+        >"$root/crates/capi/Cargo.toml"
     printf '%s\n' \
         'pub fn prepare_host_runtime() {}' \
         >"$root/crates/host-core/src/lib.rs"
@@ -69,8 +81,14 @@ expect_failure capi-hand-decodes-the-control-wire \
     'printf "%s\n" "const MAGIC: &[u8] = b\"MISOCTL\";" >>"$root/crates/capi/src/runtime.rs"'
 expect_failure capi-reimplements-the-replay-cache \
     'printf "%s\n" "struct ReplayEntryRecord { id: u64 }" >>"$root/crates/capi/src/runtime.rs"'
-expect_failure facade-depends-on-the-protocol \
-    'printf "%s\n" "protocol.workspace = true" >>"$root/crates/host-core/Cargo.toml"'
+expect_failure facade-makes-protocol-mandatory \
+    'sed -i "s/protocol = { workspace = true, optional = true }/protocol.workspace = true/" "$root/crates/host-core/Cargo.toml"'
+expect_failure facade-default-enables-control-provider \
+    'sed -i "s/default = \[\]/default = [\"control-provider\"]/" "$root/crates/host-core/Cargo.toml"'
+expect_failure facade-feature-uses-a-non-optional-edge \
+    'sed -i "s/\[\"dep:protocol\"\]/[\"protocol\"]/" "$root/crates/host-core/Cargo.toml"'
+expect_failure host-web-enables-control-provider \
+    'printf "%s\n" "host-core = { workspace = true, features = [\"control-provider\"] }" >>"$root/hosts/host-web/Cargo.toml"'
 expect_failure facade-exports-a-c-symbol \
     'printf "%s\n" "#[unsafe(no_mangle)] pub extern \"C\" fn miso_engine_v1_prepare() {}" >>"$root/crates/host-core/src/lib.rs"'
 expect_failure facade-becomes-a-cdylib \
