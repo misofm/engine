@@ -1,0 +1,1 @@
+scalar_cfg=0 scalar_simd_absence=1 expected=1 scalar_ptr_presence=0 expected=0 scalar_atomics_absence=1 expected=1 simd_build=0 simd_presence=0 expected=0

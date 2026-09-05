@@ -1,0 +1,38 @@
+    Checking engine v0.1.0 (/home/bl/misofm/engine-435-plan/crates/engine)
+warning: `math::fast_db::fast_level_db` does not refer to a reachable function
+  --> /home/bl/misofm/engine-435-plan/clippy.toml:81:5
+   |
+81 |     { path = "math::fast_db::fast_level_db", reason = "fast dB tier (#144 item 5); admitted only at a named FAST-DB-CROSSING site" },
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: add `allow-invalid = true` to the entry to suppress this warning
+
+warning: `math::fast_db::fast_gain_from_db` does not refer to a reachable function
+  --> /home/bl/misofm/engine-435-plan/clippy.toml:82:5
+   |
+82 |     { path = "math::fast_db::fast_gain_from_db", reason = "fast dB tier (#144 item 5); admitted only at a named FAST-DB-CROSSING site" },
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: add `allow-invalid = true` to the entry to suppress this warning
+
+warning: `math` (lib) generated 2 warnings
+    Checking lane v0.1.0 (/home/bl/misofm/engine-435-plan/crates/lane)
+    Checking crypto-common v0.2.2
+    Checking block-buffer v0.12.1
+    Checking matchers v0.2.0
+    Checking tracing-subscriber v0.3.23
+    Checking effect-contract v0.1.0 (/home/bl/misofm/engine-435-plan/crates/effect-contract)
+    Checking digest v0.11.3
+    Checking sha2 v0.11.0
+    Checking loom v0.7.2
+    Checking bench-support v0.1.0 (/home/bl/misofm/engine-435-plan/tools/bench-support)
+warning: `effect-contract` (lib) generated 2 warnings (2 duplicates)
+    Checking rack v0.1.0 (/home/bl/misofm/engine-435-plan/crates/rack)
+    Checking conformance v0.1.0 (/home/bl/misofm/engine-435-plan/crates/conformance)
+warning: `rack` (lib) generated 2 warnings (2 duplicates)
+    Checking graph v0.1.0 (/home/bl/misofm/engine-435-plan/crates/graph)
+warning: `conformance` (lib) generated 2 warnings (2 duplicates)
+warning: `graph` (lib) generated 2 warnings (2 duplicates)
+warning: `graph` (test "rt1_direct_bank_alloc") generated 2 warnings (2 duplicates)
+warning: `graph` (lib test) generated 2 warnings (2 duplicates)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.43s

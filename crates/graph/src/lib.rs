@@ -528,12 +528,26 @@ pub struct GraphPreparedBuiltinBank {
 /// Lane `l` is active if and only if `l < members.len()`; lanes `members.len()..width.lanes()`
 /// are identity lanes.
 pub struct GraphPreparedBuiltinBankInfo<'a> {
+    pub stage: TrackStage,
     pub backend: Backend,
     pub width: effect_contract::BankWidth,
     pub members: &'a [GraphNodeId],
+    pub control_delivery: BuiltinControlDelivery,
+}
+
+/// How prepared builtin control producers are owned relative to render calls.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
+pub enum BuiltinControlDelivery {
+    #[default]
+    Concurrent,
+    BetweenRenderCalls,
 }
 /// Render contract for an already-prepared builtin bank.
 pub trait GraphPreparedBuiltinBankProcessor: Send {
+    /// Preparation metadata only; render never reads this policy.
+    fn control_delivery(&self) -> BuiltinControlDelivery {
+        BuiltinControlDelivery::Concurrent
+    }
     fn process(
         &mut self,
         left: &mut [f32],
@@ -747,9 +761,14 @@ impl PreparedGraphPlan {
         self.builtin_banks
             .iter()
             .map(|bank| GraphPreparedBuiltinBankInfo {
+                stage: match bank.members.first() {
+                    Some(GraphNodeId::TrackStage { stage, .. }) => *stage,
+                    _ => TrackStage::Input,
+                },
                 backend: bank.backend,
                 width: bank.scratch.width(),
                 members: &bank.members,
+                control_delivery: bank.processor.control_delivery(),
             })
     }
     /// Attach sealed fixed-stage banks before binding.  The graph compiler remains responsible

@@ -1,0 +1,22 @@
+qualification=issue435 supported Wasm bounded qualification
+source_sha=69fd0bfb0504075db4d302df08ff480faab4102e
+completed_utc=2026-09-05T07:00:20Z
+rustc=rustc 1.97.1 (8bab26f4f 2026-07-14)
+wasm_objdump=1.0.34 wasm_interp=1.0.34
+repository_mutation=none tracked_status=clean
+
+scalar18_target=/tmp/sol435-scalar18.C11LQf status=0 profile=release target_feature=-simd128 packages=18 log=/tmp/sol-435-supported-scalar18.log
+scalar_cfg_status=0 simd128_absence=1_expected1 ptr_atomic_presence=0 atomics_feature_absence=1_expected1
+simd_smoke_target=/tmp/sol435-simd-smoke.qh5wC5 status=0 profile=dev target_feature=+simd128 packages=target-smoke,protocol simd128_presence=0 log=/tmp/sol-435-supported-simd-smoke.log
+
+protocol_scalar_target=/tmp/sol435-protocol-scalar.MXZC9q build=0 objdump=0 export=0 interp=0 exact_literal=0 result=main(i32:0, i32:0)_=>_i32:0
+protocol_scalar_note=initial --run-all-exports returned status0 with empty output because parameterized export was skipped; binary was not rebuilt; explicit --run-export=main with two i32:0 arguments produced and validated exact result
+protocol_simd_target=/tmp/sol435-protocol-simd.YYenuI build=0 objdump=0 export=0 interp=0 exact_literal=0 result=main(i32:0, i32:0)_=>_i32:0
+
+nonlto_target=/tmp/sol435-nonlto.Atf8Ge build=0 profile=release lto=false families=engine,source,target_smoke
+inspection=PASS families=3 archives=3 objects=3 find_statuses=0,0,0 sort_statuses=0,0,0 archive_list_statuses=0,0,0 member_read_statuses=0,0,0 decoder_statuses=0,0,0 atomic_scan_statuses=1,1,1
+observation=PASS statuses=0,0,1 binary_matches=2 source_fallback_invoked=false
+supplement=PASS same_member_hashes=true,true,true ptr_atomic_presence=0 atomics_feature_absence=1
+scope_limit=complete named non-LTO engine/source/target_smoke rlib object populations only; no fat-LTO, shipped AudioWorklet, full artifact, browser, workspace, or benchmark claim
+hashes=/tmp/sol-435-supported-wasm-hashes.txt
+result=PASS

@@ -3225,7 +3225,7 @@ mod tests {
     }
 
     #[test]
-    fn reduction_preserves_repeated_silence_muted_self_and_unrelated_buffers() {
+    fn reduction_preserves_repeated_silence_self_and_unrelated_buffers() {
         const FRAMES: usize = 5;
         let build = || stereo_lease(FRAMES, 6);
         let mut actual = build();
@@ -3245,7 +3245,6 @@ mod tests {
             lease.write(1, 1).fill(f32::from_bits(0xffc0_4202));
             lease.write(0, 5).fill(f32::from_bits(0x7fc0_4203));
             lease.write(1, 5).fill(f32::from_bits(0xffc0_4203));
-            lease.set_muted(3, true);
         }
         let ids = [2, 2, 0, 3, 4];
         for plane in 0..2 {
@@ -3276,9 +3275,7 @@ mod tests {
             .write(0, 2)
             .copy_from_slice(&[-0.0, f32::from_bits(0x7fc0_4204)]);
         reduce_plane(&mut self_alias, 0, 2, &[2]);
-        self_alias.set_muted(2, true);
         reduce_plane(&mut self_alias, 0, 2, &[2]);
-        self_alias.set_muted(2, false);
         assert_eq!(
             self_alias
                 .read(0, 2)

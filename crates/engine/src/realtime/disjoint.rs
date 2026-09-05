@@ -1,34 +1,29 @@
-//! Plan-owned disjoint audio arena for the native dependency-wave executor.
+//! Plan-owned disjoint audio arena for the sequential render executor.
 //!
-//! The native executor renders one dependency wave at a time. Inside a wave, several parcels run
-//! concurrently on auxiliary workers; between waves the coordinator owns every parcel. Before
-//! issue #100 each parcel owned a private arena and the coordinator copied every inter-parcel
-//! edge between waves, which serialised all data movement onto the render thread. The pull model
-//! instead gives the whole plan **one** arena and lets each consuming parcel read its producers'
-//! buffers in place, on the worker that needs them.
+//! The render executor consumes one prepared lease sequentially. Before issue #100, plans used
+//! separate arenas and copied edges between them. The pull model instead gives the whole plan
+//! **one** arena and lets consumers read producer buffers in place.
 //!
-//! That requires one allocation to be reachable, mutably, from several threads at once, which is
-//! why this module owns the only `unsafe` on the render path. Soundness does not depend on any
-//! worker being on time; it is a property of the lease set, proved once at bind by
-//! [`ArenaLeaseSetBuilder::finish`]:
+//! That requires one allocation to be reachable through several leases, which is why this module
+//! owns the only `unsafe` on the render path. [`ArenaLeaseSetBuilder::finish`] proves the two
+//! structural invariants:
 //!
 //! * **I1 — writes are globally unique.** Every buffer is writable by at most one lease, for the
 //!   whole life of the plan. Buffers are never recycled, so no two leases (in the same wave or in
 //!   different waves) can ever address the same words mutably.
 //! * **I2 — reads are strictly earlier.** A lease may read a buffer only if that buffer is
-//!   written by a lease of a strictly smaller wave, or by the reading lease itself. A producer of
-//!   an earlier wave has finished, and its parcel has been recovered by the coordinator, before
-//!   any consumer of a later wave is issued.
-//! * **I3 — waves are separated by a happens-before edge.** The scheduler issues one wave at a
-//!   time and recovers every issued parcel through the SPSC release/acquire pair before it issues
-//!   the next, so an earlier wave's writes are visible to a later wave's reads.
-//! * **I4 — a parcel the coordinator does not own is never read.** When a worker misses its
-//!   deadline the coordinator marks its buffers muted ([`ArenaLease::set_muted`]); a muted read
-//!   returns the always-zero silence buffer instead. A late worker can therefore only ever write
-//!   its own unique slots, which nobody reads until its parcel is reaped.
+//!   written by a lease of a strictly smaller wave, or by the reading lease itself. Wave order is
+//!   a dependency relation; it is not by itself synchronization.
+//!
+//! All execution must also satisfy **E1 — ordered access**: a foreign writer's exclusive access
+//! ends and happens-before a consuming lease reads that buffer. The production executor
+//! discharges E1 by using its single prepared lease exclusively and sequentially. Any retained
+//! multi-lease use must provide the same happens-before edge and must not overlap a foreign write
+//! with a read. Concurrent leases may write their I1-disjoint sets and join before inspection.
 //!
 //! Buffer `0` is the silence buffer. No lease may write it, so it stays zero for the life of the
-//! arena and is what every muted read observes.
+//! arena.
+
 #![allow(unsafe_code)]
 
 use core::{cell::UnsafeCell, num::NonZeroUsize};
@@ -72,7 +67,7 @@ pub enum DisjointArenaError {
     CapacityOverflow,
 }
 
-/// Flat planar `f32` storage shared by every parcel of one prepared plan.
+/// Flat planar `f32` storage shared by every lease of one prepared plan.
 ///
 /// See the module documentation for the invariants that make the shared mutable access sound.
 /// Instances are produced only by [`ArenaLeaseSetBuilder::finish`].
@@ -84,11 +79,10 @@ pub struct DisjointArena {
 }
 
 // SAFETY: the arena hands out access only through `ArenaLease`, and a lease set is constructed
-// only by `ArenaLeaseSetBuilder::finish`, which proves I1 and I2 (module documentation). I3 and
-// I4 are discharged by the scheduler: one wave at a time with an acquire/release edge between
-// waves, and no read of a parcel the coordinator does not own. Under I1 no two leases can
-// mutably alias, and under I2/I3/I4 no read can overlap a concurrent write, so sending leases to
-// worker threads never produces a data race.
+// only by `ArenaLeaseSetBuilder::finish`, which proves I1 and I2 (module documentation). I1
+// prevents write/write aliasing. E1 is the separate execution obligation that prevents a foreign
+// write from overlapping a read; the production executor meets it through exclusive sequential
+// lease use, and any retained multi-lease executor must establish the documented happens-before.
 unsafe impl Sync for DisjointArena {}
 // SAFETY: `f32` is `Send`, and a lease carries no thread-affine state.
 unsafe impl Send for DisjointArena {}
@@ -140,37 +134,27 @@ pub type ArenaStereoPair<'a> = ((&'a mut [f32], &'a mut [f32]), (&'a [f32], &'a 
 /// Both writable planes of one arena buffer.
 pub type ArenaStereoPlanes<'a> = (&'a mut [f32], &'a mut [f32]);
 
-/// One parcel's checked view of the shared arena.
+/// One executor step's checked view of the shared arena.
 ///
-/// The lease is the only way to reach arena storage. It is `Send` (it travels with its parcel to
-/// an auxiliary worker) and deliberately not `Sync`.
+/// The lease is the only way to reach arena storage. It is `Send` and deliberately not `Sync`.
 pub struct ArenaLease {
     arena: Arc<DisjointArena>,
-    /// Per buffer: bit 0 writable by this lease, bit 1 muted for this lease.
+    /// Per buffer: bit 0 writable by this lease.
     access: Box<[u8]>,
-    wave: usize,
 }
 
 const ACCESS_WRITE: u8 = 0b01;
-const ACCESS_MUTED: u8 = 0b10;
 
 impl core::fmt::Debug for ArenaLease {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         formatter
             .debug_struct("ArenaLease")
-            .field("wave", &self.wave)
             .field("buffers", &self.arena.buffers)
             .finish()
     }
 }
 
 impl ArenaLease {
-    /// The wave this lease belongs to.
-    #[must_use]
-    pub const fn wave(&self) -> usize {
-        self.wave
-    }
-
     /// Frames in one buffer.
     #[must_use]
     pub fn frames(&self) -> usize {
@@ -185,39 +169,15 @@ impl ArenaLease {
             .is_some_and(|access| access & ACCESS_WRITE != 0)
     }
 
-    /// Redirect (or restore) this lease's reads of `buffer` to the silence buffer.
-    ///
-    /// The coordinator calls this while it owns the parcel, after a worker misses its deadline
-    /// and its outputs become unreadable (I4), and again once the parcel has been reaped.
-    pub fn set_muted(&mut self, buffer: u32, muted: bool) {
-        if let Some(access) = self.access.get_mut(buffer as usize) {
-            if muted {
-                *access |= ACCESS_MUTED;
-            } else {
-                *access &= !ACCESS_MUTED;
-            }
-        }
-    }
-
-    /// Whether reads of `buffer` currently return silence.
-    #[must_use]
-    pub fn is_muted(&self, buffer: u32) -> bool {
-        self.access
-            .get(buffer as usize)
-            .is_some_and(|access| access & ACCESS_MUTED != 0)
-    }
-
     // REALTIME_POLICY_BEGIN
 
     #[inline]
     fn effective(&self, buffer: u32) -> usize {
         let index = buffer as usize;
-        debug_assert!(index < self.arena.buffers, "read of an unreserved buffer");
-        if self.access[index] & ACCESS_MUTED == 0 {
-            index
-        } else {
-            ARENA_SILENCE_BUFFER as usize
-        }
+        // This checked access is a release-mode read-ID guard. Keep it before forming the
+        // unchecked arena slice below; debug_assert alone would remove the safety boundary.
+        let _ = self.access[index];
+        index
     }
 
     #[inline]
@@ -232,16 +192,16 @@ impl ArenaLease {
         index
     }
 
-    /// One buffer's frames in `plane`, shared. A muted buffer reads as silence.
+    /// One buffer's frames in `plane`, shared.
     #[inline]
     #[must_use]
     pub fn read(&self, plane: usize, buffer: u32) -> &[f32] {
         let start = self.arena.offset(plane, self.effective(buffer));
-        // SAFETY: I1/I2/I3/I4. `start..start + frames` is in bounds by construction (the builder
+        // SAFETY: I1/I2/E1. `start..start + frames` is in bounds by construction (the builder
         // reserved every buffer and sized the allocation `planes * buffers * frames`), and no
         // other lease may write those words while this shared reference lives: either the buffer
-        // is this lease's own, or it belongs to a strictly earlier wave whose parcels have been
-        // recovered, or it is the never-written silence buffer.
+        // is this lease's own, E1 has ended and ordered its foreign writer's access, or it is the
+        // never-written silence buffer.
         unsafe {
             core::slice::from_raw_parts(
                 self.arena.cells[start].get().cast_const().cast::<f32>(),
@@ -250,7 +210,7 @@ impl ArenaLease {
         }
     }
 
-    /// Both planes of one buffer, shared. A muted buffer reads as silence.
+    /// Both planes of one buffer, shared.
     #[inline]
     #[must_use]
     pub fn read_stereo(&self, buffer: u32) -> (&[f32], &[f32]) {
@@ -261,9 +221,9 @@ impl ArenaLease {
     #[inline]
     pub fn write(&mut self, plane: usize, buffer: u32) -> &mut [f32] {
         let start = self.arena.offset(plane, self.checked_write(buffer));
-        // SAFETY: I1 — `buffer` is writable by this lease alone, for the life of the plan, so no
-        // other lease can produce a reference to these words; `&mut self` excludes any other live
-        // reference from this lease.
+        // SAFETY: I1 gives this lease the only mutable ownership of `buffer`; E1 prevents a
+        // foreign lease's shared read from overlapping this write. `&mut self` excludes any live
+        // reference produced by this lease.
         unsafe {
             core::slice::from_raw_parts_mut(
                 self.arena.cells[start].get().cast::<f32>(),
@@ -277,8 +237,10 @@ impl ArenaLease {
     pub fn write_stereo(&mut self, buffer: u32) -> (&mut [f32], &mut [f32]) {
         let index = self.checked_write(buffer);
         let (left, right) = (self.arena.offset(0, index), self.arena.offset(1, index));
-        // SAFETY: I1 as in `write`; the two planes are disjoint ranges of the allocation because
-        // `offset` is plane-major and `index` is the same buffer in both.
+        // SAFETY: I1 excludes a foreign mutable owner, E1 excludes overlapping foreign shared
+        // reads, and `&mut self` excludes references from this lease, as in `write`. The two
+        // planes are disjoint ranges because `offset` is plane-major and `index` is the same
+        // buffer in both.
         unsafe {
             (
                 core::slice::from_raw_parts_mut(
@@ -330,7 +292,8 @@ impl ArenaLease {
             // ranges lie inside that allocation. Distinct buffer IDs make every lane range
             // spatially disjoint (I1); different planes are disjoint too. `&mut self` ties every
             // returned lifetime to this exclusive lease borrow, while the lease's checked write
-            // set and builder construction retain I1--I4 for the plan lifetime.
+            // set retains I1, while exclusive borrowing prevents references from this lease from
+            // overlapping these writes; E1 governs any foreign reads and writes.
             unsafe {
                 (
                     core::slice::from_raw_parts_mut((*cells.add(left)).get(), frames),
@@ -351,7 +314,7 @@ impl ArenaLease {
             self.arena.offset(plane, out_index),
             self.arena.offset(plane, in_index),
         );
-        // SAFETY: I1 for the mutable range and I2/I3/I4 for the shared range, as in `write` and
+        // SAFETY: I1 for the mutable range and I2/E1 for the shared range, as in `write` and
         // `read`; the `debug_assert` above plus distinct buffer indices make the two ranges
         // disjoint (buffers never overlap within a plane).
         unsafe {
@@ -385,9 +348,9 @@ impl ArenaLease {
             self.arena.offset(plane, first_index),
             self.arena.offset(plane, second_index),
         );
-        // SAFETY: I1 for the mutable range, I2/I3/I4 for the two shared ranges. The two shared
-        // ranges may be the same buffer (two muted reads both resolve to silence), which is
-        // sound: they are shared references. Neither can be the output buffer.
+        // SAFETY: I1 for the mutable range, I2/E1 for the two shared ranges. The two shared
+        // ranges may be the same buffer, which is sound: they are shared references. Neither
+        // can be the output buffer.
         unsafe {
             (
                 core::slice::from_raw_parts_mut(
@@ -424,7 +387,7 @@ impl ArenaLease {
             self.arena.offset(0, in_index),
             self.arena.offset(1, in_index),
         ];
-        // SAFETY: I1 for the two mutable ranges (same buffer, two planes: disjoint), I2/I3/I4 for
+        // SAFETY: I1 for the two mutable ranges (same buffer, two planes: disjoint), I2/E1 for
         // the two shared ranges, and `out_index != in_index` keeps the two pairs apart.
         unsafe {
             (
@@ -466,7 +429,7 @@ struct PendingLease {
     reads: Vec<u32>,
 }
 
-/// Builds one plan's arena and its per-parcel leases, proving I1 and I2 before publication.
+/// Builds one plan's arena and its execution leases, proving I1 and I2 before publication.
 pub struct ArenaLeaseSetBuilder {
     planes: usize,
     frames: usize,
@@ -501,7 +464,7 @@ impl ArenaLeaseSetBuilder {
         self.reserved
     }
 
-    /// Declare one parcel's lease and return its index in the finished set.
+    /// Declare one execution lease and return its index in the finished set.
     pub fn lease(&mut self, wave: usize, writes: Vec<u32>, reads: Vec<u32>) -> usize {
         self.leases.push(PendingLease {
             wave,
@@ -606,7 +569,6 @@ impl ArenaLeaseSetBuilder {
                 ArenaLease {
                     arena: Arc::clone(&arena),
                     access,
-                    wave: lease.wave,
                 }
             })
             .collect();
@@ -707,22 +669,16 @@ mod tests {
     }
 
     #[test]
-    fn a_muted_read_is_silence_and_unmuting_restores_it() {
+    fn release_read_id_bounds_check_rejects_unreserved_buffer() {
         let mut build = builder();
-        let produced = build.reserve();
-        let consumed = build.reserve();
-        build.lease(0, vec![produced], Vec::new());
-        build.lease(1, vec![consumed], vec![produced]);
+        let owned = build.reserve();
+        build.lease(0, vec![owned], vec![owned]);
         let (_arena, mut leases) = build.finish().expect("valid lease set");
-        let mut consumer = leases.pop().expect("consumer lease");
-        let mut producer = leases.pop().expect("producer lease");
-        producer.write(0, produced).fill(7.0);
-        assert_eq!(consumer.read(0, produced), &[7.0; 4]);
-        consumer.set_muted(produced, true);
-        assert!(consumer.is_muted(produced));
-        assert_eq!(consumer.read(0, produced), &[0.0; 4]);
-        consumer.set_muted(produced, false);
-        assert_eq!(consumer.read(0, produced), &[7.0; 4]);
+        let lease = leases.pop().expect("the lease");
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = lease.read(0, 2);
+        }));
+        assert!(result.is_err(), "unreserved read ID must be rejected");
     }
 
     #[test]
@@ -833,7 +789,7 @@ mod tests {
     /// E8. Concurrent leases never touch each other's words.
     ///
     /// Every lease fills every word it owns with its own tag, on its own thread, with staggered
-    /// spins so the writes genuinely overlap. Once the wave is joined the coordinator checks the
+    /// spins so the writes genuinely overlap. Once all writers join, the test checks the
     /// whole arena word by word: each buffer must carry exactly its owner's tag, and the silence
     /// buffer must still be zero. Under Miri or a thread sanitiser this is also the data-race
     /// probe for `unsafe impl Sync`.
@@ -881,7 +837,7 @@ mod tests {
                 .collect();
             leases = handles
                 .into_iter()
-                .map(|handle| handle.join().expect("lease worker"))
+                .map(|handle| handle.join().expect("lease writer"))
                 .collect();
             for (index, buffers) in owned.iter().enumerate() {
                 let tag = (round * LEASES + index) as f32;

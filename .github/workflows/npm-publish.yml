@@ -30,7 +30,7 @@ concurrency:
 env:
   PACKAGE_NAME: "@misofm/engine"
   PACKAGE_VERSION: "0.1.0"
-  EXPECTED_WORKLET_SHA256: "10b0581f72d921b520e4066b82dc32cb7bea90b757c20ccca3dfc52cf7b9e098"
+  EXPECTED_WORKLET_SHA256: "05493c0add2a99a8b273ce0dfccb65db2b00a84b43edbb646daa3c1066a480a8"
   RUSTUP_TOOLCHAIN: "1.97.1"
   NPM_CONFIG_REGISTRY: "https://registry.npmjs.org"
 

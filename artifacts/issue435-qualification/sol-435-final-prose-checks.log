@@ -1,0 +1,26 @@
+realtime policy: ok (42 marked regions in 12 files)
+docs/REALTIME_DEPENDENCY_POLICY.md-94-shared `Arc` storage outliving both non-cloneable endpoints. `Arc` creation/destruction stays
+docs/REALTIME_DEPENDENCY_POLICY.md-95-outside push, pop, and render. Issue 100 added `crates/engine/src/realtime/disjoint.rs`, the plan-owned disjoint audio
+docs/REALTIME_DEPENDENCY_POLICY.md-96-arena, which the sequential executor still renders through. Its `unsafe impl Sync` and its raw
+docs/REALTIME_DEPENDENCY_POLICY.md:97:slice construction are justified by the structural and execution invariants stated in the module
+docs/REALTIME_DEPENDENCY_POLICY.md-98-documentation. `ArenaLeaseSetBuilder::finish` proves the structural invariants at bind: **I1**
+docs/REALTIME_DEPENDENCY_POLICY.md-99-every buffer is writable by at most one lease for the life of the plan (buffers are never recycled)
+docs/REALTIME_DEPENDENCY_POLICY.md-100-and **I2** a lease reads only buffers produced strictly earlier or by itself. Wave order expresses
+--
+crates/engine/src/realtime/disjoint.rs-219-
+crates/engine/src/realtime/disjoint.rs-220-    /// One buffer's frames in `plane`, exclusively. `buffer` must be in this lease's write set.
+crates/engine/src/realtime/disjoint.rs-221-    #[inline]
+crates/engine/src/realtime/disjoint.rs:222:    pub fn write(&mut self, plane: usize, buffer: u32) -> &mut [f32] {
+crates/engine/src/realtime/disjoint.rs-223-        let start = self.arena.offset(plane, self.checked_write(buffer));
+crates/engine/src/realtime/disjoint.rs-224-        // SAFETY: I1 gives this lease the only mutable ownership of `buffer`; E1 prevents a
+crates/engine/src/realtime/disjoint.rs-225-        // foreign lease's shared read from overlapping this write. `&mut self` excludes any live
+--
+crates/engine/src/realtime/disjoint.rs-234-
+crates/engine/src/realtime/disjoint.rs-235-    /// Both planes of one buffer, exclusively.
+crates/engine/src/realtime/disjoint.rs-236-    #[inline]
+crates/engine/src/realtime/disjoint.rs:237:    pub fn write_stereo(&mut self, buffer: u32) -> (&mut [f32], &mut [f32]) {
+crates/engine/src/realtime/disjoint.rs-238-        let index = self.checked_write(buffer);
+crates/engine/src/realtime/disjoint.rs-239-        let (left, right) = (self.arena.offset(0, index), self.arena.offset(1, index));
+crates/engine/src/realtime/disjoint.rs-240-        // SAFETY: I1 excludes a foreign mutable owner, E1 excludes overlapping foreign shared
+ M crates/engine/src/realtime/disjoint.rs
+ M docs/REALTIME_DEPENDENCY_POLICY.md
