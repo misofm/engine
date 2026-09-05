@@ -41,3 +41,9 @@ The actual GitHub comparison against merged #399 `1fa4424d732b0d9150dda5512da80c
 The frozen ceiling remains 0.50 with 60-second binary cooldown and existing affinity/sibling checks. Preparing the exact runner build profile without launching the workload is permitted before readiness assessment. Do not invoke the runner to test readiness or enable the uncontrolled override. After successful zero-workload preflight at the committed head and root's readiness decision, only one controlled invocation is allowed, with one warmup and two measured rounds. Any refusal/failure is preserved and consumes it; no automatic retry or successor chain. Successful evidence still needs all 46 current record/aggregate validations, exact provenance and actual PR review/required CI.
 
 Review used read-only source/filesystem/GitHub comparison; no local test, Cargo, Git command, benchmark, source or GitHub mutation was performed.
+
+## Completed controlled capture — pending evidence review
+
+At committed candidate a74477c68eaf8650fdc86ec6d0f3ac04a18cb880, zero-workload preflight passed. Root prepared the exact runner profile without workload launch, then assessed unchanged readiness limits: load0.20, binary age113seconds, CPU63 affinity, sibling31 busy0.00%. The one authorized controlled invocation completed: disposition PASS, invocation1, workload3, warmup1, measured rounds2, records46. No retry or uncontrolled override occurred.
+
+The unchanged production record and aggregate validators independently pass; raw/accepted hashes and byte counts, stderr and every candidate/control field were verified. Durable artifacts/issue415-rt1-measurement contains disposition, raw/accepted records, original stderr, preflight, readiness and README. Full comparison/evidence review and actual PR/required CI remain before closure. Issue399's refused directory remains intact.
