@@ -361,3 +361,35 @@ Final focused commands used `PATH=/home/bl/.cargo/bin:$PATH` and `CARGO_TARGET_D
 - `cargo fmt --all -- --check` and `git diff --check`: PASS; `/tmp/sol459-attempt3-final-{fmt,diff-check}.log`.
 
 The first policy-shell batch inherited a minimal PATH, so its builtins-policy and rustfmt entries returned command-not-found and were not counted. Both were rerun with the required PATH and passed; `/tmp/sol459-attempt3-final-rerun-statuses.log` records their zero statuses. No full workspace, target/browser/artifact matrix or benchmark was run. This completes the final Sol attempt-3 source submission for one consolidated Astra verdict; it is not a self-PASS.
+
+
+## Accepted serialized live-pair proof and parent qualification freeze
+
+# Astra #459 FINAL Sol attempt 3 — PASS
+
+Exact reviewed head: `e6f54b5f957db45d0a20663dfbfbe9f3a2f0c2eb`, `/home/bl/misofm/engine-live-pair-proof`. Accepted source candidate: `2a152bf829e769e14fb650b78b2d4ea799b89b3b`; the subsequent change is only the #459 evidence record. This is one consolidated source verdict against the complete numbered Cases A/B/C and the four finite omissions in the attempt-2 FAIL.
+
+PASS permits root to freeze/integrate the accepted child with #430 and perform the retained mandatory parent delivery qualification. It does not claim completed workspace/target/artifact/browser qualification, benchmark evidence, PR approval, CI success or remote closure.
+
+## Four final corrections
+
+1. **Actual host application linkage is now discriminating.** Both admitted commands target track8, the otherwise-eligible one-member tail. The actual application render asserts admission2/application sample, one selected process/member and true fused call. Crucially, the private output witness reads the composite's own left/right first words after its arithmetic; selected left is near0.125 and right is exactly twice left. Thus this is no longer the static routed-track0 imitation. The separately routed track0 output is explicitly only nonzero identity evidence. The drain counters are maintained in shared drain helpers, so they are not independently owner-tagged; ownership is established by the concrete track8 command fixture, selected population and changed composite-local PCM together. No claim should attribute ownership to aggregate drain counters alone.
+
+2. **Alias data is actually observed.** AliasObserver records both planes as u32 words. The observed serialized graph is compared with the same alias under actual Concurrent separate owners, with exact complete capture length and three callbacks. The otherwise-eligible one-member tail still changes factory acceptance1 to0 when that alias is observed, and PostMatrix word identity remains checked. This completes the named data gap without changing graph lowering or observation policy.
+
+3. **Selected mono/recovery evidence now uses the correct owners.** The shared fixture attaches its optional PostMatrix capture to t08, uses BetweenRenderCalls only for the paired arm, and uses prepare_session_builtins_with_console for the Concurrent reference. The latter forces collapse off. The actual symmetric input-bank collapse and asymmetric input command/disengagement are exercised, the command targets t08, and selected two-plane words match the reference with a nontrivial right-plane difference. The recovery stimulus clears its nonfinite flag after the first rendered block: the following block is really clean. Hostile and clean selected output words match separate owners, remain finite, and clean output is nonzero; selected fused/member witnesses are live. Optional allocating captures stay disabled for the actual allocation fixture.
+
+4. **Returned-owner guards now execute their preserved payloads.** Wrong-concrete owners retain tags and observable call/PCM effects. The added late-guard helper separately reaches Concurrent policy, W4/W8 mismatch and same-width active-population3/4 mismatch. It saves state, admits real fader/matrix records, recovers returned concrete boxes and renders each on its own valid shape against its matching unchanged owner. Both plane words and final state agree. The already-accepted compatible reversed-owner original-order proof and actual first-slot chain execution remain intact. No malformed shared buffer or production guard change substitutes for these cases.
+
+## Retained full contract and evidence
+
+The delta from the previous source submission changes only compiler test support/tests, the existing host test and the numbered evidence record. The existing queued ramp/FIFO/retarget/mute/reset/raw-error PairFixture comparisons, true/fallback per-call witnesses, original graph-to-separate control, real meter snapshot data, nonunity send/crossfeed PCM, first-slot owner execution, and queued graph allocation/free/realloc proof remain retained. Meter/send output-ownership masking is still a candid limitation of those finite fixtures; this review does not reclassify their counts as independently isolating every structural predicate.
+
+Read the final debug/release logs: compiler28, allocation4, graph53, host62 with1 existing ignored in each profile; all report zero failures. The five final policy logs report PASS, including realtime42 regions/12 files and unfused8 registered calls. The final record retains the initial PATH failures and the explicit successful builtins-policy/fmt reruns. Source freeze to reviewed head changes only the issue record, and the worktree is clean.
+
+Normal factory, arithmetic, drain decisions and resource accounting are unchanged by this proof completion; extra observations are cfg(test)/nondefault test-support or existing test fixtures. No new public production diagnostic, allocator, wire surface or framework was introduced. Parent #430 retains its full original acceptance and subsequent qualification/actual-PR/required-CI obligations; #443/#444/#431 and broad RT-4/#349 are not closed by this source PASS.
+
+Review was read-only source/Git/log inspection. No tests/builds, timing, repository edits or GitHub mutations were performed. No further implementation repair is requested.
+
+
+Root integrated delivered main b6836835 (PR #464) before qualification. Compared with reviewed e6f54b5f, crates/hosts/tools/sidecars/fixtures/Cargo/configuration inputs are byte-identical; integration adds only accepted scanner changes and evidence. Full workspace command is `PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/engine-430-workspace-qualified cargo test --locked --workspace`, retaining `/tmp/engine-430-candidate-workspace.log` and actual terminal status at the immutable checkpoint. No tracked source/evidence/pin edits during the run. Supported native/Wasm and shipped artifact/static/browser qualification remain mandatory; #431 owns measurement and no timing is authorized here. #443 scalar, #444 concurrent admission and broad RT-4 remain open.
