@@ -61,7 +61,7 @@ Parent #306 and the broad #349 TOOL-11 finding remain OPEN until #400, #401, #40
 The seven-gate umbrella remains OPEN until all three children close:
 
 - #406: protocol-control, effect-runtime, host-core and builtins. Merged as PR #414 / 882277b65ff64780f57c4df33dee127abc6a33e2; verified CLOSED.
-- #407: graph and conformance, after merged #406. Owns graph's two and conformance's one original find loops and their exact parser/discovery obligations. Two focused suites are wired beside their current checkers in required CI.
+- #407: graph and conformance. Merged as PR #421 / `a0e4d123a038160b4f5934dac14aacc72c9fbbf2`; verified CLOSED. Owns graph's two and conformance's one original find loops and their exact parser/discovery obligations. Two focused suites are wired beside their current checkers in required CI.
 - #417: Session format/compile-order policy, after merged #407. Owns the four grouped find producers over six required populations, first-match ordering, allowlists and its focused suite/CI wiring.
 
 Astra invoked #407's explicit pre-code split because Session's independent fixture scope made the three-gate pass too broad for half a working day. No gate, extractor or producer debt is removed from this parent. Shared-helper and workflow edits remain serialized.
@@ -76,3 +76,7 @@ No implementation, Cargo, benchmark, policy mutation run or GitHub change was pe
 
 
 Root synchronized the final #406 evidence and the amended #407 / new #417 stateless briefs before next implementation. #407's base is 882277b6; Session keeps the exact first-match and optional-empty semantics in #417. This parent stays OPEN until all remaining assigned gates are upstream and CLOSED.
+
+## Current delivered boundary coverage
+
+Six of the seven assigned gates are upstream through closed #406 and #407. The remaining Session gate is active in #417, whose first source checkpoint awaits Astra review. #401 stays OPEN until Session passes its complete contract, actual PR review and required CI, and is merged/synchronized. This status does not close broader #306 or remove any original extractor or discovery obligation.
