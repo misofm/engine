@@ -75,3 +75,7 @@ Actual sealed-owner/default/explicit/host-call discrimination remains mandatory,
 #430, #443, #444 and #431 retain respectively serialized bank pairing, scalar pairing, concurrent-native admission/pairing and measurement. #442 does not establish a native cutoff or close RT-4/#349. The caller declaration remains explicit and is not misrepresented as enforced scheduling for arbitrary external hosts.
 
 #435 remains the sole feature; #412 tooling is independent. After #435 delivery root freezes/checks merged source and follows Luna attempt 1, Astra verdict, Sol attempts 2/3 only after FAIL, then hard stop/rescope. No implementation, tests/builds, new research, source edits or Git/GitHub mutation performed for this approval.
+
+## Post-#435 source-base freeze
+
+PR #447 delivered #435 at main `99df5cf6c639f0909f82e116eb776e95c172536c` after exact-head Astra PASS and required CI. Root integrated that delivered base into this planning branch. #442 is next runtime feature only after Astra confirms the approved source route and resource gates on this base; #448 is independent tooling. No implementation is assigned by this checkpoint alone.
