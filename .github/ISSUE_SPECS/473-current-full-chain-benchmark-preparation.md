@@ -141,3 +141,39 @@ Focused gate evidence from this coherent checkpoint:
 - `/tmp/473-sol2-hermetic.{command,log,status}`: status 0 and `current builtins benchmark validators/lifecycle: PASS (real workload launches: 0)`.
 - `/tmp/473-sol2-validator-delta.{command,log,status}`: status 0 for the exact seven-hash record copy and one-include aggregate copy comparison.
 - `/tmp/473-sol2-source-prose.{command,log,status}`: status 0 for diff hygiene, exact authorized paths, historical 035/072 and input/config byte preservation, and explicit #431 `UNSPENT`/`UNAUTHORIZED` state.
+
+## Astra Sol2 verdict and final Sol3 assignment
+
+# Astra #473 Sol attempt2 — FAIL
+
+Exact reviewed a7aea9229b84f5356b4bb09d8bb50beb895aebb7, engine-473-plan. Full473 contract and prior five-group review examined. No real/synthetic preflight, runner, workload, benchmark, tests or builds executed during review; findings below are source-based. This is one consolidated verdict, preserving successful portions and limiting final Sol3 to the following four original-contract groups.
+
+Accepted progress: actual manifest/nested canonical input/common-field regression now covers the missing preparation seam without rendering. Independently compared validator text: exactly seven hash occurrences change, all non-hash text identical; aggregate differs ONLY in included module. Preserve these copies and historical files. The fixed namespace, raw JSONL preservation/promotion, checked Git operations, input hashes, unchanged controlled predicates, phase counts and real fake-only harness are substantial implementations. Reported six focused statuses0 and114-name environment check do not settle the remaining defects.
+
+## 1. Seal the ACTUAL build environment and attribution, not profile literals
+
+Preflight runs cargo with arbitrary inherited RUSTFLAGS/CARGO_ENCODED_RUSTFLAGS, Cargo profile/target overrides and wrapper/toolchain environment. It then unconditionally writes target_features="+avx2,+fma", opt_level="3", lto="fat", codegen_units=1. These values are not observed or enforced. For example CARGO_PROFILE_RELEASE_LTO=false changes the build while the seal still asserts fat; RUSTFLAGS can override repository target configuration. Runner only compares these constants with the seal. This fails the explicit full effective-environment/profile and drift contract.
+
+Freeze/enforce the already approved repository profile/target settings and record relevant effective environment/toolchain/build provenance. Refuse incompatible inherited overrides rather than silently certify them or change the workload profile; no new generic config framework. Bind runner execution metadata to recorded observations. Currently only candidate/binary variables are supplied to bench; the other Metadata::collect environment fields can be missing or caller-supplied independently of the asserted seal. Missing metadata must stay candid under the preserved validator, but no field may pretend to be a verified controlled/build fact. Add finite fake-only incompatible-profile/target-environment refusal and matching provenance checks to the current harness.
+
+## 2. Enforce sole reservation ownership and physical namespace throughout the runner
+
+The runner installs its EXIT trap BEFORE atomically creating its reservation. If two callers both pass the initial absence check, the losing noclobber write fails, but its EXIT trap still calls publish_disposition and mv -f over the winning caller's disposition. That corrupts the only-authority evidence even though noclobber prevents a second initial reservation. Track successful reservation ownership; a caller that did not acquire it must never finalize/replace another invocation's disposition. Preserve a successful reservation on all subsequent refusal paths.
+
+Runner checks the final artifact directory but not its artifacts parent, nor the prepared directory/target parent. A previously sealed namespace can be relocated behind a parent symlink and still pass individual !-L file checks. Preflight's parent checks do not protect later runner use. Refuse these fixed parent/prepared namespace aliases before writes/launch; no recursive filesystem security framework required. Retain all existing output guards. Add narrow fake-only competing-reservation/loser-does-not-write proof and post-preparation parent/prepared-directory symlink refusal, preserving prior evidence bytes and zero launches.
+
+## 3. Keep process termination and failed persistence truthful
+
+process_status initially captures the actual child status but is overwritten to1 after successful workload execution when phase/record/aggregate/promotion checks fail. The disposition therefore falsely reports a workload process failure for a process that returned0. Preserve the actual workload return separately from validation/promotion/runner status, with null/not-started before launch. Interrupt handling hardcodes130 for both INT/TERM and exits without an explicit child termination/reap protocol. The synthetic interruption fixture kills the parent and immediately exits itself, so it cannot prove preservation while a workload remains active.
+
+Use bounded explicit child lifecycle ownership for the ONE process: on interruption stop/reap that child before publishing final hashes/counts; retain actual wait status and signal/refusal reason. Do not permit a child to continue mutating raw/stderr after final disposition. Keep no-retry authority and durable partial output. Check disposition publication failures so an unavailable final write cannot turn into successful capture reporting; preserving RUNNING reservation on a failed final publication is safer than erasing it. No new runner framework.
+
+## 4. Finish the original failure-path proof, not a larger matrix
+
+Current run_failure_case only requires nonzero and disposition status/reason. Except the warmup case, it does not verify exact child status, retained raw/stderr bytes, absent accepted output or one actual synthetic launch. Round1/2 produce five/fifteen rows but those partial populations are never asserted. Interruption emits no partial payload and self-exits, as above. Several original preservation/phase requirements can therefore regress while the suite stays green.
+
+For the existing warmup/round1/round2/record/aggregate/phase/interruption cases, assert exact emitted raw/stderr identities or complete expected bounded payload, phase counts, actual child return, no accepted promotion, one synthetic launch and a second invocation's refusal without changing those artifacts. Use one bounded blocking synthetic child for genuine parent interruption and verify termination/reap plus partial-output preservation. Keep successful20-row promotion byte equality and existing production-validator mutation table unchanged. Distinguish intended lifecycle failures from harness/setup failures. Exercise a final-disposition/promotion persistence refusal through the existing fake harness; do not introduce a production mutation campaign or unrelated cases.
+
+The existing nine allowed paths remain sufficient. No validator/numeric/pin/workload changes, historical072 rewrite, new helper/allocator/framework or timing are authorized. Preserve all current successful evidence and candid failures. Root may assign final Sol3 once this finite list is synchronized; another FAIL hardstops/rescopes rather than a fourth correction. Source PASS and real #431 capture remain ungranted.
+
+Root assigns the final Sol3 implementation pass against these four remaining original groups. Preserve accepted input/validator work and all raw failed/green evidence. Pause at meaningful coherent checkpoints for root exact-path commit/push. No real workload, preflight or capture execution and no timing; future431 remains unspent. A further final FAIL requires explicit rescope, not a fourth repair.
