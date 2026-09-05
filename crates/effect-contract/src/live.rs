@@ -129,6 +129,7 @@ pub struct EffectControlLane {
     symmetry: ChannelSymmetryWitness,
 }
 
+// REALTIME_POLICY_BEGIN
 impl EffectControlLane {
     /// Binds the consumer half of one prepared channel.
     #[must_use]
@@ -265,6 +266,7 @@ impl EffectControlLane {
         }
     }
 }
+// REALTIME_POLICY_END
 
 /// What one [`EffectControlLane::stage`] call produced.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

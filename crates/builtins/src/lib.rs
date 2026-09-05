@@ -1227,6 +1227,7 @@ impl<L: Lane> InputStage<L> {
             .sum()
     }
 
+    // REALTIME_POLICY_BEGIN
     /// Renders one block of both channels.
     ///
     /// `left` and `right` are AoSoA blocks of `frames * L::WIDTH` samples; at `L = f32` a planar
@@ -1294,7 +1295,9 @@ impl<L: Lane> InputStage<L> {
             recovered_right_state: recovered[1],
         }
     }
+    // REALTIME_POLICY_END
 
+    // REALTIME_POLICY_BEGIN
     /// Renders one block of the **collapsed** track: one plane, one channel's coefficients and
     /// state, and the right channel's accounting duplicated from the left.
     ///
@@ -1368,6 +1371,7 @@ impl<L: Lane> InputStage<L> {
             recovered_right_state: recovered,
         }
     }
+    // REALTIME_POLICY_END
 
     /// Copies the left channel's **retained integrators** onto the right channel.
     ///
@@ -1923,6 +1927,7 @@ impl<L: Lane> FaderRampStage<L> {
         self.muted[channel][lane]
     }
 
+    // REALTIME_POLICY_BEGIN
     /// Renders one block of both channels.
     fn process(&mut self, left: &mut [f32], right: &mut [f32], frames: usize) {
         self.process_plane(0, left, frames);
@@ -1982,6 +1987,7 @@ impl<L: Lane> FaderRampStage<L> {
             );
         }
     }
+    // REALTIME_POLICY_END
 
     /// Snaps every lane to its target and cancels any ramp in flight.
     fn reset(&mut self) {
@@ -2166,6 +2172,7 @@ impl<L: Lane> MatrixStage<L> {
         Ok(())
     }
 
+    // REALTIME_POLICY_BEGIN
     /// Renders one block of both channels.
     fn process(&mut self, left: &mut [f32], right: &mut [f32], frames: usize) {
         let maximum = self
@@ -2213,6 +2220,7 @@ impl<L: Lane> MatrixStage<L> {
             );
         }
     }
+    // REALTIME_POLICY_END
 
     /// Snaps every lane to its target and cancels any ramp in flight.
     fn reset(&mut self) {
@@ -3416,6 +3424,7 @@ impl MeterAccumulator {
         })
     }
 
+    // REALTIME_POLICY_BEGIN
     /// Observes one block, split at the window boundaries it crosses.
     ///
     /// The split is computed once per segment instead of testing the period after every sample,
@@ -3525,6 +3534,7 @@ impl MeterAccumulator {
         }
         Ok(())
     }
+    // REALTIME_POLICY_END
     pub fn reset(&mut self, kind: BuiltinResetKind) {
         self.start = None;
         self.frames = 0;

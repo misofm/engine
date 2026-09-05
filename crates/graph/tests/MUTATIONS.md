@@ -145,3 +145,23 @@ reported zeros would leave every re-engage assertion in the tree passing vacuous
 | # | mutation | file | test | result |
 |---|---|---|---|---|
 | M3-G1 | `RuntimeUnit::collapse_transitions` returns `[0; 3]` for a banked unit, so the cycle is invisible above the chain | `graph/src/runtime.rs` | `chain_shape::the_switch_coming_back_re_engages_and_renders_the_never_collapsed_bits` | RED — `every cohort disengaged once and re-engaged once`. `no_workload_transitions_unless_something_moves_the_switch` stays green under it, which is the shape that names the cause: an all-zero accessor is indistinguishable from an undisturbed session and only a session that *did* transition can tell them apart |
+
+## Issue #371 — the root-agnostic marked-region scan (RT-16 / IO-14)
+
+The gate's discovery set changed from one directory (`crates/engine/src/realtime`) to every file
+carrying a `REALTIME_POLICY_BEGIN` marker under `crates hosts tools sidecars`, and the
+`>= 4` region floor became a floor on both the marked-region count (42) and the marked-file count
+(12). Rows 371-1 and 371-2 were applied to the working tree itself, the gate run, and the mutation
+reverted in the same session; rows 371-3 to 371-6 live in `scripts/test-realtime-policy.sh` (each
+asserting the failure class, not just a non-zero exit) against that fixture, which mirrors the
+real twelve-file, forty-two-region layout, column-zero and indented markers included.
+
+| # | mutation | file | test | result |
+|---|---|---|---|---|
+| 371-1 | `let _ = vec![0u8; 1];` inserted inside `execute_op`'s marked region | `graph/src/runtime.rs` | `bash scripts/check-realtime-policy.sh` | RED (`marked realtime code contains an allocation, lock, I/O, log, wait, syscall or panic surface`, pointing at the inserted line); GREEN once removed — the RT-16 verification gate |
+| 371-2 | `let _ = vec![0u8; 1];` inserted inside `EffectControlLane::stage`'s marked region | `effect-contract/src/live.rs` | `bash scripts/check-realtime-policy.sh` | RED (same class); GREEN once removed — the IO-14 verification gate, also standing as `marked-effect-control-lane-stage` in `scripts/test-realtime-policy.sh` |
+| 371-3 | a marked region's forbidden surface outside the old root: `let _ = vec![0u8; 1];` inside `render_next`'s marked region | `hosts/host-web/src/lib.rs` (fixture) | `scripts/test-realtime-policy.sh` (`marked-outside-realtime-root`) | RED (allocation class) |
+| 371-4 | delete every marker of one file to silence the gate, dropping it out of the discovered set | `crates/builtins/src/lib.rs` (fixture) | `scripts/test-realtime-policy.sh` (`marked-file-count-floor`) | RED (`expected at least twelve marked realtime files`) |
+| 371-5 | delete one marked region of a multi-region file, every remaining marker matched | `crates/rack/src/lib.rs` (fixture) | `scripts/test-realtime-policy.sh` (`marked-region-count-floor`) | RED (`expected at least forty-two marked realtime regions`) |
+| 371-6 | a newly marked `tools/` file carrying a `vec!` inside its region | `tools/audit/src/marker_probe.rs` (fixture) | `scripts/test-realtime-policy.sh` (`marked-tools-root-scanned`) | RED (allocation class) — the discovery walk reaches every root, not only `crates/` and `hosts/` |
+| 371-7 | delete the `END` marker of a region outside the old root, keeping its `BEGIN` | `hosts/host-web/src/lib.rs` (fixture) | `scripts/test-realtime-policy.sh` (`unmatched-markers-outside-root`) | RED (`unmatched realtime policy markers`) |
