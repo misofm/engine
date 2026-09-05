@@ -93,3 +93,7 @@ The accepted #419/#422 complete-stride/fold callback implementation stays untouc
 Proceed after base freeze with one coherent Luna source/test pass, root checkpoint, Astra adversarial verdict, Sol retries only after FAIL. Source PASS precedes retained fullworkspace, supported-target/immutable artifact/static/resource/browser qualification and the ONE controlled descriptive invocation through a fresh #420 namespace. Existing0.50/60second controls, zero-launch preflight, no automatic retry and final actual-head PR/required-CI review remain unchanged. Broader #349 remains open.
 
 Read-only review of numbered spec, Luna inventory and current accepted graph/arena/program/chain-shape source. No tests, Cargo, timing, repository/GitHub mutation or implementation occurred.
+
+## Luna attempt 1 source evidence
+
+The general reduction's `N >= 2` path now accumulates owned `Lane` values across frame vectors and writes each output vector once, using sequential checked `ArenaLease::read`/`write` borrows. Zero-input and one-input behavior remain unchanged. A test-only old primitive oracle using `sum2_block` followed by `sum_into_block` was added and both folded oracle sites were redirected to it. Fan-in coverage includes 8, 9, 64, 65 and 129 contributors while preserving existing hostile/order/self-alias cases. Graph debug/release (49/49), release console chain fixtures (21/21), graph/realtime policies, and formatting passed. Logs are recorded under `/tmp/luna-420-*`; no runner, artifact, timing, full-workspace or Git operation was performed.

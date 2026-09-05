@@ -47,9 +47,8 @@ use effect_contract::{
     BypassShunt, ChannelSymmetryWitness, EffectControlLane, EffectProcessBlock, ObservationLane,
     ObservationSample, PreparedAutomationSpan, PreparedNativeEffect,
 };
-use lane::kernels::{
-    mix2x2_block, ordered_accumulate_block, pdc_delay_block, sum_into_block, sum2_block,
-};
+use lane::Lane;
+use lane::kernels::{mix2x2_block, ordered_accumulate_block, pdc_delay_block, sum_into_block};
 use rack::{BankChain, BankMembers, BankPlaneViews, FoldCohort};
 
 use crate::{
@@ -98,15 +97,46 @@ fn reduce_plane(lease: &mut ArenaLease, plane: usize, out: u32, inputs: &[u32]) 
             }
         }
         [first, second, rest @ ..] => {
-            {
-                let (output, a, b) = lease.write_read2(plane, out, *first, *second);
-                sum2_block::<FrameLane>(output, a, b);
-            }
-            for next in rest {
-                let (output, input) = lease.write_read(plane, out, *next);
-                sum_into_block::<FrameLane>(output, input);
-            }
+            reduce_many::<FrameLane>(lease, plane, out, *first, *second, rest);
         }
+    }
+}
+
+#[inline(always)]
+fn reduce_many<L: lane::Lane>(
+    lease: &mut ArenaLease,
+    plane: usize,
+    out: u32,
+    first: u32,
+    second: u32,
+    rest: &[u32],
+) {
+    let frames = lease.frames();
+    let vectored = frames - frames % L::WIDTH;
+    let mut index = 0;
+    while index < vectored {
+        let mut acc = {
+            let source = lease.read(plane, first);
+            L::load(&source[index..])
+        };
+        for input in std::iter::once(second).chain(rest.iter().copied()) {
+            let value = {
+                let source = lease.read(plane, input);
+                L::load(&source[index..])
+            };
+            acc = acc.add(value);
+        }
+        acc.store(&mut lease.write(plane, out)[index..]);
+        index += L::WIDTH;
+    }
+    while index < frames {
+        let mut acc = <f32 as lane::Lane>::load(&lease.read(plane, first)[index..]);
+        for input in std::iter::once(second).chain(rest.iter().copied()) {
+            let value = <f32 as lane::Lane>::load(&lease.read(plane, input)[index..]);
+            acc = acc.add(value);
+        }
+        acc.store(&mut lease.write(plane, out)[index..]);
+        index += 1;
     }
 }
 
@@ -2935,6 +2965,7 @@ fn cohort_runs(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lane::kernels::sum2_block;
 
     /// The node's cached witness and the line's own answer are the same fact (#210 phase 2).
     ///
@@ -3024,6 +3055,29 @@ mod tests {
         lease.read(0, 1).to_vec()
     }
 
+    /// Frozen pre-RT-3 oracle: the old two-kernel left-associated reduction.
+    fn old_reduce_plane(lease: &mut ArenaLease, plane: usize, out: u32, inputs: &[u32]) {
+        match inputs {
+            [] => lease.write(plane, out).fill(0.0),
+            [single] => {
+                if *single != out {
+                    let (output, input) = lease.write_read(plane, out, *single);
+                    output.copy_from_slice(input);
+                }
+            }
+            [first, second, rest @ ..] => {
+                {
+                    let (output, a, b) = lease.write_read2(plane, out, *first, *second);
+                    sum2_block::<FrameLane>(output, a, b);
+                }
+                for next in rest {
+                    let (output, input) = lease.write_read(plane, out, *next);
+                    sum_into_block::<FrameLane>(output, input);
+                }
+            }
+        }
+    }
+
     /// One lease that owns `buffers` buffers of one plane, as the sequential executor does.
     fn single_lease(frames: usize, buffers: usize) -> ArenaLease {
         let mut builder = ArenaLeaseSetBuilder::new(
@@ -3100,8 +3154,8 @@ mod tests {
             right.fill(-(lane as f32 + 1.0));
             mix2x2_block::<FrameLane>(left, right, coefficients);
         }
-        reduce_plane(&mut oracle_lease, 0, ARENA_BASE, &oracle_routes);
-        reduce_plane(&mut oracle_lease, 1, ARENA_BASE, &oracle_routes);
+        old_reduce_plane(&mut oracle_lease, 0, ARENA_BASE, &oracle_routes);
+        old_reduce_plane(&mut oracle_lease, 1, ARENA_BASE, &oracle_routes);
         let (oracle_left, oracle_right) = oracle_lease.read_stereo(ARENA_BASE);
         let expected_left = oracle_left.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
         let expected_right = oracle_right.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
@@ -3264,8 +3318,8 @@ mod tests {
                 right.copy_from_slice(&tiles[index].1);
                 mix2x2_block::<FrameLane>(left, right, coefficients[index]);
             }
-            reduce_plane(&mut lease, 0, master, &routes);
-            reduce_plane(&mut lease, 1, master, &routes);
+            old_reduce_plane(&mut lease, 0, master, &routes);
+            old_reduce_plane(&mut lease, 1, master, &routes);
             let (oracle_left, oracle_right) = lease.read_stereo(master);
             let oracle: (Vec<u32>, Vec<u32>) = (
                 oracle_left.iter().map(|value| value.to_bits()).collect(),
@@ -3735,7 +3789,7 @@ mod tests {
 
         // (b) Seeded corpora at several fan-ins, against the one-line scalar reference.
         let mut state = 0x6d69_736fu32;
-        for count in [1usize, 2, 3, 5, 9, 64] {
+        for count in [1usize, 2, 3, 5, 8, 9, 64, 65, 129] {
             for frames in [1usize, 7, 64, 128, 512] {
                 let inputs: Vec<Vec<f32>> = (0..count)
                     .map(|_| (0..frames).map(|_| lcg(&mut state)).collect())
