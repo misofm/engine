@@ -2030,6 +2030,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::result_large_err)]
     fn live_scalar_owner_bytes_are_published_and_capped_before_binding() {
         let prepare = |caps: GraphCompileCaps, controlled: bool| {
             let mut model = parse_session_json(SESSION_FIXTURE).expect("session fixture");
@@ -2100,14 +2101,17 @@ mod tests {
             })
         };
 
-        let plain = prepare(integration_caps(), false)
-            .unwrap_or_else(|_| panic!("plain scalar graph"));
-        let live = prepare(integration_caps(), true)
-            .unwrap_or_else(|_| panic!("live scalar graph"));
+        let plain =
+            prepare(integration_caps(), false).unwrap_or_else(|_| panic!("plain scalar graph"));
+        let live =
+            prepare(integration_caps(), true).unwrap_or_else(|_| panic!("live scalar graph"));
         let plain_resource = plain.graph_resource_estimate();
         let live_resource = live.graph_resource_estimate();
         let scalar_bytes = live_resource.graph_metadata_bytes - plain_resource.graph_metadata_bytes;
-        assert!(scalar_bytes > 0, "live scalar owners add retained graph bytes");
+        assert!(
+            scalar_bytes > 0,
+            "live scalar owners add retained graph bytes"
+        );
         assert_eq!(
             live_resource.incremental_plan_bytes - plain_resource.incremental_plan_bytes,
             scalar_bytes
@@ -2117,14 +2121,17 @@ mod tests {
             scalar_bytes
         );
         assert_eq!(live_resource.builtin_bank_count, 0);
-        assert_eq!(live.report().estimate, *live_resource, "published pre-bind estimate");
+        assert_eq!(
+            live.report().estimate,
+            *live_resource,
+            "published pre-bind estimate"
+        );
 
         let mut exact = integration_caps();
         exact.maximum_graph_bytes = live_resource.graph_metadata_bytes;
         exact.maximum_plan_bytes = live_resource.incremental_plan_bytes;
         exact.maximum_single_allocation_bytes = live_resource.largest_allocation_bytes;
-        let exact_artifact =
-            prepare(exact, true).unwrap_or_else(|_| panic!("exact scalar caps"));
+        let exact_artifact = prepare(exact, true).unwrap_or_else(|_| panic!("exact scalar caps"));
         assert_eq!(exact_artifact.graph_resource_estimate(), live_resource);
 
         for field in ["graph", "plan", "largest"] {
@@ -2140,7 +2147,11 @@ mod tests {
                 diagnostic.code == "graph.resource.limit"
                     && diagnostic.path == "$.graph_compile_caps"
             }));
-            assert_eq!(failure.builtins.tails().count(), 1, "{field} ownership returned");
+            assert_eq!(
+                failure.builtins.tails().count(),
+                1,
+                "{field} ownership returned"
+            );
         }
     }
 

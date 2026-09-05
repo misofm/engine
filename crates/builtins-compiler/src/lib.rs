@@ -3562,23 +3562,23 @@ impl GraphRuntimeProcessor for ScalarPairProcessor {
         self.fader.drain_controls()?;
         // Preserve the original fader boundary: its queue is drained before the envelope is
         // checked, and an invalid envelope stops before the later matrix owner consumes anything.
-        let mut fused_block =
-            DualMonoBlock::new(&mut *left, &mut *right, first_sample).map_err(render_error)?;
-        let matrix_error = self.matrix.drain_controls().err();
-        if let Some(error) = matrix_error {
-            // Preserve the original failure order: the fader arithmetic completes even when a
-            // later matrix command is invalid.
-            self.fader.fader.process(fused_block);
-            return Err(error);
-        }
-        if self
-            .fader
-            .fader
-            .process_fader_matrix(&mut self.matrix.matrix, &mut fused_block)
-        {
+        let fused = {
+            let mut fused_block =
+                DualMonoBlock::new(&mut *left, &mut *right, first_sample).map_err(render_error)?;
+            let matrix_error = self.matrix.drain_controls().err();
+            if let Some(error) = matrix_error {
+                // Preserve the original failure order: the fader arithmetic completes even when
+                // a later matrix command is invalid.
+                self.fader.fader.process(fused_block);
+                return Err(error);
+            }
+            self.fader
+                .fader
+                .process_fader_matrix(&mut self.matrix.matrix, &mut fused_block)
+        };
+        if fused {
             return Ok(());
         }
-        drop(fused_block);
         self.fader.fader.process(
             DualMonoBlock::new(&mut *left, &mut *right, first_sample).map_err(render_error)?,
         );
@@ -3589,16 +3589,15 @@ impl GraphRuntimeProcessor for ScalarPairProcessor {
     }
 }
 
+type ScalarPairOwners = (
+    Box<dyn GraphRuntimeProcessor>,
+    Box<dyn GraphRuntimeProcessor>,
+);
+
 fn make_scalar_pair(
     fader: Box<dyn GraphRuntimeProcessor>,
     matrix: Box<dyn GraphRuntimeProcessor>,
-) -> Result<
-    Box<dyn GraphRuntimeProcessor>,
-    (
-        Box<dyn GraphRuntimeProcessor>,
-        Box<dyn GraphRuntimeProcessor>,
-    ),
-> {
+) -> Result<Box<dyn GraphRuntimeProcessor>, ScalarPairOwners> {
     // The factory is public through the graph trait. Check both exact concrete owners before
     // consuming either erasure; an unrelated implementation cannot opt itself into a panic.
     if fader.as_ref().type_id() != core::any::TypeId::of::<ConsoleFaderProcessor>()
@@ -5963,15 +5962,17 @@ mod tests {
         );
     }
 
-    fn scalar_console_owners(
-        fader_delivery: BuiltinControlDelivery,
-        matrix_delivery: BuiltinControlDelivery,
-    ) -> (
+    type ScalarConsoleOwners = (
         Box<dyn GraphRuntimeProcessor>,
         Box<dyn GraphRuntimeProcessor>,
         Producer<TrackFaderRecord>,
         Producer<TrackControlRecord>,
-    ) {
+    );
+
+    fn scalar_console_owners(
+        fader_delivery: BuiltinControlDelivery,
+        matrix_delivery: BuiltinControlDelivery,
+    ) -> ScalarConsoleOwners {
         let parameters = BuiltinParameters {
             left: builtins::ChannelParameters {
                 fader_db: -3.0,

@@ -3198,6 +3198,81 @@ mod tests {
             !scalar_pair_is_in_place(&program, 0, 1),
             "the explicit undelayed-input guard remains independent"
         );
+
+        struct FaderOwner(Arc<AtomicUsize>);
+        impl GraphRuntimeProcessor for FaderOwner {
+            fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                for sample in block.left.iter_mut().chain(block.right.iter_mut()) {
+                    *sample *= 2.0;
+                }
+                Ok(())
+            }
+        }
+        struct FailingMatrixOwner {
+            calls: Arc<AtomicUsize>,
+            queued: Arc<AtomicUsize>,
+        }
+        impl GraphRuntimeProcessor for FailingMatrixOwner {
+            fn process(&mut self, _: GraphBindingBlock<'_>) -> Result<(), RenderError> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                self.queued.fetch_sub(1, Ordering::Relaxed);
+                Err(RenderError::InvalidEnvelope)
+            }
+        }
+
+        // Execute the original declined shape. The later reduction copies into its distinct
+        // destination before its owner reports the first error; the fader source remains the
+        // completed earlier state. This is the boundary a one-buffer early composite cannot own.
+        let fader_calls = Arc::new(AtomicUsize::new(0));
+        let matrix_calls = Arc::new(AtomicUsize::new(0));
+        let queued = Arc::new(AtomicUsize::new(2));
+        let mut fader = RuntimeOp {
+            inputs: vec![ARENA_BASE].into_boxed_slice(),
+            staged: Box::new([]),
+            sidechain: None,
+            output: ARENA_BASE,
+            kind: NodeKind::Bound(Box::new(FaderOwner(Arc::clone(&fader_calls)))),
+            observers: Box::new([]),
+        };
+        let mut matrix = RuntimeOp {
+            inputs: vec![ARENA_BASE].into_boxed_slice(),
+            staged: Box::new([]),
+            sidechain: None,
+            output: ARENA_BASE + 1,
+            kind: NodeKind::Bound(Box::new(FailingMatrixOwner {
+                calls: Arc::clone(&matrix_calls),
+                queued: Arc::clone(&queued),
+            })),
+            observers: Box::new([]),
+        };
+        let mut lease = stereo_lease(2, 2);
+        lease
+            .write_stereo(ARENA_BASE)
+            .0
+            .copy_from_slice(&[0.25, -0.5]);
+        lease
+            .write_stereo(ARENA_BASE)
+            .1
+            .copy_from_slice(&[-0.75, 1.0]);
+        lease.write_stereo(ARENA_BASE + 1).0.fill(91.0);
+        lease.write_stereo(ARENA_BASE + 1).1.fill(-91.0);
+        execute_op(&mut fader, &mut lease, &mut [], &mut [], 0).expect("earlier fader");
+        assert_eq!(
+            execute_op(&mut matrix, &mut lease, &mut [], &mut [], 0),
+            Err(RenderError::InvalidEnvelope)
+        );
+        assert_eq!(lease.read_stereo(ARENA_BASE).0, &[0.5, -1.0]);
+        assert_eq!(lease.read_stereo(ARENA_BASE).1, &[-1.5, 2.0]);
+        assert_eq!(lease.read_stereo(ARENA_BASE + 1).0, &[0.5, -1.0]);
+        assert_eq!(lease.read_stereo(ARENA_BASE + 1).1, &[-1.5, 2.0]);
+        assert_eq!(fader_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(matrix_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            queued.load(Ordering::Relaxed),
+            1,
+            "later failure retains its next record"
+        );
     }
 
     struct DecliningPairOwner(Arc<AtomicUsize>);
