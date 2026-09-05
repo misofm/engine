@@ -93,3 +93,7 @@ One Luna attempt, then at most two Sol revisions after adversarial FAIL; three t
 ## Frozen post-prerequisite base
 
 PR #440 delivered #411/#438 as `e7e1a37f36fe8a22c237d0bfcd3737373c6d4deb` after actual-head Astra PASS and required qualification SUCCESS. Both issues are remotely verified CLOSED. Root freezes that exact main for #412 and requests Astra confirmation before Luna assignment. The shared helper API is unchanged by #411/#438. #427 follows this tooling slice; #429 remains the sole independent active runtime feature.
+
+## Frozen-base approval and attempt 1 assignment
+
+Astra reviewed exact head `b4a3a5d6866a9600910b593c03dd431a025aa7f7` on delivered main `e7e1a37f36fe8a22c237d0bfcd3737373c6d4deb` and recorded PASS. The three target gates, shared helper, existing suites and workflow are unchanged by #411/#438; the approved selective fault controls, NUL preservation, grammar and single research-suite CI invocation remain binding. Root authorizes Luna attempt 1 within this frozen scope. Review: `/tmp/astra-412-frozen-base-review.md`.
