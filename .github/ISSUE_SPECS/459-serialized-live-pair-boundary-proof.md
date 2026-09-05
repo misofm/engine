@@ -118,3 +118,46 @@ Luna retained `/tmp/luna459-{debug,release}-{builtins-compiler-lib,allocation,gr
 Luna added actual drained MeterSnapshot values to the existing compiler fixture and compares the observed serialized graph with its separate reference for post-matrix PCM words, meter identity/reset/sequence/time/frame/counter fields and all floating fields by bits. The focused a_post_fader_meter_declines_its_cohort_while_the_tail_pair_still_fuses test passes with test-support, retained in `/tmp/luna459-caseb-meter.log`; formatting and diff hygiene pass. Root verified the only source delta is the compiler lib fixture/test before checkpointing.
 
 Luna then paused on a representation question: the current track_graph fixture has one output edge, empty prepared routes and independent observers, and Luna considers send/crossfeed and alias variants beyond that fixture's representation. This is an unverified implementation-scope question, not proof that production cannot represent those boundaries. The approved brief already permits the finite GraphSpec/PreparedRoute/observer variants; root will obtain a precise existing-seam ruling before any unauthorized expansion. All remaining Case B/C and final evidence remain required, with no source PASS or closure claim.
+
+## Existing graph representation ruling
+
+# Astra #459 finite graph representation ruling
+
+Decision: the two requested variants are representable using the existing public prepared-graph data and test helpers. No missing production seam or architecture expansion has been identified. Root may authorize continuation of the SAME paused Luna1 pass within the already-numbered scope after recording this ruling. This is not a full source verdict on `d90269451531d590c64f826cdb966ef683d329e8`.
+
+Inspected the current compiler track_graph/PreparedGraphPlanParts construction, graph node/edge/route types, RuntimeParts routing and chains_into, alias lowering, and the existing graph route/alias examples. The current fixture's empty routes and one output edge are initial fixture values, not limitations of PreparedGraphPlan. Alter the finite variant before PreparedGraphPlan::new and before into_graph_artifact_with_banks; do not mutate an already prepared plan or add production APIs.
+
+## Nonunity post-fader send: exact existing route
+
+In the compiler's existing track_graph variant (lib.rs around4416 onward), retain all original stage edges and the original PostMatrix(track0)->main-out edge. Add ONE node `GraphNodeId::Route { route_id: StableGraphId::parse("proof-send") }` with zero latency/finite-zero tail. Add exactly these edges with MainOutput/MainInput ports and effect_port None:
+
+1. `GraphEdgeId::RouteSource { route_id }`: track0/PostFader -> proof-send.
+2. `GraphEdgeId::RouteDestination { route_id }`: proof-send -> existing main-out.
+
+The RouteSource/RouteDestination identities avoid the existing helper's warning about duplicate TrackMain{target: output} edge IDs. Keep the original direct post-matrix edge; that is what makes this an extra send/readership boundary instead of replacing the main route.
+
+Add the same route node to spec.nodes and to sequential_schedule/dependency_levels after PostFader and before output (it may share the PostMatrix dependency level). Keep nodes sorted by the existing sorted_nodes helper and ensure each scheduled node appears once. Add `PreparedRoute { node: route_node, transform: RouteTransform { gain: 0.5, ll: 1.0, lr: 0.0, rl: 0.0, rr: 1.0 } }` to PreparedGraphPlanParts.routes. Do not add a delay, sidechain or second output. The existing zero delay/buffer-assignment fixture setup can remain; normal lowering builds the real route execution.
+
+CRITICAL ownership detail: leave this route OUT of required_bindings and OUT of GraphRuntimeBindings.nodes. It is owned by the PreparedRoute entry, not an extra caller-supplied GraphRuntimeProcessor. RuntimeParts::new indexes routes by node (runtime.rs around1515), and node_kind consumes that transform into NodeKind::Route (around1593). A supplied custom binding would take precedence and could accidentally bypass the actual route transform. Existing graph/lib.rs route fixtures, notably the two-route plan around3520–3670, show this exact convention: route nodes in graph/schedule/routes, only input/output nodes in external required bindings.
+
+Set a nontrivial track matrix/crossfeed in the session fixture BEFORE compile_session (the existing n_track_session parameter construction seam); do not put the crossfeed only in the send or replace the builtin matrix with a fake processor. Prepare identical serialized and original-separate arms. Observe actual output/send-relevant PCM with existing captures outside allocation spans. The real post-fader producer now has both matrix and route readers; unchanged chains_into checks readers.len()==1 and must refuse crossing that boundary. The other compatible unobserved cohort/tail can still pair. Assert the already-frozen PCM/branch outcomes, no extra acceptance case.
+
+## Observed alias: exact existing lowering seam, candid fixture meaning
+
+Alias lowering already supports TrackStage::PostSimd1, PostDynamic and PostSimd2PreFader when they have one undelayed main input and no sidechain (`graph/src/program.rs:is_alias_candidate`, around186, and lowering around589). Those nodes are elided into Tap entries and MUST NOT be placed in required_bindings or supplied a processor. `chains_into` checks observers both on the producer and on taps whose after_op identifies that producer (runtime.rs around2900). Binding an observer directly to PostFader is therefore not the alias case.
+
+For the narrow bind-time guard probe, use an UNUSED identity boundary node, e.g. track0/PostDynamic (the compact fixture currently contains only Input, PostInputBuiltins, PostFader, PostMatrix). Attach it as a side-leaf identity tap with one `GraphEdgeId::TrackMain { target: alias_node }` edge from track0/PostFader. Keep the direct PostFader->PostMatrix edge unchanged. Add alias to spec.nodes and a topological schedule/level after PostFader; no PreparedRoute entry, external binding or DSP owner is required. Add `GraphNodeObserverBinding::new(alias_node, unique_handle, existing Capture(...))` to artifact.builtin_observers before into_bound, using the current observer insertion seam.
+
+This is explicitly a synthetic GraphSpec identity-alias guard fixture, NOT a claim that canonical session signal order puts PostDynamic after fader. Its purpose is to exercise the generic graph's real Tap/observed-alias predicate at the exact producer boundary. The graph API is the same API the existing hand-built track_graph already uses; adding the unused identity node neither changes canonical session compilation nor introduces a new product topology. Label it that way in code/evidence. If avoiding a synthetic post-fader tap is desired, the canonical upstream PostSimd2PreFader alias may instead test upstream chain splitting, but it cannot be claimed to force refusal of the later fader/matrix pair. Do not silently substitute that weaker/different assertion for the assigned boundary proof.
+
+With the synthetic side tap, a tap is not itself an ordinary additional reader, so the alias variant should remain pair-eligible WITHOUT the observer and decline WITH the observer. Use the same graph with the observer toggled as the existing eligible/refusal reference; this identifies the alias predicate rather than a new delayed/extra-reader/intervening-op reason. Compare tap PCM to separate reference as required. The current downstream PostMatrix capture/observation variant remains the separate allowed-observation positive.
+
+No need to modify program.rs, chains_into, GraphNodeId, runtime bindings, canonical compiler or rack execution. All fixture edits stay in the already-allowed compiler test/support construction; graph runtime test-only assertions remain available if a direct Tap mapping witness is needed. Do not copy the large graph-compiler session corpus or invent a no-op route owner.
+
+## Continuation and limits
+
+The numbered brief already expressly authorizes these finite GraphSpec/PreparedRoute/GraphNodeObserverBinding variants. Root's stop clause is triggered by a required PRODUCTION change, not by adding the corresponding fixture nodes/edges/routes/levels/bindings. The current one-output/empty-routes helper is therefore not grounds for dropping the send/alias gate or issuing a new product architecture prerequisite.
+
+Preserve d9026945 as a recovery checkpoint; finish this same coherent Luna1 pass and its remaining original gates before the single consolidated adversarial source review. This ruling neither accepts unfinished tests nor authorizes qualification/timing. No implementation, tests/builds/timing or Git/GitHub mutations were performed; only this /tmp report was written.
+
+Root adopts this exact existing-seam construction and authorizes continuation of the same paused Luna attempt 1. The finite fixture nodes/edges/routes/levels/observer changes were already within scope and require no production expansion. Preserve the synthetic alias guard's stated meaning rather than presenting it as canonical stage ordering. All original remaining Case A/B/C gates and the single consolidated source verdict remain required.
