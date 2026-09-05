@@ -42,3 +42,43 @@ Astra medium ran a bounded actual-Wasm probe using the existing SDK sessionDocum
 The one-source 48 kHz/128-frame fixture uses a 512-frame internal PCM ring. Four old-generation quanta are accepted; the fifth returns typed backpressure (6), establishing a full internal queue. All 64 shared-ring slots are also filled with old-generation work, then the producer publishes generation 2 at target frame 10000. Actual engine seek admission returns OK, but direct submission of the new target quantum still returns backpressure (6). The first actual render returns zeros; a fresh same-document engine with the same seek and target PCM returns the exact nonzero ramp (left starts 0.00390625, 0.0078125, 0.01171875). Exact first-quantum equality is RED.
 
 Probe `/private/tmp/dx457-first-quantum-probe.mjs`, output `/private/tmp/dx457-first-quantum-probe.log`; command `node /private/tmp/dx457-first-quantum-probe.mjs` exits 1 at the first-target assertion. This narrower ABI probe does not claim worklet control-port delivery or a complete browser gate. It establishes a prerequisite failure even if stale shared slots were ideally released: the full internal queue cannot accept target PCM until render consumes its pending seek. Consequently no public preparation API or worklet implementation was frozen, no output was silently rendered/discarded, and no counters or target frame were changed. Execution stops at the brief's decision gate. A reviewed amendment is required before any Rust/internal-consumer change or alternative mechanism.
+
+
+## Approved Rust consumer preparation amendment
+
+Root approves the following bounded amendment after independent Astra medium review. The failed SDK-only prerequisite is preserved above; first-quantum, realtime and ownership gates remain unchanged. Implementation may now start the Rust tranche only, checkpointing its green decisive proof before SDK control-port work.
+
+# SDK457 amendment proposal: prepare the existing web source seek on its owner
+
+The retained actual-Wasm RED probe proves the SDK-only mechanism cannot satisfy the frozen first-quantum contract. Amend457 to include the minimal internal consumer preparation below; keep the SDK control-port/readiness work and all original gates. No production implementation has begun.
+
+## Smallest first implementation tranche
+
+Strengthen the existing web host's `seek_source` operation so its successful ACK means the admitted seek has also been applied to its exclusively owned source consumer and stale internal transfer blocks have been recycled. Keep the existing web ABI `miso_engine_web_v1_source_seek(handle, id_bytes, generation, frame)` and result codes. No new control-schema record, native transport, source command, or public C API operation is needed. This changes web-host acknowledgement timing, not the target frame or PCM format. Native/C API producers retain their existing queued-seek semantics.
+
+`AudioWorkletEngineHost` owns `PreparedHost.plan` and invokes it through `&mut self`, on the same worklet owner that executes render. Its source-seek message handler and process callback cannot run simultaneously. Forward a narrow internal `prepare_source_seek(source_index, expected_generation, expected_frame)` operation through the plan's existing executor and graph source-set driver. No alias, shared consumer handle, lock, downcast, or arbitrary control-thread access. The method requires exclusive plan ownership between render blocks; it does not arm native concurrent control access.
+
+In `PcmSourceConsumer`, reuse the non-consuming prefix of `begin_block` (source/lib.rs1106): finish/recycle any retained played block, flush deferred recycling, apply pending admitted seek command(s), and acquire/recycle stale queued blocks. Stop before the branches that advance next_frame, cumulative_read_frames, underrun counters or played_frames. Retain any matching current-generation block. Bound command work by its prepared queue capacity and data work by transfer_block_count. For an exact requested generation/frame, process older already-admitted seeks through that request; do not acknowledge an older/superseded generation as the requested one. Confirm the resulting active generation and next_frame before returning success. No render_next, DSP processing, output writes, absolute-clock advance or target offset.
+
+The recycle queue and preallocated transfer blocks already provide ownership return. Do not copy PCM, allocate replacement buffers, overwrite a deferred Box, drop/free a transfer block on the worklet, or introduce an unbounded drain. Explicitly test full data/recycle/current/deferred states against the existing allocation/free observer. Normal begin_block behavior remains unchanged apart from sharing the extracted prefix where appropriate.
+
+Web seek validation and producer admission remain in SourceControlSet.seek, in their current order. Only after admission succeeds does the owning web host prepare the corresponding canonical source consumer. Source index comes from the host's compiled canonical source order, already used for shape reporting. Prevalidate the internal source capability/index before admission so a missing dispatch cannot yield an admitted producer mutation followed by an unrelated capability refusal. Unexpected generation disagreement must fail honestly; never claim prepared readiness after a partial/mismatched operation.
+
+## Exact expected paths
+
+- `crates/source/src/lib.rs`: consumer preparation and SourceGraphSourceSetDriver forwarding; existing source tests including no allocation/free.
+- `crates/engine/src/realtime/plan.rs`: narrow executor trait method and exclusive PreparedRenderPlan forwarding. Default unsupported result for plans without streamed sources.
+- `crates/graph/src/lib.rs`: source-set driver/GraphExecutor forwarding. No graph topology or schedule changes.
+- `hosts/host-web/src/lib.rs`: existing seek_source invokes prepared consumer operation after admission; existing host tests in `hosts/host-web/src/tests.rs`.
+- `hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts` / corresponding existing documentation only if its queued-ACK description needs correction; no signature change. Existing ABI/generated asset machinery regenerates affected provenance normally after the required Rust Wasm rebuild.
+- Existing SDK457 paths: `sdk/src/browser/pcm-feed.ts`, `sdk/src/browser-assets/miso-engine-v1-pcm-feed-worklet.js`, `sdk/test/browser-pcm-evals.mjs`, public export/type file only if needed, numbered spec. Any exact generated paths follow existing generator output, not manual pin edits.
+
+No host-core/source producer rewrite is anticipated. If forwarding proves to require another owner or a public ABI addition, report the exact dependency before expanding this list.
+
+## Decisive proof and checkpoint order
+
+First tranche is only the Rust consumer/owner forwarding and the existing actual-Wasm RED discriminator translated into the existing SDK PCM evaluator. Fill the internal queue to actual backpressure and all64 shared slots; admit the paused seek, prepare it without rendering, accept target-generation PCM, and require the first render's two planes to equal the fresh same-document/target oracle exactly. Assert status nextAbsoluteSample/renderedQuanta and source cumulative-read/underrun state did not advance during preparation. Include zero/current/stale block and bounded queued-seek coverage with allocation/free proof. Run proportional Rust tests and required updated Wasm artifact checks; pause exact-path coherent checkpoint as soon as this first-target proof is GREEN.
+
+Then the SDK control operation can safely apply the same existing source_seek on its owning worklet port, release old SAB slots, acknowledge exact epoch/generation, and permit fresh refill. Preserve close/timeout/supersession/backpressure as in457. Prove actual suspended-context port delivery and exact first target PCM in the existing browser gate. Only after reviewed SDK PASS does the separate adapter successor await this stronger preparation plus fresh prefill before paused seek readiness; app consumes that public promise.
+
+This proposal requires dedicated review and a synchronized457 amendment before implementation. It preserves the stop condition: if first-target proof still fails, report the new concrete cause, never add an output-discard/mute/silence workaround.
