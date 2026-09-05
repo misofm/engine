@@ -128,3 +128,13 @@ PR474 delivered #455/#471 at660fce8f2c4f76d38c82590f4c0411c117ba857d after exact
 ## Rack checker delivered; final parent reconciliation pending
 
 PR477 delivered #456 at `fa3485c6bb1a69e6dd01df734a1ad9c945964715`, after exact-head Astra PASS and required qualification SUCCESS; #456 is closed and unclaimed. All six #403 checker scopes are now delivered. Final retained inventory/loop/extractor reconciliation is being reviewed before claiming parent completion; TOOL-11's separately excluded framework work remains under #349. No original requirement is removed by this status record.
+
+## Final Astra closure acceptance — complete
+
+Astra reconciled all original #403 obligations against delivered source and GitHub state: PASS. The six checker scopes are complete: bench-policy and realtime-audit-leak via #453/#462 (PR464); native-pcm-runner via #454 (PR467); effect-interchange-qualification and effect-interchange-benchmark-108 via #455/#471 (PR474); rack-benchmark-fixture via #456 (PR477). All child issues are closed and their evidence commits are upstream.
+
+The assigned original discovery debt is fully covered: bench's one manifest loop and audit-leak's structural/resolution loops retain checked traversal, exact offline Cargo flags, real complete-output/error assertions and faithful later-package delegation. Final child reviews preserve exact grammar, optional empty sets, late producer/predicate failures and the two same-assertion controls for each frozen outcome. Approved checked local wrappers remain appropriate for bespoke captures; no claim is made that every gate literally sources the shared helper. Existing required workflow suite calls preserve the proof. No new parent-wide mutation campaign is needed.
+
+PR477 merged as `fa3485c6bb1a69e6dd01df734a1ad9c945964715`, after Astra PASS at exact head159c5d03 and required qualification SUCCESS. Its immutable workspace result is 1611 passed, 0 failed, 24 ignored, with unchanged named population versus its contemporaneous baseline. Prior deliveries retain their own contemporaneous qualification evidence; no earlier runtime test population is misrepresented as identical to this final population.
+
+This completes #403 and the separately reconciled #306 original 21-gate/five-extractor/nine-loop program. #349 TOOL-11 step1 is delivered. The excluded declarative-policy step2 and generic TOOL-12 harness work remain outside this closure. Root synchronizes this final body and closes the remote parent now.

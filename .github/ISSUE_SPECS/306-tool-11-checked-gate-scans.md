@@ -145,3 +145,66 @@ PR474 delivered #455/#471 at660fce8f2c4f76d38c82590f4c0411c117ba857d after exact
 ## Rack checker delivered; final parent reconciliation pending
 
 PR477 delivered #456 at `fa3485c6bb1a69e6dd01df734a1ad9c945964715`, after exact-head Astra PASS and required qualification SUCCESS; #456 is closed and unclaimed. All six #403 checker scopes are now delivered. Final retained inventory/loop/extractor reconciliation is being reviewed before claiming parent completion; TOOL-11's separately excluded framework work remains under #349. No original requirement is removed by this status record.
+
+## Final Astra parent closure acceptance
+
+# Astra #403 / #306 final closure reconciliation — PASS
+
+Read-only reconciliation on PR477 candidate159c5d036b5099c3743f3326dd1106d838c78299 in engine-456-plan. Live GitHub now confirms PR477 MERGED as fa3485c6bb1a69e6dd01df734a1ad9c945964715, exact reviewed head unchanged, required qualification COMPLETED/SUCCESS. Live issue roster in /tmp/astra-306-closure-issues.json confirms all delivering children and proof successors below CLOSED; #403 and #306 alone remain OPEN. No new tests, builds, timing, repository or GitHub writes performed.
+
+Approve root synchronizing final parent evidence and closing BOTH #403 and #306. No remaining original-scope product slice was identified. Do not leave these parents open for TOOL-11 step2: the adopted #306 program explicitly excluded declarative policy/runner work and generic mutation frameworks. In #349 mark TOOL-11 step1 delivered, while retaining its separately scoped step2 rather than closing the entire broader finding.
+
+## Complete 21-gate mapping
+
+Paths below are scripts/check-<name>.sh. They account for 2+7+6+6=21 unique original roster gates; the additional Wasm gate is the expressly retained ninth-loop successor, not an invented 22nd original roster member.
+
+| Parent / delivered issues | Exact gate names | Delivery |
+| --- | --- | --- |
+| #400 | workspace-policy, rack-policy | PR408, foundation helper and direct scans; workspace remainder completed by #404/PR458 |
+| #401 / #406 | protocol-control-policy, effect-runtime-policy, host-core-policy, builtins-policy | PR414 |
+| #401 / #407 + #423 | graph-policy, conformance-boundaries | PR421 and final graph-parser consolidation PR426 |
+| #401 / #417 | session-policy | PR424 |
+| #402 / #410 | realtime-policy, lane-policy | PR433 |
+| #402 / #411 + #438 | unfused-seal | PR440 |
+| #402 / #412 + #448 | env-vocabulary, effect-state-migration-v1, dsp-research | PR449 |
+| #403 / #453 + #462 | bench-policy, realtime-audit-leak | PR464, including final filesystem-order portability correction |
+| #403 / #454 | native-pcm-runner | PR467 |
+| #403 / #455 + #471 | effect-interchange-qualification, effect-interchange-benchmark-108 | PR474, including final environment vocabulary integration and lossless historical-log retention |
+| #403 / #456 | rack-benchmark-fixture | PR477, including actual conditional sourcing and cleanup status preservation |
+
+The last six paths have all delivered. Their accepted directed producer/consumer tables, faithful complete-output/error and permitted-empty cases, exact intended diagnostics and actual same-assertion status-loss controls are preserved by their final source and PR reviews. #456's passing final source9dacb8d5 is unchanged at PR477; its47 manifest payloads plus manifest are hash/size/tracking verified in /tmp/astra-456-final-pr-review.md. This is not acceptance from closed labels alone.
+
+## Original nine loops and extra workspace debt
+
+- Graph-policy two + conformance one: #407, with final graph shared parser #423. Checked discovery precedes loops; named required populations and parsers retain their exact semantics.
+- Lane-policy two: #410. Current lane-source and workspace-manifest populations use gate_find_collect and explicit checked consumers. A stale comment at lines158–162 still describes the old process-substitution workaround, but the executable code below it captures checked discovery; this comment is not a surviving unchecked loop or reason for a new product issue.
+- Bench-policy one + realtime-audit-leak two: #453/#462. Complete discovery/status and per-package Cargo tree checks retain exact offline flags and later-package delegation. Final portable delegates and unordered complete-payload assertions are qualified by PR464.
+- Wasm object loop: #404's separated #427, PR451. Current checker owns a fresh non-LTO child target; checked find/sort/archive-member extraction and reconciliation cover all engine/source/target_smoke families, every decoder and atomic/observation predicate. Nonzero object count alone is expressly NOT the proof. Original shipped-LTO decoder false-pass history is retained.
+
+These are exactly nine historical non-workspace loops. #404/PR458 separately completed workspace npm-manifest, npm-lock, Cargo-manifest, retired-directory and fingerprint populations, plus positive/filtered producers and Git/fallback traversal. Optional npm empty sets, forbidden-directory/fingerprint empty sets and individually empty workspace roots remain valid; aggregate Cargo manifests remain required/nonempty. Execution failure is never made optional by those empty-result rules.
+
+Historical check-fast-db-seal.sh is not an unassigned current gate: commit c41adf56ee4f57e4bf36e509ea0f7588ef440197 explicitly replaced that script and math-policy with resolved Clippy disallowed-methods. The approved #306 accounting already preserves the intentionally retired visibility policy and mutation provenance; do not resurrect it as scanner debt.
+
+## Shared extraction, applicability and enforced proof
+
+Actual current call sites confirm all FIVE original dependency-extractor copies are consolidated:
+
+- rack: gate_toml_dependencies default (line16);
+- effect-runtime: plain (line8);
+- builtins: plain (line11);
+- conformance: plain-target (line132);
+- graph: graph (line19).
+
+The previously approved #423 exact-grammar completion is upstream; no sixth local dependency parser is being excused here. Shared collection/filter/count/find helpers are used where their output contracts fit.
+
+The parent phrase “all21 scripts use the shared applicable helper(s)” must be reconciled with its subsequently approved exact child scopes, not misreported literally: unfused, environment and several qualification gates deliberately retain checked local wrappers for grep filenames, NUL traversal, bespoke parsers, hashes and counts. #403's adopted brief explicitly permits these and finds no need for shared API expansion. Such scripts are not all sourced from lib/gate.sh, and closure must not claim otherwise. The completed obligation is applicable shared-helper reuse plus explicit checked bespoke producers, preserving all original semantics. No boilerplate sourcing or new abstraction is required to close the defect.
+
+Required qualification.yml retains the affected gate/suite entry points. Shared helper tests run through test-workspace-policy.sh line792; interchange parent suite invokes both108 policy and fake-only lifecycle suites at lines378–379; unfused self-test is explicitly invoked; research and Wasm inspection suites have required workflow calls. Existing child source/actual-PR reviews carry the discriminating assertions, not merely generic failing shell statuses. There is no requirement for a new parent-wide mutant campaign after this reconciled delivery.
+
+## Qualification and closure wording
+
+Every tooling boundary retained its own tested immutable candidate and matched its contemporaneous baseline. Do not compare early program test counts to the final count as if independent runtime deliveries had not occurred. Final #456 freeze6f7bb616 completed276 result blocks,1611 passed,0 failed,24 ignored, exact named population equal to #471 baseline1171; runtime/build/fixture inputs equal delivered main660fce8. PR477 required CI is now successful. Earlier parent #401 and #402 final accounting and actual child PR reviews remain applicable; final #403 deliveries resolve their only retained siblings.
+
+Suggested root record: “All six #403 checkers are delivered through PR464/467/474/477. The full #30621-gate program, five shared dependency extractors, original nine non-workspace loops and five additional workspace discovery populations are reconciled; historical fast-db replacement and approved bespoke producer wrappers are explicitly accounted. All children/successors are upstream and remotely closed, their focused controls and contemporaneous unchanged-runtime workspace qualifications retained. PR477 merged fa3485c6 with exact-head Astra PASS and required qualification SUCCESS. #403 and #306 are complete. #349 TOOL-11 step1 is delivered; separate declarative-policy step2 and TOOL-12 remain outside this closure.”
+
+Root should mirror that accurate final disposition in both numbered local specs and GitHub bodies, close403/306, then re-read their remote CLOSED state. That delivery synchronization is the only remaining action; no extra product implementation or qualification campaign is warranted by this reconciliation.
