@@ -1,0 +1,28 @@
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.03s
+     Running tests/chain_shape.rs (/tmp/engine-420-sol-final-target/release/deps/chain_shape-642c39ee168fe8a8)
+
+running 21 tests
+test the_intended_strip_is_one_chain_per_cohort ... ok
+test an_armed_observation_lane_on_a_fused_chain_still_publishes ... ok
+test the_ragged_tail_banks_like_any_other_cohort_and_pays_one_chain_for_it ... ok
+test a_seam_side_only_chain_reads_as_vacuous_rather_than_eligible ... ok
+test the_two_placements_realise_the_same_chain_shape ... ok
+test the_plumbing_row_binds_no_strip_at_all ... ok
+test a_run_that_starts_collapsing_renders_what_an_always_collapsed_run_renders ... ok
+test the_switch_coming_back_re_engages_and_renders_the_never_collapsed_bits ... ok
+test the_mono_row_pair_renders_one_session ... ok
+test re_equal_designed_words_after_a_one_channel_retarget_never_re_engage ... ok
+test a_run_that_stops_collapsing_renders_what_a_never_collapsed_run_renders ... ok
+test a_collapsed_cohorts_right_channel_taps_read_what_a_dual_runs_do ... ok
+test a_live_one_channel_retarget_disengages_on_the_block_it_lands ... ok
+test console_facilities_do_not_change_the_chain_shape_or_the_bits ... ok
+test a_lifted_bypass_re_engages_the_collapse_and_renders_the_dual_bits ... ok
+test a_bypass_engaged_after_a_collapsed_run_renders_the_dual_bits ... ok
+test the_half_mono_cohort_banks_like_a_uniform_one ... ok
+test every_standing_workload_folds_one_route_per_track ... ok
+test no_workload_transitions_unless_something_moves_the_switch ... ok
+test the_collapse_fires_on_every_mono_cohort_and_no_other ... ok
+test the_folded_master_is_the_reductions_own_bits ... ok
+
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.50s
+

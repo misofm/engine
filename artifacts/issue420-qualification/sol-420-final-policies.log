@@ -1,0 +1,30 @@
+graph policy: PASS
+graph policy fixtures: ok
+realtime policy: ok (42 marked regions in 12 files)
+realtime policy mutation tests: ok
+lane policy: ok
+rg: sidecars: No such file or directory (os error 2)
+rg: sidecars: No such file or directory (os error 2)
+rg: sidecars: No such file or directory (os error 2)
+rg: sidecars: No such file or directory (os error 2)
+lane policy mutation tests: ok
+workspace policy: ok
+valid partial output
+gate policy failure: mutant search failed (rg exit 9)
+valid partial output
+gate policy failure: mutant filter errored (rg exit 9)
+2
+gate policy failure: mutant count errored (wc exit 6)
+counter-mutant controls exercised: collect required filter count plain
+counter-mutant rejected: find (status 1)
+counter-mutant rejected: sort (status 1)
+counter-mutant rejected: text (status 1)
+counter-mutant rejected: unique (status 1)
+counter-mutant rejected: join (status 1)
+counter-mutant rejected: target (status 1)
+gate library tests: ok
+workspace policy mutation tests: ok
+check-realtime-audit-leak: OK
+test-realtime-audit-leak: red as required: conformance-regular-enable
+test-realtime-audit-leak: red as required: capi-direct-enable
+test-realtime-audit-leak: OK

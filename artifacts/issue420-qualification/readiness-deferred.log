@@ -1,0 +1,17 @@
+candidate=66827b87b7210931c0a76a6dfcbcd00419ca3683
+53dce85d8ff683693598da8dce79195ecfad1ad76300b68bb348196c00f81bab  target/release/bench
+binary_age_seconds=683
+affinity_cpu=63
+readiness_probe=1 load=0.74
+readiness_probe=2 load=0.58
+readiness_probe=3 load=1.00
+readiness_probe=4 load=0.94
+readiness_probe=5 load=0.88
+readiness_probe=6 load=0.98
+readiness_probe=7 load=0.98
+readiness_probe=8 load=1.50
+readiness_probe=9 load=1.31
+readiness_probe=10 load=1.62
+readiness_probe=11 load=1.66
+readiness_probe=12 load=1.67
+READINESS NOT MET; no workload invoked
