@@ -61,3 +61,7 @@ The ruling authorizes the exact public Rust runtime API/behavior retirement open
 No scope expansion or material correction found. Freeze the post-#420 merged base and repeat complete production-call discovery before assignment; any live caller requires rebrief. Do not overlap #429 or another launch-critical feature. No implementation, benchmark or new architecture is authorized merely by this planning approval. Existing source/test/qualification and exact-head PR/required-CI gates remain.
 
 Read-only local diff/spec and remote identity inspection. No tests, Cargo, timing or repository/GitHub mutation.
+
+## Post-prerequisite base readiness
+
+Root integrated delivered main `4b352b36ba33334ea2e0c6847c0e3ecf6e8ab33a` after #420 and #429 closed with exact-head Astra PASS and required CI. This is a scope-readiness checkpoint only: Astra must repeat complete production-call discovery and confirm the frozen API retirement/release bounds proof before Luna assignment. #430 ownership/admission design proceeds separately; no implementation overlap is authorized.
