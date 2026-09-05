@@ -162,7 +162,7 @@ sed -i '/gate_scan_collect()/,/gate_scan_required()/ s/0|1) printf.*return 0/0|1
 sed -i '/gate_scan_required()/,/gate_filter_exclude()/ s/return "$rc"/return 0/' "$counter_dir/required.sh"
 sed -i '/gate_filter_exclude()/,/gate_count_lines()/ s/return "$rc"/return 0/' "$counter_dir/filter.sh"
 sed -i '/gate_count_lines()/,/gate_toml_dependencies()/ s/return "$rc"/printf '\''2'\''; return 0/' "$counter_dir/count.sh"
-sed -i 's/if \[\[ "$mode" == plain \]\]/if false/' "$counter_dir/plain.sh"
+sed -i 's/if \[\[ "$mode" == plain || "$mode" == plain-target \]\]/if false/' "$counter_dir/plain.sh"
 if PATH="$scratch/rg-partial:$PATH" bash -c 'source "$1"; gate_scan_collect mutant x "" "$2" >/dev/null' _ "$counter_dir/collect.sh" "$scratch/src"; then :; else echo 'collect counter-mutant did not forge success' >&2; exit 1; fi
 if PATH="$scratch/rg-partial:$PATH" bash -c 'source "$1"; gate_scan_required mutant x "" "$2" >/dev/null' _ "$counter_dir/required.sh" "$scratch/src"; then :; else echo 'required counter-mutant did not forge success' >&2; exit 1; fi
 if PATH="$scratch/rg-partial:$PATH" bash -c 'source "$1"; gate_filter_exclude mutant x y >/dev/null' _ "$counter_dir/filter.sh"; then :; else echo 'filter counter-mutant did not forge success' >&2; exit 1; fi

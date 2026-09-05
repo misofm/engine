@@ -60,3 +60,9 @@ Final gates are affected shell suites, bash syntax, real policy scripts, existin
 ## Numbered program and approved assignment
 
 Astra approved the exact graph/conformance scope after the pre-code Session split on 2026-09-05. Base is merged #406 commit `882277b65ff64780f57c4df33dee127abc6a33e2`, with its actual shared-helper API. #406 is verified CLOSED; #401 remains OPEN until this issue and #417 close, retaining all seven original gates and extractor obligations. Luna gets one coherent implementation pass, then Astra supplies a verdict before any Sol retry. Root owns checkpoints and synchronization.
+
+## Luna attempt 1 source checkpoint — pending adversarial verdict
+
+Luna implemented checked graph/conformance discovery and source consumers, narrow find/sort and plain-target helper extensions, two new focused suites and their required-CI wiring. Graph retains its workspace-prefix/$1 declaration behavior; Session is untouched. Root preserved focused evidence from the paused tree: both real gates, both new suites and existing helper suite exit 0 (`/tmp/engine-407-luna-real-graph.log`, `/tmp/engine-407-luna-real-conformance.log`, `/tmp/engine-407-luna-test-graph.log`, `/tmp/engine-407-luna-test-conformance.log`, `/tmp/engine-407-luna-test-helper.log`). Bash syntax and diff hygiene pass.
+
+This is a recoverable source checkpoint, not acceptance. Astra must inspect the complete declared producer/partial-output/empty-result/parser/counter-mutation contract before any further implementation or full-workspace promotion. No Cargo, runtime, manifest, Session, artifact or benchmark work was performed.
