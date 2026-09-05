@@ -28,6 +28,7 @@ export const BUNDLED_ENGINE_ASSETS = Object.freeze({
   parameterMetadata: new URL("./assets/miso-engine-v1-parameter-metadata.json", import.meta.url),
   abiLayout: new URL("./assets/miso-engine-v1-abi-layout.json", import.meta.url),
   manifest: new URL("./assets/miso-engine-v1-sdk-manifest.json", import.meta.url),
+  pcmFeedWorklet: new URL("./assets/miso-engine-v1-pcm-feed-worklet.js", import.meta.url),
 });
 
 export interface PackageAssetRecord {

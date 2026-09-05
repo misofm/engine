@@ -1,3 +1,6 @@
 Miso Engine
 
 This product includes software developed by the Miso Engine contributors.
+
+The browser PCM feed ring and attachment sources are adapted from
+misofm/engine-web-adapter at commit 63b4ee6212287000ff85e1cfa969d385f6246d2d.

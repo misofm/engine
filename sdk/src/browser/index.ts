@@ -13,3 +13,5 @@ export * from "./policy.ts";
 // worklet host directly instead of going through `createEngine`, which is a browser consumer, so
 // it is barrel surface rather than a deep import.
 export * from "./host-mirror.ts";
+export * from "./pcm-ring.ts";
+export * from "./pcm-feed.ts";
