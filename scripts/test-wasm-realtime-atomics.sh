@@ -10,6 +10,7 @@ cat >"$bin/rustc" <<'EOF'
 #!/usr/bin/env bash
 [[ "$*" == '--print cfg --target wasm32-unknown-unknown -C target-feature=-simd128' ]] || { printf 'RUSTC_ARGUMENT_SENTINEL\n' >&2; exit 90; }
 case "${FAKE_CASE:-}" in
+  cfg-empty-error) printf 'CFG_EMPTY_SENTINEL\n' >&2; exit 12 ;;
   cfg-error) printf 'target_has_atomic="ptr"\n'; printf 'CFG_SENTINEL\n' >&2; exit 13 ;;
   cfg-missing) exit 0 ;;
   cfg-feature) printf 'target_has_atomic="ptr"\ntarget_feature="atomics"\n'; exit 0 ;;
@@ -74,7 +75,11 @@ EOF
 cat >"$bin/sort" <<'EOF'
 #!/usr/bin/env bash
 case "${FAKE_CASE:-}" in
+ archive-sort-empty-error) [[ "$*" == *engine.archives* ]] && { : >"$3"; printf 'ARCHIVE_SORT_EMPTY_SENTINEL\n' >&2; exit 26; };;
  archive-sort-error) [[ "$*" == *engine.archives* ]] && { printf 'ARCHIVE_SORT_SENTINEL\n' >&2; exit 28; };;
+ member-sort-empty-error) [[ "$*" == *engine/members ]] && { printf 'MEMBER_SORT_EMPTY_SENTINEL\n' >&2; exit 36; };;
+ member-sort-partial-error) [[ "$*" == *engine/members ]] && { "$REAL_SORT" "$@"; printf 'MEMBER_SORT_PARTIAL_SENTINEL\n' >&2; exit 37; };;
+ object-sort-empty-error) [[ "$*" == *engine/objects* ]] && { : >"$3"; printf 'OBJECT_SORT_EMPTY_SENTINEL\n' >&2; exit 25; };;
  object-sort-error) [[ "$*" == *engine/objects* ]] && { printf 'OBJECT_SORT_SENTINEL\n' >&2; exit 29; };;
 esac
 exec "$REAL_SORT" "$@"
@@ -100,9 +105,13 @@ export PATH="$bin:$PATH"
 assert_case() {
   local checker_path="$1" name="$2" expected="$3" diagnostic="${4:-}"
   local target="$test_root/target-$name" log="$test_root/$name.log"
-  mkdir -p "$target/parent-cache"; printf keep >"$target/parent-cache/stale-sentinel"
+  mkdir -p "$target/parent-cache"
+  printf keep >"$target/parent-cache/stale-sentinel"
+  printf 'not an archive: atomic.stale' >"$target/parent-cache/libengine-stale.rlib"
+  cp "$target/parent-cache/libengine-stale.rlib" "$target/stale.before"
   set +e; FAKE_CASE="$name" "$checker_path" "$target" >"$log" 2>&1; local status=$?; set -e
   [[ -f "$target/parent-cache/stale-sentinel" ]] || { printf 'case %s deleted caller parent cache\n' "$name" >&2; return 96; }
+  cmp -s "$target/stale.before" "$target/parent-cache/libengine-stale.rlib" || { printf 'case %s changed caller stale archive\n' "$name" >&2; return 96; }
   if [[ "$expected" == pass ]]; then
     [[ "$status" == 0 ]] || { cat "$log" >&2; printf 'case %s unexpectedly failed (%s)\n' "$name" "$status" >&2; return 96; }
     printf 'case %s: PASS (status 0)\n' "$name"; return 0
@@ -119,15 +128,38 @@ assert_case() {
 assert_case "$checker" base pass
 assert_case "$checker" source-fallback pass
 assert_case "$checker" no-source-needed pass
+assert_path_case() {
+  local name="$1" mode="$2" target
+  local cwd="$test_root/path-$name" log="$test_root/$name.log"
+  mkdir -p "$cwd"
+  if [[ "$mode" == relative ]]; then target='target/ci/wasm-scalar'; else target='target/ci/wasm-realtime-local'; fi
+  mkdir -p "$cwd/$target/parent-cache"
+  printf 'not an archive: atomic.stale' >"$cwd/$target/parent-cache/libengine-stale.rlib"
+  cp "$cwd/$target/parent-cache/libengine-stale.rlib" "$cwd/stale.before"
+  set +e
+  if [[ "$mode" == relative ]]; then (cd "$cwd" && FAKE_CASE=base "$checker" "$target") >"$log" 2>&1
+  else (cd "$cwd" && FAKE_CASE=base "$checker") >"$log" 2>&1
+  fi
+  local status=$?; set -e
+  [[ "$status" == 0 ]] || { cat "$log" >&2; printf 'case %s unexpectedly failed (%s)\n' "$name" "$status" >&2; return 96; }
+  cmp -s "$cwd/stale.before" "$cwd/$target/parent-cache/libengine-stale.rlib" || { printf 'case %s changed caller stale archive\n' "$name" >&2; return 96; }
+  printf 'case %s: PASS (status 0, real ar extraction)\n' "$name"
+}
+assert_path_case relative-ci-target relative
+assert_path_case omitted-default default
 cases=(
+ 'cfg-empty-error|rustc cfg production failed (status 12);CFG_EMPTY_SENTINEL'
  'cfg-error|rustc cfg production failed (status 13);CFG_SENTINEL' 'cfg-missing|does not advertise pointer-width atomic' 'cfg-feature|unexpectedly enables Wasm atomics'
  'pointer-search-error|cfg atomic-support search failed (status 30);POINTER_SEARCH_SENTINEL' 'feature-search-error|cfg atomics-feature search failed (status 31);FEATURE_SEARCH_SENTINEL'
  'cargo-fail|cargo build failed (status 42);CARGO_SENTINEL' 'missing-engine|engine archive population is incomplete' 'missing-source|source archive population is incomplete' 'missing-target|target_smoke archive population is incomplete'
- 'archive-find-empty-error|engine archive discovery failed (status 23);ARCHIVE_FIND_EMPTY_SENTINEL' 'archive-find-partial-error|engine archive discovery failed (status 23);ARCHIVE_FIND_PARTIAL_SENTINEL' 'archive-sort-error|engine archive sort failed (status 28);ARCHIVE_SORT_SENTINEL'
+ 'archive-find-empty-error|engine archive discovery failed (status 23);ARCHIVE_FIND_EMPTY_SENTINEL' 'archive-find-partial-error|engine archive discovery failed (status 23);ARCHIVE_FIND_PARTIAL_SENTINEL'
+ 'archive-sort-empty-error|engine archive sort failed (status 26);ARCHIVE_SORT_EMPTY_SENTINEL' 'archive-sort-error|engine archive sort failed (status 28);ARCHIVE_SORT_SENTINEL'
+ 'member-sort-empty-error|engine archive member sort failed (status 36);MEMBER_SORT_EMPTY_SENTINEL' 'member-sort-partial-error|engine archive member sort failed (status 37);MEMBER_SORT_PARTIAL_SENTINEL'
  'ar-list-empty|engine archive member listing failed (status 17);LIST_EMPTY_SENTINEL' 'ar-list-partial|engine archive member listing failed (status 17);LIST_PARTIAL_SENTINEL' 'duplicate-object|duplicate object member'
  'list-omits-member|archive has no object members' 'ar-extract-empty|engine archive extraction failed (status 18);EXTRACT_EMPTY_SENTINEL' 'ar-extract-partial|engine archive extraction failed (status 18);EXTRACT_PARTIAL_SENTINEL'
  'missing-extracted|object reconciliation failed' 'extracted-extra|object reconciliation failed' 'object-find-empty-error|engine object discovery failed (status 27);OBJECT_FIND_EMPTY_SENTINEL'
- 'object-find-partial-error|engine object discovery failed (status 27);OBJECT_FIND_PARTIAL_SENTINEL' 'object-sort-error|engine object sort failed (status 29);OBJECT_SORT_SENTINEL'
+ 'object-find-partial-error|engine object discovery failed (status 27);OBJECT_FIND_PARTIAL_SENTINEL'
+ 'object-sort-empty-error|engine object sort failed (status 25);OBJECT_SORT_EMPTY_SENTINEL' 'object-sort-error|engine object sort failed (status 29);OBJECT_SORT_SENTINEL'
  'decoder-empty-error|wasm-objdump failed (status 19);DECODE_EMPTY_SENTINEL' 'decoder-partial-error|wasm-objdump failed (status 19);DECODE_PARTIAL_SENTINEL' 'atomic-opcode|contains an atomic opcode'
  'opcode-search-error|opcode scan failed (status 32);OPCODE_SEARCH_SENTINEL' 'observation-error|observation object search failed (status 33);OBS_SEARCH_SENTINEL'
  'late-observation-error|observation object search failed (status 34);LATE_OBS_SENTINEL' 'source-error|source ObservationSlot search failed (status 35);SOURCE_SEARCH_SENTINEL'

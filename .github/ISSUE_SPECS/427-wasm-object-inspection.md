@@ -202,4 +202,14 @@ The suite and proportional policy/syntax/diff records pass on their tested absol
 
 Read the full current #427 contract/attempt record, prior verdict, final checker/suite and `/tmp/sol-427-attempt2-suite.log` plus policy evidence. No source edits, Git/GitHub mutations, real Cargo/builds or timing were performed. Only this `/tmp` verdict was written. The relative-path failure follows directly from the two working directories and retained relative archive names; no real build is needed to establish it.
 
+## Sol attempt 3 final source correction
+
+The checker now resolves the caller target directory to an absolute path through separately checked directory changes, restores the original checker working directory with a separately checked status, and creates the owned child beneath that absolute caller root. Archive identities therefore remain valid when extraction changes to a family scratch directory, while the source fallback remains rooted at the original invocation directory. Caller cache ownership and cleanup behavior are unchanged.
+
+The hermetic suite retains its absolute-path positives and adds an explicit relative CI-shaped `target/ci/wasm-scalar` invocation plus an omitted-default invocation from disposable working directories. Both pass through the fake build and real `ar` listing/extraction. Every case creates a deliberately non-inspectable stale archive outside the fresh child, byte-compares it after execution, and separately verifies the parent sentinel survives.
+
+The remaining frozen producer pairs are present: cfg production has empty-output/error and plausible pointer-row/error cases; archive and object in-place sorts have empty-output/error and complete-looking-output/error cases; archive-member sort has empty-output/error and delegated valid-looking-output/error cases. Each negative requires its operation, exact injected status, and unique stderr sentinel. The previously accepted exact identities, reconciliation, nonquiet searches, fallback behavior, diagnostics, and two same-assertion status-97 controls remain intact.
+
+Final source validation passed Bash syntax, `git diff --check`, the complete hermetic suite, and workspace policy. Retained logs: `/tmp/sol-427-attempt3-suite.log` and `/tmp/sol-427-attempt3-workspace-policy.log`. Per the review ordering, no real Cargo gate, workspace build, benchmark, Git mutation, or GitHub mutation was performed before Astra source review.
+
 Root authorizes FINAL Sol attempt 3 for these two finite groups only. Preserve accepted reconciliation/status and genuine same-assertion controls; restore relative/default CLI correctness and complete the named table cases. No real Cargo inspection before source PASS. Third FAIL requires the hard stop and explicit rescope; no additional implementation round is authorized.

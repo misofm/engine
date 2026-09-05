@@ -3,6 +3,12 @@ set -euo pipefail
 target_directory="${1:-target/ci/wasm-realtime-local}"
 for tool in rustc cargo ar wasm-objdump rg find sort mktemp sed; do command -v "$tool" >/dev/null 2>&1 || { printf '%s is required for the Wasm realtime atomic inspection\n' "$tool" >&2; exit 1; }; done
 mkdir -p "$target_directory"
+checker_root="$PWD"
+set +e; cd "$target_directory"; target_status=$?; set -e
+[[ "$target_status" == 0 ]] || { printf 'inspection target resolution failed (status %s): %s\n' "$target_status" "$target_directory" >&2; exit 1; }
+target_directory="$PWD"
+set +e; cd "$checker_root"; root_status=$?; set -e
+[[ "$root_status" == 0 ]] || { printf 'checker root restoration failed (status %s): %s\n' "$root_status" "$checker_root" >&2; exit 1; }
 inspection_target="$(mktemp -d "$target_directory/.wasm-inspection.XXXXXX")"
 scratch="$(mktemp -d)"; keep_target=1
 cleanup() { rm -rf -- "$scratch"; if [[ "$keep_target" == 0 ]]; then rm -rf -- "$inspection_target"; else printf 'inspection target retained for diagnostics: %s\n' "$inspection_target" >&2; fi; }
