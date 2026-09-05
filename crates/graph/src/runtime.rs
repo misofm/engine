@@ -3038,7 +3038,113 @@ fn cohort_runs(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::any::Any;
     use lane::kernels::sum2_block;
+
+    struct DecliningPairOwner;
+    fn decline_pair(
+        left: crate::BuiltinProcessor,
+        right: crate::BuiltinProcessor,
+    ) -> Result<crate::BuiltinProcessor, (crate::BuiltinProcessor, crate::BuiltinProcessor)> {
+        Err((left, right))
+    }
+    impl GraphPreparedBuiltinBankProcessor for DecliningPairOwner {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn into_any(self: Box<Self>) -> Box<dyn Any> {
+            self
+        }
+        fn pair_factory(&self) -> Option<crate::BuiltinPairFactory> {
+            Some(decline_pair)
+        }
+        fn process(
+            &mut self,
+            _: &mut [f32],
+            _: &mut [f32],
+            _: u32,
+            _: u64,
+        ) -> Result<(), RenderError> {
+            Ok(())
+        }
+    }
+    struct PlainPairOwner;
+    impl GraphPreparedBuiltinBankProcessor for PlainPairOwner {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn into_any(self: Box<Self>) -> Box<dyn Any> {
+            self
+        }
+        fn process(
+            &mut self,
+            _: &mut [f32],
+            _: &mut [f32],
+            _: u32,
+            _: u64,
+        ) -> Result<(), RenderError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_declined_first_pair_retains_the_first_slots_scratch() {
+        let track = crate::StableGraphId::parse("decline").expect("id");
+        let fader = GraphNodeId::TrackStage {
+            track_id: track.clone(),
+            stage: TrackStage::PostFader,
+        };
+        let matrix = GraphNodeId::TrackStage {
+            track_id: track,
+            stage: TrackStage::PostMatrix,
+        };
+        let spec = GraphSpec {
+            nodes: vec![
+                crate::GraphNode {
+                    id: fader.clone(),
+                    latency: effect_contract::LatencySamples(0),
+                    tail: effect_contract::TailSamples::Finite(0),
+                },
+                crate::GraphNode {
+                    id: matrix.clone(),
+                    latency: effect_contract::LatencySamples(0),
+                    tail: effect_contract::TailSamples::Finite(0),
+                },
+            ],
+            ports: Vec::new(),
+            edges: Vec::new(),
+        };
+        let bank = |member, processor: Box<dyn GraphPreparedBuiltinBankProcessor>| {
+            GraphPreparedBuiltinBank {
+                backend: lane::Backend::Simd4,
+                members: vec![member].into_boxed_slice(),
+                processor,
+                scratch: AoSoaScratch::new(effect_contract::BankWidth::Four, 8).expect("scratch"),
+            }
+        };
+        let mut parts = RuntimeParts::new(
+            &spec,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            vec![
+                bank(fader, Box::new(DecliningPairOwner)),
+                bank(matrix, Box::new(PlainPairOwner)),
+            ],
+            Vec::new(),
+            Vec::new(),
+            Default::default(),
+            Vec::new(),
+            8,
+        );
+        let _chain = parts.chain_for(&[Membership::Builtin(0), Membership::Builtin(1)], 1);
+        assert!(
+            parts.builtin_banks.iter().all(Option::is_none),
+            "both original owners moved once"
+        );
+    }
 
     /// The node's cached witness and the line's own answer are the same fact (#210 phase 2).
     ///

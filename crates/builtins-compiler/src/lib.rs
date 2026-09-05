@@ -669,6 +669,12 @@ static FADER_MATRIX_PROCESS_CALLS: core::sync::atomic::AtomicUsize =
 #[cfg(test)]
 static FADER_MATRIX_FACTORY_CALLS: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+static FADER_MATRIX_FUSED_CALLS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+static FADER_MATRIX_FALLBACK_CALLS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 
 fn drain_fader_controls(
     bank: &mut BuiltinFaderBank,
@@ -775,8 +781,13 @@ impl GraphPreparedBuiltinBankProcessor for FaderMatrixBankProcessor {
             .bank
             .try_process_settled_with_matrix(&mut matrix.bank, left, right, frames)
         {
+            #[cfg(test)]
+            FADER_MATRIX_FALLBACK_CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             fader.bank.process(left, right, frames);
             matrix.bank.process(left, right, frames);
+        } else {
+            #[cfg(test)]
+            FADER_MATRIX_FUSED_CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         }
         fader.process_calls = fader.process_calls.saturating_add(1);
         fader.frames_processed = fader.frames_processed.saturating_add(u64::from(frames));
@@ -801,6 +812,65 @@ impl GraphPreparedBuiltinBankProcessor for FaderMatrixBankProcessor {
     }
     fn seam_side(&self) -> SeamSide {
         SeamSide::SeamSide
+    }
+}
+
+/// Test-support owner for allocation auditing of the actual serialized composite.
+#[cfg(feature = "test-support")]
+pub struct TestOnlyFaderMatrixPair {
+    processor: FaderMatrixBankProcessor,
+}
+
+#[cfg(feature = "test-support")]
+impl TestOnlyFaderMatrixPair {
+    #[must_use]
+    pub fn new_ramping() -> Self {
+        let width = BankWidth::Four;
+        let parameters = vec![BuiltinParameters::default(); 4];
+        let mut fader = FaderBankProcessor {
+            bank: BuiltinFaderBank::new(Backend::Simd4, width, parameters).expect("fixture"),
+            controls: (0..4).map(|_| None).collect(),
+            process_calls: 0,
+            frames_processed: 0,
+            control_delivery: BuiltinControlDelivery::BetweenRenderCalls,
+        };
+        fader
+            .bank
+            .set_fader_db(0, BuiltinLaneSelector::Both, -6.0, 17)
+            .expect("fixture");
+        let mut matrix = MatrixBankProcessor {
+            bank: BuiltinMatrixBank::new(Backend::Simd4, width, vec![(Matrix2x2::IDENTITY, 0); 4])
+                .expect("fixture"),
+            controls: (0..4).map(|_| None).collect(),
+            process_calls: 0,
+            frames_processed: 0,
+            control_delivery: BuiltinControlDelivery::BetweenRenderCalls,
+        };
+        matrix
+            .bank
+            .set_target_smoothed(
+                0,
+                Matrix2x2 {
+                    ll: 0.5,
+                    lr: 0.25,
+                    rl: -0.25,
+                    rr: 0.75,
+                },
+                11,
+            )
+            .expect("fixture");
+        Self {
+            processor: FaderMatrixBankProcessor {
+                fader: Box::new(fader),
+                matrix: Box::new(matrix),
+            },
+        }
+    }
+
+    pub fn process(&mut self, left: &mut [f32], right: &mut [f32], frames: u32) {
+        self.processor
+            .process(left, right, frames, 0)
+            .expect("fixture render");
     }
 }
 
@@ -4396,7 +4466,7 @@ mod tests {
         (graph, levels)
     }
 
-    /// Renders `HARNESS_BLOCKS` blocks and returns the post-input-builtins output bits per track.
+    /// Renders `HARNESS_BLOCKS` blocks and returns post-matrix output bits per track.
     fn render_post_input_bits_with_delivery(
         n: usize,
         dispatch: Backend,
@@ -4429,7 +4499,7 @@ mod tests {
                 .push(GraphNodeObserverBinding::new(
                     GraphNodeId::TrackStage {
                         track_id: StableGraphId::parse(&track_name(index)).expect("harness ID"),
-                        stage: TrackStage::PostInputBuiltins,
+                        stage: TrackStage::PostMatrix,
                     },
                     0x8600 + index as u64,
                     Box::new(Capture(Arc::clone(capture))),
@@ -4523,6 +4593,412 @@ mod tests {
                 "every full or partial live pair must execute once per rendered block"
             );
         }
+    }
+
+    struct PairFixture {
+        paired: Box<FaderMatrixBankProcessor>,
+        separate_fader: FaderBankProcessor,
+        separate_matrix: MatrixBankProcessor,
+        paired_fader_tx: Producer<TrackFaderRecord>,
+        paired_matrix_tx: Producer<TrackControlRecord>,
+        separate_fader_tx: Producer<TrackFaderRecord>,
+        separate_matrix_tx: Producer<TrackControlRecord>,
+        lanes: usize,
+    }
+
+    fn pair_fixture(backend: Backend, members: usize) -> PairFixture {
+        let width = BankWidth::for_backend(backend).expect("vector backend");
+        let params = (0..members)
+            .map(|lane| BuiltinParameters {
+                left: builtins::ChannelParameters {
+                    fader_db: -1.0 - lane as f32,
+                    muted: lane == 1,
+                    ..Default::default()
+                },
+                right: builtins::ChannelParameters {
+                    fader_db: -3.0 + lane as f32 * 0.25,
+                    ..Default::default()
+                },
+                matrix: Matrix2x2 {
+                    ll: 0.75,
+                    lr: -0.125,
+                    rl: 0.25,
+                    rr: 0.5,
+                },
+                smoothing_samples: 0,
+            })
+            .collect::<Vec<_>>();
+        let make = || {
+            let (fader_tx, fader_rx) =
+                bounded_spsc(NonZeroUsize::new(16).expect("queue"), QueueGeneration(0))
+                    .expect("fader queue");
+            let (matrix_tx, matrix_rx) =
+                bounded_spsc(NonZeroUsize::new(16).expect("queue"), QueueGeneration(0))
+                    .expect("matrix queue");
+            (
+                FaderBankProcessor {
+                    bank: BuiltinFaderBank::new(backend, width, params.clone()).expect("fader"),
+                    controls: core::iter::once(Some(fader_rx))
+                        .chain((1..width.lanes()).map(|_| None))
+                        .collect(),
+                    process_calls: 0,
+                    frames_processed: 0,
+                    control_delivery: BuiltinControlDelivery::BetweenRenderCalls,
+                },
+                MatrixBankProcessor {
+                    bank: BuiltinMatrixBank::new(
+                        backend,
+                        width,
+                        params.iter().map(|p| (p.matrix, 0)).collect(),
+                    )
+                    .expect("matrix"),
+                    controls: core::iter::once(Some(matrix_rx))
+                        .chain((1..width.lanes()).map(|_| None))
+                        .collect(),
+                    process_calls: 0,
+                    frames_processed: 0,
+                    control_delivery: BuiltinControlDelivery::BetweenRenderCalls,
+                },
+                fader_tx,
+                matrix_tx,
+            )
+        };
+        let (fader, matrix, paired_fader_tx, paired_matrix_tx) = make();
+        let paired = match make_fader_matrix(Box::new(fader), Box::new(matrix)) {
+            Ok(pair) => pair,
+            Err(_) => panic!("eligible pair"),
+        }
+        .into_any()
+        .downcast::<FaderMatrixBankProcessor>()
+        .expect("composite");
+        let (separate_fader, separate_matrix, separate_fader_tx, separate_matrix_tx) = make();
+        PairFixture {
+            paired,
+            separate_fader,
+            separate_matrix,
+            paired_fader_tx,
+            paired_matrix_tx,
+            separate_fader_tx,
+            separate_matrix_tx,
+            lanes: width.lanes() as usize,
+        }
+    }
+
+    fn assert_pair_call(fixture: &mut PairFixture, frames: u32, seed: u32) {
+        let samples = fixture.lanes * frames as usize;
+        let input_l = (0..samples)
+            .map(|i| f32::from_bits(0x3e80_0000 + ((i as u32 + seed) & 0x7fff)))
+            .collect::<Vec<_>>();
+        let input_r = (0..samples)
+            .map(|i| -f32::from_bits(0x3e00_0000 + ((i as u32 + seed) & 0x7fff)))
+            .collect::<Vec<_>>();
+        let (mut paired_l, mut paired_r) = (input_l.clone(), input_r.clone());
+        let (mut separate_l, mut separate_r) = (input_l, input_r);
+        fixture
+            .paired
+            .process(&mut paired_l, &mut paired_r, frames, 0)
+            .expect("paired process");
+        fixture
+            .separate_fader
+            .process(&mut separate_l, &mut separate_r, frames, 0)
+            .expect("separate fader");
+        fixture
+            .separate_matrix
+            .process(&mut separate_l, &mut separate_r, frames, 0)
+            .expect("separate matrix");
+        assert_eq!(paired_l, separate_l, "post-matrix left PCM");
+        assert_eq!(paired_r, separate_r, "post-matrix right PCM");
+        for lane in 0..fixture.paired.fader.bank.active_lanes() {
+            assert_eq!(
+                builtins::test_support::fader_bank_lane_words(&fixture.paired.fader.bank, lane),
+                builtins::test_support::fader_bank_lane_words(&fixture.separate_fader.bank, lane),
+                "fader state lane {lane}"
+            );
+            assert_eq!(
+                builtins::test_support::matrix_bank_lane_words(&fixture.paired.matrix.bank, lane),
+                builtins::test_support::matrix_bank_lane_words(&fixture.separate_matrix.bank, lane),
+                "matrix state lane {lane}"
+            );
+        }
+        assert_eq!(
+            fixture.paired.qualification_counters(),
+            [
+                fixture.separate_fader.process_calls + fixture.separate_matrix.process_calls,
+                fixture.separate_fader.frames_processed + fixture.separate_matrix.frames_processed,
+            ]
+        );
+    }
+
+    fn push_both<T: Copy + Send + core::fmt::Debug + 'static>(
+        left: &mut Producer<T>,
+        right: &mut Producer<T>,
+        record: T,
+    ) {
+        left.try_push(record).expect("paired queue");
+        right.try_push(record).expect("separate queue");
+    }
+
+    #[test]
+    fn composite_live_sequence_matches_original_owners_and_discriminates_both_branches() {
+        for (backend, members) in [(Backend::Simd4, 4), (Backend::Simd8, 5)] {
+            let mut fixture = pair_fixture(backend, members);
+            FADER_MATRIX_FUSED_CALLS.store(0, Ordering::Relaxed);
+            FADER_MATRIX_FALLBACK_CALLS.store(0, Ordering::Relaxed);
+            assert_pair_call(&mut fixture, 3, 1);
+
+            for db in [-6.0, -12.0] {
+                push_both(
+                    &mut fixture.paired_fader_tx,
+                    &mut fixture.separate_fader_tx,
+                    TrackFaderRecord::FaderDb {
+                        lanes: BuiltinLaneSelector::Left,
+                        db,
+                        smoothing_samples: 0,
+                    },
+                );
+            }
+            push_both(
+                &mut fixture.paired_matrix_tx,
+                &mut fixture.separate_matrix_tx,
+                TrackControlRecord {
+                    matrix: Matrix2x2 {
+                        ll: 0.5,
+                        lr: 0.25,
+                        rl: -0.5,
+                        rr: 0.75,
+                    },
+                    smoothing_samples: 0,
+                },
+            );
+            assert_pair_call(&mut fixture, 2, 2);
+
+            push_both(
+                &mut fixture.paired_fader_tx,
+                &mut fixture.separate_fader_tx,
+                TrackFaderRecord::Mute {
+                    lanes: BuiltinLaneSelector::Right,
+                    muted: true,
+                    smoothing_samples: 4,
+                },
+            );
+            push_both(
+                &mut fixture.paired_matrix_tx,
+                &mut fixture.separate_matrix_tx,
+                TrackControlRecord {
+                    matrix: Matrix2x2::IDENTITY,
+                    smoothing_samples: 4,
+                },
+            );
+            // Drain both queues without arithmetic, then prove the narrow bridge's false result
+            // itself mutates neither DSP state nor PCM before the original whole-call sequence.
+            drain_fader_controls(
+                &mut fixture.paired.fader.bank,
+                &mut fixture.paired.fader.controls,
+            )
+            .unwrap();
+            drain_matrix_controls(
+                &mut fixture.paired.matrix.bank,
+                &mut fixture.paired.matrix.controls,
+            )
+            .unwrap();
+            let before_fader =
+                builtins::test_support::fader_bank_lane_words(&fixture.paired.fader.bank, 0);
+            let before_matrix =
+                builtins::test_support::matrix_bank_lane_words(&fixture.paired.matrix.bank, 0);
+            let mut probe_l = [0.25_f32; 8];
+            let mut probe_r = [-0.5_f32; 8];
+            let before_pcm = (probe_l, probe_r);
+            assert!(!fixture.paired.fader.bank.try_process_settled_with_matrix(
+                &mut fixture.paired.matrix.bank,
+                &mut probe_l,
+                &mut probe_r,
+                2,
+            ));
+            assert_eq!((probe_l, probe_r), before_pcm);
+            assert_eq!(
+                builtins::test_support::fader_bank_lane_words(&fixture.paired.fader.bank, 0),
+                before_fader
+            );
+            assert_eq!(
+                builtins::test_support::matrix_bank_lane_words(&fixture.paired.matrix.bank, 0),
+                before_matrix
+            );
+            assert_pair_call(&mut fixture, 2, 3);
+            push_both(
+                &mut fixture.paired_fader_tx,
+                &mut fixture.separate_fader_tx,
+                TrackFaderRecord::FaderDb {
+                    lanes: BuiltinLaneSelector::Right,
+                    db: -9.0,
+                    smoothing_samples: 2,
+                },
+            );
+            assert_pair_call(&mut fixture, 2, 4);
+            assert_pair_call(&mut fixture, 1, 5);
+
+            push_both(
+                &mut fixture.paired_fader_tx,
+                &mut fixture.separate_fader_tx,
+                TrackFaderRecord::Mute {
+                    lanes: BuiltinLaneSelector::Right,
+                    muted: false,
+                    smoothing_samples: 0,
+                },
+            );
+            assert_pair_call(&mut fixture, 1, 6);
+            fixture
+                .paired
+                .fader
+                .bank
+                .set_mute(0, BuiltinLaneSelector::Both, true, 8)
+                .unwrap();
+            fixture
+                .separate_fader
+                .bank
+                .set_mute(0, BuiltinLaneSelector::Both, true, 8)
+                .unwrap();
+            fixture
+                .paired
+                .matrix
+                .bank
+                .set_target_smoothed(0, Matrix2x2::IDENTITY, 8)
+                .unwrap();
+            fixture
+                .separate_matrix
+                .bank
+                .set_target_smoothed(0, Matrix2x2::IDENTITY, 8)
+                .unwrap();
+            fixture.paired.fader.bank.reset();
+            fixture.paired.matrix.bank.reset();
+            fixture.separate_fader.bank.reset();
+            fixture.separate_matrix.bank.reset();
+            assert_pair_call(&mut fixture, 1, 7);
+            assert!(FADER_MATRIX_FUSED_CALLS.load(Ordering::Relaxed) >= 4);
+            assert!(FADER_MATRIX_FALLBACK_CALLS.load(Ordering::Relaxed) >= 2);
+            assert_eq!(fixture.paired.lane_symmetry(0), SEAM_SIDE_WITNESS);
+            assert_eq!(fixture.paired.seam_side(), SeamSide::SeamSide);
+            assert!(!fixture.paired.supports_mono_collapse());
+        }
+    }
+
+    #[test]
+    fn composite_raw_record_errors_preserve_the_frozen_arithmetic_order() {
+        let mut fader_error = pair_fixture(Backend::Simd4, 4);
+        fader_error
+            .paired_fader_tx
+            .try_push(TrackFaderRecord::FaderDb {
+                lanes: BuiltinLaneSelector::Both,
+                db: f32::NAN,
+                smoothing_samples: 0,
+            })
+            .unwrap();
+        let mut left = [0.25; 8];
+        let mut right = [-0.5; 8];
+        let before = (left, right);
+        assert!(
+            fader_error
+                .paired
+                .process(&mut left, &mut right, 2, 0)
+                .is_err()
+        );
+        assert_eq!((left, right), before);
+        assert_eq!(fader_error.paired.qualification_counters(), [0, 0]);
+
+        let mut matrix_error = pair_fixture(Backend::Simd4, 4);
+        matrix_error
+            .paired_fader_tx
+            .try_push(TrackFaderRecord::FaderDb {
+                lanes: BuiltinLaneSelector::Both,
+                db: -6.0,
+                smoothing_samples: 0,
+            })
+            .unwrap();
+        matrix_error
+            .paired_matrix_tx
+            .try_push(TrackControlRecord {
+                matrix: Matrix2x2 {
+                    ll: f32::NAN,
+                    ..Matrix2x2::IDENTITY
+                },
+                smoothing_samples: 0,
+            })
+            .unwrap();
+        let mut left = [0.25; 8];
+        let mut right = [-0.5; 8];
+        assert!(
+            matrix_error
+                .paired
+                .process(&mut left, &mut right, 2, 0)
+                .is_err()
+        );
+        assert_ne!(left, [0.25; 8], "fader arithmetic completed");
+        assert_eq!(matrix_error.paired.fader.process_calls, 1);
+        assert_eq!(matrix_error.paired.matrix.process_calls, 0);
+        assert_eq!(matrix_error.paired.qualification_counters(), [1, 2]);
+    }
+
+    #[test]
+    fn pair_factory_declines_wrong_order_policy_and_shape_with_original_owners() {
+        struct WrongOwner(u64);
+        impl GraphPreparedBuiltinBankProcessor for WrongOwner {
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+            fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> {
+                self
+            }
+            fn process(
+                &mut self,
+                _: &mut [f32],
+                _: &mut [f32],
+                _: u32,
+                _: u64,
+            ) -> Result<(), RenderError> {
+                Ok(())
+            }
+        }
+        let wrong = match make_fader_matrix(Box::new(WrongOwner(7)), Box::new(WrongOwner(9))) {
+            Err(owners) => owners,
+            Ok(_) => panic!("wrong concrete owners"),
+        };
+        assert_eq!(wrong.0.as_any().downcast_ref::<WrongOwner>().unwrap().0, 7);
+        assert_eq!(wrong.1.as_any().downcast_ref::<WrongOwner>().unwrap().0, 9);
+
+        let fixture = pair_fixture(Backend::Simd4, 4);
+        let reversed = match make_fader_matrix(
+            Box::new(fixture.separate_matrix),
+            Box::new(fixture.separate_fader),
+        ) {
+            Err(owners) => owners,
+            Ok(_) => panic!("owner order is typed"),
+        };
+        assert!(reversed.0.as_any().is::<MatrixBankProcessor>());
+        assert!(reversed.1.as_any().is::<FaderBankProcessor>());
+
+        let fixture = pair_fixture(Backend::Simd4, 4);
+        let mut concurrent_matrix = fixture.separate_matrix;
+        concurrent_matrix.control_delivery = BuiltinControlDelivery::Concurrent;
+        let policy = match make_fader_matrix(
+            Box::new(fixture.separate_fader),
+            Box::new(concurrent_matrix),
+        ) {
+            Err(owners) => owners,
+            Ok(_) => panic!("both owners must declare serialized delivery"),
+        };
+        assert!(policy.0.as_any().is::<FaderBankProcessor>());
+        assert!(policy.1.as_any().is::<MatrixBankProcessor>());
+
+        let four = pair_fixture(Backend::Simd4, 4);
+        let eight = pair_fixture(Backend::Simd8, 8);
+        let shape = match make_fader_matrix(
+            Box::new(four.separate_fader),
+            Box::new(eight.separate_matrix),
+        ) {
+            Err(owners) => owners,
+            Ok(_) => panic!("width/backend mismatch"),
+        };
+        assert!(shape.0.as_any().is::<FaderBankProcessor>());
+        assert!(shape.1.as_any().is::<MatrixBankProcessor>());
     }
 
     #[test]

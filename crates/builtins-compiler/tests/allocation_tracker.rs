@@ -13,7 +13,7 @@ use std::sync::Mutex;
 
 use builtins::{MeterConfig, MeterTap};
 use builtins_compiler::{
-    BuiltinCompileCaps, MeterRequest, prepare_session_builtins,
+    BuiltinCompileCaps, MeterRequest, TestOnlyFaderMatrixPair, prepare_session_builtins,
     test_only_phase_two_allocation_snapshot, test_only_record_phase_two_allocation,
     test_only_reset_phase_two_allocation_tracker,
 };
@@ -42,6 +42,8 @@ thread_local! {
     /// `Thread` handle on first use per thread and clones an `Arc` on every subsequent call,
     /// which would itself be a reentrant allocation from inside a `GlobalAlloc::alloc` hook.
     static ARMED: Cell<bool> = const { Cell::new(false) };
+    static LIVE_ALLOCS: Cell<u64> = const { Cell::new(0) };
+    static LIVE_FREES: Cell<u64> = const { Cell::new(0) };
 }
 
 /// Guards one armed span on the current thread; clears the flag on drop (including on panic), so
@@ -75,6 +77,7 @@ fn armed<T>(body: impl FnOnce() -> T) -> T {
 unsafe impl GlobalAlloc for TrackingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         if ARMED.with(Cell::get) {
+            LIVE_ALLOCS.set(LIVE_ALLOCS.get() + 1);
             test_only_record_phase_two_allocation(layout);
         }
         // SAFETY: forwards the allocator-provided layout unchanged.
@@ -83,6 +86,7 @@ unsafe impl GlobalAlloc for TrackingAllocator {
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         if ARMED.with(Cell::get) {
+            LIVE_ALLOCS.set(LIVE_ALLOCS.get() + 1);
             test_only_record_phase_two_allocation(layout);
         }
         // SAFETY: forwards the allocator-provided layout unchanged.
@@ -90,6 +94,9 @@ unsafe impl GlobalAlloc for TrackingAllocator {
     }
 
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        if ARMED.with(Cell::get) {
+            LIVE_FREES.set(LIVE_FREES.get() + 1);
+        }
         // SAFETY: forwards the original pointer and layout unchanged.
         unsafe { System.dealloc(pointer, layout) }
     }
@@ -101,6 +108,36 @@ unsafe impl GlobalAlloc for TrackingAllocator {
         // SAFETY: forwards the original allocation arguments unchanged.
         unsafe { System.realloc(pointer, layout, size) }
     }
+}
+
+#[test]
+fn actual_serialized_composite_render_allocates_and_frees_nothing() {
+    let _session_guard = SESSION
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut pair = TestOnlyFaderMatrixPair::new_ramping();
+    let mut left = [0.25_f32; 4 * 8];
+    let mut right = [-0.5_f32; 4 * 8];
+
+    LIVE_ALLOCS.set(0);
+    LIVE_FREES.set(0);
+    armed(|| {
+        let probe = Vec::<u8>::with_capacity(core::hint::black_box(64));
+        drop(probe);
+    });
+    assert!(
+        LIVE_ALLOCS.get() > 0 && LIVE_FREES.get() > 0,
+        "installed allocator liveness"
+    );
+
+    LIVE_ALLOCS.set(0);
+    LIVE_FREES.set(0);
+    armed(|| {
+        for _ in 0..32 {
+            pair.process(&mut left, &mut right, 8);
+        }
+    });
+    assert_eq!((LIVE_ALLOCS.get(), LIVE_FREES.get()), (0, 0));
 }
 
 fn session(track_count: u32) -> session::CompiledSession {
