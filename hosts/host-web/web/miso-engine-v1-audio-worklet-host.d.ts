@@ -323,7 +323,6 @@ export interface MisoCommand {
 }
 
 export interface MisoCommandRequest {
-  requestId: number;
   commands: MisoCommand[];
 }
 
@@ -441,7 +440,6 @@ export interface MisoObservationSubscription {
 
 /// One observation batch. Like a command batch, it is one transaction (issues 143, 151).
 export interface MisoObservationRequest {
-  requestId: number;
   /// At least one and at most `256` subscriptions, arming and disarming freely mixed.
   subscriptions: MisoObservationSubscription[];
 }
@@ -595,7 +593,6 @@ export interface MisoError {
 }
 
 export interface MisoSourceRequest {
-  requestId: number;
   sourceId: string;
   generation: bigint;
   startFrame: bigint;
@@ -606,7 +603,6 @@ export interface MisoSourceRequest {
 }
 
 export interface MisoSeekRequest {
-  requestId: number;
   sourceId: string;
   generation: bigint;
   sourceFrame: bigint;
@@ -636,11 +632,11 @@ export interface MisoAudioWorkletHost {
   sessionMap(): Promise<MisoSessionMap>;
   /// Take or release the decimated meter lease (issue 137 D2).
   meters(
-    request: { requestId: number; enabled: boolean; onFrame: ((frame: MisoMeterFrame) => void) | null },
+    request: { enabled: boolean; onFrame: ((frame: MisoMeterFrame) => void) | null },
   ): Promise<MisoAck>;
   /// Take or release the render-telemetry lease (issue 137 D3).
   telemetry(
-    request: { requestId: number; enabled: boolean; onFrame: ((frame: MisoTelemetryFrame) => void) | null },
+    request: { enabled: boolean; onFrame: ((frame: MisoTelemetryFrame) => void) | null },
   ): Promise<MisoAck>;
   dispose(): Promise<void>;
 }
