@@ -416,3 +416,55 @@ This is a recovery checkpoint within the same final attempt, not a completed att
 Reported focused executions with the existing `/tmp/sol430-target`: builtins-compiler library 21/21 before the latest no-mutation assertions, then the affected composite_live_sequence test 1/1 after those assertions; actual_serialized_composite_render_allocates_and_frees_nothing 1/1 with test-support; graph runtime a_declined_first_pair_retains_the_first_slots_scratch 1/1. Formatting applied and root diff hygiene passed. These reported results do not substitute for the final retained command logs or cover unfinished gates.
 
 Observation/send/alias and WebEngine mechanism linkage, final focused debug/release/policies and complete evidence remain in this same attempt. Root commits and pushes this exact tranche before authorizing continuation. No intermediate adversarial verdict or fourth attempt is created; final source review follows the completed coherent pass.
+
+## Final Astra verdict and hard stop
+
+# Astra #430 final Sol attempt 3 — FAIL / hard stop
+
+Exact clean checkpoint: `05896319fb6892b5af71758cf67bb8ebc26a5884`, `/home/bl/misofm/engine-430-live`. Reviewed against the complete binding #430 scope and `/tmp/astra-430-attempt2-review.md`, including the coherent continuation after recovery checkpoint52dcf873.
+
+FAIL. The final pass materially improves the product proof, but does not satisfy the explicitly retained live observation, dispatch and realtime integration gates. Stop this implementation series. Preserve the source/evidence; do not authorize immutable qualification, a fourth repair pass or weaker closure claims. Root may create one bounded, numbered completion scope before further implementation, retaining all #430 delivery obligations in the parent.
+
+## Accepted progress to retain
+
+The graph comparison now observes PostMatrix bits, fixing the upstream-only PCM flaw. The actual graph factory-selection mutation again fails the same positive assertion at 0 versus1, and restored source passes. The private actual composite owns real paired/separate queues and executes an asymmetric gain/mute/crossfeed sequence; state words and logical counter sums are compared after calls. True/fallback counters now increment at the actual arithmetic branch. Direct false-bridge no-mutation and invalid fader/matrix error-order cases are present. The original arithmetic bridge, shared drain implementation, seam witness, conservative resource charge and independent CAPI mirrors remain accepted source.
+
+Wrong concrete/order/policy/width cases now execute the factory, and a graph fixture actually builds a chain starting at PostFader with a declining factory, so the prior scratch-initialization crash path is exercised at construction. A real MeterRequest produces actual MeterConsumer windows while a separate tail pair is offered/executed. The installed allocation tracker now executes FaderMatrixBankProcessor rather than IdentityBank, with positive allocation/free liveness and a thread-local armed span over32 ramp-to-settled calls. These are useful proof increments; they are not discarded by this verdict.
+
+The supplied debug/release/final logs record executed product tests, including22 compiler tests, the new actual-composite allocation case, first-slot decline, WebEngine acknowledgement and resource fixtures. Filtered zero-test blocks in multi-target Cargo output are not counted as additional evidence. The mutation and corrected policy-name failure history are candidly retained.
+
+## Remaining frozen contract gaps
+
+### 1. Tie exact per-call arithmetic/state proof to live dispatch
+
+The actual bound-graph test still asserts FADER_MATRIX_FACTORY_CALLS and FADER_MATRIX_PROCESS_CALLS, not FADER_MATRIX_FUSED_CALLS. The latter process counter increments before settlement. The private direct-owner sequence asserts only aggregate lower bounds (`fused >=4`, `fallback >=2`) at the end. Consequently the tests do not assert the required branch on each eligible/ramping/next-settled bound call. The graph control earns factory reachability; it does not on its own prove that this live compiled route uses the combined traversal.
+
+Connect the existing live fixture to exact true/fallback deltas at the named calls, preserving logical counters as two stages. In the private sequence, the initial positive-ramp records are manually drained before the composite call; keep that direct false-bridge probe, but also exercise queue-driven post-drain settlement through process itself. The frozen ramp-ending-inside-call/next-call condition needs an explicit branch assertion rather than an aggregate count. No new public diagnostic API or counter framework is needed.
+
+`assert_pair_call` compares Vec<f32> values directly. That is numeric equality, not the frozen bit equality: opposite signed zeros compare equal. Compare PCM words, as the graph capture already does, without adding a new floating-point policy/corpus. The real WebEngine acknowledgement test remains valuable but unchanged from attempt2; merely saying its one-track shape resembles a compiler fixture is not the requested observable connection of its acknowledged batch to paired/combined dispatch. Add the smallest existing-fixture mechanism linkage, not a host report API.
+
+### 2. Complete the named observation/seam boundaries on serialized plans
+
+`a_post_fader_meter_declines_its_cohort_while_the_tail_pair_still_fuses` checks bank/entry counts and nonempty captures. The helper drains meter windows with `while ...is_ok()` and discards their contents; it never returns them. The test does not render a corresponding forced-separate reference or compare observed PCM/windows against it. Thus it cannot establish the specifically frozen nonempty meter-value and PCM identity requirement. Preserve its useful observed-cohort/eligible-tail structure and compare actual data plus true fusion on the other cohort.
+
+The final record candidly leaves nonunity post-fader send/crossfeed and aliased-observer checks to inherited independent graph tests. Those test unchanged dataflow machinery, but do not instantiate this newly paired serialized owner at its acceptance/decline boundary. This was explicitly required in both the frozen five gates and attempt2 correction; it cannot be substituted away at final review. Reuse those fixtures with serialized real owners, retaining separate reference PCM, the nonunity send/crossfeed case, alias refusal and allowed downstream observation.
+
+Similarly `SEAM_SIDE_WITNESS`/SeamSide/no-mono support assertions and asymmetric direct-owner output do not execute upstream input recovery, collapse duplication or live mono disengagement around a selected pair. Existing host-core tests still use default Concurrent preparation. Apply the existing representative nonfinite-recovery and mono/asymmetric-right cases to the selected serialized graph path, without broadening the arithmetic contract.
+
+Factory tests currently verify types/order of returned boxes; add the already-requested unchanged state/queue-owner witness where a decline could consume or reconstruct an owner. Preserve the first-slot scratch construction proof; do not mistake Option::is_none after take for proof of later processor execution. Reuse the original graph hole/member/order controls at the relevant preparation boundary rather than adding a graph optimizer.
+
+### 3. Complete the actual live render allocation scope
+
+The new allocation proof reaches real composite arithmetic, but `TestOnlyFaderMatrixPair::new_ramping` sets every control entry to None. It is a direct-owner call, not the selected live queued graph or observation-fallback path. It proves ramp/settled arithmetic itself does not allocate/free. The frozen gate also requires repeated eligible/ramp/observation-fallback live renders; that last integration leg remains absent, and current allocating Mutex/Vec capture observers must stay outside any armed span.
+
+The new LIVE_ALLOCS/LIVE_FREES totals are incremented by alloc/alloc_zeroed/dealloc, but realloc only updates the older preparation-layout tracker, which this test never asserts. The literal zero-allocation claim must cover a realloc call as well. Reuse the installed tracker with this narrow coverage completion and an actual nonallocating live fixture; do not add another allocator or framework.
+
+## Required rescope boundary
+
+These are remaining claims from the original five finite gates, not new product requirements or permission to redesign source. The exact current product is buildable, with meaningful accepted evidence, but cannot be closed by describing inherited Concurrent/IdentityBank tests as its missing proof.
+
+Recommend ONE explicitly numbered successor for **serialized live-pair boundary and mechanism proof completion**, based on this preserved source: existing compiler/host/graph fixtures and existing allocation tracker only; private test support only where needed. Freeze the finite three groups above before Luna starts that new bounded scope. Parent #430 retains actual live W4/W8 product acceptance, resource proof, full workspace/targets/artifact/browser delivery and actual PR/required CI, plus the existing separately owned #443/#444/#431 and broad RT-4 retention. Do not launch qualification as a substitute for these discriminators or silently close #430 by transferring away correctness obligations. If the successor cannot fit the existing small fixtures, split the remaining delivery shape explicitly before coding rather than disguising a fourth pass.
+
+Review actions were read-only source/Git/log inspection. No tests/builds/timing, source edits or Git/GitHub mutations were performed. Only this /tmp verdict was written.
+
+Root stops this implementation series after the third FAIL. All coherent checkpoints and accepted source/evidence remain preserved. No fourth Sol revision, qualification run, PR or closure is authorized for this stopped series. Astra will freeze one bounded existing-fixture completion successor for the three remaining original-contract groups; root must number and synchronize it before new implementation. #430 retains its full product and delivery acceptance through that successor, with #443/#444/#431 and broad RT-4/#349 still open.
