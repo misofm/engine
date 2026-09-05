@@ -1,0 +1,13 @@
+bypass conditional_source=False status=1
+native PCM runner V1 check failure: Rust product bypass source scan failed (rg status 7): ASTRA_VALID_PAYLOAD_ERROR
+
+bypass conditional_source=True status=1
+native PCM runner V1 check failure: Rust product bypass source scan failed (rg status 7): ASTRA_VALID_PAYLOAD_ERROR
+
+count conditional_source=False status=1
+native PCM runner portability check failure: O_NOFOLLOW count scan failed (rg status 7): ASTRA_VALID_PAYLOAD_ERROR
+
+count conditional_source=True status=1
+native PCM runner portability check failure: O_NOFOLLOW count scan failed (rg status 7): ASTRA_VALID_PAYLOAD_ERROR
+
+PASS all four unchanged-source checks

@@ -1,0 +1,8 @@
+bash -n scripts/check-native-pcm-runner.sh scripts/test-native-pcm-runner-v1-policy.sh scripts/test-native-pcm-runner-portability-v1-policy.sh
+scripts/check-native-pcm-runner.sh . v1
+scripts/check-native-pcm-runner.sh . portability
+scripts/check-native-pcm-runner.sh . all
+scripts/check-native-pcm-runner.sh . invalid
+scripts/test-native-pcm-runner-v1-policy.sh
+scripts/test-native-pcm-runner-portability-v1-policy.sh
+git diff --check
