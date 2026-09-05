@@ -109,3 +109,10 @@ Concrete CI gap to resolve within the existing roster: required qualification.ym
 After #454 delivery, root must compare these five sources and helper/CI seam again and freeze/synchronize the actual base before Luna1. Full workspace/actual-head Astra PR review/requiredCI remain later. Parent403/306/349 and sibling scopes remain open. No builds, tests, timing, repository/spec edits or Git/GitHub mutations were performed; only this /tmp review was written.
 
 Root adopts this complete finite inventory and two-call CI clarification. Planning base is delivered `6589c5185411d51bce7d0a0aafab4df63a5e47db`. Implementation remains queued until #454 delivery and its actual merged-base comparison.
+
+
+## Delivered base and Luna attempt 1 assignment
+
+#454 delivered through PR #467 as `aba905c0a5ae0bc747a65d1052ba76811fcee3c5`, with Astra PASS, required CI success and verified remote closure. Root integrated that main at `25889310dc5194c593766e2e5f5926e773966050`; the entire tree differs from delivered main only in this spec. The five assigned source/suite paths, actual scripts/lib/gate.sh and qualification workflow are unchanged from reviewed6589c518. All numbered specs have matching remote issues at this boundary.
+
+Root assigns Luna attempt 1 against the complete adopted finite inventory, sourced conditional behavior, two actual SAME-assertion controls and existing-suite CI wiring. Exactly the two checkers and three suites plus this evidence are allowed; no helper/workflow/runner/preflight/generator/fixture-byte changes or real timing. Verify the existing lifecycle suite’s fake executable resolution before invoking it. Pause coherent focused-green for root exact-path checkpoint and one Astra verdict; Sol fallback only after FAIL.
