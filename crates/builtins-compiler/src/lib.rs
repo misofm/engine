@@ -3909,7 +3909,7 @@ fn meter_diagnostic(request: &MeterRequest, error: MeterConfigError) -> BuiltinD
 
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
-pub use tests::test_only_prepared_pair_graph;
+pub use tests::{test_only_prepared_pair_graph, test_only_prepared_scalar_pair_graph};
 
 #[cfg(any(test, feature = "test-support"))]
 #[cfg_attr(not(test), allow(dead_code))]
@@ -5177,6 +5177,22 @@ mod tests {
         )
     }
 
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn test_only_prepared_scalar_pair_graph(
+        post_fader_observed: bool,
+    ) -> PreparedBuiltinsGraphBound {
+        prepared_pair_graph_fixture(
+            post_fader_observed,
+            false,
+            false,
+            true,
+            None,
+            Backend::Scalar,
+            2,
+        )
+    }
+
     fn prepared_pair_graph_fixture(
         post_fader_observed: bool,
         symmetric_input: bool,
@@ -5408,7 +5424,6 @@ mod tests {
             2,
         );
         let selected = test_only_fader_matrix_witness();
-        assert_eq!((selected.factory_calls, selected.factory_members), (1, 1));
 
         let settled = render_scalar_pair_and_compare(
             &mut paired,
@@ -5418,6 +5433,7 @@ mod tests {
             0,
             (1, 0),
         );
+        assert_eq!((selected.factory_calls, selected.factory_members), (1, 1));
         assert_eq!(
             (
                 settled.fader_records_drained,
@@ -5499,6 +5515,109 @@ mod tests {
             3 * HARNESS_QUANTUM as u64,
             (1, 0),
         );
+
+        for bound in [&mut paired, &mut separate] {
+            bound.track_controls[1]
+                .fader
+                .try_push(TrackFaderRecord::FaderDb {
+                    lanes: BuiltinLaneSelector::Both,
+                    db: -18.0,
+                    smoothing_samples: 96,
+                })
+                .unwrap();
+            bound.track_controls[1]
+                .producer
+                .try_push(TrackControlRecord {
+                    matrix: Matrix2x2::IDENTITY,
+                    smoothing_samples: 96,
+                })
+                .unwrap();
+        }
+        let _long_ramp = render_scalar_pair_and_compare(
+            &mut paired,
+            &mut separate,
+            &paired_capture,
+            &separate_capture,
+            4 * HARNESS_QUANTUM as u64,
+            (0, 1),
+        );
+        for bound in [&mut paired, &mut separate] {
+            bound.track_controls[1]
+                .fader
+                .try_push(TrackFaderRecord::FaderDb {
+                    lanes: BuiltinLaneSelector::Right,
+                    db: -3.0,
+                    smoothing_samples: 3,
+                })
+                .unwrap();
+        }
+        let _mid_ramp_retarget = render_scalar_pair_and_compare(
+            &mut paired,
+            &mut separate,
+            &paired_capture,
+            &separate_capture,
+            5 * HARNESS_QUANTUM as u64,
+            (0, 1),
+        );
+        let _retarget_settled = render_scalar_pair_and_compare(
+            &mut paired,
+            &mut separate,
+            &paired_capture,
+            &separate_capture,
+            6 * HARNESS_QUANTUM as u64,
+            (1, 0),
+        );
+        for bound in [&mut paired, &mut separate] {
+            let producer = &mut bound.track_controls[1].fader;
+            producer
+                .try_push(TrackFaderRecord::Mute {
+                    lanes: BuiltinLaneSelector::Left,
+                    muted: true,
+                    smoothing_samples: 0,
+                })
+                .unwrap();
+            producer
+                .try_push(TrackFaderRecord::FaderDb {
+                    lanes: BuiltinLaneSelector::Left,
+                    db: -2.0,
+                    smoothing_samples: 0,
+                })
+                .unwrap();
+        }
+        let muted = render_scalar_pair_and_compare(
+            &mut paired,
+            &mut separate,
+            &paired_capture,
+            &separate_capture,
+            7 * HARNESS_QUANTUM as u64,
+            (1, 0),
+        );
+        assert_eq!(muted.scalar_fader_words[12], 1);
+        assert_ne!(
+            muted.scalar_fader_words[5], 0,
+            "muted lane remembers its gain"
+        );
+        assert_eq!(muted.scalar_fader_words[0], 0.0_f32.to_bits());
+        for bound in [&mut paired, &mut separate] {
+            bound.track_controls[1]
+                .fader
+                .try_push(TrackFaderRecord::Mute {
+                    lanes: BuiltinLaneSelector::Left,
+                    muted: false,
+                    smoothing_samples: 0,
+                })
+                .unwrap();
+        }
+        let unmuted = render_scalar_pair_and_compare(
+            &mut paired,
+            &mut separate,
+            &paired_capture,
+            &separate_capture,
+            8 * HARNESS_QUANTUM as u64,
+            (1, 0),
+        );
+        assert_eq!(unmuted.scalar_fader_words[12], 0);
+        assert_eq!(unmuted.scalar_fader_words[0], unmuted.scalar_fader_words[5]);
 
         // Mutate the actual graph boundary with a post-fader observer. The same serialized
         // concrete owners remain, but the observer guard must retain separate execution. Exact
@@ -7132,6 +7251,22 @@ mod tests {
             outer,
             2 * core::mem::size_of::<usize>() as u64,
             "the composite allocation contains exactly the two retained typed boxes"
+        );
+        let fader_fields = core::mem::size_of::<FaderMuteRampBuiltins>()
+            + core::mem::size_of::<Consumer<TrackFaderRecord>>()
+            + core::mem::size_of::<BuiltinControlDelivery>();
+        let matrix_fields = core::mem::size_of::<MatrixBuiltins>()
+            + core::mem::size_of::<Consumer<TrackControlRecord>>()
+            + core::mem::size_of::<BuiltinControlDelivery>();
+        assert!(core::mem::size_of::<ConsoleFaderProcessor>() >= fader_fields);
+        assert!(core::mem::size_of::<ConsoleMatrixProcessor>() >= matrix_fields);
+        assert!(
+            core::mem::size_of::<ConsoleFaderProcessor>() - fader_fields
+                < core::mem::align_of::<ConsoleFaderProcessor>()
+        );
+        assert!(
+            core::mem::size_of::<ConsoleMatrixProcessor>() - matrix_fields
+                < core::mem::align_of::<ConsoleMatrixProcessor>()
         );
 
         let serialized =

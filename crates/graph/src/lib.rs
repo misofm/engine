@@ -1956,6 +1956,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn scalar_owner_resource_overflow_leaves_the_graph_estimate_unchanged() {
+        let mut estimate = empty_estimate();
+        estimate.graph_metadata_bytes = 3;
+        estimate.incremental_plan_bytes = 5;
+        estimate.session_plus_plan_bytes = 7;
+        let before = estimate.clone();
+        assert_eq!(
+            estimate.checked_add_scalar_owners(GraphScalarOwnerResourceEstimate {
+                total_bytes: u64::MAX,
+                largest_allocation_bytes: 64,
+            }),
+            None
+        );
+        assert_eq!(
+            estimate, before,
+            "overflow cannot partially mutate the report"
+        );
+    }
+
     fn binding_plan() -> (PreparedGraphPlan, GraphRuntimeBindings, GraphNodeId) {
         let input = GraphNodeId::TrackStage {
             track_id: StableGraphId::parse("track").expect("ID"),

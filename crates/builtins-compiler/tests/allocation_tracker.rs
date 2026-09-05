@@ -266,6 +266,81 @@ fn actual_queued_graph_phases_allocate_and_free_nothing() {
     );
 }
 
+#[test]
+fn actual_queued_scalar_graph_allocates_and_frees_nothing() {
+    let _session_guard = SESSION
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    let mut liveness = Vec::<u8>::with_capacity(core::hint::black_box(32));
+    LIVE_ALLOCS.set(0);
+    LIVE_FREES.set(0);
+    armed(|| liveness.reserve_exact(core::hint::black_box(64)));
+    assert!(LIVE_ALLOCS.get() > 0, "scalar audit allocation liveness");
+    LIVE_ALLOCS.set(0);
+    LIVE_FREES.set(0);
+    armed(|| drop(liveness));
+    assert!(LIVE_FREES.get() > 0, "scalar audit free liveness");
+
+    let mut output = [0.0_f32; 128];
+    test_only_reset_fader_matrix_witness();
+    let mut selected = builtins_compiler::test_only_prepared_scalar_pair_graph(false);
+    assert_eq!(
+        (
+            test_only_fader_matrix_witness().factory_calls,
+            test_only_fader_matrix_witness().factory_members
+        ),
+        (1, 1)
+    );
+    let settled = audit_graph_render(&mut selected, &mut output, 0);
+    assert_eq!((settled.fused_calls, settled.fallback_calls), (1, 0));
+    {
+        let scalar = selected
+            .track_controls
+            .iter_mut()
+            .find(|control| control.track_id.as_ref() == "t01")
+            .expect("selected scalar controls");
+        scalar
+            .fader
+            .try_push(TrackFaderRecord::FaderDb {
+                lanes: BuiltinLaneSelector::Both,
+                db: -12.0,
+                smoothing_samples: 96,
+            })
+            .unwrap();
+        scalar
+            .producer
+            .try_push(TrackControlRecord {
+                matrix: Matrix2x2 {
+                    ll: 0.5,
+                    lr: 0.25,
+                    rl: -0.25,
+                    rr: 0.75,
+                },
+                smoothing_samples: 96,
+            })
+            .unwrap();
+    }
+    for (sample, expected) in [(64, (0, 1)), (128, (0, 1)), (192, (1, 0))] {
+        let witness = audit_graph_render(&mut selected, &mut output, sample);
+        assert_eq!((witness.fused_calls, witness.fallback_calls), expected);
+        assert_eq!(witness.process_members, 1);
+    }
+
+    test_only_reset_fader_matrix_witness();
+    let mut observed = builtins_compiler::test_only_prepared_scalar_pair_graph(true);
+    let observed_call = audit_graph_render(&mut observed, &mut output, 0);
+    assert_eq!(
+        (observed_call.process_calls, observed_call.factory_calls),
+        (0, 0),
+        "the actual observed scalar graph retains separate owners"
+    );
+    assert!(
+        observed.meter_consumers[0].consumer.try_pop().is_ok(),
+        "observed fallback publishes its meter window"
+    );
+}
+
 fn session(track_count: u32) -> session::CompiledSession {
     let mut model = parse_session_json(include_str!("../../../fixtures/session/v1/canonical.json"))
         .expect("fixture parse");

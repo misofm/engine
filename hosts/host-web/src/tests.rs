@@ -1905,7 +1905,7 @@ fn acknowledged_pair_render_records_the_same_live_dispatch() {
     assert_eq!(witness.process_calls, 1);
     assert_eq!(
         witness.process_members, 1,
-        "the selected composite is track-8 tail"
+        "the acknowledged records reached the selected scalar track-8 tail"
     );
     assert_eq!(witness.fader_records_drained, 1);
     assert_eq!(witness.matrix_records_drained, 1);
