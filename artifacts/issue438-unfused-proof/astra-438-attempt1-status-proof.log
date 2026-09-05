@@ -1,0 +1,18 @@
+original: exit 9
+mul_add(
+EVIDENCE registered rg stdout: mul_add(
+INJECTED-occurrence-registered
+mul_add(
+unfused seal failure: fused-call search failed for tools/wasm-gates/tests/g5_native_corpus.rs (rg status 9)
+
+actual-mutant: exit 0
+unfused seal: ok (no fused multiply-add on any path; 8 registered audit calls)
+mul_add(
+EVIDENCE registered rg stdout: mul_add(
+INJECTED-occurrence-registered
+EVIDENCE registered wc result: 1
+INJECTED-occurrence-registered
+EVIDENCE registered wc result: 7
+INJECTED-occurrence-registered
+EVIDENCE registered wc result: 1
+INJECTED-occurrence-registered

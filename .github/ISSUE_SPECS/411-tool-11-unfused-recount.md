@@ -228,3 +228,7 @@ pending; #411 remains OPEN.
 ## Bounded successor proof accepted
 
 Astra passed #438 source `3f8e5dd0c06414dcf5a6f6b9dc5c68c48297fc1a`: actual payload-preserving production-local disposable status mutation, original status 9, mutant status 0, same unexpected-success assertion status 97, and retained 62-case suite. This resolves the remaining proof obligation through the explicitly rescoped issue. #411 remains OPEN until integrated workspace, actual PR Astra review, required CI and upstream delivery/state synchronization complete. Original three-attempt history remains intact.
+
+## Completed inherited workspace qualification
+
+Integrated candidate `67ac8993e087ab936b5d314b5d0aa68744095be8` completed fresh isolated `cargo test --locked --workspace` including doctests with terminal exit 0: 274 result blocks, 1,569 passed, zero failed, 24 ignored, exactly matching the retained RT-3 baseline. Source remained committed and clean throughout. Original/final proof reviews, decisive status/diff evidence, focused logs and full candidate workspace log are retained under `artifacts/issue438-unfused-proof/` with byte/hash manifest. Actual final-head PR Astra review and required qualification CI remain pending; neither issue is closed by local qualification alone.

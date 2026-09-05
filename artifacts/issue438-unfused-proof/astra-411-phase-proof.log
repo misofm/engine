@@ -1,0 +1,21 @@
+phase=2 subject=original status=9
+INJECTED-occurrence-late
+mul_add(
+unfused seal failure: fused-call search failed for tools/wasm-gates/tests/g5_native_corpus.rs (rg status 9)
+
+phase=2 subject=actual-mutant status=0
+unfused seal: ok (no fused multiply-add on any path; 8 registered audit calls)
+INJECTED-occurrence-late
+mul_add(
+unfused seal failure: fused-call search failed for tools/wasm-gates/tests/g5_native_corpus.rs (rg status 9)
+
+phase=4 subject=original status=9
+INJECTED-occurrence-late
+mul_add(
+unfused seal failure: fused-call search failed for tools/wasm-gates/tests/g5_native_corpus.rs (rg status 9)
+
+phase=4 subject=actual-mutant status=1
+INJECTED-occurrence-late
+mul_add(
+unfused seal failure: fused-call search failed for tools/wasm-gates/tests/g5_native_corpus.rs (rg status 9)
+unfused seal failure: tools/wasm-gates/tests/g5_native_corpus.rs has  fused calls, the registry says 1

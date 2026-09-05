@@ -1,0 +1,15 @@
+# Astra #411 final Sol attempt 3 review
+
+**FAIL at `2acf4ab22103cac67c95c8fae1aa03f679efc055`.** This is the third failed implementation attempt. Apply the prescribed hard stop and explicit rescope; do not authorize a fourth repair under the existing attempt series.
+
+Independently ran the embedded self-test: 62 passed, 0 failed, including the real-tree positive. Reviewed the exact checker/spec diff against attempt 2, the frozen contract and prior verdict. No repository/Git/GitHub mutation, Cargo or timing performed. Evidence: `/tmp/astra-411-attempt3-selftest.log`, `/tmp/astra-411-final-mutant.diff`, `/tmp/astra-411-attempt3-counter-proof.log`.
+
+Attempt 3 fixes the missing registered-phase directed cases: the later registered read and occurrence search receive both failure shapes after earlier consumers complete. It fixes the retired predicate's nonempty-output/error case, requires the payload and exact error diagnostic, and retains a valid-tree retired counter-control. It also propagates the relative-root result to parent accounting. The registered mutant now changes exactly one production line, and all three printed status-97 executions are real. The accepted production completion behavior, exact 7+1/8 registry, grammar and empty/marker boundaries remain unchanged.
+
+## One remaining blocking gap
+
+**The late registered counter-mutant substitutes a registry answer instead of preserving and accepting the otherwise-valid failed producer payload.** Its verified edit is `[[ "$rc" == 0 ]] || exit "$rc"` to `[[ "$rc" == 0 ]] || actual="$count"`. At this point count_calls has already rejected the failed rg operation, written its full occurrence payload to stderr, and returned empty stdout. The mutation therefore adds an expected-count fallback that bypasses the per-file count comparison; it does not demonstrate loss of the producer status while retaining that producer's valid result. This is the same payload-preserving late-consumer obligation explicitly retained in the attempt-2 blocking correction, not a new test framework or gate.
+
+Independent execution with the same phase-4 full-output/error injection confirms the distinction: original exits 9; submitted mutant exits 0; changing only that fallback to ignore the caller status (`rc=0`) exits 1 on `has  fused calls, the registry says 1`. The successful mutant's count comes from the registry, not the failed producer. Its exact unexpected-success assertion is consequently a real proof of the newly inserted registry fallback, but does not supply the assigned otherwise-correct failed-count status-loss control. Checksum/diff verification and a distinguished assertion status cannot repair that mismatch in the operation being proved.
+
+Retain the useful production work and the now-correct directed cases as evidence. This verdict does not identify a newly observed production false pass. The remaining delivery failure is the frozen counter-mutant proof contract; the three-attempt rule now requires explicit rescope before further implementation rather than another local revision or closure based solely on the green suite.
