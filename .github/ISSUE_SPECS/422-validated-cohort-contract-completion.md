@@ -33,3 +33,5 @@ Astra approves this numbered, synchronized amendment before assignment. Under us
 ## Numbered recovery assignment
 
 This is #422, created and synchronized after parent #419 exhausted its three attempts. Recovery source is `aafa59a17c4292f8f1837eac557e06e47305f1a4`; current main integration is frozen before assignment. Astra supplied the exact complete-stride capacity and dispatch contract above. Luna owns one fresh bounded attempt; root owns evidence/parent synchronization, checkpoints and the retained parent qualification/delivery. No source edits preceded this numbered brief.
+
+Integrated recovery base is `8aa9c062eb501cb24f2a1eba9954387e60fd1815`, which merges current main `a0e4d123a038160b4f5934dac14aacc72c9fbbf2` without runtime conflicts. Worktree `/home/bl/misofm/engine-419` now carries dedicated branch `codex/422-cohort-contract`; the exhausted parent branch and all checkpoints remain preserved. No timing or qualification invocation has begun.
