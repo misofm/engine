@@ -101,3 +101,7 @@ No repository/GitHub edits, claims, implementations or tests were performed whil
 - #403: qualification/evidence gates (6 gates), depends on #400.
 
 #371 is merged at `2a18b315067898a94fdc02e8f8b80f07b788ff89`, verified CLOSED, and retains 42 marked regions in 12 files. Children are queued; no implementation has started. Root approves this split without weakening original acceptance. This parent stays OPEN until every child and any original-scope successor is upstream and remotely closed. Child specs carry the complete standing contract.
+
+### Preserved parent accounting from #400 inventory
+
+#400 intentionally leaves workspace positive queries, filtered ISA/retired-codec scans and discovery loops unchanged. Before parent closure, assign or explicitly rule the five current workspace find-backed loop groups and map them against the original nine-loop debt. The historical `check-fast-db-seal.sh` name has no current file: establish removal/rename provenance or create a stateless successor if an obligation survives. These are open accounting requirements, not implicit passes and not blockers for the bounded foundation.
