@@ -193,3 +193,18 @@ The remote PR head 20ea904d was normally merged with post-#369 main `1ef2375c0a9
 ### Reproducible artifact checkpoint
 
 Luna recovery pass rebuilt the merged source twice: repin and no-repin builds agree at `a89c9606bfa72d69ced42b606cc4b7000d1b53f2b419b12ec63649a385b3eaf1`. Source pin, publisher expectation, and current qualification prose are synchronized; historical measurements are unchanged. Static AudioWorklet, realtime 42-region/12-file policy and mutations, workspace policy, formatting and publisher equality pass. Browser qualification is pending for the immutable candidate committed with this record.
+
+### Final recovery evidence — 2026-09-05
+
+Luna recovery pass completed without semantic revisions. Astra source/integration review PASS at `ded7a0a4e108c86a922817ed01ed710ded788444` independently confirmed that removing marker lines makes all five changed Rust files byte-equal to post-#369 main; generic scan-error debt remains #306. This preliminary review is not final PR merge approval.
+
+- Baseline main `1ef2375c0a9fa4b1481e844a1f68f48d22f8dc6f` and candidate `ded7a0a4e108c86a922817ed01ed710ded788444`: `cargo test --locked --workspace` both **1551 passed, 0 failed, 24 ignored**, including doctests. Each full run completed successfully; debug qualification was serialized against other debug Cargo invocations.
+- Realtime policy and mutation harness: **42 marked regions in 12 files**, unchanged required floors. Workspace policy, formatting, diff checks and workspace compilation pass.
+- Reproducible immutable artifact source candidate: `6b7cec4eb9e75efa0d2cc36439c4866ae2938340`; SHA-256 `a89c9606bfa72d69ced42b606cc4b7000d1b53f2b419b12ec63649a385b3eaf1`. Generated browser evidence follows at `ded7a0a4`; a squash merge does not retroactively change the source candidate identity.
+- Chromium 151.0.7922.34, Firefox 153.0 and WebKit 26.5: all-browser recorded qualification and each individual checked-matrix mutation run PASS. `npm run matrix -- --check` passes.
+- `check-web-audioworklet.sh`, `check-browser-expected-resources.py --artifacts` (native/direct-oracle parity plus **26 red mutations**), and `test-web-audioworklet.sh` all PASS. The separate expected-resource gate was explicitly run; static checking alone was not substituted for it.
+- CAPI resource lifecycle: **4 passed**. Host-core control-provider tests and exact read-only publisher/source/artifact digest equality PASS. No npm publication or benchmark ran.
+
+Logs retained locally: `/tmp/engine-371-main-baseline.log`, `/tmp/engine-371-recovery-workspace.log`, `/tmp/engine-371-check-web-confirmed.log`, `/tmp/engine-371-expected-resources.log`, `/tmp/engine-371-hermetic-worklet.log`, `/tmp/engine-371-qualify-all.log`, `/tmp/engine-371-check-matrix-{chromium,firefox,webkit}.log`, `/tmp/engine-371-matrix-generator.log`, `/tmp/engine-371-capi-resource.log`, `/tmp/engine-371-host-core.log` and `/tmp/engine-371-publisher-equality.log`. A root static-check invocation initially lacked Cargo on PATH and failed before metadata validation; its failure log is retained at `/tmp/engine-371-check-web-2.log`; the corrected complete invocation is the confirmed PASS log above.
+
+Final exact pushed-PR Astra review and required qualification CI remain the merge gates. Original local revised history and uncommitted pin remain untouched in their separate worktree.
