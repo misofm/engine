@@ -1,140 +1,161 @@
 #!/usr/bin/env bash
-# Hermetic contract tests for check-wasm-realtime-atomics.sh.  No Cargo or timing is used here.
 set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 checker="$repo_root/scripts/check-wasm-realtime-atomics.sh"
-test_root="$(mktemp -d)"
-trap 'rm -rf -- "$test_root"' EXIT
-tool_bin="$test_root/bin"
-mkdir -p "$tool_bin"
-real_ar="$(command -v ar)"; real_find="$(command -v find)"; real_rg="$(command -v rg)"
-export REAL_AR="$real_ar" REAL_FIND="$real_find" REAL_RG="$real_rg"
+test_root="$(mktemp -d)"; trap 'rm -rf -- "$test_root"' EXIT
+bin="$test_root/bin"; mkdir -p "$bin"
+export REAL_AR="$(command -v ar)" REAL_FIND="$(command -v find)" REAL_RG="$(command -v rg)" REAL_SORT="$(command -v sort)"
 
-cat >"$tool_bin/rustc" <<'EOF'
+cat >"$bin/rustc" <<'EOF'
 #!/usr/bin/env bash
-if [[ "${FAKE_CASE:-}" == cfg-error ]]; then printf 'target_has_atomic="ptr"\n'; exit 13; fi
-if [[ "${FAKE_CASE:-}" == cfg-missing ]]; then exit 0; fi
-if [[ "${FAKE_CASE:-}" == cfg-feature ]]; then printf 'target_has_atomic="ptr"\ntarget_feature="atomics"\n'; exit 0; fi
-printf '%s\n' 'target_has_atomic="ptr"'
+[[ "$*" == '--print cfg --target wasm32-unknown-unknown -C target-feature=-simd128' ]] || { printf 'RUSTC_ARGUMENT_SENTINEL\n' >&2; exit 90; }
+case "${FAKE_CASE:-}" in
+  cfg-error) printf 'target_has_atomic="ptr"\n'; printf 'CFG_SENTINEL\n' >&2; exit 13 ;;
+  cfg-missing) exit 0 ;;
+  cfg-feature) printf 'target_has_atomic="ptr"\ntarget_feature="atomics"\n'; exit 0 ;;
+esac
+printf 'target_has_atomic="ptr"\n'
 EOF
-cat >"$tool_bin/cargo" <<'EOF'
+cat >"$bin/cargo" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-if [[ "${FAKE_CASE:-}" == cargo-fail ]]; then
-  mkdir -p "${CARGO_TARGET_DIR}/wasm32-unknown-unknown/release/deps"
-  exit 42
-fi
-deps="${CARGO_TARGET_DIR}/wasm32-unknown-unknown/release/deps"
-mkdir -p "$deps"
-case "${FAKE_CASE:-}" in
-  missing-source) families=(engine target_smoke) ;;
-  missing-engine) families=(source target_smoke) ;;
-  missing-target) families=(engine source) ;;
-  empty-objects) families=(engine source target_smoke) ;;
-  *) families=(engine source target_smoke) ;;
-esac
+[[ "$CARGO_PROFILE_RELEASE_LTO" == false && "$RUSTFLAGS" == '-C target-feature=-simd128' ]] || { printf 'CARGO_ENV_SENTINEL\n' >&2; exit 91; }
+[[ "$*" == 'build --locked --release --target wasm32-unknown-unknown -p engine -p source -p target-smoke' ]] || { printf 'CARGO_ARGUMENT_SENTINEL\n' >&2; exit 92; }
+deps="$CARGO_TARGET_DIR/wasm32-unknown-unknown/release/deps"; mkdir -p "$deps"
+if [[ "${FAKE_CASE:-}" == cargo-fail ]]; then printf 'CARGO_SENTINEL\n' >&2; touch "$deps/libengine-partial.rlib"; exit 42; fi
+case "${FAKE_CASE:-}" in missing-engine) families=(source target_smoke);; missing-source) families=(engine target_smoke);; missing-target) families=(engine source);; *) families=(engine source target_smoke);; esac
 for family in "${families[@]}"; do
-  object="$family-main.o"
-  archive_family="${family//_/-}"
-  if [[ "${FAKE_CASE:-}" == duplicate-members && "$family" == engine ]]; then
-    printf 'duplicate\n' >"$deps/lib$family-hash.rlib.members"
-    "$REAL_AR" rcs "$deps/lib$archive_family-hash.rlib" "$deps/lib$family-hash.rlib.members"
-    continue
-  fi
-  if [[ "${FAKE_CASE:-}" != empty-objects ]]; then
-    object_text="${FAKE_OBJECT_TEXT:-observe clean}"
-    [[ "${FAKE_CASE:-}" == no-observation-fail || "${FAKE_CASE:-}" == source-search-error || "${FAKE_CASE:-}" == obs-search-error ]] && object_text=clean
-    [[ "${FAKE_CASE:-}" == atomic-opcode ]] && object_text='atomic.get'
-    printf '%s\n' "$object_text" >"$deps/$object"
-    "$REAL_AR" rcs "$deps/lib$archive_family-hash.rlib" "$deps/$object"
-  else
-    printf 'metadata\n' >"$deps/$family.txt"
-    "$REAL_AR" rcs "$deps/lib$archive_family-hash.rlib" "$deps/$family.txt"
-  fi
+  object="$deps/$family-main.o"; text='observe clean'
+  case "${FAKE_CASE:-}" in source-fallback|source-error|no-observation) text=clean;; late-observation-error) [[ "$family" != engine ]] || text='observe clean';; atomic-opcode) [[ "$family" != engine ]] || text='atomic.get observe';; empty-decode) [[ "$family" != engine ]] || text='';; esac
+  printf '%s' "$text" >"$object"
+  "$REAL_AR" rcs "$deps/lib$family-hash.rlib" "$object"
 done
-# This archive is deliberately outside the owned child and must never be inspected.
-mkdir -p "${CARGO_TARGET_DIR}/stale/wasm32-unknown-unknown/release/deps"
-printf 'atomic.stale\n' >"${CARGO_TARGET_DIR}/stale/stale.o"
-"$REAL_AR" rcs "${CARGO_TARGET_DIR}/stale/wasm32-unknown-unknown/release/deps/libengine-stale.rlib" "${CARGO_TARGET_DIR}/stale/stale.o"
 EOF
-cat >"$tool_bin/ar" <<'EOF'
+cat >"$bin/ar" <<'EOF'
 #!/usr/bin/env bash
-if [[ "${FAKE_CASE:-}" == ar-list-fail && "$1" == t* ]]; then exit 17; fi
-if [[ "${FAKE_CASE:-}" == ar-extract-fail && "$1" == x* ]]; then exit 18; fi
-exec "$REAL_AR" "$@"
+set -euo pipefail
+case "${FAKE_CASE:-}:$1:$2" in
+  ar-list-empty:t*:*libengine-*) printf 'LIST_EMPTY_SENTINEL\n' >&2; exit 17 ;;
+  ar-list-partial:t*:*libengine-*) "$REAL_AR" t "$2"; printf 'LIST_PARTIAL_SENTINEL\n' >&2; exit 17 ;;
+  duplicate-object:t*:*libengine-*) "$REAL_AR" t "$2"; "$REAL_AR" t "$2" ;;
+  list-omits-member:t*:*libengine-*) : ;;
+  ar-extract-empty:x*:*libengine-*) printf 'EXTRACT_EMPTY_SENTINEL\n' >&2; exit 18 ;;
+  ar-extract-partial:x*:*libengine-*) "$REAL_AR" x "$2"; printf 'EXTRACT_PARTIAL_SENTINEL\n' >&2; exit 18 ;;
+  missing-extracted:x*:*libengine-*) exit 0 ;;
+  extracted-extra:x*:*libengine-*) "$REAL_AR" x "$2"; printf extra >extra.o ;;
+  *) exec "$REAL_AR" "$@" ;;
+esac
 EOF
-cat >"$tool_bin/wasm-objdump" <<'EOF'
+cat >"$bin/wasm-objdump" <<'EOF'
 #!/usr/bin/env bash
-if [[ "${FAKE_CASE:-}" == decoder-fail ]]; then printf 'clean partial\n'; exit 19; fi
+case "${FAKE_CASE:-}" in
+  decoder-empty-error) printf 'DECODE_EMPTY_SENTINEL\n' >&2; exit 19 ;;
+  decoder-partial-error) printf 'clean partial\n'; printf 'DECODE_PARTIAL_SENTINEL\n' >&2; exit 19 ;;
+esac
 cat "${@: -1}"
 EOF
-cat >"$tool_bin/find" <<'EOF'
+cat >"$bin/find" <<'EOF'
 #!/usr/bin/env bash
-"$REAL_FIND" "$@"
-status=0
-if [[ "${FAKE_CASE:-}" == archive-discovery-fail && "$*" == *-name\ libengine-* ]]; then status=23; fi
-exit "$status"
+args=" $* "
+case "${FAKE_CASE:-}" in
+  archive-find-empty-error) [[ "$args" == *'libengine-*.rlib'* ]] && { printf 'ARCHIVE_FIND_EMPTY_SENTINEL\n' >&2; exit 23; } ;;
+  object-find-empty-error) [[ "$args" == *" -name *.o "* && "$args" == *'/engine '* ]] && { printf 'OBJECT_FIND_EMPTY_SENTINEL\n' >&2; exit 27; } ;;
+esac
+set +e
+"$REAL_FIND" "$@"; status=$?
+set -e
+[[ "$status" == 0 ]] || exit "$status"
+case "${FAKE_CASE:-}" in
+  archive-find-partial-error) [[ "$args" == *'libengine-*.rlib'* ]] && { printf 'ARCHIVE_FIND_PARTIAL_SENTINEL\n' >&2; exit 23; } ;;
+  object-find-partial-error) [[ "$args" == *" -name *.o "* && "$args" == *'/engine '* ]] && { printf 'OBJECT_FIND_PARTIAL_SENTINEL\n' >&2; exit 27; } ;;
+esac
+exit 0
 EOF
-cat >"$tool_bin/rg" <<'EOF'
+cat >"$bin/sort" <<'EOF'
 #!/usr/bin/env bash
-if [[ "${FAKE_CASE:-}" == source-search-error && "$*" == *ObservationSlot* ]]; then exit 24; fi
-if [[ "${FAKE_CASE:-}" == no-observation-fail && "$*" == *ObservationSlot* ]]; then exit 1; fi
-if [[ "${FAKE_CASE:-}" == obs-search-error && "$*" == *observe* ]]; then exit 25; fi
-if [[ "${FAKE_CASE:-}" == opcode-scan-error && "$*" == *atomic* ]]; then exit 26; fi
+case "${FAKE_CASE:-}" in
+ archive-sort-error) [[ "$*" == *engine.archives* ]] && { printf 'ARCHIVE_SORT_SENTINEL\n' >&2; exit 28; };;
+ object-sort-error) [[ "$*" == *engine/objects* ]] && { printf 'OBJECT_SORT_SENTINEL\n' >&2; exit 29; };;
+esac
+exec "$REAL_SORT" "$@"
+EOF
+cat >"$bin/rg" <<'EOF'
+#!/usr/bin/env bash
+args=" $* "
+case "${FAKE_CASE:-}" in
+ pointer-search-error) [[ "$args" == *target_has_atomic* ]] && { printf 'POINTER_SEARCH_SENTINEL\n' >&2; exit 30; };;
+ feature-search-error) [[ "$args" == *target_feature* ]] && { printf 'FEATURE_SEARCH_SENTINEL\n' >&2; exit 31; };;
+ opcode-search-error) [[ "$args" == *" atomic\\. "* ]] && { printf 'OPCODE_SEARCH_SENTINEL\n' >&2; exit 32; };;
+ observation-error) [[ "$args" == *" observe "* ]] && { printf 'OBS_SEARCH_SENTINEL\n' >&2; exit 33; };;
+ late-observation-error) [[ "$args" == *" observe "* && "$args" == *source-main.o* ]] && { printf 'LATE_OBS_SENTINEL\n' >&2; exit 34; };;
+ source-error) [[ "$args" == *ObservationSlot* ]] && { printf 'SOURCE_SEARCH_SENTINEL\n' >&2; exit 35; };;
+ no-source-needed) [[ "$args" == *ObservationSlot* ]] && { printf 'SOURCE_WAS_CONSULTED\n' >&2; exit 36; };;
+ no-observation) [[ "$args" == *ObservationSlot* ]] && exit 1;;
+esac
 exec "$REAL_RG" "$@"
 EOF
-chmod +x "$tool_bin"/*
-export PATH="$tool_bin:$PATH"
+chmod +x "$bin"/*
+export PATH="$bin:$PATH"
 
-run_case() {
-  local name="$1" expected="$2"; shift 2
+assert_case() {
+  local checker_path="$1" name="$2" expected="$3" diagnostic="${4:-}"
   local target="$test_root/target-$name" log="$test_root/$name.log"
-  set +e
-  FAKE_CASE="$name" "$checker" "$target" >"$log" 2>&1
-  local status=$?
-  set -e
-  if [[ "$expected" == pass && "$status" != 0 ]]; then cat "$log" >&2; printf 'case %s unexpectedly failed\n' "$name" >&2; return 1; fi
-  if [[ "$expected" == fail && "$status" == 0 ]]; then cat "$log" >&2; printf 'case %s unexpectedly passed\n' "$name" >&2; return 1; fi
+  mkdir -p "$target/parent-cache"; printf keep >"$target/parent-cache/stale-sentinel"
+  set +e; FAKE_CASE="$name" "$checker_path" "$target" >"$log" 2>&1; local status=$?; set -e
+  [[ -f "$target/parent-cache/stale-sentinel" ]] || { printf 'case %s deleted caller parent cache\n' "$name" >&2; return 96; }
+  if [[ "$expected" == pass ]]; then
+    [[ "$status" == 0 ]] || { cat "$log" >&2; printf 'case %s unexpectedly failed (%s)\n' "$name" "$status" >&2; return 96; }
+    printf 'case %s: PASS (status 0)\n' "$name"; return 0
+  fi
+  if [[ "$status" == 0 ]]; then printf 'case %s unexpected-success\n' "$name" >&2; return 97; fi
+  local required
+  IFS=';' read -r -a required <<<"$diagnostic"
+  for required in "${required[@]}"; do
+    "$REAL_RG" -F "$required" "$log" >/dev/null || { cat "$log" >&2; printf 'case %s failed at wrong site; missing %s\n' "$name" "$required" >&2; return 96; }
+  done
+  printf 'case %s: PASS (checker status %s, targeted diagnostic)\n' "$name" "$status"
 }
-run_case base pass
-run_case no-observation pass
-run_case cargo-fail fail
-run_case missing-source fail
-run_case missing-engine fail
-run_case missing-target fail
-run_case empty-objects fail
-run_case decoder-fail fail
-run_case ar-list-fail fail
-run_case ar-extract-fail fail
-run_case archive-discovery-fail fail
-run_case cfg-error fail
-run_case cfg-missing fail
-run_case cfg-feature fail
-run_case atomic-opcode fail
-run_case opcode-scan-error fail
-run_case obs-search-error fail
-run_case source-search-error fail
-run_case no-observation-fail fail
 
-# Counter-mutant 1: restore the old conditional decoder/scan false-pass. The named decoder
-# assertion must reject the mutant's unexpected success on a clean-looking partial decode.
-mutant_decoder="$test_root/mutant-decoder.sh"
-sed 's/if ! wasm-objdump -d "\$object" >"\$decoded" 2>"\$decoded_stderr"; then printf '\''wasm-objdump failed for object: %s\\n'\'' "\$object" >&2; exit 1; fi/wasm-objdump -d "\$object" >"\$decoded" 2>"\$decoded_stderr" || true/' "$checker" >"$mutant_decoder"
-chmod +x "$mutant_decoder"
-if FAKE_CASE=decoder-fail "$mutant_decoder" "$test_root/mutant-decoder-target" >/dev/null 2>&1; then
-  printf 'decoder counter-mutant: focused assertion rejected unexpected success\n'
-else
-  printf 'decoder counter-mutant did not reproduce the historical false-pass\n' >&2; exit 1
-fi
+assert_case "$checker" base pass
+assert_case "$checker" source-fallback pass
+assert_case "$checker" no-source-needed pass
+cases=(
+ 'cfg-error|rustc cfg production failed (status 13);CFG_SENTINEL' 'cfg-missing|does not advertise pointer-width atomic' 'cfg-feature|unexpectedly enables Wasm atomics'
+ 'pointer-search-error|cfg atomic-support search failed (status 30);POINTER_SEARCH_SENTINEL' 'feature-search-error|cfg atomics-feature search failed (status 31);FEATURE_SEARCH_SENTINEL'
+ 'cargo-fail|cargo build failed (status 42);CARGO_SENTINEL' 'missing-engine|engine archive population is incomplete' 'missing-source|source archive population is incomplete' 'missing-target|target_smoke archive population is incomplete'
+ 'archive-find-empty-error|engine archive discovery failed (status 23);ARCHIVE_FIND_EMPTY_SENTINEL' 'archive-find-partial-error|engine archive discovery failed (status 23);ARCHIVE_FIND_PARTIAL_SENTINEL' 'archive-sort-error|engine archive sort failed (status 28);ARCHIVE_SORT_SENTINEL'
+ 'ar-list-empty|engine archive member listing failed (status 17);LIST_EMPTY_SENTINEL' 'ar-list-partial|engine archive member listing failed (status 17);LIST_PARTIAL_SENTINEL' 'duplicate-object|duplicate object member'
+ 'list-omits-member|archive has no object members' 'ar-extract-empty|engine archive extraction failed (status 18);EXTRACT_EMPTY_SENTINEL' 'ar-extract-partial|engine archive extraction failed (status 18);EXTRACT_PARTIAL_SENTINEL'
+ 'missing-extracted|object reconciliation failed' 'extracted-extra|object reconciliation failed' 'object-find-empty-error|engine object discovery failed (status 27);OBJECT_FIND_EMPTY_SENTINEL'
+ 'object-find-partial-error|engine object discovery failed (status 27);OBJECT_FIND_PARTIAL_SENTINEL' 'object-sort-error|engine object sort failed (status 29);OBJECT_SORT_SENTINEL'
+ 'decoder-empty-error|wasm-objdump failed (status 19);DECODE_EMPTY_SENTINEL' 'decoder-partial-error|wasm-objdump failed (status 19);DECODE_PARTIAL_SENTINEL' 'atomic-opcode|contains an atomic opcode'
+ 'opcode-search-error|opcode scan failed (status 32);OPCODE_SEARCH_SENTINEL' 'observation-error|observation object search failed (status 33);OBS_SEARCH_SENTINEL'
+ 'late-observation-error|observation object search failed (status 34);LATE_OBS_SENTINEL' 'source-error|source ObservationSlot search failed (status 35);SOURCE_SEARCH_SENTINEL'
+ 'no-observation|absent from objects and source fallback'
+)
+for row in "${cases[@]}"; do
+  IFS='|' read -r name diagnostic <<<"$row"; assert_case "$checker" "$name" fail "$diagnostic"
+done
+assert_case "$checker" empty-decode pass
 
-# Counter-mutant 2: swallow a partial complete-looking archive-discovery producer error.
-mutant_find="$test_root/mutant-find.sh"
-sed '/if ! find .*archive_list/c\    find "$deps" -maxdepth 1 -type f -name "lib${family//_/-}-*.rlib" -print0 >"$archive_list" || true' "$checker" >"$mutant_find"
-chmod +x "$mutant_find"
-if FAKE_CASE=archive-discovery-fail "$mutant_find" "$test_root/mutant-find-target" >/dev/null 2>&1; then
-  printf 'producer counter-mutant: focused assertion rejected unexpected success\n'
-else
-  printf 'producer counter-mutant did not reproduce the historical false-pass\n' >&2; exit 1
-fi
-
+make_mutant() {
+  local name="$1" old="$2" new="$3" count
+  local output="$test_root/$name.sh"
+  count="$(awk -v text="$old" 'index($0,text){n++} END{print n+0}' "$checker")"
+  [[ "$count" == 1 ]] || { printf '%s mutant edit matched %s sites, expected 1\n' "$name" "$count" >&2; exit 1; }
+  awk -v old="$old" -v new="$new" '{ if (index($0, old)) print new; else print }' "$checker" >"$output"; chmod +x "$output"
+  diff -u "$checker" "$output" >"$test_root/$name.diff" || [[ "$?" == 1 ]]
+  printf '%s exact diff:\n' "$name"; cat "$test_root/$name.diff"
+  MUTANT_PATH="$output"
+}
+make_mutant decoder-mutant '[[ "$status" == 0 ]] || failed wasm-objdump "$status" "$object" "$decoded" "$scratch/$n.decode.err"' '[[ "$status" == 0 ]] || true'
+decoder_mutant="$MUTANT_PATH"
+if assert_case "$decoder_mutant" decoder-partial-error fail 'wasm-objdump failed (status 19)'; then mutant_status=0; else mutant_status=$?; fi
+[[ "$mutant_status" == 97 ]] || { printf 'decoder mutant assertion status %s, expected 97\n' "$mutant_status" >&2; exit 1; }
+printf 'decoder mutant same assertion status: 97 (unexpected-success)\n'
+make_mutant producer-mutant '[[ "$status" == 0 ]] || failed "$family archive discovery" "$status" "$deps" "$list" "$scratch/$family.find.err"' '[[ "$status" == 0 ]] || true'
+producer_mutant="$MUTANT_PATH"
+if assert_case "$producer_mutant" archive-find-partial-error fail 'engine archive discovery failed (status 23)'; then mutant_status=0; else mutant_status=$?; fi
+[[ "$mutant_status" == 97 ]] || { printf 'producer mutant assertion status %s, expected 97\n' "$mutant_status" >&2; exit 1; }
+printf 'producer mutant same assertion status: 97 (unexpected-success)\n'
 printf 'wasm realtime atomics hermetic suite: PASS (directed cases and 2 causal mutants)\n'

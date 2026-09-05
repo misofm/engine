@@ -1,62 +1,91 @@
 #!/usr/bin/env bash
-# Build and inspect the browser-local queue monomorphization; it must require no atomic opcode.
 set -euo pipefail
-
 target_directory="${1:-target/ci/wasm-realtime-local}"
-for tool in rustc cargo ar wasm-objdump rg find sort realpath mktemp; do
-    command -v "$tool" >/dev/null 2>&1 || { printf '%s is required for the Wasm realtime atomic inspection\n' "$tool" >&2; exit 1; }
-done
+for tool in rustc cargo ar wasm-objdump rg find sort mktemp sed; do command -v "$tool" >/dev/null 2>&1 || { printf '%s is required for the Wasm realtime atomic inspection\n' "$tool" >&2; exit 1; }; done
 mkdir -p "$target_directory"
 inspection_target="$(mktemp -d "$target_directory/.wasm-inspection.XXXXXX")"
-scratch="$(mktemp -d)"
-keep_target=1
+scratch="$(mktemp -d)"; keep_target=1
 cleanup() { rm -rf -- "$scratch"; if [[ "$keep_target" == 0 ]]; then rm -rf -- "$inspection_target"; else printf 'inspection target retained for diagnostics: %s\n' "$inspection_target" >&2; fi; }
 trap cleanup EXIT
+failed() {
+  local op="$1" status="$2" identity="$3" out="${4:-}" err="${5:-}"
+  printf '%s failed (status %s): %s\n' "$op" "$status" "$identity" >&2
+  [[ -z "$out" || ! -s "$out" ]] || { printf '%s partial stdout:\n' "$op" >&2; sed 's/^/  /' "$out" >&2; }
+  [[ -z "$err" || ! -s "$err" ]] || { printf '%s stderr:\n' "$op" >&2; sed 's/^/  /' "$err" >&2; }
+  exit 1
+}
+run_capture() {
+  local out="$1" err="$2"; shift 2
+  set +e; "$@" >"$out" 2>"$err"; capture_status=$?; set -e
+}
 
-cfg_file="$scratch/cfg"
-if ! rustc --print cfg --target wasm32-unknown-unknown -C target-feature=-simd128 >"$cfg_file" 2>"$scratch/cfg.stderr"; then printf 'rustc cfg production failed\n' >&2; exit 1; fi
-if rg -q '^target_has_atomic="ptr"$' "$cfg_file"; then :; else cfg_status=$?; if [[ "$cfg_status" == 1 ]]; then printf 'wasm target does not advertise pointer-width atomic support\n' >&2; else printf 'cfg atomic-support search failed (status %s)\n' "$cfg_status" >&2; fi; exit 1; fi
-if rg -q '^target_feature="atomics"$' "$cfg_file"; then printf 'browser-local fallback artifact unexpectedly enables Wasm atomics\n' >&2; exit 1; else cfg_status=$?; [[ "$cfg_status" == 1 ]] || { printf 'cfg atomics-feature search failed (status %s)\n' "$cfg_status" >&2; exit 1; }; fi
+cfg="$scratch/cfg"; run_capture "$cfg" "$scratch/cfg.err" rustc --print cfg --target wasm32-unknown-unknown -C target-feature=-simd128
+[[ "$capture_status" == 0 ]] || failed 'rustc cfg production' "$capture_status" wasm32-unknown-unknown "$cfg" "$scratch/cfg.err"
+run_capture "$scratch/pointer.matches" "$scratch/pointer.err" rg -n '^target_has_atomic="ptr"$' "$cfg"; status=$capture_status
+if [[ "$status" == 1 ]]; then printf 'wasm target does not advertise pointer-width atomic support\n' >&2; exit 1; elif [[ "$status" != 0 ]]; then failed 'cfg atomic-support search' "$status" "$cfg" "$scratch/pointer.matches" "$scratch/pointer.err"; fi
+run_capture "$scratch/feature.matches" "$scratch/feature.err" rg -n '^target_feature="atomics"$' "$cfg"; status=$capture_status
+if [[ "$status" == 0 ]]; then printf 'browser-local fallback artifact unexpectedly enables Wasm atomics\n' >&2; exit 1; elif [[ "$status" != 1 ]]; then failed 'cfg atomics-feature search' "$status" "$cfg" "$scratch/feature.matches" "$scratch/feature.err"; fi
 
-if ! CARGO_TARGET_DIR="$inspection_target" CARGO_PROFILE_RELEASE_LTO=false RUSTFLAGS='-C target-feature=-simd128' cargo build --locked --release --target wasm32-unknown-unknown -p engine -p source -p target-smoke; then printf 'scalar NON-LTO inspection cargo build failed\n' >&2; exit 1; fi
+set +e
+CARGO_TARGET_DIR="$inspection_target" CARGO_PROFILE_RELEASE_LTO=false RUSTFLAGS='-C target-feature=-simd128' cargo build --locked --release --target wasm32-unknown-unknown -p engine -p source -p target-smoke >"$scratch/cargo.out" 2>"$scratch/cargo.err"
+status=$?; set -e
+[[ "$status" == 0 ]] || failed 'scalar NON-LTO inspection cargo build' "$status" "$inspection_target" "$scratch/cargo.out" "$scratch/cargo.err"
+
 deps="$inspection_target/wasm32-unknown-unknown/release/deps"
-declare -a families=(engine source target_smoke)
-declare -a archives=() objects=()
+families=(engine source target_smoke); archives=(); objects=()
 for family in "${families[@]}"; do
-    archive_list="$scratch/$family.archives"
-    if ! find "$deps" -maxdepth 1 -type f -name "lib${family//_/-}-*.rlib" -print0 >"$archive_list"; then printf '%s archive discovery failed\n' "$family" >&2; exit 1; fi
-    if ! sort -z -o "$archive_list" "$archive_list"; then printf '%s archive sort failed\n' "$family" >&2; exit 1; fi
-    mapfile -d '' -t found_archives <"$archive_list"
-    [[ "${#found_archives[@]}" == 1 ]] || { printf '%s archive population is incomplete (found %s, expected 1)\n' "$family" "${#found_archives[@]}" >&2; exit 1; }
-    archives+=("$(realpath -- "${found_archives[0]}")")
+  list="$scratch/$family.archives"
+  run_capture "$list" "$scratch/$family.find.err" find "$deps" -maxdepth 1 -type f -name "lib$family-*.rlib" -print0; status=$capture_status
+  [[ "$status" == 0 ]] || failed "$family archive discovery" "$status" "$deps" "$list" "$scratch/$family.find.err"
+  run_capture /dev/null "$scratch/$family.sort.err" sort -z -o "$list" "$list"; status=$capture_status
+  [[ "$status" == 0 ]] || failed "$family archive sort" "$status" "$list" '' "$scratch/$family.sort.err"
+  mapfile -d '' -t found <"$list"
+  [[ "${#found[@]}" == 1 ]] || { printf '%s archive population is incomplete (found %s, expected 1)\n' "$family" "${#found[@]}" >&2; exit 1; }
+  archives+=("${found[0]}")
 done
 
 for index in "${!families[@]}"; do
-    family="${families[$index]}"; archive="${archives[$index]}"; family_dir="$scratch/$family"; mkdir -p "$family_dir"; members="$family_dir/members"
-    if ! ar t "$archive" >"$members" 2>"$family_dir/ar-list.stderr"; then printf '%s archive member listing failed\n' "$family" >&2; exit 1; fi
-    if ! sort "$members" >"$family_dir/members.sorted"; then printf '%s archive member sorting failed\n' "$family" >&2; exit 1; fi
-    if [[ "$(wc -l <"$family_dir/members.sorted")" != "$(sort -u "$family_dir/members.sorted" | wc -l)" ]]; then printf '%s archive contains duplicate member names\n' "$family" >&2; exit 1; fi
-    if ! (cd "$family_dir" && ar x "$archive") 2>"$family_dir/ar-extract.stderr"; then printf '%s archive extraction failed\n' "$family" >&2; exit 1; fi
-    if ! find "$family_dir" -type f -name '*.o' -print0 >"$family_dir/objects"; then printf '%s object discovery failed\n' "$family" >&2; exit 1; fi
-    if ! sort -z -o "$family_dir/objects" "$family_dir/objects"; then printf '%s object sort failed\n' "$family" >&2; exit 1; fi
-    mapfile -d '' -t family_objects <"$family_dir/objects"
-    [[ "${#family_objects[@]}" -gt 0 ]] || { printf '%s archive has no object members\n' "$family" >&2; exit 1; }
-    while IFS= read -r member; do [[ "$member" == *.o ]] || continue; [[ -f "$family_dir/$member" ]] || { printf '%s object member was not extracted: %s\n' "$family" "$member" >&2; exit 1; }; done <"$family_dir/members.sorted"
-    for object in "${family_objects[@]}"; do objects+=("$object"); done
+  family="${families[$index]}"; archive="${archives[$index]}"; dir="$scratch/$family"; mkdir -p "$dir"
+  run_capture "$dir/members" "$dir/list.err" ar t "$archive"; status=$capture_status
+  [[ "$status" == 0 ]] || failed "$family archive member listing" "$status" "$archive" "$dir/members" "$dir/list.err"
+  run_capture "$dir/members.sorted" "$dir/member-sort.err" sort "$dir/members"; status=$capture_status
+  [[ "$status" == 0 ]] || failed "$family archive member sort" "$status" "$archive" "$dir/members.sorted" "$dir/member-sort.err"
+  expected=(); declare -A seen=()
+  while IFS= read -r member; do
+    [[ "$member" == *.o ]] || continue
+    [[ ! -v "seen[$member]" ]] || { printf '%s archive contains duplicate object member: %s\n' "$family" "$member" >&2; exit 1; }
+    seen["$member"]=1; expected+=("$member")
+  done <"$dir/members.sorted"
+  [[ "${#expected[@]}" -gt 0 ]] || { printf '%s archive has no object members\n' "$family" >&2; exit 1; }
+  set +e; (cd "$dir" && ar x "$archive") >"$dir/extract.out" 2>"$dir/extract.err"; status=$?; set -e
+  [[ "$status" == 0 ]] || failed "$family archive extraction" "$status" "$archive" "$dir/extract.out" "$dir/extract.err"
+  run_capture "$dir/objects" "$dir/object-find.err" find "$dir" -maxdepth 1 -type f -name '*.o' -printf '%f\0'; status=$capture_status
+  [[ "$status" == 0 ]] || failed "$family object discovery" "$status" "$dir" "$dir/objects" "$dir/object-find.err"
+  run_capture /dev/null "$dir/object-sort.err" sort -z -o "$dir/objects" "$dir/objects"; status=$capture_status
+  [[ "$status" == 0 ]] || failed "$family object sort" "$status" "$dir/objects" '' "$dir/object-sort.err"
+  mapfile -d '' -t discovered <"$dir/objects"
+  [[ "${#expected[@]}" == "${#discovered[@]}" ]] || { printf '%s object reconciliation failed (expected %s, discovered %s)\n' "$family" "${#expected[@]}" "${#discovered[@]}" >&2; exit 1; }
+  for i in "${!expected[@]}"; do
+    [[ "${expected[$i]}" == "${discovered[$i]}" ]] || { printf '%s object reconciliation failed (expected %s, discovered %s)\n' "$family" "${expected[$i]}" "${discovered[$i]}" >&2; exit 1; }
+    objects+=("$dir/${discovered[$i]}")
+  done
+  unset seen
 done
 [[ "${#objects[@]}" -gt 0 ]] || { printf 'no Wasm objects were available for atomic inspection\n' >&2; exit 1; }
 
-observation_match=0
-object_index=0
+observation_match=0; n=0
 for object in "${objects[@]}"; do
-    object_index=$((object_index + 1))
-    decoded="$scratch/object-$object_index.decoded"; decoded_stderr="$scratch/object-$object_index.objdump.stderr"
-    if ! wasm-objdump -d "$object" >"$decoded" 2>"$decoded_stderr"; then printf 'wasm-objdump failed for object: %s\n' "$object" >&2; exit 1; fi
-    if rg -n 'atomic\.' "$decoded"; then printf 'browser-local fallback contains an atomic opcode: %s\n' "$object" >&2; exit 1; else scan_status=$?; [[ "$scan_status" == 1 ]] || { printf 'opcode scan failed for object %s (status %s)\n' "$object" "$scan_status" >&2; exit 1; }; fi
-    if rg -l --binary 'observe' "$object" >/dev/null; then observation_match=1; else observation_status=$?; [[ "$observation_status" == 1 ]] || { printf 'observation object search failed for %s (status %s)\n' "$object" "$observation_status" >&2; exit 1; }; fi
+  n=$((n + 1)); decoded="$scratch/$n.decoded"
+  run_capture "$decoded" "$scratch/$n.decode.err" wasm-objdump -d "$object"; status=$capture_status
+  [[ "$status" == 0 ]] || failed wasm-objdump "$status" "$object" "$decoded" "$scratch/$n.decode.err"
+  run_capture "$scratch/$n.atomic.matches" "$scratch/$n.atomic.err" rg -n 'atomic\.' "$decoded"; status=$capture_status
+  if [[ "$status" == 0 ]]; then cat "$scratch/$n.atomic.matches" >&2; printf 'browser-local fallback contains an atomic opcode: %s\n' "$object" >&2; exit 1; elif [[ "$status" != 1 ]]; then failed 'opcode scan' "$status" "$object" "$scratch/$n.atomic.matches" "$scratch/$n.atomic.err"; fi
+  run_capture "$scratch/$n.observe.matches" "$scratch/$n.observe.err" rg -l --binary observe "$object"; status=$capture_status
+  if [[ "$status" == 0 ]]; then observation_match=1; elif [[ "$status" != 1 ]]; then failed 'observation object search' "$status" "$object" "$scratch/$n.observe.matches" "$scratch/$n.observe.err"; fi
 done
 if [[ "$observation_match" == 0 ]]; then
-    if rg -q 'ObservationSlot' crates/engine/src/realtime/observe.rs; then :; else source_status=$?; if [[ "$source_status" == 1 ]]; then printf 'observation symbol absent from objects and source fallback\n' >&2; else printf 'source ObservationSlot search failed (status %s)\n' "$source_status" >&2; fi; exit 1; fi
+  run_capture "$scratch/source.matches" "$scratch/source.err" rg -n ObservationSlot crates/engine/src/realtime/observe.rs; status=$capture_status
+  if [[ "$status" == 1 ]]; then printf 'observation symbol absent from objects and source fallback\n' >&2; exit 1; elif [[ "$status" != 0 ]]; then failed 'source ObservationSlot search' "$status" crates/engine/src/realtime/observe.rs "$scratch/source.matches" "$scratch/source.err"; fi
 fi
 keep_target=0
 printf 'wasm realtime atomics: ok (%s objects, scalar NON-LTO engine/source/target_smoke)\n' "${#objects[@]}"
