@@ -270,3 +270,7 @@ Validation of the coherent tranche:
 - `git diff --check` passes; only this spec and `sdk/test/browser-pcm-evals.mjs` changed.
 
 Implementation is paused at this green exact-path checkpoint for root commit/push and separate Astra review. Historical FAIL verdicts stand; this record makes no independent-review PASS, remote closure, publication or app end-to-end claim.
+
+## Renewed independent Astra medium review — PASS
+
+Dedicated reviewer independently passed `783b4266`. All five known escaping mutations now fail at their intended assertions, including actual retry-submit count and malformed supplied writer capacity. Focused tests and fresh strict-DOM/runtime packed consumer pass. The six generated artifacts remain identical and no production/prelude rewrite was required. This SDK boundary is complete and reviewed; downstream app integration is still required for the overall goal. Prior failed attempts remain historical evidence. Full review attached to PR#398.
