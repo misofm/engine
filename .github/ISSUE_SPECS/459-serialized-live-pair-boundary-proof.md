@@ -98,3 +98,11 @@ Luna gets one coherent implementation pass in this new bounded child, followed b
 Review used read-only source/Git/GitHub inspection and wrote only this /tmp report. No tests/builds/timing or repository/GitHub mutations were performed.
 
 Root assigns Luna attempt 1 for this new bounded proof outcome. Execute all three finite cases through the approved existing fixtures and private feature path; inherited separate-path tests or prose cannot replace listed assertions. Stop at a coherent compiling focused-green checkpoint for root commit/push before layering. No production redesign, full qualification, timing or parent closure is authorized during this implementation pass.
+
+## Luna attempt 1 intermediate recovery checkpoint
+
+Luna paused at a focused-green tranche, not a completed proof outcome. The four changed source paths are builtins-compiler lib and existing allocation tracker, plus host-web Cargo feature/test files. The tranche adds feature-gated thread-local pair branch witnesses, the nondefault host feature, a nine-track real acknowledgement/dispatch test, per-call sequence branch assertions and realloc activity coverage.
+
+Luna reports passing builtins-compiler library with test-support, allocation tracker tests, the focused host acknowledgement test, normal host-web check, formatting and diff hygiene. Root verified the exact-path delta and clean diff hygiene before checkpointing. Final retained commands/status/logs and all remaining Case A/B/C obligations are still required; this record does not infer complete graph, observation, seam or allocation coverage from the reported focused passes.
+
+Root commits/pushes this recovery tranche before resuming the SAME Luna attempt 1. No interim adversarial verdict, new retry, source PASS or qualification authority is created. Production policy/arithmetic/resource behavior remains frozen.

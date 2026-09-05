@@ -103,6 +103,11 @@ unsafe impl GlobalAlloc for TrackingAllocator {
 
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
         if ARMED.with(Cell::get) {
+            // Count realloc as allocation activity as well. A realloc may release the old
+            // layout internally, so the free counter is conservatively incremented too; this
+            // keeps the zero gate from being bypassed by a direct realloc call.
+            LIVE_ALLOCS.set(LIVE_ALLOCS.get() + 1);
+            LIVE_FREES.set(LIVE_FREES.get() + 1);
             test_only_record_phase_two_allocation(layout);
         }
         // SAFETY: forwards the original allocation arguments unchanged.
@@ -122,7 +127,8 @@ fn actual_serialized_composite_render_allocates_and_frees_nothing() {
     LIVE_ALLOCS.set(0);
     LIVE_FREES.set(0);
     armed(|| {
-        let probe = Vec::<u8>::with_capacity(core::hint::black_box(64));
+        let mut probe = Vec::<u8>::with_capacity(core::hint::black_box(64));
+        probe.reserve(128);
         drop(probe);
     });
     assert!(

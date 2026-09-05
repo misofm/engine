@@ -663,18 +663,55 @@ struct FaderMatrixBankProcessor {
     matrix: Box<MatrixBankProcessor>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static FADER_MATRIX_PROCESS_CALLS: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static FADER_MATRIX_FACTORY_CALLS: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static FADER_MATRIX_FUSED_CALLS: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static FADER_MATRIX_FALLBACK_CALLS: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
+
+// Render-local witnesses for the serialized-pair proof. These are deliberately thread-local:
+// a host test can reset and read the counters around one real render without a process-global
+// diagnostic surface or interference from another test thread.
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static FADER_MATRIX_LIVE_WITNESS: std::cell::Cell<[u64; 4]> = const { std::cell::Cell::new([0; 4]) };
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[doc(hidden)]
+pub struct TestOnlyFaderMatrixWitness {
+    pub process_calls: u64,
+    pub fused_calls: u64,
+    pub fallback_calls: u64,
+    pub factory_calls: u64,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn test_only_reset_fader_matrix_witness() {
+    FADER_MATRIX_LIVE_WITNESS.with(|value| value.set([0; 4]));
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[must_use]
+#[doc(hidden)]
+pub fn test_only_fader_matrix_witness() -> TestOnlyFaderMatrixWitness {
+    let values = FADER_MATRIX_LIVE_WITNESS.with(std::cell::Cell::get);
+    TestOnlyFaderMatrixWitness {
+        process_calls: values[0],
+        fused_calls: values[1],
+        fallback_calls: values[2],
+        factory_calls: values[3],
+    }
+}
 
 fn drain_fader_controls(
     bank: &mut BuiltinFaderBank,
@@ -745,8 +782,14 @@ fn make_fader_matrix(
     {
         return Err((fader, matrix));
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     FADER_MATRIX_FACTORY_CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    #[cfg(any(test, feature = "test-support"))]
+    FADER_MATRIX_LIVE_WITNESS.with(|value| {
+        let mut counters = value.get();
+        counters[3] = counters[3].saturating_add(1);
+        value.set(counters);
+    });
     Ok(Box::new(FaderMatrixBankProcessor { fader, matrix }))
 }
 
@@ -767,8 +810,14 @@ impl GraphPreparedBuiltinBankProcessor for FaderMatrixBankProcessor {
         frames: u32,
         first_sample: u64,
     ) -> Result<(), RenderError> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         FADER_MATRIX_PROCESS_CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        #[cfg(any(test, feature = "test-support"))]
+        FADER_MATRIX_LIVE_WITNESS.with(|value| {
+            let mut counters = value.get();
+            counters[0] = counters[0].saturating_add(1);
+            value.set(counters);
+        });
         let Self { fader, matrix } = self;
         drain_fader_controls(&mut fader.bank, &mut fader.controls)?;
         if let Err(error) = drain_matrix_controls(&mut matrix.bank, &mut matrix.controls) {
@@ -781,13 +830,25 @@ impl GraphPreparedBuiltinBankProcessor for FaderMatrixBankProcessor {
             .bank
             .try_process_settled_with_matrix(&mut matrix.bank, left, right, frames)
         {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             FADER_MATRIX_FALLBACK_CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            #[cfg(any(test, feature = "test-support"))]
+            FADER_MATRIX_LIVE_WITNESS.with(|value| {
+                let mut counters = value.get();
+                counters[2] = counters[2].saturating_add(1);
+                value.set(counters);
+            });
             fader.bank.process(left, right, frames);
             matrix.bank.process(left, right, frames);
         } else {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             FADER_MATRIX_FUSED_CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            #[cfg(any(test, feature = "test-support"))]
+            FADER_MATRIX_LIVE_WITNESS.with(|value| {
+                let mut counters = value.get();
+                counters[1] = counters[1].saturating_add(1);
+                value.set(counters);
+            });
         }
         fader.process_calls = fader.process_calls.saturating_add(1);
         fader.frames_processed = fader.frames_processed.saturating_add(u64::from(frames));
@@ -4740,6 +4801,8 @@ mod tests {
     }
 
     fn assert_pair_call(fixture: &mut PairFixture, frames: u32, seed: u32) {
+        FADER_MATRIX_FUSED_CALLS.store(0, Ordering::Relaxed);
+        FADER_MATRIX_FALLBACK_CALLS.store(0, Ordering::Relaxed);
         let samples = fixture.lanes * frames as usize;
         let input_l = (0..samples)
             .map(|i| f32::from_bits(0x3e80_0000 + ((i as u32 + seed) & 0x7fff)))
@@ -4753,6 +4816,10 @@ mod tests {
             .paired
             .process(&mut paired_l, &mut paired_r, frames, 0)
             .expect("paired process");
+        let fused = FADER_MATRIX_FUSED_CALLS.load(Ordering::Relaxed);
+        let fallback = FADER_MATRIX_FALLBACK_CALLS.load(Ordering::Relaxed);
+        assert_eq!(fused + fallback, 1, "one actual dispatch branch per call");
+        assert!(fused == 1 || fallback == 1, "branch witness is exclusive");
         fixture
             .separate_fader
             .process(&mut separate_l, &mut separate_r, frames, 0)
@@ -4935,8 +5002,6 @@ mod tests {
             fixture.separate_fader.bank.reset();
             fixture.separate_matrix.bank.reset();
             assert_pair_call(&mut fixture, 1, 7);
-            assert!(FADER_MATRIX_FUSED_CALLS.load(Ordering::Relaxed) >= 4);
-            assert!(FADER_MATRIX_FALLBACK_CALLS.load(Ordering::Relaxed) >= 2);
             assert_eq!(fixture.paired.lane_symmetry(0), SEAM_SIDE_WITNESS);
             assert_eq!(fixture.paired.seam_side(), SeamSide::SeamSide);
             assert!(!fixture.paired.supports_mono_collapse());
