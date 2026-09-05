@@ -153,6 +153,59 @@ for row in '1|benchmark source validation failed (status 75)' '2|cross-file outp
     rg -F "$operation" "$python_log" >/dev/null || exit 96
 done
 
+# The second Python authority read must be exercised by the unchanged validator program itself.
+# The first invocation remains an unchanged success; only Path.read_text for the exact validator
+# path is denied in a bootstrap around the captured stdin program.
+hook_count="$scratch/python-hook-count"
+hook_program="$scratch/python-hook-program.py"
+hook_bootstrap="$scratch/python-read-hook.py"
+hook_marker="$scratch/python-read-reached"
+cat >"$scratch/python-bin/python3-hook" <<EOF
+#!/usr/bin/env bash
+count=0
+[[ ! -f "$hook_count" ]] || read -r count <"$hook_count"
+count=\$((count + 1)); printf '%s\\n' "\$count" >"$hook_count"
+if [[ "\$count" -eq 2 ]]; then
+    args=("\$@")
+    cat >"$hook_program"
+    exec "$python_bin" -I -B "$hook_bootstrap" "\${args[@]:3}"
+fi
+exec "$python_bin" "\$@"
+EOF
+chmod 755 "$scratch/python-bin/python3-hook"
+cat >"$hook_bootstrap" <<'PY'
+import os, pathlib, sys
+target = pathlib.Path(os.environ["MISO_READ_TARGET"]).resolve()
+marker = pathlib.Path(os.environ["MISO_READ_MARKER"])
+original = pathlib.Path.read_text
+def read_text(self, *args, **kwargs):
+    if self.resolve() == target:
+        marker.write_text("reached-read-hook\n", encoding="utf-8")
+        raise PermissionError(f"Permission denied: {self.resolve()}")
+    return original(self, *args, **kwargs)
+pathlib.Path.read_text = read_text
+sys.argv = ["-"] + sys.argv[1:]
+program = pathlib.Path(os.environ["MISO_READ_PROGRAM"]).read_text(encoding="utf-8")
+exec(compile(program, "<stdin>", "exec"), {"__name__": "__main__", "__file__": "<stdin>"})
+PY
+: >"$hook_count"
+rm -f "$hook_marker"
+hook_log="$scratch/python-second-read.log"
+rm -f "$scratch/python-bin/python3"
+ln -s python3-hook "$scratch/python-bin/python3"
+if MISO_READ_TARGET="$standalone/scripts/effect-interchange-benchmark-108-validator.py" \
+    MISO_READ_MARKER="$hook_marker" MISO_READ_PROGRAM="$hook_program" \
+    PATH="$scratch/python-bin:$PATH" bash "$standalone/scripts/check-effect-interchange-benchmark-108.sh" "$standalone" >"$hook_log" 2>&1; then
+    printf 'effect interchange benchmark 108 Python read unexpectedly succeeded\n' >&2; exit 97
+else hook_status=$?; fi
+[[ "$hook_status" -eq 1 ]] || { cat "$hook_log" >&2; exit 96; }
+rg -F 'cross-file output authority validation failed (status 1)' "$hook_log" >/dev/null || exit 96
+rg -F 'PermissionError' "$hook_log" >/dev/null || exit 96
+rg -F "$standalone/scripts/effect-interchange-benchmark-108-validator.py" "$hook_log" >/dev/null || exit 96
+[[ -s "$hook_marker" ]] || exit 96
+rg -F reached-read-hook "$hook_marker" >/dev/null || exit 96
+rm -f "$scratch/python-bin/python3"
+
 precise_standalone_failure() {
     local label=$1 diagnostic=$2 log="$scratch/deletion-$1.log" status
     if bash "$standalone/scripts/check-effect-interchange-benchmark-108.sh" "$standalone" >"$log" 2>&1; then

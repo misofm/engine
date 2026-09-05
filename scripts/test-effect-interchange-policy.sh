@@ -73,14 +73,38 @@ SH
         printf 'effect interchange producer failure setup/diagnostic mismatch: %s status=%s\n' "$label" "$status" >&2
         cat "$log" >&2; exit 96
     fi
+    expected_payload="$temp/delegate-$label.out"
+    cp "$temp/delegate-output" "$expected_payload"
+    expected_error="$temp/delegate-$label.err"
+    cp "$temp/delegate-error" "$expected_error"
     if [[ "$mode" == complete ]]; then
-        python3 -I -B - "$temp/delegate-output" "$log" <<'PY' || exit 96
+        payload_assertion="$temp/payload-assertion.py"
+        if [[ ! -f "$payload_assertion" ]]; then
+            cat >"$payload_assertion" <<'PY'
 import collections, pathlib, sys
-expected = collections.Counter(pathlib.Path(sys.argv[1]).read_text().splitlines())
-actual = collections.Counter(pathlib.Path(sys.argv[2]).read_text().splitlines())
-if any(actual[line] < count for line, count in expected.items()):
-    raise SystemExit("complete producer payload was not preserved")
+expected_path, log_path, delegate_error_path, label, operation = sys.argv[1:]
+expected = pathlib.Path(expected_path).read_bytes()
+log = pathlib.Path(log_path).read_bytes()
+delegate_error = pathlib.Path(delegate_error_path).read_bytes()
+sentinel = f"producer-error-sentinel:{label}\n".encode()
+lines = log.splitlines(keepends=True)
+if not lines or operation.encode() not in lines[-1] or b"(status 73)" not in lines[-1]:
+    raise SystemExit("producer operation/status framing mismatch")
+tail = sentinel + lines[-1]
+if log.count(tail) != 1 or not log.endswith(tail):
+    raise SystemExit(f"producer diagnostic framing mismatch: {expected_path}")
+prefix = log[:-len(tail)] if tail else log
+if delegate_error and (prefix.count(delegate_error) != 1 or not prefix.endswith(delegate_error)):
+    raise SystemExit("producer stderr framing mismatch")
+payload = prefix[:-len(delegate_error)] if delegate_error else prefix
+if collections.Counter(payload.splitlines(keepends=True)) != collections.Counter(expected.splitlines(keepends=True)):
+    raise SystemExit("complete producer payload did not match exactly")
 PY
+        fi
+        diagnostic="effect interchange qualification policy failure: $operation failed (status 73)"
+        diagnostic+=$'\n'
+        python3 -I -B "$payload_assertion" "$expected_payload" "$log" "$expected_error" \
+            "$label" "$operation" || exit 96
     fi
 }
 
@@ -134,6 +158,39 @@ for row in \
         producer_failure "$label-$mode" "$tool" "$needle" "$occurrence" "$expected" "$mode" "$operation" nonempty
     done
 done
+
+# Apply the same assertion to bounded duplicate, extra and missing payload controls. This uses a
+# real nonempty capture and its real stderr/sentinel/status framing.
+producer_failure export-rg-complete-controls rg 'no_mangle' 1 0 complete 'descriptor export scan' nonempty
+payload_expected="$temp/delegate-export-rg-complete-controls.out"
+payload_error="$temp/delegate-error"
+payload_assertion="$temp/payload-assertion.py"
+payload_control_log="$temp/payload-control.log"
+payload_sentinel=$'producer-error-sentinel:export-rg-complete-controls\n'
+payload_diagnostic=$'effect interchange qualification policy failure: descriptor export scan failed (status 73)\n'
+cat "$payload_expected" "$payload_error" >"$payload_control_log"
+printf '%s%s' "$payload_sentinel" "$payload_diagnostic" >>"$payload_control_log"
+payload_control() {
+    local label=$1 payload=$2
+    if python3 -I -B "$payload_assertion" "$payload" "$payload_control_log" "$payload_error" \
+        export-rg-complete-controls 'descriptor export scan' >/dev/null 2>&1; then
+        printf 'effect interchange payload control unexpectedly passed: %s\n' "$label" >&2
+        exit 96
+    fi
+}
+cp "$payload_expected" "$temp/payload-duplicate"
+head -n 1 "$payload_expected" >>"$temp/payload-duplicate"
+cp "$payload_expected" "$temp/payload-extra"
+printf 'payload-extra-row\n' >>"$temp/payload-extra"
+awk 'NR > 1' "$payload_expected" >"$temp/payload-missing"
+payload_control duplicate "$temp/payload-duplicate"
+payload_control extra "$temp/payload-extra"
+payload_control missing "$temp/payload-missing"
+if [[ "$(wc -l <"$payload_expected")" -gt 1 ]]; then
+    tac "$payload_expected" >"$temp/payload-reversed"
+    python3 -I -B "$payload_assertion" "$temp/payload-reversed" "$payload_control_log" "$payload_error" \
+        export-rg-complete-controls 'descriptor export scan' >/dev/null 2>&1 || exit 96
+fi
 
 producer_failure dependency-error rg 'tools/bench/Cargo.toml' 1 1 empty 'benchmark dependency scan' empty
 producer_failure production-manifest-error rg 'hosts/' 1 1 empty 'production dependency scan' empty

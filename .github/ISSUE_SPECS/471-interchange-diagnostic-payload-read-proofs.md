@@ -64,3 +64,20 @@ The original two production namespace/migration controls and all accepted direct
 No tests, builds, timing, repository edits or Git/GitHub mutations were performed.
 
 Root assigns Luna attempt 1 in `/home/bl/misofm/engine-471-proof` only. Root owns commits and GitHub. Pause after the coherent focused-green tranche for exact-path checkpoint; no additional pass may be layered before checkpoint.
+
+## Luna attempt 1 focused evidence
+
+The existing producer assertion now removes only one exact sentinel plus the final operation/status
+line, and independently removes the captured delegate stderr before comparing
+`Counter(payload)` with `Counter(expected)` for equality. Duplicate, extra, missing and (when the
+capture has multiple rows) reversed-row assertion controls use the same real nonempty capture;
+the first three fail at payload equality and the reversed multiset passes.
+
+The standalone108 suite retains its existing Python status injections and adds one actual second
+invocation hook. The first invocation delegates unchanged and must succeed; the second captures
+the unchanged stdin program and original script arguments, runs them under `-I -B`, and replaces
+`Path.read_text` only for the resolved validator path. The hook records a reached marker and raises
+`PermissionError` naming that path. The suite requires status 1, the exact cross-file diagnostic,
+path and marker evidence; unexpected success is 97 and setup/status/diagnostic mismatch is 96.
+
+Focused commands and statuses are retained in `/tmp/471-luna1-{syntax,qualification,108,108-policy,policy}.{command,log,status}`. With `PATH=/home/bl/.cargo/bin:$PATH` where required, all five statuses are 0. The parent policy run invokes the existing standalone108 and fake-only lifecycle children. No real runner, timing, build, or Git/GitHub operation ran.
