@@ -55,6 +55,19 @@ gate_scan_collect() {
     esac
 }
 
+gate_scan_text_collect() {
+    local description="$1" pattern="$2" input="$3" output rc
+    if output="$(rg -n "$pattern" <<<"$input" 2>&1)"; then rc=0; else rc=$?; fi
+    case "$rc" in
+        0|1) printf '%s' "$output"; return 0 ;;
+        *)
+            printf '%s\n' "$output" >&2
+            gate_fail "$description scan errored (rg exit $rc)"
+            return "$rc"
+            ;;
+    esac
+}
+
 gate_scan_required() {
     local description="$1" pattern="$2" glob="$3"
     shift 3
@@ -71,6 +84,48 @@ gate_scan_required() {
     printf '%s\n' "$output" >&2
     gate_fail "$description search failed (rg exit $rc)"
     return "$rc"
+}
+
+# Capture a filesystem enumeration.  find's zero-row result is valid for callers that have
+# optional populations; callers requiring a population must check the captured value themselves.
+# Any find failure is fatal, including useful output emitted before the failure.
+gate_find_collect() {
+    local description="$1" output rc
+    shift
+    if output="$(find "$@" 2>&1)"; then rc=0; else rc=$?; fi
+    if [[ "$rc" == 0 ]]; then
+        printf '%s' "$output"
+        return 0
+    fi
+    printf '%s\n' "$output" >&2
+    gate_fail "$description traversal errored (find status $rc)"
+    return "$rc"
+}
+
+gate_sort_lines() {
+    local description="$1" input="$2" output rc
+    if output="$(printf '%s\n' "$input" | sort)"; then rc=0; else rc=$?; fi
+    if [[ "$rc" == 0 ]]; then
+        printf '%s' "$output"
+        return 0
+    fi
+    printf '%s\n' "$output" >&2
+    gate_fail "$description sort errored (sort status $rc)"
+    return "$rc"
+}
+
+gate_unique_nonempty_lines() {
+    local description="$1" input="$2" output rc
+    if output="$(printf '%s\n' "$input" | awk 'NF && !seen[$0]++')"; then rc=0; else rc=$?; fi
+    [[ "$rc" == 0 ]] || { gate_fail "$description uniqueness filter errored (awk status $rc)"; return "$rc"; }
+    printf '%s' "$output"
+}
+
+gate_join_lines() {
+    local description="$1" delimiter="$2" input="$3" output rc
+    if output="$(printf '%s\n' "$input" | paste -sd "$delimiter" -)"; then rc=0; else rc=$?; fi
+    [[ "$rc" == 0 ]] || { gate_fail "$description join errored (paste status $rc)"; return "$rc"; }
+    printf '%s' "$output"
 }
 
 # Exclude allowlisted rows from already-collected text. An empty result is valid, but an rg
@@ -106,9 +161,9 @@ gate_count_lines() {
 
 gate_toml_dependencies() {
     local manifest="$1" mode="${2:-rack}" extracted output rc awk_program
-    if [[ "$mode" == plain ]]; then
+    if [[ "$mode" == plain || "$mode" == plain-target ]]; then
         awk_program='
-            /^\[dependencies\]$/ { in_dependencies = 1; next }
+            /^\[dependencies\]$/ || ("'"$mode"'" == "plain-target" && /^\[target[.].*[.]dependencies\]$/) { in_dependencies = 1; next }
             /^\[/ { in_dependencies = 0 }
             in_dependencies && /^[A-Za-z0-9_-]+(\.workspace)?[[:space:]]*=/ {
                 value = $0; sub(/[[:space:]]*=.*$/, "", value); sub(/\.workspace$/, "", value); print value

@@ -354,6 +354,7 @@ jobs:
           bash scripts/check-builtins-policy.sh
           bash scripts/test-builtins-policy.sh
           bash scripts/check-graph-policy.sh
+          bash scripts/test-graph-policy.sh
       - name: Effect runtime dependency-boundary and fixture policy and mutation tests
         run: |
           bash scripts/check-effect-runtime-policy.sh
@@ -380,7 +381,9 @@ jobs:
           bash scripts/test-native-pcm-runner-v1-policy.sh
           bash scripts/test-native-pcm-runner-portability-v1-policy.sh
       - name: Conformance boundaries
-        run: bash scripts/check-conformance-boundaries.sh
+        run: |
+          bash scripts/check-conformance-boundaries.sh
+          bash scripts/test-conformance-boundaries.sh
       - name: Step vocabulary uniformity and self-test
         run: |
           python3 -B scripts/check-step-vocabulary.py
