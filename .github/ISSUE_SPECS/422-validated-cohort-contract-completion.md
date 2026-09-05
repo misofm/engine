@@ -35,3 +35,19 @@ Astra approves this numbered, synchronized amendment before assignment. Under us
 This is #422, created and synchronized after parent #419 exhausted its three attempts. Recovery source is `aafa59a17c4292f8f1837eac557e06e47305f1a4`; current main integration is frozen before assignment. Astra supplied the exact complete-stride capacity and dispatch contract above. Luna owns one fresh bounded attempt; root owns evidence/parent synchronization, checkpoints and the retained parent qualification/delivery. No source edits preceded this numbered brief.
 
 Integrated recovery base is `8aa9c062eb501cb24f2a1eba9954387e60fd1815`, which merges current main `a0e4d123a038160b4f5934dac14aacc72c9fbbf2` without runtime conflicts. Worktree `/home/bl/misofm/engine-419` now carries dedicated branch `codex/422-cohort-contract`; the exhausted parent branch and all checkpoints remain preserved. No timing or qualification invocation has begun.
+
+## Astra numbered scope approval
+
+# Astra numbered #422 brief approval
+
+**PASS for fresh Luna attempt-1 assignment at planning checkpoint `0e00c42416c9adfef1cbf75a76b91a81730d96ed`.** This is scope approval, not implementation or qualification PASS.
+
+The actual numbered #422 body preserves the approved complete-stride formula `(max_id + 1) * stride` with checked arithmetic, bounded private shape and exact accepted/rejected boundary tests, default/override equivalence and a test-only wrapper exercising actual graph cohort dispatch while refusing compatibility callbacks. Existing D9, signed-zero, mixed-order, nonpartial metadata and allocator evidence is retained. Allowed source paths are the same narrow rack/graph boundary; no new runtime instrumentation, unsafe, lane algorithm or framework is authorized.
+
+The numbered recovery record freezes source integration `8aa9c062eb501cb24f2a1eba9954387e60fd1815` from exhausted source `aafa59a17c4292f8f1837eac557e06e47305f1a4` plus accepted main `a0e4d123a038160b4f5934dac14aacc72c9fbbf2`. Read-only worktree metadata confirms dedicated `codex/422-cohort-contract` at the stated planning checkpoint. Root records the normal integration and preserved exhausted branch; no history rewrite is requested.
+
+Parent #419 explicitly remains OPEN, records the three-attempt hard stop and delegates only this cohesive completion to #422. It retains the entire RT-2 product, arithmetic, realtime, identity, allocation and final workspace/target/artifact/browser/single-measurement/PR/CI qualification contract. The explicit integrated-delivery rule prevents a standalone runtime merge bypass. No obligation disappears with the new child.
+
+Root may now assign Luna one fresh bounded coherent pass under #422. Root checkpoints and synchronizes it before Astra attempt review; Sol retries only after FAIL, maximum three attempts in this separately frozen scope. No timing or broad qualification is authorized by this planning approval.
+
+Review inspected the numbered local spec, parent hard-stop amendment and worktree reference metadata only. Remote synchronization is root-recorded, not independently re-queried in this no-GitHub task. No implementation, tests, Cargo, Git command, GitHub operation or timing occurred.
