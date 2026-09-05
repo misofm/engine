@@ -1,0 +1,90 @@
++ set -euo pipefail
++ [[ 0 -eq 0 ]]
++ script_directory=scripts
++ [[ scripts != \s\c\r\i\p\t\s\/\t\e\s\t\-\e\f\f\e\c\t\-\i\n\t\e\r\c\h\a\n\g\e\-\b\e\n\c\h\m\a\r\k\-\1\0\8\-\p\o\l\i\c\y\.\s\h ]]
+++ cd scripts/..
+++ pwd
++ root=/home/bl/misofm/engine-455-plan
++ source /home/bl/misofm/engine-455-plan/scripts/check-effect-interchange-benchmark-108.sh
+++ [[ /home/bl/misofm/engine-455-plan/scripts/check-effect-interchange-benchmark-108.sh == \s\c\r\i\p\t\s\/\t\e\s\t\-\e\f\f\e\c\t\-\i\n\t\e\r\c\h\a\n\g\e\-\b\e\n\c\h\m\a\r\k\-\1\0\8\-\p\o\l\i\c\y\.\s\h ]]
+++ [[ /home/bl/misofm/engine-455-plan/scripts/check-effect-interchange-benchmark-108.sh != \s\c\r\i\p\t\s\/\t\e\s\t\-\e\f\f\e\c\t\-\i\n\t\e\r\c\h\a\n\g\e\-\b\e\n\c\h\m\a\r\k\-\1\0\8\-\p\o\l\i\c\y\.\s\h ]]
+++ return 0
+++ mktemp -d
++ scratch=/tmp/tmp.gqxcNpx6jF
++ trap 'rm -rf -- "$scratch"' EXIT
++ mutate_source stale-rate 'migration_quality(44_100, 1)' 'migration_quality(176_400, 1)'
++ local name=stale-rate 'from=migration_quality(44_100, 1)' 'to=migration_quality(176_400, 1)'
++ local candidate=/tmp/tmp.gqxcNpx6jF/stale-rate.rs
++ cp /home/bl/misofm/engine-455-plan/tools/bench/src/effect_interchange.rs /tmp/tmp.gqxcNpx6jF/stale-rate.rs
++ python3 -I -B - /tmp/tmp.gqxcNpx6jF/stale-rate.rs 'migration_quality(44_100, 1)' 'migration_quality(176_400, 1)'
++ expect_failure stale-rate validate_benchmark_source /tmp/tmp.gqxcNpx6jF/stale-rate.rs
++ local label=stale-rate
++ shift
++ validate_benchmark_source /tmp/tmp.gqxcNpx6jF/stale-rate.rs
++ mutate_source duplicate-rate 'migration_quality(88_200, 2)' 'migration_quality(48_000, 2)'
++ local name=duplicate-rate 'from=migration_quality(88_200, 2)' 'to=migration_quality(48_000, 2)'
++ local candidate=/tmp/tmp.gqxcNpx6jF/duplicate-rate.rs
++ cp /home/bl/misofm/engine-455-plan/tools/bench/src/effect_interchange.rs /tmp/tmp.gqxcNpx6jF/duplicate-rate.rs
++ python3 -I -B - /tmp/tmp.gqxcNpx6jF/duplicate-rate.rs 'migration_quality(88_200, 2)' 'migration_quality(48_000, 2)'
++ expect_failure duplicate-rate validate_benchmark_source /tmp/tmp.gqxcNpx6jF/duplicate-rate.rs
++ local label=duplicate-rate
++ shift
++ validate_benchmark_source /tmp/tmp.gqxcNpx6jF/duplicate-rate.rs
++ mutate_source missing-rate 'migration_quality(96_000, 3),' ''
++ local name=missing-rate 'from=migration_quality(96_000, 3),' to=
++ local candidate=/tmp/tmp.gqxcNpx6jF/missing-rate.rs
++ cp /home/bl/misofm/engine-455-plan/tools/bench/src/effect_interchange.rs /tmp/tmp.gqxcNpx6jF/missing-rate.rs
++ python3 -I -B - /tmp/tmp.gqxcNpx6jF/missing-rate.rs 'migration_quality(96_000, 3),' ''
++ expect_failure missing-rate validate_benchmark_source /tmp/tmp.gqxcNpx6jF/missing-rate.rs
++ local label=missing-rate
++ shift
++ validate_benchmark_source /tmp/tmp.gqxcNpx6jF/missing-rate.rs
++ mutate_source old-digest 5f23e630182137426fdfe01b74861bdff779b6738bfae8f670359ad0e9ea2777 350acfa6e348c27a01afcb9efbd40c51a697aac8bbb6a5fe19dc1eb3c52bf441
++ local name=old-digest from=5f23e630182137426fdfe01b74861bdff779b6738bfae8f670359ad0e9ea2777 to=350acfa6e348c27a01afcb9efbd40c51a697aac8bbb6a5fe19dc1eb3c52bf441
++ local candidate=/tmp/tmp.gqxcNpx6jF/old-digest.rs
++ cp /home/bl/misofm/engine-455-plan/tools/bench/src/effect_interchange.rs /tmp/tmp.gqxcNpx6jF/old-digest.rs
++ python3 -I -B - /tmp/tmp.gqxcNpx6jF/old-digest.rs 5f23e630182137426fdfe01b74861bdff779b6738bfae8f670359ad0e9ea2777 350acfa6e348c27a01afcb9efbd40c51a697aac8bbb6a5fe19dc1eb3c52bf441
++ expect_failure old-digest validate_benchmark_source /tmp/tmp.gqxcNpx6jF/old-digest.rs
++ local label=old-digest
++ shift
++ validate_benchmark_source /tmp/tmp.gqxcNpx6jF/old-digest.rs
++ mutate_source issue-81 '\"issue\":108' '\"issue\":81'
++ local name=issue-81 'from=\"issue\":108' 'to=\"issue\":81'
++ local candidate=/tmp/tmp.gqxcNpx6jF/issue-81.rs
++ cp /home/bl/misofm/engine-455-plan/tools/bench/src/effect_interchange.rs /tmp/tmp.gqxcNpx6jF/issue-81.rs
++ python3 -I -B - /tmp/tmp.gqxcNpx6jF/issue-81.rs '\"issue\":108' '\"issue\":81'
++ expect_failure issue-81 validate_benchmark_source /tmp/tmp.gqxcNpx6jF/issue-81.rs
++ local label=issue-81
++ shift
++ validate_benchmark_source /tmp/tmp.gqxcNpx6jF/issue-81.rs
++ namespace=/tmp/tmp.gqxcNpx6jF/effect-interchange-benchmark-108-validator.py
++ cp /home/bl/misofm/engine-455-plan/scripts/effect-interchange-benchmark-108-validator.py /tmp/tmp.gqxcNpx6jF/effect-interchange-benchmark-108-validator.py
++ printf '\n# artifact_dir=target/issue081\n'
++ expect_failure issue081-namespace validate_successor_namespace /tmp/tmp.gqxcNpx6jF/effect-interchange-benchmark-108-validator.py
++ local label=issue081-namespace
++ shift
++ validate_successor_namespace /tmp/tmp.gqxcNpx6jF/effect-interchange-benchmark-108-validator.py
++ namespace_error=/tmp/tmp.gqxcNpx6jF/effect-interchange-benchmark-108-validator-error.py
++ cp /home/bl/misofm/engine-455-plan/scripts/effect-interchange-benchmark-108-validator.py /tmp/tmp.gqxcNpx6jF/effect-interchange-benchmark-108-validator-error.py
++ printf '\n# namespace-error-sentinel\n'
+++ command -v rg
++ rg_bin=/home/bl/.codex/packages/standalone/releases/0.153.2-x86_64-unknown-linux-musl/codex-path/rg
++ mkdir -p /tmp/tmp.gqxcNpx6jF/namespace-bin
++ cat
++ chmod 755 /tmp/tmp.gqxcNpx6jF/namespace-bin/rg
++ assert_namespace_error /home/bl/misofm/engine-455-plan/scripts/check-effect-interchange-benchmark-108.sh
++ local checker=/home/bl/misofm/engine-455-plan/scripts/check-effect-interchange-benchmark-108.sh log=/tmp/tmp.gqxcNpx6jF/namespace-control.log status
++ env PATH=/tmp/tmp.gqxcNpx6jF/namespace-bin:/home/bl/.cargo/bin:/home/bl/.local/bin:/home/bl/.codex/packages/standalone/releases/0.153.2-x86_64-unknown-linux-musl/codex-path:/home/bl/.codex/tmp/arg0/codex-arg0CWD760:/home/bl/.local/bin:/home/bl/.opencode/bin:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.opencode/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin bash -c 'source "$1"; (validate_benchmark_source "$2" || exit $?; validate_successor_namespace "$3" || exit $?)' _ /home/bl/misofm/engine-455-plan/scripts/check-effect-interchange-benchmark-108.sh /home/bl/misofm/engine-455-plan/tools/bench/src/effect_interchange.rs /tmp/tmp.gqxcNpx6jF/effect-interchange-benchmark-108-validator-error.py
++ status=73
++ [[ 73 -eq 0 ]]
++ [[ 73 -eq 73 ]]
++ rg -F namespace-error-sentinel /tmp/tmp.gqxcNpx6jF/namespace-control.log
++ rg -F 'namespace scan failed (rg status 73)' /tmp/tmp.gqxcNpx6jF/namespace-control.log
++ mutant=/tmp/tmp.gqxcNpx6jF/check-effect-interchange-benchmark-108-mutant.sh
++ cp /home/bl/misofm/engine-455-plan/scripts/check-effect-interchange-benchmark-108.sh /tmp/tmp.gqxcNpx6jF/check-effect-interchange-benchmark-108-mutant.sh
++ sed -i 's/if \[\[ "$status" -ne 1 \]\]; then/if [[ "$status" -eq 0 ]]; then/' /tmp/tmp.gqxcNpx6jF/check-effect-interchange-benchmark-108-mutant.sh
+++ diff -u /home/bl/misofm/engine-455-plan/scripts/check-effect-interchange-benchmark-108.sh /tmp/tmp.gqxcNpx6jF/check-effect-interchange-benchmark-108-mutant.sh
+++ rg -c '^[+-][[:space:]]*if \[\[ "$status"'
++ [[ '' -eq 2 ]]
++ exit 96
++ rm -rf -- /tmp/tmp.gqxcNpx6jF

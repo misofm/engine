@@ -1,0 +1,1 @@
+['bash', '-n', 'scripts/check-effect-interchange-qualification.sh', 'scripts/check-effect-interchange-benchmark-108.sh', 'scripts/test-effect-interchange-policy.sh', 'scripts/test-effect-interchange-benchmark-108-policy.sh', 'scripts/test-effect-interchange-benchmark.sh']
