@@ -126,3 +126,21 @@ With `PATH=/home/bl/.cargo/bin:$PATH`, syntax, both production checkers, the foc
 policy and the parent policy all returned status 0. The parent recorded both inherited child
 completions, including the fake-only lifecycle. No real runner, timing, build, Git or GitHub
 operation ran.
+
+## Astra Sol attempt 2 acceptance and integrated qualification
+
+# Astra #471 Sol attempt 2 review
+
+**PASS for source acceptance and inherited #455 delivery qualification.** Exact reviewed head `c950ce45a42e4c938e4ab6ca33dfc57980461e34`, engine-471-proof. Full child contract and all finite Luna1 findings reviewed. Only the two allowed suites and child evidence changed; accepted production checkers, helper, runner/validators/pins, CI wiring, directed input selectors and two production guard mutants remain frozen.
+
+Payload assertion now runs in both complete/error-only modes. It binds the exact full known operation/status diagnostic, unique sentinel and separately captured delegate stderr suffix, then compares the complete payload Counter with fixed expected bytes including duplicate multiplicity. Empty mode expects no forwarded stdout but still validates the actual delegate before suppression. Dynamic operation labels now include their exact workload/seed/target/API subject, and the081 wording is explicitly bound rather than derived from an inexact observed suffix.
+
+The SAME assertion first accepts the actual valid captured diagnostic. Three copies alter only that diagnostic's payload (duplicate/extra/missing) while the independently captured expected payload and real framing remain fixed. Each must return1 with the precise equality-failure message; framing/setup errors cannot earn credit. Reversed actual payload preserves complete multiset and passes. No new production mutation or matrix was added.
+
+The accepted second-Python read hook still executes the original cross-file validator program/argv under -I/-B, delegates the first invocation, and raises an actual target-specific PermissionError only at Path.read_text, with reached marker and exact status/operation/path checks. The shim is removed and a clean standalone checker run now explicitly succeeds afterward. Existing deletion/tool-fault/optional-find cases and the namespace control remain intact.
+
+Read all six `/tmp/471-sol2-{syntax,qualification,108,108-policy,policy,diff-check}.status`:0. Parent policy log reaches both existing108 and fake-only lifecycle completion; its named status-loss messages are expected counter-control failures followed by suite success, not swallowed unexpected errors. No reviewer tests, builds, timing, source edits or Git/GitHub mutations were performed.
+
+Root may freeze the integrated immutable candidate and complete parent #455's workspace, actual pushed-PR Astra review and required qualification SUCCESS. #471/#455 close only on combined delivery; #403/#306/#349 and unrelated siblings remain open. No runtime/artifact/browser or benchmark authority arises from this source PASS.
+
+Root integrated delivered main 4a814f348136bc5ba1d77bd04388a3c7163a0e10 before qualification. No inherited interchange production/checker/helper/runner/validator/fixture input changed upstream. Freeze this source for the full workspace run; no tracked edits until terminal. No timing is authorized.
