@@ -1,6 +1,6 @@
 # Complete realtime and lane policy traversal before accepting its results
 
-**READY to amend existing #410; remain queued until #417 and then #423 are merged.** Revalidated by source inspection against root-designated main `a0e4d123` and the accepted #400/#406/#407 helper API. #417 may make a narrow helper addition; freeze the actual merged #417/#423 API at assignment. Do not edit its active worktree. #423 completes the last graph extractor mode before this issue consumes the shared helper. No dependency on completion of the feature #419, except observing root's build/measurement coordination and any independently merged marker-count increase.
+**READY to amend existing #410; remain queued until #417 and then #423 are merged.** Revalidated by source inspection against root-designated main `a0e4d123` and the accepted #400/#406/#407 helper API. #417 made no helper change; #423 added the graph extraction mode. Freeze the actual merged API at assignment. Do not edit its active worktree. #423 completes the last graph extractor mode before this issue consumes the shared helper. No dependency on completion of the feature #419, except observing root's build/measurement coordination and any independently merged marker-count increase.
 
 This replaces the stale “assign after #406” scheduling text in #410 and corresponding parent #402 ordering sentence. Retain the existing title, number and full parent obligations. #410 precedes #411, then #412; #402 and #306 remain open until their entire assigned programs close. #410 owns exactly lane's two original find-backed loops in #306's nine-loop accounting, plus all producer/consumer sites of these two gates.
 
@@ -17,7 +17,7 @@ No Rust, manifests, marker roster, artifact, unrelated gate or workflow edits. R
 
 ## Reuse the actual helper API, not a proposed abstraction
 
-Available: gate_scan_collect/forbidden/required, gate_scan_text_collect, gate_filter_exclude, gate_count_lines, gate_find_collect, gate_sort_lines, gate_unique_nonempty_lines, gate_join_lines, gate_toml_dependencies (rack/plain/plain-target). Every fallible invocation must be explicitly checked by its caller, including functions used within conditionals. Source the physical script's helper before fixture-root cd and preserve the existing optional workspace-root argument/default `.` and failure prefixes.
+Available: gate_scan_collect/forbidden/required, gate_scan_text_collect, gate_filter_exclude, gate_count_lines, gate_find_collect, gate_sort_lines, gate_unique_nonempty_lines, gate_join_lines, gate_toml_dependencies (rack/plain/plain-target/graph). Every fallible invocation must be explicitly checked by its caller, including functions used within conditionals. Source the physical script's helper before fixture-root cd and preserve the existing optional workspace-root argument/default `.` and failure prefixes.
 
 Use collect then exclude for allowlisted source scans, forbidden for the direct relaxed-SIMD scan, checked find and sort for actual discoveries. Existing scan helpers emit numbered matches; they are not drop-in replacements for rg -l filename discovery, rg -c counts, exact fixed manifest searches or regex membership predicates. Keep small explicit local captures for those modes unless a genuinely minimal helper is justified. The lock grammar and workspace package-name extraction are not TOML dependency declarations: do not substitute gate_toml_dependencies or alter any of its existing modes.
 
@@ -73,3 +73,7 @@ One coherent Luna attempt, exact-path root checkpoint/push, one Astra adversaria
 Focused acceptance: both real gates; both existing extended suites; helper suite if shared API changes (already transitively required in CI); bash syntax and diff hygiene. Full workspace baseline/candidate unchanged-count comparison remains the frozen coherent delivery gate, run by root after focused PASS with isolated/serialized Cargo. No benchmarks, artifact repins, source markers or runtime changes. This brief authorizes no implementation before #417/#423 merge and root assignment.
 
 Review performed source/spec inspection only: no tests, Cargo, timing, repository/Git or GitHub operation.
+
+## Post-prerequisite base freeze
+
+PR #426 merged as `4557865ee1fa8f8381ed75e7eace91d15b649d27`; #423 and parent #401 are verified CLOSED. Root freezes this merged main as the #410 source base and integrates it normally into the existing dedicated branch. Checked marker enumeration on this base finds exactly 12 marked Rust files, 42 BEGIN and 42 END markers, so the frozen floors remain 12/42. Preserve all four accepted dependency modes and existing helper tests. Sol reviewed base readiness in `/tmp/sol-410-base-readiness.md`; Astra reconfirms this numbered amendment before Luna assignment. Luna is currently completing the independently scoped #420 attempt; no #410 implementation has begun.
