@@ -255,3 +255,25 @@ FullChainFilters/IdentityChain/MatrixRamp repeated render scopes report zero for
 and the outside-render held/dropped allocation proves allocator allocation/free liveness. No
 benchmark, timing, full workspace, target matrix or artifact qualification was run. Production
 arithmetic is unchanged, and #430/#431 remain separate while RT-4/#349 stays open.
+
+## Final source acceptance and immutable qualification freeze
+
+# Astra #429 final Sol attempt 3 source review
+
+**PASS at `74128241f91b396cdf798e287c451f9a0505cc14` for remaining mandatory delivery qualification.** This is source acceptance, not final PR/CI/target/artifact acceptance or a timing claim.
+
+Reviewed exact clean checkpoint, three-path delta, complete frozen #429 contract and both prior verdicts, retained accepted source/test evidence and final named logs. No tests, builds, timing or repository/GitHub mutations performed.
+
+All three finite blockers are resolved:
+
+1. Actual public dispatch control: the recorded temporary patch replaces the eligible public branch's fused call/counter with the original separate stage calls. The unchanged positive `full_public_chain_matches_the_three_section_reference` test fails at its existing `selected path witness` assertion, 0 versus 1, in the retained mutant log; the unused fused import corroborates the removed call. The same command/test passes after restoration. Final source restores the eligible fused counter/call exactly; the only builtin source delta from accepted attempt2 is removal of the redundant expected-panic example. No mutant remains. The spec accurately records the command, replacement, terminal 101/0 and evidence limits.
+2. Actual W4/W8 partial/holey populations now have unused lanes with zero input, gain one, unmuted flags and identity coefficient/mask values. Active lanes carry asymmetric data and parameters. Every lane is checked against the independent old primitives; unused lanes additionally assert exact positive-zero output. This establishes the requested padding convention without inventing partial temporal vectors.
+3. All three lane test entry points hold the existing CanonicalFpEnv guard across old/new execution, including the wrong-equation witnesses and new population case. Separate finite/signed-zero/subnormal/nonfinite families and same-width bit comparisons remain. No universal NaN payload or unflushed-subnormal claim was added.
+
+Retained acceptance remains applicable: production input completes before downstream fusion/recovery, static fader and settled matrix use one paired kernel traversal with original operation order, active matrix ramps take whole-call fallback, and no new unsafe/dependency/runtime queue/compiler integration is introduced. Paired public PCM/report/input state/matrix readback and recovery/retarget/reset/input-ramp/next-call eligibility fixtures are unchanged. Existing actual non-timed FullChainFilters/IdentityChain/MatrixRamp render audit and positive allocation/free proof remain unchanged and accepted.
+
+Final lane debug/release logs show all three focused tests passing. Broader lane/builtin debug/release evidence retains the public and pre-existing ramp/partition tests; clippy completes with existing configuration notices, realtime reports 42 regions/12 files and unfused reports eight registered calls. No outstanding semantic blocker remains within the frozen product scope.
+
+Root may now freeze an immutable source candidate and perform mandatory workspace, supported-target, current artifact/static/browser and remaining identity delivery gates, then request exact actual PR-head Astra review and await required CI. #430 owns live compiler/bank integration, #431 descriptive measurement; #436 remains independent. #429 alone does not close RT-4/#349, and this PASS authorizes no benchmark invocation or runner expansion.
+
+Root normally integrated delivered #411/#438 main `e7e1a37f36fe8a22c237d0bfcd3737373c6d4deb` at `8a81465ddc094e726e61f79ef6d440b03e57704d`. That integration changes only the unfused checker and accepted issue/evidence records, preserving #429's accepted runtime source. The retained integrated main baseline is the accepted #438 workspace run: 274 result blocks, 1,569 passed, zero failed, 24 ignored. Root freezes the next evidence-only checkpoint for fresh isolated full workspace and supported-target/artifact delivery. No benchmark or live bank/compiler integration is authorized; #430/#431/#436 remain open.
