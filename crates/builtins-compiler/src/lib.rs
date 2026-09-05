@@ -3490,6 +3490,12 @@ impl GraphRuntimeProcessor for ConsoleMatrixProcessor {
 impl ConsoleMatrixProcessor {
     fn drain_controls(&mut self) -> Result<(), RenderError> {
         while let Ok(record) = self.control.try_pop() {
+            #[cfg(any(test, feature = "test-support"))]
+            FADER_MATRIX_LIVE_WITNESS.with(|value| {
+                let mut counters = value.get();
+                counters[7] = counters[7].saturating_add(1);
+                value.set(counters);
+            });
             self.matrix
                 .set_target_smoothed(record.matrix, record.smoothing_samples)
                 .map_err(render_error)?;
@@ -3525,6 +3531,12 @@ impl GraphRuntimeProcessor for ConsoleFaderProcessor {
 impl ConsoleFaderProcessor {
     fn drain_controls(&mut self) -> Result<(), RenderError> {
         while let Ok(record) = self.control.try_pop() {
+            #[cfg(any(test, feature = "test-support"))]
+            FADER_MATRIX_LIVE_WITNESS.with(|value| {
+                let mut counters = value.get();
+                counters[6] = counters[6].saturating_add(1);
+                value.set(counters);
+            });
             match record {
                 TrackFaderRecord::FaderDb {
                     lanes,
@@ -3554,6 +3566,13 @@ struct ScalarPairProcessor {
 
 impl GraphRuntimeProcessor for ScalarPairProcessor {
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
+        #[cfg(any(test, feature = "test-support"))]
+        FADER_MATRIX_LIVE_WITNESS.with(|value| {
+            let mut counters = value.get();
+            counters[0] = counters[0].saturating_add(1);
+            counters[4] = counters[4].saturating_add(1);
+            value.set(counters);
+        });
         let GraphBindingBlock {
             left,
             right,
@@ -3577,14 +3596,40 @@ impl GraphRuntimeProcessor for ScalarPairProcessor {
                 .process_fader_matrix(&mut self.matrix.matrix, &mut fused_block)
         };
         if fused {
+            #[cfg(any(test, feature = "test-support"))]
+            FADER_MATRIX_LIVE_WITNESS.with(|value| {
+                let mut counters = value.get();
+                counters[1] = counters[1].saturating_add(1);
+                value.set(counters);
+            });
+            #[cfg(any(test, feature = "test-support"))]
+            FADER_MATRIX_OUTPUT_WITNESS.with(|value| {
+                value.set([
+                    left.first().copied().unwrap_or(0.0).to_bits(),
+                    right.first().copied().unwrap_or(0.0).to_bits(),
+                ]);
+            });
             return Ok(());
         }
+        #[cfg(any(test, feature = "test-support"))]
+        FADER_MATRIX_LIVE_WITNESS.with(|value| {
+            let mut counters = value.get();
+            counters[2] = counters[2].saturating_add(1);
+            value.set(counters);
+        });
         self.fader.fader.process(
             DualMonoBlock::new(&mut *left, &mut *right, first_sample).map_err(render_error)?,
         );
         self.matrix.matrix.process(
             DualMonoBlock::new(&mut *left, &mut *right, first_sample).map_err(render_error)?,
         );
+        #[cfg(any(test, feature = "test-support"))]
+        FADER_MATRIX_OUTPUT_WITNESS.with(|value| {
+            value.set([
+                left.first().copied().unwrap_or(0.0).to_bits(),
+                right.first().copied().unwrap_or(0.0).to_bits(),
+            ]);
+        });
         Ok(())
     }
 }
@@ -3618,6 +3663,13 @@ fn make_scalar_pair(
     {
         return Err((fader, matrix));
     }
+    #[cfg(any(test, feature = "test-support"))]
+    FADER_MATRIX_LIVE_WITNESS.with(|value| {
+        let mut counters = value.get();
+        counters[3] = counters[3].saturating_add(1);
+        counters[5] = counters[5].saturating_add(1);
+        value.set(counters);
+    });
     Ok(Box::new(ScalarPairProcessor { fader, matrix }))
 }
 struct MeterObserver(MeterAccumulator);
@@ -4717,20 +4769,20 @@ mod tests {
             }
         }
         edges.push(GraphEdge {
-            id: GraphEdgeId::TrackMain {
-                target: output.clone(),
-            },
-            source: GraphPortId {
-                node: stage(0, TrackStage::PostMatrix),
-                kind: GraphPortKind::MainOutput,
-                effect_port: None,
-            },
-            destination: GraphPortId {
-                node: output.clone(),
-                kind: GraphPortKind::MainInput,
-                effect_port: None,
-            },
-            path: "$.routes[0]".to_owned(),
+                id: GraphEdgeId::TrackMain {
+                    target: output.clone(),
+                },
+                source: GraphPortId {
+                    node: stage(0, TrackStage::PostMatrix),
+                    kind: GraphPortKind::MainOutput,
+                    effect_port: None,
+                },
+                destination: GraphPortId {
+                    node: output.clone(),
+                    kind: GraphPortKind::MainInput,
+                    effect_port: None,
+                },
+                path: "$.routes[0]".to_owned(),
         });
         if matches!(variant, BoundaryVariant::Send) {
             edges.push(GraphEdge {
@@ -5068,7 +5120,15 @@ mod tests {
     #[cfg(feature = "test-support")]
     #[must_use]
     pub fn test_only_prepared_pair_graph(post_fader_observed: bool) -> PreparedBuiltinsGraphBound {
-        prepared_pair_graph_fixture(post_fader_observed, false, false, true, None)
+        prepared_pair_graph_fixture(
+            post_fader_observed,
+            false,
+            false,
+            true,
+            None,
+            Backend::Simd8,
+            9,
+        )
     }
 
     fn prepared_pair_graph_fixture(
@@ -5077,8 +5137,9 @@ mod tests {
         nonfinite_input: bool,
         between_render_calls: bool,
         post_matrix_capture: Option<Arc<std::sync::Mutex<Vec<u32>>>>,
+        backend: Backend,
+        n: usize,
     ) -> PreparedBuiltinsGraphBound {
-        let n = 9;
         let compiled = n_track_session_with_symmetry(n, symmetric_input);
         let controls = (0..n)
             .map(|index| TrackControlRequest {
@@ -5109,16 +5170,44 @@ mod tests {
             prepare_session_builtins_with_console(&compiled, meter.as_slice(), &controls, caps())
         }
         .expect("prepared builtins");
-        let (graph, levels) = track_graph(n);
+        let (mut graph, mut levels) = track_graph(n);
+        if backend == Backend::Scalar && n == 2 {
+            let stage = |index: usize, stage: TrackStage| GraphNodeId::TrackStage {
+                track_id: StableGraphId::parse(&track_name(index)).expect("scalar track"),
+                stage,
+            };
+            let mut schedule = Vec::new();
+            for index in 0..n {
+                schedule.extend([
+                    stage(index, TrackStage::Input),
+                    stage(index, TrackStage::PostInputBuiltins),
+                    stage(index, TrackStage::PostFader),
+                    stage(index, TrackStage::PostMatrix),
+                ]);
+            }
+            schedule.push(GraphNodeId::Output {
+                output_id: StableGraphId::parse("main-out").expect("output"),
+            });
+            levels = schedule
+                .iter()
+                .enumerate()
+                .map(|(level, node)| DependencyLevel {
+                    level: level as u64,
+                    nodes: vec![node.clone()],
+                })
+                .collect();
+            graph.sequential_schedule = schedule;
+            graph.dependency_levels = levels.clone();
+        }
         let classes = SessionPoolClasses::from_session(&compiled);
         let mut artifact =
-            builtins.into_graph_artifact_with_banks(graph, (), Backend::Simd8, &levels, &classes);
+            builtins.into_graph_artifact_with_banks(graph, (), backend, &levels, &classes);
         if let Some(capture) = post_matrix_capture {
             artifact
                 .builtin_observers
                 .push(GraphNodeObserverBinding::new(
                     GraphNodeId::TrackStage {
-                        track_id: StableGraphId::parse("t08").expect("selected tail"),
+                        track_id: StableGraphId::parse(&track_name(n - 1)).expect("selected tail"),
                         stage: TrackStage::PostMatrix,
                     },
                     0x4598,
@@ -5179,6 +5268,140 @@ mod tests {
         pcm.into_iter().map(f32::to_bits).collect()
     }
 
+    fn render_scalar_pair_and_compare(
+        paired: &mut PreparedBuiltinsGraphBound,
+        separate: &mut PreparedBuiltinsGraphBound,
+        paired_capture: &Arc<std::sync::Mutex<Vec<u32>>>,
+        separate_capture: &Arc<std::sync::Mutex<Vec<u32>>>,
+        sample: u64,
+        branches: (u64, u64),
+    ) -> TestOnlyFaderMatrixWitness {
+        test_only_reset_fader_matrix_witness();
+        let _ = render_bound(paired, sample);
+        let witness = test_only_fader_matrix_witness();
+        let _ = render_bound(separate, sample);
+        assert_eq!(
+            std::mem::take(&mut *paired_capture.lock().unwrap()),
+            std::mem::take(&mut *separate_capture.lock().unwrap()),
+            "actual selected scalar PCM must equal old separate-owner PCM"
+        );
+        assert_eq!(
+            (witness.process_calls, witness.process_members),
+            (1, 1),
+            "this assertion fails under the real selection-to-separate mutation"
+        );
+        assert_eq!((witness.fused_calls, witness.fallback_calls), branches);
+        witness
+    }
+
+    /// #443's compact product fixture reaches the genuine scalar graph selection seam. The
+    /// Concurrent twin is the independently prepared old two-owner execution and therefore also
+    /// acts as the selection-to-separate mutation: identical PCM alone cannot satisfy the witness.
+    #[test]
+    fn actual_scalar_graph_queues_fuse_and_fall_back_against_separate_owners() {
+        let _guard = PAIR_WITNESS_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let paired_capture = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let separate_capture = Arc::new(std::sync::Mutex::new(Vec::new()));
+        test_only_reset_fader_matrix_witness();
+        let mut paired = prepared_pair_graph_fixture(
+            false,
+            false,
+            false,
+            true,
+            Some(Arc::clone(&paired_capture)),
+            Backend::Scalar,
+            2,
+        );
+        let mut separate = prepared_pair_graph_fixture(
+            false,
+            false,
+            false,
+            false,
+            Some(Arc::clone(&separate_capture)),
+            Backend::Scalar,
+            2,
+        );
+        let selected = test_only_fader_matrix_witness();
+        assert_eq!((selected.factory_calls, selected.factory_members), (1, 1));
+
+        let settled = render_scalar_pair_and_compare(
+            &mut paired,
+            &mut separate,
+            &paired_capture,
+            &separate_capture,
+            0,
+            (1, 0),
+        );
+        assert_eq!((settled.fader_records_drained, settled.matrix_records_drained), (0, 0));
+
+        let fader_fifo = [
+            TrackFaderRecord::FaderDb {
+                lanes: BuiltinLaneSelector::Left,
+                db: -6.0,
+                smoothing_samples: 0,
+            },
+            TrackFaderRecord::FaderDb {
+                lanes: BuiltinLaneSelector::Left,
+                db: -12.0,
+                smoothing_samples: 0,
+            },
+        ];
+        for record in fader_fifo {
+            for bound in [&mut paired, &mut separate] {
+                bound.track_controls[1].fader.try_push(record).unwrap();
+            }
+        }
+        let matrix_now = TrackControlRecord {
+            matrix: Matrix2x2 {
+                ll: 0.5,
+                lr: 0.25,
+                rl: -0.5,
+                rr: 0.75,
+            },
+            smoothing_samples: 0,
+        };
+        for bound in [&mut paired, &mut separate] {
+            bound.track_controls[1].producer.try_push(matrix_now).unwrap();
+        }
+        let immediate = render_scalar_pair_and_compare(
+            &mut paired,
+            &mut separate,
+            &paired_capture,
+            &separate_capture,
+            HARNESS_QUANTUM as u64,
+            (1, 0),
+        );
+        assert_eq!((immediate.fader_records_drained, immediate.matrix_records_drained), (2, 1));
+
+        let ramp = TrackFaderRecord::Mute {
+            lanes: BuiltinLaneSelector::Right,
+            muted: true,
+            smoothing_samples: 3,
+        };
+        for bound in [&mut paired, &mut separate] {
+            bound.track_controls[1].fader.try_push(ramp).unwrap();
+        }
+        let ramping = render_scalar_pair_and_compare(
+            &mut paired,
+            &mut separate,
+            &paired_capture,
+            &separate_capture,
+            2 * HARNESS_QUANTUM as u64,
+            (0, 1),
+        );
+        assert_eq!(ramping.fader_records_drained, 1);
+        let _settled_again = render_scalar_pair_and_compare(
+            &mut paired,
+            &mut separate,
+            &paired_capture,
+            &separate_capture,
+            3 * HARNESS_QUANTUM as u64,
+            (1, 0),
+        );
+    }
+
     #[test]
     fn actual_graph_mono_collapse_disengages_on_input_command_and_recovers_nonfinite_input() {
         let _guard = PAIR_WITNESS_LOCK
@@ -5192,6 +5415,8 @@ mod tests {
             false,
             true,
             Some(Arc::clone(&collapsed_capture)),
+            Backend::Simd8,
+            9,
         );
         let mut separate = prepared_pair_graph_fixture(
             false,
@@ -5199,6 +5424,8 @@ mod tests {
             false,
             false,
             Some(Arc::clone(&separate_capture)),
+            Backend::Simd8,
+            9,
         );
         collapsed.plan.arm_mono_collapse(&|_| true);
         separate.plan.force_mono_collapse_off(true);
@@ -5263,6 +5490,8 @@ mod tests {
             true,
             true,
             Some(Arc::clone(&recovered_capture)),
+            Backend::Simd8,
+            9,
         );
         let mut recovery_reference = prepared_pair_graph_fixture(
             false,
@@ -5270,6 +5499,8 @@ mod tests {
             true,
             false,
             Some(Arc::clone(&reference_capture)),
+            Backend::Simd8,
+            9,
         );
         recovered.plan.arm_mono_collapse(&|_| true);
         recovery_reference.plan.force_mono_collapse_off(true);

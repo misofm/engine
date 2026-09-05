@@ -410,3 +410,41 @@ The graph-compiler release failure is separately reproduced on exact delivered b
 These four groups consolidate the ORIGINAL remaining acceptance, not a new scope. Previously fixed safe ownership, same-buffer guard and completed finite cap/decline tests remain. Final Sol3 should produce the one coherent actual scalar product proof and request one adversarial verdict. On another FAIL preserve and explicitly rescope; no fourth repair. Full immutable workspace/targets/artifact/browser/actual PR and requiredCI remain root delivery work after source acceptance; no timing authority.
 
 Root assigns one final Sol3 implementation pass covering these four original groups in the same authorized paths. Pause at each coherent focused-green tranche for an immediate root exact-path checkpoint and push; this is one attempt, not additional review rounds. No changes to baseline release profiles or unrelated tooling. Root retains Git/GitHub and qualification ownership.
+
+## Final Sol3 first recoverable scalar fixture checkpoint
+
+The builtins-compiler tranche adds test-only scalar selection/drain/branch witnesses and extends the existing prepared graph fixture to scalar topology and a separately prepared owner reference. Its initial actual scalar FIFO/settled/ramp/next-call test executes and passes: `/tmp/443-sol3-tranche1-scalar-5.{command,log,status}`, status0, one named test passed. Initial compile/test failures and one zero-filter invocation are preserved; the zero-filter status0 is not credited as a passing fixture. Formatting and diff checks passed. This is a checkpoint within the final attempt, not full source acceptance; remaining compact state/error, host/observation, resource and allocation requirements still apply.
+
+# #443 bounded release-test qualification ruling
+
+APPROVE the two-stage execution decision below; no source/Cargo/profile/benchmark change. This is a qualification procedure ruling, not a new feature attempt or waiver of release correctness. Read the recorded baseline command/error and current Cargo/dependency/policy sources; no builds/tests executed by this reviewer.
+
+The exact delivered baseline reproduces E0463 for effect_compiler. Graph-compiler normally depends on effect-compiler, which depends on effect-package; effect-package emits both rlib and cdylib. Release is fat LTO, codegen-units1, panic=abort, debug1. docs/REALTIME_DEPENDENCY_POLICY.md:209–231 already documents test unwind versus ordinary abort unit duplication and unhashed shared/static outputs, and endorses a test-only unwind override for the workspace test command. scripts/run-release-workspace-tests.sh implements it. The error is consistent with that known collision, but source inspection alone does not prove that every per-package failure has exactly that cause. Preserve observed errors instead of declaring a speculative diagnosis certain.
+
+The policy's later blanket claim that per-package commands cannot encounter the collision is contradicted by the retained exact baseline failure under the present dependency graph. Record this narrowly in #443; it does not authorize changing shipped panic behavior or expanding to an all-features workspace command. The current helper forces --workspace --all-targets, so do not invoke that entire helper merely to qualify one blocked crate.
+
+## Fixed bounded decision sequence
+
+1. On the frozen baseline, one clean isolated target, try only:
+   PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=<owned-baseline-lib-target> cargo test --locked --release -p graph-compiler --lib scalar_dispatch_compiles_without_banks_on_any_host
+   Retain exact command, status and output; verify the named test actually executes. --lib reduces requested target population while preserving all release settings. It may still fail because the colliding crate is a dependency; do not promise it fixes the issue. If it succeeds, use the same --lib shape for the candidate's complete required graph-compiler unit tests (including the new scalar fixture), retaining ordinary release settings.
+
+2. If that single baseline --lib attempt still hits the collision, use the already established test-only panic-unification mechanism, narrowly scoped:
+   PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=<owned-unwind-test-target> CARGO_PROFILE_RELEASE_PANIC=unwind cargo test --locked --release -p graph-compiler --lib
+   Execute the relevant baseline and candidate in separately owned targets or otherwise strictly isolated serialized build outputs. No --workspace/--all-features expansion is needed. Preserve fat LTO, codegen-units1, target CPU/features, opt level, toolchain, dependency lock and all other settings. Record exact immutable hashes and actual nonempty test names/counts. --no-run is insufficient for the required PCM/state/resource correctness gate.
+
+This is one bounded target-selection experiment followed, if necessary, by the existing documented panic workaround. Do not repeat identical failing commands, tune codegen, switch dependencies, add a profile or repair production source to make tests link. If the second shape fails, stop with the retained error and scope a separate tooling successor; do not broaden #443 or call the release proof complete.
+
+## Claim separation and remaining delivery
+
+A successful unwind-profile test proves optimized correctness in the explicit test configuration. It is NOT the shipped abort artifact or evidence of its exact byte identity/performance. Test harnesses already unwind by Cargo design; the override unifies ordinary dependency units with that harness. Keep this exception local to the command, never export it into subsequent shells or reuse its target directory for shipped artifacts.
+
+Retain separate normal panic=abort shipped/native/Wasm artifact construction and existing supported ABI/static/realtime/resource/browser gates under the accepted immutable delivery workflow. Those mandatory shipped-artifact checks preserve the target/abort contract. Other already successful per-package release gates need not be rerun with this override absent evidence of the same issue. No benchmark invocation, AArch64 revival, pin refresh or expanded DSP matrix follows.
+
+A new issue is not needed merely to execute this established test-only workaround. Persistent runner/dependency-shape repair or moving panic settings between profiles is separate tooling/architecture scope and requires its own issue/ruling. The Sol3 source acceptance remains governed by its full original product proof; qualification records must distinguish this inherited build failure and the exact successful replacement gate, if obtained.
+
+## Bounded baseline release qualification resolution
+
+Root applied Astra's approved first target-selection experiment at exact delivered main `660fce8f2c4f76d38c82590f4c0411c117ba857d`, in a clean detached worktree and isolated target. `cargo test --locked --release -p graph-compiler --lib scalar_dispatch_compiles_without_banks_on_any_host` completed with status0 and actually executed the named test (1 passed, 59 filtered). Full command/output/status: `/tmp/443-root-baseline-lib-release.{command,log,status}`. The temporary clean worktree was removed afterward.
+
+No panic override, profile, feature, dependency or source change was required. The unfiltered prior commands' artifact collisions remain preserved failures; this result does not make them passes. The candidate must execute the complete graph-compiler unit suite using the same `--lib` target selection after the final source checkpoint. Normal shipped abort native/Wasm artifact gates remain required. This is a target-selection resolution, not a timing or shipped-artifact claim.
