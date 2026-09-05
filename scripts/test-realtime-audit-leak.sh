@@ -167,6 +167,12 @@ printf '#!/usr/bin/env bash\nif [[ " $* " == *" -p later-fixture "* ]]; then pri
 chmod +x "$copy/shim/cargo"
 run_targeted_error cargo-tree "$copy/shim" 'cargo tree failed for later-fixture with status 8; output: later-fixture v0.1.0 (resolved); stderr: cargo-partial-sentinel' || exit $?
 
+new_fixture status-loss-cargo-empty
+mkdir -p "$copy/shim"
+printf '#!/usr/bin/env bash\nif [[ " $* " == *" -p later-fixture "* ]]; then printf "cargo-empty-error-sentinel\\n" >&2; exit 8; fi\nexec /home/bl/.cargo/bin/cargo "$@"\n' >"$copy/shim/cargo"
+chmod +x "$copy/shim/cargo"
+run_targeted_error cargo-tree-empty "$copy/shim" 'cargo tree failed for later-fixture with status 8; output: <empty>; stderr: cargo-empty-error-sentinel' || exit $?
+
 new_fixture status-loss-cargo-matching
 mkdir -p "$copy/shim"
 printf '#!/usr/bin/env bash\nif [[ " $* " == *" -p later-fixture "* ]]; then printf "later-fixture v0.1.0 (resolved) realtime-audit\\n"; printf "cargo-matching-error-sentinel\\n" >&2; exit 8; fi\nexec /home/bl/.cargo/bin/cargo "$@"\n' >"$copy/shim/cargo"

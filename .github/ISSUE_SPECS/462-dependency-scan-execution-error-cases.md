@@ -59,3 +59,8 @@ Read-only Git/GitHub/spec/source comparison only; no tests, builds, timing or re
 
 
 Root assigns one coherent Luna attempt1 for precisely the four missing rows above. No production/helper/other-test mutation. Stop after six focused commands with retained logs/statuses; no workspace/PR/CI before source review.
+
+
+## Luna attempt 1 checkpoint
+
+Added exactly the four missing empty-output/error rows in the two existing suites: later delegate parser, final count, final formatter retaining input6, and later Cargo tree after earlier package success. No production scanner/helper or existing mutation-control changes. Six focused commands passed with status0; logs/statuses `/tmp/462-{syntax,check-bench,check-audit,test-bench,test-audit,diff-check}.{log,status}`. Existing two actual production mutants remain97 and restored audit fixture0. Root checkpoints this coherent first attempt before Astra source review; full qualification remains pending.

@@ -324,6 +324,12 @@ printf '#!/usr/bin/env bash\nif [[ -n "${MISO_ENGINE_BENCH_POLICY_NEEDLE:-}" && 
 chmod +x "$case_root/shim/awk"
 expect_failure_with_path delegate-parser-output-error "$case_root/shim" 'delegate parser failed for tools/bench/src/effect_interchange.rs with status 6; output: delegate; stderr: delegate-error-sentinel'
 
+new_case delegate-parser-empty-error
+mkdir -p "$case_root/shim"
+printf '#!/usr/bin/env bash\nif [[ -n "${MISO_ENGINE_BENCH_POLICY_NEEDLE:-}" && "${@: -1}" == "tools/bench/src/effect_interchange.rs" ]]; then printf "delegate-empty-error-sentinel\\n" >&2; exit 6; fi\nexec /usr/bin/awk "$@"\n' >"$case_root/shim/awk"
+chmod +x "$case_root/shim/awk"
+expect_failure_with_path delegate-parser-empty-error "$case_root/shim" 'delegate parser failed for tools/bench/src/effect_interchange.rs with status 6; output: <empty>; stderr: delegate-empty-error-sentinel'
+
 new_case later-timed-marker-error
 mkdir -p "$case_root/shim"
 printf '#!/usr/bin/env bash\nif [[ " $* " == *"timing::timed"* && "${@: -1}" == "tools/wasm-console/src/main.rs" ]]; then /usr/bin/grep "$@"; printf "later-timer-error-sentinel\\n" >&2; exit 7; fi\nexec /usr/bin/grep "$@"\n' >"$case_root/shim/grep"
@@ -379,10 +385,22 @@ printf '#!/usr/bin/env bash\n/usr/bin/wc "$@"\nprintf "count-error-sentinel\\n" 
 chmod +x "$case_root/shim/wc"
 expect_failure_with_path count-error "$case_root/shim" 'unsafe-owner count failed with status 9; output: 6; stderr: count-error-sentinel'
 
+new_case count-empty-error
+mkdir -p "$case_root/shim"
+printf '#!/usr/bin/env bash\nprintf "count-empty-error-sentinel\\n" >&2\nexit 9\n' >"$case_root/shim/wc"
+chmod +x "$case_root/shim/wc"
+expect_failure_with_path count-empty-error "$case_root/shim" 'unsafe-owner count failed with status 9; output: <empty>; stderr: count-empty-error-sentinel'
+
 new_case count-formatter-error
 mkdir -p "$case_root/shim"
 printf '#!/usr/bin/env bash\n/usr/bin/tr "$@"\nprintf "formatter-error-sentinel\\n" >&2\nexit 10\n' >"$case_root/shim/tr"
 chmod +x "$case_root/shim/tr"
 expect_failure_with_path count-formatter-error "$case_root/shim" 'unsafe-owner count formatter failed with status 10; output: 6; input: 6; stderr: formatter-error-sentinel'
+
+new_case count-formatter-empty-error
+mkdir -p "$case_root/shim"
+printf '#!/usr/bin/env bash\nprintf "formatter-empty-error-sentinel\\n" >&2\nexit 10\n' >"$case_root/shim/tr"
+chmod +x "$case_root/shim/tr"
+expect_failure_with_path count-formatter-empty-error "$case_root/shim" 'unsafe-owner count formatter failed with status 10; output: <empty>; input: 6; stderr: formatter-empty-error-sentinel'
 
 printf 'bench policy mutations: ok\n'
