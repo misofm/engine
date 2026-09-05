@@ -176,3 +176,11 @@ Root must now complete the unchanged-count full-workspace comparison, synchroniz
 
 
 Root normally merged post-#388 main `0c2b283f86b199351b78be99784def7c614c0320` without conflicts after the focused PASS. The implementation is unchanged; final full-workspace comparison against this synchronized base is pending.
+
+## Final integration evidence — 2026-09-05
+
+Baseline synchronized main `0c2b283f86b199351b78be99784def7c614c0320` and integrated candidate `bc8605f9` both completed `cargo test --locked --workspace` with **1552 passed, 0 failed, 24 ignored**, including doctests. Source candidate was immutable during this qualification. Logs: `/tmp/engine-400-main-baseline.log` and `/tmp/engine-400-candidate-workspace.log`. The final checkpoint adds only this evidence and queued issue briefs to that qualified source.
+
+Astra's attempt-2 focused PASS at `58e1575038c32696e4114dbbd253b985284793d3` independently reran all named shell gates and the old missing-manifest reproduction. Disposable-copy counter-mutations proved the assertions reject the old extractor, accepted forbidden match, altered error class and accepted sort failure. Those checks are assertion-liveness evidence, not production/source mutations. Root's conflict-free current-main merge preserves the accepted helper/caller/test implementation and passed the real workspace/rack gates again.
+
+No runtime Rust, artifact, benchmark or publication change is included. #306/#401/#402/#403/#404 and queued #406/#407 remain open for their separate obligations; this issue closes only shared-helper and workspace/rack adoption. Final actual PR review by Astra and required CI SUCCESS remain merge gates.

@@ -124,3 +124,7 @@ Read-only review of `/tmp/sol-306-parent-accounting.md`, parent #306 and childre
 
 
 #404 now owns the remaining workspace producers/queries and the surviving ninth Wasm loop, depends on merged #400, and is required before parent closure alongside #400–#403. It is queued; no implementation has started. The earlier zero-count-only disposition is corrected explicitly above.
+
+### #401 execution refinement
+
+Astra split its seven-gate implementation into #406 (four public/runtime gates, after #400) and #407 (three compiler/reference gates, after #406). #401 remains their umbrella and cannot close after only one child. This refines execution without dropping any gate, extractor or producer obligation. Both children are queued.
