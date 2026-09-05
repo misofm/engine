@@ -81,3 +81,21 @@ the unchanged stdin program and original script arguments, runs them under `-I -
 path and marker evidence; unexpected success is 97 and setup/status/diagnostic mismatch is 96.
 
 Focused commands and statuses are retained in `/tmp/471-luna1-{syntax,qualification,108,108-policy,policy}.{command,log,status}`. With `PATH=/home/bl/.cargo/bin:$PATH` where required, all five statuses are 0. The parent policy run invokes the existing standalone108 and fake-only lifecycle children. No real runner, timing, build, or Git/GitHub operation ran.
+
+## Astra attempt 1 verdict and Sol attempt 2 assignment
+
+# Astra #471 Luna attempt 1
+
+**FAIL — bounded Sol attempt 2 required.** Reviewed exact `aa9cd8298a4f64acf2e5575a43f1866c672a12fa`, `engine-471-proof`, against the complete numbered child. Only the two suites and evidence differ; production and inherited two guard mutants remain unchanged. No tests/builds/timing or repository/Git/GitHub mutations were performed.
+
+The actual second-Python hook follows the approved route: first invocation delegates unchanged; second captures the original stdin validator, preserves -I/-B and reconstructs original argv, and raises PermissionError only when that program reads the exact resolved validator path. Actual checker status1, cross-file operation/path/PermissionError and reached marker are checked. This is real targeted read execution, not a forged process exit. Preserve it. Add the expressly required clean standalone run after removing the shim; the current sequence moves directly into deletion/fault cases rather than explicitly proving restored clean success.
+
+The payload implementation now uses Counter equality and retains duplicates, which fixes the original containment defect. However these finite child obligations remain:
+
+1. **Exact framing:** the assertion accepts any final line containing the operation substring and `(status 73)`, then treats that observed line as trusted framing. It never uses the computed exact `diagnostic` variable. Require the actual fixed full operation/status line, exact sentinel and independently captured stderr suffix, not self-selected framing. Keep the check active for both existing complete and error-only modes: currently it is entirely inside `if mode == complete`, so injected empty-mode diagnostics are not checked for an empty forwarded payload.
+2. **Same diagnostic controls at the intended assertion:** duplicate/extra/missing controls currently alter the expected payload while leaving a hand-assembled diagnostic constant. The numbered brief requires keeping the independently captured expected payload fixed and modifying copies of the actual valid diagnostic's payload portion. Do that for the three existing controls and reverse case; preserve exact real framing. Do not add producer rows or production mutants.
+3. **Discriminate equality failure from setup:** `payload_control` accepts any nonzero Python result and discards both streams, so syntax/framing/setup errors can earn all three control results. Retain diagnostics and require the named equality-failure result with a distinct setup/framing failure outcome. First validate the actual unmodified diagnostic with the SAME assertion. Duplicate/extra/missing copies must fail equality specifically; reversed actual payload must pass. Keep the expected real nonempty capture immutable throughout.
+
+These are small corrections to the two selected proof surfaces; no wider table, production scan, new helper/framework or third production mutant is authorized. Retain existing namespace/migration controls and all inherited #455 coverage. Record exact focused statuses and causal assertion diagnostics. Root should consolidate one Sol2 pass, checkpoint and request one verdict. #455 remains open with its full workspace/actual-PR/required-CI boundary; no qualification is authorized from this incomplete child checkpoint.
+
+Root assigns one coherent Sol attempt 2 against the complete retained contract and these finite findings, in this worktree only. Preserve the accepted actual read hook and frozen production/table/control paths. Pause after focused-green checkpoint notification; root owns Git and GitHub.
