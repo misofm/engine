@@ -357,6 +357,11 @@ session_floor_mutation '.core_clock_source = ""' 'a measured clock with no prove
 session_floor_mutation '.lane_samples_per_block = 8192' 'a lane-sample count that is not tracks x frames x channels'
 session_floor_mutation '.tracks = 9 | .workload_kind = "nine_track_ragged_strip"' 'a lane-sample count left behind by a changed track count'
 session_floor_mutation '.floor_cycles_per_lane_sample = 1.0' 'a floor that does not follow from the published inventory'
+# #368: the pre-recount whole-strip floor (352 lane-ops) must not survive as a self-consistent
+# floor/percentage pair after compressor and limiter repricing.
+session_floor_mutation '.floor_cycles_per_lane_sample = (352 / (8 * 3.7))
+  | .percent_of_floor = (100 * .floor_cycles_per_lane_sample / .cycles_per_lane_sample)' \
+  'the stale pre-recount whole-strip inventory'
 session_floor_mutation '.floor_cycles_per_lane_sample = null' 'a derived row that dropped its floor'
 session_floor_mutation '.percent_of_floor = 99.0' 'a percentage that flatters its own measurement'
 session_floor_mutation '.percent_of_floor = null' 'a floor stated without the percentage it implies'

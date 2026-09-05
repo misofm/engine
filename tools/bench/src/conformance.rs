@@ -2,8 +2,8 @@
 
 use bench_support::json::escape;
 use bench_support::stats::per_mille as percentile_nearest_rank;
+use bench_support::sysinfo::physical_core_count;
 use std::{
-    collections::BTreeSet,
     env, fs,
     hint::black_box,
     process::Command,
@@ -314,25 +314,6 @@ fn field(text: &str, prefix: &str) -> String {
     text.lines()
         .find_map(|line| line.strip_prefix(prefix).map(str::to_owned))
         .unwrap_or_else(|| "unknown".to_owned())
-}
-
-fn physical_core_count() -> String {
-    let Some(output) = command_allow_empty(&["lscpu", "-p=CORE,SOCKET"]) else {
-        return "unknown".to_owned();
-    };
-    let cores = output
-        .lines()
-        .filter(|line| !line.starts_with('#'))
-        .filter_map(|line| {
-            let mut fields = line.split(',');
-            Some((fields.next()?.to_owned(), fields.next()?.to_owned()))
-        })
-        .collect::<BTreeSet<_>>();
-    if cores.is_empty() {
-        "unknown".to_owned()
-    } else {
-        cores.len().to_string()
-    }
 }
 
 fn json_string_array(values: &[String]) -> String {

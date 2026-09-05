@@ -14,7 +14,7 @@
 //!
 //! The stages are the real pipeline in the real order:
 //!
-//! 1. `json-grammar` -- the JSON grammar accepted by `jstrict`, the first thing
+//! 1. `json-grammar` -- the JSON grammar accepted by `json-syntax`, the first thing
 //!    [`parse_session_json`] does. Its only diagnostic code is `json.syntax`.
 //! 2. `typed-model` -- the strict V1 schema decode plus the issue-004 validation
 //!    [`parse_session_json`] runs on the decoded model: unknown keys, ID syntax and uniqueness,
@@ -56,7 +56,7 @@ pub const STAGE_NAMES: [&str; 4] = [
 ];
 
 const STAGE_SUMMARIES: [&str; 4] = [
-    "JSON grammar (jstrict)",
+    "JSON grammar (json-syntax)",
     "strict V1 schema decode and validation",
     "resource preflight, caps, canonical normalization",
     "off-render builtins preparation",

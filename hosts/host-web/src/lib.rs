@@ -46,7 +46,7 @@ pub const MAXIMUM_DOCUMENT_BYTES: u32 = 1 << 20;
 
 /// Conservative transient parse projection in bytes per staged document byte.
 ///
-/// Issue #338 re-measured the pinned `jstrict 0.14.0` JSON frontend plus typed model and compilation
+/// Issue #338 re-measured the then-pinned `jstrict 0.14.0` JSON frontend plus typed model and compilation
 /// over the minimal document, dense one-, 64-, and 192-track documents, and the exact 1 MiB
 /// admitted ceiling. The largest observed ratio was 14.738 bytes per input byte; 17 leaves 15.3%
 /// headroom. Boot checks

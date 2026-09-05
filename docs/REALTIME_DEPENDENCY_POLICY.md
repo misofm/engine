@@ -317,17 +317,38 @@ the checked `SampleRateHz` and `QuantumFrames` value carriers; core does not dep
 Parsing, canonicalization, validation, model cloning, sorting, indexes, and all failure allocation
 remain on the control plane.
 
-The direct parser dependency is exact-pinned `jstrict = 0.14.0` with default features disabled.
+The direct parser dependency is exact-pinned `json-syntax = 0.12.5` with default features disabled.
 The session crate has no runtime `serde`, `serde_json`, or TOML dependency. A bounded preflight
 rejects excess depth and decoded duplicate keys before the dependency constructs a value tree;
-the typed walk then consumes `jstrict` values and byte spans. Canonical output is produced by the
-audited schema-specific writer, never by a dependency display implementation.
+the typed walk then consumes `json-syntax` values and byte spans. Canonical output is produced by
+the audited schema-specific writer, never by a dependency display implementation.
+
+**Issue #381 ruling, 2026-09-04:** `session` depended on `jstrict 0.14.0` from #338 through #380,
+a single-owner performance fork of `json-syntax` created 2026-07-25 ("Semantics are unchanged: same
+strictness, same `Value`, same `CodeMap`" per its own README). The audit behind #377 (Part 2,
+finding 4) measured `jstrict` at 296 total crates.io downloads against `json-syntax`'s 3.45M (701k
+in the last 90 days) and counted 26 `unsafe` sites across the fork's 10.3k lines. The owner ruled
+the engine will not ship a parser at that popularity/unsafe-footprint ratio when an API-identical
+upstream exists, and #381 replaced the dependency with upstream `json-syntax 0.12.5` (MIT OR
+Apache-2.0, last released 2024-07-03) without any change to `parse.rs`'s typed walk, `CodeMap`
+byte spans, or the exact-`f32` lexeme path -- `crates/session/src/parse.rs`'s `Value::Number(_) =>
+match parse_f32_token(&self.source[span.0..span.1])` already read the original source slice by
+`CodeMap` span rather than any dependency-owned number buffer, on both the fork and upstream. Do
+not reintroduce `jstrict`, `json-escape-simd`, or `memchr` into the session dependency graph: the
+fork's SIMD scanning and SIMD string-escape printing were the only load-bearing performance
+additions, and canonical printing was never their consumer -- `session` writes its own audited
+canonical form and never calls a dependency's printer.
 
 Parser allocation and diagnostic formatting are expected control-plane behavior. Malformed input
 returns typed diagnostics; arithmetic and configured-cap preflight runs before the canonical string,
 model clone, normalized indexes, or downstream plan work. JSON string and duplicate-key
 fixtures, the strict unknown-key matrix, target compilation, and parser/compiler fuzz targets are
-the compatibility and failure-mode evidence for this dependency choice.
+the compatibility and failure-mode evidence for this dependency choice. `json-syntax`'s object
+indexing goes through `hashbrown` 0.12's default hasher, `ahash` 0.7's `RandomState`, which on its
+first construction in a process lazily allocates 88 bytes of process-lifetime heap and seeds from
+OS entropy per process -- harmless to every shipped cap (they are explicit row sums), but relevant
+to any exact allocator oracle that arms across the first object parse in a process (see
+`crates/capi/tests/resource_lifecycle.rs`).
 
 The earlier issue-004 cross-target archive sizes are historical measurements for the retired
 parser stack and are not projected onto the JSON implementation. Current size and allocation
@@ -339,9 +360,11 @@ evidence is recorded by issue #338; it remains descriptive rather than a render-
 allocates the prepared plan and the source rings, and is never reachable from render. It contains
 no `unsafe` code and exports no C symbol -- it is a plain `rlib`, because a `cdylib` re-exports
 every `no_mangle` symbol it links, and a facade carrying them would push the C ABI's fifteen
-exports into the browser artifact. It deliberately does not depend on `protocol`: the
-control protocol is a host-specific transport, and a host that does not speak it does not pay for
-it. `scripts/check-host-core-policy.sh` enforces all of this, with mutation coverage in
+exports into the browser artifact. Its default graph deliberately does not depend on `protocol`:
+the issue #369 `control-provider` adapter is an optional, non-default feature enabled only by
+`capi`, so the browser and every host that does not speak the protocol pay for neither its code nor
+its dependencies. `scripts/check-host-core-policy.sh` enforces this exact edge and rejects a
+mandatory or default-enabled protocol dependency, with mutation coverage in
 `scripts/test-host-core-policy.sh`.
 
 ## Issue 011 runtime boundary and issue 029 package hashing dependency

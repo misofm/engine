@@ -105,16 +105,9 @@
 //! `min` is the same table with the comparison reversed, and `tests/g1_op_identity.rs` runs both
 //! over every ordered pair of the pool rather than over these nine rows alone.
 //!
-//! One accounting consequence is deliberately **not** taken here.
-//! `docs/rulings/effect-floor-accounting.md` prices `Lane::max`/`Lane::min` at two lane-ops ("one
-//! compare, one select"), which was the only lowering that existed when it was written. On x86 and
-//! on wasm they are now one, so from this commit those floors are conservative by one op per `max`
-//! or `min` — unlike `select`, whose floor already assumed the single-instruction form and does
-//! not move. The floor constants in `tools/bench/src/floor.rs` and
-//! `scripts/console-benchmark-record-lib.jq` are left alone on purpose: they are the standing
-//! authority every sealed console record is read against, and re-pricing one construct means
-//! recounting every inventory in that ruling. That recount is a separate, owner-visible change;
-//! this paragraph is the note that it is owed.
+//! The accounting consequence is recorded in `docs/rulings/effect-floor-accounting.md` (#368):
+//! max/min are one lane-op on x86 and wasm, while NEON retains the two-operation portable shape.
+//! The select floor already assumed the single-instruction form and therefore does not move.
 //!
 //! ## The one precondition: DAZ must be clear
 //!
@@ -335,6 +328,17 @@ macro_rules! impl_lane_for_wide {
                     $crate::Lane::max(n, <$simd>::splat($crate::bits::EXP2_INT_MIN)),
                     <$simd>::splat($crate::bits::EXP2_INT_MAX),
                 );
+                $crate::Lane::exp2_int_in_range(n)
+            }
+
+            #[inline(always)]
+            fn exp2_int_in_range(n: Self) -> Self {
+                debug_assert!(!<$simd as $crate::Lane>::mask_any(
+                    <$simd as $crate::Lane>::mask_not(<$simd as $crate::Lane>::mask_and(
+                        <$simd as $crate::Lane>::ge(n, <$simd>::splat($crate::bits::EXP2_INT_MIN),),
+                        <$simd as $crate::Lane>::le(n, <$simd>::splat($crate::bits::EXP2_INT_MAX),),
+                    )),
+                ));
                 let biased = n + <$simd>::splat($crate::bits::EXP2_INT_MAGIC);
                 <$simd>::from_bits(biased.to_bits() << $crate::bits::MANTISSA_BITS)
             }

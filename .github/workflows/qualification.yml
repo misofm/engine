@@ -636,7 +636,7 @@ jobs:
           overwrite: true
 
   cross-target:
-    name: android, iOS, and wasm cross-target checks
+    name: native and wasm cross-target checks
     needs: route
     if: needs.route.outputs.route == 'full'
     runs-on: ubuntu-24.04
@@ -650,7 +650,7 @@ jobs:
       - name: Install pinned Rust toolchain, cross targets, and wabt
         run: |
           rustup toolchain install 1.97.1 --profile minimal
-          rustup target add --toolchain 1.97.1 wasm32-unknown-unknown aarch64-linux-android aarch64-apple-ios
+          rustup target add --toolchain 1.97.1 wasm32-unknown-unknown
           sudo apt-get update
           sudo apt-get install -y ripgrep wabt
       # Replaces check-parametric-eq-targets.sh, check-builtins-targets.sh, and

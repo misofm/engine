@@ -31,6 +31,59 @@ pub fn per_mille<T: Copy>(sorted: &[T], per_mille: usize) -> T {
     nearest_rank(sorted, per_mille, 1_000)
 }
 
+/// Nearest-rank min/p50/p95/p99/max over one leg's per-block nanoseconds.
+///
+/// Audit #104 F4: the native console benchmark and the #163 phase 2 wasm console arm each defined
+/// this same five-field summary over the same percentiles. One definition, so the two legs' ratio
+/// is computed the same way on both sides of the comparison.
+pub struct Percentiles {
+    /// The minimum observation.
+    pub min: u64,
+    /// The 50th percentile (median).
+    pub p50: u64,
+    /// The 95th percentile.
+    pub p95: u64,
+    /// The 99th percentile.
+    pub p99: u64,
+    /// The maximum observation.
+    pub max: u64,
+}
+
+impl Percentiles {
+    /// Compute min/p50/p95/p99/max over `samples`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `samples` is empty.
+    #[must_use]
+    pub fn from_samples(samples: &[u64]) -> Self {
+        let mut sorted = samples.to_vec();
+        sorted.sort_unstable();
+        assert!(!sorted.is_empty(), "measured observations");
+        let rank =
+            |numerator: usize, denominator: usize| nearest_rank(&sorted, numerator, denominator);
+        Self {
+            min: sorted[0],
+            p50: rank(50, 100),
+            p95: rank(95, 100),
+            p99: rank(99, 100),
+            max: *sorted.last().expect("nonempty"),
+        }
+    }
+}
+
+/// `nanoseconds` rendered as fixed-point microseconds, [`format_f64`]'s three-decimal form.
+#[must_use]
+pub fn microseconds(nanoseconds: u64) -> String {
+    format_f64(nanoseconds as f64 / 1_000.0)
+}
+
+/// A stable three-decimal rendering of `value`, the one record-field float format.
+#[must_use]
+pub fn format_f64(value: f64) -> String {
+    format!("{value:.3}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::{nearest_rank, per_mille};

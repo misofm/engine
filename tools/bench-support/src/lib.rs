@@ -16,4 +16,5 @@ pub mod digest;
 pub mod json;
 pub mod metadata;
 pub mod stats;
+pub mod sysinfo;
 pub mod timing;

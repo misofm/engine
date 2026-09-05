@@ -163,6 +163,7 @@ Read by one subject each.
 | `MISO_ENGINE_WEB_HOST_TEST_MODULE` | Hermetic worklet test: override module path for the main-realm host under test, so a red mutation of the host runs the same suite (#151). |
 | `MISO_ENGINE_PRINT_HELPER_MANIFEST` | native PCM runner portability gate: helper manifest path. |
 | `MISO_ENGINE_EFFECT_CONTRACT_V1_H` | the C include guard `check-effect-contract.sh` asserts. Not an environment variable. |
+| `MISO_ENGINE_BENCH_POLICY_NEEDLE` | `check-bench-policy.sh`'s `sole_owner_or_delegate`: internal transport of the four-character backslash char-literal needle from bash to the `awk` subprocess through `ENVIRON`, chosen over `-v` because `-v` assignments go through awk's own C-style escape processing a second time. Set and read only inside that one function invocation; not user-facing. |
 
 
 ## Test harness hooks

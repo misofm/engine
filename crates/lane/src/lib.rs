@@ -309,6 +309,12 @@ pub trait Lane: Copy + Send + Sync + 'static {
     /// backend, because the clamp, the add and the shift are the same operations everywhere.
     fn exp2_int(n: Self) -> Self;
 
+    /// `2^n` for an integer-valued `n` already in `[-126, 127]`.
+    ///
+    /// The caller owns the clamp. Implementations check the range with a debug assertion only;
+    /// release render paths contain no range-check branch.
+    fn exp2_int_in_range(n: Self) -> Self;
+
     /// Splits a positive normal `self` into `(m, e)` with `self = m * 2^e` and `m` in `[1, 2)`.
     ///
     /// Used by `log2`. For inputs that are not positive normals the result is unspecified but,

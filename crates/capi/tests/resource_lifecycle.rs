@@ -130,7 +130,23 @@ fn snapshot() -> Snapshot {
     }
 }
 
+/// Initialize the process-lifetime statics that the JSON frontend's dependencies create lazily,
+/// so the first observed window is not charged for them.
+///
+/// `json-syntax` 0.12.5 indexes every object through `hashbrown` 0.12's `DefaultHashBuilder`,
+/// which is `ahash` 0.7's `RandomState`. Its first construction in a process boxes three
+/// `once_cell::race::OnceBox` statics (`RAND_SOURCE`, its inner `Box<dyn RandomSource>`, and the
+/// `SEEDS` array: 8 + 16 + 64 bytes) that live until process exit and belong to no capi owner.
+/// ahash's `build.rs` forces `runtime-rng` on every hosted target, so no Cargo feature removes
+/// them. They land on whichever thread parses the first object, which under the parallel
+/// harness is a race between this file's tests; parsing a trivial object here makes every
+/// window start after that initialization on this thread, independent of sibling scheduling.
+fn warm_process_lifetime_statics() {
+    let _ = session::parse_session_json(r#"{"warm":0}"#);
+}
+
 fn begin() {
+    warm_process_lifetime_statics();
     // Initialize the thread-local keys before observation is armed.
     ACTIVE.set(false);
     ALLOCATIONS.set(0);
@@ -1246,12 +1262,28 @@ fn complete_capi_owners(
             bytes: bytes::<CounterValue>(configuration_items),
         },
         PrimitiveOwner {
-            name: "automation track ID",
-            bytes: 4,
+            name: "provider parameter descriptor arena",
+            bytes: 9_072,
         },
         PrimitiveOwner {
-            name: "automation effect ID",
-            bytes: 7,
+            name: "provider parameter state arena",
+            bytes: 864,
+        },
+        PrimitiveOwner {
+            name: "provider parameter text payloads",
+            bytes: 864,
+        },
+        PrimitiveOwner {
+            name: "provider diagnostic projection arena",
+            bytes: 240,
+        },
+        PrimitiveOwner {
+            name: "provider diagnostic occupancy arena",
+            bytes: 2,
+        },
+        PrimitiveOwner {
+            name: "provider diagnostic code payloads",
+            bytes: 40,
         },
         PrimitiveOwner {
             name: "controller meter config",
@@ -1307,7 +1339,9 @@ fn complete_capi_owners(
     // #241 re-pin (-195): the canonical session is 171 bytes shorter and the session handle's
     // protocol controller shrinks by 24 bytes after its deleted edit variants leave, so
     // #338: canonical JSON adds 8,082 retained bytes to the active session model.
-    assert_effective_owner_mutations(&active, 150_014, "active CAPI");
+    // #369: the production provider retains the fixture's 864 descriptor/state rows and its
+    // descriptor-owned strings/enumerations, plus two bounded render-diagnostic projections.
+    assert_effective_owner_mutations(&active, 160_933, "active CAPI");
 
     let candidate_epoch_rows = [
         PrimitiveOwner {
@@ -1341,6 +1375,18 @@ fn complete_capi_owners(
             name: "candidate replay bytes",
             bytes: 8_192,
         },
+        PrimitiveOwner {
+            name: "candidate provider parameter descriptor arena",
+            bytes: 9_072,
+        },
+        PrimitiveOwner {
+            name: "candidate provider parameter state arena",
+            bytes: 864,
+        },
+        PrimitiveOwner {
+            name: "candidate provider parameter text payloads",
+            bytes: 864,
+        },
     ];
     let prepared = owner_total(&prepared_rows);
     // #84 phase B re-pin (+24): `ControlSourceMirror` carries three spsc endpoints, each +8 for
@@ -1349,7 +1395,7 @@ fn complete_capi_owners(
     // #338: canonical JSON adds 8,082 retained bytes to the candidate session model.
     assert_effective_owner_mutations(&candidate_epoch_rows, 18_706, "candidate CAPI epoch");
     // #241: `PreparedStructuralCommand` loses the same deleted edit payload (-24).
-    assert_effective_owner_mutations(&prepared_rows, 13_936, "prepared protocol");
+    assert_effective_owner_mutations(&prepared_rows, 24_736, "prepared protocol");
     let largest = active
         .iter()
         .chain(candidate_epoch_rows.iter())
@@ -1952,7 +1998,7 @@ fn primitive_replacement_oracle(current: &str, prospective: &str) -> PrimitiveRe
         },
     ];
     // #338: canonical JSON adds 8,082 retained bytes to each live session model.
-    assert_effective_owner_mutations(&capi_rows, 182_656, "double-live CAPI");
+    assert_effective_owner_mutations(&capi_rows, 204_375, "double-live CAPI");
 
     let graph_rows = graph_owners();
     // The eight graph-metadata rows begin after the five audio/effect rows. #241 removed the
@@ -1979,7 +2025,8 @@ fn primitive_replacement_oracle(current: &str, prospective: &str) -> PrimitiveRe
     ];
     let largest = largest_candidates.into_iter().max().expect("largest owner");
     // #241 canonical scratch: remove 29 locator bytes x 10, add 40 content-identity bytes x 10.
-    // 58_694 - 290 + 400 = 58_804.
+    // 58_694 - 290 + 400 = 58_804. #369's provider descriptor arena is 9,072 bytes here and does
+    // not displace the canonical-writer maximum.
     assert_eq!(largest, 58_804, "primitive maximum-single authority");
     assert_effective_owner_mutations(
         &current_canonical_writer,
@@ -2264,7 +2311,7 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
     assert_eq!(oracle.effect_scratch, 432);
     // #210 phase 3: 2 x 9_963 (see `builtin_owners`).
     assert_eq!(oracle.builtin, 19_926);
-    assert_eq!(oracle.capi, 182_656);
+    assert_eq!(oracle.capi, 204_375);
     // #241: 58_694 - (29 x 10 locator) + (40 x 10 content identity) = 58_804.
     assert_eq!(oracle.largest, 58_804);
 
@@ -2296,7 +2343,7 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
         // SAFETY: These handles are uniquely owned until their matching destroy calls.
         unsafe {
             let (session, plan) = compile_c(&session_document, &exact_limits);
-            assert_eq!(resources_c(plan), frozen_scratch_report(150_014));
+            assert_eq!(resources_c(plan), frozen_scratch_report(160_933));
             let request = command(1, 42, "double-live-cap");
             let mut response = [0xa5_u8; 4_096];
             assert_eq!(submit(session, &request, &mut response), RESULT_OK, "{row}");
@@ -2315,7 +2362,7 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
                 RESULT_OK
             );
             // The prospective session ID is nine bytes shorter than the current one.
-            assert_eq!(resources_c(plan), frozen_scratch_report(150_014 - 9));
+            assert_eq!(resources_c(plan), frozen_scratch_report(160_933 - 9));
             miso_engine_v1_session_destroy(session);
             miso_engine_v1_plan_destroy(plan);
         }
@@ -2346,4 +2393,32 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
             miso_engine_v1_plan_destroy(plan);
         }
     }
+}
+
+#[test]
+fn tiny_control_frame_still_accounts_three_provider_counters_exactly() {
+    let mut roomy = limits();
+    roomy.maximum_control_frame_bytes = 1;
+    // SAFETY: Each returned child is uniquely owned and destroyed exactly once below.
+    let required = unsafe {
+        let (session, plan) = compile_c(SESSION, &roomy);
+        let required = resources_c(plan).capi_retained_bytes;
+        miso_engine_v1_session_destroy(session);
+        miso_engine_v1_plan_destroy(plan);
+        required
+    };
+    assert_eq!(required, 178_466, "tiny-frame retained authority");
+    let mut exact = roomy;
+    exact.maximum_capi_retained_bytes = required;
+    // SAFETY: Exact admission returns two uniquely owned children.
+    unsafe {
+        let (session, plan) = compile_c(SESSION, &exact);
+        assert_eq!(resources_c(plan).capi_retained_bytes, required);
+        miso_engine_v1_session_destroy(session);
+        miso_engine_v1_plan_destroy(plan);
+    }
+    let mut below = roomy;
+    below.maximum_capi_retained_bytes = required - 1;
+    // SAFETY: The helper verifies atomic rejection without published children.
+    unsafe { compile_rejected_c(SESSION, &below) };
 }

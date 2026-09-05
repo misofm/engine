@@ -74,9 +74,11 @@ pub use conformance::{
 pub use controller::{
     CommandFrameProcessError, CommittedCommandFrame, ControlCommand, ControlProvider,
     ControllerRequest, ControllerResourceAllocationError, ControllerResponse,
-    ControllerRetainedCapacity, EventEgressError, MockProvider, MockProviderConfig,
-    ParameterProviderError, PreparedCommandCommitError, PreparedCommandFrame,
-    PreparedImmediateCommandFrame, PreparedStructuralCommand, ProtocolController,
-    ProtocolControllerConfig, ProviderFeatures, ReplayCache, ReplayCacheConfig, ReplayCacheError,
-    ReplayCacheResourceReport, ReplayDecision, ReplayHit,
+    ControllerRetainedCapacity, EventEgressError, ParameterProviderError,
+    PreparedCommandCommitError, PreparedCommandFrame, PreparedImmediateCommandFrame,
+    PreparedStructuralCommand, ProtocolController, ProtocolControllerConfig, ProviderFeatures,
+    ReplayCache, ReplayCacheConfig, ReplayCacheError, ReplayCacheResourceReport, ReplayDecision,
+    ReplayHit,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub use controller::{MockProvider, MockProviderConfig};

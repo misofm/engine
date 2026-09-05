@@ -5,7 +5,7 @@
 use core::alloc::Layout;
 use core::cell::Cell;
 use core::sync::atomic::{AtomicUsize, Ordering};
-use jstrict::{Parse, Value};
+use json_syntax::{Parse, Value};
 use std::alloc::{GlobalAlloc, System};
 
 use session::{
@@ -97,7 +97,8 @@ fn model_at(n: usize) -> session::SessionModel {
 
 #[test]
 fn allocation_calls_stay_within_linear_phase_budgets() {
-    // Measurements on the pinned jstrict 0.14.0 frontend at 1/256/4096 tracks fit below
+    // Measurements on the pinned json-syntax 0.12.5 frontend (#381; formerly a fork of the same
+    // upstream) at 1/256/4096 tracks fit below
     // `263 * tracks + 192`; this is the smallest integer-slope conservative envelope covering
     // all three observations with at least 32 calls of fixed headroom. It replaces the TOML-era
     // projection and keeps the component counts visible so a parser/model regression is local.
