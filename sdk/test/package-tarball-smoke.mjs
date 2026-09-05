@@ -36,7 +36,11 @@ assert.equal(typeof imported["./browser"].attachEngineFeed, "function");
 assert.equal(typeof imported["./browser"].prepareEngineFeed, "function");
 assert.ok(imported["./assets"].BUNDLED_ENGINE_ASSETS.wasm instanceof URL);
 assert.ok(imported["./assets"].BUNDLED_ENGINE_ASSETS.pcmFeedWorklet instanceof URL);
-assert.match(await readFile(resolve(packageRoot, "dist/NOTICE"), "utf8"), /engine-web-adapter/);
+const shippedNotice = await readFile(resolve(packageRoot, "dist/NOTICE"), "utf8");
+assert.match(shippedNotice, /engine-web-adapter/);
+assert.match(shippedNotice, /bd7f330a9773ce43bb077f0e6d5c8fc30fe9e27c/);
+assert.match(shippedNotice, /7485693e9bbcf2f65a91a4e5950e22d678d99062/);
+assert.match(shippedNotice, /63b4ee6212287000ff85e1cfa969d385f6246d2d/);
 for (const [subpath, module] of Object.entries(imported)) {
   assert.equal(
     "canonicalSessionJson" in module,
@@ -97,13 +101,27 @@ const consumer = resolve(consumerRoot, "index.ts");
 await writeFile(consumer, `
 import { CATALOG, session } from "@misofm/engine";
 import { createOfflineEngine, loadBundledEngineAsset } from "@misofm/engine/headless";
-import { createEngine } from "@misofm/engine/browser";
+import { createEngine, prepareEngineFeed, attachEngineFeed, Msb1RingWriter } from "@misofm/engine/browser";
 import type { BrowserEngine } from "@misofm/engine/browser";
 import { BUNDLED_ENGINE_ASSETS } from "@misofm/engine/assets";
 // @ts-expect-error arbitrary-model canonical serialization is intentionally not public
 import { canonicalSessionJson } from "@misofm/engine";
 void [CATALOG, session, createOfflineEngine, loadBundledEngineAsset, createEngine,
-  BUNDLED_ENGINE_ASSETS, canonicalSessionJson];
+  prepareEngineFeed, attachEngineFeed, BUNDLED_ENGINE_ASSETS, canonicalSessionJson];
+declare const domContext: BaseAudioContext;
+const domFactory = (context: BaseAudioContext, name: string, options: AudioWorkletNodeOptions): AudioWorkletNode =>
+  new AudioWorkletNode(context, name, options);
+const packedFeed = attachEngineFeed({
+  context: domContext,
+  sources: [{ sourceId: "packed-source", channels: 2 }],
+  quantumFrames: 128,
+  createNode: domFactory,
+});
+void packedFeed.rings;
+const packedWriter = new Msb1RingWriter(packedFeed.rings[0]);
+packedWriter.engage(1n);
+void packedWriter;
+void prepareEngineFeed(domContext, BUNDLED_ENGINE_ASSETS.pcmFeedWorklet);
 declare const browser: BrowserEngine;
 const host = browser.host;
 void host.command({ commands: [] });
@@ -132,6 +150,33 @@ assert.deepEqual(
   [],
   "a fresh strict TypeScript consumer resolves every declaration dependency",
 );
+
+const feedModuleUrls = [];
+const packedContext = { audioWorklet: { addModule: async (url) => feedModuleUrls.push(String(url)) } };
+await imported["./browser"].prepareEngineFeed(packedContext);
+await imported["./browser"].prepareEngineFeed(packedContext, "https://example.test/explicit-feed.js");
+assert.equal(feedModuleUrls[0], String(imported["./assets"].BUNDLED_ENGINE_ASSETS.pcmFeedWorklet));
+assert.equal(feedModuleUrls[1], "https://example.test/explicit-feed.js");
+let packedAttach;
+let packedDisconnects = 0;
+const packedNode = {
+  port: { postMessage(message) { if (message.op === "attach") packedAttach = message; } },
+  disconnect() { packedDisconnects += 1; },
+};
+const packedFeedRuntime = imported["./browser"].attachEngineFeed({
+  context: packedContext,
+  sources: [{ sourceId: "packed-mono", channels: 1 }, { sourceId: "packed-stereo", channels: 2 }],
+  quantumFrames: 4,
+  createNode: () => packedNode,
+});
+assert.deepEqual(packedAttach.rings, packedFeedRuntime.rings);
+assert.deepEqual(packedFeedRuntime.rings.map((ring) => new Int32Array(ring)[2]), [64, 64]);
+for (const ring of packedFeedRuntime.rings) Atomics.store(new Int32Array(ring), 13, 1);
+await packedFeedRuntime.ready();
+packedFeedRuntime.close();
+packedFeedRuntime.close();
+assert.equal(packedDisconnects, 1);
+assert.ok(files.includes("dist/assets/miso-engine-v1-pcm-feed-worklet.js"));
 
 const builtDocument = imported["."].session({ id: "tarball.boot", sampleRateHz: 48_000 })
   .source("stem", {

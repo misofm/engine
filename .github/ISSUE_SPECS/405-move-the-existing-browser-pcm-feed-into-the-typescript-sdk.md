@@ -179,6 +179,14 @@ Run once after the coherent revision is complete:
 
 Update issue #405 with Luna attempt-2 evidence but make no PASS claim. Root commits the exact coherent paths before any new implementation tranche. Dedicated Astra then reviews the pushed exact commit and reruns the reproduced blocked-ready, DOM consumer, attach cleanup, runtime allocation/red-mutation and packed-consumer gates. No adapter migration begins before that verdict.
 
+## Luna attempt 2 — source and focused regression checkpoint (2026-09-05)
+
+Luna corrected the public source shape to `{ sourceId, channels }`, made the feed factory context generic so a strict real-DOM `BaseAudioContext`/`AudioWorkletNode` factory assigns without casts, restored the monotonic `performance.now()` default, and added a private terminal notification so every already-blocked `ready()` rejects promptly with `closed`. Timeout ownership remains with the caller that observes its deadline; attach-post cleanup releases all ring writer states before best-effort detach/disconnect, preserving the typed primary `attachPost` failure. Repository `NOTICE` now carries the adapter, authorized Engine, and authorized app source identities and the staged package smoke checks all three exact commits.
+
+The four focused `browser-pcm-evals.mjs` subtests now cover literal mono/stereo layout bytes and UTF-8 limits, writer headers/counters/backpressure/wrap zero-fill/seek/release/malformed buffers, default and explicit prelude URLs, typed factory precedence, odd-source attach identity, empty/success readiness, two blocked callers, timeout ownership, attach-post cleanup under throwing cleanup calls, and the copied prelude's odd mono/stereo drain behavior. The prelude scenario instruments all typed-array constructors plus `subarray`/`slice` only after setup and records zero events across first/steady/partial drains; an in-memory `new Float32Array(4)` mutation turns the tracker red.
+
+Evidence from this checkpoint: `bash scripts/check-sdk-types.sh` PASS; `bash scripts/check-sdk-generated.sh` PASS; `node --test sdk/test/browser-pcm-evals.mjs` PASS, 4/4; `bash scripts/check-sdk-headless.sh /private/tmp/dx-393-current-artifacts` PASS, 137 pass / 1 skip / 0 fail; `npm run check:package -- /private/tmp/dx-393-current-artifacts` PASS, including the fresh strict DOM declaration consumer and packed runtime consumer. All six generated Engine artifacts compare byte-identically with `/private/tmp/dx-393-current-artifacts`; the prelude remains `d81c2159b6ca088df97e76f09c4803540e6451920cc3af1b091336fa1bdba58d`. This is an implementation checkpoint for dedicated Astra review, not a PASS claim.
+
 ## Review stop questions
 
 - Can `close()` settle every already-blocked `ready()` without waiting for the injected wait, and does timeout preserve its own `readyTimeout` result?

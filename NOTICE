@@ -4,3 +4,10 @@ This product includes software developed by the Miso Engine contributors.
 
 The browser PCM feed ring and attachment sources are adapted from
 misofm/engine-web-adapter at commit 63b4ee6212287000ff85e1cfa969d385f6246d2d.
+The MSB1 writer source was adapted from misofm/engine at commit
+bd7f330a9773ce43bb077f0e6d5c8fc30fe9e27c.
+The MSB1 allocation/reader contract and AudioWorklet feed prelude/attach
+mechanism were adapted from misofm/app at commit
+7485693e9bbcf2f65a91a4e5950e22d678d99062.
+The TypeScript ring/feed move and packaged asset are retained under the
+engine-web-adapter lineage above; this notice applies to both sources.
