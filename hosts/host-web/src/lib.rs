@@ -30,7 +30,7 @@ use host_core::{
     CompiledSession, ConsoleSoloState, EffectControlProducer, EffectObservationHandle, EffectRack,
     HostConsoleRequest, HostPrepareCaps, HostShapePolicy, PrepareDiagnostics, PrepareRejection,
     PreparedHost, SourceControlError, SourceSubmission, compile_host_model, compiled_session_shape,
-    control_table_bytes, parse_host_session, prepare_host_runtime_with_console,
+    control_table_bytes, parse_host_session, prepare_host_runtime_between_render_calls,
     source_id_arena_bytes,
 };
 use session::CompileCaps;
@@ -2627,7 +2627,7 @@ fn compile_ready(
 ) -> Result<(ReadyOwnership, WebResourceReport), BootFailure> {
     let console = console_request(options, session.quantum().0)
         .ok_or_else(|| fixed_diagnostic("web.console.config"))?;
-    let (host, handles) = prepare_host_runtime_with_console(&session, caps, &console)
+    let (host, handles) = prepare_host_runtime_between_render_calls(&session, caps, &console)
         .map_err(BootFailure::preparation)?;
     let engine = host.report;
 
