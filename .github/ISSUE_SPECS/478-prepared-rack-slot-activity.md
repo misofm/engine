@@ -51,3 +51,13 @@ No timing is authorized by this issue draft. Descriptive measurement or broader 
 ## Numbered queued scope
 
 GitHub #478 matches this title and stateless body. The planning branch is based on delivered main `fa3485c6bb1a69e6dd01df734a1ad9c945964715`. Root verified the inspected rack source, relevant integration tests, resource test inputs, Cargo/configuration and fixtures unchanged from the Astra-inspected660fce8 base. Numbered scope approval is still required before assignment. This queued issue does not displace #443 or the already approved queue and authorizes no implementation or timing. The preparation-accounting acceptance stop remains explicit.
+
+## Astra numbered scope approval
+
+# Astra #478 numbered scope review — PASS
+
+Reviewed planning head de9564c9a76c660c979d68e1569f864eb8564147 in engine-rt8-plan, based on delivered fa3485c6. The sole delta from that main is .github/ISSUE_SPECS/478-prepared-rack-slot-activity.md. The complete /tmp/astra-rt8-current-scope-brief.md is preserved verbatim, followed by the queued numbered record. Live GitHub #478 is OPEN, exact title “Prepare immutable rack slot activity for block dispatch”, and body matches the local spec. Read-only diff confirms relevant rack/graph/resource/Cargo/configuration/fixture inputs unchanged from inspected660fce8.
+
+PASS for numbered queued scope. This preserves public BankSlot and constructor validation, freezes private packed-mask preparation for the three invariant activity checks, and leaves live stage symmetry/observations untouched. Old-path trace/PCM/state/queue/order/mono transitions, actual mechanism control, installed allocation audit and explicit retained/peak/layout accounting remain required. No additional public caller-trusted flag, unsafe representation trick, resource subtraction from unrelated bank rows, new runner or timing authority is introduced.
+
+Preparation allocation accounting remains an explicit acceptance stop if the new conversion peak exceeds an existing accounted bound or exposes omitted storage. Root must resolve that precise estimator/test seam before source acceptance; the issue does not call the cache free. No implementation is authorized by this review now: preserve active443 and queued238/463/475 priority, and freeze/recheck the actual implementation base when assignment is reached. No tests/builds/timing or repository/GitHub mutations performed.
