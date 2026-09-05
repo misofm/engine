@@ -184,3 +184,31 @@ No new gate code defect was found. The source status checks accept only successf
 Remaining delivery: root-owned full workspace baseline/candidate comparison, the actual builtins positive gate with its default Cargo metadata enabled (the focused real check explicitly skipped metadata), syntax/diff and required CI, synchronized evidence, and Astra review of the actual final PR head. Parent #401 and broad #306/TOOL-11 remain open until their other children complete. No benchmark or artifact work belongs to this issue.
 
 Review used source, completed logs and disposable shell counter-checks only; no repository/Git/GitHub/Cargo/timing mutation or execution occurred.
+
+## Delivery qualification
+
+Full default `check-builtins-policy.sh` passed with Cargo metadata enabled (`/tmp/engine-406-default-builtins.log`). Candidate full workspace passed at d2e0b887: 1552 passed, zero failed, 24 ignored, identical to main a9e801fea91dc49a4d2acc9bea939d3fdc38dec9 (`/tmp/engine-406-candidate-workspace.log`, `/tmp/engine-a9e-workspace-baseline.log`). No Rust/package/artifact changes occurred in this issue. The later one-line helper-test output correction truthfully says controls were exercised, without claiming that block itself reran the suite against mutants; its focused suite passed (`/tmp/engine-406-final-helper-label.log`). It changes no assertion or gate.
+
+Astra's independent full-suite acceptance counter-checks supply the direct proof: collect, required, filter, count and plain-mode mutants each exited 1 at the intended assertion; the prior escaping required-execution-error-only mutant now exited 1 at `required-partial`. Exact record:
+
+```text
+collect: exit 1
+gate helper unexpectedly passed: collect-partial
+
+required: exit 1
+gate helper unexpectedly passed: required-absent
+
+filter: exit 1
+gate helper unexpectedly passed: filter-partial
+
+count: exit 1
+gate helper unexpectedly passed: count-partial
+
+plain: exit 1
+plain dependency mode changed compact/spaced declaration semantics
+
+required execution-error-only mutant: exit 1
+gate helper unexpectedly passed: required-partial
+```
+
+This evidence qualifies the named four gates only. #401/#306/#349 TOOL-11 and queued successors remain OPEN. Actual final PR review and required qualification CI still precede merge; no benchmark or artifact was run.
