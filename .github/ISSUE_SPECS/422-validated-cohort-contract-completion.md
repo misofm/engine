@@ -51,3 +51,7 @@ Parent #419 explicitly remains OPEN, records the three-attempt hard stop and del
 Root may now assign Luna one fresh bounded coherent pass under #422. Root checkpoints and synchronizes it before Astra attempt review; Sol retries only after FAIL, maximum three attempts in this separately frozen scope. No timing or broad qualification is authorized by this planning approval.
 
 Review inspected the numbered local spec, parent hard-stop amendment and worktree reference metadata only. Remote synchronization is root-recorded, not independently re-queried in this no-GitHub task. No implementation, tests, Cargo, Git command, GitHub operation or timing occurred.
+
+## Luna attempt 1 source evidence
+
+Implemented complete-stride capacity `(max_id + 1) * stride` with checked arithmetic, retaining existing validation and fold consumers. Added exact [0]/[0,1] boundaries, one-sided capacity cases, and a graph test-only provider wrapper whose `fold_plane` panics while delegating `fold_cohort` to `ArenaMembers`; an all-active `BankChain` dispatches once and matches the reduction oracle bit-for-bit. Focused rack and graph debug/release tests, release console chain fixtures, release lane identity tests, rack/graph/realtime policies, and clippy passed. No runner, artifact, timing, workspace-wide, or Git operation was performed.

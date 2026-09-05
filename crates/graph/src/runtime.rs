@@ -3048,6 +3048,85 @@ mod tests {
         leases.pop().expect("the lease")
     }
 
+    /// The compatibility callback is deliberately unusable here: a regression to per-lane
+    /// dispatch must fail rather than quietly producing the same sum.
+    #[test]
+    fn all_active_folded_bank_chain_dispatches_the_real_graph_cohort() {
+        struct Identity;
+        impl BankStage for Identity {
+            fn process(&mut self, _block: BankBlock<'_>) -> Result<(), RenderError> {
+                Ok(())
+            }
+        }
+        struct Probe<'a> {
+            inner: ArenaMembers<'a>,
+            cohorts: usize,
+        }
+        impl BankMembers for Probe<'_> {
+            fn plane(&self, lane: usize) -> (&[f32], &[f32]) {
+                self.inner.plane(lane)
+            }
+            fn plane_mut(&mut self, lane: usize) -> (&mut [f32], &mut [f32]) {
+                self.inner.plane_mut(lane)
+            }
+            fn fold_plane(&mut self, _lane: usize, _left: &mut [f32], _right: &mut [f32]) {
+                panic!("cohort dispatch regressed to fold_plane")
+            }
+            fn fold_cohort(&mut self, cohort: FoldCohort<'_>) {
+                self.cohorts += 1;
+                self.inner.fold_cohort(cohort);
+            }
+        }
+        const FRAMES: usize = 2;
+        let mut lease = stereo_lease(FRAMES, 10);
+        let inputs = [2, 3, 4, 5];
+        let outputs = [6, 7, 8, 9];
+        let coefficients = [1.0, 0.0, 0.0, 1.0];
+        let mut expected_left = vec![0.0; FRAMES];
+        let mut expected_right = vec![0.0; FRAMES];
+        for (lane, input) in inputs.iter().copied().enumerate() {
+            let (left, right) = lease.write_stereo(input);
+            left.fill(lane as f32 + 1.0);
+            right.fill(-(lane as f32 + 1.0));
+            for frame in 0..FRAMES {
+                expected_left[frame] += lane as f32 + 1.0;
+                expected_right[frame] -= lane as f32 + 1.0;
+            }
+        }
+        let fold: Vec<FoldLane> = (0..4)
+            .map(|lane| FoldLane {
+                coefficients,
+                store: lane == 0,
+            })
+            .collect();
+        let active = vec![true; 4].into_boxed_slice();
+        let mut chain = BankChain::new(
+            AoSoaScratch::new(BankWidth::Four, FRAMES as u32).expect("scratch"),
+            active.clone(),
+            vec![BankSlot {
+                stage: Box::new(Identity),
+                active_lanes: active.clone(),
+            }],
+        )
+        .expect("chain");
+        chain.arm_fold(active).expect("fold mask");
+        let mut members = Probe {
+            inner: ArenaMembers {
+                lease: &mut lease,
+                inputs: &inputs,
+                outputs: &outputs,
+                fold: &fold,
+                master: ARENA_BASE,
+            },
+            cohorts: 0,
+        };
+        chain.run(&mut members, FRAMES as u32, 0).expect("run");
+        assert_eq!(members.cohorts, 1);
+        let (left, right) = members.inner.lease.read_stereo(ARENA_BASE);
+        assert_eq!(left, expected_left);
+        assert_eq!(right, expected_right);
+    }
+
     /// RT-1: real graph arena members gather one buffer set and scatter directly into another.
     #[test]
     fn arena_members_direct_scatter_preserves_redirected_identity_bits() {

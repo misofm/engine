@@ -1179,13 +1179,12 @@ impl<'a> FoldCohort<'a> {
         {
             return Err(RackError::Shape);
         }
-        let required = lane_ids
-            .iter()
-            .try_fold(0usize, |required, lane| {
-                lane.checked_mul(stride)
-                    .and_then(|start| start.checked_add(frames))
-                    .map(|end| required.max(end))
-            })
+        // The public cohort is a complete lane-major bank: every physical ID below the maximum
+        // has a stride, including holes. This is the capacity both consumers already require.
+        let max_lane = lane_ids.iter().copied().max().ok_or(RackError::Shape)?;
+        let required = max_lane
+            .checked_add(1)
+            .and_then(|lanes| lanes.checked_mul(stride))
             .ok_or(RackError::Overflow)?;
         if left.len() < required || right.len() < required {
             return Err(RackError::Shape);
@@ -3438,6 +3437,18 @@ mod tests {
         assert!(FoldCohort::new(&ids, &mut left, &mut right, 3, 4).is_err());
         assert!(FoldCohort::new(&ids, &mut left[..7], &mut right, 4, 4).is_err());
         assert!(FoldCohort::new(&ids, &mut left, &mut right[..7], 4, 4).is_err());
+        let mut boundary_left = [0.0_f32; 8];
+        let mut boundary_right = [0.0_f32; 8];
+        assert!(FoldCohort::new(&[0], &mut boundary_left[..2], &mut boundary_right, 4, 2).is_err());
+        assert!(FoldCohort::new(&[0], &mut boundary_left, &mut boundary_right[..2], 4, 2).is_err());
+        assert!(FoldCohort::new(&[0], &mut boundary_left, &mut boundary_right, 4, 2).is_ok());
+        assert!(
+            FoldCohort::new(&[0, 1], &mut boundary_left[..6], &mut boundary_right, 4, 2).is_err()
+        );
+        assert!(
+            FoldCohort::new(&[0, 1], &mut boundary_left, &mut boundary_right[..6], 4, 2).is_err()
+        );
+        assert!(FoldCohort::new(&[0, 1], &mut boundary_left, &mut boundary_right, 4, 2).is_ok());
         assert!(FoldCohort::new(&[usize::MAX], &mut left, &mut right, 2, 1).is_err());
         assert!(FoldCohort::new(&[0], &mut left[..0], &mut right[..0], 0, 0).is_err());
         assert_eq!(left.map(f32::to_bits), left_before);
