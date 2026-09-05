@@ -361,8 +361,21 @@
       "retained_path": "artifacts/issue420-qualification/engine-420-post410-policies.log",
       "bytes": 134,
       "sha256": "0cf769a06578a51fdb87831008a1eb46c18a8a21270dd0640172bae43560b7a3"
+    },
+    {
+      "path": "/tmp/engine-420-split-source-identity.json",
+      "retained_path": "artifacts/issue420-qualification/engine-420-split-source-identity.json",
+      "bytes": 4320,
+      "sha256": "7e27bc423a3da954a17d3e188023b44670199b21985da933d88f1f0ef8e1bc42"
+    },
+    {
+      "path": "/tmp/astra-420-delivery-split-ruling.md",
+      "retained_path": "artifacts/issue420-qualification/astra-420-delivery-split-ruling.md",
+      "bytes": 9945,
+      "sha256": "82552db71003f513faf980e2bbc6df24f9f25f0a5b74d40138feb478e86c7f43"
     }
   ],
   "untimed_runner_profile_binary_sha256": "53dce85d8ff683693598da8dce79195ecfad1ad76300b68bb348196c00f81bab",
-  "measurement_status": "Uninvoked. Twelve readiness probes exceeded the frozen load ceiling; readiness ended exit 1. No benchmark artifact or disposition created."
+  "measurement_status": "Uninvoked. Twelve readiness probes exceeded the frozen load ceiling; readiness ended exit 1. No benchmark artifact or disposition created.",
+  "measurement_owner_issue": 436
 }
