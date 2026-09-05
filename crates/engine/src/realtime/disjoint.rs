@@ -754,12 +754,13 @@ mod tests {
 
     fn assert_many_rejection_keeps_plane_zero(
         lease: &mut ArenaLease,
-        observed: &[u32; 4],
+        observed: &[u32],
         attempted: &[u32; 4],
         frames: usize,
     ) {
         for buffer in observed {
             lease.write(0, *buffer).fill(f32::from_bits(0x7fc0_3990));
+            lease.write(1, *buffer).fill(f32::from_bits(0xffc0_3990));
         }
         assert!(lease.write_stereo_many(attempted, frames).is_none());
         for buffer in observed {
@@ -769,6 +770,12 @@ mod tests {
                     .iter()
                     .all(|word| word.to_bits() == 0x7fc0_3990)
             );
+            assert!(
+                lease
+                    .read(1, *buffer)
+                    .iter()
+                    .all(|word| word.to_bits() == 0xffc0_3990)
+            );
         }
     }
 
@@ -777,35 +784,45 @@ mod tests {
     fn stereo_many_rejects_every_invalid_shape_without_partial_writes() {
         let (ids, _, mut mono) = many_lease(1, 8);
         let four: [u32; 4] = ids[..4].try_into().expect("four ids");
-        assert_many_rejection_keeps_plane_zero(&mut mono, &four, &four, 8);
+        for buffer in &four {
+            mono.write(0, *buffer).fill(f32::from_bits(0x7fc0_3990));
+        }
+        assert!(mono.write_stereo_many(&four, 8).is_none());
+        for buffer in &four {
+            assert!(
+                mono.read(0, *buffer)
+                    .iter()
+                    .all(|word| word.to_bits() == 0x7fc0_3990)
+            );
+        }
 
         let (ids, unwritable, mut lease) = many_lease(2, 8);
         let four: [u32; 4] = ids[..4].try_into().expect("four ids");
         assert_many_rejection_keeps_plane_zero(
             &mut lease,
-            &four,
+            &ids,
             &[four[0], four[0], four[2], four[3]],
             8,
         );
         assert_many_rejection_keeps_plane_zero(
             &mut lease,
-            &four,
+            &ids,
             &[0, four[1], four[2], four[3]],
             8,
         );
         assert_many_rejection_keeps_plane_zero(
             &mut lease,
-            &four,
+            &ids,
             &[unwritable, four[1], four[2], four[3]],
             8,
         );
         assert_many_rejection_keeps_plane_zero(
             &mut lease,
-            &four,
+            &ids,
             &[u32::MAX, four[1], four[2], four[3]],
             8,
         );
-        assert_many_rejection_keeps_plane_zero(&mut lease, &four, &four, 9);
+        assert_many_rejection_keeps_plane_zero(&mut lease, &ids, &four, 9);
 
         let unsupported = [ids[0], ids[1], ids[2]];
         assert!(lease.write_stereo_many(&unsupported, 8).is_none());
