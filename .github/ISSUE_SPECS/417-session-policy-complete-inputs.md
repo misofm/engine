@@ -72,3 +72,7 @@ Reuse the SAME operation assertions to counter-test disposable faulty checker/he
 Once one coherent implementation pass is ready: real checker, full focused suite, shared helper tests only if changed, Bash syntax/diff. Root checkpoints/pushes before more edits; Astra gives one adversarial verdict. Full workspace unchanged-count comparison remains a delivery-boundary gate, followed by actual PR review and required CI. Luna attempt 1; Sol only after Astra FAIL, at most two revisions; after three failed attempts hard stop/rescope. No timing or benchmark tooling belongs here.
 
 This brief resolves Sol's readiness questions without changing the original Session policy. #417 remains queued until #407 merges; root must synchronize this amended existing issue/spec and freeze the actual base before assignment.
+
+## Frozen implementation assignment
+
+#407 is merged and verified CLOSED at `a0e4d123a038160b4f5934dac14aacc72c9fbbf2`; this is the fresh implementation base for #417. Astra's final brief above is synchronized before Luna attempt 1. The six direct predicates, all five anchor patterns, allowlist parsing, four find argument sets and final retired-name search are frozen to `scripts/check-session-policy.sh` at that base. Root owns exact-path checkpoints, upstream synchronization, workspace comparison, final PR and merge. No current benchmark quiet window is active.
