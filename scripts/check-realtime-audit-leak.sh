@@ -20,6 +20,8 @@ fail() {
     exit 1
 }
 
+captured() { local path=$1; [[ -s "$path" ]] && printf '%s' "$(<"$path")" || printf '<empty>'; }
+
 for required_root in crates hosts sidecars; do
     [[ -d "$required_root" ]] || fail "missing required root: $required_root"
 done
@@ -29,8 +31,9 @@ if find crates hosts sidecars -mindepth 2 -maxdepth 2 -name Cargo.toml >"$scratc
 else
     find_status=$?
 fi
-((find_status == 0)) || fail "manifest discovery failed with status $find_status: $(<"$scratch/find.err")"
-LC_ALL=C sort "$scratch/manifests" >"$scratch/manifests.sorted" || fail 'manifest sort failed'
+((find_status == 0)) || fail "manifest discovery failed with status $find_status; output: $(captured "$scratch/manifests"); stderr: $(captured "$scratch/find.err")"
+if LC_ALL=C sort "$scratch/manifests" >"$scratch/manifests.sorted" 2>"$scratch/sort.err"; then sort_status=0; else sort_status=$?; fi
+((sort_status == 0)) || fail "manifest sort failed with status $sort_status; input: $(captured "$scratch/manifests"); stderr: $(captured "$scratch/sort.err")"
 [[ -s "$scratch/manifests.sorted" ]] || fail 'manifest discovery produced no packages'
 
 # Structural half: inside crates/ and hosts/ manifests, only dev-dependency sections (and the
@@ -49,7 +52,7 @@ while IFS= read -r manifest; do
     else
         awk_status=$?
     fi
-    ((awk_status == 0)) || fail "manifest parser failed for $manifest with status $awk_status: $(<"$scratch/awk.err")"
+    ((awk_status == 0)) || fail "manifest parser failed for $manifest with status $awk_status; output: $(captured "$scratch/awk"); stderr: $(captured "$scratch/awk.err")"
     violation="$(<"$scratch/awk")"
     [[ -z "$violation" ]] || fail "non-dev feature enable: $violation"
 done < "$scratch/manifests.sorted"
@@ -62,7 +65,7 @@ while IFS= read -r manifest; do
     else
         awk_status=$?
     fi
-    ((awk_status == 0)) || fail "package-name parser failed for $manifest with status $awk_status: $(<"$scratch/awk.err")"
+    ((awk_status == 0)) || fail "package-name parser failed for $manifest with status $awk_status; output: $(captured "$scratch/package"); stderr: $(captured "$scratch/awk.err")"
     package="$(<"$scratch/package")"
     [[ -n "$package" ]] || fail "unnamed package manifest: $manifest"
     if cargo tree --locked --offline -p "$package" -e features,no-dev --target all >"$scratch/cargo" 2>"$scratch/cargo.err"; then
@@ -70,13 +73,13 @@ while IFS= read -r manifest; do
     else
         cargo_status=$?
     fi
-    ((cargo_status == 0)) || fail "cargo tree failed for $package with status $cargo_status: $(<"$scratch/cargo.err")"
+    ((cargo_status == 0)) || fail "cargo tree failed for $package with status $cargo_status; output: $(captured "$scratch/cargo"); stderr: $(captured "$scratch/cargo.err")"
     [[ -s "$scratch/cargo" ]] || fail "cargo tree produced no graph for $package"
-    if grep -q 'realtime-audit' "$scratch/cargo"; then
-        fail "production graph of $package resolves core's realtime-audit feature"
+    if grep -n 'realtime-audit' "$scratch/cargo" >"$scratch/grep" 2>"$scratch/grep.err"; then
+        fail "production graph of $package resolves core's realtime-audit feature: $(captured "$scratch/grep")"
     else
         grep_status=$?
-        ((grep_status == 1)) || fail "cargo graph scan failed for $package with status $grep_status"
+        ((grep_status == 1)) || fail "cargo graph scan failed for $package with status $grep_status; output: $(captured "$scratch/grep"); stderr: $(captured "$scratch/grep.err"); graph: $(captured "$scratch/cargo")"
     fi
 done < "$scratch/manifests.sorted"
 

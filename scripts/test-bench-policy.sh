@@ -27,9 +27,15 @@ expect_failure() {
 }
 
 expect_failure_with_path() {
-    local label="$1" shim="$2"
-    if PATH="$shim:$PATH" check >/dev/null 2>&1; then
+    local label="$1" shim="$2" expected=${3:-}
+    local output status
+    if output="$(PATH="$shim:$PATH" check 2>&1)"; then status=0; else status=$?; fi
+    if ((status == 0)); then
         printf 'bench policy mutation escaped: %s\n' "$label" >&2
+        exit 1
+    fi
+    if [[ -n "$expected" && "$output" != *"$expected"* ]]; then
+        printf 'bench policy wrong diagnostic: %s\n%s\n' "$label" "$output" >&2
         exit 1
     fi
 }
@@ -53,19 +59,19 @@ mkdir -p "$case_root/shim"
 printf '#!/usr/bin/env bash\nprintf "crates/fixture/Cargo.toml\\n"\nexit 1\n' \
     >"$case_root/shim/find"
 chmod +x "$case_root/shim/find"
-expect_failure_with_path manifest-discovery-status-loss "$case_root/shim"
+expect_failure_with_path manifest-discovery-status-loss "$case_root/shim" 'manifest discovery failed with status 1; output: crates/fixture/Cargo.toml; stderr: <empty>'
 
 new_case manifest-sort-error
 mkdir -p "$case_root/shim"
 printf '#!/usr/bin/env bash\nexit 2\n' >"$case_root/shim/sort"
 chmod +x "$case_root/shim/sort"
-expect_failure_with_path manifest-sort-error "$case_root/shim"
+expect_failure_with_path manifest-sort-error "$case_root/shim" 'manifest sort failed with status 2; input: crates/fixture/Cargo.toml'
 
 new_case manifest-awk-error
 mkdir -p "$case_root/shim"
-printf '#!/usr/bin/env bash\nexit 2\n' >"$case_root/shim/awk"
+printf '#!/usr/bin/env bash\nif [[ " $* " == *" -v file="* ]]; then printf "manifest-awk-partial\\n"; printf "manifest-awk-error\\n" >&2; exit 2; fi\nexec /usr/bin/awk "$@"\n' >"$case_root/shim/awk"
 chmod +x "$case_root/shim/awk"
-expect_failure_with_path manifest-awk-error "$case_root/shim"
+expect_failure_with_path manifest-awk-error "$case_root/shim" 'dependency parser failed for crates/fixture/Cargo.toml with status 2; output: manifest-awk-partial; stderr: manifest-awk-error'
 
 new_case second-allocator
 printf '\nunsafe impl GlobalAlloc for Second {}\n' \
@@ -249,5 +255,64 @@ mkdir -p "$case_root/crates/compressor"
 printf '[dependencies]\nbench-support.workspace = true\n\n[dev-dependencies]\nsha2.workspace = true\n' \
     >"$case_root/crates/compressor/Cargo.toml"
 expect_failure crates-dev-dependency-promoted-to-a-real-one
+
+# Selective execution faults cover every remaining grep/parser/owner/count stage. Unselected
+# invocations delegate to the real tool, so each case reaches the named operation on a valid tree.
+grep_fault() {
+    local label=$1 selector=$2 expected=$3 payload=${4-grep-partial-sentinel}
+    new_case "$label"
+    mkdir -p "$case_root/shim"
+    printf '#!/usr/bin/env bash\nselector=%q\npayload=%q\nif [[ " $* " == *"$selector"* ]]; then [[ -n "$payload" ]] && printf "%%s\\n" "$payload"; printf "grep-error-sentinel\\n" >&2; exit 7; fi\nexec /usr/bin/grep "$@"\n' \
+        "$selector" "$payload" >"$case_root/shim/grep"
+    chmod +x "$case_root/shim/grep"
+    expect_failure_with_path "$label" "$case_root/shim" "$expected"
+}
+
+grep_fault owner-grep-error '^unsafe impl GlobalAlloc' 'grep failed with status 7; output: tools/bench-support/src/alloc.rs; stderr: grep-error-sentinel' 'tools/bench-support/src/alloc.rs'
+grep_fault escaper-presence-error 'tools/bench-support/src/json.rs' 'shared-definition grep failed or is empty for tools/bench-support/src/json.rs; status 7; output: grep-partial-sentinel; stderr: grep-error-sentinel'
+new_case escaper-candidate-grep-error
+mkdir -p "$case_root/shim"
+printf '#!/usr/bin/env bash\nif [[ " $* " == *"--include=*.rs"* && " $* " == *"json_(escape|string|quote)"* ]]; then printf "tools/bench-support/src/json.rs\\n"; printf "grep-error-sentinel\\n" >&2; exit 7; fi\nexec /usr/bin/grep "$@"\n' >"$case_root/shim/grep"
+chmod +x "$case_root/shim/grep"
+expect_failure_with_path escaper-candidate-grep-error "$case_root/shim" 'grep failed with status 7; output: tools/bench-support/src/json.rs; stderr: grep-error-sentinel'
+grep_fault private-sha-grep-error '0x6a09_' 'grep failed with status 7; output: <empty>; stderr: grep-error-sentinel' ''
+grep_fault timed-marker-grep-error 'timing::timed' 'converted subject timer scan failed or is empty for tools/bench/src/rack.rs; status 7; output: grep-partial-sentinel; stderr: grep-error-sentinel'
+grep_fault timed-forbidden-grep-error 'Instant::now' 'subject scan failed with status 7; output: <empty>; stderr: grep-error-sentinel' ''
+grep_fault unsafe-owner-grep-error 'unsafe_code' 'unsafe-owner scan failed with status 7; output: tools/bench-support/src/alloc.rs; stderr: grep-error-sentinel' 'tools/bench-support/src/alloc.rs'
+grep_fault environment-reader-grep-error 'env::var' 'environment-reader scan failed with status 7; output: tools/audit/src/main.rs; stderr: grep-error-sentinel' 'tools/audit/src/main.rs'
+
+new_case delegate-parser-output-error
+mkdir -p "$case_root/shim"
+printf '#!/usr/bin/env bash\nif [[ -n "${MISO_ENGINE_BENCH_POLICY_NEEDLE:-}" ]]; then printf "own\\n"; printf "delegate-error-sentinel\\n" >&2; exit 6; fi\nexec /usr/bin/awk "$@"\n' >"$case_root/shim/awk"
+chmod +x "$case_root/shim/awk"
+expect_failure_with_path delegate-parser-output-error "$case_root/shim" 'delegate parser failed for tools/bench/src/builtins.rs with status 6; output: own; stderr: delegate-error-sentinel'
+
+sort_fault() {
+    local label=$1 ordinal=$2 expected=$3
+    new_case "$label"
+    mkdir -p "$case_root/shim"
+    printf '#!/usr/bin/env bash\nstate=${TMPDIR:-/tmp}/bench-sort-fault-%s\nn=0; [[ -f "$state" ]] && n=$(<"$state"); n=$((n+1)); printf "%%s" "$n" >"$state"\nif ((n == %s)); then /usr/bin/sort "$@"; printf "sort-error-sentinel\\n" >&2; exit 8; fi\nexec /usr/bin/sort "$@"\n' "$label" "$ordinal" >"$case_root/shim/sort"
+    chmod +x "$case_root/shim/sort"
+    rm -f "/tmp/bench-sort-fault-$label"
+    expect_failure_with_path "$label" "$case_root/shim" "$expected"
+    rm -f "/tmp/bench-sort-fault-$label"
+}
+
+sort_fault unsafe-expected-sort-error 8 'unsafe expected-owner sort failed with status 8; stderr: sort-error-sentinel'
+sort_fault unsafe-discovered-sort-error 9 'unsafe-owner sort failed with status 8; input:'
+sort_fault environment-expected-sort-error 10 'environment expected-owner sort failed with status 8; stderr: sort-error-sentinel'
+sort_fault environment-discovered-sort-error 11 'environment-reader sort failed with status 8; input:'
+
+new_case count-error
+mkdir -p "$case_root/shim"
+printf '#!/usr/bin/env bash\nprintf "6\\n"\nprintf "count-error-sentinel\\n" >&2\nexit 9\n' >"$case_root/shim/wc"
+chmod +x "$case_root/shim/wc"
+expect_failure_with_path count-error "$case_root/shim" 'unsafe-owner count failed with status 9; stderr: count-error-sentinel'
+
+new_case count-formatter-error
+mkdir -p "$case_root/shim"
+printf '#!/usr/bin/env bash\nprintf "6\\n"\nprintf "formatter-error-sentinel\\n" >&2\nexit 10\n' >"$case_root/shim/tr"
+chmod +x "$case_root/shim/tr"
+expect_failure_with_path count-formatter-error "$case_root/shim" 'unsafe-owner count formatter failed with status 10; input: 6; stderr: formatter-error-sentinel'
 
 printf 'bench policy mutations: ok\n'

@@ -149,3 +149,34 @@ After the coherent correction retain exact commands/statuses for both real scann
 The narrow shared population/captured Cargo approach and unchanged parser bodies should be preserved. #453 is now one FAIL; Sol2/3 are available only under the standing workflow, then hard stop/rescope. Parent #403/#306/#349 remain open. Review performed only source/Git/spec inspection and wrote this /tmp report; no tests/builds/timing or repository/GitHub mutations were performed.
 
 Root records one consolidated FAIL and authorizes Sol attempt 2 for the four finite original-contract correction groups above. Preserve accepted manifest/Cargo handling and exact parser/policy semantics; complete all named directed stages and both actual SAME-assertion production controls. No helper/framework/runner/runtime expansion or weaker gate is authorized. Root commits/pushes the coherent correction before further work; one final Sol attempt remains only after a failed verdict, then hard stop/rescope.
+
+## Sol attempt 2 implementation checkpoint
+
+Sol completed the four authorized correction groups in one pass. The benchmark checker now uses
+nonquiet captured positive greps, conditionally captures the unchanged delegate parser, checks both
+expected and discovered owner sorts, and checks count production and formatting independently. Both
+checkers retain status, stderr, and useful partial stdout/input for the original find, grep, sort,
+awk, Cargo, and count operations. The audit graph scan keeps Cargo stdout separate from stderr and
+distinguishes match, clean absence, and execution failure without changing its pattern, exemptions,
+or Cargo-tree flags.
+
+The existing suites now use selective shims over valid fixtures. Unselected operations delegate to
+the real tools. The audit directed cases use a frozen tiny offline-resolvable `fixture` package;
+only its baseline uses the full real repository. Directed cases cover required roots and empty
+aggregate, manifest find/sort, both manifest parsers, unnamed packages, clean and matching failed
+Cargo payloads, and matching-output graph-grep failure with precise sentinels. Benchmark cases cover
+ownership, escaper presence/candidate/delegate parsing, private SHA, timed marker/forbidden scans,
+unsafe/environment scans and both expected/discovered sorts, the late dependency parser, and count
+plus formatter failures while retaining the existing clean and violation controls.
+
+The audit suite applies exactly two disposable production mutations once each: suppressed checked
+manifest-discovery status and suppressed checked Cargo status. The same targeted assertions return
+97 only for the mutant's unexpected success and 96 for setup/wrong-diagnostic failure. The retained
+suite output records both mutants at status 97 and the restored tiny fixture at status 0.
+
+Focused evidence is retained in `/tmp/453-*.log` with matching `/tmp/453-*.status` files. The exact
+commands use `PATH=/home/bl/.cargo/bin:$PATH`: four-file `bash -n`; both real checkers; both existing
+suites; and `git diff --check`. All six statuses are 0. The real audit checker invokes only offline
+Cargo metadata resolution. No benchmark binary, runner, build, full-workspace gate, artifact,
+timing, Git, GitHub, workflow, Rust/runtime, or sibling-scope action was performed. Root owns the
+exact-path checkpoint before adversarial source review.
