@@ -3631,7 +3631,7 @@ mod tests {
     use graph::{
         GraphEdge, GraphEdgeId, GraphNode, GraphNodeBinding, GraphPortId, GraphPortKind,
         GraphPreparedSourceSetDriver, GraphResourceEstimate, GraphSourceInputClaim,
-        GraphSourceSetResourceReport, PreparedGraphPlanParts,
+        GraphSourceSetResourceReport, PreparedGraphPlanParts, PreparedRoute, RouteTransform,
     };
 
     /// The compiler always emits `spec.nodes` sorted by id; hand-built fixtures list them in
@@ -4380,6 +4380,13 @@ mod tests {
         seed: u64,
     }
 
+    struct AliasObserver;
+    impl GraphRuntimeObserver for AliasObserver {
+        fn observe(&mut self, _block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
+            Ok(())
+        }
+    }
+
     impl GraphRuntimeProcessor for SeededInput {
         fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
             let mut state = self.seed ^ block.first_sample.wrapping_mul(0x9e37_79b9_7f4a_7c15);
@@ -4414,7 +4421,22 @@ mod tests {
     ///
     /// `Output` is fed by track 0's `PostMatrix` only: `GraphEdgeId::TrackMain { target }` is not
     /// unique for fan-in, and a reduction is not what this harness measures.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum BoundaryVariant {
+        Plain,
+        Send,
+        Alias,
+        AliasObserved,
+    }
+
     fn track_graph(n: usize) -> (PreparedGraphPlan, Vec<DependencyLevel>) {
+        track_graph_variant(n, BoundaryVariant::Plain)
+    }
+
+    fn track_graph_variant(
+        n: usize,
+        variant: BoundaryVariant,
+    ) -> (PreparedGraphPlan, Vec<DependencyLevel>) {
         let envelope = RenderEnvelope {
             sample_rate: SampleRateHz(48_000),
             quantum: QuantumFrames(HARNESS_QUANTUM),
@@ -4428,6 +4450,10 @@ mod tests {
         let output = GraphNodeId::Output {
             output_id: StableGraphId::parse("main-out").expect("harness ID"),
         };
+        let route = GraphNodeId::Route {
+            route_id: StableGraphId::parse("proof-send").expect("harness ID"),
+        };
+        let alias = stage(0, TrackStage::PostDynamic);
         let stages = [
             TrackStage::Input,
             TrackStage::PostInputBuiltins,
@@ -4474,6 +4500,61 @@ mod tests {
             },
             path: "$.routes[0]".to_owned(),
         });
+        if matches!(variant, BoundaryVariant::Send) {
+            edges.push(GraphEdge {
+                id: GraphEdgeId::RouteSource {
+                    route_id: StableGraphId::parse("proof-send").expect("route"),
+                },
+                source: GraphPortId {
+                    node: stage(0, TrackStage::PostFader),
+                    kind: GraphPortKind::MainOutput,
+                    effect_port: None,
+                },
+                destination: GraphPortId {
+                    node: route.clone(),
+                    kind: GraphPortKind::MainInput,
+                    effect_port: None,
+                },
+                path: "$.routes[proof-send].source".to_owned(),
+            });
+            edges.push(GraphEdge {
+                id: GraphEdgeId::RouteDestination {
+                    route_id: StableGraphId::parse("proof-send").expect("route"),
+                },
+                source: GraphPortId {
+                    node: route.clone(),
+                    kind: GraphPortKind::MainOutput,
+                    effect_port: None,
+                },
+                destination: GraphPortId {
+                    node: output.clone(),
+                    kind: GraphPortKind::MainInput,
+                    effect_port: None,
+                },
+                path: "$.routes[proof-send].destination".to_owned(),
+            });
+        }
+        if matches!(
+            variant,
+            BoundaryVariant::Alias | BoundaryVariant::AliasObserved
+        ) {
+            edges.push(GraphEdge {
+                id: GraphEdgeId::TrackMain {
+                    target: alias.clone(),
+                },
+                source: GraphPortId {
+                    node: stage(0, TrackStage::PostFader),
+                    kind: GraphPortKind::MainOutput,
+                    effect_port: None,
+                },
+                destination: GraphPortId {
+                    node: alias.clone(),
+                    kind: GraphPortKind::MainInput,
+                    effect_port: None,
+                },
+                path: "$.tracks[0].alias".to_owned(),
+            });
+        }
         let mut levels = Vec::new();
         for (level, kind) in stages.iter().enumerate() {
             let level_nodes: Vec<_> = (0..n).map(|index| stage(index, *kind)).collect();
@@ -4484,10 +4565,39 @@ mod tests {
             });
         }
         nodes.push(output.clone());
+        if matches!(variant, BoundaryVariant::Send) {
+            nodes.push(route.clone());
+        }
+        if matches!(
+            variant,
+            BoundaryVariant::Alias | BoundaryVariant::AliasObserved
+        ) {
+            nodes.push(alias.clone());
+        }
         levels.push(DependencyLevel {
             level: stages.len() as u64,
             nodes: vec![output.clone()],
         });
+        if matches!(
+            variant,
+            BoundaryVariant::Send | BoundaryVariant::Alias | BoundaryVariant::AliasObserved
+        ) {
+            let boundary_node = if matches!(variant, BoundaryVariant::Send) {
+                route.clone()
+            } else {
+                alias.clone()
+            };
+            levels.insert(
+                stages.len(),
+                DependencyLevel {
+                    level: stages.len() as u64,
+                    nodes: vec![boundary_node],
+                },
+            );
+            for (index, level) in levels.iter_mut().enumerate() {
+                level.level = index as u64;
+            }
+        }
         let schedule: Vec<_> = levels
             .iter()
             .flat_map(|level| level.nodes.iter().cloned())
@@ -4516,14 +4626,39 @@ mod tests {
             buffer_assignments: Vec::new(),
             estimate: zero_graph_estimate(),
             envelope,
-            required_bindings: nodes,
-            routes: Vec::new(),
+            required_bindings: nodes
+                .iter()
+                .filter(|node| !matches!(node, GraphNodeId::Route { .. }) && *node != &alias)
+                .cloned()
+                .collect(),
+            routes: if matches!(variant, BoundaryVariant::Send) {
+                vec![PreparedRoute {
+                    node: route,
+                    transform: RouteTransform {
+                        gain: 0.5,
+                        ll: 1.0,
+                        lr: 0.0,
+                        rl: 0.0,
+                        rr: 1.0,
+                    },
+                }]
+            } else {
+                Vec::new()
+            },
             track_delays: Vec::new(),
             effects: Vec::new(),
             effect_controls: Vec::new(),
             banks: Vec::new(),
             builtin_banks: Vec::new(),
-            observers: Vec::new(),
+            observers: if matches!(variant, BoundaryVariant::AliasObserved) {
+                vec![GraphNodeObserverBinding::new(
+                    alias,
+                    0x86ff,
+                    Box::new(AliasObserver),
+                )]
+            } else {
+                Vec::new()
+            },
             effect_observations: Vec::new(),
         });
         (graph, levels)
@@ -4536,6 +4671,22 @@ mod tests {
         between_render_calls: bool,
         post_fader_barrier: bool,
     ) -> (Vec<Vec<u32>>, usize, Vec<MeterSnapshot>) {
+        render_post_input_bits_with_variant(
+            n,
+            dispatch,
+            between_render_calls,
+            post_fader_barrier,
+            BoundaryVariant::Plain,
+        )
+    }
+
+    fn render_post_input_bits_with_variant(
+        n: usize,
+        dispatch: Backend,
+        between_render_calls: bool,
+        post_fader_barrier: bool,
+        variant: BoundaryVariant,
+    ) -> (Vec<Vec<u32>>, usize, Vec<MeterSnapshot>) {
         let compiled = n_track_session(n);
         let controls = (0..n)
             .map(|index| TrackControlRequest {
@@ -4543,10 +4694,16 @@ mod tests {
                 queue_capacity: NonZeroUsize::new(4).expect("queue"),
             })
             .collect::<Vec<_>>();
-        let meter_requests = post_fader_barrier.then(|| MeterRequest {
+        let meter_requests = (post_fader_barrier
+            || matches!(variant, BoundaryVariant::AliasObserved))
+        .then(|| MeterRequest {
             handle: MeterHandle(NonZeroU64::new(0x430).expect("handle")),
             track_id: track_name(0),
-            tap: MeterTap::PostFader,
+            tap: if matches!(variant, BoundaryVariant::AliasObserved) {
+                MeterTap::PostDynamic
+            } else {
+                MeterTap::PostFader
+            },
             config: MeterConfig {
                 period_frames: NonZeroU32::new(HARNESS_QUANTUM).expect("period"),
                 peak_hold_frames: 0,
@@ -4567,7 +4724,7 @@ mod tests {
             prepare_session_builtins(&compiled, meter_requests, caps())
         }
         .expect("harness builtins");
-        let (graph, levels) = track_graph(n);
+        let (graph, levels) = track_graph_variant(n, variant);
         let classes = SessionPoolClasses::from_session(&compiled);
         let mut artifact =
             builtins.into_graph_artifact_with_banks(graph, (), dispatch, &levels, &classes);
@@ -4793,6 +4950,62 @@ mod tests {
             HARNESS_BLOCKS as usize,
             "the compatible unobserved trailing cohort remains paired"
         );
+    }
+
+    #[test]
+    fn serialized_send_reader_declines_crossing_fader_while_pcm_matches_separate() {
+        let _guard = PAIR_WITNESS_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        FADER_MATRIX_PROCESS_CALLS.store(0, Ordering::Relaxed);
+        FADER_MATRIX_FACTORY_CALLS.store(0, Ordering::Relaxed);
+        let (paired, _, _) = render_post_input_bits_with_variant(
+            9,
+            Backend::Simd8,
+            true,
+            false,
+            BoundaryVariant::Send,
+        );
+        let (separate, _, _) = render_post_input_bits_with_variant(
+            9,
+            Backend::Simd8,
+            false,
+            false,
+            BoundaryVariant::Send,
+        );
+        assert_eq!(paired, separate, "nonunity send/crossfeed PCM words");
+        assert_eq!(FADER_MATRIX_FACTORY_CALLS.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            FADER_MATRIX_PROCESS_CALLS.load(Ordering::Relaxed),
+            HARNESS_BLOCKS as usize
+        );
+    }
+
+    #[test]
+    fn serialized_alias_observer_is_the_decline_boundary() {
+        let _guard = PAIR_WITNESS_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        FADER_MATRIX_FACTORY_CALLS.store(0, Ordering::Relaxed);
+        let (eligible, _, _) = render_post_input_bits_with_variant(
+            9,
+            Backend::Simd8,
+            true,
+            false,
+            BoundaryVariant::Alias,
+        );
+        let eligible_factory = FADER_MATRIX_FACTORY_CALLS.load(Ordering::Relaxed);
+        FADER_MATRIX_FACTORY_CALLS.store(0, Ordering::Relaxed);
+        let (observed, _, _) = render_post_input_bits_with_variant(
+            9,
+            Backend::Simd8,
+            true,
+            false,
+            BoundaryVariant::AliasObserved,
+        );
+        assert_eq!(eligible, observed, "alias observer preserves PCM words");
+        assert_eq!(eligible_factory, 1);
+        assert_eq!(FADER_MATRIX_FACTORY_CALLS.load(Ordering::Relaxed), 1);
     }
 
     struct PairFixture {

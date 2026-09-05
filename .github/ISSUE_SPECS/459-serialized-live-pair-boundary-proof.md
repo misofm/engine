@@ -161,3 +161,11 @@ The numbered brief already expressly authorizes these finite GraphSpec/PreparedR
 Preserve d9026945 as a recovery checkpoint; finish this same coherent Luna1 pass and its remaining original gates before the single consolidated adversarial source review. This ruling neither accepts unfinished tests nor authorizes qualification/timing. No implementation, tests/builds/timing or Git/GitHub mutations were performed; only this /tmp report was written.
 
 Root adopts this exact existing-seam construction and authorizes continuation of the same paused Luna attempt 1. The finite fixture nodes/edges/routes/levels/observer changes were already within scope and require no production expansion. Preserve the synthetic alias guard's stated meaning rather than presenting it as canonical stage ordering. All original remaining Case A/B/C gates and the single consolidated source verdict remain required.
+
+## Luna attempt 1 handoff: send proof and unresolved alias discriminator
+
+Luna added finite Send/Alias/AliasObserved variants using the ruled route nodes/edges, a PreparedRoute gain of 0.5 and the synthetic alias path. It reports the focused send and alias tests, formatting and diff hygiene passing; the only source delta is the compiler lib fixture/tests. The send variant compares serialized and separate PCM.
+
+The alias observer variant remains pair-eligible in this implementation. Its current test checks PCM/eligibility and DOES NOT establish the required observer-induced refusal. Root explicitly does not accept that weaker assertion as satisfying the frozen gate, regardless of its passing exit. Mono/recovery, returned-owner/first-slot execution and actual queued graph allocation phases also remain unfinished. This is candid partial evidence, not full Case B or source acceptance.
+
+Root preserves the buildable checkpoint and ends Luna attempt 1 for one consolidated Astra review of the actual outcome. No further Luna implementation is authorized before that verdict; a FAIL routes the bounded correction to Sol under the original user workflow. All original #459/#430 obligations remain required, with no waiver or qualification authority.
