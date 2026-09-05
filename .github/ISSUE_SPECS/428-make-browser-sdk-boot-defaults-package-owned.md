@@ -70,3 +70,56 @@ Matching issue misofm/engine#428. Isolated branch codex/dx-sdk-boot starts from 
 ### Narrow worker packaging amendment
 
 Root approves adding a pinned build-only esbuild development dependency in sdk/package.json and sdk/package-lock.json and using sdk/codegen/stage-package.mjs to bundle emitted dist/browser/scratch-worker.js in place as an import-complete browser ES module. Existing TypeScript alone cannot preserve the worker dependency graph when a public URL is relocated by an app bundler. This preserves the public entry name, has no runtime package dependency, does not touch the six generated artifact bytes, and must make both default and forwarding custom Worker factories work in the packed browser. Preserve provenance/NOTICE.
+
+### Attempt 1 implementation evidence (Astra medium, 2026-09-05)
+
+Package-owned defaults are implemented on the existing `BrowserEngine`; independent injected
+context/scratch/host functions and asset overrides remain available. The default context type is
+resolved structurally from the consuming environment, and injected factories retain their actual
+return type. `scratchBootInWorker`'s executable body is unchanged. A one-shot Worker helper owns
+handshake/request deadlines, abort/listener/timer cleanup and termination. The narrow host helper
+imports the selected shipped module and applies the existing `toWebBootOptions` adapter.
+
+The approved build-only esbuild 0.28.1 dependency bundles the emitted Worker to an import-complete
+43,914-byte entry. Vite's literal default Worker build and its raw copied exported Worker URL both
+load successfully. No runtime dependency, generated host declaration, generated artifact byte,
+PCM implementation or policy algorithm changed. NOTICE retains the moved adapter attribution.
+Source/package milestones were checkpointed at `fca2f3a3`, `cba19b96`, and `b6747844`.
+
+The first actual browser probe found that a context constructed after user activation may already
+be running. The shipped host correctly refuses that state before worklet creation. The existing
+adapter factory's suspension step was therefore preserved in the SDK default-host helper; focused
+regressions prove suspension before construction and accepted-context closure if suspension
+rejects. This is a construction precondition, with no host or wire relaxation.
+
+Validation:
+
+- `bash scripts/check-sdk-types.sh`: PASS under unchanged ES2022/WebWorker libs.
+- `node --test sdk/test/browser-defaults-evals.mjs`: PASS, 17 focused tests, including fail-close
+  handshake/request faults, late events, abort inside construction, exact default host forwarding,
+  injected precedence, host failure cleanup and the native suspension precondition.
+- Existing `sdk/test/browser-evals.mjs` against `/private/tmp/dx-393-current-artifacts`: PASS, 16
+  tests. `bash scripts/check-sdk-headless.sh /private/tmp/dx-393-current-artifacts`: PASS, 152
+  passed / one existing skip before the two additional suspension regressions above.
+- `bash scripts/check-sdk-generated.sh`: PASS after final implementation; no Wasm rebuild/repin.
+- `MISO_ENGINE_SDK_BROWSER_TOOLS=/private/tmp/miso-dx-app/node_modules bash
+  scripts/sdk-package.sh check /private/tmp/dx-393-current-artifacts`: PASS, including the generated
+  gate, CLI tests, packed strict DOM consumer, structural thin context negative checks, standalone
+  Worker AST check, tarball smoke and actual Vite 8.2.2 / Playwright Chromium boot.
+- The retained optional browser mode uses an existing Vite/Playwright `node_modules` selected by
+  `MISO_ENGINE_SDK_BROWSER_TOOLS`; it adds no browser framework dependency. It serves the production
+  bundle on loopback, clicks both boot paths, resumes/connects/status-checks/suspends/closes each
+  engine and asserts no failed requests or HTTP errors. Both report 48000 Hz, 128 frames, status
+  result 0 and context state `closed`; the forwarding factory receives the exact exported URL and
+  `{ type: "module" }`. All observed requests returned HTTP 200. This probe required normal
+  loopback/browser permissions beyond the sandbox's network restriction.
+- Direct byte comparison: all six staged generated artifacts equal the approved input directory;
+  manifest lengths/digests match those exact bytes; the staged PCM feed equals its unchanged
+  source. The generated manifest retains exactly six artifact entries.
+
+Reproducible browser assertions are in `sdk/test/package-tarball-smoke.mjs`, not solely in temporary
+logs. Local logs: `/private/tmp/dx428-final-package-browser.log`,
+`/private/tmp/dx428-final-generated.log`, `/private/tmp/dx428-focused.log`, and
+`/private/tmp/dx428-headless.log`. Dedicated independent review and root's final upstream/issue
+synchronization remain pending. These gates prove a packed SDK capability, not npm publication or
+completion of the downstream adapter/app integration.

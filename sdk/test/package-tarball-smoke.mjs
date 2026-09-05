@@ -326,3 +326,85 @@ try {
 } finally {
   await writeFile(wasmUrl, original);
 }
+
+// Opt-in real-browser qualification reuses an existing Vite/Playwright installation; neither is
+// a package dependency. Set MISO_ENGINE_SDK_BROWSER_TOOLS to that installation's node_modules.
+// This deliberately tests a production bundle: a raw new-URL Worker asset must survive copying,
+// not just Vite's special handling of the default literal Worker constructor.
+if (process.env.MISO_ENGINE_SDK_BROWSER_TOOLS) {
+  const toolsRoot = resolve(process.env.MISO_ENGINE_SDK_BROWSER_TOOLS);
+  const [{ build }, { chromium }, { createServer }] = await Promise.all([
+    import(pathToFileURL(resolve(toolsRoot, "vite/dist/node/index.js")).href),
+    import(pathToFileURL(resolve(toolsRoot, "playwright/index.mjs")).href),
+    import("node:http"),
+  ]);
+  const browserRoot = resolve(consumerRoot, "browser");
+  await mkdir(browserRoot);
+  await writeFile(resolve(browserRoot, "index.html"), '<!doctype html><button id="default">Default boot</button><button id="forward">Forwarding factory</button><script type="module" src="/main.js"></script>');
+  await writeFile(resolve(browserRoot, "main.js"), `
+import { createEngine } from '@misofm/engine/browser';
+import { BUNDLED_ENGINE_ASSETS } from '@misofm/engine/assets';
+const sessionDocument = ${JSON.stringify(builtDocument)};
+window.proof = [];
+for (const id of ['default', 'forward']) document.querySelector('#' + id).onclick = async () => {
+  try {
+    const calls = [];
+    const engine = await createEngine({ document: sessionDocument, ...(id === 'forward' ? {
+      createWorker(url, options) {
+        calls.push({ url: String(url), expected: String(BUNDLED_ENGINE_ASSETS.scratchWorkerModule), type: options.type });
+        return new Worker(url, options);
+      },
+    } : {}) });
+    engine.host.node.connect(engine.context.destination);
+    await engine.context.resume();
+    const status = await engine.host.status();
+    await engine.context.suspend();
+    await engine.close();
+    await engine.close();
+    window.proof.push({ id, calls, rate: engine.shape.sampleRateHz, quantum: engine.shape.quantumFrames, result: status.result, state: engine.context.state });
+  } catch (error) { window.bootError = String(error?.stack ?? JSON.stringify(error)); }
+};
+`);
+  await build({ root: browserRoot, configFile: false, logLevel: "warn" });
+  const network = [];
+  const faults = [];
+  const server = createServer(async (request, response) => {
+    const pathname = new URL(request.url, "http://localhost").pathname;
+    try {
+      const bytes = await readFile(resolve(browserRoot, "dist", `.${pathname === "/" ? "/index.html" : pathname}`));
+      const mime = pathname.endsWith(".js") ? "text/javascript" : pathname.endsWith(".wasm") ? "application/wasm" : "text/html";
+      response.writeHead(200, { "content-type": mime }); response.end(bytes);
+    } catch { response.writeHead(404); response.end(); }
+  });
+  await new Promise((accept, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", accept); });
+  let browser;
+  try {
+    browser = await chromium.launch({ headless: true });
+    const page = await browser.newPage();
+    page.on("pageerror", error => faults.push(error.message));
+    page.on("requestfailed", request => faults.push(`${request.url()}: ${request.failure()?.errorText}`));
+    page.on("response", response => network.push({ url: response.url(), status: response.status() }));
+    await page.goto(`http://127.0.0.1:${server.address().port}`);
+    await page.waitForLoadState("networkidle");
+    for (const [id, count] of [["default", 1], ["forward", 2]]) {
+      await page.locator(`#${id}`).click();
+      await page.waitForFunction(count => window.proof.length === count || window.bootError, count, { timeout: 20000 });
+      assert.equal(await page.evaluate(() => window.bootError), undefined);
+    }
+    const results = await page.evaluate(() => window.proof);
+    for (const result of results) {
+      assert.equal(result.rate, 48000); assert.equal(result.quantum, 128);
+      assert.equal(result.result, 0); assert.equal(result.state, "closed");
+    }
+    assert.deepEqual(results[0].calls, []);
+    assert.equal(results[1].calls.length, 1);
+    assert.equal(results[1].calls[0].url, results[1].calls[0].expected);
+    assert.equal(results[1].calls[0].type, "module");
+    assert.deepEqual(faults, []);
+    assert.equal(network.some(response => response.status >= 400), false);
+    console.log(`packed Vite/Chromium browser boot passed: ${JSON.stringify({ results, network })}`);
+  } finally {
+    await browser?.close();
+    await new Promise(accept => server.close(accept));
+  }
+}
