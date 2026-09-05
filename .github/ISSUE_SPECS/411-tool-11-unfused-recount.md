@@ -57,3 +57,7 @@ Read-only current numbered brief, `/tmp/luna-411-readiness.md`, checker/self-tes
 ## Numbered scope refresh
 
 This is the existing #411, with unchanged title and parent obligations. Root synchronizes Astra's complete producer/consumer refresh before implementation; source remains queued until #410 merges and its actual helper/base is frozen. #412 follows #411, and #427 follows #412 in the tooling stream.
+
+## Frozen post-prerequisite base
+
+PR #433 merged as `1af76181490a623675960c244a6c677c06aae745`; #410 is remotely verified CLOSED. Root normally integrates this exact merged main and freezes it as #411's implementation base. #410 changed no shared helper API; preserve all four dependency modes while using explicit checked local operations for this distinct grammar. Astra confirms the numbered frozen-base scope before Luna assignment. Root will release implementation after #420's active measurement quiet window, avoiding competing test/build load.
