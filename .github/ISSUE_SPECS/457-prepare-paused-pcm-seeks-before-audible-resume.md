@@ -34,3 +34,11 @@ SDK browser feed, SDK-owned PCM worklet prelude, public types/exports if needed,
 ## Execution
 
 User-selected Astra medium implements and a separate Astra medium agent reviews. Root approves this bounded contract; mechanism remains conditional on the first decisive proof. Detailed read-only diagnosis: /private/tmp/dx101-paused-resume-readiness-brief.md. Actual failure evidence: /private/tmp/dx101-ghost-32db3f2.json. No implementation has started.
+
+## First decision gate: message-only preparation blocked
+
+Astra medium ran a bounded actual-Wasm probe using the existing SDK sessionDocument fixture and WasmBoundary, with the reviewed SDK445 artifact from the writer checkout. The bytes compare exactly with the app's installed reviewed module; SHA256 `22e4c25cba7f97b66db720ad8ac8cf653de0afcabe84101693f4fa166b90d4e6`. No Rust rebuild or production modification.
+
+The one-source 48 kHz/128-frame fixture uses a 512-frame internal PCM ring. Four old-generation quanta are accepted; the fifth returns typed backpressure (6), establishing a full internal queue. All 64 shared-ring slots are also filled with old-generation work, then the producer publishes generation 2 at target frame 10000. Actual engine seek admission returns OK, but direct submission of the new target quantum still returns backpressure (6). The first actual render returns zeros; a fresh same-document engine with the same seek and target PCM returns the exact nonzero ramp (left starts 0.00390625, 0.0078125, 0.01171875). Exact first-quantum equality is RED.
+
+Probe `/private/tmp/dx457-first-quantum-probe.mjs`, output `/private/tmp/dx457-first-quantum-probe.log`; command `node /private/tmp/dx457-first-quantum-probe.mjs` exits 1 at the first-target assertion. This narrower ABI probe does not claim worklet control-port delivery or a complete browser gate. It establishes a prerequisite failure even if stale shared slots were ideally released: the full internal queue cannot accept target PCM until render consumes its pending seek. Consequently no public preparation API or worklet implementation was frozen, no output was silently rendered/discarded, and no counters or target frame were changed. Execution stops at the brief's decision gate. A reviewed amendment is required before any Rust/internal-consumer change or alternative mechanism.
