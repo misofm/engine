@@ -220,6 +220,27 @@ Call `await engine.close()` when the browser session is finished. It disposes th
 before closing its `AudioContext`, is safe to call repeatedly, and still closes the context if the
 host's MessagePort has already failed.
 
+For input-source spectrum, `Msb1RingObserver` from `@misofm/engine/browser` reads an
+existing feed ring without consuming audio or changing shared bytes:
+
+```ts
+const observer = new Msb1RingObserver(feed.rings[0]);
+observer.pull((chunk) => {
+  updateSourceSpectrum(chunk.planes, chunk.frames); // Use synchronously; scratch is reused.
+});
+const { underruns, drainBlocks, depth } = observer.counters();
+observer.close();
+```
+
+Each observer starts at the oldest live chunk and has an independent cursor. Pull attempts at
+most `min(ringCapacity, 32)` chunks by default, or an explicit integer from 1 to 32. Metadata and
+planar scratch are borrowed until the callback returns; only `frames` samples are valid. Pull
+creates no PCM buffers or views. It skips stale or concurrently reused slots and catches up after
+missed data or seeks; visualization is best effort. Use it on the control thread and do not
+reenter `pull` from its callback. Counters read existing wire words individually, not as an atomic
+multiword snapshot. Closing releases local storage; later pulls return zero and counters retain
+the final snapshot. Observation never holds slots or delays playback.
+
 ## Agents
 
 ```ts
