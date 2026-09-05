@@ -7,3 +7,9 @@
 No benchmark, timing, runtime, crate boundary, parser grammar, owner exception, workflow or artifact implementation changes are claimed. #403/#306/#349 retain other obligations.
 
 The original workspace stdout retains its terminal blank line byte-for-byte; full diff whitespace inspection reports that raw-log EOF only. Source/spec whitespace checks pass.
+
+## Corrected CI portability completion
+
+Required CI run33962425273 failed at the benchmark suite's filesystem-order assumption despite the production checker passing. The failed job log and terminal run status are retained. Astra's bounded final #462 Sol3 ruling freezes complete diagnostic payload comparisons for three multi-file scans in actual and reversed order; `462-sol3-*` records the passing six permutations, real checker and audit controls. Final source PASS is4502e4e97c5ab3ae3b260dd1539b384d06fbce19. The prior exact-head PR review was conditional on CI and is retained as historical, not current approval.
+
+The correction changes only benchmark-suite assertions and evidence. The accepted full workspace candidate2c8e0c48 and runtime-input identity remain applicable, as recorded in the ruling and final source review; no rebuild or benchmark was needed. Corrected exact-head PR review and required CI remain mandatory.

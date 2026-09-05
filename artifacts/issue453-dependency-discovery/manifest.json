@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "accepted_source": "8d4520bd461830e8622419a481b8109551565c49",
+  "accepted_source": "4502e4e97c5ab3ae3b260dd1539b384d06fbce19",
   "workspace_candidate": "2c8e0c48646192ae1484e56356ff2a26279a403e",
   "files": [
     {
@@ -169,6 +169,56 @@
       "sha256": "85d8c64b3b513f5989af442769019f38ace07fa03f4f98f2c5383c3360db4f10"
     },
     {
+      "path": "artifacts/issue453-dependency-discovery/462-sol3-audit-suite.log",
+      "bytes": 1648,
+      "sha256": "b94a8e2acba0aa3bb501ad8ec673f6990011a1ed33a07aafa76103553f8acbbb"
+    },
+    {
+      "path": "artifacts/issue453-dependency-discovery/462-sol3-audit-suite.status",
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "artifacts/issue453-dependency-discovery/462-sol3-bench-suite.log",
+      "bytes": 2824,
+      "sha256": "dea40db225bca84b1e7baafad4b989557bc175be98ca302a535fb0940e9da8a6"
+    },
+    {
+      "path": "artifacts/issue453-dependency-discovery/462-sol3-bench-suite.status",
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "artifacts/issue453-dependency-discovery/462-sol3-diff-check.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "artifacts/issue453-dependency-discovery/462-sol3-diff-check.status",
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "artifacts/issue453-dependency-discovery/462-sol3-real-bench-scanner.log",
+      "bytes": 120,
+      "sha256": "e6845f6d1301441d34d305b765d86ee85288e15518eda2cfaf50f74b866640a6"
+    },
+    {
+      "path": "artifacts/issue453-dependency-discovery/462-sol3-real-bench-scanner.status",
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "artifacts/issue453-dependency-discovery/462-sol3-syntax.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "artifacts/issue453-dependency-discovery/462-sol3-syntax.status",
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
       "path": "artifacts/issue453-dependency-discovery/462-syntax.log",
       "bytes": 0,
       "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
@@ -205,8 +255,13 @@
     },
     {
       "path": "artifacts/issue453-dependency-discovery/README.md",
-      "bytes": 1494,
-      "sha256": "005881128e467e377903d90cb2ea4c69dc581f935be00b7217d2f6bac9bac349"
+      "bytes": 2429,
+      "sha256": "c5e08e0a11cfa2ee03a56b3576b35e358f0a27e7ab7a923e81959979221a1662"
+    },
+    {
+      "path": "artifacts/issue453-dependency-discovery/astra-453-462-initial-pr-review.md",
+      "bytes": 3325,
+      "sha256": "3671b42f93151beeefb94575e45d71b1f9726ae853ced5483ea1b4ebfe75d817"
     },
     {
       "path": "artifacts/issue453-dependency-discovery/astra-453-attempt1-review.md",
@@ -237,6 +292,11 @@
       "path": "artifacts/issue453-dependency-discovery/astra-462-attempt2-review.md",
       "bytes": 3162,
       "sha256": "d84d3f6f64db34a1f834b4a82f29b8bef3e8350a3cdab97173f952b47274ade9"
+    },
+    {
+      "path": "artifacts/issue453-dependency-discovery/astra-462-attempt3-review.md",
+      "bytes": 3118,
+      "sha256": "d32a1dbd8c4fb1750977af2affedf7cd54e3982ad5ea8ff0fdaf5b1fe80fcf66"
     },
     {
       "path": "artifacts/issue453-dependency-discovery/astra-462-cargo-portability-ruling.md",
@@ -272,6 +332,11 @@
       "path": "artifacts/issue453-dependency-discovery/engine-462-workspace-summary.json",
       "bytes": 215,
       "sha256": "f930fda5e04d57d1e1d352d04091da526f0689a6c156f6468921f652ee49e652"
+    },
+    {
+      "path": "artifacts/issue453-dependency-discovery/engine-464-failed-run-status.json",
+      "bytes": 124,
+      "sha256": "763c8430f2e35081e56ec0eece7f60a7bfdc1575fd351492b9625a50d44866c0"
     },
     {
       "path": "artifacts/issue453-dependency-discovery/engine-464-policy-ci.log",

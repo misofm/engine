@@ -309,3 +309,8 @@ Review used read-only source/Git/log inspection; no tests, builds, Cargo resolut
 ## Completed source and workspace qualification
 
 Astra accepted amended #462 Sol attempt2 at8d4520bd, completing the four missing rows and portable Cargo delegation while preserving #453's scanner semantics and existing controls. The immutable full-workspace candidate2c8e0c48646192ae1484e56356ff2a26279a403e completed `cargo test --locked --workspace` with exit0:275result blocks,1576passed,0failed,24ignored including doctests, identical to the unchanged Rust baseline. No runtime/fixture/configuration inputs changed against delivered29a8c88b. Evidence, terminal status, source identity, relocation proof and prior verdicts are retained under `artifacts/issue453-dependency-discovery/` with byte/hash manifest. Actual PR exact-head Astra review and required CI remain the final gates before #453/#462 closure; #403/#306/#349 remain open for other scopes.
+
+
+## Final assertion portability source PASS
+
+Required PR CI exposed filesystem-order assumptions in three benchmark-suite assertions. Final #462 Sol3 at4502e4e97c5ab3ae3b260dd1539b384d06fbce19 now verifies exact operation/status/sentinel and complete actual/reversed stdout against independent unchanged file multisets. Astra recorded PASS; all focused gates and original97/97/restored0 controls passed. Failed CI, ruling, final source review and focused proof are retained in the existing artifact manifest. Prior full workspace remains applicable because only assertion/evidence files changed; corrected PR exact-head review and required CI still gate closure.
