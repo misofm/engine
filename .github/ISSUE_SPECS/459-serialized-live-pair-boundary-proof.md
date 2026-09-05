@@ -240,3 +240,25 @@ The graph fixture now explicitly supplies asymmetric crossfeed and retains actua
 ## Sol attempt 2 recovery checkpoint: real queued graph allocation and mono
 
 The nondefault support fixture retains the actual nine-track prepared plan, control producers and meter consumers without allocating Capture observers. Allocation auditing arms only actual render across settled fusion, queued three-sample ramp/retarget fallback-to-settled and observed-full-cohort/eligible-tail phases; reports zero allocations and frees with disarmed enqueue/drain/assertions. The graph mono fixture compares armed collapse against a forced-off plan, submits asymmetric right trim through its real input producer, verifies disengagement and asymmetric output identity, then checks representative NaN/infinity recovery. Focused compiler debug27/27 and allocation4/4 passed; feature check and fmt/diff passed. Logs `/tmp/sol459-attempt2-graph-proof-debug-{builtins-compiler-lib,allocation}.log` and `/tmp/sol459-attempt2-graph-proof-check-feature.log`. Source obligations are submitted as implemented, not accepted: final focused debug/release/policies and consolidated Astra verdict remain before parent qualification.
+
+## Sol attempt 2 final source candidate and focused evidence
+
+Exact integrated candidate: `2253eeb58c983435c41b49aef425b87936b01663`, with this evidence record as the only subsequent repository edit. Main integration added delivered #404 workspace policy/evidence and #436 measurement/evidence; it did not alter the runtime inputs exercised here. Production pairing arithmetic, factory/drain behavior and resource accounting remain unchanged by #459.
+
+The original finite cases are represented by executable evidence. Case A compares PCM words, private state and logical counters per named call while requiring its exact fused/fallback branch; the matrix-error path compares the completed fader operation with an independent original-owner sequence. The host test supplies real PCM for the acknowledged application block and proves the same call executes the commanded selected composite. Case B identifies accepted/executed lane populations through thread-local witnesses: the full cohort remains independently ineligible where output ownership, metering or send readership already requires refusal, while only an otherwise-eligible one-lane tail discriminates alias-observer refusal. Actual meter data, routed output, crossfeed, mono collapse/disengagement, nonfinite recovery, declined-owner state/queues and first-slot execution are compared to their original/separate references. Case C arms only actual `PreparedRenderPlan::render` over settled, queued ramp/retarget and observed-cohort phases and reports zero allocations and frees; realloc activity and an independent free are live outside render.
+
+Final focused commands all exited 0 with `PATH=/home/bl/.cargo/bin:$PATH` and `CARGO_TARGET_DIR=/tmp/sol459-target`:
+
+- `cargo test --locked -p builtins-compiler --features test-support --lib`: 27 passed; `/tmp/sol459-final-debug-builtins-compiler-lib.log`.
+- `cargo test --locked -p builtins-compiler --features test-support --test allocation_tracker`: 4 passed; `/tmp/sol459-final-debug-allocation.log`.
+- `cargo test --locked -p graph --lib`: 53 passed; `/tmp/sol459-final-debug-graph.log`.
+- `cargo test --locked -p host-web --features test-support --lib`: 62 passed, 1 existing nightly-only ignored; `/tmp/sol459-final-debug-host-web.log`.
+- The same four commands with `--release`: respectively 27 passed; 4 passed; 53 passed; 62 passed and 1 ignored. Logs are `/tmp/sol459-final-release-{builtins-compiler-lib,allocation,graph,host-web}.log`.
+- `bash scripts/check-realtime-policy.sh`: PASS, 42 marked regions in 12 files; `/tmp/sol459-final-policy-realtime.log`.
+- `bash scripts/check-builtins-policy.sh`: PASS; `/tmp/sol459-final-policy-builtins.log`.
+- `bash scripts/check-workspace-policy.sh`: PASS; `/tmp/sol459-final-policy-workspace.log`.
+- `scripts/check-lane-policy.sh`: PASS; `/tmp/sol459-final-policy-lane.log`.
+- `scripts/check-unfused-seal.sh`: PASS, 8 registered audit calls; `/tmp/sol459-final-policy-unfused.log`.
+- `cargo fmt --all -- --check` and `git diff --check`: PASS; `/tmp/sol459-final-{fmt,diff-check}.log`.
+
+The realtime, builtins and workspace scripts are repository files without executable bits: their first direct invocation returned shell status 126 (`Permission denied`), retained in the tool transcript, so the actual gates were run through `bash` and passed. Lane and unfused scripts are executable and passed directly. No full workspace, target/browser/artifact matrix or benchmark was run. This is the completed Sol attempt-2 source submission for one consolidated Astra verdict, not self-acceptance or parent #430 qualification.
