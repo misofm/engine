@@ -1152,6 +1152,75 @@ pub struct BankSlot {
     pub active_lanes: Box<[bool]>,
 }
 
+/// The staged planar tiles for one ordered folded cohort.
+pub struct FoldCohort<'a> {
+    lane_ids: &'a [usize],
+    left: &'a mut [f32],
+    right: &'a mut [f32],
+    stride: usize,
+    frames: usize,
+}
+
+impl<'a> FoldCohort<'a> {
+    fn new(
+        lane_ids: &'a [usize],
+        left: &'a mut [f32],
+        right: &'a mut [f32],
+        stride: usize,
+        frames: usize,
+    ) -> Self {
+        Self {
+            lane_ids,
+            left,
+            right,
+            stride,
+            frames,
+        }
+    }
+
+    #[must_use]
+    pub fn lane_ids(&self) -> &[usize] {
+        self.lane_ids
+    }
+    #[must_use]
+    pub fn stride(&self) -> usize {
+        self.stride
+    }
+    #[must_use]
+    pub fn frames(&self) -> usize {
+        self.frames
+    }
+    #[must_use]
+    pub fn left(&self) -> &[f32] {
+        self.left
+    }
+    #[must_use]
+    pub fn right(&self) -> &[f32] {
+        self.right
+    }
+    #[must_use]
+    pub fn left_mut(&mut self) -> &mut [f32] {
+        self.left
+    }
+    #[must_use]
+    pub fn right_mut(&mut self) -> &mut [f32] {
+        self.right
+    }
+    pub fn planes_mut(&mut self, index: usize) -> Option<(&mut [f32], &mut [f32])> {
+        if !self.lane_ids.contains(&index) {
+            return None;
+        }
+        let start = index * self.stride;
+        if start + self.frames > self.left.len() || start + self.frames > self.right.len() {
+            return None;
+        }
+        Some((
+            &mut self.left[start..start + self.frames],
+            &mut self.right[start..start + self.frames],
+        ))
+    }
+}
+
 /// Per-lane planar views a chain gathers from and scatters to. `lane < lanes` always.
 pub trait BankMembers {
     fn plane(&self, lane: usize) -> (&[f32], &[f32]);
@@ -1218,6 +1287,44 @@ pub trait BankMembers {
     /// where it is proved.
     fn fold_plane(&mut self, lane: usize, left: &mut [f32], right: &mut [f32]) {
         let _ = (lane, left, right);
+    }
+
+    /// Fold one ordered cohort. The default delegates to the established per-lane seam.
+    fn fold_cohort(&mut self, cohort: FoldCohort<'_>) {
+        if cohort.lane_ids.is_empty() || cohort.lane_ids.len() > 8 {
+            return;
+        }
+        let Some(max_lane) = cohort.lane_ids.iter().copied().max() else {
+            return;
+        };
+        if cohort
+            .lane_ids
+            .iter()
+            .enumerate()
+            .any(|(index, lane)| cohort.lane_ids[..index].contains(lane))
+        {
+            return;
+        }
+        let Some(required) = max_lane
+            .checked_add(1)
+            .and_then(|lanes| lanes.checked_mul(cohort.stride))
+        else {
+            return;
+        };
+        if cohort.stride < cohort.frames
+            || cohort.left.len() < required
+            || cohort.right.len() < required
+        {
+            return;
+        }
+        for lane in cohort.lane_ids.iter().copied() {
+            let start = lane * cohort.stride;
+            self.fold_plane(
+                lane,
+                &mut cohort.left[start..start + cohort.frames],
+                &mut cohort.right[start..start + cohort.frames],
+            );
+        }
     }
 }
 
@@ -2121,6 +2228,8 @@ impl BankChain {
         } = self;
         let stride = scratch.quantum as usize;
         let used = frames as usize;
+        let mut folded_lanes = [0usize; 8];
+        let mut folded_count = 0;
         for lane in 0..*lanes {
             if !active[lane] {
                 continue;
@@ -2129,11 +2238,21 @@ impl BankChain {
                 let left = &mut staging_left[lane * stride..lane * stride + used];
                 let right = &mut staging_right[lane * stride..lane * stride + used];
                 scratch.scatter_lane(lane, left, right, 0, frames);
-                members.fold_plane(lane, left, right);
+                folded_lanes[folded_count] = lane;
+                folded_count += 1;
             } else {
                 let (left, right) = members.plane_mut(lane);
                 scratch.scatter_lane(lane, left, right, 0, frames);
             }
+        }
+        if folded_count != 0 {
+            members.fold_cohort(FoldCohort::new(
+                &folded_lanes[..folded_count],
+                staging_left,
+                staging_right,
+                stride,
+                used,
+            ));
         }
     }
     // REALTIME_POLICY_END
@@ -2232,17 +2351,29 @@ impl BankChain {
             fold,
             ..
         } = self;
+        let mut folded_lanes = [0usize; 8];
+        let mut folded_count = 0;
         for lane in 0..W {
             let left = &mut staging_left[lane * stride..lane * stride + frames_used];
             let right = &mut staging_right[lane * stride..lane * stride + frames_used];
             if fold[lane] {
-                members.fold_plane(lane, left, right);
+                folded_lanes[folded_count] = lane;
+                folded_count += 1;
             } else {
                 let (plane_left, plane_right) = members.plane_mut(lane);
                 debug_assert!(plane_left.len() == frames_used && plane_right.len() == frames_used);
                 plane_left.copy_from_slice(left);
                 plane_right.copy_from_slice(right);
             }
+        }
+        if folded_count != 0 {
+            members.fold_cohort(FoldCohort::new(
+                &folded_lanes[..folded_count],
+                staging_left,
+                staging_right,
+                stride,
+                frames_used,
+            ));
         }
     }
     // REALTIME_POLICY_END

@@ -14,7 +14,7 @@
 
 mod support;
 
-use lane::kernels::{SvfState, svf_step};
+use lane::kernels::{SvfState, ordered_accumulate_block, svf_step};
 use lane::{Lane, Simd4, Simd8, flush};
 use support::{
     ALL_KERNELS, ALL_SIGNALS, Kernel, MAX_WIDTH, Signal, deinterleave, interleave, run_kernel,
@@ -83,6 +83,70 @@ fn compare(
             );
         }
     }
+}
+
+#[test]
+fn ordered_accumulation_matches_scalar_d9_at_w4_and_w8() {
+    for width in [1usize, 4, 8] {
+        let frames = 9;
+        let len = frames * width;
+        let contributors = [
+            vec![16_777_216.0_f32; len],
+            vec![1.0_f32; len],
+            vec![-16_777_216.0_f32; len],
+        ];
+        let refs: Vec<&[f32]> = contributors.iter().map(Vec::as_slice).collect();
+        let mut output = vec![0.0_f32; len];
+        let ok = match width {
+            1 => ordered_accumulate_block::<f32>(&mut output, &refs, true),
+            4 => ordered_accumulate_block::<Simd4>(&mut output, &refs, true),
+            8 => ordered_accumulate_block::<Simd8>(&mut output, &refs, true),
+            _ => unreachable!(),
+        };
+        assert!(ok);
+        assert!(output.iter().all(|value| value.to_bits() == 0));
+    }
+}
+
+#[test]
+fn ordered_accumulation_continuation_and_initial_store_preserve_bits() {
+    for width in [1usize, 4, 8] {
+        let len = 9 * width;
+        let first = vec![-0.0_f32; len];
+        let refs: [&[f32]; 1] = [&first];
+        let mut output = vec![1.0_f32; len];
+        let ok = match width {
+            1 => ordered_accumulate_block::<f32>(&mut output, &refs, true),
+            4 => ordered_accumulate_block::<Simd4>(&mut output, &refs, true),
+            8 => ordered_accumulate_block::<Simd8>(&mut output, &refs, true),
+            _ => unreachable!(),
+        };
+        assert!(ok);
+        assert!(output.iter().all(|value| value.to_bits() == 0x8000_0000));
+
+        let one = vec![1.0_f32; len];
+        let negative = vec![-16_777_216.0_f32; len];
+        let continuation: [&[f32]; 2] = [&one, &negative];
+        let mut prior = vec![16_777_216.0_f32; len];
+        let ok = match width {
+            1 => ordered_accumulate_block::<f32>(&mut prior, &continuation, false),
+            4 => ordered_accumulate_block::<Simd4>(&mut prior, &continuation, false),
+            8 => ordered_accumulate_block::<Simd8>(&mut prior, &continuation, false),
+            _ => unreachable!(),
+        };
+        assert!(ok);
+        assert!(prior.iter().all(|value| value.to_bits() == 0));
+    }
+}
+
+#[test]
+fn ordered_accumulation_rejects_shape_before_writing() {
+    let input = [1.0_f32; 4];
+    let short = [2.0_f32; 3];
+    let refs: [&[f32]; 2] = [&input, &short];
+    let mut output = [9.0_f32; 4];
+    assert!(!ordered_accumulate_block::<f32>(&mut output, &refs, true));
+    assert_eq!(output, [9.0; 4]);
 }
 
 #[test]

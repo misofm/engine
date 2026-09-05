@@ -65,3 +65,9 @@ This remains one bounded Class A product outcome. No second benchmark framework,
 ## Numbered assignment
 
 Issue #419 implements finding RT-2 in #349. Astra supplied the frozen brief above. The issue and local spec are synchronized before implementation. Base is `1fa4424d732b0d9150dda5512da80cb95d76a33e`; #399 is merged. The #415 measurement window has completed successfully, so its quiet-window dependency is satisfied. Luna owns attempt 1; root owns Git checkpoints and delivery. Root handles benchmark registration and all timing only after source review PASS.
+
+## Luna attempt 1 evidence
+
+Implemented the bounded ordered cohort path in `crates/lane/src/kernels.rs`, `crates/rack/src/lib.rs`, and `crates/graph/src/runtime.rs`. The callback validates IDs, widths, strides, capacities, and store mode before routing; the graph override routes each physical lane once, holds each frame-vector accumulator across the ordered cohort, and stores once, while the default callback preserves original per-lane `fold_plane` behavior. Added scalar/W4/W8 D9, continuation, negative-zero, and pre-write shape rejection witnesses in `crates/lane/tests/g2_kernel_identity.rs`.
+
+Focused debug and release lane/rack/graph suites, graph allocation fixture, and console workload chain-shape fixtures passed. Lane, rack, graph, and realtime policy checks passed; focused clippy passed with only the repository's existing invalid-path configuration warnings. No benchmark or runner invocation was made. Root owns the exact-path checkpoint and subsequent Astra review.

@@ -47,8 +47,10 @@ use effect_contract::{
     BypassShunt, ChannelSymmetryWitness, EffectControlLane, EffectProcessBlock, ObservationLane,
     ObservationSample, PreparedAutomationSpan, PreparedNativeEffect,
 };
-use lane::kernels::{mix2x2_block, pdc_delay_block, sum_into_block, sum2_block};
-use rack::{BankChain, BankMembers, BankPlaneViews};
+use lane::kernels::{
+    mix2x2_block, ordered_accumulate_block, pdc_delay_block, sum_into_block, sum2_block,
+};
+use rack::{BankChain, BankMembers, BankPlaneViews, FoldCohort};
 
 use crate::{
     GraphBindingBlock, GraphNodeObserverBinding, GraphObservationBlock, GraphPreparedEffect,
@@ -712,6 +714,80 @@ impl BankMembers for ArenaMembers<'_> {
             sum_into_block::<FrameLane>(master_left, left);
             sum_into_block::<FrameLane>(master_right, right);
         }
+    }
+
+    fn fold_cohort(&mut self, cohort: FoldCohort<'_>) {
+        let lane_ids = cohort.lane_ids();
+        let count = lane_ids.len();
+        let frames = cohort.frames();
+        let stride = cohort.stride();
+        let Some(max_lane) = lane_ids.iter().copied().max() else {
+            return;
+        };
+        if lane_ids
+            .iter()
+            .enumerate()
+            .any(|(index, lane)| lane_ids[..index].contains(lane))
+        {
+            return;
+        }
+        let Some(required) = max_lane
+            .checked_add(1)
+            .and_then(|lanes| lanes.checked_mul(stride))
+        else {
+            return;
+        };
+        if count == 0
+            || count > 8
+            || stride < frames
+            || cohort.left().len() < required
+            || cohort.right().len() < required
+            || frames > self.lease.frames()
+            || !self.lease.writes(self.master)
+        {
+            return;
+        }
+        let mut coefficients = [[0.0; 4]; 8];
+        let mut stores = [false; 8];
+        let mut ids = [0usize; 8];
+        for (index, &lane) in lane_ids.iter().enumerate() {
+            ids[index] = lane;
+            let Some(fold) = self.fold.get(lane).copied() else {
+                return;
+            };
+            if index != 0 && fold.store {
+                return;
+            }
+            coefficients[index] = fold.coefficients;
+            stores[index] = fold.store;
+        }
+        let mut left = cohort;
+        for (index, coefficient) in coefficients[..count].iter().enumerate() {
+            let Some((left_plane, right_plane)) = left.planes_mut(ids[index]) else {
+                return;
+            };
+            mix2x2_block::<FrameLane>(left_plane, right_plane, *coefficient);
+        }
+        let mut left_inputs: [&[f32]; 8] = [&[]; 8];
+        let mut right_inputs: [&[f32]; 8] = [&[]; 8];
+        for index in 0..count {
+            let start = ids[index] * stride;
+            left_inputs[index] = &left.left()[start..start + frames];
+            right_inputs[index] = &left.right()[start..start + frames];
+        }
+        let (master_left, master_right) = self.lease.write_stereo(self.master);
+        let initial_store = stores[0];
+        let valid_left = ordered_accumulate_block::<FrameLane>(
+            &mut master_left[..frames],
+            &left_inputs[..count],
+            initial_store,
+        );
+        let valid_right = ordered_accumulate_block::<FrameLane>(
+            &mut master_right[..frames],
+            &right_inputs[..count],
+            initial_store,
+        );
+        debug_assert!(valid_left && valid_right);
     }
 }
 
