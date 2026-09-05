@@ -470,4 +470,7 @@ allow_approved_isa_pin "$scratch_root/approved-isa-pin"
 allow_sidecar_valid "$scratch_root/sidecar-valid"
 allow_retired_name_in_comment "$scratch_root/retired-name-comment"
 
+# Keep the shared helper contract on the existing required-CI mutation entry point.
+bash "$script_directory/test-gate-lib.sh" || exit "$?"
+
 printf 'workspace policy mutation tests: ok\n'

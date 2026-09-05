@@ -1,0 +1,30 @@
+# Complete workspace and Wasm discovery before certifying their policy
+
+Stateless successor of #306; depends on merged #400. This is issue #404; root synchronizes its local/remote spec before implementation. Current roles: Astra brief/review, Luna one coherent attempt, Sol at most two retries following FAIL, hard stop/rescope after three failures. Root owns commits, pushes, review/CI/merge. No edits to another issue's active tranche.
+
+## Smallest outcome and scope
+
+Complete or fail the remaining workspace-policy discovery/filtered scans and the ninth original find loop in Wasm realtime atomics. Retain current policies, diagnostic classes, input roots/CLI and optional-result semantics. No new ban, target support, opcode policy, artifact schema or browser rebuild. This does not expand #400 or migrate another member of #401–#403.
+
+Allowed production paths: `scripts/check-workspace-policy.sh`, `scripts/check-wasm-realtime-atomics.sh`, minimal extension of `scripts/lib/gate.sh` only if its merged API lacks the necessary checked producer operation. Tests: existing `scripts/test-workspace-policy.sh`, focused `scripts/test-wasm-realtime-atomics.sh` if still absent, shared helper tests if changed; numbered issue/evidence only. No generic test framework or command-runner library.
+
+Freeze actual post-#400 sites before coding:
+
+- Workspace five find-backed populations: package.json, package-lock.json, Cargo manifests under crates/hosts/tools/sidecars, forbidden retired directory names, shallow .fingerprint spill directories. Capture complete producer status before consuming results; check sort/filter status too.
+- Workspace explicitly deferred positive queries (license/workspace inheritance, third-party reference, ISA table/pin), comment-stripped per-manifest retired-codec scan, tracked_paths manifest pipeline (git listing or non-Git fallback), optional .cargo filtered ISA query and global [build] ban. Check producer/read/parser statuses before applying no-match/allowlist logic. Keep existing TOML/comment interpretation unchanged; don't replace it with a parser project. An optional empty [[bin]] list remains valid, while a failed extractor cannot masquerade as that empty list.
+- Wasm object's find/sort list must be captured once successfully and required nonempty before scanning. Reuse the checked population for observation-object presence if practical. Preserve the existing observation-symbol OR source-ObservationSlot semantics for successful searches; neither producer errors nor failed wasm-objdump/rg calls are legitimate absence. Keep atomic opcode bans exactly unchanged. This is error propagation through the existing object inspection, not a target/artifact redesign.
+
+## Frozen empty-set rules
+
+Successful empty npm package/lock discovery passes, so existing Rust-only fixture roots remain valid. All four Cargo discovery roots are required; at least one discovered package manifest across them is required, not one per root. Successful empty retired-directory/fingerprint results pass. A missing optional .cargo directory is valid; scan errors when it exists fail. Wasm objects are required nonempty. Every producer error fails regardless of output length, whether zero, clean partial rows or rows containing an actual violation. Preserve stderr/status evidence and never certify a partial population.
+
+Use explicit conditionals/status capture; don't rely on set-e, a conditional caller's errexit, process substitution, pipefail alone, or `! command` as an assertion. A list cannot be trusted merely because nonempty. Safe fixture-root selection sources the real shared library before cd. Never filter required roots to those that exist or mkdir a missing root to obtain green.
+
+## Proportional gates
+
+- Existing workspace mutation suite and helper suite pass; preserve all current policy red cases. Add clean empty npm/lock and clean empty forbidden-directory/fingerprint positives; required-empty manifest red with a complete valid root fixture, plus missing required root. Ensure new cases reach the intended discovery site rather than an unrelated early license failure.
+- For each materially different producer pipeline, inject failure with zero output AND failure after a valid nonviolating partial row. Cover find, tracked git listing/fallback, parser/filter and rg status >=2 where applicable. Distinguish rg 1 from failure. Root privileges must not make unreadability mutations vacuous; controlled executable failure is acceptable. Positive searches must distinguish missing required content from failed search in diagnostics.
+- A hermetic Wasm-script harness stubs the existing external tools/build command and creates representative object/archive fixtures without compiling/timing. Prove valid object positive, atomic opcode red, empty object set red, one valid object followed by find failure red, failed disassembler red, and failed observation-object search cannot be hidden by a successful source fallback. Stub only the intended operation, not the policy under test; assert intended diagnostic and explicit unexpected-success refusal. A counter-mutation must prove at least the partial-producer failure assertion would reject the original unsafe control flow.
+- Run `bash -n` on changed scripts, actual workspace policy, affected hermetic suites and diff hygiene. Run the existing real Wasm atomics gate once at final qualification with required toolchain available (non-timed build/inspection); do not invent a second matrix or rebuild the shipped AudioWorklet. If unavailable, required CI must provide the real result; record local limitation honestly. Existing full-workspace unchanged-count comparison remains the parent program gate at coherent delivery boundary; no new Rust tests for shell mirrors.
+
+No benchmark invocation, mutation of sealed evidence or publication. Luna pauses after one coherent green tranche for root checkpoint. Astra reviews the actual pushed PR and root waits required CI. This successor can close independently; #306/#349 TOOL-11 remain open until #400–#403 and this successor meet the full original accounting.
