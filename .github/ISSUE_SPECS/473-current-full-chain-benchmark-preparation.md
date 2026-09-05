@@ -50,3 +50,19 @@ Astra scopes/reviews; Luna1, Sol2/3 then hard stop; root numbers/synchronizes/ch
 ## Numbered preparation scope
 
 GitHub #473 matches this title and body. This is queued tooling preparation; Astra must approve the numbered integrated base before Luna implementation. The sole #431 controlled capture remains unspent and unauthorized by this issue. Latest delivered main bb5ed498 is integrated; runtime/benchmark inputs are unchanged by this planning checkpoint.
+
+## Astra numbered scope approval
+
+# Astra #473 numbered scope/base review
+
+**PASS for queued numbered scope at `b235dc9cb8c22e031be559dc2db7a7e363400330`, engine-473-plan.** The complete adopted draft `/tmp/astra-431-tooling-preparation-brief.md` is retained verbatim, followed only by numbered status. Compared to deliveredbb5ed498, the planning delta is solely431 retention and the new473 spec. No runtime/benchmark/input drift or implementation is present. Root reports exact remote title/body/number synchronization; no independent GitHub mutation/query is claimed here.
+
+The readiness outcome and files are bounded as approved: stale current manifest guard/untimed input regression in bench; dedicated current record/aggregate validators, runner, preflight and fake-only suite; one existing CI-step suite call; numbered evidence. Historical035/072 files remain untouched. The current manifest and six changed descriptor pins are justified by the retained current-input ruling, with four unchanged matrix/meter pins and all original numeric/audit/paired-output acceptance preserved. No timing-derived input/output pin or historical matched-input speedup claim is authorized.
+
+The existing20-row workload, dispatcher/internal argument semantics, one internal warmup/two rounds and release profile remain frozen. Zero-launch preflight/lifecycle proof is synthetic and isolated; no real runner, benchmark workload, actual capture or authority consumption belongs to473. Dedicated431 namespace is not a generic issue adapter. Future431 capture remains a separately frozen and root-authorized ONE controlled invocation, still unspent.
+
+Existing fake executable verification, persistence/status/overwrite/refusal controls, exact validator allowed-delta check and untimed ten-input regression address the actual identified readiness failures. No further scope amendment is needed before root assignment at the approved tooling boundary. If intervening delivered source changes those exact inputs, repeat only the focused base comparison before coding.
+
+Root may assign Luna1 when the current tooling boundary permits; this review itself does not start implementation. #431/#443/#444 and broadRT4 remain open. Actual-head Astra review and required CI remain delivery gates for473. No tests, builds, timing, edits or Git/GitHub mutations were performed.
+
+Root retains this approved issue in the queue until the active tooling delivery boundary. No implementation or capture invocation has started.
