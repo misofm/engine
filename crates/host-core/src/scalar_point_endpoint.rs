@@ -63,6 +63,7 @@ pub struct ScalarPointControl {
 }
 #[allow(missing_docs)]
 impl ScalarPointControl {
+    #[allow(clippy::result_large_err)] // Frozen rejection returns the untouched fixed batch.
     pub fn try_admit(
         &mut self,
         now: SampleTime,
@@ -225,6 +226,7 @@ pub struct StartedScalarPointRender<'a> {
 }
 #[allow(missing_docs)]
 impl<'a> PreparedScalarPointRender<'a> {
+    #[allow(clippy::result_large_err)] // Failed attestation must return the complete prepared owner.
     pub fn start(
         self,
     ) -> Result<StartedScalarPointRender<'a>, (Self, lane::fpenv::FpEnvironmentRejection)> {
@@ -363,6 +365,7 @@ impl PreparedScalarPointRender<'_> {
             (p.ticket, p.applied_prefix, count, next)
         })
     }
+    #[allow(clippy::too_many_arguments)] // Keeps all fixed fault progress explicit and allocation-free.
     fn fail<T>(
         &mut self,
         l: &mut [f32],

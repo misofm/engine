@@ -1,4 +1,5 @@
 //! Product gates for borrowed scalar compressor Point delivery.
+#![cfg(feature = "control-provider")]
 
 use core::num::NonZeroUsize;
 use effect_contract::{
@@ -150,16 +151,24 @@ fn late_points_apply_in_order_and_second_ticket_waits() {
     .unwrap();
     c.try_admit(SampleTime(0), batch(4, &[record(H[1], 3, 3.0)]))
         .unwrap();
-    c.try_handoff_next().unwrap();
-    c.try_handoff_next().unwrap();
     let mut r = r.start().unwrap_or_else(|_| panic!());
     let (mut l, mut x) = ([0.2; Q], [0.2; Q]);
     r.render(&mut l, &mut x, SampleTime(0)).unwrap();
-    assert_eq!(r.snapshot().unwrap().applied, 2);
+    c.try_handoff_next().unwrap();
+    c.try_handoff_next().unwrap();
     r.render(&mut l, &mut x, SampleTime(16)).unwrap();
     let s = r.snapshot().unwrap();
-    assert_eq!((s.applied, s.late), (3, 1));
-    assert_eq!(s.last_application[1], Some(SampleTime(16)));
+    assert_eq!((s.applied, s.late), (2, 2));
+    assert_eq!(s.last_application[0], Some(SampleTime(16)));
+    r.render(&mut l, &mut x, SampleTime(32)).unwrap();
+    let s = r.snapshot().unwrap();
+    assert_eq!((s.applied, s.late), (3, 3));
+    assert_eq!(s.last_application[1], Some(SampleTime(32)));
+    r.render(&mut l, &mut x, SampleTime(48)).unwrap();
+    assert_eq!(
+        (r.snapshot().unwrap().applied, r.snapshot().unwrap().late),
+        (3, 3)
+    );
 }
 
 #[test]
