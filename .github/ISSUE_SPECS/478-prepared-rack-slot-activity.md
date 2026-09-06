@@ -350,3 +350,10 @@ Inspected raw evidence supports the four frozen exact tests in debug/release, ra
 No remaining source-phase blocker or necessary revision was found. Root should now freeze and qualify the immutable delivery candidate using the already-required workspace/supported-target/native ABI and actually affected artifact/browser routes, obtain actual-PR-head Astra review and required qualification success, and synchronize closure/post-main evidence. This source PASS does not claim those pending delivery steps passed, does not close #478/#518 by itself, and does not authorize resource/artifact repins, timing, RT-6 expansion or unrelated work.
 
 Root adopts source PASS at `10ff9172`; no third attempt is consumed or required. The next phase is immutable workspace/supported-target/ABI/artifact qualification, then actual-PR/current-base Astra review and required qualification CI. This source verdict does not close #478 before delivery.
+
+
+## Immutable source qualification and observed artifact integration
+
+Clean source `2d70b159` passed `cargo test --locked --workspace` (including doctests), scalar and simd128 Wasm checks for host-web/protocol/target-smoke, and native C ABI compilation/export/linkage checks. Raw evidence and workspace totals are in `artifacts/issue478-delivery/`. All commands reached terminal status before any tracked edit.
+
+The unchanged normal worklet builder compiled successfully and rejected the old pinned hash `c06f9517763890a081f9ee60c70fc8531fdcafbd9630495e4de5782bcf0dc79a`; its observed module hash was `e3f47856ad917edf2cd99cdc6669a4f3e6c6a9074b15c560a8337bf842187fef`. The raw status 1 is preserved. Astra reviewed exact source/build attribution and approved only that observed pin update plus actual qualification records; see `artifact-integration-ruling.md`. Root changes that single pin after all immutable checks completed. No resource, PCM, fixture, metadata, runtime or gate expectation is changed. The normal rebuild and static/resource/browser consumers must still pass; this integration checkpoint is not final delivery acceptance.
