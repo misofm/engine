@@ -1,0 +1,16 @@
+commit_base=5861a637
+fixture_author=cargo run -p audit -- fixture-builtins --write /private/tmp/engine-521-fixture-repin
+fixture_diff_only=MANIFEST.tsv,resources.jsonl,reference/filter-response.csv
+copied=MANIFEST.tsv resources.jsonl
+excluded=reference/filter-response.csv (known preexisting macOS tangent ULP drift)
+fixture_check=PASS
+audit_issue064_read_only=PASS
+audit_issue064_24_corruptions=PASS
+audit_issue067_graph_pdc=PASS
+browser_expected_resources=PASS
+browser_expected_resources_mutations=PASS_26
+wasm_artifact=/private/tmp/engine-519-linux-final-output
+meter_snapshot_bytes=160 unchanged
+meter_accumulator_bytes=232 baseline224 delta8_per_observer
+ready_ownership_bytes=1040 baseline952 delta88
+audio_worklet_host_bytes=1520 baseline1424 delta96

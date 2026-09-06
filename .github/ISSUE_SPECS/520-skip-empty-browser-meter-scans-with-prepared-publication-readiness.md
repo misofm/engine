@@ -100,3 +100,14 @@ Canonical Linux/amd64 Rust 1.97.1 build of candidate `a1aeefb830b2ac192274153539
 Focused source suites passed: 73 host-web tests (two explicitly ignored release timing tests), selective builtins tests covering all 15 nonempty subsets and zero forbidden peak-only operations, compiler 38 tests, host-core unit 8 tests and preparation 13 tests (one intended ignored). Formatting, generated matrix consistency and realtime policy passed. The earlier baseline-only native tangent ULP failure remains documented; DSP arithmetic is unchanged. No callback/resource gate was weakened.
 
 Timing remains unavailable: the single invocation failed during fixture warmup, and repair/measurement is explicitly assigned to #522. The supported performance result is avoided operations and empty scans, not a measured `µs/block` or end-to-end browser speedup. SDK/app rendering and presentation tuning remain downstream work.
+
+
+## CI resource-fixture correction
+
+The first combined CI run passed the exact artifact build, all three browser jobs, SDK package/generated-surface checks, native/cross-target tests, Clippy and rustdoc. It exposed stale independent resource fixtures plus two ignored-test environment names outside the required prefix. The environment names now use `MISO_ENGINE_`; no timing retry was performed.
+
+Independent Astra layout evidence gives native `MeterAccumulator` 224→232 bytes, with `MeterSnapshot` and its queue slots unchanged at 160 bytes. The resource grid changes only meter/retained totals by 8 bytes per observer (8 for one, 56 for seven); zero-meter rows, allocation counts and maximum-allocation values are unchanged. Only the resource manifest entry and its authority digest are refreshed.
+
+For Wasm, `ReadyOwnership` grows 952→1040: 92 field bytes reuse 4 padding bytes. The outer host grows 1424→1520: 88 inner bytes plus the 8-byte activation timestamp. Thus the meter-disabled browser fixture's metadata and retained totals each increase exactly 96 bytes (4243→4339 and 24752→24848). No payload or resource limit is increased. These compiler-derived fixture corrections preserve the independent exact checks.
+
+Correction checkpoint `596421d5` passed the existing fixture author/check, issue064 read-only corpus and 24-corruption tests, issue067 graph/PDC fixture checks, and the actual Linux-artifact browser resource oracle with all 26 red mutations. The unrelated platform filter-reference drift was excluded; no signal-bearing fixture changed. Evidence is `docs/evidence/metering-519-520/resource-fixture-qualification.txt`.
