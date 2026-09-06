@@ -400,7 +400,12 @@ fn session_diagnostics(value: session::DiagnosticSet) -> PrepareDiagnostics {
 fn effect_diagnostics(value: effect_compiler::EffectDiagnosticSet) -> PrepareDiagnostics {
     PrepareDiagnostics::new(
         PrepareRejection::Effect,
-        diagnostic_lines(value.0.into_iter().map(|diagnostic| (diagnostic.code, diagnostic.path))),
+        diagnostic_lines(
+            value
+                .0
+                .iter()
+                .map(|diagnostic| (diagnostic.code, &diagnostic.path)),
+        ),
     )
 }
 
@@ -968,4 +973,53 @@ fn graph_failure(code: &str) -> PrepareDiagnostics {
 
 fn effect_failure(code: &str) -> PrepareDiagnostics {
     PrepareDiagnostics::fixed(PrepareRejection::Effect, code)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{effect_diagnostics, session_diagnostics};
+    use effect_compiler::{EffectDiagnostic, EffectDiagnosticSet};
+    use session::parse_session_json;
+
+    #[test]
+    fn typed_diagnostic_adapters_preserve_projection_and_bound() {
+        let effects = EffectDiagnosticSet(vec![
+            EffectDiagnostic {
+                code: "effect.first",
+                path: "$.tracks[id=one]".into(),
+            },
+            EffectDiagnostic {
+                code: "effect.second",
+                path: "$.tracks[id=two].effects".into(),
+            },
+        ]);
+        assert_eq!(
+            effect_diagnostics(effects).as_bytes(),
+            b"effect.first\t$.tracks[id=one]\neffect.second\t$.tracks[id=two].effects\n"
+        );
+        assert_eq!(
+            effect_diagnostics(EffectDiagnosticSet(Vec::new())).as_bytes(),
+            b""
+        );
+        let many = EffectDiagnosticSet(
+            (0..65)
+                .map(|index| EffectDiagnostic {
+                    code: "effect.too_many",
+                    path: format!("$.effects[{index}]"),
+                })
+                .collect(),
+        );
+        let bounded = effect_diagnostics(many).into_bytes();
+        assert_eq!(bounded.iter().filter(|&&byte| byte == b'\n').count(), 64);
+        assert!(
+            !bounded
+                .windows(b"$.effects[64]".len())
+                .any(|w| w == b"$.effects[64]")
+        );
+
+        let session = parse_session_json("{}").expect_err("missing fields");
+        let projected = session_diagnostics(session);
+        assert_eq!(projected.kind(), super::PrepareRejection::Session);
+        assert!(!projected.as_bytes().is_empty());
+    }
 }
