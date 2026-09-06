@@ -1019,9 +1019,7 @@ mod tests {
         let bounded = effect_diagnostics(many).into_bytes();
         let mut expected = String::new();
         for index in 0..64 {
-            expected.push_str(&format!(
-                "effect.too_many\t$.effects[index={index:02}]\n"
-            ));
+            expected.push_str(&format!("effect.too_many\t$.effects[index={index:02}]\n"));
         }
         assert_eq!(bounded, expected.into_bytes());
 
@@ -1063,9 +1061,7 @@ mod tests {
         let bounded = session_diagnostics(many).into_bytes();
         let mut expected = String::new();
         for index in 0..64 {
-            expected.push_str(&format!(
-                "schema.unknown_field\t$.unexpected_{index:02}\n"
-            ));
+            expected.push_str(&format!("schema.unknown_field\t$.unexpected_{index:02}\n"));
         }
         assert_eq!(bounded, expected.into_bytes());
     }
