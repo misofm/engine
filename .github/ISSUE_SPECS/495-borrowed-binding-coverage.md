@@ -1,5 +1,7 @@
 # 495: Compare graph binding coverage without constructing a combined owned set
 
+Current assignment: Luna attempt 1. The decision below supersedes historical scheduling records. Root owns Git/GitHub and exact-path checkpoints; no timing or benchmark capture is authorized.
+
 Source inspected at delivered b94da42d9ad20afc0321821067473353a3e30008; crates/graph/src/lib.rs blob b0b66378b85619705998771f681b9c58cfd12e53. This is a queued control-plane maintenance brief, not implementation authorization. Root must number/synchronize and verify the actual eventual base before Luna1. It does not overlap the lane/compressor kernel work and should follow #492 maintenance.
 
 The premise is real: bind_optional_source_set currently constructs supplied, builtin_bank_members, required, source_claim_set and observer pairs, plus all_supplied by cloning supplied and extending with cloned source claims. The combined set is used only for equality against required, twice. The other sets have independent membership/deduplication roles; this brief does not assume they are redundant. GraphPreparedSourceSet::claimed_nodes also allocates a Vec, but removing that is a distinct residual and excluded here.
@@ -25,3 +27,19 @@ GitHub495 number/title matches this spec; branch base is deliveredmain571dfc5be5
 ## Current delivered-base readiness
 
 Root integrated deliveredmainfd4a937cbb782ebe04be0594f439606389dbe283 after #492 closed, and carried its remote closure record. Graph/Cargo/config remain byte-identical to the previously scoped base571dfc5b. Pending Astra numbered actual-base approval before fresh Luna1; #475 remains sole runtime feature. No implementation yet.
+
+## Current assignment: Luna attempt 1 — Astra decision
+
+# Astra #495 numbered actual implementation-base review — PASS
+
+Exact clean head dfe6898c1cfc473d0ef33559a3f2e4b8a66a7d2b, engine-cp4-bind-coverage, integrated delivered main fd4a937cbb782ebe04be0594f439606389dbe283. Read numbered495-borrowed-binding-coverage.md and compared its substantive body to the approved CP4 draft. The draft is preserved, with numbered/current-base records. Only495 scope and492 closure documentation differ from delivered main. Graph/Cargo/config are byte-identical to scoped571dfc5b; the original combined owned set and both equality sites remain unchanged. Root reports matching remote495 number/title/body and completed492 closure; no independent remote mutation performed.
+
+Approve fresh Luna1 within the exact existing scope: replace only all_supplied clone/extend with borrowed standard BTreeSet union equality, compute the coverage boolean once and reuse it at both original sites. Preserve independent source-overlap/duplicate detection, all other sets and validation calls, rejection precedence, returned ownership and structural/executor boundaries. No API, resource-layout, scheduler, runtime, allocator or collection-framework change is authorized.
+
+The frozen compact real-bind coverage/priority/repaired-ownership fixtures, retained bank/identity/layout tests, exact source mechanism and affected graph debug/release/Clippy/fmt/policy gates remain sufficient and mandatory. No extra table, timing or mutation campaign is added. Source mechanism proves removal of the combined owned collection; it is not a claim that binding is allocation-free or measurably faster.
+
+Root may assign this independent control-plane maintenance while475 remains sole runtime feature. Preserve exact-path checkpoints and the Luna1→Sol2/3 review limit. Later actual-current-source integration, proportional ordinary artifact verification, any separately justified mismatch amendment, exact-head PR review and required CI remain delivery gates.
+
+Read-only source/Git inspection; no tests/builds/timing or repository/Git/GitHub mutation performed.
+
+Root authorizes the named attempt within this frozen scope. Pause at each compiling, focused-test-green tranche for root checkpoint before layering more implementation.
