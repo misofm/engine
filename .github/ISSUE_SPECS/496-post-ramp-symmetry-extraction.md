@@ -45,3 +45,15 @@ Production-native optimized-body inspection is bounded pre-edit evidence and can
 ## Numbered queue checkpoint
 
 GitHub #496 matches this title and spec. Branch codex/rt5-ramp-symmetry starts at delivered main fd4a937cbb782ebe04be0594f439606389dbe283. Root boundary inspection found no missing remote identities among 235 previously numbered local specs. This is queued after #475, not active implementation. Before assigning fresh Luna1, root must integrate then-current delivered main, verify scope/source equivalence and obtain Astra actual numbered-base approval. #238 stays delivered; this owns only the retained post-ramp extraction product. No timing or benchmark invocation is authorized.
+
+## Astra numbered scope review
+
+# Astra #496 numbered scope review — PASS, queued only
+
+Reviewed clean head659bd19a83d6fd1236d8b5f35b8d7532899e296d in engine-rt5-ramp-plan, based on delivered fd4a937cbb782ebe04be0594f439606389dbe283. Only496-post-ramp-symmetry-extraction.md differs from that base. The entire approved refreshed brief body is preserved verbatim beneath the numbered title, followed by the explicit queue checkpoint. Root reports creation/synchronization and owns the final remote number/title/body verification before assignment.
+
+The scope remains one private post-ramp whole-mask extraction helper and exactly two existing dual/mono call sites, with unchanged per-lane oracle, #238 addressed update, preparation/reset behavior, DSP arithmetic, layout and public API. Compact mask/PCM/state and isolated actual extraction-count proof, the same old-full-refresh control, existing liveness/gates and honest native lowering-null limitation are retained. No extra proof, matrix, framework, allocator or timing authority is introduced.
+
+Approve numbered queue scope only. #475 remains the active runtime issue. Before future Luna1, root must integrate actual then-delivered main, verify source/scope equivalence, confirm remote identity and obtain actual implementation-base approval. #235/#238 remain delivered; #496 does not claim all RT5 bookkeeping or descriptive measurement is complete.
+
+Read-only source/Git comparison; no tests/builds/timing or source/spec/Git/GitHub mutations performed.
