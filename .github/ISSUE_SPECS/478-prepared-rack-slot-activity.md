@@ -111,3 +111,7 @@ Once that prerequisite is resolved, preserve the approved packed-mask product an
 Read-only source inspection; no tests/builds/timing or source/spec/Git/GitHub mutations performed. This report deliberately does not supply guessed native/Wasm allocation measurements.
 
 Root preserves the existing packed-mask design and its frozen accounting acceptance stop. No Luna attempt has been consumed. Astra is scoping the smallest separately numbered accounting prerequisite with exact owner reservation/bound and existing test-local allocation seam; no generic allocator or resource redesign is authorized by this queued issue. Independent #509 maintenance continues.
+
+## Numbered accounting prerequisite
+
+The missing reservation is now owned by #511 (`511-runtime-bank-slot-reservation.md` on its dedicated branch). It reserves C=N*(F+3B+3W) and L=max(NF,NB,W) using actual combined prepared/planned bank populations before cap admission, with independent ownership and transactional evidence. Luna attempt1 did not satisfy its full gates; Astra issued one consolidated FAIL and Sol attempt2 is active. #478 remains queued with zero implementation attempts consumed until #511 is delivered and its actual integrated base is reviewed. #509 and #512 maintenance are delivered independently; neither resolves this accounting prerequisite.
