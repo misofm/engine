@@ -160,3 +160,7 @@ The six finite real-product gates discriminate the actual capability: real two-o
 Run focused debug/release, host-core feature tests, protocol ownership regression gates, affected strict lint/policies and supported target compilation as frozen. Pause at the first coherent compiling/focused-green tranche for root's exact-path checkpoint before more implementation or review handoffs. One consolidated adversarial verdict ends each attempt. Root delivery qualification/current-base review and GitHub synchronization remain required after source PASS. #140/#444 and IO5 stay open beyond this leaf.
 
 Root adopts this PASS and the frozen exact-path clarification. Luna attempt 1 starts only after #524 post-main success.
+
+## Luna attempt 1 compiling scaffold checkpoint
+
+The first two-file scaffold compiles and the existing 10 host-core library tests pass. These are NOT the six new endpoint gates, which have not yet been written, and this is not a product/source PASS. The scaffold still needs the frozen pending-prefix, unsupported-kind admission, fault-containment/readback and exact preparation contracts, plus the actual endpoint tests and audit evidence. Root checkpoints this candid compiling scaffold before Luna continues the same attempt. Command logs are in `/tmp/issue528-luna1`; authoritative source is this checkpoint. No consolidated attempt verdict has occurred.
