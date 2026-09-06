@@ -369,20 +369,8 @@ impl GraphCompiler {
                 LatencySamples(0),
                 TailSamples::Finite(0),
             );
-            let Some(source) = route_source_node(&route.source) else {
-                diagnostics.push(diag(
-                    "graph.port.unknown",
-                    &format!("$.routes[id={}].source", route.id),
-                ));
-                continue;
-            };
-            let Some(destination) = route_destination_node(&route.destination) else {
-                diagnostics.push(diag(
-                    "graph.port.unknown",
-                    &format!("$.routes[id={}].destination", route.id),
-                ));
-                continue;
-            };
+            let source = route_source_node(&route.source);
+            let destination = route_destination_node(&route.destination);
             add_route_source_edge(&mut edges, source, route_node.clone(), route.id.as_str());
             add_route_destination_edge(&mut edges, route_node, destination, route.id.as_str());
             route_transforms.push(PreparedRoute {
@@ -402,13 +390,7 @@ impl GraphCompiler {
                     let SidechainDeclaration::Routed(sidechain) = &effect.sidechain else {
                         continue;
                     };
-                    let Some(source) = route_source_node(&sidechain.source) else {
-                        diagnostics.push(diag(
-                            "graph.port.unknown",
-                            &format!("$.tracks[id={}].sidechain", track.id),
-                        ));
-                        continue;
-                    };
+                    let source = route_source_node(&sidechain.source);
                     let key = (
                         track.id.as_str().to_owned(),
                         rack,
