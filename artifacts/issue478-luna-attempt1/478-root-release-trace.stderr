@@ -1,0 +1,3 @@
+    Blocking waiting for file lock on build directory
+    Finished `release` profile [optimized + debuginfo] target(s) in 7.28s
+     Running unittests src/lib.rs (target/release/deps/rack-73cd89f0c58db6eb)

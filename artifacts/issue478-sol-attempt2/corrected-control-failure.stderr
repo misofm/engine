@@ -1,0 +1,16 @@
+   Compiling rack v0.1.0 (/home/bl/misofm/engine-rt8-plan/crates/rack)
+warning: method `has_active_lanes` is never used
+    --> crates/rack/src/lib.rs:1169:8
+     |
+1167 | impl PreparedSlot {
+     | ----------------- method in this implementation
+1168 |     #[inline(always)]
+1169 |     fn has_active_lanes(&self) -> bool {
+     |        ^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `rack` (lib test) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.62s
+     Running unittests src/lib.rs (target/debug/deps/rack-928eba0ca3adf2a1)
+error: test failed, to rerun pass `-p rack --lib`

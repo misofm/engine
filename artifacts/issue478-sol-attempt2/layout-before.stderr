@@ -1,0 +1,10 @@
+   Compiling bytemuck v1.25.2
+   Compiling engine v0.1.0 (/home/bl/misofm/engine-478-layout-before/crates/engine)
+   Compiling math v0.1.0 (/home/bl/misofm/engine-478-layout-before/crates/math)
+   Compiling safe_arch v1.2.0
+   Compiling wide v1.6.1
+   Compiling lane v0.1.0 (/home/bl/misofm/engine-478-layout-before/crates/lane)
+   Compiling effect-contract v0.1.0 (/home/bl/misofm/engine-478-layout-before/crates/effect-contract)
+   Compiling rack v0.1.0 (/home/bl/misofm/engine-478-layout-before/crates/rack)
+   Compiling graph v0.1.0 (/home/bl/misofm/engine-478-layout-before/crates/graph)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 6.23s

@@ -1,0 +1,6 @@
+{
+  "note": "Root reconstructed this diff after execution from unchanged restored source; candidate SHA256 exactly matches the contemporaneous actual mutant command metadata. This is not a contemporaneously saved mutation diff and no new mutant was run.",
+  "restored_sha256": "bc1276d0018a1a443f2b21fa318dbfe5d061588ef7c3aa576c133064ea061bfe",
+  "mutant_sha256": "d8730faac40b1dd65c9c0cdb90db0af5fa8f14a14a1b1260bc3f6acbac14e694",
+  "metadata": "478-root-mechanism-mutant-actual.command.json"
+}

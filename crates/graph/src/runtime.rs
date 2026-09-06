@@ -1478,16 +1478,24 @@ pub fn test_only_bank_chain_construction_facts() -> TestOnlyBankChainConstructio
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
 pub struct TestOnlyBankChainOwnership {
-    #[allow(dead_code)]
     chain: BankChain,
     pub slot_count: usize,
     pub requested_stage_capacity: usize,
+    /// Capacity of the incoming public `Vec<BankSlot>`, before private conversion.
     pub runtime_slot_capacity: usize,
     /// The boxed slice receives all initialized Vec elements; this is its inferred retained count.
     pub inferred_retained_slot_count: usize,
     pub mask_bytes: usize,
     pub stage_pointer_bytes: usize,
     pub slot_bytes: usize,
+}
+
+#[cfg(feature = "test-support")]
+impl TestOnlyBankChainOwnership {
+    #[doc(hidden)]
+    pub fn test_only_chain_mut(&mut self) -> &mut BankChain {
+        &mut self.chain
+    }
 }
 
 #[cfg(feature = "test-support")]
@@ -1510,10 +1518,28 @@ pub fn test_only_prepare_bank_chain_inputs(
         fn process(&mut self, _block: BankBlock<'_>) -> Result<(), RenderError> {
             Ok(())
         }
+
+        fn lane_symmetry(&self, _lane: usize) -> ChannelSymmetryWitness {
+            ChannelSymmetryWitness::SYMMETRIC
+        }
+
+        fn supports_mono_collapse(&self) -> bool {
+            true
+        }
+
+        fn process_mono(&mut self, _block: BankBlock<'_>) -> Result<(), RenderError> {
+            Ok(())
+        }
+
+        fn channels_agree(&self) -> bool {
+            true
+        }
     }
 
     let scratch = AoSoaScratch::new(width, 1).expect("test width and quantum");
-    let active = trailing_active_mask(slot_count.min(width.lanes() as usize), width);
+    // Keep this ownership oracle ragged so tiled staging remains a separate owner. Slot count and
+    // lane width are independent: S=0 still has a legal nonempty direct-caller chain mask.
+    let active = trailing_active_mask(width.lanes() as usize - 1, width);
     let mut stages = Vec::with_capacity(slot_count);
     for _ in 0..slot_count {
         stages.push(Box::new(IdentityStage) as Box<dyn BankStage>);

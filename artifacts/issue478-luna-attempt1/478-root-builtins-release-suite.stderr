@@ -1,0 +1,2 @@
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.03s
+     Running tests/allocation_tracker.rs (target/release/deps/allocation_tracker-07c444198b779b67)
