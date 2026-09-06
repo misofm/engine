@@ -276,3 +276,9 @@ The user requested a pause to restart outside tmux. Root checkpoints/pushes this
 ## Resumed delivery: current-main integration
 
 Root resumed from `923c860a` and fetched current main `be781895` (merged metering PR #521). All production source merges without conflict; the three conflicts are browser pin/results/matrix identities. Preserve current main's three identity files as the integration starting point, then run the ordinary builder to observe the combined artifact before any bounded pin update. Earlier source PASS and raw evidence remain attributed to their original candidates. Combined-source workspace/browser qualification and final actual-head/current-base Astra review remain pending; this merge checkpoint is recoverable integration, not delivery PASS or a fourth implementation attempt.
+
+### Combined-source immutable results and observed pin
+
+On clean `e4fea349`, every compiled workspace test binary passed. The initial combined command has 1,668 passes, zero assertion failures, 25 ignored tests and 241 completed result blocks, then exits 1 at capi doctest setup with E0463 host_core. A serial full workspace doctest recovery on identical source passes all 40 targets and 14 tests. Shared build artifact interference remains a hypothesis; original failure is preserved, not relabeled PASS. Astra approved this bounded recovery. Focused tests pass 5/5 in debug/release; native ABI, scalar/SIMD targets and worklet checks pass.
+
+Astra reviewed the successful ordinary compilation and observed combined artifact mismatch, approving only pin `04f938f667180d0e7b972e1cc2236af3a5d5e3f7b73d1ed503dde72e83aa9bce` after immutable commands finished. The ordinary rebuild and browser/static/resource consumers remain pending. Existing metering resource/PCM fixtures and all accepted #524 source remain unchanged. Captures and rulings are preserved in `artifacts/issue524-delivery/resumed-*`.

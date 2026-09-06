@@ -1,0 +1,5 @@
+# Astra resumed integration rulings
+
+Astra reviewed clean e4fea349 and the ordinary build mismatch. After immutable commands completed, approved updating only the shipped pin from main 54dcf7dd5f6199cf3ceeab77afefe09067e18b730c9e0a6ef9df73fbfd3afc69 to observed 04f938f667180d0e7b972e1cc2236af3a5d5e3f7b73d1ed503dde72e83aa9bce. Ordinary rebuild, independent hash, static/resource/worklet and three-browser consumers remain required. No source, resource or PCM expectation change is authorized.
+
+The initial combined workspace command exited 1 at capi doctest setup (E0463 host_core), after all compiled test binaries passed. Its 241 completed result blocks contain 1,668 passes, zero assertion failures and 25 ignored tests (including three empty initial doc blocks). Serial full workspace --doc recovery on the identical source passes all 40 doc targets, 14 tests. Shared build artifact interference is a plausible cause, not a proved diagnosis. Astra accepts this bounded recovery without rerunning passing compiled tests; the original command remains explicitly failed. Native ABI, scalar/SIMD targets, five focused tests per profile and worklet checks pass.

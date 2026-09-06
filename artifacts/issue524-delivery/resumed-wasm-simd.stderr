@@ -1,0 +1,10 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Checking builtins v0.1.0 (/home/bl/misofm/engine-native-points/crates/builtins)
+    Checking builtins-compiler v0.1.0 (/home/bl/misofm/engine-native-points/crates/builtins-compiler)
+    Checking graph-compiler v0.1.0 (/home/bl/misofm/engine-native-points/crates/graph-compiler)
+    Checking host-core v0.1.0 (/home/bl/misofm/engine-native-points/crates/host-core)
+    Checking host-web v0.1.0 (/home/bl/misofm/engine-native-points/hosts/host-web)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.30s
