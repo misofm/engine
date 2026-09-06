@@ -1,0 +1,6 @@
+effect runtime policy: ok
+effect runtime policy mutations: ok
+effect runtime fixtures: ok (4 files)
+effect runtime fixture mutations: ok
+{"schema_version":1,"kind":"effect_conformance","launch_prepared_configurations":8,"launch_process_calls":4608,"launch_failed_gates":0,"extended_compatibility_prepared_configurations":8,"extended_compatibility_process_calls":4608,"extended_compatibility_failed_probes":0}
+effect runtime contract/conformance: ok (8 production factories on the harness)
