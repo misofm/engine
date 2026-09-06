@@ -17,7 +17,9 @@
 
 mod support;
 
-use effect_contract::{EffectProcessBlock, LinkMode, PreparedSidechainPort, ProcessReport};
+use effect_contract::{
+    EffectProcessBlock, LinkMode, PreparedSidechainPort, ProcessReport, ResetKind,
+};
 
 use support::{
     accumulate, noise, prepare, render_scalar, request_with_quantum, sidechain_port, snapshot,
@@ -128,7 +130,7 @@ fn a_ragged_bank_agrees_with_the_per_frame_body() {
         return;
     };
     let lanes = width.lanes() as usize;
-    for forced in [false, true] {
+    for (left_ragged, forced) in [(false, false), (false, true), (true, false)] {
         let values: Vec<_> = (0..lanes)
             .map(|track| {
                 let right_lookahead = if forced && track == 0 {
@@ -141,8 +143,7 @@ fn a_ragged_bank_agrees_with_the_per_frame_body() {
                     (0, -18.0 - track as f32),
                     (1, 3.0 + track as f32),
                     (5, 2.0),
-                    // Left stays uniform while right is ragged (and includes D=0 when forced).
-                    (7, 0.0),
+                    (7, if left_ragged { right_lookahead } else { 0.0 }),
                 ]);
                 values[7 * 2 + 1].value = right_lookahead;
                 values
@@ -193,12 +194,135 @@ fn a_ragged_bank_agrees_with_the_per_frame_body() {
                 Some(expected) => {
                     assert_eq!(
                         &rendered, expected,
-                        "forced {forced}, bank partition {partition}"
+                        "left_ragged {left_ragged}, forced {forced}, bank partition {partition}"
                     )
                 }
             }
         }
     }
+}
+
+fn bank_requests(
+    lanes: usize,
+    ragged: bool,
+) -> Vec<[effect_contract::InitialParameterValue; support::PARAMETER_COUNT * 2]> {
+    (0..lanes)
+        .map(|lane| {
+            values_with(&[
+                (0, -24.0 - lane as f32),
+                (1, 4.0 + lane as f32 * 0.25),
+                (2, 5.0),
+                (5, 2.0),
+                (7, if ragged { 2.5 * lane as f32 } else { 0.0 }),
+            ])
+        })
+        .collect()
+}
+
+fn bind_values(
+    values: &[[effect_contract::InitialParameterValue; support::PARAMETER_COUNT * 2]],
+) -> Box<dyn effect_contract::PreparedNativeEffectBank> {
+    let requests: Vec<_> = values
+        .iter()
+        .map(|values| request_with_quantum(values, 128))
+        .collect();
+    support::bind_bank(&requests).expect("native bank")
+}
+
+fn bank_snapshot(
+    bank: &dyn effect_contract::PreparedNativeEffectBank,
+    lanes: usize,
+    sizes_from: &dyn effect_contract::PreparedNativeEffect,
+) -> Vec<(Vec<u8>, Vec<u8>)> {
+    (0..lanes as u32)
+        .map(|track| support::snapshot_track(bank, track, sizes_from))
+        .collect()
+}
+
+fn restore_bank(
+    bank: &mut dyn effect_contract::PreparedNativeEffectBank,
+    payloads: &[(Vec<u8>, Vec<u8>)],
+    sizes_from: &dyn effect_contract::PreparedNativeEffect,
+) {
+    for (track, (left, right)) in payloads.iter().enumerate() {
+        support::restore_track(bank, track as u32, 1, left, right, sizes_from).expect("restore");
+    }
+}
+
+fn next_bank_render(
+    bank: &mut dyn effect_contract::PreparedNativeEffectBank,
+    lanes: usize,
+    width: effect_contract::BankWidth,
+    seed: u64,
+    sizes_from: &dyn effect_contract::PreparedNativeEffect,
+) -> Rendered {
+    let mut left = noise(128 * lanes, seed, 0.75);
+    let mut right = noise(128 * lanes, seed ^ 0x4750_4750, 0.55);
+    left[lanes] = -0.0;
+    right[2 * lanes - 1] = -0.0;
+    support::render_bank(bank, &mut left, &mut right, lanes, width, 128, 128, &[]);
+    let payloads = bank_snapshot(bank, lanes, sizes_from);
+    (
+        left.iter().map(|word| word.to_bits()).collect(),
+        right.iter().map(|word| word.to_bits()).collect(),
+        payloads.iter().flat_map(|(left, _)| left.clone()).collect(),
+        payloads
+            .iter()
+            .flat_map(|(_, right)| right.clone())
+            .collect(),
+    )
+}
+
+/// Supported restore and full-reset boundaries choose the next render's access class from the
+/// state they install. This compares the complete next PCM and payload against an identically
+/// restored baseline in both directions, then proves full reset returns to preparation defaults.
+#[test]
+fn restore_and_full_reset_drive_the_next_bank_render_classification() {
+    let Some((_, width)) = support::native_bank_width() else {
+        return;
+    };
+    let lanes = width.lanes() as usize;
+    let uniform_values = bank_requests(lanes, false);
+    let ragged_values = bank_requests(lanes, true);
+    let scalar = prepare(request_with_quantum(&uniform_values[0], 128));
+
+    for (source_values, destination_values, seed) in [
+        (&ragged_values, &uniform_values, 0x4750_1001),
+        (&uniform_values, &ragged_values, 0x4750_1002),
+    ] {
+        let mut source = bind_values(source_values);
+        let _ = next_bank_render(source.as_mut(), lanes, width, seed - 1, scalar.as_ref());
+        let payloads = bank_snapshot(source.as_ref(), lanes, scalar.as_ref());
+
+        let mut transitioned = bind_values(destination_values);
+        restore_bank(transitioned.as_mut(), &payloads, scalar.as_ref());
+        assert_eq!(
+            next_bank_render(transitioned.as_mut(), lanes, width, seed, scalar.as_ref()),
+            next_bank_render(source.as_mut(), lanes, width, seed, scalar.as_ref()),
+            "the first actual render after restore must use the restored delay population"
+        );
+    }
+
+    let mut reset = bind_values(&ragged_values);
+    let uniform_payloads = bank_snapshot(
+        bind_values(&uniform_values).as_ref(),
+        lanes,
+        scalar.as_ref(),
+    );
+    restore_bank(reset.as_mut(), &uniform_payloads, scalar.as_ref());
+    reset.reset(ResetKind::FullToDefaults);
+    let mut defaults = bind_values(&ragged_values);
+    assert_eq!(
+        next_bank_render(reset.as_mut(), lanes, width, 0x4750_1003, scalar.as_ref()),
+        next_bank_render(
+            defaults.as_mut(),
+            lanes,
+            width,
+            0x4750_1003,
+            scalar.as_ref()
+        ),
+        "full reset must select the preparation-default delay population on the next render"
+    );
 }
 
 /// The same property across the three link laws, the bypass flag and a connected sidechain.

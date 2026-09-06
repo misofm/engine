@@ -1393,9 +1393,9 @@ mod tests {
         let actual = gather_detector(channel, write, delay_class(channel), &mut gather);
         let mut lanes = [0.0; MAX_WIDTH];
         actual.store(&mut lanes);
-        for lane in 0..L::WIDTH {
+        for (lane, actual) in lanes.iter().enumerate().take(L::WIDTH) {
             assert_eq!(
-                lanes[lane].to_bits(),
+                actual.to_bits(),
                 old_detector_word(channel, write, lane).to_bits(),
                 "gather write={write} lane={lane}"
             );
