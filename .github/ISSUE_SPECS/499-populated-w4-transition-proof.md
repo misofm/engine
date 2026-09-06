@@ -1,5 +1,7 @@
 # 499: Prove compressor W4 state transitions with populated delayed history
 
+Active fresh Luna attempt1 under the numbered approval below.
+
 This is a bounded proof-completion child of stopped #475, based on preserved source019ac62a / reviewedce745d8a and parent hardstop8c52c832. Parent475 keeps its full original product acceptance and delivery obligations. Its three attempts are exhausted; this child must be numbered/synchronized and scope-approved before a fresh Luna1 pass, then Sol2/3 only after a consolidated FAIL. No further parent repair or qualification is authorized before child PASS. #498 is independent maintenance.
 
 ## Sole remaining problem and exact scope
@@ -31,3 +33,17 @@ Prepared read-only from accepted source and final review; no tests/builds/timing
 ## Numbered bounded successor
 
 GitHub499 title/number match this stateless child. Branch codex/475-populated-w4-proof is isolated from preserved parent hardstop8c52c832; accepted implementation source remains019ac62a. Parent475 remains open and stopped pending this child. #498 is independent graph maintenance. Before fresh Luna1, Astra must confirm this numbered scope/base; no correction or delivery qualification is authorized by numbering alone.
+
+## Astra numbered approval and assignment
+
+# Astra #499 numbered scope/base review — PASS
+
+Exact clean head9c10b5689d615abc1de4b4ad7cde29a3ffbb5af2 in engine-475-populated-proof, isolated from parent hardstop8c52c832. Only numbered499 spec and reciprocal475 retention documentation changed. Crates/hosts/tools/Cargo/config are byte-identical to preserved019ac62a. The complete approved populated-history brief body is retained verbatim under its numbered title; root reports synchronized remote499 identity/body.
+
+Approve fresh Luna1 for this proof-only child. The two restore directions and mono/copy sequence must use populated varying histories before the first transition render, with nonzero/distinguishable reference PCM and distinct actual delayed detector history before candidate equality. Full reset retains correct initial silence/state and then a fixed continuation beyond latency. Only the existing kernel.rs cfg(test) W4 fixture and evidence may change; private actual state-owner construction remains the approved seam, not native factory admission.
+
+No production/API/backend, allocator, corpus/G5/object, new harness, mutation campaign or timing change is authorized. Existing finite focused/library/Clippy/policy gates remain unchanged. Parent475 remains stopped and open with full original product/delivery obligations; this is a separately numbered fresh attempt, not a fourth parent correction. After child source PASS root may integrate actual current main, verify source identity and complete parent qualification followed by actual-head PR review and required CI. Numbering does not itself claim implementation or delivery.
+
+Read-only source/Git comparison; no tests/builds/timing or source/spec/Git/GitHub mutations performed.
+
+Root assigns fresh Luna1 to this bounded proof child. Root owns exact-path checkpoints and GitHub. Parent475 remains stopped until child PASS; no delivery qualification or timing is authorized during implementation.
