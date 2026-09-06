@@ -524,3 +524,7 @@ Bounded completion issue #479 owns only the three remaining observation/sidechai
 ## Successor proof accepted and full parent qualification
 
 Astra accepted bounded successor479 at82d5e5b2, completing actual meter data, connected sidechain decline and retained-owner proof without weakening the original parent. Full workspace1626/0/24 (15 added, none removed), native CAPI/resource4/ABI, scalar/SIMD Wasm, normal candidate worklet/static/resources and actual three-browser qualification pass. `artifacts/issue479-live-scalar-pairing/` preserves raw failed and green evidence, applicability rulings and final reviews. This is the adjacent serialized scalar product only;470/476/444 and431 stay separate. Actual PR review/required CI and upstream merge still precede parent closure.
+
+## Remotely synchronized delivery
+
+PR482 merged as024ad674789a96390bcc45a754931ef5119c8b59 after Astra exact-head PASS at2546cc29 and required qualification34003198856 SUCCESS. The adjacent serialized scalar pairing product and bounded proof completion are delivered; nonadjacent470, distinct-output476, Concurrent444 and measurement431 remain separate. GitHub issue443 is CLOSED.

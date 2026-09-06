@@ -107,3 +107,7 @@ Root freezes runtime source at82d5e5b2 for the full workspace, native release/re
 Runtime source82d5e5b2 full `cargo test --locked --workspace` passes:276 result blocks,1626 passed,0 failed,24 ignored. Actual named population retains every prior456 workspace test and adds15. Normal native CAPI/resource4/4/shared+static ABI and supported scalar/SIMD Wasm checks pass. Delivery candidate2e48ff2e differs only in artifact pin/prose; normal worklet build, static/object checks and browser-resource checks including26 rejection mutations pass with a22f42fefbd23e618761e706b8a48de5d84c9c99034aacfe9ce33065c77ece48.
 
 The actual all-browser qualification record runs Chromium151.0.7922.34, Firefox153.0 and WebKit26.5 successfully, including existing mutation checks, session identities and the exact6-file artifact set. Generated results/matrix change only candidate/artifact identities; matrix freshness check passes. Raw `/tmp/engine-479-*` evidence retains the original pin mismatch separately. No timing or new benchmark invocation occurred. Packaging, actual PR review and required CI remain before delivery/closure.
+
+## Remotely synchronized delivery
+
+PR482 merged as024ad674789a96390bcc45a754931ef5119c8b59 after Astra exact-head PASS at2546cc29 and required qualification34003198856 SUCCESS. The adjacent serialized scalar pairing product and bounded proof completion are delivered; nonadjacent470, distinct-output476, Concurrent444 and measurement431 remain separate. GitHub issue479 is CLOSED.

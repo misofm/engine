@@ -1,0 +1,15 @@
+{
+  "baseline": "82d5e5b2f42c8e0d5f98ba1f4210c200a7231043",
+  "candidate": "add3ca11cb88331fe9cf83f63ea4e62e3f86e545",
+  "added": [
+    [
+      "floor::tests::rust_and_jq_floor_tables_have_exact_key_value_parity",
+      "ok"
+    ],
+    [
+      "tests::lane_symmetry_retarget_updates_only_the_addressed_predicate",
+      "ok"
+    ]
+  ],
+  "removed": []
+}
