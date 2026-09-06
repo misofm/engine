@@ -287,6 +287,13 @@ mod tests {
         Backend::current()
     }
 
+    fn literal_bank_slot_reservation_bytes(bank_count: u64, lanes: u64) -> u64 {
+        let stage = core::mem::size_of::<Box<dyn rack::BankStage>>() as u64;
+        let slot = core::mem::size_of::<rack::BankSlot>() as u64;
+        let mask = lanes * core::mem::size_of::<bool>() as u64;
+        bank_count * (stage + 3 * slot + 3 * mask)
+    }
+
     /// Track stages the builtins compiler banks, one bank each per cohort.
     ///
     /// Three since issue #212: the post-input builtin stage, the fader, and the pan matrix. It was
@@ -2363,6 +2370,7 @@ mod tests {
     #[test]
     #[allow(clippy::result_large_err)]
     fn runtime_bank_slot_reservation_is_published_and_capped_transactionally() {
+        assert_eq!(core::mem::size_of::<bool>(), 1);
         let literal = |n: u64, width: effect_contract::BankWidth| {
             let f = core::mem::size_of::<Box<dyn rack::BankStage>>() as u64;
             let b = core::mem::size_of::<rack::BankSlot>() as u64;
@@ -2375,6 +2383,16 @@ mod tests {
                 Some(effect_contract::BankWidth::Four)
             ),
             Some(Default::default())
+        );
+        assert_eq!(
+            graph::GraphBankSlotResourceEstimate::checked_for(0, None),
+            Some(Default::default()),
+            "empty/scalar population has no width or reservation"
+        );
+        assert_eq!(
+            graph::GraphBankSlotResourceEstimate::checked_for(1, None),
+            None,
+            "a populated scalar selection cannot describe bank slots"
         );
         for (n, width) in [
             (1, effect_contract::BankWidth::Four),
@@ -2396,18 +2414,58 @@ mod tests {
             ),
             None
         );
-        let mut estimate = compile_fixture(5_110).report.estimate;
-        estimate.graph_metadata_bytes = u64::MAX;
-        let before = estimate.clone();
-        assert!(
-            estimate
-                .checked_add_bank_slot_owners(graph::GraphBankSlotResourceEstimate {
-                    total_bytes: 1,
-                    ..Default::default()
-                })
-                .is_none()
+        let resource = graph::GraphBankSlotResourceEstimate::checked_for(
+            3,
+            Some(effect_contract::BankWidth::Eight),
+        )
+        .expect("literal fold resource");
+        let mut below_largest = compile_fixture(5_110).report.estimate;
+        below_largest.graph_metadata_bytes = 11;
+        below_largest.incremental_plan_bytes = 22;
+        below_largest.session_plus_plan_bytes = 33;
+        below_largest.largest_allocation_bytes = resource.largest_allocation_bytes - 1;
+        below_largest.effect_bank_metadata_bytes = 44;
+        below_largest.effect_bank_scratch_bytes = 55;
+        let mut expected = below_largest.clone();
+        expected.graph_metadata_bytes += resource.total_bytes;
+        expected.incremental_plan_bytes += resource.total_bytes;
+        expected.session_plus_plan_bytes += resource.total_bytes;
+        expected.largest_allocation_bytes = resource.largest_allocation_bytes;
+        below_largest
+            .checked_add_bank_slot_owners(resource)
+            .expect("literal fold");
+        assert_eq!(
+            below_largest, expected,
+            "all four fields fold independently"
         );
-        assert_eq!(estimate, before, "reservation overflow is transactional");
+
+        let mut above_largest = compile_fixture(5_111).report.estimate;
+        above_largest.largest_allocation_bytes = resource.largest_allocation_bytes + 1;
+        let expected_largest = above_largest.largest_allocation_bytes;
+        above_largest
+            .checked_add_bank_slot_owners(resource)
+            .expect("larger prior allocation remains");
+        assert_eq!(above_largest.largest_allocation_bytes, expected_largest);
+
+        let mut zero = compile_fixture(5_110).report.estimate;
+        let before_zero = zero.clone();
+        zero.checked_add_bank_slot_owners(Default::default())
+            .expect("zero fold");
+        assert_eq!(zero, before_zero);
+        for field in ["graph", "plan", "session"] {
+            let mut estimate = before_zero.clone();
+            match field {
+                "graph" => estimate.graph_metadata_bytes = u64::MAX - resource.total_bytes + 1,
+                "plan" => estimate.incremental_plan_bytes = u64::MAX - resource.total_bytes + 1,
+                "session" => {
+                    estimate.session_plus_plan_bytes = u64::MAX - resource.total_bytes + 1;
+                }
+                _ => unreachable!(),
+            }
+            let before = estimate.clone();
+            assert!(estimate.checked_add_bank_slot_owners(resource).is_none());
+            assert_eq!(estimate, before, "{field} overflow rolls back every field");
+        }
 
         let mut model = parse_session_json(SESSION_FIXTURE).expect("session fixture");
         let base_track = model.tracks[0].clone();
@@ -2473,6 +2531,11 @@ mod tests {
         let prepared =
             prepare_session_builtins(&session, &[], builtin_caps).expect("prepared builtins");
         let classes = SessionPoolClasses::from_session(&session);
+        let empty_builtin_resource = prepared
+            .graph_builtin_bank_resource(host_dispatch(), &[], &classes)
+            .expect("empty builtin resource");
+        assert_eq!(empty_builtin_resource.bank_count, 0);
+        assert_eq!(empty_builtin_resource.maximum_mask_bytes, 0);
         let builtin_resource = prepared
             .graph_builtin_bank_resource(host_dispatch(), &graph.graph.dependency_levels, &classes)
             .expect("builtin resource");
@@ -2485,10 +2548,23 @@ mod tests {
             effect_contract::BankWidth::for_backend(host_dispatch()),
         )
         .expect("slot resource");
+        let width = effect_contract::BankWidth::for_backend(host_dispatch())
+            .expect("delivery host bank width");
+        let slot_total = literal_bank_slot_reservation_bytes(
+            builtin_resource.bank_count,
+            u64::from(width.lanes()),
+        );
+        let slot_largest = (builtin_resource.bank_count
+            * core::mem::size_of::<Box<dyn rack::BankStage>>() as u64)
+            .max(builtin_resource.bank_count * core::mem::size_of::<rack::BankSlot>() as u64)
+            .max(u64::from(width.lanes()) * core::mem::size_of::<bool>() as u64);
+        assert_eq!(slots.total_bytes, slot_total);
+        assert_eq!(slots.largest_allocation_bytes, slot_largest);
         let mut expected = graph.report.estimate.clone();
-        expected
-            .checked_add_bank_slot_owners(slots)
-            .expect("slot estimate");
+        expected.graph_metadata_bytes += slot_total;
+        expected.incremental_plan_bytes += slot_total;
+        expected.session_plus_plan_bytes += slot_total;
+        expected.largest_allocation_bytes = expected.largest_allocation_bytes.max(slot_largest);
         let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
             dispatch: host_dispatch(),
             plan_id: 5_112,
@@ -2523,7 +2599,114 @@ mod tests {
             GraphCompiler::evidence(artifact.graph(), artifact.report()).canonical_bytes,
             "bank overlay leaves canonical semantics unchanged"
         );
-        let final_estimate = artifact.graph_resource_estimate().clone();
+        // A separate real compiler fixture combines prepared native effects and builtins. The
+        // effect-only compile supplies the independently observed prior owners; direct arithmetic
+        // below derives the combined slot delta and attached builtin payload.
+        let (_, effect_only_inputs) = rack_chain_fixture(8, 1, |_| 1);
+        let mixed_session = effect_only_inputs.session.clone();
+        let effect_only = compile_chain_fixture(effect_only_inputs);
+        let effect_count = effect_only.report.estimate.effect_bank_count;
+        assert!(effect_count > 0, "mixed fixture prepares effect banks");
+        let mixed_classes = SessionPoolClasses::from_session(&mixed_session);
+        let mixed_builtins =
+            prepare_session_builtins(&mixed_session, &[], builtin_caps).expect("mixed builtins");
+        let mixed_builtin_resource = mixed_builtins
+            .graph_builtin_bank_resource(
+                host_dispatch(),
+                &effect_only.graph.dependency_levels,
+                &mixed_classes,
+            )
+            .expect("mixed builtin resource");
+        assert!(mixed_builtin_resource.bank_count > 0);
+        let width = effect_contract::BankWidth::for_backend(host_dispatch())
+            .expect("delivery host bank width");
+        let lanes = u64::from(width.lanes());
+        let combined_count = effect_count
+            .checked_add(mixed_builtin_resource.bank_count)
+            .expect("combined count");
+        let effect_slot_bytes = literal_bank_slot_reservation_bytes(effect_count, lanes);
+        let combined_slot_bytes = literal_bank_slot_reservation_bytes(combined_count, lanes);
+        let stage = core::mem::size_of::<Box<dyn rack::BankStage>>() as u64;
+        let slot = core::mem::size_of::<rack::BankSlot>() as u64;
+        let mask = lanes * core::mem::size_of::<bool>() as u64;
+        let combined_largest = (combined_count * stage)
+            .max(combined_count * slot)
+            .max(mask);
+        let mut expected_report = effect_only.report.estimate.clone();
+        let slot_delta = combined_slot_bytes - effect_slot_bytes;
+        expected_report.graph_metadata_bytes += slot_delta;
+        expected_report.incremental_plan_bytes += slot_delta;
+        expected_report.session_plus_plan_bytes += slot_delta;
+        expected_report.largest_allocation_bytes = expected_report
+            .largest_allocation_bytes
+            .max(combined_largest);
+
+        let mixed = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+            dispatch: host_dispatch(),
+            plan_id: 5_116,
+            effects: {
+                let (_, effects) = rack_chain_fixture(8, 1, |_| 1);
+                effects
+            },
+            builtins: mixed_builtins,
+            caps: integration_caps(),
+        })
+        .unwrap_or_else(|failure| panic!("mixed graph: {:?}", failure.diagnostics));
+        assert_eq!(mixed.report().estimate, expected_report);
+        assert_eq!(
+            mixed.report().estimate.effect_bank_count,
+            effect_count,
+            "builtin combination preserves prepared effect owners"
+        );
+        assert_eq!(
+            (
+                mixed.report().estimate.effect_bank_metadata_bytes,
+                mixed.report().estimate.effect_bank_scratch_bytes,
+                mixed.report().estimate.effect_bank_runtime_buffer_bytes,
+            ),
+            (
+                effect_only.report.estimate.effect_bank_metadata_bytes,
+                effect_only.report.estimate.effect_bank_scratch_bytes,
+                effect_only.report.estimate.effect_bank_runtime_buffer_bytes,
+            )
+        );
+        let mut expected_attached = expected_report.clone();
+        expected_attached.builtin_bank_count += mixed_builtin_resource.bank_count;
+        expected_attached.builtin_bank_bytes += mixed_builtin_resource.payload_bytes;
+        expected_attached.builtin_bank_scratch_bytes += mixed_builtin_resource.scratch_bytes;
+        expected_attached.audio_buffer_samples += mixed_builtin_resource.scratch_samples;
+        expected_attached.graph_metadata_bytes += mixed_builtin_resource.metadata_bytes;
+        let builtin_total = mixed_builtin_resource.payload_bytes
+            + mixed_builtin_resource.scratch_bytes
+            + mixed_builtin_resource.metadata_bytes;
+        expected_attached.incremental_plan_bytes += builtin_total;
+        expected_attached.session_plus_plan_bytes += builtin_total;
+        expected_attached.largest_allocation_bytes = expected_attached
+            .largest_allocation_bytes
+            .max(mixed_builtin_resource.largest_allocation_bytes);
+        assert_eq!(mixed.graph_resource_estimate(), &expected_attached);
+        let scalar_mixed = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+            dispatch: Backend::Scalar,
+            plan_id: 5_117,
+            effects: {
+                let (_, effects) = rack_chain_fixture(8, 1, |_| 1);
+                effects
+            },
+            builtins: {
+                let (_, effects) = rack_chain_fixture(8, 1, |_| 1);
+                prepare_session_builtins(&effects.session, &[], builtin_caps)
+                    .expect("scalar mixed builtins")
+            },
+            caps: integration_caps(),
+        })
+        .unwrap_or_else(|failure| panic!("scalar mixed graph: {:?}", failure.diagnostics));
+        assert_eq!(
+            GraphCompiler::evidence(mixed.graph(), mixed.report()).canonical_bytes,
+            GraphCompiler::evidence(scalar_mixed.graph(), scalar_mixed.report()).canonical_bytes,
+            "combined slot owners preserve canonical semantics across dispatch"
+        );
+
+        let final_estimate = expected_attached;
         for (field, value) in [
             ("graph", final_estimate.graph_metadata_bytes),
             ("plan", final_estimate.incremental_plan_bytes),
@@ -2536,15 +2719,13 @@ mod tests {
                 "largest" => caps.maximum_single_allocation_bytes = value,
                 _ => unreachable!(),
             }
-            let prepared =
-                prepare_session_builtins(&session, &[], builtin_caps).expect("prepared for cap");
+            let (_, effects) = rack_chain_fixture(8, 1, |_| 1);
+            let prepared = prepare_session_builtins(&effects.session, &[], builtin_caps)
+                .expect("prepared for cap");
             let exact_result = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
                 dispatch: host_dispatch(),
                 plan_id: 5_113,
-                effects: EffectPreparedSession {
-                    session: session.clone(),
-                    entries: Vec::new(),
-                },
+                effects,
                 builtins: prepared,
                 caps,
             });
@@ -2556,15 +2737,13 @@ mod tests {
                 "largest" => below.maximum_single_allocation_bytes -= 1,
                 _ => unreachable!(),
             }
-            let prepared =
-                prepare_session_builtins(&session, &[], builtin_caps).expect("returned prepared");
+            let (_, effects) = rack_chain_fixture(8, 1, |_| 1);
+            let prepared = prepare_session_builtins(&effects.session, &[], builtin_caps)
+                .expect("returned prepared");
             let failure = match GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
                 dispatch: host_dispatch(),
                 plan_id: 5_114,
-                effects: EffectPreparedSession {
-                    session: session.clone(),
-                    entries: Vec::new(),
-                },
+                effects,
                 builtins: prepared,
                 caps: below,
             }) {
@@ -2579,7 +2758,16 @@ mod tests {
                     .any(|d| d.code == "graph.resource.limit" && d.path == "$.graph_compile_caps")
             );
             assert_eq!(failure.effects.session.normalized_model().tracks.len(), 8);
+            assert_eq!(failure.effects.entries.len(), 8, "live effects returned");
             assert_eq!(failure.builtins.tails().count(), 8);
+            assert!(
+                failure
+                    .builtins
+                    .validate_for_session(&failure.effects.session)
+                    .0
+                    .is_empty(),
+                "returned builtin ownership remains sealed"
+            );
         }
     }
 
@@ -7465,6 +7653,7 @@ mod tests {
         assert_eq!(scalar_artifact.graph.prepared_bank_count(), 0);
         let lanes = width.map_or(0_u64, |width| u64::from(width.lanes()));
         let bank_count = u64::try_from(expected_banks).expect("bank count");
+        let expected_bank_slot_bytes = literal_bank_slot_reservation_bytes(bank_count, lanes);
         let quantum = u64::from(session.quantum().0);
         let expected_bank_scratch_bytes = bank_count * lanes * quantum * 2 * 4;
         let expected_bank_runtime_buffer_bytes = bank_count * lanes * quantum * 2 * 4;
@@ -7517,7 +7706,9 @@ mod tests {
         );
         assert_eq!(
             artifact.report.estimate.graph_metadata_bytes,
-            scalar_artifact.report.estimate.graph_metadata_bytes + expected_bank_metadata_bytes
+            scalar_artifact.report.estimate.graph_metadata_bytes
+                + expected_bank_metadata_bytes
+                + expected_bank_slot_bytes
         );
         assert_eq!(
             artifact.report.estimate.incremental_plan_bytes,
@@ -7525,6 +7716,7 @@ mod tests {
                 + expected_bank_scratch_bytes
                 + expected_bank_runtime_buffer_bytes
                 + expected_bank_metadata_bytes
+                + expected_bank_slot_bytes
         );
         assert_eq!(
             artifact.report.estimate.session_plus_plan_bytes,
@@ -7532,6 +7724,7 @@ mod tests {
                 + expected_bank_scratch_bytes
                 + expected_bank_runtime_buffer_bytes
                 + expected_bank_metadata_bytes
+                + expected_bank_slot_bytes
         );
         assert_eq!(
             artifact.graph.sequential_schedule,
@@ -7883,6 +8076,7 @@ mod tests {
 
         let lanes = width.map_or(0_u64, |width| u64::from(width.lanes()));
         let bank_count = u64::try_from(expected_banks).expect("bank count");
+        let expected_bank_slot_bytes = literal_bank_slot_reservation_bytes(bank_count, lanes);
         let quantum = u64::from(session.quantum().0);
         let expected_bank_scratch_bytes = bank_count * lanes * quantum * 2 * 4;
         let expected_bank_runtime_buffer_bytes = bank_count * lanes * quantum * 2 * 4;
@@ -7922,6 +8116,7 @@ mod tests {
                 + expected_bank_scratch_bytes
                 + expected_bank_runtime_buffer_bytes
                 + expected_bank_metadata_bytes
+                + expected_bank_slot_bytes
         );
         assert_eq!(
             artifact.report.estimate.session_plus_plan_bytes,
@@ -7929,6 +8124,7 @@ mod tests {
                 + expected_bank_scratch_bytes
                 + expected_bank_runtime_buffer_bytes
                 + expected_bank_metadata_bytes
+                + expected_bank_slot_bytes
         );
         assert_eq!(
             artifact.graph.sequential_schedule,
@@ -8262,6 +8458,7 @@ mod tests {
 
         let lanes = width.map_or(0_u64, |width| u64::from(width.lanes()));
         let bank_count = u64::try_from(expected_banks).expect("bank count");
+        let expected_bank_slot_bytes = literal_bank_slot_reservation_bytes(bank_count, lanes);
         let quantum = u64::from(session.quantum().0);
         let expected_bank_scratch_bytes = bank_count * lanes * quantum * 2 * 4;
         let expected_bank_runtime_buffer_bytes = bank_count * lanes * quantum * 2 * 4;
@@ -8301,6 +8498,7 @@ mod tests {
                 + expected_bank_scratch_bytes
                 + expected_bank_runtime_buffer_bytes
                 + expected_bank_metadata_bytes
+                + expected_bank_slot_bytes
         );
         assert_eq!(
             artifact.report.estimate.session_plus_plan_bytes,
@@ -8308,6 +8506,7 @@ mod tests {
                 + expected_bank_scratch_bytes
                 + expected_bank_runtime_buffer_bytes
                 + expected_bank_metadata_bytes
+                + expected_bank_slot_bytes
         );
         assert_eq!(
             artifact.graph.sequential_schedule,
@@ -8645,6 +8844,7 @@ mod tests {
 
         let lanes = width.map_or(0_u64, |width| u64::from(width.lanes()));
         let bank_count = u64::try_from(expected_banks).expect("bank count");
+        let expected_bank_slot_bytes = literal_bank_slot_reservation_bytes(bank_count, lanes);
         let quantum = u64::from(session.quantum().0);
         let expected_bank_scratch_bytes = bank_count * lanes * quantum * 2 * 4;
         let expected_bank_runtime_buffer_bytes = bank_count * lanes * quantum * 2 * 4;
@@ -8680,7 +8880,8 @@ mod tests {
         assert_eq!(scalar_artifact.report.estimate.effect_bank_count, 0);
         let bank_overhead = expected_bank_scratch_bytes
             + expected_bank_runtime_buffer_bytes
-            + expected_bank_metadata_bytes;
+            + expected_bank_metadata_bytes
+            + expected_bank_slot_bytes;
         assert_eq!(
             artifact.report.estimate.incremental_plan_bytes,
             scalar_artifact.report.estimate.incremental_plan_bytes + bank_overhead

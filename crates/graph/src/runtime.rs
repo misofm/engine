@@ -1436,6 +1436,43 @@ fn bank_chain(
 #[cfg(feature = "test-support")]
 thread_local! {
     static BANK_CHAIN_CAPACITIES: std::cell::Cell<[usize; 2]> = const { std::cell::Cell::new([0, 0]) };
+    static BANK_CHAIN_FACTS: std::cell::Cell<TestOnlyBankChainConstructionFacts> =
+        const { std::cell::Cell::new(TestOnlyBankChainConstructionFacts::ZERO) };
+}
+
+#[cfg(feature = "test-support")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[doc(hidden)]
+pub struct TestOnlyBankChainConstructionFacts {
+    pub prepared_memberships: usize,
+    pub run_memberships: usize,
+    pub runtime_slots: usize,
+    pub maximum_run_memberships: usize,
+    pub maximum_runtime_slots: usize,
+}
+
+#[cfg(feature = "test-support")]
+impl TestOnlyBankChainConstructionFacts {
+    const ZERO: Self = Self {
+        prepared_memberships: 0,
+        run_memberships: 0,
+        runtime_slots: 0,
+        maximum_run_memberships: 0,
+        maximum_runtime_slots: 0,
+    };
+}
+
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub fn test_only_reset_bank_chain_construction_facts() {
+    BANK_CHAIN_FACTS.with(|facts| facts.set(TestOnlyBankChainConstructionFacts::ZERO));
+}
+
+#[cfg(feature = "test-support")]
+#[must_use]
+#[doc(hidden)]
+pub fn test_only_bank_chain_construction_facts() -> TestOnlyBankChainConstructionFacts {
+    BANK_CHAIN_FACTS.with(std::cell::Cell::get)
 }
 
 #[cfg(feature = "test-support")]
@@ -1446,7 +1483,8 @@ pub struct TestOnlyBankChainOwnership {
     pub slot_count: usize,
     pub requested_stage_capacity: usize,
     pub runtime_slot_capacity: usize,
-    pub retained_slot_capacity: usize,
+    /// The boxed slice receives all initialized Vec elements; this is its inferred retained count.
+    pub inferred_retained_slot_count: usize,
     pub mask_bytes: usize,
     pub stage_pointer_bytes: usize,
     pub slot_bytes: usize,
@@ -1503,14 +1541,14 @@ pub fn test_only_bank_chain_ownership(
     let slot_count = stages.len();
     let mask_bytes = core::mem::size_of::<bool>() * active.len();
     let chain = bank_chain(scratch, active, stages);
-    let [runtime_slot_capacity, retained_slot_capacity] =
+    let [runtime_slot_capacity, inferred_retained_slot_count] =
         BANK_CHAIN_CAPACITIES.with(std::cell::Cell::get);
     TestOnlyBankChainOwnership {
         chain,
         slot_count,
         requested_stage_capacity: stage_capacity,
         runtime_slot_capacity,
-        retained_slot_capacity,
+        inferred_retained_slot_count,
         mask_bytes,
         stage_pointer_bytes: core::mem::size_of::<Box<dyn BankStage>>() * slot_count,
         slot_bytes: core::mem::size_of::<BankSlot>() * slot_count,
@@ -1597,6 +1635,12 @@ impl RuntimeParts {
         track_delays: Vec<crate::PreparedTrackDelay>,
         frames: usize,
     ) -> Self {
+        #[cfg(feature = "test-support")]
+        BANK_CHAIN_FACTS.with(|facts| {
+            let mut observed = facts.get();
+            observed.prepared_memberships = banks.len() + builtin_banks.len();
+            facts.set(observed);
+        });
         let membership = bank_membership(spec, &banks, &builtin_banks);
         let mut by_node: BTreeMap<GraphNodeId, Vec<GraphNodeObserverBinding>> = BTreeMap::new();
         for observer in observers {
@@ -1788,6 +1832,15 @@ impl RuntimeParts {
             stages.push(stage);
             index += 1;
         }
+        #[cfg(feature = "test-support")]
+        BANK_CHAIN_FACTS.with(|facts| {
+            let mut observed = facts.get();
+            observed.run_memberships += run.len();
+            observed.runtime_slots += stages.len();
+            observed.maximum_run_memberships = observed.maximum_run_memberships.max(run.len());
+            observed.maximum_runtime_slots = observed.maximum_runtime_slots.max(stages.len());
+            facts.set(observed);
+        });
         bank_chain(
             scratch.expect("a unit has at least one slot"),
             active.expect("a unit has at least one slot"),

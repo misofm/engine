@@ -193,3 +193,7 @@ The early focused metadata does not include contemporaneous source hashes, some 
 No builds, tests, timing, repository edits, Git mutations or GitHub mutations were performed during this review. Only this requested temporary review report was written. The named source/accounting/evidence corrections fit one Sol2 pass in the already permitted paths; no gate weakening, allocator database, public schema expansion, or unrelated owner audit is authorized.
 
 Root integrated delivered maina6a59030 and #512 closure/post-main records before Sol2. The only merge conflict was #509 documentation; the completed post-main success paragraph was retained. All six #511 source files and first-attempt evidence remain identical to the reviewed cdae5a57 source. Root activates fresh Sol attempt2 for precisely this consolidated correction, with the four derived expectation amendments authorized above. No benchmark or automatic artifact pin update is authorized.
+
+## Sol attempt 2 focused checkpoint
+
+Sol corrected the six approved source paths and both frozen exact debug tests pass one test each. Root verified contemporaneous six-file SHA256 identities in both successful records before committing. Initial feature/compile/canonical-oracle failures remain preserved. Release/full/static gates and consolidated Astra acceptance are still pending; this checkpoint is recovery progress, not issue closure.

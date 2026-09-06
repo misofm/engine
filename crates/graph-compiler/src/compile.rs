@@ -592,6 +592,19 @@ impl GraphCompiler {
         } else {
             graph::GraphBuiltinBankResourceEstimate::default()
         };
+        let mut capped_estimate = estimate.clone();
+        if capped_estimate
+            .checked_add_builtin_banks(builtin_bank_resource)
+            .is_none()
+        {
+            return Err(failure(
+                effects,
+                vec![diag(
+                    "graph.resource.arithmetic_overflow",
+                    "$.graph.builtin_banks",
+                )],
+            ));
+        }
         let bank_count = bank_resource
             .bank_count
             .checked_add(builtin_bank_resource.bank_count);
@@ -633,19 +646,6 @@ impl GraphCompiler {
                 )],
             ));
         };
-        let mut capped_estimate = estimate.clone();
-        if capped_estimate
-            .checked_add_builtin_banks(builtin_bank_resource)
-            .is_none()
-        {
-            return Err(failure(
-                effects,
-                vec![diag(
-                    "graph.resource.arithmetic_overflow",
-                    "$.graph.builtin_banks",
-                )],
-            ));
-        }
         if capped_estimate
             .checked_add_bank_slot_owners(slot_resource)
             .is_none()

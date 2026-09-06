@@ -10,8 +10,9 @@ mod runtime;
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
 pub use runtime::{
-    TestOnlyBankChainInputs, TestOnlyBankChainOwnership, test_only_bank_chain_ownership,
-    test_only_prepare_bank_chain_inputs,
+    TestOnlyBankChainConstructionFacts, TestOnlyBankChainInputs, TestOnlyBankChainOwnership,
+    test_only_bank_chain_construction_facts, test_only_bank_chain_ownership,
+    test_only_prepare_bank_chain_inputs, test_only_reset_bank_chain_construction_facts,
 };
 
 use core::cell::Cell;

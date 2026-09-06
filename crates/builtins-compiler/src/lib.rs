@@ -1230,8 +1230,12 @@ fn builtin_bank_resource(
         scratch_bytes,
         scratch_samples,
         metadata_bytes,
-        maximum_mask_bytes: u64::from(width.lanes())
-            .checked_mul(u64::try_from(core::mem::size_of::<bool>()).ok()?)?,
+        maximum_mask_bytes: if bank_count == 0 {
+            0
+        } else {
+            u64::from(width.lanes())
+                .checked_mul(u64::try_from(core::mem::size_of::<bool>()).ok()?)?
+        },
         largest_allocation_bytes: largest_member_array
             .max(processor_bytes)
             .max(largest_member_string)
@@ -4037,6 +4041,9 @@ fn meter_diagnostic(request: &MeterRequest, error: MeterConfigError) -> BuiltinD
 pub use tests::test_only_observed_scalar_pair_binding;
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
+pub use tests::test_only_prepared_unpaired_graph;
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
 pub use tests::{test_only_prepared_pair_graph, test_only_prepared_scalar_pair_graph};
 
 #[cfg(any(test, feature = "test-support"))]
@@ -5502,6 +5509,14 @@ mod tests {
             Backend::Simd8,
             9,
         )
+    }
+
+    /// The existing queued graph through the direct-console delivery path, whose separate fader
+    /// and matrix consumers make the adjacent runtime memberships decline pairing.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn test_only_prepared_unpaired_graph() -> PreparedBuiltinsGraphBound {
+        prepared_pair_graph_fixture(false, false, false, false, None, Backend::Simd8, 9)
     }
 
     #[cfg(feature = "test-support")]
