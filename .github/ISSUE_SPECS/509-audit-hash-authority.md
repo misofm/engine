@@ -66,3 +66,17 @@ Root integrated delivered main1543c4c2 after PR508 and its closure record. All f
 ## Luna attempt 1 source and evidence
 
 Source5368843f replaces all five one-shot text helper bodies with existing shared imports. The frozen final debug/release filters execute5,6,3,1,1 tests with exit0; strict affected Clippy/fmt/diff and both static policies pass. Raw records in artifacts/issue509-audit-hash-authority preserve the initial empty-target-directory setup failures, final actual source hashes and corrected execution. Root verified hashes; no fixture generation, repin, runner or timing was invoked. Consolidated Astra review pending.
+
+## Astra Luna attempt 1 PASS
+
+# Astra #509 Luna attempt 1 consolidated source/evidence review — PASS
+
+Reviewed clean head 3501833a8b04eaa51a8c6a030b43f3cd363ae362 in /home/bl/misofm/engine-audit-hash-authority, including source checkpoint 5368843f and the exact numbered specification and numbered scope review. This is source/evidence acceptance; actual PR exact-head review and required CI remain delivery gates.
+
+The complete audit source diff contains only the five authorized modules. Each replacement imports the existing bench_support::digest::sha256_hex under its previous callable name and removes the redundant one-shot implementation. All existing call sites and input bytes remain unchanged. The shared implementation hashes the supplied slice once and encodes lowercase text; no sink counter or timing behavior is added. Required raw tree hashing, separators, formatting imports, source seek transcripts, parsing/error behavior, and author/checker inspection anchors remain intact. The five independent tests invoke their actual module alias on empty/abc bytes against fixed correct literals. No Cargo, shared helper, fixture/manifest, historical validator/seal, runtime or worklet input changes occur in this implementation. Base-relative other changes are issue documentation and this evidence package.
+
+Independently verified every manifest entry's byte length and SHA256: 83 payload files plus the manifest, with exact 84-file tracked coverage and no omitted payload. Both final identity records' five source SHA256 values and Git blob identities match the current files and source5368843f. The captured HEAD identifies the precommit base8f1c483f and is correctly supplemented by these dirty-source identities, rather than misrepresented as the final source commit.
+
+Read the actual final argv/cwd, stdout, stderr and numeric status records. Debug and release each execute the frozen populations 5,6,3,1,1, with named successful tests and zero failures/ignores; no zero-test success is credited. The two exact existing filters run one test apiece. Strict affected Clippy, fmt, diff and both specified static policies have individual exit0 records, with successful Clippy completion and policy diagnostics. The README correctly resolves the preserved report's imprecise generic count wording. All ten initial empty-CARGO_TARGET_DIR failures remain recorded as failures, with matching diagnostics; final identity records mark the optional setting unset.
+
+No consolidated blocking findings. This verdict does not extend to fixture generation, listening evidence, timing, browser artifact qualification or full audit execution, and CP20 remains partial outside this package. No builds/tests/timing, repository edits, Git mutations or GitHub actions were performed during review; only this /tmp verdict was written. Root retains upstream synchronization, actual PR review, CI and closure.
