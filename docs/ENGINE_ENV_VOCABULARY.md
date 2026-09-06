@@ -161,6 +161,7 @@ Read by one subject each.
 | `MISO_ENGINE_WEB_STRIP` | AudioWorklet build: the `wasm-strip` binary. |
 | `MISO_ENGINE_WEB_WORKLET_TEST_MODULE` | Hermetic worklet test: override module path for the bootstrap-under-test (#132). |
 | `MISO_ENGINE_WEB_HOST_TEST_MODULE` | Hermetic worklet test: override module path for the main-realm host under test, so a red mutation of the host runs the same suite (#151). |
+| `MISO_ENGINE_WEB_HOST_MAX_SAFE_TEST` | Hermetic host allocator test selector; when `1`, the existing test runs the transformed private counter at `MAX_SAFE_INTEGER - 1`, proves the final safe ID once, then proves repeatable local exhaustion with no post, wrap or reuse. |
 | `MISO_ENGINE_PRINT_HELPER_MANIFEST` | native PCM runner portability gate: helper manifest path. |
 | `MISO_ENGINE_EFFECT_CONTRACT_V1_H` | the C include guard `check-effect-contract.sh` asserts. Not an environment variable. |
 | `MISO_ENGINE_BENCH_POLICY_NEEDLE` | `check-bench-policy.sh`'s `sole_owner_or_delegate`: internal transport of the four-character backslash char-literal needle from bash to the `awk` subprocess through `ENVIRON`, chosen over `-v` because `-v` assignments go through awk's own C-style escape processing a second time. Set and read only inside that one function invocation; not user-facing. |
@@ -199,3 +200,25 @@ runs, so re-pin mode cannot turn a backend disagreement into a new pin (master p
 |---|---|
 | `MISO_ENGINE_WEB_AUDIOWORKLET_REPIN` | `build-web-audioworklet.sh`: print the reproducibly built AudioWorklet artifact digest instead of comparing it to the committed pin. |
 | `MISO_ENGINE_REPIN_NATIVE_PCM_RUNNER` | print the five native PCM runner output digests instead of asserting them. |
+
+## Interchange policy test shims
+
+These variables belong only to the hermetic interchange policy suites.
+
+| name | meaning |
+|---|---|
+| `MISO_ENGINE_INTERCHANGE_TEST_DELEGATE_ERROR` | Captured real delegate stderr path. |
+| `MISO_ENGINE_INTERCHANGE_TEST_DELEGATE_OUTPUT` | Captured real delegate stdout path. |
+| `MISO_ENGINE_INTERCHANGE_TEST_EXPECT_DELEGATE` | Expected real delegate exit status. |
+| `MISO_ENGINE_INTERCHANGE_TEST_FAULT_LABEL` | Fault diagnostic label. |
+| `MISO_ENGINE_INTERCHANGE_TEST_FAULT_MODE` | Forwarded fault output mode. |
+| `MISO_ENGINE_INTERCHANGE_TEST_FAULT_NEEDLE` | Fault argv selector. |
+| `MISO_ENGINE_INTERCHANGE_TEST_FAULT_OCCURRENCE` | Selected fault occurrence. |
+| `MISO_ENGINE_INTERCHANGE_TEST_FAULT_STATE` | Fault occurrence counter file. |
+| `MISO_ENGINE_INTERCHANGE_TEST_OPTIONAL_FIND_MODE` | Optional-find expected shape. |
+| `MISO_ENGINE_INTERCHANGE_TEST_OUTPUT_SHAPE` | Expected real stdout shape. |
+| `MISO_ENGINE_INTERCHANGE_TEST_PYTHON_OCCURRENCE` | Selected Python invocation. |
+| `MISO_ENGINE_INTERCHANGE_TEST_READ_MARKER` | Read-hook reached marker path. |
+| `MISO_ENGINE_INTERCHANGE_TEST_READ_PROGRAM` | Original Python program capture path. |
+| `MISO_ENGINE_INTERCHANGE_TEST_READ_TARGET` | Exact refused read target path. |
+| `MISO_ENGINE_INTERCHANGE_TEST_REAL_TOOL` | Resolved real delegate executable. |

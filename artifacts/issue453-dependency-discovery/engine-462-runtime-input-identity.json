@@ -1,0 +1,16 @@
+{
+  "base": "29a8c88b82de8660a5d573e75b7e67d977496576",
+  "candidate": "2c8e0c48646192ae1484e56356ff2a26279a403e",
+  "compared_paths": [
+    "crates",
+    "hosts",
+    "tools",
+    "sidecars",
+    "fixtures",
+    "Cargo.toml",
+    "Cargo.lock",
+    ".cargo",
+    "rust-toolchain.toml"
+  ],
+  "changed_paths": []
+}

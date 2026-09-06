@@ -1,0 +1,9 @@
+delivery_ownership.rs 0 realtime policy: ok (42 marked regions in 12 files)
+ 
+delivery_ownershipXrs.rs 1  crates/protocol/tests/delivery_ownershipXrs.rs:1:unsafe fn unapproved_neighbor() {}
+realtime policy failure: unsafe code exists outside the issue-approved ownership/audit files
+
+delivery_ownership_extra.rs 1  crates/protocol/tests/delivery_ownership_extra.rs:1:unsafe fn unapproved_neighbor() {}
+realtime policy failure: unsafe code exists outside the issue-approved ownership/audit files
+
+[{"name": "delivery_ownership.rs", "status": 0}, {"name": "delivery_ownershipXrs.rs", "status": 1}, {"name": "delivery_ownership_extra.rs", "status": 1}]

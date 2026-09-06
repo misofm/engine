@@ -1,0 +1,100 @@
+{
+  "candidate_commit": "284e27ccd1b223c301cffa73918ae4dc595924cd",
+  "files": [
+    {
+      "path": "README.md",
+      "bytes": 1569,
+      "sha256": "5027efa471238809ab567cbf1d3d6f6a3881fd456d7d44ac6d9278f6536b0c9e"
+    },
+    {
+      "path": "astra-427-attempt1-review.md",
+      "bytes": 9091,
+      "sha256": "21f82f6c2a4eabb8279f310c23eec2dd1e3d28a96f954a56f4a4ea20bf863cd6"
+    },
+    {
+      "path": "astra-427-attempt2-review.md",
+      "bytes": 6654,
+      "sha256": "7d3642cadb0872531849286f8c668353eb6ba130de3fd0116346344bada8c723"
+    },
+    {
+      "path": "astra-427-attempt3-review.md",
+      "bytes": 4070,
+      "sha256": "abc54b85ae4663705e6c2d1c5dc8233980bc9de384525445ca16fbe7b3d75ac1"
+    },
+    {
+      "path": "astra-427-frozen-base-review.md",
+      "bytes": 2747,
+      "sha256": "4d2151a0d56e51a06d53689efb3160563911b815fdfc1f4a41b87570afe398f9"
+    },
+    {
+      "path": "astra-427-numbered-review.md",
+      "bytes": 2405,
+      "sha256": "4dda703c443e169fa9c2490b895ca3b035dcd86290244e94e564b6795608640a"
+    },
+    {
+      "path": "engine-427-candidate-workspace.log",
+      "bytes": 185629,
+      "sha256": "66d931e3805d028410614cd3a8e5e18e7344bb2a905f618e24f792c469e034b9"
+    },
+    {
+      "path": "engine-427-final-helper-suite.log",
+      "bytes": 631,
+      "sha256": "4807663d6b2e18cb82d0e009cfa0ad465e8209e8f9f47fd1b2717850b5a1315d"
+    },
+    {
+      "path": "engine-427-final-hermetic-suite.log",
+      "bytes": 4992,
+      "sha256": "b852f38f5b8e0216420fa77de3f294feacd50a2c092bcb8c4d1abb07b505354d"
+    },
+    {
+      "path": "engine-427-final-workspace-policy.log",
+      "bytes": 21,
+      "sha256": "8261c11a9ad607004e800b131ad999fbad0194619b971b30aa45a6ba10eeb880"
+    },
+    {
+      "path": "engine-427-real-nonlto-inspection.log",
+      "bytes": 19494,
+      "sha256": "7944ae3f24a2c32be27f9ecd0e8e15d57da5d3eafe9cee1237698d768728ba77"
+    },
+    {
+      "path": "engine-427-real-qualification-summary.json",
+      "bytes": 521,
+      "sha256": "0e9556767a63239e450e58350521725abd4ee247ac0d81628a661bf423a601fa"
+    },
+    {
+      "path": "engine-427-root-attempt1-suite.log",
+      "bytes": 222,
+      "sha256": "5264597652586d46b9da363c175cf302062c9bf5ecb6453341820fe76f341304"
+    },
+    {
+      "path": "engine-427-runtime-input-identity.json",
+      "bytes": 717,
+      "sha256": "8b28687728c4639e1624b5208fd131f54dd58981155d22579d1ea37e6e245b99"
+    },
+    {
+      "path": "engine-427-workspace-summary.json",
+      "bytes": 206,
+      "sha256": "66d67b3e90983758b09398e2eb627c72539fa2efdaa86c1fe32fcb2b91ec8f1f"
+    },
+    {
+      "path": "sol-427-attempt2-suite.log",
+      "bytes": 4503,
+      "sha256": "2a71446e11ed61bbec8c7c0158ddc04d6cbb07e903ef39836548c736762b1177"
+    },
+    {
+      "path": "sol-427-attempt2-workspace-policy.log",
+      "bytes": 21,
+      "sha256": "8261c11a9ad607004e800b131ad999fbad0194619b971b30aa45a6ba10eeb880"
+    },
+    {
+      "path": "sol-427-attempt3-suite.log",
+      "bytes": 4992,
+      "sha256": "b25e8d4bab295604760444ff67b586973a8da44a7fdb647964f052afad97503b"
+    },
+    {
+      "path": "sol-427-attempt3-workspace-policy.log",
+      "bytes": 21,
+      "sha256": "8261c11a9ad607004e800b131ad999fbad0194619b971b30aa45a6ba10eeb880"
+    }
+  ]
+}

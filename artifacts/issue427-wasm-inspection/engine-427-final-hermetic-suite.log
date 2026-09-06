@@ -1,0 +1,71 @@
+case base: PASS (status 0)
+case source-fallback: PASS (status 0)
+case no-source-needed: PASS (status 0)
+case relative-ci-target: PASS (status 0, real ar extraction)
+case omitted-default: PASS (status 0, real ar extraction)
+case cfg-empty-error: PASS (checker status 1, targeted diagnostic)
+case cfg-error: PASS (checker status 1, targeted diagnostic)
+case cfg-missing: PASS (checker status 1, targeted diagnostic)
+case cfg-feature: PASS (checker status 1, targeted diagnostic)
+case pointer-search-error: PASS (checker status 1, targeted diagnostic)
+case feature-search-error: PASS (checker status 1, targeted diagnostic)
+case cargo-fail: PASS (checker status 1, targeted diagnostic)
+case missing-engine: PASS (checker status 1, targeted diagnostic)
+case missing-source: PASS (checker status 1, targeted diagnostic)
+case missing-target: PASS (checker status 1, targeted diagnostic)
+case archive-find-empty-error: PASS (checker status 1, targeted diagnostic)
+case archive-find-partial-error: PASS (checker status 1, targeted diagnostic)
+case archive-sort-empty-error: PASS (checker status 1, targeted diagnostic)
+case archive-sort-error: PASS (checker status 1, targeted diagnostic)
+case member-sort-empty-error: PASS (checker status 1, targeted diagnostic)
+case member-sort-partial-error: PASS (checker status 1, targeted diagnostic)
+case ar-list-empty: PASS (checker status 1, targeted diagnostic)
+case ar-list-partial: PASS (checker status 1, targeted diagnostic)
+case duplicate-object: PASS (checker status 1, targeted diagnostic)
+case list-omits-member: PASS (checker status 1, targeted diagnostic)
+case ar-extract-empty: PASS (checker status 1, targeted diagnostic)
+case ar-extract-partial: PASS (checker status 1, targeted diagnostic)
+case missing-extracted: PASS (checker status 1, targeted diagnostic)
+case extracted-extra: PASS (checker status 1, targeted diagnostic)
+case object-find-empty-error: PASS (checker status 1, targeted diagnostic)
+case object-find-partial-error: PASS (checker status 1, targeted diagnostic)
+case object-sort-empty-error: PASS (checker status 1, targeted diagnostic)
+case object-sort-error: PASS (checker status 1, targeted diagnostic)
+case decoder-empty-error: PASS (checker status 1, targeted diagnostic)
+case decoder-partial-error: PASS (checker status 1, targeted diagnostic)
+case atomic-opcode: PASS (checker status 1, targeted diagnostic)
+case opcode-search-error: PASS (checker status 1, targeted diagnostic)
+case observation-error: PASS (checker status 1, targeted diagnostic)
+case late-observation-error: PASS (checker status 1, targeted diagnostic)
+case source-error: PASS (checker status 1, targeted diagnostic)
+case no-observation: PASS (checker status 1, targeted diagnostic)
+case empty-decode: PASS (status 0)
+decoder-mutant exact diff:
+--- /home/bl/misofm/engine-404-plan/scripts/check-wasm-realtime-atomics.sh	2026-09-05 08:16:48.709919015 +0000
++++ /tmp/tmp.QH9muKZ0du/decoder-mutant.sh	2026-09-05 08:31:51.320444346 +0000
+@@ -83,7 +83,7 @@
+ for object in "${objects[@]}"; do
+   n=$((n + 1)); decoded="$scratch/$n.decoded"
+   run_capture "$decoded" "$scratch/$n.decode.err" wasm-objdump -d "$object"; status=$capture_status
+-  [[ "$status" == 0 ]] || failed wasm-objdump "$status" "$object" "$decoded" "$scratch/$n.decode.err"
++[[ "$status" == 0 ]] || true
+   run_capture "$scratch/$n.atomic.matches" "$scratch/$n.atomic.err" rg -n 'atomic\.' "$decoded"; status=$capture_status
+   if [[ "$status" == 0 ]]; then cat "$scratch/$n.atomic.matches" >&2; printf 'browser-local fallback contains an atomic opcode: %s\n' "$object" >&2; exit 1; elif [[ "$status" != 1 ]]; then failed 'opcode scan' "$status" "$object" "$scratch/$n.atomic.matches" "$scratch/$n.atomic.err"; fi
+   run_capture "$scratch/$n.observe.matches" "$scratch/$n.observe.err" rg -l --binary observe "$object"; status=$capture_status
+case decoder-partial-error unexpected-success
+decoder mutant same assertion status: 97 (unexpected-success)
+producer-mutant exact diff:
+--- /home/bl/misofm/engine-404-plan/scripts/check-wasm-realtime-atomics.sh	2026-09-05 08:16:48.709919015 +0000
++++ /tmp/tmp.QH9muKZ0du/producer-mutant.sh	2026-09-05 08:31:51.421442952 +0000
+@@ -42,7 +42,7 @@
+ for family in "${families[@]}"; do
+   list="$scratch/$family.archives"
+   run_capture "$list" "$scratch/$family.find.err" find "$deps" -maxdepth 1 -type f -name "lib$family-*.rlib" -print0; status=$capture_status
+-  [[ "$status" == 0 ]] || failed "$family archive discovery" "$status" "$deps" "$list" "$scratch/$family.find.err"
++[[ "$status" == 0 ]] || true
+   run_capture /dev/null "$scratch/$family.sort.err" sort -z -o "$list" "$list"; status=$capture_status
+   [[ "$status" == 0 ]] || failed "$family archive sort" "$status" "$list" '' "$scratch/$family.sort.err"
+   mapfile -d '' -t found <"$list"
+case archive-find-partial-error unexpected-success
+producer mutant same assertion status: 97 (unexpected-success)
+wasm realtime atomics hermetic suite: PASS (directed cases and 2 causal mutants)

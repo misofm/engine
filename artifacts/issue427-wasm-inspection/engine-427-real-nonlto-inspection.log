@@ -1,0 +1,469 @@
++ set -euo pipefail
++ target_directory=target/ci/wasm-scalar
++ for tool in rustc cargo ar wasm-objdump rg find sort mktemp sed
++ command -v rustc
++ for tool in rustc cargo ar wasm-objdump rg find sort mktemp sed
++ command -v cargo
++ for tool in rustc cargo ar wasm-objdump rg find sort mktemp sed
++ command -v ar
++ for tool in rustc cargo ar wasm-objdump rg find sort mktemp sed
++ command -v wasm-objdump
++ for tool in rustc cargo ar wasm-objdump rg find sort mktemp sed
++ command -v rg
++ for tool in rustc cargo ar wasm-objdump rg find sort mktemp sed
++ command -v find
++ for tool in rustc cargo ar wasm-objdump rg find sort mktemp sed
++ command -v sort
++ for tool in rustc cargo ar wasm-objdump rg find sort mktemp sed
++ command -v mktemp
++ for tool in rustc cargo ar wasm-objdump rg find sort mktemp sed
++ command -v sed
++ mkdir -p target/ci/wasm-scalar
++ checker_root=/home/bl/misofm/engine-404-plan
++ set +e
++ cd target/ci/wasm-scalar
++ target_status=0
++ set -e
++ [[ 0 == 0 ]]
++ target_directory=/home/bl/misofm/engine-404-plan/target/ci/wasm-scalar
++ set +e
++ cd /home/bl/misofm/engine-404-plan
++ root_status=0
++ set -e
++ [[ 0 == 0 ]]
+++ mktemp -d /home/bl/misofm/engine-404-plan/target/ci/wasm-scalar/.wasm-inspection.XXXXXX
++ inspection_target=/home/bl/misofm/engine-404-plan/target/ci/wasm-scalar/.wasm-inspection.1FBIh1
+++ mktemp -d
++ scratch=/tmp/tmp.m5KojJhs9L
++ keep_target=1
++ trap cleanup EXIT
++ cfg=/tmp/tmp.m5KojJhs9L/cfg
++ run_capture /tmp/tmp.m5KojJhs9L/cfg /tmp/tmp.m5KojJhs9L/cfg.err rustc --print cfg --target wasm32-unknown-unknown -C target-feature=-simd128
++ local out=/tmp/tmp.m5KojJhs9L/cfg err=/tmp/tmp.m5KojJhs9L/cfg.err
++ shift 2
++ set +e
++ rustc --print cfg --target wasm32-unknown-unknown -C target-feature=-simd128
++ capture_status=0
++ set -e
++ [[ 0 == 0 ]]
++ run_capture /tmp/tmp.m5KojJhs9L/pointer.matches /tmp/tmp.m5KojJhs9L/pointer.err rg -n '^target_has_atomic="ptr"$' /tmp/tmp.m5KojJhs9L/cfg
++ local out=/tmp/tmp.m5KojJhs9L/pointer.matches err=/tmp/tmp.m5KojJhs9L/pointer.err
++ shift 2
++ set +e
++ rg -n '^target_has_atomic="ptr"$' /tmp/tmp.m5KojJhs9L/cfg
++ capture_status=0
++ set -e
++ status=0
++ [[ 0 == 1 ]]
++ [[ 0 != 0 ]]
++ run_capture /tmp/tmp.m5KojJhs9L/feature.matches /tmp/tmp.m5KojJhs9L/feature.err rg -n '^target_feature="atomics"$' /tmp/tmp.m5KojJhs9L/cfg
++ local out=/tmp/tmp.m5KojJhs9L/feature.matches err=/tmp/tmp.m5KojJhs9L/feature.err
++ shift 2
++ set +e
++ rg -n '^target_feature="atomics"$' /tmp/tmp.m5KojJhs9L/cfg
++ capture_status=1
++ set -e
++ status=1
++ [[ 1 == 0 ]]
++ [[ 1 != 1 ]]
++ set +e
++ CARGO_TARGET_DIR=/home/bl/misofm/engine-404-plan/target/ci/wasm-scalar/.wasm-inspection.1FBIh1
++ CARGO_PROFILE_RELEASE_LTO=false
++ RUSTFLAGS='-C target-feature=-simd128'
++ cargo build --locked --release --target wasm32-unknown-unknown -p engine -p source -p target-smoke
++ status=0
++ set -e
++ [[ 0 == 0 ]]
++ deps=/home/bl/misofm/engine-404-plan/target/ci/wasm-scalar/.wasm-inspection.1FBIh1/wasm32-unknown-unknown/release/deps
++ families=(engine source target_smoke)
++ archives=()
++ objects=()
++ for family in "${families[@]}"
++ list=/tmp/tmp.m5KojJhs9L/engine.archives
++ run_capture /tmp/tmp.m5KojJhs9L/engine.archives /tmp/tmp.m5KojJhs9L/engine.find.err find /home/bl/misofm/engine-404-plan/target/ci/wasm-scalar/.wasm-inspection.1FBIh1/wasm32-unknown-unknown/release/deps -maxdepth 1 -type f -name 'libengine-*.rlib' -print0
++ local out=/tmp/tmp.m5KojJhs9L/engine.archives err=/tmp/tmp.m5KojJhs9L/engine.find.err
++ shift 2
++ set +e
++ find /home/bl/misofm/engine-404-plan/target/ci/wasm-scalar/.wasm-inspection.1FBIh1/wasm32-unknown-unknown/release/deps -maxdepth 1 -type f -name 'libengine-*.rlib' -print0
++ capture_status=0
++ set -e
++ status=0
++ [[ 0 == 0 ]]
++ run_capture /dev/null /tmp/tmp.m5KojJhs9L/engine.sort.err sort -z -o /tmp/tmp.m5KojJhs9L/engine.archives /tmp/tmp.m5KojJhs9L/engine.archives
++ local out=/dev/null err=/tmp/tmp.m5KojJhs9L/engine.sort.err
++ shift 2
++ set +e
++ sort -z -o /tmp/tmp.m5KojJhs9L/engine.archives /tmp/tmp.m5KojJhs9L/engine.archives
++ capture_status=0
++ set -e
++ status=0
++ [[ 0 == 0 ]]
++ mapfile -d '' -t found
++ [[ 1 == 1 ]]
++ archives+=("${found[0]}")
++ for family in "${families[@]}"
++ list=/tmp/tmp.m5KojJhs9L/source.archives
++ run_capture /tmp/tmp.m5KojJhs9L/source.archives /tmp/tmp.m5KojJhs9L/source.find.err find /home/bl/misofm/engine-404-plan/target/ci/wasm-scalar/.wasm-inspection.1FBIh1/wasm32-unknown-unknown/release/deps -maxdepth 1 -type f -name 'libsource-*.rlib' -print0
++ local out=/tmp/tmp.m5KojJhs9L/source.archives err=/tmp/tmp.m5KojJhs9L/source.find.err
++ shift 2
++ set +e
++ find /home/bl/misofm/engine-404-plan/target/ci/wasm-scalar/.wasm-inspection.1FBIh1/wasm32-unknown-unknown/release/deps -maxdepth 1 -type f -name 'libsource-*.rlib' -print0
++ capture_status=0
++ set -e
++ status=0
++ [[ 0 == 0 ]]
++ run_capture /dev/null /tmp/tmp.m5KojJhs9L/source.sort.err sort -z -o /tmp/tmp.m5KojJhs9L/source.archives /tmp/tmp.m5KojJhs9L/source.archives
++ local out=/dev/null err=/tmp/tmp.m5KojJhs9L/source.sort.err
++ shift 2
++ set +e
++ sort -z -o /tmp/tmp.m5KojJhs9L/source.archives /tmp/tmp.m5KojJhs9L/source.archives
++ capture_status=0
++ set -e
++ status=0
++ [[ 0 == 0 ]]
++ mapfile -d '' -t found
++ [[ 1 == 1 ]]
++ archives+=("${found[0]}")
++ for family in "${families[@]}"
++ list=/tmp/tmp.m5KojJhs9L/target_smoke.archives
++ run_capture /tmp/tmp.m5KojJhs9L/target_smoke.archives /tmp/tmp.m5KojJhs9L/target_smoke.find.err find /home/bl/misofm/engine-404-plan/target/ci/wasm-scalar/.wasm-inspection.1FBIh1/wasm32-unknown-unknown/release/deps -maxdepth 1 -type f -name 'libtarget_smoke-*.rlib' -print0
++ local out=/tmp/tmp.m5KojJhs9L/target_smoke.archives err=/tmp/tmp.m5KojJhs9L/target_smoke.find.err
++ shift 2
++ set +e
++ find /home/bl/misofm/engine-404-plan/target/ci/wasm-scalar/.wasm-inspection.1FBIh1/wasm32-unknown-unknown/release/deps -maxdepth 1 -type f -name 'libtarget_smoke-*.rlib' -print0
++ capture_status=0
++ set -e
++ status=0
++ [[ 0 == 0 ]]
++ run_capture /dev/null /tmp/tmp.m5KojJhs9L/target_smoke.sort.err sort -z -o /tmp/tmp.m5KojJhs9L/target_smoke.archives /tmp/tmp.m5KojJhs9L/target_smoke.archives
++ local out=/dev/null err=/tmp/tmp.m5KojJhs9L/target_smoke.sort.err
++ shift 2
++ set +e
++ sort -z -o /tmp/tmp.m5KojJhs9L/target_smoke.archives /tmp/tmp.m5KojJhs9L/target_smoke.archives
++ capture_status=0
++ set -e
++ status=0
++ [[ 0 == 0 ]]
++ mapfile -d '' -t found
++ [[ 1 == 1 ]]
++ archives+=("${found[0]}")
++ for index in "${!families[@]}"
++ family=engine
++ archive=/home/bl/misofm/engine-404-plan/target/ci/wasm-scalar/.wasm-inspection.1FBIh1/wasm32-unknown-unknown/release/deps/libengine-43010e1ae45ff1b3.rlib
++ dir=/tmp/tmp.m5KojJhs9L/engine
++ mkdir -p /tmp/tmp.m5KojJhs9L/engine
++ run_capture /tmp/tmp.m5KojJhs9L/engine/members /tmp/tmp.m5KojJhs9L/engine/list.err ar t /home/bl/misofm/engine-404-plan/target/ci/wasm-scalar/.wasm-inspection.1FBIh1/wasm32-unknown-unknown/release/deps/libengine-43010e1ae45ff1b3.rlib
++ local out=/tmp/tmp.m5KojJhs9L/engine/members err=/tmp/tmp.m5KojJhs9L/engine/list.err
++ shift 2
++ set +e
++ ar t /home/bl/misofm/engine-404-plan/target/ci/wasm-scalar/.wasm-inspection.1FBIh1/wasm32-unknown-unknown/release/deps/libengine-43010e1ae45ff1b3.rlib
++ capture_status=0
++ set -e
++ status=0
++ [[ 0 == 0 ]]
++ run_capture /tmp/tmp.m5KojJhs9L/engine/members.sorted /tmp/tmp.m5KojJhs9L/engine/member-sort.err sort /tmp/tmp.m5KojJhs9L/engine/members
++ local out=/tmp/tmp.m5KojJhs9L/engine/members.sorted err=/tmp/tmp.m5KojJhs9L/engine/member-sort.err
++ shift 2
++ set +e
++ sort /tmp/tmp.m5KojJhs9L/engine/members
++ capture_status=0
++ set -e
++ status=0
++ [[ 0 == 0 ]]
++ expected=()
++ seen=()
++ declare -A seen
++ IFS=
++ read -r member
++ [[ engine-43010e1ae45ff1b3.engine.3cdc5b765e4ae52f-cgu.0.rcgu.o == *.o ]]
++ [[ ! -v seen[engine-43010e1ae45ff1b3.engine.3cdc5b765e4ae52f-cgu.0.rcgu.o] ]]
++ seen["$member"]=1
++ expected+=("$member")
++ IFS=
++ read -r member
++ [[ lib.rmeta == *.o ]]
++ continue
++ IFS=
++ read -r member
++ [[ lib.rmeta-link == *.o ]]
++ continue
++ IFS=
++ read -r member
++ [[ 1 -gt 0 ]]
++ set +e
++ status=0
++ set -e
++ [[ 0 == 0 ]]
++ run_capture /tmp/tmp.m5KojJhs9L/engine/objects /tmp/tmp.m5KojJhs9L/engine/object-find.err find /tmp/tmp.m5KojJhs9L/engine -maxdepth 1 -type f -name '*.o' -printf '%f\0'
++ local out=/tmp/tmp.m5KojJhs9L/engine/objects err=/tmp/tmp.m5KojJhs9L/engine/object-find.err
++ shift 2
++ set +e
++ find /tmp/tmp.m5KojJhs9L/engine -maxdepth 1 -type f -name '*.o' -printf '%f\0'
++ capture_status=0
++ set -e
++ status=0
++ [[ 0 == 0 ]]
++ run_capture /dev/null /tmp/tmp.m5KojJhs9L/engine/object-sort.err sort -z -o /tmp/tmp.m5KojJhs9L/engine/objects /tmp/tmp.m5KojJhs9L/engine/objects
++ local out=/dev/null err=/tmp/tmp.m5KojJhs9L/engine/object-sort.err
++ shift 2
++ set +e
++ sort -z -o /tmp/tmp.m5KojJhs9L/engine/objects /tmp/tmp.m5KojJhs9L/engine/objects
++ capture_status=0
++ set -e
++ status=0
++ [[ 0 == 0 ]]
++ mapfile -d '' -t discovered
++ [[ 1 == \1 ]]
++ for i in "${!expected[@]}"
++ [[ engine-43010e1ae45ff1b3.engine.3cdc5b765e4ae52f-cgu.0.rcgu.o == \e\n\g\i\n\e\-\4\3\0\1\0\e\1\a\e\4\5\f\f\1\b\3\.\e\n\g\i\n\e\.\3\c\d\c\5\b\7\6\5\e\4\a\e\5\2\f\-\c\g\u\.\0\.\r\c\g\u\.\o ]]
++ objects+=("$dir/${discovered[$i]}")
++ unset seen
++ for index in "${!families[@]}"
++ family=source
++ archive=/home/bl/misofm/engine-404-plan/target/ci/wasm-scalar/.wasm-inspection.1FBIh1/wasm32-unknown-unknown/release/deps/libsource-0fdfa2234eb4bd89.rlib
++ dir=/tmp/tmp.m5KojJhs9L/source
++ mkdir -p /tmp/tmp.m5KojJhs9L/source
++ run_capture /tmp/tmp.m5KojJhs9L/source/members /tmp/tmp.m5KojJhs9L/source/list.err ar t /home/bl/misofm/engine-404-plan/target/ci/wasm-scalar/.wasm-inspection.1FBIh1/wasm32-unknown-unknown/release/deps/libsource-0fdfa2234eb4bd89.rlib
++ local out=/tmp/tmp.m5KojJhs9L/source/members err=/tmp/tmp.m5KojJhs9L/source/list.err
++ shift 2
++ set +e
++ ar t /home/bl/misofm/engine-404-plan/target/ci/wasm-scalar/.wasm-inspection.1FBIh1/wasm32-unknown-unknown/release/deps/libsource-0fdfa2234eb4bd89.rlib
++ capture_status=0
++ set -e
++ status=0
++ [[ 0 == 0 ]]
++ run_capture /tmp/tmp.m5KojJhs9L/source/members.sorted /tmp/tmp.m5KojJhs9L/source/member-sort.err sort /tmp/tmp.m5KojJhs9L/source/members
++ local out=/tmp/tmp.m5KojJhs9L/source/members.sorted err=/tmp/tmp.m5KojJhs9L/source/member-sort.err
++ shift 2
++ set +e
++ sort /tmp/tmp.m5KojJhs9L/source/members
++ capture_status=0
++ set -e
++ status=0
++ [[ 0 == 0 ]]
++ expected=()
++ seen=()
++ declare -A seen
++ IFS=
++ read -r member
++ [[ lib.rmeta == *.o ]]
++ continue
++ IFS=
++ read -r member
++ [[ lib.rmeta-link == *.o ]]
++ continue
++ IFS=
++ read -r member
++ [[ source-0fdfa2234eb4bd89.source.7b5fcfd726247e1-cgu.0.rcgu.o == *.o ]]
++ [[ ! -v seen[source-0fdfa2234eb4bd89.source.7b5fcfd726247e1-cgu.0.rcgu.o] ]]
++ seen["$member"]=1
++ expected+=("$member")
++ IFS=
++ read -r member
++ [[ 1 -gt 0 ]]
++ set +e
++ status=0
++ set -e
++ [[ 0 == 0 ]]
++ run_capture /tmp/tmp.m5KojJhs9L/source/objects /tmp/tmp.m5KojJhs9L/source/object-find.err find /tmp/tmp.m5KojJhs9L/source -maxdepth 1 -type f -name '*.o' -printf '%f\0'
++ local out=/tmp/tmp.m5KojJhs9L/source/objects err=/tmp/tmp.m5KojJhs9L/source/object-find.err
++ shift 2
++ set +e
++ find /tmp/tmp.m5KojJhs9L/source -maxdepth 1 -type f -name '*.o' -printf '%f\0'
++ capture_status=0
++ set -e
++ status=0
++ [[ 0 == 0 ]]
++ run_capture /dev/null /tmp/tmp.m5KojJhs9L/source/object-sort.err sort -z -o /tmp/tmp.m5KojJhs9L/source/objects /tmp/tmp.m5KojJhs9L/source/objects
++ local out=/dev/null err=/tmp/tmp.m5KojJhs9L/source/object-sort.err
++ shift 2
++ set +e
++ sort -z -o /tmp/tmp.m5KojJhs9L/source/objects /tmp/tmp.m5KojJhs9L/source/objects
++ capture_status=0
++ set -e
++ status=0
++ [[ 0 == 0 ]]
++ mapfile -d '' -t discovered
++ [[ 1 == \1 ]]
++ for i in "${!expected[@]}"
++ [[ source-0fdfa2234eb4bd89.source.7b5fcfd726247e1-cgu.0.rcgu.o == \s\o\u\r\c\e\-\0\f\d\f\a\2\2\3\4\e\b\4\b\d\8\9\.\s\o\u\r\c\e\.\7\b\5\f\c\f\d\7\2\6\2\4\7\e\1\-\c\g\u\.\0\.\r\c\g\u\.\o ]]
++ objects+=("$dir/${discovered[$i]}")
++ unset seen
++ for index in "${!families[@]}"
++ family=target_smoke
++ archive=/home/bl/misofm/engine-404-plan/target/ci/wasm-scalar/.wasm-inspection.1FBIh1/wasm32-unknown-unknown/release/deps/libtarget_smoke-f8895a03d6c8d18b.rlib
++ dir=/tmp/tmp.m5KojJhs9L/target_smoke
++ mkdir -p /tmp/tmp.m5KojJhs9L/target_smoke
++ run_capture /tmp/tmp.m5KojJhs9L/target_smoke/members /tmp/tmp.m5KojJhs9L/target_smoke/list.err ar t /home/bl/misofm/engine-404-plan/target/ci/wasm-scalar/.wasm-inspection.1FBIh1/wasm32-unknown-unknown/release/deps/libtarget_smoke-f8895a03d6c8d18b.rlib
++ local out=/tmp/tmp.m5KojJhs9L/target_smoke/members err=/tmp/tmp.m5KojJhs9L/target_smoke/list.err
++ shift 2
++ set +e
++ ar t /home/bl/misofm/engine-404-plan/target/ci/wasm-scalar/.wasm-inspection.1FBIh1/wasm32-unknown-unknown/release/deps/libtarget_smoke-f8895a03d6c8d18b.rlib
++ capture_status=0
++ set -e
++ status=0
++ [[ 0 == 0 ]]
++ run_capture /tmp/tmp.m5KojJhs9L/target_smoke/members.sorted /tmp/tmp.m5KojJhs9L/target_smoke/member-sort.err sort /tmp/tmp.m5KojJhs9L/target_smoke/members
++ local out=/tmp/tmp.m5KojJhs9L/target_smoke/members.sorted err=/tmp/tmp.m5KojJhs9L/target_smoke/member-sort.err
++ shift 2
++ set +e
++ sort /tmp/tmp.m5KojJhs9L/target_smoke/members
++ capture_status=0
++ set -e
++ status=0
++ [[ 0 == 0 ]]
++ expected=()
++ seen=()
++ declare -A seen
++ IFS=
++ read -r member
++ [[ lib.rmeta == *.o ]]
++ continue
++ IFS=
++ read -r member
++ [[ lib.rmeta-link == *.o ]]
++ continue
++ IFS=
++ read -r member
++ [[ target_smoke-f8895a03d6c8d18b.target_smoke.d196ae6c3bbfe597-cgu.0.rcgu.o == *.o ]]
++ [[ ! -v seen[target_smoke-f8895a03d6c8d18b.target_smoke.d196ae6c3bbfe597-cgu.0.rcgu.o] ]]
++ seen["$member"]=1
++ expected+=("$member")
++ IFS=
++ read -r member
++ [[ 1 -gt 0 ]]
++ set +e
++ status=0
++ set -e
++ [[ 0 == 0 ]]
++ run_capture /tmp/tmp.m5KojJhs9L/target_smoke/objects /tmp/tmp.m5KojJhs9L/target_smoke/object-find.err find /tmp/tmp.m5KojJhs9L/target_smoke -maxdepth 1 -type f -name '*.o' -printf '%f\0'
++ local out=/tmp/tmp.m5KojJhs9L/target_smoke/objects err=/tmp/tmp.m5KojJhs9L/target_smoke/object-find.err
++ shift 2
++ set +e
++ find /tmp/tmp.m5KojJhs9L/target_smoke -maxdepth 1 -type f -name '*.o' -printf '%f\0'
++ capture_status=0
++ set -e
++ status=0
++ [[ 0 == 0 ]]
++ run_capture /dev/null /tmp/tmp.m5KojJhs9L/target_smoke/object-sort.err sort -z -o /tmp/tmp.m5KojJhs9L/target_smoke/objects /tmp/tmp.m5KojJhs9L/target_smoke/objects
++ local out=/dev/null err=/tmp/tmp.m5KojJhs9L/target_smoke/object-sort.err
++ shift 2
++ set +e
++ sort -z -o /tmp/tmp.m5KojJhs9L/target_smoke/objects /tmp/tmp.m5KojJhs9L/target_smoke/objects
++ capture_status=0
++ set -e
++ status=0
++ [[ 0 == 0 ]]
++ mapfile -d '' -t discovered
++ [[ 1 == \1 ]]
++ for i in "${!expected[@]}"
++ [[ target_smoke-f8895a03d6c8d18b.target_smoke.d196ae6c3bbfe597-cgu.0.rcgu.o == \t\a\r\g\e\t\_\s\m\o\k\e\-\f\8\8\9\5\a\0\3\d\6\c\8\d\1\8\b\.\t\a\r\g\e\t\_\s\m\o\k\e\.\d\1\9\6\a\e\6\c\3\b\b\f\e\5\9\7\-\c\g\u\.\0\.\r\c\g\u\.\o ]]
++ objects+=("$dir/${discovered[$i]}")
++ unset seen
++ [[ 3 -gt 0 ]]
++ observation_match=0
++ n=0
++ for object in "${objects[@]}"
++ n=1
++ decoded=/tmp/tmp.m5KojJhs9L/1.decoded
++ run_capture /tmp/tmp.m5KojJhs9L/1.decoded /tmp/tmp.m5KojJhs9L/1.decode.err wasm-objdump -d /tmp/tmp.m5KojJhs9L/engine/engine-43010e1ae45ff1b3.engine.3cdc5b765e4ae52f-cgu.0.rcgu.o
++ local out=/tmp/tmp.m5KojJhs9L/1.decoded err=/tmp/tmp.m5KojJhs9L/1.decode.err
++ shift 2
++ set +e
++ wasm-objdump -d /tmp/tmp.m5KojJhs9L/engine/engine-43010e1ae45ff1b3.engine.3cdc5b765e4ae52f-cgu.0.rcgu.o
++ capture_status=0
++ set -e
++ status=0
++ [[ 0 == 0 ]]
++ run_capture /tmp/tmp.m5KojJhs9L/1.atomic.matches /tmp/tmp.m5KojJhs9L/1.atomic.err rg -n 'atomic\.' /tmp/tmp.m5KojJhs9L/1.decoded
++ local out=/tmp/tmp.m5KojJhs9L/1.atomic.matches err=/tmp/tmp.m5KojJhs9L/1.atomic.err
++ shift 2
++ set +e
++ rg -n 'atomic\.' /tmp/tmp.m5KojJhs9L/1.decoded
++ capture_status=1
++ set -e
++ status=1
++ [[ 1 == 0 ]]
++ [[ 1 != 1 ]]
++ run_capture /tmp/tmp.m5KojJhs9L/1.observe.matches /tmp/tmp.m5KojJhs9L/1.observe.err rg -l --binary observe /tmp/tmp.m5KojJhs9L/engine/engine-43010e1ae45ff1b3.engine.3cdc5b765e4ae52f-cgu.0.rcgu.o
++ local out=/tmp/tmp.m5KojJhs9L/1.observe.matches err=/tmp/tmp.m5KojJhs9L/1.observe.err
++ shift 2
++ set +e
++ rg -l --binary observe /tmp/tmp.m5KojJhs9L/engine/engine-43010e1ae45ff1b3.engine.3cdc5b765e4ae52f-cgu.0.rcgu.o
++ capture_status=0
++ set -e
++ status=0
++ [[ 0 == 0 ]]
++ observation_match=1
++ for object in "${objects[@]}"
++ n=2
++ decoded=/tmp/tmp.m5KojJhs9L/2.decoded
++ run_capture /tmp/tmp.m5KojJhs9L/2.decoded /tmp/tmp.m5KojJhs9L/2.decode.err wasm-objdump -d /tmp/tmp.m5KojJhs9L/source/source-0fdfa2234eb4bd89.source.7b5fcfd726247e1-cgu.0.rcgu.o
++ local out=/tmp/tmp.m5KojJhs9L/2.decoded err=/tmp/tmp.m5KojJhs9L/2.decode.err
++ shift 2
++ set +e
++ wasm-objdump -d /tmp/tmp.m5KojJhs9L/source/source-0fdfa2234eb4bd89.source.7b5fcfd726247e1-cgu.0.rcgu.o
++ capture_status=0
++ set -e
++ status=0
++ [[ 0 == 0 ]]
++ run_capture /tmp/tmp.m5KojJhs9L/2.atomic.matches /tmp/tmp.m5KojJhs9L/2.atomic.err rg -n 'atomic\.' /tmp/tmp.m5KojJhs9L/2.decoded
++ local out=/tmp/tmp.m5KojJhs9L/2.atomic.matches err=/tmp/tmp.m5KojJhs9L/2.atomic.err
++ shift 2
++ set +e
++ rg -n 'atomic\.' /tmp/tmp.m5KojJhs9L/2.decoded
++ capture_status=1
++ set -e
++ status=1
++ [[ 1 == 0 ]]
++ [[ 1 != 1 ]]
++ run_capture /tmp/tmp.m5KojJhs9L/2.observe.matches /tmp/tmp.m5KojJhs9L/2.observe.err rg -l --binary observe /tmp/tmp.m5KojJhs9L/source/source-0fdfa2234eb4bd89.source.7b5fcfd726247e1-cgu.0.rcgu.o
++ local out=/tmp/tmp.m5KojJhs9L/2.observe.matches err=/tmp/tmp.m5KojJhs9L/2.observe.err
++ shift 2
++ set +e
++ rg -l --binary observe /tmp/tmp.m5KojJhs9L/source/source-0fdfa2234eb4bd89.source.7b5fcfd726247e1-cgu.0.rcgu.o
++ capture_status=0
++ set -e
++ status=0
++ [[ 0 == 0 ]]
++ observation_match=1
++ for object in "${objects[@]}"
++ n=3
++ decoded=/tmp/tmp.m5KojJhs9L/3.decoded
++ run_capture /tmp/tmp.m5KojJhs9L/3.decoded /tmp/tmp.m5KojJhs9L/3.decode.err wasm-objdump -d /tmp/tmp.m5KojJhs9L/target_smoke/target_smoke-f8895a03d6c8d18b.target_smoke.d196ae6c3bbfe597-cgu.0.rcgu.o
++ local out=/tmp/tmp.m5KojJhs9L/3.decoded err=/tmp/tmp.m5KojJhs9L/3.decode.err
++ shift 2
++ set +e
++ wasm-objdump -d /tmp/tmp.m5KojJhs9L/target_smoke/target_smoke-f8895a03d6c8d18b.target_smoke.d196ae6c3bbfe597-cgu.0.rcgu.o
++ capture_status=0
++ set -e
++ status=0
++ [[ 0 == 0 ]]
++ run_capture /tmp/tmp.m5KojJhs9L/3.atomic.matches /tmp/tmp.m5KojJhs9L/3.atomic.err rg -n 'atomic\.' /tmp/tmp.m5KojJhs9L/3.decoded
++ local out=/tmp/tmp.m5KojJhs9L/3.atomic.matches err=/tmp/tmp.m5KojJhs9L/3.atomic.err
++ shift 2
++ set +e
++ rg -n 'atomic\.' /tmp/tmp.m5KojJhs9L/3.decoded
++ capture_status=1
++ set -e
++ status=1
++ [[ 1 == 0 ]]
++ [[ 1 != 1 ]]
++ run_capture /tmp/tmp.m5KojJhs9L/3.observe.matches /tmp/tmp.m5KojJhs9L/3.observe.err rg -l --binary observe /tmp/tmp.m5KojJhs9L/target_smoke/target_smoke-f8895a03d6c8d18b.target_smoke.d196ae6c3bbfe597-cgu.0.rcgu.o
++ local out=/tmp/tmp.m5KojJhs9L/3.observe.matches err=/tmp/tmp.m5KojJhs9L/3.observe.err
++ shift 2
++ set +e
++ rg -l --binary observe /tmp/tmp.m5KojJhs9L/target_smoke/target_smoke-f8895a03d6c8d18b.target_smoke.d196ae6c3bbfe597-cgu.0.rcgu.o
++ capture_status=1
++ set -e
++ status=1
++ [[ 1 == 0 ]]
++ [[ 1 != 1 ]]
++ [[ 1 == 0 ]]
++ keep_target=0
++ printf 'wasm realtime atomics: ok (%s objects, scalar NON-LTO engine/source/target_smoke)\n' 3
+wasm realtime atomics: ok (3 objects, scalar NON-LTO engine/source/target_smoke)
++ cleanup
++ rm -rf -- /tmp/tmp.m5KojJhs9L
++ [[ 0 == 0 ]]
++ rm -rf -- /home/bl/misofm/engine-404-plan/target/ci/wasm-scalar/.wasm-inspection.1FBIh1

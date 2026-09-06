@@ -63,6 +63,12 @@ function errorResult(promise, result) {
   );
 }
 
+async function localErrorResult(promise, result) {
+  const error = await errorResult(promise, result);
+  assert.equal(error.requestId, 0, "local refusal carries no allocated ID");
+  return error;
+}
+
 async function testMainRealm() {
   const original = {
     fetch: globalThis.fetch,
@@ -80,6 +86,7 @@ async function testMainRealm() {
   let statusMutation = null;
   let planeMutation = null;
   let commandResult = 0;
+  let mixedSuccess = false;
   let commandMutation = null;
 
   class FakePort {
@@ -101,7 +108,7 @@ async function testMainRealm() {
           response = {
             tag: failSource ? "miso.error.v1" : "miso.ack.v1",
             requestId: received.requestId,
-            result: failSource ? 1 : 6,
+            result: failSource ? 1 : (mixedSuccess ? 0 : 6),
             planes: received.planes,
           };
           responseTransfer = [...new Set(received.planes.map((plane) => plane.buffer))];
@@ -211,6 +218,19 @@ async function testMainRealm() {
     assert.deepEqual(events.slice(0, 2), [
       ["compile", "simd.wasm"], ["addModule", "processor.js"],
     ]);
+    if (process.env.MISO_ENGINE_WEB_HOST_MAX_SAFE_TEST === "1") {
+      const last = await host.status();
+      assert.equal(last.requestId, Number.MAX_SAFE_INTEGER);
+      await localErrorResult(host.status(), 1);
+      await localErrorResult(host.status(), 1);
+      assert.deepEqual(
+        events.filter((event) => event[0] === "request").map((event) => event[2]),
+        [Number.MAX_SAFE_INTEGER],
+        "safe-integer exhaustion never posts or wraps",
+      );
+      await host.dispose().catch(() => undefined);
+      return;
+    }
 
     const storage = new ArrayBuffer(32);
     const left = new Float32Array(storage, 0, 2);
@@ -219,7 +239,7 @@ async function testMainRealm() {
     right.set([3, 4]);
     holdSource = true;
     const sourcePromise = host.submitSource({
-      requestId: 1, sourceId: "source", generation: 1n, startFrame: 0n,
+      sourceId: "source", generation: 1n, startFrame: 0n,
       sampleRateHz: 48000, planes: [left, right], frames: 2, endOfRegion: false,
     });
     assert.equal(storage.byteLength, 0, "postMessage transfers caller ownership");
@@ -241,7 +261,7 @@ async function testMainRealm() {
 
     // Request 2 was consumed by the status above, which now settles independently.
     const seek = await host.seekSource({
-      requestId: 3, sourceId: "source", generation: 2n, sourceFrame: 10n,
+      sourceId: "source", generation: 2n, sourceFrame: 10n,
     });
     assert.deepEqual(seek, { tag: "miso.ack.v1", requestId: 3, result: 0 });
     const status = await host.status();
@@ -250,7 +270,7 @@ async function testMainRealm() {
     failSource = true;
     const failedStorage = new ArrayBuffer(16);
     const failedSource = host.submitSource({
-      requestId: 5, sourceId: "source", generation: 3n, startFrame: 2n,
+      sourceId: "source", generation: 3n, startFrame: 2n,
       sampleRateHz: 48000, planes: [new Float32Array(failedStorage)], frames: 4,
       endOfRegion: true,
     });
@@ -310,7 +330,7 @@ async function testMainRealm() {
     });
     const malformedStorage = new ArrayBuffer(16);
     await errorResult(planeHost.submitSource({
-      requestId: 1, sourceId: "source", generation: 1n, startFrame: 0n,
+      sourceId: "source", generation: 1n, startFrame: 0n,
       sampleRateHz: 48000, planes: [new Float32Array(malformedStorage)], frames: 4,
       endOfRegion: false,
     }), 255);
@@ -329,14 +349,13 @@ async function testMainRealm() {
     });
     failSource = false;
     holdAll = true;
-    const chunk = (requestId, sourceId) => {
+    const chunk = (sourceId, startFrame) => {
       const buffer = new ArrayBuffer(8);
       return {
         request: pipelineHost.submitSource({
-          requestId,
           sourceId,
           generation: 1n,
-          startFrame: BigInt(requestId),
+          startFrame: BigInt(startFrame),
           sampleRateHz: 48000,
           planes: [new Float32Array(buffer)],
           frames: 2,
@@ -345,27 +364,31 @@ async function testMainRealm() {
         buffer,
       };
     };
-    const inFlight = [1, 2, 3, 4].map((requestId) => chunk(requestId, "source"));
+    const inFlight = [1, 2, 3, 4].map((startFrame) => chunk("source", startFrame));
     for (const [index, entry] of inFlight.entries()) {
       assert.equal(entry.buffer.byteLength, 0, `chunk ${index} was transferred`);
     }
-    const overflow = chunk(5, "source");
-    await errorResult(overflow.request, 6);
+    const beforeSourceOverflow = events.length;
+    const overflow = chunk("source", 5);
+    await localErrorResult(overflow.request, 6);
+    assert.equal(events.length, beforeSourceOverflow, "source saturation posts no refusal");
     assert.equal(
       overflow.buffer.byteLength,
       8,
       "a locally refused chunk keeps its planes: nothing is transferred and the caller can retry",
     );
     // A different source has its own budget and is accepted while the first is saturated.
-    const other = chunk(6, "other-source");
+    const other = chunk("other-source", 6);
     assert.equal(other.buffer.byteLength, 0, "the bound is per source, not per host");
     // One unsettled seek per source: the ring carries a single command slot.
     const firstSeek = pipelineHost.seekSource({
-      requestId: 7, sourceId: "source", generation: 2n, sourceFrame: 0n,
+      sourceId: "source", generation: 2n, sourceFrame: 0n,
     });
-    await errorResult(pipelineHost.seekSource({
-      requestId: 8, sourceId: "source", generation: 3n, sourceFrame: 0n,
+    const beforeSeekOverflow = events.length;
+    await localErrorResult(pipelineHost.seekSource({
+      sourceId: "source", generation: 3n, sourceFrame: 0n,
     }), 6);
+    assert.equal(events.length, beforeSeekOverflow, "seek saturation posts no refusal");
     holdAll = false;
     for (const respond of heldAll) respond();
     heldAll.length = 0;
@@ -376,13 +399,13 @@ async function testMainRealm() {
     ]);
     assert.deepEqual(
       settled.map((message) => message.requestId),
-      [1, 2, 3, 4, 6, 7],
+      [1, 2, 3, 4, 5, 6],
       "acknowledgements arrive in request order",
     );
     // With the budget released the source accepts chunks again.
-    const again = chunk(9, "source");
+    const again = chunk("source", 9);
     assert.equal(again.buffer.byteLength, 0);
-    await again.request;
+    assert.equal((await again.request).requestId, 7, "source saturation does not burn an ID");
     await pipelineHost.dispose();
 
     // W4-D1: a browser that cannot validate simd128 is refused with the typed record, before any
@@ -436,7 +459,99 @@ async function testMainRealm() {
       kind: 1, rack: 255, channel: 255, trackIndex: 1, effectIndex: 0, parameterId: 0,
       smoothingSamples: 64, values: [-0.5, 0.5, 0, 0],
     };
-    const commandAck = await consoleHost.command({ requestId: 200, commands: [pan] });
+    // Issue #393: one real host fixture owns every request ID across interleaved request classes.
+    // Twenty-five rounds cover 250 successful calls, including both lease orderings around a
+    // command and direct source/seek traffic. No caller-side ID is supplied anywhere in this loop.
+    const mixedAcks = [];
+    const mixedSendStart = events.length;
+    const mixedSubscription = {
+      trackIndex: 0, rack: 1, effectIndex: 0, tapId: 1, windowBlocks: 1, armed: true,
+    };
+    for (let round = 0; round < 25; round += 1) {
+      mixedAcks.push((await consoleHost.command({ commands: [pan] })).requestId);
+      mixedAcks.push((await consoleHost.observe({ subscriptions: [mixedSubscription] })).requestId);
+      mixedAcks.push((await consoleHost.meters({ enabled: true, onFrame: null })).requestId);
+      mixedAcks.push((await consoleHost.meters({ enabled: false, onFrame: null })).requestId);
+      mixedAcks.push((await consoleHost.telemetry({ enabled: true, onFrame: null })).requestId);
+      mixedAcks.push((await consoleHost.telemetry({ enabled: false, onFrame: null })).requestId);
+      const mixedBuffer = new ArrayBuffer(16);
+      const mixedLeft = new Float32Array(mixedBuffer, 0, 2);
+      const mixedRight = new Float32Array(mixedBuffer, 8, 2);
+      mixedLeft.set([round, round + 1]);
+      mixedRight.set([round + 2, round + 3]);
+      mixedSuccess = true;
+      const mixedSourceAck = await consoleHost.submitSource({
+        sourceId: "mixed-source", generation: BigInt(round + 1), startFrame: 0n,
+        sampleRateHz: 48000, planes: [mixedLeft, mixedRight], frames: 2, endOfRegion: true,
+      });
+      assert.equal(mixedSourceAck.result, 0, "mixed source admission succeeds");
+      assert.equal(mixedBuffer.byteLength, 0, "successful mixed source transfers its buffer");
+      assert.equal(mixedSourceAck.planes.length, 2);
+      assert.equal(mixedSourceAck.planes[0].byteOffset, 0);
+      assert.equal(mixedSourceAck.planes[1].byteOffset, 8);
+      assert.equal(mixedSourceAck.planes[0].buffer, mixedSourceAck.planes[1].buffer);
+      assert.equal(mixedSourceAck.planes[0].buffer.byteLength, 16);
+      const mixedSourceEvent = events.findLast((event) => event[1] === "miso.source.v1");
+      assert.equal(mixedSourceEvent[2], mixedSourceAck.requestId);
+      assert.equal(mixedSourceEvent[3], 1, "shared mixed source storage transfers once");
+      mixedAcks.push(mixedSourceAck.requestId);
+      mixedAcks.push((await consoleHost.seekSource({
+        sourceId: "mixed-source", generation: BigInt(round + 1), sourceFrame: 0n,
+      })).requestId);
+      mixedAcks.push((await consoleHost.status()).requestId);
+      mixedAcks.push((await consoleHost.sessionMap()).requestId);
+    }
+    assert.equal(mixedAcks.length, 250, "mixed host regression covers 250 successful calls");
+    const mixedSendIds = events.slice(mixedSendStart).map((event) => event[2]);
+    assert.deepEqual(mixedAcks, mixedSendIds, "acknowledgements match actual outbound send order");
+    assert.equal(mixedAcks[0], 2, "sessionMap consumes the first host allocation");
+    assert.equal(mixedAcks.at(-1), 251, "250 mixed calls occupy IDs 2 through 251");
+    assert(mixedAcks.every((id, index) => index === 0 || id === mixedAcks[index - 1] + 1),
+      "mixed acknowledgements have adjacent IDs");
+    assert(mixedAcks.every((_id, index) => index % 10 !== 1 || mixedAcks[index] === mixedAcks[index - 1] + 1),
+      "observe delegates with exactly one allocation");
+    assert.equal(new Set(mixedAcks).size, mixedAcks.length, "mixed acknowledgements are unique");
+    console.log("Issue393 mixed calls: 250 result-zero, send IDs 2..251, adjacent, observe single allocation");
+    // The shipped SDK consumer uses the same real host: sessionMap -> direct meter lease ->
+    // semantic console submit. This is the collision reproducer that the host-owned ledger fixes.
+    const { createBrowserConsole } = await import(new URL("./sdk/src/browser/console.ts", root));
+    const browserConsole = await createBrowserConsole(consoleHost);
+    await consoleHost.meters({ enabled: true, onFrame: null });
+    const sdkReport = await browserConsole.submit(browserConsole.edit.track("kick").faderDb(-1));
+    assert.equal(sdkReport.ok, true, "SDK console submits through the real host after direct meters");
+    // Every bounded response class refuses locally with requestId 0 and leaves the next accepted
+    // request exactly one ID later. Hold each class independently so the fake port cannot answer.
+    const assertBoundedNoBurn = async (label, heldCall, refusedCall, nextCall) => {
+      const before = events.length;
+      holdAll = true;
+      const held = heldCall();
+      await localErrorResult(refusedCall(), 6);
+      assert.equal(events.length, before + 1, `${label}: refusal posted no message`);
+      holdAll = false;
+      for (const respond of heldAll.splice(0)) respond();
+      const first = await held;
+      const next = await nextCall();
+      assert.equal(next.requestId, first.requestId + 1, `${label}: refusal did not burn an ID`);
+      return next;
+    };
+    await assertBoundedNoBurn(
+      "status", () => consoleHost.status(), () => consoleHost.status(), () => consoleHost.status(),
+    );
+    await assertBoundedNoBurn(
+      "sessionMap", () => consoleHost.sessionMap(), () => consoleHost.sessionMap(),
+      () => consoleHost.sessionMap(),
+    );
+    await assertBoundedNoBurn(
+      "meters", () => consoleHost.meters({ enabled: false, onFrame: null }),
+      () => consoleHost.meters({ enabled: true, onFrame: null }),
+      () => consoleHost.meters({ enabled: false, onFrame: null }),
+    );
+    await assertBoundedNoBurn(
+      "telemetry", () => consoleHost.telemetry({ enabled: false, onFrame: null }),
+      () => consoleHost.telemetry({ enabled: true, onFrame: null }),
+      () => consoleHost.telemetry({ enabled: false, onFrame: null }),
+    );
+    const commandAck = await consoleHost.command({ commands: [pan] });
     assert.equal(commandAck.tag, "miso.ack.v1");
     assert.equal(commandAck.result, 0);
     assert.equal(commandAck.admitted, 1);
@@ -459,19 +574,34 @@ async function testMainRealm() {
     // A malformed command never reaches the port.
     const beforeMalformed = events.length;
     await errorResult(
-      consoleHost.command({ requestId: 201, commands: [{ ...pan, kind: 99 }] }),
+      consoleHost.command({ commands: [{ ...pan, kind: 99 }] }),
       1,
     );
     await errorResult(
-      consoleHost.command({ requestId: 202, commands: [{ ...pan, values: [0, 0, 0, NaN] }] }),
+      consoleHost.command({ commands: [{ ...pan, values: [0, 0, 0, NaN] }] }),
       1,
     );
-    await errorResult(consoleHost.command({ requestId: 203, commands: [] }), 1);
+    await errorResult(consoleHost.command({ commands: [] }), 1);
+    await localErrorResult(consoleHost.command({ requestId: 999, commands: [pan] }), 1);
+    await localErrorResult(consoleHost.observe({ requestId: 999, subscriptions: [{
+      trackIndex: 0, rack: 1, effectIndex: 0, tapId: 1, windowBlocks: 1, armed: true,
+    }] }), 1);
+    const oldShapeBuffer = new ArrayBuffer(256);
+    await localErrorResult(consoleHost.submitSource({
+      requestId: 999, sourceId: "extra", generation: 1n, startFrame: 0n,
+      sampleRateHz: 48000, planes: [new Float32Array(oldShapeBuffer)], frames: 64, endOfRegion: false,
+    }), 1);
+    assert.equal(oldShapeBuffer.byteLength, 256, "malformed source keeps caller ownership");
+    await localErrorResult(consoleHost.seekSource({
+      requestId: 999, sourceId: "extra", generation: 1n, sourceFrame: 0n,
+    }), 1);
+    await localErrorResult(consoleHost.meters({ requestId: 999, enabled: true, onFrame: null }), 1);
+    await localErrorResult(consoleHost.telemetry({ requestId: 999, enabled: true, onFrame: null }), 1);
     assert.equal(events.length, beforeMalformed, "a malformed batch costs no message");
 
     // Engine backpressure is a resolved acknowledgement that admits nothing.
     commandResult = 6;
-    const refused = await consoleHost.command({ requestId: 204, commands: [pan] });
+    const refused = await consoleHost.command({ commands: [pan] });
     assert.equal(refused.result, 6);
     assert.equal(refused.admitted, 0);
     assert.equal(refused.reason, 8);
@@ -480,23 +610,31 @@ async function testMainRealm() {
     // Local backpressure: the worklet-side queue depth is 4, so a fifth unsettled batch is
     // refused here, before any transfer, and the caller keeps its records.
     holdAll = true;
-    const held4 = [205, 206, 207, 208].map((requestId) =>
-      consoleHost.command({ requestId, commands: [pan] }));
-    await errorResult(consoleHost.command({ requestId: 209, commands: [pan] }), 6);
+    const commandEventsBefore = events.length;
+    const held4 = Array.from({ length: 4 }, () => consoleHost.command({ commands: [pan] }));
+    await localErrorResult(consoleHost.command({ commands: [pan] }), 6);
+    await localErrorResult(consoleHost.observe({ subscriptions: [mixedSubscription] }), 6);
+    assert.equal(events.length, commandEventsBefore + 4, "command/observe saturation posts no refusal");
     holdAll = false;
     for (const respond of heldAll) respond();
     heldAll.length = 0;
-    await Promise.all(held4);
+    const heldCommandAcks = await Promise.all(held4);
+    const commandAfterBound = await consoleHost.command({ commands: [pan] });
+    assert.equal(
+      commandAfterBound.requestId,
+      Math.max(...heldCommandAcks.map((ack) => ack.requestId)) + 1,
+      "command saturation does not burn an ID",
+    );
 
     // Leases and their unsolicited frames.
     const meterFrames = [];
     const telemetryFrames = [];
     assert.equal(
-      (await consoleHost.meters({ requestId: 210, enabled: true, onFrame: (frame) => meterFrames.push(frame) })).result,
+      (await consoleHost.meters({ enabled: true, onFrame: (frame) => meterFrames.push(frame) })).result,
       0,
     );
     assert.equal(
-      (await consoleHost.telemetry({ requestId: 211, enabled: true, onFrame: (frame) => telemetryFrames.push(frame) })).result,
+      (await consoleHost.telemetry({ enabled: true, onFrame: (frame) => telemetryFrames.push(frame) })).result,
       0,
     );
     const node = FakeNode.latest;
@@ -578,7 +716,6 @@ async function testMainRealm() {
     // is canonically ordered, `windowBlocks: 0` resolves to the plan default, and an unsubscribe
     // removes exactly one entry.
     const observeAck = await consoleHost.observe({
-      requestId: 213,
       subscriptions: [
         { trackIndex: 1, rack: 1, effectIndex: 0, tapId: 1, windowBlocks: 0, armed: true },
         { trackIndex: 0, rack: 1, effectIndex: 0, tapId: 1, windowBlocks: 8, armed: true },
@@ -595,7 +732,6 @@ async function testMainRealm() {
       "`windowBlocks: 0` resolves to the plan default, and the map says which one it got");
     assert.equal(Object.isFrozen(observeAck.bindings), true);
     const unsubscribed = await consoleHost.observe({
-      requestId: 214,
       subscriptions: [
         { trackIndex: 1, rack: 1, effectIndex: 0, tapId: 1, windowBlocks: 0, armed: false },
       ],
@@ -606,14 +742,13 @@ async function testMainRealm() {
       { trackIndex: -1 }, { rack: 3 }, { tapId: 0 }, { armed: "yes" }, { windowBlocks: -1 },
     ]) {
       await errorResult(consoleHost.observe({
-        requestId: 215,
         subscriptions: [{
           trackIndex: 0, rack: 1, effectIndex: 0, tapId: 1, windowBlocks: 0, armed: true,
           ...broken,
         }],
       }), 1);
     }
-    await errorResult(consoleHost.observe({ requestId: 216, subscriptions: [] }), 1);
+    await errorResult(consoleHost.observe({ subscriptions: [] }), 1);
 
     // Issue #143's two reasons, and the #151 defect they exposed: a refused subscription is a
     // typed *per-request* rejection and costs the host nothing.
@@ -629,8 +764,6 @@ async function testMainRealm() {
     // every assertion below fails with the sticky signature, starting with `refused.tag` because
     // the promise rejects with `{tag: "miso.error.v1", result: 255}` instead of settling.
     // `scripts/test-web-audioworklet.sh` runs exactly that mutation and requires this file red.
-    let refusalRequestId = 240;
-    const nextRequestId = () => (refusalRequestId += 10);
     const mapBeforeRefusal = unsubscribed.bindings;
     for (const { reason, result, what } of [
       // The address resolves and the tap id does not. A bad address, like every other unknown, so
@@ -643,7 +776,6 @@ async function testMainRealm() {
       commandResult = result;
       commandMutation = (response) => ({ ...response, reason, rejectedIndex: 0, admitted: 0 });
       const refused = await consoleHost.observe({
-        requestId: nextRequestId(),
         subscriptions: [
           { trackIndex: 0, rack: 1, effectIndex: 0, tapId: 9, windowBlocks: 0, armed: true },
         ],
@@ -664,7 +796,7 @@ async function testMainRealm() {
       // have failed with `{tag: "miso.error.v1", result: 255}`.
       assert.equal((await consoleHost.status()).result, 0, `${what}: status still answers`);
       const laterCommand = await consoleHost.command({
-        requestId: nextRequestId(), commands: [pan],
+        commands: [pan],
       });
       assert.equal(laterCommand.result, 0, `${what}: the command path still admits a batch`);
       assert.equal(laterCommand.admitted, 1);
@@ -691,7 +823,6 @@ async function testMainRealm() {
 
       // And a *correct* subscription still arms, so nothing about the map machinery was poisoned.
       const recovered = await consoleHost.observe({
-        requestId: nextRequestId(),
         subscriptions: [
           { trackIndex: 1, rack: 1, effectIndex: 0, tapId: 1, windowBlocks: 4, armed: true },
         ],
@@ -700,7 +831,6 @@ async function testMainRealm() {
       assert.equal(recovered.reason, 0);
       assert.deepEqual(recovered.bindings.map((binding) => binding.trackIndex), [0, 1]);
       const undo = await consoleHost.observe({
-        requestId: nextRequestId(),
         subscriptions: [
           { trackIndex: 1, rack: 1, effectIndex: 0, tapId: 1, windowBlocks: 4, armed: false },
         ],
@@ -710,7 +840,7 @@ async function testMainRealm() {
 
     // A released lease detaches the callback: a late frame is delivered nowhere.
     const framesAtRelease = meterFrames.length;
-    await consoleHost.meters({ requestId: nextRequestId(), enabled: false, onFrame: null });
+    await consoleHost.meters({ enabled: false, onFrame: null });
     node.port.onmessage({
       data: {
         tag: "miso.meter.v1", sequence: 2, windows: 1, trackCount: 2,
@@ -733,6 +863,21 @@ async function testMainRealm() {
     });
     await errorResult(doomed, 255);
     await consoleHost.dispose();
+    const disposedEvents = events.length;
+    await localErrorResult(consoleHost.status(), 3);
+    await localErrorResult(consoleHost.command({ commands: [pan] }), 3);
+    await localErrorResult(consoleHost.observe({ subscriptions: [mixedSubscription] }), 3);
+    await localErrorResult(consoleHost.sessionMap(), 3);
+    await localErrorResult(consoleHost.meters({ enabled: false, onFrame: null }), 3);
+    await localErrorResult(consoleHost.telemetry({ enabled: false, onFrame: null }), 3);
+    await localErrorResult(consoleHost.seekSource({
+      sourceId: "disposed", generation: 1n, sourceFrame: 0n,
+    }), 3);
+    await localErrorResult(consoleHost.submitSource({
+      sourceId: "disposed", generation: 1n, startFrame: 0n, sampleRateHz: 48000,
+      planes: [new Float32Array(2)], frames: 2, endOfRegion: true,
+    }), 3);
+    assert.equal(events.length, disposedEvents, "disposed refusals post no messages or consume IDs");
 
     // Issue #143 D7 / #151: recompile and re-subscribe, the way the app re-arms after the plan is
     // replaced.
@@ -757,7 +902,7 @@ async function testMainRealm() {
 
     const beforeEdit = await prepare("{\"schema_version\":0}");
     const armedBefore = await beforeEdit.observe({
-      requestId: 1, subscriptions: [tap(0, 0, true), tap(1, 0, true)],
+      subscriptions: [tap(0, 0, true), tap(1, 0, true)],
     });
     assert.equal(armedBefore.result, 0);
     assert.deepEqual(armedBefore.bindings.map((binding) => binding.trackIndex), [0, 1]);
@@ -769,7 +914,7 @@ async function testMainRealm() {
     commandResult = 1;
     commandMutation = (response) => ({ ...response, reason: 10, rejectedIndex: 0, admitted: 0 });
     const staleRearm = await afterEdit.observe({
-      requestId: 1, subscriptions: [tap(0, 0, true), tap(1, 0, true)],
+      subscriptions: [tap(0, 0, true), tap(1, 0, true)],
     });
     commandMutation = null;
     commandResult = 0;
@@ -781,7 +926,7 @@ async function testMainRealm() {
     // second call rather than a rebuild.
     assert.deepEqual((await afterEdit.sessionMap()).tracks, ["kick", "snare"]);
     const rearmed = await afterEdit.observe({
-      requestId: 3, subscriptions: [tap(0, 1, true), tap(1, 1, true)],
+      subscriptions: [tap(0, 1, true), tap(1, 1, true)],
     });
     assert.equal(rearmed.result, 0, "the replacement plan re-arms after the refusal");
     assert.deepEqual(rearmed.bindings.map((binding) => binding.effectIndex), [1, 1],
@@ -794,7 +939,7 @@ async function testMainRealm() {
     const rearmedFrames = [];
     assert.equal(
       (await afterEdit.meters({
-        requestId: 4, enabled: true, onFrame: (frame) => rearmedFrames.push(frame),
+        enabled: true, onFrame: (frame) => rearmedFrames.push(frame),
       })).result,
       0,
     );
@@ -807,7 +952,7 @@ async function testMainRealm() {
     });
     assert.equal(rearmedFrames.length, 1, "the replacement's meter sequence restarts at 1");
     assert.deepEqual([...rearmedFrames[0].trackGrDb], [1.5, 2.5]);
-    assert.equal((await afterEdit.command({ requestId: 5, commands: [pan] })).result, 0);
+    assert.equal((await afterEdit.command({ commands: [pan] })).result, 0);
     assert.equal((await afterEdit.status()).result, 0);
     await afterEdit.dispose();
   } finally {
@@ -969,6 +1114,39 @@ function createFakeExports(quantum, backend = 1) {
     },
   };
   return { exports, calls, trackIds, sourceRows, meterFrameFloats };
+}
+
+function createTelemetryClock(elapsedMsByBlock) {
+  let reads = 0;
+  let timeMs = 0;
+  return {
+    now() {
+      const block = Math.floor(reads / 2);
+      if (block >= elapsedMsByBlock.length) throw new Error("telemetry clock read past fixture");
+      if (reads % 2 === 1) timeMs += elapsedMsByBlock[block];
+      reads += 1;
+      return timeMs;
+    },
+    get reads() {
+      return reads;
+    },
+  };
+}
+
+function withTelemetryClock(clock, callback) {
+  const originalPerformance = Object.getOwnPropertyDescriptor(globalThis, "performance");
+  Object.defineProperty(globalThis, "performance", {
+    configurable: true,
+    enumerable: originalPerformance?.enumerable ?? true,
+    writable: true,
+    value: { now: clock.now },
+  });
+  try {
+    return callback();
+  } finally {
+    if (originalPerformance === undefined) delete globalThis.performance;
+    else Object.defineProperty(globalThis, "performance", originalPerformance);
+  }
 }
 
 async function testProcessor() {
@@ -1336,33 +1514,60 @@ async function testProcessor() {
 
     {
       // Issue #137 D3: a full telemetry window posts exactly one frame, and the frame is honest
-      // about the resolution of the clock it actually found.
-      const { processor } = makeProcessor();
-      processor.receive({ tag: "miso.telemetry.v1", requestId: 1, enabled: true });
-      assert.deepEqual(processor.port.posts.at(-1).message, {
-        tag: "miso.ack.v1", requestId: 1, result: 0,
-      });
-      const left = new Float32Array(64);
-      const right = new Float32Array(64);
-      let frames = 0;
-      for (let block = 0; block < 128; block += 1) {
-        assert.equal(processor.process([], [[left, right]]), true);
-        const last = processor.port.posts.at(-1).message;
-        if (last.tag === "miso.telemetry.v1") frames += 1;
-      }
-      assert.equal(frames, 1, "one frame per 128-block window and no more");
-      const telemetry = processor.port.posts.at(-1).message;
-      assert.equal(telemetry.blocks, 128);
-      assert.equal(telemetry.sequence, 1);
-      assert.equal(telemetry.deadlineMisses, 0);
-      assert(telemetry.budgetMs > 1.3 && telemetry.budgetMs < 1.4, telemetry.budgetMs);
-      assert(telemetry.resolutionMs > 0);
-      assert.equal(typeof telemetry.belowResolution, "boolean");
-      assert(telemetry.cpuPercent >= 0);
-      processor.receive({ tag: "miso.telemetry.v1", requestId: 2, enabled: false });
-      const quiet = processor.port.posts.length;
-      for (let block = 0; block < 200; block += 1) processor.process([], [[left, right]]);
-      assert.equal(processor.port.posts.length, quiet, "a released lease reads no clock");
+      // about the resolution of the clock it actually found. The real process clock made the
+      // zero-miss assertion scheduler-sensitive, so each window uses a local monotonic fixture.
+      const belowBudgetMs = 0.5;
+      const aboveBudgetMs = 2;
+      const noMissWindow = Array.from({ length: 128 }, () => belowBudgetMs);
+      const oneMissWindow = noMissWindow.map((duration, block) => block === 64
+        ? aboveBudgetMs
+        : duration);
+      const runTelemetryWindow = (elapsedMsByBlock, expectedDeadlineMisses) => {
+        const clock = createTelemetryClock(elapsedMsByBlock);
+        return withTelemetryClock(clock, () => {
+          const { processor } = makeProcessor();
+          processor.receive({ tag: "miso.telemetry.v1", requestId: 1, enabled: true });
+          assert.deepEqual(processor.port.posts.at(-1).message, {
+            tag: "miso.ack.v1", requestId: 1, result: 0,
+          });
+          const left = new Float32Array(64);
+          const right = new Float32Array(64);
+          let frames = 0;
+          let telemetry;
+          for (let block = 0; block < 128; block += 1) {
+            assert.equal(processor.process([], [[left, right]]), true);
+            const last = processor.port.posts.at(-1).message;
+            if (last.tag === "miso.telemetry.v1") {
+              frames += 1;
+              telemetry = last;
+            }
+          }
+          assert.equal(frames, 1, "one frame per 128-block window and no more");
+          assert.equal(telemetry.blocks, 128);
+          assert.equal(telemetry.sequence, 1);
+          assert.equal(telemetry.deadlineMisses, expectedDeadlineMisses);
+          assert(telemetry.budgetMs > 1.3 && telemetry.budgetMs < 1.4, telemetry.budgetMs);
+          assert(telemetry.resolutionMs > 0);
+          assert.equal(typeof telemetry.belowResolution, "boolean");
+          for (const field of ["cpuPercent", "peakBlockMs", "meanBlockMs"]) {
+            assert(Number.isFinite(telemetry[field]) && telemetry[field] >= 0, field);
+          }
+          assert.equal(clock.reads, 256, "two clock reads per leased rendered block");
+          processor.receive({ tag: "miso.telemetry.v1", requestId: 2, enabled: false });
+          const quiet = processor.port.posts.length;
+          const readsAfterRelease = clock.reads;
+          for (let block = 0; block < 200; block += 1) {
+            assert.equal(processor.process([], [[left, right]]), true);
+          }
+          assert.equal(clock.reads, readsAfterRelease, "a released lease reads no clock");
+          assert.equal(processor.port.posts.length, quiet, "a released lease posts nothing");
+        });
+      };
+
+      // The first fresh processor has 128 positive sub-budget blocks; the second has exactly one
+      // over-budget block, preserving the behavioral deadline-miss discriminator.
+      runTelemetryWindow(noMissWindow, 0);
+      runTelemetryWindow(oneMissWindow, 1);
     }
 
     {

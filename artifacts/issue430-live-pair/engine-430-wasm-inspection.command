@@ -1,0 +1,1 @@
+bash scripts/check-wasm-realtime-atomics.sh /tmp/engine-430-wasm-inspection 

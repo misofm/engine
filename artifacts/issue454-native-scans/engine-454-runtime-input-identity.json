@@ -1,0 +1,17 @@
+{
+  "candidate": "8b9d0ade4a1480a2992f503c41a669ed6dd9648f",
+  "delivered_main": "6589c5185411d51bce7d0a0aafab4df63a5e47db",
+  "paths": [
+    "crates",
+    "hosts",
+    "tools",
+    "sidecars",
+    "fixtures",
+    "Cargo.toml",
+    "Cargo.lock",
+    ".cargo",
+    "rust-toolchain.toml"
+  ],
+  "git_diff_exit": 0,
+  "runtime_build_fixture_inputs_unchanged": true
+}

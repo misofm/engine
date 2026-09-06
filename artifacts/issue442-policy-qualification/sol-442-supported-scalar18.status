@@ -1,0 +1,1 @@
+status=0 target=/tmp/sol-442-scalar18-target profile=release target_feature=-simd128 packages=18

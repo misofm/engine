@@ -1,0 +1,40 @@
+PASS: all 46 individual record validators exit 0
+PASS: aggregate validator exit 0: true
+Comparison arguments: RT-3 capture, RT-2 capture. Inherited labels rt2/rt1 are historical.
+rowcounts: rt2=46 rt1=46; unique keyed: rt2=46 rt1=46
+matching key: (record, workload_kind, round)
+missing from rt2: []
+missing from rt1: []
+stable identity fields compared: schema_version,record,workload_kind,tracks,synthetic_fixture,strip_content,strip_layout,input_signal,fixture_id,backend,sample_rate_hz,quantum_frames,observations,units,percentile_method,descriptive_only,statistical_method,target_triple,target_features,profile,measurement_control,merged_chain_layout,split_chains_layout,strip_layout
+emitted digest fields compared: absent_output_sha256,armed_output_sha256,automated_output_sha256,collapse_eligible_output_sha256,collapse_forced_off_output_sha256,merged_chain_output_sha256,meters_off_output_sha256,meters_on_output_sha256,moving_output_sha256,output_sha256,quiet_output_sha256,restated_output_sha256,split_chains_output_sha256,unarmed_output_sha256
+emitted error/counter fields compared: collapse_eligible_transposes_per_block,collapse_forced_off_transposes_per_block,merged_chain_transposes_per_block,render_errors,render_total_forbidden_operations,split_chains_transposes_per_block
+stable/digest/counter value mismatches: 0
+stable/digest/counter presence mismatches: 0
+field presence counts (rt2,rt1):
+absent_output_sha256 2 2
+armed_output_sha256 2 2
+automated_output_sha256 2 2
+collapse_eligible_output_sha256 2 2
+collapse_forced_off_output_sha256 2 2
+merged_chain_output_sha256 2 2
+meters_off_output_sha256 2 2
+meters_on_output_sha256 2 2
+moving_output_sha256 4 4
+output_sha256 32 32
+quiet_output_sha256 6 6
+restated_output_sha256 6 6
+split_chains_output_sha256 2 2
+unarmed_output_sha256 2 2
+collapse_eligible_transposes_per_block 2 2
+collapse_forced_off_transposes_per_block 2 2
+merged_chain_transposes_per_block 2 2
+render_errors 42 42
+render_total_forbidden_operations 42 42
+split_chains_transposes_per_block 2 2
+sixty_four_track_plumbing_only
+rt2 [(1, 6670, 6.67, 0.104, '38ebb48908b62b9770ac7df1a8f6f2427bfd15eb849429219f8705a3926084c3'), (2, 6710, 6.71, 0.105, '38ebb48908b62b9770ac7df1a8f6f2427bfd15eb849429219f8705a3926084c3')]
+rt1 [(1, 6700, 6.7, 0.105, '38ebb48908b62b9770ac7df1a8f6f2427bfd15eb849429219f8705a3926084c3'), (2, 6910, 6.91, 0.108, '38ebb48908b62b9770ac7df1a8f6f2427bfd15eb849429219f8705a3926084c3')]
+sixty_four_track_gain_pan_only
+rt2 [(1, 8753, 8.753, 0.137, '2410d7237d2173526f967b897835b52eb515196c655920b09ca93acb111bb7b1'), (2, 8693, 8.693, 0.136, '2410d7237d2173526f967b897835b52eb515196c655920b09ca93acb111bb7b1')]
+rt1 [(1, 8704, 8.704, 0.136, '2410d7237d2173526f967b897835b52eb515196c655920b09ca93acb111bb7b1'), (2, 8753, 8.753, 0.137, '2410d7237d2173526f967b897835b52eb515196c655920b09ca93acb111bb7b1')]
+PASS: complete keyed emitted digest/counter and named stable identity comparison

@@ -1,0 +1,1 @@
+build=0 objdump=0 export=0 interp=0 exact=0 target=/tmp/sol-442-protocol-simd-target feature=+simd128 invocation=explicit_main_two_i32_zero

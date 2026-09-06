@@ -1,0 +1,7 @@
+
+> @miso/engine-v1-browser-qualification@0.0.0 qualify
+> node ./run.mjs --artifacts /tmp/engine-430-worklet-current --browser firefox --check-matrix --self-test-mutations
+
+session identities: 3 qualification documents declare their fed PCM
+artifact set: the exact 6-file shipped set is pinned
+firefox: all qualification gates passed (153.0)

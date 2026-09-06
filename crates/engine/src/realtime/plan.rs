@@ -172,6 +172,14 @@ impl PlanUnitEligibility {
 /// implementations are policy-limited to `graph`.
 #[doc(hidden)]
 pub trait PreparedPlanExecutor: Send {
+    /// Whether the exclusively owned source consumer supports between-block seek preparation.
+    fn can_prepare_source_seek(&self, _source_index: usize) -> bool {
+        false
+    }
+    /// Apply an admitted source seek without rendering or advancing any sample clock.
+    fn prepare_source_seek(&mut self, _source_index: usize, _generation: u64, _frame: u64) -> bool {
+        false
+    }
     /// Render one already-validated block using only preallocated state.
     fn render(
         &mut self,
@@ -535,6 +543,27 @@ impl PreparedRenderPlan {
             .as_deref()
             .map_or([0; 4], PreparedPlanExecutor::dispatch_counters)
     }
+    /// Prevalidate source preparation before a host admits the producer-side seek.
+    /// Requires the plan owner; it provides no concurrent control-side consumer handle.
+    pub fn can_prepare_source_seek(&self, source_index: usize) -> bool {
+        self.executor
+            .as_ref()
+            .is_some_and(|executor| executor.can_prepare_source_seek(source_index))
+    }
+
+    /// Prepare an admitted seek on the exclusive render owner between blocks.
+    /// Does not render, mutate topology, or advance the plan's sample clock.
+    pub fn prepare_source_seek(
+        &mut self,
+        source_index: usize,
+        generation: u64,
+        frame: u64,
+    ) -> bool {
+        self.executor
+            .as_mut()
+            .is_some_and(|executor| executor.prepare_source_seek(source_index, generation, frame))
+    }
+
     /// The plan's internal executor, for the block-boundary hand-over in `plan_exchange`.
     pub(crate) fn executor_mut(&mut self) -> Option<&mut (dyn PreparedPlanExecutor + 'static)> {
         self.executor.as_deref_mut()

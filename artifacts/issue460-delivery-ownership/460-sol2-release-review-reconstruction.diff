@@ -1,0 +1,11 @@
+--- a/crates/protocol/src/delivery.rs
++++ b/crates/protocol/src/delivery.rs
+@@ -571,6 +571,8 @@
+             return Ok(HandoffResult::PendingUnsupported);
+         }
+         self.core.publish_reserved(ticket)?;
++        let released = self.core.payload(ticket)?;
++        self.release(ticket, released);
+         Ok(HandoffResult::HandedOff(ticket))
+     }
+ 

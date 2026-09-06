@@ -1,0 +1,9 @@
+delivery_ownership.rs 0 realtime policy: ok (42 marked regions in 12 files)
+ 
+delivery_ownershipXrs 0 realtime policy: ok (42 marked regions in 12 files)
+ 
+Traceback (most recent call last):
+  File "/tmp/460-ci-policy-neighbor-proof.py", line 15, in <module>
+    assert p.returncode==want
+           ^^^^^^^^^^^^^^^^^^
+AssertionError

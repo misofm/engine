@@ -1,0 +1,95 @@
+{
+  "candidate_commit": "6834d35187c4723eda7e1d75e598832edc4762d4",
+  "files": [
+    {
+      "path": "README.md",
+      "bytes": 1431,
+      "sha256": "df22d3b4f292598422eee0e5da30336bddf840bcdf8be1e2fcdab4859e1ec543"
+    },
+    {
+      "path": "astra-404-attempt1-review.md",
+      "bytes": 8154,
+      "sha256": "638d640d070316dd9346cb3c7393bb87e449644d1533bd148c9db2cf10a27644"
+    },
+    {
+      "path": "astra-404-attempt2-review.md",
+      "bytes": 7412,
+      "sha256": "fae25cafc44baf2ad903fe2ad0423b3ca28fbc73295c8514261d9fc2206b9f09"
+    },
+    {
+      "path": "astra-404-attempt3-review.md",
+      "bytes": 4403,
+      "sha256": "6226de578964941fbfdc34e4d48807d95b618bf877fc2d82468edff5a8d84b0c"
+    },
+    {
+      "path": "astra-404-numbered-workspace-base-review.md",
+      "bytes": 3386,
+      "sha256": "69d653f60597fc189311dd0d3adf2cfe753715f4317b738d63b9b10d04c3a763"
+    },
+    {
+      "path": "astra-404-workspace-remainder-brief.md",
+      "bytes": 14694,
+      "sha256": "22ee6277eb591e12e1991ea2f9daea3af031fec3f5c9adb8cfa0561abce018b3"
+    },
+    {
+      "path": "engine-404-candidate-workspace.log",
+      "bytes": 185802,
+      "sha256": "dd05ec3e3b8883bbf0d61011346ca19f4292de6b07a9aa3352803382c7411983"
+    },
+    {
+      "path": "engine-404-root-attempt1-suite.log",
+      "bytes": 667,
+      "sha256": "9cc9c86903e82fa9c8e888157ff6caae058a536bbb9e5df9a731e11361c58328"
+    },
+    {
+      "path": "engine-404-runtime-input-identity.json",
+      "bytes": 439,
+      "sha256": "077165943e9cc0d7d8f58370ffa8bff11183de293af5b47adef287a1192bd8aa"
+    },
+    {
+      "path": "engine-404-sol2-helper.log",
+      "bytes": 631,
+      "sha256": "4807663d6b2e18cb82d0e009cfa0ad465e8209e8f9f47fd1b2717850b5a1315d"
+    },
+    {
+      "path": "engine-404-sol2-suite.log",
+      "bytes": 849,
+      "sha256": "9ff936f0cacf0c2c36e6d7418187a3c840d5d605167e1dd67d71a0382864892e"
+    },
+    {
+      "path": "engine-404-sol2-workspace.log",
+      "bytes": 21,
+      "sha256": "8261c11a9ad607004e800b131ad999fbad0194619b971b30aa45a6ba10eeb880"
+    },
+    {
+      "path": "engine-404-sol3-diff-check.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "engine-404-sol3-helper.log",
+      "bytes": 631,
+      "sha256": "4807663d6b2e18cb82d0e009cfa0ad465e8209e8f9f47fd1b2717850b5a1315d"
+    },
+    {
+      "path": "engine-404-sol3-suite.log",
+      "bytes": 849,
+      "sha256": "9ff936f0cacf0c2c36e6d7418187a3c840d5d605167e1dd67d71a0382864892e"
+    },
+    {
+      "path": "engine-404-sol3-syntax.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "engine-404-sol3-workspace.log",
+      "bytes": 21,
+      "sha256": "8261c11a9ad607004e800b131ad999fbad0194619b971b30aa45a6ba10eeb880"
+    },
+    {
+      "path": "engine-404-workspace-summary.json",
+      "bytes": 401,
+      "sha256": "854491931f2281105ccb1f3e0d7156b57943c9653b0eb0ab683ac0df9d548c8e"
+    }
+  ]
+}

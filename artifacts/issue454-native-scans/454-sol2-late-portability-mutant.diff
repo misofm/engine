@@ -1,0 +1,11 @@
+--- /tmp/tmp.xJ3Bc7k8Yk/late-scan-error/scripts/check-native-pcm-runner.sh	2026-09-05 12:02:49.283119438 +0000
++++ /tmp/tmp.xJ3Bc7k8Yk/late-scan-error/scripts/check-native-pcm-runner-mutant.sh	2026-09-05 12:02:49.341119026 +0000
+@@ -55,7 +55,7 @@
+     if rg -Fq 'does not claim safety against a' "$contract"; then :; else status=$?; fail "concurrent same-privilege mutation limitation is missing (rg status $status)"; fi
+     if rg -n 'identity-conditionally unlink|safe against (a )?concurrent same-privilege' "$contract"; then fail 'impossible concurrent directory-mutation guarantee was restored'; else status=$?; [[ "$status" == 1 ]] || fail "contract prohibition scan failed (rg status $status)"; fi
+     for pattern in 'fs::hard_link\(&self\.partial_path|std::fs::hard_link\(&self\.partial_path' 'AT_EMPTY_PATH|/dev/fd/|FileLinkInfo|FILE_LINK_INFO_CLASS' 'replace_if_exists\s*=\s*(1|true)|REPLACE_IF_EXISTS|MOVEFILE_REPLACE_EXISTING' 'RENAME_REPLACE' 'FakeEntry::Owned\s*\|\s*FakeEntry::WrongPublished|WrongPublished\s*\|\s*FakeEntry::Owned'; do
+-        if rg -n "$pattern" "$source"; then fail 'forbidden publication or cleanup strategy was restored'; else status=$?; [[ "$status" == 1 ]] || fail "portability forbidden scan failed (rg status $status)"; fi
++        if rg -n "$pattern" "$source"; then fail 'forbidden publication or cleanup strategy was restored'; else status=$?; [[ "$status" == 1 ]] || :; fi
+     done
+     if python3 -I -B - "$source" <<'PY'
+ import pathlib, sys

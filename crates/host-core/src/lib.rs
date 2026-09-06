@@ -110,8 +110,8 @@ pub use prepare::{
     HostConsoleHandles, HostConsoleRequest, HostPrepareCaps, HostPrepareReport, HostShapePolicy,
     LAUNCH_SAMPLE_RATES_HZ, PreparedHost, SOURCE_STALL_TOLERANCE_MS, compile_host_model,
     compile_host_session, count_effects, default_source_ring_frames, parse_host_session,
-    prepare_host_runtime, prepare_host_runtime_with_console, prepare_host_session,
-    prepare_host_session_with_console,
+    prepare_host_runtime, prepare_host_runtime_between_render_calls,
+    prepare_host_runtime_with_console, prepare_host_session, prepare_host_session_with_console,
 };
 pub use render_session::StartedRenderSession;
 pub use shape::{HostSessionShape, compiled_session_shape};

@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "execution_commit": "1fc6ed1ed3fe57ccac0b47899a1cbe36c9050571",
+  "files": [
+    {
+      "path": "artifacts/issue420-rt3/astra-436-measurement-review.md",
+      "bytes": 4854,
+      "sha256": "a92d6f04fcd1ae160163be7ca3af5fe05561522d6d232c66541acc66d73e514e"
+    },
+    {
+      "path": "artifacts/issue420-rt3/console-benchmark.accepted.jsonl",
+      "bytes": 79199,
+      "sha256": "5fa46e12a926e3da1bdeb4dfa5cb4efa22642fca2724254e27303e57a3b100ca"
+    },
+    {
+      "path": "artifacts/issue420-rt3/console-benchmark.disposition.json",
+      "bytes": 772,
+      "sha256": "b56d3dbd6d1e3b6efae9d6dfab6df2a02f141aca874f172e6abedc36b3a50dc4"
+    },
+    {
+      "path": "artifacts/issue420-rt3/console-benchmark.raw.jsonl",
+      "bytes": 79199,
+      "sha256": "5fa46e12a926e3da1bdeb4dfa5cb4efa22642fca2724254e27303e57a3b100ca"
+    },
+    {
+      "path": "artifacts/issue420-rt3/console-benchmark.stderr.log",
+      "bytes": 88,
+      "sha256": "042f18e1bb4a0bd75a48dddcdb7151532f5db11ffe092e4ea9d3696be89724c2"
+    },
+    {
+      "path": "artifacts/issue420-rt3/engine-436-console-runner.log",
+      "bytes": 83,
+      "sha256": "371cfe8317c95edfca76d1172721af51857468ec4c04f15099f8def8792295c3"
+    },
+    {
+      "path": "artifacts/issue420-rt3/engine-436-current-readiness-identity.json",
+      "bytes": 346,
+      "sha256": "8bc2e6b6437e686c44409dc844793e8e8e18b1f4a8a1a79044821322700abc35"
+    },
+    {
+      "path": "artifacts/issue420-rt3/engine-436-current-readiness-load.log",
+      "bytes": 32,
+      "sha256": "f34ffea980e326f8a7f021be42d47fedecc669e96b25c45f8d6d9d92d3472e00"
+    },
+    {
+      "path": "artifacts/issue420-rt3/runner-terminal-status.json",
+      "bytes": 243,
+      "sha256": "ad8e9a850114e25df83f527df4b7f1e46a5b60616ef59a9ff1169bc69781e3d0"
+    },
+    {
+      "path": "artifacts/issue420-rt3/validation.log",
+      "bytes": 2926,
+      "sha256": "d857f163b44e169e7c38338375c58d3951edb34d4a91afa819d01b429933c2f0"
+    }
+  ]
+}

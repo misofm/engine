@@ -1,0 +1,20 @@
+#443 Luna attempt 1, consolidated finite proof tranche
+
+Resource correction:
+- graph_scalar_owner_resource now derives banked tracks from planned PostFader membership and
+  charges only residual scalar owners.
+- Zero residual owners report zero largest allocation and no outer allocation.
+- Concurrent owners retain fader/matrix policy layout charge without scalar outer ownership.
+
+Actual validation:
+- /tmp/443-luna1-tranche4-graph-compiler-3.log (+ .command, .status): 60 passed, exit.status=0.
+- /tmp/443-luna1-tranche4-builtins-compiler.log (+ .command, .status): 28 passed, exit.status=0.
+- /tmp/443-luna1-tranche4-host-web.log (+ .command, .status): 62 passed, 1 ignored, exit.status=0.
+- /tmp/443-luna1-tranche4-allocation.log (+ .command, .status): 4 passed, exit.status=0.
+- /tmp/443-luna1-tranche4-fmt-2.log (+ .command, .status): exit.status=0.
+- /tmp/443-luna1-tranche4-graph-compiler.log (+ .command, .status): initial compile failure,
+  exit.status=101, retained candidly.
+- /tmp/443-luna1-tranche4-graph-compiler-2.log (+ .command, .status): type inference failure,
+  exit.status=101, retained candidly.
+
+Paused at consolidated focused-green checkpoint. No commit or push performed; root owns delivery.

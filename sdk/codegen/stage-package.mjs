@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /** Stage the exact gated browser artifact closure under the emitted package tree. */
 
+import { build } from "esbuild";
 import { createHash } from "node:crypto";
 import { copyFile, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
@@ -61,4 +62,22 @@ await copyFile(
   resolve(sdkRoot, "dist", "browser", "shipped-host.d.ts"),
 );
 await copyFile(resolve(repoRoot, "LICENSE"), resolve(sdkRoot, "dist", "LICENSE"));
+await copyFile(
+  resolve(sdkRoot, "src", "browser-assets", "miso-engine-v1-pcm-feed-worklet.js"),
+  resolve(destination, "miso-engine-v1-pcm-feed-worklet.js"),
+);
+await copyFile(resolve(repoRoot, "NOTICE"), resolve(sdkRoot, "dist", "NOTICE"));
 console.log(`staged ${expected.length} Engine V1 artifacts and package manifest`);
+
+// A consumer bundler may copy an exported new-URL asset without following its imports. Emit an
+// import-complete Worker so both that URL and the default literal Worker constructor are valid.
+await build({
+  entryPoints: [resolve(sdkRoot, "dist", "browser", "scratch-worker.js")],
+  outfile: resolve(sdkRoot, "dist", "browser", "scratch-worker.js"),
+  allowOverwrite: true,
+  bundle: true,
+  format: "esm",
+  platform: "browser",
+  target: "es2022",
+  legalComments: "inline",
+});

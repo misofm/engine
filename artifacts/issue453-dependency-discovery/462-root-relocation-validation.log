@@ -1,0 +1,5 @@
+PASS: status-loss-cargo forwarded earlier fixture with exact flags
+PASS: status-loss-cargo-empty forwarded earlier fixture with exact flags
+PASS: status-loss-cargo-matching forwarded earlier fixture with exact flags
+PASS: cargo-empty-success forwarded earlier fixture with exact flags
+PASS: status-loss-grep forwarded earlier fixture with exact flags

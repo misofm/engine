@@ -1,0 +1,249 @@
+Diff in /home/bl/misofm/engine-443-plan/crates/builtins/src/lib.rs:1853:
+ 
+     #[inline(always)]
+     fn is_settled(&self) -> bool {
+-        self.remaining
+-            .iter()
+-            .all(|channel| channel.iter().take(L::WIDTH).all(|&remaining| remaining == 0))
++        self.remaining.iter().all(|channel| {
++            channel
++                .iter()
++                .take(L::WIDTH)
++                .all(|&remaining| remaining == 0)
++        })
+     }
+ 
+     /// Retargets one lane of one channel. D11: one division per event, never per sample.
+Diff in /home/bl/misofm/engine-443-plan/crates/builtins-compiler/src/lib.rs:25:
+ use effect_contract::{
+     BankWidth, ChannelSymmetryWitness, LiveConsoleRecord, SeamSide, SymmetryEvent,
+ };
+-use std::any::Any;
+ use engine::realtime::{
+     Consumer, PreparedRenderPlan, Producer, QueueGeneration, RenderEnvelope, RenderError,
+     bounded_spsc, bounded_spsc_retained_payload,
+Diff in /home/bl/misofm/engine-443-plan/crates/builtins-compiler/src/lib.rs:41:
+ use rack::{AoSoaScratch, BankSlotKey, RackLocation, RackProgram};
+ use rack_compiler::{CohortCandidate, CohortLevel, CohortPoolClass, plan_bank_groups};
+ use session::{CompiledSession, MatrixOrPan, Track};
++use std::any::Any;
+ 
+ #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+ pub struct BuiltinCompileCaps {
+Diff in /home/bl/misofm/engine-443-plan/crates/builtins-compiler/src/lib.rs:1949:
+         let fader = u64::try_from(core::mem::size_of::<ConsoleFaderProcessor>()).ok()?;
+         let matrix = u64::try_from(core::mem::size_of::<ConsoleMatrixProcessor>()).ok()?;
+         let outer = u64::try_from(core::mem::size_of::<ScalarPairProcessor>()).ok()?;
+-        let banked: std::collections::BTreeSet<_> = planned_strip_banks(
+-            &self.seal.tracks,
+-            dispatch,
+-            levels,
+-            classes,
+-        )
+-        .into_iter()
+-        .find(|(stage, _)| *stage == TrackStage::PostFader)
+-        .map(|(_, groups)| {
+-            groups
++        let banked: std::collections::BTreeSet<_> =
++            planned_strip_banks(&self.seal.tracks, dispatch, levels, classes)
+                 .into_iter()
+-                .flat_map(|group| group.into_vec())
+-                .filter_map(|node| match node {
+-                    GraphNodeId::TrackStage { track_id, .. } => {
+-                        Some(Box::<str>::from(track_id.as_str()))
+-                    }
+-                    _ => None,
++                .find(|(stage, _)| *stage == TrackStage::PostFader)
++                .map(|(_, groups)| {
++                    groups
++                        .into_iter()
++                        .flat_map(|group| group.into_vec())
++                        .filter_map(|node| match node {
++                            GraphNodeId::TrackStage { track_id, .. } => {
++                                Some(Box::<str>::from(track_id.as_str()))
++                            }
++                            _ => None,
++                        })
++                        .collect()
+                 })
+-                .collect()
+-        })
+-        .unwrap_or_default();
++                .unwrap_or_default();
+         let count = u64::try_from(
+             self.strips
+                 .iter()
+Diff in /home/bl/misofm/engine-443-plan/crates/builtins-compiler/src/lib.rs:1989:
+             largest_allocation_bytes: if count == 0 {
+                 0
+             } else {
+-                fader.max(matrix).max(if outer_total == 0 { 0 } else { outer })
++                fader
++                    .max(matrix)
++                    .max(if outer_total == 0 { 0 } else { outer })
+             },
+         })
+     }
+Diff in /home/bl/misofm/engine-443-plan/crates/builtins-compiler/src/lib.rs:3523:
+         Ok(())
+     }
+     fn scalar_pair_factory(&self) -> Option<graph::ScalarPairFactory> {
+-        (self.control_delivery == BuiltinControlDelivery::BetweenRenderCalls).then_some(make_scalar_pair)
++        (self.control_delivery == BuiltinControlDelivery::BetweenRenderCalls)
++            .then_some(make_scalar_pair)
+     }
+ }
+ impl ConsoleFaderProcessor {
+Diff in /home/bl/misofm/engine-443-plan/crates/builtins-compiler/src/lib.rs:3530:
+     fn drain_controls(&mut self) -> Result<(), RenderError> {
+         while let Ok(record) = self.control.try_pop() {
+             match record {
+-                TrackFaderRecord::FaderDb { lanes, db, smoothing_samples } => self
++                TrackFaderRecord::FaderDb {
++                    lanes,
++                    db,
++                    smoothing_samples,
++                } => self
+                     .fader
+                     .set_fader_db(lanes, db, smoothing_samples)
+                     .map_err(render_error)?,
+Diff in /home/bl/misofm/engine-443-plan/crates/builtins-compiler/src/lib.rs:3537:
+-                TrackFaderRecord::Mute { lanes, muted, smoothing_samples } => {
+-                    self.fader.set_mute(lanes, muted, smoothing_samples)
+-                }
++                TrackFaderRecord::Mute {
++                    lanes,
++                    muted,
++                    smoothing_samples,
++                } => self.fader.set_mute(lanes, muted, smoothing_samples),
+             }
+         }
+         Ok(())
+Diff in /home/bl/misofm/engine-443-plan/crates/builtins-compiler/src/lib.rs:3552:
+ 
+ impl GraphRuntimeProcessor for ScalarPairProcessor {
+     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
+-        let GraphBindingBlock { left, right, first_sample } = block;
++        let GraphBindingBlock {
++            left,
++            right,
++            first_sample,
++        } = block;
+         self.fader.drain_controls()?;
+         let matrix_error = self.matrix.drain_controls().err();
+         if let Some(error) = matrix_error {
+Diff in /home/bl/misofm/engine-443-plan/crates/builtins-compiler/src/lib.rs:3562:
+             self.fader.fader.process(block);
+             return Err(error);
+         }
+-        let mut fused_block = DualMonoBlock::new(&mut *left, &mut *right, first_sample)
+-            .map_err(render_error)?;
++        let mut fused_block =
++            DualMonoBlock::new(&mut *left, &mut *right, first_sample).map_err(render_error)?;
+         if self
+             .fader
+             .fader
+Diff in /home/bl/misofm/engine-443-plan/crates/builtins-compiler/src/lib.rs:3585:
+ fn make_scalar_pair(
+     fader: Box<dyn GraphRuntimeProcessor>,
+     matrix: Box<dyn GraphRuntimeProcessor>,
+-) -> Result<Box<dyn GraphRuntimeProcessor>, (Box<dyn GraphRuntimeProcessor>, Box<dyn GraphRuntimeProcessor>)> {
++) -> Result<
++    Box<dyn GraphRuntimeProcessor>,
++    (
++        Box<dyn GraphRuntimeProcessor>,
++        Box<dyn GraphRuntimeProcessor>,
++    ),
++> {
+     if !matrix.scalar_pair_accepts() {
+         return Err((fader, matrix));
+     }
+Diff in /home/bl/misofm/engine-443-plan/crates/builtins-compiler/src/lib.rs:3597:
+     let matrix = matrix_any
+         .downcast::<ConsoleMatrixProcessor>()
+         .expect("only ConsoleMatrixProcessor accepts scalar pairing");
+-    Ok(Box::new(ScalarPairProcessor { fader: *fader, matrix: *matrix }))
++    Ok(Box::new(ScalarPairProcessor {
++        fader: *fader,
++        matrix: *matrix,
++    }))
+ }
+ struct MeterObserver(MeterAccumulator);
+ impl GraphRuntimeObserver for MeterObserver {
+Diff in /home/bl/misofm/engine-443-plan/crates/graph/src/lib.rs:224:
+         resource: GraphScalarOwnerResourceEstimate,
+     ) -> Option<()> {
+         let mut next = self.clone();
+-        next.graph_metadata_bytes = next.graph_metadata_bytes.checked_add(resource.total_bytes)?;
+-        next.incremental_plan_bytes = next.incremental_plan_bytes.checked_add(resource.total_bytes)?;
+-        next.session_plus_plan_bytes = next.session_plus_plan_bytes.checked_add(resource.total_bytes)?;
++        next.graph_metadata_bytes = next
++            .graph_metadata_bytes
++            .checked_add(resource.total_bytes)?;
++        next.incremental_plan_bytes = next
++            .incremental_plan_bytes
++            .checked_add(resource.total_bytes)?;
++        next.session_plus_plan_bytes = next
++            .session_plus_plan_bytes
++            .checked_add(resource.total_bytes)?;
+         next.largest_allocation_bytes = next
+             .largest_allocation_bytes
+             .max(resource.largest_allocation_bytes);
+Diff in /home/bl/misofm/engine-443-plan/crates/graph/src/lib.rs:1309:
+ pub type ScalarPairFactory = fn(
+     Box<dyn GraphRuntimeProcessor>,
+     Box<dyn GraphRuntimeProcessor>,
+-) -> Result<Box<dyn GraphRuntimeProcessor>, (Box<dyn GraphRuntimeProcessor>, Box<dyn GraphRuntimeProcessor>)>;
++) -> Result<
++    Box<dyn GraphRuntimeProcessor>,
++    (
++        Box<dyn GraphRuntimeProcessor>,
++        Box<dyn GraphRuntimeProcessor>,
++    ),
++>;
+ 
+ pub trait GraphRuntimeProcessor: Send + Any {
+     /// Process one block in place.
+Diff in /home/bl/misofm/engine-443-plan/crates/graph/src/runtime.rs:1882:
+         &run_units,
+     )
+     .into_iter()
+-        .filter(|(run, _, _)| !folded_runs.contains(run))
+-        .collect();
++    .filter(|(run, _, _)| !folded_runs.contains(run))
++    .collect();
+ 
+     // Serialized scalar fader/matrix pairing is decided while both original owners and the
+     // lowered graph are still available.  The schedule is intentionally left untouched: the
+Diff in /home/bl/misofm/engine-443-plan/crates/graph/src/runtime.rs:1911:
+         let first_node = &spec.nodes[program.ops[first].node as usize].id;
+         let second_node = &spec.nodes[program.ops[second].node as usize].id;
+         let (
+-            GraphNodeId::TrackStage { track_id: first_track, stage: TrackStage::PostFader },
+-            GraphNodeId::TrackStage { track_id: second_track, stage: TrackStage::PostMatrix },
++            GraphNodeId::TrackStage {
++                track_id: first_track,
++                stage: TrackStage::PostFader,
++            },
++            GraphNodeId::TrackStage {
++                track_id: second_track,
++                stage: TrackStage::PostMatrix,
++            },
+         ) = (first_node, second_node)
+         else {
+             continue;
+Diff in /home/bl/misofm/engine-443-plan/crates/graph-compiler/src/compile.rs:570:
+             ));
+         }
+         if let Some(builtins) = prepared_builtins {
+-            let Some(resource) = builtins.graph_scalar_owner_resource(
+-                dispatch,
+-                &levels,
+-                &pool_classes,
+-            ) else {
++            let Some(resource) =
++                builtins.graph_scalar_owner_resource(dispatch, &levels, &pool_classes)
++            else {
+                 return Err(failure(
+                     effects,
+                     vec![diag(

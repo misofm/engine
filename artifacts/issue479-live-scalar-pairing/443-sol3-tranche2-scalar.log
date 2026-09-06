@@ -1,0 +1,11 @@
+   Compiling builtins-compiler v0.1.0 (/home/bl/misofm/engine-443-plan/crates/builtins-compiler)
+error[E0425]: cannot find value `backend` in this scope
+    --> crates/builtins-compiler/src/lib.rs:5007:37
+     |
+5007 |             track_id: track_name(if backend == Backend::Scalar { n - 1 } else { 0 }),
+     |                                     ^^^^^^^ not found in this scope
+
+For more information about this error, try `rustc --explain E0425`.
+error: could not compile `builtins-compiler` (lib) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `builtins-compiler` (lib test) due to 1 previous error

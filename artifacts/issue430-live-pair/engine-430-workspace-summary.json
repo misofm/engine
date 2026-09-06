@@ -1,0 +1,9 @@
+{
+  "candidate": "7951736605fa64870bc1d91342d00d5fdb6417c5",
+  "exit_code": 0,
+  "result_blocks": 275,
+  "passed": 1591,
+  "failed": 0,
+  "ignored": 24,
+  "includes_doctests": true
+}

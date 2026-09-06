@@ -1,0 +1,24 @@
+diff --git a/hosts/host-web/src/lib.rs b/hosts/host-web/src/lib.rs
+index a89ced85..838946a4 100644
+--- a/hosts/host-web/src/lib.rs
++++ b/hosts/host-web/src/lib.rs
+@@ -2627,8 +2627,18 @@ fn compile_ready(
+ ) -> Result<(ReadyOwnership, WebResourceReport), BootFailure> {
+     let console = console_request(options, session.quantum().0)
+         .ok_or_else(|| fixed_diagnostic("web.console.config"))?;
+-    let (host, handles) = prepare_host_runtime_between_render_calls(&session, caps, &console)
++    let (host, handles) = host_core::prepare_host_runtime_with_console(&session, caps, &console)
+         .map_err(BootFailure::preparation)?;
++    #[cfg(test)]
++    assert!(
++        handles.post_fader_controls_are_between_render_calls(),
++        "WebEngine construction must seal between-render-call post-fader owners"
++    );
++    #[cfg(test)]
++    assert!(
++        handles.post_matrix_controls_are_between_render_calls(),
++        "WebEngine construction must seal between-render-call post-matrix owners"
++    );
+     let engine = host.report;
+ 
+     let control_table = control_table_bytes(engine.source_count as usize)

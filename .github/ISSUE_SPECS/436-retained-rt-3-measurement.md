@@ -32,3 +32,23 @@ A refusal/failure is an honest terminal consumed-authority record, not successfu
 
 Allowed changes: this numbered spec/evidence, reciprocal #420/tracker accounting, and capture evidence in the existing issue420 namespace. No runner/helper/workload/validator production edit, new framework, Rust/artifact rebuild or publication belongs in this transferred qualification slice. If a real tooling defect surfaces, preserve the consumed outcome and seek a separately justified bounded ruling; no implicit repair-and-rerun.
 
+
+## Delivered product and frozen execution checkout
+
+PR #437 delivered #420 as `c7469e28d52a716339b6f3119a57b69afb3411f1` after exact-head Astra PASS and required qualification SUCCESS. Root verified the merged tree is byte-identical to the reviewed product head `cb8cc2bf55ae78f83548e9479dc86dde5a885626` and reuses the isolated `/home/bl/misofm/engine-420` checkout on `codex/436-retained-rt3-measurement`, retaining its existing prepared binary. This evidence-only checkpoint precedes fresh source/binary/manifest/readiness verification and the sole authorized invocation. #429 implementation has not started and local test/build work is terminal; root coordinates this bounded quiet window. Authority remains unused at this checkpoint.
+
+## Post-delivery readiness observation
+
+At execution checkpoint `100d51205571ce97b40af87f7486f79f695509b3`, checked source comparison and all 48 retained manifest entries passed. The existing runner binary matched SHA-256 `53dce85d8ff683693598da8dce79195ecfad1ad76300b68bb348196c00f81bab`; it was 2,304 seconds old and CPU 63 affinity was available. Load then read 1.18, above the unchanged 0.50 ceiling, so readiness terminated exit 1 before sibling sampling or runner invocation. Root ended this bounded quiet window and released independent #429 implementation. Runner and workload invocations remain zero. Exact observation is retained in `artifacts/issue420-qualification/readiness-436-deferred.log`; no timing result or refusal disposition exists.
+
+
+## Controlled measurement captured; review pending
+
+At execution HEAD `1fc6ed1ed3fe57ccac0b47899a1cbe36c9050571`, root verified all 48 retained manifest entries and the exact frozen binary hash, source changes against the reviewed allowlist, absent output paths, and unchanged controls. Local agent commands were paused. Readiness sampled CPU63 and sibling31 at 0.00% and load0.24; the runner recorded load0.14 and sibling0.00%. The sole authorized command completed exit0, with controlled PASS, one warmup and two measured rounds (three workload launches). The authority is now consumed; no retry is permitted.
+
+Raw/accepted records, stderr, disposition, readiness identity/load, command output and terminal status are retained in `artifacts/issue420-rt3/`. The runner validated all46 records with the unchanged aggregate validator before promotion. Plumbing-only p50 observations are 6.67 and 6.71 us/block. These are descriptive observations, not a causal speedup claim against different hosts/profiles. Independent Astra evidence review and normal PR/CI delivery remain pending; #436 stays open.
+
+
+## RT-3 measurement acceptance under #436
+
+The transferred authority was consumed successfully at execution commit `1fc6ed1ed3fe57ccac0b47899a1cbe36c9050571`: one controlled invocation, one warmup, two measured rounds, all46 records accepted. Astra independently recorded capture PASS in `artifacts/issue420-rt3/astra-436-measurement-review.md`. All46 keys and the enumerated stable output/workload/counter identities match #419. Exactly42 records report zero render errors and forbidden operations; the four hoist records omit those fields. Plumbing-only p50 is6.670/6.710us per block; no cycle evidence or causal speedup is claimed. The source reduces repeated output traffic but retains checked-view access overhead. Prior unused-authority and deferred-readiness statements above are historical; no further invocation is authorized. Actual PR review and required qualification remain the final delivery gates.

@@ -1,0 +1,15 @@
+{
+  "candidate_commit": "284e27ccd1b223c301cffa73918ae4dc595924cd",
+  "command": "PATH=/home/bl/.cargo/bin:$PATH bash -x scripts/check-wasm-realtime-atomics.sh target/ci/wasm-scalar",
+  "invocations": 1,
+  "terminal_exit": 0,
+  "families": [
+    "engine",
+    "source",
+    "target_smoke"
+  ],
+  "objects": 3,
+  "decoder_invocations": 3,
+  "trace_sha256": "7944ae3f24a2c32be27f9ecd0e8e15d57da5d3eafe9cee1237698d768728ba77",
+  "scope": "Named scalar non-LTO gate; no shipped-artifact or all-workspace dependency claim."
+}

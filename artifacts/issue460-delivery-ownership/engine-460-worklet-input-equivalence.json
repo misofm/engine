@@ -1,0 +1,17 @@
+{
+  "head": "4df68ff104ac8bf0f5c86c78cd5e1a636ef1d480",
+  "delivered_main": "bb5ed498a2c0934498d964befb2cd5b7c2a45264",
+  "changed_paths": [
+    ".github/ISSUE_SPECS/140-automation-span-feed.md",
+    ".github/ISSUE_SPECS/444-concurrent-builtin-admission-pairing.md",
+    ".github/ISSUE_SPECS/460-automation-delivery-ownership.md",
+    "crates/protocol/src/delivery.rs",
+    "crates/protocol/src/lib.rs",
+    "crates/protocol/src/queue.rs",
+    "crates/protocol/tests/delivery_ownership.rs"
+  ],
+  "normal_host_web_protocol_reachable": false,
+  "worklet_build_inputs_equal_delivered_main": true,
+  "artifact_pin": "97a83d452ad09b3140423ac3465aae846ce468b12fc1a6472dd820f330e8bfd3\n",
+  "method": "Exact complete git path delta contains only three issue specs and four protocol paths; postintegration normal host-web dependency tree excludes protocol. No Cargo/config/feature/host/fixture/script/artifact input differs."
+}

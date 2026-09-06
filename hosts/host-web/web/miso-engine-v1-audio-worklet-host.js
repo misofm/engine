@@ -36,7 +36,6 @@ const BOOT_OPTION_FIELDS = [
 ];
 
 const SOURCE_FIELDS = [
-  "requestId",
   "sourceId",
   "generation",
   "startFrame",
@@ -46,7 +45,7 @@ const SOURCE_FIELDS = [
   "endOfRegion",
 ];
 
-const SEEK_FIELDS = ["requestId", "sourceId", "generation", "sourceFrame"];
+const SEEK_FIELDS = ["sourceId", "generation", "sourceFrame"];
 // Issue #137 D1: the frozen 48-byte little-endian command record.
 const COMMAND_RECORD_BYTES = 48;
 const MAXIMUM_COMMAND_RECORDS = 256;
@@ -367,6 +366,12 @@ class MisoAudioWorkletHost {
     return 0;
   }
 
+  #allocateRequestId() {
+    if (this.#lastRequestId >= Number.MAX_SAFE_INTEGER) return null;
+    this.#lastRequestId += 1;
+    return this.#lastRequestId;
+  }
+
   #release(pending) {
     this.#pending.delete(pending.requestId);
     if (pending.response === "source") {
@@ -574,33 +579,34 @@ class MisoAudioWorkletHost {
     expectedPlanes = undefined,
     sourceId = undefined,
   ) {
-    if (this.#disposed) return Promise.reject(webError(3, message.requestId));
+    if (this.#disposed) return Promise.reject(webError(3));
     if (this.#stickyError !== null && !allowSticky) return Promise.reject(this.#stickyError);
     if (this.#saturated(response, sourceId)) {
-      return Promise.reject(webError(RESULT_BACKPRESSURE, message.requestId));
+      return Promise.reject(webError(RESULT_BACKPRESSURE));
     }
-    if (!validRequestId(message.requestId) || message.requestId <= this.#lastRequestId) {
-      return Promise.reject(webError(1, message.requestId));
+    const requestId = this.#allocateRequestId();
+    if (requestId === null) {
+      return Promise.reject(webError(1));
     }
-    this.#lastRequestId = message.requestId;
+    const stamped = { ...message, requestId };
     return new Promise((resolve, reject) => {
       const pending = {
-        requestId: message.requestId,
+        requestId,
         sourceId,
         leaseKind: sourceId,
-        commandCount: message.count ?? 0,
+        commandCount: stamped.count ?? 0,
         resolve,
         reject,
         response,
         planeShape: expectedPlanes === undefined ? undefined : planeShape(expectedPlanes),
       };
-      this.#pending.set(pending.requestId, pending);
+      this.#pending.set(requestId, pending);
       this.#reserve(response, sourceId);
       try {
-        this.#port.postMessage(message, transfer);
+        this.#port.postMessage(stamped, transfer);
       } catch (error) {
         this.#release(pending);
-        reject(webError(255, message.requestId));
+        reject(webError(255, requestId));
       }
     });
   }
@@ -620,7 +626,7 @@ class MisoAudioWorkletHost {
           || !(plane.buffer instanceof ArrayBuffer)
           || (typeof SharedArrayBuffer !== "undefined"
             && plane.buffer instanceof SharedArrayBuffer))) {
-      return Promise.reject(webError(1, request?.requestId ?? 0));
+      return Promise.reject(webError(1));
     }
     const transfer = [...new Set(request.planes.map((plane) => plane.buffer))];
     return this.#request(
@@ -638,7 +644,7 @@ class MisoAudioWorkletHost {
         || typeof request.sourceId !== "string"
         || typeof request.generation !== "bigint" || request.generation <= 0n
         || typeof request.sourceFrame !== "bigint" || request.sourceFrame < 0n) {
-      return Promise.reject(webError(1, request?.requestId ?? 0));
+      return Promise.reject(webError(1));
     }
     return this.#request(
       { tag: "miso.seek.v1", ...request },
@@ -651,11 +657,7 @@ class MisoAudioWorkletHost {
   }
 
   status() {
-    return this.#request(
-      { tag: "miso.status.v1", requestId: this.#lastRequestId + 1 },
-      [],
-      "status",
-    );
+    return this.#request({ tag: "miso.status.v1" }, [], "status");
   }
 
   /// Submit one live-console command batch (issue #137 D1).
@@ -664,18 +666,17 @@ class MisoAudioWorkletHost {
   /// every record was admitted, and `appliedAtSample` is the exact absolute sample the batch takes
   /// effect at. A refusal names `reason` and `rejectedIndex` and admits nothing.
   command(request) {
-    if (!hasExactFields(request, ["requestId", "commands"])
+    if (!hasExactFields(request, ["commands"])
         || !Array.isArray(request.commands)
         || request.commands.length === 0
         || request.commands.length > MAXIMUM_COMMAND_RECORDS
         || !request.commands.every(validCommand)) {
-      return Promise.reject(webError(1, request?.requestId ?? 0));
+      return Promise.reject(webError(1));
     }
     const records = encodeCommands(request.commands);
     return this.#request(
       {
         tag: "miso.command.v1",
-        requestId: request.requestId,
         count: request.commands.length,
         records,
       },
@@ -698,12 +699,12 @@ class MisoAudioWorkletHost {
   /// it is updated only on `result === 0`, and it is cleared whenever the plan is replaced --
   /// subscriptions belong to the plan they were applied to (D7).
   async observe(request) {
-    if (!hasExactFields(request, ["requestId", "subscriptions"])
+    if (!hasExactFields(request, ["subscriptions"])
         || !Array.isArray(request.subscriptions)
         || request.subscriptions.length === 0
         || request.subscriptions.length > MAXIMUM_COMMAND_RECORDS
         || !request.subscriptions.every(validSubscription)) {
-      return Promise.reject(webError(1, request?.requestId ?? 0));
+      return Promise.reject(webError(1));
     }
     const commands = request.subscriptions.map((subscription) => ({
       kind: subscription.armed
@@ -717,7 +718,7 @@ class MisoAudioWorkletHost {
       smoothingSamples: subscription.windowBlocks,
       values: [0, 0, 0, 0],
     }));
-    const ack = await this.command({ requestId: request.requestId, commands });
+    const ack = await this.command({ commands });
     if (ack.result === 0) {
       for (const subscription of request.subscriptions) {
         const key = [
@@ -759,14 +760,7 @@ class MisoAudioWorkletHost {
   /// This is the addressing authority for `trackIndex`: the app never guesses an index, and never
   /// sends a string on the command path.
   sessionMap() {
-    return this.#request(
-      { tag: "miso.sessionmap.v1", requestId: this.#lastRequestId + 1 },
-      [],
-      "sessionMap",
-      false,
-      undefined,
-      "sessionMap",
-    );
+    return this.#request({ tag: "miso.sessionmap.v1" }, [], "sessionMap", false, undefined, "sessionMap");
   }
 
   /// Take or release the decimated meter lease (issue #137 D2).
@@ -774,14 +768,14 @@ class MisoAudioWorkletHost {
   /// `onFrame` receives every `miso.meter.v1` frame while the lease is held. Passing
   /// `enabled: false` releases it and detaches the callback.
   meters(request) {
-    if (!hasExactFields(request, ["requestId", "enabled", "onFrame"])
+    if (!hasExactFields(request, ["enabled", "onFrame"])
         || typeof request.enabled !== "boolean"
         || (request.onFrame !== null && typeof request.onFrame !== "function")) {
-      return Promise.reject(webError(1, request?.requestId ?? 0));
+      return Promise.reject(webError(1));
     }
     this.#onMeterFrame = request.enabled ? request.onFrame : null;
     return this.#request(
-      { tag: "miso.meters.v1", requestId: request.requestId, enabled: request.enabled },
+      { tag: "miso.meters.v1", enabled: request.enabled },
       [],
       "lease",
       false,
@@ -792,14 +786,14 @@ class MisoAudioWorkletHost {
 
   /// Take or release the render-telemetry lease (issue #137 D3).
   telemetry(request) {
-    if (!hasExactFields(request, ["requestId", "enabled", "onFrame"])
+    if (!hasExactFields(request, ["enabled", "onFrame"])
         || typeof request.enabled !== "boolean"
         || (request.onFrame !== null && typeof request.onFrame !== "function")) {
-      return Promise.reject(webError(1, request?.requestId ?? 0));
+      return Promise.reject(webError(1));
     }
     this.#onTelemetryFrame = request.enabled ? request.onFrame : null;
     return this.#request(
-      { tag: "miso.telemetry.v1", requestId: request.requestId, enabled: request.enabled },
+      { tag: "miso.telemetry.v1", enabled: request.enabled },
       [],
       "lease",
       false,
@@ -810,8 +804,7 @@ class MisoAudioWorkletHost {
 
   async dispose() {
     if (this.#disposed) return;
-    const requestId = this.#lastRequestId + 1;
-    await this.#request({ tag: "miso.dispose.v1", requestId }, [], "dispose", true);
+    await this.#request({ tag: "miso.dispose.v1" }, [], "dispose", true);
     this.#disposed = true;
     this.#observations.clear();
     this.#onMeterFrame = null;

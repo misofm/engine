@@ -1,0 +1,22 @@
+miso_engine_web_v1_render: closure=6 traps=5 trap_owners=['_RNvMs2_NtNtCsd50TmRYst6h_6engine8realtime4planNtB5_18PreparedRenderPlan12render_inner'] entries=['_RNvNtNtCsdkdt1aaAg1T_4core5slice5index16slice_index_fail']
+kernel shape: f32x4_arith=8207 kernels=13 pattern='4wide6f32x[48]'
+  roster ok   vector=2560 scalar=20 budget=256.0 ceiling=0.1 multiband-compressor f32x8
+  roster ok   vector=1280 scalar=20 budget=128.0 ceiling=0.1 multiband-compressor f32x4
+  roster ok   vector=786 scalar=72 budget=298.7 ceiling=0.38 transient-shaper f32x4
+  roster ok   vector=180 scalar=8 budget=34.2 ceiling=0.19 gate-expander f32x4
+  roster ok   vector=267 scalar=0 budget=26.7 ceiling=0.1 compressor f32x4 dual
+  roster ok   vector=138 scalar=0 budget=13.8 ceiling=0.1 compressor f32x4 collapsed
+  roster ok   vector=448 scalar=0 budget=44.8 ceiling=0.1 true-peak-limiter f32x4 dual
+  roster ok   vector=224 scalar=0 budget=22.4 ceiling=0.1 true-peak-limiter f32x4 collapsed
+  roster ok   vector=168 scalar=0 budget=16.8 ceiling=0.1 parametric-eq f32x4 dual
+  roster ok   vector=84 scalar=0 budget=8.4 ceiling=0.1 parametric-eq f32x4 collapsed
+  roster ok   vector=25 scalar=0 budget=8.0 ceiling=0.1 soft-clip f32x4
+miso_engine_web_v1_meter_poll: closure=5 traps=2 trap_owners=['_RNvMs0_CskSyfhxmEv5w_8host_webNtB5_22AudioWorkletEngineHost11poll_meters'] entries=['_RNvNtCsdkdt1aaAg1T_4core9panicking18panic_bounds_check']
+miso_engine_web_v1_command_submit: closure=20 traps=58 trap_owners=['_RNvCskSyfhxmEv5w_8host_web14admit_commands', '_RNvMNtCshirh86YsvQh_9host_core4soloNtB2_16ConsoleSoloState13set_user_mute', '_RNvMNtCshirh86YsvQh_9host_core4soloNtB2_16ConsoleSoloState14record_emitted', '_RNvMNtCshirh86YsvQh_9host_core4soloNtB2_16ConsoleSoloState8rollback', '_RNvMNtCshirh86YsvQh_9host_core4soloNtB2_16ConsoleSoloState8set_solo', '_RNvNtNtCsjl04eDCIjk8_4math8vendored14rem_pio2_large14rem_pio2_large', '_RNvNvNtCsdkdt1aaAg1T_4core5slice20copy_from_slice_impl17len_mismatch_fail'] entries=['_RNvNtCsdkdt1aaAg1T_4core9panicking18panic_bounds_check', '_RNvNtCsdkdt1aaAg1T_4core9panicking9panic_fmt', '_RNvNtNtCsdkdt1aaAg1T_4core5slice5index16slice_index_fail']
+parameter metadata schema: ok (/tmp/engine-442-worklet-verify.ETwlDB/miso-engine-v1-parameter-metadata.json)
+/tmp/engine-442-worklet-verify.ETwlDB/miso-engine-v1-abi-layout.json satisfies miso.web.abi-layout.v1
+command-reason vocabulary agrees across every spelling
+command-kind vocabulary agrees across every spelling
+session-map shape is one shape across the Rust FFI, the gate list, the JS and the .d.ts
+web boot budget high-water gate passed; mismatches: 0
+web AudioWorklet static/object checks passed

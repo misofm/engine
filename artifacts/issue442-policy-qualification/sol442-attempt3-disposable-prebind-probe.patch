@@ -1,0 +1,23 @@
+--- a/crates/host-core/src/prepare.rs
++++ b/crates/host-core/src/prepare.rs
+@@
+     })?;
++    let assert_stage = |stage, label| {
++        let mut count = 0_usize;
++        for bank in artifact
++            .prepared_builtin_banks()
++            .filter(|bank| bank.stage == stage)
++        {
++            assert!(!bank.members.is_empty(), "{label} owner must have members");
++            assert_eq!(
++                bank.control_delivery,
++                graph::BuiltinControlDelivery::BetweenRenderCalls,
++                "WebEngine construction must seal between-render-call {label} owners"
++            );
++            count += 1;
++        }
++        assert!(count > 0, "WebEngine construction must prepare {label} owners");
++    };
++    assert_stage(TrackStage::PostFader, "post-fader");
++    assert_stage(TrackStage::PostMatrix, "post-matrix");
+     let graph_report = artifact.report().clone();

@@ -1,0 +1,7 @@
+{
+  "command": "PATH=/home/bl/.cargo/bin:$PATH bash scripts/run-console-benchmark.sh --issue420-rt3 > /tmp/engine-436-console-runner.log 2>&1",
+  "session_id": 23483,
+  "exit_code": 0,
+  "runner_invocations": 1,
+  "authority_consumed": true
+}

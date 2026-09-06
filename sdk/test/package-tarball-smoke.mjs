@@ -32,7 +32,22 @@ for (const subpath of [".", "./headless", "./browser", "./assets"]) {
 assert.equal(typeof imported["."].session, "function");
 assert.equal(typeof imported["./headless"].createOfflineEngine, "function");
 assert.equal(typeof imported["./browser"].createEngine, "function");
+assert.equal(typeof imported["./browser"].scratchBootWithWorker, "function");
+assert.equal(typeof imported["./browser"].createDefaultHost, "function");
+const workerText = await readFile(imported["./assets"].BUNDLED_ENGINE_ASSETS.scratchWorkerModule, "utf8");
+const workerAst = ts.createSourceFile("scratch-worker.js", workerText, ts.ScriptTarget.ES2022, true, ts.ScriptKind.JS);
+assert.equal(workerAst.statements.some(statement => ts.isImportDeclaration(statement)
+  || (ts.isExportDeclaration(statement) && statement.moduleSpecifier !== undefined)), false,
+"the exported Worker URL is import-complete when a consumer bundler copies it");
+assert.equal(typeof imported["./browser"].attachEngineFeed, "function");
+assert.equal(typeof imported["./browser"].prepareEngineFeed, "function");
 assert.ok(imported["./assets"].BUNDLED_ENGINE_ASSETS.wasm instanceof URL);
+assert.ok(imported["./assets"].BUNDLED_ENGINE_ASSETS.pcmFeedWorklet instanceof URL);
+const shippedNotice = await readFile(resolve(packageRoot, "dist/NOTICE"), "utf8");
+assert.match(shippedNotice, /engine-web-adapter/);
+assert.match(shippedNotice, /bd7f330a9773ce43bb077f0e6d5c8fc30fe9e27c/);
+assert.match(shippedNotice, /7485693e9bbcf2f65a91a4e5950e22d678d99062/);
+assert.match(shippedNotice, /63b4ee6212287000ff85e1cfa969d385f6246d2d/);
 for (const [subpath, module] of Object.entries(imported)) {
   assert.equal(
     "canonicalSessionJson" in module,
@@ -66,6 +81,8 @@ const files = await readdir(packageRoot, { recursive: true });
 assert.ok(files.includes("dist/assets/miso-engine-v1-audio-worklet.simd128.wasm"));
 assert.equal(files.some((name) => /flac|decoder|cli\/stems/i.test(name)), false, "the archive has no retired delivery payload");
 assert.ok(files.includes("dist/LICENSE"));
+assert.ok(files.includes("dist/NOTICE"));
+assert.ok(files.includes("dist/assets/miso-engine-v1-pcm-feed-worklet.js"));
 assert.equal(files.some((name) => name.includes("node_modules")), false);
 assert.equal(files.some((name) => name.startsWith("test") || name.includes("/test/")), false);
 assert.equal(files.includes("dist/effect.js"), false);
@@ -91,12 +108,68 @@ const consumer = resolve(consumerRoot, "index.ts");
 await writeFile(consumer, `
 import { CATALOG, session } from "@misofm/engine";
 import { createOfflineEngine, loadBundledEngineAsset } from "@misofm/engine/headless";
-import { createEngine } from "@misofm/engine/browser";
+import { createEngine, prepareEngineFeed, attachEngineFeed, Msb1RingWriter, Msb1RingObserver } from "@misofm/engine/browser";
+import type { BrowserEngine, PcmSourceChunk } from "@misofm/engine/browser";
 import { BUNDLED_ENGINE_ASSETS } from "@misofm/engine/assets";
 // @ts-expect-error arbitrary-model canonical serialization is intentionally not public
 import { canonicalSessionJson } from "@misofm/engine";
 void [CATALOG, session, createOfflineEngine, loadBundledEngineAsset, createEngine,
-  BUNDLED_ENGINE_ASSETS, canonicalSessionJson];
+  prepareEngineFeed, attachEngineFeed, BUNDLED_ENGINE_ASSETS, canonicalSessionJson];
+declare const domContext: BaseAudioContext;
+const domFactory = (context: BaseAudioContext, name: string, options: AudioWorkletNodeOptions): AudioWorkletNode =>
+  new AudioWorkletNode(context, name, options);
+const packedFeed = attachEngineFeed({
+  context: domContext,
+  sources: [{ sourceId: "packed-source", channels: 2 }],
+  quantumFrames: 128,
+  createNode: domFactory,
+});
+void packedFeed.rings;
+const packedWriter = new Msb1RingWriter(packedFeed.rings[0]);
+packedWriter.engage(1n);
+void packedWriter;
+const packedObserver = new Msb1RingObserver(packedFeed.rings[0]);
+packedObserver.pull((chunk: PcmSourceChunk) => {
+  const generation: bigint = chunk.generation;
+  const planes: readonly Float32Array[] = chunk.planes;
+  const frames: number = chunk.frames;
+  // @ts-expect-error Borrowed metadata is read-only.
+  chunk.frames = 3;
+  void [generation, planes, frames];
+}, 1);
+const observedCounters: number[] = [packedObserver.counters().underruns, packedObserver.counters().drainBlocks, packedObserver.counters().depth];
+void observedCounters;
+packedObserver.close();
+void prepareEngineFeed(domContext, BUNDLED_ENGINE_ASSETS.pcmFeedWorklet);
+async function defaultBrowserContext() {
+  const engine = await createEngine({ document: "opaque" });
+  await engine.context.resume();
+  await engine.context.suspend();
+  engine.host.node.connect(engine.context.destination);
+  const nativeContext: AudioContext = engine.context;
+  const forwarded = await createEngine({ document: "opaque", createWorker: (url, options) => new Worker(url, options) });
+  await forwarded.context.resume();
+  const thin = await createEngine({ document: "opaque", createContext: () => ({
+    sampleRate: 48000, state: "suspended", close: async () => {},
+    audioWorklet: { addModule: async (_url: string) => {} }, marker: "thin" as const,
+  }) });
+  const marker: "thin" = thin.context.marker;
+  // @ts-expect-error Thin injected contexts never acquire DOM capabilities.
+  thin.context.resume();
+  void [nativeContext, marker];
+}
+void defaultBrowserContext;
+declare const browser: BrowserEngine;
+const host = browser.host;
+void host.command({ commands: [] });
+void host.observe({ subscriptions: [] });
+void host.submitSource({
+  sourceId: "s", generation: 1n, startFrame: 0n, sampleRateHz: 48_000,
+  planes: [new Float32Array()], frames: 0, endOfRegion: true,
+});
+void host.seekSource({ sourceId: "s", generation: 1n, sourceFrame: 0n });
+void host.meters({ enabled: false, onFrame: null });
+void host.telemetry({ enabled: false, onFrame: null });
 `, "utf8");
 const program = ts.createProgram([consumer], {
   module: ts.ModuleKind.NodeNext,
@@ -114,6 +187,50 @@ assert.deepEqual(
   [],
   "a fresh strict TypeScript consumer resolves every declaration dependency",
 );
+
+const feedModuleUrls = [];
+const packedContext = { audioWorklet: { addModule: async (url) => feedModuleUrls.push(String(url)) } };
+await imported["./browser"].prepareEngineFeed(packedContext);
+await imported["./browser"].prepareEngineFeed(packedContext, "https://example.test/explicit-feed.js");
+assert.equal(feedModuleUrls[0], String(imported["./assets"].BUNDLED_ENGINE_ASSETS.pcmFeedWorklet));
+assert.equal(feedModuleUrls[1], "https://example.test/explicit-feed.js");
+let packedAttach;
+let packedDisconnects = 0;
+const packedNode = {
+  port: { postMessage(message) { if (message.op === "attach") packedAttach = message; } },
+  disconnect() { packedDisconnects += 1; },
+};
+const packedFeedRuntime = imported["./browser"].attachEngineFeed({
+  context: packedContext,
+  sources: [{ sourceId: "packed-mono", channels: 1 }, { sourceId: "packed-stereo", channels: 2 }],
+  quantumFrames: 4,
+  createNode: () => packedNode,
+});
+assert.deepEqual(packedAttach.rings, packedFeedRuntime.rings);
+assert.deepEqual(packedFeedRuntime.rings.map((ring) => new Int32Array(ring)[2]), [64, 64]);
+for (const ring of packedFeedRuntime.rings) Atomics.store(new Int32Array(ring), 13, 1);
+await packedFeedRuntime.ready();
+const publicWriter = new imported["./browser"].Msb1RingWriter(packedFeedRuntime.rings[0]);
+publicWriter.engage(1n);
+publicWriter.reserve(3)[0].set([1, 2, 3]);
+publicWriter.commit({ generation: 1n, startFrame: 11n, frames: 3, endOfRegion: true });
+const observationBefore = Buffer.from(new Uint8Array(packedFeedRuntime.rings[0]));
+const publicObserver = new imported["./browser"].Msb1RingObserver(packedFeedRuntime.rings[0]);
+assert.equal(publicObserver.pull((chunk) => {
+  assert.equal(chunk.generation, 1n);
+  assert.equal(chunk.startFrame, 11n);
+  assert.equal(chunk.frames, 3);
+  assert.equal(chunk.endOfRegion, true);
+  assert.deepEqual([...chunk.planes[0]], [1, 2, 3, 0]);
+}), 1);
+assert.deepEqual([publicObserver.counters().underruns, publicObserver.counters().drainBlocks, publicObserver.counters().depth], [0, 0, 0]);
+publicObserver.close();
+assert.equal(publicObserver.pull(() => assert.fail("closed observer")), 0);
+assert.deepEqual(Buffer.from(new Uint8Array(packedFeedRuntime.rings[0])), observationBefore);
+packedFeedRuntime.close();
+packedFeedRuntime.close();
+assert.equal(packedDisconnects, 1);
+assert.ok(files.includes("dist/assets/miso-engine-v1-pcm-feed-worklet.js"));
 
 const builtDocument = imported["."].session({ id: "tarball.boot", sampleRateHz: 48_000 })
   .source("stem", {
@@ -237,4 +354,168 @@ try {
   );
 } finally {
   await writeFile(wasmUrl, original);
+}
+
+// Opt-in real-browser qualification reuses an existing Vite/Playwright installation; neither is
+// a package dependency. Set MISO_ENGINE_SDK_BROWSER_TOOLS to that installation's node_modules.
+// This deliberately tests a production bundle: a raw new-URL Worker asset must survive copying,
+// not just Vite's special handling of the default literal Worker constructor.
+if (process.env.MISO_ENGINE_SDK_BROWSER_TOOLS) {
+  const toolsRoot = resolve(process.env.MISO_ENGINE_SDK_BROWSER_TOOLS);
+  const [{ build }, { chromium }, { createServer }] = await Promise.all([
+    import(pathToFileURL(resolve(toolsRoot, "vite/dist/node/index.js")).href),
+    import(pathToFileURL(resolve(toolsRoot, "playwright/index.mjs")).href),
+    import("node:http"),
+  ]);
+  const browserRoot = resolve(consumerRoot, "browser");
+  await mkdir(browserRoot);
+  const seekModel = JSON.parse(builtDocument);
+  seekModel.sources[0].frames = "480000";
+  const seekDocument = JSON.stringify(seekModel);
+  const target = [Float32Array.from({ length: 128 }, (_, i) => (i + 1) / 256), Float32Array.from({ length: 128 }, (_, i) => -(i + 1) / 512)];
+  const oracle = await imported["./headless"].createOfflineEngine(seekDocument);
+  const expectedSeek = (() => {
+    try {
+      assert.equal(oracle.seekSource({ sourceId: "stem", generation: 2n, sourceFrame: 10_000n }).ok, true);
+      assert.equal(oracle.submitSource({ sourceId: "stem", generation: 2n, startFrame: 10_000n, planes: target, endOfRegion: false }).ok, true);
+      const pcm = oracle.render(); return [[...pcm.left], [...pcm.right]];
+    } finally { oracle.dispose(); }
+  })();
+  await writeFile(resolve(browserRoot, "capture.js"), `
+class Capture extends AudioWorkletProcessor {
+  constructor() { super(); this.sent = false; }
+  process(inputs, outputs) {
+    const input = inputs[0];
+    if (!this.sent && input?.length === 2 && input[0].length === 128) {
+      this.sent = true; this.port.postMessage([Array.from(input[0]), Array.from(input[1])]);
+    }
+    for (let channel = 0; channel < outputs[0].length; channel++) if (input?.[channel]) outputs[0][channel].set(input[channel]);
+    return true;
+  }
+}
+registerProcessor('capture-first-quantum', Capture);
+`);
+  await writeFile(resolve(browserRoot, "index.html"), '<!doctype html><button id="default">Default boot</button><button id="forward">Forwarding factory</button><button id="seek">Paused seek</button><script type="module" src="/main.js"></script>');
+  await writeFile(resolve(browserRoot, "main.js"), `
+import { createEngine, createDefaultHost, prepareEngineFeed, attachEngineFeed, Msb1RingWriter, Msb1RingObserver } from '@misofm/engine/browser';
+import { BUNDLED_ENGINE_ASSETS } from '@misofm/engine/assets';
+const sessionDocument = ${JSON.stringify(builtDocument)};
+window.proof = [];
+for (const id of ['default', 'forward']) document.querySelector('#' + id).onclick = async () => {
+  try {
+    const calls = [];
+    const engine = await createEngine({ document: sessionDocument, ...(id === 'forward' ? {
+      createWorker(url, options) {
+        calls.push({ url: String(url), expected: String(BUNDLED_ENGINE_ASSETS.scratchWorkerModule), type: options.type });
+        return new Worker(url, options);
+      },
+    } : {}) });
+    engine.host.node.connect(engine.context.destination);
+    await engine.context.resume();
+    const status = await engine.host.status();
+    await engine.context.suspend();
+    await engine.close();
+    await engine.close();
+    window.proof.push({ id, calls, rate: engine.shape.sampleRateHz, quantum: engine.shape.quantumFrames, result: status.result, state: engine.context.state });
+  } catch (error) { window.bootError = String(error?.stack ?? JSON.stringify(error)); }
+};
+document.querySelector('#seek').onclick = async () => {
+  let engine, feed;
+  try {
+    engine = await createEngine({ document: ${JSON.stringify(seekDocument)}, policy: { sourceRingFrames: 512 }, createHost: async request => {
+      if (request.context.state === 'running') await request.context.suspend();
+      await prepareEngineFeed(request.context); return createDefaultHost(request);
+    } });
+    const context = engine.context;
+    feed = attachEngineFeed({ context, sources: [{ sourceId: 'stem', channels: 2 }], quantumFrames: 128 });
+    await feed.ready();
+    const writer = new Msb1RingWriter(feed.rings[0]); writer.engage(1n);
+    const old = () => [new Float32Array(128).fill(.25), new Float32Array(128).fill(-.25)];
+    for (let index = 0; index < 4; index++) {
+      const ack = await engine.host.submitSource({ sourceId: 'stem', generation: 1n, startFrame: BigInt(index * 128), sampleRateHz: 48000, frames: 128, planes: old(), endOfRegion: false });
+      if (ack.result !== 0) throw new Error('old internal queue did not fill');
+    }
+    const refusal = await engine.host.submitSource({ sourceId: 'stem', generation: 1n, startFrame: 512n, sampleRateHz: 48000, frames: 128, planes: old(), endOfRegion: false }).catch(error => error);
+    if (refusal.result !== 6) throw new Error('internal queue was not full');
+    for (let index = 0; index < writer.capacity; index++) {
+      const planes = writer.reserve(128); planes[0].fill(.25); planes[1].fill(-.25);
+      writer.commit({ generation: 1n, startFrame: BigInt(512 + index * 128), frames: 128, endOfRegion: false });
+    }
+    const before = await engine.host.status();
+    const beforeTime = context.currentTime;
+    writer.seek(2n, 10_000n);
+    await feed.prepareSeek();
+    const after = await engine.host.status();
+    const prepared = { state: context.state, timeUnchanged: context.currentTime === beforeTime, sampleUnchanged: after.nextAbsoluteSample === before.nextAbsoluteSample, occupancy: writer.occupancy };
+    if (prepared.state !== 'suspended' || !prepared.timeUnchanged || !prepared.sampleUnchanged || prepared.occupancy !== 0) throw new Error('preparation rendered, advanced time or retained stale slots');
+    const target = ${JSON.stringify(target.map(plane => [...plane]))};
+    for (let index = 0; index < writer.capacity; index++) {
+      const planes = writer.reserve(128); planes[0].set(target[0]); planes[1].set(target[1]);
+      writer.commit({ generation: 2n, startFrame: BigInt(10_000 + index * 128), frames: 128, endOfRegion: false });
+    }
+    await context.audioWorklet.addModule(new URL('./capture.js', import.meta.url));
+    const capture = new AudioWorkletNode(context, 'capture-first-quantum', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2] });
+    const first = new Promise(resolve => { capture.port.onmessage = ({ data }) => resolve(data); });
+    engine.host.node.connect(capture); capture.connect(context.destination);
+    await context.resume();
+    const pcm = await first;
+    await context.suspend();
+    const observer = new Msb1RingObserver(feed.rings[0]);
+    const counters = observer.counters(); observer.close();
+    window.seekProof = { prepared, pcm, counters };
+  } catch (error) { window.bootError = String(error?.stack ?? JSON.stringify(error)); }
+  finally { feed?.close(); await engine?.close(); }
+};
+`);
+  await build({ root: browserRoot, configFile: false, logLevel: "warn" });
+  const network = [];
+  const faults = [];
+  const server = createServer(async (request, response) => {
+    const pathname = new URL(request.url, "http://localhost").pathname;
+    try {
+      const bytes = await readFile(resolve(browserRoot, "dist", `.${pathname === "/" ? "/index.html" : pathname}`));
+      const mime = pathname.endsWith(".js") ? "text/javascript" : pathname.endsWith(".wasm") ? "application/wasm" : "text/html";
+      response.writeHead(200, { "content-type": mime, "cross-origin-opener-policy": "same-origin", "cross-origin-embedder-policy": "require-corp" }); response.end(bytes);
+    } catch { response.writeHead(404); response.end(); }
+  });
+  await new Promise((accept, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", accept); });
+  let browser;
+  try {
+    browser = await chromium.launch({ headless: true });
+    const page = await browser.newPage();
+    page.on("pageerror", error => faults.push(error.message));
+    page.on("requestfailed", request => faults.push(`${request.url()}: ${request.failure()?.errorText}`));
+    page.on("response", response => network.push({ url: response.url(), status: response.status() }));
+    await page.goto(`http://127.0.0.1:${server.address().port}`);
+    await page.waitForLoadState("networkidle");
+    for (const [id, count] of [["default", 1], ["forward", 2]]) {
+      await page.locator(`#${id}`).click();
+      await page.waitForFunction(count => window.proof.length === count || window.bootError, count, { timeout: 20000 });
+      assert.equal(await page.evaluate(() => window.bootError), undefined);
+    }
+    const results = await page.evaluate(() => window.proof);
+    for (const result of results) {
+      assert.equal(result.rate, 48000); assert.equal(result.quantum, 128);
+      assert.equal(result.result, 0); assert.equal(result.state, "closed");
+    }
+    assert.deepEqual(results[0].calls, []);
+    assert.equal(results[1].calls.length, 1);
+    assert.equal(results[1].calls[0].url, results[1].calls[0].expected);
+    assert.equal(results[1].calls[0].type, "module");
+    await page.locator('#seek').click();
+    await page.waitForFunction(() => window.seekProof || window.bootError, undefined, { timeout: 20000 });
+    assert.equal(await page.evaluate(() => window.bootError), undefined);
+    const seekProof = await page.evaluate(() => window.seekProof);
+    assert.deepEqual(seekProof.pcm, expectedSeek, 'first resumed browser quantum equals exact target PCM');
+    assert.equal(seekProof.counters.stale, 64);
+    assert.equal(seekProof.counters.underruns, 0);
+    assert.equal(seekProof.counters.seeksApplied, 1);
+    assert.equal(seekProof.counters.submittedGenerationTag, 2);
+    assert.deepEqual(faults, []);
+    assert.equal(network.some(response => response.status >= 400), false);
+    console.log(`packed Vite/Chromium browser boot passed: ${JSON.stringify({ results, seekProof, network })}`);
+  } finally {
+    await browser?.close();
+    await new Promise(accept => server.close(accept));
+  }
 }

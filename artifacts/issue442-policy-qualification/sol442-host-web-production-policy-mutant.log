@@ -1,0 +1,29 @@
+   Compiling host-web v0.1.0 (/home/bl/misofm/engine-430-plan/hosts/host-web)
+warning: unused import: `prepare_host_runtime_between_render_calls`
+  --> hosts/host-web/src/lib.rs:33:46
+   |
+33 |     control_table_bytes, parse_host_session, prepare_host_runtime_between_render_calls,
+   |                                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `host-web` (lib) generated 1 warning (run `cargo fix --lib -p host-web` to apply 1 suggestion)
+warning: `host-web` (lib test) generated 1 warning (1 duplicate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.60s
+     Running unittests src/lib.rs (/tmp/sol442-target/debug/deps/host_web-5bbcf2d829042aa5)
+
+running 1 test
+
+thread 'tests::source_backpressure_seek_render_and_stable_output_are_bounded' (2521223) panicked at hosts/host-web/src/lib.rs:2633:5:
+WebEngine construction must seal between-render-call post-fader owners
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test tests::source_backpressure_seek_render_and_stable_output_are_bounded ... FAILED
+
+failures:
+
+failures:
+    tests::source_backpressure_seek_render_and_stable_output_are_bounded
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 60 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `-p host-web --lib`

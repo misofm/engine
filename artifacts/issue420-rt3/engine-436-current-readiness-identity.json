@@ -1,0 +1,9 @@
+{
+  "head": "1fc6ed1ed3fe57ccac0b47899a1cbe36c9050571",
+  "product_merge": "c7469e28d52a716339b6f3119a57b69afb3411f1",
+  "unexpected_changes": [],
+  "manifest_entries_verified": 48,
+  "binary_sha256": "53dce85d8ff683693598da8dce79195ecfad1ad76300b68bb348196c00f81bab",
+  "binary_age_seconds": 19790.35907816887,
+  "reserved_paths_absent": true
+}

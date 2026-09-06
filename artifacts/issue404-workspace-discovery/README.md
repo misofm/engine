@@ -1,0 +1,7 @@
+# Workspace discovery qualification
+
+Immutable candidate `6834d35187c4723eda7e1d75e598832edc4762d4` passed `cargo test --locked --workspace`, including doctests, with terminal exit 0: 275 result blocks, 1,576 passed, zero failed, 24 ignored. This matches delivered main `3faf89adea25e32e85a27d744c643a79cd80ce31`; source stayed clean throughout.
+
+Astra passed final source `366be2c0b1ae161bd87c72a77dc5baca12c8abd1`. The checker and existing fixture suite cover the frozen five discovery populations and downstream parsing/search chains, required versus optional empty results, exact Git fallback and all directed error modes. Two actual production status-loss mutations must fail the same original targeted assertion at status 97, distinct from setup/diagnostic status 96. The final suite, actual checker, independent unchanged helper suite, syntax and diff hygiene passed. Failed earlier attempts and their narrower passing tests are preserved candidly. Empty syntax/diff logs require their command/exit evidence in the numbered decision record; their emptiness alone is not proof.
+
+The runtime and artifact build input comparison has no delta. No new target, Wasm object, worklet/browser or timing execution is claimed. #427 already delivered the Wasm half; #404 completes its remaining workspace obligation. #403, #306 and audit #349 retain their separate work. Actual PR review and required CI remain separate delivery gates.

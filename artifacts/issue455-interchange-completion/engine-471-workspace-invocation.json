@@ -1,0 +1,7 @@
+{
+  "head": "1171d0e44710010125c0f6c4571b29a2fdc6754a",
+  "command": "cargo test --locked --workspace",
+  "target": "/tmp/engine-471-workspace-qualified",
+  "status": "completed",
+  "exit_code": 0
+}

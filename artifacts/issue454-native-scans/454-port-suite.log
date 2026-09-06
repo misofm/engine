@@ -1,0 +1,4 @@
+counter-mutant unexpectedly passed: operation status was swallowed
+LATE_PORTABILITY_SENTINEL
+native PCM runner portability check: ok
+native PCM runner portability policy mutations: ok

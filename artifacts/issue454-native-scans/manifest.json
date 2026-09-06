@@ -1,0 +1,272 @@
+[
+  {
+    "path": "454-all-check.log",
+    "bytes": 71,
+    "sha256": "1279ef8241586ca70dbc505ee1d816e6c156b7e3a64b2d07f97f43023be55de9"
+  },
+  {
+    "path": "454-invalidmode2.log",
+    "bytes": 70,
+    "sha256": "59a55c8b7554f6906f7f667fb8269aee307a8c4a4453749060852ba81de0b077"
+  },
+  {
+    "path": "454-port-suite.log",
+    "bytes": 184,
+    "sha256": "1476e3ca64528a42e4b8ad627e0a2313ea5f3c48d26282c227077590c5707cc7"
+  },
+  {
+    "path": "454-portability-check.log",
+    "bytes": 40,
+    "sha256": "e7ef018d75aada65d13eff3bafdd2ac27511805d76a1195ab3b0c008d851bf23"
+  },
+  {
+    "path": "454-sol2-all-check.log",
+    "bytes": 71,
+    "sha256": "1279ef8241586ca70dbc505ee1d816e6c156b7e3a64b2d07f97f43023be55de9"
+  },
+  {
+    "path": "454-sol2-all-check.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "454-sol2-invalid-check.log",
+    "bytes": 70,
+    "sha256": "59a55c8b7554f6906f7f667fb8269aee307a8c4a4453749060852ba81de0b077"
+  },
+  {
+    "path": "454-sol2-invalid-check.status",
+    "bytes": 2,
+    "sha256": "53c234e5e8472b6ac51c1ae1cab3fe06fad053beb8ebfd8977b010655bfdd3c3"
+  },
+  {
+    "path": "454-sol2-late-portability-mutant.diff",
+    "bytes": 1491,
+    "sha256": "d2ba8ec667a27c02ba7b16969858b4f56b6fb2bb430dad6bd0267088a65677bc"
+  },
+  {
+    "path": "454-sol2-port-suite.log",
+    "bytes": 175,
+    "sha256": "b4aa23ad80c7f0dad7c4955a93acc1ed271390e3450dafd5f4593594f868b2fa"
+  },
+  {
+    "path": "454-sol2-port-suite.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "454-sol2-portability-check.log",
+    "bytes": 40,
+    "sha256": "e7ef018d75aada65d13eff3bafdd2ac27511805d76a1195ab3b0c008d851bf23"
+  },
+  {
+    "path": "454-sol2-portability-check.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "454-sol2-reachability-mutant.diff",
+    "bytes": 1384,
+    "sha256": "66b896a34945e60e07c5cbabc4eeb1a0c45d5b69f779ab8faf81e546482e1cbf"
+  },
+  {
+    "path": "454-sol2-syntax.log",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "454-sol2-syntax.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "454-sol2-v1-check.log",
+    "bytes": 31,
+    "sha256": "61389552a9c42774c609b1451c0b5db1ccd6369a79781afcdad5a811f4df0cde"
+  },
+  {
+    "path": "454-sol2-v1-check.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "454-sol2-v1-suite.log",
+    "bytes": 134,
+    "sha256": "9fe2637c2cb27f23606abf9232481f5387a2973e195f23ab502f3d28b0607b15"
+  },
+  {
+    "path": "454-sol2-v1-suite.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "454-sol3-all-check.log",
+    "bytes": 71,
+    "sha256": "1279ef8241586ca70dbc505ee1d816e6c156b7e3a64b2d07f97f43023be55de9"
+  },
+  {
+    "path": "454-sol3-all-check.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "454-sol3-commands.log",
+    "bytes": 435,
+    "sha256": "fa2a9446b81fac09a6790f6916c54f0b9c1510ee2799fc46a0885972164ecff4"
+  },
+  {
+    "path": "454-sol3-diff-check.log",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "454-sol3-diff-check.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "454-sol3-invalid-check.log",
+    "bytes": 70,
+    "sha256": "59a55c8b7554f6906f7f667fb8269aee307a8c4a4453749060852ba81de0b077"
+  },
+  {
+    "path": "454-sol3-invalid-check.status",
+    "bytes": 2,
+    "sha256": "53c234e5e8472b6ac51c1ae1cab3fe06fad053beb8ebfd8977b010655bfdd3c3"
+  },
+  {
+    "path": "454-sol3-late-portability-mutant.diff",
+    "bytes": 1491,
+    "sha256": "4aec1fc103e3673e7118e5de8e092a42c7c90c1cb5a016b7e7cdf1d1d1b9164a"
+  },
+  {
+    "path": "454-sol3-port-suite.log",
+    "bytes": 207,
+    "sha256": "997d87188d82be138f98e6b6da56954cd8b023632f4fa29c96da224a58a18b66"
+  },
+  {
+    "path": "454-sol3-port-suite.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "454-sol3-portability-check.log",
+    "bytes": 40,
+    "sha256": "e7ef018d75aada65d13eff3bafdd2ac27511805d76a1195ab3b0c008d851bf23"
+  },
+  {
+    "path": "454-sol3-portability-check.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "454-sol3-reachability-mutant.diff",
+    "bytes": 1384,
+    "sha256": "b2a62bafbddcf597e1bccf3a206d2c69349c37d69de36103def471e412d893fd"
+  },
+  {
+    "path": "454-sol3-syntax.log",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "454-sol3-syntax.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "454-sol3-v1-check.log",
+    "bytes": 31,
+    "sha256": "61389552a9c42774c609b1451c0b5db1ccd6369a79781afcdad5a811f4df0cde"
+  },
+  {
+    "path": "454-sol3-v1-check.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "454-sol3-v1-suite.log",
+    "bytes": 134,
+    "sha256": "9fe2637c2cb27f23606abf9232481f5387a2973e195f23ab502f3d28b0607b15"
+  },
+  {
+    "path": "454-sol3-v1-suite.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "454-v1-check.log",
+    "bytes": 31,
+    "sha256": "61389552a9c42774c609b1451c0b5db1ccd6369a79781afcdad5a811f4df0cde"
+  },
+  {
+    "path": "454-v1-suite.log",
+    "bytes": 143,
+    "sha256": "28d148c9a8dbe9228f77f535d0257830c0ebbbd2b4da445652eeb997a27ddc0b"
+  },
+  {
+    "path": "README.md",
+    "bytes": 1259,
+    "sha256": "7dd0f967da566b1a1111084a606661cfdef2b61474a8a5f4bb1beeddb6c99d92"
+  },
+  {
+    "path": "astra-454-attempt1-bypass-probe.log",
+    "bytes": 59,
+    "sha256": "d4040adf1d5f41ee53f931805289129e2bcce68cb21e37241d5c14f178ec9489"
+  },
+  {
+    "path": "astra-454-attempt1-count-probe.log",
+    "bytes": 67,
+    "sha256": "5848e939dd6c594f755ebc434b3bcb60a5794bc7a5185feb515f4f69f45a16f3"
+  },
+  {
+    "path": "astra-454-attempt1-review.md",
+    "bytes": 9327,
+    "sha256": "2563d352450d841d64977cdf0d3acbd52e250000246a6580daf2a655a182ac36"
+  },
+  {
+    "path": "astra-454-attempt2-review.md",
+    "bytes": 7869,
+    "sha256": "8f94375ee97a3a50a081e76831738aedc047979aaa4a2930db0c9d2b815e78e5"
+  },
+  {
+    "path": "astra-454-attempt3-conditional-proof.log",
+    "bytes": 664,
+    "sha256": "df2f379788f5b2f3e3e3d0e9ace760858821d9c10f8c8cd007b8ab96c9db7d6b"
+  },
+  {
+    "path": "astra-454-attempt3-review.md",
+    "bytes": 4946,
+    "sha256": "94eef29b5f3c073db66c9e071e5c2af476af5fbe5580a834c40f0bc432fdad2e"
+  },
+  {
+    "path": "astra-454-delivered-base-review.md",
+    "bytes": 1674,
+    "sha256": "46a5f51170f7e80616526ed55bd15e3ce14bc5cdf697dd766c3b38b1536da463"
+  },
+  {
+    "path": "astra-454-numbered-scope-review.md",
+    "bytes": 6531,
+    "sha256": "e13316b635274a6c2b28f3205399eb6ca115ef0087b5bbee72d0d627645bff8e"
+  },
+  {
+    "path": "engine-454-candidate-workspace.log",
+    "bytes": 186863,
+    "sha256": "d0805a19d3427536a66ef0795163a5626febfe22a548c1c221e8a8f44288529d"
+  },
+  {
+    "path": "engine-454-runtime-input-identity.json",
+    "bytes": 364,
+    "sha256": "03c0c9c0ef889aaba623910758ee882dcb17ccab1451df1d5e7c4385baff4beb"
+  },
+  {
+    "path": "engine-454-workspace-invocation.json",
+    "bytes": 199,
+    "sha256": "8fa48cda899afbd11c36953fa1f66c825d277d4168c632b14e43e357277c33ef"
+  },
+  {
+    "path": "engine-454-workspace-summary.json",
+    "bytes": 228,
+    "sha256": "9e733a747a184d9d53763a5a9e985c4eca3c8b6d1d64b86dad09a951da5981df"
+  }
+]

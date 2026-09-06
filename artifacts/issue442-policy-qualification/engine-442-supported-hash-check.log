@@ -1,0 +1,14 @@
+/tmp/sol-442-supported-scalar18.log: OK
+/tmp/sol-442-supported-scalar.cfg: OK
+/tmp/sol-442-supported-simd-smoke.log: OK
+/tmp/sol-442-supported-simd.cfg: OK
+/tmp/sol-442-supported-protocol-scalar-build.log: OK
+/tmp/sol-442-supported-protocol-scalar-exports.log: OK
+/tmp/sol-442-supported-protocol-scalar-run.log: OK
+/tmp/sol-442-supported-protocol-simd-build.log: OK
+/tmp/sol-442-supported-protocol-simd-exports.log: OK
+/tmp/sol-442-supported-protocol-simd-run.log: OK
+/tmp/sol-442-nonlto-build.log: OK
+/tmp/sol-442-nonlto-inspection.log: OK
+/tmp/sol-442-nonlto-inspect.py: OK
+/tmp/sol-442-supported-wasm-summary.log: OK

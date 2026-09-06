@@ -1,0 +1,4 @@
+unexpected success: late portability status was swallowed
+LATE_PORTABILITY_SENTINEL delegate_status=1 payload=empty
+native PCM runner portability check: ok
+native PCM runner portability policy mutations: ok

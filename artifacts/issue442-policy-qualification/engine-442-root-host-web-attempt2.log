@@ -1,0 +1,68 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
+     Running unittests src/lib.rs (/tmp/sol442-target/debug/deps/host_web-5bbcf2d829042aa5)
+
+running 61 tests
+test tests::a_computed_tap_is_refused_with_unsupported_kind ... ok
+test tests::default_ring_covers_stall_tolerance ... ok
+test tests::maximum_document_dense_invalid_boot_finishes_under_one_second_in_release ... ignored, release-mode budget; runs nightly
+test tests::observation_unit_conversion_is_declared_and_clamped ... ok
+test tests::the_observation_fields_account_for_the_moved_bridge_rows ... ok
+test tests::console_track_id_longer_than_every_source_id_boots_and_round_trips ... ok
+test tests::a_fader_command_names_the_exact_application_sample ... ok
+test tests::a_console_free_host_refuses_every_live_kind_as_unsupported ... ok
+test tests::a_mute_command_is_a_fader_endpoint_not_a_discontinuity ... ok
+test tests::native_identity_session_digest_pins_the_wasm_parity ... ok
+test tests::a_console_that_never_solos_renders_what_it_always_did ... ok
+test tests::command_ack_names_the_exact_application_sample ... ok
+test tests::raw_ffi_source_introspection_mirrors_the_track_queries ... ok
+test tests::a_solo_that_changes_nothing_emits_nothing ... ok
+test tests::malformed_config_and_atomic_compile_failure_are_sticky ... ok
+test tests::a_solo_gate_is_a_bounded_ramp_and_a_zero_window_snaps ... ok
+test tests::session_source_introspection_is_canonical_ordered_shaped_and_bounded ... ok
+test tests::an_effect_bypass_command_returns_the_dry_signal ... ok
+test tests::mute_and_solo_are_separate_states ... ok
+test tests::facade_source_rules_reach_the_browser_host ... ok
+test tests::a_trim_is_not_a_mute_and_solo_does_not_move_it ... ok
+test tests::frozen_layouts_and_values_are_exact ... ok
+test tests::unknown_targets_are_typed_and_leave_the_engine_untouched ... ok
+test tests::a_subscription_without_capacity_is_observation_unbound ... ok
+test tests::compile_resource_caps_are_inclusive_and_one_below_rejects ... ok
+test tests::command_flood_is_typed_backpressure_and_leaves_the_render_untouched ... ok
+test tests::retained_projection_budget_diagnostic_names_projected_bytes ... ok
+test tests::an_effect_parameter_command_names_the_exact_application_sample ... ok
+test tests::solo_records_are_shape_checked_like_mute_records ... ok
+test tests::render_failure_retains_ownership_and_silences ... ok
+test tests::native_command_timeline_digest_pins_the_wasm_parity ... ok
+test tests::each_boot_option_rule_has_its_own_typed_refusal ... ok
+test tests::a_mixed_batch_is_one_transaction_across_every_queue ... ok
+test tests::the_input_queue_is_a_destination_of_its_own ... ok
+test tests::raw_ffi_validates_handle_layout_overflow_and_transactional_failure ... ok
+test tests::output_mismatch_and_disposal_are_sticky_and_idempotent ... ok
+test tests::observation_configuration_words_are_validated ... ok
+test tests::a_trim_command_reaches_the_render_plane ... ok
+test tests::the_decode_staging_holds_a_full_batch_plus_a_solo_transition ... ok
+test tests::a_refused_batch_pushes_no_trim_record ... ok
+test tests::source_backpressure_seek_render_and_stable_output_are_bounded ... ok
+test tests::raw_ffi_uses_stable_staging_and_exact_output_quantum_without_growth ... ok
+test tests::meter_frames_equal_an_offline_fold_and_cost_the_render_nothing ... ok
+test tests::trim_and_polarity_leave_the_solo_transaction_closed ... ok
+test tests::ring_prefill_survives_stall ... ok
+test tests::a_refused_solo_submission_leaves_the_console_untouched ... ok
+test tests::observation_misuse_is_typed_and_all_or_nothing ... ok
+test tests::native_observation_timeline_digest_pins_the_wasm_parity ... ok
+test tests::quoted_root_shape_keys_self_configure_without_a_second_parser ... ok
+test tests::a_both_lane_trim_command_is_one_record_and_one_queue_slot ... ok
+test tests::un_solo_restores_the_exact_per_lane_user_mute_set ... ok
+test tests::preparation_accepts_explicit_64_128_and_256_quanta_with_stable_buffers ... ok
+test tests::a_batch_of_alternating_solo_toggles_coalesces_to_its_net_effect ... ok
+test tests::exact_retained_total_is_checked_as_one_budget_not_independent_caps ... ok
+test tests::the_meter_frame_carries_the_app_shaped_gain_reduction ... ok
+test tests::trim_and_polarity_are_admitted_on_every_lane_selector ... ok
+test tests::trim_and_polarity_refuse_on_the_declared_terms ... ok
+test tests::solo_is_bit_identically_mute_on_the_complement ... ok
+test tests::representative_retained_projection_tracks_the_post_prepare_exact_aggregate ... ok
+test tests::maximum_document_dense_invalid_fixture_reaches_bounded_semantic_validation ... ok
+test tests::maximum_document_dense_invalid_boot_is_typed_and_bounded ... ok
+
+test result: ok. 60 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.22s
+

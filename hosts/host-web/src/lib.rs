@@ -30,7 +30,7 @@ use host_core::{
     CompiledSession, ConsoleSoloState, EffectControlProducer, EffectObservationHandle, EffectRack,
     HostConsoleRequest, HostPrepareCaps, HostShapePolicy, PrepareDiagnostics, PrepareRejection,
     PreparedHost, SourceControlError, SourceSubmission, compile_host_model, compiled_session_shape,
-    control_table_bytes, parse_host_session, prepare_host_runtime_with_console,
+    control_table_bytes, parse_host_session, prepare_host_runtime_between_render_calls,
     source_id_arena_bytes,
 };
 use session::CompileCaps;
@@ -1184,7 +1184,9 @@ impl AudioWorkletEngineHost {
         self.record(code)
     }
 
-    /// Queue one strictly increasing generation-tagged absolute source seek.
+    /// Apply one strictly increasing generation-tagged source seek between render blocks.
+    /// This web host owns both producer and render plan on one exclusive thread. Successful
+    /// admission also prepares its consumer so new PCM can enter even when old queues were full.
     pub fn seek_source(&mut self, source_id: &[u8], generation: u64, source_frame: u64) -> u32 {
         if self.status.state != STATE_READY {
             return self.record(RESULT_WRONG_STATE);
@@ -1192,8 +1194,30 @@ impl AudioWorkletEngineHost {
         let Some(ready) = self.ready.as_mut() else {
             return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
         };
+        let Some(source_index) = ready
+            .session
+            .normalized_model()
+            .sources
+            .iter()
+            .position(|source| source.id.as_str().as_bytes() == source_id)
+        else {
+            return self.record(RESULT_INVALID_ARGUMENT);
+        };
+        if !ready.host.plan.can_prepare_source_seek(source_index) {
+            return self.record(RESULT_WRONG_STATE);
+        }
         let code = match ready.host.sources.seek(source_id, generation, source_frame) {
-            Ok(()) => RESULT_OK,
+            Ok(()) => {
+                if ready
+                    .host
+                    .plan
+                    .prepare_source_seek(source_index, generation, source_frame)
+                {
+                    RESULT_OK
+                } else {
+                    RESULT_INTERNAL
+                }
+            }
             Err(error) => source_result(error),
         };
         self.record(code)
@@ -2627,7 +2651,7 @@ fn compile_ready(
 ) -> Result<(ReadyOwnership, WebResourceReport), BootFailure> {
     let console = console_request(options, session.quantum().0)
         .ok_or_else(|| fixed_diagnostic("web.console.config"))?;
-    let (host, handles) = prepare_host_runtime_with_console(&session, caps, &console)
+    let (host, handles) = prepare_host_runtime_between_render_calls(&session, caps, &console)
         .map_err(BootFailure::preparation)?;
     let engine = host.report;
 

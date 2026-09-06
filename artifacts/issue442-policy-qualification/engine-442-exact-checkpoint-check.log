@@ -1,0 +1,28 @@
+    Checking engine v0.1.0 (/home/bl/misofm/engine-430-plan/crates/engine)
+    Checking math v0.1.0 (/home/bl/misofm/engine-430-plan/crates/math)
+    Checking dsp-reference v0.1.0 (/home/bl/misofm/engine-430-plan/crates/dsp-reference)
+    Checking effect-contract v0.1.0 (/home/bl/misofm/engine-430-plan/crates/effect-contract)
+    Checking bench-support v0.1.0 (/home/bl/misofm/engine-430-plan/tools/bench-support)
+    Checking rack v0.1.0 (/home/bl/misofm/engine-430-plan/crates/rack)
+    Checking conformance v0.1.0 (/home/bl/misofm/engine-430-plan/crates/conformance)
+    Checking graph v0.1.0 (/home/bl/misofm/engine-430-plan/crates/graph)
+error[E0063]: missing field `stage` in initializer of `GraphNodeId`
+    --> crates/graph/src/lib.rs:1984:36
+     |
+1984 |                         .unwrap_or(GraphNodeId::TrackStage {
+     |                                    ^^^^^^^^^^^^^^^^^^^^^^^ missing `stage`
+
+error[E0063]: missing field `stage` in initializer of `GraphNodeId`
+    --> crates/graph/src/lib.rs:2026:29
+     |
+2026 |                 .map(|lane| GraphNodeId::TrackStage {
+     |                             ^^^^^^^^^^^^^^^^^^^^^^^ missing `stage`
+
+error[E0063]: missing field `stage` in initializer of `GraphNodeId`
+    --> crates/graph/src/lib.rs:2071:25
+     |
+2071 |             .map(|lane| GraphNodeId::TrackStage {
+     |                         ^^^^^^^^^^^^^^^^^^^^^^^ missing `stage`
+
+For more information about this error, try `rustc --explain E0063`.
+error: could not compile `graph` (lib test) due to 3 previous errors

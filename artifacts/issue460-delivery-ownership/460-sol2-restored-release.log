@@ -1,0 +1,9 @@
+   Compiling protocol v0.1.0 (/home/bl/misofm/engine-140-ownership/crates/protocol)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.52s
+     Running unittests src/lib.rs (/tmp/engine-460-sol-target/debug/deps/protocol-8d85afa28ae00720)
+
+running 1 test
+test delivery::tests::total_outstanding_bound_and_terminal_collection_are_the_only_reuse_credit ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 133 filtered out; finished in 0.00s
+
