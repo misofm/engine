@@ -1,0 +1,5 @@
+argv: cargo test --locked -p true-peak-limiter --test determinism shared_hex_adapter_matches_literal_bytes -- --exact
+cwd: /home/bl/misofm/engine-dsp-test-hex
+env: PATH=/home/bl/.cargo/bin:$PATH
+head: 793a6b186c83482e67e512a36fe5e79d458f27a9
+source: crates/true-peak-limiter/tests/determinism.rs blob=dc04207ac5feaaff6785dc564168a4ebde38d6d6

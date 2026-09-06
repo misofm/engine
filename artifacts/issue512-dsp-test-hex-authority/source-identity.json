@@ -1,0 +1,26 @@
+{
+  "captured_by": "root after source checkpoint; supplements original dirty source blob metadata",
+  "source_commit": "ab4627ae5bad60e836d8afa5cf85a3c08c3b5937",
+  "files": [
+    {
+      "path": "crates/compressor/tests/cross_target.rs",
+      "sha256": "0ba7c4c53dc1b5347aab8e519a5cac7b0a1be0d3be127a73e52d6909f73d89df",
+      "git_blob": "e20040aed75e84d45811bda22bd9dcb8777f9433"
+    },
+    {
+      "path": "crates/parametric-eq/tests/determinism.rs",
+      "sha256": "c119c296c527a028dced4cc1e23584bbec55e8cb92b02beea61793a5c425e89f",
+      "git_blob": "e14f21d39f96883320a0971e6f0002934d5ada3e"
+    },
+    {
+      "path": "crates/transient-shaper/tests/cross_target.rs",
+      "sha256": "0d4c737f1ebbccbf44a453bc2635b74cd7952303cc5a9a92f865aa615b6f0f0d",
+      "git_blob": "bcbab462ccbd1e3f1a32fd28acf78291744f16e9"
+    },
+    {
+      "path": "crates/true-peak-limiter/tests/determinism.rs",
+      "sha256": "78b789b4aaf06363f8f5b60b9fc6f1df2521132667cb1a0efac6761f23ef2aab",
+      "git_blob": "dc04207ac5feaaff6785dc564168a4ebde38d6d6"
+    }
+  ]
+}

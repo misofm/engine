@@ -1,0 +1,5 @@
+argv: git diff --check
+cwd: /home/bl/misofm/engine-dsp-test-hex
+env: PATH=/home/bl/.cargo/bin:$PATH
+head: 793a6b186c83482e67e512a36fe5e79d458f27a9
+source: AGENTS.md blob=1e41740c493e9fd551b365701a1da89631cd74ce
