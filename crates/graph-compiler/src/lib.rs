@@ -268,7 +268,9 @@ mod tests {
         canonical_parts, edge_text, edge_text_len, hex_sha256, node_text, node_text_len,
         write_canonical,
     };
-    use crate::ids::{gid, port, rack_id, route_destination_node, route_source_node, stages, track_node};
+    use crate::ids::{
+        gid, port, rack_id, route_destination_node, route_source_node, stages, track_node,
+    };
     use crate::pdc::timings;
     use crate::schedule::{
         buffer_assignments, cycle_witness, cycle_witnesses, is_identity_boundary, topo,
@@ -386,7 +388,9 @@ mod tests {
             }
         );
         assert_eq!(
-            route_destination_node(&RouteDestination::OutputInput { output_id: output_id.clone() }),
+            route_destination_node(&RouteDestination::OutputInput {
+                output_id: output_id.clone()
+            }),
             GraphNodeId::Output {
                 output_id: gid(output_id.as_str()),
             }
