@@ -398,3 +398,5 @@ Clean d1295506 passes the workspace (277 result blocks;1660passed/0failed/24igno
 ## Delivered — PR #515
 
 Merged2026-09-06T09:16:15Z as107b9ed1803b8313e434821ec5bf49a178b6bb2f after Astra actual-PR PASS on fd6953774bc60c0cc0b15ef73cc72e0f3057a95d against a6a59030 ([review](https://github.com/misofm/engine/pull/515#issuecomment-5558248762)) and required qualification34023823998 SUCCESS. GitHub511 CLOSED. This delivers the runtime slot reservation prerequisite, not all of RT8 or an unmeasured speed improvement. #478 still requires fresh base review. Post-main qualification34024175768 is running and is not yet claimed green.
+
+Post-main qualification34024175768 completed SUCCESS on107b9ed1803b8313e434821ec5bf49a178b6bb2f. Both required pre-merge and combined post-main CI are green.
