@@ -1660,6 +1660,91 @@ mod tests {
         units
     }
 
+    /// A small independent contract for the runtime's bank-unit emission order (#488).
+    ///
+    /// The randomized interpreters below intentionally model the runtime schedule so they can
+    /// check larger dataflow properties. This fixture instead keeps the expected schedule as
+    /// handwritten literals and compares it directly with `runtime::units_of`, so a shared
+    /// scheduling mistake cannot make the assertion pass.
+    #[test]
+    fn runtime_units_match_literal_bank_schedules() {
+        fn program_with_ops(count: usize) -> ExecutionProgram {
+            let ops = (0..count)
+                .map(|index| Op {
+                    // Deliberately nonmonotonic and unrelated to the op position.
+                    node: [41, 7, 93, 18, 66, 12, 87, 3][index],
+                    level: 0,
+                    inputs: (0, 0),
+                    sidechain: None,
+                    output: BufferRef(index as u32),
+                    in_place: false,
+                })
+                .collect::<Vec<_>>()
+                .into_boxed_slice();
+            ExecutionProgram {
+                ops,
+                inputs: Box::new([]),
+                delays: Box::new([]),
+                node_buffer: Box::new([]),
+                node_op: Box::new([]),
+                taps: Box::new([]),
+                buffers: count as u32,
+                output: BufferRef(0),
+            }
+        }
+
+        let empty = program_with_ops(0);
+        assert_eq!(
+            crate::runtime::units_of(&empty, &crate::runtime::BankMembership::new()),
+            Vec::<crate::runtime::PlannedUnit>::new()
+        );
+
+        let no_members = program_with_ops(8);
+        assert_eq!(
+            crate::runtime::units_of(&no_members, &crate::runtime::BankMembership::new()),
+            (0..8).map(|index| (None, vec![index])).collect::<Vec<_>>()
+        );
+
+        let program = program_with_ops(8);
+        let mut membership = crate::runtime::BankMembership::new();
+        membership.insert(66, (crate::runtime::Membership::Effect(0), 0));
+        membership.insert(7, (crate::runtime::Membership::Effect(0), 1));
+        membership.insert(12, (crate::runtime::Membership::Builtin(0), 0));
+        membership.insert(93, (crate::runtime::Membership::Builtin(0), 1));
+        membership.insert(87, (crate::runtime::Membership::Effect(1), 0));
+
+        let expected = vec![
+            (None, vec![0]),
+            (Some(crate::runtime::Membership::Effect(0)), vec![4, 1]),
+            (Some(crate::runtime::Membership::Builtin(0)), vec![5, 2]),
+            (None, vec![3]),
+            (Some(crate::runtime::Membership::Effect(1)), vec![6]),
+            (None, vec![7]),
+        ];
+        assert_eq!(crate::runtime::units_of(&program, &membership), expected);
+
+        let effect_membership = membership
+            .iter()
+            .filter_map(|(node, (kind, lane))| match kind {
+                crate::runtime::Membership::Effect(bank) => Some((*node, (*bank, *lane))),
+                crate::runtime::Membership::Builtin(_) => None,
+            })
+            .collect();
+        let expected_effect_only = vec![
+            vec![0],
+            vec![4, 1],
+            vec![2],
+            vec![3],
+            vec![5],
+            vec![6],
+            vec![7],
+        ];
+        assert_eq!(
+            units_in_runtime_order(&program, &effect_membership),
+            expected_effect_only
+        );
+    }
+
     /// `runtime::op_dataflow`, restated for the interpreter: readers of each op, and the op that
     /// produced each op's first main input.
     fn op_dataflow_model(program: &ExecutionProgram) -> (Vec<Vec<usize>>, Vec<Option<usize>>) {
