@@ -106,3 +106,10 @@ poll cadence work, benchmark framework, or effect-observation redesign.
   selection mode; it was left unchanged rather than mutating its workload. The operation-site
   gate supplies the required work-removal evidence while a descriptive peak/full timing invocation
   remains pending owner review under the ceremony boundary.
+
+
+## Timing disposition and independent review
+
+Dedicated Astra medium source review passed, conditional on final shipped artifact qualification. The bounded timing helper was separately reviewed after correcting its JSON serializer. Release preflight passed. The sole timing invocation at `11cb3c2e` then failed during warmup: its final source chunk omitted the end-of-region marker and was correctly rejected. No measured rounds or timing figures exist. Raw evidence is committed in `docs/evidence/metering-519-520/timing-failed.log` and `timing-failed.jsonl`. No retry was performed and no measured speedup is claimed.
+
+Per the repository's bounded benchmark-failure rule, the remaining timing requirement is explicitly transferred to [#522](https://github.com/misofm/engine/issues/522), whose stateless brief was written and reviewed by dedicated Astra medium. That tooling successor does not relax numerical, realtime, resource or work-avoidance gates for this feature.

@@ -1,0 +1,1 @@
+{"kind":"header","label":"isolated metering ns for 9 streams; poll-only callback ns","measured_rounds":2,"period_blocks":32,"quantum":128,"schema":1,"warmups":1,"windows":256}
