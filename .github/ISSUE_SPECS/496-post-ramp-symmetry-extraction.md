@@ -61,3 +61,17 @@ Read-only source/Git comparison; no tests/builds/timing or source/spec/Git/GitHu
 ## Current implementation-base readiness
 
 Root integrated delivered mainad00d16b8ef8e3aa5ba4c406d00db4c62ff311b5 after PR502 closed475/499 and carried their closure record. Builtins/Cargo/config are byte-identical to scopedfd4a937c; no implementation has started. This becomes the next sole runtime feature after475 delivery, independently of500 graph-compiler maintenance. Await Astra actual numbered-base review before fresh Luna1 and bounded pre-edit native inspection. No timing or broader optimization is authorized.
+
+## Astra implementation-base PASS and activation
+
+# Astra #496 actual implementation-base review — PASS
+
+Reviewed clean exact head 5be6737abdb017854e0c16a8655cb7757bf21d6a in engine-rt5-ramp-plan, integrated delivered main ad00d16b8ef8e3aa5ba4c406d00db4c62ff311b5 after PR502/#475/#499 delivery. Only numbered scope and closure documents differ from main. All crates/hosts/tools/scripts/Cargo/config match delivered main; builtins/Cargo/config also remain byte-identical to the originally scoped fd4a937c. The entire previously approved numbered #496 text is retained, followed by its review and current-base record. No source implementation has started.
+
+Approve fresh Luna1 as the next sole runtime feature. #500 graph-compiler maintenance is independent. Begin with the frozen bounded pre-edit native optimized-body inspection; report inlining limits or an honest lowering null without a new probe framework or timing requirement. Then implement only the private stack-only whole-mask helper and two ordered post-ramp call sites. Preserve the unchanged per-lane predicate, preparation/reset, #238 addressed updates, bitwise comparisons/countdowns/padding, mirroring, layout, public API and DSP arithmetic.
+
+The frozen finite proof remains unchanged: W1/W4/W8 compact oracle cases; actual dual/mono ramp PCM/state and subsequent retarget behavior; no helper invocation on settled blocks; isolated full-W8 at-most30 extraction observation versus old240 and the same intended assertion under the one actual old-full-refresh mutation. Keep oracle/report/settle work outside that observation. Existing liveness/console tests, proportional strict Clippy/fmt/policies and later immutable qualification remain required. No universal instruction/cycle reduction, C-3 false failure, additional matrix, allocator instrumentation or benchmark authority is introduced.
+
+Root retains remote identity/body synchronization, checkpoint ownership and attempt escalation. Source acceptance and later current-artifact/actual-PR/required-CI delivery remain separate gates. Read-only source/Git comparison only; no builds/tests/timing or source/spec/Git/GitHub changes performed.
+
+Root activates fresh Luna attempt 1 on the approved production base. The separately discovered compressor allocation-proof issue #503 now has source and exact-PR Astra PASS plus authentic local focused/full/DSP integration PASS; its PR504 awaits required CI. Its changes are confined to compressor tests/dev-dependency, so this builtins runtime slice is independent. Root retains Git/checkpoint ownership and no timing is authorized.
