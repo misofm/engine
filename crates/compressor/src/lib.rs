@@ -43,12 +43,13 @@ use effect_contract::{
     EffectDescriptor, EffectPrepareError, EffectProcessBlock, EffectQuality, InitialParameterValue,
     LatencySamples, LinkModeSet, NativeEffectFactory, ObservationCadence, ObservationChannels,
     ObservationCost, ObservationDescriptor, ObservationFold, ObservationKind, ObservationSample,
-    ObservationTapId, ParameterChannel, ParameterChannelPolicy, ParameterDescriptor,
-    ParameterDomain, ParameterId, ParameterMapping, ParameterUnit, PortDescriptor, PortId,
-    PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectRequest, PreparedAutomationSpan,
-    PreparedBankMetadata, PreparedEffectMetadata, PreparedNativeEffect, PreparedNativeEffectBank,
-    ProcessReport, ResetKind, SmoothingRule, StatePayloadError, StatePayloadInput,
-    StatePayloadOutput, StatePayloadSizes, TailSamples, expected_prepared_metadata,
+    ObservationTapId, ParameterAccessError, ParameterChannel, ParameterChannelPolicy,
+    ParameterDescriptor, ParameterDomain, ParameterId, ParameterMapping, ParameterUnit,
+    PortDescriptor, PortId, PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectRequest,
+    PreparedAutomationSpan, PreparedBankMetadata, PreparedEffectMetadata, PreparedNativeEffect,
+    PreparedNativeEffectBank, PreparedParameterState, ProcessReport, ResetKind, SmoothingRule,
+    StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
+    expected_prepared_metadata,
 };
 use effect_runtime::bank::block_is_positive_zero;
 use effect_runtime::params::{is_negative_zero, normalize_zero, parameter_value_valid};
@@ -881,6 +882,89 @@ impl PreparedNativeEffect for PreparedCompressor {
 
     fn channel_symmetry(&self) -> bool {
         self.instance.designed_channel_symmetry(0)
+    }
+
+    /// Applies a compressor target by zero-based descriptor index.
+    ///
+    /// Indices 0 through 6 are the threshold dB, ratio, knee dB, attack milliseconds, release
+    /// milliseconds, makeup dB, and unitless wet mix. Index 7 (lookahead milliseconds) is readable
+    /// but fixed after preparation. Left and Right are independent; Both is rejected. Validation
+    /// precedence is index, channel, automatable, then finite in-domain value, and every rejection
+    /// leaves the complete prepared state unchanged.
+    ///
+    /// The accepted target begins the compressor's 64-sample smoothing transition without
+    /// processing a sample. A direct native caller must keep this call, any no-sample catch-up,
+    /// and the following [`Self::process`] call within the canonical environment established by
+    /// [`lane::CanonicalFpEnv`], as render entry does.
+    fn apply_parameter_point(
+        &mut self,
+        parameter_index: u32,
+        channel: ParameterChannel,
+        value: f32,
+    ) -> Result<(), ParameterAccessError> {
+        let index = usize::try_from(parameter_index)
+            .ok()
+            .filter(|&index| index < PARAMETER_COUNT)
+            .ok_or(ParameterAccessError::InvalidParameterIndex)?;
+        let lane = match channel {
+            ParameterChannel::Left => 0,
+            ParameterChannel::Right => 1,
+            ParameterChannel::Both => return Err(ParameterAccessError::InvalidChannel),
+        };
+        if !COMPRESSOR_PARAMETERS[index].automatable {
+            return Err(ParameterAccessError::NotAutomatable);
+        }
+        if !parameter_value_valid(&PARAMETER_SPECS[index], value) {
+            return Err(ParameterAccessError::InvalidValue);
+        }
+        let value = normalize_zero(value);
+        self.instance.silent_fixed_point = false;
+        let channel = if lane == 0 {
+            &mut self.instance.left
+        } else {
+            &mut self.instance.right
+        };
+        channel.ramps[index][0].set_target(value, SMOOTHING_SAMPLES);
+        Ok(())
+    }
+
+    /// Reads the resident current and target values in the units listed above.
+    ///
+    /// The same index and channel validation applies. Lookahead reports its fixed prepared value
+    /// as both current and target. Reading never changes smoother, detector, or delay state. Direct
+    /// native scheduling shares the [`lane::CanonicalFpEnv`] precondition documented on
+    /// [`Self::apply_parameter_point`].
+    fn parameter_state(
+        &self,
+        parameter_index: u32,
+        channel: ParameterChannel,
+    ) -> Result<PreparedParameterState, ParameterAccessError> {
+        let index = usize::try_from(parameter_index)
+            .ok()
+            .filter(|&index| index < PARAMETER_COUNT)
+            .ok_or(ParameterAccessError::InvalidParameterIndex)?;
+        let lane = match channel {
+            ParameterChannel::Left => 0,
+            ParameterChannel::Right => 1,
+            ParameterChannel::Both => return Err(ParameterAccessError::InvalidChannel),
+        };
+        let channel = if lane == 0 {
+            &self.instance.left
+        } else {
+            &self.instance.right
+        };
+        if index == RAMP_COUNT {
+            let value = channel.lookahead_ms[0];
+            return Ok(PreparedParameterState {
+                current_value: value,
+                target_value: value,
+            });
+        }
+        let ramp = channel.ramps[index][0];
+        Ok(PreparedParameterState {
+            current_value: ramp.current,
+            target_value: ramp.target,
+        })
     }
 
     fn reset(&mut self, kind: ResetKind) {

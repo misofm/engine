@@ -1,0 +1,38 @@
+
+running 2 tests
+test kernel::tests::uniform_and_ragged_access_match_old_transcription ... ok
+test kernel::tests::w4_state_owner_transitions_drive_the_next_real_render ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+
+running 3 tests
+test scoped_allocator_attribution_controls_are_live_and_isolated ... ok
+
+running 1 test
+test uniform_and_ragged_render_paths_allocate_and_free_nothing ... FAILED
+
+failures:
+
+failures:
+    uniform_and_ragged_render_paths_allocate_and_free_nothing
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+test uniform_and_ragged_render_paths_allocate_and_free_nothing ... FAILED
+test passes_effect_contract_conformance ... ok
+
+failures:
+
+---- uniform_and_ragged_render_paths_allocate_and_free_nothing stdout ----
+
+thread 'uniform_and_ragged_render_paths_allocate_and_free_nothing' (220613) panicked at crates/compressor/tests/conformance.rs:100:9:
+isolated allocation audit child failed
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    uniform_and_ragged_render_paths_allocate_and_free_nothing
+
+test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.87s
+

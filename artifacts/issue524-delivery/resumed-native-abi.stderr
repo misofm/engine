@@ -1,0 +1,10 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+   Compiling builtins v0.1.0 (/home/bl/misofm/engine-native-points/crates/builtins)
+   Compiling effect-package v0.1.0 (/home/bl/misofm/engine-native-points/crates/effect-package)
+   Compiling builtins-compiler v0.1.0 (/home/bl/misofm/engine-native-points/crates/builtins-compiler)
+   Compiling effect-compiler v0.1.0 (/home/bl/misofm/engine-native-points/crates/effect-compiler)
+   Compiling graph-compiler v0.1.0 (/home/bl/misofm/engine-native-points/crates/graph-compiler)
+   Compiling host-core v0.1.0 (/home/bl/misofm/engine-native-points/crates/host-core)
+   Compiling capi v0.1.0 (/home/bl/misofm/engine-native-points/crates/capi)
+    Finished `release` profile [optimized + debuginfo] target(s) in 13.71s

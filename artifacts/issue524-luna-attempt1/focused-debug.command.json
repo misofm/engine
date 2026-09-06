@@ -1,0 +1,37 @@
+{
+  "argv": [
+    "cargo",
+    "test",
+    "-p",
+    "compressor",
+    "--test",
+    "native_points",
+    "--locked"
+  ],
+  "cwd": "/home/bl/misofm/engine-native-points",
+  "head": "46d366fceea462e47a6e7d635c063ae4ddb3ef9a",
+  "status": " M crates/compressor/src/lib.rs\n M crates/compressor/tests/conformance.rs\n M crates/effect-contract/src/lib.rs\n?? crates/compressor/tests/native_points.rs\n",
+  "env": {
+    "PATH": "/home/bl/.cargo/bin:/home/bl/.cargo/bin:/home/bl/.local/bin:/home/bl/.codex/packages/standalone/releases/0.153.4-x86_64-unknown-linux-musl/codex-path:/home/bl/.codex1/tmp/arg0/codex-arg0Q8EgMu:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin",
+    "RUSTFLAGS": null,
+    "CARGO_TARGET_DIR": null
+  },
+  "source": {
+    "crates/effect-contract/src/lib.rs": {
+      "sha256": "91435f21417359846c1217bdf19747592e55dd1e99c4134ded4fd353fe1c4ba4",
+      "git_blob": "80d1409727a0b5ced3db8470425d883add735189"
+    },
+    "crates/compressor/src/lib.rs": {
+      "sha256": "5de3430fbd25f3326424154e5a88fc2f8dea54b241a14e76e275249ff0d4f75d",
+      "git_blob": "09a4a1f7405298d358fb589b266d8074ce58ed3a"
+    },
+    "crates/compressor/tests/native_points.rs": {
+      "sha256": "06f676c13cdee7e806f3857cec9f49bc02462a06d49bf5d6bb8cdddd0407dd7e",
+      "git_blob": "451acfcff55736719f540bfb8f3bd715f49ac5df"
+    },
+    "crates/compressor/tests/conformance.rs": {
+      "sha256": "6791e9ebc3573d61d285a0de7f18cf13ff1d746c025dac2d184355776f3c424b",
+      "git_blob": "03ebb08223fd94338013858aa53c7fe359cf5bc7"
+    }
+  }
+}

@@ -1,0 +1,9 @@
+   Compiling engine v0.1.0 (/home/bl/misofm/engine-native-points/crates/engine)
+   Compiling math v0.1.0 (/home/bl/misofm/engine-native-points/crates/math)
+   Compiling effect-contract v0.1.0 (/home/bl/misofm/engine-native-points/crates/effect-contract)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.20s
+     Running unittests src/lib.rs (target/debug/deps/effect_contract-bc8ae5a504e45fbf)
+     Running tests/lattice.rs (target/debug/deps/lattice-5177944955c9edae)
+     Running tests/live_control.rs (target/debug/deps/live_control-84753ae70b73f44a)
+     Running tests/observation_lane.rs (target/debug/deps/observation_lane-58baf0acdae7a975)
+   Doc-tests effect_contract

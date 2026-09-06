@@ -1,0 +1,37 @@
+# Astra consolidated adversarial verdict — #524 Sol attempt 2
+
+**FAIL for source acceptance at `7190a6a3ae6222f97a284237287c640e99ea1c07`, limited to an incomplete frozen typed-access assertion table. The production implementation and the other corrected semantic gates are acceptable on the inspected source/evidence. Sol attempt 3 needs only the bounded test correction below; no production/API/architecture revision is indicated.**
+
+Reviewed the approved numbered spec and adopted Luna FAIL, actual implementation and every focused fixture, final `/tmp/issue524-sol2/sol2-report.md`, raw command/status/stdout/stderr evidence and root's copied package. The production transition body is unchanged from Luna. Relative to `d384d363`, `3b9a5fb8` only removed the redundant zero-frame allocation-test call; `7190a6a3` only regroups twelve hexadecimal seeds with identical numeric values. No reviewer source edits, tests, builds, mutations or timing were performed.
+
+## Credited corrections
+
+The API/compressor rustdoc now explains descriptor index versus ID, declared units, resident current versus target, unsupported defaults and state-preserving rejection, caller scheduling/ownership, Point application versus admission/acknowledgement, channel policy/error order and the inherited canonical native FP environment. Focused arithmetic/subnormal fixtures establish that existing environment. No new host guard or DSP arithmetic is needed.
+
+The domain table now covers all seven writable parameters' finite boundaries, below/above values and nonfinite rejection; readback covers eight asymmetric Left/Right states against payload bits, including fixed lookahead. Negative zero and a domain-valid positive subnormal are covered. Rejected calls retain payloads and match an independently prepared continuation. The defaults have a real forwarding wrapper, with the coverage limitation below.
+
+The no-sample fixture uses equally warmed asymmetric processors, a whitelist allowing only selected target/remaining payload words to change, both ordered intermediate target reads, preserved current/history/observations and subsequent old-span PCM/report/state equivalence. This closes the former snapshot-inequality-only gap.
+
+The ramp fixture checks an independent iterated f32 oracle and remaining words at 0/1/17/63/64 samples, exact completion, in-flight same/different-target restarts and stationary cancellation with subsequent evolution and asymmetric Right preservation. The old-span comparator covers all seven writable parameters on both channels, establishes nonzero delay history, compares PCM as bits and reports/payloads/observations, and proves makeup changes actual PCM against a no-Point reference.
+
+The silent fixture now compares stationary, moving and rejected-hook continuations against old-span/reference processing. Source review supplies the private eligibility-flag evidence; the fixture does not falsely claim the payload exposes that flag. Repeated allocation qualification executes successful/rejected calls, readback and actual 128-frame empty-span process 32 times with installed allocation/free liveness and zero render counters. The redundant zero-frame call was correctly removed rather than changing EffectProcessBlock's contract.
+
+## Remaining frozen table coverage
+
+`crates/compressor/tests/native_points.rs:227–377`, `native_parameter_access_is_typed_and_transactional`, still omits the following small cases from the already frozen access contract:
+
+1. **Both write on equal channels is absent.** The asymmetric object receives Both read and apply rejections at lines 258–270. The equal-channel object at lines 331–337 is immutable and receives only a read rejection. The adopted Luna FAIL explicitly requires “Both read/write on unequal and equal channels.” A write path that permits Both only when channels are equal would pass the current table, although it violates the frozen API. Add the equal-channel apply rejection with payload and unchanged-reference continuation. This is a specific missing mandatory assertion, not a request for another channel matrix.
+2. **Default Unsupported is exercised only with malformed arguments.** The forwarding wrapper at lines 362–376 receives `(u32::MAX, Both, NaN)` and `(u32::MAX, Both)`. Add a well-formed readable/automatable request, such as index 5 / Left / a legal nondefault value, to both default methods, preserving the same snapshot/continuation witness. The frozen requirement is that absent implementation is Unsupported, including invalid arguments; it must also remain Unsupported for the request that would succeed on the wrapped compressor. This completes that existing capability gate.
+3. **The top two error-precedence boundaries are not discriminated.** Current invalid-index cases use an otherwise valid channel, and the Both+NaN apply uses automatable index 5. Complete the existing combined-error table with invalid index+Both (read and apply must give InvalidParameterIndex) and index 7+Both+NaN (apply must give InvalidChannel). Existing index 7+Left+NaN and valid-index+Left+NaN already cover the lower boundaries. These few tuples establish the declared index → channel → automatable → domain order; no Cartesian invalid-input corpus is needed.
+
+The production body visibly implements all three requirements correctly. This FAIL is an assertion-completeness finding against the frozen brief; it is not a reproduced DSP error, a missing target build or a proposal to modify the API.
+
+## Evidence disposition and bounded Sol attempt 3
+
+Final valid captures pass: five focused tests debug/release; compressor 75 passing entries across 19 result blocks in each profile; effect-contract 40 across five in each; isolated allocation gate debug/release; strict affected Clippy; six policies; scalar Wasm release build and SIMD Wasm check; fmt/diff. Source identities and numeric-only seed drift are attributed accurately; repeating every suite solely for regrouped literals is unnecessary.
+
+Four retained failures are resolved historical evidence: FP guard API misuse failed compilation; the zero-frame test failed as the existing constructor requires; seed spelling failed Clippy; scalar flags invocation failed setup. They do not cause this verdict and must remain preserved. Broad immutable delivery remains root's post-source-PASS phase.
+
+For attempt 3, change only the typed-access fixture in `native_points.rs` to add the listed finite calls using its existing helpers and independently prepared references. Keep all five exact test names, all other assertions and the production/docs/harness paths unchanged. Preserve all prior evidence; append a concise correction report with exact source identity. Run the updated five focused tests debug/release and affected strict Clippy/fmt/diff. Reuse already passing unchanged production, other suite and target evidence with explicit source attribution; broaden reruns only for actual drift or a failure. Pause for root's coherent exact-path checkpoint, then freeze one complete package for the final consolidated Astra verdict.
+
+No mutation, benchmark, new helper framework, resource/artifact repin, domain expansion or endpoint integration is authorized by this correction. This is the third and final implementation attempt under #518; if it fails, preserve evidence and apply the hard stop/rebrief rule, with no disguised fourth retry. #524 remains open pending acceptance and delivery.

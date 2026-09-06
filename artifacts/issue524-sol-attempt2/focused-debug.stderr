@@ -1,0 +1,35 @@
+   Compiling effect-contract v0.1.0 (/home/bl/misofm/engine-native-points/crates/effect-contract)
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-native-points/crates/compressor)
+   Compiling conformance v0.1.0 (/home/bl/misofm/engine-native-points/crates/conformance)
+error[E0599]: no method named `expect` found for struct `CanonicalFpEnv` in the current scope
+   --> crates/compressor/tests/native_points.rs:228:45
+    |
+228 |     let _fp = lane::CanonicalFpEnv::enter().expect("canonical FP environment");
+    |                                             ^^^^^^ method not found in `CanonicalFpEnv`
+
+error[E0599]: no method named `expect` found for struct `CanonicalFpEnv` in the current scope
+   --> crates/compressor/tests/native_points.rs:381:45
+    |
+381 |     let _fp = lane::CanonicalFpEnv::enter().expect("canonical FP environment");
+    |                                             ^^^^^^ method not found in `CanonicalFpEnv`
+
+error[E0599]: no method named `expect` found for struct `CanonicalFpEnv` in the current scope
+   --> crates/compressor/tests/native_points.rs:503:45
+    |
+503 |     let _fp = lane::CanonicalFpEnv::enter().expect("canonical FP environment");
+    |                                             ^^^^^^ method not found in `CanonicalFpEnv`
+
+error[E0599]: no method named `expect` found for struct `CanonicalFpEnv` in the current scope
+   --> crates/compressor/tests/native_points.rs:692:45
+    |
+692 |     let _fp = lane::CanonicalFpEnv::enter().expect("canonical FP environment");
+    |                                             ^^^^^^ method not found in `CanonicalFpEnv`
+
+error[E0599]: no method named `expect` found for struct `CanonicalFpEnv` in the current scope
+   --> crates/compressor/tests/native_points.rs:724:45
+    |
+724 |     let _fp = lane::CanonicalFpEnv::enter().expect("canonical FP environment");
+    |                                             ^^^^^^ method not found in `CanonicalFpEnv`
+
+For more information about this error, try `rustc --explain E0599`.
+error: could not compile `compressor` (test "native_points") due to 5 previous errors

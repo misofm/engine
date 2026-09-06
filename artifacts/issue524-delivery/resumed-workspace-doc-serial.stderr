@@ -1,0 +1,51 @@
+warning: doc tests are not supported for crate type(s) `cdylib` in package `wasm-console-guest`
+warning: doc tests are not supported for crate type(s) `cdylib` in package `wasm-gate-guest`
+   Compiling effect-package v0.1.0 (/home/bl/misofm/engine-native-points/crates/effect-package)
+   Compiling effect-compiler v0.1.0 (/home/bl/misofm/engine-native-points/crates/effect-compiler)
+   Compiling graph-compiler v0.1.0 (/home/bl/misofm/engine-native-points/crates/graph-compiler)
+   Compiling host-core v0.1.0 (/home/bl/misofm/engine-native-points/crates/host-core)
+   Compiling console-workload v0.1.0 (/home/bl/misofm/engine-native-points/tools/console-workload)
+   Compiling host-web v0.1.0 (/home/bl/misofm/engine-native-points/hosts/host-web)
+   Compiling capi v0.1.0 (/home/bl/misofm/engine-native-points/crates/capi)
+   Compiling parameter-metadata v0.1.0 (/home/bl/misofm/engine-native-points/tools/parameter-metadata)
+   Compiling native-pcm-runner v0.1.0 (/home/bl/misofm/engine-native-points/tools/native-pcm-runner)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.79s
+   Doc-tests bench_support
+   Doc-tests builtins
+   Doc-tests builtins_compiler
+   Doc-tests capi
+   Doc-tests compressor
+   Doc-tests conformance
+   Doc-tests console_workload
+   Doc-tests delay
+   Doc-tests dsp_reference
+   Doc-tests effect_compiler
+   Doc-tests effect_contract
+   Doc-tests effect_package
+   Doc-tests effect_runtime
+   Doc-tests engine
+   Doc-tests gate_expander
+   Doc-tests graph
+   Doc-tests graph_compiler
+   Doc-tests host_core
+   Doc-tests host_mobile
+   Doc-tests host_web
+   Doc-tests lane
+   Doc-tests math
+   Doc-tests multiband_compressor
+   Doc-tests native_pcm_runner
+   Doc-tests parameter_metadata
+   Doc-tests parametric_eq
+   Doc-tests protocol
+   Doc-tests rack
+   Doc-tests rack_compiler
+   Doc-tests session
+   Doc-tests session_validator
+   Doc-tests soft_clip
+   Doc-tests source
+   Doc-tests stem_hasher
+   Doc-tests target_smoke
+   Doc-tests transient_shaper
+   Doc-tests true_peak_limiter
+   Doc-tests wasm_gate_corpus
+   Doc-tests wasm_gates

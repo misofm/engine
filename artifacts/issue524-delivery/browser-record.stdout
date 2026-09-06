@@ -1,0 +1,5 @@
+
+> @miso/engine-v1-browser-qualification@0.0.0 qualify
+> node ./run.mjs --artifacts /tmp/issue524-delivery/artifact --browser all --record-matrix --candidate-commit 63c2fbb2 --self-test-mutations
+
+session identities: 3 qualification documents declare their fed PCM

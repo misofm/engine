@@ -1,0 +1,507 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.24
+   Compiling serde_core v1.0.228
+   Compiling serde v1.0.228
+   Compiling version_check v0.9.5
+   Compiling libc v0.2.189
+   Compiling once_cell v1.21.4
+   Compiling autocfg v1.5.1
+   Compiling lexical-util v1.0.7
+   Compiling syn v1.0.109
+   Compiling locspan v0.8.2
+   Compiling utf8-decode v1.0.1
+   Compiling decoded-char v0.1.1
+   Compiling memchr v2.8.3
+   Compiling foldhash v0.2.0
+   Compiling zmij v1.0.23
+   Compiling stable_deref_trait v1.2.1
+   Compiling serde_json v1.0.151
+   Compiling libm v0.2.16
+   Compiling itoa v1.0.18
+   Compiling regex-syntax v0.8.11
+   Compiling lazy_static v1.5.0
+   Compiling writeable v0.6.4
+   Compiling litemap v0.8.3
+   Compiling log v0.4.33
+   Compiling icu_properties_data v2.3.0
+   Compiling utf8_iter v1.0.4
+   Compiling icu_normalizer_data v2.3.0
+   Compiling wasmtime-internal-core v47.0.3
+   Compiling soft-clip v0.1.0 (/home/bl/misofm/engine-native-points/crates/soft-clip)
+   Compiling builtins v0.1.0 (/home/bl/misofm/engine-native-points/crates/builtins)
+   Compiling parametric-eq v0.1.0 (/home/bl/misofm/engine-native-points/crates/parametric-eq)
+   Compiling multiband-compressor v0.1.0 (/home/bl/misofm/engine-native-points/crates/multiband-compressor)
+   Compiling transient-shaper v0.1.0 (/home/bl/misofm/engine-native-points/crates/transient-shaper)
+   Compiling true-peak-limiter v0.1.0 (/home/bl/misofm/engine-native-points/crates/true-peak-limiter)
+   Compiling gate-expander v0.1.0 (/home/bl/misofm/engine-native-points/crates/gate-expander)
+   Compiling delay v0.1.0 (/home/bl/misofm/engine-native-points/crates/delay)
+   Compiling rack v0.1.0 (/home/bl/misofm/engine-native-points/crates/rack)
+   Compiling effect-package v0.1.0 (/home/bl/misofm/engine-native-points/crates/effect-package)
+   Compiling getrandom v0.3.4
+   Compiling ref-cast v1.0.27
+   Compiling zerocopy v0.8.56
+   Compiling parking_lot_core v0.9.12
+   Compiling scopeguard v1.2.0
+   Compiling cranelift-srcgen v0.134.4
+   Compiling proc-macro-error-attr v1.0.4
+   Compiling ahash v0.7.8
+   Compiling proc-macro-error v1.0.4
+   Compiling ahash v0.8.12
+   Compiling generic-array v0.14.7
+   Compiling lock_api v0.4.14
+   Compiling indexmap v1.9.3
+   Compiling num-traits v0.2.19
+   Compiling hashbrown v0.17.1
+   Compiling borrow-or-share v0.2.4
+   Compiling aho-corasick v1.1.5
+   Compiling cranelift-assembler-x64-meta v0.134.4
+   Compiling bit-vec v0.8.0
+   Compiling shlex v2.0.1
+   Compiling find-msvc-tools v0.1.11
+   Compiling uuid v1.26.0
+   Compiling percent-encoding v2.3.2
+   Compiling thiserror v2.0.20
+   Compiling graph v0.1.0 (/home/bl/misofm/engine-native-points/crates/graph)
+   Compiling rack-compiler v0.1.0 (/home/bl/misofm/engine-native-points/crates/rack-compiler)
+   Compiling lexical-parse-integer v1.0.6
+   Compiling lexical-write-integer v1.0.6
+   Compiling bit-set v0.8.0
+   Compiling outref v0.5.2
+   Compiling vsimd v0.8.0
+   Compiling cc v1.4.3
+   Compiling cranelift-isle v0.134.3
+   Compiling bytecount v0.6.9
+   Compiling base64 v0.22.1
+   Compiling lexical-parse-float v1.0.6
+   Compiling lexical-write-float v1.0.6
+   Compiling bitflags v2.13.1
+   Compiling num-cmp v0.1.0
+   Compiling equivalent v1.0.2
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.1.7
+   Compiling heck v0.5.0
+   Compiling target-lexicon v0.13.5
+   Compiling cranelift-codegen-shared v0.134.4
+   Compiling cpufeatures v0.2.17
+   Compiling fnv v1.0.7
+   Compiling allocator-api2 v0.2.21
+   Compiling digest v0.10.7
+   Compiling hashbrown v0.16.1
+   Compiling arbitrary v1.4.2
+   Compiling anyhow v1.0.104
+   Compiling syn v2.0.119
+   Compiling lexical-core v1.0.6
+   Compiling syn v3.0.3
+   Compiling uuid-simd v0.8.0
+   Compiling sha2 v0.10.9
+   Compiling crc32fast v1.5.1
+   Compiling rustc-hash v2.1.3
+   Compiling lexical v7.0.5
+   Compiling getrandom v0.2.17
+   Compiling object v0.39.1
+   Compiling bumpalo v3.20.3
+   Compiling leb128fmt v0.1.0
+   Compiling termcolor v1.4.1
+   Compiling wasm-encoder v0.252.0
+   Compiling num-integer v0.1.47
+   Compiling num-complex v0.4.6
+   Compiling wasmtime-internal-component-util v47.0.3
+   Compiling wasmtime-internal-unwinder v47.0.3
+   Compiling rustix v1.1.4
+   Compiling hashbrown v0.12.3
+   Compiling linux-raw-sys v0.12.1
+   Compiling wasmtime-internal-cranelift v47.0.3
+   Compiling either v1.18.0
+   Compiling wasm-gate-corpus v0.1.0 (/home/bl/misofm/engine-native-points/tools/wasm-gate-corpus)
+   Compiling rustversion v1.0.23
+   Compiling tracing-core v0.1.36
+   Compiling pin-project-lite v0.2.17
+   Compiling sharded-slab v0.1.7
+   Compiling cranelift-bitset v0.134.3
+   Compiling num-bigint v0.4.8
+   Compiling num-iter v0.1.46
+   Compiling cranelift-control v0.134.4
+   Compiling itertools v0.14.0
+   Compiling regex-automata v0.4.18
+   Compiling target-smoke v0.1.0 (/home/bl/misofm/engine-native-points/crates/target-smoke)
+   Compiling thread_local v1.1.10
+   Compiling nu-ansi-term v0.50.3
+   Compiling semver v1.0.28
+   Compiling scoped-tls v1.0.1
+   Compiling host-mobile v0.1.0 (/home/bl/misofm/engine-native-points/hosts/host-mobile)
+   Compiling tracing v0.1.44
+   Compiling tracing-log v0.2.0
+   Compiling host-native v0.1.0 (/home/bl/misofm/engine-native-points/hosts/host-native)
+   Compiling rustc_version v0.4.1
+   Compiling generator v0.8.9
+   Compiling flatbuffers v25.12.19
+   Compiling indexmap v2.14.0
+   Compiling cranelift-assembler-x64 v0.134.4
+   Compiling num-rational v0.4.2
+   Compiling num v0.4.3
+   Compiling fraction v0.15.4
+   Compiling locspan-derive v0.6.0
+   Compiling gimli v0.33.0
+   Compiling memfd v0.6.5
+   Compiling wasm-gate-guest v0.1.0 (/home/bl/misofm/engine-native-points/tools/wasm-gate-guest)
+   Compiling synstructure v0.13.2
+   Compiling regex v1.13.1
+   Compiling fancy-regex v0.16.2
+   Compiling matchers v0.2.0
+   Compiling conformance v0.1.0 (/home/bl/misofm/engine-native-points/crates/conformance)
+   Compiling effect-runtime v0.1.0 (/home/bl/misofm/engine-native-points/crates/effect-runtime)
+   Compiling zerovec-derive v0.11.6
+   Compiling displaydoc v0.2.7
+   Compiling ref-cast-impl v1.0.27
+   Compiling thiserror-impl v2.0.20
+   Compiling async-trait v0.1.92
+   Compiling effect-contract v0.1.0 (/home/bl/misofm/engine-native-points/crates/effect-contract)
+   Compiling serde_derive v1.0.228
+   Compiling zerofrom-derive v0.1.7
+   Compiling yoke-derive v0.8.2
+   Compiling pulley-macros v47.0.3
+   Compiling wasmtime-internal-versioned-export-macros v47.0.3
+   Compiling math v0.1.0 (/home/bl/misofm/engine-native-points/crates/math)
+   Compiling bench-support v0.1.0 (/home/bl/misofm/engine-native-points/tools/bench-support)
+   Compiling pulley-interpreter v47.0.3
+   Compiling wasmtime v47.0.3
+   Compiling lane v0.1.0 (/home/bl/misofm/engine-native-points/crates/lane)
+   Compiling cobs v0.3.0
+   Compiling zerofrom v0.1.8
+   Compiling dsp-reference v0.1.0 (/home/bl/misofm/engine-native-points/crates/dsp-reference)
+   Compiling yoke v0.8.3
+   Compiling zerovec v0.11.8
+   Compiling zerotrie v0.2.5
+   Compiling tinystr v0.8.4
+   Compiling potential_utf v0.1.6
+   Compiling icu_collections v2.3.0
+   Compiling icu_locale_core v2.3.0
+   Compiling cranelift-codegen-meta v0.134.3
+   Compiling smallvec v1.15.2
+   Compiling fluent-uri v0.3.2
+   Compiling email_address v0.2.9
+   Compiling postcard v1.1.3
+   Compiling wasmparser v0.252.0
+   Compiling smallstr v0.3.1
+   Compiling json-number v0.4.10
+   Compiling regalloc2 v0.15.2
+   Compiling tracing-subscriber v0.3.23
+   Compiling json-syntax v0.12.5
+   Compiling parking_lot v0.12.5
+   Compiling icu_provider v2.3.1
+   Compiling referencing v0.33.0
+   Compiling wasmtime-internal-jit-icache-coherence v47.0.3
+   Compiling icu_normalizer v2.3.0
+   Compiling icu_properties v2.3.0
+   Compiling cranelift-entity v0.134.3
+   Compiling session v0.1.0 (/home/bl/misofm/engine-native-points/crates/session)
+   Compiling cranelift-bforest v0.134.3
+   Compiling loom v0.7.2
+   Compiling idna_adapter v1.2.2
+   Compiling idna v1.1.0
+   Compiling cranelift-codegen v0.134.3
+   Compiling effect-compiler v0.1.0 (/home/bl/misofm/engine-native-points/crates/effect-compiler)
+   Compiling builtins-compiler v0.1.0 (/home/bl/misofm/engine-native-points/crates/builtins-compiler)
+   Compiling protocol v0.1.0 (/home/bl/misofm/engine-native-points/crates/protocol)
+   Compiling source v0.1.0 (/home/bl/misofm/engine-native-points/crates/source)
+   Compiling jsonschema v0.33.0
+   Compiling stem-hasher v0.1.0 (/home/bl/misofm/engine-native-points/tools/stem-hasher)
+   Compiling graph-compiler v0.1.0 (/home/bl/misofm/engine-native-points/crates/graph-compiler)
+   Compiling session-validator v0.1.0 (/home/bl/misofm/engine-native-points/tools/session-validator)
+   Compiling engine v0.1.0 (/home/bl/misofm/engine-native-points/crates/engine)
+   Compiling console-workload v0.1.0 (/home/bl/misofm/engine-native-points/tools/console-workload)
+   Compiling host-core v0.1.0 (/home/bl/misofm/engine-native-points/crates/host-core)
+   Compiling host-web v0.1.0 (/home/bl/misofm/engine-native-points/hosts/host-web)
+   Compiling capi v0.1.0 (/home/bl/misofm/engine-native-points/crates/capi)
+   Compiling wasm-console-guest v0.1.0 (/home/bl/misofm/engine-native-points/tools/wasm-console-guest)
+   Compiling bench v0.1.0 (/home/bl/misofm/engine-native-points/tools/bench)
+   Compiling wasmprinter v0.252.0
+   Compiling wasmtime-environ v47.0.3
+   Compiling parameter-metadata v0.1.0 (/home/bl/misofm/engine-native-points/tools/parameter-metadata)
+   Compiling native-pcm-runner v0.1.0 (/home/bl/misofm/engine-native-points/tools/native-pcm-runner)
+   Compiling audit v0.1.0 (/home/bl/misofm/engine-native-points/tools/audit)
+   Compiling cranelift-native v0.134.3
+   Compiling cranelift-frontend v0.134.3
+   Compiling wasm-gates v0.1.0 (/home/bl/misofm/engine-native-points/tools/wasm-gates)
+   Compiling wasm-console v0.1.0 (/home/bl/misofm/engine-native-points/tools/wasm-console)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 37.97s
+     Running unittests src/main.rs (target/debug/deps/audit-02611fef8a36fbc1)
+     Running unittests src/main.rs (target/debug/deps/bench-df01d09e92a9181b)
+     Running unittests src/lib.rs (target/debug/deps/bench_support-e15bfd8a9bc9d9e9)
+     Running unittests src/lib.rs (target/debug/deps/builtins-e199633334b728a2)
+     Running tests/contract.rs (target/debug/deps/contract-4393a298aea28ff0)
+     Running tests/determinism.rs (target/debug/deps/determinism-b1cbf76b3ba05233)
+     Running tests/fader_ramp.rs (target/debug/deps/fader_ramp-f1790f2e1775f4da)
+     Running tests/input_liveness.rs (target/debug/deps/input_liveness-36c7767e8835920c)
+     Running tests/input_liveness_mono.rs (target/debug/deps/input_liveness_mono-9f8aa6f0d7109817)
+     Running tests/matrix.rs (target/debug/deps/matrix-52a3575866254045)
+     Running tests/meter.rs (target/debug/deps/meter-3f6305517d757e65)
+     Running tests/mono_collapse.rs (target/debug/deps/mono_collapse-1b6804b571a17a06)
+     Running tests/response.rs (target/debug/deps/response-468cadb41f2d4f5c)
+     Running tests/speed.rs (target/debug/deps/speed-6548b5cc277bdfd7)
+     Running tests/stage.rs (target/debug/deps/stage-e6c249b90d6913d2)
+     Running unittests src/lib.rs (target/debug/deps/builtins_compiler-09d1b1f305bb830e)
+     Running tests/allocation_tracker.rs (target/debug/deps/allocation_tracker-352c0b6698949641)
+     Running tests/builtin_automation_targets.rs (target/debug/deps/builtin_automation_targets-253140acbc1e6d04)
+     Running tests/input_drain.rs (target/debug/deps/input_drain-9d18b6a59cac7fa3)
+     Running tests/scale.rs (target/debug/deps/scale-094844ceff632213)
+     Running tests/track_delay_domain.rs (target/debug/deps/track_delay_domain-4b1a9fbe8da90b18)
+     Running unittests src/lib.rs (target/debug/deps/capi-73ee5587372b5c1c)
+     Running tests/resource_lifecycle.rs (target/debug/deps/resource_lifecycle-16c0c834bc92af12)
+     Running unittests src/lib.rs (target/debug/deps/compressor-6a14549b6a1f5d67)
+     Running tests/conformance.rs (target/debug/deps/conformance-3c37af9fe9c8a5a5)
+     Running tests/contract.rs (target/debug/deps/contract-944d6fcbb33f6884)
+     Running tests/cross_target.rs (target/debug/deps/cross_target-278cc22dc0b34da8)
+     Running tests/identity.rs (target/debug/deps/identity-e9fe5351d812d801)
+     Running tests/lane_identity.rs (target/debug/deps/lane_identity-6eb0d1b6b7825c57)
+     Running tests/mono_collapse.rs (target/debug/deps/mono_collapse-76971c417f0a52c6)
+     Running tests/native_points.rs (target/debug/deps/native_points-266d0a5c040fa8b2)
+     Running tests/nonfinite.rs (target/debug/deps/nonfinite-62e7cb923032724e)
+     Running tests/observation.rs (target/debug/deps/observation-e275c057be1bcf8b)
+     Running tests/oracle.rs (target/debug/deps/oracle-1712499cbfd21533)
+     Running tests/partition.rs (target/debug/deps/partition-42c1f88bc1237a02)
+     Running tests/payload.rs (target/debug/deps/payload-3c2c6fc61c92901b)
+     Running tests/ramps.rs (target/debug/deps/ramps-a8f67af457a6aacc)
+     Running tests/silent_fixed_point.rs (target/debug/deps/silent_fixed_point-e4b66d1eb5cd6a78)
+     Running tests/staged_idle.rs (target/debug/deps/staged_idle-8fa74e548f3a5931)
+     Running tests/static_curve.rs (target/debug/deps/static_curve-25eb04caf4a52ed5)
+     Running unittests src/lib.rs (target/debug/deps/conformance-1c4ad374f1e78973)
+     Running tests/api_metrics.rs (target/debug/deps/api_metrics-50bcd390259e41b0)
+     Running tests/effect_contract.rs (target/debug/deps/effect_contract-471cb5f6800167e0)
+     Running tests/fixture_corruption.rs (target/debug/deps/fixture_corruption-bf1513bbbfbdcb49)
+     Running tests/fixtures.rs (target/debug/deps/fixtures-39f47630aaf10193)
+     Running unittests src/lib.rs (target/debug/deps/console_workload-32e2623e9bf5e93f)
+     Running tests/automation.rs (target/debug/deps/automation-a5b2e3073d3f3bd8)
+     Running tests/chain_shape.rs (target/debug/deps/chain_shape-3b9ecd9117634743)
+     Running tests/placement.rs (target/debug/deps/placement-c138e4e9862fa55c)
+     Running unittests src/lib.rs (target/debug/deps/delay-5b589aceac7cca47)
+     Running tests/conformance.rs (target/debug/deps/conformance-35e1f15dfdf2a810)
+     Running tests/determinism.rs (target/debug/deps/determinism-4f3b54639ee401a5)
+     Running unittests src/lib.rs (target/debug/deps/dsp_reference-4e471b03f7e5feed)
+     Running tests/reference.rs (target/debug/deps/reference-d2a965a71f97ce7c)
+     Running unittests src/lib.rs (target/debug/deps/effect_compiler-7d4b31800536a799)
+     Running tests/bank_state.rs (target/debug/deps/bank_state-0937466e904061ec)
+     Running tests/migration.rs (target/debug/deps/migration-8cbdb86070a9d288)
+     Running tests/migration_terminal.rs (target/debug/deps/migration_terminal-9b56af5eaf447a88)
+     Running tests/native_session.rs (target/debug/deps/native_session-0c30d887e9e1ce86)
+     Running tests/observation_identity.rs (target/debug/deps/observation_identity-e88a45133bd06f91)
+     Running tests/parameter_lattice.rs (target/debug/deps/parameter_lattice-737b982b24540b31)
+     Running tests/scalar_state.rs (target/debug/deps/scalar_state-ee4a785b528082a9)
+     Running tests/symmetry_designed_words.rs (target/debug/deps/symmetry_designed_words-3b370e27b2365b3e)
+     Running tests/symmetry_restore.rs (target/debug/deps/symmetry_restore-d795ee524afb99ae)
+     Running unittests src/lib.rs (target/debug/deps/effect_contract-b5c22c49f0aeed2c)
+     Running tests/lattice.rs (target/debug/deps/lattice-60f417e1855d2e9b)
+     Running tests/live_control.rs (target/debug/deps/live_control-b16eb6894398b8ec)
+     Running tests/observation_lane.rs (target/debug/deps/observation_lane-6b1d7f6914ea80ba)
+     Running unittests src/lib.rs (target/debug/deps/effect_package-cc30e8a0f41c6e5b)
+     Running tests/descriptor_v1_qualification.rs (target/debug/deps/descriptor_v1_qualification-65091476ef203d3c)
+     Running tests/effect_interchange_abi.rs (target/debug/deps/effect_interchange_abi-4d9dca0bd4389f69)
+     Running tests/effect_interchange_mutation.rs (target/debug/deps/effect_interchange_mutation-ec4dc8feac736e0b)
+     Running tests/package_allocation.rs (target/debug/deps/package_allocation-522e1b972d1066d1)
+     Running tests/package_v1_qualification.rs (target/debug/deps/package_v1_qualification-b96408734bb4a602)
+     Running tests/package_vectors.rs (target/debug/deps/package_vectors-f304b4501f3020c6)
+     Running tests/state_vectors.rs (target/debug/deps/state_vectors-16985c58b8231c3c)
+     Running unittests src/lib.rs (target/debug/deps/effect_runtime-d92aaf50e4574ada)
+     Running tests/bank.rs (target/debug/deps/bank-08d1328699dca6b6)
+     Running tests/contract_ramp_identity.rs (target/debug/deps/contract_ramp_identity-a238f9c090f5e1bf)
+     Running tests/determinism.rs (target/debug/deps/determinism-4e3fedb85172c2f6)
+     Running tests/dynamics.rs (target/debug/deps/dynamics-e234f51f5747622f)
+     Running tests/envelope.rs (target/debug/deps/envelope-60d5b055f0592c33)
+     Running tests/lane_identity.rs (target/debug/deps/lane_identity-bd8b9ec63d7df11b)
+     Running tests/params.rs (target/debug/deps/params-9275f320b843561c)
+     Running tests/partition.rs (target/debug/deps/partition-ccf695060b8b012a)
+     Running tests/ramp.rs (target/debug/deps/ramp-75acada377fdcb19)
+     Running tests/state_payload.rs (target/debug/deps/state_payload-a6f742a3839a1ead)
+     Running tests/stationary_hoist.rs (target/debug/deps/stationary_hoist-9d27b2757875756a)
+     Running unittests src/lib.rs (target/debug/deps/engine-470110242f23818e)
+     Running tests/observation_transport.rs (target/debug/deps/observation_transport-4911028e7a0ce60c)
+     Running unittests src/lib.rs (target/debug/deps/gate_expander-568cd71602912dfe)
+     Running tests/conformance.rs (target/debug/deps/conformance-cd8e68eaf40eb8bc)
+     Running tests/contract.rs (target/debug/deps/contract-a7b69bade72b6c59)
+     Running tests/determinism.rs (target/debug/deps/determinism-4c2cd1ca17d202fd)
+     Running tests/identity.rs (target/debug/deps/identity-569acb1688dbd896)
+     Running tests/oracle.rs (target/debug/deps/oracle-679f6a5d0368d754)
+     Running tests/state.rs (target/debug/deps/state-8be55eb5b09784d1)
+     Running unittests src/lib.rs (target/debug/deps/graph-89c70a494b045b57)
+     Running tests/rt1_direct_bank_alloc.rs (target/debug/deps/rt1_direct_bank_alloc-0e3dbe6db7e0f16b)
+     Running unittests src/lib.rs (target/debug/deps/graph_compiler-bd0d8f7107cd321e)
+     Running unittests src/bin/graph_fixture.rs (target/debug/deps/graph_fixture-d6e7bc0fe547640e)
+     Running unittests src/bin/rack_fixture.rs (target/debug/deps/rack_fixture-76dd787e07d70a09)
+     Running tests/route_gain.rs (target/debug/deps/route_gain-800842e69c755230)
+     Running tests/scale.rs (target/debug/deps/scale-be548d46c36c6791)
+     Running tests/track_delay.rs (target/debug/deps/track_delay-099b0e1f9a785bc3)
+     Running unittests src/lib.rs (target/debug/deps/host_core-613add0ca0003a7a)
+     Running tests/effect_console.rs (target/debug/deps/effect_console-d6df9653690fe764)
+     Running tests/effect_observation.rs (target/debug/deps/effect_observation-7a7ea7beeef61cec)
+     Running tests/fp_environment.rs (target/debug/deps/fp_environment-deffd00cf14466f6)
+     Running tests/input_liveness_console.rs (target/debug/deps/input_liveness_console-3be4f88322589728)
+     Running tests/prepare.rs (target/debug/deps/prepare-d827362dcf48dca0)
+     Running tests/source_diagnostics.rs (target/debug/deps/source_diagnostics-6338276019bea857)
+     Running tests/symmetry_witness.rs (target/debug/deps/symmetry_witness-a2731ef138f35b6c)
+     Running tests/track_delay.rs (target/debug/deps/track_delay-ee8f887b85af83ae)
+     Running unittests src/lib.rs (target/debug/deps/host_mobile-e7598718437e127d)
+     Running unittests src/main.rs (target/debug/deps/host_native-ecfc7fd0cda90eb2)
+     Running unittests src/lib.rs (target/debug/deps/host_web-a39388673db77f5c)
+     Running tests/boot_transient_budget.rs (target/debug/deps/boot_transient_budget-cda9507d363ca0b5)
+     Running unittests src/lib.rs (target/debug/deps/lane-d7c29e699773f118)
+     Running tests/b1_speed.rs (target/debug/deps/b1_speed-7e20693005d98fbf)
+     Running tests/b2_interleave.rs (target/debug/deps/b2_interleave-2d55a558ae78be8a)
+     Running tests/fader_matrix.rs (target/debug/deps/fader_matrix-5c9f2b258aa039fe)
+     Running tests/fp_env.rs (target/debug/deps/fp_env-852d8e7a42214586)
+     Running tests/g1_op_identity.rs (target/debug/deps/g1_op_identity-e8b035c21b797213)
+     Running tests/g2_kernel_identity.rs (target/debug/deps/g2_kernel_identity-b008d5690fc4ed67)
+     Running tests/g4_flush.rs (target/debug/deps/g4_flush-1894276a5013722d)
+     Running tests/g6_ftz_inert.rs (target/debug/deps/g6_ftz_inert-d966997a39af08cf)
+     Running tests/halfband.rs (target/debug/deps/halfband-5b1052f909f1d263)
+     Running tests/input_chain_elision.rs (target/debug/deps/input_chain_elision-279cc198c72ace52)
+     Running tests/p1_partition.rs (target/debug/deps/p1_partition-98587a2af6ea4e71)
+     Running tests/sanitise_counter.rs (target/debug/deps/sanitise_counter-71a4b3592a2c02e3)
+     Running unittests src/lib.rs (target/debug/deps/math-fc6a2da64c272405)
+     Running tests/f1_fast_db_bounds.rs (target/debug/deps/f1_fast_db_bounds-553ebee96cb4c06e)
+     Running tests/m1_exhaustive.rs (target/debug/deps/m1_exhaustive-3943155a65254bcb)
+     Running tests/m2_lane_identity.rs (target/debug/deps/m2_lane_identity-ed99f568e41ab1d3)
+     Running tests/m3_determinism.rs (target/debug/deps/m3_determinism-894f399f46e8e004)
+     Running tests/scalar_accuracy.rs (target/debug/deps/scalar_accuracy-42e8f8618a303ed0)
+     Running unittests src/lib.rs (target/debug/deps/multiband_compressor-d7fa5ded05fdb86e)
+     Running tests/conformance.rs (target/debug/deps/conformance-8ac9b0e10df0fb42)
+     Running tests/cross_target_digest.rs (target/debug/deps/cross_target_digest-83af2054564d6686)
+     Running tests/crossover.rs (target/debug/deps/crossover-a2c14a3daec79216)
+     Running tests/descriptive_frame_cost.rs (target/debug/deps/descriptive_frame_cost-ac5eea64d434f3d4)
+     Running tests/identity.rs (target/debug/deps/identity-edb08f00da434ccb)
+     Running tests/lr4_two_section_mapping_f64.rs (target/debug/deps/lr4_two_section_mapping_f64-4db988d24d6e884a)
+     Running tests/no_alloc_render.rs (target/debug/deps/no_alloc_render-249c7406eb7c01a4)
+     Running tests/nonfinite.rs (target/debug/deps/nonfinite-977d86c0dfc223f3)
+     Running tests/product.rs (target/debug/deps/product-c1a18e8ac26ee3ad)
+     Running unittests src/lib.rs (target/debug/deps/native_pcm_runner-7bbf5ed1af5701e1)
+     Running unittests src/main.rs (target/debug/deps/native_pcm_runner-b05a8da610839bc7)
+     Running unittests src/lib.rs (target/debug/deps/parameter_metadata-49bd8dd704f2b5bc)
+     Running unittests src/main.rs (target/debug/deps/parameter_metadata-1d936ad7ae2b23f5)
+     Running unittests src/bin/lattice_oracle.rs (target/debug/deps/parameter_metadata_lattice_oracle-c11e4f3641f68413)
+     Running tests/abi_layout.rs (target/debug/deps/abi_layout-96f556cf63c0aa9c)
+     Running tests/round_trip.rs (target/debug/deps/round_trip-726650b507bbde9b)
+     Running unittests src/lib.rs (target/debug/deps/parametric_eq-6ea40f580f0b7b18)
+     Running tests/analytic.rs (target/debug/deps/analytic-28eb1995d5764604)
+     Running tests/bank.rs (target/debug/deps/bank-2d1a65c63a787be7)
+     Running tests/conformance.rs (target/debug/deps/conformance-2b8cae5696f8210a)
+     Running tests/contract.rs (target/debug/deps/contract-daa398f2e0b21f0a)
+     Running tests/determinism.rs (target/debug/deps/determinism-af62e5c6eed06fa7)
+     Running tests/mono_collapse.rs (target/debug/deps/mono_collapse-0e3ee362cada3849)
+     Running tests/silent_fixed_point.rs (target/debug/deps/silent_fixed_point-31a5a2749e2fe516)
+     Running tests/stationary_hoist.rs (target/debug/deps/stationary_hoist-15f40815b540bd95)
+     Running tests/time_domain.rs (target/debug/deps/time_domain-a27bd57d840542df)
+     Running unittests src/lib.rs (target/debug/deps/protocol-9fdbedae104e3a3a)
+     Running unittests src/bin/protocol_wasm_golden.rs (target/debug/deps/protocol_wasm_golden-3f9c9bbeb69090ef)
+     Running tests/conformance_corpus.rs (target/debug/deps/conformance_corpus-1fd04f4861d49c6c)
+     Running tests/controller_response_api.rs (target/debug/deps/controller_response_api-fd621e4f21f5d9af)
+     Running tests/delivery_ownership.rs (target/debug/deps/delivery_ownership-36282ced18eb0f65)
+     Running tests/mutation_million.rs (target/debug/deps/mutation_million-42b63879e06d8a20)
+     Running tests/session_edit_builtins_rack.rs (target/debug/deps/session_edit_builtins_rack-1edb341bbc90b010)
+     Running unittests src/lib.rs (target/debug/deps/rack-940cbe1e0fec5aab)
+     Running tests/console_bank.rs (target/debug/deps/console_bank-0a269cc844e25631)
+     Running tests/mono_reengage.rs (target/debug/deps/mono_reengage-88a403391f7762fd)
+     Running unittests src/lib.rs (target/debug/deps/rack_compiler-a0eb226f6f989b0b)
+     Running unittests src/lib.rs (target/debug/deps/session-9d1e94e8bf906f5a)
+     Running tests/allocation_budget.rs (target/debug/deps/allocation_budget-ec75a2f2a1bb1495)
+     Running tests/canonical_schema.rs (target/debug/deps/canonical_schema-89a776a0c194d9c9)
+     Running tests/descriptive_scale.rs (target/debug/deps/descriptive_scale-c95bb3d9db8eb00e)
+     Running tests/diagnostic_parity.rs (target/debug/deps/diagnostic_parity-4748100b614fee1a)
+     Running tests/fuzz_smoke.rs (target/debug/deps/fuzz_smoke-2443a2b036917d3b)
+     Running tests/invalid_matrix.rs (target/debug/deps/invalid_matrix-cd062e9982b3c423)
+     Running tests/json_contract_artifacts.rs (target/debug/deps/json_contract_artifacts-8ad9b373fb7d8b2e)
+     Running tests/json_grammar.rs (target/debug/deps/json_grammar-21cf12676cc38d7a)
+     Running tests/json_unicode.rs (target/debug/deps/json_unicode-c475adf9c64cd72d)
+     Running tests/render_mode_tiers.rs (target/debug/deps/render_mode_tiers-351b7f132c6df25a)
+     Running tests/sample_rate_tiers.rs (target/debug/deps/sample_rate_tiers-1b876d35890e5397)
+     Running tests/scale_transaction.rs (target/debug/deps/scale_transaction-9ab771ce97271d97)
+     Running tests/strict_unknowns.rs (target/debug/deps/strict_unknowns-58d204dc6b485a3b)
+     Running tests/token_tables.rs (target/debug/deps/token_tables-6655d8619be1755d)
+     Running tests/visit_model.rs (target/debug/deps/visit_model-1b0ffaf66796b86c)
+     Running unittests src/lib.rs (target/debug/deps/session_validator-020fde03b52eb4cc)
+     Running unittests src/main.rs (target/debug/deps/session_validator-bcd50b80fb09d892)
+     Running tests/skill.rs (target/debug/deps/skill-efc0e4d04e80479e)
+     Running tests/validate.rs (target/debug/deps/validate-69f1b0d104ea56cd)
+     Running unittests src/lib.rs (target/debug/deps/soft_clip-36b049196328a215)
+     Running tests/allocation.rs (target/debug/deps/allocation-0d47b2c8fd1c6be5)
+     Running tests/boundary_check.rs (target/debug/deps/boundary_check-516345abf142c062)
+     Running tests/conformance.rs (target/debug/deps/conformance-f20b40eb9c5571a7)
+     Running tests/contract.rs (target/debug/deps/contract-63ed55dff8cc278a)
+     Running tests/descriptive_bench.rs (target/debug/deps/descriptive_bench-32f05e3076778247)
+     Running tests/determinism.rs (target/debug/deps/determinism-46872f28a64983a6)
+     Running tests/lane_identity.rs (target/debug/deps/lane_identity-a8186148ba728e5a)
+     Running tests/partition_invariance.rs (target/debug/deps/partition_invariance-90ac2c413e82bf99)
+     Running tests/polyphase_identity.rs (target/debug/deps/polyphase_identity-f1a7d6d37ab714d5)
+     Running tests/ramp_law.rs (target/debug/deps/ramp_law-b78cf8918b56d81f)
+     Running tests/state_roundtrip.rs (target/debug/deps/state_roundtrip-761ef560bb783eb8)
+     Running unittests src/lib.rs (target/debug/deps/source-b9376415cbb0b698)
+     Running unittests src/lib.rs (target/debug/deps/stem_hasher-a7eebae7bd598149)
+     Running unittests src/main.rs (target/debug/deps/stem_hasher-9c0d517a23ac2dd1)
+     Running tests/conformance.rs (target/debug/deps/conformance-836264406c6049ff)
+     Running unittests src/lib.rs (target/debug/deps/target_smoke-d46f5536aa0467f4)
+     Running unittests src/lib.rs (target/debug/deps/transient_shaper-a611d5d17dfa48af)
+     Running tests/allocation.rs (target/debug/deps/allocation-ff35785caf098a68)
+     Running tests/bank.rs (target/debug/deps/bank-83c66c6b2525bfc0)
+     Running tests/boundary.rs (target/debug/deps/boundary-fd1a0a0fee935844)
+     Running tests/conformance.rs (target/debug/deps/conformance-7ab9d17372cbfc26)
+     Running tests/contract.rs (target/debug/deps/contract-59c0e7f57fceafc9)
+     Running tests/cross_target.rs (target/debug/deps/cross_target-edbf72cf4ec5ef9d)
+     Running tests/oracle.rs (target/debug/deps/oracle-1c7d34e238c63e17)
+     Running tests/partition.rs (target/debug/deps/partition-1192d3115c6c152f)
+     Running unittests src/lib.rs (target/debug/deps/true_peak_limiter-ccc5d17c76c12159)
+     Running tests/allocation.rs (target/debug/deps/allocation-73edab74ea9dd7c3)
+     Running tests/bench.rs (target/debug/deps/bench-fed822bba511395c)
+     Running tests/conformance.rs (target/debug/deps/conformance-d6e48becd81f6760)
+     Running tests/determinism.rs (target/debug/deps/determinism-d9bda6b41ae4dcff)
+     Running tests/gain_law.rs (target/debug/deps/gain_law-da1b3e21269ba288)
+     Running tests/mono_collapse.rs (target/debug/deps/mono_collapse-98a81bb19b0f1091)
+     Running tests/observation.rs (target/debug/deps/observation-cd836c752eed6503)
+     Running unittests src/main.rs (target/debug/deps/wasm_console-29fafd7e3c379b5a)
+     Running unittests src/lib.rs (target/debug/deps/wasm_console_guest-acdfc7b7fedbeecf)
+     Running unittests src/lib.rs (target/debug/deps/wasm_gate_corpus-942fa29dd3223392)
+     Running unittests src/lib.rs (target/debug/deps/wasm_gate_guest-ea588739d34133df)
+     Running unittests src/lib.rs (target/debug/deps/wasm_gates-f92c883e35d78743)
+     Running unittests src/main.rs (target/debug/deps/wasm_gates-ac4717469a191f55)
+     Running tests/g5_native_corpus.rs (target/debug/deps/g5_native_corpus-5b395e53f940841f)
+     Running tests/g6_full_corpus_ftz.rs (target/debug/deps/g6_full_corpus_ftz-c77cc0d280bf2533)
+   Doc-tests bench_support
+   Doc-tests builtins
+   Doc-tests builtins_compiler
+   Doc-tests capi
+   Doc-tests compressor
+   Doc-tests conformance
+   Doc-tests console_workload
+   Doc-tests delay
+   Doc-tests dsp_reference
+   Doc-tests effect_compiler
+   Doc-tests effect_contract
+   Doc-tests effect_package
+   Doc-tests effect_runtime
+   Doc-tests engine
+   Doc-tests gate_expander
+   Doc-tests graph
+   Doc-tests graph_compiler
+   Doc-tests host_core
+   Doc-tests host_mobile
+   Doc-tests host_web
+   Doc-tests lane
+   Doc-tests math
+   Doc-tests multiband_compressor
+   Doc-tests native_pcm_runner
+   Doc-tests parameter_metadata
+   Doc-tests parametric_eq
+   Doc-tests protocol
+   Doc-tests rack
+   Doc-tests rack_compiler
+   Doc-tests session
+   Doc-tests session_validator
+   Doc-tests soft_clip
+   Doc-tests source
+   Doc-tests stem_hasher
+   Doc-tests target_smoke
+   Doc-tests transient_shaper
+   Doc-tests true_peak_limiter
+   Doc-tests wasm_gate_corpus
+   Doc-tests wasm_gates

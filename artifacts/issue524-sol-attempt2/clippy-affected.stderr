@@ -1,0 +1,103 @@
+    Checking effect-contract v0.1.0 (/home/bl/misofm/engine-native-points/crates/effect-contract)
+    Checking conformance v0.1.0 (/home/bl/misofm/engine-native-points/crates/conformance)
+    Checking compressor v0.1.0 (/home/bl/misofm/engine-native-points/crates/compressor)
+error: digits of hex, binary or octal literal not in groups of equal size
+   --> crates/compressor/tests/native_points.rs:168:39
+    |
+168 |     let mut left = noise(WARM_FRAMES, 0x5240_11, 0.73);
+    |                                       ^^^^^^^^^ help: consider: `0x0052_4011`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#unusual_byte_groupings
+    = note: `-D clippy::unusual-byte-groupings` implied by `-D clippy::all`
+    = help: to override `-D clippy::all` add `#[allow(clippy::unusual_byte_groupings)]`
+
+error: digits of hex, binary or octal literal not in groups of equal size
+   --> crates/compressor/tests/native_points.rs:169:40
+    |
+169 |     let mut right = noise(WARM_FRAMES, 0x5240_22, 0.61);
+    |                                        ^^^^^^^^^ help: consider: `0x0052_4022`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#unusual_byte_groupings
+
+error: digits of hex, binary or octal literal not in groups of equal size
+   --> crates/compressor/tests/native_points.rs:178:41
+    |
+178 |     let mut left_a = noise(WARM_FRAMES, 0x5240_33, 0.67);
+    |                                         ^^^^^^^^^ help: consider: `0x0052_4033`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#unusual_byte_groupings
+
+error: digits of hex, binary or octal literal not in groups of equal size
+   --> crates/compressor/tests/native_points.rs:179:42
+    |
+179 |     let mut right_a = noise(WARM_FRAMES, 0x5240_44, 0.59);
+    |                                          ^^^^^^^^^ help: consider: `0x0052_4044`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#unusual_byte_groupings
+
+error: digits of hex, binary or octal literal not in groups of equal size
+   --> crates/compressor/tests/native_points.rs:438:37
+    |
+438 |     let mut point_left = noise(128, 0x5241_01, 0.71);
+    |                                     ^^^^^^^^^ help: consider: `0x0052_4101`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#unusual_byte_groupings
+
+error: digits of hex, binary or octal literal not in groups of equal size
+   --> crates/compressor/tests/native_points.rs:439:38
+    |
+439 |     let mut point_right = noise(128, 0x5241_02, 0.63);
+    |                                      ^^^^^^^^^ help: consider: `0x0052_4102`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#unusual_byte_groupings
+
+error: digits of hex, binary or octal literal not in groups of equal size
+   --> crates/compressor/tests/native_points.rs:481:34
+    |
+481 |     let mut left = noise(frames, 0x5242_01 ^ *first_sample, 0.55);
+    |                                  ^^^^^^^^^ help: consider: `0x0052_4201`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#unusual_byte_groupings
+
+error: digits of hex, binary or octal literal not in groups of equal size
+   --> crates/compressor/tests/native_points.rs:482:35
+    |
+482 |     let mut right = noise(frames, 0x5242_02 ^ *first_sample, 0.47);
+    |                                   ^^^^^^^^^ help: consider: `0x0052_4202`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#unusual_byte_groupings
+
+error: digits of hex, binary or octal literal not in groups of equal size
+   --> crates/compressor/tests/native_points.rs:629:37
+    |
+629 |     let mut point_left = noise(128, 0x5243_01 ^ parameter as u64, 0.69);
+    |                                     ^^^^^^^^^ help: consider: `0x0052_4301`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#unusual_byte_groupings
+
+error: digits of hex, binary or octal literal not in groups of equal size
+   --> crates/compressor/tests/native_points.rs:630:38
+    |
+630 |     let mut point_right = noise(128, 0x5243_02 ^ parameter as u64, 0.57);
+    |                                      ^^^^^^^^^ help: consider: `0x0052_4302`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#unusual_byte_groupings
+
+error: digits of hex, binary or octal literal not in groups of equal size
+   --> crates/compressor/tests/native_points.rs:667:45
+    |
+667 |         let mut unchanged_left = noise(128, 0x5243_01 ^ parameter as u64, 0.69);
+    |                                             ^^^^^^^^^ help: consider: `0x0052_4301`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#unusual_byte_groupings
+
+error: digits of hex, binary or octal literal not in groups of equal size
+   --> crates/compressor/tests/native_points.rs:668:46
+    |
+668 |         let mut unchanged_right = noise(128, 0x5243_02 ^ parameter as u64, 0.57);
+    |                                              ^^^^^^^^^ help: consider: `0x0052_4302`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#unusual_byte_groupings
+
+error: could not compile `compressor` (test "native_points") due to 12 previous errors
+warning: build failed, waiting for other jobs to finish...

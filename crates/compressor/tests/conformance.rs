@@ -12,7 +12,7 @@ use std::hint::black_box;
 use std::sync::{Arc, Barrier};
 
 use bench_support::alloc as bench_alloc;
-use effect_contract::{EffectBankProcessBlock, EffectProcessBlock};
+use effect_contract::{EffectBankProcessBlock, EffectProcessBlock, ParameterChannel};
 use engine::realtime::audit;
 
 conformance::effect_conformance_test!(compressor::CompressorFactory);
@@ -149,7 +149,36 @@ fn uniform_and_ragged_render_paths_allocate_and_free_nothing() {
     audit::warm_up();
     audit::reset();
     audit::in_render_scope(|| {
+        let targets = [3.0_f32, -3.0, 6.0, -6.0];
         for block in 0..32_u64 {
+            let target = targets[block as usize % targets.len()];
+            assert_eq!(
+                staged.apply_parameter_point(5, ParameterChannel::Left, target),
+                Ok(())
+            );
+            let accepted = staged
+                .parameter_state(5, ParameterChannel::Left)
+                .expect("native point state");
+            assert_eq!(accepted.target_value.to_bits(), target.to_bits());
+            assert_eq!(
+                staged.apply_parameter_point(5, ParameterChannel::Left, f32::NAN),
+                Err(effect_contract::ParameterAccessError::InvalidValue)
+            );
+            let after_rejection = staged
+                .parameter_state(5, ParameterChannel::Left)
+                .expect("native point state");
+            assert_eq!(
+                after_rejection.current_value.to_bits(),
+                accepted.current_value.to_bits()
+            );
+            assert_eq!(
+                after_rejection.target_value.to_bits(),
+                accepted.target_value.to_bits()
+            );
+            assert_eq!(
+                staged.parameter_state(u32::MAX, ParameterChannel::Right),
+                Err(effect_contract::ParameterAccessError::InvalidParameterIndex)
+            );
             staged.process(
                 EffectProcessBlock::new(
                     &mut staged_left,

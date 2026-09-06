@@ -1,0 +1,9 @@
+file:///home/bl/misofm/engine-native-points/hosts/host-web/qualification/run.mjs:351
+    throw new Error("--record-matrix requires --candidate-commit as canonical lowercase 40-hex");
+          ^
+
+Error: --record-matrix requires --candidate-commit as canonical lowercase 40-hex
+    at main (file:///home/bl/misofm/engine-native-points/hosts/host-web/qualification/run.mjs:351:11)
+    at async file:///home/bl/misofm/engine-native-points/hosts/host-web/qualification/run.mjs:402:1
+
+Node.js v22.23.2

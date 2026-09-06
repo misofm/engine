@@ -1,0 +1,39 @@
+{
+  "argv": [
+    "python3",
+    "-B",
+    "scripts/check-browser-expected-resources.py",
+    "--artifacts",
+    "/tmp/issue524-delivery/resumed-artifact"
+  ],
+  "cwd": "/home/bl/misofm/engine-native-points",
+  "head": "0df067cbc8366607d2dcec7912364aa437c7f573",
+  "status": " M hosts/host-web/BROWSER_DEPLOYMENT_MATRIX.md\n M hosts/host-web/qualification/results.json\n",
+  "env": {
+    "PATH": "/home/bl/.cargo/bin:/home/bl/.cargo/bin:/home/bl/.local/bin:/home/bl/.codex/packages/standalone/releases/0.153.4-x86_64-unknown-linux-musl/codex-path:/home/bl/.codex1/tmp/arg0/codex-arg032GUSu:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin",
+    "RUSTFLAGS": null,
+    "CARGO_TARGET_DIR": null
+  },
+  "source": {
+    "crates/effect-contract/src/lib.rs": {
+      "sha256": "48a7b230da74e1a91c4d535f051df8bee58ecf53af0d0bf0b1b8db9e672f9ae3",
+      "git_blob": "3e87af9c93b4aa1ab052657256047f36721fc26b"
+    },
+    "crates/compressor/src/lib.rs": {
+      "sha256": "b32b49de02d5e0f907cc49485c9f702e9f25c2999a956b41234a9f0ff3346b87",
+      "git_blob": "a3fea590674b83e1f8ee0b7f07ce3040f5ad4aae"
+    },
+    "crates/compressor/tests/native_points.rs": {
+      "sha256": "e931976489438af2f6a5d1e6d67d53214723da38c70c5c89cffe2dfd895abbe6",
+      "git_blob": "8641fcdc654ef49dfd1e189290afe95205eb440e"
+    },
+    "crates/compressor/tests/conformance.rs": {
+      "sha256": "a038491a6bab7a38cb8dc0b89c257184d6ffcb5474051c0ed21e78b94b17c2ec",
+      "git_blob": "505062e5af1eff876a3f9a77344c76c43712ffb3"
+    },
+    "hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256": {
+      "sha256": "78c3c3f65721744be6dcbb2831172387f7f9aeebde39a1a63f153796ffd813d9",
+      "git_blob": "17a5f92a981ddd519858cff6eb8ba00aa160fbe2"
+    }
+  }
+}

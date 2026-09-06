@@ -1,0 +1,32 @@
+{
+  "argv": [
+    "bash",
+    "scripts/check-lane-policy.sh"
+  ],
+  "cwd": "/home/bl/misofm/engine-native-points",
+  "head": "fb6d2d24617412ba5b946a04a9a07f3c524456a4",
+  "status": "",
+  "env": {
+    "PATH": "/home/bl/.cargo/bin:/home/bl/.cargo/bin:/home/bl/.local/bin:/home/bl/.codex/packages/standalone/releases/0.153.4-x86_64-unknown-linux-musl/codex-path:/home/bl/.codex1/tmp/arg0/codex-arg0Q8EgMu:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin",
+    "RUSTFLAGS": null,
+    "CARGO_TARGET_DIR": null
+  },
+  "source": {
+    "crates/effect-contract/src/lib.rs": {
+      "sha256": "91435f21417359846c1217bdf19747592e55dd1e99c4134ded4fd353fe1c4ba4",
+      "git_blob": "80d1409727a0b5ced3db8470425d883add735189"
+    },
+    "crates/compressor/src/lib.rs": {
+      "sha256": "1e8604760ed6e2477d04383e51105a5bc7742526d381853f1d9a2191ddba6e07",
+      "git_blob": "7db15f8b2c4341d6a77106173e242d3a4b9ddc69"
+    },
+    "crates/compressor/tests/native_points.rs": {
+      "sha256": "76a8a837390f1c705160220b189bc5b9d664bc4cbe5f6bddc8252368be446cd0",
+      "git_blob": "155191310f55dbd07b269da5162a70b3d2390700"
+    },
+    "crates/compressor/tests/conformance.rs": {
+      "sha256": "6791e9ebc3573d61d285a0de7f18cf13ff1d746c025dac2d184355776f3c424b",
+      "git_blob": "03ebb08223fd94338013858aa53c7fe359cf5bc7"
+    }
+  }
+}

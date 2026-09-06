@@ -1,0 +1,10 @@
+
+running 5 tests
+test native_point_retarget_obeys_current_and_sample_count_laws ... ok
+test native_point_invalidates_silent_fixed_point_without_advancing_it ... ok
+test native_point_changes_target_without_advancing_samples ... ok
+test native_parameter_access_is_typed_and_transactional ... ok
+test native_point_matches_existing_span_pcm_and_state ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+

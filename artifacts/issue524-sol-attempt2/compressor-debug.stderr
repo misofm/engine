@@ -1,0 +1,9 @@
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-native-points/crates/compressor)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.47s
+     Running unittests src/lib.rs (target/debug/deps/compressor-6a14549b6a1f5d67)
+     Running tests/conformance.rs (target/debug/deps/conformance-3c37af9fe9c8a5a5)
+
+thread 'uniform_and_ragged_render_paths_allocate_and_free_nothing' (220616) panicked at crates/compressor/tests/conformance.rs:193:18:
+empty staged block: ZeroFrames
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+error: test failed, to rerun pass `-p compressor --test conformance`
