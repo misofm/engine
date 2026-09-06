@@ -1017,9 +1017,28 @@ mod tests {
                 .any(|w| w == b"$.effects[64]")
         );
 
-        let session = parse_session_json("{}").expect_err("missing fields");
+        let invalid = include_str!("../../../fixtures/session/v1/canonical.json")
+            .replace("\"sample_rate_hz\": 48000", "\"sample_rate_hz\": 123")
+            .replace("\"quantum_frames\": 128", "\"quantum_frames\": 0");
+        let session = parse_session_json(&invalid).expect_err("invalid shape");
+        assert_eq!(session.diagnostics().len(), 2);
+        assert!(
+            session
+                .diagnostics()
+                .iter()
+                .all(|diagnostic| { diagnostic.span.is_some() && !diagnostic.message.is_empty() })
+        );
         let projected = session_diagnostics(session);
         assert_eq!(projected.kind(), super::PrepareRejection::Session);
-        assert!(!projected.as_bytes().is_empty());
+        assert_eq!(
+            projected.as_bytes(),
+            b"capacity.zero\t$.quantum_frames\nsample_rate.unsupported_at_launch\t$.sample_rate_hz\n"
+        );
+
+        let invalid_tracks = (0..65).map(|_| "null").collect::<Vec<_>>().join(",");
+        let many = format!(r#"{{"schema_version":1,"tracks":[{invalid_tracks}]}}"#);
+        let many = parse_session_json(&many).expect_err("65 unknown fields");
+        let bounded = session_diagnostics(many).into_bytes();
+        assert_eq!(bounded.iter().filter(|&&byte| byte == b'\n').count(), 64);
     }
 }
