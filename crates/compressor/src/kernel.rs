@@ -44,6 +44,9 @@ use lane::kernels::gain_mix_step;
 use lane::{Lane, flush};
 use math::fast_db::{fast_gain_from_db, fast_level_db};
 
+#[cfg(test)]
+use core::sync::atomic::{AtomicUsize, Ordering};
+
 use crate::design::{
     ALL_PARAMETERS, COEF_ATTACK, COEF_HALF_KNEE, COEF_INV_RATIO_MINUS_ONE, COEF_INV_TWO_KNEE,
     COEF_MAKEUP, COEF_MIX, COEF_RELEASE, COEF_THRESHOLD, CoefWords, MAX_WIDTH, PARAMETER_COUNT,
@@ -814,6 +817,15 @@ enum DelayClass {
     Ragged,
 }
 
+#[cfg(test)]
+static FILL_UNIFORM_CALLS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static FILL_RAGGED_CALLS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static GATHER_UNIFORM_CALLS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static GATHER_RAGGED_CALLS: AtomicUsize = AtomicUsize::new(0);
+
 /// Classifies the live detector delays once for a frame segment. Padding never participates.
 #[inline(always)]
 fn delay_class<L: Lane>(channel: &Channel<L>) -> DelayClass {
@@ -839,6 +851,8 @@ fn fill_taps<L: Lane>(channel: &Channel<L>, write: usize, len: usize, scratch: &
     let ring_length = channel.ring_length as usize;
     let scratch = &mut scratch[..len * width];
     if let DelayClass::Uniform(delay) = delay_class(channel) {
+        #[cfg(test)]
+        FILL_UNIFORM_CALLS.fetch_add(1, Ordering::Relaxed);
         let row = if write >= delay {
             write - delay
         } else {
@@ -850,6 +864,8 @@ fn fill_taps<L: Lane>(channel: &Channel<L>, write: usize, len: usize, scratch: &
         scratch[first..first + rest].copy_from_slice(&channel.detector[..rest]);
         return;
     }
+    #[cfg(test)]
+    FILL_RAGGED_CALLS.fetch_add(1, Ordering::Relaxed);
     for lane in 0..width {
         let delay = channel.delay[lane] as usize;
         let row = if write >= delay {
@@ -899,6 +915,8 @@ fn gather_detector<L: Lane>(
     let width = L::WIDTH;
     let ring_length = channel.ring_length as usize;
     if let DelayClass::Uniform(delay) = class {
+        #[cfg(test)]
+        GATHER_UNIFORM_CALLS.fetch_add(1, Ordering::Relaxed);
         let row = if write >= delay {
             write - delay
         } else {
@@ -906,6 +924,8 @@ fn gather_detector<L: Lane>(
         };
         return L::load(&channel.detector[row * width..]);
     }
+    #[cfg(test)]
+    GATHER_RAGGED_CALLS.fetch_add(1, Ordering::Relaxed);
     for (lane, slot) in gather.iter_mut().take(width).enumerate() {
         let delay = channel.delay[lane] as usize;
         let tap = if write >= delay {
@@ -1331,6 +1351,57 @@ mod tests {
     use super::*;
     use lane::{Simd4, Simd8};
 
+    fn old_detector_word<L: Lane>(channel: &Channel<L>, write: usize, lane: usize) -> f32 {
+        let delay = channel.delay[lane] as usize;
+        let ring_length = channel.ring_length as usize;
+        let row = if write >= delay {
+            write - delay
+        } else {
+            write + ring_length - delay
+        };
+        channel.detector[row * L::WIDTH + lane]
+    }
+
+    fn assert_access_case<L: Lane>(
+        channel: &Channel<L>,
+        write: usize,
+        len: usize,
+        expected_class: DelayClass,
+    ) {
+        assert_eq!(delay_class(channel), expected_class);
+        let prefix = len * L::WIDTH;
+        let mut scratch = vec![f32::from_bits(0x7f7f_4750); prefix + 3];
+        fill_taps(channel, write, len, &mut scratch);
+        for frame in 0..len {
+            let frame_write = (write + frame) % channel.ring_length as usize;
+            for lane in 0..L::WIDTH {
+                assert_eq!(
+                    scratch[frame * L::WIDTH + lane].to_bits(),
+                    old_detector_word(channel, frame_write, lane).to_bits(),
+                    "write={write} len={len} frame={frame} lane={lane}"
+                );
+            }
+        }
+        assert!(
+            scratch[prefix..]
+                .iter()
+                .all(|word| word.to_bits() == 0x7f7f_4750),
+            "write={write} len={len}: fill touched the outside-prefix sentinel"
+        );
+
+        let mut gather = [f32::from_bits(0x7f7f_4751); MAX_WIDTH];
+        let actual = gather_detector(channel, write, delay_class(channel), &mut gather);
+        let mut lanes = [0.0; MAX_WIDTH];
+        actual.store(&mut lanes);
+        for lane in 0..L::WIDTH {
+            assert_eq!(
+                lanes[lane].to_bits(),
+                old_detector_word(channel, write, lane).to_bits(),
+                "gather write={write} lane={lane}"
+            );
+        }
+    }
+
     fn access_witness<L: Lane>() {
         let defaults = [[0.0; PARAMETER_COUNT]; MAX_WIDTH];
         let mut channel = Channel::<L>::new(&defaults, 11, 48_000);
@@ -1339,75 +1410,49 @@ mod tests {
                 channel.detector[row * L::WIDTH + lane] = (row * 100 + lane) as f32;
             }
         }
-        let write = 10;
-        let len = 4;
-        let mut scratch = vec![-7.0; len * L::WIDTH + 2];
-
-        channel.delay[0] = 2;
-        for lane in 1..L::WIDTH {
-            channel.delay[lane] = 2;
-        }
+        channel.delay[..L::WIDTH].fill(2);
         for lane in L::WIDTH..MAX_WIDTH {
             channel.delay[lane] = 99;
         }
-        assert_eq!(delay_class(&channel), DelayClass::Uniform(2));
-        scratch[len * L::WIDTH..].fill(13.0);
-        fill_taps(&channel, write, len, &mut scratch);
-        for frame in 0..len {
-            let row = (write + frame + 11 - 2) % 11;
-            for lane in 0..L::WIDTH {
-                assert_eq!(scratch[frame * L::WIDTH + lane], (row * 100 + lane) as f32);
+        // Real uniform classification at the compact run's start row before, at and after the
+        // physical wrap. The lengths cover empty and singleton prefixes, one complete staged
+        // segment and the shorter tail left by a split segment.
+        for write in [0, 2, 10] {
+            for len in [0, 1, 4, 10] {
+                assert_access_case(&channel, write, len, DelayClass::Uniform(2));
             }
-        }
-        assert_eq!(&scratch[len * L::WIDTH..], &[13.0, 13.0]);
-        let mut gather = [0.0; MAX_WIDTH];
-        let value = gather_detector(&channel, write, DelayClass::Uniform(2), &mut gather);
-        let mut lanes = [0.0; MAX_WIDTH];
-        value.store(&mut lanes);
-        for (lane, value) in lanes.iter().enumerate().take(L::WIDTH) {
-            assert_eq!(*value, (8 * 100 + lane) as f32);
         }
 
         for lane in 0..L::WIDTH {
             channel.delay[lane] = 2 + (lane & 1) as u32;
         }
-        if L::WIDTH == 1 {
-            assert_eq!(delay_class(&channel), DelayClass::Uniform(2));
+        let expected = if L::WIDTH == 1 {
+            DelayClass::Uniform(2)
         } else {
-            assert_eq!(delay_class(&channel), DelayClass::Ragged);
-        }
-        scratch.fill(-7.0);
-        fill_taps(&channel, write, len, &mut scratch);
-        for frame in 0..len {
-            for lane in 0..L::WIDTH {
-                let row = (write + frame + 11 - channel.delay[lane] as usize) % 11;
-                assert_eq!(scratch[frame * L::WIDTH + lane], (row * 100 + lane) as f32);
+            DelayClass::Ragged
+        };
+        for write in [0, 2, 10] {
+            for len in [0, 1, 4, 10] {
+                assert_access_case(&channel, write, len, expected);
             }
-        }
-        let ragged = gather_detector(&channel, write, DelayClass::Ragged, &mut gather);
-        ragged.store(&mut lanes);
-        for (lane, value) in lanes.iter().enumerate().take(L::WIDTH) {
-            let row = (write + 11 - channel.delay[lane] as usize) % 11;
-            assert_eq!(*value, (row * 100 + lane) as f32);
-        }
-
-        for (start, length) in [(0, 0), (5, 1), (10, 4)] {
-            scratch.fill(-19.0);
-            fill_taps(&channel, start, length, &mut scratch);
-            for frame in 0..length {
-                for lane in 0..L::WIDTH {
-                    let row = (start + frame + 11 - channel.delay[lane] as usize) % 11;
-                    assert_eq!(scratch[frame * L::WIDTH + lane], (row * 100 + lane) as f32);
-                }
-            }
-            assert!(scratch[length * L::WIDTH..].iter().all(|v| *v == -19.0));
         }
     }
 
     #[test]
     fn uniform_and_ragged_access_match_old_transcription() {
+        FILL_UNIFORM_CALLS.store(0, Ordering::Relaxed);
+        FILL_RAGGED_CALLS.store(0, Ordering::Relaxed);
+        GATHER_UNIFORM_CALLS.store(0, Ordering::Relaxed);
+        GATHER_RAGGED_CALLS.store(0, Ordering::Relaxed);
         access_witness::<f32>();
         access_witness::<Simd4>();
         access_witness::<Simd8>();
+        // These counters are branch-local: classification alone cannot satisfy them. Keep these
+        // assertions after the independent old-access comparisons so a dispatch mutant retains
+        // the useful fact that its PCM words still match before its causal witness rejects it.
+        assert!(FILL_UNIFORM_CALLS.load(Ordering::Relaxed) > 0);
+        assert!(FILL_RAGGED_CALLS.load(Ordering::Relaxed) > 0);
+        assert!(GATHER_UNIFORM_CALLS.load(Ordering::Relaxed) > 0);
+        assert!(GATHER_RAGGED_CALLS.load(Ordering::Relaxed) > 0);
     }
 }
