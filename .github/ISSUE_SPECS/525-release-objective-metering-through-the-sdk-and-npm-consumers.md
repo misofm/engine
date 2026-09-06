@@ -19,3 +19,9 @@ Dedicated Astra review of merge/release changes; combined engine focused tests a
 ## Limits
 
 The metering timing fixture repair remains #522 and is not part of this release. No measured CPU speedup is claimed. Display ballistics remain downstream follow-up scope, not part of dependency adoption.
+
+## Combined engine release checkpoint
+
+Sol medium approved the bounded release brief. Merge checkpoint `5d1f4907` preserves main `70ce3d7b` prepared-slot activity and all reviewed metering source; only generated artifact records conflicted. SDK/workflow identities are updated to 0.2.1. Candidate `fb801b8d2b71a1b20833e2d8102345fd76e84c85` qualifies canonical Linux WASM `54dcf7dd5f6199cf3ceeab77afefe09067e18b730c9e0a6ef9df73fbfd3afc69`, matching the source pin and trusted publishing workflow.
+
+Astra medium independently reviewed the source preservation, release identity/guards and actual artifact. Local qualification PASS: unchanged static/object/budget gates, Chromium/Firefox/WebKit with mutation checks, resource oracle with 26 red mutations, SDK0.2.1 tarball smoke, 167 headless tests passed/one skipped/zero failed, generated surface and TypeScript mirror checks. No production source changed after the candidate. Review: `docs/evidence/metering-525/review.md`. PR CI, merge, trusted publication and downstream adoption remain pending; no timing speedup is claimed.
