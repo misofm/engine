@@ -2,7 +2,6 @@
   "source_pass_commit": "6b9f4d19509412fac3dea884744ebb35b37e6639",
   "parent_rust_evidence_commit": "a7aea9229b84f5356b4bb09d8bb50beb895aebb7",
   "unchanged_paths": [
-    "tools/bench",
     "Cargo.toml",
     "Cargo.lock",
     ".cargo",
@@ -10,5 +9,11 @@
     "hosts"
   ],
   "real_benchmark_launches": 0,
-  "issue431_capture": "UNSPENT; UNAUTHORIZED"
+  "issue431_capture": "UNSPENT; UNAUTHORIZED",
+  "formatting_only": {
+    "path": "tools/bench/src/builtins.rs",
+    "prior_sha256": "3d2503d8f3db82b1e1c2f3bbba59ceda7a1b7ce6490053d886e659922bc767fe",
+    "current_sha256": "21593f9a57858db53f1921c7e5ca247de3fc807ee805e040db507fbadfd674e7",
+    "verified": "Exactly one assert_eq line wrapped by rustfmt; inverse replacement reproduces prior bytes"
+  }
 }

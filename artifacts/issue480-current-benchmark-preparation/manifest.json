@@ -250,6 +250,21 @@
     "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
   },
   {
+    "path": "480-ci-env-reproduction.command",
+    "bytes": 91,
+    "sha256": "97e233970909129c4ec09dc807af25eeae3a6aea3e764fe3af857785dc076fdf"
+  },
+  {
+    "path": "480-ci-env-reproduction.log",
+    "bytes": 97,
+    "sha256": "1586d28c2c86abc1781c9157f6c07aba8956d3655dec896b639928f6ccc82d89"
+  },
+  {
+    "path": "480-ci-env-reproduction.status",
+    "bytes": 2,
+    "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+  },
+  {
     "path": "480-luna1-focused.command",
     "bytes": 48,
     "sha256": "880f386b1497123a255de96b848904cebd92e4e819ec78d0c37784cd42503dcd"
@@ -499,9 +514,84 @@
     "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
   },
   {
+    "path": "481-delivery-ci-env-clean.command",
+    "bytes": 135,
+    "sha256": "6d5b2311161a4b55b8b4dc3f0b7c564cc86efde3509eb915d56b662de437ac10"
+  },
+  {
+    "path": "481-delivery-ci-env-clean.log",
+    "bytes": 82,
+    "sha256": "3b50fae3e3b2218805f7f1a6584eb25b19afc106d138aaf8c013475f073cc943"
+  },
+  {
+    "path": "481-delivery-ci-env-clean.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "481-delivery-env.command",
+    "bytes": 44,
+    "sha256": "e3f5e4d2bc9d0dbf4061f534b4753f6d1003a1b936384912c91f3000b70948ee"
+  },
+  {
+    "path": "481-delivery-env.log",
+    "bytes": 56,
+    "sha256": "81db7ded215a305c3764c15edd04fb83bc4eff3edf4df40df2f4b306c419a756"
+  },
+  {
+    "path": "481-delivery-env.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "481-delivery-fmt.command",
+    "bytes": 109,
+    "sha256": "c8d7b81ce37ca318e7b4619647a1579fb71a82e140f90d51005efbe77bc37567"
+  },
+  {
+    "path": "481-delivery-fmt.log",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "481-delivery-fmt.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "481-delivery-syntax.command",
+    "bytes": 157,
+    "sha256": "47cd11cb70df3c40edfe16d99a5212454b23a0a13531d9e9b27e695a6caf40d5"
+  },
+  {
+    "path": "481-delivery-syntax.log",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "481-delivery-syntax.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "481-delivery-validator-delta.command",
+    "bytes": 1304,
+    "sha256": "dd8813cc7503a999de2be0986d2c0303676f92cff49f1bfcbb2d8505d68f6c0b"
+  },
+  {
+    "path": "481-delivery-validator-delta.log",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "481-delivery-validator-delta.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
     "path": "README.md",
-    "bytes": 1520,
-    "sha256": "d58033c5a9e1085726ffeae0145cac05144f6d1b23f96055cd31f7719ce08c1b"
+    "bytes": 1949,
+    "sha256": "17b9ff0b99d25e31f080e057f3b688d2d18c137128533ec7edd3e09c70ffa446"
   },
   {
     "path": "astra-473-attempt1-review.md",
@@ -539,8 +629,18 @@
     "sha256": "51748d7bec36f5450b6388a530763477d3a896442361952055c19627d5fc395f"
   },
   {
+    "path": "astra-481-ci-integration-ruling.md",
+    "bytes": 2441,
+    "sha256": "56686026f8bbcc261fe1ed6e8a480e278620e122f611eeb4dd82b5485cf6c03b"
+  },
+  {
+    "path": "engine-481-initial-fmt-job.log",
+    "bytes": 28550,
+    "sha256": "57903e4b7fa17213a55ea55bf4524f48691893b7fdb6c2cc06f872dbf61578e3"
+  },
+  {
     "path": "source-equivalence.json",
-    "bytes": 350,
-    "sha256": "7bd79e47deb5bcf09408c1c203c7f94ca22ef1f113e3fe3a414256923cc8f6fc"
+    "bytes": 688,
+    "sha256": "221bc35117ad5bf961b02911e0c2f3d378104f712e12a566419ca38627c6c894"
   }
 ]

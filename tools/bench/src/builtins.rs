@@ -2014,7 +2014,10 @@ mod tests {
             assert_eq!(sha256(input.bytes), manifest_input_sha256(input.id));
             input.validate_common(plan.workload, plan.rate_hz);
             if plan.workload.is_prepare() {
-                assert_eq!(sha256(SESSION.as_bytes()), input.text("session_template_sha256"));
+                assert_eq!(
+                    sha256(SESSION.as_bytes()),
+                    input.text("session_template_sha256")
+                );
                 assert_eq!(input.usize("tracks"), 256);
                 assert_eq!(input.usize("meter_observers"), 56);
                 assert_eq!(input.usize("meter_queue_capacity"), 4);
