@@ -14,7 +14,9 @@
 
 mod support;
 
-use lane::kernels::{SvfState, ordered_accumulate_block, sum_into_block, svf_step};
+use lane::kernels::{
+    SvfState, mix2x2_block, ordered_accumulate_block, sum_into_block, sum2_block, svf_step,
+};
 use lane::{Lane, Simd4, Simd8, flush};
 use support::{
     ALL_KERNELS, ALL_SIGNALS, Kernel, MAX_WIDTH, Signal, deinterleave, interleave, run_kernel,
@@ -169,6 +171,224 @@ fn ordered_accumulation_matches_the_existing_d9_primitives_and_rejects_shapes() 
     check_ordered_accumulation::<f32>();
     check_ordered_accumulation::<Simd4>();
     check_ordered_accumulation::<Simd8>();
+}
+
+fn caught(f: impl FnOnce() + std::panic::UnwindSafe) -> bool {
+    std::panic::catch_unwind(f).is_err()
+}
+
+fn lane2_value(index: usize) -> f32 {
+    const VALUES: [f32; 10] = [
+        0.0,
+        -0.0,
+        1.0,
+        -1.0,
+        16_777_216.0,
+        -16_777_216.0,
+        f32::MIN_POSITIVE,
+        f32::from_bits(1),
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+    ];
+    VALUES[index % VALUES.len()]
+}
+
+fn check_lane2_bounds_and_identity<L: Lane>() {
+    let hostile: Vec<f32> = (0..10).map(lane2_value).collect();
+    assert!(hostile.iter().any(|value| value.to_bits() == 0));
+    assert!(hostile.iter().any(|value| value.to_bits() == 0x8000_0000));
+    assert!(hostile.iter().any(|value| value.is_subnormal()));
+    assert!(hostile.iter().any(|value| value.is_normal()));
+    assert!(hostile.iter().any(|value| value.is_infinite()));
+
+    let mut lengths = vec![
+        0,
+        1,
+        L::WIDTH.saturating_sub(1),
+        L::WIDTH,
+        L::WIDTH + 1,
+        2 * L::WIDTH + 1,
+    ];
+    lengths.sort_unstable();
+    lengths.dedup();
+    for len in lengths {
+        let a: Vec<f32> = (0..len).map(lane2_value).collect();
+        let b: Vec<f32> = (0..len).map(|index| lane2_value(index + 3)).collect();
+
+        let expected_sum: Vec<u32> = a
+            .iter()
+            .zip(&b)
+            .map(|(a, b)| <f32 as Lane>::add(*a, *b).to_bits())
+            .collect();
+        let mut sum = vec![f32::from_bits(0x7fc0_4630); len];
+        sum2_block::<L>(&mut sum, &a, &b);
+        assert_eq!(
+            block_bits(&sum),
+            expected_sum,
+            "sum2 width {} len {len}",
+            L::WIDTH
+        );
+
+        let mut expected_acc = a.clone();
+        for (acc, x) in expected_acc.iter_mut().zip(&b) {
+            *acc = <f32 as Lane>::add(*acc, *x);
+        }
+        let mut acc = a.clone();
+        sum_into_block::<L>(&mut acc, &b);
+        assert_eq!(
+            block_bits(&acc),
+            block_bits(&expected_acc),
+            "sum_into width {} len {len}",
+            L::WIDTH
+        );
+
+        let mut expected_left = a.clone();
+        let mut expected_right = b.clone();
+        for (left, right) in expected_left.iter_mut().zip(&mut expected_right) {
+            let old_left = *left;
+            let old_right = *right;
+            *left = <f32 as Lane>::fma(-0.1, old_right, <f32 as Lane>::mul(0.9, old_left));
+            *right = <f32 as Lane>::fma(0.8, old_right, <f32 as Lane>::mul(0.2, old_left));
+        }
+        let mut left = a;
+        let mut right = b;
+        mix2x2_block::<L>(&mut left, &mut right, [0.9, -0.1, 0.2, 0.8]);
+        assert_eq!(
+            block_bits(&left),
+            block_bits(&expected_left),
+            "matrix left width {} len {len}",
+            L::WIDTH
+        );
+        assert_eq!(
+            block_bits(&right),
+            block_bits(&expected_right),
+            "matrix right width {} len {len}",
+            L::WIDTH
+        );
+    }
+
+    let len = L::WIDTH + 1;
+    let short = vec![1.0; len - 1];
+    let full = vec![2.0; len];
+    let poison = f32::from_bits(0x7fc0_4630);
+    for first_short in [true, false] {
+        let mut out = vec![poison; len];
+        let before = block_bits(&out);
+        let panicked = caught(std::panic::AssertUnwindSafe(|| {
+            let (a, b) = if first_short {
+                (&short[..], &full[..])
+            } else {
+                (&full[..], &short[..])
+            };
+            sum2_block::<L>(&mut out, a, b);
+        }));
+        assert!(panicked);
+        assert_eq!(block_bits(&out), before, "sum2 must reject before writing");
+    }
+    let mut acc = vec![poison; len];
+    let before = block_bits(&acc);
+    assert!(caught(std::panic::AssertUnwindSafe(
+        || sum_into_block::<L>(&mut acc, &short)
+    )));
+    assert_eq!(
+        block_bits(&acc),
+        before,
+        "sum_into must reject before writing"
+    );
+    let mut left = vec![poison; len];
+    let mut right = short.clone();
+    let before_left = block_bits(&left);
+    let before_right = block_bits(&right);
+    assert!(caught(std::panic::AssertUnwindSafe(|| mix2x2_block::<L>(
+        &mut left,
+        &mut right,
+        [0.9, -0.1, 0.2, 0.8]
+    ))));
+    assert_eq!(
+        block_bits(&left),
+        before_left,
+        "matrix must reject before writing left"
+    );
+    assert_eq!(
+        block_bits(&right),
+        before_right,
+        "matrix must reject before writing right"
+    );
+
+    let long = vec![1.0; len + 1];
+    let mut sum_long_panicked = false;
+    for first_long in [true, false] {
+        let mut out = vec![poison; len];
+        sum_long_panicked |= caught(std::panic::AssertUnwindSafe(|| {
+            let (a, b) = if first_long {
+                (&long[..], &full[..])
+            } else {
+                (&full[..], &long[..])
+            };
+            sum2_block::<L>(&mut out, a, b);
+        }));
+        if !cfg!(debug_assertions) {
+            assert!(out.iter().all(|value| value.to_bits() == 3.0_f32.to_bits()));
+        }
+    }
+    let mut acc = vec![1.0; len];
+    let acc_long_panicked = caught(std::panic::AssertUnwindSafe(|| {
+        sum_into_block::<L>(&mut acc, &long)
+    }));
+    let mut left = vec![1.0_f32; len];
+    let mut right = vec![2.0_f32; len + 1];
+    let suffix = right[len].to_bits();
+    let matrix_long_panicked = caught(std::panic::AssertUnwindSafe(|| {
+        mix2x2_block::<L>(&mut left, &mut right, [0.9, -0.1, 0.2, 0.8])
+    }));
+    if cfg!(debug_assertions) {
+        assert!(sum_long_panicked && acc_long_panicked && matrix_long_panicked);
+    } else {
+        assert!(!sum_long_panicked && !acc_long_panicked && !matrix_long_panicked);
+        assert!(acc.iter().all(|value| value.to_bits() == 2.0_f32.to_bits()));
+        assert_eq!(
+            right[len].to_bits(),
+            suffix,
+            "matrix right excess suffix changed"
+        );
+    }
+
+    let longer_than_zero = [1.0_f32];
+    let zero_sum_panicked = caught(|| {
+        let mut out = [];
+        sum2_block::<L>(&mut out, &longer_than_zero, &longer_than_zero);
+    });
+    let zero_acc_panicked = caught(|| {
+        let mut acc = [];
+        sum_into_block::<L>(&mut acc, &longer_than_zero);
+    });
+    let zero_matrix_panicked = caught(|| {
+        let mut left = [];
+        let mut right = longer_than_zero;
+        mix2x2_block::<L>(&mut left, &mut right, [0.9, -0.1, 0.2, 0.8]);
+        assert_eq!(right[0].to_bits(), 1.0_f32.to_bits());
+    });
+    assert_eq!(
+        (zero_sum_panicked, zero_acc_panicked, zero_matrix_panicked),
+        if cfg!(debug_assertions) {
+            (true, true, true)
+        } else {
+            (false, false, false)
+        },
+        "zero controlling spans preserve debug equality and release prefix behavior"
+    );
+
+    let nan = f32::from_bits(0x7fc0_4630);
+    let mut nan_out = [0.0];
+    sum2_block::<L>(&mut nan_out, &[nan], &[1.0]);
+    assert!(nan_out[0].is_nan(), "NaN case must be exercised separately");
+}
+
+#[test]
+fn lane2_kernels_preserve_original_words_and_reject_short_inputs_before_writing() {
+    check_lane2_bounds_and_identity::<f32>();
+    check_lane2_bounds_and_identity::<Simd4>();
+    check_lane2_bounds_and_identity::<Simd8>();
 }
 
 #[test]
