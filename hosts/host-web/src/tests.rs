@@ -3307,8 +3307,8 @@ fn selective_meter_and_readiness_descriptive_timing() {
     if std::hint::black_box(cfg!(debug_assertions)) {
         panic!("timing requires --release");
     }
-    let mode = std::env::var("MISO_METER_TIMING_MODE").expect("timing mode");
-    let output = std::env::var("MISO_METER_TIMING_OUTPUT").expect("timing output path");
+    let mode = std::env::var("MISO_ENGINE_METER_TIMING_MODE").expect("timing mode");
+    let output = std::env::var("MISO_ENGINE_METER_TIMING_OUTPUT").expect("timing output path");
     let open = || {
         std::fs::OpenOptions::new()
             .write(true)
