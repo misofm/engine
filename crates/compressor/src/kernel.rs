@@ -491,6 +491,8 @@ fn frames_loop<L: Lane, const RAMPING: bool>(
     let mut coef_left = Coef::load(&channel_left.words);
     let mut coef_right = Coef::load(&channel_right.words);
     let mut gather = [0.0_f32; MAX_WIDTH];
+    let delay_left = delay_class(channel_left);
+    let delay_right = delay_class(channel_right);
 
     for frame in start..end {
         if RAMPING {
@@ -517,8 +519,8 @@ fn frames_loop<L: Lane, const RAMPING: bool>(
         level_right.store(&mut channel_right.detector[write * width..]);
         let delayed_left = L::load(&channel_left.main[next * width..]);
         let delayed_right = L::load(&channel_right.main[next * width..]);
-        let detected_left = gather_detector(channel_left, write, &mut gather);
-        let detected_right = gather_detector(channel_right, write, &mut gather);
+        let detected_left = gather_detector(channel_left, write, delay_left, &mut gather);
+        let detected_right = gather_detector(channel_right, write, delay_right, &mut gather);
 
         // 4-8, one channel then the other; the two share only the linked detector above.
         let output_left = one_frame(
@@ -806,6 +808,24 @@ fn min_delay<L: Lane>(channel: &Channel<L>) -> usize {
     least as usize
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DelayClass {
+    Uniform(usize),
+    Ragged,
+}
+
+/// Classifies the live detector delays once for a frame segment. Padding never participates.
+#[inline(always)]
+fn delay_class<L: Lane>(channel: &Channel<L>) -> DelayClass {
+    let first = channel.delay[0] as usize;
+    for lane in 1..L::WIDTH {
+        if channel.delay[lane] as usize != first {
+            return DelayClass::Ragged;
+        }
+    }
+    DelayClass::Uniform(first)
+}
+
 /// Copies `len` frames of every live lane's detector tap into `scratch`, frame major.
 ///
 /// The tap row of lane `k` advances one row per frame from `(write - D_k) mod B`, so the whole
@@ -818,6 +838,18 @@ fn fill_taps<L: Lane>(channel: &Channel<L>, write: usize, len: usize, scratch: &
     let width = L::WIDTH;
     let ring_length = channel.ring_length as usize;
     let scratch = &mut scratch[..len * width];
+    if let DelayClass::Uniform(delay) = delay_class(channel) {
+        let row = if write >= delay {
+            write - delay
+        } else {
+            write + ring_length - delay
+        };
+        let first = (ring_length - row).min(len) * width;
+        scratch[..first].copy_from_slice(&channel.detector[row * width..row * width + first]);
+        let rest = len * width - first;
+        scratch[first..first + rest].copy_from_slice(&channel.detector[..rest]);
+        return;
+    }
     for lane in 0..width {
         let delay = channel.delay[lane] as usize;
         let row = if write >= delay {
@@ -861,10 +893,19 @@ fn copy_lane(source: &[f32], destination: &mut [f32], lane: usize, width: usize)
 fn gather_detector<L: Lane>(
     channel: &Channel<L>,
     write: usize,
+    class: DelayClass,
     gather: &mut [f32; MAX_WIDTH],
 ) -> L {
     let width = L::WIDTH;
     let ring_length = channel.ring_length as usize;
+    if let DelayClass::Uniform(delay) = class {
+        let row = if write >= delay {
+            write - delay
+        } else {
+            write + ring_length - delay
+        };
+        return L::load(&channel.detector[row * width..]);
+    }
     for (lane, slot) in gather.iter_mut().take(width).enumerate() {
         let delay = channel.delay[lane] as usize;
         let tap = if write >= delay {
@@ -1195,6 +1236,7 @@ fn frames_loop_mono<L: Lane, const RAMPING: bool>(
 
     let mut coef_left = Coef::load(&channel_left.words);
     let mut gather = [0.0_f32; MAX_WIDTH];
+    let delay = delay_class(channel_left);
 
     for frame in start..end {
         if RAMPING {
@@ -1213,7 +1255,7 @@ fn frames_loop_mono<L: Lane, const RAMPING: bool>(
         main_left.store(&mut channel_left.main[write * width..]);
         level_left.store(&mut channel_left.detector[write * width..]);
         let delayed_left = L::load(&channel_left.main[next * width..]);
-        let detected_left = gather_detector(channel_left, write, &mut gather);
+        let detected_left = gather_detector(channel_left, write, delay, &mut gather);
 
         let output_left = one_frame(
             delayed_left,
@@ -1281,5 +1323,68 @@ fn idle_frames_staged_mono<L: Lane>(
         let slot = (start + index) * width;
         let delayed_left = L::load(&left[slot..]);
         gain_mix(delayed_left, *smoothed_left, &coef_left, &invariants).store(&mut left[slot..]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lane::{Simd4, Simd8};
+
+    fn access_witness<L: Lane>() {
+        let defaults = [[0.0; PARAMETER_COUNT]; MAX_WIDTH];
+        let mut channel = Channel::<L>::new(&defaults, 11, 48_000);
+        for row in 0..11 {
+            for lane in 0..L::WIDTH {
+                channel.detector[row * L::WIDTH + lane] = (row * 100 + lane) as f32;
+            }
+        }
+        let write = 9;
+        let len = 4;
+        let mut scratch = vec![-7.0; len * L::WIDTH];
+
+        channel.delay[0] = 2;
+        for lane in 1..L::WIDTH {
+            channel.delay[lane] = 2;
+        }
+        assert_eq!(delay_class(&channel), DelayClass::Uniform(2));
+        fill_taps(&channel, write, len, &mut scratch);
+        for frame in 0..len {
+            let row = (write + frame + 11 - 2) % 11;
+            for lane in 0..L::WIDTH {
+                assert_eq!(scratch[frame * L::WIDTH + lane], (row * 100 + lane) as f32);
+            }
+        }
+        let mut gather = [0.0; MAX_WIDTH];
+        let value = gather_detector(&channel, write, DelayClass::Uniform(2), &mut gather);
+        let mut lanes = [0.0; MAX_WIDTH];
+        value.store(&mut lanes);
+        for lane in 0..L::WIDTH {
+            assert_eq!(lanes[lane], (7 * 100 + lane) as f32);
+        }
+
+        for lane in 0..L::WIDTH {
+            channel.delay[lane] = 2 + (lane & 1) as u32;
+        }
+        if L::WIDTH == 1 {
+            assert_eq!(delay_class(&channel), DelayClass::Uniform(2));
+        } else {
+            assert_eq!(delay_class(&channel), DelayClass::Ragged);
+        }
+        scratch.fill(-7.0);
+        fill_taps(&channel, write, len, &mut scratch);
+        for frame in 0..len {
+            for lane in 0..L::WIDTH {
+                let row = (write + frame + 11 - channel.delay[lane] as usize) % 11;
+                assert_eq!(scratch[frame * L::WIDTH + lane], (row * 100 + lane) as f32);
+            }
+        }
+    }
+
+    #[test]
+    fn uniform_and_ragged_access_match_old_transcription() {
+        access_witness::<f32>();
+        access_witness::<Simd4>();
+        access_witness::<Simd8>();
     }
 }
