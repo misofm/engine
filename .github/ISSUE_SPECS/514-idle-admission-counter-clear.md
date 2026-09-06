@@ -149,3 +149,38 @@ The existing frozen test now covers repeated accepted submissions, pending flag 
 ## Sol attempt 2 local evidence
 
 Sourceb12fbc3a passes frozenexactdebug/release1each, fullhost63passed/1ignored each, strictClippy/fmt/diff andexistingpolicycontrols. Multipleacceptedsubmission/capacityack andpendingfailure state/silence/diagnostic proofs are complete in the existingtest. Artifacts/issue514-sol-attempt2 preserves11capturedcommands andpriorconsolidatedFAIL. Production/initialidleassertion/layout remainunchanged; accepted prioractualmutation/layout apply. ConsolidatedAstra review andpost-#511 integrateddelivery arepending.
+
+## Consolidated Astra Sol attempt 2 PASS
+
+# #514 Sol attempt 2 — consolidated Astra review: PASS
+
+Source qualification passes at clean `cf110abb209fcab58cbf2e1ed97b14486c00c44d` in `/home/bl/misofm/engine-idle-admission-clear`, with implementation/test source checkpoint `b12fbc3a54660c4f447792445ede3383d3d9b517`. Both blocking findings from the consolidated Luna attempt-1 review are resolved. No additional source correction is required. This is source acceptance only; integrated delivery remains deferred.
+
+## Frozen contract and corrected witnesses
+
+The attempt-2 source diff changes only later staging and assertions in the existing `idle_render_skips_admission_counter_clear_without_losing_queue_credit` test. Production `lib.rs`, its physical-fill instrumentation, the initial idle assertion, all other tests, dependencies and resource expectations remain unchanged.
+
+The admission witness now makes two successful submissions before one render: two records to the matrix destination, then one record to the fader destination. It compares complete command reports against explicit expected fields and the shared application sample `3 * QUANTUM`, with exact intermediate counts `[2, 0, 0]` and accumulated counts `[2, 1, 0]`, and pending true throughout. Successful drain proves one full physical clear and zero counters/false pending; subsequent idle rendering adds no clear.
+
+The full-queue witness now stages the excess record in the slot actually read, requires the complete typed BACKPRESSURE report with zero admitted records, and directly asserts the pending flag and full counters remain intact. That same host renders successfully, records `(1, 3)` physical-clear work, resets pending and zeros every counter. Reusing the retained matrix staging then successfully admits the full capacity at the next exact application sample, drains once again, and leaves the following idle render at `(0, 0)` clears. This closes the prior false-negative: a backpressure refusal that erased pending work would now fail directly and could not hide behind an abandoned host.
+
+The real pending-command TimeOverflow witness now seeds output with `-1.0` before rejection and requires STATE_FAILED, bitwise positive-zero output and exact `web.render.rejected\t$\n`. It retains the ready owner, exact counters, pending flag and zero clear work. WRONG_STATE re-entry preserves failed state, diagnostic and pending ownership without clearing. No fake recovery or production error injector was added.
+
+The previously accepted production invariant remains intact: initialize false beside the zero array; mark immediately after every successful push/count increment; clear and reset only following successful render with pending records; preserve ownership on failure. Zero-emission solo, idle malformed/backpressure rejection, and malformed rejection after accepted work remain covered. The unchanged named PCM/ack/fader-matrix/effect/flood/solo regressions supplement the mechanism assertions and pass in both full suites. Admission and ack construction, queue order, solo handling, meter/lease logic and production realtime operations have no further changes.
+
+## Independently verified evidence
+
+- Recomputed all manifest byte counts and SHA-256 values and compared exact tracked coverage: baseline 8 payload plus manifest (9 files), Luna attempt 1 75 plus manifest (76 files), Sol attempt 2 47 plus manifest (48 files). Both prior packages are byte-identical to the previously reviewed commit.
+- All 11 Sol captures have status 0 and identify the expected worktree and final production/test SHA-256 and Git blob identities. The focused debug capture records the pre-checkpoint dirty test at HEAD `a4d16dd3`; its captured bytes exactly equal the eventual committed test. The other ten captures record clean `b12fbc3a`. Current source equals those captured bytes. The inherited `514-luna1-` filename prefix does not obscure the explicit `sol2` labels and report attribution.
+- Exact focused debug/release each selected one test, with 63 filtered. Full host debug/release each report 63 passed, 1 ignored, no failures. The new test and every frozen named regression are explicitly present and passed in both outputs. Strict affected Clippy, fmt, diff, realtime/workspace policy and their existing controls pass. Directed-fault stderr in the workspace control script is consistent with its passing negative-control output, not a hidden candidate failure.
+- Test SHA-256 is `d35a91c02b8b020997348583be0846d5270f70397250487c0614bba18650cf91`, blob `ea9b160972cb9be5bc2b169162ac857e00461abf`. Production remains SHA-256 `aaea4b3c344e3f948fe965e1e8ed0c8394b5fb3843c2a50974890e7be9391924`, blob `0400e53fab15ba4066057432cba11928431efe2a`.
+
+## Prior-proof applicability and delivery boundary
+
+The prior actual unconditional-fill mutant, physical counter instrumentation and original initial `(0, 0)` assertion are unchanged. The accepted recorded failure at `(3, 9)` still discriminates the same production regression before any attempt-2 edit executes. Its recorded failure, malformed first restoration and exact successful final restoration remain preserved. There is no need to repeat this accepted mutation merely for later assertions.
+
+No production type, layout or resource calculation changed in attempt 2. The accepted native cfg(test) baseline/candidate observations therefore remain applicable: ReadyOwnership/Option 1336 → 1344, host 1864 → 1872 (all align 8), bridge metadata 6859 → 6867, bridge retained 29087 → 29095, largest bridge/named 19238 unchanged. Aggregate retained projections include the bridge delta once. This does not establish shipped-Wasm layout or a timing improvement, and no numeric pins were changed.
+
+Root may record this source PASS. Keep #514 open until #511 lands, the default branch is integrated and source/dependency drift is reviewed. The normal integrated current-artifact/current-consumer checks, native command-timeline identity, scalar/SIMD Wasm builds, shipped render-closure allocation/deallocation/drop gate and its controls, unchanged PCM, actual PR/required CI and remote issue synchronization remain delivery requirements. Root owns all Git/GitHub actions.
+
+No builds, tests, benchmarks/timing, source edits, Git mutations or GitHub operations were performed during this review. Inspection and hash reconstruction were read-only; the only file written is this requested `/tmp` report.
