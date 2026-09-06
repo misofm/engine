@@ -1673,8 +1673,28 @@ mod tests {
             result.1.iter().any(meaningful),
             "{context}: silent right PCM"
         );
-        assert!(result.0.windows(2).any(|pair| pair[0] != pair[1]));
-        assert!(result.1.windows(2).any(|pair| pair[0] != pair[1]));
+        for (plane, words) in [("left", &result.0), ("right", &result.1)] {
+            let mut first = None;
+            let mut differs = false;
+            for word in words {
+                let value = f32::from_bits(*word);
+                if !value.is_finite() || value == 0.0 {
+                    continue;
+                }
+                if let Some(previous) = first {
+                    if value != previous {
+                        differs = true;
+                        break;
+                    }
+                } else {
+                    first = Some(value);
+                }
+            }
+            assert!(
+                differs,
+                "{context}: {plane} PCM lacks distinct nonzero values"
+            );
+        }
     }
 
     fn population(ragged: bool) -> [[InitialParameterValue; 16]; 4] {
