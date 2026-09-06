@@ -1,6 +1,6 @@
-# Ready-to-number: specialize uniform compressor detector taps without changing DSP
+# 475: Specialize uniform compressor detector taps without changing DSP
 
-Queued Class-A product child of audit #349 DYN-1. Implementation is not authorized by this draft; #443 remains the sole active runtime feature. Root must number/synchronize and freeze the actual implementation base before Luna1, with Astra review and Sol2/3 fallback under the existing hardstop rule.
+Active Class-A product child of audit #349 DYN-1. Current implementation base is delivered main571dfc5b after #463 closed. Astra has approved the actual base below; root assigns fresh Luna1 under the Astra review and Sol2/3 fallback workflow. Earlier queued-base records are retained as history, not current scheduling authority.
 
 ## Current premise and duplication check
 
@@ -69,3 +69,19 @@ Approve numbered queue scope. Actual implementation-base verification and root a
 ## Delivered-base readiness after #463
 
 Root integrated current deliveredmain571dfc5be5fb040a537c11d683734b8015f37c32 without conflicts. #463 is remotely CLOSED after PR493; #492 is independent host-core delivery maintenance. Boundary reconciliation reports329 remote issues,234 local numbered specs, no missing local identities. Compressor, Cargo/configuration remain unchanged from the approved queued base; lane kernels/tests and the G5 matrix corpus now include delivered #463. Frozen narrow compressor scope is unchanged, but prior no-delta statements do not cover these new lane/corpus inputs. Pending Astra actual-base approval before Luna1 baseline or implementation.
+
+## Current actual-base approval and Luna attempt 1
+
+# Astra #475 actual implementation-base review — PASS
+
+Reviewed exact clean head2daa3510e683aefd7d90e9065d9c4cb9639f9e92 in engine-475-plan against delivered main571dfc5be5fb040a537c11d683734b8015f37c32. Only the numbered475 spec differs from that main; crates/hosts/tools/Cargo/config/scripts source is identical. Read the complete updated scope and previous conditional readiness. Root's retained boundary audit reports329 remote/234 local numbered identities, missing0, with #463 delivery/closure separately confirmed by root. No tests, builds, object captures, timing or repository/Git/GitHub mutations performed.
+
+The dependency change is precisely accounted for. From old approved660fce8 to delivered571dfc5b, compressor and Cargo/config remain unchanged; lane's three block kernels/tests and G5 corpus/lib plus pins contain delivered463. The compressor detector helpers still perform their original strided per-lane fill_taps and scratch gather_detector work, with ordinary dual and mono call sites intact. They do not call the three changed lane block kernels. The delivered lane arithmetic/bounds and four new matrix corpus entries are now the baseline; do not reuse the earlier statement that lane/corpus inputs are unchanged, remove those entries, or regenerate existing compressor pins.
+
+Approve fresh Luna1 assignment by root for the existing bounded product: classify active WIDTH delays once per actual frame-loop segment, independently per channel; uniform row load after existing writes; staged two safe contiguous copies into existing scratch; retain ragged traversal, staging eligibility, cursors, ring/layout, state serialization, latency and all DSP behavior. No D-in-key/cohort change, persistent cache, public API, unsafe, new corpus, framework or timing authority. Exact allowed compressor paths and finite frozen proof gates remain sufficient without amendment.
+
+First checkpoint sequence remains mandatory: capture current-base actual native production-instantiation baseline object/IR before access rewrites, retaining commands/status/toolchain/profile and any honest lowering null. Use dedicated targets independent of #492 qualification. Then make the compact private kernel specialization and old-access oracle/witness checkpoint, compile and run its meaningful uniform/ragged W1/W4/W8 and wrap coverage, and pause for root's recoverable checkpoint before adding the remaining public transition/allocation evidence. Do not treat that first tranche as product acceptance. Full dual/mono PCM/state, D0/Dlen/Dltlen, restore/copy/reset next-render classification, genuine same-assertion mechanism control, zero allocations/frees, existing corpus and supported object evidence remain mandatory for the single consolidated attempt verdict.
+
+#463 no longer occupies runtime WIP; #492 is independent host maintenance. No additional scope ruling is needed before this assignment. Root retains all checkpoint/synchronization ownership, and later source acceptance plus proportional immutable delivery/actual-head PR/required CI remain separate gates.
+
+Root adopts PASS and assigns fresh Luna1. Preserve actual native production baseline before edits, then pause at the first compact compiling/focused-green specialization/old-access-oracle tranche for exact-path root checkpoint and push. Continue remaining proof only after checkpoint. No timing; root owns Git/GitHub and one consolidated adversarial verdict per attempt.
