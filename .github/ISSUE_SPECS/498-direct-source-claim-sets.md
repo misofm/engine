@@ -45,3 +45,7 @@ The unchanged numbered finite gates and actual command/source/status evidence re
 Read-only source/Git inspection; no tests/builds/timing or source/spec/Git/GitHub mutations performed.
 
 Root assigns fresh Luna attempt1 within this scope. Root owns all Git/GitHub checkpoints. No timing or artifact qualification until source acceptance.
+
+## Luna attempt1 candidate
+
+Source735dc5d5 implements only the two direct collectors and removes their private Vec helper. Existing graph debug/release57 each, exact real source fanout debug/release1 each, strict graph Clippy, fmt/diff/graph policy all pass. The first graph-debug source/PATH metadata limitation is preserved and explained in artifacts/issue498-direct-source-claims; subsequent logs identify the committed source and effective environment. No tests, production behavior contracts, timing or delivery gates were added or changed. Pending consolidated Astra source review.

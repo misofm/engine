@@ -1,0 +1,48 @@
+argv: cargo test --locked -p source --lib tests::one_four_channel_source_fans_out_to_three_inputs_in_the_sequential_executor -- --exact
+cwd: /home/bl/misofm/engine-cp4-source-claims
+source: 735dc5d5aea127687517927aec70ccda0db67185
+env: PATH=/home/bl/.cargo/bin:/home/bl/.local/bin:/home/bl/.codex/packages/standalone/releases/0.153.2-x86_64-unknown-linux-musl/codex-path:/home/bl/.codex/tmp/arg0/codex-arg0CWD760:/home/bl/.local/bin:/home/bl/.opencode/bin:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.opencode/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin RUSTFLAGS=
+   Compiling version_check v0.9.5
+   Compiling proc-macro2 v1.0.107
+   Compiling lexical-util v1.0.7
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.24
+   Compiling libc v0.2.189
+   Compiling syn v1.0.109
+   Compiling once_cell v1.21.4
+   Compiling autocfg v1.5.1
+   Compiling engine v0.1.0 (/home/bl/misofm/engine-cp4-source-claims/crates/engine)
+   Compiling smallvec v1.15.2
+   Compiling decoded-char v0.1.1
+   Compiling utf8-decode v1.0.1
+   Compiling locspan v0.8.2
+   Compiling smallstr v0.3.1
+   Compiling proc-macro-error-attr v1.0.4
+   Compiling ahash v0.7.8
+   Compiling proc-macro-error v1.0.4
+   Compiling indexmap v1.9.3
+   Compiling effect-contract v0.1.0 (/home/bl/misofm/engine-cp4-source-claims/crates/effect-contract)
+   Compiling lexical-write-integer v1.0.6
+   Compiling lexical-parse-integer v1.0.6
+   Compiling lexical-parse-float v1.0.6
+   Compiling lexical-write-float v1.0.6
+   Compiling lexical-core v1.0.6
+   Compiling getrandom v0.2.17
+   Compiling lexical v7.0.5
+   Compiling json-number v0.4.10
+   Compiling rack v0.1.0 (/home/bl/misofm/engine-cp4-source-claims/crates/rack)
+   Compiling hashbrown v0.12.3
+   Compiling graph v0.1.0 (/home/bl/misofm/engine-cp4-source-claims/crates/graph)
+   Compiling locspan-derive v0.6.0
+   Compiling json-syntax v0.12.5
+   Compiling session v0.1.0 (/home/bl/misofm/engine-cp4-source-claims/crates/session)
+   Compiling source v0.1.0 (/home/bl/misofm/engine-cp4-source-claims/crates/source)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.98s
+     Running unittests src/lib.rs (target/debug/deps/source-01b0b20e3ef1ec25)
+
+running 1 test
+test tests::one_four_channel_source_fans_out_to_three_inputs_in_the_sequential_executor ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 55 filtered out; finished in 0.00s
+
+status: 0
