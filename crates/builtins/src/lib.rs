@@ -4281,54 +4281,108 @@ mod tests {
             .0
             .stage
             .lane_track(0);
-        fn assert_matches<L: super::Lane>(stage: &mut InputStage<L>) {
+        fn active_mask<L: super::Lane>(stage: &InputStage<L>) -> u8 {
+            if stage.members == 8 {
+                u8::MAX
+            } else {
+                (1_u8 << stage.members) - 1
+            }
+        }
+        fn assert_matches<L: super::Lane>(stage: &mut InputStage<L>, expected: u8) {
             stage.refresh_channel_symmetry_post_ramp();
             let oracle = (0..stage.members).fold(0_u8, |mask, lane| {
                 mask | u8::from(stage.compute_lane_channel_symmetry(lane)) << lane
             });
             assert_eq!(stage.symmetry, oracle);
-            let active = if stage.members == 8 {
-                u8::MAX
-            } else {
-                (1_u8 << stage.members) - 1
-            };
+            assert_eq!(stage.symmetry, expected);
+            let active = active_mask(stage);
             assert_eq!(stage.symmetry & !active, 0);
         }
-        fn exercise<L: super::Lane>(tracks: &[super::PreparedInputTrack]) {
+        fn assert_independent_case<L: super::Lane>(
+            tracks: &[super::PreparedInputTrack],
+            toggle: fn(&mut InputStage<L>, usize),
+        ) {
             let mut stage = InputStage::<L>::new(tracks);
-            let mut left = super::lane_read(stage.coef.trim[0]);
-            let mut right = super::lane_read(stage.coef.trim[1]);
+            let lane = 0;
+            let active = active_mask(&stage);
+            assert_matches(&mut stage, active);
+
+            toggle(&mut stage, lane);
+            assert_matches(&mut stage, active & !(1 << lane));
+            if stage.members > 1 {
+                assert_ne!(
+                    stage.symmetry & (1 << 1),
+                    0,
+                    "an unaffected member stays set"
+                );
+            }
+
+            toggle(&mut stage, lane);
+            assert_matches(&mut stage, active);
+        }
+        fn exercise<L: super::Lane>(tracks: &[super::PreparedInputTrack]) {
+            macro_rules! toggled_word {
+                ($field:expr, $lane:expr) => {{
+                    let mut words = super::lane_read($field);
+                    words[$lane] = f32::from_bits(words[$lane].to_bits() ^ 1);
+                    $field = super::lane_words(&words);
+                }};
+            }
+            assert_independent_case::<L>(tracks, |stage, lane| {
+                toggled_word!(stage.coef.trim[1], lane);
+            });
+            assert_independent_case::<L>(tracks, |stage, lane| {
+                toggled_word!(stage.ramp.target[1], lane);
+            });
+            assert_independent_case::<L>(tracks, |stage, lane| {
+                toggled_word!(stage.ramp.step[1], lane);
+            });
+            assert_independent_case::<L>(tracks, |stage, lane| {
+                stage.remaining[1][lane] ^= 1;
+            });
+            macro_rules! coefficient_cases {
+                ($section:expr) => {
+                    assert_independent_case::<L>(tracks, |stage, lane| {
+                        toggled_word!(stage.coef.section[1][$section].c1, lane);
+                    });
+                    assert_independent_case::<L>(tracks, |stage, lane| {
+                        toggled_word!(stage.coef.section[1][$section].a2, lane);
+                    });
+                    assert_independent_case::<L>(tracks, |stage, lane| {
+                        toggled_word!(stage.coef.section[1][$section].a3, lane);
+                    });
+                    assert_independent_case::<L>(tracks, |stage, lane| {
+                        toggled_word!(stage.coef.section[1][$section].m0, lane);
+                    });
+                    assert_independent_case::<L>(tracks, |stage, lane| {
+                        toggled_word!(stage.coef.section[1][$section].m1, lane);
+                    });
+                    assert_independent_case::<L>(tracks, |stage, lane| {
+                        toggled_word!(stage.coef.section[1][$section].m2, lane);
+                    });
+                };
+            }
+            coefficient_cases!(0);
+            coefficient_cases!(1);
+
+            let mut signed_zero = InputStage::<L>::new(tracks);
+            let active = active_mask(&signed_zero);
+            let mut left = super::lane_read(signed_zero.coef.trim[0]);
+            let mut right = super::lane_read(signed_zero.coef.trim[1]);
             left[0] = 0.0;
             right[0] = -0.0;
-            stage.coef.trim = [super::lane_words(&left), super::lane_words(&right)];
-            assert_matches(&mut stage);
-            if stage.members > 1 {
-                let mut word = super::lane_read(stage.ramp.target[1]);
-                word[1] = f32::from_bits(word[1].to_bits() ^ 1);
-                stage.ramp.target[1] = super::lane_words(&word);
-                assert_matches(&mut stage);
-            }
-            if stage.members > 2 {
-                let mut word = super::lane_read(stage.ramp.step[1]);
-                word[2] = f32::from_bits(word[2].to_bits() ^ 1);
-                stage.ramp.step[1] = super::lane_words(&word);
-                assert_matches(&mut stage);
-            }
-            if stage.members > 3 {
-                let mut word = super::lane_read(stage.coef.section[1][0].c1);
-                word[3] = f32::from_bits(word[3].to_bits() ^ 1);
-                stage.coef.section[1][0].c1 = super::lane_words(&word);
-                assert_matches(&mut stage);
-            }
-            if stage.members > 4 {
-                stage.remaining[1][4] = 7;
-                assert_matches(&mut stage);
-            }
+            signed_zero.coef.trim = [super::lane_words(&left), super::lane_words(&right)];
+            assert_matches(&mut signed_zero, active & !1);
+            right[0] = 0.0;
+            signed_zero.coef.trim[1] = super::lane_words(&right);
+            assert_matches(&mut signed_zero, active);
         }
         let tracks = [track; 8];
         exercise::<f32>(&tracks[..1]);
+        exercise::<Simd4>(&tracks[..3]);
         exercise::<Simd4>(&tracks[..4]);
         exercise::<Simd8>(&tracks[..5]);
+        exercise::<Simd8>(&tracks[..8]);
     }
 
     #[test]
