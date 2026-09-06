@@ -67,3 +67,7 @@ Two bounded original completion groups remain:
 Final graph library debug/release PTY records genuinely report56/0/0, and focused debug/release report one test; preserve these accepted regressions. After the small final test addition, retain current focused debug/release and the existing full graph library profile results on the final candidate as required by the brief. No extra property matrix, public API, scheduler, framework, timing, allocator or artifact work enters this correction. Root may synchronize this finite FAIL and assign Sol2; no further Luna edits. Existing source progress is accepted, but full source PASS awaits the two named groups.
 
 Root adopts consolidated FAIL and assigns Sol2 for these original finite groups only. Preserve acceptedmixedschedule and all existing tests; no scope expansion, permanent runtime change or timing.
+
+## Sol attempt 2 finite source and evidence
+
+Sourcec86c4347 adds the frozen independent runtime effect-only comparison while retaining the separate model-to-literal assertion. /tmp/488-sol2-* captures the actual single-site sort-removal diff, unchanged literal assertion101, restored focused debug/release0 (one test each), fullgraph debug/release0 (56 each), and independently captured fmt/diff/affected graph-policy0. Runtime is restored and clean. Raw evidence and earlier Luna provenance limits are retained in artifacts/issue488-independent-schedule-oracle; pending consolidated Astra Sol2 verdict.
