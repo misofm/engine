@@ -257,6 +257,19 @@ fn native_parameter_access_is_typed_and_transactional() {
     }
     assert_read_rejected(
         &*rejected,
+        u32::MAX,
+        ParameterChannel::Both,
+        ParameterAccessError::InvalidParameterIndex,
+    );
+    assert_apply_rejected(
+        &mut *rejected,
+        u32::MAX,
+        ParameterChannel::Both,
+        f32::NAN,
+        ParameterAccessError::InvalidParameterIndex,
+    );
+    assert_read_rejected(
+        &*rejected,
         5,
         ParameterChannel::Both,
         ParameterAccessError::InvalidChannel,
@@ -274,6 +287,13 @@ fn native_parameter_access_is_typed_and_transactional() {
         ParameterChannel::Left,
         f32::NAN,
         ParameterAccessError::NotAutomatable,
+    );
+    assert_apply_rejected(
+        &mut *rejected,
+        7,
+        ParameterChannel::Both,
+        f32::NAN,
+        ParameterAccessError::InvalidChannel,
     );
 
     let bounds = [
@@ -328,13 +348,23 @@ fn native_parameter_access_is_typed_and_transactional() {
         }
     }
 
-    let equal = prepare(request(&initial_values()));
+    let mut equal = prepare(request(&initial_values()));
+    let mut equal_reference = prepare(request(&initial_values()));
     assert_read_rejected(
         &*equal,
         5,
         ParameterChannel::Both,
         ParameterAccessError::InvalidChannel,
     );
+    assert_apply_rejected(
+        &mut *equal,
+        5,
+        ParameterChannel::Both,
+        6.0,
+        ParameterAccessError::InvalidChannel,
+    );
+    assert_eq!(snapshot(&*equal), snapshot(&*equal_reference));
+    assert_identical_continuation(&mut *equal, &mut *equal_reference);
     let mut zero = prepare(request(&values));
     zero.apply_parameter_point(5, ParameterChannel::Left, -0.0)
         .unwrap();
@@ -370,6 +400,14 @@ fn native_parameter_access_is_typed_and_transactional() {
     );
     assert_eq!(
         defaulted.parameter_state(u32::MAX, ParameterChannel::Both),
+        Err(ParameterAccessError::Unsupported)
+    );
+    assert_eq!(
+        defaulted.apply_parameter_point(5, ParameterChannel::Left, 6.0),
+        Err(ParameterAccessError::Unsupported)
+    );
+    assert_eq!(
+        defaulted.parameter_state(5, ParameterChannel::Left),
         Err(ParameterAccessError::Unsupported)
     );
     assert_eq!(snapshot(&defaulted), before);

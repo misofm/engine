@@ -222,3 +222,7 @@ For attempt 3, change only the typed-access fixture in `native_points.rs` to add
 No mutation, benchmark, new helper framework, resource/artifact repin, domain expansion or endpoint integration is authorized by this correction. This is the third and final implementation attempt under #518; if it fails, preserve evidence and apply the hard stop/rebrief rule, with no disguised fourth retry. #524 remains open pending acceptance and delivery.
 
 Root adopts this test-table-only Sol attempt 3 correction. This is the final allowed attempt; no production change or gate relaxation is authorized.
+
+## Sol attempt 3 focused checkpoint
+
+Only the typed-access fixture changed: equal-channel Both write rejection with reference continuation, well-formed apply/read calls through the default-Unsupported wrapper, and the two missing precedence boundaries. The five focused debug tests pass on recorded source identities. Production, documentation, other fixtures and all prior evidence remain unchanged. Root checkpoints this final test-table correction before release/Clippy/fmt/diff and the final consolidated verdict.
