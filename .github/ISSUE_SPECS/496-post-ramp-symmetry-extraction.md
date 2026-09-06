@@ -107,3 +107,7 @@ Retain the actual seam extraction control and already executed PCM/state/disenga
 No tests/builds/timing or source/Git/GitHub mutations performed during review.
 
 Root integrated delivered main71059eab and closure records before Sol2. Builtins remains byte-identical to reviewed7a91feca. Source/actual-seam mutation and existing PCM/state fixtures remain accepted; only the finite independent predicate-field table is assigned to Sol2. User workflow escalation applies; no further Luna revision is authorized.
+
+## Sol attempt 2 correction and evidence
+
+Source5a4f4147 changes only the independent field-case fixture. It clears/restores each compared field from equality against expected bits and the unchanged per-lane oracle across required widths/partial populations. All exact final-source private tests and finite debug/release library/liveness/console gates pass, with strict Clippy/fmt/diff/policies. Authentic records and initial compile failure are retained in artifacts/issue496-sol-attempt2. Accepted production and original actual-seam mutation remain unchanged. Consolidated Astra review pending.
