@@ -395,16 +395,23 @@ class MisoAudioWorkletHost {
     // whose shape is wrong is a hard failure exactly like a malformed acknowledgement: a console
     // that silently ignores a broken frame is a console that lies to its user.
     if (message?.tag === "miso.meter.v1") {
-      // Issue #143 D5: the gain-reduction section and the sample window ride the same frame.
+      // Issue #143 D5: the gain-reduction section and the peak sample window ride the same frame;
+      // GR remains a latest independently aged fold and does not inherit the peak timestamps.
       // Every rule below is a shape rule the app is entitled to rely on without checking:
       // `trackGrDb` is exactly `trackCount` long, every entry is a finite non-negative magnitude,
       // `masterGrDb` is a finite number or `null` -- never `0` standing in for absence -- and the
       // window is half-open and non-empty.
       if (!hasExactFields(message, [
-        "tag", "sequence", "windows", "trackCount", "peaks",
+        "tag", "sequence", "generation", "validity", "lossCount", "windows", "trackCount", "peaks",
         "trackGrDb", "masterGrDb", "firstSample", "endSample",
       ])
           || !Number.isSafeInteger(message.sequence) || message.sequence <= 0
+          || typeof message.generation !== "bigint" || message.generation <= 0n
+          || !Number.isSafeInteger(message.validity) || message.validity < 0
+          || message.validity > 0xf || (message.validity & 0x3) !== 0x3
+          || !Number.isSafeInteger(message.lossCount) || message.lossCount < 0
+          || message.lossCount > 0xffffffff
+          || ((message.validity & 0x4) !== 0) !== (message.lossCount > 0)
           || !Number.isSafeInteger(message.windows) || message.windows <= 0
           || !Number.isSafeInteger(message.trackCount) || message.trackCount < 0
           || !(message.peaks instanceof Float32Array)
@@ -416,7 +423,7 @@ class MisoAudioWorkletHost {
             || (typeof message.masterGrDb === "number" && Number.isFinite(message.masterGrDb)
               && message.masterGrDb >= 0))
           || typeof message.firstSample !== "bigint" || typeof message.endSample !== "bigint"
-          || message.firstSample < 0n || message.endSample < message.firstSample) {
+          || message.firstSample < 0n || message.endSample <= message.firstSample) {
         this.#fail(webError(255, this.#oldestRequestId()));
         return;
       }

@@ -3580,6 +3580,35 @@ pub enum MeterTap {
 }
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct MeterHandle(pub NonZeroU64);
+/// Stable selection and presence bits for fixed-size meter snapshots.
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct MeterMetricSet(u8);
+impl MeterMetricSet {
+    pub const SAMPLE_PEAK: Self = Self(1 << 0);
+    pub const ENERGY_RMS: Self = Self(1 << 1);
+    pub const COUNTS: Self = Self(1 << 2);
+    pub const HELD_PEAK: Self = Self(1 << 3);
+    pub const ALL: Self =
+        Self(Self::SAMPLE_PEAK.0 | Self::ENERGY_RMS.0 | Self::COUNTS.0 | Self::HELD_PEAK.0);
+
+    #[must_use]
+    pub const fn from_bits_retain(bits: u8) -> Self {
+        Self(bits)
+    }
+    #[must_use]
+    pub const fn bits(self) -> u8 {
+        self.0
+    }
+    #[must_use]
+    pub const fn contains(self, metric: Self) -> bool {
+        self.0 & metric.0 == metric.0
+    }
+    #[must_use]
+    pub const fn is_valid(self) -> bool {
+        self.0 != 0 && self.0 & !Self::ALL.0 == 0
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MeterConfig {
     pub period_frames: NonZeroU32,
@@ -3591,6 +3620,7 @@ pub struct MeterConfig {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MeterConfigError {
     DecayDomain,
+    Metrics,
     Queue,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3610,6 +3640,7 @@ pub struct MeterLaneSnapshot {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MeterSnapshot {
     pub handle: MeterHandle,
+    pub present_metrics: MeterMetricSet,
     pub reset_generation: u64,
     pub window_sequence: u64,
     pub start_sample: u64,
@@ -3633,6 +3664,7 @@ struct MeterLane {
 }
 pub struct MeterAccumulator {
     handle: MeterHandle,
+    metrics: MeterMetricSet,
     config: MeterConfig,
     decay: f32,
     start: Option<u64>,
@@ -3652,12 +3684,33 @@ pub struct PreparedMeter {
     pub consumer: Consumer<MeterSnapshot>,
 }
 
+#[cfg(test)]
+mod meter_work_probe {
+    use core::sync::atomic::AtomicUsize;
+    pub(super) static ENERGY: AtomicUsize = AtomicUsize::new(0);
+    pub(super) static COUNTS: AtomicUsize = AtomicUsize::new(0);
+    pub(super) static HELD: AtomicUsize = AtomicUsize::new(0);
+    pub(super) static SQRT: AtomicUsize = AtomicUsize::new(0);
+}
+
 impl MeterAccumulator {
     pub fn prepare(
         handle: MeterHandle,
         config: MeterConfig,
         sample_rate: u32,
     ) -> Result<PreparedMeter, MeterConfigError> {
+        Self::prepare_selected(handle, config, sample_rate, MeterMetricSet::ALL)
+    }
+
+    pub fn prepare_selected(
+        handle: MeterHandle,
+        config: MeterConfig,
+        sample_rate: u32,
+        metrics: MeterMetricSet,
+    ) -> Result<PreparedMeter, MeterConfigError> {
+        if !metrics.is_valid() {
+            return Err(MeterConfigError::Metrics);
+        }
         if !config.peak_decay_db_per_second.is_finite()
             || !(0.0..=120.0).contains(&config.peak_decay_db_per_second)
             || sample_rate == 0
@@ -3676,6 +3729,7 @@ impl MeterAccumulator {
         Ok(PreparedMeter {
             accumulator: Self {
                 handle,
+                metrics,
                 config,
                 decay: if normal_or_zero(decay) { decay } else { 0.0 },
                 start: None,
@@ -3763,7 +3817,8 @@ impl MeterAccumulator {
         //
         // Cost on the active path is one compare: `all` short-circuits on the first nonzero
         // sample, so a block carrying signal pays for the first frame and nothing more.
-        let settled_silence = self.left.held == 0.0
+        let settled_silence = self.metrics == MeterMetricSet::ALL
+            && self.left.held == 0.0
             && self.right.held == 0.0
             && self.left.hold_remaining == window.hold_frames
             && self.right.hold_remaining == window.hold_frames
@@ -3781,20 +3836,39 @@ impl MeterAccumulator {
                 }
                 continue;
             }
-            observe_segment(
-                &mut self.left,
-                &left[offset..end],
-                window,
-                &mut self.cumulative_clipped,
-                &mut self.cumulative_sanitized,
-            );
-            observe_segment(
-                &mut self.right,
-                &right[offset..end],
-                window,
-                &mut self.cumulative_clipped,
-                &mut self.cumulative_sanitized,
-            );
+            if self.metrics == MeterMetricSet::ALL {
+                observe_segment(
+                    &mut self.left,
+                    &left[offset..end],
+                    window,
+                    &mut self.cumulative_clipped,
+                    &mut self.cumulative_sanitized,
+                );
+                observe_segment(
+                    &mut self.right,
+                    &right[offset..end],
+                    window,
+                    &mut self.cumulative_clipped,
+                    &mut self.cumulative_sanitized,
+                );
+            } else {
+                observe_selected_segment(
+                    &mut self.left,
+                    &left[offset..end],
+                    window,
+                    self.metrics,
+                    &mut self.cumulative_clipped,
+                    &mut self.cumulative_sanitized,
+                );
+                observe_selected_segment(
+                    &mut self.right,
+                    &right[offset..end],
+                    window,
+                    self.metrics,
+                    &mut self.cumulative_clipped,
+                    &mut self.cumulative_sanitized,
+                );
+            }
             self.frames = self.frames.saturating_add(take as u32);
             offset = end;
             if self.frames == period {
@@ -3844,13 +3918,14 @@ impl MeterAccumulator {
         };
         let snapshot = MeterSnapshot {
             handle: self.handle,
+            present_metrics: self.metrics,
             reset_generation: self.config.reset_generation,
             window_sequence: self.sequence,
             start_sample: start,
             end_sample: end,
             frames: self.frames,
-            left: lane_snapshot(&self.left, self.frames),
-            right: lane_snapshot(&self.right, self.frames),
+            left: lane_snapshot(&self.left, self.frames, self.metrics),
+            right: lane_snapshot(&self.right, self.frames, self.metrics),
             cumulative_clipped_samples: self.cumulative_clipped,
             cumulative_sanitized_samples: self.cumulative_sanitized,
             cumulative_discontinuities: self.discontinuities,
@@ -3920,8 +3995,14 @@ fn observe_segment(
         sanitized += u64::from(invalid);
         let absolute = sample.abs();
         peak = if absolute > peak { absolute } else { peak };
+        #[cfg(test)]
+        meter_work_probe::ENERGY.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         energy += f64::from(sample) * f64::from(sample);
+        #[cfg(test)]
+        meter_work_probe::COUNTS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         clipped += u64::from(absolute >= 1.0);
+        #[cfg(test)]
+        meter_work_probe::HELD.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         if absolute >= held {
             held = absolute;
             hold_remaining = window.hold_frames;
@@ -3941,14 +4022,119 @@ fn observe_segment(
     *cumulative_sanitized = cumulative_sanitized.saturating_add(sanitized);
 }
 
-fn lane_snapshot(lane: &MeterLane, frames: u32) -> MeterLaneSnapshot {
+/// Partial selections use independent straight-line passes selected once per segment. The full
+/// selection stays on [`observe_segment`] so its arithmetic order and published bits do not move.
+fn observe_selected_segment(
+    lane: &mut MeterLane,
+    samples: &[f32],
+    window: MeterWindow,
+    metrics: MeterMetricSet,
+    cumulative_clipped: &mut u64,
+    cumulative_sanitized: &mut u64,
+) {
+    if metrics.contains(MeterMetricSet::SAMPLE_PEAK) {
+        let mut peak = lane.peak;
+        for sample in samples.iter().copied() {
+            let sample = if normal_or_zero(sample) { sample } else { 0.0 };
+            let absolute = sample.abs();
+            peak = if absolute > peak { absolute } else { peak };
+        }
+        lane.peak = peak;
+    }
+    if metrics.contains(MeterMetricSet::ENERGY_RMS) {
+        let mut energy = lane.energy;
+        for sample in samples.iter().copied() {
+            let sample = if normal_or_zero(sample) { sample } else { 0.0 };
+            #[cfg(test)]
+            meter_work_probe::ENERGY.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            energy += f64::from(sample) * f64::from(sample);
+        }
+        lane.energy = energy;
+    }
+    if metrics.contains(MeterMetricSet::COUNTS) {
+        let mut clipped = 0_u64;
+        let mut sanitized = 0_u64;
+        for sample in samples.iter().copied() {
+            #[cfg(test)]
+            meter_work_probe::COUNTS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            let invalid = !normal_or_zero(sample);
+            let sample = if invalid { 0.0 } else { sample };
+            sanitized += u64::from(invalid);
+            clipped += u64::from(sample.abs() >= 1.0);
+        }
+        lane.clipped = lane.clipped.saturating_add(clipped);
+        lane.sanitized = lane.sanitized.saturating_add(sanitized);
+        *cumulative_clipped = cumulative_clipped.saturating_add(clipped);
+        *cumulative_sanitized = cumulative_sanitized.saturating_add(sanitized);
+    }
+    if metrics.contains(MeterMetricSet::HELD_PEAK) {
+        let mut held = lane.held;
+        let mut hold_remaining = lane.hold_remaining;
+        for sample in samples.iter().copied() {
+            #[cfg(test)]
+            meter_work_probe::HELD.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            let sample = if normal_or_zero(sample) { sample } else { 0.0 };
+            let absolute = sample.abs();
+            if absolute >= held {
+                held = absolute;
+                hold_remaining = window.hold_frames;
+            } else if hold_remaining > 0 {
+                hold_remaining -= 1;
+            } else if window.decay_enabled {
+                held = flush_subnormal(held * window.decay);
+            }
+        }
+        lane.held = held;
+        lane.hold_remaining = hold_remaining;
+    }
+}
+
+fn lane_snapshot(lane: &MeterLane, frames: u32, metrics: MeterMetricSet) -> MeterLaneSnapshot {
+    if metrics == MeterMetricSet::ALL {
+        #[cfg(test)]
+        meter_work_probe::SQRT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        return MeterLaneSnapshot {
+            sample_peak: lane.peak,
+            rms: (lane.energy / f64::from(frames)).sqrt(),
+            energy: lane.energy,
+            held_peak: lane.held,
+            clipped_samples: lane.clipped,
+            sanitized_samples: lane.sanitized,
+        };
+    }
     MeterLaneSnapshot {
-        sample_peak: lane.peak,
-        rms: (lane.energy / f64::from(frames)).sqrt(),
-        energy: lane.energy,
-        held_peak: lane.held,
-        clipped_samples: lane.clipped,
-        sanitized_samples: lane.sanitized,
+        sample_peak: if metrics.contains(MeterMetricSet::SAMPLE_PEAK) {
+            lane.peak
+        } else {
+            0.0
+        },
+        rms: if metrics.contains(MeterMetricSet::ENERGY_RMS) {
+            #[cfg(test)]
+            meter_work_probe::SQRT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            (lane.energy / f64::from(frames)).sqrt()
+        } else {
+            0.0
+        },
+        energy: if metrics.contains(MeterMetricSet::ENERGY_RMS) {
+            lane.energy
+        } else {
+            0.0
+        },
+        held_peak: if metrics.contains(MeterMetricSet::HELD_PEAK) {
+            lane.held
+        } else {
+            0.0
+        },
+        clipped_samples: if metrics.contains(MeterMetricSet::COUNTS) {
+            lane.clipped
+        } else {
+            0
+        },
+        sanitized_samples: if metrics.contains(MeterMetricSet::COUNTS) {
+            lane.sanitized
+        } else {
+            0
+        },
     }
 }
 
@@ -4250,6 +4436,109 @@ mod tests {
         ChannelParameters, DualMonoBlock, InputStage, Matrix2x2, Simd4, Simd8, prepare_sections,
         test_support,
     };
+
+    fn selected_snapshot(metrics: super::MeterMetricSet) -> super::MeterSnapshot {
+        let config = super::MeterConfig {
+            period_frames: core::num::NonZeroU32::new(8).unwrap(),
+            peak_hold_frames: 2,
+            peak_decay_db_per_second: 12.0,
+            queue_capacity: core::num::NonZeroUsize::new(2).unwrap(),
+            reset_generation: 7,
+        };
+        let handle = super::MeterHandle(core::num::NonZeroU64::new(9).unwrap());
+        let mut prepared =
+            super::MeterAccumulator::prepare_selected(handle, config, 48_000, metrics)
+                .expect("valid meter selection");
+        let samples = [
+            0.5,
+            -1.0,
+            f32::NAN,
+            f32::from_bits(1),
+            0.25,
+            f32::INFINITY,
+            -0.75,
+            -0.0,
+        ];
+        prepared
+            .accumulator
+            .observe(&samples[..3], &samples[..3], 10)
+            .unwrap();
+        prepared
+            .accumulator
+            .observe(&samples[3..], &samples[3..], 13)
+            .unwrap();
+        prepared.consumer.try_pop().expect("one complete window")
+    }
+
+    #[test]
+    fn meter_metric_subsets_match_full_and_peak_only_omits_work() {
+        use core::sync::atomic::Ordering;
+
+        let full = selected_snapshot(super::MeterMetricSet::ALL);
+        for bits in 1..=super::MeterMetricSet::ALL.bits() {
+            let metrics = super::MeterMetricSet::from_bits_retain(bits);
+            let snapshot = selected_snapshot(metrics);
+            assert_eq!(snapshot.present_metrics, metrics);
+            assert_eq!(snapshot.frames, full.frames);
+            assert_eq!(snapshot.start_sample, full.start_sample);
+            assert_eq!(snapshot.end_sample, full.end_sample);
+            if metrics.contains(super::MeterMetricSet::SAMPLE_PEAK) {
+                assert_eq!(
+                    snapshot.left.sample_peak.to_bits(),
+                    full.left.sample_peak.to_bits()
+                );
+            }
+            if metrics.contains(super::MeterMetricSet::ENERGY_RMS) {
+                assert_eq!(snapshot.left.energy.to_bits(), full.left.energy.to_bits());
+                assert_eq!(snapshot.left.rms.to_bits(), full.left.rms.to_bits());
+            }
+            if metrics.contains(super::MeterMetricSet::COUNTS) {
+                assert_eq!(snapshot.left.clipped_samples, full.left.clipped_samples);
+                assert_eq!(snapshot.left.sanitized_samples, full.left.sanitized_samples);
+            }
+            if metrics.contains(super::MeterMetricSet::HELD_PEAK) {
+                assert_eq!(
+                    snapshot.left.held_peak.to_bits(),
+                    full.left.held_peak.to_bits()
+                );
+            }
+        }
+
+        super::meter_work_probe::ENERGY.store(0, Ordering::Relaxed);
+        super::meter_work_probe::COUNTS.store(0, Ordering::Relaxed);
+        super::meter_work_probe::HELD.store(0, Ordering::Relaxed);
+        super::meter_work_probe::SQRT.store(0, Ordering::Relaxed);
+        let peak = selected_snapshot(super::MeterMetricSet::SAMPLE_PEAK);
+        assert_eq!(
+            peak.left.sample_peak.to_bits(),
+            full.left.sample_peak.to_bits()
+        );
+        assert_eq!(super::meter_work_probe::ENERGY.load(Ordering::Relaxed), 0);
+        assert_eq!(super::meter_work_probe::COUNTS.load(Ordering::Relaxed), 0);
+        assert_eq!(super::meter_work_probe::HELD.load(Ordering::Relaxed), 0);
+        assert_eq!(super::meter_work_probe::SQRT.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn meter_rejects_empty_and_unknown_metric_bits_before_queue_allocation() {
+        let config = super::MeterConfig {
+            period_frames: core::num::NonZeroU32::MIN,
+            peak_hold_frames: 0,
+            peak_decay_db_per_second: 0.0,
+            queue_capacity: core::num::NonZeroUsize::MIN,
+            reset_generation: 0,
+        };
+        let handle = super::MeterHandle(core::num::NonZeroU64::MIN);
+        for metrics in [
+            super::MeterMetricSet::from_bits_retain(0),
+            super::MeterMetricSet::from_bits_retain(1 << 7),
+        ] {
+            assert!(matches!(
+                super::MeterAccumulator::prepare_selected(handle, config, 48_000, metrics),
+                Err(super::MeterConfigError::Metrics)
+            ));
+        }
+    }
 
     #[test]
     fn post_ramp_symmetry_mask_matches_lane_oracle() {

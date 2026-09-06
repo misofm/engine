@@ -474,6 +474,12 @@ pub extern "C" fn miso_engine_web_v1_meter_poll(handle: u32) -> u32 {
 /// The `f32` meter frame carries numbers a meter draws; the window those numbers describe is a
 /// pair of absolute sample counts, which an `f32` cannot hold. They ride this fixed structure, read
 /// exactly as the status and the resource report are.
+/// `reserved[0]` is the publication generation, advanced by lease transitions and detected meter
+/// producer resets. In `reserved[1]`, bits 0..3 are validity
+/// (`complete`, `master aligned`, `loss observed`, `gain reduction present`) and bits 32..63 carry
+/// the saturating loss count. A successful poll publishes one exact track/master window; an empty
+/// or invalid poll leaves every byte of the prior header and frame untouched. Source seeks keep
+/// absolute render time continuous and therefore do not advance this meter generation.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_meter_header_ptr(handle: u32) -> u32 {
     with_host(handle, 0, |host| {

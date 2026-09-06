@@ -82,9 +82,11 @@
 // observers exist.
 //
 // Gain reduction **is** in the meter frame, since issue #143. The frame carries `trackGrDb` --
-// one non-negative decibel magnitude per track -- `masterGrDb`, and the `firstSample`/`endSample`
-// of the window they were folded over. It rides the existing `miso.meter.v1` post: there is no
-// second message and no second clock, so the pinned occurrence rule is unchanged.
+// one non-negative decibel magnitude per track -- and `masterGrDb`. These are latest folds from
+// independently aged effect observations; their sequence/span is not transported in this frame,
+// and they never supply or inherit the `firstSample`/`endSample` peak timestamps. The additive
+// `generation`, `validity` and `lossCount` fields make lease resets, producer resets and dropped
+// peak windows visible without changing the peak array.
 //
 // What a tap costs is declared, not guessed. Every effect publishes an `observations` menu in the
 // build-time metadata JSON; a `resident` tap is a copy out of state the block already wrote and is
@@ -381,6 +383,12 @@ export interface MisoSessionMap {
 export interface MisoMeterFrame {
   readonly tag: "miso.meter.v1";
   readonly sequence: number;
+  /// Publication generation; changes on each real lease transition or detected producer reset.
+  readonly generation: bigint;
+  /// Header validity bits: complete (`1`), master aligned (`2`), loss (`4`), gain reduction (`8`).
+  readonly validity: number;
+  /// Saturating count of dropped or rejected meter windows observed before this frame.
+  readonly lossCount: number;
   /// Complete windows folded into this frame; normally `1`.
   readonly windows: number;
   readonly trackCount: number;
@@ -395,7 +403,8 @@ export interface MisoMeterFrame {
   /// Every entry is finite. `0` deliberately conflates "not reducing" with "no observed effect on
   /// this track", because the array is positional and read without null checks; the distinction
   /// lives in the `miso.observe.v1` acknowledgement's subscription map. Several armed taps on one
-  /// track fold max-magnitude into the one slot, on the control plane.
+  /// track fold max-magnitude into the one slot, on the control plane. Each value is the latest
+  /// available independently aged effect fold; this frame carries no GR sequence or sample span.
   readonly trackGrDb: Float32Array;
   /// The designated master track's own folded reading, or `null` (issue 143 D6).
   ///
@@ -404,9 +413,11 @@ export interface MisoMeterFrame {
   readonly masterGrDb: number | null;
   /// Absolute sample the reported window opened at, inclusive.
   ///
-  /// Correlate this against a `MisoCommandAck.appliedAtSample`: the first window whose
-  /// `firstSample >= appliedAtSample` is the first that reflects the command. Consecutive windows
-  /// tile with no gap, so `firstSample` of the next frame is this frame's `endSample`.
+  /// This timestamps only `peaks`. Correlate it against a `MisoCommandAck.appliedAtSample`: the
+  /// first peak window whose `firstSample >= appliedAtSample` is the first wholly after the
+  /// command. A generation change starts a fresh delivery epoch. Within one generation, a gap
+  /// between this frame's `endSample` and the next frame's `firstSample`, or the loss bit/count,
+  /// reports omitted/rejected telemetry rather than a contiguous measurement.
   readonly firstSample: bigint;
   /// Absolute sample the reported window closed at, exclusive.
   readonly endSample: bigint;
@@ -614,6 +625,8 @@ export interface MisoAudioWorkletHost {
   readonly resources: MisoWebResourceReport;
   readonly memoryBytes: number;
   submitSource(request: MisoSourceRequest): Promise<MisoAck>;
+  /// Seeks source content while absolute render time remains continuous. Meter peak windows can
+  /// straddle this content discontinuity; the seek does not advance the meter generation.
   seekSource(request: MisoSeekRequest): Promise<MisoAck>;
   status(): Promise<MisoStatus>;
   /// Submit one live-console batch as a single transaction (issue 137 D1).

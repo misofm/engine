@@ -1,0 +1,11 @@
+commit=924e524ea179ae88e0ac732badf27d00d215684c
+platform=linux/amd64
+rustc=1.97.1-x86_64-unknown-linux-gnu
+builder=scripts/build-web-audioworklet.sh
+result=pass
+wasm_sha256=671d615de9a74232c2af623592fc85eca68b8cd571fb5b7542ba648e621af4e3
+host_js_sha256=21c8947d8aad2d1d9a23e553c2c7b983dbd5a622aabfbab9a41c622d1a50229a
+worklet_js_sha256=225bc06043ed6e2c62a38d63f1c2015b40480d673e3a53109c938eba481556cb
+release_build_seconds=36.74
+artifact_dir=/private/tmp/engine-519-linux-final-output
+container=stopped

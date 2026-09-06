@@ -1,0 +1,21 @@
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.09s
+     Running unittests src/lib.rs (target/release/deps/host_web-953c3a9ce1d69af8)
+
+running 1 test
+{"kind":"header","label":"isolated metering ns for 9 streams; poll-only callback ns","measured_rounds":2,"period_blocks":32,"quantum":128,"schema":1,"warmups":1,"windows":256}
+
+thread 'tests::selective_meter_and_readiness_descriptive_timing' (139384256) panicked at hosts/host-web/src/tests.rs:1748:5:
+assertion `left == right` failed
+  left: 1
+ right: 0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test tests::selective_meter_and_readiness_descriptive_timing ... FAILED
+
+failures:
+
+failures:
+    tests::selective_meter_and_readiness_descriptive_timing
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 74 filtered out; finished in 0.14s
+
+error: test failed, to rerun pass `-p host-web --lib`
