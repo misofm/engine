@@ -1,13 +1,12 @@
 //! Fixed-work, exactly-two-round descriptive benchmark driver for issue 006.
 #![allow(missing_docs)]
 
+use bench_support::digest::sha256_hex;
 use bench_support::json::escape;
 use bench_support::stats::per_mille as percentile;
 use graph_compiler::Backend;
 use std::{
-    env,
-    fmt::Write as _,
-    fs,
+    env, fs,
     hint::black_box,
     process::Command,
     time::{Instant, SystemTime, UNIX_EPOCH},
@@ -24,7 +23,6 @@ use session::{
     SidechainDeclaration, StableId, Submix, canonical_session_json, compile_session,
     parse_session_json,
 };
-use sha2::{Digest, Sha256};
 
 const SEED: &str = include_str!("../../../fixtures/session/v1/canonical.json");
 const ROUNDS: u8 = 2;
@@ -562,14 +560,6 @@ fn peak_resident_bytes() -> u64 {
         .unwrap_or(0)
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
-    let mut output = String::with_capacity(64);
-    for byte in Sha256::digest(bytes) {
-        write!(&mut output, "{byte:02x}").expect("String write");
-    }
-    output
-}
-
 fn string_array(values: &[String]) -> String {
     format!(
         "[{}]",
@@ -584,6 +574,14 @@ fn string_array(values: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sha256_hex_matches_known_abc_digest() {
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
 
     #[test]
     fn nearest_rank_is_ordered_at_all_frozen_percentiles() {

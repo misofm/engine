@@ -1,0 +1,1 @@
+cargo test --locked --release -p bench-support digest --lib

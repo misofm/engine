@@ -109,3 +109,9 @@ The known compressor post-main allocation proof failure remains unresolved under
 Read-only source/log/hash review; no tests/builds/timing or source/spec/Git/GitHub mutations performed.
 
 PR504 delivered #503 as main 5159da6ceee5903ff1b9534a55ea149c38970acb after exact-head Astra PASS and required qualification34015517216 SUCCESS. Root merged that main and its closure record. Comparison against qualified candidate02c74cc2 shows only the known compressor test, explicit dev-only engine dependency and existing lock edge, plus previously accepted generated candidate/hash identities. All production source, normal dependency declarations, artifact pin and consumer numerical expectations remain unchanged. Per Astra final PR504 ruling, the existing #500 artifact qualification remains applicable without an unconditional rebuild. Actual #500 PR review and required CI remain mandatory; #504 post-main34015812921 is monitored independently.
+
+## Delivered and remotely closed
+
+PR505 merged at2026-09-06T06:20:49Z as71059eab8b83a39d5b3c69fd2aba9ca285409e52. Astra exact-head PASS applies to3622d6250375418fdedf7d045b24ef42496d2788 and required qualification34015869156 completed SUCCESS on that same head before merge. GitHub #500 is verified CLOSED. This delivers shared node/edge token emission with allocation-free length calculation and unchanged canonical bytes; CP20 remains PARTIAL because concrete independent hex encoders remain. The historical count of fourteen encoders is not recertified. Post-main CI is monitored separately.
+
+Post-main qualification34016249875 at71059eab8b83a39d5b3c69fd2aba9ca285409e52 completed SUCCESS. Both required pre-merge and post-main CI are green.

@@ -67,3 +67,5 @@ Root may package/open the actual PR for exact-head review. Required CI must succ
 ## Delivered and remotely closed
 
 PR504 merged at 2026-09-06T06:10:29Z as 5159da6ceee5903ff1b9534a55ea149c38970acb. Astra exact-PR PASS applies to 1037c63c4662188c37f09eb6a56ec8c9fb5664a6; required qualification 34015517216 completed SUCCESS on that head before merge. GitHub #503 is verified CLOSED. The correction keeps zero render-thread allocation/free requirements and makes unrelated process traffic irrelevant to that measurement. Post-main qualification is monitored separately; the historical PR502 failure is retained, not relabeled.
+
+Post-main qualification34015812921 at5159da6ceee5903ff1b9534a55ea149c38970acb completed SUCCESS. Both required pre-merge and post-main CI are green; the previously failing DSP job passes with the scoped allocation proof.

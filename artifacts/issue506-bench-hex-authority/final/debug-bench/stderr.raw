@@ -1,0 +1,5 @@
+   Compiling bench-support v0.1.0 (/home/bl/misofm/engine-bench-hex-authority/tools/bench-support)
+   Compiling console-workload v0.1.0 (/home/bl/misofm/engine-bench-hex-authority/tools/console-workload)
+   Compiling bench v0.1.0 (/home/bl/misofm/engine-bench-hex-authority/tools/bench)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.63s
+     Running unittests src/main.rs (target/debug/deps/bench-c884e76c7a7f3be8)

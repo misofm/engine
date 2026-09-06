@@ -1,0 +1,2 @@
+PATH=/home/bl/.cargo/bin:/usr/bin:/bin
+CARGO_TERM_COLOR=never

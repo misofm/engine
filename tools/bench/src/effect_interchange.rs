@@ -1,6 +1,7 @@
 //! Descriptive benchmark for the accepted effect interchange boundary.
 #![allow(missing_docs)]
 
+use bench_support::digest::sha256_hex as digest_hex;
 use bench_support::json;
 use bench_support::stats::nearest_rank;
 use std::{
@@ -70,15 +71,10 @@ fn hex_bytes(text: &str) -> Vec<u8> {
         .collect()
 }
 
+// Retained as the raw digest helper for callers/tests that need digest bytes rather than text.
+#[allow(dead_code)]
 fn digest(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
-}
-
-fn digest_hex(bytes: &[u8]) -> String {
-    digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
 }
 
 static STATE_PARAMETERS: [ParameterDescriptor; 2] = [
@@ -1082,5 +1078,15 @@ mod tests {
         let actual = digest_hex(&envelope);
         assert_ne!(actual, ISSUE_081_UNREACHABLE_MIGRATION_SHA256);
         assert_eq!(actual, EXPECTED_OUTPUT_SHA256[3]);
+    }
+
+    #[test]
+    fn digest_hex_matches_known_abc_digest() {
+        assert_eq!(
+            digest_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        let expected: [u8; 32] = Sha256::digest(b"abc").into();
+        assert_eq!(digest(b"abc"), expected);
     }
 }

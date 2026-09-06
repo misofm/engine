@@ -1,0 +1,3 @@
+   Compiling bench-support v0.1.0 (/home/bl/misofm/engine-bench-hex-authority/tools/bench-support)
+    Finished `release` profile [optimized + debuginfo] target(s) in 5.21s
+     Running unittests src/lib.rs (target/release/deps/bench_support-f709b8e31e177266)
