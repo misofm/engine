@@ -1,0 +1,1 @@
+{"argv":["npm","run","qualify","--","--artifacts","/tmp/engine-238-worklet-qualified","--browser","all","--record-matrix","--candidate-commit","89c25e7ccfe166853685c9490f74ba4a4117cccc","--self-test-mutations"],"cwd":"/home/bl/misofm/engine-238-delivery/hosts/host-web/qualification","candidate_commit":"89c25e7ccfe166853685c9490f74ba4a4117cccc"}

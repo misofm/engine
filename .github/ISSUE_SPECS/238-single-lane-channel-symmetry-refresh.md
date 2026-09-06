@@ -173,3 +173,9 @@ Root integrates delivered main4587bfae (PR484 cfg(test)-only floor parity) befor
 On immutable add3ca11, scalar/SIMD Wasm, ordinary release native C API, resource lifecycle and shared/static ABI gates return numeric0. Normal worklet build correctly rejects the previous a22f42fe pin and reports new da36c7503d9d4e1994cec6f22abd3fd97a41ede0551e3355adacdf9068bbead1 from the accepted production input-stage change. The actual failing command/log/status and expected/observed digests are retained under /tmp/engine-238-worklet-current.*.
 
 Root records the observed digest as the new artifact pin on this separate delivery branch before rebuilding and running existing static/resource/browser qualification. Runtime source remains byte-identical to add3ca11; no builder flags or qualification gates change. Browser results are still pending and the prior matrix is not evidence for the new bytes.
+
+## Immutable delivery qualification complete
+
+Full workspace at add3ca11:276 result blocks,1628 passed,0 failed,24 ignored. Compared with the delivered479 test population there are exactly two additions (floor parity and addressed symmetry), no removals. Supported scalar/SIMD Wasm checks, native C API build/resource lifecycle/shared+static ABI, new-pin worklet build/static object checks, expected-resource26 negative controls, all three actual browser engines and generated-matrix check passed. Root environment/lane/unfused/workspace policies also passed.
+
+All actual command/log/status records, initial pin rejection, test-population delta and source-equivalence record are in artifacts/issue238-addressed-symmetry. Browser-generated changes at719232c9 preserve all prior gates/version floors and update only candidate/digest. Actual PR-head Astra review and required qualification remain before merge; broader RT5 extraction and measurement are still retained separate obligations.
