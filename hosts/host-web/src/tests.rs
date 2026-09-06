@@ -1649,9 +1649,21 @@ fn stage_command(
 
 /// A console host over the browser identity fixture: one track, unity everything, one-quantum ring.
 fn console_host(quantum: u32, meter_blocks: u64) -> AudioWorkletEngineHost {
-    let document = identity_session(quantum, quantum, u64::from(quantum) * 64);
+    console_host_at_rate(48_000, quantum, meter_blocks)
+}
+
+fn console_host_at_rate(
+    sample_rate_hz: u32,
+    quantum: u32,
+    meter_blocks: u64,
+) -> AudioWorkletEngineHost {
+    let mut model =
+        parse_session_json(&identity_session(quantum, quantum, u64::from(quantum) * 64))
+            .expect("identity model");
+    model.sample_rate_hz = sample_rate_hz;
+    let document = canonical_session_json(&model).expect("canonical identity session");
     let options = WebBootOptions {
-        require_sample_rate_hz: 48_000,
+        require_sample_rate_hz: sample_rate_hz,
         require_quantum_frames: quantum,
         source_ring_frames: quantum,
         console_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
@@ -1689,6 +1701,44 @@ fn paired_console_host(quantum: u32) -> AudioWorkletEngineHost {
     AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("paired console boot")
 }
 
+fn meter_tail_host(sample_rate_hz: u32, quantum: u32) -> AudioWorkletEngineHost {
+    meter_tail_host_for_blocks(sample_rate_hz, quantum, 1, 4)
+}
+
+fn meter_tail_host_for_blocks(
+    sample_rate_hz: u32,
+    quantum: u32,
+    meter_blocks: u64,
+    source_blocks: u64,
+) -> AudioWorkletEngineHost {
+    let mut model = parse_session_json(include_str!("../tests/browser-v1/session.json"))
+        .expect("accepted identity fixture");
+    model.sample_rate_hz = sample_rate_hz;
+    model.quantum_frames = quantum;
+    model.sources[0].frames = u64::from(quantum) * source_blocks;
+    let template = model.tracks[0].clone();
+    model.tracks.clear();
+    for index in 0..9 {
+        let mut track = template.clone();
+        track.id = session::StableId::parse(&format!("track-{index}")).expect("track id");
+        model.tracks.push(track);
+    }
+    model.routes[0].source = session::RouteSource::Track {
+        track_id: session::StableId::parse("track-0").expect("route track"),
+        tap: session::SendTap::PostMatrix,
+    };
+    let document = canonical_session_json(&model).expect("canonical meter-tail fixture");
+    let options = WebBootOptions {
+        require_sample_rate_hz: sample_rate_hz,
+        require_quantum_frames: quantum,
+        source_ring_frames: quantum,
+        console_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
+        console_meter_blocks: meter_blocks,
+        ..WebBootOptions::explicit_defaults()
+    };
+    AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("meter-tail boot")
+}
+
 /// Feed one full quantum of a constant left plane and render it.
 fn feed_and_render(host: &mut AudioWorkletEngineHost, generation: u64, block: u64, value: f32) {
     let quantum = host.status().quantum_frames as usize;
@@ -1700,7 +1750,7 @@ fn feed_and_render(host: &mut AudioWorkletEngineHost, generation: u64, block: u6
             b"fixture-source",
             generation,
             block * quantum as u64,
-            48_000,
+            host.status().sample_rate_hz,
             &planes,
             quantum as u32,
             false,
@@ -3020,6 +3070,549 @@ fn meter_frames_equal_an_offline_fold_and_cost_the_render_nothing() {
     assert!(!bare.meters_attached());
     assert_eq!(bare.set_meter_lease(true), RESULT_UNSUPPORTED);
     assert_eq!(bare.poll_meters(), 0);
+}
+
+#[test]
+fn meter_empty_poll_preserves_early_peak_and_publication_state() {
+    let mut host = console_host(128, 2);
+    assert_eq!(host.set_meter_lease(true), RESULT_OK);
+    feed_and_render(&mut host, 1, 0, 1.0);
+    assert_eq!(
+        host.poll_meters(),
+        0,
+        "the first half-window is still pending"
+    );
+    let pending_frame = host.meter_frame().to_vec();
+    let pending_header = *host.meter_header();
+    feed_and_render(&mut host, 1, 1, 0.1);
+    assert_eq!(host.poll_meters(), 1);
+    assert_eq!(
+        host.meter_frame()[0],
+        1.0,
+        "the early impulse survived the empty poll"
+    );
+    let published_frame = host.meter_frame().to_vec();
+    let published_header = *host.meter_header();
+    assert_ne!(published_frame, pending_frame);
+    assert_eq!(published_header.first_sample, 0);
+    assert_eq!(published_header.end_sample, 256);
+    assert_eq!(
+        published_frame[2], 1.0,
+        "master left retained the early peak"
+    );
+    assert_eq!(
+        published_frame[3], 1.0,
+        "master right retained the early peak"
+    );
+    assert_eq!(
+        host.poll_meters(),
+        0,
+        "an empty poll does not manufacture a new frame"
+    );
+    assert_eq!(host.meter_frame(), &published_frame[..]);
+    assert_eq!(*host.meter_header(), published_header);
+    assert_eq!(pending_header.sequence, 0);
+}
+
+#[test]
+fn incomplete_master_periods_skip_all_track_pops_and_effect_scans() {
+    const QUANTUM: u32 = 128;
+    for blocks in [2_u64, 8, 32] {
+        let mut eager = console_host(QUANTUM, blocks);
+        let mut boundary = console_host(QUANTUM, blocks);
+        assert_eq!(eager.set_meter_lease(true), RESULT_OK);
+        assert_eq!(boundary.set_meter_lease(true), RESULT_OK);
+        let initial_frame = eager.meter_frame().to_vec();
+        let initial_header = *eager.meter_header();
+        let initial_work = eager.meter_poll_work();
+
+        for block in 0..blocks {
+            let value = if block == 0 { 1.0 } else { 0.125 };
+            feed_and_render(&mut eager, 1, block, value);
+            feed_and_render(&mut boundary, 1, block, value);
+            if block + 1 < blocks {
+                assert_eq!(eager.poll_meters(), 0, "period {blocks}, block {block}");
+                assert_eq!(eager.meter_poll_work(), initial_work);
+                assert_eq!(eager.meter_frame(), &initial_frame[..]);
+                assert_eq!(*eager.meter_header(), initial_header);
+            }
+        }
+        assert_eq!(eager.poll_meters(), 1, "period {blocks}");
+        assert_eq!(boundary.poll_meters(), 1, "boundary period {blocks}");
+        assert_eq!(eager.meter_frame(), boundary.meter_frame());
+        assert_eq!(eager.meter_header(), boundary.meter_header());
+
+        let published_frame = eager.meter_frame().to_vec();
+        let published_header = *eager.meter_header();
+        let completed_work = eager.meter_poll_work();
+        feed_and_render(&mut eager, 1, blocks, 0.75);
+        assert_eq!(eager.poll_meters(), 0, "partial period {blocks}");
+        assert_eq!(eager.meter_poll_work(), completed_work);
+        assert_eq!(eager.meter_frame(), &published_frame[..]);
+        assert_eq!(*eager.meter_header(), published_header);
+    }
+
+    let mut observed = observation_host(QUANTUM, 8, Some(0));
+    assert!(observed.observation_attached());
+    assert_eq!(observed.set_meter_lease(true), RESULT_OK);
+    let before = observed.meter_poll_work();
+    feed_and_render_tracks(&mut observed, 0, 0.5);
+    assert_eq!(observed.poll_meters(), 0);
+    assert_eq!(observed.meter_poll_work(), before);
+}
+
+fn timed_accumulator_mode(metrics: Option<MeterMetricSet>) -> (u128, u64, u64) {
+    const QUANTUM: usize = 128;
+    const PERIOD_BLOCKS: u32 = 32;
+    const WINDOWS: u64 = 256;
+    const STREAMS: usize = 9;
+    let config = builtins::MeterConfig {
+        period_frames: core::num::NonZeroU32::new(QUANTUM as u32 * PERIOD_BLOCKS).unwrap(),
+        peak_hold_frames: 256,
+        peak_decay_db_per_second: 12.0,
+        queue_capacity: core::num::NonZeroUsize::MIN,
+        reset_generation: 1,
+    };
+    let mut meters = metrics.map(|selection| {
+        (0..STREAMS)
+            .map(|index| {
+                builtins::MeterAccumulator::prepare_selected(
+                    builtins::MeterHandle(core::num::NonZeroU64::new(index as u64 + 1).unwrap()),
+                    config,
+                    48_000,
+                    selection,
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>()
+    });
+    let blocks = WINDOWS * u64::from(PERIOD_BLOCKS);
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    let started = std::time::Instant::now();
+    for block in 0..blocks {
+        let amplitude = if block % 17 == 0 { 1.0 } else { 0.125 };
+        let samples = [amplitude; QUANTUM];
+        if let Some(meters) = meters.as_mut() {
+            for meter in meters {
+                meter
+                    .accumulator
+                    .observe(&samples, &samples, block * QUANTUM as u64)
+                    .unwrap();
+                if (block + 1) % u64::from(PERIOD_BLOCKS) == 0 {
+                    let snapshot = meter.consumer.try_pop().unwrap();
+                    hash ^= u64::from(snapshot.left.sample_peak.to_bits());
+                    hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+                }
+            }
+        } else {
+            std::hint::black_box(&samples);
+        }
+    }
+    (started.elapsed().as_nanos(), hash, blocks)
+}
+
+fn timed_poll_mode(bypass_readiness: bool) -> (u128, u64, u64, (u64, u64)) {
+    const QUANTUM: u32 = 128;
+    const PERIOD_BLOCKS: u64 = 32;
+    const WINDOWS: u64 = 256;
+    let blocks = PERIOD_BLOCKS * WINDOWS;
+    let mut host = meter_tail_host_for_blocks(48_000, QUANTUM, PERIOD_BLOCKS, blocks);
+    assert_eq!(host.set_meter_lease(true), RESULT_OK);
+    host.set_meter_readiness_bypass(bypass_readiness);
+    let before = host.meter_poll_work();
+    let mut elapsed = 0_u128;
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    let mut emitted = 0_u64;
+    for block in 0..blocks {
+        let value = if block % 17 == 0 { 1.0 } else { 0.125 };
+        feed_and_render(&mut host, 1, block, value);
+        let started = std::time::Instant::now();
+        let windows = host.poll_meters();
+        elapsed = elapsed.saturating_add(started.elapsed().as_nanos());
+        if windows != 0 {
+            emitted = emitted.saturating_add(u64::from(windows));
+            for value in host.meter_frame() {
+                hash ^= u64::from(value.to_bits());
+                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            hash ^= host.meter_header().first_sample;
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    let after = host.meter_poll_work();
+    (
+        elapsed,
+        hash,
+        emitted,
+        (after.0 - before.0, after.1 - before.1),
+    )
+}
+
+/// Frozen descriptive evidence for issues #519/#520. Run only through the documented two-phase
+/// command; this is deliberately an ignored test rather than a benchmark framework.
+fn timing_header() -> String {
+    serde_json::json!({
+        "schema": 1,
+        "kind": "header",
+        "label": "isolated metering ns for 9 streams; poll-only callback ns",
+        "quantum": 128,
+        "period_blocks": 32,
+        "windows": WINDOWS_FOR_TIMING,
+        "warmups": 1,
+        "measured_rounds": 2,
+    })
+    .to_string()
+}
+
+fn accumulator_timing_record(round: u32, mode: &str, result: (u128, u64, u64)) -> String {
+    serde_json::json!({
+        "schema": 1,
+        "kind": "accumulator",
+        "round": round,
+        "mode": mode,
+        "elapsed_ns": result.0,
+        "payload_hash": result.1,
+        "blocks": result.2,
+    })
+    .to_string()
+}
+
+fn poll_timing_record(round: u32, mode: &str, result: (u128, u64, u64, (u64, u64))) -> String {
+    serde_json::json!({
+        "schema": 1,
+        "kind": "poll",
+        "round": round,
+        "mode": mode,
+        "elapsed_ns": result.0,
+        "payload_hash": result.1,
+        "emitted_windows": result.2,
+        "track_pop_attempts": result.3.0,
+        "effect_scans": result.3.1,
+    })
+    .to_string()
+}
+
+fn persist_timing_record(file: &mut std::fs::File, record: &str) {
+    use std::io::Write;
+    writeln!(file, "{record}").expect("persist timing record");
+    file.sync_data().expect("sync timing record");
+    eprintln!("{record}");
+}
+
+#[test]
+#[ignore = "descriptive release timing; requires explicit preflight then one run"]
+fn selective_meter_and_readiness_descriptive_timing() {
+    use std::io::Write;
+
+    if std::hint::black_box(cfg!(debug_assertions)) {
+        panic!("timing requires --release");
+    }
+    let mode = std::env::var("MISO_ENGINE_METER_TIMING_MODE").expect("timing mode");
+    let output = std::env::var("MISO_ENGINE_METER_TIMING_OUTPUT").expect("timing output path");
+    let open = || {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&output)
+            .expect("output must not exist and must be writable")
+    };
+    if mode == "preflight" {
+        let mut file = open();
+        let records = [
+            timing_header(),
+            accumulator_timing_record(0, "peak", (1, 2, 3)),
+            poll_timing_record(0, "ready", (1, 2, 3, (4, 5))),
+        ];
+        for record in records {
+            let parsed: serde_json::Value = serde_json::from_str(&record).expect("valid JSONL row");
+            assert_eq!(parsed["schema"], 1);
+            assert!(parsed["kind"].is_string());
+            writeln!(file, "{record}").unwrap();
+        }
+        file.sync_all().unwrap();
+        assert_eq!(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&output)
+                .expect_err("overwrite refusal")
+                .kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+        drop(file);
+        std::fs::remove_file(&output).expect("remove preflight probe");
+        return;
+    }
+    assert_eq!(mode, "run", "mode is preflight or run");
+    let mut file = open();
+    persist_timing_record(&mut file, &timing_header());
+
+    // Exactly one warmup per frozen mode.
+    let _ = timed_accumulator_mode(None);
+    let _ = timed_accumulator_mode(Some(MeterMetricSet::SAMPLE_PEAK));
+    let _ = timed_accumulator_mode(Some(MeterMetricSet::ALL));
+    let _ = timed_poll_mode(true);
+    let _ = timed_poll_mode(false);
+
+    // Exactly two measured rounds, with no retry or tuning loop.
+    for round in 0..2 {
+        let disabled = timed_accumulator_mode(None);
+        persist_timing_record(
+            &mut file,
+            &accumulator_timing_record(round, "disabled", disabled),
+        );
+        let peak = timed_accumulator_mode(Some(MeterMetricSet::SAMPLE_PEAK));
+        persist_timing_record(&mut file, &accumulator_timing_record(round, "peak", peak));
+        let full = timed_accumulator_mode(Some(MeterMetricSet::ALL));
+        persist_timing_record(&mut file, &accumulator_timing_record(round, "full", full));
+        assert_eq!(peak.1, full.1, "round {round}: peak payload identity");
+        assert_eq!(disabled.2, peak.2);
+
+        let legacy = timed_poll_mode(true);
+        persist_timing_record(&mut file, &poll_timing_record(round, "legacy_scan", legacy));
+        let ready = timed_poll_mode(false);
+        persist_timing_record(&mut file, &poll_timing_record(round, "readiness", ready));
+        assert_eq!(legacy.1, ready.1, "round {round}: poll payload identity");
+        assert_eq!(legacy.2, WINDOWS_FOR_TIMING);
+        assert_eq!(ready.2, WINDOWS_FOR_TIMING);
+    }
+    file.sync_all().unwrap();
+}
+
+const WINDOWS_FOR_TIMING: u64 = 256;
+
+#[test]
+fn meter_delayed_poll_delivers_each_queued_window_with_its_own_peak() {
+    let mut host = console_host(128, 2);
+    assert_eq!(host.set_meter_lease(true), RESULT_OK);
+    for (block, value) in [1.0_f32, 0.2, 0.3, 0.4].into_iter().enumerate() {
+        feed_and_render(&mut host, 1, block as u64, value);
+    }
+    assert_eq!(host.poll_meters(), 1);
+    assert_eq!(host.meter_header().windows, 1);
+    assert_eq!(host.meter_header().first_sample, 0);
+    assert_eq!(host.meter_header().end_sample, 256);
+    assert_eq!(host.meter_frame()[0], 1.0);
+    assert_eq!(host.meter_frame()[2], 1.0);
+    assert_eq!(host.meter_frame()[3], 1.0);
+    assert_eq!(host.poll_meters(), 1);
+    assert_eq!(host.meter_header().first_sample, 256);
+    assert_eq!(host.meter_header().end_sample, 512);
+    assert_eq!(host.meter_frame()[0], 0.4);
+    assert_eq!(host.meter_frame()[2], 0.4);
+    assert_eq!(host.meter_frame()[3], 0.4);
+
+    feed_and_render(&mut host, 1, 4, 0.8);
+    let partial_frame = host.meter_frame().to_vec();
+    let partial_header = *host.meter_header();
+    assert_eq!(
+        host.poll_meters(),
+        0,
+        "a partial trailing period is not published"
+    );
+    assert_eq!(host.meter_frame(), partial_frame);
+    assert_eq!(*host.meter_header(), partial_header);
+}
+
+#[test]
+fn meter_invalid_master_rejects_transactionally_then_recovers_with_loss() {
+    let mut host = console_host(128, 1);
+    assert_eq!(host.set_meter_lease(true), RESULT_OK);
+    feed_and_render(&mut host, 1, 0, 0.9);
+    assert_eq!(host.poll_meters(), 1);
+    let published_frame = host.meter_frame().to_vec();
+    let published_header = *host.meter_header();
+
+    feed_and_render(&mut host, 1, 1, 0.2);
+    assert!(
+        host.ready
+            .as_mut()
+            .expect("ready")
+            .pop_master_window()
+            .is_some()
+    );
+    assert_eq!(host.poll_meters(), 0);
+    assert_eq!(host.meter_frame(), published_frame);
+    assert_eq!(*host.meter_header(), published_header);
+
+    feed_and_render(&mut host, 1, 2, 0.3);
+    assert_eq!(
+        host.poll_meters(),
+        0,
+        "the first ready poll rejects the older track-only interval"
+    );
+    assert_eq!(host.poll_meters(), 1, "the same bounded readiness recovers");
+    assert_eq!(host.meter_header().first_sample, 256);
+    assert_eq!(&host.meter_frame()[..4], &[0.3, 0.3, 0.3, 0.3]);
+    assert_ne!(host.meter_header().reserved[1] & METER_VALID_LOSS, 0);
+}
+
+#[test]
+fn meter_producer_reset_starts_a_fresh_delivery_epoch() {
+    let mut host = console_host(128, 1);
+    assert_eq!(host.set_meter_lease(true), RESULT_OK);
+    feed_and_render(&mut host, 1, 0, 0.9);
+    assert_eq!(host.poll_meters(), 1);
+    let published_frame = host.meter_frame().to_vec();
+    let published_header = *host.meter_header();
+
+    feed_and_render(&mut host, 1, 1, 0.2);
+    let ready = host.ready.as_mut().expect("ready");
+    for (meter, pending) in ready.meters.iter_mut().zip(ready.meter_pending.iter_mut()) {
+        let mut snapshot = meter.consumer.try_pop().expect("queued snapshot");
+        snapshot.reset_generation = snapshot.reset_generation.saturating_add(1);
+        snapshot.window_sequence = 0;
+        *pending = Some(snapshot);
+    }
+    assert_eq!(host.poll_meters(), 0);
+    assert_eq!(host.meter_frame(), published_frame);
+    assert_eq!(*host.meter_header(), published_header);
+
+    feed_and_render(&mut host, 1, 2, 0.3);
+    assert_eq!(host.poll_meters(), 1);
+    assert!(host.meter_header().reserved[0] > published_header.reserved[0]);
+    assert_eq!(host.meter_header().first_sample, 256);
+    assert_eq!(&host.meter_frame()[..4], &[0.3, 0.3, 0.3, 0.3]);
+    assert_ne!(host.meter_header().reserved[1] & METER_VALID_LOSS, 0);
+}
+
+#[test]
+fn meter_queue_saturation_recovers_with_explicit_loss() {
+    let mut host = console_host(128, 1);
+    assert_eq!(host.set_meter_lease(true), RESULT_OK);
+    for block in 0..12 {
+        feed_and_render(&mut host, 1, block, 0.2);
+    }
+    for block in 0..8 {
+        assert_eq!(host.poll_meters(), 1);
+        assert_eq!(host.meter_header().first_sample, block * 128);
+    }
+    assert_eq!(host.poll_meters(), 0);
+    feed_and_render(&mut host, 1, 12, 0.3);
+    assert_eq!(host.poll_meters(), 1);
+    assert_eq!(host.meter_header().first_sample, 12 * 128);
+    assert_eq!(&host.meter_frame()[..4], &[0.3, 0.3, 0.3, 0.3]);
+    assert_ne!(host.meter_header().reserved[1] & METER_VALID_LOSS, 0);
+    assert!(host.meter_header().reserved[1] >> METER_LOSS_SHIFT > 0);
+}
+
+#[test]
+fn meter_spans_cover_all_launch_rates_and_a_nine_track_tail() {
+    const QUANTUM: u32 = 128;
+    for sample_rate_hz in [44_100, 48_000, 88_200, 96_000] {
+        let mut host = meter_tail_host(sample_rate_hz, QUANTUM);
+        assert_eq!(host.set_meter_lease(true), RESULT_OK);
+        feed_and_render(&mut host, 1, 0, 0.625);
+        assert_eq!(host.poll_meters(), 1, "{sample_rate_hz} Hz");
+        assert_eq!(host.meter_header().first_sample, 0);
+        assert_eq!(host.meter_header().end_sample, u64::from(QUANTUM));
+        assert_eq!(host.meter_header().track_count, 9);
+        for track in 0..9 {
+            assert_eq!(
+                host.meter_frame()[track * 2],
+                0.625,
+                "rate {sample_rate_hz}, track {track} L"
+            );
+            assert_eq!(
+                host.meter_frame()[track * 2 + 1],
+                0.625,
+                "rate {sample_rate_hz}, track {track} R"
+            );
+        }
+        assert_eq!(
+            host.meter_frame()[18],
+            0.625,
+            "{sample_rate_hz} Hz master L"
+        );
+        assert_eq!(
+            host.meter_frame()[19],
+            0.625,
+            "{sample_rate_hz} Hz master R"
+        );
+    }
+}
+
+#[test]
+fn source_seek_keeps_the_meter_epoch_and_absolute_peak_clock() {
+    let mut host = console_host(128, 1);
+    assert_eq!(host.set_meter_lease(true), RESULT_OK);
+    feed_and_render(&mut host, 1, 0, 0.4);
+    assert_eq!(host.poll_meters(), 1);
+    let meter_generation = host.meter_header().reserved[0];
+
+    assert_eq!(host.seek_source(b"fixture-source", 2, 0), RESULT_OK);
+    let plane = vec![0.7_f32; 128];
+    let planes: [&[f32]; 2] = [&plane, &plane];
+    assert_eq!(
+        host.submit_source(b"fixture-source", 2, 0, 48_000, &planes, 128, false),
+        RESULT_OK
+    );
+    assert_eq!(host.render_next(), RESULT_OK);
+    assert_eq!(host.poll_meters(), 1);
+    assert_eq!(host.meter_header().reserved[0], meter_generation);
+    assert_eq!(host.meter_header().first_sample, 128);
+    assert_eq!(host.meter_header().end_sample, 256);
+    assert_eq!(&host.meter_frame()[..4], &[0.7, 0.7, 0.7, 0.7]);
+}
+
+#[test]
+fn meter_lease_reacquisition_waits_for_a_clean_boundary() {
+    let mut host = console_host(128, 2);
+    assert_eq!(host.set_meter_lease(true), RESULT_OK);
+    feed_and_render(&mut host, 1, 0, 0.9);
+    assert_eq!(host.set_meter_lease(false), RESULT_OK);
+    assert_eq!(host.set_meter_lease(true), RESULT_OK);
+    let generation = host.meter_header().reserved[0];
+    assert!(generation >= 2);
+    assert_eq!(host.set_meter_lease(true), RESULT_OK);
+    assert_eq!(host.meter_header().reserved[0], generation);
+    for block in 1..4_u64 {
+        feed_and_render(&mut host, 1, block, 0.2);
+        if block < 3 {
+            assert_eq!(host.poll_meters(), 0);
+        }
+    }
+    assert_eq!(host.poll_meters(), 1);
+    assert!(host.meter_header().first_sample >= 256);
+    assert_eq!(host.meter_header().reserved[0], generation);
+    assert_eq!(host.meter_frame()[0], 0.2);
+    assert_eq!(host.meter_frame()[2], 0.2);
+    assert_eq!(host.meter_frame()[3], 0.2);
+}
+
+#[test]
+fn meter_reacquisition_rejects_a_full_stale_queue_then_recovers() {
+    let mut host = console_host(128, 1);
+    assert_eq!(host.set_meter_lease(true), RESULT_OK);
+    feed_and_render(&mut host, 1, 0, 0.9);
+    assert_eq!(host.poll_meters(), 1);
+    let old_generation = host.meter_header().reserved[0];
+
+    // Fill the prepared producer queue while the consumer is delayed.
+    for block in 1..=8 {
+        feed_and_render(&mut host, 1, block, 0.2);
+    }
+    assert_eq!(host.set_meter_lease(false), RESULT_OK);
+    assert_eq!(host.set_meter_lease(true), RESULT_OK);
+    let empty_frame = host.meter_frame().to_vec();
+    let empty_header = *host.meter_header();
+    assert!(empty_header.reserved[0] > old_generation);
+
+    // The first fresh track window is dropped while stale producer slots remain full. One bounded
+    // poll rejects those old windows and publishes nothing.
+    feed_and_render(&mut host, 1, 9, 0.3);
+    assert_eq!(host.poll_meters(), 0);
+    assert_eq!(host.meter_frame(), empty_frame);
+    assert_eq!(*host.meter_header(), empty_header);
+
+    // With queue room restored, the next exact track/master interval publishes in the new epoch
+    // and reports both the producer drop and discarded stale master interval.
+    feed_and_render(&mut host, 1, 10, 0.4);
+    assert_eq!(host.poll_meters(), 1);
+    assert_eq!(host.meter_header().reserved[0], empty_header.reserved[0]);
+    assert_eq!(host.meter_header().first_sample, 10 * 128);
+    assert_eq!(&host.meter_frame()[..4], &[0.4, 0.4, 0.4, 0.4]);
+    assert_ne!(host.meter_header().reserved[1] & METER_VALID_LOSS, 0);
 }
 
 /// A three-track observation host over the #143 E4 fixture: compressor, EQ (no tap), gate.

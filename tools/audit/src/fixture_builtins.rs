@@ -354,7 +354,7 @@ const METER_REQUEST_SEAL_BYTES: u64 = 56;
 const OBSERVER_SEAL_BYTES: u64 = 32;
 const CONSUMER_SEAL_BYTES: u64 = 32;
 const METER_QUEUE_HEADER_BYTES: u64 = 256;
-const METER_OBSERVER_BYTES: u64 = 224;
+const METER_OBSERVER_BYTES: u64 = 232;
 const METER_SNAPSHOT_BYTES: u64 = 160;
 
 /// One parsed independent response row from the checked V1 CSV.
@@ -5241,7 +5241,9 @@ mod tests {
             // Re-pinned by issue #241: the same two preparation workloads now name the canonical
             // session by its source-content identity after the source-schema migration. Their
             // payload lengths and every render-bearing fixture remain unchanged.
-            "b244da45d88d670951205098b7516af20387a141eccb3bf60edb61e8ba57a919",
+            // Re-pinned by issue #519: the metric-selection field grows `MeterAccumulator` by 8
+            // bytes after alignment while `MeterSnapshot` remains 160 by using existing padding.
+            "31798260263396c242c0b90042e01abb18624f383fd88029341dffecde662796",
             "accepted joined-corpus manifest identity"
         );
 

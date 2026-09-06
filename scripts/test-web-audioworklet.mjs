@@ -640,7 +640,8 @@ async function testMainRealm() {
     const node = FakeNode.latest;
     node.port.onmessage({
       data: {
-        tag: "miso.meter.v1", sequence: 1, windows: 1, trackCount: 2,
+        tag: "miso.meter.v1", sequence: 1, generation: 1n, validity: 0xb, lossCount: 0,
+        windows: 1, trackCount: 2,
         peaks: new Float32Array([0.125, 0.25, 0.375, 0.5, 0.625, 0.75]),
         trackGrDb: new Float32Array([6.5, 0]), masterGrDb: 6.5,
         firstSample: 512n, endSample: 768n,
@@ -680,6 +681,13 @@ async function testMainRealm() {
     // Every shape rule is a hard failure, not a silent skip. Each entry is one red mutation of
     // one rule in the `miso.meter.v1` branch of `#receive`.
     for (const broken of [
+      { generation: 0n },
+      { generation: 1 },
+      { validity: 0x1 },
+      { validity: 0x13 },
+      { validity: 0x7, lossCount: 0 },
+      { validity: 0x3, lossCount: 1 },
+      { lossCount: 0x1_0000_0000 },
       { trackGrDb: new Float32Array(1) },
       { trackGrDb: [0, 0] },
       { trackGrDb: new Float32Array([-6.5, 0]) },
@@ -688,6 +696,7 @@ async function testMainRealm() {
       { masterGrDb: "6.5" },
       { firstSample: 512 },
       { endSample: 256n },
+      { endSample: 512n },
     ]) {
       const rejecting = await createMisoAudioWorkletHost({
         context,
@@ -699,7 +708,8 @@ async function testMainRealm() {
       const rejected = rejecting.status();
       FakeNode.latest.port.onmessage({
         data: {
-          tag: "miso.meter.v1", sequence: 1, windows: 1, trackCount: 2,
+          tag: "miso.meter.v1", sequence: 1, generation: 1n, validity: 0xb, lossCount: 0,
+          windows: 1, trackCount: 2,
           peaks: new Float32Array(6), trackGrDb: new Float32Array(2), masterGrDb: null,
           firstSample: 512n, endSample: 768n, ...broken,
         },
@@ -808,7 +818,8 @@ async function testMainRealm() {
       const framesBefore = meterFrames.length;
       node.port.onmessage({
         data: {
-          tag: "miso.meter.v1", sequence: 10 + reason, windows: 1, trackCount: 2,
+          tag: "miso.meter.v1", sequence: 10 + reason, generation: 1n, validity: 0xb,
+          lossCount: 0, windows: 1, trackCount: 2,
           peaks: new Float32Array([0.5, 0.5, 0.5, 0.5, 0.5, 0.5]),
           trackGrDb: new Float32Array([3.25, 0]), masterGrDb: 3.25,
           firstSample: 1024n, endSample: 1280n,
@@ -843,7 +854,8 @@ async function testMainRealm() {
     await consoleHost.meters({ enabled: false, onFrame: null });
     node.port.onmessage({
       data: {
-        tag: "miso.meter.v1", sequence: 2, windows: 1, trackCount: 2,
+        tag: "miso.meter.v1", sequence: 2, generation: 1n, validity: 0x3, lossCount: 0,
+        windows: 1, trackCount: 2,
         peaks: new Float32Array(6), trackGrDb: new Float32Array(2), masterGrDb: null,
         firstSample: 768n, endSample: 1024n,
       },
@@ -856,7 +868,8 @@ async function testMainRealm() {
     const doomed = consoleHost.status();
     node.port.onmessage({
       data: {
-        tag: "miso.meter.v1", sequence: 3, windows: 1, trackCount: 2,
+        tag: "miso.meter.v1", sequence: 3, generation: 1n, validity: 0x3, lossCount: 0,
+        windows: 1, trackCount: 2,
         peaks: new Float32Array(4), trackGrDb: new Float32Array(2), masterGrDb: null,
         firstSample: 0n, endSample: 0n,
       },
@@ -945,7 +958,8 @@ async function testMainRealm() {
     );
     FakeNode.latest.port.onmessage({
       data: {
-        tag: "miso.meter.v1", sequence: 1, windows: 1, trackCount: 2,
+        tag: "miso.meter.v1", sequence: 1, generation: 1n, validity: 0xb, lossCount: 0,
+        windows: 1, trackCount: 2,
         peaks: new Float32Array(6), trackGrDb: new Float32Array([1.5, 2.5]), masterGrDb: 2.5,
         firstSample: 0n, endSample: 256n,
       },
@@ -1010,6 +1024,8 @@ function createFakeExports(quantum, backend = 1) {
   meterHeader.setUint32(44, 1, true);
   meterHeader.setBigUint64(16, 512n, true);
   meterHeader.setBigUint64(24, 768n, true);
+  meterHeader.setBigUint64(48, 1n, true);
+  meterHeader.setBigUint64(56, 0xbn, true);
   const report = new DataView(memory.buffer, reportPointer, 48);
   report.setUint32(0, 48, true);
   report.setUint32(4, 0x00010000, true);
@@ -1113,7 +1129,7 @@ function createFakeExports(quantum, backend = 1) {
       return 0;
     },
   };
-  return { exports, calls, trackIds, sourceRows, meterFrameFloats };
+  return { exports, calls, trackIds, sourceRows, meterFrameFloats, meterHeader };
 }
 
 function createTelemetryClock(elapsedMsByBlock) {
@@ -1493,6 +1509,9 @@ async function testProcessor() {
       const frame = processor.port.posts.at(-1).message;
       assert.equal(frame.tag, "miso.meter.v1");
       assert.equal(frame.sequence, 1);
+      assert.equal(frame.generation, 1n);
+      assert.equal(frame.validity, 0xb);
+      assert.equal(frame.lossCount, 0);
       assert.equal(frame.windows, 1);
       assert.equal(frame.trackCount, 2);
       assert.equal(frame.peaks.length, 6);
@@ -1503,6 +1522,23 @@ async function testProcessor() {
       assert.equal(frame.masterGrDb, 6.5, "the header says the master reading is present");
       assert.equal(frame.firstSample, 512n);
       assert.equal(frame.endSample, 768n);
+
+      // A nonzero poll is still withheld unless both complete peak-validity bits are present.
+      // This exercises the real worklet guard against a malformed/future Rust publication.
+      fake.meterHeader.setBigUint64(56, 0x1n, true);
+      const invalidPosts = processor.port.posts.length;
+      assert.equal(processor.process([], [[left, right]]), true);
+      assert.equal(processor.port.posts.length, invalidPosts, "invalid peak metadata is not posted");
+
+      // Loss metadata crosses the BigInt header as bounded numeric message fields.
+      fake.meterHeader.setBigUint64(56, (2n << 32n) | 0xfn, true);
+      assert.equal(processor.process([], [[left, right]]), true);
+      const lossyFrame = processor.port.posts.at(-1).message;
+      assert.equal(lossyFrame.tag, "miso.meter.v1");
+      assert.equal(lossyFrame.sequence, 2);
+      assert.equal(lossyFrame.generation, 1n);
+      assert.equal(lossyFrame.validity, 0xf);
+      assert.equal(lossyFrame.lossCount, 2);
 
       // Releasing the lease stops the frames immediately.
       processor.receive({ tag: "miso.meters.v1", requestId: 2, enabled: false });
