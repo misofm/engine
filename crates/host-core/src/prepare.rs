@@ -281,9 +281,9 @@ pub struct HostConsoleRequest {
     /// disabled one, none — and `observation_retained_bytes` is zero. Nonzero requires a control
     /// channel, because a subscription rides the effect's existing command queue.
     ///
-    /// The published window is the *meter* window: it is derived from `meter_period_frames`, not
-    /// configured separately, so a gain-reduction value and the peak beside it in one
-    /// `miso.meter.v1` frame describe the same span of samples.
+    /// The default observation period is derived from `meter_period_frames`; individual taps
+    /// can use other periods. Latest gain-reduction observations can be independently aged,
+    /// so a browser frame's peak interval does not establish the gain-reduction interval.
     pub observation_taps: u32,
     /// The track whose gain reduction is reported as the master's, or `None` (issue #143 D6).
     ///

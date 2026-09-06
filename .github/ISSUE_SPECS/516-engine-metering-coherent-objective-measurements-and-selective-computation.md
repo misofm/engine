@@ -210,6 +210,17 @@ restricted environment (`PermissionError: Operation not permitted`). That enviro
 a browser qualification claim. A rebuilt artifact static gate must verify removal of the named trap
 owner before the next review verdict.
 
+## Final correctness-slice qualification
+
+Frozen candidate `7c7001e7885fcbbe176c7bec82cb36b579db527b` produces Wasm SHA-256 `bc73d5205cab8e8e95dde2360198f1614d6ca2e3939afaf0df59d1b50c4def20`. The ordinary builder, unchanged static/object/callback checks, metadata checks and boot memory-budget gate all passed. No callgraph allowlist, realtime gate, PCM expectation or resource-budget gate was weakened. Earlier candidates that failed static qualification remain recorded above; their browser passes do not substitute for this candidate's results.
+
+Final evidence: `cargo test -p host-web --lib` passed 72 tests with 1 ignored; focused `meter_` passed 12; source realtime policy passed 42 marked regions in 12 files; formatting and diff checks passed. The hermetic worklet wrapper, including malformed-metadata and mutation checks, passed with localhost permission needed by its existing self-test. The existing Playwright suite against this exact artifact passed Chromium 151.0.7922.34, Firefox 153.0 and WebKit 26.5, including mutation proofs. `qualification/results.json` and `BROWSER_DEPLOYMENT_MATRIX.md` contain the actual candidate lineage; matrix consistency passed.
+
+This checkpoint delivers the first coherent measurement-publication slice, not selective metric computation or a measured performance gain. No descriptive timing benchmark was executed during this correctness correction; the planned efficiency slices must establish their own frozen baseline and work-avoidance evidence before quoting cost improvements. The unrelated builtin tangent-oracle failure reported earlier was not attributed by an independent baseline comparison and is not claimed fixed.
+
+
+Final independent Astra medium verdict: PASS for the correctness slice after Sol medium corrections. Final delivery also corrects a stale three-line host-core documentation claim about shared GR/peak spans; no executable source changed after the qualified candidate. Performance follow-ups remain open work.
+
 ## Planning review
 
-Drafted by a dedicated Astra agent at low reasoning effort and adversarially reviewed by a separate Astra agent at medium reasoning effort, as requested by the owner. Verdict: PASS after bounded revisions clarifying selective computation as a required planned outcome, concrete work-avoidance gates, and metadata compatibility without a broad ABI redesign. This verdict covers the plan only; implementation, performance results and release qualification remain unperformed.
+The original plan was drafted by Astra low and adversarially reviewed by a separate Astra medium agent. That planning review passed after revisions; the implementation verdict and actual qualification results are recorded separately above.
