@@ -1,0 +1,10 @@
+{
+  "original_path": "/tmp/475-sol2-guest-simd128-disassembly.txt",
+  "original_bytes": 24557232,
+  "original_sha256": "51b1ec21813ee7ac350289a0ee124885a50959335f88251687ff3e23f72daa3c",
+  "extraction": "Root after-run extraction of complete decoded function blocks: header matches ^[0-9a-f]+ func[, contains compressor and fill_taps, ends immediately before next function header. No new decoding/build performed.",
+  "selected_headers": [
+    "07b0d1 func[172] <_RINvNtCse2Vtagz2PEy_10compressor6kernel9fill_tapsNtNtCsk6DwtE1d11l_4wide6f32x4_5f32x4ECs1wPktp6usmF_16wasm_gate_corpus>:",
+    "095e68 func[207] <_RINvNtCse2Vtagz2PEy_10compressor6kernel9fill_tapsNtNtCsk6DwtE1d11l_4wide6f32x8_5f32x8ECs1wPktp6usmF_16wasm_gate_corpus>:"
+  ]
+}

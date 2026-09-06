@@ -1,0 +1,31 @@
+COMMAND=wasm-objdump -x/-d each exact production relocatable object, then sha256sum/wc/rg source mapping
+CWD=/home/bl/misofm/engine-475-plan
+SOURCE_REV=81ed8e72f9c5401ad3e91da05fe611adbdef189c
+DECODER=/usr/bin/wasm-objdump 1.0.34
+SCALAR_OBJECT=/tmp/475-sol2-wasm-scalar/wasm32-unknown-unknown/release/deps/compressor-56213dca927f49f7.o
+SIMD128_OBJECT=/tmp/475-sol2-wasm-simd128/wasm32-unknown-unknown/release/deps/compressor-3390df13682dd9cb.o
+0000004: error: bad magic value
+SCALAR_METADATA_EXIT=1
+0000004: error: bad magic value
+SCALAR_DISASSEMBLY_EXIT=1
+0000004: error: bad magic value
+SIMD128_METADATA_EXIT=1
+0000004: error: bad magic value
+SIMD128_DISASSEMBLY_EXIT=1
+8e9d8683a1f813c5f2625ab6896c60db81019e86668101c26e85f978e5f9910d  /tmp/475-sol2-wasm-scalar/wasm32-unknown-unknown/release/deps/compressor-56213dca927f49f7.o
+be1d4921b469e3d5518044aef967cfecd898082ac3c523d9d113a2b4ae9164de  /tmp/475-sol2-wasm-simd128/wasm32-unknown-unknown/release/deps/compressor-3390df13682dd9cb.o
+01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b  /tmp/475-sol2-wasm-scalar-metadata.txt
+01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b  /tmp/475-sol2-wasm-simd128-metadata.txt
+01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b  /tmp/475-sol2-wasm-scalar-disassembly.txt
+01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b  /tmp/475-sol2-wasm-simd128-disassembly.txt
+   768 168280 /tmp/475-sol2-wasm-scalar/wasm32-unknown-unknown/release/deps/compressor-56213dca927f49f7.o
+  1556 390372 /tmp/475-sol2-wasm-simd128/wasm32-unknown-unknown/release/deps/compressor-3390df13682dd9cb.o
+     1      1 /tmp/475-sol2-wasm-scalar-metadata.txt
+     1      1 /tmp/475-sol2-wasm-simd128-metadata.txt
+     1      1 /tmp/475-sol2-wasm-scalar-disassembly.txt
+     1      1 /tmp/475-sol2-wasm-simd128-disassembly.txt
+  2328 558656 total
+SOURCE_MAPPING_SYMBOLS_BEGIN
+SOURCE_MAPPING_RG_EXIT=1
+SOURCE_MAPPING_SYMBOLS_END
+

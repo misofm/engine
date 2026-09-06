@@ -120,4 +120,34 @@ Evidence accepted within its actual scope: all25 manifested payload hashes/sizes
 
 These four groups are the original contract's finite omissions. Preserve accepted production and evidence while completing them in one coherent Sol2 pass, with root checkpoints; then one consolidated adversarial verdict. Product/source PASS remains prerequisite to immutable delivery qualification and actual-head PR/required CI.
 
+## Sol attempt 2 submission
+
+Exact reviewed source is `60004323b0b8fb71b80864927c2c9e186dc6be49`; production is unchanged from
+the accepted attempt-1 implementation. The four finite proof corrections are complete in
+`artifacts/issue475-sol-attempt2/`:
+
+- the real classifier drives a W1/W4/W8 old-access oracle over uniform and applicable ragged
+  no-wrap/wrap boundaries, empty/singleton/complete/tail prefixes and outside-prefix sentinels;
+  private branch-local witnesses prove actual uniform/ragged fill and gather dispatch, and one
+  retained live uniform-to-ragged dispatch mutant preserves old-access bits before the mechanism
+  witness rejects it;
+- public scalar/native-bank fixtures compare complete PCM bits and serialized state for D=0,
+  D=len, D<len, wrap, both-ragged and independently classified channels, plus bidirectional
+  restore, full-default reset and mono-reopen channel-copy transitions on the next actual render;
+- the existing audited allocator proves positive allocation and free liveness outside an isolated
+  interval, then zero allocation/free/reallocation over 32 repeated actual renders of uniform
+  staged, uniform D=0 per-frame and ragged bank paths; the initially contaminated parallel run is
+  retained rather than hidden;
+- locked debug and release compressor suites, strict Clippy, fmt/diff and realtime/lane/workspace
+  policy pass. Fresh linked scalar-Wasm and simd128 production modules compile and decode
+  successfully, with identities/populations/source mapping and the uniform two-copy plus
+  conditional ragged shape recorded. Direct `--emit=obj` produced LLVM bitcode and its bad-magic
+  decode is retained with no inspection credit.
+
+Public test width claims are bounded to W1 scalar and native W8 on this host. The private oracle
+instantiates W1/W4/W8; decoded Wasm production modules carry named W4/W8 instantiations and the
+unchanged accepted G5 records cover scalar-Wasm/simd128 execution. No timing, new corpus/framework,
+immutable delivery qualification, full-workspace qualification or PR/CI claim is made. Pending one
+consolidated Astra adversarial verdict.
+
 Root authorizes the named attempt within this frozen scope. Pause at each compiling, focused-test-green tranche for root checkpoint before layering more implementation.
