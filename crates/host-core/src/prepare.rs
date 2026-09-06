@@ -7,9 +7,10 @@
 use core::num::{NonZeroU32, NonZeroUsize};
 use std::collections::BTreeSet;
 
-use builtins::{MeterConfig, MeterHandle, MeterTap};
+use builtins::{MeterConfig, MeterHandle, MeterMetricSet, MeterTap};
 use builtins_compiler::{
-    BuiltinCompileCaps, MeterConsumer, MeterRequest, TrackControlProducer, TrackControlRequest,
+    BuiltinCompileCaps, MeterConsumer, MeterRequest, SelectedMeterRequest, TrackControlProducer,
+    TrackControlRequest, prepare_selected_session_builtins_between_render_calls,
     prepare_session_builtins_between_render_calls, prepare_session_builtins_with_console,
     session_structural_symmetry,
 };
@@ -306,6 +307,17 @@ impl Default for HostConsoleRequest {
     }
 }
 
+/// One caller-selected engine meter observer. Ordering is retained in returned meter handles.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HostMeterRequest {
+    /// Stable compiled track identity.
+    pub track_id: Box<str>,
+    /// Chain boundary observed by this meter.
+    pub tap: MeterTap,
+    /// Numeric groups computed and marked present in each snapshot.
+    pub metrics: MeterMetricSet,
+}
+
 /// The control-side halves of an attached live console, in canonical track order.
 ///
 /// `tracks` is the compiled session's normalized track order and is the addressing authority: a
@@ -486,7 +498,7 @@ pub fn prepare_host_runtime_with_console(
     caps: &HostPrepareCaps,
     console: &HostConsoleRequest,
 ) -> Result<(PreparedHost, HostConsoleHandles), PrepareDiagnostics> {
-    prepare_host_runtime_with_console_policy(compiled, caps, console, false)
+    prepare_host_runtime_with_console_policy(compiled, caps, console, None, false)
 }
 
 /// Prepare a host whose caller retains every returned producer endpoint and admits records only
@@ -500,7 +512,18 @@ pub fn prepare_host_runtime_between_render_calls(
     caps: &HostPrepareCaps,
     console: &HostConsoleRequest,
 ) -> Result<(PreparedHost, HostConsoleHandles), PrepareDiagnostics> {
-    prepare_host_runtime_with_console_policy(compiled, caps, console, true)
+    prepare_host_runtime_with_console_policy(compiled, caps, console, None, true)
+}
+
+/// Prepare a serialized host with exactly the caller-selected meter observers.
+#[allow(clippy::too_many_lines)]
+pub fn prepare_host_runtime_with_selected_meters_between_render_calls(
+    compiled: &CompiledSession,
+    caps: &HostPrepareCaps,
+    console: &HostConsoleRequest,
+    meters: &[HostMeterRequest],
+) -> Result<(PreparedHost, HostConsoleHandles), PrepareDiagnostics> {
+    prepare_host_runtime_with_console_policy(compiled, caps, console, Some(meters), true)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -508,6 +531,7 @@ fn prepare_host_runtime_with_console_policy(
     compiled: &CompiledSession,
     caps: &HostPrepareCaps,
     console: &HostConsoleRequest,
+    selected_meters: Option<&[HostMeterRequest]>,
     between_render_calls: bool,
 ) -> Result<(PreparedHost, HostConsoleHandles), PrepareDiagnostics> {
     let model = compiled.normalized_model();
@@ -672,12 +696,27 @@ fn prepare_host_runtime_with_console_policy(
             })
             .collect(),
     };
-    let meter_requests: Vec<MeterRequest> = match console.meter_period_frames {
+    if selected_meters.is_some_and(|meters| !meters.is_empty())
+        && console.meter_period_frames.is_none()
+    {
+        return Err(shape("host.meter.period"));
+    }
+    let meter_tracks: Vec<(Box<str>, MeterTap, MeterMetricSet)> = match selected_meters {
+        Some(meters) => meters
+            .iter()
+            .map(|meter| (meter.track_id.clone(), meter.tap, meter.metrics))
+            .collect(),
+        None => console_tracks
+            .iter()
+            .map(|track| (track.clone(), console.meter_tap, MeterMetricSet::ALL))
+            .collect(),
+    };
+    let meter_requests: Vec<SelectedMeterRequest> = match console.meter_period_frames {
         None => Vec::new(),
-        Some(period) => console_tracks
+        Some(period) => meter_tracks
             .iter()
             .enumerate()
-            .map(|(index, track)| {
+            .map(|(index, (track, tap, metrics))| {
                 // Handles are `index + 1` so they are nonzero and stable in canonical track
                 // order; nothing outside this function invents a meter handle.
                 let handle = u64::try_from(index)
@@ -685,17 +724,20 @@ fn prepare_host_runtime_with_console_policy(
                     .and_then(|value| value.checked_add(1))
                     .and_then(core::num::NonZeroU64::new)
                     .ok_or_else(|| platform("host.count"))?;
-                Ok(MeterRequest {
-                    handle: MeterHandle(handle),
-                    track_id: track.to_string(),
-                    tap: console.meter_tap,
-                    config: MeterConfig {
-                        period_frames: period,
-                        peak_hold_frames: 0,
-                        peak_decay_db_per_second: 0.0,
-                        queue_capacity: console.meter_queue_depth,
-                        reset_generation: 0,
+                Ok(SelectedMeterRequest {
+                    request: MeterRequest {
+                        handle: MeterHandle(handle),
+                        track_id: track.to_string(),
+                        tap: *tap,
+                        config: MeterConfig {
+                            period_frames: period,
+                            peak_hold_frames: 0,
+                            peak_decay_db_per_second: 0.0,
+                            queue_capacity: console.meter_queue_depth,
+                            reset_generation: 0,
+                        },
                     },
+                    metrics: *metrics,
                 })
             })
             .collect::<Result<Vec<_>, PrepareDiagnostics>>()?,
@@ -711,17 +753,30 @@ fn prepare_host_runtime_with_console_policy(
         maximum_peak_hold_frames: u32::MAX,
         maximum_smoothing_samples: u32::MAX,
     };
-    let builtins = if between_render_calls {
-        prepare_session_builtins_between_render_calls(
+    let builtins = if selected_meters.is_some() {
+        prepare_selected_session_builtins_between_render_calls(
             compiled,
             &meter_requests,
+            &control_requests,
+            builtin_caps,
+        )
+    } else if between_render_calls {
+        prepare_session_builtins_between_render_calls(
+            compiled,
+            &meter_requests
+                .iter()
+                .map(|item| item.request.clone())
+                .collect::<Vec<_>>(),
             &control_requests,
             builtin_caps,
         )
     } else {
         prepare_session_builtins_with_console(
             compiled,
-            &meter_requests,
+            &meter_requests
+                .iter()
+                .map(|item| item.request.clone())
+                .collect::<Vec<_>>(),
             &control_requests,
             builtin_caps,
         )
@@ -852,7 +907,21 @@ fn prepare_host_runtime_with_console_policy(
         return Err(graph_failure("host.meter.order"));
     }
     track_controls.sort_by_key(|value| canonical_index[&*value.track_id]);
-    meters.sort_by_key(|value| canonical_index[&*value.track_id]);
+    if selected_meters.is_some() {
+        if meters
+            .iter()
+            .zip(&meter_requests)
+            .any(|(actual, requested)| {
+                actual.handle != requested.request.handle
+                    || actual.track_id.as_ref() != requested.request.track_id
+                    || actual.tap != requested.request.tap
+            })
+        {
+            return Err(graph_failure("host.meter.order"));
+        }
+    } else {
+        meters.sort_by_key(|value| canonical_index[&*value.track_id]);
+    }
 
     // Issue #143 D6: a designated master must name a track this session actually has, or the
     // frame would report a master reading nobody can address.

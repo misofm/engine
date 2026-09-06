@@ -13,8 +13,10 @@ contract and all existing full-statistics callers.
 
 ## Smallest useful slice
 
-Add an explicit engine-owned metric selection to `builtins_compiler::MeterRequest` and its sealed
-preparation identity. The selection has independent stable bits for sample peak, energy/RMS,
+Add an explicit engine-owned metric selection through additive
+`builtins_compiler::SelectedMeterRequest` and its sealed preparation identity. Existing
+`MeterRequest` literals remain the compatibility form and select all metrics. The selection has
+independent stable bits for sample peak, energy/RMS,
 interval counts (clipped and sanitized), and held peak. Reject an empty or unknown selection during
 preparation. Keep window identity, generation, frame count, discontinuity count and dropped-snapshot
 count mandatory transport metadata rather than optional metrics.
@@ -67,3 +69,40 @@ claim or retry.
 
 No SDK UI controls, app presets, loudness, true peak, transport protocol, runtime reconfiguration,
 poll cadence work, benchmark framework, or effect-observation redesign.
+
+## Implementation decision and evidence
+
+- `MeterMetricSet` assigns stable bits `1/2/4/8` to sample peak, energy/RMS, interval counts and
+  held peak. `MeterSnapshot::present_metrics` is fixed-size mandatory presence metadata;
+  generation, sequence, span and cumulative delivery counters remain mandatory. Empty and unknown
+  sets are rejected before ring preparation.
+- The compatibility entry still constructs the original full fused accumulator. Partial sets are
+  selected once per segment and call independent straight-line peak, energy, count and held passes;
+  there is no metric branch inside a selected pass. Test-only counters are incremented at the
+  `f64` square, threshold count, held-state and square-root operation sites. The peak-only test
+  observes zero for all four counters.
+- The all-15-subsets test uses nonzero hold/decay, irregular observation splits, nonfinite and
+  subnormal input, and threshold values. Every selected field matches the full fused reference by
+  exact bits/counts. The existing full path remains the numeric oracle and is not reassociated.
+- `SelectedMeterRequest` keeps existing request literals source-compatible and adds metrics to the
+  preparation seal. The selected host entry accepts caller-ordered track/tap/metric records with
+  common console period/depth, validates the returned bindings in that order, and binds no omitted
+  track. The browser creates the same generic records for every canonical track at post-matrix with
+  sample peak only; meter-off creates an empty record set.
+- Fixed-size snapshot growth flows through the existing `size_of::<MeterSnapshot>()` SPSC payload,
+  host pending-slot and largest-allocation calculations. Existing inclusive/one-below resource
+  tests and browser retained-resource tests remain the boundary evidence rather than a parallel
+  estimator.
+- Focused evidence on 2026-09-06: selective builtins tests pass; the compiler's 10,000-case sealed
+  mutation transcript passes with its deliberate metric-identity digest update; selected host
+  ordering/validation passes; all 72 non-ignored `host-web` unit tests pass (one release benchmark
+  remains ignored by design). Existing browser tests cover all four launch rates, a nine-track SIMD
+  tail, meter loss/generation/empty/master behavior and PCM identity.
+- The existing stage tangent ULP test fails identically on untouched baseline `c34383fc` and issue
+  parent `b49f0910` at 44.1 kHz / 9,520 Hz. Independent logs are
+  `/private/tmp/engine-519-baseline-tan.log` and `/private/tmp/engine-519-parent-tan.log`; #519 does
+  not alter DSP math or weaken that gate.
+- Timing is not yet claimed. The existing frozen benchmark hashes full-stat snapshots and has no
+  selection mode; it was left unchanged rather than mutating its workload. The operation-site
+  gate supplies the required work-removal evidence while a descriptive peak/full timing invocation
+  remains pending owner review under the ceremony boundary.

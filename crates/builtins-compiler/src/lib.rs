@@ -19,8 +19,8 @@ use builtins::{
     BuiltinChain, BuiltinFaderBank, BuiltinInputBank, BuiltinLaneSelector, BuiltinMatrixBank,
     BuiltinParameterError, BuiltinParameters, BuiltinTail, ChannelParameters, DualMonoBlock,
     FaderMuteBuiltins, FaderMuteRampBuiltins, InputBuiltins, Matrix2x2, MatrixBuiltins,
-    MeterAccumulator, MeterConfig, MeterConfigError, MeterHandle, MeterSnapshot, MeterTap,
-    PreparedMeter, pan_matrix, validate_builtin_filter_cutoff,
+    MeterAccumulator, MeterConfig, MeterConfigError, MeterHandle, MeterMetricSet, MeterSnapshot,
+    MeterTap, PreparedMeter, pan_matrix, validate_builtin_filter_cutoff,
 };
 use effect_contract::{
     BankWidth, ChannelSymmetryWitness, LiveConsoleRecord, SeamSide, SymmetryEvent,
@@ -61,6 +61,16 @@ pub struct MeterRequest {
     pub track_id: String,
     pub tap: MeterTap,
     pub config: MeterConfig,
+}
+
+/// A meter request with an explicit computation/presence contract.
+///
+/// Existing [`MeterRequest`] entry points retain their full-statistics behavior; callers use this
+/// wrapper only when they intentionally select a subset.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SelectedMeterRequest {
+    pub request: MeterRequest,
+    pub metrics: MeterMetricSet,
 }
 
 /// One live-console control record for a track's smoothed 2x2 matrix/pan stage (issue #137 D1).
@@ -1270,6 +1280,7 @@ struct MeterRequestSeal {
     peak_hold_frames: u32,
     peak_decay_bits: u32,
     queue_capacity: usize,
+    metrics: MeterMetricSet,
 }
 
 type ObserverSeal = (Box<str>, TrackStage, u64);
@@ -2413,6 +2424,7 @@ fn forged_request_seal() -> MeterRequestSeal {
         peak_hold_frames: 0,
         peak_decay_bits: 0,
         queue_capacity: 1,
+        metrics: MeterMetricSet::ALL,
     }
 }
 
@@ -2781,6 +2793,7 @@ pub fn prepare_session_builtins_with_console(
     prepare_session_builtins_with_console_and_policy(
         session,
         requests,
+        None,
         controls,
         caps,
         BuiltinControlDelivery::Concurrent,
@@ -2801,6 +2814,26 @@ pub fn prepare_session_builtins_between_render_calls(
     prepare_session_builtins_with_console_and_policy(
         session,
         requests,
+        None,
+        controls,
+        caps,
+        BuiltinControlDelivery::BetweenRenderCalls,
+    )
+}
+
+/// Prepare explicitly selected meter observers for hosts that serialize control with rendering.
+pub fn prepare_selected_session_builtins_between_render_calls(
+    session: &CompiledSession,
+    requests: &[SelectedMeterRequest],
+    controls: &[TrackControlRequest],
+    caps: BuiltinCompileCaps,
+) -> Result<PreparedBuiltinsSession, BuiltinDiagnosticSet> {
+    let plain: Vec<MeterRequest> = requests.iter().map(|item| item.request.clone()).collect();
+    let metrics: Vec<MeterMetricSet> = requests.iter().map(|item| item.metrics).collect();
+    prepare_session_builtins_with_console_and_policy(
+        session,
+        &plain,
+        Some(&metrics),
         controls,
         caps,
         BuiltinControlDelivery::BetweenRenderCalls,
@@ -2810,6 +2843,7 @@ pub fn prepare_session_builtins_between_render_calls(
 fn prepare_session_builtins_with_console_and_policy(
     session: &CompiledSession,
     requests: &[MeterRequest],
+    selected_metrics: Option<&[MeterMetricSet]>,
     controls: &[TrackControlRequest],
     caps: BuiltinCompileCaps,
     control_delivery: BuiltinControlDelivery,
@@ -2840,7 +2874,7 @@ fn prepare_session_builtins_with_console_and_policy(
     }
     let mut request_keys = BTreeSet::new();
     let mut request_handles = BTreeSet::new();
-    for request in requests {
+    for (index, request) in requests.iter().enumerate() {
         if !request_handles.insert(request.handle) {
             diagnostics.push(diag("builtin.meter.duplicate_handle", &meter_path(request)));
         }
@@ -2857,6 +2891,10 @@ fn prepare_session_builtins_with_console_and_policy(
             || !(0.0..=120.0).contains(&request.config.peak_decay_db_per_second)
         {
             diagnostics.push(diag("builtin.meter.config", &meter_path(request)));
+        }
+        let metrics = selected_metrics.map_or(MeterMetricSet::ALL, |selections| selections[index]);
+        if !metrics.is_valid() {
+            diagnostics.push(diag("builtin.meter.metrics", &meter_path(request)));
         }
     }
     let known_tracks: BTreeSet<_> = session
@@ -3005,14 +3043,19 @@ fn prepare_session_builtins_with_console_and_policy(
     let mut observers = Vec::with_capacity(requests.len());
     let mut meter_consumers = Vec::with_capacity(requests.len());
     let mut request_seals = Vec::with_capacity(requests.len());
-    for request in requests {
+    for (index, request) in requests.iter().enumerate() {
         let handle = request.handle;
+        let metrics = selected_metrics.map_or(MeterMetricSet::ALL, |selections| selections[index]);
         let PreparedMeter {
             accumulator,
             consumer,
-        } = MeterAccumulator::prepare(handle, request.config, session.sample_rate().0).map_err(
-            |error| BuiltinDiagnosticSet::sorted(vec![meter_diagnostic(request, error)]),
-        )?;
+        } = MeterAccumulator::prepare_selected(
+            handle,
+            request.config,
+            session.sample_rate().0,
+            metrics,
+        )
+        .map_err(|error| BuiltinDiagnosticSet::sorted(vec![meter_diagnostic(request, error)]))?;
         let graph_id = StableGraphId::parse(&request.track_id).expect("known accepted session ID");
         observers.push(GraphNodeObserverBinding::new(
             stage_node(graph_id, stage(request.tap)),
@@ -3034,6 +3077,7 @@ fn prepare_session_builtins_with_console_and_policy(
             peak_hold_frames: request.config.peak_hold_frames,
             peak_decay_bits: request.config.peak_decay_db_per_second.to_bits(),
             queue_capacity: request.config.queue_capacity.get(),
+            metrics,
         });
     }
     tails.sort_unstable_by(|left, right| left.0.cmp(&right.0));
@@ -4031,6 +4075,7 @@ fn meter_diagnostic(request: &MeterRequest, error: MeterConfigError) -> BuiltinD
     diag(
         match error {
             MeterConfigError::DecayDomain => "builtin.meter.config",
+            MeterConfigError::Metrics => "builtin.meter.metrics",
             MeterConfigError::Queue => "builtin.resource.arithmetic_overflow",
         },
         &meter_path(request),
@@ -9084,12 +9129,13 @@ mod tests {
         // 2_459 on this fixture with one depth-8 channel. `maximum_single_allocation_bytes` moves
         // 344 -> 656 with `StripPreparation`, which is the largest single allocation at one track.
         //
-        // Nothing else in the transcript moved: `expected` is declared per frozen class rather
+        // Issue #519 adds the meter metric selection to the sealed request identity. Nothing else
+        // in the transcript moved: `expected` is declared per frozen class rather
         // than read off the report, and the boundary classes stay exact because they are stated
         // relative to the report rather than as literals -- case 32 admits at the payload and case
         // 33 rejects one byte below it, whatever the payload is.
         assert_eq!(
-            transcript_hash, 4_741_579_849_300_275_697,
+            transcript_hash, 7_866_884_810_278_916_745,
             "updated only through a deliberate frozen-case change"
         );
     }

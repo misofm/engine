@@ -4,11 +4,14 @@
 //! plus the two properties that only exist because the code is now shared: every resource cap is
 //! checked against the row the facade itself reports, and every source-control rejection is typed.
 
+use builtins::{MeterMetricSet, MeterTap};
 use host_core::{
-    HostPrepareCaps, HostPrepareReport, HostShapePolicy, LAUNCH_SAMPLE_RATES_HZ, PrepareRejection,
-    SOURCE_STALL_TOLERANCE_MS, SourceControlError, SourceSubmission, compile_host_session,
-    control_table_bytes, default_source_ring_frames, diagnostic_lines, prepare_host_runtime,
-    prepare_host_session, source_id_arena_bytes,
+    HostConsoleRequest, HostMeterRequest, HostPrepareCaps, HostPrepareReport, HostShapePolicy,
+    LAUNCH_SAMPLE_RATES_HZ, PrepareRejection, SOURCE_STALL_TOLERANCE_MS, SourceControlError,
+    SourceSubmission, compile_host_session, control_table_bytes, default_source_ring_frames,
+    diagnostic_lines, prepare_host_runtime,
+    prepare_host_runtime_with_selected_meters_between_render_calls, prepare_host_session,
+    source_id_arena_bytes,
 };
 use source::{HostChunkError, SourceSeekError};
 
@@ -44,6 +47,54 @@ fn report() -> HostPrepareReport {
         })
         .1
         .report
+}
+
+#[test]
+fn selected_meter_observers_preserve_caller_order_taps_and_metric_identity() {
+    let compiled = compile_host_session(SESSION, &caps()).expect("compiled fixture");
+    let console = HostConsoleRequest {
+        meter_period_frames: core::num::NonZeroU32::new(128),
+        meter_queue_depth: core::num::NonZeroUsize::new(2).unwrap(),
+        ..HostConsoleRequest::default()
+    };
+    let meters = [
+        HostMeterRequest {
+            track_id: "eq7".into(),
+            tap: MeterTap::Input,
+            metrics: MeterMetricSet::COUNTS,
+        },
+        HostMeterRequest {
+            track_id: "eq1".into(),
+            tap: MeterTap::PostFader,
+            metrics: MeterMetricSet::SAMPLE_PEAK,
+        },
+    ];
+    let mut limits = caps();
+    limits.maximum_meter_streams = 2;
+    limits.maximum_meter_items = u64::MAX;
+    limits.maximum_meter_bytes = u64::MAX;
+    let (_host, handles) = prepare_host_runtime_with_selected_meters_between_render_calls(
+        &compiled, &limits, &console, &meters,
+    )
+    .expect("selected observers");
+    assert_eq!(handles.meters.len(), 2);
+    assert_eq!(&*handles.meters[0].track_id, "eq7");
+    assert_eq!(handles.meters[0].tap, MeterTap::Input);
+    assert_eq!(&*handles.meters[1].track_id, "eq1");
+    assert_eq!(handles.meters[1].tap, MeterTap::PostFader);
+
+    let invalid = [HostMeterRequest {
+        track_id: "eq1".into(),
+        tap: MeterTap::PostFader,
+        metrics: MeterMetricSet::from_bits_retain(0x80),
+    }];
+    let Err(error) = prepare_host_runtime_with_selected_meters_between_render_calls(
+        &compiled, &limits, &console, &invalid,
+    ) else {
+        panic!("unknown metric bit must be rejected");
+    };
+    assert_eq!(error.kind(), PrepareRejection::Builtin);
+    assert!(String::from_utf8_lossy(error.as_bytes()).contains("builtin.meter.metrics"));
 }
 
 /// The ported C ABI ownership test: one preparation yields the session's shape, a live plan, and a

@@ -18,7 +18,9 @@ use core::mem::{MaybeUninit, size_of};
 use core::num::{NonZeroU32, NonZeroUsize};
 use std::collections::BTreeMap;
 
-use builtins::{BuiltinLaneSelector, Matrix2x2, MeterSnapshot, MeterTap, pan_matrix};
+use builtins::{
+    BuiltinLaneSelector, Matrix2x2, MeterMetricSet, MeterSnapshot, MeterTap, pan_matrix,
+};
 use builtins_compiler::{
     MeterConsumer, TrackControlProducer, TrackControlRecord, TrackFaderRecord, TrackInputRecord,
 };
@@ -28,10 +30,10 @@ use effect_contract::{
 use engine::realtime::{PlanarBufferMut, RenderIo, RenderTime};
 use host_core::{
     CompiledSession, ConsoleSoloState, EffectControlProducer, EffectObservationHandle, EffectRack,
-    HostConsoleRequest, HostPrepareCaps, HostShapePolicy, PrepareDiagnostics, PrepareRejection,
-    PreparedHost, SourceControlError, SourceSubmission, compile_host_model, compiled_session_shape,
-    control_table_bytes, parse_host_session, prepare_host_runtime_between_render_calls,
-    source_id_arena_bytes,
+    HostConsoleRequest, HostMeterRequest, HostPrepareCaps, HostShapePolicy, PrepareDiagnostics,
+    PrepareRejection, PreparedHost, SourceControlError, SourceSubmission, compile_host_model,
+    compiled_session_shape, control_table_bytes, parse_host_session,
+    prepare_host_runtime_with_selected_meters_between_render_calls, source_id_arena_bytes,
 };
 use session::CompileCaps;
 
@@ -2999,8 +3001,24 @@ fn compile_ready(
 ) -> Result<(ReadyOwnership, WebResourceReport), BootFailure> {
     let console = console_request(options, session.quantum().0)
         .ok_or_else(|| fixed_diagnostic("web.console.config"))?;
-    let (host, handles) = prepare_host_runtime_between_render_calls(&session, caps, &console)
-        .map_err(BootFailure::preparation)?;
+    let meters: Vec<HostMeterRequest> = if console.meter_period_frames.is_some() {
+        session
+            .normalized_model()
+            .tracks
+            .iter()
+            .map(|track| HostMeterRequest {
+                track_id: track.id.as_str().into(),
+                tap: MeterTap::PostMatrix,
+                metrics: MeterMetricSet::SAMPLE_PEAK,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let (host, handles) = prepare_host_runtime_with_selected_meters_between_render_calls(
+        &session, caps, &console, &meters,
+    )
+    .map_err(BootFailure::preparation)?;
     let engine = host.report;
 
     let control_table = control_table_bytes(engine.source_count as usize)
