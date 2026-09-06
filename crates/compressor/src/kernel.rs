@@ -1573,9 +1573,19 @@ mod tests {
         }
     }
 
-    fn render4(bank: &mut dyn PreparedNativeEffectBank, seed: u32, mono: bool) -> BankResult {
+    fn render4(
+        bank: &mut dyn PreparedNativeEffectBank,
+        block_origin: u64,
+        mono: bool,
+    ) -> BankResult {
         let mut left: Vec<f32> = (0..512)
-            .map(|word| f32::from_bits(0x3e00_0000 + ((word as u32 * 7919 + seed) & 0x000f_ffff)))
+            .map(|word| {
+                let frame = block_origin + (word / 4) as u64;
+                let lane = (word % 4) as u64;
+                f32::from_bits(
+                    0x3e00_0000 + (((frame * 7919 + lane * 104729) as u32) & 0x007f_ffff),
+                )
+            })
             .collect();
         left[4] = -0.0;
         left[11] = -0.0;
@@ -1588,7 +1598,7 @@ mod tests {
             None,
             128,
             BankWidth::Four,
-            seed as u64 * 128,
+            block_origin,
             &[],
             &offsets,
             128,
@@ -1606,6 +1616,67 @@ mod tests {
         )
     }
 
+    fn prime8(bank: &mut dyn PreparedNativeEffectBank) {
+        for block in 0..8 {
+            let _ = render4(bank, block * 128, false);
+        }
+    }
+
+    fn assert_populated_history(bank: &PreparedCompressorBank<Simd4>) {
+        for channel in [&bank.instance.left, &bank.instance.right] {
+            assert!(
+                channel
+                    .main
+                    .iter()
+                    .any(|word| word.is_finite() && *word != 0.0)
+            );
+            assert!(
+                channel
+                    .detector
+                    .iter()
+                    .any(|word| word.is_finite() && *word != 0.0)
+            );
+            for lane in 1..4 {
+                let write = channel.cursor as usize;
+                let actual = old_detector_word(channel, write, lane);
+                let alternate_delay = if channel.delay[lane] == 960 {
+                    960 - 120 * lane as u32
+                } else {
+                    960
+                };
+                let row = if write >= alternate_delay as usize {
+                    write - alternate_delay as usize
+                } else {
+                    write + channel.ring_length as usize - alternate_delay as usize
+                };
+                let alternate = channel.detector[row * Simd4::WIDTH + lane];
+                assert!(actual.is_finite() && actual != 0.0);
+                assert!(alternate.is_finite() && alternate != 0.0);
+                assert_ne!(
+                    actual, alternate,
+                    "same lane delay choices selected identical history"
+                );
+            }
+        }
+    }
+
+    fn assert_meaningful_pcm(result: &BankResult, context: &str) {
+        let meaningful = |word: &u32| {
+            let value = f32::from_bits(*word);
+            value.is_finite() && value != 0.0
+        };
+        assert!(
+            result.0.iter().any(meaningful),
+            "{context}: silent left PCM"
+        );
+        assert!(
+            result.1.iter().any(meaningful),
+            "{context}: silent right PCM"
+        );
+        assert!(result.0.windows(2).any(|pair| pair[0] != pair[1]));
+        assert!(result.1.windows(2).any(|pair| pair[0] != pair[1]));
+    }
+
     fn population(ragged: bool) -> [[InitialParameterValue; 16]; 4] {
         core::array::from_fn(|lane| {
             let lookahead = if ragged { 2.5 * lane as f32 } else { 0.0 };
@@ -1620,49 +1691,72 @@ mod tests {
 
         // Restore changes both actual W4 directions. The uninterrupted owner holding the saved
         // state is the oracle for the destination owner's first render after restore.
-        for (source_values, destination_values, seed) in
-            [(&ragged, &uniform, 0x101), (&uniform, &ragged, 0x102)]
-        {
+        for (source_values, destination_values) in [(&ragged, &uniform), (&uniform, &ragged)] {
             let mut source = bank4(source_values);
-            let _ = render4(&mut source, seed - 1, false);
+            prime8(&mut source);
+            assert_populated_history(&source);
             let saved = payloads(&source);
             let mut transitioned = bank4(destination_values);
             restore_payloads(&mut transitioned, &saved);
+            let expected = render4(&mut source, 1024, false);
+            assert_meaningful_pcm(&expected, "restored W4 expected first block");
             assert_eq!(
-                render4(&mut transitioned, seed, false),
-                render4(&mut source, seed, false),
+                render4(&mut transitioned, 1024, false),
+                expected,
                 "first W4 render after restored delay-population transition"
             );
         }
 
         // Full reset reinstalls the ragged preparation defaults over restored uniform state.
-        let uniform_state = payloads(&bank4(&uniform));
+        let mut uniform_owner = bank4(&uniform);
+        prime8(&mut uniform_owner);
+        let uniform_state = payloads(&uniform_owner);
         let mut reset = bank4(&ragged);
         restore_payloads(&mut reset, &uniform_state);
         reset.reset(ResetKind::FullToDefaults);
-        assert_eq!(
-            render4(&mut reset, 0x103, false),
-            render4(&mut bank4(&ragged), 0x103, false),
-            "first W4 render after full reset"
-        );
+        let mut fresh = bank4(&ragged);
+        let first_reset = render4(&mut reset, 0, false);
+        let first_fresh = render4(&mut fresh, 0, false);
+        assert_eq!(first_reset, first_fresh, "first W4 render after full reset");
+        assert!(first_reset.0.iter().all(|word| *word == 0));
+        assert!(first_reset.1.iter().all(|word| *word == 0));
+        for block in 1..=8 {
+            let reset_result = render4(&mut reset, block * 128, false);
+            let fresh_result = render4(&mut fresh, block * 128, false);
+            if block == 8 {
+                assert_meaningful_pcm(&fresh_result, "full-reset expected final block");
+                assert_populated_history(&fresh);
+            }
+            assert_eq!(
+                reset_result, fresh_result,
+                "full-reset continuation block {block}"
+            );
+        }
 
         // Reopen copies a uniform left population over a ragged right population. Construct that
         // state only through the real per-track restore method, then use the actual mono/copy/dual
         // trait calls and compare complete next PCM plus every serialized lane state.
         let asymmetric: [[InitialParameterValue; 16]; 4] =
             core::array::from_fn(|lane| initial_values(0.0, 2.5 * lane as f32));
-        let asymmetric_state = payloads(&bank4(&asymmetric));
+        let mut asymmetric_owner = bank4(&asymmetric);
+        let mut oracle = bank4(&uniform);
+        prime8(&mut asymmetric_owner);
+        prime8(&mut oracle);
+        assert_populated_history(&asymmetric_owner);
+        let asymmetric_state = payloads(&asymmetric_owner);
         let mut reopened = bank4(&uniform);
         restore_payloads(&mut reopened, &asymmetric_state);
-        let mut oracle = bank4(&uniform);
-        let mono = render4(&mut reopened, 0x104, true);
-        let dual = render4(&mut oracle, 0x104, false);
+        let mono = render4(&mut reopened, 1024, true);
+        let dual = render4(&mut oracle, 1024, false);
+        assert_meaningful_pcm(&dual, "mono expected first block");
         assert_eq!(mono.0, dual.0, "W4 mono left PCM before reopen");
         reopened.desymmetrize_channels();
         assert_eq!(payloads(&reopened), payloads(&oracle), "W4 copied state");
+        let expected_reopen = render4(&mut oracle, 1152, false);
+        assert_meaningful_pcm(&expected_reopen, "reopen expected first dual block");
         assert_eq!(
-            render4(&mut reopened, 0x105, false),
-            render4(&mut oracle, 0x105, false),
+            render4(&mut reopened, 1152, false),
+            expected_reopen,
             "first W4 dual render after mono reopen"
         );
 
