@@ -1,0 +1,2 @@
+command=cargo clippy --locked -p builtins --all-targets -- -D warnings
+status=pass

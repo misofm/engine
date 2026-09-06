@@ -1,0 +1,13 @@
+diff --git a/crates/builtins/src/lib.rs b/crates/builtins/src/lib.rs
+index 0baa4bd1..dff7e00d 100644
+--- a/crates/builtins/src/lib.rs
++++ b/crates/builtins/src/lib.rs
+@@ -1108,7 +1108,7 @@ impl<L: Lane> InputStage<L> {
+                 self.ramping = true;
+             }
+         }
+-        self.refresh_channel_symmetry_lane(lane);
++        self.refresh_channel_symmetry();
+     }
+ 
+     /// Retargets one lane's trim in decibels, keeping its polarity.

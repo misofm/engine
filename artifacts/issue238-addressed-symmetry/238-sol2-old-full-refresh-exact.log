@@ -1,0 +1,35 @@
+warning: method `refresh_channel_symmetry_lane` is never used
+    --> crates/builtins/src/lib.rs:1053:8
+     |
+ 984 | impl<L: Lane> InputStage<L> {
+     | --------------------------- method in this implementation
+...
+1053 |     fn refresh_channel_symmetry_lane(&mut self, lane: usize) {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `builtins` (lib test) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running unittests src/lib.rs (target/debug/deps/builtins-b28151c824699de5)
+
+running 1 test
+test tests::lane_symmetry_retarget_updates_only_the_addressed_predicate ... FAILED
+
+failures:
+
+---- tests::lane_symmetry_retarget_updates_only_the_addressed_predicate stdout ----
+
+thread 'tests::lane_symmetry_retarget_updates_only_the_addressed_predicate' (11553) panicked at crates/builtins/src/lib.rs:4196:13:
+assertion `left == right` failed: one retarget evaluates only the addressed lane
+  left: 8
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::lane_symmetry_retarget_updates_only_the_addressed_predicate
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p builtins --lib`
