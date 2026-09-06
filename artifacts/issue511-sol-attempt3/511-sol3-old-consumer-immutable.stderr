@@ -1,0 +1,7 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running unittests src/lib.rs (target/debug/deps/builtins_compiler-b1097326876d7c0c)
+     Running tests/allocation_tracker.rs (target/debug/deps/allocation_tracker-0b3098f71078d54f)
+     Running tests/builtin_automation_targets.rs (target/debug/deps/builtin_automation_targets-1d7c122e12a6c68d)
+     Running tests/input_drain.rs (target/debug/deps/input_drain-6176280e9bf75cd2)
+     Running tests/scale.rs (target/debug/deps/scale-2c99503fa9bd1e25)
+     Running tests/track_delay_domain.rs (target/debug/deps/track_delay_domain-1ae7762f5742a495)

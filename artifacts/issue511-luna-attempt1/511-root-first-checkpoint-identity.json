@@ -1,0 +1,12 @@
+{
+  "note": "Root current source supplement after focused runs; not retrospective execution provenance",
+  "precommit_head": "8f71317f9cd3c9dbeebc5d936244cf4b35068ab3",
+  "sha256": {
+    "crates/graph/src/lib.rs": "3c185f39da34b3285a0606aa382d2b6043bfbc860afd961d6f6799c54e4954ab",
+    "crates/graph/src/runtime.rs": "7777e4655a65cb66605fb437c05f8f5024a63d2974f6a7c38a9274e93a5691ea",
+    "crates/graph-compiler/src/compile.rs": "f275c74542004bb66c12f7fb9355778a5f04a33ba7ce0bc28455d8e90dae8e82",
+    "crates/graph-compiler/src/lib.rs": "0a690ad3b142db7700442d8aa583fb11c711fe257d5eb4eac35e9d139104f1dd",
+    "crates/builtins-compiler/src/lib.rs": "a4eae26c4708caf9f354737b96646d273ad63746cb484a22363872c106719a2e",
+    "crates/builtins-compiler/tests/allocation_tracker.rs": "4e6d9c90698dfa05727a3d0ac735d3686d9d3d6c69739c621fc50520f6436353"
+  }
+}

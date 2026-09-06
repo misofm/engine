@@ -21,7 +21,7 @@ effect-contract.workspace = true
 sha2.workspace = true
 
 [features]
-test-support = []
+test-support = ["graph/test-support"]
 
 [lints]
 workspace = true

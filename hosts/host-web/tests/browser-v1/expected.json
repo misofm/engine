@@ -67,9 +67,9 @@
         "effectScalarStateBytes": "0",
         "effectScalarScratchBytes": "0",
         "builtinRetainedBytes": "985",
-        "graphSessionPlusPlanBytes": "29294",
-        "graphIncrementalPlanBytes": "29294",
-        "graphMetadataBytes": "3455",
+        "graphSessionPlusPlanBytes": "29498",
+        "graphIncrementalPlanBytes": "29498",
+        "graphMetadataBytes": "3659",
         "graphDelayBytes": "0",
         "largestNamedAllocationBytes": "16384",
         "observationRetainedBytes": "0"

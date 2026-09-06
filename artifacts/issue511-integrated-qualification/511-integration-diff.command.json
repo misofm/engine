@@ -1,0 +1,25 @@
+{
+  "argv": [
+    "git",
+    "diff",
+    "--check"
+  ],
+  "cwd": "/home/bl/misofm/engine-slot-reservation",
+  "head": "0f30be0a76f89994059e9ef435b8ddb6edcc152f",
+  "status": " M .github/ISSUE_SPECS/511-runtime-bank-slot-reservation.md\n M crates/capi/tests/resource_lifecycle.rs\n M hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256\n",
+  "env": {
+    "PATH": "/home/bl/.cargo/bin:/home/bl/.local/bin:/home/bl/.codex/packages/standalone/releases/0.153.2-x86_64-unknown-linux-musl/codex-path:/home/bl/.codex/tmp/arg0/codex-arg0CWD760:/home/bl/.local/bin:/home/bl/.opencode/bin:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.opencode/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin",
+    "RUSTFLAGS": null,
+    "CARGO_TARGET_DIR": null
+  },
+  "source": {
+    "crates/capi/tests/resource_lifecycle.rs": {
+      "sha256": "6400bab3b6430d62ee5ccd232e402221dfa6297c15db87195929b0b6b3bce18a",
+      "git_blob": "9a5eba5eb7c80efee9c9e85d1086e9664d823a82"
+    },
+    "hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256": {
+      "sha256": "f063a1ea015c2be5b68d3d624926c66022c50aa12d8657e9eef16b45ea8c4c95",
+      "git_blob": "e1558c515422a0268a61ed2411fd3185104554e5"
+    }
+  }
+}

@@ -1,0 +1,4 @@
+   Compiling graph v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/graph)
+   Compiling builtins-compiler v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/builtins-compiler)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.38s
+     Running tests/allocation_tracker.rs (target/debug/deps/allocation_tracker-0b3098f71078d54f)

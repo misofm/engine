@@ -1,0 +1,5 @@
+argv=[cargo test --locked --release -p builtins-compiler --features test-support,graph/test-support --test allocation_tracker]
+cwd=/home/bl/misofm/engine-slot-reservation
+env=PATH=/home/bl/.cargo/bin:$PATH
+exit=0
+exit=0

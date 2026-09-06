@@ -79,3 +79,9 @@ Independently verified all 66 manifest payloads for unique paths, actual SHA256 
 The precommit metadata honestly identifies HEAD793a6b18 plus the changed test blobs, rather than pretending execution occurred at the later evidence head. All four recorded blobs independently match the source commit and current HEAD bytes; all four supplemental SHA256 values also match. README accurately distinguishes root's later source-identity supplement from original execution provenance and describes the inherited PATH suffix limitation. No full corpus, fixture/repin, browser, listening or timed execution is claimed or required for this slice.
 
 Source contract and finite gates are complete. Root may carry the separately accepted509 post-main documentation, then request actual-PR exact-head review and wait for required CI success. Test-only delegation does not justify a runtime artifact rebuild or pin change. CP20 remains partial beyond these four adapters. No builds/tests/timing or repository/GitHub mutations were performed by this review; only this /tmp report was written.
+
+## Delivered
+
+PR #513 merged as a6a5903082692bca58810f44a40b9717d49254a0 after Astra exact-head PASS at f76da15d6e08dbd8fc0bee5775fc7dff75276b37 and required qualification run34019289183 SUCCESS. GitHub #512 is closed; the four DSP test adapters share the existing encoding authority. This is the48th merged audit PR. CP20 remains partial and no runtime timing claim is made. Post-main qualification pending.
+
+Post-main qualification run34019645825 completed SUCCESS at a6a5903082692bca58810f44a40b9717d49254a0. Delivered source and combined main are qualified.

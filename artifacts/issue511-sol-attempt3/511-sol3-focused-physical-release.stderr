@@ -1,0 +1,3 @@
+   Compiling builtins-compiler v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/builtins-compiler)
+    Finished `release` profile [optimized + debuginfo] target(s) in 14.63s
+     Running tests/allocation_tracker.rs (target/release/deps/allocation_tracker-07c444198b779b67)

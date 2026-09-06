@@ -1,0 +1,5 @@
+   Compiling graph v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/graph)
+   Compiling builtins-compiler v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/builtins-compiler)
+   Compiling graph-compiler v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/graph-compiler)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.89s
+     Running unittests src/lib.rs (target/debug/deps/graph_compiler-12dea0a01d43bb77)
