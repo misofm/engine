@@ -640,7 +640,13 @@ fn actual_runtime_bank_slot_owners_fit_retained_largest_and_conversion_reservati
                     usize::try_from(observed.align_bytes).expect("native layout alignment"),
                 )
                 .expect("observed private destination layout");
-                let unit = (layout.size() / slot_count, layout.align());
+                let unit = (
+                    layout
+                        .size()
+                        .checked_div(slot_count)
+                        .expect("nonzero private destination slot count"),
+                    layout.align(),
+                );
                 if let Some(expected) = prepared_unit_layout {
                     assert_eq!(unit, expected, "one private target layout across S/W cases");
                 } else {
@@ -668,7 +674,11 @@ fn actual_runtime_bank_slot_owners_fit_retained_largest_and_conversion_reservati
             let f = core::mem::size_of::<Box<dyn rack::BankStage>>() as u64;
             let b = core::mem::size_of::<rack::BankSlot>() as u64;
             let w = mask_layout.size() as u64;
-            let p = prepared_layout.map_or(0, |layout| layout.size() as u64 / n);
+            let p = prepared_layout.map_or(0, |layout| {
+                (layout.size() as u64)
+                    .checked_div(n)
+                    .expect("private layout exists only for a nonzero slot count")
+            });
             assert_eq!(core::mem::size_of::<bool>(), 1);
             assert!(p <= b, "actual private slot layout fits public slot layout");
             let retained = n * p + w;

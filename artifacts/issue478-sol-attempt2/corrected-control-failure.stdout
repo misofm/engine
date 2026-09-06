@@ -1,0 +1,20 @@
+
+running 1 test
+test tests::prepared_slot_dispatch_uses_constant_activity_checks ... FAILED
+
+failures:
+
+---- tests::prepared_slot_dispatch_uses_constant_activity_checks stdout ----
+
+thread 'tests::prepared_slot_dispatch_uses_constant_activity_checks' (117997) panicked at crates/rack/src/lib.rs:3534:9:
+assertion `left == right` failed: prepared queries do not scan lane masks
+  left: 8
+ right: 0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::prepared_slot_dispatch_uses_constant_activity_checks
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 29 filtered out; finished in 0.00s
+

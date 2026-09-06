@@ -1,0 +1,3 @@
+   Compiling builtins-compiler v0.1.0 (/home/bl/misofm/engine-rt8-plan/crates/builtins-compiler)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.49s
+     Running tests/allocation_tracker.rs (target/debug/deps/allocation_tracker-0b3098f71078d54f)

@@ -1,0 +1,59 @@
+
+running 30 tests
+test tests::a_partial_agreement_slot_declines_the_collapse ... ok
+test tests::a_collapsed_seam_keeps_the_matrixs_operation_order ... ok
+test tests::an_armed_seam_side_only_chain_renders_the_dual_bits ... ok
+test tests::an_unarmed_chain_never_collapses ... ok
+test tests::an_ineligible_armed_chain_renders_the_dual_bits ... ok
+test tests::arming_a_fold_refuses_an_unrenderable_mask ... ok
+test tests::arming_an_auxiliary_destination_refuses_an_unrenderable_mask ... ok
+test tests::chain_new_rejects_mask_shape_and_lane_implication ... ok
+test tests::all_active_folded_masks_use_one_cohort_with_physical_lane_ids ... ok
+test tests::direct_plane_views_encode_width_and_reject_short_capacity ... ok
+test tests::default_and_override_fold_identical_complete_strided_cohorts ... ok
+test tests::direct_scatter_never_calls_the_per_lane_fallback ... ok
+test tests::disengaging_copies_the_prefixs_state_once ... ok
+test tests::fold_cohort_constructor_rejects_every_invalid_shape_without_writes ... ok
+test tests::inactive_lanes_are_never_gathered_or_scattered ... ok
+test tests::identity_everywhere_slot_is_not_executed ... ok
+test tests::gather_scatter_round_trip_is_bit_exact ... ok
+test tests::inadequate_claimed_capacity_takes_complete_staged_fallback ... ok
+test tests::only_a_seam_suffix_over_a_collapsible_prefix_can_collapse ... ok
+test tests::prepared_slot_activity_preserves_dispatch_trace_and_errors ... ok
+test tests::scratch_allocates_exactly_two_planes ... ok
+test tests::prepared_slot_activity_preserves_shape_bits_and_ownership ... ok
+test tests::prepared_slot_dispatch_uses_constant_activity_checks ... ok
+test tests::stage_sees_frame_major_layout ... ok
+test tests::wrong_width_provider_is_dropped_before_complete_staged_fallback ... ok
+test tests::the_auxiliary_destination_seam_is_absent_by_default_and_accumulates_when_armed ... ok
+test tests::full_bank_gather_scatter_round_trip_is_bit_exact ... ok
+test tests::the_fold_epilogue_is_absent_by_default_and_replaces_the_lane_write_when_armed ... ok
+test tests::tiled_transpose_matches_the_scalar_path_bit_for_bit ... ok
+test tests::chain_run_is_partition_invariant ... ok
+
+test result: ok. 30 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+
+running 10 tests
+test a_command_applies_at_the_block_boundary_and_persists ... ok
+test a_stage_with_no_controlled_lane_allocates_no_shunt ... ok
+test a_command_timeline_is_partition_invariant ... ok
+test a_mid_session_bypass_emits_the_delayed_dry_signal_captured_while_wet ... ok
+test an_unobserved_bank_slot_reports_no_observation_state_at_all ... ok
+test a_zero_latency_bypass_emits_the_current_block_dry ... ok
+test stage_construction_rejects_a_lane_count_or_quantum_mismatch ... ok
+test bypass_is_per_lane_and_preserves_the_declared_latency ... ok
+test each_lane_receives_only_its_own_commands ... ok
+test un_bypassing_returns_the_current_wet_signal ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 4 tests
+test a_bypass_episode_re_engages_because_it_never_moved_the_channels_apart ... ok
+test re_equal_words_after_a_desymmetrised_episode_do_not_re_engage ... ok
+test the_forced_off_window_re_engages_and_renders_the_never_collapsed_bits ... ok
+test an_earned_agreement_proof_re_engages_a_chain_the_witness_could_not ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

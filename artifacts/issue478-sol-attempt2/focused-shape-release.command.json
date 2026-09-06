@@ -1,0 +1,36 @@
+{
+  "argv": [
+    "cargo",
+    "test",
+    "--locked",
+    "--release",
+    "-p",
+    "rack",
+    "--lib",
+    "tests::prepared_slot_activity_preserves_shape_bits_and_ownership",
+    "--",
+    "--exact"
+  ],
+  "cwd": "/home/bl/misofm/engine-rt8-plan",
+  "head": "d5a952116bf7bde487a9c17a324b848fa5c7d14f",
+  "status": "",
+  "env": {
+    "PATH": "/home/bl/.cargo/bin:/home/bl/.cargo/bin:/home/bl/.local/bin:/home/bl/.codex/packages/standalone/releases/0.153.4-x86_64-unknown-linux-musl/codex-path:/home/bl/.codex1/tmp/arg0/codex-arg0Q8EgMu:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin",
+    "RUSTFLAGS": null,
+    "CARGO_TARGET_DIR": null
+  },
+  "source": {
+    "crates/rack/src/lib.rs": {
+      "sha256": "0f666adb7696a401b2abe098faa1d78c9d7768297406a2e8de90987ad772e10e",
+      "git_blob": "804a7976a28122ae28cd864968dd7951ccd54549"
+    },
+    "crates/builtins-compiler/tests/allocation_tracker.rs": {
+      "sha256": "376dd72e0c576298b505841319837b5eed259d2435359bbe908411ea4d50cde1",
+      "git_blob": "cb948654ad313dc19d8c3edb7a99c5a3268e3fe6"
+    },
+    "crates/graph/src/runtime.rs": {
+      "sha256": "dbba576b96297ab453aee5c317fafa3048ccff01f3c1b4fb5bb89fe3f0119605",
+      "git_blob": "e2bb02e44addfc7aa5cca37cb200551cd2474b03"
+    }
+  }
+}

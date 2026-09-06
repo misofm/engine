@@ -1,0 +1,31 @@
+diff --git a/crates/rack/src/lib.rs b/crates/rack/src/lib.rs
+index 804a7976..b43cfb5e 100644
+--- a/crates/rack/src/lib.rs
++++ b/crates/rack/src/lib.rs
+@@ -1854,7 +1854,7 @@ impl BankChain {
+             // The same identity-slot guard `process` has always taken. A slot that is an identity
+             // on every lane renders nothing, and draining its queues would consume records for a
+             // block it does not run.
+-            if slot.has_active_lanes() {
++            if slot.has_active_lanes_scan(self.lanes) {
+                 slot.stage.begin_block(first_sample)?;
+             }
+         }
+@@ -1973,7 +1973,7 @@ impl BankChain {
+             self.slots.len()
+         };
+         for slot in &mut self.slots[..prefix] {
+-            if slot.has_active_lanes() {
++            if slot.has_active_lanes_scan(self.lanes) {
+                 let block = BankBlock {
+                     left: &mut self.scratch.left[..len],
+                     right: &mut self.scratch.right[..len],
+@@ -1998,7 +1998,7 @@ impl BankChain {
+             let AoSoaScratch { left, right, .. } = &mut self.scratch;
+             right[..len].copy_from_slice(&left[..len]);
+             for slot in &mut self.slots[self.collapse_prefix..] {
+-                if slot.has_active_lanes() {
++                if slot.has_active_lanes_scan(self.lanes) {
+                     slot.stage.process(BankBlock {
+                         left: &mut self.scratch.left[..len],
+                         right: &mut self.scratch.right[..len],
