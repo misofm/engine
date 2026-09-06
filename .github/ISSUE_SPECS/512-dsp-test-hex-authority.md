@@ -65,3 +65,17 @@ Root verified clean pushed8779bcb6 and matching GitHub512 body/title; fresh Luna
 ## Luna attempt 1 source and evidence
 
 Source ab4627ae replaces the four private encoder bodies with delegation while preserving signatures and call sites. Eight exact debug/release literal tests each pass one test; four strict same-target Clippy and four static commands pass. Raw records and source identities are preserved in artifacts/issue512-dsp-test-hex-authority. Consolidated Astra review is pending.
+
+## Astra Luna attempt 1 PASS
+
+# #512 Luna attempt 1 — PASS
+
+Reviewed clean f6d9eb6439541537df9e8b1608f99b3afb6a99fe in engine-dsp-test-hex, source ab4627ae5bad60e836d8afa5cf85a3c08c3b5937, against the complete numbered spec and scope approval. No blocking findings.
+
+The cumulative source delta is exactly the four authorized integration-test files. Each old encoder body now calls fully qualified bench_support::digest::hex. Parametric EQ retains its owned [u8;32] signature and borrows inside the adapter; the other three retain &[u8;32]. Existing callers, finalized/raw hash streams, little-endian PCM word handling, pins, corpus assertions and separate repin emitters are unchanged. No production/Cargo/feature/shared-helper changes. The four new tests invoke the actual adapter with the two exact frozen literal inputs and compare against independent literal strings. This is finalized-byte encoding, not rehashing or recursion.
+
+Independently verified all 66 manifest payloads for unique paths, actual SHA256 and sizes, and exact tracked coverage of 66 payloads plus manifest =67 files. The 64 raw command records comprise16 metadata/stdout/stderr/status sets; every numeric status is0. Eight exact debug/release test commands each report1 passed/0 failed/0 ignored, not zero-match success. Four Clippy commands target precisely their integration tests with `-- -D warnings` and have normal compiler completion output. Fmt/diff and bench/realtime-leak policies also have independent status0; both policies report success.
+
+The precommit metadata honestly identifies HEAD793a6b18 plus the changed test blobs, rather than pretending execution occurred at the later evidence head. All four recorded blobs independently match the source commit and current HEAD bytes; all four supplemental SHA256 values also match. README accurately distinguishes root's later source-identity supplement from original execution provenance and describes the inherited PATH suffix limitation. No full corpus, fixture/repin, browser, listening or timed execution is claimed or required for this slice.
+
+Source contract and finite gates are complete. Root may carry the separately accepted509 post-main documentation, then request actual-PR exact-head review and wait for required CI success. Test-only delegation does not justify a runtime artifact rebuild or pin change. CP20 remains partial beyond these four adapters. No builds/tests/timing or repository/GitHub mutations were performed by this review; only this /tmp report was written.
