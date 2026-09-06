@@ -1,0 +1,14 @@
+COMMAND: PATH=/home/bl/.cargo/bin:$PATH cargo test --locked -p compressor --lib -- kernel::tests::uniform_and_ragged_access_match_old_transcription
+CWD: /home/bl/misofm/engine-475-plan
+SOURCE_REV: 55e1c1e8a0ef9401e5bdbd89011b0c67837c9595
+SOURCE_KERNEL_SHA256: 2253ff67518ceea52996accce1162f11cf29ec692724d549edcd69da910c66b9  crates/compressor/src/kernel.rs
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-475-plan/crates/compressor)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.14s
+     Running unittests src/lib.rs (target/debug/deps/compressor-80bd63f116d0655c)
+
+running 1 test
+test kernel::tests::uniform_and_ragged_access_match_old_transcription ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+STATUS=0

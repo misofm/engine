@@ -85,3 +85,15 @@ First checkpoint sequence remains mandatory: capture current-base actual native 
 #463 no longer occupies runtime WIP; #492 is independent host maintenance. No additional scope ruling is needed before this assignment. Root retains all checkpoint/synchronization ownership, and later source acceptance plus proportional immutable delivery/actual-head PR/required CI remain separate gates.
 
 Root adopts PASS and assigns fresh Luna1. Preserve actual native production baseline before edits, then pause at the first compact compiling/focused-green specialization/old-access-oracle tranche for exact-path root checkpoint and push. Continue remaining proof only after checkpoint. No timing; root owns Git/GitHub and one consolidated adversarial verdict per attempt.
+
+## Luna attempt 1 consolidated submission
+
+# Luna attempt 1 submitted evidence
+
+Product source243ca03e; test checkpoints55e1c1e8 and89ae24ef. Native baseline preceded edits atcf5c6148. Full compiler outputs remain in original task targets; baseline/candidate process-callers.ll and source-mapping.txt are root’s later deterministic extracts, not new compiler runs. Root selected complete LLVM define blocks containing compressor and process_block/fill_taps/process_bank_inner; frames_loop and idle_frames_staged survive as inline debug mappings rather than separate define bodies. Original IR/ASM hashes are retained. This corrects any interpretation that debug metadata itself proves a separately emitted function. No isolated instruction-count or timing claim.
+
+Luna stopped with dedicated public next-render transition/state/PCM, real allocation/free liveness/repeated zero-count proof, and successfully decoded production Wasm object evidence unfulfilled. The claimed mutation failed a positive classification assertion; its authentic log is retained but no standalone actual mutation diff was saved. Final adversarial assessment must determine whether it proves actual optimized dispatch.
+
+Wasm logs later completed: root found actual STATUS=0 and all three backend records each139cases/349comparisons/zero mismatches in both retained logs; both JSONL outputs are retained. Root process inspection found no matching live475/run-wasm-gates process. Luna’s earlier unresolved-status report is superseded by these terminal records; no status was invented and no additional G5 run was started. The two calls contended on fixed script build directories, with source89ae24ef unchanged throughout.
+
+Existing68 release tests/strictClippy/initial access fixture are useful but do not substitute for unfulfilled frozen gates. This is one incomplete Luna attempt, pending one consolidated Astra verdict; no completed product or measured speed gain is claimed.
