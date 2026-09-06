@@ -4209,6 +4209,7 @@ mod tests {
     /// master is `+0.0` (bits 0) where `-0.0` (bits 0x8000_0000) is required.
     #[test]
     fn the_first_contributor_stores_so_a_negative_zero_master_keeps_its_sign() {
+        let _canonical = lane::fpenv::CanonicalFpEnv::enter();
         const FRAMES: usize = 9;
         let mut lease = stereo_lease(FRAMES, 1);
         // The arena starts at `+0.0`, which is exactly the value a zero-fill would leave.

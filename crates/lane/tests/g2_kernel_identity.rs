@@ -17,7 +17,7 @@ mod support;
 use lane::kernels::{
     SvfState, mix2x2_block, ordered_accumulate_block, sum_into_block, sum2_block, svf_step,
 };
-use lane::{Lane, Simd4, Simd8, flush};
+use lane::{CanonicalFpEnv, Lane, Simd4, Simd8, flush};
 use support::{
     ALL_KERNELS, ALL_SIGNALS, Kernel, MAX_WIDTH, Signal, deinterleave, interleave, run_kernel,
 };
@@ -194,13 +194,6 @@ fn lane2_value(index: usize) -> f32 {
 }
 
 fn check_lane2_bounds_and_identity<L: Lane>() {
-    let hostile: Vec<f32> = (0..10).map(lane2_value).collect();
-    assert!(hostile.iter().any(|value| value.to_bits() == 0));
-    assert!(hostile.iter().any(|value| value.to_bits() == 0x8000_0000));
-    assert!(hostile.iter().any(|value| value.is_subnormal()));
-    assert!(hostile.iter().any(|value| value.is_normal()));
-    assert!(hostile.iter().any(|value| value.is_infinite()));
-
     let mut lengths = vec![
         0,
         1,
@@ -316,10 +309,9 @@ fn check_lane2_bounds_and_identity<L: Lane>() {
     );
 
     let long = vec![1.0; len + 1];
-    let mut sum_long_panicked = false;
     for first_long in [true, false] {
         let mut out = vec![poison; len];
-        sum_long_panicked |= caught(std::panic::AssertUnwindSafe(|| {
+        let panicked = caught(std::panic::AssertUnwindSafe(|| {
             let (a, b) = if first_long {
                 (&long[..], &full[..])
             } else {
@@ -327,6 +319,13 @@ fn check_lane2_bounds_and_identity<L: Lane>() {
             };
             sum2_block::<L>(&mut out, a, b);
         }));
+        assert_eq!(
+            panicked,
+            cfg!(debug_assertions),
+            "sum2 width {} must independently apply its debug equality rule to longer {}",
+            L::WIDTH,
+            if first_long { "a" } else { "b" }
+        );
         if !cfg!(debug_assertions) {
             assert!(out.iter().all(|value| value.to_bits() == 3.0_f32.to_bits()));
         }
@@ -338,14 +337,24 @@ fn check_lane2_bounds_and_identity<L: Lane>() {
     let mut left = vec![1.0_f32; len];
     let mut right = vec![2.0_f32; len + 1];
     let suffix = right[len].to_bits();
+    let mut expected_left = left.clone();
+    let mut expected_right = right[..len].to_vec();
+    for (left, right) in expected_left.iter_mut().zip(&mut expected_right) {
+        let old_left = *left;
+        let old_right = *right;
+        *left = <f32 as Lane>::fma(-0.1, old_right, <f32 as Lane>::mul(0.9, old_left));
+        *right = <f32 as Lane>::fma(0.8, old_right, <f32 as Lane>::mul(0.2, old_left));
+    }
     let matrix_long_panicked = caught(std::panic::AssertUnwindSafe(|| {
         mix2x2_block::<L>(&mut left, &mut right, [0.9, -0.1, 0.2, 0.8])
     }));
     if cfg!(debug_assertions) {
-        assert!(sum_long_panicked && acc_long_panicked && matrix_long_panicked);
+        assert!(acc_long_panicked && matrix_long_panicked);
     } else {
-        assert!(!sum_long_panicked && !acc_long_panicked && !matrix_long_panicked);
+        assert!(!acc_long_panicked && !matrix_long_panicked);
         assert!(acc.iter().all(|value| value.to_bits() == 2.0_f32.to_bits()));
+        assert_eq!(block_bits(&left), block_bits(&expected_left));
+        assert_eq!(block_bits(&right[..len]), block_bits(&expected_right));
         assert_eq!(
             right[len].to_bits(),
             suffix,
@@ -378,14 +387,140 @@ fn check_lane2_bounds_and_identity<L: Lane>() {
         "zero controlling spans preserve debug equality and release prefix behavior"
     );
 
-    let nan = f32::from_bits(0x7fc0_4630);
-    let mut nan_out = [0.0];
-    sum2_block::<L>(&mut nan_out, &[nan], &[1.0]);
-    assert!(nan_out[0].is_nan(), "NaN case must be exercised separately");
+    check_lane2_hostile_categories::<L>();
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Lane2Family {
+    FiniteOrder,
+    NegativeZero,
+    Normal,
+    Subnormal,
+    Infinity,
+    Nan,
+}
+
+fn lane2_family_inputs(family: Lane2Family, len: usize) -> (Vec<f32>, Vec<f32>, [f32; 4]) {
+    let (a, b, coefficients) = match family {
+        Lane2Family::FiniteOrder => (
+            [16_777_216.0, 1.0, -16_777_216.0, -0.0],
+            [1.0, -16_777_216.0, 16_777_216.0, 0.0],
+            [0.9, -0.1, 0.2, 0.8],
+        ),
+        Lane2Family::NegativeZero => ([-0.0; 4], [-0.0; 4], [1.0, 0.0, 0.0, 1.0]),
+        Lane2Family::Normal => (
+            [f32::MIN_POSITIVE; 4],
+            [f32::MIN_POSITIVE; 4],
+            [1.0, 0.0, 0.0, 1.0],
+        ),
+        Lane2Family::Subnormal => (
+            [f32::from_bits(1); 4],
+            [f32::from_bits(1); 4],
+            [1.0, 0.0, 0.0, 1.0],
+        ),
+        Lane2Family::Infinity => ([f32::INFINITY; 4], [1.0; 4], [1.0, 1.0, 1.0, 1.0]),
+        Lane2Family::Nan => (
+            [f32::from_bits(0x7fc0_4630); 4],
+            [1.0; 4],
+            [1.0, 1.0, 1.0, 1.0],
+        ),
+    };
+    (
+        (0..len).map(|index| a[index % a.len()]).collect(),
+        (0..len).map(|index| b[index % b.len()]).collect(),
+        coefficients,
+    )
+}
+
+fn assert_lane2_expected_category(family: Lane2Family, expected: &[f32], kernel: &str) {
+    let valid = match family {
+        Lane2Family::FiniteOrder => expected.iter().all(|value| value.is_finite()),
+        Lane2Family::NegativeZero => expected
+            .iter()
+            .all(|value| value.to_bits() == (-0.0_f32).to_bits()),
+        Lane2Family::Normal => expected.iter().all(|value| value.is_normal()),
+        Lane2Family::Subnormal => expected.iter().all(|value| value.is_subnormal()),
+        Lane2Family::Infinity => expected.iter().all(|value| value.is_infinite()),
+        Lane2Family::Nan => expected.iter().all(|value| value.is_nan()),
+    };
+    assert!(valid, "{kernel} scalar oracle did not produce {family:?}");
+}
+
+fn assert_lane2_words_or_nan(family: Lane2Family, actual: &[f32], expected: &[f32], kernel: &str) {
+    if matches!(family, Lane2Family::Nan) {
+        assert!(
+            actual.iter().all(|value| value.is_nan()),
+            "{kernel} NaN category"
+        );
+    } else {
+        assert_eq!(
+            block_bits(actual),
+            block_bits(expected),
+            "{kernel} {family:?}"
+        );
+    }
+}
+
+fn check_lane2_hostile_categories<L: Lane>() {
+    let len = 2 * L::WIDTH + 1;
+    for family in [
+        Lane2Family::FiniteOrder,
+        Lane2Family::NegativeZero,
+        Lane2Family::Normal,
+        Lane2Family::Subnormal,
+        Lane2Family::Infinity,
+        Lane2Family::Nan,
+    ] {
+        let (a, b, coefficients) = lane2_family_inputs(family, len);
+
+        let expected_sum: Vec<f32> = a
+            .iter()
+            .zip(&b)
+            .map(|(a, b)| <f32 as Lane>::add(*a, *b))
+            .collect();
+        assert_lane2_expected_category(family, &expected_sum, "sum2");
+        let mut sum = vec![0.0; len];
+        sum2_block::<L>(&mut sum, &a, &b);
+        assert_lane2_words_or_nan(family, &sum, &expected_sum, "sum2");
+
+        let mut expected_acc = a.clone();
+        for (acc, x) in expected_acc.iter_mut().zip(&b) {
+            *acc = <f32 as Lane>::add(*acc, *x);
+        }
+        assert_lane2_expected_category(family, &expected_acc, "sum_into");
+        let mut acc = a.clone();
+        sum_into_block::<L>(&mut acc, &b);
+        assert_lane2_words_or_nan(family, &acc, &expected_acc, "sum_into");
+
+        let mut expected_left = a.clone();
+        let mut expected_right = b.clone();
+        for (left, right) in expected_left.iter_mut().zip(&mut expected_right) {
+            let old_left = *left;
+            let old_right = *right;
+            *left = <f32 as Lane>::fma(
+                coefficients[1],
+                old_right,
+                <f32 as Lane>::mul(coefficients[0], old_left),
+            );
+            *right = <f32 as Lane>::fma(
+                coefficients[3],
+                old_right,
+                <f32 as Lane>::mul(coefficients[2], old_left),
+            );
+        }
+        assert_lane2_expected_category(family, &expected_left, "matrix left");
+        assert_lane2_expected_category(family, &expected_right, "matrix right");
+        let mut left = a;
+        let mut right = b;
+        mix2x2_block::<L>(&mut left, &mut right, coefficients);
+        assert_lane2_words_or_nan(family, &left, &expected_left, "matrix left");
+        assert_lane2_words_or_nan(family, &right, &expected_right, "matrix right");
+    }
 }
 
 #[test]
 fn lane2_kernels_preserve_original_words_and_reject_short_inputs_before_writing() {
+    let _canonical = CanonicalFpEnv::enter();
     check_lane2_bounds_and_identity::<f32>();
     check_lane2_bounds_and_identity::<Simd4>();
     check_lane2_bounds_and_identity::<Simd8>();
