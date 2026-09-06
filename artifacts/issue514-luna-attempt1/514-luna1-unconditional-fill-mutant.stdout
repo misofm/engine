@@ -1,0 +1,20 @@
+
+running 1 test
+test tests::idle_render_skips_admission_counter_clear_without_losing_queue_credit ... FAILED
+
+failures:
+
+---- tests::idle_render_skips_admission_counter_clear_without_losing_queue_credit stdout ----
+
+thread 'tests::idle_render_skips_admission_counter_clear_without_losing_queue_credit' (684311) panicked at hosts/host-web/src/tests.rs:1725:5:
+assertion `left == right` failed
+  left: (3, 9)
+ right: (0, 0)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::idle_render_skips_admission_counter_clear_without_losing_queue_credit
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 63 filtered out; finished in 0.00s
+

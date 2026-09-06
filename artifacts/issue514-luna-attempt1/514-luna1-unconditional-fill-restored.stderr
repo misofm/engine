@@ -1,0 +1,26 @@
+   Compiling host-web v0.1.0 (/home/bl/misofm/engine-idle-admission-clear/hosts/host-web)
+error: expected `{`, found keyword `if`
+   --> hosts/host-web/src/lib.rs:708:17
+    |
+708 |                 if ready.has_in_flight_commands {
+    |                 ^^ expected `{`
+    |
+note: the `if` expression is missing a block after this condition
+   --> hosts/host-web/src/lib.rs:703:20
+    |
+703 |                   if let EffectControlRecord::Observe {
+    |  ____________________^
+704 | |                     tap_index, armed, ..
+705 | |                 } = record
+706 | |                     && let Some(mask) = self.observation_armed.get_mut(effect)
+707 | |                     && tap_index < u32::BITS
+    | |____________________________________________^
+help: you might have meant to write this as part of a block
+    |
+708 ~                 { if ready.has_in_flight_commands {
+709 |                     let bit = 1_u32 << tap_index;
+710 |                     *mask = if armed { *mask | bit } else { *mask & !bit };
+711 ~                 } }
+    |
+
+error: could not compile `host-web` (lib test) due to 1 previous error

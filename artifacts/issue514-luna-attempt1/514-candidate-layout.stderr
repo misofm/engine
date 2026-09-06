@@ -1,0 +1,3 @@
+   Compiling host-web v0.1.0 (/home/bl/misofm/engine-idle-admission-clear/hosts/host-web)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.52s
+     Running unittests src/lib.rs (target/debug/deps/host_web-5bbcf2d829042aa5)
