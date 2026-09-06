@@ -1,6 +1,6 @@
 # 499: Prove compressor W4 state transitions with populated delayed history
 
-Active fresh Luna attempt1 under the numbered approval below.
+Delivered via PR502; GitHub issue CLOSED. Historical attempt records follow.
 
 This is a bounded proof-completion child of stopped #475, based on preserved source019ac62a / reviewedce745d8a and parent hardstop8c52c832. Parent475 keeps its full original product acceptance and delivery obligations. Its three attempts are exhausted; this child must be numbered/synchronized and scope-approved before a fresh Luna1 pass, then Sol2/3 only after a consolidated FAIL. No further parent repair or qualification is authorized before child PASS. #498 is independent maintenance.
 
@@ -75,3 +75,7 @@ Delivery continues with parent475 in separate codex/475-compressor-tap-delivery 
 ## Integrated delivery qualification complete
 
 Frozen1c71000d passes immutable full workspace (transcript277 blocks/1639 passed/0 failed/24 ignored, including isolated child result), supported scalar/simd128 checks, native release C API and shared/static ABI. Separate delivery candidatede410134 passes verified artifact/static/resources26/hermetic/current3browser+self-tests/matrix; modulefa78dc8d3f0d391b94419f5252504eee2aafbbf13853884157e24935ed092cc3 is independently hashed. Complete command/source/output/numeric status and source equivalence are retained in artifacts/issue475-integrated-delivery. No production/numerical change after source acceptance. Actual-head PR review and required qualification remain before merged closure of475 and499.
+
+## Delivered and remotely closed
+
+PR502 merged at2026-09-06T05:39:25Z asad00d16b8ef8e3aa5ba4c406d00db4c62ff311b5. Astra exact-head PASS and required qualification34014259495 SUCCESS both apply to13fd9d1b6e3df7cc9005d0eef1b9e0723a3b0a1e before merge. GitHub475 and499 are verified CLOSED. This delivers the uniform compressor detector-access DYN1 product and its populated W4 proof; no measured speedup or other-effect closure is claimed. Post-main qualification is monitored separately.
