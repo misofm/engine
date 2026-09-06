@@ -159,3 +159,31 @@ Scope preserves all three kernels, original two-rounding operand order and matri
 Queue remains behind active459 and queued460; current462 delivery is also recorded. Historical draft references to older heads/issue states are contextual and superseded by the explicit planning-base/queue paragraph. Root must perform a separate actual implementation-base review, synchronize that freeze and assign Luna1 only when ordering permits. No feature implementation, qualification or timing follows merely from this numbered approval.
 
 Read-only Git/GitHub/spec inspection; no tests, builds, timing or repository/Git/GitHub mutations.
+
+## Delivered-base readiness refresh
+
+# #463 current-base readiness — scope remains valid, queued
+
+Read numbered463 at engine-lane2-plan79b88a4f and current delivered024ad674 source in engine-483-floor-parity. No code, tests/builds, timing or Git/GitHub mutations. #238 remains runtime priority; this is not assignment authorization.
+
+Relevant lane kernels, G5 runner/corpus/pins and gate tools have no source delta across the compared bases. Current kernels remain sum2_block473, sum_into_block498, mix2x2_block612. Graph runtime changed for delivered scalar pairing, but the named route/fold tests and actual matrix/sum callback paths remain; no graph production adjustment is required for463. Public debug equal-length assertions, release controlling-prefix behavior/short rejection, two-rounding operand order and matrix old-plane snapshots remain the contract.
+
+Refresh stale scheduling/base references only: old459/460/462 work is delivered; queue now follows active238 and a root-frozen later main. Historical60519995/29a8 line references are evidence context. Current exact graph filters still exist:
+- runtime::tests::route_applies_folded_gain_with_frozen_op_order (runtime4633)
+- tests::executor_applies_exact_pdc_then_fixed_pairwise_reduction (graph lib3598)
+- runtime::tests::a_folded_epilogue_is_the_route_and_the_reduction_bit_for_bit (runtime3962)
+- runtime::tests::the_first_contributor_stores_so_a_negative_zero_master_keeps_its_sign (runtime4211)
+
+Use `cargo test --locked -p graph --lib FILTER -- --exact` and matching --release for these four filters, requiring one actual test each. Existing lane command remains `cargo test --locked -p lane --test g2_kernel_identity --test p1_partition`, debug/release. The negative-zero fixture currently tests real fold_plane store=true and a separate fold_cohort case; neither supplies real fold_plane store=false. The frozen SECOND contribution extension remains necessary and must preserve both existing assertions, not replace them. Its old-order expected words stay independent of the candidate sum traversal.
+
+The final root-selected corpus amendment remains binding over earlier optional scalar-Wasm wording: KERNELS currently12, FRAMES1024, four SIGNALS, no direct Mix2x2 case. Add exactly one variant and four named cases, using the prescribed half-array L/R representation and coefficients. Generate ONLY four new scalar-baseline pins with `cargo run --locked --release -q -p wasm-gates -- --print-pins`; preserve full output as evidence and transplant no other pin. All old named-case digest bytes/order must remain identical despite shifted indices. Both planes must remain in the ordinary digest transcript. No record schema, other family pins or signal population change.
+
+Mandatory order: freeze actual main; retain pre-edit three-kernel body identity; perform the opaque-wrapper native/scalar-Wasm/simd128 code-generation inspection; checkpoint the corpus addition/new scalar pins while all three kernel bodies remain unchanged; execute `bash scripts/run-wasm-gates.sh target/ci/lane2-baseline-wasm-gates`; only then consider a justified kernel rewrite. The final candidate repeats the SAME cases/pins using `target/ci/lane2-candidate-wasm-gates`. The gate internally fixes guest targets at target/ci/wasm-gates-* despite its output-directory argument, so root must serialize those directories with other Wasm work. No timing switches, console runner or workload measurement.
+
+No prebuilt opaque-wrapper evidence currently resolves the claimed checks. The numbered requirement to freeze a disposable retained probe source/exact rustc/LLVM/flags/status/body hashes before edits remains; no null conclusion may be inferred from these source reads or a generic vectorization report. If all supported decoded bodies already remove the alleged checks, keep the honest-null path and do not manufacture an optimization. The baseline corpus still provides the explicitly approved execution evidence.
+
+Existing native host filters remain `tests::native_identity_session_digest_pins_the_wasm_parity` and `tests::native_command_timeline_digest_pins_the_wasm_parity` with `cargo test --locked -p host-web --lib FILTER -- --exact` and release. Existing normal worklet builder and direct-oracle.mjs ARTIFACT_DIRECTORY EXPECTED_JSON remain the untimed shipped simd128 route gate, with root-owned empty artifact directory/current accepted pin. Direct G5 now must cover matrix execution on BOTH scalar-Wasm and simd128; no claim that simd128 direct oracle alone covers scalar-Wasm.
+
+Allowed product/test/probe/corpus paths and original finite W1/W4/W8 bounds/hostile-category/suffix/zero-allocation gates need no expansion. A later actual-main integration and source-equivalence check still precede Luna1. Preserve broader artifact/measurement separation, no native AArch64 revival, no changes to reduce_many/ordered_accumulate_block, and no timing authority.
+
+Root selects463 as the next runtime feature after238 delivery. Actual mainf357330ce0f391e785429e82807d7d79ba9a077c is integrated atdda36da0fbb772671bf3467db0f03f6039edbcfa; crates/tools/hosts/Cargo/.cargo/scripts are byte-identical to that main. Historical behind459/460/462/238 scheduling is superseded by this record. Pending fresh actual-base Astra approval before Luna1. Existing pre-edit probe and four new baseline scalar pins must precede any kernel rewrite; timing remains unauthorized. Independent488 test-only work touches graph/program.rs, so463 must not edit that file; its allowed real fallback proof is graph/runtime.rs.
