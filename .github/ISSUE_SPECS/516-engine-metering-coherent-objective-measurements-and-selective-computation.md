@@ -159,6 +159,48 @@ The existing PCM-identity and gain-reduction tests remain green. Shipped Wasm ar
 allocation/callgraph inspection, resource-fixture refresh and browser execution remain pending a
 separate Astra ruling over the frozen corrected source and are not claimed here.
 
+## Attempt 2 qualification follow-up
+
+The correction was checkpointed at `32db5599`. Dedicated Astra source review returned **PASS** and
+approved adoption of the observed corrected Wasm digest
+`6cb9675bdd6ccb776f59fa44b48c6b9f870af5d71a79277378fe335167878bdf`; the ordinary artifact builder
+then passed and the reviewed pin was adopted at `fb9f0d6c`. Qualification subsequently found two
+real integration blockers, so that artifact is preserved as failed evidence rather than treated as
+qualified.
+
+First, the unchanged static callgraph gate found callback-reachable `panic_bounds_check` owned by
+`ReadyOwnership::reset_meter_delivery`. The only slice-wide operation in that new helper was public
+frame `fill`; the follow-up uses an iterator over the prepared frame instead, preserving exact reset
+behavior while removing that bounds-panic owner. This Rust change requires a new observed artifact
+digest and a fresh Astra adoption ruling; no pin or gate is changed here.
+
+Second, the hermetic fake header omitted the new complete/master validity bits, but inspection also
+found that the production main-realm host's exact-field validator still accepted only the old meter
+message shape. A real worklet frame carrying `generation`, `validity` and `lossCount` would therefore
+have caused sticky result 255. The validator now requires the exact new field set, a positive BigInt
+generation, bounded numeric validity/loss fields, complete+master bits, no unknown validity bits,
+and consistency between the loss bit and count. It also enforces the already documented nonempty
+half-open peak span. Hermetic fixtures exercise valid metadata, loss transport, missing validity and
+malformed metadata domains through both the processor and real host receiver. The generated SDK
+declaration mirror is refreshed byte-for-byte from the shipped host declaration.
+
+Follow-up evidence on the dirty candidate after `fb9f0d6c`:
+
+```text
+node scripts/test-web-audioworklet.mjs           # PASS
+cargo test -p host-web --lib meter_              # PASS: 11 passed, 61 filtered out
+bash scripts/check-sdk-generated.sh              # PASS
+bash scripts/check-realtime-policy.sh             # PASS: 42 marked regions in 12 files
+cargo fmt --all -- --check                        # PASS
+git diff --check                                  # PASS
+```
+
+The full hermetic wrapper passed its Node tests, allocator mutation, opcode mutations and callgraph
+analyser self-tests, then its browser-correctness self-test could not bind a localhost socket in the
+restricted environment (`PermissionError: Operation not permitted`). That environment result is not
+a browser qualification claim. A rebuilt artifact static gate must verify removal of the named trap
+owner before the next review verdict.
+
 ## Planning review
 
 Drafted by a dedicated Astra agent at low reasoning effort and adversarially reviewed by a separate Astra agent at medium reasoning effort, as requested by the owner. Verdict: PASS after bounded revisions clarifying selective computation as a required planned outcome, concrete work-avoidance gates, and metadata compatibility without a broad ABI redesign. This verdict covers the plan only; implementation, performance results and release qualification remain unperformed.

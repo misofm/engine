@@ -694,7 +694,11 @@ impl ReadyOwnership {
         self.meter_snapshot_drops_seen = 0;
         self.meter_loss_count = 0;
         if clear_publication {
-            self.meter_frame.fill(0.0);
+            // Keep the callback-reachable reset free of slice-fill's bounds-panic owner in the
+            // shipped Wasm call graph. The iterator walks the already prepared frame exactly once.
+            for slot in &mut self.meter_frame {
+                *slot = 0.0;
+            }
             self.meter_header.sequence = 0;
             self.meter_header.windows = 0;
             self.meter_header.first_sample = 0;
