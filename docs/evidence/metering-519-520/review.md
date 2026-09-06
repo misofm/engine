@@ -50,3 +50,11 @@ Independent Wasm compiler-layout diagnostics resolved the browser sum exactly: R
 Inspected `/private/tmp/engine-521-resource-oracle-gates.log`: fixture check PASS; issue064 read-only corpus PASS; all24corruption rejections PASS; issue067 graph/PDC PASS; actual browser expected resources against the qualifiedLinux671d artifact PASS; all26resource comparator mutations PASS. The fixture author produced a preexisting macOS tangent-response difference, which was explicitly excluded rather than copied or used to weaken DSP expectations. Only the derived resource/manifest files were adopted.
 
 The correction updates test authorities to the independently measured layouts and restores exact gate agreement; it does not weaken resource gates or change the production artifact. The prior combined functionality, static/browser and no-performance-claim findings stand. Remote push, GitHub synchronization and the next CI result remain root delivery obligations; no merge is performed or implied by this restored technical PASS.
+
+## Live benchmark manifest consumers synchronized
+
+Reviewed checkpoint `5934fe0f125f1b025ba352cf922387ce13cdd4a1`: **PASS**. Exactly five literal references across the current benchmark preflight, record validator, lifecycle fixture and bench source now identify the independently verified resource manifest `31798260263396c242c0b90042e01abb18624f383fd88029341dffecde662796`. No workload/input hashes, validator predicates, timing behavior or historical result artifacts changed. An independent search found no remaining old identity in active scripts/tools/fixtures; old references in historical issue431/473 prose were appropriately preserved.
+
+Root/Sol report Linux/amd64 current benchmark validators/lifecycle PASS with real workload launches0, the bench manifest unit test PASS1, and formatting/bash-syntax/diff checks PASS. No descriptive benchmark was retried. This resolves the remaining active-consumer identity propagation gap without relaxing a gate or changing the shipped engine module.
+
+Combined technical PASS stands. No known local qualification blocker remains; final remote CI verification and GitHub delivery synchronization remain outstanding root obligations. No merge or performance-gain claim is included.

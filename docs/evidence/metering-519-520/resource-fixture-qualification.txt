@@ -14,3 +14,7 @@ meter_snapshot_bytes=160 unchanged
 meter_accumulator_bytes=232 baseline224 delta8_per_observer
 ready_ownership_bytes=1040 baseline952 delta88
 audio_worklet_host_bytes=1520 baseline1424 delta96
+manifest_consumer_checkpoint=5934fe0f
+bench_manifest_unit=PASS_1
+current_benchmark_validators_lifecycle=PASS_linux_amd64_real_workload_launches_0
+live_old_manifest_references=0
