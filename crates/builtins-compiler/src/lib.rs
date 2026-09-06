@@ -4023,11 +4023,18 @@ mod tests {
     use super::*;
     use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
     use core::sync::atomic::{AtomicUsize, Ordering};
+    use effect_contract::{
+        EffectDescriptor, EffectId, EffectProcessBlock, EffectQuality, LinkMode, LinkModeSet,
+        PortDescriptor, PortId, PortLayout, PortRole, PreparedEffectMetadata, PreparedNativeEffect,
+        PreparedPorts, PreparedSidechainPort, ProcessReport, ResetKind, StatePayloadError,
+        StatePayloadInput, StatePayloadOutput, StatePayloadSizes,
+    };
     use engine::{QuantumFrames, SampleRateHz};
     use graph::{
-        GraphEdge, GraphEdgeId, GraphNode, GraphNodeBinding, GraphPortId, GraphPortKind,
-        GraphPreparedSourceSetDriver, GraphResourceEstimate, GraphSourceInputClaim,
-        GraphSourceSetResourceReport, PreparedGraphPlanParts, PreparedRoute, RouteTransform,
+        EffectNodeId, GraphEdge, GraphEdgeId, GraphNode, GraphNodeBinding, GraphPortId,
+        GraphPortKind, GraphPreparedEffect, GraphPreparedSourceSetDriver, GraphResourceEstimate,
+        GraphSourceInputClaim, GraphSourceSetResourceReport, PreparedGraphPlanParts, PreparedRoute,
+        RackId, RouteTransform,
     };
 
     /// The compiler always emits `spec.nodes` sorted by id; hand-built fixtures list them in
@@ -4849,6 +4856,85 @@ mod tests {
         }
     }
 
+    const SIDECHAIN_SUM_ID: EffectId = match EffectId::new("scalar-sidechain-sum") {
+        Ok(value) => value,
+        Err(_) => panic!("effect ID"),
+    };
+    const SIDECHAIN_MAIN_IN: PortId = match PortId::new("main-in") {
+        Ok(value) => value,
+        Err(_) => panic!("port ID"),
+    };
+    const SIDECHAIN_MAIN_OUT: PortId = match PortId::new("main-out") {
+        Ok(value) => value,
+        Err(_) => panic!("port ID"),
+    };
+    const SIDECHAIN_INPUT: PortId = match PortId::new("sidechain-in") {
+        Ok(value) => value,
+        Err(_) => panic!("port ID"),
+    };
+    static SIDECHAIN_SUM_PORTS: [PortDescriptor; 3] = [
+        PortDescriptor {
+            id: SIDECHAIN_MAIN_IN,
+            role: PortRole::MainInput,
+            required: true,
+            layout: PortLayout::DualMonoPlanar,
+        },
+        PortDescriptor {
+            id: SIDECHAIN_MAIN_OUT,
+            role: PortRole::MainOutput,
+            required: true,
+            layout: PortLayout::DualMonoPlanar,
+        },
+        PortDescriptor {
+            id: SIDECHAIN_INPUT,
+            role: PortRole::SidechainInput,
+            required: true,
+            layout: PortLayout::DualMonoPlanar,
+        },
+    ];
+    static SIDECHAIN_SUM_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
+        id: SIDECHAIN_SUM_ID,
+        display_name: "Scalar sidechain sum fixture",
+        contract_major: 1,
+        contract_minor: 0,
+        state_layout_version: 1,
+        supported_link_modes: LinkModeSet::DUAL_MONO,
+        parameters: &[],
+        ports: &SIDECHAIN_SUM_PORTS,
+        qualities: &[],
+        observations: &[],
+    };
+
+    struct SidechainSum(PreparedEffectMetadata);
+
+    impl PreparedNativeEffect for SidechainSum {
+        fn metadata(&self) -> PreparedEffectMetadata {
+            self.0
+        }
+        fn reset(&mut self, _kind: ResetKind) {}
+        fn process(&mut self, block: EffectProcessBlock<'_>) -> ProcessReport {
+            let (side_left, side_right) = block.sidechain.expect("connected sidechain");
+            for frame in 0..block.left.len() {
+                block.left[frame] += side_left[frame];
+                block.right[frame] += side_right[frame];
+            }
+            ProcessReport::default()
+        }
+        fn snapshot_state_payload(
+            &self,
+            _output: StatePayloadOutput<'_>,
+        ) -> Result<(), StatePayloadError> {
+            Ok(())
+        }
+        fn restore_state_payload(
+            &mut self,
+            _version: u32,
+            _input: StatePayloadInput<'_>,
+        ) -> Result<(), StatePayloadError> {
+            Ok(())
+        }
+    }
+
     /// Builds the five-level graph the harness renders: one level per track stage.
     ///
     /// `Output` is fed by track 0's `PostMatrix` only: `GraphEdgeId::TrackMain { target }` is not
@@ -4860,6 +4946,7 @@ mod tests {
         SelectedSend,
         Alias,
         AliasObserved,
+        Sidechain,
     }
 
     fn track_graph(n: usize) -> (PreparedGraphPlan, Vec<DependencyLevel>) {
@@ -4891,6 +4978,12 @@ mod tests {
         // observer independently discriminates the observer barrier.
         let alias_track = n - 1;
         let alias = stage(alias_track, TrackStage::PostDynamic);
+        let sidechain_effect_id = EffectNodeId {
+            track_id: StableGraphId::parse("sidechain-proof").expect("effect track"),
+            rack: RackId::Dynamic,
+            effect_id: StableGraphId::parse("sum").expect("effect ID"),
+        };
+        let sidechain_effect = GraphNodeId::Effect(sidechain_effect_id.clone());
         let stages = [
             TrackStage::Input,
             TrackStage::PostInputBuiltins,
@@ -4921,9 +5014,14 @@ mod tests {
                 });
             }
         }
+        let main_target = if matches!(variant, BoundaryVariant::Sidechain) {
+            sidechain_effect.clone()
+        } else {
+            output.clone()
+        };
         edges.push(GraphEdge {
             id: GraphEdgeId::TrackMain {
-                target: output.clone(),
+                target: main_target.clone(),
             },
             source: GraphPortId {
                 node: stage(0, TrackStage::PostMatrix),
@@ -4931,12 +5029,47 @@ mod tests {
                 effect_port: None,
             },
             destination: GraphPortId {
-                node: output.clone(),
+                node: main_target,
                 kind: GraphPortKind::MainInput,
                 effect_port: None,
             },
             path: "$.routes[0]".to_owned(),
         });
+        if matches!(variant, BoundaryVariant::Sidechain) {
+            edges.push(GraphEdge {
+                id: GraphEdgeId::EffectSidechain {
+                    effect: sidechain_effect_id.clone(),
+                    port: SIDECHAIN_INPUT.as_str().to_owned(),
+                },
+                source: GraphPortId {
+                    node: stage(alias_track, TrackStage::PostFader),
+                    kind: GraphPortKind::MainOutput,
+                    effect_port: None,
+                },
+                destination: GraphPortId {
+                    node: sidechain_effect.clone(),
+                    kind: GraphPortKind::SidechainInput,
+                    effect_port: Some(SIDECHAIN_INPUT.as_str().to_owned()),
+                },
+                path: "$.effects[sidechain-proof].sidechain".to_owned(),
+            });
+            edges.push(GraphEdge {
+                id: GraphEdgeId::TrackMain {
+                    target: output.clone(),
+                },
+                source: GraphPortId {
+                    node: sidechain_effect.clone(),
+                    kind: GraphPortKind::MainOutput,
+                    effect_port: None,
+                },
+                destination: GraphPortId {
+                    node: output.clone(),
+                    kind: GraphPortKind::MainInput,
+                    effect_port: None,
+                },
+                path: "$.effects[sidechain-proof].output".to_owned(),
+            });
+        }
         if matches!(
             variant,
             BoundaryVariant::Send | BoundaryVariant::SelectedSend
@@ -5022,6 +5155,9 @@ mod tests {
             });
         }
         nodes.push(output.clone());
+        if matches!(variant, BoundaryVariant::Sidechain) {
+            nodes.push(sidechain_effect.clone());
+        }
         if matches!(
             variant,
             BoundaryVariant::Send | BoundaryVariant::SelectedSend
@@ -5033,6 +5169,12 @@ mod tests {
             BoundaryVariant::Alias | BoundaryVariant::AliasObserved
         ) {
             nodes.push(alias.clone());
+        }
+        if matches!(variant, BoundaryVariant::Sidechain) {
+            levels.push(DependencyLevel {
+                level: stages.len() as u64,
+                nodes: vec![sidechain_effect.clone()],
+            });
         }
         levels.push(DependencyLevel {
             level: stages.len() as u64,
@@ -5094,7 +5236,10 @@ mod tests {
             envelope,
             required_bindings: nodes
                 .iter()
-                .filter(|node| !matches!(node, GraphNodeId::Route { .. }) && *node != &alias)
+                .filter(|node| {
+                    !matches!(node, GraphNodeId::Route { .. } | GraphNodeId::Effect(_))
+                        && *node != &alias
+                })
                 .cloned()
                 .collect(),
             routes: if matches!(
@@ -5115,7 +5260,38 @@ mod tests {
                 Vec::new()
             },
             track_delays: Vec::new(),
-            effects: Vec::new(),
+            effects: if matches!(variant, BoundaryVariant::Sidechain) {
+                let metadata = PreparedEffectMetadata {
+                    descriptor: &SIDECHAIN_SUM_DESCRIPTOR,
+                    sample_rate: 48_000,
+                    quantum: HARNESS_QUANTUM,
+                    quality: EffectQuality::Normal,
+                    bypass: false,
+                    link_mode: LinkMode::DualMono,
+                    ports: PreparedPorts {
+                        sidechain: PreparedSidechainPort::Connected {
+                            id: SIDECHAIN_INPUT,
+                            required: true,
+                        },
+                    },
+                    latency: effect_contract::LatencySamples(0),
+                    tail: effect_contract::TailSamples::Finite(0),
+                    state_sizes: StatePayloadSizes {
+                        common_bytes: 0,
+                        left_bytes: 0,
+                        right_bytes: 0,
+                    },
+                    scratch_bytes: 0,
+                    automation_capacity: 0,
+                };
+                vec![GraphPreparedEffect {
+                    id: sidechain_effect_id,
+                    metadata,
+                    processor: Box::new(SidechainSum(metadata)),
+                }]
+            } else {
+                Vec::new()
+            },
             effect_controls: Vec::new(),
             banks: Vec::new(),
             builtin_banks: Vec::new(),
@@ -5331,20 +5507,27 @@ mod tests {
         TestPhaseTwoAllocationSnapshot,
         TestPhaseTwoAllocationSnapshot,
     ) {
-        let (bound, estimate, scalar_resource, owners, binding) = prepared_pair_graph_variant_observed(
-            false,
-            false,
-            false,
-            true,
-            None,
-            Backend::Scalar,
-            2,
-            BoundaryVariant::Plain,
-            1,
-            None,
-            true,
-        );
-        (bound, estimate, scalar_resource, owners.unwrap(), binding.unwrap())
+        let (bound, estimate, scalar_resource, owners, binding) =
+            prepared_pair_graph_variant_observed(
+                false,
+                false,
+                false,
+                true,
+                None,
+                Backend::Scalar,
+                2,
+                BoundaryVariant::Plain,
+                1,
+                None,
+                true,
+            );
+        (
+            bound,
+            estimate,
+            scalar_resource,
+            owners.unwrap(),
+            binding.unwrap(),
+        )
     }
 
     fn prepared_pair_graph_fixture(
@@ -5479,6 +5662,13 @@ mod tests {
                     route_id: StableGraphId::parse("proof-send").expect("route"),
                 });
             }
+            if matches!(variant, BoundaryVariant::Sidechain) {
+                schedule.push(GraphNodeId::Effect(EffectNodeId {
+                    track_id: StableGraphId::parse("sidechain-proof").expect("effect track"),
+                    rack: RackId::Dynamic,
+                    effect_id: StableGraphId::parse("sum").expect("effect ID"),
+                }));
+            }
             schedule.push(GraphNodeId::Output {
                 output_id: StableGraphId::parse("main-out").expect("output"),
             });
@@ -5600,7 +5790,13 @@ mod tests {
             .unwrap_or_else(|failure| panic!("fixture bind: {}", failure.code));
         drop(_binding_observation);
         let binding_snapshot = observe_binding.then(test_only_phase_two_allocation_snapshot);
-        (bound, saved_estimate, scalar_resource, owner_snapshot, binding_snapshot)
+        (
+            bound,
+            saved_estimate,
+            scalar_resource,
+            owner_snapshot,
+            binding_snapshot,
+        )
     }
 
     fn render_bound(bound: &mut PreparedBuiltinsGraphBound, sample: u64) -> Vec<u32> {
@@ -6081,6 +6277,78 @@ mod tests {
             std::mem::take(&mut *declined_capture.lock().unwrap()),
             std::mem::take(&mut *reference_capture.lock().unwrap()),
             "decline keeps the original separate-owner post-matrix PCM"
+        );
+    }
+
+    #[test]
+    fn actual_scalar_effect_sidechain_declines_and_matches_separate_owner_data_and_state() {
+        let _guard = PAIR_WITNESS_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let paired_side = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let reference_side = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let paired_main = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let reference_main = Arc::new(std::sync::Mutex::new(Vec::new()));
+        test_only_reset_fader_matrix_witness();
+        let mut declined = prepared_pair_graph_variant(
+            true,
+            false,
+            false,
+            true,
+            Some(Arc::clone(&paired_side)),
+            Backend::Scalar,
+            2,
+            BoundaryVariant::Sidechain,
+            0,
+            Some((0, Arc::clone(&paired_main))),
+        );
+        let prepared = test_only_fader_matrix_witness();
+        let mut reference = prepared_pair_graph_variant(
+            true,
+            false,
+            false,
+            false,
+            Some(Arc::clone(&reference_side)),
+            Backend::Scalar,
+            2,
+            BoundaryVariant::Sidechain,
+            0,
+            Some((0, Arc::clone(&reference_main))),
+        );
+        assert_eq!(
+            (prepared.factory_calls, prepared.factory_members),
+            (0, 0),
+            "the real EffectSidechain reader declines before owner transfer"
+        );
+
+        test_only_reset_fader_matrix_witness();
+        let declined_output = render_bound(&mut declined, 0);
+        let declined_state = test_only_fader_matrix_witness();
+        test_only_reset_fader_matrix_witness();
+        let reference_output = render_bound(&mut reference, 0);
+        let reference_state = test_only_fader_matrix_witness();
+
+        assert_eq!(declined_output, reference_output, "effect output PCM");
+        let paired_side = std::mem::take(&mut *paired_side.lock().unwrap());
+        let reference_side = std::mem::take(&mut *reference_side.lock().unwrap());
+        let paired_main = std::mem::take(&mut *paired_main.lock().unwrap());
+        let reference_main = std::mem::take(&mut *reference_main.lock().unwrap());
+        assert_eq!(
+            paired_side, reference_side,
+            "sidechain-source post-matrix PCM"
+        );
+        assert_eq!(paired_main, reference_main, "effect-main post-matrix PCM");
+        assert_ne!(
+            declined_output, paired_main,
+            "the effect consumed its sidechain input"
+        );
+        assert_eq!(
+            declined_state.scalar_fader_words,
+            reference_state.scalar_fader_words
+        );
+        assert_eq!(
+            declined_state.scalar_matrix_words,
+            reference_state.scalar_matrix_words
         );
     }
 

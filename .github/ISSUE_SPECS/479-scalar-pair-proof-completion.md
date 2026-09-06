@@ -71,3 +71,9 @@ The bound outer observation still accepts any matching-size allocation count>=1 
 Luna1 is complete and failed; root may assign Sol2 after recording this verdict. No further Luna correction. Allowed paths remain builtins-compiler/src/lib.rs ONLY test/test-support code, existing allocation_tracker.rs and numbered evidence. Parent443 stays stopped/open and retains full eventual qualification;479 source PASS is not delivery, and no timing or public architecture change is authorized.
 
 Root adopts FAIL and assigns Sol attempt 2 for this exact finite correction. Meter proof is accepted; retained parent obligations stay mandatory. No further Luna correction.
+
+## Sol attempt 2 first recoverable checkpoint
+
+The existing test-only scalar fixture now binds a real GraphPreparedEffect with connected sidechain metadata. The actual PostFader output feeds that effect through EffectSidechain while the normal PostFader→PostMatrix path remains. `actual_scalar_effect_sidechain_declines_and_matches_separate_owner_data_and_state` compares main/sidechain/effect output/post-matrix data and queued owner state against separate owners and asserts no factory pairing at the boundary. The other track uses a real meter barrier to isolate this assertion.
+
+`/tmp/479-sol2-tranche1-sidechain-3.{command,log,status}` reports0, one test/37 filtered. Initial compile and fixture-selection failures are preserved in sidechain-1/-2; neither is credited as success. The source was formatted. Owner attribution/max and final finite gates remain for this same Sol2 pass; no final source acceptance or parent qualification yet.
