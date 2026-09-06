@@ -95,3 +95,9 @@ Root adopts the ruling after verified PR486 delivery and merges actual mainf3573
 ## Observed combined artifact checkpoint
 
 Normal builder on frozen e4367be13783cb279c9aebf338929b3ae012e244 compiled successfully and returned1 for expected incoming da36c750 versus actual combined14811597b77cb4331d5f1e0bd032c01354451db79c0939fd30113b963b1a7d9b. Raw /tmp/485-combined-initial.{source,command,rawlog,numericstatus} preserves the exact attempt. Root checkpoints that observed pin before ordinary verified rebuild and existing static/resource/hermetic/browser qualification. This pin is not itself a correctness PASS; no source or expectation arithmetic changed.
+
+## Combined artifact qualification complete
+
+Candidate6ede671129ab9cb61c2bde4300cb972acb36c8a5 reproducibly builds the observed14811597 artifact with ordinary verification enabled. Static/object/ABI, expected-resource26 negative controls, separate hermetic worklet checks, all3 actual browser engines with self-test mutations and generatedmatrix verification pass with captured numeric0. Generated consumers atd0ed18a2 change only candidate/digest. All raw commands/log/statuses, initial CI/build failures, Astra amendment and source-equivalence record are retained in artifacts/issue485-scalar-error-propagation.
+
+The entire accepted compiler file is byte-identical tod0bafe8b. Relative to deliveredmainf357330c, executable inputs change only that compiler file and the3approved artifact consumers. Refreshed actual-head Astra review and successful requiredCI are still mandatory before merge; the earlier conditional review cannot approve a failed or changed head.
