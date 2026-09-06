@@ -1,0 +1,6 @@
+Sun Sep  6 05:31:49 UTC 2026
+/home/bl/misofm/engine-cp20-identity-plan
+argv: cargo fmt --all -- --check
+source=fcb8703cbb4d61fca041225305b91049fbee2bb2
+PATH=/home/bl/.cargo/bin:/home/bl/.local/bin:/home/bl/.codex/packages/standalone/releases/0.153.2-x86_64-unknown-linux-musl/codex-path:/home/bl/.codex/tmp/arg0/codex-arg0CWD760:/home/bl/.local/bin:/home/bl/.opencode/bin:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.opencode/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin
+exit=0

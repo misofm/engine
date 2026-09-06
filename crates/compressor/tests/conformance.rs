@@ -9,11 +9,80 @@
 mod support;
 
 use std::hint::black_box;
+use std::sync::{Arc, Barrier};
 
 use bench_support::alloc as bench_alloc;
 use effect_contract::{EffectBankProcessBlock, EffectProcessBlock};
+use engine::realtime::audit;
 
 conformance::effect_conformance_test!(compressor::CompressorFactory);
+
+/// The allocator hooks feed the same thread-local audit used by the render guard. A deliberately
+/// counted heap probe proves positive same-thread attribution (capacity growth uses realloc, which
+/// the existing allocator records as an Allocation) and a worker allocation proves that unrelated
+/// coordinating-thread activity cannot enter the render thread's snapshot.
+#[test]
+fn scoped_allocator_attribution_controls_are_live_and_isolated() {
+    bench_alloc::set_mode(bench_alloc::Mode::Count);
+    bench_alloc::assert_installed();
+    audit::warm_up();
+    audit::reset();
+
+    let (allocated, grown, freed) = audit::in_render_scope(|| {
+        let mut probe = Vec::with_capacity(1);
+        let allocated = audit::snapshot();
+        probe.push(1_u8);
+        probe.reserve(128);
+        assert!(
+            probe.capacity() > 1,
+            "allocation-control probe did not grow"
+        );
+        let grown = audit::snapshot();
+        black_box(&probe);
+        drop(probe);
+        let freed = audit::snapshot();
+        (allocated, grown, freed)
+    });
+    assert!(
+        allocated.allocations > 0,
+        "same-thread allocation was not audited"
+    );
+    assert!(
+        grown.allocations > allocated.allocations,
+        "same-thread capacity growth/reallocation was not audited"
+    );
+    assert!(
+        freed.deallocations > grown.deallocations,
+        "same-thread deallocation was not audited"
+    );
+
+    audit::reset();
+    let ready = Arc::new(Barrier::new(2));
+    let start = Arc::new(Barrier::new(2));
+    let done = Arc::new(Barrier::new(2));
+    let worker_ready = Arc::clone(&ready);
+    let worker_start = Arc::clone(&start);
+    let worker_done = Arc::clone(&done);
+    let worker = std::thread::spawn(move || {
+        worker_ready.wait();
+        worker_start.wait();
+        let mut probe = Vec::with_capacity(1);
+        probe.push(1_u8);
+        probe.reserve(128);
+        assert!(probe.capacity() > 1, "worker probe did not grow");
+        black_box(&probe);
+        drop(probe);
+        worker_done.wait();
+    });
+    ready.wait();
+    audit::in_render_scope(|| {
+        start.wait();
+        done.wait();
+    });
+    worker.join().expect("allocation-control worker");
+    let other_thread = audit::snapshot();
+    assert_eq!(other_thread, audit::AuditSnapshot::default());
+}
 
 /// The installed allocator is live for both allocation and free, while repeated production
 /// renders through the uniform staged, uniform D=0 and ragged bank paths move neither counter.
@@ -77,38 +146,48 @@ fn uniform_and_ragged_render_paths_allocate_and_free_nothing() {
         )
     };
 
-    let mark = bench_alloc::counters();
-    for block in 0..32_u64 {
-        staged.process(
-            EffectProcessBlock::new(
-                &mut staged_left,
-                &mut staged_right,
-                None,
-                block * 128,
-                &[],
-                128,
-            )
-            .expect("staged block"),
-        );
-        live.process(
-            EffectProcessBlock::new(&mut live_left, &mut live_right, None, block * 128, &[], 128)
+    audit::warm_up();
+    audit::reset();
+    audit::in_render_scope(|| {
+        for block in 0..32_u64 {
+            staged.process(
+                EffectProcessBlock::new(
+                    &mut staged_left,
+                    &mut staged_right,
+                    None,
+                    block * 128,
+                    &[],
+                    128,
+                )
+                .expect("staged block"),
+            );
+            live.process(
+                EffectProcessBlock::new(
+                    &mut live_left,
+                    &mut live_right,
+                    None,
+                    block * 128,
+                    &[],
+                    128,
+                )
                 .expect("D=0 block"),
-        );
-        ragged.process_bank(
-            EffectBankProcessBlock::new(
-                &mut ragged_left,
-                &mut ragged_right,
-                None,
-                128,
-                bank_width,
-                block * 128,
-                &[],
-                &offsets,
-                128,
-            )
-            .expect("ragged block"),
-        );
-    }
+            );
+            ragged.process_bank(
+                EffectBankProcessBlock::new(
+                    &mut ragged_left,
+                    &mut ragged_right,
+                    None,
+                    128,
+                    bank_width,
+                    block * 128,
+                    &[],
+                    &offsets,
+                    128,
+                )
+                .expect("ragged block"),
+            );
+        }
+    });
     black_box((
         &staged_left,
         &staged_right,
@@ -118,8 +197,8 @@ fn uniform_and_ragged_render_paths_allocate_and_free_nothing() {
         &ragged_right,
         bank_lanes,
     ));
-    let render = bench_alloc::delta_since(mark);
+    let render = audit::snapshot();
     assert_eq!(render.allocations, 0, "render allocated");
     assert_eq!(render.deallocations, 0, "render freed heap storage");
-    assert_eq!(render.reallocations, 0, "render reallocated");
+    assert_eq!(render.total(), 0, "render reported forbidden operations");
 }

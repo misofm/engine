@@ -1,0 +1,6 @@
+command: PATH=/home/bl/.cargo/bin:$PATH cargo test --locked -p compressor --test conformance --features engine/realtime-audit --profile dev -- --exact scoped_allocator_attribution_controls_are_live_and_isolated --nocapture
+cwd: /home/bl/misofm/engine-compressor-allocation-proof
+exit: 0
+running 1 test
+test scoped_allocator_attribution_controls_are_live_and_isolated ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out

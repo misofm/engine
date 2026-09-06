@@ -1,0 +1,1393 @@
+   Compiling bytemuck v1.25.2
+   Compiling engine v0.1.0 (/home/bl/misofm/engine-compressor-allocation-proof/crates/engine)
+   Compiling typenum v1.20.1
+   Compiling cfg-if v1.0.4
+   Compiling cpufeatures v0.3.0
+   Compiling dsp-reference v0.1.0 (/home/bl/misofm/engine-compressor-allocation-proof/crates/dsp-reference)
+   Compiling safe_arch v1.2.0
+   Compiling wide v1.6.1
+   Compiling hybrid-array v0.4.14
+   Compiling crypto-common v0.2.2
+   Compiling block-buffer v0.12.1
+   Compiling digest v0.11.3
+   Compiling sha2 v0.11.0
+   Compiling bench-support v0.1.0 (/home/bl/misofm/engine-compressor-allocation-proof/tools/bench-support)
+   Compiling lane v0.1.0 (/home/bl/misofm/engine-compressor-allocation-proof/crates/lane)
+   Compiling math v0.1.0 (/home/bl/misofm/engine-compressor-allocation-proof/crates/math)
+   Compiling effect-contract v0.1.0 (/home/bl/misofm/engine-compressor-allocation-proof/crates/effect-contract)
+   Compiling effect-runtime v0.1.0 (/home/bl/misofm/engine-compressor-allocation-proof/crates/effect-runtime)
+   Compiling conformance v0.1.0 (/home/bl/misofm/engine-compressor-allocation-proof/crates/conformance)
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-compressor-allocation-proof/crates/compressor)
+   Compiling soft-clip v0.1.0 (/home/bl/misofm/engine-compressor-allocation-proof/crates/soft-clip)
+   Compiling builtins v0.1.0 (/home/bl/misofm/engine-compressor-allocation-proof/crates/builtins)
+   Compiling parametric-eq v0.1.0 (/home/bl/misofm/engine-compressor-allocation-proof/crates/parametric-eq)
+   Compiling multiband-compressor v0.1.0 (/home/bl/misofm/engine-compressor-allocation-proof/crates/multiband-compressor)
+   Compiling transient-shaper v0.1.0 (/home/bl/misofm/engine-compressor-allocation-proof/crates/transient-shaper)
+   Compiling true-peak-limiter v0.1.0 (/home/bl/misofm/engine-compressor-allocation-proof/crates/true-peak-limiter)
+   Compiling gate-expander v0.1.0 (/home/bl/misofm/engine-compressor-allocation-proof/crates/gate-expander)
+   Compiling delay v0.1.0 (/home/bl/misofm/engine-compressor-allocation-proof/crates/delay)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.03s
+     Running unittests src/lib.rs (/tmp/engine-503-qualified/debug/deps/builtins-dc56e81ba7410a2b)
+
+running 3 tests
+test tests::full_public_chain_matches_the_three_section_reference ... ok
+test tests::eligibility_sequence_uses_whole_call_fallback_then_fuses_the_next_call ... ok
+test tests::lane_symmetry_retarget_updates_only_the_addressed_predicate ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/contract.rs (/tmp/engine-503-qualified/debug/deps/contract-73bc9f2f219aecff)
+
+running 4 tests
+test descriptor_domains_are_exhaustive_at_launch_rates ... ok
+test parameter_descriptors_have_complete_stable_contracts ... ok
+test compatibility_fallback_is_limited_to_the_exact_extended_rate_tier ... ok
+test representable_cutoff_domain_is_shared_by_descriptors_and_preparation ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/determinism.rs (/tmp/engine-503-qualified/debug/deps/determinism-e4bed8ce3136ed32)
+
+running 2 tests
+test no_corpus_case_is_vacuous_or_carries_a_nan ... ok
+test every_corpus_case_matches_its_pin_at_every_width ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/fader_ramp.rs (/tmp/engine-503-qualified/debug/deps/fader_ramp-67f6ce369d5bc5fe)
+
+running 8 tests
+test a_cross_block_ramp_is_partition_invariant ... ok
+test a_move_made_while_muted_applies_on_unmute ... ok
+test a_windowed_move_is_monotone_and_lands_exactly_on_its_target ... ok
+test a_zero_window_move_takes_effect_on_the_first_sample ... ok
+test a_zero_window_mute_is_the_exact_prepared_mute ... ok
+test mute_is_a_fader_endpoint_and_settles_to_exact_positive_zero ... ok
+test the_fader_domain_is_enforced_at_the_setter ... ok
+test an_uncommanded_live_fader_is_bit_identical_to_the_prepared_one ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/input_liveness.rs (/tmp/engine-503-qualified/debug/deps/input_liveness-a0712e584fd24421)
+
+running 13 tests
+test a_lane_selector_addresses_exactly_the_lanes_it_names ... ok
+test a_bank_refuses_a_retarget_addressed_past_its_members ... ok
+test the_live_trim_domain_is_the_declared_one ... ok
+test an_uncommanded_bank_keeps_its_elision_plan ... ok
+test an_uncommanded_live_input_renders_the_prepared_coefficients ... ok
+test the_settled_arm_leaves_the_ramp_words_untouched ... ok
+test trim_and_polarity_do_not_overwrite_each_other ... ok
+test the_trim_ramp_is_partition_invariant ... ok
+test a_ramping_block_leaves_an_elidable_banks_integrators_at_positive_zero ... ok
+test a_banked_lane_ramps_exactly_as_the_same_track_alone ... ok
+test settled_and_ramping_paths_agree_on_an_elided_bank ... ok
+test a_polarity_flip_crosses_zero_and_settles_at_the_reprepared_coefficient ... ok
+test the_trim_ramp_is_bit_identical_to_the_parameter_smoother ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/input_liveness_mono.rs (/tmp/engine-503-qualified/debug/deps/input_liveness_mono-49d9ffd1e88132ec)
+
+running 8 tests
+test re_equalising_the_words_restores_the_designed_term_and_nothing_more ... ok
+test an_asymmetric_retarget_declines_the_lane_on_the_admitting_block ... ok
+test channels_agree_covers_the_trim_ramp_record ... ok
+test a_collapsed_block_keeps_the_two_channels_ramp_records_equal ... ok
+test a_symmetric_retarget_keeps_the_lane_eligible ... ok
+test the_disengage_copy_still_restores_the_integrators ... ok
+test a_symmetric_ride_through_a_collapse_renders_never_collapsed_bits ... ok
+test a_retarget_between_a_collapsed_block_and_the_disengage_survives_the_copy ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/matrix.rs (/tmp/engine-503-qualified/debug/deps/matrix-a9232089d5ecbd4b)
+
+running 7 tests
+test explicit_window_retarget_ramps_over_the_requested_window_and_is_adopted ... ok
+test matrix_ramp_reaches_target ... ok
+test zero_window_snaps_and_reset_cancels_a_ramp ... ok
+test settled_identity_matrix_preserves_signed_zero ... ok
+test matrix_retarget_mid_ramp_matches_the_reference ... ok
+test matrix_ramp_tracks_the_f64_interpolation ... ok
+test matrix_ramp_matches_reference_d11_law ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/meter.rs (/tmp/engine-503-qualified/debug/deps/meter-b50c00104035ee9c)
+
+running 7 tests
+test a_settled_silent_block_is_bit_identical_through_the_early_out ... ok
+test meter_peak_of_signed_zeros_is_positive_zero ... ok
+test meter_windows_are_exact ... ok
+test meter_windows_discontinuities_resets_and_drops_are_exact ... ok
+test silence_against_a_nonzero_held_peak_still_decays ... ok
+test meter_segment_law_is_exact ... ok
+test ten_thousand_deterministic_meter_mutations_remain_bounded_and_finite ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/mono_collapse.rs (/tmp/engine-503-qualified/debug/deps/mono_collapse-5eceb43c382d776d)
+
+running 2 tests
+test the_collapsed_body_publishes_the_dual_bodys_report ... ok
+test a_desymmetrized_bank_is_a_never_collapsed_bank ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/response.rs (/tmp/engine-503-qualified/debug/deps/response-fd3b89876d811706)
+
+running 8 tests
+test launch_and_extended_compatibility_rates_match_the_independent_f64_rbj_oracle ... ok
+test launch_and_extended_compatibility_rate_sweeps_match_f64_magnitude ... ok
+test cast_tpt_state_space_matches_independent_rbj_transfer_at_compatibility_rates ... ok
+test ten_thousand_bounded_parameter_and_block_mutations_stay_finite ... ok
+test production_order_hpf_lpf_cascade_meets_all_launch_response_gates ... ok
+test representable_cutoff_domain_prepares_everywhere_and_rejects_successor ... ok
+test coherent_sustained_sines_cover_launch_and_extended_compatibility_rates ... ok
+test one_second_impulse_dfts_match_rbj_at_launch_and_extended_compatibility_rates ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 16.66s
+
+     Running tests/speed.rs (/tmp/engine-503-qualified/debug/deps/speed-639a181eb48d0f8c)
+
+running 1 test
+test bench_input_stage_ns_per_track_frame ... ignored, descriptive timing, run by hand
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/stage.rs (/tmp/engine-503-qualified/debug/deps/stage-2bf93f9b6bb30167)
+
+running 12 tests
+test a_settled_banked_mute_is_exactly_positive_zero ... ok
+test polarity_trim_fader_and_matrix_are_exact ... ok
+test prepared_sections_match_reference_coefficients ... ok
+test signed_zero_and_mute_laws ... ok
+test bank_construction_accepts_one_to_width_members_only ... ok
+test boundary_check_is_lane_local_per_block ... ok
+test identity_sections_are_elided_only_when_every_lane_and_word_says_so ... ok
+test partition_invariance_over_master_plan_quanta ... ok
+test engine_tan_agrees_with_the_platform_to_one_ulp_over_the_cutoff_domain ... ok
+test bank_is_bit_identical_to_scalar_stage_at_every_width ... ok
+test banked_fader_and_matrix_are_bit_identical_to_the_per_track_sections ... ok
+test scalar_stage_is_bit_identical_to_reference_recurrence ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+     Running unittests src/lib.rs (/tmp/engine-503-qualified/debug/deps/compressor-16c1ce635d5401bc)
+
+running 2 tests
+test kernel::tests::uniform_and_ragged_access_match_old_transcription ... ok
+test kernel::tests::w4_state_owner_transitions_drive_the_next_real_render ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/conformance.rs (/tmp/engine-503-qualified/debug/deps/conformance-ee8b140ba999ae0a)
+
+running 3 tests
+test scoped_allocator_attribution_controls_are_live_and_isolated ... ok
+
+running 1 test
+test uniform_and_ragged_render_paths_allocate_and_free_nothing ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.02s
+
+test uniform_and_ragged_render_paths_allocate_and_free_nothing ... ok
+test passes_effect_contract_conformance ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.92s
+
+     Running tests/contract.rs (/tmp/engine-503-qualified/debug/deps/contract-3773f5abf879f8cc)
+
+running 7 tests
+test descriptor_rows_and_resource_envelope_are_frozen ... ok
+test preparation_has_expected_metadata_and_one_byte_below_rejects ... ok
+test bank_fallback_never_hides_malformed_or_incompatible_requests ... ok
+test a_malformed_bank_block_is_rejected_before_it_is_indexed ... ok
+test every_descriptor_row_admits_exactly_its_own_domain ... ok
+test lookahead_taps_are_derived_only_at_prepare_restore_and_full_reset ... ok
+test links_are_exact_and_connected_sidechain_is_distinct_from_main_detection ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/cross_target.rs (/tmp/engine-503-qualified/debug/deps/cross_target-aac02c336d8d98f7)
+
+running 3 tests
+test the_corpus_is_finite ... ok
+test no_case_is_vacuous ... ok
+test the_corpus_matches_its_pins_at_every_width ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/identity.rs (/tmp/engine-503-qualified/debug/deps/identity-f35a603084060fd3)
+
+running 6 tests
+test a_unit_mix_is_the_wet_signal_exactly ... ok
+test a_unity_gain_stage_is_the_dry_signal ... ok
+test bypass_preserves_exact_dry_bits_at_fixed_latency ... ok
+test the_average_link_is_two_products_and_an_add ... ok
+test a_zero_mix_is_the_dry_signal_while_gain_reduction_runs ... ok
+test every_identity_keeps_the_state_warm ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/lane_identity.rs (/tmp/engine-503-qualified/debug/deps/lane_identity-1d48d18416d4cbac)
+
+running 2 tests
+test bank_matches_scalar_per_lane_bits ... ok
+test every_width_produces_the_same_words ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/mono_collapse.rs (/tmp/engine-503-qualified/debug/deps/mono_collapse-0a55acbec2e87da6)
+
+running 5 tests
+test a_halved_subnormal_does_not_come_back ... ok
+test mono_reopen_drives_the_next_render_from_the_copied_delay_population ... ok
+test a_statically_bypassed_bank_collapses_to_the_dual_bits ... ok
+test a_desymmetrized_bank_is_a_never_collapsed_bank ... ok
+test the_collapsed_body_renders_the_dual_bodys_left_plane ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+     Running tests/nonfinite.rs (/tmp/engine-503-qualified/debug/deps/nonfinite-3c07cfa5703ebec4)
+
+running 4 tests
+test a_nan_in_the_sidechain_alone_is_clamped_to_the_level_floor ... ok
+test the_boundary_limit_rejects_a_finite_but_absurd_value ... ok
+test a_nan_is_caught_at_the_block_boundary_not_per_sample ... ok
+test the_recursive_word_flushes_to_exactly_zero ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/observation.rs (/tmp/engine-503-qualified/debug/deps/observation-7789c4a0479c2e7b)
+
+running 6 tests
+test the_compressor_declares_one_resident_gain_reduction_tap ... ok
+test a_resident_read_is_repeatable_to_the_bit ... ok
+test a_full_reset_returns_the_reading_to_zero ... ok
+test the_reading_follows_the_smoother_rather_than_the_instantaneous_curve ... ok
+test the_compressor_reports_the_reduction_its_kernel_smoothed ... ok
+test every_bank_lane_reads_its_own_reduction ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running tests/oracle.rs (/tmp/engine-503-qualified/debug/deps/oracle-267ff57599a1d871)
+
+running 1 test
+test scalar_output_matches_the_independent_f64_oracle ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/partition.rs (/tmp/engine-503-qualified/debug/deps/partition-c8ff00743255e185)
+
+running 2 tests
+test block_partitions_are_invariant ... ok
+test bank_block_partitions_are_invariant ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+
+     Running tests/payload.rs (/tmp/engine-503-qualified/debug/deps/payload-f7459266880a39d5)
+
+running 5 tests
+test preparation_legal_parameter_states_round_trip ... ok
+test a_mid_ramp_restore_arrives_on_the_same_sample ... ok
+test a_restore_is_transactional_across_both_channels ... ok
+test resets_clear_state_and_only_the_full_one_restores_defaults ... ok
+test an_idle_restore_is_bit_exact ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/ramps.rs (/tmp/engine-503-qualified/debug/deps/ramps-0dbe7141a1278b82)
+
+running 9 tests
+test a_restarting_point_ramps_from_the_current_value ... ok
+test automation_validation_is_unchanged ... ok
+test a_ramp_that_finishes_mid_block_is_invisible_to_the_partition ... ok
+test block_point_steps_by_a_precomputed_increment_and_snaps_exactly ... ok
+test a_finished_ramp_equals_a_fresh_preparation ... ok
+test a_restated_point_leaves_every_lane_on_the_idle_body ... ok
+test a_ramp_onto_an_identity_boundary_lands_on_the_identity ... ok
+test an_idle_lane_is_untouched_by_a_neighbours_ramp ... ok
+test a_ramp_inside_the_silent_fixed_point_withdraws_it_and_moves_no_bit ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
+
+     Running tests/silent_fixed_point.rs (/tmp/engine-503-qualified/debug/deps/silent_fixed_point-20d9a5c3a34d80e6)
+
+running 5 tests
+test the_trailing_tone_is_actually_rendered ... ok
+test silence_shorter_than_the_lookahead_line_still_drains_it ... ok
+test a_detector_still_releasing_through_the_silence_is_never_frozen ... ok
+test a_negative_zero_input_block_is_not_treated_as_silence ... ok
+test a_settled_silent_bank_renders_exactly_the_never_fast_path ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
+
+     Running tests/staged_idle.rs (/tmp/engine-503-qualified/debug/deps/staged_idle-6b58764a1dfd0965)
+
+running 5 tests
+test a_left_only_rejection_diverges_the_cursors_and_the_staged_body_still_agrees ... ok
+test restore_and_full_reset_drive_the_next_bank_render_classification ... ok
+test every_partition_agrees_with_the_per_frame_body ... ok
+test the_link_laws_bypass_and_a_sidechain_all_agree ... ok
+test a_ragged_bank_agrees_with_the_per_frame_body ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.49s
+
+     Running tests/static_curve.rs (/tmp/engine-503-qualified/debug/deps/static_curve-aa93bcb86db84e8f)
+
+running 3 tests
+test a_hard_knee_is_exact_at_the_threshold ... ok
+test the_knee_is_continuous_at_both_edges ... ok
+test eq4_static_curve_matches_f64_within_1e4_db ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/lane_sample_timing.rs (/tmp/engine-503-qualified/debug/examples/lane_sample_timing-9f6e846c20ffa72c)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/tmp/engine-503-qualified/debug/deps/conformance-06633ea4b7b80130)
+
+running 7 tests
+test compare::tests::scaled_sum_squares_handles_extreme_finite_values ... ok
+test tests::block_metrics_and_repeat_bits_cover_boundaries ... ok
+test tests::crc32c_known_vector ... ok
+test tests::fixture_header_limits_and_exact_length_reject ... ok
+test tests::manifest_rejects_invalid_classes ... ok
+test tests::prng_vectors_and_range_are_frozen ... ok
+test tests::fixture_preserves_bits_and_detects_every_bit_flip ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/api_metrics.rs (/tmp/engine-503-qualified/debug/deps/api_metrics-7bfbef8c903796fd)
+
+running 2 tests
+test invalid_rates_shapes_tolerances_and_nonfinite_values_are_typed ... ok
+test tolerance_boundary_tie_and_snr_cases_are_explicit ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/effect_contract.rs (/tmp/engine-503-qualified/debug/deps/effect_contract-b856b063c839dbbb)
+
+running 8 tests
+test correct_factory_binds_distinguishable_four_lane_bank ... ok
+test normalized_mapping_endpoints_ties_and_round_trips_are_stable ... ok
+test smoothers_and_segments_finish_on_the_exact_update_or_endpoint ... ok
+test descriptor_requires_launch_rows_and_accepts_optional_extended_rows ... ok
+test extended_rate_failures_are_reported_but_do_not_fail_launch_gates ... ok
+test correct_mock_passes_every_enabled_conformance_gate ... ok
+test ten_thousand_descriptor_and_span_mutations_reject_without_panic ... ok
+test every_faulty_mock_is_detected ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.71s
+
+     Running tests/fixture_corruption.rs (/tmp/engine-503-qualified/debug/deps/fixture_corruption-7d622d8478b9f99f)
+
+running 3 tests
+test every_header_field_limit_overflow_truncation_and_eof_is_rejected ... ok
+test manifest_rejects_all_noncanonical_text_and_path_classes ... ok
+test every_bit_and_4096_seeded_mutations_are_panic_free_and_detected ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/fixtures.rs (/tmp/engine-503-qualified/debug/deps/fixtures-0d70d7cf02df685a)
+
+running 3 tests
+test fixture_trailing_and_truncated_bytes_fail_before_decode ... ok
+test planar_blocks_group_launch_gates_and_extended_compatibility_inputs ... ok
+test checked_in_manifest_lists_only_valid_exact_fixtures ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/conformance_fixtures.rs (/tmp/engine-503-qualified/debug/examples/conformance_fixtures-2989192331546f08)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/tmp/engine-503-qualified/debug/deps/delay-cb636b4bc5d612eb)
+
+running 13 tests
+test tests::descriptor_and_specs_agree ... ok
+test tests::bank_fallback_validates_every_member ... ok
+test tests::crossfade_updates_are_exact_and_queued_retarget_completes ... ok
+test tests::damping_mapping_is_rate_invariant_and_monotone ... ok
+test tests::dry_identities_warm_histories_with_canonical_zero_state ... ok
+test tests::malformed_automation_is_counted_and_never_applied ... ok
+test tests::damped_matrix_tail_matches_reference_oracle ... ok
+test tests::nonfinite_state_recovers_per_block_lane_locally_at_p_zero ... ok
+test tests::descriptor_exact_resources_caps_and_integer_mapping_are_frozen ... ok
+test tests::tap_timing_is_sample_exact ... ok
+test tests::ramp_updates_retarget_and_partition_are_exact ... ok
+test tests::invalid_restore_is_atomic_and_both_resets_are_word_exact ... ok
+test tests::partition_invariance_over_1_7_64_128_512 ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.27s
+
+     Running tests/conformance.rs (/tmp/engine-503-qualified/debug/deps/conformance-ebbcbfacf9629ecf)
+
+running 1 test
+test passes_effect_contract_conformance ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.50s
+
+     Running tests/determinism.rs (/tmp/engine-503-qualified/debug/deps/determinism-670665c57e7e267f)
+
+running 3 tests
+test print_pins ... ignored, regeneration helper; run with --ignored to print the pins
+test corpus_digests_match_their_pins ... ok
+test corpus_cases_are_finite_distinct_and_alive ... ok
+
+test result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running unittests src/lib.rs (/tmp/engine-503-qualified/debug/deps/dsp_reference-a6625f12d7f9a985)
+
+running 25 tests
+test gate_expander::tests::a_non_finite_sample_is_rejected ... ok
+test gate_expander::tests::curve_is_identity_at_ratio_one_and_range_limited_when_closed ... ok
+test gate_expander::tests::hand_computed_curve_point_is_range_clamped ... ok
+test lr4::tests::crossover_domain_is_enforced ... ok
+test gate_expander::tests::a_level_exactly_at_the_threshold_opens_a_closed_gate ... ok
+test gate_expander::tests::a_level_inside_the_hysteresis_band_keeps_reloading_the_hold ... ok
+test parametric_eq::tests::all_families_design_stably_and_have_finite_analytic_response ... ok
+test gate_expander::tests::the_dry_path_is_delayed_by_the_fixed_latency ... ok
+test parametric_eq::tests::identity_section_returns_input_and_warms_independent_history ... ok
+test gate_expander::tests::hold_expiry_closes_exactly_one_sample_after_the_countdown_reaches_zero ... ok
+test ramp::tests::a_zero_window_snaps ... ok
+test ramp::tests::the_step_is_computed_once_and_the_last_sample_is_an_assignment ... ok
+test svf::tests::zero_gain_bell_and_shelves_are_exact_identity ... ok
+test tests::identity_and_direct_dft_oracles_are_bounded_and_correct ... ok
+test tests::sine_frequency_and_silence_are_finite ... ok
+test true_peak_limiter::tests::a_unit_impulse_reproduces_the_annex2_table_rows ... ok
+test tpt::tests::cast_coefficient_transfer_is_bit_identical_to_the_replaced_model ... ok
+test true_peak_limiter::tests::out_of_domain_construction_is_rejected ... ok
+test true_peak_limiter::tests::ramp_windows_follow_the_w_min_floor ... ok
+test true_peak_limiter::tests::the_estimate_of_a_scaled_impulse_is_the_scale ... ok
+test lr4::tests::lr4_sum_is_allpass_and_crossing_is_half ... ok
+test true_peak_limiter::tests::impulse_emerges_at_the_declared_latency ... ok
+test lr4::tests::lr4_impulse_matches_cascaded_state_space ... ok
+test svf::tests::svf_transfer_matches_rbj_cookbook ... ok
+test svf::tests::svf_recurrence_matches_state_space_impulse ... ok
+
+test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s
+
+     Running tests/reference.rs (/tmp/engine-503-qualified/debug/deps/reference-587451a720589ec2)
+
+running 3 tests
+test independent_identity_oracle_round_trips_noise ... ok
+test signal_and_spectrum_domains_are_strict ... ok
+test delayed_delta_and_exact_bin_sine_have_known_spectra ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/tmp/engine-503-qualified/debug/deps/effect_runtime-ed2019aa18d9cb3b)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/bank.rs (/tmp/engine-503-qualified/debug/deps/bank-2c9b5a98706e5f6c)
+
+running 10 tests
+test a_finite_block_is_accepted ... ok
+test a_rejected_block_is_zeroed_reset_and_counted ... ok
+test a_diverging_bank_is_caught_and_reset ... ok
+test an_identity_slot_passes_the_block_through_unchanged ... ok
+test finish_channel_is_per_channel_and_reports_its_lanes ... ok
+test reset_clears_state_and_keeps_coefficients ... ok
+test the_counter_counts_blocks ... ok
+test the_lane_mask_names_the_failing_lanes ... ok
+test the_check_rejects_at_the_threshold ... ok
+test the_two_channels_fail_together ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/contract_ramp_identity.rs (/tmp/engine-503-qualified/debug/deps/contract_ramp_identity-f3a1b7b9c01b810c)
+
+running 3 tests
+test no_smoothing_snaps_and_one_pole_uses_a_precomputed_coefficient ... ok
+test linear_smoother_is_bit_identical_to_the_linear_ramp ... ok
+test the_precomputed_increment_is_the_declared_one_and_the_last_update_assigns ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/determinism.rs (/tmp/engine-503-qualified/debug/deps/determinism-a1f4779a86ef8c83)
+
+running 4 tests
+test print_digests ... ignored, re-pinning helper
+test the_corpus_is_nan_free ... ok
+test every_case_has_a_wide_output_spread ... ok
+test the_corpus_matches_its_pins ... ok
+
+test result: ok. 3 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.31s
+
+     Running tests/dynamics.rs (/tmp/engine-503-qualified/debug/deps/dynamics-fa194fcd587c0194)
+
+running 9 tests
+test a_nan_level_stays_a_nan ... ok
+test a_hard_knee_is_exact_at_the_threshold ... ok
+test below_the_knee_is_the_exact_identity ... ok
+test a_non_positive_knee_is_a_hard_knee ... ok
+test silence_gives_a_finite_floor ... ok
+test the_db_conversions_agree ... ok
+test the_knee_is_continuous_at_both_edges ... ok
+test the_ratio_sets_the_slope ... ok
+test the_curve_matches_the_paper ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/envelope.rs (/tmp/engine-503-qualified/debug/deps/envelope-f027cd2db7d4c2db)
+
+running 15 tests
+test ar_coefficient_complements_are_exact ... ok
+test ar_one_pole_step_flushes_the_recurrence ... ok
+test ar_one_pole_step_is_the_two_product_form ... ok
+test ar_one_pole_step_is_width_independent ... ok
+test ar_one_pole_step_switches_strictly_on_rising ... ok
+test coefficients_are_in_range_and_correctly_signed ... ok
+test degenerate_coefficient_arguments_are_instantaneous ... ok
+test follower_extremes_are_exact ... ok
+test hysteresis_lanes_are_independent ... ok
+test hysteresis_opens_holds_and_closes ... ok
+test peak_follow_max_follows_d8 ... ok
+test the_countdown_clamps_at_zero ... ok
+test the_hold_delays_closing ... ok
+test rms_follow_matches_the_unfused_f64_restatement ... ok
+test peak_follow_matches_the_unfused_f64_restatement ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/lane_identity.rs (/tmp/engine-503-qualified/debug/deps/lane_identity-fee68f521790e02e)
+
+running 4 tests
+test ramp_segments_are_width_independent ... ok
+test the_lane_mask_agrees_across_widths ... ok
+test the_boundary_check_is_width_independent ... ok
+test the_corpus_is_width_independent ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+
+     Running tests/params.rs (/tmp/engine-503-qualified/debug/deps/params-dde3eb66e6a6a647)
+
+running 9 tests
+test a_degenerate_range_has_no_position ... ok
+test a_logarithmic_mapping_is_constant_ratio ... ok
+test boolean_and_enumeration_domains_are_exact ... ok
+test clamping_always_lands_in_the_domain ... ok
+test continuous_domains_are_inclusive_and_reject_non_finite ... ok
+test defaults_are_clamped_and_counted ... ok
+test mapping_is_exact_at_the_ends_and_monotone ... ok
+test negative_zero_is_accepted_and_normalised ... ok
+test the_mapping_inverse_round_trips ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/partition.rs (/tmp/engine-503-qualified/debug/deps/partition-99a11abbb97ff468)
+
+running 4 tests
+test the_composition_is_partition_invariant_at_width_one ... ok
+test the_composition_is_width_independent ... ok
+test the_composition_is_partition_invariant_at_width_four ... ok
+test the_composition_is_partition_invariant_at_width_eight ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/ramp.rs (/tmp/engine-503-qualified/debug/deps/ramp-20b51928ed39c81d)
+
+running 7 tests
+test a_resting_ramp_is_a_constant_segment ... ok
+test the_last_sample_is_exactly_the_target ... ok
+test the_rest_invariant_holds ... ok
+test the_step_is_computed_once ... ok
+test zero_length_ramps_snap ... ok
+test the_state_after_a_block_is_partition_invariant ... ok
+test block_driving_matches_the_scalar_sequence ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/state_payload.rs (/tmp/engine-503-qualified/debug/deps/state_payload-6163a5b9b236405c)
+
+running 9 tests
+test expected_sizes_account_for_the_header ... ok
+test float_words_round_trip_by_bits ... ok
+test rejected_restore_writes_nothing ... ok
+test snapshot_then_restore_returns_every_word ... ok
+test word_slice_lengths_are_checked ... ok
+test words_are_little_endian ... ok
+test wrong_section_lengths_are_rejected ... ok
+test wrong_version_is_rejected ... ok
+test wrong_word_count_is_a_length_error ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/stationary_hoist.rs (/tmp/engine-503-qualified/debug/deps/stationary_hoist-1dd80a040dfd5cd7)
+
+running 11 tests
+test a_one_ulp_move_is_never_hoisted ... ok
+test a_redundant_change_arriving_mid_block_is_partition_invariant ... ok
+test a_retarget_to_the_value_in_force_mid_ramp_agrees_with_the_armed_arm ... ok
+test a_redundant_retarget_renders_the_same_bits_as_the_window_it_skips ... ok
+test a_window_that_closes_on_a_block_boundary_hoists_on_the_next_block ... ok
+test non_finite_values_are_excluded ... ok
+test negative_zero_is_excluded_because_the_two_arms_really_do_differ ... ok
+test signed_zeros_are_distinct_targets ... ok
+test subnormal_targets_are_hoisted_and_both_arms_agree ... ok
+test the_contract_smoother_hoists_linear_and_refuses_one_pole ... ok
+test the_rest_invariant_survives_the_hoist ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/tmp/engine-503-qualified/debug/deps/gate_expander-0e3e8f5b6ba33895)
+
+running 2 tests
+test tests::the_runtime_parameter_specs_agree_with_the_frozen_descriptor ... ok
+test tests::injected_nonfinite_gain_has_scalar_w8_parity ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/conformance.rs (/tmp/engine-503-qualified/debug/deps/conformance-db61dee9db264bbf)
+
+running 1 test
+test passes_effect_contract_conformance ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.06s
+
+     Running tests/contract.rs (/tmp/engine-503-qualified/debug/deps/contract-cbebae6a59998a7b)
+
+running 9 tests
+test descriptor_and_exact_resources_are_frozen ... ok
+test the_payload_header_names_the_layout ... ok
+test bank_validation_precedes_fallback_and_unavailable_w4_is_legal ... ok
+test active_sidechain_and_exact_automation_state_are_observable ... ok
+test independent_curve_and_exact_hold_transitions_agree ... ok
+test an_open_gate_rearms_at_a_level_exactly_equal_to_the_close_threshold ... ok
+test a_closed_gate_opens_at_a_level_exactly_equal_to_the_threshold ... ok
+test the_lookahead_tap_lands_the_detector_exactly_where_the_brief_says ... ok
+test all_rate_caps_lookahead_and_fixed_latency_are_exact ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/determinism.rs (/tmp/engine-503-qualified/debug/deps/determinism-f11db523bb82a954)
+
+running 2 tests
+test no_case_is_vacuous ... ok
+test every_case_agrees_at_every_width_and_matches_its_pin ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+
+     Running tests/identity.rs (/tmp/engine-503-qualified/debug/deps/identity-33f325e05ae0579b)
+
+running 3 tests
+test signed_zero_identity_is_bit_exact ... ok
+test lane_identity_scalar_w8 ... ok
+test partition_invariance ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.38s
+
+     Running tests/oracle.rs (/tmp/engine-503-qualified/debug/deps/oracle-7408e53e49ae38f1)
+
+running 3 tests
+test every_decision_is_at_least_one_decibel_clear_of_a_threshold ... ok
+test oracle_pcm_within_derived_tolerance_scalar ... ok
+test oracle_pcm_within_derived_tolerance_w8 ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.87s
+
+     Running tests/state.rs (/tmp/engine-503-qualified/debug/deps/state-2b4dc28d420e7c4b)
+
+running 8 tests
+test a_malformed_phase_word_rejects_and_leaves_both_lanes_untouched ... ok
+test reset_kinds_are_word_exact ... ok
+test nonfinite_input_recovers_lane_locally_at_the_block_boundary ... ok
+test reset_kinds_are_word_exact_for_every_lane_of_a_bank ... ok
+test the_gain_word_is_flushed_to_zero_once_it_decays_below_the_band ... ok
+test active_restore_continues_against_uninterrupted ... ok
+test a_track_restores_into_a_bank_whose_cursor_is_elsewhere ... ok
+test nonfinite_input_recovers_one_lane_of_a_bank ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src/lib.rs (/tmp/engine-503-qualified/debug/deps/lane-b22b9a2a7efdd5f8)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/b1_speed.rs (/tmp/engine-503-qualified/debug/deps/b1_speed-be52895afee45025)
+
+running 1 test
+test b1_block_kernel_against_a_per_sample_path ... ignored, descriptive benchmark, not a gate; run with --ignored --nocapture
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/b2_interleave.rs (/tmp/engine-503-qualified/debug/deps/b2_interleave-c3b47aa4c982759e)
+
+running 1 test
+test b2_interleave_sweep ... ignored, descriptive sweep, not a gate; run with --ignored --nocapture
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/fader_matrix.rs (/tmp/engine-503-qualified/debug/deps/fader_matrix-1295e7fafd54b301)
+
+running 3 tests
+test holey_populations_keep_neutral_wide_padding ... ok
+test wrong_equations_are_distinguished_before_the_dut_is_checked ... ok
+test settled_fader_matrix_matches_the_two_primitive_oracle ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/fp_env.rs (/tmp/engine-503-qualified/debug/deps/fp_env-36b997964bd7401c)
+
+running 8 tests
+test attestation_passes_on_this_thread ... ok
+test the_canonical_word_is_the_word_inside_the_guard ... ok
+test the_target_declares_whether_it_pins ... ok
+test x86::a_hostile_caller_word_is_normalised_and_returned_bit_exactly ... ok
+test x86::attestation_passes_from_a_hostile_caller_word ... ok
+test x86::denormal_arithmetic_is_correct_inside_the_guard_and_flushed_outside_it ... ok
+test x86::sticky_status_flags_do_not_fail_the_attestation_but_a_control_bit_does ... ok
+test x86::the_caller_word_survives_an_unwind_through_the_guard ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/g1_op_identity.rs (/tmp/engine-503-qualified/debug/deps/g1_op_identity-ab18cce49cdf1503)
+
+running 9 tests
+test g1_fma_is_unfused_on_every_backend ... ok
+test g1_mask_any_matches_the_oracle ... ok
+test g1_nan_max_and_min_follow_d8 ... ok
+test g1_exp2_int_is_exact_on_the_integer_range ... ok
+test g1_max_and_min_lowerings_match_the_oracle ... ok
+test g1_signed_zero_max_and_min_follow_d8 ... ok
+test g1_frexp_reconstructs_positive_normals ... ok
+test g1_directed_edge_pool_is_lane_identical ... ok
+test g1_random_vectors_are_lane_identical ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.51s
+
+     Running tests/g2_kernel_identity.rs (/tmp/engine-503-qualified/debug/deps/g2_kernel_identity-0aed8b25aedcc5db)
+
+running 7 tests
+test lane2_kernels_preserve_original_words_and_reject_short_inputs_before_writing ... ok
+test ordered_accumulation_matches_the_existing_d9_primitives_and_rejects_shapes ... ok
+test g2_subnormal_state_is_flushed_at_every_width ... ok
+test g2_svf_step_yields_both_taps_of_one_state ... ok
+test g2_idle_ramped_svf_equals_the_plain_svf ... ok
+test g2_kernels_are_bit_identical_at_every_width ... ok
+test g2_interleaved_cascade_equals_a_chain_of_blocks ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+
+     Running tests/g4_flush.rs (/tmp/engine-503-qualified/debug/deps/g4_flush-ffe4d9fb9e48b590)
+
+running 2 tests
+test g4_flush_is_lane_wise ... ok
+test g4_flush_law_holds_at_every_width ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/g6_ftz_inert.rs (/tmp/engine-503-qualified/debug/deps/g6_ftz_inert-86a45049927891d2)
+
+running 1 test
+test g6_flush_makes_hardware_ftz_inert ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/halfband.rs (/tmp/engine-503-qualified/debug/deps/halfband-12439a29e76b9bf8)
+
+running 3 tests
+test the_even_tap_table_is_the_symmetric_half_band ... ok
+test the_double_written_history_addresses_every_age_at_every_position ... ok
+test interpolation_and_decimation_are_width_independent ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.60s
+
+     Running tests/input_chain_elision.rs (/tmp/engine-503-qualified/debug/deps/input_chain_elision-c9fc8ff2a0f1dd73)
+
+running 5 tests
+test identity_coefficients_over_non_zero_state_are_not_elidable ... ok
+test negative_zero_mix_words_are_not_the_identity ... ok
+test a_single_non_identity_lane_blocks_the_whole_section ... ok
+test negative_zero_state_words_are_inert_but_still_fail_the_bitwise_gate ... ok
+test elision_is_bit_identical_at_every_width_and_section_pattern ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.70s
+
+     Running tests/p1_partition.rs (/tmp/engine-503-qualified/debug/deps/p1_partition-8e275d1d66a20213)
+
+running 1 test
+test p1_every_kernel_is_partition_invariant ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.35s
+
+     Running tests/sanitise_counter.rs (/tmp/engine-503-qualified/debug/deps/sanitise_counter-763bdb134b34fccb)
+
+running 2 tests
+test the_and_form_is_the_select_form_on_every_lane_subset ... ok
+test every_copy_of_the_sanitise_prologue_counts_what_the_policy_counts ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.17s
+
+     Running unittests src/lib.rs (/tmp/engine-503-qualified/debug/deps/math-b0c2c5b1ddd14e1a)
+
+running 1 test
+test vendored::exp2::i0_wrap_test ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/f1_fast_db_bounds.rs (/tmp/engine-503-qualified/debug/deps/f1_fast_db_bounds-8eb6590375f73459)
+
+running 14 tests
+test f1_fast_tier_stays_within_twice_the_exact_tier ... ignored, full-domain sweep: run with --release -- --ignored
+test f1_gain_from_db_exhaustive ... ignored, full-domain sweep: run with --release -- --ignored
+test f1_level_db_exhaustive ... ignored, full-domain sweep: run with --release -- --ignored
+test f1_domain_and_clamping ... ok
+test f1_identity_anchors_are_exact ... ok
+test f1_the_container_pins_exactly_six_crossings ... ok
+test f1_level_db_subsample ... ok
+test f1_gain_from_db_subsample ... ok
+test f1_crossing_x1_compressor_detector_level ... ok
+test f1_crossing_x3_gate_detector_level ... ok
+test f1_crossing_x5_multiband_detector_level ... ok
+test f1_crossing_x4_gate_applied_gain ... ok
+test f1_crossing_x2_compressor_applied_gain ... ok
+test f1_crossing_x6_multiband_applied_gain ... ok
+
+test result: ok. 11 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+     Running tests/m1_exhaustive.rs (/tmp/engine-503-qualified/debug/deps/m1_exhaustive-31004c652cc6efcf)
+
+running 6 tests
+test m1_exp2_lane_exhaustive ... ignored, 2^32 sweep: run with --release -- --ignored
+test m1_log2_lane_exhaustive ... ignored, 2^32 sweep: run with --release -- --ignored
+test m1_anchors_and_clamping ... ok
+test m1_measured_worst_points ... ok
+test m1_log2_lane_subsample ... ok
+test m1_exp2_lane_subsample ... ok
+
+test result: ok. 4 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/m2_lane_identity.rs (/tmp/engine-503-qualified/debug/deps/m2_lane_identity-d31b12e55240d076)
+
+running 4 tests
+test m2_exp2_callers_directed_edges_are_lane_identical ... ok
+test m2_corpus_reaches_every_branch ... ok
+test m2_exp2_lane_identity ... ok
+test m2_log2_lane_identity ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.51s
+
+     Running tests/m3_determinism.rs (/tmp/engine-503-qualified/debug/deps/m3_determinism-c4851931423bcbcd)
+
+running 5 tests
+test m3_no_unsafe_or_force_eval_in_vendored_source ... ok
+test m3_no_target_conditional_source ... ok
+test m3_corpus_is_nan_free ... ok
+test m3_corpus_digests_match_pins ... ok
+test m3_corpus_exercises_each_domain ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.07s
+
+     Running tests/scalar_accuracy.rs (/tmp/engine-503-qualified/debug/deps/scalar_accuracy-289c65f4c89b8e35)
+
+running 9 tests
+test exact_anchors ... ok
+test extreme_scaling_paths ... ok
+test sqrtf_is_correctly_rounded_exhaustive ... ignored, 2^31 sweep: run with --release -- --ignored
+test huge_argument_reduction ... ok
+test f32_functions_match_platform_libm_in_f64 ... ok
+test f64_functions_match_platform_libm ... ok
+test floor_matches_platform ... ok
+test sqrtf_is_correctly_rounded ... ok
+test sqrt_is_correctly_rounded ... ok
+
+test result: ok. 8 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.18s
+
+     Running unittests src/lib.rs (/tmp/engine-503-qualified/debug/deps/multiband_compressor-c2da031093ccdf69)
+
+running 16 tests
+test shim::tests::the_link_combines_the_pair_per_mode ... ok
+test shim::tests::the_shims_are_width_independent ... ok
+test shim::tests::the_smoother_has_exact_ends ... ok
+test split::the_split_costs_what_it_costs ... ignored, descriptive measurement, not a gate
+test shim::tests::the_smoother_picks_the_attack_direction_and_matches_the_unfused_restatement ... ok
+test split::a_window_lands_on_its_target_on_the_exact_sample ... ok
+test split::a_settled_bank_meets_the_flat_paths_precondition ... ok
+test split::the_split_is_partition_invariant ... ok
+test split::a_ramp_in_flight_when_a_block_opens_stays_in_flight ... ok
+test split::a_ramp_arriving_on_a_block_boundary_arrives_on_the_same_sample ... ok
+test split::a_restated_parameter_stays_on_the_flat_path ... ok
+test split::a_settled_bank_renders_what_the_ramped_path_rendered ... ok
+test split::a_ramp_arriving_mid_block_arrives_on_the_same_sample ... ok
+test split::the_ramped_path_advances_both_channels ... ok
+test split::a_restatement_mid_flight_agrees ... ok
+test split::overlapping_windows_on_different_tracks_agree ... ok
+
+test result: ok. 15 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.12s
+
+     Running tests/conformance.rs (/tmp/engine-503-qualified/debug/deps/conformance-29c2bc38d30f64ef)
+
+running 1 test
+test passes_effect_contract_conformance ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.86s
+
+     Running tests/cross_target_digest.rs (/tmp/engine-503-qualified/debug/deps/cross_target_digest-8dbd4d13a63ac0fd)
+
+running 1 test
+test the_corpus_digests_are_pinned_and_width_independent ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+     Running tests/crossover.rs (/tmp/engine-503-qualified/debug/deps/crossover-1144e5752b437ca2)
+
+running 3 tests
+test the_design_guards_its_domain ... ok
+test the_recursive_words_are_flushed ... ok
+test the_two_stage_split_matches_the_reference_and_recombines_flat ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.38s
+
+     Running tests/descriptive_frame_cost.rs (/tmp/engine-503-qualified/debug/deps/descriptive_frame_cost-75075de5f16162db)
+
+running 1 test
+test descriptive_frame_cost ... ignored, descriptive measurement, not a gate
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/identity.rs (/tmp/engine-503-qualified/debug/deps/identity-cee60395b1bda97e)
+
+running 4 tests
+test resets_agree_across_widths ... ok
+test a_restored_track_is_rotated_into_the_receiving_cursor ... ok
+test partition_invariance ... ok
+test lane_identity_across_widths ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+
+     Running tests/lr4_two_section_mapping_f64.rs (/tmp/engine-503-qualified/debug/deps/lr4_two_section_mapping_f64-6f6be27bb23339c0)
+
+running 2 tests
+test two_section_bands_match_the_four_section_reference ... ok
+test the_band_sum_is_the_butterworth_allpass ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.52s
+
+     Running tests/no_alloc_render.rs (/tmp/engine-503-qualified/debug/deps/no_alloc_render-13e333585836bf40)
+
+running 2 tests
+test the_scalar_render_path_allocates_nothing ... ok
+test the_bank_render_path_allocates_nothing ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/nonfinite.rs (/tmp/engine-503-qualified/debug/deps/nonfinite-64e997032d2e792b)
+
+running 3 tests
+test recovery_restores_a_fresh_instance ... ok
+test a_nonfinite_block_is_zeroed_reset_and_counted ... ok
+test the_boundary_is_the_shared_limit_and_a_bank_shares_its_reset ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/product.rs (/tmp/engine-503-qualified/debug/deps/product-f96172ae26acee4b)
+
+running 7 tests
+test descriptor_preparation_and_exact_four_rate_resources_are_frozen ... ok
+test bypass_latency_automation_and_restore_are_transactional ... ok
+test a_rejected_restore_changes_nothing ... ok
+test bank_requests_are_validated_before_any_fallback ... ok
+test unity_gain_output_is_the_delayed_lr4_sum ... ok
+test unity_gain_transition_has_no_step_at_crossover ... ok
+test isolated_low_and_high_band_compression_reduce_only_the_selected_band ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src/lib.rs (/tmp/engine-503-qualified/debug/deps/parametric_eq-1ff22f6f710322fe)
+
+running 13 tests
+test interleave_identity::the_tuned_depth_is_per_backend_and_divides_the_cascade ... ok
+test elision::a_negative_zero_state_in_a_live_section_refuses_elision ... ok
+test elision::a_non_zero_state_in_a_dead_section_refuses_elision ... ok
+test elision::the_shipped_shape_actually_elides ... ok
+test elision::a_non_finite_or_oversized_input_refuses_elision ... ok
+test elision::the_negative_zero_refusal_is_load_bearing ... ok
+test elision::a_negative_zero_input_refuses_elision ... ok
+test elision::a_section_live_on_one_lane_is_not_elided ... ok
+test elision::a_discontinuity_reset_mid_ramp_refreshes_the_identity_flag ... ok
+test elision::a_mid_session_enable_or_disable_stays_bit_exact ... ok
+test interleave_identity::the_interleaved_cascade_renders_the_per_section_path_bit_for_bit ... ok
+test elision::an_elided_cascade_is_the_full_cascade_bit_for_bit ... ok
+test elision::the_two_channels_are_judged_together ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.67s
+
+     Running tests/analytic.rs (/tmp/engine-503-qualified/debug/deps/analytic-2b1e5dee29961995)
+
+running 7 tests
+test the_spectral_norm_predicate_separates_contractive_from_expansive_words ... ok
+test the_pcm_fixture_rows_are_oracle_bounded ... ok
+test ten_thousand_seeded_legal_designs_are_finite_and_reference_bounded ... ok
+test frequency_searches_cover_cutoff_center_midpoint_and_notch_minimum ... ok
+test word_ramps_are_contractive_on_every_grid_row ... ok
+test svf_words_match_the_independent_oracle_on_the_complete_grid ... ok
+test the_f64_mapping_reproduces_the_verified_reference_mapping ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.48s
+
+     Running tests/bank.rs (/tmp/engine-503-qualified/debug/deps/bank-8efda21068e0b0c1)
+
+running 6 tests
+test descriptive_bank_throughput ... ignored, descriptive measurement
+test bank_binding_rejects_malformed_shapes_and_declines_a_foreign_width ... ok
+test bank_binding_declines_a_heterogeneous_cohort ... ok
+test bank_lane_and_track_changes_do_not_leak ... ok
+test bank_rendering_is_partition_invariant ... ok
+test every_width_matches_the_scalar_instantiation ... ok
+
+test result: ok. 5 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/conformance.rs (/tmp/engine-503-qualified/debug/deps/conformance-2dab8a2f5198d19d)
+
+running 1 test
+test passes_effect_contract_conformance ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/contract.rs (/tmp/engine-503-qualified/debug/deps/contract-5e02ef502176da6b)
+
+running 16 tests
+test a_payload_of_the_wrong_length_is_rejected ... ok
+test a_payload_with_a_stale_header_is_rejected_on_its_own_evidence ... ok
+test a_malformed_payload_is_rejected_without_touching_either_channel ... ok
+test a_negative_zero_automation_value_is_accepted_as_zero ... ok
+test an_invalid_version_payload_is_rejected ... ok
+test an_over_capacity_automation_block_is_rejected_whole ... ok
+test descriptor_is_frozen ... ok
+test automation_starts_a_64_sample_word_ramp ... ok
+test bypass_copies_dry_bits_and_leaves_the_state_alone ... ok
+test prepare_refuses_an_unknown_family ... ok
+test malformed_automation_rejects_each_span_without_losing_valid_targets ... ok
+test disabled_and_zero_db_sections_return_dry_bits_with_zero_state_growth ... ok
+test snapshot_rejects_bad_output_without_touching_either_lane ... ok
+test resets_restore_defaults_or_only_clear_history ... ok
+test state_restore_continues_active_ramp_bit_exactly ... ok
+test automation_is_partition_invariant ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/determinism.rs (/tmp/engine-503-qualified/debug/deps/determinism-2ee7205eee0085fc)
+
+running 3 tests
+test print_pins ... ignored, pin generator
+test the_corpus_is_finite_and_discriminating ... ok
+test the_corpus_digests_match_the_pins_at_every_width ... ok
+
+test result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/mono_collapse.rs (/tmp/engine-503-qualified/debug/deps/mono_collapse-613c0b5803c68d81)
+
+running 2 tests
+test a_desymmetrized_bank_is_a_never_collapsed_bank ... ok
+test the_collapsed_body_renders_the_dual_bodys_left_plane ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/silent_fixed_point.rs (/tmp/engine-503-qualified/debug/deps/silent_fixed_point-2334506edac90616)
+
+running 3 tests
+test the_settled_stretch_is_exactly_positive_zero ... ok
+test a_negative_zero_input_block_is_not_treated_as_silence ... ok
+test a_settled_silent_bank_renders_exactly_the_bank_that_never_fast_paths ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/stationary_hoist.rs (/tmp/engine-503-qualified/debug/deps/stationary_hoist-dc62bad51dc4759a)
+
+running 4 tests
+test a_band_restated_mid_flight_still_settles_at_the_designed_words ... ok
+test a_redundant_automation_point_renders_exactly_the_unautomated_bank ... ok
+test a_restated_band_is_indistinguishable_from_no_automation_over_many_blocks ... ok
+test a_real_automation_point_still_ramps ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/time_domain.rs (/tmp/engine-503-qualified/debug/deps/time_domain-6ce33f3e9d35232a)
+
+running 5 tests
+test a_non_launch_sample_rate_is_not_a_legal_design ... ok
+test a_non_finite_input_block_is_zeroed_counted_once_and_leaves_the_next_block_clean ... ok
+test flush_keeps_decaying_state_out_of_the_subnormal_range ... ok
+test one_second_impulse_dfts_match_the_independent_oracle_at_all_frozen_edges ... ok
+test forty_eight_frozen_million_sample_sequences_remain_valid_without_recovery ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.75s
+
+     Running unittests src/lib.rs (/tmp/engine-503-qualified/debug/deps/soft_clip-b59a36db504a9516)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/allocation.rs (/tmp/engine-503-qualified/debug/deps/allocation-54872d22bcbc48c7)
+
+running 3 tests
+test preparation_allocates_a_bounded_number_of_times ... ok
+test the_scalar_render_path_never_allocates ... ok
+test the_bank_render_path_never_allocates ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.69s
+
+     Running tests/boundary_check.rs (/tmp/engine-503-qualified/debug/deps/boundary_check-5486c9fcf4a09fa7)
+
+running 3 tests
+test a_finite_but_out_of_range_block_also_fails ... ok
+test a_non_finite_block_is_zeroed_reset_and_counted_once ... ok
+test a_bank_block_fails_and_recovers_as_a_unit ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/conformance.rs (/tmp/engine-503-qualified/debug/deps/conformance-3f84fe5a4e9fad84)
+
+running 1 test
+test passes_effect_contract_conformance ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.56s
+
+     Running tests/contract.rs (/tmp/engine-503-qualified/debug/deps/contract-aec7cd7675e9792d)
+
+running 7 tests
+test descriptor_resources_and_independent_fir_design_are_frozen ... ok
+test automation_rejects_everything_but_canonical_ordered_points ... ok
+test bank_binding_validates_before_declining_an_unavailable_width ... ok
+test wet_impulse_has_exact_group_delay_and_final_causal_support ... ok
+test scalar_matches_independent_oracle_after_warmup ... ok
+test identity_and_bypass_emit_the_delayed_dry_signal_bit_for_bit ... ok
+test frozen_alias_claim_improves_over_independent_naive_cubic ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.32s
+
+     Running tests/descriptive_bench.rs (/tmp/engine-503-qualified/debug/deps/descriptive_bench-5415592d512064e0)
+
+running 1 test
+test descriptive_bank_throughput ... ignored, descriptive benchmark; run explicitly in release
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/determinism.rs (/tmp/engine-503-qualified/debug/deps/determinism-ce548ebba1640915)
+
+running 2 tests
+test the_corpus_is_not_vacuous ... ok
+test every_case_matches_its_pin_at_every_width ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+
+     Running tests/lane_identity.rs (/tmp/engine-503-qualified/debug/deps/lane_identity-c141716e4dadf34d)
+
+running 1 test
+test the_hosts_bank_width_matches_the_scalar_instantiation ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.44s
+
+     Running tests/partition_invariance.rs (/tmp/engine-503-qualified/debug/deps/partition_invariance-0add7a88fb660b01)
+
+running 1 test
+test every_partition_renders_the_one_shot_bits_and_state ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+
+     Running tests/polyphase_identity.rs (/tmp/engine-503-qualified/debug/deps/polyphase_identity-b933d44fbe43e1bc)
+
+running 1 test
+test polyphase_matches_the_frozen_63_tap_graph ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.89s
+
+     Running tests/ramp_law.rs (/tmp/engine-503-qualified/debug/deps/ramp_law-b0310e1b2810eb13)
+
+running 3 tests
+test a_new_point_restarts_from_the_current_value ... ok
+test the_driver_reproduces_the_runtime_ramp_law_bit_for_bit ... ok
+test the_ramp_divides_once_and_snaps_exactly_whatever_the_block_size ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/state_roundtrip.rs (/tmp/engine-503-qualified/debug/deps/state_roundtrip-330ef7bc77ed6c28)
+
+running 4 tests
+test a_restore_rejects_a_stale_version_a_wrong_length_and_every_invalid_word ... ok
+test both_resets_are_word_exact ... ok
+test a_snapshot_restores_into_a_fresh_instance_and_continues_bit_for_bit ... ok
+test a_bank_track_restore_is_position_independent_and_lane_local ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/tmp/engine-503-qualified/debug/deps/transient_shaper-2558c84c2c99a726)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/allocation.rs (/tmp/engine-503-qualified/debug/deps/allocation-246f1063b29095e8)
+
+running 3 tests
+test the_counter_observes_same_thread_allocation_and_free ... ok
+test foreign_thread_allocations_do_not_enter_the_callers_counts ... ok
+test the_render_path_allocates_nothing ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.77s
+
+     Running tests/bank.rs (/tmp/engine-503-qualified/debug/deps/bank-d00d3ef03d4a60df)
+
+running 2 tests
+test bank_snapshot_restore_and_resets_are_track_local ... ok
+test bank_matches_scalar_pcm_state_and_reports_for_every_link_mode ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/boundary.rs (/tmp/engine-503-qualified/debug/deps/boundary-2b7a9750be5331cd)
+
+running 3 tests
+test a_nonfinite_block_is_zeroed_and_the_envelopes_are_reset ... ok
+test a_subnormal_input_renders_and_flushes_the_envelope ... ok
+test a_nonfinite_bank_block_is_rejected_as_a_unit ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/conformance.rs (/tmp/engine-503-qualified/debug/deps/conformance-94253bad7cf8195e)
+
+running 1 test
+test passes_effect_contract_conformance ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.31s
+
+     Running tests/contract.rs (/tmp/engine-503-qualified/debug/deps/contract-4ea7bab4adbaac7d)
+
+running 8 tests
+test both_resets_have_word_exact_parameter_and_envelope_states ... ok
+test descriptor_coefficients_resources_and_transactional_caps_are_frozen ... ok
+test automation_updates_one_sixty_three_sixty_four_retargets_and_restores_exactly ... ok
+test bank_resources_and_validation_precede_legal_unavailable_fallback ... ok
+test identity_rules_are_bit_exact_and_the_followers_still_warm ... ok
+test independent_coefficients_time_constants_layout_and_both_caps_are_exact ... ok
+test state_restore_validates_version_length_envelope_and_parameters ... ok
+test link_modes_drive_the_detector_as_specified ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/cross_target.rs (/tmp/engine-503-qualified/debug/deps/cross_target-68b48f5e6eaff6c9)
+
+running 2 tests
+test the_pinned_digests_hold ... ok
+test every_width_produces_the_same_words ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/oracle.rs (/tmp/engine-503-qualified/debug/deps/oracle-1d8a0270d70ee211)
+
+running 2 tests
+test scalar_matches_the_independent_f64_oracle ... ok
+test impulse_step_and_decay_cover_both_attack_and_sustain_signs ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/partition.rs (/tmp/engine-503-qualified/debug/deps/partition-fb2131a50fca2ef6)
+
+running 2 tests
+test the_scalar_product_is_partition_invariant ... ok
+test the_bank_is_partition_invariant ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running unittests src/lib.rs (/tmp/engine-503-qualified/debug/deps/true_peak_limiter-81730cdca3a128e2)
+
+running 29 tests
+test tests::an_open_window_is_never_stationary ... ok
+test tests::a_nonfinite_block_is_zeroed_reset_and_counted ... ok
+test tests::automation_retargets_linear_coefficients_and_counts_invalid_spans ... ok
+test tests::descriptor_metadata_and_exact_resource_rows_are_frozen ... ok
+test tests::bank_binding_validates_before_fallback_and_retains_exact_width_bytes ... ok
+test tests::automation_withdraws_the_claim_and_the_resident_tap_keeps_up ... ok
+test tests::both_resets_return_the_runtime_state_to_a_silent_lane ... ok
+test tests::the_lane_ramp_reproduces_the_scalar_ramp_bit_for_bit ... ok
+test tests::the_stationary_hoist_reads_what_advancing_would_have_produced ... ok
+test tests::the_gain_ramp_falls_gradually_and_arrives_at_the_requirement ... ok
+test tests::state_round_trips_and_rejects_corruption ... ok
+test tests::partition_invariance_holds_over_block_sizes ... ok
+test tests::phase_outputs_match_the_frozen_scalar_order ... ok
+test tests::fixed_latency_guarded_ceiling_and_bypass_bits_hold ... ok
+test tests::a_restore_withdraws_the_silence_claim ... ok
+test tests::automation_withdraws_the_claim_on_the_bank_path_too ... ok
+test tests::a_mixed_lookahead_cohort_falls_back_bit_identically ... ok
+test tests::a_uniform_cohort_renders_exactly_the_per_lane_path ... ok
+test tests::a_restore_that_desyncs_the_phase_falls_back ... ok
+test tests::a_de_zipper_window_open_across_a_block_boundary_refuses_the_claim ... ok
+test tests::the_segment_walk_visits_the_slots_a_frame_at_a_time_walk_visits ... ok
+test tests::bs1770_annex2_conformance_is_unchanged ... ok
+test tests::lane_identity_holds_across_widths ... ok
+test tests::the_two_channels_of_a_uniform_cohort_keep_their_own_phases ... ok
+test tests::silence_restores_exact_identity_including_signed_zero ... ok
+test tests::a_limiter_still_releasing_through_the_silence_is_never_frozen ... ok
+test tests::a_settled_silent_limiter_renders_exactly_the_never_fast_path ... ok
+test tests::a_negative_zero_input_block_is_not_treated_as_silence ... ok
+test tests::a_stale_detector_history_refuses_the_claim ... ok
+
+test result: ok. 29 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
+
+     Running tests/allocation.rs (/tmp/engine-503-qualified/debug/deps/allocation-bd63ee06ed827838)
+
+running 1 test
+test the_render_path_allocates_nothing ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+     Running tests/bench.rs (/tmp/engine-503-qualified/debug/deps/bench-4cbd1597c42d5fac)
+
+running 1 test
+test bench_w8_ns_per_lane_sample ... ignored, descriptive benchmark, run by hand (AGENTS.md benchmark protocol)
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/conformance.rs (/tmp/engine-503-qualified/debug/deps/conformance-12e612c994dc7f9e)
+
+running 1 test
+test passes_effect_contract_conformance ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.93s
+
+     Running tests/determinism.rs (/tmp/engine-503-qualified/debug/deps/determinism-fc90b419473bf357)
+
+running 1 test
+test every_case_has_one_digest_at_every_width ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+
+     Running tests/gain_law.rs (/tmp/engine-503-qualified/debug/deps/gain_law-4c57caa070c18331)
+
+running 2 tests
+test production_tracks_the_f64_oracle ... ok
+test output_true_peak_never_exceeds_the_ceiling ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.14s
+
+     Running tests/mono_collapse.rs (/tmp/engine-503-qualified/debug/deps/mono_collapse-c4153c66eb76d298)
+
+running 2 tests
+test a_desymmetrized_bank_is_a_never_collapsed_bank ... ok
+test the_collapsed_body_renders_the_dual_bodys_left_plane ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running tests/observation.rs (/tmp/engine-503-qualified/debug/deps/observation-17563c428930bf2b)
+
+running 3 tests
+test a_resident_read_is_repeatable_to_the_bit ... ok
+test the_limiter_reads_the_reduction_word_the_envelope_persists ... ok
+test observing_between_blocks_does_not_move_a_single_output_sample ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
