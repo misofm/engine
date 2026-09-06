@@ -1,0 +1,262 @@
+[
+  {
+    "path": "502-postmain-dsp-failure.log",
+    "bytes": 75428,
+    "sha256": "8aa1fc9a04c7f44b4fc545d4c7ab455439f18c5a9ffb03d7619f53fff99492de"
+  },
+  {
+    "path": "503-evidence-attribution.md",
+    "bytes": 747,
+    "sha256": "582f2b90c8f7130654d3e1cf291e10e7799da8abe43a76f86f478b7fec868c77"
+  },
+  {
+    "path": "503-luna1-debug-controls.log",
+    "bytes": 449,
+    "sha256": "7488ddb2d7743119ccac2e0286d7c7c686a7756729a28eeab09198329c43859a"
+  },
+  {
+    "path": "503-luna1-debug-render.log",
+    "bytes": 428,
+    "sha256": "f906a36198e09072cc82e30e3980dd125de893f84331e77798ce705dd48189f8"
+  },
+  {
+    "path": "503-luna1-full-debug.log",
+    "bytes": 518,
+    "sha256": "71594a64d40d710621d0851139e9510c2c01d1fb074f8fb3add79ed81f1f0d54"
+  },
+  {
+    "path": "503-luna1-full-release.log",
+    "bytes": 522,
+    "sha256": "48c7d5d9240540a220b4afcfe989abaa651de20f83bb4f8fb1360ba848ec7dac"
+  },
+  {
+    "path": "503-luna1-policy.log",
+    "bytes": 514,
+    "sha256": "dae29bbb6415ad335f7af98039d1da14590e5055195bb1c692d0ad219358b4e1"
+  },
+  {
+    "path": "503-luna1-release-controls.log",
+    "bytes": 453,
+    "sha256": "1379058e726800e01ecb1a364cb4790e4532edd1ed4d222b2600eb50477e0f0e"
+  },
+  {
+    "path": "503-luna1-release-render.log",
+    "bytes": 432,
+    "sha256": "183e57d0fc5c74bddcc42058d0ee80c7ac9fec7744164ce5e3a0e8894f162c3f"
+  },
+  {
+    "path": "503-luna1-report.md",
+    "bytes": 3995,
+    "sha256": "d3584a52d075387c27549d95df05061a1b52e151d536b1c23fe06308c3502ed6"
+  },
+  {
+    "path": "503-root-dsp-integration.command.json",
+    "bytes": 1164,
+    "sha256": "cd8d8a1bc4d03f3460e3f243e3cc310fac7b107dc41533a761c66c2307cd1f1d"
+  },
+  {
+    "path": "503-root-dsp-integration.log",
+    "bytes": 66711,
+    "sha256": "a68b55db74be93e786e5899f326e0925caa719aac636a2335afb5453a521fc9d"
+  },
+  {
+    "path": "503-root-dsp-integration.py",
+    "bytes": 1305,
+    "sha256": "94a1d9c0dab07234bde7a0df3e0dfb66b0dfa768678b6e294368eb3ea8b2afc8"
+  },
+  {
+    "path": "503-root-dsp-integration.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "503-root-final-clippy.command.json",
+    "bytes": 870,
+    "sha256": "7c8dcf718bc195076248071ae732cc9db1d8a0dead53bcca2bd8a10ce9c27c41"
+  },
+  {
+    "path": "503-root-final-clippy.log",
+    "bytes": 1318,
+    "sha256": "fbb233e74fecde12cde781987ac9ce5705f6f6b13675e2082aa9884aad5a2c5a"
+  },
+  {
+    "path": "503-root-final-clippy.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "503-root-final-dev-conformance.command.json",
+    "bytes": 879,
+    "sha256": "b24067674ac228341f07a442a2a09e2b93618fe6b121a5d3a3a3aaabd828447d"
+  },
+  {
+    "path": "503-root-final-dev-conformance.log",
+    "bytes": 660,
+    "sha256": "3ad68ece1832bfe6ed47f59e1fe10c1165e7f3b14a7da35f8b391c2dbab46281"
+  },
+  {
+    "path": "503-root-final-dev-conformance.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "503-root-final-dev-control.command.json",
+    "bytes": 961,
+    "sha256": "4ed346298034e88188207cbabd30fc5b0cd075dbe7ec7838217f6d0589a0683b"
+  },
+  {
+    "path": "503-root-final-dev-control.log",
+    "bytes": 1606,
+    "sha256": "daf69108bd3ce00f12f107691f1dcec1cae224ce6ba24f8b6959f744664c992b"
+  },
+  {
+    "path": "503-root-final-dev-control.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "503-root-final-dev-render.command.json",
+    "bytes": 959,
+    "sha256": "3b379b8b3dacec57b89a5f9621771df2ad0a63270e5e16cd853b943e18876d82"
+  },
+  {
+    "path": "503-root-final-dev-render.log",
+    "bytes": 540,
+    "sha256": "a8f74640bcd04c94ed176684db9050691b0c23ed0848189975657fd41c030039"
+  },
+  {
+    "path": "503-root-final-dev-render.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "503-root-final-diff.command.json",
+    "bytes": 758,
+    "sha256": "86f1be2432f6efc9dc8b5e21f856d2ee04d186b5abce4cf0662b6cd29e029600"
+  },
+  {
+    "path": "503-root-final-diff.log",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "503-root-final-diff.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "503-root-final-fmt.command.json",
+    "bytes": 782,
+    "sha256": "0dae33508c036f42f72b451eab273286e3ace1ed35347a17ad7546c6f66659af"
+  },
+  {
+    "path": "503-root-final-fmt.log",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "503-root-final-fmt.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "503-root-final-gates.py",
+    "bytes": 1901,
+    "sha256": "77f62571419b9da133b07a2f7796cbf28e4bcd85f7b8ba5f7c716a98c1783b48"
+  },
+  {
+    "path": "503-root-final-realtime-mutations.command.json",
+    "bytes": 771,
+    "sha256": "67ace2b4794c6463a9b03263f65c1e51fcba558554a98796b8bc808dd88eb0ce"
+  },
+  {
+    "path": "503-root-final-realtime-mutations.log",
+    "bytes": 35,
+    "sha256": "9ddd615ea2c19bae6ce028d9d2b9c2eee8bd0861593bcde27cb6261068e67b78"
+  },
+  {
+    "path": "503-root-final-realtime-mutations.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "503-root-final-realtime.command.json",
+    "bytes": 772,
+    "sha256": "ccbb2260e1d44d7a384894befee359350cb90443f36b96127c72b033f3f98a69"
+  },
+  {
+    "path": "503-root-final-realtime.log",
+    "bytes": 52,
+    "sha256": "df6e4f25e60994df7ea568d80ad9bea2caa821c5cad110007f742ffe00847331"
+  },
+  {
+    "path": "503-root-final-realtime.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "503-root-final-release-conformance.command.json",
+    "bytes": 883,
+    "sha256": "ef28a2f442515917f89d1026242ebc10559e6578b3bb1bce684cf2c9af8274a9"
+  },
+  {
+    "path": "503-root-final-release-conformance.log",
+    "bytes": 664,
+    "sha256": "2bdc9e20b17681cd313a14abc52e730100a20490cc513f95b98fe5e7d0ba446c"
+  },
+  {
+    "path": "503-root-final-release-conformance.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "503-root-final-release-control.command.json",
+    "bytes": 965,
+    "sha256": "ea2aff6f8120fad979c2ffb0ce592238f7ea2e1e563090cefb820498c254ea68"
+  },
+  {
+    "path": "503-root-final-release-control.log",
+    "bytes": 1610,
+    "sha256": "559efe8125ed310aecbdd7a2a7d4c13b5a782e8d4f21b652412c1a6d9f87eb2e"
+  },
+  {
+    "path": "503-root-final-release-control.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "503-root-final-release-render.command.json",
+    "bytes": 963,
+    "sha256": "1e0b6186f17db17d93a6949964c036008836c2d0f706c4ca8947b88663016811"
+  },
+  {
+    "path": "503-root-final-release-render.log",
+    "bytes": 544,
+    "sha256": "86910e038a590478343e2f6010f4d1cae52448cec27d79d47042b540f6593b7c"
+  },
+  {
+    "path": "503-root-final-release-render.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "503-root-source-identities.json",
+    "bytes": 455,
+    "sha256": "7a636d00357293e2a0787214601a51e5ddceaab3040b5a43ac7a648f43af185b"
+  },
+  {
+    "path": "README.md",
+    "bytes": 1983,
+    "sha256": "98423102a1bac97d3afa2b437d27977407407e7f1294d76f1ac85a313d9fa39d"
+  },
+  {
+    "path": "astra-502-postmain-failure-brief.md",
+    "bytes": 5237,
+    "sha256": "7192eeb318f295782a26cc1ee0650bc8d5b3015a79ca3f76a7901c21c60a351b"
+  },
+  {
+    "path": "astra-503-numbered-scope-review.md",
+    "bytes": 1982,
+    "sha256": "c974d517732a7259e82666459e5e7027e7ae1f6100b0887280d85f6f385fa1e1"
+  }
+]

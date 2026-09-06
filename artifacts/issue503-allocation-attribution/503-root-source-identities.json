@@ -1,0 +1,17 @@
+[
+  {
+    "path": "crates/compressor/tests/conformance.rs",
+    "bytes": 7374,
+    "sha256": "4840842b3d74fcfb181f18db6189a0371951e276578897cebda79373907dbbd8"
+  },
+  {
+    "path": "crates/compressor/Cargo.toml",
+    "bytes": 1042,
+    "sha256": "8eb1e329f51d85a6d521ed55bd8de1b95067040cbb35ad9e14287fd941685393"
+  },
+  {
+    "path": "Cargo.lock",
+    "bytes": 63624,
+    "sha256": "3da9c28d3f6f5cfca08c56c5cf962a336ff4e0f1a7b9a28a7bdd3bbc617627a5"
+  }
+]

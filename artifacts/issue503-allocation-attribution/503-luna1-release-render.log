@@ -1,0 +1,6 @@
+command: PATH=/home/bl/.cargo/bin:$PATH cargo test --locked -p compressor --test conformance --features engine/realtime-audit --profile release -- --exact uniform_and_ragged_render_paths_allocate_and_free_nothing --nocapture
+cwd: /home/bl/misofm/engine-compressor-allocation-proof
+exit: 0
+running 1 test
+test uniform_and_ragged_render_paths_allocate_and_free_nothing ... ok
+parent and isolated child both passed; 2 filtered in each
