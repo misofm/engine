@@ -1,0 +1,31 @@
+{
+  "cwd": "/home/bl/misofm/engine-lane2-plan",
+  "argv": [
+    "rustc",
+    "artifacts/issue463-lane-bounds-baseline/issue463_probe.rs",
+    "--edition=2024",
+    "--crate-name",
+    "issue463_probe",
+    "--crate-type",
+    "lib",
+    "--target",
+    "wasm32-unknown-unknown",
+    "-C",
+    "opt-level=3",
+    "-C",
+    "debuginfo=2",
+    "-C",
+    "codegen-units=1",
+    "-C",
+    "lto=off",
+    "-C",
+    "target-feature=-simd128",
+    "-L",
+    "dependency=/tmp/463-sol2-wasm-scalar-target/wasm32-unknown-unknown/release/deps",
+    "--extern",
+    "lane=/tmp/463-sol2-wasm-scalar-target/wasm32-unknown-unknown/release/liblane.rlib",
+    "--emit=obj=/tmp/463-root-baseline/wasm-scalar.o"
+  ],
+  "environment_overrides": {},
+  "source_commit": "9c2741ab7fda641c2305b63061769da0a2e16271"
+}

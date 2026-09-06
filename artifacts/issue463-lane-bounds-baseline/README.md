@@ -83,3 +83,7 @@ guest legs. The console log SHA-256 is
 `3a35fb84fbac2f2b3697dd82e087537b6d65659f76f44e90310a83eef939589f`; the three JSON records are
 retained at the command's artifact path with SHA-256
 `6ad61ef8bfb758a0b50f886653c6ff3446c8be89965cc3ea6bd375f52c5640b2`.
+
+## Root exact-command recapture
+
+Root independently rebuilt and decoded the unchanged probe/kernels at9c2741ab. Sol’s original compiler command record used placeholders and is retained as a template, not represented as exact invocation provenance. `root-recapture/` supplies actual expanded argv/cwd/environment overrides, tool versions, numeric exits, source/rlib/object/decoded/body hashes and raw outputs. All12 commands returned0. All three object hashes match Sol’s recorded objects. All18 decoded instruction bodies match; five native extracted records additionally include the next section label, documented in comparison.json without modifying either raw capture. The compiler/decoder recapture is the authoritative exact-command baseline; no kernel rewrite or timing occurred.

@@ -254,3 +254,9 @@ Mix2x2 signal entries. Fresh ordinary G5 exited zero: native, scalar-Wasm and si
 The corpus shape and current pins were not changed during this repair. This is the first coherent
 Sol2 baseline tranche; no kernel rewrite begins before root checkpoints it and Astra explicitly
 accepts the pre-edit baseline.
+
+## Root exact-command recapture
+
+Root independently rebuilt and decoded the unchanged probe/kernels at9c2741ab. Sol’s original compiler command record used placeholders and is retained as a template, not represented as exact invocation provenance. `root-recapture/` supplies actual expanded argv/cwd/environment overrides, tool versions, numeric exits, source/rlib/object/decoded/body hashes and raw outputs. All12 commands returned0. All three object hashes match Sol’s recorded objects. All18 decoded instruction bodies match; five native extracted records additionally include the next section label, documented in comparison.json without modifying either raw capture. The compiler/decoder recapture is the authoritative exact-command baseline; no kernel rewrite or timing occurred.
+
+Pending mandatory Astra pre-edit acceptance of Sol attempt2 baseline.

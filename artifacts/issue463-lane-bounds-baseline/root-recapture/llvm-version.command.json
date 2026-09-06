@@ -1,0 +1,9 @@
+{
+  "cwd": "/home/bl/misofm/engine-lane2-plan",
+  "argv": [
+    "/home/bl/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-objdump",
+    "--version"
+  ],
+  "environment_overrides": {},
+  "source_commit": "9c2741ab7fda641c2305b63061769da0a2e16271"
+}
