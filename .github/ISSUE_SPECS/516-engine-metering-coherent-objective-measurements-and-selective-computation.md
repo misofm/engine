@@ -60,6 +60,47 @@ For each implementation slice, freeze the workload and validator before timing. 
 
 Sol approves the reconciled brief and gates; Terra implements attempt one; Sol adversarially reviews. Follow the three-attempt stop. Commit coherent exact-path checkpoints; push according to the active delivery mode. Close the smallest slice when its correctness gates pass and evidence is upstream and GitHub synchronized; successor optimization or expanded qualification must not hold it open. Record decisions, actual commands/results, revision and review verdict here. No implementation or performance result is claimed by this plan.
 
+## Implementation attempt 1 — correctness slice
+
+Frozen adapter policy: bounded per-window delivery. Each browser poll publishes at most one
+complete track window, leaving later bounded queue entries for later polls. Track snapshots are
+matched by expected handle, reset generation, sequence, half-open sample span and frame count;
+stale, mismatched, noncontiguous or pre-lease candidates are rejected and counted. This avoids
+unioning a last-only peak with a wider timestamp envelope.
+
+The 64-byte `WebMeterHeader` remains ABI-compatible. `reserved[0]` is the host publication
+generation, incremented on real lease transitions. In `reserved[1]`, bits 0..3 are complete,
+master-aligned, loss-observed and gain-reduction-present; bits 32..63 carry a saturating loss
+count. The legacy `f32` peak payload is unchanged. Master output peaks use a fixed-capacity
+interval ring sized from the prepared meter queue, split at the same period as track snapshots,
+so an early impulse survives delayed polling. Empty polls leave the last frame, header and pending
+master interval unchanged. Lease reacquisition drains bounded state and activates at the next
+meter boundary; the straddling interval is discarded. Gain reduction retains its own effect-tap
+fold and unit conversion and never supplies track/master timestamps.
+
+Changed paths: `hosts/host-web/src/lib.rs`, `hosts/host-web/src/ffi.rs`,
+`hosts/host-web/src/tests.rs`, `hosts/host-web/web/miso-engine-v1-audio-worklet.js`, and
+`hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts`. The fixed pending/master storage is
+charged to `WebResourceReport.bridge_metadata_bytes` and `bridge_retained_bytes` before the exact
+budget gate. The worklet reads the metadata and refuses to post a frame unless complete and
+master-aligned bits are set.
+
+Evidence run from base `5206e187`:
+
+```text
+cargo check -p host-web                         # PASS
+cargo test -p host-web --lib meter_             # PASS: 6 passed, 61 filtered out
+cargo test -p host-web --lib                    # PASS: 63 passed, 1 ignored
+```
+
+The focused fixtures cover an early impulse surviving an empty poll, one-window-at-a-time
+delivery from multiple queued windows, lease reacquisition at a clean boundary, existing PCM
+bit identity, and existing gain-reduction behavior. Native host tests ran on the current host.
+Wasm/browser target qualification, allocation-symbol inspection of the rebuilt artifact, and
+four-rate target execution remain unavailable in this tranche and are not claimed as performed.
+Selective metric requests, poll-scan reduction and measured kernel work remain separate successor
+issues as planned.
+
 ## Planning review
 
 Drafted by a dedicated Astra agent at low reasoning effort and adversarially reviewed by a separate Astra agent at medium reasoning effort, as requested by the owner. Verdict: PASS after bounded revisions clarifying selective computation as a required planned outcome, concrete work-avoidance gates, and metadata compatibility without a broad ABI redesign. This verdict covers the plan only; implementation, performance results and release qualification remain unperformed.

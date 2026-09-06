@@ -83,8 +83,9 @@
 //
 // Gain reduction **is** in the meter frame, since issue #143. The frame carries `trackGrDb` --
 // one non-negative decibel magnitude per track -- `masterGrDb`, and the `firstSample`/`endSample`
-// of the window they were folded over. It rides the existing `miso.meter.v1` post: there is no
-// second message and no second clock, so the pinned occurrence rule is unchanged.
+// of the track/master peak window. Gain reduction retains its own effect-tap window identity and
+// never supplies or relabels these timestamps. The additive `generation`, `validity` and
+// `lossCount` fields make lease resets and dropped windows visible without changing the peak array.
 //
 // What a tap costs is declared, not guessed. Every effect publishes an `observations` menu in the
 // build-time metadata JSON; a `resident` tap is a copy out of state the block already wrote and is
@@ -381,6 +382,12 @@ export interface MisoSessionMap {
 export interface MisoMeterFrame {
   readonly tag: "miso.meter.v1";
   readonly sequence: number;
+  /// Publication generation; changes on each real lease transition.
+  readonly generation: bigint;
+  /// Header validity bits: complete (`1`), master aligned (`2`), loss (`4`), gain reduction (`8`).
+  readonly validity: number;
+  /// Saturating count of dropped or rejected meter windows observed before this frame.
+  readonly lossCount: number;
   /// Complete windows folded into this frame; normally `1`.
   readonly windows: number;
   readonly trackCount: number;

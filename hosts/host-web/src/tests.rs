@@ -3022,6 +3022,81 @@ fn meter_frames_equal_an_offline_fold_and_cost_the_render_nothing() {
     assert_eq!(bare.poll_meters(), 0);
 }
 
+#[test]
+fn meter_empty_poll_preserves_early_peak_and_publication_state() {
+    let mut host = console_host(128, 2);
+    assert_eq!(host.set_meter_lease(true), RESULT_OK);
+    feed_and_render(&mut host, 1, 0, 1.0);
+    assert_eq!(
+        host.poll_meters(),
+        0,
+        "the first half-window is still pending"
+    );
+    let pending_frame = host.meter_frame().to_vec();
+    let pending_header = *host.meter_header();
+    feed_and_render(&mut host, 1, 1, 0.1);
+    assert_eq!(host.poll_meters(), 1);
+    assert_eq!(
+        host.meter_frame()[0],
+        1.0,
+        "the early impulse survived the empty poll"
+    );
+    let published_frame = host.meter_frame().to_vec();
+    let published_header = *host.meter_header();
+    assert_ne!(published_frame, pending_frame);
+    assert_eq!(published_header.first_sample, 0);
+    assert_eq!(published_header.end_sample, 256);
+    assert_eq!(
+        host.poll_meters(),
+        0,
+        "an empty poll does not manufacture a new frame"
+    );
+    assert_eq!(host.meter_frame(), &published_frame[..]);
+    assert_eq!(*host.meter_header(), published_header);
+    assert_eq!(pending_header.sequence, 0);
+}
+
+#[test]
+fn meter_delayed_poll_delivers_each_queued_window_with_its_own_peak() {
+    let mut host = console_host(128, 2);
+    assert_eq!(host.set_meter_lease(true), RESULT_OK);
+    for (block, value) in [1.0_f32, 0.2, 0.3, 0.4].into_iter().enumerate() {
+        feed_and_render(&mut host, 1, block as u64, value);
+    }
+    assert_eq!(host.poll_meters(), 1);
+    assert_eq!(host.meter_header().windows, 1);
+    assert_eq!(host.meter_header().first_sample, 0);
+    assert_eq!(host.meter_header().end_sample, 256);
+    assert_eq!(host.meter_frame()[0], 1.0);
+    assert_eq!(host.poll_meters(), 1);
+    assert_eq!(host.meter_header().first_sample, 256);
+    assert_eq!(host.meter_header().end_sample, 512);
+    assert_eq!(host.meter_frame()[0], 0.4);
+}
+
+#[test]
+fn meter_lease_reacquisition_waits_for_a_clean_boundary() {
+    let mut host = console_host(128, 2);
+    assert_eq!(host.set_meter_lease(true), RESULT_OK);
+    feed_and_render(&mut host, 1, 0, 0.9);
+    assert_eq!(host.set_meter_lease(false), RESULT_OK);
+    assert_eq!(host.set_meter_lease(true), RESULT_OK);
+    let generation = host.meter_header().reserved[0];
+    assert!(generation >= 2);
+    assert_eq!(host.set_meter_lease(true), RESULT_OK);
+    assert_eq!(host.meter_header().reserved[0], generation);
+    for block in 1..4_u64 {
+        feed_and_render(&mut host, 1, block, 0.2);
+        if block < 3 {
+            assert_eq!(host.poll_meters(), 0);
+        }
+    }
+    assert_eq!(host.poll_meters(), 1);
+    assert!(host.meter_header().first_sample >= 256);
+    assert_eq!(host.meter_header().reserved[0], generation);
+    assert_eq!(host.meter_frame()[0], 0.2);
+}
+
 /// A three-track observation host over the #143 E4 fixture: compressor, EQ (no tap), gate.
 fn observation_host(
     quantum: u32,

@@ -322,9 +322,21 @@ pub struct WebMeterHeader {
     pub master_track_plus_one: u32,
     /// `1` when `master_gr_db` is meaningful, `0` when no master tap is bound.
     pub master_gr_present: u32,
-    /// Required-zero expansion words.
+    /// Publication generation. It increments on each real lease transition, so a consumer can
+    /// reject a frame retained across release/reacquisition without changing the ABI shape.
     pub reserved: [u64; 2],
 }
+
+/// `WebMeterHeader::reserved[1]` validity bits. The high 32 bits carry a saturating loss count.
+pub const METER_VALID_COMPLETE: u64 = 1;
+/// The master peak covers the exact published track interval.
+pub const METER_VALID_MASTER: u64 = 1 << 1;
+/// One or more queued windows were dropped or rejected before this publication.
+pub const METER_VALID_LOSS: u64 = 1 << 2;
+/// Gain-reduction values are present from the effect tap's own latest window; their timing is
+/// intentionally independent and never supplies the track/master interval.
+pub const METER_VALID_GAIN_REDUCTION: u64 = 1 << 3;
+const METER_LOSS_SHIFT: u32 = 32;
 
 /// Byte size of [`WebMeterHeader`].
 pub const METER_HEADER_BYTES: u32 = size_of::<WebMeterHeader>() as u32;
@@ -613,6 +625,27 @@ struct ReadyOwnership {
     meter_header: WebMeterHeader,
     /// Master peaks folded over the rendered block while the lease is on.
     master_peak: [f32; 2],
+    /// Half-open span covered by `master_peak`; retained across empty polls until a track span is
+    /// complete, so a master impulse cannot disappear between track-window boundaries.
+    master_start_sample: Option<u64>,
+    master_end_sample: u64,
+    /// Bounded master intervals, split at the same fixed period as track snapshots. This keeps a
+    /// delayed poll from needing to union several master envelopes or relabel one as another.
+    master_windows: Box<[Option<MasterMeasurement>]>,
+    master_read: usize,
+    master_write: usize,
+    master_count: usize,
+    /// One bounded pending snapshot per track. This is fixed at preparation and never grows from
+    /// the callback; the queue itself remains the only producer-side buffer.
+    meter_pending: Box<[Option<MeterSnapshot>]>,
+    /// Host publication generation, advanced only on an actual lease transition.
+    meter_generation: u64,
+    /// Losses and rejected stale/mismatched windows waiting to be reported in the next complete
+    /// frame. Keeping this out of the public header until publication preserves empty-poll
+    /// immutability.
+    meter_loss_count: u64,
+    meter_snapshot_drops_seen: u64,
+    meter_snapshot_generation: Option<u64>,
     /// Windows folded into `meter_frame` since the host was compiled.
     meter_windows: u64,
     /// The compiled session model, retained so the browser bridge keeps charging itself for what
@@ -624,7 +657,77 @@ struct ReadyOwnership {
     session: CompiledSession,
 }
 
+#[derive(Clone, Copy)]
+struct MasterMeasurement {
+    start_sample: u64,
+    end_sample: u64,
+    peak: [f32; 2],
+}
+
 impl ReadyOwnership {
+    /// Drop queued and pending delivery state using only the prepared queue capacities. This is
+    /// used at lease boundaries; producer-side accumulators continue rendering, but any window
+    /// that straddles the boundary is rejected by `meter_activation_sample` in `poll_meters`.
+    fn reset_meter_delivery(&mut self, clear_publication: bool) {
+        for meter in &mut self.meters {
+            let capacity = meter.consumer.capacity();
+            for _ in 0..capacity {
+                if meter.consumer.try_pop().is_err() {
+                    break;
+                }
+            }
+        }
+        for pending in &mut self.meter_pending {
+            *pending = None;
+        }
+        self.master_peak = [0.0, 0.0];
+        self.master_start_sample = None;
+        self.master_end_sample = 0;
+        for window in &mut self.master_windows {
+            *window = None;
+        }
+        self.master_read = 0;
+        self.master_write = 0;
+        self.master_count = 0;
+        self.meter_snapshot_generation = None;
+        self.meter_snapshot_drops_seen = 0;
+        self.meter_loss_count = 0;
+        if clear_publication {
+            self.meter_frame.fill(0.0);
+            self.meter_header.sequence = 0;
+            self.meter_header.windows = 0;
+            self.meter_header.first_sample = 0;
+            self.meter_header.end_sample = 0;
+            self.meter_header.master_gr_present = 0;
+            self.meter_header.reserved[1] = 0;
+            self.meter_windows = 0;
+        }
+    }
+
+    fn push_master_window(&mut self, measurement: MasterMeasurement) {
+        if self.master_count == self.master_windows.len() {
+            // Drop-newest mirrors the engine meter queue contract. The loss is visible in the
+            // next successful browser snapshot through `reserved[1]`.
+            self.meter_loss_count = self.meter_loss_count.saturating_add(1);
+            return;
+        }
+        if let Some(slot) = self.master_windows.get_mut(self.master_write) {
+            *slot = Some(measurement);
+            self.master_write = (self.master_write + 1) % self.master_windows.len();
+            self.master_count += 1;
+        }
+    }
+
+    fn pop_master_window(&mut self) -> Option<MasterMeasurement> {
+        if self.master_count == 0 {
+            return None;
+        }
+        let value = self.master_windows.get_mut(self.master_read)?.take();
+        self.master_read = (self.master_read + 1) % self.master_windows.len();
+        self.master_count -= 1;
+        value
+    }
+
     /// The dense destination-queue index of one addressed console channel.
     ///
     /// The layout is frozen here and nowhere else:
@@ -754,6 +857,9 @@ pub struct AudioWorkletEngineHost {
     command_report: WebCommandReport,
     /// Issue #137 D2: the meter lease. `false` skips the master fold and every drain.
     meter_lease: bool,
+    /// First sample eligible for the current lease. A snapshot that opens before this boundary
+    /// is an old/partial interval and is dropped rather than presented as a clean measurement.
+    meter_activation_sample: u64,
     buffers: Option<PreparedBuffers>,
     ready: Option<ReadyOwnership>,
     diagnostic_len: usize,
@@ -881,6 +987,7 @@ impl AudioWorkletEngineHost {
             resources,
             command_report: empty_command_report(),
             meter_lease: false,
+            meter_activation_sample: 0,
             buffers: Some(buffers),
             ready: Some(ready),
             diagnostic_len: 0,
@@ -1027,19 +1134,36 @@ impl AudioWorkletEngineHost {
         if enabled && !self.meters_attached() {
             return self.record(RESULT_UNSUPPORTED);
         }
+        // Repeated acquisition/release is idempotent. A real transition starts a new publication
+        // generation and drops every queued/pending interval from the previous lease.
+        if enabled == self.meter_lease {
+            return self.record(RESULT_OK);
+        }
         self.meter_lease = enabled;
         if let Some(ready) = self.ready.as_mut() {
-            ready.master_peak = [0.0, 0.0];
-            ready.meter_frame.fill(0.0);
-            // Issue #143 E8: a retaken lease restarts the frame sequence and the reported window,
-            // so a consumer never folds a window from before the release into one after it.
-            ready.meter_header.sequence = 0;
-            ready.meter_header.windows = 0;
-            ready.meter_header.first_sample = 0;
-            ready.meter_header.end_sample = 0;
-            ready.meter_header.master_gr_present = 0;
+            ready.meter_generation = ready.meter_generation.saturating_add(1);
+            ready.reset_meter_delivery(true);
+            ready.meter_header.reserved[0] = ready.meter_generation;
         }
+        self.meter_activation_sample = self.next_meter_boundary(self.status.next_absolute_sample);
         self.record(RESULT_OK)
+    }
+
+    fn next_meter_boundary(&self, sample: u64) -> u64 {
+        let Some(period) = self
+            .options
+            .console_meter_blocks
+            .checked_mul(u64::from(self.status.quantum_frames))
+            .filter(|period| *period != 0)
+        else {
+            return sample;
+        };
+        let remainder = sample % period;
+        sample.saturating_add(if remainder == 0 {
+            0
+        } else {
+            period - remainder
+        })
     }
 
     /// Mutable source-ID staging storage, available only after preparation.
@@ -1237,6 +1361,10 @@ impl AudioWorkletEngineHost {
         // Lossless on every supported target (wasm32 and every 64-bit host); `try_from` would
         // leave an `expect_failed` trap owner in the render export's call graph.
         let quantum = self.status.quantum_frames as usize;
+        let meter_period = self
+            .options
+            .console_meter_blocks
+            .checked_mul(u64::from(self.status.quantum_frames));
         let Some(ready) = self.ready.as_mut() else {
             return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
         };
@@ -1247,6 +1375,7 @@ impl AudioWorkletEngineHost {
             Ok(value) => value,
             Err(_) => return self.fail(RESULT_INTERNAL, b"web.internal.output\t$\n"),
         };
+        let render_first_sample = self.status.next_absolute_sample;
         let result = ready.host.plan.render(
             RenderIo {
                 input: None,
@@ -1272,7 +1401,7 @@ impl AudioWorkletEngineHost {
                 // Issue #137 D2: the master bus is the host's own output plane, so there is
                 // nothing to observe and nothing to expose -- one branch and one pass over a
                 // buffer already in cache, and only while the lease is held.
-                if self.meter_lease {
+                if self.meter_lease && render_first_sample >= self.meter_activation_sample {
                     // Indexed with `get`, never with a range: a slice index would put
                     // `slice_index_fail` in the render export's call graph, and the shipped
                     // artifact's gate would -- correctly -- refuse the build.
@@ -1287,13 +1416,33 @@ impl AudioWorkletEngineHost {
                             break;
                         };
                         for sample in samples {
-                            let magnitude = sample.abs();
+                            let magnitude = meter_sample_magnitude(*sample);
                             if magnitude > *peak {
                                 *peak = magnitude;
                             }
                         }
                     }
                     ready.master_peak = peaks;
+                    if ready.master_start_sample.is_none() {
+                        ready.master_start_sample = Some(render_first_sample);
+                    }
+                    ready.master_end_sample = report.next_absolute_sample;
+                    if let Some(period) = meter_period.filter(|period| *period != 0)
+                        && ready.master_start_sample.is_some()
+                        && ready.master_end_sample.saturating_sub(
+                            ready.master_start_sample.unwrap_or(render_first_sample),
+                        ) >= period
+                    {
+                        let measurement = MasterMeasurement {
+                            start_sample: ready.master_start_sample.unwrap_or(render_first_sample),
+                            end_sample: ready.master_end_sample,
+                            peak: ready.master_peak,
+                        };
+                        ready.push_master_window(measurement);
+                        ready.master_peak = [0.0, 0.0];
+                        ready.master_start_sample = None;
+                        ready.master_end_sample = 0;
+                    }
                 }
                 self.record(RESULT_OK)
             }
@@ -1391,35 +1540,193 @@ impl AudioWorkletEngineHost {
         // `panic_bounds_check` in this export's call graph, and this export is called from
         // `process()`, so the shipped artifact's gate covers it exactly as it covers the render
         // export.
+        let track_count = ready.meters.len();
+        if track_count == 0 {
+            return 0;
+        }
+        let mut drain_budget = 1_usize;
+        for meter in &ready.meters {
+            drain_budget = drain_budget.saturating_add(meter.consumer.capacity());
+        }
+        let mut popped = 0_usize;
         let mut windows = 0_u32;
-        for (index, meter) in ready.meters.iter_mut().enumerate() {
-            let mut popped = 0_u32;
-            while let Ok(snapshot) = meter.consumer.try_pop() {
-                let MeterSnapshot { left, right, .. } = snapshot;
-                if let Some(slot) = ready.meter_frame.get_mut(index * 2) {
-                    *slot = left.sample_peak;
+        let mut folded_start = 0_u64;
+        let mut folded_end = 0_u64;
+        let mut folded = false;
+        while popped < drain_budget {
+            for index in 0..track_count {
+                if ready.meter_pending.get(index).is_some_and(Option::is_none)
+                    && let Some(meter) = ready.meters.get_mut(index)
+                    && let Ok(snapshot) = meter.consumer.try_pop()
+                {
+                    if let Some(slot) = ready.meter_pending.get_mut(index) {
+                        *slot = Some(snapshot);
+                    }
+                    popped = popped.saturating_add(1);
                 }
-                if let Some(slot) = ready.meter_frame.get_mut(index * 2 + 1) {
-                    *slot = right.sample_peak;
-                }
-                popped = popped.saturating_add(1);
             }
-            // Every track's meter shares one window length and one start sample, so they finish
-            // together; the minimum is the number of windows the whole frame actually covers.
-            windows = if index == 0 {
-                popped
-            } else {
-                windows.min(popped)
+            if ready.meter_pending.iter().any(Option::is_none) {
+                break;
+            }
+            let Some(first) = ready
+                .meter_pending
+                .first()
+                .and_then(Option::as_ref)
+                .copied()
+            else {
+                break;
             };
+            let all_equal = ready
+                .meter_pending
+                .iter()
+                .enumerate()
+                .all(|(index, entry)| {
+                    let Some(snapshot) = entry else { return false };
+                    ready
+                        .meters
+                        .get(index)
+                        .is_some_and(|meter| snapshot.handle == meter.handle)
+                        && snapshot.reset_generation == first.reset_generation
+                        && snapshot.window_sequence == first.window_sequence
+                        && snapshot.start_sample == first.start_sample
+                        && snapshot.end_sample == first.end_sample
+                        && snapshot.frames == first.frames
+                });
+            if !all_equal {
+                // A sequence gap can be recovered by dropping only the older stream head. Equal
+                // sequences with different spans/generations are a discontinuity: drop the whole
+                // candidate set so no mixed interval reaches the public frame.
+                let same_generation = ready.meter_pending.iter().all(|entry| {
+                    entry
+                        .is_some_and(|snapshot| snapshot.reset_generation == first.reset_generation)
+                });
+                let same_sequence = ready.meter_pending.iter().all(|entry| {
+                    entry.is_some_and(|snapshot| snapshot.window_sequence == first.window_sequence)
+                });
+                if same_generation && !same_sequence {
+                    let minimum = ready
+                        .meter_pending
+                        .iter()
+                        .filter_map(|entry| entry.as_ref().map(|snapshot| snapshot.window_sequence))
+                        .min()
+                        .unwrap_or(first.window_sequence);
+                    for pending in &mut ready.meter_pending {
+                        if pending
+                            .as_ref()
+                            .is_some_and(|snapshot| snapshot.window_sequence == minimum)
+                        {
+                            *pending = None;
+                            ready.meter_loss_count = ready.meter_loss_count.saturating_add(1);
+                        }
+                    }
+                } else {
+                    for pending in &mut ready.meter_pending {
+                        *pending = None;
+                        ready.meter_loss_count = ready.meter_loss_count.saturating_add(1);
+                    }
+                }
+                continue;
+            }
+            if first.start_sample < self.meter_activation_sample
+                || first.end_sample <= first.start_sample
+                || u64::from(first.frames) != first.end_sample - first.start_sample
+            {
+                for pending in &mut ready.meter_pending {
+                    *pending = None;
+                }
+                ready.meter_loss_count = ready.meter_loss_count.saturating_add(1);
+                continue;
+            }
+            if ready.meter_header.sequence > 0
+                && !folded
+                && first.start_sample != ready.meter_header.end_sample
+            {
+                ready.meter_loss_count = ready.meter_loss_count.saturating_add(1);
+            }
+            if !folded {
+                folded_start = first.start_sample;
+                folded = true;
+                for index in 0..track_count {
+                    if let Some(slot) = ready.meter_frame.get_mut(index * 2) {
+                        *slot = 0.0;
+                    }
+                    if let Some(slot) = ready.meter_frame.get_mut(index * 2 + 1) {
+                        *slot = 0.0;
+                    }
+                }
+            }
+            folded_end = first.end_sample;
+            for (index, pending) in ready.meter_pending.iter_mut().enumerate() {
+                let Some(snapshot) = pending.take() else {
+                    continue;
+                };
+                if snapshot.cumulative_dropped_snapshots > ready.meter_snapshot_drops_seen {
+                    ready.meter_loss_count = ready.meter_loss_count.saturating_add(
+                        snapshot
+                            .cumulative_dropped_snapshots
+                            .saturating_sub(ready.meter_snapshot_drops_seen),
+                    );
+                    ready.meter_snapshot_drops_seen = snapshot.cumulative_dropped_snapshots;
+                }
+                if let Some(slot) = ready.meter_frame.get_mut(index * 2)
+                    && snapshot.left.sample_peak > *slot
+                {
+                    *slot = snapshot.left.sample_peak;
+                }
+                if let Some(slot) = ready.meter_frame.get_mut(index * 2 + 1)
+                    && snapshot.right.sample_peak > *slot
+                {
+                    *slot = snapshot.right.sample_peak;
+                }
+                ready.meter_snapshot_generation = Some(snapshot.reset_generation);
+            }
+            windows = windows.saturating_add(1);
+            // The frozen adapter policy is bounded per-window delivery. Further complete windows
+            // remain queued for the next poll, preserving one exact span per public frame.
+            break;
+        }
+        if !folded {
+            return 0;
         }
         let tracks = ready.tracks.len();
         let master = tracks * 2;
-        for (plane, peak) in ready.master_peak.iter().enumerate() {
+        let mut stale_master_budget = ready.master_count;
+        while stale_master_budget > 0 {
+            let stale = ready
+                .master_windows
+                .get(ready.master_read)
+                .and_then(Option::as_ref)
+                .is_some_and(|measurement| measurement.end_sample <= folded_start);
+            if !stale {
+                break;
+            }
+            let _ = ready.pop_master_window();
+            ready.meter_loss_count = ready.meter_loss_count.saturating_add(1);
+            stale_master_budget -= 1;
+        }
+        let master_measurement = ready
+            .master_windows
+            .get(ready.master_read)
+            .and_then(Option::as_ref)
+            .copied();
+        let master_valid = master_measurement.is_some_and(|measurement| {
+            measurement.start_sample == folded_start && measurement.end_sample == folded_end
+        });
+        if !master_valid {
+            // The host cannot recover an interval peak from one envelope once its boundary is
+            // lost. Consume the track group, count the discontinuity, and wait for the next clean
+            // master/track span rather than publishing a mixed or guessed master value.
+            ready.meter_loss_count = ready.meter_loss_count.saturating_add(1);
+            return 0;
+        }
+        let master_peak = ready
+            .pop_master_window()
+            .map_or([0.0, 0.0], |measurement| measurement.peak);
+        for (plane, peak) in master_peak.iter().enumerate() {
             if let Some(slot) = ready.meter_frame.get_mut(master + plane) {
                 *slot = *peak;
             }
         }
-        ready.master_peak = [0.0, 0.0];
 
         // Issue #143 D5: the gain-reduction section. This is the control plane -- `poll_meters` is
         // called from `process()` but after the render export, and it performs no allocation, no
@@ -1434,8 +1741,6 @@ impl AudioWorkletEngineHost {
         for slot in ready.observation_present.iter_mut() {
             *slot = false;
         }
-        let mut first_sample = u64::MAX;
-        let mut end_sample = 0_u64;
         let mut observed_any = false;
         for (effect, entry) in ready.effect_observations.iter().enumerate() {
             let Some(handle) = entry.as_ref() else {
@@ -1482,12 +1787,6 @@ impl AudioWorkletEngineHost {
                     *present = true;
                 }
                 observed_any = true;
-                if window.first_sample < first_sample {
-                    first_sample = window.first_sample;
-                }
-                if window.end_sample > end_sample {
-                    end_sample = window.end_sample;
-                }
             }
         }
         // `masterGrDb` is a designation, not a discovery (D6). It is absent -- not zero -- when no
@@ -1511,10 +1810,21 @@ impl AudioWorkletEngineHost {
         ready.meter_header.windows = windows;
         ready.meter_header.sequence = ready.meter_header.sequence.saturating_add(1);
         ready.meter_header.master_gr_present = u32::from(master_present);
-        if observed_any {
-            ready.meter_header.first_sample = first_sample;
-            ready.meter_header.end_sample = end_sample;
+        ready.meter_header.first_sample = folded_start;
+        ready.meter_header.end_sample = folded_end;
+        let mut validity = METER_VALID_COMPLETE;
+        if master_valid {
+            validity |= METER_VALID_MASTER;
         }
+        if ready.meter_loss_count != 0 {
+            validity |= METER_VALID_LOSS;
+        }
+        if observed_any {
+            validity |= METER_VALID_GAIN_REDUCTION;
+        }
+        ready.meter_header.reserved[0] = ready.meter_generation;
+        ready.meter_header.reserved[1] =
+            validity | (ready.meter_loss_count.min(u64::from(u32::MAX)) << METER_LOSS_SHIFT);
         ready.meter_windows = ready.meter_windows.saturating_add(u64::from(windows));
         windows
     }
@@ -2256,6 +2566,16 @@ fn observed_decibels(tap: effect_contract::ObservationDescriptor, magnitude: f32
     }
 }
 
+/// Master peak sanitization mirrors the builtin meter's finite/normal sample contract. The
+/// output PCM remains untouched; only the observer's magnitude is normalized.
+fn meter_sample_magnitude(sample: f32) -> f32 {
+    if !sample.is_finite() || sample.is_subnormal() {
+        0.0
+    } else {
+        sample.abs()
+    }
+}
+
 const fn empty_command_report() -> WebCommandReport {
     WebCommandReport {
         struct_size: COMMAND_REPORT_BYTES,
@@ -2822,6 +3142,32 @@ fn compile_ready(
     meter_header.master_track_plus_one = handles
         .master_track
         .map_or(0, |track| track.saturating_add(1));
+    let meter_count = handles.meters.len();
+    let master_capacity = handles
+        .meters
+        .first()
+        .map_or(1, |meter| meter.consumer.capacity());
+    let meter_delivery_bytes = u64::try_from(meter_count)
+        .ok()
+        .and_then(|count| count.checked_mul(size_of::<Option<MeterSnapshot>>() as u64))
+        .and_then(|pending| {
+            u64::try_from(master_capacity)
+                .ok()
+                .and_then(|count| count.checked_mul(size_of::<Option<MasterMeasurement>>() as u64))
+                .and_then(|master| pending.checked_add(master))
+        })
+        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
+    report.bridge_metadata_bytes = report
+        .bridge_metadata_bytes
+        .checked_add(meter_delivery_bytes)
+        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
+    report.bridge_retained_bytes = report
+        .bridge_retained_bytes
+        .checked_add(meter_delivery_bytes)
+        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
+    report.largest_bridge_allocation_bytes = report
+        .largest_bridge_allocation_bytes
+        .max(u64::try_from(meter_delivery_bytes).unwrap_or(u64::MAX));
     let ready = ReadyOwnership {
         controls: handles.track_controls,
         effect_controls: effect_controls.into_boxed_slice(),
@@ -2844,6 +3190,23 @@ fn compile_ready(
         meters: handles.meters,
         meter_frame: boxed_zero_meter_frame(track_count)?,
         master_peak: [0.0, 0.0],
+        master_start_sample: None,
+        master_end_sample: 0,
+        master_windows: (0..master_capacity)
+            .map(|_| None)
+            .collect::<Vec<_>>()
+            .into_boxed_slice(),
+        master_read: 0,
+        master_write: 0,
+        master_count: 0,
+        meter_pending: (0..meter_count)
+            .map(|_| None)
+            .collect::<Vec<_>>()
+            .into_boxed_slice(),
+        meter_generation: 0,
+        meter_loss_count: 0,
+        meter_snapshot_drops_seen: 0,
+        meter_snapshot_generation: None,
         meter_windows: 0,
         session,
     };

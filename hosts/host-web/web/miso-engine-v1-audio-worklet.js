@@ -381,6 +381,9 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       this.meterMessage = {
         tag: "miso.meter.v1",
         sequence: 0,
+        generation: 0n,
+        validity: 0,
+        lossCount: 0,
         windows: 0,
         trackCount: this.trackCount,
         // The frozen `2T + 2` peak view, unmoved: an existing reader indexes it exactly as before.
@@ -766,8 +769,15 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
   postMeterFrame() {
     const windows = this.exports.miso_engine_web_v1_meter_poll(this.handle);
     if (windows === 0) return;
+    const metadata = this.meterHeaderView.getBigUint64(56, true);
+    // The Rust adapter only publishes complete track/master spans. Keep this guard at the
+    // transport boundary so a future invalid publication cannot reach legacy numeric consumers.
+    if ((metadata & 1n) === 0n || (metadata & 2n) === 0n) return;
     this.meterSequence += 1;
     this.meterMessage.sequence = this.meterSequence;
+    this.meterMessage.generation = this.meterHeaderView.getBigUint64(48, true);
+    this.meterMessage.validity = Number(metadata & 0xffffffffn);
+    this.meterMessage.lossCount = Number(metadata >> 32n);
     this.meterMessage.windows = windows;
     this.meterMessage.peaks.set(this.meterPeakView);
     // Issue #143 D5: the gain-reduction section rides the same post. There is no second message
