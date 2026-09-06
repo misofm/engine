@@ -46,3 +46,19 @@ Root adopts scope PASS and assigns fresh Luna1. Pause at the first compiling/foc
 Source20eeb26a implements exactly the two total helper signatures, three caller bindings and direct mapping fixture;9d069b8b changes only formatting in that fixture. /tmp/490-luna1-{focused,debug,release,session,clippy,diff,fmt}/command.{command,log,status} retains actual runs: focused1, graph compiler62 in each profile, session parity1 plus invalid-matrix14, strict affected Clippy and diff all return0. Initial fmt returns1; formatting is applied and root independently captures restored fmt0 in /tmp/490-root-fmt-restored.*. Earlier tests precede this formatting-only correction; no semantic test rerun is claimed.
 
 Pending one consolidated Astra Luna1 verdict. Validation order, transforms and validated-invariant expects remain unchanged. No timing or performance gain is claimed.
+
+## Astra Luna1 verdict and delivery integration
+
+# Astra #490 Luna attempt 1 — PASS
+
+Exact head8dad40ea97f85c88a2dcd707ee16bf3edc2102a1 in engine-490-route-mapping; implementation20eeb26a plus formatting-only9d069b8b. Read full frozen scope, cumulative source and retained command/log/status records. No tests/builds/timing or repository/Git/GitHub mutations performed.
+
+Production delta is exactly the two total return signatures/Some wrappers and three formerly unreachable caller else branches. Actual exhaustive typed mappings are unchanged. route_transform remains before the route mapping, routed-sidechain selection and downstream insertion remain ordered, and resource/cycle/prepared-input validation is untouched. gid and topo expects retain their validated-invariant roles; no reachable-panic claim, catch or suppression was introduced. No diagnostic vocabulary/type/public API or canonical implementation changed.
+
+The new direct mapping test explicitly covers all seven SendTap-to-TrackStage pairs and both source/destination enum variants using GraphNodeId expectations. A typed127-byte track ID exercises the shared accepted grammar boundary; submix/output identities remain explicit. Reusing unchanged gid for stable-ID conversion does not derive the tested variant/stage mapping from the implementation.
+
+Actual debug/release library logs each pass62 tests, including every frozen named canonical-repeatability, route-transform/hash, direct-route, sidechain and cycle diagnostic fixture (individually checked in both logs). Focused mapping executes1, session diagnostic_parity1 and invalid_matrix14 pass. Strict graph-compiler all-targets/all-features Clippy and diff return0. Initial fmt1 is retained; root's actual corrected-format command/status returns0 after the formatting-only checkpoint. Do not relabel the initial formatting failure.
+
+Source PASS permits proportional delivery. An existing normal artifact verification is reasonable given the demonstrated sensitivity of shipped bytes to prior semantic-equivalent source edits; no automatic repin or new browser qualification is authorized absent actual mismatch and a precise ruling. Root owns packaging/source identity, actual-head PR review, requiredCI and verified remote closure. No performance, timing or broad audit-closure claim is supported by this small control-plane simplification.
+
+Root adopts PASS; integrated delivered main e2b77fd6 and #488 closure record. Accepted graph-compiler source remains byte-identical. Actual evidence retained in artifacts/issue490-total-route-mapping. Normal shipped-worklet verification follows; repin requires an actual mismatch and precise ruling.

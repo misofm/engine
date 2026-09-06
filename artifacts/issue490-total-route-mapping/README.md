@@ -1,0 +1,1 @@
+Actual Luna1 command/log/status records and root restored formatting proof. Initial fmt failure remains retained; formatting-only correction preceded Astra PASS. Main integration leaves accepted graph-compiler source identical. No performance measurement.
