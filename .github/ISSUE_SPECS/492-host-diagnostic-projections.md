@@ -91,3 +91,7 @@ Retained final exact private-test commands execute one test in each profile, bot
 Root may proceed with proportional delivery on integrated current main: freeze and verify source identity, run ordinary artifact verification, and retain any actual mismatch before requesting a bounded pin/current-consumer qualification amendment. This source PASS does not authorize an automatic repin, changed PCM/resource expectations, timing, or merge without the required actual-head PR review and successful required CI. No further product correction is requested.
 
 Root adopts source PASS. Artifact delivery is deliberately sequenced after #463 merges, then current main will be integrated and the final combined source verified once. GitHub492 remains open pending actual PR review/qualification/merge; no delivery or performance claim yet.
+
+## Current-main delivery integration
+
+Root integrated deliveredmain571dfc5b (PR493) and its closure record without conflicts. Entire host-core crate remains byte-identical to Astra-accepted source. Freeze this combined source for ordinary shipped-worklet verification; prior standalone artifacts are not reused as combined evidence. Any actual mismatch requires the bounded delivery ruling before repin.
