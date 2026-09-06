@@ -111,3 +111,21 @@ Root integrated delivered main71059eab and closure records before Sol2. Builtins
 ## Sol attempt 2 correction and evidence
 
 Source5a4f4147 changes only the independent field-case fixture. It clears/restores each compared field from equality against expected bits and the unchanged per-lane oracle across required widths/partial populations. All exact final-source private tests and finite debug/release library/liveness/console gates pass, with strict Clippy/fmt/diff/policies. Authentic records and initial compile failure are retained in artifacts/issue496-sol-attempt2. Accepted production and original actual-seam mutation remain unchanged. Consolidated Astra review pending.
+
+## Astra Sol attempt 2 PASS and immutable delivery qualification
+
+# Astra #496 Sol attempt2 consolidated review — PASS
+
+Reviewed clean exact head ddcdfeacb5c06777139cc337679907a99b8db2f7 in engine-rt5-ramp-plan, source 5a4f4147af8d1c0263128cec0474881b783a6d77. Only the compact cfg(test) field fixture changes after attempt1's accepted production; no source delta follows the final source checkpoint.
+
+The sole bounded proof gap is fixed. Each trim/target/step/countdown and each of six coefficient fields in both sections now starts from a fresh valid equal stage. The independently specified active mask is checked, one lane's field is toggled, its exact bit must clear while any unaffected member remains set, then the same field is restored and the exact bit must return. Every stage is additionally compared with the unchanged per-lane predicate. No later field is hidden by a cumulative earlier mismatch. The finite population covers scalarW1, W4 full/three-member partial, W8 full/five-member partial. Separate +0/-0 trim mismatch and restoration are bit-sensitive; padding stays false. This satisfies the original field/width/partial/re-equalization scope without an expanded corpus.
+
+Retain acceptance of the private stack-only helper and its two ordered post-ramp calls, unchanged preparation/reset/addressed updates, predicate, DSP arithmetic, layout and API. The actual old-full-refresh mutation and original/restored 240-versus30 same assertion remain unchanged in attempt1 evidence. The honest15-body native baseline observation is not a new instruction-count or speedup claim. Existing nonzero mono/dual ramp, never-collapsed PCM/state and subsequent retarget/disengage proof remains credited as detailed in attempt1 review; no redundant PCM harness is needed.
+
+Final authentic metadata identifies committed source, source blob52ffe66d04369d89a47ce240a9a620c1a5c7d5c3 and SHA256 c21b54c7147b32601daf82d54d698beca68425019753bf134330ec37e5feb4a9. Four exact private tests pass one each debug/release; library7 each, liveness13+mono8 each and host-console10 each pass. Strict affected all-targets/all-features Clippy, fmt/diff and realtime/lane/workspace policy final statuses are0. The initial compile failure remains separate. Independently verified50 payload hashes/sizes and exact51-file tracking including manifest; the accidentally included root checkpoint comment is retained as a comment, not execution evidence.
+
+Approve source acceptance. Root may integrate actual delivered main, verify accepted builtins/fixture identity and freeze the immutable workspace/supported-target/nativeABI qualification and ordinary artifact build. No stale artifact digest may be promoted: a real current-source mismatch requires the bounded current-pin/current-consumer ruling with unchanged numerical expectations. Exact-head actual PR review and required CI remain delivery gates. No timing, additional mutation campaign or universal runtime performance claim is authorized.
+
+Read-only source/evidence review; no tests/builds/timing or source/spec/Git/GitHub mutations performed.
+
+Root adopts PASS and freezes this delivered-main source for immutable workspace, scalar/SIMD Wasm and native C ABI checks, alongside the ordinary worklet builder. No further source edits occur during these checks. #505 post-main qualification is also verified SUCCESS and its closure note is carried here. Any actual artifact mismatch receives a separate bounded ruling before pin update/consumer checks. No timing authorized.
