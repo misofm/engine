@@ -1,0 +1,5 @@
+    <eec55>   DW_AT_name        : (indirect string, offset: 0xb30abe): RuntimeUnit
+    <eec59>   DW_AT_byte_size   : 248
+    <eec5a>   DW_AT_accessibility: 2	(protected)
+    <eec5b>   DW_AT_alignment   : 8
+ <4><eec5c>: Abbrev Number: 10 (DW_TAG_variant_part)

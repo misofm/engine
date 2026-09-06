@@ -1,0 +1,12 @@
+   Compiling rack v0.1.0 (/home/bl/misofm/engine-rt8-plan/crates/rack)
+   Compiling graph v0.1.0 (/home/bl/misofm/engine-rt8-plan/crates/graph)
+   Compiling rack-compiler v0.1.0 (/home/bl/misofm/engine-rt8-plan/crates/rack-compiler)
+   Compiling builtins-compiler v0.1.0 (/home/bl/misofm/engine-rt8-plan/crates/builtins-compiler)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.64s
+     Running tests/allocation_tracker.rs (target/debug/deps/allocation_tracker-0b3098f71078d54f)
+
+running 1 test
+test actual_runtime_bank_slot_owners_fit_retained_largest_and_conversion_reservation ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.01s
+

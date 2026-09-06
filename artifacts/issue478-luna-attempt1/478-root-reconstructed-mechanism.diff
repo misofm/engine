@@ -1,0 +1,29 @@
+--- a/crates/rack/src/lib.rs
++++ b/crates/rack/src/lib.rs
+@@ -1855,7 +1855,7 @@
+             // The same identity-slot guard `process` has always taken. A slot that is an identity
+             // on every lane renders nothing, and draining its queues would consume records for a
+             // block it does not run.
+-            if slot.has_active_lanes() {
++            if slot.has_active_lanes_scan() {
+                 slot.stage.begin_block(first_sample)?;
+             }
+         }
+@@ -1974,7 +1974,7 @@
+             self.slots.len()
+         };
+         for slot in &mut self.slots[..prefix] {
+-            if slot.has_active_lanes() {
++            if slot.has_active_lanes_scan() {
+                 let block = BankBlock {
+                     left: &mut self.scratch.left[..len],
+                     right: &mut self.scratch.right[..len],
+@@ -1999,7 +1999,7 @@
+             let AoSoaScratch { left, right, .. } = &mut self.scratch;
+             right[..len].copy_from_slice(&left[..len]);
+             for slot in &mut self.slots[self.collapse_prefix..] {
+-                if slot.has_active_lanes() {
++                if slot.has_active_lanes_scan() {
+                     slot.stage.process(BankBlock {
+                         left: &mut self.scratch.left[..len],
+                         right: &mut self.scratch.right[..len],

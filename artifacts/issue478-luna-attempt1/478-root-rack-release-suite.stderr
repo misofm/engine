@@ -1,0 +1,5 @@
+   Compiling rack v0.1.0 (/home/bl/misofm/engine-rt8-plan/crates/rack)
+    Finished `release` profile [optimized + debuginfo] target(s) in 5.40s
+     Running unittests src/lib.rs (target/release/deps/rack-73cd89f0c58db6eb)
+     Running tests/console_bank.rs (target/release/deps/console_bank-5f5e430afaa2685c)
+     Running tests/mono_reengage.rs (target/release/deps/mono_reengage-f96521d318b4ee91)

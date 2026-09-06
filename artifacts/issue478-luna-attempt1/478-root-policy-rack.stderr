@@ -1,0 +1,24 @@
+crates/rack/src/lib.rs:2561:    static PREPARED_DROPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+crates/rack/src/lib.rs:2566:            PREPARED_DROPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+crates/rack/src/lib.rs:2751:        begin: std::sync::Arc<std::sync::atomic::AtomicU64>,
+crates/rack/src/lib.rs:2752:        dual: std::sync::Arc<std::sync::atomic::AtomicU64>,
+crates/rack/src/lib.rs:2753:        mono: std::sync::Arc<std::sync::atomic::AtomicU64>,
+crates/rack/src/lib.rs:2761:            self.dual.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+crates/rack/src/lib.rs:2771:                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+crates/rack/src/lib.rs:2788:            self.mono.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+crates/rack/src/lib.rs:2798:        begin: &std::sync::Arc<std::sync::atomic::AtomicU64>,
+crates/rack/src/lib.rs:2799:        dual: &std::sync::Arc<std::sync::atomic::AtomicU64>,
+crates/rack/src/lib.rs:2800:        mono: &std::sync::Arc<std::sync::atomic::AtomicU64>,
+crates/rack/src/lib.rs:2894:            let before_drop = PREPARED_DROPS.load(std::sync::atomic::Ordering::Relaxed);
+crates/rack/src/lib.rs:2897:                PREPARED_DROPS.load(std::sync::atomic::Ordering::Relaxed),
+crates/rack/src/lib.rs:2906:        use std::sync::atomic::{AtomicU64, Ordering};
+crates/rack/src/lib.rs:2907:        let begin = std::sync::Arc::new(AtomicU64::new(0));
+crates/rack/src/lib.rs:2908:        let dual = std::sync::Arc::new(AtomicU64::new(0));
+crates/rack/src/lib.rs:2909:        let mono = std::sync::Arc::new(AtomicU64::new(0));
+crates/rack/src/lib.rs:2957:        let mono_begin = std::sync::Arc::new(AtomicU64::new(0));
+crates/rack/src/lib.rs:2958:        let mono_dual = std::sync::Arc::new(AtomicU64::new(0));
+crates/rack/src/lib.rs:2959:        let mono_mono = std::sync::Arc::new(AtomicU64::new(0));
+crates/rack/src/lib.rs:3005:        let begin = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+crates/rack/src/lib.rs:3006:        let dual = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+crates/rack/src/lib.rs:3007:        let mono = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+rack policy failure: control-plane, I/O, threading, synchronization, or logging leaked into rack render code
