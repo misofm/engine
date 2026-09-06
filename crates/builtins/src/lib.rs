@@ -19,9 +19,9 @@
 //! checks at all.
 #![allow(missing_docs)]
 
-use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 #[cfg(test)]
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::cell::Cell;
+use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 
 use engine::{
     SampleRateHz, is_extended_compatibility_sample_rate,
@@ -826,7 +826,9 @@ fn lane_read<L: Lane>(value: L) -> [f32; MAX_BANK_LANES] {
 const MAX_BANK_LANES: usize = 8;
 
 #[cfg(test)]
-static CHANNEL_SYMMETRY_PREDICATE_CALLS: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    static CHANNEL_SYMMETRY_PREDICATE_CALLS: Cell<usize> = const { Cell::new(0) };
+}
 
 /// The damping of every builtin section: Butterworth, `k = 1 / Q = sqrt(2)`, rounded once.
 const BUTTERWORTH_K: f32 = core::f64::consts::SQRT_2 as f32;
@@ -1645,11 +1647,11 @@ impl<L: Lane> InputStage<L> {
     /// * `members`, `active`, `lifetime_recovered` -- cohort shape and counters, not track
     ///   parameters. A lane's witness must not change because the cohort grew.
     ///
-    /// Taken only by [`InputStage::refresh_channel_symmetry`] and by the reader's assertion:
-    /// it is the definition, not the per-block path.
+    /// Taken by the full refresh, the addressed-lane retarget update, and the reader's assertion:
+    /// it is the definition, never the per-block path.
     fn compute_lane_channel_symmetry(&self, lane: usize) -> bool {
         #[cfg(test)]
-        CHANNEL_SYMMETRY_PREDICATE_CALLS.fetch_add(1, Ordering::Relaxed);
+        CHANNEL_SYMMETRY_PREDICATE_CALLS.with(|calls| calls.set(calls.get() + 1));
         if lane >= self.members || lane >= L::WIDTH {
             return false;
         }
@@ -4118,10 +4120,9 @@ pub mod test_support {
 mod tests {
     use super::{
         BuiltinChain, BuiltinLaneSelector, BuiltinParameters, BuiltinProcessReport,
-        BuiltinResetKind, CHANNEL_SYMMETRY_PREDICATE_CALLS, ChannelParameters, DualMonoBlock,
+        BuiltinResetKind, CHANNEL_SYMMETRY_PREDICATE_CALLS, Cell, ChannelParameters, DualMonoBlock,
         InputStage, Matrix2x2, Simd4, Simd8, prepare_sections, test_support,
     };
-    use core::sync::atomic::Ordering;
 
     fn process_reference(
         chain: &mut BuiltinChain,
@@ -4157,8 +4158,8 @@ mod tests {
         }
 
         let tracks = [
-            track(0.0, 0.0),
-            track(0.0, 3.0),
+            track(1.0, 0.0),
+            track(1.0, 3.0),
             track(2.0, 2.0),
             track(-4.0, 1.0),
             track(5.0, 5.0),
@@ -4168,33 +4169,60 @@ mod tests {
         ];
 
         macro_rules! check_width {
-            ($lane:ty, $members:expr) => {{
+            ($lane:ty, $members:expr, $addressed:expr) => {{
                 let mut stage = InputStage::<$lane>::new(&tracks[..$members]);
-                CHANNEL_SYMMETRY_PREDICATE_CALLS.store(0, Ordering::Relaxed);
+                CHANNEL_SYMMETRY_PREDICATE_CALLS.with(|calls| calls.set(0));
                 let before = stage.symmetry;
-                stage.set_trim_signed(1, BuiltinLaneSelector::Right, |_| 1.0, 0);
+                stage.set_trim_signed(
+                    $addressed,
+                    BuiltinLaneSelector::Right,
+                    |_| super::db_gain(1.0).unwrap(),
+                    0,
+                );
                 assert_eq!(
-                    CHANNEL_SYMMETRY_PREDICATE_CALLS.load(Ordering::Relaxed),
+                    CHANNEL_SYMMETRY_PREDICATE_CALLS.with(Cell::get),
                     1,
                     "one retarget evaluates one addressed lane"
                 );
-                assert_eq!(stage.symmetry & !(1 << 1), before & !(1 << 1));
-                assert_ne!(stage.symmetry & (1 << 1), 0);
+                assert_eq!(
+                    stage.symmetry & !(1 << $addressed),
+                    before & !(1 << $addressed)
+                );
+                assert_ne!(
+                    stage.symmetry & (1 << $addressed),
+                    0,
+                    "members={}, addressed={}, mask={:#x}",
+                    $members,
+                    $addressed,
+                    stage.symmetry
+                );
                 assert_eq!(stage.symmetry & !((1 << $members) - 1), 0);
 
-                CHANNEL_SYMMETRY_PREDICATE_CALLS.store(0, Ordering::Relaxed);
-                stage.set_trim_signed(1, BuiltinLaneSelector::Right, |_| -1.0, 0);
+                // Exercise every selector and a positive ramp window; each accepted retarget
+                // still has one addressed-lane predicate evaluation.
+                for selector in [
+                    BuiltinLaneSelector::Left,
+                    BuiltinLaneSelector::Right,
+                    BuiltinLaneSelector::Both,
+                ] {
+                    CHANNEL_SYMMETRY_PREDICATE_CALLS.with(|calls| calls.set(0));
+                    stage.set_trim_signed($addressed, selector, |_| 1.0, 8);
+                    assert_eq!(CHANNEL_SYMMETRY_PREDICATE_CALLS.with(Cell::get), 1);
+                }
+                CHANNEL_SYMMETRY_PREDICATE_CALLS.with(|calls| calls.set(0));
+                stage.set_polarity_invert($addressed, BuiltinLaneSelector::Right, true, 0);
                 assert_eq!(
-                    CHANNEL_SYMMETRY_PREDICATE_CALLS.load(Ordering::Relaxed),
+                    CHANNEL_SYMMETRY_PREDICATE_CALLS.with(Cell::get),
                     1,
-                    "the clear transition also evaluates one addressed lane"
+                    "polarity retarget evaluates one addressed lane"
                 );
-                assert_eq!(stage.symmetry & (1 << 1), 0);
+                assert_eq!(stage.symmetry & (1 << $addressed), 0);
             }};
         }
 
-        check_width!(Simd4, 3);
-        check_width!(Simd8, 5);
+        check_width!(Simd4, 3, 1);
+        check_width!(Simd8, 5, 1);
+        check_width!(f32, 1, 0);
     }
 
     fn assert_pair(

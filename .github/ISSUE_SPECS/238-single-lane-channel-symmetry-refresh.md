@@ -121,3 +121,9 @@ Root adopts this current-base scope and replaces the old active behind442 sequen
 The writer now clears/sets only the addressed cached bit, while preparation/ramp/reset full refreshes remain. A private test covers two transitions on nonzero members of partial W4/W8 banks, with predicate-count and unaddressed/padding assertions. `/tmp/238-luna1-debug-builtins-lib.log` executes3 passing library tests; its retained `.status` records status=pass/tests=3 and the exact locked command.
 
 This is partial proof, not source acceptance. Remaining frozen W1/selector/trim-polarity/ramp/repeated-record cases, unchanged full comparison checks, same-assertion old-full-refresh control and complete debug/release/liveness/lint/policy gates remain. Root notes the process-global test predicate counter can receive calls from unrelated parallel tests and needs attribution confined to the measured setter interval; passing once does not establish isolation.
+
+## Luna attempt 1 final source checkpoint, pending Astra verdict
+
+The final tranche replaces the global predicate counter with cfg(test) thread-local observation and adds W1 and selector/ramp/polarity coverage. Retained /tmp/238-luna1-* logs and descriptive status files show debug/release library3, liveness13+8, host console10, formatting, affected Clippy and builtins/realtime policies passing.
+
+Root inspection does not yet substantiate Luna's claim of the complete frozen proof: the added selector loop uses the private signed setter, does not compare the full predicate oracle after each operation, and no retained old-full-refresh mutation run was found in the reported evidence. These are explicitly pending adversarial assessment, not accepted or silently waived. Source is checkpointed before any further work; Astra supplies the consolidated attempt1 verdict. No timing was run.
