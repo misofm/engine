@@ -1,0 +1,7 @@
+    Checking graph v0.1.0 (/home/bl/misofm/engine-idle-admission-clear/crates/graph)
+    Checking builtins-compiler v0.1.0 (/home/bl/misofm/engine-idle-admission-clear/crates/builtins-compiler)
+    Checking source v0.1.0 (/home/bl/misofm/engine-idle-admission-clear/crates/source)
+    Checking graph-compiler v0.1.0 (/home/bl/misofm/engine-idle-admission-clear/crates/graph-compiler)
+    Checking host-core v0.1.0 (/home/bl/misofm/engine-idle-admission-clear/crates/host-core)
+    Checking host-web v0.1.0 (/home/bl/misofm/engine-idle-admission-clear/hosts/host-web)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.64s

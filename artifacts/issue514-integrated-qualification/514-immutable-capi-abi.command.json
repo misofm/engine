@@ -1,0 +1,14 @@
+{
+  "argv": [
+    "bash",
+    "scripts/check-capi-abi.sh"
+  ],
+  "cwd": "/home/bl/misofm/engine-idle-admission-clear",
+  "source": "d9dbb3147bc273f13082cedda30766ea5c5eac35",
+  "env_overrides": {
+    "MISO_ENGINE_CAPI_SKIP_BUILD": "1",
+    "MISO_ENGINE_CAPI_LIBRARY": "/tmp/engine-514-native-qualified/release/libcapi.so",
+    "MISO_ENGINE_CAPI_STATIC_LIBRARY": "/tmp/engine-514-native-qualified/release/libcapi.a",
+    "PATH": "/home/bl/.cargo/bin:/home/bl/.local/bin:/home/bl/.codex/packages/standalone/releases/0.153.2-x86_64-unknown-linux-musl/codex-path:/home/bl/.codex/tmp/arg0/codex-arg0CWD760:/home/bl/.local/bin:/home/bl/.opencode/bin:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.opencode/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin"
+  }
+}

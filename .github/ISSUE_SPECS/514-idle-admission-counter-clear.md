@@ -325,3 +325,7 @@ No builds, tests, timing, source/spec edits, Git mutations or GitHub operations 
 ## Corrected current-artifact consumers PASS
 
 Candidate b3db4c8d passes the exact non-print direct oracle, resource/native witness with26 rejection controls, hermetic worklet, pinned npm installation, all three browser engines with existing mutation self-tests and matrix check. Accepted module2693780bytes hashes c06f9517763890a081f9ee60c70fc8531fdcafbd9630495e4de5782bcf0dc79a. Generated records change only candidate/module identity. Only the separately derived two bridge rows moved; all PCM and other resources remain unchanged. Final integrated evidence review, exact PR review and required CI remain pending.
+
+## Integrated evidence package
+
+Artifacts/issue514-integrated-qualification preserves immutable workspace/targets/native ABI, release host/static gates, actual original builder/resource failures, both published module identities and baseline/candidate direct oracles, bounded integration rulings, corrected current browser consumers and honest command/source metadata. Root verified every manifest SHA256/byte length. No new performance measurement is claimed. Source and local delivery gates are ready for final actual-PR review; #514 remains OPEN until CI and remote delivery.
