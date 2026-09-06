@@ -382,17 +382,31 @@ impl core::fmt::Debug for PreparedHost {
 
 /// Parse one session JSON document.
 pub fn parse_host_session(document: &str) -> Result<SessionModel, PrepareDiagnostics> {
-    parse_session_json(document).map_err(|value| {
-        PrepareDiagnostics::new(
-            PrepareRejection::Session,
-            diagnostic_lines(
-                value
-                    .diagnostics()
-                    .iter()
-                    .map(|diagnostic| (diagnostic.code.as_str(), &diagnostic.path)),
-            ),
-        )
-    })
+    parse_session_json(document).map_err(session_diagnostics)
+}
+
+fn session_diagnostics(value: session::DiagnosticSet) -> PrepareDiagnostics {
+    PrepareDiagnostics::new(
+        PrepareRejection::Session,
+        diagnostic_lines(
+            value
+                .diagnostics()
+                .iter()
+                .map(|diagnostic| (diagnostic.code.as_str(), &diagnostic.path)),
+        ),
+    )
+}
+
+fn effect_diagnostics(value: effect_compiler::EffectDiagnosticSet) -> PrepareDiagnostics {
+    PrepareDiagnostics::new(
+        PrepareRejection::Effect,
+        diagnostic_lines(
+            value
+                .0
+                .iter()
+                .map(|diagnostic| (diagnostic.code, &diagnostic.path)),
+        ),
+    )
 }
 
 /// Parse and compile one session JSON document under this host's caps.
@@ -419,17 +433,7 @@ pub fn compile_host_model(
     model: &SessionModel,
     caps: CompileCaps,
 ) -> Result<CompiledSession, PrepareDiagnostics> {
-    compile_session(model, caps).map_err(|value| {
-        PrepareDiagnostics::new(
-            PrepareRejection::Session,
-            diagnostic_lines(
-                value
-                    .diagnostics()
-                    .iter()
-                    .map(|diagnostic| (diagnostic.code.as_str(), &diagnostic.path)),
-            ),
-        )
-    })
+    compile_session(model, caps).map_err(session_diagnostics)
 }
 
 /// Parse, compile and prepare one session in a single call.
@@ -592,17 +596,7 @@ fn prepare_host_runtime_with_console_policy(
             maximum_automation_spans_per_block: caps.maximum_automation_spans_per_block,
         },
     )
-    .map_err(|diagnostics| {
-        PrepareDiagnostics::new(
-            PrepareRejection::Effect,
-            diagnostic_lines(
-                diagnostics
-                    .0
-                    .iter()
-                    .map(|diagnostic| (diagnostic.code, &diagnostic.path)),
-            ),
-        )
-    })?;
+    .map_err(effect_diagnostics)?;
     let (effect_state_bytes, effect_scratch_bytes) =
         effects
             .entries
@@ -640,17 +634,7 @@ fn prepare_host_runtime_with_console_policy(
     // plan renders the byte-identical console-free path.
     let effect_controls: Vec<EffectControlProducer> = match console.control_queue_depth {
         None => Vec::new(),
-        Some(depth) => attach_effect_console(&mut effects, depth).map_err(|diagnostics| {
-            PrepareDiagnostics::new(
-                PrepareRejection::Effect,
-                diagnostic_lines(
-                    diagnostics
-                        .0
-                        .iter()
-                        .map(|diagnostic| (diagnostic.code, &diagnostic.path)),
-                ),
-            )
-        })?,
+        Some(depth) => attach_effect_console(&mut effects, depth).map_err(effect_diagnostics)?,
     };
 
     // Issue #143 D3, level 1. Observation capacity is attached only when it was asked for, and
@@ -667,19 +651,8 @@ fn prepare_host_runtime_with_console_policy(
             let _ = taps;
             return Err(shape("host.observation.console"));
         }
-        taps => attach_effect_observation(&mut effects, taps, observation_window_blocks).map_err(
-            |diagnostics| {
-                PrepareDiagnostics::new(
-                    PrepareRejection::Effect,
-                    diagnostic_lines(
-                        diagnostics
-                            .0
-                            .iter()
-                            .map(|diagnostic| (diagnostic.code, &diagnostic.path)),
-                    ),
-                )
-            },
-        )?,
+        taps => attach_effect_observation(&mut effects, taps, observation_window_blocks)
+            .map_err(effect_diagnostics)?,
     };
 
     // Issue #137 D1/D2: the console requests are derived here, once, from the canonical track
@@ -1000,4 +973,96 @@ fn graph_failure(code: &str) -> PrepareDiagnostics {
 
 fn effect_failure(code: &str) -> PrepareDiagnostics {
     PrepareDiagnostics::fixed(PrepareRejection::Effect, code)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{effect_diagnostics, session_diagnostics};
+    use effect_compiler::{EffectDiagnostic, EffectDiagnosticSet};
+    use session::{DiagnosticCode, parse_session_json};
+
+    #[test]
+    fn typed_diagnostic_adapters_preserve_projection_and_bound() {
+        let effects = EffectDiagnosticSet(vec![
+            EffectDiagnostic {
+                code: "effect.first",
+                path: "$.tracks[id=one]".into(),
+            },
+            EffectDiagnostic {
+                code: "effect.second",
+                path: "$.tracks[id=two].effects".into(),
+            },
+        ]);
+        let projected = effect_diagnostics(effects);
+        assert_eq!(projected.kind(), super::PrepareRejection::Effect);
+        assert_eq!(
+            projected.as_bytes(),
+            b"effect.first\t$.tracks[id=one]\neffect.second\t$.tracks[id=two].effects\n"
+        );
+        assert_eq!(
+            effect_diagnostics(EffectDiagnosticSet(Vec::new())).as_bytes(),
+            b""
+        );
+        let many = EffectDiagnosticSet(
+            (0..65)
+                .map(|index| EffectDiagnostic {
+                    code: "effect.too_many",
+                    path: format!("$.effects[index={index:02}]"),
+                })
+                .collect(),
+        );
+        assert_eq!(many.0.len(), 65);
+        assert!(many.0.iter().enumerate().all(|(index, diagnostic)| {
+            diagnostic.code == "effect.too_many"
+                && diagnostic.path == format!("$.effects[index={index:02}]")
+        }));
+        let bounded = effect_diagnostics(many).into_bytes();
+        let mut expected = String::new();
+        for index in 0..64 {
+            expected.push_str(&format!("effect.too_many\t$.effects[index={index:02}]\n"));
+        }
+        assert_eq!(bounded, expected.into_bytes());
+
+        let invalid = include_str!("../../../fixtures/session/v1/canonical.json")
+            .replace("\"sample_rate_hz\": 48000", "\"sample_rate_hz\": 123")
+            .replace("\"quantum_frames\": 128", "\"quantum_frames\": 0");
+        let session = parse_session_json(&invalid).expect_err("invalid shape");
+        assert_eq!(session.diagnostics().len(), 2);
+        assert!(
+            session
+                .diagnostics()
+                .iter()
+                .all(|diagnostic| { diagnostic.span.is_some() && !diagnostic.message.is_empty() })
+        );
+        let projected = session_diagnostics(session);
+        assert_eq!(projected.kind(), super::PrepareRejection::Session);
+        assert_eq!(
+            projected.as_bytes(),
+            b"capacity.zero\t$.quantum_frames\nsample_rate.unsupported_at_launch\t$.sample_rate_hz\n"
+        );
+
+        let canonical = include_str!("../../../fixtures/session/v1/canonical.json");
+        let mut many_document = canonical[..canonical.len() - 2].to_owned();
+        for index in 0..65 {
+            many_document.push_str(&format!(",\n  \"unexpected_{index:02}\": null"));
+        }
+        many_document.push_str("\n}\n");
+        let many = parse_session_json(&many_document).expect_err("65 unknown fields");
+        assert_eq!(many.diagnostics().len(), 64);
+        assert!(
+            many.diagnostics()
+                .iter()
+                .enumerate()
+                .all(|(index, diagnostic)| {
+                    diagnostic.code == DiagnosticCode::UnknownField
+                        && diagnostic.path.to_string() == format!("$.unexpected_{index:02}")
+                })
+        );
+        let bounded = session_diagnostics(many).into_bytes();
+        let mut expected = String::new();
+        for index in 0..64 {
+            expected.push_str(&format!("schema.unknown_field\t$.unexpected_{index:02}\n"));
+        }
+        assert_eq!(bounded, expected.into_bytes());
+    }
 }
