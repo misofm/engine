@@ -518,3 +518,5 @@ Accept the substantial completed work: actual Scalar ownership, FIFO/state/PCM/r
 These are remaining original proof obligations, not a request to redesign accepted scalar arithmetic or reopen the native-host applicability ruling. Parent qualification is NOT authorized. Third failure means preserve205fa3b5 and all evidence, stop443 implementation, and number/rebrief ONE bounded proof-completion successor before any repair. Parent443 must retain all original product and delivery obligations and remain open; #470/#476/#444 remain separately scoped. No disguised fourth correction or authority reset by calling the next patch a qualification fix.
 
 Root adopts this final FAIL. Accepted source and raw evidence remain preserved at the reviewed head. No further parent implementation is authorized. A separately numbered, Astra-approved bounded completion issue must precede further corrections; parent delivery and all retained obligations remain open.
+
+Bounded completion issue #479 owns only the three remaining observation/sidechain/owner proofs. All original parent requirements remain in force; #443 stays open until full reviewed delivery.
