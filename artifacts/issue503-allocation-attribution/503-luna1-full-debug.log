@@ -1,0 +1,8 @@
+command: PATH=/home/bl/.cargo/bin:$PATH cargo test --locked -p compressor --test conformance --features engine/realtime-audit --profile dev -- --nocapture
+cwd: /home/bl/misofm/engine-compressor-allocation-proof
+exit: 0
+running 3 tests
+test scoped_allocator_attribution_controls_are_live_and_isolated ... ok
+test uniform_and_ragged_render_paths_allocate_and_free_nothing ... ok (parent and child)
+test passes_effect_contract_conformance ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
