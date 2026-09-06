@@ -91,3 +91,7 @@ Reconcile the integrated source delta to confirm only accepted238/485 and alread
 This is a necessary delivery qualification amendment prompted by an observed required gate failure, not a fourth implementation attempt, a speculative optimization or a waiver of the original three-site/cfg source contract. No tests/builds, repository changes or Git/GitHub mutations were performed for this ruling.
 
 Root adopts the ruling after verified PR486 delivery and merges actual mainf357330c without source conflicts. Incoming238 pin da36c750 is retained pending a normal combined-source builder run. The accepted485 source and cfg dependency closure remain unchanged; standalone331160cd is not promoted. Current checkpoint is intentionally pending artifact qualification.
+
+## Observed combined artifact checkpoint
+
+Normal builder on frozen e4367be13783cb279c9aebf338929b3ae012e244 compiled successfully and returned1 for expected incoming da36c750 versus actual combined14811597b77cb4331d5f1e0bd032c01354451db79c0939fd30113b963b1a7d9b. Raw /tmp/485-combined-initial.{source,command,rawlog,numericstatus} preserves the exact attempt. Root checkpoints that observed pin before ordinary verified rebuild and existing static/resource/hermetic/browser qualification. This pin is not itself a correctness PASS; no source or expectation arithmetic changed.
