@@ -141,3 +141,7 @@ After source qualification, integrated artifacts/current consumers/native comman
 No builds, tests, benchmarks/timing, source edits, Git mutations or GitHub operations were performed during this review. Read-only inspection/hash reconstruction was used; the only file written is this requested `/tmp` report.
 
 Root activates Sol attempt2 for only these bounded corrections inside the existing frozen host test. Production source, instrumentation, initial idle assertion, baseline/layout and actual accepted mutation remain unchanged. No new mutation or layout run is required merely for later test assertions; reassess applicability from the exact diff. Integrated delivery remains deferred until #511 is delivered and integrated.
+
+## Sol attempt 2 focused checkpoint
+
+The existing frozen test now covers repeated accepted submissions, pending flag and counter preservation through backpressure followed by drain/refill, and pending-command failed-state/positive-zero silence/exact diagnostic assertions. Only hosts/host-web/src/tests.rs changed. The captured exact debug test passes one test with contemporaneous source hashes verified by root; pre-checkpoint fmt/diff pass. Production, instrumentation, initial idle assertion and native layout are unchanged. Remaining release/full/static gates and consolidated review are pending.

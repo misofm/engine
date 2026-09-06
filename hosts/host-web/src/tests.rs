@@ -1759,9 +1759,30 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
         0,
         [1.0, 0.0, 0.0, 1.0],
     );
+    assert_eq!(host.submit_commands(2), RESULT_OK);
+    let application_sample = 3 * u64::from(QUANTUM);
+    assert_eq!(
+        *host.command_report(),
+        WebCommandReport {
+            struct_size: COMMAND_REPORT_BYTES,
+            abi_version: ABI_VERSION,
+            result: RESULT_OK,
+            reason: COMMAND_REASON_NONE,
+            rejected_index: 0,
+            admitted: 2,
+            applied_at_sample: application_sample,
+            reserved: [0; 2],
+        }
+    );
+    assert_eq!(
+        host.ready.as_ref().expect("ready").in_flight[..3],
+        [2, 0, 0]
+    );
+    assert!(host.ready.as_ref().expect("ready").has_in_flight_commands);
+
     stage_command(
         &mut host,
-        2,
+        0,
         COMMAND_FADER_DB,
         255,
         2,
@@ -1771,7 +1792,20 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
         0,
         [0.0, 0.0, 0.0, 0.0],
     );
-    assert_eq!(host.submit_commands(3), RESULT_OK);
+    assert_eq!(host.submit_commands(1), RESULT_OK);
+    assert_eq!(
+        *host.command_report(),
+        WebCommandReport {
+            struct_size: COMMAND_REPORT_BYTES,
+            abi_version: ABI_VERSION,
+            result: RESULT_OK,
+            reason: COMMAND_REASON_NONE,
+            rejected_index: 0,
+            admitted: 1,
+            applied_at_sample: application_sample,
+            reserved: [0; 2],
+        }
+    );
     assert_eq!(
         host.ready.as_ref().expect("ready").in_flight[..3],
         [2, 1, 0]
@@ -1820,7 +1854,7 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
     assert!(host.ready.as_ref().expect("ready").has_in_flight_commands);
     stage_command(
         &mut host,
-        QUEUE_DEPTH,
+        0,
         COMMAND_MATRIX,
         255,
         255,
@@ -1831,11 +1865,72 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
         [1.0, 0.0, 0.0, 1.0],
     );
     assert_eq!(host.submit_commands(1), RESULT_BACKPRESSURE);
-    assert_eq!(host.command_report().reason, COMMAND_REASON_BACKPRESSURE);
     assert_eq!(
-        host.ready.as_ref().expect("ready").in_flight[0],
+        *host.command_report(),
+        WebCommandReport {
+            struct_size: COMMAND_REPORT_BYTES,
+            abi_version: ABI_VERSION,
+            result: RESULT_BACKPRESSURE,
+            reason: COMMAND_REASON_BACKPRESSURE,
+            rejected_index: 0,
+            admitted: 0,
+            applied_at_sample: 5 * u64::from(QUANTUM),
+            reserved: [0; 2],
+        }
+    );
+    assert_eq!(
+        host.ready.as_ref().expect("ready").in_flight[..3],
+        [DEFAULT_COMMAND_QUEUE_RECORDS, 0, 0]
+    );
+    assert!(host.ready.as_ref().expect("ready").has_in_flight_commands);
+
+    reset_admission_counter_clear();
+    feed_and_render(&mut host, 1, 5, 0.25);
+    assert_eq!(admission_counter_clear_stats(), (1, 3));
+    assert!(!host.ready.as_ref().expect("ready").has_in_flight_commands);
+    assert!(
+        host.ready
+            .as_ref()
+            .expect("ready")
+            .in_flight
+            .iter()
+            .all(|count| *count == 0)
+    );
+
+    // The successful drain renews the full old capacity. Drain that refill, then prove the next
+    // command-free block performs no physical clear.
+    assert_eq!(
+        host.submit_commands(DEFAULT_COMMAND_QUEUE_RECORDS),
+        RESULT_OK
+    );
+    assert_eq!(
+        host.command_report().admitted,
         DEFAULT_COMMAND_QUEUE_RECORDS
     );
+    assert_eq!(
+        host.command_report().applied_at_sample,
+        6 * u64::from(QUANTUM)
+    );
+    assert_eq!(
+        host.ready.as_ref().expect("ready").in_flight[..3],
+        [DEFAULT_COMMAND_QUEUE_RECORDS, 0, 0]
+    );
+    assert!(host.ready.as_ref().expect("ready").has_in_flight_commands);
+    reset_admission_counter_clear();
+    feed_and_render(&mut host, 1, 6, 0.25);
+    assert_eq!(admission_counter_clear_stats(), (1, 3));
+    assert!(!host.ready.as_ref().expect("ready").has_in_flight_commands);
+    assert!(
+        host.ready
+            .as_ref()
+            .expect("ready")
+            .in_flight
+            .iter()
+            .all(|count| *count == 0)
+    );
+    reset_admission_counter_clear();
+    feed_and_render(&mut host, 1, 7, 0.25);
+    assert_eq!(admission_counter_clear_stats(), (0, 0));
 
     // Malformed and backpressured submissions on an idle host cannot create pending ownership.
     let mut refused = console_host(QUANTUM, 0);
@@ -1971,9 +2066,25 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
     assert_eq!(failed.submit_commands(1), RESULT_OK);
     let before = failed.ready.as_ref().expect("ready").in_flight.to_vec();
     assert!(failed.ready.as_ref().expect("ready").has_in_flight_commands);
+    failed
+        .buffers
+        .as_mut()
+        .expect("prepared buffers")
+        .output_pcm
+        .fill(-1.0);
     reset_admission_counter_clear();
     failed.status.next_absolute_sample = u64::MAX;
     assert_eq!(failed.render_next(), RESULT_RENDER_REJECTED);
+    assert_eq!(failed.status().state, STATE_FAILED);
+    assert!(
+        failed
+            .output_pcm()
+            .expect("prepared output")
+            .iter()
+            .all(|sample| sample.to_bits() == 0),
+        "a failed render with pending commands emits positive-zero silence"
+    );
+    assert_eq!(failed.diagnostic(), b"web.render.rejected\t$\n");
     assert_eq!(admission_counter_clear_stats(), (0, 0));
     assert_eq!(
         &failed.ready.as_ref().expect("ready").in_flight[..],
@@ -1981,6 +2092,8 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
     );
     assert!(failed.ready.as_ref().expect("ready").has_in_flight_commands);
     assert_eq!(failed.render_next(), RESULT_WRONG_STATE);
+    assert_eq!(failed.status().state, STATE_FAILED);
+    assert_eq!(failed.diagnostic(), b"web.render.rejected\t$\n");
     assert_eq!(admission_counter_clear_stats(), (0, 0));
     assert_eq!(
         &failed.ready.as_ref().expect("ready").in_flight[..],
