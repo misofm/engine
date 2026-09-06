@@ -32,3 +32,15 @@ Workflow: Astra scopes/reviews; fresh Luna1, Sol2/3 only after failure, one cons
 ## Numbered implementation baseline
 
 GitHub483 matches the title and this numbered spec. Base main024ad674789a96390bcc45a754931ef5119c8b59 contains merged PR482; the exact floor/validator/workload/Cargo inputs are unchanged from Astra-inspected59f35c62. Pending numbered Astra approval; no implementation assigned yet. Existing238 remains the active runtime feature; this test-only tooling is independent.
+
+## Numbered scope approval and Luna attempt 1
+
+# Astra #483 numbered scope review — PASS
+
+Exact planning headba64710039bd865f3d43265f8b9e5ccd10bddf7d, engine-483-floor-parity, delivered base024ad674789a96390bcc45a754931ef5119c8b59. Local numbered spec contains the approved draft verbatim plus the correct numbered baseline. Live GitHub483 is OPEN with matching title “Enforce complete Rust/jq console floor parity in existing CI tests”. Root reports synchronized body; this review independently checked title/number/state.
+
+Relevant floor, jq validator, workload and Cargo inputs have no delta from inspected59f35c62. Planning delta is only the numbered spec. Approve the smallest cfg(test)-only floor.rs comparison of actual production values against the existing jq object, with full keys/tuples and the same comparator's missing/extra/value divergences. Existing native bench CI execution supplies the gate; no new CLI, workflow, parser/framework, repricing, historical pin change or actual workload/timing is allowed. Missing jq/import/process errors must fail independently, not count as successful negative controls.
+
+The historical wording “unnumbered brief” is superseded by the numbered baseline and this approval; it does not forbid root's next assignment. Root may assign fresh Luna1 after its checkpoint audit. #238 remains the sole active runtime feature; this test-only tooling is independent. Existing Astra review/Sol retry/three-failure hard stop and actual-PR/requiredCI/remote delivery rules apply. No code, tests, builds or timing performed.
+
+Root adopts PASS and assigns fresh Luna attempt1. Pause at a coherent compiling/focused-green tranche before further implementation so root can checkpoint exact paths. All test commands are untimed; no benchmark runner/capture is authorized.
