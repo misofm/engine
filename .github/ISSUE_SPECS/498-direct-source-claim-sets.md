@@ -79,3 +79,7 @@ Root may synchronize the delivery amendment, preserve the authentic failed invoc
 No automatic promotion, numerical/resource expectation change, corpus repin, lint/CI/policy change, production revision, new framework/matrix or timing authority is granted. The observed digest above is from the builder record; final independent output identity belongs to verified rebuild evidence. Any other discrepancy needs its own concrete ruling. Source PASS remains subject to delivery qualification, exact-head actual PR review and required CI SUCCESS before merge/remote closure.
 
 Read-only source/log inspection; no tests/builds/timing or source/spec/Git/GitHub mutations performed.
+
+## Qualified current artifact
+
+Candidatea928a42d passes verified builder/static/resources26/hermetic/npm/current3browser+self-tests/matrix, all7 numeric exits0. Final module SHA2568a42eb47c36ff8053b66054d72a06dee48b3c3577943f21119e0709fe64d0d0c agrees with the pin and generated records; only candidate/hash identity changed at5ff72a70. Full immutable raw records and original mismatch1 are retained. No numerical expectation or production source changed after acceptance. Actual-head PR review and required qualification remain before merge.
