@@ -1,0 +1,2 @@
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.03s
+     Running tests/resource_lifecycle.rs (target/release/deps/resource_lifecycle-c3764b7a4fd38077)

@@ -1,0 +1,6 @@
+{
+  "path": "/tmp/engine-511-qualified/miso-engine-v1-audio-worklet.simd128.wasm",
+  "bytes": 2693746,
+  "sha256": "eb573b1e5fa083eb9d12f90a21de99536310d5c8379d5d2c671370a1dbfb32c4",
+  "note": "Published binary omitted from Git; ordinary builder and current consumers qualify these bytes."
+}

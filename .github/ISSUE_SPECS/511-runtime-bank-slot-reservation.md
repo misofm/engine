@@ -390,3 +390,7 @@ Further observed discrepancies require their own concrete ruling; this is no bla
 ## Current artifact consumer qualification
 
 Candidate eba52341 passes the complete corrected direct oracle, resource gate with26 rejection controls/native row witness, hermetic worklet, npm installation, all three browser qualification/self-tests and generated matrix check. Builder/static success on e3cba8e8 composes with unchanged production/pin/module bytes; module2693746bytes hashes to eb573b1e5fa083eb9d12f90a21de99536310d5c8379d5d2c671370a1dbfb32c4. Generated records change only candidate/module identity. Original mismatch captures are preserved. Immutable workspace/targets/native ABI and final integrated review/CI remain pending.
+
+## Immutable integrated qualification PASS
+
+Clean d1295506 passes the workspace (277 result blocks;1660passed/0failed/24ignored), supported scalar/SIMD Wasm checks, release native C API and ABI check. All five captured commands return0 and source remains unchanged. Artifacts/issue511-integrated-qualification preserves complete integration lineage, raw failures and final successes, commands, source identities, component rulings and current module identity. Final actual-PR Astra review and required CI remain pending; #511 is not yet delivered.
