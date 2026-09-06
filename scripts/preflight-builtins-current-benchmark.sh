@@ -37,17 +37,19 @@ for tool in awk cargo chmod cp git jq mkdir mktemp mv rm rustc sha256sum stat; d
     command -v "$tool" >/dev/null 2>&1 || fail "required tool unavailable: $tool"
 done
 for override in RUSTFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_BUILD_RUSTFLAGS CARGO_BUILD_TARGET \
-    CARGO_PROFILE_RELEASE_OPT_LEVEL CARGO_PROFILE_RELEASE_LTO \
-    CARGO_PROFILE_RELEASE_CODEGEN_UNITS CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS \
-    RUSTC RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER; do
+    CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS RUSTC RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER; do
     [[ ! -v "$override" ]] || fail "incompatible build environment: $override"
 done
+while IFS= read -r override; do
+    [[ "$override" == CARGO_PROFILE_* ]] && fail "incompatible build environment: $override"
+done < <(compgen -e)
 if cargo_version=$(cargo -V); then :; else fail 'cargo version query failed'; fi
 if rustc_verbose=$(rustc -vV); then :; else fail 'rustc provenance query failed'; fi
 rust_version=$(printf '%s\n' "$rustc_verbose" | awk 'NR==1 {print; found=1} END {if (!found) exit 1}') ||
     fail 'rustc version is unavailable'
 target_triple=$(printf '%s\n' "$rustc_verbose" | awk '$1=="host:" {print $2; found=1} END {if (!found) exit 1}') ||
     fail 'rustc host target is unavailable'
+[[ "$target_triple" == x86_64-unknown-linux-gnu ]] || fail "unsupported rustc host target: $target_triple"
 llvm_version=$(printf '%s\n' "$rustc_verbose" | awk '$1=="LLVM" && $2=="version:" {print $3; found=1} END {if (!found) exit 1}') ||
     fail 'LLVM version is unavailable'
 cargo_executable=$(command -v cargo)
@@ -116,7 +118,10 @@ rm -rf -- "$build_directory"
 if (cd "$repository_root" && \
     CARGO_TARGET_DIR="$build_directory" \
     CARGO_PROFILE_RELEASE_OPT_LEVEL=3 CARGO_PROFILE_RELEASE_LTO=fat \
-    CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
+    CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 CARGO_PROFILE_RELEASE_PANIC=abort \
+    CARGO_PROFILE_RELEASE_DEBUG=1 CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=false \
+    CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=false CARGO_PROFILE_RELEASE_INCREMENTAL=false \
+    CARGO_PROFILE_RELEASE_STRIP=none CARGO_PROFILE_RELEASE_SPLIT_DEBUG_INFO=unpacked \
     CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS='-Ctarget-feature=+avx2,+fma' \
     cargo build --locked --release -p bench); then :; else
     fail 'isolated release build failed'
@@ -191,6 +196,8 @@ jq -n -S \
     rustc_executable:$rustc_executable,cargo_executable_sha256:$cargo_executable_sha,
     rustc_executable_sha256:$rustc_executable_sha,
     target_features:"+avx2,+fma",profile:"release",opt_level:"3",lto:"fat",codegen_units:1,
+    panic:"abort",debug:1,debug_assertions:false,overflow_checks:false,incremental:false,
+    strip:"none",split_debuginfo:"unpacked",
     records_required:20,warmup_passes:1,measured_rounds:2,
     preflight_invocations:1,runner_invocations:0,workload_invocations:0,
     timed_benchmark_invocations:0}' >"$temporary_seal"

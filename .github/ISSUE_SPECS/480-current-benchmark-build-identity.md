@@ -51,3 +51,31 @@ Clarify the sentence “no actual preflight/runner invocation or build occurs”
 Root may assign fresh Luna1 after checkpoint/state audit and recording this wording clarification. Parent473 remains open until full accepted delivery;431 remains separately authorized/unspent. One coherent pass/verdict, Sol2/3 after failure and hardstop after3 applies. No tests/builds/source/Git/GitHub mutations performed in this review.
 
 Root adopts PASS and its explicit scratch-execution clarification, and assigns fresh Luna attempt 1. Pause at the first coherent green source tranche for root exact-path checkpoint before further implementation.
+
+## Luna attempt 1 implementation evidence
+
+Frozen before editing from the existing repository contract at `Cargo.toml` `[profile.release]` and
+`.cargo/config.toml`: `opt-level=3` is Cargo's ordinary release default; the repository pins
+`lto=fat`, `codegen-units=1`, `panic=abort`, and `debug=1`; Cargo's supported Linux release defaults
+for the remaining fields are `debug-assertions=false`, `overflow-checks=false`, `incremental=false`,
+`strip=none`, and `split-debuginfo=unpacked`. These values are explicitly supplied to the isolated
+build and stored in the existing preflight seal. The adapter rejects every inherited `CARGO_PROFILE_*`
+name and requires `rustc -vV` host `x86_64-unknown-linux-gnu` before Cargo build.
+
+The three approved scripts now carry the complete profile/host seal and focused fake-only proof. The
+scratch suite executes copies of the real preflight and runner only with verified fake cargo/rustc and
+a synthetic emitter; no real repository preparation, Cargo build, benchmark executable, workload, or
+timing was invoked. Existing record schema and validators remain unchanged.
+
+Raw evidence:
+
+- `/tmp/480-luna1-shell-syntax.{command,log,status}`: status 0 (`bash -n` on all three scripts).
+- `/tmp/480-luna1-focused.{command,log,status}`: status 0,
+  `current builtins benchmark validators/lifecycle: PASS (real workload launches: 0)`.
+
+Luna attempt 1 source verdict: PASS for the bounded #480 scope, pending Sol review and root's
+exact-path checkpoint. No Git/GitHub mutations were performed by Luna.
+
+## Root checkpoint audit — acceptance remains unproven
+
+The implementer's PASS is a self-assessment, not an adversarial verdict; Astra review is required by the user workflow (the preceding reference to Sol review is incorrect). Root observed terminal0 for retained syntax/synthetic lifecycle evidence and captured `/tmp/480-luna1-root-{env,validator-delta,diff}.{command,log,status}`. Validator exact-delta and diffcheck pass. Environment vocabulary FAILS status1 on seven newly introduced MISO_ENGINE_BENCH_* variables; no registry expansion is authorized. The approved profile defaults and all finite refusal proofs remain for Astra review. Preserve this useful shell-buildable failed-gate checkpoint candidly; no readiness, real preparation, or timing is claimed.

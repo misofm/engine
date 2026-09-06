@@ -222,6 +222,17 @@ cat >"$template/bin/cargo" <<'EOF'
 set -euo pipefail
 if [[ "${1:-}" == -V ]]; then printf 'cargo 1.99.0 (fake)\n'; exit 0; fi
 [[ "${1:-}" == build && "${2:-}" == --locked && "${3:-}" == --release && "${4:-}" == -p && "${5:-}" == bench ]] || exit 90
+[[ "${CARGO_PROFILE_RELEASE_OPT_LEVEL:-}" == 3 &&
+   "${CARGO_PROFILE_RELEASE_LTO:-}" == fat &&
+   "${CARGO_PROFILE_RELEASE_CODEGEN_UNITS:-}" == 1 &&
+   "${CARGO_PROFILE_RELEASE_PANIC:-}" == abort &&
+   "${CARGO_PROFILE_RELEASE_DEBUG:-}" == 1 &&
+   "${CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS:-}" == false &&
+   "${CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS:-}" == false &&
+   "${CARGO_PROFILE_RELEASE_INCREMENTAL:-}" == false &&
+   "${CARGO_PROFILE_RELEASE_STRIP:-}" == none &&
+   "${CARGO_PROFILE_RELEASE_SPLIT_DEBUG_INFO:-}" == unpacked ]] || exit 91
+printf 'build\n' >>"$(cd "$(dirname "$0")/.." && pwd)/build-calls"
 mkdir -p "$CARGO_TARGET_DIR/release"
 cp synthetic-emitter.sh "$CARGO_TARGET_DIR/release/bench"
 chmod 755 "$CARGO_TARGET_DIR/release/bench"
@@ -230,7 +241,10 @@ cat >"$template/bin/rustc" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 [[ "${1:-}" == -vV ]] || exit 90
-printf 'rustc 1.99.0 (fake)\nbinary: rustc\ncommit-hash: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.0\nLLVM version: 20.1.0\n'
+host=x86_64-unknown-linux-gnu
+root=$(cd "$(dirname "$0")/.." && pwd)
+[[ ! -e "$root/rustc-host" ]] || host=$(<"$root/rustc-host")
+printf 'rustc 1.99.0 (fake)\nbinary: rustc\ncommit-hash: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nhost: %s\nrelease: 1.99.0\nLLVM version: 20.1.0\n' "$host"
 EOF
 cat >"$template/bin/taskset" <<'EOF'
 #!/usr/bin/env bash
@@ -297,7 +311,7 @@ emit_records() {
     --arg note "$MISO_ENGINE_BENCH_BACKGROUND_LOAD_NOTE" \
     '.candidate_commit=$commit|.binary_sha256=$binary|.rust_version=$rust|.llvm_version=$llvm|
      .target_triple=$triple|.target_features=$features|.profile=$profile|.opt_level=$opt|
-     .lto=$lto|.codegen_units=$units|.background_load_note=$note|
+    .lto=$lto|.codegen_units=$units|.background_load_note=$note|
      .missing_metadata -= ["rust_version","llvm_version","target_triple","target_features",
        "profile","opt_level","lto","codegen_units","background_load_note"]' "$records"
 }
@@ -377,6 +391,21 @@ for override in RUSTFLAGS CARGO_PROFILE_RELEASE_LTO CARGO_TARGET_X86_64_UNKNOWN_
       bash "$case_root/scripts/preflight-builtins-current-benchmark.sh" >/dev/null 2>&1; then exit 1; fi
   [[ ! -e "$case_root/synthetic-launches" && ! -e "$case_root/target/issue431-prepared/bench" ]]
 done
+for override in CARGO_PROFILE_RELEASE_PANIC CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS CARGO_PROFILE_SOMETHING; do
+  new_case "profile-family-$override"
+  if env "$override=conflict" PATH="$case_root/bin:$PATH" \
+      bash "$case_root/scripts/preflight-builtins-current-benchmark.sh" >/dev/null 2>&1; then exit 1; fi
+  [[ ! -e "$case_root/build-calls" && ! -e "$case_root/target/issue431-prepared/bench" ]]
+done
+
+new_case unsupported-host
+printf '%s\n' aarch64-unknown-linux-gnu >"$case_root/rustc-host"
+if run_preflight >/dev/null 2>&1; then exit 1; fi
+[[ ! -e "$case_root/build-calls" && ! -e "$case_root/target/issue431-prepared/bench" ]]
+new_case malformed-host
+printf '%s\n' malformed >"$case_root/rustc-host"
+if run_preflight >/dev/null 2>&1; then exit 1; fi
+[[ ! -e "$case_root/build-calls" && ! -e "$case_root/target/issue431-prepared/bench" ]]
 
 run_failure_case() {
   local name=$1 mode=$2 reason=$3 expected_child=$4 expected_validation=$5 expected_runner=$6
@@ -490,6 +519,21 @@ new_case metadata-override
 run_preflight >/dev/null
 if MISO_ENGINE_BENCH_PROFILE=caller-value run_benchmark >/dev/null 2>&1; then exit 1; fi
 disposition_reason FAIL environment_override_forbidden
+[[ ! -e "$case_root/synthetic-launches" ]]
+
+new_case runner-profile-override
+run_preflight >/dev/null
+if env CARGO_PROFILE_RELEASE_PANIC=unwind PATH="$case_root/bin:$PATH" \
+    bash "$case_root/scripts/run-builtins-current-benchmark.sh" >/dev/null 2>&1; then exit 1; fi
+disposition_reason FAIL environment_override_forbidden
+[[ ! -e "$case_root/synthetic-launches" ]]
+
+new_case seal-profile-tamper
+run_preflight >/dev/null
+jq '.panic="unwind"' "$case_root/artifacts/issue431-full-chain/builtins-benchmark.preflight.json" >"$case_root/seal-tampered"
+mv "$case_root/seal-tampered" "$case_root/artifacts/issue431-full-chain/builtins-benchmark.preflight.json"
+if run_benchmark >/dev/null 2>&1; then exit 1; fi
+disposition_reason FAIL preflight_seal_mismatch
 [[ ! -e "$case_root/synthetic-launches" ]]
 
 run_failure_case warmup warmup_fail workload_failed 71 not_run 71

@@ -161,8 +161,7 @@ fi
 
 [[ "$#" == 0 ]] || { reason=invalid_arguments; printf 'usage: %s\n' "$0" >&2; exit 2; }
 for override in RUSTFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_BUILD_RUSTFLAGS CARGO_BUILD_TARGET \
-    CARGO_PROFILE_RELEASE_OPT_LEVEL CARGO_PROFILE_RELEASE_LTO \
-    CARGO_PROFILE_RELEASE_CODEGEN_UNITS CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS \
+    CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS \
     RUSTC RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER \
     MISO_ENGINE_BENCH_CANDIDATE_COMMIT MISO_ENGINE_BENCH_BINARY_SHA256 \
     MISO_ENGINE_BENCH_RUST_VERSION MISO_ENGINE_BENCH_LLVM_VERSION \
@@ -175,6 +174,9 @@ for override in RUSTFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_BUILD_RUSTFLAGS CARGO_BU
     MISO_ENGINE_BENCH_GOVERNOR_OR_POWER_MODE; do
     [[ ! -v "$override" ]] || { reason=environment_override_forbidden; exit 1; }
 done
+while IFS= read -r override; do
+    [[ "$override" == CARGO_PROFILE_* ]] && { reason=environment_override_forbidden; exit 1; }
+done < <(compgen -e)
 [[ -z "${MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED:-}" ]] ||
     { reason=uncontrolled_override_forbidden; printf 'Issue-431 refuses uncontrolled benchmark override\n' >&2; exit 1; }
 for path in "$raw_output" "$accepted_output" "$stderr_output"; do
@@ -262,7 +264,9 @@ jq -e --arg commit "$candidate_commit" --arg tree "$candidate_tree" \
    .cargo_executable_sha256==$cargo_executable_sha and
    .rustc_executable_sha256==$rustc_executable_sha and
    .target_features=="+avx2,+fma" and .profile=="release" and .opt_level=="3" and
-   .lto=="fat" and .codegen_units==1 and .records_required==20 and
+   .lto=="fat" and .codegen_units==1 and .panic=="abort" and .debug==1 and
+   .debug_assertions==false and .overflow_checks==false and .incremental==false and
+   .strip=="none" and .split_debuginfo=="unpacked" and .records_required==20 and
    .warmup_passes==1 and .measured_rounds==2 and .preflight_invocations==1 and
    .runner_invocations==0 and .workload_invocations==0 and .timed_benchmark_invocations==0' \
   "$seal" >/dev/null || { reason=preflight_seal_mismatch; exit 1; }
@@ -314,6 +318,10 @@ MISO_ENGINE_BENCH_TARGET_TRIPLE="$target_triple" \
 MISO_ENGINE_BENCH_TARGET_FEATURES='+avx2,+fma' \
 MISO_ENGINE_BENCH_PROFILE=release MISO_ENGINE_BENCH_OPT_LEVEL=3 \
 MISO_ENGINE_BENCH_LTO=fat MISO_ENGINE_BENCH_CODEGEN_UNITS=1 \
+MISO_ENGINE_BENCH_PANIC=abort MISO_ENGINE_BENCH_DEBUG=1 \
+MISO_ENGINE_BENCH_DEBUG_ASSERTIONS=false MISO_ENGINE_BENCH_OVERFLOW_CHECKS=false \
+MISO_ENGINE_BENCH_INCREMENTAL=false MISO_ENGINE_BENCH_STRIP=none \
+MISO_ENGINE_BENCH_SPLIT_DEBUG_INFO=unpacked \
 MISO_ENGINE_BENCH_BACKGROUND_LOAD_NOTE="controlled; loadavg $loadavg; affinity cpu$bench_cpu; sibling ceiling 5%; cooldown 60s" \
 taskset -c "$bench_cpu" "$binary" builtins >&"$raw_fd" 2>&"$stderr_fd" &
 child_pid=$!
