@@ -1267,6 +1267,9 @@ struct TestPhaseTwoLayoutTable {
     values: [BuiltinRetainedLayout; BUILTIN_RETAINED_LAYOUT_CLASS_CAPACITY],
     len: usize,
     overflowed: bool,
+    deallocation_count: u64,
+    deallocations: [BuiltinRetainedLayout; BUILTIN_RETAINED_LAYOUT_CLASS_CAPACITY],
+    deallocation_len: usize,
 }
 
 #[cfg(feature = "test-support")]
@@ -1276,6 +1279,9 @@ impl TestPhaseTwoLayoutTable {
             values: [BuiltinRetainedLayout::ZERO; BUILTIN_RETAINED_LAYOUT_CLASS_CAPACITY],
             len: 0,
             overflowed: false,
+            deallocation_count: 0,
+            deallocations: [BuiltinRetainedLayout::ZERO; BUILTIN_RETAINED_LAYOUT_CLASS_CAPACITY],
+            deallocation_len: 0,
         }
     }
 
@@ -1314,6 +1320,30 @@ impl TestPhaseTwoLayoutTable {
         };
         self.len += 1;
     }
+
+    fn record_deallocation(&mut self, layout: core::alloc::Layout) {
+        match self.deallocation_count.checked_add(1) {
+            Some(count) => self.deallocation_count = count,
+            None => self.overflowed = true,
+        }
+        let size_bytes = layout.size() as u64;
+        let align_bytes = layout.align() as u64;
+        if let Some(value) = self.deallocations[..self.deallocation_len]
+            .iter_mut()
+            .find(|value| value.size_bytes == size_bytes && value.align_bytes == align_bytes)
+        {
+            value.allocation_count = value.allocation_count.saturating_add(1);
+        } else if let Some(slot) = self.deallocations.get_mut(self.deallocation_len) {
+            *slot = BuiltinRetainedLayout {
+                size_bytes,
+                align_bytes,
+                allocation_count: 1,
+            };
+            self.deallocation_len += 1;
+        } else {
+            self.overflowed = true;
+        }
+    }
 }
 
 /// Independent test-only phase-two allocation observation.
@@ -1326,6 +1356,8 @@ pub struct TestPhaseTwoAllocationSnapshot {
     pub allocation_count: u64,
     pub layouts: Vec<BuiltinRetainedLayout>,
     pub overflowed: bool,
+    pub deallocation_count: u64,
+    pub deallocation_layouts: Vec<BuiltinRetainedLayout>,
 }
 
 #[cfg(feature = "test-support")]
@@ -1345,6 +1377,17 @@ pub fn test_only_record_phase_two_allocation(layout: core::alloc::Layout) {
     }
     if let Ok(mut table) = TEST_PHASE_TWO_LAYOUTS.lock() {
         table.record(layout);
+    }
+}
+
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub fn test_only_record_phase_two_deallocation(layout: core::alloc::Layout) {
+    if !TEST_PHASE_TWO_ACTIVE.load(Ordering::Relaxed) {
+        return;
+    }
+    if let Ok(mut table) = TEST_PHASE_TWO_LAYOUTS.lock() {
+        table.record_deallocation(layout);
     }
 }
 
@@ -1383,6 +1426,8 @@ pub fn test_only_phase_two_allocation_snapshot() -> TestPhaseTwoAllocationSnapsh
         allocation_count,
         layouts,
         overflowed,
+        deallocation_count: table.deallocation_count,
+        deallocation_layouts: table.deallocations[..table.deallocation_len].to_vec(),
     }
 }
 
@@ -1394,6 +1439,27 @@ impl TestPhaseTwoAllocationGuard {
         TEST_PHASE_TWO_ACTIVE.store(true, Ordering::SeqCst);
         Self
     }
+}
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub fn test_only_begin_phase_two_allocation_observation() -> impl Drop {
+    TestPhaseTwoAllocationGuard::begin()
+}
+
+#[cfg(feature = "test-support")]
+#[must_use]
+#[doc(hidden)]
+pub fn test_only_scalar_owner_layouts() -> [BuiltinRetainedLayout; 3] {
+    let layout = |value: core::alloc::Layout| BuiltinRetainedLayout {
+        size_bytes: value.size() as u64,
+        align_bytes: value.align() as u64,
+        allocation_count: 1,
+    };
+    [
+        layout(core::alloc::Layout::new::<ConsoleFaderProcessor>()),
+        layout(core::alloc::Layout::new::<ConsoleMatrixProcessor>()),
+        layout(core::alloc::Layout::new::<ScalarPairProcessor>()),
+    ]
 }
 #[cfg(feature = "test-support")]
 impl Drop for TestPhaseTwoAllocationGuard {
@@ -3908,6 +3974,8 @@ fn meter_diagnostic(request: &MeterRequest, error: MeterConfigError) -> BuiltinD
 }
 
 #[cfg(feature = "test-support")]
+pub use tests::test_only_observed_scalar_pair_binding;
+#[cfg(feature = "test-support")]
 #[doc(hidden)]
 pub use tests::{test_only_prepared_pair_graph, test_only_prepared_scalar_pair_graph};
 
@@ -4751,6 +4819,7 @@ mod tests {
     enum BoundaryVariant {
         Plain,
         Send,
+        SelectedSend,
         Alias,
         AliasObserved,
     }
@@ -4830,13 +4899,23 @@ mod tests {
             },
             path: "$.routes[0]".to_owned(),
         });
-        if matches!(variant, BoundaryVariant::Send) {
+        if matches!(
+            variant,
+            BoundaryVariant::Send | BoundaryVariant::SelectedSend
+        ) {
             edges.push(GraphEdge {
                 id: GraphEdgeId::RouteSource {
                     route_id: StableGraphId::parse("proof-send").expect("route"),
                 },
                 source: GraphPortId {
-                    node: stage(0, TrackStage::PostFader),
+                    node: stage(
+                        if matches!(variant, BoundaryVariant::SelectedSend) {
+                            alias_track
+                        } else {
+                            0
+                        },
+                        TrackStage::PostFader,
+                    ),
                     kind: GraphPortKind::MainOutput,
                     effect_port: None,
                 },
@@ -4905,7 +4984,10 @@ mod tests {
             });
         }
         nodes.push(output.clone());
-        if matches!(variant, BoundaryVariant::Send) {
+        if matches!(
+            variant,
+            BoundaryVariant::Send | BoundaryVariant::SelectedSend
+        ) {
             nodes.push(route.clone());
         }
         if matches!(
@@ -4920,9 +5002,15 @@ mod tests {
         });
         if matches!(
             variant,
-            BoundaryVariant::Send | BoundaryVariant::Alias | BoundaryVariant::AliasObserved
+            BoundaryVariant::Send
+                | BoundaryVariant::SelectedSend
+                | BoundaryVariant::Alias
+                | BoundaryVariant::AliasObserved
         ) {
-            let boundary_node = if matches!(variant, BoundaryVariant::Send) {
+            let boundary_node = if matches!(
+                variant,
+                BoundaryVariant::Send | BoundaryVariant::SelectedSend
+            ) {
                 route.clone()
             } else {
                 alias.clone()
@@ -4971,7 +5059,10 @@ mod tests {
                 .filter(|node| !matches!(node, GraphNodeId::Route { .. }) && *node != &alias)
                 .cloned()
                 .collect(),
-            routes: if matches!(variant, BoundaryVariant::Send) {
+            routes: if matches!(
+                variant,
+                BoundaryVariant::Send | BoundaryVariant::SelectedSend
+            ) {
                 vec![PreparedRoute {
                     node: route,
                     transform: RouteTransform {
@@ -5193,6 +5284,30 @@ mod tests {
         )
     }
 
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn test_only_observed_scalar_pair_binding() -> (
+        PreparedBuiltinsGraphBound,
+        graph::GraphResourceEstimate,
+        TestPhaseTwoAllocationSnapshot,
+        TestPhaseTwoAllocationSnapshot,
+    ) {
+        let (bound, estimate, owners, binding) = prepared_pair_graph_variant_observed(
+            false,
+            false,
+            false,
+            true,
+            None,
+            Backend::Scalar,
+            2,
+            BoundaryVariant::Plain,
+            1,
+            None,
+            true,
+        );
+        (bound, estimate, owners.unwrap(), binding.unwrap())
+    }
+
     fn prepared_pair_graph_fixture(
         post_fader_observed: bool,
         symmetric_input: bool,
@@ -5229,6 +5344,41 @@ mod tests {
         meter_track: usize,
         extra_post_matrix_capture: Option<(usize, Arc<std::sync::Mutex<Vec<u32>>>)>,
     ) -> PreparedBuiltinsGraphBound {
+        prepared_pair_graph_variant_observed(
+            post_fader_observed,
+            symmetric_input,
+            nonfinite_input,
+            between_render_calls,
+            post_matrix_capture,
+            backend,
+            n,
+            variant,
+            meter_track,
+            extra_post_matrix_capture,
+            false,
+        )
+        .0
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepared_pair_graph_variant_observed(
+        post_fader_observed: bool,
+        symmetric_input: bool,
+        nonfinite_input: bool,
+        between_render_calls: bool,
+        post_matrix_capture: Option<Arc<std::sync::Mutex<Vec<u32>>>>,
+        backend: Backend,
+        n: usize,
+        variant: BoundaryVariant,
+        meter_track: usize,
+        extra_post_matrix_capture: Option<(usize, Arc<std::sync::Mutex<Vec<u32>>>)>,
+        observe_binding: bool,
+    ) -> (
+        PreparedBuiltinsGraphBound,
+        graph::GraphResourceEstimate,
+        Option<TestPhaseTwoAllocationSnapshot>,
+        Option<TestPhaseTwoAllocationSnapshot>,
+    ) {
         let compiled = n_track_session_with_symmetry(n, symmetric_input);
         let controls = (0..n)
             .map(|index| TrackControlRequest {
@@ -5284,6 +5434,11 @@ mod tests {
             ) {
                 schedule.push(stage(n - 1, TrackStage::PostDynamic));
             }
+            if matches!(variant, BoundaryVariant::SelectedSend) {
+                schedule.push(GraphNodeId::Route {
+                    route_id: StableGraphId::parse("proof-send").expect("route"),
+                });
+            }
             schedule.push(GraphNodeId::Output {
                 output_id: StableGraphId::parse("main-out").expect("output"),
             });
@@ -5319,8 +5474,22 @@ mod tests {
             );
         }
         let classes = SessionPoolClasses::from_session(&compiled);
+        let scalar_resource = builtins
+            .graph_scalar_owner_resource(backend, &levels, &classes)
+            .expect("checked scalar owner resource");
+        graph
+            .estimate
+            .checked_add_scalar_owners(scalar_resource)
+            .expect("fixture scalar owner estimate");
+        let owner_observation =
+            observe_binding.then(test_only_begin_phase_two_allocation_observation);
         let mut artifact =
             builtins.into_graph_artifact_with_banks(graph, (), backend, &levels, &classes);
+        drop(owner_observation);
+        let owner_snapshot = observe_binding.then(test_only_phase_two_allocation_snapshot);
+        if observe_binding {
+            test_only_reset_phase_two_allocation_tracker();
+        }
         if matches!(variant, BoundaryVariant::AliasObserved) {
             artifact
                 .builtin_observers
@@ -5379,13 +5548,19 @@ mod tests {
             },
             Box::new(HarnessSink) as Box<dyn GraphRuntimeProcessor>,
         ));
-        artifact
+        let saved_estimate = artifact.graph_resource_estimate().clone();
+        let _binding_observation =
+            observe_binding.then(test_only_begin_phase_two_allocation_observation);
+        let bound = artifact
             .into_bound(GraphRuntimeBindings {
                 envelope,
                 nodes,
                 observers: Vec::new(),
             })
-            .unwrap_or_else(|failure| panic!("fixture bind: {}", failure.code))
+            .unwrap_or_else(|failure| panic!("fixture bind: {}", failure.code));
+        drop(_binding_observation);
+        let binding_snapshot = observe_binding.then(test_only_phase_two_allocation_snapshot);
+        (bound, saved_estimate, owner_snapshot, binding_snapshot)
     }
 
     fn render_bound(bound: &mut PreparedBuiltinsGraphBound, sample: u64) -> Vec<u32> {
@@ -5931,6 +6106,61 @@ mod tests {
         assert!(
             paired.meter_consumers[0].consumer.try_pop().is_ok(),
             "the observed separate track publishes a nonempty meter window"
+        );
+    }
+
+    #[test]
+    fn actual_scalar_nonunity_send_reader_declines_with_reference_output() {
+        let _guard = PAIR_WITNESS_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let declined_capture = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let reference_capture = Arc::new(std::sync::Mutex::new(Vec::new()));
+        test_only_reset_fader_matrix_witness();
+        let mut declined = prepared_pair_graph_variant(
+            false,
+            false,
+            false,
+            true,
+            Some(Arc::clone(&declined_capture)),
+            Backend::Scalar,
+            2,
+            BoundaryVariant::SelectedSend,
+            1,
+            None,
+        );
+        let prepared = test_only_fader_matrix_witness();
+        let mut reference = prepared_pair_graph_variant(
+            false,
+            false,
+            false,
+            false,
+            Some(Arc::clone(&reference_capture)),
+            Backend::Scalar,
+            2,
+            BoundaryVariant::SelectedSend,
+            1,
+            None,
+        );
+        assert_eq!(
+            (prepared.factory_calls, prepared.factory_members),
+            (1, 1),
+            "the non-send peer pairs while the send-reading scalar track stays separate"
+        );
+        test_only_reset_fader_matrix_witness();
+        let declined_output = render_bound(&mut declined, 0);
+        let rendered = test_only_fader_matrix_witness();
+        let reference_output = render_bound(&mut reference, 0);
+        assert_eq!((rendered.process_calls, rendered.process_members), (1, 1));
+        assert_eq!(declined_output, reference_output);
+        assert!(
+            declined_output
+                .iter()
+                .any(|word| *word != 0 && *word != 0x8000_0000)
+        );
+        assert_eq!(
+            std::mem::take(&mut *declined_capture.lock().unwrap()),
+            std::mem::take(&mut *reference_capture.lock().unwrap())
         );
     }
 
@@ -6973,6 +7203,119 @@ mod tests {
             interrupted_left,
             [0.5, 0.25],
             "queued matrix command applied on retry"
+        );
+    }
+
+    #[test]
+    fn scalar_pair_reset_matches_reset_original_owners() {
+        let make = || {
+            scalar_console_owners(
+                BuiltinControlDelivery::BetweenRenderCalls,
+                BuiltinControlDelivery::BetweenRenderCalls,
+            )
+        };
+        let (fader, matrix, mut paired_fader_tx, mut paired_matrix_tx) = make();
+        let paired =
+            make_scalar_pair(fader, matrix).unwrap_or_else(|_| panic!("eligible scalar pair"));
+        let paired: Box<dyn Any> = paired;
+        let mut paired = paired.downcast::<ScalarPairProcessor>().unwrap();
+        let (fader, matrix, mut separate_fader_tx, mut separate_matrix_tx) = make();
+        let fader: Box<dyn Any> = fader;
+        let matrix: Box<dyn Any> = matrix;
+        let mut separate_fader = fader.downcast::<ConsoleFaderProcessor>().unwrap();
+        let mut separate_matrix = matrix.downcast::<ConsoleMatrixProcessor>().unwrap();
+        let fader_record = TrackFaderRecord::Mute {
+            lanes: BuiltinLaneSelector::Both,
+            muted: true,
+            smoothing_samples: 7,
+        };
+        let matrix_record = TrackControlRecord {
+            matrix: Matrix2x2 {
+                ll: 0.5,
+                lr: 0.25,
+                rl: -0.25,
+                rr: 0.75,
+            },
+            smoothing_samples: 7,
+        };
+        push_both(&mut paired_fader_tx, &mut separate_fader_tx, fader_record);
+        push_both(
+            &mut paired_matrix_tx,
+            &mut separate_matrix_tx,
+            matrix_record,
+        );
+        let mut paired_left = [0.5_f32; 3];
+        let mut paired_right = [-0.25_f32; 3];
+        paired
+            .process(GraphBindingBlock {
+                left: &mut paired_left,
+                right: &mut paired_right,
+                first_sample: 0,
+            })
+            .unwrap();
+        let mut separate_left = [0.5_f32; 3];
+        let mut separate_right = [-0.25_f32; 3];
+        separate_fader
+            .process(GraphBindingBlock {
+                left: &mut separate_left,
+                right: &mut separate_right,
+                first_sample: 0,
+            })
+            .unwrap();
+        separate_matrix
+            .process(GraphBindingBlock {
+                left: &mut separate_left,
+                right: &mut separate_right,
+                first_sample: 0,
+            })
+            .unwrap();
+
+        paired.fader.fader.reset();
+        paired.matrix.matrix.reset();
+        separate_fader.fader.reset();
+        separate_matrix.matrix.reset();
+        let expected_fader = builtins::test_support::scalar_fader_words(&separate_fader.fader);
+        let expected_matrix = builtins::test_support::scalar_matrix_words(&separate_matrix.matrix);
+        assert_eq!(
+            builtins::test_support::scalar_fader_words(&paired.fader.fader),
+            expected_fader
+        );
+        assert_eq!(
+            builtins::test_support::scalar_matrix_words(&paired.matrix.matrix),
+            expected_matrix
+        );
+        let mut paired_left = [0.75_f32; 4];
+        let mut paired_right = [-0.5_f32; 4];
+        let mut separate_left = paired_left;
+        let mut separate_right = paired_right;
+        paired
+            .process(GraphBindingBlock {
+                left: &mut paired_left,
+                right: &mut paired_right,
+                first_sample: 3,
+            })
+            .unwrap();
+        separate_fader
+            .process(GraphBindingBlock {
+                left: &mut separate_left,
+                right: &mut separate_right,
+                first_sample: 3,
+            })
+            .unwrap();
+        separate_matrix
+            .process(GraphBindingBlock {
+                left: &mut separate_left,
+                right: &mut separate_right,
+                first_sample: 3,
+            })
+            .unwrap();
+        assert_eq!(
+            paired_left.map(f32::to_bits),
+            separate_left.map(f32::to_bits)
+        );
+        assert_eq!(
+            paired_right.map(f32::to_bits),
+            separate_right.map(f32::to_bits)
         );
     }
 

@@ -52,8 +52,8 @@ use lane::kernels::{mix2x2_block, ordered_accumulate_block, pdc_delay_block, sum
 use rack::{BankChain, BankMembers, BankPlaneViews, FoldCohort};
 
 use crate::{
-    GraphBindingBlock, GraphNodeObserverBinding, GraphObservationBlock, GraphPreparedEffect,
-    GraphRuntimeProcessor,
+    GraphBindingBlock, GraphEdgeId, GraphNodeObserverBinding, GraphObservationBlock,
+    GraphPreparedEffect, GraphRuntimeProcessor,
 };
 
 /// Lane type the block kernels are instantiated at to vectorise **over frames**.
@@ -1940,7 +1940,15 @@ pub(crate) fn build_sequential(
         else {
             continue;
         };
-        if first_track != second_track
+        let crossing_reader = spec.edges.iter().any(|edge| {
+            edge.source.node == *first_node
+                && matches!(
+                    edge.id,
+                    GraphEdgeId::RouteSource { .. } | GraphEdgeId::EffectSidechain { .. }
+                )
+        });
+        if crossing_reader
+            || first_track != second_track
             || !chains_into(
                 program,
                 spec,

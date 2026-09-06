@@ -15,8 +15,10 @@ use builtins::{BuiltinLaneSelector, Matrix2x2, MeterConfig, MeterTap};
 use builtins_compiler::{
     BuiltinCompileCaps, MeterRequest, TestOnlyFaderMatrixPair, TrackControlRecord,
     TrackFaderRecord, prepare_session_builtins, test_only_fader_matrix_witness,
-    test_only_phase_two_allocation_snapshot, test_only_record_phase_two_allocation,
+    test_only_observed_scalar_pair_binding, test_only_phase_two_allocation_snapshot,
+    test_only_record_phase_two_allocation, test_only_record_phase_two_deallocation,
     test_only_reset_fader_matrix_witness, test_only_reset_phase_two_allocation_tracker,
+    test_only_scalar_owner_layouts,
 };
 use engine::realtime::{PlanarBufferMut, RenderIo, RenderTime};
 use session::{CompileCaps, RouteSource, SendTap, StableId, compile_session, parse_session_json};
@@ -98,6 +100,7 @@ unsafe impl GlobalAlloc for TrackingAllocator {
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
         if ARMED.with(Cell::get) {
             LIVE_FREES.set(LIVE_FREES.get() + 1);
+            test_only_record_phase_two_deallocation(layout);
         }
         // SAFETY: forwards the original pointer and layout unchanged.
         unsafe { System.dealloc(pointer, layout) }
@@ -110,6 +113,7 @@ unsafe impl GlobalAlloc for TrackingAllocator {
             // keeps the zero gate from being bypassed by a direct realloc call.
             LIVE_ALLOCS.set(LIVE_ALLOCS.get() + 1);
             LIVE_FREES.set(LIVE_FREES.get() + 1);
+            test_only_record_phase_two_deallocation(layout);
             test_only_record_phase_two_allocation(layout);
         }
         // SAFETY: forwards the original allocation arguments unchanged.
@@ -341,6 +345,58 @@ fn actual_queued_scalar_graph_allocates_and_frees_nothing() {
     );
 }
 
+#[test]
+fn actual_scalar_prepare_and_bind_retain_the_charged_owner_layouts() {
+    let _session_guard = SESSION
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let [fader, matrix, outer] = test_only_scalar_owner_layouts();
+
+    test_only_reset_phase_two_allocation_tracker();
+    let (bound, admitted, preparation, binding) = armed(test_only_observed_scalar_pair_binding);
+    assert!(!preparation.overflowed);
+    for expected in [fader, matrix] {
+        assert!(
+            preparation.layouts.iter().any(|observed| {
+                observed.size_bytes == expected.size_bytes
+                    && observed.align_bytes == expected.align_bytes
+                    && observed.allocation_count >= 2
+            }),
+            "both original owners are actual retained preparation allocations: expected={expected:?}, observed={:?}",
+            preparation.layouts
+        );
+    }
+    assert!(!binding.overflowed);
+    for retained in [fader, matrix] {
+        assert!(
+            !binding.deallocation_layouts.iter().any(|released| {
+                released.size_bytes == retained.size_bytes
+                    && released.align_bytes == retained.align_bytes
+            }),
+            "binding retains each original owner without free/reallocate substitution"
+        );
+    }
+    assert!(
+        binding.layouts.iter().any(|observed| {
+            observed.size_bytes == outer.size_bytes
+                && observed.align_bytes == outer.align_bytes
+                && observed.allocation_count >= 1
+        }),
+        "binding allocates the charged two-pointer scalar outer"
+    );
+    assert!(binding.largest_allocation_bytes >= outer.size_bytes);
+    assert!(outer.size_bytes <= admitted.largest_allocation_bytes);
+
+    LIVE_ALLOCS.set(0);
+    LIVE_FREES.set(0);
+    armed(|| drop(bound));
+    assert_eq!(LIVE_ALLOCS.get(), 0, "off-render release does not allocate");
+    assert!(
+        LIVE_FREES.get() > 0,
+        "bound owners release only during off-render drop"
+    );
+}
+
 fn session(track_count: u32) -> session::CompiledSession {
     let mut model = parse_session_json(include_str!("../../../fixtures/session/v1/canonical.json"))
         .expect("fixture parse");
@@ -413,6 +469,8 @@ fn assert_zero_phase_two_allocations() {
     assert_eq!(snapshot.largest_allocation_bytes, 0);
     assert_eq!(snapshot.allocation_count, 0);
     assert!(snapshot.layouts.is_empty());
+    assert_eq!(snapshot.deallocation_count, 0);
+    assert!(snapshot.deallocation_layouts.is_empty());
     assert!(!snapshot.overflowed);
 }
 
