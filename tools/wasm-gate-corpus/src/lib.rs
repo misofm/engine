@@ -43,8 +43,8 @@ use gate_expander::corpus as gate_expander_corpus;
 use lane::Lane;
 use lane::kernels::{
     OnePoleCoef, OnePoleState, RampSegment, SvfCoef, SvfCoefStep, SvfState, gain_block,
-    gain_mix_block, one_pole_block, ramp_block, sum_into_block, sum2_block, svf_block,
-    svf_block_ramped,
+    gain_mix_block, mix2x2_block, one_pole_block, ramp_block, sum_into_block, sum2_block,
+    svf_block, svf_block_ramped,
 };
 use math::corpus as math_corpus;
 use math::{exp2_lane, log2_lane};
@@ -183,7 +183,7 @@ pub const CASE_COUNT: usize = LANE_CASE_COUNT
     + COMPRESSOR_CASE_COUNT;
 
 /// The block kernels the corpus drives, in pin order.
-const KERNELS: [Kernel; 12] = [
+const KERNELS: [Kernel; 13] = [
     Kernel::SvfLow,
     Kernel::SvfHigh,
     Kernel::SvfBand,
@@ -196,6 +196,7 @@ const KERNELS: [Kernel; 12] = [
     Kernel::Ramp,
     Kernel::Sum2,
     Kernel::SumInto,
+    Kernel::Mix2x2,
 ];
 
 /// The signals each kernel is driven with, in pin order.
@@ -241,6 +242,8 @@ enum Kernel {
     Sum2,
     /// `sum_into_block`.
     SumInto,
+    /// `mix2x2_block` over two equal planar halves of the block.
+    Mix2x2,
 }
 
 impl Kernel {
@@ -259,6 +262,7 @@ impl Kernel {
             Self::Ramp => "ramp_block",
             Self::Sum2 => "sum2_block",
             Self::SumInto => "sum_into_block",
+            Self::Mix2x2 => "mix2x2_block",
         }
     }
 
@@ -964,6 +968,14 @@ fn run_kernel<L: Lane>(kernel: Kernel, block: &mut [f32], state_seed: f32) {
         Kernel::SumInto => {
             let other: Vec<f32> = block.iter().map(|x| x * 0.25).collect();
             sum_into_block::<L>(block, &other);
+        }
+        Kernel::Mix2x2 => {
+            // The existing single-array digest carries both matrix outputs: each half is one
+            // planar channel, and FRAMES is even so every supported width sees whole groups.
+            assert!(FRAMES.is_multiple_of(2));
+            let midpoint = block.len() / 2;
+            let (left, right) = block.split_at_mut(midpoint);
+            mix2x2_block::<L>(left, right, [0.9, -0.1, 0.2, 0.8]);
         }
     }
 }

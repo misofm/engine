@@ -203,3 +203,9 @@ All existing arithmetic/order, debug equality and release prefix/short rejection
 Root must serialize the G5 fixed internal guest target directories with ongoing Wasm qualification (the output-directory argument does not isolate those targets). Root controls worker assignment, checkpoint/push and eventual combined qualification. The current updated sequence after delivered238 supersedes historical queue references. Scope is ready without further amendment; source acceptance, exact-head PR review and requiredCI remain later gates.
 
 Root adopts PASS and assigns fresh Luna1, beginning only the mandatory retained opaque probe and unchanged-kernel corpus/pin baseline sequence. Report/checkpoint before kernel edits. No timing is authorized; use the isolated worktree target directories and do not overlap488 graph/program.rs.
+
+## Luna attempt 1 recoverable pre-edit checkpoint
+
+The three kernels are unchanged. The G5 corpus adds the prescribed matrix case/four scalar-derived pins; root verifies every old named pin is unchanged. Raw baseline G5 output reports native/scalar-Wasm/simd128 cases139/comparisons349 with no mismatches. A retained opaque example and large native/Wasm disassemblies exist. This checkpoint preserves work before any kernel rewrite; it is not baseline acceptance.
+
+Root notes the reported /tmp/463-luna1-* files contain build/decode/output logs but no retained command/status/toolchain/hash record files matching the claimed provenance. The current probe hardcodes Simd8 and one common length for all spans; the frozen supported Simd4/scalar interpretation and exact loop-check claims require independent assessment. Initial placeholder pins were replaced by actual scalar output before this checkpoint. Astra must assess baseline sufficiency and allowed permanent probe placement before any rewrite. No timing or runtime kernel change is claimed.
