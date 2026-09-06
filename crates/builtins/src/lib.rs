@@ -4168,61 +4168,141 @@ mod tests {
             track(9.0, 4.0),
         ];
 
-        macro_rules! check_width {
-            ($lane:ty, $members:expr, $addressed:expr) => {{
-                let mut stage = InputStage::<$lane>::new(&tracks[..$members]);
-                CHANNEL_SYMMETRY_PREDICATE_CALLS.with(|calls| calls.set(0));
-                let before = stage.symmetry;
-                stage.set_trim_signed(
-                    $addressed,
-                    BuiltinLaneSelector::Right,
-                    |_| super::db_gain(1.0).unwrap(),
-                    0,
-                );
-                assert_eq!(
-                    CHANNEL_SYMMETRY_PREDICATE_CALLS.with(Cell::get),
-                    1,
-                    "one retarget evaluates one addressed lane"
-                );
-                assert_eq!(
-                    stage.symmetry & !(1 << $addressed),
-                    before & !(1 << $addressed)
-                );
-                assert_ne!(
-                    stage.symmetry & (1 << $addressed),
-                    0,
-                    "members={}, addressed={}, mask={:#x}",
-                    $members,
-                    $addressed,
-                    stage.symmetry
-                );
-                assert_eq!(stage.symmetry & !((1 << $members) - 1), 0);
+        enum Retarget {
+            Trim(BuiltinLaneSelector, f32, u32),
+            Polarity(BuiltinLaneSelector, bool, u32),
+        }
 
-                // Exercise every selector and a positive ramp window; each accepted retarget
-                // still has one addressed-lane predicate evaluation.
-                for selector in [
-                    BuiltinLaneSelector::Left,
-                    BuiltinLaneSelector::Right,
-                    BuiltinLaneSelector::Both,
-                ] {
-                    CHANNEL_SYMMETRY_PREDICATE_CALLS.with(|calls| calls.set(0));
-                    stage.set_trim_signed($addressed, selector, |_| 1.0, 8);
-                    assert_eq!(CHANNEL_SYMMETRY_PREDICATE_CALLS.with(Cell::get), 1);
+        fn retarget_and_check<L: super::Lane>(
+            stage: &mut InputStage<L>,
+            lane: usize,
+            retarget: Retarget,
+        ) {
+            let before = stage.symmetry;
+            CHANNEL_SYMMETRY_PREDICATE_CALLS.with(|calls| calls.set(0));
+            match retarget {
+                Retarget::Trim(selector, gain, smoothing_samples) => {
+                    stage.set_trim_db(lane, selector, gain, smoothing_samples);
                 }
-                CHANNEL_SYMMETRY_PREDICATE_CALLS.with(|calls| calls.set(0));
-                stage.set_polarity_invert($addressed, BuiltinLaneSelector::Right, true, 0);
-                assert_eq!(
-                    CHANNEL_SYMMETRY_PREDICATE_CALLS.with(Cell::get),
-                    1,
-                    "polarity retarget evaluates one addressed lane"
+                Retarget::Polarity(selector, inverted, smoothing_samples) => {
+                    stage.set_polarity_invert(lane, selector, inverted, smoothing_samples);
+                }
+            }
+
+            // Capture the setter's interval before the independent full-definition oracle below
+            // evaluates any predicates of its own. This named assertion is also the mutation
+            // control: restoring the old full refresh must fail here on a multi-member bank.
+            let setter_predicate_calls = CHANNEL_SYMMETRY_PREDICATE_CALLS.with(Cell::get);
+            assert_eq!(
+                setter_predicate_calls, 1,
+                "one retarget evaluates only the addressed lane"
+            );
+
+            let active_mask = if stage.members == u8::BITS as usize {
+                u8::MAX
+            } else {
+                (1_u8 << stage.members) - 1
+            };
+            let mut oracle = 0_u8;
+            for candidate in 0..stage.members {
+                if stage.compute_lane_channel_symmetry(candidate) {
+                    oracle |= 1 << candidate;
+                }
+            }
+            assert_eq!(stage.symmetry & active_mask, oracle);
+            assert_eq!(
+                stage.symmetry & !(1 << lane),
+                before & !(1 << lane),
+                "a retarget changed an unaddressed or padding bit"
+            );
+            assert_eq!(
+                stage.symmetry & !active_mask,
+                0,
+                "padding bits must stay clear"
+            );
+        }
+
+        macro_rules! check_width {
+            ($lane:ty, $members:expr, $addressed:expr, $different:expr) => {{
+                let mut stage = InputStage::<$lane>::new(&tracks[..$members]);
+                let addressed_bit = 1_u8 << $addressed;
+                let mut saw_false_to_true = false;
+                let mut saw_true_to_false = false;
+
+                macro_rules! operation {
+                    ($target:expr, $operation:expr) => {{
+                        let before = stage.symmetry;
+                        retarget_and_check(&mut stage, $target, $operation);
+                        saw_false_to_true |=
+                            before & (1 << $target) == 0 && stage.symmetry & (1 << $target) != 0;
+                        saw_true_to_false |=
+                            before & (1 << $target) != 0 && stage.symmetry & (1 << $target) == 0;
+                    }};
+                }
+
+                // Re-equalize, split, and re-equalize the same nonzero lane through the actual
+                // trim/polarity operations and all three selectors.
+                operation!(
+                    $addressed,
+                    Retarget::Trim(BuiltinLaneSelector::Right, super::db_gain(1.0).unwrap(), 0,)
                 );
-                assert_eq!(stage.symmetry & (1 << $addressed), 0);
+                operation!(
+                    $addressed,
+                    Retarget::Polarity(BuiltinLaneSelector::Left, true, 0)
+                );
+                operation!(
+                    $addressed,
+                    Retarget::Polarity(BuiltinLaneSelector::Left, false, 0)
+                );
+                operation!(
+                    $addressed,
+                    Retarget::Trim(BuiltinLaneSelector::Both, super::db_gain(2.0).unwrap(), 8,)
+                );
+
+                // Multi-member banks then retarget a different lane and return to the first one;
+                // the scalar case repeats its sole lane instead.
+                operation!(
+                    $different,
+                    Retarget::Trim(BuiltinLaneSelector::Right, super::db_gain(1.0).unwrap(), 0,)
+                );
+                operation!(
+                    $different,
+                    Retarget::Polarity(BuiltinLaneSelector::Right, true, 8)
+                );
+                operation!(
+                    $different,
+                    Retarget::Polarity(BuiltinLaneSelector::Both, false, 0)
+                );
+                operation!(
+                    $addressed,
+                    Retarget::Polarity(BuiltinLaneSelector::Both, false, 0)
+                );
+
+                assert!(
+                    saw_false_to_true,
+                    "members={}, addressed={}, mask={:#x} never became symmetric",
+                    $members, $addressed, stage.symmetry
+                );
+                assert!(
+                    saw_true_to_false,
+                    "members={}, addressed={}, mask={:#x} never became asymmetric",
+                    $members, $addressed, stage.symmetry
+                );
+                if $members > 1 {
+                    assert_ne!(
+                        addressed_bit,
+                        1_u8 << $different,
+                        "multi-member evidence must address different lanes"
+                    );
+                }
             }};
         }
 
-        check_width!(Simd4, 3, 1);
-        check_width!(Simd8, 5, 1);
-        check_width!(f32, 1, 0);
+        check_width!(f32, 1, 0, 0);
+        check_width!(Simd4, 3, 1, 0);
+        check_width!(Simd4, 4, 1, 0);
+        check_width!(Simd8, 5, 1, 0);
+        check_width!(Simd8, 8, 1, 0);
     }
 
     fn assert_pair(
