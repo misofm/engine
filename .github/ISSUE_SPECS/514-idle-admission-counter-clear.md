@@ -321,3 +321,7 @@ On the checkpointed corrected document, run the existing direct oracle without p
 Any further observed discrepancy requires a separate concrete ruling. Final integrated review, actual-PR/required CI and GitHub synchronization remain root's obligations. This is a bounded integration expectation correction, not a new production attempt or final delivery PASS.
 
 No builds, tests, timing, source/spec edits, Git mutations or GitHub operations were performed. Read-only inspection, hashing and JSON comparisons were used; the only file written is this requested `/tmp` ruling.
+
+## Corrected current-artifact consumers PASS
+
+Candidate b3db4c8d passes the exact non-print direct oracle, resource/native witness with26 rejection controls, hermetic worklet, pinned npm installation, all three browser engines with existing mutation self-tests and matrix check. Accepted module2693780bytes hashes c06f9517763890a081f9ee60c70fc8531fdcafbd9630495e4de5782bcf0dc79a. Generated records change only candidate/module identity. Only the separately derived two bridge rows moved; all PCM and other resources remain unchanged. Final integrated evidence review, exact PR review and required CI remain pending.
