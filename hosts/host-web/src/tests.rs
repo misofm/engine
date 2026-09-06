@@ -1649,9 +1649,21 @@ fn stage_command(
 
 /// A console host over the browser identity fixture: one track, unity everything, one-quantum ring.
 fn console_host(quantum: u32, meter_blocks: u64) -> AudioWorkletEngineHost {
-    let document = identity_session(quantum, quantum, u64::from(quantum) * 64);
+    console_host_at_rate(48_000, quantum, meter_blocks)
+}
+
+fn console_host_at_rate(
+    sample_rate_hz: u32,
+    quantum: u32,
+    meter_blocks: u64,
+) -> AudioWorkletEngineHost {
+    let mut model =
+        parse_session_json(&identity_session(quantum, quantum, u64::from(quantum) * 64))
+            .expect("identity model");
+    model.sample_rate_hz = sample_rate_hz;
+    let document = canonical_session_json(&model).expect("canonical identity session");
     let options = WebBootOptions {
-        require_sample_rate_hz: 48_000,
+        require_sample_rate_hz: sample_rate_hz,
         require_quantum_frames: quantum,
         source_ring_frames: quantum,
         console_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
@@ -1689,6 +1701,35 @@ fn paired_console_host(quantum: u32) -> AudioWorkletEngineHost {
     AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("paired console boot")
 }
 
+fn meter_tail_host(sample_rate_hz: u32, quantum: u32) -> AudioWorkletEngineHost {
+    let mut model = parse_session_json(include_str!("../tests/browser-v1/session.json"))
+        .expect("accepted identity fixture");
+    model.sample_rate_hz = sample_rate_hz;
+    model.quantum_frames = quantum;
+    model.sources[0].frames = u64::from(quantum) * 4;
+    let template = model.tracks[0].clone();
+    model.tracks.clear();
+    for index in 0..9 {
+        let mut track = template.clone();
+        track.id = session::StableId::parse(&format!("track-{index}")).expect("track id");
+        model.tracks.push(track);
+    }
+    model.routes[0].source = session::RouteSource::Track {
+        track_id: session::StableId::parse("track-0").expect("route track"),
+        tap: session::SendTap::PostMatrix,
+    };
+    let document = canonical_session_json(&model).expect("canonical meter-tail fixture");
+    let options = WebBootOptions {
+        require_sample_rate_hz: sample_rate_hz,
+        require_quantum_frames: quantum,
+        source_ring_frames: quantum,
+        console_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
+        console_meter_blocks: 1,
+        ..WebBootOptions::explicit_defaults()
+    };
+    AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("meter-tail boot")
+}
+
 /// Feed one full quantum of a constant left plane and render it.
 fn feed_and_render(host: &mut AudioWorkletEngineHost, generation: u64, block: u64, value: f32) {
     let quantum = host.status().quantum_frames as usize;
@@ -1700,7 +1741,7 @@ fn feed_and_render(host: &mut AudioWorkletEngineHost, generation: u64, block: u6
             b"fixture-source",
             generation,
             block * quantum as u64,
-            48_000,
+            host.status().sample_rate_hz,
             &planes,
             quantum as u32,
             false,
@@ -3047,6 +3088,14 @@ fn meter_empty_poll_preserves_early_peak_and_publication_state() {
     assert_eq!(published_header.first_sample, 0);
     assert_eq!(published_header.end_sample, 256);
     assert_eq!(
+        published_frame[2], 1.0,
+        "master left retained the early peak"
+    );
+    assert_eq!(
+        published_frame[3], 1.0,
+        "master right retained the early peak"
+    );
+    assert_eq!(
         host.poll_meters(),
         0,
         "an empty poll does not manufacture a new frame"
@@ -3068,10 +3117,161 @@ fn meter_delayed_poll_delivers_each_queued_window_with_its_own_peak() {
     assert_eq!(host.meter_header().first_sample, 0);
     assert_eq!(host.meter_header().end_sample, 256);
     assert_eq!(host.meter_frame()[0], 1.0);
+    assert_eq!(host.meter_frame()[2], 1.0);
+    assert_eq!(host.meter_frame()[3], 1.0);
     assert_eq!(host.poll_meters(), 1);
     assert_eq!(host.meter_header().first_sample, 256);
     assert_eq!(host.meter_header().end_sample, 512);
     assert_eq!(host.meter_frame()[0], 0.4);
+    assert_eq!(host.meter_frame()[2], 0.4);
+    assert_eq!(host.meter_frame()[3], 0.4);
+
+    feed_and_render(&mut host, 1, 4, 0.8);
+    let partial_frame = host.meter_frame().to_vec();
+    let partial_header = *host.meter_header();
+    assert_eq!(
+        host.poll_meters(),
+        0,
+        "a partial trailing period is not published"
+    );
+    assert_eq!(host.meter_frame(), partial_frame);
+    assert_eq!(*host.meter_header(), partial_header);
+}
+
+#[test]
+fn meter_invalid_master_rejects_transactionally_then_recovers_with_loss() {
+    let mut host = console_host(128, 1);
+    assert_eq!(host.set_meter_lease(true), RESULT_OK);
+    feed_and_render(&mut host, 1, 0, 0.9);
+    assert_eq!(host.poll_meters(), 1);
+    let published_frame = host.meter_frame().to_vec();
+    let published_header = *host.meter_header();
+
+    feed_and_render(&mut host, 1, 1, 0.2);
+    assert!(
+        host.ready
+            .as_mut()
+            .expect("ready")
+            .pop_master_window()
+            .is_some()
+    );
+    assert_eq!(host.poll_meters(), 0);
+    assert_eq!(host.meter_frame(), published_frame);
+    assert_eq!(*host.meter_header(), published_header);
+
+    feed_and_render(&mut host, 1, 2, 0.3);
+    assert_eq!(host.poll_meters(), 1);
+    assert_eq!(host.meter_header().first_sample, 256);
+    assert_eq!(&host.meter_frame()[..4], &[0.3, 0.3, 0.3, 0.3]);
+    assert_ne!(host.meter_header().reserved[1] & METER_VALID_LOSS, 0);
+}
+
+#[test]
+fn meter_producer_reset_starts_a_fresh_delivery_epoch() {
+    let mut host = console_host(128, 1);
+    assert_eq!(host.set_meter_lease(true), RESULT_OK);
+    feed_and_render(&mut host, 1, 0, 0.9);
+    assert_eq!(host.poll_meters(), 1);
+    let published_frame = host.meter_frame().to_vec();
+    let published_header = *host.meter_header();
+
+    feed_and_render(&mut host, 1, 1, 0.2);
+    let ready = host.ready.as_mut().expect("ready");
+    for (meter, pending) in ready.meters.iter_mut().zip(ready.meter_pending.iter_mut()) {
+        let mut snapshot = meter.consumer.try_pop().expect("queued snapshot");
+        snapshot.reset_generation = snapshot.reset_generation.saturating_add(1);
+        snapshot.window_sequence = 0;
+        *pending = Some(snapshot);
+    }
+    assert_eq!(host.poll_meters(), 0);
+    assert_eq!(host.meter_frame(), published_frame);
+    assert_eq!(*host.meter_header(), published_header);
+
+    feed_and_render(&mut host, 1, 2, 0.3);
+    assert_eq!(host.poll_meters(), 1);
+    assert!(host.meter_header().reserved[0] > published_header.reserved[0]);
+    assert_eq!(host.meter_header().first_sample, 256);
+    assert_eq!(&host.meter_frame()[..4], &[0.3, 0.3, 0.3, 0.3]);
+    assert_ne!(host.meter_header().reserved[1] & METER_VALID_LOSS, 0);
+}
+
+#[test]
+fn meter_queue_saturation_recovers_with_explicit_loss() {
+    let mut host = console_host(128, 1);
+    assert_eq!(host.set_meter_lease(true), RESULT_OK);
+    for block in 0..12 {
+        feed_and_render(&mut host, 1, block, 0.2);
+    }
+    for block in 0..8 {
+        assert_eq!(host.poll_meters(), 1);
+        assert_eq!(host.meter_header().first_sample, block * 128);
+    }
+    assert_eq!(host.poll_meters(), 0);
+    feed_and_render(&mut host, 1, 12, 0.3);
+    assert_eq!(host.poll_meters(), 1);
+    assert_eq!(host.meter_header().first_sample, 12 * 128);
+    assert_eq!(&host.meter_frame()[..4], &[0.3, 0.3, 0.3, 0.3]);
+    assert_ne!(host.meter_header().reserved[1] & METER_VALID_LOSS, 0);
+    assert!(host.meter_header().reserved[1] >> METER_LOSS_SHIFT > 0);
+}
+
+#[test]
+fn meter_spans_cover_all_launch_rates_and_a_nine_track_tail() {
+    const QUANTUM: u32 = 128;
+    for sample_rate_hz in [44_100, 48_000, 88_200, 96_000] {
+        let mut host = meter_tail_host(sample_rate_hz, QUANTUM);
+        assert_eq!(host.set_meter_lease(true), RESULT_OK);
+        feed_and_render(&mut host, 1, 0, 0.625);
+        assert_eq!(host.poll_meters(), 1, "{sample_rate_hz} Hz");
+        assert_eq!(host.meter_header().first_sample, 0);
+        assert_eq!(host.meter_header().end_sample, u64::from(QUANTUM));
+        assert_eq!(host.meter_header().track_count, 9);
+        for track in 0..9 {
+            assert_eq!(
+                host.meter_frame()[track * 2],
+                0.625,
+                "rate {sample_rate_hz}, track {track} L"
+            );
+            assert_eq!(
+                host.meter_frame()[track * 2 + 1],
+                0.625,
+                "rate {sample_rate_hz}, track {track} R"
+            );
+        }
+        assert_eq!(
+            host.meter_frame()[18],
+            0.625,
+            "{sample_rate_hz} Hz master L"
+        );
+        assert_eq!(
+            host.meter_frame()[19],
+            0.625,
+            "{sample_rate_hz} Hz master R"
+        );
+    }
+}
+
+#[test]
+fn source_seek_keeps_the_meter_epoch_and_absolute_peak_clock() {
+    let mut host = console_host(128, 1);
+    assert_eq!(host.set_meter_lease(true), RESULT_OK);
+    feed_and_render(&mut host, 1, 0, 0.4);
+    assert_eq!(host.poll_meters(), 1);
+    let meter_generation = host.meter_header().reserved[0];
+
+    assert_eq!(host.seek_source(b"fixture-source", 2, 0), RESULT_OK);
+    let plane = vec![0.7_f32; 128];
+    let planes: [&[f32]; 2] = [&plane, &plane];
+    assert_eq!(
+        host.submit_source(b"fixture-source", 2, 0, 48_000, &planes, 128, false),
+        RESULT_OK
+    );
+    assert_eq!(host.render_next(), RESULT_OK);
+    assert_eq!(host.poll_meters(), 1);
+    assert_eq!(host.meter_header().reserved[0], meter_generation);
+    assert_eq!(host.meter_header().first_sample, 128);
+    assert_eq!(host.meter_header().end_sample, 256);
+    assert_eq!(&host.meter_frame()[..4], &[0.7, 0.7, 0.7, 0.7]);
 }
 
 #[test]
@@ -3095,6 +3295,8 @@ fn meter_lease_reacquisition_waits_for_a_clean_boundary() {
     assert!(host.meter_header().first_sample >= 256);
     assert_eq!(host.meter_header().reserved[0], generation);
     assert_eq!(host.meter_frame()[0], 0.2);
+    assert_eq!(host.meter_frame()[2], 0.2);
+    assert_eq!(host.meter_frame()[3], 0.2);
 }
 
 /// A three-track observation host over the #143 E4 fixture: compressor, EQ (no tap), gate.

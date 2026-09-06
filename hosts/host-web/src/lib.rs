@@ -298,9 +298,10 @@ pub const COMMAND_REPORT_BYTES: u32 = size_of::<WebCommandReport>() as u32;
 /// JavaScript side reads through `miso_engine_web_v1_meter_header_ptr`, exactly as the status and
 /// the resource report already do, and the `f32` buffer stays what it is: numbers a meter draws.
 ///
-/// `first_sample`/`end_sample` are half-open and describe the window the frame's values were
-/// folded over, so a consumer correlates them against a command's `applied_at_sample` rather than
-/// against a wall clock.
+/// `first_sample`/`end_sample` are half-open and describe only the track and master peak window.
+/// Gain-reduction slots are latest independently aged effect folds and do not inherit this span.
+/// A consumer correlates the peak span against a command's `applied_at_sample` rather than against
+/// a wall clock.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WebMeterHeader {
@@ -322,8 +323,8 @@ pub struct WebMeterHeader {
     pub master_track_plus_one: u32,
     /// `1` when `master_gr_db` is meaningful, `0` when no master tap is bound.
     pub master_gr_present: u32,
-    /// Publication generation. It increments on each real lease transition, so a consumer can
-    /// reject a frame retained across release/reacquisition without changing the ABI shape.
+    /// Publication generation. It increments on each real lease transition and on a detected
+    /// meter-producer reset, so retained frames cannot cross either delivery epoch.
     pub reserved: [u64; 2],
 }
 
@@ -638,7 +639,7 @@ struct ReadyOwnership {
     /// One bounded pending snapshot per track. This is fixed at preparation and never grows from
     /// the callback; the queue itself remains the only producer-side buffer.
     meter_pending: Box<[Option<MeterSnapshot>]>,
-    /// Host publication generation, advanced only on an actual lease transition.
+    /// Host publication generation, advanced on lease transitions and detected producer resets.
     meter_generation: u64,
     /// Losses and rejected stale/mismatched windows waiting to be reported in the next complete
     /// frame. Keeping this out of the public header until publication preserves empty-poll
@@ -1071,7 +1072,8 @@ impl AudioWorkletEngineHost {
     ///
     /// `3T + 3` words: two peaks per track, master left and right, then one **non-negative**
     /// gain-reduction magnitude in decibels per track and the master's. The peak section is
-    /// byte-for-byte where it always was.
+    /// byte-for-byte where it always was. Gain reduction is the latest fold from each independently
+    /// aged effect observation and does not share the peak interval in [`WebMeterHeader`].
     #[must_use]
     pub fn meter_frame(&self) -> &[f32] {
         self.ready.as_ref().map_or(&[], |ready| &ready.meter_frame)
@@ -1316,6 +1318,8 @@ impl AudioWorkletEngineHost {
     /// Apply one strictly increasing generation-tagged source seek between render blocks.
     /// This web host owns both producer and render plan on one exclusive thread. Successful
     /// admission also prepares its consumer so new PCM can enter even when old queues were full.
+    /// A seek changes source-content position while the absolute render clock stays continuous;
+    /// it therefore neither resets meter accumulators nor advances the meter publication epoch.
     pub fn seek_source(&mut self, source_id: &[u8], generation: u64, source_frame: u64) -> u32 {
         if self.status.state != STATE_READY {
             return self.record(RESULT_WRONG_STATE);
@@ -1533,6 +1537,7 @@ impl AudioWorkletEngineHost {
         if !self.meter_lease || self.status.state != STATE_READY {
             return 0;
         }
+        let reset_activation_sample = self.next_meter_boundary(self.status.next_absolute_sample);
         let Some(ready) = self.ready.as_mut() else {
             return 0;
         };
@@ -1637,49 +1642,29 @@ impl AudioWorkletEngineHost {
                 ready.meter_loss_count = ready.meter_loss_count.saturating_add(1);
                 continue;
             }
+            if ready
+                .meter_snapshot_generation
+                .is_some_and(|generation| generation != first.reset_generation)
+            {
+                // A producer reset is a new delivery epoch. Reject this group under the old
+                // public identity and clear all bounded delivery state so the next render opens a
+                // clean master/track interval. The prior public frame and header stay byte-stable
+                // because a zero return never publishes an epoch transition.
+                ready.meter_generation = ready.meter_generation.saturating_add(1);
+                ready.reset_meter_delivery(false);
+                ready.meter_loss_count = 1;
+                self.meter_activation_sample = reset_activation_sample;
+                return 0;
+            }
             if ready.meter_header.sequence > 0
-                && !folded
+                && ready.meter_header.reserved[0] == ready.meter_generation
                 && first.start_sample != ready.meter_header.end_sample
             {
                 ready.meter_loss_count = ready.meter_loss_count.saturating_add(1);
             }
-            if !folded {
-                folded_start = first.start_sample;
-                folded = true;
-                for index in 0..track_count {
-                    if let Some(slot) = ready.meter_frame.get_mut(index * 2) {
-                        *slot = 0.0;
-                    }
-                    if let Some(slot) = ready.meter_frame.get_mut(index * 2 + 1) {
-                        *slot = 0.0;
-                    }
-                }
-            }
+            folded_start = first.start_sample;
+            folded = true;
             folded_end = first.end_sample;
-            for (index, pending) in ready.meter_pending.iter_mut().enumerate() {
-                let Some(snapshot) = pending.take() else {
-                    continue;
-                };
-                if snapshot.cumulative_dropped_snapshots > ready.meter_snapshot_drops_seen {
-                    ready.meter_loss_count = ready.meter_loss_count.saturating_add(
-                        snapshot
-                            .cumulative_dropped_snapshots
-                            .saturating_sub(ready.meter_snapshot_drops_seen),
-                    );
-                    ready.meter_snapshot_drops_seen = snapshot.cumulative_dropped_snapshots;
-                }
-                if let Some(slot) = ready.meter_frame.get_mut(index * 2)
-                    && snapshot.left.sample_peak > *slot
-                {
-                    *slot = snapshot.left.sample_peak;
-                }
-                if let Some(slot) = ready.meter_frame.get_mut(index * 2 + 1)
-                    && snapshot.right.sample_peak > *slot
-                {
-                    *slot = snapshot.right.sample_peak;
-                }
-                ready.meter_snapshot_generation = Some(snapshot.reset_generation);
-            }
             windows = windows.saturating_add(1);
             // The frozen adapter policy is bounded per-window delivery. Further complete windows
             // remain queued for the next poll, preserving one exact span per public frame.
@@ -1716,12 +1701,46 @@ impl AudioWorkletEngineHost {
             // The host cannot recover an interval peak from one envelope once its boundary is
             // lost. Consume the track group, count the discontinuity, and wait for the next clean
             // master/track span rather than publishing a mixed or guessed master value.
+            for pending in &mut ready.meter_pending {
+                if let Some(snapshot) = pending.take()
+                    && snapshot.cumulative_dropped_snapshots > ready.meter_snapshot_drops_seen
+                {
+                    ready.meter_loss_count = ready.meter_loss_count.saturating_add(
+                        snapshot
+                            .cumulative_dropped_snapshots
+                            .saturating_sub(ready.meter_snapshot_drops_seen),
+                    );
+                    ready.meter_snapshot_drops_seen = snapshot.cumulative_dropped_snapshots;
+                }
+            }
             ready.meter_loss_count = ready.meter_loss_count.saturating_add(1);
             return 0;
         }
         let master_peak = ready
             .pop_master_window()
             .map_or([0.0, 0.0], |measurement| measurement.peak);
+        // All candidate validation is complete. Only this commit section mutates the public frame;
+        // every earlier zero-return path leaves both public buffers byte-for-byte unchanged.
+        for (index, pending) in ready.meter_pending.iter_mut().enumerate() {
+            let Some(snapshot) = pending.take() else {
+                continue;
+            };
+            if snapshot.cumulative_dropped_snapshots > ready.meter_snapshot_drops_seen {
+                ready.meter_loss_count = ready.meter_loss_count.saturating_add(
+                    snapshot
+                        .cumulative_dropped_snapshots
+                        .saturating_sub(ready.meter_snapshot_drops_seen),
+                );
+                ready.meter_snapshot_drops_seen = snapshot.cumulative_dropped_snapshots;
+            }
+            if let Some(slot) = ready.meter_frame.get_mut(index * 2) {
+                *slot = snapshot.left.sample_peak;
+            }
+            if let Some(slot) = ready.meter_frame.get_mut(index * 2 + 1) {
+                *slot = snapshot.right.sample_peak;
+            }
+            ready.meter_snapshot_generation = Some(snapshot.reset_generation);
+        }
         for (plane, peak) in master_peak.iter().enumerate() {
             if let Some(slot) = ready.meter_frame.get_mut(master + plane) {
                 *slot = *peak;
@@ -3146,16 +3165,17 @@ fn compile_ready(
     let master_capacity = handles
         .meters
         .first()
-        .map_or(1, |meter| meter.consumer.capacity());
-    let meter_delivery_bytes = u64::try_from(meter_count)
+        .map_or(0, |meter| meter.consumer.capacity());
+    let pending_meter_bytes = u64::try_from(meter_count)
         .ok()
         .and_then(|count| count.checked_mul(size_of::<Option<MeterSnapshot>>() as u64))
-        .and_then(|pending| {
-            u64::try_from(master_capacity)
-                .ok()
-                .and_then(|count| count.checked_mul(size_of::<Option<MasterMeasurement>>() as u64))
-                .and_then(|master| pending.checked_add(master))
-        })
+        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
+    let master_meter_bytes = u64::try_from(master_capacity)
+        .ok()
+        .and_then(|count| count.checked_mul(size_of::<Option<MasterMeasurement>>() as u64))
+        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
+    let meter_delivery_bytes = pending_meter_bytes
+        .checked_add(master_meter_bytes)
         .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
     report.bridge_metadata_bytes = report
         .bridge_metadata_bytes
@@ -3167,7 +3187,11 @@ fn compile_ready(
         .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
     report.largest_bridge_allocation_bytes = report
         .largest_bridge_allocation_bytes
-        .max(u64::try_from(meter_delivery_bytes).unwrap_or(u64::MAX));
+        .max(pending_meter_bytes)
+        .max(master_meter_bytes);
+    report.largest_named_allocation_bytes = report
+        .largest_named_allocation_bytes
+        .max(report.largest_bridge_allocation_bytes);
     let ready = ReadyOwnership {
         controls: handles.track_controls,
         effect_controls: effect_controls.into_boxed_slice(),

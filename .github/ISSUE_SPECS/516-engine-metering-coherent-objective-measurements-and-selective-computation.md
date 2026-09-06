@@ -101,6 +101,64 @@ four-rate target execution remain unavailable in this tranche and are not claime
 Selective metric requests, poll-scan reduction and measured kernel work remain separate successor
 issues as planned.
 
+## Attempt 1 adversarial review
+
+Dedicated Sol review at committed revision `d90bf386` recorded **FAIL**. A poll could consume and
+write a coherent track candidate before validating the corresponding master interval, then return
+zero with the previous header but changed public peak bytes. The stored meter-producer generation
+was never compared with later candidates, so a restarted producer sequence could be published
+under the previous host epoch. Public TypeScript documentation also applied the peak interval too
+broadly to independently aged gain-reduction folds and promised gapless delivery despite explicit
+loss handling. Shipped Wasm callback/browser qualification had stopped honestly at the expected
+old artifact digest; it was not claimed as passing. The review also found that the largest bridge
+allocation row used the sum of two separately allocated meter buffers rather than their maximum.
+
+## Sol correction attempt 2 — correctness slice
+
+The poll now validates handle/generation/sequence/span/frame identity and the exact master interval
+before entering a single public-frame commit section. Every zero-return path leaves all published
+frame and header bytes intact. Asymmetric loss consumes only hidden bounded candidate state, records
+loss, and later recovers at the next exact master/track span.
+
+The first accepted producer reset generation is retained and compared on every later candidate. An
+unexpected change rejects the group under the old public identity, increments the internal delivery
+epoch, drains only prepared queue capacities, clears pending/master partial state, and starts at the
+next clean meter boundary. The new epoch becomes public only with its first successful frame. Lease
+transitions retain the same bounded clean-boundary rule. Source seek is explicitly a content-position
+discontinuity on a continuous absolute render clock: it neither resets the meter accumulator nor
+advances the meter epoch, so a peak window may straddle it. This web host exposes no in-place plan
+replacement or full render reset; those operations create a fresh host and therefore have no queued
+or published meter state to inherit.
+
+Gain-reduction documentation now states that each slot is a latest, independently aged effect fold;
+its sequence and sample span are not transported and the track/master peak timestamps never apply to
+it. Peak-frame documentation treats generation changes and sample gaps as delivery discontinuities
+and uses the validity/loss metadata rather than promising gapless windows.
+
+The pending-track and master-ring allocation sizes are still both charged to bridge metadata and
+retained totals before the exact budget gate. Largest-allocation reporting now uses the larger
+individual allocation, carries that value into `largest_named_allocation_bytes`, and prepares zero
+master-ring entries when meters are unattached.
+
+Correction evidence from the dirty candidate based on `d90bf386`:
+
+```text
+cargo check -p host-web                         # PASS
+cargo test -p host-web --lib meter_             # PASS: 11 passed, 61 filtered out
+cargo test -p host-web --lib                    # PASS: 71 passed, 1 ignored
+bash scripts/check-realtime-policy.sh            # PASS: 42 marked regions in 12 files
+cargo fmt --all -- --check                       # PASS
+git diff --check                                 # PASS
+```
+
+The added executable probes cover transactional zero-return publication and recovery, asymmetric
+master loss, producer reset and fresh epoch recovery, queue saturation with explicit loss, delayed
+polling with a partial trailing period, lease reactivation, continuous-clock source seek, all four
+launch sample rates, and a nine-track SIMD-width tail. Peak assertions include both master slots.
+The existing PCM-identity and gain-reduction tests remain green. Shipped Wasm artifact adoption,
+allocation/callgraph inspection, resource-fixture refresh and browser execution remain pending a
+separate Astra ruling over the frozen corrected source and are not claimed here.
+
 ## Planning review
 
 Drafted by a dedicated Astra agent at low reasoning effort and adversarially reviewed by a separate Astra agent at medium reasoning effort, as requested by the owner. Verdict: PASS after bounded revisions clarifying selective computation as a required planned outcome, concrete work-avoidance gates, and metadata compatibility without a broad ABI redesign. This verdict covers the plan only; implementation, performance results and release qualification remain unperformed.
