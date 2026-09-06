@@ -73,3 +73,17 @@ Root reports PR502 has now merged as ad00d16b. Integrate that delivered main onc
 Root is integrating delivered main ad00d16b8ef8e3aa5ba4c406d00db4c62ff311b5; the 475/499 closure record follows in a separate checkpoint. The entire graph-compiler crate remains byte-identical to accepted6f421d67. The next pushed checkpoint freezes current combined source for ordinary artifact verification.
 
 Recovery record: the first integration command stopped at a prose-only conflict in the #498 post-main closure note. A subsequent orchestration step incorrectly continued and ran the ordinary builder before the merge commit. Its raw record labels HEAD 6f421d67, but the worktree included delivered compressor source from main; this is not clean-head qualification evidence. The compiler succeeded and the digest comparison failed (expected fa78dc8d3f0d391b94419f5252504eee2aafbbf13853884157e24935ed092cc3, observed bed7d77cbd55e91f38679d4ed1ea6d99684ad12d8a1a0f785049d788630f17ee). Preserve these raw records; final qualification must execute on the resolved committed source. The conflict resolution retains the successful #498 post-main note. Separately, #502 post-main qualification 34014528298 failed its compressor allocation test; investigation is active and no green post-main claim is made.
+
+## Clean artifact ruling
+
+# Astra #500 current artifact integration ruling — approved, bounded
+
+Reviewed clean frozen be055b4c602ffc8dcca0653815e303f3001bdd69 in engine-cp20-identity-plan. Graph-compiler is byte-identical to accepted 4e2fc87d/6f421d67; compressor/Cargo/config match delivered ad00d16b. The original builder executed during a documentation merge conflict and remains historical, explicitly not clean-head qualification evidence.
+
+The separate clean ordinary invocation in /tmp/500-clean-delivery-builder.command.json identifies this exact source, explicit output /tmp/engine-500-clean-qualified and target /tmp/engine-500-artifact-target. Its authentic log records successful release compilation followed by builder exit1: expected fa78dc8d3f0d391b94419f5252504eee2aafbbf13853884157e24935ed092cc3, observed bed7d77cbd55e91f38679d4ed1ea6d99684ad12d8a1a0f785049d788630f17ee. This is an actual supported-build mismatch, not authorization to choose a digest from an unqualified file or alter numerical expectations.
+
+Approve an exact observed-pin checkpoint followed by the ordinary verified rebuild and existing static/object/ABI, resource gate with its 26 rejection controls, hermetic worklet, current three-browser record/check plus self-tests and matrix qualification. Independently compare the successfully published module bytes/SHA to the exact pin and all current consumer records. Generated candidate/hash identities may change; canonical/PCM/resource numerical expectations, schemas, corpus pins, CI/lints and builders remain unchanged. Any unexpected numerical or further source discrepancy stops promotion for a concrete ruling. Preserve both initial dirty-merge and clean mismatch logs with honest provenance; do not overwrite failure evidence.
+
+This ruling grants no timing authority and does not resolve or waive the separately observed PR502 post-main allocation qualification failure. That regression must be handled under its bounded successor and required CI; no merger may rely on the historical premerge PASS to ignore the known failure. Final exact-head Astra PR review and required CI success remain delivery gates.
+
+Read-only source/log comparison; no source/Git/GitHub edits, builds, tests or timing performed.
