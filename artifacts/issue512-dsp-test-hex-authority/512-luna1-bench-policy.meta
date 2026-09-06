@@ -1,0 +1,5 @@
+argv: scripts/check-bench-policy.sh
+cwd: /home/bl/misofm/engine-dsp-test-hex
+env: PATH=/home/bl/.cargo/bin:$PATH
+head: 793a6b186c83482e67e512a36fe5e79d458f27a9
+source: scripts/check-bench-policy.sh blob=3635749b91ea123093635427e4b1cc5f86e63e63

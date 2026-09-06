@@ -1,0 +1,3 @@
+    Blocking waiting for file lock on build directory
+    Checking parametric-eq v0.1.0 (/home/bl/misofm/engine-dsp-test-hex/crates/parametric-eq)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.45s

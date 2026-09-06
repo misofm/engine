@@ -1,0 +1,4 @@
+    Blocking waiting for file lock on build directory
+   Compiling parametric-eq v0.1.0 (/home/bl/misofm/engine-dsp-test-hex/crates/parametric-eq)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.22s
+     Running tests/determinism.rs (target/debug/deps/determinism-af62e5c6eed06fa7)
