@@ -1,6 +1,6 @@
 # 475: Specialize uniform compressor detector taps without changing DSP
 
-Current state: three-attempt hardstop; bounded proof successor required. The decision below supersedes historical scheduling records. Root owns Git/GitHub and exact-path checkpoints; no timing or benchmark capture is authorized.
+Current state: source accepted through bounded child499; integrated delivery qualification active. The decision below supersedes historical scheduling records. Root owns Git/GitHub and exact-path checkpoints; no timing or benchmark capture is authorized.
 
 Active Class-A product child of audit #349 DYN-1. Current implementation base is delivered main571dfc5b after #463 closed. Astra has approved the actual base below; root assigns fresh Luna1 under the Astra review and Sol2/3 fallback workflow. Earlier queued-base records are retained as history, not current scheduling authority.
 
@@ -210,3 +210,7 @@ Evidence otherwise checks out: all12 manifest payload hashes/sizes and exact13-f
 Root adopts the hardstop. No further implementation or delivery qualification under parent475 is authorized until a numbered, Astra-briefed proof successor owns the finite populated-history correction. The parent retains the complete product contract and all eventual delivery gates; no acceptance requirement is weakened.
 
 The one remaining populated-history proof obligation is now numbered child #499. Parent implementation remains frozen; child499 has its own bounded brief and fresh attempt budget, without weakening the parent acceptance or delivery contract.
+
+## Child499 acceptance and integrated delivery freeze
+
+Astra child499 Luna1 PASS at05c73e7e completes the sole populated W4 proof gap; the full review is retained in499 spec. Parent hardstop history remains preserved, and no fourth parent implementation occurred. Root integrated delivered main95abdd015e28823905800d051d03837255d91612 plus the498 closure record, and git diff over the entire compressor crate against reviewed05c73e7e is empty. Retained immutable workspace/supported-target and ordinary current-artifact qualification are now authorized at the next pushed frozen checkpoint. No timing, numerical expectation or corpus change.
