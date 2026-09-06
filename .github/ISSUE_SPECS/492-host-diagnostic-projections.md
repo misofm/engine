@@ -67,3 +67,9 @@ Accept the candidate's65 intended unknown fields on an otherwise-valid canonical
 No production change, cap change, broader test interface or additional gate is needed. Root should synchronize this narrow applicability correction and allow Sol2 to finish the existing gates. This is not the consolidated Sol2 verdict; final source/evidence review remains pending. No tests/builds or repository/Git/GitHub mutation performed.
 
 Root adopts this correction. Focused-green test-only checkpoint1ed69049 is pushed; Sol2 may finish existing gates with production adapters unchanged.
+
+## Sol attempt 2 final evidence
+
+Finalsourceb5ac4dbe retains the accepted production adapters; tests assert effect category and actual65 ordered diagnostic entries with exact first64 bytes. Otherwise-valid session input supplies65 intended errors; the approved parser cap ruling establishes actual64 known ordered entries and exact64 projected lines. No claim of reachable65 session diagnostics or empty session set is made.
+
+Final focusedtyped debug/release1each, prepareintegration12passed+1existingignored each, strictalltargets/allfeaturesClippy, correctedfmt and diff all return0. Raw records preserve initial zero-test filters, initial parser-cap mismatch and fmt1; final exact tests and correctedfmt supersede them. Awaiting one consolidated Astra Sol2 verdict.

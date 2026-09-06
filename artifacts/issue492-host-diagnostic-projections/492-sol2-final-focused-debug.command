@@ -1,0 +1,1 @@
+PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/492-sol2-target cargo test --locked -p host-core --lib prepare::tests::typed_diagnostic_adapters_preserve_projection_and_bound -- --exact
