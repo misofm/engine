@@ -1364,8 +1364,8 @@ mod tests {
         let value = gather_detector(&channel, write, DelayClass::Uniform(2), &mut gather);
         let mut lanes = [0.0; MAX_WIDTH];
         value.store(&mut lanes);
-        for lane in 0..L::WIDTH {
-            assert_eq!(lanes[lane], (8 * 100 + lane) as f32);
+        for (lane, value) in lanes.iter().enumerate().take(L::WIDTH) {
+            assert_eq!(*value, (8 * 100 + lane) as f32);
         }
 
         for lane in 0..L::WIDTH {
@@ -1386,9 +1386,9 @@ mod tests {
         }
         let ragged = gather_detector(&channel, write, DelayClass::Ragged, &mut gather);
         ragged.store(&mut lanes);
-        for lane in 0..L::WIDTH {
+        for (lane, value) in lanes.iter().enumerate().take(L::WIDTH) {
             let row = (write + 11 - channel.delay[lane] as usize) % 11;
-            assert_eq!(lanes[lane], (row * 100 + lane) as f32);
+            assert_eq!(*value, (row * 100 + lane) as f32);
         }
 
         for (start, length) in [(0, 0), (5, 1), (10, 4)] {
