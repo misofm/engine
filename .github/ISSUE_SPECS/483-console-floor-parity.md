@@ -50,3 +50,19 @@ Root adopts PASS and assigns fresh Luna attempt1. Pause at a coherent compiling/
 The cfg(test)-only floor.rs test builds the actual complete Rust table and compares the existing jq floor_pins object, including successful missing/extra/value divergences and restored equality. Native jq is a required test prerequisite. Raw /tmp/483-luna1-{debug,release,floor-suite}.log show the named test passing in both profiles and all9 floor tests passing. Existing validator log reports zero real runner/workload/timing invocations. Bench-only strict Clippy --tests --no-deps passes.
 
 The full strict Clippy log fails at three inherited builtins-compiler question_mark sites introduced before this branch; that source is unchanged here. This is preserved as a failure, not a full lint PASS. The initial cargo PATH failure and empty successful-format log are retained; these logs lack standalone numeric status records, so root will capture explicit command/status evidence for delivery. Astra must independently rule scope and gates; no source acceptance is claimed by this checkpoint.
+
+## Astra attempt 1 source acceptance
+
+# Astra #483 Luna1 source verdict — PASS
+
+Exact d9a3413911e6f95f98c2134a5fa17d85c4b337f2, engine-483-floor-parity. Read full numbered scope, cfg(test)-only floor delta, Luna logs and root's independently captured six command/status sets. No builds/tests/timing or repository/Git/GitHub edits performed.
+
+The test serializes actual WORKLOADS/floor_row private production values with duplicate-key detection, finite numeric fields and shared JSON escaping. It does not parse source or copy the floor table. jq imports the actual existing floor_pins object; entire-object equality checks key set, tuple components and exact strings/null conventions. Missing, extra and numeric-value transformations apply to that same actual jq map, compare against the SAME unchanged Rust input through the same helper, require successful subprocess completion and false result, then restored actual equality passes. A tool/import/parse failure is an Err and cannot satisfy a negative comparison. The scripts path comes from CARGO_MANIFEST_DIR and no shell/workload dispatcher is involved.
+
+Root evidence has numeric0 for fmt/debug/release/floor-suite/affected-Clippy/validator. Named parity test executes once in debug/release; existing floor suite executes9. Existing native bench CI test command runs this test without a new workflow call. No runtime/pin/validator arithmetic changes or real benchmark invocation occurred.
+
+The full strict dependency Clippy failure is real but inherited: three unchanged builtins-compiler normal-feature question_mark sites. For this cfg(test)-only bench slice, strict `cargo clippy --locked -p bench --tests --no-deps -- -D warnings` is the proportional affected lint gate and passes. Do not call the broader command passing or modify dependency runtime code in483. A separately numbered minimal repair should preserve its error-time witnesses; draft supplied separately. Required actual PR/CI still governs delivery and cannot be waived if that CI reports a blocking failure.
+
+PASS permits proportional packaging/actual-head Astra review and required CI. Root must synchronize483 only on delivery; TOOL8 parity is the precise closure, not floor repricing or a broader audit completion. Historical source logs without separate exit files are distinguished from the root recapture, not retroactively assigned numeric provenance.
+
+Raw evidence is retained in artifacts/issue483-console-floor-parity with a hash/size manifest. Root also captured environment vocabulary and workspace policy checks separately. Actual PR-head review and required qualification remain pending; issue483 stays OPEN until merged evidence is upstream.
