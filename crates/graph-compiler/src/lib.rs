@@ -1337,6 +1337,156 @@ mod tests {
         assert_eq!(checked, 10_000);
     }
 
+    #[test]
+    fn identity_tokens_match_independent_literals_and_utf8_lengths() {
+        let effect = |rack| EffectNodeId {
+            track_id: gid("fxtrack"),
+            rack,
+            effect_id: gid("fxid"),
+        };
+        let nodes = [
+            (
+                GraphNodeId::TrackStage {
+                    track_id: gid("trk"),
+                    stage: TrackStage::Input,
+                },
+                "track:trk:input",
+            ),
+            (
+                GraphNodeId::TrackStage {
+                    track_id: gid("trk"),
+                    stage: TrackStage::PostInputBuiltins,
+                },
+                "track:trk:post-input-builtins",
+            ),
+            (
+                GraphNodeId::TrackStage {
+                    track_id: gid("trk"),
+                    stage: TrackStage::PostSimd1,
+                },
+                "track:trk:post-simd1",
+            ),
+            (
+                GraphNodeId::TrackStage {
+                    track_id: gid("trk"),
+                    stage: TrackStage::PostDynamic,
+                },
+                "track:trk:post-dynamic",
+            ),
+            (
+                GraphNodeId::TrackStage {
+                    track_id: gid("trk"),
+                    stage: TrackStage::PostSimd2PreFader,
+                },
+                "track:trk:post-simd2-pre-fader",
+            ),
+            (
+                GraphNodeId::TrackStage {
+                    track_id: gid("trk"),
+                    stage: TrackStage::PostFader,
+                },
+                "track:trk:post-fader",
+            ),
+            (
+                GraphNodeId::TrackStage {
+                    track_id: gid("trk"),
+                    stage: TrackStage::PostMatrix,
+                },
+                "track:trk:post-matrix",
+            ),
+            (
+                GraphNodeId::Effect(effect(RackId::Simd1)),
+                "effect:fxtrack:simd1:fxid",
+            ),
+            (
+                GraphNodeId::Effect(effect(RackId::Dynamic)),
+                "effect:fxtrack:dynamic:fxid",
+            ),
+            (
+                GraphNodeId::Effect(effect(RackId::Simd2)),
+                "effect:fxtrack:simd2:fxid",
+            ),
+            (
+                GraphNodeId::Route {
+                    route_id: gid("route"),
+                },
+                "route:route",
+            ),
+            (
+                GraphNodeId::Submix {
+                    submix_id: gid("sub"),
+                },
+                "submix:sub",
+            ),
+            (
+                GraphNodeId::Output {
+                    output_id: gid("out"),
+                },
+                "output:out",
+            ),
+            (
+                GraphNodeId::CompensationDelay {
+                    edge_id: Box::new(GraphEdgeId::TrackMain {
+                        target: GraphNodeId::CompensationDelay {
+                            edge_id: Box::new(GraphEdgeId::RouteDestination {
+                                route_id: gid("rd"),
+                            }),
+                        },
+                    }),
+                },
+                "delay:track-main:delay:route-destination:rd",
+            ),
+        ];
+        for (node, expected) in nodes {
+            assert_eq!(node_text(&node), expected);
+            assert_eq!(node_text_len(&node), expected.as_bytes().len());
+        }
+
+        let edges = [
+            (
+                GraphEdgeId::TrackMain {
+                    target: GraphNodeId::Route {
+                        route_id: gid("target"),
+                    },
+                },
+                "track-main:route:target",
+            ),
+            (
+                GraphEdgeId::RouteSource {
+                    route_id: gid("rs"),
+                },
+                "route-source:rs",
+            ),
+            (
+                GraphEdgeId::RouteDestination {
+                    route_id: gid("rd"),
+                },
+                "route-destination:rd",
+            ),
+            (
+                GraphEdgeId::EffectSidechain {
+                    effect: effect(RackId::Dynamic),
+                    port: "é/鼓".to_owned(),
+                },
+                "effect-sidechain:fxtrack:dynamic:fxid:é/鼓",
+            ),
+            (
+                GraphEdgeId::TrackMain {
+                    target: GraphNodeId::CompensationDelay {
+                        edge_id: Box::new(GraphEdgeId::RouteDestination {
+                            route_id: gid("rd"),
+                        }),
+                    },
+                },
+                "track-main:delay:route-destination:rd",
+            ),
+        ];
+        for (edge, expected) in edges {
+            assert_eq!(edge_text(&edge), expected);
+            assert_eq!(edge_text_len(&edge), expected.as_bytes().len());
+        }
+    }
+
     /// Deterministic xorshift64: the same 500 graphs on every host, every run.
     fn xorshift(state: &mut u64) -> u64 {
         *state ^= *state << 13;

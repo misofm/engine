@@ -24,22 +24,70 @@ pub(crate) fn rack_token(rack: RackId) -> &'static str {
         RackId::Simd2 => "simd2",
     }
 }
-pub(crate) fn node_text(node: &GraphNodeId) -> String {
+fn visit_node_text<F: FnMut(&str)>(node: &GraphNodeId, sink: &mut F) {
     match node {
         GraphNodeId::TrackStage { track_id, stage } => {
-            format!("track:{}:{}", track_id.as_str(), stage_token(*stage))
+            sink("track:");
+            sink(track_id.as_str());
+            sink(":");
+            sink(stage_token(*stage));
         }
-        GraphNodeId::Effect(effect) => format!(
-            "effect:{}:{}:{}",
-            effect.track_id.as_str(),
-            rack_token(effect.rack),
-            effect.effect_id.as_str()
-        ),
-        GraphNodeId::Route { route_id } => format!("route:{}", route_id.as_str()),
-        GraphNodeId::Submix { submix_id } => format!("submix:{}", submix_id.as_str()),
-        GraphNodeId::Output { output_id } => format!("output:{}", output_id.as_str()),
-        GraphNodeId::CompensationDelay { edge_id } => format!("delay:{}", edge_text(edge_id)),
+        GraphNodeId::Effect(effect) => {
+            sink("effect:");
+            sink(effect.track_id.as_str());
+            sink(":");
+            sink(rack_token(effect.rack));
+            sink(":");
+            sink(effect.effect_id.as_str());
+        }
+        GraphNodeId::Route { route_id } => {
+            sink("route:");
+            sink(route_id.as_str());
+        }
+        GraphNodeId::Submix { submix_id } => {
+            sink("submix:");
+            sink(submix_id.as_str());
+        }
+        GraphNodeId::Output { output_id } => {
+            sink("output:");
+            sink(output_id.as_str());
+        }
+        GraphNodeId::CompensationDelay { edge_id } => {
+            sink("delay:");
+            visit_edge_text(edge_id, sink);
+        }
     }
+}
+fn visit_edge_text<F: FnMut(&str)>(edge: &GraphEdgeId, sink: &mut F) {
+    match edge {
+        GraphEdgeId::TrackMain { target } => {
+            sink("track-main:");
+            visit_node_text(target, sink);
+        }
+        GraphEdgeId::RouteSource { route_id } => {
+            sink("route-source:");
+            sink(route_id.as_str());
+        }
+        GraphEdgeId::RouteDestination { route_id } => {
+            sink("route-destination:");
+            sink(route_id.as_str());
+        }
+        GraphEdgeId::EffectSidechain { effect, port } => {
+            sink("effect-sidechain:");
+            sink(effect.track_id.as_str());
+            sink(":");
+            sink(rack_token(effect.rack));
+            sink(":");
+            sink(effect.effect_id.as_str());
+            sink(":");
+            sink(port);
+        }
+    }
+}
+pub(crate) fn node_text(node: &GraphNodeId) -> String {
+    let mut text = String::new();
+    visit_node_text(node, &mut |piece| text.push_str(piece));
+    text
 }
 /// Byte length of [`node_text`] without building it (#99 F5).
 ///
@@ -49,45 +97,15 @@ pub(crate) fn node_text(node: &GraphNodeId) -> String {
 /// the corresponding `node_text` arm exactly; `node_text_len_matches_node_text_for_every_variant`
 /// is the gate that keeps them in step.
 pub(crate) fn node_text_len(node: &GraphNodeId) -> usize {
-    match node {
-        // "track:{track}:{stage}"
-        GraphNodeId::TrackStage { track_id, stage } => {
-            "track:".len() + track_id.as_str().len() + 1 + stage_token(*stage).len()
-        }
-        // "effect:{track}:{rack}:{effect}"
-        GraphNodeId::Effect(effect) => {
-            "effect:".len()
-                + effect.track_id.as_str().len()
-                + 1
-                + rack_token(effect.rack).len()
-                + 1
-                + effect.effect_id.as_str().len()
-        }
-        GraphNodeId::Route { route_id } => "route:".len() + route_id.as_str().len(),
-        GraphNodeId::Submix { submix_id } => "submix:".len() + submix_id.as_str().len(),
-        GraphNodeId::Output { output_id } => "output:".len() + output_id.as_str().len(),
-        GraphNodeId::CompensationDelay { edge_id } => "delay:".len() + edge_text_len(edge_id),
-    }
+    let mut length = 0;
+    visit_node_text(node, &mut |piece| length += piece.len());
+    length
 }
 /// Byte length of [`edge_text`] without building it. See [`node_text_len`].
 pub(crate) fn edge_text_len(edge: &GraphEdgeId) -> usize {
-    match edge {
-        GraphEdgeId::TrackMain { target } => "track-main:".len() + node_text_len(target),
-        GraphEdgeId::RouteSource { route_id } => "route-source:".len() + route_id.as_str().len(),
-        GraphEdgeId::RouteDestination { route_id } => {
-            "route-destination:".len() + route_id.as_str().len()
-        }
-        GraphEdgeId::EffectSidechain { effect, port } => {
-            "effect-sidechain:".len()
-                + effect.track_id.as_str().len()
-                + 1
-                + rack_token(effect.rack).len()
-                + 1
-                + effect.effect_id.as_str().len()
-                + 1
-                + port.len()
-        }
-    }
+    let mut length = 0;
+    visit_edge_text(edge, &mut |piece| length += piece.len());
+    length
 }
 pub(crate) fn node_kind_token(node: &GraphNodeId) -> &'static str {
     match node {
@@ -115,20 +133,9 @@ pub(crate) fn port_text(port: &GraphPortId) -> String {
     )
 }
 pub(crate) fn edge_text(edge: &GraphEdgeId) -> String {
-    match edge {
-        GraphEdgeId::TrackMain { target } => format!("track-main:{}", node_text(target)),
-        GraphEdgeId::RouteSource { route_id } => format!("route-source:{}", route_id.as_str()),
-        GraphEdgeId::RouteDestination { route_id } => {
-            format!("route-destination:{}", route_id.as_str())
-        }
-        GraphEdgeId::EffectSidechain { effect, port } => format!(
-            "effect-sidechain:{}:{}:{}:{}",
-            effect.track_id.as_str(),
-            rack_token(effect.rack),
-            effect.effect_id.as_str(),
-            port
-        ),
-    }
+    let mut text = String::new();
+    visit_edge_text(edge, &mut |piece| text.push_str(piece));
+    text
 }
 pub(crate) fn tail_text(tail: TailSamples) -> String {
     match tail {
