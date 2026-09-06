@@ -49,3 +49,21 @@ Root assigns fresh Luna attempt1 within this scope. Root owns all Git/GitHub che
 ## Luna attempt1 candidate
 
 Source735dc5d5 implements only the two direct collectors and removes their private Vec helper. Existing graph debug/release57 each, exact real source fanout debug/release1 each, strict graph Clippy, fmt/diff/graph policy all pass. The first graph-debug source/PATH metadata limitation is preserved and explained in artifacts/issue498-direct-source-claims; subsequent logs identify the committed source and effective environment. No tests, production behavior contracts, timing or delivery gates were added or changed. Pending consolidated Astra source review.
+
+## Astra Luna attempt1 PASS
+
+# Astra #498 Luna attempt 1 — PASS
+
+Exact clean headfa9d86653112637a7e350545166cc12fb72bb0bd, source735dc5d5aea127687517927aec70ccda0db67185, engine-cp4-source-claims. One consolidated source verdict against the complete numbered scope. Read-only source/Git/log inspection; no tests/builds/timing or source/Git/GitHub mutations performed.
+
+The transformation exactly follows the approved two-caller design. bind_optional_source_set borrows claims(), clones each node directly into its existing owned set, and compares the resulting length against the original slice length. GraphExecutor::new collects source_inputs directly from the borrowed claims while retaining its original Option/default shape. The private Vec-producing claimed_nodes helper is removed and has no remaining graph references. No other source/test path changes, public API, helper abstraction or retained collection is introduced.
+
+Source validity and evaluation order are preserved: source envelope/resource/driver count/order/type checks still precede the same count comparison; original claims are not sorted or deduplicated in place. #495 coverage/overlap/duplicate/observer/envelope priorities and returned ownership remain untouched. Source-input buffer mappings still enumerate the original claims separately, with identical indices and render driver call order. Borrowing ends before source ownership moves; no caller-owned plan/driver/processor is dropped earlier. The saved mechanism is two intermediate vectors and one bind-time extra key-clone population, not elimination of the owned sets or measured runtime work.
+
+Retained graph library debug/release each execute57 tests including #495's exact binding/priority/reuse fixture. The actual source-fanout test executes once in each profile, exercising missing/extra/overlap source claims and the real executor's four-channel-to-three-input mapping with analytic PCM. These existing tests plus the exact preserved production boundaries satisfy the frozen finite proof; no new fixture or mutation is required. Strict graph all-targets/all-features Clippy argv includes -D warnings and status0; configuration warnings do not justify relabeling the invocation. Fmt, diff and graph policy records also return0.
+
+All9 manifest payload hashes/sizes independently verified, exact10-file tracked coverage including manifest. The first debug record's base-plus-dirty-source and inherited-PATH metadata mistake is disclosed, not silently rewritten; the exact graph diff was checkpointed without subsequent code changes, and later committed-source release/fanout/Clippy records have the effective prefix. There is no crates/hosts/tools/Cargo/config delta after735dc5d5. No invented contemporaneous provenance or new delivery run is claimed.
+
+No remaining source/evidence blocker. Root may proceed with proportional delivery on actual current main and ordinary artifact verification; preserve any real mismatch for a bounded current-pin/current-consumer ruling before promotion. Source PASS does not itself approve automatic repinning, artifact qualification or merge. Actual-head PR review and required CI SUCCESS remain mandatory; broader CP4/349 work is not closed by this slice.
+
+Root verified remote main remains396a97119583704888d7b2a20830c5720e16b189, already integrated. Accepted graph source is frozen for ordinary artifact verification.
