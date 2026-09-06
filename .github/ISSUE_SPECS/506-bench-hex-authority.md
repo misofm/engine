@@ -34,3 +34,7 @@ Historical scripts/validators/records/source-seal snapshots and all fixture/outp
 CP20 remains partial after this slice because other separately owned encoders survive. Root retains checkpoint/GitHub ownership and normal Luna1/Sol2/3 escalation, eventual exact-head PR review and required CI. Independent #496 runtime correction is unaffected. No source/spec/Git/GitHub mutations or tests/builds/timing performed for this review; only /tmp review/readback files written.
 
 Root activates fresh Luna attempt1, independent of the #496 runtime test correction. Git/GitHub/checkpoints remain root-owned; no benchmark/timing authority is granted.
+
+## Luna attempt 1 source and evidence
+
+Final sourcee88a2bb2 shares the existing byte/one-shot digest authority across all three bench modules. Literal all-nibble and abc/finalized-byte consumer tests pass. Separate final captures run bench-support digest5 and bench35 in debug/release plus strict Clippy, fmt and applicable static policies, all exit0. Raw/source-identity records are retained in artifacts/issue506-bench-hex-authority; initial one-command provenance and omitted process-wide environment are candidly documented. Historical seals, pins and measurement authority are untouched. Consolidated Astra review pending.
