@@ -145,3 +145,7 @@ Root activates Sol attempt2 for only these bounded corrections inside the existi
 ## Sol attempt 2 focused checkpoint
 
 The existing frozen test now covers repeated accepted submissions, pending flag and counter preservation through backpressure followed by drain/refill, and pending-command failed-state/positive-zero silence/exact diagnostic assertions. Only hosts/host-web/src/tests.rs changed. The captured exact debug test passes one test with contemporaneous source hashes verified by root; pre-checkpoint fmt/diff pass. Production, instrumentation, initial idle assertion and native layout are unchanged. Remaining release/full/static gates and consolidated review are pending.
+
+## Sol attempt 2 local evidence
+
+Sourceb12fbc3a passes frozenexactdebug/release1each, fullhost63passed/1ignored each, strictClippy/fmt/diff andexistingpolicycontrols. Multipleacceptedsubmission/capacityack andpendingfailure state/silence/diagnostic proofs are complete in the existingtest. Artifacts/issue514-sol-attempt2 preserves11capturedcommands andpriorconsolidatedFAIL. Production/initialidleassertion/layout remainunchanged; accepted prioractualmutation/layout apply. ConsolidatedAstra review andpost-#511 integrateddelivery arepending.

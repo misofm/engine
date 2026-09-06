@@ -1,0 +1,237 @@
+[
+  {
+    "path": "514-luna1-sol2-clippy-host-web.command.json",
+    "bytes": 1180,
+    "sha256": "ae10c28fdee7ffcce76dd14a803eca89ba5c18dbc4dcce4c69ef9059a84d93d9"
+  },
+  {
+    "path": "514-luna1-sol2-clippy-host-web.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "514-luna1-sol2-clippy-host-web.stderr",
+    "bytes": 162,
+    "sha256": "c759f328b6bae140c8125995ed4dfd0a2249dfb59a7e60c47f142a8d0957bbc2"
+  },
+  {
+    "path": "514-luna1-sol2-clippy-host-web.stdout",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "514-luna1-sol2-diff-check.command.json",
+    "bytes": 1057,
+    "sha256": "f310585359ff1bb3c8dcff3b4dc02047095096e6169624e443b03b799dc2df0c"
+  },
+  {
+    "path": "514-luna1-sol2-diff-check.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "514-luna1-sol2-diff-check.stderr",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "514-luna1-sol2-diff-check.stdout",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "514-luna1-sol2-fmt-check.command.json",
+    "bytes": 1081,
+    "sha256": "54922333f9a9b25d0db12a4b100597ea45d936eb73703144bd2a435603bb1837"
+  },
+  {
+    "path": "514-luna1-sol2-fmt-check.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "514-luna1-sol2-fmt-check.stderr",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "514-luna1-sol2-fmt-check.stdout",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "514-luna1-sol2-focused-debug.command.json",
+    "bytes": 1240,
+    "sha256": "e90cec57f1f9a630742253775bdd49ef615570e594414fed674d27d5c0341ada"
+  },
+  {
+    "path": "514-luna1-sol2-focused-debug.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "514-luna1-sol2-focused-debug.stderr",
+    "bytes": 243,
+    "sha256": "0169959e11cfb8000f27b16b327ff43f0bf6ce1275d1b3229671194b58c9f682"
+  },
+  {
+    "path": "514-luna1-sol2-focused-debug.stdout",
+    "bytes": 202,
+    "sha256": "49372b584e04640cadc5afccb253ce922c8d3d531dc36bf9e60bba384e42a51f"
+  },
+  {
+    "path": "514-luna1-sol2-focused-release.command.json",
+    "bytes": 1225,
+    "sha256": "b4a5d45ee970b3dbcc58fc9a303840eec42ce71a50070650be460acf1102b97e"
+  },
+  {
+    "path": "514-luna1-sol2-focused-release.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "514-luna1-sol2-focused-release.stderr",
+    "bytes": 247,
+    "sha256": "e7098998fad6e4dc81dab09e004293cce773c9c14bd0eb3d985867599877c926"
+  },
+  {
+    "path": "514-luna1-sol2-focused-release.stdout",
+    "bytes": 202,
+    "sha256": "c2920584f9905f16ca5cdf4a12714090a72c4b6248c6dbe5c7e65a8db7222b52"
+  },
+  {
+    "path": "514-luna1-sol2-host-lib-debug.command.json",
+    "bytes": 1099,
+    "sha256": "8fb8874ecad493915d6647fe577d9daecf719df08b5e188cac763d1fb699c7b3"
+  },
+  {
+    "path": "514-luna1-sol2-host-lib-debug.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "514-luna1-sol2-host-lib-debug.stderr",
+    "bytes": 153,
+    "sha256": "fdc35ef0a421c7b2604b4cb2840939057bc0e20d63037480c89e5f6e7feaeab7"
+  },
+  {
+    "path": "514-luna1-sol2-host-lib-debug.stdout",
+    "bytes": 4890,
+    "sha256": "b5824e104d2b1f3145754cd91203ad73dccdfb4edb0b52758e673067cc201e02"
+  },
+  {
+    "path": "514-luna1-sol2-host-lib-release.command.json",
+    "bytes": 1116,
+    "sha256": "29937a510f01c439036a5db372748a9d80eeca3d6b58af3a46b042c07f7e3194"
+  },
+  {
+    "path": "514-luna1-sol2-host-lib-release.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "514-luna1-sol2-host-lib-release.stderr",
+    "bytes": 156,
+    "sha256": "b7bec69230efe340b7ab8849ebc58721b830807eda8d66c55ebd5a1ff30eea9f"
+  },
+  {
+    "path": "514-luna1-sol2-host-lib-release.stdout",
+    "bytes": 4890,
+    "sha256": "60f3181d9091462a9f8e6713969e576db806166dbea2adfccead812637fd9d53"
+  },
+  {
+    "path": "514-luna1-sol2-realtime-policy-tests.command.json",
+    "bytes": 1070,
+    "sha256": "acf0c95a5c0b65dbbc6e81c46ad5bfc56369d0be378f961671e20f72bdfcd8f9"
+  },
+  {
+    "path": "514-luna1-sol2-realtime-policy-tests.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "514-luna1-sol2-realtime-policy-tests.stderr",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "514-luna1-sol2-realtime-policy-tests.stdout",
+    "bytes": 35,
+    "sha256": "9ddd615ea2c19bae6ce028d9d2b9c2eee8bd0861593bcde27cb6261068e67b78"
+  },
+  {
+    "path": "514-luna1-sol2-realtime-policy.command.json",
+    "bytes": 1071,
+    "sha256": "ecd672309dbf9c36a0242551d0282681139af1885d3226f0183b40c9f4fc4626"
+  },
+  {
+    "path": "514-luna1-sol2-realtime-policy.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "514-luna1-sol2-realtime-policy.stderr",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "514-luna1-sol2-realtime-policy.stdout",
+    "bytes": 52,
+    "sha256": "df6e4f25e60994df7ea568d80ad9bea2caa821c5cad110007f742ffe00847331"
+  },
+  {
+    "path": "514-luna1-sol2-workspace-policy-tests.command.json",
+    "bytes": 1071,
+    "sha256": "6a112a239a2046b7c581440a844969e7004e2cf24159cdf42c531e06350d4442"
+  },
+  {
+    "path": "514-luna1-sol2-workspace-policy-tests.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "514-luna1-sol2-workspace-policy-tests.stderr",
+    "bytes": 312,
+    "sha256": "5dee16a193920af658c9f220cd3adeee5daf59c816dbc337d9a4fdf5131ed4fc"
+  },
+  {
+    "path": "514-luna1-sol2-workspace-policy-tests.stdout",
+    "bytes": 537,
+    "sha256": "ed84352cda106bf30dab1084232f789de4ee5e6073b6df15b78da80d6a822ac8"
+  },
+  {
+    "path": "514-luna1-sol2-workspace-policy.command.json",
+    "bytes": 1072,
+    "sha256": "3918b41736211acff58716ceb2e79b70122fa657808904ba30ecc25881e59b0a"
+  },
+  {
+    "path": "514-luna1-sol2-workspace-policy.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "514-luna1-sol2-workspace-policy.stderr",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "514-luna1-sol2-workspace-policy.stdout",
+    "bytes": 21,
+    "sha256": "8261c11a9ad607004e800b131ad999fbad0194619b971b30aa45a6ba10eeb880"
+  },
+  {
+    "path": "514-sol2-report.md",
+    "bytes": 6671,
+    "sha256": "6e331bcfb32375d3b72973b13d638f6fa9a35dec93f44e0c42c4834245aea065"
+  },
+  {
+    "path": "README.md",
+    "bytes": 899,
+    "sha256": "d3d6b7667a66b61b176c91c30d2c819b0ffca7c36bf0a086b1bf7a0bf17e3cce"
+  },
+  {
+    "path": "astra-luna1-consolidated-review.md",
+    "bytes": 8149,
+    "sha256": "1d609820e274be62ab04cc7eae187751e30bb8ca6a6d64487c141e5fd33d2a09"
+  }
+]
