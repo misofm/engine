@@ -1,0 +1,49 @@
+    Checking bytemuck v1.25.2
+    Checking typenum v1.20.1
+    Checking engine v0.1.0 (/home/bl/misofm/engine-238-plan/crates/engine)
+    Checking math v0.1.0 (/home/bl/misofm/engine-238-plan/crates/math)
+    Checking cfg-if v1.0.4
+    Checking cpufeatures v0.3.0
+    Checking dsp-reference v0.1.0 (/home/bl/misofm/engine-238-plan/crates/dsp-reference)
+    Checking safe_arch v1.2.0
+warning: `math::fast_db::fast_level_db` does not refer to a reachable function
+  --> /home/bl/misofm/engine-238-plan/clippy.toml:81:5
+   |
+81 |     { path = "math::fast_db::fast_level_db", reason = "fast dB tier (#144 item 5); admitted only at a named FAST-DB-CROSSING site" },
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: add `allow-invalid = true` to the entry to suppress this warning
+
+warning: `math::fast_db::fast_gain_from_db` does not refer to a reachable function
+  --> /home/bl/misofm/engine-238-plan/clippy.toml:82:5
+   |
+82 |     { path = "math::fast_db::fast_gain_from_db", reason = "fast dB tier (#144 item 5); admitted only at a named FAST-DB-CROSSING site" },
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: add `allow-invalid = true` to the entry to suppress this warning
+
+warning: `math` (lib) generated 2 warnings
+    Checking wide v1.6.1
+    Checking hybrid-array v0.4.14
+    Checking crypto-common v0.2.2
+    Checking block-buffer v0.12.1
+    Checking digest v0.11.3
+    Checking sha2 v0.11.0
+    Checking lane v0.1.0 (/home/bl/misofm/engine-238-plan/crates/lane)
+    Checking effect-contract v0.1.0 (/home/bl/misofm/engine-238-plan/crates/effect-contract)
+warning: `effect-contract` (lib) generated 2 warnings (2 duplicates)
+    Checking builtins v0.1.0 (/home/bl/misofm/engine-238-plan/crates/builtins)
+warning: `builtins` (lib) generated 2 warnings (2 duplicates)
+warning: `builtins` (lib test) generated 2 warnings (2 duplicates)
+warning: `builtins` (test "speed") generated 2 warnings (2 duplicates)
+warning: `builtins` (test "mono_collapse") generated 2 warnings (2 duplicates)
+warning: `builtins` (test "matrix") generated 2 warnings (2 duplicates)
+warning: `builtins` (test "determinism") generated 2 warnings (2 duplicates)
+warning: `builtins` (test "contract") generated 2 warnings (2 duplicates)
+warning: `builtins` (test "fader_ramp") generated 2 warnings (2 duplicates)
+warning: `builtins` (test "meter") generated 2 warnings (2 duplicates)
+warning: `builtins` (test "input_liveness_mono") generated 2 warnings (2 duplicates)
+warning: `builtins` (test "response") generated 2 warnings (2 duplicates)
+warning: `builtins` (test "input_liveness") generated 2 warnings (2 duplicates)
+warning: `builtins` (test "stage") generated 2 warnings (2 duplicates)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.05s

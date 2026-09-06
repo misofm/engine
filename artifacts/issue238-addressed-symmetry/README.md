@@ -1,0 +1,7 @@
+# Addressed-lane symmetry evidence
+
+Sol2 source checkpoint70a6ff03, decision record8bd081fb. This package preserves Luna1 and Sol2 raw evidence including failed and non-discriminating intermediate runs. Luna statuses are descriptive author records; Sol statuses capture numeric process exits. Empty fmt output is authentic.
+
+The actual old-full-refresh-multimember mutation returns101 at the same named excess-comparison assertion, left8/right1, on a partialW4 first case. old-full-refresh-restored returns0. Earlier zero-test filter and W1-first controls are not the discriminating evidence. Final Sol debug/release library/liveness/host tests and affected Clippy/fmt/policy gates are green. No current timing, benchmark workload or full-delivery qualification is claimed by these focused records.
+
+Immutable full workspace qualification at add3ca11 passed276 result blocks/1628 tests/0 failures/24 ignored. Compared with accepted479 baseline, only the new floor-parity and addressed-symmetry tests were added; none removed. Scalar/SIMD Wasm checks, native C API/resource/ABI, repinned worklet build, static/object gate and expected-resource gate (26 negative controls), actual all-browser qualification and matrix check all passed. Initial old worklet pin rejection is retained. Browser candidate89c25e7c uses observed da36c7503d9d4e1994cec6f22abd3fd97a41ede0551e3355adacdf9068bbead1. Source equality is recorded separately; no current timing result is claimed.

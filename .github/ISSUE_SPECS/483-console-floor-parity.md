@@ -66,3 +66,7 @@ The full strict dependency Clippy failure is real but inherited: three unchanged
 PASS permits proportional packaging/actual-head Astra review and required CI. Root must synchronize483 only on delivery; TOOL8 parity is the precise closure, not floor repricing or a broader audit completion. Historical source logs without separate exit files are distinguished from the root recapture, not retroactively assigned numeric provenance.
 
 Raw evidence is retained in artifacts/issue483-console-floor-parity with a hash/size manifest. Root also captured environment vocabulary and workspace policy checks separately. Actual PR-head review and required qualification remain pending; issue483 stays OPEN until merged evidence is upstream.
+
+## Delivered and closed
+
+PR484 merged2026-09-06T01:44:58Z as4587bfae673adbb848cda66f473beecefeae8deb. Exact-head Astra PASS covers de57f7bffe123e42650109db6869c94adfe96bd4; required qualification34004423637 completed SUCCESS before merge. GitHub483 is verified CLOSED. TOOL8 continuous complete Rust/jq parity is delivered; this makes33 merged audit PRs and108 audit entries retaining work. Post-main qualification is tracked separately and no timing improvement is claimed.

@@ -1,0 +1,6610 @@
+[
+  {
+    "name": "builtins_graph::tests::issue070_retirement_worker_source_is_limited_to_nonblocking_primitives",
+    "status": "ok"
+  },
+  {
+    "name": "capi::tests::serializer_names_all_nine_forbidden_counters_exactly",
+    "status": "ok"
+  },
+  {
+    "name": "capi::tests::audit_plan_is_fixed_non_timed_and_calls_the_c_entrypoint",
+    "status": "ok"
+  },
+  {
+    "name": "builtins_fixture_check::tests::issue069_author_is_not_reachable_from_audit_mains",
+    "status": "ok"
+  },
+  {
+    "name": "fixture_builtins_listening::tests::level_match_attenuates_only_and_caps_peak",
+    "status": "ok"
+  },
+  {
+    "name": "fixture_builtins::tests::owned_jsonl_parsers_reject_duplicate_extra_reordered_and_wrong_variants",
+    "status": "ok"
+  },
+  {
+    "name": "source::tests::asserted_worker_lifecycle_counter_and_pcm_transcript_is_canonical",
+    "status": "ok"
+  },
+  {
+    "name": "vectorization::tests::fused_multiply_add_is_red",
+    "status": "ok"
+  },
+  {
+    "name": "vectorization::tests::incomplete_allowlist_is_red",
+    "status": "ok"
+  },
+  {
+    "name": "vectorization::tests::missing_vector_family_is_red",
+    "status": "ok"
+  },
+  {
+    "name": "vectorization::tests::scalar_fallback_is_red",
+    "status": "ok"
+  },
+  {
+    "name": "vectorization::tests::call_inside_kernel_body_is_red",
+    "status": "ok"
+  },
+  {
+    "name": "source_duration::tests::exact_duration_independent_accounting_serialization_is_canonical",
+    "status": "ok"
+  },
+  {
+    "name": "builtins_fixture_check::tests::issue069_checker_is_read_only_and_rejects_payload_mutation",
+    "status": "ok"
+  },
+  {
+    "name": "fixture_builtins::tests::issue061_unsuffixed_ramp_and_reset_script_have_frozen_semantics",
+    "status": "ok"
+  },
+  {
+    "name": "fixture_builtins_listening::tests::probe_seed_and_cli_rejections_are_exact",
+    "status": "ok"
+  },
+  {
+    "name": "source_fixture::tests::generated_fixtures_match_manifest_oracles_and_mutation_policy",
+    "status": "ok"
+  },
+  {
+    "name": "builtins_graph::tests::issue069_two_graph_instances_prove_success_and_saturation_without_duplicates",
+    "status": "ok"
+  },
+  {
+    "name": "builtins_graph::tests::issue070_retirement_worker_is_ready_quiescent_and_owns_only_a",
+    "status": "ok"
+  },
+  {
+    "name": "capi::tests::lifecycle_prepares_and_destroys_without_entering_render",
+    "status": "ok"
+  },
+  {
+    "name": "fixture_builtins::tests::issue061_response_tuples_decimals_and_partitions_reject_semantic_mutations",
+    "status": "ok"
+  },
+  {
+    "name": "fixture_builtins_listening::tests::block_events_wave_and_repeat_are_exact",
+    "status": "ok"
+  },
+  {
+    "name": "fixture_builtins_listening::tests::output_is_closed_and_no_clobber",
+    "status": "ok"
+  },
+  {
+    "name": "fixture_builtins::tests::issue064_checked_corpus_is_read_only_complete_and_has_no_authoring_reachability",
+    "status": "ok"
+  },
+  {
+    "name": "fixture_builtins_listening::tests::strict_source_shape_edges_peak_and_finite_reject",
+    "status": "ok"
+  },
+  {
+    "name": "fixture_builtins::tests::issue064_checked_corpus_rejects_exactly_twenty_four_corruptions",
+    "status": "ok"
+  },
+  {
+    "name": "fixture_builtins::tests::check_rejects_manifest_grammar",
+    "status": "ok"
+  },
+  {
+    "name": "fixture_builtins::tests::check_rejects_all_twenty_four_format_mutations",
+    "status": "ok"
+  },
+  {
+    "name": "fixture_builtins::tests::issue067_graph_pdc_and_dependent_identity_mutations_are_rejected",
+    "status": "ok"
+  },
+  {
+    "name": "fixture_builtins::tests::check_rejects_benchmark_identity_parameter_and_pcm_hash_mutations",
+    "status": "ok"
+  },
+  {
+    "name": "fixture_builtins::tests::check_rejects_owned_jsonl_tuple_mutations",
+    "status": "ok"
+  },
+  {
+    "name": "builtins::tests::audited_allocator_is_live_outside_the_render_scope",
+    "status": "ok"
+  },
+  {
+    "name": "builtins::tests::matrix_targets_alternate_by_global_operation_across_batch_boundaries",
+    "status": "ok"
+  },
+  {
+    "name": "builtins::tests::measured_plan_is_the_frozen_twenty_row_cartesian_set",
+    "status": "ok"
+  },
+  {
+    "name": "builtins::tests::issue035_preparation_record_uses_only_required_null_and_not_applicable_values",
+    "status": "ok"
+  },
+  {
+    "name": "floor::tests::a_control_row_is_always_cheaper_than_the_row_it_isolates",
+    "status": "ok"
+  },
+  {
+    "name": "conformance::tests::percentile_is_nearest_rank_and_escape_is_json_safe",
+    "status": "ok"
+  },
+  {
+    "name": "floor::tests::every_derived_row_names_its_ruling_and_composes_a_positive_floor",
+    "status": "ok"
+  },
+  {
+    "name": "builtins::tests::issue035_record_has_exact_render_identity_shape_and_typed_missing_metadata",
+    "status": "ok"
+  },
+  {
+    "name": "floor::tests::the_compressor_isolate_is_the_compressor_inventory",
+    "status": "ok"
+  },
+  {
+    "name": "floor::tests::the_current_effect_recount_keeps_fractional_link_work_and_composes_the_strip",
+    "status": "ok"
+  },
+  {
+    "name": "floor::tests::the_overhead_inventories_differ_by_the_scaffolding_and_neither_row_claims_an_isolate",
+    "status": "ok"
+  },
+  {
+    "name": "floor::tests::the_plumbing_row_is_the_floor_of_the_table_and_the_identity_pair_shares_one_inventory",
+    "status": "ok"
+  },
+  {
+    "name": "floor::tests::the_mono_rows_carry_the_standing_strips_floor",
+    "status": "ok"
+  },
+  {
+    "name": "floor::tests::the_sixty_four_track_block_has_the_lane_sample_count_the_rulings_quote",
+    "status": "ok"
+  },
+  {
+    "name": "builtins::tests::checked_toml_and_referenced_pcm_drive_render_configuration_bit_exactly",
+    "status": "ok"
+  },
+  {
+    "name": "graph::tests::nearest_rank_is_ordered_at_all_frozen_percentiles",
+    "status": "ok"
+  },
+  {
+    "name": "rack::tests::nearest_rank_uses_the_frozen_one_thousand_observation_indices",
+    "status": "ok"
+  },
+  {
+    "name": "session::tests::percentile_and_sha256_are_contract_stable",
+    "status": "ok"
+  },
+  {
+    "name": "effect_interchange::tests::exact_four_rate_migration_envelope_without_timing",
+    "status": "ok"
+  },
+  {
+    "name": "builtins::tests::benchmark_inputs_take_their_hashes_from_the_checked_manifest_rows",
+    "status": "ok"
+  },
+  {
+    "name": "protocol::tests::jsonl_schema_record_carries_frozen_corpus_and_environment_fields",
+    "status": "ok"
+  },
+  {
+    "name": "builtins::tests::real_meter_tap_plans_use_the_compiled_seven_taps_and_preserve_full_queue_state",
+    "status": "ok"
+  },
+  {
+    "name": "protocol::tests::frozen_corpus_has_required_cardinality_and_checksum",
+    "status": "ok"
+  },
+  {
+    "name": "protocol::tests::actual_flatbuffer_builder_and_bounded_verifier_agree",
+    "status": "ok"
+  },
+  {
+    "name": "floor::tests::rust_and_jq_floor_tables_have_exact_key_value_parity",
+    "status": "ok"
+  },
+  {
+    "name": "builtins::tests::preparation_projection_is_complete_address_free_and_deterministic",
+    "status": "ok"
+  },
+  {
+    "name": "rack::tests::zero_launch_preflight_prepares_each_exact_production_workload",
+    "status": "ok"
+  },
+  {
+    "name": "protocol::tests::btlv_sources_encode_and_decode_without_schema_escapes",
+    "status": "ok"
+  },
+  {
+    "name": "graph::tests::canonical_benchmark_fixture_prepares_and_compiles",
+    "status": "ok"
+  },
+  {
+    "name": "session::tests::representative_fixture_has_the_frozen_workload_and_stable_bytes",
+    "status": "ok"
+  },
+  {
+    "name": "rack::tests::semantic_input_identity_is_layout_independent_and_workload_specific",
+    "status": "ok"
+  },
+  {
+    "name": "builtins::tests::all_render_workloads_arm_only_product_render_without_timing",
+    "status": "ok"
+  },
+  {
+    "name": "alloc::tests::default_mode_is_abort",
+    "status": "ok"
+  },
+  {
+    "name": "alloc::tests::delta_saturates_below_its_mark",
+    "status": "ok"
+  },
+  {
+    "name": "alloc::tests::the_installed_allocator_is_the_audited_one",
+    "status": "ok"
+  },
+  {
+    "name": "alloc::tests::the_installed_allocator_assertion_holds_here",
+    "status": "ok"
+  },
+  {
+    "name": "digest::tests::incremental_updates_match_a_one_shot_digest",
+    "status": "ok"
+  },
+  {
+    "name": "digest::tests::every_update_is_counted_and_a_one_shot_digest_is_not",
+    "status": "ok"
+  },
+  {
+    "name": "digest::tests::matches_the_published_vectors",
+    "status": "ok"
+  },
+  {
+    "name": "json::tests::escapes_every_rfc_8259_two_character_form",
+    "status": "ok"
+  },
+  {
+    "name": "digest::tests::snapshot_does_not_consume_the_sink",
+    "status": "ok"
+  },
+  {
+    "name": "json::tests::escapes_remaining_control_characters_as_four_hex_digits",
+    "status": "ok"
+  },
+  {
+    "name": "json::tests::leaves_ordinary_text_alone",
+    "status": "ok"
+  },
+  {
+    "name": "json::tests::passes_non_ascii_through_unchanged",
+    "status": "ok"
+  },
+  {
+    "name": "stats::tests::a_single_observation_is_every_percentile",
+    "status": "ok"
+  },
+  {
+    "name": "metadata::tests::gather_is_memoized_and_matches_the_process_environment",
+    "status": "ok"
+  },
+  {
+    "name": "stats::tests::frozen_indices_over_one_thousand_observations",
+    "status": "ok"
+  },
+  {
+    "name": "stats::tests::is_monotone_in_the_position",
+    "status": "ok"
+  },
+  {
+    "name": "stats::tests::small_samples_round_up_to_the_next_rank",
+    "status": "ok"
+  },
+  {
+    "name": "stats::tests::rejects_an_empty_sample - should panic",
+    "status": "ok"
+  },
+  {
+    "name": "stats::tests::the_numerator_denominator_form_matches_the_per_mille_form",
+    "status": "ok"
+  },
+  {
+    "name": "sysinfo::tests::distinct_core_socket_pairs_are_counted_once_each",
+    "status": "ok"
+  },
+  {
+    "name": "sysinfo::tests::empty_output_is_unknown",
+    "status": "ok"
+  },
+  {
+    "name": "sysinfo::tests::header_only_output_is_unknown",
+    "status": "ok"
+  },
+  {
+    "name": "sysinfo::tests::whitespace_only_output_is_unknown",
+    "status": "ok"
+  },
+  {
+    "name": "timing::tests::a_pure_body_is_accepted",
+    "status": "ok"
+  },
+  {
+    "name": "timing::tests::hashing_inside_the_timer_is_a_harness_defect - should panic",
+    "status": "ok"
+  },
+  {
+    "name": "timing::tests::hashing_outside_the_timer_is_how_it_is_done",
+    "status": "ok"
+  },
+  {
+    "name": "timing::tests::returns_the_operation_result",
+    "status": "ok"
+  },
+  {
+    "name": "sysinfo::tests::returns_a_decimal_count_or_the_unknown_sentinel",
+    "status": "ok"
+  },
+  {
+    "name": "tests::eligibility_sequence_uses_whole_call_fallback_then_fuses_the_next_call",
+    "status": "ok"
+  },
+  {
+    "name": "tests::full_public_chain_matches_the_three_section_reference",
+    "status": "ok"
+  },
+  {
+    "name": "tests::lane_symmetry_retarget_updates_only_the_addressed_predicate",
+    "status": "ok"
+  },
+  {
+    "name": "descriptor_domains_are_exhaustive_at_launch_rates",
+    "status": "ok"
+  },
+  {
+    "name": "compatibility_fallback_is_limited_to_the_exact_extended_rate_tier",
+    "status": "ok"
+  },
+  {
+    "name": "parameter_descriptors_have_complete_stable_contracts",
+    "status": "ok"
+  },
+  {
+    "name": "representable_cutoff_domain_is_shared_by_descriptors_and_preparation",
+    "status": "ok"
+  },
+  {
+    "name": "no_corpus_case_is_vacuous_or_carries_a_nan",
+    "status": "ok"
+  },
+  {
+    "name": "every_corpus_case_matches_its_pin_at_every_width",
+    "status": "ok"
+  },
+  {
+    "name": "a_move_made_while_muted_applies_on_unmute",
+    "status": "ok"
+  },
+  {
+    "name": "a_cross_block_ramp_is_partition_invariant",
+    "status": "ok"
+  },
+  {
+    "name": "a_windowed_move_is_monotone_and_lands_exactly_on_its_target",
+    "status": "ok"
+  },
+  {
+    "name": "a_zero_window_move_takes_effect_on_the_first_sample",
+    "status": "ok"
+  },
+  {
+    "name": "a_zero_window_mute_is_the_exact_prepared_mute",
+    "status": "ok"
+  },
+  {
+    "name": "mute_is_a_fader_endpoint_and_settles_to_exact_positive_zero",
+    "status": "ok"
+  },
+  {
+    "name": "the_fader_domain_is_enforced_at_the_setter",
+    "status": "ok"
+  },
+  {
+    "name": "an_uncommanded_live_fader_is_bit_identical_to_the_prepared_one",
+    "status": "ok"
+  },
+  {
+    "name": "a_lane_selector_addresses_exactly_the_lanes_it_names",
+    "status": "ok"
+  },
+  {
+    "name": "a_bank_refuses_a_retarget_addressed_past_its_members",
+    "status": "ok"
+  },
+  {
+    "name": "the_live_trim_domain_is_the_declared_one",
+    "status": "ok"
+  },
+  {
+    "name": "the_settled_arm_leaves_the_ramp_words_untouched",
+    "status": "ok"
+  },
+  {
+    "name": "trim_and_polarity_do_not_overwrite_each_other",
+    "status": "ok"
+  },
+  {
+    "name": "an_uncommanded_bank_keeps_its_elision_plan",
+    "status": "ok"
+  },
+  {
+    "name": "an_uncommanded_live_input_renders_the_prepared_coefficients",
+    "status": "ok"
+  },
+  {
+    "name": "the_trim_ramp_is_partition_invariant",
+    "status": "ok"
+  },
+  {
+    "name": "a_ramping_block_leaves_an_elidable_banks_integrators_at_positive_zero",
+    "status": "ok"
+  },
+  {
+    "name": "a_banked_lane_ramps_exactly_as_the_same_track_alone",
+    "status": "ok"
+  },
+  {
+    "name": "settled_and_ramping_paths_agree_on_an_elided_bank",
+    "status": "ok"
+  },
+  {
+    "name": "a_polarity_flip_crosses_zero_and_settles_at_the_reprepared_coefficient",
+    "status": "ok"
+  },
+  {
+    "name": "the_trim_ramp_is_bit_identical_to_the_parameter_smoother",
+    "status": "ok"
+  },
+  {
+    "name": "re_equalising_the_words_restores_the_designed_term_and_nothing_more",
+    "status": "ok"
+  },
+  {
+    "name": "an_asymmetric_retarget_declines_the_lane_on_the_admitting_block",
+    "status": "ok"
+  },
+  {
+    "name": "channels_agree_covers_the_trim_ramp_record",
+    "status": "ok"
+  },
+  {
+    "name": "a_collapsed_block_keeps_the_two_channels_ramp_records_equal",
+    "status": "ok"
+  },
+  {
+    "name": "a_symmetric_retarget_keeps_the_lane_eligible",
+    "status": "ok"
+  },
+  {
+    "name": "the_disengage_copy_still_restores_the_integrators",
+    "status": "ok"
+  },
+  {
+    "name": "a_symmetric_ride_through_a_collapse_renders_never_collapsed_bits",
+    "status": "ok"
+  },
+  {
+    "name": "a_retarget_between_a_collapsed_block_and_the_disengage_survives_the_copy",
+    "status": "ok"
+  },
+  {
+    "name": "explicit_window_retarget_ramps_over_the_requested_window_and_is_adopted",
+    "status": "ok"
+  },
+  {
+    "name": "matrix_ramp_reaches_target",
+    "status": "ok"
+  },
+  {
+    "name": "settled_identity_matrix_preserves_signed_zero",
+    "status": "ok"
+  },
+  {
+    "name": "zero_window_snaps_and_reset_cancels_a_ramp",
+    "status": "ok"
+  },
+  {
+    "name": "matrix_retarget_mid_ramp_matches_the_reference",
+    "status": "ok"
+  },
+  {
+    "name": "matrix_ramp_tracks_the_f64_interpolation",
+    "status": "ok"
+  },
+  {
+    "name": "matrix_ramp_matches_reference_d11_law",
+    "status": "ok"
+  },
+  {
+    "name": "a_settled_silent_block_is_bit_identical_through_the_early_out",
+    "status": "ok"
+  },
+  {
+    "name": "meter_peak_of_signed_zeros_is_positive_zero",
+    "status": "ok"
+  },
+  {
+    "name": "meter_windows_discontinuities_resets_and_drops_are_exact",
+    "status": "ok"
+  },
+  {
+    "name": "meter_windows_are_exact",
+    "status": "ok"
+  },
+  {
+    "name": "silence_against_a_nonzero_held_peak_still_decays",
+    "status": "ok"
+  },
+  {
+    "name": "meter_segment_law_is_exact",
+    "status": "ok"
+  },
+  {
+    "name": "ten_thousand_deterministic_meter_mutations_remain_bounded_and_finite",
+    "status": "ok"
+  },
+  {
+    "name": "the_collapsed_body_publishes_the_dual_bodys_report",
+    "status": "ok"
+  },
+  {
+    "name": "a_desymmetrized_bank_is_a_never_collapsed_bank",
+    "status": "ok"
+  },
+  {
+    "name": "launch_and_extended_compatibility_rates_match_the_independent_f64_rbj_oracle",
+    "status": "ok"
+  },
+  {
+    "name": "launch_and_extended_compatibility_rate_sweeps_match_f64_magnitude",
+    "status": "ok"
+  },
+  {
+    "name": "cast_tpt_state_space_matches_independent_rbj_transfer_at_compatibility_rates",
+    "status": "ok"
+  },
+  {
+    "name": "ten_thousand_bounded_parameter_and_block_mutations_stay_finite",
+    "status": "ok"
+  },
+  {
+    "name": "production_order_hpf_lpf_cascade_meets_all_launch_response_gates",
+    "status": "ok"
+  },
+  {
+    "name": "representable_cutoff_domain_prepares_everywhere_and_rejects_successor",
+    "status": "ok"
+  },
+  {
+    "name": "coherent_sustained_sines_cover_launch_and_extended_compatibility_rates",
+    "status": "ok"
+  },
+  {
+    "name": "one_second_impulse_dfts_match_rbj_at_launch_and_extended_compatibility_rates",
+    "status": "ok"
+  },
+  {
+    "name": "bench_input_stage_ns_per_track_frame",
+    "status": "ignored"
+  },
+  {
+    "name": "a_settled_banked_mute_is_exactly_positive_zero",
+    "status": "ok"
+  },
+  {
+    "name": "polarity_trim_fader_and_matrix_are_exact",
+    "status": "ok"
+  },
+  {
+    "name": "prepared_sections_match_reference_coefficients",
+    "status": "ok"
+  },
+  {
+    "name": "signed_zero_and_mute_laws",
+    "status": "ok"
+  },
+  {
+    "name": "bank_construction_accepts_one_to_width_members_only",
+    "status": "ok"
+  },
+  {
+    "name": "boundary_check_is_lane_local_per_block",
+    "status": "ok"
+  },
+  {
+    "name": "identity_sections_are_elided_only_when_every_lane_and_word_says_so",
+    "status": "ok"
+  },
+  {
+    "name": "partition_invariance_over_master_plan_quanta",
+    "status": "ok"
+  },
+  {
+    "name": "engine_tan_agrees_with_the_platform_to_one_ulp_over_the_cutoff_domain",
+    "status": "ok"
+  },
+  {
+    "name": "bank_is_bit_identical_to_scalar_stage_at_every_width",
+    "status": "ok"
+  },
+  {
+    "name": "banked_fader_and_matrix_are_bit_identical_to_the_per_track_sections",
+    "status": "ok"
+  },
+  {
+    "name": "scalar_stage_is_bit_identical_to_reference_recurrence",
+    "status": "ok"
+  },
+  {
+    "name": "tests::builtin_bank_resource_charges_two_planes_and_actual_members",
+    "status": "ok"
+  },
+  {
+    "name": "tests::builtin_bank_layout_regroups_by_dependency_wave_and_scalar_falls_back",
+    "status": "ok"
+  },
+  {
+    "name": "tests::delegated_source_rejection_restores_private_and_external_ownership",
+    "status": "ok"
+  },
+  {
+    "name": "tests::scalar_factory_checks_both_exact_owners_and_policies_without_consuming_state",
+    "status": "ok"
+  },
+  {
+    "name": "tests::scalar_invalid_envelope_leaves_the_later_matrix_queue_untouched",
+    "status": "ok"
+  },
+  {
+    "name": "tests::a_prepared_session_that_lost_a_strip_fails_validation",
+    "status": "ok"
+  },
+  {
+    "name": "tests::scalar_pair_reset_matches_reset_original_owners",
+    "status": "ok"
+  },
+  {
+    "name": "tests::the_per_node_console_input_processor_drains_and_folds_its_witness",
+    "status": "ok"
+  },
+  {
+    "name": "tests::source_set_bind_prevalidation_returns_all_ownership_for_each_code",
+    "status": "ok"
+  },
+  {
+    "name": "tests::prepares_three_sections_and_each_named_meter_tap",
+    "status": "ok"
+  },
+  {
+    "name": "tests::source_set_bind_succeeds_with_private_builtin_and_external_ownership",
+    "status": "ok"
+  },
+  {
+    "name": "tests::rejects_duplicate_and_unknown_meter_transactionally",
+    "status": "ok"
+  },
+  {
+    "name": "tests::console_control_requests_are_validated_sealed_and_charged_per_track",
+    "status": "ok"
+  },
+  {
+    "name": "tests::resource_estimate_enforces_the_actual_largest_retained_payload",
+    "status": "ok"
+  },
+  {
+    "name": "tests::scalar_owner_resource_is_independent_two_boxes_plus_two_pointer_outer",
+    "status": "ok"
+  },
+  {
+    "name": "tests::retained_payload_boundaries_reject_in_phase_one",
+    "status": "ok"
+  },
+  {
+    "name": "tests::cutoff_boundaries_match_compiler_diagnostics_at_every_launch_rate_and_section",
+    "status": "ok"
+  },
+  {
+    "name": "tests::control_delivery_metadata_reaches_both_sealed_strip_bank_owners",
+    "status": "ok"
+  },
+  {
+    "name": "tests::a_post_fader_meter_declines_its_cohort_while_the_tail_pair_still_fuses",
+    "status": "ok"
+  },
+  {
+    "name": "tests::actual_scalar_effect_sidechain_declines_and_matches_separate_owner_data_and_state",
+    "status": "ok"
+  },
+  {
+    "name": "tests::track_bits_do_not_depend_on_session_track_count",
+    "status": "ok"
+  },
+  {
+    "name": "tests::actual_graph_mono_collapse_disengages_on_input_command_and_recovers_nonfinite_input",
+    "status": "ok"
+  },
+  {
+    "name": "tests::actual_scalar_graph_queues_fuse_and_fall_back_against_separate_owners",
+    "status": "ok"
+  },
+  {
+    "name": "tests::actual_scalar_graph_preserves_scheduled_matrix_prefix_error_and_queue_tail",
+    "status": "ok"
+  },
+  {
+    "name": "tests::actual_scalar_extra_reader_declines_and_retains_separate_owner_pcm",
+    "status": "ok"
+  },
+  {
+    "name": "tests::banked_tracks_are_bit_identical_to_their_scalar_tails",
+    "status": "ok"
+  },
+  {
+    "name": "tests::actual_scalar_nonunity_send_reader_declines_with_reference_output",
+    "status": "ok"
+  },
+  {
+    "name": "tests::composite_live_sequence_matches_original_owners_and_discriminates_both_branches",
+    "status": "ok"
+  },
+  {
+    "name": "tests::composite_raw_record_errors_preserve_the_frozen_arithmetic_order",
+    "status": "ok"
+  },
+  {
+    "name": "tests::declined_factory_owners_keep_queued_state_and_render_in_original_order",
+    "status": "ok"
+  },
+  {
+    "name": "tests::late_factory_guards_return_live_policy_width_and_population_owners",
+    "status": "ok"
+  },
+  {
+    "name": "tests::pair_factory_declines_wrong_order_policy_and_shape_with_original_owners",
+    "status": "ok"
+  },
+  {
+    "name": "tests::queued_three_sample_ramp_crosses_call_boundary_before_fusing",
+    "status": "ok"
+  },
+  {
+    "name": "tests::serialized_alias_observer_is_the_decline_boundary",
+    "status": "ok"
+  },
+  {
+    "name": "tests::serialized_live_fader_matrix_is_selected_by_the_bound_render_path",
+    "status": "ok"
+  },
+  {
+    "name": "tests::serialized_send_reader_declines_crossing_fader_while_pcm_matches_separate",
+    "status": "ok"
+  },
+  {
+    "name": "tests::staggered_observed_scalar_track_stays_separate_while_eligible_peer_pairs",
+    "status": "ok"
+  },
+  {
+    "name": "tests::deterministic_builtin_compiler_mutation_matrix_has_exactly_ten_thousand_cases",
+    "status": "ok"
+  },
+  {
+    "name": "actual_scalar_prepare_and_bind_retain_the_charged_owner_layouts",
+    "status": "ok"
+  },
+  {
+    "name": "actual_queued_scalar_graph_allocates_and_frees_nothing",
+    "status": "ok"
+  },
+  {
+    "name": "actual_queued_graph_phases_allocate_and_free_nothing",
+    "status": "ok"
+  },
+  {
+    "name": "actual_serialized_composite_render_allocates_and_frees_nothing",
+    "status": "ok"
+  },
+  {
+    "name": "phase_two_allocator_layouts_are_stable_across_repeated_measured_prepares",
+    "status": "ok"
+  },
+  {
+    "name": "phase_two_allocator_layouts_match_the_checked_resource_report",
+    "status": "ok"
+  },
+  {
+    "name": "builtin_automation_targets_match_the_parameter_abi",
+    "status": "ok"
+  },
+  {
+    "name": "refused_targets_are_exactly_the_prepared_only_rows",
+    "status": "ok"
+  },
+  {
+    "name": "the_builtin_automation_effect_id_is_the_strip",
+    "status": "ok"
+  },
+  {
+    "name": "a_per_lane_record_desymmetrizes_and_a_both_record_preserves",
+    "status": "ok"
+  },
+  {
+    "name": "re_equalising_the_words_does_not_re_arm_the_live_term",
+    "status": "ok"
+  },
+  {
+    "name": "the_input_record_is_upstream_of_the_seam",
+    "status": "ok"
+  },
+  {
+    "name": "both_variants_answer_the_hook_identically_for_the_same_selector",
+    "status": "ok"
+  },
+  {
+    "name": "the_live_term_survives_a_symmetric_ride_and_not_a_one_lane_one",
+    "status": "ok"
+  },
+  {
+    "name": "prepares_65_537_tracks_or_rejects_only_the_configured_resource",
+    "status": "ok"
+  },
+  {
+    "name": "the_descriptor_and_the_schema_publish_the_same_delay_domain",
+    "status": "ok"
+  },
+  {
+    "name": "a_declared_delay_changes_no_prepared_builtin_byte",
+    "status": "ok"
+  },
+  {
+    "name": "abi::tests::frozen_sizes_alignments_and_representative_offsets_match",
+    "status": "ok"
+  },
+  {
+    "name": "abi::tests::masks_and_result_codes_are_frozen",
+    "status": "ok"
+  },
+  {
+    "name": "ffi::tests::compile_diagnostics_query_is_atomic_and_handle_local",
+    "status": "ok"
+  },
+  {
+    "name": "ffi::tests::engine_creation_is_transactional_and_validates",
+    "status": "ok"
+  },
+  {
+    "name": "ffi::tests::engine_last_error_uses_empty_query_result",
+    "status": "ok"
+  },
+  {
+    "name": "ffi::tests::query_rejects_null_and_wrong_size_without_a_write",
+    "status": "ok"
+  },
+  {
+    "name": "ffi::tests::version_and_capabilities_are_exact",
+    "status": "ok"
+  },
+  {
+    "name": "ffi::tests::wrong_live_handle_kind_is_rejected_by_stub",
+    "status": "ok"
+  },
+  {
+    "name": "runtime::tests::fp_environment::the_fp_environment_refusal_names_its_own_check",
+    "status": "ok"
+  },
+  {
+    "name": "ffi::tests::ffi_never_forms_a_whole_plan_reference",
+    "status": "ok"
+  },
+  {
+    "name": "runtime::tests::barrier_schedule_separates_one_source_producer_from_exclusive_render",
+    "status": "ok"
+  },
+  {
+    "name": "ffi::tests::oversized_borrowed_lengths_are_rejected_before_any_read",
+    "status": "ok"
+  },
+  {
+    "name": "runtime::tests::fp_environment::a_rejected_c_render_also_restores_the_callers_word",
+    "status": "ok"
+  },
+  {
+    "name": "ffi::tests::source_rejections_reach_the_c_host_as_their_own_diagnostic",
+    "status": "ok"
+  },
+  {
+    "name": "runtime::tests::plan_first_destroy_guards_structural_publication_without_visible_mutation",
+    "status": "ok"
+  },
+  {
+    "name": "runtime::tests::generated_session_prepares_independent_source_and_plan_ownership",
+    "status": "ok"
+  },
+  {
+    "name": "ffi::tests::plan_resources_does_not_clear_the_render_diagnostic",
+    "status": "ok"
+  },
+  {
+    "name": "ffi::tests::misaligned_planes_and_output_are_rejected",
+    "status": "ok"
+  },
+  {
+    "name": "ffi::tests::render_rejections_name_their_single_check",
+    "status": "ok"
+  },
+  {
+    "name": "runtime::tests::c_commands_observe_the_rendered_plan_sample",
+    "status": "ok"
+  },
+  {
+    "name": "runtime::tests::c_commands_publish_the_replacement_parameter_catalog",
+    "status": "ok"
+  },
+  {
+    "name": "runtime::tests::capi_controller_dispatches_every_advertised_command_family",
+    "status": "ok"
+  },
+  {
+    "name": "ffi::tests::compile_publishes_both_children_and_source_control_is_region_checked",
+    "status": "ok"
+  },
+  {
+    "name": "runtime::tests::all_six_event_families_cross_c_dequeue_with_exact_oracle_bytes",
+    "status": "ok"
+  },
+  {
+    "name": "runtime::tests::ring_zero_derives_from_the_document_and_matches_the_explicit_value",
+    "status": "ok"
+  },
+  {
+    "name": "runtime::tests::exported_c_replay_revision_event_and_publication_pressure_statuses_are_exact",
+    "status": "ok"
+  },
+  {
+    "name": "runtime::tests::structural_command_keeps_protocol_plan_provider_and_event_epochs_atomic",
+    "status": "ok"
+  },
+  {
+    "name": "runtime::tests::fp_environment::the_c_render_entry_is_canonical_under_a_caller_that_set_ftz_and_daz",
+    "status": "ok"
+  },
+  {
+    "name": "runtime::tests::direct_and_c_render_match_one_and_ten_tracks_across_launch_rates",
+    "status": "ok"
+  },
+  {
+    "name": "runtime::tests::every_structural_phase_and_ordered_dual_fault_preserves_owners_and_credits",
+    "status": "ok"
+  },
+  {
+    "name": "ffi::tests::plan_queries_are_pure_and_concurrent_with_render",
+    "status": "ok"
+  },
+  {
+    "name": "render_diagnostic_egress_reuses_eager_capi_storage_without_allocation",
+    "status": "ok"
+  },
+  {
+    "name": "tiny_control_frame_still_accounts_three_provider_counters_exactly",
+    "status": "ok"
+  },
+  {
+    "name": "exported_c_candidates_replay_render_and_both_destroy_orders_balance_exactly",
+    "status": "ok"
+  },
+  {
+    "name": "external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps",
+    "status": "ok"
+  },
+  {
+    "name": "passes_effect_contract_conformance",
+    "status": "ok"
+  },
+  {
+    "name": "descriptor_rows_and_resource_envelope_are_frozen",
+    "status": "ok"
+  },
+  {
+    "name": "preparation_has_expected_metadata_and_one_byte_below_rejects",
+    "status": "ok"
+  },
+  {
+    "name": "bank_fallback_never_hides_malformed_or_incompatible_requests",
+    "status": "ok"
+  },
+  {
+    "name": "a_malformed_bank_block_is_rejected_before_it_is_indexed",
+    "status": "ok"
+  },
+  {
+    "name": "every_descriptor_row_admits_exactly_its_own_domain",
+    "status": "ok"
+  },
+  {
+    "name": "lookahead_taps_are_derived_only_at_prepare_restore_and_full_reset",
+    "status": "ok"
+  },
+  {
+    "name": "links_are_exact_and_connected_sidechain_is_distinct_from_main_detection",
+    "status": "ok"
+  },
+  {
+    "name": "the_corpus_is_finite",
+    "status": "ok"
+  },
+  {
+    "name": "no_case_is_vacuous",
+    "status": "ok"
+  },
+  {
+    "name": "the_corpus_matches_its_pins_at_every_width",
+    "status": "ok"
+  },
+  {
+    "name": "a_unit_mix_is_the_wet_signal_exactly",
+    "status": "ok"
+  },
+  {
+    "name": "a_unity_gain_stage_is_the_dry_signal",
+    "status": "ok"
+  },
+  {
+    "name": "bypass_preserves_exact_dry_bits_at_fixed_latency",
+    "status": "ok"
+  },
+  {
+    "name": "the_average_link_is_two_products_and_an_add",
+    "status": "ok"
+  },
+  {
+    "name": "a_zero_mix_is_the_dry_signal_while_gain_reduction_runs",
+    "status": "ok"
+  },
+  {
+    "name": "every_identity_keeps_the_state_warm",
+    "status": "ok"
+  },
+  {
+    "name": "bank_matches_scalar_per_lane_bits",
+    "status": "ok"
+  },
+  {
+    "name": "every_width_produces_the_same_words",
+    "status": "ok"
+  },
+  {
+    "name": "a_halved_subnormal_does_not_come_back",
+    "status": "ok"
+  },
+  {
+    "name": "a_statically_bypassed_bank_collapses_to_the_dual_bits",
+    "status": "ok"
+  },
+  {
+    "name": "a_desymmetrized_bank_is_a_never_collapsed_bank",
+    "status": "ok"
+  },
+  {
+    "name": "the_collapsed_body_renders_the_dual_bodys_left_plane",
+    "status": "ok"
+  },
+  {
+    "name": "a_nan_in_the_sidechain_alone_is_clamped_to_the_level_floor",
+    "status": "ok"
+  },
+  {
+    "name": "the_boundary_limit_rejects_a_finite_but_absurd_value",
+    "status": "ok"
+  },
+  {
+    "name": "a_nan_is_caught_at_the_block_boundary_not_per_sample",
+    "status": "ok"
+  },
+  {
+    "name": "the_recursive_word_flushes_to_exactly_zero",
+    "status": "ok"
+  },
+  {
+    "name": "the_compressor_declares_one_resident_gain_reduction_tap",
+    "status": "ok"
+  },
+  {
+    "name": "a_resident_read_is_repeatable_to_the_bit",
+    "status": "ok"
+  },
+  {
+    "name": "a_full_reset_returns_the_reading_to_zero",
+    "status": "ok"
+  },
+  {
+    "name": "the_reading_follows_the_smoother_rather_than_the_instantaneous_curve",
+    "status": "ok"
+  },
+  {
+    "name": "the_compressor_reports_the_reduction_its_kernel_smoothed",
+    "status": "ok"
+  },
+  {
+    "name": "every_bank_lane_reads_its_own_reduction",
+    "status": "ok"
+  },
+  {
+    "name": "scalar_output_matches_the_independent_f64_oracle",
+    "status": "ok"
+  },
+  {
+    "name": "block_partitions_are_invariant",
+    "status": "ok"
+  },
+  {
+    "name": "bank_block_partitions_are_invariant",
+    "status": "ok"
+  },
+  {
+    "name": "preparation_legal_parameter_states_round_trip",
+    "status": "ok"
+  },
+  {
+    "name": "a_mid_ramp_restore_arrives_on_the_same_sample",
+    "status": "ok"
+  },
+  {
+    "name": "a_restore_is_transactional_across_both_channels",
+    "status": "ok"
+  },
+  {
+    "name": "resets_clear_state_and_only_the_full_one_restores_defaults",
+    "status": "ok"
+  },
+  {
+    "name": "an_idle_restore_is_bit_exact",
+    "status": "ok"
+  },
+  {
+    "name": "a_restarting_point_ramps_from_the_current_value",
+    "status": "ok"
+  },
+  {
+    "name": "a_ramp_that_finishes_mid_block_is_invisible_to_the_partition",
+    "status": "ok"
+  },
+  {
+    "name": "automation_validation_is_unchanged",
+    "status": "ok"
+  },
+  {
+    "name": "block_point_steps_by_a_precomputed_increment_and_snaps_exactly",
+    "status": "ok"
+  },
+  {
+    "name": "a_finished_ramp_equals_a_fresh_preparation",
+    "status": "ok"
+  },
+  {
+    "name": "a_restated_point_leaves_every_lane_on_the_idle_body",
+    "status": "ok"
+  },
+  {
+    "name": "an_idle_lane_is_untouched_by_a_neighbours_ramp",
+    "status": "ok"
+  },
+  {
+    "name": "a_ramp_onto_an_identity_boundary_lands_on_the_identity",
+    "status": "ok"
+  },
+  {
+    "name": "a_ramp_inside_the_silent_fixed_point_withdraws_it_and_moves_no_bit",
+    "status": "ok"
+  },
+  {
+    "name": "the_trailing_tone_is_actually_rendered",
+    "status": "ok"
+  },
+  {
+    "name": "silence_shorter_than_the_lookahead_line_still_drains_it",
+    "status": "ok"
+  },
+  {
+    "name": "a_negative_zero_input_block_is_not_treated_as_silence",
+    "status": "ok"
+  },
+  {
+    "name": "a_detector_still_releasing_through_the_silence_is_never_frozen",
+    "status": "ok"
+  },
+  {
+    "name": "a_settled_silent_bank_renders_exactly_the_never_fast_path",
+    "status": "ok"
+  },
+  {
+    "name": "a_left_only_rejection_diverges_the_cursors_and_the_staged_body_still_agrees",
+    "status": "ok"
+  },
+  {
+    "name": "every_partition_agrees_with_the_per_frame_body",
+    "status": "ok"
+  },
+  {
+    "name": "the_link_laws_bypass_and_a_sidechain_all_agree",
+    "status": "ok"
+  },
+  {
+    "name": "a_ragged_bank_agrees_with_the_per_frame_body",
+    "status": "ok"
+  },
+  {
+    "name": "a_hard_knee_is_exact_at_the_threshold",
+    "status": "ok"
+  },
+  {
+    "name": "the_knee_is_continuous_at_both_edges",
+    "status": "ok"
+  },
+  {
+    "name": "eq4_static_curve_matches_f64_within_1e4_db",
+    "status": "ok"
+  },
+  {
+    "name": "tests::block_metrics_and_repeat_bits_cover_boundaries",
+    "status": "ok"
+  },
+  {
+    "name": "compare::tests::scaled_sum_squares_handles_extreme_finite_values",
+    "status": "ok"
+  },
+  {
+    "name": "tests::crc32c_known_vector",
+    "status": "ok"
+  },
+  {
+    "name": "tests::fixture_header_limits_and_exact_length_reject",
+    "status": "ok"
+  },
+  {
+    "name": "tests::manifest_rejects_invalid_classes",
+    "status": "ok"
+  },
+  {
+    "name": "tests::prng_vectors_and_range_are_frozen",
+    "status": "ok"
+  },
+  {
+    "name": "tests::fixture_preserves_bits_and_detects_every_bit_flip",
+    "status": "ok"
+  },
+  {
+    "name": "invalid_rates_shapes_tolerances_and_nonfinite_values_are_typed",
+    "status": "ok"
+  },
+  {
+    "name": "tolerance_boundary_tie_and_snr_cases_are_explicit",
+    "status": "ok"
+  },
+  {
+    "name": "correct_factory_binds_distinguishable_four_lane_bank",
+    "status": "ok"
+  },
+  {
+    "name": "normalized_mapping_endpoints_ties_and_round_trips_are_stable",
+    "status": "ok"
+  },
+  {
+    "name": "smoothers_and_segments_finish_on_the_exact_update_or_endpoint",
+    "status": "ok"
+  },
+  {
+    "name": "descriptor_requires_launch_rows_and_accepts_optional_extended_rows",
+    "status": "ok"
+  },
+  {
+    "name": "extended_rate_failures_are_reported_but_do_not_fail_launch_gates",
+    "status": "ok"
+  },
+  {
+    "name": "correct_mock_passes_every_enabled_conformance_gate",
+    "status": "ok"
+  },
+  {
+    "name": "ten_thousand_descriptor_and_span_mutations_reject_without_panic",
+    "status": "ok"
+  },
+  {
+    "name": "every_faulty_mock_is_detected",
+    "status": "ok"
+  },
+  {
+    "name": "every_header_field_limit_overflow_truncation_and_eof_is_rejected",
+    "status": "ok"
+  },
+  {
+    "name": "manifest_rejects_all_noncanonical_text_and_path_classes",
+    "status": "ok"
+  },
+  {
+    "name": "every_bit_and_4096_seeded_mutations_are_panic_free_and_detected",
+    "status": "ok"
+  },
+  {
+    "name": "fixture_trailing_and_truncated_bytes_fail_before_decode",
+    "status": "ok"
+  },
+  {
+    "name": "planar_blocks_group_launch_gates_and_extended_compatibility_inputs",
+    "status": "ok"
+  },
+  {
+    "name": "checked_in_manifest_lists_only_valid_exact_fixtures",
+    "status": "ok"
+  },
+  {
+    "name": "a_plan_without_a_control_channel_resolves_nothing",
+    "status": "ok"
+  },
+  {
+    "name": "the_automated_track_is_the_stable_minimum",
+    "status": "ok"
+  },
+  {
+    "name": "moving_the_threshold_moves_rendered_bits_on_every_block",
+    "status": "ok"
+  },
+  {
+    "name": "restating_the_threshold_moves_no_rendered_bit",
+    "status": "ok"
+  },
+  {
+    "name": "a_seam_side_only_chain_reads_as_vacuous_rather_than_eligible",
+    "status": "ok"
+  },
+  {
+    "name": "the_plumbing_row_binds_no_strip_at_all",
+    "status": "ok"
+  },
+  {
+    "name": "the_ragged_tail_banks_like_any_other_cohort_and_pays_one_chain_for_it",
+    "status": "ok"
+  },
+  {
+    "name": "the_switch_coming_back_re_engages_and_renders_the_never_collapsed_bits",
+    "status": "ok"
+  },
+  {
+    "name": "the_intended_strip_is_one_chain_per_cohort",
+    "status": "ok"
+  },
+  {
+    "name": "an_armed_observation_lane_on_a_fused_chain_still_publishes",
+    "status": "ok"
+  },
+  {
+    "name": "the_two_placements_realise_the_same_chain_shape",
+    "status": "ok"
+  },
+  {
+    "name": "a_run_that_starts_collapsing_renders_what_an_always_collapsed_run_renders",
+    "status": "ok"
+  },
+  {
+    "name": "every_standing_workload_folds_one_route_per_track",
+    "status": "ok"
+  },
+  {
+    "name": "the_mono_row_pair_renders_one_session",
+    "status": "ok"
+  },
+  {
+    "name": "a_collapsed_cohorts_right_channel_taps_read_what_a_dual_runs_do",
+    "status": "ok"
+  },
+  {
+    "name": "re_equal_designed_words_after_a_one_channel_retarget_never_re_engage",
+    "status": "ok"
+  },
+  {
+    "name": "a_live_one_channel_retarget_disengages_on_the_block_it_lands",
+    "status": "ok"
+  },
+  {
+    "name": "a_run_that_stops_collapsing_renders_what_a_never_collapsed_run_renders",
+    "status": "ok"
+  },
+  {
+    "name": "the_half_mono_cohort_banks_like_a_uniform_one",
+    "status": "ok"
+  },
+  {
+    "name": "a_lifted_bypass_re_engages_the_collapse_and_renders_the_dual_bits",
+    "status": "ok"
+  },
+  {
+    "name": "console_facilities_do_not_change_the_chain_shape_or_the_bits",
+    "status": "ok"
+  },
+  {
+    "name": "a_bypass_engaged_after_a_collapsed_run_renders_the_dual_bits",
+    "status": "ok"
+  },
+  {
+    "name": "the_collapse_fires_on_every_mono_cohort_and_no_other",
+    "status": "ok"
+  },
+  {
+    "name": "no_workload_transitions_unless_something_moves_the_switch",
+    "status": "ok"
+  },
+  {
+    "name": "the_folded_master_is_the_reductions_own_bits",
+    "status": "ok"
+  },
+  {
+    "name": "the_two_placements_agree_block_by_block",
+    "status": "ok"
+  },
+  {
+    "name": "merging_the_compressor_into_the_simd1_chain_moves_no_rendered_bit",
+    "status": "ok"
+  },
+  {
+    "name": "the_intended_strips_limiter_moves_rendered_bits",
+    "status": "ok"
+  },
+  {
+    "name": "tests::bank_fallback_validates_every_member",
+    "status": "ok"
+  },
+  {
+    "name": "tests::damping_mapping_is_rate_invariant_and_monotone",
+    "status": "ok"
+  },
+  {
+    "name": "tests::descriptor_and_specs_agree",
+    "status": "ok"
+  },
+  {
+    "name": "tests::crossfade_updates_are_exact_and_queued_retarget_completes",
+    "status": "ok"
+  },
+  {
+    "name": "tests::malformed_automation_is_counted_and_never_applied",
+    "status": "ok"
+  },
+  {
+    "name": "tests::nonfinite_state_recovers_per_block_lane_locally_at_p_zero",
+    "status": "ok"
+  },
+  {
+    "name": "tests::damped_matrix_tail_matches_reference_oracle",
+    "status": "ok"
+  },
+  {
+    "name": "tests::dry_identities_warm_histories_with_canonical_zero_state",
+    "status": "ok"
+  },
+  {
+    "name": "tests::descriptor_exact_resources_caps_and_integer_mapping_are_frozen",
+    "status": "ok"
+  },
+  {
+    "name": "tests::tap_timing_is_sample_exact",
+    "status": "ok"
+  },
+  {
+    "name": "tests::ramp_updates_retarget_and_partition_are_exact",
+    "status": "ok"
+  },
+  {
+    "name": "tests::invalid_restore_is_atomic_and_both_resets_are_word_exact",
+    "status": "ok"
+  },
+  {
+    "name": "tests::partition_invariance_over_1_7_64_128_512",
+    "status": "ok"
+  },
+  {
+    "name": "passes_effect_contract_conformance",
+    "status": "ok"
+  },
+  {
+    "name": "print_pins",
+    "status": "ignored"
+  },
+  {
+    "name": "corpus_digests_match_their_pins",
+    "status": "ok"
+  },
+  {
+    "name": "corpus_cases_are_finite_distinct_and_alive",
+    "status": "ok"
+  },
+  {
+    "name": "gate_expander::tests::a_non_finite_sample_is_rejected",
+    "status": "ok"
+  },
+  {
+    "name": "gate_expander::tests::curve_is_identity_at_ratio_one_and_range_limited_when_closed",
+    "status": "ok"
+  },
+  {
+    "name": "gate_expander::tests::hand_computed_curve_point_is_range_clamped",
+    "status": "ok"
+  },
+  {
+    "name": "gate_expander::tests::a_level_exactly_at_the_threshold_opens_a_closed_gate",
+    "status": "ok"
+  },
+  {
+    "name": "gate_expander::tests::a_level_inside_the_hysteresis_band_keeps_reloading_the_hold",
+    "status": "ok"
+  },
+  {
+    "name": "lr4::tests::crossover_domain_is_enforced",
+    "status": "ok"
+  },
+  {
+    "name": "parametric_eq::tests::all_families_design_stably_and_have_finite_analytic_response",
+    "status": "ok"
+  },
+  {
+    "name": "gate_expander::tests::hold_expiry_closes_exactly_one_sample_after_the_countdown_reaches_zero",
+    "status": "ok"
+  },
+  {
+    "name": "ramp::tests::a_zero_window_snaps",
+    "status": "ok"
+  },
+  {
+    "name": "parametric_eq::tests::identity_section_returns_input_and_warms_independent_history",
+    "status": "ok"
+  },
+  {
+    "name": "gate_expander::tests::the_dry_path_is_delayed_by_the_fixed_latency",
+    "status": "ok"
+  },
+  {
+    "name": "ramp::tests::the_step_is_computed_once_and_the_last_sample_is_an_assignment",
+    "status": "ok"
+  },
+  {
+    "name": "svf::tests::zero_gain_bell_and_shelves_are_exact_identity",
+    "status": "ok"
+  },
+  {
+    "name": "tests::identity_and_direct_dft_oracles_are_bounded_and_correct",
+    "status": "ok"
+  },
+  {
+    "name": "tests::sine_frequency_and_silence_are_finite",
+    "status": "ok"
+  },
+  {
+    "name": "true_peak_limiter::tests::a_unit_impulse_reproduces_the_annex2_table_rows",
+    "status": "ok"
+  },
+  {
+    "name": "tpt::tests::cast_coefficient_transfer_is_bit_identical_to_the_replaced_model",
+    "status": "ok"
+  },
+  {
+    "name": "true_peak_limiter::tests::out_of_domain_construction_is_rejected",
+    "status": "ok"
+  },
+  {
+    "name": "true_peak_limiter::tests::ramp_windows_follow_the_w_min_floor",
+    "status": "ok"
+  },
+  {
+    "name": "true_peak_limiter::tests::the_estimate_of_a_scaled_impulse_is_the_scale",
+    "status": "ok"
+  },
+  {
+    "name": "lr4::tests::lr4_sum_is_allpass_and_crossing_is_half",
+    "status": "ok"
+  },
+  {
+    "name": "true_peak_limiter::tests::impulse_emerges_at_the_declared_latency",
+    "status": "ok"
+  },
+  {
+    "name": "lr4::tests::lr4_impulse_matches_cascaded_state_space",
+    "status": "ok"
+  },
+  {
+    "name": "svf::tests::svf_transfer_matches_rbj_cookbook",
+    "status": "ok"
+  },
+  {
+    "name": "svf::tests::svf_recurrence_matches_state_space_impulse",
+    "status": "ok"
+  },
+  {
+    "name": "signal_and_spectrum_domains_are_strict",
+    "status": "ok"
+  },
+  {
+    "name": "independent_identity_oracle_round_trips_noise",
+    "status": "ok"
+  },
+  {
+    "name": "delayed_delta_and_exact_bin_sine_have_known_spectra",
+    "status": "ok"
+  },
+  {
+    "name": "bank_snapshot_one_short_never_calls_hook_or_publishes_output",
+    "status": "ok"
+  },
+  {
+    "name": "bank_restore_is_serial_and_isolates_siblings",
+    "status": "ok"
+  },
+  {
+    "name": "preparation_admits_every_sibling_before_one_bind_and_none_is_failure",
+    "status": "ok"
+  },
+  {
+    "name": "scalar_and_bank_payloads_interchange_and_continue_exactly",
+    "status": "ok"
+  },
+  {
+    "name": "bank_failures_drop_partial_ownership_and_preserve_first_error_order",
+    "status": "ok"
+  },
+  {
+    "name": "production_soft_clip_w8_member_restores_and_isolates_siblings",
+    "status": "ok"
+  },
+  {
+    "name": "diagnostics_and_step_report_layouts_are_exact",
+    "status": "ok"
+  },
+  {
+    "name": "registry_rejects_edges_duplicates_caps_and_host_overflow_in_order",
+    "status": "ok"
+  },
+  {
+    "name": "zero_one_and_two_step_resolution_have_exact_workspace_and_zero_hooks",
+    "status": "ok"
+  },
+  {
+    "name": "nested_state_diagnostics_and_current_admission_are_preserved_without_hooks",
+    "status": "ok"
+  },
+  {
+    "name": "resolution_rejects_missing_downgrade_terminal_caps_and_overflow_exactly",
+    "status": "ok"
+  },
+  {
+    "name": "dependency_and_render_boundaries_remain_one_way",
+    "status": "ok"
+  },
+  {
+    "name": "exact_portable_migration_qualification_matrix",
+    "status": "ignored"
+  },
+  {
+    "name": "intermediate_identity_and_replay_mutation_are_unreachable_by_construction",
+    "status": "ok"
+  },
+  {
+    "name": "one_portable_migration_qualification_row_smoke",
+    "status": "ok"
+  },
+  {
+    "name": "registry_resolution_and_bank_execution_allocation_boundaries_are_isolated",
+    "status": "ok"
+  },
+  {
+    "name": "terminal_factory_and_partial_restore_failures_publish_nothing",
+    "status": "ok"
+  },
+  {
+    "name": "two_step_scalar_and_bank_restore_publish_identical_current_state",
+    "status": "ok"
+  },
+  {
+    "name": "zero_step_scalar_and_serial_one_step_bank_restores_are_exact_and_isolated",
+    "status": "ok"
+  },
+  {
+    "name": "workspace_and_step_failures_precede_hooks_and_drop_banks",
+    "status": "ok"
+  },
+  {
+    "name": "every_workspace_and_bank_destination_failure_is_pre_hook_and_exact",
+    "status": "ok"
+  },
+  {
+    "name": "unavailable_factory_and_resource_caps_return_no_partial_session",
+    "status": "ok"
+  },
+  {
+    "name": "preparation_is_complete_sorted_and_preserves_cached_metadata",
+    "status": "ok"
+  },
+  {
+    "name": "launch_registry_prepares_the_accepted_nine_track_parametric_eq_fixture",
+    "status": "ok"
+  },
+  {
+    "name": "ten_thousand_session_parameter_mutations_reject_transactionally_without_panic",
+    "status": "ok"
+  },
+  {
+    "name": "launch_native_state_layouts_are_v1",
+    "status": "ok"
+  },
+  {
+    "name": "a_declared_tap_moves_contract_minor_and_leaves_the_state_layout_alone",
+    "status": "ok"
+  },
+  {
+    "name": "every_declared_tap_costs_exactly_its_record_and_its_two_strings",
+    "status": "ok"
+  },
+  {
+    "name": "the_appended_pan_row_is_the_persisted_pan_authority",
+    "status": "ok"
+  },
+  {
+    "name": "the_launch_catalog_is_not_empty_and_every_row_is_swept",
+    "status": "ok"
+  },
+  {
+    "name": "a_rate_keyed_cutoff_ceiling_is_a_clamp_and_never_a_lattice_member",
+    "status": "ok"
+  },
+  {
+    "name": "every_log_row_steps_geometrically_and_every_linear_row_arithmetically",
+    "status": "ok"
+  },
+  {
+    "name": "every_ladder_is_integer_multiples_of_the_step_and_stays_on_the_lattice",
+    "status": "ok"
+  },
+  {
+    "name": "the_prepared_word_of_a_default_is_bit_identical_to_the_descriptor",
+    "status": "ok"
+  },
+  {
+    "name": "every_declared_bound_and_default_is_a_lattice_member",
+    "status": "ok"
+  },
+  {
+    "name": "every_lattice_point_reaches_the_engine_through_the_one_blessed_conversion",
+    "status": "ok"
+  },
+  {
+    "name": "every_shipped_row_declares_a_lawful_lattice",
+    "status": "ok"
+  },
+  {
+    "name": "every_builtin_row_declares_a_lawful_lattice_at_every_launch_rate",
+    "status": "ok"
+  },
+  {
+    "name": "binding_and_snapshot_metadata_failures_are_exact_and_atomic",
+    "status": "ok"
+  },
+  {
+    "name": "malformed_replay_is_rejected_before_initial_scratch",
+    "status": "ok"
+  },
+  {
+    "name": "snapshot_and_restore_failures_publish_nothing",
+    "status": "ok"
+  },
+  {
+    "name": "every_restore_admission_owner_rejects_before_prepare",
+    "status": "ok"
+  },
+  {
+    "name": "scalar_restore_is_transactional_and_admission_precedes_prepare",
+    "status": "ok"
+  },
+  {
+    "name": "production_delay_active_common_and_lane_state_continues_exactly",
+    "status": "ok"
+  },
+  {
+    "name": "production_delay_state_round_trips_at_every_launch_rate",
+    "status": "ok"
+  },
+  {
+    "name": "each_launch_effect_sees_its_own_designed_words_disagree",
+    "status": "ok"
+  },
+  {
+    "name": "a_bank_declines_exactly_the_asymmetric_lane",
+    "status": "ok"
+  },
+  {
+    "name": "a_bank_restore_declines_exactly_the_lane_whose_sections_differ",
+    "status": "ok"
+  },
+  {
+    "name": "one_declining_restore_does_not_contaminate_a_sibling",
+    "status": "ok"
+  },
+  {
+    "name": "a_scalar_restore_declines_exactly_when_the_channel_sections_differ",
+    "status": "ok"
+  },
+  {
+    "name": "bank_width_tests::bank_width_for_backend_is_total",
+    "status": "ok"
+  },
+  {
+    "name": "symmetry::tests::a_left_channel_parameter_desymmetrises_and_a_both_channel_one_does_not",
+    "status": "ok"
+  },
+  {
+    "name": "symmetry::tests::a_declined_witness_names_every_term_it_is_missing",
+    "status": "ok"
+  },
+  {
+    "name": "step::tests::an_index_lattice_is_ordinal_indexed_and_choice_value_spelled",
+    "status": "ok"
+  },
+  {
+    "name": "symmetry::tests::a_subscription_never_moves_the_witness",
+    "status": "ok"
+  },
+  {
+    "name": "symmetry::tests::a_seam_side_record_never_moves_the_witness",
+    "status": "ok"
+  },
+  {
+    "name": "symmetry::tests::bypass_is_reversible_and_asymmetric_parameters_are_not",
+    "status": "ok"
+  },
+  {
+    "name": "symmetry::tests::every_single_missing_term_declines_the_conjunction",
+    "status": "ok"
+  },
+  {
+    "name": "symmetry::tests::payload_sections_agree_is_a_bitwise_comparison",
+    "status": "ok"
+  },
+  {
+    "name": "symmetry::tests::the_conjunction_declines_when_either_operand_declines",
+    "status": "ok"
+  },
+  {
+    "name": "step::tests::ratio_lattice_retains_butterworth_default",
+    "status": "ok"
+  },
+  {
+    "name": "step::tests::cents_lattice_retains_round_endpoint_and_declared_default",
+    "status": "ok"
+  },
+  {
+    "name": "a_boolean_lattice_admits_exactly_its_two_encodings",
+    "status": "ok"
+  },
+  {
+    "name": "a_bound_the_pinned_precision_cannot_spell_is_a_declaration_error",
+    "status": "ok"
+  },
+  {
+    "name": "an_enumeration_lattice_is_spelled_in_choice_values_and_indexed_by_ordinal",
+    "status": "ok"
+  },
+  {
+    "name": "decimal_matching_refuses_what_an_f32_comparison_would_admit",
+    "status": "ok"
+  },
+  {
+    "name": "a_negative_zero_spelling_names_the_zero_lattice_point",
+    "status": "ok"
+  },
+  {
+    "name": "equivalent_spellings_of_one_lattice_point_are_one_value",
+    "status": "ok"
+  },
+  {
+    "name": "arithmetic_rows_step_by_exactly_one_declared_unit",
+    "status": "ok"
+  },
+  {
+    "name": "geometric_ratio_row_keeps_its_round_maximum_and_meaningful_default",
+    "status": "ok"
+  },
+  {
+    "name": "declared_bounds_and_default_are_always_members",
+    "status": "ok"
+  },
+  {
+    "name": "every_ladder_size_lands_on_a_lattice_point_and_clamps_at_the_ends",
+    "status": "ok"
+  },
+  {
+    "name": "refusal_names_the_two_nearest_legal_values",
+    "status": "ok"
+  },
+  {
+    "name": "cents_rows_are_geometric_and_never_equal_hertz",
+    "status": "ok"
+  },
+  {
+    "name": "a_drain_emits_the_contract_canonical_span_order",
+    "status": "ok"
+  },
+  {
+    "name": "a_drained_queue_stages_nothing_on_the_next_block",
+    "status": "ok"
+  },
+  {
+    "name": "a_full_window_counts_the_overflow_instead_of_overrunning",
+    "status": "ok"
+  },
+  {
+    "name": "a_repeated_target_collapses_last_wins",
+    "status": "ok"
+  },
+  {
+    "name": "bypass_is_retained_state_and_produces_no_span",
+    "status": "ok"
+  },
+  {
+    "name": "the_shunt_preserves_signed_zero",
+    "status": "ok"
+  },
+  {
+    "name": "the_shunt_reproduces_the_dry_signal_at_the_declared_latency",
+    "status": "ok"
+  },
+  {
+    "name": "a_lane_refuses_a_publisher_count_that_does_not_match_the_menu",
+    "status": "ok"
+  },
+  {
+    "name": "a_second_subscribe_takes_the_newer_window_length",
+    "status": "ok"
+  },
+  {
+    "name": "an_observe_record_against_an_incapable_plan_is_reported_unbound",
+    "status": "ok"
+  },
+  {
+    "name": "an_observe_record_rides_the_parameter_queue_and_emits_no_span",
+    "status": "ok"
+  },
+  {
+    "name": "disarming_all_stops_every_tap_without_disturbing_published_windows",
+    "status": "ok"
+  },
+  {
+    "name": "an_unarmed_tap_is_never_read_and_publishes_nothing",
+    "status": "ok"
+  },
+  {
+    "name": "retained_bytes_are_a_formula_over_the_declared_menu",
+    "status": "ok"
+  },
+  {
+    "name": "the_latest_fold_publishes_the_last_block_verbatim",
+    "status": "ok"
+  },
+  {
+    "name": "windows_tile_exactly_and_fold_by_the_declared_rule",
+    "status": "ok"
+  },
+  {
+    "name": "cid::tests::official_hello_vector_and_fixed_layout_are_exact",
+    "status": "ok"
+  },
+  {
+    "name": "cid::tests::binary_codec_rejects_length_prefix_codec_hash_and_digest_length",
+    "status": "ok"
+  },
+  {
+    "name": "diagnostic::tests::descriptor_wire_diagnostic_codes_and_strings_are_frozen",
+    "status": "ok"
+  },
+  {
+    "name": "cid::tests::writer_is_atomic_and_preserves_trailing_canary",
+    "status": "ok"
+  },
+  {
+    "name": "ffi::tests::c_records_have_the_frozen_sizes_alignments_and_offsets",
+    "status": "ok"
+  },
+  {
+    "name": "ffi::tests::mandatory_null_publishes_only_zero_counts_and_null_diagnostic",
+    "status": "ok"
+  },
+  {
+    "name": "ffi::tests::null_diagnostic_returns_null_without_dereferencing_other_arguments",
+    "status": "ok"
+  },
+  {
+    "name": "wire::tests::accepted_enum_numbers_are_the_wire_numbers",
+    "status": "ok"
+  },
+  {
+    "name": "cid::tests::package_creation_and_expected_verification_are_strict",
+    "status": "ok"
+  },
+  {
+    "name": "package::tests::authoring_grammar_and_limit",
+    "status": "ok"
+  },
+  {
+    "name": "package::tests::fixed_header_length_truncation_trailing_and_overflow_diagnostics",
+    "status": "ok"
+  },
+  {
+    "name": "package::tests::diagnostic_layout_and_mutations",
+    "status": "ok"
+  },
+  {
+    "name": "package::tests::permutation_and_short_atomic",
+    "status": "ok"
+  },
+  {
+    "name": "package::tests::round_trip_layout_and_borrows",
+    "status": "ok"
+  },
+  {
+    "name": "wire::tests::field_overflow_offsets_and_within_phase_tie_breaks_are_exact",
+    "status": "ok"
+  },
+  {
+    "name": "wire::tests::exact_size_and_one_short_have_complete_canaries",
+    "status": "ok"
+  },
+  {
+    "name": "wire::tests::diagnostic_phase_order_and_wire_only_rejections_are_frozen",
+    "status": "ok"
+  },
+  {
+    "name": "package::tests::selection_has_no_feature_kind_or_target_implication",
+    "status": "ok"
+  },
+  {
+    "name": "package::tests::selection_baselines_supersets_and_total_ties_are_exact",
+    "status": "ok"
+  },
+  {
+    "name": "wire::tests::issue011_absent_rules_rates_and_control_scalars_are_not_strengthened",
+    "status": "ok"
+  },
+  {
+    "name": "package::tests::selection_rehash_detects_post_verification_content_tamper",
+    "status": "ok"
+  },
+  {
+    "name": "package::tests::selection_request_capabilities_are_canonical_and_strict",
+    "status": "ok"
+  },
+  {
+    "name": "package::tests::authoring_duplicate_source_invariant_and_native_feature_grammars",
+    "status": "ok"
+  },
+  {
+    "name": "cid::tests::text_codec_rejects_every_alphabet_prefix_length_and_pad_bit_class",
+    "status": "ok"
+  },
+  {
+    "name": "wire::tests::representative_layout_roundtrip_and_identity_are_exact",
+    "status": "ok"
+  },
+  {
+    "name": "package::tests::selection_is_permutation_stable_and_returns_borrowed_content",
+    "status": "ok"
+  },
+  {
+    "name": "wire::tests::port_order_is_canonical_and_legal_fields_change_identity",
+    "status": "ok"
+  },
+  {
+    "name": "package::tests::structural_counts_offsets_lengths_and_padding_are_count_driven",
+    "status": "ok"
+  },
+  {
+    "name": "package::tests::every_table_grammar_padding_order_hash_and_source_class_rejects",
+    "status": "ok"
+  },
+  {
+    "name": "package::tests::exact_and_one_below_limits_cover_all_five_caps",
+    "status": "ok"
+  },
+  {
+    "name": "wire::tests::bound_descriptor_comparison_reports_earliest_semantic_wire_field",
+    "status": "ok"
+  },
+  {
+    "name": "package::tests::descriptor_mapping_and_phase_priority_are_exact",
+    "status": "ok"
+  },
+  {
+    "name": "wire::tests::safe_constructor_semantic_differential_parity_is_exact",
+    "status": "ok"
+  },
+  {
+    "name": "wire::tests::constructor_sealed_id_and_link_mutations_have_raw_wire_diagnostics",
+    "status": "ok"
+  },
+  {
+    "name": "raw_closed_values_and_field_overflows_have_exact_public_diagnostics",
+    "status": "ok"
+  },
+  {
+    "name": "observation_section_is_additive_and_stale_readers_refuse_it",
+    "status": "ok"
+  },
+  {
+    "name": "an_explicitly_spelled_derived_lattice_is_refused_as_a_second_spelling",
+    "status": "ok"
+  },
+  {
+    "name": "checked_vectors_match_independent_wire_identity_and_port_permutation",
+    "status": "ok"
+  },
+  {
+    "name": "every_current_production_descriptor_encodes_and_verifies",
+    "status": "ok"
+  },
+  {
+    "name": "every_legally_mutable_semantic_field_class_changes_identity",
+    "status": "ok"
+  },
+  {
+    "name": "rust_only_package_and_state_diagnostics_retain_exact_c_layouts",
+    "status": "ok"
+  },
+  {
+    "name": "six_descriptor_c_records_have_exact_rust_layouts_and_offsets",
+    "status": "ok"
+  },
+  {
+    "name": "tiny_deterministic_mutation_smoke",
+    "status": "ok"
+  },
+  {
+    "name": "encode_at_the_frozen_artifact_cap_finishes_in_ten_milliseconds_in_release",
+    "status": "ignored"
+  },
+  {
+    "name": "c_inspect_reports_a_wire_diagnostic_for_an_empty_null_wire",
+    "status": "ok"
+  },
+  {
+    "name": "prebound_state_selection_verification_replay_requirements_and_encode_allocate_nothing",
+    "status": "ok"
+  },
+  {
+    "name": "c_inspect_performs_exactly_one_nested_descriptor_pass",
+    "status": "ok"
+  },
+  {
+    "name": "each_package_publication_has_one_nested_descriptor_pass_and_no_native_allocation",
+    "status": "ok"
+  },
+  {
+    "name": "encode_at_the_frozen_artifact_cap_has_one_nested_descriptor_pass_and_no_native_allocation",
+    "status": "ok"
+  },
+  {
+    "name": "enum_discriminants_used_by_the_manifest_are_frozen",
+    "status": "ok"
+  },
+  {
+    "name": "legal_content_and_descriptor_changes_accept_and_change_cid",
+    "status": "ok"
+  },
+  {
+    "name": "python_authored_vectors_match_every_frozen_identity_and_selection",
+    "status": "ok"
+  },
+  {
+    "name": "official_hello_cid_primitive_vector",
+    "status": "ok"
+  },
+  {
+    "name": "accepted_descriptor_package_round_trip_and_raw_cid_mutation",
+    "status": "ok"
+  },
+  {
+    "name": "diagnostic_layout_and_default_limits_are_frozen",
+    "status": "ok"
+  },
+  {
+    "name": "binding_distinguishes_external_wire_from_static_mismatch",
+    "status": "ok"
+  },
+  {
+    "name": "checked_scratch_arithmetic_reports_exact_overflow_before_layout",
+    "status": "ok"
+  },
+  {
+    "name": "borrowed_verification_enforces_each_caller_cap",
+    "status": "ok"
+  },
+  {
+    "name": "every_authoring_cap_and_one_short_output_are_atomic",
+    "status": "ok"
+  },
+  {
+    "name": "exact_wire_round_trip_preserves_independent_sections_and_suffixes",
+    "status": "ok"
+  },
+  {
+    "name": "independent_reference_malformed_oracle_matches_exact_diagnostics",
+    "status": "ok"
+  },
+  {
+    "name": "replay_configuration_is_independent_of_layout_and_prepared_resources",
+    "status": "ok"
+  },
+  {
+    "name": "independent_reference_vector_binds_verifies_and_reencodes_byte_identically",
+    "status": "ok"
+  },
+  {
+    "name": "representative_mutations_have_exact_phase_order_and_diagnostics",
+    "status": "ok"
+  },
+  {
+    "name": "the_state_envelope_binds_the_effect_identity_it_names",
+    "status": "ok"
+  },
+  {
+    "name": "selector_and_registry_paths_perform_no_descriptor_validation_pass",
+    "status": "ok"
+  },
+  {
+    "name": "every_state_header_field_and_payload_class_has_an_exact_diagnostic",
+    "status": "ok"
+  },
+  {
+    "name": "migration_edges_are_adjacent_compatible_and_preserve_exact_provenance",
+    "status": "ok"
+  },
+  {
+    "name": "structural_selector_is_diagnostic_equivalent_until_descriptor_binding",
+    "status": "ok"
+  },
+  {
+    "name": "a_finite_block_is_accepted",
+    "status": "ok"
+  },
+  {
+    "name": "a_rejected_block_is_zeroed_reset_and_counted",
+    "status": "ok"
+  },
+  {
+    "name": "a_diverging_bank_is_caught_and_reset",
+    "status": "ok"
+  },
+  {
+    "name": "reset_clears_state_and_keeps_coefficients",
+    "status": "ok"
+  },
+  {
+    "name": "finish_channel_is_per_channel_and_reports_its_lanes",
+    "status": "ok"
+  },
+  {
+    "name": "an_identity_slot_passes_the_block_through_unchanged",
+    "status": "ok"
+  },
+  {
+    "name": "the_counter_counts_blocks",
+    "status": "ok"
+  },
+  {
+    "name": "the_lane_mask_names_the_failing_lanes",
+    "status": "ok"
+  },
+  {
+    "name": "the_two_channels_fail_together",
+    "status": "ok"
+  },
+  {
+    "name": "the_check_rejects_at_the_threshold",
+    "status": "ok"
+  },
+  {
+    "name": "no_smoothing_snaps_and_one_pole_uses_a_precomputed_coefficient",
+    "status": "ok"
+  },
+  {
+    "name": "the_precomputed_increment_is_the_declared_one_and_the_last_update_assigns",
+    "status": "ok"
+  },
+  {
+    "name": "linear_smoother_is_bit_identical_to_the_linear_ramp",
+    "status": "ok"
+  },
+  {
+    "name": "print_digests",
+    "status": "ignored"
+  },
+  {
+    "name": "the_corpus_is_nan_free",
+    "status": "ok"
+  },
+  {
+    "name": "every_case_has_a_wide_output_spread",
+    "status": "ok"
+  },
+  {
+    "name": "the_corpus_matches_its_pins",
+    "status": "ok"
+  },
+  {
+    "name": "a_hard_knee_is_exact_at_the_threshold",
+    "status": "ok"
+  },
+  {
+    "name": "a_nan_level_stays_a_nan",
+    "status": "ok"
+  },
+  {
+    "name": "silence_gives_a_finite_floor",
+    "status": "ok"
+  },
+  {
+    "name": "below_the_knee_is_the_exact_identity",
+    "status": "ok"
+  },
+  {
+    "name": "a_non_positive_knee_is_a_hard_knee",
+    "status": "ok"
+  },
+  {
+    "name": "the_knee_is_continuous_at_both_edges",
+    "status": "ok"
+  },
+  {
+    "name": "the_db_conversions_agree",
+    "status": "ok"
+  },
+  {
+    "name": "the_ratio_sets_the_slope",
+    "status": "ok"
+  },
+  {
+    "name": "the_curve_matches_the_paper",
+    "status": "ok"
+  },
+  {
+    "name": "ar_coefficient_complements_are_exact",
+    "status": "ok"
+  },
+  {
+    "name": "ar_one_pole_step_flushes_the_recurrence",
+    "status": "ok"
+  },
+  {
+    "name": "ar_one_pole_step_is_the_two_product_form",
+    "status": "ok"
+  },
+  {
+    "name": "ar_one_pole_step_is_width_independent",
+    "status": "ok"
+  },
+  {
+    "name": "ar_one_pole_step_switches_strictly_on_rising",
+    "status": "ok"
+  },
+  {
+    "name": "degenerate_coefficient_arguments_are_instantaneous",
+    "status": "ok"
+  },
+  {
+    "name": "coefficients_are_in_range_and_correctly_signed",
+    "status": "ok"
+  },
+  {
+    "name": "follower_extremes_are_exact",
+    "status": "ok"
+  },
+  {
+    "name": "hysteresis_lanes_are_independent",
+    "status": "ok"
+  },
+  {
+    "name": "hysteresis_opens_holds_and_closes",
+    "status": "ok"
+  },
+  {
+    "name": "peak_follow_max_follows_d8",
+    "status": "ok"
+  },
+  {
+    "name": "the_countdown_clamps_at_zero",
+    "status": "ok"
+  },
+  {
+    "name": "the_hold_delays_closing",
+    "status": "ok"
+  },
+  {
+    "name": "rms_follow_matches_the_unfused_f64_restatement",
+    "status": "ok"
+  },
+  {
+    "name": "peak_follow_matches_the_unfused_f64_restatement",
+    "status": "ok"
+  },
+  {
+    "name": "ramp_segments_are_width_independent",
+    "status": "ok"
+  },
+  {
+    "name": "the_lane_mask_agrees_across_widths",
+    "status": "ok"
+  },
+  {
+    "name": "the_boundary_check_is_width_independent",
+    "status": "ok"
+  },
+  {
+    "name": "the_corpus_is_width_independent",
+    "status": "ok"
+  },
+  {
+    "name": "a_degenerate_range_has_no_position",
+    "status": "ok"
+  },
+  {
+    "name": "a_logarithmic_mapping_is_constant_ratio",
+    "status": "ok"
+  },
+  {
+    "name": "clamping_always_lands_in_the_domain",
+    "status": "ok"
+  },
+  {
+    "name": "boolean_and_enumeration_domains_are_exact",
+    "status": "ok"
+  },
+  {
+    "name": "continuous_domains_are_inclusive_and_reject_non_finite",
+    "status": "ok"
+  },
+  {
+    "name": "defaults_are_clamped_and_counted",
+    "status": "ok"
+  },
+  {
+    "name": "mapping_is_exact_at_the_ends_and_monotone",
+    "status": "ok"
+  },
+  {
+    "name": "negative_zero_is_accepted_and_normalised",
+    "status": "ok"
+  },
+  {
+    "name": "the_mapping_inverse_round_trips",
+    "status": "ok"
+  },
+  {
+    "name": "the_composition_is_partition_invariant_at_width_one",
+    "status": "ok"
+  },
+  {
+    "name": "the_composition_is_width_independent",
+    "status": "ok"
+  },
+  {
+    "name": "the_composition_is_partition_invariant_at_width_four",
+    "status": "ok"
+  },
+  {
+    "name": "the_composition_is_partition_invariant_at_width_eight",
+    "status": "ok"
+  },
+  {
+    "name": "a_resting_ramp_is_a_constant_segment",
+    "status": "ok"
+  },
+  {
+    "name": "the_last_sample_is_exactly_the_target",
+    "status": "ok"
+  },
+  {
+    "name": "the_rest_invariant_holds",
+    "status": "ok"
+  },
+  {
+    "name": "the_state_after_a_block_is_partition_invariant",
+    "status": "ok"
+  },
+  {
+    "name": "the_step_is_computed_once",
+    "status": "ok"
+  },
+  {
+    "name": "zero_length_ramps_snap",
+    "status": "ok"
+  },
+  {
+    "name": "block_driving_matches_the_scalar_sequence",
+    "status": "ok"
+  },
+  {
+    "name": "expected_sizes_account_for_the_header",
+    "status": "ok"
+  },
+  {
+    "name": "float_words_round_trip_by_bits",
+    "status": "ok"
+  },
+  {
+    "name": "rejected_restore_writes_nothing",
+    "status": "ok"
+  },
+  {
+    "name": "word_slice_lengths_are_checked",
+    "status": "ok"
+  },
+  {
+    "name": "snapshot_then_restore_returns_every_word",
+    "status": "ok"
+  },
+  {
+    "name": "words_are_little_endian",
+    "status": "ok"
+  },
+  {
+    "name": "wrong_section_lengths_are_rejected",
+    "status": "ok"
+  },
+  {
+    "name": "wrong_version_is_rejected",
+    "status": "ok"
+  },
+  {
+    "name": "wrong_word_count_is_a_length_error",
+    "status": "ok"
+  },
+  {
+    "name": "a_one_ulp_move_is_never_hoisted",
+    "status": "ok"
+  },
+  {
+    "name": "a_redundant_change_arriving_mid_block_is_partition_invariant",
+    "status": "ok"
+  },
+  {
+    "name": "a_retarget_to_the_value_in_force_mid_ramp_agrees_with_the_armed_arm",
+    "status": "ok"
+  },
+  {
+    "name": "a_redundant_retarget_renders_the_same_bits_as_the_window_it_skips",
+    "status": "ok"
+  },
+  {
+    "name": "a_window_that_closes_on_a_block_boundary_hoists_on_the_next_block",
+    "status": "ok"
+  },
+  {
+    "name": "negative_zero_is_excluded_because_the_two_arms_really_do_differ",
+    "status": "ok"
+  },
+  {
+    "name": "non_finite_values_are_excluded",
+    "status": "ok"
+  },
+  {
+    "name": "signed_zeros_are_distinct_targets",
+    "status": "ok"
+  },
+  {
+    "name": "subnormal_targets_are_hoisted_and_both_arms_agree",
+    "status": "ok"
+  },
+  {
+    "name": "the_contract_smoother_hoists_linear_and_refuses_one_pole",
+    "status": "ok"
+  },
+  {
+    "name": "the_rest_invariant_survives_the_hoist",
+    "status": "ok"
+  },
+  {
+    "name": "realtime::audit::tests::armed_panic_is_counted_before_it_escapes",
+    "status": "ok"
+  },
+  {
+    "name": "realtime::disjoint::tests::a_lease_may_read_the_buffers_it_writes_itself",
+    "status": "ok"
+  },
+  {
+    "name": "realtime::disjoint::tests::a_read_from_the_same_wave_is_rejected",
+    "status": "ok"
+  },
+  {
+    "name": "realtime::audit::tests::forbidden_hooks_are_armed_only_inside_render",
+    "status": "ok"
+  },
+  {
+    "name": "realtime::disjoint::tests::a_write_to_the_silence_buffer_is_rejected",
+    "status": "ok"
+  },
+  {
+    "name": "realtime::disjoint::tests::a_write_then_a_later_wave_read_carries_the_audio",
+    "status": "ok"
+  },
+  {
+    "name": "realtime::disjoint::tests::an_unproduced_read_is_rejected",
+    "status": "ok"
+  },
+  {
+    "name": "realtime::disjoint::tests::overlapping_writes_are_rejected",
+    "status": "ok"
+  },
+  {
+    "name": "realtime::disjoint::tests::stereo_many_rejects_every_invalid_shape_without_partial_writes",
+    "status": "ok"
+  },
+  {
+    "name": "realtime::disjoint::tests::release_read_id_bounds_check_rejects_unreserved_buffer",
+    "status": "ok"
+  },
+  {
+    "name": "realtime::spsc::tests::endpoint_drop_order_is_safe_and_queued_values_drop_once",
+    "status": "ok"
+  },
+  {
+    "name": "realtime::spsc::tests::ring_header_is_arc_counts_plus_three_cache_lines",
+    "status": "ok"
+  },
+  {
+    "name": "realtime::tests::arena_is_fixed_and_disjoint",
+    "status": "ok"
+  },
+  {
+    "name": "realtime::spsc::tests::wrap_increment_agrees_with_remainder",
+    "status": "ok"
+  },
+  {
+    "name": "realtime::tests::enter_block_moves_the_executor_handover_and_returns_a_refused_one",
+    "status": "ok"
+  },
+  {
+    "name": "realtime::tests::launch_sample_rates_prepare_and_render",
+    "status": "ok"
+  },
+  {
+    "name": "realtime::tests::extended_and_unrelated_rates_reject_before_plan_publication",
+    "status": "ok"
+  },
+  {
+    "name": "realtime::tests::local_ring_supports_capacity_one_and_wraparound",
+    "status": "ok"
+  },
+  {
+    "name": "realtime::tests::move_only_spsc_preserves_full_value_and_drops_once_after_transfer",
+    "status": "ok"
+  },
+  {
+    "name": "realtime::tests::exchange_defers_without_retirement_capacity_then_applies",
+    "status": "ok"
+  },
+  {
+    "name": "realtime::tests::plan_exchange_resource_projection_covers_both_queues_and_checks_overflow",
+    "status": "ok"
+  },
+  {
+    "name": "realtime::tests::native_spsc_preserves_value_on_full_and_fifo_wrap",
+    "status": "ok"
+  },
+  {
+    "name": "realtime::tests::render_contiguous_rejects_stale_and_accepts_next",
+    "status": "ok"
+  },
+  {
+    "name": "realtime::tests::concurrent_plan_publication_is_complete_and_retirement_drops_off_render",
+    "status": "ok"
+  },
+  {
+    "name": "realtime::tests::replacement_cancel_releases_both_credits_without_consuming_epoch",
+    "status": "ok"
+  },
+  {
+    "name": "realtime::tests::replacement_reservation_freezes_failure_precedence_and_serial_order",
+    "status": "ok"
+  },
+  {
+    "name": "realtime::tests::reservation_never_strands_a_pending_legacy_predecessor",
+    "status": "ok"
+  },
+  {
+    "name": "realtime::tests::reservation_never_strands_a_queued_legacy_predecessor",
+    "status": "ok"
+  },
+  {
+    "name": "realtime::tests::reserved_replacement_preowns_publication_epoch_and_retirement_credit",
+    "status": "ok"
+  },
+  {
+    "name": "tests::quantum_is_a_lossless_carrier",
+    "status": "ok"
+  },
+  {
+    "name": "tests::sample_rate_tiers_are_exact_sorted_disjoint_and_classified",
+    "status": "ok"
+  },
+  {
+    "name": "tests::version_is_stable_for_bootstrap",
+    "status": "ok"
+  },
+  {
+    "name": "realtime::disjoint::tests::concurrent_leases_never_write_a_foreign_word",
+    "status": "ok"
+  },
+  {
+    "name": "realtime::spsc::tests::concurrent_spsc_stress",
+    "status": "ok"
+  },
+  {
+    "name": "published_words_are_bit_exact",
+    "status": "ok"
+  },
+  {
+    "name": "a_stalled_reader_resumes_on_the_newest_window_with_a_counted_gap",
+    "status": "ok"
+  },
+  {
+    "name": "a_million_windows_are_read_whole_and_in_order",
+    "status": "ok"
+  },
+  {
+    "name": "tests::the_runtime_parameter_specs_agree_with_the_frozen_descriptor",
+    "status": "ok"
+  },
+  {
+    "name": "tests::injected_nonfinite_gain_has_scalar_w8_parity",
+    "status": "ok"
+  },
+  {
+    "name": "passes_effect_contract_conformance",
+    "status": "ok"
+  },
+  {
+    "name": "descriptor_and_exact_resources_are_frozen",
+    "status": "ok"
+  },
+  {
+    "name": "the_payload_header_names_the_layout",
+    "status": "ok"
+  },
+  {
+    "name": "bank_validation_precedes_fallback_and_unavailable_w4_is_legal",
+    "status": "ok"
+  },
+  {
+    "name": "active_sidechain_and_exact_automation_state_are_observable",
+    "status": "ok"
+  },
+  {
+    "name": "independent_curve_and_exact_hold_transitions_agree",
+    "status": "ok"
+  },
+  {
+    "name": "an_open_gate_rearms_at_a_level_exactly_equal_to_the_close_threshold",
+    "status": "ok"
+  },
+  {
+    "name": "a_closed_gate_opens_at_a_level_exactly_equal_to_the_threshold",
+    "status": "ok"
+  },
+  {
+    "name": "the_lookahead_tap_lands_the_detector_exactly_where_the_brief_says",
+    "status": "ok"
+  },
+  {
+    "name": "all_rate_caps_lookahead_and_fixed_latency_are_exact",
+    "status": "ok"
+  },
+  {
+    "name": "no_case_is_vacuous",
+    "status": "ok"
+  },
+  {
+    "name": "every_case_agrees_at_every_width_and_matches_its_pin",
+    "status": "ok"
+  },
+  {
+    "name": "signed_zero_identity_is_bit_exact",
+    "status": "ok"
+  },
+  {
+    "name": "lane_identity_scalar_w8",
+    "status": "ok"
+  },
+  {
+    "name": "partition_invariance",
+    "status": "ok"
+  },
+  {
+    "name": "every_decision_is_at_least_one_decibel_clear_of_a_threshold",
+    "status": "ok"
+  },
+  {
+    "name": "oracle_pcm_within_derived_tolerance_scalar",
+    "status": "ok"
+  },
+  {
+    "name": "oracle_pcm_within_derived_tolerance_w8",
+    "status": "ok"
+  },
+  {
+    "name": "a_malformed_phase_word_rejects_and_leaves_both_lanes_untouched",
+    "status": "ok"
+  },
+  {
+    "name": "reset_kinds_are_word_exact",
+    "status": "ok"
+  },
+  {
+    "name": "nonfinite_input_recovers_lane_locally_at_the_block_boundary",
+    "status": "ok"
+  },
+  {
+    "name": "reset_kinds_are_word_exact_for_every_lane_of_a_bank",
+    "status": "ok"
+  },
+  {
+    "name": "the_gain_word_is_flushed_to_zero_once_it_decays_below_the_band",
+    "status": "ok"
+  },
+  {
+    "name": "active_restore_continues_against_uninterrupted",
+    "status": "ok"
+  },
+  {
+    "name": "a_track_restores_into_a_bank_whose_cursor_is_elsewhere",
+    "status": "ok"
+  },
+  {
+    "name": "nonfinite_input_recovers_one_lane_of_a_bank",
+    "status": "ok"
+  },
+  {
+    "name": "observation_size_accounting::no_reported_runtime_byte_moved",
+    "status": "ok"
+  },
+  {
+    "name": "observation_size_accounting::the_observation_lane_costs_one_nullable_pointer_in_the_console_effect",
+    "status": "ok"
+  },
+  {
+    "name": "program::tests::a_delayed_stage_boundary_is_not_elided",
+    "status": "ok"
+  },
+  {
+    "name": "program::tests::chain_of_seven_stages_lowers_to_six_ops_three_taps_and_two_buffers",
+    "status": "ok"
+  },
+  {
+    "name": "program::tests::delayed_edge_gets_staging_buffer_and_blocks_in_place",
+    "status": "ok"
+  },
+  {
+    "name": "program::tests::malformed_inputs_are_rejected_rather_than_lowered",
+    "status": "ok"
+  },
+  {
+    "name": "program::tests::fan_out_blocks_in_place_and_fan_in_keeps_its_reduction",
+    "status": "ok"
+  },
+  {
+    "name": "program::tests::taps_are_not_readers_so_an_alias_chain_still_folds_into_its_producer",
+    "status": "ok"
+  },
+  {
+    "name": "runtime::tests::a_declined_first_pair_retains_the_first_slots_scratch",
+    "status": "ok"
+  },
+  {
+    "name": "runtime::tests::a_later_folded_cohort_continues_from_the_live_master_in_d9_order",
+    "status": "ok"
+  },
+  {
+    "name": "runtime::tests::a_single_in_place_input_is_left_untouched",
+    "status": "ok"
+  },
+  {
+    "name": "runtime::tests::all_active_folded_bank_chain_dispatches_the_real_graph_cohort",
+    "status": "ok"
+  },
+  {
+    "name": "runtime::tests::bank_gather_source_admits_only_the_dedication_copy",
+    "status": "ok"
+  },
+  {
+    "name": "runtime::tests::arena_members_direct_scatter_preserves_redirected_identity_bits",
+    "status": "ok"
+  },
+  {
+    "name": "runtime::tests::a_folded_epilogue_is_the_route_and_the_reduction_bit_for_bit",
+    "status": "ok"
+  },
+  {
+    "name": "runtime::tests::malformed_folded_cohorts_are_rejected_before_route_or_master_mutation",
+    "status": "ok"
+  },
+  {
+    "name": "runtime::tests::reduction_preserves_repeated_silence_self_and_unrelated_buffers",
+    "status": "ok"
+  },
+  {
+    "name": "runtime::tests::synthetic_distinct_matrix_destination_is_the_scalar_pair_identity_decline",
+    "status": "ok"
+  },
+  {
+    "name": "runtime::tests::a_delay_line_is_a_pure_shift_at_every_partitioning",
+    "status": "ok"
+  },
+  {
+    "name": "program::tests::a_bank_window_never_recycles_a_physical_slot",
+    "status": "ok"
+  },
+  {
+    "name": "runtime::tests::the_fan_in_zero_fill_is_dead_only_under_a_bound_source",
+    "status": "ok"
+  },
+  {
+    "name": "runtime::tests::the_node_witness_agrees_with_its_line",
+    "status": "ok"
+  },
+  {
+    "name": "runtime::tests::the_first_contributor_stores_so_a_negative_zero_master_keeps_its_sign",
+    "status": "ok"
+  },
+  {
+    "name": "tests::builtin_bank_resource_overflow_leaves_the_graph_estimate_unchanged",
+    "status": "ok"
+  },
+  {
+    "name": "program::tests::no_slot_is_recycled_inside_a_merged_bank_window",
+    "status": "ok"
+  },
+  {
+    "name": "tests::binding_rejects_duplicates_and_returns_all_ownership",
+    "status": "ok"
+  },
+  {
+    "name": "tests::delay_is_exact_and_lane_independent",
+    "status": "ok"
+  },
+  {
+    "name": "runtime::tests::route_applies_folded_gain_with_frozen_op_order",
+    "status": "ok"
+  },
+  {
+    "name": "tests::a_console_parameter_command_applies_at_the_next_block_boundary",
+    "status": "ok"
+  },
+  {
+    "name": "tests::compile_request_plan_id_survives_binding",
+    "status": "ok"
+  },
+  {
+    "name": "tests::attaching_builtin_banks_re_derives_the_program_that_bind_will_use",
+    "status": "ok"
+  },
+  {
+    "name": "tests::executor_applies_exact_pdc_then_fixed_pairwise_reduction",
+    "status": "ok"
+  },
+  {
+    "name": "tests::an_idle_console_changes_no_rendered_bit",
+    "status": "ok"
+  },
+  {
+    "name": "tests::aliased_identity_stages_do_not_change_audio",
+    "status": "ok"
+  },
+  {
+    "name": "tests::faster_main_and_faster_sidechain_align_on_their_typed_ports",
+    "status": "ok"
+  },
+  {
+    "name": "tests::reduction_is_left_to_right",
+    "status": "ok"
+  },
+  {
+    "name": "tests::identity_binding_acknowledges_without_a_processor",
+    "status": "ok"
+  },
+  {
+    "name": "tests::id_ordered_bank_plan_rejects_transactionally_and_returned_ownership_is_reusable",
+    "status": "ok"
+  },
+  {
+    "name": "tests::live_bypass_is_latency_preserving_and_reversible",
+    "status": "ok"
+  },
+  {
+    "name": "tests::scalar_owner_resource_overflow_leaves_the_graph_estimate_unchanged",
+    "status": "ok"
+  },
+  {
+    "name": "tests::the_console_effect_drops_nothing_within_its_prepared_capacity",
+    "status": "ok"
+  },
+  {
+    "name": "tests::level_major_w4_builtin_bank_is_analytic_for_three_blocks",
+    "status": "ok"
+  },
+  {
+    "name": "tests::structural_layout_rejects_node_level_edge_and_bank_corruptions",
+    "status": "ok"
+  },
+  {
+    "name": "tests::with_builtin_banks_accepts_padded_members_and_rejects_empty_or_oversized",
+    "status": "ok"
+  },
+  {
+    "name": "tests::structural_layout_rejection_is_shared_after_binding_validation_for_source_families",
+    "status": "ok"
+  },
+  {
+    "name": "runtime::tests::every_lane_width_matches_the_frozen_old_kernel_on_hostile_values",
+    "status": "ok"
+  },
+  {
+    "name": "tests::left_to_right_reduction_meets_analytic_bound_and_ignores_completion_order",
+    "status": "ok"
+  },
+  {
+    "name": "tests::enabled_and_bypass_pdc_align_at_launch_rates_and_quanta",
+    "status": "ok"
+  },
+  {
+    "name": "runtime::tests::reduction_is_left_to_right_bit_identical_to_scalar_reference",
+    "status": "ok"
+  },
+  {
+    "name": "runtime::tests::compensation_delay_is_partition_invariant_and_matches_per_sample_reference",
+    "status": "ok"
+  },
+  {
+    "name": "tests::fifty_random_dag_sessions_render_deterministic_nonsilent_pcm",
+    "status": "ok"
+  },
+  {
+    "name": "program::tests::lowering_preserves_dataflow_and_bounds_the_arena_on_random_graphs",
+    "status": "ok"
+  },
+  {
+    "name": "program::tests::sixty_four_plain_tracks_keep_one_ordered_non_aliasing_master_reduction",
+    "status": "ok"
+  },
+  {
+    "name": "program::tests::bank_window_hoisting_preserves_dataflow_on_random_graphs",
+    "status": "ok"
+  },
+  {
+    "name": "program::tests::cohort_chain_merging_preserves_dataflow_on_random_graphs",
+    "status": "ok"
+  },
+  {
+    "name": "direct_bank_graph_render_is_allocation_free_and_bit_exact",
+    "status": "ok"
+  },
+  {
+    "name": "tests::buffer_coloring_aliases_identity_and_preserves_fanout_liveness",
+    "status": "ok"
+  },
+  {
+    "name": "tests::cycle_witness_skips_acyclic_residual_nodes_downstream_of_cycle",
+    "status": "ok"
+  },
+  {
+    "name": "tests::every_cyclic_scc_has_one_closed_sorted_witness_and_edge_paths",
+    "status": "ok"
+  },
+  {
+    "name": "tests::accepted_session_compiles_binds_and_renders_direct_route",
+    "status": "ok"
+  },
+  {
+    "name": "tests::builtins_replace_only_the_three_internal_track_bindings",
+    "status": "ok"
+  },
+  {
+    "name": "tests::timing_applies_declared_tail_after_node_latency",
+    "status": "ok"
+  },
+  {
+    "name": "tests::timing_reports_the_checked_sole_output_arrival_and_extent",
+    "status": "ok"
+  },
+  {
+    "name": "tests::level_major_compiler_coloring_matches_independent_live_intervals",
+    "status": "ok"
+  },
+  {
+    "name": "tests::route_transform_uses_the_canonical_db_to_gain_conversion",
+    "status": "ok"
+  },
+  {
+    "name": "tests::direct_graph_report_exposes_zero_output_latency_and_tail_without_identity_change",
+    "status": "ok"
+  },
+  {
+    "name": "tests::chains_of_different_depths_share_a_cohort_through_identity_slots",
+    "status": "ok"
+  },
+  {
+    "name": "tests::route_transform_bits_participate_in_semantic_hash",
+    "status": "ok"
+  },
+  {
+    "name": "tests::node_text_len_matches_node_text_for_every_variant",
+    "status": "ok"
+  },
+  {
+    "name": "tests::multi_slot_rack_chains_form_one_cohort_and_bind_every_slot",
+    "status": "ok"
+  },
+  {
+    "name": "tests::a_dynamic_slot_that_differs_from_its_bank_mates_falls_back_per_node",
+    "status": "ok"
+  },
+  {
+    "name": "tests::third_party_dynamic_effects_are_never_bank_candidates",
+    "status": "ok"
+  },
+  {
+    "name": "tests::a_sidechain_lifted_chain_slot_falls_back_instead_of_failing_the_compile",
+    "status": "ok"
+  },
+  {
+    "name": "tests::live_scalar_owner_bytes_are_published_and_capped_before_binding",
+    "status": "ok"
+  },
+  {
+    "name": "tests::issue122_reverse_route_ids_emit_sorted_levels_and_bind",
+    "status": "ok"
+  },
+  {
+    "name": "tests::compiled_plans_always_lower_to_a_smaller_executable_program",
+    "status": "ok"
+  },
+  {
+    "name": "tests::post_bank_graph_cap_rejects_transactionally_with_both_prepared_inputs",
+    "status": "ok"
+  },
+  {
+    "name": "tests::bank_membership_is_independent_of_entry_order",
+    "status": "ok"
+  },
+  {
+    "name": "tests::production_builtin_banks_replace_full_post_input_groups_and_render",
+    "status": "ok"
+  },
+  {
+    "name": "tests::each_forged_builtin_seal_tuple_is_rejected_before_graph_attachment",
+    "status": "ok"
+  },
+  {
+    "name": "tests::mixed_twelve_track_plan_binds_renders_full_banks_and_scalar_tails_without_graph_changes",
+    "status": "ok"
+  },
+  {
+    "name": "tests::launch_parametric_eq_fixture_retains_banks_and_matches_scalar_across_blocks",
+    "status": "ok"
+  },
+  {
+    "name": "tests::scalar_dispatch_compiles_without_banks_on_any_host",
+    "status": "ok"
+  },
+  {
+    "name": "tests::launch_transient_shaper_fixture_closes_banks_tails_pdc_and_transactional_caps",
+    "status": "ok"
+  },
+  {
+    "name": "tests::launch_compressor_fixture_retains_bank_tail_and_connected_scalar_without_pdc_change",
+    "status": "ok"
+  },
+  {
+    "name": "tests::launch_soft_clip_fixture_closes_banks_tails_pdc_support_and_transactional_caps",
+    "status": "ok"
+  },
+  {
+    "name": "tests::dynamic_rack_compressors_bank_and_render_bit_identically_to_the_per_node_path",
+    "status": "ok"
+  },
+  {
+    "name": "tests::add_a_track_keeps_existing_track_bits_and_one_transpose_per_chain",
+    "status": "ok"
+  },
+  {
+    "name": "tests::launch_gate_expander_fixture_retains_width_correct_banks_and_scalar_fallbacks",
+    "status": "ok"
+  },
+  {
+    "name": "tests::launch_delay_fixture_closes_scalar_state_tail_pdc_and_transactional_caps",
+    "status": "ok"
+  },
+  {
+    "name": "tests::rack_placement_changes_the_bank_but_never_the_samples",
+    "status": "ok"
+  },
+  {
+    "name": "tests::launch_true_peak_limiter_fixture_retains_banks_tails_latency_and_transactional_caps",
+    "status": "ok"
+  },
+  {
+    "name": "tests::launch_multiband_compressor_fixture_closes_bank_graph_and_transactional_caps",
+    "status": "ok"
+  },
+  {
+    "name": "tests::banking_a_dynamic_rack_costs_no_arena_buffers",
+    "status": "ok"
+  },
+  {
+    "name": "tests::canonical_artifacts_are_complete_and_repeatable_100_times",
+    "status": "ok"
+  },
+  {
+    "name": "tests::console_sixty_four_track_fixture_banks_its_dynamic_compressor_bit_identically",
+    "status": "ok"
+  },
+  {
+    "name": "tests::random_dags_have_strictly_ascending_levels_and_level_major_schedule",
+    "status": "ok"
+  },
+  {
+    "name": "tests::the_two_planners_agree_on_every_track_class",
+    "status": "ok"
+  },
+  {
+    "name": "tests::ten_thousand_graph_mutations_are_panic_free_and_repeatable",
+    "status": "ok"
+  },
+  {
+    "name": "tests::intended_placement_merges_two_chains_into_one_bit_identically",
+    "status": "ok"
+  },
+  {
+    "name": "tests::a_meter_on_a_bank_member_declines_that_lanes_scatter_redirect",
+    "status": "ok"
+  },
+  {
+    "name": "tests::misaligned_lane_sets_decline_the_merge",
+    "status": "ok"
+  },
+  {
+    "name": "tests::a_send_from_a_rack_boundary_declines_the_merge",
+    "status": "ok"
+  },
+  {
+    "name": "tests::a_meter_on_the_matrix_declines_the_route_fold_and_still_meters",
+    "status": "ok"
+  },
+  {
+    "name": "tests::a_subsequence_program_track_binds_instead_of_panicking",
+    "status": "ok"
+  },
+  {
+    "name": "tests::a_second_route_from_a_tracks_matrix_declines_the_route_fold",
+    "status": "ok"
+  },
+  {
+    "name": "tests::a_leased_stage_meter_declines_the_merge_and_still_meters",
+    "status": "ok"
+  },
+  {
+    "name": "tests::an_observed_alias_on_the_last_slot_declines_that_lanes_scatter_redirect",
+    "status": "ok"
+  },
+  {
+    "name": "tests::a_send_from_the_last_slots_alias_declines_that_lanes_scatter_redirect",
+    "status": "ok"
+  },
+  {
+    "name": "tests::a_meter_leased_at_post_fader_splits_the_chain_and_still_meters",
+    "status": "ok"
+  },
+  {
+    "name": "tests::the_intended_strip_fuses_the_whole_signal_path_into_one_chain_per_cohort",
+    "status": "ok"
+  },
+  {
+    "name": "tests::route_ids_ordered_against_the_cohorts_decline_the_route_fold",
+    "status": "ok"
+  },
+  {
+    "name": "tests::frozen_issue_037_seeded_builtin_bank_layouts_have_exact_membership_and_counters",
+    "status": "ok"
+  },
+  {
+    "name": "tests::the_intended_strip_folds_every_route_into_its_cohorts_epilogue",
+    "status": "ok"
+  },
+  {
+    "name": "tests::class_pooling_forfeits_the_route_fold_only_on_an_interleaved_session",
+    "status": "ok"
+  },
+  {
+    "name": "tests::a_single_odd_track_strands_both_pools_remainders",
+    "status": "ok"
+  },
+  {
+    "name": "tests::a_banked_fader_command_lands_on_the_block_it_was_admitted_in",
+    "status": "ok"
+  },
+  {
+    "name": "tests::check_rejects_fixture_manifest_missing_and_unlisted_corruption",
+    "status": "ok"
+  },
+  {
+    "name": "tests::checker_rejects_content_manifest_missing_and_unlisted_corruption",
+    "status": "ok"
+  },
+  {
+    "name": "the_replaced_platform_conversion_had_different_bits_at_the_pinned_witness",
+    "status": "ok"
+  },
+  {
+    "name": "route_gain_matches_f64_oracle_within_two_ulp",
+    "status": "ok"
+  },
+  {
+    "name": "unity_route_gain_is_exactly_one",
+    "status": "ok"
+  },
+  {
+    "name": "compiles_65_537_tracks_or_rejects_only_a_configured_resource",
+    "status": "ok"
+  },
+  {
+    "name": "the_zero_delay_plan_digest_is_the_pre_feature_digest",
+    "status": "ok"
+  },
+  {
+    "name": "a_delayed_session_is_a_different_plan",
+    "status": "ok"
+  },
+  {
+    "name": "a_zero_delay_session_lowers_no_delay_node",
+    "status": "ok"
+  },
+  {
+    "name": "the_pdc_counts_are_untouched",
+    "status": "ok"
+  },
+  {
+    "name": "a_ring_is_a_named_allocation",
+    "status": "ok"
+  },
+  {
+    "name": "an_oversized_delay_is_rejected_by_the_caps",
+    "status": "ok"
+  },
+  {
+    "name": "a_track_delay_moves_no_pdc_row",
+    "status": "ok"
+  },
+  {
+    "name": "the_estimate_charges_each_lane_its_own_ring",
+    "status": "ok"
+  },
+  {
+    "name": "solo::tests::a_two_record_delta_is_exactly_the_disagreeing_case",
+    "status": "ok"
+  },
+  {
+    "name": "solo::tests::an_unknown_track_is_refused",
+    "status": "ok"
+  },
+  {
+    "name": "solo::tests::per_lane_user_mute_restores_as_two_records",
+    "status": "ok"
+  },
+  {
+    "name": "solo::tests::engaging_solo_mutes_the_complement_and_only_the_complement",
+    "status": "ok"
+  },
+  {
+    "name": "solo::tests::rollback_restores_every_word",
+    "status": "ok"
+  },
+  {
+    "name": "solo::tests::mute_while_soloed_survives_the_un_solo",
+    "status": "ok"
+  },
+  {
+    "name": "solo::tests::solo_count_tracks_engaged_bits_exactly",
+    "status": "ok"
+  },
+  {
+    "name": "control_provider::tests::catalog_state_clock_transport_counters_and_diagnostics_are_session_backed",
+    "status": "ok"
+  },
+  {
+    "name": "control_provider::tests::every_launch_effect_and_rack_matches_the_accepted_preparation_authority",
+    "status": "ok"
+  },
+  {
+    "name": "a_banked_effect_applies_each_lanes_own_command_and_no_others",
+    "status": "ok"
+  },
+  {
+    "name": "two_lanes_of_one_bank_take_two_different_commands",
+    "status": "ok"
+  },
+  {
+    "name": "observation_cost_classes_are_separated_from_a_computed_scan_in_release",
+    "status": "ignored"
+  },
+  {
+    "name": "observation_cost_classes_are_what_they_claim",
+    "status": "ok"
+  },
+  {
+    "name": "the_per_node_scalar_path_publishes_its_own_block",
+    "status": "ok"
+  },
+  {
+    "name": "observation_without_a_control_channel_is_refused",
+    "status": "ok"
+  },
+  {
+    "name": "observation_retained_bytes_are_the_declared_menu_times_one_row_and_one_slot",
+    "status": "ok"
+  },
+  {
+    "name": "a_session_that_asked_for_no_observation_holds_none",
+    "status": "ok"
+  },
+  {
+    "name": "a_plan_replacement_drops_every_subscription",
+    "status": "ok"
+  },
+  {
+    "name": "the_first_window_at_or_after_applied_at_sample_reflects_the_command",
+    "status": "ok"
+  },
+  {
+    "name": "every_bank_lane_publishes_its_own_reduction",
+    "status": "ok"
+  },
+  {
+    "name": "observation_is_identical_across_rack_placement",
+    "status": "ok"
+  },
+  {
+    "name": "every_observation_leg_renders_the_corpus_to_the_same_bytes",
+    "status": "ok"
+  },
+  {
+    "name": "a_started_session_hands_the_plan_back_when_it_stops",
+    "status": "ok"
+  },
+  {
+    "name": "x86::the_callers_word_is_restored_bit_exactly_after_every_block",
+    "status": "ok"
+  },
+  {
+    "name": "x86::a_caller_with_ftz_and_daz_renders_the_canonical_bytes",
+    "status": "ok"
+  },
+  {
+    "name": "a_command_takes_effect_on_the_whole_block_that_drains_it",
+    "status": "ok"
+  },
+  {
+    "name": "two_commands_are_not_interchangeable",
+    "status": "ok"
+  },
+  {
+    "name": "the_stereo_arm_is_a_never_collapsed_oracle",
+    "status": "ok"
+  },
+  {
+    "name": "a_both_lane_record_drained_while_collapsed_keeps_the_collapse",
+    "status": "ok"
+  },
+  {
+    "name": "a_symmetric_ride_renders_the_same_bits_collapsed_or_not",
+    "status": "ok"
+  },
+  {
+    "name": "re_equalising_after_a_disengaging_drain_holds_the_never_collapsed_bits",
+    "status": "ok"
+  },
+  {
+    "name": "the_collapse_census_follows_the_commands",
+    "status": "ok"
+  },
+  {
+    "name": "an_uncommanded_console_renders_the_console_free_bytes",
+    "status": "ok"
+  },
+  {
+    "name": "a_command_moves_exactly_the_addressed_track",
+    "status": "ok"
+  },
+  {
+    "name": "a_per_lane_record_drained_on_the_disengaging_block_reaches_one_channel",
+    "status": "ok"
+  },
+  {
+    "name": "dense_refusal_diagnostics_finish_under_one_second_in_release",
+    "status": "ignored"
+  },
+  {
+    "name": "contract_types_are_send_and_not_sync",
+    "status": "ok"
+  },
+  {
+    "name": "default_ring_derivation_covers_the_stall_and_two_in_flight_quanta",
+    "status": "ok"
+  },
+  {
+    "name": "dense_refusal_diagnostics_are_count_bounded",
+    "status": "ok"
+  },
+  {
+    "name": "retained_bytes_projection_matches_the_live_set",
+    "status": "ok"
+  },
+  {
+    "name": "source_control_errors_are_typed",
+    "status": "ok"
+  },
+  {
+    "name": "prepare_reports_the_session_shape_and_feeds_sources_independently",
+    "status": "ok"
+  },
+  {
+    "name": "console_attaches_bounded_control_and_meter_halves_in_canonical_track_order",
+    "status": "ok"
+  },
+  {
+    "name": "source_channel_cap_is_optional",
+    "status": "ok"
+  },
+  {
+    "name": "no_console_request_attaches_nothing_and_charges_nothing",
+    "status": "ok"
+  },
+  {
+    "name": "shape_policy_pins_rate_and_quantum",
+    "status": "ok"
+  },
+  {
+    "name": "session_validation_owns_the_launch_rate_set",
+    "status": "ok"
+  },
+  {
+    "name": "every_byte_cap_admits_its_reported_row_and_rejects_one_byte_below",
+    "status": "ok"
+  },
+  {
+    "name": "classification_partitions_the_table",
+    "status": "ok"
+  },
+  {
+    "name": "only_the_documented_pairs_share_a_code",
+    "status": "ok"
+  },
+  {
+    "name": "every_source_rejection_reports_its_own_pinned_diagnostic",
+    "status": "ok"
+  },
+  {
+    "name": "a_left_channel_command_declines_exactly_one_lane",
+    "status": "ok"
+  },
+  {
+    "name": "an_observe_record_never_moves_the_witness",
+    "status": "ok"
+  },
+  {
+    "name": "a_live_bypass_declines_its_lane_and_lifting_it_re_earns_the_term",
+    "status": "ok"
+  },
+  {
+    "name": "seam_side_console_traffic_leaves_every_lane_eligible",
+    "status": "ok"
+  },
+  {
+    "name": "a_prepare_time_bypass_seeds_the_unbypassed_term_before_any_render",
+    "status": "ok"
+  },
+  {
+    "name": "the_scalar_console_effect_arm_maintains_its_own_live_terms",
+    "status": "ok"
+  },
+  {
+    "name": "a_both_channel_command_preserves_every_lane_including_mid_ramp",
+    "status": "ok"
+  },
+  {
+    "name": "two_per_lane_writes_that_agree_still_decline_the_lane",
+    "status": "ok"
+  },
+  {
+    "name": "the_two_halves_of_the_witness_are_decided_independently",
+    "status": "ok"
+  },
+  {
+    "name": "an_asymmetric_input_builtin_declines_its_own_track_only",
+    "status": "ok"
+  },
+  {
+    "name": "the_structural_witness_follows_the_source_mapping",
+    "status": "ok"
+  },
+  {
+    "name": "a_zero_delay_arm_never_lowers_a_delay_node",
+    "status": "ok"
+  },
+  {
+    "name": "an_asymmetric_delay_declines_exactly_its_own_track",
+    "status": "ok"
+  },
+  {
+    "name": "the_pre_delay_region_is_exactly_positive_zero",
+    "status": "ok"
+  },
+  {
+    "name": "the_two_lanes_carry_independent_delays",
+    "status": "ok"
+  },
+  {
+    "name": "a_symmetric_delay_keeps_every_track_eligible",
+    "status": "ok"
+  },
+  {
+    "name": "the_delay_survives_the_banked_path",
+    "status": "ok"
+  },
+  {
+    "name": "a_symmetric_delay_renders_the_same_bits_collapsed_as_dual",
+    "status": "ok"
+  },
+  {
+    "name": "a_declared_delay_is_exactly_a_pre_padded_source",
+    "status": "ok"
+  },
+  {
+    "name": "tests::a_computed_tap_is_refused_with_unsupported_kind",
+    "status": "ok"
+  },
+  {
+    "name": "tests::default_ring_covers_stall_tolerance",
+    "status": "ok"
+  },
+  {
+    "name": "tests::maximum_document_dense_invalid_boot_finishes_under_one_second_in_release",
+    "status": "ignored"
+  },
+  {
+    "name": "tests::observation_unit_conversion_is_declared_and_clamped",
+    "status": "ok"
+  },
+  {
+    "name": "tests::the_observation_fields_account_for_the_moved_bridge_rows",
+    "status": "ok"
+  },
+  {
+    "name": "tests::console_track_id_longer_than_every_source_id_boots_and_round_trips",
+    "status": "ok"
+  },
+  {
+    "name": "tests::native_identity_session_digest_pins_the_wasm_parity",
+    "status": "ok"
+  },
+  {
+    "name": "tests::a_fader_command_names_the_exact_application_sample",
+    "status": "ok"
+  },
+  {
+    "name": "tests::a_mute_command_is_a_fader_endpoint_not_a_discontinuity",
+    "status": "ok"
+  },
+  {
+    "name": "tests::command_ack_names_the_exact_application_sample",
+    "status": "ok"
+  },
+  {
+    "name": "tests::malformed_config_and_atomic_compile_failure_are_sticky",
+    "status": "ok"
+  },
+  {
+    "name": "tests::paused_seek_recycles_full_internal_queue_before_first_target_quantum",
+    "status": "ok"
+  },
+  {
+    "name": "tests::a_console_that_never_solos_renders_what_it_always_did",
+    "status": "ok"
+  },
+  {
+    "name": "tests::a_solo_gate_is_a_bounded_ramp_and_a_zero_window_snaps",
+    "status": "ok"
+  },
+  {
+    "name": "tests::raw_ffi_source_introspection_mirrors_the_track_queries",
+    "status": "ok"
+  },
+  {
+    "name": "tests::paired_fader_and_matrix_commands_share_the_acknowledged_application_sample",
+    "status": "ok"
+  },
+  {
+    "name": "tests::a_console_free_host_refuses_every_live_kind_as_unsupported",
+    "status": "ok"
+  },
+  {
+    "name": "tests::a_solo_that_changes_nothing_emits_nothing",
+    "status": "ok"
+  },
+  {
+    "name": "tests::an_effect_bypass_command_returns_the_dry_signal",
+    "status": "ok"
+  },
+  {
+    "name": "tests::session_source_introspection_is_canonical_ordered_shaped_and_bounded",
+    "status": "ok"
+  },
+  {
+    "name": "tests::a_trim_is_not_a_mute_and_solo_does_not_move_it",
+    "status": "ok"
+  },
+  {
+    "name": "tests::mute_and_solo_are_separate_states",
+    "status": "ok"
+  },
+  {
+    "name": "tests::unknown_targets_are_typed_and_leave_the_engine_untouched",
+    "status": "ok"
+  },
+  {
+    "name": "tests::each_boot_option_rule_has_its_own_typed_refusal",
+    "status": "ok"
+  },
+  {
+    "name": "tests::a_subscription_without_capacity_is_observation_unbound",
+    "status": "ok"
+  },
+  {
+    "name": "tests::facade_source_rules_reach_the_browser_host",
+    "status": "ok"
+  },
+  {
+    "name": "tests::solo_records_are_shape_checked_like_mute_records",
+    "status": "ok"
+  },
+  {
+    "name": "tests::compile_resource_caps_are_inclusive_and_one_below_rejects",
+    "status": "ok"
+  },
+  {
+    "name": "tests::native_command_timeline_digest_pins_the_wasm_parity",
+    "status": "ok"
+  },
+  {
+    "name": "tests::a_refused_batch_pushes_no_trim_record",
+    "status": "ok"
+  },
+  {
+    "name": "tests::output_mismatch_and_disposal_are_sticky_and_idempotent",
+    "status": "ok"
+  },
+  {
+    "name": "tests::a_trim_command_reaches_the_render_plane",
+    "status": "ok"
+  },
+  {
+    "name": "tests::frozen_layouts_and_values_are_exact",
+    "status": "ok"
+  },
+  {
+    "name": "tests::retained_projection_budget_diagnostic_names_projected_bytes",
+    "status": "ok"
+  },
+  {
+    "name": "tests::render_failure_retains_ownership_and_silences",
+    "status": "ok"
+  },
+  {
+    "name": "tests::observation_configuration_words_are_validated",
+    "status": "ok"
+  },
+  {
+    "name": "tests::command_flood_is_typed_backpressure_and_leaves_the_render_untouched",
+    "status": "ok"
+  },
+  {
+    "name": "tests::a_mixed_batch_is_one_transaction_across_every_queue",
+    "status": "ok"
+  },
+  {
+    "name": "tests::an_effect_parameter_command_names_the_exact_application_sample",
+    "status": "ok"
+  },
+  {
+    "name": "tests::raw_ffi_validates_handle_layout_overflow_and_transactional_failure",
+    "status": "ok"
+  },
+  {
+    "name": "tests::source_backpressure_seek_render_and_stable_output_are_bounded",
+    "status": "ok"
+  },
+  {
+    "name": "tests::the_decode_staging_holds_a_full_batch_plus_a_solo_transition",
+    "status": "ok"
+  },
+  {
+    "name": "tests::raw_ffi_uses_stable_staging_and_exact_output_quantum_without_growth",
+    "status": "ok"
+  },
+  {
+    "name": "tests::the_input_queue_is_a_destination_of_its_own",
+    "status": "ok"
+  },
+  {
+    "name": "tests::ring_prefill_survives_stall",
+    "status": "ok"
+  },
+  {
+    "name": "tests::observation_misuse_is_typed_and_all_or_nothing",
+    "status": "ok"
+  },
+  {
+    "name": "tests::meter_frames_equal_an_offline_fold_and_cost_the_render_nothing",
+    "status": "ok"
+  },
+  {
+    "name": "tests::quoted_root_shape_keys_self_configure_without_a_second_parser",
+    "status": "ok"
+  },
+  {
+    "name": "tests::a_refused_solo_submission_leaves_the_console_untouched",
+    "status": "ok"
+  },
+  {
+    "name": "tests::trim_and_polarity_leave_the_solo_transaction_closed",
+    "status": "ok"
+  },
+  {
+    "name": "tests::native_observation_timeline_digest_pins_the_wasm_parity",
+    "status": "ok"
+  },
+  {
+    "name": "tests::a_batch_of_alternating_solo_toggles_coalesces_to_its_net_effect",
+    "status": "ok"
+  },
+  {
+    "name": "tests::preparation_accepts_explicit_64_128_and_256_quanta_with_stable_buffers",
+    "status": "ok"
+  },
+  {
+    "name": "tests::a_both_lane_trim_command_is_one_record_and_one_queue_slot",
+    "status": "ok"
+  },
+  {
+    "name": "tests::un_solo_restores_the_exact_per_lane_user_mute_set",
+    "status": "ok"
+  },
+  {
+    "name": "tests::exact_retained_total_is_checked_as_one_budget_not_independent_caps",
+    "status": "ok"
+  },
+  {
+    "name": "tests::the_meter_frame_carries_the_app_shaped_gain_reduction",
+    "status": "ok"
+  },
+  {
+    "name": "tests::trim_and_polarity_are_admitted_on_every_lane_selector",
+    "status": "ok"
+  },
+  {
+    "name": "tests::trim_and_polarity_refuse_on_the_declared_terms",
+    "status": "ok"
+  },
+  {
+    "name": "tests::solo_is_bit_identically_mute_on_the_complement",
+    "status": "ok"
+  },
+  {
+    "name": "tests::representative_retained_projection_tracks_the_post_prepare_exact_aggregate",
+    "status": "ok"
+  },
+  {
+    "name": "tests::maximum_document_dense_invalid_boot_is_typed_and_bounded",
+    "status": "ok"
+  },
+  {
+    "name": "tests::maximum_document_dense_invalid_fixture_reaches_bounded_semantic_validation",
+    "status": "ok"
+  },
+  {
+    "name": "paused_seek_recycles_without_allocating_or_freeing",
+    "status": "ok"
+  },
+  {
+    "name": "pinned_multiplier_bounds_the_worst_accepted_parse_and_model_build_peak",
+    "status": "ok"
+  },
+  {
+    "name": "b1_block_kernel_against_a_per_sample_path",
+    "status": "ignored"
+  },
+  {
+    "name": "b2_interleave_sweep",
+    "status": "ignored"
+  },
+  {
+    "name": "holey_populations_keep_neutral_wide_padding",
+    "status": "ok"
+  },
+  {
+    "name": "wrong_equations_are_distinguished_before_the_dut_is_checked",
+    "status": "ok"
+  },
+  {
+    "name": "settled_fader_matrix_matches_the_two_primitive_oracle",
+    "status": "ok"
+  },
+  {
+    "name": "attestation_passes_on_this_thread",
+    "status": "ok"
+  },
+  {
+    "name": "the_canonical_word_is_the_word_inside_the_guard",
+    "status": "ok"
+  },
+  {
+    "name": "the_target_declares_whether_it_pins",
+    "status": "ok"
+  },
+  {
+    "name": "x86::a_hostile_caller_word_is_normalised_and_returned_bit_exactly",
+    "status": "ok"
+  },
+  {
+    "name": "x86::attestation_passes_from_a_hostile_caller_word",
+    "status": "ok"
+  },
+  {
+    "name": "x86::denormal_arithmetic_is_correct_inside_the_guard_and_flushed_outside_it",
+    "status": "ok"
+  },
+  {
+    "name": "x86::sticky_status_flags_do_not_fail_the_attestation_but_a_control_bit_does",
+    "status": "ok"
+  },
+  {
+    "name": "x86::the_caller_word_survives_an_unwind_through_the_guard",
+    "status": "ok"
+  },
+  {
+    "name": "g1_fma_is_unfused_on_every_backend",
+    "status": "ok"
+  },
+  {
+    "name": "g1_mask_any_matches_the_oracle",
+    "status": "ok"
+  },
+  {
+    "name": "g1_exp2_int_is_exact_on_the_integer_range",
+    "status": "ok"
+  },
+  {
+    "name": "g1_nan_max_and_min_follow_d8",
+    "status": "ok"
+  },
+  {
+    "name": "g1_max_and_min_lowerings_match_the_oracle",
+    "status": "ok"
+  },
+  {
+    "name": "g1_signed_zero_max_and_min_follow_d8",
+    "status": "ok"
+  },
+  {
+    "name": "g1_frexp_reconstructs_positive_normals",
+    "status": "ok"
+  },
+  {
+    "name": "g1_directed_edge_pool_is_lane_identical",
+    "status": "ok"
+  },
+  {
+    "name": "g1_random_vectors_are_lane_identical",
+    "status": "ok"
+  },
+  {
+    "name": "ordered_accumulation_matches_the_existing_d9_primitives_and_rejects_shapes",
+    "status": "ok"
+  },
+  {
+    "name": "g2_subnormal_state_is_flushed_at_every_width",
+    "status": "ok"
+  },
+  {
+    "name": "g2_svf_step_yields_both_taps_of_one_state",
+    "status": "ok"
+  },
+  {
+    "name": "g2_idle_ramped_svf_equals_the_plain_svf",
+    "status": "ok"
+  },
+  {
+    "name": "g2_kernels_are_bit_identical_at_every_width",
+    "status": "ok"
+  },
+  {
+    "name": "g2_interleaved_cascade_equals_a_chain_of_blocks",
+    "status": "ok"
+  },
+  {
+    "name": "g4_flush_is_lane_wise",
+    "status": "ok"
+  },
+  {
+    "name": "g4_flush_law_holds_at_every_width",
+    "status": "ok"
+  },
+  {
+    "name": "g6_flush_makes_hardware_ftz_inert",
+    "status": "ok"
+  },
+  {
+    "name": "the_even_tap_table_is_the_symmetric_half_band",
+    "status": "ok"
+  },
+  {
+    "name": "the_double_written_history_addresses_every_age_at_every_position",
+    "status": "ok"
+  },
+  {
+    "name": "interpolation_and_decimation_are_width_independent",
+    "status": "ok"
+  },
+  {
+    "name": "identity_coefficients_over_non_zero_state_are_not_elidable",
+    "status": "ok"
+  },
+  {
+    "name": "negative_zero_mix_words_are_not_the_identity",
+    "status": "ok"
+  },
+  {
+    "name": "a_single_non_identity_lane_blocks_the_whole_section",
+    "status": "ok"
+  },
+  {
+    "name": "negative_zero_state_words_are_inert_but_still_fail_the_bitwise_gate",
+    "status": "ok"
+  },
+  {
+    "name": "elision_is_bit_identical_at_every_width_and_section_pattern",
+    "status": "ok"
+  },
+  {
+    "name": "p1_every_kernel_is_partition_invariant",
+    "status": "ok"
+  },
+  {
+    "name": "the_and_form_is_the_select_form_on_every_lane_subset",
+    "status": "ok"
+  },
+  {
+    "name": "every_copy_of_the_sanitise_prologue_counts_what_the_policy_counts",
+    "status": "ok"
+  },
+  {
+    "name": "vendored::exp2::i0_wrap_test",
+    "status": "ok"
+  },
+  {
+    "name": "f1_fast_tier_stays_within_twice_the_exact_tier",
+    "status": "ignored"
+  },
+  {
+    "name": "f1_gain_from_db_exhaustive",
+    "status": "ignored"
+  },
+  {
+    "name": "f1_level_db_exhaustive",
+    "status": "ignored"
+  },
+  {
+    "name": "f1_domain_and_clamping",
+    "status": "ok"
+  },
+  {
+    "name": "f1_identity_anchors_are_exact",
+    "status": "ok"
+  },
+  {
+    "name": "f1_the_container_pins_exactly_six_crossings",
+    "status": "ok"
+  },
+  {
+    "name": "f1_level_db_subsample",
+    "status": "ok"
+  },
+  {
+    "name": "f1_gain_from_db_subsample",
+    "status": "ok"
+  },
+  {
+    "name": "f1_crossing_x1_compressor_detector_level",
+    "status": "ok"
+  },
+  {
+    "name": "f1_crossing_x3_gate_detector_level",
+    "status": "ok"
+  },
+  {
+    "name": "f1_crossing_x5_multiband_detector_level",
+    "status": "ok"
+  },
+  {
+    "name": "f1_crossing_x4_gate_applied_gain",
+    "status": "ok"
+  },
+  {
+    "name": "f1_crossing_x2_compressor_applied_gain",
+    "status": "ok"
+  },
+  {
+    "name": "f1_crossing_x6_multiband_applied_gain",
+    "status": "ok"
+  },
+  {
+    "name": "m1_exp2_lane_exhaustive",
+    "status": "ignored"
+  },
+  {
+    "name": "m1_log2_lane_exhaustive",
+    "status": "ignored"
+  },
+  {
+    "name": "m1_anchors_and_clamping",
+    "status": "ok"
+  },
+  {
+    "name": "m1_measured_worst_points",
+    "status": "ok"
+  },
+  {
+    "name": "m1_log2_lane_subsample",
+    "status": "ok"
+  },
+  {
+    "name": "m1_exp2_lane_subsample",
+    "status": "ok"
+  },
+  {
+    "name": "m2_exp2_callers_directed_edges_are_lane_identical",
+    "status": "ok"
+  },
+  {
+    "name": "m2_corpus_reaches_every_branch",
+    "status": "ok"
+  },
+  {
+    "name": "m2_exp2_lane_identity",
+    "status": "ok"
+  },
+  {
+    "name": "m2_log2_lane_identity",
+    "status": "ok"
+  },
+  {
+    "name": "m3_no_unsafe_or_force_eval_in_vendored_source",
+    "status": "ok"
+  },
+  {
+    "name": "m3_no_target_conditional_source",
+    "status": "ok"
+  },
+  {
+    "name": "m3_corpus_is_nan_free",
+    "status": "ok"
+  },
+  {
+    "name": "m3_corpus_digests_match_pins",
+    "status": "ok"
+  },
+  {
+    "name": "m3_corpus_exercises_each_domain",
+    "status": "ok"
+  },
+  {
+    "name": "extreme_scaling_paths",
+    "status": "ok"
+  },
+  {
+    "name": "exact_anchors",
+    "status": "ok"
+  },
+  {
+    "name": "sqrtf_is_correctly_rounded_exhaustive",
+    "status": "ignored"
+  },
+  {
+    "name": "huge_argument_reduction",
+    "status": "ok"
+  },
+  {
+    "name": "f32_functions_match_platform_libm_in_f64",
+    "status": "ok"
+  },
+  {
+    "name": "f64_functions_match_platform_libm",
+    "status": "ok"
+  },
+  {
+    "name": "floor_matches_platform",
+    "status": "ok"
+  },
+  {
+    "name": "sqrtf_is_correctly_rounded",
+    "status": "ok"
+  },
+  {
+    "name": "sqrt_is_correctly_rounded",
+    "status": "ok"
+  },
+  {
+    "name": "shim::tests::the_link_combines_the_pair_per_mode",
+    "status": "ok"
+  },
+  {
+    "name": "shim::tests::the_shims_are_width_independent",
+    "status": "ok"
+  },
+  {
+    "name": "shim::tests::the_smoother_has_exact_ends",
+    "status": "ok"
+  },
+  {
+    "name": "split::the_split_costs_what_it_costs",
+    "status": "ignored"
+  },
+  {
+    "name": "shim::tests::the_smoother_picks_the_attack_direction_and_matches_the_unfused_restatement",
+    "status": "ok"
+  },
+  {
+    "name": "split::a_window_lands_on_its_target_on_the_exact_sample",
+    "status": "ok"
+  },
+  {
+    "name": "split::a_settled_bank_meets_the_flat_paths_precondition",
+    "status": "ok"
+  },
+  {
+    "name": "split::the_split_is_partition_invariant",
+    "status": "ok"
+  },
+  {
+    "name": "split::a_ramp_in_flight_when_a_block_opens_stays_in_flight",
+    "status": "ok"
+  },
+  {
+    "name": "split::a_ramp_arriving_on_a_block_boundary_arrives_on_the_same_sample",
+    "status": "ok"
+  },
+  {
+    "name": "split::a_restated_parameter_stays_on_the_flat_path",
+    "status": "ok"
+  },
+  {
+    "name": "split::a_settled_bank_renders_what_the_ramped_path_rendered",
+    "status": "ok"
+  },
+  {
+    "name": "split::a_ramp_arriving_mid_block_arrives_on_the_same_sample",
+    "status": "ok"
+  },
+  {
+    "name": "split::the_ramped_path_advances_both_channels",
+    "status": "ok"
+  },
+  {
+    "name": "split::overlapping_windows_on_different_tracks_agree",
+    "status": "ok"
+  },
+  {
+    "name": "split::a_restatement_mid_flight_agrees",
+    "status": "ok"
+  },
+  {
+    "name": "passes_effect_contract_conformance",
+    "status": "ok"
+  },
+  {
+    "name": "the_corpus_digests_are_pinned_and_width_independent",
+    "status": "ok"
+  },
+  {
+    "name": "the_design_guards_its_domain",
+    "status": "ok"
+  },
+  {
+    "name": "the_recursive_words_are_flushed",
+    "status": "ok"
+  },
+  {
+    "name": "the_two_stage_split_matches_the_reference_and_recombines_flat",
+    "status": "ok"
+  },
+  {
+    "name": "descriptive_frame_cost",
+    "status": "ignored"
+  },
+  {
+    "name": "resets_agree_across_widths",
+    "status": "ok"
+  },
+  {
+    "name": "a_restored_track_is_rotated_into_the_receiving_cursor",
+    "status": "ok"
+  },
+  {
+    "name": "partition_invariance",
+    "status": "ok"
+  },
+  {
+    "name": "lane_identity_across_widths",
+    "status": "ok"
+  },
+  {
+    "name": "two_section_bands_match_the_four_section_reference",
+    "status": "ok"
+  },
+  {
+    "name": "the_band_sum_is_the_butterworth_allpass",
+    "status": "ok"
+  },
+  {
+    "name": "the_scalar_render_path_allocates_nothing",
+    "status": "ok"
+  },
+  {
+    "name": "the_bank_render_path_allocates_nothing",
+    "status": "ok"
+  },
+  {
+    "name": "recovery_restores_a_fresh_instance",
+    "status": "ok"
+  },
+  {
+    "name": "a_nonfinite_block_is_zeroed_reset_and_counted",
+    "status": "ok"
+  },
+  {
+    "name": "the_boundary_is_the_shared_limit_and_a_bank_shares_its_reset",
+    "status": "ok"
+  },
+  {
+    "name": "descriptor_preparation_and_exact_four_rate_resources_are_frozen",
+    "status": "ok"
+  },
+  {
+    "name": "bypass_latency_automation_and_restore_are_transactional",
+    "status": "ok"
+  },
+  {
+    "name": "a_rejected_restore_changes_nothing",
+    "status": "ok"
+  },
+  {
+    "name": "bank_requests_are_validated_before_any_fallback",
+    "status": "ok"
+  },
+  {
+    "name": "unity_gain_output_is_the_delayed_lr4_sum",
+    "status": "ok"
+  },
+  {
+    "name": "isolated_low_and_high_band_compression_reduce_only_the_selected_band",
+    "status": "ok"
+  },
+  {
+    "name": "unity_gain_transition_has_no_step_at_crossover",
+    "status": "ok"
+  },
+  {
+    "name": "tests::cli_is_closed_and_exact",
+    "status": "ok"
+  },
+  {
+    "name": "tests::identity_grammar_is_closed",
+    "status": "ok"
+  },
+  {
+    "name": "tests::portable_publication_state_machine_freezes_every_race_and_failure",
+    "status": "ok"
+  },
+  {
+    "name": "tests::encoder_preserves_signed_zero_and_publication_is_no_clobber",
+    "status": "ok"
+  },
+  {
+    "name": "tests::post_create_partial_replacements_are_preserved_and_never_published",
+    "status": "ok"
+  },
+  {
+    "name": "tests::final_collisions_inserted_immediately_before_publication_are_preserved",
+    "status": "ok"
+  },
+  {
+    "name": "tests::source_symlink_is_rejected_and_sentinel_preserved",
+    "status": "ok"
+  },
+  {
+    "name": "tests::unsupported_platform_stops_before_output_source_engine_or_publication",
+    "status": "ok"
+  },
+  {
+    "name": "tests::reversed_source_declarations_submit_in_canonical_id_order",
+    "status": "ok"
+  },
+  {
+    "name": "tests::preflight_and_resolution_fail_before_compile_or_output",
+    "status": "ok"
+  },
+  {
+    "name": "tests::scalar_caps_precede_resolution_and_cover_overflow_and_unsupported_rate",
+    "status": "ok"
+  },
+  {
+    "name": "tests::resolver_rejects_integer_and_float_depth_mismatches_both_directions_precompile",
+    "status": "ok"
+  },
+  {
+    "name": "tests::missing_mismatched_and_truncated_riff_sources_are_exact_precompile_failures",
+    "status": "ok"
+  },
+  {
+    "name": "tests::injected_create_write_and_publish_failures_are_terminal",
+    "status": "ok"
+  },
+  {
+    "name": "tests::shared_runner_orders_short_final_submission_and_terminal_failures",
+    "status": "ok"
+  },
+  {
+    "name": "tests::resolver_rejects_identity_shape_file_shape_and_declaration_mismatches_precompile",
+    "status": "ok"
+  },
+  {
+    "name": "tests::publication_refuses_every_preexisting_final_and_partial_kind",
+    "status": "ok"
+  },
+  {
+    "name": "tests::real_output_faults_remove_only_the_owned_partial",
+    "status": "ok"
+  },
+  {
+    "name": "tests::real_c_abi_riff_and_rf64_render_exact_block_planar_outputs",
+    "status": "ok"
+  },
+  {
+    "name": "the_boot_alias_table_is_exactly_the_three_alias_constants",
+    "status": "ok"
+  },
+  {
+    "name": "the_checked_in_self_test_fixture_is_current",
+    "status": "ok"
+  },
+  {
+    "name": "rendering_is_deterministic",
+    "status": "ok"
+  },
+  {
+    "name": "the_document_carries_its_whole_schema_and_the_engine_s_offsets",
+    "status": "ok"
+  },
+  {
+    "name": "the_published_source_ring_rule_reproduces_the_engine_derivation",
+    "status": "ok"
+  },
+  {
+    "name": "the_published_export_set_is_the_frozen_artifact_set",
+    "status": "ok"
+  },
+  {
+    "name": "the_emitted_command_record_offsets_are_the_engine_s_own_decode_rule",
+    "status": "ok"
+  },
+  {
+    "name": "every_published_sidechain_port_prepares_and_an_unpublished_one_does_not",
+    "status": "ok"
+  },
+  {
+    "name": "every_metadata_id_resolves_through_a_command_acknowledgement",
+    "status": "ok"
+  },
+  {
+    "name": "every_metadata_observation_tap_resolves_through_a_command_acknowledgement",
+    "status": "ok"
+  },
+  {
+    "name": "interleave_identity::the_tuned_depth_is_per_backend_and_divides_the_cascade",
+    "status": "ok"
+  },
+  {
+    "name": "elision::a_negative_zero_state_in_a_live_section_refuses_elision",
+    "status": "ok"
+  },
+  {
+    "name": "elision::a_non_zero_state_in_a_dead_section_refuses_elision",
+    "status": "ok"
+  },
+  {
+    "name": "elision::the_shipped_shape_actually_elides",
+    "status": "ok"
+  },
+  {
+    "name": "elision::a_non_finite_or_oversized_input_refuses_elision",
+    "status": "ok"
+  },
+  {
+    "name": "elision::the_negative_zero_refusal_is_load_bearing",
+    "status": "ok"
+  },
+  {
+    "name": "elision::a_negative_zero_input_refuses_elision",
+    "status": "ok"
+  },
+  {
+    "name": "elision::a_section_live_on_one_lane_is_not_elided",
+    "status": "ok"
+  },
+  {
+    "name": "elision::a_discontinuity_reset_mid_ramp_refreshes_the_identity_flag",
+    "status": "ok"
+  },
+  {
+    "name": "elision::a_mid_session_enable_or_disable_stays_bit_exact",
+    "status": "ok"
+  },
+  {
+    "name": "interleave_identity::the_interleaved_cascade_renders_the_per_section_path_bit_for_bit",
+    "status": "ok"
+  },
+  {
+    "name": "elision::an_elided_cascade_is_the_full_cascade_bit_for_bit",
+    "status": "ok"
+  },
+  {
+    "name": "elision::the_two_channels_are_judged_together",
+    "status": "ok"
+  },
+  {
+    "name": "the_spectral_norm_predicate_separates_contractive_from_expansive_words",
+    "status": "ok"
+  },
+  {
+    "name": "the_pcm_fixture_rows_are_oracle_bounded",
+    "status": "ok"
+  },
+  {
+    "name": "ten_thousand_seeded_legal_designs_are_finite_and_reference_bounded",
+    "status": "ok"
+  },
+  {
+    "name": "frequency_searches_cover_cutoff_center_midpoint_and_notch_minimum",
+    "status": "ok"
+  },
+  {
+    "name": "word_ramps_are_contractive_on_every_grid_row",
+    "status": "ok"
+  },
+  {
+    "name": "svf_words_match_the_independent_oracle_on_the_complete_grid",
+    "status": "ok"
+  },
+  {
+    "name": "the_f64_mapping_reproduces_the_verified_reference_mapping",
+    "status": "ok"
+  },
+  {
+    "name": "descriptive_bank_throughput",
+    "status": "ignored"
+  },
+  {
+    "name": "bank_binding_rejects_malformed_shapes_and_declines_a_foreign_width",
+    "status": "ok"
+  },
+  {
+    "name": "bank_binding_declines_a_heterogeneous_cohort",
+    "status": "ok"
+  },
+  {
+    "name": "bank_lane_and_track_changes_do_not_leak",
+    "status": "ok"
+  },
+  {
+    "name": "bank_rendering_is_partition_invariant",
+    "status": "ok"
+  },
+  {
+    "name": "every_width_matches_the_scalar_instantiation",
+    "status": "ok"
+  },
+  {
+    "name": "passes_effect_contract_conformance",
+    "status": "ok"
+  },
+  {
+    "name": "a_payload_of_the_wrong_length_is_rejected",
+    "status": "ok"
+  },
+  {
+    "name": "a_negative_zero_automation_value_is_accepted_as_zero",
+    "status": "ok"
+  },
+  {
+    "name": "a_malformed_payload_is_rejected_without_touching_either_channel",
+    "status": "ok"
+  },
+  {
+    "name": "a_payload_with_a_stale_header_is_rejected_on_its_own_evidence",
+    "status": "ok"
+  },
+  {
+    "name": "an_invalid_version_payload_is_rejected",
+    "status": "ok"
+  },
+  {
+    "name": "automation_starts_a_64_sample_word_ramp",
+    "status": "ok"
+  },
+  {
+    "name": "descriptor_is_frozen",
+    "status": "ok"
+  },
+  {
+    "name": "bypass_copies_dry_bits_and_leaves_the_state_alone",
+    "status": "ok"
+  },
+  {
+    "name": "an_over_capacity_automation_block_is_rejected_whole",
+    "status": "ok"
+  },
+  {
+    "name": "prepare_refuses_an_unknown_family",
+    "status": "ok"
+  },
+  {
+    "name": "resets_restore_defaults_or_only_clear_history",
+    "status": "ok"
+  },
+  {
+    "name": "snapshot_rejects_bad_output_without_touching_either_lane",
+    "status": "ok"
+  },
+  {
+    "name": "malformed_automation_rejects_each_span_without_losing_valid_targets",
+    "status": "ok"
+  },
+  {
+    "name": "disabled_and_zero_db_sections_return_dry_bits_with_zero_state_growth",
+    "status": "ok"
+  },
+  {
+    "name": "state_restore_continues_active_ramp_bit_exactly",
+    "status": "ok"
+  },
+  {
+    "name": "automation_is_partition_invariant",
+    "status": "ok"
+  },
+  {
+    "name": "print_pins",
+    "status": "ignored"
+  },
+  {
+    "name": "the_corpus_is_finite_and_discriminating",
+    "status": "ok"
+  },
+  {
+    "name": "the_corpus_digests_match_the_pins_at_every_width",
+    "status": "ok"
+  },
+  {
+    "name": "a_desymmetrized_bank_is_a_never_collapsed_bank",
+    "status": "ok"
+  },
+  {
+    "name": "the_collapsed_body_renders_the_dual_bodys_left_plane",
+    "status": "ok"
+  },
+  {
+    "name": "the_settled_stretch_is_exactly_positive_zero",
+    "status": "ok"
+  },
+  {
+    "name": "a_negative_zero_input_block_is_not_treated_as_silence",
+    "status": "ok"
+  },
+  {
+    "name": "a_settled_silent_bank_renders_exactly_the_bank_that_never_fast_paths",
+    "status": "ok"
+  },
+  {
+    "name": "a_band_restated_mid_flight_still_settles_at_the_designed_words",
+    "status": "ok"
+  },
+  {
+    "name": "a_redundant_automation_point_renders_exactly_the_unautomated_bank",
+    "status": "ok"
+  },
+  {
+    "name": "a_real_automation_point_still_ramps",
+    "status": "ok"
+  },
+  {
+    "name": "a_restated_band_is_indistinguishable_from_no_automation_over_many_blocks",
+    "status": "ok"
+  },
+  {
+    "name": "a_non_launch_sample_rate_is_not_a_legal_design",
+    "status": "ok"
+  },
+  {
+    "name": "a_non_finite_input_block_is_zeroed_counted_once_and_leaves_the_next_block_clean",
+    "status": "ok"
+  },
+  {
+    "name": "flush_keeps_decaying_state_out_of_the_subnormal_range",
+    "status": "ok"
+  },
+  {
+    "name": "one_second_impulse_dfts_match_the_independent_oracle_at_all_frozen_edges",
+    "status": "ok"
+  },
+  {
+    "name": "forty_eight_frozen_million_sample_sequences_remain_valid_without_recovery",
+    "status": "ok"
+  },
+  {
+    "name": "btlv::tests::canonical_fields_constructors_share_count_frame_reserved_and_depth_limits",
+    "status": "ok"
+  },
+  {
+    "name": "btlv::tests::nested_count_mismatch_restores_parent_counter",
+    "status": "ok"
+  },
+  {
+    "name": "btlv::tests::sinks_reject_under_and_over_emission_against_declared_count",
+    "status": "ok"
+  },
+  {
+    "name": "btlv::tests::nested_body_runs_once_per_sink_and_patches_length",
+    "status": "ok"
+  },
+  {
+    "name": "btlv::tests::nested_sinks_enforce_depth_and_restore_it_after_body_errors",
+    "status": "ok"
+  },
+  {
+    "name": "btlv::tests::schema_fields_stream_optional_and_nested_values_once_per_sink",
+    "status": "ok"
+  },
+  {
+    "name": "controller::tests::fixed_replay_arena_reports_response_and_reservation_bounds",
+    "status": "ok"
+  },
+  {
+    "name": "controller::tests::fixed_replay_arena_returns_exact_hits_and_compacts_one_evicted_prefix",
+    "status": "ok"
+  },
+  {
+    "name": "controller::tests::c2b2_disabled_configuration_emits_nothing_and_reliable_full_returns_original",
+    "status": "ok"
+  },
+  {
+    "name": "controller::tests::b3b1_btlv_telemetry_echo_and_counters_are_typed_and_nondestructive",
+    "status": "ok"
+  },
+  {
+    "name": "controller::tests::compatibility_response_uses_one_frame_backing_and_cached_header_only_decode",
+    "status": "ok"
+  },
+  {
+    "name": "controller::tests::b3a_transport_btlv_is_typed_idempotent_and_emits_reliable_state",
+    "status": "ok"
+  },
+  {
+    "name": "controller::tests::backpressure_is_cached_without_second_enqueue",
+    "status": "ok"
+  },
+  {
+    "name": "controller::tests::committed_transaction_emits_typed_zero_header_id_event",
+    "status": "ok"
+  },
+  {
+    "name": "controller::tests::b3b2_diagnostics_btlv_pages_are_typed_nondestructive_and_expire_old_cursors",
+    "status": "ok"
+  },
+  {
+    "name": "controller::tests::replay_admission_rejects_before_provider_execution",
+    "status": "ok"
+  },
+  {
+    "name": "controller::tests::edit_rejections_use_typed_operation_diagnostics_not_protocol_failure",
+    "status": "ok"
+  },
+  {
+    "name": "controller::tests::endpoint_owned_current_sample_rejects_past_automation_without_client_time",
+    "status": "ok"
+  },
+  {
+    "name": "controller::tests::counter_egress_splits_nonascending_staged_snapshots_without_stalling",
+    "status": "ok"
+  },
+  {
+    "name": "controller::tests::decoded_track_edit_reaches_same_atomic_session_store",
+    "status": "ok"
+  },
+  {
+    "name": "controller::tests::decoded_invalid_automation_rolls_back_after_final_compilation",
+    "status": "ok"
+  },
+  {
+    "name": "controller::tests::replay_reservation_binds_exact_request_bytes",
+    "status": "ok"
+  },
+  {
+    "name": "controller::tests::replay_layout_stays_within_the_capi_resource_oracle",
+    "status": "ok"
+  },
+  {
+    "name": "controller::tests::decoded_route_edit_reaches_same_atomic_session_store",
+    "status": "ok"
+  },
+  {
+    "name": "controller::tests::decoded_btlv_transaction_reaches_same_atomic_session_store",
+    "status": "ok"
+  },
+  {
+    "name": "controller::tests::replay_prefix_derives_length_retained_bytes_and_highest_pending_id",
+    "status": "ok"
+  },
+  {
+    "name": "controller::tests::b2b_btlv_automation_uses_header_identity_typed_domains_and_backpressure",
+    "status": "ok"
+  },
+  {
+    "name": "controller::tests::replay_resource_projection_is_bounded_and_overflow_checked",
+    "status": "ok"
+  },
+  {
+    "name": "controller::tests::identical_replay_changed_reuse_eviction_and_expiry_are_deterministic",
+    "status": "ok"
+  },
+  {
+    "name": "controller::tests::full_frame_ingress_replays_exact_bytes_and_rejects_changed_request_reuse",
+    "status": "ok"
+  },
+  {
+    "name": "controller::tests::c2b2_event_egress_emits_all_six_schema_closed_full_frames",
+    "status": "ok"
+  },
+  {
+    "name": "controller::tests::c2b2_short_buffers_retain_pending_reliable_order_and_diagnostic_storage",
+    "status": "ok"
+  },
+  {
+    "name": "controller::tests::full_frame_ingress_preserves_output_ownership_and_correlates_payload_errors",
+    "status": "ok"
+  },
+  {
+    "name": "controller::tests::session_diagnostic_path_segments_preserve_field_index_and_stable_id_variants",
+    "status": "ok"
+  },
+  {
+    "name": "controller::tests::mutations_require_exact_revision_and_roll_back_on_validation",
+    "status": "ok"
+  },
+  {
+    "name": "controller::tests::public_immediate_frame_path_never_builds_a_prepared_vec",
+    "status": "ok"
+  },
+  {
+    "name": "delivery::tests::generic_copy_core_transfers_layout_independent_payload",
+    "status": "ok"
+  },
+  {
+    "name": "controller::tests::session_commit_reserves_reliable_event_before_replacing_store",
+    "status": "ok"
+  },
+  {
+    "name": "delivery::tests::automation_progress_rejections_preserve_exact_pending_and_terminal_ownership",
+    "status": "ok"
+  },
+  {
+    "name": "delivery::tests::applied_only_cancel_emits_zero_and_resets_generation_and_ordering",
+    "status": "ok"
+  },
+  {
+    "name": "delivery::tests::generic_core_rejected_identities_preserve_pending_and_terminal_owner",
+    "status": "ok"
+  },
+  {
+    "name": "delivery::tests::cancellation_publication_uses_admission_order_after_physical_slot_reuse",
+    "status": "ok"
+  },
+  {
+    "name": "controller::tests::snapshot_pagination_has_exact_revision_conflict_and_eof_boundaries",
+    "status": "ok"
+  },
+  {
+    "name": "delivery::tests::cancellation_refusals_are_transactional_and_events_keep_admission_order",
+    "status": "ok"
+  },
+  {
+    "name": "controller::tests::transport_state_only_preserves_automation_and_locate_starts_new_ordering_epoch",
+    "status": "ok"
+  },
+  {
+    "name": "delivery::tests::ordered_cancel_reconciles_handed_off_and_partial_at_actual_boundary",
+    "status": "ok"
+  },
+  {
+    "name": "delivery::tests::occupied_reliable_capacity_refuses_next_cancel_without_mutation",
+    "status": "ok"
+  },
+  {
+    "name": "controller::tests::validation_diagnostics_preserve_operation_paths_and_exact_omission_count",
+    "status": "ok"
+  },
+  {
+    "name": "delivery::tests::total_outstanding_bound_and_terminal_collection_are_the_only_reuse_credit",
+    "status": "ok"
+  },
+  {
+    "name": "delivery::tests::retained_admission_survives_handoff_until_terminal_consumption",
+    "status": "ok"
+  },
+  {
+    "name": "delivery::tests::rejected_admission_preserves_the_exact_batch_and_service_state",
+    "status": "ok"
+  },
+  {
+    "name": "delivery::tests::wide_cancellation_accounting_has_no_u16_boundary_or_saturation",
+    "status": "ok"
+  },
+  {
+    "name": "delivery::tests::unsupported_head_blocks_fifo_and_cancel_ack_publishes_event",
+    "status": "ok"
+  },
+  {
+    "name": "message_wire::tests::capability_id_views_reject_order_allocation_and_session_family_identically",
+    "status": "ok"
+  },
+  {
+    "name": "message_wire::tests::b1b_fixed_goldens_and_every_byte_truncation",
+    "status": "ok"
+  },
+  {
+    "name": "message_wire::tests::descriptor_invariant_rejects_encode_and_decode_identically",
+    "status": "ok"
+  },
+  {
+    "name": "message_wire::tests::common_error_payload_is_canonical_and_caller_owned",
+    "status": "ok"
+  },
+  {
+    "name": "message_wire::tests::direct_common_decoder_enforces_counts_strings_and_nesting",
+    "status": "ok"
+  },
+  {
+    "name": "message_wire::tests::b2a_metadata_and_state_are_typed_bounded_and_strict",
+    "status": "ok"
+  },
+  {
+    "name": "controller::tests::frozen_deep_transaction_reaches_public_b1b_process_path",
+    "status": "ok"
+  },
+  {
+    "name": "message_wire::tests::every_common_golden_truncation_rejects_and_bounded_count_is_exact",
+    "status": "ok"
+  },
+  {
+    "name": "message_wire::tests::unknown_optional_skips_but_required_and_wrong_variant_reject",
+    "status": "ok"
+  },
+  {
+    "name": "schema::tests::top_level_counts_derive_required_optional_and_repeated_occurrences",
+    "status": "ok"
+  },
+  {
+    "name": "message_wire::tests::b3b1_telemetry_and_counters_are_typed_canonical_and_bounded",
+    "status": "ok"
+  },
+  {
+    "name": "message_wire::tests::b3a_transport_goldens_truncation_and_direct_codec_are_strict",
+    "status": "ok"
+  },
+  {
+    "name": "message_wire::tests::direct_common_encoder_is_byte_stable_in_caller_storage",
+    "status": "ok"
+  },
+  {
+    "name": "controller::tests::structural_prepare_is_invisible_until_commit_and_byte_identical_to_one_call",
+    "status": "ok"
+  },
+  {
+    "name": "queue::tests::invalid_and_out_of_order_slots_return_whole_unchanged_batches",
+    "status": "ok"
+  },
+  {
+    "name": "session_wire::tests::every_send_tap_tag_is_typed_and_canonical",
+    "status": "ok"
+  },
+  {
+    "name": "message_wire::tests::b4_event_payloads_are_typed_canonical_and_truncation_safe",
+    "status": "ok"
+  },
+  {
+    "name": "session_wire::tests::route_and_automation_unknown_optional_fields_are_canonicalized_away",
+    "status": "ok"
+  },
+  {
+    "name": "session_wire::tests::tagged_pan_rejects_optional_field_known_only_to_matrix_variant",
+    "status": "ok"
+  },
+  {
+    "name": "controller::tests::structural_token_cancel_owner_generation_and_serial_rules_are_affine",
+    "status": "ok"
+  },
+  {
+    "name": "model::tests::any_and_maximum_revision_are_rejected_without_replacement",
+    "status": "ok"
+  },
+  {
+    "name": "message_wire::tests::b3b2_diagnostics_pages_are_canonical_bounded_and_strict",
+    "status": "ok"
+  },
+  {
+    "name": "queue::tests::queue_resource_projection_is_nonzero_and_shares_prepare_overflow_rules",
+    "status": "ok"
+  },
+  {
+    "name": "model::tests::failed_edit_and_final_validation_roll_back_wholly",
+    "status": "ok"
+  },
+  {
+    "name": "queue::tests::reliable_event_reservation_excludes_commit_capacity",
+    "status": "ok"
+  },
+  {
+    "name": "schema::tests::migrated_specs_are_sorted_unique_and_structurally_consistent",
+    "status": "ok"
+  },
+  {
+    "name": "queue::tests::reliable_never_coalesces_and_lossy_telemetry_is_explicit",
+    "status": "ok"
+  },
+  {
+    "name": "model::tests::opcode_registry_covers_noneditable_revision_and_schema_exclusion",
+    "status": "ok"
+  },
+  {
+    "name": "model::tests::transaction_revisions_and_snapshot_are_authoritative",
+    "status": "ok"
+  },
+  {
+    "name": "queue::tests::full_empty_wrap_and_generation_preserve_original_items",
+    "status": "ok"
+  },
+  {
+    "name": "session_wire::tests::transaction_outer_header_uses_sizing_sink_repeated_count",
+    "status": "ok"
+  },
+  {
+    "name": "queue::tests::lossy_coalesce_and_drop_counters_saturate_under_fault_injection",
+    "status": "ok"
+  },
+  {
+    "name": "session_wire::tests::transaction_requires_exact_nonempty_edits_and_repeated_message_wire_type",
+    "status": "ok"
+  },
+  {
+    "name": "session_wire::tests::transaction_repeated_fields_match_schema_derived_count",
+    "status": "ok"
+  },
+  {
+    "name": "schema::tests::parameter_enum_wire_mappings_are_exhaustive_and_roundtrip",
+    "status": "ok"
+  },
+  {
+    "name": "session_wire::tests::every_route_and_automation_opcode_round_trips_canonically",
+    "status": "ok"
+  },
+  {
+    "name": "queue::tests::past_order_overlap_and_density_reject_wholly",
+    "status": "ok"
+  },
+  {
+    "name": "queue::tests::zero_record_and_aggregate_frontier_density_reject_wholly",
+    "status": "ok"
+  },
+  {
+    "name": "session_wire::tests::exact_set_session_id_golden_and_no_partial_output",
+    "status": "ok"
+  },
+  {
+    "name": "model::tests::temporary_extended_rate_is_permitted_when_final_candidate_is_launch_rate",
+    "status": "ok"
+  },
+  {
+    "name": "session_wire::tests::five_session_edit_encoders_are_canonical_and_ordered",
+    "status": "ok"
+  },
+  {
+    "name": "session_wire::tests::deleted_source_and_limits_opcodes_are_typed_refusals",
+    "status": "ok"
+  },
+  {
+    "name": "message_wire::tests::path_tags_and_registered_mandatory_flags_are_exact",
+    "status": "ok"
+  },
+  {
+    "name": "session_wire::tests::track_effect_schema_rejects_duplicate_type_order_and_variant_errors",
+    "status": "ok"
+  },
+  {
+    "name": "session_wire::tests::optional_fields_skip_but_required_and_corrupt_nested_fields_reject",
+    "status": "ok"
+  },
+  {
+    "name": "queue::tests::overlap_is_rejected_across_separately_queued_batches",
+    "status": "ok"
+  },
+  {
+    "name": "session_wire::tests::source_variants_decode_and_reencode_canonically",
+    "status": "ok"
+  },
+  {
+    "name": "message_wire::tests::b1b_success_schemas_round_trip_and_truncate",
+    "status": "ok"
+  },
+  {
+    "name": "schema::tests::wire_registry_covers_every_frozen_code",
+    "status": "ok"
+  },
+  {
+    "name": "model::tests::effects_and_parameters_follow_exact_key_rules",
+    "status": "ok"
+  },
+  {
+    "name": "session_wire::tests::every_byte_of_transaction_golden_truncates",
+    "status": "ok"
+  },
+  {
+    "name": "queue::tests::transient_record_has_exact_manual_le_codec",
+    "status": "ok"
+  },
+  {
+    "name": "typed_frame::tests::full_event_frames_cover_every_registered_event_and_reject_pcm_reachability",
+    "status": "ok"
+  },
+  {
+    "name": "delivery::tests::logical_record_bounds_and_resource_report_are_exactly_composed",
+    "status": "ok"
+  },
+  {
+    "name": "session_wire::tests::transaction_descendants_retain_string_limits",
+    "status": "ok"
+  },
+  {
+    "name": "typed_frame::tests::full_command_frames_cover_every_registered_command_without_payload_escape",
+    "status": "ok"
+  },
+  {
+    "name": "typed_frame::tests::complete_frame_encoders_preserve_prepared_typed_values",
+    "status": "ok"
+  },
+  {
+    "name": "typed_frame::tests::full_success_response_frames_cover_every_registered_command_response",
+    "status": "ok"
+  },
+  {
+    "name": "session_wire::tests::direct_encoder_limits_and_short_buffers_preserve_caller_ownership",
+    "status": "ok"
+  },
+  {
+    "name": "typed_frame::tests::complete_frame_header_uses_sizing_sink_optional_and_repeated_counts",
+    "status": "ok"
+  },
+  {
+    "name": "typed_frame::tests::full_non_ok_frames_cover_every_status_and_backpressure_is_exclusive",
+    "status": "ok"
+  },
+  {
+    "name": "wire::tests::every_golden_truncation_rejects",
+    "status": "ok"
+  },
+  {
+    "name": "wire::tests::malformed_tlv_forms_reject_without_overread",
+    "status": "ok"
+  },
+  {
+    "name": "wire::tests::media_range_is_semantically_forbidden",
+    "status": "ok"
+  },
+  {
+    "name": "wire::tests::output_too_small_does_not_mutate_caller_memory",
+    "status": "ok"
+  },
+  {
+    "name": "wire::tests::public_command_header_peek_stops_before_payload_validation",
+    "status": "ok"
+  },
+  {
+    "name": "wire::tests::response_and_event_goldens_use_kind_specific_correlation_and_revision",
+    "status": "ok"
+  },
+  {
+    "name": "wire::tests::revision_any_requires_zero_and_command_context",
+    "status": "ok"
+  },
+  {
+    "name": "wire::tests::exact_empty_capabilities_golden_round_trips",
+    "status": "ok"
+  },
+  {
+    "name": "session_wire::tests::transaction_encoder_reserves_envelope_depth_for_frozen_deep_fixture",
+    "status": "ok"
+  },
+  {
+    "name": "wire::tests::kind_specific_request_and_revision_carriers_reject_cross_kind_forms",
+    "status": "ok"
+  },
+  {
+    "name": "controller::tests::one_call_transaction_success_and_fallbacks_avoid_owned_preparation",
+    "status": "ok"
+  },
+  {
+    "name": "controller::tests::provider_feature_matrix_derives_capabilities_and_refuses_disabled_dispatch",
+    "status": "ok"
+  },
+  {
+    "name": "session_wire::tests::every_track_effect_opcode_and_nested_variant_round_trips_canonically",
+    "status": "ok"
+  },
+  {
+    "name": "controller::tests::full_frame_ingress_dispatches_every_registered_command_through_typed_frames",
+    "status": "ok"
+  },
+  {
+    "name": "model::tests::every_launch_rate_initializes_store_and_commits_as_the_final_candidate",
+    "status": "ok"
+  },
+  {
+    "name": "session_wire::tests::direct_full_schema_encoder_is_byte_identical_in_caller_storage",
+    "status": "ok"
+  },
+  {
+    "name": "model::tests::launch_rate_final_validation_is_atomic_and_uses_session_diagnostic",
+    "status": "ok"
+  },
+  {
+    "name": "controller::tests::public_b1b_uses_exactly_the_typed_reader_passes_and_replays_identical_bytes",
+    "status": "ok"
+  },
+  {
+    "name": "controller::tests::every_non_ok_status_has_a_canonical_common_response_payload",
+    "status": "ok"
+  },
+  {
+    "name": "controller::tests::rejected_engine_rates_have_identical_typed_and_btlv_rollback_diagnostics",
+    "status": "ok"
+  },
+  {
+    "name": "message_wire::tests::b2a_goldens_truncations_malformed_matrix_and_encoder_audit",
+    "status": "ok"
+  },
+  {
+    "name": "controller::tests::canonical_json_snapshots_reparse_before_and_after_commit_across_utf8_split_pages",
+    "status": "ok"
+  },
+  {
+    "name": "message_wire::tests::b2b_automation_goldens_truncation_and_malformed_cases_are_functional",
+    "status": "ok"
+  },
+  {
+    "name": "queue::tests::ten_thousand_events_fit_as_exactly_forty_atomic_batches",
+    "status": "ok"
+  },
+  {
+    "name": "delivery::tests::generic_core_slot_identity_covers_capacity_above_u16",
+    "status": "ok"
+  },
+  {
+    "name": "descriptor_handle_required_flag_is_frozen",
+    "status": "ok"
+  },
+  {
+    "name": "frozen_deep_transaction_uses_typed_command_dispatch",
+    "status": "ok"
+  },
+  {
+    "name": "frozen_corpus_bytes_and_typed_decoders_are_unchanged",
+    "status": "ok"
+  },
+  {
+    "name": "complete_canonical_response_frame_is_publicly_accessible",
+    "status": "ok"
+  },
+  {
+    "name": "prepared_heaps_free_off_thread_and_realtime_owner_operations_are_zero_zero",
+    "status": "ok"
+  },
+  {
+    "name": "distinct_render_owner_reconciles_all_four_cancellation_positions_without_allocation",
+    "status": "ok"
+  },
+  {
+    "name": "one_million_deterministic_mutations_cover_complete_schema_closed_dispatch",
+    "status": "ok"
+  },
+  {
+    "name": "the_strip_is_still_editable_through_set_track_builtins",
+    "status": "ok"
+  },
+  {
+    "name": "the_same_edits_against_a_real_rack_are_applied",
+    "status": "ok"
+  },
+  {
+    "name": "rack_addressed_edits_refuse_the_builtins_token",
+    "status": "ok"
+  },
+  {
+    "name": "tests::a_collapsed_seam_keeps_the_matrixs_operation_order",
+    "status": "ok"
+  },
+  {
+    "name": "tests::a_partial_agreement_slot_declines_the_collapse",
+    "status": "ok"
+  },
+  {
+    "name": "tests::an_armed_seam_side_only_chain_renders_the_dual_bits",
+    "status": "ok"
+  },
+  {
+    "name": "tests::arming_a_fold_refuses_an_unrenderable_mask",
+    "status": "ok"
+  },
+  {
+    "name": "tests::an_unarmed_chain_never_collapses",
+    "status": "ok"
+  },
+  {
+    "name": "tests::arming_an_auxiliary_destination_refuses_an_unrenderable_mask",
+    "status": "ok"
+  },
+  {
+    "name": "tests::an_ineligible_armed_chain_renders_the_dual_bits",
+    "status": "ok"
+  },
+  {
+    "name": "tests::chain_new_rejects_mask_shape_and_lane_implication",
+    "status": "ok"
+  },
+  {
+    "name": "tests::direct_plane_views_encode_width_and_reject_short_capacity",
+    "status": "ok"
+  },
+  {
+    "name": "tests::all_active_folded_masks_use_one_cohort_with_physical_lane_ids",
+    "status": "ok"
+  },
+  {
+    "name": "tests::default_and_override_fold_identical_complete_strided_cohorts",
+    "status": "ok"
+  },
+  {
+    "name": "tests::direct_scatter_never_calls_the_per_lane_fallback",
+    "status": "ok"
+  },
+  {
+    "name": "tests::fold_cohort_constructor_rejects_every_invalid_shape_without_writes",
+    "status": "ok"
+  },
+  {
+    "name": "tests::disengaging_copies_the_prefixs_state_once",
+    "status": "ok"
+  },
+  {
+    "name": "tests::inactive_lanes_are_never_gathered_or_scattered",
+    "status": "ok"
+  },
+  {
+    "name": "tests::identity_everywhere_slot_is_not_executed",
+    "status": "ok"
+  },
+  {
+    "name": "tests::inadequate_claimed_capacity_takes_complete_staged_fallback",
+    "status": "ok"
+  },
+  {
+    "name": "tests::only_a_seam_suffix_over_a_collapsible_prefix_can_collapse",
+    "status": "ok"
+  },
+  {
+    "name": "tests::gather_scatter_round_trip_is_bit_exact",
+    "status": "ok"
+  },
+  {
+    "name": "tests::stage_sees_frame_major_layout",
+    "status": "ok"
+  },
+  {
+    "name": "tests::scratch_allocates_exactly_two_planes",
+    "status": "ok"
+  },
+  {
+    "name": "tests::wrong_width_provider_is_dropped_before_complete_staged_fallback",
+    "status": "ok"
+  },
+  {
+    "name": "tests::the_auxiliary_destination_seam_is_absent_by_default_and_accumulates_when_armed",
+    "status": "ok"
+  },
+  {
+    "name": "tests::the_fold_epilogue_is_absent_by_default_and_replaces_the_lane_write_when_armed",
+    "status": "ok"
+  },
+  {
+    "name": "tests::full_bank_gather_scatter_round_trip_is_bit_exact",
+    "status": "ok"
+  },
+  {
+    "name": "tests::tiled_transpose_matches_the_scalar_path_bit_for_bit",
+    "status": "ok"
+  },
+  {
+    "name": "tests::chain_run_is_partition_invariant",
+    "status": "ok"
+  },
+  {
+    "name": "a_stage_with_no_controlled_lane_allocates_no_shunt",
+    "status": "ok"
+  },
+  {
+    "name": "a_command_applies_at_the_block_boundary_and_persists",
+    "status": "ok"
+  },
+  {
+    "name": "a_command_timeline_is_partition_invariant",
+    "status": "ok"
+  },
+  {
+    "name": "a_mid_session_bypass_emits_the_delayed_dry_signal_captured_while_wet",
+    "status": "ok"
+  },
+  {
+    "name": "a_zero_latency_bypass_emits_the_current_block_dry",
+    "status": "ok"
+  },
+  {
+    "name": "each_lane_receives_only_its_own_commands",
+    "status": "ok"
+  },
+  {
+    "name": "an_unobserved_bank_slot_reports_no_observation_state_at_all",
+    "status": "ok"
+  },
+  {
+    "name": "stage_construction_rejects_a_lane_count_or_quantum_mismatch",
+    "status": "ok"
+  },
+  {
+    "name": "un_bypassing_returns_the_current_wet_signal",
+    "status": "ok"
+  },
+  {
+    "name": "bypass_is_per_lane_and_preserves_the_declared_latency",
+    "status": "ok"
+  },
+  {
+    "name": "a_bypass_episode_re_engages_because_it_never_moved_the_channels_apart",
+    "status": "ok"
+  },
+  {
+    "name": "re_equal_words_after_a_desymmetrised_episode_do_not_re_engage",
+    "status": "ok"
+  },
+  {
+    "name": "the_forced_off_window_re_engages_and_renders_the_never_collapsed_bits",
+    "status": "ok"
+  },
+  {
+    "name": "an_earned_agreement_proof_re_engages_a_chain_the_witness_could_not",
+    "status": "ok"
+  },
+  {
+    "name": "tests::duplicate_ids_are_rejected_across_levels",
+    "status": "ok"
+  },
+  {
+    "name": "tests::empty_programs_and_connected_sidechains_never_bank",
+    "status": "ok"
+  },
+  {
+    "name": "tests::longest_program_leads_and_full_programs_fill_first",
+    "status": "ok"
+  },
+  {
+    "name": "tests::program_comparison_is_a_total_order",
+    "status": "ok"
+  },
+  {
+    "name": "tests::a_subsequence_program_still_emits_ascending_banks",
+    "status": "ok"
+  },
+  {
+    "name": "tests::subsequence_uses_program_equality_not_occurrence",
+    "status": "ok"
+  },
+  {
+    "name": "tests::the_pool_class_rests_on_the_two_prepare_time_terms",
+    "status": "ok"
+  },
+  {
+    "name": "tests::the_pool_class_partitions_cohorts_and_leaves_a_uniform_session_alone",
+    "status": "ok"
+  },
+  {
+    "name": "tests::output_is_input_order_invariant",
+    "status": "ok"
+  },
+  {
+    "name": "tests::every_slot_cohort_is_homogeneous",
+    "status": "ok"
+  },
+  {
+    "name": "tests::invariants_hold_on_seeded_corpus",
+    "status": "ok"
+  },
+  {
+    "name": "tests::pooling_is_exhaustive_so_no_member_is_stranded",
+    "status": "ok"
+  },
+  {
+    "name": "tests::single_slot_programs_reproduce_exact_equal_chunking",
+    "status": "ok"
+  },
+  {
+    "name": "value::tests::exhaustive_f32_round_trip",
+    "status": "ignored"
+  },
+  {
+    "name": "canonical::tests::canonical_string_escaping_is_frozen",
+    "status": "ok"
+  },
+  {
+    "name": "value::tests::known_double_rounding_values_and_signed_zero_round_trip",
+    "status": "ok"
+  },
+  {
+    "name": "tests::compile_is_transactional_and_non_publishable",
+    "status": "ok"
+  },
+  {
+    "name": "tests::canonical_round_trip_is_byte_stable",
+    "status": "ok"
+  },
+  {
+    "name": "canonical::tests::canonical_writer_corpus_is_rust_generated_and_current",
+    "status": "ok"
+  },
+  {
+    "name": "value::tests::ten_million_deterministic_f32_patterns_round_trip",
+    "status": "ok"
+  },
+  {
+    "name": "allocation_calls_stay_within_linear_phase_budgets",
+    "status": "ok"
+  },
+  {
+    "name": "parametric_eq_session_fixture_bytes_are_immutable",
+    "status": "ok"
+  },
+  {
+    "name": "checked_in_fixtures_are_exact_canonical_bytes",
+    "status": "ok"
+  },
+  {
+    "name": "maximal_float_spellings_fit_the_canonical_size_estimate",
+    "status": "ok"
+  },
+  {
+    "name": "full_tagged_surface_round_trips_without_field_loss",
+    "status": "ok"
+  },
+  {
+    "name": "signed_zero_and_double_rounding_values_survive_session_compilation",
+    "status": "ok"
+  },
+  {
+    "name": "canonical_compile_parse_timings_at_32768_and_65536_tracks",
+    "status": "ignored"
+  },
+  {
+    "name": "parse_canonical_and_compile_diagnostics_have_code_path_and_span_parity",
+    "status": "ok"
+  },
+  {
+    "name": "deterministic_parser_compiler_mutation_smoke",
+    "status": "ok"
+  },
+  {
+    "name": "corpus_distribution_totals_124_cases",
+    "status": "ok"
+  },
+  {
+    "name": "compile_caps_reject_before_semantic_validation",
+    "status": "ok"
+  },
+  {
+    "name": "configured_resource_category_has_4_distinct_cases",
+    "status": "ok"
+  },
+  {
+    "name": "empty_third_party_cid_is_reported_at_the_identity_leaf",
+    "status": "ok"
+  },
+  {
+    "name": "dead_resource_caps_cannot_refuse_any_session",
+    "status": "ok"
+  },
+  {
+    "name": "tagged_route_roles_are_structurally_closed",
+    "status": "ok"
+  },
+  {
+    "name": "parser_registry_covers_right_lane_and_f32_representation",
+    "status": "ok"
+  },
+  {
+    "name": "u64_model_fields_accept_the_full_unsigned_domain",
+    "status": "ok"
+  },
+  {
+    "name": "schema_version_and_type_category_has_16_distinct_cases",
+    "status": "ok"
+  },
+  {
+    "name": "automation_category_has_20_distinct_cases",
+    "status": "ok"
+  },
+  {
+    "name": "schema_owned_reference_category_has_20_distinct_cases",
+    "status": "ok"
+  },
+  {
+    "name": "source_identity_and_shape_category_has_20_distinct_cases",
+    "status": "ok"
+  },
+  {
+    "name": "stable_id_category_has_20_distinct_cases",
+    "status": "ok"
+  },
+  {
+    "name": "finite_unit_and_local_range_category_has_24_distinct_cases",
+    "status": "ok"
+  },
+  {
+    "name": "migration_inventory_keeps_all_four_classifications_and_reproducible_audit",
+    "status": "ok"
+  },
+  {
+    "name": "session_schema_is_draft_2020_12_and_closes_every_object",
+    "status": "ok"
+  },
+  {
+    "name": "session_schema_u64_pattern_executes_the_exact_unsigned_64_bit_domain",
+    "status": "ok"
+  },
+  {
+    "name": "decoded_duplicate_path_and_second_key_span_are_exact",
+    "status": "ok"
+  },
+  {
+    "name": "bom_comments_trailing_commas_and_multiple_values_refuse_as_syntax",
+    "status": "ok"
+  },
+  {
+    "name": "syntax_and_typed_spans_are_exact_after_multibyte_text_and_newlines",
+    "status": "ok"
+  },
+  {
+    "name": "duplicates_refuse_at_root_records_and_array_items_before_their_value",
+    "status": "ok"
+  },
+  {
+    "name": "depth_128_accepts_and_opening_depth_129_refuses",
+    "status": "ok"
+  },
+  {
+    "name": "insignificant_whitespace_and_shuffled_keys_canonicalize",
+    "status": "ok"
+  },
+  {
+    "name": "every_u64_leaf_accepts_the_full_unsigned_domain",
+    "status": "ok"
+  },
+  {
+    "name": "numeric_lexemes_reach_typed_rules_without_f64_preprocessing",
+    "status": "ok"
+  },
+  {
+    "name": "u64_decimal_strings_cover_full_domain_and_reject_noncanonical_forms",
+    "status": "ok"
+  },
+  {
+    "name": "invalid_escape_and_unpaired_surrogate_refuse",
+    "status": "ok"
+  },
+  {
+    "name": "escaped_and_direct_unicode_decode_equally_and_emit_directly",
+    "status": "ok"
+  },
+  {
+    "name": "single_thread_parses_compiles_and_canonicalizes",
+    "status": "ok"
+  },
+  {
+    "name": "dependency_waves_is_still_a_known_token_and_not_an_unknown_enum",
+    "status": "ok"
+  },
+  {
+    "name": "dependency_waves_rejects_with_one_stable_diagnostic_at_every_entry_point",
+    "status": "ok"
+  },
+  {
+    "name": "launch_rates_parse_compile_and_canonicalize",
+    "status": "ok"
+  },
+  {
+    "name": "extended_and_unrelated_engine_rates_reject_with_one_stable_diagnostic",
+    "status": "ok"
+  },
+  {
+    "name": "preflight_resource_failure_precedes_clone_and_index_construction",
+    "status": "ok"
+  },
+  {
+    "name": "failed_compile_does_not_mutate_input_or_construct_a_partial_artifact",
+    "status": "ok"
+  },
+  {
+    "name": "compiles_65_537_tracks_without_a_product_track_limit",
+    "status": "ok"
+  },
+  {
+    "name": "every_nested_object_family_rejects_an_exact_unknown_leaf",
+    "status": "ok"
+  },
+  {
+    "name": "all_closed_tokens_round_trip_in_declaration_and_wire_order",
+    "status": "ok"
+  },
+  {
+    "name": "source_bit_depth_wire_table_is_closed_at_both_edges",
+    "status": "ok"
+  },
+  {
+    "name": "visitor_counts_keys_tags_and_conditional_canonical_order_are_exact",
+    "status": "ok"
+  },
+  {
+    "name": "the_shipped_skill_names_the_real_commands",
+    "status": "ok"
+  },
+  {
+    "name": "the_duplicate_key_fixture_fails_the_grammar_stage",
+    "status": "ok"
+  },
+  {
+    "name": "canonical_output_reproduces_the_checked_in_canonical_fixtures",
+    "status": "ok"
+  },
+  {
+    "name": "the_report_is_deterministic",
+    "status": "ok"
+  },
+  {
+    "name": "parse_stage_diagnostics_carry_a_source_location_and_preparation_diagnostics_do_not",
+    "status": "ok"
+  },
+  {
+    "name": "source_identity_format_diagnostics_are_byte_identical_at_validator_and_web_boot",
+    "status": "ok"
+  },
+  {
+    "name": "canonicalization_normalizes_and_is_a_fixed_point",
+    "status": "ok"
+  },
+  {
+    "name": "each_mutation_is_attributed_to_the_stage_that_rejects_it",
+    "status": "ok"
+  },
+  {
+    "name": "every_valid_session_fixture_passes_every_stage",
+    "status": "ok"
+  },
+  {
+    "name": "preparation_allocates_a_bounded_number_of_times",
+    "status": "ok"
+  },
+  {
+    "name": "the_scalar_render_path_never_allocates",
+    "status": "ok"
+  },
+  {
+    "name": "the_bank_render_path_never_allocates",
+    "status": "ok"
+  },
+  {
+    "name": "a_finite_but_out_of_range_block_also_fails",
+    "status": "ok"
+  },
+  {
+    "name": "a_non_finite_block_is_zeroed_reset_and_counted_once",
+    "status": "ok"
+  },
+  {
+    "name": "a_bank_block_fails_and_recovers_as_a_unit",
+    "status": "ok"
+  },
+  {
+    "name": "passes_effect_contract_conformance",
+    "status": "ok"
+  },
+  {
+    "name": "descriptor_resources_and_independent_fir_design_are_frozen",
+    "status": "ok"
+  },
+  {
+    "name": "automation_rejects_everything_but_canonical_ordered_points",
+    "status": "ok"
+  },
+  {
+    "name": "bank_binding_validates_before_declining_an_unavailable_width",
+    "status": "ok"
+  },
+  {
+    "name": "wet_impulse_has_exact_group_delay_and_final_causal_support",
+    "status": "ok"
+  },
+  {
+    "name": "scalar_matches_independent_oracle_after_warmup",
+    "status": "ok"
+  },
+  {
+    "name": "identity_and_bypass_emit_the_delayed_dry_signal_bit_for_bit",
+    "status": "ok"
+  },
+  {
+    "name": "frozen_alias_claim_improves_over_independent_naive_cubic",
+    "status": "ok"
+  },
+  {
+    "name": "descriptive_bank_throughput",
+    "status": "ignored"
+  },
+  {
+    "name": "the_corpus_is_not_vacuous",
+    "status": "ok"
+  },
+  {
+    "name": "every_case_matches_its_pin_at_every_width",
+    "status": "ok"
+  },
+  {
+    "name": "the_hosts_bank_width_matches_the_scalar_instantiation",
+    "status": "ok"
+  },
+  {
+    "name": "every_partition_renders_the_one_shot_bits_and_state",
+    "status": "ok"
+  },
+  {
+    "name": "polyphase_matches_the_frozen_63_tap_graph",
+    "status": "ok"
+  },
+  {
+    "name": "a_new_point_restarts_from_the_current_value",
+    "status": "ok"
+  },
+  {
+    "name": "the_driver_reproduces_the_runtime_ramp_law_bit_for_bit",
+    "status": "ok"
+  },
+  {
+    "name": "the_ramp_divides_once_and_snaps_exactly_whatever_the_block_size",
+    "status": "ok"
+  },
+  {
+    "name": "a_restore_rejects_a_stale_version_a_wrong_length_and_every_invalid_word",
+    "status": "ok"
+  },
+  {
+    "name": "both_resets_are_word_exact",
+    "status": "ok"
+  },
+  {
+    "name": "a_snapshot_restores_into_a_fresh_instance_and_continues_bit_for_bit",
+    "status": "ok"
+  },
+  {
+    "name": "a_bank_track_restore_is_position_independent_and_lane_local",
+    "status": "ok"
+  },
+  {
+    "name": "native_source::tests::controller_first_drop_does_not_detach_the_retirement_stop_owner",
+    "status": "ok"
+  },
+  {
+    "name": "native_source::tests::engine_boundary_refuses_declared_versus_decoded_depth_in_both_directions",
+    "status": "ok"
+  },
+  {
+    "name": "native_source::tests::compiled_sourceless_session_returns_collection_diagnostic_without_resolving",
+    "status": "ok"
+  },
+  {
+    "name": "native_source::tests::compiled_session_source_failure_collects_sorted_diagnostics_before_worker_start",
+    "status": "ok"
+  },
+  {
+    "name": "native_source::tests::decoder_failure_after_accepted_seek_keeps_typed_terminal",
+    "status": "ok"
+  },
+  {
+    "name": "native_source::tests::controller_snapshot_and_terminal_watermarks_are_exact_and_monotonic",
+    "status": "ok"
+  },
+  {
+    "name": "native_source::tests::invalid_graph_mapping_stops_carried_worker_before_consumer_cleanup",
+    "status": "ok"
+  },
+  {
+    "name": "native_source::tests::multiblock_native_watermark_does_not_readd_the_cumulative_decoder_report",
+    "status": "ok"
+  },
+  {
+    "name": "native_source::tests::prepared_source_job_is_inert_until_the_single_start_boundary",
+    "status": "ok"
+  },
+  {
+    "name": "native_source::tests::compiled_session_source_mismatch_and_cap_fail_without_publication",
+    "status": "ok"
+  },
+  {
+    "name": "native_source::tests::graph_set_driver_retains_all_native_workers_until_set_drop",
+    "status": "ok"
+  },
+  {
+    "name": "native_source::tests::compiled_session_sources_prepare_once_and_publish_one_graph_source_set",
+    "status": "ok"
+  },
+  {
+    "name": "native_source::tests::compiled_multi_source_session_uses_one_exact_shared_worker",
+    "status": "ok"
+  },
+  {
+    "name": "native_source::tests::native_sanitation_reaches_after_disarm_source_set_telemetry_and_drop_retires_worker",
+    "status": "ok"
+  },
+  {
+    "name": "native_source::tests::combined_retained_cap_accepts_exactly_and_rejects_one_byte_short",
+    "status": "ok"
+  },
+  {
+    "name": "native_source::tests::launch_rates_prepare_and_extended_rate_mismatch_is_rejected",
+    "status": "ok"
+  },
+  {
+    "name": "native_source::tests::render_wait_is_half_the_prepared_ring_and_bounded",
+    "status": "ok"
+  },
+  {
+    "name": "native_source::tests::retained_layout_grid_is_checked_without_source_duration_storage",
+    "status": "ok"
+  },
+  {
+    "name": "native_source::tests::resolver_preparation_validates_identity_rate_channels_region_and_fixed_caps",
+    "status": "ok"
+  },
+  {
+    "name": "native_source::tests::provider_seek_admission_precedes_decoder_reposition",
+    "status": "ok"
+  },
+  {
+    "name": "native_source::tests::native_worker_and_host_provider_produce_identical_prepared_ring_pcm",
+    "status": "ok"
+  },
+  {
+    "name": "native_source::tests::native_queue_layout_and_per_source_caps_use_exact_requests",
+    "status": "ok"
+  },
+  {
+    "name": "native_source::tests::native_worker_idle_paths_do_not_use_active_spin_primitives",
+    "status": "ok"
+  },
+  {
+    "name": "native_wave::tests::buffered_quanta_seek_and_straddled_refill_preserve_exact_pcm",
+    "status": "ok"
+  },
+  {
+    "name": "native_wave::tests::classic_formats_decode_with_exact_pcm_scaling_and_float_sanitation",
+    "status": "ok"
+  },
+  {
+    "name": "native_wave::tests::extensible_and_rf64_metadata_are_accepted_with_checked_sizes",
+    "status": "ok"
+  },
+  {
+    "name": "native_source::tests::worker_seek_stop_wake_and_join_are_bounded_and_typed",
+    "status": "ok"
+  },
+  {
+    "name": "native_wave::tests::failed_io_forgets_reader_position_and_retry_reseeks",
+    "status": "ok"
+  },
+  {
+    "name": "native_source::tests::seek_continuation_pcm_reads_are_preceded_by_audit_acknowledgements",
+    "status": "ok"
+  },
+  {
+    "name": "native_source::tests::reserved_event_slot_preserves_terminal_after_ready_and_snapshot",
+    "status": "ok"
+  },
+  {
+    "name": "native_wave::tests::invalid_native_containers_and_regions_have_frozen_diagnostics",
+    "status": "ok"
+  },
+  {
+    "name": "native_wave::tests::malformed_ds64_byte_rate_duplicate_data_and_metadata_cap_reject_without_payload_retention",
+    "status": "ok"
+  },
+  {
+    "name": "native_wave::tests::mask_sanitizers_freeze_float_boundary_bits_and_counts",
+    "status": "ok"
+  },
+  {
+    "name": "native_source::tests::pending_seek_stops_without_render_drain_and_controller_backpressure_does_not_advance",
+    "status": "ok"
+  },
+  {
+    "name": "native_source::tests::retired_graph_plan_is_the_native_worker_join_owner",
+    "status": "ok"
+  },
+  {
+    "name": "native_wave::tests::prepared_quantum_decode_uses_contiguous_planar_worker_storage",
+    "status": "ok"
+  },
+  {
+    "name": "tests::copy_channel_zeroes_only_the_tail_the_full_fill_used_to_reach",
+    "status": "ok"
+  },
+  {
+    "name": "tests::graph_driver_last_claim_recycles_in_call_and_incomplete_paths_recycle_next_begin",
+    "status": "ok"
+  },
+  {
+    "name": "tests::host_and_native_submission_share_exact_short_eof_metadata_and_validation_order",
+    "status": "ok"
+  },
+  {
+    "name": "tests::host_region_preparation_preserves_resources_and_absolute_ownership",
+    "status": "ok"
+  },
+  {
+    "name": "tests::host_submission_is_fifo_wraparound_and_never_accepts_a_prefix",
+    "status": "ok"
+  },
+  {
+    "name": "tests::paused_seek_prepares_full_queues_without_consuming_target",
+    "status": "ok"
+  },
+  {
+    "name": "tests::prepare_rejects_invalid_fixed_ring_shape",
+    "status": "ok"
+  },
+  {
+    "name": "tests::prepared_contiguous_native_submission_matches_planar_ring_shape",
+    "status": "ok"
+  },
+  {
+    "name": "tests::registry_and_host_shape_errors_are_stable",
+    "status": "ok"
+  },
+  {
+    "name": "native_source::tests::terminal_event_carries_decode_failure_and_other_sources_continue",
+    "status": "ok"
+  },
+  {
+    "name": "tests::report_separates_session_pcm_from_source_overhead",
+    "status": "ok"
+  },
+  {
+    "name": "tests::retained_played_block_supports_repeat_fanout_and_auto_recycles_once",
+    "status": "ok"
+  },
+  {
+    "name": "tests::seek_switches_at_boundary_and_discards_older_queued_audio",
+    "status": "ok"
+  },
+  {
+    "name": "tests::stamped_native_watermark_survives_seek_stale_discard_and_saturates",
+    "status": "ok"
+  },
+  {
+    "name": "native_wave::tests::plane_and_strided_sinks_match_every_encoding_across_chunks_refills_and_seek",
+    "status": "ok"
+  },
+  {
+    "name": "tests::underrun_is_positive_zero_and_eof_is_not_an_underrun",
+    "status": "ok"
+  },
+  {
+    "name": "tests::graph_driver_zero_claims_recycles_in_begin_and_retains_no_plane_class",
+    "status": "ok"
+  },
+  {
+    "name": "tests::set_driver_declares_worker_tokens_before_source_consumers",
+    "status": "ok"
+  },
+  {
+    "name": "tests::one_four_channel_source_fans_out_to_three_inputs_in_the_sequential_executor",
+    "status": "ok"
+  },
+  {
+    "name": "tests::producer_submission_has_one_stamping_and_copy_body",
+    "status": "ok"
+  },
+  {
+    "name": "native_source::tests::single_worker_seek_resumes_contiguously_at_the_exact_frame",
+    "status": "ok"
+  },
+  {
+    "name": "native_source::tests::worker_coalesces_provider_backpressure_to_latest_exact_frame_without_intermediate_pcm",
+    "status": "ok"
+  },
+  {
+    "name": "native_source::tests::idle_decode_thread_cpu_is_bounded_and_one_thread_serves_a_set",
+    "status": "ok"
+  },
+  {
+    "name": "tests::cli_is_closed_and_raw_shape_is_exact",
+    "status": "ok"
+  },
+  {
+    "name": "tests::wave_depth_set_rejects_integer_pcm32_but_accepts_float32",
+    "status": "ok"
+  },
+  {
+    "name": "tests::raw_length_is_total_and_output_is_canonical",
+    "status": "ok"
+  },
+  {
+    "name": "vector_matrix_covers_integer_boundaries_and_float_edge_bits",
+    "status": "ok"
+  },
+  {
+    "name": "stdout_mode_keeps_canonical_bytes_and_identity_separate",
+    "status": "ok"
+  },
+  {
+    "name": "f32_mono_edge_bit_pin_matches_library_and_cli",
+    "status": "ok"
+  },
+  {
+    "name": "pcm16_mono_boundary_pin_matches_library_and_cli",
+    "status": "ok"
+  },
+  {
+    "name": "pcm24_mono_boundary_pin_matches_library_and_cli",
+    "status": "ok"
+  },
+  {
+    "name": "pcm16_stereo_boundary_pin_matches_library_cli_and_engine_wave_parser",
+    "status": "ok"
+  },
+  {
+    "name": "pcm24_stereo_boundary_pin_matches_library_cli_and_engine_wave_parser",
+    "status": "ok"
+  },
+  {
+    "name": "f32_stereo_edge_bit_pin_matches_library_cli_and_engine_wave_parser",
+    "status": "ok"
+  },
+  {
+    "name": "tests::local_realtime_ring_round_trips",
+    "status": "ok"
+  },
+  {
+    "name": "tests::smoke_values_are_canonical",
+    "status": "ok"
+  },
+  {
+    "name": "the_counter_observes_same_thread_allocation_and_free",
+    "status": "ok"
+  },
+  {
+    "name": "foreign_thread_allocations_do_not_enter_the_callers_counts",
+    "status": "ok"
+  },
+  {
+    "name": "the_render_path_allocates_nothing",
+    "status": "ok"
+  },
+  {
+    "name": "bank_snapshot_restore_and_resets_are_track_local",
+    "status": "ok"
+  },
+  {
+    "name": "bank_matches_scalar_pcm_state_and_reports_for_every_link_mode",
+    "status": "ok"
+  },
+  {
+    "name": "a_subnormal_input_renders_and_flushes_the_envelope",
+    "status": "ok"
+  },
+  {
+    "name": "a_nonfinite_block_is_zeroed_and_the_envelopes_are_reset",
+    "status": "ok"
+  },
+  {
+    "name": "a_nonfinite_bank_block_is_rejected_as_a_unit",
+    "status": "ok"
+  },
+  {
+    "name": "passes_effect_contract_conformance",
+    "status": "ok"
+  },
+  {
+    "name": "both_resets_have_word_exact_parameter_and_envelope_states",
+    "status": "ok"
+  },
+  {
+    "name": "automation_updates_one_sixty_three_sixty_four_retargets_and_restores_exactly",
+    "status": "ok"
+  },
+  {
+    "name": "descriptor_coefficients_resources_and_transactional_caps_are_frozen",
+    "status": "ok"
+  },
+  {
+    "name": "bank_resources_and_validation_precede_legal_unavailable_fallback",
+    "status": "ok"
+  },
+  {
+    "name": "identity_rules_are_bit_exact_and_the_followers_still_warm",
+    "status": "ok"
+  },
+  {
+    "name": "independent_coefficients_time_constants_layout_and_both_caps_are_exact",
+    "status": "ok"
+  },
+  {
+    "name": "state_restore_validates_version_length_envelope_and_parameters",
+    "status": "ok"
+  },
+  {
+    "name": "link_modes_drive_the_detector_as_specified",
+    "status": "ok"
+  },
+  {
+    "name": "the_pinned_digests_hold",
+    "status": "ok"
+  },
+  {
+    "name": "every_width_produces_the_same_words",
+    "status": "ok"
+  },
+  {
+    "name": "scalar_matches_the_independent_f64_oracle",
+    "status": "ok"
+  },
+  {
+    "name": "impulse_step_and_decay_cover_both_attack_and_sustain_signs",
+    "status": "ok"
+  },
+  {
+    "name": "the_scalar_product_is_partition_invariant",
+    "status": "ok"
+  },
+  {
+    "name": "the_bank_is_partition_invariant",
+    "status": "ok"
+  },
+  {
+    "name": "tests::an_open_window_is_never_stationary",
+    "status": "ok"
+  },
+  {
+    "name": "tests::a_nonfinite_block_is_zeroed_reset_and_counted",
+    "status": "ok"
+  },
+  {
+    "name": "tests::automation_retargets_linear_coefficients_and_counts_invalid_spans",
+    "status": "ok"
+  },
+  {
+    "name": "tests::descriptor_metadata_and_exact_resource_rows_are_frozen",
+    "status": "ok"
+  },
+  {
+    "name": "tests::bank_binding_validates_before_fallback_and_retains_exact_width_bytes",
+    "status": "ok"
+  },
+  {
+    "name": "tests::both_resets_return_the_runtime_state_to_a_silent_lane",
+    "status": "ok"
+  },
+  {
+    "name": "tests::automation_withdraws_the_claim_and_the_resident_tap_keeps_up",
+    "status": "ok"
+  },
+  {
+    "name": "tests::the_lane_ramp_reproduces_the_scalar_ramp_bit_for_bit",
+    "status": "ok"
+  },
+  {
+    "name": "tests::the_stationary_hoist_reads_what_advancing_would_have_produced",
+    "status": "ok"
+  },
+  {
+    "name": "tests::the_gain_ramp_falls_gradually_and_arrives_at_the_requirement",
+    "status": "ok"
+  },
+  {
+    "name": "tests::state_round_trips_and_rejects_corruption",
+    "status": "ok"
+  },
+  {
+    "name": "tests::phase_outputs_match_the_frozen_scalar_order",
+    "status": "ok"
+  },
+  {
+    "name": "tests::partition_invariance_holds_over_block_sizes",
+    "status": "ok"
+  },
+  {
+    "name": "tests::fixed_latency_guarded_ceiling_and_bypass_bits_hold",
+    "status": "ok"
+  },
+  {
+    "name": "tests::a_restore_withdraws_the_silence_claim",
+    "status": "ok"
+  },
+  {
+    "name": "tests::automation_withdraws_the_claim_on_the_bank_path_too",
+    "status": "ok"
+  },
+  {
+    "name": "tests::a_mixed_lookahead_cohort_falls_back_bit_identically",
+    "status": "ok"
+  },
+  {
+    "name": "tests::a_uniform_cohort_renders_exactly_the_per_lane_path",
+    "status": "ok"
+  },
+  {
+    "name": "tests::a_restore_that_desyncs_the_phase_falls_back",
+    "status": "ok"
+  },
+  {
+    "name": "tests::a_de_zipper_window_open_across_a_block_boundary_refuses_the_claim",
+    "status": "ok"
+  },
+  {
+    "name": "tests::the_segment_walk_visits_the_slots_a_frame_at_a_time_walk_visits",
+    "status": "ok"
+  },
+  {
+    "name": "tests::bs1770_annex2_conformance_is_unchanged",
+    "status": "ok"
+  },
+  {
+    "name": "tests::lane_identity_holds_across_widths",
+    "status": "ok"
+  },
+  {
+    "name": "tests::the_two_channels_of_a_uniform_cohort_keep_their_own_phases",
+    "status": "ok"
+  },
+  {
+    "name": "tests::silence_restores_exact_identity_including_signed_zero",
+    "status": "ok"
+  },
+  {
+    "name": "tests::a_limiter_still_releasing_through_the_silence_is_never_frozen",
+    "status": "ok"
+  },
+  {
+    "name": "tests::a_settled_silent_limiter_renders_exactly_the_never_fast_path",
+    "status": "ok"
+  },
+  {
+    "name": "tests::a_negative_zero_input_block_is_not_treated_as_silence",
+    "status": "ok"
+  },
+  {
+    "name": "tests::a_stale_detector_history_refuses_the_claim",
+    "status": "ok"
+  },
+  {
+    "name": "the_render_path_allocates_nothing",
+    "status": "ok"
+  },
+  {
+    "name": "bench_w8_ns_per_lane_sample",
+    "status": "ignored"
+  },
+  {
+    "name": "passes_effect_contract_conformance",
+    "status": "ok"
+  },
+  {
+    "name": "every_case_has_one_digest_at_every_width",
+    "status": "ok"
+  },
+  {
+    "name": "production_tracks_the_f64_oracle",
+    "status": "ok"
+  },
+  {
+    "name": "output_true_peak_never_exceeds_the_ceiling",
+    "status": "ok"
+  },
+  {
+    "name": "a_desymmetrized_bank_is_a_never_collapsed_bank",
+    "status": "ok"
+  },
+  {
+    "name": "the_collapsed_body_renders_the_dual_bodys_left_plane",
+    "status": "ok"
+  },
+  {
+    "name": "the_limiter_reads_the_reduction_word_the_envelope_persists",
+    "status": "ok"
+  },
+  {
+    "name": "a_resident_read_is_repeatable_to_the_bit",
+    "status": "ok"
+  },
+  {
+    "name": "observing_between_blocks_does_not_move_a_single_output_sample",
+    "status": "ok"
+  },
+  {
+    "name": "g5_delegated_cases_use_the_owning_crates_pins",
+    "status": "ok"
+  },
+  {
+    "name": "g5_case_digests_are_distinct",
+    "status": "ok"
+  },
+  {
+    "name": "g5_idle_ramped_svf_equals_the_plain_svf",
+    "status": "ok"
+  },
+  {
+    "name": "g5_fma_case_is_unfused_and_the_case_is_not_vacuous",
+    "status": "ok"
+  },
+  {
+    "name": "g5_no_case_is_vacuously_zero",
+    "status": "ok"
+  },
+  {
+    "name": "g5_lane_corpus_is_finite",
+    "status": "ok"
+  },
+  {
+    "name": "g5_native_digests_match_pins",
+    "status": "ok"
+  },
+  {
+    "name": "x86::g6_the_guard_is_an_identity_for_a_caller_who_never_set_ftz",
+    "status": "ok"
+  },
+  {
+    "name": "x86::g6_full_wasm_gate_corpus_is_canonical_under_caller_ftz",
+    "status": "ok"
+  },
+  {
+    "name": "crates/engine/src/realtime/plan.rs - realtime::plan::PreparedRenderPlan (line 429) - compile fail",
+    "status": "ok"
+  },
+  {
+    "name": "crates/graph-compiler/src/lib.rs - PreparedGraphBuiltinsArtifact (line 79) - compile fail",
+    "status": "ok"
+  },
+  {
+    "name": "crates/graph-compiler/src/lib.rs - PreparedGraphBuiltinsArtifact (line 105) - compile fail",
+    "status": "ok"
+  },
+  {
+    "name": "crates/graph-compiler/src/lib.rs - PreparedGraphBuiltinsArtifact (line 87) - compile fail",
+    "status": "ok"
+  },
+  {
+    "name": "crates/graph-compiler/src/lib.rs - PreparedGraphBuiltinsArtifact (line 93) - compile fail",
+    "status": "ok"
+  },
+  {
+    "name": "crates/graph-compiler/src/lib.rs - PreparedGraphBuiltinsArtifact (line 111) - compile fail",
+    "status": "ok"
+  },
+  {
+    "name": "crates/graph-compiler/src/lib.rs - PreparedGraphBuiltinsArtifact (line 99) - compile fail",
+    "status": "ok"
+  },
+  {
+    "name": "crates/host-core/src/prepare.rs - prepare::PreparedHost (line 355)",
+    "status": "ok"
+  },
+  {
+    "name": "crates/host-core/src/render_session.rs - render_session::StartedRenderSession (line 49) - compile fail",
+    "status": "ok"
+  },
+  {
+    "name": "crates/host-core/src/prepare.rs - prepare::PreparedHost (line 348) - compile fail",
+    "status": "ok"
+  },
+  {
+    "name": "crates/host-core/src/render_session.rs - render_session::StartedRenderSession (line 54) - compile fail",
+    "status": "ok"
+  },
+  {
+    "name": "crates/lane/src/fpenv.rs - fpenv::CanonicalFpEnv (line 281) - compile fail",
+    "status": "ok"
+  },
+  {
+    "name": "crates/lane/src/fpenv.rs - fpenv::CanonicalFpEnv (line 286) - compile fail",
+    "status": "ok"
+  },
+  {
+    "name": "crates/source/src/native_source.rs - native_source::prepare_native_source (line 836) - compile fail",
+    "status": "ok"
+  }
+]
