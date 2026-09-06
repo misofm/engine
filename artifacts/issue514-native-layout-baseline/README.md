@@ -1,0 +1,3 @@
+# #514 pre-edit native layout baseline
+
+One temporary test-only probe ran on clean production base58ef9b23, then the exact test bytes were restored. The command/source identities, temporary probe, execution script, actual output/status and clean restoration are preserved. ReadyOwnership and Option<ReadyOwnership> are1336 bytes/alignment8; AudioWorkletEngineHost is1864/alignment8. Existing prepared_host(128) bridge metadata6859, bridge retained29087, largest bridge/named19238. These are native cfg(test) observations, not shipped-Wasm layout proof or performance measurements. Revalidate dependency-base applicability before comparing a later candidate.

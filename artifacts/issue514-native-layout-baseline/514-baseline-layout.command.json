@@ -1,0 +1,25 @@
+{
+  "argv": [
+    "cargo",
+    "test",
+    "--locked",
+    "-p",
+    "host-web",
+    "--lib",
+    "tests::issue514_native_layout_probe",
+    "--",
+    "--exact",
+    "--nocapture"
+  ],
+  "cwd": "/home/bl/misofm/engine-idle-admission-clear",
+  "head": "58ef9b233e9c767fd2758442b49e94e3f6b38b27",
+  "env": {
+    "PATH": "/home/bl/.cargo/bin:/home/bl/.codex/packages/standalone/releases/0.153.2-x86_64-unknown-linux-musl/codex-path:/home/bl/.local/bin:/home/bl/.codex/tmp/arg0/codex-arg0CWD760:/home/bl/.codex/packages/standalone/releases/0.153.2-x86_64-unknown-linux-musl/codex-path:/home/bl/.local/bin:/home/bl/.opencode/bin:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.opencode/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin",
+    "RUSTFLAGS": null,
+    "CARGO_TARGET_DIR": null
+  },
+  "original_test_sha256": "9360462776776a314558a258f290d1d88b07fe40efa41acd03ab47a6466ceceb",
+  "temporary_test_sha256": "7522fd56b7875dd45744872ba7b2b19723995678c17862804ac0c854d4a101b7",
+  "production_lib_sha256": "8beca294ea308d61542af4059653c7a5d8f30513f96c18cabbfd0fd579c7215a",
+  "note": "Temporary test-only native layout probe; no production change. Not shipped-Wasm layout evidence."
+}

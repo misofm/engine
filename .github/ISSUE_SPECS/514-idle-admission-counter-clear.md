@@ -71,3 +71,7 @@ At Wasm delivery, use the actual unchanged-resource oracle/current-consumer comp
 Retain the already named new test `idle_render_skips_admission_counter_clear_without_losing_queue_credit`, exact debug/release one-test gates, existing host lib suites and policies. After root appends/synchronizes these corrections, numbered scope is ready for fresh Luna1 at its eventual integrated implementation base. They resolve inherited fixture applicability only; no change to the actual dirty-flag product. No tests/builds/timing or repository/GitHub mutations performed in this review.
 
 Root adopts these fixture applicability corrections. #514 remains queued, with no Luna attempt consumed, until its implementation slot and integrated-base review.
+
+## Pre-edit native layout observation
+
+Root ran one temporary test-only probe against production base58ef9b23 and restored the test file exactly (clean status). ReadyOwnership/Option sizes are1336 with alignment8, host size1864/alignment8; prepared_host(128) bridge metadata6859, retained29087 and largest bridge/named19238. Actual raw proof is in artifacts/issue514-native-layout-baseline. This is native cfg(test) evidence only; later implementation-base dependency changes require applicability review, and shipped-Wasm resource proof remains separate. #514 stays queued, no implementation attempt consumed.
