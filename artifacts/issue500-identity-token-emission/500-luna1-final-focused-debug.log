@@ -1,0 +1,17 @@
+Sun Sep  6 05:33:10 UTC 2026
+/home/bl/misofm/engine-cp20-identity-plan
+argv: cargo test --locked -p graph-compiler --lib tests::identity_tokens_match_independent_literals_and_utf8_lengths -- --exact --nocapture
+committed_base=fcb8703cbb4d61fca041225305b91049fbee2bb2
+dirty_blob_sha1=97929c6a1b8e0678fdcd555ac7fbcf85ee4b5953
+dirty_sha256=044ec65b3861773fda59d7765d068875a137f7f9be8d5ab3be3f5dad36eb1899
+PATH=/home/bl/.cargo/bin:/home/bl/.local/bin:/home/bl/.codex/packages/standalone/releases/0.153.2-x86_64-unknown-linux-musl/codex-path:/home/bl/.codex/tmp/arg0/codex-arg0CWD760:/home/bl/.local/bin:/home/bl/.opencode/bin:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.opencode/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin
+   Compiling graph-compiler v0.1.0 (/home/bl/misofm/engine-cp20-identity-plan/crates/graph-compiler)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.19s
+     Running unittests src/lib.rs (target/debug/deps/graph_compiler-c1c1e295dac82746)
+
+running 1 test
+test tests::identity_tokens_match_independent_literals_and_utf8_lengths ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 62 filtered out; finished in 0.00s
+
+exit=0

@@ -1,0 +1,14 @@
+Sun Sep  6 05:27:38 UTC 2026
+/home/bl/misofm/engine-cp20-identity-plan
+argv: cargo test --locked -p graph-compiler --lib tests::identity_tokens_match_independent_literals_and_utf8_lengths -- --exact --nocapture
+source=31cdbe0e2de07b0f51fef19ecfe9d9c433def308
+PATH=/home/bl/.cargo/bin:/home/bl/.local/bin:/home/bl/.codex/packages/standalone/releases/0.153.2-x86_64-unknown-linux-musl/codex-path:/home/bl/.codex/tmp/arg0/codex-arg0CWD760:/home/bl/.local/bin:/home/bl/.opencode/bin:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.opencode/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running unittests src/lib.rs (target/debug/deps/graph_compiler-c1c1e295dac82746)
+
+running 1 test
+test tests::identity_tokens_match_independent_literals_and_utf8_lengths ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 62 filtered out; finished in 0.00s
+
+exit=0

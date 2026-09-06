@@ -1,0 +1,33 @@
+Sun Sep  6 05:32:25 UTC 2026
+/home/bl/misofm/engine-cp20-identity-plan
+argv: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+source=fcb8703cbb4d61fca041225305b91049fbee2bb2
+PATH=/home/bl/.cargo/bin:/home/bl/.local/bin:/home/bl/.codex/packages/standalone/releases/0.153.2-x86_64-unknown-linux-musl/codex-path:/home/bl/.codex/tmp/arg0/codex-arg0CWD760:/home/bl/.local/bin:/home/bl/.opencode/bin:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.opencode/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin
+    Checking wasmprinter v0.252.0
+    Checking cranelift-codegen v0.134.3
+    Checking graph-compiler v0.1.0 (/home/bl/misofm/engine-cp20-identity-plan/crates/graph-compiler)
+    Checking protocol v0.1.0 (/home/bl/misofm/engine-cp20-identity-plan/crates/protocol)
+    Checking host-core v0.1.0 (/home/bl/misofm/engine-cp20-identity-plan/crates/host-core)
+    Checking console-workload v0.1.0 (/home/bl/misofm/engine-cp20-identity-plan/tools/console-workload)
+    Checking wasm-console-guest v0.1.0 (/home/bl/misofm/engine-cp20-identity-plan/tools/wasm-console-guest)
+    Checking bench v0.1.0 (/home/bl/misofm/engine-cp20-identity-plan/tools/bench)
+    Checking host-web v0.1.0 (/home/bl/misofm/engine-cp20-identity-plan/hosts/host-web)
+    Checking capi v0.1.0 (/home/bl/misofm/engine-cp20-identity-plan/crates/capi)
+    Checking wasmtime-environ v47.0.3
+    Checking native-pcm-runner v0.1.0 (/home/bl/misofm/engine-cp20-identity-plan/tools/native-pcm-runner)
+    Checking audit v0.1.0 (/home/bl/misofm/engine-cp20-identity-plan/tools/audit)
+    Checking parameter-metadata v0.1.0 (/home/bl/misofm/engine-cp20-identity-plan/tools/parameter-metadata)
+    Checking session-validator v0.1.0 (/home/bl/misofm/engine-cp20-identity-plan/tools/session-validator)
+error: this lint expectation is unfulfilled
+   --> crates/graph-compiler/src/canonical.rs:106:5
+    |
+106 |     dead_code,
+    |     ^^^^^^^^^
+    |
+    = note: retained private edge-length interface is exercised by canonical identity tests
+    = note: `-D unfulfilled-lint-expectations` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(unfulfilled_lint_expectations)]`
+
+error: could not compile `graph-compiler` (lib test) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+exit=101

@@ -47,3 +47,7 @@ The independent literal fixture remains essential because text-versus-length par
 Read-only source/Git comparison; no tests/builds/timing or source/spec/Git/GitHub mutations performed.
 
 Root assigns fresh Luna1 within the frozen scope, owns all Git/GitHub checkpoints, and defers artifact qualification until source acceptance. This independent maintenance does not modify the frozen compressor qualification worktree. No timing is authorized.
+
+## Luna attempt1 candidate and evidence
+
+Source4e2fc87d preserves the shared borrowed visitors introduced atfcb8703c, completes the independent literal fixture and updates the length helper documentation. Retained edge_text_len now has a function-local non-test dead-code annotation because production recursion moved to the shared visitor while the scope retains its signature. Graph-compiler library63 debug/release, final literal1 debug/release, existing parity/repeatability, strict workspace Clippy and fmt/diff/graph policy pass. Authentic initial zero-filter and Clippy failures remain in artifacts/issue500-identity-token-emission with final source identities and candid source-attribution notes. No artifact/timing or numerical claim; consolidated Astra review pending.
