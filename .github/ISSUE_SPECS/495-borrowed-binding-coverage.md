@@ -79,3 +79,7 @@ Root may amend/synchronize495 delivery scope, retain authentic mismatch records,
 No PCM/resource expectation, corpus pin, policy threshold, lint/CI configuration, runtime source or broad repin change is authorized. Any actual numerical failure or new discrepancy requires a specific ruling; do not turn this artifact mismatch into an arithmetic claim. No timing or new framework/matrix. Source PASS remains valid subject to these delivery gates; exact-head actual PR review and required CI SUCCESS remain necessary before merge/remote closure.
 
 Read-only source and evidence inspection. No tests/builds/timing or source/spec/Git/GitHub mutations performed.
+
+## Qualified current artifact
+
+At frozen pin/source3e17caf3 all seven delivery pipeline commands exit0: verified builder, static checks, resource equivalence plus26 negative controls, hermetic tests, npm ci, current three-browser qualification with self-tests, and generated matrix check. The published Wasm SHA256 is87007c1aaad418f44074132b3c73876d77fcff0b778256e55c05a377a5277f6d. Only generated candidate/hash records changed atf87c9680; numerical expectations stay unchanged. Full raw command/source/output/status and module identity are retained in the artifact package. Actual-head PR review and required qualification are the remaining merge gates.
