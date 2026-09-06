@@ -1,0 +1,15 @@
+
+running 10 tests
+test a_command_takes_effect_on_the_whole_block_that_drains_it ... ok
+test two_commands_are_not_interchangeable ... ok
+test the_stereo_arm_is_a_never_collapsed_oracle ... ok
+test a_both_lane_record_drained_while_collapsed_keeps_the_collapse ... ok
+test a_symmetric_ride_renders_the_same_bits_collapsed_or_not ... ok
+test re_equalising_after_a_disengaging_drain_holds_the_never_collapsed_bits ... ok
+test the_collapse_census_follows_the_commands ... ok
+test an_uncommanded_console_renders_the_console_free_bytes ... ok
+test a_command_moves_exactly_the_addressed_track ... ok
+test a_per_lane_record_drained_on_the_disengaging_block_reaches_one_channel ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.30s
+

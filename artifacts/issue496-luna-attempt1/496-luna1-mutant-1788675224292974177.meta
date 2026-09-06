@@ -1,0 +1,8 @@
+argv=cargo test --locked -p builtins --lib post_ramp_symmetry_extracts_each_word_once -- --exact 
+cwd=/home/bl/misofm/engine-rt5-ramp-plan
+effectiveenv=PATH=/home/bl/.cargo/bin:/home/bl/.local/bin:/home/bl/.codex/packages/standalone/releases/0.153.2-x86_64-unknown-linux-musl/codex-path:/home/bl/.codex/tmp/arg0/codex-arg0CWD760:/home/bl/.local/bin:/home/bl/.opencode/bin:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.opencode/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin RUSTFLAGS= CARGO_TARGET_DIR=
+sourceSHA=9e5df2c858b2acaf00eb70177632cd58a2a31177
+sourceBlob=06e10ff7f9a51d0a1f7ed7692140e88781502463
+sourceSHA256=84824ce51e0efa5165c45dab3cf3b936cb659b1b64840fa4dfc4f7d1c07f018d
+mutation=dual post-ramp seam uses refresh_channel_symmetry
+exit=0

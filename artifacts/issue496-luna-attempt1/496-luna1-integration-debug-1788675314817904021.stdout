@@ -1,0 +1,18 @@
+
+running 13 tests
+test a_lane_selector_addresses_exactly_the_lanes_it_names ... ok
+test a_bank_refuses_a_retarget_addressed_past_its_members ... ok
+test the_live_trim_domain_is_the_declared_one ... ok
+test the_settled_arm_leaves_the_ramp_words_untouched ... ok
+test an_uncommanded_live_input_renders_the_prepared_coefficients ... ok
+test trim_and_polarity_do_not_overwrite_each_other ... ok
+test an_uncommanded_bank_keeps_its_elision_plan ... ok
+test the_trim_ramp_is_partition_invariant ... ok
+test a_ramping_block_leaves_an_elidable_banks_integrators_at_positive_zero ... ok
+test a_banked_lane_ramps_exactly_as_the_same_track_alone ... ok
+test settled_and_ramping_paths_agree_on_an_elided_bank ... ok
+test a_polarity_flip_crosses_zero_and_settles_at_the_reprepared_coefficient ... ok
+test the_trim_ramp_is_bit_identical_to_the_parameter_smoother ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

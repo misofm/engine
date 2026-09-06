@@ -1,0 +1,8 @@
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.03s
+     Running unittests src/lib.rs (target/release/deps/builtins-6cea1cc0c5a9aa14)
+
+running 1 test
+test tests::post_ramp_symmetry_mask_matches_lane_oracle ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+

@@ -1,0 +1,7 @@
+argv=cargo clippy --locked -p builtins --all-targets --all-features -- -D warnings
+cwd=/home/bl/misofm/engine-rt5-ramp-plan
+effectiveenv=PATH=/home/bl/.cargo/bin:/home/bl/.local/bin:/home/bl/.codex/packages/standalone/releases/0.153.2-x86_64-unknown-linux-musl/codex-path:/home/bl/.codex/tmp/arg0/codex-arg0CWD760:/home/bl/.local/bin:/home/bl/.opencode/bin:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.opencode/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin RUSTFLAGS= CARGO_TARGET_DIR=
+sourceSHA=9e5df2c858b2acaf00eb70177632cd58a2a31177
+sourceBlob=faea16181e5ad64b8d9b5fcabae5bdd97084eec1
+sourceSHA256=42f177275b8f885f09b827ca0bd35f86c15300fe7d8cd1c7a21a6b1095e6480c
+exit=0
