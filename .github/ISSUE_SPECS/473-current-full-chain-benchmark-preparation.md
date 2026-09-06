@@ -197,3 +197,23 @@ Final-pass raw evidence:
 - `/tmp/473-sol3-source-prose.{command,log,status}`: status 0; only the three adapter scripts and this final evidence changed from the accepted Sol2 checkpoint, with accepted input/validator/workflow/parent and all historical/input/config bytes unchanged.
 
 The accepted Sol2 bench unit and strict Clippy results remain applicable because this final pass changes no Rust, validator, workflow, input or configuration source. No real preflight, runner, workload, benchmark, audio or timing command was executed.
+
+## Third-attempt hard stop and completion rescope
+
+# Astra #473 FINAL Sol3 verdict — FAIL / hard stop
+
+Exact head8e932ebf3992fbbbf2d12a2b99d4c790f5d9b4dd, engine-473-plan. Full frozen contract and four Sol2 groups reviewed against final four-path delta and reported five focused status0 records. No tests, builds, preflight, runner, workload or timing executed during this review; the remaining finding is direct source/control-flow analysis.
+
+Accepted: unchanged exact seven-hash validator copy delta and aggregate include-only delta, untimed current/nested input proof, reservation_owned preventing losing callers overwriting the winner, physical parent/prepared directory checks, actual child stop/wait with distinct child/validation/runner statuses, final-publication refusal retaining reservation, real synthetic blocking-child test, partial round/raw preservation and second-invocation refusal. Keep all these implementations and evidence; no new lifecycle/mutation matrix is requested.
+
+ONE finite original build-provenance group remains incomplete:
+
+Preflight rejects/sets only OPT_LEVEL/LTO/CODEGEN_UNITS among release-profile overrides. Repository Cargo.toml:129–133 also freezes panic="abort" and debug=1; ordinary release defaults include disabled debug assertions/overflow checks. Inherited CARGO_PROFILE_RELEASE_PANIC=unwind or CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true (and related remaining profile overrides) are neither refused, enforced nor recorded. Cargo therefore can build a materially different profile while the seal and per-record metadata still identify the approved release profile. Runner's same limited blacklist does not detect it. This is the exact remaining “actual effective profile/environment, not literals” requirement from Sol2, not a new feature gate. The current fake tests cover LTO/RUSTFLAGS/wrapper examples only and cannot establish refusal of the omitted release settings.
+
+The target attribution is also unconditional: the script reads rustc host triple but never requires the supported x86_64 Linux capture host. It injects only CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS and nevertheless seals target_features="+avx2,+fma" for any returned host. A different host can receive false target metadata. This is one build-identity completion slice, not authorization for AArch64 or cross-target benchmarking.
+
+Required bounded successor: freeze the exact supported capture target and complete approved release environment before cargo; either explicitly reject incompatible profile overrides (including panic/debug/assertions/overflow settings) or enforce every frozen setting while recording that effective decision. Reject unsupported host triples instead of asserting x86 features for them. Preserve Cargo/profile/source/validator/fixture files themselves. Add only focused fake-cargo cases proving rejected omitted-profile settings do not reach build and the unsupported host refuses, plus the original positive recorded build environment. No new generic profile framework, historical072 edits, numerical changes, real preparation or timing.
+
+This is third-attempt FAIL: preserve head/history and STOP473 repairs. Root must number/rebrief that single bounded build-identity completion child before any further source correction; parent473 retains complete delivery/PR/CI acceptance and stays OPEN. #431's sole real capture remains unspent and unauthorized. Existing successful source groups do not need reinvention; no disguised fourth attempt or real run to discover this defect is permitted.
+
+Root adopts this final FAIL. Accepted source and raw evidence remain preserved at the reviewed head. No further parent implementation is authorized. A separately numbered, Astra-approved bounded completion issue must precede further corrections; parent delivery and all retained obligations remain open.
