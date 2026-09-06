@@ -301,3 +301,7 @@ After the coherent patch and all six focused debug gates pass, pause for root's 
 No other blocking source or frozen fixture gap was found in this consolidated review. The hard stop remains: if attempt3 fails, preserve evidence and rebrief/rescope rather than perform a disguised fourth retry. #528 remains OPEN pending final source acceptance and root's immutable/current-base/CI delivery; #140/#444 and IO5 remain open beyond this leaf.
 
 Root adopts this bounded FAIL. Sol attempt 3 is authorized only for the two frozen corrections and named proportional checks after this checkpoint is upstream. This is the final attempt; a further FAIL stops this issue for rescope/rebrief.
+
+## Final Sol attempt 3 source checkpoint
+
+Sol supplied exactly the two frozen corrections: explicit compact Delivery/Pending fault after successful mark, and a positive allocation/free probe inside the same render-audit scope used by gate6. The unchanged six focused debug tests pass (plus the isolated gate6 child); raw capture is `/tmp/issue528-sol3/focused-debug.*`, to be preserved with the final package. Root inspected the exact two-path diff and checkpoints before the remaining proportional gates. This is not source acceptance or delivery.

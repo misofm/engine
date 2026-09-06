@@ -654,11 +654,28 @@ impl PreparedScalarPointRender<'_> {
                     );
                 }
                 delivered = native;
-                let next = self
-                    .delivery
-                    .pending(ticket)
-                    .ok()
-                    .and_then(|p| p.records.get(usize::from(delivered)).map(|r| r.start));
+                let next = match self.delivery.pending(ticket) {
+                    Ok(p) => p.records.get(usize::from(delivered)).map(|r| r.start),
+                    Err(error) => {
+                        return self.fail(
+                            l,
+                            r,
+                            end,
+                            ScalarPointFaultCause::Delivery {
+                                operation: ScalarPointDeliveryOperation::Pending,
+                                error,
+                            },
+                            SampleTime(first.0 + cursor as u64),
+                            processed,
+                            Some(ScalarPointFaultProgress {
+                                ticket,
+                                record_count: count,
+                                native_applied_prefix: native,
+                                delivery_applied_prefix: delivered,
+                            }),
+                        );
+                    }
+                };
                 self.claimed = Some((ticket, delivered, count, next));
             }
             if delivered == count {

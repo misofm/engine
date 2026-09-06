@@ -1143,6 +1143,23 @@ fn preparation_resources_and_success_path_are_bounded() {
     let liveness = bench_alloc::delta_since(liveness_mark);
     assert!(liveness.allocations > 0, "allocation counter is not live");
     assert!(liveness.deallocations > 0, "free counter is not live");
+    audit::warm_up();
+    audit::reset();
+    audit::in_render_scope(|| {
+        let probe = black_box(vec![0_u8; 4_096]);
+        black_box(&probe);
+        drop(probe);
+    });
+    let audit_liveness = audit::snapshot();
+    assert!(
+        audit_liveness.allocations > 0,
+        "render-audit allocation counter is not live"
+    );
+    assert!(
+        audit_liveness.deallocations > 0,
+        "render-audit deallocation counter is not live"
+    );
+    audit::reset();
 
     let cfg = config();
     let expected_delivery = PreparedAutomationDelivery::resource_report_for_config(cfg).unwrap();
