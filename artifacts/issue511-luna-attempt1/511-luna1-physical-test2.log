@@ -1,0 +1,27 @@
+   Compiling graph v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/graph)
+   Compiling builtins-compiler v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/builtins-compiler)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.65s
+     Running tests/allocation_tracker.rs (target/debug/deps/allocation_tracker-0b3098f71078d54f)
+
+running 1 test
+test actual_runtime_bank_slot_owners_fit_retained_largest_and_conversion_reservation ... FAILED
+
+failures:
+
+---- actual_runtime_bank_slot_owners_fit_retained_largest_and_conversion_reservation stdout ----
+
+thread 'actual_runtime_bank_slot_owners_fit_retained_largest_and_conversion_reservation' (648418) panicked at crates/builtins-compiler/tests/allocation_tracker.rs:533:5:
+assertion failed: snapshot.layouts.iter().any(|layout|
+        {
+            layout.size_bytes == ownership.stage_pointer_bytes as u64 &&
+                layout.allocation_count > 0
+        })
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    actual_runtime_bank_slot_owners_fit_retained_largest_and_conversion_reservation
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p builtins-compiler --test allocation_tracker`

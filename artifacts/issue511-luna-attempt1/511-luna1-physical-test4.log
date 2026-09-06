@@ -1,0 +1,19 @@
+   Compiling graph v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/graph)
+warning: unused variable: `requested_stage_capacity`
+    --> crates/graph/src/runtime.rs:1505:10
+     |
+1505 |     let [requested_stage_capacity, retained_slot_capacity] =
+     |          ^^^^^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_requested_stage_capacity`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling builtins-compiler v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/builtins-compiler)
+warning: `graph` (lib) generated 1 warning (run `cargo fix --lib -p graph` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.75s
+     Running tests/allocation_tracker.rs (target/debug/deps/allocation_tracker-0b3098f71078d54f)
+
+running 1 test
+test actual_runtime_bank_slot_owners_fit_retained_largest_and_conversion_reservation ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+

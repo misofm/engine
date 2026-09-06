@@ -1,0 +1,2 @@
+argv=cargo test --locked -p audit --bin audit fixture_builtins_listening::tests::level_match_attenuates_only_and_caps_peak -- --exact --release
+cwd=/home/bl/misofm/engine-audit-hash-authority

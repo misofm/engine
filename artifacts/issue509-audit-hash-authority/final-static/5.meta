@@ -1,0 +1,2 @@
+argv=bash scripts/check-realtime-audit-leak.sh
+cwd=/home/bl/misofm/engine-audit-hash-authority

@@ -1,0 +1,5 @@
+argv=[cargo test --locked --release -p graph-compiler --lib]
+cwd=/home/bl/misofm/engine-slot-reservation
+env=PATH=/home/bl/.cargo/bin:$PATH
+exit=101
+exit=101

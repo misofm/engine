@@ -1,0 +1,2 @@
+argv=git diff --check
+cwd=/home/bl/misofm/engine-audit-hash-authority

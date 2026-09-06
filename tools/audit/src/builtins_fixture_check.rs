@@ -7,6 +7,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use bench_support::digest::sha256_hex as sha256;
 use dsp_reference::{ReferenceRetainedTptF32, ReferenceTptOutput};
 use sha2::{Digest, Sha256};
 
@@ -499,17 +500,21 @@ fn tree_hash(root: &Path) -> Result<[u8; 32], String> {
     Ok(digest.finalize().into())
 }
 
-fn sha256(bytes: &[u8]) -> String {
-    let mut output = String::with_capacity(64);
-    for byte in Sha256::digest(bytes) {
-        write!(&mut output, "{byte:02x}").expect("string");
-    }
-    output
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_sha256_alias_matches_published_literals() {
+        assert_eq!(
+            sha256(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            sha256(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
 
     #[test]
     fn issue069_checker_is_read_only_and_rejects_payload_mutation() {

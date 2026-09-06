@@ -1,0 +1,2 @@
+argv=cargo clippy --locked -p audit --bin audit --all-targets -- -D warnings
+cwd=/home/bl/misofm/engine-audit-hash-authority

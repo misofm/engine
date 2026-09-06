@@ -60,3 +60,5 @@ Root may proceed to delivery preparation with accepted source identity preserved
 ## Delivered and remotely closed
 
 PR507 merged at2026-09-06T06:44:45Z as0fc4e9592453171f9900aececa156576203d8a55. Astra exact-head PASS applies to4b29296d5cf307227c76e12db537e1824e517ea0; required qualification34016958560 completed SUCCESS on that same head before merge. GitHub #506 is verified CLOSED. All three bench-package local encoders now use the existing shared authority, preserving finalized bytes and hash boundaries. CP20 remains PARTIAL across other owned encoders. No timing authority was consumed. Post-main CI is monitored separately.
+
+Post-main qualification34017298536 at0fc4e9592453171f9900aececa156576203d8a55 completed SUCCESS. Both required pre-merge and post-main CI are green.

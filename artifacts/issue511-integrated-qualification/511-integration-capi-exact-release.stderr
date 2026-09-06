@@ -1,0 +1,46 @@
+   Compiling engine v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/engine)
+   Compiling lexical-util v1.0.7
+   Compiling once_cell v1.21.4
+   Compiling smallvec v1.15.2
+   Compiling utf8-decode v1.0.1
+   Compiling decoded-char v0.1.1
+   Compiling locspan v0.8.2
+   Compiling effect-runtime v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/effect-runtime)
+   Compiling libc v0.2.189
+   Compiling smallstr v0.3.1
+   Compiling effect-contract v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/effect-contract)
+   Compiling lexical-write-integer v1.0.6
+   Compiling lexical-parse-integer v1.0.6
+   Compiling lexical-parse-float v1.0.6
+   Compiling getrandom v0.2.17
+   Compiling lexical-write-float v1.0.6
+   Compiling ahash v0.7.8
+   Compiling rack v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/rack)
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/compressor)
+   Compiling soft-clip v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/soft-clip)
+   Compiling multiband-compressor v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/multiband-compressor)
+   Compiling true-peak-limiter v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/true-peak-limiter)
+   Compiling delay v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/delay)
+   Compiling gate-expander v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/gate-expander)
+   Compiling parametric-eq v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/parametric-eq)
+   Compiling transient-shaper v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/transient-shaper)
+   Compiling builtins v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/builtins)
+   Compiling hashbrown v0.12.3
+   Compiling lexical-core v1.0.6
+   Compiling lexical v7.0.5
+   Compiling json-number v0.4.10
+   Compiling graph v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/graph)
+   Compiling rack-compiler v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/rack-compiler)
+   Compiling indexmap v1.9.3
+   Compiling json-syntax v0.12.5
+   Compiling session v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/session)
+   Compiling effect-package v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/effect-package)
+   Compiling builtins-compiler v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/builtins-compiler)
+   Compiling protocol v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/protocol)
+   Compiling source v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/source)
+   Compiling effect-compiler v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/effect-compiler)
+   Compiling graph-compiler v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/graph-compiler)
+   Compiling host-core v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/host-core)
+   Compiling capi v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/capi)
+    Finished `release` profile [optimized + debuginfo] target(s) in 36.63s
+     Running tests/resource_lifecycle.rs (target/release/deps/resource_lifecycle-c3764b7a4fd38077)

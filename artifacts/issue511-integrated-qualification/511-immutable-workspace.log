@@ -1,0 +1,668 @@
+   Compiling cfg-if v1.0.4
+   Compiling engine v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/engine)
+   Compiling bytemuck v1.25.2
+   Compiling typenum v1.20.1
+   Compiling cpufeatures v0.3.0
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.47
+   Compiling serde_core v1.0.228
+   Compiling serde v1.0.228
+   Compiling version_check v0.9.5
+   Compiling libc v0.2.189
+   Compiling once_cell v1.21.4
+   Compiling autocfg v1.5.1
+   Compiling lexical-util v1.0.7
+   Compiling syn v1.0.109
+   Compiling locspan v0.8.2
+   Compiling utf8-decode v1.0.1
+   Compiling decoded-char v0.1.1
+   Compiling dsp-reference v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/dsp-reference)
+   Compiling memchr v2.8.3
+   Compiling foldhash v0.2.0
+   Compiling zmij v1.0.23
+   Compiling stable_deref_trait v1.2.1
+   Compiling serde_json v1.0.151
+   Compiling libm v0.2.16
+   Compiling itoa v1.0.18
+   Compiling regex-syntax v0.8.11
+   Compiling lazy_static v1.5.0
+   Compiling log v0.4.33
+   Compiling writeable v0.6.4
+   Compiling litemap v0.8.3
+   Compiling icu_properties_data v2.3.0
+   Compiling utf8_iter v1.0.4
+   Compiling icu_normalizer_data v2.3.0
+   Compiling getrandom v0.3.4
+   Compiling ref-cast v1.0.27
+   Compiling wasmtime-internal-core v47.0.3
+   Compiling parking_lot_core v0.9.12
+   Compiling zerocopy v0.8.56
+   Compiling scopeguard v1.2.0
+   Compiling cranelift-srcgen v0.134.4
+   Compiling borrow-or-share v0.2.4
+   Compiling bit-vec v0.8.0
+   Compiling outref v0.5.2
+   Compiling vsimd v0.8.0
+   Compiling percent-encoding v2.3.2
+   Compiling find-msvc-tools v0.1.11
+   Compiling thiserror v2.0.20
+   Compiling uuid v1.26.0
+   Compiling shlex v2.0.1
+   Compiling base64 v0.22.1
+   Compiling bitflags v2.13.1
+   Compiling cranelift-isle v0.134.3
+   Compiling bytecount v0.6.9
+   Compiling num-cmp v0.1.0
+   Compiling equivalent v1.0.2
+   Compiling target-lexicon v0.13.5
+   Compiling heck v0.5.0
+   Compiling cranelift-codegen-shared v0.134.4
+   Compiling fnv v1.0.7
+   Compiling cpufeatures v0.2.17
+   Compiling allocator-api2 v0.2.21
+   Compiling hashbrown v0.16.1
+   Compiling safe_arch v1.2.0
+   Compiling hashbrown v0.17.1
+   Compiling arbitrary v1.4.2
+   Compiling lock_api v0.4.14
+   Compiling rustc-hash v2.1.3
+   Compiling crc32fast v1.5.1
+   Compiling anyhow v1.0.104
+   Compiling object v0.39.1
+   Compiling leb128fmt v0.1.0
+   Compiling termcolor v1.4.1
+   Compiling proc-macro-error-attr v1.0.4
+   Compiling ahash v0.7.8
+   Compiling proc-macro-error v1.0.4
+   Compiling ahash v0.8.12
+   Compiling generic-array v0.14.7
+   Compiling indexmap v1.9.3
+   Compiling num-traits v0.2.19
+   Compiling cranelift-assembler-x64-meta v0.134.4
+   Compiling bit-set v0.8.0
+   Compiling cc v1.4.3
+   Compiling bumpalo v3.20.3
+   Compiling wasmtime-internal-component-util v47.0.3
+   Compiling wasmtime-internal-unwinder v47.0.3
+   Compiling rustix v1.1.4
+   Compiling either v1.18.0
+   Compiling linux-raw-sys v0.12.1
+   Compiling wasmtime-internal-cranelift v47.0.3
+   Compiling rustversion v1.0.23
+   Compiling tracing-core v0.1.36
+   Compiling pin-project-lite v0.2.17
+   Compiling aho-corasick v1.1.5
+   Compiling wasm-encoder v0.252.0
+   Compiling sharded-slab v0.1.7
+   Compiling thread_local v1.1.10
+   Compiling semver v1.0.28
+   Compiling nu-ansi-term v0.50.3
+   Compiling scoped-tls v1.0.1
+   Compiling wide v1.6.1
+   Compiling lexical-write-integer v1.0.6
+   Compiling lexical-parse-integer v1.0.6
+   Compiling uuid-simd v0.8.0
+   Compiling itertools v0.14.0
+   Compiling rustc_version v0.4.1
+   Compiling lexical-parse-float v1.0.6
+   Compiling hybrid-array v0.4.14
+   Compiling tracing v0.1.44
+   Compiling tracing-log v0.2.0
+   Compiling lexical-write-float v1.0.6
+   Compiling cranelift-control v0.134.4
+   Compiling flatbuffers v25.12.19
+   Compiling lexical-core v1.0.6
+   Compiling syn v2.0.119
+   Compiling syn v3.0.3
+   Compiling lexical v7.0.5
+   Compiling block-buffer v0.12.1
+   Compiling crypto-common v0.2.2
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.1.7
+   Compiling digest v0.10.7
+   Compiling getrandom v0.2.17
+   Compiling generator v0.8.9
+   Compiling num-integer v0.1.47
+   Compiling num-complex v0.4.6
+   Compiling sha2 v0.10.9
+   Compiling cranelift-assembler-x64 v0.134.4
+   Compiling hashbrown v0.12.3
+   Compiling num-bigint v0.4.8
+   Compiling num-iter v0.1.46
+   Compiling regex-automata v0.4.18
+   Compiling digest v0.11.3
+   Compiling cranelift-bitset v0.134.3
+   Compiling sha2 v0.11.0
+   Compiling bench-support v0.1.0 (/home/bl/misofm/engine-slot-reservation/tools/bench-support)
+   Compiling locspan-derive v0.6.0
+   Compiling num-rational v0.4.2
+   Compiling memfd v0.6.5
+   Compiling num v0.4.3
+   Compiling fraction v0.15.4
+   Compiling indexmap v2.14.0
+   Compiling gimli v0.33.0
+   Compiling synstructure v0.13.2
+   Compiling regex v1.13.1
+   Compiling fancy-regex v0.16.2
+   Compiling matchers v0.2.0
+   Compiling zerovec-derive v0.11.6
+   Compiling displaydoc v0.2.7
+   Compiling ref-cast-impl v1.0.27
+   Compiling thiserror-impl v2.0.20
+   Compiling async-trait v0.1.92
+   Compiling serde_derive v1.0.228
+   Compiling zerofrom-derive v0.1.7
+   Compiling yoke-derive v0.8.2
+   Compiling pulley-macros v47.0.3
+   Compiling wasmtime-internal-versioned-export-macros v47.0.3
+   Compiling pulley-interpreter v47.0.3
+   Compiling wasmtime v47.0.3
+   Compiling cobs v0.3.0
+   Compiling zerofrom v0.1.8
+   Compiling yoke v0.8.3
+   Compiling zerovec v0.11.8
+   Compiling zerotrie v0.2.5
+   Compiling lane v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/lane)
+   Compiling tinystr v0.8.4
+   Compiling potential_utf v0.1.6
+   Compiling math v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/math)
+   Compiling target-smoke v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/target-smoke)
+   Compiling icu_collections v2.3.0
+   Compiling icu_locale_core v2.3.0
+   Compiling host-mobile v0.1.0 (/home/bl/misofm/engine-slot-reservation/hosts/host-mobile)
+   Compiling host-native v0.1.0 (/home/bl/misofm/engine-slot-reservation/hosts/host-native)
+   Compiling effect-contract v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/effect-contract)
+   Compiling effect-runtime v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/effect-runtime)
+   Compiling cranelift-codegen-meta v0.134.3
+   Compiling icu_provider v2.3.1
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/compressor)
+   Compiling soft-clip v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/soft-clip)
+   Compiling builtins v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/builtins)
+   Compiling parametric-eq v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/parametric-eq)
+   Compiling conformance v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/conformance)
+   Compiling multiband-compressor v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/multiband-compressor)
+   Compiling transient-shaper v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/transient-shaper)
+   Compiling true-peak-limiter v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/true-peak-limiter)
+   Compiling gate-expander v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/gate-expander)
+   Compiling delay v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/delay)
+   Compiling rack v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/rack)
+   Compiling icu_properties v2.3.0
+   Compiling smallvec v1.15.2
+   Compiling fluent-uri v0.3.2
+   Compiling email_address v0.2.9
+   Compiling postcard v1.1.3
+   Compiling wasmparser v0.252.0
+   Compiling graph v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/graph)
+   Compiling rack-compiler v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/rack-compiler)
+   Compiling effect-package v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/effect-package)
+   Compiling json-number v0.4.10
+   Compiling smallstr v0.3.1
+   Compiling icu_normalizer v2.3.0
+   Compiling regalloc2 v0.15.2
+   Compiling tracing-subscriber v0.3.23
+   Compiling wasm-gate-corpus v0.1.0 (/home/bl/misofm/engine-slot-reservation/tools/wasm-gate-corpus)
+   Compiling json-syntax v0.12.5
+   Compiling wasmtime-internal-jit-icache-coherence v47.0.3
+   Compiling parking_lot v0.12.5
+   Compiling cranelift-entity v0.134.3
+   Compiling referencing v0.33.0
+   Compiling idna_adapter v1.2.2
+   Compiling cranelift-bforest v0.134.3
+   Compiling session v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/session)
+   Compiling idna v1.1.0
+   Compiling jsonschema v0.33.0
+   Compiling loom v0.7.2
+   Compiling builtins-compiler v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/builtins-compiler)
+   Compiling protocol v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/protocol)
+   Compiling source v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/source)
+   Compiling wasm-gate-guest v0.1.0 (/home/bl/misofm/engine-slot-reservation/tools/wasm-gate-guest)
+   Compiling effect-compiler v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/effect-compiler)
+   Compiling cranelift-codegen v0.134.3
+   Compiling stem-hasher v0.1.0 (/home/bl/misofm/engine-slot-reservation/tools/stem-hasher)
+   Compiling graph-compiler v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/graph-compiler)
+   Compiling session-validator v0.1.0 (/home/bl/misofm/engine-slot-reservation/tools/session-validator)
+   Compiling console-workload v0.1.0 (/home/bl/misofm/engine-slot-reservation/tools/console-workload)
+   Compiling host-core v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/host-core)
+   Compiling bench v0.1.0 (/home/bl/misofm/engine-slot-reservation/tools/bench)
+   Compiling wasm-console-guest v0.1.0 (/home/bl/misofm/engine-slot-reservation/tools/wasm-console-guest)
+   Compiling host-web v0.1.0 (/home/bl/misofm/engine-slot-reservation/hosts/host-web)
+   Compiling capi v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/capi)
+   Compiling wasmprinter v0.252.0
+   Compiling parameter-metadata v0.1.0 (/home/bl/misofm/engine-slot-reservation/tools/parameter-metadata)
+   Compiling native-pcm-runner v0.1.0 (/home/bl/misofm/engine-slot-reservation/tools/native-pcm-runner)
+   Compiling audit v0.1.0 (/home/bl/misofm/engine-slot-reservation/tools/audit)
+   Compiling wasmtime-environ v47.0.3
+   Compiling cranelift-native v0.134.3
+   Compiling cranelift-frontend v0.134.3
+   Compiling wasm-gates v0.1.0 (/home/bl/misofm/engine-slot-reservation/tools/wasm-gates)
+   Compiling wasm-console v0.1.0 (/home/bl/misofm/engine-slot-reservation/tools/wasm-console)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 22.36s
+     Running unittests src/main.rs (/tmp/engine-511-workspace-qualified/debug/deps/audit-02611fef8a36fbc1)
+
+running 36 tests
+test builtins_fixture_check::tests::shared_sha256_alias_matches_published_literals ... ok
+test capi::tests::serializer_names_all_nine_forbidden_counters_exactly ... ok
+test builtins_graph::tests::issue070_retirement_worker_source_is_limited_to_nonblocking_primitives ... ok
+test builtins_fixture_check::tests::issue069_author_is_not_reachable_from_audit_mains ... ok
+test capi::tests::audit_plan_is_fixed_non_timed_and_calls_the_c_entrypoint ... ok
+test fixture_builtins::tests::shared_sha256_alias_matches_published_literals ... ok
+test fixture_builtins::tests::owned_jsonl_parsers_reject_duplicate_extra_reordered_and_wrong_variants ... ok
+test fixture_builtins_listening::tests::level_match_attenuates_only_and_caps_peak ... ok
+test fixture_builtins_listening::tests::shared_sha256_alias_matches_published_literals ... ok
+test source::tests::asserted_worker_lifecycle_counter_and_pcm_transcript_is_canonical ... ok
+test source_fixture::tests::shared_sha256_alias_matches_published_literals ... ok
+test vectorization::tests::shared_sha256_alias_matches_published_literals ... ok
+test vectorization::tests::incomplete_allowlist_is_red ... ok
+test vectorization::tests::fused_multiply_add_is_red ... ok
+test vectorization::tests::missing_vector_family_is_red ... ok
+test vectorization::tests::scalar_fallback_is_red ... ok
+test vectorization::tests::call_inside_kernel_body_is_red ... ok
+test source_duration::tests::exact_duration_independent_accounting_serialization_is_canonical ... ok
+test builtins_fixture_check::tests::issue069_checker_is_read_only_and_rejects_payload_mutation ... ok
+test fixture_builtins::tests::issue061_unsuffixed_ramp_and_reset_script_have_frozen_semantics ... ok
+test fixture_builtins_listening::tests::probe_seed_and_cli_rejections_are_exact ... ok
+test source_fixture::tests::generated_fixtures_match_manifest_oracles_and_mutation_policy ... ok
+test builtins_graph::tests::issue069_two_graph_instances_prove_success_and_saturation_without_duplicates ... ok
+test builtins_graph::tests::issue070_retirement_worker_is_ready_quiescent_and_owns_only_a ... ok
+test capi::tests::lifecycle_prepares_and_destroys_without_entering_render ... ok
+test fixture_builtins::tests::issue061_response_tuples_decimals_and_partitions_reject_semantic_mutations ... ok
+test fixture_builtins_listening::tests::block_events_wave_and_repeat_are_exact ... ok
+test fixture_builtins_listening::tests::output_is_closed_and_no_clobber ... ok
+test fixture_builtins::tests::issue064_checked_corpus_is_read_only_complete_and_has_no_authoring_reachability ... ok
+test fixture_builtins_listening::tests::strict_source_shape_edges_peak_and_finite_reject ... ok
+test fixture_builtins::tests::issue064_checked_corpus_rejects_exactly_twenty_four_corruptions ... ok
+test fixture_builtins::tests::check_rejects_all_twenty_four_format_mutations has been running for over 60 seconds
+test fixture_builtins::tests::check_rejects_benchmark_identity_parameter_and_pcm_hash_mutations has been running for over 60 seconds
+test fixture_builtins::tests::check_rejects_manifest_grammar has been running for over 60 seconds
+test fixture_builtins::tests::check_rejects_owned_jsonl_tuple_mutations has been running for over 60 seconds
+test fixture_builtins::tests::issue067_graph_pdc_and_dependent_identity_mutations_are_rejected has been running for over 60 seconds
+test fixture_builtins::tests::check_rejects_manifest_grammar ... ok
+test fixture_builtins::tests::check_rejects_all_twenty_four_format_mutations ... ok
+test fixture_builtins::tests::issue067_graph_pdc_and_dependent_identity_mutations_are_rejected ... ok
+test fixture_builtins::tests::check_rejects_benchmark_identity_parameter_and_pcm_hash_mutations ... ok
+test fixture_builtins::tests::check_rejects_owned_jsonl_tuple_mutations ... ok
+
+test result: ok. 36 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 82.47s
+
+     Running unittests src/main.rs (/tmp/engine-511-workspace-qualified/debug/deps/bench-df01d09e92a9181b)
+
+running 35 tests
+test builtins::tests::audited_allocator_is_live_outside_the_render_scope ... ok
+test builtins::tests::digest_helpers_encode_known_abc_without_rehashing_finalized_bytes ... ok
+test builtins::tests::matrix_targets_alternate_by_global_operation_across_batch_boundaries ... ok
+test builtins::tests::measured_plan_is_the_frozen_twenty_row_cartesian_set ... ok
+test builtins::tests::issue035_preparation_record_uses_only_required_null_and_not_applicable_values ... ok
+test conformance::tests::percentile_is_nearest_rank_and_escape_is_json_safe ... ok
+test floor::tests::a_control_row_is_always_cheaper_than_the_row_it_isolates ... ok
+test effect_interchange::tests::digest_hex_matches_known_abc_digest ... ok
+test builtins::tests::issue035_record_has_exact_render_identity_shape_and_typed_missing_metadata ... ok
+test floor::tests::every_derived_row_names_its_ruling_and_composes_a_positive_floor ... ok
+test floor::tests::the_compressor_isolate_is_the_compressor_inventory ... ok
+test floor::tests::the_current_effect_recount_keeps_fractional_link_work_and_composes_the_strip ... ok
+test floor::tests::the_mono_rows_carry_the_standing_strips_floor ... ok
+test floor::tests::the_overhead_inventories_differ_by_the_scaffolding_and_neither_row_claims_an_isolate ... ok
+test floor::tests::the_plumbing_row_is_the_floor_of_the_table_and_the_identity_pair_shares_one_inventory ... ok
+test floor::tests::the_sixty_four_track_block_has_the_lane_sample_count_the_rulings_quote ... ok
+test builtins::tests::checked_toml_and_referenced_pcm_drive_render_configuration_bit_exactly ... ok
+test graph::tests::nearest_rank_is_ordered_at_all_frozen_percentiles ... ok
+test graph::tests::sha256_hex_matches_known_abc_digest ... ok
+test rack::tests::nearest_rank_uses_the_frozen_one_thousand_observation_indices ... ok
+test session::tests::percentile_and_sha256_are_contract_stable ... ok
+test effect_interchange::tests::exact_four_rate_migration_envelope_without_timing ... ok
+test builtins::tests::benchmark_inputs_take_their_hashes_from_the_checked_manifest_rows ... ok
+test protocol::tests::jsonl_schema_record_carries_frozen_corpus_and_environment_fields ... ok
+test builtins::tests::real_meter_tap_plans_use_the_compiled_seven_taps_and_preserve_full_queue_state ... ok
+test protocol::tests::frozen_corpus_has_required_cardinality_and_checksum ... ok
+test protocol::tests::actual_flatbuffer_builder_and_bounded_verifier_agree ... ok
+test floor::tests::rust_and_jq_floor_tables_have_exact_key_value_parity ... ok
+test builtins::tests::preparation_projection_is_complete_address_free_and_deterministic ... ok
+test rack::tests::zero_launch_preflight_prepares_each_exact_production_workload ... ok
+test protocol::tests::btlv_sources_encode_and_decode_without_schema_escapes ... ok
+test graph::tests::canonical_benchmark_fixture_prepares_and_compiles ... ok
+test session::tests::representative_fixture_has_the_frozen_workload_and_stable_bytes ... ok
+test rack::tests::semantic_input_identity_is_layout_independent_and_workload_specific ... ok
+test builtins::tests::all_render_workloads_arm_only_product_render_without_timing ... ok
+
+test result: ok. 35 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.51s
+
+     Running unittests src/lib.rs (/tmp/engine-511-workspace-qualified/debug/deps/bench_support-e15bfd8a9bc9d9e9)
+
+running 29 tests
+test alloc::tests::delta_saturates_below_its_mark ... ok
+test alloc::tests::default_mode_is_abort ... ok
+test alloc::tests::the_installed_allocator_assertion_holds_here ... ok
+test alloc::tests::the_installed_allocator_is_the_audited_one ... ok
+test digest::tests::hex_encodes_empty_leading_zero_and_each_nibble ... ok
+test digest::tests::every_update_is_counted_and_a_one_shot_digest_is_not ... ok
+test digest::tests::matches_the_published_vectors ... ok
+test digest::tests::snapshot_does_not_consume_the_sink ... ok
+test json::tests::escapes_every_rfc_8259_two_character_form ... ok
+test digest::tests::incremental_updates_match_a_one_shot_digest ... ok
+test json::tests::escapes_remaining_control_characters_as_four_hex_digits ... ok
+test json::tests::leaves_ordinary_text_alone ... ok
+test json::tests::passes_non_ascii_through_unchanged ... ok
+test stats::tests::a_single_observation_is_every_percentile ... ok
+test metadata::tests::gather_is_memoized_and_matches_the_process_environment ... ok
+test stats::tests::frozen_indices_over_one_thousand_observations ... ok
+test stats::tests::is_monotone_in_the_position ... ok
+test stats::tests::small_samples_round_up_to_the_next_rank ... ok
+test stats::tests::the_numerator_denominator_form_matches_the_per_mille_form ... ok
+test stats::tests::rejects_an_empty_sample - should panic ... ok
+test sysinfo::tests::distinct_core_socket_pairs_are_counted_once_each ... ok
+test sysinfo::tests::empty_output_is_unknown ... ok
+test sysinfo::tests::header_only_output_is_unknown ... ok
+test sysinfo::tests::whitespace_only_output_is_unknown ... ok
+test timing::tests::a_pure_body_is_accepted ... ok
+test timing::tests::hashing_outside_the_timer_is_how_it_is_done ... ok
+test timing::tests::hashing_inside_the_timer_is_a_harness_defect - should panic ... ok
+test timing::tests::returns_the_operation_result ... ok
+test sysinfo::tests::returns_a_decimal_count_or_the_unknown_sentinel ... ok
+
+test result: ok. 29 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src/lib.rs (/tmp/engine-511-workspace-qualified/debug/deps/builtins-e199633334b728a2)
+
+running 7 tests
+test tests::full_public_chain_matches_the_three_section_reference ... ok
+test tests::eligibility_sequence_uses_whole_call_fallback_then_fuses_the_next_call ... ok
+test tests::post_ramp_symmetry_helper_is_off_for_settled_blocks ... ok
+test tests::post_ramp_symmetry_extracts_each_word_once ... ok
+test tests::post_ramp_symmetry_mask_matches_lane_oracle ... ok
+test tests::lane_symmetry_retarget_updates_only_the_addressed_predicate ... ok
+test tests::post_ramp_symmetry_handles_differing_words_countdowns_and_padding ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/contract.rs (/tmp/engine-511-workspace-qualified/debug/deps/contract-4393a298aea28ff0)
+
+running 4 tests
+test descriptor_domains_are_exhaustive_at_launch_rates ... ok
+test parameter_descriptors_have_complete_stable_contracts ... ok
+test compatibility_fallback_is_limited_to_the_exact_extended_rate_tier ... ok
+test representable_cutoff_domain_is_shared_by_descriptors_and_preparation ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/determinism.rs (/tmp/engine-511-workspace-qualified/debug/deps/determinism-b1cbf76b3ba05233)
+
+running 2 tests
+test no_corpus_case_is_vacuous_or_carries_a_nan ... ok
+test every_corpus_case_matches_its_pin_at_every_width ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/fader_ramp.rs (/tmp/engine-511-workspace-qualified/debug/deps/fader_ramp-f1790f2e1775f4da)
+
+running 8 tests
+test a_cross_block_ramp_is_partition_invariant ... ok
+test a_move_made_while_muted_applies_on_unmute ... ok
+test a_zero_window_move_takes_effect_on_the_first_sample ... ok
+test a_windowed_move_is_monotone_and_lands_exactly_on_its_target ... ok
+test a_zero_window_mute_is_the_exact_prepared_mute ... ok
+test the_fader_domain_is_enforced_at_the_setter ... ok
+test an_uncommanded_live_fader_is_bit_identical_to_the_prepared_one ... ok
+test mute_is_a_fader_endpoint_and_settles_to_exact_positive_zero ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/input_liveness.rs (/tmp/engine-511-workspace-qualified/debug/deps/input_liveness-36c7767e8835920c)
+
+running 13 tests
+test a_lane_selector_addresses_exactly_the_lanes_it_names ... ok
+test a_bank_refuses_a_retarget_addressed_past_its_members ... ok
+test the_live_trim_domain_is_the_declared_one ... ok
+test an_uncommanded_bank_keeps_its_elision_plan ... ok
+test trim_and_polarity_do_not_overwrite_each_other ... ok
+test an_uncommanded_live_input_renders_the_prepared_coefficients ... ok
+test the_settled_arm_leaves_the_ramp_words_untouched ... ok
+test the_trim_ramp_is_partition_invariant ... ok
+test a_ramping_block_leaves_an_elidable_banks_integrators_at_positive_zero ... ok
+test a_banked_lane_ramps_exactly_as_the_same_track_alone ... ok
+test settled_and_ramping_paths_agree_on_an_elided_bank ... ok
+test a_polarity_flip_crosses_zero_and_settles_at_the_reprepared_coefficient ... ok
+test the_trim_ramp_is_bit_identical_to_the_parameter_smoother ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/input_liveness_mono.rs (/tmp/engine-511-workspace-qualified/debug/deps/input_liveness_mono-9f8aa6f0d7109817)
+
+running 8 tests
+test re_equalising_the_words_restores_the_designed_term_and_nothing_more ... ok
+test channels_agree_covers_the_trim_ramp_record ... ok
+test an_asymmetric_retarget_declines_the_lane_on_the_admitting_block ... ok
+test a_collapsed_block_keeps_the_two_channels_ramp_records_equal ... ok
+test a_symmetric_retarget_keeps_the_lane_eligible ... ok
+test the_disengage_copy_still_restores_the_integrators ... ok
+test a_symmetric_ride_through_a_collapse_renders_never_collapsed_bits ... ok
+test a_retarget_between_a_collapsed_block_and_the_disengage_survives_the_copy ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/matrix.rs (/tmp/engine-511-workspace-qualified/debug/deps/matrix-52a3575866254045)
+
+running 7 tests
+test explicit_window_retarget_ramps_over_the_requested_window_and_is_adopted ... ok
+test matrix_ramp_reaches_target ... ok
+test settled_identity_matrix_preserves_signed_zero ... ok
+test zero_window_snaps_and_reset_cancels_a_ramp ... ok
+test matrix_retarget_mid_ramp_matches_the_reference ... ok
+test matrix_ramp_tracks_the_f64_interpolation ... ok
+test matrix_ramp_matches_reference_d11_law ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/meter.rs (/tmp/engine-511-workspace-qualified/debug/deps/meter-3f6305517d757e65)
+
+running 7 tests
+test a_settled_silent_block_is_bit_identical_through_the_early_out ... ok
+test meter_peak_of_signed_zeros_is_positive_zero ... ok
+test meter_windows_are_exact ... ok
+test meter_windows_discontinuities_resets_and_drops_are_exact ... ok
+test silence_against_a_nonzero_held_peak_still_decays ... ok
+test meter_segment_law_is_exact ... ok
+test ten_thousand_deterministic_meter_mutations_remain_bounded_and_finite ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/mono_collapse.rs (/tmp/engine-511-workspace-qualified/debug/deps/mono_collapse-1b6804b571a17a06)
+
+running 2 tests
+test the_collapsed_body_publishes_the_dual_bodys_report ... ok
+test a_desymmetrized_bank_is_a_never_collapsed_bank ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/response.rs (/tmp/engine-511-workspace-qualified/debug/deps/response-468cadb41f2d4f5c)
+
+running 8 tests
+test launch_and_extended_compatibility_rates_match_the_independent_f64_rbj_oracle ... ok
+test launch_and_extended_compatibility_rate_sweeps_match_f64_magnitude ... ok
+test cast_tpt_state_space_matches_independent_rbj_transfer_at_compatibility_rates ... ok
+test ten_thousand_bounded_parameter_and_block_mutations_stay_finite ... ok
+test production_order_hpf_lpf_cascade_meets_all_launch_response_gates ... ok
+test representable_cutoff_domain_prepares_everywhere_and_rejects_successor ... ok
+test coherent_sustained_sines_cover_launch_and_extended_compatibility_rates ... ok
+test one_second_impulse_dfts_match_rbj_at_launch_and_extended_compatibility_rates ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 16.60s
+
+     Running tests/speed.rs (/tmp/engine-511-workspace-qualified/debug/deps/speed-6548b5cc277bdfd7)
+
+running 1 test
+test bench_input_stage_ns_per_track_frame ... ignored, descriptive timing, run by hand
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/stage.rs (/tmp/engine-511-workspace-qualified/debug/deps/stage-e6c249b90d6913d2)
+
+running 12 tests
+test a_settled_banked_mute_is_exactly_positive_zero ... ok
+test polarity_trim_fader_and_matrix_are_exact ... ok
+test prepared_sections_match_reference_coefficients ... ok
+test signed_zero_and_mute_laws ... ok
+test bank_construction_accepts_one_to_width_members_only ... ok
+test boundary_check_is_lane_local_per_block ... ok
+test identity_sections_are_elided_only_when_every_lane_and_word_says_so ... ok
+test partition_invariance_over_master_plan_quanta ... ok
+test engine_tan_agrees_with_the_platform_to_one_ulp_over_the_cutoff_domain ... ok
+test bank_is_bit_identical_to_scalar_stage_at_every_width ... ok
+test banked_fader_and_matrix_are_bit_identical_to_the_per_track_sections ... ok
+test scalar_stage_is_bit_identical_to_reference_recurrence ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+     Running unittests src/lib.rs (/tmp/engine-511-workspace-qualified/debug/deps/builtins_compiler-09d1b1f305bb830e)
+
+running 38 tests
+test tests::builtin_bank_resource_charges_two_planes_and_actual_members ... ok
+test tests::builtin_bank_layout_regroups_by_dependency_wave_and_scalar_falls_back ... ok
+test tests::delegated_source_rejection_restores_private_and_external_ownership ... ok
+test tests::scalar_factory_checks_both_exact_owners_and_policies_without_consuming_state ... ok
+test tests::scalar_invalid_envelope_leaves_the_later_matrix_queue_untouched ... ok
+test tests::scalar_pair_reset_matches_reset_original_owners ... ok
+test tests::a_prepared_session_that_lost_a_strip_fails_validation ... ok
+test tests::the_per_node_console_input_processor_drains_and_folds_its_witness ... ok
+test tests::source_set_bind_succeeds_with_private_builtin_and_external_ownership ... ok
+test tests::source_set_bind_prevalidation_returns_all_ownership_for_each_code ... ok
+test tests::rejects_duplicate_and_unknown_meter_transactionally ... ok
+test tests::console_control_requests_are_validated_sealed_and_charged_per_track ... ok
+test tests::prepares_three_sections_and_each_named_meter_tap ... ok
+test tests::resource_estimate_enforces_the_actual_largest_retained_payload ... ok
+test tests::scalar_owner_resource_is_independent_two_boxes_plus_two_pointer_outer ... ok
+test tests::retained_payload_boundaries_reject_in_phase_one ... ok
+test tests::cutoff_boundaries_match_compiler_diagnostics_at_every_launch_rate_and_section ... ok
+test tests::control_delivery_metadata_reaches_both_sealed_strip_bank_owners ... ok
+test tests::a_post_fader_meter_declines_its_cohort_while_the_tail_pair_still_fuses ... ok
+test tests::track_bits_do_not_depend_on_session_track_count ... ok
+test tests::actual_graph_mono_collapse_disengages_on_input_command_and_recovers_nonfinite_input ... ok
+test tests::actual_scalar_effect_sidechain_declines_and_matches_separate_owner_data_and_state ... ok
+test tests::actual_scalar_extra_reader_declines_and_retains_separate_owner_pcm ... ok
+test tests::actual_scalar_graph_preserves_scheduled_matrix_prefix_error_and_queue_tail ... ok
+test tests::actual_scalar_nonunity_send_reader_declines_with_reference_output ... ok
+test tests::actual_scalar_graph_queues_fuse_and_fall_back_against_separate_owners ... ok
+test tests::banked_tracks_are_bit_identical_to_their_scalar_tails ... ok
+test tests::composite_live_sequence_matches_original_owners_and_discriminates_both_branches ... ok
+test tests::composite_raw_record_errors_preserve_the_frozen_arithmetic_order ... ok
+test tests::declined_factory_owners_keep_queued_state_and_render_in_original_order ... ok
+test tests::late_factory_guards_return_live_policy_width_and_population_owners ... ok
+test tests::pair_factory_declines_wrong_order_policy_and_shape_with_original_owners ... ok
+test tests::queued_three_sample_ramp_crosses_call_boundary_before_fusing ... ok
+test tests::serialized_live_fader_matrix_is_selected_by_the_bound_render_path ... ok
+test tests::serialized_alias_observer_is_the_decline_boundary ... ok
+test tests::serialized_send_reader_declines_crossing_fader_while_pcm_matches_separate ... ok
+test tests::staggered_observed_scalar_track_stays_separate_while_eligible_peer_pairs ... ok
+test tests::deterministic_builtin_compiler_mutation_matrix_has_exactly_ten_thousand_cases ... ok
+
+test result: ok. 38 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.28s
+
+     Running tests/allocation_tracker.rs (/tmp/engine-511-workspace-qualified/debug/deps/allocation_tracker-352c0b6698949641)
+
+running 7 tests
+test actual_queued_graph_phases_allocate_and_free_nothing ... ok
+test actual_runtime_bank_slot_owners_fit_retained_largest_and_conversion_reservation ... ok
+test actual_queued_scalar_graph_allocates_and_frees_nothing ... ok
+test actual_scalar_prepare_and_bind_retain_the_charged_owner_layouts ... ok
+test actual_serialized_composite_render_allocates_and_frees_nothing ... ok
+test phase_two_allocator_layouts_are_stable_across_repeated_measured_prepares ... ok
+test phase_two_allocator_layouts_match_the_checked_resource_report ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 17.96s
+
+     Running tests/builtin_automation_targets.rs (/tmp/engine-511-workspace-qualified/debug/deps/builtin_automation_targets-253140acbc1e6d04)
+
+running 3 tests
+test builtin_automation_targets_match_the_parameter_abi ... ok
+test refused_targets_are_exactly_the_prepared_only_rows ... ok
+test the_builtin_automation_effect_id_is_the_strip ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/input_drain.rs (/tmp/engine-511-workspace-qualified/debug/deps/input_drain-9d18b6a59cac7fa3)
+
+running 5 tests
+test both_variants_answer_the_hook_identically_for_the_same_selector ... ok
+test a_per_lane_record_desymmetrizes_and_a_both_record_preserves ... ok
+test re_equalising_the_words_does_not_re_arm_the_live_term ... ok
+test the_live_term_survives_a_symmetric_ride_and_not_a_one_lane_one ... ok
+test the_input_record_is_upstream_of_the_seam ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/scale.rs (/tmp/engine-511-workspace-qualified/debug/deps/scale-094844ceff632213)
+
+running 1 test
+test prepares_65_537_tracks_or_rejects_only_the_configured_resource ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.24s
+
+     Running tests/track_delay_domain.rs (/tmp/engine-511-workspace-qualified/debug/deps/track_delay_domain-4b1a9fbe8da90b18)
+
+running 2 tests
+test the_descriptor_and_the_schema_publish_the_same_delay_domain ... ok
+test a_declared_delay_changes_no_prepared_builtin_byte ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/tmp/engine-511-workspace-qualified/debug/deps/capi-73ee5587372b5c1c)
+
+running 31 tests
+test abi::tests::frozen_sizes_alignments_and_representative_offsets_match ... ok
+test abi::tests::masks_and_result_codes_are_frozen ... ok
+test ffi::tests::engine_creation_is_transactional_and_validates ... ok
+test ffi::tests::compile_diagnostics_query_is_atomic_and_handle_local ... ok
+test ffi::tests::engine_last_error_uses_empty_query_result ... ok
+test ffi::tests::query_rejects_null_and_wrong_size_without_a_write ... ok
+test ffi::tests::version_and_capabilities_are_exact ... ok
+test ffi::tests::wrong_live_handle_kind_is_rejected_by_stub ... ok
+test runtime::tests::fp_environment::the_fp_environment_refusal_names_its_own_check ... ok
+test ffi::tests::ffi_never_forms_a_whole_plan_reference ... ok
+test runtime::tests::barrier_schedule_separates_one_source_producer_from_exclusive_render ... ok
+test ffi::tests::oversized_borrowed_lengths_are_rejected_before_any_read ... ok
+test ffi::tests::source_rejections_reach_the_c_host_as_their_own_diagnostic ... ok
+test runtime::tests::fp_environment::a_rejected_c_render_also_restores_the_callers_word ... ok
+test runtime::tests::generated_session_prepares_independent_source_and_plan_ownership ... ok
+test ffi::tests::plan_resources_does_not_clear_the_render_diagnostic ... ok
+test runtime::tests::plan_first_destroy_guards_structural_publication_without_visible_mutation ... ok
+test ffi::tests::misaligned_planes_and_output_are_rejected ... ok
+test ffi::tests::render_rejections_name_their_single_check ... ok
+test runtime::tests::c_commands_observe_the_rendered_plan_sample ... ok
+test runtime::tests::c_commands_publish_the_replacement_parameter_catalog ... ok
+test runtime::tests::capi_controller_dispatches_every_advertised_command_family ... ok
+test ffi::tests::compile_publishes_both_children_and_source_control_is_region_checked ... ok
+test runtime::tests::all_six_event_families_cross_c_dequeue_with_exact_oracle_bytes ... ok
+test runtime::tests::ring_zero_derives_from_the_document_and_matches_the_explicit_value ... ok
+test runtime::tests::exported_c_replay_revision_event_and_publication_pressure_statuses_are_exact ... ok
+test runtime::tests::structural_command_keeps_protocol_plan_provider_and_event_epochs_atomic ... ok
+test runtime::tests::fp_environment::the_c_render_entry_is_canonical_under_a_caller_that_set_ftz_and_daz ... ok
+test runtime::tests::direct_and_c_render_match_one_and_ten_tracks_across_launch_rates ... ok
+test runtime::tests::every_structural_phase_and_ordered_dual_fault_preserves_owners_and_credits ... ok
+test ffi::tests::plan_queries_are_pure_and_concurrent_with_render ... ok
+
+test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.37s
+
+     Running tests/resource_lifecycle.rs (/tmp/engine-511-workspace-qualified/debug/deps/resource_lifecycle-16c0c834bc92af12)
+
+running 4 tests
+test render_diagnostic_egress_reuses_eager_capi_storage_without_allocation ... ok
+test external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps ... FAILED
+test tiny_control_frame_still_accounts_three_provider_counters_exactly ... ok
+test exported_c_candidates_replay_render_and_both_destroy_orders_balance_exactly ... ok
+
+failures:
+
+---- external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps stdout ----
+
+thread 'external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps' (751546) panicked at crates/capi/tests/resource_lifecycle.rs:2364:13:
+assertion `left == right` failed
+  left: PlanResourceReport { struct_size: 240, abi_version: 65536, sample_rate_hz: 48000, quantum_frames: 128, source_count: 1, track_count: 9, latency_samples: 31, tail_kind: 1, tail_samples: 0, graph_session_plus_plan_bytes: 227148, graph_incremental_plan_bytes: 227148, graph_metadata_bytes: 51247, graph_delay_bytes: 0, effect_bank_scratch_bytes: 8192, effect_bank_runtime_buffer_bytes: 8192, effect_bank_metadata_bytes: 648, builtin_bank_bytes: 9369, builtin_bank_scratch_bytes: 49152, source_pcm_payload_bytes: 8192, source_overhead_bytes: 2862, source_total_bytes: 11054, effect_scalar_state_bytes: 7560, effect_scalar_scratch_bytes: 216, builtin_processor_payload_bytes: 9963, builtin_meter_payload_bytes: 0, builtin_retained_payload_bytes: 9963, capi_retained_bytes: 160933, largest_named_allocation_bytes: 49167, reserved: [0, 0, 0, 0] }
+ right: PlanResourceReport { struct_size: 240, abi_version: 65536, sample_rate_hz: 48000, quantum_frames: 128, source_count: 1, track_count: 9, latency_samples: 31, tail_kind: 1, tail_samples: 0, graph_session_plus_plan_bytes: 226196, graph_incremental_plan_bytes: 226196, graph_metadata_bytes: 50295, graph_delay_bytes: 0, effect_bank_scratch_bytes: 8192, effect_bank_runtime_buffer_bytes: 8192, effect_bank_metadata_bytes: 648, builtin_bank_bytes: 9369, builtin_bank_scratch_bytes: 49152, source_pcm_payload_bytes: 8192, source_overhead_bytes: 2862, source_total_bytes: 11054, effect_scalar_state_bytes: 7560, effect_scalar_scratch_bytes: 216, builtin_processor_payload_bytes: 9963, builtin_meter_payload_bytes: 0, builtin_retained_payload_bytes: 9963, capi_retained_bytes: 160933, largest_named_allocation_bytes: 49167, reserved: [0, 0, 0, 0] }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps
+
+test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+
+error: test failed, to rerun pass `-p capi --test resource_lifecycle`

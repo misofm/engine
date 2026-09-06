@@ -1,0 +1,2 @@
+argv=cargo test --locked -p audit --bin audit fixture_builtins::tests::owned_jsonl_parsers_reject_duplicate_extra_reordered_and_wrong_variants --release -- --exact
+cwd=/home/bl/misofm/engine-audit-hash-authority

@@ -447,6 +447,21 @@ fn scratch_session() -> String {
     session::canonical_session_json(&model).expect("oracle canonical fixture")
 }
 
+/// Independent primitive restatement of #511's conservative slot coexistence allowance.
+fn scratch_slot_reservation() -> (u64, u64) {
+    let tracks = 9_u64;
+    let lanes = 8_u64;
+    let n = tracks / lanes + 3 * tracks.div_ceil(lanes);
+    let f = 2 * size_of::<usize>() as u64; // Boxed stage: data and vtable pointers.
+    let b = f + size_of::<Box<[bool]>>() as u64;
+    let w = lanes * size_of::<bool>() as u64;
+    assert_eq!((n, f, b, w), (7, 16, 32, 8));
+    let coexistence = n * (f + 3 * b + 3 * w);
+    let largest = (n * f).max(n * b).max(w);
+    assert_eq!((coexistence, largest), (952, 224));
+    (coexistence, largest)
+}
+
 /// The single-plan resource report of the scratch fixture.
 ///
 /// Issue #181 moved four of these fields by eight bytes: `size_of::<GraphPreparedEffectBank>()`
@@ -454,6 +469,8 @@ fn scratch_session() -> String {
 /// fixture binds one bank. `effect_bank_metadata_bytes` is where it lands; the three graph totals
 /// carry it upward.
 fn frozen_scratch_report(capi_retained_bytes: u64) -> PlanResourceReport {
+    let (slot_coexistence, slot_largest) = scratch_slot_reservation();
+    assert!(slot_largest < 49_167);
     PlanResourceReport {
         struct_size: PLAN_RESOURCE_REPORT_SIZE,
         abi_version: ABI_VERSION,
@@ -511,9 +528,9 @@ fn frozen_scratch_report(capi_retained_bytes: u64) -> PlanResourceReport {
         // still reports the chosen ring exactly in the source rows below.
         // #430 conservatively charges one 16-byte two-pointer outer owner for each of the two
         // potentially pairable fader banks. The owners are graph-plan payload.
-        graph_session_plus_plan_bytes: 226_196,
-        graph_incremental_plan_bytes: 226_196,
-        graph_metadata_bytes: 50_295,
+        graph_session_plus_plan_bytes: 226_196 + slot_coexistence,
+        graph_incremental_plan_bytes: 226_196 + slot_coexistence,
+        graph_metadata_bytes: 50_295 + slot_coexistence,
         graph_delay_bytes: 0,
         effect_bank_scratch_bytes: 8_192,
         effect_bank_runtime_buffer_bytes: 8_192,
@@ -1739,6 +1756,11 @@ fn graph_owners() -> Vec<PrimitiveOwner> {
             name: "builtin-bank two-plane scratch",
             bytes: effect_bank_plane * 2 * strip_banks,
         },
+        // Append to preserve the existing positional graph-metadata allocation oracle.
+        PrimitiveOwner {
+            name: "runtime bank-slot coexistence reservation",
+            bytes: scratch_slot_reservation().0,
+        },
     ]
 }
 
@@ -1920,7 +1942,11 @@ fn primitive_replacement_oracle(current: &str, prospective: &str) -> PrimitiveRe
     // #241: the two plans lose 4_096 queue + 8_192 ring projection each (-24_576), and the two
     // compiled models each shrink by 200 bytes (-400): 510_720 - 24_576 - 400 = 485_744.
     // #338: canonical JSON adds 8,082 retained bytes to each of the two live models.
-    assert_effective_owner_mutations(&graph, 502_228, "double-live graph/model");
+    assert_effective_owner_mutations(
+        &graph,
+        502_228 + 2 * scratch_slot_reservation().0,
+        "double-live graph/model",
+    );
 
     let source = source_owners();
     assert_eq!(owner_total(&source), 11_054, "primitive source total");
@@ -2322,7 +2348,7 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
     // See
     // `primitive_replacement_oracle` for the per-bank arithmetic.
     // #241: 510_720 - 2 x (4_096 queue + 8_192 ring) - 2 x 200 = 485_744.
-    assert_eq!(oracle.graph, 502_228);
+    assert_eq!(oracle.graph, 502_228 + 2 * scratch_slot_reservation().0);
     assert_eq!(oracle.source_total, 22_108);
     assert_eq!(oracle.source_overhead, 5_724);
     assert_eq!(oracle.effect_state, 15_120);

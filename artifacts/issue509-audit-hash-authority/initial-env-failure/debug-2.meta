@@ -1,0 +1,2 @@
+argv=cargo test --locked -p audit --bin audit vectorization::tests::
+cwd=/home/bl/misofm/engine-audit-hash-authority

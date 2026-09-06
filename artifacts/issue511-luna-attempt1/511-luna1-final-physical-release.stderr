@@ -1,0 +1,5 @@
+    Blocking waiting for file lock on build directory
+    Finished `release` profile [optimized + debuginfo] target(s) in 4.97s
+     Running tests/allocation_tracker.rs (target/release/deps/allocation_tracker-07c444198b779b67)
+ + debuginfo] target(s) in 19.35s
+     Running tests/allocation_tracker.rs (target/release/deps/allocation_tracker-07c444198b779b67)

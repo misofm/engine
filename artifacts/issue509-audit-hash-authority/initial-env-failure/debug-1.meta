@@ -1,0 +1,2 @@
+argv=cargo test --locked -p audit --bin audit shared_sha256_alias_matches_published_literals
+cwd=/home/bl/misofm/engine-audit-hash-authority

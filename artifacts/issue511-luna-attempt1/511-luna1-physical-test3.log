@@ -1,0 +1,19 @@
+   Compiling builtins-compiler v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/builtins-compiler)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.24s
+     Running tests/allocation_tracker.rs (target/debug/deps/allocation_tracker-0b3098f71078d54f)
+
+running 1 test
+
+thread 'actual_runtime_bank_slot_owners_fit_retained_largest_and_conversion_reservation' (648682) panicked at crates/builtins-compiler/tests/allocation_tracker.rs:533:5:
+stage pointer layout not observed: [BuiltinRetainedLayout { size_bytes: 8, align_bytes: 1, allocation_count: 3 }, BuiltinRetainedLayout { size_bytes: 96, align_bytes: 8, allocation_count: 1 }]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test actual_runtime_bank_slot_owners_fit_retained_largest_and_conversion_reservation ... FAILED
+
+failures:
+
+failures:
+    actual_runtime_bank_slot_owners_fit_retained_largest_and_conversion_reservation
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p builtins-compiler --test allocation_tracker`

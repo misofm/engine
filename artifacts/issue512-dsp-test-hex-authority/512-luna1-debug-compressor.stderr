@@ -1,0 +1,22 @@
+   Compiling bytemuck v1.25.2
+   Compiling typenum v1.20.1
+   Compiling engine v0.1.0 (/home/bl/misofm/engine-dsp-test-hex/crates/engine)
+   Compiling cfg-if v1.0.4
+   Compiling cpufeatures v0.3.0
+   Compiling dsp-reference v0.1.0 (/home/bl/misofm/engine-dsp-test-hex/crates/dsp-reference)
+   Compiling safe_arch v1.2.0
+   Compiling wide v1.6.1
+   Compiling hybrid-array v0.4.14
+   Compiling block-buffer v0.12.1
+   Compiling crypto-common v0.2.2
+   Compiling digest v0.11.3
+   Compiling sha2 v0.11.0
+   Compiling bench-support v0.1.0 (/home/bl/misofm/engine-dsp-test-hex/tools/bench-support)
+   Compiling lane v0.1.0 (/home/bl/misofm/engine-dsp-test-hex/crates/lane)
+   Compiling math v0.1.0 (/home/bl/misofm/engine-dsp-test-hex/crates/math)
+   Compiling effect-contract v0.1.0 (/home/bl/misofm/engine-dsp-test-hex/crates/effect-contract)
+   Compiling effect-runtime v0.1.0 (/home/bl/misofm/engine-dsp-test-hex/crates/effect-runtime)
+   Compiling conformance v0.1.0 (/home/bl/misofm/engine-dsp-test-hex/crates/conformance)
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-dsp-test-hex/crates/compressor)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.26s
+     Running tests/cross_target.rs (target/debug/deps/cross_target-278cc22dc0b34da8)
