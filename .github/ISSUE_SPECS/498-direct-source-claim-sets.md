@@ -1,5 +1,7 @@
 # 498: Collect graph source claim sets directly from borrowed claims
 
+Active Luna attempt 1; actual-base approval below supersedes historical queue wording.
+
 Queued control-plane maintenance after delivered #495. Source reviewed explicitly at396a97119583704888d7b2a20830c5720e16b189, graph/src/lib.rs blobc81d68d3779659a830ed596733f6c51e60ea71ef. Root must number/synchronize and verify actual implementation base before fresh Luna1. #475 remains the sole runtime feature. No implementation, tests/builds/timing or Git/GitHub mutations performed.
 
 ## Actual remaining product
@@ -29,3 +31,17 @@ One coherent Luna1 pass, Astra review, Sol2/3 only after finite FAIL, then hards
 ## Numbered actual-base checkpoint
 
 GitHub498 number and title match this stateless spec. Branch codex/cp4-direct-source-claims starts from delivered main396a97119583704888d7b2a20830c5720e16b189 and carries the pushed495 closure decision. Graph/Cargo/config match the reviewed delivered base. Root previous boundary audit found331 remote issues and235 local numbered specs with no missing remote identity before498 creation. This is independent control-plane maintenance; #475 remains the sole runtime feature. Await Astra numbered actual-base approval before fresh Luna1 assignment. No implementation or artifact build is authorized by this queue checkpoint.
+
+## Astra actual-base approval and assignment
+
+# Astra #498 numbered actual-base review — PASS
+
+Exact clean head2402100ef545d2e8882e24bcaba23623abb8b984 in engine-cp4-source-claims, based on delivered396a97119583704888d7b2a20830c5720e16b189. Complete approved source-claims brief body is preserved verbatim under the numbered title. Only498 spec and495 delivery/post-main-CI documentation differ from delivered main; crates/hosts/tools/Cargo/config/scripts source is identical. Root reports matching remote498 identity/body and495 required/post-main qualification success.
+
+Approve fresh Luna1 for the frozen two-caller transformation: collect the existing owned sets directly from borrowed claims, remove only the now-unused private claimed_nodes Vec helper, preserve original claims order/count/driver validation, error precedence, source-index mapping and returned ownership. Retain all other sets and the495 borrowed-union result. Exact graph/lib source and current real source-fanout/transactional tests remain applicable. No public API, source runtime, scheduler, resource layout, allocator framework, new matrix or timing is introduced.
+
+The unchanged numbered finite gates and actual command/source/status evidence requirements are sufficient. Root owns implementation assignment/checkpoints and later artifact applicability, actual-head PR review and required CI. #475's just-recorded final FAIL is preserved separately; #498 does not repair or overlap that runtime issue and may proceed as independent maintenance.
+
+Read-only source/Git inspection; no tests/builds/timing or source/spec/Git/GitHub mutations performed.
+
+Root assigns fresh Luna attempt1 within this scope. Root owns all Git/GitHub checkpoints. No timing or artifact qualification until source acceptance.
