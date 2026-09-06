@@ -75,3 +75,28 @@ Root adopts these fixture applicability corrections. #514 remains queued, with n
 ## Pre-edit native layout observation
 
 Root ran one temporary test-only probe against production base58ef9b23 and restored the test file exactly (clean status). ReadyOwnership/Option sizes are1336 with alignment8, host size1864/alignment8; prepared_host(128) bridge metadata6859, retained29087 and largest bridge/named19238. Actual raw proof is in artifacts/issue514-native-layout-baseline. This is native cfg(test) evidence only; later implementation-base dependency changes require applicability review, and shipped-Wasm resource proof remains separate. #514 stays queued, no implementation attempt consumed.
+
+## Independent implementation scheduling and actual-base approval
+
+Root supersedes the earlier queued status: #511 remains the sole launch-critical resource implementation; #514 is independent bounded host work in its own worktree with disjoint source/test paths. Integrated artifact/current-consumer/PR qualification stays deferred until #511 delivery and base integration. Fresh Luna attempt1 is activated only for the frozen host correction and local proof.
+
+# #514 actual implementation base — PASS
+
+Approve fresh Luna attempt 1 for the already frozen #514 host-only correction at clean `6ba60c46ff5af6187d6a8ddf44190a8aced1793f` in `/home/bl/misofm/engine-idle-admission-clear`, after root records the scheduling amendment in the numbered issue. This is implementation readiness at the actual source base, not integrated delivery qualification. Root can supersede the earlier queue wording without changing the product or evidence contract.
+
+Current inspection confirms:
+
+- The #514 tree is clean. Its delta from `a6a59030` is the #512 closure record, #514 spec, and native baseline artifacts only. There are no production/test/dependency changes from the reviewed native baseline at `58ef9b23`.
+- #514's allowed source paths are exactly `hosts/host-web/src/lib.rs` and `hosts/host-web/src/tests.rs`, plus its own spec/evidence. Active #511 work is confined to the six graph, graph-compiler and builtins-compiler source/test paths previously reviewed; its current worktree edits contain no host source. There is no source/test edit overlap.
+- The repository's one-launch-critical-issue rule explicitly permits genuinely independent bounded work without overlapping edits or unreliable broad gates. Keeping #511 as the sole launch-critical resource issue while implementing this separate host idle-clear optimization in its own worktree is consistent with that rule. #514 does not depend on the new slot reservation to implement or discriminate its private dirty flag.
+- The native pre-edit baseline remains applicable to #514's present source: ReadyOwnership and Option<ReadyOwnership> are 1,336 bytes/alignment 8, and AudioWorkletEngineHost is 1,864 bytes/alignment 8 in the recorded native debug cfg(test) run. Its hashes, exact probe reconstruction, restoration and one-test exit 0 were verified in `/tmp/astra-514-baseline-review.md`; this inspection finds no intervening source drift. Do not rerun the unchanged baseline merely because scheduling changed.
+
+Preserve the exact small implementation: one private boolean, initialization, immediate marking at each successful push/count increment, and guarded clearing at the existing successful-render fill site. Preserve admission, ack/application sample, queue drain order, backpressure and retained ownership. Use only the existing private host test module and a cfg(test) thread-local pair of actual fill-site counters. No new test framework, allocator, public helper, instance instrumentation field, feature, dependency or error injector is authorized.
+
+The existing frozen test and regressions remain mandatory. In particular, use the actual TimeOverflow seam: failed render retains the ready owner and pending counters/flag, produces the existing silence/status/diagnostic, and subsequent WRONG_STATE clears nothing. Do not fake recovery by resetting private state; a separate healthy host proves drain/refill. Preserve actual zero-emission solo coverage and the single unconditional-fill mutation against the same idle assertion. Keep native layout/resource comparison honest and obtain the existing bounded derived ruling before changing any numeric expectation.
+
+Defer #514's integrated artifact/current-consumer/PR qualification until #511 is delivered and root integrates the resulting default branch. At that point assess dependency/source drift and distinguish any #511 resource delta from the host flag's size/projection delta. The pre-#511 resource observation is not an oracle for unrelated post-integration owners. Retain the shipped-Wasm render closure allocation/deallocation/drop gate and its controls, native command-timeline identity, scalar/SIMD Wasm builds, unchanged PCM and ordinary required CI. No native layout result substitutes for that target-specific evidence, and no issue closure or integrated PASS follows from this readiness decision.
+
+Root owns spec/GitHub synchronization and exact-path checkpoints. The two worktrees must retain isolated source identities and output attribution; neither may qualify a candidate while its own sources are changing. Checkpoint each coherent green tranche before layering more implementation, as required. Shared delivery/artifact work stays serialized through root even while these independent source edits proceed.
+
+No builds, tests, timing, repository edits, Git mutations or GitHub mutations were performed. Only this requested temporary decision report was written.
