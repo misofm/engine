@@ -165,8 +165,8 @@ fn assert_pcm_bits(left: &[f32], right: &[f32]) {
 }
 
 fn warm(effect: &mut dyn PreparedNativeEffect) -> (Vec<f32>, Vec<f32>, ProcessReport) {
-    let mut left = noise(WARM_FRAMES, 0x5240_11, 0.73);
-    let mut right = noise(WARM_FRAMES, 0x5240_22, 0.61);
+    let mut left = noise(WARM_FRAMES, 0x0052_4011, 0.73);
+    let mut right = noise(WARM_FRAMES, 0x0052_4022, 0.61);
     let report = render_scalar(effect, &mut left, &mut right, 128, QUANTUM, &[]);
     (left, right, report)
 }
@@ -175,8 +175,8 @@ fn assert_identical_continuation(
     left_effect: &mut dyn PreparedNativeEffect,
     right_effect: &mut dyn PreparedNativeEffect,
 ) {
-    let mut left_a = noise(WARM_FRAMES, 0x5240_33, 0.67);
-    let mut right_a = noise(WARM_FRAMES, 0x5240_44, 0.59);
+    let mut left_a = noise(WARM_FRAMES, 0x0052_4033, 0.67);
+    let mut right_a = noise(WARM_FRAMES, 0x0052_4044, 0.59);
     let mut left_b = left_a.clone();
     let mut right_b = right_a.clone();
     let report_a = render_scalar(left_effect, &mut left_a, &mut right_a, 128, QUANTUM, &[]);
@@ -435,8 +435,8 @@ fn native_point_changes_target_without_advancing_samples() {
     );
     assert_observation_bits(observation_before, observe(&*via_point));
 
-    let mut point_left = noise(128, 0x5241_01, 0.71);
-    let mut point_right = noise(128, 0x5241_02, 0.63);
+    let mut point_left = noise(128, 0x0052_4101, 0.71);
+    let mut point_right = noise(128, 0x0052_4102, 0.63);
     let mut span_left = point_left.clone();
     let mut span_right = point_right.clone();
     let point_report = via_point.process(
@@ -478,8 +478,8 @@ fn advance(effect: &mut dyn PreparedNativeEffect, first_sample: &mut u64, frames
     if frames == 0 {
         return;
     }
-    let mut left = noise(frames, 0x5242_01 ^ *first_sample, 0.55);
-    let mut right = noise(frames, 0x5242_02 ^ *first_sample, 0.47);
+    let mut left = noise(frames, 0x0052_4201 ^ *first_sample, 0.55);
+    let mut right = noise(frames, 0x0052_4202 ^ *first_sample, 0.47);
     effect.process(
         EffectProcessBlock::new(&mut left, &mut right, None, *first_sample, &[], QUANTUM).unwrap(),
     );
@@ -626,8 +626,8 @@ fn span_equivalence(parameter: u32, channel: ParameterChannel, target: f32) {
     via_point
         .apply_parameter_point(parameter, channel, target)
         .unwrap();
-    let mut point_left = noise(128, 0x5243_01 ^ parameter as u64, 0.69);
-    let mut point_right = noise(128, 0x5243_02 ^ parameter as u64, 0.57);
+    let mut point_left = noise(128, 0x0052_4301 ^ parameter as u64, 0.69);
+    let mut point_right = noise(128, 0x0052_4302 ^ parameter as u64, 0.57);
     let mut span_left = point_left.clone();
     let mut span_right = point_right.clone();
     let point_report = via_point.process(
@@ -664,8 +664,8 @@ fn span_equivalence(parameter: u32, channel: ParameterChannel, target: f32) {
         let no_point_warm = warm(&mut *no_point);
         assert_pcm_bits(&warm_point.0, &no_point_warm.0);
         assert_pcm_bits(&warm_point.1, &no_point_warm.1);
-        let mut unchanged_left = noise(128, 0x5243_01 ^ parameter as u64, 0.69);
-        let mut unchanged_right = noise(128, 0x5243_02 ^ parameter as u64, 0.57);
+        let mut unchanged_left = noise(128, 0x0052_4301 ^ parameter as u64, 0.69);
+        let mut unchanged_right = noise(128, 0x0052_4302 ^ parameter as u64, 0.57);
         no_point.process(
             EffectProcessBlock::new(
                 &mut unchanged_left,

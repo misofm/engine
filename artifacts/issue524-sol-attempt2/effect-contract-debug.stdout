@@ -1,0 +1,65 @@
+
+running 12 tests
+test bank_width_tests::bank_width_for_backend_is_total ... ok
+test step::tests::an_index_lattice_is_ordinal_indexed_and_choice_value_spelled ... ok
+test symmetry::tests::a_declined_witness_names_every_term_it_is_missing ... ok
+test symmetry::tests::a_left_channel_parameter_desymmetrises_and_a_both_channel_one_does_not ... ok
+test symmetry::tests::a_seam_side_record_never_moves_the_witness ... ok
+test symmetry::tests::a_subscription_never_moves_the_witness ... ok
+test symmetry::tests::bypass_is_reversible_and_asymmetric_parameters_are_not ... ok
+test symmetry::tests::every_single_missing_term_declines_the_conjunction ... ok
+test symmetry::tests::payload_sections_agree_is_a_bitwise_comparison ... ok
+test symmetry::tests::the_conjunction_declines_when_either_operand_declines ... ok
+test step::tests::ratio_lattice_retains_butterworth_default ... ok
+test step::tests::cents_lattice_retains_round_endpoint_and_declared_default ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 12 tests
+test a_boolean_lattice_admits_exactly_its_two_encodings ... ok
+test a_bound_the_pinned_precision_cannot_spell_is_a_declaration_error ... ok
+test an_enumeration_lattice_is_spelled_in_choice_values_and_indexed_by_ordinal ... ok
+test decimal_matching_refuses_what_an_f32_comparison_would_admit ... ok
+test equivalent_spellings_of_one_lattice_point_are_one_value ... ok
+test a_negative_zero_spelling_names_the_zero_lattice_point ... ok
+test arithmetic_rows_step_by_exactly_one_declared_unit ... ok
+test geometric_ratio_row_keeps_its_round_maximum_and_meaningful_default ... ok
+test refusal_names_the_two_nearest_legal_values ... ok
+test declared_bounds_and_default_are_always_members ... ok
+test cents_rows_are_geometric_and_never_equal_hertz ... ok
+test every_ladder_size_lands_on_a_lattice_point_and_clamps_at_the_ends ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 7 tests
+test a_drain_emits_the_contract_canonical_span_order ... ok
+test a_drained_queue_stages_nothing_on_the_next_block ... ok
+test a_full_window_counts_the_overflow_instead_of_overrunning ... ok
+test a_repeated_target_collapses_last_wins ... ok
+test bypass_is_retained_state_and_produces_no_span ... ok
+test the_shunt_preserves_signed_zero ... ok
+test the_shunt_reproduces_the_dry_signal_at_the_declared_latency ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 9 tests
+test a_lane_refuses_a_publisher_count_that_does_not_match_the_menu ... ok
+test a_second_subscribe_takes_the_newer_window_length ... ok
+test an_observe_record_rides_the_parameter_queue_and_emits_no_span ... ok
+test an_observe_record_against_an_incapable_plan_is_reported_unbound ... ok
+test an_unarmed_tap_is_never_read_and_publishes_nothing ... ok
+test disarming_all_stops_every_tap_without_disturbing_published_windows ... ok
+test retained_bytes_are_a_formula_over_the_declared_menu ... ok
+test the_latest_fold_publishes_the_last_block_verbatim ... ok
+test windows_tile_exactly_and_fold_by_the_declared_rule ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

@@ -176,3 +176,7 @@ Sol corrected the five named fixtures, repeated allocation sequence and Rust API
 ### Sol attempt 2 proportional-gate correction
 
 The full compressor debug suite exposed an added allocation-fixture call that incorrectly constructed a zero-frame process block. Existing `ZeroFrames` rejection is correct and unchanged. Sol removed only that redundant call; the required repeated Point/read/rejected-call sequence remains followed by a real 128-frame process with empty automation spans. The isolated allocation gate now passes. Both the failed suite capture and corrected exact allocation result are preserved. Focused release also passes 5/5 on the preceding source, whose native Point fixtures are unchanged. Root checkpoints this test-only correction before remaining gates; no review verdict has yet been issued for attempt 2.
+
+### Sol attempt 2 strict-lint checkpoint
+
+Full compressor and effect-contract suites pass in debug/release on `3b9a5fb8`; isolated allocation gates pass in both profiles. Strict Clippy found only twelve unequal hexadecimal byte-group spellings in test noise seeds. Their numeric values are unchanged by the grouping-only correction, and strict affected Clippy now passes. Original failure and corrected pass are preserved. No behavioral code or assertions changed; policies, target checks and consolidated review remain pending.

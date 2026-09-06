@@ -1,0 +1,170 @@
+
+running 2 tests
+test kernel::tests::uniform_and_ragged_access_match_old_transcription ... ok
+test kernel::tests::w4_state_owner_transitions_drive_the_next_real_render ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 3 tests
+test scoped_allocator_attribution_controls_are_live_and_isolated ... ok
+
+running 1 test
+test uniform_and_ragged_render_paths_allocate_and_free_nothing ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+test uniform_and_ragged_render_paths_allocate_and_free_nothing ... ok
+test passes_effect_contract_conformance ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+
+
+running 7 tests
+test bank_fallback_never_hides_malformed_or_incompatible_requests ... ok
+test a_malformed_bank_block_is_rejected_before_it_is_indexed ... ok
+test descriptor_rows_and_resource_envelope_are_frozen ... ok
+test every_descriptor_row_admits_exactly_its_own_domain ... ok
+test lookahead_taps_are_derived_only_at_prepare_restore_and_full_reset ... ok
+test preparation_has_expected_metadata_and_one_byte_below_rejects ... ok
+test links_are_exact_and_connected_sidechain_is_distinct_from_main_detection ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 4 tests
+test shared_hex_adapter_matches_literal_bytes ... ok
+test the_corpus_is_finite ... ok
+test no_case_is_vacuous ... ok
+test the_corpus_matches_its_pins_at_every_width ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 6 tests
+test a_unit_mix_is_the_wet_signal_exactly ... ok
+test a_unity_gain_stage_is_the_dry_signal ... ok
+test bypass_preserves_exact_dry_bits_at_fixed_latency ... ok
+test a_zero_mix_is_the_dry_signal_while_gain_reduction_runs ... ok
+test the_average_link_is_two_products_and_an_add ... ok
+test every_identity_keeps_the_state_warm ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 2 tests
+test bank_matches_scalar_per_lane_bits ... ok
+test every_width_produces_the_same_words ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 5 tests
+test a_halved_subnormal_does_not_come_back ... ok
+test a_desymmetrized_bank_is_a_never_collapsed_bank ... ok
+test a_statically_bypassed_bank_collapses_to_the_dual_bits ... ok
+test mono_reopen_drives_the_next_render_from_the_copied_delay_population ... ok
+test the_collapsed_body_renders_the_dual_bodys_left_plane ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 5 tests
+test native_point_retarget_obeys_current_and_sample_count_laws ... ok
+test native_point_invalidates_silent_fixed_point_without_advancing_it ... ok
+test native_point_changes_target_without_advancing_samples ... ok
+test native_parameter_access_is_typed_and_transactional ... ok
+test native_point_matches_existing_span_pcm_and_state ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 4 tests
+test a_nan_in_the_sidechain_alone_is_clamped_to_the_level_floor ... ok
+test the_boundary_limit_rejects_a_finite_but_absurd_value ... ok
+test a_nan_is_caught_at_the_block_boundary_not_per_sample ... ok
+test the_recursive_word_flushes_to_exactly_zero ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 6 tests
+test a_full_reset_returns_the_reading_to_zero ... ok
+test a_resident_read_is_repeatable_to_the_bit ... ok
+test the_compressor_declares_one_resident_gain_reduction_tap ... ok
+test the_reading_follows_the_smoother_rather_than_the_instantaneous_curve ... ok
+test the_compressor_reports_the_reduction_its_kernel_smoothed ... ok
+test every_bank_lane_reads_its_own_reduction ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 1 test
+test scalar_output_matches_the_independent_f64_oracle ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 2 tests
+test block_partitions_are_invariant ... ok
+test bank_block_partitions_are_invariant ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 5 tests
+test a_mid_ramp_restore_arrives_on_the_same_sample ... ok
+test a_restore_is_transactional_across_both_channels ... ok
+test preparation_legal_parameter_states_round_trip ... ok
+test resets_clear_state_and_only_the_full_one_restores_defaults ... ok
+test an_idle_restore_is_bit_exact ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 9 tests
+test a_finished_ramp_equals_a_fresh_preparation ... ok
+test a_ramp_that_finishes_mid_block_is_invisible_to_the_partition ... ok
+test a_restarting_point_ramps_from_the_current_value ... ok
+test automation_validation_is_unchanged ... ok
+test block_point_steps_by_a_precomputed_increment_and_snaps_exactly ... ok
+test a_ramp_onto_an_identity_boundary_lands_on_the_identity ... ok
+test a_restated_point_leaves_every_lane_on_the_idle_body ... ok
+test an_idle_lane_is_untouched_by_a_neighbours_ramp ... ok
+test a_ramp_inside_the_silent_fixed_point_withdraws_it_and_moves_no_bit ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 5 tests
+test silence_shorter_than_the_lookahead_line_still_drains_it ... ok
+test a_detector_still_releasing_through_the_silence_is_never_frozen ... ok
+test a_negative_zero_input_block_is_not_treated_as_silence ... ok
+test the_trailing_tone_is_actually_rendered ... ok
+test a_settled_silent_bank_renders_exactly_the_never_fast_path ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 5 tests
+test a_left_only_rejection_diverges_the_cursors_and_the_staged_body_still_agrees ... ok
+test restore_and_full_reset_drive_the_next_bank_render_classification ... ok
+test every_partition_agrees_with_the_per_frame_body ... ok
+test the_link_laws_bypass_and_a_sidechain_all_agree ... ok
+test a_ragged_bank_agrees_with_the_per_frame_body ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+
+running 3 tests
+test a_hard_knee_is_exact_at_the_threshold ... ok
+test the_knee_is_continuous_at_both_edges ... ok
+test eq4_static_curve_matches_f64_within_1e4_db ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
