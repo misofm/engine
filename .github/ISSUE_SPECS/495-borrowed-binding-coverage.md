@@ -87,3 +87,5 @@ At frozen pin/source3e17caf3 all seven delivery pipeline commands exit0: verifie
 ## Delivered and remotely closed
 
 PR #497 merged at2026-09-06T04:53:26Z as396a97119583704888d7b2a20830c5720e16b189. Astra exact-head PASS applied to0fa6407eb6bbf52dd0466ec96f5f51ec954495b7; required qualification run34012375226 completed SUCCESS at that same head before merge. GitHub495 is verified CLOSED. This closes the redundant combined binding-set slice only; broader audit CP4 remains partial. Main-push qualification is monitored separately and is not yet claimed here.
+
+Post-merge main qualification34012631704 at396a97119583704888d7b2a20830c5720e16b189 completed SUCCESS. Required PR and post-main qualification are both green.
