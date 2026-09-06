@@ -1,5 +1,7 @@
 # 500: Share graph node and edge identity token emission
 
+Active fresh Luna attempt1 under the actual-base approval below.
+
 Queued maintenance after #498, not an implementation assignment. Reviewed delivered396a97119583704888d7b2a20830c5720e16b189, graph-compiler/src/canonical.rs blobfe196f84338c0d209bd401e5a73bd8a9ede4d52a. Read-only open-title/local scope checks found no dedicated node/edge token-emission successor. #99 established allocation-free length calculation and on-demand canonical output; neither it nor #338 canonical Session JSON authorizes changing those contracts. This closes this precise CP20 duplication, not all encoders in349.
 
 ## Smallest product and frozen implementation choice
@@ -29,3 +31,19 @@ GitHub500 title/number match this stateless spec. Branch codex/cp20-identity-tok
 ## Current implementation-base readiness
 
 Root integrated delivered main95abdd015e28823905800d051d03837255d91612 after PR501/498 closure and carried the498 closure record. Graph-compiler, Cargo and target config are byte-identical to the originally scoped396a9711. Parent475/child499 are source accepted and in immutable delivery qualification, not overlapping these paths. Await Astra numbered actual-base review before fresh Luna1; no implementation has started.
+
+## Astra actual-base approval and assignment
+
+# Astra #500 numbered actual implementation-base review — PASS
+
+Exact clean headd22431500df514530269c243271716e3031657e9 in engine-cp20-identity-plan, integrated delivered main95abdd015e28823905800d051d03837255d91612. Only500 numbered scope and498 closure documentation differ from main. Graph-compiler/Cargo/config are byte-identical to scoped396a9711. The entire approved CP20 brief body is preserved under the numbered title and queue/current-base records. Root reports matching remote identity/body and498 delivery closure.
+
+Approve fresh Luna1 for the frozen private borrowed node/edge piece-emission slice. Keep current text/length interfaces, one shared token/variant definition, allocation-free length accumulation, original UTF8 bytes and recursive delay/edge ordering. Preserve stage/rack tokens, public canonical/hash/port writers, resource estimates, schemas and validation. No generic formatting framework, heap-producing length route, public API, Cargo or runtime change.
+
+The independent literal fixture remains essential because text-versus-length parity becomes correlated: all staged/rack/identity variants, recursive chain and UTF8 sidechain port must compare against fixed independent literals. Existing parity, canonical/hash repeatability and resource/cap tests plus affected library/Clippy/fmt/policy gates remain the finite acceptance scope. No added scale run, allocator framework, new matrix or timing requirement.
+
+#475/#499 immutable qualification does not share these source paths. Root may assign this independent maintenance pass with separate target directories and recoverable checkpoints. Later source acceptance, current-main integration, proportional ordinary artifact verification and any concrete mismatch ruling, exact-head PR review and required CI remain separate delivery gates.
+
+Read-only source/Git comparison; no tests/builds/timing or source/spec/Git/GitHub mutations performed.
+
+Root assigns fresh Luna1 within the frozen scope, owns all Git/GitHub checkpoints, and defers artifact qualification until source acceptance. This independent maintenance does not modify the frozen compressor qualification worktree. No timing is authorized.
