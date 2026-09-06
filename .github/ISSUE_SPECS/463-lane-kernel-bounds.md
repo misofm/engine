@@ -187,3 +187,19 @@ Existing native host filters remain `tests::native_identity_session_digest_pins_
 Allowed product/test/probe/corpus paths and original finite W1/W4/W8 bounds/hostile-category/suffix/zero-allocation gates need no expansion. A later actual-main integration and source-equivalence check still precede Luna1. Preserve broader artifact/measurement separation, no native AArch64 revival, no changes to reduce_many/ordered_accumulate_block, and no timing authority.
 
 Root selects463 as the next runtime feature after238 delivery. Actual mainf357330ce0f391e785429e82807d7d79ba9a077c is integrated atdda36da0fbb772671bf3467db0f03f6039edbcfa; crates/tools/hosts/Cargo/.cargo/scripts are byte-identical to that main. Historical behind459/460/462/238 scheduling is superseded by this record. Pending fresh actual-base Astra approval before Luna1. Existing pre-edit probe and four new baseline scalar pins must precede any kernel rewrite; timing remains unauthorized. Independent488 test-only work touches graph/program.rs, so463 must not edit that file; its allowed real fallback proof is graph/runtime.rs.
+
+## Actual implementation base approval and Luna attempt 1
+
+# Astra #463 actual implementation-base review — PASS
+
+Exact pushed head3c6c765c3948a9b9eaa3d22fcf8fa208402fd844, engine-lane2-plan. Actual delivered mainf357330ce0f391e785429e82807d7d79ba9a077c integrated atdda36da0fbb772671bf3467db0f03f6039edbcfa. Independently checked the only tree delta from that main is463spec. Relevant lane/G5 inputs retain the prior reviewed baseline; the appended current-base readiness and final corpus/executed-Wasm priority preserve the approved contract. No tests/builds/timing or repository/Git/GitHub mutations performed.
+
+Approve root assignment of fresh Luna1 for the ordered initial pre-edit work. Freeze and retain three-kernel body identities and exact opaque probe source/toolchain/flags/decoded symbols on native x86-v3, scalar Wasm and simd128. Determine whether the alleged repeated checks survive actual lowering; preserve an honest null rather than forcing an optimization.
+
+Before any kernel rewrite: add only the single prescribed Mix2x2 corpus variant and its four existing-signal cases, derive ONLY four new baseline scalar pins while all three original kernel bodies remain byte-unchanged, retain all preexisting named pins, and checkpoint that corpus/pin milestone. Execute the existing baseline Wasm gate on both scalar and simd128. A rewrite may follow only this accepted/recoverable baseline sequence and a supported mechanism finding. No new timing or benchmark authority exists.
+
+All existing arithmetic/order, debug equality and release prefix/short rejection, W1/W4/W8 hostile-category and allocation obligations remain. The real fold_plane store=false second-contribution extension stays in graph/runtime.rs, preserving existing store=true/cohort assertions and an independent ordered expected value. Do not edit graph/program.rs:488 owns that independent test-only file. No reduce_many/ordered_accumulate_block rewrite or AArch64 revival.
+
+Root must serialize the G5 fixed internal guest target directories with ongoing Wasm qualification (the output-directory argument does not isolate those targets). Root controls worker assignment, checkpoint/push and eventual combined qualification. The current updated sequence after delivered238 supersedes historical queue references. Scope is ready without further amendment; source acceptance, exact-head PR review and requiredCI remain later gates.
+
+Root adopts PASS and assigns fresh Luna1, beginning only the mandatory retained opaque probe and unchanged-kernel corpus/pin baseline sequence. Report/checkpoint before kernel edits. No timing is authorized; use the isolated worktree target directories and do not overlap488 graph/program.rs.
