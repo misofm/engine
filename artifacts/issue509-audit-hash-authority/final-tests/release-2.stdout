@@ -1,0 +1,11 @@
+
+running 6 tests
+test vectorization::tests::incomplete_allowlist_is_red ... ok
+test vectorization::tests::fused_multiply_add_is_red ... ok
+test vectorization::tests::call_inside_kernel_body_is_red ... ok
+test vectorization::tests::missing_vector_family_is_red ... ok
+test vectorization::tests::scalar_fallback_is_red ... ok
+test vectorization::tests::shared_sha256_alias_matches_published_literals ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.00s
+

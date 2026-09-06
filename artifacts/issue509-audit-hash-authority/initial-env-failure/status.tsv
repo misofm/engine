@@ -1,0 +1,10 @@
+debug-1	101	cargo test --locked -p audit --bin audit shared_sha256_alias_matches_published_literals
+debug-2	101	cargo test --locked -p audit --bin audit vectorization::tests::
+debug-3	101	cargo test --locked -p audit --bin audit builtins_fixture_check::tests::
+debug-4	101	cargo test --locked -p audit --bin audit fixture_builtins::tests::owned_jsonl_parsers_reject_duplicate_extra_reordered_and_wrong_variants -- --exact
+debug-5	101	cargo test --locked -p audit --bin audit fixture_builtins_listening::tests::level_match_attenuates_only_and_caps_peak -- --exact
+release-1	101	cargo test --locked -p audit --bin audit shared_sha256_alias_matches_published_literals --release
+release-2	101	cargo test --locked -p audit --bin audit vectorization::tests:: --release
+release-3	101	cargo test --locked -p audit --bin audit builtins_fixture_check::tests:: --release
+release-4	101	cargo test --locked -p audit --bin audit fixture_builtins::tests::owned_jsonl_parsers_reject_duplicate_extra_reordered_and_wrong_variants -- --exact --release
+release-5	101	cargo test --locked -p audit --bin audit fixture_builtins_listening::tests::level_match_attenuates_only_and_caps_peak -- --exact --release

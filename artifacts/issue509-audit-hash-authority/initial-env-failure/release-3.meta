@@ -1,0 +1,2 @@
+argv=cargo test --locked -p audit --bin audit builtins_fixture_check::tests:: --release
+cwd=/home/bl/misofm/engine-audit-hash-authority

@@ -1,0 +1,10 @@
+
+running 5 tests
+test builtins_fixture_check::tests::shared_sha256_alias_matches_published_literals ... ok
+test fixture_builtins::tests::shared_sha256_alias_matches_published_literals ... ok
+test fixture_builtins_listening::tests::shared_sha256_alias_matches_published_literals ... ok
+test source_fixture::tests::shared_sha256_alias_matches_published_literals ... ok
+test vectorization::tests::shared_sha256_alias_matches_published_literals ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 31 filtered out; finished in 0.00s
+

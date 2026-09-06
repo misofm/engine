@@ -1,0 +1,2 @@
+argv=bash scripts/check-bench-policy.sh
+cwd=/home/bl/misofm/engine-audit-hash-authority

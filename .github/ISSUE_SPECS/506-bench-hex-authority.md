@@ -56,3 +56,9 @@ Authoritative final captures record bench-support digest5 and bench35 tests in e
 Independently verified every one of74 manifest payload hashes/sizes and exact tracked75-file coverage. Historical reports and capture limitations remain candid. No benchmark runner/preflight/timing was invoked or credited, and no render-speedup claim follows. CP20 remains partial beyond these three package-local encoders.
 
 Root may proceed to delivery preparation with accepted source identity preserved. This tooling-only slice does not require unconditional current-artifact regeneration; classify any integration/build-input drift explicitly and retain historical provenance. Actual-PR exact-head Astra review and required qualification success remain mandatory before merge/closure. No source/spec/Git/GitHub mutations performed.
+
+## Delivered and remotely closed
+
+PR507 merged at2026-09-06T06:44:45Z as0fc4e9592453171f9900aececa156576203d8a55. Astra exact-head PASS applies to4b29296d5cf307227c76e12db537e1824e517ea0; required qualification34016958560 completed SUCCESS on that same head before merge. GitHub #506 is verified CLOSED. All three bench-package local encoders now use the existing shared authority, preserving finalized bytes and hash boundaries. CP20 remains PARTIAL across other owned encoders. No timing authority was consumed. Post-main CI is monitored separately.
+
+Post-main qualification34017298536 at0fc4e9592453171f9900aececa156576203d8a55 completed SUCCESS. Both required pre-merge and post-main CI are green.

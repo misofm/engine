@@ -1,0 +1,12 @@
+HEAD 8f1c483fd844d1e3b1e50c4c409d96c745a87f0e
+CWD /home/bl/misofm/engine-audit-hash-authority
+FILE tools/audit/src/vectorization.rs sha256=910bbe5b9c394d8d2bedf90efbb9e8026c29c39990fd583481d2814e1bc29489 blob=09f6ed5bff42b92f77842a37b500c5f517fc0a93
+FILE tools/audit/src/source_fixture.rs sha256=565c12a9798b4eeaf02510fa5f98ecd052b7f81773d7e8ee5dab8a883a6af88f blob=f79f4e18a2a9a6f9e8b88d5dd02771d7472da6df
+FILE tools/audit/src/fixture_builtins_listening.rs sha256=2758131d87f9d9b36d0b688142331945f8f6c8493d420f579024b7b33424bf62 blob=2d033e1c7f2ef571df5a4c837500a15b324f0dd0
+FILE tools/audit/src/builtins_fixture_check.rs sha256=b76076f342890b7f00c5b7128063e92c71a203df63774e53d92b3695077be67e blob=178ead8ecb3c995280273d45abdb7819bc1fca03
+FILE tools/audit/src/fixture_builtins.rs sha256=769dec51bf4fa06fb66f0bd907cf92fc7a6d8fc944dedd54822621d2a136300b blob=f57df02bc84cf2969747f4f8cb5c10daa3357b1a
+ENV PATH=/home/bl/.cargo/bin:/home/bl/.local/bin:/home/bl/.codex/packages/standalone/releases/0.153.2-x86_64-unknown-linux-musl/codex-path:/home/bl/.codex/tmp/arg0/codex-arg0CWD760:/home/bl/.local/bin:/home/bl/.opencode/bin:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.opencode/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin
+ENV RUSTFLAGS=
+ENV CARGO_TARGET_DIR=
+ENV CARGO_BUILD_TARGET=
+ENV RUSTC_WRAPPER=

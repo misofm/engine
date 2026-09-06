@@ -8,9 +8,9 @@ use std::{
     path::Path,
 };
 
+use bench_support::digest::sha256_hex as sha256;
 use builtins::{BuiltinChain, BuiltinParameters, ChannelParameters, DualMonoBlock, Matrix2x2};
 use conformance::{FixtureLimits, PcmFixture};
-use sha2::{Digest, Sha256};
 
 const RATE: u32 = 48_000;
 const FRAMES: usize = 480_000;
@@ -575,18 +575,6 @@ fn set_mode(_path: &Path, _mode: u32) -> Result<(), String> {
     Err("Issue-033 preparation requires Unix permission semantics".to_owned())
 }
 
-fn sha256(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    let digest = hasher.finalize();
-    let mut encoded = String::with_capacity(64);
-    for byte in digest {
-        use std::fmt::Write as _;
-        write!(&mut encoded, "{byte:02x}").expect("writing to a string cannot fail");
-    }
-    encoded
-}
-
 fn io_error(error: std::io::Error) -> String {
     error.to_string()
 }
@@ -594,6 +582,18 @@ fn io_error(error: std::io::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_sha256_alias_matches_published_literals() {
+        assert_eq!(
+            sha256(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            sha256(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
     use conformance::SampleRateHz;
     use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
     use std::sync::atomic::{AtomicU64, Ordering};

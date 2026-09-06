@@ -147,3 +147,9 @@ Preserve the authentic mismatch command/log/status and source lineage. Following
 ## Current artifact consumers complete
 
 Pinned candidatee9a6519e passes all seven existing artifact/consumer steps with individual exit0. Published module independently hashes25c1b72a65ebfd081c74d431614cfba42492e95e490cc4d7c203ee14fe8737e9. Generated browser records differ only in candidate/hash identity; canonical/PCM/resource expectations remain unchanged. artifacts/issue496-integrated-delivery retains immutable and consumer execution, actual mismatch and exact module identity. Source-level full-W8 refresh observation is240 to30 extractions; no timed improvement is claimed. Actual PR review and required CI remain mandatory.
+
+## Delivered and remotely closed
+
+PR508 merged at2026-09-06T06:49:08Z as1543c4c2bbbe1d55c4a20f889c7d2a6c6e032728. Astra exact-head PASS applies to6172534d52d5ae4fa5067ace1ed4f6c439cfaeee, with a separate current-base drift review accepting independent delivered #506 changes. Required qualification34017146495 completed SUCCESS on that exact head before merge. GitHub #496 is verified CLOSED. The two post-ramp refreshes now extract each compared lane word once, preserving masks/PCM/state; the full-W8 source-level observation is240 to30. No microseconds/block win is measured or claimed. RT5 retains separately tracked measurement/accounting obligations. Combined post-main CI is monitored separately.
+
+Combined post-main qualification34017491216 at1543c4c2bbbe1d55c4a20f889c7d2a6c6e032728 completed SUCCESS, including the independently merged bench authority changes. Both required pre-merge and combined post-main CI are green.

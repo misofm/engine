@@ -1,0 +1,5 @@
+1	0	cargo clippy --locked -p audit --bin audit --all-targets -- -D warnings
+2	0	cargo fmt --all -- --check
+3	0	git diff --check
+4	0	bash scripts/check-bench-policy.sh
+5	0	bash scripts/check-realtime-audit-leak.sh
