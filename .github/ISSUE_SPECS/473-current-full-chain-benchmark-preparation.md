@@ -217,3 +217,5 @@ Required bounded successor: freeze the exact supported capture target and comple
 This is third-attempt FAIL: preserve head/history and STOP473 repairs. Root must number/rebrief that single bounded build-identity completion child before any further source correction; parent473 retains complete delivery/PR/CI acceptance and stays OPEN. #431's sole real capture remains unspent and unauthorized. Existing successful source groups do not need reinvention; no disguised fourth attempt or real run to discover this defect is permitted.
 
 Root adopts this final FAIL. Accepted source and raw evidence remain preserved at the reviewed head. No further parent implementation is authorized. A separately numbered, Astra-approved bounded completion issue must precede further corrections; parent delivery and all retained obligations remain open.
+
+Bounded completion issue #480 owns only complete effective release build/target identity and focused fake proof. All original parent requirements remain in force; #473 stays open until full reviewed delivery. #431 remains unspent and unauthorized.
