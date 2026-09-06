@@ -1,0 +1,829 @@
+
+/tmp/463-root-baseline/native.o:	file format elf64-x86-64
+
+Disassembly of section .text._RNvCs8lo3PVzYdl8_14issue463_probe7observe:
+
+0000000000000000 <issue463_probe::observe>:
+       0:      	testq	%rsi, %rsi
+       3:      	je	0x16 <issue463_probe::observe+0x16>
+       5:      	movl	%esi, %ecx
+       7:      	andl	$0x7, %ecx
+       a:      	cmpq	$0x8, %rsi
+       e:      	jae	0x19 <issue463_probe::observe+0x19>
+      10:      	xorl	%edx, %edx
+      12:      	xorl	%eax, %eax
+      14:      	jmp	0x8d <issue463_probe::observe+0x8d>
+      16:      	xorl	%eax, %eax
+      18:      	retq
+      19:      	movabsq	$0x1ffffffffffffff8, %rax # imm = 0x1FFFFFFFFFFFFFF8
+      23:      	andq	%rax, %rsi
+      26:      	xorl	%edx, %edx
+      28:      	xorl	%eax, %eax
+      2a:      	nopw	(%rax,%rax)
+      30:      	rorxl	$0x1b, %eax, %eax
+      36:      	xorl	(%rdi,%rdx,4), %eax
+      39:      	rorxl	$0x1b, %eax, %eax
+      3f:      	xorl	0x4(%rdi,%rdx,4), %eax
+      43:      	rorxl	$0x1b, %eax, %eax
+      49:      	xorl	0x8(%rdi,%rdx,4), %eax
+      4d:      	rorxl	$0x1b, %eax, %eax
+      53:      	xorl	0xc(%rdi,%rdx,4), %eax
+      57:      	rorxl	$0x1b, %eax, %eax
+      5d:      	xorl	0x10(%rdi,%rdx,4), %eax
+      61:      	rorxl	$0x1b, %eax, %eax
+      67:      	xorl	0x14(%rdi,%rdx,4), %eax
+      6b:      	rorxl	$0x1b, %eax, %eax
+      71:      	xorl	0x18(%rdi,%rdx,4), %eax
+      75:      	rorxl	$0x1b, %eax, %eax
+      7b:      	xorl	0x1c(%rdi,%rdx,4), %eax
+      7f:      	addq	$0x8, %rdx
+      83:      	cmpq	%rdx, %rsi
+      86:      	jne	0x30 <issue463_probe::observe+0x30>
+      88:      	testq	%rcx, %rcx
+      8b:      	je	0xb1 <issue463_probe::observe+0xb1>
+      8d:      	leaq	(%rdi,%rdx,4), %rdx
+      91:      	xorl	%esi, %esi
+      93:      	nopw	%cs:(%rax,%rax)
+      a0:      	rorxl	$0x1b, %eax, %eax
+      a6:      	xorl	(%rdx,%rsi,4), %eax
+      a9:      	incq	%rsi
+      ac:      	cmpq	%rsi, %rcx
+      af:      	jne	0xa0 <issue463_probe::observe+0xa0>
+      b1:      	retq
+
+Disassembly of section .text.issue463_mix2x2_scalar:
+
+0000000000000000 <issue463_mix2x2_scalar>:
+       0:      	pushq	%rbp
+       1:      	pushq	%r14
+       3:      	pushq	%rbx
+       4:      	movq	%rcx, %rbx
+       7:      	movq	%rdx, %r14
+       a:      	testq	%rsi, %rsi
+       d:      	je	0x13d <issue463_mix2x2_scalar+0x13d>
+      13:      	leaq	-0x1(%rsi), %rcx
+      17:      	cmpq	%rcx, %rbx
+      1a:      	movq	%rcx, %rax
+      1d:      	cmovbq	%rbx, %rax
+      21:      	incq	%rax
+      24:      	cmpq	$0x11, %rax
+      28:      	jae	0x31 <issue463_mix2x2_scalar+0x31>
+      2a:      	xorl	%eax, %eax
+      2c:      	jmp	0x100 <issue463_mix2x2_scalar+0x100>
+      31:      	cmpq	%rcx, %rbx
+      34:      	cmovbq	%rbx, %rcx
+      38:      	leaq	(%rdi,%rcx,4), %rdx
+      3c:      	addq	$0x4, %rdx
+      40:      	leaq	(%r14,%rcx,4), %rcx
+      44:      	addq	$0x4, %rcx
+      48:      	cmpq	%rcx, %rdi
+      4b:      	setb	%cl
+      4e:      	cmpq	%rdx, %r14
+      51:      	setb	%dl
+      54:      	testb	%dl, %cl
+      56:      	je	0x5f <issue463_mix2x2_scalar+0x5f>
+      58:      	xorl	%eax, %eax
+      5a:      	jmp	0x100 <issue463_mix2x2_scalar+0x100>
+      5f:      	movl	%eax, %ecx
+      61:      	andl	$0xf, %ecx
+      64:      	movl	$0x10, %edx
+      69:      	cmovneq	%rcx, %rdx
+      6d:      	subq	%rdx, %rax
+      70:      	vbroadcastss	%xmm1, %ymm4
+      75:      	vbroadcastss	%xmm0, %ymm5
+      7a:      	vbroadcastss	%xmm2, %ymm6
+      7f:      	vbroadcastss	%xmm3, %ymm7
+      84:      	xorl	%ecx, %ecx
+      86:      	nopw	%cs:(%rax,%rax)
+      90:      	vmovups	(%rdi,%rcx,4), %ymm8
+      95:      	vmovups	0x20(%rdi,%rcx,4), %ymm9
+      9b:      	vmovups	(%r14,%rcx,4), %ymm10
+      a1:      	vmovups	0x20(%r14,%rcx,4), %ymm11
+      a8:      	vmulps	%ymm4, %ymm10, %ymm12
+      ac:      	vmulps	%ymm4, %ymm11, %ymm13
+      b0:      	vmulps	%ymm5, %ymm8, %ymm14
+      b4:      	vaddps	%ymm12, %ymm14, %ymm12
+      b9:      	vmulps	%ymm5, %ymm9, %ymm14
+      bd:      	vaddps	%ymm13, %ymm14, %ymm13
+      c2:      	vmovups	%ymm12, (%rdi,%rcx,4)
+      c7:      	vmovups	%ymm13, 0x20(%rdi,%rcx,4)
+      cd:      	vmulps	%ymm6, %ymm8, %ymm8
+      d1:      	vmulps	%ymm6, %ymm9, %ymm9
+      d5:      	vmulps	%ymm7, %ymm10, %ymm10
+      d9:      	vaddps	%ymm10, %ymm8, %ymm8
+      de:      	vmulps	%ymm7, %ymm11, %ymm10
+      e2:      	vaddps	%ymm10, %ymm9, %ymm9
+      e7:      	vmovups	%ymm8, (%r14,%rcx,4)
+      ed:      	vmovups	%ymm9, 0x20(%r14,%rcx,4)
+      f4:      	addq	$0x10, %rcx
+      f8:      	cmpq	%rcx, %rax
+      fb:      	jne	0x90 <issue463_mix2x2_scalar+0x90>
+      fd:      	nopl	(%rax)
+     100:      	cmpq	%rbx, %rax
+     103:      	ja	0x15d <issue463_mix2x2_scalar+0x15d>
+     105:      	je	0x178 <issue463_mix2x2_scalar+0x178>
+     107:      	vmovss	(%rdi,%rax,4), %xmm4
+     10c:      	vmovss	(%r14,%rax,4), %xmm5
+     112:      	vmulss	%xmm5, %xmm1, %xmm6
+     116:      	vmulss	%xmm4, %xmm0, %xmm7
+     11a:      	vaddss	%xmm6, %xmm7, %xmm6
+     11e:      	vmovss	%xmm6, (%rdi,%rax,4)
+     123:      	vmulss	%xmm4, %xmm2, %xmm4
+     127:      	vmulss	%xmm5, %xmm3, %xmm5
+     12b:      	vaddss	%xmm5, %xmm4, %xmm4
+     12f:      	vmovss	%xmm4, (%r14,%rax,4)
+     135:      	incq	%rax
+     138:      	cmpq	%rax, %rsi
+     13b:      	jne	0x100 <issue463_mix2x2_scalar+0x100>
+     13d:      	vzeroupper
+     140:      	callq	0x145 <issue463_mix2x2_scalar+0x145>
+     145:      	rorxl	$0x15, %eax, %ebp
+     14b:      	movq	%r14, %rdi
+     14e:      	movq	%rbx, %rsi
+     151:      	callq	0x156 <issue463_mix2x2_scalar+0x156>
+     156:      	xorl	%ebp, %eax
+     158:      	popq	%rbx
+     159:      	popq	%r14
+     15b:      	popq	%rbp
+     15c:      	retq
+     15d:      	leaq	(%rip), %rcx            # 0x164 <issue463_mix2x2_scalar+0x164>
+     164:      	movq	%rax, %rdi
+     167:      	movq	%rbx, %rsi
+     16a:      	movq	%rbx, %rdx
+     16d:      	vzeroupper
+     170:      	callq	*(%rip)                 # 0x176 <issue463_mix2x2_scalar+0x176>
+     176:      	jmp	0x18c <issue463_mix2x2_scalar+0x18c>
+     178:      	leaq	(%rip), %rdx            # 0x17f <issue463_mix2x2_scalar+0x17f>
+     17f:      	xorl	%edi, %edi
+     181:      	xorl	%esi, %esi
+     183:      	vzeroupper
+     186:      	callq	*(%rip)                 # 0x18c <issue463_mix2x2_scalar+0x18c>
+     18c:      	ud2
+     18e:      	callq	*(%rip)                 # 0x194 <issue463_mix2x2_scalar+0x194>
+
+Disassembly of section .text.issue463_mix2x2_simd8:
+
+0000000000000000 <issue463_mix2x2_simd8>:
+       0:      	pushq	%rbp
+       1:      	pushq	%r15
+       3:      	pushq	%r14
+       5:      	pushq	%r12
+       7:      	pushq	%rbx
+       8:      	movq	%rcx, %rbx
+       b:      	movq	%rdx, %r14
+       e:      	vbroadcastss	%xmm0, %ymm4
+      13:      	vbroadcastss	%xmm1, %ymm5
+      18:      	vbroadcastss	%xmm2, %ymm6
+      1d:      	vbroadcastss	%xmm3, %ymm7
+      22:      	movabsq	$0x1ffffffffffffff8, %r9 # imm = 0x1FFFFFFFFFFFFFF8
+      2c:      	andq	%rsi, %r9
+      2f:      	je	0xd7 <issue463_mix2x2_simd8+0xd7>
+      35:      	leaq	(%rip), %r10            # 0x3c <issue463_mix2x2_simd8+0x3c>
+      3c:      	leaq	(%rip), %rcx            # 0x43 <issue463_mix2x2_simd8+0x43>
+      43:      	leaq	(%rip), %r11            # 0x4a <issue463_mix2x2_simd8+0x4a>
+      4a:      	movq	%rsi, %r15
+      4d:      	movq	%rbx, %r12
+      50:      	xorl	%eax, %eax
+      52:      	movl	$0x8, %r8d
+      58:      	nopl	(%rax,%rax)
+      60:      	movq	%rsi, %rdx
+      63:      	subq	%rax, %rdx
+      66:      	jb	0x259 <issue463_mix2x2_simd8+0x259>
+      6c:      	cmpq	$0x7, %r15
+      70:      	jbe	0x255 <issue463_mix2x2_simd8+0x255>
+      76:      	movq	%rbx, %rdx
+      79:      	subq	%rax, %rdx
+      7c:      	jb	0x264 <issue463_mix2x2_simd8+0x264>
+      82:      	cmpq	$0x8, %r12
+      86:      	jb	0x255 <issue463_mix2x2_simd8+0x255>
+      8c:      	vmovups	(%rdi,%rax,4), %ymm8
+      91:      	vmovups	(%r14,%rax,4), %ymm9
+      97:      	vmulps	%ymm4, %ymm8, %ymm10
+      9b:      	vmulps	%ymm5, %ymm9, %ymm11
+      9f:      	vaddps	%ymm11, %ymm10, %ymm10
+      a4:      	vmovups	%ymm10, (%rdi,%rax,4)
+      a9:      	vmulps	%ymm6, %ymm8, %ymm8
+      ad:      	vmulps	%ymm7, %ymm9, %ymm9
+      b1:      	vaddps	%ymm9, %ymm8, %ymm8
+      b6:      	vmovups	%ymm8, (%r14,%rax,4)
+      bc:      	addq	$0x8, %rax
+      c0:      	addq	$-0x8, %r12
+      c4:      	addq	$-0x8, %r15
+      c8:      	cmpq	%r9, %rax
+      cb:      	jb	0x60 <issue463_mix2x2_simd8+0x60>
+      cd:      	cmpq	%rsi, %rax
+      d0:      	jb	0xe2 <issue463_mix2x2_simd8+0xe2>
+      d2:      	jmp	0x231 <issue463_mix2x2_simd8+0x231>
+      d7:      	xorl	%eax, %eax
+      d9:      	cmpq	%rsi, %rax
+      dc:      	jae	0x231 <issue463_mix2x2_simd8+0x231>
+      e2:      	xorl	%edx, %edx
+      e4:      	movq	%rbx, %rcx
+      e7:      	incq	%rcx
+      ea:      	sete	%dl
+      ed:      	xorl	%r8d, %r8d
+      f0:      	subq	%rax, %rcx
+      f3:      	sbbq	$0x0, %rdx
+      f7:      	cmovbq	%r8, %rdx
+      fb:      	cmovbq	%r8, %rcx
+      ff:      	movq	%rax, %r9
+     102:      	notq	%r9
+     105:      	addq	%rsi, %r9
+     108:      	cmpq	%r9, %rcx
+     10b:      	movq	%rdx, %r10
+     10e:      	sbbq	$0x0, %r10
+     112:      	cmovaeq	%r8, %rdx
+     116:      	cmovbq	%rcx, %r9
+     11a:      	movq	%rbx, %rcx
+     11d:      	subq	%rax, %rcx
+     120:      	cmpq	%rcx, %r9
+     123:      	sbbq	$0x0, %rdx
+     127:      	cmovbq	%r9, %rcx
+     12b:      	incq	%rcx
+     12e:      	cmpq	$0x10, %rcx
+     132:      	jbe	0x1e4 <issue463_mix2x2_simd8+0x1e4>
+     138:      	movl	%ecx, %edx
+     13a:      	andl	$0xf, %edx
+     13d:      	movl	$0x10, %r8d
+     143:      	cmovneq	%rdx, %r8
+     147:      	subq	%r8, %rcx
+     14a:      	leaq	(%rax,%rcx), %rdx
+     14e:      	leaq	(%r14,%rax,4), %r8
+     152:      	addq	$0x20, %r8
+     156:      	leaq	(%rdi,%rax,4), %rax
+     15a:      	addq	$0x20, %rax
+     15e:      	xorl	%r9d, %r9d
+     161:      	nopw	%cs:(%rax,%rax)
+     170:      	vmovups	-0x20(%rax,%r9,4), %ymm8
+     177:      	vmovups	(%rax,%r9,4), %ymm9
+     17d:      	vmovups	-0x20(%r8,%r9,4), %ymm10
+     184:      	vmovups	(%r8,%r9,4), %ymm11
+     18a:      	vmulps	%ymm4, %ymm8, %ymm12
+     18e:      	vmulps	%ymm4, %ymm9, %ymm13
+     192:      	vmulps	%ymm5, %ymm10, %ymm14
+     196:      	vaddps	%ymm14, %ymm12, %ymm12
+     19b:      	vmulps	%ymm5, %ymm11, %ymm14
+     19f:      	vaddps	%ymm14, %ymm13, %ymm13
+     1a4:      	vmovups	%ymm12, -0x20(%rax,%r9,4)
+     1ab:      	vmovups	%ymm13, (%rax,%r9,4)
+     1b1:      	vmulps	%ymm6, %ymm8, %ymm8
+     1b5:      	vmulps	%ymm6, %ymm9, %ymm9
+     1b9:      	vmulps	%ymm7, %ymm10, %ymm10
+     1bd:      	vaddps	%ymm10, %ymm8, %ymm8
+     1c2:      	vmulps	%ymm7, %ymm11, %ymm10
+     1c6:      	vaddps	%ymm10, %ymm9, %ymm9
+     1cb:      	vmovups	%ymm8, -0x20(%r8,%r9,4)
+     1d2:      	vmovups	%ymm9, (%r8,%r9,4)
+     1d8:      	addq	$0x10, %r9
+     1dc:      	cmpq	%r9, %rcx
+     1df:      	jne	0x170 <issue463_mix2x2_simd8+0x170>
+     1e1:      	movq	%rdx, %rax
+     1e4:      	leaq	(%rip), %rcx            # 0x1eb <issue463_mix2x2_simd8+0x1eb>
+     1eb:      	nopl	(%rax,%rax)
+     1f0:      	cmpq	%rbx, %rax
+     1f3:      	ja	0x26f <issue463_mix2x2_simd8+0x26f>
+     1f5:      	je	0x286 <issue463_mix2x2_simd8+0x286>
+     1fb:      	vmovss	(%rdi,%rax,4), %xmm4
+     200:      	vmovss	(%r14,%rax,4), %xmm5
+     206:      	vmulss	%xmm4, %xmm0, %xmm6
+     20a:      	vmulss	%xmm5, %xmm1, %xmm7
+     20e:      	vaddss	%xmm7, %xmm6, %xmm6
+     212:      	vmovss	%xmm6, (%rdi,%rax,4)
+     217:      	vmulss	%xmm4, %xmm2, %xmm4
+     21b:      	vmulss	%xmm5, %xmm3, %xmm5
+     21f:      	vaddss	%xmm5, %xmm4, %xmm4
+     223:      	vmovss	%xmm4, (%r14,%rax,4)
+     229:      	incq	%rax
+     22c:      	cmpq	%rax, %rsi
+     22f:      	jne	0x1f0 <issue463_mix2x2_simd8+0x1f0>
+     231:      	vzeroupper
+     234:      	callq	0x239 <issue463_mix2x2_simd8+0x239>
+     239:      	rorxl	$0x15, %eax, %ebp
+     23f:      	movq	%r14, %rdi
+     242:      	movq	%rbx, %rsi
+     245:      	callq	0x24a <issue463_mix2x2_simd8+0x24a>
+     24a:      	xorl	%ebp, %eax
+     24c:      	popq	%rbx
+     24d:      	popq	%r12
+     24f:      	popq	%r14
+     251:      	popq	%r15
+     253:      	popq	%rbp
+     254:      	retq
+     255:      	xorl	%eax, %eax
+     257:      	jmp	0x275 <issue463_mix2x2_simd8+0x275>
+     259:      	movq	%rsi, %r8
+     25c:      	movq	%rsi, %rdx
+     25f:      	movq	%r10, %rcx
+     262:      	jmp	0x275 <issue463_mix2x2_simd8+0x275>
+     264:      	movq	%rbx, %r8
+     267:      	movq	%rbx, %rdx
+     26a:      	movq	%r11, %rcx
+     26d:      	jmp	0x275 <issue463_mix2x2_simd8+0x275>
+     26f:      	movq	%rbx, %r8
+     272:      	movq	%rbx, %rdx
+     275:      	movq	%rax, %rdi
+     278:      	movq	%r8, %rsi
+     27b:      	vzeroupper
+     27e:      	callq	*(%rip)                 # 0x284 <issue463_mix2x2_simd8+0x284>
+     284:      	jmp	0x29a <issue463_mix2x2_simd8+0x29a>
+     286:      	leaq	(%rip), %rdx            # 0x28d <issue463_mix2x2_simd8+0x28d>
+     28d:      	xorl	%edi, %edi
+     28f:      	xorl	%esi, %esi
+     291:      	vzeroupper
+     294:      	callq	*(%rip)                 # 0x29a <issue463_mix2x2_simd8+0x29a>
+     29a:      	ud2
+     29c:      	callq	*(%rip)                 # 0x2a2 <issue463_mix2x2_simd8+0x2a2>
+
+Disassembly of section .text.issue463_sum2_scalar:
+
+0000000000000000 <issue463_sum2_scalar>:
+       0:      	pushq	%rax
+       1:      	movq	%rdi, %rax
+       4:      	testq	%rsi, %rsi
+       7:      	je	0x106 <issue463_sum2_scalar+0x106>
+       d:      	cmpq	%rcx, %r9
+      10:      	movq	%rcx, %rdi
+      13:      	cmovbq	%r9, %rdi
+      17:      	leaq	-0x1(%rsi), %r10
+      1b:      	cmpq	%r10, %rdi
+      1e:      	cmovaeq	%r10, %rdi
+      22:      	incq	%rdi
+      25:      	cmpq	$0x21, %rdi
+      29:      	jb	0x52 <issue463_sum2_scalar+0x52>
+      2b:      	movq	%rax, %r10
+      2e:      	subq	%rdx, %r10
+      31:      	cmpq	$0x80, %r10
+      38:      	setb	%r10b
+      3c:      	movq	%rax, %r11
+      3f:      	subq	%r8, %r11
+      42:      	cmpq	$0x80, %r11
+      49:      	setb	%r11b
+      4d:      	orb	%r10b, %r11b
+      50:      	je	0x56 <issue463_sum2_scalar+0x56>
+      52:      	xorl	%edi, %edi
+      54:      	jmp	0xca <issue463_sum2_scalar+0xca>
+      56:      	movl	%edi, %r10d
+      59:      	andl	$0x1f, %r10d
+      5d:      	movl	$0x20, %r11d
+      63:      	cmovneq	%r10, %r11
+      67:      	subq	%r11, %rdi
+      6a:      	xorl	%r10d, %r10d
+      6d:      	nopl	(%rax)
+      70:      	vmovups	(%rdx,%r10,4), %ymm0
+      76:      	vmovups	0x20(%rdx,%r10,4), %ymm1
+      7d:      	vmovups	0x40(%rdx,%r10,4), %ymm2
+      84:      	vmovups	0x60(%rdx,%r10,4), %ymm3
+      8b:      	vaddps	(%r8,%r10,4), %ymm0, %ymm0
+      91:      	vaddps	0x20(%r8,%r10,4), %ymm1, %ymm1
+      98:      	vaddps	0x40(%r8,%r10,4), %ymm2, %ymm2
+      9f:      	vaddps	0x60(%r8,%r10,4), %ymm3, %ymm3
+      a6:      	vmovups	%ymm0, (%rax,%r10,4)
+      ac:      	vmovups	%ymm1, 0x20(%rax,%r10,4)
+      b3:      	vmovups	%ymm2, 0x40(%rax,%r10,4)
+      ba:      	vmovups	%ymm3, 0x60(%rax,%r10,4)
+      c1:      	addq	$0x20, %r10
+      c5:      	cmpq	%r10, %rdi
+      c8:      	jne	0x70 <issue463_sum2_scalar+0x70>
+      ca:      	leaq	(%rip), %r10            # 0xd1 <issue463_sum2_scalar+0xd1>
+      d1:      	leaq	(%rip), %r11            # 0xd8 <issue463_sum2_scalar+0xd8>
+      d8:      	nopl	(%rax,%rax)
+      e0:      	cmpq	%rcx, %rdi
+      e3:      	ja	0x118 <issue463_sum2_scalar+0x118>
+      e5:      	je	0x12c <issue463_sum2_scalar+0x12c>
+      e7:      	cmpq	%r9, %rdi
+      ea:      	ja	0x112 <issue463_sum2_scalar+0x112>
+      ec:      	je	0x12c <issue463_sum2_scalar+0x12c>
+      ee:      	vmovss	(%rdx,%rdi,4), %xmm0
+      f3:      	vaddss	(%r8,%rdi,4), %xmm0, %xmm0
+      f9:      	vmovss	%xmm0, (%rax,%rdi,4)
+      fe:      	incq	%rdi
+     101:      	cmpq	%rdi, %rsi
+     104:      	jne	0xe0 <issue463_sum2_scalar+0xe0>
+     106:      	movq	%rax, %rdi
+     109:      	popq	%rax
+     10a:      	vzeroupper
+     10d:      	jmp	0x112 <issue463_sum2_scalar+0x112>
+     112:      	movq	%r9, %rcx
+     115:      	movq	%r11, %r10
+     118:      	movq	%rcx, %rsi
+     11b:      	movq	%rcx, %rdx
+     11e:      	movq	%r10, %rcx
+     121:      	vzeroupper
+     124:      	callq	*(%rip)                 # 0x12a <issue463_sum2_scalar+0x12a>
+     12a:      	jmp	0x140 <issue463_sum2_scalar+0x140>
+     12c:      	leaq	(%rip), %rdx            # 0x133 <issue463_sum2_scalar+0x133>
+     133:      	xorl	%edi, %edi
+     135:      	xorl	%esi, %esi
+     137:      	vzeroupper
+     13a:      	callq	*(%rip)                 # 0x140 <issue463_sum2_scalar+0x140>
+     140:      	ud2
+     142:      	callq	*(%rip)                 # 0x148 <issue463_sum2_scalar+0x148>
+
+Disassembly of section .text.issue463_sum2_simd8:
+
+0000000000000000 <issue463_sum2_simd8>:
+       0:      	pushq	%rbp
+       1:      	pushq	%r15
+       3:      	pushq	%r14
+       5:      	pushq	%r13
+       7:      	pushq	%r12
+       9:      	pushq	%rbx
+       a:      	pushq	%rax
+       b:      	movq	%r9, %r15
+       e:      	movq	%rsi, %r12
+      11:      	movq	%rdi, %rax
+      14:      	movabsq	$0x1ffffffffffffff8, %r14 # imm = 0x1FFFFFFFFFFFFFF8
+      1e:      	andq	%rsi, %r14
+      21:      	je	0xc1 <issue463_sum2_simd8+0xc1>
+      27:      	leaq	(%rip), %r10            # 0x2e <issue463_sum2_simd8+0x2e>
+      2e:      	leaq	(%rip), %r13            # 0x35 <issue463_sum2_simd8+0x35>
+      35:      	movq	%rcx, %rbp
+      38:      	movq	%r15, %r9
+      3b:      	movq	%r12, %rsi
+      3e:      	xorl	%edi, %edi
+      40:      	movl	$0x8, %r11d
+      46:      	nopw	%cs:(%rax,%rax)
+      50:      	movq	%rcx, %rbx
+      53:      	subq	%rdi, %rbx
+      56:      	jb	0x25e <issue463_sum2_simd8+0x25e>
+      5c:      	cmpq	$0x8, %rbp
+      60:      	jb	0x25a <issue463_sum2_simd8+0x25a>
+      66:      	movq	%r15, %rbx
+      69:      	subq	%rdi, %rbx
+      6c:      	jb	0x26d <issue463_sum2_simd8+0x26d>
+      72:      	cmpq	$0x8, %r9
+      76:      	jb	0x25a <issue463_sum2_simd8+0x25a>
+      7c:      	movq	%r12, %rbx
+      7f:      	subq	%rdi, %rbx
+      82:      	jb	0x27c <issue463_sum2_simd8+0x27c>
+      88:      	cmpq	$0x7, %rsi
+      8c:      	jbe	0x25a <issue463_sum2_simd8+0x25a>
+      92:      	vmovups	(%rdx,%rdi,4), %ymm0
+      97:      	vaddps	(%r8,%rdi,4), %ymm0, %ymm0
+      9d:      	vmovups	%ymm0, (%rax,%rdi,4)
+      a2:      	addq	$0x8, %rdi
+      a6:      	addq	$-0x8, %rsi
+      aa:      	addq	$-0x8, %r9
+      ae:      	addq	$-0x8, %rbp
+      b2:      	cmpq	%r14, %rdi
+      b5:      	jb	0x50 <issue463_sum2_simd8+0x50>
+      b7:      	cmpq	%r12, %rdi
+      ba:      	jb	0xcc <issue463_sum2_simd8+0xcc>
+      bc:      	jmp	0x23e <issue463_sum2_simd8+0x23e>
+      c1:      	xorl	%edi, %edi
+      c3:      	cmpq	%r12, %rdi
+      c6:      	jae	0x23e <issue463_sum2_simd8+0x23e>
+      cc:      	xorl	%r11d, %r11d
+      cf:      	movq	%rcx, %rsi
+      d2:      	incq	%rsi
+      d5:      	sete	%r11b
+      d9:      	xorl	%r9d, %r9d
+      dc:      	subq	%rdi, %rsi
+      df:      	sbbq	$0x0, %r11
+      e3:      	cmovbq	%r9, %r11
+      e7:      	cmovbq	%r9, %rsi
+      eb:      	xorl	%r10d, %r10d
+      ee:      	movq	%r15, %rbx
+      f1:      	incq	%rbx
+      f4:      	sete	%r10b
+      f8:      	subq	%rdi, %rbx
+      fb:      	sbbq	$0x0, %r10
+      ff:      	cmovbq	%r9, %r10
+     103:      	cmovbq	%r9, %rbx
+     107:      	cmpq	%rbx, %rsi
+     10a:      	movq	%r11, %r14
+     10d:      	sbbq	%r10, %r14
+     110:      	cmovbq	%r11, %r10
+     114:      	cmovbq	%rsi, %rbx
+     118:      	movq	%rdi, %rsi
+     11b:      	notq	%rsi
+     11e:      	addq	%r12, %rsi
+     121:      	cmpq	%rsi, %rbx
+     124:      	movq	%r10, %r11
+     127:      	sbbq	$0x0, %r11
+     12b:      	cmovaeq	%r9, %r10
+     12f:      	cmovbq	%rbx, %rsi
+     133:      	movq	%rcx, %r11
+     136:      	subq	%rdi, %r11
+     139:      	cmpq	%r11, %rsi
+     13c:      	movq	%r10, %rbx
+     13f:      	sbbq	$0x0, %rbx
+     143:      	cmovaeq	%r9, %r10
+     147:      	cmovbq	%rsi, %r11
+     14b:      	movq	%r15, %rsi
+     14e:      	subq	%rdi, %rsi
+     151:      	cmpq	%rsi, %r11
+     154:      	sbbq	$0x0, %r10
+     158:      	cmovbq	%r11, %rsi
+     15c:      	incq	%rsi
+     15f:      	cmpq	$0x20, %rsi
+     163:      	jbe	0x1f9 <issue463_sum2_simd8+0x1f9>
+     169:      	movl	%esi, %r9d
+     16c:      	andl	$0x1f, %r9d
+     170:      	movl	$0x20, %r10d
+     176:      	cmovneq	%r9, %r10
+     17a:      	subq	%r10, %rsi
+     17d:      	leaq	(%rdi,%rsi), %r9
+     181:      	leaq	(%rax,%rdi,4), %r10
+     185:      	addq	$0x60, %r10
+     189:      	leaq	(%r8,%rdi,4), %r11
+     18d:      	addq	$0x60, %r11
+     191:      	leaq	(%rdx,%rdi,4), %rdi
+     195:      	addq	$0x60, %rdi
+     199:      	xorl	%ebx, %ebx
+     19b:      	nopl	(%rax,%rax)
+     1a0:      	vmovups	-0x60(%rdi,%rbx,4), %ymm0
+     1a6:      	vmovups	-0x40(%rdi,%rbx,4), %ymm1
+     1ac:      	vmovups	-0x20(%rdi,%rbx,4), %ymm2
+     1b2:      	vmovups	(%rdi,%rbx,4), %ymm3
+     1b7:      	vaddps	-0x60(%r11,%rbx,4), %ymm0, %ymm0
+     1be:      	vaddps	-0x40(%r11,%rbx,4), %ymm1, %ymm1
+     1c5:      	vaddps	-0x20(%r11,%rbx,4), %ymm2, %ymm2
+     1cc:      	vaddps	(%r11,%rbx,4), %ymm3, %ymm3
+     1d2:      	vmovups	%ymm0, -0x60(%r10,%rbx,4)
+     1d9:      	vmovups	%ymm1, -0x40(%r10,%rbx,4)
+     1e0:      	vmovups	%ymm2, -0x20(%r10,%rbx,4)
+     1e7:      	vmovups	%ymm3, (%r10,%rbx,4)
+     1ed:      	addq	$0x20, %rbx
+     1f1:      	cmpq	%rbx, %rsi
+     1f4:      	jne	0x1a0 <issue463_sum2_simd8+0x1a0>
+     1f6:      	movq	%r9, %rdi
+     1f9:      	leaq	(%rip), %r10            # 0x200 <issue463_sum2_simd8+0x200>
+     200:      	leaq	(%rip), %rsi            # 0x207 <issue463_sum2_simd8+0x207>
+     207:      	nopw	(%rax,%rax)
+     210:      	cmpq	%rcx, %rdi
+     213:      	ja	0x287 <issue463_sum2_simd8+0x287>
+     215:      	je	0x2ac <issue463_sum2_simd8+0x2ac>
+     21b:      	cmpq	%r15, %rdi
+     21e:      	ja	0x28f <issue463_sum2_simd8+0x28f>
+     220:      	je	0x2ac <issue463_sum2_simd8+0x2ac>
+     226:      	vmovss	(%rdx,%rdi,4), %xmm0
+     22b:      	vaddss	(%r8,%rdi,4), %xmm0, %xmm0
+     231:      	vmovss	%xmm0, (%rax,%rdi,4)
+     236:      	incq	%rdi
+     239:      	cmpq	%rdi, %r12
+     23c:      	jne	0x210 <issue463_sum2_simd8+0x210>
+     23e:      	movq	%rax, %rdi
+     241:      	movq	%r12, %rsi
+     244:      	addq	$0x8, %rsp
+     248:      	popq	%rbx
+     249:      	popq	%r12
+     24b:      	popq	%r13
+     24d:      	popq	%r14
+     24f:      	popq	%r15
+     251:      	popq	%rbp
+     252:      	vzeroupper
+     255:      	jmp	0x25a <issue463_sum2_simd8+0x25a>
+     25a:      	xorl	%edi, %edi
+     25c:      	jmp	0x298 <issue463_sum2_simd8+0x298>
+     25e:      	movq	%rcx, %r11
+     261:      	movq	%rcx, %rbx
+     264:      	leaq	(%rip), %r10            # 0x26b <issue463_sum2_simd8+0x26b>
+     26b:      	jmp	0x298 <issue463_sum2_simd8+0x298>
+     26d:      	movq	%r15, %r11
+     270:      	movq	%r15, %rbx
+     273:      	leaq	(%rip), %r10            # 0x27a <issue463_sum2_simd8+0x27a>
+     27a:      	jmp	0x298 <issue463_sum2_simd8+0x298>
+     27c:      	movq	%r12, %r11
+     27f:      	movq	%r12, %rbx
+     282:      	movq	%r13, %r10
+     285:      	jmp	0x298 <issue463_sum2_simd8+0x298>
+     287:      	movq	%rcx, %r11
+     28a:      	movq	%rcx, %rbx
+     28d:      	jmp	0x298 <issue463_sum2_simd8+0x298>
+     28f:      	movq	%r15, %r11
+     292:      	movq	%r15, %rbx
+     295:      	movq	%rsi, %r10
+     298:      	movq	%r11, %rsi
+     29b:      	movq	%rbx, %rdx
+     29e:      	movq	%r10, %rcx
+     2a1:      	vzeroupper
+     2a4:      	callq	*(%rip)                 # 0x2aa <issue463_sum2_simd8+0x2aa>
+     2aa:      	jmp	0x2c0 <issue463_sum2_simd8+0x2c0>
+     2ac:      	leaq	(%rip), %rdx            # 0x2b3 <issue463_sum2_simd8+0x2b3>
+     2b3:      	xorl	%edi, %edi
+     2b5:      	xorl	%esi, %esi
+     2b7:      	vzeroupper
+     2ba:      	callq	*(%rip)                 # 0x2c0 <issue463_sum2_simd8+0x2c0>
+     2c0:      	ud2
+     2c2:      	callq	*(%rip)                 # 0x2c8 <issue463_sum2_simd8+0x2c8>
+
+Disassembly of section .text.issue463_sum_into_scalar:
+
+0000000000000000 <issue463_sum_into_scalar>:
+       0:      	pushq	%rax
+       1:      	testq	%rsi, %rsi
+       4:      	je	0xee <issue463_sum_into_scalar+0xee>
+       a:      	leaq	-0x1(%rsi), %r8
+       e:      	cmpq	%r8, %rcx
+      11:      	movq	%r8, %rax
+      14:      	cmovbq	%rcx, %rax
+      18:      	incq	%rax
+      1b:      	cmpq	$0x21, %rax
+      1f:      	jae	0x28 <issue463_sum_into_scalar+0x28>
+      21:      	xorl	%eax, %eax
+      23:      	jmp	0xd0 <issue463_sum_into_scalar+0xd0>
+      28:      	cmpq	%r8, %rcx
+      2b:      	cmovbq	%rcx, %r8
+      2f:      	leaq	(%rdi,%r8,4), %r9
+      33:      	addq	$0x4, %r9
+      37:      	leaq	(%rdx,%r8,4), %r8
+      3b:      	addq	$0x4, %r8
+      3f:      	cmpq	%r8, %rdi
+      42:      	setb	%r8b
+      46:      	cmpq	%r9, %rdx
+      49:      	setb	%r9b
+      4d:      	testb	%r9b, %r8b
+      50:      	je	0x59 <issue463_sum_into_scalar+0x59>
+      52:      	xorl	%eax, %eax
+      54:      	jmp	0xd0 <issue463_sum_into_scalar+0xd0>
+      59:      	movl	%eax, %r8d
+      5c:      	andl	$0x1f, %r8d
+      60:      	movl	$0x20, %r9d
+      66:      	cmovneq	%r8, %r9
+      6a:      	subq	%r9, %rax
+      6d:      	xorl	%r8d, %r8d
+      70:      	vmovups	(%rdi,%r8,4), %ymm0
+      76:      	vmovups	0x20(%rdi,%r8,4), %ymm1
+      7d:      	vmovups	0x40(%rdi,%r8,4), %ymm2
+      84:      	vmovups	0x60(%rdi,%r8,4), %ymm3
+      8b:      	vaddps	(%rdx,%r8,4), %ymm0, %ymm0
+      91:      	vaddps	0x20(%rdx,%r8,4), %ymm1, %ymm1
+      98:      	vaddps	0x40(%rdx,%r8,4), %ymm2, %ymm2
+      9f:      	vaddps	0x60(%rdx,%r8,4), %ymm3, %ymm3
+      a6:      	vmovups	%ymm0, (%rdi,%r8,4)
+      ac:      	vmovups	%ymm1, 0x20(%rdi,%r8,4)
+      b3:      	vmovups	%ymm2, 0x40(%rdi,%r8,4)
+      ba:      	vmovups	%ymm3, 0x60(%rdi,%r8,4)
+      c1:      	addq	$0x20, %r8
+      c5:      	cmpq	%r8, %rax
+      c8:      	jne	0x70 <issue463_sum_into_scalar+0x70>
+      ca:      	nopw	(%rax,%rax)
+      d0:      	cmpq	%rcx, %rax
+      d3:      	ja	0xf7 <issue463_sum_into_scalar+0xf7>
+      d5:      	je	0x115 <issue463_sum_into_scalar+0x115>
+      d7:      	vmovss	(%rdi,%rax,4), %xmm0
+      dc:      	vaddss	(%rdx,%rax,4), %xmm0, %xmm0
+      e1:      	vmovss	%xmm0, (%rdi,%rax,4)
+      e6:      	incq	%rax
+      e9:      	cmpq	%rax, %rsi
+      ec:      	jne	0xd0 <issue463_sum_into_scalar+0xd0>
+      ee:      	popq	%rax
+      ef:      	vzeroupper
+      f2:      	jmp	0xf7 <issue463_sum_into_scalar+0xf7>
+      f7:      	leaq	(%rip), %r8             # 0xfe <issue463_sum_into_scalar+0xfe>
+      fe:      	movq	%rax, %rdi
+     101:      	movq	%rcx, %rsi
+     104:      	movq	%rcx, %rdx
+     107:      	movq	%r8, %rcx
+     10a:      	vzeroupper
+     10d:      	callq	*(%rip)                 # 0x113 <issue463_sum_into_scalar+0x113>
+     113:      	jmp	0x129 <issue463_sum_into_scalar+0x129>
+     115:      	leaq	(%rip), %rdx            # 0x11c <issue463_sum_into_scalar+0x11c>
+     11c:      	xorl	%edi, %edi
+     11e:      	xorl	%esi, %esi
+     120:      	vzeroupper
+     123:      	callq	*(%rip)                 # 0x129 <issue463_sum_into_scalar+0x129>
+     129:      	ud2
+     12b:      	callq	*(%rip)                 # 0x131 <issue463_sum_into_scalar+0x131>
+
+Disassembly of section .text.issue463_sum_into_simd8:
+
+0000000000000000 <issue463_sum_into_simd8>:
+       0:      	pushq	%r15
+       2:      	pushq	%r14
+       4:      	pushq	%r12
+       6:      	pushq	%rbx
+       7:      	pushq	%rax
+       8:      	movabsq	$0x1ffffffffffffff8, %r11 # imm = 0x1FFFFFFFFFFFFFF8
+      12:      	andq	%rsi, %r11
+      15:      	je	0x96 <issue463_sum_into_simd8+0x96>
+      17:      	leaq	(%rip), %rbx            # 0x1e <issue463_sum_into_simd8+0x1e>
+      1e:      	leaq	(%rip), %r8             # 0x25 <issue463_sum_into_simd8+0x25>
+      25:      	leaq	(%rip), %r14            # 0x2c <issue463_sum_into_simd8+0x2c>
+      2c:      	movq	%rsi, %r15
+      2f:      	movq	%rcx, %r12
+      32:      	xorl	%eax, %eax
+      34:      	movl	$0x8, %r10d
+      3a:      	nopw	(%rax,%rax)
+      40:      	movq	%rsi, %r9
+      43:      	subq	%rax, %r9
+      46:      	jb	0x1d5 <issue463_sum_into_simd8+0x1d5>
+      4c:      	cmpq	$0x7, %r15
+      50:      	jbe	0x1d1 <issue463_sum_into_simd8+0x1d1>
+      56:      	movq	%rcx, %r9
+      59:      	subq	%rax, %r9
+      5c:      	jb	0x1e0 <issue463_sum_into_simd8+0x1e0>
+      62:      	cmpq	$0x8, %r12
+      66:      	jb	0x1d1 <issue463_sum_into_simd8+0x1d1>
+      6c:      	vmovups	(%rdi,%rax,4), %ymm0
+      71:      	vaddps	(%rdx,%rax,4), %ymm0, %ymm0
+      76:      	vmovups	%ymm0, (%rdi,%rax,4)
+      7b:      	addq	$0x8, %rax
+      7f:      	addq	$-0x8, %r12
+      83:      	addq	$-0x8, %r15
+      87:      	cmpq	%r11, %rax
+      8a:      	jb	0x40 <issue463_sum_into_simd8+0x40>
+      8c:      	cmpq	%rsi, %rax
+      8f:      	jb	0xa1 <issue463_sum_into_simd8+0xa1>
+      91:      	jmp	0x1be <issue463_sum_into_simd8+0x1be>
+      96:      	xorl	%eax, %eax
+      98:      	cmpq	%rsi, %rax
+      9b:      	jae	0x1be <issue463_sum_into_simd8+0x1be>
+      a1:      	xorl	%r9d, %r9d
+      a4:      	movq	%rcx, %r8
+      a7:      	incq	%r8
+      aa:      	sete	%r9b
+      ae:      	xorl	%r10d, %r10d
+      b1:      	subq	%rax, %r8
+      b4:      	sbbq	$0x0, %r9
+      b8:      	cmovbq	%r10, %r9
+      bc:      	cmovbq	%r10, %r8
+      c0:      	movq	%rax, %r11
+      c3:      	notq	%r11
+      c6:      	addq	%rsi, %r11
+      c9:      	cmpq	%r11, %r8
+      cc:      	movq	%r9, %rbx
+      cf:      	sbbq	$0x0, %rbx
+      d3:      	cmovaeq	%r10, %r9
+      d7:      	cmovbq	%r8, %r11
+      db:      	movq	%rcx, %r8
+      de:      	subq	%rax, %r8
+      e1:      	cmpq	%r8, %r11
+      e4:      	sbbq	$0x0, %r9
+      e8:      	cmovbq	%r11, %r8
+      ec:      	incq	%r8
+      ef:      	cmpq	$0x20, %r8
+      f3:      	jbe	0x18d <issue463_sum_into_simd8+0x18d>
+      f9:      	movl	%r8d, %r9d
+      fc:      	andl	$0x1f, %r9d
+     100:      	movl	$0x20, %r10d
+     106:      	cmovneq	%r9, %r10
+     10a:      	subq	%r10, %r8
+     10d:      	leaq	(%rax,%r8), %r9
+     111:      	leaq	(%rdx,%rax,4), %r10
+     115:      	addq	$0x60, %r10
+     119:      	leaq	(%rdi,%rax,4), %rax
+     11d:      	addq	$0x60, %rax
+     121:      	xorl	%r11d, %r11d
+     124:      	nopw	%cs:(%rax,%rax)
+     130:      	vmovups	-0x60(%rax,%r11,4), %ymm0
+     137:      	vmovups	-0x40(%rax,%r11,4), %ymm1
+     13e:      	vmovups	-0x20(%rax,%r11,4), %ymm2
+     145:      	vmovups	(%rax,%r11,4), %ymm3
+     14b:      	vaddps	-0x60(%r10,%r11,4), %ymm0, %ymm0
+     152:      	vaddps	-0x40(%r10,%r11,4), %ymm1, %ymm1
+     159:      	vaddps	-0x20(%r10,%r11,4), %ymm2, %ymm2
+     160:      	vaddps	(%r10,%r11,4), %ymm3, %ymm3
+     166:      	vmovups	%ymm0, -0x60(%rax,%r11,4)
+     16d:      	vmovups	%ymm1, -0x40(%rax,%r11,4)
+     174:      	vmovups	%ymm2, -0x20(%rax,%r11,4)
+     17b:      	vmovups	%ymm3, (%rax,%r11,4)
+     181:      	addq	$0x20, %r11
+     185:      	cmpq	%r11, %r8
+     188:      	jne	0x130 <issue463_sum_into_simd8+0x130>
+     18a:      	movq	%r9, %rax
+     18d:      	leaq	(%rip), %r8             # 0x194 <issue463_sum_into_simd8+0x194>
+     194:      	nopw	%cs:(%rax,%rax)
+     1a0:      	cmpq	%rcx, %rax
+     1a3:      	ja	0x1eb <issue463_sum_into_simd8+0x1eb>
+     1a5:      	je	0x208 <issue463_sum_into_simd8+0x208>
+     1a7:      	vmovss	(%rdi,%rax,4), %xmm0
+     1ac:      	vaddss	(%rdx,%rax,4), %xmm0, %xmm0
+     1b1:      	vmovss	%xmm0, (%rdi,%rax,4)
+     1b6:      	incq	%rax
+     1b9:      	cmpq	%rax, %rsi
+     1bc:      	jne	0x1a0 <issue463_sum_into_simd8+0x1a0>
+     1be:      	addq	$0x8, %rsp
+     1c2:      	popq	%rbx
+     1c3:      	popq	%r12
+     1c5:      	popq	%r14
+     1c7:      	popq	%r15
+     1c9:      	vzeroupper
+     1cc:      	jmp	0x1d1 <issue463_sum_into_simd8+0x1d1>
+     1d1:      	xorl	%eax, %eax
+     1d3:      	jmp	0x1f1 <issue463_sum_into_simd8+0x1f1>
+     1d5:      	movq	%rsi, %r10
+     1d8:      	movq	%rsi, %r9
+     1db:      	movq	%rbx, %r8
+     1de:      	jmp	0x1f1 <issue463_sum_into_simd8+0x1f1>
+     1e0:      	movq	%rcx, %r10
+     1e3:      	movq	%rcx, %r9
+     1e6:      	movq	%r14, %r8
+     1e9:      	jmp	0x1f1 <issue463_sum_into_simd8+0x1f1>
+     1eb:      	movq	%rcx, %r10
+     1ee:      	movq	%rcx, %r9
+     1f1:      	movq	%rax, %rdi
+     1f4:      	movq	%r10, %rsi
+     1f7:      	movq	%r9, %rdx
+     1fa:      	movq	%r8, %rcx
+     1fd:      	vzeroupper
+     200:      	callq	*(%rip)                 # 0x206 <issue463_sum_into_simd8+0x206>
+     206:      	jmp	0x21c <issue463_sum_into_simd8+0x21c>
+     208:      	leaq	(%rip), %rdx            # 0x20f <issue463_sum_into_simd8+0x20f>
+     20f:      	xorl	%edi, %edi
+     211:      	xorl	%esi, %esi
+     213:      	vzeroupper
+     216:      	callq	*(%rip)                 # 0x21c <issue463_sum_into_simd8+0x21c>
+     21c:      	ud2
+     21e:      	callq	*(%rip)                 # 0x224 <issue463_sum_into_simd8+0x224>

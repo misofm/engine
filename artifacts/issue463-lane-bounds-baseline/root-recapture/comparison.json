@@ -1,0 +1,92 @@
+[
+  {
+    "body": "native-issue463_sum2_simd8.body",
+    "exact_bytes_equal": false,
+    "instructions_equal_excluding_next_section_label": true
+  },
+  {
+    "body": "native-issue463_sum2_scalar.body",
+    "exact_bytes_equal": false,
+    "instructions_equal_excluding_next_section_label": true
+  },
+  {
+    "body": "wasm-scalar-issue463_mix2x2_scalar.body",
+    "exact_bytes_equal": true,
+    "instructions_equal_excluding_next_section_label": true
+  },
+  {
+    "body": "wasm-simd128-issue463_sum_into_scalar.body",
+    "exact_bytes_equal": true,
+    "instructions_equal_excluding_next_section_label": true
+  },
+  {
+    "body": "wasm-simd128-issue463_sum2_scalar.body",
+    "exact_bytes_equal": true,
+    "instructions_equal_excluding_next_section_label": true
+  },
+  {
+    "body": "wasm-simd128-issue463_mix2x2_scalar.body",
+    "exact_bytes_equal": true,
+    "instructions_equal_excluding_next_section_label": true
+  },
+  {
+    "body": "wasm-scalar-issue463_sum_into_simd4.body",
+    "exact_bytes_equal": true,
+    "instructions_equal_excluding_next_section_label": true
+  },
+  {
+    "body": "wasm-scalar-issue463_sum_into_scalar.body",
+    "exact_bytes_equal": true,
+    "instructions_equal_excluding_next_section_label": true
+  },
+  {
+    "body": "native-issue463_mix2x2_simd8.body",
+    "exact_bytes_equal": false,
+    "instructions_equal_excluding_next_section_label": true
+  },
+  {
+    "body": "wasm-scalar-issue463_sum2_simd4.body",
+    "exact_bytes_equal": true,
+    "instructions_equal_excluding_next_section_label": true
+  },
+  {
+    "body": "wasm-simd128-issue463_sum2_simd4.body",
+    "exact_bytes_equal": true,
+    "instructions_equal_excluding_next_section_label": true
+  },
+  {
+    "body": "wasm-scalar-issue463_sum2_scalar.body",
+    "exact_bytes_equal": true,
+    "instructions_equal_excluding_next_section_label": true
+  },
+  {
+    "body": "native-issue463_sum_into_scalar.body",
+    "exact_bytes_equal": false,
+    "instructions_equal_excluding_next_section_label": true
+  },
+  {
+    "body": "wasm-simd128-issue463_mix2x2_simd4.body",
+    "exact_bytes_equal": true,
+    "instructions_equal_excluding_next_section_label": true
+  },
+  {
+    "body": "native-issue463_sum_into_simd8.body",
+    "exact_bytes_equal": true,
+    "instructions_equal_excluding_next_section_label": true
+  },
+  {
+    "body": "wasm-simd128-issue463_sum_into_simd4.body",
+    "exact_bytes_equal": true,
+    "instructions_equal_excluding_next_section_label": true
+  },
+  {
+    "body": "wasm-scalar-issue463_mix2x2_simd4.body",
+    "exact_bytes_equal": true,
+    "instructions_equal_excluding_next_section_label": true
+  },
+  {
+    "body": "native-issue463_mix2x2_scalar.body",
+    "exact_bytes_equal": false,
+    "instructions_equal_excluding_next_section_label": true
+  }
+]

@@ -1,0 +1,8 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running unittests src/lib.rs (/tmp/463-sol2-qualification-target/debug/deps/graph-8a9a24e95701fbaa)
+
+running 1 test
+test runtime::tests::a_folded_epilogue_is_the_route_and_the_reduction_bit_for_bit ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 54 filtered out; finished in 0.00s
+

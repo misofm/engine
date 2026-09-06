@@ -1,0 +1,11 @@
+{
+  "cwd": "/home/bl/misofm/engine-lane2-plan",
+  "argv": [
+    "node",
+    "hosts/host-web/tests/browser-v1/direct-oracle.mjs",
+    "/tmp/463-sol2-worklet.4jaSqj",
+    "hosts/host-web/tests/browser-v1/expected.json"
+  ],
+  "source": "09c26a98d270d031d566feb72d93863d60e21447",
+  "wasm_sha256": "6dcf5e3a6f5a56feffce22133eb4c997d594db4bbc3624fa9cd0fe79111e10b7"
+}

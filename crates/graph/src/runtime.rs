@@ -4209,7 +4209,8 @@ mod tests {
     /// master is `+0.0` (bits 0) where `-0.0` (bits 0x8000_0000) is required.
     #[test]
     fn the_first_contributor_stores_so_a_negative_zero_master_keeps_its_sign() {
-        const FRAMES: usize = 8;
+        let _canonical = lane::fpenv::CanonicalFpEnv::enter();
+        const FRAMES: usize = 9;
         let mut lease = stereo_lease(FRAMES, 1);
         // The arena starts at `+0.0`, which is exactly the value a zero-fill would leave.
         assert!(
@@ -4248,6 +4249,93 @@ mod tests {
                 "frame {frame}: the first contributor's sign was lost on the right"
             );
         }
+
+        fn matrix_word(left: f32, right: f32, coefficients: [f32; 4]) -> (f32, f32) {
+            let left_product = coefficients[0] * left;
+            let left_cross = coefficients[1] * right;
+            let right_cross = coefficients[2] * left;
+            let right_product = coefficients[3] * right;
+            (left_cross + left_product, right_product + right_cross)
+        }
+
+        let seed_values = [
+            16_777_216.0,
+            1.0,
+            -16_777_216.0,
+            -1.0,
+            f32::MIN_POSITIVE,
+            f32::from_bits(1),
+            3.25,
+            -7.5,
+            0.0,
+        ];
+        let mut seed_left = seed_values.to_vec();
+        let mut seed_right: Vec<f32> = seed_values.iter().rev().map(|value| -*value).collect();
+        let seeded: Vec<(f32, f32)> = seed_left
+            .iter()
+            .zip(&seed_right)
+            .map(|(left, right)| matrix_word(*left, *right, fold[0].coefficients))
+            .collect();
+        let mut seed_members = ArenaMembers {
+            lease: &mut lease,
+            inputs: &[],
+            outputs: &[],
+            fold: &fold,
+            master: ARENA_BASE,
+        };
+        seed_members.fold_plane(0, &mut seed_left, &mut seed_right);
+
+        const ACCUMULATE_COEFFICIENTS: [f32; 4] = [0.9, -0.1, 0.2, 0.8];
+        let accumulate_fold = [FoldLane {
+            coefficients: ACCUMULATE_COEFFICIENTS,
+            store: false,
+        }];
+        let mut added_left: Vec<f32> = (0..FRAMES)
+            .map(|frame| seed_values[(frame + 2) % FRAMES])
+            .collect();
+        let mut added_right: Vec<f32> = (0..FRAMES)
+            .map(|frame| -seed_values[(frame + 5) % FRAMES])
+            .collect();
+        let routed: Vec<(f32, f32)> = added_left
+            .iter()
+            .zip(&added_right)
+            .map(|(left, right)| matrix_word(*left, *right, ACCUMULATE_COEFFICIENTS))
+            .collect();
+        let expected_left: Vec<u32> = seeded
+            .iter()
+            .zip(&routed)
+            .map(|(old, added)| (old.0 + added.0).to_bits())
+            .collect();
+        let expected_right: Vec<u32> = seeded
+            .iter()
+            .zip(&routed)
+            .map(|(old, added)| (old.1 + added.1).to_bits())
+            .collect();
+        let mut accumulate_members = ArenaMembers {
+            lease: &mut lease,
+            inputs: &[],
+            outputs: &[],
+            fold: &accumulate_fold,
+            master: ARENA_BASE,
+        };
+        accumulate_members.fold_plane(0, &mut added_left, &mut added_right);
+        let (master_left, master_right) = lease.read_stereo(ARENA_BASE);
+        assert_eq!(
+            master_left
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            expected_left,
+            "real fold_plane store=false must ordered-add the left contribution"
+        );
+        assert_eq!(
+            master_right
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            expected_right,
+            "real fold_plane store=false must ordered-add the right contribution"
+        );
 
         let mut cohort_lease = stereo_lease(FRAMES, 1);
         let (poison_left, poison_right) = cohort_lease.write_stereo(ARENA_BASE);

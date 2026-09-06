@@ -1,0 +1,24 @@
+   Compiling typenum v1.20.1
+   Compiling engine v0.1.0 (/home/bl/misofm/engine-lane2-plan/crates/engine)
+   Compiling math v0.1.0 (/home/bl/misofm/engine-lane2-plan/crates/math)
+   Compiling cpufeatures v0.3.0
+   Compiling cfg-if v1.0.4
+   Compiling dsp-reference v0.1.0 (/home/bl/misofm/engine-lane2-plan/crates/dsp-reference)
+   Compiling effect-contract v0.1.0 (/home/bl/misofm/engine-lane2-plan/crates/effect-contract)
+   Compiling hybrid-array v0.4.14
+   Compiling conformance v0.1.0 (/home/bl/misofm/engine-lane2-plan/crates/conformance)
+   Compiling rack v0.1.0 (/home/bl/misofm/engine-lane2-plan/crates/rack)
+   Compiling crypto-common v0.2.2
+   Compiling block-buffer v0.12.1
+   Compiling digest v0.11.3
+   Compiling sha2 v0.11.0
+   Compiling bench-support v0.1.0 (/home/bl/misofm/engine-lane2-plan/tools/bench-support)
+   Compiling graph v0.1.0 (/home/bl/misofm/engine-lane2-plan/crates/graph)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.26s
+     Running unittests src/lib.rs (/tmp/463-sol2-tranche-target/debug/deps/graph-8a9a24e95701fbaa)
+
+running 1 test
+test runtime::tests::the_first_contributor_stores_so_a_negative_zero_master_keeps_its_sign ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 54 filtered out; finished in 0.00s
+

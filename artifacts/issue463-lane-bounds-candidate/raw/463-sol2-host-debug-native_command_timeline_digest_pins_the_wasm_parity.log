@@ -1,0 +1,8 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running unittests src/lib.rs (/tmp/463-sol2-qualification-target/debug/deps/host_web-5bbcf2d829042aa5)
+
+running 1 test
+test tests::native_command_timeline_digest_pins_the_wasm_parity ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 62 filtered out; finished in 0.01s
+
