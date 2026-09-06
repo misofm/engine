@@ -1,0 +1,38 @@
+Script started on 2026-09-06 02:14:37+00:00 [COMMAND="PATH=/home/bl/.cargo/bin:$PATH cargo test --locked -p graph --lib program::tests::runtime_units_match_literal_bank_schedules -- --exact" <not executed on terminal>]
+   Compiling graph v0.1.0 (/home/bl/misofm/engine-488-schedule-oracle/crates/graph)
+warning: variable does not need to be mutable
+    --> crates/graph/src/runtime.rs:1819:21
+     |
+1819 |                 let mut members: Vec<(usize, usize)> = program
+     |                     ----^^^^^^^
+     |                     |
+     |                     help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: `graph` (lib test) generated 1 warning (run `cargo fix --lib -p graph --tests` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.53s
+     Running unittests src/lib.rs (target/debug/deps/graph-8a9a24e95701fbaa)
+
+running 1 test
+test program::tests::runtime_units_match_literal_bank_schedules ... FAILED
+
+failures:
+
+---- program::tests::runtime_units_match_literal_bank_schedules stdout ----
+
+thread 'program::tests::runtime_units_match_literal_bank_schedules' (121665) panicked at crates/graph/src/program.rs:1724:9:
+assertion `left == right` failed
+  left: [(None, [0]), (Some(Effect(0)), [1, 4]), (Some(Builtin(0)), [2, 5]), (None, [3]), (Some(Effect(1)), [6]), (None, [7])]
+ right: [(None, [0]), (Some(Effect(0)), [4, 1]), (Some(Builtin(0)), [5, 2]), (None, [3]), (Some(Effect(1)), [6]), (None, [7])]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    program::tests::runtime_units_match_literal_bank_schedules
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 55 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p graph --lib`
+
+Script done on 2026-09-06 02:14:37+00:00 [COMMAND_EXIT_CODE="101"]
