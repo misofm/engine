@@ -7,12 +7,19 @@
 pub mod program;
 mod runtime;
 
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub use runtime::{
+    TestOnlyBankChainInputs, TestOnlyBankChainOwnership, test_only_bank_chain_ownership,
+    test_only_prepare_bank_chain_inputs,
+};
+
 use core::cell::Cell;
 use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet};
 
 use effect_contract::{
-    ChannelSymmetryWitness, EffectControlLane, LatencySamples, ObservationLane,
+    BankWidth, ChannelSymmetryWitness, EffectControlLane, LatencySamples, ObservationLane,
     PreparedEffectMetadata, PreparedNativeEffect, SeamSide, TailSamples,
 };
 use engine::{
@@ -200,6 +207,7 @@ pub struct GraphBuiltinBankResourceEstimate {
     pub scratch_bytes: u64,
     pub scratch_samples: u64,
     pub metadata_bytes: u64,
+    pub maximum_mask_bytes: u64,
     pub largest_allocation_bytes: u64,
 }
 
@@ -208,6 +216,60 @@ pub struct GraphBuiltinBankResourceEstimate {
 pub struct GraphScalarOwnerResourceEstimate {
     pub total_bytes: u64,
     pub largest_allocation_bytes: u64,
+}
+
+/// Conservative coexistence reservation for runtime bank slots and their masks.
+///
+/// `bank_count` is the combined prepared effect and planned builtin membership count. `mask_bytes`
+/// is the largest selected bank mask in bytes, including the target's native bool layout.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct GraphBankSlotResourceEstimate {
+    pub bank_count: u64,
+    pub mask_bytes: u64,
+    pub total_bytes: u64,
+    pub largest_allocation_bytes: u64,
+}
+
+impl GraphBankSlotResourceEstimate {
+    /// Computes the checked slot reservation for one selected dispatch width.
+    pub fn checked_for(bank_count: u64, width: Option<BankWidth>) -> Option<Self> {
+        if bank_count == 0 {
+            return Some(Self::default());
+        }
+        let width = width?;
+        let mask_bytes = u64::from(width.lanes())
+            .checked_mul(u64::try_from(core::mem::size_of::<bool>()).ok()?)?;
+        Self::checked_for_mask(bank_count, mask_bytes)
+    }
+
+    /// Computes the same reservation from the largest mask observed in prepared banks.
+    pub fn checked_for_mask(bank_count: u64, mask_bytes: u64) -> Option<Self> {
+        if bank_count == 0 {
+            return Some(Self::default());
+        }
+        let stage_pointer_bytes = u64::try_from(core::mem::size_of::<Box<dyn rack::BankStage>>())
+            .ok()?
+            .checked_mul(bank_count)?;
+        let slot_bytes = u64::try_from(core::mem::size_of::<rack::BankSlot>())
+            .ok()?
+            .checked_mul(bank_count)?;
+        let total_bytes = bank_count.checked_mul(
+            u64::try_from(core::mem::size_of::<Box<dyn rack::BankStage>>())
+                .ok()?
+                .checked_add(
+                    u64::try_from(core::mem::size_of::<rack::BankSlot>())
+                        .ok()?
+                        .checked_mul(3)?,
+                )?
+                .checked_add(mask_bytes.checked_mul(3)?)?,
+        )?;
+        Some(Self {
+            bank_count,
+            mask_bytes,
+            total_bytes,
+            largest_allocation_bytes: stage_pointer_bytes.max(slot_bytes).max(mask_bytes),
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -219,6 +281,28 @@ pub enum GraphBuiltinBankAttachError {
 }
 
 impl GraphResourceEstimate {
+    /// Adds the conservative runtime bank-slot reservation transactionally.
+    pub fn checked_add_bank_slot_owners(
+        &mut self,
+        resource: GraphBankSlotResourceEstimate,
+    ) -> Option<()> {
+        let mut next = self.clone();
+        next.graph_metadata_bytes = next
+            .graph_metadata_bytes
+            .checked_add(resource.total_bytes)?;
+        next.incremental_plan_bytes = next
+            .incremental_plan_bytes
+            .checked_add(resource.total_bytes)?;
+        next.session_plus_plan_bytes = next
+            .session_plus_plan_bytes
+            .checked_add(resource.total_bytes)?;
+        next.largest_allocation_bytes = next
+            .largest_allocation_bytes
+            .max(resource.largest_allocation_bytes);
+        *self = next;
+        Some(())
+    }
+
     pub fn checked_add_scalar_owners(
         &mut self,
         resource: GraphScalarOwnerResourceEstimate,
@@ -1949,6 +2033,7 @@ mod tests {
                 scratch_bytes: 16,
                 scratch_samples: 4,
                 metadata_bytes: 8,
+                maximum_mask_bytes: 0,
                 largest_allocation_bytes: 16,
             }),
             None

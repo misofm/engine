@@ -573,8 +573,10 @@ impl GraphCompiler {
                 ));
             }
         }
-        let mut capped_estimate = estimate.clone();
-        if let Some(builtins) = prepared_builtins {
+        // The runtime chain retains one slot and one cloned mask per prepared membership.  Fold
+        // its conservative coexistence reservation into the published estimate before caps; the
+        // builtin payload itself is attached later and must not carry this term a second time.
+        let builtin_bank_resource = if let Some(builtins) = prepared_builtins {
             let Some(resource) =
                 builtins.graph_builtin_bank_resource(rack_cohorts.dispatch, &levels, &pool_classes)
             else {
@@ -586,18 +588,87 @@ impl GraphCompiler {
                     )],
                 ));
             };
-            if capped_estimate
-                .checked_add_builtin_banks(resource)
-                .is_none()
-            {
-                return Err(failure(
-                    effects,
-                    vec![diag(
-                        "graph.resource.arithmetic_overflow",
-                        "$.graph.builtin_banks",
-                    )],
-                ));
-            }
+            resource
+        } else {
+            graph::GraphBuiltinBankResourceEstimate::default()
+        };
+        let bank_count = bank_resource
+            .bank_count
+            .checked_add(builtin_bank_resource.bank_count);
+        let Some(bank_count) = bank_count else {
+            return Err(failure(
+                effects,
+                vec![diag(
+                    "graph.resource.arithmetic_overflow",
+                    "$.graph.bank_slots",
+                )],
+            ));
+        };
+        let effect_mask_bytes = banks
+            .iter()
+            .map(|bank| {
+                u64::try_from(bank.active_mask.len())
+                    .ok()?
+                    .checked_mul(u64::try_from(core::mem::size_of::<bool>()).ok()?)
+            })
+            .try_fold(0_u64, |maximum, value| Some(maximum.max(value?)));
+        let Some(effect_mask_bytes) = effect_mask_bytes else {
+            return Err(failure(
+                effects,
+                vec![diag(
+                    "graph.resource.arithmetic_overflow",
+                    "$.graph.bank_slots",
+                )],
+            ));
+        };
+        let mask_bytes = effect_mask_bytes.max(builtin_bank_resource.maximum_mask_bytes);
+        let Some(slot_resource) =
+            graph::GraphBankSlotResourceEstimate::checked_for_mask(bank_count, mask_bytes)
+        else {
+            return Err(failure(
+                effects,
+                vec![diag(
+                    "graph.resource.arithmetic_overflow",
+                    "$.graph.bank_slots",
+                )],
+            ));
+        };
+        let mut capped_estimate = estimate.clone();
+        if capped_estimate
+            .checked_add_builtin_banks(builtin_bank_resource)
+            .is_none()
+        {
+            return Err(failure(
+                effects,
+                vec![diag(
+                    "graph.resource.arithmetic_overflow",
+                    "$.graph.builtin_banks",
+                )],
+            ));
+        }
+        if capped_estimate
+            .checked_add_bank_slot_owners(slot_resource)
+            .is_none()
+        {
+            return Err(failure(
+                effects,
+                vec![diag(
+                    "graph.resource.arithmetic_overflow",
+                    "$.graph.bank_slots",
+                )],
+            ));
+        }
+        if estimate
+            .checked_add_bank_slot_owners(slot_resource)
+            .is_none()
+        {
+            return Err(failure(
+                effects,
+                vec![diag(
+                    "graph.resource.arithmetic_overflow",
+                    "$.graph.bank_slots",
+                )],
+            ));
         }
         if !estimate_fits_platform(&capped_estimate) {
             return Err(failure(

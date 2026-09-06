@@ -1045,6 +1045,7 @@ fn add_bank_resource(
         scratch_bytes: total.scratch_bytes.checked_add(add.scratch_bytes)?,
         scratch_samples: total.scratch_samples.checked_add(add.scratch_samples)?,
         metadata_bytes: total.metadata_bytes.checked_add(add.metadata_bytes)?,
+        maximum_mask_bytes: total.maximum_mask_bytes.max(add.maximum_mask_bytes),
         // A ceiling on the single largest allocation, so the maximum is taken and never summed.
         largest_allocation_bytes: total
             .largest_allocation_bytes
@@ -1229,6 +1230,8 @@ fn builtin_bank_resource(
         scratch_bytes,
         scratch_samples,
         metadata_bytes,
+        maximum_mask_bytes: u64::from(width.lanes())
+            .checked_mul(u64::try_from(core::mem::size_of::<bool>()).ok()?)?,
         largest_allocation_bytes: largest_member_array
             .max(processor_bytes)
             .max(largest_member_string)

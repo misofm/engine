@@ -2360,6 +2360,229 @@ mod tests {
         }
     }
 
+    #[test]
+    #[allow(clippy::result_large_err)]
+    fn runtime_bank_slot_reservation_is_published_and_capped_transactionally() {
+        let literal = |n: u64, width: effect_contract::BankWidth| {
+            let f = core::mem::size_of::<Box<dyn rack::BankStage>>() as u64;
+            let b = core::mem::size_of::<rack::BankSlot>() as u64;
+            let w = width.lanes() as u64 * core::mem::size_of::<bool>() as u64;
+            (n * (f + 3 * b + 3 * w), (n * f).max(n * b).max(w))
+        };
+        assert_eq!(
+            graph::GraphBankSlotResourceEstimate::checked_for(
+                0,
+                Some(effect_contract::BankWidth::Four)
+            ),
+            Some(Default::default())
+        );
+        for (n, width) in [
+            (1, effect_contract::BankWidth::Four),
+            (3, effect_contract::BankWidth::Four),
+            (3, effect_contract::BankWidth::Eight),
+        ] {
+            let (total, largest) = literal(n, width);
+            let resource = graph::GraphBankSlotResourceEstimate::checked_for(n, Some(width))
+                .expect("checked reservation");
+            assert_eq!(
+                (resource.total_bytes, resource.largest_allocation_bytes),
+                (total, largest)
+            );
+        }
+        assert_eq!(
+            graph::GraphBankSlotResourceEstimate::checked_for(
+                u64::MAX,
+                Some(effect_contract::BankWidth::Eight)
+            ),
+            None
+        );
+        let mut estimate = compile_fixture(511_0).report.estimate;
+        estimate.graph_metadata_bytes = u64::MAX;
+        let before = estimate.clone();
+        assert!(
+            estimate
+                .checked_add_bank_slot_owners(graph::GraphBankSlotResourceEstimate {
+                    total_bytes: 1,
+                    ..Default::default()
+                })
+                .is_none()
+        );
+        assert_eq!(estimate, before, "reservation overflow is transactional");
+
+        let mut model = parse_session_json(SESSION_FIXTURE).expect("session fixture");
+        let base_track = model.tracks[0].clone();
+        let base_route = model.routes[0].clone();
+        model.automation.clear();
+        model.tracks = (0..8)
+            .map(|index| {
+                let mut track = base_track.clone();
+                track.id = StableId::parse(&format!("bank{index}")).expect("track id");
+                track.simd1.effects.clear();
+                track.dynamic.effects.clear();
+                track.simd2.effects.clear();
+                track
+            })
+            .collect();
+        model.routes = model
+            .tracks
+            .iter()
+            .enumerate()
+            .map(|(index, track)| {
+                let mut route = base_route.clone();
+                route.id = StableId::parse(&format!("slot-route-{index}")).expect("route id");
+                route.source = RouteSource::Track {
+                    track_id: track.id.clone(),
+                    tap: SendTap::PostMatrix,
+                };
+                route
+            })
+            .collect();
+        let session = compile_session(
+            &model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("compiled session");
+        let graph = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
+            plan_id: 511_1,
+            effects: EffectPreparedSession {
+                session: session.clone(),
+                entries: Vec::new(),
+            },
+            caps: integration_caps(),
+        })
+        .unwrap_or_else(|failure| panic!("plain graph: {:?}", failure.diagnostics));
+        let builtin_caps = BuiltinCompileCaps {
+            maximum_total_state_bytes: u64::MAX,
+            maximum_total_retained_payload_bytes: u64::MAX,
+            maximum_total_meter_items: u64::MAX,
+            maximum_total_meter_bytes: u64::MAX,
+            maximum_single_allocation_bytes: u64::MAX,
+            maximum_meter_streams: u64::MAX,
+            maximum_period_frames: u32::MAX,
+            maximum_peak_hold_frames: u32::MAX,
+            maximum_smoothing_samples: u32::MAX,
+        };
+        let prepared =
+            prepare_session_builtins(&session, &[], builtin_caps).expect("prepared builtins");
+        let classes = SessionPoolClasses::from_session(&session);
+        let builtin_resource = prepared
+            .graph_builtin_bank_resource(host_dispatch(), &graph.graph.dependency_levels, &classes)
+            .expect("builtin resource");
+        assert!(
+            builtin_resource.bank_count > 0,
+            "fixture forms builtin banks"
+        );
+        let slots = graph::GraphBankSlotResourceEstimate::checked_for(
+            builtin_resource.bank_count,
+            effect_contract::BankWidth::for_backend(host_dispatch()),
+        )
+        .expect("slot resource");
+        let mut expected = graph.report.estimate.clone();
+        expected
+            .checked_add_bank_slot_owners(slots)
+            .expect("slot estimate");
+        let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+            dispatch: host_dispatch(),
+            plan_id: 511_2,
+            effects: EffectPreparedSession {
+                session: session.clone(),
+                entries: Vec::new(),
+            },
+            builtins: prepared,
+            caps: integration_caps(),
+        })
+        .unwrap_or_else(|failure| panic!("bank graph: {:?}", failure.diagnostics));
+        assert_eq!(
+            artifact.report().estimate,
+            expected,
+            "published estimate carries slots"
+        );
+        let semantic_baseline = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+            dispatch: Backend::Scalar,
+            plan_id: 511_5,
+            effects: EffectPreparedSession {
+                session: session.clone(),
+                entries: Vec::new(),
+            },
+            builtins: prepare_session_builtins(&session, &[], builtin_caps)
+                .expect("semantic baseline builtins"),
+            caps: integration_caps(),
+        })
+        .unwrap_or_else(|failure| panic!("semantic baseline: {:?}", failure.diagnostics));
+        assert_eq!(
+            GraphCompiler::evidence(semantic_baseline.graph(), semantic_baseline.report())
+                .canonical_bytes,
+            GraphCompiler::evidence(artifact.graph(), artifact.report()).canonical_bytes,
+            "bank overlay leaves canonical semantics unchanged"
+        );
+        let final_estimate = artifact.graph_resource_estimate().clone();
+        for (field, value) in [
+            ("graph", final_estimate.graph_metadata_bytes),
+            ("plan", final_estimate.incremental_plan_bytes),
+            ("largest", final_estimate.largest_allocation_bytes),
+        ] {
+            let mut caps = integration_caps();
+            match field {
+                "graph" => caps.maximum_graph_bytes = value,
+                "plan" => caps.maximum_plan_bytes = value,
+                "largest" => caps.maximum_single_allocation_bytes = value,
+                _ => unreachable!(),
+            }
+            let prepared =
+                prepare_session_builtins(&session, &[], builtin_caps).expect("prepared for cap");
+            let exact_result = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+                dispatch: host_dispatch(),
+                plan_id: 511_3,
+                effects: EffectPreparedSession {
+                    session: session.clone(),
+                    entries: Vec::new(),
+                },
+                builtins: prepared,
+                caps,
+            });
+            assert!(exact_result.is_ok(), "exact whole-plan cap accepts");
+            let mut below = caps;
+            match field {
+                "graph" => below.maximum_graph_bytes -= 1,
+                "plan" => below.maximum_plan_bytes -= 1,
+                "largest" => below.maximum_single_allocation_bytes -= 1,
+                _ => unreachable!(),
+            }
+            let prepared =
+                prepare_session_builtins(&session, &[], builtin_caps).expect("returned prepared");
+            let failure = match GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+                dispatch: host_dispatch(),
+                plan_id: 511_4,
+                effects: EffectPreparedSession {
+                    session: session.clone(),
+                    entries: Vec::new(),
+                },
+                builtins: prepared,
+                caps: below,
+            }) {
+                Ok(_) => panic!("one byte below whole-plan cap rejects"),
+                Err(failure) => failure,
+            };
+            assert!(
+                failure
+                    .diagnostics
+                    .diagnostics()
+                    .iter()
+                    .any(|d| d.code == "graph.resource.limit" && d.path == "$.graph_compile_caps")
+            );
+            assert_eq!(failure.effects.session.normalized_model().tracks.len(), 8);
+            assert_eq!(failure.builtins.tails().count(), 8);
+        }
+    }
+
     /// `slots` bankable SIMD-1 effects per track, on `tracks` tracks, plus a route per track.
     ///
     /// Generalises `twelve_track_bank_fixture` so #99 F3's evals can exercise a *chain*: with
