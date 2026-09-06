@@ -1,0 +1,69 @@
+   Compiling builtins-compiler v0.1.0 (/home/bl/misofm/engine-443-plan/crates/builtins-compiler)
+   Compiling graph-compiler v0.1.0 (/home/bl/misofm/engine-443-plan/crates/graph-compiler)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.29s
+     Running unittests src/lib.rs (/tmp/engine-443-luna-target/debug/deps/graph_compiler-c1c1e295dac82746)
+
+running 60 tests
+test tests::buffer_coloring_aliases_identity_and_preserves_fanout_liveness ... ok
+test tests::cycle_witness_skips_acyclic_residual_nodes_downstream_of_cycle ... ok
+test tests::every_cyclic_scc_has_one_closed_sorted_witness_and_edge_paths ... ok
+test tests::accepted_session_compiles_binds_and_renders_direct_route ... ok
+test tests::timing_applies_declared_tail_after_node_latency ... ok
+test tests::timing_reports_the_checked_sole_output_arrival_and_extent ... ok
+test tests::builtins_replace_only_the_three_internal_track_bindings ... ok
+test tests::level_major_compiler_coloring_matches_independent_live_intervals ... ok
+test tests::route_transform_uses_the_canonical_db_to_gain_conversion ... ok
+test tests::direct_graph_report_exposes_zero_output_latency_and_tail_without_identity_change ... ok
+test tests::chains_of_different_depths_share_a_cohort_through_identity_slots ... ok
+test tests::route_transform_bits_participate_in_semantic_hash ... ok
+test tests::node_text_len_matches_node_text_for_every_variant ... ok
+test tests::multi_slot_rack_chains_form_one_cohort_and_bind_every_slot ... ok
+test tests::a_sidechain_lifted_chain_slot_falls_back_instead_of_failing_the_compile ... ok
+test tests::third_party_dynamic_effects_are_never_bank_candidates ... ok
+test tests::a_dynamic_slot_that_differs_from_its_bank_mates_falls_back_per_node ... ok
+test tests::bank_membership_is_independent_of_entry_order ... ok
+test tests::issue122_reverse_route_ids_emit_sorted_levels_and_bind ... ok
+test tests::post_bank_graph_cap_rejects_transactionally_with_both_prepared_inputs ... ok
+test tests::compiled_plans_always_lower_to_a_smaller_executable_program ... ok
+test tests::each_forged_builtin_seal_tuple_is_rejected_before_graph_attachment ... ok
+test tests::production_builtin_banks_replace_full_post_input_groups_and_render ... ok
+test tests::mixed_twelve_track_plan_binds_renders_full_banks_and_scalar_tails_without_graph_changes ... ok
+test tests::launch_parametric_eq_fixture_retains_banks_and_matches_scalar_across_blocks ... ok
+test tests::scalar_dispatch_compiles_without_banks_on_any_host ... ok
+test tests::launch_transient_shaper_fixture_closes_banks_tails_pdc_and_transactional_caps ... ok
+test tests::dynamic_rack_compressors_bank_and_render_bit_identically_to_the_per_node_path ... ok
+test tests::launch_compressor_fixture_retains_bank_tail_and_connected_scalar_without_pdc_change ... ok
+test tests::launch_soft_clip_fixture_closes_banks_tails_pdc_support_and_transactional_caps ... ok
+test tests::add_a_track_keeps_existing_track_bits_and_one_transpose_per_chain ... ok
+test tests::launch_gate_expander_fixture_retains_width_correct_banks_and_scalar_fallbacks ... ok
+test tests::launch_delay_fixture_closes_scalar_state_tail_pdc_and_transactional_caps ... ok
+test tests::launch_true_peak_limiter_fixture_retains_banks_tails_latency_and_transactional_caps ... ok
+test tests::rack_placement_changes_the_bank_but_never_the_samples ... ok
+test tests::launch_multiband_compressor_fixture_closes_bank_graph_and_transactional_caps ... ok
+test tests::banking_a_dynamic_rack_costs_no_arena_buffers ... ok
+test tests::canonical_artifacts_are_complete_and_repeatable_100_times ... ok
+test tests::console_sixty_four_track_fixture_banks_its_dynamic_compressor_bit_identically ... ok
+test tests::the_two_planners_agree_on_every_track_class ... ok
+test tests::random_dags_have_strictly_ascending_levels_and_level_major_schedule ... ok
+test tests::ten_thousand_graph_mutations_are_panic_free_and_repeatable ... ok
+test tests::intended_placement_merges_two_chains_into_one_bit_identically ... ok
+test tests::a_meter_on_a_bank_member_declines_that_lanes_scatter_redirect ... ok
+test tests::a_meter_leased_at_post_fader_splits_the_chain_and_still_meters ... ok
+test tests::a_send_from_a_rack_boundary_declines_the_merge ... ok
+test tests::a_leased_stage_meter_declines_the_merge_and_still_meters ... ok
+test tests::a_second_route_from_a_tracks_matrix_declines_the_route_fold ... ok
+test tests::an_observed_alias_on_the_last_slot_declines_that_lanes_scatter_redirect ... ok
+test tests::misaligned_lane_sets_decline_the_merge ... ok
+test tests::the_intended_strip_fuses_the_whole_signal_path_into_one_chain_per_cohort ... ok
+test tests::a_meter_on_the_matrix_declines_the_route_fold_and_still_meters ... ok
+test tests::a_subsequence_program_track_binds_instead_of_panicking ... ok
+test tests::frozen_issue_037_seeded_builtin_bank_layouts_have_exact_membership_and_counters ... ok
+test tests::route_ids_ordered_against_the_cohorts_decline_the_route_fold ... ok
+test tests::a_send_from_the_last_slots_alias_declines_that_lanes_scatter_redirect ... ok
+test tests::the_intended_strip_folds_every_route_into_its_cohorts_epilogue ... ok
+test tests::class_pooling_forfeits_the_route_fold_only_on_an_interleaved_session ... ok
+test tests::a_single_odd_track_strands_both_pools_remainders ... ok
+test tests::a_banked_fader_command_lands_on_the_block_it_was_admitted_in ... ok
+
+test result: ok. 60 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.11s
+

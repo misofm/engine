@@ -1,0 +1,26 @@
+    Checking graph v0.1.0 (/home/bl/misofm/engine-443-plan/crates/graph)
+    Checking builtins-compiler v0.1.0 (/home/bl/misofm/engine-443-plan/crates/builtins-compiler)
+    Checking source v0.1.0 (/home/bl/misofm/engine-443-plan/crates/source)
+    Checking graph-compiler v0.1.0 (/home/bl/misofm/engine-443-plan/crates/graph-compiler)
+    Checking host-core v0.1.0 (/home/bl/misofm/engine-443-plan/crates/host-core)
+    Checking host-web v0.1.0 (/home/bl/misofm/engine-443-plan/hosts/host-web)
+error: the `Err`-variant returned from this closure is very large
+    --> crates/graph-compiler/src/lib.rs:2034:23
+     |
+2034 |           let prepare = |caps: GraphCompileCaps, controlled: bool| {
+     |  _______________________^
+2035 | |             let mut model = parse_session_json(SESSION_FIXTURE).expect("session fixture");
+2036 | |             model.tracks[0].simd1.effects.clear();
+2037 | |             model.tracks[0].dynamic.effects.clear();
+...    |
+2100 | |             })
+2101 | |         };
+     | |_________^ the `Err`-variant is at least 8744 bytes
+     |
+     = help: try reducing the size of `GraphBuiltinsCompileFailure`, for example by boxing large elements or replacing it with `Box<GraphBuiltinsCompileFailure>`
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#result_large_err
+     = note: `-D clippy::result-large-err` implied by `-D clippy::all`
+     = help: to override `-D clippy::all` add `#[allow(clippy::result_large_err)]`
+
+error: could not compile `graph-compiler` (lib test) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...

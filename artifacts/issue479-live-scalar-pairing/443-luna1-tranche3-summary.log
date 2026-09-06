@@ -1,0 +1,23 @@
+#443 Luna attempt 1, tranche 3
+
+Changed paths:
+- crates/graph/src/lib.rs
+- crates/graph-compiler/src/compile.rs
+- crates/builtins-compiler/src/lib.rs
+
+Resource work:
+- Added checked GraphScalarOwnerResourceEstimate and estimate folding into metadata, incremental
+  plan and session-plus-plan bytes, with largest allocation as max.
+- Added builtins compiler scalar owner preflight using actual ConsoleFaderProcessor,
+  ConsoleMatrixProcessor and ScalarPairProcessor layouts; only Backend::Scalar receives the
+  scalar-owner charge, and BetweenRenderCalls adds the two-box outer allocation.
+- The folded estimate is the same estimate carried into PreparedGraphPlan and published report.
+
+Actual validation records:
+- /tmp/443-luna1-tranche3-graph-compiler.log (+ .command, .status): attempted unsupported
+  `--features test-support`, exit.status=101; retained candidly.
+- /tmp/443-luna1-tranche3-graph-compiler-2.log (+ .command, .status): compile failure from
+  Option transpose, exit.status=101; retained candidly.
+- /tmp/443-luna1-tranche3-graph-compiler-3.log (+ .command, .status): 60 passed, exit.status=0.
+
+Paused at focused green per assignment. No commit or push performed; root owns checkpointing.

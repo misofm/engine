@@ -203,6 +203,13 @@ pub struct GraphBuiltinBankResourceEstimate {
     pub largest_allocation_bytes: u64,
 }
 
+/// Checked retained storage for live scalar fader/matrix owners lowered after preparation.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct GraphScalarOwnerResourceEstimate {
+    pub total_bytes: u64,
+    pub largest_allocation_bytes: u64,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GraphBuiltinBankAttachError {
     InvalidMembers,
@@ -212,6 +219,27 @@ pub enum GraphBuiltinBankAttachError {
 }
 
 impl GraphResourceEstimate {
+    pub fn checked_add_scalar_owners(
+        &mut self,
+        resource: GraphScalarOwnerResourceEstimate,
+    ) -> Option<()> {
+        let mut next = self.clone();
+        next.graph_metadata_bytes = next
+            .graph_metadata_bytes
+            .checked_add(resource.total_bytes)?;
+        next.incremental_plan_bytes = next
+            .incremental_plan_bytes
+            .checked_add(resource.total_bytes)?;
+        next.session_plus_plan_bytes = next
+            .session_plus_plan_bytes
+            .checked_add(resource.total_bytes)?;
+        next.largest_allocation_bytes = next
+            .largest_allocation_bytes
+            .max(resource.largest_allocation_bytes);
+        *self = next;
+        Some(())
+    }
+
     /// Fold exact prepared builtin-bank storage into the graph estimate before publication.
     pub fn checked_add_builtin_banks(
         &mut self,
@@ -1284,7 +1312,18 @@ pub struct GraphBindingBlock<'a> {
     pub right: &'a mut [f32],
     pub first_sample: u64,
 }
-pub trait GraphRuntimeProcessor: Send {
+pub type ScalarPairFactory = fn(
+    Box<dyn GraphRuntimeProcessor>,
+    Box<dyn GraphRuntimeProcessor>,
+) -> Result<
+    Box<dyn GraphRuntimeProcessor>,
+    (
+        Box<dyn GraphRuntimeProcessor>,
+        Box<dyn GraphRuntimeProcessor>,
+    ),
+>;
+
+pub trait GraphRuntimeProcessor: Send + Any {
     /// Process one block in place.
     ///
     /// # The contract for a node with no graph inputs (issue #218)
@@ -1307,6 +1346,12 @@ pub trait GraphRuntimeProcessor: Send {
     /// therefore declines: nothing has compared its two channels' words.
     fn channel_symmetry(&self) -> ChannelSymmetryWitness {
         ChannelSymmetryWitness::DECLINED
+    }
+
+    /// Preparation-only hook for the serialized scalar fader/matrix pair.
+    /// Render never queries this metadata.
+    fn scalar_pair_factory(&self) -> Option<ScalarPairFactory> {
+        None
     }
 }
 /// Immutable post-node observation input. Observers cannot alter graph audio.
@@ -1902,6 +1947,26 @@ mod tests {
                 scratch_samples: 4,
                 metadata_bytes: 8,
                 largest_allocation_bytes: 16,
+            }),
+            None
+        );
+        assert_eq!(
+            estimate, before,
+            "overflow cannot partially mutate the report"
+        );
+    }
+
+    #[test]
+    fn scalar_owner_resource_overflow_leaves_the_graph_estimate_unchanged() {
+        let mut estimate = empty_estimate();
+        estimate.graph_metadata_bytes = 3;
+        estimate.incremental_plan_bytes = 5;
+        estimate.session_plus_plan_bytes = 7;
+        let before = estimate.clone();
+        assert_eq!(
+            estimate.checked_add_scalar_owners(GraphScalarOwnerResourceEstimate {
+                total_bytes: u64::MAX,
+                largest_allocation_bytes: 64,
             }),
             None
         );

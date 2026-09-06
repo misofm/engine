@@ -1851,6 +1851,16 @@ impl<L: Lane> FaderRampStage<L> {
         self.ramp[channel].mute = mask_from_flags::<L>(&flags[..L::WIDTH]);
     }
 
+    #[inline(always)]
+    fn is_settled(&self) -> bool {
+        self.remaining.iter().all(|channel| {
+            channel
+                .iter()
+                .take(L::WIDTH)
+                .all(|&remaining| remaining == 0)
+        })
+    }
+
     /// Retargets one lane of one channel. D11: one division per event, never per sample.
     fn retarget(&mut self, lane: usize, channel: usize, target: f32, smoothing_samples: u32) {
         let current = lane_read::<L>(self.ramp[channel].current);
@@ -3268,6 +3278,32 @@ impl FaderMuteRampBuiltins {
         BuiltinProcessReport::default()
     }
 
+    /// Runs the settled fader and matrix stages with the established fused scalar kernel.
+    /// Returns `false` when either stage is ramping; callers must then run the original two-stage
+    /// arithmetic for the whole block.
+    pub fn process_fader_matrix(
+        &mut self,
+        matrix: &mut MatrixBuiltins,
+        block: &mut DualMonoBlock<'_>,
+    ) -> bool {
+        if !self.stage.is_settled() || !matrix.stage.is_settled() {
+            return false;
+        }
+        let DualMonoBlock { left, right, .. } = block;
+        let frames = left.len();
+        fader_matrix_block::<f32>(
+            left,
+            right,
+            frames,
+            self.stage.ramp[0].current,
+            self.stage.ramp[0].mute,
+            self.stage.ramp[1].current,
+            self.stage.ramp[1].mute,
+            &matrix.stage.coef,
+        );
+        true
+    }
+
     /// Snaps both lanes to their targets and cancels any ramp in flight.
     pub fn reset(&mut self) {
         self.stage.reset();
@@ -3810,8 +3846,8 @@ fn zero(value: f32) -> f32 {
 pub mod test_support {
     use super::{
         BuiltinChain, BuiltinFaderBank, BuiltinInputBank, BuiltinMatrixBank, BuiltinParameterError,
-        FaderStageKernel, InputBuiltins, InputStageKernel, Matrix2x2, MatrixBuiltins,
-        MatrixStageKernel, SvfSection,
+        FaderMuteRampBuiltins, FaderStageKernel, InputBuiltins, InputStageKernel, Matrix2x2,
+        MatrixBuiltins, MatrixStageKernel, SvfSection,
     };
 
     /// The seven words `[c1, a2, a3, k, m0, m1, m2]` of one designed section.
@@ -3933,6 +3969,51 @@ pub mod test_support {
     #[must_use]
     pub fn matrix_current(matrix: &MatrixBuiltins) -> Matrix2x2 {
         matrix.stage.read_current()[0]
+    }
+
+    /// Exact retained words for the live scalar fader owner.
+    #[must_use]
+    pub fn scalar_fader_words(fader: &FaderMuteRampBuiltins) -> [u32; 14] {
+        let stage = &fader.stage;
+        let mut out = [0; 14];
+        for channel in 0..2 {
+            let base = channel * 6;
+            out[base] = stage.ramp[channel].current.to_bits();
+            out[base + 1] = stage.ramp[channel].target.to_bits();
+            out[base + 2] = stage.ramp[channel].step.to_bits();
+            out[base + 3] = stage.ramp[channel].remaining.to_bits();
+            out[base + 4] = stage.remaining[channel][0];
+            out[base + 5] = stage.fader_gain[channel][0].to_bits();
+        }
+        out[12] = u32::from(stage.muted[0][0]);
+        out[13] = u32::from(stage.muted[1][0]);
+        out
+    }
+
+    /// Exact retained words for the live scalar matrix owner.
+    #[must_use]
+    pub fn scalar_matrix_words(matrix: &MatrixBuiltins) -> [u32; 15] {
+        let stage = &matrix.stage;
+        let current = stage.read_current()[0];
+        let target = stage.read_target()[0];
+        let mut out = [0; 15];
+        for (coefficient, (current, target)) in [
+            (current.ll, target.ll),
+            (current.lr, target.lr),
+            (current.rl, target.rl),
+            (current.rr, target.rr),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            out[coefficient] = current.to_bits();
+            out[4 + coefficient] = target.to_bits();
+            out[8 + coefficient] = stage.ramp.step[coefficient].to_bits();
+        }
+        out[12] = stage.ramp.remaining.to_bits();
+        out[13] = stage.remaining[0];
+        out[14] = stage.smoothing_samples[0];
+        out
     }
 
     /// Exact retained words for one fader-bank lane: per channel current/target/step/ramp word,

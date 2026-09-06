@@ -1,0 +1,50 @@
+   Compiling builtins-compiler v0.1.0 (/home/bl/misofm/engine-443-plan/crates/builtins-compiler)
+error[E0599]: no method named `is` found for reference `&dyn graph::GraphRuntimeProcessor` in the current scope
+    --> crates/builtins-compiler/src/lib.rs:6045:40
+     |
+6045 |         assert!(wrong_first.0.as_ref().is::<AdvertisedWrongOwner>());
+     |                                        ^^ method not found in `&dyn graph::GraphRuntimeProcessor`
+
+error[E0599]: no method named `is` found for reference `&dyn graph::GraphRuntimeProcessor` in the current scope
+    --> crates/builtins-compiler/src/lib.rs:6046:40
+     |
+6046 |         assert!(wrong_first.1.as_ref().is::<ConsoleMatrixProcessor>());
+     |                                        ^^ method not found in `&dyn graph::GraphRuntimeProcessor`
+
+error[E0599]: no method named `is` found for reference `&dyn graph::GraphRuntimeProcessor` in the current scope
+    --> crates/builtins-compiler/src/lib.rs:6055:41
+     |
+6055 |         assert!(wrong_second.0.as_ref().is::<ConsoleFaderProcessor>());
+     |                                         ^^ method not found in `&dyn graph::GraphRuntimeProcessor`
+
+error[E0599]: no method named `is` found for reference `&dyn graph::GraphRuntimeProcessor` in the current scope
+    --> crates/builtins-compiler/src/lib.rs:6056:41
+     |
+6056 |         assert!(wrong_second.1.as_ref().is::<AdvertisedWrongOwner>());
+     |                                         ^^ method not found in `&dyn graph::GraphRuntimeProcessor`
+
+error[E0277]: `dyn graph::GraphRuntimeProcessor` doesn't implement `Debug`
+    --> crates/builtins-compiler/src/lib.rs:6121:49
+     |
+6121 |                 make_scalar_pair(fader, matrix).expect("serialized scalar pair"),
+     |                                                 ^^^^^^ the trait `Debug` is not implemented for `dyn graph::GraphRuntimeProcessor`
+     |
+help: the following other types implement trait `Debug`
+    --> /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/any.rs:152:0
+     |
+     = note: `dyn std::any::Any`
+    ::: /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/any.rs:162:0
+     |
+     = note: `dyn std::any::Any + Send`
+    ::: /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/any.rs:169:0
+     |
+     = note: `dyn std::any::Any + Send + Sync`
+     = note: required for `Box<dyn graph::GraphRuntimeProcessor>` to implement `Debug`
+     = note: 1 redundant requirement hidden
+     = note: required for `(Box<dyn graph::GraphRuntimeProcessor>, Box<dyn graph::GraphRuntimeProcessor>)` to implement `Debug`
+note: required by a bound in `Result::<T, E>::expect`
+    --> /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/result.rs:1179:4
+
+Some errors have detailed explanations: E0277, E0599.
+For more information about an error, try `rustc --explain E0277`.
+error: could not compile `builtins-compiler` (lib test) due to 5 previous errors

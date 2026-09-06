@@ -213,3 +213,7 @@ Proportional validation: syntax/static workflow-diff inspection, fmt, the full e
 The previous PR head is not merge-approved after failed CI. Root must checkpoint/package the corrected source and retained evidence, obtain a new exact-head actual-PR Astra review and required CI SUCCESS before merge. No edits or tests performed by this ruling.
 
 Root verified the sole Rust formatting replacement reproduces the prior exact bytes when inverted. The corrected scratch invocation passes with inherited CI CARGO_INCREMENTAL=0, including all original negative cases; fmt passes. Artifact provenance explicitly records the formatting exception. Production capture scripts and validators remain unchanged. Initial CI/local failures are preserved in the delivery package.
+
+## Remotely synchronized delivery
+
+PR481 merged as59f35c627ed4bd8bcaf2e7a0944f014f521cbd94 after Astra exact-head PASS at0f4dea65 and required qualification34002732620 SUCCESS. Current input/validator/preparation/lifecycle tooling is delivered. #431 remains separately unspent and unauthorized; this is not a measured performance result. GitHub issue480 is CLOSED.

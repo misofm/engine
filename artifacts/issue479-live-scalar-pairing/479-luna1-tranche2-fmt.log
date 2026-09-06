@@ -1,0 +1,2 @@
+$ /home/bl/.cargo/bin/cargo fmt --manifest-path /home/bl/misofm/engine-479-proof/Cargo.toml -p builtins-compiler
+exit 0
