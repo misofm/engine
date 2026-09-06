@@ -1,0 +1,2 @@
+error: the package 'graph-compiler' does not contain this feature: test-support
+help: packages with the missing feature: source, graph, builtins-compiler, protocol, host-web

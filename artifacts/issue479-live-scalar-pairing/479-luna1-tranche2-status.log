@@ -1,0 +1,5 @@
+$ git -C /home/bl/misofm/engine-479-proof diff --check
+exit 0
+$ git -C /home/bl/misofm/engine-479-proof status --short
+ M crates/builtins-compiler/src/lib.rs
+ M crates/builtins-compiler/tests/allocation_tracker.rs

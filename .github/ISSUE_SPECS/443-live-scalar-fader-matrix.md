@@ -520,3 +520,7 @@ These are remaining original proof obligations, not a request to redesign accept
 Root adopts this final FAIL. Accepted source and raw evidence remain preserved at the reviewed head. No further parent implementation is authorized. A separately numbered, Astra-approved bounded completion issue must precede further corrections; parent delivery and all retained obligations remain open.
 
 Bounded completion issue #479 owns only the three remaining observation/sidechain/owner proofs. All original parent requirements remain in force; #443 stays open until full reviewed delivery.
+
+## Successor proof accepted and full parent qualification
+
+Astra accepted bounded successor479 at82d5e5b2, completing actual meter data, connected sidechain decline and retained-owner proof without weakening the original parent. Full workspace1626/0/24 (15 added, none removed), native CAPI/resource4/ABI, scalar/SIMD Wasm, normal candidate worklet/static/resources and actual three-browser qualification pass. `artifacts/issue479-live-scalar-pairing/` preserves raw failed and green evidence, applicability rulings and final reviews. This is the adjacent serialized scalar product only;470/476/444 and431 stay separate. Actual PR review/required CI and upstream merge still precede parent closure.

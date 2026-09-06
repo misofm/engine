@@ -1,0 +1,88 @@
+warning: output filename collision at /tmp/engine-443-sol-exact-baseline-release/release/deps/libeffect_package.rlib
+  |
+  = note: the lib target `effect_package` in package `effect-package v0.1.0 (/tmp/engine-443-baseline-660fce8/crates/effect-package)` has the same output filename as the lib target `effect_package` in package `effect-package v0.1.0 (/tmp/engine-443-baseline-660fce8/crates/effect-package)`
+  = note: this may become a hard error in the future; see <https://github.com/rust-lang/cargo/issues/6313>
+  = help: consider changing their names to be unique or compiling them separately
+warning: output filename collision at /tmp/engine-443-sol-exact-baseline-release/release/deps/libeffect_package.so
+  |
+  = note: the lib target `effect_package` in package `effect-package v0.1.0 (/tmp/engine-443-baseline-660fce8/crates/effect-package)` has the same output filename as the lib target `effect_package` in package `effect-package v0.1.0 (/tmp/engine-443-baseline-660fce8/crates/effect-package)`
+  = note: this may become a hard error in the future; see <https://github.com/rust-lang/cargo/issues/6313>
+  = help: consider changing their names to be unique or compiling them separately
+warning: output filename collision at /tmp/engine-443-sol-exact-baseline-release/release/deps/libeffect_package.so.dwp
+  |
+  = note: the lib target `effect_package` in package `effect-package v0.1.0 (/tmp/engine-443-baseline-660fce8/crates/effect-package)` has the same output filename as the lib target `effect_package` in package `effect-package v0.1.0 (/tmp/engine-443-baseline-660fce8/crates/effect-package)`
+  = note: this may become a hard error in the future; see <https://github.com/rust-lang/cargo/issues/6313>
+  = help: consider changing their names to be unique or compiling them separately
+   Compiling version_check v0.9.5
+   Compiling bytemuck v1.25.2
+   Compiling libc v0.2.189
+   Compiling proc-macro2 v1.0.107
+   Compiling engine v0.1.0 (/tmp/engine-443-baseline-660fce8/crates/engine)
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.24
+   Compiling autocfg v1.5.1
+   Compiling syn v1.0.109
+   Compiling lexical-util v1.0.7
+   Compiling cfg-if v1.0.4
+   Compiling typenum v1.20.1
+   Compiling once_cell v1.21.4
+   Compiling smallvec v1.15.2
+   Compiling locspan v0.8.2
+   Compiling decoded-char v0.1.1
+   Compiling cpufeatures v0.3.0
+   Compiling utf8-decode v1.0.1
+   Compiling dsp-reference v0.1.0 (/tmp/engine-443-baseline-660fce8/crates/dsp-reference)
+   Compiling safe_arch v1.2.0
+   Compiling ahash v0.7.8
+   Compiling proc-macro-error-attr v1.0.4
+   Compiling proc-macro-error v1.0.4
+   Compiling smallstr v0.3.1
+   Compiling indexmap v1.9.3
+   Compiling wide v1.6.1
+   Compiling lexical-write-integer v1.0.6
+   Compiling lexical-parse-integer v1.0.6
+   Compiling lexical-parse-float v1.0.6
+   Compiling hybrid-array v0.4.14
+   Compiling lexical-write-float v1.0.6
+   Compiling getrandom v0.2.17
+   Compiling lexical-core v1.0.6
+   Compiling lexical v7.0.5
+   Compiling hashbrown v0.12.3
+   Compiling json-number v0.4.10
+   Compiling crypto-common v0.2.2
+   Compiling block-buffer v0.12.1
+   Compiling digest v0.11.3
+   Compiling sha2 v0.11.0
+   Compiling locspan-derive v0.6.0
+   Compiling json-syntax v0.12.5
+   Compiling session v0.1.0 (/tmp/engine-443-baseline-660fce8/crates/session)
+   Compiling lane v0.1.0 (/tmp/engine-443-baseline-660fce8/crates/lane)
+   Compiling math v0.1.0 (/tmp/engine-443-baseline-660fce8/crates/math)
+   Compiling effect-contract v0.1.0 (/tmp/engine-443-baseline-660fce8/crates/effect-contract)
+   Compiling effect-runtime v0.1.0 (/tmp/engine-443-baseline-660fce8/crates/effect-runtime)
+   Compiling rack v0.1.0 (/tmp/engine-443-baseline-660fce8/crates/rack)
+   Compiling soft-clip v0.1.0 (/tmp/engine-443-baseline-660fce8/crates/soft-clip)
+   Compiling transient-shaper v0.1.0 (/tmp/engine-443-baseline-660fce8/crates/transient-shaper)
+   Compiling multiband-compressor v0.1.0 (/tmp/engine-443-baseline-660fce8/crates/multiband-compressor)
+   Compiling true-peak-limiter v0.1.0 (/tmp/engine-443-baseline-660fce8/crates/true-peak-limiter)
+   Compiling parametric-eq v0.1.0 (/tmp/engine-443-baseline-660fce8/crates/parametric-eq)
+   Compiling compressor v0.1.0 (/tmp/engine-443-baseline-660fce8/crates/compressor)
+   Compiling gate-expander v0.1.0 (/tmp/engine-443-baseline-660fce8/crates/gate-expander)
+   Compiling delay v0.1.0 (/tmp/engine-443-baseline-660fce8/crates/delay)
+   Compiling builtins v0.1.0 (/tmp/engine-443-baseline-660fce8/crates/builtins)
+   Compiling conformance v0.1.0 (/tmp/engine-443-baseline-660fce8/crates/conformance)
+   Compiling graph v0.1.0 (/tmp/engine-443-baseline-660fce8/crates/graph)
+   Compiling rack-compiler v0.1.0 (/tmp/engine-443-baseline-660fce8/crates/rack-compiler)
+   Compiling builtins-compiler v0.1.0 (/tmp/engine-443-baseline-660fce8/crates/builtins-compiler)
+   Compiling effect-package v0.1.0 (/tmp/engine-443-baseline-660fce8/crates/effect-package)
+   Compiling effect-compiler v0.1.0 (/tmp/engine-443-baseline-660fce8/crates/effect-compiler)
+   Compiling graph-compiler v0.1.0 (/tmp/engine-443-baseline-660fce8/crates/graph-compiler)
+error[E0463]: can't find crate for `effect_compiler`
+  --> crates/graph-compiler/src/lib.rs:12:5
+   |
+12 | use effect_compiler::{EffectPreparedEntry, EffectPreparedSession, EffectRack};
+   |     ^^^^^^^^^^^^^^^ can't find crate
+
+For more information about this error, try `rustc --explain E0463`.
+error: could not compile `graph-compiler` (lib) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...

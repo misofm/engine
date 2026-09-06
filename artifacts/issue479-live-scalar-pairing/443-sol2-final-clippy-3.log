@@ -1,0 +1,4 @@
+    Checking graph-compiler v0.1.0 (/home/bl/misofm/engine-443-plan/crates/graph-compiler)
+    Checking host-core v0.1.0 (/home/bl/misofm/engine-443-plan/crates/host-core)
+    Checking host-web v0.1.0 (/home/bl/misofm/engine-443-plan/hosts/host-web)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.95s

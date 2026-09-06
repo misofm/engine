@@ -1,0 +1,38 @@
+   Compiling builtins-compiler v0.1.0 (/home/bl/misofm/engine-443-plan/crates/builtins-compiler)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.81s
+     Running unittests src/lib.rs (/tmp/engine-443-sol-target/debug/deps/builtins_compiler-5ff1d293b1f7fb6b)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 32 filtered out; finished in 0.00s
+
+     Running tests/allocation_tracker.rs (/tmp/engine-443-sol-target/debug/deps/allocation_tracker-b6767a1ad7cc8a1e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+     Running tests/builtin_automation_targets.rs (/tmp/engine-443-sol-target/debug/deps/builtin_automation_targets-07b1c457de353432)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/input_drain.rs (/tmp/engine-443-sol-target/debug/deps/input_drain-9aaaf493e8c87efe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests/scale.rs (/tmp/engine-443-sol-target/debug/deps/scale-3f9db68c3e49715a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/track_delay_domain.rs (/tmp/engine-443-sol-target/debug/deps/track_delay_domain-eb932ca786152024)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+

@@ -1,0 +1,32 @@
+   Compiling builtins v0.1.0 (/home/bl/misofm/engine-443-plan/crates/builtins)
+   Compiling graph v0.1.0 (/home/bl/misofm/engine-443-plan/crates/graph)
+   Compiling effect-package v0.1.0 (/home/bl/misofm/engine-443-plan/crates/effect-package)
+   Compiling builtins-compiler v0.1.0 (/home/bl/misofm/engine-443-plan/crates/builtins-compiler)
+   Compiling source v0.1.0 (/home/bl/misofm/engine-443-plan/crates/source)
+   Compiling effect-compiler v0.1.0 (/home/bl/misofm/engine-443-plan/crates/effect-compiler)
+   Compiling graph-compiler v0.1.0 (/home/bl/misofm/engine-443-plan/crates/graph-compiler)
+   Compiling host-core v0.1.0 (/home/bl/misofm/engine-443-plan/crates/host-core)
+   Compiling host-web v0.1.0 (/home/bl/misofm/engine-443-plan/hosts/host-web)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.74s
+     Running unittests src/lib.rs (/tmp/engine-443-sol-target/debug/deps/host_web-be30bc75df2f4983)
+
+running 1 test
+test tests::acknowledged_pair_render_records_the_same_live_dispatch ... FAILED
+
+failures:
+
+---- tests::acknowledged_pair_render_records_the_same_live_dispatch stdout ----
+
+thread 'tests::acknowledged_pair_render_records_the_same_live_dispatch' (3849119) panicked at hosts/host-web/src/tests.rs:1912:5:
+assertion `left == right` failed: the acknowledged matrix is retained by the selected scalar owner
+  left: [0, 0, 0, 0]
+ right: [1056964608, 0, 0, 1065353216]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::acknowledged_pair_render_records_the_same_live_dispatch
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 63 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `-p host-web --lib`

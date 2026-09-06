@@ -1,0 +1,558 @@
+warning: output filename collision at /tmp/engine-443-sol-graphcompiler-release/release/deps/libeffect_package.rlib
+  |
+  = note: the lib target `effect_package` in package `effect-package v0.1.0 (/home/bl/misofm/engine-443-plan/crates/effect-package)` has the same output filename as the lib target `effect_package` in package `effect-package v0.1.0 (/home/bl/misofm/engine-443-plan/crates/effect-package)`
+  = note: this may become a hard error in the future; see <https://github.com/rust-lang/cargo/issues/6313>
+  = help: consider changing their names to be unique or compiling them separately
+warning: output filename collision at /tmp/engine-443-sol-graphcompiler-release/release/deps/libeffect_package.so
+  |
+  = note: the lib target `effect_package` in package `effect-package v0.1.0 (/home/bl/misofm/engine-443-plan/crates/effect-package)` has the same output filename as the lib target `effect_package` in package `effect-package v0.1.0 (/home/bl/misofm/engine-443-plan/crates/effect-package)`
+  = note: this may become a hard error in the future; see <https://github.com/rust-lang/cargo/issues/6313>
+  = help: consider changing their names to be unique or compiling them separately
+warning: output filename collision at /tmp/engine-443-sol-graphcompiler-release/release/deps/libeffect_package.so.dwp
+  |
+  = note: the lib target `effect_package` in package `effect-package v0.1.0 (/home/bl/misofm/engine-443-plan/crates/effect-package)` has the same output filename as the lib target `effect_package` in package `effect-package v0.1.0 (/home/bl/misofm/engine-443-plan/crates/effect-package)`
+  = note: this may become a hard error in the future; see <https://github.com/rust-lang/cargo/issues/6313>
+  = help: consider changing their names to be unique or compiling them separately
+   Compiling version_check v0.9.5
+   Compiling libc v0.2.189
+   Compiling bytemuck v1.25.2
+   Compiling engine v0.1.0 (/home/bl/misofm/engine-443-plan/crates/engine)
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.24
+   Compiling syn v1.0.109
+   Compiling autocfg v1.5.1
+   Compiling lexical-util v1.0.7
+   Compiling cfg-if v1.0.4
+   Compiling typenum v1.20.1
+   Compiling once_cell v1.21.4
+   Compiling smallvec v1.15.2
+   Compiling locspan v0.8.2
+   Compiling utf8-decode v1.0.1
+   Compiling decoded-char v0.1.1
+   Compiling cpufeatures v0.3.0
+   Compiling dsp-reference v0.1.0 (/home/bl/misofm/engine-443-plan/crates/dsp-reference)
+   Compiling safe_arch v1.2.0
+   Compiling ahash v0.7.8
+   Compiling proc-macro-error-attr v1.0.4
+   Compiling proc-macro-error v1.0.4
+   Compiling indexmap v1.9.3
+   Compiling smallstr v0.3.1
+   Compiling lexical-parse-integer v1.0.6
+   Compiling lexical-write-integer v1.0.6
+   Compiling wide v1.6.1
+   Compiling lexical-parse-float v1.0.6
+   Compiling lexical-write-float v1.0.6
+   Compiling hybrid-array v0.4.14
+   Compiling getrandom v0.2.17
+   Compiling lexical-core v1.0.6
+   Compiling lexical v7.0.5
+   Compiling hashbrown v0.12.3
+   Compiling json-number v0.4.10
+   Compiling block-buffer v0.12.1
+   Compiling crypto-common v0.2.2
+   Compiling digest v0.11.3
+   Compiling sha2 v0.11.0
+   Compiling locspan-derive v0.6.0
+   Compiling json-syntax v0.12.5
+   Compiling session v0.1.0 (/home/bl/misofm/engine-443-plan/crates/session)
+   Compiling lane v0.1.0 (/home/bl/misofm/engine-443-plan/crates/lane)
+   Compiling math v0.1.0 (/home/bl/misofm/engine-443-plan/crates/math)
+   Compiling effect-contract v0.1.0 (/home/bl/misofm/engine-443-plan/crates/effect-contract)
+   Compiling effect-runtime v0.1.0 (/home/bl/misofm/engine-443-plan/crates/effect-runtime)
+   Compiling rack v0.1.0 (/home/bl/misofm/engine-443-plan/crates/rack)
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-443-plan/crates/compressor)
+   Compiling soft-clip v0.1.0 (/home/bl/misofm/engine-443-plan/crates/soft-clip)
+   Compiling gate-expander v0.1.0 (/home/bl/misofm/engine-443-plan/crates/gate-expander)
+   Compiling true-peak-limiter v0.1.0 (/home/bl/misofm/engine-443-plan/crates/true-peak-limiter)
+   Compiling delay v0.1.0 (/home/bl/misofm/engine-443-plan/crates/delay)
+   Compiling parametric-eq v0.1.0 (/home/bl/misofm/engine-443-plan/crates/parametric-eq)
+   Compiling multiband-compressor v0.1.0 (/home/bl/misofm/engine-443-plan/crates/multiband-compressor)
+   Compiling builtins v0.1.0 (/home/bl/misofm/engine-443-plan/crates/builtins)
+   Compiling transient-shaper v0.1.0 (/home/bl/misofm/engine-443-plan/crates/transient-shaper)
+   Compiling conformance v0.1.0 (/home/bl/misofm/engine-443-plan/crates/conformance)
+   Compiling graph v0.1.0 (/home/bl/misofm/engine-443-plan/crates/graph)
+   Compiling rack-compiler v0.1.0 (/home/bl/misofm/engine-443-plan/crates/rack-compiler)
+   Compiling builtins-compiler v0.1.0 (/home/bl/misofm/engine-443-plan/crates/builtins-compiler)
+   Compiling effect-package v0.1.0 (/home/bl/misofm/engine-443-plan/crates/effect-package)
+   Compiling effect-compiler v0.1.0 (/home/bl/misofm/engine-443-plan/crates/effect-compiler)
+error[E0308]: mismatched types
+   --> crates/effect-compiler/src/migration.rs:550:45
+    |
+550 |     if capability.metadata().program_key != expected.program_key()
+    |        ---------------------------------    ^^^^^^^^^^^^^^^^^^^^^^ expected `EffectProgramKey`, found `effect_contract::EffectProgramKey`
+    |        |
+    |        expected because this is `EffectProgramKey`
+    |
+note: there are multiple different versions of crate `effect_contract` in the dependency graph
+   --> crates/effect-contract/src/lib.rs:967:1
+    |
+967 | pub struct EffectProgramKey {
+    | --------------------------- this is the found type
+    |
+   ::: crates/effect-contract/src/lib.rs:967:1
+    |
+967 | pub struct EffectProgramKey {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^ this is the expected type
+    = help: you can use `cargo tree` to explore your dependency tree
+
+error[E0308]: mismatched types
+   --> crates/effect-compiler/src/migration.rs:551:41
+    |
+551 |         || live_metadata.program_key != expected.program_key()
+    |            -------------------------    ^^^^^^^^^^^^^^^^^^^^^^ expected `EffectProgramKey`, found `effect_contract::EffectProgramKey`
+    |            |
+    |            expected because this is `EffectProgramKey`
+    |
+note: there are multiple different versions of crate `effect_contract` in the dependency graph
+   --> crates/effect-contract/src/lib.rs:967:1
+    |
+967 | pub struct EffectProgramKey {
+    | --------------------------- this is the found type
+    |
+   ::: crates/effect-contract/src/lib.rs:967:1
+    |
+967 | pub struct EffectProgramKey {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^ this is the expected type
+    = help: you can use `cargo tree` to explore your dependency tree
+
+error[E0308]: mismatched types
+    --> crates/effect-compiler/src/migration.rs:631:67
+     |
+ 631 |         let target = StatePayloadOutput::new(common, left, right, metadata.state_sizes)
+     |                      -----------------------                      ^^^^^^^^^^^^^^^^^^^^ expected `StatePayloadSizes`, found `effect_contract::StatePayloadSizes`
+     |                      |
+     |                      arguments to this function are incorrect
+     |
+note: there are multiple different versions of crate `effect_contract` in the dependency graph
+    --> crates/effect-contract/src/lib.rs:271:1
+     |
+ 271 | pub struct StatePayloadSizes {
+     | ---------------------------- this is the found type
+     |
+    ::: crates/effect-contract/src/lib.rs:271:1
+     |
+ 271 | pub struct StatePayloadSizes {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this is the expected type
+     = help: you can use `cargo tree` to explore your dependency tree
+note: associated function defined here
+    --> crates/effect-contract/src/lib.rs:1401:12
+     |
+1401 |     pub fn new(
+     |            ^^^
+
+error[E0308]: mismatched types
+    --> crates/effect-compiler/src/migration.rs:638:13
+     |
+ 634 |         let source_payload = StatePayloadInput::new(
+     |                              ---------------------- arguments to this function are incorrect
+...
+ 638 |             source.state_sizes(),
+     |             ^^^^^^^^^^^^^^^^^^^^ expected `StatePayloadSizes`, found `effect_contract::StatePayloadSizes`
+     |
+note: there are multiple different versions of crate `effect_contract` in the dependency graph
+    --> crates/effect-contract/src/lib.rs:271:1
+     |
+ 271 | pub struct StatePayloadSizes {
+     | ---------------------------- this is the found type
+     |
+    ::: crates/effect-contract/src/lib.rs:271:1
+     |
+ 271 | pub struct StatePayloadSizes {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this is the expected type
+     = help: you can use `cargo tree` to explore your dependency tree
+note: associated function defined here
+    --> crates/effect-contract/src/lib.rs:1416:12
+     |
+1416 |     pub fn new(
+     |            ^^^
+
+error[E0277]: a value of type `Box<[InitialParameterValue]>` cannot be built from an iterator over elements of type `effect_contract::InitialParameterValue`
+   --> crates/effect-compiler/src/migration.rs:830:79
+    |
+830 |     let initial_values: Box<[InitialParameterValue]> = state.initial_values().collect();
+    |                                                                               ^^^^^^^ value of type `Box<[InitialParameterValue]>` cannot be built from `std::iter::Iterator<Item=effect_contract::InitialParameterValue>`
+    |
+    = help: the trait `FromIterator<effect_contract::InitialParameterValue>` is not implemented for `Box<[InitialParameterValue]>`
+    = help: the following other types implement trait `FromIterator<A>`:
+              `Box<[I]>` implements `FromIterator<I>`
+              `Box<str>` implements `FromIterator<&char>`
+              `Box<str>` implements `FromIterator<&str>`
+              `Box<str>` implements `FromIterator<Box<str, A>>`
+              `Box<str>` implements `FromIterator<Cow<'_, str>>`
+              `Box<str>` implements `FromIterator<String>`
+              `Box<str>` implements `FromIterator<char>`
+note: the method call chain might not have had the expected associated types
+   --> crates/effect-compiler/src/migration.rs:830:62
+    |
+830 |     let initial_values: Box<[InitialParameterValue]> = state.initial_values().collect();
+    |                                                        ----- ^^^^^^^^^^^^^^^^ `Iterator::Item` is `InitialParameterValue` here
+    |                                                        |
+    |                                                        this expression has type `VerifiedEffectState<'_>`
+note: required by a bound in `collect`
+   --> /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/iter/traits/iterator.rs:2077:4
+
+error[E0308]: mismatched types
+    --> crates/effect-compiler/src/migration.rs:842:68
+     |
+ 842 |         let replay = effect_state_replay_view_from_verified(state, &initial_values)?;
+     |                      --------------------------------------        ^^^^^^^^^^^^^^^ expected `&[InitialParameterValue]`, found `&Box<[InitialParameterValue]>`
+     |                      |
+     |                      arguments to this function are incorrect
+     |
+     = note: expected reference `&[effect_contract::InitialParameterValue]`
+                found reference `&Box<[InitialParameterValue]>`
+note: function defined here
+    --> crates/effect-package/src/state.rs:1486:8
+     |
+1486 | pub fn effect_state_replay_view_from_verified<'initial>(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0308]: mismatched types
+   --> crates/effect-compiler/src/migration.rs:859:9
+    |
+859 |         quality,
+    |         ^^^^^^^ expected `effect_contract::EffectQuality`, found a different `effect_contract::EffectQuality`
+    |
+note: there are multiple different versions of crate `effect_contract` in the dependency graph
+   --> crates/effect-contract/src/lib.rs:132:145
+    |
+132 | ...ebug,Eq,Hash,Ord,PartialEq,PartialOrd)]pub enum $name{$($v=$n),+}impl $name{pub const fn from_raw(v:u32)->Option<Self>{match v{$...
+    |                                           -------------------------- this is the found type
+    |
+   ::: crates/effect-contract/src/lib.rs:132:145
+    |
+132 | macro_rules! scalar_enum { ($name:ident {$($v:ident=$n:expr),+$(,)?})=>{#[repr(u32)]#[derive(Clone,Copy,Debug,Eq,Hash,Ord,PartialEq,PartialOrd)]pub enum $name{$($v=$n),+}imp...
+    |                                                                                                                                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^ this is the expected type
+...
+138 | scalar_enum!(EffectQuality {Draft=1,Normal=2,High=3});
+    | ----------------------------------------------------- in this macro invocation
+    = help: you can use `cargo tree` to explore your dependency tree
+    = note: this error originates in the macro `scalar_enum` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0308]: mismatched types
+   --> crates/effect-compiler/src/migration.rs:861:9
+    |
+861 |         link_mode,
+    |         ^^^^^^^^^ expected `effect_contract::LinkMode`, found a different `effect_contract::LinkMode`
+    |
+note: there are multiple different versions of crate `effect_contract` in the dependency graph
+   --> crates/effect-contract/src/lib.rs:132:145
+    |
+132 | ...ebug,Eq,Hash,Ord,PartialEq,PartialOrd)]pub enum $name{$($v=$n),+}impl $name{pub const fn from_raw(v:u32)->Option<Self>{match v{$...
+    |                                           -------------------------- this is the found type
+    |
+   ::: crates/effect-contract/src/lib.rs:132:145
+    |
+132 | macro_rules! scalar_enum { ($name:ident {$($v:ident=$n:expr),+$(,)?})=>{#[repr(u32)]#[derive(Clone,Copy,Debug,Eq,Hash,Ord,PartialEq,PartialOrd)]pub enum $name{$($v=$n),+}imp...
+    |                                                                                                                                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^ this is the expected type
+...
+140 | scalar_enum!(LinkMode {DualMono=1,Maximum=2,Average=3});
+    | ------------------------------------------------------- in this macro invocation
+    = help: you can use `cargo tree` to explore your dependency tree
+    = note: this error originates in the macro `scalar_enum` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0308]: mismatched types
+   --> crates/effect-compiler/src/migration.rs:862:9
+    |
+862 |         ports,
+    |         ^^^^^ expected `PreparedPorts`, found `effect_contract::PreparedPorts`
+    |
+note: there are multiple different versions of crate `effect_contract` in the dependency graph
+   --> crates/effect-contract/src/lib.rs:840:1
+    |
+840 | pub struct PreparedPorts {
+    | ------------------------ this is the found type
+    |
+   ::: crates/effect-contract/src/lib.rs:840:1
+    |
+840 | pub struct PreparedPorts {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^ this is the expected type
+    = help: you can use `cargo tree` to explore your dependency tree
+
+error[E0308]: mismatched types
+   --> crates/effect-compiler/src/migration.rs:904:59
+    |
+904 |     let resources = effect_state_derived_resources(bound, replay.request())?;
+    |                     ------------------------------        ^^^^^^^^^^^^^^^^ expected `PrepareEffectRequest<'_>`, found a different `PrepareEffectRequest<'_>`
+    |                     |
+    |                     arguments to this function are incorrect
+    |
+note: there are multiple different versions of crate `effect_contract` in the dependency graph
+   --> crates/effect-contract/src/lib.rs:862:1
+    |
+862 | pub struct PrepareEffectRequest<'a> {
+    | ----------------------------------- this is the found type
+    |
+   ::: crates/effect-contract/src/lib.rs:862:1
+    |
+862 | pub struct PrepareEffectRequest<'a> {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this is the expected type
+    = help: you can use `cargo tree` to explore your dependency tree
+note: function defined here
+   --> crates/effect-package/src/state.rs:496:8
+    |
+496 | pub fn effect_state_derived_resources(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0308]: mismatched types
+  --> crates/effect-compiler/src/prepare.rs:98:13
+   |
+98 |             effect_id,
+   |             ^^^^^^^^^ expected `effect_contract::EffectId`, found `EffectId`
+   |
+note: there are multiple different versions of crate `effect_contract` in the dependency graph
+  --> crates/effect-contract/src/lib.rs:58:1
+   |
+58 | pub struct EffectId(&'static str);
+   | ------------------- this is the found type
+   |
+  ::: crates/effect-contract/src/lib.rs:58:1
+   |
+58 | pub struct EffectId(&'static str);
+   | ^^^^^^^^^^^^^^^^^^^ this is the expected type
+   = help: you can use `cargo tree` to explore your dependency tree
+
+error[E0308]: mismatched types
+   --> crates/effect-compiler/src/prepare.rs:99:22
+    |
+ 99 |             request: self.request(),
+    |                      ^^^^^^^^^^^^^^ expected `PrepareEffectRequest<'_>`, found a different `PrepareEffectRequest<'_>`
+    |
+note: there are multiple different versions of crate `effect_contract` in the dependency graph
+   --> crates/effect-contract/src/lib.rs:862:1
+    |
+862 | pub struct PrepareEffectRequest<'a> {
+    | ----------------------------------- this is the found type
+    |
+   ::: crates/effect-contract/src/lib.rs:862:1
+    |
+862 | pub struct PrepareEffectRequest<'a> {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this is the expected type
+    = help: you can use `cargo tree` to explore your dependency tree
+
+error[E0308]: mismatched types
+    --> crates/effect-compiler/src/prepare.rs:167:37
+     |
+ 167 |         bind_effect_descriptor_wire(descriptor, descriptor_wire, maximum_descriptor_bytes)
+     |         --------------------------- ^^^^^^^^^^ expected `effect_contract::EffectDescriptor`, found `EffectDescriptor`
+     |         |
+     |         arguments to this function are incorrect
+     |
+note: there are multiple different versions of crate `effect_contract` in the dependency graph
+    --> crates/effect-contract/src/lib.rs:395:1
+     |
+ 395 | pub struct EffectDescriptor {
+     | --------------------------- this is the found type
+     |
+    ::: crates/effect-contract/src/lib.rs:395:1
+     |
+ 395 | pub struct EffectDescriptor {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^ this is the expected type
+     = help: you can use `cargo tree` to explore your dependency tree
+note: function defined here
+    --> crates/effect-package/src/wire.rs:1850:8
+     |
+1850 | pub fn bind_effect_descriptor_wire<'a>(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0308]: mismatched types
+   --> crates/effect-compiler/src/prepare.rs:423:76
+    |
+423 |             effect_state_derived_resources(bound_factory.bound_descriptor, replay.request())
+    |             ------------------------------                                 ^^^^^^^^^^^^^^^^ expected `PrepareEffectRequest<'_>`, found a different `PrepareEffectRequest<'_>`
+    |             |
+    |             arguments to this function are incorrect
+    |
+note: there are multiple different versions of crate `effect_contract` in the dependency graph
+   --> crates/effect-contract/src/lib.rs:862:1
+    |
+862 | pub struct PrepareEffectRequest<'a> {
+    | ----------------------------------- this is the found type
+    |
+   ::: crates/effect-contract/src/lib.rs:862:1
+    |
+862 | pub struct PrepareEffectRequest<'a> {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this is the expected type
+    = help: you can use `cargo tree` to explore your dependency tree
+note: function defined here
+   --> crates/effect-package/src/state.rs:496:8
+    |
+496 | pub fn effect_state_derived_resources(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0308]: mismatched types
+   --> crates/effect-compiler/src/prepare.rs:440:5
+    |
+411 | ) -> Result<EffectProgramKey, EffectStateDiagnostic> {
+    |      ----------------------------------------------- expected `Result<EffectProgramKey, EffectStateDiagnostic>` because of return type
+...
+440 |     program_key.ok_or_else(|| state_unavailable(EffectStateDiagnosticCode::Factory, 2))
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `EffectProgramKey`, found `effect_contract::EffectProgramKey`
+    |
+note: there are multiple different versions of crate `effect_contract` in the dependency graph
+   --> crates/effect-contract/src/lib.rs:967:1
+    |
+967 | pub struct EffectProgramKey {
+    | --------------------------- this is the found type
+    |
+   ::: crates/effect-contract/src/lib.rs:967:1
+    |
+967 | pub struct EffectProgramKey {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^ this is the expected type
+    = help: you can use `cargo tree` to explore your dependency tree
+
+error[E0308]: mismatched types
+   --> crates/effect-compiler/src/prepare.rs:513:32
+    |
+513 |     if metadata.program_key != expected.program_key()
+    |        --------------------    ^^^^^^^^^^^^^^^^^^^^^^ expected `EffectProgramKey`, found `effect_contract::EffectProgramKey`
+    |        |
+    |        expected because this is `EffectProgramKey`
+    |
+note: there are multiple different versions of crate `effect_contract` in the dependency graph
+   --> crates/effect-contract/src/lib.rs:967:1
+    |
+967 | pub struct EffectProgramKey {
+    | --------------------------- this is the found type
+    |
+   ::: crates/effect-contract/src/lib.rs:967:1
+    |
+967 | pub struct EffectProgramKey {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^ this is the expected type
+    = help: you can use `cargo tree` to explore your dependency tree
+
+error[E0308]: mismatched types
+   --> crates/effect-compiler/src/prepare.rs:514:47
+    |
+514 |         || capability.metadata.program_key != expected.program_key()
+    |            -------------------------------    ^^^^^^^^^^^^^^^^^^^^^^ expected `EffectProgramKey`, found `effect_contract::EffectProgramKey`
+    |            |
+    |            expected because this is `EffectProgramKey`
+    |
+note: there are multiple different versions of crate `effect_contract` in the dependency graph
+   --> crates/effect-contract/src/lib.rs:967:1
+    |
+967 | pub struct EffectProgramKey {
+    | --------------------------- this is the found type
+    |
+   ::: crates/effect-contract/src/lib.rs:967:1
+    |
+967 | pub struct EffectProgramKey {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^ this is the expected type
+    = help: you can use `cargo tree` to explore your dependency tree
+
+error[E0308]: mismatched types
+   --> crates/effect-compiler/src/prepare.rs:670:81
+    |
+670 |     validate_effect_state_metadata(bound_factory.bound_descriptor, replay_view, metadata)?;
+    |     ------------------------------ arguments to this function are incorrect     ^^^^^^^^ expected `effect_contract::PreparedEffectMetadata`, found `PreparedEffectMetadata`
+    |
+note: there are multiple different versions of crate `effect_contract` in the dependency graph
+   --> crates/effect-contract/src/lib.rs:919:1
+    |
+919 | pub struct PreparedEffectMetadata {
+    | --------------------------------- this is the found type
+    |
+   ::: crates/effect-contract/src/lib.rs:919:1
+    |
+919 | pub struct PreparedEffectMetadata {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this is the expected type
+    = help: you can use `cargo tree` to explore your dependency tree
+note: function defined here
+   --> crates/effect-package/src/state.rs:529:8
+    |
+529 | pub fn validate_effect_state_metadata(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0308]: mismatched types
+   --> crates/effect-compiler/src/prepare.rs:792:24
+    |
+792 |         *destination = value;
+    |         ------------   ^^^^^ expected `InitialParameterValue`, found `effect_contract::InitialParameterValue`
+    |         |
+    |         expected due to the type of this binding
+    |
+note: there are multiple different versions of crate `effect_contract` in the dependency graph
+   --> crates/effect-contract/src/lib.rs:850:1
+    |
+850 | pub struct InitialParameterValue {
+    | -------------------------------- this is the found type
+    |
+   ::: crates/effect-contract/src/lib.rs:850:1
+    |
+850 | pub struct InitialParameterValue {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this is the expected type
+    = help: you can use `cargo tree` to explore your dependency tree
+
+error[E0308]: mismatched types
+   --> crates/effect-compiler/src/prepare.rs:800:18
+    |
+800 |         quality: state.quality(),
+    |                  ^^^^^^^^^^^^^^^ expected `effect_contract::EffectQuality`, found a different `effect_contract::EffectQuality`
+    |
+note: there are multiple different versions of crate `effect_contract` in the dependency graph
+   --> crates/effect-contract/src/lib.rs:132:145
+    |
+132 | ...ebug,Eq,Hash,Ord,PartialEq,PartialOrd)]pub enum $name{$($v=$n),+}impl $name{pub const fn from_raw(v:u32)->Option<Self>{match v{$...
+    |                                           -------------------------- this is the found type
+    |
+   ::: crates/effect-contract/src/lib.rs:132:145
+    |
+132 | macro_rules! scalar_enum { ($name:ident {$($v:ident=$n:expr),+$(,)?})=>{#[repr(u32)]#[derive(Clone,Copy,Debug,Eq,Hash,Ord,PartialEq,PartialOrd)]pub enum $name{$($v=$n),+}imp...
+    |                                                                                                                                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^ this is the expected type
+...
+138 | scalar_enum!(EffectQuality {Draft=1,Normal=2,High=3});
+    | ----------------------------------------------------- in this macro invocation
+    = help: you can use `cargo tree` to explore your dependency tree
+    = note: this error originates in the macro `scalar_enum` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0308]: mismatched types
+   --> crates/effect-compiler/src/prepare.rs:802:20
+    |
+802 |         link_mode: state.link_mode(),
+    |                    ^^^^^^^^^^^^^^^^^ expected `effect_contract::LinkMode`, found a different `effect_contract::LinkMode`
+    |
+note: there are multiple different versions of crate `effect_contract` in the dependency graph
+   --> crates/effect-contract/src/lib.rs:132:145
+    |
+132 | ...ebug,Eq,Hash,Ord,PartialEq,PartialOrd)]pub enum $name{$($v=$n),+}impl $name{pub const fn from_raw(v:u32)->Option<Self>{match v{$...
+    |                                           -------------------------- this is the found type
+    |
+   ::: crates/effect-contract/src/lib.rs:132:145
+    |
+132 | macro_rules! scalar_enum { ($name:ident {$($v:ident=$n:expr),+$(,)?})=>{#[repr(u32)]#[derive(Clone,Copy,Debug,Eq,Hash,Ord,PartialEq,PartialOrd)]pub enum $name{$($v=$n),+}imp...
+    |                                                                                                                                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^ this is the expected type
+...
+140 | scalar_enum!(LinkMode {DualMono=1,Maximum=2,Average=3});
+    | ------------------------------------------------------- in this macro invocation
+    = help: you can use `cargo tree` to explore your dependency tree
+    = note: this error originates in the macro `scalar_enum` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0308]: mismatched types
+   --> crates/effect-compiler/src/prepare.rs:820:81
+    |
+820 |     validate_effect_state_metadata(bound_factory.bound_descriptor, replay_view, metadata)
+    |     ------------------------------ arguments to this function are incorrect     ^^^^^^^^ expected `effect_contract::PreparedEffectMetadata`, found `PreparedEffectMetadata`
+    |
+note: there are multiple different versions of crate `effect_contract` in the dependency graph
+   --> crates/effect-contract/src/lib.rs:919:1
+    |
+919 | pub struct PreparedEffectMetadata {
+    | --------------------------------- this is the found type
+    |
+   ::: crates/effect-contract/src/lib.rs:919:1
+    |
+919 | pub struct PreparedEffectMetadata {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this is the expected type
+    = help: you can use `cargo tree` to explore your dependency tree
+note: function defined here
+   --> crates/effect-package/src/state.rs:529:8
+    |
+529 | pub fn validate_effect_state_metadata(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Some errors have detailed explanations: E0277, E0308.
+For more information about an error, try `rustc --explain E0277`.
+error: could not compile `effect-compiler` (lib) due to 22 previous errors
+warning: build failed, waiting for other jobs to finish...

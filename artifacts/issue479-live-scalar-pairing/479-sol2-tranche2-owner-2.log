@@ -1,0 +1,24 @@
+   Compiling builtins-compiler v0.1.0 (/home/bl/misofm/engine-479-proof/crates/builtins-compiler)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.24s
+     Running tests/allocation_tracker.rs (/tmp/engine-479-sol-target/debug/deps/allocation_tracker-b6767a1ad7cc8a1e)
+
+running 1 test
+test actual_scalar_prepare_and_bind_retain_the_charged_owner_layouts ... FAILED
+
+failures:
+
+---- actual_scalar_prepare_and_bind_retain_the_charged_owner_layouts stdout ----
+
+thread 'actual_scalar_prepare_and_bind_retain_the_charged_owner_layouts' (4058916) panicked at crates/builtins-compiler/tests/allocation_tracker.rs:431:5:
+assertion `left == right` failed: same-layout binding temporaries reconcile to the one typed live scalar outer
+  left: Some(10)
+ right: Some(1)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    actual_scalar_prepare_and_bind_retain_the_charged_owner_layouts
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p builtins-compiler --test allocation_tracker`

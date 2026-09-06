@@ -1,0 +1,154 @@
+   Compiling engine v0.1.0 (/home/bl/misofm/engine-443-plan/crates/engine)
+   Compiling dsp-reference v0.1.0 (/home/bl/misofm/engine-443-plan/crates/dsp-reference)
+   Compiling effect-contract v0.1.0 (/home/bl/misofm/engine-443-plan/crates/effect-contract)
+   Compiling bench-support v0.1.0 (/home/bl/misofm/engine-443-plan/tools/bench-support)
+   Compiling rack v0.1.0 (/home/bl/misofm/engine-443-plan/crates/rack)
+   Compiling conformance v0.1.0 (/home/bl/misofm/engine-443-plan/crates/conformance)
+   Compiling graph v0.1.0 (/home/bl/misofm/engine-443-plan/crates/graph)
+error[E0425]: cannot find function, tuple struct or tuple variant `BufferRef` in this scope
+    --> crates/graph/src/runtime.rs:3149:29
+     |
+3149 |                     output: BufferRef(1),
+     |                             ^^^^^^^^^ not found in this scope
+     |
+help: consider importing this tuple struct
+     |
+3130 +     use crate::program::BufferRef;
+     |
+
+error[E0425]: cannot find function, tuple struct or tuple variant `BufferRef` in this scope
+    --> crates/graph/src/runtime.rs:3157:29
+     |
+3157 |                     output: BufferRef(2),
+     |                             ^^^^^^^^^ not found in this scope
+     |
+help: consider importing this tuple struct
+     |
+3130 +     use crate::program::BufferRef;
+     |
+
+error[E0422]: cannot find struct, variant or union type `InputRef` in this scope
+    --> crates/graph/src/runtime.rs:3163:17
+     |
+3163 |                 InputRef {
+     |                 ^^^^^^^^ not found in this scope
+     |
+help: consider importing this struct
+     |
+3130 +     use crate::program::InputRef;
+     |
+
+error[E0425]: cannot find function, tuple struct or tuple variant `BufferRef` in this scope
+    --> crates/graph/src/runtime.rs:3164:29
+     |
+3164 |                     buffer: BufferRef(1),
+     |                             ^^^^^^^^^ not found in this scope
+     |
+help: consider importing this tuple struct
+     |
+3130 +     use crate::program::BufferRef;
+     |
+
+error[E0422]: cannot find struct, variant or union type `InputRef` in this scope
+    --> crates/graph/src/runtime.rs:3167:17
+     |
+3167 |                 InputRef {
+     |                 ^^^^^^^^ not found in this scope
+     |
+help: consider importing this struct
+     |
+3130 +     use crate::program::InputRef;
+     |
+
+error[E0425]: cannot find function, tuple struct or tuple variant `BufferRef` in this scope
+    --> crates/graph/src/runtime.rs:3168:29
+     |
+3168 |                     buffer: BufferRef(1),
+     |                             ^^^^^^^^^ not found in this scope
+     |
+help: consider importing this tuple struct
+     |
+3130 +     use crate::program::BufferRef;
+     |
+
+error[E0425]: cannot find function, tuple struct or tuple variant `BufferRef` in this scope
+    --> crates/graph/src/runtime.rs:3174:31
+     |
+3174 |             node_buffer: vec![BufferRef(1), BufferRef(2)].into_boxed_slice(),
+     |                               ^^^^^^^^^ not found in this scope
+     |
+help: consider importing this tuple struct
+     |
+3130 +     use crate::program::BufferRef;
+     |
+
+error[E0425]: cannot find function, tuple struct or tuple variant `BufferRef` in this scope
+    --> crates/graph/src/runtime.rs:3174:45
+     |
+3174 |             node_buffer: vec![BufferRef(1), BufferRef(2)].into_boxed_slice(),
+     |                                             ^^^^^^^^^ not found in this scope
+     |
+help: consider importing this tuple struct
+     |
+3130 +     use crate::program::BufferRef;
+     |
+
+error[E0425]: cannot find function, tuple struct or tuple variant `BufferRef` in this scope
+    --> crates/graph/src/runtime.rs:3178:21
+     |
+3178 |             output: BufferRef(2),
+     |                     ^^^^^^^^^ not found in this scope
+     |
+help: consider importing this tuple struct
+     |
+3130 +     use crate::program::BufferRef;
+     |
+
+error[E0425]: cannot find function, tuple struct or tuple variant `BufferRef` in this scope
+    --> crates/graph/src/runtime.rs:3185:33
+     |
+3185 |         program.ops[1].output = BufferRef(1);
+     |                                 ^^^^^^^^^ not found in this scope
+     |
+help: consider importing this tuple struct
+     |
+3130 +     use crate::program::BufferRef;
+     |
+
+error[E0425]: cannot find function, tuple struct or tuple variant `BufferRef` in this scope
+    --> crates/graph/src/runtime.rs:3187:34
+     |
+3187 |         program.node_buffer[1] = BufferRef(1);
+     |                                  ^^^^^^^^^ not found in this scope
+     |
+help: consider importing this tuple struct
+     |
+3130 +     use crate::program::BufferRef;
+     |
+
+error[E0422]: cannot find struct, variant or union type `DelayRef` in this scope
+    --> crates/graph/src/runtime.rs:3192:40
+     |
+3192 |         program.inputs[1].delay = Some(DelayRef {
+     |                                        ^^^^^^^^ not found in this scope
+     |
+help: consider importing this struct
+     |
+3130 +     use crate::program::DelayRef;
+     |
+
+error[E0425]: cannot find function, tuple struct or tuple variant `BufferRef` in this scope
+    --> crates/graph/src/runtime.rs:3194:22
+     |
+3194 |             staging: BufferRef(2),
+     |                      ^^^^^^^^^ not found in this scope
+     |
+help: consider importing this tuple struct
+     |
+3130 +     use crate::program::BufferRef;
+     |
+
+Some errors have detailed explanations: E0422, E0425.
+For more information about an error, try `rustc --explain E0422`.
+error: could not compile `graph` (lib test) due to 13 previous errors
+warning: build failed, waiting for other jobs to finish...

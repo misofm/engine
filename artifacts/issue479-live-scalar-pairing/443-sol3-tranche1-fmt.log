@@ -1,0 +1,77 @@
+Diff in /home/bl/misofm/engine-443-plan/crates/builtins-compiler/src/lib.rs:4769:
+             }
+         }
+         edges.push(GraphEdge {
+-                id: GraphEdgeId::TrackMain {
+-                    target: output.clone(),
+-                },
+-                source: GraphPortId {
+-                    node: stage(0, TrackStage::PostMatrix),
+-                    kind: GraphPortKind::MainOutput,
+-                    effect_port: None,
+-                },
+-                destination: GraphPortId {
+-                    node: output.clone(),
+-                    kind: GraphPortKind::MainInput,
+-                    effect_port: None,
+-                },
+-                path: "$.routes[0]".to_owned(),
++            id: GraphEdgeId::TrackMain {
++                target: output.clone(),
++            },
++            source: GraphPortId {
++                node: stage(0, TrackStage::PostMatrix),
++                kind: GraphPortKind::MainOutput,
++                effect_port: None,
++            },
++            destination: GraphPortId {
++                node: output.clone(),
++                kind: GraphPortKind::MainInput,
++                effect_port: None,
++            },
++            path: "$.routes[0]".to_owned(),
+         });
+         if matches!(variant, BoundaryVariant::Send) {
+             edges.push(GraphEdge {
+Diff in /home/bl/misofm/engine-443-plan/crates/builtins-compiler/src/lib.rs:5334:
+             0,
+             (1, 0),
+         );
+-        assert_eq!((settled.fader_records_drained, settled.matrix_records_drained), (0, 0));
++        assert_eq!(
++            (
++                settled.fader_records_drained,
++                settled.matrix_records_drained
++            ),
++            (0, 0)
++        );
+ 
+         let fader_fifo = [
+             TrackFaderRecord::FaderDb {
+Diff in /home/bl/misofm/engine-443-plan/crates/builtins-compiler/src/lib.rs:5363:
+             smoothing_samples: 0,
+         };
+         for bound in [&mut paired, &mut separate] {
+-            bound.track_controls[1].producer.try_push(matrix_now).unwrap();
++            bound.track_controls[1]
++                .producer
++                .try_push(matrix_now)
++                .unwrap();
+         }
+         let immediate = render_scalar_pair_and_compare(
+             &mut paired,
+Diff in /home/bl/misofm/engine-443-plan/crates/builtins-compiler/src/lib.rs:5373:
+             HARNESS_QUANTUM as u64,
+             (1, 0),
+         );
+-        assert_eq!((immediate.fader_records_drained, immediate.matrix_records_drained), (2, 1));
++        assert_eq!(
++            (
++                immediate.fader_records_drained,
++                immediate.matrix_records_drained
++            ),
++            (2, 1)
++        );
+ 
+         let ramp = TrackFaderRecord::Mute {
+             lanes: BuiltinLaneSelector::Right,

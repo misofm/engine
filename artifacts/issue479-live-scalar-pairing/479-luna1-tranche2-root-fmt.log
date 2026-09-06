@@ -1,0 +1,57 @@
+Diff in /home/bl/misofm/engine-479-proof/crates/builtins-compiler/src/lib.rs:5331:
+         TestPhaseTwoAllocationSnapshot,
+         TestPhaseTwoAllocationSnapshot,
+     ) {
+-        let (bound, estimate, scalar_resource, owners, binding) = prepared_pair_graph_variant_observed(
+-            false,
+-            false,
+-            false,
+-            true,
+-            None,
+-            Backend::Scalar,
+-            2,
+-            BoundaryVariant::Plain,
+-            1,
+-            None,
+-            true,
+-        );
+-        (bound, estimate, scalar_resource, owners.unwrap(), binding.unwrap())
++        let (bound, estimate, scalar_resource, owners, binding) =
++            prepared_pair_graph_variant_observed(
++                false,
++                false,
++                false,
++                true,
++                None,
++                Backend::Scalar,
++                2,
++                BoundaryVariant::Plain,
++                1,
++                None,
++                true,
++            );
++        (
++            bound,
++            estimate,
++            scalar_resource,
++            owners.unwrap(),
++            binding.unwrap(),
++        )
+     }
+ 
+     fn prepared_pair_graph_fixture(
+Diff in /home/bl/misofm/engine-479-proof/crates/builtins-compiler/src/lib.rs:5600:
+             .unwrap_or_else(|failure| panic!("fixture bind: {}", failure.code));
+         drop(_binding_observation);
+         let binding_snapshot = observe_binding.then(test_only_phase_two_allocation_snapshot);
+-        (bound, saved_estimate, scalar_resource, owner_snapshot, binding_snapshot)
++        (
++            bound,
++            saved_estimate,
++            scalar_resource,
++            owner_snapshot,
++            binding_snapshot,
++        )
+     }
+ 
+     fn render_bound(bound: &mut PreparedBuiltinsGraphBound, sample: u64) -> Vec<u32> {
