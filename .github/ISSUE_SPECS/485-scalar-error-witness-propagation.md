@@ -101,3 +101,7 @@ Normal builder on frozen e4367be13783cb279c9aebf338929b3ae012e244 compiled succe
 Candidate6ede671129ab9cb61c2bde4300cb972acb36c8a5 reproducibly builds the observed14811597 artifact with ordinary verification enabled. Static/object/ABI, expected-resource26 negative controls, separate hermetic worklet checks, all3 actual browser engines with self-test mutations and generatedmatrix verification pass with captured numeric0. Generated consumers atd0ed18a2 change only candidate/digest. All raw commands/log/statuses, initial CI/build failures, Astra amendment and source-equivalence record are retained in artifacts/issue485-scalar-error-propagation.
 
 The entire accepted compiler file is byte-identical tod0bafe8b. Relative to deliveredmainf357330c, executable inputs change only that compiler file and the3approved artifact consumers. Refreshed actual-head Astra review and successful requiredCI are still mandatory before merge; the earlier conditional review cannot approve a failed or changed head.
+
+## Delivered and closed
+
+PR487 merged2026-09-06T02:19:17Z asc075e44e81d7be978bb6a7420a9724db134c46cf after refreshed exact-head Astra PASS for b4e79bef99391d167c364755458294ca1d87ebac and required qualification34005873614 SUCCESS. GitHub485 is verified CLOSED. Both feature modes preserve error observations and compile/test successfully; the combined artifact is qualified. Workflow total35 merged audit PRs. This maintenance follow-up does not independently close another original349 finding, so108 retain work.

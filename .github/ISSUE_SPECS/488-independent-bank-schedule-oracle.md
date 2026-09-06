@@ -87,3 +87,7 @@ Independent fmt, diff-check and affected graph policy now have separate numeric0
 Source PASS permits root packaging and delivered-main integration with source identity preserved, then actual-head PR review and requiredCI/verified remote closure. No benchmark, artifact regeneration, second scheduler or additional property matrix is justified by this test-only result. CP-15 closure is bounded independent unit-order checking; it does not claim all other interpreter models are independent.
 
 Root integrates deliveredmainf357330c before PR. The accepted graph test and production graph/runtime/lane inputs remain identical to reviewedc86c4347; only unrelated delivered238 builtins/artifact/evidence enters through main. This cfg(test)-only product requires no new audio artifact or timing. Actual PR-head Astra review and requiredCI remain before closure.
+
+## Final delivered-base integration
+
+Root integrates deliveredmainc075e44e (PR487) before final actual-head qualification. This brings the accepted compiler configuration correction/current artifact and485 closure record. Graph production and test source remain unchanged from acceptedc86c4347. Required CI and refreshed actual-head Astra review apply to the resulting head.
