@@ -1,6 +1,6 @@
 # 475: Specialize uniform compressor detector taps without changing DSP
 
-Current assignment: Sol attempt 3 (final). The decision below supersedes historical scheduling records. Root owns Git/GitHub and exact-path checkpoints; no timing or benchmark capture is authorized.
+Current state: three-attempt hardstop; bounded proof successor required. The decision below supersedes historical scheduling records. Root owns Git/GitHub and exact-path checkpoints; no timing or benchmark capture is authorized.
 
 Active Class-A product child of audit #349 DYN-1. Current implementation base is delivered main571dfc5b after #463 closed. Astra has approved the actual base below; root assigns fresh Luna1 under the Astra review and Sol2/3 fallback workflow. Earlier queued-base records are retained as history, not current scheduling authority.
 
@@ -190,3 +190,21 @@ executed mirrored-plane oracle failure remain verbatim in `artifacts/issue475-so
 beside the corrected evidence. Accepted Sol2 production/object/G5/mutation/allocation evidence is
 unchanged and was not rerun for these test-only edits. No timing or delivery qualification is
 claimed. Pending the single consolidated final Astra verdict; any FAIL hardstops this issue shape.
+
+## Final attempt verdict — hardstop
+
+# Astra #475 FINAL Sol attempt 3 — FAIL; hardstop/rescope
+
+Exact headce745d8a5b25c77964641f9483d33794aa90d7ea, source019ac62a, engine-475-plan. One final consolidated verdict against the two remaining original groups and adopted private-W4 construction clarification. No tests/builds/timing or repository/Git/GitHub mutations performed. This is attempt3: preserve this checkpoint/evidence and rescope a bounded proof successor before further correction; no informal fourth475 pass or delivery qualification.
+
+Accepted: production remains unchanged from accepted specialization; all new kernel code is cfg(test). W4 fixture construction uses the existing PreparedCompressorBank<Simd4>/Instance with production metadata/default/ring validators and invokes the actual restore/reset/process/mono/desymmetrize/snapshot trait methods. It does not change native factory admission and explicitly records that its unavailable-width check concerns this x86-64-v3 host. Both restore directions, full reset and mono reopen are represented. The child-marker rename is correct; actual environment policy now passes114 names. Isolated allocation audit remains valid and passing. Earlier native/object/G5/access-mechanism evidence is preserved without invented reexecution.
+
+One finite original proof defect remains: the W4 transition comparisons never reach populated delayed audio or detector taps. request() fixes48k and render4 processes128 frames. The compressor latency is960 samples (ring961). Uniform lookahead0 yields D960; ragged lookaheads0/2.5/5/7.5ms yield D960/840/720/600. Restored source is primed only once (128 frames), then compared on its second128-frame render. Reset renders once from cleared rings. Mono reopen renders one mono block then one dual block from initially clear state. All are at most256 frames after clear, below even the smallest detector delay600 and far below audio latency960.
+
+Consequently the complete PCM assertions compare delayed startup silence, and the saved state comparisons chiefly prove copied/written rings, parameters and cursor. They do not discriminate using the wrong delay population for actual detector reads on the first post-transition render: all selected histories are still zero. No per-call classification/branch assertion in this new test supplies the missing discrimination. The independent W4 tap oracle proves access arithmetic in isolation, not this required transition/state-owner linkage. This is the remaining original next-render PCM/state gate, not an additional target matrix or requested performance test.
+
+Smallest successor scope: only complete this existing cfg(test) W4 fixture with a populated, frame/lane-varying detector/main history before the restore and mono-copy transitions, through existing real rendering or supported payload restore. Keep the first post-transition comparison and explicitly assert its old/reference expected PCM contains nonzero distinguishable words before candidate equality; ensure delay alternatives sample different live history. Retain complete serialized-state comparison. Full reset must still prove its legitimate first-block silence/state, then continue the same fixed finite sequence past latency to compare the populated output/default-delay behavior; do not mislabel first-after-reset silence as populated output. Freeze these few phases before coding, preserve existing W1/W8 and old-access/mechanism proofs, and add no public API/backend override, new runner/corpus or broader matrix. Parent475 keeps the full original acceptance and later qualification obligations; numbered proof child must precede implementation.
+
+Evidence otherwise checks out: all12 manifest payload hashes/sizes and exact13-file tracked coverage verified. Actual focused/affected debug-release, full debug, strict Clippy, fmt/diff and realtime/lane/workspace/environment statuses are0; both wrong-cwd/corrected package verifications and earlier compile/oracle failures are authentic retained history. Green executions do not remove the startup-silence limitation above. No additional production defect is identified, and no other new correction group is imposed.
+
+Root adopts the hardstop. No further implementation or delivery qualification under parent475 is authorized until a numbered, Astra-briefed proof successor owns the finite populated-history correction. The parent retains the complete product contract and all eventual delivery gates; no acceptance requirement is weakened.
