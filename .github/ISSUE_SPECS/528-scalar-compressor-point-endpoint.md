@@ -127,3 +127,36 @@ Ordinary cancellation remains the queued brief's real render-boundary path. No D
 ## Scope and evidence
 
 These decisions close the queued brief's explicitly deferred compact fault/result choices. They add no feature dependency, browser qualification requirement for development, benchmark, second harness, generalized event observer or expanded effect/parameter scope. The six finite product gates remain the acceptance corpus. Add only small focused checks for the now-frozen invalid-envelope no-op precedence and sticky containment using a delegating test-only native wrapper if needed; it must not alter the real compressor comparisons. No extra mutation campaign is authorized. Numbered root approval must adopt this addendum before Luna starts so these are frozen inputs, not attempt-time findings.
+
+
+## Numbered current-base approval
+
+# Astra numbered current-base brief verdict — #528
+
+**PASS for the numbered scope, decision record and finite acceptance gates at checkpoint `b0fa9a0cf7bf0ecdee2c7a5d6d22c67383082e01`, based on delivered main `af22dfa45b037d54a70e7b74c038ccae6154fabf`. No prerequisite implementation or substantive brief correction is required before attempt 1. Luna may start only after root confirms #524 post-main qualification success and the numbering/approval checkpoint is upstream.**
+
+Read-only checks confirm GitHub #528 is OPEN with the exact title “Admitted scalar compressor makeup Points to PCM”; its body matches the local numbered spec modulo the API output's terminal newline. The worktree is clean, and the checkpoint differs from current base only by this issue spec. No source implementation or test execution has occurred. #524 is delivered; its post-main run `34037080852` was still in progress when inspected, so this scope approval does not claim that start condition already holds.
+
+## Approved product and ownership seam
+
+The smallest closable capability is correctly bounded to one opt-in host-core Rust endpoint under `control-provider`, borrowing one prepared scalar native compressor and admitting actual #460 batches for exactly makeup index5/ID6, separately Left and Right. It proves admission-to-PCM and native resident/applied readback without claiming existing controller, graph, host ABI, bank, other-effect or segment rollout. Fixed two-parameter capability is not a global track limit.
+
+The current metadata supplies every required preparation check, including readable/automatable per-lane dB domain and descriptor smoothing64. #524 provides the required no-sample hook/read state. Existing #460 APIs provide admission validation, exact Point-only capabilities, retained full-ticket reservations, bounded single pending claim, prefix progress, terminal collection and real cancellation. `finish_applied` reports Full through its bounded terminal push, matching the explicitly deferred-completion law. `collect_terminal` blocks during cancellation and requires the full prefix, so the normal completion proof matches the service.
+
+No missing service seam, production dependency, host ownership restructuring or additional prerequisite is indicated. Current metering exports/preparation remain outside the endpoint changes. Trusted native metadata/read-hook checks are the capability boundary; do not add a speculative mutating capability probe.
+
+## Frozen behavior and fault decisions
+
+The numbered spec includes the previously adopted fault/result addendum without changing its substantive choices. It freezes invalid-envelope no-op precedence; sample-exact nonempty slicing; end-exclusive scheduling; ordered late catch-up without coalescing; one pending ticket per block; actual native state reads; terminal credit retention; cancellation barriers; canonical FP/start/stop ownership; and finite allocation-free bounds.
+
+It also explicitly distinguishes actual native progress from #460's recorded prefix if an unexpected post-apply mark failure occurs, preserves the original sticky fault and owned work, zeros a failed valid block without claiming DSP rollback, and limits subsequent recovery to the cancellation-only boundary. This closes the prior deferred error choices without introducing a second accepted-work ledger or service repair path. Snapshot read failure and the endpoint/native clock distinction are candidly specified.
+
+## Paths and evidence interpretation
+
+Implementation remains limited to new `crates/host-core/src/scalar_point_endpoint.rs`, its feature-gated module/export in `crates/host-core/src/lib.rs`, and new `crates/host-core/tests/scalar_point_endpoint.rs`. The already authorized test-only audit dependency may add `bench-support.workspace = true` under host-core dev-dependencies; bench-support already enables engine's realtime-audit feature. A mechanically resulting host-core dependency-list update in Cargo.lock is part of that exact dependency addition, not permission to refresh unrelated packages or add a production dependency. Root-owned numbered spec/evidence checkpoints are separate.
+
+The six finite real-product gates discriminate the actual capability: real two-offset and simultaneous PCM/span equivalence plus a no-event difference; pending/current/terminal distinctions; ordered late application; partial/future/unsupported cancellation and retained backpressure; malformed last-record and envelope no-ops; and installed positive/zero allocation controls using the real owners and progress. The small test-only forwarding wrapper for sticky-fault containment is allowed as stated. No additional hook-suppression mutation control is required by this approval; preserve the real compressor comparisons. No benchmark, new harness, broad fixture matrix or development-time browser corpus is added.
+
+Run focused debug/release, host-core feature tests, protocol ownership regression gates, affected strict lint/policies and supported target compilation as frozen. Pause at the first coherent compiling/focused-green tranche for root's exact-path checkpoint before more implementation or review handoffs. One consolidated adversarial verdict ends each attempt. Root delivery qualification/current-base review and GitHub synchronization remain required after source PASS. #140/#444 and IO5 stay open beyond this leaf.
+
+Root adopts this PASS and the frozen exact-path clarification. Luna attempt 1 starts only after #524 post-main success.
