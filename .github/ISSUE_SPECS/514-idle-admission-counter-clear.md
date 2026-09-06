@@ -184,3 +184,44 @@ No production type, layout or resource calculation changed in attempt 2. The acc
 Root may record this source PASS. Keep #514 open until #511 lands, the default branch is integrated and source/dependency drift is reviewed. The normal integrated current-artifact/current-consumer checks, native command-timeline identity, scalar/SIMD Wasm builds, shipped render-closure allocation/deallocation/drop gate and its controls, unchanged PCM, actual PR/required CI and remote issue synchronization remain delivery requirements. Root owns all Git/GitHub actions.
 
 No builds, tests, benchmarks/timing, source edits, Git mutations or GitHub operations were performed during this review. Inspection and hash reconstruction were read-only; the only file written is this requested `/tmp` report.
+
+
+## Delivered prerequisite integrated — ready for qualification
+
+Main107b9ed1 (#511/PR515) merged without production conflicts at5ce91031, followed by its remote closure record e789c777. The sole #512 documentation conflict retained its post-main SUCCESS paragraph. Both accepted #514 source hashes are unchanged.
+
+# #514 integrated-base drift review — PASS to qualify
+
+Approve the existing immutable and current-artifact delivery route on clean `e789c777bc45590e252cb75678c6e055468dc263` in `/home/bl/misofm/engine-idle-admission-clear`, following integration merge `5ce91031`. This is integrated-base readiness, not a claim that integrated gates or CI have passed. Sol attempt-2 source acceptance remains valid; no new implementation attempt is consumed or authorized.
+
+## Drift assessed
+
+Delivered main `107b9ed1803b8313e434821ec5bf49a178b6bb2f` is an ancestor. Relative to accepted #514 checkpoint `841e7125e97b6c8df1339fc4e3d22ca60feae091`, the 12 changed dependency/delivery paths are byte-identical to that main. They comprise the delivered #511 graph/builtins/compiler reservation and physical-capacity preparation, its feature-gated test support, C API resource-test correction, and qualified browser resource/artifact/matrix records. Cargo.lock, workspace Cargo/.cargo, qualification workflow, gate scripts and AGENTS.md have no intervening change. Relative to delivered main, the only production/test differences are the two already accepted #514 host files.
+
+Both accepted host identities match exactly:
+
+- `hosts/host-web/src/lib.rs`: SHA-256 `aaea4b3c344e3f948fe965e1e8ed0c8394b5fb3843c2a50974890e7be9391924`.
+- `hosts/host-web/src/tests.rs`: SHA-256 `d35a91c02b8b020997348583be0846d5270f70397250487c0614bba18650cf91`.
+
+The #514 spec and three accepted evidence packages have no drift from `841e7125`. The #512 conflict resolution exactly matches delivered main, including its post-main success paragraph. The final cherry-pick adds #511's closure record, not another implementation change.
+
+The #511 changes are off-render preparation/resource-accounting changes: conservative runtime bank-slot reservation enters graph estimates and caps, while `bank_chain` explicitly prepares its existing slot population at requested capacity. They do not modify host admission, command queues/acks, drain order, the #514 pending flag, physical clear instrument or failure seam. Their graph-report effects are independent of the host shell charge. The inherited browser expectation changes are exactly the three already qualified +204 graph rows (session-plus-plan 29294 → 29498, incremental 29294 → 29498, metadata 3455 → 3659); no #514 bridge-row repin has occurred.
+
+The current inherited worklet pin is `eb573b1e5fa083eb9d12f90a21de99536310d5c8379d5d2c671370a1dbfb32c4`, the #511 artifact identity, not evidence about the module that will be built from this integrated host change. The accepted pre-integration native +8-byte host observation remains historical native evidence. It does not establish a Wasm padding delta or freeze post-integration totals that now include #511 owners. Keep graph reservation and host-shell effects separately attributable.
+
+## Smallest existing delivery route
+
+1. Freeze the integrated source identity and retain contemporaneous commands, relevant environment, stdout/stderr and exit status. Run the already frozen proportional host/static checks and existing immutable workspace/supported-target/native sequence: locked workspace tests; scalar Wasm checks for target-smoke, protocol, host-web and builtins-compiler; SIMD target-smoke/protocol checks; release native C API build and its existing ABI check. Use issue-specific output/target paths rather than another worktree's captures. The ordinary worklet builder below supplies the real release SIMD host build. Confirm the existing `native_command_timeline_digest_pins_the_wasm_parity` actually executes and passes in the integrated host/workspace evidence; preserve its native/wasm digest expectations. No fresh digest-generation mode is needed.
+2. Invoke unchanged `bash scripts/build-web-audioworklet.sh EMPTY_OUTPUT_DIRECTORY` normally, with the inherited pin and no REPIN bypass. The script requires an existing empty nonsymlink output directory and refuses overwrite. If it reports a digest mismatch, preserve its exact expected/observed values and terminal failure for a separate bounded artifact ruling. This review authorizes no guessed digest, numeric repin, alternate build recipe or publication of unchecked module bytes.
+3. Once an ordinary verified builder succeeds, use that identified published artifact directory for existing consumers: `bash scripts/check-web-audioworklet.sh ARTIFACTS`; `python3 -B scripts/check-browser-expected-resources.py --artifacts ARTIFACTS`; `bash scripts/test-web-audioworklet.sh`; then the pinned qualification npm install and all-three-browser `npm run qualify -- --artifacts ARTIFACTS --browser all --record-matrix --candidate-commit ACCEPTED_SOURCE --self-test-mutations`, followed by `npm run matrix -- --check`. This is the existing delivery path: static shipped render closure allocation/deallocation/drop and trap checks, their hermetic controls, resource/native-row and PCM/direct-oracle checks, and current browser qualification. It does not require a new harness, full historical preflight, benchmark, listening campaign or target matrix.
+4. If any ordinary consumer exposes an actual numerical discrepancy, preserve its raw failure and the complete observed oracle/resource values, module identity and expected-document source. Request a separate ruling deriving the exact affected rows from this integrated target and existing ownership formulas. Preserve PCM and all unrelated rows. The native +8 observation supplies no speculative Wasm bridge delta. Likewise, #511's earlier +204 graph ruling cannot authorize additional graph changes. After a bounded correction, rerun the affected existing gates with honest source attribution; do not silently repin until green.
+
+Keep tracked sources immutable while any qualification job using them is active; collect terminal status before pin/spec/test edits or browser-generated record writes. Generated candidate/module matrix records belong to their normal final checkpoint, once the actual consumers have passed. Reuse a qualified artifact for remaining consumers when its inputs and bytes remain unchanged. Retain prior actual mutation/layout captures: the host code, instrument and initial idle assertion are unchanged, so integration does not justify repeating those local mechanisms merely for ceremony. New integration failures must be assessed on their evidence.
+
+## Remaining acceptance boundary
+
+The supplied #511 delivery record states PR #515 merged after required run `34023823998` succeeded, and explicitly leaves post-main run `34024175768` running. This read-only review does not convert that pending run into success or independently certify live GitHub state. Root retains CI tracking and all Git/GitHub synchronization.
+
+#514 remains open until terminal integrated evidence, final actual-PR review, required CI and normal delivery synchronization. This PASS permits executing the established qualification route; it is not a final artifact/PR/delivery PASS or a blanket permission to change expectations.
+
+No builds, tests, benchmarks/timing, source edits, Git mutations or GitHub operations were performed. Only read-only source/history inspection and hash comparisons were used; the sole output written is this requested `/tmp` report.
