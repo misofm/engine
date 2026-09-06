@@ -1152,6 +1152,63 @@ pub struct BankSlot {
     pub active_lanes: Box<[bool]>,
 }
 
+/// The render-owned form of a slot. The public bool slice is consumed at bind time, after its
+/// complete shape has been validated, and its immutable lane activity is packed into one byte.
+struct PreparedSlot {
+    stage: Box<dyn BankStage>,
+    active_lanes: u8,
+}
+
+const _: () = assert!(
+    core::mem::size_of::<PreparedSlot>() <= core::mem::size_of::<BankSlot>(),
+    "prepared slot must not exceed the public slot layout"
+);
+
+impl PreparedSlot {
+    #[inline(always)]
+    fn has_active_lanes(&self) -> bool {
+        #[cfg(test)]
+        TEST_PREPARED_ACTIVITY_QUERIES.with(|count| count.set(count.get() + 1));
+        self.active_lanes != 0
+    }
+
+    #[cfg(test)]
+    #[allow(dead_code)]
+    fn has_active_lanes_scan(&self) -> bool {
+        let mut any = false;
+        for lane in 0..u8::BITS {
+            TEST_PREPARED_ACTIVITY_LANE_INSPECTIONS.with(|count| count.set(count.get() + 1));
+            any |= self.active_lanes & (1u8 << lane) != 0;
+        }
+        any
+    }
+
+    #[inline(always)]
+    fn lane_active(&self, lane: usize) -> bool {
+        self.active_lanes & (1u8 << lane) != 0
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_PREPARED_ACTIVITY_QUERIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static TEST_PREPARED_ACTIVITY_LANE_INSPECTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_prepared_activity_observation() {
+    TEST_PREPARED_ACTIVITY_QUERIES.with(|count| count.set(0));
+    TEST_PREPARED_ACTIVITY_LANE_INSPECTIONS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn prepared_activity_observation() -> (usize, usize) {
+    (
+        TEST_PREPARED_ACTIVITY_QUERIES.with(std::cell::Cell::get),
+        TEST_PREPARED_ACTIVITY_LANE_INSPECTIONS.with(std::cell::Cell::get),
+    )
+}
+
 /// The staged planar tiles for one ordered folded cohort.
 pub struct FoldCohort<'a> {
     lane_ids: &'a [usize],
@@ -1406,7 +1463,7 @@ pub struct BankChain {
     scratch: AoSoaScratch,
     lanes: usize,
     active: Box<[bool]>,
-    slots: Box<[BankSlot]>,
+    slots: Box<[PreparedSlot]>,
     transposes: u64,
     /// Every lane of this chain is active, so the whole bank may transpose in `W`-frame tiles.
     /// Decided once in [`BankChain::new`]; a partial bank never takes the tiled path.
@@ -1513,11 +1570,23 @@ impl BankChain {
         let full_bank = active.iter().all(|lane| *lane);
         let staging = if full_bank { scratch.left.len() } else { 0 };
         let collapse_prefix = Self::collapse_prefix_of(&slots, &active);
+        let mut prepared_slots = Vec::with_capacity(slots.len());
+        for slot in slots {
+            let active_lanes = slot
+                .active_lanes
+                .iter()
+                .enumerate()
+                .fold(0u8, |mask, (lane, active)| mask | ((*active as u8) << lane));
+            prepared_slots.push(PreparedSlot {
+                stage: slot.stage,
+                active_lanes,
+            });
+        }
         Ok(Self {
             scratch,
             lanes,
             active,
-            slots: slots.into_boxed_slice(),
+            slots: prepared_slots.into_boxed_slice(),
             transposes: 0,
             full_bank,
             staging_left: vec![0.0; staging].into_boxed_slice(),
@@ -1652,7 +1721,7 @@ impl BankChain {
         for slot in &self.slots {
             // A slot that is an identity on this lane renders nothing for it, so it has nothing
             // to say about whether the lane's two channels agree.
-            if slot.active_lanes.get(lane).copied().unwrap_or(false) {
+            if slot.lane_active(lane) {
                 witness = witness.and(slot.stage.lane_symmetry(lane));
             }
         }
@@ -1782,7 +1851,7 @@ impl BankChain {
             // The same identity-slot guard `process` has always taken. A slot that is an identity
             // on every lane renders nothing, and draining its queues would consume records for a
             // block it does not run.
-            if slot.active_lanes.iter().any(|lane| *lane) {
+            if slot.has_active_lanes() {
                 slot.stage.begin_block(first_sample)?;
             }
         }
@@ -1901,7 +1970,7 @@ impl BankChain {
             self.slots.len()
         };
         for slot in &mut self.slots[..prefix] {
-            if slot.active_lanes.iter().any(|lane| *lane) {
+            if slot.has_active_lanes() {
                 let block = BankBlock {
                     left: &mut self.scratch.left[..len],
                     right: &mut self.scratch.right[..len],
@@ -1926,7 +1995,7 @@ impl BankChain {
             let AoSoaScratch { left, right, .. } = &mut self.scratch;
             right[..len].copy_from_slice(&left[..len]);
             for slot in &mut self.slots[self.collapse_prefix..] {
-                if slot.active_lanes.iter().any(|lane| *lane) {
+                if slot.has_active_lanes() {
                     slot.stage.process(BankBlock {
                         left: &mut self.scratch.left[..len],
                         right: &mut self.scratch.right[..len],
@@ -2489,6 +2558,20 @@ mod tests {
         }
     }
 
+    static PREPARED_DROPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    struct DropWitness;
+    impl Drop for DropWitness {
+        fn drop(&mut self) {
+            PREPARED_DROPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    impl BankStage for DropWitness {
+        fn process(&mut self, _block: BankBlock<'_>) -> Result<(), RenderError> {
+            Ok(())
+        }
+    }
+
     struct Planes {
         left: Vec<Vec<f32>>,
         right: Vec<Vec<f32>>,
@@ -2662,6 +2745,293 @@ mod tests {
             stage,
             active_lanes: active_lanes.into_boxed_slice(),
         }
+    }
+
+    struct PreparedTraceStage {
+        begin: std::sync::Arc<std::sync::atomic::AtomicU64>,
+        dual: std::sync::Arc<std::sync::atomic::AtomicU64>,
+        mono: std::sync::Arc<std::sync::atomic::AtomicU64>,
+        fail: bool,
+        seam: SeamSide,
+        mono_capable: bool,
+    }
+
+    impl BankStage for PreparedTraceStage {
+        fn process(&mut self, _block: BankBlock<'_>) -> Result<(), RenderError> {
+            self.dual.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if self.fail {
+                Err(RenderError::InvalidEnvelope)
+            } else {
+                Ok(())
+            }
+        }
+
+        fn begin_block(&mut self, _first_sample: u64) -> Result<(), RenderError> {
+            self.begin
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(())
+        }
+
+        fn lane_symmetry(&self, _lane: usize) -> ChannelSymmetryWitness {
+            ChannelSymmetryWitness::SYMMETRIC
+        }
+
+        fn seam_side(&self) -> SeamSide {
+            self.seam
+        }
+
+        fn supports_mono_collapse(&self) -> bool {
+            self.mono_capable
+        }
+
+        fn process_mono(&mut self, _block: BankBlock<'_>) -> Result<(), RenderError> {
+            self.mono.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(())
+        }
+
+        fn channels_agree(&self) -> bool {
+            true
+        }
+    }
+
+    fn trace_stage(
+        begin: &std::sync::Arc<std::sync::atomic::AtomicU64>,
+        dual: &std::sync::Arc<std::sync::atomic::AtomicU64>,
+        mono: &std::sync::Arc<std::sync::atomic::AtomicU64>,
+        fail: bool,
+        seam: SeamSide,
+        mono_capable: bool,
+    ) -> Box<dyn BankStage> {
+        Box::new(PreparedTraceStage {
+            begin: begin.clone(),
+            dual: dual.clone(),
+            mono: mono.clone(),
+            fail,
+            seam,
+            mono_capable,
+        })
+    }
+
+    #[test]
+    fn prepared_slot_activity_preserves_shape_bits_and_ownership() {
+        assert!(core::mem::size_of::<PreparedSlot>() <= core::mem::size_of::<BankSlot>());
+        for (width, lanes) in [(BankWidth::Four, 4_usize), (BankWidth::Eight, 8_usize)] {
+            let scratch = || AoSoaScratch::new(width, 4).expect("scratch");
+            assert_eq!(
+                BankChain::new(
+                    scratch(),
+                    vec![true; lanes].into_boxed_slice(),
+                    vec![slot(vec![true; lanes - 1], Box::new(PassThrough))],
+                )
+                .err(),
+                Some(RackError::Shape)
+            );
+            assert_eq!(
+                BankChain::new(
+                    scratch(),
+                    (0..lanes)
+                        .map(|lane| lane != lanes - 1)
+                        .collect::<Vec<_>>()
+                        .into_boxed_slice(),
+                    vec![slot(
+                        (0..lanes).map(|lane| lane == lanes - 1).collect(),
+                        Box::new(PassThrough),
+                    )],
+                )
+                .err(),
+                Some(RackError::Shape),
+                "shape validation precedes packed conversion"
+            );
+
+            let patterns = [
+                vec![false; lanes],
+                (0..lanes).map(|lane| lane == 0).collect(),
+                (0..lanes).map(|lane| lane % 2 == 0).collect(),
+                vec![true; lanes],
+            ];
+            let mut input = Vec::with_capacity(9);
+            for pattern in patterns.iter().cloned() {
+                let stage: Box<dyn BankStage> = if pattern.iter().all(|active| !active) {
+                    Box::new(DropWitness)
+                } else {
+                    Box::new(PassThrough)
+                };
+                input.push(slot(pattern, stage));
+            }
+            while input.len() < 9 {
+                input.push(slot(vec![false; lanes], Box::new(PassThrough)));
+            }
+            // A caller may finish preparing a public slot before transferring ownership. The
+            // packed value must reflect that last caller mutation exactly.
+            input[1].active_lanes[0] = false;
+            let expected: Vec<u8> = input
+                .iter()
+                .map(|slot| {
+                    slot.active_lanes
+                        .iter()
+                        .enumerate()
+                        .fold(0, |mask, (lane, active)| mask | ((*active as u8) << lane))
+                })
+                .collect();
+            let mut chain = BankChain::new(scratch(), vec![true; lanes].into_boxed_slice(), input)
+                .expect("valid prepared slots");
+            assert_eq!(
+                chain
+                    .slots
+                    .iter()
+                    .map(|slot| slot.active_lanes)
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            assert_eq!(
+                chain.slots.len(),
+                9,
+                "slot count is independent of the lane mask width"
+            );
+            assert_eq!(chain.lane_symmetry(lanes), ChannelSymmetryWitness::DECLINED);
+            assert_eq!(chain.lane_symmetry(0), ChannelSymmetryWitness::DECLINED);
+            chain.slots[0].stage.disarm_observations();
+            let before_drop = PREPARED_DROPS.load(std::sync::atomic::Ordering::Relaxed);
+            drop(chain);
+            assert_eq!(
+                PREPARED_DROPS.load(std::sync::atomic::Ordering::Relaxed),
+                before_drop + 1,
+                "an inactive stage remains owned until chain retirement"
+            );
+        }
+    }
+
+    #[test]
+    fn prepared_slot_activity_preserves_dispatch_trace_and_errors() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let begin = std::sync::Arc::new(AtomicU64::new(0));
+        let dual = std::sync::Arc::new(AtomicU64::new(0));
+        let mono = std::sync::Arc::new(AtomicU64::new(0));
+        let mut chain = BankChain::new(
+            AoSoaScratch::new(BankWidth::Four, 8).expect("scratch"),
+            vec![true; 4].into_boxed_slice(),
+            vec![
+                slot(
+                    vec![false; 4],
+                    trace_stage(&begin, &dual, &mono, false, SeamSide::UpstreamOfSeam, false),
+                ),
+                slot(
+                    vec![true; 4],
+                    trace_stage(&begin, &dual, &mono, false, SeamSide::UpstreamOfSeam, false),
+                ),
+                slot(
+                    vec![false; 4],
+                    trace_stage(&begin, &dual, &mono, false, SeamSide::UpstreamOfSeam, false),
+                ),
+                slot(
+                    vec![true; 4],
+                    trace_stage(&begin, &dual, &mono, true, SeamSide::UpstreamOfSeam, false),
+                ),
+                slot(
+                    vec![true; 4],
+                    trace_stage(&begin, &dual, &mono, false, SeamSide::UpstreamOfSeam, false),
+                ),
+            ],
+        )
+        .expect("chain");
+        let mut planes = Planes {
+            left: (0..4).map(|_| vec![1.0; 8]).collect(),
+            right: (0..4).map(|_| vec![2.0; 8]).collect(),
+        };
+        assert_eq!(
+            chain.run(&mut planes, 8, 64),
+            Err(RenderError::InvalidEnvelope)
+        );
+        assert_eq!(
+            begin.load(Ordering::Relaxed),
+            3,
+            "only nonempty slots drain"
+        );
+        assert_eq!(
+            dual.load(Ordering::Relaxed),
+            2,
+            "failure stops at the same slot"
+        );
+        assert_eq!(mono.load(Ordering::Relaxed), 0);
+
+        let mono_begin = std::sync::Arc::new(AtomicU64::new(0));
+        let mono_dual = std::sync::Arc::new(AtomicU64::new(0));
+        let mono_mono = std::sync::Arc::new(AtomicU64::new(0));
+        let mut collapsed = BankChain::new(
+            AoSoaScratch::new(BankWidth::Four, 8).expect("scratch"),
+            vec![true; 4].into_boxed_slice(),
+            vec![
+                slot(
+                    vec![true; 4],
+                    trace_stage(
+                        &mono_begin,
+                        &mono_dual,
+                        &mono_mono,
+                        false,
+                        SeamSide::UpstreamOfSeam,
+                        true,
+                    ),
+                ),
+                slot(
+                    vec![true; 4],
+                    trace_stage(
+                        &mono_begin,
+                        &mono_dual,
+                        &mono_mono,
+                        false,
+                        SeamSide::SeamSide,
+                        false,
+                    ),
+                ),
+            ],
+        )
+        .expect("collapse-eligible chain");
+        collapsed.arm_mono_collapse(true);
+        let mut mono_planes = Planes {
+            left: (0..4).map(|_| vec![1.0; 8]).collect(),
+            right: (0..4).map(|_| vec![1.0; 8]).collect(),
+        };
+        collapsed
+            .run(&mut mono_planes, 8, 64)
+            .expect("collapsed run");
+        assert_eq!(mono_begin.load(Ordering::Relaxed), 2);
+        assert_eq!(mono_mono.load(Ordering::Relaxed), 1);
+        assert_eq!(mono_dual.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn prepared_slot_dispatch_uses_constant_activity_checks() {
+        reset_prepared_activity_observation();
+        let begin = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let dual = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let mono = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let mut chain = BankChain::new(
+            AoSoaScratch::new(BankWidth::Four, 4).expect("scratch"),
+            vec![true; 4].into_boxed_slice(),
+            vec![
+                slot(
+                    vec![true; 4],
+                    trace_stage(&begin, &dual, &mono, false, SeamSide::UpstreamOfSeam, true),
+                ),
+                slot(
+                    vec![true; 4],
+                    trace_stage(&begin, &dual, &mono, false, SeamSide::SeamSide, false),
+                ),
+            ],
+        )
+        .expect("chain");
+        let mut planes = Planes {
+            left: (0..4).map(|_| vec![0.0; 4]).collect(),
+            right: (0..4).map(|_| vec![0.0; 4]).collect(),
+        };
+        chain.run(&mut planes, 4, 0).expect("ordinary run");
+        chain.run(&mut planes, 4, 4).expect("collapsed run");
+        let (queries, lane_inspections) = prepared_activity_observation();
+        assert!(queries >= 6, "all three dispatch sites were reached");
+        assert_eq!(
+            lane_inspections, 0,
+            "prepared queries do not scan lane masks"
+        );
     }
 
     /// Every bit pattern a 32-bit word can carry that a permutation must not touch: quiet and

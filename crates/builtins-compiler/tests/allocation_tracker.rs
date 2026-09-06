@@ -533,6 +533,10 @@ fn actual_runtime_bank_slot_owners_fit_retained_largest_and_conversion_reservati
     const WIDTH: usize = 8;
     let stage_layout = Layout::array::<Box<dyn rack::BankStage>>(SLOT_COUNT).expect("stage layout");
     let slot_layout = Layout::array::<rack::BankSlot>(SLOT_COUNT).expect("slot layout");
+    // The private prepared slot mirrors these fields in the same order; keep this test-local
+    // layout fact beside the ownership oracle rather than exposing a production diagnostic.
+    let prepared_slot_layout =
+        Layout::array::<(Box<dyn rack::BankStage>, u8)>(SLOT_COUNT).expect("prepared slot layout");
     let mask_layout = Layout::array::<bool>(WIDTH).expect("mask layout");
     let scratch_layout = Layout::array::<f32>(WIDTH).expect("one scratch plane");
     let count = |layouts: &[builtins_compiler::BuiltinRetainedLayout], expected: Layout| {
@@ -550,7 +554,8 @@ fn actual_runtime_bank_slot_owners_fit_retained_largest_and_conversion_reservati
     reset_byte_counters();
     LIVE_ALLOCS.set(0);
     LIVE_FREES.set(0);
-    LIVE_BYTES.set(stage_layout.size() as u64);
+    // Stage storage and the caller-owned chain mask predate the armed conversion interval.
+    LIVE_BYTES.set((stage_layout.size() + mask_layout.size()) as u64);
     let observation = test_only_begin_phase_two_allocation_observation();
     let ownership = armed(|| graph::test_only_bank_chain_ownership(inputs));
     drop(observation);
@@ -564,31 +569,34 @@ fn actual_runtime_bank_slot_owners_fit_retained_largest_and_conversion_reservati
     assert_eq!(ownership.stage_pointer_bytes, stage_layout.size());
     assert_eq!(ownership.slot_bytes, slot_layout.size());
     assert_eq!(ownership.mask_bytes, mask_layout.size());
-    assert_eq!(snapshot.allocation_count, SLOT_COUNT as u64 + 1);
-    assert_eq!(snapshot.deallocation_count, 1);
+    assert_eq!(snapshot.allocation_count, SLOT_COUNT as u64 + 2);
+    assert_eq!(snapshot.deallocation_count, SLOT_COUNT as u64 + 2);
     assert_eq!(count(&snapshot.layouts, slot_layout), 1);
+    assert_eq!(count(&snapshot.layouts, prepared_slot_layout), 1);
     assert_eq!(count(&snapshot.layouts, mask_layout), SLOT_COUNT as u64);
     assert_eq!(count(&snapshot.deallocation_layouts, stage_layout), 1);
     assert_eq!(LARGEST_REQUESTED_BYTES.get(), slot_layout.size() as u64);
-    assert_eq!(LIVE_ALLOCS.get(), SLOT_COUNT as u64 + 1);
-    assert_eq!(LIVE_FREES.get(), 1);
+    assert_eq!(LIVE_ALLOCS.get(), SLOT_COUNT as u64 + 2);
+    assert_eq!(LIVE_FREES.get(), SLOT_COUNT as u64 + 2);
 
     let n = SLOT_COUNT as u64;
     let f = core::mem::size_of::<Box<dyn rack::BankStage>>() as u64;
     let b = core::mem::size_of::<rack::BankSlot>() as u64;
+    let p = core::mem::size_of::<(Box<dyn rack::BankStage>, u8)>() as u64;
     let w = WIDTH as u64 * core::mem::size_of::<bool>() as u64;
     assert_eq!(core::mem::size_of::<bool>(), 1);
+    assert!(p <= b, "prepared slot layout fits the public slot layout");
     let c = n * (f + 3 * b + 3 * w);
     let l = (n * f).max(n * b).max(w);
-    let retained = n * b + (n + 1) * w;
-    let conversion_coexistence = n * f + n * b + (n + 1) * w;
+    let retained = n * p + w;
+    let conversion_coexistence = n * f + n * b + 2 * n * p + 2 * w;
     assert!(retained <= n * (b + 2 * w));
     assert!(conversion_coexistence <= c);
-    for request in [n * f, n * b, w] {
+    for request in [n * f, n * b, n * p, w] {
         assert!(request <= l);
     }
     assert_eq!(LARGEST_REQUESTED_BYTES.get(), l);
-    assert_eq!(LIVE_BYTES.get(), n * b + n * w);
+    assert_eq!(LIVE_BYTES.get(), retained);
 
     let release_bytes = retained + 2 * scratch_layout.size() as u64;
     test_only_reset_phase_two_allocation_tracker();
@@ -603,16 +611,16 @@ fn actual_runtime_bank_slot_owners_fit_retained_largest_and_conversion_reservati
     assert!(!release.overflowed);
     assert!(!BYTE_COUNTER_FAILED.get());
     assert_eq!(release.allocation_count, 0);
-    assert_eq!(release.deallocation_count, SLOT_COUNT as u64 + 4);
-    assert_eq!(count(&release.deallocation_layouts, slot_layout), 1);
+    assert_eq!(release.deallocation_count, 4);
     assert_eq!(
-        count(&release.deallocation_layouts, mask_layout),
-        SLOT_COUNT as u64 + 1
+        count(&release.deallocation_layouts, prepared_slot_layout),
+        1
     );
+    assert_eq!(count(&release.deallocation_layouts, mask_layout), 1);
     assert_eq!(count(&release.deallocation_layouts, scratch_layout), 2);
     assert_eq!(LIVE_BYTES.get(), 0, "owned slot chain releases off render");
     assert_eq!(LIVE_ALLOCS.get(), 0);
-    assert_eq!(LIVE_FREES.get(), SLOT_COUNT as u64 + 4);
+    assert_eq!(LIVE_FREES.get(), 4);
 
     // This direct-attachment fixture is separate from compiler admission. It proves the actual
     // runtime R/S bounds for both delivery variants against the same calculated allowance.
