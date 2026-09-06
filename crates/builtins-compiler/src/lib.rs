@@ -686,6 +686,7 @@ thread_local! {
     static FADER_MATRIX_OUTPUT_WITNESS: std::cell::Cell<[u32; 2]> = const { std::cell::Cell::new([0; 2]) };
     static SCALAR_FADER_STATE_WITNESS: std::cell::Cell<[u32; 14]> = const { std::cell::Cell::new([0; 14]) };
     static SCALAR_MATRIX_STATE_WITNESS: std::cell::Cell<[u32; 15]> = const { std::cell::Cell::new([0; 15]) };
+    static SCALAR_OWNER_DROPS: std::cell::Cell<[u64; 3]> = const { std::cell::Cell::new([0; 3]) };
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -713,6 +714,13 @@ pub fn test_only_reset_fader_matrix_witness() {
     FADER_MATRIX_OUTPUT_WITNESS.with(|value| value.set([0; 2]));
     SCALAR_FADER_STATE_WITNESS.with(|value| value.set([0; 14]));
     SCALAR_MATRIX_STATE_WITNESS.with(|value| value.set([0; 15]));
+    SCALAR_OWNER_DROPS.with(|value| value.set([0; 3]));
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn test_only_scalar_owner_drops() -> [u64; 3] {
+    SCALAR_OWNER_DROPS.with(std::cell::Cell::get)
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -3560,6 +3568,16 @@ struct ConsoleMatrixProcessor {
     control: Consumer<TrackControlRecord>,
     control_delivery: BuiltinControlDelivery,
 }
+impl Drop for ConsoleMatrixProcessor {
+    fn drop(&mut self) {
+        #[cfg(any(test, feature = "test-support"))]
+        SCALAR_OWNER_DROPS.with(|value| {
+            let mut drops = value.get();
+            drops[1] = drops[1].saturating_add(1);
+            value.set(drops);
+        });
+    }
+}
 impl GraphRuntimeProcessor for ConsoleMatrixProcessor {
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
         if let Err(error) = self.drain_controls() {
@@ -3606,6 +3624,16 @@ struct ConsoleFaderProcessor {
     fader: FaderMuteRampBuiltins,
     control: Consumer<TrackFaderRecord>,
     control_delivery: BuiltinControlDelivery,
+}
+impl Drop for ConsoleFaderProcessor {
+    fn drop(&mut self) {
+        #[cfg(any(test, feature = "test-support"))]
+        SCALAR_OWNER_DROPS.with(|value| {
+            let mut drops = value.get();
+            drops[0] = drops[0].saturating_add(1);
+            value.set(drops);
+        });
+    }
 }
 impl GraphRuntimeProcessor for ConsoleFaderProcessor {
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
@@ -3664,6 +3692,16 @@ impl ConsoleFaderProcessor {
 struct ScalarPairProcessor {
     fader: Box<ConsoleFaderProcessor>,
     matrix: Box<ConsoleMatrixProcessor>,
+}
+impl Drop for ScalarPairProcessor {
+    fn drop(&mut self) {
+        #[cfg(any(test, feature = "test-support"))]
+        SCALAR_OWNER_DROPS.with(|value| {
+            let mut drops = value.get();
+            drops[2] = drops[2].saturating_add(1);
+            value.set(drops);
+        });
+    }
 }
 
 impl GraphRuntimeProcessor for ScalarPairProcessor {
@@ -5289,10 +5327,11 @@ mod tests {
     pub fn test_only_observed_scalar_pair_binding() -> (
         PreparedBuiltinsGraphBound,
         graph::GraphResourceEstimate,
+        graph::GraphScalarOwnerResourceEstimate,
         TestPhaseTwoAllocationSnapshot,
         TestPhaseTwoAllocationSnapshot,
     ) {
-        let (bound, estimate, owners, binding) = prepared_pair_graph_variant_observed(
+        let (bound, estimate, scalar_resource, owners, binding) = prepared_pair_graph_variant_observed(
             false,
             false,
             false,
@@ -5305,7 +5344,7 @@ mod tests {
             None,
             true,
         );
-        (bound, estimate, owners.unwrap(), binding.unwrap())
+        (bound, estimate, scalar_resource, owners.unwrap(), binding.unwrap())
     }
 
     fn prepared_pair_graph_fixture(
@@ -5376,6 +5415,7 @@ mod tests {
     ) -> (
         PreparedBuiltinsGraphBound,
         graph::GraphResourceEstimate,
+        graph::GraphScalarOwnerResourceEstimate,
         Option<TestPhaseTwoAllocationSnapshot>,
         Option<TestPhaseTwoAllocationSnapshot>,
     ) {
@@ -5560,7 +5600,7 @@ mod tests {
             .unwrap_or_else(|failure| panic!("fixture bind: {}", failure.code));
         drop(_binding_observation);
         let binding_snapshot = observe_binding.then(test_only_phase_two_allocation_snapshot);
-        (bound, saved_estimate, owner_snapshot, binding_snapshot)
+        (bound, saved_estimate, scalar_resource, owner_snapshot, binding_snapshot)
     }
 
     fn render_bound(bound: &mut PreparedBuiltinsGraphBound, sample: u64) -> Vec<u32> {

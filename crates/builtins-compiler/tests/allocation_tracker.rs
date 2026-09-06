@@ -18,7 +18,7 @@ use builtins_compiler::{
     test_only_observed_scalar_pair_binding, test_only_phase_two_allocation_snapshot,
     test_only_record_phase_two_allocation, test_only_record_phase_two_deallocation,
     test_only_reset_fader_matrix_witness, test_only_reset_phase_two_allocation_tracker,
-    test_only_scalar_owner_layouts,
+    test_only_scalar_owner_drops, test_only_scalar_owner_layouts,
 };
 use engine::realtime::{PlanarBufferMut, RenderIo, RenderTime};
 use session::{CompileCaps, RouteSource, SendTap, StableId, compile_session, parse_session_json};
@@ -354,7 +354,8 @@ fn actual_scalar_prepare_and_bind_retain_the_charged_owner_layouts() {
     let owner_allowance = 2 * fader.size_bytes + 2 * matrix.size_bytes + outer.size_bytes;
 
     test_only_reset_phase_two_allocation_tracker();
-    let (bound, admitted, preparation, binding) = armed(test_only_observed_scalar_pair_binding);
+    let (bound, admitted, scalar_allowance, preparation, binding) =
+        armed(test_only_observed_scalar_pair_binding);
     assert!(!preparation.overflowed);
     let retained_owner_bytes: u64 = [fader, matrix]
         .iter()
@@ -418,16 +419,19 @@ fn actual_scalar_prepare_and_bind_retain_the_charged_owner_layouts() {
     assert_eq!(retained_owner_bytes + outer.size_bytes, owner_allowance);
     assert!(binding.largest_allocation_bytes >= outer.size_bytes);
     assert!(outer.size_bytes <= admitted.largest_allocation_bytes);
-    assert!(owner_allowance <= admitted.session_plus_plan_bytes);
+    assert!(owner_allowance <= scalar_allowance.total_bytes);
+    assert!(scalar_allowance.total_bytes <= admitted.session_plus_plan_bytes);
 
     LIVE_ALLOCS.set(0);
     LIVE_FREES.set(0);
+    test_only_reset_fader_matrix_witness();
     armed(|| drop(bound));
     assert_eq!(LIVE_ALLOCS.get(), 0, "off-render release does not allocate");
     assert!(
         LIVE_FREES.get() > 0,
         "bound owners release only during off-render drop"
     );
+    assert_eq!(test_only_scalar_owner_drops(), [2, 2, 1]);
 }
 
 fn session(track_count: u32) -> session::CompiledSession {
