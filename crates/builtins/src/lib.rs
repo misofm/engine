@@ -20,6 +20,8 @@
 #![allow(missing_docs)]
 
 use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
+#[cfg(test)]
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use engine::{
     SampleRateHz, is_extended_compatibility_sample_rate,
@@ -823,6 +825,9 @@ fn lane_read<L: Lane>(value: L) -> [f32; MAX_BANK_LANES] {
 /// Widest bank this crate builds. `BankWidth` is four or eight (D4).
 const MAX_BANK_LANES: usize = 8;
 
+#[cfg(test)]
+static CHANNEL_SYMMETRY_PREDICATE_CALLS: AtomicUsize = AtomicUsize::new(0);
+
 /// The damping of every builtin section: Butterworth, `k = 1 / Q = sqrt(2)`, rounded once.
 const BUTTERWORTH_K: f32 = core::f64::consts::SQRT_2 as f32;
 
@@ -1030,9 +1035,8 @@ impl<L: Lane> InputStage<L> {
 
     /// Retakes every lane's channel-symmetry comparison into [`InputStage::symmetry`].
     ///
-    /// Called from each of the five writers of a compared word, never from the dispatch: this is
-    /// the walk the cache exists to keep off the per-block path, so it runs on a retarget, on a
-    /// ramping block, and on a reset, and on no other block at all.
+    /// Called from preparation, both ramping process arms, and reset. The live retarget writer
+    /// updates only its addressed lane below; neither path runs from dispatch.
     fn refresh_channel_symmetry(&mut self) {
         let mut symmetry = 0_u8;
         for lane in 0..MAX_BANK_LANES {
@@ -1041,6 +1045,16 @@ impl<L: Lane> InputStage<L> {
             }
         }
         self.symmetry = symmetry;
+    }
+
+    /// Updates only the addressed lane after a live trim/polarity retarget.
+    fn refresh_channel_symmetry_lane(&mut self, lane: usize) {
+        let bit = 1_u8 << lane;
+        if self.compute_lane_channel_symmetry(lane) {
+            self.symmetry |= bit;
+        } else {
+            self.symmetry &= !bit;
+        }
     }
 
     /// Largest ramp countdown that is exact in `f32`.
@@ -1092,7 +1106,7 @@ impl<L: Lane> InputStage<L> {
                 self.ramping = true;
             }
         }
-        self.refresh_channel_symmetry();
+        self.refresh_channel_symmetry_lane(lane);
     }
 
     /// Retargets one lane's trim in decibels, keeping its polarity.
@@ -1634,6 +1648,8 @@ impl<L: Lane> InputStage<L> {
     /// Taken only by [`InputStage::refresh_channel_symmetry`] and by the reader's assertion:
     /// it is the definition, not the per-block path.
     fn compute_lane_channel_symmetry(&self, lane: usize) -> bool {
+        #[cfg(test)]
+        CHANNEL_SYMMETRY_PREDICATE_CALLS.fetch_add(1, Ordering::Relaxed);
         if lane >= self.members || lane >= L::WIDTH {
             return false;
         }
@@ -4102,8 +4118,10 @@ pub mod test_support {
 mod tests {
     use super::{
         BuiltinChain, BuiltinLaneSelector, BuiltinParameters, BuiltinProcessReport,
-        BuiltinResetKind, ChannelParameters, DualMonoBlock, Matrix2x2, test_support,
+        BuiltinResetKind, CHANNEL_SYMMETRY_PREDICATE_CALLS, ChannelParameters, DualMonoBlock,
+        InputStage, Matrix2x2, Simd4, Simd8, prepare_sections, test_support,
     };
+    use core::sync::atomic::Ordering;
 
     fn process_reference(
         chain: &mut BuiltinChain,
@@ -4115,6 +4133,68 @@ mod tests {
         chain.process_fader_mute(DualMonoBlock::new(left, right, first_sample).unwrap());
         chain.process_matrix(DualMonoBlock::new(left, right, first_sample).unwrap());
         report
+    }
+
+    #[test]
+    fn lane_symmetry_retarget_updates_only_the_addressed_predicate() {
+        fn track(left_db: f32, right_db: f32) -> super::PreparedInputTrack {
+            let parameters = BuiltinParameters {
+                left: ChannelParameters {
+                    trim_db: left_db,
+                    ..ChannelParameters::default()
+                },
+                right: ChannelParameters {
+                    trim_db: right_db,
+                    ..ChannelParameters::default()
+                },
+                ..BuiltinParameters::default()
+            };
+            prepare_sections(48_000, parameters)
+                .unwrap()
+                .0
+                .stage
+                .lane_track(0)
+        }
+
+        let tracks = [
+            track(0.0, 0.0),
+            track(0.0, 3.0),
+            track(2.0, 2.0),
+            track(-4.0, 1.0),
+            track(5.0, 5.0),
+            track(7.0, -2.0),
+            track(-8.0, -8.0),
+            track(9.0, 4.0),
+        ];
+
+        macro_rules! check_width {
+            ($lane:ty, $members:expr) => {{
+                let mut stage = InputStage::<$lane>::new(&tracks[..$members]);
+                CHANNEL_SYMMETRY_PREDICATE_CALLS.store(0, Ordering::Relaxed);
+                let before = stage.symmetry;
+                stage.set_trim_signed(1, BuiltinLaneSelector::Right, |_| 1.0, 0);
+                assert_eq!(
+                    CHANNEL_SYMMETRY_PREDICATE_CALLS.load(Ordering::Relaxed),
+                    1,
+                    "one retarget evaluates one addressed lane"
+                );
+                assert_eq!(stage.symmetry & !(1 << 1), before & !(1 << 1));
+                assert_ne!(stage.symmetry & (1 << 1), 0);
+                assert_eq!(stage.symmetry & !((1 << $members) - 1), 0);
+
+                CHANNEL_SYMMETRY_PREDICATE_CALLS.store(0, Ordering::Relaxed);
+                stage.set_trim_signed(1, BuiltinLaneSelector::Right, |_| -1.0, 0);
+                assert_eq!(
+                    CHANNEL_SYMMETRY_PREDICATE_CALLS.load(Ordering::Relaxed),
+                    1,
+                    "the clear transition also evaluates one addressed lane"
+                );
+                assert_eq!(stage.symmetry & (1 << 1), 0);
+            }};
+        }
+
+        check_width!(Simd4, 3);
+        check_width!(Simd8, 5);
     }
 
     fn assert_pair(
