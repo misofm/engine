@@ -113,3 +113,12 @@ poll cadence work, benchmark framework, or effect-observation redesign.
 Dedicated Astra medium source review passed, conditional on final shipped artifact qualification. The bounded timing helper was separately reviewed after correcting its JSON serializer. Release preflight passed. The sole timing invocation at `11cb3c2e` then failed during warmup: its final source chunk omitted the end-of-region marker and was correctly rejected. No measured rounds or timing figures exist. Raw evidence is committed in `docs/evidence/metering-519-520/timing-failed.log` and `timing-failed.jsonl`. No retry was performed and no measured speedup is claimed.
 
 Per the repository's bounded benchmark-failure rule, the remaining timing requirement is explicitly transferred to [#522](https://github.com/misofm/engine/issues/522), whose stateless brief was written and reviewed by dedicated Astra medium. That tooling successor does not relax numerical, realtime, resource or work-avoidance gates for this feature.
+
+
+## Final shipped-artifact qualification
+
+Canonical Linux/amd64 Rust 1.97.1 build of candidate `a1aeefb830b2ac192274153539847765385ed7f1` (same executable source as `11cb3c2e`, reviewed pin adopted at `924e524e`) produces SHA-256 `671d615de9a74232c2af623592fc85eca68b8cd571fb5b7542ba648e621af4e3`. The ordinary fingerprint-enforcing builder passed. The unchanged static/object/callback/resource gates and hermetic worklet/mutation suite passed. Browser qualification passed Chromium 151.0.7922.34, Firefox 153.0 and WebKit 26.5, including mutation proofs; the committed results/matrix identifies this exact candidate and artifact.
+
+Focused source suites passed: 73 host-web tests (two explicitly ignored release timing tests), selective builtins tests covering all 15 nonempty subsets and zero forbidden peak-only operations, compiler 38 tests, host-core unit 8 tests and preparation 13 tests (one intended ignored). Formatting, generated matrix consistency and realtime policy passed. The earlier baseline-only native tangent ULP failure remains documented; DSP arithmetic is unchanged. No callback/resource gate was weakened.
+
+Timing remains unavailable: the single invocation failed during fixture warmup, and repair/measurement is explicitly assigned to #522. The supported performance result is avoided operations and empty scans, not a measured `µs/block` or end-to-end browser speedup. SDK/app rendering and presentation tuning remain downstream work.
