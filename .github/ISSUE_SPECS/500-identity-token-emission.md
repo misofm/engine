@@ -87,3 +87,7 @@ Approve an exact observed-pin checkpoint followed by the ordinary verified rebui
 This ruling grants no timing authority and does not resolve or waive the separately observed PR502 post-main allocation qualification failure. That regression must be handled under its bounded successor and required CI; no merger may rely on the historical premerge PASS to ignore the known failure. Final exact-head Astra PR review and required CI success remain delivery gates.
 
 Read-only source/log comparison; no source/Git/GitHub edits, builds, tests or timing performed.
+
+## Current artifact qualification complete; delivery held for #503
+
+Clean pinned candidate 02c74cc264d5d2ed98dda446ab1adb511f05de6e passes all seven existing consumer steps (builder, static, resource, hermetic, npm-ci, three-browser qualification with self-tests, matrix), each terminal exit 0. Published module independently hashes to bed7d77cbd55e91f38679d4ed1ea6d99684ad12d8a1a0f785049d788630f17ee. Generated matrix/results differ only in candidate and hash identity. Raw records and both historical mismatch invocations are retained in artifacts/issue500-integrated-delivery (33 payloads plus manifest); no numerical expectations changed. PR delivery remains held until the known compressor post-main allocation proof defect is resolved under #503.
