@@ -1,0 +1,4 @@
+   Compiling builtins v0.1.0 (/home/bl/misofm/engine-rt5-ramp-plan/crates/builtins)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.33s
+     Running unittests src/lib.rs (target/debug/deps/builtins-b28151c824699de5)
+error: test failed, to rerun pass `-p builtins --lib`

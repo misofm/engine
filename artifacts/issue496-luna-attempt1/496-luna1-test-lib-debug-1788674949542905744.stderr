@@ -1,0 +1,19 @@
+   Compiling typenum v1.20.1
+   Compiling bytemuck v1.25.2
+   Compiling math v0.1.0 (/home/bl/misofm/engine-rt5-ramp-plan/crates/math)
+   Compiling cfg-if v1.0.4
+   Compiling cpufeatures v0.3.0
+   Compiling engine v0.1.0 (/home/bl/misofm/engine-rt5-ramp-plan/crates/engine)
+   Compiling dsp-reference v0.1.0 (/home/bl/misofm/engine-rt5-ramp-plan/crates/dsp-reference)
+   Compiling safe_arch v1.2.0
+   Compiling wide v1.6.1
+   Compiling hybrid-array v0.4.14
+   Compiling block-buffer v0.12.1
+   Compiling crypto-common v0.2.2
+   Compiling digest v0.11.3
+   Compiling sha2 v0.11.0
+   Compiling lane v0.1.0 (/home/bl/misofm/engine-rt5-ramp-plan/crates/lane)
+   Compiling effect-contract v0.1.0 (/home/bl/misofm/engine-rt5-ramp-plan/crates/effect-contract)
+   Compiling builtins v0.1.0 (/home/bl/misofm/engine-rt5-ramp-plan/crates/builtins)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.19s
+     Running unittests src/lib.rs (target/debug/deps/builtins-b28151c824699de5)

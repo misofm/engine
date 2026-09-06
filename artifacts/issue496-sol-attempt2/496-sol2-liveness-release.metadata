@@ -1,0 +1,8 @@
+argv=cargo test --locked --release -p builtins --test input_liveness --test input_liveness_mono 
+cwd=/home/bl/misofm/engine-rt5-ramp-plan
+effective_PATH=/home/bl/.cargo/bin:/home/bl/.local/bin:/home/bl/.codex/packages/standalone/releases/0.153.2-x86_64-unknown-linux-musl/codex-path:/home/bl/.codex/tmp/arg0/codex-arg0CWD760:/home/bl/.local/bin:/home/bl/.opencode/bin:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.opencode/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin
+HEAD=5a4f4147af8d1c0263128cec0474881b783a6d77
+file_blob=52ffe66d04369d89a47ce240a9a620c1a5c7d5c3
+file_sha256=c21b54c7147b32601daf82d54d698beca68425019753bf134330ec37e5feb4a9
+exit=0
+stdout_stderr_sha256=484439092b8a933aaaae17c389ca9ef999de737d1c53799224868914d0d9a668

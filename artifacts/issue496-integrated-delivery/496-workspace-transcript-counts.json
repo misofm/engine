@@ -1,0 +1,7 @@
+{
+  "transcript_result_blocks": 277,
+  "passed": 1645,
+  "failed": 0,
+  "ignored": 24,
+  "note": "Transcript block totals include isolated child results; not a deduplicated unique test count."
+}

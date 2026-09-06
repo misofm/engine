@@ -1,0 +1,10 @@
+{
+  "input": "/home/bl/misofm/engine-rt5-ramp-plan/target/release/deps/builtins-57aeb53a7eeea7a5.ll",
+  "input_sha256": "4924198b1c9bd391fe4893258b07cbc493ee55c8d69872fefa1231cf461792f8",
+  "input_bytes": 4440537,
+  "input_mtime_ns": 1788674868542475685,
+  "selected_complete_function_bodies": 15,
+  "selection": "definition body contains compute_lane_channel_symmetry; includes predicate definitions and actual callers, not a standalone linked IR module",
+  "output_sha256": "26b9522c404444ab67a30bfa49de822eb0e20953bb095480827f841c5eecc930",
+  "attribution": "Existing retained pre-edit cargo rustc --emit=llvm-ir output; later test logs do not provide a new IR build. First successful baseline command is 496-luna1-preedit-ir-1788674864503609026.meta. No source-head identity is embedded by this extraction; review original execution attribution."
+}

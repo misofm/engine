@@ -1,0 +1,20 @@
+
+running 1 test
+test tests::post_ramp_symmetry_extracts_each_word_once ... FAILED
+
+failures:
+
+---- tests::post_ramp_symmetry_extracts_each_word_once stdout ----
+
+thread 'tests::post_ramp_symmetry_extracts_each_word_once' (537718) panicked at crates/builtins/src/lib.rs:4318:9:
+assertion `left == right` failed: one extraction per side of each of 15 word pairs
+  left: 240
+ right: 30
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::post_ramp_symmetry_extracts_each_word_once
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+

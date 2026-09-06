@@ -1,0 +1,5 @@
+# Issue 496 Sol attempt 2
+
+Source 5a4f4147 changes only the compact cfg(test) field fixture after Astra accepted the production helper and existing real-seam/PCM/state proof. Every trim, target, step, countdown and all six coefficient fields in both sections starts from equality, independently clears an expected active bit and restores it; unchanged per-lane oracle equality, unaffected members, W1/W4/W8 full/partial populations, signed zero and padding are checked.
+
+Authentic per-command subprocess output and metadata identify final committed source and actual file blob/SHA256. Exact private tests run one each in debug/release; library seven, input liveness thirteen, mono liveness eight and host-console ten run per profile. Strict Clippy, fmt/diff and realtime/lane/workspace policies pass. The initial compile failure remains preserved and is not final gate credit. The attempt1 actual240-vs30 mutation and baseline IR remain in their original package; production is unchanged and no additional mutation campaign or timing was run. Consolidated Astra review remains pending.
