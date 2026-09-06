@@ -43,3 +43,21 @@ Root retains issue numbering/synchronization, fresh actual-base scope approval, 
 ## Numbered activation boundary
 
 Matching GitHub issue #512 created. Based on delivered main0b8cf178 plus #509 delivery record. Await numbered actual-base Astra scope approval before fresh Luna1. Only the four test files and numbered spec/evidence are authorized; #511 runs independently in its own worktree.
+
+## Numbered scope approval
+
+# Astra #512 numbered actual-base scope review — PASS
+
+Approve fresh Luna attempt1 for the numbered four-test-file scope in /home/bl/misofm/engine-dsp-test-hex, root-reported clean pushed8779bcb6 based on delivered0b8cf178 plus #509 closure documentation. Git/GitHub inspection was explicitly excluded from this task; root's head/clean/upstream and matching GitHub512 title/body attestations remain root-owned, not independently reverified here.
+
+Independently compared current filesystem bytes with the previously scoped engine-slot-reservation inputs: all four target integration-test files, all four package manifests, bench-support's digest authority, workspace Cargo.toml/Cargo.lock and .cargo/config.toml match exactly. Verified the numbered spec preserves the complete proposed scope verbatim beneath its numbered heading and appends the activation boundary. Its preserved historical wording about an unnumbered proposal is superseded by that boundary and this approval.
+
+All four packages already have bench-support in dev-dependencies. Their integration tests can use its existing hex function without new dependency edges, features, APIs or production linkage. Preserve the existing owned [u8;32] parametric-eq adapter and the other three borrowed &[u8;32] adapters; replace only their encoder bodies with fully qualified delegation. Do not accidentally recurse via the local hex name or rehash finalized bytes with sha256_hex. Preserve raw hashes, word endian handling, all existing assertions and the separate source-literal repin emitters.
+
+Targeted source-path search across scripts, workflows/specs, documentation and tools found no concrete checksum/shape seal over the four test files beyond this issue's own path roster. The realtime-leak policy explicitly excludes dev edges from production resolution; no manifest change is needed or allowed. Existing bench policy and realtime-leak scripts remain required finite static gates, and any newly discovered concrete seal must be recorded rather than repinned.
+
+The authorized local proof remains four actual-adapter literal tests, each exactly one successful nonignored test in debug and release; strict Clippy for each exact test target, fmt/diff and the two existing policies with independent raw statuses/source identities. Existing corpora remain in source and required CI stays enabled. No full local corpus replay, fixture/listening generation, pin changes, artifact/browser rebuild, benchmark/preflight/capture, timing or utility crate is authorized. CP20 remains partial outside this coherent diagnostic-encoding slice.
+
+No blocking scope findings. Root retains exact-path checkpoints and synchronization, consolidated Astra attempt review and actual-PR/required-CI delivery gates. Sol2/3 follow only a consolidated FAIL. #511 remains independent. No builds/tests/timing, Git/GitHub commands or repository mutations performed; only this /tmp review was written.
+
+Root verified clean pushed8779bcb6 and matching GitHub512 body/title; fresh Luna attempt1 is activated at this checkpoint.
