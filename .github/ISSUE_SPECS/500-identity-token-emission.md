@@ -113,3 +113,5 @@ PR504 delivered #503 as main 5159da6ceee5903ff1b9534a55ea149c38970acb after exac
 ## Delivered and remotely closed
 
 PR505 merged at2026-09-06T06:20:49Z as71059eab8b83a39d5b3c69fd2aba9ca285409e52. Astra exact-head PASS applies to3622d6250375418fdedf7d045b24ef42496d2788 and required qualification34015869156 completed SUCCESS on that same head before merge. GitHub #500 is verified CLOSED. This delivers shared node/edge token emission with allocation-free length calculation and unchanged canonical bytes; CP20 remains PARTIAL because concrete independent hex encoders remain. The historical count of fourteen encoders is not recertified. Post-main CI is monitored separately.
+
+Post-main qualification34016249875 at71059eab8b83a39d5b3c69fd2aba9ca285409e52 completed SUCCESS. Both required pre-merge and post-main CI are green.
