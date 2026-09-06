@@ -4,18 +4,20 @@
 use core::num::NonZeroUsize;
 use effect_contract::{
     AutomationSpanKind, EffectProcessBlock, EffectQuality, InitialParameterValue, LinkMode,
-    NativeEffectFactory, ObservationSample, ParameterChannel, PrepareEffectLimits,
-    PrepareEffectRequest, PreparedAutomationSpan, PreparedNativeEffect, PreparedParameterState,
-    PreparedPorts, PreparedSidechainPort, ProcessReport, StatePayloadOutput,
+    NativeEffectFactory, ObservationSample, ParameterAccessError, ParameterChannel,
+    PrepareEffectLimits, PrepareEffectRequest, PreparedAutomationSpan, PreparedEffectMetadata,
+    PreparedNativeEffect, PreparedParameterState, PreparedPorts, PreparedSidechainPort,
+    ProcessReport, ResetKind, StatePayloadError, StatePayloadInput, StatePayloadOutput,
 };
 use host_core::{
-    ScalarPointAdmissionError, ScalarPointCancelBoundaryError, ScalarPointRenderError,
-    prepare_scalar_point_endpoint,
+    ScalarPointAdmissionError, ScalarPointCancelBoundaryError, ScalarPointFault,
+    ScalarPointFaultCause, ScalarPointFaultProgress, ScalarPointNativeOperation,
+    ScalarPointRenderError, prepare_scalar_point_endpoint,
 };
 use protocol::{
-    AutomationBatchSlot, AutomationCancellationReason, AutomationKind, AutomationRecord,
-    DeliveryError, HandoffResult, ParameterHandle, ProtocolQueueConfig, RequestId, SampleTime,
-    SessionRevision,
+    AutomationBatchError, AutomationBatchSlot, AutomationCancellationReason,
+    AutomationEnqueueError, AutomationKind, AutomationRecord, DeliveryError, HandoffResult,
+    ParameterHandle, ProtocolQueueConfig, ReliablePayload, RequestId, SampleTime, SessionRevision,
 };
 
 const Q: usize = 16;
@@ -196,6 +198,93 @@ fn assert_state_bits(actual: PreparedParameterState, expected: PreparedParameter
 fn assert_resident_bits(actual: ObservationSample, expected: ObservationSample) {
     assert_eq!(actual.left.to_bits(), expected.left.to_bits());
     assert_eq!(actual.right.to_bits(), expected.right.to_bits());
+}
+struct FailingAccessEffect {
+    inner: Box<dyn PreparedNativeEffect>,
+    fail_apply_channel: Option<ParameterChannel>,
+    fail_read_after_process: bool,
+    processed_frames: u64,
+    apply_calls: u64,
+    read_calls: core::cell::Cell<u64>,
+}
+impl FailingAccessEffect {
+    fn apply_failure() -> Self {
+        Self {
+            inner: asymmetric_effect(),
+            fail_apply_channel: Some(ParameterChannel::Right),
+            fail_read_after_process: false,
+            processed_frames: 0,
+            apply_calls: 0,
+            read_calls: core::cell::Cell::new(0),
+        }
+    }
+    fn read_failure() -> Self {
+        Self {
+            inner: asymmetric_effect(),
+            fail_apply_channel: None,
+            fail_read_after_process: true,
+            processed_frames: 0,
+            apply_calls: 0,
+            read_calls: core::cell::Cell::new(0),
+        }
+    }
+}
+impl PreparedNativeEffect for FailingAccessEffect {
+    fn metadata(&self) -> PreparedEffectMetadata {
+        self.inner.metadata()
+    }
+    fn reset(&mut self, kind: ResetKind) {
+        self.inner.reset(kind);
+    }
+    fn process(&mut self, block: EffectProcessBlock<'_>) -> ProcessReport {
+        self.processed_frames += block.frames() as u64;
+        self.inner.process(block)
+    }
+    fn observe_resident(&self, tap_index: u32, out: &mut ObservationSample) -> bool {
+        self.inner.observe_resident(tap_index, out)
+    }
+    fn apply_parameter_point(
+        &mut self,
+        parameter_index: u32,
+        channel: ParameterChannel,
+        value: f32,
+    ) -> Result<(), ParameterAccessError> {
+        self.apply_calls += 1;
+        if self.processed_frames != 0 && self.fail_apply_channel == Some(channel) {
+            Err(ParameterAccessError::Unsupported)
+        } else {
+            self.inner
+                .apply_parameter_point(parameter_index, channel, value)
+        }
+    }
+    fn parameter_state(
+        &self,
+        parameter_index: u32,
+        channel: ParameterChannel,
+    ) -> Result<PreparedParameterState, ParameterAccessError> {
+        self.read_calls.set(self.read_calls.get() + 1);
+        if self.processed_frames != 0 && self.fail_read_after_process {
+            Err(ParameterAccessError::Unsupported)
+        } else {
+            self.inner.parameter_state(parameter_index, channel)
+        }
+    }
+    fn snapshot_state_payload(
+        &self,
+        output: StatePayloadOutput<'_>,
+    ) -> Result<(), StatePayloadError> {
+        self.inner.snapshot_state_payload(output)
+    }
+    fn restore_state_payload(
+        &mut self,
+        version: u32,
+        input: StatePayloadInput<'_>,
+    ) -> Result<(), StatePayloadError> {
+        self.inner.restore_state_payload(version, input)
+    }
+    fn channel_symmetry(&self) -> bool {
+        self.inner.channel_symmetry()
+    }
 }
 fn pcm_case(records: &[AutomationRecord], splits: &[(usize, &[PreparedAutomationSpan])]) {
     let _fp = lane::CanonicalFpEnv::enter();
@@ -411,26 +500,283 @@ fn real_cancellation_preserves_applied_prefix() {
 
 #[test]
 fn malformed_admission_and_render_envelopes_are_noops() {
+    let _fp = lane::CanonicalFpEnv::enter();
     let mut fx = effect();
-    let (mut c, r, _) = prepare_scalar_point_endpoint(&mut *fx, REV, H, config(), 1).unwrap();
+    let (mut c, mut r, _) = prepare_scalar_point_endpoint(&mut *fx, REV, H, config(), 1).unwrap();
+    let pristine = r.snapshot().unwrap();
+    let mut reject =
+        |candidate: AutomationBatchSlot,
+         expected: fn(Result<(), ScalarPointAdmissionError>) -> bool| {
+            assert!(expected(c.try_admit(SampleTime(10), candidate)));
+            assert_eq!(c.outstanding(), 0);
+            assert_eq!(c.resident_automation(), 0);
+            assert_eq!(r.snapshot().unwrap(), pristine);
+        };
+
+    let mut empty = batch(60, &[record(H[0], 10, 1.0)]);
+    empty.len = 0;
+    reject(empty, |result| {
+        matches!(
+            result,
+            Err(ScalarPointAdmissionError::InvalidBatch {
+                error: AutomationBatchError::EmptyBatch,
+                ..
+            })
+        )
+    });
+    let mut too_long = batch(61, &[record(H[0], 10, 1.0)]);
+    too_long.len = 257;
+    reject(too_long, |result| {
+        matches!(
+            result,
+            Err(ScalarPointAdmissionError::InvalidBatch {
+                error: AutomationBatchError::TooManyRecords,
+                ..
+            })
+        )
+    });
+    let mut unequal_point = batch(62, &[record(H[0], 10, 1.0)]);
+    unequal_point.records[0].end_value = 2.0;
+    reject(unequal_point, |result| {
+        matches!(
+            result,
+            Err(ScalarPointAdmissionError::InvalidBatch {
+                error: AutomationBatchError::InvalidPoint,
+                ..
+            })
+        )
+    });
+    let mut out_of_order = batch(63, &[record(H[0], 10, 1.0), record(H[1], 11, 2.0)]);
+    out_of_order.records.swap(0, 1);
+    reject(out_of_order, |result| {
+        matches!(
+            result,
+            Err(ScalarPointAdmissionError::InvalidBatch {
+                error: AutomationBatchError::OutOfOrder,
+                ..
+            })
+        )
+    });
     let wrong = AutomationBatchSlot::new(
         SessionRevision(8),
         RequestId::new(6).unwrap(),
-        &[record(H[0], 1, 1.0)],
+        &[record(H[0], 10, 1.0)],
     )
     .unwrap();
-    assert!(matches!(
-        c.try_admit(SampleTime(0), wrong),
-        Err(ScalarPointAdmissionError::WrongRevision { .. })
-    ));
+    reject(wrong, |result| {
+        matches!(result, Err(ScalarPointAdmissionError::WrongRevision { .. }))
+    });
+    reject(
+        batch(64, &[record(ParameterHandle(99), 10, 1.0)]),
+        |result| {
+            matches!(
+                result,
+                Err(ScalarPointAdmissionError::UnknownBinding { .. })
+            )
+        },
+    );
+    reject(batch(65, &[record(H[0], 10, 24.5)]), |result| {
+        matches!(result, Err(ScalarPointAdmissionError::InvalidValue { .. }))
+    });
+    let mut invalid_last = batch(66, &[record(H[0], 10, 1.0), record(H[1], 11, 2.0)]);
+    invalid_last.records[1].start_value = f32::NAN;
+    invalid_last.records[1].end_value = f32::NAN;
+    reject(invalid_last, |result| {
+        matches!(
+            result,
+            Err(ScalarPointAdmissionError::InvalidBatch {
+                error: AutomationBatchError::NonFiniteValue,
+                ..
+            })
+        )
+    });
+    reject(batch(67, &[record(H[0], 9, 1.0)]), |result| {
+        matches!(
+            result,
+            Err(ScalarPointAdmissionError::Service(
+                AutomationEnqueueError::Invalid {
+                    error: AutomationBatchError::TimeInPast,
+                    ..
+                }
+            ))
+        )
+    });
+    drop(reject);
+
     let mut r = r.start().unwrap_or_else(|_| panic!());
     let before = r.snapshot().unwrap();
     let (mut short, mut full) = ([1.0; Q - 1], [1.0; Q]);
+    let short_before = short;
+    let full_before = full;
     assert_eq!(
         r.render(&mut short, &mut full, SampleTime(0)),
         Err(ScalarPointRenderError::InvalidShape)
     );
+    assert_eq!(short, short_before);
+    assert_eq!(full, full_before);
+    let (mut left, mut right) = ([0.31; Q], [0.27; Q]);
+    let input = (left, right);
+    assert_eq!(
+        r.render(&mut left, &mut right, SampleTime(1)),
+        Err(ScalarPointRenderError::DiscontinuousTime)
+    );
+    assert_eq!((left, right), input);
     assert_eq!(r.snapshot().unwrap(), before);
+    assert_eq!(
+        r.cancel_boundary(SampleTime(0)),
+        Err(ScalarPointCancelBoundaryError::NotFaulted)
+    );
+    drop(r.stop());
+    let after_rejections = payload(&*fx);
+    let fresh = effect();
+    assert_eq!(after_rejections, payload(&*fresh));
+
+    let mut failing = FailingAccessEffect::apply_failure();
+    let (mut c, r, _) = prepare_scalar_point_endpoint(&mut failing, REV, H, config(), 70).unwrap();
+    c.try_admit(
+        SampleTime(0),
+        batch(70, &[record(H[0], 3, 7.0), record(H[1], 7, -7.0)]),
+    )
+    .unwrap();
+    let ticket = match c.try_handoff_next().unwrap() {
+        HandoffResult::HandedOff(ticket) => ticket,
+        other => panic!("{other:?}"),
+    };
+    let mut r = r.start().unwrap_or_else(|_| panic!());
+    let (mut left, mut right) = ([0.42; Q], [0.38; Q]);
+    let fault = ScalarPointFault {
+        cause: ScalarPointFaultCause::Native {
+            operation: ScalarPointNativeOperation::Apply,
+            channel: ParameterChannel::Right,
+            error: ParameterAccessError::Unsupported,
+        },
+        at_sample: SampleTime(7),
+        native_processed_frames: 7,
+        progress: Some(ScalarPointFaultProgress {
+            ticket,
+            record_count: 2,
+            native_applied_prefix: 1,
+            delivery_applied_prefix: 1,
+        }),
+    };
+    assert_eq!(
+        r.render(&mut left, &mut right, SampleTime(0)),
+        Err(ScalarPointRenderError::Fault(fault))
+    );
+    assert!(
+        left.iter()
+            .chain(&right)
+            .all(|sample| sample.to_bits() == 0)
+    );
+    assert_eq!(r.fault(), Some(fault));
+    assert_eq!(r.snapshot(), Err(fault));
+    let (mut invalid_left, mut invalid_right) = ([0.6; Q - 1], [0.5; Q]);
+    let invalid_before = (invalid_left, invalid_right);
+    assert_eq!(
+        r.render(&mut invalid_left, &mut invalid_right, SampleTime(16)),
+        Err(ScalarPointRenderError::InvalidShape)
+    );
+    assert_eq!((invalid_left, invalid_right), invalid_before);
+    let (mut silent_left, mut silent_right) = ([0.6; Q], [0.5; Q]);
+    assert_eq!(
+        r.render(&mut silent_left, &mut silent_right, SampleTime(16)),
+        Err(ScalarPointRenderError::Fault(fault))
+    );
+    assert!(
+        silent_left
+            .iter()
+            .chain(&silent_right)
+            .all(|sample| sample.to_bits() == 0)
+    );
+    assert_eq!(
+        r.cancel_boundary(SampleTime(17)),
+        Err(ScalarPointCancelBoundaryError::DiscontinuousTime)
+    );
+    let token = c
+        .begin_cancel(AutomationCancellationReason::EndpointShutdown)
+        .unwrap();
+    assert!(c.poll_cancel_boundary(token).unwrap().is_none());
+    r.cancel_boundary(SampleTime(16)).unwrap();
+    assert_eq!(r.fault(), Some(fault));
+    let done = c.poll_cancel_boundary(token).unwrap().unwrap();
+    assert_eq!(done.effective_sample, SampleTime(16));
+    assert_eq!(
+        (
+            done.applied_records,
+            done.canceled_records,
+            done.canceled_events
+        ),
+        (1, 1, 1)
+    );
+    assert_eq!(c.outstanding(), 0);
+    let event = c.try_dequeue_event().unwrap();
+    assert_eq!(event.revision, REV);
+    assert!(matches!(
+        event.payload,
+        ReliablePayload::AutomationCanceled {
+            origin_request_id,
+            canceled_records: 1,
+            reason: AutomationCancellationReason::EndpointShutdown,
+            effective_sample: Some(SampleTime(16)),
+            ..
+        } if origin_request_id == RequestId::new(70).unwrap()
+    ));
+    assert_eq!(c.collect_terminal(ticket), Err(DeliveryError::StaleTicket));
+    assert_eq!(r.snapshot(), Err(fault));
+    drop(r.stop());
+    assert_eq!((failing.processed_frames, failing.apply_calls), (7, 2));
+
+    let mut read_failing = FailingAccessEffect::read_failure();
+    let (mut c, r, _) =
+        prepare_scalar_point_endpoint(&mut read_failing, REV, H, config(), 80).unwrap();
+    c.try_admit(SampleTime(0), batch(80, &[record(H[0], 30, 8.0)]))
+        .unwrap();
+    let ticket = match c.try_handoff_next().unwrap() {
+        HandoffResult::HandedOff(ticket) => ticket,
+        other => panic!("{other:?}"),
+    };
+    let mut r = r.start().unwrap_or_else(|_| panic!());
+    let (mut left, mut right) = ([0.4; Q], [0.3; Q]);
+    r.render(&mut left, &mut right, SampleTime(0)).unwrap();
+    let read_fault = ScalarPointFault {
+        cause: ScalarPointFaultCause::Native {
+            operation: ScalarPointNativeOperation::Read,
+            channel: ParameterChannel::Left,
+            error: ParameterAccessError::Unsupported,
+        },
+        at_sample: SampleTime(16),
+        native_processed_frames: 0,
+        progress: Some(ScalarPointFaultProgress {
+            ticket,
+            record_count: 1,
+            native_applied_prefix: 0,
+            delivery_applied_prefix: 0,
+        }),
+    };
+    assert_eq!(r.snapshot(), Err(read_fault));
+    assert_eq!(r.snapshot(), Err(read_fault));
+    let (mut left, mut right) = ([0.4; Q], [0.3; Q]);
+    assert_eq!(
+        r.render(&mut left, &mut right, SampleTime(16)),
+        Err(ScalarPointRenderError::Fault(read_fault))
+    );
+    assert!(
+        left.iter()
+            .chain(&right)
+            .all(|sample| sample.to_bits() == 0)
+    );
+    let token = c
+        .begin_cancel(AutomationCancellationReason::ProviderUnavailable)
+        .unwrap();
+    r.cancel_boundary(SampleTime(16)).unwrap();
+    let done = c.poll_cancel_boundary(token).unwrap().unwrap();
+    assert_eq!((done.applied_records, done.canceled_records), (0, 1));
+    assert_eq!(done.effective_sample, SampleTime(16));
+    assert_eq!(r.fault(), Some(read_fault));
+    drop(r.stop());
+    assert_eq!(read_failing.processed_frames, Q as u64);
+    assert_eq!(read_failing.apply_calls, 0);
+    assert_eq!(read_failing.read_calls.get(), 3);
 }
 
 #[test]
