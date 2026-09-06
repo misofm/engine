@@ -48,3 +48,17 @@ After source acceptance, compare production/worklet input identity; this tooling
 ## Numbered current-base checkpoint
 
 GitHub #509 matches this title/body. Base is delivered main0fc4e959 after #506/PR507 with its closure record; audit package inputs are unchanged from Astra scoped4b29296d. Root retains Git/GitHub/checkpoints. Fresh Luna attempt1 remains pending numbered actual-base Astra approval. No timing or generation authority is granted.
+
+## Astra numbered PASS and current activation
+
+# Astra #509 numbered actual-base review — PASS
+
+Reviewed clean exact head f8b37be672abd8e0a27b4fc42af62d0aaca626fd in engine-audit-hash-authority, based on delivered main0fc4e959 after PR507/#506. Only #506 closure documentation and #509 spec differ from main. Audit/bench-support/Cargo/config match inspected4b29296d. Independently verified live GitHub509 OPEN, matching title and exact local/remote body; the entire approved five-helper brief is preserved beneath its numbered title.
+
+Approve fresh Luna1 for this single package outcome. Preserve the exact five audit module paths, unchanged one-shot input boundaries and all raw/incremental hashes, decoders, record/manifest bytes and error ordering. Use existing bench_support::digest::sha256_hex aliases and delete only duplicate helper bodies plus actually unused imports. No Cargo, shared encoder/API, runtime, schema, fixture, historical seal or validator change is authorized.
+
+The numbered gate roster remains finite and executable: five independent empty/abc alias tests, existing vectorization parser checks, small read-only audit fixture checker tests, exact literal JSON parser and small in-memory level-match tests, debug/release; strict affected Clippy/fmt/diff and existing static policies. No source-fixture generator matrix, listening packet authoring, fixture regeneration/repin, timed runner/preflight/capture or new qualification framework. Preserve historical tests not selected for proportional local execution; required CI remains enabled.
+
+CP20 remains partial for other encoder owners. Root retains checkpoints, remote synchronization, Luna1/Sol2/3 workflow and actual-PR/required-CI delivery gates. This independent tooling work does not change #496/#478 runtime sequencing. No builds/tests/timing or source/spec/Git/GitHub mutations performed; only /tmp review/readback files written.
+
+Root integrated delivered main1543c4c2 after PR508 and its closure record. All five audit files remain byte-identical to the reviewed numbered base; #496 only changes builtins runtime/test code and current artifact identities. Root activates fresh Luna attempt1 within the unchanged five-file maintenance scope. No generation/timing authority is granted.
