@@ -18,3 +18,19 @@ This consolidated slice can be numbered after root's duplicate/body boundary che
 ## Workflow and current base
 
 User override: Astra briefs and adversarially reviews, Luna attempt 1 implements, Sol gets attempts 2/3 after a consolidated FAIL. Root owns Git/GitHub, exact-path checkpoints and delivery. Implementation begins only after numbered current-base review. No benchmark or timing authority is granted.
+
+## Astra numbered scope PASS and activation
+
+# Astra #506 numbered current-base review — PASS
+
+Reviewed clean exact head f775104c239ef4451272d3296c386cba1c106753 in engine-bench-hex-authority, based on delivered main71059eab. Only #500/#503 closure documents and numbered #506 differ from main. Relevant bench/bench-support/Cargo/config source is unchanged from inspected PR505 source3622d625. Independently verified live GitHub506 OPEN, matching title and exact local/remote body.
+
+The numbered body faithfully adopts only the revised consolidated scope, without retaining the superseded one-graph-helper assignment. Approve fresh Luna1 for the four exact source paths: expose the existing bench-support borrowed-byte hex implementation unchanged and replace the three bench encoder bodies with the appropriate existing shared authority. Keep raw digest encoding distinct from hashing input bytes, preserve streaming update boundaries and the effect-interchange raw digest helper, and leave validators/decoders outside scope.
+
+The compact independent nibble/leading-zero/empty vector, published SHA vectors and actual three-module call-site identity tests remain the finite proof. Builtins must specifically show finalized digest encoding without rehashing. Existing untimed module tests, strict affected Clippy/fmt/diff/static policies remain required; no new framework, mutation campaign, broader runtime/target matrix or measured speedup claim.
+
+Historical scripts/validators/records/source-seal snapshots and all fixture/output pins remain frozen. No benchmark/preflight/capture/timing invocation is authorized. Future source/binary identities change naturally and cannot inherit an old sealed preparation by assertion. Any concrete protected-contract failure requires a bounded ruling, not a historical repin.
+
+CP20 remains partial after this slice because other separately owned encoders survive. Root retains checkpoint/GitHub ownership and normal Luna1/Sol2/3 escalation, eventual exact-head PR review and required CI. Independent #496 runtime correction is unaffected. No source/spec/Git/GitHub mutations or tests/builds/timing performed for this review; only /tmp review/readback files written.
+
+Root activates fresh Luna attempt1, independent of the #496 runtime test correction. Git/GitHub/checkpoints remain root-owned; no benchmark/timing authority is granted.
