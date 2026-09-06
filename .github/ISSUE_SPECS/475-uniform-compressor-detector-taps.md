@@ -230,3 +230,7 @@ No PCM/resource numerical expectations, existing corpus pins, DSP/source behavio
 Read-only source/log inspection; no tests/builds/timing or source/spec/Git/GitHub mutations performed.
 
 Root uses a separate delivery checkout from frozen1c71000d; the source qualification worktree remains untouched while workspace/target/ABI gates finish.
+
+## Integrated delivery qualification complete
+
+Frozen1c71000d passes immutable full workspace (transcript277 blocks/1639 passed/0 failed/24 ignored, including isolated child result), supported scalar/simd128 checks, native release C API and shared/static ABI. Separate delivery candidatede410134 passes verified artifact/static/resources26/hermetic/current3browser+self-tests/matrix; modulefa78dc8d3f0d391b94419f5252504eee2aafbbf13853884157e24935ed092cc3 is independently hashed. Complete command/source/output/numeric status and source equivalence are retained in artifacts/issue475-integrated-delivery. No production/numerical change after source acceptance. Actual-head PR review and required qualification remain before merged closure of475 and499.

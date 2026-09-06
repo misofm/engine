@@ -71,3 +71,7 @@ Parent475 may now integrate actual current delivered main, verify accepted compr
 Root integrated delivered main95abdd015e28823905800d051d03837255d91612 and verified the entire compressor crate is byte-identical to reviewed05c73e7e. Parent delivery qualification now proceeds on this combined frozen source. Child remains open until its evidence/product delivery is merged and remotely synchronized.
 
 Delivery continues with parent475 in separate codex/475-compressor-tap-delivery checkout from1c71000d; the immutable source qualification checkout remains unchanged. Parent spec records the actual integrated artifact mismatch and bounded ruling; no child/production proof requirement changes.
+
+## Integrated delivery qualification complete
+
+Frozen1c71000d passes immutable full workspace (transcript277 blocks/1639 passed/0 failed/24 ignored, including isolated child result), supported scalar/simd128 checks, native release C API and shared/static ABI. Separate delivery candidatede410134 passes verified artifact/static/resources26/hermetic/current3browser+self-tests/matrix; modulefa78dc8d3f0d391b94419f5252504eee2aafbbf13853884157e24935ed092cc3 is independently hashed. Complete command/source/output/numeric status and source equivalence are retained in artifacts/issue475-integrated-delivery. No production/numerical change after source acceptance. Actual-head PR review and required qualification remain before merged closure of475 and499.
