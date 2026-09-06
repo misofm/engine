@@ -44,3 +44,9 @@ Relevant floor, jq validator, workload and Cargo inputs have no delta from inspe
 The historical wording “unnumbered brief” is superseded by the numbered baseline and this approval; it does not forbid root's next assignment. Root may assign fresh Luna1 after its checkpoint audit. #238 remains the sole active runtime feature; this test-only tooling is independent. Existing Astra review/Sol retry/three-failure hard stop and actual-PR/requiredCI/remote delivery rules apply. No code, tests, builds or timing performed.
 
 Root adopts PASS and assigns fresh Luna attempt1. Pause at a coherent compiling/focused-green tranche before further implementation so root can checkpoint exact paths. All test commands are untimed; no benchmark runner/capture is authorized.
+
+## Luna attempt 1 source checkpoint
+
+The cfg(test)-only floor.rs test builds the actual complete Rust table and compares the existing jq floor_pins object, including successful missing/extra/value divergences and restored equality. Native jq is a required test prerequisite. Raw /tmp/483-luna1-{debug,release,floor-suite}.log show the named test passing in both profiles and all9 floor tests passing. Existing validator log reports zero real runner/workload/timing invocations. Bench-only strict Clippy --tests --no-deps passes.
+
+The full strict Clippy log fails at three inherited builtins-compiler question_mark sites introduced before this branch; that source is unchanged here. This is preserved as a failure, not a full lint PASS. The initial cargo PATH failure and empty successful-format log are retained; these logs lack standalone numeric status records, so root will capture explicit command/status evidence for delivery. Astra must independently rule scope and gates; no source acceptance is claimed by this checkpoint.
