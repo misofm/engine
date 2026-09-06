@@ -57,3 +57,7 @@ The scope remains one private post-ramp whole-mask extraction helper and exactly
 Approve numbered queue scope only. #475 remains the active runtime issue. Before future Luna1, root must integrate actual then-delivered main, verify source/scope equivalence, confirm remote identity and obtain actual implementation-base approval. #235/#238 remain delivered; #496 does not claim all RT5 bookkeeping or descriptive measurement is complete.
 
 Read-only source/Git comparison; no tests/builds/timing or source/spec/Git/GitHub mutations performed.
+
+## Current implementation-base readiness
+
+Root integrated delivered mainad00d16b8ef8e3aa5ba4c406d00db4c62ff311b5 after PR502 closed475/499 and carried their closure record. Builtins/Cargo/config are byte-identical to scopedfd4a937c; no implementation has started. This becomes the next sole runtime feature after475 delivery, independently of500 graph-compiler maintenance. Await Astra actual numbered-base review before fresh Luna1 and bounded pre-edit native inspection. No timing or broader optimization is authorized.
