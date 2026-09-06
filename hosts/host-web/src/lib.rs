@@ -654,6 +654,9 @@ struct ReadyOwnership {
     /// Test-only proof that incomplete master intervals never reach effect-reader scanning.
     #[cfg(test)]
     meter_effect_scan_count: u64,
+    /// Test-only switch for timing the exact pre-#520 poll body.
+    #[cfg(test)]
+    meter_bypass_readiness: bool,
     /// The compiled session model, retained so the browser bridge keeps charging itself for what
     /// it holds -- and, since issue #207, read by the source-introspection queries.
     ///
@@ -1131,6 +1134,13 @@ impl AudioWorkletEngineHost {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_meter_readiness_bypass(&mut self, bypass: bool) {
+        if let Some(ready) = self.ready.as_mut() {
+            ready.meter_bypass_readiness = bypass;
+        }
+    }
+
     /// Whether meter observers were attached at preparation (issue #137 D2).
     #[must_use]
     pub fn meters_attached(&self) -> bool {
@@ -1569,7 +1579,11 @@ impl AudioWorkletEngineHost {
         // count only when the configured master interval closes. An empty ring therefore proves
         // that no coherent track/master publication can exist. Preserve pending/public bytes and
         // avoid walking every track consumer on incomplete quanta.
-        if ready.master_count == 0 {
+        #[cfg(not(test))]
+        let master_not_ready = ready.master_count == 0;
+        #[cfg(test)]
+        let master_not_ready = ready.master_count == 0 && !ready.meter_bypass_readiness;
+        if master_not_ready {
             return 0;
         }
         let mut drain_budget = 1_usize;
@@ -3277,6 +3291,8 @@ fn compile_ready(
         meter_windows: 0,
         #[cfg(test)]
         meter_effect_scan_count: 0,
+        #[cfg(test)]
+        meter_bypass_readiness: false,
         session,
     };
     Ok((ready, report))

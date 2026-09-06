@@ -1702,11 +1702,20 @@ fn paired_console_host(quantum: u32) -> AudioWorkletEngineHost {
 }
 
 fn meter_tail_host(sample_rate_hz: u32, quantum: u32) -> AudioWorkletEngineHost {
+    meter_tail_host_for_blocks(sample_rate_hz, quantum, 1, 4)
+}
+
+fn meter_tail_host_for_blocks(
+    sample_rate_hz: u32,
+    quantum: u32,
+    meter_blocks: u64,
+    source_blocks: u64,
+) -> AudioWorkletEngineHost {
     let mut model = parse_session_json(include_str!("../tests/browser-v1/session.json"))
         .expect("accepted identity fixture");
     model.sample_rate_hz = sample_rate_hz;
     model.quantum_frames = quantum;
-    model.sources[0].frames = u64::from(quantum) * 4;
+    model.sources[0].frames = u64::from(quantum) * source_blocks;
     let template = model.tracks[0].clone();
     model.tracks.clear();
     for index in 0..9 {
@@ -1724,7 +1733,7 @@ fn meter_tail_host(sample_rate_hz: u32, quantum: u32) -> AudioWorkletEngineHost 
         require_quantum_frames: quantum,
         source_ring_frames: quantum,
         console_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
-        console_meter_blocks: 1,
+        console_meter_blocks: meter_blocks,
         ..WebBootOptions::explicit_defaults()
     };
     AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("meter-tail boot")
@@ -3151,6 +3160,158 @@ fn incomplete_master_periods_skip_all_track_pops_and_effect_scans() {
     assert_eq!(observed.poll_meters(), 0);
     assert_eq!(observed.meter_poll_work(), before);
 }
+
+fn timed_accumulator_mode(metrics: Option<MeterMetricSet>) -> (u128, u64, u64) {
+    const QUANTUM: usize = 128;
+    const PERIOD_BLOCKS: u32 = 32;
+    const WINDOWS: u64 = 256;
+    const STREAMS: usize = 9;
+    let config = builtins::MeterConfig {
+        period_frames: core::num::NonZeroU32::new(QUANTUM as u32 * PERIOD_BLOCKS).unwrap(),
+        peak_hold_frames: 256,
+        peak_decay_db_per_second: 12.0,
+        queue_capacity: core::num::NonZeroUsize::MIN,
+        reset_generation: 1,
+    };
+    let mut meters = metrics.map(|selection| {
+        (0..STREAMS)
+            .map(|index| {
+                builtins::MeterAccumulator::prepare_selected(
+                    builtins::MeterHandle(core::num::NonZeroU64::new(index as u64 + 1).unwrap()),
+                    config,
+                    48_000,
+                    selection,
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>()
+    });
+    let blocks = WINDOWS * u64::from(PERIOD_BLOCKS);
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    let started = std::time::Instant::now();
+    for block in 0..blocks {
+        let amplitude = if block % 17 == 0 { 1.0 } else { 0.125 };
+        let samples = [amplitude; QUANTUM];
+        if let Some(meters) = meters.as_mut() {
+            for meter in meters {
+                meter
+                    .accumulator
+                    .observe(&samples, &samples, block * QUANTUM as u64)
+                    .unwrap();
+                if (block + 1) % u64::from(PERIOD_BLOCKS) == 0 {
+                    let snapshot = meter.consumer.try_pop().unwrap();
+                    hash ^= u64::from(snapshot.left.sample_peak.to_bits());
+                    hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+                }
+            }
+        } else {
+            std::hint::black_box(&samples);
+        }
+    }
+    (started.elapsed().as_nanos(), hash, blocks)
+}
+
+fn timed_poll_mode(bypass_readiness: bool) -> (u128, u64, u64, (u64, u64)) {
+    const QUANTUM: u32 = 128;
+    const PERIOD_BLOCKS: u64 = 32;
+    const WINDOWS: u64 = 256;
+    let blocks = PERIOD_BLOCKS * WINDOWS;
+    let mut host = meter_tail_host_for_blocks(48_000, QUANTUM, PERIOD_BLOCKS, blocks);
+    assert_eq!(host.set_meter_lease(true), RESULT_OK);
+    host.set_meter_readiness_bypass(bypass_readiness);
+    let before = host.meter_poll_work();
+    let mut elapsed = 0_u128;
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    let mut emitted = 0_u64;
+    for block in 0..blocks {
+        let value = if block % 17 == 0 { 1.0 } else { 0.125 };
+        feed_and_render(&mut host, 1, block, value);
+        let started = std::time::Instant::now();
+        let windows = host.poll_meters();
+        elapsed = elapsed.saturating_add(started.elapsed().as_nanos());
+        if windows != 0 {
+            emitted = emitted.saturating_add(u64::from(windows));
+            for value in host.meter_frame() {
+                hash ^= u64::from(value.to_bits());
+                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            hash ^= host.meter_header().first_sample;
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    let after = host.meter_poll_work();
+    (
+        elapsed,
+        hash,
+        emitted,
+        (after.0 - before.0, after.1 - before.1),
+    )
+}
+
+/// Frozen descriptive evidence for issues #519/#520. Run only through the documented two-phase
+/// command; this is deliberately an ignored test rather than a benchmark framework.
+#[test]
+#[ignore = "descriptive release timing; requires explicit preflight then one run"]
+fn selective_meter_and_readiness_descriptive_timing() {
+    use std::io::Write;
+
+    assert!(!cfg!(debug_assertions), "timing requires --release");
+    let mode = std::env::var("MISO_METER_TIMING_MODE").expect("timing mode");
+    let output = std::env::var("MISO_METER_TIMING_OUTPUT").expect("timing output path");
+    let open = || {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&output)
+            .expect("output must not exist and must be writable")
+    };
+    if mode == "preflight" {
+        let mut file = open();
+        file.write_all(b"{\"schema\":1,\"preflight\":true}\n")
+            .unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        std::fs::remove_file(&output).expect("remove preflight probe");
+        return;
+    }
+    assert_eq!(mode, "run", "mode is preflight or run");
+    let mut file = open();
+
+    // Exactly one warmup per frozen mode.
+    let _ = timed_accumulator_mode(None);
+    let _ = timed_accumulator_mode(Some(MeterMetricSet::SAMPLE_PEAK));
+    let _ = timed_accumulator_mode(Some(MeterMetricSet::ALL));
+    let _ = timed_poll_mode(true);
+    let _ = timed_poll_mode(false);
+
+    // Exactly two measured rounds, with no retry or tuning loop.
+    let mut accumulator = Vec::new();
+    let mut polling = Vec::new();
+    for round in 0..2 {
+        let disabled = timed_accumulator_mode(None);
+        let peak = timed_accumulator_mode(Some(MeterMetricSet::SAMPLE_PEAK));
+        let full = timed_accumulator_mode(Some(MeterMetricSet::ALL));
+        assert_eq!(peak.1, full.1, "round {round}: peak payload identity");
+        assert_eq!(disabled.2, peak.2);
+        accumulator.push((disabled.0, peak.0, full.0, peak.1, peak.2));
+
+        let legacy = timed_poll_mode(true);
+        let ready = timed_poll_mode(false);
+        assert_eq!(legacy.1, ready.1, "round {round}: poll payload identity");
+        assert_eq!(legacy.2, WINDOWS_FOR_TIMING);
+        assert_eq!(ready.2, WINDOWS_FOR_TIMING);
+        polling.push((legacy, ready));
+    }
+    writeln!(
+        file,
+        "{{\"schema\":1,\"label\":\"isolated metering ns for 9 streams; poll-only callback ns\",\"quantum\":128,\"period_blocks\":32,\"windows\":256,\"accumulator\":{:?},\"polling\":{:?}}}",
+        accumulator, polling
+    )
+    .unwrap();
+    file.sync_all().unwrap();
+}
+
+const WINDOWS_FOR_TIMING: u64 = 256;
 
 #[test]
 fn meter_delayed_poll_delivers_each_queued_window_with_its_own_peak() {
