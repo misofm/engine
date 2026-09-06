@@ -1,0 +1,5 @@
+   Compiling host-web v0.1.0 (/home/bl/misofm/engine-idle-admission-clear/hosts/host-web)
+    Finished `release` profile [optimized + debuginfo] target(s) in 19.32s
+     Running unittests src/lib.rs (target/release/deps/host_web-8422cdbbe9429b2f)
+     Running tests/boot_transient_budget.rs (target/release/deps/boot_transient_budget-226af82dd7fad6e7)
+   Doc-tests host_web

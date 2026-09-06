@@ -1,0 +1,32 @@
+{
+  "argv": [
+    "cargo",
+    "test",
+    "--locked",
+    "--release",
+    "-p",
+    "host-web",
+    "--lib",
+    "tests::idle_render_skips_admission_counter_clear_without_losing_queue_credit",
+    "--",
+    "--exact"
+  ],
+  "cwd": "/home/bl/misofm/engine-idle-admission-clear",
+  "head": "b0d9e087a8ccb0e15431fbe23b8da9633d6cc262",
+  "status": "",
+  "env": {
+    "PATH": "/home/bl/.cargo/bin:/home/bl/.local/bin:/home/bl/.codex/packages/standalone/releases/0.153.2-x86_64-unknown-linux-musl/codex-path:/home/bl/.codex/tmp/arg0/codex-arg0CWD760:/home/bl/.local/bin:/home/bl/.opencode/bin:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.opencode/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin",
+    "RUSTFLAGS": null,
+    "CARGO_TARGET_DIR": null
+  },
+  "source": {
+    "hosts/host-web/src/lib.rs": {
+      "sha256": "aaea4b3c344e3f948fe965e1e8ed0c8394b5fb3843c2a50974890e7be9391924",
+      "git_blob": "0400e53fab15ba4066057432cba11928431efe2a"
+    },
+    "hosts/host-web/src/tests.rs": {
+      "sha256": "195ccdf7e6c034edc1bfa5457ed613dadffde518503d5db5c37a7fa2c079dd94",
+      "git_blob": "2add8eac8547e2fc58079fd28405ef7c43770395"
+    }
+  }
+}

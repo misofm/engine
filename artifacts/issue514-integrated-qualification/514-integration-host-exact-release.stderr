@@ -1,0 +1,43 @@
+   Compiling lexical-util v1.0.7
+   Compiling once_cell v1.21.4
+   Compiling smallvec v1.15.2
+   Compiling locspan v0.8.2
+   Compiling utf8-decode v1.0.1
+   Compiling decoded-char v0.1.1
+   Compiling effect-runtime v0.1.0 (/home/bl/misofm/engine-idle-admission-clear/crates/effect-runtime)
+   Compiling libc v0.2.189
+   Compiling rack v0.1.0 (/home/bl/misofm/engine-idle-admission-clear/crates/rack)
+   Compiling builtins v0.1.0 (/home/bl/misofm/engine-idle-admission-clear/crates/builtins)
+   Compiling smallstr v0.3.1
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-idle-admission-clear/crates/compressor)
+   Compiling gate-expander v0.1.0 (/home/bl/misofm/engine-idle-admission-clear/crates/gate-expander)
+   Compiling true-peak-limiter v0.1.0 (/home/bl/misofm/engine-idle-admission-clear/crates/true-peak-limiter)
+   Compiling soft-clip v0.1.0 (/home/bl/misofm/engine-idle-admission-clear/crates/soft-clip)
+   Compiling parametric-eq v0.1.0 (/home/bl/misofm/engine-idle-admission-clear/crates/parametric-eq)
+   Compiling delay v0.1.0 (/home/bl/misofm/engine-idle-admission-clear/crates/delay)
+   Compiling transient-shaper v0.1.0 (/home/bl/misofm/engine-idle-admission-clear/crates/transient-shaper)
+   Compiling multiband-compressor v0.1.0 (/home/bl/misofm/engine-idle-admission-clear/crates/multiband-compressor)
+   Compiling graph v0.1.0 (/home/bl/misofm/engine-idle-admission-clear/crates/graph)
+   Compiling rack-compiler v0.1.0 (/home/bl/misofm/engine-idle-admission-clear/crates/rack-compiler)
+   Compiling lexical-parse-integer v1.0.6
+   Compiling lexical-write-integer v1.0.6
+   Compiling lexical-parse-float v1.0.6
+   Compiling lexical-write-float v1.0.6
+   Compiling getrandom v0.2.17
+   Compiling ahash v0.7.8
+   Compiling hashbrown v0.12.3
+   Compiling lexical-core v1.0.6
+   Compiling lexical v7.0.5
+   Compiling json-number v0.4.10
+   Compiling indexmap v1.9.3
+   Compiling json-syntax v0.12.5
+   Compiling session v0.1.0 (/home/bl/misofm/engine-idle-admission-clear/crates/session)
+   Compiling effect-compiler v0.1.0 (/home/bl/misofm/engine-idle-admission-clear/crates/effect-compiler)
+   Compiling builtins-compiler v0.1.0 (/home/bl/misofm/engine-idle-admission-clear/crates/builtins-compiler)
+   Compiling source v0.1.0 (/home/bl/misofm/engine-idle-admission-clear/crates/source)
+   Compiling graph-compiler v0.1.0 (/home/bl/misofm/engine-idle-admission-clear/crates/graph-compiler)
+   Compiling host-core v0.1.0 (/home/bl/misofm/engine-idle-admission-clear/crates/host-core)
+   Compiling host-web v0.1.0 (/home/bl/misofm/engine-idle-admission-clear/hosts/host-web)
+    Finished `release` profile [optimized + debuginfo] target(s) in 37.21s
+     Running unittests src/lib.rs (target/release/deps/host_web-8422cdbbe9429b2f)
+     Running tests/boot_transient_budget.rs (target/release/deps/boot_transient_budget-226af82dd7fad6e7)

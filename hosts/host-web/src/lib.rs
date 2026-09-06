@@ -571,6 +571,11 @@ struct ReadyOwnership {
     /// control queue. That is what makes this an exact free-slot count rather than an estimate,
     /// and it is what lets a submission be refused *before* anything is pushed.
     in_flight: Box<[u32]>,
+    /// Whether any record has been admitted since the last successful render.
+    ///
+    /// This keeps command-free blocks from walking every destination counter. It is set at each
+    /// successful push, so a partial internal failure cannot accidentally credit queue capacity.
+    has_in_flight_commands: bool,
     /// Canonical normalized track order: the addressing authority for `track_index`.
     tracks: Vec<Box<str>>,
     /// Effects declared per track per rack, `[simd1, dynamic, simd2]`, so an effect-addressed
@@ -1256,8 +1261,14 @@ impl AudioWorkletEngineHost {
                 self.status.next_absolute_sample = report.next_absolute_sample;
                 self.status.rendered_quanta = self.status.rendered_quanta.saturating_add(1);
                 // Issue #137 D1: the matrix stage drained every control queue at the top of this
-                // block, so the exact free-slot count is the whole capacity again.
-                ready.in_flight.fill(0);
+                // block, so the exact free-slot count is the whole capacity again. Command-free
+                // blocks have no counters to clear and skip the dense write pass entirely.
+                if ready.has_in_flight_commands {
+                    #[cfg(test)]
+                    record_admission_counter_clear(ready.in_flight.len());
+                    ready.in_flight.fill(0);
+                    ready.has_in_flight_commands = false;
+                }
                 // Issue #137 D2: the master bus is the host's own output plane, so there is
                 // nothing to observe and nothing to expose -- one branch and one pass over a
                 // buffer already in cache, and only while the lease is held.
@@ -2201,6 +2212,7 @@ fn admit_commands_staged(
             });
         }
         ready.in_flight[slot] += 1;
+        ready.has_in_flight_commands = true;
     }
     Ok(())
 }
@@ -2825,6 +2837,7 @@ fn compile_ready(
         solo: ConsoleSoloState::try_new(&prepared_mutes)
             .map_err(|_| fixed_diagnostic("web.resource.allocation"))?,
         in_flight: boxed_zero_u32(queue_count)?,
+        has_in_flight_commands: false,
         tracks: handles.tracks,
         rack_effects: rack_effects.into_boxed_slice(),
         host,
@@ -2963,6 +2976,33 @@ fn boxed_uninit_planes(channels: u32) -> Result<Box<[MaybeUninit<&'static [f32]>
         .map_err(|_| RESULT_REFUSED_BUDGET)?;
     value.resize_with(count, MaybeUninit::uninit);
     Ok(value.into_boxed_slice())
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static ADMISSION_COUNTER_CLEAR: std::cell::Cell<(u64, u64)> =
+        const { std::cell::Cell::new((0, 0)) };
+}
+
+#[cfg(test)]
+fn reset_admission_counter_clear() {
+    ADMISSION_COUNTER_CLEAR.with(|stats| stats.set((0, 0)));
+}
+
+#[cfg(test)]
+fn admission_counter_clear_stats() -> (u64, u64) {
+    ADMISSION_COUNTER_CLEAR.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn record_admission_counter_clear(elements: usize) {
+    ADMISSION_COUNTER_CLEAR.with(|stats| {
+        let (calls, cleared) = stats.get();
+        stats.set((
+            calls.saturating_add(1),
+            cleared.saturating_add(elements as u64),
+        ));
+    });
 }
 
 mod ffi;
