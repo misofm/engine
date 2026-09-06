@@ -1,0 +1,12 @@
+   Compiling bytemuck v1.25.2
+   Compiling safe_arch v1.2.0
+   Compiling wide v1.6.1
+   Compiling lane v0.1.0 (/home/bl/misofm/engine-lane2-plan/crates/lane)
+    Finished `release` profile [optimized + debuginfo] target(s) in 9.08s
+     Running tests/g2_kernel_identity.rs (/tmp/463-sol2-tranche-target/release/deps/g2_kernel_identity-e1fc707b2590ad4a)
+
+running 1 test
+test lane2_kernels_preserve_original_words_and_reject_short_inputs_before_writing ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+

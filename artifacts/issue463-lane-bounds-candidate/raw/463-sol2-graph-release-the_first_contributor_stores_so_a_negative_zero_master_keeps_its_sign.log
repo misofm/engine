@@ -1,0 +1,8 @@
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.03s
+     Running unittests src/lib.rs (/tmp/463-sol2-qualification-target/release/deps/graph-82147ccc67a4cb2f)
+
+running 1 test
+test runtime::tests::the_first_contributor_stores_so_a_negative_zero_master_keeps_its_sign ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 54 filtered out; finished in 0.00s
+

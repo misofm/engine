@@ -1,0 +1,9 @@
+   Compiling graph v0.1.0 (/home/bl/misofm/engine-lane2-plan/crates/graph)
+    Finished `release` profile [optimized + debuginfo] target(s) in 20.78s
+     Running unittests src/lib.rs (/tmp/463-sol2-qualification-target/release/deps/graph-82147ccc67a4cb2f)
+
+running 1 test
+test runtime::tests::route_applies_folded_gain_with_frozen_op_order ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 54 filtered out; finished in 0.00s
+

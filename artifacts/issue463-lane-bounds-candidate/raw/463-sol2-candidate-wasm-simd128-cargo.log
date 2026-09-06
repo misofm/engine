@@ -1,0 +1,4 @@
+   Compiling bytemuck v1.25.2
+   Compiling wide v1.6.1
+   Compiling lane v0.1.0 (/home/bl/misofm/engine-lane2-plan/crates/lane)
+    Finished `release` profile [optimized + debuginfo] target(s) in 2.77s

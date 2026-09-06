@@ -1,0 +1,67 @@
+cwd=/home/bl/misofm/engine-lane2-plan
+PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/463-sol2-candidate-native-target cargo build --locked -p lane --release --target x86_64-unknown-linux-gnu
+status=0 log=/tmp/463-sol2-candidate-native-cargo.log
+PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/463-sol2-candidate-wasm-scalar-target RUSTFLAGS="-C target-feature=-simd128" cargo build --locked -p lane --release --target wasm32-unknown-unknown
+status=0 log=/tmp/463-sol2-candidate-wasm-scalar-cargo.log
+PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/463-sol2-candidate-wasm-simd128-target RUSTFLAGS="-C target-feature=+simd128" cargo build --locked -p lane --release --target wasm32-unknown-unknown
+status=0 log=/tmp/463-sol2-candidate-wasm-simd128-cargo.log
+The three fully expanded direct rustc commands are recorded in README.md.
+native direct rustc status=0 log=/tmp/463-sol2-candidate-native-compile.log
+wasm-scalar direct rustc status=0 log=/tmp/463-sol2-candidate-wasm-scalar-compile.log
+wasm-simd128 direct rustc status=0 log=/tmp/463-sol2-candidate-wasm-simd128-compile.log
+/home/bl/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-objdump --demangle --disassemble --no-show-raw-insn /tmp/463-sol2-candidate-codegen/native.o
+status=0 log=native-x86_64-v3.disassembly.txt
+wasm-objdump -d /tmp/463-sol2-candidate-codegen/wasm-scalar.o
+status=0 log=wasm-scalar.disassembly.txt
+wasm-objdump -d /tmp/463-sol2-candidate-codegen/wasm-simd128.o
+status=0 log=wasm-simd128.disassembly.txt
+PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/463-sol2-qualification-target cargo test --locked -p lane --test g2_kernel_identity --test p1_partition
+status=0 log=/tmp/463-sol2-lane-debug.log
+PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/463-sol2-qualification-target cargo test --locked --release -p lane --test g2_kernel_identity --test p1_partition
+status=0 log=/tmp/463-sol2-lane-release.log
+PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/463-sol2-qualification-target cargo test --locked -p graph --test rt1_direct_bank_alloc
+status=0 log=/tmp/463-sol2-alloc-debug.log
+PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/463-sol2-qualification-target cargo test --locked --release -p graph --test rt1_direct_bank_alloc
+status=0 log=/tmp/463-sol2-alloc-release.log
+PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/463-sol2-qualification-target cargo test --locked -p graph --lib runtime::tests::route_applies_folded_gain_with_frozen_op_order -- --exact
+status=0 log=/tmp/463-sol2-graph-debug-route_applies_folded_gain_with_frozen_op_order.log
+PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/463-sol2-qualification-target cargo test --locked -p graph --lib tests::executor_applies_exact_pdc_then_fixed_pairwise_reduction -- --exact
+status=0 log=/tmp/463-sol2-graph-debug-executor_applies_exact_pdc_then_fixed_pairwise_reduction.log
+PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/463-sol2-qualification-target cargo test --locked -p graph --lib runtime::tests::a_folded_epilogue_is_the_route_and_the_reduction_bit_for_bit -- --exact
+status=0 log=/tmp/463-sol2-graph-debug-a_folded_epilogue_is_the_route_and_the_reduction_bit_for_bit.log
+PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/463-sol2-qualification-target cargo test --locked -p graph --lib runtime::tests::the_first_contributor_stores_so_a_negative_zero_master_keeps_its_sign -- --exact
+status=0 log=/tmp/463-sol2-graph-debug-the_first_contributor_stores_so_a_negative_zero_master_keeps_its_sign.log
+PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/463-sol2-qualification-target cargo test --locked --release -p graph --lib runtime::tests::route_applies_folded_gain_with_frozen_op_order -- --exact
+status=0 log=/tmp/463-sol2-graph-release-route_applies_folded_gain_with_frozen_op_order.log
+PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/463-sol2-qualification-target cargo test --locked --release -p graph --lib tests::executor_applies_exact_pdc_then_fixed_pairwise_reduction -- --exact
+status=0 log=/tmp/463-sol2-graph-release-executor_applies_exact_pdc_then_fixed_pairwise_reduction.log
+PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/463-sol2-qualification-target cargo test --locked --release -p graph --lib runtime::tests::a_folded_epilogue_is_the_route_and_the_reduction_bit_for_bit -- --exact
+status=0 log=/tmp/463-sol2-graph-release-a_folded_epilogue_is_the_route_and_the_reduction_bit_for_bit.log
+PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/463-sol2-qualification-target cargo test --locked --release -p graph --lib runtime::tests::the_first_contributor_stores_so_a_negative_zero_master_keeps_its_sign -- --exact
+status=0 log=/tmp/463-sol2-graph-release-the_first_contributor_stores_so_a_negative_zero_master_keeps_its_sign.log
+PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/463-sol2-qualification-target cargo test --locked -p host-web --lib tests::native_identity_session_digest_pins_the_wasm_parity -- --exact
+status=0 log=/tmp/463-sol2-host-debug-native_identity_session_digest_pins_the_wasm_parity.log
+PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/463-sol2-qualification-target cargo test --locked -p host-web --lib tests::native_command_timeline_digest_pins_the_wasm_parity -- --exact
+status=0 log=/tmp/463-sol2-host-debug-native_command_timeline_digest_pins_the_wasm_parity.log
+PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/463-sol2-qualification-target cargo test --locked --release -p host-web --lib tests::native_identity_session_digest_pins_the_wasm_parity -- --exact
+status=0 log=/tmp/463-sol2-host-release-native_identity_session_digest_pins_the_wasm_parity.log
+PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/463-sol2-qualification-target cargo test --locked --release -p host-web --lib tests::native_command_timeline_digest_pins_the_wasm_parity -- --exact
+status=0 log=/tmp/463-sol2-host-release-native_command_timeline_digest_pins_the_wasm_parity.log
+PATH=/home/bl/.cargo/bin:$PATH bash scripts/check-lane-policy.sh
+status=0 log=/tmp/463-sol2-lane-policy.log
+PATH=/home/bl/.cargo/bin:$PATH bash scripts/check-realtime-policy.sh
+status=0 log=/tmp/463-sol2-realtime-policy.log
+PATH=/home/bl/.cargo/bin:$PATH bash scripts/check-graph-policy.sh
+status=0 log=/tmp/463-sol2-graph-policy.log
+PATH=/home/bl/.cargo/bin:$PATH bash scripts/check-workspace-policy.sh
+status=0 log=/tmp/463-sol2-workspace-policy.log
+PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/463-sol2-qualification-target cargo clippy --locked -p lane --tests -- -D warnings
+status=0 log=/tmp/463-sol2-clippy-lane.log
+PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/463-sol2-qualification-target cargo clippy --locked -p graph --lib --tests -- -D warnings
+status=0 log=/tmp/463-sol2-clippy-graph.log
+PATH=/home/bl/.cargo/bin:$PATH bash scripts/run-wasm-gates.sh /tmp/463-sol2-candidate-wasm-gates
+status=0 log=/tmp/463-sol2-candidate-g5.log
+PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/463-sol2-worklet-target bash scripts/build-web-audioworklet.sh /tmp/463-sol2-worklet.4jaSqj
+status=1 log=/tmp/463-sol2-worklet-build.log reason=artifact-pin-mismatch
+PATH=/home/bl/.cargo/bin:$PATH node hosts/host-web/tests/browser-v1/direct-oracle.mjs /tmp/463-sol2-worklet.4jaSqj hosts/host-web/tests/browser-v1/expected.json
+status=0 log=/tmp/463-sol2-direct-oracle.log

@@ -1,0 +1,120 @@
+0004e0 func[4] <issue463_sum2_scalar>:
+ 0004e1: 04 7f                      | local[2..5] type=i32
+ 0004e3: 02 40                      | block
+ 0004e5: 02 40                      |   block
+ 0004e7: 20 01                      |     local.get 1
+ 0004e9: 20 03                      |     local.get 3
+ 0004eb: 4b                         |     i32.gt_u
+ 0004ec: 0d 00                      |     br_if 0
+ 0004ee: 20 01                      |     local.get 1
+ 0004f0: 20 05                      |     local.get 5
+ 0004f2: 4b                         |     i32.gt_u
+ 0004f3: 0d 01                      |     br_if 1
+ 0004f5: 02 40                      |     block
+ 0004f7: 20 01                      |       local.get 1
+ 0004f9: 45                         |       i32.eqz
+ 0004fa: 0d 00                      |       br_if 0
+ 0004fc: 41 00                      |       i32.const 0
+ 0004fe: 21 06                      |       local.set 6
+ 000500: 02 40                      |       block
+ 000502: 20 01                      |         local.get 1
+ 000504: 41 01                      |         i32.const 1
+ 000506: 46                         |         i32.eq
+ 000507: 0d 00                      |         br_if 0
+ 000509: 20 01                      |         local.get 1
+ 00050b: 41 01                      |         i32.const 1
+ 00050d: 71                         |         i32.and
+ 00050e: 21 07                      |         local.set 7
+ 000510: 20 01                      |         local.get 1
+ 000512: 41 7e                      |         i32.const 4294967294
+ 000514: 71                         |         i32.and
+ 000515: 21 08                      |         local.set 8
+ 000517: 41 00                      |         i32.const 0
+ 000519: 21 06                      |         local.set 6
+ 00051b: 20 02                      |         local.get 2
+ 00051d: 21 03                      |         local.set 3
+ 00051f: 20 04                      |         local.get 4
+ 000521: 21 05                      |         local.set 5
+ 000523: 20 00                      |         local.get 0
+ 000525: 21 09                      |         local.set 9
+ 000527: 03 40                      |         loop
+ 000529: 20 09                      |           local.get 9
+ 00052b: 20 03                      |           local.get 3
+ 00052d: 2a 02 00                   |           f32.load 2 0
+ 000530: 20 05                      |           local.get 5
+ 000532: 2a 02 00                   |           f32.load 2 0
+ 000535: 92                         |           f32.add
+ 000536: 38 02 00                   |           f32.store 2 0
+ 000539: 20 09                      |           local.get 9
+ 00053b: 41 04                      |           i32.const 4
+ 00053d: 6a                         |           i32.add
+ 00053e: 20 03                      |           local.get 3
+ 000540: 41 04                      |           i32.const 4
+ 000542: 6a                         |           i32.add
+ 000543: 2a 02 00                   |           f32.load 2 0
+ 000546: 20 05                      |           local.get 5
+ 000548: 41 04                      |           i32.const 4
+ 00054a: 6a                         |           i32.add
+ 00054b: 2a 02 00                   |           f32.load 2 0
+ 00054e: 92                         |           f32.add
+ 00054f: 38 02 00                   |           f32.store 2 0
+ 000552: 20 03                      |           local.get 3
+ 000554: 41 08                      |           i32.const 8
+ 000556: 6a                         |           i32.add
+ 000557: 21 03                      |           local.set 3
+ 000559: 20 05                      |           local.get 5
+ 00055b: 41 08                      |           i32.const 8
+ 00055d: 6a                         |           i32.add
+ 00055e: 21 05                      |           local.set 5
+ 000560: 20 09                      |           local.get 9
+ 000562: 41 08                      |           i32.const 8
+ 000564: 6a                         |           i32.add
+ 000565: 21 09                      |           local.set 9
+ 000567: 20 08                      |           local.get 8
+ 000569: 20 06                      |           local.get 6
+ 00056b: 41 02                      |           i32.const 2
+ 00056d: 6a                         |           i32.add
+ 00056e: 22 06                      |           local.tee 6
+ 000570: 47                         |           i32.ne
+ 000571: 0d 00                      |           br_if 0
+ 000573: 0b                         |         end
+ 000574: 20 07                      |         local.get 7
+ 000576: 45                         |         i32.eqz
+ 000577: 0d 01                      |         br_if 1
+ 000579: 0b                         |       end
+ 00057a: 20 00                      |       local.get 0
+ 00057c: 20 06                      |       local.get 6
+ 00057e: 41 02                      |       i32.const 2
+ 000580: 74                         |       i32.shl
+ 000581: 22 03                      |       local.tee 3
+ 000583: 6a                         |       i32.add
+ 000584: 20 02                      |       local.get 2
+ 000586: 20 03                      |       local.get 3
+ 000588: 6a                         |       i32.add
+ 000589: 2a 02 00                   |       f32.load 2 0
+ 00058c: 20 04                      |       local.get 4
+ 00058e: 20 03                      |       local.get 3
+ 000590: 6a                         |       i32.add
+ 000591: 2a 02 00                   |       f32.load 2 0
+ 000594: 92                         |       f32.add
+ 000595: 38 02 00                   |       f32.store 2 0
+ 000598: 0b                         |     end
+ 000599: 20 00                      |     local.get 0
+ 00059b: 20 01                      |     local.get 1
+ 00059d: 10 81 80 80 80 00          |     call 1 <_RNvCs8lo3PVzYdl8_14issue463_probe7observe>
+ 0005a3: 0f                         |     return
+ 0005a4: 0b                         |   end
+ 0005a5: 41 00                      |   i32.const 0
+ 0005a7: 20 01                      |   local.get 1
+ 0005a9: 20 03                      |   local.get 3
+ 0005ab: 41 ac 80 80 80 00          |   i32.const 44
+ 0005b1: 10 80 80 80 80 00          |   call 0 <env._RNvNtNtCsdkdt1aaAg1T_4core5slice5index16slice_index_fail>
+ 0005b7: 00                         |   unreachable
+ 0005b8: 0b                         | end
+ 0005b9: 41 00                      | i32.const 0
+ 0005bb: 20 01                      | local.get 1
+ 0005bd: 20 05                      | local.get 5
+ 0005bf: 41 9c 80 80 80 00          | i32.const 28
+ 0005c5: 10 80 80 80 80 00          | call 0 <env._RNvNtNtCsdkdt1aaAg1T_4core5slice5index16slice_index_fail>
+ 0005cb: 00                         | unreachable
+ 0005cc: 0b                         | end

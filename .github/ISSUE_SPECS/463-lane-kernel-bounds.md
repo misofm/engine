@@ -277,4 +277,47 @@ Independently verified all109 unique manifest payloads by hash/size and exact tr
 
 Root may now authorize only the already-frozen three-kernel checked-prefix/chunk implementation within Sol2, preserving debug equality, release controlling prefix/short rejection, exact arithmetic/order and matrix snapshots. All final public bounds/hostile-category/identity/allocation, real fold_plane store=false and SAME-corpus candidate/codegen gates remain mandatory. No pin edits, extra kernels, timing, AArch64, generic framework or fourth-attempt accounting follows from this baseline PASS. Final Sol2 gets one consolidated product verdict after its coherent completion.
 
+## Sol attempt 2 consolidated product evidence
+
+Root checkpointed the complete product/test tranche at pushed
+`09c26a98d270d031d566feb72d93863d60e21447`. Only the three frozen kernels and existing lane/graph
+test modules changed. Each kernel preserves its debug equality assertions, validates every required
+controlling prefix before the first write, then traverses pre-split exact-width chunks and a scalar
+tail. Operand order is unchanged; matrix loads both old planes before either store. The direct lane
+fixture proves f32/W4/W8 over the frozen lengths and hostile categories, both short sum inputs,
+short accumulator input, short matrix right plane, before-write rejection, debug longer rejection,
+release controlling-prefix behavior/right suffix preservation, and zero-controller behavior. The
+graph fixture retains the signed-zero first store and adds a nonzero cancellation-sensitive master,
+an asymmetric matrix and a second real `ArenaMembers::fold_plane(store=false)` contribution over a
+native vector plus tail; overwrite cannot satisfy its independent ordered expectation.
+
+Full lane G2 (7 tests) and P1 (1) pass in debug/release. Each of the four frozen graph filters and
+two host-web digest filters executes one test and passes in both profiles. The existing isolated
+graph allocator executable passes debug/release with its positive liveness and repeated real render
+zero allocation/free proof. Lane, realtime (42 regions/12 files), graph and workspace policy gates,
+focused lane/graph Clippy, formatting and diff hygiene pass. Existing dependency Clippy
+configuration notices were not suppressed.
+
+The accepted probe was rebuilt at the candidate with the same source, Rust/LLVM versions,
+opt-level, codegen-unit, non-LTO and target flags. All three Cargo builds, direct compiles and
+decoders have numeric status 0; all 18 named native Simd8/scalar and Wasm Simd4/scalar bodies are
+nonempty. Necessary independent-length rejection is now at function entry. Native primary vector
+loops (`sum2` 0x70..0xcc, `sum_into` 0x60..0xbc, matrix 0x80..0xf3) contain arithmetic and loop
+termination but no slice-shape failure edge. Actual simd128 bodies show the corresponding v128
+arithmetic and entry-only slice rejection; scalar-Wasm has the equivalent scalar lowering. Separate
+tail selection/unrolling, alias checks and observer loops remain and are not claimed removed. No
+universal branch-removal or timing claim is made. Exact commands, statuses, object/output hashes and
+decoded bodies are retained in `artifacts/issue463-lane-bounds-candidate/`.
+
+The SAME unchanged-pin G5 candidate passes native, scalar-Wasm and simd128 at 139 cases/349
+comparisons each with no mismatch; its JSONL hash equals the accepted baseline JSONL. No pin file
+changed. The normal worklet builder compiles the changed candidate but correctly exits 1 because
+the content-addressed artifact changed (expected `da36c750...`, observed `6dcf5e3a...`). No repin
+was authorized or performed. The same stripped/remapped observed candidate executed through the
+existing direct oracle and passed PCM/command identity with status 0. Product/source acceptance is
+therefore fully evidenced; content-addressed artifact promotion remains an explicit integration
+delivery seam for root after current main integration, under the frozen bounded-successor rule.
+
 Root adopts baseline PASS and authorizes continuation of the SAME Sol2 attempt, with checkpoint at the first coherent focused-green implementation tranche. Final product verdict remains pending.
+
+Root independently reran only the existing direct oracle against the retained hash6dcf5e3a candidate because the earlier shell pipeline returned tee status. Fresh subprocess invocation records actual oracle exit0 with no pipeline in raw/463-root-direct-oracle.*. This supplies direct exit evidence without relabelling the earlier pipeline; no rebuild or timing.

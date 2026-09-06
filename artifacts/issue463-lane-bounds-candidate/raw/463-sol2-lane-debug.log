@@ -1,0 +1,25 @@
+   Compiling bytemuck v1.25.2
+   Compiling safe_arch v1.2.0
+   Compiling wide v1.6.1
+   Compiling lane v0.1.0 (/home/bl/misofm/engine-lane2-plan/crates/lane)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.79s
+     Running tests/g2_kernel_identity.rs (/tmp/463-sol2-qualification-target/debug/deps/g2_kernel_identity-b008d5690fc4ed67)
+
+running 7 tests
+test lane2_kernels_preserve_original_words_and_reject_short_inputs_before_writing ... ok
+test ordered_accumulation_matches_the_existing_d9_primitives_and_rejects_shapes ... ok
+test g2_subnormal_state_is_flushed_at_every_width ... ok
+test g2_svf_step_yields_both_taps_of_one_state ... ok
+test g2_idle_ramped_svf_equals_the_plain_svf ... ok
+test g2_kernels_are_bit_identical_at_every_width ... ok
+test g2_interleaved_cascade_equals_a_chain_of_blocks ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+
+     Running tests/p1_partition.rs (/tmp/463-sol2-qualification-target/debug/deps/p1_partition-98587a2af6ea4e71)
+
+running 1 test
+test p1_every_kernel_is_partition_invariant ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.34s
+

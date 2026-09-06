@@ -1,0 +1,61 @@
+   Compiling math v0.1.0 (/home/bl/misofm/engine-lane2-plan/crates/math)
+   Compiling engine v0.1.0 (/home/bl/misofm/engine-lane2-plan/crates/engine)
+   Compiling version_check v0.9.5
+   Compiling proc-macro2 v1.0.107
+   Compiling lexical-util v1.0.7
+   Compiling quote v1.0.47
+   Compiling libc v0.2.189
+   Compiling unicode-ident v1.0.24
+   Compiling syn v1.0.109
+   Compiling once_cell v1.21.4
+   Compiling autocfg v1.5.1
+   Compiling smallvec v1.15.2
+   Compiling utf8-decode v1.0.1
+   Compiling locspan v0.8.2
+   Compiling decoded-char v0.1.1
+   Compiling smallstr v0.3.1
+   Compiling ahash v0.7.8
+   Compiling proc-macro-error-attr v1.0.4
+   Compiling proc-macro-error v1.0.4
+   Compiling indexmap v1.9.3
+   Compiling effect-runtime v0.1.0 (/home/bl/misofm/engine-lane2-plan/crates/effect-runtime)
+   Compiling effect-contract v0.1.0 (/home/bl/misofm/engine-lane2-plan/crates/effect-contract)
+   Compiling lexical-write-integer v1.0.6
+   Compiling lexical-parse-integer v1.0.6
+   Compiling lexical-parse-float v1.0.6
+   Compiling lexical-write-float v1.0.6
+   Compiling lexical-core v1.0.6
+   Compiling getrandom v0.2.17
+   Compiling lexical v7.0.5
+   Compiling rack v0.1.0 (/home/bl/misofm/engine-lane2-plan/crates/rack)
+   Compiling delay v0.1.0 (/home/bl/misofm/engine-lane2-plan/crates/delay)
+   Compiling multiband-compressor v0.1.0 (/home/bl/misofm/engine-lane2-plan/crates/multiband-compressor)
+   Compiling parametric-eq v0.1.0 (/home/bl/misofm/engine-lane2-plan/crates/parametric-eq)
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-lane2-plan/crates/compressor)
+   Compiling gate-expander v0.1.0 (/home/bl/misofm/engine-lane2-plan/crates/gate-expander)
+   Compiling true-peak-limiter v0.1.0 (/home/bl/misofm/engine-lane2-plan/crates/true-peak-limiter)
+   Compiling soft-clip v0.1.0 (/home/bl/misofm/engine-lane2-plan/crates/soft-clip)
+   Compiling transient-shaper v0.1.0 (/home/bl/misofm/engine-lane2-plan/crates/transient-shaper)
+   Compiling builtins v0.1.0 (/home/bl/misofm/engine-lane2-plan/crates/builtins)
+   Compiling json-number v0.4.10
+   Compiling hashbrown v0.12.3
+   Compiling graph v0.1.0 (/home/bl/misofm/engine-lane2-plan/crates/graph)
+   Compiling rack-compiler v0.1.0 (/home/bl/misofm/engine-lane2-plan/crates/rack-compiler)
+   Compiling effect-package v0.1.0 (/home/bl/misofm/engine-lane2-plan/crates/effect-package)
+   Compiling locspan-derive v0.6.0
+   Compiling json-syntax v0.12.5
+   Compiling session v0.1.0 (/home/bl/misofm/engine-lane2-plan/crates/session)
+   Compiling builtins-compiler v0.1.0 (/home/bl/misofm/engine-lane2-plan/crates/builtins-compiler)
+   Compiling effect-compiler v0.1.0 (/home/bl/misofm/engine-lane2-plan/crates/effect-compiler)
+   Compiling source v0.1.0 (/home/bl/misofm/engine-lane2-plan/crates/source)
+   Compiling graph-compiler v0.1.0 (/home/bl/misofm/engine-lane2-plan/crates/graph-compiler)
+   Compiling host-core v0.1.0 (/home/bl/misofm/engine-lane2-plan/crates/host-core)
+   Compiling host-web v0.1.0 (/home/bl/misofm/engine-lane2-plan/hosts/host-web)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.96s
+     Running unittests src/lib.rs (/tmp/463-sol2-qualification-target/debug/deps/host_web-5bbcf2d829042aa5)
+
+running 1 test
+test tests::native_identity_session_digest_pins_the_wasm_parity ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 62 filtered out; finished in 0.00s
+
