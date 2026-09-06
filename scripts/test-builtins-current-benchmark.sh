@@ -221,6 +221,7 @@ cat >"$template/bin/cargo" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 if [[ "${1:-}" == -V ]]; then printf 'cargo 1.99.0 (fake)\n'; exit 0; fi
+printf 'build-entry\n' >>"$(cd "$(dirname "$0")/.." && pwd)/build-calls"
 [[ "${1:-}" == build && "${2:-}" == --locked && "${3:-}" == --release && "${4:-}" == -p && "${5:-}" == bench ]] || exit 90
 [[ "${CARGO_PROFILE_RELEASE_OPT_LEVEL:-}" == 3 &&
    "${CARGO_PROFILE_RELEASE_LTO:-}" == fat &&
@@ -230,9 +231,9 @@ if [[ "${1:-}" == -V ]]; then printf 'cargo 1.99.0 (fake)\n'; exit 0; fi
    "${CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS:-}" == false &&
    "${CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS:-}" == false &&
    "${CARGO_PROFILE_RELEASE_INCREMENTAL:-}" == false &&
+   "${CARGO_PROFILE_RELEASE_RPATH:-}" == false &&
    "${CARGO_PROFILE_RELEASE_STRIP:-}" == none &&
-   "${CARGO_PROFILE_RELEASE_SPLIT_DEBUG_INFO:-}" == unpacked ]] || exit 91
-printf 'build\n' >>"$(cd "$(dirname "$0")/.." && pwd)/build-calls"
+   "${CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO:-}" == off ]] || exit 91
 mkdir -p "$CARGO_TARGET_DIR/release"
 cp synthetic-emitter.sh "$CARGO_TARGET_DIR/release/bench"
 chmod 755 "$CARGO_TARGET_DIR/release/bench"
@@ -372,6 +373,9 @@ run_preflight >/dev/null
 jq -e '.status=="READY" and .issue==431 and .records_required==20 and
  .workload_invocations==0 and .timed_benchmark_invocations==0 and
  .profile=="release" and .opt_level=="3" and .lto=="fat" and .codegen_units==1 and
+ .panic=="abort" and .debug==1 and .debug_assertions==false and
+ .overflow_checks==false and .incremental==false and .rpath==false and
+ .strip=="none" and .split_debuginfo=="off" and
  .target_features=="+avx2,+fma" and .cargo_version=="cargo 1.99.0 (fake)" and
  .rust_version=="rustc 1.99.0 (fake)" and .llvm_version=="20.1.0" and
  .target_triple=="x86_64-unknown-linux-gnu" and
@@ -385,26 +389,48 @@ printf 'protected\n' >"$case_root/artifacts/issue431-full-chain/builtins-benchma
 if run_preflight >/dev/null 2>&1; then exit 1; fi
 [[ "$(<"$case_root/artifacts/issue431-full-chain/builtins-benchmark.preflight.json")" == protected && ! -e "$case_root/synthetic-launches" ]]
 
-for override in RUSTFLAGS CARGO_PROFILE_RELEASE_LTO CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS RUSTC_WRAPPER; do
+for override in RUSTFLAGS CARGO_PROFILE_RELEASE_LTO CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS \
+  RUSTC_WRAPPER CARGO_INCREMENTAL CARGO_BUILD_INCREMENTAL CARGO_BUILD_RUSTC \
+  CARGO_BUILD_RUSTC_WRAPPER CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER; do
   new_case "build-env-$override"
-  if env "$override=conflict" PATH="$case_root/bin:$PATH" \
-      bash "$case_root/scripts/preflight-builtins-current-benchmark.sh" >/dev/null 2>&1; then exit 1; fi
-  [[ ! -e "$case_root/synthetic-launches" && ! -e "$case_root/target/issue431-prepared/bench" ]]
+  set +e
+  env "$override=conflict" PATH="$case_root/bin:$PATH" \
+      bash "$case_root/scripts/preflight-builtins-current-benchmark.sh" >"$case_root/refusal.stdout" 2>"$case_root/refusal.stderr"
+  refusal_status=$?
+  set -e
+  [[ "$refusal_status" == 1 ]]
+  grep -Fqx "Issue-431 current benchmark preflight failure: incompatible build environment: $override" "$case_root/refusal.stderr"
+  [[ ! -e "$case_root/build-calls" && ! -e "$case_root/synthetic-launches" && ! -e "$case_root/target/issue431-prepared/bench" ]]
 done
 for override in CARGO_PROFILE_RELEASE_PANIC CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS CARGO_PROFILE_SOMETHING; do
   new_case "profile-family-$override"
-  if env "$override=conflict" PATH="$case_root/bin:$PATH" \
-      bash "$case_root/scripts/preflight-builtins-current-benchmark.sh" >/dev/null 2>&1; then exit 1; fi
+  set +e
+  env "$override=conflict" PATH="$case_root/bin:$PATH" \
+      bash "$case_root/scripts/preflight-builtins-current-benchmark.sh" >"$case_root/refusal.stdout" 2>"$case_root/refusal.stderr"
+  refusal_status=$?
+  set -e
+  [[ "$refusal_status" == 1 ]]
+  grep -Fqx "Issue-431 current benchmark preflight failure: incompatible build environment: $override" "$case_root/refusal.stderr"
   [[ ! -e "$case_root/build-calls" && ! -e "$case_root/target/issue431-prepared/bench" ]]
 done
 
 new_case unsupported-host
 printf '%s\n' aarch64-unknown-linux-gnu >"$case_root/rustc-host"
-if run_preflight >/dev/null 2>&1; then exit 1; fi
+set +e; run_preflight >"$case_root/refusal.stdout" 2>"$case_root/refusal.stderr"; refusal_status=$?; set -e
+[[ "$refusal_status" == 1 ]]
+grep -Fqx 'Issue-431 current benchmark preflight failure: unsupported rustc host target: aarch64-unknown-linux-gnu' "$case_root/refusal.stderr"
 [[ ! -e "$case_root/build-calls" && ! -e "$case_root/target/issue431-prepared/bench" ]]
 new_case malformed-host
 printf '%s\n' malformed >"$case_root/rustc-host"
-if run_preflight >/dev/null 2>&1; then exit 1; fi
+set +e; run_preflight >"$case_root/refusal.stdout" 2>"$case_root/refusal.stderr"; refusal_status=$?; set -e
+[[ "$refusal_status" == 1 ]]
+grep -Fqx 'Issue-431 current benchmark preflight failure: unsupported rustc host target: malformed' "$case_root/refusal.stderr"
+[[ ! -e "$case_root/build-calls" && ! -e "$case_root/target/issue431-prepared/bench" ]]
+new_case missing-host
+: >"$case_root/rustc-host"
+set +e; run_preflight >"$case_root/refusal.stdout" 2>"$case_root/refusal.stderr"; refusal_status=$?; set -e
+[[ "$refusal_status" == 1 ]]
+grep -Fqx 'Issue-431 current benchmark preflight failure: rustc host target is unavailable' "$case_root/refusal.stderr"
 [[ ! -e "$case_root/build-calls" && ! -e "$case_root/target/issue431-prepared/bench" ]]
 
 run_failure_case() {
@@ -526,6 +552,22 @@ run_preflight >/dev/null
 if env CARGO_PROFILE_RELEASE_PANIC=unwind PATH="$case_root/bin:$PATH" \
     bash "$case_root/scripts/run-builtins-current-benchmark.sh" >/dev/null 2>&1; then exit 1; fi
 disposition_reason FAIL environment_override_forbidden
+[[ ! -e "$case_root/synthetic-launches" ]]
+
+for override in CARGO_INCREMENTAL CARGO_BUILD_INCREMENTAL CARGO_BUILD_RUSTC CARGO_BUILD_RUSTC_WRAPPER CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER; do
+  new_case "runner-build-env-$override"
+  run_preflight >/dev/null
+  if env "$override=conflict" PATH="$case_root/bin:$PATH" \
+      bash "$case_root/scripts/run-builtins-current-benchmark.sh" >/dev/null 2>&1; then exit 1; fi
+  disposition_reason FAIL environment_override_forbidden
+  [[ ! -e "$case_root/synthetic-launches" ]]
+done
+
+new_case runner-unsupported-host
+run_preflight >/dev/null
+printf '%s\n' aarch64-unknown-linux-gnu >"$case_root/rustc-host"
+if run_benchmark >/dev/null 2>&1; then exit 1; fi
+disposition_reason FAIL build_provenance_mismatch
 [[ ! -e "$case_root/synthetic-launches" ]]
 
 new_case seal-profile-tamper

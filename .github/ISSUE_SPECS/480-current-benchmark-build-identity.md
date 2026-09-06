@@ -99,3 +99,35 @@ Four finite correction groups for Sol2:
 Keep accepted473 input/validator/lifecycle implementations and their evidence unchanged. Root may assign Sol2 after recording this single consolidated FAIL; no further Luna correction. Same three-script scope plus evidence is sufficient, with no Rust/Cargo/configuration/fixture/CI mutation, build or timing authorization. Parent473 and431 remain open;431 capture is unspent.
 
 Root adopts FAIL and assigns Sol attempt 2 for this exact finite correction, preserving all original obligations. No further Luna correction.
+
+## Sol attempt 2 correction evidence
+
+The Luna decision record's `split-debuginfo=unpacked` statement is superseded: the frozen
+x86_64 Linux value is `off`, supplied through Cargo's recognized
+`CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO` variable. The seal and runner also bind ordinary
+`rpath=false`. Preflight and runner refuse `CARGO_INCREMENTAL`, `CARGO_BUILD_INCREMENTAL`, and
+Cargo's build-scoped rustc/wrapper aliases in addition to the accepted profile-family and tool
+override checks. Runner requires the supported `x86_64-unknown-linux-gnu` host independently at
+seal consumption.
+
+The seven profile fields that the unchanged benchmark metadata schema does not consume are no
+longer exported to the workload. They remain enforced and verified in prepared provenance. The
+scratch fake cargo marks entry before argument/environment validation and checks every frozen
+profile field. Negative cases assert status 1, the exact rejected environment name or host
+diagnostic, absence of build entry, and absence of a prepared executable. Missing, malformed, and
+unsupported hosts are distinct. Runner cases cover every added alias and host drift before the
+synthetic workload, while the positive case still validates the full seal and promotes all 20
+records. No real preparation, build, runner, workload, benchmark, audio, or timing command ran;
+#431 remains unspent and unauthorized.
+
+Raw evidence:
+
+- `/tmp/480-sol2-shell-syntax.{command,log,status}`: status 0.
+- `/tmp/480-sol2-focused.{command,log,status}`: status 0 and
+  `current builtins benchmark validators/lifecycle: PASS (real workload launches: 0)`.
+- `/tmp/480-sol2-env.{command,log,status}`: status 0.
+- `/tmp/480-sol2-validator-delta.{command,log,status}`: status 0; accepted validator copies are
+  unchanged.
+- `/tmp/480-sol2-source-prose.{command,log,status}`: status 0 for exact scoped paths, unchanged
+  Rust/Cargo/configuration/validators/fixtures/workflow/history, and explicit #431
+  `UNSPENT`/`UNAUTHORIZED` state.

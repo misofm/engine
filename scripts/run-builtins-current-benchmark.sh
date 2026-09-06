@@ -161,7 +161,9 @@ fi
 
 [[ "$#" == 0 ]] || { reason=invalid_arguments; printf 'usage: %s\n' "$0" >&2; exit 2; }
 for override in RUSTFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_BUILD_RUSTFLAGS CARGO_BUILD_TARGET \
+    CARGO_BUILD_INCREMENTAL CARGO_INCREMENTAL \
     CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS \
+    CARGO_BUILD_RUSTC CARGO_BUILD_RUSTC_WRAPPER CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER \
     RUSTC RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER \
     MISO_ENGINE_BENCH_CANDIDATE_COMMIT MISO_ENGINE_BENCH_BINARY_SHA256 \
     MISO_ENGINE_BENCH_RUST_VERSION MISO_ENGINE_BENCH_LLVM_VERSION \
@@ -232,6 +234,7 @@ cargo_version=$(cargo -V) || { reason=build_provenance_mismatch; exit 1; }
 rustc_verbose=$(rustc -vV) || { reason=build_provenance_mismatch; exit 1; }
 rust_version=$(printf '%s\n' "$rustc_verbose" | awk 'NR==1 {print}')
 target_triple=$(printf '%s\n' "$rustc_verbose" | awk '$1=="host:" {print $2}')
+[[ "$target_triple" == x86_64-unknown-linux-gnu ]] || { reason=build_provenance_mismatch; exit 1; }
 llvm_version=$(printf '%s\n' "$rustc_verbose" | awk '$1=="LLVM" && $2=="version:" {print $3}')
 jq -e --arg commit "$candidate_commit" --arg tree "$candidate_tree" \
   --arg binary "$binary_sha256" --arg lock "$(hash_file "$lock_file")" \
@@ -266,7 +269,7 @@ jq -e --arg commit "$candidate_commit" --arg tree "$candidate_tree" \
    .target_features=="+avx2,+fma" and .profile=="release" and .opt_level=="3" and
    .lto=="fat" and .codegen_units==1 and .panic=="abort" and .debug==1 and
    .debug_assertions==false and .overflow_checks==false and .incremental==false and
-   .strip=="none" and .split_debuginfo=="unpacked" and .records_required==20 and
+   .rpath==false and .strip=="none" and .split_debuginfo=="off" and .records_required==20 and
    .warmup_passes==1 and .measured_rounds==2 and .preflight_invocations==1 and
    .runner_invocations==0 and .workload_invocations==0 and .timed_benchmark_invocations==0' \
   "$seal" >/dev/null || { reason=preflight_seal_mismatch; exit 1; }
@@ -318,10 +321,6 @@ MISO_ENGINE_BENCH_TARGET_TRIPLE="$target_triple" \
 MISO_ENGINE_BENCH_TARGET_FEATURES='+avx2,+fma' \
 MISO_ENGINE_BENCH_PROFILE=release MISO_ENGINE_BENCH_OPT_LEVEL=3 \
 MISO_ENGINE_BENCH_LTO=fat MISO_ENGINE_BENCH_CODEGEN_UNITS=1 \
-MISO_ENGINE_BENCH_PANIC=abort MISO_ENGINE_BENCH_DEBUG=1 \
-MISO_ENGINE_BENCH_DEBUG_ASSERTIONS=false MISO_ENGINE_BENCH_OVERFLOW_CHECKS=false \
-MISO_ENGINE_BENCH_INCREMENTAL=false MISO_ENGINE_BENCH_STRIP=none \
-MISO_ENGINE_BENCH_SPLIT_DEBUG_INFO=unpacked \
 MISO_ENGINE_BENCH_BACKGROUND_LOAD_NOTE="controlled; loadavg $loadavg; affinity cpu$bench_cpu; sibling ceiling 5%; cooldown 60s" \
 taskset -c "$bench_cpu" "$binary" builtins >&"$raw_fd" 2>&"$stderr_fd" &
 child_pid=$!
