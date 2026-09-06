@@ -1,0 +1,9 @@
+    Checking bytemuck v1.25.2
+    Checking engine v0.1.0 (/home/bl/misofm/engine-native-points/crates/engine)
+    Checking wide v1.6.1
+    Checking lane v0.1.0 (/home/bl/misofm/engine-native-points/crates/lane)
+    Checking math v0.1.0 (/home/bl/misofm/engine-native-points/crates/math)
+    Checking effect-contract v0.1.0 (/home/bl/misofm/engine-native-points/crates/effect-contract)
+    Checking effect-runtime v0.1.0 (/home/bl/misofm/engine-native-points/crates/effect-runtime)
+    Checking compressor v0.1.0 (/home/bl/misofm/engine-native-points/crates/compressor)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.94s
