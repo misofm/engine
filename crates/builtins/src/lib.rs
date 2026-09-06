@@ -4281,17 +4281,54 @@ mod tests {
             .0
             .stage
             .lane_track(0);
-        let mut stage = InputStage::<Simd8>::new(&[track; 5]);
-        let mut trim = super::lane_read(stage.coef.trim[1]);
-        trim[2] = -0.0;
-        stage.coef.trim[1] = super::lane_words(&trim);
-        stage.remaining[1][3] = 7;
-        stage.refresh_channel_symmetry_post_ramp();
-        assert_eq!(stage.symmetry & 0x1f, 0x13);
-        assert_eq!(stage.symmetry & !0x1f, 0);
-        assert!(!stage.compute_lane_channel_symmetry(2));
-        assert!(!stage.compute_lane_channel_symmetry(3));
-        assert!(!stage.compute_lane_channel_symmetry(5));
+        fn assert_matches<L: super::Lane>(stage: &mut InputStage<L>) {
+            stage.refresh_channel_symmetry_post_ramp();
+            let oracle = (0..stage.members).fold(0_u8, |mask, lane| {
+                mask | u8::from(stage.compute_lane_channel_symmetry(lane)) << lane
+            });
+            assert_eq!(stage.symmetry, oracle);
+            let active = if stage.members == 8 {
+                u8::MAX
+            } else {
+                (1_u8 << stage.members) - 1
+            };
+            assert_eq!(stage.symmetry & !active, 0);
+        }
+        fn exercise<L: super::Lane>(tracks: &[super::PreparedInputTrack]) {
+            let mut stage = InputStage::<L>::new(tracks);
+            let mut left = super::lane_read(stage.coef.trim[0]);
+            let mut right = super::lane_read(stage.coef.trim[1]);
+            left[0] = 0.0;
+            right[0] = -0.0;
+            stage.coef.trim = [super::lane_words(&left), super::lane_words(&right)];
+            assert_matches(&mut stage);
+            if stage.members > 1 {
+                let mut word = super::lane_read(stage.ramp.target[1]);
+                word[1] = f32::from_bits(word[1].to_bits() ^ 1);
+                stage.ramp.target[1] = super::lane_words(&word);
+                assert_matches(&mut stage);
+            }
+            if stage.members > 2 {
+                let mut word = super::lane_read(stage.ramp.step[1]);
+                word[2] = f32::from_bits(word[2].to_bits() ^ 1);
+                stage.ramp.step[1] = super::lane_words(&word);
+                assert_matches(&mut stage);
+            }
+            if stage.members > 3 {
+                let mut word = super::lane_read(stage.coef.section[1][0].c1);
+                word[3] = f32::from_bits(word[3].to_bits() ^ 1);
+                stage.coef.section[1][0].c1 = super::lane_words(&word);
+                assert_matches(&mut stage);
+            }
+            if stage.members > 4 {
+                stage.remaining[1][4] = 7;
+                assert_matches(&mut stage);
+            }
+        }
+        let tracks = [track; 8];
+        exercise::<f32>(&tracks[..1]);
+        exercise::<Simd4>(&tracks[..4]);
+        exercise::<Simd8>(&tracks[..5]);
     }
 
     #[test]
