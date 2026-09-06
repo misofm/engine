@@ -382,17 +382,26 @@ impl core::fmt::Debug for PreparedHost {
 
 /// Parse one session JSON document.
 pub fn parse_host_session(document: &str) -> Result<SessionModel, PrepareDiagnostics> {
-    parse_session_json(document).map_err(|value| {
-        PrepareDiagnostics::new(
-            PrepareRejection::Session,
-            diagnostic_lines(
-                value
-                    .diagnostics()
-                    .iter()
-                    .map(|diagnostic| (diagnostic.code.as_str(), &diagnostic.path)),
-            ),
-        )
-    })
+    parse_session_json(document).map_err(session_diagnostics)
+}
+
+fn session_diagnostics(value: session::DiagnosticSet) -> PrepareDiagnostics {
+    PrepareDiagnostics::new(
+        PrepareRejection::Session,
+        diagnostic_lines(
+            value
+                .diagnostics()
+                .iter()
+                .map(|diagnostic| (diagnostic.code.as_str(), &diagnostic.path)),
+        ),
+    )
+}
+
+fn effect_diagnostics(value: effect_compiler::EffectDiagnosticSet) -> PrepareDiagnostics {
+    PrepareDiagnostics::new(
+        PrepareRejection::Effect,
+        diagnostic_lines(value.0.into_iter().map(|diagnostic| (diagnostic.code, diagnostic.path))),
+    )
 }
 
 /// Parse and compile one session JSON document under this host's caps.
@@ -419,17 +428,7 @@ pub fn compile_host_model(
     model: &SessionModel,
     caps: CompileCaps,
 ) -> Result<CompiledSession, PrepareDiagnostics> {
-    compile_session(model, caps).map_err(|value| {
-        PrepareDiagnostics::new(
-            PrepareRejection::Session,
-            diagnostic_lines(
-                value
-                    .diagnostics()
-                    .iter()
-                    .map(|diagnostic| (diagnostic.code.as_str(), &diagnostic.path)),
-            ),
-        )
-    })
+    compile_session(model, caps).map_err(session_diagnostics)
 }
 
 /// Parse, compile and prepare one session in a single call.
@@ -592,17 +591,7 @@ fn prepare_host_runtime_with_console_policy(
             maximum_automation_spans_per_block: caps.maximum_automation_spans_per_block,
         },
     )
-    .map_err(|diagnostics| {
-        PrepareDiagnostics::new(
-            PrepareRejection::Effect,
-            diagnostic_lines(
-                diagnostics
-                    .0
-                    .iter()
-                    .map(|diagnostic| (diagnostic.code, &diagnostic.path)),
-            ),
-        )
-    })?;
+    .map_err(effect_diagnostics)?;
     let (effect_state_bytes, effect_scratch_bytes) =
         effects
             .entries
@@ -640,17 +629,7 @@ fn prepare_host_runtime_with_console_policy(
     // plan renders the byte-identical console-free path.
     let effect_controls: Vec<EffectControlProducer> = match console.control_queue_depth {
         None => Vec::new(),
-        Some(depth) => attach_effect_console(&mut effects, depth).map_err(|diagnostics| {
-            PrepareDiagnostics::new(
-                PrepareRejection::Effect,
-                diagnostic_lines(
-                    diagnostics
-                        .0
-                        .iter()
-                        .map(|diagnostic| (diagnostic.code, &diagnostic.path)),
-                ),
-            )
-        })?,
+        Some(depth) => attach_effect_console(&mut effects, depth).map_err(effect_diagnostics)?,
     };
 
     // Issue #143 D3, level 1. Observation capacity is attached only when it was asked for, and
@@ -667,19 +646,8 @@ fn prepare_host_runtime_with_console_policy(
             let _ = taps;
             return Err(shape("host.observation.console"));
         }
-        taps => attach_effect_observation(&mut effects, taps, observation_window_blocks).map_err(
-            |diagnostics| {
-                PrepareDiagnostics::new(
-                    PrepareRejection::Effect,
-                    diagnostic_lines(
-                        diagnostics
-                            .0
-                            .iter()
-                            .map(|diagnostic| (diagnostic.code, &diagnostic.path)),
-                    ),
-                )
-            },
-        )?,
+        taps => attach_effect_observation(&mut effects, taps, observation_window_blocks)
+            .map_err(effect_diagnostics)?,
     };
 
     // Issue #137 D1/D2: the console requests are derived here, once, from the canonical track
