@@ -37,3 +37,17 @@ Root numbers/synchronizes child and reciprocal473 hardstop record before assignm
 ## Numbered integration baseline
 
 GitHub #480 matches this title and spec. Implementation base is cb649ff7, preserving reviewed preparation source 8e932ebf and the final parent hard stop. Pending Astra numbered scope approval; no implementation assigned yet.
+
+## Numbered scope approval and attempt 1
+
+# Astra #480 numbered scope review — PASS with explicit wording interpretation
+
+Reviewed73ecabb7370af653c01e0ebc93e6649f063c64d5 in engine-480-proof. Full /tmp/astra-473-build-identity-brief.md is preserved verbatim in480-current-benchmark-build-identity.md. Reciprocal473 retains final hardstop/source8e932ebf, full parent qualification and unspent431 capture. Root reports matching remote number/title/body; no independent remote query performed here.
+
+Approve the bounded three-script build-identity child: supported x86_64-unknown-linux-gnu host before build, complete frozen release settings/provenance, inherited CARGO_PROFILE_* rejection, and the exact focused fake-only positive/refusal cases. No Rust/Cargo/config/validator/fixture/workflow/historical runner changes, new framework or additional measurement authority. Final release default values must be resolved explicitly against the existing supported configuration before implementation, not selected as a new tuned profile.
+
+Clarify the sentence “no actual preflight/runner invocation or build occurs” as follows: the REAL production script logic IS executed from scratch copies by the hermetic suite, after verifying fake cargo/rustc/tool resolution and the synthetic emitter. Those executions are required proof. No invocation against the actual431 repository namespace, real Cargo benchmark build, real bench executable, actual benchmark preparation/capture or timing is authorized. Root may append this interpretation verbatim before assignment; it changes no acceptance gate.
+
+Root may assign fresh Luna1 after checkpoint/state audit and recording this wording clarification. Parent473 remains open until full accepted delivery;431 remains separately authorized/unspent. One coherent pass/verdict, Sol2/3 after failure and hardstop after3 applies. No tests/builds/source/Git/GitHub mutations performed in this review.
+
+Root adopts PASS and its explicit scratch-execution clarification, and assigns fresh Luna attempt 1. Pause at the first coherent green source tranche for root exact-path checkpoint before further implementation.
