@@ -1,0 +1,21 @@
+   Compiling host-core v0.1.0 (/home/bl/misofm/engine-cp7-diagnostics/crates/host-core)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.33s
+     Running tests/prepare.rs (/tmp/492-sol2-target/debug/deps/prepare-7fb311c2c7158bc0)
+
+running 13 tests
+test dense_refusal_diagnostics_finish_under_one_second_in_release ... ignored, release-mode budget; runs nightly
+test contract_types_are_send_and_not_sync ... ok
+test default_ring_derivation_covers_the_stall_and_two_in_flight_quanta ... ok
+test dense_refusal_diagnostics_are_count_bounded ... ok
+test source_control_errors_are_typed ... ok
+test console_attaches_bounded_control_and_meter_halves_in_canonical_track_order ... ok
+test prepare_reports_the_session_shape_and_feeds_sources_independently ... ok
+test retained_bytes_projection_matches_the_live_set ... ok
+test source_channel_cap_is_optional ... ok
+test no_console_request_attaches_nothing_and_charges_nothing ... ok
+test shape_policy_pins_rate_and_quantum ... ok
+test session_validation_owns_the_launch_rate_set ... ok
+test every_byte_cap_admits_its_reported_row_and_rejects_one_byte_below ... ok
+
+test result: ok. 12 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.09s
+

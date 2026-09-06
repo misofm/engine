@@ -1,0 +1,7 @@
+# Astra #492 session diagnostic-cap applicability — APPROVE precise amendment
+
+Read current test-only checkpoint1ed69049 and source cap: session/diagnostic.rs defines MAXIMUM_SESSION_DIAGNOSTICS=64; parse.rs:88 and validate.rs:767 stop appending at that bound. Combined with the private/nonempty DiagnosticSet construction, the normal public parser/compiler cannot supply65 diagnostics to this adapter. The earlier demand for an actual65-entry SESSION input was inapplicable and must be corrected explicitly, not met through a new constructor/unsafe/API.
+
+Accept the candidate's65 intended unknown fields on an otherwise-valid canonical document, with an asserted actual64-entry pre-adapter set of exact ordered UnknownField/code/path values, followed by complete expected64-line byte equality. This proves preservation of the upstream-capped session population. It does NOT independently prove session-adapter truncation from65; no such claim should be recorded. The separate publicly constructible EffectDiagnosticSet65 case proves the shared host truncation behavior, with category and full-prefix equality. Keep the prior empty-session invariant ruling.
+
+No production change, cap change, broader test interface or additional gate is needed. Root should synchronize this narrow applicability correction and allow Sol2 to finish the existing gates. This is not the consolidated Sol2 verdict; final source/evidence review remains pending. No tests/builds or repository/Git/GitHub mutation performed.

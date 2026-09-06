@@ -1,0 +1,24 @@
+   Compiling host-core v0.1.0 (/home/bl/misofm/engine-cp7-diagnostics/crates/host-core)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.29s
+     Running unittests src/lib.rs (/tmp/492-luna1-target/debug/deps/host_core-1bb727029f38e8a0)
+
+running 1 test
+test prepare::tests::typed_diagnostic_adapters_preserve_projection_and_bound ... FAILED
+
+failures:
+
+---- prepare::tests::typed_diagnostic_adapters_preserve_projection_and_bound stdout ----
+
+thread 'prepare::tests::typed_diagnostic_adapters_preserve_projection_and_bound' (199612) panicked at crates/host-core/src/prepare.rs:1049:9:
+assertion `left == right` failed
+  left: 1
+ right: 64
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    prepare::tests::typed_diagnostic_adapters_preserve_projection_and_bound
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p host-core --lib`
