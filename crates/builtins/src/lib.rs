@@ -835,6 +835,30 @@ const MAX_BANK_LANES: usize = 8;
 thread_local! {
     static CHANNEL_SYMMETRY_PREDICATE_CALLS: Cell<usize> = const { Cell::new(0) };
     static CHANNEL_SYMMETRY_LANE_READS: Cell<usize> = const { Cell::new(usize::MAX) };
+    static CHANNEL_SYMMETRY_OBSERVE_POST_RAMP: Cell<bool> = const { Cell::new(false) };
+    static CHANNEL_SYMMETRY_LAST_POST_RAMP_READS: Cell<usize> = const { Cell::new(usize::MAX) };
+}
+
+#[cfg(test)]
+fn begin_post_ramp_observation() {
+    CHANNEL_SYMMETRY_OBSERVE_POST_RAMP.with(|observe| {
+        if observe.get() {
+            CHANNEL_SYMMETRY_LANE_READS.with(|reads| reads.set(0));
+        }
+    });
+}
+
+#[cfg(test)]
+fn end_post_ramp_observation() {
+    CHANNEL_SYMMETRY_OBSERVE_POST_RAMP.with(|observe| {
+        if observe.get() {
+            observe.set(false);
+            CHANNEL_SYMMETRY_LANE_READS.with(|reads| {
+                CHANNEL_SYMMETRY_LAST_POST_RAMP_READS.with(|last| last.set(reads.get()));
+                reads.set(usize::MAX);
+            });
+        }
+    });
 }
 
 /// The damping of every builtin section: Butterworth, `k = 1 / Q = sqrt(2)`, rounded once.
@@ -1101,12 +1125,30 @@ impl<L: Lane> InputStage<L> {
         }
         for section in 0..2 {
             for (left_word, right_word) in [
-                (self.coef.section[0][section].c1, self.coef.section[1][section].c1),
-                (self.coef.section[0][section].a2, self.coef.section[1][section].a2),
-                (self.coef.section[0][section].a3, self.coef.section[1][section].a3),
-                (self.coef.section[0][section].m0, self.coef.section[1][section].m0),
-                (self.coef.section[0][section].m1, self.coef.section[1][section].m1),
-                (self.coef.section[0][section].m2, self.coef.section[1][section].m2),
+                (
+                    self.coef.section[0][section].c1,
+                    self.coef.section[1][section].c1,
+                ),
+                (
+                    self.coef.section[0][section].a2,
+                    self.coef.section[1][section].a2,
+                ),
+                (
+                    self.coef.section[0][section].a3,
+                    self.coef.section[1][section].a3,
+                ),
+                (
+                    self.coef.section[0][section].m0,
+                    self.coef.section[1][section].m0,
+                ),
+                (
+                    self.coef.section[0][section].m1,
+                    self.coef.section[1][section].m1,
+                ),
+                (
+                    self.coef.section[0][section].m2,
+                    self.coef.section[1][section].m2,
+                ),
             ] {
                 if candidate == 0 {
                     break;
@@ -1114,8 +1156,7 @@ impl<L: Lane> InputStage<L> {
                 let left = lane_read::<L>(left_word);
                 let right = lane_read::<L>(right_word);
                 for lane in 0..L::WIDTH {
-                    if candidate & (1 << lane) != 0
-                        && left[lane].to_bits() != right[lane].to_bits()
+                    if candidate & (1 << lane) != 0 && left[lane].to_bits() != right[lane].to_bits()
                     {
                         candidate &= !(1 << lane);
                     }
@@ -1346,7 +1387,11 @@ impl<L: Lane> InputStage<L> {
                 &mut self.ramp,
             );
             self.settle(frames, 0..2);
+            #[cfg(test)]
+            begin_post_ramp_observation();
             self.refresh_channel_symmetry_post_ramp();
+            #[cfg(test)]
+            end_post_ramp_observation();
             report
         } else {
             input_chain_block_elided::<L>(
@@ -1429,7 +1474,11 @@ impl<L: Lane> InputStage<L> {
             // countdowns have diverged.
             self.settle(frames, 0..1);
             self.mirror_trim_ramp();
+            #[cfg(test)]
+            begin_post_ramp_observation();
             self.refresh_channel_symmetry_post_ramp();
+            #[cfg(test)]
+            end_post_ramp_observation();
             report
         } else {
             input_chain_block_mono_elided::<L>(
@@ -4196,15 +4245,20 @@ pub mod test_support {
 mod tests {
     use super::{
         BuiltinChain, BuiltinLaneSelector, BuiltinParameters, BuiltinProcessReport,
-        BuiltinResetKind, CHANNEL_SYMMETRY_PREDICATE_CALLS, Cell, ChannelParameters, DualMonoBlock,
-        CHANNEL_SYMMETRY_LANE_READS, InputStage, Matrix2x2, Simd4, Simd8, prepare_sections,
+        BuiltinResetKind, CHANNEL_SYMMETRY_LAST_POST_RAMP_READS,
+        CHANNEL_SYMMETRY_OBSERVE_POST_RAMP, CHANNEL_SYMMETRY_PREDICATE_CALLS, Cell,
+        ChannelParameters, DualMonoBlock, InputStage, Matrix2x2, Simd4, Simd8, prepare_sections,
         test_support,
     };
 
     #[test]
     fn post_ramp_symmetry_mask_matches_lane_oracle() {
         let parameters = BuiltinParameters::default();
-        let track = prepare_sections(48_000, parameters).unwrap().0.stage.lane_track(0);
+        let track = prepare_sections(48_000, parameters)
+            .unwrap()
+            .0
+            .stage
+            .lane_track(0);
         let tracks = [track; 8];
         check_post_ramp_mask::<f32>(&tracks[..1]);
         check_post_ramp_mask::<Simd4>(&tracks[..4]);
@@ -4221,15 +4275,82 @@ mod tests {
     }
 
     #[test]
+    fn post_ramp_symmetry_handles_differing_words_countdowns_and_padding() {
+        let track = prepare_sections(48_000, BuiltinParameters::default())
+            .unwrap()
+            .0
+            .stage
+            .lane_track(0);
+        let mut stage = InputStage::<Simd8>::new(&[track; 5]);
+        let mut trim = super::lane_read(stage.coef.trim[1]);
+        trim[2] = -0.0;
+        stage.coef.trim[1] = super::lane_words(&trim);
+        stage.remaining[1][3] = 7;
+        stage.refresh_channel_symmetry_post_ramp();
+        assert_eq!(stage.symmetry & 0x1f, 0x13);
+        assert_eq!(stage.symmetry & !0x1f, 0);
+        assert!(!stage.compute_lane_channel_symmetry(2));
+        assert!(!stage.compute_lane_channel_symmetry(3));
+        assert!(!stage.compute_lane_channel_symmetry(5));
+    }
+
+    #[test]
     fn post_ramp_symmetry_extracts_each_word_once() {
         let parameters = BuiltinParameters::default();
-        let track = prepare_sections(48_000, parameters).unwrap().0.stage.lane_track(0);
+        let track = prepare_sections(48_000, parameters)
+            .unwrap()
+            .0
+            .stage
+            .lane_track(0);
         let mut stage = InputStage::<Simd8>::new(&[track; 8]);
-        CHANNEL_SYMMETRY_LANE_READS.with(|reads| reads.set(0));
-        stage.refresh_channel_symmetry_post_ramp();
-        let extractions = CHANNEL_SYMMETRY_LANE_READS.with(Cell::get);
-        CHANNEL_SYMMETRY_LANE_READS.with(|reads| reads.set(usize::MAX));
-        assert_eq!(extractions, 30, "one extraction per side of each of 15 word pairs");
+        for lane in 0..8 {
+            stage.set_trim_db(lane, BuiltinLaneSelector::Both, 2.0, 8);
+        }
+        CHANNEL_SYMMETRY_OBSERVE_POST_RAMP.with(|observe| observe.set(true));
+        let mut left = vec![0.0; 8 * 8];
+        let mut right = vec![0.0; 8 * 8];
+        stage.process(&mut left, &mut right, 8);
+        let extractions = CHANNEL_SYMMETRY_LAST_POST_RAMP_READS.with(Cell::get);
+        let oracle = (0..stage.members).fold(0_u8, |mask, lane| {
+            mask | u8::from(stage.compute_lane_channel_symmetry(lane)) << lane
+        });
+        assert_eq!(stage.symmetry, oracle);
+        assert_eq!(
+            extractions, 30,
+            "one extraction per side of each of 15 word pairs"
+        );
+
+        for lane in 0..8 {
+            stage.set_trim_db(lane, BuiltinLaneSelector::Both, 3.0, 8);
+        }
+        CHANNEL_SYMMETRY_OBSERVE_POST_RAMP.with(|observe| observe.set(true));
+        let mut mono = vec![0.0; 8 * 8];
+        stage.process_mono(&mut mono, 8);
+        let mono_extractions = CHANNEL_SYMMETRY_LAST_POST_RAMP_READS.with(Cell::get);
+        let mono_oracle = (0..stage.members).fold(0_u8, |mask, lane| {
+            mask | u8::from(stage.compute_lane_channel_symmetry(lane)) << lane
+        });
+        assert_eq!(stage.symmetry, mono_oracle);
+        assert_eq!(mono_extractions, 30);
+    }
+
+    #[test]
+    fn post_ramp_symmetry_helper_is_off_for_settled_blocks() {
+        let track = prepare_sections(48_000, BuiltinParameters::default())
+            .unwrap()
+            .0
+            .stage
+            .lane_track(0);
+        let mut stage = InputStage::<Simd8>::new(&[track; 8]);
+        CHANNEL_SYMMETRY_OBSERVE_POST_RAMP.with(|observe| observe.set(true));
+        let mut left = vec![0.0; 8 * 4];
+        let mut right = vec![0.0; 8 * 4];
+        stage.process(&mut left, &mut right, 4);
+        assert_eq!(
+            CHANNEL_SYMMETRY_LAST_POST_RAMP_READS.with(Cell::get),
+            usize::MAX
+        );
+        CHANNEL_SYMMETRY_OBSERVE_POST_RAMP.with(|observe| observe.set(false));
     }
 
     fn process_reference(
