@@ -1,6 +1,6 @@
 # 475: Specialize uniform compressor detector taps without changing DSP
 
-Current state: source accepted through bounded child499; integrated delivery qualification active. The decision below supersedes historical scheduling records. Root owns Git/GitHub and exact-path checkpoints; no timing or benchmark capture is authorized.
+Current state: delivered via PR502; GitHub issue CLOSED. The decision below supersedes historical scheduling records. Root owns Git/GitHub and exact-path checkpoints; no timing or benchmark capture is authorized.
 
 Active Class-A product child of audit #349 DYN-1. Current implementation base is delivered main571dfc5b after #463 closed. Astra has approved the actual base below; root assigns fresh Luna1 under the Astra review and Sol2/3 fallback workflow. Earlier queued-base records are retained as history, not current scheduling authority.
 
@@ -234,3 +234,7 @@ Root uses a separate delivery checkout from frozen1c71000d; the source qualifica
 ## Integrated delivery qualification complete
 
 Frozen1c71000d passes immutable full workspace (transcript277 blocks/1639 passed/0 failed/24 ignored, including isolated child result), supported scalar/simd128 checks, native release C API and shared/static ABI. Separate delivery candidatede410134 passes verified artifact/static/resources26/hermetic/current3browser+self-tests/matrix; modulefa78dc8d3f0d391b94419f5252504eee2aafbbf13853884157e24935ed092cc3 is independently hashed. Complete command/source/output/numeric status and source equivalence are retained in artifacts/issue475-integrated-delivery. No production/numerical change after source acceptance. Actual-head PR review and required qualification remain before merged closure of475 and499.
+
+## Delivered and remotely closed
+
+PR502 merged at2026-09-06T05:39:25Z asad00d16b8ef8e3aa5ba4c406d00db4c62ff311b5. Astra exact-head PASS and required qualification34014259495 SUCCESS both apply to13fd9d1b6e3df7cc9005d0eef1b9e0723a3b0a1e before merge. GitHub475 and499 are verified CLOSED. This delivers the uniform compressor detector-access DYN1 product and its populated W4 proof; no measured speedup or other-effect closure is claimed. Post-main qualification is monitored separately.
