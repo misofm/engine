@@ -122,9 +122,10 @@ loss, and later recovers at the next exact master/track span.
 
 The first accepted producer reset generation is retained and compared on every later candidate. An
 unexpected change rejects the group under the old public identity, increments the internal delivery
-epoch, drains only prepared queue capacities, clears pending/master partial state, and starts at the
-next clean meter boundary. The new epoch becomes public only with its first successful frame. Lease
-transitions retain the same bounded clean-boundary rule. Source seek is explicitly a content-position
+epoch, clears pending/master partial state, and starts at the next clean meter boundary. Producer
+queue entries become stale at that boundary and the existing capacity-budgeted poll rejects them;
+the new epoch becomes public only with its first successful frame. Lease transitions retain the same
+deferred bounded-rejection rule. Source seek is explicitly a content-position
 discontinuity on a continuous absolute render clock: it neither resets the meter accumulator nor
 advances the meter epoch, so a peak window may straddle it. This web host exposes no in-place plan
 replacement or full render reset; those operations create a fresh host and therefore have no queued
@@ -169,10 +170,18 @@ real integration blockers, so that artifact is preserved as failed evidence rath
 qualified.
 
 First, the unchanged static callgraph gate found callback-reachable `panic_bounds_check` owned by
-`ReadyOwnership::reset_meter_delivery`. The only slice-wide operation in that new helper was public
-frame `fill`; the follow-up uses an iterator over the prepared frame instead, preserving exact reset
-behavior while removing that bounds-panic owner. This Rust change requires a new observed artifact
-digest and a fresh Astra adoption ruling; no pin or gate is changed here.
+`ReadyOwnership::reset_meter_delivery`. Replacing public-frame `fill` with an iterator did not alter
+the finding. Inspection of rebuilt Wasm function 61 localized the sole panic call at byte `0x00b73a`
+inside the helper's inlined `MeterConsumer::try_pop`: it compares the queue read index with capacity
+before loading a snapshot slot. The Option-array and public-frame clears compile as direct stores or
+`memory.fill` and own no such call. The final bounded correction removes eager producer-queue drains
+from lifecycle reset. Reset still clears host pending/master state and sets the clean activation
+boundary; the existing capacity-budgeted poll rejects older queued entries before accepting a new
+interval. A saturated reacquisition fixture proves the first fresh producer window may be dropped
+while stale slots remain full, the bounded rejection poll publishes nothing and preserves every
+public byte, and a later exact interval recovers in the new generation with explicit loss. This Rust
+change requires a new observed artifact digest and a fresh Astra adoption ruling; no pin, queue API
+or gate is changed here.
 
 Second, the hermetic fake header omitted the new complete/master validity bits, but inspection also
 found that the production main-realm host's exact-field validator still accepted only the old meter
@@ -188,7 +197,7 @@ Follow-up evidence on the dirty candidate after `fb9f0d6c`:
 
 ```text
 node scripts/test-web-audioworklet.mjs           # PASS
-cargo test -p host-web --lib meter_              # PASS: 11 passed, 61 filtered out
+cargo test -p host-web --lib meter_              # PASS: 12 passed, 61 filtered out
 bash scripts/check-sdk-generated.sh              # PASS
 bash scripts/check-realtime-policy.sh             # PASS: 42 marked regions in 12 files
 cargo fmt --all -- --check                        # PASS

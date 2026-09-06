@@ -3299,6 +3299,41 @@ fn meter_lease_reacquisition_waits_for_a_clean_boundary() {
     assert_eq!(host.meter_frame()[3], 0.2);
 }
 
+#[test]
+fn meter_reacquisition_rejects_a_full_stale_queue_then_recovers() {
+    let mut host = console_host(128, 1);
+    assert_eq!(host.set_meter_lease(true), RESULT_OK);
+    feed_and_render(&mut host, 1, 0, 0.9);
+    assert_eq!(host.poll_meters(), 1);
+    let old_generation = host.meter_header().reserved[0];
+
+    // Fill the prepared producer queue while the consumer is delayed.
+    for block in 1..=8 {
+        feed_and_render(&mut host, 1, block, 0.2);
+    }
+    assert_eq!(host.set_meter_lease(false), RESULT_OK);
+    assert_eq!(host.set_meter_lease(true), RESULT_OK);
+    let empty_frame = host.meter_frame().to_vec();
+    let empty_header = *host.meter_header();
+    assert!(empty_header.reserved[0] > old_generation);
+
+    // The first fresh track window is dropped while stale producer slots remain full. One bounded
+    // poll rejects those old windows and publishes nothing.
+    feed_and_render(&mut host, 1, 9, 0.3);
+    assert_eq!(host.poll_meters(), 0);
+    assert_eq!(host.meter_frame(), empty_frame);
+    assert_eq!(*host.meter_header(), empty_header);
+
+    // With queue room restored, the next exact track/master interval publishes in the new epoch
+    // and reports both the producer drop and discarded stale master interval.
+    feed_and_render(&mut host, 1, 10, 0.4);
+    assert_eq!(host.poll_meters(), 1);
+    assert_eq!(host.meter_header().reserved[0], empty_header.reserved[0]);
+    assert_eq!(host.meter_header().first_sample, 10 * 128);
+    assert_eq!(&host.meter_frame()[..4], &[0.4, 0.4, 0.4, 0.4]);
+    assert_ne!(host.meter_header().reserved[1] & METER_VALID_LOSS, 0);
+}
+
 /// A three-track observation host over the #143 E4 fixture: compressor, EQ (no tap), gate.
 fn observation_host(
     quantum: u32,

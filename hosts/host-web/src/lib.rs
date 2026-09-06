@@ -666,18 +666,10 @@ struct MasterMeasurement {
 }
 
 impl ReadyOwnership {
-    /// Drop queued and pending delivery state using only the prepared queue capacities. This is
-    /// used at lease boundaries; producer-side accumulators continue rendering, but any window
-    /// that straddles the boundary is rejected by `meter_activation_sample` in `poll_meters`.
+    /// Clear host-owned pending delivery state. Producer-side accumulators continue rendering;
+    /// `meter_activation_sample` makes the already bounded poll reject queued pre-activation
+    /// windows before it accepts a clean interval.
     fn reset_meter_delivery(&mut self, clear_publication: bool) {
-        for meter in &mut self.meters {
-            let capacity = meter.consumer.capacity();
-            for _ in 0..capacity {
-                if meter.consumer.try_pop().is_err() {
-                    break;
-                }
-            }
-        }
         for pending in &mut self.meter_pending {
             *pending = None;
         }
@@ -1141,7 +1133,8 @@ impl AudioWorkletEngineHost {
             return self.record(RESULT_UNSUPPORTED);
         }
         // Repeated acquisition/release is idempotent. A real transition starts a new publication
-        // generation and drops every queued/pending interval from the previous lease.
+        // generation, clears host-owned pending state, and marks producer-queued intervals from
+        // the previous lease for bounded rejection by the next poll.
         if enabled == self.meter_lease {
             return self.record(RESULT_OK);
         }
