@@ -1349,7 +1349,19 @@ fn idle_frames_staged_mono<L: Lane>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use effect_contract::{
+        BankWidth, EffectBankProcessBlock, EffectQuality, InitialParameterValue,
+        NativeEffectFactory, ParameterChannel, PrepareEffectLimits, PrepareEffectRequest,
+        PreparedBankMetadata, PreparedNativeEffectBank, PreparedPorts, PreparedSidechainPort,
+        ResetKind, StatePayloadInput, StatePayloadOutput,
+    };
     use lane::{Simd4, Simd8};
+
+    use crate::{
+        COMPRESSOR_DESCRIPTOR, COMPRESSOR_PARAMETERS, CompressorFactory, Instance,
+        PreparedCompressorBank, QUALITIES, expected_prepared_metadata, initial_defaults, port_id,
+        ring_length,
+    };
 
     fn old_detector_word<L: Lane>(channel: &Channel<L>, write: usize, lane: usize) -> f32 {
         let delay = channel.delay[lane] as usize;
@@ -1454,5 +1466,218 @@ mod tests {
         assert!(FILL_RAGGED_CALLS.load(Ordering::Relaxed) > 0);
         assert!(GATHER_UNIFORM_CALLS.load(Ordering::Relaxed) > 0);
         assert!(GATHER_RAGGED_CALLS.load(Ordering::Relaxed) > 0);
+    }
+
+    type TrackPayload = (Vec<u8>, Vec<u8>);
+    type BankResult = (Vec<u32>, Vec<u32>, Vec<TrackPayload>);
+
+    fn initial_values(left_lookahead: f32, right_lookahead: f32) -> [InitialParameterValue; 16] {
+        core::array::from_fn(|index| {
+            let parameter = index / 2;
+            InitialParameterValue {
+                parameter_index: parameter as u32,
+                channel: if index & 1 == 0 {
+                    ParameterChannel::Left
+                } else {
+                    ParameterChannel::Right
+                },
+                value: if parameter == 7 {
+                    if index & 1 == 0 {
+                        left_lookahead
+                    } else {
+                        right_lookahead
+                    }
+                } else {
+                    COMPRESSOR_PARAMETERS[parameter].default_value
+                },
+            }
+        })
+    }
+
+    fn request(values: &[InitialParameterValue]) -> PrepareEffectRequest<'_> {
+        PrepareEffectRequest {
+            sample_rate: 48_000,
+            quantum: 128,
+            quality: EffectQuality::Normal,
+            bypass: false,
+            link_mode: LinkMode::DualMono,
+            ports: PreparedPorts {
+                sidechain: PreparedSidechainPort::Unconnected {
+                    id: port_id("sidechain-in"),
+                    required: false,
+                },
+            },
+            initial_values: values,
+            limits: PrepareEffectLimits {
+                maximum_total_state_bytes: 15_568,
+                maximum_scratch_bytes: 64,
+                maximum_automation_spans_per_block: 16,
+            },
+        }
+    }
+
+    /// Constructs the existing W4 state owner after running the same validation/default
+    /// derivation as the public factory. This is deliberately private test construction: it does
+    /// not claim that this x86-64-v3 build's factory admits a non-native W4 bank.
+    fn bank4(values: &[[InitialParameterValue; 16]; 4]) -> PreparedCompressorBank<Simd4> {
+        let requests: [PrepareEffectRequest<'_>; 4] =
+            core::array::from_fn(|lane| request(&values[lane]));
+        let metadata = expected_prepared_metadata(&COMPRESSOR_DESCRIPTOR, requests[0])
+            .expect("validated metadata");
+        let mut left_defaults = [[0.0; PARAMETER_COUNT]; MAX_WIDTH];
+        let mut right_defaults = [[0.0; PARAMETER_COUNT]; MAX_WIDTH];
+        for (lane, request) in requests.iter().copied().enumerate() {
+            let candidate = expected_prepared_metadata(&COMPRESSOR_DESCRIPTOR, request)
+                .expect("validated lane metadata");
+            assert_eq!(candidate.program_key(), metadata.program_key());
+            let (left, right) = initial_defaults(request.initial_values).expect("defaults");
+            left_defaults[lane] = left;
+            right_defaults[lane] = right;
+        }
+        let length = ring_length(metadata).expect("ring length");
+        PreparedCompressorBank {
+            metadata: PreparedBankMetadata {
+                width: BankWidth::Four,
+                program_key: metadata.program_key(),
+            },
+            instance: Instance::new(metadata, &left_defaults, &right_defaults, length),
+        }
+    }
+
+    fn payloads(bank: &dyn PreparedNativeEffectBank) -> Vec<TrackPayload> {
+        let sizes = QUALITIES[1].maximum_state;
+        (0..4)
+            .map(|track| {
+                let mut left = vec![0; sizes.left_bytes as usize];
+                let mut right = vec![0; sizes.right_bytes as usize];
+                bank.snapshot_track_state_payload(
+                    track,
+                    StatePayloadOutput::new(&mut [], &mut left, &mut right, sizes)
+                        .expect("payload output"),
+                )
+                .expect("snapshot");
+                (left, right)
+            })
+            .collect()
+    }
+
+    fn restore_payloads(bank: &mut dyn PreparedNativeEffectBank, state: &[TrackPayload]) {
+        let sizes = QUALITIES[1].maximum_state;
+        for (track, (left, right)) in state.iter().enumerate() {
+            bank.restore_track_state_payload(
+                track as u32,
+                COMPRESSOR_DESCRIPTOR.state_layout_version,
+                StatePayloadInput::new(&[], left, right, sizes).expect("payload input"),
+            )
+            .expect("restore");
+        }
+    }
+
+    fn render4(bank: &mut dyn PreparedNativeEffectBank, seed: u32, mono: bool) -> BankResult {
+        let mut left: Vec<f32> = (0..512)
+            .map(|word| f32::from_bits(0x3e00_0000 + ((word as u32 * 7919 + seed) & 0x000f_ffff)))
+            .collect();
+        left[4] = -0.0;
+        left[11] = -0.0;
+        // Mirrored planes are the mono-collapse precondition. Values still vary by frame and lane.
+        let mut right = left.clone();
+        let offsets = [0_u32; 5];
+        let block = EffectBankProcessBlock::new(
+            &mut left,
+            &mut right,
+            None,
+            128,
+            BankWidth::Four,
+            seed as u64 * 128,
+            &[],
+            &offsets,
+            128,
+        )
+        .expect("block");
+        if mono {
+            bank.process_bank_mono(block);
+        } else {
+            bank.process_bank(block);
+        }
+        (
+            left.iter().map(|word| word.to_bits()).collect(),
+            right.iter().map(|word| word.to_bits()).collect(),
+            payloads(bank),
+        )
+    }
+
+    fn population(ragged: bool) -> [[InitialParameterValue; 16]; 4] {
+        core::array::from_fn(|lane| {
+            let lookahead = if ragged { 2.5 * lane as f32 } else { 0.0 };
+            initial_values(lookahead, lookahead)
+        })
+    }
+
+    #[test]
+    fn w4_state_owner_transitions_drive_the_next_real_render() {
+        let uniform = population(false);
+        let ragged = population(true);
+
+        // Restore changes both actual W4 directions. The uninterrupted owner holding the saved
+        // state is the oracle for the destination owner's first render after restore.
+        for (source_values, destination_values, seed) in
+            [(&ragged, &uniform, 0x101), (&uniform, &ragged, 0x102)]
+        {
+            let mut source = bank4(source_values);
+            let _ = render4(&mut source, seed - 1, false);
+            let saved = payloads(&source);
+            let mut transitioned = bank4(destination_values);
+            restore_payloads(&mut transitioned, &saved);
+            assert_eq!(
+                render4(&mut transitioned, seed, false),
+                render4(&mut source, seed, false),
+                "first W4 render after restored delay-population transition"
+            );
+        }
+
+        // Full reset reinstalls the ragged preparation defaults over restored uniform state.
+        let uniform_state = payloads(&bank4(&uniform));
+        let mut reset = bank4(&ragged);
+        restore_payloads(&mut reset, &uniform_state);
+        reset.reset(ResetKind::FullToDefaults);
+        assert_eq!(
+            render4(&mut reset, 0x103, false),
+            render4(&mut bank4(&ragged), 0x103, false),
+            "first W4 render after full reset"
+        );
+
+        // Reopen copies a uniform left population over a ragged right population. Construct that
+        // state only through the real per-track restore method, then use the actual mono/copy/dual
+        // trait calls and compare complete next PCM plus every serialized lane state.
+        let asymmetric: [[InitialParameterValue; 16]; 4] =
+            core::array::from_fn(|lane| initial_values(0.0, 2.5 * lane as f32));
+        let asymmetric_state = payloads(&bank4(&asymmetric));
+        let mut reopened = bank4(&uniform);
+        restore_payloads(&mut reopened, &asymmetric_state);
+        let mut oracle = bank4(&uniform);
+        let mono = render4(&mut reopened, 0x104, true);
+        let dual = render4(&mut oracle, 0x104, false);
+        assert_eq!(mono.0, dual.0, "W4 mono left PCM before reopen");
+        reopened.desymmetrize_channels();
+        assert_eq!(payloads(&reopened), payloads(&oracle), "W4 copied state");
+        assert_eq!(
+            render4(&mut reopened, 0x105, false),
+            render4(&mut oracle, 0x105, false),
+            "first W4 dual render after mono reopen"
+        );
+
+        // The test-only owner came through private construction, not public factory admission.
+        let requests: [PrepareEffectRequest<'_>; 4] =
+            core::array::from_fn(|lane| request(&uniform[lane]));
+        assert!(
+            CompressorFactory
+                .bind_homogeneous_bank(effect_contract::PrepareEffectBankRequest {
+                    backend: lane::Backend::Simd4,
+                    width: BankWidth::Four,
+                    requests: &requests,
+                })
+                .expect("validated public request")
+                .is_none()
+        );
     }
 }
