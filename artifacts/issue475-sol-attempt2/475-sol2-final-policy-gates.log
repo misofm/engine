@@ -1,0 +1,17 @@
+COMMAND_1=PATH=/home/bl/.cargo/bin:$PATH cargo fmt --all -- --check
+COMMAND_2=PATH=/home/bl/.cargo/bin:$PATH bash scripts/check-realtime-policy.sh
+COMMAND_3=PATH=/home/bl/.cargo/bin:$PATH bash scripts/check-lane-policy.sh
+COMMAND_4=PATH=/home/bl/.cargo/bin:$PATH bash scripts/check-workspace-policy.sh
+COMMAND_5=git diff --check
+CWD=/home/bl/misofm/engine-475-plan
+SOURCE=git-head:81ed8e72-plus-uncommitted-allocation-process-isolation-fix
+NOTE=Supersedes /tmp/475-sol2-final-policy-gates.log; two non-executable scripts required explicit bash after direct invocation returned 126.
+FMT_EXIT=0
+realtime policy: ok (42 marked regions in 12 files)
+REALTIME_POLICY_EXIT=0
+lane policy: ok
+LANE_POLICY_EXIT=0
+workspace policy: ok
+WORKSPACE_POLICY_EXIT=0
+DIFF_CHECK_EXIT=0
+

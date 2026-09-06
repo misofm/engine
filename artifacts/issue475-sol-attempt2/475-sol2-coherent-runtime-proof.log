@@ -1,0 +1,45 @@
+COMMAND=PATH=/home/bl/.cargo/bin:$PATH cargo test -p compressor --lib uniform_and_ragged_access_match_old_transcription && PATH=/home/bl/.cargo/bin:$PATH cargo test -p compressor --test staged_idle && PATH=/home/bl/.cargo/bin:$PATH cargo test -p compressor --test mono_collapse mono_reopen_drives_the_next_render_from_the_copied_delay_population -- --exact && PATH=/home/bl/.cargo/bin:$PATH cargo test -p compressor --test conformance uniform_and_ragged_render_paths_allocate_and_free_nothing -- --exact
+CWD=/home/bl/misofm/engine-475-plan
+SOURCE=git-head:7d8707df-plus-uncommitted-transitions-allocation-and-witness-lint-fix
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-475-plan/crates/compressor)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.16s
+     Running unittests src/lib.rs (target/debug/deps/compressor-80bd63f116d0655c)
+
+running 1 test
+test kernel::tests::uniform_and_ragged_access_match_old_transcription ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-475-plan/crates/compressor)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.19s
+     Running tests/staged_idle.rs (target/debug/deps/staged_idle-060f462a18ac4922)
+
+running 5 tests
+test a_left_only_rejection_diverges_the_cursors_and_the_staged_body_still_agrees ... ok
+test restore_and_full_reset_drive_the_next_bank_render_classification ... ok
+test every_partition_agrees_with_the_per_frame_body ... ok
+test the_link_laws_bypass_and_a_sidechain_all_agree ... ok
+test a_ragged_bank_agrees_with_the_per_frame_body ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.48s
+
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-475-plan/crates/compressor)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.12s
+     Running tests/mono_collapse.rs (target/debug/deps/mono_collapse-74764ddc5c4b77b3)
+
+running 1 test
+test mono_reopen_drives_the_next_render_from_the_copied_delay_population ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.01s
+
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-475-plan/crates/compressor)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.12s
+     Running tests/conformance.rs (target/debug/deps/conformance-8aabad45177d5df2)
+
+running 1 test
+test uniform_and_ragged_render_paths_allocate_and_free_nothing ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.02s
+
+EXIT=0
+

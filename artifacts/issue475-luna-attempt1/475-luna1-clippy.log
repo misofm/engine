@@ -1,0 +1,62 @@
+COMMAND: PATH=/home/bl/.cargo/bin:$PATH cargo clippy --locked -p compressor --all-targets --all-features -- -D warnings
+CWD: /home/bl/misofm/engine-475-plan
+SOURCE_REV: 55e1c1e8a0ef9401e5bdbd89011b0c67837c9595
+SOURCE_KERNEL_SHA256: 2253ff67518ceea52996accce1162f11cf29ec692724d549edcd69da910c66b9  crates/compressor/src/kernel.rs
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+binary: rustc
+commit-hash: 8bab26f4f68e0e26f0bb7960be334d5b520ea452
+commit-date: 2026-07-14
+host: x86_64-unknown-linux-gnu
+release: 1.97.1
+LLVM version: 22.1.6
+cargo 1.97.1 (c980f4866 2026-06-30)
+    Checking bytemuck v1.25.2
+    Checking typenum v1.20.1
+    Checking engine v0.1.0 (/home/bl/misofm/engine-475-plan/crates/engine)
+    Checking cpufeatures v0.3.0
+    Checking cfg-if v1.0.4
+    Checking dsp-reference v0.1.0 (/home/bl/misofm/engine-475-plan/crates/dsp-reference)
+    Checking safe_arch v1.2.0
+    Checking wide v1.6.1
+    Checking hybrid-array v0.4.14
+    Checking block-buffer v0.12.1
+    Checking crypto-common v0.2.2
+    Checking digest v0.11.3
+    Checking sha2 v0.11.0
+    Checking bench-support v0.1.0 (/home/bl/misofm/engine-475-plan/tools/bench-support)
+    Checking lane v0.1.0 (/home/bl/misofm/engine-475-plan/crates/lane)
+    Checking math v0.1.0 (/home/bl/misofm/engine-475-plan/crates/math)
+    Checking effect-contract v0.1.0 (/home/bl/misofm/engine-475-plan/crates/effect-contract)
+    Checking effect-runtime v0.1.0 (/home/bl/misofm/engine-475-plan/crates/effect-runtime)
+    Checking conformance v0.1.0 (/home/bl/misofm/engine-475-plan/crates/conformance)
+    Checking compressor v0.1.0 (/home/bl/misofm/engine-475-plan/crates/compressor)
+error: the loop variable `lane` is used to index `lanes`
+    --> crates/compressor/src/kernel.rs:1367:21
+     |
+1367 |         for lane in 0..L::WIDTH {
+     |                     ^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#needless_range_loop
+     = note: `-D clippy::needless-range-loop` implied by `-D clippy::all`
+     = help: to override `-D clippy::all` add `#[allow(clippy::needless_range_loop)]`
+help: consider using an iterator and enumerate()
+     |
+1367 -         for lane in 0..L::WIDTH {
+1367 +         for (lane, <item>) in lanes.iter().enumerate().take(L::WIDTH) {
+     |
+
+error: the loop variable `lane` is used to index `lanes`
+    --> crates/compressor/src/kernel.rs:1389:21
+     |
+1389 |         for lane in 0..L::WIDTH {
+     |                     ^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#needless_range_loop
+help: consider using an iterator and enumerate()
+     |
+1389 -         for lane in 0..L::WIDTH {
+1389 +         for (lane, <item>) in lanes.iter().enumerate().take(L::WIDTH) {
+     |
+
+error: could not compile `compressor` (lib test) due to 2 previous errors
+STATUS=101

@@ -1,0 +1,77 @@
+[
+  {
+    "argv": [
+      "cargo",
+      "clippy",
+      "--locked",
+      "-p",
+      "compressor",
+      "--all-targets",
+      "--all-features",
+      "--",
+      "-D",
+      "warnings"
+    ],
+    "cwd": "/home/bl/misofm/engine-475-populated-proof",
+    "source": "90bea9972cc452e140de580e9a78b08a8eb19f4f",
+    "exit": 0
+  },
+  {
+    "argv": [
+      "cargo",
+      "fmt",
+      "--all",
+      "--",
+      "--check"
+    ],
+    "cwd": "/home/bl/misofm/engine-475-populated-proof",
+    "source": "90bea9972cc452e140de580e9a78b08a8eb19f4f",
+    "exit": 0
+  },
+  {
+    "argv": [
+      "bash",
+      "scripts/check-realtime-policy.sh"
+    ],
+    "cwd": "/home/bl/misofm/engine-475-populated-proof",
+    "source": "90bea9972cc452e140de580e9a78b08a8eb19f4f",
+    "exit": 0
+  },
+  {
+    "argv": [
+      "bash",
+      "scripts/check-lane-policy.sh"
+    ],
+    "cwd": "/home/bl/misofm/engine-475-populated-proof",
+    "source": "90bea9972cc452e140de580e9a78b08a8eb19f4f",
+    "exit": 0
+  },
+  {
+    "argv": [
+      "bash",
+      "scripts/check-workspace-policy.sh"
+    ],
+    "cwd": "/home/bl/misofm/engine-475-populated-proof",
+    "source": "90bea9972cc452e140de580e9a78b08a8eb19f4f",
+    "exit": 0
+  },
+  {
+    "argv": [
+      "bash",
+      "scripts/check-env-vocabulary.sh"
+    ],
+    "cwd": "/home/bl/misofm/engine-475-populated-proof",
+    "source": "90bea9972cc452e140de580e9a78b08a8eb19f4f",
+    "exit": 0
+  },
+  {
+    "argv": [
+      "git",
+      "diff",
+      "--check"
+    ],
+    "cwd": "/home/bl/misofm/engine-475-populated-proof",
+    "source": "90bea9972cc452e140de580e9a78b08a8eb19f4f",
+    "exit": 0
+  }
+]

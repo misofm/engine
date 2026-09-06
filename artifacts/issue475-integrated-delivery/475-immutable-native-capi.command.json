@@ -1,0 +1,16 @@
+{
+  "argv": [
+    "cargo",
+    "build",
+    "--locked",
+    "--release",
+    "-p",
+    "capi"
+  ],
+  "cwd": "/home/bl/misofm/engine-475-populated-proof",
+  "source": "1c71000d19abd609159e1006fc6291c57ff4670d",
+  "env_overrides": {
+    "CARGO_TARGET_DIR": "/tmp/engine-475-native-qualified",
+    "PATH": "/home/bl/.cargo/bin:/home/bl/.codex/packages/standalone/releases/0.153.2-x86_64-unknown-linux-musl/codex-path:/home/bl/.local/bin:/home/bl/.codex/tmp/arg0/codex-arg0CWD760:/home/bl/.codex/packages/standalone/releases/0.153.2-x86_64-unknown-linux-musl/codex-path:/home/bl/.local/bin:/home/bl/.opencode/bin:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.opencode/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin"
+  }
+}

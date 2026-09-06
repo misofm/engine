@@ -1,0 +1,67 @@
+argv: PATH=/home/bl/.cargo/bin:$PATH cargo fmt --all -- --check
+cwd: /home/bl/misofm/engine-475-populated-proof
+effective-env: PATH=/home/bl/.local/bin:/home/bl/.codex/packages/standalone/releases/0.153.2-x86_64-unknown-linux-musl/codex-path:/home/bl/.codex/tmp/arg0/codex-arg0CWD760:/home/bl/.local/bin:/home/bl/.opencode/bin:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.opencode/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin
+Diff in /home/bl/misofm/engine-475-populated-proof/crates/compressor/src/kernel.rs:1585:
+                 let lane = (word % 4) as u64;
+                 f32::from_bits(
+                     0x3e00_0000
+-                        + (((frame * 7919 + lane * 104729 + block_origin) as u32)
+-                            & 0x000f_ffff),
++                        + (((frame * 7919 + lane * 104729 + block_origin) as u32) & 0x000f_ffff),
+                 )
+             })
+             .collect();
+Diff in /home/bl/misofm/engine-475-populated-proof/crates/compressor/src/kernel.rs:1661:
+     }
+ 
+     fn assert_meaningful_pcm(result: &BankResult, context: &str) {
+-        assert!(result.0.iter().any(|word| *word != 0), "{context}: silent left PCM");
+-        assert!(result.1.iter().any(|word| *word != 0), "{context}: silent right PCM");
++        assert!(
++            result.0.iter().any(|word| *word != 0),
++            "{context}: silent left PCM"
++        );
++        assert!(
++            result.1.iter().any(|word| *word != 0),
++            "{context}: silent right PCM"
++        );
+         assert!(result.0.windows(2).any(|pair| pair[0] != pair[1]));
+         assert!(result.1.windows(2).any(|pair| pair[0] != pair[1]));
+     }
+Diff in /home/bl/misofm/engine-475-populated-proof/crates/compressor/src/kernel.rs:1682:
+ 
+         // Restore changes both actual W4 directions. The uninterrupted owner holding the saved
+         // state is the oracle for the destination owner's first render after restore.
+-        for (source_values, destination_values) in
+-            [(&ragged, &uniform), (&uniform, &ragged)]
+-        {
++        for (source_values, destination_values) in [(&ragged, &uniform), (&uniform, &ragged)] {
+             let mut source = bank4(source_values);
+             prime8(&mut source);
+             assert_populated_history(&source, source_values[1][14].value != 0.0);
+Diff in /home/bl/misofm/engine-475-populated-proof/crates/compressor/src/kernel.rs:1710:
+         let mut fresh = bank4(&ragged);
+         let first_reset = render4(&mut reset, 0, false);
+         let first_fresh = render4(&mut fresh, 0, false);
+-        assert_eq!(
+-            first_reset,
+-            first_fresh,
+-            "first W4 render after full reset"
+-        );
++        assert_eq!(first_reset, first_fresh, "first W4 render after full reset");
+         assert!(first_reset.0.iter().all(|word| *word == 0));
+         assert!(first_reset.1.iter().all(|word| *word == 0));
+         for block in 1..=8 {
+Diff in /home/bl/misofm/engine-475-populated-proof/crates/compressor/src/kernel.rs:1724:
+                 assert_meaningful_pcm(&fresh_result, "full-reset expected final block");
+                 assert_populated_history(&fresh, true);
+             }
+-            assert_eq!(reset_result, fresh_result, "full-reset continuation block {block}");
++            assert_eq!(
++                reset_result, fresh_result,
++                "full-reset continuation block {block}"
++            );
+         }
+ 
+         // Reopen copies a uniform left population over a ragged right population. Construct that
+numeric-status: 1

@@ -1,0 +1,62 @@
+[
+  {
+    "path": "475-sol3-affected-suites.log",
+    "bytes": 7504,
+    "sha256": "167541c1ccbb2ca1b502e2e420f4cc8fd1d70bb6e0151adb76c996ce0d62f518"
+  },
+  {
+    "path": "475-sol3-focused-final.log",
+    "bytes": 2463,
+    "sha256": "61ad9a1bf9352b4615fd5b840e4594386b368e453853277d83257cecadcb0bd6"
+  },
+  {
+    "path": "475-sol3-full-cargo-gates.log",
+    "bytes": 8254,
+    "sha256": "38634db58038869387af08ecf8b729116fe93e102c017a6a2d2e6369887341e5"
+  },
+  {
+    "path": "475-sol3-package-verify-corrected.log",
+    "bytes": 405,
+    "sha256": "19a163d1a79e163237cd7ec2fca913a3de65610fc7c5cba2744eb0b16af56e40"
+  },
+  {
+    "path": "475-sol3-package-verify.log",
+    "bytes": 1139,
+    "sha256": "b43225caa1f1385ac49a69947508094f6fe4f398e7155a25e95c4a4bf2ad7842"
+  },
+  {
+    "path": "475-sol3-policy-gates.log",
+    "bytes": 602,
+    "sha256": "8d7a7d409bad32321c45a303e326f877b156026789cc6639ea50fbea30e1eecf"
+  },
+  {
+    "path": "475-sol3-w4-compile-failure-1.log",
+    "bytes": 2386,
+    "sha256": "b3eb6f5c4a62802fabbd5b58785121967d63b9a70099e323d3038f27207d3a28"
+  },
+  {
+    "path": "475-sol3-w4-compile-failure-2.log",
+    "bytes": 3004,
+    "sha256": "2bad9e5c99a1497bf704258dc2015b37c87e14e81509739d1b0bc1c3d8718800"
+  },
+  {
+    "path": "475-sol3-w4-focused-debug.log",
+    "bytes": 823,
+    "sha256": "8fbbf23af41db7a1acdd183816eaced853336ce7bf454fb1c18f8eb569f804f2"
+  },
+  {
+    "path": "475-sol3-w4-oracle-failure.log",
+    "bytes": 396168,
+    "sha256": "0a13b568b06b65fecc91b39cf5ade09a2af28a86e459bd1d2fb0c2360d13655c"
+  },
+  {
+    "path": "README.md",
+    "bytes": 1800,
+    "sha256": "7988b9688ffe52fb4d8d66336392f3eb34efcdc50d42a08ae16737a7be53b500"
+  },
+  {
+    "path": "manifest.sha256",
+    "bytes": 769,
+    "sha256": "ab95ae5c6e4b4db5d8ed5c8e90ab583330ea88fc021cce456f71456fbdfd9bff"
+  }
+]

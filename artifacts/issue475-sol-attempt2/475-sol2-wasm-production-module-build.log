@@ -1,0 +1,60 @@
+COMMAND_SCALAR=CARGO_TARGET_DIR=/tmp/475-sol2-guest-scalar RUSTFLAGS=-C target-feature=-simd128 PATH=/home/bl/.cargo/bin:$PATH cargo build --locked --release --target wasm32-unknown-unknown -p wasm-gate-guest
+COMMAND_SIMD128=CARGO_TARGET_DIR=/tmp/475-sol2-guest-simd128 RUSTFLAGS=-C target-feature=+simd128 PATH=/home/bl/.cargo/bin:$PATH cargo build --locked --release --target wasm32-unknown-unknown -p wasm-gate-guest
+CWD=/home/bl/misofm/engine-475-plan
+SOURCE_REV=81ed8e72f9c5401ad3e91da05fe611adbdef189c
+SOURCE_KERNEL_SHA256=0659a83efa4ae4ea71ef6dcc752ddf0812a742b648c872be175a3ab49fc3b129  crates/compressor/src/kernel.rs
+   Compiling bytemuck v1.25.2
+   Compiling engine v0.1.0 (/home/bl/misofm/engine-475-plan/crates/engine)
+   Compiling typenum v1.20.1
+   Compiling cfg-if v1.0.4
+   Compiling wide v1.6.1
+   Compiling hybrid-array v0.4.14
+   Compiling crypto-common v0.2.2
+   Compiling block-buffer v0.12.1
+   Compiling digest v0.11.3
+   Compiling sha2 v0.11.0
+   Compiling lane v0.1.0 (/home/bl/misofm/engine-475-plan/crates/lane)
+   Compiling math v0.1.0 (/home/bl/misofm/engine-475-plan/crates/math)
+   Compiling effect-contract v0.1.0 (/home/bl/misofm/engine-475-plan/crates/effect-contract)
+   Compiling effect-runtime v0.1.0 (/home/bl/misofm/engine-475-plan/crates/effect-runtime)
+   Compiling multiband-compressor v0.1.0 (/home/bl/misofm/engine-475-plan/crates/multiband-compressor)
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-475-plan/crates/compressor)
+   Compiling delay v0.1.0 (/home/bl/misofm/engine-475-plan/crates/delay)
+   Compiling transient-shaper v0.1.0 (/home/bl/misofm/engine-475-plan/crates/transient-shaper)
+   Compiling gate-expander v0.1.0 (/home/bl/misofm/engine-475-plan/crates/gate-expander)
+   Compiling builtins v0.1.0 (/home/bl/misofm/engine-475-plan/crates/builtins)
+   Compiling soft-clip v0.1.0 (/home/bl/misofm/engine-475-plan/crates/soft-clip)
+   Compiling true-peak-limiter v0.1.0 (/home/bl/misofm/engine-475-plan/crates/true-peak-limiter)
+   Compiling parametric-eq v0.1.0 (/home/bl/misofm/engine-475-plan/crates/parametric-eq)
+   Compiling wasm-gate-corpus v0.1.0 (/home/bl/misofm/engine-475-plan/tools/wasm-gate-corpus)
+   Compiling wasm-gate-guest v0.1.0 (/home/bl/misofm/engine-475-plan/tools/wasm-gate-guest)
+    Finished `release` profile [optimized + debuginfo] target(s) in 12.20s
+SCALAR_LINK_EXIT=0
+   Compiling bytemuck v1.25.2
+   Compiling engine v0.1.0 (/home/bl/misofm/engine-475-plan/crates/engine)
+   Compiling typenum v1.20.1
+   Compiling cfg-if v1.0.4
+   Compiling wide v1.6.1
+   Compiling hybrid-array v0.4.14
+   Compiling block-buffer v0.12.1
+   Compiling crypto-common v0.2.2
+   Compiling digest v0.11.3
+   Compiling sha2 v0.11.0
+   Compiling lane v0.1.0 (/home/bl/misofm/engine-475-plan/crates/lane)
+   Compiling math v0.1.0 (/home/bl/misofm/engine-475-plan/crates/math)
+   Compiling effect-contract v0.1.0 (/home/bl/misofm/engine-475-plan/crates/effect-contract)
+   Compiling effect-runtime v0.1.0 (/home/bl/misofm/engine-475-plan/crates/effect-runtime)
+   Compiling parametric-eq v0.1.0 (/home/bl/misofm/engine-475-plan/crates/parametric-eq)
+   Compiling multiband-compressor v0.1.0 (/home/bl/misofm/engine-475-plan/crates/multiband-compressor)
+   Compiling soft-clip v0.1.0 (/home/bl/misofm/engine-475-plan/crates/soft-clip)
+   Compiling transient-shaper v0.1.0 (/home/bl/misofm/engine-475-plan/crates/transient-shaper)
+   Compiling true-peak-limiter v0.1.0 (/home/bl/misofm/engine-475-plan/crates/true-peak-limiter)
+   Compiling builtins v0.1.0 (/home/bl/misofm/engine-475-plan/crates/builtins)
+   Compiling gate-expander v0.1.0 (/home/bl/misofm/engine-475-plan/crates/gate-expander)
+   Compiling delay v0.1.0 (/home/bl/misofm/engine-475-plan/crates/delay)
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-475-plan/crates/compressor)
+   Compiling wasm-gate-corpus v0.1.0 (/home/bl/misofm/engine-475-plan/tools/wasm-gate-corpus)
+   Compiling wasm-gate-guest v0.1.0 (/home/bl/misofm/engine-475-plan/tools/wasm-gate-guest)
+    Finished `release` profile [optimized + debuginfo] target(s) in 9.13s
+SIMD128_LINK_EXIT=0
+

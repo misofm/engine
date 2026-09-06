@@ -1,0 +1,22 @@
+COMMAND: PATH=/home/bl/.cargo/bin:$PATH cargo test --locked -p compressor --lib -- kernel::tests::uniform_and_ragged_access_match_old_transcription
+CWD: /home/bl/misofm/engine-475-plan
+SOURCE_REV: 243ca03e1bb0d21189b85531207c39fbba63f02b
+SOURCE_KERNEL_SHA256: 0128200127cfef3afb22a994118e789da5a53a17bb6d902097e60d8d44791006  crates/compressor/src/kernel.rs
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+binary: rustc
+commit-hash: 8bab26f4f68e0e26f0bb7960be334d5b520ea452
+commit-date: 2026-07-14
+host: x86_64-unknown-linux-gnu
+release: 1.97.1
+LLVM version: 22.1.6
+cargo 1.97.1 (c980f4866 2026-06-30)
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-475-plan/crates/compressor)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.15s
+     Running unittests src/lib.rs (target/debug/deps/compressor-80bd63f116d0655c)
+
+running 1 test
+test kernel::tests::uniform_and_ragged_access_match_old_transcription ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+STATUS=0
