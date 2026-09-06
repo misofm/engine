@@ -510,11 +510,14 @@ fn actual_runtime_bank_slot_owners_fit_retained_largest_and_conversion_reservati
     reset_byte_counters();
     LIVE_ALLOCS.set(0);
     LIVE_FREES.set(0);
+    // SAFETY: `old` is nonzero and valid; the returned pointer is checked before reuse.
     let pointer = armed(|| unsafe { std::alloc::alloc(old) });
     assert!(!pointer.is_null(), "controlled realloc allocation");
+    // SAFETY: `pointer` came from `alloc(old)`, remains live, and `new` preserves its alignment.
     let pointer = armed(|| unsafe { std::alloc::realloc(pointer, old, new.size()) });
     assert!(!pointer.is_null(), "controlled realloc");
     assert_eq!(LARGEST_REALLOC_BYTES.get(), new.size() as u64);
+    // SAFETY: the successful realloc returned a live allocation with layout `new`.
     armed(|| unsafe { std::alloc::dealloc(pointer, new) });
     assert!(!BYTE_COUNTER_FAILED.get());
     assert_eq!(
@@ -623,11 +626,9 @@ fn actual_runtime_bank_slot_owners_fit_retained_largest_and_conversion_reservati
     )
     .expect("paired allowance");
     assert!(paired_facts.runtime_slots < paired_facts.run_memberships);
-    for facts in [paired_facts] {
-        assert!(facts.runtime_slots <= facts.run_memberships);
-        assert!(facts.run_memberships <= facts.prepared_memberships);
-        assert!(facts.maximum_runtime_slots <= facts.maximum_run_memberships);
-    }
+    assert!(paired_facts.runtime_slots <= paired_facts.run_memberships);
+    assert!(paired_facts.run_memberships <= paired_facts.prepared_memberships);
+    assert!(paired_facts.maximum_runtime_slots <= paired_facts.maximum_run_memberships);
     assert_eq!(
         paired_allowance.bank_count,
         paired_facts.prepared_memberships as u64
