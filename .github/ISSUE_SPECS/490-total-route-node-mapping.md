@@ -76,3 +76,9 @@ Run existing current-artifact static/object/ABI metadata, expected-resource with
 Accepted source tests remain applicable if source identity is preserved. Before delivery require a new exact-head actual PR review of all qualification/consumer/evidence changes and required CI SUCCESS; source PASS alone does not authorize merge. This necessary artifact qualification is not another implementation attempt or a waiver of the two-helper/three-caller contract. No build/test or repository/Git/GitHub mutation performed for this ruling.
 
 Root adopts this amendment on332de1b3. Runtime/build source remains frozen; only the observed artifact pin, existing generated browser records and evidence may change.
+
+## Actual artifact qualification
+
+Observed pin6107fdb633f1df9227e53b50cd9d39c176f6f9d6d045d05034e47802f0fdc8f0 was checkpointed at2d507b1e and reproduced by the ordinary verified builder. Static/object/ABI, expected resources with26 negative controls, separate hermetic worklet, corrected-directory npm ci, all-three-browser qualification/self-tests and matrix check each returned0. Chromium151.0.7922.34, Firefox153.0 and WebKit26.5 passed. Generated records ated8bd92f change only candidate identity and observed artifact digest; PCM digests and resource expectations are unchanged. Accepted graph-compiler source remains byte-identical.
+
+Preserved failures: initial missing-output-directory builder preflight2; actual original pin mismatch1; wrong-directory npm ci1 and browser command254. These actual numeric records override inaccurate agent progress summaries. No measurement or performance claim. Exact-head PR review and requiredCI remain pending.
