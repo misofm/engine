@@ -1,0 +1,66 @@
+# #511 consolidated Sol attempt 2 — FAIL
+
+Reviewed clean `cd372f3d` in `/home/bl/misofm/engine-slot-reservation`, source checkpoint `777d168fcd64574ff4a1fa33e53c01b6aa73e738`, mechanical correction `ca8f34d5b1c50012f5e1a1001281c22b8ce3a005`, the original/clarified numbered contract, the attempt-1 findings, all six changed source/test files, and the preserved attempt-2 package. This is the single consolidated Sol2 verdict. The remaining blocker is a concrete existing test-feature compatibility regression; the resource implementation and corrected core evidence are otherwise acceptable for the named component. Proceed only to the bounded final Sol3 correction below, not immutable delivery yet.
+
+## Blocking finding: an existing preflight no longer compiles
+
+`crates/builtins-compiler/tests/allocation_tracker.rs` is enabled by `builtins-compiler/test-support`, and its new physical test references the feature-gated graph construction seam. `crates/builtins-compiler/Cargo.toml` still declares `test-support = []`, while `graph/src/lib.rs` exports those functions only with `graph/test-support`.
+
+The preserved combined normal Clippy command failed with six E0425 missing graph seam symbols. This is not merely an unsupported arbitrary command composition: `scripts/preflight-builtins-benchmark.sh:123` already invokes:
+
+```
+cargo test --locked -p builtins-compiler --features test-support \
+    phase_two_allocator_layouts_match_the_checked_resource_report
+```
+
+That invocation compiles the enabled integration-test target before applying its test-name filter and encounters the same missing symbols. Its preceding separate `cargo test -p bench` invocation cannot carry Cargo feature unification into this subsequent command. No preflight or benchmark execution is needed to establish this source/configuration defect, and none was performed in this review.
+
+The inspected `qualification.yml` split workspace test command explicitly enables `graph/test-support`; its full-workspace strict Clippy command enables all features, and audit/bench also carry graph test-support edges. Those facts explain why the intended workspace configurations can compile. They do not preserve the existing isolated preflight or make the recorded combined command failure operational rather than a compatibility failure. Passing per-package normal commands also skips the failing integration-test feature combination. The report's blanket “No source gate remains failing” conclusion cannot be adopted.
+
+## Exact scope amendment and final Sol3 prescription
+
+Approve one narrowly derived exception to the earlier no-Cargo-edit freeze: in `crates/builtins-compiler/Cargo.toml`, replace the existing empty feature definition with:
+
+```toml
+test-support = ["graph/test-support"]
+```
+
+This forwards the existing explicit testing feature over an already existing dependency. It introduces no dependency, default feature, normal production instrumentation, ABI, new constructor or allocator. The prior freeze was adequate for the named explicit gate commands but overlooked this existing consumer; preserving that consumer justifies the exact one-line amendment. Root should record/synchronize this ruling before final Sol3 implementation. No broader manifest/dependency or feature redesign is authorized.
+
+Also approve exactly the one-line physical assertion correction `conversion_coexistence = n * f + n * b + (n + 1) * w` in the existing frozen allocator test, and its matching report/equation correction. This directly includes the independently known original chain mask in the named complete bound (176 bytes for the existing fixture), without adding a test, observer or allocator mechanism. It makes the evidence precision correction below explicit in the assertion.
+
+Do not edit the old preflight, historical benchmark seals, expected digests, or its test filter to evade the incompatibility. Do not disable the physical test. Correct the current decision/evidence record to distinguish the previous feature failure from the successful explicit commands, preserving all raw attempt-2 failures.
+
+Verify the preflight's exact isolated Cargo test invocation above with a nonzero selected test count, and rerun the previously failing combined strict all-targets Clippy command. Run the frozen focused and affected suites/static checks proportionately on the final identified source, accounting for the changed feature composition; include the amended Cargo file in source identity. The old preflight's entire timed/sealed workflow must not be run for this correction. Once final Sol3 receives its consolidated verdict, root can perform immutable workspace/native/Wasm/current-artifact delivery under the existing route. No preemptive numerical or artifact pin updates are authorized.
+
+## Disposition of the five attempt-1 finding groups
+
+1. **Physical ownership, release and bounds: corrected.** The isolated ragged three-slot fixture reaches the same production `bank_chain`, seeds the incoming stage-vector ownership, uses checked live-byte arithmetic with an explicit failure flag, resets release counters, and checks complete allocation/deallocation counts with size and alignment. Its request shape is exhaustively constrained, not attributed from an arbitrary same-size occurrence. The three identity stage objects are zero-sized, and the ragged mask avoids full-bank staging. Release explicitly includes the independently known original mask and two scratch planes. Retained slot count is now honestly named as inferred from boxed-slice construction. The invalid unused peak claim is removed; realloc still records the new request for the local counter while leaving the old phase-two recorder semantics intact.
+
+   On the measured native fixture F=16, B=32, W=8, N=S=3: observed construction requests are one 96-byte slot array and three 8-byte mask clones, with one 48-byte incoming stage-vector free. L=96 bounds the entire array, masks and incoming vector. Retained slots plus chain/slot masks are 128 bytes, below N*(B+2W)=144. Destruction observes one 96-byte array, four 8-byte masks and two 32-byte scratch planes: seven frees, zero allocations and a checked zero closing balance. The exact request/free counts and distinguishable fixture layouts support the attribution; stage/scratch owners are not silently reclassified as slots.
+
+   **Evidence precision:** the report's `48+96+24=168` is the observed conversion subset that excludes the pre-existing 8-byte chain mask. The complete stage/slot/mask coexistence bound for this fixture is 48+96+24+8=176, still <=C=408. Record that distinction in the final decision/report; 168 must not be called the full named component coexistence. This is not an additional under-reservation finding: original-mask ownership is independently identified and released, and the full bound follows directly from those observed layouts. Across chains, R<=N bounds stage capacity, S<=R bounds slots, at most one chain mask per membership bounds originals, and the frozen C deliberately has additional slot/mask conversion headroom. No global heap accounting or future #478 implementation is certified.
+
+2. **Actual paired/unpaired counts: corrected.** A fixed thread-local record is populated at actual `RuntimeParts::new` and `chain_for`, with no allocation/registry. The existing fixture's direct-console variant is exposed without a second constructor. The physical test resets the record, checks aggregate S<=R<=N, demonstrates pairing decreases S, and requires an actual unpaired chain with S>1. The separate compiled facts output reports paired N=6/R=6/S=5/maxR=3/maxS=2 and unpaired N=6/R=6/S=6/maxR=3/maxS=3. Both actual bound variants are rendered repeatedly through the existing zero-allocation/free audit. The test labels direct attachment separately from compiler admission; it does not claim that this zero-starting test graph went through graph caps. Combined compiler admission is separately established below. These source count relationships compose with the isolated concrete allocation-shape proof without requiring an overall bind-allocation budget.
+
+3. **Independent fold, publication, mixed population and caps: corrected.** The same frozen test now covers representative literal N/W C/L arithmetic, bool size, empty/no-width cases and arithmetic overflow. The synthetic fold tests direct field additions and whole-estimate equality with old largest below L, preserves a larger prior maximum, verifies zero addition, and checks rollback on overflow in each additive field. The literal arithmetic was already independently checked for the component used by these fold cases.
+
+   Builtin-only publication expectations now use direct arithmetic instead of the production fold helper. A real effect+builtin compiler fixture has both counts nonzero, derives the combined literal reservation and delta from its effect-only prior owners, and independently folds the existing builtin payload to compare the full attached estimate. Complete equality plus explicit effect metadata/scratch/runtime-buffer checks protect unrelated fields. Vector/scalar versions of the same mixed binding surface preserve canonical bytes. Exact graph/plan/whole-plan-largest caps and one-byte-below refusals use the independently derived attached estimate; failures return eight prepared effect entries and sealed builtins. There is no requirement that slot allocation dominate unrelated real owners, and no such claim is made.
+
+4. **Diagnostic priority and empty width: corrected.** The existing checked builtin fold now precedes fallible new slot count/mask arithmetic. Effect/scalar/builtin failure order is preserved. Empty builtin kinds contribute zero maximum-mask bytes, and the frozen test explicitly checks the empty preflight. Canonical estimate capture remains before target-selected additions. The published/capped copies each receive the component once; builtin attachment does not add it again.
+
+5. **Proportional local gates: successful in the recorded explicit configurations, but compatibility remains blocking as above.** The four previously failing numeric fixtures now execute successfully, and the missing static checks are recorded. Required final workspace/target/artifact/CI delivery is still outstanding, correctly delegated to root rather than claimed by this review.
+
+## Numeric amendment compliance
+
+The small test-local `literal_bank_slot_reservation_bytes` directly calculates N*(F+3B+3W) from target-native layouts and does not invoke production reservation/folding code. Its four prior-fixture uses add the delta only to the authorized total equations: limiter graph metadata/incremental/session totals, multiband incremental/session totals, soft-clip incremental/session totals, and transient-shaper total bank overhead. No effect payload/metadata component, scratch/sample count, canonical identity, PCM, latency, tail, or artifact expectation was repinned. The native +136 discrepancy has the previously approved derivation; target-native arithmetic is retained rather than that hard-coded value.
+
+## Evidence integrity and exact limits
+
+Independently verified all 124 manifest payload hashes and byte lengths with no mismatch or missing entry; all 124 plus the manifest are tracked (125 files). Final report source hashes match all six current files. Clean-source per-command hashes match their declared commits. Early dirty-source records explicitly mark modified paths and supply hashes; they are not misrepresented as clean base executions. The final mechanical commit is exactly three safety comments and a single-element-loop expansion in the allocator test. Its corrected physical debug/Clippy hashes match the final file. The full suites ran at 777d168f; their source identity is not silently relabeled as ca8f34d5.
+
+Raw stdout/status confirms graph exact debug/release 1 pass each, physical exact debug/release 1 pass each, full graph suites 64 passes each, and full physical suites 7 passes each, all with status 0. The corrected physical debug invocation also selects one passing test. Recorded normal graph, graph test-support, graph-compiler normal, builtin normal and explicit builtin+graph test-support Clippy gates return 0; final fmt/diff/graph/realtime/workspace policy invocations return 0. The combined missing-feature failure and initial lint/script failures remain actual failures in the package.
+
+The facts probe source and both currently available input rlibs match the hashes recorded in its metadata. Its output/status and source are preserved; the large executable is deliberately untracked, with a supplemental post-execution identity that does not pretend to be contemporaneous evidence. The report also candidly records the uncaptured initial no-PATH fmt invocation. These limits do not invalidate the later identified successful gates, and do not establish final shipped target qualification.
+
+No builds, tests, timing, source edits, Git mutations or GitHub mutations were performed during this review. Only this requested temporary review report was written. The final Sol3 scope is the single existing-feature forwarding correction, the one-line complete-mask coexistence assertion and matching evidence; it must not become a fourth implementation attempt or a general harness project.

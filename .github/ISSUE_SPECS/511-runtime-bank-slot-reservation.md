@@ -223,3 +223,7 @@ Run the frozen focused and affected debug/release suites and proportional static
 ## Final Sol attempt 3 focused checkpoint
 
 Exactly the two approved lines changed: existing test-support forwards graph/test-support, and complete coexistence includes the original mask. The old isolated preflight Cargo command and frozen physical debug test each pass one test; root verified contemporaneous seven-file hashes before checkpoint. No full preflight/timing was run. Final combined Clippy, remaining frozen suites/static gates and Astra verdict remain pending.
+
+## Final Sol attempt 3 local evidence
+
+Source35dc8d4d passes all18 captured statuses: the exact existing isolated consumer selects1 passing test, previously failing combined Clippy passes, frozenexacttests1 each, fullgraph64 each and allocation7 each in debug/release, plusstaticpolicies. Complete coexistence is176<=408. Artifacts/issue511-sol-attempt3 preserves raw seven-file source identities/statuses/report and the full prior Sol2FAIL ruling. No native/Wasm/current-artifact delivery is claimed yet; final consolidated Astra verdict pending.

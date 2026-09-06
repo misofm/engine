@@ -1,0 +1,12 @@
+
+running 7 tests
+test actual_queued_graph_phases_allocate_and_free_nothing ... ok
+test actual_scalar_prepare_and_bind_retain_the_charged_owner_layouts ... ok
+test actual_queued_scalar_graph_allocates_and_frees_nothing ... ok
+test actual_runtime_bank_slot_owners_fit_retained_largest_and_conversion_reservation ... ok
+test actual_serialized_composite_render_allocates_and_frees_nothing ... ok
+test phase_two_allocator_layouts_match_the_checked_resource_report ... ok
+test phase_two_allocator_layouts_are_stable_across_repeated_measured_prepares ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.87s
+
