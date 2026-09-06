@@ -100,3 +100,7 @@ Defer #514's integrated artifact/current-consumer/PR qualification until #511 is
 Root owns spec/GitHub synchronization and exact-path checkpoints. The two worktrees must retain isolated source identities and output attribution; neither may qualify a candidate while its own sources are changing. Checkpoint each coherent green tranche before layering more implementation, as required. Shared delivery/artifact work stays serialized through root even while these independent source edits proceed.
 
 No builds, tests, timing, repository edits, Git mutations or GitHub mutations were performed. Only this requested temporary decision report was written.
+
+## Luna attempt 1 focused source checkpoint
+
+The two authorized host files implement the private pending-command flag and physical-clear test counters with the frozen product test. Luna reported an initial successful filtered run but retained no raw capture and did not use the exact invocation; it receives no frozen-gate evidence credit. Root directly captured the required full-name --lib --exact debug command with contemporaneous source hashes, stdout/stderr and status0 (one selected test) before this checkpoint. Remaining release/full suites, actual mutation/restoration, candidate native layout and static gates are pending.
