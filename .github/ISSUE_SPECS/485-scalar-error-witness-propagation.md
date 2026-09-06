@@ -27,3 +27,9 @@ Approve fresh Luna1 for the three exact builtins-compiler error-propagation bloc
 Source base preserves the reviewed three sites and fixtures; #238 remains the active runtime feature and touches a distinct file. Root owns checkpoint/synchronization and later actual-PR/requiredCI. One Luna pass, Sol2/3 on failure and hardstop after3 apply. No tests/builds/timing or repository/Git/GitHub edits performed.
 
 Root adopts scope PASS and assigns fresh Luna1. Pause at the first compiling/focused-green exact-path checkpoint. Root owns Git and remote delivery.
+
+## Luna attempt 1 checkpoint and gate results
+
+Source79a4da0a changes exactly the three approved propagation sites. All three exact existing tests execute once and pass in debug/release; feature-supported all-targets Clippy, formatting, diff and realtime policy plus its mutation suite pass. Initial malformed release commands incorrectly placed --release after the test separator; their101 records remain, and corrected command records show actual release tests passing.
+
+Required normal-feature all-targets Clippy returns101 due seven inherited E0425 references from cfg(test) code to phase-two allocation helpers gated only on feature=test-support. `/tmp/485-luna1-clippy-normal.log` retains this distinct failure; it is not a gate PASS. Root normal-feature library-only strict Clippy has captured numeric0 in `/tmp/485-root-clippy-normal-lib.*`, distinguishing repaired propagation from the test-feature mismatch without substituting it for the frozen all-targets gate. Pending consolidated Astra verdict and explicit scope ruling before further edits.
