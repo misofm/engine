@@ -1,0 +1,67 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Checking bytemuck v1.25.2
+    Checking engine v0.1.0 (/home/bl/misofm/engine-native-points/crates/engine)
+   Compiling version_check v0.9.5
+    Checking lexical-util v1.0.7
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.47
+   Compiling syn v1.0.109
+   Compiling autocfg v1.5.1
+    Checking once_cell v1.21.4
+    Checking smallvec v1.15.2
+    Checking typenum v1.20.1
+    Checking utf8-decode v1.0.1
+    Checking locspan v0.8.2
+    Checking decoded-char v0.1.1
+    Checking cfg-if v1.0.4
+    Checking wide v1.6.1
+    Checking smallstr v0.3.1
+   Compiling ahash v0.7.8
+   Compiling proc-macro-error-attr v1.0.4
+   Compiling proc-macro-error v1.0.4
+   Compiling indexmap v1.9.3
+    Checking lexical-parse-integer v1.0.6
+    Checking lexical-write-integer v1.0.6
+    Checking hashbrown v0.12.3
+    Checking lexical-write-float v1.0.6
+    Checking lexical-parse-float v1.0.6
+    Checking hybrid-array v0.4.14
+    Checking lexical-core v1.0.6
+    Checking lexical v7.0.5
+    Checking json-number v0.4.10
+    Checking crypto-common v0.2.2
+    Checking block-buffer v0.12.1
+    Checking digest v0.11.3
+    Checking sha2 v0.11.0
+   Compiling locspan-derive v0.6.0
+    Checking json-syntax v0.12.5
+    Checking session v0.1.0 (/home/bl/misofm/engine-native-points/crates/session)
+    Checking protocol v0.1.0 (/home/bl/misofm/engine-native-points/crates/protocol)
+    Checking lane v0.1.0 (/home/bl/misofm/engine-native-points/crates/lane)
+    Checking math v0.1.0 (/home/bl/misofm/engine-native-points/crates/math)
+    Checking target-smoke v0.1.0 (/home/bl/misofm/engine-native-points/crates/target-smoke)
+    Checking effect-contract v0.1.0 (/home/bl/misofm/engine-native-points/crates/effect-contract)
+    Checking effect-runtime v0.1.0 (/home/bl/misofm/engine-native-points/crates/effect-runtime)
+    Checking rack v0.1.0 (/home/bl/misofm/engine-native-points/crates/rack)
+    Checking compressor v0.1.0 (/home/bl/misofm/engine-native-points/crates/compressor)
+    Checking multiband-compressor v0.1.0 (/home/bl/misofm/engine-native-points/crates/multiband-compressor)
+    Checking effect-package v0.1.0 (/home/bl/misofm/engine-native-points/crates/effect-package)
+    Checking true-peak-limiter v0.1.0 (/home/bl/misofm/engine-native-points/crates/true-peak-limiter)
+    Checking soft-clip v0.1.0 (/home/bl/misofm/engine-native-points/crates/soft-clip)
+    Checking gate-expander v0.1.0 (/home/bl/misofm/engine-native-points/crates/gate-expander)
+    Checking builtins v0.1.0 (/home/bl/misofm/engine-native-points/crates/builtins)
+    Checking delay v0.1.0 (/home/bl/misofm/engine-native-points/crates/delay)
+    Checking parametric-eq v0.1.0 (/home/bl/misofm/engine-native-points/crates/parametric-eq)
+    Checking transient-shaper v0.1.0 (/home/bl/misofm/engine-native-points/crates/transient-shaper)
+    Checking graph v0.1.0 (/home/bl/misofm/engine-native-points/crates/graph)
+    Checking rack-compiler v0.1.0 (/home/bl/misofm/engine-native-points/crates/rack-compiler)
+    Checking effect-compiler v0.1.0 (/home/bl/misofm/engine-native-points/crates/effect-compiler)
+    Checking builtins-compiler v0.1.0 (/home/bl/misofm/engine-native-points/crates/builtins-compiler)
+    Checking source v0.1.0 (/home/bl/misofm/engine-native-points/crates/source)
+    Checking graph-compiler v0.1.0 (/home/bl/misofm/engine-native-points/crates/graph-compiler)
+    Checking host-core v0.1.0 (/home/bl/misofm/engine-native-points/crates/host-core)
+    Checking host-web v0.1.0 (/home/bl/misofm/engine-native-points/hosts/host-web)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 9.83s

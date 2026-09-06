@@ -1,0 +1,22 @@
+# Astra bounded observed-artifact integration ruling — #524
+
+**Approved conditionally: after all currently running immutable delivery commands reach terminal status and their required gates pass, root may update only the observed AudioWorklet artifact pin, then run the normal rebuild and existing artifact/browser consumers. This is delivery integration of accepted source, not another implementation attempt. No resource or PCM repin is authorized.**
+
+Read-only inspection identifies clean candidate `d7b67839b63f1610bd2a5cf85a30d9742a838462`, with the accepted #524 source hashes. Relative to main `70ce3d7b`, executable source changes are confined to the additive effect-contract trait methods/types and compressor implementation; the other changed crate files are tests. Host/browser sources, builder/consumer scripts, Cargo manifest/lock/configuration and pinned toolchain inputs have no delta. No effect descriptor, instance/state payload layout, prepared owner or numerical resource-accounting code changed. The trait/vtable/code addition can change the compiled Wasm bytes without changing those contracts; this is source-input attribution, not a claim to have isolated every changed binary byte.
+
+`/tmp/issue524-delivery/artifact-build.command.json` records the normal `bash scripts/build-web-audioworklet.sh /tmp/issue524-delivery/artifact` invocation on that clean source. Raw stderr shows completed release compilation followed by the builder's actual comparison failure, status 1:
+
+- Existing pin: `e3f47856ad917edf2cd99cdc6669a4f3e6c6a9074b15c560a8337bf842187fef`
+- Observed module: `d77d7558105c29d38751ab26c330689da829fbe0f011a6ffcc7edf55d583bc87`
+
+The unchanged builder uses an isolated temporary target directory, simd128/release, path remapping and its existing stripping rules; comparison occurs before publication. Its failure path removes the temporary build. This review therefore credits the raw builder-observed digest and does not claim independent hashing of a retained module from the failed build. The earlier `artifact-initial` status 2 is only the existing output-directory preflight rejection; it is preserved setup evidence, not a compile or semantic failure. The recorded supported scalar and SIMD checks both have status 0. Workspace qualification was still running when this ruling was requested and is not declared passed here.
+
+## Minimal permitted integration
+
+1. Wait for the frozen workspace and all other immutable commands to terminate. Preserve their actual results and both initial artifact failures. Do not modify tracked inputs while those commands are running, or use this ruling to waive an unrelated failure.
+2. Change exactly `hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256` from the existing digest to the observed `d77d7558105c29d38751ab26c330689da829fbe0f011a6ffcc7edf55d583bc87`. Checkpoint the pin/evidence without changing source, compiler flags, descriptors, resources, PCM expectations or validation scripts.
+3. Run the unchanged normal builder on the resulting identified candidate with no REPIN bypass or ad hoc strip/toolchain/profile override, into an existing empty nonsymlink output directory. Retain command/source/environment attribution. Independently hash the published module and record its actual size; it must reproduce the approved observed digest. A different observed result requires attribution review, not another automatic repin.
+4. Run the existing static/object/render-closure checks, expected-resource/digest and target-independent native parity consumer, hermetic worklet tests, and actual supported all-browser qualification with its existing mutation self-tests against that published artifact. Resource numbers, PCM/determinism fixtures, floors and pass/fail expectations stay unchanged. Any discrepancy is a concrete new finding requiring separately bounded diagnosis.
+5. Record actual browser results and regenerate/check the deployment matrix using the qualified candidate/module identities. Only truthful qualification records/generated identities may accompany this pin integration; do not hand-edit results or present an earlier candidate's run as the final source. Complete actual-PR/current-base review, required qualification, merge/post-main verification and GitHub synchronization under the standing delivery rules.
+
+No reviewer source edits, builds, tests, mutations or timing were performed. This ruling neither declares delivery complete nor closes #524/#140/#518.

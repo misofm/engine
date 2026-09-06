@@ -1,0 +1,45 @@
+   Compiling engine v0.1.0 (/home/bl/misofm/engine-native-points/crates/engine)
+   Compiling lexical-util v1.0.7
+   Compiling effect-runtime v0.1.0 (/home/bl/misofm/engine-native-points/crates/effect-runtime)
+   Compiling once_cell v1.21.4
+   Compiling smallvec v1.15.2
+   Compiling decoded-char v0.1.1
+   Compiling locspan v0.8.2
+   Compiling utf8-decode v1.0.1
+   Compiling libc v0.2.189
+   Compiling smallstr v0.3.1
+   Compiling effect-contract v0.1.0 (/home/bl/misofm/engine-native-points/crates/effect-contract)
+   Compiling lexical-write-integer v1.0.6
+   Compiling lexical-parse-integer v1.0.6
+   Compiling lexical-parse-float v1.0.6
+   Compiling getrandom v0.2.17
+   Compiling rack v0.1.0 (/home/bl/misofm/engine-native-points/crates/rack)
+   Compiling delay v0.1.0 (/home/bl/misofm/engine-native-points/crates/delay)
+   Compiling multiband-compressor v0.1.0 (/home/bl/misofm/engine-native-points/crates/multiband-compressor)
+   Compiling true-peak-limiter v0.1.0 (/home/bl/misofm/engine-native-points/crates/true-peak-limiter)
+   Compiling soft-clip v0.1.0 (/home/bl/misofm/engine-native-points/crates/soft-clip)
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-native-points/crates/compressor)
+   Compiling gate-expander v0.1.0 (/home/bl/misofm/engine-native-points/crates/gate-expander)
+   Compiling parametric-eq v0.1.0 (/home/bl/misofm/engine-native-points/crates/parametric-eq)
+   Compiling transient-shaper v0.1.0 (/home/bl/misofm/engine-native-points/crates/transient-shaper)
+   Compiling builtins v0.1.0 (/home/bl/misofm/engine-native-points/crates/builtins)
+   Compiling lexical-write-float v1.0.6
+   Compiling ahash v0.7.8
+   Compiling hashbrown v0.12.3
+   Compiling lexical-core v1.0.6
+   Compiling graph v0.1.0 (/home/bl/misofm/engine-native-points/crates/graph)
+   Compiling rack-compiler v0.1.0 (/home/bl/misofm/engine-native-points/crates/rack-compiler)
+   Compiling lexical v7.0.5
+   Compiling json-number v0.4.10
+   Compiling indexmap v1.9.3
+   Compiling json-syntax v0.12.5
+   Compiling session v0.1.0 (/home/bl/misofm/engine-native-points/crates/session)
+   Compiling effect-package v0.1.0 (/home/bl/misofm/engine-native-points/crates/effect-package)
+   Compiling builtins-compiler v0.1.0 (/home/bl/misofm/engine-native-points/crates/builtins-compiler)
+   Compiling source v0.1.0 (/home/bl/misofm/engine-native-points/crates/source)
+   Compiling protocol v0.1.0 (/home/bl/misofm/engine-native-points/crates/protocol)
+   Compiling effect-compiler v0.1.0 (/home/bl/misofm/engine-native-points/crates/effect-compiler)
+   Compiling graph-compiler v0.1.0 (/home/bl/misofm/engine-native-points/crates/graph-compiler)
+   Compiling host-core v0.1.0 (/home/bl/misofm/engine-native-points/crates/host-core)
+   Compiling capi v0.1.0 (/home/bl/misofm/engine-native-points/crates/capi)
+    Finished `release` profile [optimized + debuginfo] target(s) in 15.32s

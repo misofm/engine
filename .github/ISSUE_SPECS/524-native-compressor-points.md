@@ -260,3 +260,9 @@ As expressly authorized in Sol2's bounded correction ruling, unchanged evidence 
 Root may now freeze and run the already-required immutable delivery checks, then obtain actual-PR/current-base acceptance and required qualification success before merging and synchronizing #524 closure/post-main evidence. A future observed artifact mismatch requires its bounded observed integration; this source PASS is not a guessed-pin authorization. This is acceptance within the third and final attempt, not permission for a fourth retry. #140, #518 and audit IO-5 remain open for the promised real admitted Point-to-PCM endpoint and subsequent rollout obligations.
 
 Root adopts source PASS and begins immutable delivery. This is source acceptance only; actual PR/current-base review, required qualification and remote closure remain mandatory.
+
+## Immutable delivery and observed artifact integration
+
+On clean accepted `d7b67839`, `cargo test --locked --workspace` passed 1,669 tests, zero failures, 24 ignored across 278 result blocks. Native C ABI and broader scalar/SIMD Wasm checks passed. Raw commands/status/stderr and losslessly compressed workspace stdout are in `artifacts/issue524-delivery`. An initial artifact preflight rejected an absent output directory (status 2); after creating it, the normal builder compiled successfully and rejected only the old pin (status 1).
+
+The observed artifact SHA-256 is `d77d7558105c29d38751ab26c330689da829fbe0f011a6ffcc7edf55d583bc87`, replacing `e3f47856ad917edf2cd99cdc6669a4f3e6c6a9074b15c560a8337bf842187fef`. Astra's bounded integration ruling is preserved beside the captures. After all immutable commands finished, root updated only that observed pin. No resource reservation, PCM oracle, DSP layout or algorithm changed. Ordinary rebuild, independent hashing and existing static/resource/browser consumers remain required before PR delivery.
