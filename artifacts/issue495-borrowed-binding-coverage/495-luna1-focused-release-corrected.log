@@ -1,0 +1,9 @@
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.03s
+     Running unittests src/lib.rs (target/release/deps/graph-82147ccc67a4cb2f)
+
+running 1 test
+test tests::binding_coverage_preserves_validation_and_ownership ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 56 filtered out; finished in 0.00s
+
+STATUS: 0

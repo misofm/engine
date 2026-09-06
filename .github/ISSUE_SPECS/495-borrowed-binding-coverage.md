@@ -43,3 +43,7 @@ Root may assign this independent control-plane maintenance while475 remains sole
 Read-only source/Git inspection; no tests/builds/timing or repository/Git/GitHub mutation performed.
 
 Root authorizes the named attempt within this frozen scope. Pause at each compiling, focused-test-green tranche for root checkpoint before layering more implementation.
+
+## Luna attempt 1 candidate and evidence
+
+Source `0143434b` implements the exact borrowed-union comparison and compact real-binding fixture. Root final-source graph debug/release each pass 57 tests, strict Clippy/fmt/diff/graph policy all exit 0. Final focused debug/release each pass the named one test. `artifacts/issue495-borrowed-binding-coverage/` retains all Luna raw failures and successes, candid recovered provenance and independent root final-source command/output/status evidence. Earlier full suites preceded one test-only fixture correction and are not relabeled final-source runs. No production changes followed the source checkpoint. Astra consolidated attempt review remains pending; no artifact build, timing, or delivery claimed.
