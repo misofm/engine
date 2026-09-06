@@ -111,3 +111,7 @@ The source PASS remains valid subject to this delivery qualification. Do not cla
 Read-only source/log/hash inspection; no build, test, timing, source/spec or Git/GitHub mutation performed.
 
 Root adopts amendment on frozen90a72b00 source. Only observed pin, existing generated identity records and evidence may change; verified rebuild and current qualification remain pending.
+
+## Integrated artifact qualification complete
+
+Current-main571dfc5b integration preserves the accepted host-core source exactly. Ordinary builder at90a72b00 returned1 for observed1ab725dbcf078716a666b78215490892386bc0170622bf9f79fa806908a14863; root checkpoint4cab1c9f adopted that pin under Astra's precise ruling. Ordinary verified rebuild reproduced it. Static/object/ABI, expected resources with26 red controls, separate hermetic, npm ci, current Chromium/Firefox/WebKit qualification/self-tests and matrix check each returned0. Generated recordsc86304d4 update only candidate/hash, retaining all PCM/resource numerical expectations. Artifactbuildcandidate4cab1c9f is distinct from later evidence heads. Exact-head actual PR review and requiredCI remain merge gates; no timing gain is claimed.
