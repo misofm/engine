@@ -167,3 +167,9 @@ Inspected captured numeric0 final records: debug/release builtins library3, inpu
 Source PASS permits root to freeze and complete the existing proportional immutable delivery qualification: workspace, supported targets and artifact/current-consumer applicability, then exact-head actual PR review and required CI before merge/remote closure. No full qualification or timing is claimed here; no new benchmark authority or matrix is added. #238 repairs addressed-retarget bookkeeping only: broader RT5 ramp-block extraction and descriptive measurement remain separate, and #349 stays open.
 
 Root integrates delivered main4587bfae (PR484 cfg(test)-only floor parity) before freezing immutable qualification. The sole add/add conflict in483 documentation retains its full accepted body plus verified closure record. Builtins source is unchanged from accepted70a6ff03.
+
+## Shipped artifact qualification checkpoint
+
+On immutable add3ca11, scalar/SIMD Wasm, ordinary release native C API, resource lifecycle and shared/static ABI gates return numeric0. Normal worklet build correctly rejects the previous a22f42fe pin and reports new da36c7503d9d4e1994cec6f22abd3fd97a41ede0551e3355adacdf9068bbead1 from the accepted production input-stage change. The actual failing command/log/status and expected/observed digests are retained under /tmp/engine-238-worklet-current.*.
+
+Root records the observed digest as the new artifact pin on this separate delivery branch before rebuilding and running existing static/resource/browser qualification. Runtime source remains byte-identical to add3ca11; no builder flags or qualification gates change. Browser results are still pending and the prior matrix is not evidence for the new bytes.
