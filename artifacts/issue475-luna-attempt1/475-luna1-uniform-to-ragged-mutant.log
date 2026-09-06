@@ -1,0 +1,29 @@
+COMMAND (temporary mutant): PATH=/home/bl/.cargo/bin:$PATH cargo test --locked -p compressor --lib -- kernel::tests::uniform_and_ragged_access_match_old_transcription
+CWD: /home/bl/misofm/engine-475-plan
+SOURCE_REV: 55e1c1e8a0ef9401e5bdbd89011b0c67837c9595
+SOURCE_KERNEL_SHA256: 5ad341e5347e3636414fd381777426b6ae3d0a416612a8b5d9bf4f3101a1f99e  crates/compressor/src/kernel.rs
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-475-plan/crates/compressor)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.14s
+     Running unittests src/lib.rs (target/debug/deps/compressor-80bd63f116d0655c)
+
+running 1 test
+test kernel::tests::uniform_and_ragged_access_match_old_transcription ... FAILED
+
+failures:
+
+---- kernel::tests::uniform_and_ragged_access_match_old_transcription stdout ----
+
+thread 'kernel::tests::uniform_and_ragged_access_match_old_transcription' (302154) panicked at crates/compressor/src/kernel.rs:1353:9:
+assertion `left == right` failed
+  left: Ragged
+ right: Uniform(2)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    kernel::tests::uniform_and_ragged_access_match_old_transcription
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p compressor --lib`
+STATUS=101

@@ -1,0 +1,49 @@
+COMMAND=wasm-objdump -x/-d each linked production guest module, then sha256sum/wc/rg source mapping and opcode population
+CWD=/home/bl/misofm/engine-475-plan
+SOURCE_REV=81ed8e72f9c5401ad3e91da05fe611adbdef189c
+DECODER=/usr/bin/wasm-objdump 1.0.34
+SCALAR_MODULE=/tmp/475-sol2-guest-scalar/wasm32-unknown-unknown/release/wasm_gate_guest.wasm
+SIMD128_MODULE=/tmp/475-sol2-guest-simd128/wasm32-unknown-unknown/release/wasm_gate_guest.wasm
+SCALAR_METADATA_EXIT=0
+SCALAR_DISASSEMBLY_EXIT=0
+SIMD128_METADATA_EXIT=0
+SIMD128_DISASSEMBLY_EXIT=0
+b780fdc96b065529d6cf178b1a665496231f3ec6e13ec448ffa7bda3a0f6e092  /tmp/475-sol2-guest-scalar/wasm32-unknown-unknown/release/wasm_gate_guest.wasm
+0f8c52ec6fbd3e8154079238704f589f54f5e381e9686c136ff9a90f9790ded0  /tmp/475-sol2-guest-simd128/wasm32-unknown-unknown/release/wasm_gate_guest.wasm
+ead9cac511e50077332c9e4743b3cea32c9f0b0e2ddafc02ddcb19dbf096f5ea  /tmp/475-sol2-guest-scalar-metadata.txt
+d55f585623a5add253b11175aed305d746a803423ef03c73be1f1edbb2ec7a8f  /tmp/475-sol2-guest-simd128-metadata.txt
+5395f67a18e8b7fae2cc8fdee77f258d5cc74ee4c75fd30e05c46c1445c7d8f7  /tmp/475-sol2-guest-scalar-disassembly.txt
+51b1ec21813ee7ac350289a0ee124885a50959335f88251687ff3e23f72daa3c  /tmp/475-sol2-guest-simd128-disassembly.txt
+   46585  4942172 /tmp/475-sol2-guest-scalar/wasm32-unknown-unknown/release/wasm_gate_guest.wasm
+   14388  3257899 /tmp/475-sol2-guest-simd128/wasm32-unknown-unknown/release/wasm_gate_guest.wasm
+    2260   181499 /tmp/475-sol2-guest-scalar-metadata.txt
+    2236   178358 /tmp/475-sol2-guest-simd128-metadata.txt
+  428768 37900479 /tmp/475-sol2-guest-scalar-disassembly.txt
+  251201 24557232 /tmp/475-sol2-guest-simd128-disassembly.txt
+  745438 71017639 total
+SCALAR_FUNCTIONS=675
+SIMD128_FUNCTIONS=654
+SCALAR_V128_OPS=
+SIMD128_V128_OPS=26376
+SOURCE_MAPPING_BEGIN
+/tmp/475-sol2-guest-simd128-metadata.txt:213: - func[172] sig=7 <_RINvNtCse2Vtagz2PEy_10compressor6kernel9fill_tapsNtNtCsk6DwtE1d11l_4wide6f32x4_5f32x4ECs1wPktp6usmF_16wasm_gate_corpus>
+/tmp/475-sol2-guest-simd128-metadata.txt:248: - func[207] sig=7 <_RINvNtCse2Vtagz2PEy_10compressor6kernel9fill_tapsNtNtCsk6DwtE1d11l_4wide6f32x8_5f32x8ECs1wPktp6usmF_16wasm_gate_corpus>
+/tmp/475-sol2-guest-simd128-metadata.txt:480: - func[172] size=3096 <_RINvNtCse2Vtagz2PEy_10compressor6kernel9fill_tapsNtNtCsk6DwtE1d11l_4wide6f32x4_5f32x4ECs1wPktp6usmF_16wasm_gate_corpus>
+/tmp/475-sol2-guest-simd128-metadata.txt:515: - func[207] size=1076 <_RINvNtCse2Vtagz2PEy_10compressor6kernel9fill_tapsNtNtCsk6DwtE1d11l_4wide6f32x8_5f32x8ECs1wPktp6usmF_16wasm_gate_corpus>
+/tmp/475-sol2-guest-simd128-metadata.txt:2178: - func[172] <_RINvNtCse2Vtagz2PEy_10compressor6kernel9fill_tapsNtNtCsk6DwtE1d11l_4wide6f32x4_5f32x4ECs1wPktp6usmF_16wasm_gate_corpus>
+/tmp/475-sol2-guest-simd128-metadata.txt:2213: - func[207] <_RINvNtCse2Vtagz2PEy_10compressor6kernel9fill_tapsNtNtCsk6DwtE1d11l_4wide6f32x8_5f32x8ECs1wPktp6usmF_16wasm_gate_corpus>
+/tmp/475-sol2-guest-scalar-metadata.txt:212: - func[170] sig=29 <_RINvNtCse2Vtagz2PEy_10compressor6kernel13process_blockNtNtCsk6DwtE1d11l_4wide6f32x8_5f32x8ECs1wPktp6usmF_16wasm_gate_corpus>
+/tmp/475-sol2-guest-scalar-metadata.txt:214: - func[172] sig=29 <_RINvNtCse2Vtagz2PEy_10compressor6kernel13process_blockNtNtCsk6DwtE1d11l_4wide6f32x4_5f32x4ECs1wPktp6usmF_16wasm_gate_corpus>
+/tmp/475-sol2-guest-scalar-metadata.txt:254: - func[212] sig=15 <_RINvNtCse2Vtagz2PEy_10compressor6kernel9fill_tapsNtNtCsk6DwtE1d11l_4wide6f32x8_5f32x8ECs1wPktp6usmF_16wasm_gate_corpus>
+/tmp/475-sol2-guest-scalar-metadata.txt:256: - func[214] sig=15 <_RINvNtCse2Vtagz2PEy_10compressor6kernel9fill_tapsNtNtCsk6DwtE1d11l_4wide6f32x4_5f32x4ECs1wPktp6usmF_16wasm_gate_corpus>
+/tmp/475-sol2-guest-scalar-metadata.txt:486: - func[170] size=56089 <_RINvNtCse2Vtagz2PEy_10compressor6kernel13process_blockNtNtCsk6DwtE1d11l_4wide6f32x8_5f32x8ECs1wPktp6usmF_16wasm_gate_corpus>
+/tmp/475-sol2-guest-scalar-metadata.txt:488: - func[172] size=30666 <_RINvNtCse2Vtagz2PEy_10compressor6kernel13process_blockNtNtCsk6DwtE1d11l_4wide6f32x4_5f32x4ECs1wPktp6usmF_16wasm_gate_corpus>
+/tmp/475-sol2-guest-scalar-metadata.txt:528: - func[212] size=950 <_RINvNtCse2Vtagz2PEy_10compressor6kernel9fill_tapsNtNtCsk6DwtE1d11l_4wide6f32x8_5f32x8ECs1wPktp6usmF_16wasm_gate_corpus>
+/tmp/475-sol2-guest-scalar-metadata.txt:530: - func[214] size=2496 <_RINvNtCse2Vtagz2PEy_10compressor6kernel9fill_tapsNtNtCsk6DwtE1d11l_4wide6f32x4_5f32x4ECs1wPktp6usmF_16wasm_gate_corpus>
+/tmp/475-sol2-guest-scalar-metadata.txt:2194: - func[170] <_RINvNtCse2Vtagz2PEy_10compressor6kernel13process_blockNtNtCsk6DwtE1d11l_4wide6f32x8_5f32x8ECs1wPktp6usmF_16wasm_gate_corpus>
+/tmp/475-sol2-guest-scalar-metadata.txt:2196: - func[172] <_RINvNtCse2Vtagz2PEy_10compressor6kernel13process_blockNtNtCsk6DwtE1d11l_4wide6f32x4_5f32x4ECs1wPktp6usmF_16wasm_gate_corpus>
+/tmp/475-sol2-guest-scalar-metadata.txt:2236: - func[212] <_RINvNtCse2Vtagz2PEy_10compressor6kernel9fill_tapsNtNtCsk6DwtE1d11l_4wide6f32x8_5f32x8ECs1wPktp6usmF_16wasm_gate_corpus>
+/tmp/475-sol2-guest-scalar-metadata.txt:2238: - func[214] <_RINvNtCse2Vtagz2PEy_10compressor6kernel9fill_tapsNtNtCsk6DwtE1d11l_4wide6f32x4_5f32x4ECs1wPktp6usmF_16wasm_gate_corpus>
+SOURCE_MAPPING_RG_EXIT=0
+SOURCE_MAPPING_END
+

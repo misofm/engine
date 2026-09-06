@@ -1,0 +1,76 @@
+COMMAND_1=PATH=/home/bl/.cargo/bin:$PATH cargo test --locked -p compressor
+COMMAND_2=PATH=/home/bl/.cargo/bin:$PATH cargo test --locked --release -p compressor --all-targets
+COMMAND_3=PATH=/home/bl/.cargo/bin:$PATH cargo clippy --locked -p compressor --all-targets -- -D warnings
+CWD=/home/bl/misofm/engine-475-plan
+SOURCE_REV=81ed8e72f9c5401ad3e91da05fe611adbdef189c
+SOURCE_KERNEL_SHA256=0659a83efa4ae4ea71ef6dcc752ddf0812a742b648c872be175a3ab49fc3b129  crates/compressor/src/kernel.rs
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-475-plan/crates/compressor)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.16s
+     Running unittests src/lib.rs (target/debug/deps/compressor-80bd63f116d0655c)
+
+running 1 test
+test kernel::tests::uniform_and_ragged_access_match_old_transcription ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/conformance.rs (target/debug/deps/conformance-8aabad45177d5df2)
+
+running 2 tests
+test uniform_and_ragged_render_paths_allocate_and_free_nothing ... FAILED
+test passes_effect_contract_conformance ... ok
+
+failures:
+
+---- uniform_and_ragged_render_paths_allocate_and_free_nothing stdout ----
+
+thread 'uniform_and_ragged_render_paths_allocate_and_free_nothing' (334291) panicked at crates/compressor/tests/conformance.rs:109:5:
+assertion `left == right` failed: render allocated
+  left: 675
+ right: 0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    uniform_and_ragged_render_paths_allocate_and_free_nothing
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.92s
+
+error: test failed, to rerun pass `-p compressor --test conformance`
+DEBUG_TEST_EXIT=101
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-475-plan/crates/compressor)
+    Finished `release` profile [optimized + debuginfo] target(s) in 7.12s
+     Running unittests src/lib.rs (target/release/deps/compressor-9cc9f8cd79b77eb5)
+
+running 1 test
+test kernel::tests::uniform_and_ragged_access_match_old_transcription ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/conformance.rs (target/release/deps/conformance-ad9a60da36090213)
+
+running 2 tests
+test uniform_and_ragged_render_paths_allocate_and_free_nothing ... FAILED
+test passes_effect_contract_conformance ... ok
+
+failures:
+
+---- uniform_and_ragged_render_paths_allocate_and_free_nothing stdout ----
+
+thread 'uniform_and_ragged_render_paths_allocate_and_free_nothing' (334821) panicked at crates/compressor/tests/conformance.rs:109:5:
+assertion `left == right` failed: render allocated
+  left: 182
+ right: 0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    uniform_and_ragged_render_paths_allocate_and_free_nothing
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+
+error: test failed, to rerun pass `-p compressor --test conformance`
+RELEASE_ALL_TARGETS_EXIT=101
+    Checking compressor v0.1.0 (/home/bl/misofm/engine-475-plan/crates/compressor)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.08s
+STRICT_CLIPPY_EXIT=0
+

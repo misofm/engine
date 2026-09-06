@@ -1,0 +1,39 @@
+COMMAND: PATH=/home/bl/.cargo/bin:/home/bl/.local/bin:/home/bl/.codex/packages/standalone/releases/0.153.2-x86_64-unknown-linux-musl/codex-path:/home/bl/.codex/tmp/arg0/codex-arg0CWD760:/home/bl/.local/bin:/home/bl/.opencode/bin:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.opencode/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin cargo rustc --locked --release -p compressor --target-dir /tmp/475-luna1-target-candidate.4de9SD -- --emit=asm,llvm-ir
+CWD: /home/bl/misofm/engine-475-plan
+SOURCE_REV: 55e1c1e8a0ef9401e5bdbd89011b0c67837c9595
+SOURCE_KERNEL_SHA256: 2253ff67518ceea52996accce1162f11cf29ec692724d549edcd69da910c66b9  crates/compressor/src/kernel.rs
+TARGET_DIR: /tmp/475-luna1-target-candidate.4de9SD
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+binary: rustc
+commit-hash: 8bab26f4f68e0e26f0bb7960be334d5b520ea452
+commit-date: 2026-07-14
+host: x86_64-unknown-linux-gnu
+release: 1.97.1
+LLVM version: 22.1.6
+cargo 1.97.1 (c980f4866 2026-06-30)
+   Compiling bytemuck v1.25.2
+   Compiling engine v0.1.0 (/home/bl/misofm/engine-475-plan/crates/engine)
+   Compiling safe_arch v1.2.0
+   Compiling wide v1.6.1
+   Compiling lane v0.1.0 (/home/bl/misofm/engine-475-plan/crates/lane)
+   Compiling math v0.1.0 (/home/bl/misofm/engine-475-plan/crates/math)
+   Compiling effect-contract v0.1.0 (/home/bl/misofm/engine-475-plan/crates/effect-contract)
+   Compiling effect-runtime v0.1.0 (/home/bl/misofm/engine-475-plan/crates/effect-runtime)
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-475-plan/crates/compressor)
+    Finished `release` profile [optimized + debuginfo] target(s) in 3.89s
+STATUS=0
+/tmp/475-luna1-target-candidate.4de9SD/release/deps/compressor-4b5374e0681f5134.ll
+/tmp/475-luna1-target-candidate.4de9SD/release/deps/compressor-4b5374e0681f5134.s
+OBJECT_HASHES_AND_NAMED_SYMBOL_SCAN (actual):
+9965b12b6cb009d53e2a13c50d22b2891125249fca5dc0ca195e10136908c56c  /tmp/475-luna1-target-candidate.4de9SD/release/deps/compressor-4b5374e0681f5134.ll
+142481554c3845745765db8ffe63a6765f4b0489db84948da90a852e53182224  /tmp/475-luna1-target-candidate.4de9SD/release/deps/compressor-4b5374e0681f5134.s
+501:; call compressor::kernel::process_block::<wide::f32x8_::f32x8>
+520:; call compressor::kernel::process_block::<wide::f32x8_::f32x8>
+2199:define internal fastcc void @_RINvNtCse3bfmKSZS8Y_10compressor6kernel13process_blockNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8EB4_(ptr noalias noundef nonnull align 4 captures(none) %left.0, i64 noundef range(i64 8, 34359738361) %left.1, ptr noalias noundef nonnull align 4 captures(none) %right.0, i64 noundef range(i64 8, 34359738361) %right.1, ptr dead_on_return noalias noundef nonnull readonly align 8 captures(none) dereferenceable(40) %detector, i64 noundef range(i64 1, 4294967296) %frames, i32 noundef range(i32 1, 4) %link, i1 noundef zeroext %bypass, i32 noundef %sample_rate, ptr noalias noundef nonnull align 32 dereferenceable(1568) %channels.0, ptr noalias noundef nonnull align 32 dereferenceable(1568) %channels.1, ptr noalias noundef nonnull readonly align 8 captures(none) dereferenceable(64) %staged) unnamed_addr #0 personality ptr @rust_eh_personality !dbg !1674 {
+4911:define internal fastcc void @_RINvNtCse3bfmKSZS8Y_10compressor6kernel13process_blockfEB4_(ptr noalias noundef nonnull align 4 captures(none) %left.0, i64 noundef range(i64 0, 2305843009213693952) %left.1, ptr noalias noundef nonnull align 4 captures(none) %right.0, i64 noundef range(i64 0, 2305843009213693952) %right.1, ptr dead_on_return noalias noundef nonnull readonly align 8 captures(none) dereferenceable(40) %detector, i64 noundef %frames, i32 noundef range(i32 1, 4) %link, i1 noundef zeroext %bypass, i32 noundef %sample_rate, ptr noalias noundef nonnull align 8 dereferenceable(1520) %channels.0, ptr noalias noundef nonnull align 8 dereferenceable(1520) %channels.1, ptr noalias noundef nonnull readonly align 8 captures(none) dereferenceable(64) %staged) unnamed_addr #0 personality ptr @rust_eh_personality !dbg !6509 {
+6888:define internal fastcc void @_RINvNtCse3bfmKSZS8Y_10compressor6kernel18process_block_monoNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8EB4_(ptr noalias noundef nonnull align 4 captures(none) %left.0, i64 noundef range(i64 8, 34359738361) %left.1, ptr dead_on_return noalias noundef nonnull readonly align 8 captures(none) dereferenceable(40) %detector, i64 noundef range(i64 1, 4294967296) %frames, i32 noundef range(i32 1, 4) %link, i1 noundef zeroext %bypass, i32 noundef %sample_rate, ptr noalias noundef nonnull align 32 dereferenceable(1568) %channel_left, ptr noalias noundef nonnull readonly align 8 captures(none) dereferenceable(64) %staged) unnamed_addr #0 personality ptr @rust_eh_personality !dbg !9143 {
+14179:; call compressor::kernel::process_block::<f32>
+14200:; call compressor::kernel::process_block::<f32>
+15020:; call compressor::kernel::process_block_mono::<wide::f32x8_::f32x8>
+15033:; call compressor::kernel::process_block_mono::<wide::f32x8_::f32x8>
+INTERPRETATION: candidate retains production scalar/W8 process and mono bodies; helper access is inlined, so no isolated instruction count or speed claim.

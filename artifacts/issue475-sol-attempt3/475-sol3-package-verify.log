@@ -1,0 +1,21 @@
+COMMAND: sha256sum -c artifacts/issue475-sol-attempt3/manifest.sha256
+CWD: /home/bl/misofm/engine-475-plan
+SOURCE: 019ac62a
+sha256sum: 475-sol3-affected-suites.log: No such file or directory
+475-sol3-affected-suites.log: FAILED open or read
+sha256sum: 475-sol3-focused-final.log: No such file or directory
+475-sol3-focused-final.log: FAILED open or read
+sha256sum: 475-sol3-full-cargo-gates.log: No such file or directory
+475-sol3-full-cargo-gates.log: FAILED open or read
+sha256sum: 475-sol3-policy-gates.log: No such file or directory
+475-sol3-policy-gates.log: FAILED open or read
+sha256sum: 475-sol3-w4-compile-failure-1.log: No such file or directory
+475-sol3-w4-compile-failure-1.log: FAILED open or read
+sha256sum: 475-sol3-w4-compile-failure-2.log: No such file or directory
+475-sol3-w4-compile-failure-2.log: FAILED open or read
+sha256sum: 475-sol3-w4-focused-debug.log: No such file or directory
+475-sol3-w4-focused-debug.log: FAILED open or read
+sha256sum: 475-sol3-w4-oracle-failure.log: No such file or directory
+475-sol3-w4-oracle-failure.log: FAILED open or read
+sha256sum: WARNING: 8 listed files could not be read
+EXIT: 1
