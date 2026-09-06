@@ -1,0 +1,13 @@
+{
+  "source": "4e2fc87dcc44243df84618101c10ed06a71cbe45",
+  "files": {
+    "crates/graph-compiler/src/canonical.rs": {
+      "git_blob": "97929c6a1b8e0678fdcd555ac7fbcf85ee4b5953",
+      "sha256": "044ec65b3861773fda59d7765d068875a137f7f9be8d5ab3be3f5dad36eb1899"
+    },
+    "crates/graph-compiler/src/lib.rs": {
+      "git_blob": "5a132b1ac33d3600115e841be503cd8a27f7a392",
+      "sha256": "27c8a4884f7fffd64d493048f6547e49a48e0da15648ff498cfd56423f6f5df6"
+    }
+  }
+}

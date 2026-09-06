@@ -1,0 +1,169 @@
+Sun Sep  6 05:26:50 UTC 2026
+/home/bl/misofm/engine-cp20-identity-plan
+argv: cargo fmt --all -- --check
+source=31cdbe0e2de07b0f51fef19ecfe9d9c433def308
+env PATH=/home/bl/.cargo/bin:/home/bl/.local/bin:/home/bl/.codex/packages/standalone/releases/0.153.2-x86_64-unknown-linux-musl/codex-path:/home/bl/.codex/tmp/arg0/codex-arg0CWD760:/home/bl/.local/bin:/home/bl/.opencode/bin:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.opencode/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin
+Diff in /home/bl/misofm/engine-cp20-identity-plan/crates/graph-compiler/src/lib.rs:1345:
+             effect_id: gid("fxid"),
+         };
+         let nodes = [
+-            (GraphNodeId::TrackStage { track_id: gid("trk"), stage: TrackStage::Input }, "track:trk:input"),
+-            (GraphNodeId::TrackStage { track_id: gid("trk"), stage: TrackStage::PostInputBuiltins }, "track:trk:post-input-builtins"),
+-            (GraphNodeId::TrackStage { track_id: gid("trk"), stage: TrackStage::PostSimd1 }, "track:trk:post-simd1"),
+-            (GraphNodeId::TrackStage { track_id: gid("trk"), stage: TrackStage::PostDynamic }, "track:trk:post-dynamic"),
+-            (GraphNodeId::TrackStage { track_id: gid("trk"), stage: TrackStage::PostSimd2PreFader }, "track:trk:post-simd2-pre-fader"),
+-            (GraphNodeId::TrackStage { track_id: gid("trk"), stage: TrackStage::PostFader }, "track:trk:post-fader"),
+-            (GraphNodeId::TrackStage { track_id: gid("trk"), stage: TrackStage::PostMatrix }, "track:trk:post-matrix"),
+-            (GraphNodeId::Effect(effect(RackId::Simd1)), "effect:fxtrack:simd1:fxid"),
+-            (GraphNodeId::Effect(effect(RackId::Dynamic)), "effect:fxtrack:dynamic:fxid"),
+-            (GraphNodeId::Effect(effect(RackId::Simd2)), "effect:fxtrack:simd2:fxid"),
+-            (GraphNodeId::Route { route_id: gid("route") }, "route:route"),
+-            (GraphNodeId::Submix { submix_id: gid("sub") }, "submix:sub"),
+-            (GraphNodeId::Output { output_id: gid("out") }, "output:out"),
+-            (GraphNodeId::CompensationDelay { edge_id: Box::new(GraphEdgeId::TrackMain {
+-                target: GraphNodeId::CompensationDelay { edge_id: Box::new(GraphEdgeId::RouteDestination { route_id: gid("rd") }) },
+-            }) }, "delay:track-main:delay:route-destination:rd"),
++            (
++                GraphNodeId::TrackStage {
++                    track_id: gid("trk"),
++                    stage: TrackStage::Input,
++                },
++                "track:trk:input",
++            ),
++            (
++                GraphNodeId::TrackStage {
++                    track_id: gid("trk"),
++                    stage: TrackStage::PostInputBuiltins,
++                },
++                "track:trk:post-input-builtins",
++            ),
++            (
++                GraphNodeId::TrackStage {
++                    track_id: gid("trk"),
++                    stage: TrackStage::PostSimd1,
++                },
++                "track:trk:post-simd1",
++            ),
++            (
++                GraphNodeId::TrackStage {
++                    track_id: gid("trk"),
++                    stage: TrackStage::PostDynamic,
++                },
++                "track:trk:post-dynamic",
++            ),
++            (
++                GraphNodeId::TrackStage {
++                    track_id: gid("trk"),
++                    stage: TrackStage::PostSimd2PreFader,
++                },
++                "track:trk:post-simd2-pre-fader",
++            ),
++            (
++                GraphNodeId::TrackStage {
++                    track_id: gid("trk"),
++                    stage: TrackStage::PostFader,
++                },
++                "track:trk:post-fader",
++            ),
++            (
++                GraphNodeId::TrackStage {
++                    track_id: gid("trk"),
++                    stage: TrackStage::PostMatrix,
++                },
++                "track:trk:post-matrix",
++            ),
++            (
++                GraphNodeId::Effect(effect(RackId::Simd1)),
++                "effect:fxtrack:simd1:fxid",
++            ),
++            (
++                GraphNodeId::Effect(effect(RackId::Dynamic)),
++                "effect:fxtrack:dynamic:fxid",
++            ),
++            (
++                GraphNodeId::Effect(effect(RackId::Simd2)),
++                "effect:fxtrack:simd2:fxid",
++            ),
++            (
++                GraphNodeId::Route {
++                    route_id: gid("route"),
++                },
++                "route:route",
++            ),
++            (
++                GraphNodeId::Submix {
++                    submix_id: gid("sub"),
++                },
++                "submix:sub",
++            ),
++            (
++                GraphNodeId::Output {
++                    output_id: gid("out"),
++                },
++                "output:out",
++            ),
++            (
++                GraphNodeId::CompensationDelay {
++                    edge_id: Box::new(GraphEdgeId::TrackMain {
++                        target: GraphNodeId::CompensationDelay {
++                            edge_id: Box::new(GraphEdgeId::RouteDestination {
++                                route_id: gid("rd"),
++                            }),
++                        },
++                    }),
++                },
++                "delay:track-main:delay:route-destination:rd",
++            ),
+         ];
+         for (node, expected) in nodes {
+             assert_eq!(node_text(&node), expected);
+Diff in /home/bl/misofm/engine-cp20-identity-plan/crates/graph-compiler/src/lib.rs:1368:
+         }
+ 
+         let edges = [
+-            (GraphEdgeId::TrackMain { target: GraphNodeId::Route { route_id: gid("target") } }, "track-main:route:target"),
+-            (GraphEdgeId::RouteSource { route_id: gid("rs") }, "route-source:rs"),
+-            (GraphEdgeId::RouteDestination { route_id: gid("rd") }, "route-destination:rd"),
+-            (GraphEdgeId::EffectSidechain { effect: effect(RackId::Dynamic), port: "é/鼓".to_owned() }, "effect-sidechain:fxtrack:dynamic:fxid:é/鼓"),
+-            (GraphEdgeId::TrackMain { target: GraphNodeId::CompensationDelay { edge_id: Box::new(GraphEdgeId::RouteDestination { route_id: gid("rd") }) } }, "track-main:delay:route-destination:rd"),
++            (
++                GraphEdgeId::TrackMain {
++                    target: GraphNodeId::Route {
++                        route_id: gid("target"),
++                    },
++                },
++                "track-main:route:target",
++            ),
++            (
++                GraphEdgeId::RouteSource {
++                    route_id: gid("rs"),
++                },
++                "route-source:rs",
++            ),
++            (
++                GraphEdgeId::RouteDestination {
++                    route_id: gid("rd"),
++                },
++                "route-destination:rd",
++            ),
++            (
++                GraphEdgeId::EffectSidechain {
++                    effect: effect(RackId::Dynamic),
++                    port: "é/鼓".to_owned(),
++                },
++                "effect-sidechain:fxtrack:dynamic:fxid:é/鼓",
++            ),
++            (
++                GraphEdgeId::TrackMain {
++                    target: GraphNodeId::CompensationDelay {
++                        edge_id: Box::new(GraphEdgeId::RouteDestination {
++                            route_id: gid("rd"),
++                        }),
++                    },
++                },
++                "track-main:delay:route-destination:rd",
++            ),
+         ];
+         for (edge, expected) in edges {
+             assert_eq!(edge_text(&edge), expected);
+exit=1

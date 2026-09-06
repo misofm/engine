@@ -1,0 +1,15 @@
+Sun Sep  6 05:30:11 UTC 2026
+/home/bl/misofm/engine-cp20-identity-plan
+argv: cargo test --locked -p graph-compiler --lib tests::node_text_len_matches_node_text_for_every_variant -- --exact --nocapture
+source=fcb8703cbb4d61fca041225305b91049fbee2bb2
+PATH=/home/bl/.cargo/bin:/home/bl/.local/bin:/home/bl/.codex/packages/standalone/releases/0.153.2-x86_64-unknown-linux-musl/codex-path:/home/bl/.codex/tmp/arg0/codex-arg0CWD760:/home/bl/.local/bin:/home/bl/.opencode/bin:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.opencode/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin
+   Compiling graph-compiler v0.1.0 (/home/bl/misofm/engine-cp20-identity-plan/crates/graph-compiler)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.49s
+     Running unittests src/lib.rs (target/debug/deps/graph_compiler-c1c1e295dac82746)
+
+running 1 test
+test tests::node_text_len_matches_node_text_for_every_variant ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 62 filtered out; finished in 0.00s
+
+exit=0

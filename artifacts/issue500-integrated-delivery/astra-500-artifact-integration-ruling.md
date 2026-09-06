@@ -1,0 +1,11 @@
+# Astra #500 current artifact integration ruling — approved, bounded
+
+Reviewed clean frozen be055b4c602ffc8dcca0653815e303f3001bdd69 in engine-cp20-identity-plan. Graph-compiler is byte-identical to accepted 4e2fc87d/6f421d67; compressor/Cargo/config match delivered ad00d16b. The original builder executed during a documentation merge conflict and remains historical, explicitly not clean-head qualification evidence.
+
+The separate clean ordinary invocation in /tmp/500-clean-delivery-builder.command.json identifies this exact source, explicit output /tmp/engine-500-clean-qualified and target /tmp/engine-500-artifact-target. Its authentic log records successful release compilation followed by builder exit1: expected fa78dc8d3f0d391b94419f5252504eee2aafbbf13853884157e24935ed092cc3, observed bed7d77cbd55e91f38679d4ed1ea6d99684ad12d8a1a0f785049d788630f17ee. This is an actual supported-build mismatch, not authorization to choose a digest from an unqualified file or alter numerical expectations.
+
+Approve an exact observed-pin checkpoint followed by the ordinary verified rebuild and existing static/object/ABI, resource gate with its 26 rejection controls, hermetic worklet, current three-browser record/check plus self-tests and matrix qualification. Independently compare the successfully published module bytes/SHA to the exact pin and all current consumer records. Generated candidate/hash identities may change; canonical/PCM/resource numerical expectations, schemas, corpus pins, CI/lints and builders remain unchanged. Any unexpected numerical or further source discrepancy stops promotion for a concrete ruling. Preserve both initial dirty-merge and clean mismatch logs with honest provenance; do not overwrite failure evidence.
+
+This ruling grants no timing authority and does not resolve or waive the separately observed PR502 post-main allocation qualification failure. That regression must be handled under its bounded successor and required CI; no merger may rely on the historical premerge PASS to ignore the known failure. Final exact-head Astra PR review and required CI success remain delivery gates.
+
+Read-only source/log comparison; no source/Git/GitHub edits, builds, tests or timing performed.
