@@ -143,3 +143,7 @@ Approve only the exact observed pin checkpoint and the existing seven-step quali
 The immutable workspace/supported-target/nativeABI sequence is still running on this source. Do not edit its tracked worktree until terminal, including pin/spec edits. Root may wait, or use a separate delivery checkout with explicitly verified source identity and isolated build target while preserving the immutable run. This ruling does not claim those pending gates passed or independently hash an artifact the mismatch builder has not yet published.
 
 Preserve the authentic mismatch command/log/status and source lineage. Following all mandatory terminal gates, final actual-PR exact-head Astra review and required CI success remain necessary. No timing, benchmark authority, new qualification matrix or unconditional production change is authorized. Read-only review; no builds/tests/source/spec/Git/GitHub mutations performed.
+
+## Current artifact consumers complete
+
+Pinned candidatee9a6519e passes all seven existing artifact/consumer steps with individual exit0. Published module independently hashes25c1b72a65ebfd081c74d431614cfba42492e95e490cc4d7c203ee14fe8737e9. Generated browser records differ only in candidate/hash identity; canonical/PCM/resource expectations remain unchanged. artifacts/issue496-integrated-delivery retains immutable and consumer execution, actual mismatch and exact module identity. Source-level full-W8 refresh observation is240 to30 extractions; no timed improvement is claimed. Actual PR review and required CI remain mandatory.
