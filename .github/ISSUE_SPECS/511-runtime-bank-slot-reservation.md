@@ -197,3 +197,7 @@ Root integrated delivered maina6a59030 and #512 closure/post-main records before
 ## Sol attempt 2 focused checkpoint
 
 Sol corrected the six approved source paths and both frozen exact debug tests pass one test each. Root verified contemporaneous six-file SHA256 identities in both successful records before committing. Initial feature/compile/canonical-oracle failures remain preserved. Release/full/static gates and consolidated Astra acceptance are still pending; this checkpoint is recovery progress, not issue closure.
+
+## Sol attempt 2 final local evidence
+
+Source777d168f and the mechanical test-only follow-upca8f34d5 pass both frozen exact tests, full graph64/64 and allocation7/7 suites in debug/release, scoped strict Clippy and fmt/diff/graph/realtime/workspace policies. Actual compiled construction facts show pairedN6/R6/S5 and unpairedN6/R6/S6 with max per-chainS3. Raw evidence, source identities and candid operational failures are preserved in artifacts/issue511-sol-attempt2. Consolidated Astra review and immutable delivery are pending.

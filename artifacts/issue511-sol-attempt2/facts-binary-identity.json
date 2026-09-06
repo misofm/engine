@@ -1,0 +1,6 @@
+{
+  "path": "/tmp/511-sol2-facts-bin",
+  "bytes": 49740664,
+  "sha256": "b1e200838212d78c0eae5cbf0f56ccacc1e11949d996943244676a4ee04ab566",
+  "note": "Root identity capture after execution; executable remains local and is not committed. Original .meta names actual rustc inputs and their hashes."
+}

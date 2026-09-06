@@ -1,0 +1,49 @@
+   Compiling graph v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/graph)
+   Compiling builtins-compiler v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/builtins-compiler)
+error[E0425]: cannot find type `TestOnlyBankChainConstructionFacts` in crate `graph`
+    --> crates/builtins-compiler/src/lib.rs:5523:16
+     |
+5523 |         graph::TestOnlyBankChainConstructionFacts,
+     |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in `graph`
+     |
+note: found an item that was configured out
+    --> crates/graph/src/lib.rs:13:5
+     |
+  10 | #[cfg(feature = "test-support")]
+     |       ------------------------ the item is gated behind the `test-support` feature
+...
+  13 |     TestOnlyBankChainConstructionFacts, TestOnlyBankChainInputs, TestOnlyBankChainOwnership,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0425]: cannot find function `test_only_reset_bank_chain_construction_facts` in crate `graph`
+    --> crates/builtins-compiler/src/lib.rs:5526:16
+     |
+5526 |         graph::test_only_reset_bank_chain_construction_facts();
+     |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in `graph`
+     |
+note: found an item that was configured out
+    --> crates/graph/src/lib.rs:15:42
+     |
+  10 | #[cfg(feature = "test-support")]
+     |       ------------------------ the item is gated behind the `test-support` feature
+...
+  15 |     test_only_prepare_bank_chain_inputs, test_only_reset_bank_chain_construction_facts,
+     |                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0425]: cannot find function `test_only_bank_chain_construction_facts` in crate `graph`
+    --> crates/builtins-compiler/src/lib.rs:5536:28
+     |
+5536 |         let facts = graph::test_only_bank_chain_construction_facts();
+     |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in `graph`
+     |
+note: found an item that was configured out
+    --> crates/graph/src/lib.rs:14:5
+     |
+  10 | #[cfg(feature = "test-support")]
+     |       ------------------------ the item is gated behind the `test-support` feature
+...
+  14 |     test_only_bank_chain_construction_facts, test_only_bank_chain_ownership,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+For more information about this error, try `rustc --explain E0425`.
+error: could not compile `builtins-compiler` (lib) due to 3 previous errors

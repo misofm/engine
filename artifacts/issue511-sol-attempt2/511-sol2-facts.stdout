@@ -1,0 +1,2 @@
+paired=TestOnlyBankChainConstructionFacts { prepared_memberships: 6, run_memberships: 6, runtime_slots: 5, maximum_run_memberships: 3, maximum_runtime_slots: 2 }
+unpaired=TestOnlyBankChainConstructionFacts { prepared_memberships: 6, run_memberships: 6, runtime_slots: 6, maximum_run_memberships: 3, maximum_runtime_slots: 3 }
