@@ -1,0 +1,459 @@
+DSP crates debug tests	Set up job	﻿2026-09-06T05:39:57.1264950Z Current runner version: '2.337.0'
+DSP crates debug tests	Set up job	2026-09-06T05:39:57.1304182Z ##[group]Runner Image Provisioner
+DSP crates debug tests	Set up job	2026-09-06T05:39:57.1305517Z Hosted Compute Agent
+DSP crates debug tests	Set up job	2026-09-06T05:39:57.1306558Z Version: 20260828.587
+DSP crates debug tests	Set up job	2026-09-06T05:39:57.1307835Z Commit: abac92662cab4cc7352de4f9f9d2e2419aad9c29
+DSP crates debug tests	Set up job	2026-09-06T05:39:57.1309158Z Build Date: 2026-08-28T16:44:25Z
+DSP crates debug tests	Set up job	2026-09-06T05:39:57.1310585Z Worker ID: {2d2ac49b-61a9-4ae4-93fd-2b92dc6dfde0}
+DSP crates debug tests	Set up job	2026-09-06T05:39:57.1312236Z Azure Region: northcentralus
+DSP crates debug tests	Set up job	2026-09-06T05:39:57.1313412Z ##[endgroup]
+DSP crates debug tests	Set up job	2026-09-06T05:39:57.1316734Z ##[group]Operating System
+DSP crates debug tests	Set up job	2026-09-06T05:39:57.1317833Z Ubuntu
+DSP crates debug tests	Set up job	2026-09-06T05:39:57.1318672Z 24.04.4
+DSP crates debug tests	Set up job	2026-09-06T05:39:57.1320462Z LTS
+DSP crates debug tests	Set up job	2026-09-06T05:39:57.1321457Z ##[endgroup]
+DSP crates debug tests	Set up job	2026-09-06T05:39:57.1322563Z ##[group]Runner Image
+DSP crates debug tests	Set up job	2026-09-06T05:39:57.1323655Z Image: ubuntu-24.04
+DSP crates debug tests	Set up job	2026-09-06T05:39:57.1324644Z Version: 20260831.293.1
+DSP crates debug tests	Set up job	2026-09-06T05:39:57.1326749Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20260831.293/images/ubuntu/Ubuntu2404-Readme.md
+DSP crates debug tests	Set up job	2026-09-06T05:39:57.1360811Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260831.293
+DSP crates debug tests	Set up job	2026-09-06T05:39:57.1362602Z ##[endgroup]
+DSP crates debug tests	Set up job	2026-09-06T05:39:57.1364650Z ##[group]GITHUB_TOKEN Permissions
+DSP crates debug tests	Set up job	2026-09-06T05:39:57.1367751Z Contents: read
+DSP crates debug tests	Set up job	2026-09-06T05:39:57.1368785Z Metadata: read
+DSP crates debug tests	Set up job	2026-09-06T05:39:57.1370255Z ##[endgroup]
+DSP crates debug tests	Set up job	2026-09-06T05:39:57.1373638Z Secret source: Actions
+DSP crates debug tests	Set up job	2026-09-06T05:39:57.1375953Z Prepare workflow directory
+DSP crates debug tests	Set up job	2026-09-06T05:39:57.1936842Z Prepare all required actions
+DSP crates debug tests	Set up job	2026-09-06T05:39:57.2002382Z Getting action download info
+DSP crates debug tests	Set up job	2026-09-06T05:39:57.4588230Z Download action repository 'actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683' (SHA:11bd71901bbe5b1630ceea73d27597364c9af683)
+DSP crates debug tests	Set up job	2026-09-06T05:39:57.5933527Z Download action repository 'Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6' (SHA:6323deb102c322ba6fcbdcafc7e3dddab59af2b6)
+DSP crates debug tests	Set up job	2026-09-06T05:39:58.0993780Z Complete job name: DSP crates debug tests
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	﻿2026-09-06T05:39:58.1835285Z Node 20 is being deprecated. This workflow is running with Node 24 by default. If you need to temporarily use Node 20, you can set the ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION=true environment variable. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.1844782Z ##[group]Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.1845809Z with:
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.1846318Z   repository: misofm/engine
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.1850906Z   token: ***
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.1851442Z   ssh-strict: true
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.1851941Z   ssh-user: git
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.1852453Z   persist-credentials: true
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.1853009Z   clean: true
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.1853513Z   sparse-checkout-cone-mode: true
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.1854095Z   fetch-depth: 1
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.1854583Z   fetch-tags: false
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.1855089Z   show-progress: true
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.1855602Z   lfs: false
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.1856160Z   submodules: false
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.1856689Z   set-safe-directory: true
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.1857562Z env:
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.1858049Z   CARGO_TERM_COLOR: always
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.1858610Z   RUSTUP_TOOLCHAIN: 1.97.1
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.1859140Z ##[endgroup]
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.2913383Z Syncing repository: misofm/engine
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.2915583Z ##[group]Getting Git version info
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.2916399Z Working directory is '/home/runner/work/engine/engine'
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.2917507Z [command]/usr/bin/git version
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.3004201Z git version 2.55.0
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.3032972Z ##[endgroup]
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.3057023Z Temporarily overriding HOME='/home/runner/work/_temp/9bb7a36c-cb28-49c1-aee6-9c3a600bcc0e' before making global git config changes
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.3059843Z Adding repository directory to the temporary git global config as a safe directory
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.3062185Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/engine/engine
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.3125058Z Deleting the contents of '/home/runner/work/engine/engine'
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.3129989Z ##[group]Initializing the repository
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.3136093Z [command]/usr/bin/git init /home/runner/work/engine/engine
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.3285550Z hint: Using 'master' as the name for the initial branch. This default branch name
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.3288456Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.3291016Z hint: to use in all of your new repositories, which will suppress this warning,
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.3292601Z hint: call:
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.3293780Z hint:
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.3294957Z hint: 	git config --global init.defaultBranch <name>
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.3295882Z hint:
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.3296720Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.3297920Z hint: 'development'. The just-created branch can be renamed via this command:
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.3298945Z hint:
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.3300311Z hint: 	git branch -m <name>
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.3301588Z hint:
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.3303861Z hint: Disable this message with "git config set advice.defaultBranchName false"
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.3305419Z Initialized empty Git repository in /home/runner/work/engine/engine/.git/
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.3307949Z [command]/usr/bin/git remote add origin https://github.com/misofm/engine
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.3357680Z ##[endgroup]
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.3358597Z ##[group]Disabling automatic garbage collection
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.3363393Z [command]/usr/bin/git config --local gc.auto 0
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.3400585Z ##[endgroup]
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.3402018Z ##[group]Setting up auth
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.3411050Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.3451446Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.3867796Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.3911889Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.4146849Z [command]/usr/bin/git config --local http.https://github.com/.extraheader AUTHORIZATION: basic ***
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.4194697Z ##[endgroup]
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.4197261Z ##[group]Fetching the repository
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:39:58.4205834Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin +ad00d16b8ef8e3aa5ba4c406d00db4c62ff311b5:refs/remotes/origin/main
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:40:00.0055176Z From https://github.com/misofm/engine
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:40:00.0056092Z  * [new ref]         ad00d16b8ef8e3aa5ba4c406d00db4c62ff311b5 -> origin/main
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:40:00.0068674Z ##[endgroup]
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:40:00.0069270Z ##[group]Determining the checkout info
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:40:00.0070002Z ##[endgroup]
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:40:00.0070365Z [command]/usr/bin/git sparse-checkout disable
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:40:00.0132275Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:40:00.0167869Z ##[group]Checking out the ref
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:40:00.0173001Z [command]/usr/bin/git checkout --progress --force -B main refs/remotes/origin/main
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:40:00.3143639Z Switched to a new branch 'main'
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:40:00.3147909Z branch 'main' set up to track 'origin/main'.
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:40:00.3162251Z ##[endgroup]
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:40:00.3213325Z [command]/usr/bin/git log -1 --format=%H
+DSP crates debug tests	Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:40:00.3283938Z ad00d16b8ef8e3aa5ba4c406d00db4c62ff311b5
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	﻿2026-09-06T05:40:00.3564679Z ##[group]Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:00.3565221Z with:
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:00.3565447Z   shared-key: test-debug-b
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:00.3565713Z   save-if: true
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:00.3565946Z   prefix-key: v0-rust
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:00.3566404Z   add-job-id-key: true
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:00.3566670Z   add-rust-environment-hash-key: true
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:00.3566972Z   cache-targets: true
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:00.3567213Z   cache-all-crates: false
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:00.3567481Z   cache-workspace-crates: false
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:00.3567759Z   cache-provider: github
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:00.3568010Z   cache-bin: true
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:00.3568232Z   lookup-only: false
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:00.3568457Z   cmd-format: {0}
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:00.3568677Z env:
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:00.3568909Z   CARGO_TERM_COLOR: always
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:00.3569196Z   RUSTUP_TOOLCHAIN: 1.97.1
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:00.3569436Z ##[endgroup]
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1313522Z ##[group]Cache Configuration
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1314116Z Cache Provider:
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1314603Z     github
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1314978Z Workspaces:
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1315368Z     /home/runner/work/engine/engine
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1315871Z Cache Paths:
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1316254Z     /home/runner/.cargo/bin
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1316760Z     /home/runner/.cargo/.crates.toml
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1317290Z     /home/runner/.cargo/.crates2.json
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1317821Z     /home/runner/.cargo/registry
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1318283Z     /home/runner/.cargo/git
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1318738Z     /home/runner/work/engine/engine/target
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1319254Z Restore Key:
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1319979Z     v0-rust-test-debug-b-Linux-x64-f21772a0
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1320541Z Cache Key:
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1320994Z     v0-rust-test-debug-b-Linux-x64-f21772a0-29c25959
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1321550Z .. Prefix:
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1321960Z   - v0-rust-test-debug-b-Linux-x64
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1322482Z .. Environment considered:
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1322965Z   - Rust Versions:
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1323649Z     - 1.97.1 x86_64-unknown-linux-gnu 8bab26f4f68e0e26f0bb7960be334d5b520ea452
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1324630Z     - 1.98.0 x86_64-unknown-linux-gnu 88d9e12ae178fab0fb5cc050a94da85685d449ea
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1325376Z   - CARGO_INCREMENTAL
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1325814Z   - CARGO_TERM_COLOR
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1326214Z   - RUSTUP_TOOLCHAIN
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1326615Z .. Lockfiles considered:
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1327137Z   - /home/runner/work/engine/engine/.cargo/config.toml
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1327803Z   - /home/runner/work/engine/engine/Cargo.lock
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1328517Z   - /home/runner/work/engine/engine/crates/builtins-compiler/Cargo.toml
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1329368Z   - /home/runner/work/engine/engine/crates/builtins/Cargo.toml
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1330454Z   - /home/runner/work/engine/engine/crates/capi/Cargo.toml
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1331260Z   - /home/runner/work/engine/engine/crates/compressor/Cargo.toml
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1332112Z   - /home/runner/work/engine/engine/crates/conformance/Cargo.toml
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1332932Z   - /home/runner/work/engine/engine/crates/delay/Cargo.toml
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1333747Z   - /home/runner/work/engine/engine/crates/dsp-reference/Cargo.toml
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1334595Z   - /home/runner/work/engine/engine/crates/effect-compiler/Cargo.toml
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1335115Z   - /home/runner/work/engine/engine/crates/effect-contract/Cargo.toml
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1335595Z   - /home/runner/work/engine/engine/crates/effect-package/Cargo.toml
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1336058Z   - /home/runner/work/engine/engine/crates/effect-runtime/Cargo.toml
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1336468Z   - /home/runner/work/engine/engine/crates/engine/Cargo.toml
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1336894Z   - /home/runner/work/engine/engine/crates/gate-expander/Cargo.toml
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1337341Z   - /home/runner/work/engine/engine/crates/graph-compiler/Cargo.toml
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1337762Z   - /home/runner/work/engine/engine/crates/graph/Cargo.toml
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1338173Z   - /home/runner/work/engine/engine/crates/host-core/Cargo.toml
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1338958Z   - /home/runner/work/engine/engine/crates/lane/Cargo.toml
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1339330Z   - /home/runner/work/engine/engine/crates/math/Cargo.toml
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1340627Z   - /home/runner/work/engine/engine/crates/multiband-compressor/Cargo.toml
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1341580Z   - /home/runner/work/engine/engine/crates/parametric-eq/Cargo.toml
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1342455Z   - /home/runner/work/engine/engine/crates/protocol/Cargo.toml
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1343330Z   - /home/runner/work/engine/engine/crates/rack-compiler/Cargo.toml
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1344150Z   - /home/runner/work/engine/engine/crates/rack/Cargo.toml
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1344936Z   - /home/runner/work/engine/engine/crates/session/Cargo.toml
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1345746Z   - /home/runner/work/engine/engine/crates/soft-clip/Cargo.toml
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1346533Z   - /home/runner/work/engine/engine/crates/source/Cargo.toml
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1347322Z   - /home/runner/work/engine/engine/crates/target-smoke/Cargo.toml
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1348205Z   - /home/runner/work/engine/engine/crates/transient-shaper/Cargo.toml
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1349138Z   - /home/runner/work/engine/engine/crates/true-peak-limiter/Cargo.toml
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1350231Z   - /home/runner/work/engine/engine/hosts/host-mobile/Cargo.toml
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1351075Z   - /home/runner/work/engine/engine/hosts/host-native/Cargo.toml
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1351874Z   - /home/runner/work/engine/engine/hosts/host-web/Cargo.toml
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1352615Z   - /home/runner/work/engine/engine/rust-toolchain.toml
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1353334Z   - /home/runner/work/engine/engine/tools/audit/Cargo.toml
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1354102Z   - /home/runner/work/engine/engine/tools/bench-support/Cargo.toml
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1354851Z   - /home/runner/work/engine/engine/tools/bench/Cargo.toml
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1355612Z   - /home/runner/work/engine/engine/tools/console-workload/Cargo.toml
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1356507Z   - /home/runner/work/engine/engine/tools/native-pcm-runner/Cargo.toml
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1357471Z   - /home/runner/work/engine/engine/tools/parameter-metadata/Cargo.toml
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1358338Z   - /home/runner/work/engine/engine/tools/session-validator/Cargo.toml
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1359185Z   - /home/runner/work/engine/engine/tools/stem-hasher/Cargo.toml
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1360299Z   - /home/runner/work/engine/engine/tools/wasm-console-guest/Cargo.toml
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1361082Z   - /home/runner/work/engine/engine/tools/wasm-console/Cargo.toml
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1361836Z   - /home/runner/work/engine/engine/tools/wasm-gate-corpus/Cargo.toml
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1362632Z   - /home/runner/work/engine/engine/tools/wasm-gate-guest/Cargo.toml
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1363394Z   - /home/runner/work/engine/engine/tools/wasm-gates/Cargo.toml
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1364295Z ##[endgroup]
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1364496Z 
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.1364646Z ... Restoring cache ...
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:09.2335451Z Cache hit for: v0-rust-test-debug-b-Linux-x64-f21772a0-29c25959
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:10.0166674Z Received 41286228 of 41286228 (100.0%), 60.4 MBs/sec
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:10.0171579Z Cache Size: ~39 MB (41286228 B)
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:10.0209408Z [command]/usr/bin/tar -xf /home/runner/work/_temp/eb2b1e91-baa5-427b-81e6-84791a95850d/cache.tzst -P -C /home/runner/work/engine/engine --use-compress-program unzstd
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:10.3712271Z Cache restored successfully
+DSP crates debug tests	Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6	2026-09-06T05:40:10.3733978Z Restored from cache key "v0-rust-test-debug-b-Linux-x64-f21772a0-29c25959" full match: true.
+DSP crates debug tests	Install pinned Rust toolchain	﻿2026-09-06T05:40:10.3874491Z ##[group]Run rustup toolchain install 1.97.1 --profile minimal
+DSP crates debug tests	Install pinned Rust toolchain	2026-09-06T05:40:10.3875040Z [36;1mrustup toolchain install 1.97.1 --profile minimal[0m
+DSP crates debug tests	Install pinned Rust toolchain	2026-09-06T05:40:10.3917119Z shell: /usr/bin/bash -e {0}
+DSP crates debug tests	Install pinned Rust toolchain	2026-09-06T05:40:10.3917390Z env:
+DSP crates debug tests	Install pinned Rust toolchain	2026-09-06T05:40:10.3917591Z   CARGO_TERM_COLOR: always
+DSP crates debug tests	Install pinned Rust toolchain	2026-09-06T05:40:10.3917848Z   RUSTUP_TOOLCHAIN: 1.97.1
+DSP crates debug tests	Install pinned Rust toolchain	2026-09-06T05:40:10.3918090Z   CACHE_ON_FAILURE: false
+DSP crates debug tests	Install pinned Rust toolchain	2026-09-06T05:40:10.3918324Z   CARGO_INCREMENTAL: 0
+DSP crates debug tests	Install pinned Rust toolchain	2026-09-06T05:40:10.3918542Z ##[endgroup]
+DSP crates debug tests	Install pinned Rust toolchain	2026-09-06T05:40:10.5016264Z info: syncing channel updates for 1.97.1-x86_64-unknown-linux-gnu
+DSP crates debug tests	Install pinned Rust toolchain	2026-09-06T05:40:10.9637739Z 
+DSP crates debug tests	Install pinned Rust toolchain	2026-09-06T05:40:10.9712045Z   1.97.1-x86_64-unknown-linux-gnu unchanged - rustc 1.97.1 (8bab26f4f 2026-07-14)
+DSP crates debug tests	Install pinned Rust toolchain	2026-09-06T05:40:10.9712826Z 
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	﻿2026-09-06T05:40:10.9768042Z ##[group]Run cargo test --locked --all-targets \
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:10.9768487Z [36;1mcargo test --locked --all-targets \[0m
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:10.9769021Z [36;1m  -p lane -p math -p effect-runtime -p delay -p compressor -p multiband-compressor \[0m
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:10.9769986Z [36;1m  -p gate-expander -p true-peak-limiter -p transient-shaper -p soft-clip \[0m
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:10.9770615Z [36;1m  -p parametric-eq -p builtins -p dsp-reference -p conformance --features math/lane[0m
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:10.9806658Z shell: /usr/bin/bash -e {0}
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:10.9806924Z env:
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:10.9807134Z   CARGO_TERM_COLOR: always
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:10.9807385Z   RUSTUP_TOOLCHAIN: 1.97.1
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:10.9807622Z   CACHE_ON_FAILURE: false
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:10.9807852Z   CARGO_INCREMENTAL: 0
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:10.9808070Z ##[endgroup]
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:11.0427162Z [1m[92m    Updating[0m crates.io index
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:11.1709702Z [1m[92m   Compiling[0m engine v0.1.0 (/home/runner/work/engine/engine/crates/engine)
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:11.1711147Z [1m[92m   Compiling[0m lane v0.1.0 (/home/runner/work/engine/engine/crates/lane)
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:11.1746715Z [1m[92m   Compiling[0m dsp-reference v0.1.0 (/home/runner/work/engine/engine/crates/dsp-reference)
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:11.4362961Z [1m[92m   Compiling[0m math v0.1.0 (/home/runner/work/engine/engine/crates/math)
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:11.5181980Z [1m[92m   Compiling[0m bench-support v0.1.0 (/home/runner/work/engine/engine/tools/bench-support)
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:11.7011434Z [1m[92m   Compiling[0m effect-contract v0.1.0 (/home/runner/work/engine/engine/crates/effect-contract)
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:11.7651558Z [1m[92m   Compiling[0m effect-runtime v0.1.0 (/home/runner/work/engine/engine/crates/effect-runtime)
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:12.3121583Z [1m[92m   Compiling[0m conformance v0.1.0 (/home/runner/work/engine/engine/crates/conformance)
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:12.4121514Z [1m[92m   Compiling[0m compressor v0.1.0 (/home/runner/work/engine/engine/crates/compressor)
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:12.4236478Z [1m[92m   Compiling[0m soft-clip v0.1.0 (/home/runner/work/engine/engine/crates/soft-clip)
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:12.9763488Z [1m[92m   Compiling[0m builtins v0.1.0 (/home/runner/work/engine/engine/crates/builtins)
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:12.9805447Z [1m[92m   Compiling[0m parametric-eq v0.1.0 (/home/runner/work/engine/engine/crates/parametric-eq)
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:13.1011664Z [1m[92m   Compiling[0m multiband-compressor v0.1.0 (/home/runner/work/engine/engine/crates/multiband-compressor)
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:13.3431775Z [1m[92m   Compiling[0m transient-shaper v0.1.0 (/home/runner/work/engine/engine/crates/transient-shaper)
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:14.0264994Z [1m[92m   Compiling[0m true-peak-limiter v0.1.0 (/home/runner/work/engine/engine/crates/true-peak-limiter)
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:14.1159801Z [1m[92m   Compiling[0m gate-expander v0.1.0 (/home/runner/work/engine/engine/crates/gate-expander)
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:14.2101547Z [1m[92m   Compiling[0m delay v0.1.0 (/home/runner/work/engine/engine/crates/delay)
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.3768141Z [1m[92m    Finished[0m `test` profile [unoptimized + debuginfo] target(s) in 17.38s
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4003856Z [1m[92m     Running[0m unittests src/lib.rs (target/debug/deps/builtins-dc56e81ba7410a2b)
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4015314Z 
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4015996Z running 3 tests
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4025916Z test tests::eligibility_sequence_uses_whole_call_fallback_then_fuses_the_next_call ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4027022Z test tests::full_public_chain_matches_the_three_section_reference ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4027952Z test tests::lane_symmetry_retarget_updates_only_the_addressed_predicate ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4028327Z 
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4028760Z test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4029415Z 
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4030295Z [1m[92m     Running[0m tests/contract.rs (target/debug/deps/contract-73bc9f2f219aecff)
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4038975Z 
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4039236Z running 4 tests
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4043703Z test descriptor_domains_are_exhaustive_at_launch_rates ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4044599Z test compatibility_fallback_is_limited_to_the_exact_extended_rate_tier ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4045127Z test parameter_descriptors_have_complete_stable_contracts ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4047693Z test representable_cutoff_domain_is_shared_by_descriptors_and_preparation ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4048351Z 
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4048744Z test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4049137Z 
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4050819Z [1m[92m     Running[0m tests/determinism.rs (target/debug/deps/determinism-e4bed8ce3136ed32)
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4060999Z 
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4061260Z running 2 tests
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4327565Z test no_corpus_case_is_vacuous_or_carries_a_nan ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4544956Z test every_corpus_case_matches_its_pin_at_every_width ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4545598Z 
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4546193Z test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4546866Z 
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4548688Z [1m[92m     Running[0m tests/fader_ramp.rs (target/debug/deps/fader_ramp-67f6ce369d5bc5fe)
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4561492Z 
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4561743Z running 8 tests
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4566417Z test a_cross_block_ramp_is_partition_invariant ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4567438Z test a_windowed_move_is_monotone_and_lands_exactly_on_its_target ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4568510Z test a_zero_window_move_takes_effect_on_the_first_sample ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4569448Z test a_zero_window_mute_is_the_exact_prepared_mute ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4570445Z test a_move_made_while_muted_applies_on_unmute ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4571058Z test mute_is_a_fader_endpoint_and_settles_to_exact_positive_zero ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4573305Z test an_uncommanded_live_fader_is_bit_identical_to_the_prepared_one ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4574211Z test the_fader_domain_is_enforced_at_the_setter ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4574675Z 
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4575155Z test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4575833Z 
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4576690Z [1m[92m     Running[0m tests/input_liveness.rs (target/debug/deps/input_liveness-a0712e584fd24421)
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4583627Z 
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4583784Z running 13 tests
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4598051Z test a_lane_selector_addresses_exactly_the_lanes_it_names ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4599150Z test a_bank_refuses_a_retarget_addressed_past_its_members ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4600570Z test a_banked_lane_ramps_exactly_as_the_same_track_alone ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4609198Z test an_uncommanded_bank_keeps_its_elision_plan ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4613415Z test a_polarity_flip_crosses_zero_and_settles_at_the_reprepared_coefficient ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4614611Z test an_uncommanded_live_input_renders_the_prepared_coefficients ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4615870Z test a_ramping_block_leaves_an_elidable_banks_integrators_at_positive_zero ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4617057Z test the_settled_arm_leaves_the_ramp_words_untouched ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4618019Z test the_live_trim_domain_is_the_declared_one ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4618822Z test the_trim_ramp_is_partition_invariant ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4619348Z test trim_and_polarity_do_not_overwrite_each_other ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4630380Z test settled_and_ramping_paths_agree_on_an_elided_bank ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4636919Z test the_trim_ramp_is_bit_identical_to_the_parameter_smoother ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4637495Z 
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4637963Z test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4638589Z 
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4639997Z [1m[92m     Running[0m tests/input_liveness_mono.rs (target/debug/deps/input_liveness_mono-49d9ffd1e88132ec)
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4649097Z 
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4649288Z running 8 tests
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4673219Z test a_collapsed_block_keeps_the_two_channels_ramp_records_equal ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4684107Z test a_symmetric_retarget_keeps_the_lane_eligible ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4685177Z test an_asymmetric_retarget_declines_the_lane_on_the_admitting_block ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4686263Z test channels_agree_covers_the_trim_ramp_record ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4700901Z test re_equalising_the_words_restores_the_designed_term_and_nothing_more ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4703823Z test the_disengage_copy_still_restores_the_integrators ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4716098Z test a_symmetric_ride_through_a_collapse_renders_never_collapsed_bits ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4816796Z test a_retarget_between_a_collapsed_block_and_the_disengage_survives_the_copy ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4817500Z 
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4817941Z test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4818445Z 
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4819918Z [1m[92m     Running[0m tests/matrix.rs (target/debug/deps/matrix-a9232089d5ecbd4b)
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4829048Z 
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4829208Z running 7 tests
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4833201Z test explicit_window_retarget_ramps_over_the_requested_window_and_is_adopted ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4834046Z test matrix_ramp_reaches_target ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4841534Z test settled_identity_matrix_preserves_signed_zero ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4847688Z test matrix_retarget_mid_ramp_matches_the_reference ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4848260Z test matrix_ramp_tracks_the_f64_interpolation ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4848633Z test zero_window_snaps_and_reset_cancels_a_ramp ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4871859Z test matrix_ramp_matches_reference_d11_law ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4872265Z 
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4872703Z test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4873196Z 
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4874710Z [1m[92m     Running[0m tests/meter.rs (target/debug/deps/meter-b50c00104035ee9c)
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4883815Z 
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4883981Z running 7 tests
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4888605Z test a_settled_silent_block_is_bit_identical_through_the_early_out ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4889743Z test meter_windows_are_exact ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4890796Z test meter_peak_of_signed_zeros_is_positive_zero ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4891804Z test meter_windows_discontinuities_resets_and_drops_are_exact ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4892887Z test silence_against_a_nonzero_held_peak_still_decays ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.4893759Z test meter_segment_law_is_exact ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.5082340Z test ten_thousand_deterministic_meter_mutations_remain_bounded_and_finite ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.5082754Z 
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.5083049Z test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.5083419Z 
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.5085570Z [1m[92m     Running[0m tests/mono_collapse.rs (target/debug/deps/mono_collapse-5eceb43c382d776d)
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.5096011Z 
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.5096210Z running 2 tests
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.5111340Z test the_collapsed_body_publishes_the_dual_bodys_report ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.5134705Z test a_desymmetrized_bank_is_a_never_collapsed_bank ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.5135019Z 
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.5135282Z test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.5135671Z 
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.5137759Z [1m[92m     Running[0m tests/response.rs (target/debug/deps/response-fd3b89876d811706)
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.5148356Z 
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.5148509Z running 8 tests
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.5196839Z test launch_and_extended_compatibility_rates_match_the_independent_f64_rbj_oracle ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.5680887Z test cast_tpt_state_space_matches_independent_rbj_transfer_at_compatibility_rates ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:28.5791095Z test launch_and_extended_compatibility_rate_sweeps_match_f64_magnitude ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:31.0090769Z test production_order_hpf_lpf_cascade_meets_all_launch_response_gates ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:32.3514709Z test ten_thousand_bounded_parameter_and_block_mutations_stay_finite ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:33.6260783Z test representable_cutoff_domain_prepares_everywhere_and_rejects_successor ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:40:58.0900993Z test coherent_sustained_sines_cover_launch_and_extended_compatibility_rates ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.2282062Z test one_second_impulse_dfts_match_rbj_at_launch_and_extended_compatibility_rates ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.2282940Z 
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.2283504Z test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 33.71s
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.2284311Z 
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.2286524Z [1m[92m     Running[0m tests/speed.rs (target/debug/deps/speed-639a181eb48d0f8c)
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.2296800Z 
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.2297077Z running 1 test
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.2297577Z test bench_input_stage_ns_per_track_frame ... ignored, descriptive timing, run by hand
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.2298033Z 
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.2298526Z test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.2299259Z 
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.2300162Z [1m[92m     Running[0m tests/stage.rs (target/debug/deps/stage-2bf93f9b6bb30167)
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.2310006Z 
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.2310260Z running 12 tests
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.2314357Z test a_settled_banked_mute_is_exactly_positive_zero ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.2330285Z test bank_construction_accepts_one_to_width_members_only ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.2350654Z test boundary_check_is_lane_local_per_block ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.2420320Z test identity_sections_are_elided_only_when_every_lane_and_word_says_so ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.2500804Z test engine_tan_agrees_with_the_platform_to_one_ulp_over_the_cutoff_domain ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.2503529Z test polarity_trim_fader_and_matrix_are_exact ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.2511713Z test prepared_sections_match_reference_coefficients ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.2539115Z test bank_is_bit_identical_to_scalar_stage_at_every_width ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.2541656Z test signed_zero_and_mute_laws ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.2542247Z test partition_invariance_over_master_plan_quanta ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.2771312Z test banked_fader_and_matrix_are_bit_identical_to_the_per_track_sections ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.3782258Z test scalar_stage_is_bit_identical_to_reference_recurrence ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.3782821Z 
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.3783243Z test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.3783851Z 
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.3786400Z [1m[92m     Running[0m unittests src/lib.rs (target/debug/deps/compressor-4888eda87ebc759f)
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.3797558Z 
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.3797727Z running 2 tests
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.3802340Z test kernel::tests::uniform_and_ragged_access_match_old_transcription ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.4647842Z test kernel::tests::w4_state_owner_transitions_drive_the_next_real_render ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.4648760Z 
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.4649291Z test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.4650422Z 
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.4651546Z [1m[92m     Running[0m tests/conformance.rs (target/debug/deps/conformance-95c5687de053c740)
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.4666644Z 
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.4666873Z running 2 tests
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.4681514Z 
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.4681872Z running 1 test
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.5064689Z 
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.5067633Z thread 'uniform_and_ragged_render_paths_allocate_and_free_nothing' (4639) panicked at crates/compressor/tests/conformance.rs:122:5:
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.5068913Z assertion `left == right` failed: render allocated
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.5069455Z   left: 4
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.5070055Z  right: 0
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.5070608Z note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.5072104Z test uniform_and_ragged_render_paths_allocate_and_free_nothing ... FAILED
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.5072676Z 
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.5073876Z failures:
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.5074207Z 
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.5074526Z failures:
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.5075084Z     uniform_and_ragged_render_paths_allocate_and_free_nothing
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.5075587Z 
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.5076086Z test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.04s
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.5076781Z 
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:02.5077149Z test uniform_and_ragged_render_paths_allocate_and_free_nothing ... FAILED
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:05.7890889Z test passes_effect_contract_conformance ... ok
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:05.7891541Z 
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:05.7891740Z failures:
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:05.7892010Z 
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:05.7892480Z ---- uniform_and_ragged_render_paths_allocate_and_free_nothing stdout ----
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:05.7893057Z 
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:05.7893914Z thread 'uniform_and_ragged_render_paths_allocate_and_free_nothing' (4637) panicked at crates/compressor/tests/conformance.rs:31:9:
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:05.7895024Z isolated allocation audit child failed
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:05.7895616Z note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:05.7896078Z 
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:05.7896084Z 
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:05.7896194Z failures:
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:05.7896574Z     uniform_and_ragged_render_paths_allocate_and_free_nothing
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:05.7896883Z 
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:05.7897198Z test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.32s
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:05.7897631Z 
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:05.7898168Z [1m[91merror[0m: test failed, to rerun pass `-p compressor --test conformance`
+DSP crates debug tests	DSP crates debug tests (lane feature unification pinned explicitly)	2026-09-06T05:41:05.7963701Z ##[error]Process completed with exit code 101.
+DSP crates debug tests	Post Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	﻿2026-09-06T05:41:05.8118824Z Node 20 is being deprecated. This workflow is running with Node 24 by default. If you need to temporarily use Node 20, you can set the ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION=true environment variable. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+DSP crates debug tests	Post Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:41:05.8120473Z Post job cleanup.
+DSP crates debug tests	Post Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:41:05.8987945Z [command]/usr/bin/git version
+DSP crates debug tests	Post Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:41:05.9033934Z git version 2.55.0
+DSP crates debug tests	Post Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:41:05.9074488Z Temporarily overriding HOME='/home/runner/work/_temp/4514c251-329b-47e6-81bf-725eb24d2d25' before making global git config changes
+DSP crates debug tests	Post Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:41:05.9075909Z Adding repository directory to the temporary git global config as a safe directory
+DSP crates debug tests	Post Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:41:05.9080346Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/engine/engine
+DSP crates debug tests	Post Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:41:05.9127062Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+DSP crates debug tests	Post Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:41:05.9173342Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+DSP crates debug tests	Post Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:41:05.9440253Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+DSP crates debug tests	Post Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:41:05.9472546Z http.https://github.com/.extraheader
+DSP crates debug tests	Post Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:41:05.9484225Z [command]/usr/bin/git config --local --unset-all http.https://github.com/.extraheader
+DSP crates debug tests	Post Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683	2026-09-06T05:41:05.9520171Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+DSP crates debug tests	Complete job	﻿2026-09-06T05:41:05.9964050Z Cleaning up orphan processes
+DSP crates debug tests	Complete job	2026-09-06T05:41:06.0283555Z ##[warning]Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/

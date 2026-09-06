@@ -16,6 +16,7 @@ lane.workspace = true
 math = { workspace = true, features = ["lane"] }
 
 [dev-dependencies]
+engine = { workspace = true, features = ["realtime-audit"] }
 # Issue #105 phase 2: the workspace's one audited global allocator (#104 phase B). It is what
 # makes the conformance harness's `process.allocation` gate a real measurement; the harness
 # refuses to run without it.
