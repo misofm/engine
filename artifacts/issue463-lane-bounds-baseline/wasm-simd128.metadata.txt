@@ -1,0 +1,1591 @@
+
+463-sol2-wasm-simd128-probe.o:	file format wasm 0x1
+
+Section Details:
+
+Type[6]:
+ - type[0] (i32, i32) -> i32
+ - type[1] (i32, i32, i32, i32, f32, f32, f32, f32) -> i32
+ - type[2] (i32, i32, i32) -> nil
+ - type[3] (i32, i32, i32, i32) -> nil
+ - type[4] (i32, i32, i32, i32, i32, i32) -> i32
+ - type[5] (i32, i32, i32, i32) -> i32
+Import[4]:
+ - memory[0] pages: initial=1 <- env.__linear_memory
+ - func[0] sig=2 <env._RNvNtCsdkdt1aaAg1T_4core9panicking18panic_bounds_check> <- env._RNvNtCsdkdt1aaAg1T_4core9panicking18panic_bounds_check
+ - func[1] sig=3 <env._RNvNtNtCsdkdt1aaAg1T_4core5slice5index16slice_index_fail> <- env._RNvNtNtCsdkdt1aaAg1T_4core5slice5index16slice_index_fail
+ - global[0] i32 mutable=1 <- env.__stack_pointer
+Function[7]:
+ - func[2] sig=0 <_RNvCs8lo3PVzYdl8_14issue463_probe7observe>
+ - func[3] sig=1 <issue463_mix2x2_scalar>
+ - func[4] sig=1 <issue463_mix2x2_simd4>
+ - func[5] sig=4 <issue463_sum2_scalar>
+ - func[6] sig=4 <issue463_sum2_simd4>
+ - func[7] sig=5 <issue463_sum_into_scalar>
+ - func[8] sig=5 <issue463_sum_into_simd4>
+DataCount:
+ - data count: 16
+Code[7]:
+ - func[2] size=138 <_RNvCs8lo3PVzYdl8_14issue463_probe7observe>
+ - func[3] size=391 <issue463_mix2x2_scalar>
+ - func[4] size=680 <issue463_mix2x2_simd4>
+ - func[5] size=360 <issue463_sum2_scalar>
+ - func[6] size=743 <issue463_sum2_simd4>
+ - func[7] size=282 <issue463_sum_into_scalar>
+ - func[8] size=536 <issue463_sum_into_simd4>
+Data[16]:
+ - segment[0] <.rodata..Lanon.3d3f609199ae1b4a21e0f9e935abf484.0> memory=0 size=26 - init i32=0
+  - 0000000: 6372 6174 6573 2f6c 616e 652f 7372 632f  crates/lane/src/
+  - 0000010: 7363 616c 6172 2e72 7300                 scalar.rs.
+ - segment[1] <.rodata..Lanon.3d3f609199ae1b4a21e0f9e935abf484.1> memory=0 size=16 - init i32=28
+  - 000001c: 0000 0000 1900 0000 3300 0000 0900 0000  ........3.......
+ - segment[2] <.rodata..Lanon.3d3f609199ae1b4a21e0f9e935abf484.2> memory=0 size=27 - init i32=44
+  - 000002c: 6372 6174 6573 2f6c 616e 652f 7372 632f  crates/lane/src/
+  - 000003c: 6b65 726e 656c 732e 7273 00              kernels.rs.
+ - segment[3] <.rodata..Lanon.3d3f609199ae1b4a21e0f9e935abf484.3> memory=0 size=16 - init i32=72
+  - 0000048: 2c00 0000 1a00 0000 e701 0000 2b00 0000  ,...........+...
+ - segment[4] <.rodata..Lanon.3d3f609199ae1b4a21e0f9e935abf484.4> memory=0 size=16 - init i32=88
+  - 0000058: 2c00 0000 1a00 0000 e601 0000 2a00 0000  ,...........*...
+ - segment[5] <.rodata..Lanon.3d3f609199ae1b4a21e0f9e935abf484.5> memory=0 size=16 - init i32=104
+  - 0000068: 2c00 0000 1a00 0000 e201 0000 2700 0000  ,...........'...
+ - segment[6] <.rodata..Lanon.3d3f609199ae1b4a21e0f9e935abf484.6> memory=0 size=16 - init i32=120
+  - 0000078: 2c00 0000 1a00 0000 e101 0000 1f00 0000  ,...............
+ - segment[7] <.rodata..Lanon.3d3f609199ae1b4a21e0f9e935abf484.7> memory=0 size=16 - init i32=136
+  - 0000088: 2c00 0000 1a00 0000 e001 0000 1e00 0000  ,...............
+ - segment[8] <.rodata..Lanon.3d3f609199ae1b4a21e0f9e935abf484.8> memory=0 size=16 - init i32=152
+  - 0000098: 2c00 0000 1a00 0000 7902 0000 2b00 0000  ,.......y...+...
+ - segment[9] <.rodata..Lanon.3d3f609199ae1b4a21e0f9e935abf484.9> memory=0 size=16 - init i32=168
+  - 00000a8: 2c00 0000 1a00 0000 7102 0000 1f00 0000  ,.......q.......
+ - segment[10] <.rodata..Lanon.3d3f609199ae1b4a21e0f9e935abf484.10> memory=0 size=16 - init i32=184
+  - 00000b8: 2c00 0000 1a00 0000 7002 0000 1e00 0000  ,.......p.......
+ - segment[11] <.rodata..Lanon.3d3f609199ae1b4a21e0f9e935abf484.11> memory=0 size=16 - init i32=200
+  - 00000c8: 2c00 0000 1a00 0000 fd01 0000 5000 0000  ,...........P...
+ - segment[12] <.rodata..Lanon.3d3f609199ae1b4a21e0f9e935abf484.12> memory=0 size=16 - init i32=216
+  - 00000d8: 2c00 0000 1a00 0000 f801 0000 3800 0000  ,...........8...
+ - segment[13] <.rodata..Lanon.3d3f609199ae1b4a21e0f9e935abf484.13> memory=0 size=16 - init i32=232
+  - 00000e8: 2c00 0000 1a00 0000 f801 0000 1f00 0000  ,...............
+ - segment[14] <.rodata..Lanon.3d3f609199ae1b4a21e0f9e935abf484.14> memory=0 size=25 - init i32=248
+  - 00000f8: 6372 6174 6573 2f6c 616e 652f 7372 632f  crates/lane/src/
+  - 0000108: 7369 6d64 342e 7273 00                   simd4.rs.
+ - segment[15] <.rodata..Lanon.3d3f609199ae1b4a21e0f9e935abf484.15> memory=0 size=16 - init i32=276
+  - 0000114: f800 0000 1800 0000 0b00 0000 0100 0000  ................
+Custom:
+ - name: ".debug_loc"
+Custom:
+ - name: ".debug_abbrev"
+Custom:
+ - name: ".debug_info"
+Custom:
+ - name: ".debug_ranges"
+Custom:
+ - name: ".debug_str"
+Custom:
+ - name: ".debug_line"
+Custom:
+ - name: "linking"
+  - symbol table [count=31]
+   - 0: F <_RNvCs8lo3PVzYdl8_14issue463_probe7observe> func=2 [ binding=local vis=default ]
+   - 1: F <issue463_mix2x2_scalar> func=3 [ binding=global vis=default ]
+   - 2: D <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.1> segment=1 offset=0 size=16 [ binding=local vis=default ]
+   - 3: F <env._RNvNtCsdkdt1aaAg1T_4core9panicking18panic_bounds_check> func=0 [ undefined binding=global vis=default ]
+   - 4: D <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.9> segment=9 offset=0 size=16 [ binding=local vis=default ]
+   - 5: F <env._RNvNtNtCsdkdt1aaAg1T_4core5slice5index16slice_index_fail> func=1 [ undefined binding=global vis=default ]
+   - 6: F <issue463_mix2x2_simd4> func=4 [ binding=global vis=default ]
+   - 7: D <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.15> segment=15 offset=0 size=16 [ binding=local vis=default ]
+   - 8: D <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.10> segment=10 offset=0 size=16 [ binding=local vis=default ]
+   - 9: D <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.8> segment=8 offset=0 size=16 [ binding=local vis=default ]
+   - 10: F <issue463_sum2_scalar> func=5 [ binding=global vis=default ]
+   - 11: D <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.7> segment=7 offset=0 size=16 [ binding=local vis=default ]
+   - 12: D <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.6> segment=6 offset=0 size=16 [ binding=local vis=default ]
+   - 13: F <issue463_sum2_simd4> func=6 [ binding=global vis=default ]
+   - 14: D <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.5> segment=5 offset=0 size=16 [ binding=local vis=default ]
+   - 15: D <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.4> segment=4 offset=0 size=16 [ binding=local vis=default ]
+   - 16: D <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.3> segment=3 offset=0 size=16 [ binding=local vis=default ]
+   - 17: F <issue463_sum_into_scalar> func=7 [ binding=global vis=default ]
+   - 18: D <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.12> segment=12 offset=0 size=16 [ binding=local vis=default ]
+   - 19: F <issue463_sum_into_simd4> func=8 [ binding=global vis=default ]
+   - 20: D <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.13> segment=13 offset=0 size=16 [ binding=local vis=default ]
+   - 21: D <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.11> segment=11 offset=0 size=16 [ binding=local vis=default ]
+   - 22: D <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.0> segment=0 offset=0 size=26 [ binding=local vis=default ]
+   - 23: D <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.2> segment=2 offset=0 size=27 [ binding=local vis=default ]
+   - 24: D <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.14> segment=14 offset=0 size=25 [ binding=local vis=default ]
+   - 25: S <.debug_loc> section=6 [ binding=local vis=default ]
+   - 26: S <.debug_abbrev> section=7 [ binding=local vis=default ]
+   - 27: G <env.__stack_pointer> global=0 [ undefined binding=global vis=default ]
+   - 28: S <.debug_ranges> section=9 [ binding=local vis=default ]
+   - 29: S <.debug_str> section=10 [ binding=local vis=default ]
+   - 30: S <.debug_line> section=11 [ binding=local vis=default ]
+  - segment info [count=16]
+   - 0: .rodata..Lanon.3d3f609199ae1b4a21e0f9e935abf484.0 p2align=0 [ STRINGS ]
+   - 1: .rodata..Lanon.3d3f609199ae1b4a21e0f9e935abf484.1 p2align=2 [ ]
+   - 2: .rodata..Lanon.3d3f609199ae1b4a21e0f9e935abf484.2 p2align=0 [ STRINGS ]
+   - 3: .rodata..Lanon.3d3f609199ae1b4a21e0f9e935abf484.3 p2align=2 [ ]
+   - 4: .rodata..Lanon.3d3f609199ae1b4a21e0f9e935abf484.4 p2align=2 [ ]
+   - 5: .rodata..Lanon.3d3f609199ae1b4a21e0f9e935abf484.5 p2align=2 [ ]
+   - 6: .rodata..Lanon.3d3f609199ae1b4a21e0f9e935abf484.6 p2align=2 [ ]
+   - 7: .rodata..Lanon.3d3f609199ae1b4a21e0f9e935abf484.7 p2align=2 [ ]
+   - 8: .rodata..Lanon.3d3f609199ae1b4a21e0f9e935abf484.8 p2align=2 [ ]
+   - 9: .rodata..Lanon.3d3f609199ae1b4a21e0f9e935abf484.9 p2align=2 [ ]
+   - 10: .rodata..Lanon.3d3f609199ae1b4a21e0f9e935abf484.10 p2align=2 [ ]
+   - 11: .rodata..Lanon.3d3f609199ae1b4a21e0f9e935abf484.11 p2align=2 [ ]
+   - 12: .rodata..Lanon.3d3f609199ae1b4a21e0f9e935abf484.12 p2align=2 [ ]
+   - 13: .rodata..Lanon.3d3f609199ae1b4a21e0f9e935abf484.13 p2align=2 [ ]
+   - 14: .rodata..Lanon.3d3f609199ae1b4a21e0f9e935abf484.14 p2align=0 [ STRINGS ]
+   - 15: .rodata..Lanon.3d3f609199ae1b4a21e0f9e935abf484.15 p2align=2 [ ]
+Custom:
+ - name: "reloc.CODE"
+  - relocations for section: 4 (Code) [68]
+   - R_WASM_FUNCTION_INDEX_LEB offset=0x0001db(file=0x0002e9) symbol=0 <_RNvCs8lo3PVzYdl8_14issue463_probe7observe>
+   - R_WASM_FUNCTION_INDEX_LEB offset=0x0001e8(file=0x0002f6) symbol=0 <_RNvCs8lo3PVzYdl8_14issue463_probe7observe>
+   - R_WASM_MEMORY_ADDR_SLEB offset=0x0001f5(file=0x000303) symbol=2 <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.1>
+   - R_WASM_FUNCTION_INDEX_LEB offset=0x0001fb(file=0x000309) symbol=3 <env._RNvNtCsdkdt1aaAg1T_4core9panicking18panic_bounds_check>
+   - R_WASM_MEMORY_ADDR_SLEB offset=0x000209(file=0x000317) symbol=4 <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.9>
+   - R_WASM_FUNCTION_INDEX_LEB offset=0x00020f(file=0x00031d) symbol=5 <env._RNvNtNtCsdkdt1aaAg1T_4core5slice5index16slice_index_fail>
+   - R_WASM_MEMORY_ADDR_SLEB offset=0x0002f1(file=0x0003ff) symbol=4 <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.9>
+   - R_WASM_FUNCTION_INDEX_LEB offset=0x0002f7(file=0x000405) symbol=5 <env._RNvNtNtCsdkdt1aaAg1T_4core5slice5index16slice_index_fail>
+   - R_WASM_MEMORY_ADDR_SLEB offset=0x000305(file=0x000413) symbol=7 <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.15>
+   - R_WASM_FUNCTION_INDEX_LEB offset=0x00030b(file=0x000419) symbol=5 <env._RNvNtNtCsdkdt1aaAg1T_4core5slice5index16slice_index_fail>
+   - R_WASM_MEMORY_ADDR_SLEB offset=0x000319(file=0x000427) symbol=7 <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.15>
+   - R_WASM_FUNCTION_INDEX_LEB offset=0x00031f(file=0x00042d) symbol=5 <env._RNvNtNtCsdkdt1aaAg1T_4core5slice5index16slice_index_fail>
+   - R_WASM_MEMORY_ADDR_SLEB offset=0x00032d(file=0x00043b) symbol=8 <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.10>
+   - R_WASM_FUNCTION_INDEX_LEB offset=0x000333(file=0x000441) symbol=5 <env._RNvNtNtCsdkdt1aaAg1T_4core5slice5index16slice_index_fail>
+   - R_WASM_FUNCTION_INDEX_LEB offset=0x000485(file=0x000593) symbol=0 <_RNvCs8lo3PVzYdl8_14issue463_probe7observe>
+   - R_WASM_FUNCTION_INDEX_LEB offset=0x000492(file=0x0005a0) symbol=0 <_RNvCs8lo3PVzYdl8_14issue463_probe7observe>
+   - R_WASM_MEMORY_ADDR_SLEB offset=0x0004a1(file=0x0005af) symbol=9 <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.8>
+   - R_WASM_FUNCTION_INDEX_LEB offset=0x0004a7(file=0x0005b5) symbol=5 <env._RNvNtNtCsdkdt1aaAg1T_4core5slice5index16slice_index_fail>
+   - R_WASM_MEMORY_ADDR_SLEB offset=0x0004b3(file=0x0005c1) symbol=2 <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.1>
+   - R_WASM_FUNCTION_INDEX_LEB offset=0x0004b9(file=0x0005c7) symbol=3 <env._RNvNtCsdkdt1aaAg1T_4core9panicking18panic_bounds_check>
+   - R_WASM_FUNCTION_INDEX_LEB offset=0x0005d7(file=0x0006e5) symbol=0 <_RNvCs8lo3PVzYdl8_14issue463_probe7observe>
+   - R_WASM_MEMORY_ADDR_SLEB offset=0x0005e3(file=0x0006f1) symbol=2 <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.1>
+   - R_WASM_FUNCTION_INDEX_LEB offset=0x0005e9(file=0x0006f7) symbol=3 <env._RNvNtCsdkdt1aaAg1T_4core9panicking18panic_bounds_check>
+   - R_WASM_MEMORY_ADDR_SLEB offset=0x0005f7(file=0x000705) symbol=11 <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.7>
+   - R_WASM_FUNCTION_INDEX_LEB offset=0x0005fd(file=0x00070b) symbol=5 <env._RNvNtNtCsdkdt1aaAg1T_4core5slice5index16slice_index_fail>
+   - R_WASM_MEMORY_ADDR_SLEB offset=0x000609(file=0x000717) symbol=2 <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.1>
+   - R_WASM_FUNCTION_INDEX_LEB offset=0x00060f(file=0x00071d) symbol=3 <env._RNvNtCsdkdt1aaAg1T_4core9panicking18panic_bounds_check>
+   - R_WASM_MEMORY_ADDR_SLEB offset=0x00061d(file=0x00072b) symbol=12 <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.6>
+   - R_WASM_FUNCTION_INDEX_LEB offset=0x000623(file=0x000731) symbol=5 <env._RNvNtNtCsdkdt1aaAg1T_4core5slice5index16slice_index_fail>
+   - R_WASM_MEMORY_ADDR_SLEB offset=0x00066f(file=0x00077d) symbol=11 <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.7>
+   - R_WASM_FUNCTION_INDEX_LEB offset=0x000675(file=0x000783) symbol=5 <env._RNvNtNtCsdkdt1aaAg1T_4core5slice5index16slice_index_fail>
+   - R_WASM_MEMORY_ADDR_SLEB offset=0x0006f8(file=0x000806) symbol=14 <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.5>
+   - R_WASM_FUNCTION_INDEX_LEB offset=0x0006fe(file=0x00080c) symbol=5 <env._RNvNtNtCsdkdt1aaAg1T_4core5slice5index16slice_index_fail>
+   - R_WASM_MEMORY_ADDR_SLEB offset=0x00070c(file=0x00081a) symbol=7 <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.15>
+   - R_WASM_FUNCTION_INDEX_LEB offset=0x000712(file=0x000820) symbol=5 <env._RNvNtNtCsdkdt1aaAg1T_4core5slice5index16slice_index_fail>
+   - R_WASM_MEMORY_ADDR_SLEB offset=0x000720(file=0x00082e) symbol=7 <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.15>
+   - R_WASM_FUNCTION_INDEX_LEB offset=0x000726(file=0x000834) symbol=5 <env._RNvNtNtCsdkdt1aaAg1T_4core5slice5index16slice_index_fail>
+   - R_WASM_MEMORY_ADDR_SLEB offset=0x000734(file=0x000842) symbol=12 <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.6>
+   - R_WASM_FUNCTION_INDEX_LEB offset=0x00073a(file=0x000848) symbol=5 <env._RNvNtNtCsdkdt1aaAg1T_4core5slice5index16slice_index_fail>
+   - R_WASM_MEMORY_ADDR_SLEB offset=0x000748(file=0x000856) symbol=7 <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.15>
+   - R_WASM_FUNCTION_INDEX_LEB offset=0x00074e(file=0x00085c) symbol=5 <env._RNvNtNtCsdkdt1aaAg1T_4core5slice5index16slice_index_fail>
+   - R_WASM_FUNCTION_INDEX_LEB offset=0x0008c0(file=0x0009ce) symbol=0 <_RNvCs8lo3PVzYdl8_14issue463_probe7observe>
+   - R_WASM_MEMORY_ADDR_SLEB offset=0x0008cc(file=0x0009da) symbol=2 <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.1>
+   - R_WASM_FUNCTION_INDEX_LEB offset=0x0008d2(file=0x0009e0) symbol=3 <env._RNvNtCsdkdt1aaAg1T_4core9panicking18panic_bounds_check>
+   - R_WASM_MEMORY_ADDR_SLEB offset=0x0008e0(file=0x0009ee) symbol=15 <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.4>
+   - R_WASM_FUNCTION_INDEX_LEB offset=0x0008e6(file=0x0009f4) symbol=5 <env._RNvNtNtCsdkdt1aaAg1T_4core5slice5index16slice_index_fail>
+   - R_WASM_MEMORY_ADDR_SLEB offset=0x0008f2(file=0x000a00) symbol=2 <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.1>
+   - R_WASM_FUNCTION_INDEX_LEB offset=0x0008f8(file=0x000a06) symbol=3 <env._RNvNtCsdkdt1aaAg1T_4core9panicking18panic_bounds_check>
+   - R_WASM_MEMORY_ADDR_SLEB offset=0x000906(file=0x000a14) symbol=16 <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.3>
+   - R_WASM_FUNCTION_INDEX_LEB offset=0x00090c(file=0x000a1a) symbol=5 <env._RNvNtNtCsdkdt1aaAg1T_4core5slice5index16slice_index_fail>
+   - R_WASM_FUNCTION_INDEX_LEB offset=0x000a02(file=0x000b10) symbol=0 <_RNvCs8lo3PVzYdl8_14issue463_probe7observe>
+   - R_WASM_MEMORY_ADDR_SLEB offset=0x000a0e(file=0x000b1c) symbol=2 <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.1>
+   - R_WASM_FUNCTION_INDEX_LEB offset=0x000a14(file=0x000b22) symbol=3 <env._RNvNtCsdkdt1aaAg1T_4core9panicking18panic_bounds_check>
+   - R_WASM_MEMORY_ADDR_SLEB offset=0x000a22(file=0x000b30) symbol=18 <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.12>
+   - R_WASM_FUNCTION_INDEX_LEB offset=0x000a28(file=0x000b36) symbol=5 <env._RNvNtNtCsdkdt1aaAg1T_4core5slice5index16slice_index_fail>
+   - R_WASM_MEMORY_ADDR_SLEB offset=0x000ac7(file=0x000bd5) symbol=18 <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.12>
+   - R_WASM_FUNCTION_INDEX_LEB offset=0x000acd(file=0x000bdb) symbol=5 <env._RNvNtNtCsdkdt1aaAg1T_4core5slice5index16slice_index_fail>
+   - R_WASM_MEMORY_ADDR_SLEB offset=0x000adb(file=0x000be9) symbol=7 <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.15>
+   - R_WASM_FUNCTION_INDEX_LEB offset=0x000ae1(file=0x000bef) symbol=5 <env._RNvNtNtCsdkdt1aaAg1T_4core5slice5index16slice_index_fail>
+   - R_WASM_MEMORY_ADDR_SLEB offset=0x000aef(file=0x000bfd) symbol=7 <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.15>
+   - R_WASM_FUNCTION_INDEX_LEB offset=0x000af5(file=0x000c03) symbol=5 <env._RNvNtNtCsdkdt1aaAg1T_4core5slice5index16slice_index_fail>
+   - R_WASM_MEMORY_ADDR_SLEB offset=0x000b03(file=0x000c11) symbol=20 <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.13>
+   - R_WASM_FUNCTION_INDEX_LEB offset=0x000b09(file=0x000c17) symbol=5 <env._RNvNtNtCsdkdt1aaAg1T_4core5slice5index16slice_index_fail>
+   - R_WASM_FUNCTION_INDEX_LEB offset=0x000c1c(file=0x000d2a) symbol=0 <_RNvCs8lo3PVzYdl8_14issue463_probe7observe>
+   - R_WASM_MEMORY_ADDR_SLEB offset=0x000c2a(file=0x000d38) symbol=21 <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.11>
+   - R_WASM_FUNCTION_INDEX_LEB offset=0x000c30(file=0x000d3e) symbol=5 <env._RNvNtNtCsdkdt1aaAg1T_4core5slice5index16slice_index_fail>
+   - R_WASM_MEMORY_ADDR_SLEB offset=0x000c3c(file=0x000d4a) symbol=2 <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.1>
+   - R_WASM_FUNCTION_INDEX_LEB offset=0x000c42(file=0x000d50) symbol=3 <env._RNvNtCsdkdt1aaAg1T_4core9panicking18panic_bounds_check>
+Custom:
+ - name: "reloc.DATA"
+  - relocations for section: 5 (Data) [13]
+   - R_WASM_MEMORY_ADDR_I32 offset=0x000025(file=0x000d82) symbol=22 <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.0>
+   - R_WASM_MEMORY_ADDR_I32 offset=0x00005b(file=0x000db8) symbol=23 <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.2>
+   - R_WASM_MEMORY_ADDR_I32 offset=0x000071(file=0x000dce) symbol=23 <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.2>
+   - R_WASM_MEMORY_ADDR_I32 offset=0x000087(file=0x000de4) symbol=23 <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.2>
+   - R_WASM_MEMORY_ADDR_I32 offset=0x00009d(file=0x000dfa) symbol=23 <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.2>
+   - R_WASM_MEMORY_ADDR_I32 offset=0x0000b3(file=0x000e10) symbol=23 <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.2>
+   - R_WASM_MEMORY_ADDR_I32 offset=0x0000c9(file=0x000e26) symbol=23 <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.2>
+   - R_WASM_MEMORY_ADDR_I32 offset=0x0000df(file=0x000e3c) symbol=23 <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.2>
+   - R_WASM_MEMORY_ADDR_I32 offset=0x0000f5(file=0x000e52) symbol=23 <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.2>
+   - R_WASM_MEMORY_ADDR_I32 offset=0x00010b(file=0x000e68) symbol=23 <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.2>
+   - R_WASM_MEMORY_ADDR_I32 offset=0x000121(file=0x000e7e) symbol=23 <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.2>
+   - R_WASM_MEMORY_ADDR_I32 offset=0x000137(file=0x000e94) symbol=23 <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.2>
+   - R_WASM_MEMORY_ADDR_I32 offset=0x00016c(file=0x000ec9) symbol=24 <.Lanon.3d3f609199ae1b4a21e0f9e935abf484.14>
+Custom:
+ - name: "reloc..debug_loc"
+  - relocations for section: 6 (.debug_loc) [99]
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000004(file=0x0077ae) symbol=0 <_RNvCs8lo3PVzYdl8_14issue463_probe7observe>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00003a(file=0x0077e4) symbol=0 <_RNvCs8lo3PVzYdl8_14issue463_probe7observe>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00006a(file=0x007814) symbol=0 <_RNvCs8lo3PVzYdl8_14issue463_probe7observe>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0000ae(file=0x007858) symbol=0 <_RNvCs8lo3PVzYdl8_14issue463_probe7observe>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0000e6(file=0x007890) symbol=0 <_RNvCs8lo3PVzYdl8_14issue463_probe7observe>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000112(file=0x0078bc) symbol=0 <_RNvCs8lo3PVzYdl8_14issue463_probe7observe>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00013e(file=0x0078e8) symbol=0 <_RNvCs8lo3PVzYdl8_14issue463_probe7observe>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00015c(file=0x007906) symbol=0 <_RNvCs8lo3PVzYdl8_14issue463_probe7observe>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00017a(file=0x007924) symbol=0 <_RNvCs8lo3PVzYdl8_14issue463_probe7observe>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0001a2(file=0x00794c) symbol=0 <_RNvCs8lo3PVzYdl8_14issue463_probe7observe>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0001c0(file=0x00796a) symbol=0 <_RNvCs8lo3PVzYdl8_14issue463_probe7observe>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0001e8(file=0x007992) symbol=1 <issue463_mix2x2_scalar>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00021a(file=0x0079c4) symbol=1 <issue463_mix2x2_scalar>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000240(file=0x0079ea) symbol=1 <issue463_mix2x2_scalar>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000266(file=0x007a10) symbol=1 <issue463_mix2x2_scalar>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00028c(file=0x007a36) symbol=1 <issue463_mix2x2_scalar>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0002b2(file=0x007a5c) symbol=1 <issue463_mix2x2_scalar>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0002ea(file=0x007a94) symbol=1 <issue463_mix2x2_scalar>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000316(file=0x007ac0) symbol=1 <issue463_mix2x2_scalar>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000342(file=0x007aec) symbol=1 <issue463_mix2x2_scalar>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00036e(file=0x007b18) symbol=1 <issue463_mix2x2_scalar>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00039a(file=0x007b44) symbol=1 <issue463_mix2x2_scalar>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0003b8(file=0x007b62) symbol=1 <issue463_mix2x2_scalar>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0003d6(file=0x007b80) symbol=1 <issue463_mix2x2_scalar>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0003f4(file=0x007b9e) symbol=1 <issue463_mix2x2_scalar>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000412(file=0x007bbc) symbol=1 <issue463_mix2x2_scalar>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000430(file=0x007bda) symbol=6 <issue463_mix2x2_simd4>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000468(file=0x007c12) symbol=6 <issue463_mix2x2_simd4>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000494(file=0x007c3e) symbol=6 <issue463_mix2x2_simd4>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000530(file=0x007cda) symbol=6 <issue463_mix2x2_simd4>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00057e(file=0x007d28) symbol=6 <issue463_mix2x2_simd4>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0005aa(file=0x007d54) symbol=6 <issue463_mix2x2_simd4>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0005ca(file=0x007d74) symbol=6 <issue463_mix2x2_simd4>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0005ea(file=0x007d94) symbol=6 <issue463_mix2x2_simd4>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00060a(file=0x007db4) symbol=6 <issue463_mix2x2_simd4>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000630(file=0x007dda) symbol=6 <issue463_mix2x2_simd4>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00066c(file=0x007e16) symbol=6 <issue463_mix2x2_simd4>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0006c0(file=0x007e6a) symbol=6 <issue463_mix2x2_simd4>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0006ec(file=0x007e96) symbol=6 <issue463_mix2x2_simd4>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00070c(file=0x007eb6) symbol=6 <issue463_mix2x2_simd4>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00072a(file=0x007ed4) symbol=6 <issue463_mix2x2_simd4>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000748(file=0x007ef2) symbol=6 <issue463_mix2x2_simd4>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000766(file=0x007f10) symbol=6 <issue463_mix2x2_simd4>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000786(file=0x007f30) symbol=6 <issue463_mix2x2_simd4>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0007a4(file=0x007f4e) symbol=6 <issue463_mix2x2_simd4>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0007c2(file=0x007f6c) symbol=6 <issue463_mix2x2_simd4>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0007e0(file=0x007f8a) symbol=6 <issue463_mix2x2_simd4>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000800(file=0x007faa) symbol=6 <issue463_mix2x2_simd4>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00082c(file=0x007fd6) symbol=6 <issue463_mix2x2_simd4>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000858(file=0x008002) symbol=6 <issue463_mix2x2_simd4>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000876(file=0x008020) symbol=10 <issue463_sum2_scalar>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00089c(file=0x008046) symbol=10 <issue463_sum2_scalar>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0008c2(file=0x00806c) symbol=10 <issue463_sum2_scalar>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0008e8(file=0x008092) symbol=10 <issue463_sum2_scalar>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00090e(file=0x0080b8) symbol=10 <issue463_sum2_scalar>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000934(file=0x0080de) symbol=10 <issue463_sum2_scalar>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00095a(file=0x008104) symbol=10 <issue463_sum2_scalar>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000992(file=0x00813c) symbol=10 <issue463_sum2_scalar>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0009b0(file=0x00815a) symbol=10 <issue463_sum2_scalar>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0009ce(file=0x008178) symbol=10 <issue463_sum2_scalar>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0009ec(file=0x008196) symbol=10 <issue463_sum2_scalar>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000a0a(file=0x0081b4) symbol=10 <issue463_sum2_scalar>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000a28(file=0x0081d2) symbol=13 <issue463_sum2_simd4>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000a60(file=0x00820a) symbol=13 <issue463_sum2_simd4>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000aae(file=0x008258) symbol=13 <issue463_sum2_simd4>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000ada(file=0x008284) symbol=13 <issue463_sum2_simd4>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000b06(file=0x0082b0) symbol=13 <issue463_sum2_simd4>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000b2c(file=0x0082d6) symbol=13 <issue463_sum2_simd4>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000b4c(file=0x0082f6) symbol=13 <issue463_sum2_simd4>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000b88(file=0x008332) symbol=13 <issue463_sum2_simd4>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000bae(file=0x008358) symbol=13 <issue463_sum2_simd4>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000bea(file=0x008394) symbol=13 <issue463_sum2_simd4>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000c3e(file=0x0083e8) symbol=13 <issue463_sum2_simd4>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000c5c(file=0x008406) symbol=13 <issue463_sum2_simd4>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000c7c(file=0x008426) symbol=13 <issue463_sum2_simd4>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000c9a(file=0x008444) symbol=13 <issue463_sum2_simd4>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000cb8(file=0x008462) symbol=17 <issue463_sum_into_scalar>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000cde(file=0x008488) symbol=17 <issue463_sum_into_scalar>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000d04(file=0x0084ae) symbol=17 <issue463_sum_into_scalar>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000d2a(file=0x0084d4) symbol=17 <issue463_sum_into_scalar>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000d50(file=0x0084fa) symbol=17 <issue463_sum_into_scalar>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000d88(file=0x008532) symbol=17 <issue463_sum_into_scalar>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000da6(file=0x008550) symbol=17 <issue463_sum_into_scalar>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000dc4(file=0x00856e) symbol=17 <issue463_sum_into_scalar>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000de2(file=0x00858c) symbol=17 <issue463_sum_into_scalar>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000e00(file=0x0085aa) symbol=19 <issue463_sum_into_simd4>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000e38(file=0x0085e2) symbol=19 <issue463_sum_into_simd4>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000e86(file=0x008630) symbol=19 <issue463_sum_into_simd4>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000eb2(file=0x00865c) symbol=19 <issue463_sum_into_simd4>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000ede(file=0x008688) symbol=19 <issue463_sum_into_simd4>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000f04(file=0x0086ae) symbol=19 <issue463_sum_into_simd4>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000f24(file=0x0086ce) symbol=19 <issue463_sum_into_simd4>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000f44(file=0x0086ee) symbol=19 <issue463_sum_into_simd4>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000f80(file=0x00872a) symbol=19 <issue463_sum_into_simd4>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000fd4(file=0x00877e) symbol=19 <issue463_sum_into_simd4>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000ff2(file=0x00879c) symbol=19 <issue463_sum_into_simd4>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x001012(file=0x0087bc) symbol=19 <issue463_sum_into_simd4>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x001030(file=0x0087da) symbol=19 <issue463_sum_into_simd4>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x001050(file=0x0087fa) symbol=19 <issue463_sum_into_simd4>
+Custom:
+ - name: "reloc..debug_info"
+  - relocations for section: 8 (.debug_info) [781]
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000006(file=0x0079b5) symbol=26 <.debug_abbrev>
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00000c(file=0x0079bb) symbol=29 <.debug_str>
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000012(file=0x0079c1) symbol=29 <.debug_str>+0x39
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000016(file=0x0079c5) symbol=30 <.debug_line>
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00001a(file=0x0079c9) symbol=29 <.debug_str>+0x9b
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000022(file=0x0079d1) symbol=28 <.debug_ranges>+0x978
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000027(file=0x0079d6) symbol=29 <.debug_str>+0xbd
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00002c(file=0x0079db) symbol=29 <.debug_str>+0xc2
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000035(file=0x0079e4) symbol=29 <.debug_str>+0xdb
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00003c(file=0x0079eb) symbol=29 <.debug_str>+0xcf
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000042(file=0x0079f1) symbol=29 <.debug_str>+0xd2
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000048(file=0x0079f7) symbol=29 <.debug_str>+0xd5
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000050(file=0x0079ff) symbol=29 <.debug_str>+0xe6
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000055(file=0x007a04) symbol=29 <.debug_str>+0xec
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00005a(file=0x007a09) symbol=29 <.debug_str>+0xf1
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00005f(file=0x007a0e) symbol=29 <.debug_str>+0x131
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000063(file=0x007a12) symbol=29 <.debug_str>+0x1ca
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000074(file=0x007a23) symbol=29 <.debug_str>+0x100
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00007d(file=0x007a2c) symbol=29 <.debug_str>+0x106
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000086(file=0x007a35) symbol=29 <.debug_str>+0x12f
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00008b(file=0x007a3a) symbol=29 <.debug_str>+0x203
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000097(file=0x007a46) symbol=29 <.debug_str>+0x270
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0000a3(file=0x007a52) symbol=29 <.debug_str>+0x275
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0000b0(file=0x007a5f) symbol=29 <.debug_str>+0x277
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0000be(file=0x007a6d) symbol=29 <.debug_str>+0x27b
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0000cc(file=0x007a7b) symbol=29 <.debug_str>+0x283
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0000db(file=0x007a8a) symbol=29 <.debug_str>+0x283
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0000e9(file=0x007a98) symbol=29 <.debug_str>+0x287
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0000f9(file=0x007aa8) symbol=29 <.debug_str>+0x283
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000107(file=0x007ab6) symbol=29 <.debug_str>+0x287
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000116(file=0x007ac5) symbol=29 <.debug_str>+0x266
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000122(file=0x007ad1) symbol=29 <.debug_str>+0x100
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000127(file=0x007ad6) symbol=29 <.debug_str>+0x208
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000133(file=0x007ae2) symbol=29 <.debug_str>+0x235
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00013f(file=0x007aee) symbol=29 <.debug_str>+0x240
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00014d(file=0x007afc) symbol=29 <.debug_str>+0x543
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000152(file=0x007b01) symbol=29 <.debug_str>+0x56c
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000157(file=0x007b06) symbol=29 <.debug_str>+0x575
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00015b(file=0x007b0a) symbol=29 <.debug_str>+0x5fa
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00016c(file=0x007b1b) symbol=29 <.debug_str>+0x100
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000172(file=0x007b21) symbol=29 <.debug_str>+0x575
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000176(file=0x007b25) symbol=29 <.debug_str>+0x5fa
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000187(file=0x007b36) symbol=29 <.debug_str>+0x100
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00018d(file=0x007b3c) symbol=29 <.debug_str>+0x575
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000191(file=0x007b40) symbol=29 <.debug_str>+0x5fa
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0001a2(file=0x007b51) symbol=29 <.debug_str>+0x100
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0001a8(file=0x007b57) symbol=29 <.debug_str>+0x575
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0001ac(file=0x007b5b) symbol=29 <.debug_str>+0x5fa
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0001bd(file=0x007b6c) symbol=29 <.debug_str>+0x100
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0001c3(file=0x007b72) symbol=29 <.debug_str>+0x104a
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0001c7(file=0x007b76) symbol=29 <.debug_str>+0x10d3
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0001d8(file=0x007b87) symbol=29 <.debug_str>+0x100
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0001de(file=0x007b8d) symbol=29 <.debug_str>+0x575
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0001e2(file=0x007b91) symbol=29 <.debug_str>+0x5fa
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0001f3(file=0x007ba2) symbol=29 <.debug_str>+0x100
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0001f9(file=0x007ba8) symbol=29 <.debug_str>+0x575
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0001fd(file=0x007bac) symbol=29 <.debug_str>+0x5fa
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00020e(file=0x007bbd) symbol=29 <.debug_str>+0x100
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000215(file=0x007bc4) symbol=29 <.debug_str>+0x60c
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00021a(file=0x007bc9) symbol=29 <.debug_str>+0x63c
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00021e(file=0x007bcd) symbol=29 <.debug_str>+0x6c0
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00022e(file=0x007bdd) symbol=29 <.debug_str>+0x100
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000237(file=0x007be6) symbol=29 <.debug_str>+0x63a
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00023d(file=0x007bec) symbol=29 <.debug_str>+0x63c
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000241(file=0x007bf0) symbol=29 <.debug_str>+0x6c0
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000251(file=0x007c00) symbol=29 <.debug_str>+0x100
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00025a(file=0x007c09) symbol=29 <.debug_str>+0x63a
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000260(file=0x007c0f) symbol=29 <.debug_str>+0xa60
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000264(file=0x007c13) symbol=29 <.debug_str>+0xae2
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000274(file=0x007c23) symbol=29 <.debug_str>+0x100
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00027d(file=0x007c2c) symbol=29 <.debug_str>+0x63a
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000283(file=0x007c32) symbol=29 <.debug_str>+0x63c
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000287(file=0x007c36) symbol=29 <.debug_str>+0x6c0
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000297(file=0x007c46) symbol=29 <.debug_str>+0x100
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0002a0(file=0x007c4f) symbol=29 <.debug_str>+0x63a
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0002a6(file=0x007c55) symbol=29 <.debug_str>+0x63c
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0002aa(file=0x007c59) symbol=29 <.debug_str>+0x6c0
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0002ba(file=0x007c69) symbol=29 <.debug_str>+0x100
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0002c3(file=0x007c72) symbol=29 <.debug_str>+0x63a
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0002c9(file=0x007c78) symbol=29 <.debug_str>+0x63c
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0002cd(file=0x007c7c) symbol=29 <.debug_str>+0x6c0
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0002dd(file=0x007c8c) symbol=29 <.debug_str>+0x100
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0002e6(file=0x007c95) symbol=29 <.debug_str>+0x63a
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0002ec(file=0x007c9b) symbol=29 <.debug_str>+0x63c
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0002f0(file=0x007c9f) symbol=29 <.debug_str>+0x6c0
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000300(file=0x007caf) symbol=29 <.debug_str>+0x100
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000309(file=0x007cb8) symbol=29 <.debug_str>+0x63a
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000310(file=0x007cbf) symbol=29 <.debug_str>+0x8ad
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000314(file=0x007cc3) symbol=29 <.debug_str>+0x910
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000324(file=0x007cd3) symbol=29 <.debug_str>+0x100
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00032a(file=0x007cd9) symbol=29 <.debug_str>+0x93b
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00032f(file=0x007cde) symbol=29 <.debug_str>+0x944
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000333(file=0x007ce2) symbol=29 <.debug_str>+0x5fa
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000344(file=0x007cf3) symbol=29 <.debug_str>+0x100
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00034a(file=0x007cf9) symbol=29 <.debug_str>+0x11ab
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00034e(file=0x007cfd) symbol=29 <.debug_str>+0x10d3
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00035f(file=0x007d0e) symbol=29 <.debug_str>+0x100
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000366(file=0x007d15) symbol=29 <.debug_str>+0x9c5
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00036b(file=0x007d1a) symbol=29 <.debug_str>+0x9ce
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00036f(file=0x007d1e) symbol=29 <.debug_str>+0x5fa
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000380(file=0x007d2f) symbol=29 <.debug_str>+0x100
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000386(file=0x007d35) symbol=29 <.debug_str>+0x1230
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00038a(file=0x007d39) symbol=29 <.debug_str>+0x10d3
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00039b(file=0x007d4a) symbol=29 <.debug_str>+0x100
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0003a2(file=0x007d51) symbol=29 <.debug_str>+0x10e2
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0003a7(file=0x007d56) symbol=29 <.debug_str>+0x10eb
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0003ab(file=0x007d5a) symbol=29 <.debug_str>+0x1178
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0003bb(file=0x007d6a) symbol=29 <.debug_str>+0x100
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0003c4(file=0x007d73) symbol=29 <.debug_str>+0x63a
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0003ca(file=0x007d79) symbol=29 <.debug_str>+0x12b7
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0003ce(file=0x007d7d) symbol=29 <.debug_str>+0x1342
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0003de(file=0x007d8d) symbol=29 <.debug_str>+0x100
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0003e7(file=0x007d96) symbol=29 <.debug_str>+0x63a
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0003ee(file=0x007d9d) symbol=29 <.debug_str>+0x8ad
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0003f2(file=0x007da1) symbol=29 <.debug_str>+0x910
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000402(file=0x007db1) symbol=29 <.debug_str>+0x100
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000409(file=0x007db8) symbol=29 <.debug_str>+0xceb
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00040d(file=0x007dbc) symbol=29 <.debug_str>+0xd42
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00041a(file=0x007dc9) symbol=29 <.debug_str>+0x100
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00041f(file=0x007dce) symbol=29 <.debug_str>+0xd5c
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00042b(file=0x007dda) symbol=29 <.debug_str>+0x72d
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000438(file=0x007de7) symbol=29 <.debug_str>+0x60c
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00043d(file=0x007dec) symbol=29 <.debug_str>+0xd61
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000441(file=0x007df0) symbol=29 <.debug_str>+0xdb3
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00044e(file=0x007dfd) symbol=29 <.debug_str>+0x100
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000454(file=0x007e03) symbol=29 <.debug_str>+0xd61
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000458(file=0x007e07) symbol=29 <.debug_str>+0xdb3
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000465(file=0x007e14) symbol=29 <.debug_str>+0x100
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00046d(file=0x007e1c) symbol=29 <.debug_str>+0x208
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000472(file=0x007e21) symbol=29 <.debug_str>+0x20c
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000477(file=0x007e26) symbol=29 <.debug_str>+0x228
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000483(file=0x007e32) symbol=29 <.debug_str>+0x100
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000488(file=0x007e37) symbol=29 <.debug_str>+0x215
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000494(file=0x007e43) symbol=29 <.debug_str>+0x412
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000498(file=0x007e47) symbol=29 <.debug_str>+0x471
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0004a8(file=0x007e57) symbol=29 <.debug_str>+0x100
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0004ba(file=0x007e69) symbol=29 <.debug_str>+0xc75
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0004be(file=0x007e6d) symbol=29 <.debug_str>+0xcc9
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0004cb(file=0x007e7a) symbol=29 <.debug_str>+0x100
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0004d0(file=0x007e7f) symbol=29 <.debug_str>+0x72d
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0004dc(file=0x007e8b) symbol=29 <.debug_str>+0x7d6
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0004e8(file=0x007e97) symbol=29 <.debug_str>+0x47a
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0004f6(file=0x007ea5) symbol=29 <.debug_str>+0x248
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0004fb(file=0x007eaa) symbol=29 <.debug_str>+0x254
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000507(file=0x007eb6) symbol=29 <.debug_str>+0x100
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00050e(file=0x007ebd) symbol=29 <.debug_str>+0x28b
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000513(file=0x007ec2) symbol=29 <.debug_str>+0x296
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000517(file=0x007ec6) symbol=29 <.debug_str>+0x2ea
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000528(file=0x007ed7) symbol=29 <.debug_str>+0x100
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00052d(file=0x007edc) symbol=29 <.debug_str>+0x2fb
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000539(file=0x007ee8) symbol=29 <.debug_str>+0x2fd
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000547(file=0x007ef6) symbol=29 <.debug_str>+0x303
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00054c(file=0x007efb) symbol=29 <.debug_str>+0x307
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000551(file=0x007f00) symbol=29 <.debug_str>+0x310
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000555(file=0x007f04) symbol=29 <.debug_str>+0x340
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000562(file=0x007f11) symbol=29 <.debug_str>+0x203
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00056e(file=0x007f1d) symbol=29 <.debug_str>+0x34c
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00057c(file=0x007f2b) symbol=29 <.debug_str>+0x310
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000580(file=0x007f2f) symbol=29 <.debug_str>+0x340
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00058d(file=0x007f3c) symbol=29 <.debug_str>+0x203
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000599(file=0x007f48) symbol=29 <.debug_str>+0x34c
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0005a7(file=0x007f56) symbol=29 <.debug_str>+0x310
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0005ab(file=0x007f5a) symbol=29 <.debug_str>+0x340
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0005b8(file=0x007f67) symbol=29 <.debug_str>+0x203
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0005c4(file=0x007f73) symbol=29 <.debug_str>+0x34c
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0005d3(file=0x007f82) symbol=29 <.debug_str>+0x3c4
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0005d8(file=0x007f87) symbol=29 <.debug_str>+0x3ce
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0005dc(file=0x007f8b) symbol=29 <.debug_str>+0x400
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0005e9(file=0x007f98) symbol=29 <.debug_str>+0x203
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0005f5(file=0x007fa4) symbol=29 <.debug_str>+0x40e
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000605(file=0x007fb4) symbol=29 <.debug_str>+0x615
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00060a(file=0x007fb9) symbol=29 <.debug_str>+0x619
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00060f(file=0x007fbe) symbol=29 <.debug_str>+0x629
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00061b(file=0x007fca) symbol=29 <.debug_str>+0x61f
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000620(file=0x007fcf) symbol=29 <.debug_str>+0x623
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00062d(file=0x007fdc) symbol=29 <.debug_str>+0xa51
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000639(file=0x007fe8) symbol=29 <.debug_str>+0x61f
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00063e(file=0x007fed) symbol=29 <.debug_str>+0x287
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00064d(file=0x007ffc) symbol=29 <.debug_str>+0x7eb
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000652(file=0x008001) symbol=29 <.debug_str>+0x7f5
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000657(file=0x008006) symbol=29 <.debug_str>+0x7fc
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00065c(file=0x00800b) symbol=29 <.debug_str>+0x80c
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000664(file=0x008013) symbol=29 <.debug_str>+0x804
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000671(file=0x008020) symbol=29 <.debug_str>+0xb6f
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000675(file=0x008024) symbol=29 <.debug_str>+0xbb0
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000682(file=0x008031) symbol=29 <.debug_str>+0xbba
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00068e(file=0x00803d) symbol=29 <.debug_str>+0x766
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00069b(file=0x00804a) symbol=29 <.debug_str>+0xe1b
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00069f(file=0x00804e) symbol=29 <.debug_str>+0xe5c
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0006ac(file=0x00805b) symbol=29 <.debug_str>+0xbba
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0006b8(file=0x008067) symbol=29 <.debug_str>+0x766
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0006c9(file=0x008078) symbol=29 <.debug_str>+0xcc
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0006d0(file=0x00807f) symbol=29 <.debug_str>+0xfc
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0006d7(file=0x008086) symbol=29 <.debug_str>+0x102
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0006de(file=0x00808d) symbol=29 <.debug_str>+0x108
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0006e3(file=0x008092) symbol=29 <.debug_str>+0x117
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0006e8(file=0x008097) symbol=29 <.debug_str>+0x11f
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0006ef(file=0x00809e) symbol=29 <.debug_str>+0x34e
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0006f3(file=0x0080a2) symbol=29 <.debug_str>+0x37f
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000706(file=0x0080b5) symbol=29 <.debug_str>+0x3b9
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000711(file=0x0080c0) symbol=29 <.debug_str>+0x3be
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00071e(file=0x0080cd) symbol=0 <_RNvCs8lo3PVzYdl8_14issue463_probe7observe>
+   - R_WASM_GLOBAL_INDEX_I32 offset=0x000729(file=0x0080d8) symbol=27 <env.__stack_pointer>
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00072e(file=0x0080dd) symbol=29 <.debug_str>+0x14cb
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000732(file=0x0080e1) symbol=29 <.debug_str>+0x117
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00073d(file=0x0080ec) symbol=25 <.debug_loc>
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000741(file=0x0080f0) symbol=29 <.debug_str>+0x157d
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000750(file=0x0080ff) symbol=28 <.debug_ranges>
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000758(file=0x008107) symbol=25 <.debug_loc>+0x36
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000761(file=0x008110) symbol=25 <.debug_loc>+0x66
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00076a(file=0x008119) symbol=0 <_RNvCs8lo3PVzYdl8_14issue463_probe7observe>+0x1d
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000777(file=0x008126) symbol=25 <.debug_loc>+0xaa
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000780(file=0x00812f) symbol=0 <_RNvCs8lo3PVzYdl8_14issue463_probe7observe>+0x1d
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00078d(file=0x00813c) symbol=25 <.debug_loc>+0x10e
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00079a(file=0x008149) symbol=28 <.debug_ranges>+0x18
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0007a3(file=0x008152) symbol=25 <.debug_loc>+0x13a
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0007b0(file=0x00815f) symbol=28 <.debug_ranges>+0x48
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0007b8(file=0x008167) symbol=25 <.debug_loc>+0x158
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0007c1(file=0x008170) symbol=25 <.debug_loc>+0x176
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0007ce(file=0x00817d) symbol=28 <.debug_ranges>+0x48
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0007d7(file=0x008186) symbol=25 <.debug_loc>+0x19e
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0007e0(file=0x00818f) symbol=25 <.debug_loc>+0x1bc
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0007f0(file=0x00819f) symbol=0 <_RNvCs8lo3PVzYdl8_14issue463_probe7observe>+0x66
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0007fd(file=0x0081ac) symbol=25 <.debug_loc>+0xe2
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00080b(file=0x0081ba) symbol=0 <_RNvCs8lo3PVzYdl8_14issue463_probe7observe>+0x7e
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00081c(file=0x0081cb) symbol=1 <issue463_mix2x2_scalar>
+   - R_WASM_GLOBAL_INDEX_I32 offset=0x000827(file=0x0081d6) symbol=27 <env.__stack_pointer>
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00082c(file=0x0081db) symbol=29 <.debug_str>+0x14f6
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00083c(file=0x0081eb) symbol=29 <.debug_str>+0x4f2
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00084c(file=0x0081fb) symbol=29 <.debug_str>+0x158e
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00085c(file=0x00820b) symbol=29 <.debug_str>+0x512
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00086c(file=0x00821b) symbol=29 <.debug_str>+0x1584
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00087c(file=0x00822b) symbol=29 <.debug_str>+0x540
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00088c(file=0x00823b) symbol=29 <.debug_str>+0x53d
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00089c(file=0x00824b) symbol=29 <.debug_str>+0x53a
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0008ac(file=0x00825b) symbol=29 <.debug_str>+0x537
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0008b7(file=0x008266) symbol=28 <.debug_ranges>+0x68
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0008bc(file=0x00826b) symbol=25 <.debug_loc>+0x216
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0008c0(file=0x00826f) symbol=29 <.debug_str>+0x512
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0008cc(file=0x00827b) symbol=25 <.debug_loc>+0x262
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0008d0(file=0x00827f) symbol=29 <.debug_str>+0x4f2
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0008e0(file=0x00828f) symbol=28 <.debug_ranges>+0x80
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0008e8(file=0x008297) symbol=25 <.debug_loc>+0x288
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0008f1(file=0x0082a0) symbol=25 <.debug_loc>+0x23c
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0008fa(file=0x0082a9) symbol=25 <.debug_loc>+0x1e4
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000903(file=0x0082b2) symbol=28 <.debug_ranges>+0x80
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000916(file=0x0082c5) symbol=28 <.debug_ranges>+0x80
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000929(file=0x0082d8) symbol=28 <.debug_ranges>+0x80
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00095a(file=0x008309) symbol=28 <.debug_ranges>+0x80
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000963(file=0x008312) symbol=25 <.debug_loc>+0x2ae
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00096c(file=0x00831b) symbol=28 <.debug_ranges>+0x98
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000975(file=0x008324) symbol=25 <.debug_loc>+0x2e6
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000982(file=0x008331) symbol=28 <.debug_ranges>+0xd0
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00098f(file=0x00833e) symbol=28 <.debug_ranges>+0xd0
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000999(file=0x008348) symbol=28 <.debug_ranges>+0xf0
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0009a2(file=0x008351) symbol=25 <.debug_loc>+0x312
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0009af(file=0x00835e) symbol=28 <.debug_ranges>+0x130
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0009b8(file=0x008367) symbol=25 <.debug_loc>+0x33e
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0009c6(file=0x008375) symbol=28 <.debug_ranges>+0x148
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0009cf(file=0x00837e) symbol=25 <.debug_loc>+0x36a
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0009d8(file=0x008387) symbol=25 <.debug_loc>+0x396
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0009e6(file=0x008395) symbol=28 <.debug_ranges>+0x160
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0009ef(file=0x00839e) symbol=25 <.debug_loc>+0x3b4
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0009fd(file=0x0083ac) symbol=28 <.debug_ranges>+0x178
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000a0a(file=0x0083b9) symbol=28 <.debug_ranges>+0x190
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000a13(file=0x0083c2) symbol=25 <.debug_loc>+0x3d2
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000a21(file=0x0083d0) symbol=28 <.debug_ranges>+0x1a8
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000a2a(file=0x0083d9) symbol=25 <.debug_loc>+0x3f0
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000a39(file=0x0083e8) symbol=28 <.debug_ranges>+0x1c0
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000a47(file=0x0083f6) symbol=1 <issue463_mix2x2_scalar>+0x89
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000a58(file=0x008407) symbol=1 <issue463_mix2x2_scalar>+0x101
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000a6c(file=0x00841b) symbol=1 <issue463_mix2x2_scalar>+0x153
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000a86(file=0x008435) symbol=1 <issue463_mix2x2_scalar>+0x153
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000a93(file=0x008442) symbol=25 <.debug_loc>+0x40e
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000aa6(file=0x008455) symbol=6 <issue463_mix2x2_simd4>
+   - R_WASM_GLOBAL_INDEX_I32 offset=0x000ab1(file=0x008460) symbol=27 <env.__stack_pointer>
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000ab6(file=0x008465) symbol=29 <.debug_str>+0x150d
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000ac6(file=0x008475) symbol=29 <.debug_str>+0x4f2
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000ad6(file=0x008485) symbol=29 <.debug_str>+0x158e
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000ae6(file=0x008495) symbol=29 <.debug_str>+0x512
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000af6(file=0x0084a5) symbol=29 <.debug_str>+0x1584
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000b06(file=0x0084b5) symbol=29 <.debug_str>+0x540
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000b16(file=0x0084c5) symbol=29 <.debug_str>+0x53d
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000b26(file=0x0084d5) symbol=29 <.debug_str>+0x53a
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000b36(file=0x0084e5) symbol=29 <.debug_str>+0x537
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000b41(file=0x0084f0) symbol=28 <.debug_ranges>+0x1e8
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000b46(file=0x0084f5) symbol=25 <.debug_loc>+0x42c
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000b4a(file=0x0084f9) symbol=29 <.debug_str>+0x4f2
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000b56(file=0x008505) symbol=25 <.debug_loc>+0x606
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000b5a(file=0x008509) symbol=29 <.debug_str>+0x512
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000b6a(file=0x008519) symbol=28 <.debug_ranges>+0x200
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000b72(file=0x008521) symbol=25 <.debug_loc>+0x52c
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000b7b(file=0x00852a) symbol=25 <.debug_loc>+0x62c
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000b84(file=0x008533) symbol=25 <.debug_loc>+0x490
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000b8d(file=0x00853c) symbol=28 <.debug_ranges>+0x200
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000b96(file=0x008545) symbol=25 <.debug_loc>+0x57a
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000b9f(file=0x00854e) symbol=28 <.debug_ranges>+0x218
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000ba8(file=0x008557) symbol=25 <.debug_loc>+0x464
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000bb1(file=0x008560) symbol=28 <.debug_ranges>+0x218
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000bba(file=0x008569) symbol=25 <.debug_loc>+0x668
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000bc7(file=0x008576) symbol=28 <.debug_ranges>+0x230
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000bd4(file=0x008583) symbol=28 <.debug_ranges>+0x230
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000be0(file=0x00858f) symbol=6 <issue463_mix2x2_simd4>+0x52
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000bf3(file=0x0085a2) symbol=28 <.debug_ranges>+0x248
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000c00(file=0x0085af) symbol=28 <.debug_ranges>+0x248
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000c0c(file=0x0085bb) symbol=28 <.debug_ranges>+0x248
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000c18(file=0x0085c7) symbol=28 <.debug_ranges>+0x248
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000c28(file=0x0085d7) symbol=28 <.debug_ranges>+0x260
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000c35(file=0x0085e4) symbol=28 <.debug_ranges>+0x260
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000c43(file=0x0085f2) symbol=28 <.debug_ranges>+0x278
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000c4c(file=0x0085fb) symbol=28 <.debug_ranges>+0x278
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000c55(file=0x008604) symbol=25 <.debug_loc>+0x6bc
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000c62(file=0x008611) symbol=28 <.debug_ranges>+0x298
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000c6e(file=0x00861d) symbol=28 <.debug_ranges>+0x298
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000c7a(file=0x008629) symbol=28 <.debug_ranges>+0x298
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000c89(file=0x008638) symbol=6 <issue463_mix2x2_simd4>+0x82
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000c99(file=0x008648) symbol=6 <issue463_mix2x2_simd4>+0x82
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000ca6(file=0x008655) symbol=25 <.debug_loc>+0x5e6
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000caf(file=0x00865e) symbol=25 <.debug_loc>+0x6e8
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000cbc(file=0x00866b) symbol=6 <issue463_mix2x2_simd4>+0x82
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000cd8(file=0x008687) symbol=6 <issue463_mix2x2_simd4>+0x7d
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000ce9(file=0x008698) symbol=6 <issue463_mix2x2_simd4>+0x7d
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000cf9(file=0x0086a8) symbol=6 <issue463_mix2x2_simd4>+0x7d
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000d0c(file=0x0086bb) symbol=6 <issue463_mix2x2_simd4>+0x8a
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000d27(file=0x0086d6) symbol=6 <issue463_mix2x2_simd4>+0x8a
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000d37(file=0x0086e6) symbol=6 <issue463_mix2x2_simd4>+0x8a
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000d49(file=0x0086f8) symbol=6 <issue463_mix2x2_simd4>+0x8f
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000d5a(file=0x008709) symbol=6 <issue463_mix2x2_simd4>+0x8f
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000d67(file=0x008716) symbol=25 <.debug_loc>+0x708
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000d70(file=0x00871f) symbol=25 <.debug_loc>+0x726
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000d80(file=0x00872f) symbol=6 <issue463_mix2x2_simd4>+0x92
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000d8d(file=0x00873c) symbol=25 <.debug_loc>+0x744
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000d9a(file=0x008749) symbol=6 <issue463_mix2x2_simd4>+0x92
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000daa(file=0x008759) symbol=6 <issue463_mix2x2_simd4>+0x92
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000db7(file=0x008766) symbol=25 <.debug_loc>+0x762
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000dc0(file=0x00876f) symbol=25 <.debug_loc>+0x5a6
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000dcd(file=0x00877c) symbol=6 <issue463_mix2x2_simd4>+0x92
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000de8(file=0x008797) symbol=6 <issue463_mix2x2_simd4>+0x96
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000df9(file=0x0087a8) symbol=6 <issue463_mix2x2_simd4>+0x96
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000e09(file=0x0087b8) symbol=6 <issue463_mix2x2_simd4>+0x96
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000e1c(file=0x0087cb) symbol=6 <issue463_mix2x2_simd4>+0x9f
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000e37(file=0x0087e6) symbol=6 <issue463_mix2x2_simd4>+0x9f
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000e47(file=0x0087f6) symbol=6 <issue463_mix2x2_simd4>+0x9f
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000e59(file=0x008808) symbol=6 <issue463_mix2x2_simd4>+0xa6
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000e6a(file=0x008819) symbol=6 <issue463_mix2x2_simd4>+0xa6
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000e77(file=0x008826) symbol=25 <.debug_loc>+0x782
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000e80(file=0x00882f) symbol=25 <.debug_loc>+0x7a0
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000e90(file=0x00883f) symbol=6 <issue463_mix2x2_simd4>+0xa9
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000e9d(file=0x00884c) symbol=25 <.debug_loc>+0x7be
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000eaa(file=0x008859) symbol=6 <issue463_mix2x2_simd4>+0xa9
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000eba(file=0x008869) symbol=6 <issue463_mix2x2_simd4>+0xa9
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000ec7(file=0x008876) symbol=25 <.debug_loc>+0x7dc
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000ed0(file=0x00887f) symbol=25 <.debug_loc>+0x5c6
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000edd(file=0x00888c) symbol=6 <issue463_mix2x2_simd4>+0xa9
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000ef8(file=0x0088a7) symbol=6 <issue463_mix2x2_simd4>+0x73
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000f03(file=0x0088b2) symbol=28 <.debug_ranges>+0x2b0
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000f0c(file=0x0088bb) symbol=25 <.debug_loc>+0x7fc
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000f19(file=0x0088c8) symbol=28 <.debug_ranges>+0x2e8
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000f26(file=0x0088d5) symbol=28 <.debug_ranges>+0x2e8
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000f30(file=0x0088df) symbol=28 <.debug_ranges>+0x308
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000f39(file=0x0088e8) symbol=25 <.debug_loc>+0x828
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000f46(file=0x0088f5) symbol=28 <.debug_ranges>+0x338
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000f53(file=0x008902) symbol=28 <.debug_ranges>+0x350
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000f60(file=0x00890f) symbol=28 <.debug_ranges>+0x368
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000f6d(file=0x00891c) symbol=28 <.debug_ranges>+0x380
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000f7a(file=0x008929) symbol=28 <.debug_ranges>+0x398
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000f87(file=0x008936) symbol=28 <.debug_ranges>+0x3b0
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000f95(file=0x008944) symbol=28 <.debug_ranges>+0x3c8
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000fa3(file=0x008952) symbol=6 <issue463_mix2x2_simd4>+0x1aa
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000fb8(file=0x008967) symbol=6 <issue463_mix2x2_simd4>+0x274
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000fd2(file=0x008981) symbol=6 <issue463_mix2x2_simd4>+0x274
+   - R_WASM_SECTION_OFFSET_I32 offset=0x000fdf(file=0x00898e) symbol=25 <.debug_loc>+0x854
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000ff2(file=0x0089a1) symbol=10 <issue463_sum2_scalar>
+   - R_WASM_GLOBAL_INDEX_I32 offset=0x000ffd(file=0x0089ac) symbol=27 <env.__stack_pointer>
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001002(file=0x0089b1) symbol=29 <.debug_str>+0x1523
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001012(file=0x0089c1) symbol=29 <.debug_str>+0xf83
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001022(file=0x0089d1) symbol=29 <.debug_str>+0x15a3
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001032(file=0x0089e1) symbol=29 <.debug_str>+0xbba
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001042(file=0x0089f1) symbol=29 <.debug_str>+0x159d
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001052(file=0x008a01) symbol=29 <.debug_str>+0x766
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001062(file=0x008a11) symbol=29 <.debug_str>+0x1597
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00106d(file=0x008a1c) symbol=28 <.debug_ranges>+0x3f0
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001072(file=0x008a21) symbol=25 <.debug_loc>+0x872
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001076(file=0x008a25) symbol=29 <.debug_str>+0x766
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001082(file=0x008a31) symbol=25 <.debug_loc>+0x8be
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001086(file=0x008a35) symbol=29 <.debug_str>+0xbba
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001092(file=0x008a41) symbol=25 <.debug_loc>+0x90a
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001096(file=0x008a45) symbol=29 <.debug_str>+0xf83
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0010a6(file=0x008a55) symbol=28 <.debug_ranges>+0x408
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0010ae(file=0x008a5d) symbol=25 <.debug_loc>+0x930
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0010b7(file=0x008a66) symbol=25 <.debug_loc>+0x8e4
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0010c0(file=0x008a6f) symbol=25 <.debug_loc>+0x898
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0010c9(file=0x008a78) symbol=28 <.debug_ranges>+0x408
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0010dc(file=0x008a8b) symbol=28 <.debug_ranges>+0x408
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0010ef(file=0x008a9e) symbol=28 <.debug_ranges>+0x408
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0010f8(file=0x008aa7) symbol=25 <.debug_loc>+0x956
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001105(file=0x008ab4) symbol=28 <.debug_ranges>+0x420
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001112(file=0x008ac1) symbol=28 <.debug_ranges>+0x420
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00111b(file=0x008aca) symbol=28 <.debug_ranges>+0x440
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001124(file=0x008ad3) symbol=25 <.debug_loc>+0x98e
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00112d(file=0x008adc) symbol=28 <.debug_ranges>+0x480
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001136(file=0x008ae5) symbol=25 <.debug_loc>+0x9ac
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001143(file=0x008af2) symbol=28 <.debug_ranges>+0x4b0
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00114c(file=0x008afb) symbol=25 <.debug_loc>+0x9e8
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001155(file=0x008b04) symbol=25 <.debug_loc>+0x9ca
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001163(file=0x008b12) symbol=28 <.debug_ranges>+0x4c8
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00116c(file=0x008b1b) symbol=25 <.debug_loc>+0xa06
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00117b(file=0x008b2a) symbol=28 <.debug_ranges>+0x4e0
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001188(file=0x008b37) symbol=28 <.debug_ranges>+0x508
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001195(file=0x008b44) symbol=28 <.debug_ranges>+0x508
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0011a4(file=0x008b53) symbol=28 <.debug_ranges>+0x520
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0011b1(file=0x008b60) symbol=10 <issue463_sum2_scalar>+0xdd
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0011c2(file=0x008b71) symbol=13 <issue463_sum2_simd4>
+   - R_WASM_GLOBAL_INDEX_I32 offset=0x0011cd(file=0x008b7c) symbol=27 <env.__stack_pointer>
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0011d2(file=0x008b81) symbol=29 <.debug_str>+0x1538
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0011e2(file=0x008b91) symbol=29 <.debug_str>+0xf83
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0011f2(file=0x008ba1) symbol=29 <.debug_str>+0x15a3
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001202(file=0x008bb1) symbol=29 <.debug_str>+0xbba
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001212(file=0x008bc1) symbol=29 <.debug_str>+0x159d
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001222(file=0x008bd1) symbol=29 <.debug_str>+0x766
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001232(file=0x008be1) symbol=29 <.debug_str>+0x1597
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00123d(file=0x008bec) symbol=28 <.debug_ranges>+0x540
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001242(file=0x008bf1) symbol=25 <.debug_loc>+0xa24
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001246(file=0x008bf5) symbol=29 <.debug_str>+0xf83
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001252(file=0x008c01) symbol=25 <.debug_loc>+0xb02
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001256(file=0x008c05) symbol=29 <.debug_str>+0x766
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001262(file=0x008c11) symbol=25 <.debug_loc>+0xb84
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001266(file=0x008c15) symbol=29 <.debug_str>+0xbba
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001276(file=0x008c25) symbol=28 <.debug_ranges>+0x558
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00127e(file=0x008c2d) symbol=25 <.debug_loc>+0xa5c
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001287(file=0x008c36) symbol=25 <.debug_loc>+0xbaa
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001290(file=0x008c3f) symbol=25 <.debug_loc>+0xb48
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001299(file=0x008c48) symbol=28 <.debug_ranges>+0x558
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0012a2(file=0x008c51) symbol=25 <.debug_loc>+0xaaa
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0012ab(file=0x008c5a) symbol=28 <.debug_ranges>+0x570
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0012b4(file=0x008c63) symbol=25 <.debug_loc>+0xad6
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0012bd(file=0x008c6c) symbol=28 <.debug_ranges>+0x570
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0012c6(file=0x008c75) symbol=25 <.debug_loc>+0xbe6
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0012d3(file=0x008c82) symbol=13 <issue463_sum2_simd4>+0x29
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0012e4(file=0x008c93) symbol=13 <issue463_sum2_simd4>+0x29
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0012f5(file=0x008ca4) symbol=28 <.debug_ranges>+0x588
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001302(file=0x008cb1) symbol=28 <.debug_ranges>+0x588
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00130e(file=0x008cbd) symbol=28 <.debug_ranges>+0x588
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00131a(file=0x008cc9) symbol=28 <.debug_ranges>+0x588
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00132a(file=0x008cd9) symbol=28 <.debug_ranges>+0x5a0
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001337(file=0x008ce6) symbol=28 <.debug_ranges>+0x5a0
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001345(file=0x008cf4) symbol=28 <.debug_ranges>+0x5b8
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001352(file=0x008d01) symbol=28 <.debug_ranges>+0x5b8
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00135e(file=0x008d0d) symbol=28 <.debug_ranges>+0x5b8
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00136a(file=0x008d19) symbol=28 <.debug_ranges>+0x5b8
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00137a(file=0x008d29) symbol=28 <.debug_ranges>+0x5d0
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001387(file=0x008d36) symbol=28 <.debug_ranges>+0x5d0
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001394(file=0x008d43) symbol=28 <.debug_ranges>+0x5e8
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00139d(file=0x008d4c) symbol=25 <.debug_loc>+0xc3a
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0013aa(file=0x008d59) symbol=28 <.debug_ranges>+0x608
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0013b6(file=0x008d65) symbol=28 <.debug_ranges>+0x608
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0013c2(file=0x008d71) symbol=28 <.debug_ranges>+0x608
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0013d1(file=0x008d80) symbol=13 <issue463_sum2_simd4>+0x95
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0013e1(file=0x008d90) symbol=13 <issue463_sum2_simd4>+0x95
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0013ee(file=0x008d9d) symbol=25 <.debug_loc>+0xc58
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0013f7(file=0x008da6) symbol=25 <.debug_loc>+0xb28
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x001404(file=0x008db3) symbol=13 <issue463_sum2_simd4>+0x95
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00141f(file=0x008dce) symbol=28 <.debug_ranges>+0x620
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00142c(file=0x008ddb) symbol=28 <.debug_ranges>+0x620
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00143a(file=0x008de9) symbol=28 <.debug_ranges>+0x640
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001443(file=0x008df2) symbol=28 <.debug_ranges>+0x660
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00144c(file=0x008dfb) symbol=25 <.debug_loc>+0xc78
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001459(file=0x008e08) symbol=28 <.debug_ranges>+0x698
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001462(file=0x008e11) symbol=28 <.debug_ranges>+0x6c0
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00146b(file=0x008e1a) symbol=25 <.debug_loc>+0xc96
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001478(file=0x008e27) symbol=28 <.debug_ranges>+0x6e0
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001485(file=0x008e34) symbol=28 <.debug_ranges>+0x6f8
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001493(file=0x008e42) symbol=28 <.debug_ranges>+0x710
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0014a0(file=0x008e4f) symbol=28 <.debug_ranges>+0x710
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0014af(file=0x008e5e) symbol=13 <issue463_sum2_simd4>+0x25c
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0014c0(file=0x008e6f) symbol=17 <issue463_sum_into_scalar>
+   - R_WASM_GLOBAL_INDEX_I32 offset=0x0014cb(file=0x008e7a) symbol=27 <env.__stack_pointer>
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0014d0(file=0x008e7f) symbol=29 <.debug_str>+0x154c
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0014e0(file=0x008e8f) symbol=29 <.debug_str>+0x277
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0014f0(file=0x008e9f) symbol=29 <.debug_str>+0x15b1
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001500(file=0x008eaf) symbol=29 <.debug_str>+0x2fb
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001510(file=0x008ebf) symbol=29 <.debug_str>+0x15ab
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00151b(file=0x008eca) symbol=28 <.debug_ranges>+0x728
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001520(file=0x008ecf) symbol=25 <.debug_loc>+0xcb4
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001524(file=0x008ed3) symbol=29 <.debug_str>+0x2fb
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001530(file=0x008edf) symbol=25 <.debug_loc>+0xd00
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001534(file=0x008ee3) symbol=29 <.debug_str>+0x277
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001544(file=0x008ef3) symbol=28 <.debug_ranges>+0x740
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00154c(file=0x008efb) symbol=25 <.debug_loc>+0xd26
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001555(file=0x008f04) symbol=25 <.debug_loc>+0xcda
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00155e(file=0x008f0d) symbol=28 <.debug_ranges>+0x740
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001571(file=0x008f20) symbol=28 <.debug_ranges>+0x740
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001584(file=0x008f33) symbol=28 <.debug_ranges>+0x740
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00158d(file=0x008f3c) symbol=25 <.debug_loc>+0xd4c
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00159a(file=0x008f49) symbol=28 <.debug_ranges>+0x758
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0015a7(file=0x008f56) symbol=28 <.debug_ranges>+0x758
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0015b1(file=0x008f60) symbol=28 <.debug_ranges>+0x778
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0015ba(file=0x008f69) symbol=25 <.debug_loc>+0xdc0
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0015c7(file=0x008f76) symbol=28 <.debug_ranges>+0x7a8
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0015d0(file=0x008f7f) symbol=25 <.debug_loc>+0xdde
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0015df(file=0x008f8e) symbol=17 <issue463_sum_into_scalar>+0x69
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0015f0(file=0x008f9f) symbol=28 <.debug_ranges>+0x7c0
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0015fd(file=0x008fac) symbol=28 <.debug_ranges>+0x7e8
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001606(file=0x008fb5) symbol=25 <.debug_loc>+0xd84
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00160f(file=0x008fbe) symbol=25 <.debug_loc>+0xda2
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00161d(file=0x008fcc) symbol=17 <issue463_sum_into_scalar>+0xbc
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00162f(file=0x008fde) symbol=19 <issue463_sum_into_simd4>
+   - R_WASM_GLOBAL_INDEX_I32 offset=0x00163a(file=0x008fe9) symbol=27 <env.__stack_pointer>
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00163f(file=0x008fee) symbol=29 <.debug_str>+0x1565
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00164f(file=0x008ffe) symbol=29 <.debug_str>+0x277
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00165f(file=0x00900e) symbol=29 <.debug_str>+0x15b1
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00166f(file=0x00901e) symbol=29 <.debug_str>+0x2fb
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00167f(file=0x00902e) symbol=29 <.debug_str>+0x15ab
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00168a(file=0x009039) symbol=28 <.debug_ranges>+0x800
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00168f(file=0x00903e) symbol=25 <.debug_loc>+0xdfc
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001693(file=0x009042) symbol=29 <.debug_str>+0x277
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00169f(file=0x00904e) symbol=25 <.debug_loc>+0xeda
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0016a3(file=0x009052) symbol=29 <.debug_str>+0x2fb
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0016b3(file=0x009062) symbol=28 <.debug_ranges>+0x818
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0016bb(file=0x00906a) symbol=25 <.debug_loc>+0xe34
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0016c4(file=0x009073) symbol=25 <.debug_loc>+0xf40
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0016cd(file=0x00907c) symbol=28 <.debug_ranges>+0x818
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0016d6(file=0x009085) symbol=25 <.debug_loc>+0xe82
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0016df(file=0x00908e) symbol=28 <.debug_ranges>+0x830
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0016e8(file=0x009097) symbol=25 <.debug_loc>+0xeae
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0016f1(file=0x0090a0) symbol=28 <.debug_ranges>+0x830
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0016fa(file=0x0090a9) symbol=25 <.debug_loc>+0xf7c
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001707(file=0x0090b6) symbol=28 <.debug_ranges>+0x848
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001714(file=0x0090c3) symbol=28 <.debug_ranges>+0x848
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x001720(file=0x0090cf) symbol=19 <issue463_sum_into_simd4>+0x34
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001733(file=0x0090e2) symbol=28 <.debug_ranges>+0x860
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001740(file=0x0090ef) symbol=28 <.debug_ranges>+0x860
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00174c(file=0x0090fb) symbol=28 <.debug_ranges>+0x860
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001758(file=0x009107) symbol=28 <.debug_ranges>+0x860
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001768(file=0x009117) symbol=28 <.debug_ranges>+0x878
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001775(file=0x009124) symbol=28 <.debug_ranges>+0x878
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001783(file=0x009132) symbol=28 <.debug_ranges>+0x890
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00178c(file=0x00913b) symbol=28 <.debug_ranges>+0x890
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001795(file=0x009144) symbol=25 <.debug_loc>+0xfd0
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0017a2(file=0x009151) symbol=28 <.debug_ranges>+0x8b0
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0017ae(file=0x00915d) symbol=28 <.debug_ranges>+0x8b0
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0017ba(file=0x009169) symbol=28 <.debug_ranges>+0x8b0
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0017c9(file=0x009178) symbol=19 <issue463_sum_into_simd4>+0x5d
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0017d9(file=0x009188) symbol=19 <issue463_sum_into_simd4>+0x5d
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0017e6(file=0x009195) symbol=25 <.debug_loc>+0xf20
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0017ef(file=0x00919e) symbol=25 <.debug_loc>+0xfee
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0017fc(file=0x0091ab) symbol=19 <issue463_sum_into_simd4>+0x5d
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x001818(file=0x0091c7) symbol=19 <issue463_sum_into_simd4>+0x55
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x001828(file=0x0091d7) symbol=19 <issue463_sum_into_simd4>+0x63
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x001839(file=0x0091e8) symbol=19 <issue463_sum_into_simd4>+0x63
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x001849(file=0x0091f8) symbol=19 <issue463_sum_into_simd4>+0x63
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001858(file=0x009207) symbol=28 <.debug_ranges>+0x8c8
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00186f(file=0x00921e) symbol=19 <issue463_sum_into_simd4>+0x66
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00187c(file=0x00922b) symbol=25 <.debug_loc>+0x100e
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x001889(file=0x009238) symbol=19 <issue463_sum_into_simd4>+0x66
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x001899(file=0x009248) symbol=19 <issue463_sum_into_simd4>+0x66
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0018a6(file=0x009255) symbol=25 <.debug_loc>+0x102c
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0018af(file=0x00925e) symbol=25 <.debug_loc>+0xf00
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0018bc(file=0x00926b) symbol=19 <issue463_sum_into_simd4>+0x66
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0018d8(file=0x009287) symbol=28 <.debug_ranges>+0x8e0
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0018e5(file=0x009294) symbol=28 <.debug_ranges>+0x8e0
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0018f3(file=0x0092a2) symbol=19 <issue463_sum_into_simd4>+0x167
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001904(file=0x0092b3) symbol=28 <.debug_ranges>+0x900
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001911(file=0x0092c0) symbol=28 <.debug_ranges>+0x928
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00191a(file=0x0092c9) symbol=28 <.debug_ranges>+0x940
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001923(file=0x0092d2) symbol=25 <.debug_loc>+0x104c
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001930(file=0x0092df) symbol=28 <.debug_ranges>+0x960
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00193e(file=0x0092ed) symbol=19 <issue463_sum_into_simd4>+0x1ba
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001955(file=0x009304) symbol=29 <.debug_str>+0x21d
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001962(file=0x009311) symbol=29 <.debug_str>+0x24f
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00196b(file=0x00931a) symbol=29 <.debug_str>+0x27d
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001976(file=0x009325) symbol=29 <.debug_str>+0x38b
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001989(file=0x009338) symbol=29 <.debug_str>+0x100
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00198e(file=0x00933d) symbol=29 <.debug_str>+0x203
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00199a(file=0x009349) symbol=29 <.debug_str>+0x47a
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0019a7(file=0x009356) symbol=29 <.debug_str>+0x480
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0019ac(file=0x00935b) symbol=29 <.debug_str>+0x485
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0019b1(file=0x009360) symbol=29 <.debug_str>+0x48f
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0019b5(file=0x009364) symbol=29 <.debug_str>+0x4e0
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0019c2(file=0x009371) symbol=29 <.debug_str>+0x48d
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0019c7(file=0x009376) symbol=29 <.debug_str>+0x4f2
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0019d3(file=0x009382) symbol=29 <.debug_str>+0x512
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0019df(file=0x00938e) symbol=29 <.debug_str>+0x518
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0019ec(file=0x00939b) symbol=29 <.debug_str>+0x47a
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0019fa(file=0x0093a9) symbol=29 <.debug_str>+0x52e
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001a08(file=0x0093b7) symbol=29 <.debug_str>+0x537
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001a15(file=0x0093c4) symbol=29 <.debug_str>+0x53a
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001a22(file=0x0093d1) symbol=29 <.debug_str>+0x53d
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001a2f(file=0x0093de) symbol=29 <.debug_str>+0x540
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001a3d(file=0x0093ec) symbol=29 <.debug_str>+0x543
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001a4b(file=0x0093fa) symbol=29 <.debug_str>+0x549
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001a59(file=0x009408) symbol=29 <.debug_str>+0x54b
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001a69(file=0x009418) symbol=29 <.debug_str>+0x540
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001a76(file=0x009425) symbol=29 <.debug_str>+0x53d
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001a83(file=0x009432) symbol=29 <.debug_str>+0x53a
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001a90(file=0x00943f) symbol=29 <.debug_str>+0x537
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001a9e(file=0x00944d) symbol=29 <.debug_str>+0x549
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001aac(file=0x00945b) symbol=29 <.debug_str>+0x54b
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001ac1(file=0x009470) symbol=29 <.debug_str>+0x54d
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001ace(file=0x00947d) symbol=29 <.debug_str>+0x55d
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001adc(file=0x00948b) symbol=29 <.debug_str>+0x567
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001aec(file=0x00949b) symbol=29 <.debug_str>+0x817
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001af0(file=0x00949f) symbol=29 <.debug_str>+0x88b
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001afd(file=0x0094ac) symbol=29 <.debug_str>+0x48d
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001b02(file=0x0094b1) symbol=29 <.debug_str>+0x4f2
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001b0e(file=0x0094bd) symbol=29 <.debug_str>+0x512
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001b1a(file=0x0094c9) symbol=29 <.debug_str>+0x518
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001b27(file=0x0094d6) symbol=29 <.debug_str>+0x47a
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001b35(file=0x0094e4) symbol=29 <.debug_str>+0x52e
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001b43(file=0x0094f2) symbol=29 <.debug_str>+0x540
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001b50(file=0x0094ff) symbol=29 <.debug_str>+0x53d
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001b5d(file=0x00950c) symbol=29 <.debug_str>+0x53a
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001b6a(file=0x009519) symbol=29 <.debug_str>+0x537
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001b78(file=0x009527) symbol=29 <.debug_str>+0x543
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001b86(file=0x009535) symbol=29 <.debug_str>+0x549
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001b94(file=0x009543) symbol=29 <.debug_str>+0x54b
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001ba4(file=0x009553) symbol=29 <.debug_str>+0x540
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001bb1(file=0x009560) symbol=29 <.debug_str>+0x53d
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001bbe(file=0x00956d) symbol=29 <.debug_str>+0x53a
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001bcb(file=0x00957a) symbol=29 <.debug_str>+0x537
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001bd9(file=0x009588) symbol=29 <.debug_str>+0x549
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001be7(file=0x009596) symbol=29 <.debug_str>+0x54b
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001bfc(file=0x0095ab) symbol=29 <.debug_str>+0x54d
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001c09(file=0x0095b8) symbol=29 <.debug_str>+0x55d
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001c17(file=0x0095c6) symbol=29 <.debug_str>+0x567
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001c27(file=0x0095d6) symbol=29 <.debug_str>+0xf24
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001c2b(file=0x0095da) symbol=29 <.debug_str>+0xf73
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001c38(file=0x0095e7) symbol=29 <.debug_str>+0x48d
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001c3d(file=0x0095ec) symbol=29 <.debug_str>+0xf83
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001c49(file=0x0095f8) symbol=29 <.debug_str>+0xbba
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001c55(file=0x009604) symbol=29 <.debug_str>+0x766
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001c62(file=0x009611) symbol=29 <.debug_str>+0x47a
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001c70(file=0x00961f) symbol=29 <.debug_str>+0x52e
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001c7e(file=0x00962d) symbol=29 <.debug_str>+0x543
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001c8c(file=0x00963b) symbol=29 <.debug_str>+0x4f2
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001c9a(file=0x009649) symbol=29 <.debug_str>+0x512
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001caa(file=0x009659) symbol=29 <.debug_str>+0x4f2
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001cb8(file=0x009667) symbol=29 <.debug_str>+0x512
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001ccb(file=0x00967a) symbol=29 <.debug_str>+0x54d
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001cd8(file=0x009687) symbol=29 <.debug_str>+0x55d
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001ce6(file=0x009695) symbol=29 <.debug_str>+0x567
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001cf6(file=0x0096a5) symbol=29 <.debug_str>+0x54d
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001d03(file=0x0096b2) symbol=29 <.debug_str>+0x55d
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001d11(file=0x0096c0) symbol=29 <.debug_str>+0x567
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001d21(file=0x0096d0) symbol=29 <.debug_str>+0xfb8
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001d25(file=0x0096d4) symbol=29 <.debug_str>+0x102a
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001d32(file=0x0096e1) symbol=29 <.debug_str>+0x48d
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001d37(file=0x0096e6) symbol=29 <.debug_str>+0xf83
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001d43(file=0x0096f2) symbol=29 <.debug_str>+0xbba
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001d4f(file=0x0096fe) symbol=29 <.debug_str>+0x766
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001d5c(file=0x00970b) symbol=29 <.debug_str>+0x47a
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001d6a(file=0x009719) symbol=29 <.debug_str>+0x52e
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001d78(file=0x009727) symbol=29 <.debug_str>+0x543
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001d86(file=0x009735) symbol=29 <.debug_str>+0x4f2
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001d94(file=0x009743) symbol=29 <.debug_str>+0x512
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001da4(file=0x009753) symbol=29 <.debug_str>+0x4f2
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001db2(file=0x009761) symbol=29 <.debug_str>+0x512
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001dc5(file=0x009774) symbol=29 <.debug_str>+0x54d
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001dd2(file=0x009781) symbol=29 <.debug_str>+0x55d
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001de0(file=0x00978f) symbol=29 <.debug_str>+0x567
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001df0(file=0x00979f) symbol=29 <.debug_str>+0x54d
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001dfd(file=0x0097ac) symbol=29 <.debug_str>+0x55d
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001e0b(file=0x0097ba) symbol=29 <.debug_str>+0x567
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001e1b(file=0x0097ca) symbol=29 <.debug_str>+0x1373
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001e1f(file=0x0097ce) symbol=29 <.debug_str>+0x13c6
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001e2c(file=0x0097db) symbol=29 <.debug_str>+0x48d
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001e31(file=0x0097e0) symbol=29 <.debug_str>+0x277
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001e3d(file=0x0097ec) symbol=29 <.debug_str>+0x2fb
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001e4a(file=0x0097f9) symbol=29 <.debug_str>+0x47a
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001e58(file=0x009807) symbol=29 <.debug_str>+0x52e
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001e66(file=0x009815) symbol=29 <.debug_str>+0x543
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001e74(file=0x009823) symbol=29 <.debug_str>+0x13da
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001e83(file=0x009832) symbol=29 <.debug_str>+0x13da
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001e95(file=0x009844) symbol=29 <.debug_str>+0x54d
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001ea2(file=0x009851) symbol=29 <.debug_str>+0x55d
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001eb0(file=0x00985f) symbol=29 <.debug_str>+0x567
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001ec0(file=0x00986f) symbol=29 <.debug_str>+0x13de
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001ec4(file=0x009873) symbol=29 <.debug_str>+0x1454
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001ed1(file=0x009880) symbol=29 <.debug_str>+0x48d
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001ed6(file=0x009885) symbol=29 <.debug_str>+0x277
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001ee2(file=0x009891) symbol=29 <.debug_str>+0x2fb
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001eef(file=0x00989e) symbol=29 <.debug_str>+0x47a
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001efd(file=0x0098ac) symbol=29 <.debug_str>+0x52e
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001f0b(file=0x0098ba) symbol=29 <.debug_str>+0x543
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001f19(file=0x0098c8) symbol=29 <.debug_str>+0x13da
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001f28(file=0x0098d7) symbol=29 <.debug_str>+0x13da
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001f3a(file=0x0098e9) symbol=29 <.debug_str>+0x54d
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001f47(file=0x0098f6) symbol=29 <.debug_str>+0x55d
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001f55(file=0x009904) symbol=29 <.debug_str>+0x567
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001f66(file=0x009915) symbol=29 <.debug_str>+0x6ef
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001f6b(file=0x00991a) symbol=29 <.debug_str>+0x60c
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001f70(file=0x00991f) symbol=29 <.debug_str>+0x6f6
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001f74(file=0x009923) symbol=29 <.debug_str>+0x728
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001f80(file=0x00992f) symbol=29 <.debug_str>+0x72d
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001f8c(file=0x00993b) symbol=29 <.debug_str>+0x731
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001f90(file=0x00993f) symbol=29 <.debug_str>+0x762
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001f9c(file=0x00994b) symbol=29 <.debug_str>+0x203
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001fa7(file=0x009956) symbol=29 <.debug_str>+0x766
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001fb3(file=0x009962) symbol=29 <.debug_str>+0x768
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001fb7(file=0x009966) symbol=29 <.debug_str>+0x799
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001fc3(file=0x009972) symbol=29 <.debug_str>+0x203
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001fce(file=0x00997d) symbol=29 <.debug_str>+0x766
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001fd9(file=0x009988) symbol=29 <.debug_str>+0x518
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001fe5(file=0x009994) symbol=29 <.debug_str>+0x79d
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001fe9(file=0x009998) symbol=29 <.debug_str>+0x7d0
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001ff1(file=0x0099a0) symbol=29 <.debug_str>+0x203
+   - R_WASM_SECTION_OFFSET_I32 offset=0x001ffc(file=0x0099ab) symbol=29 <.debug_str>+0x7d6
+   - R_WASM_SECTION_OFFSET_I32 offset=0x002008(file=0x0099b7) symbol=29 <.debug_str>+0x6f6
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00200c(file=0x0099bb) symbol=29 <.debug_str>+0x728
+   - R_WASM_SECTION_OFFSET_I32 offset=0x002018(file=0x0099c7) symbol=29 <.debug_str>+0x731
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00201c(file=0x0099cb) symbol=29 <.debug_str>+0x762
+   - R_WASM_SECTION_OFFSET_I32 offset=0x002028(file=0x0099d7) symbol=29 <.debug_str>+0x768
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00202c(file=0x0099db) symbol=29 <.debug_str>+0x799
+   - R_WASM_SECTION_OFFSET_I32 offset=0x002038(file=0x0099e7) symbol=29 <.debug_str>+0x79d
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00203c(file=0x0099eb) symbol=29 <.debug_str>+0x7d0
+   - R_WASM_SECTION_OFFSET_I32 offset=0x002044(file=0x0099f3) symbol=29 <.debug_str>+0xf87
+   - R_WASM_SECTION_OFFSET_I32 offset=0x002048(file=0x0099f7) symbol=29 <.debug_str>+0xecb
+   - R_WASM_SECTION_OFFSET_I32 offset=0x002054(file=0x009a03) symbol=29 <.debug_str>+0x203
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00205f(file=0x009a0e) symbol=29 <.debug_str>+0x766
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00206b(file=0x009a1a) symbol=29 <.debug_str>+0x6f6
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00206f(file=0x009a1e) symbol=29 <.debug_str>+0x728
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00207b(file=0x009a2a) symbol=29 <.debug_str>+0xf87
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00207f(file=0x009a2e) symbol=29 <.debug_str>+0xecb
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00208b(file=0x009a3a) symbol=29 <.debug_str>+0x79d
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00208f(file=0x009a3e) symbol=29 <.debug_str>+0x7d0
+   - R_WASM_SECTION_OFFSET_I32 offset=0x002097(file=0x009a46) symbol=29 <.debug_str>+0x6f6
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00209b(file=0x009a4a) symbol=29 <.debug_str>+0x728
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0020a7(file=0x009a56) symbol=29 <.debug_str>+0xf87
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0020ab(file=0x009a5a) symbol=29 <.debug_str>+0xecb
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0020b7(file=0x009a66) symbol=29 <.debug_str>+0x79d
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0020bb(file=0x009a6a) symbol=29 <.debug_str>+0x7d0
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0020c5(file=0x009a74) symbol=29 <.debug_str>+0xb0f
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0020ca(file=0x009a79) symbol=29 <.debug_str>+0x60c
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0020cf(file=0x009a7e) symbol=29 <.debug_str>+0xb15
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0020d3(file=0x009a82) symbol=29 <.debug_str>+0x728
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0020df(file=0x009a8e) symbol=29 <.debug_str>+0x72d
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0020eb(file=0x009a9a) symbol=29 <.debug_str>+0xb69
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0020f9(file=0x009aa8) symbol=29 <.debug_str>+0xc22
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0020fd(file=0x009aac) symbol=29 <.debug_str>+0x762
+   - R_WASM_SECTION_OFFSET_I32 offset=0x002109(file=0x009ab8) symbol=29 <.debug_str>+0x203
+   - R_WASM_SECTION_OFFSET_I32 offset=0x002114(file=0x009ac3) symbol=29 <.debug_str>+0x766
+   - R_WASM_SECTION_OFFSET_I32 offset=0x002120(file=0x009acf) symbol=29 <.debug_str>+0xdc8
+   - R_WASM_SECTION_OFFSET_I32 offset=0x002124(file=0x009ad3) symbol=29 <.debug_str>+0x799
+   - R_WASM_SECTION_OFFSET_I32 offset=0x002130(file=0x009adf) symbol=29 <.debug_str>+0x203
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00213b(file=0x009aea) symbol=29 <.debug_str>+0x766
+   - R_WASM_SECTION_OFFSET_I32 offset=0x002146(file=0x009af5) symbol=29 <.debug_str>+0x518
+   - R_WASM_SECTION_OFFSET_I32 offset=0x002152(file=0x009b01) symbol=29 <.debug_str>+0xecf
+   - R_WASM_SECTION_OFFSET_I32 offset=0x002156(file=0x009b05) symbol=29 <.debug_str>+0x7d0
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00215e(file=0x009b0d) symbol=29 <.debug_str>+0x203
+   - R_WASM_SECTION_OFFSET_I32 offset=0x002169(file=0x009b18) symbol=29 <.debug_str>+0x7d6
+   - R_WASM_SECTION_OFFSET_I32 offset=0x002175(file=0x009b24) symbol=29 <.debug_str>+0x1478
+   - R_WASM_SECTION_OFFSET_I32 offset=0x002179(file=0x009b28) symbol=29 <.debug_str>+0xecb
+   - R_WASM_SECTION_OFFSET_I32 offset=0x002185(file=0x009b34) symbol=29 <.debug_str>+0x203
+   - R_WASM_SECTION_OFFSET_I32 offset=0x002190(file=0x009b3f) symbol=29 <.debug_str>+0x766
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00219f(file=0x009b4e) symbol=29 <.debug_str>+0x507
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0021a6(file=0x009b55) symbol=29 <.debug_str>+0x4f7
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0021b1(file=0x009b60) symbol=29 <.debug_str>+0x500
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0021d3(file=0x009b82) symbol=29 <.debug_str>+0x51a
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0021de(file=0x009b8d) symbol=29 <.debug_str>+0x556
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0021e7(file=0x009b96) symbol=29 <.debug_str>+0x605
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0021ee(file=0x009b9d) symbol=29 <.debug_str>+0x4f7
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0021f9(file=0x009ba8) symbol=29 <.debug_str>+0x500
+   - R_WASM_SECTION_OFFSET_I32 offset=0x002205(file=0x009bb4) symbol=29 <.debug_str>+0x7da
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00220a(file=0x009bb9) symbol=29 <.debug_str>+0x7df
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00220f(file=0x009bbe) symbol=29 <.debug_str>+0x811
+   - R_WASM_SECTION_OFFSET_I32 offset=0x002217(file=0x009bc6) symbol=29 <.debug_str>+0x7e6
+   - R_WASM_SECTION_OFFSET_I32 offset=0x002224(file=0x009bd3) symbol=29 <.debug_str>+0xbbc
+   - R_WASM_SECTION_OFFSET_I32 offset=0x002229(file=0x009bd8) symbol=29 <.debug_str>+0xbc6
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00222d(file=0x009bdc) symbol=29 <.debug_str>+0x762
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00223a(file=0x009be9) symbol=29 <.debug_str>+0xbc6
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00223e(file=0x009bed) symbol=29 <.debug_str>+0x762
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00224c(file=0x009bfb) symbol=29 <.debug_str>+0xe66
+   - R_WASM_SECTION_OFFSET_I32 offset=0x002251(file=0x009c00) symbol=29 <.debug_str>+0xe70
+   - R_WASM_SECTION_OFFSET_I32 offset=0x002255(file=0x009c04) symbol=29 <.debug_str>+0xecb
+   - R_WASM_SECTION_OFFSET_I32 offset=0x002262(file=0x009c11) symbol=29 <.debug_str>+0xe70
+   - R_WASM_SECTION_OFFSET_I32 offset=0x002266(file=0x009c15) symbol=29 <.debug_str>+0xecb
+   - R_WASM_SECTION_OFFSET_I32 offset=0x002283(file=0x009c32) symbol=29 <.debug_str>+0x808
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00228a(file=0x009c39) symbol=29 <.debug_str>+0x92e
+   - R_WASM_SECTION_OFFSET_I32 offset=0x002291(file=0x009c40) symbol=29 <.debug_str>+0x4f7
+   - R_WASM_SECTION_OFFSET_I32 offset=0x00229c(file=0x009c4b) symbol=29 <.debug_str>+0x500
+   - R_WASM_SECTION_OFFSET_I32 offset=0x0022ac(file=0x009c5b) symbol=29 <.debug_str>+0xce2
+Custom:
+ - name: "reloc..debug_ranges"
+  - relocations for section: 9 (.debug_ranges) [458]
+   - R_WASM_FUNCTION_OFFSET_I32 offset=00000000(file=0x008be3) symbol=0 <_RNvCs8lo3PVzYdl8_14issue463_probe7observe>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000004(file=0x008be7) symbol=0 <_RNvCs8lo3PVzYdl8_14issue463_probe7observe>+0x9
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000008(file=0x008beb) symbol=0 <_RNvCs8lo3PVzYdl8_14issue463_probe7observe>+0x1d
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00000c(file=0x008bef) symbol=0 <_RNvCs8lo3PVzYdl8_14issue463_probe7observe>+0x86
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000018(file=0x008bfb) symbol=0 <_RNvCs8lo3PVzYdl8_14issue463_probe7observe>+0x44
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00001c(file=0x008bff) symbol=0 <_RNvCs8lo3PVzYdl8_14issue463_probe7observe>+0x45
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000020(file=0x008c03) symbol=0 <_RNvCs8lo3PVzYdl8_14issue463_probe7observe>+0x4a
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000024(file=0x008c07) symbol=0 <_RNvCs8lo3PVzYdl8_14issue463_probe7observe>+0x52
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000028(file=0x008c0b) symbol=0 <_RNvCs8lo3PVzYdl8_14issue463_probe7observe>+0x56
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00002c(file=0x008c0f) symbol=0 <_RNvCs8lo3PVzYdl8_14issue463_probe7observe>+0x5d
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000030(file=0x008c13) symbol=0 <_RNvCs8lo3PVzYdl8_14issue463_probe7observe>+0x77
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000034(file=0x008c17) symbol=0 <_RNvCs8lo3PVzYdl8_14issue463_probe7observe>+0x7e
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000038(file=0x008c1b) symbol=0 <_RNvCs8lo3PVzYdl8_14issue463_probe7observe>+0x83
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00003c(file=0x008c1f) symbol=0 <_RNvCs8lo3PVzYdl8_14issue463_probe7observe>+0x86
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000048(file=0x008c2b) symbol=0 <_RNvCs8lo3PVzYdl8_14issue463_probe7observe>+0x44
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00004c(file=0x008c2f) symbol=0 <_RNvCs8lo3PVzYdl8_14issue463_probe7observe>+0x45
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000050(file=0x008c33) symbol=0 <_RNvCs8lo3PVzYdl8_14issue463_probe7observe>+0x4d
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000054(file=0x008c37) symbol=0 <_RNvCs8lo3PVzYdl8_14issue463_probe7observe>+0x52
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000058(file=0x008c3b) symbol=0 <_RNvCs8lo3PVzYdl8_14issue463_probe7observe>+0x77
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00005c(file=0x008c3f) symbol=0 <_RNvCs8lo3PVzYdl8_14issue463_probe7observe>+0x7e
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000068(file=0x008c4b) symbol=1 <issue463_mix2x2_scalar>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00006c(file=0x008c4f) symbol=1 <issue463_mix2x2_scalar>+0x15f
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000070(file=0x008c53) symbol=1 <issue463_mix2x2_scalar>+0x165
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000074(file=0x008c57) symbol=1 <issue463_mix2x2_scalar>+0x187
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000080(file=0x008c63) symbol=1 <issue463_mix2x2_scalar>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000084(file=0x008c67) symbol=1 <issue463_mix2x2_scalar>+0x147
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000088(file=0x008c6b) symbol=1 <issue463_mix2x2_scalar>+0x165
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00008c(file=0x008c6f) symbol=1 <issue463_mix2x2_scalar>+0x187
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000098(file=0x008c7b) symbol=1 <issue463_mix2x2_scalar>+0x22
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00009c(file=0x008c7f) symbol=1 <issue463_mix2x2_scalar>+0x55
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0000a0(file=0x008c83) symbol=1 <issue463_mix2x2_scalar>+0x95
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0000a4(file=0x008c87) symbol=1 <issue463_mix2x2_scalar>+0xc9
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0000a8(file=0x008c8b) symbol=1 <issue463_mix2x2_scalar>+0xe4
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0000ac(file=0x008c8f) symbol=1 <issue463_mix2x2_scalar>+0x101
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0000b0(file=0x008c93) symbol=1 <issue463_mix2x2_scalar>+0x10a
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0000b4(file=0x008c97) symbol=1 <issue463_mix2x2_scalar>+0x12f
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0000b8(file=0x008c9b) symbol=1 <issue463_mix2x2_scalar>+0x13f
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0000bc(file=0x008c9f) symbol=1 <issue463_mix2x2_scalar>+0x140
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0000c0(file=0x008ca3) symbol=1 <issue463_mix2x2_scalar>+0x165
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0000c4(file=0x008ca7) symbol=1 <issue463_mix2x2_scalar>+0x187
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0000d0(file=0x008cb3) symbol=1 <issue463_mix2x2_scalar>+0x22
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0000d4(file=0x008cb7) symbol=1 <issue463_mix2x2_scalar>+0x49
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0000d8(file=0x008cbb) symbol=1 <issue463_mix2x2_scalar>+0xe4
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0000dc(file=0x008cbf) symbol=1 <issue463_mix2x2_scalar>+0xfa
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0000e0(file=0x008cc3) symbol=1 <issue463_mix2x2_scalar>+0x173
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0000e4(file=0x008cc7) symbol=1 <issue463_mix2x2_scalar>+0x187
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0000f0(file=0x008cd3) symbol=1 <issue463_mix2x2_scalar>+0x49
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0000f4(file=0x008cd7) symbol=1 <issue463_mix2x2_scalar>+0x4b
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0000f8(file=0x008cdb) symbol=1 <issue463_mix2x2_scalar>+0x52
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0000fc(file=0x008cdf) symbol=1 <issue463_mix2x2_scalar>+0x55
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000100(file=0x008ce3) symbol=1 <issue463_mix2x2_scalar>+0x95
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000104(file=0x008ce7) symbol=1 <issue463_mix2x2_scalar>+0x9a
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000108(file=0x008ceb) symbol=1 <issue463_mix2x2_scalar>+0xa2
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00010c(file=0x008cef) symbol=1 <issue463_mix2x2_scalar>+0xc9
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000110(file=0x008cf3) symbol=1 <issue463_mix2x2_scalar>+0x10a
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000114(file=0x008cf7) symbol=1 <issue463_mix2x2_scalar>+0x10d
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000118(file=0x008cfb) symbol=1 <issue463_mix2x2_scalar>+0x114
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00011c(file=0x008cff) symbol=1 <issue463_mix2x2_scalar>+0x12f
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000120(file=0x008d03) symbol=1 <issue463_mix2x2_scalar>+0x13f
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000124(file=0x008d07) symbol=1 <issue463_mix2x2_scalar>+0x140
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000130(file=0x008d13) symbol=1 <issue463_mix2x2_scalar>+0x95
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000134(file=0x008d17) symbol=1 <issue463_mix2x2_scalar>+0x9a
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000138(file=0x008d1b) symbol=1 <issue463_mix2x2_scalar>+0x10a
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00013c(file=0x008d1f) symbol=1 <issue463_mix2x2_scalar>+0x10d
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000148(file=0x008d2b) symbol=1 <issue463_mix2x2_scalar>+0xa2
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00014c(file=0x008d2f) symbol=1 <issue463_mix2x2_scalar>+0xaa
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000150(file=0x008d33) symbol=1 <issue463_mix2x2_scalar>+0x114
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000154(file=0x008d37) symbol=1 <issue463_mix2x2_scalar>+0x118
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000160(file=0x008d43) symbol=1 <issue463_mix2x2_scalar>+0xaa
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000164(file=0x008d47) symbol=1 <issue463_mix2x2_scalar>+0xae
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000168(file=0x008d4b) symbol=1 <issue463_mix2x2_scalar>+0x118
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00016c(file=0x008d4f) symbol=1 <issue463_mix2x2_scalar>+0x11b
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000178(file=0x008d5b) symbol=1 <issue463_mix2x2_scalar>+0xae
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00017c(file=0x008d5f) symbol=1 <issue463_mix2x2_scalar>+0xb7
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000180(file=0x008d63) symbol=1 <issue463_mix2x2_scalar>+0x11b
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000184(file=0x008d67) symbol=1 <issue463_mix2x2_scalar>+0x122
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000190(file=0x008d73) symbol=1 <issue463_mix2x2_scalar>+0xb7
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000194(file=0x008d77) symbol=1 <issue463_mix2x2_scalar>+0xc1
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000198(file=0x008d7b) symbol=1 <issue463_mix2x2_scalar>+0x122
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00019c(file=0x008d7f) symbol=1 <issue463_mix2x2_scalar>+0x128
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0001a8(file=0x008d8b) symbol=1 <issue463_mix2x2_scalar>+0xc1
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0001ac(file=0x008d8f) symbol=1 <issue463_mix2x2_scalar>+0xc9
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0001b0(file=0x008d93) symbol=1 <issue463_mix2x2_scalar>+0x128
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0001b4(file=0x008d97) symbol=1 <issue463_mix2x2_scalar>+0x12f
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0001c0(file=0x008da3) symbol=1 <issue463_mix2x2_scalar>+0x9a
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0001c4(file=0x008da7) symbol=1 <issue463_mix2x2_scalar>+0xa2
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0001c8(file=0x008dab) symbol=1 <issue463_mix2x2_scalar>+0xfa
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0001cc(file=0x008daf) symbol=1 <issue463_mix2x2_scalar>+0x101
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0001d0(file=0x008db3) symbol=1 <issue463_mix2x2_scalar>+0x10d
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0001d4(file=0x008db7) symbol=1 <issue463_mix2x2_scalar>+0x114
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0001d8(file=0x008dbb) symbol=1 <issue463_mix2x2_scalar>+0x165
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0001dc(file=0x008dbf) symbol=1 <issue463_mix2x2_scalar>+0x172
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0001e8(file=0x008dcb) symbol=6 <issue463_mix2x2_simd4>+0x31
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0001ec(file=0x008dcf) symbol=6 <issue463_mix2x2_simd4>+0x280
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0001f0(file=0x008dd3) symbol=6 <issue463_mix2x2_simd4>+0x282
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0001f4(file=0x008dd7) symbol=6 <issue463_mix2x2_simd4>+0x2a8
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000200(file=0x008de3) symbol=6 <issue463_mix2x2_simd4>+0x31
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000204(file=0x008de7) symbol=6 <issue463_mix2x2_simd4>+0x266
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000208(file=0x008deb) symbol=6 <issue463_mix2x2_simd4>+0x282
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00020c(file=0x008def) symbol=6 <issue463_mix2x2_simd4>+0x2a8
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000218(file=0x008dfb) symbol=6 <issue463_mix2x2_simd4>+0x32
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00021c(file=0x008dff) symbol=6 <issue463_mix2x2_simd4>+0x266
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000220(file=0x008e03) symbol=6 <issue463_mix2x2_simd4>+0x282
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000224(file=0x008e07) symbol=6 <issue463_mix2x2_simd4>+0x2a8
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000230(file=0x008e13) symbol=6 <issue463_mix2x2_simd4>+0x43
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000234(file=0x008e17) symbol=6 <issue463_mix2x2_simd4>+0x5b
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000238(file=0x008e1b) symbol=6 <issue463_mix2x2_simd4>+0x10e
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00023c(file=0x008e1f) symbol=6 <issue463_mix2x2_simd4>+0x121
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000248(file=0x008e2b) symbol=6 <issue463_mix2x2_simd4>+0x5b
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00024c(file=0x008e2f) symbol=6 <issue463_mix2x2_simd4>+0x5e
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000250(file=0x008e33) symbol=6 <issue463_mix2x2_simd4>+0xea
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000254(file=0x008e37) symbol=6 <issue463_mix2x2_simd4>+0xf9
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000260(file=0x008e43) symbol=6 <issue463_mix2x2_simd4>+0x5e
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000264(file=0x008e47) symbol=6 <issue463_mix2x2_simd4>+0x67
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000268(file=0x008e4b) symbol=6 <issue463_mix2x2_simd4>+0xd1
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00026c(file=0x008e4f) symbol=6 <issue463_mix2x2_simd4>+0xe5
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000278(file=0x008e5b) symbol=6 <issue463_mix2x2_simd4>+0x67
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00027c(file=0x008e5f) symbol=6 <issue463_mix2x2_simd4>+0x73
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000280(file=0x008e63) symbol=6 <issue463_mix2x2_simd4>+0x82
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000284(file=0x008e67) symbol=6 <issue463_mix2x2_simd4>+0x8a
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000288(file=0x008e6b) symbol=6 <issue463_mix2x2_simd4>+0xfe
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00028c(file=0x008e6f) symbol=6 <issue463_mix2x2_simd4>+0x10d
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000298(file=0x008e7b) symbol=6 <issue463_mix2x2_simd4>+0x67
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00029c(file=0x008e7f) symbol=6 <issue463_mix2x2_simd4>+0x73
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0002a0(file=0x008e83) symbol=6 <issue463_mix2x2_simd4>+0xfe
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0002a4(file=0x008e87) symbol=6 <issue463_mix2x2_simd4>+0x10d
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0002b0(file=0x008e93) symbol=6 <issue463_mix2x2_simd4>+0x133
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0002b4(file=0x008e97) symbol=6 <issue463_mix2x2_simd4>+0x1aa
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0002b8(file=0x008e9b) symbol=6 <issue463_mix2x2_simd4>+0x1b6
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0002bc(file=0x008e9f) symbol=6 <issue463_mix2x2_simd4>+0x1ea
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0002c0(file=0x008ea3) symbol=6 <issue463_mix2x2_simd4>+0x205
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0002c4(file=0x008ea7) symbol=6 <issue463_mix2x2_simd4>+0x222
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0002c8(file=0x008eab) symbol=6 <issue463_mix2x2_simd4>+0x22b
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0002cc(file=0x008eaf) symbol=6 <issue463_mix2x2_simd4>+0x250
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0002d0(file=0x008eb3) symbol=6 <issue463_mix2x2_simd4>+0x260
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0002d4(file=0x008eb7) symbol=6 <issue463_mix2x2_simd4>+0x261
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0002d8(file=0x008ebb) symbol=6 <issue463_mix2x2_simd4>+0x282
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0002dc(file=0x008ebf) symbol=6 <issue463_mix2x2_simd4>+0x2a8
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0002e8(file=0x008ecb) symbol=6 <issue463_mix2x2_simd4>+0x133
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0002ec(file=0x008ecf) symbol=6 <issue463_mix2x2_simd4>+0x1aa
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0002f0(file=0x008ed3) symbol=6 <issue463_mix2x2_simd4>+0x205
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0002f4(file=0x008ed7) symbol=6 <issue463_mix2x2_simd4>+0x21b
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0002f8(file=0x008edb) symbol=6 <issue463_mix2x2_simd4>+0x282
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0002fc(file=0x008edf) symbol=6 <issue463_mix2x2_simd4>+0x295
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000308(file=0x008eeb) symbol=6 <issue463_mix2x2_simd4>+0x1b6
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00030c(file=0x008eef) symbol=6 <issue463_mix2x2_simd4>+0x1bb
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000310(file=0x008ef3) symbol=6 <issue463_mix2x2_simd4>+0x1c3
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000314(file=0x008ef7) symbol=6 <issue463_mix2x2_simd4>+0x1ea
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000318(file=0x008efb) symbol=6 <issue463_mix2x2_simd4>+0x22b
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00031c(file=0x008eff) symbol=6 <issue463_mix2x2_simd4>+0x22e
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000320(file=0x008f03) symbol=6 <issue463_mix2x2_simd4>+0x235
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000324(file=0x008f07) symbol=6 <issue463_mix2x2_simd4>+0x250
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000328(file=0x008f0b) symbol=6 <issue463_mix2x2_simd4>+0x260
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00032c(file=0x008f0f) symbol=6 <issue463_mix2x2_simd4>+0x261
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000338(file=0x008f1b) symbol=6 <issue463_mix2x2_simd4>+0x1b6
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00033c(file=0x008f1f) symbol=6 <issue463_mix2x2_simd4>+0x1bb
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000340(file=0x008f23) symbol=6 <issue463_mix2x2_simd4>+0x22b
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000344(file=0x008f27) symbol=6 <issue463_mix2x2_simd4>+0x22e
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000350(file=0x008f33) symbol=6 <issue463_mix2x2_simd4>+0x1c3
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000354(file=0x008f37) symbol=6 <issue463_mix2x2_simd4>+0x1cb
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000358(file=0x008f3b) symbol=6 <issue463_mix2x2_simd4>+0x235
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00035c(file=0x008f3f) symbol=6 <issue463_mix2x2_simd4>+0x239
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000368(file=0x008f4b) symbol=6 <issue463_mix2x2_simd4>+0x1cb
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00036c(file=0x008f4f) symbol=6 <issue463_mix2x2_simd4>+0x1cf
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000370(file=0x008f53) symbol=6 <issue463_mix2x2_simd4>+0x239
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000374(file=0x008f57) symbol=6 <issue463_mix2x2_simd4>+0x23c
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000380(file=0x008f63) symbol=6 <issue463_mix2x2_simd4>+0x1cf
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000384(file=0x008f67) symbol=6 <issue463_mix2x2_simd4>+0x1d8
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000388(file=0x008f6b) symbol=6 <issue463_mix2x2_simd4>+0x23c
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00038c(file=0x008f6f) symbol=6 <issue463_mix2x2_simd4>+0x243
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000398(file=0x008f7b) symbol=6 <issue463_mix2x2_simd4>+0x1d8
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00039c(file=0x008f7f) symbol=6 <issue463_mix2x2_simd4>+0x1e2
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0003a0(file=0x008f83) symbol=6 <issue463_mix2x2_simd4>+0x243
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0003a4(file=0x008f87) symbol=6 <issue463_mix2x2_simd4>+0x249
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0003b0(file=0x008f93) symbol=6 <issue463_mix2x2_simd4>+0x1e2
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0003b4(file=0x008f97) symbol=6 <issue463_mix2x2_simd4>+0x1ea
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0003b8(file=0x008f9b) symbol=6 <issue463_mix2x2_simd4>+0x249
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0003bc(file=0x008f9f) symbol=6 <issue463_mix2x2_simd4>+0x250
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0003c8(file=0x008fab) symbol=6 <issue463_mix2x2_simd4>+0x1bb
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0003cc(file=0x008faf) symbol=6 <issue463_mix2x2_simd4>+0x1c3
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0003d0(file=0x008fb3) symbol=6 <issue463_mix2x2_simd4>+0x21b
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0003d4(file=0x008fb7) symbol=6 <issue463_mix2x2_simd4>+0x222
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0003d8(file=0x008fbb) symbol=6 <issue463_mix2x2_simd4>+0x22e
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0003dc(file=0x008fbf) symbol=6 <issue463_mix2x2_simd4>+0x235
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0003e0(file=0x008fc3) symbol=6 <issue463_mix2x2_simd4>+0x29a
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0003e4(file=0x008fc7) symbol=6 <issue463_mix2x2_simd4>+0x2a8
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0003f0(file=0x008fd3) symbol=10 <issue463_sum2_scalar>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0003f4(file=0x008fd7) symbol=10 <issue463_sum2_scalar>+0x11a
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0003f8(file=0x008fdb) symbol=10 <issue463_sum2_scalar>+0x120
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0003fc(file=0x008fdf) symbol=10 <issue463_sum2_scalar>+0x168
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000408(file=0x008feb) symbol=10 <issue463_sum2_scalar>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00040c(file=0x008fef) symbol=10 <issue463_sum2_scalar>+0x110
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000410(file=0x008ff3) symbol=10 <issue463_sum2_scalar>+0x120
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000414(file=0x008ff7) symbol=10 <issue463_sum2_scalar>+0x168
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000420(file=0x009003) symbol=10 <issue463_sum2_scalar>+0x16
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000424(file=0x009007) symbol=10 <issue463_sum2_scalar>+0x43
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000428(file=0x00900b) symbol=10 <issue463_sum2_scalar>+0xab
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00042c(file=0x00900f) symbol=10 <issue463_sum2_scalar>+0xc8
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000430(file=0x009013) symbol=10 <issue463_sum2_scalar>+0x12e
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000434(file=0x009017) symbol=10 <issue463_sum2_scalar>+0x141
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000440(file=0x009023) symbol=10 <issue463_sum2_scalar>+0x43
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000444(file=0x009027) symbol=10 <issue463_sum2_scalar>+0x45
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000448(file=0x00902b) symbol=10 <issue463_sum2_scalar>+0x4c
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00044c(file=0x00902f) symbol=10 <issue463_sum2_scalar>+0x4f
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000450(file=0x009033) symbol=10 <issue463_sum2_scalar>+0x78
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000454(file=0x009037) symbol=10 <issue463_sum2_scalar>+0x89
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000458(file=0x00903b) symbol=10 <issue463_sum2_scalar>+0xcf
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00045c(file=0x00903f) symbol=10 <issue463_sum2_scalar>+0xdd
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000460(file=0x009043) symbol=10 <issue463_sum2_scalar>+0xe4
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000464(file=0x009047) symbol=10 <issue463_sum2_scalar>+0xf1
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000468(file=0x00904b) symbol=10 <issue463_sum2_scalar>+0x108
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00046c(file=0x00904f) symbol=10 <issue463_sum2_scalar>+0x109
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000470(file=0x009053) symbol=10 <issue463_sum2_scalar>+0x146
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000474(file=0x009057) symbol=10 <issue463_sum2_scalar>+0x168
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000480(file=0x009063) symbol=10 <issue463_sum2_scalar>+0x43
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000484(file=0x009067) symbol=10 <issue463_sum2_scalar>+0x45
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000488(file=0x00906b) symbol=10 <issue463_sum2_scalar>+0x4c
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00048c(file=0x00906f) symbol=10 <issue463_sum2_scalar>+0x4f
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000490(file=0x009073) symbol=10 <issue463_sum2_scalar>+0x7e
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000494(file=0x009077) symbol=10 <issue463_sum2_scalar>+0x89
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000498(file=0x00907b) symbol=10 <issue463_sum2_scalar>+0xe9
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00049c(file=0x00907f) symbol=10 <issue463_sum2_scalar>+0xf1
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0004a0(file=0x009083) symbol=10 <issue463_sum2_scalar>+0x108
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0004a4(file=0x009087) symbol=10 <issue463_sum2_scalar>+0x109
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0004b0(file=0x009093) symbol=10 <issue463_sum2_scalar>+0x7e
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0004b4(file=0x009097) symbol=10 <issue463_sum2_scalar>+0x81
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0004b8(file=0x00909b) symbol=10 <issue463_sum2_scalar>+0xe9
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0004bc(file=0x00909f) symbol=10 <issue463_sum2_scalar>+0xea
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0004c8(file=0x0090ab) symbol=10 <issue463_sum2_scalar>+0x81
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0004cc(file=0x0090af) symbol=10 <issue463_sum2_scalar>+0x89
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0004d0(file=0x0090b3) symbol=10 <issue463_sum2_scalar>+0xea
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0004d4(file=0x0090b7) symbol=10 <issue463_sum2_scalar>+0xf1
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0004e0(file=0x0090c3) symbol=10 <issue463_sum2_scalar>+0x78
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0004e4(file=0x0090c7) symbol=10 <issue463_sum2_scalar>+0x7e
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0004e8(file=0x0090cb) symbol=10 <issue463_sum2_scalar>+0xd6
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0004ec(file=0x0090cf) symbol=10 <issue463_sum2_scalar>+0xdd
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0004f0(file=0x0090d3) symbol=10 <issue463_sum2_scalar>+0xe4
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0004f4(file=0x0090d7) symbol=10 <issue463_sum2_scalar>+0xe9
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0004f8(file=0x0090db) symbol=10 <issue463_sum2_scalar>+0x146
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0004fc(file=0x0090df) symbol=10 <issue463_sum2_scalar>+0x153
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000508(file=0x0090eb) symbol=10 <issue463_sum2_scalar>+0xcf
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00050c(file=0x0090ef) symbol=10 <issue463_sum2_scalar>+0xd6
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000510(file=0x0090f3) symbol=10 <issue463_sum2_scalar>+0x154
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000514(file=0x0090f7) symbol=10 <issue463_sum2_scalar>+0x168
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000520(file=0x009103) symbol=10 <issue463_sum2_scalar>+0x6e
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000524(file=0x009107) symbol=10 <issue463_sum2_scalar>+0x78
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000528(file=0x00910b) symbol=10 <issue463_sum2_scalar>+0xc8
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00052c(file=0x00910f) symbol=10 <issue463_sum2_scalar>+0xcf
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000530(file=0x009113) symbol=10 <issue463_sum2_scalar>+0x120
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000534(file=0x009117) symbol=10 <issue463_sum2_scalar>+0x12d
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000540(file=0x009123) symbol=13 <issue463_sum2_simd4>+0x13
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000544(file=0x009127) symbol=13 <issue463_sum2_simd4>+0x299
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000548(file=0x00912b) symbol=13 <issue463_sum2_simd4>+0x29f
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00054c(file=0x00912f) symbol=13 <issue463_sum2_simd4>+0x2e7
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000558(file=0x00913b) symbol=13 <issue463_sum2_simd4>+0x13
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00055c(file=0x00913f) symbol=13 <issue463_sum2_simd4>+0x28d
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000560(file=0x009143) symbol=13 <issue463_sum2_simd4>+0x29f
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000564(file=0x009147) symbol=13 <issue463_sum2_simd4>+0x2e7
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000570(file=0x009153) symbol=13 <issue463_sum2_simd4>+0x14
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000574(file=0x009157) symbol=13 <issue463_sum2_simd4>+0x28d
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000578(file=0x00915b) symbol=13 <issue463_sum2_simd4>+0x29f
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00057c(file=0x00915f) symbol=13 <issue463_sum2_simd4>+0x2e7
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000588(file=0x00916b) symbol=13 <issue463_sum2_simd4>+0x50
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00058c(file=0x00916f) symbol=13 <issue463_sum2_simd4>+0x5c
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000590(file=0x009173) symbol=13 <issue463_sum2_simd4>+0xdd
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000594(file=0x009177) symbol=13 <issue463_sum2_simd4>+0xec
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0005a0(file=0x009183) symbol=13 <issue463_sum2_simd4>+0x5c
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0005a4(file=0x009187) symbol=13 <issue463_sum2_simd4>+0x63
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0005a8(file=0x00918b) symbol=13 <issue463_sum2_simd4>+0x101
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0005ac(file=0x00918f) symbol=13 <issue463_sum2_simd4>+0x114
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0005b8(file=0x00919b) symbol=13 <issue463_sum2_simd4>+0x63
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0005bc(file=0x00919f) symbol=13 <issue463_sum2_simd4>+0x6f
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0005c0(file=0x0091a3) symbol=13 <issue463_sum2_simd4>+0xf1
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0005c4(file=0x0091a7) symbol=13 <issue463_sum2_simd4>+0x100
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0005d0(file=0x0091b3) symbol=13 <issue463_sum2_simd4>+0x6f
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0005d4(file=0x0091b7) symbol=13 <issue463_sum2_simd4>+0x78
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0005d8(file=0x0091bb) symbol=13 <issue463_sum2_simd4>+0xc4
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0005dc(file=0x0091bf) symbol=13 <issue463_sum2_simd4>+0xd8
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0005e8(file=0x0091cb) symbol=13 <issue463_sum2_simd4>+0x78
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0005ec(file=0x0091cf) symbol=13 <issue463_sum2_simd4>+0x84
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0005f0(file=0x0091d3) symbol=13 <issue463_sum2_simd4>+0x95
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0005f4(file=0x0091d7) symbol=13 <issue463_sum2_simd4>+0x9d
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0005f8(file=0x0091db) symbol=13 <issue463_sum2_simd4>+0x119
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0005fc(file=0x0091df) symbol=13 <issue463_sum2_simd4>+0x128
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000608(file=0x0091eb) symbol=13 <issue463_sum2_simd4>+0x78
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00060c(file=0x0091ef) symbol=13 <issue463_sum2_simd4>+0x84
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000610(file=0x0091f3) symbol=13 <issue463_sum2_simd4>+0x119
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000614(file=0x0091f7) symbol=13 <issue463_sum2_simd4>+0x128
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000620(file=0x009203) symbol=13 <issue463_sum2_simd4>+0x13e
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000624(file=0x009207) symbol=13 <issue463_sum2_simd4>+0x1ed
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000628(file=0x00920b) symbol=13 <issue463_sum2_simd4>+0x22a
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00062c(file=0x00920f) symbol=13 <issue463_sum2_simd4>+0x247
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000630(file=0x009213) symbol=13 <issue463_sum2_simd4>+0x2ad
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000634(file=0x009217) symbol=13 <issue463_sum2_simd4>+0x2c0
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000640(file=0x009223) symbol=13 <issue463_sum2_simd4>+0x1ed
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000644(file=0x009227) symbol=13 <issue463_sum2_simd4>+0x1f7
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000648(file=0x00922b) symbol=13 <issue463_sum2_simd4>+0x247
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00064c(file=0x00922f) symbol=13 <issue463_sum2_simd4>+0x24e
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000650(file=0x009233) symbol=13 <issue463_sum2_simd4>+0x2c5
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000654(file=0x009237) symbol=13 <issue463_sum2_simd4>+0x2d2
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000660(file=0x009243) symbol=13 <issue463_sum2_simd4>+0x1f7
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000664(file=0x009247) symbol=13 <issue463_sum2_simd4>+0x208
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000668(file=0x00924b) symbol=13 <issue463_sum2_simd4>+0x24e
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00066c(file=0x00924f) symbol=13 <issue463_sum2_simd4>+0x25c
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000670(file=0x009253) symbol=13 <issue463_sum2_simd4>+0x263
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000674(file=0x009257) symbol=13 <issue463_sum2_simd4>+0x270
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000678(file=0x00925b) symbol=13 <issue463_sum2_simd4>+0x287
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00067c(file=0x00925f) symbol=13 <issue463_sum2_simd4>+0x288
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000680(file=0x009263) symbol=13 <issue463_sum2_simd4>+0x29f
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000684(file=0x009267) symbol=13 <issue463_sum2_simd4>+0x2ac
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000688(file=0x00926b) symbol=13 <issue463_sum2_simd4>+0x2d3
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00068c(file=0x00926f) symbol=13 <issue463_sum2_simd4>+0x2e7
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000698(file=0x00927b) symbol=13 <issue463_sum2_simd4>+0x1f7
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00069c(file=0x00927f) symbol=13 <issue463_sum2_simd4>+0x1fd
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0006a0(file=0x009283) symbol=13 <issue463_sum2_simd4>+0x255
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0006a4(file=0x009287) symbol=13 <issue463_sum2_simd4>+0x25c
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0006a8(file=0x00928b) symbol=13 <issue463_sum2_simd4>+0x263
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0006ac(file=0x00928f) symbol=13 <issue463_sum2_simd4>+0x268
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0006b0(file=0x009293) symbol=13 <issue463_sum2_simd4>+0x29f
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0006b4(file=0x009297) symbol=13 <issue463_sum2_simd4>+0x2ac
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0006c0(file=0x0092a3) symbol=13 <issue463_sum2_simd4>+0x1fd
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0006c4(file=0x0092a7) symbol=13 <issue463_sum2_simd4>+0x208
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0006c8(file=0x0092ab) symbol=13 <issue463_sum2_simd4>+0x268
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0006cc(file=0x0092af) symbol=13 <issue463_sum2_simd4>+0x270
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0006d0(file=0x0092b3) symbol=13 <issue463_sum2_simd4>+0x287
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0006d4(file=0x0092b7) symbol=13 <issue463_sum2_simd4>+0x288
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0006e0(file=0x0092c3) symbol=13 <issue463_sum2_simd4>+0x1fd
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0006e4(file=0x0092c7) symbol=13 <issue463_sum2_simd4>+0x200
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0006e8(file=0x0092cb) symbol=13 <issue463_sum2_simd4>+0x268
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0006ec(file=0x0092cf) symbol=13 <issue463_sum2_simd4>+0x269
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0006f8(file=0x0092db) symbol=13 <issue463_sum2_simd4>+0x200
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0006fc(file=0x0092df) symbol=13 <issue463_sum2_simd4>+0x208
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000700(file=0x0092e3) symbol=13 <issue463_sum2_simd4>+0x269
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000704(file=0x0092e7) symbol=13 <issue463_sum2_simd4>+0x270
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000710(file=0x0092f3) symbol=13 <issue463_sum2_simd4>+0x24e
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000714(file=0x0092f7) symbol=13 <issue463_sum2_simd4>+0x255
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000718(file=0x0092fb) symbol=13 <issue463_sum2_simd4>+0x2d3
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00071c(file=0x0092ff) symbol=13 <issue463_sum2_simd4>+0x2e7
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000728(file=0x00930b) symbol=17 <issue463_sum_into_scalar>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00072c(file=0x00930f) symbol=17 <issue463_sum_into_scalar>+0xf2
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000730(file=0x009313) symbol=17 <issue463_sum_into_scalar>+0xf8
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000734(file=0x009317) symbol=17 <issue463_sum_into_scalar>+0x11a
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000740(file=0x009323) symbol=17 <issue463_sum_into_scalar>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000744(file=0x009327) symbol=17 <issue463_sum_into_scalar>+0xe8
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000748(file=0x00932b) symbol=17 <issue463_sum_into_scalar>+0xf8
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00074c(file=0x00932f) symbol=17 <issue463_sum_into_scalar>+0x11a
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000758(file=0x00933b) symbol=17 <issue463_sum_into_scalar>+0x1a
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00075c(file=0x00933f) symbol=17 <issue463_sum_into_scalar>+0x41
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000760(file=0x009343) symbol=17 <issue463_sum_into_scalar>+0x9f
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000764(file=0x009347) symbol=17 <issue463_sum_into_scalar>+0xb5
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000768(file=0x00934b) symbol=17 <issue463_sum_into_scalar>+0x106
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00076c(file=0x00934f) symbol=17 <issue463_sum_into_scalar>+0x11a
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000778(file=0x00935b) symbol=17 <issue463_sum_into_scalar>+0x41
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00077c(file=0x00935f) symbol=17 <issue463_sum_into_scalar>+0x43
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000780(file=0x009363) symbol=17 <issue463_sum_into_scalar>+0x4a
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000784(file=0x009367) symbol=17 <issue463_sum_into_scalar>+0x4d
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000788(file=0x00936b) symbol=17 <issue463_sum_into_scalar>+0x7c
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00078c(file=0x00936f) symbol=17 <issue463_sum_into_scalar>+0x84
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000790(file=0x009373) symbol=17 <issue463_sum_into_scalar>+0xc9
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000794(file=0x009377) symbol=17 <issue463_sum_into_scalar>+0xd0
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000798(file=0x00937b) symbol=17 <issue463_sum_into_scalar>+0xe0
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00079c(file=0x00937f) symbol=17 <issue463_sum_into_scalar>+0xe1
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0007a8(file=0x00938b) symbol=17 <issue463_sum_into_scalar>+0x7c
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0007ac(file=0x00938f) symbol=17 <issue463_sum_into_scalar>+0x84
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0007b0(file=0x009393) symbol=17 <issue463_sum_into_scalar>+0xc9
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0007b4(file=0x009397) symbol=17 <issue463_sum_into_scalar>+0xd0
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0007c0(file=0x0093a3) symbol=17 <issue463_sum_into_scalar>+0x73
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0007c4(file=0x0093a7) symbol=17 <issue463_sum_into_scalar>+0x79
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0007c8(file=0x0093ab) symbol=17 <issue463_sum_into_scalar>+0xb5
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0007cc(file=0x0093af) symbol=17 <issue463_sum_into_scalar>+0xbc
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0007d0(file=0x0093b3) symbol=17 <issue463_sum_into_scalar>+0xc3
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0007d4(file=0x0093b7) symbol=17 <issue463_sum_into_scalar>+0xc8
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0007d8(file=0x0093bb) symbol=17 <issue463_sum_into_scalar>+0xf8
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0007dc(file=0x0093bf) symbol=17 <issue463_sum_into_scalar>+0x105
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0007e8(file=0x0093cb) symbol=17 <issue463_sum_into_scalar>+0x79
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0007ec(file=0x0093cf) symbol=17 <issue463_sum_into_scalar>+0x7c
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0007f0(file=0x0093d3) symbol=17 <issue463_sum_into_scalar>+0xc8
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0007f4(file=0x0093d7) symbol=17 <issue463_sum_into_scalar>+0xc9
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000800(file=0x0093e3) symbol=19 <issue463_sum_into_simd4>+0x13
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000804(file=0x0093e7) symbol=19 <issue463_sum_into_simd4>+0x1f0
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000808(file=0x0093eb) symbol=19 <issue463_sum_into_simd4>+0x1f2
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00080c(file=0x0093ef) symbol=19 <issue463_sum_into_simd4>+0x218
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000818(file=0x0093fb) symbol=19 <issue463_sum_into_simd4>+0x13
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00081c(file=0x0093ff) symbol=19 <issue463_sum_into_simd4>+0x1e4
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000820(file=0x009403) symbol=19 <issue463_sum_into_simd4>+0x1f2
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000824(file=0x009407) symbol=19 <issue463_sum_into_simd4>+0x218
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000830(file=0x009413) symbol=19 <issue463_sum_into_simd4>+0x14
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000834(file=0x009417) symbol=19 <issue463_sum_into_simd4>+0x1e4
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000838(file=0x00941b) symbol=19 <issue463_sum_into_simd4>+0x1f2
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00083c(file=0x00941f) symbol=19 <issue463_sum_into_simd4>+0x218
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000848(file=0x00942b) symbol=19 <issue463_sum_into_simd4>+0x25
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00084c(file=0x00942f) symbol=19 <issue463_sum_into_simd4>+0x3d
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000850(file=0x009433) symbol=19 <issue463_sum_into_simd4>+0xcb
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000854(file=0x009437) symbol=19 <issue463_sum_into_simd4>+0xde
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000860(file=0x009443) symbol=19 <issue463_sum_into_simd4>+0x3d
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000864(file=0x009447) symbol=19 <issue463_sum_into_simd4>+0x40
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000868(file=0x00944b) symbol=19 <issue463_sum_into_simd4>+0xa7
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00086c(file=0x00944f) symbol=19 <issue463_sum_into_simd4>+0xb6
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000878(file=0x00945b) symbol=19 <issue463_sum_into_simd4>+0x40
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00087c(file=0x00945f) symbol=19 <issue463_sum_into_simd4>+0x49
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000880(file=0x009463) symbol=19 <issue463_sum_into_simd4>+0x8e
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000884(file=0x009467) symbol=19 <issue463_sum_into_simd4>+0xa2
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000890(file=0x009473) symbol=19 <issue463_sum_into_simd4>+0x49
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000894(file=0x009477) symbol=19 <issue463_sum_into_simd4>+0x55
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000898(file=0x00947b) symbol=19 <issue463_sum_into_simd4>+0x5d
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00089c(file=0x00947f) symbol=19 <issue463_sum_into_simd4>+0x63
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0008a0(file=0x009483) symbol=19 <issue463_sum_into_simd4>+0xbb
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0008a4(file=0x009487) symbol=19 <issue463_sum_into_simd4>+0xca
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0008b0(file=0x009493) symbol=19 <issue463_sum_into_simd4>+0x49
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0008b4(file=0x009497) symbol=19 <issue463_sum_into_simd4>+0x55
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0008b8(file=0x00949b) symbol=19 <issue463_sum_into_simd4>+0xbb
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0008bc(file=0x00949f) symbol=19 <issue463_sum_into_simd4>+0xca
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0008c8(file=0x0094ab) symbol=19 <issue463_sum_into_simd4>+0x66
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0008cc(file=0x0094af) symbol=19 <issue463_sum_into_simd4>+0x6e
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0008d0(file=0x0094b3) symbol=19 <issue463_sum_into_simd4>+0x83
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0008d4(file=0x0094b7) symbol=19 <issue463_sum_into_simd4>+0x84
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0008e0(file=0x0094c3) symbol=19 <issue463_sum_into_simd4>+0xf0
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0008e4(file=0x0094c7) symbol=19 <issue463_sum_into_simd4>+0x167
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0008e8(file=0x0094cb) symbol=19 <issue463_sum_into_simd4>+0x19d
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0008ec(file=0x0094cf) symbol=19 <issue463_sum_into_simd4>+0x1b3
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0008f0(file=0x0094d3) symbol=19 <issue463_sum_into_simd4>+0x1f2
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0008f4(file=0x0094d7) symbol=19 <issue463_sum_into_simd4>+0x205
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000900(file=0x0094e3) symbol=19 <issue463_sum_into_simd4>+0x171
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000904(file=0x0094e7) symbol=19 <issue463_sum_into_simd4>+0x177
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000908(file=0x0094eb) symbol=19 <issue463_sum_into_simd4>+0x1b3
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00090c(file=0x0094ef) symbol=19 <issue463_sum_into_simd4>+0x1ba
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000910(file=0x0094f3) symbol=19 <issue463_sum_into_simd4>+0x1c1
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000914(file=0x0094f7) symbol=19 <issue463_sum_into_simd4>+0x1c6
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000918(file=0x0094fb) symbol=19 <issue463_sum_into_simd4>+0x20a
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00091c(file=0x0094ff) symbol=19 <issue463_sum_into_simd4>+0x218
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000928(file=0x00950b) symbol=19 <issue463_sum_into_simd4>+0x177
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00092c(file=0x00950f) symbol=19 <issue463_sum_into_simd4>+0x17a
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000930(file=0x009513) symbol=19 <issue463_sum_into_simd4>+0x1c6
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000934(file=0x009517) symbol=19 <issue463_sum_into_simd4>+0x1c7
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000940(file=0x009523) symbol=19 <issue463_sum_into_simd4>+0x17a
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000944(file=0x009527) symbol=19 <issue463_sum_into_simd4>+0x182
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000948(file=0x00952b) symbol=19 <issue463_sum_into_simd4>+0x1c7
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00094c(file=0x00952f) symbol=19 <issue463_sum_into_simd4>+0x1ce
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000950(file=0x009533) symbol=19 <issue463_sum_into_simd4>+0x1de
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000954(file=0x009537) symbol=19 <issue463_sum_into_simd4>+0x1df
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000960(file=0x009543) symbol=19 <issue463_sum_into_simd4>+0x17a
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000964(file=0x009547) symbol=19 <issue463_sum_into_simd4>+0x182
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000968(file=0x00954b) symbol=19 <issue463_sum_into_simd4>+0x1c7
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00096c(file=0x00954f) symbol=19 <issue463_sum_into_simd4>+0x1ce
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000978(file=0x00955b) symbol=0 <_RNvCs8lo3PVzYdl8_14issue463_probe7observe>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00097c(file=0x00955f) symbol=0 <_RNvCs8lo3PVzYdl8_14issue463_probe7observe>+0x8a
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000980(file=0x009563) symbol=1 <issue463_mix2x2_scalar>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000984(file=0x009567) symbol=1 <issue463_mix2x2_scalar>+0x187
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000988(file=0x00956b) symbol=6 <issue463_mix2x2_simd4>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00098c(file=0x00956f) symbol=6 <issue463_mix2x2_simd4>+0x2a8
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000990(file=0x009573) symbol=10 <issue463_sum2_scalar>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000994(file=0x009577) symbol=10 <issue463_sum2_scalar>+0x168
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000998(file=0x00957b) symbol=13 <issue463_sum2_simd4>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00099c(file=0x00957f) symbol=13 <issue463_sum2_simd4>+0x2e7
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0009a0(file=0x009583) symbol=17 <issue463_sum_into_scalar>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0009a4(file=0x009587) symbol=17 <issue463_sum_into_scalar>+0x11a
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0009a8(file=0x00958b) symbol=19 <issue463_sum_into_simd4>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0009ac(file=0x00958f) symbol=19 <issue463_sum_into_simd4>+0x218
+Custom:
+ - name: "reloc..debug_line"
+  - relocations for section: 11 (.debug_line) [7]
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00026c(file=0x0098f0) symbol=0 <_RNvCs8lo3PVzYdl8_14issue463_probe7observe>+0x3
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000330(file=0x0099b4) symbol=1 <issue463_mix2x2_scalar>+0xb
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x00041c(file=0x009aa0) symbol=6 <issue463_mix2x2_simd4>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0005be(file=0x009c42) symbol=10 <issue463_sum2_scalar>+0x3
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000696(file=0x009d1a) symbol=13 <issue463_sum2_simd4>
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x000815(file=0x009e99) symbol=17 <issue463_sum_into_scalar>+0x3
+   - R_WASM_FUNCTION_OFFSET_I32 offset=0x0008c8(file=0x009f4c) symbol=19 <issue463_sum_into_simd4>
+Custom:
+ - name: "producers"
+Custom:
+ - name: "target_features"
+  - [+] bulk-memory
+  - [+] bulk-memory-opt
+  - [+] call-indirect-overlong
+  - [+] multivalue
+  - [+] mutable-globals
+  - [+] nontrapping-fptoint
+  - [+] reference-types
+  - [+] sign-ext
+  - [+] simd128

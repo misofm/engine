@@ -229,3 +229,28 @@ Three finite original gate groups require completion:
 No expansion to a generic report framework, timing, AArch64, more kernels or additional corpus. Full product arithmetic/bounds/negative-zero store=false/identity/allocation and candidate qualification remain retained obligations, not failures manufactured for work deliberately held until baseline acceptance. Their absence at this initial gate does not authorize dropping them. Root controls isolated targets and fixed G5 guest-directory serialization. Existing source may be preserved as a useful failed checkpoint; no optimization or speedup claim is accepted yet.
 
 Root adopts this consolidated FAIL and assigns Sol2 to repair the original baseline proof first. Preserve the four accepted-shape corpus additions and old pins; production kernels remain unchanged until root/Astra accept an actual target-correct baseline. Any later warranted kernel implementation remains within the original scope and this attempt; no timing or broader optimizer work is authorized.
+
+## Sol attempt 2 corrected pre-edit baseline, pending Astra acceptance
+
+At `60a3bb858d80ee186f0f38bef3beb11988a38f2a`, Sol removed the probe from Cargo example
+discovery and retained it under `artifacts/issue463-lane-bounds-baseline/`. Its opaque ABI supplies
+independent lengths for out/a/b, acc/x and left/right, runtime matrix coefficients, and observable
+checksums covering all written outputs. The named instantiations are native Simd8 plus `f32`, and
+Wasm Simd4 plus `f32`. All three production kernels remain byte-unchanged.
+
+Rust 1.97.1/LLVM 22.1.6 compiled non-LTO native x86-64-v3, scalar-Wasm and simd128 objects; all
+corrected compiler and decoder statuses are zero, with the earlier missing-dependency-path failures
+preserved candidly. Every required named body is nonempty. Direct body inspection finds repeated
+operand-span comparisons and reachable slice-failure edges inside the vector loops of sum2,
+sum_into and mix2x2 on each applicable target, with separate loop backedges and scalar tails. This
+is a supported mechanism finding that warrants the frozen checked-prefix rewrite if Astra accepts
+the corrected baseline; it is not a timing or speed claim. Exact commands, flags, hashes, offsets
+and interpretations are retained in the artifact README and full decoded outputs.
+
+Fresh scalar `--print-pins` output exited zero and is byte-identical to the checked-in pin file.
+The named-map comparison proves 51 old entries unchanged, zero changed and exactly four new
+Mix2x2 signal entries. Fresh ordinary G5 exited zero: native, scalar-Wasm and simd128 each executed
+139 cases/349 comparisons with empty mismatch lists, and both detector-residency legs passed.
+The corpus shape and current pins were not changed during this repair. This is the first coherent
+Sol2 baseline tranche; no kernel rewrite begins before root checkpoints it and Astra explicitly
+accepts the pre-edit baseline.
