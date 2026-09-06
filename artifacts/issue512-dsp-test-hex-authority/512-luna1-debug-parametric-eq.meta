@@ -1,0 +1,5 @@
+argv: cargo test --locked -p parametric-eq --test determinism shared_hex_adapter_matches_literal_bytes -- --exact
+cwd: /home/bl/misofm/engine-dsp-test-hex
+env: PATH=/home/bl/.cargo/bin:$PATH
+head: 793a6b186c83482e67e512a36fe5e79d458f27a9
+source: crates/parametric-eq/tests/determinism.rs blob=e14f21d39f96883320a0971e6f0002934d5ada3e

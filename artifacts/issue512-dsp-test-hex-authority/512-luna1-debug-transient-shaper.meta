@@ -1,0 +1,5 @@
+argv: cargo test --locked -p transient-shaper --test cross_target shared_hex_adapter_matches_literal_bytes -- --exact
+cwd: /home/bl/misofm/engine-dsp-test-hex
+env: PATH=/home/bl/.cargo/bin:$PATH
+head: 793a6b186c83482e67e512a36fe5e79d458f27a9
+source: crates/transient-shaper/tests/cross_target.rs blob=bcbab462ccbd1e3f1a32fd28acf78291744f16e9

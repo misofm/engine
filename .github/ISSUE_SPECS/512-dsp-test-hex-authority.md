@@ -61,3 +61,7 @@ The authorized local proof remains four actual-adapter literal tests, each exact
 No blocking scope findings. Root retains exact-path checkpoints and synchronization, consolidated Astra attempt review and actual-PR/required-CI delivery gates. Sol2/3 follow only a consolidated FAIL. #511 remains independent. No builds/tests/timing, Git/GitHub commands or repository mutations performed; only this /tmp review was written.
 
 Root verified clean pushed8779bcb6 and matching GitHub512 body/title; fresh Luna attempt1 is activated at this checkpoint.
+
+## Luna attempt 1 source and evidence
+
+Source ab4627ae replaces the four private encoder bodies with delegation while preserving signatures and call sites. Eight exact debug/release literal tests each pass one test; four strict same-target Clippy and four static commands pass. Raw records and source identities are preserved in artifacts/issue512-dsp-test-hex-authority. Consolidated Astra review is pending.

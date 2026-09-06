@@ -1,0 +1,4 @@
+    Blocking waiting for file lock on build directory
+   Compiling transient-shaper v0.1.0 (/home/bl/misofm/engine-dsp-test-hex/crates/transient-shaper)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.59s
+     Running tests/cross_target.rs (target/debug/deps/cross_target-edbf72cf4ec5ef9d)
