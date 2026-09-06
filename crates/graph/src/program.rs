@@ -1723,6 +1723,13 @@ mod tests {
         ];
         assert_eq!(crate::runtime::units_of(&program, &membership), expected);
 
+        let effect_runtime_membership = membership
+            .iter()
+            .filter_map(|(node, (kind, lane))| match kind {
+                crate::runtime::Membership::Effect(_) => Some((*node, (*kind, *lane))),
+                crate::runtime::Membership::Builtin(_) => None,
+            })
+            .collect();
         let effect_membership = membership
             .iter()
             .filter_map(|(node, (kind, lane))| match kind {
@@ -1739,6 +1746,11 @@ mod tests {
             vec![6],
             vec![7],
         ];
+        let actual_effect_only = crate::runtime::units_of(&program, &effect_runtime_membership)
+            .into_iter()
+            .map(|(_, ops)| ops)
+            .collect::<Vec<_>>();
+        assert_eq!(actual_effect_only, expected_effect_only);
         assert_eq!(
             units_in_runtime_order(&program, &effect_membership),
             expected_effect_only
