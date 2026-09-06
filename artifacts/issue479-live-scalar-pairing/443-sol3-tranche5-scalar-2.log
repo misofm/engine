@@ -1,0 +1,35 @@
+   Compiling graph v0.1.0 (/home/bl/misofm/engine-443-plan/crates/graph)
+error[E0433]: cannot find type `GraphEdgeId` in this scope
+    --> crates/graph/src/runtime.rs:1947:21
+     |
+1947 |                     GraphEdgeId::RouteSource { .. } | GraphEdgeId::EffectSidechain { .. }
+     |                     ^^^^^^^^^^^ use of undeclared type `GraphEdgeId`
+     |
+help: an enum with a similar name exists
+     |
+1947 -                     GraphEdgeId::RouteSource { .. } | GraphEdgeId::EffectSidechain { .. }
+1947 +                     GraphNodeId::RouteSource { .. } | GraphEdgeId::EffectSidechain { .. }
+     |
+help: consider importing this enum
+     |
+  37 + use crate::GraphEdgeId;
+     |
+
+error[E0433]: cannot find type `GraphEdgeId` in this scope
+    --> crates/graph/src/runtime.rs:1947:55
+     |
+1947 |                     GraphEdgeId::RouteSource { .. } | GraphEdgeId::EffectSidechain { .. }
+     |                                                       ^^^^^^^^^^^ use of undeclared type `GraphEdgeId`
+     |
+help: an enum with a similar name exists
+     |
+1947 -                     GraphEdgeId::RouteSource { .. } | GraphEdgeId::EffectSidechain { .. }
+1947 +                     GraphEdgeId::RouteSource { .. } | GraphNodeId::EffectSidechain { .. }
+     |
+help: consider importing this enum
+     |
+  37 + use crate::GraphEdgeId;
+     |
+
+For more information about this error, try `rustc --explain E0433`.
+error: could not compile `graph` (lib) due to 2 previous errors

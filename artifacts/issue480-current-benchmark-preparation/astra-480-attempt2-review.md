@@ -1,0 +1,23 @@
+# Astra #480 Sol2 verdict — FAIL
+
+Exact head `fa9e9671f6d845a3213507f6096ddf463ec12704`, engine-480-proof. Read the full numbered contract, prior verdict, cumulative three-script delta and retained five command/status sets. All five statuses are 0; focused output reports zero real workload launches and environment vocabulary is accepted. No scripts, builds, preparation, benchmark or timing executed by this review; no repository/Git/GitHub mutation.
+
+## Accepted corrections
+
+The recognized SPLIT_DEBUGINFO variable now explicitly supplies Linux `off`; rpath=false and all frozen profile fields are sealed and checked at consumption. Unsupported host is explicitly rejected by the runner as well as preflight. The named inherited environment aliases are refused, the seven unused MISO exports are removed, and exact preflight negative diagnostics/status1 plus early build-entry markers replace the earlier broad failure assertions. Positive provenance checks cover the added fields. Accepted parent validators, inputs, reservation/lifecycle and output preservation remain unchanged. Do not reopen those groups.
+
+## ONE remaining original obligation: effective Cargo configuration
+
+The environment-name filter is not an effective Cargo configuration boundary. At preflight lines119–131, the build sets CARGO_PROFILE_RELEASE_INCREMENTAL=false but does not set the higher-priority build-level incremental choice. A user/ancestor Cargo config containing `[build] incremental=true` overrides every profile. No rejected environment name is needed. The resulting seal can therefore claim incremental=false for an incremental build.
+
+Likewise, config `build.rustc`, `build.rustc-wrapper`, and `build.rustc-workspace-wrapper` remain effective because the invocation only rejects environment aliases; it never selects the exact resolved rustc executable it hashes or disables configured wrappers. Hashing `$repository_root/.cargo/config.toml` does not cover Cargo's ancestor/CARGO_HOME configuration hierarchy. The same boundary includes inherited build.target and matching target rustflags: the host query is not an explicit build-target selection, and triple/cfg rustflags are combined by Cargo. Merely sealing a literal target/features value cannot establish their effective identity.
+
+These are concrete manifestations of the frozen sentence “If an otherwise inherited config can override one of these, the dedicated invocation must explicitly pin the frozen setting or reject it.” They are not a request to certify all Cargo settings. Official Cargo documentation confirms build.incremental overrides profiles, defines configured compiler/wrappers/target, and specifies target-triple plus cfg rustflags combination: [Cargo configuration](https://doc.rust-lang.org/cargo/reference/config.html#buildincremental), [compiler selection](https://doc.rust-lang.org/cargo/reference/config.html#buildrustc), [rustflags precedence](https://doc.rust-lang.org/cargo/reference/config.html#buildrustflags).
+
+## Finite final Sol3 completion
+
+Within the same three scripts, make the dedicated build independent of the above inherited build settings, or reject them before build. Prefer explicit invocation-local overrides over a new configuration parser/framework: force incremental disabled at its overriding level, select the actual resolved/sealed compiler, disable both configured wrappers, and freeze the actual host target and exact feature flags at a precedence that cannot append inherited target flags. Preserve the approved release profile and source identity; if an explicit target changes the artifact subdirectory, update only the matching owned binary lookup and fake argument assertion, not the workload/profile. Do not modify caller config, Cargo files, historical adapters or validators.
+
+Extend the existing fake build-entry assertions to verify the actual effective invocation overrides, with one bounded inherited-config fixture carrying these conflicting build choices. Require either its precise pre-build rejection (no entry) or its correct overriding invocation and truthful positive seal. Keep the existing environment refusal, host/refusal, lifecycle and twenty-record checks. The fake must check the mechanism used to defeat config precedence, not simply repeat the profile-only assertion that currently misses it. No real Cargo/build/preflight/runner/measurement is authorized; existing five focused fake/static commands suffice for this child.
+
+This is the one coherent remaining build-identity group for final Sol3. Parent473 qualification/actual-PR/CI remains pending and #431 capture stays unspent and unauthorized. Another failed attempt is a hard stop/rescope, not an informal fourth correction.

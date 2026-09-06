@@ -1,0 +1,63 @@
+0007d9 func[7] <issue463_sum_into_scalar>:
+ 0007da: 02 7f                      | local[2..3] type=i32
+ 0007dc: 02 40                      | block
+ 0007de: 02 40                      |   block
+ 0007e0: 02 40                      |     block
+ 0007e2: 20 01                      |       local.get 1
+ 0007e4: 45                         |       i32.eqz
+ 0007e5: 0d 00                      |       br_if 0
+ 0007e7: 41 00                      |       i32.const 0
+ 0007e9: 21 04                      |       local.set 4
+ 0007eb: 20 00                      |       local.get 0
+ 0007ed: 21 05                      |       local.set 5
+ 0007ef: 03 40                      |       loop
+ 0007f1: 20 04                      |         local.get 4
+ 0007f3: 20 03                      |         local.get 3
+ 0007f5: 4b                         |         i32.gt_u
+ 0007f6: 0d 03                      |         br_if 3
+ 0007f8: 20 03                      |         local.get 3
+ 0007fa: 20 04                      |         local.get 4
+ 0007fc: 46                         |         i32.eq
+ 0007fd: 0d 02                      |         br_if 2
+ 0007ff: 20 05                      |         local.get 5
+ 000801: 20 05                      |         local.get 5
+ 000803: 2a 02 00                   |         f32.load 2 0
+ 000806: 20 02                      |         local.get 2
+ 000808: 2a 02 00                   |         f32.load 2 0
+ 00080b: 92                         |         f32.add
+ 00080c: 38 02 00                   |         f32.store 2 0
+ 00080f: 20 05                      |         local.get 5
+ 000811: 41 04                      |         i32.const 4
+ 000813: 6a                         |         i32.add
+ 000814: 21 05                      |         local.set 5
+ 000816: 20 02                      |         local.get 2
+ 000818: 41 04                      |         i32.const 4
+ 00081a: 6a                         |         i32.add
+ 00081b: 21 02                      |         local.set 2
+ 00081d: 20 01                      |         local.get 1
+ 00081f: 20 04                      |         local.get 4
+ 000821: 41 01                      |         i32.const 1
+ 000823: 6a                         |         i32.add
+ 000824: 22 04                      |         local.tee 4
+ 000826: 47                         |         i32.ne
+ 000827: 0d 00                      |         br_if 0
+ 000829: 0b                         |       end
+ 00082a: 0b                         |     end
+ 00082b: 20 00                      |     local.get 0
+ 00082d: 20 01                      |     local.get 1
+ 00082f: 10 82 80 80 80 00          |     call 2 <_RNvCs8lo3PVzYdl8_14issue463_probe7observe>
+ 000835: 0f                         |     return
+ 000836: 0b                         |   end
+ 000837: 41 00                      |   i32.const 0
+ 000839: 41 00                      |   i32.const 0
+ 00083b: 41 9c 80 80 80 00          |   i32.const 28
+ 000841: 10 80 80 80 80 00          |   call 0 <env._RNvNtCsdkdt1aaAg1T_4core9panicking18panic_bounds_check>
+ 000847: 00                         |   unreachable
+ 000848: 0b                         | end
+ 000849: 20 04                      | local.get 4
+ 00084b: 20 03                      | local.get 3
+ 00084d: 20 03                      | local.get 3
+ 00084f: 41 d8 81 80 80 00          | i32.const 216
+ 000855: 10 81 80 80 80 00          | call 1 <env._RNvNtNtCsdkdt1aaAg1T_4core5slice5index16slice_index_fail>
+ 00085b: 00                         | unreachable
+ 00085c: 0b                         | end

@@ -1,0 +1,12 @@
+diff --git a/crates/graph/src/runtime.rs b/crates/graph/src/runtime.rs
+index dae6b0bb..3dbcc14d 100644
+--- a/crates/graph/src/runtime.rs
++++ b/crates/graph/src/runtime.rs
+@@ -1828,7 +1828,6 @@ pub(crate) fn units_of(
+                         )
+                     })
+                     .collect();
+-                members.sort_unstable();
+                 units.push((
+                     Some(*membership),
+                     members.into_iter().map(|(_, op)| op).collect(),

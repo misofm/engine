@@ -1,0 +1,5 @@
+Sun Sep  6 01:24:12 UTC 2026
+$ cargo fmt --check
+/bin/bash: line 1: cargo: command not found
+$ cargo test --locked -p bench floor::tests::rust_and_jq_floor_tables_have_exact_key_value_parity
+/bin/bash: line 1: cargo: command not found

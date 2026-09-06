@@ -1,0 +1,17 @@
+{
+  "qualified_source": "add3ca11cb88331fe9cf83f63ea4e62e3f86e545",
+  "browser_candidate": "89c25e7ccfe166853685c9490f74ba4a4117cccc",
+  "delivery_head_before_packaging": "719232c9d6622b95070bd19f97c9296a4710d209",
+  "equal_paths": [
+    "crates",
+    "hosts/host-core",
+    "hosts/host-web/src",
+    "hosts/capi",
+    "tools",
+    "Cargo.toml",
+    "Cargo.lock",
+    ".cargo",
+    "scripts"
+  ],
+  "delta": "artifact pin, generated browser matrix/results and decision evidence only"
+}

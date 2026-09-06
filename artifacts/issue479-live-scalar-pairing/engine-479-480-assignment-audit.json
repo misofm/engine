@@ -1,0 +1,14 @@
+[
+  {
+    "issue": 479,
+    "head": "1a039b8ef66ffcd28dd21fbb20d5af5b7eb9f85e",
+    "remote_body_matches": true,
+    "state": "OPEN"
+  },
+  {
+    "issue": 480,
+    "head": "16c9afa1e65d34b314484b0744175aeed78d3259",
+    "remote_body_matches": true,
+    "state": "OPEN"
+  }
+]

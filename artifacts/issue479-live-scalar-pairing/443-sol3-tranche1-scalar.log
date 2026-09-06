@@ -1,0 +1,134 @@
+   Compiling graph v0.1.0 (/home/bl/misofm/engine-443-plan/crates/graph)
+   Compiling builtins-compiler v0.1.0 (/home/bl/misofm/engine-443-plan/crates/builtins-compiler)
+error[E0599]: no method named `len` found for struct `Consumer<T>` in the current scope
+    --> crates/builtins-compiler/src/lib.rs:3570:47
+     |
+3570 |         let fader_before = self.fader.control.len();
+     |                                               ^^^ method not found in `Consumer<TrackFaderRecord>`
+
+error[E0599]: no method named `len` found for struct `Consumer<T>` in the current scope
+    --> crates/builtins-compiler/src/lib.rs:3584:53
+     |
+3584 |             let matrix_before = self.matrix.control.len();
+     |                                                     ^^^ method not found in `Consumer<TrackControlRecord>`
+
+error[E0599]: no method named `len` found for struct `Consumer<T>` in the current scope
+    --> crates/builtins-compiler/src/lib.rs:3590:70
+     |
+3590 |                     matrix_before.saturating_sub(self.matrix.control.len()) as u64,
+     |                                                                      ^^^ method not found in `Consumer<TrackControlRecord>`
+
+For more information about this error, try `rustc --explain E0599`.
+error: could not compile `builtins-compiler` (lib) due to 3 previous errors
+warning: build failed, waiting for other jobs to finish...
+error[E0599]: no method named `len` found for struct `engine::realtime::Consumer<T>` in the current scope
+    --> crates/builtins-compiler/src/lib.rs:3570:47
+     |
+3570 |         let fader_before = self.fader.control.len();
+     |                                               ^^^ method not found in `engine::realtime::Consumer<TrackFaderRecord>`
+
+error[E0599]: no method named `len` found for struct `engine::realtime::Consumer<T>` in the current scope
+    --> crates/builtins-compiler/src/lib.rs:3584:53
+     |
+3584 |             let matrix_before = self.matrix.control.len();
+     |                                                     ^^^ method not found in `engine::realtime::Consumer<TrackControlRecord>`
+
+error[E0599]: no method named `len` found for struct `engine::realtime::Consumer<T>` in the current scope
+    --> crates/builtins-compiler/src/lib.rs:3590:70
+     |
+3590 |                     matrix_before.saturating_sub(self.matrix.control.len()) as u64,
+     |                                                                      ^^^ method not found in `engine::realtime::Consumer<TrackControlRecord>`
+
+error[E0499]: cannot borrow `paired` as mutable more than once at a time
+    --> crates/builtins-compiler/src/lib.rs:5315:27
+     |
+5281 |         let mut render_and_compare = |sample: u64, fused: u64, fallback: u64| {
+     |                                      ---------------------------------------- first mutable borrow occurs here
+5282 |             test_only_reset_fader_matrix_witness();
+5283 |             let _ = render_bound(&mut paired, sample);
+     |                                       ------ first borrow occurs due to use of `paired` in closure
+...
+5315 |             for bound in [&mut paired, &mut separate] {
+     |                           ^^^^^^^^^^^ second mutable borrow occurs here
+...
+5331 |         let immediate = render_and_compare(HARNESS_QUANTUM as u64, 1, 0);
+     |                         ------------------ first borrow later used here
+
+error[E0499]: cannot borrow `separate` as mutable more than once at a time
+    --> crates/builtins-compiler/src/lib.rs:5315:40
+     |
+5281 |         let mut render_and_compare = |sample: u64, fused: u64, fallback: u64| {
+     |                                      ---------------------------------------- first mutable borrow occurs here
+...
+5285 |             let _ = render_bound(&mut separate, sample);
+     |                                       -------- first borrow occurs due to use of `separate` in closure
+...
+5315 |             for bound in [&mut paired, &mut separate] {
+     |                                        ^^^^^^^^^^^^^ second mutable borrow occurs here
+...
+5331 |         let immediate = render_and_compare(HARNESS_QUANTUM as u64, 1, 0);
+     |                         ------------------ first borrow later used here
+
+error[E0499]: cannot borrow `paired` as mutable more than once at a time
+    --> crates/builtins-compiler/src/lib.rs:5328:23
+     |
+5281 |         let mut render_and_compare = |sample: u64, fused: u64, fallback: u64| {
+     |                                      ---------------------------------------- first mutable borrow occurs here
+5282 |             test_only_reset_fader_matrix_witness();
+5283 |             let _ = render_bound(&mut paired, sample);
+     |                                       ------ first borrow occurs due to use of `paired` in closure
+...
+5328 |         for bound in [&mut paired, &mut separate] {
+     |                       ^^^^^^^^^^^ second mutable borrow occurs here
+...
+5331 |         let immediate = render_and_compare(HARNESS_QUANTUM as u64, 1, 0);
+     |                         ------------------ first borrow later used here
+
+error[E0499]: cannot borrow `separate` as mutable more than once at a time
+    --> crates/builtins-compiler/src/lib.rs:5328:36
+     |
+5281 |         let mut render_and_compare = |sample: u64, fused: u64, fallback: u64| {
+     |                                      ---------------------------------------- first mutable borrow occurs here
+...
+5285 |             let _ = render_bound(&mut separate, sample);
+     |                                       -------- first borrow occurs due to use of `separate` in closure
+...
+5328 |         for bound in [&mut paired, &mut separate] {
+     |                                    ^^^^^^^^^^^^^ second mutable borrow occurs here
+...
+5331 |         let immediate = render_and_compare(HARNESS_QUANTUM as u64, 1, 0);
+     |                         ------------------ first borrow later used here
+
+error[E0499]: cannot borrow `paired` as mutable more than once at a time
+    --> crates/builtins-compiler/src/lib.rs:5339:23
+     |
+5281 |         let mut render_and_compare = |sample: u64, fused: u64, fallback: u64| {
+     |                                      ---------------------------------------- first mutable borrow occurs here
+5282 |             test_only_reset_fader_matrix_witness();
+5283 |             let _ = render_bound(&mut paired, sample);
+     |                                       ------ first borrow occurs due to use of `paired` in closure
+...
+5339 |         for bound in [&mut paired, &mut separate] {
+     |                       ^^^^^^^^^^^ second mutable borrow occurs here
+...
+5342 |         let ramping = render_and_compare(2 * HARNESS_QUANTUM as u64, 0, 1);
+     |                       ------------------ first borrow later used here
+
+error[E0499]: cannot borrow `separate` as mutable more than once at a time
+    --> crates/builtins-compiler/src/lib.rs:5339:36
+     |
+5281 |         let mut render_and_compare = |sample: u64, fused: u64, fallback: u64| {
+     |                                      ---------------------------------------- first mutable borrow occurs here
+...
+5285 |             let _ = render_bound(&mut separate, sample);
+     |                                       -------- first borrow occurs due to use of `separate` in closure
+...
+5339 |         for bound in [&mut paired, &mut separate] {
+     |                                    ^^^^^^^^^^^^^ second mutable borrow occurs here
+...
+5342 |         let ramping = render_and_compare(2 * HARNESS_QUANTUM as u64, 0, 1);
+     |                       ------------------ first borrow later used here
+
+Some errors have detailed explanations: E0499, E0599.
+For more information about an error, try `rustc --explain E0499`.
+error: could not compile `builtins-compiler` (lib test) due to 9 previous errors

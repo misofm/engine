@@ -1,0 +1,219 @@
+# Seal the current benchmark's complete release build identity
+
+Parent #473 stopped after final Sol3 FAIL at8e932ebf3992fbbbf2d12a2b99d4c790f5d9b4dd. This separately numbered tooling child completes ONE remaining outcome: the prepared executable cannot be certified under a different effective release profile or unsupported host while claiming the approved x86_64 Linux build. It is not a fourth473 repair. Preserve accepted input regression, exact validator copies, reservation/namespace ownership, process lifecycle, partial-output persistence, fake-only suite and CI wiring. Parent473 retains complete delivery/actual-PR/CI obligations; #431's ONE future real invocation is unspent and unauthorized.
+
+## Exact scope and paths
+
+Only scripts/preflight-builtins-current-benchmark.sh, scripts/run-builtins-current-benchmark.sh, scripts/test-builtins-current-benchmark.sh and numbered child/parent evidence. No bench Rust, Cargo/configuration, validators, fixtures/pins, historical035/072 wrappers, general helper, workflow or benchmark workload changes. Use the existing fixed431 namespace, build command/profile and fake harness; no generic profile framework or extra runner.
+
+## Freeze the choice before implementation
+
+Refuse inherited Cargo profile overrides as a bounded CLASS of environment names, rather than adding another incomplete list of individual examples: reject set CARGO_PROFILE_* overrides in preflight and runner before any build/workload respectively. Keep existing Rust flags/build-target/compiler-wrapper refusals. This is deliberately a dedicated single-profile capture adapter, not a configurable builder. Enumerate environment NAMEs safely without eval or printing values. Do not alter caller environment or Cargo manifests.
+
+Require rustc -vV host exactly x86_64-unknown-linux-gnu BEFORE cargo build or executable publication. Any other or malformed/missing host refuses; no cross-compile, AArch64 invocation or target fallback. Preserve the existing version/tool executable identity checks and fixed target features +avx2,+fma.
+
+Enforce and record all approved release settings for the isolated build, not merely three metadata labels: opt-level3, fat LTO, codegen-units1, panic abort, debug1, release debug-assertions false and overflow-checks false, plus the current ordinary release incremental/strip/split-debuginfo settings that affect this executable. Derive/freeze their exact supported-target defaults from the existing Cargo/toolchain contract at the implementation base before editing; do not silently invent a tuned profile. If an otherwise inherited config can override one of these, the dedicated invocation must explicitly pin the frozen setting or reject it. Existing CARGO_TARGET_DIR ownership and pinned target-feature override remain. Store these effective settings in the existing preflight record, and require exact matching settings/target when consuming it. Do not change the historical per-record schema: additional provenance belongs in the prepared record; record metadata remains the existing approved fields with truthful values.
+
+The input tree/current commit, binary, source/lock, runner/preflight/validator/suite and tool hashes remain sealed as before. Complete build attribution without reopening accepted lifecycle implementation. No claims about CPU model/governor absent actual observations; existing candid missing metadata behavior is preserved.
+
+## Finite fake-only proof
+
+Extend the SAME scratch fake cargo/rustc harness, preserving its command-resolution guard and all existing lifecycle/validator cases:
+
+- Positive supported host: fake cargo asserts every frozen effective setting and exact build args/CWD/owned target; resulting preflight provenance records those values, runner verifies them and synthetic promotion still succeeds with20 original validator-accepted records.
+- Representative previously missed profile overrides: panic=unwind, debug-assertions=true and overflow-checks=true are rejected before fake cargo build; use a build-call marker independent of workload launch count. A set remaining CARGO_PROFILE_* name also proves the family rule is reached, without an unbounded matrix.
+- Post-preflight inherited profile override is rejected before workload launch with the existing reserved refusal semantics. Preserve sealed binary/output bytes; no real authority is consumed by scratch cases.
+- Fake rustc reports unsupported aarch64 Linux host and malformed/missing host in bounded cases: exact preflight refusal BEFORE build, no prepared executable/READY claim. The x86 positive remains live. Do not build any unsupported target.
+- Tampering a newly bound profile field in an otherwise-valid seal is refused by the runner before workload. Keep existing refusal diagnostic/status assertions specific enough that missing fake tools or syntax errors cannot satisfy the case.
+
+No new production mutants, fixtures, schema corpus or timing. All fake commands remain provably selected; no actual preflight/runner invocation or build occurs as part of this issue's lifecycle tests.
+
+## Commands and delivery
+
+Run bash -n on the three allowed scripts; bash scripts/test-builtins-current-benchmark.sh (scratch-only); existing real env vocabulary gate and source/prose diff checks. Retain the existing exact validator allowed-delta comparison to prove frozen copies stayed unchanged. Existing accepted bench unit/Clippy evidence remains applicable because no Rust changes are allowed. Record commands/statuses and exact checkpoint; source PASS then root determines proportional parent delivery checks, actual PR review and required CI. Do not rerun broad tests/builds merely to manufacture evidence for this shell-only correction.
+
+Root numbers/synchronizes child and reciprocal473 hardstop record before assignment. Astra scopes/reviews; fresh Luna1 then Sol2/3 on failure, one coherent pass/verdict each and hardstop after3. Root owns all checkpoints/upstream state. Close this child only after accepted synchronized delivery, and close473 only after its full readiness contract is delivered. #431 remains open and separately frozen/authorized before any real preparation/capture; this brief authorizes no timing or workload launch.
+
+## Numbered integration baseline
+
+GitHub #480 matches this title and spec. Implementation base is cb649ff7, preserving reviewed preparation source 8e932ebf and the final parent hard stop. Pending Astra numbered scope approval; no implementation assigned yet.
+
+## Numbered scope approval and attempt 1
+
+# Astra #480 numbered scope review — PASS with explicit wording interpretation
+
+Reviewed73ecabb7370af653c01e0ebc93e6649f063c64d5 in engine-480-proof. Full /tmp/astra-473-build-identity-brief.md is preserved verbatim in480-current-benchmark-build-identity.md. Reciprocal473 retains final hardstop/source8e932ebf, full parent qualification and unspent431 capture. Root reports matching remote number/title/body; no independent remote query performed here.
+
+Approve the bounded three-script build-identity child: supported x86_64-unknown-linux-gnu host before build, complete frozen release settings/provenance, inherited CARGO_PROFILE_* rejection, and the exact focused fake-only positive/refusal cases. No Rust/Cargo/config/validator/fixture/workflow/historical runner changes, new framework or additional measurement authority. Final release default values must be resolved explicitly against the existing supported configuration before implementation, not selected as a new tuned profile.
+
+Clarify the sentence “no actual preflight/runner invocation or build occurs” as follows: the REAL production script logic IS executed from scratch copies by the hermetic suite, after verifying fake cargo/rustc/tool resolution and the synthetic emitter. Those executions are required proof. No invocation against the actual431 repository namespace, real Cargo benchmark build, real bench executable, actual benchmark preparation/capture or timing is authorized. Root may append this interpretation verbatim before assignment; it changes no acceptance gate.
+
+Root may assign fresh Luna1 after checkpoint/state audit and recording this wording clarification. Parent473 remains open until full accepted delivery;431 remains separately authorized/unspent. One coherent pass/verdict, Sol2/3 after failure and hardstop after3 applies. No tests/builds/source/Git/GitHub mutations performed in this review.
+
+Root adopts PASS and its explicit scratch-execution clarification, and assigns fresh Luna attempt 1. Pause at the first coherent green source tranche for root exact-path checkpoint before further implementation.
+
+## Luna attempt 1 implementation evidence
+
+Frozen before editing from the existing repository contract at `Cargo.toml` `[profile.release]` and
+`.cargo/config.toml`: `opt-level=3` is Cargo's ordinary release default; the repository pins
+`lto=fat`, `codegen-units=1`, `panic=abort`, and `debug=1`; Cargo's supported Linux release defaults
+for the remaining fields are `debug-assertions=false`, `overflow-checks=false`, `incremental=false`,
+`strip=none`, and `split-debuginfo=unpacked`. These values are explicitly supplied to the isolated
+build and stored in the existing preflight seal. The adapter rejects every inherited `CARGO_PROFILE_*`
+name and requires `rustc -vV` host `x86_64-unknown-linux-gnu` before Cargo build.
+
+The three approved scripts now carry the complete profile/host seal and focused fake-only proof. The
+scratch suite executes copies of the real preflight and runner only with verified fake cargo/rustc and
+a synthetic emitter; no real repository preparation, Cargo build, benchmark executable, workload, or
+timing was invoked. Existing record schema and validators remain unchanged.
+
+Raw evidence:
+
+- `/tmp/480-luna1-shell-syntax.{command,log,status}`: status 0 (`bash -n` on all three scripts).
+- `/tmp/480-luna1-focused.{command,log,status}`: status 0,
+  `current builtins benchmark validators/lifecycle: PASS (real workload launches: 0)`.
+
+Luna attempt 1 source verdict: PASS for the bounded #480 scope, pending Sol review and root's
+exact-path checkpoint. No Git/GitHub mutations were performed by Luna.
+
+## Root checkpoint audit — acceptance remains unproven
+
+The implementer's PASS is a self-assessment, not an adversarial verdict; Astra review is required by the user workflow (the preceding reference to Sol review is incorrect). Root observed terminal0 for retained syntax/synthetic lifecycle evidence and captured `/tmp/480-luna1-root-{env,validator-delta,diff}.{command,log,status}`. Validator exact-delta and diffcheck pass. Environment vocabulary FAILS status1 on seven newly introduced MISO_ENGINE_BENCH_* variables; no registry expansion is authorized. The approved profile defaults and all finite refusal proofs remain for Astra review. Preserve this useful shell-buildable failed-gate checkpoint candidly; no readiness, real preparation, or timing is claimed.
+
+## Astra attempt 1 review and Sol attempt 2 assignment
+
+# Astra #480 Luna1 verdict — FAIL
+
+Exact17aa686888670e2ca789bf7a8ff69297004654f0, engine-480-proof. Full numbered480 and inherited473 contract reviewed. Reported syntax/focused0, root validator-delta/diff0 and environment-vocabulary1 are candid. No tests/builds/preflight/runner/timing or repository/Git/GitHub writes performed. Local installed toolchains have no Cargo HTML documentation at the expected path; consulted official current Cargo/rustc documentation below instead of inventing default values.
+
+Four finite correction groups for Sol2:
+
+1. **Wrong split-debug default AND ineffective variable spelling.** The code pins unpacked and records it as Linux default. Official rustc documents off for ELF/Linux; Cargo's special unpacked default is macOS. Also the recognized Cargo variable is CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO, not the code's SPLIT_DEBUG_INFO. The fake cargo asserts the same misspelling and therefore blesses a value Cargo ignores. Freeze off using the correct variable, update existing seal/consumer/fake assertions and candid decision record, preserving the ordinary approved profile. [Cargo profiles](https://doc.rust-lang.org/cargo/reference/profiles.html#split-debuginfo), [rustc split-debuginfo](https://doc.rust-lang.org/rustc/codegen-options/index.html#split-debuginfo), [Cargo environment variables](https://doc.rust-lang.org/cargo/reference/environment-variables.html).
+
+2. **Complete actual environment/target enforcement.** CARGO_PROFILE_* rejection is useful, but CARGO_INCREMENTAL (and build.incremental/CARGO_BUILD_INCREMENTAL) can override the now asserted incremental=false; likewise CARGO_BUILD_RUSTC and CARGO_BUILD_RUSTC_WRAPPER/WORKSPACE_WRAPPER are accepted aliases bypassing the existing RUSTC/WRAPPER refusals. Refuse these explicit aliases or enforce the intended tool/incremental choice and record it. Preserve ordinary rpath=false as part of the frozen release settings rather than leave another profile field to ambient config. Runner also lacks an explicit x86_64-unknown-linux-gnu check at consumption: it compares current host against seal but not against the supported constant. Require the same supported target before launch. These are the named complete-profile/actual-tool identity obligations, not a request for a general configuration framework. Official Cargo environment docs above identify the aliases and incremental precedence.
+
+3. **Do not introduce unconsumed benchmark environment API.** Seven new MISO_ENGINE_BENCH_* variables trigger the real vocabulary failure. The unchanged bench Metadata::collect does not consume these new panic/debug/assertion/overflow/incremental/strip/split variables; the frozen spec places additional provenance in preflight, without changing record schema. Remove those seven unnecessary workload environment assignments. Keep the values sealed/verified in prepared provenance; do not expand vocabulary, Rust metadata or record validators merely to preserve unused exports.
+
+4. **Make the finite negative tests discriminate their intended refusal.** New profile-family and unsupported/malformed-host cases discard diagnostics and accept any nonzero. Fake cargo writes build-calls only AFTER validating arguments/environment, so reaching cargo and failing its validation can still satisfy “no build” marker. Record build entry before fake validation, and assert the exact expected preflight operation/name/host diagnostic and status. Require the positive supported build to check the full recorded profile fields, not only the old three. Retain the existing runner profile-override/seal-tamper cases and add the bounded host-at-consumption and explicit alias/incremental refusal checks needed by group2. A missing host should be distinguishable from a malformed host/tool failure. Preserve fake resolution, all existing lifecycle cases,20 records and zero real workload launches; no additional production mutants or broad matrix.
+
+Keep accepted473 input/validator/lifecycle implementations and their evidence unchanged. Root may assign Sol2 after recording this single consolidated FAIL; no further Luna correction. Same three-script scope plus evidence is sufficient, with no Rust/Cargo/configuration/fixture/CI mutation, build or timing authorization. Parent473 and431 remain open;431 capture is unspent.
+
+Root adopts FAIL and assigns Sol attempt 2 for this exact finite correction, preserving all original obligations. No further Luna correction.
+
+## Sol attempt 2 correction evidence
+
+The Luna decision record's `split-debuginfo=unpacked` statement is superseded: the frozen
+x86_64 Linux value is `off`, supplied through Cargo's recognized
+`CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO` variable. The seal and runner also bind ordinary
+`rpath=false`. Preflight and runner refuse `CARGO_INCREMENTAL`, `CARGO_BUILD_INCREMENTAL`, and
+Cargo's build-scoped rustc/wrapper aliases in addition to the accepted profile-family and tool
+override checks. Runner requires the supported `x86_64-unknown-linux-gnu` host independently at
+seal consumption.
+
+The seven profile fields that the unchanged benchmark metadata schema does not consume are no
+longer exported to the workload. They remain enforced and verified in prepared provenance. The
+scratch fake cargo marks entry before argument/environment validation and checks every frozen
+profile field. Negative cases assert status 1, the exact rejected environment name or host
+diagnostic, absence of build entry, and absence of a prepared executable. Missing, malformed, and
+unsupported hosts are distinct. Runner cases cover every added alias and host drift before the
+synthetic workload, while the positive case still validates the full seal and promotes all 20
+records. No real preparation, build, runner, workload, benchmark, audio, or timing command ran;
+#431 remains unspent and unauthorized.
+
+Raw evidence:
+
+- `/tmp/480-sol2-shell-syntax.{command,log,status}`: status 0.
+- `/tmp/480-sol2-focused.{command,log,status}`: status 0 and
+  `current builtins benchmark validators/lifecycle: PASS (real workload launches: 0)`.
+- `/tmp/480-sol2-env.{command,log,status}`: status 0.
+- `/tmp/480-sol2-validator-delta.{command,log,status}`: status 0; accepted validator copies are
+  unchanged.
+- `/tmp/480-sol2-source-prose.{command,log,status}`: status 0 for exact scoped paths, unchanged
+  Rust/Cargo/configuration/validators/fixtures/workflow/history, and explicit #431
+  `UNSPENT`/`UNAUTHORIZED` state.
+
+## Astra attempt 2 review and final Sol attempt 3
+
+# Astra #480 Sol2 verdict — FAIL
+
+Exact head `fa9e9671f6d845a3213507f6096ddf463ec12704`, engine-480-proof. Read the full numbered contract, prior verdict, cumulative three-script delta and retained five command/status sets. All five statuses are 0; focused output reports zero real workload launches and environment vocabulary is accepted. No scripts, builds, preparation, benchmark or timing executed by this review; no repository/Git/GitHub mutation.
+
+## Accepted corrections
+
+The recognized SPLIT_DEBUGINFO variable now explicitly supplies Linux `off`; rpath=false and all frozen profile fields are sealed and checked at consumption. Unsupported host is explicitly rejected by the runner as well as preflight. The named inherited environment aliases are refused, the seven unused MISO exports are removed, and exact preflight negative diagnostics/status1 plus early build-entry markers replace the earlier broad failure assertions. Positive provenance checks cover the added fields. Accepted parent validators, inputs, reservation/lifecycle and output preservation remain unchanged. Do not reopen those groups.
+
+## ONE remaining original obligation: effective Cargo configuration
+
+The environment-name filter is not an effective Cargo configuration boundary. At preflight lines119–131, the build sets CARGO_PROFILE_RELEASE_INCREMENTAL=false but does not set the higher-priority build-level incremental choice. A user/ancestor Cargo config containing `[build] incremental=true` overrides every profile. No rejected environment name is needed. The resulting seal can therefore claim incremental=false for an incremental build.
+
+Likewise, config `build.rustc`, `build.rustc-wrapper`, and `build.rustc-workspace-wrapper` remain effective because the invocation only rejects environment aliases; it never selects the exact resolved rustc executable it hashes or disables configured wrappers. Hashing `$repository_root/.cargo/config.toml` does not cover Cargo's ancestor/CARGO_HOME configuration hierarchy. The same boundary includes inherited build.target and matching target rustflags: the host query is not an explicit build-target selection, and triple/cfg rustflags are combined by Cargo. Merely sealing a literal target/features value cannot establish their effective identity.
+
+These are concrete manifestations of the frozen sentence “If an otherwise inherited config can override one of these, the dedicated invocation must explicitly pin the frozen setting or reject it.” They are not a request to certify all Cargo settings. Official Cargo documentation confirms build.incremental overrides profiles, defines configured compiler/wrappers/target, and specifies target-triple plus cfg rustflags combination: [Cargo configuration](https://doc.rust-lang.org/cargo/reference/config.html#buildincremental), [compiler selection](https://doc.rust-lang.org/cargo/reference/config.html#buildrustc), [rustflags precedence](https://doc.rust-lang.org/cargo/reference/config.html#buildrustflags).
+
+## Finite final Sol3 completion
+
+Within the same three scripts, make the dedicated build independent of the above inherited build settings, or reject them before build. Prefer explicit invocation-local overrides over a new configuration parser/framework: force incremental disabled at its overriding level, select the actual resolved/sealed compiler, disable both configured wrappers, and freeze the actual host target and exact feature flags at a precedence that cannot append inherited target flags. Preserve the approved release profile and source identity; if an explicit target changes the artifact subdirectory, update only the matching owned binary lookup and fake argument assertion, not the workload/profile. Do not modify caller config, Cargo files, historical adapters or validators.
+
+Extend the existing fake build-entry assertions to verify the actual effective invocation overrides, with one bounded inherited-config fixture carrying these conflicting build choices. Require either its precise pre-build rejection (no entry) or its correct overriding invocation and truthful positive seal. Keep the existing environment refusal, host/refusal, lifecycle and twenty-record checks. The fake must check the mechanism used to defeat config precedence, not simply repeat the profile-only assertion that currently misses it. No real Cargo/build/preflight/runner/measurement is authorized; existing five focused fake/static commands suffice for this child.
+
+This is the one coherent remaining build-identity group for final Sol3. Parent473 qualification/actual-PR/CI remains pending and #431 capture stays unspent and unauthorized. Another failed attempt is a hard stop/rescope, not an informal fourth correction.
+
+Root adopts FAIL and assigns the final Sol attempt 3 for the single effective-configuration group. Preserve all accepted corrections; a further final FAIL hardstops/rescopes without fourth repair.
+
+## Final Sol attempt 3 effective-configuration evidence
+
+The isolated Cargo invocation now fixes every inherited configuration seam named by the final
+review at Cargo's effective precedence boundary. It supplies `CARGO_INCREMENTAL=0`, selects the
+resolved and hashed rustc through `RUSTC`, explicitly clears both rustc wrapper variables, supplies
+the exact target features through `CARGO_ENCODED_RUSTFLAGS`, and passes
+`--target x86_64-unknown-linux-gnu`. The owned binary lookup follows Cargo's explicit-target output
+directory. The seal records the explicit target, incremental, compiler, wrapper, and rustflags
+mechanisms, and the runner requires those fields before launch.
+
+The existing fake cargo now rejects any build lacking those exact controls and the explicit target.
+A bounded inherited `.cargo/config.toml` fixture supplies conflicting build incremental, compiler,
+both wrappers, target, build rustflags, target-triple rustflags, and cfg rustflags. The production
+preflight copy still reaches the verified fake exactly once, overrides every conflict, publishes the
+owned target-specific executable, and records truthful supported-target provenance. All previously
+accepted refusal, lifecycle, validator, 20-record promotion, and zero-launch cases remain green.
+No real Cargo, preflight, runner, workload, benchmark, audio, or timing command ran; #431 remains
+unspent and unauthorized.
+
+Raw evidence:
+
+- `/tmp/480-sol3-shell-syntax.{command,log,status}`: status 0.
+- `/tmp/480-sol3-focused.{command,log,status}`: status 0 and
+  `current builtins benchmark validators/lifecycle: PASS (real workload launches: 0)`.
+- `/tmp/480-sol3-env.{command,log,status}`: status 0.
+- `/tmp/480-sol3-validator-delta.{command,log,status}`: status 0; accepted validator copies remain
+  unchanged.
+- `/tmp/480-sol3-source-prose.{command,log,status}`: status 0 for the exact four scoped paths,
+  unchanged Rust/Cargo/configuration/validators/fixtures/workflow/history, and explicit #431
+  `UNSPENT`/`UNAUTHORIZED` state.
+
+## Accepted completion source and pending delivery
+
+Astra final #480 Sol3 PASS at 6b9f4d19509412fac3dea884744ebb35b37e6639 completes the build-identity successor. All parent input/validator/lifecycle requirements remain accepted. `artifacts/issue480-current-benchmark-preparation/` preserves the raw failed/green history, exact source equivalence and final review. Five final tooling gates pass, with zero real workload launches; unchanged Rust retains the parent bench31/Clippy evidence. Actual PR review and required CI still precede closure. #431 remains unspent and unauthorized.
+
+## PR481 qualification integration amendment
+
+# PR481 qualification integration ruling — APPROVED
+
+At PR head6a828682, the original473 workflow invokes the scratch lifecycle suite directly at qualification.yml:326. The CI log records CARGO_INCREMENTAL=0; the retained local reproduction exits1 with the intended incompatible-build-environment diagnostic. Separately, CI's formatting diff at builtins.rs:2014 is exactly the multiline wrapping of one assert_eq. The current working Rust diff matches that formatting-only correction.
+
+Approve the narrow delivery amendment before checkpoint:
+
+- Replace ONLY the original473 suite invocation with `env -u CARGO_INCREMENTAL bash scripts/test-builtins-current-benchmark.sh` in the existing workflow block. This gives the fake-only suite its intended baseline environment; its directed CARGO_INCREMENTAL refusal cases still explicitly supply the variable. Do not unset it globally, weaken the real preflight/runner refusal, bypass any case, or change another CI step.
+- Retain the exact rustfmt wrapping of the one parent benchmark regression assertion. Verify token/whitespace-normalized equivalence and no other Rust delta. This changes neither the benchmark input guard nor the workload.
+
+These are newly observed qualification integration corrections in original473-owned paths, not a fourth480 source attempt or new feature. Record the initial failed CI job and raw diagnostic plus the failed local reproduction honestly. Refresh applicability/provenance records to distinguish the formatting change from prior exact-byte source identity; do not continue claiming literal unchanged tools/bench bytes.
+
+Proportional validation: syntax/static workflow-diff inspection, fmt, the full existing fake suite through the new invocation WITH inherited CARGO_INCREMENTAL=0, its original negative override cases and twenty-record lifecycle proof, existing validator-delta and packaged environment checks. All fake checks must still report zero real workload launches. No full workspace, real benchmark preparation/build/runner/timing is justified by these mechanical changes alone; retained parent benchmark test/Clippy results remain applicable after verified formatting equivalence.
+
+The previous PR head is not merge-approved after failed CI. Root must checkpoint/package the corrected source and retained evidence, obtain a new exact-head actual-PR Astra review and required CI SUCCESS before merge. No edits or tests performed by this ruling.
+
+Root verified the sole Rust formatting replacement reproduces the prior exact bytes when inverted. The corrected scratch invocation passes with inherited CI CARGO_INCREMENTAL=0, including all original negative cases; fmt passes. Artifact provenance explicitly records the formatting exception. Production capture scripts and validators remain unchanged. Initial CI/local failures are preserved in the delivery package.
+
+## Remotely synchronized delivery
+
+PR481 merged as59f35c627ed4bd8bcaf2e7a0944f014f521cbd94 after Astra exact-head PASS at0f4dea65 and required qualification34002732620 SUCCESS. Current input/validator/preparation/lifecycle tooling is delivered. #431 remains separately unspent and unauthorized; this is not a measured performance result. GitHub issue480 is CLOSED.

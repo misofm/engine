@@ -1,0 +1,112 @@
+Diff in /home/bl/misofm/engine-443-plan/crates/builtins-compiler/src/lib.rs:6066:
+             wrong_second.1.as_ref().type_id(),
+             core::any::TypeId::of::<AdvertisedWrongOwner>()
+         );
+-        assert_eq!(calls.load(Ordering::Relaxed), 0, "factory never invokes owners");
++        assert_eq!(
++            calls.load(Ordering::Relaxed),
++            0,
++            "factory never invokes owners"
++        );
+ 
+         for (fader_policy, matrix_policy) in [
+             (
+Diff in /home/bl/misofm/engine-443-plan/crates/builtins-compiler/src/lib.rs:6186:
+                 first_sample: 2,
+             })
+             .unwrap();
+-        assert_eq!(interrupted_left.map(f32::to_bits), reference_left.map(f32::to_bits));
+-        assert_eq!(interrupted_right.map(f32::to_bits), reference_right.map(f32::to_bits));
+-        assert_ne!(interrupted_left, [0.5, 0.25], "queued matrix command applied on retry");
++        assert_eq!(
++            interrupted_left.map(f32::to_bits),
++            reference_left.map(f32::to_bits)
++        );
++        assert_eq!(
++            interrupted_right.map(f32::to_bits),
++            reference_right.map(f32::to_bits)
++        );
++        assert_ne!(
++            interrupted_left,
++            [0.5, 0.25],
++            "queued matrix command applied on retry"
++        );
+     }
+ 
+     /// #459 Case A: a three-sample queued ramp crossing two-sample render calls remains on the
+Diff in /home/bl/misofm/engine-443-plan/crates/builtins-compiler/src/lib.rs:6651:
+             "the composite allocation contains exactly the two retained typed boxes"
+         );
+ 
+-        let serialized = prepare_session_builtins_between_render_calls(
+-            &compiled,
+-            &[],
+-            &controls,
+-            caps(),
+-        )
+-        .expect("serialized owners")
+-        .graph_scalar_owner_resource(Backend::Scalar, &levels, &classes)
+-        .expect("checked scalar estimate");
++        let serialized =
++            prepare_session_builtins_between_render_calls(&compiled, &[], &controls, caps())
++                .expect("serialized owners")
++                .graph_scalar_owner_resource(Backend::Scalar, &levels, &classes)
++                .expect("checked scalar estimate");
+         assert_eq!(serialized.total_bytes, 3 * (fader + matrix + outer));
+         assert_eq!(
+             serialized.largest_allocation_bytes,
+Diff in /home/bl/misofm/engine-443-plan/crates/builtins-compiler/src/lib.rs:6666:
+             fader.max(matrix).max(outer)
+         );
+ 
+-        let concurrent = prepare_session_builtins_with_console(
+-            &compiled,
+-            &[],
+-            &controls,
+-            caps(),
+-        )
+-        .expect("concurrent owners")
+-        .graph_scalar_owner_resource(Backend::Scalar, &levels, &classes)
+-        .expect("checked scalar estimate");
++        let concurrent = prepare_session_builtins_with_console(&compiled, &[], &controls, caps())
++            .expect("concurrent owners")
++            .graph_scalar_owner_resource(Backend::Scalar, &levels, &classes)
++            .expect("checked scalar estimate");
+         assert_eq!(concurrent.total_bytes, 3 * (fader + matrix));
+         assert_eq!(concurrent.largest_allocation_bytes, fader.max(matrix));
+ 
+Diff in /home/bl/misofm/engine-443-plan/crates/builtins-compiler/src/lib.rs:6682:
+             .expect("no-console owners")
+             .graph_scalar_owner_resource(Backend::Scalar, &levels, &classes)
+             .expect("checked scalar estimate");
+-        assert_eq!(no_console, graph::GraphScalarOwnerResourceEstimate::default());
++        assert_eq!(
++            no_console,
++            graph::GraphScalarOwnerResourceEstimate::default()
++        );
+ 
+-        let bank_selected = prepare_session_builtins_between_render_calls(
+-            &compiled,
+-            &[],
+-            &controls,
+-            caps(),
+-        )
+-        .expect("bank candidates")
+-        .graph_scalar_owner_resource(Backend::Simd8, &levels, &classes)
+-        .expect("checked vector estimate");
++        let bank_selected =
++            prepare_session_builtins_between_render_calls(&compiled, &[], &controls, caps())
++                .expect("bank candidates")
++                .graph_scalar_owner_resource(Backend::Simd8, &levels, &classes)
++                .expect("checked vector estimate");
+         assert_eq!(
+             bank_selected,
+             graph::GraphScalarOwnerResourceEstimate::default(),
+Diff in /home/bl/misofm/engine-443-plan/crates/graph/src/lib.rs:1353:
+     fn scalar_pair_factory(&self) -> Option<ScalarPairFactory> {
+         None
+     }
+-
+ }
+ /// Immutable post-node observation input. Observers cannot alter graph audio.
+ pub struct GraphObservationBlock<'a> {

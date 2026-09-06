@@ -1,0 +1,10 @@
+{
+  "cwd": "/home/bl/misofm/engine-lane2-plan",
+  "argv": [
+    "wasm-objdump",
+    "-d",
+    "/tmp/463-root-baseline/wasm-scalar.o"
+  ],
+  "environment_overrides": {},
+  "source_commit": "9c2741ab7fda641c2305b63061769da0a2e16271"
+}

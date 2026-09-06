@@ -1,0 +1,69 @@
+   Compiling math v0.1.0 (/home/bl/misofm/engine-443-plan/crates/math)
+   Compiling session v0.1.0 (/home/bl/misofm/engine-443-plan/crates/session)
+   Compiling effect-contract v0.1.0 (/home/bl/misofm/engine-443-plan/crates/effect-contract)
+   Compiling effect-runtime v0.1.0 (/home/bl/misofm/engine-443-plan/crates/effect-runtime)
+   Compiling rack v0.1.0 (/home/bl/misofm/engine-443-plan/crates/rack)
+   Compiling delay v0.1.0 (/home/bl/misofm/engine-443-plan/crates/delay)
+   Compiling multiband-compressor v0.1.0 (/home/bl/misofm/engine-443-plan/crates/multiband-compressor)
+   Compiling parametric-eq v0.1.0 (/home/bl/misofm/engine-443-plan/crates/parametric-eq)
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-443-plan/crates/compressor)
+   Compiling transient-shaper v0.1.0 (/home/bl/misofm/engine-443-plan/crates/transient-shaper)
+   Compiling true-peak-limiter v0.1.0 (/home/bl/misofm/engine-443-plan/crates/true-peak-limiter)
+   Compiling builtins v0.1.0 (/home/bl/misofm/engine-443-plan/crates/builtins)
+   Compiling gate-expander v0.1.0 (/home/bl/misofm/engine-443-plan/crates/gate-expander)
+   Compiling soft-clip v0.1.0 (/home/bl/misofm/engine-443-plan/crates/soft-clip)
+   Compiling conformance v0.1.0 (/home/bl/misofm/engine-443-plan/crates/conformance)
+   Compiling rack-compiler v0.1.0 (/home/bl/misofm/engine-443-plan/crates/rack-compiler)
+   Compiling graph v0.1.0 (/home/bl/misofm/engine-443-plan/crates/graph)
+   Compiling effect-package v0.1.0 (/home/bl/misofm/engine-443-plan/crates/effect-package)
+   Compiling effect-compiler v0.1.0 (/home/bl/misofm/engine-443-plan/crates/effect-compiler)
+   Compiling builtins-compiler v0.1.0 (/home/bl/misofm/engine-443-plan/crates/builtins-compiler)
+   Compiling graph-compiler v0.1.0 (/home/bl/misofm/engine-443-plan/crates/graph-compiler)
+error[E0277]: `GraphBuiltinsCompileFailure` doesn't implement `Debug`
+    --> crates/graph-compiler/src/lib.rs:2103:56
+     |
+2103 |         let plain = prepare(integration_caps(), false).expect("plain scalar graph");
+     |                                                        ^^^^^^ unsatisfied trait bound
+     |
+help: the trait `Debug` is not implemented for `GraphBuiltinsCompileFailure`
+    --> crates/graph-compiler/src/lib.rs:119:1
+     |
+ 119 | pub struct GraphBuiltinsCompileFailure {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     = note: add `#[derive(Debug)]` to `GraphBuiltinsCompileFailure` or manually `impl Debug for GraphBuiltinsCompileFailure`
+note: required by a bound in `Result::<T, E>::expect`
+    --> /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/result.rs:1179:4
+
+error[E0277]: `GraphBuiltinsCompileFailure` doesn't implement `Debug`
+    --> crates/graph-compiler/src/lib.rs:2104:54
+     |
+2104 |         let live = prepare(integration_caps(), true).expect("live scalar graph");
+     |                                                      ^^^^^^ unsatisfied trait bound
+     |
+help: the trait `Debug` is not implemented for `GraphBuiltinsCompileFailure`
+    --> crates/graph-compiler/src/lib.rs:119:1
+     |
+ 119 | pub struct GraphBuiltinsCompileFailure {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     = note: add `#[derive(Debug)]` to `GraphBuiltinsCompileFailure` or manually `impl Debug for GraphBuiltinsCompileFailure`
+note: required by a bound in `Result::<T, E>::expect`
+    --> /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/result.rs:1179:4
+
+error[E0277]: `GraphBuiltinsCompileFailure` doesn't implement `Debug`
+    --> crates/graph-compiler/src/lib.rs:2124:51
+     |
+2124 |         let exact_artifact = prepare(exact, true).expect("exact scalar caps");
+     |                                                   ^^^^^^ unsatisfied trait bound
+     |
+help: the trait `Debug` is not implemented for `GraphBuiltinsCompileFailure`
+    --> crates/graph-compiler/src/lib.rs:119:1
+     |
+ 119 | pub struct GraphBuiltinsCompileFailure {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     = note: add `#[derive(Debug)]` to `GraphBuiltinsCompileFailure` or manually `impl Debug for GraphBuiltinsCompileFailure`
+note: required by a bound in `Result::<T, E>::expect`
+    --> /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/result.rs:1179:4
+
+For more information about this error, try `rustc --explain E0277`.
+error: could not compile `graph-compiler` (lib test) due to 3 previous errors
+warning: build failed, waiting for other jobs to finish...

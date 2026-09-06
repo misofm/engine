@@ -1,0 +1,36 @@
+   Compiling math v0.1.0 (/home/bl/misofm/engine-443-plan/crates/math)
+   Compiling session v0.1.0 (/home/bl/misofm/engine-443-plan/crates/session)
+   Compiling effect-contract v0.1.0 (/home/bl/misofm/engine-443-plan/crates/effect-contract)
+   Compiling effect-runtime v0.1.0 (/home/bl/misofm/engine-443-plan/crates/effect-runtime)
+   Compiling rack v0.1.0 (/home/bl/misofm/engine-443-plan/crates/rack)
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-443-plan/crates/compressor)
+   Compiling gate-expander v0.1.0 (/home/bl/misofm/engine-443-plan/crates/gate-expander)
+   Compiling delay v0.1.0 (/home/bl/misofm/engine-443-plan/crates/delay)
+   Compiling multiband-compressor v0.1.0 (/home/bl/misofm/engine-443-plan/crates/multiband-compressor)
+   Compiling builtins v0.1.0 (/home/bl/misofm/engine-443-plan/crates/builtins)
+   Compiling transient-shaper v0.1.0 (/home/bl/misofm/engine-443-plan/crates/transient-shaper)
+   Compiling true-peak-limiter v0.1.0 (/home/bl/misofm/engine-443-plan/crates/true-peak-limiter)
+   Compiling parametric-eq v0.1.0 (/home/bl/misofm/engine-443-plan/crates/parametric-eq)
+   Compiling soft-clip v0.1.0 (/home/bl/misofm/engine-443-plan/crates/soft-clip)
+   Compiling conformance v0.1.0 (/home/bl/misofm/engine-443-plan/crates/conformance)
+   Compiling graph v0.1.0 (/home/bl/misofm/engine-443-plan/crates/graph)
+   Compiling rack-compiler v0.1.0 (/home/bl/misofm/engine-443-plan/crates/rack-compiler)
+   Compiling effect-package v0.1.0 (/home/bl/misofm/engine-443-plan/crates/effect-package)
+   Compiling builtins-compiler v0.1.0 (/home/bl/misofm/engine-443-plan/crates/builtins-compiler)
+   Compiling effect-compiler v0.1.0 (/home/bl/misofm/engine-443-plan/crates/effect-compiler)
+error[E0599]: no method named `transpose` found for enum `Option<Option<u64>>` in the current scope
+    --> crates/builtins-compiler/src/lib.rs:1957:14
+     |
+1955 |           let outer_total = (self.control_delivery == BuiltinControlDelivery::BetweenRenderCalls)
+     |  ___________________________-
+1956 | |             .then(|| outer.checked_mul(count))
+1957 | |             .transpose()?;
+     | |             -^^^^^^^^^ method not found in `Option<Option<u64>>`
+     | |_____________|
+     |
+     |
+     = note: the method was found for `Option<Result<T, E>>`
+
+For more information about this error, try `rustc --explain E0599`.
+error: could not compile `builtins-compiler` (lib) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...

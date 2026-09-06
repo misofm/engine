@@ -52,8 +52,8 @@ use lane::kernels::{mix2x2_block, ordered_accumulate_block, pdc_delay_block, sum
 use rack::{BankChain, BankMembers, BankPlaneViews, FoldCohort};
 
 use crate::{
-    GraphBindingBlock, GraphNodeObserverBinding, GraphObservationBlock, GraphPreparedEffect,
-    GraphRuntimeProcessor,
+    GraphBindingBlock, GraphEdgeId, GraphNodeObserverBinding, GraphObservationBlock,
+    GraphPreparedEffect, GraphRuntimeProcessor,
 };
 
 /// Lane type the block kernels are instantiated at to vectorise **over frames**.
@@ -1775,6 +1775,21 @@ fn taps_by_op(program: &ExecutionProgram, spec: &GraphSpec) -> BTreeMap<u32, Vec
     by_op
 }
 
+/// The buffer-identity half of serialized scalar fader/matrix admission.
+///
+/// The composite receives one in-place block at the fader slot. It can preserve the later matrix
+/// op only when that op's reduction was already a self-copy: one undelayed input, the same input
+/// and output buffer as the fader, and the lowering's own `in_place` witness.
+fn scalar_pair_is_in_place(program: &ExecutionProgram, fader: usize, matrix: usize) -> bool {
+    let fader = &program.ops[fader];
+    let matrix = &program.ops[matrix];
+    let inputs = program.inputs_of(matrix);
+    matches!(inputs, [input] if input.delay.is_none()
+        && input.buffer == fader.output
+        && matrix.output == fader.output
+        && matrix.in_place)
+}
+
 /// Groups the program's ops into units: a bank's members become one unit at the first member's
 /// position, which the level-major schedule proves is after every member's producers (#98 F1).
 ///
@@ -1884,6 +1899,91 @@ pub(crate) fn build_sequential(
     .into_iter()
     .filter(|(run, _, _)| !folded_runs.contains(run))
     .collect();
+
+    // Serialized scalar fader/matrix pairing is decided while both original owners and the
+    // lowered graph are still available.  The schedule is intentionally left untouched: the
+    // matrix binding becomes an identity at its original slot, while the composite runs from the
+    // fader slot and the existing reduction/observer boundaries remain in place.
+    let (readers, first_producer) = op_dataflow(program);
+    for pair in run_units.windows(2) {
+        let (first_membership, first_ops) = &pair[0];
+        let (second_membership, second_ops) = &pair[1];
+        if !first_membership.is_empty()
+            || !second_membership.is_empty()
+            || first_ops.len() != 1
+            || second_ops.len() != 1
+        {
+            continue;
+        }
+        let first = first_ops[0];
+        let second = second_ops[0];
+        if retired.contains(&first)
+            || retired.contains(&second)
+            || second != first.saturating_add(1)
+            || program.inputs_of(&program.ops[first]).is_empty()
+            || !scalar_pair_is_in_place(program, first, second)
+        {
+            continue;
+        }
+        let first_node = &spec.nodes[program.ops[first].node as usize].id;
+        let second_node = &spec.nodes[program.ops[second].node as usize].id;
+        let (
+            GraphNodeId::TrackStage {
+                track_id: first_track,
+                stage: TrackStage::PostFader,
+            },
+            GraphNodeId::TrackStage {
+                track_id: second_track,
+                stage: TrackStage::PostMatrix,
+            },
+        ) = (first_node, second_node)
+        else {
+            continue;
+        };
+        let crossing_reader = spec.edges.iter().any(|edge| {
+            edge.source.node == *first_node
+                && matches!(
+                    edge.id,
+                    GraphEdgeId::RouteSource { .. } | GraphEdgeId::EffectSidechain { .. }
+                )
+        });
+        if crossing_reader
+            || first_track != second_track
+            || !chains_into(
+                program,
+                spec,
+                &parts,
+                &readers,
+                &first_producer,
+                &[first],
+                &[second],
+            )
+        {
+            continue;
+        }
+        let Some(Some(fader)) = parts.bindings.remove(first_node) else {
+            continue;
+        };
+        let Some(Some(matrix)) = parts.bindings.remove(second_node) else {
+            parts.bindings.insert(first_node.clone(), Some(fader));
+            continue;
+        };
+        let Some(factory) = fader.scalar_pair_factory() else {
+            parts.bindings.insert(first_node.clone(), Some(fader));
+            parts.bindings.insert(second_node.clone(), Some(matrix));
+            continue;
+        };
+        match factory(fader, matrix) {
+            Ok(composite) => {
+                parts.bindings.insert(first_node.clone(), Some(composite));
+                parts.bindings.insert(second_node.clone(), None);
+            }
+            Err((fader, matrix)) => {
+                parts.bindings.insert(first_node.clone(), Some(fader));
+                parts.bindings.insert(second_node.clone(), Some(matrix));
+            }
+        }
+    }
     // Where each op's `RuntimeOp` ended up, so a redirect can neutralise the consumer's reduction.
     let mut op_slot: Vec<Option<(usize, usize)>> = vec![None; program.ops.len()];
     // Run unit -> the unit index it was emitted at, for the chains the fold arms.
@@ -3038,12 +3138,152 @@ fn cohort_runs(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::program::{BufferRef, DelayRef, InputRef};
     use core::any::Any;
     use lane::kernels::sum2_block;
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
+
+    #[test]
+    fn synthetic_distinct_matrix_destination_is_the_scalar_pair_identity_decline() {
+        // This is a deliberately synthetic lowered program. It isolates the defensive identity
+        // gate; #476 owns the separate question of whether production lowering can emit it.
+        let mut program = ExecutionProgram {
+            ops: vec![
+                Op {
+                    node: 0,
+                    level: 0,
+                    inputs: (0, 1),
+                    sidechain: None,
+                    output: BufferRef(1),
+                    in_place: true,
+                },
+                Op {
+                    node: 1,
+                    level: 1,
+                    inputs: (1, 2),
+                    sidechain: None,
+                    output: BufferRef(2),
+                    in_place: false,
+                },
+            ]
+            .into_boxed_slice(),
+            inputs: vec![
+                InputRef {
+                    buffer: BufferRef(1),
+                    delay: None,
+                },
+                InputRef {
+                    buffer: BufferRef(1),
+                    delay: None,
+                },
+            ]
+            .into_boxed_slice(),
+            delays: Box::new([]),
+            node_buffer: vec![BufferRef(1), BufferRef(2)].into_boxed_slice(),
+            node_op: vec![Some(0), Some(1)].into_boxed_slice(),
+            taps: Box::new([]),
+            buffers: 3,
+            output: BufferRef(2),
+        };
+        assert!(
+            !scalar_pair_is_in_place(&program, 0, 1),
+            "an otherwise valid single undelayed edge declines on its distinct destination"
+        );
+
+        program.ops[1].output = BufferRef(1);
+        program.ops[1].in_place = true;
+        program.node_buffer[1] = BufferRef(1);
+        assert!(
+            scalar_pair_is_in_place(&program, 0, 1),
+            "the same fixture admits only after the exact identity facts are restored"
+        );
+        program.inputs[1].delay = Some(DelayRef {
+            line: 0,
+            staging: BufferRef(2),
+        });
+        assert!(
+            !scalar_pair_is_in_place(&program, 0, 1),
+            "the explicit undelayed-input guard remains independent"
+        );
+
+        struct FaderOwner(Arc<AtomicUsize>);
+        impl GraphRuntimeProcessor for FaderOwner {
+            fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                for sample in block.left.iter_mut().chain(block.right.iter_mut()) {
+                    *sample *= 2.0;
+                }
+                Ok(())
+            }
+        }
+        struct FailingMatrixOwner {
+            calls: Arc<AtomicUsize>,
+            queued: Arc<AtomicUsize>,
+        }
+        impl GraphRuntimeProcessor for FailingMatrixOwner {
+            fn process(&mut self, _: GraphBindingBlock<'_>) -> Result<(), RenderError> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                self.queued.fetch_sub(1, Ordering::Relaxed);
+                Err(RenderError::InvalidEnvelope)
+            }
+        }
+
+        // Execute the original declined shape. The later reduction copies into its distinct
+        // destination before its owner reports the first error; the fader source remains the
+        // completed earlier state. This is the boundary a one-buffer early composite cannot own.
+        let fader_calls = Arc::new(AtomicUsize::new(0));
+        let matrix_calls = Arc::new(AtomicUsize::new(0));
+        let queued = Arc::new(AtomicUsize::new(2));
+        let mut fader = RuntimeOp {
+            inputs: vec![ARENA_BASE].into_boxed_slice(),
+            staged: Box::new([]),
+            sidechain: None,
+            output: ARENA_BASE,
+            kind: NodeKind::Bound(Box::new(FaderOwner(Arc::clone(&fader_calls)))),
+            observers: Box::new([]),
+        };
+        let mut matrix = RuntimeOp {
+            inputs: vec![ARENA_BASE].into_boxed_slice(),
+            staged: Box::new([]),
+            sidechain: None,
+            output: ARENA_BASE + 1,
+            kind: NodeKind::Bound(Box::new(FailingMatrixOwner {
+                calls: Arc::clone(&matrix_calls),
+                queued: Arc::clone(&queued),
+            })),
+            observers: Box::new([]),
+        };
+        let mut lease = stereo_lease(2, 2);
+        lease
+            .write_stereo(ARENA_BASE)
+            .0
+            .copy_from_slice(&[0.25, -0.5]);
+        lease
+            .write_stereo(ARENA_BASE)
+            .1
+            .copy_from_slice(&[-0.75, 1.0]);
+        lease.write_stereo(ARENA_BASE + 1).0.fill(91.0);
+        lease.write_stereo(ARENA_BASE + 1).1.fill(-91.0);
+        execute_op(&mut fader, &mut lease, &mut [], &mut [], 0).expect("earlier fader");
+        assert_eq!(
+            execute_op(&mut matrix, &mut lease, &mut [], &mut [], 0),
+            Err(RenderError::InvalidEnvelope)
+        );
+        assert_eq!(lease.read_stereo(ARENA_BASE).0, &[0.5, -1.0]);
+        assert_eq!(lease.read_stereo(ARENA_BASE).1, &[-1.5, 2.0]);
+        assert_eq!(lease.read_stereo(ARENA_BASE + 1).0, &[0.5, -1.0]);
+        assert_eq!(lease.read_stereo(ARENA_BASE + 1).1, &[-1.5, 2.0]);
+        assert_eq!(fader_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(matrix_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            queued.load(Ordering::Relaxed),
+            1,
+            "later failure retains its next record"
+        );
+    }
 
     struct DecliningPairOwner(Arc<AtomicUsize>);
     fn decline_pair(
@@ -3969,7 +4209,8 @@ mod tests {
     /// master is `+0.0` (bits 0) where `-0.0` (bits 0x8000_0000) is required.
     #[test]
     fn the_first_contributor_stores_so_a_negative_zero_master_keeps_its_sign() {
-        const FRAMES: usize = 8;
+        let _canonical = lane::fpenv::CanonicalFpEnv::enter();
+        const FRAMES: usize = 9;
         let mut lease = stereo_lease(FRAMES, 1);
         // The arena starts at `+0.0`, which is exactly the value a zero-fill would leave.
         assert!(
@@ -4008,6 +4249,93 @@ mod tests {
                 "frame {frame}: the first contributor's sign was lost on the right"
             );
         }
+
+        fn matrix_word(left: f32, right: f32, coefficients: [f32; 4]) -> (f32, f32) {
+            let left_product = coefficients[0] * left;
+            let left_cross = coefficients[1] * right;
+            let right_cross = coefficients[2] * left;
+            let right_product = coefficients[3] * right;
+            (left_cross + left_product, right_product + right_cross)
+        }
+
+        let seed_values = [
+            16_777_216.0,
+            1.0,
+            -16_777_216.0,
+            -1.0,
+            f32::MIN_POSITIVE,
+            f32::from_bits(1),
+            3.25,
+            -7.5,
+            0.0,
+        ];
+        let mut seed_left = seed_values.to_vec();
+        let mut seed_right: Vec<f32> = seed_values.iter().rev().map(|value| -*value).collect();
+        let seeded: Vec<(f32, f32)> = seed_left
+            .iter()
+            .zip(&seed_right)
+            .map(|(left, right)| matrix_word(*left, *right, fold[0].coefficients))
+            .collect();
+        let mut seed_members = ArenaMembers {
+            lease: &mut lease,
+            inputs: &[],
+            outputs: &[],
+            fold: &fold,
+            master: ARENA_BASE,
+        };
+        seed_members.fold_plane(0, &mut seed_left, &mut seed_right);
+
+        const ACCUMULATE_COEFFICIENTS: [f32; 4] = [0.9, -0.1, 0.2, 0.8];
+        let accumulate_fold = [FoldLane {
+            coefficients: ACCUMULATE_COEFFICIENTS,
+            store: false,
+        }];
+        let mut added_left: Vec<f32> = (0..FRAMES)
+            .map(|frame| seed_values[(frame + 2) % FRAMES])
+            .collect();
+        let mut added_right: Vec<f32> = (0..FRAMES)
+            .map(|frame| -seed_values[(frame + 5) % FRAMES])
+            .collect();
+        let routed: Vec<(f32, f32)> = added_left
+            .iter()
+            .zip(&added_right)
+            .map(|(left, right)| matrix_word(*left, *right, ACCUMULATE_COEFFICIENTS))
+            .collect();
+        let expected_left: Vec<u32> = seeded
+            .iter()
+            .zip(&routed)
+            .map(|(old, added)| (old.0 + added.0).to_bits())
+            .collect();
+        let expected_right: Vec<u32> = seeded
+            .iter()
+            .zip(&routed)
+            .map(|(old, added)| (old.1 + added.1).to_bits())
+            .collect();
+        let mut accumulate_members = ArenaMembers {
+            lease: &mut lease,
+            inputs: &[],
+            outputs: &[],
+            fold: &accumulate_fold,
+            master: ARENA_BASE,
+        };
+        accumulate_members.fold_plane(0, &mut added_left, &mut added_right);
+        let (master_left, master_right) = lease.read_stereo(ARENA_BASE);
+        assert_eq!(
+            master_left
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            expected_left,
+            "real fold_plane store=false must ordered-add the left contribution"
+        );
+        assert_eq!(
+            master_right
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            expected_right,
+            "real fold_plane store=false must ordered-add the right contribution"
+        );
 
         let mut cohort_lease = stereo_lease(FRAMES, 1);
         let (poison_left, poison_right) = cohort_lease.write_stereo(ARENA_BASE);

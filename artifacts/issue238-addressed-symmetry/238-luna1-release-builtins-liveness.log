@@ -1,0 +1,35 @@
+   Compiling builtins v0.1.0 (/home/bl/misofm/engine-238-plan/crates/builtins)
+    Finished `release` profile [optimized + debuginfo] target(s) in 6.03s
+     Running tests/input_liveness.rs (target/release/deps/input_liveness-959c7fc286e48825)
+
+running 13 tests
+test a_bank_refuses_a_retarget_addressed_past_its_members ... ok
+test a_banked_lane_ramps_exactly_as_the_same_track_alone ... ok
+test a_polarity_flip_crosses_zero_and_settles_at_the_reprepared_coefficient ... ok
+test a_lane_selector_addresses_exactly_the_lanes_it_names ... ok
+test an_uncommanded_bank_keeps_its_elision_plan ... ok
+test a_ramping_block_leaves_an_elidable_banks_integrators_at_positive_zero ... ok
+test settled_and_ramping_paths_agree_on_an_elided_bank ... ok
+test the_live_trim_domain_is_the_declared_one ... ok
+test an_uncommanded_live_input_renders_the_prepared_coefficients ... ok
+test the_settled_arm_leaves_the_ramp_words_untouched ... ok
+test the_trim_ramp_is_partition_invariant ... ok
+test the_trim_ramp_is_bit_identical_to_the_parameter_smoother ... ok
+test trim_and_polarity_do_not_overwrite_each_other ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/input_liveness_mono.rs (target/release/deps/input_liveness_mono-31a9c868e9e8524a)
+
+running 8 tests
+test a_collapsed_block_keeps_the_two_channels_ramp_records_equal ... ok
+test a_symmetric_retarget_keeps_the_lane_eligible ... ok
+test an_asymmetric_retarget_declines_the_lane_on_the_admitting_block ... ok
+test a_symmetric_ride_through_a_collapse_renders_never_collapsed_bits ... ok
+test channels_agree_covers_the_trim_ramp_record ... ok
+test a_retarget_between_a_collapsed_block_and_the_disengage_survives_the_copy ... ok
+test re_equalising_the_words_restores_the_designed_term_and_nothing_more ... ok
+test the_disengage_copy_still_restores_the_integrators ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

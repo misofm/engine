@@ -15,8 +15,10 @@ use builtins::{BuiltinLaneSelector, Matrix2x2, MeterConfig, MeterTap};
 use builtins_compiler::{
     BuiltinCompileCaps, MeterRequest, TestOnlyFaderMatrixPair, TrackControlRecord,
     TrackFaderRecord, prepare_session_builtins, test_only_fader_matrix_witness,
-    test_only_phase_two_allocation_snapshot, test_only_record_phase_two_allocation,
+    test_only_observed_scalar_pair_binding, test_only_phase_two_allocation_snapshot,
+    test_only_record_phase_two_allocation, test_only_record_phase_two_deallocation,
     test_only_reset_fader_matrix_witness, test_only_reset_phase_two_allocation_tracker,
+    test_only_scalar_outer_lifetime, test_only_scalar_owner_drops, test_only_scalar_owner_layouts,
 };
 use engine::realtime::{PlanarBufferMut, RenderIo, RenderTime};
 use session::{CompileCaps, RouteSource, SendTap, StableId, compile_session, parse_session_json};
@@ -98,6 +100,7 @@ unsafe impl GlobalAlloc for TrackingAllocator {
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
         if ARMED.with(Cell::get) {
             LIVE_FREES.set(LIVE_FREES.get() + 1);
+            test_only_record_phase_two_deallocation(layout);
         }
         // SAFETY: forwards the original pointer and layout unchanged.
         unsafe { System.dealloc(pointer, layout) }
@@ -110,6 +113,7 @@ unsafe impl GlobalAlloc for TrackingAllocator {
             // keeps the zero gate from being bypassed by a direct realloc call.
             LIVE_ALLOCS.set(LIVE_ALLOCS.get() + 1);
             LIVE_FREES.set(LIVE_FREES.get() + 1);
+            test_only_record_phase_two_deallocation(layout);
             test_only_record_phase_two_allocation(layout);
         }
         // SAFETY: forwards the original allocation arguments unchanged.
@@ -266,6 +270,195 @@ fn actual_queued_graph_phases_allocate_and_free_nothing() {
     );
 }
 
+#[test]
+fn actual_queued_scalar_graph_allocates_and_frees_nothing() {
+    let _session_guard = SESSION
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    let mut liveness = Vec::<u8>::with_capacity(core::hint::black_box(32));
+    LIVE_ALLOCS.set(0);
+    LIVE_FREES.set(0);
+    armed(|| liveness.reserve_exact(core::hint::black_box(64)));
+    assert!(LIVE_ALLOCS.get() > 0, "scalar audit allocation liveness");
+    LIVE_ALLOCS.set(0);
+    LIVE_FREES.set(0);
+    armed(|| drop(liveness));
+    assert!(LIVE_FREES.get() > 0, "scalar audit free liveness");
+
+    let mut output = [0.0_f32; 128];
+    test_only_reset_fader_matrix_witness();
+    let mut selected = builtins_compiler::test_only_prepared_scalar_pair_graph(false);
+    assert_eq!(
+        (
+            test_only_fader_matrix_witness().factory_calls,
+            test_only_fader_matrix_witness().factory_members
+        ),
+        (1, 1)
+    );
+    let settled = audit_graph_render(&mut selected, &mut output, 0);
+    assert_eq!((settled.fused_calls, settled.fallback_calls), (1, 0));
+    {
+        let scalar = selected
+            .track_controls
+            .iter_mut()
+            .find(|control| control.track_id.as_ref() == "t01")
+            .expect("selected scalar controls");
+        scalar
+            .fader
+            .try_push(TrackFaderRecord::FaderDb {
+                lanes: BuiltinLaneSelector::Both,
+                db: -12.0,
+                smoothing_samples: 96,
+            })
+            .unwrap();
+        scalar
+            .producer
+            .try_push(TrackControlRecord {
+                matrix: Matrix2x2 {
+                    ll: 0.5,
+                    lr: 0.25,
+                    rl: -0.25,
+                    rr: 0.75,
+                },
+                smoothing_samples: 96,
+            })
+            .unwrap();
+    }
+    for (sample, expected) in [(64, (0, 1)), (128, (0, 1)), (192, (1, 0))] {
+        let witness = audit_graph_render(&mut selected, &mut output, sample);
+        assert_eq!((witness.fused_calls, witness.fallback_calls), expected);
+        assert_eq!(witness.process_members, 1);
+    }
+
+    test_only_reset_fader_matrix_witness();
+    let mut observed = builtins_compiler::test_only_prepared_scalar_pair_graph(true);
+    let observed_call = audit_graph_render(&mut observed, &mut output, 0);
+    assert_eq!(
+        (observed_call.process_calls, observed_call.factory_calls),
+        (0, 0),
+        "the actual observed scalar graph retains separate owners"
+    );
+    assert!(
+        observed.meter_consumers[0].consumer.try_pop().is_ok(),
+        "observed fallback publishes its meter window"
+    );
+}
+
+#[test]
+fn actual_scalar_prepare_and_bind_retain_the_charged_owner_layouts() {
+    let _session_guard = SESSION
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let [fader, matrix, outer] = test_only_scalar_owner_layouts();
+    let retained_owner_bytes_expected =
+        2 * fader.size_bytes + 2 * matrix.size_bytes + outer.size_bytes;
+    let owner_max = fader
+        .size_bytes
+        .max(matrix.size_bytes)
+        .max(outer.size_bytes);
+
+    test_only_reset_phase_two_allocation_tracker();
+    let (bound, admitted, scalar_allowance, preparation, binding) =
+        armed(test_only_observed_scalar_pair_binding);
+    assert!(!preparation.overflowed);
+    let retained_owner_bytes: u64 = [fader, matrix]
+        .iter()
+        .map(|expected| {
+            preparation
+                .layouts
+                .iter()
+                .find(|observed| {
+                    observed.size_bytes == expected.size_bytes
+                        && observed.align_bytes == expected.align_bytes
+                })
+                .map_or(0, |observed| {
+                    observed.size_bytes * observed.allocation_count
+                })
+        })
+        .sum();
+    assert_eq!(
+        retained_owner_bytes,
+        2 * fader.size_bytes + 2 * matrix.size_bytes
+    );
+    for expected in [fader, matrix] {
+        assert!(
+            preparation.layouts.iter().any(|observed| {
+                observed.size_bytes == expected.size_bytes
+                    && observed.align_bytes == expected.align_bytes
+                    && observed.allocation_count == 2
+            }),
+            "both original owners are actual retained preparation allocations: expected={expected:?}, observed={:?}",
+            preparation.layouts
+        );
+    }
+    assert!(!binding.overflowed);
+    assert_eq!(
+        test_only_scalar_outer_lifetime(),
+        [1, 1, 0],
+        "one actual selected scalar outer was constructed and remains live after bind"
+    );
+    for retained in [fader, matrix] {
+        assert!(
+            !binding.deallocation_layouts.iter().any(|released| {
+                released.size_bytes == retained.size_bytes
+                    && released.align_bytes == retained.align_bytes
+            }),
+            "binding retains each original owner without free/reallocate substitution"
+        );
+    }
+    assert!(
+        binding.layouts.iter().any(|observed| {
+            observed.size_bytes == outer.size_bytes && observed.align_bytes == outer.align_bytes
+        }),
+        "binding allocates the charged two-pointer scalar outer: {:?}",
+        binding.layouts
+    );
+    let outer_allocations = binding
+        .layouts
+        .iter()
+        .find(|observed| {
+            observed.size_bytes == outer.size_bytes && observed.align_bytes == outer.align_bytes
+        })
+        .map_or(0, |observed| observed.allocation_count);
+    let typed_outer_count = test_only_scalar_outer_lifetime()[0];
+    assert_eq!(typed_outer_count, 1);
+    assert!(
+        outer_allocations >= typed_outer_count,
+        "the bounded allocator window contains the allocation whose typed construction is witnessed"
+    );
+    let unrelated_same_layout_allocations = outer_allocations - typed_outer_count;
+    assert!(
+        unrelated_same_layout_allocations > 0,
+        "the fixture discriminates same-layout graph storage instead of charging it as an owner"
+    );
+    let bound_outer_bytes = outer.size_bytes;
+    assert_eq!(
+        retained_owner_bytes + bound_outer_bytes,
+        retained_owner_bytes_expected
+    );
+    assert_eq!(owner_max, scalar_allowance.largest_allocation_bytes);
+    assert!(owner_max <= admitted.largest_allocation_bytes);
+    let conservative_spare_outer = scalar_allowance
+        .total_bytes
+        .checked_sub(retained_owner_bytes_expected)
+        .expect("actual owners fit conservative scalar allowance");
+    assert_eq!(conservative_spare_outer, outer.size_bytes);
+    assert!(scalar_allowance.total_bytes <= admitted.session_plus_plan_bytes);
+
+    LIVE_ALLOCS.set(0);
+    LIVE_FREES.set(0);
+    test_only_reset_fader_matrix_witness();
+    armed(|| drop(bound));
+    assert_eq!(LIVE_ALLOCS.get(), 0, "off-render release does not allocate");
+    assert!(
+        LIVE_FREES.get() > 0,
+        "bound owners release only during off-render drop"
+    );
+    assert_eq!(test_only_scalar_owner_drops(), [2, 2, 1]);
+    assert_eq!(test_only_scalar_outer_lifetime(), [1, 0, 1]);
+}
+
 fn session(track_count: u32) -> session::CompiledSession {
     let mut model = parse_session_json(include_str!("../../../fixtures/session/v1/canonical.json"))
         .expect("fixture parse");
@@ -338,6 +531,8 @@ fn assert_zero_phase_two_allocations() {
     assert_eq!(snapshot.largest_allocation_bytes, 0);
     assert_eq!(snapshot.allocation_count, 0);
     assert!(snapshot.layouts.is_empty());
+    assert_eq!(snapshot.deallocation_count, 0);
+    assert!(snapshot.deallocation_layouts.is_empty());
     assert!(!snapshot.overflowed);
 }
 

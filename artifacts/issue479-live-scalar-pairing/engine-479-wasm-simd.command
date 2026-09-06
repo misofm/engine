@@ -1,0 +1,1 @@
+export PATH=/home/bl/.cargo/bin:$PATH; RUSTFLAGS='-C target-feature=+simd128' CARGO_TARGET_DIR=/tmp/engine-479-wasm-simd cargo check --locked --target wasm32-unknown-unknown -p target-smoke -p protocol

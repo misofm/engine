@@ -1,0 +1,9 @@
+   Compiling builtins-compiler v0.1.0 (/home/bl/misofm/engine-443-plan/crates/builtins-compiler)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.49s
+     Running tests/allocation_tracker.rs (/tmp/engine-443-sol-target/debug/deps/allocation_tracker-b6767a1ad7cc8a1e)
+
+running 1 test
+test actual_queued_scalar_graph_allocates_and_frees_nothing ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+

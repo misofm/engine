@@ -1,0 +1,38 @@
+# Astra #443 current ready-to-assign amendment
+
+**Scope ready, conditional on #460 delivery and root freezing the actual integrated base.** Read queued443/470 at2fd90129 and compared deliveredaba905 source with accepted incoming PR472 head5d8b0257. #470 now explicitly owns the nonadjacent serialized scheduling/error-order obligation; #444 retains Concurrent scalar admission. Neither is waived by this adjacent product.
+
+The relevant upstream changes are source-seek preparation APIs in graph/lib.rs, source/lib.rs and host-web source/PCM paths. GraphRuntimeProcessor, graph runtime/program scheduling, builtins and builtins-compiler pairing/lowering seams did not change. Preserve the new source-set methods and host source semantics during integration; they do not require a different scalar pairing architecture. #460's opt-in protocol service is not a prerequisite to replace the existing two scalar queue consumers and is not to be enabled here.
+
+## Exact smallest product
+
+Actual **adjacent serialized live scalar** PostFader→PostMatrix pairing, using the approved safe preparation-only Any/static restriction/default-None scalar factory on GraphRuntimeProcessor. Propagate existing BetweenRenderCalls declaration into both concrete scalar owners; default/Concurrent paths remain separate. Only the exact live scalar fader advertises the factory, inspecting both concrete owners/policies before safe ownership transfer. Keep two typed boxes inside the composite and return original owners on decline. No render reflection, raw mutable consumer escape or unsafe downcast.
+
+Select at build_sequential after grouping/fold/redirect decisions and before build_op removes bindings. Require consecutive actual plain run units and consecutive ops, same track/stage order, genuine bound owners, nonempty original inputs, unretired/unredirected ops and the existing singleton chains_into/dataflow proof (sole undelayed non-sidechain reader, no exposed post-fader graph output/direct/aliased observer). Install composite at original fader binding and explicit None identity at original matrix key; keep schedule, buffers, reductions and observer placement unchanged. Nonadjacent valid pairs remain separate and accounted by470. Do not alter cohort_runs, graph scheduling or error order to make a positive fixture eligible.
+
+The scalar FaderMuteRampBuiltins/MatrixBuiltins bridge checks lane0 authoritative countdowns after both live drains. Settled uses existing f32 fader_matrix_block arithmetic; ramping uses whole-call original separate arithmetic. Preserve failure order, including completing original fader arithmetic if the later matrix command fails, muted remembered gain/reset, input recovery, asymmetric channels and current scalar symmetry answer. No prepared-only fader state reuse or bank-collapse claim.
+
+## Allowed source/test surfaces
+
+- crates/graph/src/lib.rs: approved preparation trait/factory types and only private/test-support mechanism access if the existing seam needs it; preserve new source-seek APIs.
+- crates/graph/src/runtime.rs: exact pre-erasure adjacent selection/identity substitution and focused structural tests.
+- crates/builtins/src/lib.rs: narrow live scalar bridge and inline arithmetic/state proof.
+- crates/builtins-compiler/src/lib.rs: policy propagation, exact owners/factory/composite, prebind resource charge and existing fixture extensions.
+- crates/builtins-compiler/tests/allocation_tracker.rs and/or existing crates/graph/tests/rt1_direct_bank_alloc.rs: use whichever existing allocation fixture already supplies the needed bound-graph audit; no new allocator/framework or unrelated file. Freeze the chosen existing seam at root assignment, not midway through Luna implementation.
+- hosts/host-web/src/tests.rs: existing acknowledged-command fixture extension proving actual scalar path. No production host admission change.
+- Existing independent CAPI resource estimate/test mirror files only if the scalar owner charge changes their exact estimates; record the exact affected fields before editing, not blanket repins.
+- Numbered evidence and justified current artifact consumers during later qualification only. No source/provider implementation, protocol service, Cargo/dependency or generic rack edit.
+
+## Representative fixtures and executable gates
+
+Extend existing builtins-compiler `track_graph_variant`/`prepared_pair_graph_fixture` conventions, selecting Backend::Scalar explicitly. A one-track actual compiled graph supplies the positive: assert scheduled adjacent plain pair, in-place matrix reduction, actual fused branch and independent original-owner PCM/private state after each call. An actual selection-to-separate mutation must fail the SAME mechanism assertion while reference PCM still matches. No bank-tail fixture substitutes for it.
+
+Retain the original compact gain/mute/matrix command sequence: FIFO, immediate/ramp/retarget, endpoint inside call then settled next call, mute/remembered gain/unmute/reset, invalid later matrix command and fader state effects. Add structural declines in existing graph fixtures for observer/aliased observer, nonunity send+crossfeed, delay/fan-out, wrong owner/order/policy and nonadjacency; preserve exact output/state against separate references. Where the original gate requires an observed scalar track alongside another eligible scalar track, deliberately stagger their pre-fader graph depths with existing identity-node GraphSpec fixtures so the eligible pair is actually consecutive. Two same-depth tracks would be the470 counterexample and cannot prove positive selection. Assert the schedule rather than assuming fixture construction guarantees it.
+
+Extend the existing host `acknowledged_pair_render_records_the_same_live_dispatch`/command-ack fixture with a genuinely forced scalar, adjacent population; record actual per-call branch and PCM/application sample. Its existing bank-selected result alone is not scalar evidence. Keep current source-seek/PCM host behavior intact.
+
+Use existing allocation tracking on repeated actual bound scalar renders for both eligible settled and ramp fallback, positive allocation/free liveness, with all preparation and teardown outside the measured window. Charge new outer two-box owner and live scalar policy layout through current estimates before binding, including largest allocation and exact-cap/one-below checks; no-console owners stay unchanged if not paired.
+
+Focused commands after implementation: `cargo test --locked -p builtins`; `cargo test --locked -p builtins-compiler --features test-support`; `cargo test --locked -p graph`; `cargo test --locked -p host-web`; repeat the same directly affected scalar/state/graph/host tests with `--release`; selected existing allocation integration in debug/release; strict Clippy for affected packages; fmt; existing realtime/builtins/graph/workspace policy and affected mutation suites. Full crate commands avoid accidental zero-match filters; do not add unrelated corpus/matrix. At checkpoint root records exact new test names and counts. Source PASS then immutable integrated workspace, supported targets/nativeABI/resources and actual changed worklet build/static/hermetic/browser qualification under the existing candidate convention. No benchmark here;431/473 remain separate.
+
+This preserves the previously approved finite gates rather than redefining all scalar work as adjacent. Root must synchronize this amendment and actual-base declaration before Luna1. #460 remains active until delivered; no implementation is launched by this read-only report. No tests/builds/timing or repository/Git/GitHub mutations were performed.
