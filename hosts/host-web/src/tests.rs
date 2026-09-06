@@ -3250,6 +3250,55 @@ fn timed_poll_mode(bypass_readiness: bool) -> (u128, u64, u64, (u64, u64)) {
 
 /// Frozen descriptive evidence for issues #519/#520. Run only through the documented two-phase
 /// command; this is deliberately an ignored test rather than a benchmark framework.
+fn timing_header() -> String {
+    serde_json::json!({
+        "schema": 1,
+        "kind": "header",
+        "label": "isolated metering ns for 9 streams; poll-only callback ns",
+        "quantum": 128,
+        "period_blocks": 32,
+        "windows": WINDOWS_FOR_TIMING,
+        "warmups": 1,
+        "measured_rounds": 2,
+    })
+    .to_string()
+}
+
+fn accumulator_timing_record(round: u32, mode: &str, result: (u128, u64, u64)) -> String {
+    serde_json::json!({
+        "schema": 1,
+        "kind": "accumulator",
+        "round": round,
+        "mode": mode,
+        "elapsed_ns": result.0,
+        "payload_hash": result.1,
+        "blocks": result.2,
+    })
+    .to_string()
+}
+
+fn poll_timing_record(round: u32, mode: &str, result: (u128, u64, u64, (u64, u64))) -> String {
+    serde_json::json!({
+        "schema": 1,
+        "kind": "poll",
+        "round": round,
+        "mode": mode,
+        "elapsed_ns": result.0,
+        "payload_hash": result.1,
+        "emitted_windows": result.2,
+        "track_pop_attempts": result.3.0,
+        "effect_scans": result.3.1,
+    })
+    .to_string()
+}
+
+fn persist_timing_record(file: &mut std::fs::File, record: &str) {
+    use std::io::Write;
+    writeln!(file, "{record}").expect("persist timing record");
+    file.sync_data().expect("sync timing record");
+    eprintln!("{record}");
+}
+
 #[test]
 #[ignore = "descriptive release timing; requires explicit preflight then one run"]
 fn selective_meter_and_readiness_descriptive_timing() {
@@ -3267,15 +3316,34 @@ fn selective_meter_and_readiness_descriptive_timing() {
     };
     if mode == "preflight" {
         let mut file = open();
-        file.write_all(b"{\"schema\":1,\"preflight\":true}\n")
-            .unwrap();
+        let records = [
+            timing_header(),
+            accumulator_timing_record(0, "peak", (1, 2, 3)),
+            poll_timing_record(0, "ready", (1, 2, 3, (4, 5))),
+        ];
+        for record in records {
+            let parsed: serde_json::Value = serde_json::from_str(&record).expect("valid JSONL row");
+            assert_eq!(parsed["schema"], 1);
+            assert!(parsed["kind"].is_string());
+            writeln!(file, "{record}").unwrap();
+        }
         file.sync_all().unwrap();
+        assert_eq!(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&output)
+                .expect_err("overwrite refusal")
+                .kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
         drop(file);
         std::fs::remove_file(&output).expect("remove preflight probe");
         return;
     }
     assert_eq!(mode, "run", "mode is preflight or run");
     let mut file = open();
+    persist_timing_record(&mut file, &timing_header());
 
     // Exactly one warmup per frozen mode.
     let _ = timed_accumulator_mode(None);
@@ -3285,29 +3353,27 @@ fn selective_meter_and_readiness_descriptive_timing() {
     let _ = timed_poll_mode(false);
 
     // Exactly two measured rounds, with no retry or tuning loop.
-    let mut accumulator = Vec::new();
-    let mut polling = Vec::new();
     for round in 0..2 {
         let disabled = timed_accumulator_mode(None);
+        persist_timing_record(
+            &mut file,
+            &accumulator_timing_record(round, "disabled", disabled),
+        );
         let peak = timed_accumulator_mode(Some(MeterMetricSet::SAMPLE_PEAK));
+        persist_timing_record(&mut file, &accumulator_timing_record(round, "peak", peak));
         let full = timed_accumulator_mode(Some(MeterMetricSet::ALL));
+        persist_timing_record(&mut file, &accumulator_timing_record(round, "full", full));
         assert_eq!(peak.1, full.1, "round {round}: peak payload identity");
         assert_eq!(disabled.2, peak.2);
-        accumulator.push((disabled.0, peak.0, full.0, peak.1, peak.2));
 
         let legacy = timed_poll_mode(true);
+        persist_timing_record(&mut file, &poll_timing_record(round, "legacy_scan", legacy));
         let ready = timed_poll_mode(false);
+        persist_timing_record(&mut file, &poll_timing_record(round, "readiness", ready));
         assert_eq!(legacy.1, ready.1, "round {round}: poll payload identity");
         assert_eq!(legacy.2, WINDOWS_FOR_TIMING);
         assert_eq!(ready.2, WINDOWS_FOR_TIMING);
-        polling.push((legacy, ready));
     }
-    writeln!(
-        file,
-        "{{\"schema\":1,\"label\":\"isolated metering ns for 9 streams; poll-only callback ns\",\"quantum\":128,\"period_blocks\":32,\"windows\":256,\"accumulator\":{:?},\"polling\":{:?}}}",
-        accumulator, polling
-    )
-    .unwrap();
     file.sync_all().unwrap();
 }
 
