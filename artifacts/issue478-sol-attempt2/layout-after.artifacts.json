@@ -1,0 +1,18 @@
+[
+  {
+    "path": "/tmp/issue478-layout-after/debug/deps/librack-1c482baead645b2b.rlib",
+    "sha256": "6a88c9aca02df6fd3dc1b9836cc541e33868714b7e18e4c673df4752905598f8"
+  },
+  {
+    "path": "/tmp/issue478-layout-after/debug/deps/librack-1c482baead645b2b.rmeta",
+    "sha256": "8b3e101cee130468d66ac3efb4d1a59650ade8dad18b6ee1a3b644b6246dbe35"
+  },
+  {
+    "path": "/tmp/issue478-layout-after/debug/libgraph.rlib",
+    "sha256": "d628729f8396021701e5e2e98da163ca46b7ec2255a330bed1c2baf1fb1f1e45"
+  },
+  {
+    "path": "/tmp/issue478-layout-after/debug/deps/libgraph-e26a943af2eae531.rmeta",
+    "sha256": "124738b538298a8ebbe9d8aedcf0e77c9327b239248e32c885d4224b66478890"
+  }
+]

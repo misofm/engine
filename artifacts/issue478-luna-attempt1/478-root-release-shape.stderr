@@ -1,0 +1,10 @@
+   Compiling bytemuck v1.25.2
+   Compiling engine v0.1.0 (/home/bl/misofm/engine-rt8-plan/crates/engine)
+   Compiling math v0.1.0 (/home/bl/misofm/engine-rt8-plan/crates/math)
+   Compiling safe_arch v1.2.0
+   Compiling wide v1.6.1
+   Compiling lane v0.1.0 (/home/bl/misofm/engine-rt8-plan/crates/lane)
+   Compiling effect-contract v0.1.0 (/home/bl/misofm/engine-rt8-plan/crates/effect-contract)
+   Compiling rack v0.1.0 (/home/bl/misofm/engine-rt8-plan/crates/rack)
+    Finished `release` profile [optimized + debuginfo] target(s) in 13.49s
+     Running unittests src/lib.rs (target/release/deps/rack-73cd89f0c58db6eb)

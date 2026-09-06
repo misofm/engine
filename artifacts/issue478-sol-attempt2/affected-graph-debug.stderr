@@ -1,0 +1,9 @@
+   Compiling engine v0.1.0 (/home/bl/misofm/engine-rt8-plan/crates/engine)
+   Compiling dsp-reference v0.1.0 (/home/bl/misofm/engine-rt8-plan/crates/dsp-reference)
+   Compiling effect-contract v0.1.0 (/home/bl/misofm/engine-rt8-plan/crates/effect-contract)
+   Compiling bench-support v0.1.0 (/home/bl/misofm/engine-rt8-plan/tools/bench-support)
+   Compiling rack v0.1.0 (/home/bl/misofm/engine-rt8-plan/crates/rack)
+   Compiling conformance v0.1.0 (/home/bl/misofm/engine-rt8-plan/crates/conformance)
+   Compiling graph v0.1.0 (/home/bl/misofm/engine-rt8-plan/crates/graph)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.96s
+     Running tests/rt1_direct_bank_alloc.rs (target/debug/deps/rt1_direct_bank_alloc-33a0caff0faefd7b)

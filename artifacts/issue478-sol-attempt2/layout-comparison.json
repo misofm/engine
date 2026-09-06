@@ -1,0 +1,42 @@
+{
+  "before": {
+    "BankChain": {
+      "bytes": 200,
+      "alignment": 8
+    },
+    "BankSlot": {
+      "bytes": 32,
+      "alignment": 8
+    },
+    "std::boxed::Box<dyn BankStage>": {
+      "bytes": 16,
+      "alignment": 8
+    },
+    "runtime::RuntimeUnit": {
+      "bytes": 248,
+      "alignment": 8
+    }
+  },
+  "after": {
+    "BankChain": {
+      "bytes": 200,
+      "alignment": 8
+    },
+    "BankSlot": {
+      "bytes": 32,
+      "alignment": 8
+    },
+    "PreparedSlot": {
+      "bytes": 24,
+      "alignment": 8
+    },
+    "std::boxed::Box<dyn BankStage>": {
+      "bytes": 16,
+      "alignment": 8
+    },
+    "runtime::RuntimeUnit": {
+      "bytes": 248,
+      "alignment": 8
+    }
+  }
+}

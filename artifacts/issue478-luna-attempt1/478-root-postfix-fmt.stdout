@@ -1,0 +1,36 @@
+Diff in /home/bl/misofm/engine-rt8-plan/crates/rack/src/lib.rs:2792:
+         }
+     }
+ 
+-    fn trace_stage(fail: bool,
+-        seam: SeamSide,
+-        mono_capable: bool,
+-    ) -> Box<dyn BankStage> {
++    fn trace_stage(fail: bool, seam: SeamSide, mono_capable: bool) -> Box<dyn BankStage> {
+         Box::new(PreparedTraceStage {
+             fail,
+             seam,
+Diff in /home/bl/misofm/engine-rt8-plan/crates/rack/src/lib.rs:2955:
+                     vec![true; 4],
+                     trace_stage(false, SeamSide::UpstreamOfSeam, true),
+                 ),
+-                slot(
+-                    vec![true; 4],
+-                    trace_stage(false, SeamSide::SeamSide, false),
+-                ),
++                slot(vec![true; 4], trace_stage(false, SeamSide::SeamSide, false)),
+             ],
+         )
+         .expect("collapse-eligible chain");
+Diff in /home/bl/misofm/engine-rt8-plan/crates/rack/src/lib.rs:2989:
+                     vec![true; 4],
+                     trace_stage(false, SeamSide::UpstreamOfSeam, true),
+                 ),
+-                slot(
+-                    vec![true; 4],
+-                    trace_stage(false, SeamSide::SeamSide, false),
+-                ),
++                slot(vec![true; 4], trace_stage(false, SeamSide::SeamSide, false)),
+             ],
+         )
+         .expect("chain");

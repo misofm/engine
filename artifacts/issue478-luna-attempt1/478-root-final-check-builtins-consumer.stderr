@@ -1,0 +1,5 @@
+    Checking rack v0.1.0 (/home/bl/misofm/engine-rt8-plan/crates/rack)
+    Checking rack-compiler v0.1.0 (/home/bl/misofm/engine-rt8-plan/crates/rack-compiler)
+    Checking graph v0.1.0 (/home/bl/misofm/engine-rt8-plan/crates/graph)
+    Checking builtins-compiler v0.1.0 (/home/bl/misofm/engine-rt8-plan/crates/builtins-compiler)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.31s
