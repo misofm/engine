@@ -115,3 +115,7 @@ Root adopts amendment on frozen90a72b00 source. Only observed pin, existing gene
 ## Integrated artifact qualification complete
 
 Current-main571dfc5b integration preserves the accepted host-core source exactly. Ordinary builder at90a72b00 returned1 for observed1ab725dbcf078716a666b78215490892386bc0170622bf9f79fa806908a14863; root checkpoint4cab1c9f adopted that pin under Astra's precise ruling. Ordinary verified rebuild reproduced it. Static/object/ABI, expected resources with26 red controls, separate hermetic, npm ci, current Chromium/Firefox/WebKit qualification/self-tests and matrix check each returned0. Generated recordsc86304d4 update only candidate/hash, retaining all PCM/resource numerical expectations. Artifactbuildcandidate4cab1c9f is distinct from later evidence heads. Exact-head actual PR review and requiredCI remain merge gates; no timing gain is claimed.
+
+## Delivered and remotely synchronized
+
+PR494 merged2026-09-06T04:10:37Z as mainfd4a937cbb782ebe04be0594f439606389dbe283 after Astra exacthead46bdd29e PASS and required qualification34010555237 SUCCESS. Root verified GitHub492 CLOSED. CP7 delivered as reuse of the two repeated typed projections; distinct one-off builtin/graph projections and shared encoder remain appropriately separate. No render-performance claim. Post-main qualification is tracked separately.
