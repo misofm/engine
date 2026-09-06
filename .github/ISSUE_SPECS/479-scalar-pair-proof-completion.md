@@ -39,3 +39,9 @@ Approve the exact bounded three-proof child: actual scalar meter DATA, actual Ef
 Root may assign fresh Luna1 at the recorded parent-preserving base after ordinary checkpoint/state audit. One coherent pass/verdict, Sol2/3 after failure, hardstop after3 remains. No implementation, tests, builds or repository/Git/GitHub mutations performed by this review.
 
 Root adopts PASS and assigns fresh Luna attempt 1. Pause at the first coherent green source tranche for root exact-path checkpoint before further implementation.
+
+## Luna attempt 1 first recoverable checkpoint
+
+Meter comparison now checks actual handle/generation/sequence/sample interval/frame count and both channel statistics against the independently prepared separate-owner reference, including nonzero energy/peak. Owner layout classes are counted exactly for materialized faders/matrices, with a preliminary byte sum. Owner attribution and saved scalar-allowance comparison remain incomplete; generic free count and whole session allowance are not accepted substitutes. Actual EffectSidechain fixture remains absent. This is a recoverable partial checkpoint, not final source acceptance.
+
+Root captured `/tmp/479-luna1-tranche1-{meter,owners,fmt,diff}.{command,log,status}`: all terminal0; both focused tests execute one actual test. Prior Luna reports lacked retained raw evidence and the first formatting check failed before scoped formatting; they are not credited as separate retained passing gates. Root now permits the remaining original proof tranche within the same coherent Luna pass.

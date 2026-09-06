@@ -6103,10 +6103,31 @@ mod tests {
         );
         let frames = HARNESS_QUANTUM as usize;
         assert_ne!(&observed[..frames], &observed[frames..]);
-        assert!(
-            paired.meter_consumers[0].consumer.try_pop().is_ok(),
-            "the observed separate track publishes a nonempty meter window"
+        let observed_meter = paired.meter_consumers[0]
+            .consumer
+            .try_pop()
+            .expect("the observed separate track publishes a meter window");
+        let reference_meter = reference.meter_consumers[0]
+            .consumer
+            .try_pop()
+            .expect("the reference track publishes a meter window");
+        assert_eq!(observed_meter.handle, reference_meter.handle);
+        assert_eq!(
+            observed_meter.reset_generation,
+            reference_meter.reset_generation
         );
+        assert_eq!(
+            observed_meter.window_sequence,
+            reference_meter.window_sequence
+        );
+        assert_eq!(observed_meter.start_sample, reference_meter.start_sample);
+        assert_eq!(observed_meter.end_sample, reference_meter.end_sample);
+        assert_eq!(observed_meter.frames, reference_meter.frames);
+        assert_eq!(observed_meter.left, reference_meter.left);
+        assert_eq!(observed_meter.right, reference_meter.right);
+        assert!(observed_meter.frames > 0);
+        assert!(observed_meter.left.energy > 0.0 || observed_meter.right.energy > 0.0);
+        assert!(observed_meter.left.sample_peak > 0.0 || observed_meter.right.sample_peak > 0.0);
     }
 
     #[test]

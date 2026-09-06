@@ -351,16 +351,36 @@ fn actual_scalar_prepare_and_bind_retain_the_charged_owner_layouts() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let [fader, matrix, outer] = test_only_scalar_owner_layouts();
+    let owner_allowance = 2 * fader.size_bytes + 2 * matrix.size_bytes + outer.size_bytes;
 
     test_only_reset_phase_two_allocation_tracker();
     let (bound, admitted, preparation, binding) = armed(test_only_observed_scalar_pair_binding);
     assert!(!preparation.overflowed);
+    let retained_owner_bytes: u64 = [fader, matrix]
+        .iter()
+        .map(|expected| {
+            preparation
+                .layouts
+                .iter()
+                .find(|observed| {
+                    observed.size_bytes == expected.size_bytes
+                        && observed.align_bytes == expected.align_bytes
+                })
+                .map_or(0, |observed| {
+                    observed.size_bytes * observed.allocation_count
+                })
+        })
+        .sum();
+    assert_eq!(
+        retained_owner_bytes,
+        2 * fader.size_bytes + 2 * matrix.size_bytes
+    );
     for expected in [fader, matrix] {
         assert!(
             preparation.layouts.iter().any(|observed| {
                 observed.size_bytes == expected.size_bytes
                     && observed.align_bytes == expected.align_bytes
-                    && observed.allocation_count >= 2
+                    && observed.allocation_count == 2
             }),
             "both original owners are actual retained preparation allocations: expected={expected:?}, observed={:?}",
             preparation.layouts
@@ -382,10 +402,23 @@ fn actual_scalar_prepare_and_bind_retain_the_charged_owner_layouts() {
                 && observed.align_bytes == outer.align_bytes
                 && observed.allocation_count >= 1
         }),
-        "binding allocates the charged two-pointer scalar outer"
+        "binding allocates the charged two-pointer scalar outer: {:?}",
+        binding.layouts
     );
+    let bound_outer_bytes = binding
+        .layouts
+        .iter()
+        .find(|observed| {
+            observed.size_bytes == outer.size_bytes && observed.align_bytes == outer.align_bytes
+        })
+        .map_or(0, |observed| {
+            observed.size_bytes * observed.allocation_count
+        });
+    assert!(bound_outer_bytes >= outer.size_bytes);
+    assert_eq!(retained_owner_bytes + outer.size_bytes, owner_allowance);
     assert!(binding.largest_allocation_bytes >= outer.size_bytes);
     assert!(outer.size_bytes <= admitted.largest_allocation_bytes);
+    assert!(owner_allowance <= admitted.session_plus_plan_bytes);
 
     LIVE_ALLOCS.set(0);
     LIVE_FREES.set(0);
