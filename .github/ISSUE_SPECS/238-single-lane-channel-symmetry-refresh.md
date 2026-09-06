@@ -145,3 +145,9 @@ Two finite original proof groups remain:
 After those test-only completions, retain exact named debug/release results and affected liveness/host/fmt/Clippy/policy evidence. Existing reported status files are descriptive `status=pass`, not captured numeric exit files; report their authorship/form honestly rather than invent terminal values. No parent full workspace/artifact/timing before source acceptance. Full refresh after ramp/reset and broader RT5 residual/measurement separation remain unchanged. No further production repair is requested by this verdict.
 
 Root adopts this consolidated FAIL and assigns Sol attempt2 for these two original proof groups only. Pause at a coherent green checkpoint; no further production algorithm changes or timing are authorized.
+
+## Sol attempt 2 source and finite evidence
+
+Source checkpoints0c20debe and70a6ff03 complete the compact per-operation oracle in the existing private test without changing accepted production code. The first case is partialW4 so the old-full-refresh mutation discriminates a multi-member bank. `/tmp/238-sol2-old-full-refresh-multimember.{diff,command,log,status}` retains the actual single-call mutation and numeric101 at the SAME assertion `one retarget evaluates only the addressed lane`, left8/right1. Restored exact execution has numeric0 in old-full-refresh-restored records.
+
+Final debug/release builtins library, input liveness/mono and host console liveness, affected all-targets Clippy, fmt and builtins/realtime policy records are under /tmp/238-sol2-* with captured numeric0. Earlier formatting failure, W8 shift correction, zero-test filter and W1-first mutation are retained as failed or nondiscriminating iterations; they are not final evidence. Pending one consolidated Astra Sol2 verdict. No broader qualification or timing has been claimed.
