@@ -43,3 +43,9 @@ The one actual temporary members.sort_unstable removal must fail the SAME unchan
 Read-only source/Git/GitHub inspection; no tests/builds/timing or repository mutations performed.
 
 Root adopts PASS and assigns fresh Luna1; pause for exact-path checkpoint at the first focused-green source tranche. Root owns Git/GitHub.
+
+## Luna attempt 1 source and evidence, pending Astra
+
+Source359548c9 adds the literal mixed-bank schedule and model classification comments. Retained /tmp/488-luna1-* PTY records show focused debug/release passing, intended runtime-sort mutation101 at the unchanged mixed literal assertion, and both full graph library profiles56 passing. First checkpoint debug output was not retained; the later records are recaptures, not retroactive provenance.
+
+Root flags incomplete frozen evidence for review: the effect-only case currently compares only the model to its literal, without the independently required runtime projection; no actual mutation diff was retained among the reported files; and the fmt/diff/workspace-policy shell bundle captures only its final exit while the specifically affected graph policy has no retained run. These are not silently waived by the green full suites. Runtime source is restored and the worktree is clean. Pending one consolidated Astra Luna1 verdict before further implementation.
