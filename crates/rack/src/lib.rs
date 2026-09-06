@@ -1174,13 +1174,15 @@ impl PreparedSlot {
 
     #[cfg(test)]
     #[allow(dead_code)]
-    fn has_active_lanes_scan(&self) -> bool {
-        let mut any = false;
-        for lane in 0..u8::BITS {
+    fn has_active_lanes_scan(&self, lanes: usize) -> bool {
+        TEST_PREPARED_ACTIVITY_QUERIES.with(|count| count.set(count.get() + 1));
+        for lane in 0..lanes {
             TEST_PREPARED_ACTIVITY_LANE_INSPECTIONS.with(|count| count.set(count.get() + 1));
-            any |= self.active_lanes & (1u8 << lane) != 0;
+            if self.active_lanes & (1u8 << lane) != 0 {
+                return true;
+            }
         }
-        any
+        false
     }
 
     #[inline(always)]
@@ -1194,9 +1196,6 @@ thread_local! {
     static TEST_PREPARED_ACTIVITY_QUERIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static TEST_PREPARED_ACTIVITY_LANE_INSPECTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static TEST_PREPARED_DROPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    static TEST_TRACE_BEGIN: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    static TEST_TRACE_DUAL: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    static TEST_TRACE_MONO: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -2574,6 +2573,7 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
     struct Planes {
         left: Vec<Vec<f32>>,
         right: Vec<Vec<f32>>,
@@ -2749,25 +2749,141 @@ mod tests {
         }
     }
 
-    struct PreparedTraceStage {
-        fail: bool,
+    const TRACE_STAGE_CAPACITY: usize = 16;
+    const TRACE_EVENT_CAPACITY: usize = 64;
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum TraceKind {
+        Begin,
+        Dual,
+        Mono,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    struct TraceEvent {
+        kind: TraceKind,
+        stage: u8,
+        first_sample: u64,
+        frames: u32,
+        queue_before: u8,
+        arithmetic_before: u8,
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct TraceObservation {
+        events: [Option<TraceEvent>; TRACE_EVENT_CAPACITY],
+        event_count: usize,
+        queues: [u8; TRACE_STAGE_CAPACITY],
+        arithmetic: [u8; TRACE_STAGE_CAPACITY],
+        drops: [u8; TRACE_STAGE_CAPACITY],
+    }
+
+    impl TraceObservation {
+        const EMPTY: Self = Self {
+            events: [None; TRACE_EVENT_CAPACITY],
+            event_count: 0,
+            queues: [0; TRACE_STAGE_CAPACITY],
+            arithmetic: [0; TRACE_STAGE_CAPACITY],
+            drops: [0; TRACE_STAGE_CAPACITY],
+        };
+
+        fn with_queues(specs: &[TraceSpec]) -> Self {
+            let mut observation = Self::EMPTY;
+            for spec in specs {
+                observation.queues[usize::from(spec.id)] = 2;
+            }
+            observation
+        }
+
+        fn record(&mut self, kind: TraceKind, stage: u8, first_sample: u64, frames: u32) {
+            let index = usize::from(stage);
+            let event = TraceEvent {
+                kind,
+                stage,
+                first_sample,
+                frames,
+                queue_before: self.queues[index],
+                arithmetic_before: self.arithmetic[index],
+            };
+            self.events[self.event_count] = Some(event);
+            self.event_count += 1;
+        }
+
+        fn ordered_events(&self) -> &[Option<TraceEvent>] {
+            &self.events[..self.event_count]
+        }
+    }
+
+    thread_local! {
+        static TEST_TRACE: std::cell::RefCell<TraceObservation> =
+            const { std::cell::RefCell::new(TraceObservation::EMPTY) };
+    }
+
+    #[derive(Clone, Copy)]
+    struct TraceSpec {
+        id: u8,
+        mask: [bool; 4],
         seam: SeamSide,
         mono_capable: bool,
+        fail: Option<TraceKind>,
+        delta: f32,
+    }
+
+    struct PreparedTraceStage(TraceSpec);
+
+    impl Drop for PreparedTraceStage {
+        fn drop(&mut self) {
+            TEST_TRACE.with(|trace| {
+                let mut trace = trace.borrow_mut();
+                let drops = &mut trace.drops[usize::from(self.0.id)];
+                *drops += 1;
+            });
+        }
+    }
+
+    fn trace_arithmetic(block: BankBlock<'_>, delta: f32, mono: bool) {
+        for sample in block.left.iter_mut() {
+            *sample += delta;
+        }
+        if !mono {
+            for sample in block.right.iter_mut() {
+                *sample += delta;
+            }
+        }
     }
 
     impl BankStage for PreparedTraceStage {
-        fn process(&mut self, _block: BankBlock<'_>) -> Result<(), RenderError> {
-            TEST_TRACE_DUAL.with(|count| count.set(count.get() + 1));
-            if self.fail {
+        fn process(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
+            TEST_TRACE.with(|trace| {
+                trace.borrow_mut().record(
+                    TraceKind::Dual,
+                    self.0.id,
+                    block.first_sample,
+                    block.frames,
+                );
+            });
+            if self.0.fail == Some(TraceKind::Dual) {
+                return Err(RenderError::InvalidEnvelope);
+            }
+            trace_arithmetic(block, self.0.delta, false);
+            TEST_TRACE.with(|trace| {
+                trace.borrow_mut().arithmetic[usize::from(self.0.id)] += 1;
+            });
+            Ok(())
+        }
+
+        fn begin_block(&mut self, first_sample: u64) -> Result<(), RenderError> {
+            TEST_TRACE.with(|trace| {
+                let mut trace = trace.borrow_mut();
+                trace.record(TraceKind::Begin, self.0.id, first_sample, 0);
+                let queued = &mut trace.queues[usize::from(self.0.id)];
+                *queued = queued.saturating_sub(1);
+            });
+            if self.0.fail == Some(TraceKind::Begin) {
                 Err(RenderError::InvalidEnvelope)
             } else {
                 Ok(())
             }
-        }
-
-        fn begin_block(&mut self, _first_sample: u64) -> Result<(), RenderError> {
-            TEST_TRACE_BEGIN.with(|count| count.set(count.get() + 1));
-            Ok(())
         }
 
         fn lane_symmetry(&self, _lane: usize) -> ChannelSymmetryWitness {
@@ -2775,15 +2891,29 @@ mod tests {
         }
 
         fn seam_side(&self) -> SeamSide {
-            self.seam
+            self.0.seam
         }
 
         fn supports_mono_collapse(&self) -> bool {
-            self.mono_capable
+            self.0.mono_capable
         }
 
-        fn process_mono(&mut self, _block: BankBlock<'_>) -> Result<(), RenderError> {
-            TEST_TRACE_MONO.with(|count| count.set(count.get() + 1));
+        fn process_mono(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
+            TEST_TRACE.with(|trace| {
+                trace.borrow_mut().record(
+                    TraceKind::Mono,
+                    self.0.id,
+                    block.first_sample,
+                    block.frames,
+                );
+            });
+            if self.0.fail == Some(TraceKind::Mono) {
+                return Err(RenderError::InvalidEnvelope);
+            }
+            trace_arithmetic(block, self.0.delta, true);
+            TEST_TRACE.with(|trace| {
+                trace.borrow_mut().arithmetic[usize::from(self.0.id)] += 1;
+            });
             Ok(())
         }
 
@@ -2792,17 +2922,174 @@ mod tests {
         }
     }
 
-    fn trace_stage(fail: bool, seam: SeamSide, mono_capable: bool) -> Box<dyn BankStage> {
-        Box::new(PreparedTraceStage {
-            fail,
-            seam,
-            mono_capable,
-        })
+    fn trace_slot(spec: TraceSpec) -> BankSlot {
+        slot(spec.mask.to_vec(), Box::new(PreparedTraceStage(spec)))
+    }
+
+    fn trace_planes() -> Planes {
+        Planes {
+            left: (0..4)
+                .map(|lane| (0..3).map(|frame| (lane * 8 + frame) as f32).collect())
+                .collect(),
+            right: (0..4)
+                .map(|lane| (0..3).map(|frame| (64 + lane * 8 + frame) as f32).collect())
+                .collect(),
+        }
+    }
+
+    fn trace_plane_bits(planes: &Planes) -> (Vec<Vec<u32>>, Vec<Vec<u32>>) {
+        (
+            planes
+                .left
+                .iter()
+                .map(|plane| plane.iter().map(|sample| sample.to_bits()).collect())
+                .collect(),
+            planes
+                .right
+                .iter()
+                .map(|plane| plane.iter().map(|sample| sample.to_bits()).collect())
+                .collect(),
+        )
+    }
+
+    fn old_mask_any_reference(
+        specs: &[TraceSpec],
+        collapse_prefix: Option<usize>,
+        planes: &mut Planes,
+        frames: u32,
+        first_sample: u64,
+    ) -> (Result<(), RenderError>, TraceObservation) {
+        let mut trace = TraceObservation::with_queues(specs);
+        for spec in specs {
+            if !spec.mask.iter().any(|active| *active) {
+                continue;
+            }
+            trace.record(TraceKind::Begin, spec.id, first_sample, 0);
+            let queued = &mut trace.queues[usize::from(spec.id)];
+            *queued = queued.saturating_sub(1);
+            if spec.fail == Some(TraceKind::Begin) {
+                return (Err(RenderError::InvalidEnvelope), trace);
+            }
+        }
+
+        // BankChain gathers into resident scratch and scatters only after every stage succeeds.
+        // Keep that error boundary in the reference rather than incrementally publishing PCM.
+        let mut scratch_planes = planes.clone();
+
+        let process_one = |spec: &TraceSpec,
+                           mono: bool,
+                           planes: &mut Planes,
+                           trace: &mut TraceObservation|
+         -> Result<(), RenderError> {
+            if !spec.mask.iter().any(|active| *active) {
+                return Ok(());
+            }
+            let kind = if mono {
+                TraceKind::Mono
+            } else {
+                TraceKind::Dual
+            };
+            trace.record(kind, spec.id, first_sample, frames);
+            if spec.fail == Some(kind) {
+                return Err(RenderError::InvalidEnvelope);
+            }
+            for plane in &mut planes.left {
+                for sample in &mut plane[..frames as usize] {
+                    *sample += spec.delta;
+                }
+            }
+            if !mono {
+                for plane in &mut planes.right {
+                    for sample in &mut plane[..frames as usize] {
+                        *sample += spec.delta;
+                    }
+                }
+            }
+            trace.arithmetic[usize::from(spec.id)] += 1;
+            Ok(())
+        };
+
+        if let Some(prefix) = collapse_prefix {
+            for spec in &specs[..prefix] {
+                if let Err(error) = process_one(spec, true, &mut scratch_planes, &mut trace) {
+                    return (Err(error), trace);
+                }
+            }
+            for lane in 0..scratch_planes.left.len() {
+                scratch_planes.right[lane][..frames as usize]
+                    .copy_from_slice(&scratch_planes.left[lane][..frames as usize]);
+            }
+            for spec in &specs[prefix..] {
+                if let Err(error) = process_one(spec, false, &mut scratch_planes, &mut trace) {
+                    return (Err(error), trace);
+                }
+            }
+        } else {
+            for spec in specs {
+                if let Err(error) = process_one(spec, false, &mut scratch_planes, &mut trace) {
+                    return (Err(error), trace);
+                }
+            }
+        }
+        *planes = scratch_planes;
+        (Ok(()), trace)
+    }
+
+    fn exercise_trace_case(specs: &[TraceSpec], collapse_prefix: Option<usize>, first_sample: u64) {
+        let mut expected_planes = trace_planes();
+        let mut actual_planes = trace_planes();
+        let (expected_result, expected_trace) = old_mask_any_reference(
+            specs,
+            collapse_prefix,
+            &mut expected_planes,
+            3,
+            first_sample,
+        );
+        TEST_TRACE.with(|trace| *trace.borrow_mut() = TraceObservation::with_queues(specs));
+        let mut chain = BankChain::new(
+            AoSoaScratch::new(BankWidth::Four, 3).expect("scratch"),
+            vec![true; 4].into_boxed_slice(),
+            specs.iter().copied().map(trace_slot).collect(),
+        )
+        .expect("trace chain");
+        if collapse_prefix.is_some() {
+            chain.arm_mono_collapse(true);
+        } else {
+            chain.force_mono_collapse_off(true);
+        }
+        let actual_result = chain.run(&mut actual_planes, 3, first_sample);
+        assert_eq!(actual_result, expected_result);
+        let actual_trace = TEST_TRACE.with(|trace| trace.borrow().clone());
+        assert_eq!(
+            actual_trace.ordered_events(),
+            expected_trace.ordered_events()
+        );
+        assert_eq!(actual_trace.queues, expected_trace.queues);
+        assert_eq!(actual_trace.arithmetic, expected_trace.arithmetic);
+        assert_eq!(
+            trace_plane_bits(&actual_planes),
+            trace_plane_bits(&expected_planes)
+        );
+        assert!(actual_trace.drops.iter().all(|drops| *drops == 0));
+        drop(chain);
+        let dropped = TEST_TRACE.with(|trace| trace.borrow().drops);
+        for spec in specs {
+            assert_eq!(dropped[usize::from(spec.id)], 1);
+        }
     }
 
     #[test]
     fn prepared_slot_activity_preserves_shape_bits_and_ownership() {
         assert!(core::mem::size_of::<PreparedSlot>() <= core::mem::size_of::<BankSlot>());
+        eprintln!(
+            "prepared-slot-layout size={} align={} public-size={} public-align={} chain-size={} chain-align={}",
+            core::mem::size_of::<PreparedSlot>(),
+            core::mem::align_of::<PreparedSlot>(),
+            core::mem::size_of::<BankSlot>(),
+            core::mem::align_of::<BankSlot>(),
+            core::mem::size_of::<BankChain>(),
+            core::mem::align_of::<BankChain>()
+        );
         for (width, lanes) in [(BankWidth::Four, 4_usize), (BankWidth::Eight, 8_usize)] {
             let scratch = || AoSoaScratch::new(width, 4).expect("scratch");
             assert_eq!(
@@ -2831,170 +3118,419 @@ mod tests {
                 "shape validation precedes packed conversion"
             );
 
-            let patterns = [
-                vec![false; lanes],
-                (0..lanes).map(|lane| lane == 0).collect(),
-                (0..lanes).map(|lane| lane % 2 == 0).collect(),
-                vec![true; lanes],
-            ];
-            let mut input = Vec::with_capacity(9);
-            for pattern in patterns.iter().cloned() {
-                let stage: Box<dyn BankStage> = if pattern.iter().all(|active| !active) {
+            let partial = if lanes == 4 {
+                vec![true, false, true, false]
+            } else {
+                vec![true, false, true, false, true, false, true, false]
+            };
+            let zero = Vec::with_capacity(4);
+            assert!(zero.capacity() > zero.len(), "spare caller capacity");
+            let mut zero_chain =
+                BankChain::new(scratch(), partial.clone().into_boxed_slice(), zero)
+                    .expect("zero-slot chain remains legal");
+            assert!(zero_chain.slots.is_empty());
+            assert_eq!(zero_chain.collapse_prefix(), 0);
+            let mut identity = Planes {
+                left: (0..lanes).map(|lane| vec![lane as f32 + 1.0; 4]).collect(),
+                right: (0..lanes).map(|lane| vec![lane as f32 + 17.0; 4]).collect(),
+            };
+            let identity_before = trace_plane_bits(&identity);
+            zero_chain
+                .run(&mut identity, 4, 17)
+                .expect("zero-slot identity");
+            assert_eq!(trace_plane_bits(&identity), identity_before);
+            drop(zero_chain);
+
+            let one_mask = if lanes == 4 {
+                vec![false, false, true, false]
+            } else {
+                vec![false, false, false, false, true, false, false, false]
+            };
+            let one_expected = if lanes == 4 { 0b0100 } else { 0b0001_0000 };
+            let mut one = Vec::with_capacity(5);
+            one.push(slot(vec![false; lanes], Box::new(PassThrough)));
+            let changed_lane = if lanes == 4 { 2 } else { 4 };
+            one[0].active_lanes[changed_lane] = true;
+            assert_eq!(one[0].active_lanes.as_ref(), one_mask.as_slice());
+            assert!(one.capacity() > one.len(), "spare caller capacity");
+            let one_chain = BankChain::new(scratch(), partial.clone().into_boxed_slice(), one)
+                .expect("one-bit slot");
+            assert_eq!(one_chain.slots[0].active_lanes, one_expected);
+            drop(one_chain);
+
+            let (three_masks, three_expected) = if lanes == 4 {
+                (
+                    vec![
+                        vec![false, false, false, false],
+                        vec![true, false, true, false],
+                        vec![true, true, true, true],
+                    ],
+                    vec![0b0000, 0b0101, 0b1111],
+                )
+            } else {
+                (
+                    vec![
+                        vec![false, false, false, false, false, false, false, false],
+                        vec![true, false, true, false, true, false, true, false],
+                        vec![true, true, true, true, true, true, true, true],
+                    ],
+                    vec![0x00, 0x55, 0xff],
+                )
+            };
+            let before_drop = TEST_PREPARED_DROPS.with(std::cell::Cell::get);
+            let mut three = Vec::with_capacity(7);
+            for (index, mask) in three_masks.into_iter().enumerate() {
+                let stage: Box<dyn BankStage> = if index == 0 {
                     Box::new(DropWitness)
                 } else {
                     Box::new(PassThrough)
                 };
-                input.push(slot(pattern, stage));
+                three.push(slot(mask, stage));
             }
-            while input.len() < 9 {
-                input.push(slot(vec![false; lanes], Box::new(PassThrough)));
-            }
-            // A caller may finish preparing a public slot before transferring ownership. The
-            // packed value must reflect that last caller mutation exactly.
-            input[1].active_lanes[0] = false;
-            let expected: Vec<u8> = input
-                .iter()
-                .map(|slot| {
-                    slot.active_lanes
-                        .iter()
-                        .enumerate()
-                        .fold(0, |mask, (lane, active)| mask | ((*active as u8) << lane))
-                })
-                .collect();
-            let mut chain = BankChain::new(scratch(), vec![true; lanes].into_boxed_slice(), input)
-                .expect("valid prepared slots");
+            assert!(three.capacity() > three.len(), "spare caller capacity");
+            let mut three_chain =
+                BankChain::new(scratch(), vec![true; lanes].into_boxed_slice(), three)
+                    .expect("empty, holey and full slots");
             assert_eq!(
-                chain
+                three_chain
                     .slots
                     .iter()
                     .map(|slot| slot.active_lanes)
                     .collect::<Vec<_>>(),
-                expected
+                three_expected
             );
-            assert_eq!(
-                chain.slots.len(),
-                9,
-                "slot count is independent of the lane mask width"
-            );
-            assert_eq!(chain.lane_symmetry(lanes), ChannelSymmetryWitness::DECLINED);
-            assert_eq!(chain.lane_symmetry(0), ChannelSymmetryWitness::DECLINED);
-            chain.slots[0].stage.disarm_observations();
-            let before_drop = TEST_PREPARED_DROPS.with(std::cell::Cell::get);
-            drop(chain);
+            let mut rendered = Planes {
+                left: (0..lanes).map(|_| vec![3.0; 4]).collect(),
+                right: (0..lanes).map(|_| vec![-7.0; 4]).collect(),
+            };
+            three_chain.run(&mut rendered, 4, 23).expect("shape render");
+            assert_eq!(TEST_PREPARED_DROPS.with(std::cell::Cell::get), before_drop);
+            drop(three_chain);
             assert_eq!(
                 TEST_PREPARED_DROPS.with(std::cell::Cell::get),
-                before_drop + 1,
-                "an inactive stage remains owned until chain retirement"
+                before_drop + 1
+            );
+
+            let partial_patterns = if lanes == 4 {
+                vec![
+                    vec![false, false, false, false],
+                    vec![true, false, false, false],
+                    vec![false, false, true, false],
+                    vec![true, false, true, false],
+                    vec![false, false, false, false],
+                    vec![true, false, false, false],
+                    vec![false, false, true, false],
+                    vec![true, false, true, false],
+                    vec![false, false, false, false],
+                ]
+            } else {
+                vec![
+                    vec![false, false, false, false, false, false, false, false],
+                    vec![true, false, false, false, false, false, false, false],
+                    vec![false, false, true, false, false, false, false, false],
+                    vec![false, false, false, false, true, false, false, false],
+                    vec![false, false, false, false, false, false, true, false],
+                    vec![true, false, true, false, false, false, false, false],
+                    vec![false, false, false, false, true, false, true, false],
+                    vec![true, false, false, false, true, false, false, false],
+                    vec![true, false, true, false, true, false, true, false],
+                ]
+            };
+            let nine_expected: &[u8] = if lanes == 4 {
+                &[0, 1, 4, 5, 0, 1, 4, 5, 0]
+            } else {
+                &[0, 1, 4, 16, 64, 5, 80, 17, 85]
+            };
+            let mut nine = Vec::with_capacity(13);
+            nine.extend(
+                partial_patterns
+                    .into_iter()
+                    .map(|mask| slot(mask, Box::new(PassThrough))),
+            );
+            assert!(nine.capacity() > nine.len(), "spare caller capacity");
+            let nine_chain = BankChain::new(scratch(), partial.into_boxed_slice(), nine)
+                .expect("slot count exceeds lane width");
+            assert_eq!(nine_chain.slots.len(), 9);
+            assert_eq!(
+                nine_chain
+                    .slots
+                    .iter()
+                    .map(|slot| slot.active_lanes)
+                    .collect::<Vec<_>>(),
+                nine_expected
+            );
+            assert_eq!(
+                nine_chain.lane_symmetry(lanes),
+                ChannelSymmetryWitness::DECLINED
             );
         }
+
+        let active = [true; 4];
+        let collapsible = [
+            TraceSpec {
+                id: 0,
+                mask: active,
+                seam: SeamSide::UpstreamOfSeam,
+                mono_capable: true,
+                fail: None,
+                delta: 1.0,
+            },
+            TraceSpec {
+                id: 1,
+                mask: active,
+                seam: SeamSide::SeamSide,
+                mono_capable: false,
+                fail: None,
+                delta: 2.0,
+            },
+        ];
+        let chain = BankChain::new(
+            AoSoaScratch::new(BankWidth::Four, 1).expect("scratch"),
+            active.to_vec().into_boxed_slice(),
+            collapsible.into_iter().map(trace_slot).collect(),
+        )
+        .expect("collapse prefix");
+        assert_eq!(chain.collapse_prefix(), 1);
+        drop(chain);
+        let mut inactive_prefix = collapsible;
+        inactive_prefix[0].mask = [false; 4];
+        let chain = BankChain::new(
+            AoSoaScratch::new(BankWidth::Four, 1).expect("scratch"),
+            active.to_vec().into_boxed_slice(),
+            inactive_prefix.into_iter().map(trace_slot).collect(),
+        )
+        .expect("inactive slot remains owned");
+        assert_eq!(
+            chain.collapse_prefix(),
+            0,
+            "packed conversion preserves the original whole-mask collapse clause"
+        );
     }
 
     #[test]
     fn prepared_slot_activity_preserves_dispatch_trace_and_errors() {
-        TEST_TRACE_BEGIN.with(|count| count.set(0));
-        TEST_TRACE_DUAL.with(|count| count.set(0));
-        TEST_TRACE_MONO.with(|count| count.set(0));
-        let mut chain = BankChain::new(
-            AoSoaScratch::new(BankWidth::Four, 8).expect("scratch"),
-            vec![true; 4].into_boxed_slice(),
-            vec![
-                slot(
-                    vec![false; 4],
-                    trace_stage(false, SeamSide::UpstreamOfSeam, false),
-                ),
-                slot(
-                    vec![true; 4],
-                    trace_stage(false, SeamSide::UpstreamOfSeam, false),
-                ),
-                slot(
-                    vec![false; 4],
-                    trace_stage(false, SeamSide::UpstreamOfSeam, false),
-                ),
-                slot(
-                    vec![true; 4],
-                    trace_stage(true, SeamSide::UpstreamOfSeam, false),
-                ),
-                slot(
-                    vec![true; 4],
-                    trace_stage(false, SeamSide::UpstreamOfSeam, false),
-                ),
-            ],
-        )
-        .expect("chain");
-        let mut planes = Planes {
-            left: (0..4).map(|_| vec![1.0; 8]).collect(),
-            right: (0..4).map(|_| vec![2.0; 8]).collect(),
-        };
-        assert_eq!(
-            chain.run(&mut planes, 8, 64),
-            Err(RenderError::InvalidEnvelope)
-        );
-        assert_eq!(
-            TEST_TRACE_BEGIN.with(std::cell::Cell::get),
-            3,
-            "only nonempty slots drain"
-        );
-        assert_eq!(
-            TEST_TRACE_DUAL.with(std::cell::Cell::get),
-            2,
-            "failure stops at the same slot"
-        );
-        assert_eq!(TEST_TRACE_MONO.with(std::cell::Cell::get), 0);
+        let full = [true; 4];
+        let empty = [false; 4];
+        let ordinary = [
+            TraceSpec {
+                id: 0,
+                mask: empty,
+                seam: SeamSide::UpstreamOfSeam,
+                mono_capable: false,
+                fail: None,
+                delta: 1.0,
+            },
+            TraceSpec {
+                id: 1,
+                mask: full,
+                seam: SeamSide::UpstreamOfSeam,
+                mono_capable: false,
+                fail: None,
+                delta: 2.0,
+            },
+            TraceSpec {
+                id: 2,
+                mask: empty,
+                seam: SeamSide::UpstreamOfSeam,
+                mono_capable: false,
+                fail: None,
+                delta: 4.0,
+            },
+            TraceSpec {
+                id: 3,
+                mask: full,
+                seam: SeamSide::UpstreamOfSeam,
+                mono_capable: false,
+                fail: None,
+                delta: 8.0,
+            },
+            TraceSpec {
+                id: 4,
+                mask: empty,
+                seam: SeamSide::UpstreamOfSeam,
+                mono_capable: false,
+                fail: None,
+                delta: 16.0,
+            },
+        ];
+        exercise_trace_case(&ordinary, None, 41);
 
-        TEST_TRACE_BEGIN.with(|count| count.set(0));
-        TEST_TRACE_DUAL.with(|count| count.set(0));
-        TEST_TRACE_MONO.with(|count| count.set(0));
-        let mut collapsed = BankChain::new(
-            AoSoaScratch::new(BankWidth::Four, 8).expect("scratch"),
-            vec![true; 4].into_boxed_slice(),
-            vec![
-                slot(
-                    vec![true; 4],
-                    trace_stage(false, SeamSide::UpstreamOfSeam, true),
-                ),
-                slot(vec![true; 4], trace_stage(false, SeamSide::SeamSide, false)),
-            ],
-        )
-        .expect("collapse-eligible chain");
-        collapsed.arm_mono_collapse(true);
-        let mut mono_planes = Planes {
-            left: (0..4).map(|_| vec![1.0; 8]).collect(),
-            right: (0..4).map(|_| vec![1.0; 8]).collect(),
-        };
-        collapsed
-            .run(&mut mono_planes, 8, 64)
-            .expect("collapsed run");
-        assert_eq!(TEST_TRACE_BEGIN.with(std::cell::Cell::get), 2);
-        assert_eq!(TEST_TRACE_MONO.with(std::cell::Cell::get), 1);
-        assert_eq!(TEST_TRACE_DUAL.with(std::cell::Cell::get), 1);
+        let mut begin_failure = ordinary;
+        begin_failure[3].fail = Some(TraceKind::Begin);
+        exercise_trace_case(&begin_failure, None, 73);
+        let mut process_failure = ordinary;
+        process_failure[3].fail = Some(TraceKind::Dual);
+        exercise_trace_case(&process_failure, None, 89);
+
+        let collapsed = [
+            TraceSpec {
+                id: 5,
+                mask: full,
+                seam: SeamSide::UpstreamOfSeam,
+                mono_capable: true,
+                fail: None,
+                delta: 1.0,
+            },
+            TraceSpec {
+                id: 6,
+                mask: full,
+                seam: SeamSide::UpstreamOfSeam,
+                mono_capable: true,
+                fail: None,
+                delta: 2.0,
+            },
+            TraceSpec {
+                id: 7,
+                mask: full,
+                seam: SeamSide::SeamSide,
+                mono_capable: false,
+                fail: None,
+                delta: 4.0,
+            },
+            TraceSpec {
+                id: 8,
+                mask: full,
+                seam: SeamSide::SeamSide,
+                mono_capable: false,
+                fail: None,
+                delta: 8.0,
+            },
+        ];
+        exercise_trace_case(&collapsed, Some(2), 101);
+        let mut mono_failure = collapsed;
+        mono_failure[1].fail = Some(TraceKind::Mono);
+        exercise_trace_case(&mono_failure, Some(2), 127);
+        let mut seam_failure = collapsed;
+        seam_failure[3].fail = Some(TraceKind::Dual);
+        exercise_trace_case(&seam_failure, Some(2), 149);
     }
 
     #[test]
     fn prepared_slot_dispatch_uses_constant_activity_checks() {
         reset_prepared_activity_observation();
-        TEST_TRACE_BEGIN.with(|count| count.set(0));
-        TEST_TRACE_DUAL.with(|count| count.set(0));
-        TEST_TRACE_MONO.with(|count| count.set(0));
+        let full = [true; 4];
+        let specs = [
+            TraceSpec {
+                id: 0,
+                mask: full,
+                seam: SeamSide::UpstreamOfSeam,
+                mono_capable: true,
+                fail: None,
+                delta: 1.0,
+            },
+            TraceSpec {
+                id: 1,
+                mask: full,
+                seam: SeamSide::SeamSide,
+                mono_capable: false,
+                fail: None,
+                delta: 2.0,
+            },
+        ];
+        TEST_TRACE.with(|trace| *trace.borrow_mut() = TraceObservation::with_queues(&specs));
         let mut chain = BankChain::new(
             AoSoaScratch::new(BankWidth::Four, 4).expect("scratch"),
             vec![true; 4].into_boxed_slice(),
-            vec![
-                slot(
-                    vec![true; 4],
-                    trace_stage(false, SeamSide::UpstreamOfSeam, true),
-                ),
-                slot(vec![true; 4], trace_stage(false, SeamSide::SeamSide, false)),
-            ],
+            specs.into_iter().map(trace_slot).collect(),
         )
         .expect("chain");
         let mut planes = Planes {
-            left: (0..4).map(|_| vec![0.0; 4]).collect(),
-            right: (0..4).map(|_| vec![0.0; 4]).collect(),
+            left: (0..4).map(|lane| vec![lane as f32; 4]).collect(),
+            right: (0..4).map(|lane| vec![32.0 + lane as f32; 4]).collect(),
         };
+        chain.force_mono_collapse_off(true);
         chain.run(&mut planes, 4, 0).expect("ordinary run");
+        assert!(!chain.is_collapsed());
+        chain.force_mono_collapse_off(false);
+        chain.arm_mono_collapse(true);
         chain.run(&mut planes, 4, 4).expect("collapsed run");
+        assert!(chain.is_collapsed());
+        assert_eq!(chain.collapses(), 1);
+        let trace = TEST_TRACE.with(|trace| trace.borrow().clone());
+        assert_eq!(
+            trace.ordered_events(),
+            &[
+                Some(TraceEvent {
+                    kind: TraceKind::Begin,
+                    stage: 0,
+                    first_sample: 0,
+                    frames: 0,
+                    queue_before: 2,
+                    arithmetic_before: 0
+                }),
+                Some(TraceEvent {
+                    kind: TraceKind::Begin,
+                    stage: 1,
+                    first_sample: 0,
+                    frames: 0,
+                    queue_before: 2,
+                    arithmetic_before: 0
+                }),
+                Some(TraceEvent {
+                    kind: TraceKind::Dual,
+                    stage: 0,
+                    first_sample: 0,
+                    frames: 4,
+                    queue_before: 1,
+                    arithmetic_before: 0
+                }),
+                Some(TraceEvent {
+                    kind: TraceKind::Dual,
+                    stage: 1,
+                    first_sample: 0,
+                    frames: 4,
+                    queue_before: 1,
+                    arithmetic_before: 0
+                }),
+                Some(TraceEvent {
+                    kind: TraceKind::Begin,
+                    stage: 0,
+                    first_sample: 4,
+                    frames: 0,
+                    queue_before: 1,
+                    arithmetic_before: 1
+                }),
+                Some(TraceEvent {
+                    kind: TraceKind::Begin,
+                    stage: 1,
+                    first_sample: 4,
+                    frames: 0,
+                    queue_before: 1,
+                    arithmetic_before: 1
+                }),
+                Some(TraceEvent {
+                    kind: TraceKind::Mono,
+                    stage: 0,
+                    first_sample: 4,
+                    frames: 4,
+                    queue_before: 0,
+                    arithmetic_before: 1
+                }),
+                Some(TraceEvent {
+                    kind: TraceKind::Dual,
+                    stage: 1,
+                    first_sample: 4,
+                    frames: 4,
+                    queue_before: 0,
+                    arithmetic_before: 1
+                }),
+            ]
+        );
+        assert_eq!(trace.queues[..2], [0, 0]);
+        assert_eq!(trace.arithmetic[..2], [2, 2]);
+        assert_eq!(
+            trace_plane_bits(&planes),
+            (
+                (0..4)
+                    .map(|lane| vec![(lane as f32 + 6.0).to_bits(); 4])
+                    .collect(),
+                (0..4)
+                    .map(|lane| vec![(lane as f32 + 6.0).to_bits(); 4])
+                    .collect(),
+            )
+        );
         let (queries, lane_inspections) = prepared_activity_observation();
-        assert!(queries >= 6, "all three dispatch sites were reached");
+        assert_eq!(queries, 8, "ordinary, prefix-mono and seam-dual guards");
         assert_eq!(
             lane_inspections, 0,
             "prepared queries do not scan lane masks"

@@ -219,6 +219,49 @@ fn audit_graph_render(
     witness
 }
 
+struct RuntimeBankPlanes {
+    left: Vec<Vec<f32>>,
+    right: Vec<Vec<f32>>,
+}
+
+impl RuntimeBankPlanes {
+    fn new(lanes: usize) -> Self {
+        Self {
+            left: (0..lanes).map(|lane| vec![lane as f32 + 1.0]).collect(),
+            right: (0..lanes).map(|lane| vec![lane as f32 + 1.0]).collect(),
+        }
+    }
+}
+
+impl rack::BankMembers for RuntimeBankPlanes {
+    fn plane(&self, lane: usize) -> (&[f32], &[f32]) {
+        (&self.left[lane], &self.right[lane])
+    }
+
+    fn plane_mut(&mut self, lane: usize) -> (&mut [f32], &mut [f32]) {
+        (&mut self.left[lane], &mut self.right[lane])
+    }
+}
+
+fn audit_runtime_bank_render(
+    chain: &mut rack::BankChain,
+    planes: &mut RuntimeBankPlanes,
+    first_sample: u64,
+) {
+    LIVE_ALLOCS.set(0);
+    LIVE_FREES.set(0);
+    armed(|| {
+        chain
+            .run(planes, 1, first_sample)
+            .expect("runtime bank render")
+    });
+    assert_eq!(
+        (LIVE_ALLOCS.get(), LIVE_FREES.get()),
+        (0, 0),
+        "actual mono-collapsed/fallback bank render allocation/free gate"
+    );
+}
+
 #[test]
 fn actual_queued_graph_phases_allocate_and_free_nothing() {
     let _session_guard = SESSION
@@ -526,19 +569,6 @@ fn actual_runtime_bank_slot_owners_fit_retained_largest_and_conversion_reservati
         "controlled realloc releases its new request"
     );
 
-    // Prepare stage objects and scratch before arming the attribution interval. The actual
-    // ordered slot conversion is the production bank_chain reached by the second call, and the
-    // returned ownership stays alive until the separate release interval below.
-    const SLOT_COUNT: usize = 3;
-    const WIDTH: usize = 8;
-    let stage_layout = Layout::array::<Box<dyn rack::BankStage>>(SLOT_COUNT).expect("stage layout");
-    let slot_layout = Layout::array::<rack::BankSlot>(SLOT_COUNT).expect("slot layout");
-    // The private prepared slot mirrors these fields in the same order; keep this test-local
-    // layout fact beside the ownership oracle rather than exposing a production diagnostic.
-    let prepared_slot_layout =
-        Layout::array::<(Box<dyn rack::BankStage>, u8)>(SLOT_COUNT).expect("prepared slot layout");
-    let mask_layout = Layout::array::<bool>(WIDTH).expect("mask layout");
-    let scratch_layout = Layout::array::<f32>(WIDTH).expect("one scratch plane");
     let count = |layouts: &[builtins_compiler::BuiltinRetainedLayout], expected: Layout| {
         layouts
             .iter()
@@ -548,79 +578,158 @@ fn actual_runtime_bank_slot_owners_fit_retained_largest_and_conversion_reservati
             })
             .map_or(0, |layout| layout.allocation_count)
     };
-    let inputs =
-        graph::test_only_prepare_bank_chain_inputs(effect_contract::BankWidth::Eight, SLOT_COUNT);
-    test_only_reset_phase_two_allocation_tracker();
-    reset_byte_counters();
-    LIVE_ALLOCS.set(0);
-    LIVE_FREES.set(0);
-    // Stage storage and the caller-owned chain mask predate the armed conversion interval.
-    LIVE_BYTES.set((stage_layout.size() + mask_layout.size()) as u64);
-    let observation = test_only_begin_phase_two_allocation_observation();
-    let ownership = armed(|| graph::test_only_bank_chain_ownership(inputs));
-    drop(observation);
-    let snapshot = test_only_phase_two_allocation_snapshot();
-    assert!(!snapshot.overflowed);
-    assert!(!BYTE_COUNTER_FAILED.get());
-    assert_eq!(ownership.slot_count, SLOT_COUNT);
-    assert_eq!(ownership.requested_stage_capacity, SLOT_COUNT);
-    assert_eq!(ownership.runtime_slot_capacity, SLOT_COUNT);
-    assert_eq!(ownership.inferred_retained_slot_count, SLOT_COUNT);
-    assert_eq!(ownership.stage_pointer_bytes, stage_layout.size());
-    assert_eq!(ownership.slot_bytes, slot_layout.size());
-    assert_eq!(ownership.mask_bytes, mask_layout.size());
-    assert_eq!(snapshot.allocation_count, SLOT_COUNT as u64 + 2);
-    assert_eq!(snapshot.deallocation_count, SLOT_COUNT as u64 + 2);
-    assert_eq!(count(&snapshot.layouts, slot_layout), 1);
-    assert_eq!(count(&snapshot.layouts, prepared_slot_layout), 1);
-    assert_eq!(count(&snapshot.layouts, mask_layout), SLOT_COUNT as u64);
-    assert_eq!(count(&snapshot.deallocation_layouts, stage_layout), 1);
-    assert_eq!(LARGEST_REQUESTED_BYTES.get(), slot_layout.size() as u64);
-    assert_eq!(LIVE_ALLOCS.get(), SLOT_COUNT as u64 + 2);
-    assert_eq!(LIVE_FREES.get(), SLOT_COUNT as u64 + 2);
+    let mut prepared_unit_layout = None;
+    for width in [
+        effect_contract::BankWidth::Four,
+        effect_contract::BankWidth::Eight,
+    ] {
+        let lanes = width.lanes() as usize;
+        for slot_count in [0_usize, 1, 3, 9] {
+            // Stage storage, chain mask and scratch are created before the measured conversion.
+            // The graph test seam deliberately keeps this chain ragged, so tiled staging remains
+            // absent and separately owned.
+            let stage_layout =
+                Layout::array::<Box<dyn rack::BankStage>>(slot_count).expect("stage layout");
+            let slot_layout =
+                Layout::array::<rack::BankSlot>(slot_count).expect("public slot layout");
+            let mask_layout = Layout::array::<bool>(lanes).expect("one lane mask layout");
+            let scratch_layout = Layout::array::<f32>(lanes).expect("one scratch plane");
+            let inputs = graph::test_only_prepare_bank_chain_inputs(width, slot_count);
+            test_only_reset_phase_two_allocation_tracker();
+            reset_byte_counters();
+            LIVE_ALLOCS.set(0);
+            LIVE_FREES.set(0);
+            LIVE_BYTES.set((stage_layout.size() + mask_layout.size()) as u64);
+            let observation = test_only_begin_phase_two_allocation_observation();
+            let mut ownership = armed(|| graph::test_only_bank_chain_ownership(inputs));
+            drop(observation);
+            let snapshot = test_only_phase_two_allocation_snapshot();
+            assert!(!snapshot.overflowed);
+            assert!(!BYTE_COUNTER_FAILED.get());
+            assert_eq!(ownership.slot_count, slot_count);
+            assert_eq!(ownership.requested_stage_capacity, slot_count);
+            assert_eq!(
+                ownership.runtime_slot_capacity, slot_count,
+                "incoming public BankSlot Vec capacity"
+            );
+            assert_eq!(ownership.inferred_retained_slot_count, slot_count);
+            assert_eq!(ownership.stage_pointer_bytes, stage_layout.size());
+            assert_eq!(ownership.slot_bytes, slot_layout.size());
+            assert_eq!(ownership.mask_bytes, mask_layout.size());
 
-    let n = SLOT_COUNT as u64;
-    let f = core::mem::size_of::<Box<dyn rack::BankStage>>() as u64;
-    let b = core::mem::size_of::<rack::BankSlot>() as u64;
-    let p = core::mem::size_of::<(Box<dyn rack::BankStage>, u8)>() as u64;
-    let w = WIDTH as u64 * core::mem::size_of::<bool>() as u64;
-    assert_eq!(core::mem::size_of::<bool>(), 1);
-    assert!(p <= b, "prepared slot layout fits the public slot layout");
-    let c = n * (f + 3 * b + 3 * w);
-    let l = (n * f).max(n * b).max(w);
-    let retained = n * p + w;
-    let conversion_coexistence = n * f + n * b + 2 * n * p + 2 * w;
-    assert!(retained <= n * (b + 2 * w));
-    assert!(conversion_coexistence <= c);
-    for request in [n * f, n * b, n * p, w] {
-        assert!(request <= l);
+            let prepared_layout = if slot_count == 0 {
+                assert_eq!(snapshot.allocation_count, 0);
+                assert_eq!(snapshot.deallocation_count, 0);
+                assert!(snapshot.layouts.is_empty());
+                assert!(snapshot.deallocation_layouts.is_empty());
+                None
+            } else {
+                let observed = snapshot
+                    .layouts
+                    .iter()
+                    .find(|layout| {
+                        layout.allocation_count == 1
+                            && !(layout.size_bytes == slot_layout.size() as u64
+                                && layout.align_bytes == slot_layout.align() as u64)
+                            && !(layout.size_bytes == mask_layout.size() as u64
+                                && layout.align_bytes == mask_layout.align() as u64)
+                    })
+                    .expect("actual private prepared-slot destination request");
+                let layout = Layout::from_size_align(
+                    usize::try_from(observed.size_bytes).expect("native layout size"),
+                    usize::try_from(observed.align_bytes).expect("native layout alignment"),
+                )
+                .expect("observed private destination layout");
+                let unit = (layout.size() / slot_count, layout.align());
+                if let Some(expected) = prepared_unit_layout {
+                    assert_eq!(unit, expected, "one private target layout across S/W cases");
+                } else {
+                    prepared_unit_layout = Some(unit);
+                    eprintln!(
+                        "actual-private-prepared-slot-layout size={} align={}",
+                        unit.0, unit.1
+                    );
+                }
+                assert_eq!(snapshot.allocation_count, slot_count as u64 + 2);
+                assert_eq!(snapshot.deallocation_count, slot_count as u64 + 2);
+                assert_eq!(count(&snapshot.layouts, slot_layout), 1);
+                assert_eq!(count(&snapshot.layouts, layout), 1);
+                assert_eq!(count(&snapshot.layouts, mask_layout), slot_count as u64);
+                assert_eq!(count(&snapshot.deallocation_layouts, stage_layout), 1);
+                assert_eq!(count(&snapshot.deallocation_layouts, slot_layout), 1);
+                assert_eq!(
+                    count(&snapshot.deallocation_layouts, mask_layout),
+                    slot_count as u64
+                );
+                Some(layout)
+            };
+
+            let n = slot_count as u64;
+            let f = core::mem::size_of::<Box<dyn rack::BankStage>>() as u64;
+            let b = core::mem::size_of::<rack::BankSlot>() as u64;
+            let w = mask_layout.size() as u64;
+            let p = prepared_layout.map_or(0, |layout| layout.size() as u64 / n);
+            assert_eq!(core::mem::size_of::<bool>(), 1);
+            assert!(p <= b, "actual private slot layout fits public slot layout");
+            let retained = n * p + w;
+            if n == 0 {
+                assert_eq!(LARGEST_REQUESTED_BYTES.get(), 0);
+                assert_eq!(LIVE_BYTES.get(), w, "direct caller retains its chain mask");
+            } else {
+                let c = n * (f + 3 * b + 3 * w);
+                let l = (n * f).max(n * b).max(w);
+                let conversion_coexistence = n * f + n * b + 2 * n * p + 2 * n * w;
+                assert!(n * p + n * w <= n * (b + 2 * w));
+                assert!(conversion_coexistence <= c);
+                for request in [n * f, n * b, n * p, w] {
+                    assert!(request <= l);
+                }
+                assert_eq!(LARGEST_REQUESTED_BYTES.get(), l);
+                assert_eq!(LIVE_BYTES.get(), retained);
+
+                let mut planes = RuntimeBankPlanes::new(lanes);
+                let chain = ownership.test_only_chain_mut();
+                chain.arm_mono_collapse(true);
+                for sample in 0..4 {
+                    audit_runtime_bank_render(chain, &mut planes, sample);
+                }
+                assert_eq!(chain.collapses(), 4, "actual mono-collapsed path is live");
+                chain.force_mono_collapse_off(true);
+                for sample in 4..8 {
+                    audit_runtime_bank_render(chain, &mut planes, sample);
+                }
+                assert_eq!(chain.collapses(), 4, "forced fallback remains dual");
+                assert!(!chain.is_collapsed());
+            }
+
+            let release_bytes = retained + 2 * scratch_layout.size() as u64;
+            test_only_reset_phase_two_allocation_tracker();
+            reset_byte_counters();
+            LIVE_ALLOCS.set(0);
+            LIVE_FREES.set(0);
+            LIVE_BYTES.set(release_bytes);
+            let observation = test_only_begin_phase_two_allocation_observation();
+            armed(|| drop(ownership));
+            drop(observation);
+            let release = test_only_phase_two_allocation_snapshot();
+            assert!(!release.overflowed);
+            assert!(!BYTE_COUNTER_FAILED.get());
+            assert_eq!(release.allocation_count, 0);
+            assert_eq!(release.deallocation_count, u64::from(slot_count != 0) + 3);
+            if let Some(prepared_layout) = prepared_layout {
+                assert_eq!(count(&release.deallocation_layouts, prepared_layout), 1);
+            }
+            assert_eq!(count(&release.deallocation_layouts, mask_layout), 1);
+            assert_eq!(count(&release.deallocation_layouts, scratch_layout), 2);
+            assert_eq!(LIVE_BYTES.get(), 0, "owned slot chain releases off render");
+            assert_eq!(LIVE_ALLOCS.get(), 0);
+            assert_eq!(LIVE_FREES.get(), u64::from(slot_count != 0) + 3);
+        }
     }
-    assert_eq!(LARGEST_REQUESTED_BYTES.get(), l);
-    assert_eq!(LIVE_BYTES.get(), retained);
-
-    let release_bytes = retained + 2 * scratch_layout.size() as u64;
-    test_only_reset_phase_two_allocation_tracker();
-    reset_byte_counters();
-    LIVE_ALLOCS.set(0);
-    LIVE_FREES.set(0);
-    LIVE_BYTES.set(release_bytes);
-    let observation = test_only_begin_phase_two_allocation_observation();
-    armed(|| drop(ownership));
-    drop(observation);
-    let release = test_only_phase_two_allocation_snapshot();
-    assert!(!release.overflowed);
-    assert!(!BYTE_COUNTER_FAILED.get());
-    assert_eq!(release.allocation_count, 0);
-    assert_eq!(release.deallocation_count, 4);
-    assert_eq!(
-        count(&release.deallocation_layouts, prepared_slot_layout),
-        1
+    assert!(
+        prepared_unit_layout.is_some(),
+        "nonzero cases expose the actual private target layout"
     );
-    assert_eq!(count(&release.deallocation_layouts, mask_layout), 1);
-    assert_eq!(count(&release.deallocation_layouts, scratch_layout), 2);
-    assert_eq!(LIVE_BYTES.get(), 0, "owned slot chain releases off render");
-    assert_eq!(LIVE_ALLOCS.get(), 0);
-    assert_eq!(LIVE_FREES.get(), 4);
 
     // This direct-attachment fixture is separate from compiler admission. It proves the actual
     // runtime R/S bounds for both delivery variants against the same calculated allowance.
