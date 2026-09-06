@@ -40,3 +40,9 @@ Full frozen finite helper mapping/identity and current graph/session diagnostic 
 Read-only filesystem/Git inspection; no source/spec changes, tests/builds/timing or Git/GitHub mutations performed.
 
 Root adopts scope PASS and assigns fresh Luna1. Pause at the first compiling/focused-green exact-path tranche, retaining actual command/log/numericstatus before reporting it. Root owns Git/GitHub checkpoint and delivery.
+
+## Luna attempt 1 source and finite gates
+
+Source20eeb26a implements exactly the two total helper signatures, three caller bindings and direct mapping fixture;9d069b8b changes only formatting in that fixture. /tmp/490-luna1-{focused,debug,release,session,clippy,diff,fmt}/command.{command,log,status} retains actual runs: focused1, graph compiler62 in each profile, session parity1 plus invalid-matrix14, strict affected Clippy and diff all return0. Initial fmt returns1; formatting is applied and root independently captures restored fmt0 in /tmp/490-root-fmt-restored.*. Earlier tests precede this formatting-only correction; no semantic test rerun is claimed.
+
+Pending one consolidated Astra Luna1 verdict. Validation order, transforms and validated-invariant expects remain unchanged. No timing or performance gain is claimed.
