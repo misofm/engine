@@ -1,0 +1,101 @@
+    Checking bytemuck v1.25.2
+    Checking engine v0.1.0 (/home/bl/misofm/engine-483-floor-parity/crates/engine)
+    Checking lexical-util v1.0.7
+    Checking cfg-if v1.0.4
+    Checking typenum v1.20.1
+    Checking once_cell v1.21.4
+    Checking smallvec v1.15.2
+    Checking utf8-decode v1.0.1
+    Checking locspan v0.8.2
+    Checking decoded-char v0.1.1
+    Checking cpufeatures v0.3.0
+    Checking dsp-reference v0.1.0 (/home/bl/misofm/engine-483-floor-parity/crates/dsp-reference)
+    Checking bitflags v2.13.1
+    Checking libc v0.2.189
+    Checking flatbuffers v25.12.19
+    Checking safe_arch v1.2.0
+    Checking smallstr v0.3.1
+    Checking lexical-parse-integer v1.0.6
+    Checking lexical-write-integer v1.0.6
+    Checking wide v1.6.1
+    Checking lexical-parse-float v1.0.6
+    Checking lexical-write-float v1.0.6
+    Checking hybrid-array v0.4.14
+    Checking getrandom v0.2.17
+    Checking ahash v0.7.8
+    Checking lexical-core v1.0.6
+    Checking hashbrown v0.12.3
+    Checking lexical v7.0.5
+    Checking json-number v0.4.10
+    Checking crypto-common v0.2.2
+    Checking block-buffer v0.12.1
+    Checking indexmap v1.9.3
+    Checking json-syntax v0.12.5
+    Checking digest v0.11.3
+    Checking sha2 v0.11.0
+    Checking session v0.1.0 (/home/bl/misofm/engine-483-floor-parity/crates/session)
+    Checking bench-support v0.1.0 (/home/bl/misofm/engine-483-floor-parity/tools/bench-support)
+    Checking protocol v0.1.0 (/home/bl/misofm/engine-483-floor-parity/crates/protocol)
+    Checking lane v0.1.0 (/home/bl/misofm/engine-483-floor-parity/crates/lane)
+    Checking math v0.1.0 (/home/bl/misofm/engine-483-floor-parity/crates/math)
+    Checking effect-contract v0.1.0 (/home/bl/misofm/engine-483-floor-parity/crates/effect-contract)
+    Checking effect-runtime v0.1.0 (/home/bl/misofm/engine-483-floor-parity/crates/effect-runtime)
+    Checking rack v0.1.0 (/home/bl/misofm/engine-483-floor-parity/crates/rack)
+    Checking multiband-compressor v0.1.0 (/home/bl/misofm/engine-483-floor-parity/crates/multiband-compressor)
+    Checking gate-expander v0.1.0 (/home/bl/misofm/engine-483-floor-parity/crates/gate-expander)
+    Checking builtins v0.1.0 (/home/bl/misofm/engine-483-floor-parity/crates/builtins)
+    Checking delay v0.1.0 (/home/bl/misofm/engine-483-floor-parity/crates/delay)
+    Checking compressor v0.1.0 (/home/bl/misofm/engine-483-floor-parity/crates/compressor)
+    Checking parametric-eq v0.1.0 (/home/bl/misofm/engine-483-floor-parity/crates/parametric-eq)
+    Checking soft-clip v0.1.0 (/home/bl/misofm/engine-483-floor-parity/crates/soft-clip)
+    Checking effect-package v0.1.0 (/home/bl/misofm/engine-483-floor-parity/crates/effect-package)
+    Checking transient-shaper v0.1.0 (/home/bl/misofm/engine-483-floor-parity/crates/transient-shaper)
+    Checking true-peak-limiter v0.1.0 (/home/bl/misofm/engine-483-floor-parity/crates/true-peak-limiter)
+    Checking conformance v0.1.0 (/home/bl/misofm/engine-483-floor-parity/crates/conformance)
+    Checking rack-compiler v0.1.0 (/home/bl/misofm/engine-483-floor-parity/crates/rack-compiler)
+    Checking graph v0.1.0 (/home/bl/misofm/engine-483-floor-parity/crates/graph)
+    Checking effect-compiler v0.1.0 (/home/bl/misofm/engine-483-floor-parity/crates/effect-compiler)
+    Checking builtins-compiler v0.1.0 (/home/bl/misofm/engine-483-floor-parity/crates/builtins-compiler)
+error: this block may be rewritten with the `?` operator
+    --> crates/builtins-compiler/src/lib.rs:3591:9
+     |
+3591 | /         if let Err(error) = self.drain_controls() {
+3592 | |             #[cfg(any(test, feature = "test-support"))]
+3593 | |             SCALAR_MATRIX_STATE_WITNESS.with(|value| {
+3594 | |                 value.set(builtins::test_support::scalar_matrix_words(&self.matrix));
+3595 | |             });
+3596 | |             return Err(error);
+3597 | |         }
+     | |_________^ help: replace it with: `self.drain_controls()?;`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#question_mark
+     = note: `-D clippy::question-mark` implied by `-D clippy::all`
+     = help: to override `-D clippy::all` add `#[allow(clippy::question_mark)]`
+
+error: this block may be rewritten with the `?` operator
+    --> crates/builtins-compiler/src/lib.rs:3648:9
+     |
+3648 | /         if let Err(error) = self.drain_controls() {
+3649 | |             #[cfg(any(test, feature = "test-support"))]
+3650 | |             SCALAR_FADER_STATE_WITNESS.with(|value| {
+3651 | |                 value.set(builtins::test_support::scalar_fader_words(&self.fader));
+3652 | |             });
+3653 | |             return Err(error);
+3654 | |         }
+     | |_________^ help: replace it with: `self.drain_controls()?;`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#question_mark
+
+error: this block may be rewritten with the `?` operator
+    --> crates/builtins-compiler/src/lib.rs:3735:9
+     |
+3735 | /         if let Err(error) = self.fader.drain_controls() {
+3736 | |             #[cfg(any(test, feature = "test-support"))]
+3737 | |             record_scalar_state(&self.fader.fader, &self.matrix.matrix);
+3738 | |             return Err(error);
+3739 | |         }
+     | |_________^ help: replace it with: `self.fader.drain_controls()?;`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#question_mark
+
+error: could not compile `builtins-compiler` (lib) due to 3 previous errors
