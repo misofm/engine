@@ -83,3 +83,7 @@ Read-only source and evidence inspection. No tests/builds/timing or source/spec/
 ## Qualified current artifact
 
 At frozen pin/source3e17caf3 all seven delivery pipeline commands exit0: verified builder, static checks, resource equivalence plus26 negative controls, hermetic tests, npm ci, current three-browser qualification with self-tests, and generated matrix check. The published Wasm SHA256 is87007c1aaad418f44074132b3c73876d77fcff0b778256e55c05a377a5277f6d. Only generated candidate/hash records changed atf87c9680; numerical expectations stay unchanged. Full raw command/source/output/status and module identity are retained in the artifact package. Actual-head PR review and required qualification are the remaining merge gates.
+
+## Delivered and remotely closed
+
+PR #497 merged at2026-09-06T04:53:26Z as396a97119583704888d7b2a20830c5720e16b189. Astra exact-head PASS applied to0fa6407eb6bbf52dd0466ec96f5f51ec954495b7; required qualification run34012375226 completed SUCCESS at that same head before merge. GitHub495 is verified CLOSED. This closes the redundant combined binding-set slice only; broader audit CP4 remains partial. Main-push qualification is monitored separately and is not yet claimed here.
