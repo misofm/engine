@@ -1,0 +1,16 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running unittests src/main.rs (target/debug/deps/bench-c884e76c7a7f3be8)
+
+running 9 tests
+test floor::tests::a_control_row_is_always_cheaper_than_the_row_it_isolates ... ok
+test floor::tests::every_derived_row_names_its_ruling_and_composes_a_positive_floor ... ok
+test floor::tests::the_compressor_isolate_is_the_compressor_inventory ... ok
+test floor::tests::the_current_effect_recount_keeps_fractional_link_work_and_composes_the_strip ... ok
+test floor::tests::the_mono_rows_carry_the_standing_strips_floor ... ok
+test floor::tests::the_overhead_inventories_differ_by_the_scaffolding_and_neither_row_claims_an_isolate ... ok
+test floor::tests::the_plumbing_row_is_the_floor_of_the_table_and_the_identity_pair_shares_one_inventory ... ok
+test floor::tests::the_sixty_four_track_block_has_the_lane_sample_count_the_rulings_quote ... ok
+test floor::tests::rust_and_jq_floor_tables_have_exact_key_value_parity ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 23 filtered out; finished in 0.02s
+
