@@ -93,15 +93,16 @@ pub(crate) fn node_text(node: &GraphNodeId) -> String {
 ///
 /// `graph_metadata_bytes` needs three node lengths per edge and one per node, and used to reach
 /// them by formatting a heap `String` and throwing it away -- four allocations per edge on every
-/// production compile, at 65,537 tracks nearly 1.6 M of them, for a `usize`. Every arm mirrors
-/// the corresponding `node_text` arm exactly; `node_text_len_matches_node_text_for_every_variant`
-/// is the gate that keeps them in step.
+/// production compile, at 65,537 tracks nearly 1.6 M of them, for a `usize`. The text and length
+/// paths now share the same borrowed-piece visitor, while the independent literal fixture checks
+/// the emitted identity tokens and UTF-8 byte lengths.
 pub(crate) fn node_text_len(node: &GraphNodeId) -> usize {
     let mut length = 0;
     visit_node_text(node, &mut |piece| length += piece.len());
     length
 }
 /// Byte length of [`edge_text`] without building it. See [`node_text_len`].
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn edge_text_len(edge: &GraphEdgeId) -> usize {
     let mut length = 0;
     visit_edge_text(edge, &mut |piece| length += piece.len());

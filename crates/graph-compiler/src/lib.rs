@@ -1439,7 +1439,7 @@ mod tests {
         ];
         for (node, expected) in nodes {
             assert_eq!(node_text(&node), expected);
-            assert_eq!(node_text_len(&node), expected.as_bytes().len());
+            assert_eq!(node_text_len(&node), expected.len());
         }
 
         let edges = [
@@ -1483,7 +1483,7 @@ mod tests {
         ];
         for (edge, expected) in edges {
             assert_eq!(edge_text(&edge), expected);
-            assert_eq!(edge_text_len(&edge), expected.as_bytes().len());
+            assert_eq!(edge_text_len(&edge), expected.len());
         }
     }
 
