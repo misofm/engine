@@ -131,31 +131,39 @@ fn a_ragged_bank_agrees_with_the_per_frame_body() {
     for forced in [false, true] {
         let values: Vec<_> = (0..lanes)
             .map(|track| {
-                let lookahead = if forced && track == 0 {
+                let right_lookahead = if forced && track == 0 {
                     20.0
                 } else {
                     // 0, 2.5, 5, 7.5, ... ms: D of 960, 840, 720, 600, ...
                     2.5 * (track % 8) as f32
                 };
-                values_with(&[
+                let mut values = values_with(&[
                     (0, -18.0 - track as f32),
                     (1, 3.0 + track as f32),
                     (5, 2.0),
-                    (7, lookahead),
-                ])
+                    // Left stays uniform while right is ragged (and includes D=0 when forced).
+                    (7, 0.0),
+                ]);
+                values[7 * 2 + 1].value = right_lookahead;
+                values
             })
             .collect();
         let requests: Vec<_> = values
             .iter()
             .map(|v| request_with_quantum(v, QUANTUM))
             .collect();
-        let signal = noise(FRAMES * lanes, 0x5A_6E_D0_03, 0.8);
+        let mut signal_left = noise(FRAMES * lanes, 0x5A_6E_D0_03, 0.8);
+        let mut signal_right = noise(FRAMES * lanes, 0x5A_6E_D0_0A, 0.6);
+        // Preserve asymmetric signed zeros through the public AoSoA input seam.
+        signal_left[lanes] = -0.0;
+        signal_right[lanes * 2 + lanes - 1] = -0.0;
 
-        let mut reference: Option<Vec<u32>> = None;
+        let scalar = prepare(request_with_quantum(&values[0], QUANTUM));
+        let mut reference: Option<Rendered> = None;
         for partition in [512, 1, 7, 64, 65, 128, 129] {
             let mut bank = support::bind_bank(&requests).expect("bank");
-            let mut left = signal.clone();
-            let mut right = signal.clone();
+            let mut left = signal_left.clone();
+            let mut right = signal_right.clone();
             support::render_bank(
                 bank.as_mut(),
                 &mut left,
@@ -166,19 +174,25 @@ fn a_ragged_bank_agrees_with_the_per_frame_body() {
                 QUANTUM,
                 &[],
             );
-            let bits: Vec<u32> = left
-                .iter()
-                .chain(right.iter())
-                .map(|sample| sample.to_bits())
-                .collect();
+            let bits_left = left.iter().map(|sample| sample.to_bits()).collect();
+            let bits_right = right.iter().map(|sample| sample.to_bits()).collect();
+            let mut state_left = Vec::new();
+            let mut state_right = Vec::new();
+            for track in 0..lanes as u32 {
+                let (left, right) = support::snapshot_track(bank.as_ref(), track, scalar.as_ref());
+                state_left.extend(left);
+                state_right.extend(right);
+            }
+            let rendered = (bits_left, bits_right, state_left, state_right);
             match &reference {
                 None => {
                     assert!(left[2_000 * lanes..].iter().any(|sample| *sample != 0.0));
-                    reference = Some(bits);
+                    assert!(right[2_000 * lanes..].iter().any(|sample| *sample != 0.0));
+                    reference = Some(rendered);
                 }
                 Some(expected) => {
                     assert_eq!(
-                        &bits, expected,
+                        &rendered, expected,
                         "forced {forced}, bank partition {partition}"
                     )
                 }
