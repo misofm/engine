@@ -227,3 +227,53 @@ Exactly the two approved lines changed: existing test-support forwards graph/tes
 ## Final Sol attempt 3 local evidence
 
 Source35dc8d4d passes all18 captured statuses: the exact existing isolated consumer selects1 passing test, previously failing combined Clippy passes, frozenexacttests1 each, fullgraph64 each and allocation7 each in debug/release, plusstaticpolicies. Complete coexistence is176<=408. Artifacts/issue511-sol-attempt3 preserves raw seven-file source identities/statuses/report and the full prior Sol2FAIL ruling. No native/Wasm/current-artifact delivery is claimed yet; final consolidated Astra verdict pending.
+
+## Final consolidated Astra Sol attempt 3 PASS
+
+# #511 consolidated final Sol attempt 3 — PASS (source)
+
+Reviewed clean `8d07e25611b844b98e8b0acdbc185c11f9ef72f3` in `/home/bl/misofm/engine-slot-reservation`, final source checkpoint `35dc8d4dc90c352bc1b328ec57852fa520a1e197`, the complete numbered issue and adopted amendments, applicable AGENTS.md, the prior consolidated Sol2 review, the final diff, relevant unchanged accounting/construction/test paths, and all three preserved evidence packages. Local HEAD and the existing origin tracking ref both identify `8d07e256`; no remote fetch or GitHub-state verification was performed by this reviewer.
+
+This is the single consolidated final-attempt verdict. The accepted Sol2 core proof composes with the exact final compatibility and complete-mask corrections. No blocking source finding remains for the bounded #511 contract. Root may proceed to the already required immutable workspace/native/Wasm/current-artifact qualification and delivery workflow. This source PASS does not itself close #511 or release #478 from its prerequisite-delivery and fresh-base-review conditions.
+
+## Final correction and compatibility
+
+Relative to reviewed `cd372f3d`, the source diff is exactly one removed/added line in each of two files:
+
+- `crates/builtins-compiler/Cargo.toml` forwards the existing `test-support` feature to `graph/test-support` over the already existing graph dependency.
+- `crates/builtins-compiler/tests/allocation_tracker.rs` includes the original mask in `conversion_coexistence = n * f + n * b + (n + 1) * w`.
+
+Everything else since that review is the authorized numbered decision/evidence record. `Cargo.lock`, other manifests, default features, dependency declarations, the historical preflight and its test filter, production instrumentation enablement, seals and artifact pins are unchanged. The graph seam remains explicitly feature-gated; normal production dependencies gain no default instrumentation. The final source checkpoint introduces no extra constructor, allocator, runtime mechanism or numerical expectation revision.
+
+The old consumer in `scripts/preflight-builtins-benchmark.sh` still invokes `cargo test --locked -p builtins-compiler --features test-support phase_two_allocator_layouts_match_the_checked_resource_report`. The preserved immutable rerun uses that exact command, returns status 0 and actually executes its named allocation test: 1 passed, 0 failed. Other test binaries select zero tests, which does not replace that positive selection. The previously failing combined `cargo clippy --locked -p graph -p graph-compiler -p builtins-compiler --all-targets -- -D warnings` also returns 0. Together the source feature edge and these direct results resolve the concrete Sol2 compatibility blocker without changing its historical classification.
+
+## Complete contract acceptance
+
+The previously accepted production implementation and core fixtures are unchanged by this final correction. Their acceptance remains part of this consolidated verdict:
+
+- Checked target-layout arithmetic implements C=N*(F+3B+3W) and L=max(NF,NB,W), with zero for an empty population. The estimate fold uses a temporary copy, changes the three additive totals and largest maximum, and commits only after every addition succeeds.
+- Compiler N combines actual prepared effect banks and the single planned builtin preflight. Width comes from actual prepared/planned masks; empty builtin populations report zero. Existing effect/scalar/builtin arithmetic diagnostic ordering is preserved before new slot arithmetic. The published and capped estimate copies each receive the reservation once, and later builtin attachment does not repeat it. Canonical semantic capture stays before target-selected additions.
+- Ordered construction requests the slot vector for its actual stage count and does not grow it. Stages and masks preserve their established ownership and order. Actual membership accounting proves S<=R<=N, including successful pairing and unpaired multiple-slot reachability. The accepted compiled facts remain paired N6/R6/S5/maxR3/maxS2 and unpaired N6/R6/S6/maxR3/maxS3; final repeated-render tests exercise both paths with the existing zero-allocation/free audit.
+- Independent literal arithmetic, all-field fold equality, below/above largest cases, zero addition and rollback for each additive-field overflow remain covered. The real mixed compiler fixture has live effect and builtin populations, independently derives their combined reservation and attached estimate, preserves unrelated payload/scratch fields and canonical bytes, and exercises exact/minus-one graph, plan and whole-plan-largest caps with returned prepared ownership. Whole-plan-largest rejection is not misattributed to slot dominance.
+- The four prior numeric fixture amendments remain only their approved target-native slot-reservation additions to total equations. No effect payload, PCM, latency, tail, canonical identity or shipped artifact expectation is repinned.
+
+The physical fixture still reaches the same production constructor and exhaustively identifies its isolated requested/free layouts. For N=S=3, F=16, B=32 and W=8, construction requests one 96-byte slot array and three 8-byte mask clones, and frees the incoming 48-byte stage vector. L=96 bounds each named request. Complete stage/slot/mask coexistence is now explicitly 48+96+24+8=176<=C=408. The original 168-byte subset remains correctly preserved as a partial observation. Retained slot/chain-mask storage is 128<=144. Destruction observes one slot array, four masks and two separately identified 32-byte scratch planes: seven frees, zero allocations and a checked zero closing balance. This is an attributable component proof, not global bind-heap or replacement-plan accounting. Future #478 still owes its own element-size, destination-capacity and coexistence proof under the reservation.
+
+## Final evidence integrity and gates
+
+Independently verified every manifest payload SHA256 and byte length: Luna1 56 payloads/57 tracked files, Sol2 124/125, Sol3 75/76. No missing, mismatched or untracked package entries were found. The first two packages have no diff since `cd372f3d`. The Sol3 archived prior review is byte-identical to `/tmp/astra-511-attempt2-review.md`.
+
+All 18 final-attempt statuses are numeric 0. Each associated metadata file contains seven source hashes matching the current files. The 16 clean-source records identify `35dc8d4d`, include effective PATH and empty porcelain markers, and their seven hashes also match those exact Git blobs. The two earlier dirty-source runs are identified as such; the first old-consumer record's omitted environment is candidly retained and superseded for qualification by the complete clean-source rerun, not reconstructed.
+
+Raw final results establish:
+
+- Both frozen exact tests: 1 passed each in debug and release.
+- Full graph-compiler lib: 64 passed in each profile.
+- Full allocation tracker: 7 passed in each profile.
+- Existing isolated consumer: its intended test passes once.
+- Combined strict all-targets Clippy and explicit builtin+graph test-support strict Clippy: status 0.
+- Format, diff and graph/realtime/workspace policies: status 0.
+
+Historical failures remain preserved. Source acceptance relies on the identified successful reruns and unchanged accepted core evidence, without upgrading the earlier provenance limitations or treating status alone as proof of an omitted assertion.
+
+Immutable workspace/native/Wasm checks, ordinary current-artifact qualification, required CI, final GitHub synchronization and closure remain root's delivery obligations. No full historical preflight, benchmark, timing, automatic pin update or expanded qualification project follows from this PASS. No builds, tests, timing, source edits, Git mutations or GitHub mutations were performed during this review; only this requested temporary review report was written.
