@@ -1,0 +1,13 @@
+diff --git a/hosts/host-web/src/lib.rs b/hosts/host-web/src/lib.rs
+index 0400e53f..1002b972 100644
+--- a/hosts/host-web/src/lib.rs
++++ b/hosts/host-web/src/lib.rs
+@@ -1263,7 +1263,7 @@ impl AudioWorkletEngineHost {
+                 // Issue #137 D1: the matrix stage drained every control queue at the top of this
+                 // block, so the exact free-slot count is the whole capacity again. Command-free
+                 // blocks have no counters to clear and skip the dense write pass entirely.
+-                if ready.has_in_flight_commands {
++                {
+                     #[cfg(test)]
+                     record_admission_counter_clear(ready.in_flight.len());
+                     ready.in_flight.fill(0);

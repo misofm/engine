@@ -104,3 +104,7 @@ No builds, tests, timing, repository edits, Git mutations or GitHub mutations we
 ## Luna attempt 1 focused source checkpoint
 
 The two authorized host files implement the private pending-command flag and physical-clear test counters with the frozen product test. Luna reported an initial successful filtered run but retained no raw capture and did not use the exact invocation; it receives no frozen-gate evidence credit. Root directly captured the required full-name --lib --exact debug command with contemporaneous source hashes, stdout/stderr and status0 (one selected test) before this checkpoint. Remaining release/full suites, actual mutation/restoration, candidate native layout and static gates are pending.
+
+## Luna attempt 1 local proof
+
+Source b0d9e087 plus the two-cast-only correction022e2f2b passes the captured frozen focused debug/release tests, full host suites63passed/1ignored each, corrected strict Clippy and static policies. The actual unconditional-fill mutant fails the same idle assertion at(3,9) versus(0,0); final exact restoration passes. The initial uncaptured filtered run and failed first restoration are explicitly excluded/preserved. Candidate native host/ReadyOwnership sizes and bridge totals grow8 bytes; largest allocations stay unchanged. No numeric expectations/pins were changed. Artifacts/issue514-luna-attempt1 holds raw evidence; consolidated Astra source review and post-#511 integrated qualification remain pending.
