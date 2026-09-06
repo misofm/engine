@@ -837,104 +837,105 @@ fn malformed_admission_and_render_envelopes_are_noops() {
     let mut fx = effect();
     let (mut c, mut r, _) = prepare_scalar_point_endpoint(&mut *fx, REV, H, config(), 1).unwrap();
     let pristine = r.snapshot().unwrap();
-    let mut reject =
-        |candidate: AutomationBatchSlot,
-         expected: fn(Result<(), ScalarPointAdmissionError>) -> bool| {
-            assert!(expected(c.try_admit(SampleTime(10), candidate)));
-            assert_eq!(c.outstanding(), 0);
-            assert_eq!(c.resident_automation(), 0);
-            assert_eq!(r.snapshot().unwrap(), pristine);
-        };
+    {
+        let mut reject =
+            |candidate: AutomationBatchSlot,
+             expected: fn(Result<(), ScalarPointAdmissionError>) -> bool| {
+                assert!(expected(c.try_admit(SampleTime(10), candidate)));
+                assert_eq!(c.outstanding(), 0);
+                assert_eq!(c.resident_automation(), 0);
+                assert_eq!(r.snapshot().unwrap(), pristine);
+            };
 
-    let mut empty = batch(60, &[record(H[0], 10, 1.0)]);
-    empty.len = 0;
-    reject(empty, |result| {
-        matches!(
-            result,
-            Err(ScalarPointAdmissionError::InvalidBatch {
-                error: AutomationBatchError::EmptyBatch,
-                ..
-            })
-        )
-    });
-    let mut too_long = batch(61, &[record(H[0], 10, 1.0)]);
-    too_long.len = 257;
-    reject(too_long, |result| {
-        matches!(
-            result,
-            Err(ScalarPointAdmissionError::InvalidBatch {
-                error: AutomationBatchError::TooManyRecords,
-                ..
-            })
-        )
-    });
-    let mut unequal_point = batch(62, &[record(H[0], 10, 1.0)]);
-    unequal_point.records[0].end_value = 2.0;
-    reject(unequal_point, |result| {
-        matches!(
-            result,
-            Err(ScalarPointAdmissionError::InvalidBatch {
-                error: AutomationBatchError::InvalidPoint,
-                ..
-            })
-        )
-    });
-    let mut out_of_order = batch(63, &[record(H[0], 10, 1.0), record(H[1], 11, 2.0)]);
-    out_of_order.records.swap(0, 1);
-    reject(out_of_order, |result| {
-        matches!(
-            result,
-            Err(ScalarPointAdmissionError::InvalidBatch {
-                error: AutomationBatchError::OutOfOrder,
-                ..
-            })
-        )
-    });
-    let wrong = AutomationBatchSlot::new(
-        SessionRevision(8),
-        RequestId::new(6).unwrap(),
-        &[record(H[0], 10, 1.0)],
-    )
-    .unwrap();
-    reject(wrong, |result| {
-        matches!(result, Err(ScalarPointAdmissionError::WrongRevision { .. }))
-    });
-    reject(
-        batch(64, &[record(ParameterHandle(99), 10, 1.0)]),
-        |result| {
+        let mut empty = batch(60, &[record(H[0], 10, 1.0)]);
+        empty.len = 0;
+        reject(empty, |result| {
             matches!(
                 result,
-                Err(ScalarPointAdmissionError::UnknownBinding { .. })
-            )
-        },
-    );
-    reject(batch(65, &[record(H[0], 10, 24.5)]), |result| {
-        matches!(result, Err(ScalarPointAdmissionError::InvalidValue { .. }))
-    });
-    let mut invalid_last = batch(66, &[record(H[0], 10, 1.0), record(H[1], 11, 2.0)]);
-    invalid_last.records[1].start_value = f32::NAN;
-    invalid_last.records[1].end_value = f32::NAN;
-    reject(invalid_last, |result| {
-        matches!(
-            result,
-            Err(ScalarPointAdmissionError::InvalidBatch {
-                error: AutomationBatchError::NonFiniteValue,
-                ..
-            })
-        )
-    });
-    reject(batch(67, &[record(H[0], 9, 1.0)]), |result| {
-        matches!(
-            result,
-            Err(ScalarPointAdmissionError::Service(
-                AutomationEnqueueError::Invalid {
-                    error: AutomationBatchError::TimeInPast,
+                Err(ScalarPointAdmissionError::InvalidBatch {
+                    error: AutomationBatchError::EmptyBatch,
                     ..
-                }
-            ))
+                })
+            )
+        });
+        let mut too_long = batch(61, &[record(H[0], 10, 1.0)]);
+        too_long.len = 257;
+        reject(too_long, |result| {
+            matches!(
+                result,
+                Err(ScalarPointAdmissionError::InvalidBatch {
+                    error: AutomationBatchError::TooManyRecords,
+                    ..
+                })
+            )
+        });
+        let mut unequal_point = batch(62, &[record(H[0], 10, 1.0)]);
+        unequal_point.records[0].end_value = 2.0;
+        reject(unequal_point, |result| {
+            matches!(
+                result,
+                Err(ScalarPointAdmissionError::InvalidBatch {
+                    error: AutomationBatchError::InvalidPoint,
+                    ..
+                })
+            )
+        });
+        let mut out_of_order = batch(63, &[record(H[0], 10, 1.0), record(H[1], 11, 2.0)]);
+        out_of_order.records.swap(0, 1);
+        reject(out_of_order, |result| {
+            matches!(
+                result,
+                Err(ScalarPointAdmissionError::InvalidBatch {
+                    error: AutomationBatchError::OutOfOrder,
+                    ..
+                })
+            )
+        });
+        let wrong = AutomationBatchSlot::new(
+            SessionRevision(8),
+            RequestId::new(6).unwrap(),
+            &[record(H[0], 10, 1.0)],
         )
-    });
-    drop(reject);
+        .unwrap();
+        reject(wrong, |result| {
+            matches!(result, Err(ScalarPointAdmissionError::WrongRevision { .. }))
+        });
+        reject(
+            batch(64, &[record(ParameterHandle(99), 10, 1.0)]),
+            |result| {
+                matches!(
+                    result,
+                    Err(ScalarPointAdmissionError::UnknownBinding { .. })
+                )
+            },
+        );
+        reject(batch(65, &[record(H[0], 10, 24.5)]), |result| {
+            matches!(result, Err(ScalarPointAdmissionError::InvalidValue { .. }))
+        });
+        let mut invalid_last = batch(66, &[record(H[0], 10, 1.0), record(H[1], 11, 2.0)]);
+        invalid_last.records[1].start_value = f32::NAN;
+        invalid_last.records[1].end_value = f32::NAN;
+        reject(invalid_last, |result| {
+            matches!(
+                result,
+                Err(ScalarPointAdmissionError::InvalidBatch {
+                    error: AutomationBatchError::NonFiniteValue,
+                    ..
+                })
+            )
+        });
+        reject(batch(67, &[record(H[0], 9, 1.0)]), |result| {
+            matches!(
+                result,
+                Err(ScalarPointAdmissionError::Service(
+                    AutomationEnqueueError::Invalid {
+                        error: AutomationBatchError::TimeInPast,
+                        ..
+                    }
+                ))
+            )
+        });
+    }
 
     let mut r = r.start().unwrap_or_else(|_| panic!());
     let before = r.snapshot().unwrap();

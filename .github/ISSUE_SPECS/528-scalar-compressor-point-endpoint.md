@@ -250,3 +250,7 @@ Remaining gates now distinguish queued, handed-off/unclaimed, future/end/partial
 ### Sol2 semantic API documentation completed
 
 The module and every public surface now document the frozen ownership/admission/timestamp/resource/fault semantics; all missing-doc suppressions are removed. A compiling prepared-owner Send doctest and started-owner Send/Sync compile-fail proofs protect thread ownership. `docs-check` passes; `docs-tests` passes two normal and five compile-fail host-core doctests. This changes documentation only, not behavior/API/layout. Source and six finite fixtures are complete pending proportional final gates and one consolidated Astra Sol2 verdict.
+
+### Sol2 proportional checks and lexical-scope correction
+
+Final focused debug/release, complete host-core feature/default tests and both protocol delivery regressions pass on recorded `eb424753` source. Strict Clippy found one test-only drop_non_drop: an explicit closure drop used to end borrows. Replacing it with a lexical scope preserves the assertions and behavior; focused debug passes again on exact corrected test hashes. Root checkpoints this sole test-path correction before completing Clippy/policies/targets. The original status-101 Clippy capture is preserved.
