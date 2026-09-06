@@ -77,3 +77,9 @@ Root adopts FAIL and assigns Sol attempt 2 for this exact finite correction. Met
 The existing test-only scalar fixture now binds a real GraphPreparedEffect with connected sidechain metadata. The actual PostFader output feeds that effect through EffectSidechain while the normal PostFader→PostMatrix path remains. `actual_scalar_effect_sidechain_declines_and_matches_separate_owner_data_and_state` compares main/sidechain/effect output/post-matrix data and queued owner state against separate owners and asserts no factory pairing at the boundary. The other track uses a real meter barrier to isolate this assertion.
 
 `/tmp/479-sol2-tranche1-sidechain-3.{command,log,status}` reports0, one test/37 filtered. Initial compile and fixture-selection failures are preserved in sidechain-1/-2; neither is credited as success. The source was formatted. Owner attribution/max and final finite gates remain for this same Sol2 pass; no final source acceptance or parent qualification yet.
+
+## Sol attempt 2 second recoverable checkpoint
+
+All three Drop impls are now wholly gated to test/test-support. Typed outer construction/live/drop observations distinguish the selected scalar outer from unrelated allocations of the same layout in the existing binding window. The allocator fixture compares exact original-owner populations, retained total and maximum including fader/matrix/outer against the saved scalar allowance and admitted graph bound, and accounts for the conservative spare outer separately. Off-render release checks typed owner counts and outer lifetime.
+
+`/tmp/479-sol2-tranche2-owner-3.{command,log,status}` reports0, one actual test; `normal-check` reports0 for normal builds. Earlier `owner`/`owner-2` failures expose the invalid same-layout attribution assumptions and remain preserved. Root permits the remaining finite full/debug/release/lint/policy gates in this same Sol2 pass; focused success is not the final verdict.

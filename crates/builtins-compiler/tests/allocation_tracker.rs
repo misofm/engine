@@ -18,7 +18,7 @@ use builtins_compiler::{
     test_only_observed_scalar_pair_binding, test_only_phase_two_allocation_snapshot,
     test_only_record_phase_two_allocation, test_only_record_phase_two_deallocation,
     test_only_reset_fader_matrix_witness, test_only_reset_phase_two_allocation_tracker,
-    test_only_scalar_owner_drops, test_only_scalar_owner_layouts,
+    test_only_scalar_outer_lifetime, test_only_scalar_owner_drops, test_only_scalar_owner_layouts,
 };
 use engine::realtime::{PlanarBufferMut, RenderIo, RenderTime};
 use session::{CompileCaps, RouteSource, SendTap, StableId, compile_session, parse_session_json};
@@ -351,7 +351,12 @@ fn actual_scalar_prepare_and_bind_retain_the_charged_owner_layouts() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let [fader, matrix, outer] = test_only_scalar_owner_layouts();
-    let owner_allowance = 2 * fader.size_bytes + 2 * matrix.size_bytes + outer.size_bytes;
+    let retained_owner_bytes_expected =
+        2 * fader.size_bytes + 2 * matrix.size_bytes + outer.size_bytes;
+    let owner_max = fader
+        .size_bytes
+        .max(matrix.size_bytes)
+        .max(outer.size_bytes);
 
     test_only_reset_phase_two_allocation_tracker();
     let (bound, admitted, scalar_allowance, preparation, binding) =
@@ -388,6 +393,11 @@ fn actual_scalar_prepare_and_bind_retain_the_charged_owner_layouts() {
         );
     }
     assert!(!binding.overflowed);
+    assert_eq!(
+        test_only_scalar_outer_lifetime(),
+        [1, 1, 0],
+        "one actual selected scalar outer was constructed and remains live after bind"
+    );
     for retained in [fader, matrix] {
         assert!(
             !binding.deallocation_layouts.iter().any(|released| {
@@ -399,27 +409,41 @@ fn actual_scalar_prepare_and_bind_retain_the_charged_owner_layouts() {
     }
     assert!(
         binding.layouts.iter().any(|observed| {
-            observed.size_bytes == outer.size_bytes
-                && observed.align_bytes == outer.align_bytes
-                && observed.allocation_count >= 1
+            observed.size_bytes == outer.size_bytes && observed.align_bytes == outer.align_bytes
         }),
         "binding allocates the charged two-pointer scalar outer: {:?}",
         binding.layouts
     );
-    let bound_outer_bytes = binding
+    let outer_allocations = binding
         .layouts
         .iter()
         .find(|observed| {
             observed.size_bytes == outer.size_bytes && observed.align_bytes == outer.align_bytes
         })
-        .map_or(0, |observed| {
-            observed.size_bytes * observed.allocation_count
-        });
-    assert!(bound_outer_bytes >= outer.size_bytes);
-    assert_eq!(retained_owner_bytes + outer.size_bytes, owner_allowance);
-    assert!(binding.largest_allocation_bytes >= outer.size_bytes);
-    assert!(outer.size_bytes <= admitted.largest_allocation_bytes);
-    assert!(owner_allowance <= scalar_allowance.total_bytes);
+        .map_or(0, |observed| observed.allocation_count);
+    let typed_outer_count = test_only_scalar_outer_lifetime()[0];
+    assert_eq!(typed_outer_count, 1);
+    assert!(
+        outer_allocations >= typed_outer_count,
+        "the bounded allocator window contains the allocation whose typed construction is witnessed"
+    );
+    let unrelated_same_layout_allocations = outer_allocations - typed_outer_count;
+    assert!(
+        unrelated_same_layout_allocations > 0,
+        "the fixture discriminates same-layout graph storage instead of charging it as an owner"
+    );
+    let bound_outer_bytes = outer.size_bytes;
+    assert_eq!(
+        retained_owner_bytes + bound_outer_bytes,
+        retained_owner_bytes_expected
+    );
+    assert_eq!(owner_max, scalar_allowance.largest_allocation_bytes);
+    assert!(owner_max <= admitted.largest_allocation_bytes);
+    let conservative_spare_outer = scalar_allowance
+        .total_bytes
+        .checked_sub(retained_owner_bytes_expected)
+        .expect("actual owners fit conservative scalar allowance");
+    assert_eq!(conservative_spare_outer, outer.size_bytes);
     assert!(scalar_allowance.total_bytes <= admitted.session_plus_plan_bytes);
 
     LIVE_ALLOCS.set(0);
@@ -432,6 +456,7 @@ fn actual_scalar_prepare_and_bind_retain_the_charged_owner_layouts() {
         "bound owners release only during off-render drop"
     );
     assert_eq!(test_only_scalar_owner_drops(), [2, 2, 1]);
+    assert_eq!(test_only_scalar_outer_lifetime(), [1, 0, 1]);
 }
 
 fn session(track_count: u32) -> session::CompiledSession {

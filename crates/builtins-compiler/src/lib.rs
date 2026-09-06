@@ -687,6 +687,7 @@ thread_local! {
     static SCALAR_FADER_STATE_WITNESS: std::cell::Cell<[u32; 14]> = const { std::cell::Cell::new([0; 14]) };
     static SCALAR_MATRIX_STATE_WITNESS: std::cell::Cell<[u32; 15]> = const { std::cell::Cell::new([0; 15]) };
     static SCALAR_OWNER_DROPS: std::cell::Cell<[u64; 3]> = const { std::cell::Cell::new([0; 3]) };
+    static SCALAR_OUTER_LIFETIME: std::cell::Cell<[u64; 3]> = const { std::cell::Cell::new([0; 3]) };
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -721,6 +722,12 @@ pub fn test_only_reset_fader_matrix_witness() {
 #[doc(hidden)]
 pub fn test_only_scalar_owner_drops() -> [u64; 3] {
     SCALAR_OWNER_DROPS.with(std::cell::Cell::get)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn test_only_scalar_outer_lifetime() -> [u64; 3] {
+    SCALAR_OUTER_LIFETIME.with(std::cell::Cell::get)
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -1375,6 +1382,7 @@ pub fn test_only_reset_phase_two_allocation_tracker() {
     if let Ok(mut table) = TEST_PHASE_TWO_LAYOUTS.lock() {
         table.clear();
     }
+    SCALAR_OUTER_LIFETIME.with(|value| value.set([0; 3]));
 }
 
 #[cfg(feature = "test-support")]
@@ -3568,9 +3576,9 @@ struct ConsoleMatrixProcessor {
     control: Consumer<TrackControlRecord>,
     control_delivery: BuiltinControlDelivery,
 }
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for ConsoleMatrixProcessor {
     fn drop(&mut self) {
-        #[cfg(any(test, feature = "test-support"))]
         SCALAR_OWNER_DROPS.with(|value| {
             let mut drops = value.get();
             drops[1] = drops[1].saturating_add(1);
@@ -3625,9 +3633,9 @@ struct ConsoleFaderProcessor {
     control: Consumer<TrackFaderRecord>,
     control_delivery: BuiltinControlDelivery,
 }
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for ConsoleFaderProcessor {
     fn drop(&mut self) {
-        #[cfg(any(test, feature = "test-support"))]
         SCALAR_OWNER_DROPS.with(|value| {
             let mut drops = value.get();
             drops[0] = drops[0].saturating_add(1);
@@ -3693,13 +3701,19 @@ struct ScalarPairProcessor {
     fader: Box<ConsoleFaderProcessor>,
     matrix: Box<ConsoleMatrixProcessor>,
 }
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for ScalarPairProcessor {
     fn drop(&mut self) {
-        #[cfg(any(test, feature = "test-support"))]
         SCALAR_OWNER_DROPS.with(|value| {
             let mut drops = value.get();
             drops[2] = drops[2].saturating_add(1);
             value.set(drops);
+        });
+        SCALAR_OUTER_LIFETIME.with(|value| {
+            let mut lifetime = value.get();
+            lifetime[1] = lifetime[1].checked_sub(1).expect("live scalar outer");
+            lifetime[2] = lifetime[2].saturating_add(1);
+            value.set(lifetime);
         });
     }
 }
@@ -3820,7 +3834,15 @@ fn make_scalar_pair(
         counters[5] = counters[5].saturating_add(1);
         value.set(counters);
     });
-    Ok(Box::new(ScalarPairProcessor { fader, matrix }))
+    let pair = Box::new(ScalarPairProcessor { fader, matrix });
+    #[cfg(any(test, feature = "test-support"))]
+    SCALAR_OUTER_LIFETIME.with(|value| {
+        let mut lifetime = value.get();
+        lifetime[0] = lifetime[0].saturating_add(1);
+        lifetime[1] = lifetime[1].saturating_add(1);
+        value.set(lifetime);
+    });
+    Ok(pair)
 }
 struct MeterObserver(MeterAccumulator);
 impl GraphRuntimeObserver for MeterObserver {
