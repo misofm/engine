@@ -72,7 +72,9 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     hex(&Sha256::digest(bytes))
 }
 
-fn hex(digest: &[u8]) -> String {
+/// Encode bytes as lowercase hexadecimal without hashing them.
+#[must_use]
+pub fn hex(digest: &[u8]) -> String {
     let mut text = String::with_capacity(digest.len() * 2);
     for byte in digest {
         text.push(char::from_digit(u32::from(byte >> 4), 16).expect("nibble"));
@@ -83,10 +85,22 @@ fn hex(digest: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Sha256Sink, sha256_hex, updates_mark, updates_since};
+    use super::{Sha256Sink, hex, sha256_hex, updates_mark, updates_since};
 
     const EMPTY: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
     const ABC: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+
+    #[test]
+    fn hex_encodes_empty_leading_zero_and_each_nibble() {
+        assert_eq!(hex(b""), "");
+        assert_eq!(
+            hex(&[
+                0x00, 0x01, 0x09, 0x0a, 0x0f, 0x10, 0x19, 0x1a, 0x1f, 0xa0, 0xa1, 0xa9, 0xaa, 0xaf,
+                0xf0, 0xf1, 0xf9, 0xfa, 0xff
+            ]),
+            "0001090a0f10191a1fa0a1a9aaaff0f1f9faff"
+        );
+    }
 
     #[test]
     fn matches_the_published_vectors() {

@@ -1,6 +1,7 @@
 //! Frozen issue-035 benchmark emitter. The runner is the sole authorized timing entrypoint.
 
 use bench_support::alloc as bench_alloc;
+use bench_support::digest::{hex, sha256_hex};
 use bench_support::json;
 use bench_support::stats;
 use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
@@ -667,7 +668,7 @@ impl RealMeterTapRuntime {
                 .expect("monotonic full/drop count")
                 .to_le_bytes(),
         );
-        hex_digest(self.output.clone().finalize())
+        hex(&self.output.clone().finalize())
     }
 }
 
@@ -905,7 +906,7 @@ fn measure_prepare(rate_hz: u32) -> Measurement {
     }
     Measurement {
         samples_ns,
-        output_sha256: hex_digest(output.finalize()),
+        output_sha256: hex(&output.finalize()),
         shape: WorkloadShape {
             tracks: PREPARE_TRACKS,
             meters: OBSERVERS * 8,
@@ -1017,7 +1018,7 @@ impl RenderRuntime {
         if let Some(meter_runtime) = &mut self.meter_runtime {
             return meter_runtime.output_sha256();
         }
-        hex_digest(self.output.clone().finalize())
+        hex(&self.output.clone().finalize())
     }
     fn shape(&self) -> WorkloadShape {
         WorkloadShape {
@@ -1773,15 +1774,7 @@ impl Percentiles {
     }
 }
 fn sha256(bytes: &[u8]) -> String {
-    hex_digest(Sha256::digest(bytes))
-}
-fn hex_digest(bytes: impl AsRef<[u8]>) -> String {
-    use core::fmt::Write;
-    let mut output = String::with_capacity(64);
-    for byte in bytes.as_ref() {
-        write!(&mut output, "{byte:02x}").expect("String write");
-    }
-    output
+    sha256_hex(bytes)
 }
 #[cfg(test)]
 mod tests {
@@ -2025,6 +2018,23 @@ mod tests {
                 let _ = input.pcm();
             }
         }
+    }
+
+    #[test]
+    fn digest_helpers_encode_known_abc_without_rehashing_finalized_bytes() {
+        let finalized = Sha256::digest(b"abc");
+        assert_eq!(
+            sha256(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(
+            hex(&finalized),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_ne!(
+            sha256(&finalized),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
     }
 
     #[test]
