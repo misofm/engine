@@ -419,33 +419,73 @@ fn points_slice_real_pcm_and_readback() {
 #[test]
 fn claim_state_is_truthful_until_terminal_collection() {
     let mut fx = effect();
-    let (mut c, r, _) = prepare_scalar_point_endpoint(&mut *fx, REV, H, config(), 1).unwrap();
+    let (mut c, mut r, _) = prepare_scalar_point_endpoint(&mut *fx, REV, H, config(), 1).unwrap();
+    let initial = r.snapshot().unwrap();
     c.try_admit(
         SampleTime(0),
-        batch(2, &[record(H[0], 8, 4.0), record(H[1], 16, 5.0)]),
+        batch(
+            2,
+            &[
+                record(H[0], 16, 4.0),
+                record(H[1], 19, 5.0),
+                record(H[0], 32, 6.0),
+            ],
+        ),
     )
     .unwrap();
+    assert_eq!((c.resident_automation(), c.outstanding()), (1, 1));
+    assert_eq!(r.snapshot().unwrap(), initial);
     let ticket = match c.try_handoff_next().unwrap() {
         HandoffResult::HandedOff(t) => t,
         _ => panic!(),
     };
+    assert_eq!((c.resident_automation(), c.outstanding()), (0, 1));
+    assert_eq!(r.snapshot().unwrap().pending, None);
     let mut r = r.start().unwrap_or_else(|_| panic!());
-    let (mut l, mut x) = ([0.2; Q], [0.2; Q]);
+    let (mut l, mut x) = ([0.2; Q], [0.3; Q]);
     r.render(&mut l, &mut x, SampleTime(0)).unwrap();
     let s = r.snapshot().unwrap();
     assert_eq!(s.observed_sample, SampleTime(16));
-    assert_eq!(s.pending.unwrap().1, 1);
+    assert_eq!(s.pending.unwrap().1, 0);
     assert_eq!(s.pending.unwrap().3, Some(SampleTime(16)));
+    assert_state_bits(s.state[0], initial.state[0]);
+    assert_state_bits(s.state[1], initial.state[1]);
     assert_eq!(c.collect_terminal(ticket), Err(DeliveryError::Empty));
+
+    l.fill(0.2);
+    x.fill(0.3);
     r.render(&mut l, &mut x, SampleTime(16)).unwrap();
+    let partial = r.snapshot().unwrap();
+    assert_eq!(partial.pending.unwrap().1, 2);
+    assert_eq!(partial.pending.unwrap().3, Some(SampleTime(32)));
+    assert_eq!(partial.state[0].target_value.to_bits(), 4.0_f32.to_bits());
+    assert_eq!(partial.state[1].target_value.to_bits(), 5.0_f32.to_bits());
+    assert_eq!(c.collect_terminal(ticket), Err(DeliveryError::Empty));
+
+    l.fill(0.2);
+    x.fill(0.3);
+    r.render(&mut l, &mut x, SampleTime(32)).unwrap();
+    let complete = r.snapshot().unwrap();
+    assert_eq!(complete.pending, None);
+    assert_eq!(complete.state[0].target_value.to_bits(), 6.0_f32.to_bits());
     assert_eq!(c.outstanding(), 1);
-    c.collect_terminal(ticket).unwrap();
+    assert_eq!(c.collect_terminal(ticket).unwrap().applied_prefix, 3);
     assert_eq!(c.outstanding(), 0);
+
+    l.fill(0.2);
+    x.fill(0.3);
+    let report = r.render(&mut l, &mut x, SampleTime(48)).unwrap();
+    assert_eq!(report.process_invocations, 1);
+    let empty = r.snapshot().unwrap();
+    assert_eq!(empty.pending, None);
+    assert_eq!(empty.applied, 3);
 }
 
 #[test]
 fn late_points_apply_in_order_and_second_ticket_waits() {
+    let _fp = lane::CanonicalFpEnv::enter();
     let mut fx = effect();
+    let mut reference = effect();
     let (mut c, r, _) = prepare_scalar_point_endpoint(&mut *fx, REV, H, config(), 1).unwrap();
     c.try_admit(
         SampleTime(0),
@@ -455,23 +495,69 @@ fn late_points_apply_in_order_and_second_ticket_waits() {
     c.try_admit(SampleTime(0), batch(4, &[record(H[1], 3, 3.0)]))
         .unwrap();
     let mut r = r.start().unwrap_or_else(|_| panic!());
-    let (mut l, mut x) = ([0.2; Q], [0.2; Q]);
+    let (mut l, mut x) = ([0.2; Q], [0.3; Q]);
+    let (mut expected_l, mut expected_r) = (l, x);
     r.render(&mut l, &mut x, SampleTime(0)).unwrap();
+    process(&mut *reference, &mut expected_l, &mut expected_r, 0, &[]);
+    assert_pcm_bits(&l, &expected_l);
+    assert_pcm_bits(&x, &expected_r);
     c.try_handoff_next().unwrap();
     c.try_handoff_next().unwrap();
+    l.fill(0.21);
+    x.fill(0.31);
+    expected_l = l;
+    expected_r = x;
     r.render(&mut l, &mut x, SampleTime(16)).unwrap();
+    reference
+        .apply_parameter_point(5, ParameterChannel::Left, 1.0)
+        .unwrap();
+    reference
+        .apply_parameter_point(5, ParameterChannel::Left, 2.0)
+        .unwrap();
+    process(&mut *reference, &mut expected_l, &mut expected_r, 16, &[]);
+    assert_pcm_bits(&l, &expected_l);
+    assert_pcm_bits(&x, &expected_r);
     let s = r.snapshot().unwrap();
     assert_eq!((s.applied, s.late), (2, 2));
     assert_eq!(s.last_application[0], Some(SampleTime(16)));
+    l.fill(0.22);
+    x.fill(0.32);
+    expected_l = l;
+    expected_r = x;
     r.render(&mut l, &mut x, SampleTime(32)).unwrap();
+    reference
+        .apply_parameter_point(5, ParameterChannel::Right, 3.0)
+        .unwrap();
+    process(&mut *reference, &mut expected_l, &mut expected_r, 32, &[]);
+    assert_pcm_bits(&l, &expected_l);
+    assert_pcm_bits(&x, &expected_r);
     let s = r.snapshot().unwrap();
     assert_eq!((s.applied, s.late), (3, 3));
     assert_eq!(s.last_application[1], Some(SampleTime(32)));
+    l.fill(0.23);
+    x.fill(0.33);
+    expected_l = l;
+    expected_r = x;
     r.render(&mut l, &mut x, SampleTime(48)).unwrap();
+    process(&mut *reference, &mut expected_l, &mut expected_r, 48, &[]);
+    assert_pcm_bits(&l, &expected_l);
+    assert_pcm_bits(&x, &expected_r);
     assert_eq!(
         (r.snapshot().unwrap().applied, r.snapshot().unwrap().late),
         (3, 3)
     );
+    let endpoint_state = r.snapshot().unwrap().state;
+    for (index, channel) in [ParameterChannel::Left, ParameterChannel::Right]
+        .into_iter()
+        .enumerate()
+    {
+        assert_state_bits(
+            endpoint_state[index],
+            reference.parameter_state(5, channel).unwrap(),
+        );
+    }
+    drop(r.stop());
+    assert_eq!(payload(&*fx), payload(&*reference));
 }
 
 #[test]
@@ -483,20 +569,266 @@ fn real_cancellation_preserves_applied_prefix() {
         batch(5, &[record(H[0], 3, 2.0), record(H[1], 30, 3.0)]),
     )
     .unwrap();
-    c.try_handoff_next().unwrap();
+    let ticket = match c.try_handoff_next().unwrap() {
+        HandoffResult::HandedOff(ticket) => ticket,
+        other => panic!("{other:?}"),
+    };
     let mut r = r.start().unwrap_or_else(|_| panic!());
     let (mut l, mut x) = ([0.2; Q], [0.2; Q]);
     r.render(&mut l, &mut x, SampleTime(0)).unwrap();
+    let partial = r.snapshot().unwrap();
+    assert_eq!(partial.pending.unwrap().1, 1);
+    assert_eq!(partial.pending.unwrap().3, Some(SampleTime(30)));
+    let right_before_cancel = partial.state[1];
     let token = c
         .begin_cancel(AutomationCancellationReason::EndpointShutdown)
         .unwrap();
     r.render(&mut l, &mut x, SampleTime(16)).unwrap();
     let done = c.poll_cancel_boundary(token).unwrap().unwrap();
-    assert_eq!((done.applied_records, done.canceled_records), (1, 1));
+    assert_eq!(done.effective_sample, SampleTime(16));
     assert_eq!(
-        r.cancel_boundary(SampleTime(32)),
+        (
+            done.applied_records,
+            done.canceled_records,
+            done.canceled_events
+        ),
+        (1, 1, 1)
+    );
+    assert_eq!(c.outstanding(), 0);
+    assert_eq!(r.snapshot().unwrap().pending, None);
+    let event = c.try_dequeue_event().unwrap();
+    assert!(matches!(
+        event.payload,
+        ReliablePayload::AutomationCanceled {
+            origin_request_id,
+            canceled_records: 1,
+            effective_sample: Some(SampleTime(16)),
+            ..
+        } if origin_request_id == RequestId::new(5).unwrap()
+    ));
+    assert_eq!(c.collect_terminal(ticket), Err(DeliveryError::StaleTicket));
+    l.fill(0.2);
+    x.fill(0.2);
+    r.render(&mut l, &mut x, SampleTime(32)).unwrap();
+    let after_barrier = r.snapshot().unwrap();
+    assert_eq!(after_barrier.applied, 1);
+    assert_state_bits(after_barrier.state[1], right_before_cancel);
+    assert_eq!(
+        r.cancel_boundary(SampleTime(48)),
         Err(ScalarPointCancelBoundaryError::NotFaulted)
     );
+    drop(r.stop());
+
+    let mut future_fx = effect();
+    let (mut future_c, future_r, _) =
+        prepare_scalar_point_endpoint(&mut *future_fx, REV, H, config(), 20).unwrap();
+    future_c
+        .try_admit(SampleTime(0), batch(20, &[record(H[0], 30, 8.0)]))
+        .unwrap();
+    future_c.try_handoff_next().unwrap();
+    let token = future_c
+        .begin_cancel(AutomationCancellationReason::TransportLocate)
+        .unwrap();
+    let mut future_r = future_r.start().unwrap_or_else(|_| panic!());
+    let future_initial = future_r.snapshot().unwrap();
+    let (mut l, mut x) = ([0.2; Q], [0.3; Q]);
+    future_r.render(&mut l, &mut x, SampleTime(0)).unwrap();
+    let done = future_c.poll_cancel_boundary(token).unwrap().unwrap();
+    assert_eq!(
+        (
+            done.effective_sample,
+            done.applied_records,
+            done.canceled_records
+        ),
+        (SampleTime(0), 0, 1)
+    );
+    assert_eq!(future_r.snapshot().unwrap().pending, None);
+    let future_after = future_r.snapshot().unwrap();
+    assert_eq!(future_after.applied, 0);
+    assert_state_bits(future_after.state[0], future_initial.state[0]);
+    assert_state_bits(future_after.state[1], future_initial.state[1]);
+    assert!(future_c.try_dequeue_event().is_ok());
+    assert_eq!(future_c.outstanding(), 0);
+    drop(future_r.stop());
+
+    let mut unsupported_fx = effect();
+    let (mut unsupported_c, unsupported_r, _) =
+        prepare_scalar_point_endpoint(&mut *unsupported_fx, REV, H, config(), 30).unwrap();
+    let step = AutomationRecord {
+        kind: AutomationKind::Step,
+        handle: H[1],
+        start: SampleTime(4),
+        end: SampleTime(8),
+        start_value: -2.0,
+        end_value: -2.0,
+    };
+    let linear = AutomationRecord {
+        kind: AutomationKind::Linear,
+        handle: H[0],
+        start: SampleTime(9),
+        end: SampleTime(12),
+        start_value: 2.0,
+        end_value: 4.0,
+    };
+    unsupported_c
+        .try_admit(
+            SampleTime(0),
+            batch(30, &[record(H[0], 3, 2.0), step, linear]),
+        )
+        .unwrap();
+    unsupported_c
+        .try_admit(SampleTime(0), batch(31, &[record(H[1], 13, 6.0)]))
+        .unwrap();
+    assert_eq!(
+        unsupported_c.try_handoff_next().unwrap(),
+        HandoffResult::PendingUnsupported
+    );
+    assert_eq!(
+        unsupported_c.try_handoff_next().unwrap(),
+        HandoffResult::PendingUnsupported
+    );
+    assert_eq!(unsupported_c.outstanding(), 2);
+    let token = unsupported_c
+        .begin_cancel(AutomationCancellationReason::ExplicitReconfiguration)
+        .unwrap();
+    let mut unsupported_r = unsupported_r.start().unwrap_or_else(|_| panic!());
+    let initial = unsupported_r.snapshot().unwrap();
+    let (mut l, mut x) = ([0.2; Q], [0.3; Q]);
+    unsupported_r.render(&mut l, &mut x, SampleTime(0)).unwrap();
+    let done = unsupported_c.poll_cancel_boundary(token).unwrap().unwrap();
+    assert_eq!(
+        (
+            done.effective_sample,
+            done.applied_records,
+            done.canceled_records
+        ),
+        (SampleTime(0), 0, 4)
+    );
+    assert_eq!(done.canceled_events, 2);
+    let after = unsupported_r.snapshot().unwrap();
+    assert_eq!(after.pending, None);
+    assert_eq!(after.applied, 0);
+    assert_state_bits(after.state[0], initial.state[0]);
+    assert_state_bits(after.state[1], initial.state[1]);
+    assert_eq!(unsupported_c.outstanding(), 0);
+    for expected in [
+        (RequestId::new(30).unwrap(), 3),
+        (RequestId::new(31).unwrap(), 1),
+    ] {
+        let event = unsupported_c.try_dequeue_event().unwrap();
+        assert!(matches!(
+            event.payload,
+            ReliablePayload::AutomationCanceled {
+                origin_request_id,
+                canceled_records,
+                effective_sample: Some(SampleTime(0)),
+                ..
+            } if (origin_request_id, canceled_records) == expected
+        ));
+    }
+    drop(unsupported_r.stop());
+
+    let mut full_cfg = config();
+    full_cfg.reliable_event_slots = NonZeroUsize::new(4).unwrap();
+    let mut reliable_fx = effect();
+    let (mut reliable_c, reliable_r, _) =
+        prepare_scalar_point_endpoint(&mut *reliable_fx, REV, H, full_cfg, 40).unwrap();
+    let mut reliable_r = reliable_r.start().unwrap_or_else(|_| panic!());
+    for cycle in 0..2_u64 {
+        let first = cycle * Q as u64;
+        reliable_c
+            .try_admit(
+                SampleTime(first),
+                batch(40 + cycle * 2, &[record(H[0], first + 30, 4.0)]),
+            )
+            .unwrap();
+        reliable_c
+            .try_admit(
+                SampleTime(first),
+                batch(41 + cycle * 2, &[record(H[1], first + 31, -4.0)]),
+            )
+            .unwrap();
+        let token = reliable_c
+            .begin_cancel(AutomationCancellationReason::EndpointShutdown)
+            .unwrap();
+        let (mut l, mut x) = ([0.2; Q], [0.3; Q]);
+        reliable_r
+            .render(&mut l, &mut x, SampleTime(first))
+            .unwrap();
+        let done = reliable_c.poll_cancel_boundary(token).unwrap().unwrap();
+        assert_eq!((done.canceled_events, done.canceled_records), (2, 2));
+    }
+    reliable_c
+        .try_admit(SampleTime(32), batch(44, &[record(H[0], 62, 4.0)]))
+        .unwrap();
+    let before = (
+        reliable_c.outstanding(),
+        reliable_c.resident_automation(),
+        reliable_c.automation_status(),
+    );
+    assert!(matches!(
+        reliable_c.begin_cancel(AutomationCancellationReason::EndpointShutdown),
+        Err(DeliveryError::ReliableFull(_))
+    ));
+    assert_eq!(
+        (
+            reliable_c.outstanding(),
+            reliable_c.resident_automation(),
+            reliable_c.automation_status(),
+        ),
+        before
+    );
+    for _ in 0..4 {
+        reliable_c.try_dequeue_event().unwrap();
+    }
+    let token = reliable_c
+        .begin_cancel(AutomationCancellationReason::EndpointShutdown)
+        .unwrap();
+    let (mut l, mut x) = ([0.2; Q], [0.3; Q]);
+    reliable_r.render(&mut l, &mut x, SampleTime(32)).unwrap();
+    assert_eq!(
+        reliable_c
+            .poll_cancel_boundary(token)
+            .unwrap()
+            .unwrap()
+            .canceled_records,
+        1
+    );
+    drop(reliable_r.stop());
+
+    let mut retained_fx = effect();
+    let (mut retained_c, retained_r, _) =
+        prepare_scalar_point_endpoint(&mut *retained_fx, REV, H, config(), 60).unwrap();
+    retained_c
+        .try_admit(SampleTime(0), batch(60, &[record(H[0], 0, 2.0)]))
+        .unwrap();
+    retained_c
+        .try_admit(SampleTime(0), batch(61, &[record(H[1], 16, 3.0)]))
+        .unwrap();
+    let first = match retained_c.try_handoff_next().unwrap() {
+        HandoffResult::HandedOff(ticket) => ticket,
+        other => panic!("{other:?}"),
+    };
+    assert!(matches!(
+        retained_c.try_admit(SampleTime(0), batch(62, &[record(H[0], 17, 4.0)])),
+        Err(ScalarPointAdmissionError::Service(
+            AutomationEnqueueError::Full { .. }
+        ))
+    ));
+    let mut retained_r = retained_r.start().unwrap_or_else(|_| panic!());
+    let (mut l, mut x) = ([0.2; Q], [0.3; Q]);
+    retained_r.render(&mut l, &mut x, SampleTime(0)).unwrap();
+    assert!(matches!(
+        retained_c.try_admit(SampleTime(0), batch(63, &[record(H[0], 18, 4.0)])),
+        Err(ScalarPointAdmissionError::Service(
+            AutomationEnqueueError::Full { .. }
+        ))
+    ));
+    retained_c.collect_terminal(first).unwrap();
+    retained_c
+        .try_admit(SampleTime(0), batch(64, &[record(H[0], 19, 4.0)]))
+        .unwrap();
+    assert_eq!(retained_c.outstanding(), 2);
 }
 
 #[test]
