@@ -1,0 +1,17 @@
+# Preserve scalar error witnesses with lint-clean normal-feature propagation
+
+Ready-to-number independent, bounded maintenance brief. Discovered by483's broader strict Clippy; existing production source is unchanged by483. Do not expand483 or relax its dependency gates. Root must number/synchronize before edits and serialize this single file with active builtins-compiler work; #238 input-stage work is a different file but root owns resource scheduling.
+
+Problem: three `if let Err(error) { cfg(test/test-support) witness; return Err(error) }` sites become plain manual error propagation when test support is disabled, triggering question_mark. They are ConsoleMatrixProcessor::process (~3591), ConsoleFaderProcessor::process (~3648), and ScalarPairProcessor::process's FIRST fader drain (~3735). Preserve all test-support observations; do not apply ? blindly and drop them.
+
+Allowed source: crates/builtins-compiler/src/lib.rs, those three blocks only, plus numbered evidence. Use Result::inspect_err with the existing cfg-gated observation followed by `?` (or equally small explicit cfg-separated propagation if needed). The witness must execute only on the existing error, before return, observe exactly the same state, and not cause a second drain. Normal builds must remain free of witness access. No global lint allow, new public API/helper framework, queue/arithmetic/resource/layout change or unrelated formatting.
+
+Keep the later matrix-drain error branch in ScalarPairProcessor UNCHANGED: it intentionally processes fader arithmetic before returning the matrix error. Keep fader drain before envelope validation and envelope rejection before matrix drain. Preserve original errors and consumed queue prefixes.
+
+Finite gates: strict `cargo clippy --locked -p builtins-compiler --all-targets -- -D warnings` with normal features AND `--features test-support` (before --), plus affected existing scalar error/FIFO/state tests in debug/release using the current nonempty exact names selected from the delivered source. Exact existing filters are tests::scalar_invalid_envelope_leaves_the_later_matrix_queue_untouched, tests::actual_scalar_graph_queues_fuse_and_fall_back_against_separate_owners, and tests::actual_scalar_graph_preserves_scheduled_matrix_prefix_error_and_queue_tail. Invoke each with `cargo test --locked -p builtins-compiler --features test-support --lib FILTER -- --exact` and matching --release; require one actual test each. Preserve those names in the numbered baseline, not a new test corpus. Check existing mutation witness still reports the same error-time state via unchanged fixture assertions; no new mutation campaign. Run fmt/diff and relevant realtime policy; retain initial full Clippy101 and corrected commands/statuses. No timing/workload/artifact repin; mechanically equivalent propagation does not justify a new benchmark or independent broad matrix.
+
+Astra scopes/reviews, Luna1 then Sol2/3 on FAIL, hardstop after3. Root owns checkpoint, source-equivalence/applicable prior qualification, actual-head PR review, requiredCI and remote closure. This brief does not authorize implementation until numbered.
+
+## Numbered baseline
+
+GitHub485 has the matching number/title. Source base is delivered main024ad674789a96390bcc45a754931ef5119c8b59. This independent three-block maintenance slice does not overlap238 builtins source or483 floor tests. Pending numbered Astra approval before Luna1. No timing or broad optimization is authorized.
