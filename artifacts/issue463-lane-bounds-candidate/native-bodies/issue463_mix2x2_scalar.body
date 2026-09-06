@@ -1,0 +1,143 @@
+0000000000000000 <issue463_mix2x2_scalar>:
+       0:      	pushq	%rbp
+       1:      	pushq	%r14
+       3:      	pushq	%rbx
+       4:      	movq	%rcx, %rbx
+       7:      	cmpq	%rcx, %rsi
+       a:      	ja	0x237 <issue463_mix2x2_scalar+0x237>
+      10:      	movq	%rdx, %r14
+      13:      	testq	%rsi, %rsi
+      16:      	je	0xf9 <issue463_mix2x2_scalar+0xf9>
+      1c:      	cmpq	$0x4, %rsi
+      20:      	jb	0x3e <issue463_mix2x2_scalar+0x3e>
+      22:      	leaq	(%rdi,%rsi,4), %rax
+      26:      	leaq	(%r14,%rsi,4), %rcx
+      2a:      	cmpq	%rcx, %rdi
+      2d:      	setb	%cl
+      30:      	cmpq	%rax, %r14
+      33:      	setb	%al
+      36:      	testb	%al, %cl
+      38:      	je	0x119 <issue463_mix2x2_scalar+0x119>
+      3e:      	xorl	%eax, %eax
+      40:      	movq	%rax, %rcx
+      43:      	orq	$0x1, %rcx
+      47:      	testb	$0x1, %sil
+      4b:      	je	0x7e <issue463_mix2x2_scalar+0x7e>
+      4d:      	vmovss	(%rdi,%rax,4), %xmm4
+      52:      	vmovss	(%r14,%rax,4), %xmm5
+      58:      	vmulss	%xmm4, %xmm0, %xmm6
+      5c:      	vmulss	%xmm5, %xmm1, %xmm7
+      60:      	vaddss	%xmm7, %xmm6, %xmm6
+      64:      	vmovss	%xmm6, (%rdi,%rax,4)
+      69:      	vmulss	%xmm4, %xmm2, %xmm4
+      6d:      	vmulss	%xmm5, %xmm3, %xmm5
+      71:      	vaddss	%xmm5, %xmm4, %xmm4
+      75:      	vmovss	%xmm4, (%r14,%rax,4)
+      7b:      	movq	%rcx, %rax
+      7e:      	cmpq	%rcx, %rsi
+      81:      	je	0xf9 <issue463_mix2x2_scalar+0xf9>
+      83:      	nopw	%cs:(%rax,%rax)
+      90:      	vmovss	(%rdi,%rax,4), %xmm4
+      95:      	vmovss	(%r14,%rax,4), %xmm5
+      9b:      	vmulss	%xmm4, %xmm0, %xmm6
+      9f:      	vmulss	%xmm5, %xmm1, %xmm7
+      a3:      	vaddss	%xmm7, %xmm6, %xmm6
+      a7:      	vmovss	%xmm6, (%rdi,%rax,4)
+      ac:      	vmulss	%xmm4, %xmm2, %xmm4
+      b0:      	vmulss	%xmm5, %xmm3, %xmm5
+      b4:      	vaddss	%xmm5, %xmm4, %xmm4
+      b8:      	vmovss	%xmm4, (%r14,%rax,4)
+      be:      	vmovss	0x4(%rdi,%rax,4), %xmm4
+      c4:      	vmovss	0x4(%r14,%rax,4), %xmm5
+      cb:      	vmulss	%xmm4, %xmm0, %xmm6
+      cf:      	vmulss	%xmm5, %xmm1, %xmm7
+      d3:      	vaddss	%xmm7, %xmm6, %xmm6
+      d7:      	vmovss	%xmm6, 0x4(%rdi,%rax,4)
+      dd:      	vmulss	%xmm4, %xmm2, %xmm4
+      e1:      	vmulss	%xmm5, %xmm3, %xmm5
+      e5:      	vaddss	%xmm5, %xmm4, %xmm4
+      e9:      	vmovss	%xmm4, 0x4(%r14,%rax,4)
+      f0:      	addq	$0x2, %rax
+      f4:      	cmpq	%rax, %rsi
+      f7:      	jne	0x90 <issue463_mix2x2_scalar+0x90>
+      f9:      	vzeroupper
+      fc:      	callq	0x101 <issue463_mix2x2_scalar+0x101>
+     101:      	rorxl	$0x15, %eax, %ebp
+     107:      	movq	%r14, %rdi
+     10a:      	movq	%rbx, %rsi
+     10d:      	callq	0x112 <issue463_mix2x2_scalar+0x112>
+     112:      	xorl	%ebp, %eax
+     114:      	popq	%rbx
+     115:      	popq	%r14
+     117:      	popq	%rbp
+     118:      	retq
+     119:      	cmpq	$0x10, %rsi
+     11d:      	jae	0x126 <issue463_mix2x2_scalar+0x126>
+     11f:      	xorl	%eax, %eax
+     121:      	jmp	0x1d0 <issue463_mix2x2_scalar+0x1d0>
+     126:      	movq	%rsi, %rax
+     129:      	andq	$-0x10, %rax
+     12d:      	vbroadcastss	%xmm0, %ymm4
+     132:      	vbroadcastss	%xmm1, %ymm5
+     137:      	vbroadcastss	%xmm2, %ymm6
+     13c:      	vbroadcastss	%xmm3, %ymm7
+     141:      	xorl	%ecx, %ecx
+     143:      	nopw	%cs:(%rax,%rax)
+     150:      	vmovups	(%rdi,%rcx,4), %ymm8
+     155:      	vmovups	0x20(%rdi,%rcx,4), %ymm9
+     15b:      	vmovups	(%r14,%rcx,4), %ymm10
+     161:      	vmovups	0x20(%r14,%rcx,4), %ymm11
+     168:      	vmulps	%ymm4, %ymm8, %ymm12
+     16c:      	vmulps	%ymm4, %ymm9, %ymm13
+     170:      	vmulps	%ymm5, %ymm10, %ymm14
+     174:      	vaddps	%ymm14, %ymm12, %ymm12
+     179:      	vmulps	%ymm5, %ymm11, %ymm14
+     17d:      	vaddps	%ymm14, %ymm13, %ymm13
+     182:      	vmovups	%ymm12, (%rdi,%rcx,4)
+     187:      	vmovups	%ymm13, 0x20(%rdi,%rcx,4)
+     18d:      	vmulps	%ymm6, %ymm8, %ymm8
+     191:      	vmulps	%ymm6, %ymm9, %ymm9
+     195:      	vmulps	%ymm7, %ymm10, %ymm10
+     199:      	vaddps	%ymm10, %ymm8, %ymm8
+     19e:      	vmulps	%ymm7, %ymm11, %ymm10
+     1a2:      	vaddps	%ymm10, %ymm9, %ymm9
+     1a7:      	vmovups	%ymm8, (%r14,%rcx,4)
+     1ad:      	vmovups	%ymm9, 0x20(%r14,%rcx,4)
+     1b4:      	addq	$0x10, %rcx
+     1b8:      	cmpq	%rcx, %rax
+     1bb:      	jne	0x150 <issue463_mix2x2_scalar+0x150>
+     1bd:      	cmpq	%rax, %rsi
+     1c0:      	je	0xf9 <issue463_mix2x2_scalar+0xf9>
+     1c6:      	testb	$0xc, %sil
+     1ca:      	je	0x40 <issue463_mix2x2_scalar+0x40>
+     1d0:      	movq	%rax, %rcx
+     1d3:      	movq	%rsi, %rax
+     1d6:      	andq	$-0x4, %rax
+     1da:      	vbroadcastss	%xmm0, %xmm4
+     1df:      	vbroadcastss	%xmm1, %xmm5
+     1e4:      	vbroadcastss	%xmm2, %xmm6
+     1e9:      	vbroadcastss	%xmm3, %xmm7
+     1ee:      	nop
+     1f0:      	vmovups	(%rdi,%rcx,4), %xmm8
+     1f5:      	vmovups	(%r14,%rcx,4), %xmm9
+     1fb:      	vmulps	%xmm4, %xmm8, %xmm10
+     1ff:      	vmulps	%xmm5, %xmm9, %xmm11
+     203:      	vaddps	%xmm11, %xmm10, %xmm10
+     208:      	vmovups	%xmm10, (%rdi,%rcx,4)
+     20d:      	vmulps	%xmm6, %xmm8, %xmm8
+     211:      	vmulps	%xmm7, %xmm9, %xmm9
+     215:      	vaddps	%xmm9, %xmm8, %xmm8
+     21a:      	vmovups	%xmm8, (%r14,%rcx,4)
+     220:      	addq	$0x4, %rcx
+     224:      	cmpq	%rcx, %rax
+     227:      	jne	0x1f0 <issue463_mix2x2_scalar+0x1f0>
+     229:      	cmpq	%rax, %rsi
+     22c:      	je	0xf9 <issue463_mix2x2_scalar+0xf9>
+     232:      	jmp	0x40 <issue463_mix2x2_scalar+0x40>
+     237:      	leaq	(%rip), %rcx            # 0x23e <issue463_mix2x2_scalar+0x23e>
+     23e:      	xorl	%edi, %edi
+     240:      	movq	%rbx, %rdx
+     243:      	callq	*(%rip)                 # 0x249 <issue463_mix2x2_scalar+0x249>
+     249:      	ud2
+     24b:      	callq	*(%rip)                 # 0x251 <issue463_mix2x2_scalar+0x251>
+

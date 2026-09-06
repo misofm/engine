@@ -1,0 +1,3 @@
+native=0
+wasm_scalar=0
+wasm_simd128=0

@@ -1,0 +1,1 @@
+PATH=/home/bl/.cargo/bin:$PATH rustc artifacts/issue463-lane-bounds-baseline/issue463_probe.rs --edition=2024 --crate-name issue463_probe --crate-type lib --target TARGET -C opt-level=3 -C debuginfo=2 -C codegen-units=1 -C lto=off TARGET_FEATURE_FLAGS -L dependency=TARGET_DEPS --extern lane=TARGET_LIBLANE --emit=obj=OUTPUT

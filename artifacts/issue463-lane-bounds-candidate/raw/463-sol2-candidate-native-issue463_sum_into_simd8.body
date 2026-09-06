@@ -1,0 +1,180 @@
+0000000000000000 <issue463_sum_into_simd8>:
+       0:      	pushq	%rbp
+       1:      	pushq	%r15
+       3:      	pushq	%r14
+       5:      	pushq	%rbx
+       6:      	pushq	%rax
+       7:      	cmpq	%rcx, %rsi
+       a:      	ja	0x329 <issue463_sum_into_simd8+0x329>
+      10:      	movabsq	$-0x2000000000000000, %r8 # imm = 0xE000000000000000
+      1a:      	movabsq	$0x1ffffffffffffff8, %rcx # imm = 0x1FFFFFFFFFFFFFF8
+      24:      	andq	%rsi, %rcx
+      27:      	leaq	0x7(%r8), %rax
+      2b:      	andq	%rsi, %rax
+      2e:      	movq	%rcx, %r11
+      31:      	shrq	$0x3, %r11
+      35:      	testq	%rcx, %rcx
+      38:      	je	0xfb <issue463_sum_into_simd8+0xfb>
+      3e:      	movl	%r11d, %r9d
+      41:      	andl	$0x3, %r9d
+      45:      	cmpq	$0x20, %rcx
+      49:      	jae	0x50 <issue463_sum_into_simd8+0x50>
+      4b:      	xorl	%r10d, %r10d
+      4e:      	jmp	0xc3 <issue463_sum_into_simd8+0xc3>
+      50:      	movq	%r11, %rbx
+      53:      	andq	$-0x4, %rbx
+      57:      	movl	$0x60, %r14d
+      5d:      	xorl	%r10d, %r10d
+      60:      	vmovups	-0x60(%rdi,%r14), %ymm0
+      67:      	vmovups	-0x40(%rdi,%r14), %ymm1
+      6e:      	vmovups	-0x20(%rdi,%r14), %ymm2
+      75:      	vmovups	(%rdi,%r14), %ymm3
+      7b:      	vaddps	-0x60(%rdx,%r14), %ymm0, %ymm0
+      82:      	vmovups	%ymm0, -0x60(%rdi,%r14)
+      89:      	vaddps	-0x40(%rdx,%r14), %ymm1, %ymm0
+      90:      	vmovups	%ymm0, -0x40(%rdi,%r14)
+      97:      	vaddps	-0x20(%rdx,%r14), %ymm2, %ymm0
+      9e:      	vmovups	%ymm0, -0x20(%rdi,%r14)
+      a5:      	addq	$0x4, %r10
+      a9:      	vaddps	(%rdx,%r14), %ymm3, %ymm0
+      af:      	vmovups	%ymm0, (%rdi,%r14)
+      b5:      	subq	$-0x80, %r14
+      b9:      	cmpq	%r10, %rbx
+      bc:      	jne	0x60 <issue463_sum_into_simd8+0x60>
+      be:      	testq	%r9, %r9
+      c1:      	je	0xfb <issue463_sum_into_simd8+0xfb>
+      c3:      	shlq	$0x5, %r10
+      c7:      	leaq	(%rdx,%r10), %rbx
+      cb:      	addq	%rdi, %r10
+      ce:      	shll	$0x5, %r9d
+      d2:      	xorl	%r14d, %r14d
+      d5:      	nopw	%cs:(%rax,%rax)
+      e0:      	vmovups	(%r10,%r14), %ymm0
+      e6:      	vaddps	(%rbx,%r14), %ymm0, %ymm0
+      ec:      	vmovups	%ymm0, (%r10,%r14)
+      f2:      	addq	$0x20, %r14
+      f6:      	cmpq	%r14, %r9
+      f9:      	jne	0xe0 <issue463_sum_into_simd8+0xe0>
+      fb:      	testq	%rax, %rax
+      fe:      	je	0x242 <issue463_sum_into_simd8+0x242>
+     104:      	leaq	(%rdi,%rcx,4), %r9
+     108:      	leaq	(%rdx,%rcx,4), %r10
+     10c:      	cmpq	$0x4, %rax
+     110:      	jb	0x130 <issue463_sum_into_simd8+0x130>
+     112:      	leaq	(%rdi,%rsi,4), %rbx
+     116:      	leaq	(%rdx,%rsi,4), %r14
+     11a:      	cmpq	%r14, %r9
+     11d:      	setb	%bpl
+     121:      	cmpq	%rbx, %r10
+     124:      	setb	%bl
+     127:      	testb	%bl, %bpl
+     12a:      	je	0x254 <issue463_sum_into_simd8+0x254>
+     130:      	xorl	%ebx, %ebx
+     132:      	movl	%esi, %r11d
+     135:      	subl	%ebx, %r11d
+     138:      	movq	%rbx, %r8
+     13b:      	andl	$0x7, %r11d
+     13f:      	je	0x16a <issue463_sum_into_simd8+0x16a>
+     141:      	movq	%rbx, %r8
+     144:      	nopw	%cs:(%rax,%rax)
+     150:      	vmovss	(%r9,%r8,4), %xmm0
+     156:      	vaddss	(%r10,%r8,4), %xmm0, %xmm0
+     15c:      	vmovss	%xmm0, (%r9,%r8,4)
+     162:      	incq	%r8
+     165:      	decq	%r11
+     168:      	jne	0x150 <issue463_sum_into_simd8+0x150>
+     16a:      	subq	%rax, %rbx
+     16d:      	cmpq	$-0x8, %rbx
+     171:      	ja	0x242 <issue463_sum_into_simd8+0x242>
+     177:      	leaq	(%rdx,%rcx,4), %rdx
+     17b:      	addq	$0x1c, %rdx
+     17f:      	leaq	(%rdi,%rcx,4), %rcx
+     183:      	addq	$0x1c, %rcx
+     187:      	nopw	(%rax,%rax)
+     190:      	vmovss	-0x1c(%rcx,%r8,4), %xmm0
+     197:      	vmovss	-0x18(%rcx,%r8,4), %xmm1
+     19e:      	vaddss	-0x1c(%rdx,%r8,4), %xmm0, %xmm0
+     1a5:      	vmovss	%xmm0, -0x1c(%rcx,%r8,4)
+     1ac:      	vaddss	-0x18(%rdx,%r8,4), %xmm1, %xmm0
+     1b3:      	vmovss	%xmm0, -0x18(%rcx,%r8,4)
+     1ba:      	vmovss	-0x14(%rcx,%r8,4), %xmm0
+     1c1:      	vaddss	-0x14(%rdx,%r8,4), %xmm0, %xmm0
+     1c8:      	vmovss	%xmm0, -0x14(%rcx,%r8,4)
+     1cf:      	vmovss	-0x10(%rcx,%r8,4), %xmm0
+     1d6:      	vaddss	-0x10(%rdx,%r8,4), %xmm0, %xmm0
+     1dd:      	vmovss	%xmm0, -0x10(%rcx,%r8,4)
+     1e4:      	vmovss	-0xc(%rcx,%r8,4), %xmm0
+     1eb:      	vaddss	-0xc(%rdx,%r8,4), %xmm0, %xmm0
+     1f2:      	vmovss	%xmm0, -0xc(%rcx,%r8,4)
+     1f9:      	vmovss	-0x8(%rcx,%r8,4), %xmm0
+     200:      	vaddss	-0x8(%rdx,%r8,4), %xmm0, %xmm0
+     207:      	vmovss	%xmm0, -0x8(%rcx,%r8,4)
+     20e:      	vmovss	-0x4(%rcx,%r8,4), %xmm0
+     215:      	vaddss	-0x4(%rdx,%r8,4), %xmm0, %xmm0
+     21c:      	vmovss	%xmm0, -0x4(%rcx,%r8,4)
+     223:      	vmovss	(%rcx,%r8,4), %xmm0
+     229:      	vaddss	(%rdx,%r8,4), %xmm0, %xmm0
+     22f:      	vmovss	%xmm0, (%rcx,%r8,4)
+     235:      	addq	$0x8, %r8
+     239:      	cmpq	%r8, %rax
+     23c:      	jne	0x190 <issue463_sum_into_simd8+0x190>
+     242:      	addq	$0x8, %rsp
+     246:      	popq	%rbx
+     247:      	popq	%r14
+     249:      	popq	%r15
+     24b:      	popq	%rbp
+     24c:      	vzeroupper
+     24f:      	jmp	0x254 <issue463_sum_into_simd8+0x254>
+     254:      	cmpq	$0x20, %rax
+     258:      	jae	0x261 <issue463_sum_into_simd8+0x261>
+     25a:      	xorl	%ebx, %ebx
+     25c:      	jmp	0x2ed <issue463_sum_into_simd8+0x2ed>
+     261:      	movq	%rsi, %rbx
+     264:      	andq	%r8, %rbx
+     267:      	shlq	$0x5, %r11
+     26b:      	leaq	(%rdx,%r11), %r14
+     26f:      	addq	$0x60, %r14
+     273:      	addq	%rdi, %r11
+     276:      	addq	$0x60, %r11
+     27a:      	xorl	%r15d, %r15d
+     27d:      	nopl	(%rax)
+     280:      	vmovups	-0x60(%r11,%r15,4), %ymm0
+     287:      	vmovups	-0x40(%r11,%r15,4), %ymm1
+     28e:      	vmovups	-0x20(%r11,%r15,4), %ymm2
+     295:      	vmovups	(%r11,%r15,4), %ymm3
+     29b:      	vaddps	-0x60(%r14,%r15,4), %ymm0, %ymm0
+     2a2:      	vaddps	-0x40(%r14,%r15,4), %ymm1, %ymm1
+     2a9:      	vaddps	-0x20(%r14,%r15,4), %ymm2, %ymm2
+     2b0:      	vaddps	(%r14,%r15,4), %ymm3, %ymm3
+     2b6:      	vmovups	%ymm0, -0x60(%r11,%r15,4)
+     2bd:      	vmovups	%ymm1, -0x40(%r11,%r15,4)
+     2c4:      	vmovups	%ymm2, -0x20(%r11,%r15,4)
+     2cb:      	vmovups	%ymm3, (%r11,%r15,4)
+     2d1:      	addq	$0x20, %r15
+     2d5:      	cmpq	%r15, %rbx
+     2d8:      	jne	0x280 <issue463_sum_into_simd8+0x280>
+     2da:      	cmpq	%rbx, %rax
+     2dd:      	je	0x242 <issue463_sum_into_simd8+0x242>
+     2e3:      	testb	$0x4, %sil
+     2e7:      	je	0x132 <issue463_sum_into_simd8+0x132>
+     2ed:      	movq	%rbx, %r11
+     2f0:      	addq	$0x4, %r8
+     2f4:      	movq	%r8, %rbx
+     2f7:      	andq	%rsi, %rbx
+     2fa:      	nopw	(%rax,%rax)
+     300:      	vmovups	(%r9,%r11,4), %xmm0
+     306:      	vaddps	(%r10,%r11,4), %xmm0, %xmm0
+     30c:      	vmovups	%xmm0, (%r9,%r11,4)
+     312:      	addq	$0x4, %r11
+     316:      	cmpq	%r11, %rbx
+     319:      	jne	0x300 <issue463_sum_into_simd8+0x300>
+     31b:      	cmpq	%rbx, %rax
+     31e:      	je	0x242 <issue463_sum_into_simd8+0x242>
+     324:      	jmp	0x132 <issue463_sum_into_simd8+0x132>
+     329:      	leaq	(%rip), %rax            # 0x330 <issue463_sum_into_simd8+0x330>
+     330:      	xorl	%edi, %edi
+     332:      	movq	%rcx, %rdx
+     335:      	movq	%rax, %rcx
+     338:      	callq	*(%rip)                 # 0x33e <issue463_sum_into_simd8+0x33e>
+     33e:      	ud2
+     340:      	callq	*(%rip)                 # 0x346 <issue463_sum_into_simd8+0x346>
