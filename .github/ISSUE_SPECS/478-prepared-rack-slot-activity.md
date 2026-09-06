@@ -114,4 +114,103 @@ Root preserves the existing packed-mask design and its frozen accounting accepta
 
 ## Numbered accounting prerequisite
 
-The missing reservation is now owned by #511 (`511-runtime-bank-slot-reservation.md` on its dedicated branch). It reserves C=N*(F+3B+3W) and L=max(NF,NB,W) using actual combined prepared/planned bank populations before cap admission, with independent ownership and transactional evidence. Luna attempt1 did not satisfy its full gates; Astra issued one consolidated FAIL and Sol attempt2 is active. #478 remains queued with zero implementation attempts consumed until #511 is delivered and its actual integrated base is reviewed. #509 and #512 maintenance are delivered independently; neither resolves this accounting prerequisite.
+#511 delivered through PR515/main107b9ed1 after final Sol3 source PASS, bounded integration acceptance, exact-PR Astra PASS and required qualification34023823998 SUCCESS. Post-main34024175768 is also SUCCESS. Its C=N*(F+3B+3W) and L=max(NF,NB,W) reservation now governs this change; native CAPI and browser numerical mirrors remain frozen consumers. Zero #478 implementation attempts were consumed before this fresh-base approval. Earlier queue/prerequisite-stop prose is historical and is superseded by the authoritative Luna1 brief below.
+
+
+## Authoritative delivered-base amendments and Luna attempt 1
+
+# Astra #478 delivered-base scope review and Luna attempt 1 brief — PASS
+
+Reviewed clean `eadc52f4` in `/home/bl/misofm/engine-rt8-plan`, merge `b232922f` of delivered main `107b9ed1`, the complete numbered #478 spec, earlier implementation-base stop and queue-readiness reviews, delivered #511 accounting/construction/evidence paths, and current rack code/tests. The entire rack crate remains byte-identical to previously scoped `14f46280`. Against delivered main the only local differences are #478's accumulated planning record and #511 closure documentation. The reported #496/#506 documentation conflict introduced no rack/runtime change.
+
+The missing named reservation that blocked assignment has now been delivered by #511/PR515. Its production source and accepted resource contract are present in this exact base. PASS to activate the first #478 implementation attempt after root records/synchronizes the amendments below. No #478 attempt was consumed by its prerequisite stop. Root has reported PR515 required CI success and remote #511 closure; its post-main run remains separately monitored, and this review does not claim that pending result passed.
+
+## Smallest closable product
+
+Replace only BankChain's three invariant per-slot nonempty-mask scans with a prepared private u8 activity mask. Preserve public `BankSlot { stage, active_lanes }`, `BankChain::new` inputs/errors, original width/subset/nonempty-chain validation, stage ownership/order and live symmetry/observation/bypass behavior. Keep arbitrary slot counts: the eight bits encode bank lanes, never slots or tracks.
+
+Use one private unversioned prepared-slot type containing the original `Box<dyn BankStage>` and u8. Validate the complete original inputs first, retain scratch clearing/full-bank decisions, and calculate `collapse_prefix_of(&slots, &active)` on the original validated public slots before conversion. Convert in order into a separately owned vector explicitly requested for S initialized slots; do not grow it or rely on a capacity-opaque iterator collect. Finish as a boxed slice. Pack each bool at its original lane index, release its old mask off render, and retain every stage including all-false slots. No caller-trusted boolean, extra persistent parallel mask/array, mutable cache interface, pointer tagging or unsafe layout trick.
+
+Change exactly the nonempty predicates currently at rack lib.rs1785,1904,1929 to prepared-mask nonzero. Change the slot-specific lane lookup at1655 to a guarded bit read. The existing chain-level active.get guard must reject lane indices outside the chain before any shift. All other slot operations remain stage calls, and all chain/aux/fold masks and live witness decisions remain unchanged. `collapse_prefix_of` retains its original public-slot mask equality and seam rules. Inactive slots necessarily prevent the all-masks-equal collapse prefix where they did before; do not manufacture an impossible collapsed chain with an empty slot to satisfy a test case.
+
+This is one useful bounded rack feature plus its necessary existing ownership-oracle adaptation. It does not own a generic allocator/harness improvement, target-matrix expansion, performance framework, new DSP fixture corpus or unrelated queue rewrite. No timing or instruction/cycle improvement claim is authorized.
+
+## Exact path amendment
+
+Production remains solely `crates/rack/src/lib.rs`. Its inline tests may inspect the private representation and contain finite trace/layout/mechanism evidence. Existing directed fixture edits are allowed only in `crates/rack/tests/console_bank.rs`, `crates/rack/tests/mono_reengage.rs`, and their existing `MUTATIONS.md`.
+
+Approve these two necessary narrow additions to the old path freeze:
+
+- `crates/builtins-compiler/tests/allocation_tracker.rs`: adapt the existing `actual_runtime_bank_slot_owners_fit_retained_largest_and_conversion_reservation` to the new actual allocation/release shape, keeping its installed thread-local allocator, byte-counter liveness, paired/unpaired graph observations and repeated zero-render checks. No replacement allocator or changed old phase-two realloc semantics.
+- `crates/graph/src/runtime.rs`: only the already feature-gated #511 construction adapter/fact descriptions and test-only layout facts, if needed to identify its incoming public slot storage versus final private retained storage honestly and expose BankChain/RuntimeUnit layout sizes. No graph production constructor/scheduler/accounting change. Existing graph exports may be reused; no new public production diagnostic or rack Cargo feature is needed.
+
+The numbered spec and focused evidence are the other permitted paths. Graph/graph-compiler estimators, `crates/graph/src/lib.rs`, CAPI numerical mirrors, browser expected rows, Cargo/lock/config, ABI, DSP, scripts/gates and fixture identities stay frozen during implementation. Existing graph/CAPI tests are regression consumers, not blanket permission to edit them. Any actual delivery artifact mismatch follows the separate observed-pin/current-consumer ruling route later.
+
+## Delivered reservation and finite physical proof
+
+Keep #511's C=N*(F+3B+3W), L=max(NF,NB,W), combined N and all admission totals unchanged. F is the original boxed stage, B the public BankSlot, W the maximum actual bank mask; define P as the new private slot's actual target layout. Establish P<=B and destination capacity<=S<=R<=N. The original graph constructor now explicitly bounds the public slot capacity by S; the incoming stage-vector capacity is bounded by R. Do not confuse stage capacity with post-pairing S.
+
+A sufficient conservative graph-component bound is:
+
+- New retained private slots plus chain masks: N*P+N*W <= N*(B+2W).
+- Conversion, allowing incoming stages, old public slots, private vector plus a possible boxed-slice destination, and old slot/chain masks together: N*F+N*B+2*N*P+2*N*W <= C because P<=B.
+- Each stage/public/private destination request and mask remains <=L.
+
+Some named terms do not coexist in the actual ordered constructor; this conservative bound deliberately avoids a false process-wide peak claim. If implementation creates another destination, grows capacity, or cannot establish these inequalities, return that precise obstacle before acceptance. Do not consume or reduce #511's extra headroom in unrelated owners or lower resource totals to claim savings.
+
+A legal zero-slot direct caller still owns its chain mask and scratch. Its S=0 control must prove zero private-slot allocation and correct identity/lifetime behavior; do not assert those caller-owned bytes fit #511's N=0 graph-bank component. A graph with no prepared/planned memberships creates no such bank chain. This distinction preserves both zero-slot public compatibility and the unchanged zero-population reservation.
+
+`BankChain::new` also accepts arbitrary caller Vec capacities. Preserve that API without inventing a global cap for external callers. Its graph-admitted path has the #511 exact public-capacity premise above; tests should separately show spare-capacity public inputs still behave correctly, and attribute their input capacity explicitly rather than pretending N-based graph admission covered arbitrary caller storage.
+
+Use the existing ragged identity-stage construction interval to identify every requested and freed layout. A native three-slot example is expected to replace retained public96 plus three8 masks with private3*P, while keeping the original8 mask and two independently identified scratch planes; these are predictions, not measured facts. Update the old exact request/free expectations from actual attributable new events, not by removing assertions. Seed preexisting ownership correctly, preserve checked failure flags, distinguish scratch/stage owners, assert no unexplained requests or releases, and verify zero closing balance after destruction. The zero-sized identity stages and ragged mask avoid unrelated stage payload and tiled staging allocations in this interval.
+
+Cover W4/W8 and a small fixed set S=0,1,3,9 so zero, multiple slots and slot counts greater than mask width are represented without a sweep framework. Full-bank behavior may be established in semantic/render fixtures; its tiled staging stays a separate owner and is never charged to this component. Record native actual P/B/F sizes/alignment and array requests. Assert target-layout P<=B at compile time so the existing Wasm build also checks the real compiler-selected layout, rather than calling predicted wasm32 P12/B16 measured evidence. Retain source-level before/after BankChain and RuntimeUnit layout facts on the delivery target; their boxed-slice field footprint should be unchanged. A layout discrepancy is a returned fact, not permission to repin bank processor rows.
+
+## Frozen finite semantic and mechanism gates
+
+Freeze these new inline test identities before implementation:
+
+1. `tests::prepared_slot_activity_preserves_shape_bits_and_ownership`: W4/W8 validation failures remain Shape before conversion; legal zero slots, empty/one-bit/holey/full slot masks, caller mutation before transfer, arbitrary slot count and spare input capacity retain the original behavior. Check exact prepared bits, lane-out-of-range decline, unchanged collapse-prefix decisions and inactive-stage lifetime/drop behavior. Assert private layout <=public layout.
+2. `tests::prepared_slot_activity_preserves_dispatch_trace_and_errors`: a compact test-local old mask-any reference over the same prepared input descriptions compares begin/process/process_mono order, samples/frames, stage state/PCM bits and failure stopping position. Include ordinary chains with leading/middle/trailing inactive slots, and separately legal collapsed prefix plus seam suffix. All eligible begin calls still precede processing; an inactive stage neither drains nor computes, but remains owned. Existing real console/mono fixtures supply queued-control and recovery behavior; do not create a second production executor.
+3. `tests::prepared_slot_dispatch_uses_constant_activity_checks`: exercise actual ordinary and legal collapsed BankChain::run calls so all three production guard sites are reached. Use narrowly test-only, allocation-free accounting of actual activity-predicate work, scoped independently of required live symmetry reads. Assert prepared nonempty queries inspect no per-lane activity sequence in render, while semantic trace/PCM checks run before the work assertion.
+
+Freeze exactly one actual mechanism control: temporarily replace the three prepared nonzero guard computations in the production run path with the old bounded per-lane nonempty computation. Since persistent bool slices are deliberately removed, it may scan the original lane values decoded from the packed byte (or reconstruct a fixed stack bool array) in original lane order. This is the representationally adjusted restoration of the removed per-block scan, not a claim to retain the old heap representation. The actual loop's lane inspections must drive the test-only work observation; do not increment an arbitrary mutant marker or compare two disconnected helpers. Use the same frozen mechanism test, which must reach equal semantic assertions and then fail its unchanged excess-work assertion. Preserve exact mutation diff, failing command/status/assertion and restored-source passing result. One mutation spanning the three sites suffices; no separate campaign is requested.
+
+Reuse existing console_bank lane-command/bypass/partition fixtures and mono_reengage's forced-off, bypass, rejected recovery and earned-agreement cases. Their PCM/state/channel-copy transition checks remain load-bearing. Add only a directed missing case in those files if necessary; do not cache changing stage facts to simplify tests. Existing allocator liveness and actual ordinary/folded/full/partial graph render audits remain mandatory and separate from preparation accounting.
+
+## Exact execution and checkpoints
+
+Before source changes, capture the small applicable layout baseline using the allowed existing test seam if needed; do not introduce a timing or reusable layout tool project. Root must first append/synchronize this brief and freeze the three test names/feature commands in #478.
+
+For the first coherent source tranche, run each of the three named inline tests as `cargo test --locked -p rack --lib TEST_NAME -- --exact`, with one actual selected test, plus the adapted physical exact command:
+
+```
+cargo test --locked -p builtins-compiler --features test-support,graph/test-support --test allocation_tracker actual_runtime_bank_slot_owners_fit_retained_largest_and_conversion_reservation -- --exact
+```
+
+Once those are green, pause for root's exact-path checkpoint before more implementation. Repeat the three inline exact tests and physical exact test with `--release`. Execute the one mechanism mutant once on the frozen debug exact test, preserve its intended failure, restore accepted source and prove that exact test passes again. Do not tune or rerun the mutation to accumulate a campaign.
+
+Run these affected suites in debug/release with actual nonzero counts:
+
+```
+cargo test --locked -p rack --lib --test console_bank --test mono_reengage
+cargo test --locked -p builtins-compiler --features test-support,graph/test-support --test allocation_tracker
+cargo test --locked -p graph --test rt1_direct_bank_alloc
+cargo test --locked -p capi --test resource_lifecycle
+```
+
+Retain the #511 accounting exact regression unchanged (`cargo test --locked -p graph-compiler --lib tests::runtime_bank_slot_reservation_is_published_and_capped_transactionally -- --exact`) and its full graph-compiler lib suite in debug; release coverage follows the same existing affected route, without a new matrix. Strict affected all-targets Clippy must cover rack plus the graph/builtin test-support integration; keep the previously restored isolated `builtins-compiler --features test-support` consumer compilable. Run fmt/diff and existing rack/graph/realtime/lane/workspace policies, explicitly through bash. Record source identity before every gate; include actual selected counts, individual statuses, candid failures and target-layout limits.
+
+After one coherent Luna pass and evidence checkpoint, stop for one consolidated adversarial verdict. Root owns all Git/GitHub changes and pushes; no overlapping implementation tranche may begin before its coherent checkpoint. Sol attempt2/3 only if that verdict requires them; after three failed implementation attempts total, preserve evidence and rescope once. #478 is the sole launch-critical implementation WIP; independent #514 delivery may proceed on separate inputs.
+
+After source PASS, root performs the established immutable workspace/supported-target/native ABI and actually affected ordinary artifact/browser qualification, followed by actual-PR review and required CI. Broader performance investigations and unrelated ownership concerns belong to successors. Do not keep the product open for a second harness or an expanded corpus.
+
+## Numbered-spec amendments root should adopt explicitly
+
+Append this delivered-base approval as the authoritative current decision; preserve earlier queue/readiness/prerequisite-stop text as dated history. Replace the current-status paragraph claiming #511 Sol2 is active with: #511 delivered through PR515/main107b9ed1, source/core and bounded integrations accepted, zero #478 attempts consumed, and this exact-base review activates fresh Luna1 after synchronization. Distinguish root's still-monitored post-main job from already successful PR qualification.
+
+Amend the exact-path section with the two narrow existing-test/seam allowances above. Supersede the obsolete claim that no named slot reservation/CAPI mirror exists: #511 now supplies C/L, and its native CAPI/browser numerical mirrors are frozen consumers. Replace the ambiguous demand to measure a global actual preparation peak with the explicit attributable conservative coexistence inequality backed by actual requested/free layouts, exactly as #511 approved. Freeze the three test identities and the representationally adjusted one-scan mutation above. Preserve public API, masks/validation/prefix, arbitrary slots, no timing, no numerical subtraction and the precise uncovered-capacity/layout stop.
+
+This review supplies source approval and a concrete bounded brief, not measured P values, a test PASS, post-main CI success or repository mutation. No builds/tests, timing, source/spec/Git/GitHub mutations were performed. Only this requested temporary report was written.
+
+Root adopts all explicit path, ownership-bound, test-identity and mutation amendments above. The delivered-base report's pending post-main reference is historical:34024175768 has since completed SUCCESS and its closure evidence is carried here. The graph component uses the stated conservative coexistence inequality plus actual allocation/release attribution, not an unmeasured global preparation peak. Existing graph test-support adapter and builtin allocation fixture are the only added test paths. No #511 numerical totals or production graph accounting may change. Luna attempt1 is now active following remote spec synchronization; root retains all Git/GitHub ownership.
