@@ -3588,13 +3588,12 @@ impl Drop for ConsoleMatrixProcessor {
 }
 impl GraphRuntimeProcessor for ConsoleMatrixProcessor {
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
-        if let Err(error) = self.drain_controls() {
+        self.drain_controls().inspect_err(|_| {
             #[cfg(any(test, feature = "test-support"))]
             SCALAR_MATRIX_STATE_WITNESS.with(|value| {
                 value.set(builtins::test_support::scalar_matrix_words(&self.matrix));
             });
-            return Err(error);
-        }
+        })?;
         let block = DualMonoBlock::new(block.left, block.right, block.first_sample)
             .map_err(render_error)?;
         self.matrix.process(block);
@@ -3645,13 +3644,12 @@ impl Drop for ConsoleFaderProcessor {
 }
 impl GraphRuntimeProcessor for ConsoleFaderProcessor {
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
-        if let Err(error) = self.drain_controls() {
+        self.drain_controls().inspect_err(|_| {
             #[cfg(any(test, feature = "test-support"))]
             SCALAR_FADER_STATE_WITNESS.with(|value| {
                 value.set(builtins::test_support::scalar_fader_words(&self.fader));
             });
-            return Err(error);
-        }
+        })?;
         let block = DualMonoBlock::new(block.left, block.right, block.first_sample)
             .map_err(render_error)?;
         self.fader.process(block);
@@ -3732,11 +3730,10 @@ impl GraphRuntimeProcessor for ScalarPairProcessor {
             right,
             first_sample,
         } = block;
-        if let Err(error) = self.fader.drain_controls() {
+        self.fader.drain_controls().inspect_err(|_| {
             #[cfg(any(test, feature = "test-support"))]
             record_scalar_state(&self.fader.fader, &self.matrix.matrix);
-            return Err(error);
-        }
+        })?;
         // Preserve the original fader boundary: its queue is drained before the envelope is
         // checked, and an invalid envelope stops before the later matrix owner consumes anything.
         let fused = {
