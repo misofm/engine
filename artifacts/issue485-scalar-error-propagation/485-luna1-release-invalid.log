@@ -1,0 +1,4 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running unittests src/lib.rs (target/debug/deps/builtins_compiler-5ff1d293b1f7fb6b)
+error: Unrecognized option: 'release'
+error: test failed, to rerun pass `-p builtins-compiler --lib`

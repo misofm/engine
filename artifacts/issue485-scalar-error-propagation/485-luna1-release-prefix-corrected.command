@@ -1,0 +1,1 @@
+PATH=/home/bl/.cargo/bin:$PATH cargo test --release --locked -p builtins-compiler --features test-support --lib tests::actual_scalar_graph_preserves_scheduled_matrix_prefix_error_and_queue_tail -- --exact
