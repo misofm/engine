@@ -95,3 +95,19 @@ Root adopts source PASS. Artifact delivery is deliberately sequenced after #463 
 ## Current-main delivery integration
 
 Root integrated deliveredmain571dfc5b (PR493) and its closure record without conflicts. Entire host-core crate remains byte-identical to Astra-accepted source. Freeze this combined source for ordinary shipped-worklet verification; prior standalone artifacts are not reused as combined evidence. Any actual mismatch requires the bounded delivery ruling before repin.
+
+## Actual artifact mismatch delivery amendment
+
+# Astra #492 actual integrated artifact mismatch — approve bounded delivery amendment
+
+Inspected actual source90a72b00dd0ec51925d2bba567a14c8ab3c8f166 in engine-cp7-diagnostics, integrated delivered main571dfc5b. Host-core source is byte-identical to accepted72a4fc52/Sol2, and the only non-evidence/spec change versus delivered main is the approved prepare.rs maintenance. No new runtime repair is involved.
+
+Authentic /tmp/492-delivery-builder.command/.cwd/.source/.raw.log/.status show the ordinary builder completed release compilation and returned1 for expected e58e2544054c086a698779b8ff20b5544afdd68fa3c32ec37bc3db35a63bf998 versus observed1ab725dbcf078716a666b78215490892386bc0170622bf9f79fa806908a14863. The mismatch log supplies the observed identity; the final named simd128 output was not present at review, so this ruling does not claim an independent hash of that output. The ordinary verified rebuild must establish the actual published output identity. This is an actual required artifact integration result, not an unsolicited regeneration or evidence of a numerical change.
+
+Root may amend/synchronize #492's delivery record and checkpoint only the actual observed pin plus provenance. Preserve the failed ordinary verification bytes/status. Then run the existing ordinary verified rebuild on the same frozen combined production/build source, followed by static/object/ABI, resource expected-value checks with26 red controls, separate hermetic suite, current Chromium/Firefox/WebKit qualification with self-test mutations and matrix check. Current generated candidate/hash records may be updated to the actual qualified candidate. All PCM, resource numerical expectations, corpus pins and policy thresholds stay unchanged. A numerical or scope mismatch requires its own concrete ruling; this amendment authorizes none.
+
+The source PASS remains valid subject to this delivery qualification. Do not claim browser execution until the actual terminal records exist; keep build/qualified-candidate/source identities separate from later evidence-only heads. Package authentic failures and final commands/logs/numeric statuses, then obtain an exact-head actual PR review and required CI SUCCESS before merge. No benchmark, new matrix/framework, algorithm change or fourth implementation attempt is introduced.
+
+Read-only source/log/hash inspection; no build, test, timing, source/spec or Git/GitHub mutation performed.
+
+Root adopts amendment on frozen90a72b00 source. Only observed pin, existing generated identity records and evidence may change; verified rebuild and current qualification remain pending.
