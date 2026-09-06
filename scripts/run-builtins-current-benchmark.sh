@@ -266,6 +266,9 @@ jq -e --arg commit "$candidate_commit" --arg tree "$candidate_tree" \
    .cargo_executable==$cargo_executable and .rustc_executable==$rustc_executable and
    .cargo_executable_sha256==$cargo_executable_sha and
    .rustc_executable_sha256==$rustc_executable_sha and
+   .build_target_explicit==true and .incremental_source=="CARGO_INCREMENTAL=0" and
+   .compiler_source=="RUSTC" and .rustc_wrapper==null and .rustc_workspace_wrapper==null and
+   .rustflags_source=="CARGO_ENCODED_RUSTFLAGS" and
    .target_features=="+avx2,+fma" and .profile=="release" and .opt_level=="3" and
    .lto=="fat" and .codegen_units==1 and .panic=="abort" and .debug==1 and
    .debug_assertions==false and .overflow_checks==false and .incremental==false and

@@ -222,7 +222,14 @@ cat >"$template/bin/cargo" <<'EOF'
 set -euo pipefail
 if [[ "${1:-}" == -V ]]; then printf 'cargo 1.99.0 (fake)\n'; exit 0; fi
 printf 'build-entry\n' >>"$(cd "$(dirname "$0")/.." && pwd)/build-calls"
-[[ "${1:-}" == build && "${2:-}" == --locked && "${3:-}" == --release && "${4:-}" == -p && "${5:-}" == bench ]] || exit 90
+[[ "$#" == 7 && "${1:-}" == build && "${2:-}" == --locked && "${3:-}" == --release &&
+   "${4:-}" == -p && "${5:-}" == bench && "${6:-}" == --target &&
+   "${7:-}" == x86_64-unknown-linux-gnu ]] || exit 90
+root=$(cd "$(dirname "$0")/.." && pwd)
+[[ "${CARGO_INCREMENTAL:-}" == 0 && "${RUSTC:-}" == "$root/bin/rustc" &&
+   ${RUSTC_WRAPPER+x} == x && -z "$RUSTC_WRAPPER" &&
+   ${RUSTC_WORKSPACE_WRAPPER+x} == x && -z "$RUSTC_WORKSPACE_WRAPPER" &&
+   "${CARGO_ENCODED_RUSTFLAGS:-}" == '-Ctarget-feature=+avx2,+fma' ]] || exit 92
 [[ "${CARGO_PROFILE_RELEASE_OPT_LEVEL:-}" == 3 &&
    "${CARGO_PROFILE_RELEASE_LTO:-}" == fat &&
    "${CARGO_PROFILE_RELEASE_CODEGEN_UNITS:-}" == 1 &&
@@ -234,9 +241,9 @@ printf 'build-entry\n' >>"$(cd "$(dirname "$0")/.." && pwd)/build-calls"
    "${CARGO_PROFILE_RELEASE_RPATH:-}" == false &&
    "${CARGO_PROFILE_RELEASE_STRIP:-}" == none &&
    "${CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO:-}" == off ]] || exit 91
-mkdir -p "$CARGO_TARGET_DIR/release"
-cp synthetic-emitter.sh "$CARGO_TARGET_DIR/release/bench"
-chmod 755 "$CARGO_TARGET_DIR/release/bench"
+mkdir -p "$CARGO_TARGET_DIR/x86_64-unknown-linux-gnu/release"
+cp synthetic-emitter.sh "$CARGO_TARGET_DIR/x86_64-unknown-linux-gnu/release/bench"
+chmod 755 "$CARGO_TARGET_DIR/x86_64-unknown-linux-gnu/release/bench"
 EOF
 cat >"$template/bin/rustc" <<'EOF'
 #!/usr/bin/env bash
@@ -376,12 +383,38 @@ jq -e '.status=="READY" and .issue==431 and .records_required==20 and
  .panic=="abort" and .debug==1 and .debug_assertions==false and
  .overflow_checks==false and .incremental==false and .rpath==false and
  .strip=="none" and .split_debuginfo=="off" and
+ .build_target_explicit==true and .incremental_source=="CARGO_INCREMENTAL=0" and
+ .compiler_source=="RUSTC" and .rustc_wrapper==null and .rustc_workspace_wrapper==null and
+ .rustflags_source=="CARGO_ENCODED_RUSTFLAGS" and
  .target_features=="+avx2,+fma" and .cargo_version=="cargo 1.99.0 (fake)" and
  .rust_version=="rustc 1.99.0 (fake)" and .llvm_version=="20.1.0" and
  .target_triple=="x86_64-unknown-linux-gnu" and
  (.cargo_executable|endswith("/bin/cargo")) and (.rustc_executable|endswith("/bin/rustc"))' \
  "$case_root/artifacts/issue431-full-chain/builtins-benchmark.preflight.json" >/dev/null
 for selected in cargo git; do [[ "$(PATH="$case_root/bin:$PATH" command -v "$selected")" == "$case_root/bin/$selected" ]]; done
+
+new_case inherited-build-config
+cat >"$case_root/.cargo/config.toml" <<'EOF'
+[build]
+incremental = true
+rustc = "/forbidden/config-rustc"
+rustc-wrapper = "/forbidden/config-wrapper"
+rustc-workspace-wrapper = "/forbidden/config-workspace-wrapper"
+target = "aarch64-unknown-linux-gnu"
+rustflags = ["-Ctarget-feature=-avx2,-fma"]
+[target.'cfg(all())']
+rustflags = ["-Ctarget-feature=-avx2,-fma"]
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-Ctarget-feature=-avx2,-fma"]
+EOF
+run_preflight >/dev/null
+[[ "$(wc -l <"$case_root/build-calls")" == 1 && -x "$case_root/target/issue431-prepared/bench" ]]
+jq -e '.status=="READY" and .target_triple=="x86_64-unknown-linux-gnu" and
+ .target_features=="+avx2,+fma" and .incremental==false and
+ .build_target_explicit==true and .incremental_source=="CARGO_INCREMENTAL=0" and
+ .compiler_source=="RUSTC" and .rustc_wrapper==null and .rustc_workspace_wrapper==null and
+ .rustflags_source=="CARGO_ENCODED_RUSTFLAGS"' \
+ "$case_root/artifacts/issue431-full-chain/builtins-benchmark.preflight.json" >/dev/null
 
 new_case preflight-existing
 mkdir -p "$case_root/artifacts/issue431-full-chain"

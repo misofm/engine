@@ -120,17 +120,18 @@ input_tree_sha256=$(hash_file "$input_rows")
 rm -rf -- "$build_directory"
 if (cd "$repository_root" && \
     CARGO_TARGET_DIR="$build_directory" \
+    CARGO_INCREMENTAL=0 RUSTC="$rustc_executable" RUSTC_WRAPPER= RUSTC_WORKSPACE_WRAPPER= \
     CARGO_PROFILE_RELEASE_OPT_LEVEL=3 CARGO_PROFILE_RELEASE_LTO=fat \
     CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 CARGO_PROFILE_RELEASE_PANIC=abort \
     CARGO_PROFILE_RELEASE_DEBUG=1 CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=false \
     CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=false CARGO_PROFILE_RELEASE_INCREMENTAL=false \
     CARGO_PROFILE_RELEASE_RPATH=false CARGO_PROFILE_RELEASE_STRIP=none \
     CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO=off \
-    CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS='-Ctarget-feature=+avx2,+fma' \
-    cargo build --locked --release -p bench); then :; else
+    CARGO_ENCODED_RUSTFLAGS='-Ctarget-feature=+avx2,+fma' \
+    cargo build --locked --release -p bench --target "$target_triple"); then :; else
     fail 'isolated release build failed'
 fi
-built_binary="$build_directory/release/bench"
+built_binary="$build_directory/$target_triple/release/bench"
 [[ -x "$built_binary" && -f "$built_binary" && ! -L "$built_binary" ]] ||
     fail 'isolated release binary unavailable'
 temporary_binary=$(mktemp "$prepared_directory/.bench.XXXXXX")
@@ -199,6 +200,9 @@ jq -n -S \
     target_triple:$target_triple,cargo_executable:$cargo_executable,
     rustc_executable:$rustc_executable,cargo_executable_sha256:$cargo_executable_sha,
     rustc_executable_sha256:$rustc_executable_sha,
+    build_target_explicit:true,incremental_source:"CARGO_INCREMENTAL=0",
+    compiler_source:"RUSTC",rustc_wrapper:null,rustc_workspace_wrapper:null,
+    rustflags_source:"CARGO_ENCODED_RUSTFLAGS",
     target_features:"+avx2,+fma",profile:"release",opt_level:"3",lto:"fat",codegen_units:1,
     panic:"abort",debug:1,debug_assertions:false,overflow_checks:false,incremental:false,
     rpath:false,strip:"none",split_debuginfo:"off",

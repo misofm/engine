@@ -159,3 +159,34 @@ Extend the existing fake build-entry assertions to verify the actual effective i
 This is the one coherent remaining build-identity group for final Sol3. Parent473 qualification/actual-PR/CI remains pending and #431 capture stays unspent and unauthorized. Another failed attempt is a hard stop/rescope, not an informal fourth correction.
 
 Root adopts FAIL and assigns the final Sol attempt 3 for the single effective-configuration group. Preserve all accepted corrections; a further final FAIL hardstops/rescopes without fourth repair.
+
+## Final Sol attempt 3 effective-configuration evidence
+
+The isolated Cargo invocation now fixes every inherited configuration seam named by the final
+review at Cargo's effective precedence boundary. It supplies `CARGO_INCREMENTAL=0`, selects the
+resolved and hashed rustc through `RUSTC`, explicitly clears both rustc wrapper variables, supplies
+the exact target features through `CARGO_ENCODED_RUSTFLAGS`, and passes
+`--target x86_64-unknown-linux-gnu`. The owned binary lookup follows Cargo's explicit-target output
+directory. The seal records the explicit target, incremental, compiler, wrapper, and rustflags
+mechanisms, and the runner requires those fields before launch.
+
+The existing fake cargo now rejects any build lacking those exact controls and the explicit target.
+A bounded inherited `.cargo/config.toml` fixture supplies conflicting build incremental, compiler,
+both wrappers, target, build rustflags, target-triple rustflags, and cfg rustflags. The production
+preflight copy still reaches the verified fake exactly once, overrides every conflict, publishes the
+owned target-specific executable, and records truthful supported-target provenance. All previously
+accepted refusal, lifecycle, validator, 20-record promotion, and zero-launch cases remain green.
+No real Cargo, preflight, runner, workload, benchmark, audio, or timing command ran; #431 remains
+unspent and unauthorized.
+
+Raw evidence:
+
+- `/tmp/480-sol3-shell-syntax.{command,log,status}`: status 0.
+- `/tmp/480-sol3-focused.{command,log,status}`: status 0 and
+  `current builtins benchmark validators/lifecycle: PASS (real workload launches: 0)`.
+- `/tmp/480-sol3-env.{command,log,status}`: status 0.
+- `/tmp/480-sol3-validator-delta.{command,log,status}`: status 0; accepted validator copies remain
+  unchanged.
+- `/tmp/480-sol3-source-prose.{command,log,status}`: status 0 for the exact four scoped paths,
+  unchanged Rust/Cargo/configuration/validators/fixtures/workflow/history, and explicit #431
+  `UNSPENT`/`UNAUTHORIZED` state.
