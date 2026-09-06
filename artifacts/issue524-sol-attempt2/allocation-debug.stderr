@@ -1,0 +1,3 @@
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-native-points/crates/compressor)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.25s
+     Running tests/conformance.rs (target/debug/deps/conformance-3c37af9fe9c8a5a5)

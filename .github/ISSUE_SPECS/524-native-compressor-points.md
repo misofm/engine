@@ -172,3 +172,7 @@ Root adopts this bounded correction brief. Sol attempt 2 may begin only after th
 ## Sol attempt 2 focused checkpoint
 
 Sol corrected the five named fixtures, repeated allocation sequence and Rust API documentation in the four approved paths. The focused debug binary passes 5/5 tests on recorded source identities. An initial compile-only error from treating the existing FP guard as a Result was corrected; its status 101 and the restored status 0 are preserved in `artifacts/issue524-sol-attempt2`. No production transition logic, DSP algorithm, layout, descriptor, state payload or resource expectation changed. Root checkpoints this coherent tranche before the remaining proportional gates and one consolidated Astra review; source acceptance remains pending.
+
+### Sol attempt 2 proportional-gate correction
+
+The full compressor debug suite exposed an added allocation-fixture call that incorrectly constructed a zero-frame process block. Existing `ZeroFrames` rejection is correct and unchanged. Sol removed only that redundant call; the required repeated Point/read/rejected-call sequence remains followed by a real 128-frame process with empty automation spans. The isolated allocation gate now passes. Both the failed suite capture and corrected exact allocation result are preserved. Focused release also passes 5/5 on the preceding source, whose native Point fixtures are unchanged. Root checkpoints this test-only correction before remaining gates; no review verdict has yet been issued for attempt 2.

@@ -179,19 +179,6 @@ fn uniform_and_ragged_render_paths_allocate_and_free_nothing() {
                 staged.parameter_state(u32::MAX, ParameterChannel::Right),
                 Err(effect_contract::ParameterAccessError::InvalidParameterIndex)
             );
-            let mut empty_left = &mut staged_left[..0];
-            let mut empty_right = &mut staged_right[..0];
-            staged.process(
-                EffectProcessBlock::new(
-                    &mut empty_left,
-                    &mut empty_right,
-                    None,
-                    block * 128,
-                    &[],
-                    128,
-                )
-                .expect("empty staged block"),
-            );
             staged.process(
                 EffectProcessBlock::new(
                     &mut staged_left,

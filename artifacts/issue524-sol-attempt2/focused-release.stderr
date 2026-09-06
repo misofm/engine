@@ -1,0 +1,5 @@
+   Compiling effect-contract v0.1.0 (/home/bl/misofm/engine-native-points/crates/effect-contract)
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-native-points/crates/compressor)
+   Compiling conformance v0.1.0 (/home/bl/misofm/engine-native-points/crates/conformance)
+    Finished `release` profile [optimized + debuginfo] target(s) in 7.89s
+     Running tests/native_points.rs (target/release/deps/native_points-ca115502a460040c)
