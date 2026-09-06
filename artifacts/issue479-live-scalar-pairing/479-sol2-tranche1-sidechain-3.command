@@ -1,0 +1,1 @@
+PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/engine-479-sol-target cargo test --locked -p builtins-compiler --features test-support --lib actual_scalar_effect_sidechain_declines_and_matches_separate_owner_data_and_state

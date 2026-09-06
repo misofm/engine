@@ -1,0 +1,1 @@
+usage: scripts/check-native-pcm-runner.sh [root] [v1|portability|all]

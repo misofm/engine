@@ -1,0 +1,16 @@
+{
+  "accepted_child_source": "c950ce45a42e4c938e4ab6ca33dfc57980461e34",
+  "preserved_parent_source": "c7172f12e13f07c00edbe1c50309a52b94c00a19",
+  "integrated_candidate": "1171d0e44710010125c0f6c4571b29a2fdc6754a",
+  "delivered_main": "4a814f348136bc5ba1d77bd04388a3c7163a0e10",
+  "workspace": {
+    "head": "1171d0e44710010125c0f6c4571b29a2fdc6754a",
+    "exit_code": 0,
+    "blocks": 276,
+    "passed": 1611,
+    "failed": 0,
+    "ignored": 24
+  },
+  "timing_authorized": false,
+  "historical_failures": "Retained #455 three-attempt stop and #471 Luna1 failure; final Sol2 accepted. Preserve authentic source mutation diffs and original/restored outcomes; do not treat every historical status as a final gate."
+}

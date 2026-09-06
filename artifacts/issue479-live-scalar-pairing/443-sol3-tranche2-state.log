@@ -1,0 +1,14 @@
+   Compiling builtins v0.1.0 (/home/bl/misofm/engine-443-plan/crates/builtins)
+error[E0425]: cannot find type `FaderMuteRampBuiltins` in this scope
+    --> crates/builtins/src/lib.rs:3976:39
+     |
+3976 |     pub fn scalar_fader_words(fader: &FaderMuteRampBuiltins) -> [u32; 14] {
+     |                                       ^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+     |
+help: consider importing this struct
+     |
+3847 +     use crate::FaderMuteRampBuiltins;
+     |
+
+For more information about this error, try `rustc --explain E0425`.
+error: could not compile `builtins` (lib) due to 1 previous error

@@ -13,7 +13,9 @@
 # What survives is the live half: the benchmark source must still declare the four-rate migration
 # envelope, the four workloads with their expected output digests, and the focused regression
 # tokens. `scripts/test-effect-interchange-benchmark-108-policy.sh` proves each of those red.
-set -euo pipefail
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    set -euo pipefail
+fi
 
 fail() { printf 'effect interchange benchmark 108 policy failure: %s\n' "$1" >&2; return 1; }
 
@@ -49,11 +51,20 @@ for token in (
     if token not in source:
         raise SystemExit(f"missing focused regression token: {token}")
 PY
+    local status=$?
+    [[ "$status" -eq 0 ]] || return "$status"
 }
 
 validate_successor_namespace() {
     if rg -n 'artifact_dir=.*target/issue081|effect-interchange-benchmark-validator[.]py|preflight-effect-interchange-benchmark[.]sh|run-effect-interchange-benchmark[.]sh|test-effect-interchange-benchmark[.]sh' "$@"; then
         fail 'Issue-108 authority reaches the Issue-081 lifecycle or namespace'
+        return 1
+    else
+        local status=$?
+        if [[ "$status" -ne 1 ]]; then
+            printf 'effect interchange benchmark 108 policy failure: Issue-108 namespace scan failed (rg status %s)\n' "$status" >&2
+            return "$status"
+        fi
     fi
 }
 
@@ -67,7 +78,8 @@ cd "$root"
 
 benchmark=tools/bench/src/effect_interchange.rs
 [[ -f "$benchmark" && ! -L "$benchmark" ]] || fail "missing benchmark source: $benchmark"
-validate_benchmark_source "$benchmark"
+if validate_benchmark_source "$benchmark"; then status=0; else status=$?; fi
+[[ "$status" -eq 0 ]] || fail "benchmark source validation failed (status $status)"
 for path in \
     scripts/effect-interchange-benchmark-108-validator.py \
     scripts/check-effect-interchange-benchmark-108.sh \
@@ -75,7 +87,7 @@ for path in \
     [[ -f "$path" && ! -L "$path" ]] || fail "missing Issue-108 authority: $path"
 done
 
-python3 -I -B - "$benchmark" \
+if python3 -I -B - "$benchmark" \
     scripts/effect-interchange-benchmark-108-validator.py \
     scripts/check-effect-interchange-benchmark-108.sh <<'PY'
 import pathlib, re, sys
@@ -99,9 +111,19 @@ for path_text in sys.argv[2:]:
         if compact not in text and spaced not in text and not (workload in text and digest in text):
             raise SystemExit(f"output authority missing: {path_text}: {workload}")
 PY
+then status=0; else status=$?; fi
+[[ "$status" -eq 0 ]] || fail "cross-file output authority validation failed (status $status)"
 
 validate_successor_namespace scripts/effect-interchange-benchmark-108-validator.py
-if find target/issue108 -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null | grep -q .; then
-    fail 'Issue-108 persistent artifact appeared before authorization'
+if [[ -e target/issue108 ]]; then
+    issue108_entries=$(mktemp)
+    trap 'rm -f -- "$issue108_entries"' EXIT
+    issue108_error=$(mktemp)
+    trap 'rm -f -- "$issue108_entries" "$issue108_error"' EXIT
+    if find target/issue108 -mindepth 1 -maxdepth 1 -print >"$issue108_entries" 2>"$issue108_error"; then status=0; else status=$?; fi
+    if [[ "$status" -ne 0 ]]; then cat "$issue108_entries" "$issue108_error" >&2; fail "Issue-108 artifact traversal failed (status $status)"; fi
+    if [[ -s "$issue108_entries" ]]; then
+        fail 'Issue-108 persistent artifact appeared before authorization'
+    fi
 fi
 printf 'effect interchange benchmark 108 policy: ok counters=0/0/0/0\n'

@@ -1,0 +1,18 @@
+#443 Luna attempt 1, tranche 2
+
+Changed paths:
+- crates/builtins/src/lib.rs
+- crates/builtins-compiler/src/lib.rs
+
+Bridge work:
+- Added live scalar fader settled-state detection and fused fader_matrix_block dispatch.
+- Scalar composite now drains fader then matrix once, uses fused arithmetic only after both drains
+  settle, and uses the original whole-call separate arithmetic during ramps.
+- Matrix command errors still complete fader arithmetic before returning.
+- Original concrete fader/matrix owners and consumers remain owned by the composite.
+
+Actual command output and status:
+- /tmp/443-luna1-tranche2-builtins-compiler.log (initial compile failure, exit.status=101)
+- /tmp/443-luna1-tranche2-builtins-compiler-2.log (28 passed, exit.status=0)
+
+Paused at the next focused-green tranche. No commit or push performed; root owns checkpointing.

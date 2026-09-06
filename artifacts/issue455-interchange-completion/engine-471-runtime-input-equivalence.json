@@ -1,0 +1,15 @@
+{
+  "candidate": "1171d0e44710010125c0f6c4571b29a2fdc6754a",
+  "delivered_main": "4a814f348136bc5ba1d77bd04388a3c7163a0e10",
+  "changed_paths": [
+    ".github/ISSUE_SPECS/455-interchange-authority-scan-completion.md",
+    ".github/ISSUE_SPECS/471-interchange-diagnostic-payload-read-proofs.md",
+    "scripts/check-effect-interchange-benchmark-108.sh",
+    "scripts/check-effect-interchange-qualification.sh",
+    "scripts/test-effect-interchange-benchmark-108-policy.sh",
+    "scripts/test-effect-interchange-policy.sh"
+  ],
+  "runtime_build_fixture_inputs_equal_delivered_main": true,
+  "artifact_regeneration_required": false,
+  "reason": "Complete change set is two production shell checkers, two shell policy suites and issue records; no runtime, build, fixture or artifact inputs differ."
+}

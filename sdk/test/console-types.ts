@@ -1,6 +1,65 @@
 /** Issue #322 compile-time red probes for the catalog-derived live console. */
 
 import { ConsoleEdits } from "../src/core/console.ts";
+import type {
+  MisoCommandAck,
+  MisoCommandRequest,
+  MisoError,
+  MisoAudioWorkletHost,
+  MisoObservationRequest,
+  MisoObservationAck,
+  MisoSessionMap,
+  MisoSeekRequest,
+  MisoSourceRequest,
+  MisoAck,
+  MisoStatus,
+} from "../src/browser/shipped-host.d.ts";
+
+// @ts-expect-error request IDs belong to the host, never to public request payloads
+const oldBrowserRequest: MisoCommandRequest = { requestId: 1, commands: [] };
+// @ts-expect-error observation request IDs belong to the host
+const oldObservationRequest: MisoObservationRequest = { requestId: 1, subscriptions: [] };
+const oldSourceRequest: MisoSourceRequest = {
+  // @ts-expect-error source request IDs belong to the host
+  requestId: 1, sourceId: "s", generation: 1n, startFrame: 0n, sampleRateHz: 48_000,
+  planes: [new Float32Array()], frames: 0, endOfRegion: true,
+};
+// @ts-expect-error seek request IDs belong to the host
+const oldSeekRequest: MisoSeekRequest = { requestId: 1, sourceId: "s", generation: 1n, sourceFrame: 0n };
+void [oldBrowserRequest, oldObservationRequest, oldSourceRequest, oldSeekRequest];
+
+declare const commandAck: MisoCommandAck;
+declare const acknowledgement: MisoAck;
+declare const observationAck: MisoObservationAck;
+declare const sessionMap: MisoSessionMap;
+declare const engineError: MisoError;
+declare const status: MisoStatus;
+// @ts-expect-error response request IDs remain readonly
+commandAck.requestId = 1;
+// @ts-expect-error response request IDs remain readonly
+status.requestId = 1;
+declare const host: MisoAudioWorkletHost;
+// @ts-expect-error meter request IDs belong to the host
+host.meters({ requestId: 1, enabled: false, onFrame: null });
+// @ts-expect-error telemetry request IDs belong to the host
+host.telemetry({ requestId: 1, enabled: false, onFrame: null });
+// @ts-expect-error every response request ID remains readonly
+acknowledgement.requestId = 1;
+// @ts-expect-error every response request ID remains readonly
+observationAck.requestId = 1;
+// @ts-expect-error every response request ID remains readonly
+sessionMap.requestId = 1;
+// @ts-expect-error every response request ID remains readonly
+engineError.requestId = 1;
+
+type Assert<T extends true> = T;
+type NoCallerId<T> = "requestId" extends keyof T ? false : true;
+type _CommandPayload = Assert<NoCallerId<Parameters<MisoAudioWorkletHost["command"]>[0]>>;
+type _ObservationPayload = Assert<NoCallerId<Parameters<MisoAudioWorkletHost["observe"]>[0]>>;
+type _SourcePayload = Assert<NoCallerId<Parameters<MisoAudioWorkletHost["submitSource"]>[0]>>;
+type _SeekPayload = Assert<NoCallerId<Parameters<MisoAudioWorkletHost["seekSource"]>[0]>>;
+type _MeterPayload = Assert<NoCallerId<Parameters<MisoAudioWorkletHost["meters"]>[0]>>;
+type _TelemetryPayload = Assert<NoCallerId<Parameters<MisoAudioWorkletHost["telemetry"]>[0]>>;
 
 const edits = new ConsoleEdits({
   tracks: ["t"],

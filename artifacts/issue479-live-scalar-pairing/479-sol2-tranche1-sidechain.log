@@ -1,0 +1,178 @@
+   Compiling version_check v0.9.5
+   Compiling proc-macro2 v1.0.107
+   Compiling lexical-util v1.0.7
+   Compiling bytemuck v1.25.2
+   Compiling libc v0.2.189
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.47
+   Compiling cfg-if v1.0.4
+   Compiling syn v1.0.109
+   Compiling engine v0.1.0 (/home/bl/misofm/engine-479-proof/crates/engine)
+   Compiling once_cell v1.21.4
+   Compiling autocfg v1.5.1
+   Compiling math v0.1.0 (/home/bl/misofm/engine-479-proof/crates/math)
+   Compiling typenum v1.20.1
+   Compiling smallvec v1.15.2
+   Compiling decoded-char v0.1.1
+   Compiling locspan v0.8.2
+   Compiling utf8-decode v1.0.1
+   Compiling cpufeatures v0.3.0
+   Compiling safe_arch v1.2.0
+   Compiling smallstr v0.3.1
+   Compiling ahash v0.7.8
+   Compiling proc-macro-error-attr v1.0.4
+   Compiling proc-macro-error v1.0.4
+   Compiling indexmap v1.9.3
+   Compiling lexical-write-integer v1.0.6
+   Compiling lexical-parse-integer v1.0.6
+   Compiling wide v1.6.1
+   Compiling lexical-parse-float v1.0.6
+   Compiling lexical-write-float v1.0.6
+   Compiling hybrid-array v0.4.14
+   Compiling lexical-core v1.0.6
+   Compiling getrandom v0.2.17
+   Compiling lexical v7.0.5
+   Compiling json-number v0.4.10
+   Compiling hashbrown v0.12.3
+   Compiling crypto-common v0.2.2
+   Compiling block-buffer v0.12.1
+   Compiling digest v0.11.3
+   Compiling sha2 v0.11.0
+   Compiling locspan-derive v0.6.0
+   Compiling json-syntax v0.12.5
+   Compiling session v0.1.0 (/home/bl/misofm/engine-479-proof/crates/session)
+   Compiling lane v0.1.0 (/home/bl/misofm/engine-479-proof/crates/lane)
+   Compiling effect-contract v0.1.0 (/home/bl/misofm/engine-479-proof/crates/effect-contract)
+   Compiling rack v0.1.0 (/home/bl/misofm/engine-479-proof/crates/rack)
+   Compiling builtins v0.1.0 (/home/bl/misofm/engine-479-proof/crates/builtins)
+   Compiling rack-compiler v0.1.0 (/home/bl/misofm/engine-479-proof/crates/rack-compiler)
+   Compiling graph v0.1.0 (/home/bl/misofm/engine-479-proof/crates/graph)
+   Compiling builtins-compiler v0.1.0 (/home/bl/misofm/engine-479-proof/crates/builtins-compiler)
+error[E0433]: cannot find `RackId` in `rack`
+    --> crates/builtins-compiler/src/lib.rs:4983:25
+     |
+4983 |             rack: rack::RackId::Dynamic,
+     |                         ^^^^^^ could not find `RackId` in `rack`
+
+error[E0433]: cannot find `RackId` in `rack`
+    --> crates/builtins-compiler/src/lib.rs:5668:33
+     |
+5668 |                     rack: rack::RackId::Dynamic,
+     |                                 ^^^^^^ could not find `RackId` in `rack`
+
+error[E0425]: cannot find type `TestPhaseTwoAllocationSnapshot` in this scope
+    --> crates/builtins-compiler/src/lib.rs:5602:16
+     |
+5602 |         Option<TestPhaseTwoAllocationSnapshot>,
+     |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+     |
+note: found an item that was configured out
+    --> crates/builtins-compiler/src/lib.rs:1361:12
+     |
+1358 | #[cfg(feature = "test-support")]
+     |       ------------------------ the item is gated behind the `test-support` feature
+...
+1361 | pub struct TestPhaseTwoAllocationSnapshot {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: you might be missing a type parameter
+     |
+5586 |     fn prepared_pair_graph_variant_observed<TestPhaseTwoAllocationSnapshot>(
+     |                                            ++++++++++++++++++++++++++++++++
+
+error[E0425]: cannot find type `TestPhaseTwoAllocationSnapshot` in this scope
+    --> crates/builtins-compiler/src/lib.rs:5603:16
+     |
+5603 |         Option<TestPhaseTwoAllocationSnapshot>,
+     |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+     |
+note: found an item that was configured out
+    --> crates/builtins-compiler/src/lib.rs:1361:12
+     |
+1358 | #[cfg(feature = "test-support")]
+     |       ------------------------ the item is gated behind the `test-support` feature
+...
+1361 | pub struct TestPhaseTwoAllocationSnapshot {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: you might be missing a type parameter
+     |
+5586 |     fn prepared_pair_graph_variant_observed<TestPhaseTwoAllocationSnapshot>(
+     |                                            ++++++++++++++++++++++++++++++++
+
+error[E0425]: cannot find value `test_only_begin_phase_two_allocation_observation` in this scope
+    --> crates/builtins-compiler/src/lib.rs:5715:34
+     |
+5715 |             observe_binding.then(test_only_begin_phase_two_allocation_observation);
+     |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+     |
+note: found an item that was configured out
+    --> crates/builtins-compiler/src/lib.rs:1453:8
+     |
+1451 | #[cfg(feature = "test-support")]
+     |       ------------------------ the item is gated behind the `test-support` feature
+1452 | #[doc(hidden)]
+1453 | pub fn test_only_begin_phase_two_allocation_observation() -> impl Drop {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0425]: cannot find value `test_only_phase_two_allocation_snapshot` in this scope
+    --> crates/builtins-compiler/src/lib.rs:5719:51
+     |
+5719 |         let owner_snapshot = observe_binding.then(test_only_phase_two_allocation_snapshot);
+     |                                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+     |
+note: found an item that was configured out
+    --> crates/builtins-compiler/src/lib.rs:1404:8
+     |
+1402 | #[cfg(feature = "test-support")]
+     |       ------------------------ the item is gated behind the `test-support` feature
+1403 | #[doc(hidden)]
+1404 | pub fn test_only_phase_two_allocation_snapshot() -> TestPhaseTwoAllocationSnapshot {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0425]: cannot find value `test_only_begin_phase_two_allocation_observation` in this scope
+    --> crates/builtins-compiler/src/lib.rs:5783:34
+     |
+5783 |             observe_binding.then(test_only_begin_phase_two_allocation_observation);
+     |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+     |
+note: found an item that was configured out
+    --> crates/builtins-compiler/src/lib.rs:1453:8
+     |
+1451 | #[cfg(feature = "test-support")]
+     |       ------------------------ the item is gated behind the `test-support` feature
+1452 | #[doc(hidden)]
+1453 | pub fn test_only_begin_phase_two_allocation_observation() -> impl Drop {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0425]: cannot find value `test_only_phase_two_allocation_snapshot` in this scope
+    --> crates/builtins-compiler/src/lib.rs:5792:53
+     |
+5792 |         let binding_snapshot = observe_binding.then(test_only_phase_two_allocation_snapshot);
+     |                                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+     |
+note: found an item that was configured out
+    --> crates/builtins-compiler/src/lib.rs:1404:8
+     |
+1402 | #[cfg(feature = "test-support")]
+     |       ------------------------ the item is gated behind the `test-support` feature
+1403 | #[doc(hidden)]
+1404 | pub fn test_only_phase_two_allocation_snapshot() -> TestPhaseTwoAllocationSnapshot {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0425]: cannot find function `test_only_reset_phase_two_allocation_tracker` in this scope
+    --> crates/builtins-compiler/src/lib.rs:5721:13
+     |
+5721 |             test_only_reset_phase_two_allocation_tracker();
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+     |
+note: found an item that was configured out
+    --> crates/builtins-compiler/src/lib.rs:1373:8
+     |
+1371 | #[cfg(feature = "test-support")]
+     |       ------------------------ the item is gated behind the `test-support` feature
+1372 | #[doc(hidden)]
+1373 | pub fn test_only_reset_phase_two_allocation_tracker() {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Some errors have detailed explanations: E0425, E0433.
+For more information about an error, try `rustc --explain E0425`.
+error: could not compile `builtins-compiler` (lib test) due to 9 previous errors

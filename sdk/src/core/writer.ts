@@ -99,6 +99,12 @@ export interface WriterOptions {
   readonly maximumBatch?: number;
 }
 
+/** Submit addressed edits directly through a semantic console transport. */
+export interface SemanticWriterOptions extends Omit<WriterOptions, "submit"> {
+  readonly submit?: never;
+  readonly submitEdits: (edits: readonly LaneEdit[]) => CommandReport | Promise<CommandReport>;
+}
+
 const BACKPRESSURE = ABI_LAYOUT.constants.commandReasons
   .find((row) => row.name === "backpressure")!.value;
 const RECORD_BYTES = ABI_LAYOUT.commandRecord.bytes;
@@ -157,7 +163,7 @@ export function encodeLaneEdits(edits: readonly LaneEdit[]): Uint8Array {
 }
 
 export class ConsoleWriter {
-  readonly #submit: WriterOptions["submit"];
+  readonly #submit: SemanticWriterOptions["submitEdits"];
   readonly #maximumBatch: number;
   /** Insertion-ordered by key, which is what makes coalescing a map update rather than a scan. */
   readonly #pending = new Map<string, LaneEdit>();
@@ -181,8 +187,17 @@ export class ConsoleWriter {
   #escalations = 0;
   #coalesced = 0;
 
-  constructor(options: WriterOptions) {
-    this.#submit = options.submit;
+  constructor(options: (WriterOptions & { readonly submitEdits?: never }) | SemanticWriterOptions) {
+    const { submit, submitEdits } = options;
+    if ((submit !== undefined) === (submitEdits !== undefined)) {
+      throw new MisoUsageError("ConsoleWriter requires exactly one of submit or submitEdits");
+    }
+    if (typeof submitEdits === "function") this.#submit = submitEdits;
+    else if (typeof submit === "function") {
+      this.#submit = (edits) => submit(encodeLaneEdits(edits), edits.length);
+    } else {
+      throw new MisoUsageError("ConsoleWriter submission callback must be a function");
+    }
     this.#maximumBatch = options.maximumBatch ?? ABI_LAYOUT.constants.defaultCommandQueueRecords;
     if (!Number.isInteger(this.#maximumBatch) || this.#maximumBatch < 1) {
       throw new MisoUsageError(`maximumBatch must be a positive integer`);
@@ -260,7 +275,7 @@ export class ConsoleWriter {
     const edits = staged.map(([, edit]) => edit);
 
     this.#flushes += 1;
-    const report = await this.#submit(encodeLaneEdits(edits), edits.length);
+    const report = await this.#submit(edits);
 
     if (report.ok) {
       for (const [key, edit] of staged) {

@@ -149,7 +149,7 @@ describe("issue 322 -- shared semantic console", () => {
         request = value;
         return {
           tag: "miso.ack.v1",
-          requestId: value.requestId,
+          requestId: 2,
           result: 0,
           reason: 0,
           rejectedIndex: 0,
@@ -167,7 +167,6 @@ describe("issue 322 -- shared semantic console", () => {
     assert.equal(report.reasonName, "none");
     assert.equal(report.appliedAtSample, 256n);
     assert.deepEqual(request, {
-      requestId: 2,
       commands: [{
         kind: 3,
         rack: 255,

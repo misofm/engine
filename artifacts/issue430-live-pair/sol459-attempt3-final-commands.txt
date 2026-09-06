@@ -1,0 +1,15 @@
+PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/sol459-target cargo test --locked -p builtins-compiler --features test-support --lib
+PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/sol459-target cargo test --locked -p builtins-compiler --features test-support --test allocation_tracker
+PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/sol459-target cargo test --locked -p graph --lib
+PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/sol459-target cargo test --locked -p host-web --features test-support --lib
+PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/sol459-target cargo test --locked --release -p builtins-compiler --features test-support --lib
+PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/sol459-target cargo test --locked --release -p builtins-compiler --features test-support --test allocation_tracker
+PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/sol459-target cargo test --locked --release -p graph --lib
+PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/sol459-target cargo test --locked --release -p host-web --features test-support --lib
+bash scripts/check-realtime-policy.sh
+bash scripts/check-builtins-policy.sh
+bash scripts/check-workspace-policy.sh
+scripts/check-lane-policy.sh
+scripts/check-unfused-seal.sh
+PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/sol459-target cargo fmt --all -- --check
+git diff --check

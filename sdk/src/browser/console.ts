@@ -37,15 +37,8 @@ export async function createBrowserConsole(host: MisoAudioWorkletHost): Promise<
     sources: Object.freeze(remoteMap.sources.map((source) => Object.freeze({ ...source }))),
     metersAttached: remoteMap.metersAttached,
   });
-  // `sessionMap()` itself consumes the host's next request ID. Continue from the acknowledgement;
-  // restarting at one would be locally well-typed and rejected by the host's monotonic ledger.
-  let requestId = remoteMap.requestId;
   return new EngineConsole(map, async (edits): Promise<CommandReport> => {
-    requestId += 1;
-    const ack = await host.command({
-      requestId,
-      commands: edits.map(browserCommand),
-    });
+    const ack = await host.command({ commands: edits.map(browserCommand) });
     return Object.freeze({
       ok: ack.result === 0,
       result: ack.result,

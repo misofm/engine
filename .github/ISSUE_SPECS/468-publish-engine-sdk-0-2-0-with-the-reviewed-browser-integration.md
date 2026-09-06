@@ -1,0 +1,55 @@
+# Publish Engine SDK 0.2.0 with the reviewed browser integration
+
+## Objective and authorization
+
+The user explicitly requires the reviewed SDK and adapter to be published to npm before new website integration, then misofm/app must move from vendored archives to direct npm dependencies. This issue owns only the Engine SDK0.2.0 release; adapter0.3.0 and both consumers are separate dependent slices. Registry currently contains SDK0.0.0 and0.1.0;0.2.0 is unused. Preserve ABI/wire V1 identities.
+
+## Frozen normal integration
+
+Work in isolated /private/tmp/miso-dx-sdk-npm-release on codex/release-sdk-0-2-0, initially clean at current main aba905c0a5ae0bc747a65d1052ba76811fcee3c5. Merge reviewed DX branch9406ae82e44bdf71b8b60aa12d9eb3b28dce515c normally, retaining both histories. Its functional package175755e9/archive0df6 and canonical Wasm271a2bf3 are historical evidence, not the identity of the merged release.
+
+Dedicated Astra medium release audit approves this normal integration. Against preceding main6589c518 the only merge conflicts are three derived files: hosts/host-web/BROWSER_DEPLOYMENT_MATRIX.md, hosts/host-web/qualification/results.json and web/miso-engine-v1-audio-worklet-artifact.sha256. Main's subsequent aba905c0 adds native static-scan policy/evidence, not runtime or SDK code. Resolve derived conflicts with explicitly provisional existing main evidence, then replace them only through actual new Linux build/recording. Never label an old digest or browser candidate as the new merged artifact. SDK subtree previously auto-merges identical to reviewed DX; inspect actual merge and preserve native/runtime changes from main. Report any new source conflict before broadening scope.
+
+## Minimal release metadata
+
+Set sdk/package.json and package-lock root versions to0.2.0. In the existing npm-publish.yml, update the version-specific constant, job label, qualification job lookup, packed identity and provenance PURL to the new package version. Update its EXPECTED_WORKLET_SHA256 only when the actual merged Linux digest is earned and equals the authoritative source pin. Preserve main-only dispatch/head checks, accepted/rejected ancestry, immutable-version refusal, prior-qualified exact archive checks, OIDC-only provenance, registry integrity/access/latest convergence and verify-only recovery. No token fallback, force-reset, fabricated asset identity or alternate publishing framework.
+
+## Checkpoint and objective gates
+
+First pause a coherent merge/metadata checkpoint after proportional merge inspection, version consistency, syntax/types and source checks. Root commits the normal merge and pushes before further implementation. The unresolved new artifact identity must be candidly recorded; old records cannot imply qualification PASS.
+
+Use the existing official Ubuntu builder and existing repin/recording/ordinary qualification mechanisms to earn the actual merged artifact and truthful browser records. Run required merged-source CI and existing generated/deletion/type/headless/package gates, including actual first-target suspended/live consumer preparation proofs from the reviewed integration. No new fixture corpus or browser matrix. Independently review the merged source, derived records and exact newly versioned package.
+
+After a concrete green candidate, integrate through normal protected-main review/checks without rewriting history or bypassing protection. Dispatch the existing npm workflow qualify at exact main SHA; inspect its immutable tarball and successful gates. Publish that exact qualifying artifact once through existing GitHub OIDC. Verify registry0.2.0/latest/public access/SHA512/shasum, fresh public imports and enginectl, and cryptographic provenance binding the package, source and trusted workflow. If publication reply is ambiguous, use verify mode rather than republishing. Preserve evidence and synchronize this numbered issue; close only once the public registry release is verified. Adapter publication begins afterward with an exact registry dependency on SDK0.2.0.
+
+## First merge and release-metadata checkpoint
+
+Normal uncommitted merge parents are release-brief HEAD `d772dde63a80fbc3d5b78d19d8a086389e150518` (based on current main `aba905c0a5ae0bc747a65d1052ba76811fcee3c5`) and reviewed DX `9406ae82e44bdf71b8b60aa12d9eb3b28dce515c`. Exactly the three predicted derived files conflicted; each retains the existing main version provisionally. No runtime source conflict occurred. Before release-version edits, the merged SDK subtree was byte-identical to reviewed DX. The merge preserves main's independent source changes and its publisher safeguards.
+
+The package and both lockfile root versions are now 0.2.0. The publisher differs from pre-merge main only in its five existing version literals: environment, job label, successful-job lookup, packed identity and provenance PURL. The existing `a08a868c` pin and publisher hash remain unchanged and explicitly do not qualify the combined source. A new actual Linux artifact, browser records, complete merged-source qualification and publication remain pending.
+
+Proportional checks pass: SDK types, generated Rust-derived assets/modules/host declaration, deletion policy, existing npm trust-list parser fixtures/mutations, artifact-builder output-directory contract, YAML plus embedded shell syntax, exact metadata consistency and unresolved-conflict checks. Logs `/private/tmp/dx468-{types,generated,deletions,trust-parser,builder-contract,metadata-syntax}.log`. The existing workspace-policy check cannot complete on this macOS host because its fingerprint scan invokes GNU `find -printf`; `/private/tmp/dx468-workspace.log` records that environmental failure. No gate or source workaround was introduced. Root should checkpoint the normal merge before the Linux artifact/qualification tranche; no package build or npm publication is claimed here.
+
+## Earned merged Linux identity; recording preparation
+
+Existing PR469 qualification run33966949736 artifact job101308690753 built approved release head519d24e9fe8b00ee877a41c4bb6ae4ebb5623728 on Ubuntu24.04.4/image20260831.293.1 with Rust1.97.1 x86_64. Actual checked-out synthetic merge91b6384755d2dfd8675bbe44f6b4e64beb9ca9ee has the identical complete tree0ef724285fa3f2605a66f9bead6506ec21e3ac80. The builder observed SHA25697a83d452ad09b3140423ac3465aae846ce468b12fc1a6472dd820f330e8bfd3 and correctly refused the provisional a08a pin before upload. This expected FAIL earns identity, not package/CI acceptance. Receipt `/private/tmp/dx468-linux-33966949736-identity.md` and raw artifact log preserve provenance; independent first-merge review PASS is `/private/tmp/dx468-astra-first-merge-review.md`.
+
+Root authorized an isolated temporary recording branch from exact519d24e9 to set the authoritative and publisher pins to this observed digest and run the existing official all-browser recorder with unchanged assertions and mutation proofs. Its single [all] matrix preserves existing routing-test anchors. Only actual successful generated records may be promoted later, retaining their true executed candidate. Root will promote the two pins, two generated records and evidence together onto the primary branch; the temporary qualification workflow must not be promoted. No intermediate known-stale ordinary run or duplicate initial artifact dispatch. Recording, canonical package qualification, final ordinary CI and publication remain pending.
+
+## Bounded merged-test expectation reconciliation
+
+First PR qualification33966949736 also exposed an independent environment-vocabulary mutation expectation failure in job101308690685. Format, Clippy, docs and workspace policy passed; the vocabulary checker correctly reports99 documented names. Reviewed DX adds the documented MISO_ENGINE_WEB_HOST_MAX_SAFE_TEST name to main's98. The injected count failure retains actual partial stdout99 and the expected wc status7 diagnostic, but scripts/test-env-vocabulary.sh COUNT and COUNT_TR fixtures still expect98. Raw evidence /private/tmp/dx468-first-lint-failure.log.
+
+Before code, dedicated Astra medium approves exactly those two expected partial-output values98→99. Preserve the checker, assert_fault logic, error/full modes, diagnostics, failure status and every mutation. This test-only merge reconciliation changes no runtime or artifact identity and will accompany the earned pins and actual browser records in primary promotion. No new fixture framework or weakened gate.
+
+Implemented exactly the two expected values in `scripts/test-env-vocabulary.sh`; the checker and all fault assertions/modes remain unchanged. The existing checker passes on macOS with `99 names, one MISO_ENGINE_ prefix` (`/private/tmp/dx468-env-vocabulary-check.log`). The existing mutation suite was invoked once but cannot complete with BSD `sed`: its existing GNU-style `sed -i` command fails with `invalid command code f` (`/private/tmp/dx468-env-vocabulary-test.log`). This is not a mutation-suite PASS; Linux execution remains required. Shell syntax and the exact two-value diff pass inspection. No portability workaround, runtime change or new artifact claim was introduced. Pause the existing temporary five-path tranche for root checkpoint.
+
+## Actual Linux artifact and browser records promoted
+
+Temporary recording run [33967861794](https://github.com/misofm/engine/actions/runs/33967861794) executed commit `ecf668c1464545407c99dfc8e117a0a8a5fccc06`. Artifact job 101311096313 passed and uploaded the exact six-file canonical closure as artifact 9970025418. Its Wasm is 2,668,461 bytes with SHA256 `97a83d452ad09b3140423ac3465aae846ce468b12fc1a6472dd820f330e8bfd3`. Independent Astra medium review passes: `/private/tmp/dx468-astra-canonical-closure-review.md`.
+
+Browser job 101311303197 passed all six existing gates and mutation proofs for Chromium 151.0.7922.34, Firefox 153.0 and WebKit 26.5, uploading the actual two generated records as artifact 9970042179. Independent review `/private/tmp/dx468-astra-linux-record-review.md` verified source, hashes and exact generated Markdown. The promoted records retain their true executed `ecf668c1` candidate; these Playwright results do not claim untested branded-browser or production deployment support.
+
+The Linux lint job now passes the checker with 99 names and the unchanged environment-vocabulary mutation suite. Existing SDK package qualification also passes, including actual-Wasm first-target/control-port tests, types, deletion mutations and the publishable-tarball gate. Raw evidence is `/private/tmp/dx468-record-33967861794-{lint,sdk}.log`. The recording run's release-audit job remains running at this checkpoint; no whole-run success is claimed yet.
+
+Root promotes only the earned source/publisher pins, actual two browser records, two expected-count corrections and this issue evidence. The temporary qualification workflow is excluded. The final primary candidate must pass ordinary qualification before normal main integration, followed by the existing main-only npm qualify/publish workflow and registry verification. No npm publication is claimed.

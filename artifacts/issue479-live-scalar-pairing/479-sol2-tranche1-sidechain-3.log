@@ -1,0 +1,9 @@
+   Compiling builtins-compiler v0.1.0 (/home/bl/misofm/engine-479-proof/crates/builtins-compiler)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.61s
+     Running unittests src/lib.rs (/tmp/engine-479-sol-target/debug/deps/builtins_compiler-5ff1d293b1f7fb6b)
+
+running 1 test
+test tests::actual_scalar_effect_sidechain_declines_and_matches_separate_owner_data_and_state ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 37 filtered out; finished in 0.00s
+

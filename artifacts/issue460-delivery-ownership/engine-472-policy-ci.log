@@ -1,0 +1,754 @@
+﻿2026-09-05T13:41:56.0273250Z Current runner version: '2.337.0'
+2026-09-05T13:41:56.0300037Z ##[group]Runner Image Provisioner
+2026-09-05T13:41:56.0301028Z Hosted Compute Agent
+2026-09-05T13:41:56.0301664Z Version: 20260828.587
+2026-09-05T13:41:56.0302739Z Commit: abac92662cab4cc7352de4f9f9d2e2419aad9c29
+2026-09-05T13:41:56.0303583Z Build Date: 2026-08-28T16:44:25Z
+2026-09-05T13:41:56.0304256Z Worker ID: {3de07f93-88c7-48b1-aa39-3c10b5b653cb}
+2026-09-05T13:41:56.0305433Z Azure Region: eastus
+2026-09-05T13:41:56.0306184Z ##[endgroup]
+2026-09-05T13:41:56.0307870Z ##[group]Operating System
+2026-09-05T13:41:56.0308638Z Ubuntu
+2026-09-05T13:41:56.0309167Z 24.04.4
+2026-09-05T13:41:56.0309764Z LTS
+2026-09-05T13:41:56.0310267Z ##[endgroup]
+2026-09-05T13:41:56.0310840Z ##[group]Runner Image
+2026-09-05T13:41:56.0311485Z Image: ubuntu-24.04
+2026-09-05T13:41:56.0312043Z Version: 20260831.293.1
+2026-09-05T13:41:56.0313362Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20260831.293/images/ubuntu/Ubuntu2404-Readme.md
+2026-09-05T13:41:56.0315300Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260831.293
+2026-09-05T13:41:56.0316390Z ##[endgroup]
+2026-09-05T13:41:56.0317589Z ##[group]GITHUB_TOKEN Permissions
+2026-09-05T13:41:56.0319769Z Contents: read
+2026-09-05T13:41:56.0320377Z Metadata: read
+2026-09-05T13:41:56.0321075Z ##[endgroup]
+2026-09-05T13:41:56.0323598Z Secret source: Actions
+2026-09-05T13:41:56.0324837Z Prepare workflow directory
+2026-09-05T13:41:56.0724518Z Prepare all required actions
+2026-09-05T13:41:56.0773038Z Getting action download info
+2026-09-05T13:41:56.2779898Z Download action repository 'actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683' (SHA:11bd71901bbe5b1630ceea73d27597364c9af683)
+2026-09-05T13:41:56.4468506Z Download action repository 'Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6' (SHA:6323deb102c322ba6fcbdcafc7e3dddab59af2b6)
+2026-09-05T13:41:56.7107734Z Complete job name: fmt, clippy, doc, and hermetic policy gates
+2026-09-05T13:41:56.8001396Z Node 20 is being deprecated. This workflow is running with Node 24 by default. If you need to temporarily use Node 20, you can set the ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION=true environment variable. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+2026-09-05T13:41:56.8010578Z ##[group]Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+2026-09-05T13:41:56.8011509Z with:
+2026-09-05T13:41:56.8011938Z   repository: misofm/engine
+2026-09-05T13:41:56.8015909Z   token: ***
+2026-09-05T13:41:56.8016337Z   ssh-strict: true
+2026-09-05T13:41:56.8016765Z   ssh-user: git
+2026-09-05T13:41:56.8017211Z   persist-credentials: true
+2026-09-05T13:41:56.8017703Z   clean: true
+2026-09-05T13:41:56.8018146Z   sparse-checkout-cone-mode: true
+2026-09-05T13:41:56.8018672Z   fetch-depth: 1
+2026-09-05T13:41:56.8019095Z   fetch-tags: false
+2026-09-05T13:41:56.8019530Z   show-progress: true
+2026-09-05T13:41:56.8020025Z   lfs: false
+2026-09-05T13:41:56.8020442Z   submodules: false
+2026-09-05T13:41:56.8020882Z   set-safe-directory: true
+2026-09-05T13:41:56.8021640Z env:
+2026-09-05T13:41:56.8022048Z   CARGO_TERM_COLOR: always
+2026-09-05T13:41:56.8022542Z   RUSTUP_TOOLCHAIN: 1.97.1
+2026-09-05T13:41:56.8023014Z ##[endgroup]
+2026-09-05T13:41:56.9140907Z Syncing repository: misofm/engine
+2026-09-05T13:41:56.9142848Z ##[group]Getting Git version info
+2026-09-05T13:41:56.9143893Z Working directory is '/home/runner/work/engine/engine'
+2026-09-05T13:41:56.9145269Z [command]/usr/bin/git version
+2026-09-05T13:41:56.9215980Z git version 2.55.0
+2026-09-05T13:41:56.9243249Z ##[endgroup]
+2026-09-05T13:41:56.9262602Z Temporarily overriding HOME='/home/runner/work/_temp/29e8fd35-fa74-4c40-9d07-1aa78c68e229' before making global git config changes
+2026-09-05T13:41:56.9264389Z Adding repository directory to the temporary git global config as a safe directory
+2026-09-05T13:41:56.9268822Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/engine/engine
+2026-09-05T13:41:56.9328810Z Deleting the contents of '/home/runner/work/engine/engine'
+2026-09-05T13:41:56.9333033Z ##[group]Initializing the repository
+2026-09-05T13:41:56.9339414Z [command]/usr/bin/git init /home/runner/work/engine/engine
+2026-09-05T13:41:56.9488907Z hint: Using 'master' as the name for the initial branch. This default branch name
+2026-09-05T13:41:56.9490286Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+2026-09-05T13:41:56.9491250Z hint: to use in all of your new repositories, which will suppress this warning,
+2026-09-05T13:41:56.9491987Z hint: call:
+2026-09-05T13:41:56.9492375Z hint:
+2026-09-05T13:41:56.9492896Z hint: 	git config --global init.defaultBranch <name>
+2026-09-05T13:41:56.9493510Z hint:
+2026-09-05T13:41:56.9494087Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+2026-09-05T13:41:56.9495394Z hint: 'development'. The just-created branch can be renamed via this command:
+2026-09-05T13:41:56.9496804Z hint:
+2026-09-05T13:41:56.9497543Z hint: 	git branch -m <name>
+2026-09-05T13:41:56.9498321Z hint:
+2026-09-05T13:41:56.9499389Z hint: Disable this message with "git config set advice.defaultBranchName false"
+2026-09-05T13:41:56.9500855Z Initialized empty Git repository in /home/runner/work/engine/engine/.git/
+2026-09-05T13:41:56.9512744Z [command]/usr/bin/git remote add origin https://github.com/misofm/engine
+2026-09-05T13:41:56.9572642Z ##[endgroup]
+2026-09-05T13:41:56.9573606Z ##[group]Disabling automatic garbage collection
+2026-09-05T13:41:56.9577892Z [command]/usr/bin/git config --local gc.auto 0
+2026-09-05T13:41:56.9610723Z ##[endgroup]
+2026-09-05T13:41:56.9611778Z ##[group]Setting up auth
+2026-09-05T13:41:56.9619232Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-09-05T13:41:56.9656736Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-09-05T13:41:57.0113323Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-09-05T13:41:57.0149734Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-09-05T13:41:57.0402784Z [command]/usr/bin/git config --local http.https://github.com/.extraheader AUTHORIZATION: basic ***
+2026-09-05T13:41:57.0447746Z ##[endgroup]
+2026-09-05T13:41:57.0458317Z ##[group]Fetching the repository
+2026-09-05T13:41:57.0460867Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin +9761e825ab988fd0bcac8367b9b58f31f2758883:refs/remotes/pull/472/merge
+2026-09-05T13:41:58.2989787Z From https://github.com/misofm/engine
+2026-09-05T13:41:58.2990872Z  * [new ref]         9761e825ab988fd0bcac8367b9b58f31f2758883 -> pull/472/merge
+2026-09-05T13:41:58.2998460Z ##[endgroup]
+2026-09-05T13:41:58.2999443Z ##[group]Determining the checkout info
+2026-09-05T13:41:58.3000516Z ##[endgroup]
+2026-09-05T13:41:58.3006060Z [command]/usr/bin/git sparse-checkout disable
+2026-09-05T13:41:58.3063713Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
+2026-09-05T13:41:58.3096164Z ##[group]Checking out the ref
+2026-09-05T13:41:58.3101080Z [command]/usr/bin/git checkout --progress --force refs/remotes/pull/472/merge
+2026-09-05T13:41:58.5026207Z Note: switching to 'refs/remotes/pull/472/merge'.
+2026-09-05T13:41:58.5026900Z 
+2026-09-05T13:41:58.5027446Z You are in 'detached HEAD' state. You can look around, make experimental
+2026-09-05T13:41:58.5028514Z changes and commit them, and you can discard any commits you make in this
+2026-09-05T13:41:58.5029485Z state without impacting any branches by switching back to a branch.
+2026-09-05T13:41:58.5030076Z 
+2026-09-05T13:41:58.5030461Z If you want to create a new branch to retain commits you create, you may
+2026-09-05T13:41:58.5031382Z do so (now or later) by using -c with the switch command. Example:
+2026-09-05T13:41:58.5032148Z 
+2026-09-05T13:41:58.5032372Z   git switch -c <new-branch-name>
+2026-09-05T13:41:58.5032711Z 
+2026-09-05T13:41:58.5032924Z Or undo this operation with:
+2026-09-05T13:41:58.5033240Z 
+2026-09-05T13:41:58.5033422Z   git switch -
+2026-09-05T13:41:58.5033713Z 
+2026-09-05T13:41:58.5043620Z Turn off this advice by setting config variable advice.detachedHead to false
+2026-09-05T13:41:58.5044342Z 
+2026-09-05T13:41:58.5045358Z HEAD is now at 9761e82 Merge 93007b366a1307e51069bcba92cc5378d6e0a859 into bb5ed498a2c0934498d964befb2cd5b7c2a45264
+2026-09-05T13:41:58.5048201Z ##[endgroup]
+2026-09-05T13:41:58.5103128Z [command]/usr/bin/git log -1 --format=%H
+2026-09-05T13:41:58.5135159Z 9761e825ab988fd0bcac8367b9b58f31f2758883
+2026-09-05T13:41:58.5408666Z ##[group]Run Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+2026-09-05T13:41:58.5409175Z with:
+2026-09-05T13:41:58.5409423Z   shared-key: lint
+2026-09-05T13:41:58.5409681Z   save-if: false
+2026-09-05T13:41:58.5409956Z   prefix-key: v0-rust
+2026-09-05T13:41:58.5410217Z   add-job-id-key: true
+2026-09-05T13:41:58.5410519Z   add-rust-environment-hash-key: true
+2026-09-05T13:41:58.5410852Z   cache-targets: true
+2026-09-05T13:41:58.5411113Z   cache-all-crates: false
+2026-09-05T13:41:58.5411395Z   cache-workspace-crates: false
+2026-09-05T13:41:58.5411687Z   cache-provider: github
+2026-09-05T13:41:58.5411959Z   cache-bin: true
+2026-09-05T13:41:58.5412198Z   lookup-only: false
+2026-09-05T13:41:58.5412442Z   cmd-format: {0}
+2026-09-05T13:41:58.5412684Z env:
+2026-09-05T13:41:58.5412910Z   CARGO_TERM_COLOR: always
+2026-09-05T13:41:58.5413179Z   RUSTUP_TOOLCHAIN: 1.97.1
+2026-09-05T13:41:58.5413438Z ##[endgroup]
+2026-09-05T13:42:08.9787938Z ##[group]Cache Configuration
+2026-09-05T13:42:08.9788638Z Cache Provider:
+2026-09-05T13:42:08.9789742Z     github
+2026-09-05T13:42:08.9790172Z Workspaces:
+2026-09-05T13:42:08.9790550Z     /home/runner/work/engine/engine
+2026-09-05T13:42:08.9806588Z Cache Paths:
+2026-09-05T13:42:08.9807186Z     /home/runner/.cargo/bin
+2026-09-05T13:42:08.9807708Z     /home/runner/.cargo/.crates.toml
+2026-09-05T13:42:08.9808713Z     /home/runner/.cargo/.crates2.json
+2026-09-05T13:42:08.9809345Z     /home/runner/.cargo/registry
+2026-09-05T13:42:08.9810987Z     /home/runner/.cargo/git
+2026-09-05T13:42:08.9811574Z     /home/runner/work/engine/engine/target
+2026-09-05T13:42:08.9812804Z Restore Key:
+2026-09-05T13:42:08.9813284Z     v0-rust-lint-Linux-x64-f21772a0
+2026-09-05T13:42:08.9816275Z Cache Key:
+2026-09-05T13:42:08.9818740Z     v0-rust-lint-Linux-x64-f21772a0-29c25959
+2026-09-05T13:42:08.9819534Z .. Prefix:
+2026-09-05T13:42:08.9819960Z   - v0-rust-lint-Linux-x64
+2026-09-05T13:42:08.9820424Z .. Environment considered:
+2026-09-05T13:42:08.9820816Z   - Rust Versions:
+2026-09-05T13:42:08.9821405Z     - 1.97.1 x86_64-unknown-linux-gnu 8bab26f4f68e0e26f0bb7960be334d5b520ea452
+2026-09-05T13:42:08.9822277Z     - 1.98.0 x86_64-unknown-linux-gnu 88d9e12ae178fab0fb5cc050a94da85685d449ea
+2026-09-05T13:42:08.9822973Z   - CARGO_INCREMENTAL
+2026-09-05T13:42:08.9823344Z   - CARGO_TERM_COLOR
+2026-09-05T13:42:08.9823715Z   - RUSTUP_TOOLCHAIN
+2026-09-05T13:42:08.9824079Z .. Lockfiles considered:
+2026-09-05T13:42:08.9824552Z   - /home/runner/work/engine/engine/.cargo/config.toml
+2026-09-05T13:42:08.9825351Z   - /home/runner/work/engine/engine/Cargo.lock
+2026-09-05T13:42:08.9825962Z   - /home/runner/work/engine/engine/crates/builtins-compiler/Cargo.toml
+2026-09-05T13:42:08.9826519Z   - /home/runner/work/engine/engine/crates/builtins/Cargo.toml
+2026-09-05T13:42:08.9827008Z   - /home/runner/work/engine/engine/crates/capi/Cargo.toml
+2026-09-05T13:42:08.9827422Z   - /home/runner/work/engine/engine/crates/compressor/Cargo.toml
+2026-09-05T13:42:08.9827878Z   - /home/runner/work/engine/engine/crates/conformance/Cargo.toml
+2026-09-05T13:42:08.9828280Z   - /home/runner/work/engine/engine/crates/delay/Cargo.toml
+2026-09-05T13:42:08.9828687Z   - /home/runner/work/engine/engine/crates/dsp-reference/Cargo.toml
+2026-09-05T13:42:08.9829488Z   - /home/runner/work/engine/engine/crates/effect-compiler/Cargo.toml
+2026-09-05T13:42:08.9829935Z   - /home/runner/work/engine/engine/crates/effect-contract/Cargo.toml
+2026-09-05T13:42:08.9830403Z   - /home/runner/work/engine/engine/crates/effect-package/Cargo.toml
+2026-09-05T13:42:08.9830850Z   - /home/runner/work/engine/engine/crates/effect-runtime/Cargo.toml
+2026-09-05T13:42:08.9831257Z   - /home/runner/work/engine/engine/crates/engine/Cargo.toml
+2026-09-05T13:42:08.9831659Z   - /home/runner/work/engine/engine/crates/gate-expander/Cargo.toml
+2026-09-05T13:42:08.9832082Z   - /home/runner/work/engine/engine/crates/graph-compiler/Cargo.toml
+2026-09-05T13:42:08.9832521Z   - /home/runner/work/engine/engine/crates/graph/Cargo.toml
+2026-09-05T13:42:08.9833167Z   - /home/runner/work/engine/engine/crates/host-core/Cargo.toml
+2026-09-05T13:42:08.9833574Z   - /home/runner/work/engine/engine/crates/lane/Cargo.toml
+2026-09-05T13:42:08.9833938Z   - /home/runner/work/engine/engine/crates/math/Cargo.toml
+2026-09-05T13:42:08.9834376Z   - /home/runner/work/engine/engine/crates/multiband-compressor/Cargo.toml
+2026-09-05T13:42:08.9835116Z   - /home/runner/work/engine/engine/crates/parametric-eq/Cargo.toml
+2026-09-05T13:42:08.9835653Z   - /home/runner/work/engine/engine/crates/protocol/Cargo.toml
+2026-09-05T13:42:08.9836185Z   - /home/runner/work/engine/engine/crates/rack-compiler/Cargo.toml
+2026-09-05T13:42:08.9836577Z   - /home/runner/work/engine/engine/crates/rack/Cargo.toml
+2026-09-05T13:42:08.9836956Z   - /home/runner/work/engine/engine/crates/session/Cargo.toml
+2026-09-05T13:42:08.9837347Z   - /home/runner/work/engine/engine/crates/soft-clip/Cargo.toml
+2026-09-05T13:42:08.9837733Z   - /home/runner/work/engine/engine/crates/source/Cargo.toml
+2026-09-05T13:42:08.9838142Z   - /home/runner/work/engine/engine/crates/target-smoke/Cargo.toml
+2026-09-05T13:42:08.9838588Z   - /home/runner/work/engine/engine/crates/transient-shaper/Cargo.toml
+2026-09-05T13:42:08.9839048Z   - /home/runner/work/engine/engine/crates/true-peak-limiter/Cargo.toml
+2026-09-05T13:42:08.9839492Z   - /home/runner/work/engine/engine/hosts/host-mobile/Cargo.toml
+2026-09-05T13:42:08.9839903Z   - /home/runner/work/engine/engine/hosts/host-native/Cargo.toml
+2026-09-05T13:42:08.9840296Z   - /home/runner/work/engine/engine/hosts/host-web/Cargo.toml
+2026-09-05T13:42:08.9840677Z   - /home/runner/work/engine/engine/rust-toolchain.toml
+2026-09-05T13:42:08.9841138Z   - /home/runner/work/engine/engine/tools/audit/Cargo.toml
+2026-09-05T13:42:08.9841583Z   - /home/runner/work/engine/engine/tools/bench-support/Cargo.toml
+2026-09-05T13:42:08.9841978Z   - /home/runner/work/engine/engine/tools/bench/Cargo.toml
+2026-09-05T13:42:08.9842382Z   - /home/runner/work/engine/engine/tools/console-workload/Cargo.toml
+2026-09-05T13:42:08.9842860Z   - /home/runner/work/engine/engine/tools/native-pcm-runner/Cargo.toml
+2026-09-05T13:42:08.9843399Z   - /home/runner/work/engine/engine/tools/parameter-metadata/Cargo.toml
+2026-09-05T13:42:08.9843853Z   - /home/runner/work/engine/engine/tools/session-validator/Cargo.toml
+2026-09-05T13:42:08.9844278Z   - /home/runner/work/engine/engine/tools/stem-hasher/Cargo.toml
+2026-09-05T13:42:08.9844703Z   - /home/runner/work/engine/engine/tools/wasm-console-guest/Cargo.toml
+2026-09-05T13:42:08.9845380Z   - /home/runner/work/engine/engine/tools/wasm-console/Cargo.toml
+2026-09-05T13:42:08.9845809Z   - /home/runner/work/engine/engine/tools/wasm-gate-corpus/Cargo.toml
+2026-09-05T13:42:08.9846244Z   - /home/runner/work/engine/engine/tools/wasm-gate-guest/Cargo.toml
+2026-09-05T13:42:08.9846657Z   - /home/runner/work/engine/engine/tools/wasm-gates/Cargo.toml
+2026-09-05T13:42:08.9847330Z ##[endgroup]
+2026-09-05T13:42:08.9847454Z 
+2026-09-05T13:42:08.9847545Z ... Restoring cache ...
+2026-09-05T13:42:09.0344601Z Cache hit for: v0-rust-lint-Linux-x64-f21772a0-29c25959
+2026-09-05T13:42:10.0862372Z Received 268435456 of 279662080 (96.0%), 256.0 MBs/sec
+2026-09-05T13:42:10.1731009Z Received 279662080 of 279662080 (100.0%), 246.7 MBs/sec
+2026-09-05T13:42:10.1732170Z Cache Size: ~267 MB (279662080 B)
+2026-09-05T13:42:10.1782734Z [command]/usr/bin/tar -xf /home/runner/work/_temp/fe4ffac1-74d0-4a3d-93d3-284ded7a4f4d/cache.tzst -P -C /home/runner/work/engine/engine --use-compress-program unzstd
+2026-09-05T13:42:11.7443761Z Cache restored successfully
+2026-09-05T13:42:11.8419131Z Restored from cache key "v0-rust-lint-Linux-x64-f21772a0-29c25959" full match: true.
+2026-09-05T13:42:11.8591695Z ##[group]Run rustup toolchain install 1.97.1 --profile minimal --component clippy --component rustfmt
+2026-09-05T13:42:11.8592527Z [36;1mrustup toolchain install 1.97.1 --profile minimal --component clippy --component rustfmt[0m
+2026-09-05T13:42:11.8593017Z [36;1msudo apt-get update[0m
+2026-09-05T13:42:11.8593290Z [36;1msudo apt-get install -y ripgrep[0m
+2026-09-05T13:42:11.8633411Z shell: /usr/bin/bash -e {0}
+2026-09-05T13:42:11.8633676Z env:
+2026-09-05T13:42:11.8633878Z   CARGO_TERM_COLOR: always
+2026-09-05T13:42:11.8634136Z   RUSTUP_TOOLCHAIN: 1.97.1
+2026-09-05T13:42:11.8634385Z   CACHE_ON_FAILURE: false
+2026-09-05T13:42:11.8634614Z   CARGO_INCREMENTAL: 0
+2026-09-05T13:42:11.8635117Z ##[endgroup]
+2026-09-05T13:42:11.9122054Z info: syncing channel updates for 1.97.1-x86_64-unknown-linux-gnu
+2026-09-05T13:42:12.0019349Z info: latest update on 2026-07-16 for version 1.97.1 (8bab26f4f 2026-07-14)
+2026-09-05T13:42:12.0144480Z info: downloading component clippy
+2026-09-05T13:42:12.6958309Z 
+2026-09-05T13:42:12.7051060Z   1.97.1-x86_64-unknown-linux-gnu updated - rustc 1.97.1 (8bab26f4f 2026-07-14) (from rustc 1.97.1 (8bab26f4f 2026-07-14))
+2026-09-05T13:42:12.7051735Z 
+2026-09-05T13:42:12.8468357Z Get:1 file:/etc/apt/apt-mirrors.txt Mirrorlist [144 B]
+2026-09-05T13:42:12.8704587Z Get:6 https://packages.microsoft.com/ubuntu/24.04/prod noble InRelease [3600 B]
+2026-09-05T13:42:12.8989988Z Hit:2 http://azure.archive.ubuntu.com/ubuntu noble InRelease
+2026-09-05T13:42:12.8991284Z Get:7 https://dl.google.com/linux/chrome-stable/deb stable InRelease [2548 B]
+2026-09-05T13:42:12.9077278Z Get:3 http://azure.archive.ubuntu.com/ubuntu noble-updates InRelease [126 kB]
+2026-09-05T13:42:12.9137327Z Get:4 http://azure.archive.ubuntu.com/ubuntu noble-backports InRelease [126 kB]
+2026-09-05T13:42:12.9224777Z Get:5 http://azure.archive.ubuntu.com/ubuntu noble-security InRelease [126 kB]
+2026-09-05T13:42:13.0069915Z Get:8 https://packages.microsoft.com/ubuntu/24.04/prod noble/main arm64 Packages [394 kB]
+2026-09-05T13:42:13.0211207Z Get:9 https://packages.microsoft.com/ubuntu/24.04/prod noble/main amd64 Packages [441 kB]
+2026-09-05T13:42:13.1921097Z Get:10 http://azure.archive.ubuntu.com/ubuntu noble-updates/main amd64 Packages [1260 kB]
+2026-09-05T13:42:13.2005838Z Get:11 http://azure.archive.ubuntu.com/ubuntu noble-updates/main Translation-en [292 kB]
+2026-09-05T13:42:13.2032472Z Get:12 http://azure.archive.ubuntu.com/ubuntu noble-updates/main amd64 Components [180 kB]
+2026-09-05T13:42:13.2053455Z Get:13 http://azure.archive.ubuntu.com/ubuntu noble-updates/universe amd64 Packages [1690 kB]
+2026-09-05T13:42:13.2133071Z Get:19 https://dl.google.com/linux/chrome-stable/deb stable/main amd64 Packages [1401 B]
+2026-09-05T13:42:13.2146290Z Get:14 http://azure.archive.ubuntu.com/ubuntu noble-updates/universe Translation-en [339 kB]
+2026-09-05T13:42:13.2172965Z Get:15 http://azure.archive.ubuntu.com/ubuntu noble-updates/universe amd64 Components [388 kB]
+2026-09-05T13:42:13.2206055Z Get:16 http://azure.archive.ubuntu.com/ubuntu noble-updates/restricted amd64 Packages [1536 kB]
+2026-09-05T13:42:13.2290691Z Get:17 http://azure.archive.ubuntu.com/ubuntu noble-updates/restricted Translation-en [352 kB]
+2026-09-05T13:42:13.2322336Z Get:18 http://azure.archive.ubuntu.com/ubuntu noble-updates/multiverse amd64 Components [940 B]
+2026-09-05T13:42:13.2506215Z Get:20 http://azure.archive.ubuntu.com/ubuntu noble-backports/main amd64 Components [5740 B]
+2026-09-05T13:42:13.2947229Z Get:21 http://azure.archive.ubuntu.com/ubuntu noble-backports/universe amd64 Components [12.6 kB]
+2026-09-05T13:42:13.3132340Z Get:22 http://azure.archive.ubuntu.com/ubuntu noble-security/main amd64 Packages [1002 kB]
+2026-09-05T13:42:13.3189664Z Get:23 http://azure.archive.ubuntu.com/ubuntu noble-security/main Translation-en [212 kB]
+2026-09-05T13:42:13.3211899Z Get:24 http://azure.archive.ubuntu.com/ubuntu noble-security/main amd64 Components [46.4 kB]
+2026-09-05T13:42:13.3229073Z Get:25 http://azure.archive.ubuntu.com/ubuntu noble-security/universe amd64 Packages [1206 kB]
+2026-09-05T13:42:13.3291099Z Get:26 http://azure.archive.ubuntu.com/ubuntu noble-security/universe Translation-en [241 kB]
+2026-09-05T13:42:13.3315393Z Get:27 http://azure.archive.ubuntu.com/ubuntu noble-security/universe amd64 Components [76.3 kB]
+2026-09-05T13:42:13.3333529Z Get:28 http://azure.archive.ubuntu.com/ubuntu noble-security/restricted amd64 Packages [1437 kB]
+2026-09-05T13:42:13.3407537Z Get:29 http://azure.archive.ubuntu.com/ubuntu noble-security/restricted Translation-en [334 kB]
+2026-09-05T13:42:22.1352180Z Fetched 11.8 MB in 1s (8178 kB/s)
+2026-09-05T13:42:22.9724555Z Reading package lists...
+2026-09-05T13:42:23.0033397Z Reading package lists...
+2026-09-05T13:42:23.2071866Z Building dependency tree...
+2026-09-05T13:42:23.2079272Z Reading state information...
+2026-09-05T13:42:23.4104813Z The following NEW packages will be installed:
+2026-09-05T13:42:23.4105735Z   ripgrep
+2026-09-05T13:42:23.4283931Z 0 upgraded, 1 newly installed, 0 to remove and 38 not upgraded.
+2026-09-05T13:42:23.4284628Z Need to get 1551 kB of archives.
+2026-09-05T13:42:23.4285364Z After this operation, 5335 kB of additional disk space will be used.
+2026-09-05T13:42:23.4286085Z Get:1 file:/etc/apt/apt-mirrors.txt Mirrorlist [144 B]
+2026-09-05T13:42:23.4531508Z Get:2 http://azure.archive.ubuntu.com/ubuntu noble/universe amd64 ripgrep amd64 14.1.0-1 [1551 kB]
+2026-09-05T13:42:23.7378940Z Fetched 1551 kB in 0s (31.5 MB/s)
+2026-09-05T13:42:23.7922307Z Selecting previously unselected package ripgrep.
+2026-09-05T13:42:23.8731156Z (Reading database ... 
+2026-09-05T13:42:23.8731621Z (Reading database ... 5%
+2026-09-05T13:42:23.8731932Z (Reading database ... 10%
+2026-09-05T13:42:23.8732196Z (Reading database ... 15%
+2026-09-05T13:42:23.8732458Z (Reading database ... 20%
+2026-09-05T13:42:23.8732710Z (Reading database ... 25%
+2026-09-05T13:42:23.8733442Z (Reading database ... 30%
+2026-09-05T13:42:23.8733756Z (Reading database ... 35%
+2026-09-05T13:42:23.8734009Z (Reading database ... 40%
+2026-09-05T13:42:23.8734271Z (Reading database ... 45%
+2026-09-05T13:42:23.8734533Z (Reading database ... 50%
+2026-09-05T13:42:23.9338320Z (Reading database ... 55%
+2026-09-05T13:42:24.4617864Z (Reading database ... 60%
+2026-09-05T13:42:24.8187280Z (Reading database ... 65%
+2026-09-05T13:42:25.1715728Z (Reading database ... 70%
+2026-09-05T13:42:25.5473852Z (Reading database ... 75%
+2026-09-05T13:42:26.0554749Z (Reading database ... 80%
+2026-09-05T13:42:26.8034664Z (Reading database ... 85%
+2026-09-05T13:42:27.6661978Z (Reading database ... 90%
+2026-09-05T13:42:28.7124609Z (Reading database ... 95%
+2026-09-05T13:42:28.7125488Z (Reading database ... 100%
+2026-09-05T13:42:28.7126275Z (Reading database ... 201676 files and directories currently installed.)
+2026-09-05T13:42:28.7167329Z Preparing to unpack .../ripgrep_14.1.0-1_amd64.deb ...
+2026-09-05T13:42:28.7182241Z Unpacking ripgrep (14.1.0-1) ...
+2026-09-05T13:42:28.8207829Z Setting up ripgrep (14.1.0-1) ...
+2026-09-05T13:42:28.8234394Z Processing triggers for man-db (2.12.0-4build2) ...
+2026-09-05T13:42:28.8263681Z Not building database; man-db/auto-update is not 'true'.
+2026-09-05T13:42:30.0975782Z 
+2026-09-05T13:42:30.0976326Z Running kernel seems to be up-to-date.
+2026-09-05T13:42:30.0976736Z 
+2026-09-05T13:42:30.0976911Z No services need to be restarted.
+2026-09-05T13:42:30.0977212Z 
+2026-09-05T13:42:30.0977387Z No containers need to be restarted.
+2026-09-05T13:42:30.0977694Z 
+2026-09-05T13:42:30.0977905Z No user sessions are running outdated binaries.
+2026-09-05T13:42:30.0978281Z 
+2026-09-05T13:42:30.0978616Z No VM guests are running outdated hypervisor (qemu) binaries on this host.
+2026-09-05T13:42:31.0332894Z ##[group]Run cargo fmt --all -- --check
+2026-09-05T13:42:31.0333276Z [36;1mcargo fmt --all -- --check[0m
+2026-09-05T13:42:31.0370254Z shell: /usr/bin/bash -e {0}
+2026-09-05T13:42:31.0370504Z env:
+2026-09-05T13:42:31.0370699Z   CARGO_TERM_COLOR: always
+2026-09-05T13:42:31.0370942Z   RUSTUP_TOOLCHAIN: 1.97.1
+2026-09-05T13:42:31.0371170Z   CACHE_ON_FAILURE: false
+2026-09-05T13:42:31.0371393Z   CARGO_INCREMENTAL: 0
+2026-09-05T13:42:31.0371603Z ##[endgroup]
+2026-09-05T13:42:33.3262144Z ##[group]Run cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+2026-09-05T13:42:33.3262818Z [36;1mcargo clippy --locked --workspace --all-targets --all-features -- -D warnings[0m
+2026-09-05T13:42:33.3298390Z shell: /usr/bin/bash -e {0}
+2026-09-05T13:42:33.3298634Z env:
+2026-09-05T13:42:33.3298839Z   CARGO_TERM_COLOR: always
+2026-09-05T13:42:33.3299082Z   RUSTUP_TOOLCHAIN: 1.97.1
+2026-09-05T13:42:33.3299328Z   CACHE_ON_FAILURE: false
+2026-09-05T13:42:33.3299559Z   CARGO_INCREMENTAL: 0
+2026-09-05T13:42:33.3299790Z ##[endgroup]
+2026-09-05T13:42:33.4126170Z [1m[92m    Updating[0m crates.io index
+2026-09-05T13:42:34.3616686Z [1m[92m    Checking[0m engine v0.1.0 (/home/runner/work/engine/engine/crates/engine)
+2026-09-05T13:42:34.3653023Z [1m[92m    Checking[0m lane v0.1.0 (/home/runner/work/engine/engine/crates/lane)
+2026-09-05T13:42:34.3714015Z [1m[92m    Checking[0m dsp-reference v0.1.0 (/home/runner/work/engine/engine/crates/dsp-reference)
+2026-09-05T13:42:34.7124473Z [1m[92m    Checking[0m math v0.1.0 (/home/runner/work/engine/engine/crates/math)
+2026-09-05T13:42:34.7295447Z [1m[92m    Checking[0m bench-support v0.1.0 (/home/runner/work/engine/engine/tools/bench-support)
+2026-09-05T13:42:34.7705319Z [1m[92m    Checking[0m session v0.1.0 (/home/runner/work/engine/engine/crates/session)
+2026-09-05T13:42:34.8586859Z [1m[92m    Checking[0m target-smoke v0.1.0 (/home/runner/work/engine/engine/crates/target-smoke)
+2026-09-05T13:42:34.9066633Z [1m[92m    Checking[0m host-mobile v0.1.0 (/home/runner/work/engine/engine/hosts/host-mobile)
+2026-09-05T13:42:34.9696615Z [1m[92m    Checking[0m host-native v0.1.0 (/home/runner/work/engine/engine/hosts/host-native)
+2026-09-05T13:42:35.1043644Z [1m[92m    Checking[0m effect-contract v0.1.0 (/home/runner/work/engine/engine/crates/effect-contract)
+2026-09-05T13:42:35.1516801Z [1m[92m    Checking[0m effect-runtime v0.1.0 (/home/runner/work/engine/engine/crates/effect-runtime)
+2026-09-05T13:42:35.5998772Z [1m[92m    Checking[0m protocol v0.1.0 (/home/runner/work/engine/engine/crates/protocol)
+2026-09-05T13:42:35.7596540Z [1m[92m    Checking[0m compressor v0.1.0 (/home/runner/work/engine/engine/crates/compressor)
+2026-09-05T13:42:35.9066414Z [1m[92m    Checking[0m builtins v0.1.0 (/home/runner/work/engine/engine/crates/builtins)
+2026-09-05T13:42:36.0566819Z [1m[92m    Checking[0m soft-clip v0.1.0 (/home/runner/work/engine/engine/crates/soft-clip)
+2026-09-05T13:42:36.0806941Z [1m[92m    Checking[0m parametric-eq v0.1.0 (/home/runner/work/engine/engine/crates/parametric-eq)
+2026-09-05T13:42:36.2917086Z [1m[92m    Checking[0m multiband-compressor v0.1.0 (/home/runner/work/engine/engine/crates/multiband-compressor)
+2026-09-05T13:42:36.4566837Z [1m[92m    Checking[0m transient-shaper v0.1.0 (/home/runner/work/engine/engine/crates/transient-shaper)
+2026-09-05T13:42:36.4626408Z [1m[92m    Checking[0m true-peak-limiter v0.1.0 (/home/runner/work/engine/engine/crates/true-peak-limiter)
+2026-09-05T13:42:36.5976334Z [1m[92m    Checking[0m conformance v0.1.0 (/home/runner/work/engine/engine/crates/conformance)
+2026-09-05T13:42:36.6626738Z [1m[92m    Checking[0m gate-expander v0.1.0 (/home/runner/work/engine/engine/crates/gate-expander)
+2026-09-05T13:42:36.8936901Z [1m[92m    Checking[0m delay v0.1.0 (/home/runner/work/engine/engine/crates/delay)
+2026-09-05T13:42:36.9547192Z [1m[92m    Checking[0m rack v0.1.0 (/home/runner/work/engine/engine/crates/rack)
+2026-09-05T13:42:36.9717059Z [1m[92m    Checking[0m effect-package v0.1.0 (/home/runner/work/engine/engine/crates/effect-package)
+2026-09-05T13:42:37.1376616Z [1m[92m    Checking[0m wasm-gate-corpus v0.1.0 (/home/runner/work/engine/engine/tools/wasm-gate-corpus)
+2026-09-05T13:42:37.2746723Z [1m[92m    Checking[0m graph v0.1.0 (/home/runner/work/engine/engine/crates/graph)
+2026-09-05T13:42:37.3443860Z [1m[92m    Checking[0m rack-compiler v0.1.0 (/home/runner/work/engine/engine/crates/rack-compiler)
+2026-09-05T13:42:37.4749759Z [1m[92m    Checking[0m wasm-gates v0.1.0 (/home/runner/work/engine/engine/tools/wasm-gates)
+2026-09-05T13:42:37.8567278Z [1m[92m    Checking[0m effect-compiler v0.1.0 (/home/runner/work/engine/engine/crates/effect-compiler)
+2026-09-05T13:42:38.0696910Z [1m[92m    Checking[0m builtins-compiler v0.1.0 (/home/runner/work/engine/engine/crates/builtins-compiler)
+2026-09-05T13:42:38.2466687Z [1m[92m    Checking[0m source v0.1.0 (/home/runner/work/engine/engine/crates/source)
+2026-09-05T13:42:38.8077706Z [1m[92m    Checking[0m graph-compiler v0.1.0 (/home/runner/work/engine/engine/crates/graph-compiler)
+2026-09-05T13:42:38.8885597Z [1m[92m    Checking[0m session-validator v0.1.0 (/home/runner/work/engine/engine/tools/session-validator)
+2026-09-05T13:42:38.9827163Z [1m[92m    Checking[0m stem-hasher v0.1.0 (/home/runner/work/engine/engine/tools/stem-hasher)
+2026-09-05T13:42:39.3194193Z [1m[92m    Checking[0m host-core v0.1.0 (/home/runner/work/engine/engine/crates/host-core)
+2026-09-05T13:42:39.3196548Z [1m[92m    Checking[0m console-workload v0.1.0 (/home/runner/work/engine/engine/tools/console-workload)
+2026-09-05T13:42:39.5186737Z [1m[92m    Checking[0m wasm-console-guest v0.1.0 (/home/runner/work/engine/engine/tools/wasm-console-guest)
+2026-09-05T13:42:39.5676789Z [1m[92m    Checking[0m wasm-console v0.1.0 (/home/runner/work/engine/engine/tools/wasm-console)
+2026-09-05T13:42:39.7017036Z [1m[92m    Checking[0m host-web v0.1.0 (/home/runner/work/engine/engine/hosts/host-web)
+2026-09-05T13:42:39.7836545Z [1m[92m    Checking[0m capi v0.1.0 (/home/runner/work/engine/engine/crates/capi)
+2026-09-05T13:42:40.1736940Z [1m[92m    Checking[0m parameter-metadata v0.1.0 (/home/runner/work/engine/engine/tools/parameter-metadata)
+2026-09-05T13:42:40.1827100Z [1m[92m    Checking[0m native-pcm-runner v0.1.0 (/home/runner/work/engine/engine/tools/native-pcm-runner)
+2026-09-05T13:42:40.2336735Z [1m[92m    Checking[0m audit v0.1.0 (/home/runner/work/engine/engine/tools/audit)
+2026-09-05T13:42:43.1016817Z [1m[92m    Checking[0m bench v0.1.0 (/home/runner/work/engine/engine/tools/bench)
+2026-09-05T13:42:45.8706812Z [1m[92m    Checking[0m wasm-gate-guest v0.1.0 (/home/runner/work/engine/engine/tools/wasm-gate-guest)
+2026-09-05T13:42:54.2947712Z [1m[92m    Finished[0m `dev` profile [unoptimized + debuginfo] target(s) in 20.93s
+2026-09-05T13:42:54.3842361Z ##[group]Run RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps
+2026-09-05T13:42:54.3842978Z [36;1mRUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps[0m
+2026-09-05T13:42:54.3878295Z shell: /usr/bin/bash -e {0}
+2026-09-05T13:42:54.3878551Z env:
+2026-09-05T13:42:54.3878744Z   CARGO_TERM_COLOR: always
+2026-09-05T13:42:54.3878983Z   RUSTUP_TOOLCHAIN: 1.97.1
+2026-09-05T13:42:54.3879208Z   CACHE_ON_FAILURE: false
+2026-09-05T13:42:54.3879426Z   CARGO_INCREMENTAL: 0
+2026-09-05T13:42:54.3879645Z ##[endgroup]
+2026-09-05T13:42:54.6428289Z [1m[92m    Checking[0m engine v0.1.0 (/home/runner/work/engine/engine/crates/engine)
+2026-09-05T13:42:54.6429548Z [1m[92m    Checking[0m lane v0.1.0 (/home/runner/work/engine/engine/crates/lane)
+2026-09-05T13:42:54.6563053Z [1m[92m    Checking[0m dsp-reference v0.1.0 (/home/runner/work/engine/engine/crates/dsp-reference)
+2026-09-05T13:42:54.6586281Z [1m[92m Documenting[0m lane v0.1.0 (/home/runner/work/engine/engine/crates/lane)
+2026-09-05T13:42:54.8739862Z [1m[92m    Checking[0m math v0.1.0 (/home/runner/work/engine/engine/crates/math)
+2026-09-05T13:42:54.8825909Z [1m[92m    Checking[0m session v0.1.0 (/home/runner/work/engine/engine/crates/session)
+2026-09-05T13:42:54.9003436Z [1m[92m    Checking[0m bench-support v0.1.0 (/home/runner/work/engine/engine/tools/bench-support)
+2026-09-05T13:42:55.0057170Z [1m[92m    Checking[0m target-smoke v0.1.0 (/home/runner/work/engine/engine/crates/target-smoke)
+2026-09-05T13:42:55.0466614Z [1m[92m Documenting[0m host-mobile v0.1.0 (/home/runner/work/engine/engine/hosts/host-mobile)
+2026-09-05T13:42:55.0621750Z [1m[92m    Checking[0m effect-contract v0.1.0 (/home/runner/work/engine/engine/crates/effect-contract)
+2026-09-05T13:42:55.4029401Z [1m[92m    Checking[0m effect-runtime v0.1.0 (/home/runner/work/engine/engine/crates/effect-runtime)
+2026-09-05T13:42:55.4108850Z [1m[92m    Checking[0m protocol v0.1.0 (/home/runner/work/engine/engine/crates/protocol)
+2026-09-05T13:42:55.4616496Z [1m[92m    Checking[0m rack v0.1.0 (/home/runner/work/engine/engine/crates/rack)
+2026-09-05T13:42:55.5683053Z [1m[92m    Checking[0m builtins v0.1.0 (/home/runner/work/engine/engine/crates/builtins)
+2026-09-05T13:42:55.6806794Z [1m[92m    Checking[0m graph v0.1.0 (/home/runner/work/engine/engine/crates/graph)
+2026-09-05T13:42:55.7417184Z [1m[92m    Checking[0m soft-clip v0.1.0 (/home/runner/work/engine/engine/crates/soft-clip)
+2026-09-05T13:42:55.8905653Z [1m[92m    Checking[0m transient-shaper v0.1.0 (/home/runner/work/engine/engine/crates/transient-shaper)
+2026-09-05T13:42:55.9273158Z [1m[92m    Checking[0m gate-expander v0.1.0 (/home/runner/work/engine/engine/crates/gate-expander)
+2026-09-05T13:42:56.0357212Z [1m[92m    Checking[0m parametric-eq v0.1.0 (/home/runner/work/engine/engine/crates/parametric-eq)
+2026-09-05T13:42:56.1314035Z [1m[92m    Checking[0m true-peak-limiter v0.1.0 (/home/runner/work/engine/engine/crates/true-peak-limiter)
+2026-09-05T13:42:56.2514703Z [1m[92m    Checking[0m delay v0.1.0 (/home/runner/work/engine/engine/crates/delay)
+2026-09-05T13:42:56.2733588Z [1m[92m    Checking[0m compressor v0.1.0 (/home/runner/work/engine/engine/crates/compressor)
+2026-09-05T13:42:56.3976942Z [1m[92m    Checking[0m multiband-compressor v0.1.0 (/home/runner/work/engine/engine/crates/multiband-compressor)
+2026-09-05T13:42:56.4068600Z [1m[92m    Checking[0m rack-compiler v0.1.0 (/home/runner/work/engine/engine/crates/rack-compiler)
+2026-09-05T13:42:56.4886855Z [1m[92m    Checking[0m effect-package v0.1.0 (/home/runner/work/engine/engine/crates/effect-package)
+2026-09-05T13:42:56.5026773Z [1m[92m    Checking[0m builtins-compiler v0.1.0 (/home/runner/work/engine/engine/crates/builtins-compiler)
+2026-09-05T13:42:56.6017089Z [1m[92m    Checking[0m source v0.1.0 (/home/runner/work/engine/engine/crates/source)
+2026-09-05T13:42:56.8217869Z [1m[92m    Checking[0m wasm-gate-corpus v0.1.0 (/home/runner/work/engine/engine/tools/wasm-gate-corpus)
+2026-09-05T13:42:56.9565705Z [1m[92m    Checking[0m conformance v0.1.0 (/home/runner/work/engine/engine/crates/conformance)
+2026-09-05T13:42:56.9836808Z [1m[92m    Checking[0m effect-compiler v0.1.0 (/home/runner/work/engine/engine/crates/effect-compiler)
+2026-09-05T13:42:56.9856770Z [1m[92m Documenting[0m protocol v0.1.0 (/home/runner/work/engine/engine/crates/protocol)
+2026-09-05T13:42:57.0446818Z [1m[92m Documenting[0m stem-hasher v0.1.0 (/home/runner/work/engine/engine/tools/stem-hasher)
+2026-09-05T13:42:57.1815184Z [1m[92m Documenting[0m effect-compiler v0.1.0 (/home/runner/work/engine/engine/crates/effect-compiler)
+2026-09-05T13:42:57.2389433Z [1m[92m    Checking[0m graph-compiler v0.1.0 (/home/runner/work/engine/engine/crates/graph-compiler)
+2026-09-05T13:42:57.5987423Z [1m[92m    Checking[0m host-core v0.1.0 (/home/runner/work/engine/engine/crates/host-core)
+2026-09-05T13:42:57.8576545Z [1m[92m    Checking[0m host-web v0.1.0 (/home/runner/work/engine/engine/hosts/host-web)
+2026-09-05T13:42:57.9146801Z [1m[92m    Checking[0m console-workload v0.1.0 (/home/runner/work/engine/engine/tools/console-workload)
+2026-09-05T13:42:58.0672042Z [1m[92m    Checking[0m capi v0.1.0 (/home/runner/work/engine/engine/crates/capi)
+2026-09-05T13:42:58.1296611Z [1m[92m Documenting[0m graph-compiler v0.1.0 (/home/runner/work/engine/engine/crates/graph-compiler)
+2026-09-05T13:42:58.1657130Z [1m[92m    Checking[0m parameter-metadata v0.1.0 (/home/runner/work/engine/engine/tools/parameter-metadata)
+2026-09-05T13:42:58.2871412Z [1m[92m Documenting[0m parameter-metadata v0.1.0 (/home/runner/work/engine/engine/tools/parameter-metadata)
+2026-09-05T13:42:58.3291051Z [1m[92m Documenting[0m native-pcm-runner v0.1.0 (/home/runner/work/engine/engine/tools/native-pcm-runner)
+2026-09-05T13:42:58.9116633Z [1m[92m Documenting[0m audit v0.1.0 (/home/runner/work/engine/engine/tools/audit)
+2026-09-05T13:42:59.6736638Z [1m[92m Documenting[0m bench v0.1.0 (/home/runner/work/engine/engine/tools/bench)
+2026-09-05T13:43:00.0606692Z [1m[92m Documenting[0m wasm-console-guest v0.1.0 (/home/runner/work/engine/engine/tools/wasm-console-guest)
+2026-09-05T13:43:00.2967166Z [1m[92m Documenting[0m wasm-console v0.1.0 (/home/runner/work/engine/engine/tools/wasm-console)
+2026-09-05T13:43:00.3696568Z [1m[92m Documenting[0m host-web v0.1.0 (/home/runner/work/engine/engine/hosts/host-web)
+2026-09-05T13:43:00.9036611Z [1m[92m Documenting[0m capi v0.1.0 (/home/runner/work/engine/engine/crates/capi)
+2026-09-05T13:43:00.9916802Z [1m[92m Documenting[0m host-core v0.1.0 (/home/runner/work/engine/engine/crates/host-core)
+2026-09-05T13:43:01.4477091Z [1m[92m Documenting[0m console-workload v0.1.0 (/home/runner/work/engine/engine/tools/console-workload)
+2026-09-05T13:43:01.9358886Z [1m[92m Documenting[0m wasm-gates v0.1.0 (/home/runner/work/engine/engine/tools/wasm-gates)
+2026-09-05T13:43:02.1276723Z [1m[92m Documenting[0m wasm-gate-guest v0.1.0 (/home/runner/work/engine/engine/tools/wasm-gate-guest)
+2026-09-05T13:43:02.3226647Z [1m[92m Documenting[0m session-validator v0.1.0 (/home/runner/work/engine/engine/tools/session-validator)
+2026-09-05T13:43:02.4956997Z [1m[92m Documenting[0m wasm-gate-corpus v0.1.0 (/home/runner/work/engine/engine/tools/wasm-gate-corpus)
+2026-09-05T13:43:02.9016893Z [1m[92m Documenting[0m builtins-compiler v0.1.0 (/home/runner/work/engine/engine/crates/builtins-compiler)
+2026-09-05T13:43:03.2846576Z [1m[92m Documenting[0m source v0.1.0 (/home/runner/work/engine/engine/crates/source)
+2026-09-05T13:43:03.4096724Z [1m[92m Documenting[0m rack-compiler v0.1.0 (/home/runner/work/engine/engine/crates/rack-compiler)
+2026-09-05T13:43:03.6202206Z [1m[92m Documenting[0m graph v0.1.0 (/home/runner/work/engine/engine/crates/graph)
+2026-09-05T13:43:04.0237146Z [1m[92m Documenting[0m soft-clip v0.1.0 (/home/runner/work/engine/engine/crates/soft-clip)
+2026-09-05T13:43:04.3427059Z [1m[92m Documenting[0m true-peak-limiter v0.1.0 (/home/runner/work/engine/engine/crates/true-peak-limiter)
+2026-09-05T13:43:04.6121088Z [1m[92m Documenting[0m delay v0.1.0 (/home/runner/work/engine/engine/crates/delay)
+2026-09-05T13:43:04.8101557Z [1m[92m Documenting[0m multiband-compressor v0.1.0 (/home/runner/work/engine/engine/crates/multiband-compressor)
+2026-09-05T13:43:04.9973580Z [1m[92m Documenting[0m transient-shaper v0.1.0 (/home/runner/work/engine/engine/crates/transient-shaper)
+2026-09-05T13:43:05.2226603Z [1m[92m Documenting[0m parametric-eq v0.1.0 (/home/runner/work/engine/engine/crates/parametric-eq)
+2026-09-05T13:43:05.4816490Z [1m[92m Documenting[0m compressor v0.1.0 (/home/runner/work/engine/engine/crates/compressor)
+2026-09-05T13:43:05.7096683Z [1m[92m Documenting[0m gate-expander v0.1.0 (/home/runner/work/engine/engine/crates/gate-expander)
+2026-09-05T13:43:05.9620897Z [1m[92m Documenting[0m builtins v0.1.0 (/home/runner/work/engine/engine/crates/builtins)
+2026-09-05T13:43:06.2058188Z [1m[92m Documenting[0m effect-package v0.1.0 (/home/runner/work/engine/engine/crates/effect-package)
+2026-09-05T13:43:06.3846743Z [1m[92m Documenting[0m conformance v0.1.0 (/home/runner/work/engine/engine/crates/conformance)
+2026-09-05T13:43:06.6166785Z [1m[92m Documenting[0m rack v0.1.0 (/home/runner/work/engine/engine/crates/rack)
+2026-09-05T13:43:06.9356771Z [1m[92m Documenting[0m effect-contract v0.1.0 (/home/runner/work/engine/engine/crates/effect-contract)
+2026-09-05T13:43:07.2357900Z [1m[92m Documenting[0m effect-runtime v0.1.0 (/home/runner/work/engine/engine/crates/effect-runtime)
+2026-09-05T13:43:07.4427243Z [1m[92m Documenting[0m host-native v0.1.0 (/home/runner/work/engine/engine/hosts/host-native)
+2026-09-05T13:43:07.6786824Z [1m[92m Documenting[0m target-smoke v0.1.0 (/home/runner/work/engine/engine/crates/target-smoke)
+2026-09-05T13:43:07.9636616Z [1m[92m Documenting[0m session v0.1.0 (/home/runner/work/engine/engine/crates/session)
+2026-09-05T13:43:08.1834616Z [1m[92m Documenting[0m bench-support v0.1.0 (/home/runner/work/engine/engine/tools/bench-support)
+2026-09-05T13:43:08.4420776Z [1m[92m Documenting[0m math v0.1.0 (/home/runner/work/engine/engine/crates/math)
+2026-09-05T13:43:08.6516493Z [1m[92m Documenting[0m dsp-reference v0.1.0 (/home/runner/work/engine/engine/crates/dsp-reference)
+2026-09-05T13:43:08.8983217Z [1m[92m Documenting[0m engine v0.1.0 (/home/runner/work/engine/engine/crates/engine)
+2026-09-05T13:43:09.7847738Z [1m[92m    Finished[0m `dev` profile [unoptimized + debuginfo] target(s) in 15.38s
+2026-09-05T13:43:09.7942003Z [1m[92m   Generated[0m /home/runner/work/engine/engine/target/doc/audit/index.html and 48 other files
+2026-09-05T13:43:09.8037908Z ##[group]Run bash scripts/check-workspace-policy.sh
+2026-09-05T13:43:09.8038335Z [36;1mbash scripts/check-workspace-policy.sh[0m
+2026-09-05T13:43:09.8072825Z shell: /usr/bin/bash -e {0}
+2026-09-05T13:43:09.8073095Z env:
+2026-09-05T13:43:09.8073300Z   CARGO_TERM_COLOR: always
+2026-09-05T13:43:09.8073540Z   RUSTUP_TOOLCHAIN: 1.97.1
+2026-09-05T13:43:09.8073769Z   CACHE_ON_FAILURE: false
+2026-09-05T13:43:09.8073994Z   CARGO_INCREMENTAL: 0
+2026-09-05T13:43:09.8074207Z ##[endgroup]
+2026-09-05T13:43:10.6783283Z workspace policy: ok
+2026-09-05T13:43:10.6890581Z ##[group]Run bash scripts/test-workspace-policy.sh
+2026-09-05T13:43:10.6891002Z [36;1mbash scripts/test-workspace-policy.sh[0m
+2026-09-05T13:43:10.6925807Z shell: /usr/bin/bash -e {0}
+2026-09-05T13:43:10.6926057Z env:
+2026-09-05T13:43:10.6926261Z   CARGO_TERM_COLOR: always
+2026-09-05T13:43:10.6926505Z   RUSTUP_TOOLCHAIN: 1.97.1
+2026-09-05T13:43:10.6926732Z   CACHE_ON_FAILURE: false
+2026-09-05T13:43:10.6926958Z   CARGO_INCREMENTAL: 0
+2026-09-05T13:43:10.6927168Z ##[endgroup]
+2026-09-05T13:43:19.2903426Z directed fault unexpectedly passed: mutant-population
+2026-09-05T13:43:19.4652806Z directed fault unexpectedly passed: isa-build-late
+2026-09-05T13:43:19.4653707Z workspace production counter-mutants rejected by same assertions (status 97)
+2026-09-05T13:43:19.5763922Z graph suffix-stripping counter-mutant rejected by grammar assertion (status 97)
+2026-09-05T13:43:19.8178906Z valid partial output
+2026-09-05T13:43:19.8179474Z gate policy failure: mutant search failed (rg exit 9)
+2026-09-05T13:43:19.8229471Z valid partial output
+2026-09-05T13:43:19.8229999Z gate policy failure: mutant filter errored (rg exit 9)
+2026-09-05T13:43:19.8288687Z 2
+2026-09-05T13:43:19.8289165Z gate policy failure: mutant count errored (wc exit 6)
+2026-09-05T13:43:19.8357967Z counter-mutant controls exercised: collect required filter count plain
+2026-09-05T13:43:19.8603516Z counter-mutant rejected: find (status 1)
+2026-09-05T13:43:19.8663920Z counter-mutant rejected: sort (status 1)
+2026-09-05T13:43:19.8723892Z counter-mutant rejected: text (status 1)
+2026-09-05T13:43:19.8783858Z counter-mutant rejected: unique (status 1)
+2026-09-05T13:43:19.8843755Z counter-mutant rejected: join (status 1)
+2026-09-05T13:43:19.8920483Z counter-mutant rejected: target (status 1)
+2026-09-05T13:43:19.9221542Z gate library tests: ok
+2026-09-05T13:43:19.9245307Z workspace policy mutation tests: ok
+2026-09-05T13:43:20.0130973Z ##[group]Run bash scripts/check-session-policy.sh
+2026-09-05T13:43:20.0131397Z [36;1mbash scripts/check-session-policy.sh[0m
+2026-09-05T13:43:20.0131917Z [36;1mbash scripts/test-session-policy.sh[0m
+2026-09-05T13:43:20.0167817Z shell: /usr/bin/bash -e {0}
+2026-09-05T13:43:20.0168068Z env:
+2026-09-05T13:43:20.0168264Z   CARGO_TERM_COLOR: always
+2026-09-05T13:43:20.0168506Z   RUSTUP_TOOLCHAIN: 1.97.1
+2026-09-05T13:43:20.0168734Z   CACHE_ON_FAILURE: false
+2026-09-05T13:43:20.0168966Z   CARGO_INCREMENTAL: 0
+2026-09-05T13:43:20.0169177Z ##[endgroup]
+2026-09-05T13:43:20.0997910Z session policy: ok
+2026-09-05T13:43:23.6057521Z counter-mutant rejected: anchor assertion_status=97 (unexpected-success assertion)
+2026-09-05T13:43:23.6813505Z counter-mutant rejected: find assertion_status=97 (unexpected-success assertion)
+2026-09-05T13:43:23.7528254Z counter-mutant rejected: sort assertion_status=97 (unexpected-success assertion)
+2026-09-05T13:43:23.8236600Z counter-mutant rejected: allowlist assertion_status=97 (unexpected-success assertion)
+2026-09-05T13:43:23.9053179Z counter-mutant rejected: retired assertion_status=97 (unexpected-success assertion)
+2026-09-05T13:43:23.9054163Z session policy fixture, diagnostic, and counter-mutant checks: PASS
+2026-09-05T13:43:23.9696949Z ##[group]Run bash scripts/check-env-vocabulary.sh
+2026-09-05T13:43:23.9697839Z [36;1mbash scripts/check-env-vocabulary.sh[0m
+2026-09-05T13:43:23.9698603Z [36;1mbash scripts/test-env-vocabulary.sh[0m
+2026-09-05T13:43:23.9750278Z shell: /usr/bin/bash -e {0}
+2026-09-05T13:43:23.9751047Z env:
+2026-09-05T13:43:23.9751535Z   CARGO_TERM_COLOR: always
+2026-09-05T13:43:23.9752152Z   RUSTUP_TOOLCHAIN: 1.97.1
+2026-09-05T13:43:23.9752925Z   CACHE_ON_FAILURE: false
+2026-09-05T13:43:23.9753580Z   CARGO_INCREMENTAL: 0
+2026-09-05T13:43:23.9754256Z ##[endgroup]
+2026-09-05T13:43:27.5687923Z env vocabulary: ok (99 names, one MISO_ENGINE_ prefix)
+2026-09-05T13:43:34.0867555Z Git listing assertion: mode=error checker_status=1 partial_required=none
+2026-09-05T13:43:34.1017686Z Git listing assertion: mode=full checker_status=1 partial_required=scripts/check-env-vocabulary.sh
+2026-09-05T13:44:07.8868334Z Git listing mutant assertion: mode=full assertion_status=86 outcome=named-unexpected-success
+2026-09-05T13:44:09.1718186Z env vocabulary mutations: ok
+2026-09-05T13:44:09.3253785Z ##[group]Run bash scripts/check-bench-policy.sh
+2026-09-05T13:44:09.3254405Z [36;1mbash scripts/check-bench-policy.sh[0m
+2026-09-05T13:44:09.3270424Z [36;1mbash scripts/test-bench-policy.sh[0m
+2026-09-05T13:44:09.3305817Z shell: /usr/bin/bash -e {0}
+2026-09-05T13:44:09.3306166Z env:
+2026-09-05T13:44:09.3306547Z   CARGO_TERM_COLOR: always
+2026-09-05T13:44:09.3306889Z   RUSTUP_TOOLCHAIN: 1.97.1
+2026-09-05T13:44:09.3307236Z   CACHE_ON_FAILURE: false
+2026-09-05T13:44:09.3307624Z   CARGO_INCREMENTAL: 0
+2026-09-05T13:44:09.3307940Z ##[endgroup]
+2026-09-05T13:44:09.4701749Z bench policy: ok (1 allocator, 1 escaper, 1 percentile, 1 digest sink, 6 unsafe owners, 3 subjects on the shared timer)
+2026-09-05T13:44:11.9325227Z bench policy selected grep evidence: escaper-candidate-grep-error producer-status=0 lines=3
+2026-09-05T13:44:11.9326290Z payload:
+2026-09-05T13:44:11.9326525Z tools/bench-support/src/json.rs
+2026-09-05T13:44:11.9326978Z tools/bench/src/builtins.rs
+2026-09-05T13:44:11.9327636Z tools/bench/src/effect_interchange.rs
+2026-09-05T13:44:11.9328117Z replay:
+2026-09-05T13:44:11.9328452Z tools/bench-support/src/json.rs
+2026-09-05T13:44:11.9328897Z tools/bench/src/builtins.rs
+2026-09-05T13:44:11.9329318Z tools/bench/src/effect_interchange.rs
+2026-09-05T13:44:11.9329773Z diagnostic-output:
+2026-09-05T13:44:11.9330139Z tools/bench-support/src/json.rs
+2026-09-05T13:44:11.9330554Z tools/bench/src/builtins.rs
+2026-09-05T13:44:11.9330972Z tools/bench/src/effect_interchange.rs
+2026-09-05T13:44:11.9966122Z bench policy selected grep evidence: escaper-candidate-grep-error-reversed producer-status=0 lines=3
+2026-09-05T13:44:11.9967120Z payload:
+2026-09-05T13:44:11.9967488Z tools/bench-support/src/json.rs
+2026-09-05T13:44:11.9967934Z tools/bench/src/builtins.rs
+2026-09-05T13:44:11.9968373Z tools/bench/src/effect_interchange.rs
+2026-09-05T13:44:11.9969028Z replay:
+2026-09-05T13:44:11.9969246Z tools/bench/src/effect_interchange.rs
+2026-09-05T13:44:11.9969541Z tools/bench/src/builtins.rs
+2026-09-05T13:44:11.9969816Z tools/bench-support/src/json.rs
+2026-09-05T13:44:11.9970075Z diagnostic-output:
+2026-09-05T13:44:11.9970310Z tools/bench/src/effect_interchange.rs
+2026-09-05T13:44:11.9970593Z tools/bench/src/builtins.rs
+2026-09-05T13:44:11.9970841Z tools/bench-support/src/json.rs
+2026-09-05T13:44:12.2108479Z bench policy selected grep evidence: unsafe-owner-grep-error producer-status=0 lines=6
+2026-09-05T13:44:12.2109144Z payload:
+2026-09-05T13:44:12.2109370Z tools/wasm-console-guest/src/lib.rs
+2026-09-05T13:44:12.2109671Z tools/native-pcm-runner/src/lib.rs
+2026-09-05T13:44:12.2109946Z tools/wasm-gate-guest/src/lib.rs
+2026-09-05T13:44:12.2110233Z tools/bench-support/src/alloc.rs
+2026-09-05T13:44:12.2110518Z tools/bench/src/protocol.rs
+2026-09-05T13:44:12.2110779Z tools/audit/src/capi.rs
+2026-09-05T13:44:12.2111011Z replay:
+2026-09-05T13:44:12.2111260Z tools/wasm-console-guest/src/lib.rs
+2026-09-05T13:44:12.2111568Z tools/native-pcm-runner/src/lib.rs
+2026-09-05T13:44:12.2111878Z tools/wasm-gate-guest/src/lib.rs
+2026-09-05T13:44:12.2112175Z tools/bench-support/src/alloc.rs
+2026-09-05T13:44:12.2112460Z tools/bench/src/protocol.rs
+2026-09-05T13:44:12.2112737Z tools/audit/src/capi.rs
+2026-09-05T13:44:12.2112985Z diagnostic-output:
+2026-09-05T13:44:12.2113234Z tools/wasm-console-guest/src/lib.rs
+2026-09-05T13:44:12.2113541Z tools/native-pcm-runner/src/lib.rs
+2026-09-05T13:44:12.2113840Z tools/wasm-gate-guest/src/lib.rs
+2026-09-05T13:44:12.2114132Z tools/bench-support/src/alloc.rs
+2026-09-05T13:44:12.2114415Z tools/bench/src/protocol.rs
+2026-09-05T13:44:12.2114676Z tools/audit/src/capi.rs
+2026-09-05T13:44:12.3173964Z bench policy selected grep evidence: unsafe-owner-grep-error-reversed producer-status=0 lines=6
+2026-09-05T13:44:12.3174747Z payload:
+2026-09-05T13:44:12.3175374Z tools/wasm-console-guest/src/lib.rs
+2026-09-05T13:44:12.3175728Z tools/native-pcm-runner/src/lib.rs
+2026-09-05T13:44:12.3176052Z tools/wasm-gate-guest/src/lib.rs
+2026-09-05T13:44:12.3176334Z tools/bench-support/src/alloc.rs
+2026-09-05T13:44:12.3176867Z tools/bench/src/protocol.rs
+2026-09-05T13:44:12.3177141Z tools/audit/src/capi.rs
+2026-09-05T13:44:12.3177363Z replay:
+2026-09-05T13:44:12.3177559Z tools/audit/src/capi.rs
+2026-09-05T13:44:12.3177808Z tools/bench/src/protocol.rs
+2026-09-05T13:44:12.3178066Z tools/bench-support/src/alloc.rs
+2026-09-05T13:44:12.3178338Z tools/wasm-gate-guest/src/lib.rs
+2026-09-05T13:44:12.3178613Z tools/native-pcm-runner/src/lib.rs
+2026-09-05T13:44:12.3178895Z tools/wasm-console-guest/src/lib.rs
+2026-09-05T13:44:12.3179170Z diagnostic-output:
+2026-09-05T13:44:12.3179387Z tools/audit/src/capi.rs
+2026-09-05T13:44:12.3179616Z tools/bench/src/protocol.rs
+2026-09-05T13:44:12.3179871Z tools/bench-support/src/alloc.rs
+2026-09-05T13:44:12.3180134Z tools/wasm-gate-guest/src/lib.rs
+2026-09-05T13:44:12.3180399Z tools/native-pcm-runner/src/lib.rs
+2026-09-05T13:44:12.3180683Z tools/wasm-console-guest/src/lib.rs
+2026-09-05T13:44:12.5291960Z bench policy selected grep evidence: environment-reader-grep-error producer-status=0 lines=2
+2026-09-05T13:44:12.5292829Z payload:
+2026-09-05T13:44:12.5293041Z tools/audit/src/main.rs
+2026-09-05T13:44:12.5293278Z tools/bench/src/main.rs
+2026-09-05T13:44:12.5293485Z replay:
+2026-09-05T13:44:12.5293668Z tools/audit/src/main.rs
+2026-09-05T13:44:12.5293883Z tools/bench/src/main.rs
+2026-09-05T13:44:12.5294090Z diagnostic-output:
+2026-09-05T13:44:12.5294296Z tools/audit/src/main.rs
+2026-09-05T13:44:12.5294501Z tools/bench/src/main.rs
+2026-09-05T13:44:12.6433239Z bench policy selected grep evidence: environment-reader-grep-error-reversed producer-status=0 lines=2
+2026-09-05T13:44:12.6434127Z payload:
+2026-09-05T13:44:12.6434333Z tools/audit/src/main.rs
+2026-09-05T13:44:12.6434564Z tools/bench/src/main.rs
+2026-09-05T13:44:12.6434786Z replay:
+2026-09-05T13:44:12.6435278Z tools/bench/src/main.rs
+2026-09-05T13:44:12.6435543Z tools/audit/src/main.rs
+2026-09-05T13:44:12.6436025Z diagnostic-output:
+2026-09-05T13:44:12.6436250Z tools/bench/src/main.rs
+2026-09-05T13:44:12.6436478Z tools/audit/src/main.rs
+2026-09-05T13:44:14.7537592Z bench policy mutations: ok
+2026-09-05T13:44:15.0241420Z ##[group]Run bash scripts/check-console-benchmark-fixture.sh
+2026-09-05T13:44:15.0241903Z [36;1mbash scripts/check-console-benchmark-fixture.sh[0m
+2026-09-05T13:44:15.0242295Z [36;1mbash scripts/check-rack-benchmark-fixture.sh[0m
+2026-09-05T13:44:15.0277045Z shell: /usr/bin/bash -e {0}
+2026-09-05T13:44:15.0277306Z env:
+2026-09-05T13:44:15.0277512Z   CARGO_TERM_COLOR: always
+2026-09-05T13:44:15.0277757Z   RUSTUP_TOOLCHAIN: 1.97.1
+2026-09-05T13:44:15.0277984Z   CACHE_ON_FAILURE: false
+2026-09-05T13:44:15.0278216Z   CARGO_INCREMENTAL: 0
+2026-09-05T13:44:15.0278435Z ##[endgroup]
+2026-09-05T13:44:15.0621984Z console fixture: ok (64 tracks, 8 full banks, EQ + compressor strip, 13 distinct trims)
+2026-09-05T13:44:15.0936093Z ##[group]Run bash scripts/test-builtins-fixtures.sh
+2026-09-05T13:44:15.0936537Z [36;1mbash scripts/test-builtins-fixtures.sh[0m
+2026-09-05T13:44:15.0971919Z shell: /usr/bin/bash -e {0}
+2026-09-05T13:44:15.0972171Z env:
+2026-09-05T13:44:15.0972372Z   CARGO_TERM_COLOR: always
+2026-09-05T13:44:15.0972613Z   RUSTUP_TOOLCHAIN: 1.97.1
+2026-09-05T13:44:15.0972839Z   CACHE_ON_FAILURE: false
+2026-09-05T13:44:15.0973059Z   CARGO_INCREMENTAL: 0
+2026-09-05T13:44:15.0973268Z ##[endgroup]
+2026-09-05T13:44:15.7266497Z builtins fixture mutations: ok
+2026-09-05T13:44:15.7388746Z ##[group]Run bash scripts/test-wasm-console-benchmark.sh
+2026-09-05T13:44:15.7389196Z [36;1mbash scripts/test-wasm-console-benchmark.sh[0m
+2026-09-05T13:44:15.7423888Z shell: /usr/bin/bash -e {0}
+2026-09-05T13:44:15.7424143Z env:
+2026-09-05T13:44:15.7424339Z   CARGO_TERM_COLOR: always
+2026-09-05T13:44:15.7424580Z   RUSTUP_TOOLCHAIN: 1.97.1
+2026-09-05T13:44:15.7424805Z   CACHE_ON_FAILURE: false
+2026-09-05T13:44:15.7425319Z   CARGO_INCREMENTAL: 0
+2026-09-05T13:44:15.7425535Z ##[endgroup]
+2026-09-05T13:44:16.7938125Z wasm console benchmark validators: PASS (real runtime/timing invocations: 0/0)
+2026-09-05T13:44:16.7977301Z ##[group]Run bash scripts/check-bench-preconditions.sh
+2026-09-05T13:44:16.7977758Z [36;1mbash scripts/check-bench-preconditions.sh[0m
+2026-09-05T13:44:16.7978116Z [36;1mbash scripts/test-console-benchmark.sh[0m
+2026-09-05T13:44:16.7978466Z [36;1mbash scripts/test-rack-benchmark.sh[0m
+2026-09-05T13:44:16.7978797Z [36;1mbash scripts/test-wasm-kernel-timing.sh[0m
+2026-09-05T13:44:16.8016557Z shell: /usr/bin/bash -e {0}
+2026-09-05T13:44:16.8016804Z env:
+2026-09-05T13:44:16.8017002Z   CARGO_TERM_COLOR: always
+2026-09-05T13:44:16.8017354Z   RUSTUP_TOOLCHAIN: 1.97.1
+2026-09-05T13:44:16.8017644Z   CACHE_ON_FAILURE: false
+2026-09-05T13:44:16.8017865Z   CARGO_INCREMENTAL: 0
+2026-09-05T13:44:16.8018077Z ##[endgroup]
+2026-09-05T13:44:16.8737975Z bench preconditions: ok (loadavg ceiling 0.50, cooldown 60s, sibling busy ceiling 5%)
+2026-09-05T13:44:42.5339394Z console benchmark validators: PASS (real runner/workload/timing invocations: 0/0/0)
+2026-09-05T13:44:44.6669670Z rack benchmark validators/lifecycle: PASS (audio workload launches: 0)
+2026-09-05T13:44:44.9243228Z wasm kernel timing validators: PASS (real runtime/timing invocations: 0/0)
+2026-09-05T13:44:44.9276551Z ##[group]Run bash scripts/check-host-core-policy.sh
+2026-09-05T13:44:44.9276975Z [36;1mbash scripts/check-host-core-policy.sh[0m
+2026-09-05T13:44:44.9277317Z [36;1mbash scripts/test-host-core-policy.sh[0m
+2026-09-05T13:44:44.9312668Z shell: /usr/bin/bash -e {0}
+2026-09-05T13:44:44.9312919Z env:
+2026-09-05T13:44:44.9313112Z   CARGO_TERM_COLOR: always
+2026-09-05T13:44:44.9313357Z   RUSTUP_TOOLCHAIN: 1.97.1
+2026-09-05T13:44:44.9313587Z   CACHE_ON_FAILURE: false
+2026-09-05T13:44:44.9313814Z   CARGO_INCREMENTAL: 0
+2026-09-05T13:44:44.9314026Z ##[endgroup]
+2026-09-05T13:44:44.9907467Z host-core policy: ok
+2026-09-05T13:44:45.6726603Z host-core policy mutation tests: ok
+2026-09-05T13:44:45.6878956Z ##[group]Run bash scripts/check-protocol-control-policy.sh
+2026-09-05T13:44:45.6879701Z [36;1mbash scripts/check-protocol-control-policy.sh[0m
+2026-09-05T13:44:45.6880086Z [36;1mbash scripts/test-protocol-control-policy.sh[0m
+2026-09-05T13:44:45.6915542Z shell: /usr/bin/bash -e {0}
+2026-09-05T13:44:45.6915802Z env:
+2026-09-05T13:44:45.6915995Z   CARGO_TERM_COLOR: always
+2026-09-05T13:44:45.6916235Z   RUSTUP_TOOLCHAIN: 1.97.1
+2026-09-05T13:44:45.6916462Z   CACHE_ON_FAILURE: false
+2026-09-05T13:44:45.6916718Z   CARGO_INCREMENTAL: 0
+2026-09-05T13:44:45.6916938Z ##[endgroup]
+2026-09-05T13:44:45.7215555Z protocol control policy: ok
+2026-09-05T13:44:45.9407301Z protocol control policy mutation tests: ok
+2026-09-05T13:44:45.9476021Z ##[group]Run bash scripts/check-realtime-policy.sh
+2026-09-05T13:44:45.9476459Z [36;1mbash scripts/check-realtime-policy.sh[0m
+2026-09-05T13:44:45.9476812Z [36;1mbash scripts/test-realtime-policy.sh[0m
+2026-09-05T13:44:45.9477176Z [36;1mbash scripts/check-realtime-audit-leak.sh[0m
+2026-09-05T13:44:45.9477537Z [36;1mbash scripts/test-realtime-audit-leak.sh[0m
+2026-09-05T13:44:45.9477903Z [36;1mbash scripts/check-artifact-evidence-leak.sh[0m
+2026-09-05T13:44:45.9478271Z [36;1mbash scripts/test-artifact-evidence-leak.sh[0m
+2026-09-05T13:44:45.9514046Z shell: /usr/bin/bash -e {0}
+2026-09-05T13:44:45.9514302Z env:
+2026-09-05T13:44:45.9514495Z   CARGO_TERM_COLOR: always
+2026-09-05T13:44:45.9514747Z   RUSTUP_TOOLCHAIN: 1.97.1
+2026-09-05T13:44:45.9515351Z   CACHE_ON_FAILURE: false
+2026-09-05T13:44:45.9515610Z   CARGO_INCREMENTAL: 0
+2026-09-05T13:44:45.9515840Z ##[endgroup]
+2026-09-05T13:44:45.9785110Z crates/protocol/tests/delivery_ownership.rs:25:unsafe impl GlobalAlloc for CountingAllocator {
+2026-09-05T13:44:45.9786202Z crates/protocol/tests/delivery_ownership.rs:26:    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+2026-09-05T13:44:45.9787419Z crates/protocol/tests/delivery_ownership.rs:28:        let pointer = unsafe { System.alloc(layout) };
+2026-09-05T13:44:45.9788743Z crates/protocol/tests/delivery_ownership.rs:40:    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+2026-09-05T13:44:45.9790133Z crates/protocol/tests/delivery_ownership.rs:48:        unsafe { System.dealloc(pointer, layout) }
+2026-09-05T13:44:45.9790820Z realtime policy failure: unsafe code exists outside the issue-approved ownership/audit files
+2026-09-05T13:44:45.9801124Z ##[error]Process completed with exit code 1.
+2026-09-05T13:44:46.0008295Z Node 20 is being deprecated. This workflow is running with Node 24 by default. If you need to temporarily use Node 20, you can set the ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION=true environment variable. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+2026-09-05T13:44:46.0009617Z Post job cleanup.
+2026-09-05T13:44:46.0870043Z [command]/usr/bin/git version
+2026-09-05T13:44:46.0914355Z git version 2.55.0
+2026-09-05T13:44:46.0960736Z Temporarily overriding HOME='/home/runner/work/_temp/32c16bd8-284d-4410-a594-f5e2ebcd7467' before making global git config changes
+2026-09-05T13:44:46.0962380Z Adding repository directory to the temporary git global config as a safe directory
+2026-09-05T13:44:46.0967671Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/engine/engine
+2026-09-05T13:44:46.1007674Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-09-05T13:44:46.1043728Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-09-05T13:44:46.1290776Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-09-05T13:44:46.1321366Z http.https://github.com/.extraheader
+2026-09-05T13:44:46.1335826Z [command]/usr/bin/git config --local --unset-all http.https://github.com/.extraheader
+2026-09-05T13:44:46.1377706Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-09-05T13:44:46.1812985Z Cleaning up orphan processes
+2026-09-05T13:44:46.2101683Z ##[warning]Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/

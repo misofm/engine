@@ -1,0 +1,35 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
+     Running unittests src/lib.rs (/tmp/engine-443-sol-target/debug/deps/builtins_compiler-5ff1d293b1f7fb6b)
+
+running 1 test
+
+thread 'tests::actual_scalar_graph_queues_fuse_and_fall_back_against_separate_owners' (3835984) panicked at crates/builtins-compiler/src/lib.rs:2425:23:
+internal error: entered unreachable code: sealed wrapper prevalidated its complete graph bindings
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/std/src/panicking.rs:689:5
+   1: core::panicking::panic_fmt
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/panicking.rs:80:14
+   2: <builtins_compiler::PreparedBuiltinsGraphArtifact<()>>::into_bound
+             at ./src/lib.rs:2425:23
+   3: builtins_compiler::tests::prepared_pair_graph_fixture
+             at ./src/lib.rs:5250:14
+   4: builtins_compiler::tests::actual_scalar_graph_queues_fuse_and_fall_back_against_separate_owners
+             at ./src/lib.rs:5318:26
+   5: builtins_compiler::tests::actual_scalar_graph_queues_fuse_and_fall_back_against_separate_owners::{closure#0}
+             at ./src/lib.rs:5311:79
+   6: <builtins_compiler::tests::actual_scalar_graph_queues_fuse_and_fall_back_against_separate_owners::{closure#0} as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/ops/function.rs:250:5
+   7: <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+test tests::actual_scalar_graph_queues_fuse_and_fall_back_against_separate_owners ... FAILED
+
+failures:
+
+failures:
+    tests::actual_scalar_graph_queues_fuse_and_fall_back_against_separate_owners
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 31 filtered out; finished in 0.02s
+
+error: test failed, to rerun pass `-p builtins-compiler --lib`

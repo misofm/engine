@@ -1,0 +1,57 @@
+   Compiling engine v0.1.0 (/home/bl/misofm/engine-443-plan/crates/engine)
+   Compiling lexical-util v1.0.7
+   Compiling effect-runtime v0.1.0 (/home/bl/misofm/engine-443-plan/crates/effect-runtime)
+   Compiling once_cell v1.21.4
+   Compiling smallvec v1.15.2
+   Compiling decoded-char v0.1.1
+   Compiling locspan v0.8.2
+   Compiling utf8-decode v1.0.1
+   Compiling libc v0.2.189
+   Compiling smallstr v0.3.1
+   Compiling effect-contract v0.1.0 (/home/bl/misofm/engine-443-plan/crates/effect-contract)
+   Compiling lexical-write-integer v1.0.6
+   Compiling lexical-parse-integer v1.0.6
+   Compiling lexical-parse-float v1.0.6
+   Compiling getrandom v0.2.17
+   Compiling lexical-write-float v1.0.6
+   Compiling ahash v0.7.8
+   Compiling rack v0.1.0 (/home/bl/misofm/engine-443-plan/crates/rack)
+   Compiling delay v0.1.0 (/home/bl/misofm/engine-443-plan/crates/delay)
+   Compiling builtins v0.1.0 (/home/bl/misofm/engine-443-plan/crates/builtins)
+   Compiling multiband-compressor v0.1.0 (/home/bl/misofm/engine-443-plan/crates/multiband-compressor)
+   Compiling true-peak-limiter v0.1.0 (/home/bl/misofm/engine-443-plan/crates/true-peak-limiter)
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-443-plan/crates/compressor)
+   Compiling gate-expander v0.1.0 (/home/bl/misofm/engine-443-plan/crates/gate-expander)
+   Compiling transient-shaper v0.1.0 (/home/bl/misofm/engine-443-plan/crates/transient-shaper)
+   Compiling soft-clip v0.1.0 (/home/bl/misofm/engine-443-plan/crates/soft-clip)
+   Compiling parametric-eq v0.1.0 (/home/bl/misofm/engine-443-plan/crates/parametric-eq)
+   Compiling hashbrown v0.12.3
+   Compiling lexical-core v1.0.6
+   Compiling lexical v7.0.5
+   Compiling graph v0.1.0 (/home/bl/misofm/engine-443-plan/crates/graph)
+   Compiling rack-compiler v0.1.0 (/home/bl/misofm/engine-443-plan/crates/rack-compiler)
+   Compiling json-number v0.4.10
+   Compiling indexmap v1.9.3
+   Compiling json-syntax v0.12.5
+   Compiling session v0.1.0 (/home/bl/misofm/engine-443-plan/crates/session)
+   Compiling effect-package v0.1.0 (/home/bl/misofm/engine-443-plan/crates/effect-package)
+   Compiling builtins-compiler v0.1.0 (/home/bl/misofm/engine-443-plan/crates/builtins-compiler)
+   Compiling source v0.1.0 (/home/bl/misofm/engine-443-plan/crates/source)
+   Compiling effect-compiler v0.1.0 (/home/bl/misofm/engine-443-plan/crates/effect-compiler)
+   Compiling graph-compiler v0.1.0 (/home/bl/misofm/engine-443-plan/crates/graph-compiler)
+   Compiling host-core v0.1.0 (/home/bl/misofm/engine-443-plan/crates/host-core)
+   Compiling host-web v0.1.0 (/home/bl/misofm/engine-443-plan/hosts/host-web)
+    Finished `release` profile [optimized + debuginfo] target(s) in 35.19s
+     Running unittests src/lib.rs (/tmp/engine-443-sol-target/release/deps/host_web-19e6c713555b40f2)
+
+running 1 test
+test tests::acknowledged_pair_render_records_the_same_live_dispatch ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 63 filtered out; finished in 0.00s
+
+     Running tests/boot_transient_budget.rs (/tmp/engine-443-sol-target/release/deps/boot_transient_budget-72ceba4142a52d81)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+

@@ -19,6 +19,8 @@
 //! checks at all.
 #![allow(missing_docs)]
 
+#[cfg(test)]
+use core::cell::Cell;
 use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 
 use engine::{
@@ -823,6 +825,11 @@ fn lane_read<L: Lane>(value: L) -> [f32; MAX_BANK_LANES] {
 /// Widest bank this crate builds. `BankWidth` is four or eight (D4).
 const MAX_BANK_LANES: usize = 8;
 
+#[cfg(test)]
+thread_local! {
+    static CHANNEL_SYMMETRY_PREDICATE_CALLS: Cell<usize> = const { Cell::new(0) };
+}
+
 /// The damping of every builtin section: Butterworth, `k = 1 / Q = sqrt(2)`, rounded once.
 const BUTTERWORTH_K: f32 = core::f64::consts::SQRT_2 as f32;
 
@@ -1030,9 +1037,8 @@ impl<L: Lane> InputStage<L> {
 
     /// Retakes every lane's channel-symmetry comparison into [`InputStage::symmetry`].
     ///
-    /// Called from each of the five writers of a compared word, never from the dispatch: this is
-    /// the walk the cache exists to keep off the per-block path, so it runs on a retarget, on a
-    /// ramping block, and on a reset, and on no other block at all.
+    /// Called from preparation, both ramping process arms, and reset. The live retarget writer
+    /// updates only its addressed lane below; neither path runs from dispatch.
     fn refresh_channel_symmetry(&mut self) {
         let mut symmetry = 0_u8;
         for lane in 0..MAX_BANK_LANES {
@@ -1041,6 +1047,16 @@ impl<L: Lane> InputStage<L> {
             }
         }
         self.symmetry = symmetry;
+    }
+
+    /// Updates only the addressed lane after a live trim/polarity retarget.
+    fn refresh_channel_symmetry_lane(&mut self, lane: usize) {
+        let bit = 1_u8 << lane;
+        if self.compute_lane_channel_symmetry(lane) {
+            self.symmetry |= bit;
+        } else {
+            self.symmetry &= !bit;
+        }
     }
 
     /// Largest ramp countdown that is exact in `f32`.
@@ -1092,7 +1108,7 @@ impl<L: Lane> InputStage<L> {
                 self.ramping = true;
             }
         }
-        self.refresh_channel_symmetry();
+        self.refresh_channel_symmetry_lane(lane);
     }
 
     /// Retargets one lane's trim in decibels, keeping its polarity.
@@ -1631,9 +1647,11 @@ impl<L: Lane> InputStage<L> {
     /// * `members`, `active`, `lifetime_recovered` -- cohort shape and counters, not track
     ///   parameters. A lane's witness must not change because the cohort grew.
     ///
-    /// Taken only by [`InputStage::refresh_channel_symmetry`] and by the reader's assertion:
-    /// it is the definition, not the per-block path.
+    /// Taken by the full refresh, the addressed-lane retarget update, and the reader's assertion:
+    /// it is the definition, never the per-block path.
     fn compute_lane_channel_symmetry(&self, lane: usize) -> bool {
+        #[cfg(test)]
+        CHANNEL_SYMMETRY_PREDICATE_CALLS.with(|calls| calls.set(calls.get() + 1));
         if lane >= self.members || lane >= L::WIDTH {
             return false;
         }
@@ -1849,6 +1867,16 @@ impl<L: Lane> FaderRampStage<L> {
             *flag = f32::from(u8::from(self.muted[channel][lane]));
         }
         self.ramp[channel].mute = mask_from_flags::<L>(&flags[..L::WIDTH]);
+    }
+
+    #[inline(always)]
+    fn is_settled(&self) -> bool {
+        self.remaining.iter().all(|channel| {
+            channel
+                .iter()
+                .take(L::WIDTH)
+                .all(|&remaining| remaining == 0)
+        })
     }
 
     /// Retargets one lane of one channel. D11: one division per event, never per sample.
@@ -2937,6 +2965,60 @@ impl BuiltinFaderBank {
         BuiltinProcessReport::default()
     }
 
+    /// Runs the settled fader and matrix stages in one traversal when their shapes and ramps
+    /// agree. Returns false without touching either stage when a ramp is still active.
+    pub fn try_process_settled_with_matrix(
+        &mut self,
+        matrix: &mut BuiltinMatrixBank,
+        left: &mut [f32],
+        right: &mut [f32],
+        frames: u32,
+    ) -> bool {
+        if self.backend != matrix.backend
+            || self.width != matrix.width
+            || self.members != matrix.members
+            || self.remaining_nonzero()
+            || matrix.remaining_nonzero()
+        {
+            return false;
+        }
+        match (&self.stage, &matrix.stage) {
+            (FaderStageKernel::Simd4(fader), MatrixStageKernel::Simd4(matrix)) => {
+                fader_matrix_block::<Simd4>(
+                    left,
+                    right,
+                    frames as usize,
+                    fader.ramp[0].current,
+                    fader.ramp[0].mute,
+                    fader.ramp[1].current,
+                    fader.ramp[1].mute,
+                    &matrix.coef,
+                );
+            }
+            (FaderStageKernel::Simd8(fader), MatrixStageKernel::Simd8(matrix)) => {
+                fader_matrix_block::<Simd8>(
+                    left,
+                    right,
+                    frames as usize,
+                    fader.ramp[0].current,
+                    fader.ramp[0].mute,
+                    fader.ramp[1].current,
+                    fader.ramp[1].mute,
+                    &matrix.coef,
+                );
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    fn remaining_nonzero(&self) -> bool {
+        match &self.stage {
+            FaderStageKernel::Simd4(stage) => stage.remaining.iter().flatten().any(|v| *v != 0),
+            FaderStageKernel::Simd8(stage) => stage.remaining.iter().flatten().any(|v| *v != 0),
+        }
+    }
+
     /// Snaps every lane to its target and cancels any ramp in flight.
     pub fn reset(&mut self) {
         match &mut self.stage {
@@ -3068,6 +3150,13 @@ impl BuiltinMatrixBank {
             MatrixStageKernel::Simd8(stage) => stage.process(left, right, frames),
         }
         BuiltinProcessReport::default()
+    }
+
+    fn remaining_nonzero(&self) -> bool {
+        match &self.stage {
+            MatrixStageKernel::Simd4(stage) => stage.remaining.iter().any(|v| *v != 0),
+            MatrixStageKernel::Simd8(stage) => stage.remaining.iter().any(|v| *v != 0),
+        }
     }
 
     /// Snaps every lane to its target and cancels any ramp in flight.
@@ -3205,6 +3294,32 @@ impl FaderMuteRampBuiltins {
         let frames = block.left.len();
         self.stage.process(block.left, block.right, frames);
         BuiltinProcessReport::default()
+    }
+
+    /// Runs the settled fader and matrix stages with the established fused scalar kernel.
+    /// Returns `false` when either stage is ramping; callers must then run the original two-stage
+    /// arithmetic for the whole block.
+    pub fn process_fader_matrix(
+        &mut self,
+        matrix: &mut MatrixBuiltins,
+        block: &mut DualMonoBlock<'_>,
+    ) -> bool {
+        if !self.stage.is_settled() || !matrix.stage.is_settled() {
+            return false;
+        }
+        let DualMonoBlock { left, right, .. } = block;
+        let frames = left.len();
+        fader_matrix_block::<f32>(
+            left,
+            right,
+            frames,
+            self.stage.ramp[0].current,
+            self.stage.ramp[0].mute,
+            self.stage.ramp[1].current,
+            self.stage.ramp[1].mute,
+            &matrix.stage.coef,
+        );
+        true
     }
 
     /// Snaps both lanes to their targets and cancels any ramp in flight.
@@ -3748,8 +3863,9 @@ fn zero(value: f32) -> f32 {
 #[doc(hidden)]
 pub mod test_support {
     use super::{
-        BuiltinChain, BuiltinInputBank, BuiltinParameterError, InputBuiltins, InputStageKernel,
-        Matrix2x2, MatrixBuiltins, SvfSection,
+        BuiltinChain, BuiltinFaderBank, BuiltinInputBank, BuiltinMatrixBank, BuiltinParameterError,
+        FaderMuteRampBuiltins, FaderStageKernel, InputBuiltins, InputStageKernel, Matrix2x2,
+        MatrixBuiltins, MatrixStageKernel, SvfSection,
     };
 
     /// The seven words `[c1, a2, a3, k, m0, m1, m2]` of one designed section.
@@ -3873,6 +3989,110 @@ pub mod test_support {
         matrix.stage.read_current()[0]
     }
 
+    /// Exact retained words for the live scalar fader owner.
+    #[must_use]
+    pub fn scalar_fader_words(fader: &FaderMuteRampBuiltins) -> [u32; 14] {
+        let stage = &fader.stage;
+        let mut out = [0; 14];
+        for channel in 0..2 {
+            let base = channel * 6;
+            out[base] = stage.ramp[channel].current.to_bits();
+            out[base + 1] = stage.ramp[channel].target.to_bits();
+            out[base + 2] = stage.ramp[channel].step.to_bits();
+            out[base + 3] = stage.ramp[channel].remaining.to_bits();
+            out[base + 4] = stage.remaining[channel][0];
+            out[base + 5] = stage.fader_gain[channel][0].to_bits();
+        }
+        out[12] = u32::from(stage.muted[0][0]);
+        out[13] = u32::from(stage.muted[1][0]);
+        out
+    }
+
+    /// Exact retained words for the live scalar matrix owner.
+    #[must_use]
+    pub fn scalar_matrix_words(matrix: &MatrixBuiltins) -> [u32; 15] {
+        let stage = &matrix.stage;
+        let current = stage.read_current()[0];
+        let target = stage.read_target()[0];
+        let mut out = [0; 15];
+        for (coefficient, (current, target)) in [
+            (current.ll, target.ll),
+            (current.lr, target.lr),
+            (current.rl, target.rl),
+            (current.rr, target.rr),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            out[coefficient] = current.to_bits();
+            out[4 + coefficient] = target.to_bits();
+            out[8 + coefficient] = stage.ramp.step[coefficient].to_bits();
+        }
+        out[12] = stage.ramp.remaining.to_bits();
+        out[13] = stage.remaining[0];
+        out[14] = stage.smoothing_samples[0];
+        out
+    }
+
+    /// Exact retained words for one fader-bank lane: per channel current/target/step/ramp word,
+    /// authoritative countdown and remembered gain, followed by both mute flags.
+    #[must_use]
+    pub fn fader_bank_lane_words(bank: &BuiltinFaderBank, lane: usize) -> [u32; 14] {
+        fn words<L: crate::Lane>(stage: &crate::FaderRampStage<L>, lane: usize) -> [u32; 14] {
+            let mut out = [0; 14];
+            for channel in 0..2 {
+                let base = channel * 6;
+                out[base] = crate::lane_read::<L>(stage.ramp[channel].current)[lane].to_bits();
+                out[base + 1] = crate::lane_read::<L>(stage.ramp[channel].target)[lane].to_bits();
+                out[base + 2] = crate::lane_read::<L>(stage.ramp[channel].step)[lane].to_bits();
+                out[base + 3] =
+                    crate::lane_read::<L>(stage.ramp[channel].remaining)[lane].to_bits();
+                out[base + 4] = stage.remaining[channel][lane];
+                out[base + 5] = stage.fader_gain[channel][lane].to_bits();
+            }
+            out[12] = u32::from(stage.muted[0][lane]);
+            out[13] = u32::from(stage.muted[1][lane]);
+            out
+        }
+        match &bank.stage {
+            FaderStageKernel::Simd4(stage) => words(stage, lane),
+            FaderStageKernel::Simd8(stage) => words(stage, lane),
+        }
+    }
+
+    /// Exact current/target/step/ramp/countdown words for one matrix-bank lane.
+    #[must_use]
+    pub fn matrix_bank_lane_words(bank: &BuiltinMatrixBank, lane: usize) -> [u32; 15] {
+        fn words<L: crate::Lane>(stage: &crate::MatrixStage<L>, lane: usize) -> [u32; 15] {
+            let current = stage.read_current();
+            let target = stage.read_target();
+            let step = stage.ramp.step.map(crate::lane_read::<L>);
+            let remaining = crate::lane_read::<L>(stage.ramp.remaining);
+            let mut out = [0; 15];
+            for (coefficient, (current, target)) in [
+                (current[lane].ll, target[lane].ll),
+                (current[lane].lr, target[lane].lr),
+                (current[lane].rl, target[lane].rl),
+                (current[lane].rr, target[lane].rr),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                out[coefficient] = current.to_bits();
+                out[4 + coefficient] = target.to_bits();
+                out[8 + coefficient] = step[coefficient][lane].to_bits();
+            }
+            out[12] = remaining[lane].to_bits();
+            out[13] = stage.remaining[lane];
+            out[14] = stage.smoothing_samples[lane];
+            out
+        }
+        match &bank.stage {
+            MatrixStageKernel::Simd4(stage) => words(stage, lane),
+            MatrixStageKernel::Simd8(stage) => words(stage, lane),
+        }
+    }
+
     /// The input section of a chain, for state injection.
     pub fn chain_input_mut(chain: &mut BuiltinChain) -> &mut InputBuiltins {
         &mut chain.input
@@ -3900,7 +4120,8 @@ pub mod test_support {
 mod tests {
     use super::{
         BuiltinChain, BuiltinLaneSelector, BuiltinParameters, BuiltinProcessReport,
-        BuiltinResetKind, ChannelParameters, DualMonoBlock, Matrix2x2, test_support,
+        BuiltinResetKind, CHANNEL_SYMMETRY_PREDICATE_CALLS, Cell, ChannelParameters, DualMonoBlock,
+        InputStage, Matrix2x2, Simd4, Simd8, prepare_sections, test_support,
     };
 
     fn process_reference(
@@ -3913,6 +4134,175 @@ mod tests {
         chain.process_fader_mute(DualMonoBlock::new(left, right, first_sample).unwrap());
         chain.process_matrix(DualMonoBlock::new(left, right, first_sample).unwrap());
         report
+    }
+
+    #[test]
+    fn lane_symmetry_retarget_updates_only_the_addressed_predicate() {
+        fn track(left_db: f32, right_db: f32) -> super::PreparedInputTrack {
+            let parameters = BuiltinParameters {
+                left: ChannelParameters {
+                    trim_db: left_db,
+                    ..ChannelParameters::default()
+                },
+                right: ChannelParameters {
+                    trim_db: right_db,
+                    ..ChannelParameters::default()
+                },
+                ..BuiltinParameters::default()
+            };
+            prepare_sections(48_000, parameters)
+                .unwrap()
+                .0
+                .stage
+                .lane_track(0)
+        }
+
+        let tracks = [
+            track(1.0, 0.0),
+            track(1.0, 3.0),
+            track(2.0, 2.0),
+            track(-4.0, 1.0),
+            track(5.0, 5.0),
+            track(7.0, -2.0),
+            track(-8.0, -8.0),
+            track(9.0, 4.0),
+        ];
+
+        enum Retarget {
+            Trim(BuiltinLaneSelector, f32, u32),
+            Polarity(BuiltinLaneSelector, bool, u32),
+        }
+
+        fn retarget_and_check<L: super::Lane>(
+            stage: &mut InputStage<L>,
+            lane: usize,
+            retarget: Retarget,
+        ) {
+            let before = stage.symmetry;
+            CHANNEL_SYMMETRY_PREDICATE_CALLS.with(|calls| calls.set(0));
+            match retarget {
+                Retarget::Trim(selector, gain, smoothing_samples) => {
+                    stage.set_trim_db(lane, selector, gain, smoothing_samples);
+                }
+                Retarget::Polarity(selector, inverted, smoothing_samples) => {
+                    stage.set_polarity_invert(lane, selector, inverted, smoothing_samples);
+                }
+            }
+
+            // Capture the setter's interval before the independent full-definition oracle below
+            // evaluates any predicates of its own. This named assertion is also the mutation
+            // control: restoring the old full refresh must fail here on a multi-member bank.
+            let setter_predicate_calls = CHANNEL_SYMMETRY_PREDICATE_CALLS.with(Cell::get);
+            assert_eq!(
+                setter_predicate_calls, 1,
+                "one retarget evaluates only the addressed lane"
+            );
+
+            let active_mask = if stage.members == u8::BITS as usize {
+                u8::MAX
+            } else {
+                (1_u8 << stage.members) - 1
+            };
+            let mut oracle = 0_u8;
+            for candidate in 0..stage.members {
+                if stage.compute_lane_channel_symmetry(candidate) {
+                    oracle |= 1 << candidate;
+                }
+            }
+            assert_eq!(stage.symmetry & active_mask, oracle);
+            assert_eq!(
+                stage.symmetry & !(1 << lane),
+                before & !(1 << lane),
+                "a retarget changed an unaddressed or padding bit"
+            );
+            assert_eq!(
+                stage.symmetry & !active_mask,
+                0,
+                "padding bits must stay clear"
+            );
+        }
+
+        macro_rules! check_width {
+            ($lane:ty, $members:expr, $addressed:expr, $different:expr) => {{
+                let mut stage = InputStage::<$lane>::new(&tracks[..$members]);
+                let addressed_bit = 1_u8 << $addressed;
+                let mut saw_false_to_true = false;
+                let mut saw_true_to_false = false;
+
+                macro_rules! operation {
+                    ($target:expr, $operation:expr) => {{
+                        let before = stage.symmetry;
+                        retarget_and_check(&mut stage, $target, $operation);
+                        saw_false_to_true |=
+                            before & (1 << $target) == 0 && stage.symmetry & (1 << $target) != 0;
+                        saw_true_to_false |=
+                            before & (1 << $target) != 0 && stage.symmetry & (1 << $target) == 0;
+                    }};
+                }
+
+                // Re-equalize, split, and re-equalize the same nonzero lane through the actual
+                // trim/polarity operations and all three selectors.
+                operation!(
+                    $addressed,
+                    Retarget::Trim(BuiltinLaneSelector::Right, super::db_gain(1.0).unwrap(), 0,)
+                );
+                operation!(
+                    $addressed,
+                    Retarget::Polarity(BuiltinLaneSelector::Left, true, 0)
+                );
+                operation!(
+                    $addressed,
+                    Retarget::Polarity(BuiltinLaneSelector::Left, false, 0)
+                );
+                operation!(
+                    $addressed,
+                    Retarget::Trim(BuiltinLaneSelector::Both, super::db_gain(2.0).unwrap(), 8,)
+                );
+
+                // Multi-member banks then retarget a different lane and return to the first one;
+                // the scalar case repeats its sole lane instead.
+                operation!(
+                    $different,
+                    Retarget::Trim(BuiltinLaneSelector::Right, super::db_gain(1.0).unwrap(), 0,)
+                );
+                operation!(
+                    $different,
+                    Retarget::Polarity(BuiltinLaneSelector::Right, true, 8)
+                );
+                operation!(
+                    $different,
+                    Retarget::Polarity(BuiltinLaneSelector::Both, false, 0)
+                );
+                operation!(
+                    $addressed,
+                    Retarget::Polarity(BuiltinLaneSelector::Both, false, 0)
+                );
+
+                assert!(
+                    saw_false_to_true,
+                    "members={}, addressed={}, mask={:#x} never became symmetric",
+                    $members, $addressed, stage.symmetry
+                );
+                assert!(
+                    saw_true_to_false,
+                    "members={}, addressed={}, mask={:#x} never became asymmetric",
+                    $members, $addressed, stage.symmetry
+                );
+                if $members > 1 {
+                    assert_ne!(
+                        addressed_bit,
+                        1_u8 << $different,
+                        "multi-member evidence must address different lanes"
+                    );
+                }
+            }};
+        }
+
+        check_width!(Simd4, 3, 1, 0);
+        check_width!(Simd4, 4, 1, 0);
+        check_width!(Simd8, 5, 1, 0);
+        check_width!(Simd8, 8, 1, 0);
+        check_width!(f32, 1, 0, 0);
     }
 
     fn assert_pair(

@@ -52,8 +52,8 @@ use lane::kernels::{mix2x2_block, ordered_accumulate_block, pdc_delay_block, sum
 use rack::{BankChain, BankMembers, BankPlaneViews, FoldCohort};
 
 use crate::{
-    GraphBindingBlock, GraphNodeObserverBinding, GraphObservationBlock, GraphPreparedEffect,
-    GraphRuntimeProcessor,
+    GraphBindingBlock, GraphEdgeId, GraphNodeObserverBinding, GraphObservationBlock,
+    GraphPreparedEffect, GraphRuntimeProcessor,
 };
 
 /// Lane type the block kernels are instantiated at to vectorise **over frames**.
@@ -1350,7 +1350,7 @@ use rack::{AoSoaScratch, BankBlock, BankSlot, BankStage, ConsoleEffectBankStage,
 
 use crate::{
     GraphNodeBinding, GraphNodeId, GraphPreparedBuiltinBank, GraphPreparedBuiltinBankProcessor,
-    GraphPreparedEffectBank, GraphSpec, PreparedRoute, RouteTransform,
+    GraphPreparedEffectBank, GraphSpec, PreparedRoute, RouteTransform, TrackStage,
     program::{ExecutionProgram, Op},
 };
 
@@ -1615,13 +1615,86 @@ impl RuntimeParts {
         let mut scratch = None;
         let mut active: Option<Box<[bool]>> = None;
         let mut stages = Vec::with_capacity(run.len());
-        for membership in run {
-            let (slot_scratch, slot_active, stage) = self.stage_for(*membership, members);
+        let mut index = 0;
+        while index < run.len() {
+            let pair = if index + 1 < run.len() {
+                match (run[index], run[index + 1]) {
+                    (Membership::Builtin(a), Membership::Builtin(b)) => {
+                        let left = self.builtin_banks[a].as_ref().expect("builtin owner");
+                        let right = self.builtin_banks[b].as_ref().expect("builtin owner");
+                        let same_tracks = left.members.len() == right.members.len()
+                            && left.members.iter().zip(right.members.iter()).all(|(left, right)| {
+                                matches!((left, right),
+                                    (GraphNodeId::TrackStage { track_id: left_id, stage: TrackStage::PostFader },
+                                     GraphNodeId::TrackStage { track_id: right_id, stage: TrackStage::PostMatrix })
+                                    if left_id == right_id)
+                            });
+                        same_tracks
+                            && left.backend == right.backend
+                            && left.scratch.width() == right.scratch.width()
+                            && left.scratch.quantum() == right.scratch.quantum()
+                    }
+                    _ => false,
+                }
+            } else {
+                false
+            };
+            if pair {
+                let a = match run[index] {
+                    Membership::Builtin(i) => self.builtin_banks[i].take().expect("builtin owner"),
+                    _ => unreachable!(),
+                };
+                let b = match run[index + 1] {
+                    Membership::Builtin(i) => self.builtin_banks[i].take().expect("builtin owner"),
+                    _ => unreachable!(),
+                };
+                let scratch_a = a.scratch;
+                let active_a = trailing_active_mask(members, scratch_a.width());
+                let factory = a.processor.pair_factory();
+                let (slot_scratch, slot_active, stage) = match factory {
+                    Some(factory) => match factory(a.processor, b.processor) {
+                        Ok(processor) => (
+                            scratch_a,
+                            active_a,
+                            Box::new(BuiltinStage(processor)) as Box<dyn BankStage>,
+                        ),
+                        Err((left, right)) => {
+                            if scratch.is_none() {
+                                scratch = Some(scratch_a);
+                                active = Some(active_a);
+                            }
+                            stages.push(Box::new(BuiltinStage(left)) as Box<dyn BankStage>);
+                            stages.push(Box::new(BuiltinStage(right)) as Box<dyn BankStage>);
+                            index += 2;
+                            continue;
+                        }
+                    },
+                    None => {
+                        if scratch.is_none() {
+                            scratch = Some(scratch_a);
+                            active = Some(active_a);
+                        }
+                        stages.push(Box::new(BuiltinStage(a.processor)) as Box<dyn BankStage>);
+                        stages.push(Box::new(BuiltinStage(b.processor)) as Box<dyn BankStage>);
+                        index += 2;
+                        continue;
+                    }
+                };
+                if scratch.is_none() {
+                    scratch = Some(slot_scratch);
+                    active = Some(slot_active);
+                }
+                stages.push(stage);
+                index += 2;
+                continue;
+            }
+            let (slot_scratch, slot_active, stage) = self.stage_for(run[index], members);
             if scratch.is_none() {
                 scratch = Some(slot_scratch);
                 active = Some(slot_active);
             }
             stages.push(stage);
+            index += 1;
         }
         bank_chain(
             scratch.expect("a unit has at least one slot"),
@@ -1700,6 +1773,21 @@ fn taps_by_op(program: &ExecutionProgram, spec: &GraphSpec) -> BTreeMap<u32, Vec
             .push(spec.nodes[tap.node as usize].id.clone());
     }
     by_op
+}
+
+/// The buffer-identity half of serialized scalar fader/matrix admission.
+///
+/// The composite receives one in-place block at the fader slot. It can preserve the later matrix
+/// op only when that op's reduction was already a self-copy: one undelayed input, the same input
+/// and output buffer as the fader, and the lowering's own `in_place` witness.
+fn scalar_pair_is_in_place(program: &ExecutionProgram, fader: usize, matrix: usize) -> bool {
+    let fader = &program.ops[fader];
+    let matrix = &program.ops[matrix];
+    let inputs = program.inputs_of(matrix);
+    matches!(inputs, [input] if input.delay.is_none()
+        && input.buffer == fader.output
+        && matrix.output == fader.output
+        && matrix.in_place)
 }
 
 /// Groups the program's ops into units: a bank's members become one unit at the first member's
@@ -1811,6 +1899,91 @@ pub(crate) fn build_sequential(
     .into_iter()
     .filter(|(run, _, _)| !folded_runs.contains(run))
     .collect();
+
+    // Serialized scalar fader/matrix pairing is decided while both original owners and the
+    // lowered graph are still available.  The schedule is intentionally left untouched: the
+    // matrix binding becomes an identity at its original slot, while the composite runs from the
+    // fader slot and the existing reduction/observer boundaries remain in place.
+    let (readers, first_producer) = op_dataflow(program);
+    for pair in run_units.windows(2) {
+        let (first_membership, first_ops) = &pair[0];
+        let (second_membership, second_ops) = &pair[1];
+        if !first_membership.is_empty()
+            || !second_membership.is_empty()
+            || first_ops.len() != 1
+            || second_ops.len() != 1
+        {
+            continue;
+        }
+        let first = first_ops[0];
+        let second = second_ops[0];
+        if retired.contains(&first)
+            || retired.contains(&second)
+            || second != first.saturating_add(1)
+            || program.inputs_of(&program.ops[first]).is_empty()
+            || !scalar_pair_is_in_place(program, first, second)
+        {
+            continue;
+        }
+        let first_node = &spec.nodes[program.ops[first].node as usize].id;
+        let second_node = &spec.nodes[program.ops[second].node as usize].id;
+        let (
+            GraphNodeId::TrackStage {
+                track_id: first_track,
+                stage: TrackStage::PostFader,
+            },
+            GraphNodeId::TrackStage {
+                track_id: second_track,
+                stage: TrackStage::PostMatrix,
+            },
+        ) = (first_node, second_node)
+        else {
+            continue;
+        };
+        let crossing_reader = spec.edges.iter().any(|edge| {
+            edge.source.node == *first_node
+                && matches!(
+                    edge.id,
+                    GraphEdgeId::RouteSource { .. } | GraphEdgeId::EffectSidechain { .. }
+                )
+        });
+        if crossing_reader
+            || first_track != second_track
+            || !chains_into(
+                program,
+                spec,
+                &parts,
+                &readers,
+                &first_producer,
+                &[first],
+                &[second],
+            )
+        {
+            continue;
+        }
+        let Some(Some(fader)) = parts.bindings.remove(first_node) else {
+            continue;
+        };
+        let Some(Some(matrix)) = parts.bindings.remove(second_node) else {
+            parts.bindings.insert(first_node.clone(), Some(fader));
+            continue;
+        };
+        let Some(factory) = fader.scalar_pair_factory() else {
+            parts.bindings.insert(first_node.clone(), Some(fader));
+            parts.bindings.insert(second_node.clone(), Some(matrix));
+            continue;
+        };
+        match factory(fader, matrix) {
+            Ok(composite) => {
+                parts.bindings.insert(first_node.clone(), Some(composite));
+                parts.bindings.insert(second_node.clone(), None);
+            }
+            Err((fader, matrix)) => {
+                parts.bindings.insert(first_node.clone(), Some(fader));
+                parts.bindings.insert(second_node.clone(), Some(matrix));
+            }
+        }
+    }
     // Where each op's `RuntimeOp` ended up, so a redirect can neutralise the consumer's reduction.
     let mut op_slot: Vec<Option<(usize, usize)>> = vec![None; program.ops.len()];
     // Run unit -> the unit index it was emitted at, for the chains the fold arms.
@@ -2965,7 +3138,296 @@ fn cohort_runs(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::program::{BufferRef, DelayRef, InputRef};
+    use core::any::Any;
     use lane::kernels::sum2_block;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    #[test]
+    fn synthetic_distinct_matrix_destination_is_the_scalar_pair_identity_decline() {
+        // This is a deliberately synthetic lowered program. It isolates the defensive identity
+        // gate; #476 owns the separate question of whether production lowering can emit it.
+        let mut program = ExecutionProgram {
+            ops: vec![
+                Op {
+                    node: 0,
+                    level: 0,
+                    inputs: (0, 1),
+                    sidechain: None,
+                    output: BufferRef(1),
+                    in_place: true,
+                },
+                Op {
+                    node: 1,
+                    level: 1,
+                    inputs: (1, 2),
+                    sidechain: None,
+                    output: BufferRef(2),
+                    in_place: false,
+                },
+            ]
+            .into_boxed_slice(),
+            inputs: vec![
+                InputRef {
+                    buffer: BufferRef(1),
+                    delay: None,
+                },
+                InputRef {
+                    buffer: BufferRef(1),
+                    delay: None,
+                },
+            ]
+            .into_boxed_slice(),
+            delays: Box::new([]),
+            node_buffer: vec![BufferRef(1), BufferRef(2)].into_boxed_slice(),
+            node_op: vec![Some(0), Some(1)].into_boxed_slice(),
+            taps: Box::new([]),
+            buffers: 3,
+            output: BufferRef(2),
+        };
+        assert!(
+            !scalar_pair_is_in_place(&program, 0, 1),
+            "an otherwise valid single undelayed edge declines on its distinct destination"
+        );
+
+        program.ops[1].output = BufferRef(1);
+        program.ops[1].in_place = true;
+        program.node_buffer[1] = BufferRef(1);
+        assert!(
+            scalar_pair_is_in_place(&program, 0, 1),
+            "the same fixture admits only after the exact identity facts are restored"
+        );
+        program.inputs[1].delay = Some(DelayRef {
+            line: 0,
+            staging: BufferRef(2),
+        });
+        assert!(
+            !scalar_pair_is_in_place(&program, 0, 1),
+            "the explicit undelayed-input guard remains independent"
+        );
+
+        struct FaderOwner(Arc<AtomicUsize>);
+        impl GraphRuntimeProcessor for FaderOwner {
+            fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                for sample in block.left.iter_mut().chain(block.right.iter_mut()) {
+                    *sample *= 2.0;
+                }
+                Ok(())
+            }
+        }
+        struct FailingMatrixOwner {
+            calls: Arc<AtomicUsize>,
+            queued: Arc<AtomicUsize>,
+        }
+        impl GraphRuntimeProcessor for FailingMatrixOwner {
+            fn process(&mut self, _: GraphBindingBlock<'_>) -> Result<(), RenderError> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                self.queued.fetch_sub(1, Ordering::Relaxed);
+                Err(RenderError::InvalidEnvelope)
+            }
+        }
+
+        // Execute the original declined shape. The later reduction copies into its distinct
+        // destination before its owner reports the first error; the fader source remains the
+        // completed earlier state. This is the boundary a one-buffer early composite cannot own.
+        let fader_calls = Arc::new(AtomicUsize::new(0));
+        let matrix_calls = Arc::new(AtomicUsize::new(0));
+        let queued = Arc::new(AtomicUsize::new(2));
+        let mut fader = RuntimeOp {
+            inputs: vec![ARENA_BASE].into_boxed_slice(),
+            staged: Box::new([]),
+            sidechain: None,
+            output: ARENA_BASE,
+            kind: NodeKind::Bound(Box::new(FaderOwner(Arc::clone(&fader_calls)))),
+            observers: Box::new([]),
+        };
+        let mut matrix = RuntimeOp {
+            inputs: vec![ARENA_BASE].into_boxed_slice(),
+            staged: Box::new([]),
+            sidechain: None,
+            output: ARENA_BASE + 1,
+            kind: NodeKind::Bound(Box::new(FailingMatrixOwner {
+                calls: Arc::clone(&matrix_calls),
+                queued: Arc::clone(&queued),
+            })),
+            observers: Box::new([]),
+        };
+        let mut lease = stereo_lease(2, 2);
+        lease
+            .write_stereo(ARENA_BASE)
+            .0
+            .copy_from_slice(&[0.25, -0.5]);
+        lease
+            .write_stereo(ARENA_BASE)
+            .1
+            .copy_from_slice(&[-0.75, 1.0]);
+        lease.write_stereo(ARENA_BASE + 1).0.fill(91.0);
+        lease.write_stereo(ARENA_BASE + 1).1.fill(-91.0);
+        execute_op(&mut fader, &mut lease, &mut [], &mut [], 0).expect("earlier fader");
+        assert_eq!(
+            execute_op(&mut matrix, &mut lease, &mut [], &mut [], 0),
+            Err(RenderError::InvalidEnvelope)
+        );
+        assert_eq!(lease.read_stereo(ARENA_BASE).0, &[0.5, -1.0]);
+        assert_eq!(lease.read_stereo(ARENA_BASE).1, &[-1.5, 2.0]);
+        assert_eq!(lease.read_stereo(ARENA_BASE + 1).0, &[0.5, -1.0]);
+        assert_eq!(lease.read_stereo(ARENA_BASE + 1).1, &[-1.5, 2.0]);
+        assert_eq!(fader_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(matrix_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            queued.load(Ordering::Relaxed),
+            1,
+            "later failure retains its next record"
+        );
+    }
+
+    struct DecliningPairOwner(Arc<AtomicUsize>);
+    fn decline_pair(
+        left: crate::BuiltinProcessor,
+        right: crate::BuiltinProcessor,
+    ) -> Result<crate::BuiltinProcessor, (crate::BuiltinProcessor, crate::BuiltinProcessor)> {
+        Err((left, right))
+    }
+    impl GraphPreparedBuiltinBankProcessor for DecliningPairOwner {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn into_any(self: Box<Self>) -> Box<dyn Any> {
+            self
+        }
+        fn pair_factory(&self) -> Option<crate::BuiltinPairFactory> {
+            Some(decline_pair)
+        }
+        fn process(
+            &mut self,
+            left: &mut [f32],
+            right: &mut [f32],
+            _: u32,
+            _: u64,
+        ) -> Result<(), RenderError> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            for sample in left.iter_mut().chain(right.iter_mut()) {
+                *sample += 1.0;
+            }
+            Ok(())
+        }
+    }
+    struct PlainPairOwner(Arc<AtomicUsize>);
+    impl GraphPreparedBuiltinBankProcessor for PlainPairOwner {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn into_any(self: Box<Self>) -> Box<dyn Any> {
+            self
+        }
+        fn process(
+            &mut self,
+            left: &mut [f32],
+            right: &mut [f32],
+            _: u32,
+            _: u64,
+        ) -> Result<(), RenderError> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            for sample in left.iter_mut().chain(right.iter_mut()) {
+                *sample *= 2.0;
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_declined_first_pair_retains_the_first_slots_scratch() {
+        let track = crate::StableGraphId::parse("decline").expect("id");
+        let fader = GraphNodeId::TrackStage {
+            track_id: track.clone(),
+            stage: TrackStage::PostFader,
+        };
+        let matrix = GraphNodeId::TrackStage {
+            track_id: track,
+            stage: TrackStage::PostMatrix,
+        };
+        let spec = GraphSpec {
+            nodes: vec![
+                crate::GraphNode {
+                    id: fader.clone(),
+                    latency: effect_contract::LatencySamples(0),
+                    tail: effect_contract::TailSamples::Finite(0),
+                },
+                crate::GraphNode {
+                    id: matrix.clone(),
+                    latency: effect_contract::LatencySamples(0),
+                    tail: effect_contract::TailSamples::Finite(0),
+                },
+            ],
+            ports: Vec::new(),
+            edges: Vec::new(),
+        };
+        let bank = |member, processor: Box<dyn GraphPreparedBuiltinBankProcessor>| {
+            GraphPreparedBuiltinBank {
+                backend: lane::Backend::Simd4,
+                members: vec![member].into_boxed_slice(),
+                processor,
+                scratch: AoSoaScratch::new(effect_contract::BankWidth::Four, 8).expect("scratch"),
+            }
+        };
+        let first_calls = Arc::new(AtomicUsize::new(0));
+        let second_calls = Arc::new(AtomicUsize::new(0));
+        let mut parts = RuntimeParts::new(
+            &spec,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            vec![
+                bank(
+                    fader,
+                    Box::new(DecliningPairOwner(Arc::clone(&first_calls))),
+                ),
+                bank(matrix, Box::new(PlainPairOwner(Arc::clone(&second_calls)))),
+            ],
+            Vec::new(),
+            Vec::new(),
+            Default::default(),
+            Vec::new(),
+            8,
+        );
+        let mut chain = parts.chain_for(&[Membership::Builtin(0), Membership::Builtin(1)], 1);
+        assert!(
+            parts.builtin_banks.iter().all(Option::is_none),
+            "both original owners moved once"
+        );
+        const FRAMES: usize = 2;
+        let mut lease = stereo_lease(FRAMES, 3);
+        lease.write_stereo(1).0.copy_from_slice(&[1.0, 2.0]);
+        lease.write_stereo(1).1.copy_from_slice(&[-1.0, -2.0]);
+        let mut members = ArenaMembers {
+            lease: &mut lease,
+            inputs: &[1],
+            outputs: &[2],
+            fold: &[],
+            master: 0,
+        };
+        chain
+            .run(&mut members, FRAMES as u32, 0)
+            .expect("declined chain render");
+        assert_eq!(
+            first_calls.load(Ordering::Relaxed),
+            1,
+            "first returned owner executes"
+        );
+        assert_eq!(
+            second_calls.load(Ordering::Relaxed),
+            1,
+            "second returned owner executes"
+        );
+        assert_eq!(members.lease.read_stereo(2).0, &[4.0, 6.0]);
+        assert_eq!(members.lease.read_stereo(2).1, &[0.0, -2.0]);
+    }
 
     /// The node's cached witness and the line's own answer are the same fact (#210 phase 2).
     ///

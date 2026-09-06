@@ -1,0 +1,5 @@
+effect interchange qualification policy: migration status-loss unexpectedly succeeded
+effect interchange qualification policy mutations: ok
+effect interchange benchmark 108 policy: namespace status-loss unexpectedly succeeded
+effect interchange benchmark 108 policy mutations: ok synthetic_only=1
+effect interchange benchmark hermetic lifecycle: ok fake_launches_only=1-per-launched-case

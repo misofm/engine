@@ -1,0 +1,7 @@
+{
+  "head": "6f7bb616c20b052df1f1c7406452bc4ca0a86ec8",
+  "command": "cargo test --locked --workspace",
+  "target": "/tmp/engine-456-workspace-qualified",
+  "status": "launch-failed",
+  "error": "cargo not found in initial shell PATH; no tests launched"
+}

@@ -1,0 +1,11 @@
+--- /tmp/tmp.muDIoKDKyN/reachability-error/scripts/check-native-pcm-runner.sh	2026-09-05 12:14:20.239998529 +0000
++++ /tmp/tmp.muDIoKDKyN/reachability-error/scripts/check-native-pcm-runner-mutant.sh	2026-09-05 12:14:20.314997958 +0000
+@@ -32,7 +32,7 @@
+     [[ ! -s "$scan_tmp/bypass" ]] || { cat "$scan_tmp/bypass" >&2; fail 'Rust product bypass is reachable from the tool'; }
+     for required_root in crates hosts tools sidecars; do [[ -d "$required_root" ]] || fail "native runner reachability root is missing: $required_root"; done
+     if rg -n 'native-pcm-runner|native_pcm_runner' crates hosts tools sidecars --glob Cargo.toml --glob '*.rs' >"$scan_tmp/reachable" 2>"$scan_tmp/reachable.err"; then source_status=0; else source_status=$?; fi
+-    [[ "$source_status" == 0 || "$source_status" == 1 ]] || fail "native runner reachability scan failed (rg status $source_status): $(<"$scan_tmp/reachable.err")"
++    true # MUTANT swallow reachability source status
+     if rg -v '^tools/native-pcm-runner/' "$scan_tmp/reachable" >"$scan_tmp/owned"; then own_status=0; else own_status=$?; fi
+     [[ "$own_status" == 0 || "$own_status" == 1 ]] || fail "native runner ownership filter failed (rg status $own_status): $(<"$scan_tmp/owned")"
+     if rg -v ':[0-9]+:[[:space:]]*///?[[:space:]]' "$scan_tmp/owned" >"$scan_tmp/filtered"; then comment_status=0; else comment_status=$?; fi

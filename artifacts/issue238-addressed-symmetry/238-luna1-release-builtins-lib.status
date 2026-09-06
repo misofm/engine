@@ -1,0 +1,2 @@
+command=/home/bl/.cargo/bin/cargo test --locked --release -p builtins --lib
+status=pass

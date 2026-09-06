@@ -509,14 +509,16 @@ fn frozen_scratch_report(capi_retained_bytes: u64) -> PlanResourceReport {
         // #241 deletes 64 x 64 = 4_096 control-queue bytes and 1_024 x 2 x 4 = 8_192
         // declarative source-ring bytes from the session compiler's runtime projection. The host
         // still reports the chosen ring exactly in the source rows below.
-        graph_session_plus_plan_bytes: 226_164,
-        graph_incremental_plan_bytes: 226_164,
+        // #430 conservatively charges one 16-byte two-pointer outer owner for each of the two
+        // potentially pairable fader banks. The owners are graph-plan payload.
+        graph_session_plus_plan_bytes: 226_196,
+        graph_incremental_plan_bytes: 226_196,
         graph_metadata_bytes: 50_295,
         graph_delay_bytes: 0,
         effect_bank_scratch_bytes: 8_192,
         effect_bank_runtime_buffer_bytes: 8_192,
         effect_bank_metadata_bytes: 648,
-        builtin_bank_bytes: 9_337,
+        builtin_bank_bytes: 9_369,
         builtin_bank_scratch_bytes: 49_152,
         source_pcm_payload_bytes: 8_192,
         source_overhead_bytes: 2_862,
@@ -1093,6 +1095,15 @@ struct MatrixBankProcessorMirror {
     process_calls: u64,
     frames_processed: u64,
     control_delivery: graph::BuiltinControlDelivery,
+}
+
+/// Preparation allocates one outer owner for every potentially pairable fader bank. The two
+/// pointers retain the original typed fader and matrix boxes; their allocations remain charged
+/// by the independent processor rows below.
+#[allow(dead_code)]
+struct FaderMatrixBankProcessorMirror {
+    fader: Box<FaderBankProcessorMirror>,
+    matrix: Box<MatrixBankProcessorMirror>,
 }
 
 #[derive(Clone, Copy)]
@@ -1715,7 +1726,10 @@ fn graph_owners() -> Vec<PrimitiveOwner> {
         },
         PrimitiveOwner {
             name: "builtin-bank fader processors",
-            bytes: (fader_bank_processor + strip_control_array) * builtin_banks,
+            bytes: (fader_bank_processor
+                + strip_control_array
+                + bytes::<FaderMatrixBankProcessorMirror>(1))
+                * builtin_banks,
         },
         PrimitiveOwner {
             name: "builtin-bank matrix processors",
@@ -1906,7 +1920,7 @@ fn primitive_replacement_oracle(current: &str, prospective: &str) -> PrimitiveRe
     // #241: the two plans lose 4_096 queue + 8_192 ring projection each (-24_576), and the two
     // compiled models each shrink by 200 bytes (-400): 510_720 - 24_576 - 400 = 485_744.
     // #338: canonical JSON adds 8,082 retained bytes to each of the two live models.
-    assert_effective_owner_mutations(&graph, 502_164, "double-live graph/model");
+    assert_effective_owner_mutations(&graph, 502_228, "double-live graph/model");
 
     let source = source_owners();
     assert_eq!(owner_total(&source), 11_054, "primitive source total");
@@ -2308,12 +2322,12 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
     // See
     // `primitive_replacement_oracle` for the per-bank arithmetic.
     // #241: 510_720 - 2 x (4_096 queue + 8_192 ring) - 2 x 200 = 485_744.
-    assert_eq!(oracle.graph, 502_164);
+    assert_eq!(oracle.graph, 502_228);
     assert_eq!(oracle.source_total, 22_108);
     assert_eq!(oracle.source_overhead, 5_724);
     assert_eq!(oracle.effect_state, 15_120);
     assert_eq!(oracle.effect_scratch, 432);
-    // #210 phase 3: 2 x 9_963 (see `builtin_owners`).
+    // #210 phase 3: 2 x 9_963 (see `builtin_owners`). The #430 outer allowance is graph-owned.
     assert_eq!(oracle.builtin, 19_926);
     assert_eq!(oracle.capi, 204_375);
     // #241: 58_694 - (29 x 10 locator) + (40 x 10 content identity) = 58_804.

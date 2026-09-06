@@ -1,0 +1,85 @@
+{
+  "baseline": "2c8e0c48646192ae1484e56356ff2a26279a403e",
+  "candidate": "7951736605fa64870bc1d91342d00d5fdb6417c5",
+  "comparison": "Multiset of printed test names/statuses; doctest line numbers normalized. Not a substitute for full workspace terminal status.",
+  "baseline_observations": 1600,
+  "candidate_observations": 1615,
+  "removed": [],
+  "added": [
+    {
+      "name": "tests::a_post_fader_meter_declines_its_cohort_while_the_tail_pair_still_fuses",
+      "status": "ok",
+      "count": 1
+    },
+    {
+      "name": "tests::actual_graph_mono_collapse_disengages_on_input_command_and_recovers_nonfinite_input",
+      "status": "ok",
+      "count": 1
+    },
+    {
+      "name": "tests::composite_live_sequence_matches_original_owners_and_discriminates_both_branches",
+      "status": "ok",
+      "count": 1
+    },
+    {
+      "name": "tests::composite_raw_record_errors_preserve_the_frozen_arithmetic_order",
+      "status": "ok",
+      "count": 1
+    },
+    {
+      "name": "tests::declined_factory_owners_keep_queued_state_and_render_in_original_order",
+      "status": "ok",
+      "count": 1
+    },
+    {
+      "name": "tests::late_factory_guards_return_live_policy_width_and_population_owners",
+      "status": "ok",
+      "count": 1
+    },
+    {
+      "name": "tests::pair_factory_declines_wrong_order_policy_and_shape_with_original_owners",
+      "status": "ok",
+      "count": 1
+    },
+    {
+      "name": "tests::queued_three_sample_ramp_crosses_call_boundary_before_fusing",
+      "status": "ok",
+      "count": 1
+    },
+    {
+      "name": "tests::serialized_live_fader_matrix_is_selected_by_the_bound_render_path",
+      "status": "ok",
+      "count": 1
+    },
+    {
+      "name": "tests::serialized_alias_observer_is_the_decline_boundary",
+      "status": "ok",
+      "count": 1
+    },
+    {
+      "name": "tests::serialized_send_reader_declines_crossing_fader_while_pcm_matches_separate",
+      "status": "ok",
+      "count": 1
+    },
+    {
+      "name": "actual_serialized_composite_render_allocates_and_frees_nothing",
+      "status": "ok",
+      "count": 1
+    },
+    {
+      "name": "actual_queued_graph_phases_allocate_and_free_nothing",
+      "status": "ok",
+      "count": 1
+    },
+    {
+      "name": "runtime::tests::a_declined_first_pair_retains_the_first_slots_scratch",
+      "status": "ok",
+      "count": 1
+    },
+    {
+      "name": "tests::paired_fader_and_matrix_commands_share_the_acknowledged_application_sample",
+      "status": "ok",
+      "count": 1
+    }
+  ]
+}

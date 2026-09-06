@@ -8,6 +8,7 @@ pub mod program;
 mod runtime;
 
 use core::cell::Cell;
+use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet};
 
 use effect_contract::{
@@ -202,6 +203,13 @@ pub struct GraphBuiltinBankResourceEstimate {
     pub largest_allocation_bytes: u64,
 }
 
+/// Checked retained storage for live scalar fader/matrix owners lowered after preparation.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct GraphScalarOwnerResourceEstimate {
+    pub total_bytes: u64,
+    pub largest_allocation_bytes: u64,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GraphBuiltinBankAttachError {
     InvalidMembers,
@@ -211,6 +219,27 @@ pub enum GraphBuiltinBankAttachError {
 }
 
 impl GraphResourceEstimate {
+    pub fn checked_add_scalar_owners(
+        &mut self,
+        resource: GraphScalarOwnerResourceEstimate,
+    ) -> Option<()> {
+        let mut next = self.clone();
+        next.graph_metadata_bytes = next
+            .graph_metadata_bytes
+            .checked_add(resource.total_bytes)?;
+        next.incremental_plan_bytes = next
+            .incremental_plan_bytes
+            .checked_add(resource.total_bytes)?;
+        next.session_plus_plan_bytes = next
+            .session_plus_plan_bytes
+            .checked_add(resource.total_bytes)?;
+        next.largest_allocation_bytes = next
+            .largest_allocation_bytes
+            .max(resource.largest_allocation_bytes);
+        *self = next;
+        Some(())
+    }
+
     /// Fold exact prepared builtin-bank storage into the graph estimate before publication.
     pub fn checked_add_builtin_banks(
         &mut self,
@@ -543,10 +572,22 @@ pub enum BuiltinControlDelivery {
     BetweenRenderCalls,
 }
 /// Render contract for an already-prepared builtin bank.
-pub trait GraphPreparedBuiltinBankProcessor: Send {
+pub type BuiltinProcessor = Box<dyn GraphPreparedBuiltinBankProcessor>;
+pub type BuiltinPairFactory = fn(
+    BuiltinProcessor,
+    BuiltinProcessor,
+) -> Result<BuiltinProcessor, (BuiltinProcessor, BuiltinProcessor)>;
+
+pub trait GraphPreparedBuiltinBankProcessor: Send + Any {
+    fn as_any(&self) -> &dyn Any;
+    fn into_any(self: Box<Self>) -> Box<dyn Any>;
     /// Preparation metadata only; render never reads this policy.
     fn control_delivery(&self) -> BuiltinControlDelivery {
         BuiltinControlDelivery::Concurrent
+    }
+    /// Preparation-only pairing hook. Render never queries or uses this metadata.
+    fn pair_factory(&self) -> Option<BuiltinPairFactory> {
+        None
     }
     fn process(
         &mut self,
@@ -1125,6 +1166,12 @@ impl GraphSourceSetResourceReport {
 /// Implementors own prepared source consumers and source-plane storage. The graph invokes this
 /// only on its coordinator before ordinary nodes or native dependency waves begin.
 pub trait GraphPreparedSourceSetDriver: Send {
+    fn can_prepare_source_seek(&self, _source_index: usize) -> bool {
+        false
+    }
+    fn prepare_source_seek(&mut self, _source_index: usize, _generation: u64, _frame: u64) -> bool {
+        false
+    }
     fn claim_count(&self) -> usize;
     fn begin_block(&mut self, first_sample: u64, frames: u32) -> Result<(), RenderError>;
     fn copy_track_input(
@@ -1265,7 +1312,18 @@ pub struct GraphBindingBlock<'a> {
     pub right: &'a mut [f32],
     pub first_sample: u64,
 }
-pub trait GraphRuntimeProcessor: Send {
+pub type ScalarPairFactory = fn(
+    Box<dyn GraphRuntimeProcessor>,
+    Box<dyn GraphRuntimeProcessor>,
+) -> Result<
+    Box<dyn GraphRuntimeProcessor>,
+    (
+        Box<dyn GraphRuntimeProcessor>,
+        Box<dyn GraphRuntimeProcessor>,
+    ),
+>;
+
+pub trait GraphRuntimeProcessor: Send + Any {
     /// Process one block in place.
     ///
     /// # The contract for a node with no graph inputs (issue #218)
@@ -1288,6 +1346,12 @@ pub trait GraphRuntimeProcessor: Send {
     /// therefore declines: nothing has compared its two channels' words.
     fn channel_symmetry(&self) -> ChannelSymmetryWitness {
         ChannelSymmetryWitness::DECLINED
+    }
+
+    /// Preparation-only hook for the serialized scalar fader/matrix pair.
+    /// Render never queries this metadata.
+    fn scalar_pair_factory(&self) -> Option<ScalarPairFactory> {
+        None
     }
 }
 /// Immutable post-node observation input. Observers cannot alter graph audio.
@@ -1412,6 +1476,19 @@ impl GraphExecutor {
 }
 
 impl PreparedPlanExecutor for GraphExecutor {
+    fn can_prepare_source_seek(&self, source_index: usize) -> bool {
+        self.source_set
+            .as_ref()
+            .is_some_and(|set| set.driver.can_prepare_source_seek(source_index))
+    }
+
+    fn prepare_source_seek(&mut self, source_index: usize, generation: u64, frame: u64) -> bool {
+        self.source_set.as_mut().is_some_and(|set| {
+            set.driver
+                .prepare_source_seek(source_index, generation, frame)
+        })
+    }
+
     // REALTIME_POLICY_BEGIN
     fn render(
         &mut self,
@@ -1654,6 +1731,12 @@ mod tests {
         calls: u64,
     }
     impl GraphPreparedBuiltinBankProcessor for CountingIdentityBuiltin {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn into_any(self: Box<Self>) -> Box<dyn Any> {
+            self
+        }
         fn process(
             &mut self,
             _left: &mut [f32],
@@ -1864,6 +1947,26 @@ mod tests {
                 scratch_samples: 4,
                 metadata_bytes: 8,
                 largest_allocation_bytes: 16,
+            }),
+            None
+        );
+        assert_eq!(
+            estimate, before,
+            "overflow cannot partially mutate the report"
+        );
+    }
+
+    #[test]
+    fn scalar_owner_resource_overflow_leaves_the_graph_estimate_unchanged() {
+        let mut estimate = empty_estimate();
+        estimate.graph_metadata_bytes = 3;
+        estimate.incremental_plan_bytes = 5;
+        estimate.session_plus_plan_bytes = 7;
+        let before = estimate.clone();
+        assert_eq!(
+            estimate.checked_add_scalar_owners(GraphScalarOwnerResourceEstimate {
+                total_bytes: u64::MAX,
+                largest_allocation_bytes: 64,
             }),
             None
         );

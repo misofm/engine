@@ -833,10 +833,25 @@ impl ProtocolQueues {
     /// The only production consumer is `ProtocolController::cancel_queued_automation_reserved`;
     /// render-side delivery is deferred (see `docs/CONTROL_PROTOCOL_SEMANTICS.md`, "Delivery status").
     pub fn try_dequeue_automation(&mut self) -> Result<AutomationBatchSlot, QueueEmpty> {
-        let batch = self.automation.consumer.try_pop()?;
+        let batch = self.try_dequeue_automation_retaining_admission()?;
         self.remove_automation_density(&batch);
         self.remove_automation_intervals(&batch);
         Ok(batch)
+    }
+
+    /// Remove a resident batch while retaining its admission rows for an owner that has taken
+    /// responsibility for the batch. The delivery owner releases those rows at terminal return.
+    pub(crate) fn try_dequeue_automation_retaining_admission(
+        &mut self,
+    ) -> Result<AutomationBatchSlot, QueueEmpty> {
+        self.automation.consumer.try_pop()
+    }
+
+    /// Release admission rows for a batch previously removed with
+    /// [`Self::try_dequeue_automation_retaining_admission`].
+    pub(crate) fn release_automation_admission(&mut self, batch: &AutomationBatchSlot) {
+        self.remove_automation_density(batch);
+        self.remove_automation_intervals(batch);
     }
 
     /// Begin a new accepted-automation ordering epoch after explicit cancellation drained the

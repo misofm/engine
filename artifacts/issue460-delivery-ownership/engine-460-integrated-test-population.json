@@ -1,0 +1,12 @@
+{
+  "removed_names": [
+    "crates/engine/src/realtime/plan.rs - realtime::plan::PreparedRenderPlan (line 421) - compile fail"
+  ],
+  "added_names": [
+    "crates/engine/src/realtime/plan.rs - realtime::plan::PreparedRenderPlan (line 429) - compile fail",
+    "paused_seek_recycles_without_allocating_or_freeing",
+    "tests::paused_seek_prepares_full_queues_without_consuming_target",
+    "tests::paused_seek_recycles_full_internal_queue_before_first_target_quantum"
+  ],
+  "attribution": "Compared with initial460 workspace; additional names are inherited latestmain SDK/runtime integration."
+}

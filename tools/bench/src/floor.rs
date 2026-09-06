@@ -369,11 +369,120 @@ fn optional(value: Option<f64>) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
     use super::{
         BANK_WIDTH, BUILTINS_IDENTITY_LANE_OPS, COMPRESSOR_LANE_OPS, EQ_LANE_OPS, LIMITER_LANE_OPS,
         OPS_PER_CYCLE, PLUMBING_LANE_OPS, floor_row, lane_samples_per_block,
     };
     use console_workload::{WORKLOADS, Workload};
+
+    fn rust_floor_table() -> String {
+        let mut keys = BTreeSet::new();
+        let mut table = String::from("{");
+        for (index, workload) in WORKLOADS.into_iter().enumerate() {
+            let key = workload.kind();
+            assert!(keys.insert(key), "duplicate floor workload key: {key}");
+            if index != 0 {
+                table.push(',');
+            }
+            table.push('"');
+            table.push_str(&bench_support::json::escape(key));
+            table.push_str("\":[");
+            match floor_row(workload) {
+                Some(row) => {
+                    assert!(row.lane_ops.is_finite());
+                    assert!(row.width_factor.is_finite());
+                    table.push_str(&format!("{:?},{:?},\"", row.lane_ops, row.width_factor));
+                    table.push_str(&bench_support::json::escape(
+                        row.control.map_or("none", Workload::kind),
+                    ));
+                    table.push_str("\",");
+                    table.push('"');
+                    table.push_str(&bench_support::json::escape(row.basis));
+                    table.push('"');
+                }
+                None => {
+                    assert!(matches!(workload, Workload::NineTrackBaseline));
+                    table.push_str("null,1,\"none\",\"not_derived\"");
+                }
+            }
+            table.push(']');
+        }
+        table.push('}');
+        table
+    }
+
+    fn jq_floor_comparison(rust_table: &str, mutation: &str) -> Result<bool, String> {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let scripts = manifest
+            .parent()
+            .and_then(std::path::Path::parent)
+            .ok_or_else(|| "cannot resolve repository scripts directory".to_string())
+            .map(|root| root.join("scripts"))?;
+        let expression = r#"
+include "console-benchmark-record-lib";
+floor_pins as $expected |
+input as $rust |
+(if $mutation == "missing" then
+   ($expected | del(.sixty_four_track_console))
+ elif $mutation == "extra" then
+   $expected + {"floor_parity_extra": [null, 1, "none", "not_derived"]}
+ elif $mutation == "value" then
+   ($expected | .sixty_four_track_console[0] = (.sixty_four_track_console[0] + 1))
+ else $expected
+ end) == $rust
+"#;
+        let mut child = Command::new("jq")
+            .args([
+                "-L",
+                scripts
+                    .to_str()
+                    .ok_or_else(|| "non-UTF-8 scripts path".to_string())?,
+            ])
+            .args(["-n", "--arg", "mutation", mutation, expression])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| format!("failed to spawn jq: {error}"))?;
+        child
+            .stdin
+            .take()
+            .ok_or_else(|| "jq stdin was not available".to_string())?
+            .write_all(rust_table.as_bytes())
+            .map_err(|error| format!("failed to write jq input: {error}"))?;
+        let output = child
+            .wait_with_output()
+            .map_err(|error| format!("failed waiting for jq: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "jq failed with {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        match String::from_utf8_lossy(&output.stdout).trim() {
+            "true" => Ok(true),
+            "false" => Ok(false),
+            result => Err(format!("jq did not return exactly one boolean: {result:?}")),
+        }
+    }
+
+    #[test]
+    fn rust_and_jq_floor_tables_have_exact_key_value_parity() {
+        let rust_table = rust_floor_table();
+        assert!(jq_floor_comparison(&rust_table, "").expect("positive jq comparison"));
+        for mutation in ["missing", "extra", "value"] {
+            assert!(
+                !jq_floor_comparison(&rust_table, mutation).expect("negative jq comparison"),
+                "{mutation} mutation was not detected"
+            );
+        }
+        assert!(jq_floor_comparison(&rust_table, "").expect("restored jq comparison"));
+    }
 
     #[test]
     fn the_sixty_four_track_block_has_the_lane_sample_count_the_rulings_quote() {

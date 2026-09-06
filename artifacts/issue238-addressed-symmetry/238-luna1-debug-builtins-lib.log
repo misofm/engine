@@ -1,0 +1,10 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running unittests src/lib.rs (target/debug/deps/builtins-b28151c824699de5)
+
+running 3 tests
+test tests::eligibility_sequence_uses_whole_call_fallback_then_fuses_the_next_call ... ok
+test tests::full_public_chain_matches_the_three_section_reference ... ok
+test tests::lane_symmetry_retarget_updates_only_the_addressed_predicate ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

@@ -14,6 +14,9 @@ import type { BrowserBootPolicy } from "./policy.ts";
 import { BUNDLED_ENGINE_ASSETS } from "../assets.ts";
 import type { MisoAudioWorkletHost } from "./shipped-host.d.ts";
 import type { EngineConsole } from "../core/console.ts";
+import { scratchBootWithWorker } from "./scratch.ts";
+import type { ScratchWorkerFactory } from "./scratch.ts";
+import { createDefaultHost, BrowserBootError } from "./default-host.ts";
 import { createBrowserConsole } from "./console.ts";
 
 /**
@@ -56,7 +59,12 @@ export interface AudioContextLike {
   readonly audioWorklet: { addModule(url: string): Promise<void> };
 }
 
-export interface CreateEngineOptions {
+/** Resolves against the consumer's ambient browser constructor without requiring DOM libs here. */
+export type DefaultAudioContext = typeof globalThis extends {
+  AudioContext: abstract new (...args: never[]) => infer Context extends AudioContextLike;
+} ? Context : AudioContextLike;
+
+export interface CreateEngineOptions<Context extends AudioContextLike = AudioContextLike> {
   /** The Session V1 document, or the SDK builder session that produced it. */
   readonly document: Uint8Array | string | { toJson(): string };
   /**
@@ -70,19 +78,24 @@ export interface CreateEngineOptions {
   /** Release URLs, from the same release as the module bytes. */
   readonly simd128ModuleUrl?: string;
   readonly workletModuleUrl?: string;
+  readonly hostModuleUrl?: string;
+  readonly scratchWorkerModuleUrl?: string;
+  readonly createWorker?: ScratchWorkerFactory;
+  readonly requestDeadlineMs?: number;
+  readonly signal?: AbortSignal;
   /** Constructs an `AudioContext` at the requested rate. Injected so the entry stays testable. */
-  readonly createContext: (options: {
+  readonly createContext?: (options: {
     readonly sampleRate: number;
     readonly renderSizeHint: number;
-  }) => AudioContextLike;
+  }) => Context;
   /** Boots a scratch instance in a Worker and returns the shape it read back. */
-  readonly scratchBoot: (request: {
+  readonly scratchBoot?: (request: {
     readonly document: Uint8Array;
     readonly options: ReturnType<typeof scratchBootOptions>;
   }) => Promise<SessionShape>;
   /** Creates the worklet host once the context is verified. Normally the shipped factory. */
-  readonly createHost: (request: {
-    readonly context: AudioContextLike;
+  readonly createHost?: (request: {
+    readonly context: Context;
     readonly document: Uint8Array;
     readonly options: ReturnType<typeof workletBootOptions>;
     readonly simd128ModuleUrl: string;
@@ -93,9 +106,9 @@ export interface CreateEngineOptions {
   readonly contextAttempts?: number;
 }
 
-export interface BrowserEngine {
+export interface BrowserEngine<Context extends AudioContextLike = DefaultAudioContext> {
   readonly shape: SessionShape;
-  readonly context: AudioContextLike;
+  readonly context: Context;
   readonly host: MisoAudioWorkletHost;
   /** Resolve the compiled session map once and bind the shared semantic console. */
   console(): Promise<EngineConsole>;
@@ -133,7 +146,14 @@ function documentBytes(document: CreateEngineOptions["document"]): Uint8Array<Ar
  *    the context changed under everything above, the engine still refuses rather than rendering at
  *    a rate nobody agreed to.
  */
-export async function createEngine(options: CreateEngineOptions): Promise<BrowserEngine> {
+export function createEngine<Context extends AudioContextLike>(
+  options: CreateEngineOptions<Context> & { readonly createContext: NonNullable<CreateEngineOptions<Context>["createContext"]> },
+): Promise<BrowserEngine<Context>>;
+export function createEngine(
+  options: CreateEngineOptions & { readonly createContext?: undefined },
+): Promise<BrowserEngine<DefaultAudioContext>>;
+export function createEngine(options: CreateEngineOptions): Promise<BrowserEngine<AudioContextLike>>;
+export async function createEngine(options: CreateEngineOptions): Promise<BrowserEngine<AudioContextLike>> {
   const document = documentBytes(options.document);
   const policy = options.policy ?? {};
   const simd128ModuleUrl = options.simd128ModuleUrl ?? BUNDLED_ENGINE_ASSETS.wasm.href;
@@ -143,7 +163,15 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
   if (options.sources !== undefined) assertWebDeliverableSources(options.sources);
 
   // 2. The scratch boot's answer.
-  const shape = await options.scratchBoot({
+  const scratchBoot = options.scratchBoot ?? ((request) => scratchBootWithWorker({
+    ...request,
+    moduleUrl: simd128ModuleUrl,
+    ...(options.scratchWorkerModuleUrl === undefined ? {} : { scratchWorkerModuleUrl: options.scratchWorkerModuleUrl }),
+    ...(options.createWorker === undefined ? {} : { createWorker: options.createWorker }),
+    ...(options.requestDeadlineMs === undefined ? {} : { requestDeadlineMs: options.requestDeadlineMs }),
+    ...(options.signal === undefined ? {} : { signal: options.signal }),
+  }));
+  const shape = await scratchBoot({
     document,
     options: scratchBootOptions(policy),
   });
@@ -153,9 +181,10 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
   if (!Number.isInteger(attempts) || attempts < 1) {
     throw new MisoUsageError("contextAttempts must be a positive integer");
   }
+  const createContext = options.createContext ?? defaultCreateContext;
   let context: AudioContextLike | undefined;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
-    const candidate = options.createContext({
+    const candidate = createContext({
       sampleRate: shape.sampleRateHz,
       renderSizeHint: shape.quantumFrames,
     });
@@ -187,7 +216,11 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
 
   // 5. The worklet boot, with the physical shape required.
   try {
-    const host = await options.createHost({
+    const createHost = options.createHost ?? ((request) => createDefaultHost({
+      ...request,
+      ...(options.hostModuleUrl === undefined ? {} : { hostModuleUrl: options.hostModuleUrl }),
+    }));
+    const host = await createHost({
       context,
       document,
       options: workletBootOptions(policy, {
@@ -228,9 +261,8 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
 /**
  * The scratch boot's body, to be run inside a Worker.
  *
- * Exported rather than inlined because the Worker's module is the caller's to write -- the SDK core
- * has no opinions about audio plumbing, and bundling a Worker would be one (ruling #207/5448359546).
- * A caller's Worker imports this, calls it, and posts the result back.
+ * The packaged Worker calls this primitive. Custom Workers may also import it, call it, and post
+ * the result back; context/host ownership remains with the browser entry.
  */
 export async function scratchBootInWorker(request: {
   readonly moduleBytes: Uint8Array<ArrayBuffer>;
@@ -247,4 +279,14 @@ export async function scratchBootInWorker(request: {
     // second engine's worth of memory alive beside the one that is about to render.
     boundary.dispose();
   }
+}
+
+function defaultCreateContext(options: { sampleRate: number; renderSizeHint: number }): AudioContextLike {
+  const constructor = (globalThis as { AudioContext?: new (options: {
+    sampleRate: number; renderSizeHint: number;
+  }) => AudioContextLike }).AudioContext;
+  if (typeof constructor !== "function") {
+    throw new BrowserBootError("context-unavailable", "AudioContext is unavailable");
+  }
+  return new constructor(options);
 }

@@ -180,7 +180,11 @@ consumer that reads its rate from it cannot be told 48000 by a fallback that nev
 ## Browser
 
 ```ts
-import { createEngine, scratchBootInWorker } from "@misofm/engine/browser";
+import { createEngine } from "@misofm/engine/browser";
+
+const engine = await createEngine({ document });
+await engine.context.resume();
+engine.host.node.connect(engine.context.destination);
 ```
 
 The order matters, and each step exists because the next is expensive to undo: refuse what web
@@ -190,9 +194,21 @@ verify and if necessary close-and-retry the `AudioContext` → refuse a quantum 
 
 Both boots read the same policy object, so the ring, the memory budget and all four console words
 are identical by construction; the two `require_*` words are role-defined (zero in the scratch boot,
-physical in the worklet). Source plumbing is bring-your-own: SDK core has no opinions about audio
-plumbing — no OPFS, no fetch, no Workers — so the Worker boot and the context constructor are
-injected rather than reached for.
+physical in the worklet). The browser entry supplies a packaged scratch module Worker, a guarded
+`AudioContext` constructor, and the shipped host factory. Source delivery remains caller-owned.
+
+`createContext`, `scratchBoot`, and `createHost` are optional independent overrides. An injected
+context factory preserves its exact return type; a default DOM consumer receives its native
+`AudioContext` type. The `simd128ModuleUrl`, `workletModuleUrl`, `hostModuleUrl`, and
+`scratchWorkerModuleUrl` overrides select individual assets. `createWorker(url, { type })` can
+forward the exported package Worker URL directly to `new Worker`; the packaged entry contains its
+imports, including after Vite copies it. `requestDeadlineMs` (default 5000) bounds each scratch
+handshake/request phase, and `signal` cancels scratch work. Every outcome terminates the Worker.
+
+For callers that compose boot explicitly, `scratchBootWithWorker` performs one scratch request
+and `createDefaultHost` imports and invokes the shipped host with `toWebBootOptions` mapping.
+`scratchBootInWorker` remains the low-level primitive for custom Worker entries. The browser
+helpers install no PCM feed or storage service.
 
 `await engine.console()` binds the same semantic console shown above to the shipped browser host.
 It resolves the browser session map once, then submits the same whole-batch edits over MessagePort.
@@ -203,6 +219,27 @@ the browser and headless acknowledgements carry the same generated result/reason
 Call `await engine.close()` when the browser session is finished. It disposes the worklet host
 before closing its `AudioContext`, is safe to call repeatedly, and still closes the context if the
 host's MessagePort has already failed.
+
+For input-source spectrum, `Msb1RingObserver` from `@misofm/engine/browser` reads an
+existing feed ring without consuming audio or changing shared bytes:
+
+```ts
+const observer = new Msb1RingObserver(feed.rings[0]);
+observer.pull((chunk) => {
+  updateSourceSpectrum(chunk.planes, chunk.frames); // Use synchronously; scratch is reused.
+});
+const { underruns, drainBlocks, depth } = observer.counters();
+observer.close();
+```
+
+Each observer starts at the oldest live chunk and has an independent cursor. Pull attempts at
+most `min(ringCapacity, 32)` chunks by default, or an explicit integer from 1 to 32. Metadata and
+planar scratch are borrowed until the callback returns; only `frames` samples are valid. Pull
+creates no PCM buffers or views. It skips stale or concurrently reused slots and catches up after
+missed data or seeks; visualization is best effort. Use it on the control thread and do not
+reenter `pull` from its callback. Counters read existing wire words individually, not as an atomic
+multiword snapshot. Closing releases local storage; later pulls return zero and counters retain
+the final snapshot. Observation never holds slots or delays playback.
 
 ## Agents
 
@@ -253,7 +290,31 @@ A refusal that is *not* flow control throws instead: backpressure succeeds on re
 thread drains, an unknown address never will, and retrying it silently would be an infinite loop
 wearing the costume of resilience.
 
-`submit` may answer synchronously or with a `Promise` — in-process the engine answers immediately,
+Choose exactly one submission callback. Encoded `submit(records, count)` keeps the existing
+`WriterOptions` contract. Semantic `submitEdits(edits)` accepts the selected readonly `LaneEdit[]`
+without an encode/decode round trip and is typed by `SemanticWriterOptions`:
+
+```ts
+const console = engine.console();
+const writer = new ConsoleWriter({
+  submitEdits: (edits) => console.submit(...edits),
+  maximumBatch: 32,
+});
+
+// Existing encoded integrations remain supported:
+const encodedWriter = new ConsoleWriter({
+  submit: (records, count) => engine.submitCommands(records, count),
+  maximumBatch: 32,
+});
+```
+
+Both callbacks return the actual `CommandReport` or a promise for it. Both use the same pending
+map, batch sizing and serialized flush chain; semantic submission adds no queue. Providing both
+callbacks or neither rejects. `maximumBatch` retains its existing default and positive-integer
+validation. The callback owns transport-specific encoding and validation; `FlushOutcome` remains
+the writer's admission/pending summary.
+
+`submit` and `submitEdits` may answer synchronously or with a `Promise` — in-process the engine answers immediately,
 but a browser host reaches it over a worklet port, where the answer is a promise by construction —
 so `flush()` and `drain()` are async. Flushes serialize: a call entered while a prior submit is
 still outstanding waits for it rather than picking its batch out of a map the earlier flush has not

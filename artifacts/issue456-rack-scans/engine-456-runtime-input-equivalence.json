@@ -1,0 +1,16 @@
+{
+  "baseline": "660fce8f2c4f76d38c82590f4c0411c117ba857d",
+  "candidate": "6f7bb616c20b052df1f1c7406452bc4ca0a86ec8",
+  "paths": [
+    "crates",
+    "hosts",
+    "tools",
+    "fixtures",
+    "Cargo.toml",
+    "Cargo.lock",
+    ".cargo",
+    "rust-toolchain.toml"
+  ],
+  "byte_identical": true,
+  "qualification": "Runtime/build/fixture source identity only; not new target execution or timing."
+}

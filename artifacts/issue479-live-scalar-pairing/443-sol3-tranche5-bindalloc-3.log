@@ -1,0 +1,6 @@
+   Compiling builtins-compiler v0.1.0 (/home/bl/misofm/engine-443-plan/crates/builtins-compiler)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.71s
+     Running tests/allocation_tracker.rs (/tmp/engine-443-sol-target/debug/deps/allocation_tracker-b6767a1ad7cc8a1e)
+
+running 1 test
+test actual_scalar_prepare_and_bind_retain_the_charged_owner_layouts has been running for over 60 seconds

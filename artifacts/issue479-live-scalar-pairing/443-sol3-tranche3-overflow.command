@@ -1,0 +1,1 @@
+cargo test --locked -p graph scalar_owner_resource_overflow_leaves_the_graph_estimate_unchanged

@@ -1,0 +1,25 @@
+   Compiling graph v0.1.0 (/home/bl/misofm/engine-443-plan/crates/graph)
+   Compiling builtins-compiler v0.1.0 (/home/bl/misofm/engine-443-plan/crates/builtins-compiler)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.08s
+     Running unittests src/lib.rs (/tmp/engine-443-sol-target/debug/deps/builtins_compiler-5ff1d293b1f7fb6b)
+
+running 3 tests
+test tests::actual_scalar_extra_reader_declines_and_retains_separate_owner_pcm ... FAILED
+test tests::actual_scalar_graph_preserves_scheduled_matrix_prefix_error_and_queue_tail ... ok
+test tests::actual_scalar_graph_queues_fuse_and_fall_back_against_separate_owners ... ok
+
+failures:
+
+---- tests::actual_scalar_extra_reader_declines_and_retains_separate_owner_pcm stdout ----
+
+thread 'tests::actual_scalar_extra_reader_declines_and_retains_separate_owner_pcm' (3859260) panicked at crates/builtins-compiler/src/lib.rs:2441:23:
+internal error: entered unreachable code: sealed wrapper prevalidated its complete graph bindings
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::actual_scalar_extra_reader_declines_and_retains_separate_owner_pcm
+
+test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 31 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `-p builtins-compiler --lib`
