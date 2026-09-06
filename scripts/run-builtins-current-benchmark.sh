@@ -26,18 +26,26 @@ config_file="$repository_root/.cargo/config.toml"
 preconditions="$script_directory/check-bench-preconditions.sh"
 fixture_manifest="$repository_root/fixtures/builtins/v1/MANIFEST.tsv"
 
-for tool in awk cat cmp cp date git jq mkdir mktemp mv sha256sum sleep stat taskset wc; do
+for tool in awk cargo cat cmp cp date env git jq kill mkdir mktemp mv rustc sha256sum sleep stat taskset wc; do
     command -v "$tool" >/dev/null 2>&1 || { printf 'Issue-431 runner bootstrap tool unavailable: %s\n' "$tool" >&2; exit 1; }
 done
-mkdir -p "$artifact_directory"
+for directory in "$repository_root/artifacts" "$repository_root/target" \
+    "$artifact_directory" "$prepared_directory"; do
+    [[ -d "$directory" && ! -L "$directory" ]] ||
+        { printf 'Issue-431 fixed namespace is not physical: %s\n' "$directory" >&2; exit 1; }
+done
 [[ -d "$artifact_directory" && ! -L "$artifact_directory" ]] ||
     { printf 'Issue-431 artifact namespace is not a physical directory\n' >&2; exit 1; }
 [[ ! -e "$disposition" && ! -L "$disposition" ]] ||
     { printf 'refusing consumed Issue-431 invocation\n' >&2; exit 1; }
 scratch=$(mktemp -d "$artifact_directory/.run.XXXXXX")
 completed=0
+reservation_owned=0
+publication_attempted=0
 launched=0
-process_status=1
+child_pid=
+child_status=null
+validation_status=not_run
 reason=prelaunch_failure
 candidate_commit=
 candidate_tree=
@@ -73,12 +81,14 @@ refresh_phases() {
     }
 }
 publish_disposition() {
-    local status=$1 final_reason=$2
+    local status=$1 final_reason=$2 runner_status=$3
     local temporary="$scratch/disposition"
     refresh_phases
-    jq -n -S --arg status "$status" --arg reason "$final_reason" \
+    if jq -n -S --arg status "$status" --arg reason "$final_reason" \
       --arg commit "$candidate_commit" --arg tree "$candidate_tree" --arg binary "$binary_sha256" \
-      --argjson process_status "$process_status" --argjson launched "$launched" \
+      --argjson child_status "$child_status" --arg validation_status "$validation_status" \
+      --argjson runner_status "$runner_status" \
+      --argjson launched "$launched" \
       --argjson workload "$workload_started" --argjson warmup "$warmup_complete" \
       --argjson timed "$timed_started" --argjson round1 "$round_1_complete" \
       --argjson round2 "$round_2_complete" --argjson raw "$(artifact_json "$raw_output")" \
@@ -88,35 +98,83 @@ publish_disposition() {
         status:$status,reason:$reason,preflight_invocations:1,runner_invocations:1,
         workload_invocations:$launched,timed_benchmark_invocations:$timed,
         workload_started:$workload,warmup_complete:$warmup,timed_started:$timed,
-        round_1_complete:$round1,round_2_complete:$round2,process_status:$process_status,
+        round_1_complete:$round1,round_2_complete:$round2,child_status:$child_status,
+        validation_status:$validation_status,runner_status:$runner_status,
         candidate_commit:(if $commit=="" then null else $commit end),
         candidate_tree:(if $tree=="" then null else $tree end),
         binary_sha256:(if $binary=="" then null else $binary end),
-        raw:$raw,accepted:$accepted,stderr:$stderr}' >"$temporary"
-    mv -f -- "$temporary" "$disposition"
+        raw:$raw,accepted:$accepted,stderr:$stderr}' >"$temporary"; then :; else
+        return 1
+    fi
+    if mv -f -- "$temporary" "$disposition"; then :; else return 1; fi
+}
+stop_and_reap_child() {
+    local index wait_status
+    [[ -n "$child_pid" ]] || return 0
+    if kill -0 "$child_pid" 2>/dev/null; then
+        kill -TERM "$child_pid" 2>/dev/null || :
+        for ((index=0; index<50; index++)); do
+            kill -0 "$child_pid" 2>/dev/null || break
+            sleep 0.02
+        done
+        if kill -0 "$child_pid" 2>/dev/null; then kill -KILL "$child_pid" 2>/dev/null || :; fi
+    fi
+    if wait "$child_pid"; then wait_status=0; else wait_status=$?; fi
+    child_status=$wait_status
+    child_pid=
 }
 on_exit() {
     local status=$?
     trap - EXIT INT TERM
-    if [[ "$completed" == 0 ]]; then
+    stop_and_reap_child
+    if [[ "$reservation_owned" == 1 && "$completed" == 0 && "$publication_attempted" == 0 ]]; then
         set +e
-        publish_disposition FAIL "$reason"
+        publication_attempted=1
+        publish_disposition FAIL "$reason" "$status" || :
     fi
     rm -rf -- "$scratch"
     exit "$status"
 }
-on_signal() { reason=workload_interrupted; process_status=130; exit 130; }
+on_signal() {
+    local signal=$1 exit_status=$2
+    reason="workload_interrupted_${signal}"
+    stop_and_reap_child
+    exit "$exit_status"
+}
 trap on_exit EXIT
-trap on_signal INT TERM
+trap 'on_signal INT 130' INT
+trap 'on_signal TERM 143' TERM
 
 # Persist the sole-invocation reservation before any refusal or possible workload launch.
 umask 077
-set -o noclobber
-jq -n -S '{schema_version:1,issue:431,kind:"builtins_current_benchmark_disposition",
- status:"RUNNING",reason:"reserved",preflight_invocations:1,runner_invocations:1,
- workload_invocations:0,timed_benchmark_invocations:0}' >"$disposition"
+if (set -o noclobber; jq -n -S \
+    '{schema_version:1,issue:431,kind:"builtins_current_benchmark_disposition",
+      status:"RUNNING",reason:"reserved",preflight_invocations:1,runner_invocations:1,
+      workload_invocations:0,timed_benchmark_invocations:0}' >"$disposition"); then
+    reservation_owned=1
+else
+    trap - EXIT INT TERM
+    rm -rf -- "$scratch"
+    printf 'Issue-431 invocation reservation was not acquired\n' >&2
+    exit 1
+fi
 
 [[ "$#" == 0 ]] || { reason=invalid_arguments; printf 'usage: %s\n' "$0" >&2; exit 2; }
+for override in RUSTFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_BUILD_RUSTFLAGS CARGO_BUILD_TARGET \
+    CARGO_PROFILE_RELEASE_OPT_LEVEL CARGO_PROFILE_RELEASE_LTO \
+    CARGO_PROFILE_RELEASE_CODEGEN_UNITS CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS \
+    RUSTC RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER \
+    MISO_ENGINE_BENCH_CANDIDATE_COMMIT MISO_ENGINE_BENCH_BINARY_SHA256 \
+    MISO_ENGINE_BENCH_RUST_VERSION MISO_ENGINE_BENCH_LLVM_VERSION \
+    MISO_ENGINE_BENCH_TARGET_TRIPLE MISO_ENGINE_BENCH_TARGET_FEATURES \
+    MISO_ENGINE_BENCH_PROFILE MISO_ENGINE_BENCH_OPT_LEVEL MISO_ENGINE_BENCH_LTO \
+    MISO_ENGINE_BENCH_CODEGEN_UNITS MISO_ENGINE_BENCH_BACKGROUND_LOAD_NOTE \
+    MISO_ENGINE_BENCH_CPU_MODEL MISO_ENGINE_BENCH_CPU_ARCHITECTURE \
+    MISO_ENGINE_BENCH_LOGICAL_CORE_COUNT MISO_ENGINE_BENCH_PHYSICAL_CORE_COUNT \
+    MISO_ENGINE_BENCH_OS MISO_ENGINE_BENCH_KERNEL \
+    MISO_ENGINE_BENCH_GOVERNOR_OR_POWER_MODE; do
+    [[ ! -v "$override" ]] || { reason=environment_override_forbidden; exit 1; }
+done
 [[ -z "${MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED:-}" ]] ||
     { reason=uncontrolled_override_forbidden; printf 'Issue-431 refuses uncontrolled benchmark override\n' >&2; exit 1; }
 for path in "$raw_output" "$accepted_output" "$stderr_output"; do
@@ -166,6 +224,13 @@ input_tree_sha256=$(hash_file "$input_rows")
 binary_sha256=$(hash_file "$binary")
 seal_sha256=$(hash_file "$seal")
 manifest_evidence_sha256=$(hash_file "$manifest_evidence")
+cargo_executable=$(command -v cargo)
+rustc_executable=$(command -v rustc)
+cargo_version=$(cargo -V) || { reason=build_provenance_mismatch; exit 1; }
+rustc_verbose=$(rustc -vV) || { reason=build_provenance_mismatch; exit 1; }
+rust_version=$(printf '%s\n' "$rustc_verbose" | awk 'NR==1 {print}')
+target_triple=$(printf '%s\n' "$rustc_verbose" | awk '$1=="host:" {print $2}')
+llvm_version=$(printf '%s\n' "$rustc_verbose" | awk '$1=="LLVM" && $2=="version:" {print $3}')
 jq -e --arg commit "$candidate_commit" --arg tree "$candidate_tree" \
   --arg binary "$binary_sha256" --arg lock "$(hash_file "$lock_file")" \
   --arg workspace "$(hash_file "$workspace_manifest")" \
@@ -175,6 +240,11 @@ jq -e --arg commit "$candidate_commit" --arg tree "$candidate_tree" \
   --arg aggregate "$(hash_file "$aggregate_validator")" --arg lifecycle "$(hash_file "$lifecycle")" \
   --arg inputs "$input_tree_sha256" --arg manifest "$(hash_file "$fixture_manifest")" \
   --arg evidence "$manifest_evidence_sha256" --arg readme "$(hash_file "$readme")" \
+  --arg cargo_version "$cargo_version" --arg rust_version "$rust_version" \
+  --arg llvm_version "$llvm_version" --arg target_triple "$target_triple" \
+  --arg cargo_executable "$cargo_executable" --arg rustc_executable "$rustc_executable" \
+  --arg cargo_executable_sha "$(hash_file "$cargo_executable")" \
+  --arg rustc_executable_sha "$(hash_file "$rustc_executable")" \
   'type=="object" and .schema_version==1 and .issue==431 and
    .kind=="builtins_current_benchmark_preflight" and .status=="READY" and
    .candidate_commit==$commit and .candidate_tree==$tree and .binary_sha256==$binary and
@@ -186,6 +256,11 @@ jq -e --arg commit "$candidate_commit" --arg tree "$candidate_tree" \
    .lifecycle_sha256==$lifecycle and .input_tree_sha256==$inputs and
    .fixture_manifest_sha256==$manifest and .manifest_evidence_sha256==$evidence and
    .readme_sha256==$readme and
+   .cargo_version==$cargo_version and .rust_version==$rust_version and
+   .llvm_version==$llvm_version and .target_triple==$target_triple and
+   .cargo_executable==$cargo_executable and .rustc_executable==$rustc_executable and
+   .cargo_executable_sha256==$cargo_executable_sha and
+   .rustc_executable_sha256==$rustc_executable_sha and
    .target_features=="+avx2,+fma" and .profile=="release" and .opt_level=="3" and
    .lto=="fat" and .codegen_units==1 and .records_required==20 and
    .warmup_passes==1 and .measured_rounds==2 and .preflight_invocations==1 and
@@ -233,40 +308,50 @@ launched=1
 set +e
 MISO_ENGINE_BENCH_CANDIDATE_COMMIT="$candidate_commit" \
 MISO_ENGINE_BENCH_BINARY_SHA256="$binary_sha256" \
-taskset -c "$bench_cpu" "$binary" builtins >&"$raw_fd" 2>&"$stderr_fd"
-process_status=$?
+MISO_ENGINE_BENCH_RUST_VERSION="$rust_version" \
+MISO_ENGINE_BENCH_LLVM_VERSION="$llvm_version" \
+MISO_ENGINE_BENCH_TARGET_TRIPLE="$target_triple" \
+MISO_ENGINE_BENCH_TARGET_FEATURES='+avx2,+fma' \
+MISO_ENGINE_BENCH_PROFILE=release MISO_ENGINE_BENCH_OPT_LEVEL=3 \
+MISO_ENGINE_BENCH_LTO=fat MISO_ENGINE_BENCH_CODEGEN_UNITS=1 \
+MISO_ENGINE_BENCH_BACKGROUND_LOAD_NOTE="controlled; loadavg $loadavg; affinity cpu$bench_cpu; sibling ceiling 5%; cooldown 60s" \
+taskset -c "$bench_cpu" "$binary" builtins >&"$raw_fd" 2>&"$stderr_fd" &
+child_pid=$!
+if wait "$child_pid"; then child_status=0; else child_status=$?; fi
+child_pid=
 set -e
 exec {raw_fd}>&-
 exec {stderr_fd}>&-
 refresh_phases
-if ((process_status != 0)); then
-    ((process_status < 128)) || reason=workload_interrupted
-    exit "$process_status"
+if ((child_status != 0)); then
+    ((child_status < 128)) || reason=workload_interrupted
+    exit "$child_status"
 fi
 [[ "$workload_started" == 1 && "$warmup_complete" == 1 && "$timed_started" == 1 &&
    "$round_1_complete" == 1 && "$round_2_complete" == 1 ]] ||
-    { reason=phase_mismatch; process_status=1; exit 1; }
+    { reason=phase_mismatch; validation_status=phase_failed; exit 1; }
 
 reason=record_validation_failed
 jq -s -e -L "$script_directory" 'include "builtins-current-benchmark-record-validator";
  all(.[]; builtins_benchmark_record_valid)' "$raw_output" >/dev/null 2>>"$stderr_output" ||
-    { process_status=1; exit 1; }
+    { validation_status=record_failed; exit 1; }
 reason=aggregate_validation_failed
 jq -s -e -L "$script_directory" -f "$aggregate_validator" "$raw_output" >/dev/null 2>>"$stderr_output" ||
-    { process_status=1; exit 1; }
+    { validation_status=aggregate_failed; exit 1; }
+validation_status=passed
 
 reason=promotion_failed
 temporary_accepted="$scratch/accepted.jsonl"
 cp -- "$raw_output" "$temporary_accepted"
-cmp -s -- "$raw_output" "$temporary_accepted" || { process_status=1; exit 1; }
-[[ ! -e "$accepted_output" && ! -L "$accepted_output" ]] || { process_status=1; exit 1; }
+cmp -s -- "$raw_output" "$temporary_accepted" || exit 1
+[[ ! -e "$accepted_output" && ! -L "$accepted_output" ]] || exit 1
 mv -n -- "$temporary_accepted" "$accepted_output"
 [[ ! -e "$temporary_accepted" && -f "$accepted_output" && ! -L "$accepted_output" &&
-   "$(stat -c %h "$accepted_output")" == 1 ]] || { process_status=1; exit 1; }
-cmp -s -- "$raw_output" "$accepted_output" || { process_status=1; exit 1; }
+   "$(stat -c %h "$accepted_output")" == 1 ]] || exit 1
+cmp -s -- "$raw_output" "$accepted_output" || exit 1
 
-process_status=0
-publish_disposition PASS complete
+publication_attempted=1
+publish_disposition PASS complete 0 || { printf 'Issue-431 final disposition publication failed\n' >&2; exit 1; }
 completed=1
 trap - EXIT INT TERM
 rm -rf -- "$scratch"

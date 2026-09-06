@@ -33,9 +33,26 @@ hash_file() {
 one_link_file() {
     [[ -f "$1" && ! -L "$1" && "$(stat -c %h "$1")" == 1 ]]
 }
-for tool in awk cargo chmod cp git jq mkdir mktemp mv rm sha256sum stat; do
+for tool in awk cargo chmod cp git jq mkdir mktemp mv rm rustc sha256sum stat; do
     command -v "$tool" >/dev/null 2>&1 || fail "required tool unavailable: $tool"
 done
+for override in RUSTFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_BUILD_RUSTFLAGS CARGO_BUILD_TARGET \
+    CARGO_PROFILE_RELEASE_OPT_LEVEL CARGO_PROFILE_RELEASE_LTO \
+    CARGO_PROFILE_RELEASE_CODEGEN_UNITS CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS \
+    RUSTC RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER; do
+    [[ ! -v "$override" ]] || fail "incompatible build environment: $override"
+done
+if cargo_version=$(cargo -V); then :; else fail 'cargo version query failed'; fi
+if rustc_verbose=$(rustc -vV); then :; else fail 'rustc provenance query failed'; fi
+rust_version=$(printf '%s\n' "$rustc_verbose" | awk 'NR==1 {print; found=1} END {if (!found) exit 1}') ||
+    fail 'rustc version is unavailable'
+target_triple=$(printf '%s\n' "$rustc_verbose" | awk '$1=="host:" {print $2; found=1} END {if (!found) exit 1}') ||
+    fail 'rustc host target is unavailable'
+llvm_version=$(printf '%s\n' "$rustc_verbose" | awk '$1=="LLVM" && $2=="version:" {print $3; found=1} END {if (!found) exit 1}') ||
+    fail 'LLVM version is unavailable'
+cargo_executable=$(command -v cargo)
+rustc_executable=$(command -v rustc)
+[[ -x "$cargo_executable" && -x "$rustc_executable" ]] || fail 'build tool executable unavailable'
 for directory in "$repository_root/artifacts" "$repository_root/target"; do
     [[ ! -L "$directory" ]] || fail "parent directory is a symlink: $directory"
 done
@@ -96,7 +113,12 @@ input_tree_sha256=$(hash_file "$input_rows")
     fail 'current fixture manifest identity mismatch'
 
 rm -rf -- "$build_directory"
-if (cd "$repository_root" && CARGO_TARGET_DIR="$build_directory" cargo build --locked --release -p bench); then :; else
+if (cd "$repository_root" && \
+    CARGO_TARGET_DIR="$build_directory" \
+    CARGO_PROFILE_RELEASE_OPT_LEVEL=3 CARGO_PROFILE_RELEASE_LTO=fat \
+    CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
+    CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS='-Ctarget-feature=+avx2,+fma' \
+    cargo build --locked --release -p bench); then :; else
     fail 'isolated release build failed'
 fi
 built_binary="$build_directory/release/bench"
@@ -116,6 +138,8 @@ if final_clean=$(git -C "$repository_root" status --porcelain=v1 --untracked-fil
     fail 'candidate drifted during preparation'
 
 binary_sha256=$(hash_file "$binary")
+cargo_executable_sha256=$(hash_file "$cargo_executable")
+rustc_executable_sha256=$(hash_file "$rustc_executable")
 lock_sha256=$(hash_file "$lock_file")
 workspace_manifest_sha256=$(hash_file "$workspace_manifest")
 source_sha256=$(hash_file "$source_file")
@@ -148,6 +172,11 @@ jq -n -S \
   --arg lifecycle "$lifecycle_sha256" --arg inputs "$input_tree_sha256" \
   --arg manifest "$(hash_file "$fixture_manifest")" --arg evidence "$manifest_evidence_sha256" \
   --arg readme "$readme_sha256" \
+  --arg cargo_version "$cargo_version" --arg rust_version "$rust_version" \
+  --arg llvm_version "$llvm_version" --arg target_triple "$target_triple" \
+  --arg cargo_executable "$cargo_executable" --arg rustc_executable "$rustc_executable" \
+  --arg cargo_executable_sha "$cargo_executable_sha256" \
+  --arg rustc_executable_sha "$rustc_executable_sha256" \
   '{schema_version:1,issue:431,kind:"builtins_current_benchmark_preflight",status:"READY",
     candidate_commit:$commit,candidate_tree:$tree,binary_sha256:$binary,
     cargo_lock_sha256:$lock,workspace_manifest_sha256:$workspace,
@@ -157,6 +186,10 @@ jq -n -S \
     record_validator_sha256:$record,aggregate_validator_sha256:$aggregate,
     lifecycle_sha256:$lifecycle,input_tree_sha256:$inputs,
     fixture_manifest_sha256:$manifest,manifest_evidence_sha256:$evidence,readme_sha256:$readme,
+    cargo_version:$cargo_version,rust_version:$rust_version,llvm_version:$llvm_version,
+    target_triple:$target_triple,cargo_executable:$cargo_executable,
+    rustc_executable:$rustc_executable,cargo_executable_sha256:$cargo_executable_sha,
+    rustc_executable_sha256:$rustc_executable_sha,
     target_features:"+avx2,+fma",profile:"release",opt_level:"3",lto:"fat",codegen_units:1,
     records_required:20,warmup_passes:1,measured_rounds:2,
     preflight_invocations:1,runner_invocations:0,workload_invocations:0,

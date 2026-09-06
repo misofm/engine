@@ -220,10 +220,17 @@ EOF
 cat >"$template/bin/cargo" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ "${1:-}" == -V ]]; then printf 'cargo 1.99.0 (fake)\n'; exit 0; fi
 [[ "${1:-}" == build && "${2:-}" == --locked && "${3:-}" == --release && "${4:-}" == -p && "${5:-}" == bench ]] || exit 90
 mkdir -p "$CARGO_TARGET_DIR/release"
 cp synthetic-emitter.sh "$CARGO_TARGET_DIR/release/bench"
 chmod 755 "$CARGO_TARGET_DIR/release/bench"
+EOF
+cat >"$template/bin/rustc" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${1:-}" == -vV ]] || exit 90
+printf 'rustc 1.99.0 (fake)\nbinary: rustc\ncommit-hash: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.0\nLLVM version: 20.1.0\n'
 EOF
 cat >"$template/bin/taskset" <<'EOF'
 #!/usr/bin/env bash
@@ -235,6 +242,32 @@ EOF
 cat >"$template/bin/sleep" <<'EOF'
 #!/usr/bin/env bash
 exit 0
+EOF
+cat >"$template/bin/mktemp" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+real=$(<"$root/real-mktemp")
+result=$($real "$@")
+if [[ -f "$root/reservation-race" && "$result" == */artifacts/issue431-full-chain/.run.* ]]; then
+  printf '{"winner":"first"}\n' >"$root/artifacts/issue431-full-chain/builtins-benchmark.disposition.json"
+fi
+printf '%s\n' "$result"
+EOF
+cat >"$template/bin/mv" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+destination=${@: -1}
+if [[ -f "$root/fail-disposition-publication" && "$destination" == */builtins-benchmark.disposition.json ]]; then
+  printf 'synthetic disposition persistence failure\n' >&2
+  exit 88
+fi
+if [[ -f "$root/fail-accepted-promotion" && "$destination" == */builtins-benchmark.jsonl ]]; then
+  printf 'synthetic accepted promotion failure\n' >&2
+  exit 89
+fi
+exec "$(<"$root/real-mv")" "$@"
 EOF
 cat >"$template/bin/cat" <<'EOF'
 #!/usr/bin/env bash
@@ -257,9 +290,25 @@ mode=$(<"$root/synthetic-mode")
 records="$root/synthetic-records.jsonl"
 emit_records() {
   jq -c --arg commit "$MISO_ENGINE_BENCH_CANDIDATE_COMMIT" --arg binary "$MISO_ENGINE_BENCH_BINARY_SHA256" \
-    '.candidate_commit=$commit|.binary_sha256=$binary' "$records"
+    --arg rust "$MISO_ENGINE_BENCH_RUST_VERSION" --arg llvm "$MISO_ENGINE_BENCH_LLVM_VERSION" \
+    --arg triple "$MISO_ENGINE_BENCH_TARGET_TRIPLE" --arg features "$MISO_ENGINE_BENCH_TARGET_FEATURES" \
+    --arg profile "$MISO_ENGINE_BENCH_PROFILE" --arg opt "$MISO_ENGINE_BENCH_OPT_LEVEL" \
+    --arg lto "$MISO_ENGINE_BENCH_LTO" --arg units "$MISO_ENGINE_BENCH_CODEGEN_UNITS" \
+    --arg note "$MISO_ENGINE_BENCH_BACKGROUND_LOAD_NOTE" \
+    '.candidate_commit=$commit|.binary_sha256=$binary|.rust_version=$rust|.llvm_version=$llvm|
+     .target_triple=$triple|.target_features=$features|.profile=$profile|.opt_level=$opt|
+     .lto=$lto|.codegen_units=$units|.background_load_note=$note|
+     .missing_metadata -= ["rust_version","llvm_version","target_triple","target_features",
+       "profile","opt_level","lto","codegen_units","background_load_note"]' "$records"
 }
 printf 'MISO_ENGINE_BENCH_PHASE workload_started\n' >&2
+if [[ "$mode" == interrupt ]]; then
+  printf '{"partial":"interrupt"}\n'
+  printf '%s\n' "$$" >"$root/blocking-child-pid"
+  trap 'printf "reaped-by-runner\n" >>"$root/blocking-child-stopped"; exit 143' TERM
+  kill -TERM "$PPID"
+  while :; do :; done
+fi
 [[ "$mode" != warmup_fail ]] || { printf '{"partial":"warmup"}\n'; exit 71; }
 printf 'MISO_ENGINE_BENCH_PHASE warmup_complete\nMISO_ENGINE_BENCH_PHASE timed_started\n' >&2
 [[ "$mode" != round1_fail ]] || { head -n 5 "$records"; exit 72; }
@@ -271,12 +320,13 @@ case "$mode" in
   bad_record) emit_records | jq -c 'if .workload_kind=="full_chain_filters" and .sample_rate_hz==48000 and .round==1 then .render_allocations=1 else . end' ;;
   bad_aggregate) emit_records | awk 'NR==20{print first;next} NR==1{first=$0} {print}' ;;
   bad_phase) printf 'MISO_ENGINE_BENCH_PHASE round_2_complete\n' >&2; emit_records ;;
-  interrupt) kill -TERM "$PPID"; exit 143 ;;
   *) exit 90 ;;
 esac
 EOF
 chmod 755 "$template/bin/"* "$template/synthetic-emitter.sh"
 command -v cat >"$template/real-cat"
+command -v mktemp >"$template/real-mktemp"
+command -v mv >"$template/real-mv"
 
 new_case() {
   local name=$1
@@ -287,7 +337,7 @@ new_case() {
 }
 assert_fakes() {
   local tool selected
-  for tool in cargo git taskset sleep cat; do
+  for tool in cargo git rustc taskset sleep cat mktemp mv; do
     selected=$(PATH="$case_root/bin:$PATH" command -v "$tool")
     [[ "$selected" == "$case_root/bin/$tool" ]] || { printf 'selected non-fake %s\n' "$tool" >&2; exit 1; }
   done
@@ -307,7 +357,11 @@ run_preflight >/dev/null
 [[ ! -e "$case_root/synthetic-launches" ]]
 jq -e '.status=="READY" and .issue==431 and .records_required==20 and
  .workload_invocations==0 and .timed_benchmark_invocations==0 and
- .profile=="release" and .lto=="fat" and .codegen_units==1' \
+ .profile=="release" and .opt_level=="3" and .lto=="fat" and .codegen_units==1 and
+ .target_features=="+avx2,+fma" and .cargo_version=="cargo 1.99.0 (fake)" and
+ .rust_version=="rustc 1.99.0 (fake)" and .llvm_version=="20.1.0" and
+ .target_triple=="x86_64-unknown-linux-gnu" and
+ (.cargo_executable|endswith("/bin/cargo")) and (.rustc_executable|endswith("/bin/rustc"))' \
  "$case_root/artifacts/issue431-full-chain/builtins-benchmark.preflight.json" >/dev/null
 for selected in cargo git; do [[ "$(PATH="$case_root/bin:$PATH" command -v "$selected")" == "$case_root/bin/$selected" ]]; done
 
@@ -317,8 +371,15 @@ printf 'protected\n' >"$case_root/artifacts/issue431-full-chain/builtins-benchma
 if run_preflight >/dev/null 2>&1; then exit 1; fi
 [[ "$(<"$case_root/artifacts/issue431-full-chain/builtins-benchmark.preflight.json")" == protected && ! -e "$case_root/synthetic-launches" ]]
 
+for override in RUSTFLAGS CARGO_PROFILE_RELEASE_LTO CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS RUSTC_WRAPPER; do
+  new_case "build-env-$override"
+  if env "$override=conflict" PATH="$case_root/bin:$PATH" \
+      bash "$case_root/scripts/preflight-builtins-current-benchmark.sh" >/dev/null 2>&1; then exit 1; fi
+  [[ ! -e "$case_root/synthetic-launches" && ! -e "$case_root/target/issue431-prepared/bench" ]]
+done
+
 run_failure_case() {
-  local name=$1 mode=$2 reason=$3
+  local name=$1 mode=$2 reason=$3 expected_child=$4 expected_validation=$5 expected_runner=$6
   new_case "$name"; run_preflight >/dev/null
   printf '%s\n' "$mode" >"$case_root/synthetic-mode"
   if run_benchmark >/dev/null 2>&1; then exit 1; fi
@@ -327,6 +388,25 @@ run_failure_case() {
     jq . "$case_root/artifacts/issue431-full-chain/builtins-benchmark.disposition.json" >&2
     exit 1
   }
+  disposition_file="$case_root/artifacts/issue431-full-chain/builtins-benchmark.disposition.json"
+  raw_file="$case_root/artifacts/issue431-full-chain/builtins-benchmark.raw.jsonl"
+  stderr_file="$case_root/artifacts/issue431-full-chain/builtins-benchmark.stderr"
+  accepted_file="$case_root/artifacts/issue431-full-chain/builtins-benchmark.jsonl"
+  jq -e --argjson child "$expected_child" --arg validation "$expected_validation" \
+    --argjson runner "$expected_runner" \
+    '.child_status==$child and .validation_status==$validation and .runner_status==$runner and
+     .workload_invocations==1 and .raw!=null and .stderr!=null' "$disposition_file" >/dev/null
+  [[ ! -e "$accepted_file" && "$(wc -l <"$case_root/synthetic-launches")" == 1 ]]
+  raw_sha_before=$(sha256sum "$raw_file" | awk '{print $1}')
+  stderr_sha_before=$(sha256sum "$stderr_file" | awk '{print $1}')
+  disposition_sha_before=$(sha256sum "$disposition_file" | awk '{print $1}')
+  jq -e --arg raw "$raw_sha_before" --arg stderr "$stderr_sha_before" \
+    '.raw.sha256==$raw and .stderr.sha256==$stderr' "$disposition_file" >/dev/null
+  if run_benchmark >/dev/null 2>&1; then exit 1; fi
+  [[ "$raw_sha_before" == "$(sha256sum "$raw_file" | awk '{print $1}')" &&
+     "$stderr_sha_before" == "$(sha256sum "$stderr_file" | awk '{print $1}')" &&
+     "$disposition_sha_before" == "$(sha256sum "$disposition_file" | awk '{print $1}')" &&
+     "$(wc -l <"$case_root/synthetic-launches")" == 1 ]]
 }
 
 new_case bad-args
@@ -350,6 +430,29 @@ if run_benchmark >/dev/null 2>&1; then exit 1; fi
 disposition_reason FAIL existing_output
 [[ ! -e "$case_root/synthetic-launches" ]]
 
+new_case reservation-race
+run_preflight >/dev/null
+printf 'race\n' >"$case_root/reservation-race"
+if run_benchmark >/dev/null 2>&1; then exit 1; fi
+[[ "$(<"$case_root/artifacts/issue431-full-chain/builtins-benchmark.disposition.json")" == '{"winner":"first"}' ]]
+[[ ! -e "$case_root/synthetic-launches" ]]
+
+new_case artifact-parent-symlink
+run_preflight >/dev/null
+seal_before=$(sha256sum "$case_root/artifacts/issue431-full-chain/builtins-benchmark.preflight.json" | awk '{print $1}')
+mv "$case_root/artifacts" "$case_root/artifacts-physical"
+ln -s artifacts-physical "$case_root/artifacts"
+if run_benchmark >/dev/null 2>&1; then exit 1; fi
+[[ "$seal_before" == "$(sha256sum "$case_root/artifacts-physical/issue431-full-chain/builtins-benchmark.preflight.json" | awk '{print $1}')" && ! -e "$case_root/synthetic-launches" ]]
+
+new_case prepared-directory-symlink
+run_preflight >/dev/null
+binary_before=$(sha256sum "$case_root/target/issue431-prepared/bench" | awk '{print $1}')
+mv "$case_root/target/issue431-prepared" "$case_root/target/issue431-prepared-physical"
+ln -s issue431-prepared-physical "$case_root/target/issue431-prepared"
+if run_benchmark >/dev/null 2>&1; then exit 1; fi
+[[ "$binary_before" == "$(sha256sum "$case_root/target/issue431-prepared-physical/bench" | awk '{print $1}')" && ! -e "$case_root/synthetic-launches" ]]
+
 for drift in binary source validator; do
   new_case "drift-$drift"; run_preflight >/dev/null
   case "$drift" in
@@ -357,6 +460,14 @@ for drift in binary source validator; do
     source) printf '// drift\n' >>"$case_root/tools/bench/src/builtins.rs" ;;
     validator) printf '# drift\n' >>"$case_root/scripts/builtins-current-benchmark-record-validator.jq" ;;
   esac
+  if run_benchmark >/dev/null 2>&1; then exit 1; fi
+  disposition_reason FAIL preflight_seal_mismatch
+  [[ ! -e "$case_root/synthetic-launches" ]]
+done
+
+for build_tool in cargo rustc; do
+  new_case "drift-$build_tool"; run_preflight >/dev/null
+  printf '# drift\n' >>"$case_root/bin/$build_tool"
   if run_benchmark >/dev/null 2>&1; then exit 1; fi
   disposition_reason FAIL preflight_seal_mismatch
   [[ ! -e "$case_root/synthetic-launches" ]]
@@ -375,15 +486,57 @@ if MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED=1 run_benchmark >/dev/null 2>&1; then ex
 disposition_reason FAIL uncontrolled_override_forbidden
 [[ ! -e "$case_root/synthetic-launches" ]]
 
-run_failure_case warmup warmup_fail workload_failed
-[[ "$(wc -l <"$case_root/synthetic-launches")" == 1 ]]
-grep -Fqx '{"partial":"warmup"}' "$case_root/artifacts/issue431-full-chain/builtins-benchmark.raw.jsonl"
-run_failure_case round1 round1_fail workload_failed
-run_failure_case round2 round2_fail workload_failed
-run_failure_case bad-record bad_record record_validation_failed
-run_failure_case bad-aggregate bad_aggregate aggregate_validation_failed
-run_failure_case bad-phase bad_phase phase_mismatch
-run_failure_case interruption interrupt workload_interrupted
+new_case metadata-override
+run_preflight >/dev/null
+if MISO_ENGINE_BENCH_PROFILE=caller-value run_benchmark >/dev/null 2>&1; then exit 1; fi
+disposition_reason FAIL environment_override_forbidden
+[[ ! -e "$case_root/synthetic-launches" ]]
+
+run_failure_case warmup warmup_fail workload_failed 71 not_run 71
+grep -Fqx '{"partial":"warmup"}' "$raw_file"
+jq -e '.workload_started==1 and .warmup_complete==0 and .timed_started==0 and
+ .round_1_complete==0 and .round_2_complete==0' "$disposition_file" >/dev/null
+run_failure_case round1 round1_fail workload_failed 72 not_run 72
+cmp -s "$raw_file" <(head -n 5 "$case_root/synthetic-records.jsonl")
+jq -e '.workload_started==1 and .warmup_complete==1 and .timed_started==1 and
+ .round_1_complete==0 and .round_2_complete==0' "$disposition_file" >/dev/null
+run_failure_case round2 round2_fail workload_failed 73 not_run 73
+cmp -s "$raw_file" <(head -n 15 "$case_root/synthetic-records.jsonl")
+jq -e '.workload_started==1 and .warmup_complete==1 and .timed_started==1 and
+ .round_1_complete==1 and .round_2_complete==0' "$disposition_file" >/dev/null
+run_failure_case bad-record bad_record record_validation_failed 0 record_failed 1
+[[ "$(wc -l <"$raw_file")" == 20 ]]
+run_failure_case bad-aggregate bad_aggregate aggregate_validation_failed 0 aggregate_failed 1
+[[ "$(wc -l <"$raw_file")" == 20 ]]
+run_failure_case bad-phase bad_phase phase_mismatch 0 phase_failed 1
+jq -e '.workload_started==1 and .warmup_complete==1 and .timed_started==1 and
+ .round_1_complete==1 and .round_2_complete==2' "$disposition_file" >/dev/null
+run_failure_case interruption interrupt workload_interrupted_TERM 143 not_run 143
+grep -Fqx '{"partial":"interrupt"}' "$raw_file"
+jq -e '.workload_started==1 and .warmup_complete==0 and .timed_started==0 and
+ .round_1_complete==0 and .round_2_complete==0' "$disposition_file" >/dev/null
+[[ "$(<"$case_root/blocking-child-stopped")" == reaped-by-runner ]]
+blocking_pid=$(<"$case_root/blocking-child-pid")
+if kill -0 "$blocking_pid" 2>/dev/null; then printf 'blocking child survived disposition\n' >&2; exit 1; fi
+
+new_case disposition-persistence
+run_preflight >/dev/null
+printf 'fail\n' >"$case_root/fail-disposition-publication"
+if run_benchmark >/dev/null 2>&1; then exit 1; fi
+jq -e '.status=="RUNNING" and .reason=="reserved"' \
+  "$case_root/artifacts/issue431-full-chain/builtins-benchmark.disposition.json" >/dev/null
+[[ "$(wc -l <"$case_root/synthetic-launches")" == 1 &&
+   "$(wc -l <"$case_root/artifacts/issue431-full-chain/builtins-benchmark.raw.jsonl")" == 20 ]]
+
+new_case promotion-persistence
+run_preflight >/dev/null
+printf 'fail\n' >"$case_root/fail-accepted-promotion"
+if run_benchmark >/dev/null 2>&1; then exit 1; fi
+disposition_reason FAIL promotion_failed
+jq -e '.child_status==0 and .validation_status=="passed" and .raw!=null and .accepted==null' \
+  "$case_root/artifacts/issue431-full-chain/builtins-benchmark.disposition.json" >/dev/null
+[[ "$(wc -l <"$case_root/synthetic-launches")" == 1 &&
+   ! -e "$case_root/artifacts/issue431-full-chain/builtins-benchmark.jsonl" ]]
 
 new_case success
 run_preflight >/dev/null
@@ -394,6 +547,11 @@ cmp -s "$raw" "$accepted"
 [[ "$(wc -l <"$raw")" == 20 && "$(wc -l <"$case_root/synthetic-launches")" == 1 ]]
 disposition_reason PASS complete
 jq -s -e -L "$case_root/scripts" -f "$case_root/scripts/builtins-current-benchmark-validator.jq" "$raw" >/dev/null
+jq -s -e '. | all(.[]; .rust_version=="rustc 1.99.0 (fake)" and
+ .llvm_version=="20.1.0" and .target_triple=="x86_64-unknown-linux-gnu" and
+ .target_features=="+avx2,+fma" and .profile=="release" and .opt_level=="3" and
+ .lto=="fat" and .codegen_units=="1" and
+ (.background_load_note|startswith("controlled; loadavg 0.01")))' "$raw" >/dev/null
 if run_benchmark >/dev/null 2>&1; then exit 1; fi
 [[ "$(wc -l <"$case_root/synthetic-launches")" == 1 ]]
 
