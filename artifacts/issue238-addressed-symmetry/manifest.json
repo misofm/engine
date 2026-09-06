@@ -375,6 +375,11 @@
     "sha256": "77602147be53d14405b203d9a28983862b28fb214c16ace0b4f345cd0c2a0356"
   },
   {
+    "path": "astra-238-attempt2-review.md",
+    "bytes": 2893,
+    "sha256": "8661975bf00109fb0573916e013d7166aebec747e375411dacedc314f8e5fa2f"
+  },
+  {
     "path": "astra-238-current-base-review.md",
     "bytes": 4437,
     "sha256": "cbd15342e17340dd2daaebc8407253c164e557950eb83f95d23da884704af1b6"
