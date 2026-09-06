@@ -1,0 +1,145 @@
+   Compiling bytemuck v1.25.2
+   Compiling engine v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/engine)
+   Compiling lexical-util v1.0.7
+   Compiling cfg-if v1.0.4
+   Compiling typenum v1.20.1
+   Compiling once_cell v1.21.4
+   Compiling smallvec v1.15.2
+   Compiling locspan v0.8.2
+   Compiling utf8-decode v1.0.1
+   Compiling decoded-char v0.1.1
+   Compiling cpufeatures v0.3.0
+   Compiling dsp-reference v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/dsp-reference)
+   Compiling libc v0.2.189
+   Compiling safe_arch v1.2.0
+   Compiling smallstr v0.3.1
+   Compiling lexical-write-integer v1.0.6
+   Compiling lexical-parse-integer v1.0.6
+   Compiling wide v1.6.1
+   Compiling lexical-parse-float v1.0.6
+   Compiling lexical-write-float v1.0.6
+   Compiling getrandom v0.2.17
+   Compiling hybrid-array v0.4.14
+   Compiling ahash v0.7.8
+   Compiling lexical-core v1.0.6
+   Compiling hashbrown v0.12.3
+   Compiling lexical v7.0.5
+   Compiling json-number v0.4.10
+   Compiling crypto-common v0.2.2
+   Compiling block-buffer v0.12.1
+   Compiling indexmap v1.9.3
+   Compiling json-syntax v0.12.5
+   Compiling digest v0.11.3
+   Compiling sha2 v0.11.0
+   Compiling session v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/session)
+   Compiling lane v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/lane)
+   Compiling math v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/math)
+   Compiling effect-contract v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/effect-contract)
+   Compiling effect-runtime v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/effect-runtime)
+   Compiling rack v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/rack)
+   Compiling true-peak-limiter v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/true-peak-limiter)
+   Compiling gate-expander v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/gate-expander)
+   Compiling builtins v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/builtins)
+   Compiling delay v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/delay)
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/compressor)
+   Compiling multiband-compressor v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/multiband-compressor)
+   Compiling parametric-eq v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/parametric-eq)
+   Compiling soft-clip v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/soft-clip)
+   Compiling transient-shaper v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/transient-shaper)
+   Compiling conformance v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/conformance)
+   Compiling rack-compiler v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/rack-compiler)
+   Compiling graph v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/graph)
+   Compiling effect-package v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/effect-package)
+   Compiling builtins-compiler v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/builtins-compiler)
+   Compiling effect-compiler v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/effect-compiler)
+   Compiling graph-compiler v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/graph-compiler)
+error[E0599]: no associated function or constant named `default` found for struct `graph::GraphResourceEstimate` in the current scope
+    --> crates/graph-compiler/src/lib.rs:2379:51
+     |
+2379 |         let mut estimate = GraphResourceEstimate::default();
+     |                                                   ^^^^^^^ associated function or constant not found in `graph::GraphResourceEstimate`
+
+error[E0308]: mismatched types
+    --> crates/graph-compiler/src/lib.rs:2427:64
+     |
+2427 |         let prepared = prepare_session_builtins(&session, &[], &builtin_caps).expect("prepared builtins");
+     |                        ------------------------                ^^^^^^^^^^^^^ expected `BuiltinCompileCaps`, found `&BuiltinCompileCaps`
+     |                        |
+     |                        arguments to this function are incorrect
+     |
+note: function defined here
+    --> crates/builtins-compiler/src/lib.rs:2751:8
+     |
+2751 | pub fn prepare_session_builtins(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^
+help: consider removing the borrow
+     |
+2427 -         let prepared = prepare_session_builtins(&session, &[], &builtin_caps).expect("prepared builtins");
+2427 +         let prepared = prepare_session_builtins(&session, &[], builtin_caps).expect("prepared builtins");
+     |
+
+error[E0308]: mismatched types
+    --> crates/graph-compiler/src/lib.rs:2455:68
+     |
+2455 |             let prepared = prepare_session_builtins(&session, &[], &builtin_caps).expect("prepared for cap");
+     |                            ------------------------                ^^^^^^^^^^^^^ expected `BuiltinCompileCaps`, found `&BuiltinCompileCaps`
+     |                            |
+     |                            arguments to this function are incorrect
+     |
+note: function defined here
+    --> crates/builtins-compiler/src/lib.rs:2751:8
+     |
+2751 | pub fn prepare_session_builtins(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^
+help: consider removing the borrow
+     |
+2455 -             let prepared = prepare_session_builtins(&session, &[], &builtin_caps).expect("prepared for cap");
+2455 +             let prepared = prepare_session_builtins(&session, &[], builtin_caps).expect("prepared for cap");
+     |
+
+error[E0277]: `GraphBuiltinsCompileFailure` doesn't implement `Debug`
+    --> crates/graph-compiler/src/lib.rs:2460:16
+     |
+2460 |             }).expect("exact whole-plan cap accepts");
+     |                ^^^^^^ unsatisfied trait bound
+     |
+help: the trait `Debug` is not implemented for `GraphBuiltinsCompileFailure`
+    --> crates/graph-compiler/src/lib.rs:119:1
+     |
+ 119 | pub struct GraphBuiltinsCompileFailure {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     = note: add `#[derive(Debug)]` to `GraphBuiltinsCompileFailure` or manually `impl Debug for GraphBuiltinsCompileFailure`
+note: required by a bound in `Result::<T, E>::expect`
+    --> /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/result.rs:1179:4
+
+error[E0308]: mismatched types
+    --> crates/graph-compiler/src/lib.rs:2468:68
+     |
+2468 |             let prepared = prepare_session_builtins(&session, &[], &builtin_caps).expect("returned prepared");
+     |                            ------------------------                ^^^^^^^^^^^^^ expected `BuiltinCompileCaps`, found `&BuiltinCompileCaps`
+     |                            |
+     |                            arguments to this function are incorrect
+     |
+note: function defined here
+    --> crates/builtins-compiler/src/lib.rs:2751:8
+     |
+2751 | pub fn prepare_session_builtins(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^
+help: consider removing the borrow
+     |
+2468 -             let prepared = prepare_session_builtins(&session, &[], &builtin_caps).expect("returned prepared");
+2468 +             let prepared = prepare_session_builtins(&session, &[], builtin_caps).expect("returned prepared");
+     |
+
+error[E0277]: `PreparedBuiltinsGraphArtifact<GraphCompileReport>` doesn't implement `Debug`
+    --> crates/graph-compiler/src/lib.rs:2473:16
+     |
+2473 |             }).expect_err("one byte below whole-plan cap rejects");
+     |                ^^^^^^^^^^ the trait `Debug` is not implemented for `PreparedBuiltinsGraphArtifact<GraphCompileReport>`
+     |
+note: required by a bound in `Result::<T, E>::expect_err`
+    --> /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/result.rs:1293:4
+
+Some errors have detailed explanations: E0277, E0308, E0599.
+For more information about an error, try `rustc --explain E0277`.
+error: could not compile `graph-compiler` (lib test) due to 6 previous errors

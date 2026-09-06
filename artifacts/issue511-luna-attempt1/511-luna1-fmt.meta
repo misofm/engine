@@ -1,0 +1,4 @@
+argv=[cargo fmt --all]
+cwd=/home/bl/misofm/engine-slot-reservation
+env=PATH=/home/bl/.cargo/bin:$PATH
+exit=0

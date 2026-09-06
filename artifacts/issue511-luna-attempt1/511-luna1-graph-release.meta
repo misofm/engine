@@ -1,0 +1,1 @@
+argv=[cargo test --locked --release -p graph-compiler --lib tests::runtime_bank_slot_reservation_is_published_and_capped_transactionally -- --exact]\ncwd=/home/bl/misofm/engine-slot-reservation\nenv=PATH=/home/bl/.cargo/bin:$PATH\nexit=0\n

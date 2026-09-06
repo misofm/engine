@@ -1,0 +1,282 @@
+[
+  {
+    "path": "511-luna1-check.log",
+    "bytes": 3398,
+    "sha256": "bebdbd7b5f0d2fd1dd8e434b3099cf50d6bdb8027ef3a6ee8cda822a32ae91ef"
+  },
+  {
+    "path": "511-luna1-check.meta",
+    "bytes": 132,
+    "sha256": "cbc9baaabb342a8250d34652a7a0492d64ec12cca85371a974ec2338232f7d28"
+  },
+  {
+    "path": "511-luna1-diff-check.log",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "511-luna1-diff-check.meta",
+    "bytes": 110,
+    "sha256": "8abcabb8010bacfbc68929cdeb30063ff27d3c4a0d7679c124133e34006c2216"
+  },
+  {
+    "path": "511-luna1-final-clippy-graph-compiler-correction.meta",
+    "bytes": 844,
+    "sha256": "e1cf2b7c9edf46f31304fa5bfd3eaab889b21b86e1e06c7bfca32ed944a569c8"
+  },
+  {
+    "path": "511-luna1-final-clippy-graph-compiler-correction.stderr",
+    "bytes": 171,
+    "sha256": "8d2ad538fd53ee6c745713496fe31002392e965f6c60a582c566d1f02a31f91d"
+  },
+  {
+    "path": "511-luna1-final-clippy-graph-compiler-correction.stdout",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "511-luna1-final-clippy-graph-compiler.meta",
+    "bytes": 179,
+    "sha256": "cc464259ba7a729ab88c3dce7a711b26c4e13ceaae26f6e4e08650a45d3af18d"
+  },
+  {
+    "path": "511-luna1-final-clippy-graph-compiler.stderr",
+    "bytes": 4368,
+    "sha256": "1b11e89f5bd750262934e2ba71e7d02001476a87b8cd051897d4ea048be07891"
+  },
+  {
+    "path": "511-luna1-final-clippy-graph-compiler.stdout",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "511-luna1-final-clippy-graph.meta",
+    "bytes": 168,
+    "sha256": "e10356880ba768baa5a490c0fa7bd7587cd4623f928e0e4d5e9333a3e458e5bc"
+  },
+  {
+    "path": "511-luna1-final-clippy-graph.stderr",
+    "bytes": 2326,
+    "sha256": "09ea313786457a08d88d4b9ee17c7e62648ff57ad7ff7f5949efac4ccff1c62d"
+  },
+  {
+    "path": "511-luna1-final-clippy-graph.stdout",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "511-luna1-final-graph-debug.meta",
+    "bytes": 139,
+    "sha256": "29d68b5b1add9c8b8ede780f78481400b2e5804d789584c6153d46e8396d9bc4"
+  },
+  {
+    "path": "511-luna1-final-graph-debug.stderr",
+    "bytes": 504,
+    "sha256": "af2a25004dfce6e4caea3567ad2b003b22a09b1cb5ffab0949650f3ed6ab9d83"
+  },
+  {
+    "path": "511-luna1-final-graph-debug.stdout",
+    "bytes": 7184,
+    "sha256": "4b1c7d599271ce08f0f46c85a5c09f4e8010bc2854aa2cbabcecfd6d0b3b42d6"
+  },
+  {
+    "path": "511-luna1-final-graph-release.meta",
+    "bytes": 158,
+    "sha256": "206ac93c71954a24bdaec084cee4c2348c19d3efc0144305a964b6c78d49afef"
+  },
+  {
+    "path": "511-luna1-final-graph-release.stderr",
+    "bytes": 508,
+    "sha256": "ee7dbe14c25c25ebae5505c45c770be707d75580a04ac827deda1f4a53bb7c35"
+  },
+  {
+    "path": "511-luna1-final-graph-release.stdout",
+    "bytes": 7184,
+    "sha256": "1aa8234bd2fd0d098e7f69a6361f1667bd1bd676545b4d98da68449b16ec16fb"
+  },
+  {
+    "path": "511-luna1-final-identity.txt",
+    "bytes": 732,
+    "sha256": "7714e3511ce6cd0e7f1cc2e0724e677ba359f87e9e656e6c0268c657abe3b4e6"
+  },
+  {
+    "path": "511-luna1-final-physical-debug.meta",
+    "bytes": 210,
+    "sha256": "a78db0975e7715b073d06abf8e013992591478a0665e0e540eb0067344d378e5"
+  },
+  {
+    "path": "511-luna1-final-physical-debug.stderr",
+    "bytes": 170,
+    "sha256": "6f935f3dabb8fc5c68ef11c9747e390aad1214fef9de6e564648312bb6d6de93"
+  },
+  {
+    "path": "511-luna1-final-physical-debug.stdout",
+    "bytes": 648,
+    "sha256": "1d69b895793e1fc8187955b9e81c0199d735738fe1d35d1d1c0447695e0fa674"
+  },
+  {
+    "path": "511-luna1-final-physical-release.meta",
+    "bytes": 220,
+    "sha256": "424409ac3ca9d824d1e25f9af11dabb3a3e9d4b0434089834cfec470b359c394"
+  },
+  {
+    "path": "511-luna1-final-physical-release.stderr",
+    "bytes": 360,
+    "sha256": "806ea2358a810cfd2565537982bae4eb3a434cf32a0b756cc6204d1071203b8a"
+  },
+  {
+    "path": "511-luna1-final-physical-release.stdout",
+    "bytes": 647,
+    "sha256": "6305fcf0afe8012b7a51bf0ac5f0b4c9e6ac338d39cc3b1cdd0bf2dd9dc8077b"
+  },
+  {
+    "path": "511-luna1-final-report.md",
+    "bytes": 4293,
+    "sha256": "f87e6bcaa0aa09b3a67d276ab75bf9207925f44c1e1c1b8088c7b38cd7fb6544"
+  },
+  {
+    "path": "511-luna1-fmt-check.log",
+    "bytes": 20600,
+    "sha256": "ed3f37f0b7c52f920f813d9e8f6f3dc390f5c35c02dff5a390776ae2aa743b9b"
+  },
+  {
+    "path": "511-luna1-fmt-check.meta",
+    "bytes": 120,
+    "sha256": "9fb9c729fdcd0d8e1a6e1e4a95005cb51efcc79ab8b92b23b89b66474e90c814"
+  },
+  {
+    "path": "511-luna1-fmt.log",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "511-luna1-fmt.meta",
+    "bytes": 109,
+    "sha256": "460765645c6bab1eb9b50e0b6c495f66eaad2c108abdccf2fda5efc88cd30ec7"
+  },
+  {
+    "path": "511-luna1-graph-release.log",
+    "bytes": 3881,
+    "sha256": "30942b45fce96acc9558734fa91a7882a0cb693b7d5c97fee88341073b2c4ee0"
+  },
+  {
+    "path": "511-luna1-graph-release.meta",
+    "bytes": 239,
+    "sha256": "c250d9ee8629b82aad29c744645a29be8db9b9c57b13ee45d76bb883c970e6fe"
+  },
+  {
+    "path": "511-luna1-graph-test.log",
+    "bytes": 7805,
+    "sha256": "386cc6575d2716b66f4912ab41853dad0a6967bb987719ba4fe27dec22edaaa7"
+  },
+  {
+    "path": "511-luna1-graph-test.meta",
+    "bytes": 227,
+    "sha256": "4b92787becf1cf3888e69c02f9d4d083028bed1399458db8cae51952b65ed23a"
+  },
+  {
+    "path": "511-luna1-graph-test2.log",
+    "bytes": 2633,
+    "sha256": "c631c2f69466baae7d7846027605f126b508e34a80a6bfedee9b909f5f757084"
+  },
+  {
+    "path": "511-luna1-graph-test2.meta",
+    "bytes": 227,
+    "sha256": "4b92787becf1cf3888e69c02f9d4d083028bed1399458db8cae51952b65ed23a"
+  },
+  {
+    "path": "511-luna1-graph-test3.log",
+    "bytes": 263599,
+    "sha256": "6e134e3f7afbb25360074c1aef8a5fb65a2e66a89dd49a13d9130440755e7c43"
+  },
+  {
+    "path": "511-luna1-graph-test3.meta",
+    "bytes": 227,
+    "sha256": "4b92787becf1cf3888e69c02f9d4d083028bed1399458db8cae51952b65ed23a"
+  },
+  {
+    "path": "511-luna1-graph-test4.log",
+    "bytes": 460,
+    "sha256": "a38f45ebd14da96421550138c79390fd1632feba7bc3e8cd3b2de280bb96e569"
+  },
+  {
+    "path": "511-luna1-graph-test4.meta",
+    "bytes": 225,
+    "sha256": "59784a93741f661e59e3784a6a8f78c52eb25837673e771f5d46e27eeb7f1044"
+  },
+  {
+    "path": "511-luna1-graph-test5.log",
+    "bytes": 646,
+    "sha256": "aebfeb8d24f98d268da09930c95132ffe6605c057a5bb4d65cd3fac06c7638d9"
+  },
+  {
+    "path": "511-luna1-graph-test5.meta",
+    "bytes": 225,
+    "sha256": "59784a93741f661e59e3784a6a8f78c52eb25837673e771f5d46e27eeb7f1044"
+  },
+  {
+    "path": "511-luna1-physical-release.log",
+    "bytes": 1787,
+    "sha256": "4b3ce16885cede0f11dd8c3e5511d9949a976d91849a7d2dc1db4b3a26f248d5"
+  },
+  {
+    "path": "511-luna1-physical-release.meta",
+    "bytes": 308,
+    "sha256": "60249da3338eb65292591bf30ec31a849d93b11a17c0d01c511e22efb2fa3693"
+  },
+  {
+    "path": "511-luna1-physical-test.log",
+    "bytes": 2090,
+    "sha256": "efc8f2e11ea0a4bd6410a5bba65aaf3f92d40764400d54cb9fe22baa323a052c"
+  },
+  {
+    "path": "511-luna1-physical-test.meta",
+    "bytes": 296,
+    "sha256": "1d54a0ddd9ed2969e888b995c9232e7f647e3a3dd5bf757f5c5f364f2a48ce26"
+  },
+  {
+    "path": "511-luna1-physical-test2.log",
+    "bytes": 1298,
+    "sha256": "c9a176f02b5dba4fd5082ca3c1be03a11093f347343dd1285a20fbb0d1c9b95a"
+  },
+  {
+    "path": "511-luna1-physical-test2.meta",
+    "bytes": 296,
+    "sha256": "1d54a0ddd9ed2969e888b995c9232e7f647e3a3dd5bf757f5c5f364f2a48ce26"
+  },
+  {
+    "path": "511-luna1-physical-test3.log",
+    "bytes": 1118,
+    "sha256": "3b61e0bcae847ef5a06fab523a0b2c915f3e29a92bf34855dd6d16b8f7743130"
+  },
+  {
+    "path": "511-luna1-physical-test3.meta",
+    "bytes": 311,
+    "sha256": "c77b6f982af68fd1a0412f15e6349100d8cc2efe5bb211b7c11725036cd40532"
+  },
+  {
+    "path": "511-luna1-physical-test4.log",
+    "bytes": 1050,
+    "sha256": "933d0d40dcf182569fb8f4924f40f5381f00062d467abb0db72f7b7aa7d2272e"
+  },
+  {
+    "path": "511-luna1-physical-test4.meta",
+    "bytes": 294,
+    "sha256": "723bc1473fc83e347736471077fda1aa42671dcd4dcd03a2a12e001e0698baa0"
+  },
+  {
+    "path": "511-root-first-checkpoint-identity.json",
+    "bytes": 849,
+    "sha256": "e0fb578a324a9f7a85befa13fd79febe934e8dfa4c3c39d6b011ec304d91213b"
+  },
+  {
+    "path": "README.md",
+    "bytes": 1282,
+    "sha256": "00a07e1cacb7ded584ef3bfcf98fec5f9475f230c2b41d458aba156292d875e2"
+  },
+  {
+    "path": "astra-511-width-scope-decision.md",
+    "bytes": 3494,
+    "sha256": "a94b565b4758b34280b8e70e7d7ffa85165f881973e2c4ffcc413672d5aca221"
+  }
+]

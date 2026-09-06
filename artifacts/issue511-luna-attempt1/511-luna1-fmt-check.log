@@ -1,0 +1,393 @@
+Diff in /home/bl/misofm/engine-slot-reservation/crates/builtins-compiler/tests/allocation_tracker.rs:15:
+ use builtins_compiler::{
+     BuiltinCompileCaps, MeterRequest, TestOnlyFaderMatrixPair, TrackControlRecord,
+     TrackFaderRecord, prepare_session_builtins, test_only_begin_phase_two_allocation_observation,
+-    test_only_fader_matrix_witness,
+-    test_only_observed_scalar_pair_binding, test_only_phase_two_allocation_snapshot,
+-    test_only_record_phase_two_allocation, test_only_record_phase_two_deallocation,
+-    test_only_reset_fader_matrix_witness, test_only_reset_phase_two_allocation_tracker,
+-    test_only_scalar_outer_lifetime, test_only_scalar_owner_drops, test_only_scalar_owner_layouts,
++    test_only_fader_matrix_witness, test_only_observed_scalar_pair_binding,
++    test_only_phase_two_allocation_snapshot, test_only_record_phase_two_allocation,
++    test_only_record_phase_two_deallocation, test_only_reset_fader_matrix_witness,
++    test_only_reset_phase_two_allocation_tracker, test_only_scalar_outer_lifetime,
++    test_only_scalar_owner_drops, test_only_scalar_owner_layouts,
+ };
+ use engine::realtime::{PlanarBufferMut, RenderIo, RenderTime};
+ use session::{CompileCaps, RouteSource, SendTap, StableId, compile_session, parse_session_json};
+Diff in /home/bl/misofm/engine-slot-reservation/crates/builtins-compiler/tests/allocation_tracker.rs:513:
+     assert!(!pointer.is_null(), "controlled realloc");
+     assert_eq!(LARGEST_REALLOC_BYTES.get(), new.size() as u64);
+     armed(|| unsafe { std::alloc::dealloc(pointer, new) });
+-    assert_eq!(LIVE_BYTES.get(), 0, "controlled realloc releases its new request");
++    assert_eq!(
++        LIVE_BYTES.get(),
++        0,
++        "controlled realloc releases its new request"
++    );
+ 
+     // Prepare stage objects and scratch before arming the attribution interval. The actual
+     // ordered slot conversion is the production bank_chain reached by the second call, and the
+Diff in /home/bl/misofm/engine-slot-reservation/crates/builtins-compiler/tests/allocation_tracker.rs:531:
+     assert_eq!(ownership.runtime_slot_capacity, 3);
+     assert_eq!(ownership.retained_slot_capacity, 3);
+     assert!(LARGEST_REQUESTED_BYTES.get() > 0);
+-    assert!(snapshot.deallocation_layouts.iter().any(|layout| {
+-        layout.size_bytes == ownership.stage_pointer_bytes as u64 && layout.allocation_count > 0
+-    }), "incoming stage pointer release not observed: {:?}", snapshot.deallocation_layouts);
++    assert!(
++        snapshot.deallocation_layouts.iter().any(|layout| {
++            layout.size_bytes == ownership.stage_pointer_bytes as u64 && layout.allocation_count > 0
++        }),
++        "incoming stage pointer release not observed: {:?}",
++        snapshot.deallocation_layouts
++    );
+     assert!(snapshot.layouts.iter().any(|layout| {
+         layout.size_bytes == ownership.slot_bytes as u64 && layout.allocation_count > 0
+     }));
+Diff in /home/bl/misofm/engine-slot-reservation/crates/builtins-compiler/tests/allocation_tracker.rs:543:
+     )
+     .expect("checked slot reservation");
+     let retained = ownership.slot_bytes as u64 + 4 * ownership.mask_bytes as u64;
+-    assert!(retained <= ownership.slot_count as u64 * (ownership.slot_bytes as u64 / 3 + 2 * ownership.mask_bytes as u64));
++    assert!(
++        retained
++            <= ownership.slot_count as u64
++                * (ownership.slot_bytes as u64 / 3 + 2 * ownership.mask_bytes as u64)
++    );
+     assert!(ownership.stage_pointer_bytes as u64 <= reservation.total_bytes);
+     assert!(ownership.slot_bytes as u64 <= reservation.total_bytes);
+     assert!(reservation.largest_allocation_bytes >= ownership.slot_bytes as u64 / 3);
+Diff in /home/bl/misofm/engine-slot-reservation/crates/builtins-compiler/tests/allocation_tracker.rs:554:
+     armed(|| drop(ownership));
+     drop(observation);
+     assert_eq!(LIVE_BYTES.get(), 0, "owned slot chain releases off render");
+-    assert!(LIVE_FREES.get() > 0, "owned slot chain deallocation liveness");
++    assert!(
++        LIVE_FREES.get() > 0,
++        "owned slot chain deallocation liveness"
++    );
+ 
+     // The existing bound graph proves multiple membership reaches the runtime and its builtin
+     // pairing path remains live alongside the isolated ownership seam.
+Diff in /home/bl/misofm/engine-slot-reservation/crates/builtins-compiler/tests/allocation_tracker.rs:561:
+     let mut bound = builtins_compiler::test_only_prepared_pair_graph(false);
+     let mut output = [0.0_f32; 128];
+     let witness = audit_graph_render(&mut bound, &mut output, 0);
+-    assert!(witness.fused_calls > 0, "successful builtin pairing remains reachable");
++    assert!(
++        witness.fused_calls > 0,
++        "successful builtin pairing remains reachable"
++    );
+     drop(bound);
+ }
+ 
+Diff in /home/bl/misofm/engine-slot-reservation/crates/graph/src/lib.rs:254:
+             .ok()?
+             .checked_mul(bank_count)?;
+         let total_bytes = bank_count.checked_mul(
+-            u64::try_from(core::mem::size_of::<Box<dyn rack::BankStage>>()).ok()?
++            u64::try_from(core::mem::size_of::<Box<dyn rack::BankStage>>())
++                .ok()?
+                 .checked_add(
+-                    u64::try_from(core::mem::size_of::<rack::BankSlot>()).ok()?
++                    u64::try_from(core::mem::size_of::<rack::BankSlot>())
++                        .ok()?
+                         .checked_mul(3)?,
+                 )?
+                 .checked_add(mask_bytes.checked_mul(3)?)?,
+Diff in /home/bl/misofm/engine-slot-reservation/crates/graph-compiler/src/compile.rs:607:
+         let effect_mask_bytes = banks
+             .iter()
+             .map(|bank| {
+-                u64::try_from(bank.active_mask.len()).ok()?.checked_mul(
+-                    u64::try_from(core::mem::size_of::<bool>()).ok()?,
+-                )
++                u64::try_from(bank.active_mask.len())
++                    .ok()?
++                    .checked_mul(u64::try_from(core::mem::size_of::<bool>()).ok()?)
+             })
+             .try_fold(0_u64, |maximum, value| Some(maximum.max(value?)));
+         let Some(effect_mask_bytes) = effect_mask_bytes else {
+Diff in /home/bl/misofm/engine-slot-reservation/crates/graph-compiler/src/compile.rs:658:
+                 )],
+             ));
+         }
+-        if estimate.checked_add_bank_slot_owners(slot_resource).is_none() {
++        if estimate
++            .checked_add_bank_slot_owners(slot_resource)
++            .is_none()
++        {
+             return Err(failure(
+                 effects,
+                 vec![diag(
+Diff in /home/bl/misofm/engine-slot-reservation/crates/graph-compiler/src/lib.rs:2369:
+             let w = width.lanes() as u64 * core::mem::size_of::<bool>() as u64;
+             (n * (f + 3 * b + 3 * w), (n * f).max(n * b).max(w))
+         };
+-        assert_eq!(graph::GraphBankSlotResourceEstimate::checked_for(0, Some(effect_contract::BankWidth::Four)), Some(Default::default()));
+-        for (n, width) in [(1, effect_contract::BankWidth::Four), (3, effect_contract::BankWidth::Four), (3, effect_contract::BankWidth::Eight)] {
++        assert_eq!(
++            graph::GraphBankSlotResourceEstimate::checked_for(
++                0,
++                Some(effect_contract::BankWidth::Four)
++            ),
++            Some(Default::default())
++        );
++        for (n, width) in [
++            (1, effect_contract::BankWidth::Four),
++            (3, effect_contract::BankWidth::Four),
++            (3, effect_contract::BankWidth::Eight),
++        ] {
+             let (total, largest) = literal(n, width);
+-            let resource = graph::GraphBankSlotResourceEstimate::checked_for(n, Some(width)).expect("checked reservation");
+-            assert_eq!((resource.total_bytes, resource.largest_allocation_bytes), (total, largest));
++            let resource = graph::GraphBankSlotResourceEstimate::checked_for(n, Some(width))
++                .expect("checked reservation");
++            assert_eq!(
++                (resource.total_bytes, resource.largest_allocation_bytes),
++                (total, largest)
++            );
+         }
+-        assert_eq!(graph::GraphBankSlotResourceEstimate::checked_for(u64::MAX, Some(effect_contract::BankWidth::Eight)), None);
++        assert_eq!(
++            graph::GraphBankSlotResourceEstimate::checked_for(
++                u64::MAX,
++                Some(effect_contract::BankWidth::Eight)
++            ),
++            None
++        );
+         let mut estimate = compile_fixture(511_0).report.estimate;
+         estimate.graph_metadata_bytes = u64::MAX;
+         let before = estimate.clone();
+Diff in /home/bl/misofm/engine-slot-reservation/crates/graph-compiler/src/lib.rs:2382:
+-        assert!(estimate.checked_add_bank_slot_owners(graph::GraphBankSlotResourceEstimate { total_bytes: 1, ..Default::default() }).is_none());
++        assert!(
++            estimate
++                .checked_add_bank_slot_owners(graph::GraphBankSlotResourceEstimate {
++                    total_bytes: 1,
++                    ..Default::default()
++                })
++                .is_none()
++        );
+         assert_eq!(estimate, before, "reservation overflow is transactional");
+ 
+         let mut model = parse_session_json(SESSION_FIXTURE).expect("session fixture");
+Diff in /home/bl/misofm/engine-slot-reservation/crates/graph-compiler/src/lib.rs:2386:
+         let base_track = model.tracks[0].clone();
+         let base_route = model.routes[0].clone();
+         model.automation.clear();
+-        model.tracks = (0..8).map(|index| {
+-            let mut track = base_track.clone();
+-            track.id = StableId::parse(&format!("bank{index}")).expect("track id");
+-            track.simd1.effects.clear();
+-            track.dynamic.effects.clear();
+-            track.simd2.effects.clear();
+-            track
+-        }).collect();
+-        model.routes = model.tracks.iter().enumerate().map(|(index, track)| {
+-            let mut route = base_route.clone();
+-            route.id = StableId::parse(&format!("slot-route-{index}")).expect("route id");
+-            route.source = RouteSource::Track { track_id: track.id.clone(), tap: SendTap::PostMatrix };
+-            route
+-        }).collect();
+-        let session = compile_session(&model, CompileCaps {
+-            max_compiled_model_bytes: u64::MAX,
+-            max_requested_runtime_bytes: u64::MAX,
+-            max_single_allocation_bytes: u64::MAX,
+-            max_queue_items: u64::MAX,
+-            max_source_ring_frames: u64::MAX,
+-            max_source_ring_bytes: u64::MAX,
+-        }).expect("compiled session");
++        model.tracks = (0..8)
++            .map(|index| {
++                let mut track = base_track.clone();
++                track.id = StableId::parse(&format!("bank{index}")).expect("track id");
++                track.simd1.effects.clear();
++                track.dynamic.effects.clear();
++                track.simd2.effects.clear();
++                track
++            })
++            .collect();
++        model.routes = model
++            .tracks
++            .iter()
++            .enumerate()
++            .map(|(index, track)| {
++                let mut route = base_route.clone();
++                route.id = StableId::parse(&format!("slot-route-{index}")).expect("route id");
++                route.source = RouteSource::Track {
++                    track_id: track.id.clone(),
++                    tap: SendTap::PostMatrix,
++                };
++                route
++            })
++            .collect();
++        let session = compile_session(
++            &model,
++            CompileCaps {
++                max_compiled_model_bytes: u64::MAX,
++                max_requested_runtime_bytes: u64::MAX,
++                max_single_allocation_bytes: u64::MAX,
++                max_queue_items: u64::MAX,
++                max_source_ring_frames: u64::MAX,
++                max_source_ring_bytes: u64::MAX,
++            },
++        )
++        .expect("compiled session");
+         let graph = GraphCompiler::compile(GraphCompileRequest {
+-            dispatch: host_dispatch(), plan_id: 511_1,
+-            effects: EffectPreparedSession { session: session.clone(), entries: Vec::new() },
++            dispatch: host_dispatch(),
++            plan_id: 511_1,
++            effects: EffectPreparedSession {
++                session: session.clone(),
++                entries: Vec::new(),
++            },
+             caps: integration_caps(),
+-        }).unwrap_or_else(|failure| panic!("plain graph: {:?}", failure.diagnostics));
++        })
++        .unwrap_or_else(|failure| panic!("plain graph: {:?}", failure.diagnostics));
+         let builtin_caps = BuiltinCompileCaps {
+             maximum_total_state_bytes: u64::MAX,
+             maximum_total_retained_payload_bytes: u64::MAX,
+Diff in /home/bl/misofm/engine-slot-reservation/crates/graph-compiler/src/lib.rs:2424:
+             maximum_peak_hold_frames: u32::MAX,
+             maximum_smoothing_samples: u32::MAX,
+         };
+-        let prepared = prepare_session_builtins(&session, &[], builtin_caps).expect("prepared builtins");
++        let prepared =
++            prepare_session_builtins(&session, &[], builtin_caps).expect("prepared builtins");
+         let classes = SessionPoolClasses::from_session(&session);
+         let builtin_resource = prepared
+             .graph_builtin_bank_resource(host_dispatch(), &graph.graph.dependency_levels, &classes)
+Diff in /home/bl/misofm/engine-slot-reservation/crates/graph-compiler/src/lib.rs:2431:
+             .expect("builtin resource");
+-        assert!(builtin_resource.bank_count > 0, "fixture forms builtin banks");
++        assert!(
++            builtin_resource.bank_count > 0,
++            "fixture forms builtin banks"
++        );
+         let slots = graph::GraphBankSlotResourceEstimate::checked_for(
+             builtin_resource.bank_count,
+             effect_contract::BankWidth::for_backend(host_dispatch()),
+Diff in /home/bl/misofm/engine-slot-reservation/crates/graph-compiler/src/lib.rs:2436:
+-        ).expect("slot resource");
++        )
++        .expect("slot resource");
+         let mut expected = graph.report.estimate.clone();
+-        expected.checked_add_bank_slot_owners(slots).expect("slot estimate");
++        expected
++            .checked_add_bank_slot_owners(slots)
++            .expect("slot estimate");
+         let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+-            dispatch: host_dispatch(), plan_id: 511_2,
+-            effects: EffectPreparedSession { session: session.clone(), entries: Vec::new() },
+-            builtins: prepared, caps: integration_caps(),
+-        }).unwrap_or_else(|failure| panic!("bank graph: {:?}", failure.diagnostics));
+-        assert_eq!(artifact.report().estimate, expected, "published estimate carries slots");
++            dispatch: host_dispatch(),
++            plan_id: 511_2,
++            effects: EffectPreparedSession {
++                session: session.clone(),
++                entries: Vec::new(),
++            },
++            builtins: prepared,
++            caps: integration_caps(),
++        })
++        .unwrap_or_else(|failure| panic!("bank graph: {:?}", failure.diagnostics));
++        assert_eq!(
++            artifact.report().estimate,
++            expected,
++            "published estimate carries slots"
++        );
+         let semantic_baseline = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+-            dispatch: Backend::Scalar, plan_id: 511_5,
+-            effects: EffectPreparedSession { session: session.clone(), entries: Vec::new() },
+-            builtins: prepare_session_builtins(&session, &[], builtin_caps).expect("semantic baseline builtins"),
++            dispatch: Backend::Scalar,
++            plan_id: 511_5,
++            effects: EffectPreparedSession {
++                session: session.clone(),
++                entries: Vec::new(),
++            },
++            builtins: prepare_session_builtins(&session, &[], builtin_caps)
++                .expect("semantic baseline builtins"),
+             caps: integration_caps(),
+-        }).unwrap_or_else(|failure| panic!("semantic baseline: {:?}", failure.diagnostics));
+-        assert_eq!(GraphCompiler::evidence(semantic_baseline.graph(), semantic_baseline.report()).canonical_bytes, GraphCompiler::evidence(artifact.graph(), artifact.report()).canonical_bytes, "bank overlay leaves canonical semantics unchanged");
++        })
++        .unwrap_or_else(|failure| panic!("semantic baseline: {:?}", failure.diagnostics));
++        assert_eq!(
++            GraphCompiler::evidence(semantic_baseline.graph(), semantic_baseline.report())
++                .canonical_bytes,
++            GraphCompiler::evidence(artifact.graph(), artifact.report()).canonical_bytes,
++            "bank overlay leaves canonical semantics unchanged"
++        );
+         let final_estimate = artifact.graph_resource_estimate().clone();
+-        for (field, value) in [("graph", final_estimate.graph_metadata_bytes), ("plan", final_estimate.incremental_plan_bytes), ("largest", final_estimate.largest_allocation_bytes)] {
++        for (field, value) in [
++            ("graph", final_estimate.graph_metadata_bytes),
++            ("plan", final_estimate.incremental_plan_bytes),
++            ("largest", final_estimate.largest_allocation_bytes),
++        ] {
+             let mut caps = integration_caps();
+             match field {
+                 "graph" => caps.maximum_graph_bytes = value,
+Diff in /home/bl/misofm/engine-slot-reservation/crates/graph-compiler/src/lib.rs:2458:
+                 "largest" => caps.maximum_single_allocation_bytes = value,
+                 _ => unreachable!(),
+             }
+-            let prepared = prepare_session_builtins(&session, &[], builtin_caps).expect("prepared for cap");
++            let prepared =
++                prepare_session_builtins(&session, &[], builtin_caps).expect("prepared for cap");
+             let exact_result = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+-                dispatch: host_dispatch(), plan_id: 511_3,
+-                effects: EffectPreparedSession { session: session.clone(), entries: Vec::new() },
+-                builtins: prepared, caps,
++                dispatch: host_dispatch(),
++                plan_id: 511_3,
++                effects: EffectPreparedSession {
++                    session: session.clone(),
++                    entries: Vec::new(),
++                },
++                builtins: prepared,
++                caps,
+             });
+             assert!(exact_result.is_ok(), "exact whole-plan cap accepts");
+             let mut below = caps;
+Diff in /home/bl/misofm/engine-slot-reservation/crates/graph-compiler/src/lib.rs:2472:
+                 "largest" => below.maximum_single_allocation_bytes -= 1,
+                 _ => unreachable!(),
+             }
+-            let prepared = prepare_session_builtins(&session, &[], builtin_caps).expect("returned prepared");
++            let prepared =
++                prepare_session_builtins(&session, &[], builtin_caps).expect("returned prepared");
+             let failure = match GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+-                dispatch: host_dispatch(), plan_id: 511_4,
+-                effects: EffectPreparedSession { session: session.clone(), entries: Vec::new() },
+-                builtins: prepared, caps: below,
++                dispatch: host_dispatch(),
++                plan_id: 511_4,
++                effects: EffectPreparedSession {
++                    session: session.clone(),
++                    entries: Vec::new(),
++                },
++                builtins: prepared,
++                caps: below,
+             }) {
+                 Ok(_) => panic!("one byte below whole-plan cap rejects"),
+                 Err(failure) => failure,
+Diff in /home/bl/misofm/engine-slot-reservation/crates/graph-compiler/src/lib.rs:2483:
+             };
+-            assert!(failure.diagnostics.diagnostics().iter().any(|d| d.code == "graph.resource.limit" && d.path == "$.graph_compile_caps"));
++            assert!(
++                failure
++                    .diagnostics
++                    .diagnostics()
++                    .iter()
++                    .any(|d| d.code == "graph.resource.limit" && d.path == "$.graph_compile_caps")
++            );
+             assert_eq!(failure.effects.session.normalized_model().tracks.len(), 8);
+             assert_eq!(failure.builtins.tails().count(), 8);
+         }

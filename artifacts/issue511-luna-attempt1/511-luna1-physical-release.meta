@@ -1,0 +1,1 @@
+argv=[cargo test --locked --release -p builtins-compiler --features test-support,graph/test-support --test allocation_tracker actual_runtime_bank_slot_owners_fit_retained_largest_and_conversion_reservation -- --exact]\ncwd=/home/bl/misofm/engine-slot-reservation\nenv=PATH=/home/bl/.cargo/bin:$PATH\nexit=0\n
