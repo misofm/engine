@@ -17,7 +17,8 @@ use host_core::{
 use protocol::{
     AutomationBatchError, AutomationBatchSlot, AutomationCancellationReason,
     AutomationEnqueueError, AutomationKind, AutomationRecord, DeliveryError, HandoffResult,
-    ParameterHandle, ProtocolQueueConfig, ReliablePayload, RequestId, SampleTime, SessionRevision,
+    ParameterHandle, PreparedAutomationDelivery, ProtocolQueueConfig, ReliablePayload, RequestId,
+    SampleTime, SessionRevision,
 };
 
 const Q: usize = 16;
@@ -781,15 +782,191 @@ fn malformed_admission_and_render_envelopes_are_noops() {
 
 #[test]
 fn preparation_resources_and_success_path_are_bounded() {
-    let mut fx = effect();
-    let (mut c, r, res) = prepare_scalar_point_endpoint(&mut *fx, REV, H, config(), 1).unwrap();
-    assert!(res.delivery.retained_payload_bytes > 0);
-    assert!(res.control_size > 0 && res.render_size > 0);
-    c.try_admit(SampleTime(0), batch(7, &[record(H[0], 0, 2.0)]))
+    const CHILD: &str = "MISO_ENGINE_SCALAR_POINT_GATE6_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let status = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .arg("--exact")
+            .arg("preparation_resources_and_success_path_are_bounded")
+            .arg("--nocapture")
+            .env(CHILD, "1")
+            .status()
+            .expect("isolated scalar Point resource child");
+        assert!(
+            status.success(),
+            "isolated scalar Point resource child failed"
+        );
+        return;
+    }
+
+    use bench_support::alloc as bench_alloc;
+    use engine::realtime::audit;
+    use std::hint::black_box;
+
+    bench_alloc::set_mode(bench_alloc::Mode::Count);
+    bench_alloc::assert_installed();
+    let liveness_mark = bench_alloc::counters();
+    let probe = black_box(vec![0_u8; 4_096]);
+    drop(probe);
+    let liveness = bench_alloc::delta_since(liveness_mark);
+    assert!(liveness.allocations > 0, "allocation counter is not live");
+    assert!(liveness.deallocations > 0, "free counter is not live");
+
+    let cfg = config();
+    let expected_delivery = PreparedAutomationDelivery::resource_report_for_config(cfg).unwrap();
+    let direct_mark = bench_alloc::counters();
+    let direct_owners = PreparedAutomationDelivery::prepare(cfg, 1).unwrap();
+    let direct_allocations = bench_alloc::delta_since(direct_mark);
+
+    let mut fx = asymmetric_effect();
+    warm(&mut *fx);
+    let endpoint_mark = bench_alloc::counters();
+    let (mut control, render, resources) =
+        prepare_scalar_point_endpoint(&mut *fx, REV, H, cfg, 1).unwrap();
+    let endpoint_allocations = bench_alloc::delta_since(endpoint_mark);
+    assert_eq!(
+        endpoint_allocations.allocations,
+        direct_allocations.allocations
+    );
+    assert_eq!(
+        endpoint_allocations.requested_bytes,
+        direct_allocations.requested_bytes
+    );
+    assert_eq!(direct_allocations.reallocations, 0);
+    assert_eq!(endpoint_allocations.reallocations, 0);
+    assert_eq!(direct_allocations.deallocations, 0);
+    assert_eq!(endpoint_allocations.deallocations, 0);
+    assert_eq!(resources.delivery, expected_delivery);
+    assert!(resources.delivery.retained_payload_bytes > 0);
+    assert!(resources.delivery.largest_allocation_bytes > 0);
+    assert_eq!(resources.control_size, core::mem::size_of_val(&control));
+    assert_eq!(resources.render_size, core::mem::size_of_val(&render));
+    black_box(&direct_owners);
+
+    let mut render = render.start().unwrap_or_else(|_| panic!());
+    let mut left = [0.41_f32; Q];
+    let mut right = [-0.37_f32; Q];
+    let targets = [(H[0], 5.0), (H[1], -5.0), (H[0], 9.0), (H[1], -9.0)];
+    let mut applied = [0_u64; 4];
+    let mut nonzero = [false; 4];
+    audit::warm_up();
+    for (block, &(handle, target)) in targets.iter().enumerate() {
+        let first = (block * Q) as u64;
+        control
+            .try_admit(
+                SampleTime(first),
+                batch(90 + block as u64, &[record(handle, first + 3, target)]),
+            )
+            .unwrap();
+        let ticket = match control.try_handoff_next().unwrap() {
+            HandoffResult::HandedOff(ticket) => ticket,
+            other => panic!("{other:?}"),
+        };
+        left.fill(0.41);
+        right.fill(-0.37);
+        audit::reset();
+        let (report, snapshot) = audit::in_render_scope(|| {
+            let report = render
+                .render(&mut left, &mut right, SampleTime(first))
+                .unwrap();
+            let snapshot = render.snapshot().unwrap();
+            (report, snapshot)
+        });
+        let observed = audit::snapshot();
+        assert_eq!(observed.allocations, 0, "Point render/read allocated");
+        assert_eq!(observed.deallocations, 0, "Point render/read freed");
+        assert_eq!(
+            observed.total(),
+            0,
+            "Point render/read used realtime-forbidden work"
+        );
+        assert_eq!(report.process_invocations, 2);
+        applied[block] = snapshot.applied;
+        nonzero[block] = left
+            .iter()
+            .chain(&right)
+            .any(|sample| sample.to_bits() & 0x7fff_ffff != 0);
+        assert_eq!(control.collect_terminal(ticket).unwrap().applied_prefix, 1);
+    }
+    assert_eq!(applied, [1, 2, 3, 4]);
+    assert!(
+        nonzero.into_iter().all(|value| value),
+        "real compressor PCM stayed silent"
+    );
+    drop(render.stop());
+    drop(control);
+    drop(fx);
+    drop(direct_owners);
+
+    let mut failing = FailingAccessEffect::apply_failure();
+    warm(&mut *failing.inner);
+    let (mut control, render, _) =
+        prepare_scalar_point_endpoint(&mut failing, REV, H, cfg, 100).unwrap();
+    control
+        .try_admit(
+            SampleTime(0),
+            batch(100, &[record(H[0], 3, 6.0), record(H[1], 7, -6.0)]),
+        )
         .unwrap();
-    c.try_handoff_next().unwrap();
-    let mut r = r.start().unwrap_or_else(|_| panic!());
-    let (mut l, mut x) = ([0.4; Q], [0.3; Q]);
-    r.render(&mut l, &mut x, SampleTime(0)).unwrap();
-    assert_eq!(r.snapshot().unwrap().applied, 1);
+    let ticket = match control.try_handoff_next().unwrap() {
+        HandoffResult::HandedOff(ticket) => ticket,
+        other => panic!("{other:?}"),
+    };
+    let mut render = render.start().unwrap_or_else(|_| panic!());
+    let (mut left, mut right) = ([0.43_f32; Q], [-0.39_f32; Q]);
+    audit::reset();
+    let fault =
+        audit::in_render_scope(
+            || match render.render(&mut left, &mut right, SampleTime(0)) {
+                Err(ScalarPointRenderError::Fault(fault)) => fault,
+                other => panic!("unexpected fault render {other:?}"),
+            },
+        );
+    let fault_render_audit = audit::snapshot();
+    assert_eq!(fault_render_audit.allocations, 0, "fault render allocated");
+    assert_eq!(fault_render_audit.deallocations, 0, "fault render freed");
+    assert_eq!(
+        fault_render_audit.total(),
+        0,
+        "fault render used forbidden work"
+    );
+    assert_eq!(fault.native_processed_frames, 7);
+    assert_eq!(
+        fault.progress,
+        Some(ScalarPointFaultProgress {
+            ticket,
+            record_count: 2,
+            native_applied_prefix: 1,
+            delivery_applied_prefix: 1,
+        })
+    );
+    assert!(
+        left.iter()
+            .chain(&right)
+            .all(|sample| sample.to_bits() == 0)
+    );
+    let token = control
+        .begin_cancel(AutomationCancellationReason::EndpointShutdown)
+        .unwrap();
+    audit::reset();
+    audit::in_render_scope(|| render.cancel_boundary(SampleTime(16)).unwrap());
+    let cancel_audit = audit::snapshot();
+    assert_eq!(
+        cancel_audit.allocations, 0,
+        "fault cancel boundary allocated"
+    );
+    assert_eq!(cancel_audit.deallocations, 0, "fault cancel boundary freed");
+    assert_eq!(
+        cancel_audit.total(),
+        0,
+        "fault cancel boundary used forbidden work"
+    );
+    let complete = control.poll_cancel_boundary(token).unwrap().unwrap();
+    assert_eq!(
+        (complete.applied_records, complete.canceled_records),
+        (1, 1)
+    );
+    assert!(control.try_dequeue_event().is_ok());
+    assert_eq!(control.outstanding(), 0);
+    drop(render.stop());
+    assert_eq!(failing.processed_frames, 7);
 }
