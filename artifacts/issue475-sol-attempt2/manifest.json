@@ -1,0 +1,82 @@
+[
+  {
+    "path": "475-sol2-access-uniform-dispatch-mutant.log",
+    "bytes": 10197,
+    "sha256": "07fb5b74c92b7c08d15e4ea4c64d17f60b840f485d710c9cf4b037c52c2019e5"
+  },
+  {
+    "path": "475-sol2-coherent-runtime-proof.log",
+    "bytes": 2609,
+    "sha256": "dba8918bb9e377a71f9be9aa2b36344777494d78258a47f2a71e1ef01ba0573c"
+  },
+  {
+    "path": "475-sol2-final-cargo-gates-contaminated.log",
+    "bytes": 3246,
+    "sha256": "367139cc6e1b7202e0d7b7607c5d7a85fd68eb9eecd2d4f24a1f02b179f9a4d8"
+  },
+  {
+    "path": "475-sol2-final-cargo-gates.log",
+    "bytes": 16251,
+    "sha256": "2140a2b645baae8190bced84b658a73a93b33568473582dfe2169b1422ba8981"
+  },
+  {
+    "path": "475-sol2-final-policy-gates-direct-failure.log",
+    "bytes": 686,
+    "sha256": "cd0645a2cb8ba9c46de3def2c708a3f093d0279afdfc61068df49ac0c1f5f621"
+  },
+  {
+    "path": "475-sol2-final-policy-gates.log",
+    "bytes": 767,
+    "sha256": "3ad8f738aea421293ec3b91f752257c5a6ee6b050da7cf8a0cb9707e73bc4dfa"
+  },
+  {
+    "path": "475-sol2-package-validation.log",
+    "bytes": 901,
+    "sha256": "941faf7754d35480f0ff9dcd3fbdb529d1c0eebfe1aa779e8b46b6b8e687740d"
+  },
+  {
+    "path": "475-sol2-wasm-bitcode-bad-magic.log",
+    "bytes": 1952,
+    "sha256": "f33afe193c5bb837acbf2870ae16d6bdb941a9ac16cb44d09e0a995427656cbd"
+  },
+  {
+    "path": "475-sol2-wasm-production-module-build.log",
+    "bytes": 4102,
+    "sha256": "531c4d509daddc6b61443489ce654d3ae2827192c62cc542c7ac5e132a1ed2e8"
+  },
+  {
+    "path": "475-sol2-wasm-production-module-decode.log",
+    "bytes": 5231,
+    "sha256": "f41c03b95b778ddca464d32851dc8ffd68e157e1ab723536f301ab5d63f6cfce"
+  },
+  {
+    "path": "README.md",
+    "bytes": 3083,
+    "sha256": "9e58083b4bb929495d0548eb25c83d6bacdfc4d3c69b3710a8c1fb4e2d410663"
+  },
+  {
+    "path": "manifest.sha256",
+    "bytes": 1047,
+    "sha256": "6ccf8e77cbe0a24ea60a164916111f6c0ec9ec43c41ec92deded360761f2ee60"
+  },
+  {
+    "path": "scalar-disassembly-extract-provenance.json",
+    "bytes": 738,
+    "sha256": "cdd76656790a2f49769ba96a1f7c86731dd9046dca31834182723fa44a44d9b1"
+  },
+  {
+    "path": "scalar-production-fill-taps.wat.txt",
+    "bytes": 118164,
+    "sha256": "4fa54ec27f17855924fabbc33d3da0492f78437fdc250cbfcb91c2135656f786"
+  },
+  {
+    "path": "simd128-disassembly-extract-provenance.json",
+    "bytes": 739,
+    "sha256": "d7c0cd16e4ffaa0d1e60d36fe3af7926fc907eaf0b24953cb3c2b51c162f1529"
+  },
+  {
+    "path": "simd128-production-fill-taps.wat.txt",
+    "bytes": 125090,
+    "sha256": "c0ed897fe4f06f0daebee1ea80a21d8abb4448acead98c2052e4d453dfd11222"
+  }
+]

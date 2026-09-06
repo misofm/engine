@@ -1,0 +1,16 @@
+COMMAND_1=PATH=/home/bl/.cargo/bin:$PATH cargo fmt --all -- --check
+COMMAND_2=PATH=/home/bl/.cargo/bin:$PATH scripts/check-realtime-policy.sh
+COMMAND_3=PATH=/home/bl/.cargo/bin:$PATH scripts/check-lane-policy.sh
+COMMAND_4=PATH=/home/bl/.cargo/bin:$PATH scripts/check-workspace-policy.sh
+COMMAND_5=git diff --check
+CWD=/home/bl/misofm/engine-475-plan
+SOURCE=git-head:81ed8e72-plus-uncommitted-allocation-process-isolation-fix
+FMT_EXIT=0
+/bin/bash: line 11: scripts/check-realtime-policy.sh: Permission denied
+REALTIME_POLICY_EXIT=126
+lane policy: ok
+LANE_POLICY_EXIT=0
+/bin/bash: line 13: scripts/check-workspace-policy.sh: Permission denied
+WORKSPACE_POLICY_EXIT=126
+DIFF_CHECK_EXIT=0
+

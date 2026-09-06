@@ -1,0 +1,15 @@
+COMMAND=PATH=/home/bl/.cargo/bin:$PATH cargo test --locked -p compressor --lib kernel::tests::w4_state_owner_transitions_drive_the_next_real_render -- --exact
+CWD=/home/bl/misofm/engine-475-plan
+SOURCE=git-head:c8772db1-plus-uncommitted-sol3-w4-and-env-fix
+NOTE=Supersedes compilation failures and the executed failure whose dual oracle violated the mono mirrored-plane precondition.
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-475-plan/crates/compressor)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.19s
+     Running unittests src/lib.rs (target/debug/deps/compressor-80bd63f116d0655c)
+
+running 1 test
+test kernel::tests::w4_state_owner_transitions_drive_the_next_real_render ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.01s
+
+EXIT=0
+

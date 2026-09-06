@@ -1,0 +1,12 @@
+COMMAND: sha256sum -c manifest.sha256
+CWD: /home/bl/misofm/engine-475-plan/artifacts/issue475-sol-attempt3
+SOURCE: 019ac62a
+475-sol3-affected-suites.log: OK
+475-sol3-focused-final.log: OK
+475-sol3-full-cargo-gates.log: OK
+475-sol3-policy-gates.log: OK
+475-sol3-w4-compile-failure-1.log: OK
+475-sol3-w4-compile-failure-2.log: OK
+475-sol3-w4-focused-debug.log: OK
+475-sol3-w4-oracle-failure.log: OK
+EXIT: 0

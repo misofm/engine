@@ -1,0 +1,49 @@
+COMMAND=PATH=/home/bl/.cargo/bin:$PATH cargo test --locked -p compressor --lib kernel::tests::w4_state_owner_transitions_drive_the_next_real_render -- --exact
+CWD=/home/bl/misofm/engine-475-plan
+SOURCE=git-head:c8772db1-plus-uncommitted-sol3-w4-and-env-fix
+NOTE=Supersedes /tmp/475-sol3-w4-focused-debug.log, which failed compilation before executing any test.
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-475-plan/crates/compressor)
+error[E0284]: type annotations needed for `[PrepareEffectRequest<'_>; _]`
+    --> crates/compressor/src/kernel.rs:1523:13
+     |
+1523 |         let requests = core::array::from_fn(|lane| request(&values[lane]));
+     |             ^^^^^^^^   --------------------------------------------------- type must be known at this point
+     |
+note: required by a const generic parameter in `std::array::from_fn`
+    --> /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/array/mod.rs:110:0
+help: consider giving `requests` an explicit type, where the value of const parameter `N` is specified
+     |
+1523 |         let requests: [PrepareEffectRequest<'_>; N] = core::array::from_fn(|lane| request(&values[lane]));
+     |                     +++++++++++++++++++++++++++++++
+
+error[E0284]: type annotations needed for `[PrepareEffectRequest<'_>; _]`
+    --> crates/compressor/src/kernel.rs:1523:13
+     |
+1523 |         let requests = core::array::from_fn(|lane| request(&values[lane]));
+     |             ^^^^^^^^
+1524 |         let metadata = expected_prepared_metadata(&COMPRESSOR_DESCRIPTOR, requests[0])
+     |                                                                           ----------- type must be known at this point
+     |
+     = note: required for `[PrepareEffectRequest<'_>; _]` to implement `std::ops::Index<usize>`
+help: consider giving `requests` an explicit type, where the value of const parameter `N` is specified
+     |
+1523 |         let requests: [PrepareEffectRequest<'_>; N] = core::array::from_fn(|lane| request(&values[lane]));
+     |                     +++++++++++++++++++++++++++++++
+
+error[E0284]: type annotations needed for `[PrepareEffectRequest<'_>; _]`
+    --> crates/compressor/src/kernel.rs:1670:13
+     |
+1670 |         let requests = core::array::from_fn(|lane| request(&uniform[lane]));
+     |             ^^^^^^^^   ---------------------------------------------------- type must be known at this point
+     |
+note: required by a const generic parameter in `std::array::from_fn`
+    --> /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/array/mod.rs:110:0
+help: consider giving `requests` an explicit type, where the value of const parameter `N` is specified
+     |
+1670 |         let requests: [PrepareEffectRequest<'_>; N] = core::array::from_fn(|lane| request(&uniform[lane]));
+     |                     +++++++++++++++++++++++++++++++
+
+For more information about this error, try `rustc --explain E0284`.
+error: could not compile `compressor` (lib test) due to 3 previous errors
+EXIT=101
+

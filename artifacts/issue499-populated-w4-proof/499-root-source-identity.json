@@ -1,0 +1,6 @@
+{
+  "source": "90bea9972cc452e140de580e9a78b08a8eb19f4f",
+  "kernel_git_blob": "6d6c8b338b7bb03e060c5b3a46c882fab0689350",
+  "kernel_sha256": "0e4d84c4bb2b13133f3dd67fbb1d26045777a81126805baeddab1d072c86b145",
+  "note": "Luna logs label the 40-hex Git blob identity as sha256; this independently verified record corrects that label without rewriting raw logs."
+}

@@ -1,0 +1,10 @@
+07fb5b74c92b7c08d15e4ea4c64d17f60b840f485d710c9cf4b037c52c2019e5  475-sol2-access-uniform-dispatch-mutant.log
+dba8918bb9e377a71f9be9aa2b36344777494d78258a47f2a71e1ef01ba0573c  475-sol2-coherent-runtime-proof.log
+367139cc6e1b7202e0d7b7607c5d7a85fd68eb9eecd2d4f24a1f02b179f9a4d8  475-sol2-final-cargo-gates-contaminated.log
+2140a2b645baae8190bced84b658a73a93b33568473582dfe2169b1422ba8981  475-sol2-final-cargo-gates.log
+cd0645a2cb8ba9c46de3def2c708a3f093d0279afdfc61068df49ac0c1f5f621  475-sol2-final-policy-gates-direct-failure.log
+3ad8f738aea421293ec3b91f752257c5a6ee6b050da7cf8a0cb9707e73bc4dfa  475-sol2-final-policy-gates.log
+f33afe193c5bb837acbf2870ae16d6bdb941a9ac16cb44d09e0a995427656cbd  475-sol2-wasm-bitcode-bad-magic.log
+531c4d509daddc6b61443489ce654d3ae2827192c62cc542c7ac5e132a1ed2e8  475-sol2-wasm-production-module-build.log
+f41c03b95b778ddca464d32851dc8ffd68e157e1ab723536f301ab5d63f6cfce  475-sol2-wasm-production-module-decode.log
+941faf7754d35480f0ff9dcd3fbdb529d1c0eebfe1aa779e8b46b6b8e687740d  475-sol2-package-validation.log

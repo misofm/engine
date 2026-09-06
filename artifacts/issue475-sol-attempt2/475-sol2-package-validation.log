@@ -1,0 +1,20 @@
+COMMAND_1=(cd artifacts/issue475-sol-attempt2 && sha256sum -c manifest.sha256)
+COMMAND_2=git diff --quiet 81ed8e72 60004323 -- crates/compressor/src/kernel.rs crates/compressor/src/lib.rs crates/compressor/src/state.rs crates/compressor/src/design.rs
+COMMAND_3=PATH=/home/bl/.cargo/bin:$PATH cargo fmt --all -- --check
+COMMAND_4=git diff --check
+CWD=/home/bl/misofm/engine-475-plan
+SOURCE_REV=60004323b0b8fb71b80864927c2c9e186dc6be49
+475-sol2-access-uniform-dispatch-mutant.log: OK
+475-sol2-coherent-runtime-proof.log: OK
+475-sol2-final-cargo-gates-contaminated.log: OK
+475-sol2-final-cargo-gates.log: OK
+475-sol2-final-policy-gates-direct-failure.log: OK
+475-sol2-final-policy-gates.log: OK
+475-sol2-wasm-bitcode-bad-magic.log: OK
+475-sol2-wasm-production-module-build.log: OK
+475-sol2-wasm-production-module-decode.log: OK
+MANIFEST_EXIT=0
+PRODUCTION_EQUIVALENCE_EXIT=0
+FMT_EXIT=0
+DIFF_CHECK_EXIT=0
+

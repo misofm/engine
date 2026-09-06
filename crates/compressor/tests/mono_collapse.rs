@@ -367,6 +367,139 @@ fn a_desymmetrized_bank_is_a_never_collapsed_bank() {
     }
 }
 
+/// A mono reopen copies a uniform left delay population over a ragged right population, and the
+/// very next public dual render agrees in complete PCM and serialised state with its dual oracle.
+#[test]
+fn mono_reopen_drives_the_next_render_from_the_copied_delay_population() {
+    let Some((_, width)) = support::native_bank_width() else {
+        return;
+    };
+    let lanes = width.lanes() as usize;
+    let uniform_values = support::values_with(&[(0, -30.0), (1, 4.0), (7, 0.0)]);
+    let requests: Vec<_> = (0..lanes)
+        .map(|_| request_linked(&uniform_values, LinkMode::Average))
+        .collect();
+    let mut reopened = support::bind_bank(&requests).expect("reopened bank");
+    let mut oracle = support::bind_bank(&requests).expect("dual oracle");
+    let sizes = support::prepare(request_linked(&uniform_values, LinkMode::Average));
+
+    for track in 0..lanes {
+        let ragged_values =
+            support::values_with(&[(0, -30.0), (1, 4.0), (7, 2.5 * (track % 8) as f32)]);
+        let uniform_source = support::prepare(request_linked(&uniform_values, LinkMode::Average));
+        let ragged_source = support::prepare(request_linked(&ragged_values, LinkMode::Average));
+        let (uniform_left, uniform_right) = support::snapshot(uniform_source.as_ref());
+        let (_, ragged_right) = support::snapshot(ragged_source.as_ref());
+        support::restore_track(
+            reopened.as_mut(),
+            track as u32,
+            1,
+            &uniform_left,
+            &ragged_right,
+            sizes.as_ref(),
+        )
+        .expect("asymmetric restore");
+        support::restore_track(
+            oracle.as_mut(),
+            track as u32,
+            1,
+            &uniform_left,
+            &uniform_right,
+            sizes.as_ref(),
+        )
+        .expect("uniform restore");
+    }
+
+    let empty_offsets = offsets(lanes);
+    let mut mono_left = block(0, lanes);
+    let mut ignored_right = vec![f32::from_bits(0x7f7f_4750); FRAMES * lanes];
+    let mut oracle_left = mono_left.clone();
+    let mut oracle_right = mono_left.clone();
+    run_block(
+        reopened.as_mut(),
+        &mut mono_left,
+        &mut ignored_right,
+        width,
+        0,
+        &[],
+        &empty_offsets,
+        true,
+    );
+    run_block(
+        oracle.as_mut(),
+        &mut oracle_left,
+        &mut oracle_right,
+        width,
+        0,
+        &[],
+        &empty_offsets,
+        false,
+    );
+    assert_eq!(
+        mono_left
+            .iter()
+            .map(|word| word.to_bits())
+            .collect::<Vec<_>>(),
+        oracle_left
+            .iter()
+            .map(|word| word.to_bits())
+            .collect::<Vec<_>>()
+    );
+    reopened.desymmetrize_channels();
+    for track in 0..lanes as u32 {
+        assert_eq!(
+            support::snapshot_track(reopened.as_ref(), track, sizes.as_ref()),
+            support::snapshot_track(oracle.as_ref(), track, sizes.as_ref()),
+            "track {track}: reopen must copy the uniform left state over ragged right state"
+        );
+    }
+
+    let mut reopened_left = block(FRAMES, lanes);
+    let mut reopened_right = reopened_left.clone();
+    let mut expected_left = reopened_left.clone();
+    let mut expected_right = reopened_left.clone();
+    run_block(
+        reopened.as_mut(),
+        &mut reopened_left,
+        &mut reopened_right,
+        width,
+        FRAMES as u64,
+        &[],
+        &empty_offsets,
+        false,
+    );
+    run_block(
+        oracle.as_mut(),
+        &mut expected_left,
+        &mut expected_right,
+        width,
+        FRAMES as u64,
+        &[],
+        &empty_offsets,
+        false,
+    );
+    assert_eq!(
+        reopened_left
+            .iter()
+            .chain(&reopened_right)
+            .map(|word| word.to_bits())
+            .collect::<Vec<_>>(),
+        expected_left
+            .iter()
+            .chain(&expected_right)
+            .map(|word| word.to_bits())
+            .collect::<Vec<_>>(),
+        "first dual PCM after reopen"
+    );
+    for track in 0..lanes as u32 {
+        assert_eq!(
+            support::snapshot_track(reopened.as_ref(), track, sizes.as_ref()),
+            support::snapshot_track(oracle.as_ref(), track, sizes.as_ref()),
+            "track {track}: first dual state after reopen"
+        );
+    }
+}
+
 /// A **statically bypassed** bank collapses to the dual bypassed bits, plane and state.
 ///
 /// # The seam this closes

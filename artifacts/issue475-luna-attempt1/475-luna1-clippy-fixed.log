@@ -1,0 +1,7 @@
+COMMAND: PATH=/home/bl/.cargo/bin:$PATH cargo clippy --locked -p compressor --all-targets --all-features -- -D warnings
+CWD: /home/bl/misofm/engine-475-plan
+SOURCE_REV: 55e1c1e8a0ef9401e5bdbd89011b0c67837c9595
+SOURCE_KERNEL_SHA256: e4739d130616358ccd55287636194175eb6890275d9baaa245083fd5c0037011  crates/compressor/src/kernel.rs
+    Checking compressor v0.1.0 (/home/bl/misofm/engine-475-plan/crates/compressor)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.21s
+STATUS=0

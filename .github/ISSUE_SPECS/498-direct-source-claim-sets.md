@@ -83,3 +83,9 @@ Read-only source/log inspection; no tests/builds/timing or source/spec/Git/GitHu
 ## Qualified current artifact
 
 Candidatea928a42d passes verified builder/static/resources26/hermetic/npm/current3browser+self-tests/matrix, all7 numeric exits0. Final module SHA2568a42eb47c36ff8053b66054d72a06dee48b3c3577943f21119e0709fe64d0d0c agrees with the pin and generated records; only candidate/hash identity changed at5ff72a70. Full immutable raw records and original mismatch1 are retained. No numerical expectation or production source changed after acceptance. Actual-head PR review and required qualification remain before merge.
+
+## Delivered and remotely closed
+
+PR501 merged at2026-09-06T05:20:59Z as95abdd015e28823905800d051d03837255d91612. Astra exact-head PASS applies to23d6b7af4fc9aff5cb149484e21a9713d7c6a60f, and required qualification34013469825 completed SUCCESS on that same head before merge. GitHub498 is verified CLOSED. This delivers the two intermediate claim-vector removals only; other CP4 collections remain. Post-main qualification will be monitored separately.
+
+Post-main qualification34013759448 at95abdd015e28823905800d051d03837255d91612 completed SUCCESS; both required pre-merge and post-main CI are green.

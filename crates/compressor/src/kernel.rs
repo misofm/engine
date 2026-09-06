@@ -44,6 +44,9 @@ use lane::kernels::gain_mix_step;
 use lane::{Lane, flush};
 use math::fast_db::{fast_gain_from_db, fast_level_db};
 
+#[cfg(test)]
+use core::sync::atomic::{AtomicUsize, Ordering};
+
 use crate::design::{
     ALL_PARAMETERS, COEF_ATTACK, COEF_HALF_KNEE, COEF_INV_RATIO_MINUS_ONE, COEF_INV_TWO_KNEE,
     COEF_MAKEUP, COEF_MIX, COEF_RELEASE, COEF_THRESHOLD, CoefWords, MAX_WIDTH, PARAMETER_COUNT,
@@ -491,6 +494,8 @@ fn frames_loop<L: Lane, const RAMPING: bool>(
     let mut coef_left = Coef::load(&channel_left.words);
     let mut coef_right = Coef::load(&channel_right.words);
     let mut gather = [0.0_f32; MAX_WIDTH];
+    let delay_left = delay_class(channel_left);
+    let delay_right = delay_class(channel_right);
 
     for frame in start..end {
         if RAMPING {
@@ -517,8 +522,8 @@ fn frames_loop<L: Lane, const RAMPING: bool>(
         level_right.store(&mut channel_right.detector[write * width..]);
         let delayed_left = L::load(&channel_left.main[next * width..]);
         let delayed_right = L::load(&channel_right.main[next * width..]);
-        let detected_left = gather_detector(channel_left, write, &mut gather);
-        let detected_right = gather_detector(channel_right, write, &mut gather);
+        let detected_left = gather_detector(channel_left, write, delay_left, &mut gather);
+        let detected_right = gather_detector(channel_right, write, delay_right, &mut gather);
 
         // 4-8, one channel then the other; the two share only the linked detector above.
         let output_left = one_frame(
@@ -806,6 +811,33 @@ fn min_delay<L: Lane>(channel: &Channel<L>) -> usize {
     least as usize
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DelayClass {
+    Uniform(usize),
+    Ragged,
+}
+
+#[cfg(test)]
+static FILL_UNIFORM_CALLS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static FILL_RAGGED_CALLS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static GATHER_UNIFORM_CALLS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static GATHER_RAGGED_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+/// Classifies the live detector delays once for a frame segment. Padding never participates.
+#[inline(always)]
+fn delay_class<L: Lane>(channel: &Channel<L>) -> DelayClass {
+    let first = channel.delay[0] as usize;
+    for lane in 1..L::WIDTH {
+        if channel.delay[lane] as usize != first {
+            return DelayClass::Ragged;
+        }
+    }
+    DelayClass::Uniform(first)
+}
+
 /// Copies `len` frames of every live lane's detector tap into `scratch`, frame major.
 ///
 /// The tap row of lane `k` advances one row per frame from `(write - D_k) mod B`, so the whole
@@ -818,6 +850,22 @@ fn fill_taps<L: Lane>(channel: &Channel<L>, write: usize, len: usize, scratch: &
     let width = L::WIDTH;
     let ring_length = channel.ring_length as usize;
     let scratch = &mut scratch[..len * width];
+    if let DelayClass::Uniform(delay) = delay_class(channel) {
+        #[cfg(test)]
+        FILL_UNIFORM_CALLS.fetch_add(1, Ordering::Relaxed);
+        let row = if write >= delay {
+            write - delay
+        } else {
+            write + ring_length - delay
+        };
+        let first = (ring_length - row).min(len) * width;
+        scratch[..first].copy_from_slice(&channel.detector[row * width..row * width + first]);
+        let rest = len * width - first;
+        scratch[first..first + rest].copy_from_slice(&channel.detector[..rest]);
+        return;
+    }
+    #[cfg(test)]
+    FILL_RAGGED_CALLS.fetch_add(1, Ordering::Relaxed);
     for lane in 0..width {
         let delay = channel.delay[lane] as usize;
         let row = if write >= delay {
@@ -861,10 +909,23 @@ fn copy_lane(source: &[f32], destination: &mut [f32], lane: usize, width: usize)
 fn gather_detector<L: Lane>(
     channel: &Channel<L>,
     write: usize,
+    class: DelayClass,
     gather: &mut [f32; MAX_WIDTH],
 ) -> L {
     let width = L::WIDTH;
     let ring_length = channel.ring_length as usize;
+    if let DelayClass::Uniform(delay) = class {
+        #[cfg(test)]
+        GATHER_UNIFORM_CALLS.fetch_add(1, Ordering::Relaxed);
+        let row = if write >= delay {
+            write - delay
+        } else {
+            write + ring_length - delay
+        };
+        return L::load(&channel.detector[row * width..]);
+    }
+    #[cfg(test)]
+    GATHER_RAGGED_CALLS.fetch_add(1, Ordering::Relaxed);
     for (lane, slot) in gather.iter_mut().take(width).enumerate() {
         let delay = channel.delay[lane] as usize;
         let tap = if write >= delay {
@@ -1195,6 +1256,7 @@ fn frames_loop_mono<L: Lane, const RAMPING: bool>(
 
     let mut coef_left = Coef::load(&channel_left.words);
     let mut gather = [0.0_f32; MAX_WIDTH];
+    let delay = delay_class(channel_left);
 
     for frame in start..end {
         if RAMPING {
@@ -1213,7 +1275,7 @@ fn frames_loop_mono<L: Lane, const RAMPING: bool>(
         main_left.store(&mut channel_left.main[write * width..]);
         level_left.store(&mut channel_left.detector[write * width..]);
         let delayed_left = L::load(&channel_left.main[next * width..]);
-        let detected_left = gather_detector(channel_left, write, &mut gather);
+        let detected_left = gather_detector(channel_left, write, delay, &mut gather);
 
         let output_left = one_frame(
             delayed_left,
@@ -1281,5 +1343,455 @@ fn idle_frames_staged_mono<L: Lane>(
         let slot = (start + index) * width;
         let delayed_left = L::load(&left[slot..]);
         gain_mix(delayed_left, *smoothed_left, &coef_left, &invariants).store(&mut left[slot..]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use effect_contract::{
+        BankWidth, EffectBankProcessBlock, EffectQuality, InitialParameterValue,
+        NativeEffectFactory, ParameterChannel, PrepareEffectLimits, PrepareEffectRequest,
+        PreparedBankMetadata, PreparedNativeEffectBank, PreparedPorts, PreparedSidechainPort,
+        ResetKind, StatePayloadInput, StatePayloadOutput,
+    };
+    use lane::{Simd4, Simd8};
+
+    use crate::{
+        COMPRESSOR_DESCRIPTOR, COMPRESSOR_PARAMETERS, CompressorFactory, Instance,
+        PreparedCompressorBank, QUALITIES, expected_prepared_metadata, initial_defaults, port_id,
+        ring_length,
+    };
+
+    fn old_detector_word<L: Lane>(channel: &Channel<L>, write: usize, lane: usize) -> f32 {
+        let delay = channel.delay[lane] as usize;
+        let ring_length = channel.ring_length as usize;
+        let row = if write >= delay {
+            write - delay
+        } else {
+            write + ring_length - delay
+        };
+        channel.detector[row * L::WIDTH + lane]
+    }
+
+    fn assert_access_case<L: Lane>(
+        channel: &Channel<L>,
+        write: usize,
+        len: usize,
+        expected_class: DelayClass,
+    ) {
+        assert_eq!(delay_class(channel), expected_class);
+        let prefix = len * L::WIDTH;
+        let mut scratch = vec![f32::from_bits(0x7f7f_4750); prefix + 3];
+        fill_taps(channel, write, len, &mut scratch);
+        for frame in 0..len {
+            let frame_write = (write + frame) % channel.ring_length as usize;
+            for lane in 0..L::WIDTH {
+                assert_eq!(
+                    scratch[frame * L::WIDTH + lane].to_bits(),
+                    old_detector_word(channel, frame_write, lane).to_bits(),
+                    "write={write} len={len} frame={frame} lane={lane}"
+                );
+            }
+        }
+        assert!(
+            scratch[prefix..]
+                .iter()
+                .all(|word| word.to_bits() == 0x7f7f_4750),
+            "write={write} len={len}: fill touched the outside-prefix sentinel"
+        );
+
+        let mut gather = [f32::from_bits(0x7f7f_4751); MAX_WIDTH];
+        let actual = gather_detector(channel, write, delay_class(channel), &mut gather);
+        let mut lanes = [0.0; MAX_WIDTH];
+        actual.store(&mut lanes);
+        for (lane, actual) in lanes.iter().enumerate().take(L::WIDTH) {
+            assert_eq!(
+                actual.to_bits(),
+                old_detector_word(channel, write, lane).to_bits(),
+                "gather write={write} lane={lane}"
+            );
+        }
+    }
+
+    fn access_witness<L: Lane>() {
+        let defaults = [[0.0; PARAMETER_COUNT]; MAX_WIDTH];
+        let mut channel = Channel::<L>::new(&defaults, 11, 48_000);
+        for row in 0..11 {
+            for lane in 0..L::WIDTH {
+                channel.detector[row * L::WIDTH + lane] = (row * 100 + lane) as f32;
+            }
+        }
+        channel.delay[..L::WIDTH].fill(2);
+        for lane in L::WIDTH..MAX_WIDTH {
+            channel.delay[lane] = 99;
+        }
+        // Real uniform classification at the compact run's start row before, at and after the
+        // physical wrap. The lengths cover empty and singleton prefixes, one complete staged
+        // segment and the shorter tail left by a split segment.
+        for write in [0, 2, 10] {
+            for len in [0, 1, 4, 10] {
+                assert_access_case(&channel, write, len, DelayClass::Uniform(2));
+            }
+        }
+
+        for lane in 0..L::WIDTH {
+            channel.delay[lane] = 2 + (lane & 1) as u32;
+        }
+        let expected = if L::WIDTH == 1 {
+            DelayClass::Uniform(2)
+        } else {
+            DelayClass::Ragged
+        };
+        for write in [0, 2, 10] {
+            for len in [0, 1, 4, 10] {
+                assert_access_case(&channel, write, len, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn uniform_and_ragged_access_match_old_transcription() {
+        FILL_UNIFORM_CALLS.store(0, Ordering::Relaxed);
+        FILL_RAGGED_CALLS.store(0, Ordering::Relaxed);
+        GATHER_UNIFORM_CALLS.store(0, Ordering::Relaxed);
+        GATHER_RAGGED_CALLS.store(0, Ordering::Relaxed);
+        access_witness::<f32>();
+        access_witness::<Simd4>();
+        access_witness::<Simd8>();
+        // These counters are branch-local: classification alone cannot satisfy them. Keep these
+        // assertions after the independent old-access comparisons so a dispatch mutant retains
+        // the useful fact that its PCM words still match before its causal witness rejects it.
+        assert!(FILL_UNIFORM_CALLS.load(Ordering::Relaxed) > 0);
+        assert!(FILL_RAGGED_CALLS.load(Ordering::Relaxed) > 0);
+        assert!(GATHER_UNIFORM_CALLS.load(Ordering::Relaxed) > 0);
+        assert!(GATHER_RAGGED_CALLS.load(Ordering::Relaxed) > 0);
+    }
+
+    type TrackPayload = (Vec<u8>, Vec<u8>);
+    type BankResult = (Vec<u32>, Vec<u32>, Vec<TrackPayload>);
+
+    fn initial_values(left_lookahead: f32, right_lookahead: f32) -> [InitialParameterValue; 16] {
+        core::array::from_fn(|index| {
+            let parameter = index / 2;
+            InitialParameterValue {
+                parameter_index: parameter as u32,
+                channel: if index & 1 == 0 {
+                    ParameterChannel::Left
+                } else {
+                    ParameterChannel::Right
+                },
+                value: if parameter == 7 {
+                    if index & 1 == 0 {
+                        left_lookahead
+                    } else {
+                        right_lookahead
+                    }
+                } else {
+                    COMPRESSOR_PARAMETERS[parameter].default_value
+                },
+            }
+        })
+    }
+
+    fn request(values: &[InitialParameterValue]) -> PrepareEffectRequest<'_> {
+        PrepareEffectRequest {
+            sample_rate: 48_000,
+            quantum: 128,
+            quality: EffectQuality::Normal,
+            bypass: false,
+            link_mode: LinkMode::DualMono,
+            ports: PreparedPorts {
+                sidechain: PreparedSidechainPort::Unconnected {
+                    id: port_id("sidechain-in"),
+                    required: false,
+                },
+            },
+            initial_values: values,
+            limits: PrepareEffectLimits {
+                maximum_total_state_bytes: 15_568,
+                maximum_scratch_bytes: 64,
+                maximum_automation_spans_per_block: 16,
+            },
+        }
+    }
+
+    /// Constructs the existing W4 state owner after running the same validation/default
+    /// derivation as the public factory. This is deliberately private test construction: it does
+    /// not claim that this x86-64-v3 build's factory admits a non-native W4 bank.
+    fn bank4(values: &[[InitialParameterValue; 16]; 4]) -> PreparedCompressorBank<Simd4> {
+        let requests: [PrepareEffectRequest<'_>; 4] =
+            core::array::from_fn(|lane| request(&values[lane]));
+        let metadata = expected_prepared_metadata(&COMPRESSOR_DESCRIPTOR, requests[0])
+            .expect("validated metadata");
+        let mut left_defaults = [[0.0; PARAMETER_COUNT]; MAX_WIDTH];
+        let mut right_defaults = [[0.0; PARAMETER_COUNT]; MAX_WIDTH];
+        for (lane, request) in requests.iter().copied().enumerate() {
+            let candidate = expected_prepared_metadata(&COMPRESSOR_DESCRIPTOR, request)
+                .expect("validated lane metadata");
+            assert_eq!(candidate.program_key(), metadata.program_key());
+            let (left, right) = initial_defaults(request.initial_values).expect("defaults");
+            left_defaults[lane] = left;
+            right_defaults[lane] = right;
+        }
+        let length = ring_length(metadata).expect("ring length");
+        PreparedCompressorBank {
+            metadata: PreparedBankMetadata {
+                width: BankWidth::Four,
+                program_key: metadata.program_key(),
+            },
+            instance: Instance::new(metadata, &left_defaults, &right_defaults, length),
+        }
+    }
+
+    fn payloads(bank: &dyn PreparedNativeEffectBank) -> Vec<TrackPayload> {
+        let sizes = QUALITIES[1].maximum_state;
+        (0..4)
+            .map(|track| {
+                let mut left = vec![0; sizes.left_bytes as usize];
+                let mut right = vec![0; sizes.right_bytes as usize];
+                bank.snapshot_track_state_payload(
+                    track,
+                    StatePayloadOutput::new(&mut [], &mut left, &mut right, sizes)
+                        .expect("payload output"),
+                )
+                .expect("snapshot");
+                (left, right)
+            })
+            .collect()
+    }
+
+    fn restore_payloads(bank: &mut dyn PreparedNativeEffectBank, state: &[TrackPayload]) {
+        let sizes = QUALITIES[1].maximum_state;
+        for (track, (left, right)) in state.iter().enumerate() {
+            bank.restore_track_state_payload(
+                track as u32,
+                COMPRESSOR_DESCRIPTOR.state_layout_version,
+                StatePayloadInput::new(&[], left, right, sizes).expect("payload input"),
+            )
+            .expect("restore");
+        }
+    }
+
+    fn render4(
+        bank: &mut dyn PreparedNativeEffectBank,
+        block_origin: u64,
+        mono: bool,
+    ) -> BankResult {
+        let mut left: Vec<f32> = (0..512)
+            .map(|word| {
+                let frame = block_origin + (word / 4) as u64;
+                let lane = (word % 4) as u64;
+                f32::from_bits(
+                    0x3e00_0000 + (((frame * 7919 + lane * 104729) as u32) & 0x007f_ffff),
+                )
+            })
+            .collect();
+        left[4] = -0.0;
+        left[11] = -0.0;
+        // Mirrored planes are the mono-collapse precondition. Values still vary by frame and lane.
+        let mut right = left.clone();
+        let offsets = [0_u32; 5];
+        let block = EffectBankProcessBlock::new(
+            &mut left,
+            &mut right,
+            None,
+            128,
+            BankWidth::Four,
+            block_origin,
+            &[],
+            &offsets,
+            128,
+        )
+        .expect("block");
+        if mono {
+            bank.process_bank_mono(block);
+        } else {
+            bank.process_bank(block);
+        }
+        (
+            left.iter().map(|word| word.to_bits()).collect(),
+            right.iter().map(|word| word.to_bits()).collect(),
+            payloads(bank),
+        )
+    }
+
+    fn prime8(bank: &mut dyn PreparedNativeEffectBank) {
+        for block in 0..8 {
+            let _ = render4(bank, block * 128, false);
+        }
+    }
+
+    fn assert_populated_history(bank: &PreparedCompressorBank<Simd4>) {
+        for channel in [&bank.instance.left, &bank.instance.right] {
+            assert!(
+                channel
+                    .main
+                    .iter()
+                    .any(|word| word.is_finite() && *word != 0.0)
+            );
+            assert!(
+                channel
+                    .detector
+                    .iter()
+                    .any(|word| word.is_finite() && *word != 0.0)
+            );
+            for lane in 1..4 {
+                let write = channel.cursor as usize;
+                let actual = old_detector_word(channel, write, lane);
+                let alternate_delay = if channel.delay[lane] == 960 {
+                    960 - 120 * lane as u32
+                } else {
+                    960
+                };
+                let row = if write >= alternate_delay as usize {
+                    write - alternate_delay as usize
+                } else {
+                    write + channel.ring_length as usize - alternate_delay as usize
+                };
+                let alternate = channel.detector[row * Simd4::WIDTH + lane];
+                assert!(actual.is_finite() && actual != 0.0);
+                assert!(alternate.is_finite() && alternate != 0.0);
+                assert_ne!(
+                    actual, alternate,
+                    "same lane delay choices selected identical history"
+                );
+            }
+        }
+    }
+
+    fn assert_meaningful_pcm(result: &BankResult, context: &str) {
+        let meaningful = |word: &u32| {
+            let value = f32::from_bits(*word);
+            value.is_finite() && value != 0.0
+        };
+        assert!(
+            result.0.iter().any(meaningful),
+            "{context}: silent left PCM"
+        );
+        assert!(
+            result.1.iter().any(meaningful),
+            "{context}: silent right PCM"
+        );
+        for (plane, words) in [("left", &result.0), ("right", &result.1)] {
+            let mut first = None;
+            let mut differs = false;
+            for word in words {
+                let value = f32::from_bits(*word);
+                if !value.is_finite() || value == 0.0 {
+                    continue;
+                }
+                if let Some(previous) = first {
+                    if value != previous {
+                        differs = true;
+                        break;
+                    }
+                } else {
+                    first = Some(value);
+                }
+            }
+            assert!(
+                differs,
+                "{context}: {plane} PCM lacks distinct nonzero values"
+            );
+        }
+    }
+
+    fn population(ragged: bool) -> [[InitialParameterValue; 16]; 4] {
+        core::array::from_fn(|lane| {
+            let lookahead = if ragged { 2.5 * lane as f32 } else { 0.0 };
+            initial_values(lookahead, lookahead)
+        })
+    }
+
+    #[test]
+    fn w4_state_owner_transitions_drive_the_next_real_render() {
+        let uniform = population(false);
+        let ragged = population(true);
+
+        // Restore changes both actual W4 directions. The uninterrupted owner holding the saved
+        // state is the oracle for the destination owner's first render after restore.
+        for (source_values, destination_values) in [(&ragged, &uniform), (&uniform, &ragged)] {
+            let mut source = bank4(source_values);
+            prime8(&mut source);
+            assert_populated_history(&source);
+            let saved = payloads(&source);
+            let mut transitioned = bank4(destination_values);
+            restore_payloads(&mut transitioned, &saved);
+            let expected = render4(&mut source, 1024, false);
+            assert_meaningful_pcm(&expected, "restored W4 expected first block");
+            assert_eq!(
+                render4(&mut transitioned, 1024, false),
+                expected,
+                "first W4 render after restored delay-population transition"
+            );
+        }
+
+        // Full reset reinstalls the ragged preparation defaults over restored uniform state.
+        let mut uniform_owner = bank4(&uniform);
+        prime8(&mut uniform_owner);
+        let uniform_state = payloads(&uniform_owner);
+        let mut reset = bank4(&ragged);
+        restore_payloads(&mut reset, &uniform_state);
+        reset.reset(ResetKind::FullToDefaults);
+        let mut fresh = bank4(&ragged);
+        let first_reset = render4(&mut reset, 0, false);
+        let first_fresh = render4(&mut fresh, 0, false);
+        assert_eq!(first_reset, first_fresh, "first W4 render after full reset");
+        assert!(first_reset.0.iter().all(|word| *word == 0));
+        assert!(first_reset.1.iter().all(|word| *word == 0));
+        for block in 1..=8 {
+            let reset_result = render4(&mut reset, block * 128, false);
+            let fresh_result = render4(&mut fresh, block * 128, false);
+            if block == 8 {
+                assert_meaningful_pcm(&fresh_result, "full-reset expected final block");
+                assert_populated_history(&fresh);
+            }
+            assert_eq!(
+                reset_result, fresh_result,
+                "full-reset continuation block {block}"
+            );
+        }
+
+        // Reopen copies a uniform left population over a ragged right population. Construct that
+        // state only through the real per-track restore method, then use the actual mono/copy/dual
+        // trait calls and compare complete next PCM plus every serialized lane state.
+        let asymmetric: [[InitialParameterValue; 16]; 4] =
+            core::array::from_fn(|lane| initial_values(0.0, 2.5 * lane as f32));
+        let mut asymmetric_owner = bank4(&asymmetric);
+        let mut oracle = bank4(&uniform);
+        prime8(&mut asymmetric_owner);
+        prime8(&mut oracle);
+        assert_populated_history(&asymmetric_owner);
+        let asymmetric_state = payloads(&asymmetric_owner);
+        let mut reopened = bank4(&uniform);
+        restore_payloads(&mut reopened, &asymmetric_state);
+        let mono = render4(&mut reopened, 1024, true);
+        let dual = render4(&mut oracle, 1024, false);
+        assert_meaningful_pcm(&dual, "mono expected first block");
+        assert_eq!(mono.0, dual.0, "W4 mono left PCM before reopen");
+        reopened.desymmetrize_channels();
+        assert_eq!(payloads(&reopened), payloads(&oracle), "W4 copied state");
+        let expected_reopen = render4(&mut oracle, 1152, false);
+        assert_meaningful_pcm(&expected_reopen, "reopen expected first dual block");
+        assert_eq!(
+            render4(&mut reopened, 1152, false),
+            expected_reopen,
+            "first W4 dual render after mono reopen"
+        );
+
+        // The test-only owner came through private construction, not public factory admission.
+        let requests: [PrepareEffectRequest<'_>; 4] =
+            core::array::from_fn(|lane| request(&uniform[lane]));
+        assert!(
+            CompressorFactory
+                .bind_homogeneous_bank(effect_contract::PrepareEffectBankRequest {
+                    backend: lane::Backend::Simd4,
+                    width: BankWidth::Four,
+                    requests: &requests,
+                })
+                .expect("validated public request")
+                .is_none()
+        );
     }
 }

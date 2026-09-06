@@ -1,0 +1,9 @@
+BASELINE COMMAND (actual; executed before access rewrite): PATH=/home/bl/.cargo/bin:$PATH cargo rustc --locked --release -p compressor --target-dir "$BASE" -- --emit=asm,llvm-ir
+CWD: /home/bl/misofm/engine-475-plan
+PRE_EDIT_SOURCE_REV: cf5c61487b06f24605fc6bd62f62b94c46a27868
+PRE_EDIT_KERNEL_BLOB: 8864f18bf67b6346fd8a72b924e71ee34c03183c
+RETAINED_IR_ASM_SHA256: 7b4c3adec692b6be12d757d16fe42e1b136e0b5b7099e3165e0334659d27c22e  /tmp/475-luna1-target-baseline.G0nm9N/release/deps/compressor-4b5374e0681f5134.ll
+e50040ab4612d66d6aa74c4d15732a6f695b8d130c90889edad5acbe84ae759b  /tmp/475-luna1-target-baseline.G0nm9N/release/deps/compressor-4b5374e0681f5134.s
+ACTUAL_CAPTURE_LOG: /tmp/475-luna1-baseline.log
+BASELINE_STATUS (from actual capture): 0
+INTERPRETATION: production release IR has process_block<f32>, process_block<wide::f32x8>, process_block_mono<wide::f32x8>, frames_loop true/false, and idle_frames_staged scalar/W8. gather_detector has no standalone baseline body (inlined/optimized); no instruction saving claim is made.

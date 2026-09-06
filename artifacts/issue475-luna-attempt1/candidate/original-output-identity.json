@@ -1,0 +1,12 @@
+[
+  {
+    "original_path": "/tmp/475-luna1-target-candidate.4de9SD/release/deps/compressor-4b5374e0681f5134.ll",
+    "bytes": 2869769,
+    "sha256": "9965b12b6cb009d53e2a13c50d22b2891125249fca5dc0ca195e10136908c56c"
+  },
+  {
+    "original_path": "/tmp/475-luna1-target-candidate.4de9SD/release/deps/compressor-4b5374e0681f5134.s",
+    "bytes": 1317834,
+    "sha256": "142481554c3845745765db8ffe63a6765f4b0489db84948da90a852e53182224"
+  }
+]

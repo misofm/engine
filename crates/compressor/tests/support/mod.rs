@@ -241,6 +241,23 @@ pub fn snapshot_track(
     (left, right)
 }
 
+/// Restores one track of a prepared bank from two channel sections.
+pub fn restore_track(
+    bank: &mut dyn PreparedNativeEffectBank,
+    track: u32,
+    version: u32,
+    left: &[u8],
+    right: &[u8],
+    sizes_from: &dyn PreparedNativeEffect,
+) -> Result<(), effect_contract::StatePayloadError> {
+    let sizes = sizes_from.metadata().state_sizes;
+    bank.restore_track_state_payload(
+        track,
+        version,
+        StatePayloadInput::new(&[], left, right, sizes).expect("payload"),
+    )
+}
+
 /// Restores a scalar instance from two channel sections.
 pub fn restore(
     effect: &mut dyn PreparedNativeEffect,
