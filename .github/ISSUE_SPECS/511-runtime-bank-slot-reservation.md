@@ -201,3 +201,21 @@ Sol corrected the six approved source paths and both frozen exact debug tests pa
 ## Sol attempt 2 final local evidence
 
 Source777d168f and the mechanical test-only follow-upca8f34d5 pass both frozen exact tests, full graph64/64 and allocation7/7 suites in debug/release, scoped strict Clippy and fmt/diff/graph/realtime/workspace policies. Actual compiled construction facts show pairedN6/R6/S5 and unpairedN6/R6/S6 with max per-chainS3. Raw evidence, source identities and candid operational failures are preserved in artifacts/issue511-sol-attempt2. Consolidated Astra review and immutable delivery are pending.
+
+## Consolidated Sol attempt 2 FAIL; final Sol attempt 3 scope
+
+Astra reviewed clean cd372f3d and accepted the corrected component arithmetic, independent mixed admission/rollback/caps, prior diagnostic ordering, actual paired/unpaired counts, attributable allocation/release/largest evidence and four derived numeric equations. All124 Sol2 payload hashes and125 tracked files verify. The remaining blocking finding is a real existing consumer regression: scripts/preflight-builtins-benchmark.sh invokes builtins-compiler tests with only its test-support feature, but the new physical test also needs graph/test-support. Passing explicit workspace configurations does not preserve this isolated consumer. The earlier report's operational-only classification is rejected; all raw failures remain preserved. Full consolidated review: /tmp/astra-511-attempt2-review.md, to be retained with final-attempt evidence.
+
+Astra approves exactly two final source corrections:
+
+- In crates/builtins-compiler/Cargo.toml, change the existing test-support feature from [] to ["graph/test-support"]. This is forwarding over the existing dependency, with no new/default dependency or normal production instrumentation. It is the sole exception to the earlier no-Cargo-edit freeze.
+- In the existing allocation_tracker test, compute conversion_coexistence = n * f + n * b + (n + 1) * w. The complete observed stage/slot/mask coexistence includes the original8-byte chain mask:176<=408. The earlier168 subset remains an accurately preserved partial observation, not the complete component bound. Correct the new report/decision wording accordingly; no new test framework or allocator.
+
+Do not edit the historical preflight, seals, digests, test filter or physical-test enablement. Root activates final Sol attempt3 for these exact corrections. Run the preflight's isolated Cargo command directly (one actual selected test), never the full sealed/timed preflight:
+
+```
+cargo test --locked -p builtins-compiler --features test-support phase_two_allocator_layouts_match_the_checked_resource_report
+cargo clippy --locked -p graph -p graph-compiler -p builtins-compiler --all-targets -- -D warnings
+```
+
+Run the frozen focused and affected debug/release suites and proportional static checks on final identified source, including the manifest in source identity. This is attempt3, the final allowed implementation attempt; one consolidated Astra verdict follows. If it fails, stop and rescope once rather than silently retry a fourth time. Immutable native/Wasm/current-artifact qualification follows only after acceptance. No benchmark/timing, new fixture corpus, broad manifest/dependency changes or preemptive pin updates are authorized.
