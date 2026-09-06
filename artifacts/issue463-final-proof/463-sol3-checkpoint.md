@@ -1,0 +1,1 @@
+Final Sol3 test-only checkpoint45aeb3fb is pushed. Focused lane and graph exact tests pass debug/release (one each), canonical FP guards and actual expected-category cases added; longer-operand panic/prefix assertions completed. Production/pins/codegen remain unchanged. Remaining affected gates and one final Astra verdict are pending; no qualification/merge or timing claim yet.
