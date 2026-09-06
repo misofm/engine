@@ -19,6 +19,19 @@ conformance::effect_conformance_test!(compressor::CompressorFactory);
 /// renders through the uniform staged, uniform D=0 and ragged bank paths move neither counter.
 #[test]
 fn uniform_and_ragged_render_paths_allocate_and_free_nothing() {
+    const CHILD: &str = "MISO_475_ALLOCATION_AUDIT_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let status = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .arg("--exact")
+            .arg("uniform_and_ragged_render_paths_allocate_and_free_nothing")
+            .arg("--nocapture")
+            .env(CHILD, "1")
+            .status()
+            .expect("isolated allocation audit child");
+        assert!(status.success(), "isolated allocation audit child failed");
+        return;
+    }
+
     bench_alloc::set_mode(bench_alloc::Mode::Count);
     bench_alloc::assert_installed();
     let liveness_mark = bench_alloc::counters();
