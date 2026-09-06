@@ -1,0 +1,21 @@
+{
+  "main": "f357330ce0f391e785429e82807d7d79ba9a077c",
+  "accepted_compiler_source": "d0bafe8bd669ddbba659236ae988f8d4755f9cca",
+  "qualified_artifact_candidate": "6ede671129ab9cb61c2bde4300cb972acb36c8a5",
+  "checked_paths": [
+    "crates",
+    "hosts",
+    "tools",
+    "scripts",
+    "Cargo.toml",
+    "Cargo.lock",
+    ".cargo"
+  ],
+  "delta_from_main": [
+    "crates/builtins-compiler/src/lib.rs",
+    "hosts/host-web/BROWSER_DEPLOYMENT_MATRIX.md",
+    "hosts/host-web/qualification/results.json",
+    "hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256"
+  ],
+  "compiler_byte_identical_to_accepted": true
+}
