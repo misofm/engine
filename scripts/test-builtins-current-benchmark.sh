@@ -9,7 +9,7 @@ command -v jq >/dev/null || { printf 'jq is required for benchmark validator tes
 hash64="6a1633442678cfdecb2872deacd053e727c47f0bc94039a84b4e950949e195d0"
 binary64="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 output64="cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-manifest64="b244da45d88d670951205098b7516af20387a141eccb3bf60edb61e8ba57a919"
+manifest64="31798260263396c242c0b90042e01abb18624f383fd88029341dffecde662796"
 commit40="0123456789abcdef0123456789abcdef01234567"
 
 record="$(jq -cn --arg hash "$hash64" --arg binary "$binary64" --arg output "$output64" --arg manifest "$manifest64" --arg commit "$commit40" '
@@ -174,7 +174,7 @@ done
 delta_scratch=$(mktemp -d)
 trap 'rm -rf -- "$delta_scratch"' EXIT
 sed \
-  -e 's/ddb4b201dcd4cc00ad445013c9a1b29d9d5f6071f018e649748963c74af4c55b/b244da45d88d670951205098b7516af20387a141eccb3bf60edb61e8ba57a919/' \
+  -e 's/ddb4b201dcd4cc00ad445013c9a1b29d9d5f6071f018e649748963c74af4c55b/31798260263396c242c0b90042e01abb18624f383fd88029341dffecde662796/' \
   -e 's/4e5e2c9fc8e2c2400b816715273879f3635f2374133e5775ade18dabee1f6ad9/6a1633442678cfdecb2872deacd053e727c47f0bc94039a84b4e950949e195d0/' \
   -e 's/cc4f23f6579cc255a1282797de2b78c93951f947c7b0ab72fa2ca713780f8a1e/ac9e825b5051a161ca731b04bd9b9b825bad6484c3a3f911551051e316224fa0/' \
   -e 's/65232ba5a59f54a22762a6ebc82620be6332f9d583c0e61fe4c5d82ede23e7ac/15dfc8b6d918d01a5d6e46417e37a10023d31a85391e8fb2371af0cdc055dd95/' \
