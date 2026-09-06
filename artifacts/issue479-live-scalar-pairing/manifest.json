@@ -2493,5 +2493,10 @@
     "path": "engine-479-workspace.status",
     "bytes": 2,
     "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "integration-source-equivalence.json",
+    "bytes": 750,
+    "sha256": "d2f30594d533f69729155518db741dbfcea1199601176cc0f9fe40fa53057117"
   }
 ]
