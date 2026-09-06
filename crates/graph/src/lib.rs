@@ -1030,9 +1030,12 @@ impl PreparedGraphPlan {
         let duplicate_binding = supplied.len() != bindings.nodes.len();
         let source_claims = source_set
             .as_ref()
-            .map(GraphPreparedSourceSet::claimed_nodes)
+            .map(GraphPreparedSourceSet::claims)
             .unwrap_or_default();
-        let source_claim_set: BTreeSet<_> = source_claims.iter().cloned().collect();
+        let source_claim_set: BTreeSet<_> = source_claims
+            .iter()
+            .map(|claim| claim.node.clone())
+            .collect();
         let source_claims_valid = source_set.as_ref().is_none_or(|set| {
             set.envelope == self.envelope
                 && set.is_valid()
@@ -1219,10 +1222,6 @@ impl GraphPreparedSourceSet {
     #[must_use]
     pub const fn resource_report(&self) -> GraphSourceSetResourceReport {
         self.resources
-    }
-
-    fn claimed_nodes(&self) -> Vec<GraphNodeId> {
-        self.claims.iter().map(|claim| claim.node.clone()).collect()
     }
 
     fn is_valid(&self) -> bool {
@@ -1429,7 +1428,12 @@ impl GraphExecutor {
         let frames = plan.envelope.quantum.0 as usize;
         let source_inputs: BTreeSet<_> = source_set
             .as_ref()
-            .map(|set| set.claimed_nodes().into_iter().collect())
+            .map(|set| {
+                set.claims()
+                    .iter()
+                    .map(|claim| claim.node.clone())
+                    .collect()
+            })
             .unwrap_or_default();
         let source_input_buffers: Box<[(usize, u32)]> = source_set
             .as_ref()
