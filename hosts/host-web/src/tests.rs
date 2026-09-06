@@ -3304,7 +3304,9 @@ fn persist_timing_record(file: &mut std::fs::File, record: &str) {
 fn selective_meter_and_readiness_descriptive_timing() {
     use std::io::Write;
 
-    assert!(!cfg!(debug_assertions), "timing requires --release");
+    if std::hint::black_box(cfg!(debug_assertions)) {
+        panic!("timing requires --release");
+    }
     let mode = std::env::var("MISO_METER_TIMING_MODE").expect("timing mode");
     let output = std::env::var("MISO_METER_TIMING_OUTPUT").expect("timing output path");
     let open = || {
