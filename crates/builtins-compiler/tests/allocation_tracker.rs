@@ -581,7 +581,7 @@ fn actual_runtime_bank_slot_owners_fit_retained_largest_and_conversion_reservati
     let c = n * (f + 3 * b + 3 * w);
     let l = (n * f).max(n * b).max(w);
     let retained = n * b + (n + 1) * w;
-    let conversion_coexistence = n * f + n * b + n * w;
+    let conversion_coexistence = n * f + n * b + (n + 1) * w;
     assert!(retained <= n * (b + 2 * w));
     assert!(conversion_coexistence <= c);
     for request in [n * f, n * b, w] {

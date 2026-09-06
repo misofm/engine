@@ -219,3 +219,7 @@ cargo clippy --locked -p graph -p graph-compiler -p builtins-compiler --all-targ
 ```
 
 Run the frozen focused and affected debug/release suites and proportional static checks on final identified source, including the manifest in source identity. This is attempt3, the final allowed implementation attempt; one consolidated Astra verdict follows. If it fails, stop and rescope once rather than silently retry a fourth time. Immutable native/Wasm/current-artifact qualification follows only after acceptance. No benchmark/timing, new fixture corpus, broad manifest/dependency changes or preemptive pin updates are authorized.
+
+## Final Sol attempt 3 focused checkpoint
+
+Exactly the two approved lines changed: existing test-support forwards graph/test-support, and complete coexistence includes the original mask. The old isolated preflight Cargo command and frozen physical debug test each pass one test; root verified contemporaneous seven-file hashes before checkpoint. No full preflight/timing was run. Final combined Clippy, remaining frozen suites/static gates and Astra verdict remain pending.
