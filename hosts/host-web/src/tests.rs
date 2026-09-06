@@ -1815,7 +1815,7 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
     );
     assert_eq!(
         host.ready.as_ref().expect("ready").in_flight[0],
-        DEFAULT_COMMAND_QUEUE_RECORDS as u32
+        DEFAULT_COMMAND_QUEUE_RECORDS
     );
     assert!(host.ready.as_ref().expect("ready").has_in_flight_commands);
     stage_command(
@@ -1834,7 +1834,7 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
     assert_eq!(host.command_report().reason, COMMAND_REASON_BACKPRESSURE);
     assert_eq!(
         host.ready.as_ref().expect("ready").in_flight[0],
-        DEFAULT_COMMAND_QUEUE_RECORDS as u32
+        DEFAULT_COMMAND_QUEUE_RECORDS
     );
 
     // Malformed and backpressured submissions on an idle host cannot create pending ownership.
