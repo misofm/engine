@@ -171,3 +171,22 @@ Successful linked production Wasm decoding is now present separately from retain
 After these finite corrections, retain meaningful exact new W4 and allocator tests in debug/release plus the frozen affected full suites, strict Clippy/fmt/diff and policies on final source. Preserve accepted production, native/object/G5 evidence and authentic failed history. No more informal Sol2 revisions; root may checkpoint this FAIL and authorize one final Sol3 pass. Another FAIL hardstops/rescopes. Immutable delivery/artifact qualification and actual PR/CI still follow source acceptance; no timing authority is granted.
 
 Root adopts the two finite corrections and authorizes Sol attempt 3, the final attempt. The W4 construction clarification is explicit: only cfg(test) kernel.rs child-module code may construct the existing private PreparedCompressorBank<Simd4>/Instance using validated existing defaults and metadata, then invoke the real PreparedNativeEffectBank restore/reset/process/desymmetrize operations. This is a test fixture for the existing state owner, not a claim that the native public factory accepts W4. No production lib.rs change, backend override, public API, harness, corpus, additional mutation or timing is authorized. Preserve accepted native W8/scalar and generic old-access evidence. Rename the test marker consistently to MISO_ENGINE_COMPRESSOR_ALLOCATION_AUDIT_CHILD and run the actual environment vocabulary gate. Complete one coherent pass and one consolidated Astra verdict; another FAIL requires hardstop and explicit rescope.
+
+## Sol attempt 3 final submission
+
+Final source checkpoint `019ac62a` completes the two authorized corrections without changing
+production behavior. A `cfg(test)` child fixture constructs the existing W4 state owner through
+validated production metadata/default/ring derivation, invokes the real bank trait's restore,
+reset, dual/mono process, desymmetrize and snapshot methods, and compares next-render PCM plus all
+four complete lane payloads for both restored delay directions, full-default reset and mono reopen.
+It also proves the public native factory continues to decline unavailable W4. The allocator child
+marker is now `MISO_ENGINE_COMPRESSOR_ALLOCATION_AUDIT_CHILD`; the unchanged isolated allocator
+test passes in debug/release and the actual environment vocabulary gate reports PASS.
+
+The final affected debug and release lib/staged-idle/mono-collapse/payload/conformance/cross-target
+suites pass with nonempty counts. Full compressor debug, strict all-target Clippy, fmt/diff and
+realtime/lane/workspace/environment policies pass. Failed fixture compilation and the first
+executed mirrored-plane oracle failure remain verbatim in `artifacts/issue475-sol-attempt3/`
+beside the corrected evidence. Accepted Sol2 production/object/G5/mutation/allocation evidence is
+unchanged and was not rerun for these test-only edits. No timing or delivery qualification is
+claimed. Pending the single consolidated final Astra verdict; any FAIL hardstops this issue shape.

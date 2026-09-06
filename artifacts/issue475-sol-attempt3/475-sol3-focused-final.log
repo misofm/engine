@@ -1,0 +1,51 @@
+COMMAND_1=PATH=/home/bl/.cargo/bin:$PATH cargo test --locked --release -p compressor --lib kernel::tests::w4_state_owner_transitions_drive_the_next_real_render -- --exact
+COMMAND_2=PATH=/home/bl/.cargo/bin:$PATH cargo test --locked -p compressor --test conformance uniform_and_ragged_render_paths_allocate_and_free_nothing -- --exact
+COMMAND_3=PATH=/home/bl/.cargo/bin:$PATH cargo test --locked --release -p compressor --test conformance uniform_and_ragged_render_paths_allocate_and_free_nothing -- --exact
+COMMAND_4=PATH=/home/bl/.cargo/bin:$PATH bash scripts/check-env-vocabulary.sh
+CWD=/home/bl/misofm/engine-475-plan
+SOURCE=git-head:c8772db1-plus-uncommitted-sol3-w4-and-env-fix
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-475-plan/crates/compressor)
+    Finished `release` profile [optimized + debuginfo] target(s) in 5.89s
+     Running unittests src/lib.rs (target/release/deps/compressor-9cc9f8cd79b77eb5)
+
+running 1 test
+test kernel::tests::w4_state_owner_transitions_drive_the_next_real_render ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+W4_RELEASE_EXIT=0
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-475-plan/crates/compressor)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.21s
+     Running tests/conformance.rs (target/debug/deps/conformance-8aabad45177d5df2)
+
+running 1 test
+
+running 1 test
+test uniform_and_ragged_render_paths_allocate_and_free_nothing ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.02s
+
+test uniform_and_ragged_render_paths_allocate_and_free_nothing ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.02s
+
+ALLOC_DEBUG_EXIT=0
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-475-plan/crates/compressor)
+    Finished `release` profile [optimized + debuginfo] target(s) in 6.27s
+     Running tests/conformance.rs (target/release/deps/conformance-ad9a60da36090213)
+
+running 1 test
+
+running 1 test
+test uniform_and_ragged_render_paths_allocate_and_free_nothing ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+test uniform_and_ragged_render_paths_allocate_and_free_nothing ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+ALLOC_RELEASE_EXIT=0
+env vocabulary: ok (114 names, one MISO_ENGINE_ prefix)
+ENV_VOCABULARY_EXIT=0
+
