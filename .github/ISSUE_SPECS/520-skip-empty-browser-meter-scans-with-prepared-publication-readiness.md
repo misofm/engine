@@ -61,3 +61,26 @@ one warmup and two measured rounds. Observation cadence and emitted values must 
 
 No metric selection, new subscription protocol, SDK/app cadence API, queue replacement, aggregated
 windows, network transport, UI work, benchmark framework, or DSP kernel optimization.
+
+## Implementation decision and evidence
+
+- `ReadyOwnership::master_count` remains the sole readiness authority. After lease, ready-state and
+  attached-meter checks, `poll_meters` now returns immediately when that count is zero. The return
+  precedes drain-budget construction, every track consumer access, pending-candidate inspection and
+  effect-observation scanning. It adds no retained state or resource-report delta.
+- A test-only work probe sums the existing per-consumer successful/empty pop counters and counts
+  effect-observation entries at the actual scan site. For periods of 2, 8 and 32 quanta, every
+  incomplete-quantum poll leaves both counts unchanged. A prepared effect-observation fixture also
+  proves the early path reaches zero effect scans rather than relying on an empty effect table.
+- The same test renders identical active PCM into an every-quantum polling host and a boundary-only
+  oracle. At each completed interval their frame and header are exactly equal; an early full-scale
+  impulse survives, and a partial trailing interval preserves the previous publication byte for
+  byte.
+- Existing delayed-window, saturation, asymmetric missing-master, producer-reset, stale full-queue,
+  lease reacquisition, source-seek, four-launch-rate and nine-track-tail tests remain the lifecycle
+  evidence. A missing master now consumes the older track-only candidate on the first ready poll
+  and publishes the matching queued interval on the next bounded poll, with loss visible; an empty
+  master ring no longer drives speculative track draining.
+- Focused evidence on 2026-09-06: the new readiness test passes and all 12 meter-filtered host-web
+  tests pass. Final full host-web, realtime source-policy and shipped Wasm qualifications remain for
+  the frozen checkpoint.

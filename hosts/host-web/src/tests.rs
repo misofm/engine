@@ -3106,6 +3106,53 @@ fn meter_empty_poll_preserves_early_peak_and_publication_state() {
 }
 
 #[test]
+fn incomplete_master_periods_skip_all_track_pops_and_effect_scans() {
+    const QUANTUM: u32 = 128;
+    for blocks in [2_u64, 8, 32] {
+        let mut eager = console_host(QUANTUM, blocks);
+        let mut boundary = console_host(QUANTUM, blocks);
+        assert_eq!(eager.set_meter_lease(true), RESULT_OK);
+        assert_eq!(boundary.set_meter_lease(true), RESULT_OK);
+        let initial_frame = eager.meter_frame().to_vec();
+        let initial_header = *eager.meter_header();
+        let initial_work = eager.meter_poll_work();
+
+        for block in 0..blocks {
+            let value = if block == 0 { 1.0 } else { 0.125 };
+            feed_and_render(&mut eager, 1, block, value);
+            feed_and_render(&mut boundary, 1, block, value);
+            if block + 1 < blocks {
+                assert_eq!(eager.poll_meters(), 0, "period {blocks}, block {block}");
+                assert_eq!(eager.meter_poll_work(), initial_work);
+                assert_eq!(eager.meter_frame(), &initial_frame[..]);
+                assert_eq!(*eager.meter_header(), initial_header);
+            }
+        }
+        assert_eq!(eager.poll_meters(), 1, "period {blocks}");
+        assert_eq!(boundary.poll_meters(), 1, "boundary period {blocks}");
+        assert_eq!(eager.meter_frame(), boundary.meter_frame());
+        assert_eq!(eager.meter_header(), boundary.meter_header());
+
+        let published_frame = eager.meter_frame().to_vec();
+        let published_header = *eager.meter_header();
+        let completed_work = eager.meter_poll_work();
+        feed_and_render(&mut eager, 1, blocks, 0.75);
+        assert_eq!(eager.poll_meters(), 0, "partial period {blocks}");
+        assert_eq!(eager.meter_poll_work(), completed_work);
+        assert_eq!(eager.meter_frame(), &published_frame[..]);
+        assert_eq!(*eager.meter_header(), published_header);
+    }
+
+    let mut observed = observation_host(QUANTUM, 8, Some(0));
+    assert!(observed.observation_attached());
+    assert_eq!(observed.set_meter_lease(true), RESULT_OK);
+    let before = observed.meter_poll_work();
+    feed_and_render_tracks(&mut observed, 0, 0.5);
+    assert_eq!(observed.poll_meters(), 0);
+    assert_eq!(observed.meter_poll_work(), before);
+}
+
+#[test]
 fn meter_delayed_poll_delivers_each_queued_window_with_its_own_peak() {
     let mut host = console_host(128, 2);
     assert_eq!(host.set_meter_lease(true), RESULT_OK);
@@ -3160,7 +3207,12 @@ fn meter_invalid_master_rejects_transactionally_then_recovers_with_loss() {
     assert_eq!(*host.meter_header(), published_header);
 
     feed_and_render(&mut host, 1, 2, 0.3);
-    assert_eq!(host.poll_meters(), 1);
+    assert_eq!(
+        host.poll_meters(),
+        0,
+        "the first ready poll rejects the older track-only interval"
+    );
+    assert_eq!(host.poll_meters(), 1, "the same bounded readiness recovers");
     assert_eq!(host.meter_header().first_sample, 256);
     assert_eq!(&host.meter_frame()[..4], &[0.3, 0.3, 0.3, 0.3]);
     assert_ne!(host.meter_header().reserved[1] & METER_VALID_LOSS, 0);

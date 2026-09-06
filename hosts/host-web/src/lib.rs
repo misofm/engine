@@ -651,6 +651,9 @@ struct ReadyOwnership {
     meter_snapshot_generation: Option<u64>,
     /// Windows folded into `meter_frame` since the host was compiled.
     meter_windows: u64,
+    /// Test-only proof that incomplete master intervals never reach effect-reader scanning.
+    #[cfg(test)]
+    meter_effect_scan_count: u64,
     /// The compiled session model, retained so the browser bridge keeps charging itself for what
     /// it holds -- and, since issue #207, read by the source-introspection queries.
     ///
@@ -1114,6 +1117,20 @@ impl AudioWorkletEngineHost {
         self.ready.as_ref().map_or(0, |ready| ready.meter_windows)
     }
 
+    #[cfg(test)]
+    pub(crate) fn meter_poll_work(&self) -> (u64, u64) {
+        self.ready.as_ref().map_or((0, 0), |ready| {
+            (
+                ready
+                    .meters
+                    .iter()
+                    .map(|meter| meter.consumer.empty_count() + meter.consumer.success_count())
+                    .sum(),
+                ready.meter_effect_scan_count,
+            )
+        })
+    }
+
     /// Whether meter observers were attached at preparation (issue #137 D2).
     #[must_use]
     pub fn meters_attached(&self) -> bool {
@@ -1548,6 +1565,13 @@ impl AudioWorkletEngineHost {
         if track_count == 0 {
             return 0;
         }
+        // The render path is the sole producer of this fixed-capacity ring and increments the
+        // count only when the configured master interval closes. An empty ring therefore proves
+        // that no coherent track/master publication can exist. Preserve pending/public bytes and
+        // avoid walking every track consumer on incomplete quanta.
+        if ready.master_count == 0 {
+            return 0;
+        }
         let mut drain_budget = 1_usize;
         for meter in &ready.meters {
             drain_budget = drain_budget.saturating_add(meter.consumer.capacity());
@@ -1761,6 +1785,10 @@ impl AudioWorkletEngineHost {
         }
         let mut observed_any = false;
         for (effect, entry) in ready.effect_observations.iter().enumerate() {
+            #[cfg(test)]
+            {
+                ready.meter_effect_scan_count = ready.meter_effect_scan_count.saturating_add(1);
+            }
             let Some(handle) = entry.as_ref() else {
                 continue;
             };
@@ -3247,6 +3275,8 @@ fn compile_ready(
         meter_snapshot_drops_seen: 0,
         meter_snapshot_generation: None,
         meter_windows: 0,
+        #[cfg(test)]
+        meter_effect_scan_count: 0,
         session,
     };
     Ok((ready, report))
