@@ -1,0 +1,32 @@
+argv: PATH=/home/bl/.cargo/bin:$PATH cargo test --locked -p compressor --release --lib kernel::tests::w4_state_owner_transitions_drive_the_next_real_render -- --exact
+cwd: /home/bl/misofm/engine-475-populated-proof
+effective-env: PATH=/home/bl/.local/bin:/home/bl/.codex/packages/standalone/releases/0.153.2-x86_64-unknown-linux-musl/codex-path:/home/bl/.codex/tmp/arg0/codex-arg0CWD760:/home/bl/.local/bin:/home/bl/.opencode/bin:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.opencode/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin
+   Compiling bytemuck v1.25.2
+   Compiling typenum v1.20.1
+   Compiling engine v0.1.0 (/home/bl/misofm/engine-475-populated-proof/crates/engine)
+   Compiling cpufeatures v0.3.0
+   Compiling cfg-if v1.0.4
+   Compiling dsp-reference v0.1.0 (/home/bl/misofm/engine-475-populated-proof/crates/dsp-reference)
+   Compiling safe_arch v1.2.0
+   Compiling wide v1.6.1
+   Compiling hybrid-array v0.4.14
+   Compiling crypto-common v0.2.2
+   Compiling block-buffer v0.12.1
+   Compiling digest v0.11.3
+   Compiling sha2 v0.11.0
+   Compiling bench-support v0.1.0 (/home/bl/misofm/engine-475-populated-proof/tools/bench-support)
+   Compiling lane v0.1.0 (/home/bl/misofm/engine-475-populated-proof/crates/lane)
+   Compiling math v0.1.0 (/home/bl/misofm/engine-475-populated-proof/crates/math)
+   Compiling effect-contract v0.1.0 (/home/bl/misofm/engine-475-populated-proof/crates/effect-contract)
+   Compiling effect-runtime v0.1.0 (/home/bl/misofm/engine-475-populated-proof/crates/effect-runtime)
+   Compiling conformance v0.1.0 (/home/bl/misofm/engine-475-populated-proof/crates/conformance)
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-475-populated-proof/crates/compressor)
+    Finished `release` profile [optimized + debuginfo] target(s) in 9.80s
+     Running unittests src/lib.rs (target/release/deps/compressor-9cc9f8cd79b77eb5)
+
+running 1 test
+test kernel::tests::w4_state_owner_transitions_drive_the_next_real_render ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+numeric-status: 0

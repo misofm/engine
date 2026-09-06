@@ -1,0 +1,9 @@
+# Issue499 populated W4 proof, Luna attempt1
+
+Final source90bea997, test-only kernel fixture. Restore and mono/copy phases prime exactly8x128 frames with explicit absolute origins, assert same-lane alternate delay choices read distinct finite nonzero detector histories, then assert meaningful expected first post-transition PCM before complete candidate PCM/payload equality. Full reset retains explicit first-block silence and continues exactly8 further blocks to meaningful post-latency output. The final PCM predicate requires two finite nonzero numerically distinct values on each plane.
+
+Final named test runs1 in debug/release, and library tests run2 in each profile. Raw earlier test/assertion/lint/formatting history is retained without relabeling it final-source evidence. Final test log source identity is the exact Git blob6d6c8b338b7bb03e060c5b3a46c882fab0689350, incorrectly labeled sha256 by Luna. Root independently verified that blob against final source and records the actual SHA256 separately; raw logs stay unchanged. Earlier effective-env lines record inherited PATH before their explicit inline Cargo PATH override; later final logs correctly record the prefixed environment.
+
+Luna's final policy log has one combined exit, so root independently captured strict all-targets/all-features Clippy, fmt, realtime/lane/workspace/environment and diff commands on committed90bea997, with each actual numeric exit0. Root JSON and raw log are authoritative for those individual statuses. No source changes occurred during capture.
+
+No production/API/backend, parent acceptance, native/object/G5 evidence or numerical expectations changed. No new mutation, timing or delivery qualification ran. Parent475 remains stopped pending this child's consolidated Astra source verdict, then retained integrated workspace/target/artifact/PR/CI obligations.

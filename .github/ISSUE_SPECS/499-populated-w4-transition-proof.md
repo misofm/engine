@@ -47,3 +47,7 @@ No production/API/backend, allocator, corpus/G5/object, new harness, mutation ca
 Read-only source/Git comparison; no tests/builds/timing or source/spec/Git/GitHub mutations performed.
 
 Root assigns fresh Luna1 to this bounded proof child. Root owns exact-path checkpoints and GitHub. Parent475 remains stopped until child PASS; no delivery qualification or timing is authorized during implementation.
+
+## Luna attempt1 final candidate
+
+Source90bea997 completes the frozen8-block priming, same-lane populated alternate-tap checks, meaningful first post-transition PCM/full payload comparisons, and fixed reset continuation. Final focused debug/release1 each and library debug/release2 each pass. Root independently captures each strict Clippy/fmt/realtime/lane/workspace/environment/diff gate at this committed source with numeric0. The artifact package preserves all earlier logs and candidly corrects Luna's Git-blob-as-SHA256 label and inherited-PATH metadata. No new production, numerical, object/G5, mutation, timing or delivery claim. Consolidated Astra child review remains pending.
