@@ -1,0 +1,25 @@
+
+running 6 tests
+test tests::full_public_chain_matches_the_three_section_reference ... ok
+test tests::eligibility_sequence_uses_whole_call_fallback_then_fuses_the_next_call ... ok
+test tests::post_ramp_symmetry_handles_differing_words_countdowns_and_padding ... ok
+test tests::post_ramp_symmetry_mask_matches_lane_oracle ... ok
+test tests::post_ramp_symmetry_extracts_each_word_once ... FAILED
+test tests::lane_symmetry_retarget_updates_only_the_addressed_predicate ... ok
+
+failures:
+
+---- tests::post_ramp_symmetry_extracts_each_word_once stdout ----
+
+thread 'tests::post_ramp_symmetry_extracts_each_word_once' (535360) panicked at crates/builtins/src/lib.rs:4313:9:
+assertion `left == right` failed: one extraction per side of each of 15 word pairs
+  left: 32
+ right: 30
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::post_ramp_symmetry_extracts_each_word_once
+
+test result: FAILED. 5 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

@@ -1,0 +1,13 @@
+
+running 8 tests
+test re_equalising_the_words_restores_the_designed_term_and_nothing_more ... ok
+test channels_agree_covers_the_trim_ramp_record ... ok
+test an_asymmetric_retarget_declines_the_lane_on_the_admitting_block ... ok
+test a_collapsed_block_keeps_the_two_channels_ramp_records_equal ... ok
+test a_symmetric_retarget_keeps_the_lane_eligible ... ok
+test the_disengage_copy_still_restores_the_integrators ... ok
+test a_symmetric_ride_through_a_collapse_renders_never_collapsed_bits ... ok
+test a_retarget_between_a_collapsed_block_and_the_disengage_survives_the_copy ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+

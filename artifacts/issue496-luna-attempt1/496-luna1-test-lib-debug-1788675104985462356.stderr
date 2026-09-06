@@ -1,0 +1,12 @@
+   Compiling builtins v0.1.0 (/home/bl/misofm/engine-rt5-ramp-plan/crates/builtins)
+warning: unused import: `CHANNEL_SYMMETRY_LANE_READS`
+    --> crates/builtins/src/lib.rs:4248:27
+     |
+4248 |         BuiltinResetKind, CHANNEL_SYMMETRY_LANE_READS, CHANNEL_SYMMETRY_LAST_POST_RAMP_READS,
+     |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `builtins` (lib test) generated 1 warning (run `cargo fix --lib -p builtins --tests` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.32s
+     Running unittests src/lib.rs (target/debug/deps/builtins-b28151c824699de5)

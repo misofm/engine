@@ -1,0 +1,3 @@
+    Blocking waiting for file lock on build directory
+    Finished `release` profile [optimized + debuginfo] target(s) in 12.61s
+     Running tests/input_liveness_console.rs (target/release/deps/input_liveness_console-a5fee44d15c935e7)

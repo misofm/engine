@@ -1,0 +1,2 @@
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.03s
+     Running unittests src/lib.rs (target/release/deps/builtins-6cea1cc0c5a9aa14)

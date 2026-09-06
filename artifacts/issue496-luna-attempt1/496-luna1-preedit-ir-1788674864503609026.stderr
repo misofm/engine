@@ -1,0 +1,9 @@
+   Compiling bytemuck v1.25.2
+   Compiling engine v0.1.0 (/home/bl/misofm/engine-rt5-ramp-plan/crates/engine)
+   Compiling math v0.1.0 (/home/bl/misofm/engine-rt5-ramp-plan/crates/math)
+   Compiling safe_arch v1.2.0
+   Compiling wide v1.6.1
+   Compiling lane v0.1.0 (/home/bl/misofm/engine-rt5-ramp-plan/crates/lane)
+   Compiling effect-contract v0.1.0 (/home/bl/misofm/engine-rt5-ramp-plan/crates/effect-contract)
+   Compiling builtins v0.1.0 (/home/bl/misofm/engine-rt5-ramp-plan/crates/builtins)
+    Finished `release` profile [optimized + debuginfo] target(s) in 4.03s

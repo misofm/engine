@@ -75,3 +75,7 @@ The frozen finite proof remains unchanged: W1/W4/W8 compact oracle cases; actual
 Root retains remote identity/body synchronization, checkpoint ownership and attempt escalation. Source acceptance and later current-artifact/actual-PR/required-CI delivery remain separate gates. Read-only source/Git comparison only; no builds/tests/timing or source/spec/Git/GitHub changes performed.
 
 Root activates fresh Luna attempt 1 on the approved production base. The separately discovered compressor allocation-proof issue #503 now has source and exact-PR Astra PASS plus authentic local focused/full/DSP integration PASS; its PR504 awaits required CI. Its changes are confined to compressor tests/dev-dependency, so this builtins runtime slice is independent. Root retains Git/checkpoint ownership and no timing is authorized.
+
+## Luna attempt 1 candidate and retained evidence
+
+Source deb73c0c adds the whole-mask helper and two real post-ramp call-site replacements. Root checkpoints preserve implementation and test milestones. Raw records in artifacts/issue496-luna-attempt1 include the actual old-refresh mutation failing the extraction assertion at240 versus30, restored passing tests, initial failures and existing-consumer/profile/policy commands. The report filename typo and early dirty-HEAD provenance limitations are candidly documented. Consolidated Astra review must verify all frozen PCM/state and adversarial gates; no delivery or timing claim is made.

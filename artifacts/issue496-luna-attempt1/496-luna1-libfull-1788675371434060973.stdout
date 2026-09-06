@@ -1,0 +1,12 @@
+
+running 7 tests
+test tests::full_public_chain_matches_the_three_section_reference ... ok
+test tests::eligibility_sequence_uses_whole_call_fallback_then_fuses_the_next_call ... ok
+test tests::post_ramp_symmetry_extracts_each_word_once ... ok
+test tests::post_ramp_symmetry_helper_is_off_for_settled_blocks ... ok
+test tests::post_ramp_symmetry_mask_matches_lane_oracle ... ok
+test tests::post_ramp_symmetry_handles_differing_words_countdowns_and_padding ... ok
+test tests::lane_symmetry_retarget_updates_only_the_addressed_predicate ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
