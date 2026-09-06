@@ -26,3 +26,17 @@ Before/after evidence should establish only these two signatures/three callers c
 ## Numbered baseline
 
 GitHub490 has the matching number/title, on deliveredmainc075e44e81d7be978bb6a7420a9724db134c46cf. Root boundary audit found no missing local numbered issue identity. Pending numbered Astra approval before Luna1. This control-plane maintenance slice does not overlap463 lane/runtime or488 graph/program tests.
+
+## Numbered approval and Luna attempt 1
+
+# Astra #490 numbered scope/base review — PASS
+
+Exact head641966ff68e87f181a58265c19316202385fb871, engine-490-route-mapping, deliveredbasec075e44e81d7be978bb6a7420a9724db134c46cf. Independently checked only numbered spec differs from base; entire approved CP17 draft body is retained with matching title/numbered baseline. Root supplies synchronized GitHub490 number/title/body and clean boundary audit; no remote query was performed for this review.
+
+Approve fresh Luna1 for the exact two total route helper signatures and three unreachable caller branches, plus the compact existing-module mapping test and numbered evidence. Preserve all genuine validation, error order, canonical results and the specifically excluded gid/topo expects. Those invariant classifications are not authority to suppress a demonstrated accepted-input panic. No session/graph API, diagnostic vocabulary or generic framework change.
+
+Full frozen finite helper mapping/identity and current graph/session diagnostic fixtures remain binding, including all taps and maximum valid ID. Root owns checkpoint/synchronization and any inherited gate-failure ruling. No timing, speculative speedup, target/artifact expansion or overlap with463 runtime work. Actual-head PR/requiredCI and remote closure remain delivery gates.
+
+Read-only filesystem/Git inspection; no source/spec changes, tests/builds/timing or Git/GitHub mutations performed.
+
+Root adopts scope PASS and assigns fresh Luna1. Pause at the first compiling/focused-green exact-path tranche, retaining actual command/log/numericstatus before reporting it. Root owns Git/GitHub checkpoint and delivery.
