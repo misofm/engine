@@ -226,3 +226,67 @@ The rack policy rejected std::sync references in the new test-only counters. Lun
 ## Luna attempt1 evidence checkpoint — paused at user request
 
 Source f5d5e3c7 is clean and pushed. Artifacts/issue478-luna-attempt1 preserves the complete raw gate/mutation captures, original and corrected reports, and explicit provenance limits. Focused and affected gates pass as recorded, but the required pre-change layout baseline is absent and the actual mutant fails at query-count before the lane-inspection assertion. No consolidated Astra verdict has been requested or issued for this attempt. These are open review questions, not accepted evidence. The user requested stopping at this tranche boundary to change Codex accounts; implementation is paused here. Resume with one consolidated Astra review, then Sol attempt2 only if that verdict is FAIL. Do not restart Luna1 or silently add another implementation pass. Delivered main now includes independent #514/PR517 at c34383fc; this branch has not integrated that later main yet, to preserve its captured source.
+
+
+## Restart review — 2026-09-06
+
+**Astra #478 attempt 1 consolidated verdict: FAIL.**
+
+Reviewed clean `d772e4af`, production/test source matching checkpoint `f5d5e3c7`, the authoritative delivered-base brief, raw attempt evidence, and later main `c34383fc`. No edits, builds, timing, or mutations performed.
+
+The production change follows the approved design: public `BankSlot` remains intact; complete validation and original collapse-prefix calculation precede ordered conversion; the private slot retains each stage and packs lane activity into `u8`; precisely three existence predicates and one guarded lane lookup change. Live stage witnesses and graph accounting remain unchanged. I found no demonstrated production semantic regression. Acceptance fails because several frozen tests do not prove their stated contracts.
+
+1. **The mechanism gate does not exercise all three sites or the prescribed failure.**
+   At `crates/rack/src/lib.rs:2973`, neither run arms mono collapse. `collapse_source` remains false, so the run labeled “collapsed” is ordinary; the seam-suffix guard is never reached. Aggregate `queries >= 6` cannot establish site coverage. There are no PCM or ordered-trace assertions before the work check.
+
+   The preserved actual mutant fails at that query-count assertion because the scan helper never increments the query counter. This detects a different helper, not excess lane-inspection work. The unchanged lane-inspection assertion is never reached. Additionally, the helper scans all eight bits without short-circuiting even for W4, rather than reproducing the original width-bounded `any` behavior.
+
+2. **The frozen trace/error test is aggregate counting, not the required reference comparison.**
+   At `lib.rs:2752–2970`, the fixture has no old mask-any reference, ordered event records, stage IDs, sample/frame observations, queue state, private arithmetic state, or PCM comparison. Its stage methods ignore block data; `begin_block` cannot fail and `process_mono` ignores `fail`. Leading/middle inactive slots are present, but no trailing inactive slot is exercised. Counts cannot prove original slot order, all begins preceding gather, unchanged stopping position, or inactive queue preservation.
+
+   Existing console and mono-reengagement suites remain valuable and passed. They do not supply this missing mixed-activity old-reference gate.
+
+3. **Shape/ownership coverage omits explicitly frozen cases.**
+   At `lib.rs:2804`, W4/W8 inputs each contain nine slots in capacity nine. This does not exercise spare input capacity, legal zero-slot chains, or the finite S=0/1/3/9 construction set. The sole one-bit pattern is mutated to empty before construction, leaving no successful one-bit packing assertion in that test. Expected bits are calculated using the same fold as production, which weakens the oracle.
+
+   The drop assertion proves one inactive stage drops when the chain drops; it does not observe ownership through actual rendering. Existing tests cover several rejection and partial-lane behaviors, but they do not fill these specific gaps.
+
+4. **The physical proof is only W8/S3 and leaves attribution incomplete.**
+   At `crates/builtins-compiler/tests/allocation_tracker.rs:499`, the one ragged identity construction provides useful actual evidence: public destination 96 bytes, prepared destination 72 bytes, retained attributed bytes 80, largest request 96, and balanced off-render release. However:
+
+   - W4 and S=0/1/9 are absent.
+   - The inferred prepared layout is a tuple mirror, not a recorded size/alignment of the private type.
+   - Conversion asserts only the incoming stage-vector release by layout; the old public-slot and old mask releases are not individually asserted.
+   - `NF + NB + 2NP + 2W` omits the old per-slot mask population from the stated conservative ownership accounting. Use the frozen sufficient `NF + NB + 2NP + 2NW <= C`, or supply an explicit justified ordered-lifetime derivation. This finding does **not** establish an actual cap overrun.
+   - The existing `runtime_slot_capacity` observation describes the incoming public vector, not the new private destination. Preserve that distinction explicitly.
+
+5. **Before/after layout provenance is missing.**
+   No prechange `BankChain`/`RuntimeUnit` baseline was captured. Current probes choose the first cached artifact without identifying its path/hash; the BankChain probe also omits alignment. These cannot establish exact-source before/after layout equality. The compile-time private-size bound is appropriate and should remain; it is not a substitute for the required delivery-target layout facts.
+
+6. **The allocation evidence does not demonstrate actual mono-collapsed rendering.**
+   The existing installed allocator proves live allocation/free detection and repeated ordinary full/partial graph rendering. `rt1_direct_bank_alloc` additionally proves route-folded rendering. Route folding is distinct from mono collapse. The builtins allocation fixtures use asymmetric inputs and never arm mono collapse; no observed collapse counter establishes the frozen collapsed-render zero-allocation case.
+
+The raw captures support the reported successful focused gates, final release suites (rack 30/10/4, allocation 7, graph 1, CAPI 4), strict Clippy, isolated test-support consumer and policies. Graph-compiler debug gates passed on an earlier source hash and must retain that provenance. Passing these tests does not repair the missing assertions above.
+
+The reconstructed mutation diff matches the contemporaneous mutant source hash, making its exact content recoverable. Preserve its disclosed retrospective provenance; reconstructing it did not itself cause the substantive failure.
+
+**Bounded Sol attempt 2 brief**
+
+Keep the existing production design, allowed paths, three frozen test names, reservation totals, and prohibition on timing. One coherent revision should:
+
+- Complete the shape fixture with literal independently expected masks, full/partial W4/W8 cases, preserved caller mutation, genuinely spare input capacity, zero-slot identity/render/lifetime behavior, and the finite slot-count set. Keep arbitrary slots separate from lane width.
+- Replace aggregate trace counts with one compact old mask-any reference and fixed-capacity ordered event/state observations. Compare successful ordinary and legally collapsed prefix/seam cases, nonzero sample/frame values, PCM bits, inactive leading/middle/trailing stages, queue effects, and bounded begin/process failure cases. Observe stage lifetime through rendering and off-render destruction. Reuse existing real console/recovery tests.
+- Correct the mechanism fixture to actually arm and prove collapsed execution with prefix-mono and seam-dual events. Complete semantic comparisons before the excess-work assertion. Keep predicate-call accounting consistent across both implementations. In attempt 2 execute **one corrected three-site scan control**, using actual width-bounded short-circuit lane reads to drive the work counter; preserve the original invalid control, new exact diff/failure, and restored success. This is correction of the failed gate, not a mutation campaign.
+- Extend the existing physical test to W4/W8 and S=0/1/3/9. Attribute every request/release, distinguish scratch/stage/mask ownership and input/private capacities, use actual private layout facts, and assert the frozen general inequalities. Handle S=0 as direct-caller compatibility, not an N=0 graph reservation claim.
+- Recover a **retrospective** baseline from the immutable preimplementation revision using an isolated identified build, then compare the candidate under identical compiler/target/flags. Record actual size/alignment of public/private slots, `BankChain` and `RuntimeUnit`, source revisions, commands and exact artifacts. Do not describe recovered evidence as contemporaneously captured.
+- Within the existing allocator harness, add the missing bounded repeated mono-collapsed/fallback render observations, with explicit path liveness and zero allocation/free assertions. No new allocator or framework.
+- Run the frozen focused debug gates, pause for root’s coherent checkpoint, then complete prescribed release/affected gates and corrected control with source identities. One consolidated adversarial re-review follows; broader immutable qualification remains root’s post-source-PASS work.
+
+The fresh-server toolchain/browser provisioning and missing GitHub authentication are setup/delivery matters, **not** implementation failures. They neither explain nor waive the assertion gaps.
+
+Main `c34383fc` adds #514 host/browser changes and evidence; rack, graph runtime, the allocation fixture, Cargo/configuration and graph accounting inputs are unchanged from delivered `107b9ed1`. Integrating it requires no #478 design expansion, but final delivery must use its current browser/artifact consumers rather than stale pre-#514 pins.
+
+
+### Root restart disposition
+
+Adopt the consolidated FAIL and bounded Sol attempt 2 brief above without changing the production design, reservation totals, or acceptance gates. Attempt 1 remains preserved at `d772e4af3982da7e4d9d3246b714f1c76ee2b5cc`. No attempt 2 implementation has started. The fresh checkout is main `c34383fcfeea29de855005c15ba89eccab8f45c7`; its independent #514 changes must be integrated at the next committed boundary before delivery. The coordinator recovered the pushed #478 worktree and installed pinned Rust 1.97.1, native/Wasm targets, clippy/rustfmt, native build tools, Node 22 and pinned browser qualification dependencies. A fresh native rack smoke run passed 30 library, 10 console_bank and 4 mono_reengage tests; this confirms toolchain operation, not satisfaction of the missing assertions. GitHub authentication is restored for `tamashi095`; repository-local commits use the authenticated account name and GitHub noreply address. Root is checkpointing and synchronizing this verdict before attempt 2. Keep #478 and #518 open.
