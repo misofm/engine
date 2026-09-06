@@ -2396,7 +2396,7 @@ mod tests {
             ),
             None
         );
-        let mut estimate = compile_fixture(511_0).report.estimate;
+        let mut estimate = compile_fixture(5_110).report.estimate;
         estimate.graph_metadata_bytes = u64::MAX;
         let before = estimate.clone();
         assert!(
@@ -2451,7 +2451,7 @@ mod tests {
         .expect("compiled session");
         let graph = GraphCompiler::compile(GraphCompileRequest {
             dispatch: host_dispatch(),
-            plan_id: 511_1,
+            plan_id: 5_111,
             effects: EffectPreparedSession {
                 session: session.clone(),
                 entries: Vec::new(),
@@ -2491,7 +2491,7 @@ mod tests {
             .expect("slot estimate");
         let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
             dispatch: host_dispatch(),
-            plan_id: 511_2,
+            plan_id: 5_112,
             effects: EffectPreparedSession {
                 session: session.clone(),
                 entries: Vec::new(),
@@ -2507,7 +2507,7 @@ mod tests {
         );
         let semantic_baseline = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
             dispatch: Backend::Scalar,
-            plan_id: 511_5,
+            plan_id: 5_115,
             effects: EffectPreparedSession {
                 session: session.clone(),
                 entries: Vec::new(),
@@ -2540,7 +2540,7 @@ mod tests {
                 prepare_session_builtins(&session, &[], builtin_caps).expect("prepared for cap");
             let exact_result = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
                 dispatch: host_dispatch(),
-                plan_id: 511_3,
+                plan_id: 5_113,
                 effects: EffectPreparedSession {
                     session: session.clone(),
                     entries: Vec::new(),
@@ -2560,7 +2560,7 @@ mod tests {
                 prepare_session_builtins(&session, &[], builtin_caps).expect("returned prepared");
             let failure = match GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
                 dispatch: host_dispatch(),
-                plan_id: 511_4,
+                plan_id: 5_114,
                 effects: EffectPreparedSession {
                     session: session.clone(),
                     entries: Vec::new(),
