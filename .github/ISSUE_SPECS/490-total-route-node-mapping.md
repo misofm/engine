@@ -62,3 +62,17 @@ Actual debug/release library logs each pass62 tests, including every frozen name
 Source PASS permits proportional delivery. An existing normal artifact verification is reasonable given the demonstrated sensitivity of shipped bytes to prior semantic-equivalent source edits; no automatic repin or new browser qualification is authorized absent actual mismatch and a precise ruling. Root owns packaging/source identity, actual-head PR review, requiredCI and verified remote closure. No performance, timing or broad audit-closure claim is supported by this small control-plane simplification.
 
 Root adopts PASS; integrated delivered main e2b77fd6 and #488 closure record. Accepted graph-compiler source remains byte-identical. Actual evidence retained in artifacts/issue490-total-route-mapping. Normal shipped-worklet verification follows; repin requires an actual mismatch and precise ruling.
+
+## Actual artifact mismatch and bounded delivery amendment
+
+# Astra #490 artifact delivery ruling — APPROVE bounded qualification amendment
+
+Read actual /tmp/490-delivery-builder.status=1 and log: normal build completed, then expected14811597b77cb4331d5f1e0bd032c01354451db79c0939fd30113b963b1a7d9b mismatched observed6107fdb633f1df9227e53b50cd9d39c176f6f9d6d045d05034e47802f0fdc8f0. Root identifies immutable candidate332de1b3 with accepted source unchanged. Numeric artifact record is authoritative: distinguish this exit1 from the earlier missing-output-directory preflight2 and preserve both authentic records.
+
+The concrete changed artifact justifies a narrow delivery amendment despite source semantic equivalence. Root must record/synchronize the amendment and frozen runtime/build identity first. Then replace only the current shipped artifact pin with that actually observed digest, checkpoint candidly pending qualification, and execute the ordinary builder again with normal verification enabled. Do not infer reproducibility from a pin edit or accept a later different digest silently. If relevant delivered source changes before qualification, freeze and recapture the actual combined candidate rather than attributing332de1b3 bytes to it.
+
+Run existing current-artifact static/object/ABI metadata, expected-resource with26 negative controls, separate hermetic worklet and all-three-browser qualification/self-tests plus generated matrix verification. Bind outputs to the exact rebuilt artifact and candidate. Update only existing pin/current generated browser records and490evidence/spec/manifest; retain all failed and successful command/status/hash evidence. Keep PCM digests and numerical resource expectations unchanged. Any such mismatch needs a specific diagnosis/ruling, not blanket refresh. No source repair, new matrix/framework, workload/timing or performance claim is authorized.
+
+Accepted source tests remain applicable if source identity is preserved. Before delivery require a new exact-head actual PR review of all qualification/consumer/evidence changes and required CI SUCCESS; source PASS alone does not authorize merge. This necessary artifact qualification is not another implementation attempt or a waiver of the two-helper/three-caller contract. No build/test or repository/Git/GitHub mutation performed for this ruling.
+
+Root adopts this amendment on332de1b3. Runtime/build source remains frozen; only the observed artifact pin, existing generated browser records and evidence may change.
