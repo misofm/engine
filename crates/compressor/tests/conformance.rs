@@ -12,7 +12,7 @@ use std::hint::black_box;
 use std::sync::{Arc, Barrier};
 
 use bench_support::alloc as bench_alloc;
-use effect_contract::{EffectBankProcessBlock, EffectProcessBlock};
+use effect_contract::{EffectBankProcessBlock, EffectProcessBlock, ParameterChannel};
 use engine::realtime::audit;
 
 conformance::effect_conformance_test!(compressor::CompressorFactory);
@@ -149,6 +149,31 @@ fn uniform_and_ragged_render_paths_allocate_and_free_nothing() {
     audit::warm_up();
     audit::reset();
     audit::in_render_scope(|| {
+        let before = staged
+            .parameter_state(5, ParameterChannel::Left)
+            .expect("native point state");
+        assert_eq!(
+            staged.apply_parameter_point(5, ParameterChannel::Left, 3.0),
+            Ok(())
+        );
+        assert_eq!(
+            staged
+                .parameter_state(5, ParameterChannel::Left)
+                .expect("native point state")
+                .target_value,
+            3.0
+        );
+        assert_eq!(
+            staged.apply_parameter_point(5, ParameterChannel::Left, f32::NAN),
+            Err(effect_contract::ParameterAccessError::InvalidValue)
+        );
+        assert_eq!(
+            staged
+                .parameter_state(5, ParameterChannel::Left)
+                .expect("native point state")
+                .current_value,
+            before.current_value
+        );
         for block in 0..32_u64 {
             staged.process(
                 EffectProcessBlock::new(

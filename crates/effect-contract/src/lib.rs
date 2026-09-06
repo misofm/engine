@@ -1502,6 +1502,23 @@ pub struct ObservationSample {
     pub right: f32,
 }
 
+/// The resident current and target values of one prepared parameter.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PreparedParameterState {
+    pub current_value: f32,
+    pub target_value: f32,
+}
+
+/// Why a native parameter access request was rejected.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ParameterAccessError {
+    Unsupported,
+    InvalidParameterIndex,
+    InvalidChannel,
+    NotAutomatable,
+    InvalidValue,
+}
+
 pub trait PreparedNativeEffect: Send {
     fn metadata(&self) -> PreparedEffectMetadata;
     fn reset(&mut self, kind: ResetKind);
@@ -1529,6 +1546,27 @@ pub trait PreparedNativeEffect: Send {
     fn observe_resident(&self, tap_index: u32, out: &mut ObservationSample) -> bool {
         let _ = (tap_index, out);
         false
+    }
+
+    /// Apply one parameter target without processing a sample.
+    fn apply_parameter_point(
+        &mut self,
+        parameter_index: u32,
+        channel: ParameterChannel,
+        value: f32,
+    ) -> Result<(), ParameterAccessError> {
+        let _ = (parameter_index, channel, value);
+        Err(ParameterAccessError::Unsupported)
+    }
+
+    /// Read one parameter's resident current and target values.
+    fn parameter_state(
+        &self,
+        parameter_index: u32,
+        channel: ParameterChannel,
+    ) -> Result<PreparedParameterState, ParameterAccessError> {
+        let _ = (parameter_index, channel);
+        Err(ParameterAccessError::Unsupported)
     }
     fn snapshot_state_payload(
         &self,

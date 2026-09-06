@@ -1,0 +1,3 @@
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-native-points/crates/compressor)
+    Finished `release` profile [optimized + debuginfo] target(s) in 6.97s
+     Running tests/native_points.rs (target/release/deps/native_points-ca115502a460040c)

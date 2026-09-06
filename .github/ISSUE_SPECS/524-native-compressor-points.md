@@ -120,3 +120,7 @@ Retain all specified focused debug/release, affected suite/Clippy/policy and sup
 No implementation, source edits, builds, tests, mutations or timing were performed for this readiness review.
 
 Root activates Luna attempt 1 under this exact approved scope after checkpoint/push and GitHub synchronization. The native Point/readback primitive is the sole active implementation issue. #478 is delivered and closed with post-main SUCCESS; #516 remains separately owned.
+
+## Luna attempt 1 source checkpoint
+
+The two default-unsupported native methods and compressor-only implementation are present in the approved paths. The five focused native Point tests pass in debug and release (5 selected in each), and the existing isolated allocation gate passes. Formatted source identities match the recorded commands in `artifacts/issue524-luna-attempt1`; earlier pre-format captures are preserved. Source is checkpointed before the remaining proportional suite, lint, policy and target gates and one consolidated Astra review. No review PASS or parent/audit closure is claimed.
