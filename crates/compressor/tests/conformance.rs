@@ -149,32 +149,49 @@ fn uniform_and_ragged_render_paths_allocate_and_free_nothing() {
     audit::warm_up();
     audit::reset();
     audit::in_render_scope(|| {
-        let before = staged
-            .parameter_state(5, ParameterChannel::Left)
-            .expect("native point state");
-        assert_eq!(
-            staged.apply_parameter_point(5, ParameterChannel::Left, 3.0),
-            Ok(())
-        );
-        assert_eq!(
-            staged
-                .parameter_state(5, ParameterChannel::Left)
-                .expect("native point state")
-                .target_value,
-            3.0
-        );
-        assert_eq!(
-            staged.apply_parameter_point(5, ParameterChannel::Left, f32::NAN),
-            Err(effect_contract::ParameterAccessError::InvalidValue)
-        );
-        assert_eq!(
-            staged
-                .parameter_state(5, ParameterChannel::Left)
-                .expect("native point state")
-                .current_value,
-            before.current_value
-        );
+        let targets = [3.0_f32, -3.0, 6.0, -6.0];
         for block in 0..32_u64 {
+            let target = targets[block as usize % targets.len()];
+            assert_eq!(
+                staged.apply_parameter_point(5, ParameterChannel::Left, target),
+                Ok(())
+            );
+            let accepted = staged
+                .parameter_state(5, ParameterChannel::Left)
+                .expect("native point state");
+            assert_eq!(accepted.target_value.to_bits(), target.to_bits());
+            assert_eq!(
+                staged.apply_parameter_point(5, ParameterChannel::Left, f32::NAN),
+                Err(effect_contract::ParameterAccessError::InvalidValue)
+            );
+            let after_rejection = staged
+                .parameter_state(5, ParameterChannel::Left)
+                .expect("native point state");
+            assert_eq!(
+                after_rejection.current_value.to_bits(),
+                accepted.current_value.to_bits()
+            );
+            assert_eq!(
+                after_rejection.target_value.to_bits(),
+                accepted.target_value.to_bits()
+            );
+            assert_eq!(
+                staged.parameter_state(u32::MAX, ParameterChannel::Right),
+                Err(effect_contract::ParameterAccessError::InvalidParameterIndex)
+            );
+            let mut empty_left = &mut staged_left[..0];
+            let mut empty_right = &mut staged_right[..0];
+            staged.process(
+                EffectProcessBlock::new(
+                    &mut empty_left,
+                    &mut empty_right,
+                    None,
+                    block * 128,
+                    &[],
+                    128,
+                )
+                .expect("empty staged block"),
+            );
             staged.process(
                 EffectProcessBlock::new(
                     &mut staged_left,

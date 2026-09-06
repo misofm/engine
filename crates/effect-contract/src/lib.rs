@@ -1502,20 +1502,32 @@ pub struct ObservationSample {
     pub right: f32,
 }
 
-/// The resident current and target values of one prepared parameter.
+/// The resident values of one prepared parameter.
+///
+/// `current_value` is the value reached by the last processed sample. `target_value` is the
+/// destination accepted by the most recent Point update; it may differ from `current_value` while
+/// the effect's declared smoothing rule is active. Both values use the parameter descriptor's
+/// declared unit.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PreparedParameterState {
+    /// The value reached by the last processed sample.
     pub current_value: f32,
+    /// The destination of the active smoothing transition.
     pub target_value: f32,
 }
 
 /// Why a native parameter access request was rejected.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ParameterAccessError {
+    /// This prepared effect does not implement direct parameter access.
     Unsupported,
+    /// `parameter_index` is outside the descriptor's zero-based parameter array.
     InvalidParameterIndex,
+    /// The parameter cannot be addressed with the requested channel selector.
     InvalidChannel,
+    /// The declared parameter is readable but does not accept automation.
     NotAutomatable,
+    /// The value is non-finite or outside the descriptor's declared domain.
     InvalidValue,
 }
 
@@ -1548,7 +1560,17 @@ pub trait PreparedNativeEffect: Send {
         false
     }
 
-    /// Apply one parameter target without processing a sample.
+    /// Applies one parameter target without processing a sample.
+    ///
+    /// `parameter_index` is a zero-based index into [`EffectDescriptor::parameters`], not a
+    /// [`ParameterId`]. `value` uses that descriptor's declared unit and domain. A successful call
+    /// starts the implementation's declared current-to-target smoothing transition; it does not
+    /// advance the current value, admit an event to a queue, or acknowledge later application.
+    /// The caller owns scheduling and must call this only while it has exclusive access to the
+    /// prepared instance. Implementations define their accepted [`ParameterChannel`] policy.
+    ///
+    /// Every rejection is a state-preserving no-op. The default reports
+    /// [`ParameterAccessError::Unsupported`] without inspecting the arguments.
     fn apply_parameter_point(
         &mut self,
         parameter_index: u32,
@@ -1559,7 +1581,12 @@ pub trait PreparedNativeEffect: Send {
         Err(ParameterAccessError::Unsupported)
     }
 
-    /// Read one parameter's resident current and target values.
+    /// Reads one parameter's resident current and target values without advancing state.
+    ///
+    /// `parameter_index` is a zero-based index into [`EffectDescriptor::parameters`], not a
+    /// [`ParameterId`]. Returned values use the parameter's declared unit. Callers use the same
+    /// exclusive-ownership and scheduling discipline as [`Self::apply_parameter_point`]. The
+    /// default reports [`ParameterAccessError::Unsupported`] without inspecting the arguments.
     fn parameter_state(
         &self,
         parameter_index: u32,

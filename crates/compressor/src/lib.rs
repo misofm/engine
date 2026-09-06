@@ -884,6 +884,18 @@ impl PreparedNativeEffect for PreparedCompressor {
         self.instance.designed_channel_symmetry(0)
     }
 
+    /// Applies a compressor target by zero-based descriptor index.
+    ///
+    /// Indices 0 through 6 are the threshold dB, ratio, knee dB, attack milliseconds, release
+    /// milliseconds, makeup dB, and unitless wet mix. Index 7 (lookahead milliseconds) is readable
+    /// but fixed after preparation. Left and Right are independent; Both is rejected. Validation
+    /// precedence is index, channel, automatable, then finite in-domain value, and every rejection
+    /// leaves the complete prepared state unchanged.
+    ///
+    /// The accepted target begins the compressor's 64-sample smoothing transition without
+    /// processing a sample. A direct native caller must keep this call, any no-sample catch-up,
+    /// and the following [`Self::process`] call within the canonical environment established by
+    /// [`lane::CanonicalFpEnv`], as render entry does.
     fn apply_parameter_point(
         &mut self,
         parameter_index: u32,
@@ -916,6 +928,12 @@ impl PreparedNativeEffect for PreparedCompressor {
         Ok(())
     }
 
+    /// Reads the resident current and target values in the units listed above.
+    ///
+    /// The same index and channel validation applies. Lookahead reports its fixed prepared value
+    /// as both current and target. Reading never changes smoother, detector, or delay state. Direct
+    /// native scheduling shares the [`lane::CanonicalFpEnv`] precondition documented on
+    /// [`Self::apply_parameter_point`].
     fn parameter_state(
         &self,
         parameter_index: u32,

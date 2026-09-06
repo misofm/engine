@@ -168,3 +168,7 @@ Add concise Rust API/compressor documentation for the existing frozen semantics 
 After the coherent corrected tranche compiles and the five focused debug gates pass, pause for root's exact-path checkpoint. Finish the prescribed debug/release full compressor/effect-contract, allocation, strict Clippy, policy/fmt/diff and scalar/SIMD target checks with exact command/source attribution. Freeze one complete evidence package for one consolidated Astra attempt-2 verdict. No mutation or benchmark campaign is required or authorized. This consumes Luna attempt 1 only; Sol has attempts 2 and 3 under #518's unchanged hard stop. #524 and its parent obligations remain open.
 
 Root adopts this bounded correction brief. Sol attempt 2 may begin only after this evidence/review checkpoint is pushed and synchronized. No production redesign or acceptance relaxation is authorized.
+
+## Sol attempt 2 focused checkpoint
+
+Sol corrected the five named fixtures, repeated allocation sequence and Rust API documentation in the four approved paths. The focused debug binary passes 5/5 tests on recorded source identities. An initial compile-only error from treating the existing FP guard as a Result was corrected; its status 101 and the restored status 0 are preserved in `artifacts/issue524-sol-attempt2`. No production transition logic, DSP algorithm, layout, descriptor, state payload or resource expectation changed. Root checkpoints this coherent tranche before the remaining proportional gates and one consolidated Astra review; source acceptance remains pending.
