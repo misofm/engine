@@ -1,0 +1,11 @@
+
+running 6 tests
+test malformed_admission_and_render_envelopes_are_noops ... ok
+test late_points_apply_in_order_and_second_ticket_waits ... ok
+test claim_state_is_truthful_until_terminal_collection ... ok
+test real_cancellation_preserves_applied_prefix ... ok
+test preparation_resources_and_success_path_are_bounded ... ok
+test points_slice_real_pcm_and_readback ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
