@@ -1,0 +1,4 @@
+argv=[cargo clippy --locked -p graph --all-targets --all-features -- -D warnings]
+cwd=/home/bl/misofm/engine-slot-reservation
+env=PATH=/home/bl/.cargo/bin:$PATH
+exit=0

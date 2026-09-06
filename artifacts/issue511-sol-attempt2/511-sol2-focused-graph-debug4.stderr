@@ -1,0 +1,3 @@
+   Compiling graph-compiler v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/graph-compiler)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.40s
+     Running unittests src/lib.rs (target/debug/deps/graph_compiler-c1c1e295dac82746)

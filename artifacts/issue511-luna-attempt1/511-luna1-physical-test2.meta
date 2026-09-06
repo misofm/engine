@@ -1,0 +1,4 @@
+argv=[cargo test --locked -p builtins-compiler --features test-support,graph/test-support --test allocation_tracker actual_runtime_bank_slot_owners_fit_retained_largest_and_conversion_reservation -- --exact]
+cwd=/home/bl/misofm/engine-slot-reservation
+env=PATH=/home/bl/.cargo/bin:$PATH
+exit=101

@@ -1,0 +1,43 @@
+   Compiling builtins-compiler v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/builtins-compiler)
+   Compiling graph-compiler v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/graph-compiler)
+error[E0277]: the trait bound `graph::GraphResourceEstimate: Default` is not satisfied
+    --> crates/graph-compiler/src/lib.rs:2429:15
+     |
+2429 |             ..Default::default()
+     |               ^^^^^^^^^^^^^^^^^^ the trait `Default` is not implemented for `graph::GraphResourceEstimate`
+
+error[E0277]: the trait bound `graph::GraphResourceEstimate: Default` is not satisfied
+    --> crates/graph-compiler/src/lib.rs:2446:15
+     |
+2446 |             ..Default::default()
+     |               ^^^^^^^^^^^^^^^^^^ the trait `Default` is not implemented for `graph::GraphResourceEstimate`
+
+error[E0599]: no method named `graph` found for struct `PreparedGraphArtifact` in the current scope
+    --> crates/graph-compiler/src/lib.rs:2693:49
+     |
+  53 | pub struct PreparedGraphArtifact {
+     | -------------------------------- method `graph` not found for this struct
+...
+2693 |             GraphCompiler::evidence(effect_only.graph(), effect_only.report()).canonical_bytes,
+     |                                                 ^^^^^-- help: remove the arguments
+     |                                                 |
+     |                                                 field, not a method
+
+error[E0599]: no method named `report` found for struct `PreparedGraphArtifact` in the current scope
+    --> crates/graph-compiler/src/lib.rs:2693:70
+     |
+  53 | pub struct PreparedGraphArtifact {
+     | -------------------------------- method `report` not found for this struct
+...
+2693 |             GraphCompiler::evidence(effect_only.graph(), effect_only.report()).canonical_bytes,
+     |                                                                      ^^^^^^-- help: remove the arguments
+     |                                                                      |
+     |                                                                      field, not a method
+     |
+     = help: items from traits can only be used if the trait is implemented and in scope
+     = note: the following trait defines an item `report`, perhaps you need to implement it:
+             candidate #1: `Termination`
+
+Some errors have detailed explanations: E0277, E0599.
+For more information about an error, try `rustc --explain E0277`.
+error: could not compile `graph-compiler` (lib test) due to 4 previous errors

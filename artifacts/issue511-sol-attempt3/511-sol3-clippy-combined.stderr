@@ -1,0 +1,4 @@
+    Checking graph v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/graph)
+    Checking builtins-compiler v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/builtins-compiler)
+    Checking graph-compiler v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/graph-compiler)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.78s

@@ -1,0 +1,96 @@
+    Checking graph v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/graph)
+    Checking builtins-compiler v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/builtins-compiler)
+    Checking graph-compiler v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/graph-compiler)
+error[E0425]: cannot find function `test_only_prepare_bank_chain_inputs` in crate `graph`
+   --> crates/builtins-compiler/tests/allocation_tracker.rs:545:16
+    |
+545 |         graph::test_only_prepare_bank_chain_inputs(effect_contract::BankWidth::Eight, SLOT_COUNT);
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in `graph`
+    |
+note: found an item that was configured out
+   --> crates/graph/src/lib.rs:15:5
+    |
+ 10 | #[cfg(feature = "test-support")]
+    |       ------------------------ the item is gated behind the `test-support` feature
+...
+ 15 |     test_only_prepare_bank_chain_inputs, test_only_reset_bank_chain_construction_facts,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0425]: cannot find function `test_only_bank_chain_ownership` in crate `graph`
+   --> crates/builtins-compiler/tests/allocation_tracker.rs:552:37
+    |
+552 |     let ownership = armed(|| graph::test_only_bank_chain_ownership(inputs));
+    |                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in `graph`
+    |
+note: found an item that was configured out
+   --> crates/graph/src/lib.rs:14:46
+    |
+ 10 | #[cfg(feature = "test-support")]
+    |       ------------------------ the item is gated behind the `test-support` feature
+...
+ 14 |     test_only_bank_chain_construction_facts, test_only_bank_chain_ownership,
+    |                                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0425]: cannot find function `test_only_reset_bank_chain_construction_facts` in crate `graph`
+   --> crates/builtins-compiler/tests/allocation_tracker.rs:617:12
+    |
+617 |     graph::test_only_reset_bank_chain_construction_facts();
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in `graph`
+    |
+note: found an item that was configured out
+   --> crates/graph/src/lib.rs:15:42
+    |
+ 10 | #[cfg(feature = "test-support")]
+    |       ------------------------ the item is gated behind the `test-support` feature
+...
+ 15 |     test_only_prepare_bank_chain_inputs, test_only_reset_bank_chain_construction_facts,
+    |                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0425]: cannot find function `test_only_bank_chain_construction_facts` in crate `graph`
+   --> crates/builtins-compiler/tests/allocation_tracker.rs:619:31
+    |
+619 |     let paired_facts = graph::test_only_bank_chain_construction_facts();
+    |                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in `graph`
+    |
+note: found an item that was configured out
+   --> crates/graph/src/lib.rs:14:5
+    |
+ 10 | #[cfg(feature = "test-support")]
+    |       ------------------------ the item is gated behind the `test-support` feature
+...
+ 14 |     test_only_bank_chain_construction_facts, test_only_bank_chain_ownership,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0425]: cannot find function `test_only_reset_bank_chain_construction_facts` in crate `graph`
+   --> crates/builtins-compiler/tests/allocation_tracker.rs:641:12
+    |
+641 |     graph::test_only_reset_bank_chain_construction_facts();
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in `graph`
+    |
+note: found an item that was configured out
+   --> crates/graph/src/lib.rs:15:42
+    |
+ 10 | #[cfg(feature = "test-support")]
+    |       ------------------------ the item is gated behind the `test-support` feature
+...
+ 15 |     test_only_prepare_bank_chain_inputs, test_only_reset_bank_chain_construction_facts,
+    |                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0425]: cannot find function `test_only_bank_chain_construction_facts` in crate `graph`
+   --> crates/builtins-compiler/tests/allocation_tracker.rs:643:33
+    |
+643 |     let unpaired_facts = graph::test_only_bank_chain_construction_facts();
+    |                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in `graph`
+    |
+note: found an item that was configured out
+   --> crates/graph/src/lib.rs:14:5
+    |
+ 10 | #[cfg(feature = "test-support")]
+    |       ------------------------ the item is gated behind the `test-support` feature
+...
+ 14 |     test_only_bank_chain_construction_facts, test_only_bank_chain_ownership,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+For more information about this error, try `rustc --explain E0425`.
+error: could not compile `builtins-compiler` (test "allocation_tracker") due to 6 previous errors
+warning: build failed, waiting for other jobs to finish...

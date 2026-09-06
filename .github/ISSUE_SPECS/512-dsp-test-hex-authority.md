@@ -83,3 +83,5 @@ Source contract and finite gates are complete. Root may carry the separately acc
 ## Delivered
 
 PR #513 merged as a6a5903082692bca58810f44a40b9717d49254a0 after Astra exact-head PASS at f76da15d6e08dbd8fc0bee5775fc7dff75276b37 and required qualification run34019289183 SUCCESS. GitHub #512 is closed; the four DSP test adapters share the existing encoding authority. This is the48th merged audit PR. CP20 remains partial and no runtime timing claim is made. Post-main qualification pending.
+
+Post-main qualification run34019645825 completed SUCCESS at a6a5903082692bca58810f44a40b9717d49254a0. Delivered source and combined main are qualified.

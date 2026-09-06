@@ -14,11 +14,12 @@ use std::sync::Mutex;
 use builtins::{BuiltinLaneSelector, Matrix2x2, MeterConfig, MeterTap};
 use builtins_compiler::{
     BuiltinCompileCaps, MeterRequest, TestOnlyFaderMatrixPair, TrackControlRecord,
-    TrackFaderRecord, prepare_session_builtins, test_only_fader_matrix_witness,
-    test_only_observed_scalar_pair_binding, test_only_phase_two_allocation_snapshot,
-    test_only_record_phase_two_allocation, test_only_record_phase_two_deallocation,
-    test_only_reset_fader_matrix_witness, test_only_reset_phase_two_allocation_tracker,
-    test_only_scalar_outer_lifetime, test_only_scalar_owner_drops, test_only_scalar_owner_layouts,
+    TrackFaderRecord, prepare_session_builtins, test_only_begin_phase_two_allocation_observation,
+    test_only_fader_matrix_witness, test_only_observed_scalar_pair_binding,
+    test_only_phase_two_allocation_snapshot, test_only_record_phase_two_allocation,
+    test_only_record_phase_two_deallocation, test_only_reset_fader_matrix_witness,
+    test_only_reset_phase_two_allocation_tracker, test_only_scalar_outer_lifetime,
+    test_only_scalar_owner_drops, test_only_scalar_owner_layouts,
 };
 use engine::realtime::{PlanarBufferMut, RenderIo, RenderTime};
 use session::{CompileCaps, RouteSource, SendTap, StableId, compile_session, parse_session_json};
@@ -48,6 +49,34 @@ thread_local! {
     static ARMED: Cell<bool> = const { Cell::new(false) };
     static LIVE_ALLOCS: Cell<u64> = const { Cell::new(0) };
     static LIVE_FREES: Cell<u64> = const { Cell::new(0) };
+    static LIVE_BYTES: Cell<u64> = const { Cell::new(0) };
+    static LARGEST_REQUESTED_BYTES: Cell<u64> = const { Cell::new(0) };
+    static LARGEST_REALLOC_BYTES: Cell<u64> = const { Cell::new(0) };
+    static BYTE_COUNTER_FAILED: Cell<bool> = const { Cell::new(false) };
+}
+
+fn reset_byte_counters() {
+    LIVE_BYTES.set(0);
+    LARGEST_REQUESTED_BYTES.set(0);
+    LARGEST_REALLOC_BYTES.set(0);
+    BYTE_COUNTER_FAILED.set(false);
+}
+
+fn observe_allocation_bytes(bytes: usize) {
+    let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
+    match LIVE_BYTES.get().checked_add(bytes) {
+        Some(live) => LIVE_BYTES.set(live),
+        None => BYTE_COUNTER_FAILED.set(true),
+    }
+    LARGEST_REQUESTED_BYTES.set(LARGEST_REQUESTED_BYTES.get().max(bytes));
+}
+
+fn observe_deallocation_bytes(bytes: usize) {
+    let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
+    match LIVE_BYTES.get().checked_sub(bytes) {
+        Some(live) => LIVE_BYTES.set(live),
+        None => BYTE_COUNTER_FAILED.set(true),
+    }
 }
 
 /// Guards one armed span on the current thread; clears the flag on drop (including on panic), so
@@ -82,6 +111,7 @@ unsafe impl GlobalAlloc for TrackingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         if ARMED.with(Cell::get) {
             LIVE_ALLOCS.set(LIVE_ALLOCS.get() + 1);
+            observe_allocation_bytes(layout.size());
             test_only_record_phase_two_allocation(layout);
         }
         // SAFETY: forwards the allocator-provided layout unchanged.
@@ -91,6 +121,7 @@ unsafe impl GlobalAlloc for TrackingAllocator {
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         if ARMED.with(Cell::get) {
             LIVE_ALLOCS.set(LIVE_ALLOCS.get() + 1);
+            observe_allocation_bytes(layout.size());
             test_only_record_phase_two_allocation(layout);
         }
         // SAFETY: forwards the allocator-provided layout unchanged.
@@ -100,6 +131,7 @@ unsafe impl GlobalAlloc for TrackingAllocator {
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
         if ARMED.with(Cell::get) {
             LIVE_FREES.set(LIVE_FREES.get() + 1);
+            observe_deallocation_bytes(layout.size());
             test_only_record_phase_two_deallocation(layout);
         }
         // SAFETY: forwards the original pointer and layout unchanged.
@@ -113,6 +145,12 @@ unsafe impl GlobalAlloc for TrackingAllocator {
             // keeps the zero gate from being bypassed by a direct realloc call.
             LIVE_ALLOCS.set(LIVE_ALLOCS.get() + 1);
             LIVE_FREES.set(LIVE_FREES.get() + 1);
+            observe_deallocation_bytes(layout.size());
+            let new_layout = Layout::from_size_align(size, layout.align())
+                .expect("GlobalAlloc::realloc receives a valid new layout");
+            let new_bytes = u64::try_from(size).unwrap_or(u64::MAX);
+            LARGEST_REALLOC_BYTES.set(LARGEST_REALLOC_BYTES.get().max(new_bytes));
+            observe_allocation_bytes(new_layout.size());
             test_only_record_phase_two_deallocation(layout);
             test_only_record_phase_two_allocation(layout);
         }
@@ -457,6 +495,172 @@ fn actual_scalar_prepare_and_bind_retain_the_charged_owner_layouts() {
     );
     assert_eq!(test_only_scalar_owner_drops(), [2, 2, 1]);
     assert_eq!(test_only_scalar_outer_lifetime(), [1, 0, 1]);
+}
+
+#[test]
+fn actual_runtime_bank_slot_owners_fit_retained_largest_and_conversion_reservation() {
+    let _session_guard = SESSION
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    // Positive liveness control for the NEW realloc request. The phase-two recorder intentionally
+    // retains its old-layout semantics; this test-local counter observes the requested new size.
+    let old = Layout::from_size_align(8, 8).expect("old realloc layout");
+    let new = Layout::from_size_align(64, 8).expect("new realloc layout");
+    reset_byte_counters();
+    LIVE_ALLOCS.set(0);
+    LIVE_FREES.set(0);
+    // SAFETY: `old` is nonzero and valid; the returned pointer is checked before reuse.
+    let pointer = armed(|| unsafe { std::alloc::alloc(old) });
+    assert!(!pointer.is_null(), "controlled realloc allocation");
+    // SAFETY: `pointer` came from `alloc(old)`, remains live, and `new` preserves its alignment.
+    let pointer = armed(|| unsafe { std::alloc::realloc(pointer, old, new.size()) });
+    assert!(!pointer.is_null(), "controlled realloc");
+    assert_eq!(LARGEST_REALLOC_BYTES.get(), new.size() as u64);
+    // SAFETY: the successful realloc returned a live allocation with layout `new`.
+    armed(|| unsafe { std::alloc::dealloc(pointer, new) });
+    assert!(!BYTE_COUNTER_FAILED.get());
+    assert_eq!(
+        LIVE_BYTES.get(),
+        0,
+        "controlled realloc releases its new request"
+    );
+
+    // Prepare stage objects and scratch before arming the attribution interval. The actual
+    // ordered slot conversion is the production bank_chain reached by the second call, and the
+    // returned ownership stays alive until the separate release interval below.
+    const SLOT_COUNT: usize = 3;
+    const WIDTH: usize = 8;
+    let stage_layout = Layout::array::<Box<dyn rack::BankStage>>(SLOT_COUNT).expect("stage layout");
+    let slot_layout = Layout::array::<rack::BankSlot>(SLOT_COUNT).expect("slot layout");
+    let mask_layout = Layout::array::<bool>(WIDTH).expect("mask layout");
+    let scratch_layout = Layout::array::<f32>(WIDTH).expect("one scratch plane");
+    let count = |layouts: &[builtins_compiler::BuiltinRetainedLayout], expected: Layout| {
+        layouts
+            .iter()
+            .find(|layout| {
+                layout.size_bytes == expected.size() as u64
+                    && layout.align_bytes == expected.align() as u64
+            })
+            .map_or(0, |layout| layout.allocation_count)
+    };
+    let inputs =
+        graph::test_only_prepare_bank_chain_inputs(effect_contract::BankWidth::Eight, SLOT_COUNT);
+    test_only_reset_phase_two_allocation_tracker();
+    reset_byte_counters();
+    LIVE_ALLOCS.set(0);
+    LIVE_FREES.set(0);
+    LIVE_BYTES.set(stage_layout.size() as u64);
+    let observation = test_only_begin_phase_two_allocation_observation();
+    let ownership = armed(|| graph::test_only_bank_chain_ownership(inputs));
+    drop(observation);
+    let snapshot = test_only_phase_two_allocation_snapshot();
+    assert!(!snapshot.overflowed);
+    assert!(!BYTE_COUNTER_FAILED.get());
+    assert_eq!(ownership.slot_count, SLOT_COUNT);
+    assert_eq!(ownership.requested_stage_capacity, SLOT_COUNT);
+    assert_eq!(ownership.runtime_slot_capacity, SLOT_COUNT);
+    assert_eq!(ownership.inferred_retained_slot_count, SLOT_COUNT);
+    assert_eq!(ownership.stage_pointer_bytes, stage_layout.size());
+    assert_eq!(ownership.slot_bytes, slot_layout.size());
+    assert_eq!(ownership.mask_bytes, mask_layout.size());
+    assert_eq!(snapshot.allocation_count, SLOT_COUNT as u64 + 1);
+    assert_eq!(snapshot.deallocation_count, 1);
+    assert_eq!(count(&snapshot.layouts, slot_layout), 1);
+    assert_eq!(count(&snapshot.layouts, mask_layout), SLOT_COUNT as u64);
+    assert_eq!(count(&snapshot.deallocation_layouts, stage_layout), 1);
+    assert_eq!(LARGEST_REQUESTED_BYTES.get(), slot_layout.size() as u64);
+    assert_eq!(LIVE_ALLOCS.get(), SLOT_COUNT as u64 + 1);
+    assert_eq!(LIVE_FREES.get(), 1);
+
+    let n = SLOT_COUNT as u64;
+    let f = core::mem::size_of::<Box<dyn rack::BankStage>>() as u64;
+    let b = core::mem::size_of::<rack::BankSlot>() as u64;
+    let w = WIDTH as u64 * core::mem::size_of::<bool>() as u64;
+    assert_eq!(core::mem::size_of::<bool>(), 1);
+    let c = n * (f + 3 * b + 3 * w);
+    let l = (n * f).max(n * b).max(w);
+    let retained = n * b + (n + 1) * w;
+    let conversion_coexistence = n * f + n * b + (n + 1) * w;
+    assert!(retained <= n * (b + 2 * w));
+    assert!(conversion_coexistence <= c);
+    for request in [n * f, n * b, w] {
+        assert!(request <= l);
+    }
+    assert_eq!(LARGEST_REQUESTED_BYTES.get(), l);
+    assert_eq!(LIVE_BYTES.get(), n * b + n * w);
+
+    let release_bytes = retained + 2 * scratch_layout.size() as u64;
+    test_only_reset_phase_two_allocation_tracker();
+    reset_byte_counters();
+    LIVE_ALLOCS.set(0);
+    LIVE_FREES.set(0);
+    LIVE_BYTES.set(release_bytes);
+    let observation = test_only_begin_phase_two_allocation_observation();
+    armed(|| drop(ownership));
+    drop(observation);
+    let release = test_only_phase_two_allocation_snapshot();
+    assert!(!release.overflowed);
+    assert!(!BYTE_COUNTER_FAILED.get());
+    assert_eq!(release.allocation_count, 0);
+    assert_eq!(release.deallocation_count, SLOT_COUNT as u64 + 4);
+    assert_eq!(count(&release.deallocation_layouts, slot_layout), 1);
+    assert_eq!(
+        count(&release.deallocation_layouts, mask_layout),
+        SLOT_COUNT as u64 + 1
+    );
+    assert_eq!(count(&release.deallocation_layouts, scratch_layout), 2);
+    assert_eq!(LIVE_BYTES.get(), 0, "owned slot chain releases off render");
+    assert_eq!(LIVE_ALLOCS.get(), 0);
+    assert_eq!(LIVE_FREES.get(), SLOT_COUNT as u64 + 4);
+
+    // This direct-attachment fixture is separate from compiler admission. It proves the actual
+    // runtime R/S bounds for both delivery variants against the same calculated allowance.
+    let mut output = [0.0_f32; 128];
+    graph::test_only_reset_bank_chain_construction_facts();
+    let mut paired = builtins_compiler::test_only_prepared_pair_graph(false);
+    let paired_facts = graph::test_only_bank_chain_construction_facts();
+    let paired_allowance = graph::GraphBankSlotResourceEstimate::checked_for(
+        paired_facts.prepared_memberships as u64,
+        Some(effect_contract::BankWidth::Eight),
+    )
+    .expect("paired allowance");
+    assert!(paired_facts.runtime_slots < paired_facts.run_memberships);
+    assert!(paired_facts.runtime_slots <= paired_facts.run_memberships);
+    assert!(paired_facts.run_memberships <= paired_facts.prepared_memberships);
+    assert!(paired_facts.maximum_runtime_slots <= paired_facts.maximum_run_memberships);
+    assert_eq!(
+        paired_allowance.bank_count,
+        paired_facts.prepared_memberships as u64
+    );
+    for sample in [0, 64] {
+        let witness = audit_graph_render(&mut paired, &mut output, sample);
+        assert!(witness.fused_calls > 0, "successful pairing is rendered");
+    }
+    drop(paired);
+
+    graph::test_only_reset_bank_chain_construction_facts();
+    let mut unpaired = builtins_compiler::test_only_prepared_unpaired_graph();
+    let unpaired_facts = graph::test_only_bank_chain_construction_facts();
+    let unpaired_allowance = graph::GraphBankSlotResourceEstimate::checked_for(
+        unpaired_facts.prepared_memberships as u64,
+        Some(effect_contract::BankWidth::Eight),
+    )
+    .expect("unpaired allowance");
+    assert!(
+        unpaired_facts.maximum_runtime_slots > 1,
+        "actual unpaired S > 1"
+    );
+    assert!(unpaired_facts.runtime_slots <= unpaired_facts.run_memberships);
+    assert!(unpaired_facts.run_memberships <= unpaired_facts.prepared_memberships);
+    assert_eq!(
+        unpaired_allowance.bank_count,
+        unpaired_facts.prepared_memberships as u64
+    );
+    for sample in [0, 64] {
+        let _ = audit_graph_render(&mut unpaired, &mut output, sample);
+    }
+    drop(unpaired);
 }
 
 fn session(track_count: u32) -> session::CompiledSession {

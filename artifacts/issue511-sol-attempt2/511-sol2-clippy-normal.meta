@@ -1,0 +1,10 @@
+/home/bl/misofm/engine-slot-reservation
+argv=cargo clippy --locked -p graph -p graph-compiler -p builtins-compiler --all-targets -- -D warnings
+777d168fcd64574ff4a1fa33e53c01b6aa73e738
+9bdac963068795bc8a33f93b18ba5bbe5221ab628bdf739ec8694a919bbbd432  crates/graph/src/lib.rs
+b92af988c6a8a602a7f93bf8cd11f4fb62e1f68831acca0eac8e39aaf75c23a2  crates/graph/src/runtime.rs
+7f435cff8087b7e66dc74b57873cd343ff178fe8f849b5c9cf61e14c8513ff13  crates/graph-compiler/src/compile.rs
+fc4a43306b56b0ddb6d4f85ff86ee926fc14b98a9543b18e5e420b9218f444d8  crates/graph-compiler/src/lib.rs
+6642d7fa25ca317e133b1705fe62fb6148f0e6894e28a51ba48353e152021ebc  crates/builtins-compiler/src/lib.rs
+a843bd4c8bfbd9e2a216f90fcbe7aacf24bb2dba16ea805e87a018689161267c  crates/builtins-compiler/tests/allocation_tracker.rs
+PATH=/home/bl/.cargo/bin:/home/bl/.local/bin:/home/bl/.codex/packages/standalone/releases/0.153.2-x86_64-unknown-linux-musl/codex-path:/home/bl/.codex/tmp/arg0/codex-arg0CWD760:/home/bl/.local/bin:/home/bl/.opencode/bin:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.opencode/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin

@@ -1,0 +1,37 @@
+    Checking engine v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/engine)
+warning: `math::fast_db::fast_level_db` does not refer to a reachable function
+  --> /home/bl/misofm/engine-slot-reservation/clippy.toml:81:5
+   |
+81 |     { path = "math::fast_db::fast_level_db", reason = "fast dB tier (#144 item 5); admitted only at a named FAST-DB-CROSSING site" },
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: add `allow-invalid = true` to the entry to suppress this warning
+
+warning: `math::fast_db::fast_gain_from_db` does not refer to a reachable function
+  --> /home/bl/misofm/engine-slot-reservation/clippy.toml:82:5
+   |
+82 |     { path = "math::fast_db::fast_gain_from_db", reason = "fast dB tier (#144 item 5); admitted only at a named FAST-DB-CROSSING site" },
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: add `allow-invalid = true` to the entry to suppress this warning
+
+warning: `math` (lib) generated 2 warnings
+    Checking effect-contract v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/effect-contract)
+    Checking session v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/session)
+warning: `effect-contract` (lib) generated 2 warnings (2 duplicates)
+    Checking rack v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/rack)
+    Checking builtins v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/builtins)
+warning: `rack` (lib) generated 2 warnings (2 duplicates)
+    Checking graph v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/graph)
+    Checking rack-compiler v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/rack-compiler)
+warning: `rack-compiler` (lib) generated 2 warnings (2 duplicates)
+warning: `builtins` (lib) generated 2 warnings (2 duplicates)
+warning: `graph` (lib) generated 2 warnings (2 duplicates)
+    Checking builtins-compiler v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/builtins-compiler)
+warning: `builtins-compiler` (lib) generated 2 warnings (2 duplicates)
+warning: `builtins-compiler` (test "track_delay_domain") generated 2 warnings (2 duplicates)
+warning: `builtins-compiler` (test "builtin_automation_targets") generated 2 warnings (2 duplicates)
+warning: `builtins-compiler` (test "input_drain") generated 2 warnings (2 duplicates)
+warning: `builtins-compiler` (test "scale") generated 2 warnings (2 duplicates)
+warning: `builtins-compiler` (lib test) generated 2 warnings (2 duplicates)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.59s

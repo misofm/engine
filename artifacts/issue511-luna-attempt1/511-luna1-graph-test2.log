@@ -1,0 +1,48 @@
+   Compiling graph-compiler v0.1.0 (/home/bl/misofm/engine-slot-reservation/crates/graph-compiler)
+error[E0382]: borrow of moved value: `estimate`
+    --> crates/graph-compiler/src/lib.rs:2382:17
+     |
+2379 |         let mut estimate = compile_fixture(511_0).report.estimate;
+     |             ------------ move occurs because `estimate` has type `graph::GraphResourceEstimate`, which does not implement the `Copy` trait
+2380 |         estimate.graph_metadata_bytes = u64::MAX;
+2381 |         let before = estimate;
+     |                      -------- value moved here
+2382 |         assert!(estimate.checked_add_bank_slot_owners(graph::GraphBankSlotResourceEstimate { total_bytes: 1, ..Default::default() ...
+     |                 ^^^^^^^^ value borrowed here after move
+     |
+help: consider cloning the value if the performance cost is acceptable
+     |
+2381 |         let before = estimate.clone();
+     |                              ++++++++
+
+error[E0382]: borrow of partially moved value: `graph.report`
+    --> crates/graph-compiler/src/lib.rs:2445:58
+     |
+2437 | ...   let mut expected = graph.report.estimate;
+     |                          --------------------- value partially moved here
+...
+2445 | ...   assert_eq!(GraphCompiler::evidence(&graph.graph, &graph.report).canonical_bytes, GraphCompiler::evidence(artifact.graph(), a...
+     |                                                        ^^^^^^^^^^^^^ value borrowed here after partial move
+     |
+     = note: partial move occurs because `graph.report.estimate` has type `graph::GraphResourceEstimate`, which does not implement the `Copy` trait
+
+error[E0507]: cannot move out of a shared reference
+    --> crates/graph-compiler/src/lib.rs:2446:30
+     |
+2446 |         let final_estimate = *artifact.graph_resource_estimate();
+     |                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ move occurs because value has type `graph::GraphResourceEstimate`, which does not implement the `Copy` trait
+     |
+help: consider removing the dereference here
+     |
+2446 -         let final_estimate = *artifact.graph_resource_estimate();
+2446 +         let final_estimate = artifact.graph_resource_estimate();
+     |
+help: consider cloning the value if the performance cost is acceptable
+     |
+2446 -         let final_estimate = *artifact.graph_resource_estimate();
+2446 +         let final_estimate = artifact.graph_resource_estimate().clone();
+     |
+
+Some errors have detailed explanations: E0382, E0507.
+For more information about an error, try `rustc --explain E0382`.
+error: could not compile `graph-compiler` (lib test) due to 3 previous errors
