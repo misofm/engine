@@ -48,3 +48,41 @@ Run the two newly named focused tests (one accounting/caps, one physical slot ow
 This issue closes when actual compiler admission reserves this named slot component, independent physical bounds and transactional cap behavior pass, and ordinary delivery/required CI succeeds. #478 can then receive a fresh base review and implement only its already-frozen packed-mask outcome under these inequalities. Neither issue may claim all global resource owners audited. This is a half-day-sized admission/component correction plus two existing fixture extensions; a newly discovered allocator-capacity or unrelated-owner problem is a precise stop/successor decision, not permission for a general resource rewrite.
 
 Fresh Luna1 followed by one consolidated Astra verdict; Sol2 and Sol3 only if needed, hard stop/rescope after three failed attempts. Parent #478 accounting stop remains binding until this prerequisite is delivered. No implementation, tests/builds, timing, repository/Git/GitHub mutations were performed for this brief.
+
+## Numbered Astra scope approval and frozen gate clarification
+
+# #511 numbered scope/base review — PASS
+
+Reviewed clean 7f93a324eea5c8cddae8eb06692a8f9de93b5965 in engine-slot-reservation. GitHub511 is OPEN with matching number/title and exact local body. The body from “Concrete source finding” onward equals the accepted accounting prerequisite brief verbatim. Versus delivered0b8cf178 the delta is only the numbered spec and509 closure record. Graph, graph-compiler, builtins-compiler, rack, Cargo and .cargo inputs are unchanged from inspected e147263a. No base drift changes the count, capacity or accounting premises.
+
+Approve fresh Luna1 for this prerequisite only. Preserve combined membership-count reservation, checked transactional folding, canonical semantic estimate separation, explicit allocation-shape bound and independent physical inequalities. #478 remains queued until prerequisite delivery and fresh base review. This PASS does not establish an actual capacity/peak measurement or certify unrelated owners.
+
+Freeze these two new focused test identities before implementation:
+
+1. `tests::runtime_bank_slot_reservation_is_published_and_capped_transactionally` in crates/graph-compiler/src/lib.rs. This single fixture covers the specified arithmetic/empty/overflow and independently discriminating publication/cap/returned-ownership cases; existing relevant fixtures remain.
+2. `actual_runtime_bank_slot_owners_fit_retained_largest_and_conversion_reservation` in crates/builtins-compiler/tests/allocation_tracker.rs. This covers the finite actual construction/retention/release inequalities and bound-graph membership/pairing proof using the existing allocator. Do not accept layouts merely because they share an allocation size with a slot owner.
+
+Exact focused commands (each selects one test) are:
+
+```
+cargo test --locked -p graph-compiler --lib tests::runtime_bank_slot_reservation_is_published_and_capped_transactionally -- --exact
+cargo test --locked --release -p graph-compiler --lib tests::runtime_bank_slot_reservation_is_published_and_capped_transactionally -- --exact
+cargo test --locked -p builtins-compiler --features test-support,graph/test-support --test allocation_tracker actual_runtime_bank_slot_owners_fit_retained_largest_and_conversion_reservation -- --exact
+cargo test --locked --release -p builtins-compiler --features test-support,graph/test-support --test allocation_tracker actual_runtime_bank_slot_owners_fit_retained_largest_and_conversion_reservation -- --exact
+```
+
+`allocation_tracker.rs` is crate-gated on builtins-compiler/test-support; the existing prior owner evidence used that feature. Graph already declares its own test-support feature. Enable that existing dependency feature explicitly for the approved graph construction-boundary adapter; no Cargo declaration or normal feature change is necessary. Graph-compiler already enables builtins-compiler/test-support as a dev dependency. The named graph compiler test lives in its existing `tests` module.
+
+Full affected commands are `cargo test --locked -p graph-compiler --lib` and `cargo test --locked -p builtins-compiler --features test-support,graph/test-support --test allocation_tracker`, each repeated with `--release`. Record actual counts, individual numeric statuses and source identity. Strict affected all-targets Clippy must cover normal and enabled test-support compilation; retain fmt/diff and existing graph/realtime/workspace policy gates. No expanded corpus, benchmark, new allocator, public resource schema or automatic pin changes follow from naming these gates.
+
+Root should append these exact names/feature commands to the synchronized numbered decision record before assignment. Existing capacity-contract and unrelated-owner stops remain intact: an unsupported allocation-capacity premise is a precise returned obstacle, not permission to substitute a test-only assumption. No implementation, builds, tests, timing or repository/GitHub mutations performed in this review.
+
+## Gate feasibility clarification adopted with this PASS
+
+Do not grow a session until slot storage happens to dominate every processor/scratch allocation. For the new component's L, independently test the checked fold with a small synthetic prior estimate whose largest field is below L, then with an existing larger value: require max(old,L) exactly, plus zero/overflow transactional behavior. In the small real compiler fixture, test admission at its independently computed *whole-plan* largest and refusal one byte below that whole-plan maximum. Attribute that rejection honestly to the whole-plan maximum; it need not be a slot allocation. Graph/plan total boundaries must include the exact new reservation delta. Together these discriminate the component calculation, integration and cap consumption without a huge graph. This clarifies the earlier brief's “component actually determines threshold” requirement: that discrimination belongs in the direct checked-fold fixture when real owners dominate.
+
+Keep the physical adapter construction-specific: a feature-gated prepared-input/owned-chain test bridge to the SAME bank_chain function is sufficient. Prepare fake stage/scratch owners outside observation, invoke the actual ordered slot conversion inside the existing armed interval, expose only typed slot/mask counts/capacities needed for the fixed inequalities, and release owners on the control thread. Account explicitly for incoming stage Vec and mask allocations when their frees occur inside an observed interval; do not subtract untracked bytes from zero or misidentify stage/scratch frees as slot releases. Use a second, existing actual bound-graph fixture for membership/pairing reachability. No generic callback observer registry, allocation-ID database or second constructor is needed.
+
+The existing allocator realloc branch reports the OLD layout to its phase-two recorder. This is not evidence of the new allocation's byte size. Add the narrow test-local requested-byte observation using `Layout::from_size_align(new_size, old.align())` (checked outside any fallible assumption as appropriate to GlobalAlloc's contract) for the NEW request. The original phase-two record semantics remain unchanged in this issue. A positive controlled realloc must prove the new counter sees the increased size; do not silently change old recorder behavior and call its prior evidence unchanged. For a conservative transient bound a realloc may coexist with its old allocation; do not interpret net growth as its maximum live request.
+
+Root activates fresh Luna attempt 1 at this documentation checkpoint. Implementation is limited to the approved reservation prerequisite; #478 remains queued.
