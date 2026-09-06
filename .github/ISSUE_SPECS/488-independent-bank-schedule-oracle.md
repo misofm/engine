@@ -91,3 +91,7 @@ Root integrates deliveredmainf357330c before PR. The accepted graph test and pro
 ## Final delivered-base integration
 
 Root integrates deliveredmainc075e44e (PR487) before final actual-head qualification. This brings the accepted compiler configuration correction/current artifact and485 closure record. Graph production and test source remain unchanged from acceptedc86c4347. Required CI and refreshed actual-head Astra review apply to the resulting head.
+
+## Delivered and closed
+
+PR489 merged2026-09-06T02:30:54Z ase2b77fd65e142b19d032c688b71d3ef810d7ddb2 after refreshed exact-head Astra PASS for073b410b4a755f6bd7430a0564162e5a91ae424f and required qualification34006285450 SUCCESS. GitHub488 is verified CLOSED. CP15 independent scheduling-oracle correction is delivered; the production runtime is unchanged. Workflow total36 merged audit PRs, with107 original audit entries retaining work. Other mirrored model/dataflow obligations remain separately classified.

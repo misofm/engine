@@ -117,22 +117,22 @@ pub(crate) fn track_node(track: &str, stage: TrackStage) -> GraphNodeId {
         stage,
     }
 }
-pub(crate) fn route_source_node(source: &RouteSource) -> Option<GraphNodeId> {
+pub(crate) fn route_source_node(source: &RouteSource) -> GraphNodeId {
     match source {
-        RouteSource::Track { track_id, tap } => Some(track_node(track_id.as_str(), stage(*tap))),
-        RouteSource::SubmixOutput { submix_id } => Some(GraphNodeId::Submix {
+        RouteSource::Track { track_id, tap } => track_node(track_id.as_str(), stage(*tap)),
+        RouteSource::SubmixOutput { submix_id } => GraphNodeId::Submix {
             submix_id: gid(submix_id.as_str()),
-        }),
+        },
     }
 }
-pub(crate) fn route_destination_node(destination: &RouteDestination) -> Option<GraphNodeId> {
+pub(crate) fn route_destination_node(destination: &RouteDestination) -> GraphNodeId {
     match destination {
-        RouteDestination::SubmixInput { submix_id } => Some(GraphNodeId::Submix {
+        RouteDestination::SubmixInput { submix_id } => GraphNodeId::Submix {
             submix_id: gid(submix_id.as_str()),
-        }),
-        RouteDestination::OutputInput { output_id } => Some(GraphNodeId::Output {
+        },
+        RouteDestination::OutputInput { output_id } => GraphNodeId::Output {
             output_id: gid(output_id.as_str()),
-        }),
+        },
     }
 }
 pub(crate) fn stage(tap: SendTap) -> TrackStage {
