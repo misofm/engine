@@ -979,7 +979,7 @@ fn effect_failure(code: &str) -> PrepareDiagnostics {
 mod tests {
     use super::{effect_diagnostics, session_diagnostics};
     use effect_compiler::{EffectDiagnostic, EffectDiagnosticSet};
-    use session::parse_session_json;
+    use session::{DiagnosticCode, parse_session_json};
 
     #[test]
     fn typed_diagnostic_adapters_preserve_projection_and_bound() {
@@ -993,8 +993,10 @@ mod tests {
                 path: "$.tracks[id=two].effects".into(),
             },
         ]);
+        let projected = effect_diagnostics(effects);
+        assert_eq!(projected.kind(), super::PrepareRejection::Effect);
         assert_eq!(
-            effect_diagnostics(effects).as_bytes(),
+            projected.as_bytes(),
             b"effect.first\t$.tracks[id=one]\neffect.second\t$.tracks[id=two].effects\n"
         );
         assert_eq!(
@@ -1005,17 +1007,23 @@ mod tests {
             (0..65)
                 .map(|index| EffectDiagnostic {
                     code: "effect.too_many",
-                    path: format!("$.effects[{index}]"),
+                    path: format!("$.effects[index={index:02}]"),
                 })
                 .collect(),
         );
+        assert_eq!(many.0.len(), 65);
+        assert!(many.0.iter().enumerate().all(|(index, diagnostic)| {
+            diagnostic.code == "effect.too_many"
+                && diagnostic.path == format!("$.effects[index={index:02}]")
+        }));
         let bounded = effect_diagnostics(many).into_bytes();
-        assert_eq!(bounded.iter().filter(|&&byte| byte == b'\n').count(), 64);
-        assert!(
-            !bounded
-                .windows(b"$.effects[64]".len())
-                .any(|w| w == b"$.effects[64]")
-        );
+        let mut expected = String::new();
+        for index in 0..64 {
+            expected.push_str(&format!(
+                "effect.too_many\t$.effects[index={index:02}]\n"
+            ));
+        }
+        assert_eq!(bounded, expected.into_bytes());
 
         let invalid = include_str!("../../../fixtures/session/v1/canonical.json")
             .replace("\"sample_rate_hz\": 48000", "\"sample_rate_hz\": 123")
@@ -1035,10 +1043,30 @@ mod tests {
             b"capacity.zero\t$.quantum_frames\nsample_rate.unsupported_at_launch\t$.sample_rate_hz\n"
         );
 
-        let invalid_tracks = (0..65).map(|_| "null").collect::<Vec<_>>().join(",");
-        let many = format!(r#"{{"schema_version":1,"tracks":[{invalid_tracks}]}}"#);
-        let many = parse_session_json(&many).expect_err("65 unknown fields");
+        let canonical = include_str!("../../../fixtures/session/v1/canonical.json");
+        let mut many_document = canonical[..canonical.len() - 2].to_owned();
+        for index in 0..65 {
+            many_document.push_str(&format!(",\n  \"unexpected_{index:02}\": null"));
+        }
+        many_document.push_str("\n}\n");
+        let many = parse_session_json(&many_document).expect_err("65 unknown fields");
+        assert_eq!(many.diagnostics().len(), 64);
+        assert!(
+            many.diagnostics()
+                .iter()
+                .enumerate()
+                .all(|(index, diagnostic)| {
+                    diagnostic.code == DiagnosticCode::UnknownField
+                        && diagnostic.path.to_string() == format!("$.unexpected_{index:02}")
+                })
+        );
         let bounded = session_diagnostics(many).into_bytes();
-        assert_eq!(bounded.iter().filter(|&&byte| byte == b'\n').count(), 64);
+        let mut expected = String::new();
+        for index in 0..64 {
+            expected.push_str(&format!(
+                "schema.unknown_field\t$.unexpected_{index:02}\n"
+            ));
+        }
+        assert_eq!(bounded, expected.into_bytes());
     }
 }
