@@ -208,3 +208,5 @@ Smallest successor scope: only complete this existing cfg(test) W4 fixture with 
 Evidence otherwise checks out: all12 manifest payload hashes/sizes and exact13-file tracked coverage verified. Actual focused/affected debug-release, full debug, strict Clippy, fmt/diff and realtime/lane/workspace/environment statuses are0; both wrong-cwd/corrected package verifications and earlier compile/oracle failures are authentic retained history. Green executions do not remove the startup-silence limitation above. No additional production defect is identified, and no other new correction group is imposed.
 
 Root adopts the hardstop. No further implementation or delivery qualification under parent475 is authorized until a numbered, Astra-briefed proof successor owns the finite populated-history correction. The parent retains the complete product contract and all eventual delivery gates; no acceptance requirement is weakened.
+
+The one remaining populated-history proof obligation is now numbered child #499. Parent implementation remains frozen; child499 has its own bounded brief and fresh attempt budget, without weakening the parent acceptance or delivery contract.
