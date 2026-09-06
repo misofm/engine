@@ -4298,11 +4298,11 @@ mod tests {
             }};
         }
 
-        check_width!(f32, 1, 0, 0);
         check_width!(Simd4, 3, 1, 0);
         check_width!(Simd4, 4, 1, 0);
         check_width!(Simd8, 5, 1, 0);
         check_width!(Simd8, 8, 1, 0);
+        check_width!(f32, 1, 0, 0);
     }
 
     fn assert_pair(
