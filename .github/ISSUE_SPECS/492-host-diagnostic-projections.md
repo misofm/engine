@@ -55,3 +55,15 @@ Explicit applicability correction to the original empty-input wording: session::
 Retained package56 payload hashes/sizes checked without errors. Reported focused1 and host prepare12+1ignored in both profiles, strict Clippy/fmt/diff0 remain useful; earlier compile/assertion failures are candid. Passing counts do not establish the missing category/full-prefix assertions. After the small test-only correction run the frozen affected tests/gates on the final candidate and retain actual commands/statuses. No production repair is requested, no further Luna revision; root may synchronize this finite FAIL/applicability ruling and assign Sol2. #463 runtime remains independent.
 
 Root adopts FAIL and the exact empty-session applicability ruling. Sol2 owns only the missing category and complete known first64 byte assertions using a parser-produced exactly65 diagnostic population. Production adapters and accepted previous proof remain frozen. Pause at first coherent focused-green checkpoint; root owns commits/pushes/GitHub and consolidated verdict.
+
+## Public session diagnostic cap applicability
+
+# Astra #492 session diagnostic-cap applicability — APPROVE precise amendment
+
+Read current test-only checkpoint1ed69049 and source cap: session/diagnostic.rs defines MAXIMUM_SESSION_DIAGNOSTICS=64; parse.rs:88 and validate.rs:767 stop appending at that bound. Combined with the private/nonempty DiagnosticSet construction, the normal public parser/compiler cannot supply65 diagnostics to this adapter. The earlier demand for an actual65-entry SESSION input was inapplicable and must be corrected explicitly, not met through a new constructor/unsafe/API.
+
+Accept the candidate's65 intended unknown fields on an otherwise-valid canonical document, with an asserted actual64-entry pre-adapter set of exact ordered UnknownField/code/path values, followed by complete expected64-line byte equality. This proves preservation of the upstream-capped session population. It does NOT independently prove session-adapter truncation from65; no such claim should be recorded. The separate publicly constructible EffectDiagnosticSet65 case proves the shared host truncation behavior, with category and full-prefix equality. Keep the prior empty-session invariant ruling.
+
+No production change, cap change, broader test interface or additional gate is needed. Root should synchronize this narrow applicability correction and allow Sol2 to finish the existing gates. This is not the consolidated Sol2 verdict; final source/evidence review remains pending. No tests/builds or repository/Git/GitHub mutation performed.
+
+Root adopts this correction. Focused-green test-only checkpoint1ed69049 is pushed; Sol2 may finish existing gates with production adapters unchanged.
