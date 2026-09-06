@@ -1193,6 +1193,10 @@ impl PreparedSlot {
 thread_local! {
     static TEST_PREPARED_ACTIVITY_QUERIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static TEST_PREPARED_ACTIVITY_LANE_INSPECTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static TEST_PREPARED_DROPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static TEST_TRACE_BEGIN: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static TEST_TRACE_DUAL: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static TEST_TRACE_MONO: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -2558,12 +2562,10 @@ mod tests {
         }
     }
 
-    static PREPARED_DROPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
     struct DropWitness;
     impl Drop for DropWitness {
         fn drop(&mut self) {
-            PREPARED_DROPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            TEST_PREPARED_DROPS.with(|count| count.set(count.get() + 1));
         }
     }
     impl BankStage for DropWitness {
@@ -2748,9 +2750,6 @@ mod tests {
     }
 
     struct PreparedTraceStage {
-        begin: std::sync::Arc<std::sync::atomic::AtomicU64>,
-        dual: std::sync::Arc<std::sync::atomic::AtomicU64>,
-        mono: std::sync::Arc<std::sync::atomic::AtomicU64>,
         fail: bool,
         seam: SeamSide,
         mono_capable: bool,
@@ -2758,7 +2757,7 @@ mod tests {
 
     impl BankStage for PreparedTraceStage {
         fn process(&mut self, _block: BankBlock<'_>) -> Result<(), RenderError> {
-            self.dual.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            TEST_TRACE_DUAL.with(|count| count.set(count.get() + 1));
             if self.fail {
                 Err(RenderError::InvalidEnvelope)
             } else {
@@ -2767,8 +2766,7 @@ mod tests {
         }
 
         fn begin_block(&mut self, _first_sample: u64) -> Result<(), RenderError> {
-            self.begin
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            TEST_TRACE_BEGIN.with(|count| count.set(count.get() + 1));
             Ok(())
         }
 
@@ -2785,7 +2783,7 @@ mod tests {
         }
 
         fn process_mono(&mut self, _block: BankBlock<'_>) -> Result<(), RenderError> {
-            self.mono.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            TEST_TRACE_MONO.with(|count| count.set(count.get() + 1));
             Ok(())
         }
 
@@ -2794,18 +2792,8 @@ mod tests {
         }
     }
 
-    fn trace_stage(
-        begin: &std::sync::Arc<std::sync::atomic::AtomicU64>,
-        dual: &std::sync::Arc<std::sync::atomic::AtomicU64>,
-        mono: &std::sync::Arc<std::sync::atomic::AtomicU64>,
-        fail: bool,
-        seam: SeamSide,
-        mono_capable: bool,
-    ) -> Box<dyn BankStage> {
+    fn trace_stage(fail: bool, seam: SeamSide, mono_capable: bool) -> Box<dyn BankStage> {
         Box::new(PreparedTraceStage {
-            begin: begin.clone(),
-            dual: dual.clone(),
-            mono: mono.clone(),
             fail,
             seam,
             mono_capable,
@@ -2891,10 +2879,10 @@ mod tests {
             assert_eq!(chain.lane_symmetry(lanes), ChannelSymmetryWitness::DECLINED);
             assert_eq!(chain.lane_symmetry(0), ChannelSymmetryWitness::DECLINED);
             chain.slots[0].stage.disarm_observations();
-            let before_drop = PREPARED_DROPS.load(std::sync::atomic::Ordering::Relaxed);
+            let before_drop = TEST_PREPARED_DROPS.with(std::cell::Cell::get);
             drop(chain);
             assert_eq!(
-                PREPARED_DROPS.load(std::sync::atomic::Ordering::Relaxed),
+                TEST_PREPARED_DROPS.with(std::cell::Cell::get),
                 before_drop + 1,
                 "an inactive stage remains owned until chain retirement"
             );
@@ -2903,33 +2891,32 @@ mod tests {
 
     #[test]
     fn prepared_slot_activity_preserves_dispatch_trace_and_errors() {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        let begin = std::sync::Arc::new(AtomicU64::new(0));
-        let dual = std::sync::Arc::new(AtomicU64::new(0));
-        let mono = std::sync::Arc::new(AtomicU64::new(0));
+        TEST_TRACE_BEGIN.with(|count| count.set(0));
+        TEST_TRACE_DUAL.with(|count| count.set(0));
+        TEST_TRACE_MONO.with(|count| count.set(0));
         let mut chain = BankChain::new(
             AoSoaScratch::new(BankWidth::Four, 8).expect("scratch"),
             vec![true; 4].into_boxed_slice(),
             vec![
                 slot(
                     vec![false; 4],
-                    trace_stage(&begin, &dual, &mono, false, SeamSide::UpstreamOfSeam, false),
+                    trace_stage(false, SeamSide::UpstreamOfSeam, false),
                 ),
                 slot(
                     vec![true; 4],
-                    trace_stage(&begin, &dual, &mono, false, SeamSide::UpstreamOfSeam, false),
+                    trace_stage(false, SeamSide::UpstreamOfSeam, false),
                 ),
                 slot(
                     vec![false; 4],
-                    trace_stage(&begin, &dual, &mono, false, SeamSide::UpstreamOfSeam, false),
+                    trace_stage(false, SeamSide::UpstreamOfSeam, false),
                 ),
                 slot(
                     vec![true; 4],
-                    trace_stage(&begin, &dual, &mono, true, SeamSide::UpstreamOfSeam, false),
+                    trace_stage(true, SeamSide::UpstreamOfSeam, false),
                 ),
                 slot(
                     vec![true; 4],
-                    trace_stage(&begin, &dual, &mono, false, SeamSide::UpstreamOfSeam, false),
+                    trace_stage(false, SeamSide::UpstreamOfSeam, false),
                 ),
             ],
         )
@@ -2943,46 +2930,29 @@ mod tests {
             Err(RenderError::InvalidEnvelope)
         );
         assert_eq!(
-            begin.load(Ordering::Relaxed),
+            TEST_TRACE_BEGIN.with(std::cell::Cell::get),
             3,
             "only nonempty slots drain"
         );
         assert_eq!(
-            dual.load(Ordering::Relaxed),
+            TEST_TRACE_DUAL.with(std::cell::Cell::get),
             2,
             "failure stops at the same slot"
         );
-        assert_eq!(mono.load(Ordering::Relaxed), 0);
+        assert_eq!(TEST_TRACE_MONO.with(std::cell::Cell::get), 0);
 
-        let mono_begin = std::sync::Arc::new(AtomicU64::new(0));
-        let mono_dual = std::sync::Arc::new(AtomicU64::new(0));
-        let mono_mono = std::sync::Arc::new(AtomicU64::new(0));
+        TEST_TRACE_BEGIN.with(|count| count.set(0));
+        TEST_TRACE_DUAL.with(|count| count.set(0));
+        TEST_TRACE_MONO.with(|count| count.set(0));
         let mut collapsed = BankChain::new(
             AoSoaScratch::new(BankWidth::Four, 8).expect("scratch"),
             vec![true; 4].into_boxed_slice(),
             vec![
                 slot(
                     vec![true; 4],
-                    trace_stage(
-                        &mono_begin,
-                        &mono_dual,
-                        &mono_mono,
-                        false,
-                        SeamSide::UpstreamOfSeam,
-                        true,
-                    ),
+                    trace_stage(false, SeamSide::UpstreamOfSeam, true),
                 ),
-                slot(
-                    vec![true; 4],
-                    trace_stage(
-                        &mono_begin,
-                        &mono_dual,
-                        &mono_mono,
-                        false,
-                        SeamSide::SeamSide,
-                        false,
-                    ),
-                ),
+                slot(vec![true; 4], trace_stage(false, SeamSide::SeamSide, false)),
             ],
         )
         .expect("collapse-eligible chain");
@@ -2994,29 +2964,26 @@ mod tests {
         collapsed
             .run(&mut mono_planes, 8, 64)
             .expect("collapsed run");
-        assert_eq!(mono_begin.load(Ordering::Relaxed), 2);
-        assert_eq!(mono_mono.load(Ordering::Relaxed), 1);
-        assert_eq!(mono_dual.load(Ordering::Relaxed), 1);
+        assert_eq!(TEST_TRACE_BEGIN.with(std::cell::Cell::get), 2);
+        assert_eq!(TEST_TRACE_MONO.with(std::cell::Cell::get), 1);
+        assert_eq!(TEST_TRACE_DUAL.with(std::cell::Cell::get), 1);
     }
 
     #[test]
     fn prepared_slot_dispatch_uses_constant_activity_checks() {
         reset_prepared_activity_observation();
-        let begin = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let dual = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let mono = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        TEST_TRACE_BEGIN.with(|count| count.set(0));
+        TEST_TRACE_DUAL.with(|count| count.set(0));
+        TEST_TRACE_MONO.with(|count| count.set(0));
         let mut chain = BankChain::new(
             AoSoaScratch::new(BankWidth::Four, 4).expect("scratch"),
             vec![true; 4].into_boxed_slice(),
             vec![
                 slot(
                     vec![true; 4],
-                    trace_stage(&begin, &dual, &mono, false, SeamSide::UpstreamOfSeam, true),
+                    trace_stage(false, SeamSide::UpstreamOfSeam, true),
                 ),
-                slot(
-                    vec![true; 4],
-                    trace_stage(&begin, &dual, &mono, false, SeamSide::SeamSide, false),
-                ),
+                slot(vec![true; 4], trace_stage(false, SeamSide::SeamSide, false)),
             ],
         )
         .expect("chain");

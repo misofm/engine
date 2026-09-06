@@ -218,3 +218,7 @@ Root adopts all explicit path, ownership-bound, test-identity and mutation amend
 ## Luna attempt1 first coherent checkpoint
 
 Private prepared-slot conversion, three nonempty guards, guarded lane lookup and frozen inline/physical tests compile. Root independently captured all four exact debug gates against contemporaneous two-file source hashes; each executes1passing test. Original Luna logs lack command/source/status metadata and precede the current unused-helper annotation, so they remain historical output rather than exact-head proof. Release, actual mechanism mutation, full affected suites, layout evidence and consolidated Astra review remain pending. This checkpoint does not claim the complete brief is satisfied.
+
+## Luna attempt1 bounded test-policy correction
+
+The rack policy rejected std::sync references in the new test-only counters. Luna replaced them with thread-local Cell counters; production code and the physical fixture remain unchanged. Root captured the final formatted source: all four exact debug tests execute1pass each and fmt passes. Prior policy/fmt failures remain preserved. The requested pre-change BankChain/RuntimeUnit layout baseline was not captured; this is an explicit evidence gap for the consolidated review, not a fabricated baseline. Remaining release/mutation/evidence gates must run on identified corrected source before Luna1 verdict.
