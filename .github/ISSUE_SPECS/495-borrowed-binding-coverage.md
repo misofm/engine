@@ -21,3 +21,7 @@ Read-only source inspection only. No tests, builds, timing, source/spec or Git/G
 ## Numbered queue
 
 GitHub495 number/title matches this spec; branch base is deliveredmain571dfc5be5fb040a537c11d683734b8015f37c32. Root boundary audit found no missing local numbered issue identity. Queued after #492 delivery; #475 remains the only active runtime feature. Before Luna1 root must integrate then-current delivered main and obtain Astra actual numbered-base approval. No implementation or artifact build is authorized by this queue checkpoint.
+
+## Current delivered-base readiness
+
+Root integrated deliveredmainfd4a937cbb782ebe04be0594f439606389dbe283 after #492 closed, and carried its remote closure record. Graph/Cargo/config remain byte-identical to the previously scoped base571dfc5b. Pending Astra numbered actual-base approval before fresh Luna1; #475 remains sole runtime feature. No implementation yet.
