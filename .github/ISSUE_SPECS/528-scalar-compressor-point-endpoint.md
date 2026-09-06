@@ -246,3 +246,7 @@ Gate 6 reuses the existing isolated self-child pattern and installed allocator w
 ### Sol2 pending, late and cancellation fixtures completed
 
 Remaining gates now distinguish queued, handed-off/unclaimed, future/end/partial and terminal-uncollected work from native current/target readback. The late same-binding pair and next-ticket boundary have direct native continuation PCM/state/payload equivalence. Real partial/future/mixed-unsupported FIFO cancellation proves exact effective samples, counts, admission-order events, cleared claims and no later application. Reliable-full cancellation refuses transactionally until events are drained; B+1 stays Full across handoff/render completion until terminal collection. `remaining-gates-debug` passes six outer tests and the isolated allocation child on exact recorded source. Public semantic docs and proportional gates remain before the single consolidated Sol2 verdict.
+
+### Sol2 semantic API documentation completed
+
+The module and every public surface now document the frozen ownership/admission/timestamp/resource/fault semantics; all missing-doc suppressions are removed. A compiling prepared-owner Send doctest and started-owner Send/Sync compile-fail proofs protect thread ownership. `docs-check` passes; `docs-tests` passes two normal and five compile-fail host-core doctests. This changes documentation only, not behavior/API/layout. Source and six finite fixtures are complete pending proportional final gates and one consolidated Astra Sol2 verdict.

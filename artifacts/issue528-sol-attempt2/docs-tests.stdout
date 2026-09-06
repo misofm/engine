@@ -1,0 +1,18 @@
+
+running 2 tests
+test crates/host-core/src/scalar_point_endpoint.rs - scalar_point_endpoint::PreparedScalarPointRender (line 291) ... ok
+test crates/host-core/src/prepare.rs - prepare::PreparedHost (line 367) ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 5 tests
+test crates/host-core/src/render_session.rs - render_session::StartedRenderSession (line 49) - compile fail ... ok
+test crates/host-core/src/scalar_point_endpoint.rs - scalar_point_endpoint::StartedScalarPointRender (line 320) - compile fail ... ok
+test crates/host-core/src/render_session.rs - render_session::StartedRenderSession (line 54) - compile fail ... ok
+test crates/host-core/src/prepare.rs - prepare::PreparedHost (line 360) - compile fail ... ok
+test crates/host-core/src/scalar_point_endpoint.rs - scalar_point_endpoint::StartedScalarPointRender (line 325) - compile fail ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+all doctests ran in 0.33s; merged doctests compilation took 0.27s

@@ -1,4 +1,29 @@
-//! Borrowed scalar-compressor makeup Point delivery.
+//! Opt-in delivery of scalar compressor makeup Points to planar PCM.
+//!
+//! This endpoint binds exactly two revision-scoped handles to the native compressor's Left and
+//! Right makeup parameter. Admission accepts complete protocol batches; application occurs only
+//! after control-side handoff and at render boundaries. Points retain their order and are never
+//! coalesced. Admission credit remains owned until terminal collection or cancellation, even after
+//! native application has completed.
+//!
+//! Times are absolute samples. A snapshot distinguishes the next required render sample, the last
+//! fully observed sample, native current and target values, and the sole render-side claimed batch.
+//! A future Point, including one exactly at the block end, remains pending until a later block.
+//!
+//! Preparation exclusively borrows an already prepared compressor. The unstarted render owner is
+//! transferable; `start` attests the floating-point environment and produces a thread-affine
+//! owner, while `stop` returns the transferable owner. Snapshot and render native access run under
+//! the canonical floating-point environment.
+//!
+//! Valid render envelopes have one exact prepared quantum and contiguous time. An unexpected
+//! native or delivery error becomes sticky: the complete valid output block is silenced, the
+//! consumed envelope advances once, and later valid renders return the first fault without DSP or
+//! clock advancement. Fault progress distinguishes Points actually accepted by native code from
+//! the prefix recorded by the delivery service. A faulted endpoint services a cancellation barrier
+//! only through `cancel_boundary`, which performs no DSP or parameter access.
+//!
+//! Resource reporting separates the unchanged delivery service's heap payload from the inline
+//! control/render owner sizes. It excludes the borrowed compressor, caller PCM, and their storage.
 
 use core::marker::PhantomData;
 use effect_contract::{
@@ -17,40 +42,55 @@ use protocol::{
 const MAKEUP_INDEX: u32 = 5;
 const MAKEUP_ID: u32 = 6;
 
-/// Preparation rejection.
+/// Why endpoint preparation rejected the supplied processor, bindings, or resources.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(missing_docs)]
 pub enum ScalarPointPrepareError {
+    /// The effect is not the required Normal-quality, enabled, dual-mono native compressor with
+    /// the frozen makeup descriptor, quantum, rate, and unconnected optional sidechain.
     InvalidProcessor,
+    /// The Left/Right handles are zero, equal, reversed, or cannot form exact Point capabilities.
     InvalidBindings,
+    /// The configured quantum is zero or cannot be represented by the endpoint's `u32` contract.
     InvalidQueue,
+    /// The bounded delivery service rejected the queue configuration or initial sequence.
     Delivery(protocol::ProtocolQueueError),
 }
 /// Delivery heap and endpoint inline accounting; excludes borrowed compressor and caller PCM.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(missing_docs)]
 pub struct ScalarPointResources {
+    /// Heap payload retained by the underlying prepared automation-delivery service.
     pub delivery: protocol::DeliveryResourceReport,
+    /// Inline byte size of [`ScalarPointControl`], excluding its owned delivery allocations.
     pub control_size: usize,
+    /// Inline byte size of [`PreparedScalarPointRender`], excluding the borrowed effect and PCM.
     pub render_size: usize,
 }
 /// Endpoint admission rejection retaining the complete batch.
 #[derive(Clone, Copy, Debug, PartialEq)]
-#[allow(missing_docs)]
 pub enum ScalarPointAdmissionError {
+    /// The batch's own record, length, ordering, overlap, or time-shape validation failed.
     InvalidBatch {
+        /// The untouched batch returned to its caller.
         batch: AutomationBatchSlot,
+        /// The protocol batch validation failure.
         error: AutomationBatchError,
     },
+    /// The batch uses a session revision other than the one fixed at preparation.
     WrongRevision {
+        /// The untouched batch returned to its caller.
         batch: AutomationBatchSlot,
     },
+    /// At least one record does not use the prepared Left or Right makeup handle.
     UnknownBinding {
+        /// The untouched batch returned to its caller.
         batch: AutomationBatchSlot,
     },
+    /// At least one endpoint value is outside the inclusive `-24..=24` dB makeup domain.
     InvalidValue {
+        /// The untouched batch returned to its caller.
         batch: AutomationBatchSlot,
     },
+    /// The validated batch was refused by the bounded delivery service and remains caller-owned.
     Service(AutomationEnqueueError),
 }
 
@@ -61,8 +101,8 @@ pub struct ScalarPointControl {
     handles: [ParameterHandle; 2],
     capabilities: PreparedDeliveryCapabilities,
 }
-#[allow(missing_docs)]
 impl ScalarPointControl {
+    /// Validates and admits one complete batch at control time without applying native state.
     #[allow(clippy::result_large_err)] // Frozen rejection returns the untouched fixed batch.
     pub fn try_admit(
         &mut self,
@@ -91,38 +131,49 @@ impl ScalarPointControl {
             .try_admit(now, batch)
             .map_err(ScalarPointAdmissionError::Service)
     }
+    /// Transfers the FIFO head to render ownership when the whole batch is Point-supported.
+    ///
+    /// A batch containing any other automation kind remains whole and reports
+    /// [`HandoffResult::PendingUnsupported`], blocking later batches until cancellation.
     pub fn try_handoff_next(&mut self) -> Result<HandoffResult, DeliveryError> {
         self.delivery.try_handoff_next(&self.capabilities)
     }
+    /// Reconciles and releases one fully terminal ticket, returning its applied-prefix record.
     pub fn collect_terminal(
         &mut self,
         t: DeliveryTicket,
     ) -> Result<protocol::TerminalAutomation, DeliveryError> {
         self.delivery.collect_terminal(t)
     }
+    /// Begins ordered cancellation of every accepted owner at a later render boundary.
     pub fn begin_cancel(
         &mut self,
         r: AutomationCancellationReason,
     ) -> Result<protocol::CancelToken, DeliveryError> {
         self.delivery.begin_cancel(r, self.revision)
     }
+    /// Polls until the render side has observed the cancellation barrier and owners are released.
     pub fn poll_cancel_boundary(
         &mut self,
         t: protocol::CancelToken,
     ) -> Result<Option<protocol::CancelComplete>, DeliveryError> {
         self.delivery.poll_cancel_boundary(t)
     }
+    /// Dequeues one reliable cancellation event produced during control-side reconciliation.
     pub fn try_dequeue_event(
         &mut self,
     ) -> Result<protocol::ReliableSlot, engine::realtime::QueueEmpty> {
         self.delivery.try_dequeue_event()
     }
+    /// Returns all accepted owners, including queued, staged, handed-off, and terminal work.
     pub fn outstanding(&self) -> usize {
         self.delivery.outstanding()
     }
+    /// Returns batches still resident in the public automation queue before ownership handoff.
     pub fn resident_automation(&self) -> u64 {
         self.delivery.resident_automation()
     }
+    /// Returns the underlying automation queue's bounded occupancy and saturation counters.
     pub fn automation_status(&self) -> QueueReport {
         self.delivery.queues().report(QueueKind::Automation)
     }
@@ -130,76 +181,117 @@ impl ScalarPointControl {
 
 /// Between-block native state and the sole bounded render claim.
 #[derive(Clone, Copy, Debug, PartialEq)]
-#[allow(missing_docs)]
 pub struct ScalarPointSnapshot {
+    /// Absolute first sample required by the next valid render or cancellation-only boundary.
     pub next_sample: SampleTime,
+    /// End sample of the most recent block whose DSP result was successfully observed.
     pub observed_sample: SampleTime,
+    /// Native makeup current/target states in `[Left, Right]` order.
     pub state: [PreparedParameterState; 2],
+    /// Most recent actual application sample in `[Left, Right]` order.
     pub last_application: [Option<SampleTime>; 2],
+    /// Saturating count of Points successfully accepted by the native compressor.
     pub applied: u64,
+    /// Saturating subset of `applied` whose requested time preceded its application boundary.
     pub late: u64,
+    /// Claimed `(ticket, applied prefix, record count, next unapplied sample)` if one is active.
     pub pending: Option<(DeliveryTicket, u16, u16, Option<SampleTime>)>,
 }
+/// Native parameter operation that produced a sticky endpoint fault.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(missing_docs)]
 pub enum ScalarPointNativeOperation {
+    /// Reading the native makeup current/target state failed.
     Read,
+    /// Applying a native makeup Point target failed.
     Apply,
 }
+/// Delivery-service operation that produced a sticky invariant fault.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(missing_docs)]
 pub enum ScalarPointDeliveryOperation {
+    /// Reading the currently claimed ticket failed.
     Pending,
+    /// Recording a successfully applied native prefix failed.
     MarkApplied,
+    /// Publishing a fully applied ticket as terminal failed.
     FinishApplied,
 }
+/// Typed cause retained by the first sticky endpoint fault.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(missing_docs)]
 pub enum ScalarPointFaultCause {
+    /// A native parameter read or apply returned an unexpected typed error.
     Native {
+        /// Whether the endpoint was reading state or applying a Point.
         operation: ScalarPointNativeOperation,
+        /// Compressor lane involved in the failed access.
         channel: ParameterChannel,
+        /// Native parameter-access error returned by the processor.
         error: ParameterAccessError,
     },
+    /// The trusted bounded delivery service violated the endpoint's expected ownership sequence.
     Delivery {
+        /// Delivery operation that failed.
         operation: ScalarPointDeliveryOperation,
+        /// Underlying delivery error.
         error: DeliveryError,
     },
+    /// An internally constructed native process slice unexpectedly failed envelope validation.
     ProcessEnvelope(ProcessBlockError),
 }
+/// Applied-prefix detail captured when a sticky fault occurs with a claimed ticket.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(missing_docs)]
 pub struct ScalarPointFaultProgress {
+    /// Claimed delivery ticket.
     pub ticket: DeliveryTicket,
+    /// Total records retained by that ticket.
     pub record_count: u16,
+    /// Prefix actually accepted by native parameter application.
     pub native_applied_prefix: u16,
+    /// Prefix successfully recorded by the delivery service.
     pub delivery_applied_prefix: u16,
 }
+/// First sticky failure, its exact sample, and irreversible progress made before silence.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(missing_docs)]
 pub struct ScalarPointFault {
+    /// Typed native, delivery, or internal process-envelope cause.
     pub cause: ScalarPointFaultCause,
+    /// Sample at which the failing operation was attempted.
     pub at_sample: SampleTime,
+    /// Native frames processed earlier in the same failing render call.
     pub native_processed_frames: u32,
+    /// Claimed-ticket progress at the failure, when a claim existed.
     pub progress: Option<ScalarPointFaultProgress>,
 }
+/// Rejection or sticky failure returned by a render call.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(missing_docs)]
 pub enum ScalarPointRenderError {
+    /// PCM planes do not both contain exactly the prepared quantum.
     InvalidShape,
+    /// `first` is not the endpoint's next required absolute sample.
     DiscontinuousTime,
+    /// Adding the prepared quantum to `first` overflowed absolute sample time.
     SampleOverflow,
+    /// A valid envelope encountered, or followed, the retained first endpoint fault.
     Fault(ScalarPointFault),
 }
+/// Rejection returned by the DSP-free cancellation-only boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(missing_docs)]
 pub enum ScalarPointCancelBoundaryError {
+    /// Cancellation-only boundaries are unavailable while the endpoint is healthy.
     NotFaulted,
+    /// The boundary does not start at the endpoint's next required sample.
     DiscontinuousTime,
+    /// Adding the prepared quantum would overflow absolute sample time.
     SampleOverflow,
 }
 
-/// Transferable unstarted owner holding the exclusive processor borrow.
+/// Transferable unstarted owner holding the exclusive processor borrow and render-side delivery.
+///
+/// The owner may move to the selected render thread before [`Self::start`].
+///
+/// ```
+/// fn assert_send<T: Send>() {}
+/// assert_send::<host_core::PreparedScalarPointRender<'static>>();
+/// ```
 pub struct PreparedScalarPointRender<'a> {
     processor: &'a mut dyn PreparedNativeEffect,
     delivery: protocol::AutomationDeliveryRender,
@@ -213,19 +305,35 @@ pub struct PreparedScalarPointRender<'a> {
     claimed: Option<(DeliveryTicket, u16, u16, Option<SampleTime>)>,
     fault: Option<ScalarPointFault>,
 }
+/// Aggregate result of all native process slices used for one endpoint quantum.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(missing_docs)]
 pub struct ScalarPointRenderReport {
+    /// Field-wise saturating sum of the native compressor's per-slice reports.
     pub native: ProcessReport,
+    /// Number of native process calls made after splitting the quantum at Point offsets.
     pub process_invocations: u32,
 }
-/// Thread-affine started owner.
+/// Thread-affine started owner used for rendering and fault-only cancellation boundaries.
+///
+/// Starting pins use to the current thread until [`Self::stop`] returns the transferable owner.
+///
+/// ```compile_fail
+/// fn assert_send<T: Send>() {}
+/// assert_send::<host_core::StartedScalarPointRender<'static>>();
+/// ```
+///
+/// ```compile_fail
+/// fn assert_sync<T: Sync>() {}
+/// assert_sync::<host_core::StartedScalarPointRender<'static>>();
+/// ```
 pub struct StartedScalarPointRender<'a> {
     inner: PreparedScalarPointRender<'a>,
     _thread: PhantomData<*const ()>,
 }
-#[allow(missing_docs)]
 impl<'a> PreparedScalarPointRender<'a> {
+    /// Attests the current floating-point environment and pins the complete owner to this thread.
+    ///
+    /// Failure returns the unchanged prepared owner together with the attestation rejection.
     #[allow(clippy::result_large_err)] // Failed attestation must return the complete prepared owner.
     pub fn start(
         self,
@@ -238,16 +346,25 @@ impl<'a> PreparedScalarPointRender<'a> {
             Err(e) => Err((self, e)),
         }
     }
+    /// Reads native Left/Right current and target values plus endpoint progress between blocks.
+    ///
+    /// An unexpected native read failure becomes the first sticky fault without advancing DSP or
+    /// time. Native reads run under the canonical floating-point environment.
     pub fn snapshot(&mut self) -> Result<ScalarPointSnapshot, ScalarPointFault> {
         let _fp = CanonicalFpEnv::enter();
         self.snapshot_inner()
     }
+    /// Returns the retained first fault without reading native state or mutating progress.
     pub const fn fault(&self) -> Option<ScalarPointFault> {
         self.fault
     }
 }
-#[allow(missing_docs)]
 impl<'a> StartedScalarPointRender<'a> {
+    /// Applies due Points and renders one exact contiguous quantum into the borrowed PCM planes.
+    ///
+    /// Ordinary envelope rejection is a complete no-op. A valid call that encounters a sticky
+    /// fault silences the whole block; the first failing call consumes that envelope, while later
+    /// valid faulted calls do not advance time or delivery state.
     pub fn render(
         &mut self,
         l: &mut [f32],
@@ -257,13 +374,21 @@ impl<'a> StartedScalarPointRender<'a> {
         let _fp = CanonicalFpEnv::enter();
         self.inner.render_inner(l, r, first)
     }
+    /// Reads native Left/Right current and target values plus endpoint progress between blocks.
+    ///
+    /// Read failures latch and return the first sticky fault without advancing DSP or time.
     pub fn snapshot(&mut self) -> Result<ScalarPointSnapshot, ScalarPointFault> {
         let _fp = CanonicalFpEnv::enter();
         self.inner.snapshot_inner()
     }
+    /// Returns the retained first fault without reading native state or mutating progress.
     pub const fn fault(&self) -> Option<ScalarPointFault> {
         self.inner.fault
     }
+    /// Services one contiguous delivery cancellation boundary after a sticky fault.
+    ///
+    /// This calls no DSP or native parameter access. A valid boundary advances the endpoint clock
+    /// once and refreshes the claimed-ticket view while preserving the immutable first fault.
     pub fn cancel_boundary(
         &mut self,
         first: SampleTime,
@@ -282,6 +407,7 @@ impl<'a> StartedScalarPointRender<'a> {
         self.inner.next_sample = SampleTime(end);
         Ok(())
     }
+    /// Ends thread-affine use and returns the complete transferable prepared owner.
     pub fn stop(self) -> PreparedScalarPointRender<'a> {
         self.inner
     }
@@ -609,7 +735,12 @@ fn add_report(mut a: ProcessReport, b: ProcessReport) -> ProcessReport {
     a
 }
 
-/// Prepares fixed Left/Right makeup bindings and the bounded ownership service.
+/// Validates and prepares fixed Left/Right compressor makeup Point delivery.
+///
+/// `handles` must be distinct nonzero values in Left-then-Right order. `processor` remains
+/// exclusively borrowed until the returned render owner is dropped. Preparation allocates only
+/// the underlying bounded delivery service; endpoint bindings, counters, and capabilities are
+/// inline. The returned resource report excludes the processor and caller-owned PCM.
 pub fn prepare_scalar_point_endpoint<'a>(
     processor: &'a mut dyn PreparedNativeEffect,
     revision: SessionRevision,
