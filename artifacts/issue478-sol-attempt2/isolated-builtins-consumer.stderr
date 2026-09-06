@@ -1,0 +1,11 @@
+    Checking engine v0.1.0 (/home/bl/misofm/engine-rt8-plan/crates/engine)
+    Checking math v0.1.0 (/home/bl/misofm/engine-rt8-plan/crates/math)
+    Checking lane v0.1.0 (/home/bl/misofm/engine-rt8-plan/crates/lane)
+    Checking effect-contract v0.1.0 (/home/bl/misofm/engine-rt8-plan/crates/effect-contract)
+    Checking session v0.1.0 (/home/bl/misofm/engine-rt8-plan/crates/session)
+    Checking rack v0.1.0 (/home/bl/misofm/engine-rt8-plan/crates/rack)
+    Checking builtins v0.1.0 (/home/bl/misofm/engine-rt8-plan/crates/builtins)
+    Checking graph v0.1.0 (/home/bl/misofm/engine-rt8-plan/crates/graph)
+    Checking rack-compiler v0.1.0 (/home/bl/misofm/engine-rt8-plan/crates/rack-compiler)
+    Checking builtins-compiler v0.1.0 (/home/bl/misofm/engine-rt8-plan/crates/builtins-compiler)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.55s
