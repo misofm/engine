@@ -1,0 +1,17 @@
+#473 Luna attempt 1, tranche 1
+
+Changed path:
+- tools/bench/src/builtins.rs
+
+Current identity regression:
+- Updated INPUT_MANIFEST_SHA256 to b244da45d88d670951205098b7516af20387a141eccb3bf60edb61e8ba57a919.
+- Regression now asserts the actual manifest digest, checks every measured descriptor against its
+  manifest row, and parses each render workload's referenced PCM input without invoking main,
+  timing, warmup, effect execution, or benchmark preparation.
+
+Actual validation:
+- /tmp/473-luna1-tranche1-bench.log (+ .command, .status): regression initially failed because
+  preparation_256_tracks has no input_pcm_path, exit.status=101; retained candidly.
+- /tmp/473-luna1-tranche1-bench-2.log (+ .command, .status): 31 passed, exit.status=0.
+
+Paused at first coherent focused-green tranche. No commit or push performed; root owns delivery.

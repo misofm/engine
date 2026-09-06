@@ -1,0 +1,38 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
+     Running unittests src/main.rs (/tmp/engine-473-luna-target/debug/deps/bench-c884e76c7a7f3be8)
+
+running 31 tests
+test builtins::tests::audited_allocator_is_live_outside_the_render_scope ... ok
+test builtins::tests::measured_plan_is_the_frozen_twenty_row_cartesian_set ... ok
+test builtins::tests::matrix_targets_alternate_by_global_operation_across_batch_boundaries ... ok
+test conformance::tests::percentile_is_nearest_rank_and_escape_is_json_safe ... ok
+test floor::tests::a_control_row_is_always_cheaper_than_the_row_it_isolates ... ok
+test floor::tests::every_derived_row_names_its_ruling_and_composes_a_positive_floor ... ok
+test builtins::tests::issue035_preparation_record_uses_only_required_null_and_not_applicable_values ... ok
+test floor::tests::the_compressor_isolate_is_the_compressor_inventory ... ok
+test builtins::tests::issue035_record_has_exact_render_identity_shape_and_typed_missing_metadata ... ok
+test floor::tests::the_current_effect_recount_keeps_fractional_link_work_and_composes_the_strip ... ok
+test floor::tests::the_mono_rows_carry_the_standing_strips_floor ... ok
+test floor::tests::the_overhead_inventories_differ_by_the_scaffolding_and_neither_row_claims_an_isolate ... ok
+test floor::tests::the_plumbing_row_is_the_floor_of_the_table_and_the_identity_pair_shares_one_inventory ... ok
+test floor::tests::the_sixty_four_track_block_has_the_lane_sample_count_the_rulings_quote ... ok
+test graph::tests::nearest_rank_is_ordered_at_all_frozen_percentiles ... ok
+test builtins::tests::checked_toml_and_referenced_pcm_drive_render_configuration_bit_exactly ... ok
+test rack::tests::nearest_rank_uses_the_frozen_one_thousand_observation_indices ... ok
+test session::tests::percentile_and_sha256_are_contract_stable ... ok
+test builtins::tests::benchmark_inputs_take_their_hashes_from_the_checked_manifest_rows ... ok
+test effect_interchange::tests::exact_four_rate_migration_envelope_without_timing ... ok
+test protocol::tests::jsonl_schema_record_carries_frozen_corpus_and_environment_fields ... ok
+test builtins::tests::real_meter_tap_plans_use_the_compiled_seven_taps_and_preserve_full_queue_state ... ok
+test protocol::tests::frozen_corpus_has_required_cardinality_and_checksum ... ok
+test protocol::tests::actual_flatbuffer_builder_and_bounded_verifier_agree ... ok
+test builtins::tests::preparation_projection_is_complete_address_free_and_deterministic ... ok
+test rack::tests::zero_launch_preflight_prepares_each_exact_production_workload ... ok
+test protocol::tests::btlv_sources_encode_and_decode_without_schema_escapes ... ok
+test graph::tests::canonical_benchmark_fixture_prepares_and_compiles ... ok
+test session::tests::representative_fixture_has_the_frozen_workload_and_stable_bytes ... ok
+test rack::tests::semantic_input_identity_is_layout_independent_and_workload_specific ... ok
+test builtins::tests::all_render_workloads_arm_only_product_render_without_timing ... ok
+
+test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.53s
+

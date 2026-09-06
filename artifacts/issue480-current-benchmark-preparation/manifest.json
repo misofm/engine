@@ -1,0 +1,546 @@
+[
+  {
+    "path": "473-luna1-tranche1-bench-2.log",
+    "bytes": 3156,
+    "sha256": "77910d24325e5f6d06a15bb10c0320754b0b9184accd940fdce76e521fe93a1a"
+  },
+  {
+    "path": "473-luna1-tranche1-bench-2.log.command",
+    "bytes": 105,
+    "sha256": "fce86495cd6097cae1e1c9e7ea2921641e3857214c2ef2cf2710117ca34c84c8"
+  },
+  {
+    "path": "473-luna1-tranche1-bench-2.log.status",
+    "bytes": 14,
+    "sha256": "4b18a80cace06ba730ce291268a3876ebc108cada6397fb80855c341994fcbd5"
+  },
+  {
+    "path": "473-luna1-tranche1-bench.log",
+    "bytes": 7422,
+    "sha256": "59a7b15220ed08ee440400be0489a5af3f59b2c8ee7ffb5f4e280814244c5a48"
+  },
+  {
+    "path": "473-luna1-tranche1-bench.log.command",
+    "bytes": 105,
+    "sha256": "fce86495cd6097cae1e1c9e7ea2921641e3857214c2ef2cf2710117ca34c84c8"
+  },
+  {
+    "path": "473-luna1-tranche1-bench.log.status",
+    "bytes": 16,
+    "sha256": "cc9c74b484bb2e87679a4b129cba5eaca0a6c2937efb66ab2695b2d001a1a59b"
+  },
+  {
+    "path": "473-luna1-tranche1-summary.log",
+    "bytes": 845,
+    "sha256": "491a80f2d21723fc43802a96f45dafe7ef225d7e7e7c790391b6237c7cb7b5d7"
+  },
+  {
+    "path": "473-luna1-tranche2-bench.log",
+    "bytes": 3084,
+    "sha256": "c754daffe7766a02b6fd3d2ed7ea101b4ea50912bc9abfa12d882300298b76ed"
+  },
+  {
+    "path": "473-luna1-tranche2-bench.log.command",
+    "bytes": 105,
+    "sha256": "fce86495cd6097cae1e1c9e7ea2921641e3857214c2ef2cf2710117ca34c84c8"
+  },
+  {
+    "path": "473-luna1-tranche2-bench.log.status",
+    "bytes": 14,
+    "sha256": "4b18a80cace06ba730ce291268a3876ebc108cada6397fb80855c341994fcbd5"
+  },
+  {
+    "path": "473-luna1-tranche2-summary.log",
+    "bytes": 1082,
+    "sha256": "137cf8d57bbf205956620845a33e3ba2807eb18f21e30be0e416f9d154507d91"
+  },
+  {
+    "path": "473-luna1-tranche2-syntax.log",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "473-luna1-tranche2-syntax.log.command",
+    "bytes": 141,
+    "sha256": "e0a7e6925db4edbfc0df95990e240a3e4aa221f32b2e731e9dd95617e73377ff"
+  },
+  {
+    "path": "473-luna1-tranche2-syntax.log.status",
+    "bytes": 14,
+    "sha256": "4b18a80cace06ba730ce291268a3876ebc108cada6397fb80855c341994fcbd5"
+  },
+  {
+    "path": "473-luna1-tranche2-validator.log",
+    "bytes": 6,
+    "sha256": "2ed27c1421e6928dbe13dbfdb5c59e1045b30341fe7ebe05700006bc5ac572c0"
+  },
+  {
+    "path": "473-luna1-tranche2-validator.log.command",
+    "bytes": 68,
+    "sha256": "53a908c202881a859d55b90a570b5df123f9c383ba14c4f19be62085619ba7b9"
+  },
+  {
+    "path": "473-luna1-tranche2-validator.log.status",
+    "bytes": 14,
+    "sha256": "4b18a80cace06ba730ce291268a3876ebc108cada6397fb80855c341994fcbd5"
+  },
+  {
+    "path": "473-sol2-bench-clippy.command",
+    "bytes": 91,
+    "sha256": "7e14945aaa244bdcf82332a6534e408120a5606ddd303acb053e60111ea324cd"
+  },
+  {
+    "path": "473-sol2-bench-clippy.log",
+    "bytes": 3496,
+    "sha256": "83059b8645d377105a1ab4fb06bbb88f54ea639839b54cc9ac46b0ec6b3fcef8"
+  },
+  {
+    "path": "473-sol2-bench-clippy.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "473-sol2-bench-test.command",
+    "bytes": 60,
+    "sha256": "9e6307eec72888ba13facb213e7127533c1630c9d0a9ef97357f7af73a61ba77"
+  },
+  {
+    "path": "473-sol2-bench-test.log",
+    "bytes": 6847,
+    "sha256": "df93122a82d5af64dcf11495f53827f94bf57883a73b8d880dc2d61609283829"
+  },
+  {
+    "path": "473-sol2-bench-test.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "473-sol2-hermetic.command",
+    "bytes": 79,
+    "sha256": "ca0940b17bbce4aaa8e1f243d78cc37f08323ac59fb5724a4317ac7a31f77f8b"
+  },
+  {
+    "path": "473-sol2-hermetic.log",
+    "bytes": 82,
+    "sha256": "3b50fae3e3b2218805f7f1a6584eb25b19afc106d138aaf8c013475f073cc943"
+  },
+  {
+    "path": "473-sol2-hermetic.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "473-sol2-shell-syntax.command",
+    "bytes": 141,
+    "sha256": "e0a7e6925db4edbfc0df95990e240a3e4aa221f32b2e731e9dd95617e73377ff"
+  },
+  {
+    "path": "473-sol2-shell-syntax.log",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "473-sol2-shell-syntax.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "473-sol2-source-prose.command",
+    "bytes": 125,
+    "sha256": "ce5ae3196b6e8b3a61d2182712d107ef77ad93b979944ea71f36f7d5218a958a"
+  },
+  {
+    "path": "473-sol2-source-prose.log",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "473-sol2-source-prose.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "473-sol2-validator-delta.command",
+    "bytes": 1280,
+    "sha256": "901f1b95dee056b6057b32dafde1a19d6250afdd8deb190671bb79c8cd897a0c"
+  },
+  {
+    "path": "473-sol2-validator-delta.log",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "473-sol2-validator-delta.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "473-sol3-env.command",
+    "bytes": 68,
+    "sha256": "3035a9a664d7a36b5210f5a4e050bca0afc752470b4e5eabdb06cd550cc934de"
+  },
+  {
+    "path": "473-sol3-env.log",
+    "bytes": 56,
+    "sha256": "81db7ded215a305c3764c15edd04fb83bc4eff3edf4df40df2f4b306c419a756"
+  },
+  {
+    "path": "473-sol3-env.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "473-sol3-hermetic.command",
+    "bytes": 79,
+    "sha256": "ca0940b17bbce4aaa8e1f243d78cc37f08323ac59fb5724a4317ac7a31f77f8b"
+  },
+  {
+    "path": "473-sol3-hermetic.log",
+    "bytes": 82,
+    "sha256": "3b50fae3e3b2218805f7f1a6584eb25b19afc106d138aaf8c013475f073cc943"
+  },
+  {
+    "path": "473-sol3-hermetic.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "473-sol3-shell-syntax.command",
+    "bytes": 141,
+    "sha256": "e0a7e6925db4edbfc0df95990e240a3e4aa221f32b2e731e9dd95617e73377ff"
+  },
+  {
+    "path": "473-sol3-shell-syntax.log",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "473-sol3-shell-syntax.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "473-sol3-source-prose.command",
+    "bytes": 119,
+    "sha256": "c42bb8f7249f802858ba81c86a642dfd60bd1dc4a3573dd71925fa80821802c2"
+  },
+  {
+    "path": "473-sol3-source-prose.log",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "473-sol3-source-prose.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "473-sol3-validator-delta.command",
+    "bytes": 1280,
+    "sha256": "901f1b95dee056b6057b32dafde1a19d6250afdd8deb190671bb79c8cd897a0c"
+  },
+  {
+    "path": "473-sol3-validator-delta.log",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "473-sol3-validator-delta.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "480-luna1-focused.command",
+    "bytes": 48,
+    "sha256": "880f386b1497123a255de96b848904cebd92e4e819ec78d0c37784cd42503dcd"
+  },
+  {
+    "path": "480-luna1-focused.log",
+    "bytes": 82,
+    "sha256": "3b50fae3e3b2218805f7f1a6584eb25b19afc106d138aaf8c013475f073cc943"
+  },
+  {
+    "path": "480-luna1-focused.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "480-luna1-root-diff.command",
+    "bytes": 27,
+    "sha256": "fe996e3f8e8dd2792f878567e525524dc33baecf59900a8f99192a65a5189273"
+  },
+  {
+    "path": "480-luna1-root-diff.log",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "480-luna1-root-diff.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "480-luna1-root-env.command",
+    "bytes": 44,
+    "sha256": "e3f5e4d2bc9d0dbf4061f534b4753f6d1003a1b936384912c91f3000b70948ee"
+  },
+  {
+    "path": "480-luna1-root-env.log.base64",
+    "bytes": 422,
+    "sha256": "eeffb5cc0096f41aac7bac0dd0e3c299beb32244b1900550f74a5c089c2e3dea",
+    "encoding": "base64",
+    "decoded_path": "480-luna1-root-env.log",
+    "decoded_bytes": 311,
+    "decoded_sha256": "5196252b8cc0e59ed8d7043d3d60517904d4c51675df2aad97f50b6579f5606d"
+  },
+  {
+    "path": "480-luna1-root-env.status",
+    "bytes": 2,
+    "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+  },
+  {
+    "path": "480-luna1-root-validator-delta.command",
+    "bytes": 1304,
+    "sha256": "dd8813cc7503a999de2be0986d2c0303676f92cff49f1bfcbb2d8505d68f6c0b"
+  },
+  {
+    "path": "480-luna1-root-validator-delta.log",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "480-luna1-root-validator-delta.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "480-luna1-shell-syntax.command",
+    "bytes": 141,
+    "sha256": "e0a7e6925db4edbfc0df95990e240a3e4aa221f32b2e731e9dd95617e73377ff"
+  },
+  {
+    "path": "480-luna1-shell-syntax.log",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "480-luna1-shell-syntax.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "480-luna1-trace.log",
+    "bytes": 417565,
+    "sha256": "df9164f65b1128930b752bbfb1fabcb6ee7b2758c32e19db034cb96a697d8857"
+  },
+  {
+    "path": "480-package-env.command",
+    "bytes": 44,
+    "sha256": "e3f5e4d2bc9d0dbf4061f534b4753f6d1003a1b936384912c91f3000b70948ee"
+  },
+  {
+    "path": "480-package-env.log",
+    "bytes": 56,
+    "sha256": "81db7ded215a305c3764c15edd04fb83bc4eff3edf4df40df2f4b306c419a756"
+  },
+  {
+    "path": "480-package-env.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "480-sol2-env.command",
+    "bytes": 68,
+    "sha256": "3035a9a664d7a36b5210f5a4e050bca0afc752470b4e5eabdb06cd550cc934de"
+  },
+  {
+    "path": "480-sol2-env.log",
+    "bytes": 56,
+    "sha256": "81db7ded215a305c3764c15edd04fb83bc4eff3edf4df40df2f4b306c419a756"
+  },
+  {
+    "path": "480-sol2-env.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "480-sol2-focused.command",
+    "bytes": 79,
+    "sha256": "ca0940b17bbce4aaa8e1f243d78cc37f08323ac59fb5724a4317ac7a31f77f8b"
+  },
+  {
+    "path": "480-sol2-focused.log",
+    "bytes": 82,
+    "sha256": "3b50fae3e3b2218805f7f1a6584eb25b19afc106d138aaf8c013475f073cc943"
+  },
+  {
+    "path": "480-sol2-focused.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "480-sol2-shell-syntax.command",
+    "bytes": 141,
+    "sha256": "e0a7e6925db4edbfc0df95990e240a3e4aa221f32b2e731e9dd95617e73377ff"
+  },
+  {
+    "path": "480-sol2-shell-syntax.log",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "480-sol2-shell-syntax.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "480-sol2-source-prose.command",
+    "bytes": 1037,
+    "sha256": "9bd211d5f22ab39ade007b30c5d3287a5649ed87ebcd02142070749ac4960d4c"
+  },
+  {
+    "path": "480-sol2-source-prose.log",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "480-sol2-source-prose.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "480-sol2-validator-delta.command",
+    "bytes": 1294,
+    "sha256": "538b6de9f6e61fc99076b036081d0069d8e53f4de3117e99da14100016439a05"
+  },
+  {
+    "path": "480-sol2-validator-delta.log",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "480-sol2-validator-delta.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "480-sol3-env.command",
+    "bytes": 68,
+    "sha256": "3035a9a664d7a36b5210f5a4e050bca0afc752470b4e5eabdb06cd550cc934de"
+  },
+  {
+    "path": "480-sol3-env.log",
+    "bytes": 56,
+    "sha256": "81db7ded215a305c3764c15edd04fb83bc4eff3edf4df40df2f4b306c419a756"
+  },
+  {
+    "path": "480-sol3-env.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "480-sol3-focused.command",
+    "bytes": 79,
+    "sha256": "ca0940b17bbce4aaa8e1f243d78cc37f08323ac59fb5724a4317ac7a31f77f8b"
+  },
+  {
+    "path": "480-sol3-focused.log",
+    "bytes": 82,
+    "sha256": "3b50fae3e3b2218805f7f1a6584eb25b19afc106d138aaf8c013475f073cc943"
+  },
+  {
+    "path": "480-sol3-focused.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "480-sol3-shell-syntax.command",
+    "bytes": 141,
+    "sha256": "e0a7e6925db4edbfc0df95990e240a3e4aa221f32b2e731e9dd95617e73377ff"
+  },
+  {
+    "path": "480-sol3-shell-syntax.log",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "480-sol3-shell-syntax.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "480-sol3-source-prose.command",
+    "bytes": 1018,
+    "sha256": "ec7d38841404debd3565a07126601a45f781164f0b76d69b0bda07d6e7be9798"
+  },
+  {
+    "path": "480-sol3-source-prose.log",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "480-sol3-source-prose.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "480-sol3-validator-delta.command",
+    "bytes": 43,
+    "sha256": "c7b06217712f1e0787882d84e3117f545ae85ca396e894c632e2b5ba8b429ce7"
+  },
+  {
+    "path": "480-sol3-validator-delta.log",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "480-sol3-validator-delta.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "README.md",
+    "bytes": 1520,
+    "sha256": "d58033c5a9e1085726ffeae0145cac05144f6d1b23f96055cd31f7719ce08c1b"
+  },
+  {
+    "path": "astra-473-attempt1-review.md",
+    "bytes": 7242,
+    "sha256": "2877d4df1688c6e4a6599cfa79f43d02c8887eb0f9e833e5c85b1b0628555325"
+  },
+  {
+    "path": "astra-473-attempt2-review.md",
+    "bytes": 6806,
+    "sha256": "8253663cf54c3274e3bea0383cb79915d7f4d2576ae3ae834a61426f436c1955"
+  },
+  {
+    "path": "astra-473-attempt3-review.md",
+    "bytes": 3504,
+    "sha256": "7597694099bab9c311b0747e217a82eab074def0916c18088dcd8aab4bbe37ec"
+  },
+  {
+    "path": "astra-480-attempt1-review.md",
+    "bytes": 4315,
+    "sha256": "542f3787b6d9163e8903cc091afd215555a24472724c7efd1a818a34fb85c684"
+  },
+  {
+    "path": "astra-480-attempt2-review.md",
+    "bytes": 4720,
+    "sha256": "b86b328a83bd439c6fe863f1436ffb9cf0726e0d93dcad95f4be7722c28f6ef8"
+  },
+  {
+    "path": "astra-480-attempt3-review.md",
+    "bytes": 2970,
+    "sha256": "5e133301d89b3c78eb55a1274011cd72c0b3bf156749e612790efcf3f076a116"
+  },
+  {
+    "path": "astra-480-evidence-preservation-ruling.md",
+    "bytes": 1616,
+    "sha256": "51748d7bec36f5450b6388a530763477d3a896442361952055c19627d5fc395f"
+  },
+  {
+    "path": "source-equivalence.json",
+    "bytes": 350,
+    "sha256": "7bd79e47deb5bcf09408c1c203c7f94ca22ef1f113e3fe3a414256923cc8f6fc"
+  }
+]

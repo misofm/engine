@@ -190,3 +190,7 @@ Raw evidence:
 - `/tmp/480-sol3-source-prose.{command,log,status}`: status 0 for the exact four scoped paths,
   unchanged Rust/Cargo/configuration/validators/fixtures/workflow/history, and explicit #431
   `UNSPENT`/`UNAUTHORIZED` state.
+
+## Accepted completion source and pending delivery
+
+Astra final #480 Sol3 PASS at 6b9f4d19509412fac3dea884744ebb35b37e6639 completes the build-identity successor. All parent input/validator/lifecycle requirements remain accepted. `artifacts/issue480-current-benchmark-preparation/` preserves the raw failed/green history, exact source equivalence and final review. Five final tooling gates pass, with zero real workload launches; unchanged Rust retains the parent bench31/Clippy evidence. Actual PR review and required CI still precede closure. #431 remains unspent and unauthorized.
