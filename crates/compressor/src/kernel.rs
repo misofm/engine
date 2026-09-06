@@ -1339,15 +1339,19 @@ mod tests {
                 channel.detector[row * L::WIDTH + lane] = (row * 100 + lane) as f32;
             }
         }
-        let write = 9;
+        let write = 10;
         let len = 4;
-        let mut scratch = vec![-7.0; len * L::WIDTH];
+        let mut scratch = vec![-7.0; len * L::WIDTH + 2];
 
         channel.delay[0] = 2;
         for lane in 1..L::WIDTH {
             channel.delay[lane] = 2;
         }
+        for lane in L::WIDTH..MAX_WIDTH {
+            channel.delay[lane] = 99;
+        }
         assert_eq!(delay_class(&channel), DelayClass::Uniform(2));
+        scratch[len * L::WIDTH..].fill(13.0);
         fill_taps(&channel, write, len, &mut scratch);
         for frame in 0..len {
             let row = (write + frame + 11 - 2) % 11;
@@ -1355,12 +1359,13 @@ mod tests {
                 assert_eq!(scratch[frame * L::WIDTH + lane], (row * 100 + lane) as f32);
             }
         }
+        assert_eq!(&scratch[len * L::WIDTH..], &[13.0, 13.0]);
         let mut gather = [0.0; MAX_WIDTH];
         let value = gather_detector(&channel, write, DelayClass::Uniform(2), &mut gather);
         let mut lanes = [0.0; MAX_WIDTH];
         value.store(&mut lanes);
         for lane in 0..L::WIDTH {
-            assert_eq!(lanes[lane], (7 * 100 + lane) as f32);
+            assert_eq!(lanes[lane], (8 * 100 + lane) as f32);
         }
 
         for lane in 0..L::WIDTH {
@@ -1378,6 +1383,24 @@ mod tests {
                 let row = (write + frame + 11 - channel.delay[lane] as usize) % 11;
                 assert_eq!(scratch[frame * L::WIDTH + lane], (row * 100 + lane) as f32);
             }
+        }
+        let ragged = gather_detector(&channel, write, DelayClass::Ragged, &mut gather);
+        ragged.store(&mut lanes);
+        for lane in 0..L::WIDTH {
+            let row = (write + 11 - channel.delay[lane] as usize) % 11;
+            assert_eq!(lanes[lane], (row * 100 + lane) as f32);
+        }
+
+        for (start, length) in [(0, 0), (5, 1), (10, 4)] {
+            scratch.fill(-19.0);
+            fill_taps(&channel, start, length, &mut scratch);
+            for frame in 0..length {
+                for lane in 0..L::WIDTH {
+                    let row = (start + frame + 11 - channel.delay[lane] as usize) % 11;
+                    assert_eq!(scratch[frame * L::WIDTH + lane], (row * 100 + lane) as f32);
+                }
+            }
+            assert!(scratch[length * L::WIDTH..].iter().all(|v| *v == -19.0));
         }
     }
 
