@@ -91,11 +91,11 @@
 
 #[cfg(feature = "control-provider")]
 pub mod control_provider;
-#[cfg(feature = "control-provider")]
-pub mod scalar_point_endpoint;
 pub mod diagnostics;
 pub mod prepare;
 pub mod render_session;
+#[cfg(feature = "control-provider")]
+pub mod scalar_point_endpoint;
 pub mod shape;
 pub mod solo;
 pub mod source;

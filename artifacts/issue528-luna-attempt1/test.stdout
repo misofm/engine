@@ -1,0 +1,15 @@
+
+running 10 tests
+test solo::tests::a_two_record_delta_is_exactly_the_disagreeing_case ... ok
+test solo::tests::an_unknown_track_is_refused ... ok
+test solo::tests::per_lane_user_mute_restores_as_two_records ... ok
+test solo::tests::engaging_solo_mutes_the_complement_and_only_the_complement ... ok
+test solo::tests::rollback_restores_every_word ... ok
+test solo::tests::mute_while_soloed_survives_the_un_solo ... ok
+test solo::tests::solo_count_tracks_engaged_bits_exactly ... ok
+test prepare::tests::typed_diagnostic_adapters_preserve_projection_and_bound ... ok
+test control_provider::tests::catalog_state_clock_transport_counters_and_diagnostics_are_session_backed ... ok
+test control_provider::tests::every_launch_effect_and_rack_matches_the_accepted_preparation_authority ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+

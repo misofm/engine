@@ -164,3 +164,7 @@ Root adopts this PASS and the frozen exact-path clarification. Luna attempt 1 st
 ## Luna attempt 1 compiling scaffold checkpoint
 
 The first two-file scaffold compiles and the existing 10 host-core library tests pass. These are NOT the six new endpoint gates, which have not yet been written, and this is not a product/source PASS. The scaffold still needs the frozen pending-prefix, unsupported-kind admission, fault-containment/readback and exact preparation contracts, plus the actual endpoint tests and audit evidence. Root checkpoints this candid compiling scaffold before Luna continues the same attempt. Command logs are in `/tmp/issue528-luna1`; authoritative source is this checkpoint. No consolidated attempt verdict has occurred.
+
+## Luna attempt 1 incomplete package frozen for review
+
+Luna's continuation corrects several scheduling/admission paths and reports another successful compile, but again ends with the six endpoint tests, compact sticky fault model and full evidence capture unfinished. Existing 10 library tests are not endpoint proof. Root stops progress-only continuations under the throughput rule, preserves this buildable incomplete attempt, and requests one consolidated Astra verdict before reassignment. Original limited logs are preserved as supplied in `artifacts/issue528-luna-attempt1`; they lack full source/argv attribution and do not establish completion. No acceptance gate is weakened.
