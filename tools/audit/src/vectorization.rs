@@ -11,9 +11,9 @@ use std::hint::black_box;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use bench_support::digest::sha256_hex as sha256;
 use lane::Lane;
 use lane::kernels::{SvfCoef, SvfState, gain_block, sum2_block, svf_block};
-use sha2::{Digest, Sha256};
 
 const DEFAULT_ALLOWLIST: &str = "tools/audit/vectorization-allowlist.tsv";
 const PROBE_FRAMES: usize = 32;
@@ -333,16 +333,6 @@ fn is_encoding_token(token: &str) -> bool {
     (token.len() == 2 || token.len() == 8) && token.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-fn sha256(bytes: &[u8]) -> String {
-    let mut digest = Sha256::new();
-    digest.update(bytes);
-    digest
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
 struct Args {
     artifact: PathBuf,
     allowlist: PathBuf,
@@ -448,6 +438,18 @@ pub(crate) fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_sha256_alias_matches_published_literals() {
+        assert_eq!(
+            sha256(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            sha256(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
 
     fn active_rules() -> Vec<Rule> {
         ACTIVE_REGISTRY
