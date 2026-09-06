@@ -1,0 +1,19 @@
+   Compiling builtins-compiler v0.1.0 (/home/bl/misofm/engine-443-plan/crates/builtins-compiler)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.24s
+     Running tests/allocation_tracker.rs (/tmp/engine-443-sol-target/debug/deps/allocation_tracker-b6767a1ad7cc8a1e)
+
+running 1 test
+
+thread 'actual_scalar_prepare_and_bind_retain_the_charged_owner_layouts' (3900293) panicked at crates/builtins-compiler/tests/allocation_tracker.rs:372:9:
+both original owners are actual retained preparation allocations: expected=BuiltinRetainedLayout { size_bytes: 232, align_bytes: 8, allocation_count: 1 }, observed=[BuiltinRetainedLayout { size_bytes: 7, align_bytes: 1, allocation_count: 22 }, BuiltinRetainedLayout { size_bytes: 32, align_bytes: 8, allocation_count: 1 }, BuiltinRetainedLayout { size_bytes: 48, align_bytes: 8, allocation_count: 3 }, BuiltinRetainedLayout { size_bytes: 108, align_bytes: 4, allocation_count: 4 }, BuiltinRetainedLayout { size_bytes: 144, align_bytes: 8, allocation_count: 1 }, BuiltinRetainedLayout { size_bytes: 180, align_bytes: 4, allocation_count: 2 }, BuiltinRetainedLayout { size_bytes: 256, align_bytes: 64, allocation_count: 6 }, BuiltinRetainedLayout { size_bytes: 272, align_bytes: 8, allocation_count: 1 }, BuiltinRetainedLayout { size_bytes: 280, align_bytes: 8, allocation_count: 1 }, BuiltinRetainedLayout { size_bytes: 576, align_bytes: 8, allocation_count: 1 }, BuiltinRetainedLayout { size_bytes: 1312, align_bytes: 8, allocation_count: 1 }]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test actual_scalar_prepare_and_bind_retain_the_charged_owner_layouts ... FAILED
+
+failures:
+
+failures:
+    actual_scalar_prepare_and_bind_retain_the_charged_owner_layouts
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p builtins-compiler --test allocation_tracker`

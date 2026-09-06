@@ -1,0 +1,46 @@
+   Compiling builtins v0.1.0 (/home/bl/misofm/engine-rt5-ramp-plan/crates/builtins)
+error[E0283]: type annotations needed for `&mut InputStage<_>`
+    --> crates/builtins/src/lib.rs:4331:46
+     |
+4331 |             assert_independent_case(tracks, |stage, lane| {
+     |             -----------------------          ^^^^^
+     |             |
+     |             required by a bound introduced by this call
+     |
+     = note: the type must implement `Lane`
+help: the following types implement trait `Lane`
+    --> crates/lane/src/scalar.rs:31:1
+     |
+  31 | impl Lane for f32 {
+     | ^^^^^^^^^^^^^^^^^ `f32`
+     |
+    ::: crates/lane/src/wide_impl.rs:132:9
+     |
+ 132 |         impl $crate::Lane for $simd {
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |         |
+     |         `lane::Simd4`
+     |         `lane::Simd8`
+     |
+    ::: crates/lane/src/simd4.rs:11:1
+     |
+  11 | impl_lane_for_wide!(f32x4, u32x4, 4, 2);
+     | --------------------------------------- in this macro invocation
+     |
+    ::: crates/lane/src/simd8.rs:12:1
+     |
+  12 | impl_lane_for_wide!(f32x8, u32x8, 8, 2);
+     | --------------------------------------- in this macro invocation
+note: required by a bound in `assert_independent_case`
+    --> crates/builtins/src/lib.rs:4301:39
+     |
+4301 |         fn assert_independent_case<L: super::Lane>(
+     |                                       ^^^^^^^^^^^ required by this bound in `assert_independent_case`
+     = note: this error originates in the macro `impl_lane_for_wide` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: consider giving this closure parameter an explicit type, where the type for type parameter `L` is specified
+     |
+4331 |             assert_independent_case(tracks, |stage: &mut InputStage<L>, lane| {
+     |                                                   ++++++++++++++++++++
+
+For more information about this error, try `rustc --explain E0283`.
+error: could not compile `builtins` (lib test) due to 1 previous error

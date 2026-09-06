@@ -1,0 +1,24 @@
+2026-09-06T03:56:24Z
+/home/bl/misofm/engine-475-plan
+cf5c61487b06f24605fc6bd62f62b94c46a27868
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+binary: rustc
+commit-hash: 8bab26f4f68e0e26f0bb7960be334d5b520ea452
+commit-date: 2026-07-14
+host: x86_64-unknown-linux-gnu
+release: 1.97.1
+LLVM version: 22.1.6
+cargo 1.97.1 (c980f4866 2026-06-30)
+   Compiling bytemuck v1.25.2
+   Compiling engine v0.1.0 (/home/bl/misofm/engine-475-plan/crates/engine)
+   Compiling safe_arch v1.2.0
+   Compiling wide v1.6.1
+   Compiling lane v0.1.0 (/home/bl/misofm/engine-475-plan/crates/lane)
+   Compiling math v0.1.0 (/home/bl/misofm/engine-475-plan/crates/math)
+   Compiling effect-contract v0.1.0 (/home/bl/misofm/engine-475-plan/crates/effect-contract)
+   Compiling effect-runtime v0.1.0 (/home/bl/misofm/engine-475-plan/crates/effect-runtime)
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-475-plan/crates/compressor)
+    Finished `release` profile [optimized + debuginfo] target(s) in 3.94s
+STATUS=0
+/tmp/475-luna1-target-baseline.G0nm9N/release/deps/compressor-4b5374e0681f5134.ll
+/tmp/475-luna1-target-baseline.G0nm9N/release/deps/compressor-4b5374e0681f5134.s

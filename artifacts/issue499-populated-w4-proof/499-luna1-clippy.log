@@ -1,0 +1,25 @@
+argv: PATH=/home/bl/.cargo/bin:$PATH cargo clippy --locked -p compressor --all-targets --all-features -- -D warnings
+cwd: /home/bl/misofm/engine-475-populated-proof
+effective-env: PATH=/home/bl/.local/bin:/home/bl/.codex/packages/standalone/releases/0.153.2-x86_64-unknown-linux-musl/codex-path:/home/bl/.codex/tmp/arg0/codex-arg0CWD760:/home/bl/.local/bin:/home/bl/.opencode/bin:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.opencode/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin
+    Checking bytemuck v1.25.2
+    Checking typenum v1.20.1
+    Checking engine v0.1.0 (/home/bl/misofm/engine-475-populated-proof/crates/engine)
+    Checking cfg-if v1.0.4
+    Checking cpufeatures v0.3.0
+    Checking dsp-reference v0.1.0 (/home/bl/misofm/engine-475-populated-proof/crates/dsp-reference)
+    Checking safe_arch v1.2.0
+    Checking wide v1.6.1
+    Checking hybrid-array v0.4.14
+    Checking crypto-common v0.2.2
+    Checking block-buffer v0.12.1
+    Checking digest v0.11.3
+    Checking sha2 v0.11.0
+    Checking bench-support v0.1.0 (/home/bl/misofm/engine-475-populated-proof/tools/bench-support)
+    Checking lane v0.1.0 (/home/bl/misofm/engine-475-populated-proof/crates/lane)
+    Checking math v0.1.0 (/home/bl/misofm/engine-475-populated-proof/crates/math)
+    Checking effect-contract v0.1.0 (/home/bl/misofm/engine-475-populated-proof/crates/effect-contract)
+    Checking effect-runtime v0.1.0 (/home/bl/misofm/engine-475-populated-proof/crates/effect-runtime)
+    Checking conformance v0.1.0 (/home/bl/misofm/engine-475-populated-proof/crates/conformance)
+    Checking compressor v0.1.0 (/home/bl/misofm/engine-475-populated-proof/crates/compressor)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.20s
+numeric-status: 0

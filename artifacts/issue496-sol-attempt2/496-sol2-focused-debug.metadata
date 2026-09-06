@@ -1,0 +1,8 @@
+argv=cargo test --locked -p builtins --lib tests::post_ramp_symmetry_handles_differing_words_countdowns_and_padding -- --exact
+cwd=/home/bl/misofm/engine-rt5-ramp-plan
+effective_PATH=/home/bl/.cargo/bin:/home/bl/.local/bin:/home/bl/.codex/packages/standalone/releases/0.153.2-x86_64-unknown-linux-musl/codex-path:/home/bl/.codex/tmp/arg0/codex-arg0CWD760:/home/bl/.local/bin:/home/bl/.opencode/bin:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.opencode/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin
+HEAD=0449ee9dc38e569543b6c3554b09fafa31f20a57
+file_blob=65c77f7bc8bcb41f8478c6fd988b2e73ee34733b
+file_sha256=b6db00d6906a0bb9f811aaabc7aa734a59c1202c83881b4d86ea6f3255cd8708
+exit=101
+stdout_stderr_sha256=4d8339918c18658e88bbb99e99229196b2c3b025fb1ed4f1935c7869b32943c9

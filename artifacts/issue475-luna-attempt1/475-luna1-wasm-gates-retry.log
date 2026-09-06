@@ -1,0 +1,39 @@
+COMMAND: export PATH=/home/bl/.cargo/bin:$PATH; scripts/run-wasm-gates.sh /tmp/475-luna1-target-wasm-gates-retry
+CWD: /home/bl/misofm/engine-475-plan
+SOURCE_REV: 89ae24efbea1533f13999f75262286e3df70c5ed
+{"schema_version":1,"kind":"wasm_gates","leg":"native","runtime":"wasmtime 47.0.3","backend":2,"cases":139,"comparisons":349,"minmax_lowering_mismatches":0,"mismatches":[]}
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on build directory
+    Finished `release` profile [optimized + debuginfo] target(s) in 12.20s
+{"schema_version":1,"kind":"wasm_gates","leg":"wasm","runtime":"wasmtime 47.0.3","backend":0,"cases":139,"comparisons":349,"minmax_lowering_mismatches":0,"mismatches":[]}
+    Blocking waiting for file lock on package cache
+   Compiling bytemuck v1.25.2
+   Compiling engine v0.1.0 (/home/bl/misofm/engine-475-plan/crates/engine)
+   Compiling typenum v1.20.1
+   Compiling cfg-if v1.0.4
+   Compiling wide v1.6.1
+   Compiling hybrid-array v0.4.14
+   Compiling block-buffer v0.12.1
+   Compiling crypto-common v0.2.2
+   Compiling digest v0.11.3
+   Compiling sha2 v0.11.0
+   Compiling lane v0.1.0 (/home/bl/misofm/engine-475-plan/crates/lane)
+   Compiling math v0.1.0 (/home/bl/misofm/engine-475-plan/crates/math)
+   Compiling effect-contract v0.1.0 (/home/bl/misofm/engine-475-plan/crates/effect-contract)
+   Compiling effect-runtime v0.1.0 (/home/bl/misofm/engine-475-plan/crates/effect-runtime)
+   Compiling gate-expander v0.1.0 (/home/bl/misofm/engine-475-plan/crates/gate-expander)
+   Compiling delay v0.1.0 (/home/bl/misofm/engine-475-plan/crates/delay)
+   Compiling transient-shaper v0.1.0 (/home/bl/misofm/engine-475-plan/crates/transient-shaper)
+   Compiling builtins v0.1.0 (/home/bl/misofm/engine-475-plan/crates/builtins)
+   Compiling parametric-eq v0.1.0 (/home/bl/misofm/engine-475-plan/crates/parametric-eq)
+   Compiling true-peak-limiter v0.1.0 (/home/bl/misofm/engine-475-plan/crates/true-peak-limiter)
+   Compiling multiband-compressor v0.1.0 (/home/bl/misofm/engine-475-plan/crates/multiband-compressor)
+   Compiling soft-clip v0.1.0 (/home/bl/misofm/engine-475-plan/crates/soft-clip)
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-475-plan/crates/compressor)
+   Compiling wasm-gate-corpus v0.1.0 (/home/bl/misofm/engine-475-plan/tools/wasm-gate-corpus)
+   Compiling wasm-gate-guest v0.1.0 (/home/bl/misofm/engine-475-plan/tools/wasm-gate-guest)
+    Finished `release` profile [optimized + debuginfo] target(s) in 9.13s
+{"schema_version":1,"kind":"wasm_gates","leg":"wasm","runtime":"wasmtime 47.0.3","backend":1,"cases":139,"comparisons":349,"minmax_lowering_mismatches":0,"mismatches":[]}
+wasm gates: detector history resident in locals on both guest legs
+wasm gates: ok (native + wasm scalar + wasm simd128), evidence in /tmp/475-luna1-target-wasm-gates-retry/wasm-gates.jsonl
+STATUS=0

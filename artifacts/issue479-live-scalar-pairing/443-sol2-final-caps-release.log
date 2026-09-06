@@ -1,0 +1,78 @@
+warning: output filename collision at /tmp/engine-443-sol-target/release/deps/libeffect_package.rlib
+  |
+  = note: the lib target `effect_package` in package `effect-package v0.1.0 (/home/bl/misofm/engine-443-plan/crates/effect-package)` has the same output filename as the lib target `effect_package` in package `effect-package v0.1.0 (/home/bl/misofm/engine-443-plan/crates/effect-package)`
+  = note: this may become a hard error in the future; see <https://github.com/rust-lang/cargo/issues/6313>
+  = help: consider changing their names to be unique or compiling them separately
+warning: output filename collision at /tmp/engine-443-sol-target/release/deps/libeffect_package.so
+  |
+  = note: the lib target `effect_package` in package `effect-package v0.1.0 (/home/bl/misofm/engine-443-plan/crates/effect-package)` has the same output filename as the lib target `effect_package` in package `effect-package v0.1.0 (/home/bl/misofm/engine-443-plan/crates/effect-package)`
+  = note: this may become a hard error in the future; see <https://github.com/rust-lang/cargo/issues/6313>
+  = help: consider changing their names to be unique or compiling them separately
+warning: output filename collision at /tmp/engine-443-sol-target/release/deps/libeffect_package.so.dwp
+  |
+  = note: the lib target `effect_package` in package `effect-package v0.1.0 (/home/bl/misofm/engine-443-plan/crates/effect-package)` has the same output filename as the lib target `effect_package` in package `effect-package v0.1.0 (/home/bl/misofm/engine-443-plan/crates/effect-package)`
+  = note: this may become a hard error in the future; see <https://github.com/rust-lang/cargo/issues/6313>
+  = help: consider changing their names to be unique or compiling them separately
+   Compiling bytemuck v1.25.2
+   Compiling engine v0.1.0 (/home/bl/misofm/engine-443-plan/crates/engine)
+   Compiling lexical-util v1.0.7
+   Compiling cfg-if v1.0.4
+   Compiling typenum v1.20.1
+   Compiling libc v0.2.189
+   Compiling once_cell v1.21.4
+   Compiling smallvec v1.15.2
+   Compiling cpufeatures v0.3.0
+   Compiling decoded-char v0.1.1
+   Compiling utf8-decode v1.0.1
+   Compiling locspan v0.8.2
+   Compiling getrandom v0.2.17
+   Compiling ahash v0.7.8
+   Compiling safe_arch v1.2.0
+   Compiling smallstr v0.3.1
+   Compiling hashbrown v0.12.3
+   Compiling lexical-parse-integer v1.0.6
+   Compiling lexical-write-integer v1.0.6
+   Compiling wide v1.6.1
+   Compiling hybrid-array v0.4.14
+   Compiling lexical-parse-float v1.0.6
+   Compiling indexmap v1.9.3
+   Compiling lexical-write-float v1.0.6
+   Compiling lexical-core v1.0.6
+   Compiling block-buffer v0.12.1
+   Compiling crypto-common v0.2.2
+   Compiling lexical v7.0.5
+   Compiling json-syntax v0.12.5
+   Compiling json-number v0.4.10
+   Compiling digest v0.11.3
+   Compiling session v0.1.0 (/home/bl/misofm/engine-443-plan/crates/session)
+   Compiling sha2 v0.11.0
+   Compiling lane v0.1.0 (/home/bl/misofm/engine-443-plan/crates/lane)
+   Compiling math v0.1.0 (/home/bl/misofm/engine-443-plan/crates/math)
+   Compiling effect-contract v0.1.0 (/home/bl/misofm/engine-443-plan/crates/effect-contract)
+   Compiling effect-runtime v0.1.0 (/home/bl/misofm/engine-443-plan/crates/effect-runtime)
+   Compiling rack v0.1.0 (/home/bl/misofm/engine-443-plan/crates/rack)
+   Compiling builtins v0.1.0 (/home/bl/misofm/engine-443-plan/crates/builtins)
+   Compiling multiband-compressor v0.1.0 (/home/bl/misofm/engine-443-plan/crates/multiband-compressor)
+   Compiling gate-expander v0.1.0 (/home/bl/misofm/engine-443-plan/crates/gate-expander)
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-443-plan/crates/compressor)
+   Compiling true-peak-limiter v0.1.0 (/home/bl/misofm/engine-443-plan/crates/true-peak-limiter)
+   Compiling parametric-eq v0.1.0 (/home/bl/misofm/engine-443-plan/crates/parametric-eq)
+   Compiling transient-shaper v0.1.0 (/home/bl/misofm/engine-443-plan/crates/transient-shaper)
+   Compiling soft-clip v0.1.0 (/home/bl/misofm/engine-443-plan/crates/soft-clip)
+   Compiling delay v0.1.0 (/home/bl/misofm/engine-443-plan/crates/delay)
+   Compiling conformance v0.1.0 (/home/bl/misofm/engine-443-plan/crates/conformance)
+   Compiling graph v0.1.0 (/home/bl/misofm/engine-443-plan/crates/graph)
+   Compiling rack-compiler v0.1.0 (/home/bl/misofm/engine-443-plan/crates/rack-compiler)
+   Compiling builtins-compiler v0.1.0 (/home/bl/misofm/engine-443-plan/crates/builtins-compiler)
+   Compiling effect-package v0.1.0 (/home/bl/misofm/engine-443-plan/crates/effect-package)
+   Compiling effect-compiler v0.1.0 (/home/bl/misofm/engine-443-plan/crates/effect-compiler)
+   Compiling graph-compiler v0.1.0 (/home/bl/misofm/engine-443-plan/crates/graph-compiler)
+error[E0463]: can't find crate for `effect_compiler`
+  --> crates/graph-compiler/src/lib.rs:12:5
+   |
+12 | use effect_compiler::{EffectPreparedEntry, EffectPreparedSession, EffectRack};
+   |     ^^^^^^^^^^^^^^^ can't find crate
+
+For more information about this error, try `rustc --explain E0463`.
+error: could not compile `graph-compiler` (lib) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...

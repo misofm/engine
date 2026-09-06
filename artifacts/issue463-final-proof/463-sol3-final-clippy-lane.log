@@ -1,0 +1,5 @@
+    Checking bytemuck v1.25.2
+    Checking safe_arch v1.2.0
+    Checking wide v1.6.1
+    Checking lane v0.1.0 (/home/bl/misofm/engine-lane2-plan/crates/lane)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.50s

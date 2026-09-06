@@ -1,0 +1,225 @@
+diff --git a/tools/bench-support/src/digest.rs b/tools/bench-support/src/digest.rs
+index ae53ced5..7961863c 100644
+--- a/tools/bench-support/src/digest.rs
++++ b/tools/bench-support/src/digest.rs
+@@ -72,7 +72,9 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
+     hex(&Sha256::digest(bytes))
+ }
+ 
+-fn hex(digest: &[u8]) -> String {
++/// Encode bytes as lowercase hexadecimal without hashing them.
++#[must_use]
++pub fn hex(digest: &[u8]) -> String {
+     let mut text = String::with_capacity(digest.len() * 2);
+     for byte in digest {
+         text.push(char::from_digit(u32::from(byte >> 4), 16).expect("nibble"));
+@@ -83,11 +85,23 @@ fn hex(digest: &[u8]) -> String {
+ 
+ #[cfg(test)]
+ mod tests {
+-    use super::{Sha256Sink, sha256_hex, updates_mark, updates_since};
++    use super::{Sha256Sink, hex, sha256_hex, updates_mark, updates_since};
+ 
+     const EMPTY: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+     const ABC: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+ 
++    #[test]
++    fn hex_encodes_empty_leading_zero_and_each_nibble() {
++        assert_eq!(hex(b""), "");
++        assert_eq!(
++            hex(&[
++                0x00, 0x01, 0x09, 0x0a, 0x0f, 0x10, 0x19, 0x1a, 0x1f, 0xa0, 0xa1, 0xa9, 0xaa, 0xaf,
++                0xf0, 0xf1, 0xf9, 0xfa, 0xff
++            ]),
++            "0001090a0f10191a1fa0a1a9aaaff0f1f9faff"
++        );
++    }
++
+     #[test]
+     fn matches_the_published_vectors() {
+         assert_eq!(sha256_hex(b""), EMPTY);
+diff --git a/tools/bench/src/builtins.rs b/tools/bench/src/builtins.rs
+index c16954c8..8d03074b 100644
+--- a/tools/bench/src/builtins.rs
++++ b/tools/bench/src/builtins.rs
+@@ -1,6 +1,7 @@
+ //! Frozen issue-035 benchmark emitter. The runner is the sole authorized timing entrypoint.
+ 
+ use bench_support::alloc as bench_alloc;
++use bench_support::digest::{hex, sha256_hex};
+ use bench_support::json;
+ use bench_support::stats;
+ use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
+@@ -667,7 +668,7 @@ impl RealMeterTapRuntime {
+                 .expect("monotonic full/drop count")
+                 .to_le_bytes(),
+         );
+-        hex_digest(self.output.clone().finalize())
++        hex(&self.output.clone().finalize())
+     }
+ }
+ 
+@@ -905,7 +906,7 @@ fn measure_prepare(rate_hz: u32) -> Measurement {
+     }
+     Measurement {
+         samples_ns,
+-        output_sha256: hex_digest(output.finalize()),
++        output_sha256: hex(&output.finalize()),
+         shape: WorkloadShape {
+             tracks: PREPARE_TRACKS,
+             meters: OBSERVERS * 8,
+@@ -1017,7 +1018,7 @@ impl RenderRuntime {
+         if let Some(meter_runtime) = &mut self.meter_runtime {
+             return meter_runtime.output_sha256();
+         }
+-        hex_digest(self.output.clone().finalize())
++        hex(&self.output.clone().finalize())
+     }
+     fn shape(&self) -> WorkloadShape {
+         WorkloadShape {
+@@ -1773,15 +1774,7 @@ impl Percentiles {
+     }
+ }
+ fn sha256(bytes: &[u8]) -> String {
+-    hex_digest(Sha256::digest(bytes))
+-}
+-fn hex_digest(bytes: impl AsRef<[u8]>) -> String {
+-    use core::fmt::Write;
+-    let mut output = String::with_capacity(64);
+-    for byte in bytes.as_ref() {
+-        write!(&mut output, "{byte:02x}").expect("String write");
+-    }
+-    output
++    sha256_hex(bytes)
+ }
+ #[cfg(test)]
+ mod tests {
+@@ -2027,6 +2020,23 @@ mod tests {
+         }
+     }
+ 
++    #[test]
++    fn digest_helpers_encode_known_abc_without_rehashing_finalized_bytes() {
++        let finalized = Sha256::digest(b"abc");
++        assert_eq!(
++            sha256(b"abc"),
++            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
++        );
++        assert_eq!(
++            hex(&finalized),
++            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
++        );
++        assert_ne!(
++            sha256(&finalized),
++            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
++        );
++    }
++
+     #[test]
+     fn real_meter_tap_plans_use_the_compiled_seven_taps_and_preserve_full_queue_state() {
+         let fixture = input_fixture(Workload::MeterSuccessFull, 48_000);
+diff --git a/tools/bench/src/effect_interchange.rs b/tools/bench/src/effect_interchange.rs
+index b8e25e30..b2750e83 100644
+--- a/tools/bench/src/effect_interchange.rs
++++ b/tools/bench/src/effect_interchange.rs
+@@ -1,6 +1,7 @@
+ //! Descriptive benchmark for the accepted effect interchange boundary.
+ #![allow(missing_docs)]
+ 
++use bench_support::digest::sha256_hex as digest_hex;
+ use bench_support::json;
+ use bench_support::stats::nearest_rank;
+ use std::{
+@@ -70,17 +71,12 @@ fn hex_bytes(text: &str) -> Vec<u8> {
+         .collect()
+ }
+ 
++// Retained as the raw digest helper for callers/tests that need digest bytes rather than text.
++#[allow(dead_code)]
+ fn digest(bytes: &[u8]) -> [u8; 32] {
+     Sha256::digest(bytes).into()
+ }
+ 
+-fn digest_hex(bytes: &[u8]) -> String {
+-    digest(bytes)
+-        .iter()
+-        .map(|byte| format!("{byte:02x}"))
+-        .collect()
+-}
+-
+ static STATE_PARAMETERS: [ParameterDescriptor; 2] = [
+     ParameterDescriptor {
+         id: ParameterId(1),
+@@ -1083,4 +1079,14 @@ mod tests {
+         assert_ne!(actual, ISSUE_081_UNREACHABLE_MIGRATION_SHA256);
+         assert_eq!(actual, EXPECTED_OUTPUT_SHA256[3]);
+     }
++
++    #[test]
++    fn digest_hex_matches_known_abc_digest() {
++        assert_eq!(
++            digest_hex(b"abc"),
++            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
++        );
++        let expected: [u8; 32] = Sha256::digest(b"abc").into();
++        assert_eq!(digest(b"abc"), expected);
++    }
+ }
+diff --git a/tools/bench/src/graph.rs b/tools/bench/src/graph.rs
+index 99441591..1760ef29 100644
+--- a/tools/bench/src/graph.rs
++++ b/tools/bench/src/graph.rs
+@@ -1,13 +1,12 @@
+ //! Fixed-work, exactly-two-round descriptive benchmark driver for issue 006.
+ #![allow(missing_docs)]
+ 
++use bench_support::digest::sha256_hex;
+ use bench_support::json::escape;
+ use bench_support::stats::per_mille as percentile;
+ use graph_compiler::Backend;
+ use std::{
+-    env,
+-    fmt::Write as _,
+-    fs,
++    env, fs,
+     hint::black_box,
+     process::Command,
+     time::{Instant, SystemTime, UNIX_EPOCH},
+@@ -24,7 +23,6 @@ use session::{
+     SidechainDeclaration, StableId, Submix, canonical_session_json, compile_session,
+     parse_session_json,
+ };
+-use sha2::{Digest, Sha256};
+ 
+ const SEED: &str = include_str!("../../../fixtures/session/v1/canonical.json");
+ const ROUNDS: u8 = 2;
+@@ -562,14 +560,6 @@ fn peak_resident_bytes() -> u64 {
+         .unwrap_or(0)
+ }
+ 
+-fn sha256_hex(bytes: &[u8]) -> String {
+-    let mut output = String::with_capacity(64);
+-    for byte in Sha256::digest(bytes) {
+-        write!(&mut output, "{byte:02x}").expect("String write");
+-    }
+-    output
+-}
+-
+ fn string_array(values: &[String]) -> String {
+     format!(
+         "[{}]",
+@@ -585,6 +575,14 @@ fn string_array(values: &[String]) -> String {
+ mod tests {
+     use super::*;
+ 
++    #[test]
++    fn sha256_hex_matches_known_abc_digest() {
++        assert_eq!(
++            sha256_hex(b"abc"),
++            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
++        );
++    }
++
+     #[test]
+     fn nearest_rank_is_ordered_at_all_frozen_percentiles() {
+         let values = [1, 2, 3, 4, 5];

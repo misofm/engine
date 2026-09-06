@@ -1,0 +1,165 @@
+COMMAND_DEBUG=PATH=/home/bl/.cargo/bin:$PATH cargo test --locked -p compressor --lib && [staged_idle mono_collapse payload conformance cross_target]
+COMMAND_RELEASE=the same six targets with --release
+CWD=/home/bl/misofm/engine-475-plan
+SOURCE_REV=019ac62a
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running unittests src/lib.rs (target/debug/deps/compressor-80bd63f116d0655c)
+
+running 2 tests
+test kernel::tests::uniform_and_ragged_access_match_old_transcription ... ok
+test kernel::tests::w4_state_owner_transitions_drive_the_next_real_render ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+DEBUG_lib_EXIT=0
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-475-plan/crates/compressor)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.13s
+     Running tests/staged_idle.rs (target/debug/deps/staged_idle-060f462a18ac4922)
+
+running 5 tests
+test a_left_only_rejection_diverges_the_cursors_and_the_staged_body_still_agrees ... ok
+test restore_and_full_reset_drive_the_next_bank_render_classification ... ok
+test every_partition_agrees_with_the_per_frame_body ... ok
+test the_link_laws_bypass_and_a_sidechain_all_agree ... ok
+test a_ragged_bank_agrees_with_the_per_frame_body ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.48s
+
+DEBUG_staged_idle_EXIT=0
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-475-plan/crates/compressor)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.12s
+     Running tests/mono_collapse.rs (target/debug/deps/mono_collapse-74764ddc5c4b77b3)
+
+running 5 tests
+test a_halved_subnormal_does_not_come_back ... ok
+test mono_reopen_drives_the_next_render_from_the_copied_delay_population ... ok
+test a_statically_bypassed_bank_collapses_to_the_dual_bits ... ok
+test a_desymmetrized_bank_is_a_never_collapsed_bank ... ok
+test the_collapsed_body_renders_the_dual_bodys_left_plane ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+DEBUG_mono_collapse_EXIT=0
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-475-plan/crates/compressor)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.12s
+     Running tests/payload.rs (target/debug/deps/payload-4e3020f6b2d1b5c8)
+
+running 5 tests
+test preparation_legal_parameter_states_round_trip ... ok
+test a_mid_ramp_restore_arrives_on_the_same_sample ... ok
+test a_restore_is_transactional_across_both_channels ... ok
+test resets_clear_state_and_only_the_full_one_restores_defaults ... ok
+test an_idle_restore_is_bit_exact ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+DEBUG_payload_EXIT=0
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running tests/conformance.rs (target/debug/deps/conformance-8aabad45177d5df2)
+
+running 2 tests
+
+running 1 test
+test uniform_and_ragged_render_paths_allocate_and_free_nothing ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.02s
+
+test uniform_and_ragged_render_paths_allocate_and_free_nothing ... ok
+test passes_effect_contract_conformance ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.91s
+
+DEBUG_conformance_EXIT=0
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-475-plan/crates/compressor)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.12s
+     Running tests/cross_target.rs (target/debug/deps/cross_target-56a9b3382b5f791a)
+
+running 3 tests
+test the_corpus_is_finite ... ok
+test no_case_is_vacuous ... ok
+test the_corpus_matches_its_pins_at_every_width ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+DEBUG_cross_target_EXIT=0
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.03s
+     Running unittests src/lib.rs (target/release/deps/compressor-9cc9f8cd79b77eb5)
+
+running 2 tests
+test kernel::tests::uniform_and_ragged_access_match_old_transcription ... ok
+test kernel::tests::w4_state_owner_transitions_drive_the_next_real_render ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+RELEASE_lib_EXIT=0
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-475-plan/crates/compressor)
+    Finished `release` profile [optimized + debuginfo] target(s) in 5.40s
+     Running tests/staged_idle.rs (target/release/deps/staged_idle-86af6682652d2cb6)
+
+running 5 tests
+test a_left_only_rejection_diverges_the_cursors_and_the_staged_body_still_agrees ... ok
+test restore_and_full_reset_drive_the_next_bank_render_classification ... ok
+test every_partition_agrees_with_the_per_frame_body ... ok
+test a_ragged_bank_agrees_with_the_per_frame_body ... ok
+test the_link_laws_bypass_and_a_sidechain_all_agree ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+RELEASE_staged_idle_EXIT=0
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-475-plan/crates/compressor)
+    Finished `release` profile [optimized + debuginfo] target(s) in 5.23s
+     Running tests/mono_collapse.rs (target/release/deps/mono_collapse-e3da19825ce1fed5)
+
+running 5 tests
+test a_halved_subnormal_does_not_come_back ... ok
+test a_desymmetrized_bank_is_a_never_collapsed_bank ... ok
+test a_statically_bypassed_bank_collapses_to_the_dual_bits ... ok
+test mono_reopen_drives_the_next_render_from_the_copied_delay_population ... ok
+test the_collapsed_body_renders_the_dual_bodys_left_plane ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+RELEASE_mono_collapse_EXIT=0
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-475-plan/crates/compressor)
+    Finished `release` profile [optimized + debuginfo] target(s) in 4.90s
+     Running tests/payload.rs (target/release/deps/payload-03f53fa9d4391431)
+
+running 5 tests
+test a_mid_ramp_restore_arrives_on_the_same_sample ... ok
+test a_restore_is_transactional_across_both_channels ... ok
+test preparation_legal_parameter_states_round_trip ... ok
+test resets_clear_state_and_only_the_full_one_restores_defaults ... ok
+test an_idle_restore_is_bit_exact ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+RELEASE_payload_EXIT=0
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.03s
+     Running tests/conformance.rs (target/release/deps/conformance-ad9a60da36090213)
+
+running 2 tests
+
+running 1 test
+test uniform_and_ragged_render_paths_allocate_and_free_nothing ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+test uniform_and_ragged_render_paths_allocate_and_free_nothing ... ok
+test passes_effect_contract_conformance ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+
+RELEASE_conformance_EXIT=0
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-475-plan/crates/compressor)
+    Finished `release` profile [optimized + debuginfo] target(s) in 5.57s
+     Running tests/cross_target.rs (target/release/deps/cross_target-b690833b97e9edbf)
+
+running 3 tests
+test the_corpus_is_finite ... ok
+test no_case_is_vacuous ... ok
+test the_corpus_matches_its_pins_at_every_width ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+RELEASE_cross_target_EXIT=0
+

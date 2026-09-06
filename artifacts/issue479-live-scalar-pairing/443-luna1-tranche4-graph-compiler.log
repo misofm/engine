@@ -1,0 +1,18 @@
+   Compiling builtins-compiler v0.1.0 (/home/bl/misofm/engine-443-plan/crates/builtins-compiler)
+error[E0599]: `graph::StableGraphId` doesn't implement `std::fmt::Display`
+    --> crates/builtins-compiler/src/lib.rs:1965:79
+     |
+1965 |                     GraphNodeId::TrackStage { track_id, .. } => Some(track_id.to_string().into_boxed_str()),
+     |                                                                               ^^^^^^^^^ method cannot be called on `graph::StableGraphId` due to unsatisfied trait bounds
+     |
+    ::: crates/graph/src/lib.rs:29:1
+     |
+  29 | pub struct StableGraphId(String);
+     | ------------------------ doesn't satisfy `graph::StableGraphId: ToString` or `graph::StableGraphId: std::fmt::Display`
+     |
+     = note: the following trait bounds were not satisfied:
+             `graph::StableGraphId: std::fmt::Display`
+             which is required by `graph::StableGraphId: ToString`
+
+For more information about this error, try `rustc --explain E0599`.
+error: could not compile `builtins-compiler` (lib) due to 1 previous error

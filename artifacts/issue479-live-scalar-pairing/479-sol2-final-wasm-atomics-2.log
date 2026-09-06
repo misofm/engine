@@ -1,0 +1,1 @@
+wasm realtime atomics: ok (3 objects, scalar NON-LTO engine/source/target_smoke)

@@ -1,0 +1,49 @@
+cwd=/home/bl/misofm/engine-lane2-plan
+source_head=45aeb3fb5114e948086cfe8e9cfda6f8860aa5a8
+source_sha256 crates/lane/tests/g2_kernel_identity.rs=266a5a696d91f5ecf67539d340aa8697d2a742141fc347bf5e680849262faa56
+source_sha256 crates/graph/src/runtime.rs=7546369fd2093685d3079ea67e57b2048d1c51cd6b1550bcf1154a709e13ca63
+
+PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/463-sol3-final-lane-target cargo test --locked -p lane --test g2_kernel_identity --test p1_partition
+status=0 log=/tmp/463-sol3-final-lane-debug.log
+PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/463-sol3-final-lane-target cargo test --locked --release -p lane --test g2_kernel_identity --test p1_partition
+status=0 log=/tmp/463-sol3-final-lane-release.log
+
+PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/463-sol3-final-graph-target cargo test --locked -p graph --lib runtime::tests::route_applies_folded_gain_with_frozen_op_order -- --exact
+status=0 log=/tmp/463-sol3-final-graph-debug-1.log
+PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/463-sol3-final-graph-target cargo test --locked -p graph --lib tests::executor_applies_exact_pdc_then_fixed_pairwise_reduction -- --exact
+status=0 log=/tmp/463-sol3-final-graph-debug-2.log
+PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/463-sol3-final-graph-target cargo test --locked -p graph --lib runtime::tests::a_folded_epilogue_is_the_route_and_the_reduction_bit_for_bit -- --exact
+status=0 log=/tmp/463-sol3-final-graph-debug-3.log
+PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/463-sol3-final-graph-target cargo test --locked -p graph --lib runtime::tests::the_first_contributor_stores_so_a_negative_zero_master_keeps_its_sign -- --exact
+status=0 log=/tmp/463-sol3-final-graph-debug-4.log
+PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/463-sol3-final-graph-target cargo test --locked --release -p graph --lib runtime::tests::route_applies_folded_gain_with_frozen_op_order -- --exact
+status=0 log=/tmp/463-sol3-final-graph-release-1.log
+PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/463-sol3-final-graph-target cargo test --locked --release -p graph --lib tests::executor_applies_exact_pdc_then_fixed_pairwise_reduction -- --exact
+status=0 log=/tmp/463-sol3-final-graph-release-2.log
+PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/463-sol3-final-graph-target cargo test --locked --release -p graph --lib runtime::tests::a_folded_epilogue_is_the_route_and_the_reduction_bit_for_bit -- --exact
+status=0 log=/tmp/463-sol3-final-graph-release-3.log
+PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/463-sol3-final-graph-target cargo test --locked --release -p graph --lib runtime::tests::the_first_contributor_stores_so_a_negative_zero_master_keeps_its_sign -- --exact
+status=0 log=/tmp/463-sol3-final-graph-release-4.log
+
+PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/463-sol3-final-graph-target cargo test --locked -p graph --test rt1_direct_bank_alloc
+status=0 log=/tmp/463-sol3-final-alloc-debug.log
+PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/463-sol3-final-graph-target cargo test --locked --release -p graph --test rt1_direct_bank_alloc
+status=0 log=/tmp/463-sol3-final-alloc-release.log
+
+PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/463-sol3-final-clippy-target cargo clippy --locked -p lane --tests -- -D warnings
+status=0 log=/tmp/463-sol3-final-clippy-lane.log
+PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/463-sol3-final-clippy-target cargo clippy --locked -p graph --lib --tests -- -D warnings
+status=0 log=/tmp/463-sol3-final-clippy-graph.log
+
+PATH=/home/bl/.cargo/bin:$PATH bash scripts/check-lane-policy.sh
+status=0 log=/tmp/463-sol3-final-lane-policy.log
+PATH=/home/bl/.cargo/bin:$PATH bash scripts/check-realtime-policy.sh
+status=0 log=/tmp/463-sol3-final-realtime-policy.log
+PATH=/home/bl/.cargo/bin:$PATH bash scripts/check-graph-policy.sh
+status=0 log=/tmp/463-sol3-final-graph-policy.log
+PATH=/home/bl/.cargo/bin:$PATH bash scripts/check-workspace-policy.sh
+status=0 log=/tmp/463-sol3-final-workspace-policy.log
+PATH=/home/bl/.cargo/bin:$PATH cargo fmt --all -- --check
+status=0 log=/tmp/463-sol3-final-fmt.log
+git diff --check
+status=0 log=/tmp/463-sol3-final-diff-check.log

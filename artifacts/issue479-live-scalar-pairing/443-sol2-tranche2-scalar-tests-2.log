@@ -1,0 +1,12 @@
+   Compiling builtins-compiler v0.1.0 (/home/bl/misofm/engine-443-plan/crates/builtins-compiler)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.60s
+     Running unittests src/lib.rs (/tmp/engine-443-sol-target/debug/deps/builtins_compiler-5ff1d293b1f7fb6b)
+
+running 4 tests
+test tests::scalar_factory_checks_both_exact_owners_and_policies_without_consuming_state ... ok
+test tests::scalar_invalid_envelope_leaves_the_later_matrix_queue_untouched ... ok
+test tests::builtin_bank_layout_regroups_by_dependency_wave_and_scalar_falls_back ... ok
+test tests::banked_tracks_are_bit_identical_to_their_scalar_tails ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 26 filtered out; finished in 0.03s
+

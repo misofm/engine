@@ -1,0 +1,18 @@
+{
+  "runtime_qualified_commit": "82d5e5b2f42c8e0d5f98ba1f4210c200a7231043",
+  "browser_qualified_commit": "2e48ff2e05e7769d00d5ae7e13654549a59eb979",
+  "integration_commit": "86719569af347b76220316160ff7532b00dbd38c",
+  "integrated_main": "59f35c627ed4bd8bcaf2e7a0944f014f521cbd94",
+  "unchanged_runtime_build_paths": [
+    "crates",
+    "hosts/host-core",
+    "hosts/host-web/src",
+    "tools/parameter-metadata",
+    "Cargo.toml",
+    "Cargo.lock",
+    ".cargo",
+    "scripts/build-web-audioworklet.sh",
+    "scripts/check-web-audioworklet.sh"
+  ],
+  "integration_delta": "PR481 only adds benchmark manifest/untimed test, current tooling/CI invocation and evidence; PR481 required CI passed independently. Final combined PR CI remains required."
+}

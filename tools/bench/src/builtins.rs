@@ -1,6 +1,7 @@
 //! Frozen issue-035 benchmark emitter. The runner is the sole authorized timing entrypoint.
 
 use bench_support::alloc as bench_alloc;
+use bench_support::digest::{hex, sha256_hex};
 use bench_support::json;
 use bench_support::stats;
 use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
@@ -52,7 +53,7 @@ const INPUT_MANIFEST: &[u8] = include_bytes!("../../../fixtures/builtins/v1/MANI
 /// benchmark's `main` path, which `test-builtins-benchmark.sh` (the swept, hermetic half) does not
 /// execute. That gap is a real finding about the gate, not about this feature.
 const INPUT_MANIFEST_SHA256: &str =
-    "ad034b8880acd13e6144fd00c515dc5fa83ca3b044c2a2472453cc6cad9934d1";
+    "b244da45d88d670951205098b7516af20387a141eccb3bf60edb61e8ba57a919";
 const SESSION: &str = include_str!("../../../fixtures/session/v1/canonical.json");
 
 const WORKLOADS: [Workload; 5] = [
@@ -667,7 +668,7 @@ impl RealMeterTapRuntime {
                 .expect("monotonic full/drop count")
                 .to_le_bytes(),
         );
-        hex_digest(self.output.clone().finalize())
+        hex(&self.output.clone().finalize())
     }
 }
 
@@ -905,7 +906,7 @@ fn measure_prepare(rate_hz: u32) -> Measurement {
     }
     Measurement {
         samples_ns,
-        output_sha256: hex_digest(output.finalize()),
+        output_sha256: hex(&output.finalize()),
         shape: WorkloadShape {
             tracks: PREPARE_TRACKS,
             meters: OBSERVERS * 8,
@@ -1017,7 +1018,7 @@ impl RenderRuntime {
         if let Some(meter_runtime) = &mut self.meter_runtime {
             return meter_runtime.output_sha256();
         }
-        hex_digest(self.output.clone().finalize())
+        hex(&self.output.clone().finalize())
     }
     fn shape(&self) -> WorkloadShape {
         WorkloadShape {
@@ -1773,15 +1774,7 @@ impl Percentiles {
     }
 }
 fn sha256(bytes: &[u8]) -> String {
-    hex_digest(Sha256::digest(bytes))
-}
-fn hex_digest(bytes: impl AsRef<[u8]>) -> String {
-    use core::fmt::Write;
-    let mut output = String::with_capacity(64);
-    for byte in bytes.as_ref() {
-        write!(&mut output, "{byte:02x}").expect("String write");
-    }
-    output
+    sha256_hex(bytes)
 }
 #[cfg(test)]
 mod tests {
@@ -2008,13 +2001,39 @@ mod tests {
 
     #[test]
     fn benchmark_inputs_take_their_hashes_from_the_checked_manifest_rows() {
+        assert_eq!(sha256(INPUT_MANIFEST), INPUT_MANIFEST_SHA256);
         for plan in measured_record_plans() {
             let input = input_fixture(plan.workload, plan.rate_hz);
             assert_eq!(sha256(input.bytes), manifest_input_sha256(input.id));
+            input.validate_common(plan.workload, plan.rate_hz);
+            if plan.workload.is_prepare() {
+                assert_eq!(
+                    sha256(SESSION.as_bytes()),
+                    input.text("session_template_sha256")
+                );
+                assert_eq!(input.usize("tracks"), 256);
+                assert_eq!(input.usize("meter_observers"), 56);
+                assert_eq!(input.usize("meter_queue_capacity"), 4);
+            } else {
+                let _ = input.pcm();
+            }
         }
+    }
+
+    #[test]
+    fn digest_helpers_encode_known_abc_without_rehashing_finalized_bytes() {
+        let finalized = Sha256::digest(b"abc");
         assert_eq!(
-            manifest_input_sha256("fixtures/builtins/v1/benchmark/meter_success_full-48000.toml"),
-            "ded3579ee8ffbf79d920648a33a7e2f35fa9c9b386e98ef469d583830ef992de"
+            sha256(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(
+            hex(&finalized),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_ne!(
+            sha256(&finalized),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
     }
 

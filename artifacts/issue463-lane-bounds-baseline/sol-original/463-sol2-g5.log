@@ -1,0 +1,7 @@
+{"schema_version":1,"kind":"wasm_gates","leg":"native","runtime":"wasmtime 47.0.3","backend":2,"cases":139,"comparisons":349,"minmax_lowering_mismatches":0,"mismatches":[]}
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.03s
+{"schema_version":1,"kind":"wasm_gates","leg":"wasm","runtime":"wasmtime 47.0.3","backend":0,"cases":139,"comparisons":349,"minmax_lowering_mismatches":0,"mismatches":[]}
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.03s
+{"schema_version":1,"kind":"wasm_gates","leg":"wasm","runtime":"wasmtime 47.0.3","backend":1,"cases":139,"comparisons":349,"minmax_lowering_mismatches":0,"mismatches":[]}
+wasm gates: detector history resident in locals on both guest legs
+wasm gates: ok (native + wasm scalar + wasm simd128), evidence in /tmp/463-sol2-g5-artifact/wasm-gates.jsonl

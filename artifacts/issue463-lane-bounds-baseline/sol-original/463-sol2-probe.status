@@ -1,0 +1,6 @@
+native=0
+wasm_scalar=0
+wasm_simd128=0
+initial_without_dependency_search_path_native=1
+initial_without_dependency_search_path_wasm_scalar=1
+initial_without_dependency_search_path_wasm_simd128=1

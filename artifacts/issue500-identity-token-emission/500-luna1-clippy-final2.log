@@ -1,0 +1,25 @@
+Sun Sep  6 05:32:56 UTC 2026
+/home/bl/misofm/engine-cp20-identity-plan
+argv: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+source=fcb8703cbb4d61fca041225305b91049fbee2bb2
+PATH=/home/bl/.cargo/bin:/home/bl/.local/bin:/home/bl/.codex/packages/standalone/releases/0.153.2-x86_64-unknown-linux-musl/codex-path:/home/bl/.codex/tmp/arg0/codex-arg0CWD760:/home/bl/.local/bin:/home/bl/.opencode/bin:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.opencode/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin
+    Checking graph-compiler v0.1.0 (/home/bl/misofm/engine-cp20-identity-plan/crates/graph-compiler)
+    Checking cranelift-native v0.134.3
+    Checking cranelift-frontend v0.134.3
+    Checking wasmtime-internal-unwinder v47.0.3
+    Checking wasmtime-internal-cranelift v47.0.3
+    Checking host-core v0.1.0 (/home/bl/misofm/engine-cp20-identity-plan/crates/host-core)
+    Checking console-workload v0.1.0 (/home/bl/misofm/engine-cp20-identity-plan/tools/console-workload)
+    Checking bench v0.1.0 (/home/bl/misofm/engine-cp20-identity-plan/tools/bench)
+    Checking wasm-console-guest v0.1.0 (/home/bl/misofm/engine-cp20-identity-plan/tools/wasm-console-guest)
+    Checking host-web v0.1.0 (/home/bl/misofm/engine-cp20-identity-plan/hosts/host-web)
+    Checking capi v0.1.0 (/home/bl/misofm/engine-cp20-identity-plan/crates/capi)
+    Checking native-pcm-runner v0.1.0 (/home/bl/misofm/engine-cp20-identity-plan/tools/native-pcm-runner)
+    Checking audit v0.1.0 (/home/bl/misofm/engine-cp20-identity-plan/tools/audit)
+    Checking parameter-metadata v0.1.0 (/home/bl/misofm/engine-cp20-identity-plan/tools/parameter-metadata)
+    Checking session-validator v0.1.0 (/home/bl/misofm/engine-cp20-identity-plan/tools/session-validator)
+    Checking wasmtime v47.0.3
+    Checking wasm-gates v0.1.0 (/home/bl/misofm/engine-cp20-identity-plan/tools/wasm-gates)
+    Checking wasm-console v0.1.0 (/home/bl/misofm/engine-cp20-identity-plan/tools/wasm-console)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.96s
+exit=0

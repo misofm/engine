@@ -1,0 +1,122 @@
+[
+  {
+    "path": "500-luna1-clippy-final.log",
+    "bytes": 2406,
+    "sha256": "9444ba46a8a77cde35e81f96e855caf68948157da2f5bcfce94568dfe827e099"
+  },
+  {
+    "path": "500-luna1-clippy-final2.log",
+    "bytes": 2136,
+    "sha256": "1e107d33823309facad7b24d80e16fe2b81e7dfcb18e1bedc7fc1500d6a1ddf1"
+  },
+  {
+    "path": "500-luna1-clippy.log",
+    "bytes": 11373,
+    "sha256": "92bdc103f01e52383d5ccbcac270a2ea9e49961024f2f02fbcb8c527555d1c7a"
+  },
+  {
+    "path": "500-luna1-diff-final.log",
+    "bytes": 531,
+    "sha256": "2d120012dce123f5897b7a89b56d2b75e9778620190de93eadec8f30b3770ed9"
+  },
+  {
+    "path": "500-luna1-final-focused-debug.log",
+    "bytes": 1263,
+    "sha256": "2632157eb32b4ea73d48afe0a90b550f8398187d5a4b79f059f94057d413bdb6"
+  },
+  {
+    "path": "500-luna1-final-focused-release-2.log",
+    "bytes": 1175,
+    "sha256": "46854995b214eb9913af6062a53fe2aea80fe8df45abe93bfc300289cac0bb5e"
+  },
+  {
+    "path": "500-luna1-final-focused-release.log",
+    "bytes": 1277,
+    "sha256": "69fd2eac4af772c8e086e835398450ad0d479c199ca47d6d037378c82e0e7576"
+  },
+  {
+    "path": "500-luna1-fmt-check.log",
+    "bytes": 561,
+    "sha256": "c549f1dafd4325970ad8998b0e664b872801409a7e2b9f43ccb0514abf684386"
+  },
+  {
+    "path": "500-luna1-fmt-final.log",
+    "bytes": 561,
+    "sha256": "bb49a828f156b23d548742ea9d2b674836b11b70671a2a46268d968ddddf819a"
+  },
+  {
+    "path": "500-luna1-fmt-final2.log",
+    "bytes": 704,
+    "sha256": "cf5b703c751f2c3786a151040fbb1d4ab33ae811477167b6839212f3f84a2304"
+  },
+  {
+    "path": "500-luna1-fmt-post-clippy.log",
+    "bytes": 587,
+    "sha256": "67747ade7c94ebefaeb4e436ac828592853715a6f1c85cbc3c6c448d2271f232"
+  },
+  {
+    "path": "500-luna1-fmt.log",
+    "bytes": 7712,
+    "sha256": "50a5520488b37d4396b0a6f7ebb798670a38294cb8445fd1a45cbc8efd779527"
+  },
+  {
+    "path": "500-luna1-focused-debug.log",
+    "bytes": 1019,
+    "sha256": "1876e36cd99c84f224fe4481ee17fd5a3e45c4e26e51e732592322c9e955d9fa"
+  },
+  {
+    "path": "500-luna1-focused-release-2.log",
+    "bytes": 1086,
+    "sha256": "4fbf85b83ee9432f9e13956eea9a6005487ae499ce30c8cc98b2bbfe4149162f"
+  },
+  {
+    "path": "500-luna1-focused-release.log",
+    "bytes": 4597,
+    "sha256": "76e93967ea9b3e0907540e1a075ff48f6ef0499287e52b096712c2e61176cc41"
+  },
+  {
+    "path": "500-luna1-graph-policy-tests.log",
+    "bytes": 594,
+    "sha256": "e9a510f78dd678d822361085421ee24ab94876a859ccfa91ded5b18dba3ffc68"
+  },
+  {
+    "path": "500-luna1-graph-policy.log",
+    "bytes": 588,
+    "sha256": "dec5f9f00e75a1c12f5829c94e217dcbe72c08b26ea07a51cd057430d11f6780"
+  },
+  {
+    "path": "500-luna1-lib-debug.log",
+    "bytes": 6047,
+    "sha256": "ff4212904b8574138ba71f13dadc49e255457a1897896ba83cfd0998be6dacfb"
+  },
+  {
+    "path": "500-luna1-lib-release-2.log",
+    "bytes": 6114,
+    "sha256": "7244084c5de880c6c3a3a05fd50d9125aea91ae4a8c00c7351acc898db986e1f"
+  },
+  {
+    "path": "500-luna1-lib-release.log",
+    "bytes": 6162,
+    "sha256": "9faee40f5d61bbcac30e66ed43278e269033e153aefc920c23805d09e4677694"
+  },
+  {
+    "path": "500-luna1-parity-debug.log",
+    "bytes": 1100,
+    "sha256": "e48b93bbcab65f970578566670b695dac6edd3355ec63c6b0293b9bda3e8be4d"
+  },
+  {
+    "path": "500-luna1-repeat-debug.log",
+    "bytes": 1015,
+    "sha256": "ec9a49e7eb8d97c19f4b40ae7917e614e77f46544438a3407f7e34155b357623"
+  },
+  {
+    "path": "README.md",
+    "bytes": 2010,
+    "sha256": "3773fbe7e842a3de0dc5bf36232cdc430ee1a1ec255e081ffca948b84d2b5b53"
+  },
+  {
+    "path": "final-source-identity.json",
+    "bytes": 470,
+    "sha256": "56cb8000de12343459af141bdde7cfe2dc7523a63c09609e241b357dc7ae0104"
+  }
+]

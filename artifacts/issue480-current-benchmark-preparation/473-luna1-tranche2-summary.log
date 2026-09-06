@@ -1,0 +1,21 @@
+#473 Luna attempt 1, tranche 2
+
+Changed paths:
+- scripts/builtins-current-benchmark-record-validator.jq
+- scripts/builtins-current-benchmark-validator.jq
+- scripts/preflight-builtins-current-benchmark.sh
+- scripts/run-builtins-current-benchmark.sh
+- scripts/test-builtins-current-benchmark.sh
+
+- Added dedicated current validator namespace with current manifest and ten descriptor identities,
+  while leaving historical validators untouched.
+- Added dedicated zero-argument preflight, runner, and shell-only lifecycle entrypoints. No real
+  preflight, runner, audio, benchmark, or timing invocation was performed.
+
+Actual validation:
+- /tmp/473-luna1-tranche2-syntax.log (+ .command, .status): shell syntax passed, exit.status=0.
+- /tmp/473-luna1-tranche2-bench.log (+ .command, .status): 31 passed, exit.status=0.
+- /tmp/473-luna1-tranche2-validator.log (+ .command, .status): jq syntax evaluation returned
+  false for empty input, exit.status=0; retained as a syntax-only check.
+
+Paused at the next coherent focused-green tranche. No commit or push performed; root owns delivery.

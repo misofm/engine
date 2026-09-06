@@ -1,0 +1,8 @@
+error: unexpected argument '--exact' found
+
+  tip: to pass '--exact' as a value, use '-- --exact'
+
+Usage: cargo test --locked --package [<SPEC>] --lib <TESTNAME> [-- [ARGS]...]
+
+For more information, try '--help'.
+STATUS: 1

@@ -1,0 +1,15 @@
+COMMAND_1=PATH=/home/bl/.cargo/bin:$PATH bash scripts/check-realtime-policy.sh
+COMMAND_2=PATH=/home/bl/.cargo/bin:$PATH bash scripts/check-lane-policy.sh
+COMMAND_3=PATH=/home/bl/.cargo/bin:$PATH bash scripts/check-workspace-policy.sh
+COMMAND_4=PATH=/home/bl/.cargo/bin:$PATH bash scripts/check-env-vocabulary.sh
+CWD=/home/bl/misofm/engine-475-plan
+SOURCE_REV=019ac62a
+realtime policy: ok (42 marked regions in 12 files)
+REALTIME_POLICY_EXIT=0
+lane policy: ok
+LANE_POLICY_EXIT=0
+workspace policy: ok
+WORKSPACE_POLICY_EXIT=0
+env vocabulary: ok (114 names, one MISO_ENGINE_ prefix)
+ENV_VOCABULARY_EXIT=0
+

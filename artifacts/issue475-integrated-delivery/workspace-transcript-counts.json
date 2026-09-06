@@ -1,0 +1,7 @@
+{
+  "result_blocks": 277,
+  "passed": 1639,
+  "failed": 0,
+  "ignored": 24,
+  "note": "Transcript aggregates include the isolated allocation child result; not a claim of this many distinct test functions."
+}

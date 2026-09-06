@@ -1,0 +1,14 @@
+{
+  "argv": [
+    "bash",
+    "scripts/check-capi-abi.sh"
+  ],
+  "cwd": "/home/bl/misofm/engine-475-populated-proof",
+  "source": "1c71000d19abd609159e1006fc6291c57ff4670d",
+  "env_overrides": {
+    "MISO_ENGINE_CAPI_SKIP_BUILD": "1",
+    "MISO_ENGINE_CAPI_LIBRARY": "/tmp/engine-475-native-qualified/release/libcapi.so",
+    "MISO_ENGINE_CAPI_STATIC_LIBRARY": "/tmp/engine-475-native-qualified/release/libcapi.a",
+    "PATH": "/home/bl/.cargo/bin:/home/bl/.codex/packages/standalone/releases/0.153.2-x86_64-unknown-linux-musl/codex-path:/home/bl/.local/bin:/home/bl/.codex/tmp/arg0/codex-arg0CWD760:/home/bl/.codex/packages/standalone/releases/0.153.2-x86_64-unknown-linux-musl/codex-path:/home/bl/.local/bin:/home/bl/.opencode/bin:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.opencode/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin"
+  }
+}

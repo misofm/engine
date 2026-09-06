@@ -1,0 +1,28 @@
+   Compiling bytemuck v1.25.2
+   Compiling typenum v1.20.1
+   Compiling engine v0.1.0 (/home/bl/misofm/engine-compressor-allocation-proof/crates/engine)
+   Compiling cpufeatures v0.3.0
+   Compiling cfg-if v1.0.4
+   Compiling dsp-reference v0.1.0 (/home/bl/misofm/engine-compressor-allocation-proof/crates/dsp-reference)
+   Compiling safe_arch v1.2.0
+   Compiling wide v1.6.1
+   Compiling hybrid-array v0.4.14
+   Compiling crypto-common v0.2.2
+   Compiling block-buffer v0.12.1
+   Compiling digest v0.11.3
+   Compiling sha2 v0.11.0
+   Compiling bench-support v0.1.0 (/home/bl/misofm/engine-compressor-allocation-proof/tools/bench-support)
+   Compiling lane v0.1.0 (/home/bl/misofm/engine-compressor-allocation-proof/crates/lane)
+   Compiling math v0.1.0 (/home/bl/misofm/engine-compressor-allocation-proof/crates/math)
+   Compiling effect-contract v0.1.0 (/home/bl/misofm/engine-compressor-allocation-proof/crates/effect-contract)
+   Compiling effect-runtime v0.1.0 (/home/bl/misofm/engine-compressor-allocation-proof/crates/effect-runtime)
+   Compiling conformance v0.1.0 (/home/bl/misofm/engine-compressor-allocation-proof/crates/conformance)
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-compressor-allocation-proof/crates/compressor)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.30s
+     Running tests/conformance.rs (/tmp/engine-503-final-gates/debug/deps/conformance-3c37af9fe9c8a5a5)
+
+running 1 test
+test scoped_allocator_attribution_controls_are_live_and_isolated ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+

@@ -1,0 +1,7 @@
+# Issue 506 bench hex authority
+
+Final source e88a2bb2 exposes the unchanged bench-support byte encoder and replaces all three bench-package local encoder bodies with the existing shared byte/one-shot authorities. Finalized builtin digests are encoded directly, never rehashed; raw effect digest and decoding/validation remain unchanged. Literal empty/leading-zero/all-nibble and consumer abc fixtures exercise the shared paths.
+
+Final separate authentic subprocess captures supply bench-support digest5 and bench35 tests in both debug/release profiles, strict affected Clippy, fmt, bench policy and effect-interchange qualification policy, each exit0. Per-command source SHA256 lists match final files even though the HEAD record names the preceding checkpoint with the final vector change uncommitted. Root checked source hashes independently. The earlier initial debug-support capture supplies only its one command, not every gate claimed in the initial report. Its process-wide environment dump is deliberately omitted from this package; final captures retain a whitelist of relevant execution settings. Original local records remain untouched.
+
+No benchmark runner, capture or timing was invoked; historical source seals, preparation records, validators, fixture pins and measurement authority remain unchanged. Future tool source/binary identities necessarily differ. This is one package's maintenance slice; CP20 remains partial across the repository. Consolidated Astra review remains pending.

@@ -1,0 +1,9 @@
+   Compiling builtins-compiler v0.1.0 (/home/bl/misofm/engine-479-proof/crates/builtins-compiler)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.25s
+     Running tests/allocation_tracker.rs (/tmp/engine-479-sol-target/debug/deps/allocation_tracker-b6767a1ad7cc8a1e)
+
+running 1 test
+test actual_scalar_prepare_and_bind_retain_the_charged_owner_layouts ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+

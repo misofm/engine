@@ -475,18 +475,20 @@ pub fn sum2_block<L: Lane>(out: &mut [f32], a: &[f32], b: &[f32]) {
     debug_assert_eq!(out.len(), b.len());
     let count = out.len();
     let vectored = count - count % L::WIDTH;
-    let mut index = 0;
-    while index < vectored {
-        let left = L::load(&a[index..]);
-        let right = L::load(&b[index..]);
-        left.add(right).store(&mut out[index..]);
-        index += L::WIDTH;
+    let a = &a[..count];
+    let b = &b[..count];
+    let (out_vectors, out_tail) = out.split_at_mut(vectored);
+    let (a_vectors, a_tail) = a.split_at(vectored);
+    let (b_vectors, b_tail) = b.split_at(vectored);
+    for ((out, a), b) in out_vectors
+        .chunks_exact_mut(L::WIDTH)
+        .zip(a_vectors.chunks_exact(L::WIDTH))
+        .zip(b_vectors.chunks_exact(L::WIDTH))
+    {
+        L::load(a).add(L::load(b)).store(out);
     }
-    while index < count {
-        let left = <f32 as Lane>::load(&a[index..]);
-        let right = <f32 as Lane>::load(&b[index..]);
-        left.add(right).store(&mut out[index..]);
-        index += 1;
+    for ((out, a), b) in out_tail.iter_mut().zip(a_tail).zip(b_tail) {
+        *out = <f32 as Lane>::add(*a, *b);
     }
 }
 
@@ -499,16 +501,17 @@ pub fn sum_into_block<L: Lane>(acc: &mut [f32], x: &[f32]) {
     debug_assert_eq!(acc.len(), x.len());
     let count = acc.len();
     let vectored = count - count % L::WIDTH;
-    let mut index = 0;
-    while index < vectored {
-        let sum = L::load(&acc[index..]).add(L::load(&x[index..]));
-        sum.store(&mut acc[index..]);
-        index += L::WIDTH;
+    let x = &x[..count];
+    let (acc_vectors, acc_tail) = acc.split_at_mut(vectored);
+    let (x_vectors, x_tail) = x.split_at(vectored);
+    for (acc, x) in acc_vectors
+        .chunks_exact_mut(L::WIDTH)
+        .zip(x_vectors.chunks_exact(L::WIDTH))
+    {
+        L::load(acc).add(L::load(x)).store(acc);
     }
-    while index < count {
-        let sum = <f32 as Lane>::load(&acc[index..]).add(<f32 as Lane>::load(&x[index..]));
-        sum.store(&mut acc[index..]);
-        index += 1;
+    for (acc, x) in acc_tail.iter_mut().zip(x_tail) {
+        *acc = <f32 as Lane>::add(*acc, *x);
     }
 }
 
@@ -613,26 +616,29 @@ pub fn mix2x2_block<L: Lane>(left: &mut [f32], right: &mut [f32], c: [f32; 4]) {
     debug_assert_eq!(left.len(), right.len());
     let count = left.len();
     let vectored = count - count % L::WIDTH;
+    let right = &mut right[..count];
     let (ll, lr, rl, rr) = (
         L::splat(c[0]),
         L::splat(c[1]),
         L::splat(c[2]),
         L::splat(c[3]),
     );
-    let mut index = 0;
-    while index < vectored {
-        let l = L::load(&left[index..]);
-        let r = L::load(&right[index..]);
-        lr.fma(r, ll.mul(l)).store(&mut left[index..]);
-        rr.fma(r, rl.mul(l)).store(&mut right[index..]);
-        index += L::WIDTH;
+    let (left_vectors, left_tail) = left.split_at_mut(vectored);
+    let (right_vectors, right_tail) = right.split_at_mut(vectored);
+    for (left, right) in left_vectors
+        .chunks_exact_mut(L::WIDTH)
+        .zip(right_vectors.chunks_exact_mut(L::WIDTH))
+    {
+        let old_left = L::load(left);
+        let old_right = L::load(right);
+        lr.fma(old_right, ll.mul(old_left)).store(left);
+        rr.fma(old_right, rl.mul(old_left)).store(right);
     }
     let (ll, lr, rl, rr) = (c[0], c[1], c[2], c[3]);
-    while index < count {
-        let l = <f32 as Lane>::load(&left[index..]);
-        let r = <f32 as Lane>::load(&right[index..]);
-        lr.fma(r, ll.mul(l)).store(&mut left[index..]);
-        rr.fma(r, rl.mul(l)).store(&mut right[index..]);
-        index += 1;
+    for (left, right) in left_tail.iter_mut().zip(right_tail) {
+        let old_left = *left;
+        let old_right = *right;
+        *left = <f32 as Lane>::fma(lr, old_right, <f32 as Lane>::mul(ll, old_left));
+        *right = <f32 as Lane>::fma(rr, old_right, <f32 as Lane>::mul(rl, old_left));
     }
 }

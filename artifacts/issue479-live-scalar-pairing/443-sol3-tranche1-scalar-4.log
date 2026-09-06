@@ -1,0 +1,24 @@
+   Compiling builtins-compiler v0.1.0 (/home/bl/misofm/engine-443-plan/crates/builtins-compiler)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.63s
+     Running unittests src/lib.rs (/tmp/engine-443-sol-target/debug/deps/builtins_compiler-5ff1d293b1f7fb6b)
+
+running 1 test
+test tests::actual_scalar_graph_queues_fuse_and_fall_back_against_separate_owners ... FAILED
+
+failures:
+
+---- tests::actual_scalar_graph_queues_fuse_and_fall_back_against_separate_owners stdout ----
+
+thread 'tests::actual_scalar_graph_queues_fuse_and_fall_back_against_separate_owners' (3832197) panicked at crates/builtins-compiler/src/lib.rs:5306:9:
+assertion `left == right` failed
+  left: (0, 0)
+ right: (1, 1)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::actual_scalar_graph_queues_fuse_and_fall_back_against_separate_owners
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 31 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p builtins-compiler --lib`

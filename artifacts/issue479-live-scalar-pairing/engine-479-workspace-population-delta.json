@@ -1,0 +1,80 @@
+{
+  "removed": [],
+  "added": [
+    {
+      "name": "tests::scalar_invalid_envelope_leaves_the_later_matrix_queue_untouched",
+      "status": "ok",
+      "count": 1
+    },
+    {
+      "name": "tests::scalar_factory_checks_both_exact_owners_and_policies_without_consuming_state",
+      "status": "ok",
+      "count": 1
+    },
+    {
+      "name": "tests::scalar_pair_reset_matches_reset_original_owners",
+      "status": "ok",
+      "count": 1
+    },
+    {
+      "name": "tests::scalar_owner_resource_is_independent_two_boxes_plus_two_pointer_outer",
+      "status": "ok",
+      "count": 1
+    },
+    {
+      "name": "tests::actual_scalar_extra_reader_declines_and_retains_separate_owner_pcm",
+      "status": "ok",
+      "count": 1
+    },
+    {
+      "name": "tests::actual_scalar_effect_sidechain_declines_and_matches_separate_owner_data_and_state",
+      "status": "ok",
+      "count": 1
+    },
+    {
+      "name": "tests::actual_scalar_graph_preserves_scheduled_matrix_prefix_error_and_queue_tail",
+      "status": "ok",
+      "count": 1
+    },
+    {
+      "name": "tests::actual_scalar_graph_queues_fuse_and_fall_back_against_separate_owners",
+      "status": "ok",
+      "count": 1
+    },
+    {
+      "name": "tests::actual_scalar_nonunity_send_reader_declines_with_reference_output",
+      "status": "ok",
+      "count": 1
+    },
+    {
+      "name": "tests::staggered_observed_scalar_track_stays_separate_while_eligible_peer_pairs",
+      "status": "ok",
+      "count": 1
+    },
+    {
+      "name": "actual_queued_scalar_graph_allocates_and_frees_nothing",
+      "status": "ok",
+      "count": 1
+    },
+    {
+      "name": "actual_scalar_prepare_and_bind_retain_the_charged_owner_layouts",
+      "status": "ok",
+      "count": 1
+    },
+    {
+      "name": "runtime::tests::synthetic_distinct_matrix_destination_is_the_scalar_pair_identity_decline",
+      "status": "ok",
+      "count": 1
+    },
+    {
+      "name": "tests::scalar_owner_resource_overflow_leaves_the_graph_estimate_unchanged",
+      "status": "ok",
+      "count": 1
+    },
+    {
+      "name": "tests::live_scalar_owner_bytes_are_published_and_capped_before_binding",
+      "status": "ok",
+      "count": 1
+    }
+  ]
+}

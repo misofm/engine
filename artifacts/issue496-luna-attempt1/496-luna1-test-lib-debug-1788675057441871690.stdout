@@ -1,0 +1,97 @@
+Diff in /home/bl/misofm/engine-rt5-ramp-plan/crates/builtins/src/lib.rs:1120:
+         }
+         for section in 0..2 {
+             for (left_word, right_word) in [
+-                (self.coef.section[0][section].c1, self.coef.section[1][section].c1),
+-                (self.coef.section[0][section].a2, self.coef.section[1][section].a2),
+-                (self.coef.section[0][section].a3, self.coef.section[1][section].a3),
+-                (self.coef.section[0][section].m0, self.coef.section[1][section].m0),
+-                (self.coef.section[0][section].m1, self.coef.section[1][section].m1),
+-                (self.coef.section[0][section].m2, self.coef.section[1][section].m2),
++                (
++                    self.coef.section[0][section].c1,
++                    self.coef.section[1][section].c1,
++                ),
++                (
++                    self.coef.section[0][section].a2,
++                    self.coef.section[1][section].a2,
++                ),
++                (
++                    self.coef.section[0][section].a3,
++                    self.coef.section[1][section].a3,
++                ),
++                (
++                    self.coef.section[0][section].m0,
++                    self.coef.section[1][section].m0,
++                ),
++                (
++                    self.coef.section[0][section].m1,
++                    self.coef.section[1][section].m1,
++                ),
++                (
++                    self.coef.section[0][section].m2,
++                    self.coef.section[1][section].m2,
++                ),
+             ] {
+                 if candidate == 0 {
+                     break;
+Diff in /home/bl/misofm/engine-rt5-ramp-plan/crates/builtins/src/lib.rs:1133:
+                 let left = lane_read::<L>(left_word);
+                 let right = lane_read::<L>(right_word);
+                 for lane in 0..L::WIDTH {
+-                    if candidate & (1 << lane) != 0
+-                        && left[lane].to_bits() != right[lane].to_bits()
++                    if candidate & (1 << lane) != 0 && left[lane].to_bits() != right[lane].to_bits()
+                     {
+                         candidate &= !(1 << lane);
+                     }
+Diff in /home/bl/misofm/engine-rt5-ramp-plan/crates/builtins/src/lib.rs:4223:
+ mod tests {
+     use super::{
+         BuiltinChain, BuiltinLaneSelector, BuiltinParameters, BuiltinProcessReport,
+-        BuiltinResetKind, CHANNEL_SYMMETRY_PREDICATE_CALLS, Cell, ChannelParameters, DualMonoBlock,
+-        CHANNEL_SYMMETRY_LANE_READS, CHANNEL_SYMMETRY_OBSERVE_POST_RAMP, InputStage, Matrix2x2,
+-        Simd4, Simd8, prepare_sections, test_support,
++        BuiltinResetKind, CHANNEL_SYMMETRY_LANE_READS, CHANNEL_SYMMETRY_OBSERVE_POST_RAMP,
++        CHANNEL_SYMMETRY_PREDICATE_CALLS, Cell, ChannelParameters, DualMonoBlock, InputStage,
++        Matrix2x2, Simd4, Simd8, prepare_sections, test_support,
+     };
+ 
+     #[test]
+Diff in /home/bl/misofm/engine-rt5-ramp-plan/crates/builtins/src/lib.rs:4232:
+     fn post_ramp_symmetry_mask_matches_lane_oracle() {
+         let parameters = BuiltinParameters::default();
+-        let track = prepare_sections(48_000, parameters).unwrap().0.stage.lane_track(0);
++        let track = prepare_sections(48_000, parameters)
++            .unwrap()
++            .0
++            .stage
++            .lane_track(0);
+         let tracks = [track; 8];
+         check_post_ramp_mask::<f32>(&tracks[..1]);
+         check_post_ramp_mask::<Simd4>(&tracks[..4]);
+Diff in /home/bl/misofm/engine-rt5-ramp-plan/crates/builtins/src/lib.rs:4270:
+     #[test]
+     fn post_ramp_symmetry_extracts_each_word_once() {
+         let parameters = BuiltinParameters::default();
+-        let track = prepare_sections(48_000, parameters).unwrap().0.stage.lane_track(0);
++        let track = prepare_sections(48_000, parameters)
++            .unwrap()
++            .0
++            .stage
++            .lane_track(0);
+         let mut stage = InputStage::<Simd8>::new(&[track; 8]);
+         for lane in 0..8 {
+             stage.set_trim_db(lane, BuiltinLaneSelector::Both, 2.0, 8);
+Diff in /home/bl/misofm/engine-rt5-ramp-plan/crates/builtins/src/lib.rs:4285:
+             mask | u8::from(stage.compute_lane_channel_symmetry(lane)) << lane
+         });
+         assert_eq!(stage.symmetry, oracle);
+-        assert_eq!(extractions, 30, "one extraction per side of each of 15 word pairs");
++        assert_eq!(
++            extractions, 30,
++            "one extraction per side of each of 15 word pairs"
++        );
+     }
+ 
+     fn process_reference(

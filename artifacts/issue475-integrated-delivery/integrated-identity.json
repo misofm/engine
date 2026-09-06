@@ -1,0 +1,11 @@
+{
+  "immutable_source": "1c71000d19abd609159e1006fc6291c57ff4670d",
+  "immutable_checkout": "/home/bl/misofm/engine-475-populated-proof",
+  "immutable_checkout_clean": true,
+  "delivery_source": "91a7681622f9c0774ddde8a78e156010511b7f99",
+  "crate_cargo_config_delta": "none",
+  "qualified_candidate": "de4101349b3b6fa7b96b69dc3fdca30b9a7afa46",
+  "published_module": "/tmp/engine-475-qualified/miso-engine-v1-audio-worklet.simd128.wasm",
+  "module_bytes": 2686383,
+  "module_sha256": "fa78dc8d3f0d391b94419f5252504eee2aafbbf13853884157e24935ed092cc3"
+}

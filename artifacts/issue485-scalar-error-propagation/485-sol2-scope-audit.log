@@ -1,0 +1,72 @@
+diff --git a/crates/builtins-compiler/src/lib.rs b/crates/builtins-compiler/src/lib.rs
+index 6786a86e..4a5b1039 100644
+--- a/crates/builtins-compiler/src/lib.rs
++++ b/crates/builtins-compiler/src/lib.rs
+@@ -7 +7 @@ use std::collections::{BTreeMap, BTreeSet};
+-#[cfg(feature = "test-support")]
++#[cfg(any(test, feature = "test-support"))]
+@@ -13 +13 @@ use builtins::builtin_filter_cutoff_maximum_hz;
+-#[cfg(feature = "test-support")]
++#[cfg(any(test, feature = "test-support"))]
+@@ -1274 +1274 @@ type ConsumerSeal = (u64, Box<str>, MeterTap);
+-#[cfg(feature = "test-support")]
++#[cfg(any(test, feature = "test-support"))]
+@@ -1276 +1276 @@ static TEST_PHASE_TWO_ACTIVE: AtomicBool = AtomicBool::new(false);
+-#[cfg(feature = "test-support")]
++#[cfg(any(test, feature = "test-support"))]
+@@ -1280 +1280 @@ static TEST_PHASE_TWO_LAYOUTS: Mutex<TestPhaseTwoLayoutTable> =
+-#[cfg(feature = "test-support")]
++#[cfg(any(test, feature = "test-support"))]
+@@ -1290 +1290 @@ struct TestPhaseTwoLayoutTable {
+-#[cfg(feature = "test-support")]
++#[cfg(any(test, feature = "test-support"))]
+@@ -1365 +1365 @@ impl TestPhaseTwoLayoutTable {
+-#[cfg(feature = "test-support")]
++#[cfg(any(test, feature = "test-support"))]
+@@ -1378 +1378 @@ pub struct TestPhaseTwoAllocationSnapshot {
+-#[cfg(feature = "test-support")]
++#[cfg(any(test, feature = "test-support"))]
+@@ -1388 +1388 @@ pub fn test_only_reset_phase_two_allocation_tracker() {
+-#[cfg(feature = "test-support")]
++#[cfg(any(test, feature = "test-support"))]
+@@ -1399 +1399 @@ pub fn test_only_record_phase_two_allocation(layout: core::alloc::Layout) {
+-#[cfg(feature = "test-support")]
++#[cfg(any(test, feature = "test-support"))]
+@@ -1410 +1410 @@ pub fn test_only_record_phase_two_deallocation(layout: core::alloc::Layout) {
+-#[cfg(feature = "test-support")]
++#[cfg(any(test, feature = "test-support"))]
+@@ -1450 +1450 @@ pub fn test_only_phase_two_allocation_snapshot() -> TestPhaseTwoAllocationSnapsh
+-#[cfg(feature = "test-support")]
++#[cfg(any(test, feature = "test-support"))]
+@@ -1452 +1452 @@ struct TestPhaseTwoAllocationGuard;
+-#[cfg(feature = "test-support")]
++#[cfg(any(test, feature = "test-support"))]
+@@ -1459 +1459 @@ impl TestPhaseTwoAllocationGuard {
+-#[cfg(feature = "test-support")]
++#[cfg(any(test, feature = "test-support"))]
+@@ -1480 +1480 @@ pub fn test_only_scalar_owner_layouts() -> [BuiltinRetainedLayout; 3] {
+-#[cfg(feature = "test-support")]
++#[cfg(any(test, feature = "test-support"))]
+@@ -3591 +3591 @@ impl GraphRuntimeProcessor for ConsoleMatrixProcessor {
+-        if let Err(error) = self.drain_controls() {
++        self.drain_controls().inspect_err(|_| {
+@@ -3596,2 +3596 @@ impl GraphRuntimeProcessor for ConsoleMatrixProcessor {
+-            return Err(error);
+-        }
++        })?;
+@@ -3648 +3647 @@ impl GraphRuntimeProcessor for ConsoleFaderProcessor {
+-        if let Err(error) = self.drain_controls() {
++        self.drain_controls().inspect_err(|_| {
+@@ -3653,2 +3652 @@ impl GraphRuntimeProcessor for ConsoleFaderProcessor {
+-            return Err(error);
+-        }
++        })?;
+@@ -3735 +3733 @@ impl GraphRuntimeProcessor for ScalarPairProcessor {
+-        if let Err(error) = self.fader.drain_controls() {
++        self.fader.drain_controls().inspect_err(|_| {
+@@ -3738,2 +3736 @@ impl GraphRuntimeProcessor for ScalarPairProcessor {
+-            return Err(error);
+-        }
++        })?;
+
+COUNTS removed_cfg=15 added_cfg=15 removed_if=3 added_inspect=3 removed_return=3

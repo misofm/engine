@@ -1,0 +1,11 @@
+lib-debug exit=0
+lib-release exit=0
+liveness-debug exit=0
+liveness-release exit=0
+host-console-debug exit=0
+host-console-release exit=0
+clippy exit=0
+fmt exit=0
+realtime-policy exit=0
+lane-policy exit=0
+workspace-policy exit=0

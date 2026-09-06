@@ -1,0 +1,43 @@
+PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/engine-443-luna-target cargo test --locked -p builtins-compiler --features test-support --lib
+   Compiling builtins v0.1.0 (/home/bl/misofm/engine-443-plan/crates/builtins)
+   Compiling builtins-compiler v0.1.0 (/home/bl/misofm/engine-443-plan/crates/builtins-compiler)
+error[E0382]: borrow of moved value: `block`
+    --> crates/builtins-compiler/src/lib.rs:3508:75
+     |
+3501 |         let block = DualMonoBlock::new(left, right, first_sample).map_err(render_error)?;
+     |             ----- move occurs because `block` has type `builtins::DualMonoBlock<'_>`, which does not implement the `Copy` trait
+3502 |         self.matrix.drain_controls().or_else(|error| {
+     |                                              ------- value moved into closure here
+...
+3505 |             self.fader.fader.process(block);
+     |                                      ----- variable moved due to use in closure
+...
+3508 |         if self.fader.fader.process_fader_matrix(&mut self.matrix.matrix, &mut block) {
+     |                                                                           ^^^^^^^^^^ value borrowed here after move
+
+error[E0596]: cannot borrow `block` as mutable, as it is not declared as mutable
+    --> crates/builtins-compiler/src/lib.rs:3508:75
+     |
+3508 |         if self.fader.fader.process_fader_matrix(&mut self.matrix.matrix, &mut block) {
+     |                                                                           ^^^^^^^^^^ cannot borrow as mutable
+     |
+help: consider changing this to be mutable
+     |
+3501 |         let mut block = DualMonoBlock::new(left, right, first_sample).map_err(render_error)?;
+     |             +++
+
+error[E0382]: use of moved value: `block`
+    --> crates/builtins-compiler/src/lib.rs:3512:36
+     |
+3501 |         let block = DualMonoBlock::new(left, right, first_sample).map_err(render_error)?;
+     |             ----- move occurs because `block` has type `builtins::DualMonoBlock<'_>`, which does not implement the `Copy` trait
+...
+3511 |         self.fader.fader.process(block);
+     |                                  ----- value moved here
+3512 |         self.matrix.matrix.process(block);
+     |                                    ^^^^^ value used here after move
+
+Some errors have detailed explanations: E0382, E0596.
+For more information about an error, try `rustc --explain E0382`.
+error: could not compile `builtins-compiler` (lib test) due to 3 previous errors
+exit.status=101

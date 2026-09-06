@@ -203,6 +203,13 @@ pub struct GraphBuiltinBankResourceEstimate {
     pub largest_allocation_bytes: u64,
 }
 
+/// Checked retained storage for live scalar fader/matrix owners lowered after preparation.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct GraphScalarOwnerResourceEstimate {
+    pub total_bytes: u64,
+    pub largest_allocation_bytes: u64,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GraphBuiltinBankAttachError {
     InvalidMembers,
@@ -212,6 +219,27 @@ pub enum GraphBuiltinBankAttachError {
 }
 
 impl GraphResourceEstimate {
+    pub fn checked_add_scalar_owners(
+        &mut self,
+        resource: GraphScalarOwnerResourceEstimate,
+    ) -> Option<()> {
+        let mut next = self.clone();
+        next.graph_metadata_bytes = next
+            .graph_metadata_bytes
+            .checked_add(resource.total_bytes)?;
+        next.incremental_plan_bytes = next
+            .incremental_plan_bytes
+            .checked_add(resource.total_bytes)?;
+        next.session_plus_plan_bytes = next
+            .session_plus_plan_bytes
+            .checked_add(resource.total_bytes)?;
+        next.largest_allocation_bytes = next
+            .largest_allocation_bytes
+            .max(resource.largest_allocation_bytes);
+        *self = next;
+        Some(())
+    }
+
     /// Fold exact prepared builtin-bank storage into the graph estimate before publication.
     pub fn checked_add_builtin_banks(
         &mut self,
@@ -1002,16 +1030,18 @@ impl PreparedGraphPlan {
         let duplicate_binding = supplied.len() != bindings.nodes.len();
         let source_claims = source_set
             .as_ref()
-            .map(GraphPreparedSourceSet::claimed_nodes)
+            .map(GraphPreparedSourceSet::claims)
             .unwrap_or_default();
-        let source_claim_set: BTreeSet<_> = source_claims.iter().cloned().collect();
+        let source_claim_set: BTreeSet<_> = source_claims
+            .iter()
+            .map(|claim| claim.node.clone())
+            .collect();
         let source_claims_valid = source_set.as_ref().is_none_or(|set| {
             set.envelope == self.envelope
                 && set.is_valid()
                 && source_claim_set.len() == source_claims.len()
         });
-        let mut all_supplied = supplied.clone();
-        all_supplied.extend(source_claim_set.iter().cloned());
+        let coverage_matches = supplied.union(&source_claim_set).eq(required.iter());
         let source_overlap = supplied.iter().any(|node| source_claim_set.contains(node));
         let valid_observers = self
             .observers
@@ -1026,7 +1056,7 @@ impl PreparedGraphPlan {
                     .all(|binding| pairs.insert((binding.node.clone(), binding.handle)))
             };
         if bindings.envelope != self.envelope
-            || all_supplied != required
+            || !coverage_matches
             || duplicate_binding
             || source_overlap
             || !source_claims_valid
@@ -1034,7 +1064,7 @@ impl PreparedGraphPlan {
         {
             let envelope_mismatch = bindings.envelope != self.envelope;
             let code = if source_set.is_some()
-                && (!source_claims_valid || source_overlap || all_supplied != required)
+                && (!source_claims_valid || source_overlap || !coverage_matches)
             {
                 "source.graph.binding_mismatch"
             } else if !valid_observers {
@@ -1194,10 +1224,6 @@ impl GraphPreparedSourceSet {
         self.resources
     }
 
-    fn claimed_nodes(&self) -> Vec<GraphNodeId> {
-        self.claims.iter().map(|claim| claim.node.clone()).collect()
-    }
-
     fn is_valid(&self) -> bool {
         self.resources.is_consistent()
             && self.driver.claim_count() == self.claims.len()
@@ -1284,7 +1310,18 @@ pub struct GraphBindingBlock<'a> {
     pub right: &'a mut [f32],
     pub first_sample: u64,
 }
-pub trait GraphRuntimeProcessor: Send {
+pub type ScalarPairFactory = fn(
+    Box<dyn GraphRuntimeProcessor>,
+    Box<dyn GraphRuntimeProcessor>,
+) -> Result<
+    Box<dyn GraphRuntimeProcessor>,
+    (
+        Box<dyn GraphRuntimeProcessor>,
+        Box<dyn GraphRuntimeProcessor>,
+    ),
+>;
+
+pub trait GraphRuntimeProcessor: Send + Any {
     /// Process one block in place.
     ///
     /// # The contract for a node with no graph inputs (issue #218)
@@ -1307,6 +1344,12 @@ pub trait GraphRuntimeProcessor: Send {
     /// therefore declines: nothing has compared its two channels' words.
     fn channel_symmetry(&self) -> ChannelSymmetryWitness {
         ChannelSymmetryWitness::DECLINED
+    }
+
+    /// Preparation-only hook for the serialized scalar fader/matrix pair.
+    /// Render never queries this metadata.
+    fn scalar_pair_factory(&self) -> Option<ScalarPairFactory> {
+        None
     }
 }
 /// Immutable post-node observation input. Observers cannot alter graph audio.
@@ -1385,7 +1428,12 @@ impl GraphExecutor {
         let frames = plan.envelope.quantum.0 as usize;
         let source_inputs: BTreeSet<_> = source_set
             .as_ref()
-            .map(|set| set.claimed_nodes().into_iter().collect())
+            .map(|set| {
+                set.claims()
+                    .iter()
+                    .map(|claim| claim.node.clone())
+                    .collect()
+            })
             .unwrap_or_default();
         let source_input_buffers: Box<[(usize, u32)]> = source_set
             .as_ref()
@@ -1911,6 +1959,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn scalar_owner_resource_overflow_leaves_the_graph_estimate_unchanged() {
+        let mut estimate = empty_estimate();
+        estimate.graph_metadata_bytes = 3;
+        estimate.incremental_plan_bytes = 5;
+        estimate.session_plus_plan_bytes = 7;
+        let before = estimate.clone();
+        assert_eq!(
+            estimate.checked_add_scalar_owners(GraphScalarOwnerResourceEstimate {
+                total_bytes: u64::MAX,
+                largest_allocation_bytes: 64,
+            }),
+            None
+        );
+        assert_eq!(
+            estimate, before,
+            "overflow cannot partially mutate the report"
+        );
+    }
+
     fn binding_plan() -> (PreparedGraphPlan, GraphRuntimeBindings, GraphNodeId) {
         let input = GraphNodeId::TrackStage {
             track_id: StableGraphId::parse("track").expect("ID"),
@@ -2314,6 +2382,193 @@ mod tests {
             },
             Box::new(SilentSourceSetDriver { claims: 1 }),
         )
+    }
+
+    #[test]
+    fn binding_coverage_preserves_validation_and_ownership() {
+        let assert_ok = |result: Result<PreparedRenderPlan, GraphBindFailure>| match result {
+            Ok(_) => {}
+            Err(failure) => panic!("unexpected bind failure: {}", failure.code),
+        };
+        let assert_source_ok =
+            |result: Result<PreparedRenderPlan, GraphSourceBindFailure>| match result {
+                Ok(_) => {}
+                Err(failure) => panic!("unexpected source bind failure: {}", failure.code),
+            };
+        let source_err = |result: Result<PreparedRenderPlan, GraphSourceBindFailure>| match result {
+            Ok(_) => panic!("unexpected successful source bind"),
+            Err(failure) => failure,
+        };
+        let bind_err = |result: Result<PreparedRenderPlan, GraphBindFailure>| match result {
+            Ok(_) => panic!("unexpected successful bind"),
+            Err(failure) => failure,
+        };
+        let make_source = |envelope: RenderEnvelope, claims: Vec<GraphNodeId>| {
+            let claim_count = claims.len();
+            GraphPreparedSourceSet::new(
+                envelope,
+                claims
+                    .into_iter()
+                    .map(|node| GraphSourceInputClaim { node })
+                    .collect(),
+                GraphSourceSetResourceReport {
+                    pcm_payload_already_charged_bytes: 0,
+                    overhead_bytes: 0,
+                    total_engine_owned_bytes: 0,
+                    largest_allocation_bytes: 0,
+                },
+                Box::new(SilentSourceSetDriver {
+                    claims: claim_count,
+                }),
+            )
+        };
+        let source_bindings = |bindings: GraphRuntimeBindings, input: &GraphNodeId| {
+            let envelope = bindings.envelope;
+            let nodes = bindings
+                .nodes
+                .into_iter()
+                .filter(|binding| &binding.node != input)
+                .collect();
+            GraphRuntimeBindings {
+                envelope,
+                nodes,
+                observers: bindings.observers,
+            }
+        };
+
+        // Plain and split coverage both bind successfully.
+        {
+            let (plan, bindings, _) = binding_plan();
+            assert_ok(plan.bind(bindings));
+            let (plan, bindings, input) = binding_plan();
+            let source = silent_source_set(bindings.envelope, input.clone());
+            let split = source_bindings(bindings, &input);
+            assert_source_ok(plan.bind_with_source_set(split, source));
+        }
+
+        // Missing and extra source coverage return every owner and can be repaired in place.
+        {
+            let (plan, bindings, input) = binding_plan();
+            let source = make_source(bindings.envelope, vec![input.clone()]);
+            let mut missing = source_bindings(bindings, &input);
+            missing.nodes.clear();
+            let failure = source_err(plan.bind_with_source_set(missing, source));
+            assert_eq!(failure.code, "source.graph.binding_mismatch");
+            assert_eq!(failure.bindings.nodes.len(), 0);
+            let output = failure
+                .plan
+                .required_bindings
+                .iter()
+                .find(|node| matches!(node, GraphNodeId::Output { .. }))
+                .cloned()
+                .expect("output");
+            let mut repaired = failure.bindings;
+            repaired
+                .nodes
+                .push(GraphNodeBinding::new(output, Box::new(Noop)));
+            assert_source_ok((*failure.plan).bind_with_source_set(repaired, failure.source_set));
+
+            let (plan, bindings, input) = binding_plan();
+            let envelope = bindings.envelope;
+            let mut extra = source_bindings(bindings, &input);
+            extra.nodes.push(GraphNodeBinding::new(
+                GraphNodeId::Output {
+                    output_id: StableGraphId::parse("extra").expect("ID"),
+                },
+                Box::new(Noop),
+            ));
+            let source = make_source(envelope, vec![input]);
+            let failure = source_err(plan.bind_with_source_set(extra, source));
+            assert_eq!(failure.code, "source.graph.binding_mismatch");
+            assert_eq!(failure.bindings.nodes.len(), 2);
+            let mut repaired = failure.bindings;
+            repaired.nodes.pop();
+            assert_source_ok((*failure.plan).bind_with_source_set(repaired, failure.source_set));
+        }
+
+        // Union equality never overrides overlap, duplicate, or empty-coverage validation.
+        {
+            let (plan, mut bindings, input) = binding_plan();
+            let source = make_source(bindings.envelope, vec![input.clone()]);
+            bindings
+                .nodes
+                .push(GraphNodeBinding::new(input, Box::new(Noop)));
+            let failure = source_err(plan.bind_with_source_set(
+                source_bindings(
+                    bindings,
+                    &GraphNodeId::Output {
+                        output_id: StableGraphId::parse("never").expect("ID"),
+                    },
+                ),
+                source,
+            ));
+            assert_eq!(failure.code, "source.graph.binding_mismatch");
+
+            let (plan, mut bindings, duplicate) = binding_plan();
+            bindings
+                .nodes
+                .push(GraphNodeBinding::new(duplicate, Box::new(Noop)));
+            assert_eq!(bind_err(plan.bind(bindings)).code, "graph.plan.binding");
+
+            let (plan, bindings, input) = binding_plan();
+            let source = make_source(bindings.envelope, Vec::new());
+            let mut empty = source_bindings(bindings, &input);
+            empty.nodes.clear();
+            assert_eq!(
+                source_err(plan.bind_with_source_set(empty, source)).code,
+                "source.graph.binding_mismatch"
+            );
+        }
+
+        // Source mismatch has priority over observer/envelope, then observer over envelope.
+        {
+            let (plan, bindings, input) = binding_plan();
+            let mut bad = source_bindings(bindings, &input);
+            bad.envelope.sample_rate = engine::SampleRateHz(44_100);
+            bad.observers.push(GraphNodeObserverBinding::new(
+                GraphNodeId::Output {
+                    output_id: StableGraphId::parse("main").expect("ID"),
+                },
+                1,
+                Box::new(W4OrderObserver {
+                    lane: 0,
+                    order: Arc::new(AtomicU64::new(0)),
+                }),
+            ));
+            let source = make_source(plan.envelope, Vec::new());
+            assert_eq!(
+                source_err(plan.bind_with_source_set(bad, source)).code,
+                "source.graph.binding_mismatch"
+            );
+
+            let (plan, bindings, input) = binding_plan();
+            let mut bad = source_bindings(bindings, &input);
+            bad.observers.push(GraphNodeObserverBinding::new(
+                GraphNodeId::Output {
+                    output_id: StableGraphId::parse("main").expect("ID"),
+                },
+                1,
+                Box::new(W4OrderObserver {
+                    lane: 0,
+                    order: Arc::new(AtomicU64::new(0)),
+                }),
+            ));
+            bad.envelope.sample_rate = engine::SampleRateHz(44_100);
+            let source = make_source(plan.envelope, vec![input]);
+            assert_eq!(
+                source_err(plan.bind_with_source_set(bad, source)).code,
+                "graph.plan.observer"
+            );
+
+            let (plan, bindings, input) = binding_plan();
+            let mut bad = source_bindings(bindings, &input);
+            bad.envelope.sample_rate = engine::SampleRateHz(44_100);
+            let source = make_source(plan.envelope, vec![input]);
+            assert_eq!(
+                source_err(plan.bind_with_source_set(bad, source)).code,
+                "graph.plan.envelope_mismatch"
+            );
+        }
     }
 
     #[test]

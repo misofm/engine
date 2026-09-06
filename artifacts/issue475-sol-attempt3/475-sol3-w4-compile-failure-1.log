@@ -1,0 +1,43 @@
+COMMAND=PATH=/home/bl/.cargo/bin:$PATH cargo test --locked -p compressor --lib w4_state_owner_transitions_drive_the_next_real_render -- --exact
+CWD=/home/bl/misofm/engine-475-plan
+SOURCE=git-head:c8772db1-plus-uncommitted-sol3-w4-and-env-fix
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-475-plan/crates/compressor)
+error[E0609]: no field `maximum_state` on type `EffectDescriptor`
+    --> crates/compressor/src/kernel.rs:1546:43
+     |
+1546 |         let sizes = COMPRESSOR_DESCRIPTOR.maximum_state;
+     |                                           ^^^^^^^^^^^^^ unknown field
+     |
+     = note: available fields are: `id`, `display_name`, `contract_major`, `contract_minor`, `state_layout_version` ... and 5 others
+
+error[E0609]: no field `maximum_state` on type `EffectDescriptor`
+    --> crates/compressor/src/kernel.rs:1563:43
+     |
+1563 |         let sizes = COMPRESSOR_DESCRIPTOR.maximum_state;
+     |                                           ^^^^^^^^^^^^^ unknown field
+     |
+     = note: available fields are: `id`, `display_name`, `contract_major`, `contract_minor`, `state_layout_version` ... and 5 others
+
+error[E0515]: cannot return value referencing function parameter `values`
+    --> crates/compressor/src/kernel.rs:1522:44
+     |
+1522 |         let requests = values.map(|values| request(&values));
+     |                                            ^^^^^^^^-------^
+     |                                            |       |
+     |                                            |       `values` is borrowed here
+     |                                            returns a value referencing data owned by the current function
+
+error[E0515]: cannot return value referencing function parameter `values`
+    --> crates/compressor/src/kernel.rs:1669:45
+     |
+1669 |         let requests = uniform.map(|values| request(&values));
+     |                                             ^^^^^^^^-------^
+     |                                             |       |
+     |                                             |       `values` is borrowed here
+     |                                             returns a value referencing data owned by the current function
+
+Some errors have detailed explanations: E0515, E0609.
+For more information about an error, try `rustc --explain E0515`.
+error: could not compile `compressor` (lib test) due to 4 previous errors
+EXIT=101
+
