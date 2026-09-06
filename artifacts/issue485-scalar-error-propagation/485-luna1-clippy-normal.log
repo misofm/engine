@@ -1,0 +1,152 @@
+    Checking engine v0.1.0 (/home/bl/misofm/engine-485-error-propagation/crates/engine)
+    Checking math v0.1.0 (/home/bl/misofm/engine-485-error-propagation/crates/math)
+    Checking lane v0.1.0 (/home/bl/misofm/engine-485-error-propagation/crates/lane)
+warning: `math::fast_db::fast_level_db` does not refer to a reachable function
+  --> /home/bl/misofm/engine-485-error-propagation/clippy.toml:81:5
+   |
+81 |     { path = "math::fast_db::fast_level_db", reason = "fast dB tier (#144 item 5); admitted only at a named FAST-DB-CROSSING site" },
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: add `allow-invalid = true` to the entry to suppress this warning
+
+warning: `math::fast_db::fast_gain_from_db` does not refer to a reachable function
+  --> /home/bl/misofm/engine-485-error-propagation/clippy.toml:82:5
+   |
+82 |     { path = "math::fast_db::fast_gain_from_db", reason = "fast dB tier (#144 item 5); admitted only at a named FAST-DB-CROSSING site" },
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: add `allow-invalid = true` to the entry to suppress this warning
+
+warning: `math` (lib) generated 2 warnings
+    Checking effect-contract v0.1.0 (/home/bl/misofm/engine-485-error-propagation/crates/effect-contract)
+    Checking session v0.1.0 (/home/bl/misofm/engine-485-error-propagation/crates/session)
+warning: `effect-contract` (lib) generated 2 warnings (2 duplicates)
+    Checking rack v0.1.0 (/home/bl/misofm/engine-485-error-propagation/crates/rack)
+    Checking builtins v0.1.0 (/home/bl/misofm/engine-485-error-propagation/crates/builtins)
+warning: `rack` (lib) generated 2 warnings (2 duplicates)
+    Checking rack-compiler v0.1.0 (/home/bl/misofm/engine-485-error-propagation/crates/rack-compiler)
+    Checking graph v0.1.0 (/home/bl/misofm/engine-485-error-propagation/crates/graph)
+warning: `rack-compiler` (lib) generated 2 warnings (2 duplicates)
+warning: `builtins` (lib) generated 2 warnings (2 duplicates)
+warning: `graph` (lib) generated 2 warnings (2 duplicates)
+    Checking builtins-compiler v0.1.0 (/home/bl/misofm/engine-485-error-propagation/crates/builtins-compiler)
+error[E0425]: cannot find type `TestPhaseTwoAllocationSnapshot` in this scope
+    --> crates/builtins-compiler/src/lib.rs:5621:16
+     |
+5621 |         Option<TestPhaseTwoAllocationSnapshot>,
+     |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+     |
+note: found an item that was configured out
+    --> crates/builtins-compiler/src/lib.rs:1368:12
+     |
+1365 | #[cfg(feature = "test-support")]
+     |       ------------------------ the item is gated behind the `test-support` feature
+...
+1368 | pub struct TestPhaseTwoAllocationSnapshot {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: you might be missing a type parameter
+     |
+5605 |     fn prepared_pair_graph_variant_observed<TestPhaseTwoAllocationSnapshot>(
+     |                                            ++++++++++++++++++++++++++++++++
+
+error[E0425]: cannot find type `TestPhaseTwoAllocationSnapshot` in this scope
+    --> crates/builtins-compiler/src/lib.rs:5622:16
+     |
+5622 |         Option<TestPhaseTwoAllocationSnapshot>,
+     |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+     |
+note: found an item that was configured out
+    --> crates/builtins-compiler/src/lib.rs:1368:12
+     |
+1365 | #[cfg(feature = "test-support")]
+     |       ------------------------ the item is gated behind the `test-support` feature
+...
+1368 | pub struct TestPhaseTwoAllocationSnapshot {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: you might be missing a type parameter
+     |
+5605 |     fn prepared_pair_graph_variant_observed<TestPhaseTwoAllocationSnapshot>(
+     |                                            ++++++++++++++++++++++++++++++++
+
+error[E0425]: cannot find value `test_only_begin_phase_two_allocation_observation` in this scope
+    --> crates/builtins-compiler/src/lib.rs:5734:34
+     |
+5734 |             observe_binding.then(test_only_begin_phase_two_allocation_observation);
+     |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+     |
+note: found an item that was configured out
+    --> crates/builtins-compiler/src/lib.rs:1461:8
+     |
+1459 | #[cfg(feature = "test-support")]
+     |       ------------------------ the item is gated behind the `test-support` feature
+1460 | #[doc(hidden)]
+1461 | pub fn test_only_begin_phase_two_allocation_observation() -> impl Drop {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0425]: cannot find value `test_only_phase_two_allocation_snapshot` in this scope
+    --> crates/builtins-compiler/src/lib.rs:5738:51
+     |
+5738 |         let owner_snapshot = observe_binding.then(test_only_phase_two_allocation_snapshot);
+     |                                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+     |
+note: found an item that was configured out
+    --> crates/builtins-compiler/src/lib.rs:1412:8
+     |
+1410 | #[cfg(feature = "test-support")]
+     |       ------------------------ the item is gated behind the `test-support` feature
+1411 | #[doc(hidden)]
+1412 | pub fn test_only_phase_two_allocation_snapshot() -> TestPhaseTwoAllocationSnapshot {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0425]: cannot find value `test_only_begin_phase_two_allocation_observation` in this scope
+    --> crates/builtins-compiler/src/lib.rs:5802:34
+     |
+5802 |             observe_binding.then(test_only_begin_phase_two_allocation_observation);
+     |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+     |
+note: found an item that was configured out
+    --> crates/builtins-compiler/src/lib.rs:1461:8
+     |
+1459 | #[cfg(feature = "test-support")]
+     |       ------------------------ the item is gated behind the `test-support` feature
+1460 | #[doc(hidden)]
+1461 | pub fn test_only_begin_phase_two_allocation_observation() -> impl Drop {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0425]: cannot find value `test_only_phase_two_allocation_snapshot` in this scope
+    --> crates/builtins-compiler/src/lib.rs:5811:53
+     |
+5811 |         let binding_snapshot = observe_binding.then(test_only_phase_two_allocation_snapshot);
+     |                                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+     |
+note: found an item that was configured out
+    --> crates/builtins-compiler/src/lib.rs:1412:8
+     |
+1410 | #[cfg(feature = "test-support")]
+     |       ------------------------ the item is gated behind the `test-support` feature
+1411 | #[doc(hidden)]
+1412 | pub fn test_only_phase_two_allocation_snapshot() -> TestPhaseTwoAllocationSnapshot {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0425]: cannot find function `test_only_reset_phase_two_allocation_tracker` in this scope
+    --> crates/builtins-compiler/src/lib.rs:5740:13
+     |
+5740 |             test_only_reset_phase_two_allocation_tracker();
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+     |
+note: found an item that was configured out
+    --> crates/builtins-compiler/src/lib.rs:1380:8
+     |
+1378 | #[cfg(feature = "test-support")]
+     |       ------------------------ the item is gated behind the `test-support` feature
+1379 | #[doc(hidden)]
+1380 | pub fn test_only_reset_phase_two_allocation_tracker() {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `builtins-compiler` (lib) generated 2 warnings (2 duplicates)
+warning: `builtins-compiler` (test "builtin_automation_targets") generated 2 warnings (2 duplicates)
+warning: `builtins-compiler` (test "input_drain") generated 2 warnings (2 duplicates)
+warning: `builtins-compiler` (test "scale") generated 2 warnings (2 duplicates)
+warning: `builtins-compiler` (test "track_delay_domain") generated 2 warnings (2 duplicates)
+For more information about this error, try `rustc --explain E0425`.
+error: could not compile `builtins-compiler` (lib test) due to 7 previous errors

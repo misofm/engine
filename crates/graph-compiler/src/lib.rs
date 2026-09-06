@@ -268,7 +268,9 @@ mod tests {
         canonical_parts, edge_text, edge_text_len, hex_sha256, node_text, node_text_len,
         write_canonical,
     };
-    use crate::ids::{gid, port, rack_id, stages, track_node};
+    use crate::ids::{
+        gid, port, rack_id, route_destination_node, route_source_node, stages, track_node,
+    };
     use crate::pdc::timings;
     use crate::schedule::{
         buffer_assignments, cycle_witness, cycle_witnesses, is_identity_boundary, topo,
@@ -341,6 +343,59 @@ mod tests {
         include_str!("../../../fixtures/session/v1/console-sixty-four-track-mono.json");
     const PARAMETRIC_EQ_NINE_TRACK_FIXTURE: &str =
         include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
+
+    #[test]
+    fn route_helpers_map_every_typed_variant_to_its_graph_node() {
+        let track_id = StableId::parse(&format!("a{}", "a".repeat(126))).expect("127-byte ID");
+        let expected_stages = [
+            (SendTap::Input, TrackStage::Input),
+            (SendTap::PostInputBuiltins, TrackStage::PostInputBuiltins),
+            (SendTap::PostSimd1, TrackStage::PostSimd1),
+            (SendTap::PostDynamic, TrackStage::PostDynamic),
+            (SendTap::PostSimd2PreFader, TrackStage::PostSimd2PreFader),
+            (SendTap::PostFader, TrackStage::PostFader),
+            (SendTap::PostMatrix, TrackStage::PostMatrix),
+        ];
+        for (tap, expected_stage) in expected_stages {
+            assert_eq!(
+                route_source_node(&RouteSource::Track {
+                    track_id: track_id.clone(),
+                    tap,
+                }),
+                GraphNodeId::TrackStage {
+                    track_id: gid(track_id.as_str()),
+                    stage: expected_stage,
+                }
+            );
+        }
+
+        let submix_id = StableId::parse("submix").expect("stable ID");
+        let output_id = StableId::parse("output").expect("stable ID");
+        assert_eq!(
+            route_source_node(&RouteSource::SubmixOutput {
+                submix_id: submix_id.clone(),
+            }),
+            GraphNodeId::Submix {
+                submix_id: gid(submix_id.as_str()),
+            }
+        );
+        assert_eq!(
+            route_destination_node(&RouteDestination::SubmixInput {
+                submix_id: submix_id.clone(),
+            }),
+            GraphNodeId::Submix {
+                submix_id: gid(submix_id.as_str()),
+            }
+        );
+        assert_eq!(
+            route_destination_node(&RouteDestination::OutputInput {
+                output_id: output_id.clone()
+            }),
+            GraphNodeId::Output {
+                output_id: gid(output_id.as_str()),
+            }
+        );
+    }
 
     struct IdentityBinding;
     impl GraphRuntimeProcessor for IdentityBinding {

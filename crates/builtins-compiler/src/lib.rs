@@ -4,13 +4,13 @@
 use core::num::NonZeroUsize;
 use std::collections::{BTreeMap, BTreeSet};
 
-#[cfg(feature = "test-support")]
+#[cfg(any(test, feature = "test-support"))]
 use core::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(test)]
 use builtins::builtin_filter_cutoff_maximum_hz;
 
-#[cfg(feature = "test-support")]
+#[cfg(any(test, feature = "test-support"))]
 use std::sync::Mutex;
 
 use sha2::{Digest, Sha256};
@@ -1271,13 +1271,13 @@ type ConsumerSeal = (u64, Box<str>, MeterTap);
 /// Test-only phase-two allocation accounting.  The production resource report deliberately
 /// remains a layout calculation; this probe independently observes the allocator requests made
 /// after phase-one validation has accepted the artifact.
-#[cfg(feature = "test-support")]
+#[cfg(any(test, feature = "test-support"))]
 static TEST_PHASE_TWO_ACTIVE: AtomicBool = AtomicBool::new(false);
-#[cfg(feature = "test-support")]
+#[cfg(any(test, feature = "test-support"))]
 static TEST_PHASE_TWO_LAYOUTS: Mutex<TestPhaseTwoLayoutTable> =
     Mutex::new(TestPhaseTwoLayoutTable::new());
 
-#[cfg(feature = "test-support")]
+#[cfg(any(test, feature = "test-support"))]
 struct TestPhaseTwoLayoutTable {
     values: [BuiltinRetainedLayout; BUILTIN_RETAINED_LAYOUT_CLASS_CAPACITY],
     len: usize,
@@ -1287,7 +1287,7 @@ struct TestPhaseTwoLayoutTable {
     deallocation_len: usize,
 }
 
-#[cfg(feature = "test-support")]
+#[cfg(any(test, feature = "test-support"))]
 impl TestPhaseTwoLayoutTable {
     const fn new() -> Self {
         Self {
@@ -1362,7 +1362,7 @@ impl TestPhaseTwoLayoutTable {
 }
 
 /// Independent test-only phase-two allocation observation.
-#[cfg(feature = "test-support")]
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[doc(hidden)]
 pub struct TestPhaseTwoAllocationSnapshot {
@@ -1375,7 +1375,7 @@ pub struct TestPhaseTwoAllocationSnapshot {
     pub deallocation_layouts: Vec<BuiltinRetainedLayout>,
 }
 
-#[cfg(feature = "test-support")]
+#[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub fn test_only_reset_phase_two_allocation_tracker() {
     TEST_PHASE_TWO_ACTIVE.store(false, Ordering::SeqCst);
@@ -1385,7 +1385,7 @@ pub fn test_only_reset_phase_two_allocation_tracker() {
     SCALAR_OUTER_LIFETIME.with(|value| value.set([0; 3]));
 }
 
-#[cfg(feature = "test-support")]
+#[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub fn test_only_record_phase_two_allocation(layout: core::alloc::Layout) {
     if !TEST_PHASE_TWO_ACTIVE.load(Ordering::Relaxed) {
@@ -1396,7 +1396,7 @@ pub fn test_only_record_phase_two_allocation(layout: core::alloc::Layout) {
     }
 }
 
-#[cfg(feature = "test-support")]
+#[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub fn test_only_record_phase_two_deallocation(layout: core::alloc::Layout) {
     if !TEST_PHASE_TWO_ACTIVE.load(Ordering::Relaxed) {
@@ -1407,7 +1407,7 @@ pub fn test_only_record_phase_two_deallocation(layout: core::alloc::Layout) {
     }
 }
 
-#[cfg(feature = "test-support")]
+#[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub fn test_only_phase_two_allocation_snapshot() -> TestPhaseTwoAllocationSnapshot {
     let table = TEST_PHASE_TWO_LAYOUTS
@@ -1447,16 +1447,16 @@ pub fn test_only_phase_two_allocation_snapshot() -> TestPhaseTwoAllocationSnapsh
     }
 }
 
-#[cfg(feature = "test-support")]
+#[cfg(any(test, feature = "test-support"))]
 struct TestPhaseTwoAllocationGuard;
-#[cfg(feature = "test-support")]
+#[cfg(any(test, feature = "test-support"))]
 impl TestPhaseTwoAllocationGuard {
     fn begin() -> Self {
         TEST_PHASE_TWO_ACTIVE.store(true, Ordering::SeqCst);
         Self
     }
 }
-#[cfg(feature = "test-support")]
+#[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub fn test_only_begin_phase_two_allocation_observation() -> impl Drop {
     TestPhaseTwoAllocationGuard::begin()
@@ -1477,7 +1477,7 @@ pub fn test_only_scalar_owner_layouts() -> [BuiltinRetainedLayout; 3] {
         layout(core::alloc::Layout::new::<ScalarPairProcessor>()),
     ]
 }
-#[cfg(feature = "test-support")]
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for TestPhaseTwoAllocationGuard {
     fn drop(&mut self) {
         TEST_PHASE_TWO_ACTIVE.store(false, Ordering::SeqCst);
@@ -3588,13 +3588,12 @@ impl Drop for ConsoleMatrixProcessor {
 }
 impl GraphRuntimeProcessor for ConsoleMatrixProcessor {
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
-        if let Err(error) = self.drain_controls() {
+        self.drain_controls().inspect_err(|_| {
             #[cfg(any(test, feature = "test-support"))]
             SCALAR_MATRIX_STATE_WITNESS.with(|value| {
                 value.set(builtins::test_support::scalar_matrix_words(&self.matrix));
             });
-            return Err(error);
-        }
+        })?;
         let block = DualMonoBlock::new(block.left, block.right, block.first_sample)
             .map_err(render_error)?;
         self.matrix.process(block);
@@ -3645,13 +3644,12 @@ impl Drop for ConsoleFaderProcessor {
 }
 impl GraphRuntimeProcessor for ConsoleFaderProcessor {
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
-        if let Err(error) = self.drain_controls() {
+        self.drain_controls().inspect_err(|_| {
             #[cfg(any(test, feature = "test-support"))]
             SCALAR_FADER_STATE_WITNESS.with(|value| {
                 value.set(builtins::test_support::scalar_fader_words(&self.fader));
             });
-            return Err(error);
-        }
+        })?;
         let block = DualMonoBlock::new(block.left, block.right, block.first_sample)
             .map_err(render_error)?;
         self.fader.process(block);
@@ -3732,11 +3730,10 @@ impl GraphRuntimeProcessor for ScalarPairProcessor {
             right,
             first_sample,
         } = block;
-        if let Err(error) = self.fader.drain_controls() {
+        self.fader.drain_controls().inspect_err(|_| {
             #[cfg(any(test, feature = "test-support"))]
             record_scalar_state(&self.fader.fader, &self.matrix.matrix);
-            return Err(error);
-        }
+        })?;
         // Preserve the original fader boundary: its queue is drained before the envelope is
         // checked, and an invalid envelope stops before the later matrix owner consumes anything.
         let fused = {

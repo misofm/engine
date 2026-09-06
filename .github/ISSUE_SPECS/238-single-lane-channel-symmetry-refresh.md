@@ -179,3 +179,7 @@ Root records the observed digest as the new artifact pin on this separate delive
 Full workspace at add3ca11:276 result blocks,1628 passed,0 failed,24 ignored. Compared with the delivered479 test population there are exactly two additions (floor parity and addressed symmetry), no removals. Supported scalar/SIMD Wasm checks, native C API build/resource lifecycle/shared+static ABI, new-pin worklet build/static object checks, expected-resource26 negative controls, all three actual browser engines and generated-matrix check passed. Root environment/lane/unfused/workspace policies also passed.
 
 All actual command/log/status records, initial pin rejection, test-population delta and source-equivalence record are in artifacts/issue238-addressed-symmetry. Browser-generated changes at719232c9 preserve all prior gates/version floors and update only candidate/digest. Actual PR-head Astra review and required qualification remain before merge; broader RT5 extraction and measurement are still retained separate obligations.
+
+## Delivered and closed
+
+PR486 merged2026-09-06T02:04:38Z asf357330ce0f391e785429e82807d7d79ba9a077c after exact-head Astra PASS for e22d3330254ed612e7d936829cd710c8bf6086e6 and required qualification34005217306 SUCCESS. GitHub238 is verified CLOSED. The addressed-record refresh product is delivered; RT5 remains partial for ramp-block extraction and separate measurement. Workflow total is34 merged audit PRs, with108 original audit entries retaining work.
