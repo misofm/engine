@@ -1,0 +1,22 @@
+   Compiling builtins v0.1.0 (/home/bl/misofm/engine-238-plan/crates/builtins)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.25s
+     Running unittests src/lib.rs (target/debug/deps/builtins-b28151c824699de5)
+
+running 1 test
+test tests::lane_symmetry_retarget_updates_only_the_addressed_predicate ... FAILED
+
+failures:
+
+---- tests::lane_symmetry_retarget_updates_only_the_addressed_predicate stdout ----
+
+thread 'tests::lane_symmetry_retarget_updates_only_the_addressed_predicate' (10316) panicked at crates/builtins/src/lib.rs:4201:31:
+attempt to shift left with overflow
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::lane_symmetry_retarget_updates_only_the_addressed_predicate
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p builtins --lib`
