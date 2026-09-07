@@ -8,7 +8,6 @@ use graph_compiler::Backend;
 use std::{
     env, fs,
     hint::black_box,
-    process::Command,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -533,15 +532,8 @@ fn metadata() -> Metadata {
 }
 
 fn command(program: &str, arguments: &[&str]) -> String {
-    Command::new(program)
-        .args(arguments)
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| String::from_utf8(output.stdout).ok())
+    bench_support::sysinfo::command_output(program, arguments)
         .unwrap_or_else(|| "unknown".to_owned())
-        .trim()
-        .to_owned()
 }
 
 fn peak_resident_bytes() -> u64 {
@@ -613,5 +605,91 @@ mod tests {
         let evidence = GraphCompiler::evidence(&artifact.graph, &artifact.report);
         assert!(!evidence.canonical_bytes.is_empty());
         assert!(!evidence.dot.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn metadata_command_projection_preserves_graph_policy() {
+        assert_eq!(command("/bin/sh", &["-c", "printf '  text  \\n'"]), "text");
+        assert_eq!(command("/bin/sh", &["-c", "true"]), "");
+        assert_eq!(command("/bin/sh", &["-c", "printf ' \\n\\t'"]), "");
+        assert_eq!(
+            command("/bin/sh", &["-c", "printf plausible; exit 7"]),
+            "unknown"
+        );
+        assert_eq!(
+            command("/definitely/missing/metadata-command", &[]),
+            "unknown"
+        );
+        assert_eq!(command("/bin/sh", &["-c", r"printf '\377'"]), "unknown");
+    }
+
+    #[test]
+    fn fixed_metadata_projection_preserves_record_fields() {
+        let fixture = representative_fixture();
+        let metadata = Metadata {
+            timestamp_epoch_seconds: 1_700_000_000,
+            cpu: "Test CPU".to_owned(),
+            os: "linux test-kernel".to_owned(),
+            governor_or_power_mode: "performance".to_owned(),
+            power_source: "AC".to_owned(),
+            rustc: "rustc test 1.0".to_owned(),
+            llvm: "LLVM test".to_owned(),
+            target_triple: "x86_64-test".to_owned(),
+            target_features: "avx2-µ".to_owned(),
+            opt_level: "2".to_owned(),
+            lto: "thin".to_owned(),
+            codegen_units: "16".to_owned(),
+            background_load: "quiet".to_owned(),
+            missing: vec!["target_features".to_owned()],
+        };
+        let sample = Sample {
+            total_ns: 30,
+            effect_prepare_ns: 10,
+            graph_compile_ns: 20,
+            graph_sha256: "deadbeef".to_owned(),
+            canonical_debug_bytes: 64,
+            dot_bytes: 128,
+            estimate: GraphResourceEstimate {
+                logical_nodes: 1,
+                materialized_nodes: 2,
+                edges: 3,
+                schedule_items: 4,
+                dependency_levels: 5,
+                reductions: 6,
+                routes: 7,
+                effects: 8,
+                audio_buffer_samples: 9,
+                total_delay_samples: 10,
+                delay_bytes: 11,
+                graph_metadata_bytes: 12,
+                declared_effect_bytes: 13,
+                effect_bank_count: 14,
+                effect_bank_scratch_bytes: 15,
+                effect_bank_runtime_buffer_bytes: 16,
+                effect_bank_metadata_bytes: 17,
+                builtin_bank_bytes: 18,
+                builtin_bank_scratch_bytes: 19,
+                builtin_bank_count: 20,
+                largest_allocation_bytes: 21,
+                incremental_plan_bytes: 22,
+                session_plus_plan_bytes: 23,
+            },
+        };
+        let record = record(
+            Workload::CanonicalCompile,
+            1,
+            &fixture,
+            &[sample],
+            &metadata,
+        );
+        assert!(record.contains(
+            "\"timestamp_epoch_seconds\":1700000000,\"cpu\":\"Test CPU\",\"os\":\"linux test-kernel\",\"governor_or_power_mode\":\"performance\",\"power_source\":\"AC\",\"rustc\":\"rustc test 1.0\",\"llvm\":\"LLVM test\",\"target_triple\":\"x86_64-test\",\"target_features\":\"avx2-µ\",\"opt_level\":\"2\",\"lto\":\"thin\",\"codegen_units\":\"16\",\"background_load\":\"quiet\""
+        ));
+        assert!(
+            record.contains(
+                "\"metadata_incomplete\":true,\"missing_metadata\":[\"target_features\"]"
+            )
+        );
     }
 }
