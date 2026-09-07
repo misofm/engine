@@ -520,6 +520,27 @@ installation changed no tracked file and the subsequent type gate passed. Raw co
 artifact identities, stdout, stderr and statuses for both failures and every passing gate are
 preserved under `artifacts/issue470-delivery-qualification/` with a checksum manifest.
 
-The repository artifact pin, checked browser result and generated deployment-matrix lineage remain
-unchanged. Astra LOW must now re-review the exact pushed evidence head and retained artifact. Only
-an Astra PASS authorizes the three already-qualified lineage changes to become repository state.
+The raw qualification transcripts were losslessly packaged as gzip files at `37b09cf3`, with the
+checksum manifest updated to cover the packaged evidence. Astra LOW then returned **PASS** for the
+clean pushed pre-pin head: the corrected CAPI explanation, independently derived Wasm `+80`, raw
+evidence and manifest, SDK/package results, all three browser results, and candidate digest were
+consistent. The PASS authorized exactly the artifact checksum, checked browser result, and
+generated deployment-matrix lineage files.
+
+## Qualified artifact pin and post-pin consistency
+
+Checkpoint `0f01ed33` applies only those three authorized lineage changes. The repository checksum
+now pins `63dd5f8b0febf193847b697fa8e4d92e791b7e4775f3b4b6b61252783f153e9f`, and both the checked
+browser result and generated deployment matrix identify qualification candidate `d6f78803` with
+that same digest. No source, expected-resource value, PCM digest, SDK package byte, ABI declaration,
+Cargo file or workflow changed in the pin checkpoint.
+
+Root rebuilt the shipped six-file AudioWorklet output from the post-pin branch. The resulting Wasm
+reproduced the pinned digest exactly. The ordinary AudioWorklet static/object checks, ABI-layout and
+vocabulary checks, browser expected-resource comparator with its 26 red mutations, generated-matrix
+check, formatting and diff checks all returned zero. This was a consistency rerun after applying
+reviewed lineage, not a second qualification or timing run.
+
+The remaining delivery gate is one Astra LOW adversarial review of the exact final pushed branch
+against `origin/main`, followed by the required pull-request qualification and post-main run. #444
+continues to own `Concurrent` RT-4 behavior, and this issue makes no performance claim.
