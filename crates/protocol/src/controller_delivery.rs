@@ -521,10 +521,10 @@ mod tests {
         }
     }
 
-    fn encoded_enqueue(
+    fn encoded_command(
         request_id: u64,
-        revision: SessionRevision,
-        records: &[AutomationRecord],
+        expected_revision: ExpectedRevision,
+        payload: CommandPayload<'_>,
     ) -> Vec<u8> {
         let codec = ProtocolCodec::default();
         let mut bytes = vec![0_u8; 16 * 1024];
@@ -532,14 +532,26 @@ mod tests {
             .encode_command_frame_into(
                 &TypedCommandFrame {
                     request_id: RequestId::new(request_id).unwrap(),
-                    expected_revision: ExpectedRevision::Exact(revision),
-                    payload: CommandPayload::AutomationEnqueue(AutomationEnqueue { records }),
+                    expected_revision,
+                    payload,
                 },
                 &mut bytes,
             )
-            .expect("encoded automation frame");
+            .expect("encoded command frame");
         bytes.truncate(length);
         bytes
+    }
+
+    fn encoded_enqueue(
+        request_id: u64,
+        revision: SessionRevision,
+        records: &[AutomationRecord],
+    ) -> Vec<u8> {
+        encoded_command(
+            request_id,
+            ExpectedRevision::Exact(revision),
+            CommandPayload::AutomationEnqueue(AutomationEnqueue { records }),
+        )
     }
 
     fn decode_event<'a>(codec: &ProtocolCodec, frame: &'a [u8]) -> DecodedTypedEventFrame<'a> {
@@ -594,6 +606,205 @@ mod tests {
             .finish_applied(ticket, count)
             .expect("finish applied");
         facade.collect_terminal(ticket).expect("collect terminal");
+        assert_eq!(facade.outstanding(), 0);
+    }
+
+    #[test]
+    fn framed_facade_rejections_are_atomic_and_saturate_at_bound() {
+        let (mut facade, _, _) = facade(8, &[(ParameterHandle(7), AutomationKind::Point)]);
+        let revision = facade.session().revision();
+        let point = |request_id, revision, handle, sample, value| {
+            let records = [AutomationRecord {
+                kind: AutomationKind::Point,
+                handle: ParameterHandle(handle),
+                start: SampleTime(sample),
+                end: SampleTime(sample),
+                start_value: value,
+                end_value: value,
+            }];
+            encoded_enqueue(request_id, revision, &records)
+        };
+
+        assert_eq!(
+            facade
+                .process_b1b_btlv(
+                    &point(1, SessionRevision(revision.0 + 1), 7, 1, 0.5),
+                    &mut DecodeScratch::new(&mut [0_u16; 32]),
+                )
+                .expect("wrong-revision response")
+                .status,
+            StatusCode::RevisionConflict
+        );
+        assert_eq!(facade.outstanding(), 0);
+        assert_eq!(facade.automation_status().occupancy, 0);
+
+        assert_eq!(
+            facade
+                .process_b1b_btlv(
+                    &point(2, revision, 7, 1, 2.0),
+                    &mut DecodeScratch::new(&mut [0_u16; 32]),
+                )
+                .expect("invalid-value response")
+                .status,
+            StatusCode::InvalidField
+        );
+        assert_eq!(facade.outstanding(), 0);
+
+        assert_eq!(
+            facade
+                .process_b1b_btlv(
+                    &point(3, revision, 99, 1, 0.5),
+                    &mut DecodeScratch::new(&mut [0_u16; 32]),
+                )
+                .expect("unknown-handle response")
+                .status,
+            StatusCode::NotFound
+        );
+        assert_eq!(facade.outstanding(), 0);
+
+        assert_eq!(
+            facade
+                .process_b1b_btlv(
+                    &point(4, revision, 7, 1, 0.5),
+                    &mut DecodeScratch::new(&mut [0_u16; 32]),
+                )
+                .expect("first saturation admission")
+                .status,
+            StatusCode::Ok
+        );
+        assert_eq!(
+            facade
+                .process_b1b_btlv(
+                    &point(5, revision, 7, 2, 0.5),
+                    &mut DecodeScratch::new(&mut [0_u16; 32]),
+                )
+                .expect("second saturation admission")
+                .status,
+            StatusCode::Ok
+        );
+        let full = facade
+            .process_b1b_btlv(
+                &point(6, revision, 7, 3, 0.5),
+                &mut DecodeScratch::new(&mut [0_u16; 32]),
+            )
+            .expect("saturation response");
+        assert_eq!(full.status, StatusCode::Backpressure);
+        assert_eq!(facade.outstanding(), 2);
+        assert_eq!(facade.automation_status().occupancy, 2);
+    }
+
+    #[test]
+    fn framed_unsupported_batch_stays_pending_and_cancels_whole_batch() {
+        let (mut facade, mut render, canceled) =
+            facade(8, &[(ParameterHandle(7), AutomationKind::Point)]);
+        let revision = facade.session().revision();
+        let unsupported_records = [AutomationRecord {
+            kind: AutomationKind::Linear,
+            handle: ParameterHandle(7),
+            start: SampleTime(1),
+            end: SampleTime(2),
+            start_value: 0.5,
+            end_value: 0.75,
+        }];
+        assert_eq!(
+            facade
+                .process_b1b_btlv(
+                    &encoded_enqueue(1, revision, &unsupported_records),
+                    &mut DecodeScratch::new(&mut [0_u16; 32]),
+                )
+                .expect("unsupported framed admission")
+                .status,
+            StatusCode::Ok
+        );
+        let follower = [AutomationRecord {
+            kind: AutomationKind::Point,
+            handle: ParameterHandle(7),
+            start: SampleTime(3),
+            end: SampleTime(3),
+            start_value: 0.5,
+            end_value: 0.5,
+        }];
+        assert_eq!(
+            facade
+                .process_b1b_btlv(
+                    &encoded_enqueue(2, revision, &follower),
+                    &mut DecodeScratch::new(&mut [0_u16; 32]),
+                )
+                .expect("supported follower admission")
+                .status,
+            StatusCode::Ok
+        );
+        assert_eq!(
+            facade.try_handoff_next().unwrap(),
+            HandoffResult::PendingUnsupported
+        );
+        let token = facade
+            .begin_cancel(AutomationCancellationReason::EndpointShutdown)
+            .unwrap();
+        assert!(facade.poll_cancel_boundary(token).unwrap().is_none());
+        assert!(render.begin_boundary(SampleTime(77)).is_none());
+        let complete = facade.poll_cancel_boundary(token).unwrap().unwrap();
+        assert_eq!(
+            (complete.canceled_records, complete.canceled_events),
+            (2, 2)
+        );
+        assert_eq!(canceled.load(Ordering::Relaxed), 2);
+        assert_eq!(facade.outstanding(), 0);
+    }
+
+    #[test]
+    fn framed_facade_limits_remain_unavailable() {
+        let (mut facade, _, _) = facade(8, &[(ParameterHandle(7), AutomationKind::Point)]);
+        let revision = facade.session().revision();
+        let state = ParameterStateRequest { handles: vec![7] };
+        assert_eq!(
+            facade
+                .process_b1b_btlv(
+                    &encoded_command(
+                        1,
+                        ExpectedRevision::Any,
+                        CommandPayload::ParameterStateGet(&state),
+                    ),
+                    &mut DecodeScratch::new(&mut [0_u16; 32]),
+                )
+                .expect("framed state response")
+                .status,
+            StatusCode::Unavailable
+        );
+        let edits = [SessionEdit::SetSessionId {
+            session_id: session::StableId::parse("framed-refused").unwrap(),
+        }];
+        assert_eq!(
+            facade
+                .process_b1b_btlv(
+                    &encoded_command(
+                        2,
+                        ExpectedRevision::Exact(revision),
+                        CommandPayload::SessionTransactionApply(&edits),
+                    ),
+                    &mut DecodeScratch::new(&mut [0_u16; 32]),
+                )
+                .expect("framed structural response")
+                .status,
+            StatusCode::Unavailable
+        );
+        assert_eq!(
+            facade
+                .process_b1b_btlv(
+                    &encoded_command(
+                        3,
+                        ExpectedRevision::Exact(revision),
+                        CommandPayload::TransportSet(TransportSetRequest {
+                            state: TransportState::Playing,
+                            position: Some(SampleTime(9)),
+                        }),
+                    ),
+                    &mut DecodeScratch::new(&mut [0_u16; 32]),
+                )
+                .expect("framed locate response")
+                .status,
+            StatusCode::Unavailable
+        );
         assert_eq!(facade.outstanding(), 0);
     }
 
