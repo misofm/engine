@@ -84,3 +84,11 @@ Astra LOW independently passed the full debug suites (40/39), focused release su
 Luna HIGH completed the sole attempt-1 correction at source `9ed73fa5ebe030007a45ae41fc5c417e49c039c7`. Only `tools/bench/src/conformance.rs` changed. `Metadata::gather` now passes the existing `command_allow_empty` result through a private `workspace_dirty` conversion. The same conversion is directly tested for empty and whitespace-only success → `"false"`, nonempty success → `"true"`, and unavailable → `"unknown"`. Command acquisition, the synthetic record oracle and all other source remain unchanged.
 
 Focused conformance debug and release each pass 4 tests, complete `bench` debug passes 40 tests, and strict bench Clippy, formatting and diff checks pass. No benchmark ran and no manifest, lock, policy, evidence, artifact or #580 path changed. Astra LOW attempt-2 adversarial review remains pending before delivery.
+
+## Attempt 2 source verdict
+
+Astra LOW returned **PASS** at exact pushed head `215ca939d5e23b74372b65b286d81a0617fe70d2`, correction source `9ed73fa5ebe030007a45ae41fc5c417e49c039c7`, base and merge-base `735197b1bc94006eeb1c42ad447ab02bf61696d5`. Production directly uses the tested clean/dirty/unavailable conversion; the synthetic record oracle and all other attempt-1 source remain unchanged. One command-output acquisition authority and both consumer policies are preserved with no manifest, lock, policy or #580 overlap.
+
+Independent conformance debug/release 4/4, complete bench debug 40, strict affected Clippy/rustdoc, format/diff, workspace and bench policy/mutation gates pass. The exact-base release allocator failure remains unrelated and unrepaired. GitHub/spec identity, clean exact upstream and #580 head `517bbf486f84fdfd6d59c42f7683348b55cea781` pass review.
+
+Source is accepted on attempt 2. No audio artifact probe, qualification, pin change, browser run or benchmark is required. Final documentation-only exact-head/current-base review, PR CI, merge, post-main qualification, GitHub closure and clean-worktree removal remain pending. TOOL9 remains partial.
