@@ -51,6 +51,58 @@ workspace_lib_names() {
     gate_unique_nonempty_lines 'workspace library name aggregation' "$names"
 }
 
+# These are the only protocol source children that may use the dev-only conformance dependency.
+# Keep the mapping explicit: a basename or directory exemption would make an unguarded production
+# module look test-only merely because its path happens to end in `tests.rs`.
+protocol_test_child_paths=(
+    crates/protocol/src/controller/tests.rs
+    crates/protocol/src/message_wire/tests.rs
+    crates/protocol/src/session_wire/tests.rs
+)
+
+protocol_test_child_parent() {
+    case "$1" in
+        crates/protocol/src/controller/tests.rs) printf '%s\n' crates/protocol/src/controller.rs ;;
+        crates/protocol/src/message_wire/tests.rs) printf '%s\n' crates/protocol/src/message_wire.rs ;;
+        crates/protocol/src/session_wire/tests.rs) printf '%s\n' crates/protocol/src/session_wire.rs ;;
+        *) return 1 ;;
+    esac
+}
+
+verify_protocol_test_child_guard() {
+    local child="$1" parent rc
+    parent="$(protocol_test_child_parent "$child")" || {
+        gate_fail "unknown protocol test-child path: $child"
+        return 1
+    }
+    [[ -r "$parent" ]] || {
+        gate_fail "protocol test-child parent is unreadable: $parent"
+        return 1
+    }
+    if awk '
+        $0 == "mod tests;" {
+            module_count++
+            if (previous == "#[cfg(test)]") valid_count++
+        }
+        { previous = $0 }
+        END { exit !(module_count == 1 && valid_count == 1) }
+    ' "$parent"; then
+        return 0
+    else
+        rc=$?
+    fi
+    if [[ "$rc" == 1 ]]; then
+        gate_fail "$parent must contain exactly one literal adjacent '#[cfg(test)]' and 'mod tests;' declaration for $child"
+    else
+        gate_fail "$parent guard verification errored (awk status $rc)"
+    fi
+    return "$rc"
+}
+
+for protocol_test_child in "${protocol_test_child_paths[@]}"; do
+    verify_protocol_test_child_guard "$protocol_test_child" || exit $?
+done
+
 # Manifests carry the package name (hyphens); code carries the crate identifier (underscores).
 # Scoped to `Cargo.toml` and `src/` rather than the whole crate directory: a `tests/MUTATIONS.md`
 # that *names* the harness while recording a red mutation is evidence, not a dependency, and a
@@ -97,9 +149,14 @@ for production in "${production_crates[@]}"; do
     if [[ -n "$harness_pattern" ]]; then
         harness_uses="$(gate_scan_collect "${production} harness use scan" "\\b(${harness_pattern})::" '' "$crate_dir/src")" || exit $?
         filtered_uses="$(gate_filter_exclude "${production} harness comment filter" ':[0-9]+:[[:space:]]*//' "$harness_uses")" || exit $?
-        # Protocol's conformance dependency is deliberately dev-only. Its private unit-test
-        # children are the only source files permitted to name that dependency.
-        filtered_uses="$(gate_filter_exclude "${production} test-only harness filter" '/tests\.rs:' "$filtered_uses")" || exit $?
+        if [[ "$production" == protocol ]]; then
+            # Protocol's conformance dependency is deliberately dev-only. Exempt only the three
+            # exact child paths whose parent guards were verified above; every other tests.rs
+            # path, including one in another production crate, remains production code here.
+            filtered_uses="$(gate_filter_exclude "${production} controller test-child filter" '^crates/protocol/src/controller/tests[.]rs:' "$filtered_uses")" || exit $?
+            filtered_uses="$(gate_filter_exclude "${production} message-wire test-child filter" '^crates/protocol/src/message_wire/tests[.]rs:' "$filtered_uses")" || exit $?
+            filtered_uses="$(gate_filter_exclude "${production} session-wire test-child filter" '^crates/protocol/src/session_wire/tests[.]rs:' "$filtered_uses")" || exit $?
+        fi
     else
         filtered_uses=''
     fi
