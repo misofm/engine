@@ -1,0 +1,2 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.07s
+     Running tests/scalar_point_endpoint.rs (/tmp/issue528-target/debug/deps/scalar_point_endpoint-fb9af70fce4ccb65)

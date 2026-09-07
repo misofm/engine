@@ -94,6 +94,8 @@ pub mod control_provider;
 pub mod diagnostics;
 pub mod prepare;
 pub mod render_session;
+#[cfg(feature = "control-provider")]
+pub mod scalar_point_endpoint;
 pub mod shape;
 pub mod solo;
 pub mod source;
@@ -149,6 +151,9 @@ pub use effect_compiler::{EffectControlProducer, EffectObservationHandle, Effect
 /// is the safe default and the reason the join is an explicit call rather than an inference.
 pub use builtins_compiler::{session_structural_symmetry, track_mono_source};
 pub use effect_contract::{ChannelSymmetryWitness, LiveConsoleRecord, SeamSide, SymmetryEvent};
+
+#[cfg(feature = "control-provider")]
+pub use scalar_point_endpoint::*;
 
 #[doc(hidden)]
 pub use session::CompiledSession;

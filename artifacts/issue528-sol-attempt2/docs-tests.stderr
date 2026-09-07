@@ -1,0 +1,3 @@
+   Compiling host-core v0.1.0 (/home/bl/misofm/engine-scalar-point-endpoint/crates/host-core)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.31s
+   Doc-tests host_core

@@ -31,6 +31,7 @@ session.workspace = true
 source.workspace = true
 
 [dev-dependencies]
+bench-support.workspace = true
 builtins.workspace = true
 builtins-compiler.workspace = true
 # Issue #143 E2: the observation eval compares a bank lane's published reduction against an

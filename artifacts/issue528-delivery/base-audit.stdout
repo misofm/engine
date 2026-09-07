@@ -1,0 +1,12 @@
+{
+  "head": "014bd172f2019d4b0485cd3b3cc342c4c6cd2a60",
+  "current_main": "af22dfa45b037d54a70e7b74c038ccae6154fabf",
+  "source_changes": [
+    "Cargo.lock",
+    "crates/host-core/Cargo.toml",
+    "crates/host-core/src/lib.rs",
+    "crates/host-core/src/scalar_point_endpoint.rs",
+    "crates/host-core/tests/scalar_point_endpoint.rs"
+  ],
+  "evidence_file_count": 164
+}

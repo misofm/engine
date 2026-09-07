@@ -1,0 +1,4 @@
+argv: cargo check --locked -p host-core --features control-provider
+status: 0
+argv: cargo test --locked -p host-core --features control-provider --lib
+status: 0
