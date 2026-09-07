@@ -1,0 +1,19 @@
+{
+  "argv": [
+    "/home/bl/.local/bin/codex",
+    "exec",
+    "-C",
+    "/home/bl/misofm/engine-worktree-cleanup",
+    "-s",
+    "danger-full-access",
+    "-m",
+    "gpt-5.6-sol",
+    "-c",
+    "model_reasoning_effort=\"high\"",
+    "-o",
+    "/tmp/worktree-cleanup/sol-high-brief.md",
+    "-"
+  ],
+  "cwd": "/home/bl/misofm/engine-worktree-cleanup",
+  "prompt": "/tmp/worktree-cleanup/sol-brief-prompt.md"
+}
