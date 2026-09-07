@@ -11,3 +11,7 @@ Gates: actual process execution for both cases, existing native-pcm-runner tests
 ## Numbered TOOL14 disposition
 
 This issue is #547. The complete residual is tracked by #545 orphan rack retirement, #546 current operator/path corrections and #547 native-runner process coverage. Only #545 is currently active; #546/#547 await a slot. FLAC retirement was delivered by #356. Closing one child does not close TOOL14.
+
+## Active slot
+
+#545 is merged through PR549 at86d5b4bd and CLOSED, with its completed worktree removed. #547 now occupies that freed slot alongside #542, #543 and #546. Root activates this frozen smallest process-boundary slice from synchronized main86d5b4bd. Sol high coordinates Luna high implementation; Sol xhigh verifies. Production/audio changes remain out of scope.
