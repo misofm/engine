@@ -1,0 +1,23 @@
+Continue the same issue #544 attempt 1 after a bounded local launcher error. Work in /home/bl/misofm/engine-audit-subject-disposition. This is not a second implementation tranche: no repository edit was made and no audit process actually started in the prior run.
+
+Read AGENTS.md, .github/ISSUE_SPECS/544-runtime-audit-callers.md, artifacts/issue544-brief/sol-high-census.md, tools/audit/src/capi.rs, tools/audit/src/source_duration.rs, the audit-native portion of .github/workflows/qualification.yml, and the existing /tmp/issue544/manifest-20260907T082112Z-544.txt plus /tmp/issue544/luna-attempt1-20260907.md. Do not broadly reread history.
+
+The prior isolated release build and 36-test pass at HEAD d7857eaf71dece44e10fbf0ae966e76a7eabf8fd are valid. The attempted argv ./target/release/audit capi exited 127 before process start because CARGO_TARGET_DIR=/tmp/issue544-target places the local binary elsewhere. Therefore neither real audit subject has yet run. Do not rerun cargo build/test unless HEAD or the source hashes changed; verify they have not changed first.
+
+For LOCAL evidence only, use PATH=/home/bl/.cargo/bin:$PATH and execute:
+- /tmp/issue544-target/release/audit capi
+- /tmp/issue544-target/release/audit source-duration
+Run each real subject exactly once total from this point. Preserve each raw stdout, raw stderr, and numeric status under new unique /tmp/issue544 filenames; do not overwrite the earlier failed-launch files. Record exact argv arrays, cwd, HEAD, capi/source/workflow hashes, and outcomes in a new unique continuation manifest. If an actual audit process exits nonzero, stop and report without source edits.
+
+After both actual audits pass, validate their captured stdout without rerunning them, then edit only .github/workflows/qualification.yml. In CI the commands MUST remain workflow-relative ./target/release/audit capi and ./target/release/audit source-duration because that workflow uses the default target directory. Add exactly those two invocations to audit-native, capture each original single JSON stdout record to target/, preserve stderr and pipeline failure semantics, and validate in the workflow.
+
+Validation contract:
+- Reject empty/multiple records, non-object JSON, extra/missing keys, and bool-as-int for integer fields.
+- capi exact keys: schema_version, kind, calls, sample_rate_hz, quantum_frames, stable_output_address, pcm_digest, render_errors, allocations, deallocations, locks, feature_detection, logs, file_io, network_io, syscalls, panic_unwinds, total_violations. Require schema_version=1, kind=issue022_capi_render_audit, calls=100000, sample_rate_hz=48000, quantum_frames=128, stable_output_address=true, render_errors=0, all nine counters zero, total_violations=0, and pcm_digest exactly 16 lowercase hex chars without pinning its value.
+- source-duration exact keys: schema_version, kind, minute_frames, multi_hour_frames, minute_file_bytes, multi_hour_file_bytes, layout_entries, layout_total_bytes, layout_equal, source_report_equal, graph_report_equal, minute_rss_bytes, multi_hour_rss_bytes, os, arch, rust, timed_benchmark_invocations. Require schema_version=1, kind=issue041_source_duration_layout, minute_frames=2880000, multi_hour_frames=518400000, minute_file_bytes=11520044, multi_hour_file_bytes=2073600044, layout_entries=17, layout_total_bytes=6416, all equality booleans true, os=linux, timed_benchmark_invocations=0. RSS fields are nonnegative integers only, with no threshold/relation. arch/rust are nonempty strings.
+
+Use strict inline Python or jq without dependency/pin changes. No timing threshold, RSS threshold, PCM digest pin, source audit rewrite, benchmark, fixture work, generic framework, or changes to workflow triggers/routing/expectations/verdict/context. Preserve exact audit exit failure through bash pipefail (GitHub run blocks use it by default, but make capture semantics unambiguous).
+
+After editing, validate the two already captured records using the same logic without rerunning subjects. Run cargo fmt --all -- --check with PATH=/home/bl/.cargo/bin:$PATH. Validate workflow YAML syntax using an already-installed local mechanism; do not install or pin anything. Inspect git status/diff and require the sole repo edit to be .github/workflows/qualification.yml. Stop at that focused tranche. No git commit/push/GitHub operations.
+
+Final report: worker terminal/live state, exact changed path, commands/outcomes, all capture/manifest paths, both numeric statuses and decisive observed fields, syntax validation method/result, diff scope, failures. Do not overwrite either runner report output file.
