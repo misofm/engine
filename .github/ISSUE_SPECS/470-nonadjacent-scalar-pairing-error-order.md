@@ -496,10 +496,12 @@ nor the repository artifact pin was edited in this tranche.
 ## Full pre-pin artifact and package qualification
 
 Astra LOW's pre-pin review of `d6f78803` returned **FAIL for pin readiness** while accepting the
-native and Wasm numeric resource changes and candidate digest. It required the corrected CAPI
-double-live explanation and the target-specific Wasm `+80` derivation above. Luna HIGH independently
-verified both bounded corrections; root checkpointed them at `e4f34e8e`. This is an evidence
-correction within accepted attempt 2, not another product attempt.
+native and Wasm numeric resource changes and candidate digest. It required a corrected CAPI
+double-live explanation and the target-specific Wasm `+80` derivation above. Checkpoint `e4f34e8e`
+added the derivation but its CAPI wording still retained the rejected cancellation clause. The final
+waiting comment-only correction removes that clause: the double-live peak sums both live reports,
+and #470 contributes 1,328 bytes to each plan, 2,656 total. This is an evidence correction within
+accepted attempt 2, not another product attempt.
 
 Using the same retained six-file artifact, the artifact-backed browser resource gate and 26 red
 mutations passed. SDK generated/deletion/type/headless/package gates passed, including 37 deletion
