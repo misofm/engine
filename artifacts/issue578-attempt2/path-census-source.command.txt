@@ -1,0 +1,1 @@
+expected=$(printf "%s\n" "crates/host-core/tests/scalar_point_endpoint.rs" "crates/protocol/src/controller.rs" "crates/protocol/src/controller_delivery.rs"); actual=$(git diff --name-only bb7bdff1..b023eec6 | sort); printf "expected:\n%sactual:\n%s" "$expected" "$actual"; test "$actual" = "$expected"
