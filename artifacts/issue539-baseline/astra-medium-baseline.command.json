@@ -1,0 +1,21 @@
+{
+  "argv": [
+    "/home/bl/.local/bin/codex",
+    "exec",
+    "-C",
+    "/home/bl/misofm/engine-limiter-stationary-dispatch",
+    "-s",
+    "danger-full-access",
+    "resume",
+    "-m",
+    "gpt-6-astra",
+    "-c",
+    "model_reasoning_effort=\"medium\"",
+    "-o",
+    "/tmp/issue539/astra-medium-baseline.md",
+    "01a07a7a-915f-7523-9d57-a3a0f2e35e86",
+    "-"
+  ],
+  "cwd": "/home/bl/misofm/engine-limiter-stationary-dispatch",
+  "prompt": "/tmp/issue539/baseline-review-prompt.md"
+}

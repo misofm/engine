@@ -1,0 +1,2078 @@
+OpenAI Codex v0.153.4
+--------
+workdir: /home/bl/misofm/engine-limiter-stationary-dispatch
+model: gpt-6-astra
+provider: openai
+approval: never
+sandbox: danger-full-access
+reasoning effort: medium
+reasoning summaries: none
+session id: 01a07a7a-915f-7523-9d57-a3a0f2e35e86
+--------
+user
+Astra MEDIUM bounded baseline residual decision for #539, following your baseline-only approval. Read-only: no edits/builds/tests/benchmarks/captures/Git/GitHub writes/agents. Return COMPLETE final report; do not write own report file. Current clean pushed a57c8a7f on unchangedbase32a4c205, exact numberedissue539body synchronized. Luna xhigh ran ONE successful cargo rustc --locked --release -p true-peak-limiter --lib -- --emit=asm,llvm-ir atc97c1944. No source edits. Worker report preparation stalled and root interrupted after successful capture/extraction; no final mapping claim exists. Review raw compiler data independently, not an absent agent report. Ten complete mapped actual scalar/W8 process/core/mono IR+ASM excerpts artifacts/issue539-baseline/selected with original-output-identities.json, command/status/source/toolchain and copied helpers. Fulloriginal /tmp/issue539-baseline-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.{ll,s}; root verified allintervals/hashes. Scalar wrapper->scalarcore, W8bankwrapper->W8core, W8mono ownsbody. Map actual four stationary sourcebodies1701/1890/3086/3197 throughW8 supporteddispatch; scalar dual/uniformonly. Distinguish uniform/perlane, ramping/stationary, existing silent-rest and compiler unswitching. Identify reachable retained perframe stationaryconditional machine work, if any, using flags/branches/addresses and loopbackedges rather than debuglocations alone. Narrow scans/reads, do not dump entire megabytefunctions.
+Provenance metadata honestly captures cargo argv (not verbose rustc), pinned1.97.1LLVM22.1.6, config+avx2+fma/fatLTO/codegen1 and selectedenvironment. Assess effective flags from actual module attributes and retained cargo fingerprints/config as needed; no fabricatedcapture/rebuild. Extra /tmp extractedobject is uncredited. Determine whether baseline is sufficient and useful residual exists; partialsurvival narrows implementation, compiler-eliminated/unprovableresidual yields nochange. No projectedwin or new premise, no broad framework/matrix. If usefulresidual, provide bounded Luna high/xhigh attempt1 authority and precise mechanism/state gates, including oldbehaviororacle and actualpathcontrol; resolve tests/allocation.rs path only if needed. If nochange, state exact limitations and closure/accounting advice without claiming performancegain or changingfindingstatusunilaterally. Max3implementationattempts; none has started yet. PostmainPR538qualification34089134766SUCCESS.
+
+codex
+I’ll check the checkpoint and capture provenance, then trace the four W8 paths through the retained IR and assembly. I’ll base the residual decision on reachable branches and loop edges, without running or changing anything.
+
+exec
+/bin/bash -lc 'git status --short && git rev-parse HEAD && git log -4 --oneline && cat artifacts/issue539-baseline/selected/manifest.json && cat artifacts/issue539-baseline/native-release.command.json && cat artifacts/issue539-baseline/original-output-identities.json' in /home/bl/misofm/engine-limiter-stationary-dispatch
+ succeeded in 0ms:
+a57c8a7f7f89ef51c9d188aa6e4f1f711360cd3d
+a57c8a7f Preserve single native limiter baseline for residual review
+c97c1944 Approve one native limiter baseline with actual caller coverage
+918efad7 Brief conditional stationary limiter dispatch slice #539
+32a4c205 Merge pull request #538 from misofm/codex/multiband-detector-access
+{
+  "source_llvm": "/tmp/issue539-baseline-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.ll",
+  "source_asm": "/tmp/issue539-baseline-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.s",
+  "functions": [
+    {
+      "label": "process-scalar",
+      "kind": "llvm",
+      "path": "/tmp/issue539-baseline/selected/process-scalar.ll",
+      "original": "/tmp/issue539-baseline-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.ll",
+      "lines": [
+        24085,
+        24121
+      ],
+      "bytes": 3401,
+      "sha256": "56f5c71fd9a650d47a18410b0239546c8930ad9f322509fa97a54d91f7a67bc8",
+      "symbol": "_RNvXsd_CsdvPQf9CMsz3_17true_peak_limiterNtB5_23PreparedTruePeakLimiterNtCsfGpaX3jkkqY_15effect_contract20PreparedNativeEffect7process"
+    },
+    {
+      "label": "process-scalar",
+      "kind": "asm",
+      "path": "/tmp/issue539-baseline/selected/process-scalar.s",
+      "original": "/tmp/issue539-baseline-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.s",
+      "lines": [
+        37328,
+        37422
+      ],
+      "bytes": 2266,
+      "sha256": "b8e06055262fe8fbfd8739966896a5e641741d53c5690d0d6cb516c18e8e5b53",
+      "symbol": "_RNvXsd_CsdvPQf9CMsz3_17true_peak_limiterNtB5_23PreparedTruePeakLimiterNtCsfGpaX3jkkqY_15effect_contract20PreparedNativeEffect7process"
+    },
+    {
+      "label": "process-core-scalar",
+      "kind": "llvm",
+      "path": "/tmp/issue539-baseline/selected/process-core-scalar.ll",
+      "original": "/tmp/issue539-baseline-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.ll",
+      "lines": [
+        17496,
+        21808
+      ],
+      "bytes": 346968,
+      "sha256": "8bd1d14c7624bd7a134eab102d4b68fac5c2026542fd61eec59364f71f628d59",
+      "symbol": "_RNvMs9_CsdvPQf9CMsz3_17true_peak_limiterINtB5_11LimiterCorefE13process_blockB5_"
+    },
+    {
+      "label": "process-core-scalar",
+      "kind": "asm",
+      "path": "/tmp/issue539-baseline/selected/process-core-scalar.s",
+      "original": "/tmp/issue539-baseline-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.s",
+      "lines": [
+        26764,
+        34023
+      ],
+      "bytes": 141962,
+      "sha256": "ee0be9992acf71f7744b00fc686b1d8381a9e5b60c75d3f09c7568c7423f5e40",
+      "symbol": "_RNvMs9_CsdvPQf9CMsz3_17true_peak_limiterINtB5_11LimiterCorefE13process_blockB5_"
+    },
+    {
+      "label": "process-bank-w8",
+      "kind": "llvm",
+      "path": "/tmp/issue539-baseline/selected/process-bank-w8.ll",
+      "original": "/tmp/issue539-baseline-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.ll",
+      "lines": [
+        27754,
+        28008
+      ],
+      "bytes": 21978,
+      "sha256": "1f889bb0173a444432dc1f0ab0eb3c64a0dbbaf07b4a311266ce66ef524c1be6",
+      "symbol": "_RNvXse_CsdvPQf9CMsz3_17true_peak_limiterINtB5_27PreparedTruePeakLimiterBankNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8ENtCsfGpaX3jkkqY_15effect_contract24PreparedNativeEffectBank12process_bankB5_"
+    },
+    {
+      "label": "process-bank-w8",
+      "kind": "asm",
+      "path": "/tmp/issue539-baseline/selected/process-bank-w8.s",
+      "original": "/tmp/issue539-baseline-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.s",
+      "lines": [
+        43086,
+        43590
+      ],
+      "bytes": 11204,
+      "sha256": "2224a4c18bb194ef256ab008641b82400ee7017f5630c6c201615569df0fd4ba",
+      "symbol": "_RNvXse_CsdvPQf9CMsz3_17true_peak_limiterINtB5_27PreparedTruePeakLimiterBankNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8ENtCsfGpaX3jkkqY_15effect_contract24PreparedNativeEffectBank12process_bankB5_"
+    },
+    {
+      "label": "process-bank-mono-w8",
+      "kind": "llvm",
+      "path": "/tmp/issue539-baseline/selected/process-bank-mono-w8.ll",
+      "original": "/tmp/issue539-baseline-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.ll",
+      "lines": [
+        28012,
+        30731
+      ],
+      "bytes": 262790,
+      "sha256": "02ea676eff0e299d03dcc2e4d188c616a7087ddc3867331c2d2855e09c936a77",
+      "symbol": "_RNvXse_CsdvPQf9CMsz3_17true_peak_limiterINtB5_27PreparedTruePeakLimiterBankNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8ENtCsfGpaX3jkkqY_15effect_contract24PreparedNativeEffectBank17process_bank_monoB5_"
+    },
+    {
+      "label": "process-bank-mono-w8",
+      "kind": "asm",
+      "path": "/tmp/issue539-baseline/selected/process-bank-mono-w8.s",
+      "original": "/tmp/issue539-baseline-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.s",
+      "lines": [
+        43612,
+        47960
+      ],
+      "bytes": 87703,
+      "sha256": "b187b654bf2bacb9d529f6b61c0d6db3cee8d9e00cc4ca6f7acb31bfd5facd5b",
+      "symbol": "_RNvXse_CsdvPQf9CMsz3_17true_peak_limiterINtB5_27PreparedTruePeakLimiterBankNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8ENtCsfGpaX3jkkqY_15effect_contract24PreparedNativeEffectBank17process_bank_monoB5_"
+    },
+    {
+      "label": "process-core-w8",
+      "kind": "llvm",
+      "path": "/tmp/issue539-baseline/selected/process-core-w8.ll",
+      "original": "/tmp/issue539-baseline-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.ll",
+      "lines": [
+        12834,
+        17300
+      ],
+      "bytes": 388559,
+      "sha256": "389b36d10152fa51550b4cfc1f6dd26a99e8c69527c68e7fe5fb46d1ed8da3a9",
+      "symbol": "_RNvMs9_CsdvPQf9CMsz3_17true_peak_limiterINtB5_11LimiterCoreNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8E13process_blockB5_"
+    },
+    {
+      "label": "process-core-w8",
+      "kind": "asm",
+      "path": "/tmp/issue539-baseline/selected/process-core-w8.s",
+      "original": "/tmp/issue539-baseline-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.s",
+      "lines": [
+        19098,
+        26490
+      ],
+      "bytes": 148115,
+      "sha256": "b002b5a9dea10fd48c4abe7d3857eb4b80164b70a46df56c6ce8bf4891d10936",
+      "symbol": "_RNvMs9_CsdvPQf9CMsz3_17true_peak_limiterINtB5_11LimiterCoreNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8E13process_blockB5_"
+    }
+  ]
+}
+{
+  "argv": [
+    "cargo",
+    "rustc",
+    "--locked",
+    "--release",
+    "-p",
+    "true-peak-limiter",
+    "--lib",
+    "--",
+    "--emit=asm,llvm-ir"
+  ],
+  "cwd": "/home/bl/misofm/engine-limiter-stationary-dispatch",
+  "head": "c97c19441717e4fe98552bb55833dd6c51843419",
+  "branch": "codex/limiter-stationary-dispatch",
+  "status": "",
+  "env": {
+    "PATH": "/home/bl/.cargo/bin:/home/bl/.cargo/bin:/home/bl/.local/bin:/home/bl/.codex/packages/standalone/releases/0.153.4-x86_64-unknown-linux-musl/codex-path:/home/bl/.codex1/tmp/arg0/codex-arg032GUSu:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin",
+    "RUSTFLAGS": null,
+    "CARGO_TARGET_DIR": "/tmp/issue539-baseline-target"
+  },
+  "toolchain": {
+    "rustc": {
+      "status": 0,
+      "output": "rustc 1.97.1 (8bab26f4f 2026-07-14)\nbinary: rustc\ncommit-hash: 8bab26f4f68e0e26f0bb7960be334d5b520ea452\ncommit-date: 2026-07-14\nhost: x86_64-unknown-linux-gnu\nrelease: 1.97.1\nLLVM version: 22.1.6\n"
+    },
+    "cargo": {
+      "status": 0,
+      "output": "cargo 1.97.1 (c980f4866 2026-06-30)\n"
+    },
+    "rustup_toolchain": {
+      "status": 0,
+      "output": "1.97.1-x86_64-unknown-linux-gnu (overridden by '/home/bl/misofm/engine-limiter-stationary-dispatch/rust-toolchain.toml')\n"
+    }
+  },
+  "source": {
+    "crates/true-peak-limiter/src/lib.rs": {
+      "sha256": "d945d98c8799457f7567485b63daf87aa78e9eb52ff7174f7678fbbc77984689",
+      "git_blob": "dfe7488ddd6f09a1d3f8e41a7fe909dce864f320"
+    },
+    "Cargo.toml": {
+      "sha256": "471660ddca768e90ec87550807e140b4754454509f6f5f59986a80764b53effb",
+      "git_blob": "23944595dc9167dbb5a3a2ced7234dfdbadf3d0d"
+    },
+    "Cargo.lock": {
+      "sha256": "ef85bfaac8b4df80b651fa89e5e9a67bfef141b58076bdaac513044161b0b853",
+      "git_blob": "1b74fb016a04a090d2d1d37ea15fd2917fb85491"
+    },
+    ".cargo/config.toml": {
+      "sha256": "03b0fbd88c069abb0a8fbdca5921ba6a9899298291fe087977b509a29ebb7d0e",
+      "git_blob": "de2180972c37406f1f16913901bd1d4fc2e660e3"
+    },
+    "rust-toolchain.toml": {
+      "sha256": "85a45cac04c296adac076f8f0609ca8f4c8ca658957f1f24cbd1e054b6cc44e0",
+      "git_blob": "6b6739839ba23906921aeb4c268d275dcc459fb6"
+    }
+  }
+}
+{
+  "/tmp/issue539-baseline-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.ll": {
+    "bytes": 5639902,
+    "sha256": "7a5e51556857b079fc8311d1d4c513c18c512a0cc4af14aa4e5d13416d8c5a34"
+  },
+  "/tmp/issue539-baseline-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.s": {
+    "bytes": 2677152,
+    "sha256": "62c22a115b7d95e7d10574b782b79a0a0dfce69994bd8b3a24079a08d369a9b0"
+  }
+}
+
+exec
+/bin/bash -lc "cat .github/ISSUE_SPECS/539-stationary-limiter-dispatch.md; cat artifacts/issue539-baseline/native-release.status; rg -n 'stationary|unswitch|resting_value' artifacts/issue539-baseline/selected/process-{core-w8,bank-mono-w8,core-scalar}.ll | head -100" in /home/bl/misofm/engine-limiter-stationary-dispatch
+ succeeded in 0ms:
+# Specialize stationary limiter dispatch without changing DSP
+
+Status: OPEN #539. Number/title/body synchronization precedes the baseline-only review. #537 is CLOSED through PR538/main32a4c2058f2c01dea78af32affab660dbc17cae0. Boundary inventory259 local numbered specs/353 remote issues found no missing local-to-remote identities and verified534/536/537 CLOSED. No implementation or lowering capture is authorized before numbered/current-base approval. Root owns Git/GitHub; Luna high/xhigh implements, Astra medium verifies audio correctness. Maximum three implementation attempts. No timing authority or speedup claim.
+
+## Smallest closable outcome
+
+Establish whether actual native limiter production lowering retains per-frame stationary conditionals in the dual/mono, uniform/per-lane bodies. Only if native baseline evidence demonstrates a useful residual and Astra accepts the narrowed premise, specialize the existing common bodies at one block-entry decision while retaining the ramping path and every DSP/state contract. Compiler-eliminated or unprovable residual is a no-change result, not permission to rewrite for a descriptive number. FX2 detector-chunk access is a separate successor; it does not belong here.
+
+## Conditional scope and invariants
+
+Only crates/true-peak-limiter/src/lib.rs (including existing private tests), narrowly needed tests/mono_collapse.rs, and this issue/evidence. Existing stationary admission requires remaining=0 and bit-equal current/target; dual admission checks all four ramp/channel sets, mono checks the left pair under unchanged collapse eligibility. Keep one block-entry decision, no mid-block transition, persistent cache, per-lane dispatch, duplicated divergent DSP body or new public API. Preserve existing uniform/per-lane selection and all ramp snapshots/retargeting.
+
+Keep detector_peak and annex2_phases history shift, center tap, four phases and twelve separately rounded multiply/add steps in original tap order and ordered maxima. Gain law, quantization, lookahead/window shape, fixed latency Fs/100+6, tail, bypass signed-zero bits, independent L/R history/phase/prefix state and the existing bank-shared main/ring cursor pair, active scratch prefixes and state codecs are unchanged. Preserve uniform segmentation, restore-desynchronized fallback, mono right-plane non-access and disengage copy, silent-rest admission/automation invalidation, nonfinite recovery and rejection ordering. No detector-chunk/ring access rewrite, resources, dependencies, backend policy, corpus/reference/pin change or generic harness. Artifact delivery pin changes require a separate bounded decision if the ordinary builder demonstrates an expected mismatch.
+
+## Frozen finite sequence
+
+1. Confirm actual numbered GitHub title/body/current default base and issue boundary. Capture one untimed native release production baseline with pinned toolchain, x86-64-v3 AVX2/FMA, existing release LTO/codegen settings, --locked and isolated target. Reuse #537 capture methodology; retain actual argv/cwd/source/config/environment/stdout/stderr/status and complete mapped scalar/native W8 production IR/assembly with original hashes/ranges. Inspect all four stationary bodies separately and distinguish the already-existing silent-rest path. Do not infer machine branches from source if-statements or absence of an inline helper symbol. Root checkpoints/pushes, then Astra rules on surviving mechanism before edits.
+2. Conditional compact implementation and bounded existing private witness. Compare populated PCM/full state against the old unspecialized behavior for ramping through a within-block ramp endpoint, then the next stationary block; cover both uniform/per-lane and dual/mono supported paths. Prove actual admitted branch use with an independent discriminating mechanism control, not counters recording intended classification. Freeze one fallback-only control, retain its expected failure on the same mechanism assertion while identity remains equal, restore byte-exactly and pass. No mutation campaign or new fixture framework. Root checkpoints each coherent green tranche before another.
+3. Retain existing stationary-hoist/open-window/ramp-bit-identity, phase-order, uniform/mixed-lookahead/independent-LR/restore fallback, mono transition/desymmetrization and active-prefix regressions. Existing conformance, determinism/corpus pins, gain-law/f64, reset/rejection/nonfinite/silent-rest and allocation/free checks remain. Ensure actual supported W8 execution is identified rather than treating a skip as evidence. Extend existing own-thread allocation liveness only if necessary; no new allocator.
+4. Frozen-source full affected suite and changed focused debug/release checks, strict affected Clippy/fmt and proportional existing policies. Comparable candidate native lowering must establish the intended access/dispatch mechanism while preserving math; actual supported production host-web scalar/simd128 lowering and existing immutable corpus remain portability/regression gates. No fresh numerical corpus, benchmark runner, exhaustive target matrix or listening campaign.
+
+## Research and DSP authority
+
+Dispatch-only: preserve the current source equations (lib.rs:11–25), not the superseded initial step/hold law. With N=Fs/100, T=N+6, R=N+1, L=round(lookahead_ms*Fs/1000), Wb=clamp(L+1,32,R), P=max(abs(h[6]),abs(four Annex2 phases)), r=(P>limit ? limit/P : 1), m the existing sliding minimum, m_q=floor(m*16384)/16384, s the Wb-term box average, d=max(1-s, existing lane multiply-add(c,(1-s)-previous_d,previous_d)), g=1-d, y=x[n-T]*g. Keep all rounding/order/quantization and native/base-Wasm arithmetic policies. Quantized sums remain exact within launch R<=961; no reassociation or reciprocal substitution.
+
+Current lib.rs:769–783 derives limit=10^((ceiling_db-1)/20) and c=1-exp(-1/(0.001*release_ms*Fs)) in f64 through math, rounded once to f32 at the existing parameter-update seam. Ceiling -24..0 dBTP-est (default-1) and release10..2000ms (default100) use existing64-update linear-domain ramps with exact endpoints/retargeting. Preparation-only lookahead0..10ms (default5) and its rounding/clamp remain unchanged. Launch rates exactly44.1/48/88.2/96kHz, latencyT and infinite tail. Preserve lane::flush on recursive d, existing effect-runtime block nonfinite boundary recovery and validation, not the superseded original per-value recovery.
+
+Exact inherited research/decision authority: .github/ISSUE_SPECS/BRIEFS/016-true-peak-limiter.md, especially the issue90 wave2 amendment (gain-law/coefficient/sanitation sections around292–403); .github/ISSUE_SPECS/090-audit-miso-engine-true-peak-limiter.md; current lib.rs and docs/EFFECT_CONTRACT_V1.md. The original016 sections are historical where that amendment/current source supersede them. ITU-BS1770-5 supplies only the detector coefficient table/estimator; REISS-COMP supports detector/gain separation and one-pole timing; SMITH-SASP supplies signal-processing context as recorded in the research corpus. Existing fixtures include phase-order, independent f64 gain-law/ceiling, exact width/partition/state, and zero-allocation/free gates. Historical cost measurements and audition/listening records in016/049 remain historical: no timed invocation or new human listening occurs under this dispatch slice, and no new sound-quality claim is made.
+
+## Delivery
+
+After consolidated Astra source PASS, qualify the actual native ABI and ordinary published artifact with existing static/resources/hermetic/three-browser obligations. Get exact-head/current-base Astra review and actual required qualification SUCCESS, assert live main immediately before exact-head merge, verify parents, then synchronize GitHub closure and audit349/518. No task is reported delivered before those remote steps. All failed attempts/captures remain candid; after three failed attempts stop and rescope, never perform a fourth disguised retry.
+
+## Numbered/current-base baseline approval — Astra medium
+
+**PASS — baseline-only scope review for #539.** One untimed native baseline capture is authorized. No implementation, timing, or projected gain is authorized.
+
+Verified read-only:
+
+- Clean, pushed HEAD `918efad74e90b7b2d2786359886765e1ed9a9d74`, directly parented by live default-branch main `32a4c2058f2c01dea78af32affab660dbc17cae0`. Production source/configuration is unchanged from that base. The local `main` ref is stale; use the verified remote SHA.
+- [GitHub #539](https://github.com/misofm/engine/issues/539) is OPEN, titled **“Specialize stationary limiter dispatch without changing DSP”**, with a byte-exact match to the numbered local body.
+- [#537](https://github.com/misofm/engine/issues/537) is CLOSED; [PR #538](https://github.com/misofm/engine/pull/538) is MERGED with the stated merge SHA and expected parents. Run `34088692973` and its `qualification` verdict succeeded. Post-main run `34089134766` remained in progress at the final check.
+- Current inventory is **260 numbered local specs / 354 remote issues**, with no missing local-number identities; #534/#536/#537 are CLOSED. The recorded 259/353 inventory predates #539. This verifies number coverage, not universal historical title/body equality.
+- Read applicable root AGENTS, the numbered brief, retained unnumbered prebrief, current limiter seams, inherited #016 wave-2 amendment/#090 pointer, contract, and #537 capture methodology. User routing overrides the guide’s older model assignments: Luna high/xhigh implementation; Astra medium audio verification.
+
+The FX1 scope is appropriately small and conditional. Source conditionals occur at `lib.rs:1701`, `1890`, `3086`, and `3197`: dual per-lane/uniform and mono per-lane/uniform. Stationary admission requires zero remaining updates and bit-equal current/target; dual checks four ramp sets, mono the left pair under existing collapse eligibility. Existing silent-rest admission is a separate mechanism. **None of these source facts proves a surviving machine branch.**
+
+The inherited DSP contract is sufficient for a dispatch-only change: preserve the current windowed, quantized gain law; coefficient design and exact ramp endpoints; separately rounded Annex-2 tap arithmetic; ordered maxima; latency, signed-zero bypass, state restoration, mono disengagement, and nonfinite recovery. The superseded step/hold law supplies no authority. FX2 detector access remains a separate successor.
+
+Record these narrow clarifications with the baseline instructions:
+
+1. **Caller coverage is not an eight-cell requirement.** Capture scalar production `process` and supported W8 `process_bank` / `process_bank_mono`, including any outlined callees. Map all four bodies through W8. Scalar is dual-only and its valid one-lane state is uniform; do not manufacture scalar mono/per-lane probes or credit unreachable code.
+2. **Correct the cursor wording:** L/R history, prefix and phase state are independent; the current engine shares one main/ring cursor pair across the bank. Preserve that arrangement.
+3. **Preserve effective compiler provenance.** Reuse the existing capture approach with Rust `1.97.1`, `--locked --release`, isolated target, fat LTO/codegen-units=1 and existing `+avx2,+fma` configuration. Record effective environment overrides and compiler invocation; do not add `target-cpu`. Retain complete mapped IR/ASM and original identities/ranges. Distinguish crate production lowering from a final linked native artifact.
+4. The brief conditionally permits allocator-liveness work but omits `tests/allocation.rs` from its path list. Resolve that narrowly **only if implementation proceeds**; the existing allocator is already thread-local. No allocator rewrite is warranted.
+
+The finite conditional gates are feasible using existing private and integration machinery: populated PCM/full-state comparison with the old unspecialized behavior, a ramp ending within a block followed by a stationary block, all four supported routes, and one discriminating fallback-only negative control. Classification counters alone are insufficient. Preserve existing arithmetic, state, mono, allocation and corpus gates; identify actual W8 execution. Later native/Wasm and ordinary artifact qualification remain conditional delivery obligations.
+
+After the **single capture**, root checkpoints and pushes the evidence; Astra then decides whether a useful, reachable residual survives. Partial survival narrows the implementation. Compiler-eliminated or unprovable residual yields **no change**, not another optimization premise. Maximum **three implementation attempts** remains binding.
+
+No edits, builds, tests, benchmarks, captures, Git/GitHub writes, agents, or report-file writes were performed.
+
+Root adopts all four baseline clarifications above. Capture actual scalar process and W8 process_bank/process_bank_mono including outlined callees; map all four bodies through supported W8, never invent scalar mono/per-lane probes. Capture is crate production lowering, not a final linked native artifact. If implementation proceeds, explicitly resolve any narrowly needed tests/allocation.rs liveness extension before editing; no allocator rewrite. Post-main34089134766 has now completedSUCCESS.
+
+## Single unchanged native baseline checkpoint — Luna xhigh
+
+One cargo rustc --locked --release -p true-peak-limiter --lib -- --emit=asm,llvm-ir capture returned0 atc97c1944. Source SHA d945d98c8799457f7567485b63daf87aa78e9eb52ff7174f7678fbbc77984689 remains unchanged. Metadata retains actual cargo argv, toolchain/config/source and selected environment; it is not a captured verbose rustc invocation. Ten complete scalar/W8 caller/core IR/ASM excerpts and full-output identities are retained. Root verified every selected byte range/size/hash.
+
+Worker preparation was interrupted after the successful capture/extraction without a final branch-mapping report. No second capture or source edit ran. No stationary residual is claimed by this checkpoint; Astra medium must independently map the retained compiler dataflow and decide whether a useful reachable residual survives, including effective provenance limits. The finite baseline gate and no-change option remain unchanged.
+0
+artifacts/issue539-baseline/selected/process-bank-mono-w8.ll:352:  %stationary.sroa.0.0.i219.i.i = phi i1 [ false, %bb13.i.i1738.i.i ], [ true, %bb1.i.i1735.i.i ], [ false, %bb13.i.i1727.i.i ], !dbg !26217
+artifacts/issue539-baseline/selected/process-bank-mono-w8.ll:786:  br i1 %stationary.sroa.0.0.i219.i.i, label %_RNvXNtCs1miJJANcyja_4lane5simd8NtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8NtB4_4Lane4load.exit1341.i.i, label %bb21.i243.i.i, !dbg !26868
+artifacts/issue539-baseline/selected/process-bank-mono-w8.ll:1451:  %stationary.sroa.0.0.i.i.i = phi i1 [ false, %bb13.i.i1791.i.i ], [ true, %bb1.i.i1788.i.i ], [ false, %bb13.i.i1780.i.i ], !dbg !27406
+artifacts/issue539-baseline/selected/process-bank-mono-w8.ll:1996:  br i1 %stationary.sroa.0.0.i.i.i, label %bb35.i.i.i, label %bb32.i.i.i, !dbg !28136
+artifacts/issue539-baseline/selected/process-core-scalar.ll:456:  %stationary.sroa.0.0.i21 = phi i1 [ false, %bb13.i.i1846 ], [ false, %bb13.i.i1835 ], [ false, %bb13.i.i1857 ], [ true, %bb1.i.i1854 ], [ false, %bb13.i.i1824 ], !dbg !17743
+artifacts/issue539-baseline/selected/process-core-scalar.ll:1180:  br i1 %stationary.sroa.0.0.i21, label %bb35.i, label %bb30.i, !dbg !18367
+artifacts/issue539-baseline/selected/process-core-scalar.ll:2481:  %stationary.sroa.0.0.i = phi i1 [ false, %bb13.i.i1945 ], [ false, %bb13.i.i1934 ], [ false, %bb13.i.i1956 ], [ true, %bb1.i.i1953 ], [ false, %bb13.i.i1923 ], !dbg !19107
+artifacts/issue539-baseline/selected/process-core-scalar.ll:3324:  br i1 %stationary.sroa.0.0.i, label %_RNvXNtCs1miJJANcyja_4lane6scalarfNtB4_4Lane4load.exit1235, label %bb46.i, !dbg !19796
+artifacts/issue539-baseline/selected/process-core-w8.ll:455:  %stationary.sroa.0.0.i227 = phi i1 [ false, %bb13.i.i3158 ], [ false, %bb13.i.i3147 ], [ false, %bb13.i.i3169 ], [ true, %bb1.i.i3166 ], [ false, %bb13.i.i3136 ], !dbg !11828
+artifacts/issue539-baseline/selected/process-core-w8.ll:1158:  br i1 %stationary.sroa.0.0.i227, label %_RNvXNtCs1miJJANcyja_4lane5simd8NtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8NtB4_4Lane4load.exit2462, label %bb30.i, !dbg !13131
+artifacts/issue539-baseline/selected/process-core-w8.ll:2468:  %stationary.sroa.0.0.i = phi i1 [ false, %bb13.i.i3276 ], [ false, %bb13.i.i3265 ], [ false, %bb13.i.i3287 ], [ true, %bb1.i.i3284 ], [ false, %bb13.i.i3254 ], !dbg !14286
+artifacts/issue539-baseline/selected/process-core-w8.ll:3310:  br i1 %stationary.sroa.0.0.i, label %bb51.i, label %bb46.i, !dbg !15592
+
+exec
+/bin/bash -lc "python3 - <<'PY'
+import subprocess,json,pathlib,hashlib
+p=pathlib.Path('.github/ISSUE_SPECS/539-stationary-limiter-dispatch.md'); i=json.loads(subprocess.check_output(['gh','issue','view','539','--json','number,title,body,state']))
+print({k:v for k,v in i.items() if k"'!='"'body'},'body_exact',p.read_text()==i['body'])
+for p,h in json.loads(pathlib.Path('artifacts/issue539-baseline/original-output-identities.json').read_text()).items():
+ b=pathlib.Path(p).read_bytes(); print(p,len(b)==h['bytes'],hashlib.sha256(b).hexdigest()==h['sha256'])
+m=json.loads(pathlib.Path('artifacts/issue539-baseline/selected/manifest.json').read_text())
+for f in m['functions']:
+ b=(pathlib.Path('artifacts/issue539-baseline/selected')/pathlib.Path(f['path']).name).read_bytes(); a,z=f['lines']; orig=pathlib.Path(f['original']).read_bytes().splitlines(keepends=True)
+ print(f['label'],f['kind'],b==b''.join(orig[a-1:z]),hashlib.sha256(b).hexdigest()==f['sha256'])
+PY
+ git ls-remote origin refs/heads/main refs/heads/codex/limiter-stationary-dispatch; gh api repos/misofm/engine/actions/runs/34089134766 --jq '{status,conclusion,head_sha}'" in /home/bl/misofm/engine-limiter-stationary-dispatch
+ succeeded in 1226ms:
+{'number': 539, 'state': 'OPEN', 'title': 'Specialize stationary limiter dispatch without changing DSP'} body_exact True
+/tmp/issue539-baseline-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.ll True True
+/tmp/issue539-baseline-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.s True True
+process-scalar llvm True True
+process-scalar asm True True
+process-core-scalar llvm True True
+process-core-scalar asm True True
+process-bank-w8 llvm True True
+process-bank-w8 asm True True
+process-bank-mono-w8 llvm True True
+process-bank-mono-w8 asm True True
+process-core-w8 llvm True True
+process-core-w8 asm True True
+a57c8a7f7f89ef51c9d188aa6e4f1f711360cd3d	refs/heads/codex/limiter-stationary-dispatch
+32a4c2058f2c01dea78af32affab660dbc17cae0	refs/heads/main
+{"conclusion":"success","head_sha":"32a4c2058f2c01dea78af32affab660dbc17cae0","status":"completed"}
+
+exec
+/bin/bash -lc "rg -n -B8 -A18 '\\.loc.*(1701|1890|3086|3197) ' artifacts/issue539-baseline/selected/process-{core-w8,bank-mono-w8,core-scalar}.s; rg -n 'attributes #0|target-features|llvm.ident|"'!llvm.module.flags'"' /tmp/issue539-baseline-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.ll | head -8; cat /tmp/issue539-baseline-target/release/.fingerprint/true-peak-limiter-61bcf0f0b2475b36/lib-true_peak_limiter.json" in /home/bl/misofm/engine-limiter-stationary-dispatch
+ succeeded in 0ms:
+artifacts/issue539-baseline/selected/process-bank-mono-w8.s-1420-	vmovaps	1632(%rsp), %ymm10
+artifacts/issue539-baseline/selected/process-bank-mono-w8.s-1421-	xorl	%r8d, %r8d
+artifacts/issue539-baseline/selected/process-bank-mono-w8.s-1422-	vbroadcastss	.LCPI60_2(%rip), %ymm5
+artifacts/issue539-baseline/selected/process-bank-mono-w8.s-1423-	vbroadcastss	.LCPI60_3(%rip), %ymm6
+artifacts/issue539-baseline/selected/process-bank-mono-w8.s-1424-	movq	%r11, 2176(%rsp)
+artifacts/issue539-baseline/selected/process-bank-mono-w8.s-1425-	.p2align	4
+artifacts/issue539-baseline/selected/process-bank-mono-w8.s-1426-.LBB60_86:
+artifacts/issue539-baseline/selected/process-bank-mono-w8.s-1427-.Ltmp8100:
+artifacts/issue539-baseline/selected/process-bank-mono-w8.s:1428:	.loc	15 3086 49 is_stmt 1
+artifacts/issue539-baseline/selected/process-bank-mono-w8.s-1429-	cmpb	$0, 48(%rsp)
+artifacts/issue539-baseline/selected/process-bank-mono-w8.s-1430-	jne	.LBB60_88
+artifacts/issue539-baseline/selected/process-bank-mono-w8.s-1431-	.loc	15 0 49 is_stmt 0
+artifacts/issue539-baseline/selected/process-bank-mono-w8.s-1432-	vbroadcastss	.LCPI60_1(%rip), %ymm13
+artifacts/issue539-baseline/selected/process-bank-mono-w8.s-1433-.Ltmp8101:
+artifacts/issue539-baseline/selected/process-bank-mono-w8.s-1434-	.loc	50 347 14 is_stmt 1
+artifacts/issue539-baseline/selected/process-bank-mono-w8.s-1435-	vaddps	%ymm13, %ymm15, %ymm8
+artifacts/issue539-baseline/selected/process-bank-mono-w8.s-1436-	vxorps	%xmm14, %xmm14, %xmm14
+artifacts/issue539-baseline/selected/process-bank-mono-w8.s-1437-.Ltmp8102:
+artifacts/issue539-baseline/selected/process-bank-mono-w8.s-1438-	.loc	50 233 14
+artifacts/issue539-baseline/selected/process-bank-mono-w8.s-1439-	vmaxps	%ymm14, %ymm8, %ymm8
+artifacts/issue539-baseline/selected/process-bank-mono-w8.s-1440-	vmovaps	%ymm8, %ymm15
+artifacts/issue539-baseline/selected/process-bank-mono-w8.s-1441-.Ltmp8103:
+artifacts/issue539-baseline/selected/process-bank-mono-w8.s-1442-	.loc	50 871 14
+artifacts/issue539-baseline/selected/process-bank-mono-w8.s-1443-	vcmpgt_oqps	%ymm14, %ymm8, %ymm8
+artifacts/issue539-baseline/selected/process-bank-mono-w8.s-1444-.Ltmp8104:
+artifacts/issue539-baseline/selected/process-bank-mono-w8.s-1445-	.loc	50 48 14
+artifacts/issue539-baseline/selected/process-bank-mono-w8.s-1446-	vaddps	%ymm0, %ymm12, %ymm0
+--
+artifacts/issue539-baseline/selected/process-bank-mono-w8.s-3028-	vmovaps	%ymm9, %ymm0
+artifacts/issue539-baseline/selected/process-bank-mono-w8.s-3029-	xorl	%r13d, %r13d
+artifacts/issue539-baseline/selected/process-bank-mono-w8.s-3030-	vmovaps	%ymm1, %ymm2
+artifacts/issue539-baseline/selected/process-bank-mono-w8.s-3031-.Ltmp8405:
+artifacts/issue539-baseline/selected/process-bank-mono-w8.s-3032-	.loc	32 0 12
+artifacts/issue539-baseline/selected/process-bank-mono-w8.s-3033-.Ltmp8406:
+artifacts/issue539-baseline/selected/process-bank-mono-w8.s-3034-	.p2align	4
+artifacts/issue539-baseline/selected/process-bank-mono-w8.s-3035-.LBB60_176:
+artifacts/issue539-baseline/selected/process-bank-mono-w8.s:3036:	.loc	15 3197 57 is_stmt 1
+artifacts/issue539-baseline/selected/process-bank-mono-w8.s-3037-	cmpb	$0, 8(%rsp)
+artifacts/issue539-baseline/selected/process-bank-mono-w8.s-3038-	movq	256(%rsp), %rcx
+artifacts/issue539-baseline/selected/process-bank-mono-w8.s-3039-	jne	.LBB60_178
+artifacts/issue539-baseline/selected/process-bank-mono-w8.s-3040-	.loc	15 0 57 is_stmt 0
+artifacts/issue539-baseline/selected/process-bank-mono-w8.s-3041-	vbroadcastss	.LCPI60_1(%rip), %ymm13
+artifacts/issue539-baseline/selected/process-bank-mono-w8.s-3042-.Ltmp8407:
+artifacts/issue539-baseline/selected/process-bank-mono-w8.s-3043-	.loc	50 347 14 is_stmt 1
+artifacts/issue539-baseline/selected/process-bank-mono-w8.s-3044-	vaddps	%ymm13, %ymm15, %ymm9
+artifacts/issue539-baseline/selected/process-bank-mono-w8.s-3045-	vxorps	%xmm1, %xmm1, %xmm1
+artifacts/issue539-baseline/selected/process-bank-mono-w8.s-3046-.Ltmp8408:
+artifacts/issue539-baseline/selected/process-bank-mono-w8.s-3047-	.loc	50 233 14
+artifacts/issue539-baseline/selected/process-bank-mono-w8.s-3048-	vmaxps	%ymm1, %ymm9, %ymm15
+artifacts/issue539-baseline/selected/process-bank-mono-w8.s-3049-.Ltmp8409:
+artifacts/issue539-baseline/selected/process-bank-mono-w8.s-3050-	.loc	50 871 14
+artifacts/issue539-baseline/selected/process-bank-mono-w8.s-3051-	vcmpgt_oqps	%ymm1, %ymm15, %ymm9
+artifacts/issue539-baseline/selected/process-bank-mono-w8.s-3052-.Ltmp8410:
+artifacts/issue539-baseline/selected/process-bank-mono-w8.s-3053-	.loc	50 48 14
+artifacts/issue539-baseline/selected/process-bank-mono-w8.s-3054-	vaddps	%ymm0, %ymm5, %ymm0
+--
+artifacts/issue539-baseline/selected/process-core-scalar.s-1909-	vmovss	596(%rsp), %xmm13
+artifacts/issue539-baseline/selected/process-core-scalar.s-1910-	vmovss	592(%rsp), %xmm2
+artifacts/issue539-baseline/selected/process-core-scalar.s-1911-	movq	504(%rsp), %r12
+artifacts/issue539-baseline/selected/process-core-scalar.s-1912-	movl	416(%rsp), %r15d
+artifacts/issue539-baseline/selected/process-core-scalar.s-1913-	vmovss	.LCPI34_2(%rip), %xmm6
+artifacts/issue539-baseline/selected/process-core-scalar.s-1914-	.p2align	4
+artifacts/issue539-baseline/selected/process-core-scalar.s-1915-.LBB34_88:
+artifacts/issue539-baseline/selected/process-core-scalar.s-1916-.Ltmp5310:
+artifacts/issue539-baseline/selected/process-core-scalar.s:1917:	.loc	15 1701 77 is_stmt 1
+artifacts/issue539-baseline/selected/process-core-scalar.s-1918-	cmpb	$0, 12(%rsp)
+artifacts/issue539-baseline/selected/process-core-scalar.s-1919-	jne	.LBB34_102
+artifacts/issue539-baseline/selected/process-core-scalar.s-1920-	.loc	15 0 77 is_stmt 0
+artifacts/issue539-baseline/selected/process-core-scalar.s-1921-	vmovss	52(%rsp), %xmm0
+artifacts/issue539-baseline/selected/process-core-scalar.s-1922-.Ltmp5311:
+artifacts/issue539-baseline/selected/process-core-scalar.s-1923-	.loc	39 66 9 is_stmt 1
+artifacts/issue539-baseline/selected/process-core-scalar.s-1924-	vaddss	.LCPI34_1(%rip), %xmm0, %xmm0
+artifacts/issue539-baseline/selected/process-core-scalar.s-1925-.Ltmp5312:
+artifacts/issue539-baseline/selected/process-core-scalar.s-1926-	.loc	39 124 14
+artifacts/issue539-baseline/selected/process-core-scalar.s-1927-	vxorps	%xmm1, %xmm1, %xmm1
+artifacts/issue539-baseline/selected/process-core-scalar.s-1928-	vmovaps	%xmm3, %xmm7
+artifacts/issue539-baseline/selected/process-core-scalar.s-1929-	vucomiss	%xmm1, %xmm0
+artifacts/issue539-baseline/selected/process-core-scalar.s-1930-.Ltmp5313:
+artifacts/issue539-baseline/selected/process-core-scalar.s-1931-	.loc	39 161 24
+artifacts/issue539-baseline/selected/process-core-scalar.s-1932-	ja	.LBB34_90
+artifacts/issue539-baseline/selected/process-core-scalar.s-1933-.Ltmp5314:
+artifacts/issue539-baseline/selected/process-core-scalar.s-1934-	.loc	39 0 24 is_stmt 0
+artifacts/issue539-baseline/selected/process-core-scalar.s-1935-	vmovss	368(%rsp), %xmm1
+--
+artifacts/issue539-baseline/selected/process-core-scalar.s-5174-	vmovss	804(%rsp), %xmm0
+artifacts/issue539-baseline/selected/process-core-scalar.s-5175-	vmovss	800(%rsp), %xmm3
+artifacts/issue539-baseline/selected/process-core-scalar.s-5176-	vmovss	%xmm2, 164(%rsp)
+artifacts/issue539-baseline/selected/process-core-scalar.s-5177-.Ltmp5945:
+artifacts/issue539-baseline/selected/process-core-scalar.s-5178-	.loc	32 0 12
+artifacts/issue539-baseline/selected/process-core-scalar.s-5179-.Ltmp5946:
+artifacts/issue539-baseline/selected/process-core-scalar.s-5180-	.p2align	4
+artifacts/issue539-baseline/selected/process-core-scalar.s-5181-.LBB34_283:
+artifacts/issue539-baseline/selected/process-core-scalar.s:5182:	.loc	15 1890 85 is_stmt 1
+artifacts/issue539-baseline/selected/process-core-scalar.s-5183-	cmpb	$0, 992(%rsp)
+artifacts/issue539-baseline/selected/process-core-scalar.s-5184-	movq	392(%rsp), %rsi
+artifacts/issue539-baseline/selected/process-core-scalar.s-5185-	je	.LBB34_287
+artifacts/issue539-baseline/selected/process-core-scalar.s-5186-	.loc	15 0 85 is_stmt 0
+artifacts/issue539-baseline/selected/process-core-scalar.s-5187-	movl	172(%rsp), %edi
+artifacts/issue539-baseline/selected/process-core-scalar.s-5188-	movq	272(%rsp), %r8
+artifacts/issue539-baseline/selected/process-core-scalar.s:5189:	.loc	15 1890 85
+artifacts/issue539-baseline/selected/process-core-scalar.s-5190-	jmp	.LBB34_300
+artifacts/issue539-baseline/selected/process-core-scalar.s-5191-	.loc	15 0 85
+artifacts/issue539-baseline/selected/process-core-scalar.s-5192-.Ltmp5947:
+artifacts/issue539-baseline/selected/process-core-scalar.s-5193-	.p2align	4
+artifacts/issue539-baseline/selected/process-core-scalar.s-5194-.LBB34_287:
+artifacts/issue539-baseline/selected/process-core-scalar.s-5195-	vmovss	52(%rsp), %xmm1
+artifacts/issue539-baseline/selected/process-core-scalar.s-5196-.Ltmp5948:
+artifacts/issue539-baseline/selected/process-core-scalar.s-5197-	.loc	39 66 9 is_stmt 1
+artifacts/issue539-baseline/selected/process-core-scalar.s-5198-	vaddss	.LCPI34_1(%rip), %xmm1, %xmm5
+artifacts/issue539-baseline/selected/process-core-scalar.s-5199-.Ltmp5949:
+artifacts/issue539-baseline/selected/process-core-scalar.s-5200-	.loc	39 124 14
+artifacts/issue539-baseline/selected/process-core-scalar.s-5201-	vxorps	%xmm1, %xmm1, %xmm1
+artifacts/issue539-baseline/selected/process-core-scalar.s-5202-	vucomiss	%xmm1, %xmm5
+artifacts/issue539-baseline/selected/process-core-scalar.s-5203-	movl	172(%rsp), %edi
+artifacts/issue539-baseline/selected/process-core-scalar.s-5204-	movq	272(%rsp), %r8
+artifacts/issue539-baseline/selected/process-core-scalar.s-5205-.Ltmp5950:
+artifacts/issue539-baseline/selected/process-core-scalar.s-5206-	.loc	39 161 24
+artifacts/issue539-baseline/selected/process-core-scalar.s-5207-	ja	.LBB34_288
+--
+artifacts/issue539-baseline/selected/process-core-w8.s-1879-	vmovaps	%ymm0, 800(%rsp)
+artifacts/issue539-baseline/selected/process-core-w8.s-1880-	vmovaps	4480(%rsp), %ymm1
+artifacts/issue539-baseline/selected/process-core-w8.s-1881-	vmovaps	5216(%rsp), %ymm0
+artifacts/issue539-baseline/selected/process-core-w8.s-1882-	xorl	%eax, %eax
+artifacts/issue539-baseline/selected/process-core-w8.s-1883-	vbroadcastss	.LCPI32_2(%rip), %ymm14
+artifacts/issue539-baseline/selected/process-core-w8.s-1884-	.p2align	4
+artifacts/issue539-baseline/selected/process-core-w8.s-1885-.LBB32_96:
+artifacts/issue539-baseline/selected/process-core-w8.s-1886-.Ltmp3738:
+artifacts/issue539-baseline/selected/process-core-w8.s:1887:	.loc	15 1701 77 is_stmt 1
+artifacts/issue539-baseline/selected/process-core-w8.s-1888-	cmpb	$0, 256(%rsp)
+artifacts/issue539-baseline/selected/process-core-w8.s-1889-	jne	.LBB32_98
+artifacts/issue539-baseline/selected/process-core-w8.s-1890-	.loc	15 0 77 is_stmt 0
+artifacts/issue539-baseline/selected/process-core-w8.s-1891-	vbroadcastss	.LCPI32_1(%rip), %ymm9
+artifacts/issue539-baseline/selected/process-core-w8.s-1892-.Ltmp3739:
+artifacts/issue539-baseline/selected/process-core-w8.s-1893-	.loc	50 347 14 is_stmt 1
+artifacts/issue539-baseline/selected/process-core-w8.s-1894-	vaddps	96(%rsp), %ymm9, %ymm2
+artifacts/issue539-baseline/selected/process-core-w8.s-1895-	vxorps	%xmm10, %xmm10, %xmm10
+artifacts/issue539-baseline/selected/process-core-w8.s-1896-.Ltmp3740:
+artifacts/issue539-baseline/selected/process-core-w8.s-1897-	.loc	50 233 14
+artifacts/issue539-baseline/selected/process-core-w8.s-1898-	vmaxps	%ymm10, %ymm2, %ymm2
+artifacts/issue539-baseline/selected/process-core-w8.s-1899-	vmovaps	%ymm2, 96(%rsp)
+artifacts/issue539-baseline/selected/process-core-w8.s-1900-.Ltmp3741:
+artifacts/issue539-baseline/selected/process-core-w8.s-1901-	.loc	50 871 14
+artifacts/issue539-baseline/selected/process-core-w8.s-1902-	vcmpgt_oqps	%ymm10, %ymm2, %ymm2
+artifacts/issue539-baseline/selected/process-core-w8.s-1903-	vmovaps	928(%rsp), %ymm13
+artifacts/issue539-baseline/selected/process-core-w8.s-1904-.Ltmp3742:
+artifacts/issue539-baseline/selected/process-core-w8.s-1905-	.loc	50 48 14
+--
+artifacts/issue539-baseline/selected/process-core-w8.s-5035-.Ltmp4363:
+artifacts/issue539-baseline/selected/process-core-w8.s-5036-	.loc	14 1050 16 is_stmt 1
+artifacts/issue539-baseline/selected/process-core-w8.s-5037-	jae	.LBB32_403
+artifacts/issue539-baseline/selected/process-core-w8.s-5038-.Ltmp4364:
+artifacts/issue539-baseline/selected/process-core-w8.s-5039-	.loc	32 304 12
+artifacts/issue539-baseline/selected/process-core-w8.s-5040-	testq	%r10, %r10
+artifacts/issue539-baseline/selected/process-core-w8.s-5041-	je	.LBB32_311
+artifacts/issue539-baseline/selected/process-core-w8.s-5042-.Ltmp4365:
+artifacts/issue539-baseline/selected/process-core-w8.s:5043:	.loc	15 1890 85
+artifacts/issue539-baseline/selected/process-core-w8.s-5044-	cmpq	%r15, %rbx
+artifacts/issue539-baseline/selected/process-core-w8.s-5045-	cmovbq	%rbx, %r15
+artifacts/issue539-baseline/selected/process-core-w8.s-5046-	cmpq	%r9, %r15
+artifacts/issue539-baseline/selected/process-core-w8.s-5047-	cmovaeq	%r9, %r15
+artifacts/issue539-baseline/selected/process-core-w8.s-5048-	cmpq	%r11, %r15
+artifacts/issue539-baseline/selected/process-core-w8.s-5049-	cmovaeq	%r11, %r15
+artifacts/issue539-baseline/selected/process-core-w8.s-5050-	cmpq	%r13, %r15
+artifacts/issue539-baseline/selected/process-core-w8.s-5051-	cmovaeq	%r13, %r15
+artifacts/issue539-baseline/selected/process-core-w8.s-5052-	cmpq	%r14, %r15
+artifacts/issue539-baseline/selected/process-core-w8.s-5053-	cmovaeq	%r14, %r15
+artifacts/issue539-baseline/selected/process-core-w8.s-5054-	movq	192(%rsp), %r9
+artifacts/issue539-baseline/selected/process-core-w8.s-5055-.Ltmp4366:
+artifacts/issue539-baseline/selected/process-core-w8.s-5056-	.loc	15 0 0 is_stmt 0
+artifacts/issue539-baseline/selected/process-core-w8.s-5057-	leaq	(%r9,%rdi,4), %rsi
+artifacts/issue539-baseline/selected/process-core-w8.s-5058-	movq	%rsi, 832(%rsp)
+artifacts/issue539-baseline/selected/process-core-w8.s-5059-	movq	200(%rsp), %r9
+artifacts/issue539-baseline/selected/process-core-w8.s-5060-.Ltmp4367:
+artifacts/issue539-baseline/selected/process-core-w8.s-5061-	leaq	(%r9,%rdi,4), %rsi
+artifacts/issue539-baseline/selected/process-core-w8.s-5062-	movq	%rsi, 2016(%rsp)
+artifacts/issue539-baseline/selected/process-core-w8.s-5063-	movq	480(%rsp), %rsi
+artifacts/issue539-baseline/selected/process-core-w8.s-5064-.Ltmp4368:
+artifacts/issue539-baseline/selected/process-core-w8.s:5065:	.loc	15 1890 85
+artifacts/issue539-baseline/selected/process-core-w8.s-5066-	cmpq	%rsi, %r15
+artifacts/issue539-baseline/selected/process-core-w8.s-5067-	cmovaeq	%rsi, %r15
+artifacts/issue539-baseline/selected/process-core-w8.s-5068-	movq	752(%rsp), %rsi
+artifacts/issue539-baseline/selected/process-core-w8.s-5069-	subq	448(%rsp), %rsi
+artifacts/issue539-baseline/selected/process-core-w8.s-5070-	movq	224(%rsp), %r9
+artifacts/issue539-baseline/selected/process-core-w8.s-5071-.Ltmp4369:
+artifacts/issue539-baseline/selected/process-core-w8.s-5072-	.loc	15 0 0
+artifacts/issue539-baseline/selected/process-core-w8.s-5073-	leaq	(%rsp,%r9,4), %rdi
+artifacts/issue539-baseline/selected/process-core-w8.s-5074-	addq	$6376, %rdi
+artifacts/issue539-baseline/selected/process-core-w8.s-5075-	movq	%rdi, 928(%rsp)
+artifacts/issue539-baseline/selected/process-core-w8.s-5076-.Ltmp4370:
+artifacts/issue539-baseline/selected/process-core-w8.s-5077-	leaq	(%rsp,%r9,4), %rdi
+artifacts/issue539-baseline/selected/process-core-w8.s-5078-	addq	$5344, %rdi
+artifacts/issue539-baseline/selected/process-core-w8.s-5079-	movq	%rdi, 896(%rsp)
+artifacts/issue539-baseline/selected/process-core-w8.s-5080-.Ltmp4371:
+artifacts/issue539-baseline/selected/process-core-w8.s:5081:	.loc	15 1890 85
+artifacts/issue539-baseline/selected/process-core-w8.s-5082-	cmpq	%rsi, %r15
+artifacts/issue539-baseline/selected/process-core-w8.s-5083-	cmovbq	%r15, %rsi
+artifacts/issue539-baseline/selected/process-core-w8.s-5084-	andq	528(%rsp), %rsi
+artifacts/issue539-baseline/selected/process-core-w8.s-5085-	movq	%rsi, 1984(%rsp)
+artifacts/issue539-baseline/selected/process-core-w8.s-5086-	vmovaps	2720(%rsp), %ymm13
+artifacts/issue539-baseline/selected/process-core-w8.s-5087-	vmovaps	2752(%rsp), %ymm0
+artifacts/issue539-baseline/selected/process-core-w8.s-5088-	vmovaps	%ymm0, 1696(%rsp)
+artifacts/issue539-baseline/selected/process-core-w8.s-5089-	vmovaps	2784(%rsp), %ymm0
+artifacts/issue539-baseline/selected/process-core-w8.s-5090-	vmovaps	%ymm0, 256(%rsp)
+artifacts/issue539-baseline/selected/process-core-w8.s-5091-	vmovaps	2816(%rsp), %ymm0
+artifacts/issue539-baseline/selected/process-core-w8.s-5092-	vmovaps	%ymm0, 320(%rsp)
+artifacts/issue539-baseline/selected/process-core-w8.s-5093-	vmovaps	2880(%rsp), %ymm0
+artifacts/issue539-baseline/selected/process-core-w8.s-5094-	vmovaps	%ymm0, 1664(%rsp)
+artifacts/issue539-baseline/selected/process-core-w8.s-5095-	vmovaps	3456(%rsp), %ymm10
+artifacts/issue539-baseline/selected/process-core-w8.s-5096-	vmovaps	3488(%rsp), %ymm0
+artifacts/issue539-baseline/selected/process-core-w8.s-5097-	vmovaps	%ymm0, 1632(%rsp)
+artifacts/issue539-baseline/selected/process-core-w8.s-5098-	vmovaps	3520(%rsp), %ymm0
+artifacts/issue539-baseline/selected/process-core-w8.s-5099-	vmovaps	%ymm0, 224(%rsp)
+--
+artifacts/issue539-baseline/selected/process-core-w8.s-5116-	vmovaps	3584(%rsp), %ymm15
+artifacts/issue539-baseline/selected/process-core-w8.s-5117-	vmovaps	3648(%rsp), %ymm2
+artifacts/issue539-baseline/selected/process-core-w8.s-5118-	vmovaps	3008(%rsp), %ymm6
+artifacts/issue539-baseline/selected/process-core-w8.s-5119-	vmovaps	3744(%rsp), %ymm9
+artifacts/issue539-baseline/selected/process-core-w8.s-5120-	.loc	15 0 85
+artifacts/issue539-baseline/selected/process-core-w8.s-5121-.Ltmp4372:
+artifacts/issue539-baseline/selected/process-core-w8.s-5122-	.p2align	4
+artifacts/issue539-baseline/selected/process-core-w8.s-5123-.LBB32_313:
+artifacts/issue539-baseline/selected/process-core-w8.s:5124:	.loc	15 1890 85 is_stmt 1
+artifacts/issue539-baseline/selected/process-core-w8.s-5125-	cmpb	$0, 2304(%rsp)
+artifacts/issue539-baseline/selected/process-core-w8.s-5126-	movq	1120(%rsp), %rsi
+artifacts/issue539-baseline/selected/process-core-w8.s-5127-	jne	.LBB32_315
+artifacts/issue539-baseline/selected/process-core-w8.s-5128-	.loc	15 0 85 is_stmt 0
+artifacts/issue539-baseline/selected/process-core-w8.s-5129-	vbroadcastss	.LCPI32_1(%rip), %ymm1
+artifacts/issue539-baseline/selected/process-core-w8.s-5130-.Ltmp4373:
+artifacts/issue539-baseline/selected/process-core-w8.s-5131-	.loc	50 347 14 is_stmt 1
+artifacts/issue539-baseline/selected/process-core-w8.s-5132-	vaddps	320(%rsp), %ymm1, %ymm0
+artifacts/issue539-baseline/selected/process-core-w8.s-5133-	vxorps	%xmm3, %xmm3, %xmm3
+artifacts/issue539-baseline/selected/process-core-w8.s-5134-.Ltmp4374:
+artifacts/issue539-baseline/selected/process-core-w8.s-5135-	.loc	50 233 14
+artifacts/issue539-baseline/selected/process-core-w8.s-5136-	vmaxps	%ymm3, %ymm0, %ymm0
+artifacts/issue539-baseline/selected/process-core-w8.s-5137-	vmovaps	%ymm0, 320(%rsp)
+artifacts/issue539-baseline/selected/process-core-w8.s-5138-.Ltmp4375:
+artifacts/issue539-baseline/selected/process-core-w8.s-5139-	.loc	50 871 14
+artifacts/issue539-baseline/selected/process-core-w8.s-5140-	vcmpgt_oqps	%ymm3, %ymm0, %ymm0
+artifacts/issue539-baseline/selected/process-core-w8.s-5141-	vmovaps	256(%rsp), %ymm5
+artifacts/issue539-baseline/selected/process-core-w8.s-5142-.Ltmp4376:
+31803:attributes #0 = { nounwind nonlazybind uwtable "probe-stack"="inline-asm" "target-cpu"="x86-64" "target-features"="+avx,+avx2,+sse,+sse2,+sse3,+sse4.1,+sse4.2,+crc32,+ssse3,+avx,+fma,+sse,+sse2,+sse3,+sse4.1,+sse4.2,+crc32,+ssse3" }
+31804:attributes #1 = { inlinehint nounwind nonlazybind uwtable "probe-stack"="inline-asm" "target-cpu"="x86-64" "target-features"="+avx,+avx2,+sse,+sse2,+sse3,+sse4.1,+sse4.2,+crc32,+ssse3,+avx,+fma,+sse,+sse2,+sse3,+sse4.1,+sse4.2,+crc32,+ssse3" }
+31805:attributes #2 = { nofree norecurse nosync nounwind nonlazybind memory(read, inaccessiblemem: readwrite, target_mem0: none, target_mem1: none) uwtable "probe-stack"="inline-asm" "target-cpu"="x86-64" "target-features"="+avx,+avx2,+sse,+sse2,+sse3,+sse4.1,+sse4.2,+crc32,+ssse3,+avx,+fma,+sse,+sse2,+sse3,+sse4.1,+sse4.2,+crc32,+ssse3" }
+31806:attributes #3 = { nofree norecurse nosync nounwind nonlazybind memory(argmem: read) uwtable "probe-stack"="inline-asm" "target-cpu"="x86-64" "target-features"="+avx,+avx2,+sse,+sse2,+sse3,+sse4.1,+sse4.2,+crc32,+ssse3,+avx,+fma,+sse,+sse2,+sse3,+sse4.1,+sse4.2,+crc32,+ssse3" }
+31807:attributes #4 = { nofree norecurse nosync nounwind nonlazybind memory(readwrite, inaccessiblemem: none, target_mem0: none, target_mem1: none) uwtable "probe-stack"="inline-asm" "target-cpu"="x86-64" "target-features"="+avx,+avx2,+sse,+sse2,+sse3,+sse4.1,+sse4.2,+crc32,+ssse3,+avx,+fma,+sse,+sse2,+sse3,+sse4.1,+sse4.2,+crc32,+ssse3" }
+31808:attributes #5 = { nofree norecurse nosync nounwind nonlazybind memory(read, inaccessiblemem: none, target_mem0: none, target_mem1: none) uwtable "probe-stack"="inline-asm" "target-cpu"="x86-64" "target-features"="+avx,+avx2,+sse,+sse2,+sse3,+sse4.1,+sse4.2,+crc32,+ssse3,+avx,+fma,+sse,+sse2,+sse3,+sse4.1,+sse4.2,+crc32,+ssse3" }
+31809:attributes #6 = { cold noinline nounwind nonlazybind uwtable "probe-stack"="inline-asm" "target-cpu"="x86-64" "target-features"="+avx,+avx2,+sse,+sse2,+sse3,+sse4.1,+sse4.2,+crc32,+ssse3,+avx,+fma,+sse,+sse2,+sse3,+sse4.1,+sse4.2,+crc32,+ssse3" }
+31810:attributes #7 = { cold nounwind nonlazybind uwtable "probe-stack"="inline-asm" "target-cpu"="x86-64" "target-features"="+avx,+avx2,+sse,+sse2,+sse3,+sse4.1,+sse4.2,+crc32,+ssse3,+avx,+fma,+sse,+sse2,+sse3,+sse4.1,+sse4.2,+crc32,+ssse3" }
+{"rustc":12019306335353385202,"features":"[]","declared_features":"[]","target":15812265388898435458,"profile":6516278246683128382,"path":11036005944511604209,"deps":[[499577950835210268,"effect_contract",false,11727111119327968308],[2123573917613131540,"lane",false,15199792197345275044],[6393336753524716634,"math",false,5951370404084672911],[13190203957081767472,"effect_runtime",false,16407066758427399175]],"local":[{"CheckDepInfo":{"dep_info":"release/.fingerprint/true-peak-limiter-61bcf0f0b2475b36/dep-lib-true_peak_limiter","checksum":false}}],"rustflags":["-C","target-feature=+avx2,+fma"],"config":9396254390672932401,"compile_kind":0}
+exec
+/bin/bash -lc "python3 - <<'PY'
+from pathlib import Path
+for name, pats in [('process-core-w8',['1701 77','2304(%rsp)','LBB32_313','stationary']),('process-bank-mono-w8',['48(%rsp)','8(%rsp)','LBB60_86','LBB60_176']),('process-core-scalar',['992(%rsp)','LBB34_283'])]:
+ lines=Path('artifacts/issue539-baseline/selected/'+name+'.s').read_text().splitlines();print('\\n',name)
+ for i,l in enumerate(lines):
+  if any(p in l for p in pats) and not (name=='process-bank-mono-w8' and ('148(%rsp)' in l or '248(%rsp)' in l)):
+   if ('48(%rsp)' in l or '8(%rsp)' in l) and name=='process-bank-mono-w8' and not any('\\t'+op in l for op in ['cmpb','movb','set']):continue
+   print(i+1, '\\n'.join(lines[max(0,i-2):i+4]))
+PY" in /home/bl/misofm/engine-limiter-stationary-dispatch
+ succeeded in 0ms:
+
+ process-core-w8
+912 	vmovaps	%ymm5, 1184(%rsp)
+	vmovaps	1472(%r11), %ymm5
+	vmovaps	%ymm5, 2304(%rsp)
+	vmovaps	1504(%r11), %ymm5
+	vmovaps	%ymm5, 2080(%rsp)
+	.p2align	4
+1238 .Ltmp3598:
+	.loc	50 283 14
+	vmulps	2304(%rsp), %ymm1, %ymm15
+.Ltmp3599:
+	.loc	50 48 14
+	vaddps	%ymm15, %ymm9, %ymm9
+1449 	vmovaps	%ymm5, 1184(%rsp)
+	vmovaps	1472(%r11), %ymm5
+	vmovaps	%ymm5, 2304(%rsp)
+	vmovaps	1504(%r11), %ymm5
+	vmovaps	%ymm5, 2080(%rsp)
+	.p2align	4
+1775 .Ltmp3719:
+	.loc	50 283 14
+	vmulps	2304(%rsp), %ymm1, %ymm15
+.Ltmp3720:
+	.loc	50 48 14
+	vaddps	%ymm15, %ymm9, %ymm9
+1887 .LBB32_96:
+.Ltmp3738:
+	.loc	15 1701 77 is_stmt 1
+	cmpb	$0, 256(%rsp)
+	jne	.LBB32_98
+	.loc	15 0 77 is_stmt 0
+3605 	movb	$1, %sil
+.LBB32_251:
+	movl	%esi, 2304(%rsp)
+.Ltmp4067:
+	.loc	15 1828 19 is_stmt 1
+	movzbl	1536(%r8), %r14d
+5123 .Ltmp4372:
+	.p2align	4
+.LBB32_313:
+	.loc	15 1890 85 is_stmt 1
+	cmpb	$0, 2304(%rsp)
+	movq	1120(%rsp), %rsi
+5125 .LBB32_313:
+	.loc	15 1890 85 is_stmt 1
+	cmpb	$0, 2304(%rsp)
+	movq	1120(%rsp), %rsi
+	jne	.LBB32_315
+	.loc	15 0 85 is_stmt 0
+5720 	.loc	32 304 12
+	cmpq	1984(%rsp), %r13
+	jne	.LBB32_313
+.Ltmp4530:
+	.loc	32 0 12 is_stmt 0
+	vmovaps	320(%rsp), %ymm0
+
+ process-bank-mono-w8
+1426 	movq	%r11, 2176(%rsp)
+	.p2align	4
+.LBB60_86:
+.Ltmp8100:
+	.loc	15 3086 49 is_stmt 1
+	cmpb	$0, 48(%rsp)
+1429 .Ltmp8100:
+	.loc	15 3086 49 is_stmt 1
+	cmpb	$0, 48(%rsp)
+	jne	.LBB60_88
+	.loc	15 0 49 is_stmt 0
+	vbroadcastss	.LCPI60_1(%rip), %ymm13
+2077 .Ltmp8220:
+	.loc	11 900 12
+	jne	.LBB60_86
+	jmp	.LBB60_76
+.Ltmp8221:
+.LBB60_142:
+3035 .Ltmp8406:
+	.p2align	4
+.LBB60_176:
+	.loc	15 3197 57 is_stmt 1
+	cmpb	$0, 8(%rsp)
+	movq	256(%rsp), %rcx
+3037 .LBB60_176:
+	.loc	15 3197 57 is_stmt 1
+	cmpb	$0, 8(%rsp)
+	movq	256(%rsp), %rcx
+	jne	.LBB60_178
+	.loc	15 0 57 is_stmt 0
+3335 	.loc	32 304 12
+	cmpq	%rbx, %rsi
+	jne	.LBB60_176
+	jmp	.LBB60_171
+.Ltmp8487:
+.LBB60_192:
+
+ process-core-scalar
+714 	movq	%r12, %rax
+	negq	%rax
+	movq	%rax, 992(%rsp)
+	movq	%rbp, %rax
+	negq	%rax
+	movq	%rax, 984(%rsp)
+818 	vmovss	604(%r13), %xmm0
+	vmovss	%xmm0, 76(%rsp)
+	movq	992(%rsp), %rax
+.Ltmp5072:
+	.loc	37 568 12 is_stmt 1
+	leaq	(%rax,%r11), %rcx
+3678 	movb	$1, %sil
+.LBB34_254:
+	movl	%esi, 992(%rsp)
+.Ltmp5648:
+	.loc	15 1828 19 is_stmt 1
+	movzbl	776(%r13), %eax
+5181 .Ltmp5946:
+	.p2align	4
+.LBB34_283:
+	.loc	15 1890 85 is_stmt 1
+	cmpb	$0, 992(%rsp)
+	movq	392(%rsp), %rsi
+5183 .LBB34_283:
+	.loc	15 1890 85 is_stmt 1
+	cmpb	$0, 992(%rsp)
+	movq	392(%rsp), %rsi
+	je	.LBB34_287
+	.loc	15 0 85 is_stmt 0
+5783 	cmpq	352(%rsp), %rbx
+	vmovaps	%xmm14, %xmm12
+	jne	.LBB34_283
+.Ltmp6094:
+	.loc	32 0 12 is_stmt 0
+	movq	%r12, 320(%rsp)
+
+exec
+/bin/bash -lc "sed -n '1125,1185p;3288,3338p;425,460p' artifacts/issue539-baseline/selected/process-core-w8.ll; sed -n '760,810p;1975,2025p' artifacts/issue539-baseline/selected/process-bank-mono-w8.ll; rg -n 'cmpb.*rsp' artifacts/issue539-baseline/selected/process-core-w8.s" in /home/bl/misofm/engine-limiter-stationary-dispatch
+ succeeded in 0ms:
+  %74 = icmp eq i32 %_51.i.i.i3161, %_72.i.i.i3162, !dbg !11792
+  %_0.sroa.0.0.i.i.i3163 = select i1 %72, i1 %74, i1 false, !dbg !11792
+  br i1 %_0.sroa.0.0.i.i.i3163, label %bb1.i.i3155, label %bb14.i226, !dbg !11802
+
+bb8.i296:                                         ; preds = %bb1.i.i3155
+  %75 = getelementptr inbounds nuw i8, ptr %self, i64 1992, !dbg !11803
+  %_165.0.i = load ptr, ptr %75, align 8, !dbg !11803, !alias.scope !11713, !noalias !11778, !nonnull !12, !noundef !12
+  %76 = getelementptr inbounds nuw i8, ptr %self, i64 2000, !dbg !11803
+  %_165.1.i = load i64, ptr %76, align 8, !dbg !11803, !alias.scope !11713, !noalias !11778, !noundef !12
+  %_8.i3165 = getelementptr inbounds nuw %"effect_runtime::ramp::LinearRamp", ptr %_165.0.i, i64 %_165.1.i, !dbg !11804
+  br label %bb1.i.i3166, !dbg !11809
+
+bb1.i.i3166:                                      ; preds = %bb13.i.i3169, %bb8.i296
+  %_221.i.i3167 = phi ptr [ %_22.i.i3170, %bb13.i.i3169 ], [ %_165.0.i, %bb8.i296 ]
+  %_12.i.i3168 = icmp eq ptr %_221.i.i3167, %_8.i3165, !dbg !11811
+  br i1 %_12.i.i3168, label %bb14.i226, label %bb13.i.i3169, !dbg !11814
+
+bb13.i.i3169:                                     ; preds = %bb1.i.i3166
+  %_22.i.i3170 = getelementptr inbounds nuw i8, ptr %_221.i.i3167, i64 16, !dbg !11815
+  %77 = getelementptr inbounds nuw i8, ptr %_221.i.i3167, i64 12, !dbg !11817
+  %_3.i.i.i3171 = load i32, ptr %77, align 4, !dbg !11817, !alias.scope !11819, !noalias !11824, !noundef !12
+  %78 = icmp eq i32 %_3.i.i.i3171, 0, !dbg !11817
+  %_51.i.i.i3172 = load i32, ptr %_221.i.i3167, align 4, !dbg !11817, !alias.scope !11819, !noalias !11824
+  %79 = getelementptr inbounds nuw i8, ptr %_221.i.i3167, i64 4, !dbg !11817
+  %_72.i.i.i3173 = load i32, ptr %79, align 4, !dbg !11817, !alias.scope !11819, !noalias !11824
+  %80 = icmp eq i32 %_51.i.i.i3172, %_72.i.i.i3173, !dbg !11817
+  %_0.sroa.0.0.i.i.i3174 = select i1 %78, i1 %80, i1 false, !dbg !11817
+  br i1 %_0.sroa.0.0.i.i.i3174, label %bb1.i.i3166, label %bb14.i226, !dbg !11827
+
+bb14.i226:                                        ; preds = %bb13.i.i3136, %bb13.i.i3147, %bb13.i.i3158, %bb13.i.i3169, %bb1.i.i3166
+  %stationary.sroa.0.0.i227 = phi i1 [ false, %bb13.i.i3158 ], [ false, %bb13.i.i3147 ], [ false, %bb13.i.i3169 ], [ true, %bb1.i.i3166 ], [ false, %bb13.i.i3136 ], !dbg !11828
+  %81 = getelementptr inbounds nuw i8, ptr %self, i64 1536, !dbg !11829
+  %82 = load i8, ptr %81, align 32, !dbg !11829, !range !5399, !alias.scope !11705, !noalias !11833, !noundef !12
+  %83 = getelementptr inbounds nuw i8, ptr %self, i64 1537, !dbg !11834
+  %84 = load i8, ptr %83, align 1, !dbg !11834, !range !5399, !alias.scope !11705, !noalias !11833, !noundef !12
+  %_41.i = load i32, ptr %_35, align 4, !dbg !11836, !alias.scope !11715, !noalias !11838, !noundef !12
+  %_71.i.promoted = load <8 x float>, ptr %_71.i, align 32
+  %.promoted9464 = load <8 x float>, ptr %132, align 32
+  %.promoted9467 = load <8 x float>, ptr %134, align 32
+  %_73.i251.promoted = load <8 x float>, ptr %_73.i251, align 32
+  %.promoted9505 = load <8 x float>, ptr %135, align 32
+  %.promoted9508 = load <8 x float>, ptr %137, align 32
+  %_75.i.promoted = load <8 x float>, ptr %_75.i, align 32
+  %.promoted9511 = load <8 x float>, ptr %138, align 32
+  %.promoted9514 = load <8 x float>, ptr %152, align 32
+  %.promoted9516 = load <8 x float>, ptr %170, align 32
+  br label %bb57.i, !dbg !13131
+
+bb57.i:                                           ; preds = %bb57.i.preheader, %_RNvXNtCs1miJJANcyja_4lane5simd8NtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8NtB4_4Lane5store.exit2798
+  %_58.i.i.sroa.0.0.copyload9517 = phi <8 x float> [ %.promoted9516, %bb57.i.preheader ], [ %553, %_RNvXNtCs1miJJANcyja_4lane5simd8NtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8NtB4_4Lane5store.exit2798 ]
+  %_58.i44.i.sroa.0.0.copyload9515 = phi <8 x float> [ %.promoted9514, %bb57.i.preheader ], [ %466, %_RNvXNtCs1miJJANcyja_4lane5simd8NtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8NtB4_4Lane5store.exit2798 ]
+  %_12.i619.sroa.0.0.copyload9513 = phi <8 x float> [ %.promoted9511, %bb57.i.preheader ], [ %_12.i619.sroa.0.0.copyload9512, %_RNvXNtCs1miJJANcyja_4lane5simd8NtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8NtB4_4Lane5store.exit2798 ]
+  %release_right.i212.sroa.0.0.copyload9510 = phi <8 x float> [ %_75.i.promoted, %bb57.i.preheader ], [ %release_right.i212.sroa.0.0.copyload9509, %_RNvXNtCs1miJJANcyja_4lane5simd8NtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8NtB4_4Lane5store.exit2798 ]
+  %391 = phi <8 x float> [ %.promoted9508, %bb57.i.preheader ], [ %428, %_RNvXNtCs1miJJANcyja_4lane5simd8NtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8NtB4_4Lane5store.exit2798 ]
+  %_12.i627.sroa.0.0.copyload9507 = phi <8 x float> [ %.promoted9505, %bb57.i.preheader ], [ %_12.i627.sroa.0.0.copyload9506, %_RNvXNtCs1miJJANcyja_4lane5simd8NtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8NtB4_4Lane5store.exit2798 ]
+  %limit_right.i213.sroa.0.0.copyload39719504 = phi <8 x float> [ %_73.i251.promoted, %bb57.i.preheader ], [ %limit_right.i213.sroa.0.0.copyload39719503, %_RNvXNtCs1miJJANcyja_4lane5simd8NtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8NtB4_4Lane5store.exit2798 ]
+  %392 = phi <8 x float> [ %.promoted9467, %bb57.i.preheader ], [ %429, %_RNvXNtCs1miJJANcyja_4lane5simd8NtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8NtB4_4Lane5store.exit2798 ]
+  %_12.i641.sroa.0.0.copyload9466 = phi <8 x float> [ %.promoted9464, %bb57.i.preheader ], [ %_12.i641.sroa.0.0.copyload9465, %_RNvXNtCs1miJJANcyja_4lane5simd8NtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8NtB4_4Lane5store.exit2798 ]
+  %release_left.i214.sroa.0.0.copyload9463 = phi <8 x float> [ %_71.i.promoted, %bb57.i.preheader ], [ %release_left.i214.sroa.0.0.copyload9462, %_RNvXNtCs1miJJANcyja_4lane5simd8NtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8NtB4_4Lane5store.exit2798 ]
+  %393 = phi <8 x float> [ %.promoted9461, %bb57.i.preheader ], [ %430, %_RNvXNtCs1miJJANcyja_4lane5simd8NtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8NtB4_4Lane5store.exit2798 ]
+  %_12.i655.sroa.0.0.copyload9460 = phi <8 x float> [ %.promoted9458, %bb57.i.preheader ], [ %_12.i655.sroa.0.0.copyload9459, %_RNvXNtCs1miJJANcyja_4lane5simd8NtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8NtB4_4Lane5store.exit2798 ]
+  %limit_left.i215.sroa.0.0.copyload39689457 = phi <8 x float> [ %_69.i.promoted, %bb57.i.preheader ], [ %limit_left.i215.sroa.0.0.copyload39689456, %_RNvXNtCs1miJJANcyja_4lane5simd8NtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8NtB4_4Lane5store.exit2798 ]
+  %394 = phi <8 x float> [ %.promoted, %bb57.i.preheader ], [ %431, %_RNvXNtCs1miJJANcyja_4lane5simd8NtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8NtB4_4Lane5store.exit2798 ]
+  %main_cursor.sroa.0.1.i2497388 = phi i64 [ %main_cursor.sroa.0.0.i2417395, %bb57.i.preheader ], [ %spec.store.select.i, %_RNvXNtCs1miJJANcyja_4lane5simd8NtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8NtB4_4Lane5store.exit2798 ]
+  %ring_cursor.sroa.0.1.i2487387 = phi i64 [ %ring_cursor.sroa.0.0.i2407394, %bb57.i.preheader ], [ %spec.store.select13.i, %_RNvXNtCs1miJJANcyja_4lane5simd8NtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8NtB4_4Lane5store.exit2798 ]
+  %iter3.sroa.0.0.i2477386 = phi i64 [ 0, %bb57.i.preheader ], [ %395, %_RNvXNtCs1miJJANcyja_4lane5simd8NtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8NtB4_4Lane5store.exit2798 ]
+  %395 = add nuw nsw i64 %iter3.sroa.0.0.i2477386, 1, !dbg !13132
+  %_66.i = add nuw nsw i64 %iter3.sroa.0.0.i2477386, %iter.sroa.0.0.i7392, !dbg !13138
+  %base.i250 = shl i64 %_66.i, 3, !dbg !13138
+  br i1 %stationary.sroa.0.0.i227, label %_RNvXNtCs1miJJANcyja_4lane5simd8NtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8NtB4_4Lane4load.exit2462, label %bb30.i, !dbg !13131
+
+bb30.i:                                           ; preds = %bb57.i
+  %396 = fadd <8 x float> %394, splat (float -1.000000e+00), !dbg !13139
+  %397 = tail call <8 x float> @llvm.x86.avx.max.ps.256(<8 x float> %396, <8 x float> zeroinitializer), !dbg !13149
+  %398 = tail call <8 x float> @llvm.x86.avx.cmp.ps.256(<8 x float> %397, <8 x float> zeroinitializer, i8 30), !dbg !13154
+  %399 = fadd <8 x float> %limit_left.i215.sroa.0.0.copyload39689457, %_12.i655.sroa.0.0.copyload9460, !dbg !13166
+  %_13.i654.sroa.0.0.copyload = load <8 x float>, ptr %130, align 32, !dbg !13172
+  %400 = bitcast <8 x float> %398 to <8 x i32>, !dbg !13173
+  %401 = icmp slt <8 x i32> %400, zeroinitializer, !dbg !13180
+  %402 = select <8 x i1> %401, <8 x float> %399, <8 x float> %_13.i654.sroa.0.0.copyload, !dbg !13180
+  store <8 x float> %402, ptr %_69.i, align 32, !dbg !13184
+  %403 = select <8 x i1> %401, <8 x float> %_12.i655.sroa.0.0.copyload9460, <8 x float> zeroinitializer, !dbg !13185
+  store <8 x float> %403, ptr %129, align 32, !dbg !13190
+  %404 = fadd <8 x float> %393, splat (float -1.000000e+00), !dbg !13191
+  %405 = tail call <8 x float> @llvm.x86.avx.max.ps.256(<8 x float> %404, <8 x float> zeroinitializer), !dbg !13197
+  store <8 x float> %405, ptr %131, align 32, !dbg !13202
+  %406 = tail call <8 x float> @llvm.x86.avx.cmp.ps.256(<8 x float> %405, <8 x float> zeroinitializer, i8 30), !dbg !13203
+  %407 = fadd <8 x float> %release_left.i214.sroa.0.0.copyload9463, %_12.i641.sroa.0.0.copyload9466, !dbg !13209
+  %_13.i640.sroa.0.0.copyload = load <8 x float>, ptr %133, align 32, !dbg !13214
+  %408 = bitcast <8 x float> %406 to <8 x i32>, !dbg !13215
+  %409 = icmp slt <8 x i32> %408, zeroinitializer, !dbg !13219
+  %410 = select <8 x i1> %409, <8 x float> %407, <8 x float> %_13.i640.sroa.0.0.copyload, !dbg !13219
+  store <8 x float> %410, ptr %_71.i, align 32, !dbg !13221
+  %411 = select <8 x i1> %409, <8 x float> %_12.i641.sroa.0.0.copyload9466, <8 x float> zeroinitializer, !dbg !13222
+  store <8 x float> %411, ptr %132, align 32, !dbg !13227
+  %412 = fadd <8 x float> %392, splat (float -1.000000e+00), !dbg !13228
+  %413 = tail call <8 x float> @llvm.x86.avx.max.ps.256(<8 x float> %412, <8 x float> zeroinitializer), !dbg !13233
+  %_33.i270.i.sroa.0.0.copyload9657 = phi <8 x float> [ %.promoted9656, %bb43.i.preheader ], [ %1010, %_RINvCsdvPQf9CMsz3_17true_peak_limiter9ring_laneNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8EB2_.exit420 ]
+  %minimum.i279.i.sroa.0.09642 = phi <8 x float> [ %minimum.i279.i.sroa.0.0.lcssa96559709, %bb43.i.preheader ], [ %minimum.i279.i.sroa.0.0, %_RINvCsdvPQf9CMsz3_17true_peak_limiter9ring_laneNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8EB2_.exit420 ]
+  %storemerge.i3249628 = phi i32 [ %storemerge.i324.lcssa96419690, %bb43.i.preheader ], [ %storemerge.i324, %_RINvCsdvPQf9CMsz3_17true_peak_limiter9ring_laneNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8EB2_.exit420 ]
+  %_12.i669.sroa.0.0.copyload9627 = phi <8 x float> [ %.promoted9625, %bb43.i.preheader ], [ %_12.i669.sroa.0.0.copyload9626, %_RINvCsdvPQf9CMsz3_17true_peak_limiter9ring_laneNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8EB2_.exit420 ]
+  %release_right.i.sroa.0.0.copyload9624 = phi <8 x float> [ %_121.i.promoted, %bb43.i.preheader ], [ %release_right.i.sroa.0.0.copyload9623, %_RINvCsdvPQf9CMsz3_17true_peak_limiter9ring_laneNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8EB2_.exit420 ]
+  %943 = phi <8 x float> [ %.promoted9622, %bb43.i.preheader ], [ %982, %_RINvCsdvPQf9CMsz3_17true_peak_limiter9ring_laneNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8EB2_.exit420 ]
+  %_12.i683.sroa.0.0.copyload9607 = phi <8 x float> [ %.promoted9605, %bb43.i.preheader ], [ %_12.i683.sroa.0.0.copyload9606, %_RINvCsdvPQf9CMsz3_17true_peak_limiter9ring_laneNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8EB2_.exit420 ]
+  %limit_right.i.sroa.0.0.copyload35379590 = phi <8 x float> [ %_119.i.promoted, %bb43.i.preheader ], [ %limit_right.i.sroa.0.0.copyload35379589, %_RINvCsdvPQf9CMsz3_17true_peak_limiter9ring_laneNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8EB2_.exit420 ]
+  %944 = phi <8 x float> [ %.promoted9573, %bb43.i.preheader ], [ %983, %_RINvCsdvPQf9CMsz3_17true_peak_limiter9ring_laneNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8EB2_.exit420 ]
+  %_12.i697.sroa.0.0.copyload9572 = phi <8 x float> [ %.promoted9570, %bb43.i.preheader ], [ %_12.i697.sroa.0.0.copyload9571, %_RINvCsdvPQf9CMsz3_17true_peak_limiter9ring_laneNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8EB2_.exit420 ]
+  %release_left.i.sroa.0.0.copyload9569 = phi <8 x float> [ %_117.i.promoted, %bb43.i.preheader ], [ %release_left.i.sroa.0.0.copyload9568, %_RINvCsdvPQf9CMsz3_17true_peak_limiter9ring_laneNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8EB2_.exit420 ]
+  %945 = phi <8 x float> [ %.promoted9567, %bb43.i.preheader ], [ %984, %_RINvCsdvPQf9CMsz3_17true_peak_limiter9ring_laneNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8EB2_.exit420 ]
+  %_12.i711.sroa.0.0.copyload9552 = phi <8 x float> [ %.promoted9550, %bb43.i.preheader ], [ %_12.i711.sroa.0.0.copyload9551, %_RINvCsdvPQf9CMsz3_17true_peak_limiter9ring_laneNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8EB2_.exit420 ]
+  %limit_left.i.sroa.0.0.copyload35349535 = phi <8 x float> [ %_115.i.promoted, %bb43.i.preheader ], [ %limit_left.i.sroa.0.0.copyload35349534, %_RINvCsdvPQf9CMsz3_17true_peak_limiter9ring_laneNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8EB2_.exit420 ]
+  %946 = phi <8 x float> [ %.promoted9518, %bb43.i.preheader ], [ %985, %_RINvCsdvPQf9CMsz3_17true_peak_limiter9ring_laneNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8EB2_.exit420 ]
+  %iter.i.sroa.36.07462 = phi i64 [ 0, %bb43.i.preheader ], [ %947, %_RINvCsdvPQf9CMsz3_17true_peak_limiter9ring_laneNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8EB2_.exit420 ]
+  %947 = add nuw nsw i64 %iter.i.sroa.36.07462, 1, !dbg !15594
+  %start1.i.i.i.i.i.i.i.i = shl i64 %iter.i.sroa.36.07462, 3, !dbg !15595
+  %data.i.i.i.i.i.i.i.i = getelementptr inbounds nuw float, ptr %_187.i, i64 %start1.i.i.i.i.i.i.i.i, !dbg !15601
+  %data.i.i.i.i3381 = getelementptr inbounds nuw float, ptr %_213.i, i64 %start1.i.i.i.i.i.i.i.i, !dbg !15603
+  %data.i.i.i.i.i.i = getelementptr inbounds nuw float, ptr %_204.i, i64 %start1.i.i.i.i.i.i.i.i, !dbg !15606
+  %data.i5.i.i.i.i.i.i.i = getelementptr inbounds nuw float, ptr %_195.i, i64 %start1.i.i.i.i.i.i.i.i, !dbg !15609
+  br i1 %stationary.sroa.0.0.i, label %bb51.i, label %bb46.i, !dbg !15592
+
+bb44.i.loopexit:                                  ; preds = %_RINvCsdvPQf9CMsz3_17true_peak_limiter9ring_laneNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8EB2_.exit420
+  store <8 x float> %985, ptr %688, align 32, !dbg !15612
+  store <8 x float> %limit_left.i.sroa.0.0.copyload35349534, ptr %_115.i, align 32, !dbg !15614
+  store <8 x float> %_12.i711.sroa.0.0.copyload9551, ptr %689, align 32, !dbg !15615
+  store <8 x float> %983, ptr %694, align 32, !dbg !15616
+  store <8 x float> %limit_right.i.sroa.0.0.copyload35379589, ptr %_119.i, align 32, !dbg !15614
+  store <8 x float> %_12.i683.sroa.0.0.copyload9606, ptr %695, align 32, !dbg !15618
+  br label %bb44.i, !dbg !15619
+
+bb44.i:                                           ; preds = %bb44.i.loopexit, %_RINvYINtNtNtNtCs4NRVxsYgnAr_4core4iter8adapters3zip3ZipIB4_INtNtNtBc_5slice4iter14ChunksExactMutfEBV_EINtBY_11ChunksExactfEENtNtNtBa_6traits8iterator8Iterator3zipB1C_ECsdvPQf9CMsz3_17true_peak_limiter.exit
+  %minimum.i.i.sroa.0.0.lcssa96859746 = phi <8 x float> [ %minimum.i.i.sroa.0.0, %bb44.i.loopexit ], [ %minimum.i.i.sroa.0.0.lcssa96859747, %_RINvYINtNtNtNtCs4NRVxsYgnAr_4core4iter8adapters3zip3ZipIB4_INtNtNtBc_5slice4iter14ChunksExactMutfEBV_EINtBY_11ChunksExactfEENtNtNtBa_6traits8iterator8Iterator3zipB1C_ECsdvPQf9CMsz3_17true_peak_limiter.exit ]
+  %storemerge.i.lcssa96719727 = phi i32 [ %storemerge.i, %bb44.i.loopexit ], [ %storemerge.i.lcssa96719728, %_RINvYINtNtNtNtCs4NRVxsYgnAr_4core4iter8adapters3zip3ZipIB4_INtNtNtBc_5slice4iter14ChunksExactMutfEBV_EINtBY_11ChunksExactfEENtNtNtBa_6traits8iterator8Iterator3zipB1C_ECsdvPQf9CMsz3_17true_peak_limiter.exit ]
+  %minimum.i279.i.sroa.0.0.lcssa96559708 = phi <8 x float> [ %minimum.i279.i.sroa.0.0, %bb44.i.loopexit ], [ %minimum.i279.i.sroa.0.0.lcssa96559709, %_RINvYINtNtNtNtCs4NRVxsYgnAr_4core4iter8adapters3zip3ZipIB4_INtNtNtBc_5slice4iter14ChunksExactMutfEBV_EINtBY_11ChunksExactfEENtNtNtBa_6traits8iterator8Iterator3zipB1C_ECsdvPQf9CMsz3_17true_peak_limiter.exit ]
+  %storemerge.i324.lcssa96419689 = phi i32 [ %storemerge.i324, %bb44.i.loopexit ], [ %storemerge.i324.lcssa96419690, %_RINvYINtNtNtNtCs4NRVxsYgnAr_4core4iter8adapters3zip3ZipIB4_INtNtNtBc_5slice4iter14ChunksExactMutfEBV_EINtBY_11ChunksExactfEENtNtNtBa_6traits8iterator8Iterator3zipB1C_ECsdvPQf9CMsz3_17true_peak_limiter.exit ]
+  %_144.i = add i64 %..i3329, %ring_cursor.sroa.0.1.i7464, !dbg !15619
+  %_214.not.i = icmp ult i64 %_144.i, %ring.i, !dbg !15620
+  %948 = select i1 %_214.not.i, i64 0, i64 %ring.i, !dbg !15620
+  %ring_cursor.sroa.0.2.i = sub nuw i64 %_144.i, %948, !dbg !15620
+  %_146.i = add i64 %..i3329, %main_cursor.sroa.0.1.i7465, !dbg !15623
+  %_225.not.i = icmp ult i64 %_146.i, %main.i, !dbg !15624
+  %949 = select i1 %_225.not.i, i64 0, i64 %main.i, !dbg !15624
+  %main_cursor.sroa.0.2.i = sub nuw i64 %_146.i, %949, !dbg !15624
+  %_65.i = icmp ult i64 %_87.i, %..i3298, !dbg !15481
+  br i1 %_65.i, label %bb32.i, label %bb27.i.loopexit.loopexit, !dbg !15481
+
+bb46.i:                                           ; preds = %bb43.i
+  %950 = fadd <8 x float> %946, splat (float -1.000000e+00), !dbg !15626
+  %.promoted3812.i.i = load <8 x float>, ptr %111, align 32, !noalias !26271
+  %.promoted3815.i.i = load <8 x float>, ptr %113, align 32, !noalias !26271
+  %_51.i245.promoted.i.i = load <8 x float>, ptr %_51.i245.i.i, align 32, !noalias !26271
+  %.promoted3818.i.i = load <8 x float>, ptr %114, align 32, !noalias !26271
+  %.promoted3821.i.i = load <8 x float>, ptr %128, align 32, !noalias !26271
+  br label %bb41.i.i.i, !dbg !26289
+
+bb41.i.i.i:                                       ; preds = %_RNvXNtCs1miJJANcyja_4lane5simd8NtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8NtB4_4Lane5store.exit1532.i.i, %bb41.i.lr.ph.i.i
+  %245 = phi <8 x float> [ %.promoted3818.i.i, %bb41.i.lr.ph.i.i ], [ %269, %_RNvXNtCs1miJJANcyja_4lane5simd8NtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8NtB4_4Lane5store.exit1532.i.i ]
+  %246 = phi <8 x float> [ %_51.i245.promoted.i.i, %bb41.i.lr.ph.i.i ], [ %270, %_RNvXNtCs1miJJANcyja_4lane5simd8NtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8NtB4_4Lane5store.exit1532.i.i ]
+  %247 = phi <8 x float> [ %.promoted3815.i.i, %bb41.i.lr.ph.i.i ], [ %271, %_RNvXNtCs1miJJANcyja_4lane5simd8NtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8NtB4_4Lane5store.exit1532.i.i ]
+  %248 = phi <8 x float> [ %.promoted3812.i.i, %bb41.i.lr.ph.i.i ], [ %272, %_RNvXNtCs1miJJANcyja_4lane5simd8NtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8NtB4_4Lane5store.exit1532.i.i ]
+  %249 = phi <8 x float> [ %_49.i244.promoted.i.i, %bb41.i.lr.ph.i.i ], [ %273, %_RNvXNtCs1miJJANcyja_4lane5simd8NtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8NtB4_4Lane5store.exit1532.i.i ]
+  %_58.i.i.sroa.0.0.copyload3822.i.i = phi <8 x float> [ %.promoted3821.i.i, %bb41.i.lr.ph.i.i ], [ %309, %_RNvXNtCs1miJJANcyja_4lane5simd8NtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8NtB4_4Lane5store.exit1532.i.i ]
+  %_12.i398.sroa.0.0.copyload3820.i.i = phi <8 x float> [ %.promoted3818.i.i, %bb41.i.lr.ph.i.i ], [ %_12.i398.sroa.0.0.copyload3819.i.i, %_RNvXNtCs1miJJANcyja_4lane5simd8NtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8NtB4_4Lane5store.exit1532.i.i ]
+  %_11.i.sroa.0.0.copyload3817.i.i = phi <8 x float> [ %_51.i245.promoted.i.i, %bb41.i.lr.ph.i.i ], [ %_11.i.sroa.0.0.copyload3816.i.i, %_RNvXNtCs1miJJANcyja_4lane5simd8NtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8NtB4_4Lane5store.exit1532.i.i ]
+  %250 = phi <8 x float> [ %.promoted3815.i.i, %bb41.i.lr.ph.i.i ], [ %274, %_RNvXNtCs1miJJANcyja_4lane5simd8NtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8NtB4_4Lane5store.exit1532.i.i ]
+  %_12.i406.sroa.0.0.copyload3814.i.i = phi <8 x float> [ %.promoted3812.i.i, %bb41.i.lr.ph.i.i ], [ %_12.i406.sroa.0.0.copyload3813.i.i, %_RNvXNtCs1miJJANcyja_4lane5simd8NtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8NtB4_4Lane5store.exit1532.i.i ]
+  %_11.i407.sroa.0.0.copyload3811.i.i = phi <8 x float> [ %_49.i244.promoted.i.i, %bb41.i.lr.ph.i.i ], [ %_11.i407.sroa.0.0.copyload3810.i.i, %_RNvXNtCs1miJJANcyja_4lane5simd8NtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8NtB4_4Lane5store.exit1532.i.i ]
+  %251 = phi <8 x float> [ %.promoted.i.i, %bb41.i.lr.ph.i.i ], [ %275, %_RNvXNtCs1miJJANcyja_4lane5simd8NtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8NtB4_4Lane5store.exit1532.i.i ]
+  %main_cursor.sroa.0.1.i2403768.i.i = phi i64 [ %main_cursor.sroa.0.0.i2313827.i.i, %bb41.i.lr.ph.i.i ], [ %spec.store.select.i.i.i, %_RNvXNtCs1miJJANcyja_4lane5simd8NtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8NtB4_4Lane5store.exit1532.i.i ]
+  %ring_cursor.sroa.0.1.i2393767.i.i = phi i64 [ %ring_cursor.sroa.0.0.i2303826.i.i, %bb41.i.lr.ph.i.i ], [ %spec.store.select9.i.i.i, %_RNvXNtCs1miJJANcyja_4lane5simd8NtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8NtB4_4Lane5store.exit1532.i.i ]
+  %iter2.sroa.0.0.i2383766.i.i = phi i64 [ 0, %bb41.i.lr.ph.i.i ], [ %252, %_RNvXNtCs1miJJANcyja_4lane5simd8NtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8NtB4_4Lane5store.exit1532.i.i ]
+  %252 = add nuw nsw i64 %iter2.sroa.0.0.i2383766.i.i, 1, !dbg !26861
+  %_46.i.i.i = add nuw nsw i64 %iter2.sroa.0.0.i2383766.i.i, %iter.sroa.0.0.i3824.i.i, !dbg !26867
+  %base.i242.i.i = shl i64 %_46.i.i.i, 3, !dbg !26867
+  br i1 %stationary.sroa.0.0.i219.i.i, label %_RNvXNtCs1miJJANcyja_4lane5simd8NtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8NtB4_4Lane4load.exit1341.i.i, label %bb21.i243.i.i, !dbg !26868
+
+bb21.i243.i.i:                                    ; preds = %bb41.i.i.i
+  %253 = fadd <8 x float> %251, splat (float -1.000000e+00), !dbg !26869
+  %254 = tail call <8 x float> @llvm.x86.avx.max.ps.256(<8 x float> %253, <8 x float> zeroinitializer), !dbg !26874
+  %255 = tail call <8 x float> @llvm.x86.avx.cmp.ps.256(<8 x float> %254, <8 x float> zeroinitializer, i8 30), !dbg !26879
+  %256 = fadd <8 x float> %_12.i406.sroa.0.0.copyload3814.i.i, %_11.i407.sroa.0.0.copyload3811.i.i, !dbg !26885
+  %257 = bitcast <8 x float> %255 to <8 x i32>, !dbg !26890
+  %258 = icmp slt <8 x i32> %257, zeroinitializer, !dbg !26894
+  %259 = select <8 x i1> %258, <8 x float> %256, <8 x float> %_13.i405.sroa.0.0.copyload.i.i, !dbg !26894
+  %260 = select <8 x i1> %258, <8 x float> %_12.i406.sroa.0.0.copyload3814.i.i, <8 x float> zeroinitializer, !dbg !26896
+  %261 = fadd <8 x float> %250, splat (float -1.000000e+00), !dbg !26901
+  %262 = tail call <8 x float> @llvm.x86.avx.max.ps.256(<8 x float> %261, <8 x float> zeroinitializer), !dbg !26906
+  %263 = tail call <8 x float> @llvm.x86.avx.cmp.ps.256(<8 x float> %262, <8 x float> zeroinitializer, i8 30), !dbg !26911
+  %264 = fadd <8 x float> %_12.i398.sroa.0.0.copyload3820.i.i, %_11.i.sroa.0.0.copyload3817.i.i, !dbg !26917
+  %265 = bitcast <8 x float> %263 to <8 x i32>, !dbg !26922
+  %266 = icmp slt <8 x i32> %265, zeroinitializer, !dbg !26926
+  %267 = select <8 x i1> %266, <8 x float> %264, <8 x float> %_13.i397.sroa.0.0.copyload.i.i, !dbg !26926
+  %268 = select <8 x i1> %266, <8 x float> %_12.i398.sroa.0.0.copyload3820.i.i, <8 x float> zeroinitializer, !dbg !26928
+  br label %_RNvXNtCs1miJJANcyja_4lane5simd8NtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8NtB4_4Lane4load.exit1341.i.i, !dbg !26933
+
+_RNvXNtCs1miJJANcyja_4lane5simd8NtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8NtB4_4Lane4load.exit1341.i.i: ; preds = %bb21.i243.i.i, %bb41.i.i.i
+  %269 = phi <8 x float> [ %268, %bb21.i243.i.i ], [ %245, %bb41.i.i.i ]
+  %270 = phi <8 x float> [ %267, %bb21.i243.i.i ], [ %246, %bb41.i.i.i ]
+  %271 = phi <8 x float> [ %262, %bb21.i243.i.i ], [ %247, %bb41.i.i.i ]
+  %562 = and i64 %umin4451.i.i, 2305843009213693951, !dbg !28122
+  br label %bb29.i.i.i, !dbg !28122
+
+bb29.i.i.i:                                       ; preds = %_RINvCsdvPQf9CMsz3_17true_peak_limiter9ring_laneNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8EB2_.exit307.i.i, %bb29.i.lr.ph.i.i
+  %563 = phi <8 x float> [ %.lcssa49975026.i.i, %bb29.i.lr.ph.i.i ], [ %616, %_RINvCsdvPQf9CMsz3_17true_peak_limiter9ring_laneNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8EB2_.exit307.i.i ]
+  %564 = phi <8 x float> [ %.lcssa49885023.i.i, %bb29.i.lr.ph.i.i ], [ %588, %_RINvCsdvPQf9CMsz3_17true_peak_limiter9ring_laneNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8EB2_.exit307.i.i ]
+  %565 = phi <8 x float> [ %.lcssa49795020.i.i, %bb29.i.lr.ph.i.i ], [ %589, %_RINvCsdvPQf9CMsz3_17true_peak_limiter9ring_laneNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8EB2_.exit307.i.i ]
+  %566 = phi <8 x float> [ %.lcssa49705017.i.i, %bb29.i.lr.ph.i.i ], [ %590, %_RINvCsdvPQf9CMsz3_17true_peak_limiter9ring_laneNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8EB2_.exit307.i.i ]
+  %storemerge.i.i3927.i.i = phi i32 [ %storemerge.i.i.lcssa39373963.i.i, %bb29.i.lr.ph.i.i ], [ %storemerge.i.i.i.i, %_RINvCsdvPQf9CMsz3_17true_peak_limiter9ring_laneNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8EB2_.exit307.i.i ]
+  %_12.i420.sroa.0.0.copyload3926.i.i = phi <8 x float> [ %.lcssa49885023.i.i, %bb29.i.lr.ph.i.i ], [ %_12.i420.sroa.0.0.copyload3925.i.i, %_RINvCsdvPQf9CMsz3_17true_peak_limiter9ring_laneNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8EB2_.exit307.i.i ]
+  %_11.i421.sroa.0.0.copyload3923.i.i = phi <8 x float> [ %.lcssa49795020.i.i, %bb29.i.lr.ph.i.i ], [ %_11.i421.sroa.0.0.copyload3922.i.i, %_RINvCsdvPQf9CMsz3_17true_peak_limiter9ring_laneNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8EB2_.exit307.i.i ]
+  %567 = phi <8 x float> [ %.lcssa49705017.i.i, %bb29.i.lr.ph.i.i ], [ %591, %_RINvCsdvPQf9CMsz3_17true_peak_limiter9ring_laneNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8EB2_.exit307.i.i ]
+  %_12.i434.sroa.0.0.copyload3906.i.i = phi <8 x float> [ %_12.i434.sroa.0.0.copyload3905.lcssa46955014.i.i, %bb29.i.lr.ph.i.i ], [ %_12.i434.sroa.0.0.copyload3905.i.i, %_RINvCsdvPQf9CMsz3_17true_peak_limiter9ring_laneNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8EB2_.exit307.i.i ]
+  %_11.i435.sroa.0.0.copyload3890.i.i = phi <8 x float> [ %_11.i435.sroa.0.0.copyload3889.lcssa46885011.i.i, %bb29.i.lr.ph.i.i ], [ %_11.i435.sroa.0.0.copyload3889.i.i, %_RINvCsdvPQf9CMsz3_17true_peak_limiter9ring_laneNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8EB2_.exit307.i.i ]
+  %568 = phi <8 x float> [ %.lcssa46815000.i.i, %bb29.i.lr.ph.i.i ], [ %592, %_RINvCsdvPQf9CMsz3_17true_peak_limiter9ring_laneNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8EB2_.exit307.i.i ]
+  %iter.i.sroa.16.03871.i.i = phi i64 [ 0, %bb29.i.lr.ph.i.i ], [ %569, %_RINvCsdvPQf9CMsz3_17true_peak_limiter9ring_laneNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8EB2_.exit307.i.i ]
+  %minimum.i.i.sroa.0.038613869.i.i = phi <8 x float> [ %minimum.i.i.sroa.0.03861.lcssa39433954.i.i, %bb29.i.lr.ph.i.i ], [ %minimum.i.i.sroa.0.0.i.i, %_RINvCsdvPQf9CMsz3_17true_peak_limiter9ring_laneNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8EB2_.exit307.i.i ]
+  %569 = add nuw nsw i64 %iter.i.sroa.16.03871.i.i, 1, !dbg !28128
+  %start1.i.i.i.i.i.i = shl i64 %iter.i.sroa.16.03871.i.i, 3, !dbg !28129
+  %data.i.i.i.i1831.i.i = getelementptr inbounds nuw float, ptr %_127.i.i.i, i64 %start1.i.i.i.i.i.i, !dbg !28131
+  %data.i4.i.i.i.i.i = getelementptr inbounds nuw float, ptr %_136.i.i.i, i64 %start1.i.i.i.i.i.i, !dbg !28133
+  br i1 %stationary.sroa.0.0.i.i.i, label %bb35.i.i.i, label %bb32.i.i.i, !dbg !28136
+
+bb30.i.i.i:                                       ; preds = %_RINvCsdvPQf9CMsz3_17true_peak_limiter9ring_laneNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8EB2_.exit307.i.i, %bb48.i.i.i
+  %_12.i434.sroa.0.0.copyload3905.i.i.lcssa8901243 = phi <8 x float> [ %_12.i434.sroa.0.0.copyload3905.i.i.lcssa8901244, %bb48.i.i.i ], [ %_12.i434.sroa.0.0.copyload3905.i.i, %_RINvCsdvPQf9CMsz3_17true_peak_limiter9ring_laneNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8EB2_.exit307.i.i ]
+  %_11.i435.sroa.0.0.copyload3889.i.i.lcssa8831233 = phi <8 x float> [ %_11.i435.sroa.0.0.copyload3889.i.i.lcssa8831234, %bb48.i.i.i ], [ %_11.i435.sroa.0.0.copyload3889.i.i, %_RINvCsdvPQf9CMsz3_17true_peak_limiter9ring_laneNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8EB2_.exit307.i.i ]
+  %.lcssa9231215.i = phi <8 x float> [ %.lcssa9231216.i, %bb48.i.i.i ], [ %616, %_RINvCsdvPQf9CMsz3_17true_peak_limiter9ring_laneNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8EB2_.exit307.i.i ]
+  %.lcssa9031205.i = phi <8 x float> [ %.lcssa9031206.i, %bb48.i.i.i ], [ %588, %_RINvCsdvPQf9CMsz3_17true_peak_limiter9ring_laneNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8EB2_.exit307.i.i ]
+  %.lcssa8951195.i = phi <8 x float> [ %.lcssa8951196.i, %bb48.i.i.i ], [ %589, %_RINvCsdvPQf9CMsz3_17true_peak_limiter9ring_laneNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8EB2_.exit307.i.i ]
+  %.lcssa8871186.i = phi <8 x float> [ %.lcssa8871187.i, %bb48.i.i.i ], [ %590, %_RINvCsdvPQf9CMsz3_17true_peak_limiter9ring_laneNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8EB2_.exit307.i.i ]
+  %.lcssa49975025.i.i = phi <8 x float> [ %.lcssa49975026.i.i, %bb48.i.i.i ], [ %616, %_RINvCsdvPQf9CMsz3_17true_peak_limiter9ring_laneNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8EB2_.exit307.i.i ]
+  %.lcssa49885022.i.i = phi <8 x float> [ %.lcssa49885023.i.i, %bb48.i.i.i ], [ %588, %_RINvCsdvPQf9CMsz3_17true_peak_limiter9ring_laneNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8EB2_.exit307.i.i ]
+  %.lcssa49795019.i.i = phi <8 x float> [ %.lcssa49795020.i.i, %bb48.i.i.i ], [ %589, %_RINvCsdvPQf9CMsz3_17true_peak_limiter9ring_laneNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8EB2_.exit307.i.i ]
+  %.lcssa49705016.i.i = phi <8 x float> [ %.lcssa49705017.i.i, %bb48.i.i.i ], [ %590, %_RINvCsdvPQf9CMsz3_17true_peak_limiter9ring_laneNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8EB2_.exit307.i.i ]
+  %_12.i434.sroa.0.0.copyload3905.lcssa46955013.i.i = phi <8 x float> [ %_12.i434.sroa.0.0.copyload3905.lcssa46955014.i.i, %bb48.i.i.i ], [ %_12.i434.sroa.0.0.copyload3905.i.i, %_RINvCsdvPQf9CMsz3_17true_peak_limiter9ring_laneNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8EB2_.exit307.i.i ]
+  %_11.i435.sroa.0.0.copyload3889.lcssa46885010.i.i = phi <8 x float> [ %_11.i435.sroa.0.0.copyload3889.lcssa46885011.i.i, %bb48.i.i.i ], [ %_11.i435.sroa.0.0.copyload3889.i.i, %_RINvCsdvPQf9CMsz3_17true_peak_limiter9ring_laneNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8EB2_.exit307.i.i ]
+  %.lcssa46814999.i.i = phi <8 x float> [ %.lcssa46815000.i.i, %bb48.i.i.i ], [ %592, %_RINvCsdvPQf9CMsz3_17true_peak_limiter9ring_laneNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8EB2_.exit307.i.i ]
+  %storemerge.i.i.lcssa39373962.i.i = phi i32 [ %storemerge.i.i.lcssa39373963.i.i, %bb48.i.i.i ], [ %storemerge.i.i.i.i, %_RINvCsdvPQf9CMsz3_17true_peak_limiter9ring_laneNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8EB2_.exit307.i.i ]
+  %minimum.i.i.sroa.0.03861.lcssa.i.i = phi <8 x float> [ %minimum.i.i.sroa.0.03861.lcssa39433954.i.i, %bb48.i.i.i ], [ %minimum.i.i.sroa.0.0.i.i, %_RINvCsdvPQf9CMsz3_17true_peak_limiter9ring_laneNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8EB2_.exit307.i.i ]
+  %_95.i.i.i = add i64 %..i1820.i.i, %ring_cursor.sroa.0.1.i3955.i.i, !dbg !28137
+  %_137.not.i.i.i = icmp ult i64 %_95.i.i.i, %ring.i.i.i, !dbg !28138
+  %570 = select i1 %_137.not.i.i.i, i64 0, i64 %ring.i.i.i, !dbg !28138
+  %ring_cursor.sroa.0.2.i.i.i = sub nuw i64 %_95.i.i.i, %570, !dbg !28138
+  %_97.i.i.i = add i64 %..i1820.i.i, %main_cursor.sroa.0.1.i3956.i.i, !dbg !28141
+  %_143.not.i.i.i = icmp ult i64 %_97.i.i.i, %main.i.i.i, !dbg !28142
+  %571 = select i1 %_143.not.i.i.i, i64 0, i64 %main.i.i.i, !dbg !28142
+  %main_cursor.sroa.0.2.i.i.i = sub nuw i64 %_97.i.i.i, %571, !dbg !28142
+  %_44.i.i.i = icmp ult i64 %_65.i.i.i, %..i1802.i.i, !dbg !27491
+  br i1 %_44.i.i.i, label %bb22.i.i.i, label %bb21.i.bb18.i.loopexit_crit_edge.i.i, !dbg !27491
+
+bb32.i.i.i:                                       ; preds = %bb29.i.i.i
+1888:	cmpb	$0, 256(%rsp)
+3251:	cmpb	$0, 764(%rsp)
+3679:	cmpb	$0, 32(%rsp)
+5125:	cmpb	$0, 2304(%rsp)
+5918:	cmpb	$0, 764(%rsp)
+
+codex
+The retained assembly has a stationary-flag test inside each of the four W8 frame loops, with backedges that revisit those tests. I’m tracing the flag definitions and path admission to confirm they are reachable stationary branches, rather than silent-rest checks or unreachable fallback code.
+
+exec
+/bin/bash -lc "python3 - <<'PY'
+from pathlib import Path
+import re
+for n,slots in [('process-core-w8',[256,2304]),('process-bank-mono-w8',[48,8])]:
+ ls=Path('artifacts/issue539-baseline/selected/'+n+'.s').read_text().splitlines();print(n)
+ for i,l in enumerate(ls):
+  if re.search(r'\\b(movl|movb|cmpb)\\s+.*?, ('+'|'.join(map(str,slots))+r')\\(%rsp\\)',l):
+   print('FLAG',i+1)
+   for j in range(max(0,i-27),min(len(ls),i+4)):
+    if not ls[j].startswith(('.Ltmp','\\t.loc')): print(j+1,ls[j])
+ for target in (['.LBB32_96','.LBB32_98','.LBB32_313','.LBB32_315'] if n=='process-core-w8' else ['.LBB60_86','.LBB60_88','.LBB60_176','.LBB60_178']):
+  for i,l in enumerate(ls):
+   if target in l:
+    print('TARGET',target)
+    for j in range(max(0,i-6),min(len(ls),i+8)):
+     if not ls[j].startswith(('.Ltmp','\\t.loc')):print(j+1,ls[j])
+PY" in /home/bl/misofm/engine-limiter-stationary-dispatch
+ succeeded in 0ms:
+process-core-w8
+FLAG 454
+427 	movq	%r14, %rsi
+428 	callq	_RNvMs5_CsdvPQf9CMsz3_17true_peak_limiterINtB5_10HotChannelNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8E4loadB5_
+429 	leaq	4544(%rsp), %rdi
+432 	movq	%rbx, %rsi
+433 	callq	_RNvMs5_CsdvPQf9CMsz3_17true_peak_limiterINtB5_10HotChannelNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8E4loadB5_
+434 	movq	24(%rsp), %rsi
+437 	movq	1776(%rsi), %rcx
+438 	movq	1784(%rsi), %rax
+441 	shlq	$4, %rax
+444 	.p2align	4
+445 .LBB32_53:
+448 	testq	%rax, %rax
+451 	je	.LBB32_56
+454 	movl	$0, 256(%rsp)
+457 	cmpl	$0, 12(%rcx)
+FLAG 489
+462 	movl	4(%rcx), %edx
+463 	cmpl	%edx, (%rcx)
+465 	leaq	16(%rcx), %rcx
+467 	je	.LBB32_53
+468 	jmp	.LBB32_69
+470 .LBB32_56:
+472 	movq	1792(%rsi), %rcx
+473 	movq	1800(%rsi), %rax
+476 	shlq	$4, %rax
+479 	.p2align	4
+480 .LBB32_57:
+483 	testq	%rax, %rax
+486 	je	.LBB32_60
+489 	movl	$0, 256(%rsp)
+492 	cmpl	$0, 12(%rcx)
+FLAG 524
+497 	movl	4(%rcx), %edx
+498 	cmpl	%edx, (%rcx)
+500 	leaq	16(%rcx), %rcx
+502 	je	.LBB32_57
+503 	jmp	.LBB32_69
+505 .LBB32_60:
+507 	movq	1976(%rsi), %rcx
+508 	movq	1984(%rsi), %rax
+511 	shlq	$4, %rax
+514 	.p2align	4
+515 .LBB32_61:
+518 	testq	%rax, %rax
+521 	je	.LBB32_64
+524 	movl	$0, 256(%rsp)
+527 	cmpl	$0, 12(%rcx)
+FLAG 607
+580 	movl	4(%rcx), %edx
+581 	cmpl	%edx, (%rcx)
+583 	leaq	16(%rcx), %rcx
+585 	je	.LBB32_235
+586 	jmp	.LBB32_251
+588 .LBB32_64:
+590 	movq	1992(%rsi), %rcx
+591 	movq	2000(%rsi), %rax
+594 	shlq	$4, %rax
+597 	.p2align	4
+598 .LBB32_65:
+601 	testq	%rax, %rax
+604 	je	.LBB32_66
+607 	movl	$0, 256(%rsp)
+610 	cmpl	$0, 12(%rcx)
+FLAG 661
+636 	testq	%rax, %rax
+639 	je	.LBB32_242
+642 	xorl	%esi, %esi
+645 	cmpl	$0, 12(%rcx)
+648 	jne	.LBB32_251
+649 	addq	$-16, %rax
+650 	movl	4(%rcx), %edx
+651 	cmpl	%edx, (%rcx)
+653 	leaq	16(%rcx), %rcx
+655 	je	.LBB32_239
+656 	jmp	.LBB32_251
+658 .LBB32_66:
+660 	movb	$1, %al
+661 	movl	%eax, 256(%rsp)
+662 .LBB32_69:
+FLAG 1888
+1861 	vmovaps	4192(%rsp), %ymm11
+1862 	vmovaps	4256(%rsp), %ymm0
+1863 	vmovaps	%ymm0, 928(%rsp)
+1864 	vmovaps	4288(%rsp), %ymm0
+1865 	vmovaps	%ymm0, 96(%rsp)
+1866 	vmovaps	4320(%rsp), %ymm12
+1867 	vmovaps	4416(%rsp), %ymm0
+1868 	vmovaps	%ymm0, 864(%rsp)
+1869 	vmovaps	4384(%rsp), %ymm0
+1870 	vmovaps	%ymm0, 896(%rsp)
+1871 	vmovaps	4928(%rsp), %ymm3
+1872 	vmovaps	4992(%rsp), %ymm0
+1873 	vmovaps	%ymm0, 832(%rsp)
+1874 	vmovaps	5024(%rsp), %ymm0
+1875 	vmovaps	%ymm0, 128(%rsp)
+1876 	vmovaps	5056(%rsp), %ymm5
+1877 	vmovaps	5152(%rsp), %ymm6
+1878 	vmovaps	5120(%rsp), %ymm0
+1879 	vmovaps	%ymm0, 800(%rsp)
+1880 	vmovaps	4480(%rsp), %ymm1
+1881 	vmovaps	5216(%rsp), %ymm0
+1882 	xorl	%eax, %eax
+1883 	vbroadcastss	.LCPI32_2(%rip), %ymm14
+1884 	.p2align	4
+1885 .LBB32_96:
+1888 	cmpb	$0, 256(%rsp)
+1889 	jne	.LBB32_98
+1891 	vbroadcastss	.LCPI32_1(%rip), %ymm9
+FLAG 3605
+3579 	testq	%rax, %rax
+3582 	je	.LBB32_248
+3585 	xorl	%esi, %esi
+3588 	cmpl	$0, 12(%rcx)
+3591 	jne	.LBB32_251
+3592 	addq	$-16, %rax
+3593 	movl	4(%rcx), %edx
+3594 	cmpl	%edx, (%rcx)
+3596 	leaq	16(%rcx), %rcx
+3598 	je	.LBB32_247
+3599 	jmp	.LBB32_251
+3601 .LBB32_248:
+3603 	movb	$1, %sil
+3604 .LBB32_251:
+3605 	movl	%esi, 2304(%rsp)
+3608 	movzbl	1536(%r8), %r14d
+FLAG 5125
+5098 	vmovaps	3520(%rsp), %ymm0
+5099 	vmovaps	%ymm0, 224(%rsp)
+5100 	vmovaps	3552(%rsp), %ymm0
+5101 	vmovaps	%ymm0, 288(%rsp)
+5102 	vmovaps	3616(%rsp), %ymm0
+5103 	vmovaps	%ymm0, 1600(%rsp)
+5104 	vmovaps	3040(%rsp), %ymm0
+5105 	vmovaps	%ymm0, 864(%rsp)
+5106 	vmovaps	3776(%rsp), %ymm0
+5107 	vmovaps	%ymm0, 2048(%rsp)
+5108 	vmovaps	2944(%rsp), %ymm0
+5109 	vmovaps	%ymm0, 960(%rsp)
+5110 	vmovaps	2848(%rsp), %ymm4
+5111 	vmovaps	2912(%rsp), %ymm0
+5112 	vmovaps	%ymm0, 128(%rsp)
+5113 	vmovaps	3680(%rsp), %ymm0
+5114 	vmovaps	%ymm0, 96(%rsp)
+5115 	xorl	%r13d, %r13d
+5116 	vmovaps	3584(%rsp), %ymm15
+5117 	vmovaps	3648(%rsp), %ymm2
+5118 	vmovaps	3008(%rsp), %ymm6
+5119 	vmovaps	3744(%rsp), %ymm9
+5122 	.p2align	4
+5123 .LBB32_313:
+5125 	cmpb	$0, 2304(%rsp)
+5126 	movq	1120(%rsp), %rsi
+5127 	jne	.LBB32_315
+TARGET .LBB32_96
+1879 	vmovaps	%ymm0, 800(%rsp)
+1880 	vmovaps	4480(%rsp), %ymm1
+1881 	vmovaps	5216(%rsp), %ymm0
+1882 	xorl	%eax, %eax
+1883 	vbroadcastss	.LCPI32_2(%rip), %ymm14
+1884 	.p2align	4
+1885 .LBB32_96:
+1888 	cmpb	$0, 256(%rsp)
+1889 	jne	.LBB32_98
+1891 	vbroadcastss	.LCPI32_1(%rip), %ymm9
+TARGET .LBB32_96
+3219 	cmpq	752(%rsp), %rsi
+3220 	movq	208(%rsp), %r13
+3221 	movq	216(%rsp), %rdx
+3224 	jne	.LBB32_96
+3225 	jmp	.LBB32_77
+3227 .LBB32_70:
+3229 	movq	176(%rsp), %r14
+3230 	movq	200(%rsp), %r15
+3231 	movq	%r12, %rbx
+TARGET .LBB32_98
+1883 	vbroadcastss	.LCPI32_2(%rip), %ymm14
+1884 	.p2align	4
+1885 .LBB32_96:
+1888 	cmpb	$0, 256(%rsp)
+1889 	jne	.LBB32_98
+1891 	vbroadcastss	.LCPI32_1(%rip), %ymm9
+1894 	vaddps	96(%rsp), %ymm9, %ymm2
+1895 	vxorps	%xmm10, %xmm10, %xmm10
+TARGET .LBB32_98
+2010 	vmovaps	%ymm5, 5056(%rsp)
+2011 	vmovaps	%ymm9, 800(%rsp)
+2013 	vmovaps	%ymm9, 5120(%rsp)
+2015 .LBB32_98:
+2017 	leaq	(%rax,%rdx), %rsi
+2018 	shlq	$3, %rsi
+2021 	movq	%r13, %rdx
+2022 	movq	%rsi, 480(%rsp)
+TARGET .LBB32_313
+5117 	vmovaps	3648(%rsp), %ymm2
+5118 	vmovaps	3008(%rsp), %ymm6
+5119 	vmovaps	3744(%rsp), %ymm9
+5122 	.p2align	4
+5123 .LBB32_313:
+5125 	cmpb	$0, 2304(%rsp)
+5126 	movq	1120(%rsp), %rsi
+5127 	jne	.LBB32_315
+5129 	vbroadcastss	.LCPI32_1(%rip), %ymm1
+TARGET .LBB32_313
+5714 	vmovups	%ymm0, (%r15)
+5715 	vmovaps	%ymm7, %ymm8
+5716 	vmovaps	%ymm14, %ymm11
+5719 	cmpq	1984(%rsp), %r13
+5720 	jne	.LBB32_313
+5723 	vmovaps	320(%rsp), %ymm0
+5726 	vmovaps	%ymm0, 2816(%rsp)
+TARGET .LBB32_315
+5122 	.p2align	4
+5123 .LBB32_313:
+5125 	cmpb	$0, 2304(%rsp)
+5126 	movq	1120(%rsp), %rsi
+5127 	jne	.LBB32_315
+5129 	vbroadcastss	.LCPI32_1(%rip), %ymm1
+5132 	vaddps	320(%rsp), %ymm1, %ymm0
+5133 	vxorps	%xmm3, %xmm3, %xmm3
+TARGET .LBB32_315
+5230 	vmovaps	%ymm15, 3584(%rsp)
+5232 	vmovaps	%ymm2, 3648(%rsp)
+5234 .LBB32_315:
+5236 	vbroadcastss	.LCPI32_2(%rip), %ymm5
+5237 	movl	64(%rsp), %r14d
+5240 	addq	%r13, %rsi
+process-bank-mono-w8
+FLAG 602
+576 .LBB60_53:
+578 	leaq	960(%rsp), %rdi
+579 	movq	16(%rsp), %rsi
+582 	callq	_RNvMs5_CsdvPQf9CMsz3_17true_peak_limiterINtB5_10HotChannelNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8E4loadB5_
+585 	movq	1776(%r12), %rcx
+586 	movq	1784(%r12), %rax
+589 	shlq	$4, %rax
+592 	.p2align	4
+593 .LBB60_54:
+596 	testq	%rax, %rax
+599 	je	.LBB60_61
+602 	movl	$0, 48(%rsp)
+605 	cmpl	$0, 12(%rcx)
+FLAG 644
+618 .LBB60_57:
+620 	leaq	960(%rsp), %rdi
+621 	movq	16(%rsp), %rsi
+624 	callq	_RNvMs5_CsdvPQf9CMsz3_17true_peak_limiterINtB5_10HotChannelNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8E4loadB5_
+627 	movq	1776(%r12), %rcx
+628 	movq	1784(%r12), %rax
+631 	shlq	$4, %rax
+634 	.p2align	4
+635 .LBB60_58:
+638 	testq	%rax, %rax
+641 	je	.LBB60_65
+644 	movl	$0, 8(%rsp)
+647 	cmpl	$0, 12(%rcx)
+FLAG 679
+652 	movl	4(%rcx), %edx
+653 	cmpl	%edx, (%rcx)
+655 	leaq	16(%rcx), %rcx
+657 	je	.LBB60_58
+658 	jmp	.LBB60_154
+660 .LBB60_61:
+662 	movq	1792(%r12), %rcx
+663 	movq	1800(%r12), %rax
+666 	shlq	$4, %rax
+669 	.p2align	4
+670 .LBB60_62:
+673 	testq	%rax, %rax
+676 	je	.LBB60_69
+679 	movl	$0, 48(%rsp)
+682 	cmpl	$0, 12(%rcx)
+FLAG 714
+687 	movl	4(%rcx), %edx
+688 	cmpl	%edx, (%rcx)
+690 	leaq	16(%rcx), %rcx
+692 	je	.LBB60_62
+693 	jmp	.LBB60_70
+695 .LBB60_65:
+697 	movq	1792(%r12), %rcx
+698 	movq	1800(%r12), %rax
+701 	shlq	$4, %rax
+704 	.p2align	4
+705 .LBB60_66:
+708 	testq	%rax, %rax
+711 	je	.LBB60_153
+714 	movl	$0, 8(%rsp)
+717 	cmpl	$0, 12(%rcx)
+FLAG 733
+708 	testq	%rax, %rax
+711 	je	.LBB60_153
+714 	movl	$0, 8(%rsp)
+717 	cmpl	$0, 12(%rcx)
+720 	jne	.LBB60_154
+721 	addq	$-16, %rax
+722 	movl	4(%rcx), %edx
+723 	cmpl	%edx, (%rcx)
+725 	leaq	16(%rcx), %rcx
+727 	je	.LBB60_66
+728 	jmp	.LBB60_154
+730 .LBB60_69:
+732 	movb	$1, %al
+733 	movl	%eax, 48(%rsp)
+734 .LBB60_70:
+FLAG 1429
+1402 	vmovaps	%ymm9, 384(%rsp)
+1403 	vmovaps	%ymm8, 576(%rsp)
+1404 	vmovaps	%ymm2, 544(%rsp)
+1405 	vmovaps	%ymm4, 512(%rsp)
+1406 	vmovaps	1344(%rsp), %ymm0
+1407 	vmovaps	1376(%rsp), %ymm2
+1408 	vmovaps	%ymm2, 800(%rsp)
+1409 	vmovaps	1408(%rsp), %ymm12
+1410 	vmovaps	1440(%rsp), %ymm15
+1411 	vmovaps	1504(%rsp), %ymm2
+1412 	vmovaps	%ymm2, 768(%rsp)
+1413 	movq	1624(%r12), %rcx
+1414 	movq	1632(%r12), %rax
+1415 	movq	%rax, 1792(%rsp)
+1416 	vmovaps	1664(%rsp), %ymm4
+1417 	vmovaps	1568(%rsp), %ymm3
+1418 	vmovaps	1472(%rsp), %ymm9
+1419 	vmovaps	1536(%rsp), %ymm11
+1420 	vmovaps	1632(%rsp), %ymm10
+1421 	xorl	%r8d, %r8d
+1422 	vbroadcastss	.LCPI60_2(%rip), %ymm5
+1423 	vbroadcastss	.LCPI60_3(%rip), %ymm6
+1424 	movq	%r11, 2176(%rsp)
+1425 	.p2align	4
+1426 .LBB60_86:
+1429 	cmpb	$0, 48(%rsp)
+1430 	jne	.LBB60_88
+1432 	vbroadcastss	.LCPI60_1(%rip), %ymm13
+FLAG 2118
+2091 	movl	%ebx, 1640(%r12)
+2092 	movq	8(%rsp), %rax
+2095 	movl	%eax, 1644(%r12)
+2098 	cmpb	$0, 124(%rsp)
+2099 	jne	.LBB60_200
+2100 	jmp	.LBB60_208
+2101 .LBB60_151:
+2104 	vmovaps	%ymm11, 1536(%rsp)
+2107 	vmovaps	%ymm10, 1632(%rsp)
+2109 .LBB60_152:
+2111 	leaq	.Lalloc_cae05af65618c8d83c932596374a1d80(%rip), %rcx
+2112 	movl	$8, %esi
+2113 	xorl	%edi, %edi
+2114 	vzeroupper
+2115 	callq	*_RNvNtNtCs4NRVxsYgnAr_4core5slice5index16slice_index_fail@GOTPCREL(%rip)
+2116 .LBB60_153:
+2117 	movb	$1, %al
+2118 	movl	%eax, 8(%rsp)
+2119 .LBB60_154:
+FLAG 3037
+3011 	leaq	(%rsp,%rsi), %rcx
+3012 	addq	$3904, %rcx
+3013 	movq	%rcx, 352(%rsp)
+3016 	cmpq	%r12, %r8
+3017 	cmovaeq	%r12, %r8
+3018 	cmpq	%r13, %r8
+3019 	cmovaeq	%r13, %r8
+3020 	cmpq	%rbx, %r8
+3021 	cmovaeq	%rbx, %r8
+3022 	movq	728(%rsp), %rbx
+3023 	subq	%rdi, %rbx
+3024 	cmpq	%rbx, %r8
+3025 	cmovbq	%r8, %rbx
+3026 	andq	336(%rsp), %rbx
+3027 	vmovaps	%ymm10, %ymm5
+3028 	vmovaps	%ymm9, %ymm0
+3029 	xorl	%r13d, %r13d
+3030 	vmovaps	%ymm1, %ymm2
+3034 	.p2align	4
+3035 .LBB60_176:
+3037 	cmpb	$0, 8(%rsp)
+3038 	movq	256(%rsp), %rcx
+3039 	jne	.LBB60_178
+TARGET .LBB60_86
+1420 	vmovaps	1632(%rsp), %ymm10
+1421 	xorl	%r8d, %r8d
+1422 	vbroadcastss	.LCPI60_2(%rip), %ymm5
+1423 	vbroadcastss	.LCPI60_3(%rip), %ymm6
+1424 	movq	%r11, 2176(%rsp)
+1425 	.p2align	4
+1426 .LBB60_86:
+1429 	cmpb	$0, 48(%rsp)
+1430 	jne	.LBB60_88
+1432 	vbroadcastss	.LCPI60_1(%rip), %ymm13
+TARGET .LBB60_86
+2073 	cmpq	2208(%rsp), %r8
+2074 	movq	2016(%rsp), %rdx
+2077 	jne	.LBB60_86
+2078 	jmp	.LBB60_76
+2080 .LBB60_142:
+2082 	movq	40(%rsp), %r14
+2083 	movq	%r15, %rbx
+2084 .LBB60_143:
+TARGET .LBB60_88
+1424 	movq	%r11, 2176(%rsp)
+1425 	.p2align	4
+1426 .LBB60_86:
+1429 	cmpb	$0, 48(%rsp)
+1430 	jne	.LBB60_88
+1432 	vbroadcastss	.LCPI60_1(%rip), %ymm13
+1435 	vaddps	%ymm13, %ymm15, %ymm8
+1436 	vxorps	%xmm14, %xmm14, %xmm14
+TARGET .LBB60_88
+1470 	vblendvps	%ymm8, %ymm9, %ymm2, %ymm9
+1473 	vblendvps	%ymm8, %ymm11, %ymm14, %ymm11
+1475 .LBB60_88:
+1477 	leaq	(%r8,%rdx), %rdi
+1478 	shlq	$3, %rdi
+1481 	movq	%r13, %rdx
+1482 	subq	%rdi, %rdx
+TARGET .LBB60_176
+3029 	xorl	%r13d, %r13d
+3030 	vmovaps	%ymm1, %ymm2
+3034 	.p2align	4
+3035 .LBB60_176:
+3037 	cmpb	$0, 8(%rsp)
+3038 	movq	256(%rsp), %rcx
+3039 	jne	.LBB60_178
+3041 	vbroadcastss	.LCPI60_1(%rip), %ymm13
+TARGET .LBB60_176
+3329 	vmovaps	%ymm1, %ymm2
+3330 	vmovaps	%ymm5, %ymm10
+3331 	vmovaps	%ymm0, %ymm9
+3334 	cmpq	%rbx, %rsi
+3335 	jne	.LBB60_176
+3336 	jmp	.LBB60_171
+3338 .LBB60_192:
+3340 	vmovaps	%ymm1, 2080(%rsp)
+3341 	movq	%rcx, 256(%rsp)
+TARGET .LBB60_178
+3034 	.p2align	4
+3035 .LBB60_176:
+3037 	cmpb	$0, 8(%rsp)
+3038 	movq	256(%rsp), %rcx
+3039 	jne	.LBB60_178
+3041 	vbroadcastss	.LCPI60_1(%rip), %ymm13
+3044 	vaddps	%ymm13, %ymm15, %ymm9
+3045 	vxorps	%xmm1, %xmm1, %xmm1
+TARGET .LBB60_178
+3083 	vblendvps	%ymm9, %ymm13, %ymm1, %ymm13
+3084 	vmovaps	%ymm13, 608(%rsp)
+3085 	vbroadcastss	.LCPI60_2(%rip), %ymm13
+3087 .LBB60_178:
+3089 	addq	%r13, %rcx
+3092 	leaq	(,%rcx,8), %rdi
+
+exec
+/bin/bash -lc "rg -n 'call.*(process_block|lanes_uniform|HotChannel)|silent_fixed|lanes_uniform' artifacts/issue539-baseline/selected/process-{scalar,bank-w8,core-w8,bank-mono-w8}.ll | head -45; rg -n 'lto|codegen|profile|rustflags' artifacts/issue539-baseline/capture.py Cargo.toml .cargo/config.toml; rg --files /tmp/issue539-baseline-target/release/.fingerprint/true-peak-limiter-61bcf0f0b2475b36" in /home/bl/misofm/engine-limiter-stationary-dispatch
+ succeeded in 0ms:
+artifacts/issue539-baseline/selected/process-scalar.ll:32:; call <true_peak_limiter::LimiterCore<f32>>::process_block
+artifacts/issue539-baseline/selected/process-scalar.ll:33:  tail call fastcc void @_RNvMs9_CsdvPQf9CMsz3_17true_peak_limiterINtB5_11LimiterCorefE13process_blockB5_(ptr noalias noundef align 8 dereferenceable(784) %self, ptr noalias noundef nonnull align 4 %_16.0, i64 noundef %_16.1, ptr noalias noundef nonnull align 4 %_14.0, i64 noundef %_14.1, i64 noundef %_16.1) #30, !dbg !22283
+artifacts/issue539-baseline/selected/process-bank-w8.ll:250:; call <true_peak_limiter::LimiterCore<wide::f32x8_::f32x8>>::process_block
+artifacts/issue539-baseline/selected/process-bank-w8.ll:251:  tail call fastcc void @_RNvMs9_CsdvPQf9CMsz3_17true_peak_limiterINtB5_11LimiterCoreNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8E13process_blockB5_(ptr noalias noundef nonnull align 32 dereferenceable(2304) %self, ptr noalias noundef nonnull align 4 %_40.0.i, i64 noundef %_40.1.i, ptr noalias noundef nonnull align 4 %_41.0.i, i64 noundef %_41.1.i, i64 noundef %_35.i) #30, !dbg !25904, !noalias !25861
+artifacts/issue539-baseline/selected/process-core-w8.ll:231:bb1.i.i3082:                                      ; preds = %bb26, %_RNCNvCsdvPQf9CMsz3_17true_peak_limiter13lanes_uniform0B3_.exit.i.i
+artifacts/issue539-baseline/selected/process-core-w8.ll:232:  %_224.i.i = phi ptr [ %_22.i.i3085, %_RNCNvCsdvPQf9CMsz3_17true_peak_limiter13lanes_uniform0B3_.exit.i.i ], [ %_31.0.i, %bb26 ]
+artifacts/issue539-baseline/selected/process-core-w8.ll:249:  br i1 %_11.i.i.i, label %_RNCNvCsdvPQf9CMsz3_17true_peak_limiter13lanes_uniform0B3_.exit.i.i, label %bb7.i, !dbg !11621
+artifacts/issue539-baseline/selected/process-core-w8.ll:251:_RNCNvCsdvPQf9CMsz3_17true_peak_limiter13lanes_uniform0B3_.exit.i.i: ; preds = %bb2.i.i.i
+artifacts/issue539-baseline/selected/process-core-w8.ll:295:bb1.i.i3100:                                      ; preds = %bb2.i, %_RNCNvCsdvPQf9CMsz3_17true_peak_limiter13lanes_uniform0B3_.exit.i.i3114
+artifacts/issue539-baseline/selected/process-core-w8.ll:296:  %_224.i.i3101 = phi ptr [ %_22.i.i3104, %_RNCNvCsdvPQf9CMsz3_17true_peak_limiter13lanes_uniform0B3_.exit.i.i3114 ], [ %_31.0.i3095, %bb2.i ]
+artifacts/issue539-baseline/selected/process-core-w8.ll:313:  br i1 %_11.i.i.i3113, label %_RNCNvCsdvPQf9CMsz3_17true_peak_limiter13lanes_uniform0B3_.exit.i.i3114, label %bb7.i, !dbg !11676
+artifacts/issue539-baseline/selected/process-core-w8.ll:315:_RNCNvCsdvPQf9CMsz3_17true_peak_limiter13lanes_uniform0B3_.exit.i.i3114: ; preds = %bb2.i.i.i3110
+artifacts/issue539-baseline/selected/process-core-w8.ll:345:bb7.i:                                            ; preds = %bb13.i.i3084, %bb2.i.i.i, %_RNCNvCsdvPQf9CMsz3_17true_peak_limiter13lanes_uniform0B3_.exit.i.i, %bb13.i5.i, %bb13.i.i3103, %bb2.i.i.i3110, %_RNCNvCsdvPQf9CMsz3_17true_peak_limiter13lanes_uniform0B3_.exit.i.i3114, %bb13.i5.i3126
+artifacts/issue539-baseline/selected/process-core-w8.ll:351:; call <true_peak_limiter::HotChannel<wide::f32x8_::f32x8>>::load
+artifacts/issue539-baseline/selected/process-core-w8.ll:352:  call fastcc void @_RNvMs5_CsdvPQf9CMsz3_17true_peak_limiterINtB5_10HotChannelNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8E4loadB5_(ptr noalias noundef align 32 captures(none) dereferenceable(736) %hot_left.i224, ptr noalias noundef nonnull readonly align 8 captures(address, read_provenance) dereferenceable(200) %_33) #30, !dbg !11717
+artifacts/issue539-baseline/selected/process-core-w8.ll:353:; call <true_peak_limiter::HotChannel<wide::f32x8_::f32x8>>::load
+artifacts/issue539-baseline/selected/process-core-w8.ll:354:  call fastcc void @_RNvMs5_CsdvPQf9CMsz3_17true_peak_limiterINtB5_10HotChannelNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8E4loadB5_(ptr noalias noundef align 32 captures(none) dereferenceable(736) %hot_right.i223, ptr noalias noundef nonnull readonly align 8 captures(address, read_provenance) dereferenceable(200) %_34) #30, !dbg !11721
+artifacts/issue539-baseline/selected/process-core-w8.ll:2347:; call <true_peak_limiter::HotChannel<wide::f32x8_::f32x8>>::store
+artifacts/issue539-baseline/selected/process-core-w8.ll:2348:  call fastcc void @_RNvMs5_CsdvPQf9CMsz3_17true_peak_limiterINtB5_10HotChannelNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8E5storeB5_(ptr noalias noundef readonly align 32 captures(none) dereferenceable(736) %hot_left.i224, ptr noalias noundef nonnull align 8 dereferenceable(200) %_33) #30, !dbg !14158
+artifacts/issue539-baseline/selected/process-core-w8.ll:2349:; call <true_peak_limiter::HotChannel<wide::f32x8_::f32x8>>::store
+artifacts/issue539-baseline/selected/process-core-w8.ll:2350:  call fastcc void @_RNvMs5_CsdvPQf9CMsz3_17true_peak_limiterINtB5_10HotChannelNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8E5storeB5_(ptr noalias noundef readonly align 32 captures(none) dereferenceable(736) %hot_right.i223, ptr noalias noundef nonnull align 8 dereferenceable(200) %_34) #30, !dbg !14159
+artifacts/issue539-baseline/selected/process-core-w8.ll:2364:; call <true_peak_limiter::HotChannel<wide::f32x8_::f32x8>>::load
+artifacts/issue539-baseline/selected/process-core-w8.ll:2365:  call fastcc void @_RNvMs5_CsdvPQf9CMsz3_17true_peak_limiterINtB5_10HotChannelNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8E4loadB5_(ptr noalias noundef align 32 captures(none) dereferenceable(736) %hot_left.i, ptr noalias noundef nonnull readonly align 8 captures(address, read_provenance) dereferenceable(200) %_33) #30, !dbg !14175
+artifacts/issue539-baseline/selected/process-core-w8.ll:2366:; call <true_peak_limiter::HotChannel<wide::f32x8_::f32x8>>::load
+artifacts/issue539-baseline/selected/process-core-w8.ll:2367:  call fastcc void @_RNvMs5_CsdvPQf9CMsz3_17true_peak_limiterINtB5_10HotChannelNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8E4loadB5_(ptr noalias noundef align 32 captures(none) dereferenceable(736) %hot_right.i, ptr noalias noundef nonnull readonly align 8 captures(address, read_provenance) dereferenceable(200) %_34) #30, !dbg !14179
+artifacts/issue539-baseline/selected/process-core-w8.ll:4024:; call <true_peak_limiter::HotChannel<wide::f32x8_::f32x8>>::store
+artifacts/issue539-baseline/selected/process-core-w8.ll:4025:  call fastcc void @_RNvMs5_CsdvPQf9CMsz3_17true_peak_limiterINtB5_10HotChannelNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8E5storeB5_(ptr noalias noundef readonly align 32 captures(none) dereferenceable(736) %hot_left.i, ptr noalias noundef nonnull align 8 dereferenceable(200) %_33) #30, !dbg !16726
+artifacts/issue539-baseline/selected/process-core-w8.ll:4026:; call <true_peak_limiter::HotChannel<wide::f32x8_::f32x8>>::store
+artifacts/issue539-baseline/selected/process-core-w8.ll:4027:  call fastcc void @_RNvMs5_CsdvPQf9CMsz3_17true_peak_limiterINtB5_10HotChannelNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8E5storeB5_(ptr noalias noundef readonly align 32 captures(none) dereferenceable(736) %hot_right.i, ptr noalias noundef nonnull align 8 dereferenceable(200) %_34) #30, !dbg !16727
+artifacts/issue539-baseline/selected/process-bank-mono-w8.ll:164:bb1.i.i1682.i.i:                                  ; preds = %bb16.i.i, %_RNCNvCsdvPQf9CMsz3_17true_peak_limiter13lanes_uniform0B3_.exit.i.i.i.i
+artifacts/issue539-baseline/selected/process-bank-mono-w8.ll:165:  %_224.i.i.i.i = phi ptr [ %_22.i.i1685.i.i, %_RNCNvCsdvPQf9CMsz3_17true_peak_limiter13lanes_uniform0B3_.exit.i.i.i.i ], [ %_31.0.i.i.i, %bb16.i.i ]
+artifacts/issue539-baseline/selected/process-bank-mono-w8.ll:182:  br i1 %_11.i.i.i.i.i, label %_RNCNvCsdvPQf9CMsz3_17true_peak_limiter13lanes_uniform0B3_.exit.i.i.i.i, label %bb39.i.i, !dbg !26071
+artifacts/issue539-baseline/selected/process-bank-mono-w8.ll:184:_RNCNvCsdvPQf9CMsz3_17true_peak_limiter13lanes_uniform0B3_.exit.i.i.i.i: ; preds = %bb2.i.i.i.i.i
+artifacts/issue539-baseline/selected/process-bank-mono-w8.ll:296:bb39.i.i:                                         ; preds = %_RNCNvCsdvPQf9CMsz3_17true_peak_limiter13lanes_uniform0B3_.exit.i.i.i.i, %bb2.i.i.i.i.i, %bb13.i.i1684.i.i, %bb13.i5.i.i.i
+artifacts/issue539-baseline/selected/process-bank-mono-w8.ll:300:; call <true_peak_limiter::HotChannel<wide::f32x8_::f32x8>>::load
+artifacts/issue539-baseline/selected/process-bank-mono-w8.ll:301:  call fastcc void @_RNvMs5_CsdvPQf9CMsz3_17true_peak_limiterINtB5_10HotChannelNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8E4loadB5_(ptr noalias noundef align 32 captures(none) dereferenceable(736) %hot_left.i216.i.i, ptr noalias noundef nonnull readonly align 8 captures(address, read_provenance) dereferenceable(200) %_25.i) #30, !dbg !26158, !noalias !25947
+artifacts/issue539-baseline/selected/process-bank-mono-w8.ll:1386:; call <true_peak_limiter::HotChannel<wide::f32x8_::f32x8>>::store
+artifacts/issue539-baseline/selected/process-bank-mono-w8.ll:1387:  call fastcc void @_RNvMs5_CsdvPQf9CMsz3_17true_peak_limiterINtB5_10HotChannelNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8E5storeB5_(ptr noalias noundef readonly align 32 captures(none) dereferenceable(736) %hot_left.i216.i.i, ptr noalias noundef nonnull align 8 dereferenceable(200) %_25.i) #30, !dbg !27335, !noalias !25947
+artifacts/issue539-baseline/selected/process-bank-mono-w8.ll:1399:; call <true_peak_limiter::HotChannel<wide::f32x8_::f32x8>>::load
+artifacts/issue539-baseline/selected/process-bank-mono-w8.ll:1400:  call fastcc void @_RNvMs5_CsdvPQf9CMsz3_17true_peak_limiterINtB5_10HotChannelNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8E4loadB5_(ptr noalias noundef align 32 captures(none) dereferenceable(736) %hot_left.i.i.i, ptr noalias noundef nonnull readonly align 8 captures(address, read_provenance) dereferenceable(200) %_25.i) #30, !dbg !27348, !noalias !25947
+artifacts/issue539-baseline/selected/process-bank-mono-w8.ll:2312:; call <true_peak_limiter::HotChannel<wide::f32x8_::f32x8>>::store
+artifacts/issue539-baseline/selected/process-bank-mono-w8.ll:2313:  call fastcc void @_RNvMs5_CsdvPQf9CMsz3_17true_peak_limiterINtB5_10HotChannelNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8E5storeB5_(ptr noalias noundef readonly align 32 captures(none) dereferenceable(736) %hot_left.i.i.i, ptr noalias noundef nonnull align 8 dereferenceable(200) %_25.i) #30, !dbg !28668, !noalias !25947
+rg: artifacts/issue539-baseline/capture.py: No such file or directory (os error 2)
+.cargo/config.toml:6:# that exact shape); `-C target-cpu` and a global `[build] rustflags` remain forbidden.
+.cargo/config.toml:8:rustflags = ["-C", "target-feature=+avx2,+fma"]
+Cargo.toml:115:# Master plan #83 D12. One release profile for every artifact the engine ships, so a benchmark, a
+Cargo.toml:118:# `lto = "fat"` and `codegen-units = 1` exist for one reason: the block kernels of
+Cargo.toml:121:# across crate boundaries. `debug = 1` keeps line tables so a profile or a core dump names a
+Cargo.toml:127:# "Panic behaviour by profile". Cargo ignores this setting when it builds a test or benchmark
+Cargo.toml:129:[profile.release]
+Cargo.toml:130:lto = "fat"
+Cargo.toml:131:codegen-units = 1
+Cargo.toml:135:# Benchmarks measure the shipped profile, never a separately tuned one.
+Cargo.toml:136:[profile.bench]
+/tmp/issue539-baseline-target/release/.fingerprint/true-peak-limiter-61bcf0f0b2475b36/lib-true_peak_limiter
+/tmp/issue539-baseline-target/release/.fingerprint/true-peak-limiter-61bcf0f0b2475b36/dep-lib-true_peak_limiter
+/tmp/issue539-baseline-target/release/.fingerprint/true-peak-limiter-61bcf0f0b2475b36/invoked.timestamp
+/tmp/issue539-baseline-target/release/.fingerprint/true-peak-limiter-61bcf0f0b2475b36/lib-true_peak_limiter.json
+
+exec
+/bin/bash -lc "python3 - <<'PY'
+from pathlib import Path
+import re
+for name,ranges in [('process-core-w8',[(90,350)]),('process-bank-mono-w8',[(35,300)]),('process-core-scalar',[(3300,3335)])]:
+ print(name)
+ ls=Path('artifacts/issue539-baseline/selected/'+name+'.ll').read_text().splitlines()
+ for a,b in ranges:
+  for i in range(a-1,b):
+   l=ls[i]
+   if re.search(r'("'^[A-Za-z_].*:|br |getelementptr.*i64 (153[67]|15[56][0-9]|2[012][0-9][0-9]|16[0-9][0-9])|icmp.*(i32|i1)|load i8|positive_zero|silent)'"',l): print(i+1,l.split(', "'!dbg'"')[0])
+PY
+rg --files artifacts/issue539-baseline; sed -n '129,134p' Cargo.toml; rg -n 'uniform|remaining|step' crates/true-peak-limiter/src/lib.rs | tail -12" in /home/bl/misofm/engine-limiter-stationary-dispatch
+ succeeded in 0ms:
+process-core-w8
+92   %19 = icmp eq i32 %_3.i.i.i3042, 0
+96   %21 = icmp eq i32 %_51.i.i.i3043, %_72.i.i.i3044
+98   br i1 %_0.sroa.0.0.i.i.i3045, label %bb1.i.i3037, label %bb20.thread
+100 bb7:                                              ; preds = %bb1.i.i3037
+103   %23 = getelementptr inbounds nuw i8, ptr %self, i64 2000
+106   br label %bb1.i.i3048
+108 bb1.i.i3048:                                      ; preds = %bb13.i.i3051, %bb7
+111   br i1 %_12.i.i3050, label %bb9, label %bb13.i.i3051
+113 bb13.i.i3051:                                     ; preds = %bb1.i.i3048
+117   %25 = icmp eq i32 %_3.i.i.i3053, 0
+121   %27 = icmp eq i32 %_51.i.i.i3054, %_72.i.i.i3055
+123   br i1 %_0.sroa.0.0.i.i.i3056, label %bb1.i.i3048, label %bb20.thread
+125 bb9:                                              ; preds = %bb1.i.i3048
+127   br i1 %_65.not, label %bb45, label %bb1.i3058
+129 bb45:                                             ; preds = %bb9
+134 bb1.i3058:                                        ; preds = %bb9, %bb10.i
+138   br i1 %28, label %bb11, label %bb11.preheader.i
+140 bb11.preheader.i:                                 ; preds = %bb1.i3058
+144   br label %bb11.i3061
+146 bb11.i3061:                                       ; preds = %bb11.i3061, %bb11.preheader.i
+153   br i1 %_25.i3064, label %bb10.i, label %bb11.i3061
+155 bb10.i:                                           ; preds = %bb11.i3061
+158   %30 = icmp eq i32 %29, 0
+159   br i1 %30, label %bb1.i3058, label %bb20.thread
+161 bb11:                                             ; preds = %bb1.i3058
+163   br i1 %_73.not, label %bb48, label %bb1.i3065
+165 bb20.thread:                                      ; preds = %bb13.i.i3023, %bb13.i.i3029, %bb13.i.i3040, %bb13.i.i3051, %bb10.i, %start
+166   %31 = getelementptr inbounds nuw i8, ptr %self, i64 2152
+167   br label %bb26
+169 bb20:                                             ; preds = %bb1.i3065
+170   %32 = getelementptr inbounds nuw i8, ptr %self, i64 2152
+171   %33 = load i8, ptr %32, align 8, !range !5399
+173   br i1 %_22, label %bb22, label %bb26
+175 bb48:                                             ; preds = %bb11
+180 bb1.i3065:                                        ; preds = %bb11, %bb10.i3080
+184   br i1 %34, label %bb20, label %bb11.preheader.i3068
+186 bb11.preheader.i3068:                             ; preds = %bb1.i3065
+190   br label %bb11.i3074
+192 bb11.i3074:                                       ; preds = %bb11.i3074, %bb11.preheader.i3068
+199   br i1 %_25.i3079, label %bb10.i3080, label %bb11.i3074
+201 bb10.i3080:                                       ; preds = %bb11.i3074
+204   %36 = icmp eq i32 %35, 0
+205   br i1 %36, label %bb1.i3065, label %bb20.thread6182
+207 bb20.thread6182:                                  ; preds = %bb10.i3080
+208   %37 = getelementptr inbounds nuw i8, ptr %self, i64 2152
+209   br label %bb26
+211 bb26:                                             ; preds = %bb20.thread6182, %bb20.thread, %bb20
+214   %_32 = getelementptr inbounds nuw i8, ptr %self, i64 1616
+215   %_33 = getelementptr inbounds nuw i8, ptr %self, i64 1648
+217   %_35 = getelementptr inbounds nuw i8, ptr %self, i64 1640
+229   br i1 %_5.not.i.i.i, label %bb2.i3092, label %bb1.i.i3082
+231 bb1.i.i3082:                                      ; preds = %bb26, %_RNCNvCsdvPQf9CMsz3_17true_peak_limiter13lanes_uniform0B3_.exit.i.i
+234   br i1 %_12.i.i3083, label %bb2.i3092, label %bb13.i.i3084
+236 bb13.i.i3084:                                     ; preds = %bb1.i.i3082
+241   %_8.i.i.i = icmp eq i32 %_9.i.i.i3086, %_10.i.i.i
+242   br i1 %_8.i.i.i, label %bb2.i.i.i, label %bb7.i
+244 bb2.i.i.i:                                        ; preds = %bb13.i.i3084
+248   %_11.i.i.i = icmp eq i32 %_12.i.i.i3088, %_13.i.i.i3089
+249   br i1 %_11.i.i.i, label %_RNCNvCsdvPQf9CMsz3_17true_peak_limiter13lanes_uniform0B3_.exit.i.i, label %bb7.i
+251 _RNCNvCsdvPQf9CMsz3_17true_peak_limiter13lanes_uniform0B3_.exit.i.i: ; preds = %bb2.i.i.i
+255   %45 = icmp eq i32 %_14.i.i.i3090, %_15.i.i.i3091
+256   br i1 %45, label %bb1.i.i3082, label %bb7.i
+258 bb2.i3092:                                        ; preds = %bb1.i.i3082, %bb26
+267   br i1 %_6.not.i.i.i, label %bb2.i, label %bb1.i3.i
+269 bb1.i3.i:                                         ; preds = %bb2.i3092, %bb13.i5.i
+272   br i1 %_12.i4.i, label %bb2.i, label %bb13.i5.i
+274 bb13.i5.i:                                        ; preds = %bb1.i3.i
+278   %_0.i.i.i = icmp eq i32 %ptr.val.i.i, %_4.i.i.i3094
+279   br i1 %_0.i.i.i, label %bb1.i3.i, label %bb7.i
+281 bb2.i:                                            ; preds = %bb1.i3.i, %bb2.i3092
+283   %48 = getelementptr inbounds nuw i8, ptr %self, i64 2024
+285   %49 = getelementptr inbounds nuw i8, ptr %self, i64 2032
+293   br i1 %_5.not.i.i.i3099, label %bb2.i3117, label %bb1.i.i3100
+295 bb1.i.i3100:                                      ; preds = %bb2.i, %_RNCNvCsdvPQf9CMsz3_17true_peak_limiter13lanes_uniform0B3_.exit.i.i3114
+298   br i1 %_12.i.i3102, label %bb2.i3117, label %bb13.i.i3103
+300 bb13.i.i3103:                                     ; preds = %bb1.i.i3100
+305   %_8.i.i.i3107 = icmp eq i32 %_9.i.i.i3105, %_10.i.i.i3106
+306   br i1 %_8.i.i.i3107, label %bb2.i.i.i3110, label %bb7.i
+308 bb2.i.i.i3110:                                    ; preds = %bb13.i.i3103
+312   %_11.i.i.i3113 = icmp eq i32 %_12.i.i.i3111, %_13.i.i.i3112
+313   br i1 %_11.i.i.i3113, label %_RNCNvCsdvPQf9CMsz3_17true_peak_limiter13lanes_uniform0B3_.exit.i.i3114, label %bb7.i
+315 _RNCNvCsdvPQf9CMsz3_17true_peak_limiter13lanes_uniform0B3_.exit.i.i3114: ; preds = %bb2.i.i.i3110
+319   %54 = icmp eq i32 %_14.i.i.i3115, %_15.i.i.i3116
+320   br i1 %54, label %bb1.i.i3100, label %bb7.i
+322 bb2.i3117:                                        ; preds = %bb1.i.i3100, %bb2.i
+331   br i1 %_6.not.i.i.i3122, label %bb4.i, label %bb1.i3.i3123
+333 bb1.i3.i3123:                                     ; preds = %bb2.i3117, %bb13.i5.i3126
+336   br i1 %_12.i4.i3125, label %bb4.i, label %bb13.i5.i3126
+338 bb13.i5.i3126:                                    ; preds = %bb1.i3.i3123
+342   %_0.i.i.i3130 = icmp eq i32 %ptr.val.i.i3128, %_4.i.i.i3129
+343   br i1 %_0.i.i.i3130, label %bb1.i3.i3123, label %bb7.i
+345 bb7.i:                                            ; preds = %bb13.i.i3084, %bb2.i.i.i, %_RNCNvCsdvPQf9CMsz3_17true_peak_limiter13lanes_uniform0B3_.exit.i.i, %bb13.i5.i, %bb13.i.i3103, %bb2.i.i.i3110, %_RNCNvCsdvPQf9CMsz3_17true_peak_limiter13lanes_uniform0B3_.exit.i.i3114, %bb13.i5.i3126
+process-bank-mono-w8
+36   %_23.i = getelementptr inbounds nuw i8, ptr %self, i64 2048
+39   br i1 %exitcond.not.i, label %panic.i, label %bb4.i
+41 bb1.i:                                            ; preds = %start
+42   %10 = getelementptr inbounds nuw i8, ptr %self, i64 2152
+44   br label %bb2.i
+46 bb1.i.i:                                          ; preds = %bb6.7.i
+52   br label %bb1.i.i1660.i.i
+54 bb1.i.i1660.i.i:                                  ; preds = %bb13.i.i1662.i.i, %bb1.i.i
+56   %_12.i.i1661.i.i = icmp eq ptr %_221.i.i.i.i, %_8.i1659.i.i
+57   br i1 %_12.i.i1661.i.i, label %bb3.i.i, label %bb13.i.i1662.i.i
+59 bb13.i.i1662.i.i:                                 ; preds = %bb1.i.i1660.i.i
+63   %14 = icmp eq i32 %_3.i.i.i.i.i, 0
+67   %16 = icmp eq i32 %_51.i.i.i.i.i, %_72.i.i.i.i.i
+69   br i1 %_0.sroa.0.0.i.i.i.i.i, label %bb1.i.i1660.i.i, label %bb11.thread.i.i
+71 bb3.i.i:                                          ; preds = %bb1.i.i1660.i.i
+77   br label %bb1.i.i1665.i.i
+79 bb1.i.i1665.i.i:                                  ; preds = %bb13.i.i1668.i.i, %bb3.i.i
+81   %_12.i.i1667.i.i = icmp eq ptr %_221.i.i1666.i.i, %_8.i1664.i.i
+82   br i1 %_12.i.i1667.i.i, label %bb5.i.i, label %bb13.i.i1668.i.i
+84 bb13.i.i1668.i.i:                                 ; preds = %bb1.i.i1665.i.i
+88   %20 = icmp eq i32 %_3.i.i.i1670.i.i, 0
+92   %22 = icmp eq i32 %_51.i.i.i1671.i.i, %_72.i.i.i1672.i.i
+94   br i1 %_0.sroa.0.0.i.i.i1673.i.i, label %bb1.i.i1665.i.i, label %bb11.thread.i.i
+96 bb5.i.i:                                          ; preds = %bb1.i.i1665.i.i
+98   br i1 %_50.not.i.i, label %bb34.i.i, label %bb1.i1675.i.i
+100 bb11.thread.i.i:                                  ; preds = %bb13.i.i1662.i.i, %bb13.i.i1668.i.i, %bb6.7.i
+101   %23 = getelementptr inbounds nuw i8, ptr %self, i64 2152
+102   br label %bb16.i.i
+104 bb11.i.i:                                         ; preds = %bb1.i1675.i.i
+105   %24 = getelementptr inbounds nuw i8, ptr %self, i64 2152
+106   %25 = load i8, ptr %24, align 8, !range !5399, !alias.scope !25944, !noalias !25947
+108   br i1 %_15.i.i, label %bb13.i.i, label %bb16.i.i
+110 bb1.i1675.i.i:                                    ; preds = %bb5.i.i, %bb10.i.i.i
+114   br i1 %26, label %bb11.i.i, label %bb11.preheader.i.i.i
+116 bb11.preheader.i.i.i:                             ; preds = %bb1.i1675.i.i
+120   br label %bb11.i1678.i.i
+122 bb11.i1678.i.i:                                   ; preds = %bb11.i1678.i.i, %bb11.preheader.i.i.i
+128   %_25.i1681.i.i = icmp eq ptr %_31.i1679.i.i, %_18.i1677.i.i
+129   br i1 %_25.i1681.i.i, label %bb10.i.i.i, label %bb11.i1678.i.i
+131 bb10.i.i.i:                                       ; preds = %bb11.i1678.i.i
+134   %28 = icmp eq i32 %27, 0
+135   br i1 %28, label %bb1.i1675.i.i, label %bb11.thread3257.i.i
+137 bb11.thread3257.i.i:                              ; preds = %bb10.i.i.i
+138   %29 = getelementptr inbounds nuw i8, ptr %self, i64 2152
+139   br label %bb16.i.i
+141 bb34.i.i:                                         ; preds = %bb5.i.i
+146 bb16.i.i:                                         ; preds = %bb11.thread3257.i.i, %bb11.i.i, %bb11.thread.i.i
+149   %_22.i.i = getelementptr inbounds nuw i8, ptr %self, i64 1616
+150   %_24.i.i = getelementptr inbounds nuw i8, ptr %self, i64 1640
+162   br i1 %_5.not.i.i.i.i.i, label %bb2.i1692.i.i, label %bb1.i.i1682.i.i
+164 bb1.i.i1682.i.i:                                  ; preds = %bb16.i.i, %_RNCNvCsdvPQf9CMsz3_17true_peak_limiter13lanes_uniform0B3_.exit.i.i.i.i
+167   br i1 %_12.i.i1683.i.i, label %bb2.i1692.i.i, label %bb13.i.i1684.i.i
+169 bb13.i.i1684.i.i:                                 ; preds = %bb1.i.i1682.i.i
+174   %_8.i.i.i.i.i = icmp eq i32 %_9.i.i.i1686.i.i, %_10.i.i.i.i.i
+175   br i1 %_8.i.i.i.i.i, label %bb2.i.i.i.i.i, label %bb39.i.i
+177 bb2.i.i.i.i.i:                                    ; preds = %bb13.i.i1684.i.i
+181   %_11.i.i.i.i.i = icmp eq i32 %_12.i.i.i1688.i.i, %_13.i.i.i1689.i.i
+182   br i1 %_11.i.i.i.i.i, label %_RNCNvCsdvPQf9CMsz3_17true_peak_limiter13lanes_uniform0B3_.exit.i.i.i.i, label %bb39.i.i
+184 _RNCNvCsdvPQf9CMsz3_17true_peak_limiter13lanes_uniform0B3_.exit.i.i.i.i: ; preds = %bb2.i.i.i.i.i
+188   %37 = icmp eq i32 %_14.i.i.i1690.i.i, %_15.i.i.i1691.i.i
+189   br i1 %37, label %bb1.i.i1682.i.i, label %bb39.i.i
+191 bb2.i1692.i.i:                                    ; preds = %bb1.i.i1682.i.i, %bb16.i.i
+200   br i1 %_6.not.i.i.i.i.i, label %bb38.i.i, label %bb1.i3.i.i.i
+202 bb1.i3.i.i.i:                                     ; preds = %bb2.i1692.i.i, %bb13.i5.i.i.i
+204   %_12.i4.i.i.i = icmp eq ptr %_223.i.i.i.i, %_26.i1693.i.i
+205   br i1 %_12.i4.i.i.i, label %bb38.i.i, label %bb13.i5.i.i.i
+207 bb13.i5.i.i.i:                                    ; preds = %bb1.i3.i.i.i
+211   %_0.i.i.i.i.i = icmp eq i32 %ptr.val.i.i.i.i, %_4.i.i.i1694.i.i
+212   br i1 %_0.i.i.i.i.i, label %bb1.i3.i.i.i, label %bb39.i.i
+214 bb13.i.i:                                         ; preds = %bb11.i.i
+226   br i1 %_2.i6.not.i.i.i, label %_RNvMs2_CsdvPQf9CMsz3_17true_peak_limiterNtB5_12ChannelState18advance_rest_phase.exit.i.i, label %bb4.i1695.i.i
+228 bb4.i1695.i.i:                                    ; preds = %bb13.i.i, %bb6.i1698.i.i
+232   %_20.i1697.i.i = icmp eq i32 %_14.i1696.i.i, 0
+233   br i1 %_20.i1697.i.i, label %panic.i1707.i.i, label %bb6.i1698.i.i
+235 bb6.i1698.i.i:                                    ; preds = %bb4.i1695.i.i
+247   br i1 %exitcond.not.i.i.i, label %_RNvMs2_CsdvPQf9CMsz3_17true_peak_limiterNtB5_12ChannelState18advance_rest_phase.exit.i.i, label %bb4.i1695.i.i
+249 panic.i1707.i.i:                                  ; preds = %bb4.i1695.i.i
+254 _RNvMs2_CsdvPQf9CMsz3_17true_peak_limiterNtB5_12ChannelState18advance_rest_phase.exit.i.i: ; preds = %bb6.i1698.i.i, %bb13.i.i
+255   %46 = getelementptr inbounds nuw i8, ptr %self, i64 1624
+257   %47 = getelementptr inbounds nuw i8, ptr %self, i64 1632
+261   br i1 %_10.i1708.i.i, label %panic.i1722.i.i, label %bb1.i1709.i.i
+263 bb1.i1709.i.i:                                    ; preds = %_RNvMs2_CsdvPQf9CMsz3_17true_peak_limiterNtB5_12ChannelState18advance_rest_phase.exit.i.i
+264   %_19.i.i = getelementptr inbounds nuw i8, ptr %self, i64 1640
+273   br i1 %_17.i1715.i.i, label %panic2.i.i.i, label %_RNvMs1_CsdvPQf9CMsz3_17true_peak_limiterNtB5_7Cursors7advance.exit.i.i
+275 panic.i1722.i.i:                                  ; preds = %_RNvMs2_CsdvPQf9CMsz3_17true_peak_limiterNtB5_12ChannelState18advance_rest_phase.exit.i.i
+280 panic2.i.i.i:                                     ; preds = %bb1.i1709.i.i
+285 _RNvMs1_CsdvPQf9CMsz3_17true_peak_limiterNtB5_7Cursors7advance.exit.i.i: ; preds = %bb1.i1709.i.i
+286   %49 = getelementptr inbounds nuw i8, ptr %self, i64 1644
+294   br label %_RINvMsf_CsdvPQf9CMsz3_17true_peak_limiterINtB6_27PreparedTruePeakLimiterBankNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8E18process_bank_innerKb1_EB6_.exit
+296 bb39.i.i:                                         ; preds = %_RNCNvCsdvPQf9CMsz3_17true_peak_limiter13lanes_uniform0B3_.exit.i.i.i.i, %bb2.i.i.i.i.i, %bb13.i.i1684.i.i, %bb13.i5.i.i.i
+process-core-scalar
+3324   br i1 %stationary.sroa.0.0.i, label %_RNvXNtCs1miJJANcyja_4lane6scalarfNtB4_4Lane4load.exit1235, label %bb46.i
+3326 bb41.i.bb44.i_crit_edge:                          ; preds = %_RNvXNtCs1miJJANcyja_4lane6scalarfNtB4_4Lane5store.exit1310
+artifacts/issue539-baseline/issue539-baseline-capture.py
+artifacts/issue539-baseline/README.md
+artifacts/issue539-baseline/native-release.command.json
+artifacts/issue539-baseline/native-release.status
+artifacts/issue539-baseline/original-output-identities.json
+artifacts/issue539-baseline/native-release.stdout
+artifacts/issue539-baseline/native-release.stderr
+artifacts/issue539-baseline/selected/process-core-scalar.ll
+artifacts/issue539-baseline/selected/process-core-scalar.s
+artifacts/issue539-baseline/selected/process-bank-w8.ll
+artifacts/issue539-baseline/selected/process-bank-mono-w8.s
+artifacts/issue539-baseline/selected/process-scalar.s
+artifacts/issue539-baseline/selected/process-scalar.ll
+artifacts/issue539-baseline/selected/process-core-w8.s
+artifacts/issue539-baseline/selected/process-core-w8.ll
+artifacts/issue539-baseline/selected/process-bank-w8.s
+artifacts/issue539-baseline/selected/process-bank-mono-w8.ll
+artifacts/issue539-baseline/selected/manifest.json
+artifacts/issue539-baseline/issue539-extract-selected.py
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = 1
+
+4335:        // Subject: every lane the same asymmetric program, so both channels are internally uniform
+4336:        // and the bank takes `limiter_block_uniform`.
+4340:        // Oracle: lane 7's *left* lookahead differs, so `lanes_uniform(left)` is false and both
+4365:    /// **Restoring one track of a uniform cohort desynchronises the phase, and that falls back.**
+4367:    /// Issue #182 S1, the phase leg of [`lanes_uniform`], and the reason the gate is two bit
+4375:    /// Red mutation: drop the phase leg, `state.phase.iter().all(..)`, from `lanes_uniform`. The
+4379:    /// which is the whole-bank failure a per-lane parameter causes when it is assumed uniform.
+4415:    // ring is **uniform**: a read from any cursor position then returns the value a slow path would
+4504:                    words.push(ramp.step.to_bits());
+4505:                    words.push(ramp.remaining);
+4736:    /// `remaining == 64` and the `ramps_are_stationary` leg refuses the next block anyway; a span
+5358:                "ramp remaining past the window",
+
+exec
+/bin/bash -lc "cat artifacts/issue539-baseline/README.md; sed -n '1,120p' artifacts/issue539-baseline/issue539-baseline-capture.py; python3 - <<'PY'
+from pathlib import Path
+import json,hashlib,subprocess
+m=json.loads(Path('artifacts/issue539-baseline/native-release.command.json').read_text())
+print('current source/config hashes',all(hashlib.sha256(Path(p).read_bytes()).hexdigest()==v['sha256'] for p,v in m['source'].items()))
+print('source/config diff:',subprocess.check_output(['git','diff','--name-only','32a4c2058f2c01dea78af32affab660dbc17cae0','HEAD','--','crates','Cargo.toml','Cargo.lock','.cargo','rust-toolchain.toml'],text=True))
+for p in Path('/tmp').glob('issue537*target/release/.fingerprint/multiband-compressor-*/lib-multiband_compressor.json'):
+ d=json.loads(p.read_text()); print(str(p),'profile',d['profile'],'flags',d['rustflags'])
+PY" in /home/bl/misofm/engine-limiter-stationary-dispatch
+ succeeded in 0ms:
+Luna xhigh performed one native release capture at c97c1944, status0, with unchanged limiter source. Ten complete selected IR/ASM intervals cover actual scalar process, scalar outlined process_block, W8 process_bank, W8 outlined process_block and W8 process_bank_mono. Root independently verified all selected byte ranges, sizes and hashes against retained originals and recorded full-output identities. No implementation or benchmark ran.
+
+Worker report preparation was interrupted after successful capture/extraction because no bounded branch-mapping report/status was returned. No second capture was run. This package makes no residual-branch claim; Astra medium must independently map the actual compiler dataflow and decide baseline acceptance. Captured metadata records the actual cargo argv, toolchain/config/source and selected environment, not a verbose rustc invocation. Original outputs remain at manifest paths. An extra extracted object under /tmp is not credited as evidence.
+from pathlib import Path
+import hashlib
+import json
+import os
+import subprocess
+import sys
+
+label = sys.argv[1]
+argv = sys.argv[2:]
+assert label and all(character.isalnum() or character == "-" for character in label)
+assert argv
+root = Path("/home/bl/misofm/engine-limiter-stationary-dispatch")
+prefix = Path("/tmp/issue539-baseline") / label
+prefix.parent.mkdir(parents=True, exist_ok=True)
+paths = [
+    "crates/true-peak-limiter/src/lib.rs",
+    "Cargo.toml",
+    "Cargo.lock",
+    ".cargo/config.toml",
+    "rust-toolchain.toml",
+]
+environment = os.environ.copy()
+environment["PATH"] = "/home/bl/.cargo/bin:" + environment.get("PATH", "")
+environment["CARGO_TARGET_DIR"] = "/tmp/issue539-baseline-target"
+def run_output(command):
+    completed = subprocess.run(command, cwd=root, env=environment, capture_output=True, text=True, check=False)
+    return {"status": completed.returncode, "output": completed.stdout + completed.stderr}
+metadata = {
+    "argv": argv,
+    "cwd": str(root),
+    "head": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip(),
+    "branch": subprocess.check_output(["git", "branch", "--show-current"], cwd=root, text=True).strip(),
+    "status": subprocess.check_output(["git", "status", "--porcelain=v1"], cwd=root, text=True),
+    "env": {key: environment.get(key) for key in ["PATH", "RUSTFLAGS", "CARGO_TARGET_DIR"]},
+    "toolchain": {
+        "rustc": run_output(["rustc", "--version", "--verbose"]),
+        "cargo": run_output(["cargo", "--version"]),
+        "rustup_toolchain": run_output(["rustup", "show", "active-toolchain"]),
+    },
+    "source": {
+        path: {
+            "sha256": hashlib.sha256((root / path).read_bytes()).hexdigest(),
+            "git_blob": subprocess.check_output(["git", "hash-object", path], cwd=root, text=True).strip(),
+        }
+        for path in paths
+    },
+}
+with prefix.with_suffix(".command.json").open("x") as command_file:
+    json.dump(metadata, command_file, indent=2)
+    command_file.write("\n")
+with prefix.with_suffix(".stdout").open("xb") as stdout_file, prefix.with_suffix(".stderr").open("xb") as stderr_file:
+    result = subprocess.run(argv, cwd=root, env=environment, stdout=stdout_file, stderr=stderr_file, check=False)
+with prefix.with_suffix(".status").open("x") as status_file:
+    status_file.write(f"{result.returncode}\n")
+print(label, result.returncode, flush=True)
+sys.exit(result.returncode)
+current source/config hashes True
+source/config diff: 
+/tmp/issue537-baseline-target/release/.fingerprint/multiband-compressor-524a987dfea296bf/lib-multiband_compressor.json profile 6516278246683128382 flags ['-C', 'target-feature=+avx2,+fma']
+/tmp/issue537-delivery-target/release/.fingerprint/multiband-compressor-bcc58b95adc95528/lib-multiband_compressor.json profile 604039197347921951 flags ['-C', 'target-feature=+avx2,+fma']
+/tmp/issue537-delivery-native-target/release/.fingerprint/multiband-compressor-83c62f653f2ce1dc/lib-multiband_compressor.json profile 604039197347921951 flags ['-C', 'target-feature=+avx2,+fma']
+/tmp/issue537-luna2-target/release/.fingerprint/multiband-compressor-c869402eefa77f58/lib-multiband_compressor.json profile 7022368724086122894 flags ['-C', 'target-feature=+avx2,+fma']
+/tmp/issue537-luna2-target/release/.fingerprint/multiband-compressor-262f5a535fd68bd3/lib-multiband_compressor.json profile 3171830424518566283 flags ['-C', 'target-feature=+avx2,+fma']
+/tmp/issue537-candidate-target/release/.fingerprint/multiband-compressor-524a987dfea296bf/lib-multiband_compressor.json profile 6516278246683128382 flags ['-C', 'target-feature=+avx2,+fma']
+/tmp/issue537-delivery-web-target/release/.fingerprint/multiband-compressor-bcc58b95adc95528/lib-multiband_compressor.json profile 604039197347921951 flags ['-C', 'target-feature=+avx2,+fma']
+
+exec
+/bin/bash -lc "rg -n 'remaining|step' crates/true-peak-limiter/src/lib.rs | head -35; sed -n '4390,4410p;4470,4515p' crates/true-peak-limiter/src/lib.rs; sed -n '144,175p;245,280p' crates/true-peak-limiter/tests/allocation.rs; sed -n '31830,31848p' /tmp/issue539-baseline-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.ll; git status --short" in /home/bl/misofm/engine-limiter-stationary-dispatch
+ succeeded in 0ms:
+28://! forces `g <= s`. That is what replaces the old instantaneous step attack, whose full-bandwidth
+104:/// sixteen-sample floor. A lookahead of 0 ms therefore means "fastest ramp", never "step".
+305:/// sum, a box ring and a precomputed ramp step, none of which layout 1 can hold, and the payload
+435:/// Every lane and both channels advance in lockstep and always have (#90 F3): keeping one pair
+445:    /// Advances both cursors by a whole block, as `frames` per-sample steps would (#182 S2).
+657:    /// mirror of the same fact [`lanes_uniform`] gates on. The phase cycles `0 .. Wb - 1` one step
+658:    /// per frame, so `frames` steps land on `(phase + frames) mod Wb`.
+679:/// Issue #144 item 6. Both halves are needed and both are exact: `remaining == 0` is the D11
+687:        .all(|ramp| ramp.remaining == 0 && ramp.current.to_bits() == ramp.target.to_bits())
+695:    step: L,
+696:    remaining: L,
+705:        let mut step = [0.0_f32; MAXIMUM_WIDTH];
+706:        let mut remaining = [0.0_f32; MAXIMUM_WIDTH];
+710:            step[lane] = ramp.step;
+711:            remaining[lane] = f32::from(ramp.remaining as u16);
+716:            step: L::load(&step),
+717:            remaining: L::load(&remaining),
+725:        let mut remaining = [0.0_f32; MAXIMUM_WIDTH];
+726:        let mut step = [0.0_f32; MAXIMUM_WIDTH];
+728:        self.remaining.store(&mut remaining);
+729:        self.step.store(&mut step);
+732:            ramp.step = step[lane];
+733:            ramp.remaining = remaining[lane] as u32;
+739:    /// `remaining = max(remaining - 1, 0)` then `current = select(remaining > 0, current + step,
+741:    /// is exactly `LinearRamp::next_value` and is why a block boundary is not observable. `step` is
+746:        self.remaining = self.remaining.sub(L::splat(1.0)).max(zero);
+747:        let stepping = self.remaining.gt(zero);
+748:        self.current = L::select(stepping, self.current.add(self.step), self.target);
+749:        self.step = L::select(stepping, self.step, zero);
+758:    /// nothing ever is. At rest `advance` computes `remaining = max(0 - 1, 0) = 0`, `stepping =
+759:    /// false`, `current = select(false, .., target) = target` and `step = select(false, step, 0)
+760:    /// = 0`; with the rest invariant `current == target` bitwise and `step == 0` already true,
+816:/// `add(mul(..))` steps per accumulator. The native target reaches the same code either way once
+926:/// The FIR is tap-major and lockstep across lanes: for each phase the accumulator starts at exactly
+927:/// `+0.0` and takes twelve separately rounded `add(mul(...))` steps in increasing tap order, which
+        // The donor: the same program, two blocks into a different signal, so its phase is 15.
+        let mut donor = TruePeakLimiterFactory
+            .prepare(request(&values))
+            .expect("prepare");
+        let mut noise = Noise(0x0D0D_0182);
+        let mut left: Vec<f32> = (0..256).map(|_| noise.next() * 3.0).collect();
+        let mut right: Vec<f32> = (0..256).map(|_| noise.next() * 3.0).collect();
+        render(donor.as_mut(), &mut left, &mut right, 128);
+        let payload = snapshot(donor.as_ref());
+        assert_eq!(
+            read_u32(&payload.1, words::PHASE),
+            256 % 241,
+            "the donor is not at the phase this test is about"
+        );
+
+        let run = cohort_run(&tracks, 8, Some((3, payload)));
+        run.assert_lane_identity("phase-desynchronised cohort");
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Issue #182 S2: the earned silence fixed point.
+            vec![right; L::WIDTH].into_boxed_slice(),
+        )
+        .expect("core")
+    }
+
+    /// Every word of one core's state, as bits: both cursors, then both channels' whole arenas.
+    ///
+    /// Comparing *this* between the two arms, and not only the rendered samples, is what makes the
+    /// fast path's cursor and phase advances load-bearing. The compressor's version of this test
+    /// records honestly that deleting its cursor advance passes every test in its file, because a
+    /// ring of exact `+0.0` reads the same from every position; reading the state back directly
+    /// closes that gap rather than restating it. `phase` is in the list for the same reason.
+    fn state_bits<L: Lane>(core: &LimiterCore<L>) -> Vec<u32> {
+        let mut words = vec![core.cursors.main, core.cursors.ring];
+        for channel in [&core.left, &core.right] {
+            for plane in [
+                &channel.history,
+                &channel.main_ring,
+                &channel.required_ring,
+                &channel.box_ring,
+                &channel.reduction,
+                &channel.prefix,
+                &channel.box_sum,
+            ] {
+                words.extend(plane.iter().map(|value| value.to_bits()));
+            }
+            words.extend(channel.phase.iter().copied());
+            // The two coefficient ramps, which the fast path must not freeze. A skipped block
+            // advances no ramp, so a claim admitted while a de-zipper window was still open would
+            // strand `current` short of its target for as long as the silence lasted.
+            for ramps in [&channel.limit, &channel.release] {
+                for ramp in ramps.iter() {
+                    words.push(ramp.current.to_bits());
+                    words.push(ramp.target.to_bits());
+                    words.push(ramp.step.to_bits());
+                    words.push(ramp.remaining);
+                }
+            }
+        }
+        words
+    }
+
+    /// What one arm of a silence comparison produced.
+    struct SilenceArm {
+        /// Every rendered sample of every block, both planes.
+        rendered: Vec<u32>,
+fn the_render_path_allocates_nothing() {
+    let values = values();
+    let mut scalar = TruePeakLimiterFactory
+        .prepare(request(&values))
+        .expect("prepare");
+    let mut left = vec![0.0_f32; 128];
+    let mut right = vec![0.0_f32; 128];
+    // Warm every lazily initialised path once before arming the counter.
+    scalar
+        .process(EffectProcessBlock::new(&mut left, &mut right, None, 0, &[], 128).expect("block"));
+
+    let (allocations, deallocations) = measure(|| {
+        for block in 0..100 {
+            for (index, sample) in left.iter_mut().enumerate() {
+                // A hostile magnitude every twentieth block: the FIR overflows to infinity and the
+                // once-per-block boundary check zeroes, resets and counts — still without a heap.
+                *sample = if block % 20 == 19 {
+                    3.0e38
+                } else {
+                    ((index % 17) as f32 - 8.0) * 0.25
+                };
+            }
+            right.copy_from_slice(&left);
+            let spans = automation(block);
+            scalar.process(
+                EffectProcessBlock::new(
+                    &mut left,
+                    &mut right,
+                    None,
+                    (block * 128) as u64,
+                    &spans,
+                    128,
+                bank.reset(ResetKind::DiscontinuityKeepParameters);
+            }
+        }
+        bank.reset(ResetKind::FullToDefaults);
+    });
+    assert_eq!(
+        (allocations, deallocations),
+        (0, 0),
+        "bank render path allocated"
+    );
+}
+attributes #27 = { nocallback nocreateundeforpoison nofree nosync nounwind speculatable willreturn memory(none) }
+attributes #28 = { nocallback nofree nounwind nonlazybind willreturn memory(argmem: read) }
+attributes #29 = { nocallback nofree nosync nounwind willreturn memory(inaccessiblemem: readwrite) }
+attributes #30 = { nounwind }
+attributes #31 = { noreturn nounwind }
+
+!llvm.module.flags = !{!0, !1, !2, !3}
+!llvm.ident = !{!4}
+!llvm.dbg.cu = !{!5}
+
+!0 = !{i32 8, !"PIC Level", i32 2}
+!1 = !{i32 2, !"RtLibUseGOT", i32 1}
+!2 = !{i32 7, !"Dwarf Version", i32 4}
+!3 = !{i32 2, !"Debug Info Version", i32 3}
+!4 = !{!"rustc version 1.97.1 (8bab26f4f 2026-07-14)"}
+!5 = distinct !DICompileUnit(language: DW_LANG_Rust, file: !6, producer: "clang LLVM (rustc version 1.97.1 (8bab26f4f 2026-07-14))", isOptimized: true, runtimeVersion: 0, emissionKind: FullDebug, splitDebugInlining: false, nameTableKind: None)
+!6 = !DIFile(filename: "crates/true-peak-limiter/src/lib.rs/@/true_peak_limiter.9d6662472b5a836f-cgu.0", directory: "/home/bl/misofm/engine-limiter-stationary-dispatch")
+!7 = distinct !DISubprogram(name: "drop_glue<true_peak_limiter::PreparedTruePeakLimiterBank<wide::f32x4_::f32x4>>", linkageName: "_RINvNtCs4NRVxsYgnAr_4core3ptr9drop_glueINtCsdvPQf9CMsz3_17true_peak_limiter27PreparedTruePeakLimiterBankNtNtCsdw0XaoyMD7p_4wide6f32x4_5f32x4EEBE_", scope: !9, file: !8, line: 825, type: !11, scopeLine: 825, flags: DIFlagPrototyped, spFlags: DISPFlagLocalToUnit | DISPFlagDefinition | DISPFlagOptimized, unit: !5, templateParams: !12)
+!8 = !DIFile(filename: "library/core/src/ptr/mod.rs", directory: "/rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452", checksumkind: CSK_MD5, checksum: "083f613d4c0dee7d8eb289a97bc119b0")
+
+codex
+**PASS — baseline sufficient; a reachable FX1 residual survives in all four W8 bodies. Luna high/xhigh attempt 1 is authorized within the bounded scope below.** This establishes retained dispatch work, not a measured or projected speedup.
+
+Verified clean, pushed HEAD `a57c8a7f7f89ef51c9d188aa6e4f1f711360cd3d` against live main `32a4c2058f2c01dea78af32affab660dbc17cae0`. [#539](https://github.com/misofm/engine/issues/539) remains OPEN with exact title/body synchronization. Source and captured configuration hashes match; no production changes separate this checkpoint from the base. Post-main qualification `34089134766` completed SUCCESS.
+
+I independently verified both full original compiler-output hashes and all ten selected intervals, sizes and hashes. The successful capture is at `c97c1944`, status 0. The interrupted worker report supplies no mapping evidence; the findings below come from the retained compiler output.
+
+**Provenance is sufficient for this bounded decision.** Captured Cargo argv, Rust `1.97.1`/LLVM `22.1.6`, configuration and source identities are consistent. The retained Cargo fingerprint records `["-C","target-feature=+avx2,+fma"]`; actual function attributes include AVX2/FMA, and the module identifies the pinned compiler and optimized compilation. Its profile fingerprint matches the retained #537 baseline/candidate captures under the unchanged release configuration.
+
+The environment record is selective and there is no verbose rustc invocation. Fat LTO/codegen-units=1 are recorded configuration, not proof that these crate-emitted excerpts are final linked, post-LTO native code. That limitation does not invalidate this previously authorized crate-production baseline. No extracted object is credited and no replacement capture is needed.
+
+The production caller chain is explicit: scalar `process` calls scalar `LimiterCore::process_block`; W8 `process_bank` calls W8 `LimiterCore::process_block`; W8 `process_bank_mono` contains the mono bodies.
+
+All line numbers below are **selected-file lines** in [the retained package](/home/bl/misofm/engine-limiter-stationary-dispatch/artifacts/issue539-baseline/selected/manifest.json).
+
+| Supported W8 body | Stationary test and taken target | Frame-loop backedge |
+|---|---|---|
+| Dual per-lane, source 1701 | `process-core-w8.s:1888`: `cmpb $0, 256(%rsp)`; `jne .LBB32_98` | Line 3224 returns to `.LBB32_96`, before the test |
+| Dual uniform, source 1890 | `process-core-w8.s:5125`: `cmpb $0, 2304(%rsp)`; `jne .LBB32_315` | Line 5720 returns to `.LBB32_313`, before the test |
+| Mono per-lane, source 3086 | `process-bank-mono-w8.s:1429`: `cmpb $0, 48(%rsp)`; `jne .LBB60_88` | Line 2077 returns to `.LBB60_86`, before the test |
+| Mono uniform, source 3197 | `process-bank-mono-w8.s:3037`: `cmpb $0, 8(%rsp)`; `jne .LBB60_178` | Line 3335 returns to `.LBB60_176`, before the test |
+
+These are stationary flags, not attribution based solely on debug locations:
+
+- Their definitions test each ramp’s `remaining` word at offset 12 against zero and compare current/target as integer words at offsets 0/4. Dual combines four ramp sets; mono combines two.
+- Successful admission writes the true flag before entering the frame walk. IR carries those invariant predicates to the corresponding branches at W8-core lines **1158/3310** and W8-mono lines **786/1996**.
+- In each W8 case, the stationary jump bypasses decrement/max/compare/add/select ramp updates and rejoins the shared DSP frame body. That body’s backedge revisits the same flag test.
+- Uniform admission checks lane shapes and phases, on both channels for dual and the live channel for mono. Valid mixed lookahead or restored phase differences reach per-lane fallback while coefficients can remain stationary.
+- Positive signal with stationary coefficients reaches these loops without taking silent-rest bypass. Silent-rest has separate input/state admission and cursor/phase advancement.
+
+Consequently, compiler unswitching has **not removed these four per-frame stationary tests** in this capture. Existing stationary handling already avoids ramp arithmetic; #539 must claim only removal of the repeated dispatch test, not rediscover that earlier saving.
+
+Scalar dual/uniform also retains the test: `process-core-scalar.s:5183` compares `992(%rsp)`; `je .LBB34_287` enters ramp handling, and line 5783 returns to `.LBB34_283`. The emitted scalar per-lane body is not credited as supported one-lane execution. There is no scalar mono claim.
+
+**Bounded attempt-1 authority**
+
+After root records this decision, Luna may specialize the four existing common bodies using the existing block-entry stationary decision. Preserve uniform/per-lane selection, ramping behavior for the entire block, and all frozen DSP/state contracts. No mid-block transition, cached eligibility, per-lane dispatch, hand-maintained divergent DSP copies, FX2 access rewrite, or new public surface.
+
+Required mechanism/state gates:
+
+1. **Old-behavior oracle:** retain the original runtime-predicate behavior in a bounded private test path. Compare populated PCM and complete state for stationary blocks, a ramp ending inside a block, and the following stationary block across all four W8 routes and scalar dual/uniform. Preserve ramp `current`, `target`, `step` and `remaining` exactly. An always-advance oracle is not automatically equivalent to the original stationary path.
+2. **Actual-path control:** observe execution inside the selected specialization, on the witness’s test thread—not classification before dispatch. Freeze one fallback-only control that routes through the old unspecialized behavior. Identity assertions must pass before the same positive specialization assertion fails. Retain that failure, restore byte-exactly, verify focused green, then pause for root checkpoint.
+3. **Mono comparison:** compare candidate mono state against old mono behavior, including right-plane non-access. Retain dual equivalence and full-state comparison at the existing disengagement/desymmetrization boundary.
+4. **Candidate lowering:** under comparable settings, demonstrate block-entry specialization and removal of these repeated stationary tests from the admitted frame loops. Preserve the ramping path and arithmetic order. Test instrumentation alone cannot establish the machine-code mechanism.
+5. Retain the numbered brief’s finite existing correctness, realtime, native/Wasm and delivery gates. Explicitly identify supported W8 execution; skips are not evidence.
+
+Resolve the allocation-path ambiguity narrowly: `crates/true-peak-limiter/tests/allocation.rs` may receive only existing-allocator positive liveness controls and focused coverage needed for the changed paths. Reuse its thread-local allocator; no new allocator or framework.
+
+No implementation attempt has started; this authorizes **attempt 1 of at most three**. No timing, projected gain, FX2 work, finding-status change, delivery acceptance or issue closure follows from this decision.
+
+Review was read-only: no edits, builds, tests, benchmarks, captures, Git/GitHub writes, agents or report-file writes.
+tokens used
+52,617
