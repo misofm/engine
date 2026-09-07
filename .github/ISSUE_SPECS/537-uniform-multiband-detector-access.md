@@ -33,3 +33,16 @@ Standing equations/fixtures/objective/listening evidence and limitations are in 
 ## Delivery
 
 The preceding boundary inventory found258 local numbered specs/352 remote issues, no missing identities, and verified534/536 CLOSED before this issue was created. Match this issue's actual GitHub number/title/body and clean base before any baseline capture. After consolidated Astra PASS and unchanged-source local delivery qualification (native/ABI/current artifact/browser obligations proportionate to changed binary), root obtains exact-head/current-base review and actual required qualification SUCCESS. Assert live main immediately before exact-head merge and verify actual parents. Synchronize closure only once accepted evidence is upstream. Post-main CI and audit349/518 continuation remain part of delivery. PR535 post-main34083008320 is currently running and is not claimed successful.
+
+## Numbered/current-base approval — Astra medium
+
+**PASS — baseline-only authorization for #537.**
+
+- Verified clean, pushed `da550e463ea256a0e1c229eaba03398779419361`, directly based on live main `375a86c280ac5be83004dc78dc25541bfa6371ba`. Only the issue brief and retained evidence differ.
+- GitHub #537 is **OPEN**, with matching number, title and byte-exact body. #534/#536 are **CLOSED**, delivered through merged PR535. Required run `34082558237` succeeded; post-main `34083008320` remains **in progress**.
+- Current detector/callsite/ring/restore code supports the narrow boundary: independent channel offsets, four signed reads after ring writes, existing wrap semantics, and a shared ramped/settled segment seam. Transient classification avoids restore/reset cache invalidation.
+- Proposed finite gates are adequate: independent old-index oracle, actual-callsite mechanism assertion and fallback mutation, populated bidirectional restore transitions, PCM/state identity, and allocation/free checks. The current allocator fixture lacks a positive liveness test; supply the brief’s required own-thread control within the allowed test file. Corpus digests remain arithmetic regression evidence only.
+
+Next: Luna high/xhigh captures the unchanged native production baseline; root checkpoints/pushes it; Astra low/medium reviews surviving access work before any rewrite. If useful work does not survive lowering, record no-change or narrowly rebrief. Keep the three-attempt limit.
+
+No implementation acceptance or speedup claim. No edits, builds, benchmarks, Git/GitHub writes, or agents were performed.

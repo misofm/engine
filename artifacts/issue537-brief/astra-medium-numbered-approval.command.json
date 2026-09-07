@@ -1,0 +1,19 @@
+{
+  "argv": [
+    "/home/bl/.local/bin/codex",
+    "exec",
+    "-C",
+    "/home/bl/misofm/engine-multiband-detector-access",
+    "-s",
+    "danger-full-access",
+    "-m",
+    "gpt-6-astra",
+    "-c",
+    "model_reasoning_effort=\"medium\"",
+    "-o",
+    "/tmp/issue537-astra-medium-brief.md",
+    "-"
+  ],
+  "cwd": "/home/bl/misofm/engine-multiband-detector-access",
+  "prompt": "/tmp/issue537-astra-medium-brief.prompt.md"
+}
