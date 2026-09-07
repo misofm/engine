@@ -1,0 +1,7 @@
+
+running 2 tests
+test kernel::tests::classification_ignores_inactive_padding_and_dual_mono_ignores_partner_words ... ok
+test kernel::tests::access_routes_agree_with_old_words_at_all_supported_widths_and_wraps ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+

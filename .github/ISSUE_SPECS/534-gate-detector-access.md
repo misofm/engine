@@ -1,6 +1,6 @@
 # Avoid redundant gate detector gathers
 
-Status: numbered #534 scope preparation on delivered main `fe58709c04c880b14dd72f9bd4a25ef5f7071202` after #532 / PR #533. This is audit #349 DYN2 under #518’s ordered continuation; DYN3 remains separate. Root adopts the bounded baseline-first decision and unchanged-arithmetic outcome below. Astra numbered/current-base approval is required before baseline capture; no access rewrite is authorized until the baseline decision is recorded. Workflow override from #518: Astra briefs/reviews, Luna attempt1, Sol attempts2/3, root owns Git/GitHub/checkpoints. One implementation WIP and the hard three-attempt limit remain. #532’s post-main qualification is being monitored separately; no new performance measurement is inferred from that delivery.
+Status: OPEN #534 on delivered main `fe58709c04c880b14dd72f9bd4a25ef5f7071202`. Baseline accepted; attempt1 FAIL preserved. Luna xhigh attempt2 has a coherent mapping/private-oracle repair passing two focused tests and the existing independent scalar PCM oracle. Remaining frozen evidence and Astra medium review are pending. Root owns Git/GitHub/checkpoints. Current user routing: implementation Luna high/xhigh; noncritical documentation verification Sol high; audio-path verification Astra low/medium by complexity. Hard three-attempt limit unchanged. Historical approvals and verdicts below retain their original attribution.
 
 ## Baseline decision comes first
 
@@ -146,3 +146,7 @@ The user explicitly requires Luna high or xhigh for implementation work. This su
 ## User verification-model override
 
 Use Sol high for documentation-related and other verification that is neither performance- nor correctness-critical. Audio-path verification uses Astra low for simpler checks or Astra medium for complex reviews. The current gate detector mapping, mechanism, native/Wasm lowering and PCM/state review is audio-path correctness/performance work and will use Astra medium. Implementation remains Luna high/xhigh; attempt counters and objective gates are unchanged.
+
+## Attempt2 first coherent repair checkpoint
+
+Luna xhigh repaired the linked-equal consumed partner mapping and the same private oracle. Both focused tests pass and the previously failing independent scalar oracle now passes on exact captured kernel SHA256298cfdeee6391c6b0ceb91ca561db52abd00df63da3c7c0ea797a38820be71d4; lib.rs is unchanged. Original captures are in artifacts/issue534-luna-attempt2. Root verified capture/source identities and paused implementation for this checkpoint. Remaining bounded fixture/state, mutation, lowering and proportional gates precede one consolidated Astra medium attempt2 review; no source PASS, PR, closure or performance measurement is claimed.

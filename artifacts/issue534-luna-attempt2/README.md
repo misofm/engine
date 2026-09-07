@@ -1,0 +1,3 @@
+# Luna xhigh attempt2: first repaired tranche
+
+Only kernel.rs changed from failed attempt1. Linked equal now supplies opposite own words as consumed partners; independent expectations cover class/route, genuine W1 unequal taps and actual unused partner indices. Two focused private tests and the existing independent scalar PCM oracle pass, each status0. Exact commands/source identities and original outputs are retained alongside this note. This is a coherent recovery checkpoint, not final source acceptance: public fixture/state, one mutation, candidate lowering and remaining frozen gates are pending. No timing or pin change.

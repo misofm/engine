@@ -210,8 +210,9 @@ pub struct GateArgs<'a, L: Lane> {
 /// Gathers detector words for one frame and returns the route actually taken by the loads.
 ///
 /// The returned route is private test evidence for the branch itself; production code does not
-/// count or retain it. In the two-read routes, each channel's own word is passed as its partner
-/// so [`channel_step`] keeps its existing link arithmetic and the ignored partner is never read.
+/// count or retain it. DualMono supplies each channel's own word as its ignored partner. Linked
+/// equal taps reuse the opposite channel's own word, preserving the original four tap arguments
+/// after only the two own source reads.
 #[inline(always)]
 fn gather_detector(
     access: DetectorAccess,
@@ -225,7 +226,7 @@ fn gather_detector(
     taps: &mut [[f32; MAX_WIDTH]; 4],
 ) -> DetectorLoadRoute {
     match access {
-        DetectorAccess::DualMono | DetectorAccess::LinkedEqual => {
+        DetectorAccess::DualMono => {
             #[allow(clippy::needless_range_loop)]
             for lane in 0..width {
                 let left = ((now.wrapping_sub(left_tap[lane]) & slot_mask) as usize) * width + lane;
@@ -237,6 +238,21 @@ fn gather_detector(
                 taps[1][lane] = left_own;
                 taps[2][lane] = right_own;
                 taps[3][lane] = right_own;
+            }
+            DetectorLoadRoute::OwnOnly
+        }
+        DetectorAccess::LinkedEqual => {
+            #[allow(clippy::needless_range_loop)]
+            for lane in 0..width {
+                let left = ((now.wrapping_sub(left_tap[lane]) & slot_mask) as usize) * width + lane;
+                let right =
+                    ((now.wrapping_sub(right_tap[lane]) & slot_mask) as usize) * width + lane;
+                let left_own = source_left[left];
+                let right_own = source_right[right];
+                taps[0][lane] = left_own;
+                taps[1][lane] = right_own;
+                taps[2][lane] = right_own;
+                taps[3][lane] = left_own;
             }
             DetectorLoadRoute::OwnOnly
         }
@@ -532,6 +548,8 @@ mod tests {
     fn check_case(
         width: usize,
         link_mode: LinkMode,
+        expected_access: DetectorAccess,
+        expected_route: DetectorLoadRoute,
         left_tap: [u32; MAX_WIDTH],
         right_tap: [u32; MAX_WIDTH],
         now: u32,
@@ -547,11 +565,7 @@ mod tests {
             &source_right,
         );
         let access = classify_detector_access(link_mode, width, &left_tap, &right_tap);
-        let expected_route = if matches!(access, DetectorAccess::LinkedUnequal) {
-            DetectorLoadRoute::FourReads
-        } else {
-            DetectorLoadRoute::OwnOnly
-        };
+        assert_eq!(access, expected_access);
         let mut actual = [[0.0; MAX_WIDTH]; 4];
         let route = gather_detector(
             access,
@@ -564,35 +578,72 @@ mod tests {
             &source_right,
             &mut actual,
         );
-        assert_eq!(route, expected_route);
-        for lane in 0..width {
-            let expected = if route == DetectorLoadRoute::OwnOnly {
-                [old[0][lane], old[0][lane], old[2][lane], old[2][lane]]
-            } else {
-                [old[0][lane], old[1][lane], old[2][lane], old[3][lane]]
-            };
-            for (channel, word) in expected.into_iter().enumerate() {
-                assert_eq!(actual[channel][lane].to_bits(), word.to_bits());
+        match expected_access {
+            DetectorAccess::DualMono => {
+                // DualMono's partner arguments are not consumed by channel_step. Compare the
+                // two actual own words against the independent old mapping only.
+                for lane in 0..width {
+                    assert_eq!(actual[0][lane].to_bits(), old[0][lane].to_bits());
+                    assert_eq!(actual[2][lane].to_bits(), old[2][lane].to_bits());
+                }
+            }
+            DetectorAccess::LinkedEqual | DetectorAccess::LinkedUnequal => {
+                // Linked modes consume all four detector arguments, so every old word is part of
+                // the independent bit-for-bit comparison.
+                for lane in 0..width {
+                    for (channel, word) in old.iter().enumerate() {
+                        assert_eq!(actual[channel][lane].to_bits(), word[lane].to_bits());
+                    }
+                }
             }
         }
+        // Assert the mechanism only after the consumed-word semantics have passed.
+        assert_eq!(route, expected_route);
     }
 
     #[test]
     fn access_routes_agree_with_old_words_at_all_supported_widths_and_wraps() {
         for width in [1, 4, 8] {
             let equal_ragged = core::array::from_fn(|lane| lane as u32);
-            let unequal = core::array::from_fn(|lane| lane as u32 + (lane % 2) as u32);
+            let unequal_left = core::array::from_fn(|lane| lane as u32 * 2);
+            let unequal_right = core::array::from_fn(|lane| lane as u32 * 2 + 1);
             let all_zero = [0; MAX_WIDTH];
-            check_case(width, LinkMode::DualMono, all_zero, unequal, 0);
-            check_case(width, LinkMode::Maximum, equal_ragged, equal_ragged, 5);
+            check_case(
+                width,
+                LinkMode::DualMono,
+                DetectorAccess::DualMono,
+                DetectorLoadRoute::OwnOnly,
+                all_zero,
+                unequal_right,
+                0,
+            );
+            check_case(
+                width,
+                LinkMode::Maximum,
+                DetectorAccess::LinkedEqual,
+                DetectorLoadRoute::OwnOnly,
+                equal_ragged,
+                equal_ragged,
+                5,
+            );
             check_case(
                 width,
                 LinkMode::Average,
+                DetectorAccess::LinkedEqual,
+                DetectorLoadRoute::OwnOnly,
                 equal_ragged,
                 equal_ragged,
                 u32::MAX,
             );
-            check_case(width, LinkMode::Maximum, equal_ragged, unequal, 1);
+            check_case(
+                width,
+                LinkMode::Maximum,
+                DetectorAccess::LinkedUnequal,
+                DetectorLoadRoute::FourReads,
+                unequal_left,
+                unequal_right,
+                1,
+            );
         }
     }
 
@@ -607,39 +658,45 @@ mod tests {
 
         let mut source_left = source_words(-9.0);
         let mut source_right = source_words(23.0);
-        let taps = [2; MAX_WIDTH];
-        let old = old_gather(1, 3, &taps, &taps, &source_left, &source_right);
+        // W1 uses genuinely unequal taps: left own is slot 3 and right own is slot 1. The
+        // opposite-plane partner positions (right slot 3 and left slot 1) are therefore unused
+        // by DualMono and can be mutated without changing either consumed own word.
+        let left_tap = [0; MAX_WIDTH];
+        let right_tap = [2; MAX_WIDTH];
+        let old = old_gather(1, 3, &left_tap, &right_tap, &source_left, &source_right);
         let mut actual = [[0.0; MAX_WIDTH]; 4];
         let route = gather_detector(
             DetectorAccess::DualMono,
             3,
             MASK,
             1,
-            &taps,
-            &taps,
+            &left_tap,
+            &right_tap,
             &source_left,
             &source_right,
             &mut actual,
         );
-        assert_eq!(route, DetectorLoadRoute::OwnOnly);
-        assert_eq!(actual[1][0].to_bits(), old[0][0].to_bits());
-        assert_eq!(actual[3][0].to_bits(), old[2][0].to_bits());
+        assert_eq!(actual[0][0].to_bits(), old[0][0].to_bits());
+        assert_eq!(actual[2][0].to_bits(), old[2][0].to_bits());
 
-        source_left[0] = f32::NAN;
-        source_right[0] = f32::NAN;
+        source_left[1] += 1000.0;
+        source_right[3] -= 1000.0;
         let mut changed = [[0.0; MAX_WIDTH]; 4];
-        let _ = gather_detector(
+        let changed_route = gather_detector(
             DetectorAccess::DualMono,
             3,
             MASK,
             1,
-            &taps,
-            &taps,
+            &left_tap,
+            &right_tap,
             &source_left,
             &source_right,
             &mut changed,
         );
-        assert_eq!(changed[1][0].to_bits(), actual[1][0].to_bits());
-        assert_eq!(changed[3][0].to_bits(), actual[3][0].to_bits());
+        assert_eq!(changed[0][0].to_bits(), actual[0][0].to_bits());
+        assert_eq!(changed[2][0].to_bits(), actual[2][0].to_bits());
+        // Keep this positive branch witness after the independent consumed-word checks.
+        assert_eq!(route, DetectorLoadRoute::OwnOnly);
+        assert_eq!(changed_route, DetectorLoadRoute::OwnOnly);
     }
 }
