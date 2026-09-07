@@ -20,3 +20,7 @@ COMPLETE — Sol HIGH brief approval: **PASS**.
 - Scope authorizes Luna HIGH to add exactly one concise `AGENTS.md` delivery-control bullet covering the requested safeguards.
 - No new framework, permission ceremony, tests, builds, or unrelated review is warranted.
 - No blocker found. Final Sol diff review, required CI, merge/closure synchronization, and removal of this completed worktree remain required.
+
+## Luna high documentation checkpoint
+
+Added one AGENTS.md delivery-control bullet requiring completed merged worktree removal after required synchronization, clean/pushed checkpoints and evidence preservation; active/primary checkouts and branches/history remain. It also covers integrated-through-another-PR work and completed detached baselines. git diff --check passed. No product code, tests or builds changed. Final Sol high review and required CI/merge/closure/self-removal remain pending.
