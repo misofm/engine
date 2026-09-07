@@ -2299,14 +2299,6 @@ mod detector_access_tests {
         label: &str,
     ) {
         let observed = detector_observation();
-        assert_eq!(
-            observed.uniform_calls, expected_uniform_calls,
-            "{label}: executed uniform calls"
-        );
-        assert_eq!(
-            observed.ragged_calls, expected_ragged_calls,
-            "{label}: executed ragged calls"
-        );
         assert_eq!(observed.entries, expected.len(), "{label}: observed entry count");
         for (index, expected_words) in expected.iter().enumerate() {
             assert_eq!(
@@ -2318,6 +2310,14 @@ mod detector_access_tests {
                 "{label}: actual accessed words at entry {index}"
             );
         }
+        assert_eq!(
+            observed.uniform_calls, expected_uniform_calls,
+            "{label}: executed uniform calls"
+        );
+        assert_eq!(
+            observed.ragged_calls, expected_ragged_calls,
+            "{label}: executed ragged calls"
+        );
     }
 
     fn prepared_callsite_case<L: Lane, const W: usize>(
