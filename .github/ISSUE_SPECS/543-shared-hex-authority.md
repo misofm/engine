@@ -214,3 +214,9 @@ Frozen focused gates: inspect locked normal and normal/dev dependency trees; ben
 ## Attempt3 focused checkpoint
 
 Actual Luna HIGH correction is pushed at e4f46fa808e413507d204e81b6a4ebc27254869c. Exactly three one-line substitutions preserve the four normal runner dependencies and unchanged policy scripts. All12 frozen focused gates returned0, including both policy mutation suites, complete runner tests and strict clippy. Raw commands/streams/statuses, actual model argv, source identities, and original failed CI job logs are retained losslessly with a manifest in artifacts/issue543-attempt3. Sol XHIGH attempt3 review is pending. This exact corrected source is the artifact qualification source freeze; no pin has changed and delivery remains incomplete.
+
+## Counted attempt3 adversarial PASS
+
+Actual Sol XHIGH returned PASS at f2e87ab0b010b5f706038c5eaa8461a1e26fa7a4 against maina3b4ed763c47658e10fc111e2cfcbd141c77f064. It verified exactly three one-line changes, unchanged four normal dependencies and policy checkers, test-only bench-support reachability, sole Rust hex implementation, source identities and all117 lossless records. Gate11 contained an invalid rg -E subscan despite its aggregate zero status: that subscan is not credited. The reviewer independently ran a correct read-only scan and inspected the exact source diff; no substantive blocker remains. Raw evidence is retained unchanged and the full verdict/provenance are in artifacts/issue543-attempt3-review.
+
+Artifact qualification555 remains pending against sourcee4f46fa8. No pin changed, required deliveryCI is not satisfied, and CP20 remains partial pending delivered552. This PASS is implementation acceptance only.
