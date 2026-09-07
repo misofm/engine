@@ -61,3 +61,9 @@ After the **single capture**, root checkpoints and pushes the evidence; Astra th
 No edits, builds, tests, benchmarks, captures, Git/GitHub writes, agents, or report-file writes were performed.
 
 Root adopts all four baseline clarifications above. Capture actual scalar process and W8 process_bank/process_bank_mono including outlined callees; map all four bodies through supported W8, never invent scalar mono/per-lane probes. Capture is crate production lowering, not a final linked native artifact. If implementation proceeds, explicitly resolve any narrowly needed tests/allocation.rs liveness extension before editing; no allocator rewrite. Post-main34089134766 has now completedSUCCESS.
+
+## Single unchanged native baseline checkpoint — Luna xhigh
+
+One cargo rustc --locked --release -p true-peak-limiter --lib -- --emit=asm,llvm-ir capture returned0 atc97c1944. Source SHA d945d98c8799457f7567485b63daf87aa78e9eb52ff7174f7678fbbc77984689 remains unchanged. Metadata retains actual cargo argv, toolchain/config/source and selected environment; it is not a captured verbose rustc invocation. Ten complete scalar/W8 caller/core IR/ASM excerpts and full-output identities are retained. Root verified every selected byte range/size/hash.
+
+Worker preparation was interrupted after the successful capture/extraction without a final branch-mapping report. No second capture or source edit ran. No stationary residual is claimed by this checkpoint; Astra medium must independently map the retained compiler dataflow and decide whether a useful reachable residual survives, including effective provenance limits. The finite baseline gate and no-change option remain unchanged.
