@@ -398,8 +398,9 @@ The CI-shaped workspace debug command passed every preceding package and #470's 
 nine allocation tests, then failed one CAPI resource-lifecycle equality. The actual report carries
 `graph_session_plus_plan_bytes = graph_incremental_plan_bytes = 228_476` and
 `graph_metadata_bytes = 52_575`; the frozen single-plan fixture still expects 227_148 and 51_247.
-The exact +1_328 delta is 83 emitted runtime ops times the accepted conservative 16-byte per-op
-reservation. No PCM, ABI, cap, ownership or render assertion failed.
+The exact +1_328 delta is the 16-byte runtime table field plus 82 emitted nodes times the accepted
+conservative 16-byte per-op/unit reservation. No PCM, ABI, cap, ownership or render assertion
+failed.
 
 This is a stale delivery-side numeric consumer of the accepted resource model, not a source-PASS
 reversal or authority for lane A to edit `crates/capi/tests/resource_lifecycle.rs`. Preserve the
@@ -407,3 +408,14 @@ failed command and actual/expected values. Lane B owns qualification/pinning and
 the CAPI frozen report together with the ordinary AudioWorklet resource/current-consumer check,
 with an independently justified exact value and one-below behavior before #470 opens a PR. No
 blanket repin, timing run or unrelated fixture change is authorized.
+
+Astra LOW independently reproduced the CAPI failure and traced the complete consumer correction.
+The single-plan frozen report must add 1,328 to each of its three graph totals. The independent
+primitive replacement oracle must add the runtime field and conservative 82-entry allowance, so
+its double-live graph peak rises by 2,656 from 504,132 to 506,788; the old comment that uniform plan
+shifts cancel is false for a peak that sums both plans. Largest-allocation values do not move
+because the 82 × 256-byte containing-op allocation is below the existing maxima. The current
+browser resource pin is `hosts/host-web/tests/browser-v1/expected.json`; its Wasm fixture must be
+derived and qualified independently rather than copying the native delta. Debug/release focused
+CAPI and full resource-lifecycle gates plus ordinary browser expected-resource checks remain lane
+B work.
