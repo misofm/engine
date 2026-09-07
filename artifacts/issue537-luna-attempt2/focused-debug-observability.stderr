@@ -1,0 +1,86 @@
+   Compiling bytemuck v1.25.2
+   Compiling typenum v1.20.1
+   Compiling engine v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/engine)
+   Compiling cfg-if v1.0.4
+   Compiling cpufeatures v0.3.0
+   Compiling dsp-reference v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/dsp-reference)
+   Compiling safe_arch v1.2.0
+   Compiling wide v1.6.1
+   Compiling hybrid-array v0.4.14
+   Compiling block-buffer v0.12.1
+   Compiling crypto-common v0.2.2
+   Compiling digest v0.11.3
+   Compiling sha2 v0.11.0
+   Compiling bench-support v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/tools/bench-support)
+   Compiling lane v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/lane)
+   Compiling math v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/math)
+   Compiling effect-contract v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/effect-contract)
+   Compiling effect-runtime v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/effect-runtime)
+   Compiling conformance v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/conformance)
+   Compiling multiband-compressor v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/multiband-compressor)
+error[E0284]: type annotations needed
+    --> crates/multiband-compressor/src/lib.rs:2230:9
+     |
+2230 |         seed_ring(&mut instance.sides[0].low_ring, 0);
+     |         ^^^^^^^^^ cannot infer the value of the const parameter `W` declared on the function `seed_ring`
+     |
+note: required by a const generic parameter in `seed_ring`
+    --> crates/multiband-compressor/src/lib.rs:2217:18
+     |
+2217 |     fn seed_ring<const W: usize>(ring: &mut [f32], identity: u32) {
+     |                  ^^^^^^^^^^^^^^ required by this const generic parameter in `seed_ring`
+help: consider specifying a const for the const parameter `W`
+     |
+2230 |         seed_ring::</* CONST */>(&mut instance.sides[0].low_ring, 0);
+     |                  +++++++++++++++
+
+error[E0284]: type annotations needed
+    --> crates/multiband-compressor/src/lib.rs:2231:9
+     |
+2231 |         seed_ring(&mut instance.sides[0].high_ring, 1);
+     |         ^^^^^^^^^ cannot infer the value of the const parameter `W` declared on the function `seed_ring`
+     |
+note: required by a const generic parameter in `seed_ring`
+    --> crates/multiband-compressor/src/lib.rs:2217:18
+     |
+2217 |     fn seed_ring<const W: usize>(ring: &mut [f32], identity: u32) {
+     |                  ^^^^^^^^^^^^^^ required by this const generic parameter in `seed_ring`
+help: consider specifying a const for the const parameter `W`
+     |
+2231 |         seed_ring::</* CONST */>(&mut instance.sides[0].high_ring, 1);
+     |                  +++++++++++++++
+
+error[E0284]: type annotations needed
+    --> crates/multiband-compressor/src/lib.rs:2232:9
+     |
+2232 |         seed_ring(&mut instance.sides[1].low_ring, 2);
+     |         ^^^^^^^^^ cannot infer the value of the const parameter `W` declared on the function `seed_ring`
+     |
+note: required by a const generic parameter in `seed_ring`
+    --> crates/multiband-compressor/src/lib.rs:2217:18
+     |
+2217 |     fn seed_ring<const W: usize>(ring: &mut [f32], identity: u32) {
+     |                  ^^^^^^^^^^^^^^ required by this const generic parameter in `seed_ring`
+help: consider specifying a const for the const parameter `W`
+     |
+2232 |         seed_ring::</* CONST */>(&mut instance.sides[1].low_ring, 2);
+     |                  +++++++++++++++
+
+error[E0284]: type annotations needed
+    --> crates/multiband-compressor/src/lib.rs:2233:9
+     |
+2233 |         seed_ring(&mut instance.sides[1].high_ring, 3);
+     |         ^^^^^^^^^ cannot infer the value of the const parameter `W` declared on the function `seed_ring`
+     |
+note: required by a const generic parameter in `seed_ring`
+    --> crates/multiband-compressor/src/lib.rs:2217:18
+     |
+2217 |     fn seed_ring<const W: usize>(ring: &mut [f32], identity: u32) {
+     |                  ^^^^^^^^^^^^^^ required by this const generic parameter in `seed_ring`
+help: consider specifying a const for the const parameter `W`
+     |
+2233 |         seed_ring::</* CONST */>(&mut instance.sides[1].high_ring, 3);
+     |                  +++++++++++++++
+
+For more information about this error, try `rustc --explain E0284`.
+error: could not compile `multiband-compressor` (lib test) due to 4 previous errors

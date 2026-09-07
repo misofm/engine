@@ -880,12 +880,56 @@ fn detector_offsets_uniform<const W: usize>(offsets: &[usize; W]) -> bool {
 }
 
 #[cfg(test)]
-static DETECTOR_UNIFORM_CALLS: core::sync::atomic::AtomicUsize =
-    core::sync::atomic::AtomicUsize::new(0);
+const DETECTOR_OBSERVATION_CAPACITY: usize = 64;
 
 #[cfg(test)]
-static DETECTOR_RAGGED_CALLS: core::sync::atomic::AtomicUsize =
-    core::sync::atomic::AtomicUsize::new(0);
+#[derive(Clone, Copy)]
+struct DetectorObservation {
+    uniform_calls: usize,
+    ragged_calls: usize,
+    entries: usize,
+    widths: [u8; DETECTOR_OBSERVATION_CAPACITY],
+    words: [[u32; 8]; DETECTOR_OBSERVATION_CAPACITY],
+}
+
+#[cfg(test)]
+impl DetectorObservation {
+    const fn new() -> Self {
+        Self {
+            uniform_calls: 0,
+            ragged_calls: 0,
+            entries: 0,
+            widths: [0; DETECTOR_OBSERVATION_CAPACITY],
+            words: [[0; 8]; DETECTOR_OBSERVATION_CAPACITY],
+        }
+    }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static DETECTOR_OBSERVATION: core::cell::Cell<DetectorObservation> =
+        const { core::cell::Cell::new(DetectorObservation::new()) };
+}
+
+#[cfg(test)]
+#[inline(never)]
+fn record_detector_observation<L: Lane>(uniform: bool, value: L) {
+    DETECTOR_OBSERVATION.with(|observation| {
+        let mut current = observation.get();
+        if uniform {
+            current.uniform_calls += 1;
+        } else {
+            current.ragged_calls += 1;
+        }
+        if current.entries < DETECTOR_OBSERVATION_CAPACITY {
+            let entry = current.entries;
+            current.widths[entry] = L::WIDTH as u8;
+            value.store_bits(&mut current.words[entry][..L::WIDTH]);
+            current.entries += 1;
+        }
+        observation.set(current);
+    });
+}
 
 /// The per-track detector tap of one ring, gathered into one lane.
 ///
@@ -899,25 +943,21 @@ fn detector_tap<L: Lane, const W: usize>(
     ring_len: usize,
     uniform: bool,
 ) -> L {
-    #[cfg(test)]
-    {
-        use core::sync::atomic::Ordering;
-        let counter = if uniform {
-            &DETECTOR_UNIFORM_CALLS
-        } else {
-            &DETECTOR_RAGGED_CALLS
-        };
-        counter.fetch_add(1, Ordering::Relaxed);
-    }
     if uniform {
         let row = wrap(cursor + offsets[0], ring_len);
-        return L::load(&ring[row * W..]);
+        let value = L::load(&ring[row * W..]);
+        #[cfg(test)]
+        record_detector_observation(true, value);
+        return value;
     }
     let mut values = [0.0f32; 8];
     for track in 0..W {
         values[track] = ring[wrap(cursor + offsets[track], ring_len) * W + track];
     }
-    L::load(&values[..W])
+    let value = L::load(&values[..W]);
+    #[cfg(test)]
+    record_detector_observation(false, value);
+    value
 }
 
 /// One band's amplitude for one frame: detector level, static curve, smoother, makeup.
@@ -2008,7 +2048,6 @@ fn checked_track(track_index: u32, width: usize) -> Result<usize, StatePayloadEr
 #[cfg(test)]
 mod detector_access_tests {
     use super::*;
-    use core::sync::atomic::Ordering;
 
     const RING_LEN: usize = 7;
 
@@ -2167,122 +2206,211 @@ mod detector_access_tests {
         .expect("test metadata")
     }
 
+    fn clear_detector_observation() {
+        DETECTOR_OBSERVATION.with(|observation| observation.set(DetectorObservation::new()));
+    }
+
+    fn detector_observation() -> DetectorObservation {
+        DETECTOR_OBSERVATION.with(|observation| observation.get())
+    }
+
+    fn seed_ring<const W: usize>(ring: &mut [f32], identity: u32) {
+        assert_eq!(ring.len() % W, 0);
+        for (index, sample) in ring.iter_mut().enumerate() {
+            let bits = match (identity, index) {
+                (0, 0) => 0x0000_0000,
+                (0, 1) => 0x8000_0000,
+                _ => 0x3f80_0000 + identity * 0x0010_0000 + index as u32,
+            };
+            *sample = f32::from_bits(bits);
+        }
+    }
+
+    fn seed_instance_rings<L: Lane, const W: usize>(instance: &mut Instance<L, W>) {
+        seed_ring::<W>(&mut instance.sides[0].low_ring, 0);
+        seed_ring::<W>(&mut instance.sides[0].high_ring, 1);
+        seed_ring::<W>(&mut instance.sides[1].low_ring, 2);
+        seed_ring::<W>(&mut instance.sides[1].high_ring, 3);
+    }
+
+    fn padded_words<const W: usize>(words: [u32; W]) -> [u32; 8] {
+        let mut padded = [0u32; 8];
+        padded[..W].copy_from_slice(&words);
+        padded
+    }
+
+    fn push_expected_tap<const W: usize>(
+        expected: &mut Vec<[u32; 8]>,
+        ring: &[f32],
+        cursor: usize,
+        offsets: &[usize; W],
+        ring_len: usize,
+    ) {
+        expected.push(padded_words(old_detector_words(
+            ring, cursor, offsets, ring_len,
+        )));
+    }
+
+    fn expected_callsite_words<const W: usize>(
+        rings: [&[f32]; 4],
+        near_offsets: &[usize; W],
+        far_offsets: &[usize; W],
+        ring_len: usize,
+        frames: usize,
+    ) -> Vec<[u32; 8]> {
+        let mut expected = Vec::with_capacity(frames * 4);
+        for cursor in 0..frames {
+            push_expected_tap(
+                &mut expected,
+                rings[0],
+                cursor,
+                near_offsets,
+                ring_len,
+            );
+            push_expected_tap(
+                &mut expected,
+                rings[1],
+                cursor,
+                near_offsets,
+                ring_len,
+            );
+            push_expected_tap(
+                &mut expected,
+                rings[2],
+                cursor,
+                far_offsets,
+                ring_len,
+            );
+            push_expected_tap(
+                &mut expected,
+                rings[3],
+                cursor,
+                far_offsets,
+                ring_len,
+            );
+        }
+        expected
+    }
+
+    fn assert_actual_observation<const W: usize>(
+        expected: &[[u32; 8]],
+        expected_uniform_calls: usize,
+        expected_ragged_calls: usize,
+        label: &str,
+    ) {
+        let observed = detector_observation();
+        assert_eq!(
+            observed.uniform_calls, expected_uniform_calls,
+            "{label}: executed uniform calls"
+        );
+        assert_eq!(
+            observed.ragged_calls, expected_ragged_calls,
+            "{label}: executed ragged calls"
+        );
+        assert_eq!(observed.entries, expected.len(), "{label}: observed entry count");
+        for (index, expected_words) in expected.iter().enumerate() {
+            assert_eq!(
+                observed.widths[index] as usize, W,
+                "{label}: observed width at entry {index}"
+            );
+            assert_eq!(
+                observed.words[index], *expected_words,
+                "{label}: actual accessed words at entry {index}"
+            );
+        }
+    }
+
+    fn prepared_callsite_case<L: Lane, const W: usize>(
+        metadata: PreparedEffectMetadata,
+        left_defaults: [f32; PARAMETER_COUNT],
+        right_defaults: [f32; PARAMETER_COUNT],
+        near_offsets: [usize; W],
+        far_offsets: [usize; W],
+        label: &str,
+    ) {
+        const FRAMES: usize = 3;
+        let mut instance = Instance::<L, W>::new(
+            [left_defaults; W],
+            [right_defaults; W],
+            metadata,
+        )
+        .expect("prepared witness instance");
+        instance.sides[0].detector_offset = near_offsets;
+        instance.sides[1].detector_offset = far_offsets;
+        seed_instance_rings(&mut instance);
+        let ring_copies = [
+            instance.sides[0].low_ring.to_vec(),
+            instance.sides[0].high_ring.to_vec(),
+            instance.sides[1].low_ring.to_vec(),
+            instance.sides[1].high_ring.to_vec(),
+        ];
+        let expected = expected_callsite_words(
+            [
+                &ring_copies[0],
+                &ring_copies[1],
+                &ring_copies[2],
+                &ring_copies[3],
+            ],
+            &near_offsets,
+            &far_offsets,
+            instance.ring_len,
+            FRAMES,
+        );
+        let near_uniform = detector_offsets_uniform(&near_offsets);
+        let far_uniform = detector_offsets_uniform(&far_offsets);
+        let expected_uniform_calls = 2 * FRAMES * (near_uniform as usize + far_uniform as usize);
+        let expected_ragged_calls = 2 * FRAMES * ((!near_uniform) as usize + (!far_uniform) as usize);
+        let mut left = vec![0.25f32; FRAMES * W];
+        let mut right = vec![-0.5f32; FRAMES * W];
+        let mut reports = [ProcessReport::default(); W];
+        clear_detector_observation();
+        render::<L, W, false>(
+            &mut instance,
+            &mut left,
+            &mut right,
+            FRAMES,
+            &mut reports,
+        );
+        assert_actual_observation::<W>(
+            &expected,
+            expected_uniform_calls,
+            expected_ragged_calls,
+            label,
+        );
+    }
+
     fn prepared_callsite_witness<L: Lane, const W: usize>() {
         let initial_values = default_initial_values();
         let metadata = test_metadata(&initial_values);
         let (left_defaults, right_defaults) = initial_defaults(&initial_values).expect("defaults");
-        let frames = 3;
+        let uniform_near = [1usize; W];
+        let uniform_far = [2usize; W];
+        let ragged = core::array::from_fn(|track| 1 + track % (RING_LEN - 1));
 
-        let mut uniform_instance = Instance::<L, W>::new(
-            [left_defaults; W],
-            [right_defaults; W],
+        prepared_callsite_case::<L, W>(
             metadata,
-        )
-        .expect("uniform instance");
-        uniform_instance.sides[0].detector_offset = [1; W];
-        uniform_instance.sides[1].detector_offset = [uniform_instance.ring_len; W];
-        let mut left = vec![0.25f32; frames * W];
-        let mut right = vec![-0.5f32; frames * W];
-        let mut reports = [ProcessReport::default(); W];
-        DETECTOR_UNIFORM_CALLS.store(0, Ordering::SeqCst);
-        DETECTOR_RAGGED_CALLS.store(0, Ordering::SeqCst);
-        render::<L, W, false>(
-            &mut uniform_instance,
-            &mut left,
-            &mut right,
-            frames,
-            &mut reports,
+            left_defaults,
+            right_defaults,
+            uniform_near,
+            uniform_far,
+            "prepared uniform channels",
         );
-        assert_eq!(
-            DETECTOR_UNIFORM_CALLS.load(Ordering::SeqCst),
-            4 * frames,
-            "W={W}: prepared callsite must select both uniform channels"
-        );
-        assert_eq!(
-            DETECTOR_RAGGED_CALLS.load(Ordering::SeqCst),
-            0,
-            "W={W}: uniform prepared callsite must not use ragged fallback"
-        );
-
-        let mut mixed_instance = Instance::<L, W>::new(
-            [left_defaults; W],
-            [right_defaults; W],
+        prepared_callsite_case::<L, W>(
             metadata,
-        )
-        .expect("mixed instance");
-        mixed_instance.sides[0].detector_offset =
-            core::array::from_fn(|track| 1 + track % (mixed_instance.ring_len - 1));
-        mixed_instance.sides[1].detector_offset = [mixed_instance.ring_len; W];
-        let mut left = vec![0.25f32; frames * W];
-        let mut right = vec![-0.5f32; frames * W];
-        let mut reports = [ProcessReport::default(); W];
-        DETECTOR_UNIFORM_CALLS.store(0, Ordering::SeqCst);
-        DETECTOR_RAGGED_CALLS.store(0, Ordering::SeqCst);
-        render::<L, W, false>(
-            &mut mixed_instance,
-            &mut left,
-            &mut right,
-            frames,
-            &mut reports,
+            left_defaults,
+            right_defaults,
+            ragged,
+            uniform_far,
+            "prepared ragged-left uniform-right",
         );
-        if W == 1 {
-            assert_eq!(
-                DETECTOR_UNIFORM_CALLS.load(Ordering::SeqCst),
-                4 * frames,
-                "W=1: width one is naturally uniform"
-            );
-            assert_eq!(DETECTOR_RAGGED_CALLS.load(Ordering::SeqCst), 0);
-        } else {
-            assert_eq!(
-                DETECTOR_UNIFORM_CALLS.load(Ordering::SeqCst),
-                2 * frames,
-                "W={W}: prepared mixed callsite uniform channel"
-            );
-            assert_eq!(
-                DETECTOR_RAGGED_CALLS.load(Ordering::SeqCst),
-                2 * frames,
-                "W={W}: prepared mixed callsite ragged channel"
-            );
-        }
-
-        // Reverse the channel directions so the callsite witness covers uniform-left/ragged-right
-        // as well as the preceding ragged-left/uniform-right case.
-        let mut opposite_instance = Instance::<L, W>::new(
-            [left_defaults; W],
-            [right_defaults; W],
+        prepared_callsite_case::<L, W>(
             metadata,
-        )
-        .expect("opposite mixed instance");
-        opposite_instance.sides[0].detector_offset = [2; W];
-        opposite_instance.sides[1].detector_offset =
-            core::array::from_fn(|track| 1 + track % (opposite_instance.ring_len - 1));
-        let mut left = vec![0.25f32; frames * W];
-        let mut right = vec![-0.5f32; frames * W];
-        let mut reports = [ProcessReport::default(); W];
-        DETECTOR_UNIFORM_CALLS.store(0, Ordering::SeqCst);
-        DETECTOR_RAGGED_CALLS.store(0, Ordering::SeqCst);
-        render::<L, W, false>(
-            &mut opposite_instance,
-            &mut left,
-            &mut right,
-            frames,
-            &mut reports,
+            left_defaults,
+            right_defaults,
+            uniform_near,
+            ragged,
+            "prepared uniform-left ragged-right",
         );
-        if W == 1 {
-            assert_eq!(DETECTOR_UNIFORM_CALLS.load(Ordering::SeqCst), 4 * frames);
-            assert_eq!(DETECTOR_RAGGED_CALLS.load(Ordering::SeqCst), 0);
-        } else {
-            assert_eq!(
-                DETECTOR_UNIFORM_CALLS.load(Ordering::SeqCst),
-                2 * frames,
-                "W={W}: opposite prepared mixed uniform channel"
-            );
-            assert_eq!(
-                DETECTOR_RAGGED_CALLS.load(Ordering::SeqCst),
-                2 * frames,
-                "W={W}: opposite prepared mixed ragged channel"
-            );
-        }
     }
 
     #[test]

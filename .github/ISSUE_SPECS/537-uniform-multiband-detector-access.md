@@ -108,3 +108,7 @@ The production diff retains safe loads, original ragged indexing, width-bounded 
 2. Complete frozen populated PCM/state/report transitions, reset/bypass, allocation/free and own-thread liveness gates; then candidate native/Wasm lowering and final checks.
 
 Preserve the zero-selected capture, periodic-oracle correction, passing mutant and restored pass. The prepared second patch remains **unexecuted**, not evidence. No baseline redo, new framework/corpus, gate weakening or performance claim. Maximum **three total attempts**.
+
+## Attempt 2 first coherent observability checkpoint — Luna xhigh
+
+Test-only observation now uses fixed-capacity thread-local storage, records values inside the actual selected access arm, and compares actual returned words against independently indexed copies of four distinguishable channel/band rings. Existing W1/W4/W8 private wrap/offset oracle and actual mixed-direction callsite cases remain. Corrected fully-qualified focused invocation passed1/0,status0 at sourceSHA ad34dd9adfc1753fb4db3a6bbc96d94a9c3f5c3a836bfa5f8f3853fb4d345331. The prior status101 fixture compile diagnostic (missing const-generic annotation) is retained; no production algorithm change was made to repair it. Fresh frozen attempt2 mutation and remaining public/candidate gates are pending.
