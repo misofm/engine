@@ -1,0 +1,5 @@
+## Attempt 1 compact source checkpoint — Luna xhigh
+
+The sole changed source lib.rs classifies channel offsets once per segment, uses a safe contiguous row load for uniform offsets and preserves the old ragged gather. Private test-only route counters and an independent old-index word oracle cover W1/W4/W8, offsets1/interior/B, wrap, signed words, unequal uniform channels and both mixed directions, including an actual render callsite witness. Corrected fully-qualified focused selector executed1 test:1pass/0fail,status0. Source SHA3309e4ead47d586413d4d57b85ce1295fb11fc13c74881b96a8f0a7a3d7d5587.
+
+The first status0 invocation selected0 tests/17filtered and is retained as compile/filter evidence only; it is not credited as a passing fixture. Both captures are in artifacts/issue537-luna-attempt1. This is a recoverable first checkpoint, not source acceptance. The one forced-fallback mutation, public populated transitions/allocation evidence, candidate lowering and final gates remain pending.

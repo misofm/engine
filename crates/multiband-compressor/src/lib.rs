@@ -861,6 +861,32 @@ fn wrap(index: usize, modulus: usize) -> usize {
     }
 }
 
+/// Classifies one channel's detector offsets for the current segment.
+///
+/// The first read and the loop together inspect exactly `W` offsets, once per segment. The result
+/// is transient: changing a prepared parameter or restoring state therefore takes effect at the
+/// next segment without any cache invalidation.
+#[inline(always)]
+fn detector_offsets_uniform<const W: usize>(offsets: &[usize; W]) -> bool {
+    let first = offsets[0];
+    let mut track = 1;
+    while track < W {
+        if offsets[track] != first {
+            return false;
+        }
+        track += 1;
+    }
+    true
+}
+
+#[cfg(test)]
+static DETECTOR_UNIFORM_CALLS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+static DETECTOR_RAGGED_CALLS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
 /// The per-track detector tap of one ring, gathered into one lane.
 ///
 /// The only non-contiguous access on the render path, and it is loads only: lookahead is a
@@ -871,7 +897,22 @@ fn detector_tap<L: Lane, const W: usize>(
     cursor: usize,
     offsets: &[usize; W],
     ring_len: usize,
+    uniform: bool,
 ) -> L {
+    #[cfg(test)]
+    {
+        use core::sync::atomic::Ordering;
+        let counter = if uniform {
+            &DETECTOR_UNIFORM_CALLS
+        } else {
+            &DETECTOR_RAGGED_CALLS
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+    if uniform {
+        let row = wrap(cursor + offsets[0], ring_len);
+        return L::load(&ring[row * W..]);
+    }
     let mut values = [0.0f32; 8];
     for track in 0..W {
         values[track] = ring[wrap(cursor + offsets[track], ring_len) * W + track];
@@ -974,6 +1015,8 @@ fn run_segment<L: Lane, const W: usize, const LINK: u8, const BYPASS: bool, cons
     let mut gain_near = near.gain_db;
     let mut gain_far = far.gain_db;
     let mut position = *cursor;
+    let near_detector_uniform = detector_offsets_uniform(&near.detector_offset);
+    let far_detector_uniform = detector_offsets_uniform(&far.detector_offset);
     for frame in 0..frames {
         if RAMPING {
             for index in 0..RAMP_COUNT {
@@ -1003,13 +1046,37 @@ fn run_segment<L: Lane, const W: usize, const LINK: u8, const BYPASS: bool, cons
         high_far.store(&mut far.high_ring[slot..]);
 
         let detector_near_low =
-            detector_tap::<L, W>(&near.low_ring, position, &near.detector_offset, ring_len);
+            detector_tap::<L, W>(
+                &near.low_ring,
+                position,
+                &near.detector_offset,
+                ring_len,
+                near_detector_uniform,
+            );
         let detector_near_high =
-            detector_tap::<L, W>(&near.high_ring, position, &near.detector_offset, ring_len);
+            detector_tap::<L, W>(
+                &near.high_ring,
+                position,
+                &near.detector_offset,
+                ring_len,
+                near_detector_uniform,
+            );
         let detector_far_low =
-            detector_tap::<L, W>(&far.low_ring, position, &far.detector_offset, ring_len);
+            detector_tap::<L, W>(
+                &far.low_ring,
+                position,
+                &far.detector_offset,
+                ring_len,
+                far_detector_uniform,
+            );
         let detector_far_high =
-            detector_tap::<L, W>(&far.high_ring, position, &far.detector_offset, ring_len);
+            detector_tap::<L, W>(
+                &far.high_ring,
+                position,
+                &far.detector_offset,
+                ring_len,
+                far_detector_uniform,
+            );
         let (linked_near_low, linked_far_low) =
             link_levels::<L, LINK>(detector_near_low, detector_far_low);
         let (linked_near_high, linked_far_high) =
@@ -1936,4 +2003,241 @@ fn checked_track(track_index: u32, width: usize) -> Result<usize, StatePayloadEr
         return Err(state_error("effect.state.track"));
     }
     Ok(track)
+}
+
+#[cfg(test)]
+mod detector_access_tests {
+    use super::*;
+    use core::sync::atomic::Ordering;
+
+    const RING_LEN: usize = 7;
+
+    fn patterned_ring<const W: usize>() -> Vec<f32> {
+        const WORDS: [u32; 8] = [
+            0x0000_0000,
+            0x8000_0000,
+            0x3f80_0000,
+            0xbf80_0000,
+            0x4120_0000,
+            0xc120_0000,
+            0x0000_0001,
+            0x8000_0001,
+        ];
+        let mut ring = vec![0.0f32; RING_LEN * W];
+        for (index, word) in ring.iter_mut().enumerate() {
+            *word = f32::from_bits(WORDS[index % WORDS.len()]);
+        }
+        ring
+    }
+
+    /// Independent old-index oracle: this deliberately spells out the one subtract rather than
+    /// calling the production `wrap`, so a changed access route cannot make its own oracle pass.
+    fn old_detector_words<const W: usize>(
+        ring: &[f32],
+        cursor: usize,
+        offsets: &[usize; W],
+        ring_len: usize,
+    ) -> [u32; W] {
+        core::array::from_fn(|track| {
+            let index = cursor + offsets[track];
+            let row = if index >= ring_len {
+                index - ring_len
+            } else {
+                index
+            };
+            ring[row * W + track].to_bits()
+        })
+    }
+
+    fn lane_words<L: Lane, const W: usize>(value: L) -> [u32; W] {
+        let mut words = [0u32; 8];
+        value.store_bits(&mut words[..W]);
+        core::array::from_fn(|track| words[track])
+    }
+
+    fn assert_tap_case<L: Lane, const W: usize>(
+        ring: &[f32],
+        cursor: usize,
+        offsets: [usize; W],
+        expected_uniform: bool,
+        label: &str,
+    ) {
+        assert_eq!(
+            detector_offsets_uniform(&offsets),
+            expected_uniform,
+            "{label}: classification"
+        );
+        let expected = old_detector_words(ring, cursor, &offsets, RING_LEN);
+        let selected = detector_tap::<L, W>(
+            ring,
+            cursor,
+            &offsets,
+            RING_LEN,
+            expected_uniform,
+        );
+        assert_eq!(lane_words(selected), expected, "{label}: selected route");
+
+        let fallback = detector_tap::<L, W>(ring, cursor, &offsets, RING_LEN, false);
+        assert_eq!(lane_words(fallback), expected, "{label}: old fallback");
+    }
+
+    fn width_word_witness<L: Lane, const W: usize>() {
+        let ring = patterned_ring::<W>();
+        let uniform_one = [1usize; W];
+        let uniform_interior = [3usize; W];
+        let uniform_ring_end = [RING_LEN; W];
+        assert_tap_case::<L, W>(&ring, 0, uniform_one, true, "O=1");
+        assert_tap_case::<L, W>(&ring, RING_LEN - 1, uniform_one, true, "O=1 wrap");
+        assert_tap_case::<L, W>(&ring, 2, uniform_interior, true, "interior");
+        assert_tap_case::<L, W>(
+            &ring,
+            RING_LEN - 1,
+            uniform_ring_end,
+            true,
+            "O=B wrap",
+        );
+
+        if W > 1 {
+            let ragged = core::array::from_fn(|track| 1 + track % (RING_LEN - 1));
+            assert_tap_case::<L, W>(&ring, RING_LEN - 1, ragged, false, "ragged wrap");
+
+            // Distinct uniform channel words are both eligible, while they must not be merged.
+            let near_uniform = [2usize; W];
+            let far_uniform = [5usize; W];
+            assert_tap_case::<L, W>(&ring, 1, near_uniform, true, "near uniform");
+            assert_tap_case::<L, W>(&ring, 1, far_uniform, true, "far unequal uniform");
+
+            // Exercise both channel directions of the mixed uniform/ragged contract.
+            assert_tap_case::<L, W>(&ring, 4, near_uniform, true, "uniform/ragged uniform");
+            assert_tap_case::<L, W>(&ring, 4, ragged, false, "uniform/ragged ragged");
+            assert_tap_case::<L, W>(&ring, 5, ragged, false, "ragged/uniform ragged");
+            assert_tap_case::<L, W>(&ring, 5, far_uniform, true, "ragged/uniform uniform");
+        }
+    }
+
+    fn default_initial_values() -> [InitialParameterValue; PARAMETER_COUNT * 2] {
+        core::array::from_fn(|index| InitialParameterValue {
+            parameter_index: (index / 2) as u32,
+            channel: if index % 2 == 0 {
+                ParameterChannel::Left
+            } else {
+                ParameterChannel::Right
+            },
+            value: MULTIBAND_COMPRESSOR_PARAMETERS[index / 2].default_value,
+        })
+    }
+
+    fn test_metadata(
+        initial_values: &[InitialParameterValue; PARAMETER_COUNT * 2],
+    ) -> PreparedEffectMetadata {
+        expected_prepared_metadata(
+            &MULTIBAND_COMPRESSOR_DESCRIPTOR,
+            PrepareEffectRequest {
+                sample_rate: 48_000,
+                quantum: 128,
+                quality: EffectQuality::Normal,
+                bypass: false,
+                link_mode: LinkMode::DualMono,
+                ports: effect_contract::PreparedPorts {
+                    sidechain: effect_contract::PreparedSidechainPort::None,
+                },
+                initial_values,
+                limits: effect_contract::PrepareEffectLimits {
+                    maximum_total_state_bytes: u64::MAX,
+                    maximum_scratch_bytes: u64::MAX,
+                    maximum_automation_spans_per_block: 32,
+                },
+            },
+        )
+        .expect("test metadata")
+    }
+
+    fn prepared_callsite_witness<L: Lane, const W: usize>() {
+        let initial_values = default_initial_values();
+        let metadata = test_metadata(&initial_values);
+        let (left_defaults, right_defaults) = initial_defaults(&initial_values).expect("defaults");
+        let frames = 3;
+
+        let mut uniform_instance = Instance::<L, W>::new(
+            [left_defaults; W],
+            [right_defaults; W],
+            metadata,
+        )
+        .expect("uniform instance");
+        uniform_instance.sides[0].detector_offset = [1; W];
+        uniform_instance.sides[1].detector_offset = [uniform_instance.ring_len; W];
+        let mut left = vec![0.25f32; frames * W];
+        let mut right = vec![-0.5f32; frames * W];
+        let mut reports = [ProcessReport::default(); W];
+        DETECTOR_UNIFORM_CALLS.store(0, Ordering::SeqCst);
+        DETECTOR_RAGGED_CALLS.store(0, Ordering::SeqCst);
+        render::<L, W, false>(
+            &mut uniform_instance,
+            &mut left,
+            &mut right,
+            frames,
+            &mut reports,
+        );
+        assert_eq!(
+            DETECTOR_UNIFORM_CALLS.load(Ordering::SeqCst),
+            4 * frames,
+            "W={W}: prepared callsite must select both uniform channels"
+        );
+        assert_eq!(
+            DETECTOR_RAGGED_CALLS.load(Ordering::SeqCst),
+            0,
+            "W={W}: uniform prepared callsite must not use ragged fallback"
+        );
+
+        let mut mixed_instance = Instance::<L, W>::new(
+            [left_defaults; W],
+            [right_defaults; W],
+            metadata,
+        )
+        .expect("mixed instance");
+        mixed_instance.sides[0].detector_offset =
+            core::array::from_fn(|track| 1 + track % (mixed_instance.ring_len - 1));
+        mixed_instance.sides[1].detector_offset = [mixed_instance.ring_len; W];
+        let mut left = vec![0.25f32; frames * W];
+        let mut right = vec![-0.5f32; frames * W];
+        let mut reports = [ProcessReport::default(); W];
+        DETECTOR_UNIFORM_CALLS.store(0, Ordering::SeqCst);
+        DETECTOR_RAGGED_CALLS.store(0, Ordering::SeqCst);
+        render::<L, W, false>(
+            &mut mixed_instance,
+            &mut left,
+            &mut right,
+            frames,
+            &mut reports,
+        );
+        if W == 1 {
+            assert_eq!(
+                DETECTOR_UNIFORM_CALLS.load(Ordering::SeqCst),
+                4 * frames,
+                "W=1: width one is naturally uniform"
+            );
+            assert_eq!(DETECTOR_RAGGED_CALLS.load(Ordering::SeqCst), 0);
+        } else {
+            assert_eq!(
+                DETECTOR_UNIFORM_CALLS.load(Ordering::SeqCst),
+                2 * frames,
+                "W={W}: prepared mixed callsite uniform channel"
+            );
+            assert_eq!(
+                DETECTOR_RAGGED_CALLS.load(Ordering::SeqCst),
+                2 * frames,
+                "W={W}: prepared mixed callsite ragged channel"
+            );
+        }
+    }
+
+    #[test]
+    fn detector_access_matches_old_words_and_prepared_callsite_route() {
+        width_word_witness::<f32, 1>();
+        width_word_witness::<Simd4, 4>();
+        width_word_witness::<Simd8, 8>();
+        prepared_callsite_witness::<f32, 1>();
+        prepared_callsite_witness::<Simd4, 4>();
+        prepared_callsite_witness::<Simd8, 8>();
+    }
 }

@@ -1,0 +1,2 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.06s
+     Running unittests src/lib.rs (/tmp/issue537-luna1-target/debug/deps/multiband_compressor-d7fa5ded05fdb86e)
