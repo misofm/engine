@@ -156,3 +156,17 @@ snapshots/deltas; assert exact drains/members and applicable state; and exercise
 public native constructor. Existing PostFader tests already prove genuine bank/scalar
 decline and need no duplicate fixture. Full verdict:
 `docs/audits/587-attempt1-review.md`.
+
+## Attempt 2 implementation record
+
+Luna HIGH/XHIGH corrected only the selected-pair proof and root checkpointed the
+coherent source as `751c6f3854c79e47e239e7b6912aa930b998b209`. Native execution now uses the public
+endpoint constructor; forced scalar alone uses the private backend selector. Both run
+against independent `Concurrent` references through immediate, ramping, mid-ramp
+retarget, settled, mute, and unmute blocks. Per-owner witness resets isolate every
+render, PCM bits match each block, record drains are exact, preparation and process
+cohort/member counts match, and the stable `t2` scalar state words match without
+trace overflow. The accepted PostFader decline and mutation evidence are unchanged.
+Six endpoint unit tests, fourteen integration tests, the focused release test,
+strict Clippy, rustdoc, formatting, and diff checks pass. Full record:
+`docs/audits/587-builtin-endpoint-pairing-attempt2.md`.
