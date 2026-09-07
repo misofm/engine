@@ -137,3 +137,7 @@ Five functional fixture tests pass in locked `functional-debug-5` after preserve
 ## Luna functional assertions checkpoint
 
 Locked `gates1-3-debug-1` passes the five functional tests after adding public length overflow, native-independent provider domain/past rejection, density, duplicate terminal collection and mixed-capability whole-batch cancellation assertions. Root preserves the exact source and capture before the remaining event/policy and allocation fixtures. Final source review remains pending; this is not acceptance of complete gate coverage.
+
+## Luna final fixture tranche
+
+The final functional fixture command (`final-functional-debug-4`) passes five tests, and the existing delivery ownership fixture with `--features test-support` (`final-delivery-debug-1`) passes three tests including the new Gate6 comparison. Gate6 uses the existing TLS allocator and compares A = B + C − D allocation count/requested bytes with zero preparation frees; initial setup/typing failures remain in raw captures. The fixture is feature-gated for the existing MockProvider, with explicit feature-enabled commands (the audit workspace package already enables that feature). Native functional and ownership capture hashes match the current source. Formatting is applied. Full proportional debug/release/protocol/lint/policy/target gates and one consolidated Astra verdict remain pending.

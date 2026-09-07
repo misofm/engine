@@ -20,6 +20,7 @@ std::thread_local! {
 
 #[cfg(any(test, feature = "test-support"))]
 use crate::TransportState;
+use crate::delivery::{DeliveryContext, PreparedDeliveryCapabilities};
 use crate::{
     AutomationBatchError, AutomationBatchSlot, AutomationCanceled, AutomationCancellationReason,
     AutomationEnqueueError, AutomationEnqueued, Backpressure, BackpressureQueueKind, Capabilities,
@@ -36,7 +37,6 @@ use crate::{
     TransportSnapshot, TransportStateEvent, TypedEventFrame, TypedNonOkResponseFrame,
     TypedSuccessResponseFrame,
 };
-use crate::delivery::{DeliveryContext, PreparedDeliveryCapabilities};
 
 /// Bounded replay storage configuration for one logical endpoint lifetime.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2624,7 +2624,8 @@ impl<P: ControlProvider> ProtocolController<P> {
             token,
         )?;
         if let Some(complete) = complete {
-            self.provider.record_canceled_automation(complete.canceled_records);
+            self.provider
+                .record_canceled_automation(complete.canceled_records);
         }
         Ok(complete)
     }
@@ -3071,7 +3072,10 @@ impl<P: ControlProvider> ProtocolController<P> {
                 ControlCommand::SessionTransactionApply { .. }
                 | ControlCommand::ParameterStateGet { .. }
                 | ControlCommand::TransportSet {
-                    request: TransportSetRequest { position: Some(_), .. },
+                    request:
+                        TransportSetRequest {
+                            position: Some(_), ..
+                        },
                 } => return self.non_ok(StatusCode::Unavailable, None),
                 ControlCommand::TransportSet { .. } if context.cancellation_pending() => {
                     return self.non_ok(StatusCode::Unavailable, None);
@@ -3207,11 +3211,9 @@ impl<P: ControlProvider> ProtocolController<P> {
                 }
                 let current_sample = self.provider.current_sample();
                 let result = if let Some(context) = delivery.as_deref_mut() {
-                    context.state.try_admit(
-                        &mut self.queues,
-                        current_sample,
-                        *batch,
-                    )
+                    context
+                        .state
+                        .try_admit(&mut self.queues, current_sample, *batch)
                 } else {
                     self.queues.try_enqueue_automation(current_sample, *batch)
                 };

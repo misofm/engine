@@ -82,11 +82,11 @@ pub use controller::{
     ReplayCache, ReplayCacheConfig, ReplayCacheError, ReplayCacheResourceReport, ReplayDecision,
     ReplayHit,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub use controller::{MockProvider, MockProviderConfig};
 pub use controller_delivery::{
     ControllerAutomationDelivery, ControllerAutomationPrepareError, ControllerAutomationResources,
 };
-#[cfg(any(test, feature = "test-support"))]
-pub use controller::{MockProvider, MockProviderConfig};
 pub use delivery::{
     AutomationDeliveryControl, AutomationDeliveryRender, CancelComplete, CancelToken,
     CoreCompletion, CoreTicket, DeliveryCoreControl, DeliveryCoreRender, DeliveryError,

@@ -2,9 +2,7 @@
 
 use core::mem::size_of;
 
-use crate::delivery::{
-    AutomationDeliveryState, DeliveryContext, PreparedAutomationDelivery,
-};
+use crate::delivery::{AutomationDeliveryState, DeliveryContext, PreparedAutomationDelivery};
 use crate::{
     AutomationCancellationReason, AutomationDeliveryRender, CancelComplete, CancelToken,
     ControllerRequest, ControllerResourceAllocationError, ControllerResponse,
@@ -84,7 +82,11 @@ impl<P: ControlProvider> ControllerAutomationDelivery<P> {
         retained: ControllerRetainedCapacity,
         capabilities: PreparedDeliveryCapabilities,
     ) -> Result<
-        (Self, AutomationDeliveryRender, ControllerAutomationResources),
+        (
+            Self,
+            AutomationDeliveryRender,
+            ControllerAutomationResources,
+        ),
         ControllerAutomationPrepareError,
     > {
         let queue_and_delivery = PreparedAutomationDelivery::resource_report_for_config(queues)?;
@@ -197,7 +199,10 @@ impl<P: ControlProvider> ControllerAutomationDelivery<P> {
 mod tests {
     use super::*;
     use crate::*;
-    use core::{num::NonZeroUsize, sync::atomic::{AtomicU64, Ordering}};
+    use core::{
+        num::NonZeroUsize,
+        sync::atomic::{AtomicU64, Ordering},
+    };
     use session::{CompileCaps, parse_session_json};
     use std::sync::Arc;
 
@@ -488,17 +493,6 @@ mod tests {
         }
     }
 
-    fn complete_render(
-        facade: &mut ControllerAutomationDelivery<FixtureProvider>,
-        render: &mut AutomationDeliveryRender,
-        ticket: DeliveryTicket,
-    ) {
-        let count = render.begin_boundary(SampleTime(0)).unwrap().records.len() as u16;
-        render.mark_applied(ticket, count).unwrap();
-        render.finish_applied(ticket, count).unwrap();
-        facade.collect_terminal(ticket).unwrap();
-    }
-
     fn decode_event<'a>(codec: &ProtocolCodec, frame: &'a [u8]) -> DecodedTypedEventFrame<'a> {
         codec
             .decode_typed_event(frame, &mut DecodeScratch::new(&mut [0_u16; 32]))
@@ -515,12 +509,10 @@ mod tests {
 
     #[test]
     fn real_admission_replay_shape_and_domain_guards_are_owned_by_facade() {
-        let (mut facade, mut render, _) = facade(
-            8,
-            &[(ParameterHandle(7), AutomationKind::Point)],
-        );
+        let (mut facade, mut render, _) = facade(8, &[(ParameterHandle(7), AutomationKind::Point)]);
         let revision = facade.session().revision();
-        let request = enqueue_request(1, b"enqueue-one", batch(revision, 1, 7, 1));
+        let admitted_batch = batch(revision, 1, 7, 1);
+        let request = enqueue_request(1, b"enqueue-one", admitted_batch);
         let response = facade.process(request);
         assert_eq!(response.status, StatusCode::Ok);
         let decoded = ProtocolCodec::default()
@@ -532,15 +524,35 @@ mod tests {
         let DecodedSuccessResponsePayload::AutomationEnqueued(accepted) = payload else {
             panic!("wrong success payload")
         };
-        assert_eq!((accepted.accepted_records, accepted.occupancy, accepted.capacity), (1, 1, 2));
+        assert_eq!(
+            (
+                accepted.accepted_records,
+                accepted.occupancy,
+                accepted.capacity
+            ),
+            (1, 1, 2)
+        );
         let ticket = match facade.try_handoff_next().unwrap() {
             HandoffResult::HandedOff(ticket) => ticket,
             other => panic!("{other:?}"),
         };
-        complete_render(&mut facade, &mut render, ticket);
+        let pending = render.begin_boundary(SampleTime(0)).unwrap();
+        assert_eq!(pending.records, admitted_batch.as_slice());
+        let count = pending.records.len() as u16;
+        render.mark_applied(ticket, count).unwrap();
+        render.finish_applied(ticket, count).unwrap();
+        facade.collect_terminal(ticket).unwrap();
         assert_eq!(facade.outstanding(), 0);
-        assert_eq!(facade.process(enqueue_request(1, b"enqueue-one", batch(revision, 1, 7, 1))), response);
-        assert_eq!(facade.process(enqueue_request(1, b"changed", batch(revision, 1, 7, 1))).status, StatusCode::RequestIdReuse);
+        assert_eq!(
+            facade.process(enqueue_request(1, b"enqueue-one", batch(revision, 1, 7, 1))),
+            response
+        );
+        assert_eq!(
+            facade
+                .process(enqueue_request(1, b"changed", batch(revision, 1, 7, 1)))
+                .status,
+            StatusCode::RequestIdReuse
+        );
 
         let mut malformed = batch(revision, 2, 7, 3);
         malformed.len = 2;
@@ -558,16 +570,38 @@ mod tests {
 
         let mut too_long = batch(revision, 3, 7, 3);
         too_long.len = 257;
-        assert_eq!(facade.process(enqueue_request(3, b"too-long", too_long)).status, StatusCode::LimitExceeded);
+        assert_eq!(
+            facade
+                .process(enqueue_request(3, b"too-long", too_long))
+                .status,
+            StatusCode::LimitExceeded
+        );
+        assert_eq!(facade.outstanding(), 0);
 
         let mut outside_domain = batch(revision, 4, 7, 4);
         outside_domain.records[0].start_value = 2.0;
         outside_domain.records[0].end_value = 2.0;
-        assert_eq!(facade.process(enqueue_request(4, b"outside-domain", outside_domain)).status, StatusCode::InvalidField);
+        assert_eq!(
+            facade
+                .process(enqueue_request(4, b"outside-domain", outside_domain))
+                .status,
+            StatusCode::InvalidField
+        );
+        assert_eq!(facade.outstanding(), 0);
 
-        let (mut past_facade, _, _) = facade_with(8, &[(ParameterHandle(7), AutomationKind::Point)], SampleTime(10), 256);
+        let (mut past_facade, _, _) = facade_with(
+            8,
+            &[(ParameterHandle(7), AutomationKind::Point)],
+            SampleTime(10),
+            256,
+        );
         let past_revision = past_facade.session().revision();
-        assert_eq!(past_facade.process(enqueue_request(1, b"past", batch(past_revision, 1, 7, 9))).status, StatusCode::TimeInPast);
+        assert_eq!(
+            past_facade
+                .process(enqueue_request(1, b"past", batch(past_revision, 1, 7, 9)))
+                .status,
+            StatusCode::TimeInPast
+        );
         assert_eq!(past_facade.outstanding(), 0);
     }
 
@@ -584,56 +618,172 @@ mod tests {
         let count = render.begin_boundary(SampleTime(0)).unwrap().records.len() as u16;
         render.mark_applied(ticket, count).unwrap();
         render.finish_applied(ticket, count).unwrap();
-        assert_eq!(facade.process(enqueue_request(2, b"overlap", batch(revision, 2, 7, 1))).status, StatusCode::AutomationOrder);
-        assert_eq!(facade.process(enqueue_request(3, b"second", batch(revision, 3, 7, 2))).status, StatusCode::Ok);
-        assert_eq!(facade.process(enqueue_request(4, b"third", batch(revision, 4, 7, 3))).status, StatusCode::Backpressure);
+        assert_eq!(
+            facade
+                .process(enqueue_request(2, b"overlap", batch(revision, 2, 7, 1)))
+                .status,
+            StatusCode::AutomationOrder
+        );
+        assert_eq!(
+            facade
+                .process(enqueue_request(3, b"second", batch(revision, 3, 7, 2)))
+                .status,
+            StatusCode::Ok
+        );
+        assert_eq!(
+            facade
+                .process(enqueue_request(4, b"third", batch(revision, 4, 7, 3)))
+                .status,
+            StatusCode::Backpressure
+        );
         facade.collect_terminal(ticket).unwrap();
-        assert_eq!(facade.collect_terminal(ticket), Err(DeliveryError::StaleTicket));
-        assert_eq!(facade.process(enqueue_request(5, b"after-collect", batch(revision, 5, 7, 3))).status, StatusCode::Ok);
+        assert_eq!(
+            facade.collect_terminal(ticket),
+            Err(DeliveryError::StaleTicket)
+        );
+        assert_eq!(
+            facade
+                .process(enqueue_request(
+                    5,
+                    b"after-collect",
+                    batch(revision, 5, 7, 3)
+                ))
+                .status,
+            StatusCode::Ok
+        );
 
-        let (mut dense, _, _) = facade_with(
+        let (mut dense, mut dense_render, _) = facade_with(
             8,
-            &[(ParameterHandle(7), AutomationKind::Point), (ParameterHandle(8), AutomationKind::Point)],
+            &[
+                (ParameterHandle(7), AutomationKind::Point),
+                (ParameterHandle(8), AutomationKind::Point),
+            ],
             SampleTime(0),
             1,
         );
         let dense_revision = dense.session().revision();
-        assert_eq!(dense.process(enqueue_request(10, b"dense-first", batch(dense_revision, 10, 7, 1))).status, StatusCode::Ok);
-        assert_eq!(dense.process(enqueue_request(11, b"dense-second", batch(dense_revision, 11, 8, 1))).status, StatusCode::LimitExceeded);
+        assert_eq!(
+            dense
+                .process(enqueue_request(
+                    10,
+                    b"dense-first",
+                    batch(dense_revision, 10, 7, 1)
+                ))
+                .status,
+            StatusCode::Ok
+        );
+        assert_eq!(
+            dense
+                .process(enqueue_request(
+                    11,
+                    b"dense-second",
+                    batch(dense_revision, 11, 8, 1)
+                ))
+                .status,
+            StatusCode::LimitExceeded
+        );
+        let dense_ticket = match dense.try_handoff_next().unwrap() {
+            HandoffResult::HandedOff(ticket) => ticket,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            dense
+                .process(enqueue_request(
+                    12,
+                    b"dense-after-handoff",
+                    batch(dense_revision, 12, 8, 1)
+                ))
+                .status,
+            StatusCode::LimitExceeded
+        );
+        let dense_count = dense_render
+            .begin_boundary(SampleTime(0))
+            .unwrap()
+            .records
+            .len() as u16;
+        dense_render
+            .mark_applied(dense_ticket, dense_count)
+            .unwrap();
+        dense_render
+            .finish_applied(dense_ticket, dense_count)
+            .unwrap();
+        dense.collect_terminal(dense_ticket).unwrap();
+        assert_eq!(
+            dense
+                .process(enqueue_request(
+                    13,
+                    b"dense-after-collect",
+                    batch(dense_revision, 13, 8, 1)
+                ))
+                .status,
+            StatusCode::Ok
+        );
     }
 
     #[test]
     fn unsupported_head_blocks_fifo_and_real_cancel_releases_all_owners() {
-        let (mut endpoint, mut render, canceled) = facade(8, &[(ParameterHandle(7), AutomationKind::Point)]);
+        let (mut endpoint, mut render, canceled) =
+            facade(8, &[(ParameterHandle(7), AutomationKind::Point)]);
         let revision = endpoint.session().revision();
-        assert_eq!(endpoint.process(enqueue_request(1, b"unsupported", mixed_batch(revision, 1))).status, StatusCode::Ok);
-        assert_eq!(endpoint.process(enqueue_request(2, b"supported-follower", batch(revision, 2, 7, 2))).status, StatusCode::Ok);
-        assert_eq!(endpoint.try_handoff_next().unwrap(), HandoffResult::PendingUnsupported);
-        let token = endpoint.begin_cancel(AutomationCancellationReason::EndpointShutdown).unwrap();
+        assert_eq!(
+            endpoint
+                .process(enqueue_request(1, b"unsupported", mixed_batch(revision, 1)))
+                .status,
+            StatusCode::Ok
+        );
+        assert_eq!(
+            endpoint
+                .process(enqueue_request(
+                    2,
+                    b"supported-follower",
+                    batch(revision, 2, 7, 2)
+                ))
+                .status,
+            StatusCode::Ok
+        );
+        assert_eq!(
+            endpoint.try_handoff_next().unwrap(),
+            HandoffResult::PendingUnsupported
+        );
+        let token = endpoint
+            .begin_cancel(AutomationCancellationReason::EndpointShutdown)
+            .unwrap();
         assert!(endpoint.poll_cancel_boundary(token).unwrap().is_none());
         assert!(render.begin_boundary(SampleTime(77)).is_none());
         let complete = endpoint.poll_cancel_boundary(token).unwrap().unwrap();
-        assert_eq!((complete.canceled_events, complete.canceled_records), (2, 3));
+        assert_eq!(
+            (complete.canceled_events, complete.canceled_records),
+            (2, 3)
+        );
         assert_eq!(canceled.load(Ordering::Relaxed), 3);
         assert_eq!(endpoint.outstanding(), 0);
     }
 
     #[test]
     fn one_controller_queue_and_sequence_cover_transport_cancel_and_short_retry() {
-        let (mut endpoint, mut render, canceled) = facade(8, &[(ParameterHandle(7), AutomationKind::Point)]);
+        let (mut endpoint, mut render, canceled) =
+            facade(8, &[(ParameterHandle(7), AutomationKind::Point)]);
         let revision = endpoint.session().revision();
         let transport = |id, bytes| ControllerRequest {
             request_id: RequestId::new(id).unwrap(),
             expected_revision: ExpectedRevision::Exact(revision),
             canonical_bytes: bytes,
             command: ControlCommand::TransportSet {
-                request: TransportSetRequest { state: TransportState::Playing, position: None },
+                request: TransportSetRequest {
+                    state: TransportState::Playing,
+                    position: None,
+                },
             },
         };
         let first_transport = endpoint.process(transport(1, b"transport-one"));
         assert_eq!(first_transport.status, StatusCode::Ok);
         let ticket = {
-            assert_eq!(endpoint.process(enqueue_request(2, b"partial", batch(revision, 2, 7, 1))).status, StatusCode::Ok);
+            assert_eq!(
+                endpoint
+                    .process(enqueue_request(2, b"partial", batch(revision, 2, 7, 1)))
+                    .status,
+                StatusCode::Ok
+            );
             match endpoint.try_handoff_next().unwrap() {
                 HandoffResult::HandedOff(ticket) => ticket,
                 other => panic!("{other:?}"),
@@ -641,44 +791,150 @@ mod tests {
         };
         render.begin_boundary(SampleTime(0)).unwrap();
         render.mark_applied(ticket, 0).unwrap();
-        let token = endpoint.begin_cancel(AutomationCancellationReason::EndpointShutdown).unwrap();
+        let token = endpoint
+            .begin_cancel(AutomationCancellationReason::EndpointShutdown)
+            .unwrap();
         assert!(endpoint.poll_cancel_boundary(token).unwrap().is_none());
-        assert_eq!(endpoint.process(transport(3, b"blocked-transport")).status, StatusCode::Unavailable);
-        assert_eq!(endpoint.process(transport(1, b"transport-one")), first_transport);
+        let blocked = endpoint.process(transport(3, b"blocked-transport"));
+        assert_eq!(blocked.status, StatusCode::Unavailable);
+        assert_eq!(
+            endpoint.process(transport(3, b"blocked-transport")),
+            blocked
+        );
+        assert_eq!(
+            endpoint.process(transport(1, b"transport-one")),
+            first_transport
+        );
         assert!(render.begin_boundary(SampleTime(99)).is_none());
         let complete = endpoint.poll_cancel_boundary(token).unwrap().unwrap();
-        assert_eq!((complete.effective_sample, complete.canceled_records), (SampleTime(99), 1));
+        assert_eq!(
+            (
+                complete.effective_sample,
+                complete.canceled_events,
+                complete.canceled_records,
+                complete.applied_records
+            ),
+            (SampleTime(99), 1, 1, 0)
+        );
         assert_eq!(canceled.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            endpoint.poll_cancel_boundary(token),
+            Err(DeliveryError::StaleTicket)
+        );
         let later = endpoint.process(transport(4, b"transport-later"));
         assert_eq!(later.status, StatusCode::Ok);
 
         let mut short = [0_u8; 1];
-        assert!(matches!(endpoint.dequeue_reliable_event_frame_into(&mut short), Err(EventEgressError::Encode(EncodeError::OutputTooSmall { .. }))));
+        assert!(matches!(
+            endpoint.dequeue_reliable_event_frame_into(&mut short),
+            Err(EventEgressError::Encode(EncodeError::OutputTooSmall { .. }))
+        ));
         let mut frame = [0_u8; 1024];
-        let first = endpoint.dequeue_reliable_event_frame_into(&mut frame).unwrap().unwrap();
-        let first_sequence = event_sequence(&ProtocolCodec::default(), &frame[..first]);
-        let second = endpoint.dequeue_reliable_event_frame_into(&mut frame).unwrap().unwrap();
-        let second_sequence = event_sequence(&ProtocolCodec::default(), &frame[..second]);
-        let third = endpoint.dequeue_reliable_event_frame_into(&mut frame).unwrap().unwrap();
-        let third_sequence = event_sequence(&ProtocolCodec::default(), &frame[..third]);
-        assert_eq!([first_sequence, second_sequence, third_sequence], [1, 2, 3]);
+        let first = endpoint
+            .dequeue_reliable_event_frame_into(&mut frame)
+            .unwrap()
+            .unwrap();
+        match decode_event(&ProtocolCodec::default(), &frame[..first]).payload {
+            DecodedEventPayload::TransportState(value) => {
+                assert_eq!(
+                    (
+                        value.event_sequence,
+                        value.state,
+                        value.position,
+                        value.effective_sample
+                    ),
+                    (1, TransportState::Playing, SampleTime(0), SampleTime(0))
+                );
+            }
+            _ => panic!("unexpected first event"),
+        }
+        let second = endpoint
+            .dequeue_reliable_event_frame_into(&mut frame)
+            .unwrap()
+            .unwrap();
+        match decode_event(&ProtocolCodec::default(), &frame[..second]).payload {
+            DecodedEventPayload::AutomationCanceled(value) => {
+                assert_eq!(
+                    (
+                        value.event_sequence,
+                        value.origin_request_id,
+                        value.canceled_records,
+                        value.effective_sample
+                    ),
+                    (2, RequestId::new(2).unwrap(), 1, Some(SampleTime(99)))
+                );
+            }
+            _ => panic!("unexpected cancellation event"),
+        }
+        let third = endpoint
+            .dequeue_reliable_event_frame_into(&mut frame)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            event_sequence(&ProtocolCodec::default(), &frame[..third]),
+            3
+        );
 
         let (mut full, _, _) = facade(1, &[(ParameterHandle(7), AutomationKind::Point)]);
         let full_revision = full.session().revision();
-        assert_eq!(full.process(transport_request(full_revision, 1, b"full-transport")).status, StatusCode::Ok);
-        assert_eq!(full.process(enqueue_request(2, b"full-batch", batch(full_revision, 2, 7, 1))).status, StatusCode::Ok);
+        assert_eq!(
+            full.process(transport_request(full_revision, 1, b"full-transport"))
+                .status,
+            StatusCode::Ok
+        );
+        assert_eq!(
+            full.process(enqueue_request(
+                2,
+                b"full-batch",
+                batch(full_revision, 2, 7, 1)
+            ))
+            .status,
+            StatusCode::Ok
+        );
         let before = (full.outstanding(), full.automation_status());
-        assert!(matches!(full.begin_cancel(AutomationCancellationReason::EndpointShutdown), Err(DeliveryError::ReliableFull(_))));
+        assert!(matches!(
+            full.begin_cancel(AutomationCancellationReason::EndpointShutdown),
+            Err(DeliveryError::ReliableFull(_))
+        ));
         assert_eq!((full.outstanding(), full.automation_status()), before);
+        let mut full_frame = [0_u8; 1024];
+        let first_full = full
+            .dequeue_reliable_event_frame_into(&mut full_frame)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            event_sequence(&ProtocolCodec::default(), &full_frame[..first_full]),
+            1
+        );
+        assert_eq!(
+            full.process(transport_request(full_revision, 3, b"full-later"))
+                .status,
+            StatusCode::Ok
+        );
+        let second_full = full
+            .dequeue_reliable_event_frame_into(&mut full_frame)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            event_sequence(&ProtocolCodec::default(), &full_frame[..second_full]),
+            2
+        );
     }
 
-    fn transport_request<'a>(revision: SessionRevision, id: u64, bytes: &'a [u8]) -> ControllerRequest<'a> {
+    fn transport_request<'a>(
+        revision: SessionRevision,
+        id: u64,
+        bytes: &'a [u8],
+    ) -> ControllerRequest<'a> {
         ControllerRequest {
             request_id: RequestId::new(id).unwrap(),
             expected_revision: ExpectedRevision::Exact(revision),
             canonical_bytes: bytes,
             command: ControlCommand::TransportSet {
-                request: TransportSetRequest { state: TransportState::Playing, position: None },
+                request: TransportSetRequest {
+                    state: TransportState::Playing,
+                    position: None,
+                },
             },
         }
     }
@@ -689,32 +945,106 @@ mod tests {
         let revision = facade.session().revision();
         let snapshot = facade.session().canonical_snapshot().to_owned();
         let edits: [SessionEdit; 0] = [];
-        assert_eq!(facade.process(ControllerRequest {
-            request_id: RequestId::new(1).unwrap(),
-            expected_revision: ExpectedRevision::Exact(revision),
-            canonical_bytes: b"transaction",
-            command: ControlCommand::SessionTransactionApply { edits: &edits },
-        }).status, StatusCode::Unavailable);
-        assert_eq!(facade.process(ControllerRequest {
-            request_id: RequestId::new(2).unwrap(),
-            expected_revision: ExpectedRevision::Exact(revision),
-            canonical_bytes: b"locate",
-            command: ControlCommand::TransportSet { request: TransportSetRequest { state: TransportState::Playing, position: Some(SampleTime(9)) } },
-        }).status, StatusCode::Unavailable);
-        assert_eq!(facade.process(ControllerRequest {
-            request_id: RequestId::new(3).unwrap(),
-            expected_revision: ExpectedRevision::Exact(revision),
-            canonical_bytes: b"state",
-            command: ControlCommand::ParameterStateGet { request: ParameterStateRequest { handles: vec![7] } },
-        }).status, StatusCode::Unavailable);
+        assert_eq!(
+            facade
+                .process(ControllerRequest {
+                    request_id: RequestId::new(1).unwrap(),
+                    expected_revision: ExpectedRevision::Exact(revision),
+                    canonical_bytes: b"transaction",
+                    command: ControlCommand::SessionTransactionApply { edits: &edits },
+                })
+                .status,
+            StatusCode::Unavailable
+        );
+        assert_eq!(
+            facade
+                .process(ControllerRequest {
+                    request_id: RequestId::new(2).unwrap(),
+                    expected_revision: ExpectedRevision::Exact(revision),
+                    canonical_bytes: b"locate",
+                    command: ControlCommand::TransportSet {
+                        request: TransportSetRequest {
+                            state: TransportState::Playing,
+                            position: Some(SampleTime(9))
+                        }
+                    },
+                })
+                .status,
+            StatusCode::Unavailable
+        );
+        assert_eq!(
+            facade
+                .process(ControllerRequest {
+                    request_id: RequestId::new(3).unwrap(),
+                    expected_revision: ExpectedRevision::Exact(revision),
+                    canonical_bytes: b"state",
+                    command: ControlCommand::ParameterStateGet {
+                        request: ParameterStateRequest { handles: vec![7] }
+                    },
+                })
+                .status,
+            StatusCode::Unavailable
+        );
         assert_eq!(facade.session().canonical_snapshot(), snapshot);
         assert_eq!(facade.session().revision(), revision);
-        assert_eq!(facade.process(ControllerRequest {
-            request_id: RequestId::new(4).unwrap(),
+        assert_eq!(
+            facade
+                .process(ControllerRequest {
+                    request_id: RequestId::new(4).unwrap(),
+                    expected_revision: ExpectedRevision::Any,
+                    canonical_bytes: b"metadata",
+                    command: ControlCommand::ParameterMetadataGet {
+                        request: ParameterMetadataRequest {
+                            after_handle: 0,
+                            limit: 8
+                        }
+                    },
+                })
+                .status,
+            StatusCode::Ok
+        );
+        assert_eq!(
+            facade
+                .process(ControllerRequest {
+                    request_id: RequestId::new(5).unwrap(),
+                    expected_revision: ExpectedRevision::Any,
+                    canonical_bytes: b"snapshot",
+                    command: ControlCommand::SessionSnapshotGet {
+                        offset: 0,
+                        max_bytes: 1024
+                    },
+                })
+                .status,
+            StatusCode::Ok
+        );
+        let transport_before = facade.process(ControllerRequest {
+            request_id: RequestId::new(6).unwrap(),
             expected_revision: ExpectedRevision::Any,
-            canonical_bytes: b"snapshot",
-            command: ControlCommand::SessionSnapshotGet { offset: 0, max_bytes: 1024 },
-        }).status, StatusCode::Ok);
+            canonical_bytes: b"transport-before",
+            command: ControlCommand::TransportGet,
+        });
+        let transport_after = facade.process(ControllerRequest {
+            request_id: RequestId::new(7).unwrap(),
+            expected_revision: ExpectedRevision::Any,
+            canonical_bytes: b"transport-after",
+            command: ControlCommand::TransportGet,
+        });
+        let decode_transport = |response: &ControllerResponse| {
+            let DecodedTypedResponseFrame::Success { payload, .. } = ProtocolCodec::default()
+                .decode_typed_response(&response.frame, &mut DecodeScratch::new(&mut [0_u16; 16]))
+                .unwrap()
+            else {
+                panic!("transport get must succeed")
+            };
+            let DecodedSuccessResponsePayload::TransportGetSnapshot(value) = payload else {
+                panic!("wrong transport payload")
+            };
+            value
+        };
+        assert_eq!(
+            decode_transport(&transport_before),
+            decode_transport(&transport_after)
+        );
         assert_eq!(facade.outstanding(), 0);
     }
 }

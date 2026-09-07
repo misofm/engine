@@ -109,6 +109,69 @@ fn two_record_batch(id: u64) -> AutomationBatchSlot {
     .unwrap()
 }
 
+#[cfg(feature = "test-support")]
+fn fixture_descriptor() -> ParameterDescriptor {
+    ParameterDescriptor {
+        handle: 7,
+        track_id: "fixture".to_owned(),
+        rack: ParameterRack::Dynamic,
+        effect_id: "effect".to_owned(),
+        parameter_id: 7,
+        channel: ParameterChannel::Left,
+        value_kind: ParameterValueKind::F32,
+        unit: ParameterUnit::Linear,
+        domain: ParameterDomain::Continuous,
+        minimum: Some(-1.0),
+        maximum: Some(1.0),
+        default: 0.0,
+        mapping: ParameterMapping::Linear,
+        automation_rate: ParameterAutomationRate::Sample,
+        smoothing_samples: 0,
+        flags: 3,
+        display_name: None,
+        display_unit: None,
+        enum_choices: Vec::new(),
+    }
+}
+
+#[cfg(feature = "test-support")]
+fn fixture_session() -> SessionStore {
+    let source = include_str!("../../../fixtures/session/v1/canonical.json");
+    SessionStore::new(
+        session::parse_session_json(source).unwrap(),
+        session::CompileCaps {
+            max_compiled_model_bytes: u64::MAX,
+            max_requested_runtime_bytes: u64::MAX,
+            max_single_allocation_bytes: u64::MAX,
+            max_queue_items: u64::MAX,
+            max_source_ring_frames: u64::MAX,
+            max_source_ring_bytes: u64::MAX,
+        },
+    )
+    .unwrap()
+}
+
+#[cfg(feature = "test-support")]
+fn fixture_provider() -> MockProvider {
+    MockProvider::try_with_retained_capacity_and_automation(
+        ControllerRetainedCapacity {
+            meter_handles: 0,
+            counter_ids: 0,
+        },
+        fixture_descriptor(),
+    )
+    .unwrap()
+}
+
+#[cfg(feature = "test-support")]
+fn replay_config() -> ReplayCacheConfig {
+    ReplayCacheConfig {
+        entries: NonZeroUsize::new(32).unwrap(),
+        bytes: NonZeroUsize::new(16 * 1024).unwrap(),
+        max_response_bytes: 2048,
+    }
+}
+
 #[test]
 fn prepared_heaps_free_off_thread_and_realtime_owner_operations_are_zero_zero() {
     let (pair, preparation) =
@@ -248,4 +311,63 @@ fn distinct_render_owner_reconciles_all_four_cancellation_positions_without_allo
             }
         });
     }
+}
+
+#[cfg(feature = "test-support")]
+#[test]
+fn controller_facade_preparation_has_one_queue_allocation_authority() {
+    let cfg = config();
+    let capabilities =
+        PreparedDeliveryCapabilities::new_exact(&[(ParameterHandle(7), AutomationKind::Point)])
+            .unwrap();
+    let session_a = fixture_session();
+    let provider_a = fixture_provider();
+    let (a, a_counts) = measured(|| {
+        ControllerAutomationDelivery::prepare(
+            session_a,
+            cfg,
+            provider_a,
+            replay_config(),
+            ProtocolCodec::default(),
+            ProtocolControllerConfig::default(),
+            ControllerRetainedCapacity {
+                meter_handles: 0,
+                counter_ids: 0,
+            },
+            capabilities,
+        )
+        .unwrap()
+    });
+    let session_b = fixture_session();
+    let provider_b = fixture_provider();
+    let (b, b_counts) = measured(|| {
+        let queues = ProtocolQueues::prepare(cfg).unwrap();
+        let replay = ReplayCache::try_new(replay_config()).unwrap();
+        ProtocolController::try_with_config_and_retained_capacity(
+            session_b,
+            queues,
+            provider_b,
+            replay,
+            ProtocolCodec::default(),
+            ProtocolControllerConfig::default(),
+            ControllerRetainedCapacity {
+                meter_handles: 0,
+                counter_ids: 0,
+            },
+        )
+        .unwrap()
+    });
+    let (c, c_counts) = measured(|| PreparedAutomationDelivery::prepare(cfg, 1).unwrap());
+    let (d, d_counts) = measured(|| ProtocolQueues::prepare(cfg).unwrap());
+    assert_eq!(a_counts.1, 0);
+    assert_eq!(b_counts.1, 0);
+    assert_eq!(c_counts.1, 0);
+    assert_eq!(d_counts.1, 0);
+    assert_eq!(a_counts.0, b_counts.0 + c_counts.0 - d_counts.0);
+    assert_eq!(a_counts.2, b_counts.2 + c_counts.2 - d_counts.2);
+    assert_eq!(
+        PreparedAutomationDelivery::resource_report_for_config(cfg).unwrap(),
+        a.2.queue_and_delivery
+    );
+    let _ = (b, c, d);
 }

@@ -568,7 +568,8 @@ impl PreparedAutomationDelivery {
 
     pub(crate) fn prepare_state_and_render(
         config: ProtocolQueueConfig,
-    ) -> Result<(AutomationDeliveryState, AutomationDeliveryRender), crate::ProtocolQueueError> {
+    ) -> Result<(AutomationDeliveryState, AutomationDeliveryRender), crate::ProtocolQueueError>
+    {
         let (mut core, render_core) =
             PreparedDelivery::<AutomationBatchSlot>::prepare(config.automation_batch_slots)?;
         core.generation = 1;
@@ -611,8 +612,8 @@ impl AutomationDeliveryState {
         current_sample: SampleTime,
         batch: AutomationBatchSlot,
     ) -> Result<(), AutomationEnqueueError> {
-        let resident = usize::try_from(queues.report(QueueKind::Automation).occupancy)
-            .unwrap_or(usize::MAX);
+        let resident =
+            usize::try_from(queues.report(QueueKind::Automation).occupancy).unwrap_or(usize::MAX);
         if self.cancel.is_some()
             || self.core.outstanding().saturating_add(resident) >= self.owners.len()
         {
@@ -729,7 +730,12 @@ impl AutomationDeliveryState {
         })
     }
 
-    fn release(&mut self, queues: &mut ProtocolQueues, ticket: DeliveryTicket, batch: AutomationBatchSlot) {
+    fn release(
+        &mut self,
+        queues: &mut ProtocolQueues,
+        ticket: DeliveryTicket,
+        batch: AutomationBatchSlot,
+    ) {
         let owner = self.owners[ticket.slot]
             .take()
             .expect("ticket owns admission");
@@ -749,8 +755,8 @@ impl AutomationDeliveryState {
             return Err(DeliveryError::CancellationPending);
         }
         self.reconcile(queues)?;
-        let queued = usize::try_from(queues.report(QueueKind::Automation).occupancy)
-            .unwrap_or(usize::MAX);
+        let queued =
+            usize::try_from(queues.report(QueueKind::Automation).occupancy).unwrap_or(usize::MAX);
         let total = self
             .core
             .outstanding()
@@ -864,8 +870,7 @@ impl AutomationDeliveryState {
                     queues.report(QueueKind::Automation).generation.0,
                     Some(sample),
                 );
-                queues
-                    .commit_reserved_reliable_event(state.reservations.as_mut().unwrap(), event);
+                queues.commit_reserved_reliable_event(state.reservations.as_mut().unwrap(), event);
                 *sequence += 1;
                 published = published
                     .checked_add(1)
@@ -877,8 +882,7 @@ impl AutomationDeliveryState {
             self.release(queues, owner.ticket, batch);
         }
         let mut state = self.cancel.take().unwrap();
-        queues
-            .release_reliable_events(state.reservations.take().unwrap());
+        queues.release_reliable_events(state.reservations.take().unwrap());
         self.staged = None;
         queues.reset_automation_ordering_after_cancellation();
         self.core.generation = self.next_generation;
@@ -893,8 +897,7 @@ impl AutomationDeliveryState {
 
     pub(crate) fn outstanding(&self, queues: &ProtocolQueues) -> usize {
         self.core.outstanding().saturating_add(
-            usize::try_from(queues.report(QueueKind::Automation).occupancy)
-                .unwrap_or(usize::MAX),
+            usize::try_from(queues.report(QueueKind::Automation).occupancy).unwrap_or(usize::MAX),
         )
     }
     pub(crate) fn resident_automation(&self, queues: &ProtocolQueues) -> u64 {
@@ -909,7 +912,8 @@ impl AutomationDeliveryControl {
         current_sample: SampleTime,
         batch: AutomationBatchSlot,
     ) -> Result<(), AutomationEnqueueError> {
-        self.state.try_admit(&mut self.queues, current_sample, batch)
+        self.state
+            .try_admit(&mut self.queues, current_sample, batch)
     }
 
     pub fn try_handoff_next(
