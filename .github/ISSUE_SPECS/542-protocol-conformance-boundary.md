@@ -250,3 +250,18 @@ controller, 17 message-wire and 19 session-wire tests with zero ignored in each 
 Wasm artifacts are pinned in the evidence manifest. Two malformed evidence probes are retained and
 explicitly denied gate credit; their corrected captures pass without product edits. Root commits
 and pushes this evidence before Astra low reviews the exact evidence-bearing head.
+
+## Astra low final integrated review PASS
+
+Astra low reviewed exact evidence head `859b820bf6820c00f235364a827f9d5814e21a70` against current
+main `b95c9b7b028ed07cfea2f7669467689c05320c37` and returned PASS. The review found no
+product-source, scope, dependency, corpus, extracted-test, Wasm or boundary-policy blocker. It
+decoded all 24 final qualification capture pairs, matched all 833 recorded source-hash entries,
+and independently matched both retained Wasm artifact identities and their returned zero verdicts.
+
+The review records one nonblocking evidence limit: the fresh final forbidden-export control used
+literal backslash-n bytes around the exact forbidden token, so that capture proves the structural
+token predicate and byte-exact restoration rather than compilable Rust. The preserved attempt-two
+control supplies the proper Rust export mutation against byte-identical current `lib.rs` and
+boundary-checker content. No compile-success claim is made for either deliberate mutation. Root
+commits this verdict, then Astra low checks the exact verdict-bearing head before PR creation.

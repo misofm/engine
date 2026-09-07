@@ -1,0 +1,1 @@
+All 24 metadata heads match qualification head; all 833 source-hash entries match current files; all paired gzip captures decode.
