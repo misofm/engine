@@ -1,0 +1,1 @@
+for file in six shipped artifact files; do cmp -s /tmp/issue580-prepin-candidate-517bbf48/$file /tmp/issue580-artifact-517bbf48/$file || exit 1; sha256sum /tmp/issue580-artifact-517bbf48/$file; done

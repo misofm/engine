@@ -1,0 +1,1 @@
+npm --prefix hosts/host-web/qualification ci --ignore-scripts
