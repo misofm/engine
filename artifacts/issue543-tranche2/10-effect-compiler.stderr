@@ -1,0 +1,4 @@
+   Compiling effect-package v0.1.0 (/home/bl/misofm/engine-shared-hex-authority/crates/effect-package)
+   Compiling effect-compiler v0.1.0 (/home/bl/misofm/engine-shared-hex-authority/crates/effect-compiler)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.99s
+     Running tests/migration_terminal.rs (/tmp/issue543-target/debug/deps/migration_terminal-2824843b98d473d2)

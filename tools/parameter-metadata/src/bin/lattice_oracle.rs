@@ -50,11 +50,7 @@ fn digest(points: &[LatticePoint]) -> String {
         hasher.update(if point.intrinsic { b"1" } else { b"0" });
         hasher.update(b"\n");
     }
-    hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    bench_support::digest::hex(&hasher.finalize())
 }
 
 fn main() {

@@ -52,6 +52,7 @@ fn config() -> ProtocolQueueConfig {
 #[derive(Clone, Copy, Debug)]
 struct PreparationAllocationDiagnostic {
     global: bench_support::alloc::Counters,
+    current_thread: bench_support::alloc::Counters,
     thread_audit: engine::realtime::audit::AuditSnapshot,
 }
 
@@ -62,6 +63,7 @@ fn measure_preparation<T>(prepare: impl FnOnce() -> T) -> (T, PreparationAllocat
     audit::warm_up();
     audit::reset();
     let global_mark = bench_alloc::counters();
+    let current_thread_mark = bench_alloc::current_thread_counters();
     let (value, thread_audit) = audit::in_render_scope(|| {
         let value = prepare();
         (value, audit::snapshot())
@@ -70,12 +72,14 @@ fn measure_preparation<T>(prepare: impl FnOnce() -> T) -> (T, PreparationAllocat
         value,
         PreparationAllocationDiagnostic {
             global: bench_alloc::delta_since(global_mark),
+            current_thread: bench_alloc::current_thread_delta_since(current_thread_mark),
             thread_audit,
         },
     )
 }
 
 fn foreign_thread_allocation_probe() -> (
+    bench_support::alloc::Counters,
     bench_support::alloc::Counters,
     engine::realtime::audit::AuditSnapshot,
 ) {
@@ -105,14 +109,23 @@ fn foreign_thread_allocation_probe() -> (
     audit::warm_up();
     audit::reset();
     let global_mark = bench_alloc::counters();
+    let current_thread_mark = bench_alloc::current_thread_counters();
     let thread_audit = audit::in_render_scope(|| {
         start.wait();
         finished.wait();
         audit::snapshot()
     });
     let global = bench_alloc::delta_since(global_mark);
+    let current_thread = bench_alloc::current_thread_delta_since(current_thread_mark);
     worker.join().expect("foreign allocation probe worker");
-    (global, thread_audit)
+    (global, current_thread, thread_audit)
+}
+
+fn assert_global_dominates_current_thread(diagnostic: PreparationAllocationDiagnostic) {
+    assert!(diagnostic.global.allocations >= diagnostic.current_thread.allocations);
+    assert!(diagnostic.global.deallocations >= diagnostic.current_thread.deallocations);
+    assert!(diagnostic.global.reallocations >= diagnostic.current_thread.reallocations);
+    assert!(diagnostic.global.requested_bytes >= diagnostic.current_thread.requested_bytes);
 }
 
 const REAL_SESSION: &str =
@@ -1430,13 +1443,17 @@ fn preparation_resources_and_success_path_are_bounded() {
     warm(&mut *fx);
     let ((mut control, render, resources), endpoint_diagnostic) =
         measure_preparation(|| prepare_scalar_point_endpoint(&mut *fx, REV, H, cfg, 1).unwrap());
-    let (foreign_global, foreign_thread_audit) = foreign_thread_allocation_probe();
+    let (foreign_global, foreign_current_thread, foreign_thread_audit) =
+        foreign_thread_allocation_probe();
     eprintln!(
-        "scalar Point preparation diagnostics: direct global={direct_global:?} thread={direct_thread:?}; wrapped global={wrapped_global:?} thread={wrapped_thread:?}; foreign global={foreign_global:?} thread={foreign_thread_audit:?}",
+        "scalar Point preparation diagnostics: direct global={direct_global:?} current={direct_current:?} thread={direct_thread:?}; wrapped global={wrapped_global:?} current={wrapped_current:?} thread={wrapped_thread:?}; foreign global={foreign_global:?} current={foreign_current:?} thread={foreign_thread_audit:?}",
         direct_global = direct_diagnostic.global,
+        direct_current = direct_diagnostic.current_thread,
         direct_thread = direct_diagnostic.thread_audit,
         wrapped_global = endpoint_diagnostic.global,
+        wrapped_current = endpoint_diagnostic.current_thread,
         wrapped_thread = endpoint_diagnostic.thread_audit,
+        foreign_current = foreign_current_thread,
     );
     assert!(
         foreign_global.allocations > 0,
@@ -1455,17 +1472,18 @@ fn preparation_resources_and_success_path_are_bounded() {
         "foreign free moved measured-thread deallocation audit"
     );
     assert_eq!(
-        endpoint_diagnostic.global.allocations,
-        direct_diagnostic.global.allocations
+        foreign_current_thread,
+        bench_support::alloc::Counters::default(),
+        "foreign allocation moved measured-thread allocator counters"
     );
     assert_eq!(
-        endpoint_diagnostic.global.requested_bytes,
-        direct_diagnostic.global.requested_bytes
+        endpoint_diagnostic.current_thread,
+        direct_diagnostic.current_thread
     );
-    assert_eq!(direct_diagnostic.global.reallocations, 0);
-    assert_eq!(endpoint_diagnostic.global.reallocations, 0);
-    assert_eq!(direct_diagnostic.global.deallocations, 0);
-    assert_eq!(endpoint_diagnostic.global.deallocations, 0);
+    assert_eq!(direct_diagnostic.current_thread.reallocations, 0);
+    assert_eq!(direct_diagnostic.current_thread.deallocations, 0);
+    assert_global_dominates_current_thread(direct_diagnostic);
+    assert_global_dominates_current_thread(endpoint_diagnostic);
     assert_eq!(resources.delivery, expected_delivery);
     assert!(resources.delivery.retained_payload_bytes > 0);
     assert!(resources.delivery.largest_allocation_bytes > 0);
@@ -2103,29 +2121,33 @@ fn controller_scalar_preflight_rejections_and_single_allocation_authority() {
             .expect("combined preparation")
         });
     eprintln!(
-        "controller scalar Point preparation diagnostics: direct global={direct_global:?} thread={direct_thread:?}; wrapped global={wrapped_global:?} thread={wrapped_thread:?}",
+        "controller scalar Point preparation diagnostics: direct global={direct_global:?} current={direct_current:?} thread={direct_thread:?}; wrapped global={wrapped_global:?} current={wrapped_current:?} thread={wrapped_thread:?}",
         direct_global = direct_diagnostic.global,
+        direct_current = direct_diagnostic.current_thread,
         direct_thread = direct_diagnostic.thread_audit,
         wrapped_global = combined_diagnostic.global,
+        wrapped_current = combined_diagnostic.current_thread,
         wrapped_thread = combined_diagnostic.thread_audit,
     );
     let transient_bytes = ("comp0".len() + "comp".len()) as u64;
     assert_eq!(
-        combined_diagnostic.global.allocations,
-        direct_diagnostic.global.allocations + 2
+        combined_diagnostic.current_thread.allocations,
+        direct_diagnostic.current_thread.allocations + 2
     );
     assert_eq!(
-        combined_diagnostic.global.deallocations,
-        direct_diagnostic.global.deallocations + 2
+        combined_diagnostic.current_thread.deallocations,
+        direct_diagnostic.current_thread.deallocations + 2
     );
     assert_eq!(
-        combined_diagnostic.global.reallocations,
-        direct_diagnostic.global.reallocations
+        combined_diagnostic.current_thread.reallocations,
+        direct_diagnostic.current_thread.reallocations
     );
     assert_eq!(
-        combined_diagnostic.global.requested_bytes,
-        direct_diagnostic.global.requested_bytes + transient_bytes
+        combined_diagnostic.current_thread.requested_bytes,
+        direct_diagnostic.current_thread.requested_bytes + transient_bytes
     );
+    assert_global_dominates_current_thread(direct_diagnostic);
+    assert_global_dominates_current_thread(combined_diagnostic);
     assert_eq!(
         resources.controller.queue_and_delivery,
         direct_resources.queue_and_delivery

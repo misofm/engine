@@ -1971,7 +1971,7 @@ fn exact_portable_migration_qualification_matrix() {
         &[false, true],
     );
     assert_eq!(rows, 48);
-    let digest_hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+    let digest_hex = engine::hex_lower(&digest);
     println!("migration_rows=48 output_sha256={digest_hex}");
 }
 

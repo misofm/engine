@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "reviewedHead": "c13d202df07ca875ec1e3bb003bd92dc7f333ba5",
+  "files": [
+    {
+      "sha256": "d4907e0723f22327959814d2417a13ea2daf5493c4f6af1a3d33ff8c5e89a761",
+      "path": "artifacts/issue563-review-attempt1/astra-medium-verdict.md"
+    }
+  ]
+}

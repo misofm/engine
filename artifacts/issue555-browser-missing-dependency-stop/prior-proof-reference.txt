@@ -1,0 +1,9 @@
+source_commit=e4f46fa808e413507d204e81b6a4ebc27254869c
+committed_reference=artifacts/issue555-browser-proof-wrapper-stop/proof.stdout
+committed_reference_commit=9c82a56a3bd13a255ddcab42c1652363052928e1
+tracked_records=8439
+excluded_overlay=1
+checked_non_overlay_paths=8438
+missing_paths=0
+mismatched_paths=0
+browser_command_run=false

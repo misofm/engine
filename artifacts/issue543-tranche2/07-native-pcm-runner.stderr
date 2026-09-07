@@ -1,0 +1,29 @@
+   Compiling rack v0.1.0 (/home/bl/misofm/engine-shared-hex-authority/crates/rack)
+   Compiling builtins v0.1.0 (/home/bl/misofm/engine-shared-hex-authority/crates/builtins)
+   Compiling zmij v1.0.23
+   Compiling serde_core v1.0.228
+   Compiling serde_json v1.0.151
+   Compiling memchr v2.8.3
+   Compiling itoa v1.0.18
+   Compiling gate-expander v0.1.0 (/home/bl/misofm/engine-shared-hex-authority/crates/gate-expander)
+   Compiling true-peak-limiter v0.1.0 (/home/bl/misofm/engine-shared-hex-authority/crates/true-peak-limiter)
+   Compiling delay v0.1.0 (/home/bl/misofm/engine-shared-hex-authority/crates/delay)
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-shared-hex-authority/crates/compressor)
+   Compiling transient-shaper v0.1.0 (/home/bl/misofm/engine-shared-hex-authority/crates/transient-shaper)
+   Compiling parametric-eq v0.1.0 (/home/bl/misofm/engine-shared-hex-authority/crates/parametric-eq)
+   Compiling multiband-compressor v0.1.0 (/home/bl/misofm/engine-shared-hex-authority/crates/multiband-compressor)
+   Compiling soft-clip v0.1.0 (/home/bl/misofm/engine-shared-hex-authority/crates/soft-clip)
+   Compiling effect-package v0.1.0 (/home/bl/misofm/engine-shared-hex-authority/crates/effect-package)
+   Compiling graph v0.1.0 (/home/bl/misofm/engine-shared-hex-authority/crates/graph)
+   Compiling rack-compiler v0.1.0 (/home/bl/misofm/engine-shared-hex-authority/crates/rack-compiler)
+   Compiling effect-compiler v0.1.0 (/home/bl/misofm/engine-shared-hex-authority/crates/effect-compiler)
+   Compiling builtins-compiler v0.1.0 (/home/bl/misofm/engine-shared-hex-authority/crates/builtins-compiler)
+   Compiling source v0.1.0 (/home/bl/misofm/engine-shared-hex-authority/crates/source)
+   Compiling graph-compiler v0.1.0 (/home/bl/misofm/engine-shared-hex-authority/crates/graph-compiler)
+   Compiling host-core v0.1.0 (/home/bl/misofm/engine-shared-hex-authority/crates/host-core)
+   Compiling capi v0.1.0 (/home/bl/misofm/engine-shared-hex-authority/crates/capi)
+   Compiling native-pcm-runner v0.1.0 (/home/bl/misofm/engine-shared-hex-authority/tools/native-pcm-runner)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.03s
+     Running unittests src/lib.rs (/tmp/issue543-target/debug/deps/native_pcm_runner-60be34a2b3480a15)
+     Running unittests src/main.rs (/tmp/issue543-target/debug/deps/native_pcm_runner-fb74ecd745919edf)
+   Doc-tests native_pcm_runner

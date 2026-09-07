@@ -1,0 +1,56 @@
+{
+  "argv": [
+    "cargo",
+    "fmt",
+    "--all",
+    "--",
+    "--check"
+  ],
+  "cwd": "/home/bl/misofm/engine-shared-hex-authority",
+  "environment": {
+    "CARGO_TARGET_DIR": "/tmp/issue543-target"
+  },
+  "git_head_before": "acd57011eed98bf87975c36eb2c5070500897e0c",
+  "git_status_before": [
+    " M crates/effect-compiler/tests/migration_terminal.rs",
+    " M crates/effect-package/tests/package_v1_qualification.rs",
+    " M crates/effect-runtime/Cargo.toml",
+    " M crates/effect-runtime/tests/determinism.rs",
+    " M crates/graph-compiler/src/bin/graph_fixture.rs",
+    " M crates/graph-compiler/src/canonical.rs",
+    " M crates/math/Cargo.toml",
+    " M crates/math/tests/m2_lane_identity.rs",
+    " M crates/math/tests/m3_determinism.rs",
+    " M hosts/host-web/examples/sdk_render_oracle.rs",
+    " M hosts/host-web/src/tests.rs",
+    " M tools/bench-support/src/digest.rs",
+    " M tools/native-pcm-runner/Cargo.toml",
+    " M tools/native-pcm-runner/src/lib.rs",
+    " M tools/parameter-metadata/src/bin/lattice_oracle.rs",
+    " M tools/stem-hasher/Cargo.toml",
+    " M tools/stem-hasher/src/lib.rs",
+    " M tools/stem-hasher/tests/conformance.rs",
+    " M tools/wasm-gates/src/lib.rs"
+  ],
+  "selected_source_sha256_before": {
+    "tools/bench-support/src/digest.rs": "fbe5b9da074b330ede289a8e2561f8e43de387c1f525cc9907eb44610ef84027",
+    "crates/graph-compiler/src/canonical.rs": "0925bc7e49c6411e8222fc0f2c0e4666be7aebc0c4cc0375b64e72b70cf000c5",
+    "crates/graph-compiler/src/bin/graph_fixture.rs": "76f827458fc966e1426c5468597cfa4a1449e7d3c9488ef415796bee444fca82",
+    "crates/math/tests/m2_lane_identity.rs": "93e749a86c53e76fb448510f126a9fa79bcd23168b74ef589183db7ddca6b13d",
+    "crates/math/tests/m3_determinism.rs": "d7dda875934a267e4695c09599907b9a43d2fd146169c1f8407a0c52d3426a73",
+    "crates/effect-runtime/tests/determinism.rs": "1d43dc635101596d97ac5284bf832aa2e2dc56420b2a13ac1d9dd0c631decda7",
+    "tools/native-pcm-runner/src/lib.rs": "07f77b7f8a49d5b59d8e232594f02712831f5c9ab6d66bd46b482ac3f5048b8c",
+    "tools/wasm-gates/src/lib.rs": "033fb8cce50d2e59b523b89cc27dd32e4c2df6a4970dbd16715134795cc0d751",
+    "hosts/host-web/examples/sdk_render_oracle.rs": "6a31a989a3c62c19f33b16cfe8bea40737cc91497fce2739e4323e00e728f033",
+    "hosts/host-web/src/tests.rs": "547748632bebcb651ec943e69dc488e288f02f5bb509333f1ec99ec1f587cd43",
+    "crates/effect-compiler/tests/migration_terminal.rs": "0952f637818719edd15d75bc4a4d81dc0155fbd1b961a9485d15a7cc76c79e01",
+    "tools/parameter-metadata/src/bin/lattice_oracle.rs": "510e59c20698711b11238d80d2249cbaadb1541ae637f72df071ef898ae9069f",
+    "crates/effect-package/tests/package_v1_qualification.rs": "af4fe188a13b822cf9313f1e13620ac539d559ff3f4f6b9ad21827af75f3302f",
+    "tools/stem-hasher/src/lib.rs": "f50ac97a27b7e4b41379b99d7c25bc53cb1810e70916d94cf68c750dc23a0a30",
+    "tools/stem-hasher/tests/conformance.rs": "18215bd782c06fb2d4a80241d652045a6e5a52ccde03217e53d4064d01554e5d",
+    "crates/math/Cargo.toml": "94330c85aadc33f9b24d0c631e8a50f5bb7b83eee6c827102626524376b74c3a",
+    "crates/effect-runtime/Cargo.toml": "95b59293925a66da75a2c7130aeb10e8f4f08565c6d58e2c823b12682ded2390",
+    "tools/native-pcm-runner/Cargo.toml": "528d5738a8dc7e10392836f0fdaf88f4ebca687713e2528e3a0a0f1aacfc9198",
+    "tools/stem-hasher/Cargo.toml": "7ce3603ee219bfe2d7e79bc184f7d898ac61440b390b129bc32563c806e7911c"
+  }
+}

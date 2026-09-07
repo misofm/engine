@@ -1,0 +1,13 @@
+crates/true-peak-limiter/tests/determinism.rs:66:        let bytes: Vec<String> = scalar.iter().map(|byte| format!("0x{byte:02x}")).collect();
+crates/multiband-compressor/tests/cross_target_digest.rs:46:            repin.push_str(&format!("0x{byte:02x}, "));
+crates/parametric-eq/tests/determinism.rs:69:        let bytes: Vec<String> = scalar.iter().map(|byte| format!("0x{byte:02x}")).collect();
+crates/parametric-eq/tests/determinism.rs:139:        let bytes: Vec<String> = digest.iter().map(|byte| format!("0x{byte:02x}")).collect();
+crates/graph-compiler/src/bin/rack_fixture.rs:174:        write!(output, "{byte:02x}").expect("string");
+crates/effect-runtime/tests/determinism.rs:64:        let bytes: Vec<String> = scalar.iter().map(|b| format!("0x{b:02x}")).collect();
+crates/effect-runtime/tests/determinism.rs:132:        let bytes: Vec<String> = digest.iter().map(|b| format!("0x{b:02x}")).collect();
+crates/gate-expander/tests/determinism.rs:55:            let bytes: Vec<String> = row.iter().map(|byte| format!("0x{byte:02x},")).collect();
+crates/transient-shaper/tests/cross_target.rs:77:            .map(|byte| format!("0x{byte:02x}"))
+crates/engine/src/lib.rs:9:    const HEX: &[u8; 16] = b"0123456789abcdef";
+crates/compressor/tests/cross_target.rs:84:        let bytes: Vec<String> = scalar.iter().map(|byte| format!("0x{byte:02x}")).collect();
+crates/builtins/tests/determinism.rs:48:        let bytes: Vec<String> = scalar.iter().map(|byte| format!("0x{byte:02x}")).collect();
+crates/soft-clip/tests/determinism.rs:29:        text.push_str(&format!("0x{byte:02x}, "));

@@ -1,0 +1,36 @@
+{
+  "argv": [
+    "rg",
+    "-n",
+    "--glob",
+    "!target/**",
+    "(byte:02x|b:02x|char::from_digit|const HEX)",
+    "tools/bench-support/src/digest.rs",
+    "crates/graph-compiler/src/canonical.rs",
+    "crates/graph-compiler/src/bin/graph_fixture.rs",
+    "crates/math/tests/m2_lane_identity.rs",
+    "crates/math/tests/m3_determinism.rs",
+    "crates/effect-runtime/tests/determinism.rs",
+    "tools/native-pcm-runner/src/lib.rs",
+    "tools/wasm-gates/src/lib.rs",
+    "hosts/host-web/examples/sdk_render_oracle.rs",
+    "hosts/host-web/src/tests.rs",
+    "crates/effect-compiler/tests/migration_terminal.rs",
+    "tools/parameter-metadata/src/bin/lattice_oracle.rs",
+    "crates/effect-package/tests/package_v1_qualification.rs",
+    "tools/stem-hasher/src/lib.rs",
+    "tools/stem-hasher/tests/conformance.rs",
+    "crates/protocol/src/controller.rs",
+    "crates/protocol/src/message_wire.rs",
+    "crates/protocol/src/session_wire.rs",
+    "crates/graph-compiler/src/bin/rack_fixture.rs",
+    "fixtures/rack/v1"
+  ],
+  "cwd": "/home/bl/misofm/engine-shared-hex-authority",
+  "environment": {
+    "CARGO_TARGET_DIR": "/tmp/issue543-target"
+  },
+  "git_head_before": "acd57011eed98bf87975c36eb2c5070500897e0c",
+  "git_status_before": [],
+  "selected_source_sha256_before": {}
+}

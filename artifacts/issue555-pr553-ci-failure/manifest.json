@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "head": "be1e20743610b359261e7155845421f778be4bbf",
+  "base": "1757b9e4521fea43c7a54b4bc7d5f40cbb5fd41b",
+  "run": "34122602614",
+  "jobs": {
+    "chromium": "101744537209",
+    "firefox": "101744537252"
+  },
+  "files": [
+    {
+      "sha256": "ff863bbffec7269f65a2070b77061c67a47089846b6b5471b579e06f1d047e7f",
+      "path": "artifacts/issue555-pr553-ci-failure/chromium.log.gz"
+    },
+    {
+      "sha256": "c473c00a7a1a756ea37240139734e131f8ba9bf39b4943e6bc307b2dee9611bd",
+      "path": "artifacts/issue555-pr553-ci-failure/firefox.log.gz"
+    },
+    {
+      "sha256": "178f73bca2d22226b2845610684efc052b6313f46be0474dd25ba12f51a848df",
+      "path": "artifacts/issue555-pr553-ci-failure/run.json"
+    }
+  ]
+}

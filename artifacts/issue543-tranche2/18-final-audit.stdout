@@ -1,0 +1,81 @@
+ Cargo.lock                                         |  4 ++++
+ crates/effect-compiler/tests/migration_terminal.rs |  2 +-
+ .../tests/package_v1_qualification.rs              |  8 +------
+ crates/effect-runtime/Cargo.toml                   |  1 +
+ crates/effect-runtime/tests/determinism.rs         |  2 +-
+ crates/graph-compiler/src/bin/graph_fixture.rs     |  6 +----
+ crates/graph-compiler/src/canonical.rs             |  7 +-----
+ crates/math/Cargo.toml                             |  1 +
+ crates/math/tests/m2_lane_identity.rs              |  2 +-
+ crates/math/tests/m3_determinism.rs                |  2 +-
+ hosts/host-web/examples/sdk_render_oracle.rs       |  6 +----
+ hosts/host-web/src/tests.rs                        | 27 +++-------------------
+ tools/bench-support/src/digest.rs                  |  7 +-----
+ tools/native-pcm-runner/Cargo.toml                 |  1 +
+ tools/native-pcm-runner/src/lib.rs                 |  2 +-
+ tools/parameter-metadata/src/bin/lattice_oracle.rs |  6 +----
+ tools/stem-hasher/Cargo.toml                       |  1 +
+ tools/stem-hasher/src/lib.rs                       |  8 +------
+ tools/stem-hasher/tests/conformance.rs             |  8 +------
+ tools/wasm-gates/src/lib.rs                        |  7 +-----
+ 20 files changed, 25 insertions(+), 83 deletions(-)
+ M Cargo.lock
+ M crates/effect-compiler/tests/migration_terminal.rs
+ M crates/effect-package/tests/package_v1_qualification.rs
+ M crates/effect-runtime/Cargo.toml
+ M crates/effect-runtime/tests/determinism.rs
+ M crates/graph-compiler/src/bin/graph_fixture.rs
+ M crates/graph-compiler/src/canonical.rs
+ M crates/math/Cargo.toml
+ M crates/math/tests/m2_lane_identity.rs
+ M crates/math/tests/m3_determinism.rs
+ M hosts/host-web/examples/sdk_render_oracle.rs
+ M hosts/host-web/src/tests.rs
+ M tools/bench-support/src/digest.rs
+ M tools/native-pcm-runner/Cargo.toml
+ M tools/native-pcm-runner/src/lib.rs
+ M tools/parameter-metadata/src/bin/lattice_oracle.rs
+ M tools/stem-hasher/Cargo.toml
+ M tools/stem-hasher/src/lib.rs
+ M tools/stem-hasher/tests/conformance.rs
+ M tools/wasm-gates/src/lib.rs
+Cargo.lock
+crates/effect-compiler/tests/migration_terminal.rs
+crates/effect-package/tests/package_v1_qualification.rs
+crates/effect-runtime/Cargo.toml
+crates/effect-runtime/tests/determinism.rs
+crates/graph-compiler/src/bin/graph_fixture.rs
+crates/graph-compiler/src/canonical.rs
+crates/math/Cargo.toml
+crates/math/tests/m2_lane_identity.rs
+crates/math/tests/m3_determinism.rs
+hosts/host-web/examples/sdk_render_oracle.rs
+hosts/host-web/src/tests.rs
+tools/bench-support/src/digest.rs
+tools/native-pcm-runner/Cargo.toml
+tools/native-pcm-runner/src/lib.rs
+tools/parameter-metadata/src/bin/lattice_oracle.rs
+tools/stem-hasher/Cargo.toml
+tools/stem-hasher/src/lib.rs
+tools/stem-hasher/tests/conformance.rs
+tools/wasm-gates/src/lib.rs
+ec25bc5f2aa11a2831c972e6c354ac902fe78e478bd1771f5845da0850e97210  Cargo.lock
+0952f637818719edd15d75bc4a4d81dc0155fbd1b961a9485d15a7cc76c79e01  crates/effect-compiler/tests/migration_terminal.rs
+af4fe188a13b822cf9313f1e13620ac539d559ff3f4f6b9ad21827af75f3302f  crates/effect-package/tests/package_v1_qualification.rs
+95b59293925a66da75a2c7130aeb10e8f4f08565c6d58e2c823b12682ded2390  crates/effect-runtime/Cargo.toml
+1d43dc635101596d97ac5284bf832aa2e2dc56420b2a13ac1d9dd0c631decda7  crates/effect-runtime/tests/determinism.rs
+76f827458fc966e1426c5468597cfa4a1449e7d3c9488ef415796bee444fca82  crates/graph-compiler/src/bin/graph_fixture.rs
+0925bc7e49c6411e8222fc0f2c0e4666be7aebc0c4cc0375b64e72b70cf000c5  crates/graph-compiler/src/canonical.rs
+94330c85aadc33f9b24d0c631e8a50f5bb7b83eee6c827102626524376b74c3a  crates/math/Cargo.toml
+93e749a86c53e76fb448510f126a9fa79bcd23168b74ef589183db7ddca6b13d  crates/math/tests/m2_lane_identity.rs
+d7dda875934a267e4695c09599907b9a43d2fd146169c1f8407a0c52d3426a73  crates/math/tests/m3_determinism.rs
+6a31a989a3c62c19f33b16cfe8bea40737cc91497fce2739e4323e00e728f033  hosts/host-web/examples/sdk_render_oracle.rs
+547748632bebcb651ec943e69dc488e288f02f5bb509333f1ec99ec1f587cd43  hosts/host-web/src/tests.rs
+fbe5b9da074b330ede289a8e2561f8e43de387c1f525cc9907eb44610ef84027  tools/bench-support/src/digest.rs
+528d5738a8dc7e10392836f0fdaf88f4ebca687713e2528e3a0a0f1aacfc9198  tools/native-pcm-runner/Cargo.toml
+07f77b7f8a49d5b59d8e232594f02712831f5c9ab6d66bd46b482ac3f5048b8c  tools/native-pcm-runner/src/lib.rs
+510e59c20698711b11238d80d2249cbaadb1541ae637f72df071ef898ae9069f  tools/parameter-metadata/src/bin/lattice_oracle.rs
+7ce3603ee219bfe2d7e79bc184f7d898ac61440b390b129bc32563c806e7911c  tools/stem-hasher/Cargo.toml
+f50ac97a27b7e4b41379b99d7c25bc53cb1810e70916d94cf68c750dc23a0a30  tools/stem-hasher/src/lib.rs
+18215bd782c06fb2d4a80241d652045a6e5a52ccde03217e53d4064d01554e5d  tools/stem-hasher/tests/conformance.rs
+033fb8cce50d2e59b523b89cc27dd32e4c2df6a4970dbd16715134795cc0d751  tools/wasm-gates/src/lib.rs

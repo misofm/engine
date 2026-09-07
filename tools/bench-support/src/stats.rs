@@ -31,10 +31,10 @@ pub fn per_mille<T: Copy>(sorted: &[T], per_mille: usize) -> T {
     nearest_rank(sorted, per_mille, 1_000)
 }
 
-/// Nearest-rank min/p50/p95/p99/max over one leg's per-block nanoseconds.
+/// Nearest-rank min/p50/p95/p99/p99.9/max over one leg's per-block nanoseconds.
 ///
 /// Audit #104 F4: the native console benchmark and the #163 phase 2 wasm console arm each defined
-/// this same five-field summary over the same percentiles. One definition, so the two legs' ratio
+/// this same six-field summary over the same percentiles. One definition, so the two legs' ratio
 /// is computed the same way on both sides of the comparison.
 pub struct Percentiles {
     /// The minimum observation.
@@ -45,12 +45,14 @@ pub struct Percentiles {
     pub p95: u64,
     /// The 99th percentile.
     pub p99: u64,
+    /// The 99.9th percentile.
+    pub p999: u64,
     /// The maximum observation.
     pub max: u64,
 }
 
 impl Percentiles {
-    /// Compute min/p50/p95/p99/max over `samples`.
+    /// Compute min/p50/p95/p99/p99.9/max over `samples`.
     ///
     /// # Panics
     ///
@@ -67,6 +69,7 @@ impl Percentiles {
             p50: rank(50, 100),
             p95: rank(95, 100),
             p99: rank(99, 100),
+            p999: rank(999, 1_000),
             max: *sorted.last().expect("nonempty"),
         }
     }
@@ -86,7 +89,26 @@ pub fn format_f64(value: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{nearest_rank, per_mille};
+    use super::{Percentiles, nearest_rank, per_mille};
+
+    #[test]
+    fn percentiles_cover_the_complete_tuple_over_one_thousand_observations() {
+        let samples: Vec<_> = (1..=1_000).collect();
+        let p = Percentiles::from_samples(&samples);
+        assert_eq!(
+            (p.min, p.p50, p.p95, p.p99, p.p999, p.max),
+            (1, 500, 950, 990, 999, 1_000)
+        );
+    }
+
+    #[test]
+    fn percentiles_sort_an_unsorted_short_sample() {
+        let p = Percentiles::from_samples(&[3, 1, 2]);
+        assert_eq!(
+            (p.min, p.p50, p.p95, p.p99, p.p999, p.max),
+            (1, 2, 3, 3, 3, 3)
+        );
+    }
 
     #[test]
     fn frozen_indices_over_one_thousand_observations() {

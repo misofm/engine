@@ -1,0 +1,21 @@
+{
+  "argv": [
+    "/home/bl/.local/bin/codex",
+    "exec",
+    "-C",
+    "/home/bl/misofm/engine-shared-hex-authority",
+    "-s",
+    "danger-full-access",
+    "resume",
+    "-m",
+    "gpt-5.6-sol",
+    "-c",
+    "model_reasoning_effort=\"xhigh\"",
+    "-o",
+    "/tmp/issue349-partials/543-sol-xhigh-attempt2.md",
+    "01a07b29-559c-75e0-b0b7-f4b358a6d3a0",
+    "-"
+  ],
+  "cwd": "/home/bl/misofm/engine-shared-hex-authority",
+  "prompt": "/tmp/issue349-partials/543-attempt2-review-prompt.md"
+}

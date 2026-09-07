@@ -56,13 +56,7 @@ fn hex(value: &str) -> Vec<u8> {
 }
 
 fn hex_string(bytes: &[u8]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        output.push(char::from(DIGITS[(byte >> 4) as usize]));
-        output.push(char::from(DIGITS[(byte & 15) as usize]));
-    }
-    output
+    engine::hex_lower(bytes)
 }
 
 fn kind_value(kind: EffectArtifactKind) -> u32 {

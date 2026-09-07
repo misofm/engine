@@ -3,7 +3,7 @@
 use bench_support::alloc as bench_alloc;
 use bench_support::digest::{hex, sha256_hex};
 use bench_support::json;
-use bench_support::stats;
+use bench_support::stats::Percentiles;
 use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 use graph_compiler::Backend;
 use std::time::Instant;
@@ -1749,30 +1749,6 @@ fn json_string(value: &str) -> String {
     format!("\"{}\"", json::escape(value))
 }
 
-struct Percentiles {
-    min: u64,
-    p50: u64,
-    p95: u64,
-    p99: u64,
-    p999: u64,
-    max: u64,
-}
-impl Percentiles {
-    fn from_samples(samples: &[u64]) -> Self {
-        let mut sorted = samples.to_vec();
-        sorted.sort_unstable();
-        assert!(!sorted.is_empty(), "measured batches");
-        let rank = |n: usize, d: usize| stats::nearest_rank(&sorted, n, d);
-        Self {
-            min: sorted[0],
-            p50: rank(50, 100),
-            p95: rank(95, 100),
-            p99: rank(99, 100),
-            p999: rank(999, 1000),
-            max: *sorted.last().expect("nonempty"),
-        }
-    }
-}
 fn sha256(bytes: &[u8]) -> String {
     sha256_hex(bytes)
 }
@@ -1810,6 +1786,9 @@ mod tests {
         assert!(record.contains("\"workload_id\":\"issue035.full_chain_filters.48000hz.q128\""));
         assert!(record.contains("\"total_operations\":4096"));
         assert!(record.contains("\"units\":\"ns_per_operation\""));
+        assert!(record.contains(
+            "\"min_ns\":1,\"p50_ns\":2,\"p95_ns\":3,\"p99_ns\":3,\"p99_9_ns\":3,\"max_ns\":3,"
+        ));
         assert!(record.contains("\"frames_per_operation\":128"));
         assert!(record.contains("\"meter_queue_capacity\":null"));
         assert!(record.contains(

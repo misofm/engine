@@ -24,7 +24,7 @@ fn case_digest<L: Lane>(case: usize) -> [u8; 32] {
 }
 
 fn hex(bytes: &[u8; 32]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    engine::hex_lower(bytes)
 }
 
 /// Every case matches its pin, at all three widths.

@@ -1,0 +1,12 @@
+{
+  "argv": [
+    "env",
+    "CARGO_TARGET_DIR=/tmp/issue543-target",
+    "cargo",
+    "test",
+    "--locked",
+    "-p",
+    "protocol"
+  ],
+  "cwd": "/home/bl/misofm/engine-shared-hex-authority"
+}

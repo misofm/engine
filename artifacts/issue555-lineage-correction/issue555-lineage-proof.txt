@@ -1,0 +1,8 @@
+semantic proof: PASS; changed parsed keys = candidateCommit, wasmSha256 only
+semantic proof: PASS; every non-lineage field and all browser rows are identical
+textual proof: PASS; matrix changed exactly one line (4)
+textual before: This matrix is generated from the pinned Playwright 1.62.1 headless Linux qualification run over candidate `62366ba20cab5742aa6e0636f428ec18365104bf` and the single shipped simd128 AudioWorklet artifact `1bc18ab8cfb3e2a3e5a0ebeda185a64551e8398870abb2f3581077da0dfd3a3f`. The version shown is the lowest version qualified by this run; older versions are unqualified, not implicitly supported.
+textual after:  This matrix is generated from the pinned Playwright 1.62.1 headless Linux qualification run over candidate `e4f46fa808e413507d204e81b6a4ebc27254869c` and the single shipped simd128 AudioWorklet artifact `6452f0db237da1d57b3594e7d95dd53a089a604d5b0791ea8b3533c5930c5a1c`. The version shown is the lowest version qualified by this run; older versions are unqualified, not implicitly supported.
+generator consistency: PASS; renderMatrix(results.json) equals committed matrix
+static lineage preflight: PASS; candidateCommit canonical and retained post-pin artifact SHA matches wasmSha256
+artifact SHA-256: 6452f0db237da1d57b3594e7d95dd53a089a604d5b0791ea8b3533c5930c5a1c
