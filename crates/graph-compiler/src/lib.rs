@@ -313,7 +313,8 @@ mod tests {
         BuiltinCompileCaps, MeterRequest, PreparedBuiltinsCorruption,
         PreparedBuiltinsCorruptionCase, TrackControlRequest, TrackFaderRecord,
         prepare_session_builtins, prepare_session_builtins_between_render_calls,
-        prepare_session_builtins_with_console,
+        prepare_session_builtins_with_console, test_only_fader_matrix_witness,
+        test_only_reset_fader_matrix_witness,
     };
     use conformance::DualAccumulatorDelayFactory;
     use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
@@ -6729,8 +6730,12 @@ mod tests {
                     if matches!(track_id.as_str(), "ch00" | "ch01")
             )
         });
-        let artifact =
-            compile_console_model_with_builtins(&model, 2_140, &[], &scalar_console_registry());
+        let artifact = compile_scalar_live_console_model(&model, 2_140);
+        assert_eq!(
+            artifact.prepared_builtin_bank_count(),
+            0,
+            "explicit scalar dispatch must leave the target builtin tracks unbanked"
+        );
         let schedule = &artifact.graph().sequential_schedule;
         let position = |track: &str, stage: TrackStage| {
             schedule
@@ -6752,6 +6757,88 @@ mod tests {
             fader_a < fader_b && fader_b < matrix_a && matrix_a < matrix_b,
             "the compiler must provide F_A -> F_B -> M_A -> M_B: {fader_a}, {fader_b}, {matrix_a}, {matrix_b}"
         );
+
+        let program = artifact
+            .graph()
+            .program()
+            .expect("production graph lowers to an execution program");
+        let node_index = |track: &str, stage: TrackStage| {
+            artifact
+                .graph()
+                .spec
+                .nodes
+                .iter()
+                .position(|node| {
+                    node.id
+                        == GraphNodeId::TrackStage {
+                            track_id: gid(track),
+                            stage,
+                        }
+                })
+                .expect("stage in lowered program")
+        };
+        let fader_op = program.ops[program.node_op[node_index("ch00", TrackStage::PostFader)]
+            .expect("fader op") as usize];
+        let matrix_op = program.ops[program.node_op[node_index("ch00", TrackStage::PostMatrix)]
+            .expect("matrix op") as usize];
+        let matrix_input = program
+            .inputs_of(&matrix_op)
+            .first()
+            .expect("matrix main input");
+        assert_eq!(
+            fader_op.output, matrix_input.buffer,
+            "the lowered matrix must read the fader's physical output buffer"
+        );
+        assert_eq!(
+            fader_op.output, matrix_op.output,
+            "the lowered F_A/M_A pair must share one physical output buffer"
+        );
+        assert!(
+            matrix_op.in_place,
+            "the lowered matrix must retain the in-place witness"
+        );
+
+        static PAIR_WITNESS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = PAIR_WITNESS_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        test_only_reset_fader_matrix_witness();
+        let envelope = artifact.envelope();
+        let frames = envelope.quantum.0 as usize;
+        let nodes = artifact
+            .external_binding_nodes()
+            .map(|node| GraphNodeBinding::new(node.clone(), console_track_sustained_binding(node)))
+            .collect();
+        let bound = artifact
+            .into_bound(GraphRuntimeBindings {
+                envelope,
+                nodes,
+                observers: Vec::new(),
+            })
+            .unwrap_or_else(|failure| panic!("production console bind: {}", failure.code));
+        let witness = test_only_fader_matrix_witness();
+        assert_eq!(
+            (witness.factory_calls, witness.factory_members),
+            (1, 1),
+            "binding must select exactly one split fader/matrix factory and member"
+        );
+        let mut plan = bound.plan;
+        let mut rendered_nonzero = false;
+        for block in 0..12_u64 {
+            let mut pcm = vec![0.0_f32; frames * 2];
+            plan.render(
+                RenderIo {
+                    input: None,
+                    output: PlanarBufferMut::try_new(&mut pcm, 2, frames, frames).expect("output"),
+                },
+                RenderTime {
+                    absolute_sample: block * frames as u64,
+                },
+            )
+            .expect("scalar live console render");
+            rendered_nonzero |= pcm.iter().any(|sample| *sample != 0.0);
+        }
+        assert!(rendered_nonzero, "rendered audio must be nonzero");
     }
 
     /// Issue #212: a meter leased at `PostFader` splits the chain there, and still meters right.
@@ -7066,6 +7153,71 @@ mod tests {
             caps: integration_caps(),
         })
         .unwrap_or_else(|_| panic!("production console graph"))
+    }
+
+    /// Compile a live-control console model through the production scalar path. This fixture is
+    /// intentionally separate from the broad host-dispatch helper above: the split-pair seam is
+    /// eligible only for between-render-call controls, and scalar dispatch must disable every
+    /// builtin bank before the graph is bound.
+    fn compile_scalar_live_console_model(
+        model: &session::SessionModel,
+        plan_id: u64,
+    ) -> PreparedGraphBuiltinsArtifact {
+        let session = compile_session(
+            model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("compiled live console model");
+        let controls: Vec<TrackControlRequest> = model
+            .tracks
+            .iter()
+            .map(|track| TrackControlRequest {
+                track_id: track.id.as_str().to_owned(),
+                queue_capacity: NonZeroUsize::new(16).expect("constant"),
+            })
+            .collect();
+        let builtins = prepare_session_builtins_between_render_calls(
+            &session,
+            &[],
+            &controls,
+            BuiltinCompileCaps {
+                maximum_total_state_bytes: u64::MAX,
+                maximum_total_retained_payload_bytes: u64::MAX,
+                maximum_total_meter_items: u64::MAX,
+                maximum_total_meter_bytes: u64::MAX,
+                maximum_single_allocation_bytes: u64::MAX,
+                maximum_meter_streams: u64::MAX,
+                maximum_period_frames: u32::MAX,
+                maximum_peak_hold_frames: u32::MAX,
+                maximum_smoothing_samples: u32::MAX,
+            },
+        )
+        .expect("prepared between-render-call console builtins");
+        let registry = scalar_console_registry();
+        GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+            dispatch: Backend::Scalar,
+            plan_id,
+            effects: prepare_native_session_effects(
+                &session,
+                &registry,
+                EffectCompileCaps {
+                    maximum_total_state_bytes: 1 << 22,
+                    maximum_scratch_bytes: 1 << 20,
+                    maximum_automation_spans_per_block: 32,
+                },
+            )
+            .expect("prepared scalar console effects"),
+            builtins,
+            caps: integration_caps(),
+        })
+        .unwrap_or_else(|_| panic!("production scalar live console graph"))
     }
 
     /// The registry that forces every console effect onto the per-node scalar path.
