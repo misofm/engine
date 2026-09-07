@@ -236,3 +236,23 @@ release/static/supported-target gates. The production minimum is track A across 
 synthetic B-across-`M_A` harness does not substitute for it. No artifact qualification, benchmark
 or performance claim is authorized. This is failed attempt 1 of the three-attempt maximum; preserve
 its commits and evidence without weakening any gate.
+
+## Luna attempt 2 production applicability checkpoint
+
+Pushed source `b8775fe5` corrects the attempt-1 fixture entirely within the authorized
+`graph-compiler/src/lib.rs` test path. It compiles the actual two-track console session with
+explicit `Backend::Scalar`, prepares concrete live controls through
+`prepare_session_builtins_between_render_calls`, and asserts zero builtin banks. The semantic
+schedule is the required `F_A,F_B,M_A,M_B`; the independently lowered `ExecutionProgram` proves
+`F_A` and `M_A` share the same physical `BufferRef`, the matrix reads that buffer and is marked
+in-place. Binding the actual production artifact selects exactly one split factory/member, and
+twelve rendered quanta contain nonzero output.
+
+The first attempt-2 probe mistakenly inspected semantic `graph.buffer_assignments`, which
+intentionally gives the stages distinct assignments and is not passed to the runtime binder. Luna
+reverted that probe without checkpointing it. Astra traced the actual binder through independent
+`program::lower`, froze the correct executable-program oracle, and rejected any inapplicability or
+distinct-output conclusion. Root inspected the final diff and reproduced the exact production
+fixture test; format and diff checks pass. The applicability correction is a green checkpoint, not
+attempt-2 PASS. Failed-call PCM observation, full runtime metadata charging, direct settled-envelope
+validation, ramp/retarget/decline/failure-allocation and release/target gates remain.
