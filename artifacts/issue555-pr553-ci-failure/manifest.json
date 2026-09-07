@@ -17,7 +17,7 @@
       "path": "artifacts/issue555-pr553-ci-failure/firefox.log.gz"
     },
     {
-      "sha256": "2fe16aba9ddff97923b18923070ad125ac2b16c90713b53323770b78d9189633",
+      "sha256": "178f73bca2d22226b2845610684efc052b6313f46be0474dd25ba12f51a848df",
       "path": "artifacts/issue555-pr553-ci-failure/run.json"
     }
   ]
