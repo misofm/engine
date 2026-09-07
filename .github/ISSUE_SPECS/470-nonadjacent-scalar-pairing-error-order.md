@@ -135,8 +135,9 @@ AudioWorklet artifact qualification and pin changes after a frozen source checkp
    success and failure, positive audit liveness, exact retained bytes/largest allocation/cap and
    overflow refusal, and single off-render owner release.
 7. Run proportional affected debug/release suites, strict lint/format/realtime policy, supported
-   scalar and SIMD target qualification, then freeze the source for Astra MEDIUM adversarial
-   review. Coordinate any browser artifact qualification with lane B. No timing is authorized.
+   scalar and SIMD target qualification, then freeze the source for Astra LOW adversarial review,
+   following the user's 2026-09-07 verification-routing direction. Coordinate any browser artifact
+   qualification with lane B. No timing is authorized.
 
 Luna must pause at each coherent compiling/focused-green tranche for root's exact-path status,
 commit and upstream audit. This is attempt 1. If the implementation needs a second scheduler,
