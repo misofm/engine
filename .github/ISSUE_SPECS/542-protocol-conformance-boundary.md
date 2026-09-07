@@ -314,7 +314,7 @@ counter-mutant that changes that helper to swallow a failing sort status passes 
 fixture suite. The exact mutant and exit are preserved under `artifacts/issue542-attempt3-review/`.
 
 This is the third attempt and no further #542 implementation is authorized. Root preserves this
-failed checkpoint and opens a new bounded successor for one workspace-sort status injection that
+failed checkpoint. Successor #567 owns one workspace-sort status injection that
 runs after TOML extraction succeeds, while retaining the separate TOML sort controls. #542 remains
 open and undelivered until the successor carries the already accepted product source through
 review, required qualification, merge, GitHub synchronization and cleanup.
