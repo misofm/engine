@@ -1,0 +1,34 @@
+stem-store operator path self-test: PASS
+{"eval":"cold-open-latency","stems":8,"canonicalBytes":2097152,"coldMs":107.985,"warmVerifyMs":46.999,"budgetsMs":{"cold":5000,"warmVerify":2000}}
+stem-store-core-v1: PASS (budget asserts skipped: 3)
+stem-pump-v1: PASS
+RED: provenance primary bytes mutated
+RED: provenance helper bytes mutated
+RED: provenance dependency roster removed
+RED: provenance extra dependency
+RED: provenance renamed dependency
+RED: provenance different well-formed dependency hash
+RED: content-key -> per-session store directory [target: mix B fetches only its two misses]
+RED: remove Web Lock single-flight
+RED: skip pre-promote staging verification
+RED: insert index before promote verification
+RED: open interaction gate while stems are missing
+RED: trust warm filename without verify-on-open
+RED: match one access-handle contention error name
+RED: disable wedged decoder read deadline [target: wedged decoder escaped its deadline]
+RED: omit AbortSignal from wedged decoder read race [target: wedged decoder ignored mix-switch abort]
+RED: retain predecessor pin on same-session replacement [target: same-session replacement waited on its own predecessor pin lock]
+RED: treat missing index as an empty authoritative index [target: missing crash-only index must adopt a self-verifying final without re-ingest]
+RED: count an opening-session survivor as write-time evictable [target: write-time quota accounting counted an opening-session survivor as evictable]
+RED: allow a stale estimate to report zero write-time shortfall [target: write-time quota race reported a zero shortfall]
+RED: restore the pre-successor direct fallback final write [target: fallback final write ignored mix-switch abort]
+RED: drop the streamed-ingest byte-length check [target: a lying declaration is refused before the pre-promote reopen]
+RED: drop the streamed and pre-promote byte-length checks [target: a lying declaration must never be promoted]
+RED: drop the streamed, pre-promote, and fallback-final byte-length checks [target: a lying declaration must never survive fallback promotion]
+RED: drop the verify-on-open byte-length check [target: verify-on-open must demote a lying declaration to a miss]
+RED: fill staging to the stream end before refusing an over-length delivery [target: over-length delivery is refused before staging fills past the declaration]
+RED: drop every open-time byte-length check [target: a lying declaration must never survive fallback promotion]
+RED: drive the pump loop by default [target: an un-driven worker writes nothing on its own]
+RED: let stop leave the idle sleep pending [target: stop cancelled the idle timer rather than waiting it out]
+RED: pump network API tripwire
+stem-store-v1 gate: PASS (budget asserts skipped: 3)

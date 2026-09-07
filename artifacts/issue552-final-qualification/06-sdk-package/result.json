@@ -1,0 +1,11 @@
+{
+  "name": "06-sdk-package",
+  "argv": [
+    "bash",
+    "scripts/sdk-package.sh",
+    "check",
+    "/tmp/issue555-postpin-artifact"
+  ],
+  "cwd": "/home/bl/misofm/engine-js-hex-recovery",
+  "status": 0
+}

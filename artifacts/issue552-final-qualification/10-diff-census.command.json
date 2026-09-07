@@ -1,0 +1,24 @@
+{
+  "argv": [
+    "bash",
+    "/tmp/issue552-final-qualification-luna/gate10-diff-census.sh"
+  ],
+  "cwd": "/home/bl/misofm/engine-js-hex-recovery",
+  "environment": {},
+  "git_head_before": "3881591d307c7b00e1cc7dfb431b3abf26874717",
+  "git_status_before": [
+    "?? hosts/host-web/qualification/node_modules"
+  ],
+  "selected_source_sha256_before": {
+    "sdk/src/core/hex.ts": "527c820b255dcdf9b4ce15ab0b9b59c3bea3f451b7f9941cc2ea4dd37bca4d1b",
+    "sdk/src/core/asset.ts": "6fa8225245c5176cbbf03df2671eddde34cd58d6e9a61b41380e12b9ee71d7da",
+    "sdk/test/boot-evals.mjs": "049242e78e76abbd841cb8f0f23c6cc7d89abbc0d02e1ce28a444bb9db3caa2a",
+    "hosts/host-web/web/hex-lower.js": "1eb5564599b0ae99ca404f0c139c0eb9abfe48d488bc55a4bad0b9aacd039560",
+    "hosts/host-web/web/stem-store/incremental-sha256.js": "e4519729bc0fede4f4ffd815492f7bb22b97c10d0899c05eb1f63e156f5b0e40",
+    "hosts/host-web/qualification/qualification.js": "30b29223fbb787aa71f40da8b0000a731c7b2bb72b75f7270c02cbd6b72e426b",
+    "hosts/host-web/qualification/server.mjs": "ca041e9d7af6a2e2e4ea2b70077b3bff4e2c51e8a6d89e944326462b0f87730e",
+    "hosts/host-web/tests/stem-store-hash-v1.mjs": "cf2125bd2a80d42cfe0963bd1ad63d2b95360a737bde39b035e4291570a25c34",
+    "hosts/host-web/web/stem-store/incremental-sha256.provenance.json": "fd6200bb0dd8b5663bd22354c957d15f7cca32a15555c2974caf86e87ded595d",
+    "scripts/check-stem-store-v1.mjs": "30833441be1d00fee9ddcf2eff05d6c6cb5b4b760151f055a76b84cd8fec9c63"
+  }
+}

@@ -1,6 +1,7 @@
 import { ABI_LAYOUT } from "../generated/abi.ts";
 import { PROVENANCE } from "../generated/provenance.ts";
 import { MisoEngineError, MisoUsageError } from "./errors.ts";
+import { hexLower } from "./hex.ts";
 
 /**
  * A verified, compiled engine module.
@@ -158,5 +159,5 @@ function constantOf(name: string): number {
  */
 export async function sha256Hex(bytes: Uint8Array<ArrayBuffer>): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", bytes);
-  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return hexLower(new Uint8Array(digest));
 }
