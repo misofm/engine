@@ -298,6 +298,28 @@ fn process_controller_frame<P: ControlProvider>(
     output
 }
 
+#[derive(Clone, Copy)]
+enum ControllerIngress {
+    CallerBuffer,
+    B1b,
+}
+
+fn process_controller_ingress<P: ControlProvider>(
+    controller: &mut ControllerAutomationDelivery<P>,
+    input: &[u8],
+    ingress: ControllerIngress,
+) -> Vec<u8> {
+    match ingress {
+        ControllerIngress::CallerBuffer => process_controller_frame(controller, input),
+        ControllerIngress::B1b => {
+            controller
+                .process_b1b_btlv(input, &mut DecodeScratch::new(&mut [0_u16; 64]))
+                .expect("complete B1b command frame")
+                .frame
+        }
+    }
+}
+
 fn response_status(frame: &[u8]) -> StatusCode {
     match ProtocolCodec::default()
         .decode_typed_response(frame, &mut DecodeScratch::new(&mut [0_u16; 64]))
@@ -1641,6 +1663,14 @@ fn preparation_resources_and_success_path_are_bounded() {
 
 #[test]
 fn controller_points_drive_real_asymmetric_pcm_replay_and_clock_refusal() {
+    for ingress in [ControllerIngress::CallerBuffer, ControllerIngress::B1b] {
+        run_controller_points_drive_real_asymmetric_pcm_replay_and_clock_refusal(ingress);
+    }
+}
+
+fn run_controller_points_drive_real_asymmetric_pcm_replay_and_clock_refusal(
+    ingress: ControllerIngress,
+) {
     let mut fixture = real_controller_fixture();
     let revision = fixture.session.revision();
     let handles = fixture.handles;
@@ -1701,7 +1731,7 @@ fn controller_points_drive_real_asymmetric_pcm_replay_and_clock_refusal() {
 
     let records = [(handles[0], 3, 6.0), (handles[1], 128, -6.0)];
     let encoded = encoded_controller_enqueue(revision, 1, &records);
-    let response = process_controller_frame(&mut controller, &encoded);
+    let response = process_controller_ingress(&mut controller, &encoded, ingress);
     assert_eq!(response_status(&response), StatusCode::Ok);
     let decoded = ProtocolCodec::default()
         .decode_typed_response(&response, &mut DecodeScratch::new(&mut [0_u16; 64]))
@@ -1713,7 +1743,7 @@ fn controller_points_drive_real_asymmetric_pcm_replay_and_clock_refusal() {
             ..
         } if accepted.accepted_records == 2
     ));
-    let replay = process_controller_frame(&mut controller, &encoded);
+    let replay = process_controller_ingress(&mut controller, &encoded, ingress);
     assert_eq!(replay, response);
     let changed = encoded_controller_enqueue(
         revision,
@@ -1721,7 +1751,11 @@ fn controller_points_drive_real_asymmetric_pcm_replay_and_clock_refusal() {
         &[(handles[0], 3, 5.0), (handles[1], 128, -6.0)],
     );
     assert_eq!(
-        response_status(&process_controller_frame(&mut controller, &changed)),
+        response_status(&process_controller_ingress(
+            &mut controller,
+            &changed,
+            ingress,
+        )),
         StatusCode::RequestIdReuse
     );
     assert_eq!(controller.outstanding(), 1);
@@ -1889,9 +1923,10 @@ fn controller_points_drive_real_asymmetric_pcm_replay_and_clock_refusal() {
         .clock
         .0
         .store(snapshot.next_sample.0, Ordering::Release);
-    let past = process_controller_frame(
+    let past = process_controller_ingress(
         &mut controller,
         &encoded_controller_enqueue(revision, 100, &[(handles[0], 200, 1.0)]),
+        ingress,
     );
     assert_eq!(response_status(&past), StatusCode::TimeInPast);
     assert_eq!(controller.outstanding(), 0);
@@ -1911,6 +1946,14 @@ fn controller_points_drive_real_asymmetric_pcm_replay_and_clock_refusal() {
 
 #[test]
 fn controller_cancellation_keeps_real_prefix_event_credit_and_native_state() {
+    for ingress in [ControllerIngress::CallerBuffer, ControllerIngress::B1b] {
+        run_controller_cancellation_keeps_real_prefix_event_credit_and_native_state(ingress);
+    }
+}
+
+fn run_controller_cancellation_keeps_real_prefix_event_credit_and_native_state(
+    ingress: ControllerIngress,
+) {
     let mut fixture = real_controller_fixture();
     let revision = fixture.session.revision();
     let handles = fixture.handles;
@@ -1931,13 +1974,14 @@ fn controller_cancellation_keeps_real_prefix_event_credit_and_native_state() {
         },
     )
     .expect("combined cancellation preparation");
-    let response = process_controller_frame(
+    let response = process_controller_ingress(
         &mut controller,
         &encoded_controller_enqueue(
             revision,
             10,
             &[(handles[0], 3, 6.0), (handles[1], 200, -6.0)],
         ),
+        ingress,
     );
     assert_eq!(response_status(&response), StatusCode::Ok);
     let ticket = match controller.try_handoff_next().unwrap() {
@@ -2057,9 +2101,10 @@ fn controller_cancellation_keeps_real_prefix_event_credit_and_native_state() {
         Some(1)
     );
 
-    let replacement = process_controller_frame(
+    let replacement = process_controller_ingress(
         &mut controller,
         &encoded_controller_enqueue(revision, 12, &[(handles[0], 300, 2.0)]),
+        ingress,
     );
     assert_eq!(response_status(&replacement), StatusCode::Ok);
     let replacement_ticket = match controller.try_handoff_next().unwrap() {

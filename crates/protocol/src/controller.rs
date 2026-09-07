@@ -18,6 +18,16 @@ std::thread_local! {
     static TYPED_COMMAND_DECODES: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
 }
 
+#[cfg(test)]
+pub(crate) fn reset_typed_command_decodes() {
+    TYPED_COMMAND_DECODES.with(|decodes| decodes.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn typed_command_decodes() -> usize {
+    TYPED_COMMAND_DECODES.with(core::cell::Cell::get)
+}
+
 #[cfg(any(test, feature = "test-support"))]
 use crate::TransportState;
 use crate::delivery::{DeliveryContext, PreparedDeliveryCapabilities};
