@@ -6035,12 +6035,7 @@ mod tests {
             frame
         }
         fn hex(bytes: &[u8]) -> String {
-            let mut result = String::with_capacity(bytes.len() * 2);
-            for byte in bytes {
-                use core::fmt::Write as _;
-                write!(result, "{byte:02x}").expect("hex");
-            }
-            result
+            engine::hex_lower(bytes)
         }
 
         let codec = ProtocolCodec::default();

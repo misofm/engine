@@ -1,0 +1,8 @@
+path=/tmp/issue555-postpin-artifact
+initial_state=absent
+non_symlink_directory=false (path absent)
+builder_requirement=existing non-symlink directory
+builder_status=2
+builder_stderr=output must be an existing non-symlink directory
+emitted_artifact_files=0
+later_checks=not_run

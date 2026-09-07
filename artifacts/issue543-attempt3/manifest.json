@@ -1,0 +1,938 @@
+[
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/01.argv",
+    "packed": "artifacts/issue543-attempt3/000-01.argv.gz",
+    "source_bytes": 66,
+    "source_sha256": "6d491697e68dccbe789ef8cfeab9f01e30e8ff858cbb8b15ecb52df2d31b9d1e",
+    "packed_bytes": 78,
+    "packed_sha256": "01f5c7f95a00863e78e7a04f432f2e2b3cfe39e913c2b525996bbcd40f239c59"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/01.cwd",
+    "packed": "artifacts/issue543-attempt3/001-01.cwd.gz",
+    "source_bytes": 44,
+    "source_sha256": "2564b8f319e2573791786f76cc5b4537dddb9b97e2d0c8471614504c4e9f1eeb",
+    "packed_bytes": 64,
+    "packed_sha256": "c2b7c0c66ee3a0584ba28fa38e4e02d3d2ce01856afe497974a118f0566a07c7"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/01.env",
+    "packed": "artifacts/issue543-attempt3/002-01.env.gz",
+    "source_bytes": 38,
+    "source_sha256": "d23c3a0ff6dadd7864a4cbb1c2090c899c90861b029cd2667065e60bf7824eb1",
+    "packed_bytes": 56,
+    "packed_sha256": "c5435b67a01b5d9fa7c27af5f2e8158914499dc72eac8882d460567f7fdd202c"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/01.pre-head",
+    "packed": "artifacts/issue543-attempt3/003-01.pre-head.gz",
+    "source_bytes": 41,
+    "source_sha256": "ed44be2bf0d6c1642b86f4350e614d36acba940f7a6fcdcec6923adaf53b6305",
+    "packed_bytes": 59,
+    "packed_sha256": "29890c173cf8db3a508dc49cae8d102b5d008fd9d09016d5e5295a90fe921032"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/01.pre-sha256",
+    "packed": "artifacts/issue543-attempt3/004-01.pre-sha256.gz",
+    "source_bytes": 279,
+    "source_sha256": "1e478f5c656022f8550bf97c78c8defd8a271a5a4f19b1d046a9fa49188ca06d",
+    "packed_bytes": 207,
+    "packed_sha256": "bdc21999c7cd014b55e79621c06ee32f0d8d40d38e6866d98d64df8d0771531e"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/01.pre-status",
+    "packed": "artifacts/issue543-attempt3/005-01.pre-status.gz",
+    "source_bytes": 90,
+    "source_sha256": "b8c71a7492d80e763dcb52e95016e70ef04b095fafbed643d210a28cf013267b",
+    "packed_bytes": 80,
+    "packed_sha256": "30ed28bf218f964806d381851216d135895a5313a6ebe2f41ad7b4325ab393b9"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/01.status",
+    "packed": "artifacts/issue543-attempt3/006-01.status.gz",
+    "source_bytes": 2,
+    "source_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "packed_bytes": 22,
+    "packed_sha256": "cabc3a30b39528db601f65ca3ced008dd775595c901102d08ac8ae8976b29bcf"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/01.stderr",
+    "packed": "artifacts/issue543-attempt3/007-01.stderr.gz",
+    "source_bytes": 0,
+    "source_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "packed_bytes": 20,
+    "packed_sha256": "f61f27bd17de546264aa58f40f3aafaac7021e0ef69c17f6b1b4cd7664a037ec"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/01.stdout",
+    "packed": "artifacts/issue543-attempt3/008-01.stdout.gz",
+    "source_bytes": 368,
+    "source_sha256": "63096988432a5756a690680a303bdb93c394952ed46ec406e96d77c8b5c44286",
+    "packed_bytes": 157,
+    "packed_sha256": "209b91678b4fc149b6f649113cda72089c296833b17606f31fd78f6c7c780efb"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/02.argv",
+    "packed": "artifacts/issue543-attempt3/009-02.argv.gz",
+    "source_bytes": 70,
+    "source_sha256": "e52cfb1887a9663d0425adcc840368215f31642a1187f7c89182b46018ecca4f",
+    "packed_bytes": 81,
+    "packed_sha256": "62aa8ca173e092dc52c9328b5cbec189dcccda5019c4c3873ff55fbe069c49a5"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/02.cwd",
+    "packed": "artifacts/issue543-attempt3/010-02.cwd.gz",
+    "source_bytes": 44,
+    "source_sha256": "2564b8f319e2573791786f76cc5b4537dddb9b97e2d0c8471614504c4e9f1eeb",
+    "packed_bytes": 64,
+    "packed_sha256": "c2b7c0c66ee3a0584ba28fa38e4e02d3d2ce01856afe497974a118f0566a07c7"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/02.env",
+    "packed": "artifacts/issue543-attempt3/011-02.env.gz",
+    "source_bytes": 38,
+    "source_sha256": "d23c3a0ff6dadd7864a4cbb1c2090c899c90861b029cd2667065e60bf7824eb1",
+    "packed_bytes": 56,
+    "packed_sha256": "c5435b67a01b5d9fa7c27af5f2e8158914499dc72eac8882d460567f7fdd202c"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/02.pre-head",
+    "packed": "artifacts/issue543-attempt3/012-02.pre-head.gz",
+    "source_bytes": 41,
+    "source_sha256": "ed44be2bf0d6c1642b86f4350e614d36acba940f7a6fcdcec6923adaf53b6305",
+    "packed_bytes": 59,
+    "packed_sha256": "29890c173cf8db3a508dc49cae8d102b5d008fd9d09016d5e5295a90fe921032"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/02.pre-sha256",
+    "packed": "artifacts/issue543-attempt3/013-02.pre-sha256.gz",
+    "source_bytes": 279,
+    "source_sha256": "1e478f5c656022f8550bf97c78c8defd8a271a5a4f19b1d046a9fa49188ca06d",
+    "packed_bytes": 207,
+    "packed_sha256": "bdc21999c7cd014b55e79621c06ee32f0d8d40d38e6866d98d64df8d0771531e"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/02.pre-status",
+    "packed": "artifacts/issue543-attempt3/014-02.pre-status.gz",
+    "source_bytes": 90,
+    "source_sha256": "b8c71a7492d80e763dcb52e95016e70ef04b095fafbed643d210a28cf013267b",
+    "packed_bytes": 80,
+    "packed_sha256": "30ed28bf218f964806d381851216d135895a5313a6ebe2f41ad7b4325ab393b9"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/02.status",
+    "packed": "artifacts/issue543-attempt3/015-02.status.gz",
+    "source_bytes": 2,
+    "source_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "packed_bytes": 22,
+    "packed_sha256": "cabc3a30b39528db601f65ca3ced008dd775595c901102d08ac8ae8976b29bcf"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/02.stderr",
+    "packed": "artifacts/issue543-attempt3/016-02.stderr.gz",
+    "source_bytes": 0,
+    "source_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "packed_bytes": 20,
+    "packed_sha256": "f61f27bd17de546264aa58f40f3aafaac7021e0ef69c17f6b1b4cd7664a037ec"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/02.stdout",
+    "packed": "artifacts/issue543-attempt3/017-02.stdout.gz",
+    "source_bytes": 1513,
+    "source_sha256": "d17df587be318b391290aee48c4a50dd502c0318457fb30cbc8efc640d44bea9",
+    "packed_bytes": 360,
+    "packed_sha256": "ae90ac7ce7422de123f867ffa809e7b9ebe450a1287337d454feecd390b2e0ca"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/03.argv",
+    "packed": "artifacts/issue543-attempt3/018-03.argv.gz",
+    "source_bytes": 51,
+    "source_sha256": "db16e2c3f34883b4d3bafe47263fd674e321a10c7b52ee1e25aea1758a077233",
+    "packed_bytes": 68,
+    "packed_sha256": "71941352a8a6667b89f1aac2371293135b61e78a5fe31d3ac1bd67c120d331eb"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/03.cwd",
+    "packed": "artifacts/issue543-attempt3/019-03.cwd.gz",
+    "source_bytes": 44,
+    "source_sha256": "2564b8f319e2573791786f76cc5b4537dddb9b97e2d0c8471614504c4e9f1eeb",
+    "packed_bytes": 64,
+    "packed_sha256": "c2b7c0c66ee3a0584ba28fa38e4e02d3d2ce01856afe497974a118f0566a07c7"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/03.env",
+    "packed": "artifacts/issue543-attempt3/020-03.env.gz",
+    "source_bytes": 38,
+    "source_sha256": "d23c3a0ff6dadd7864a4cbb1c2090c899c90861b029cd2667065e60bf7824eb1",
+    "packed_bytes": 56,
+    "packed_sha256": "c5435b67a01b5d9fa7c27af5f2e8158914499dc72eac8882d460567f7fdd202c"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/03.pre-head",
+    "packed": "artifacts/issue543-attempt3/021-03.pre-head.gz",
+    "source_bytes": 41,
+    "source_sha256": "ed44be2bf0d6c1642b86f4350e614d36acba940f7a6fcdcec6923adaf53b6305",
+    "packed_bytes": 59,
+    "packed_sha256": "29890c173cf8db3a508dc49cae8d102b5d008fd9d09016d5e5295a90fe921032"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/03.pre-sha256",
+    "packed": "artifacts/issue543-attempt3/022-03.pre-sha256.gz",
+    "source_bytes": 279,
+    "source_sha256": "1e478f5c656022f8550bf97c78c8defd8a271a5a4f19b1d046a9fa49188ca06d",
+    "packed_bytes": 207,
+    "packed_sha256": "bdc21999c7cd014b55e79621c06ee32f0d8d40d38e6866d98d64df8d0771531e"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/03.pre-status",
+    "packed": "artifacts/issue543-attempt3/023-03.pre-status.gz",
+    "source_bytes": 90,
+    "source_sha256": "b8c71a7492d80e763dcb52e95016e70ef04b095fafbed643d210a28cf013267b",
+    "packed_bytes": 80,
+    "packed_sha256": "30ed28bf218f964806d381851216d135895a5313a6ebe2f41ad7b4325ab393b9"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/03.status",
+    "packed": "artifacts/issue543-attempt3/024-03.status.gz",
+    "source_bytes": 2,
+    "source_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "packed_bytes": 22,
+    "packed_sha256": "cabc3a30b39528db601f65ca3ced008dd775595c901102d08ac8ae8976b29bcf"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/03.stderr",
+    "packed": "artifacts/issue543-attempt3/025-03.stderr.gz",
+    "source_bytes": 172,
+    "source_sha256": "27628050ce485f79694e8980d3f76428b3f97a36f433f31279eec914dfe70c44",
+    "packed_bytes": 159,
+    "packed_sha256": "44ab1cef790c7386eced23779894c972dd238b3481a5cbfb282d4735c003b2e9"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/03.stdout",
+    "packed": "artifacts/issue543-attempt3/026-03.stdout.gz",
+    "source_bytes": 458,
+    "source_sha256": "e0661f0e3ac7bbea6a9c22dc951b1c5b09b38df23752ed38f64cc49250531f3f",
+    "packed_bytes": 244,
+    "packed_sha256": "45c8df624ac4472edc0e3ff384f7601f759f308f7caa886a2e450b4810a5be7e"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/04.argv",
+    "packed": "artifacts/issue543-attempt3/027-04.argv.gz",
+    "source_bytes": 41,
+    "source_sha256": "beeaa779dd3e46a9e0cd5472306926e9bf957d643ecbc47eb8b54d8110b5db18",
+    "packed_bytes": 61,
+    "packed_sha256": "012a06e116222e2e5747eb5be795158daf0475fa937ae1da90acd4020d184b06"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/04.cwd",
+    "packed": "artifacts/issue543-attempt3/028-04.cwd.gz",
+    "source_bytes": 44,
+    "source_sha256": "2564b8f319e2573791786f76cc5b4537dddb9b97e2d0c8471614504c4e9f1eeb",
+    "packed_bytes": 64,
+    "packed_sha256": "c2b7c0c66ee3a0584ba28fa38e4e02d3d2ce01856afe497974a118f0566a07c7"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/04.env",
+    "packed": "artifacts/issue543-attempt3/029-04.env.gz",
+    "source_bytes": 38,
+    "source_sha256": "d23c3a0ff6dadd7864a4cbb1c2090c899c90861b029cd2667065e60bf7824eb1",
+    "packed_bytes": 56,
+    "packed_sha256": "c5435b67a01b5d9fa7c27af5f2e8158914499dc72eac8882d460567f7fdd202c"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/04.pre-head",
+    "packed": "artifacts/issue543-attempt3/030-04.pre-head.gz",
+    "source_bytes": 41,
+    "source_sha256": "ed44be2bf0d6c1642b86f4350e614d36acba940f7a6fcdcec6923adaf53b6305",
+    "packed_bytes": 59,
+    "packed_sha256": "29890c173cf8db3a508dc49cae8d102b5d008fd9d09016d5e5295a90fe921032"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/04.pre-sha256",
+    "packed": "artifacts/issue543-attempt3/031-04.pre-sha256.gz",
+    "source_bytes": 279,
+    "source_sha256": "1e478f5c656022f8550bf97c78c8defd8a271a5a4f19b1d046a9fa49188ca06d",
+    "packed_bytes": 207,
+    "packed_sha256": "bdc21999c7cd014b55e79621c06ee32f0d8d40d38e6866d98d64df8d0771531e"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/04.pre-status",
+    "packed": "artifacts/issue543-attempt3/032-04.pre-status.gz",
+    "source_bytes": 90,
+    "source_sha256": "b8c71a7492d80e763dcb52e95016e70ef04b095fafbed643d210a28cf013267b",
+    "packed_bytes": 80,
+    "packed_sha256": "30ed28bf218f964806d381851216d135895a5313a6ebe2f41ad7b4325ab393b9"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/04.status",
+    "packed": "artifacts/issue543-attempt3/033-04.status.gz",
+    "source_bytes": 2,
+    "source_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "packed_bytes": 22,
+    "packed_sha256": "cabc3a30b39528db601f65ca3ced008dd775595c901102d08ac8ae8976b29bcf"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/04.stderr",
+    "packed": "artifacts/issue543-attempt3/034-04.stderr.gz",
+    "source_bytes": 1104,
+    "source_sha256": "17183fcfa74760ea0638de7c8a1b791c285b4eb2bec3e4e00a71dc4809fd966c",
+    "packed_bytes": 361,
+    "packed_sha256": "0b9ee8feddf3251932a46e59870ed58ef2f3cdbfb9a138737cd8b769a1a2a80d"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/04.stdout",
+    "packed": "artifacts/issue543-attempt3/035-04.stdout.gz",
+    "source_bytes": 2032,
+    "source_sha256": "20ae84c1b525f511a88150ea837c88a33af88445f6885d00360e1e83a1aca5b2",
+    "packed_bytes": 720,
+    "packed_sha256": "a54f6b00d05ba06d6647bc3c42b82421f04ea7f440ecb8802ca4b083a1af2ddf"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/05.argv",
+    "packed": "artifacts/issue543-attempt3/036-05.argv.gz",
+    "source_bytes": 72,
+    "source_sha256": "af2ca08c779a1f117c0530de2c4b652af3e2e04cd0d92b75b4c3ddddff6a3ad8",
+    "packed_bytes": 84,
+    "packed_sha256": "ee1877e27e008cc73fdecafa7d871f2be5fbefa06ae51fd276cf588821a4fffa"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/05.cwd",
+    "packed": "artifacts/issue543-attempt3/037-05.cwd.gz",
+    "source_bytes": 44,
+    "source_sha256": "2564b8f319e2573791786f76cc5b4537dddb9b97e2d0c8471614504c4e9f1eeb",
+    "packed_bytes": 64,
+    "packed_sha256": "c2b7c0c66ee3a0584ba28fa38e4e02d3d2ce01856afe497974a118f0566a07c7"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/05.env",
+    "packed": "artifacts/issue543-attempt3/038-05.env.gz",
+    "source_bytes": 38,
+    "source_sha256": "d23c3a0ff6dadd7864a4cbb1c2090c899c90861b029cd2667065e60bf7824eb1",
+    "packed_bytes": 56,
+    "packed_sha256": "c5435b67a01b5d9fa7c27af5f2e8158914499dc72eac8882d460567f7fdd202c"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/05.pre-head",
+    "packed": "artifacts/issue543-attempt3/039-05.pre-head.gz",
+    "source_bytes": 41,
+    "source_sha256": "ed44be2bf0d6c1642b86f4350e614d36acba940f7a6fcdcec6923adaf53b6305",
+    "packed_bytes": 59,
+    "packed_sha256": "29890c173cf8db3a508dc49cae8d102b5d008fd9d09016d5e5295a90fe921032"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/05.pre-sha256",
+    "packed": "artifacts/issue543-attempt3/040-05.pre-sha256.gz",
+    "source_bytes": 279,
+    "source_sha256": "1e478f5c656022f8550bf97c78c8defd8a271a5a4f19b1d046a9fa49188ca06d",
+    "packed_bytes": 207,
+    "packed_sha256": "bdc21999c7cd014b55e79621c06ee32f0d8d40d38e6866d98d64df8d0771531e"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/05.pre-status",
+    "packed": "artifacts/issue543-attempt3/041-05.pre-status.gz",
+    "source_bytes": 90,
+    "source_sha256": "b8c71a7492d80e763dcb52e95016e70ef04b095fafbed643d210a28cf013267b",
+    "packed_bytes": 80,
+    "packed_sha256": "30ed28bf218f964806d381851216d135895a5313a6ebe2f41ad7b4325ab393b9"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/05.status",
+    "packed": "artifacts/issue543-attempt3/042-05.status.gz",
+    "source_bytes": 2,
+    "source_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "packed_bytes": 22,
+    "packed_sha256": "cabc3a30b39528db601f65ca3ced008dd775595c901102d08ac8ae8976b29bcf"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/05.stderr",
+    "packed": "artifacts/issue543-attempt3/043-05.stderr.gz",
+    "source_bytes": 1128,
+    "source_sha256": "34421d9b31c8add86da7e3fc0aaaa27d8e06e41f13d72ad0485522809cac2dac",
+    "packed_bytes": 276,
+    "packed_sha256": "5bbe374c3a83b79b6f401c06ed22d326a66ebd769f5118e68ae9c34e10742d81"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/05.stdout",
+    "packed": "artifacts/issue543-attempt3/044-05.stdout.gz",
+    "source_bytes": 0,
+    "source_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "packed_bytes": 20,
+    "packed_sha256": "f61f27bd17de546264aa58f40f3aafaac7021e0ef69c17f6b1b4cd7664a037ec"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/06.argv",
+    "packed": "artifacts/issue543-attempt3/045-06.argv.gz",
+    "source_bytes": 46,
+    "source_sha256": "5b002398ae26626e59360af0ad85f86b25f4d72ba802289ba544508607bf8c5c",
+    "packed_bytes": 65,
+    "packed_sha256": "d45a81ba65b4fe7ea69cded5ecaf3248a4514e01afb39d061ff1529b65fdf2d4"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/06.cwd",
+    "packed": "artifacts/issue543-attempt3/046-06.cwd.gz",
+    "source_bytes": 44,
+    "source_sha256": "2564b8f319e2573791786f76cc5b4537dddb9b97e2d0c8471614504c4e9f1eeb",
+    "packed_bytes": 64,
+    "packed_sha256": "c2b7c0c66ee3a0584ba28fa38e4e02d3d2ce01856afe497974a118f0566a07c7"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/06.env",
+    "packed": "artifacts/issue543-attempt3/047-06.env.gz",
+    "source_bytes": 38,
+    "source_sha256": "d23c3a0ff6dadd7864a4cbb1c2090c899c90861b029cd2667065e60bf7824eb1",
+    "packed_bytes": 56,
+    "packed_sha256": "c5435b67a01b5d9fa7c27af5f2e8158914499dc72eac8882d460567f7fdd202c"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/06.pre-head",
+    "packed": "artifacts/issue543-attempt3/048-06.pre-head.gz",
+    "source_bytes": 41,
+    "source_sha256": "ed44be2bf0d6c1642b86f4350e614d36acba940f7a6fcdcec6923adaf53b6305",
+    "packed_bytes": 59,
+    "packed_sha256": "29890c173cf8db3a508dc49cae8d102b5d008fd9d09016d5e5295a90fe921032"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/06.pre-sha256",
+    "packed": "artifacts/issue543-attempt3/049-06.pre-sha256.gz",
+    "source_bytes": 279,
+    "source_sha256": "1e478f5c656022f8550bf97c78c8defd8a271a5a4f19b1d046a9fa49188ca06d",
+    "packed_bytes": 207,
+    "packed_sha256": "bdc21999c7cd014b55e79621c06ee32f0d8d40d38e6866d98d64df8d0771531e"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/06.pre-status",
+    "packed": "artifacts/issue543-attempt3/050-06.pre-status.gz",
+    "source_bytes": 90,
+    "source_sha256": "b8c71a7492d80e763dcb52e95016e70ef04b095fafbed643d210a28cf013267b",
+    "packed_bytes": 80,
+    "packed_sha256": "30ed28bf218f964806d381851216d135895a5313a6ebe2f41ad7b4325ab393b9"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/06.status",
+    "packed": "artifacts/issue543-attempt3/051-06.status.gz",
+    "source_bytes": 2,
+    "source_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "packed_bytes": 22,
+    "packed_sha256": "cabc3a30b39528db601f65ca3ced008dd775595c901102d08ac8ae8976b29bcf"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/06.stderr",
+    "packed": "artifacts/issue543-attempt3/052-06.stderr.gz",
+    "source_bytes": 0,
+    "source_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "packed_bytes": 20,
+    "packed_sha256": "f61f27bd17de546264aa58f40f3aafaac7021e0ef69c17f6b1b4cd7664a037ec"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/06.stdout",
+    "packed": "artifacts/issue543-attempt3/053-06.stdout.gz",
+    "source_bytes": 71,
+    "source_sha256": "1279ef8241586ca70dbc505ee1d816e6c156b7e3a64b2d07f97f43023be55de9",
+    "packed_bytes": 67,
+    "packed_sha256": "0cb608e383cb825c7dadec290a06462faa7e3c22d9aea882ab05095c4621dd62"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/07.argv",
+    "packed": "artifacts/issue543-attempt3/054-07.argv.gz",
+    "source_bytes": 49,
+    "source_sha256": "861db91686b157f940e60f67485a4db784e94a58ca5b70708ad7823dc484b9ea",
+    "packed_bytes": 68,
+    "packed_sha256": "72f659bfd9716ac5fecdff8c4267bf049c1317ad239284ff26da3bc4a0a7109d"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/07.cwd",
+    "packed": "artifacts/issue543-attempt3/055-07.cwd.gz",
+    "source_bytes": 44,
+    "source_sha256": "2564b8f319e2573791786f76cc5b4537dddb9b97e2d0c8471614504c4e9f1eeb",
+    "packed_bytes": 64,
+    "packed_sha256": "c2b7c0c66ee3a0584ba28fa38e4e02d3d2ce01856afe497974a118f0566a07c7"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/07.env",
+    "packed": "artifacts/issue543-attempt3/056-07.env.gz",
+    "source_bytes": 38,
+    "source_sha256": "d23c3a0ff6dadd7864a4cbb1c2090c899c90861b029cd2667065e60bf7824eb1",
+    "packed_bytes": 56,
+    "packed_sha256": "c5435b67a01b5d9fa7c27af5f2e8158914499dc72eac8882d460567f7fdd202c"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/07.pre-head",
+    "packed": "artifacts/issue543-attempt3/057-07.pre-head.gz",
+    "source_bytes": 41,
+    "source_sha256": "ed44be2bf0d6c1642b86f4350e614d36acba940f7a6fcdcec6923adaf53b6305",
+    "packed_bytes": 59,
+    "packed_sha256": "29890c173cf8db3a508dc49cae8d102b5d008fd9d09016d5e5295a90fe921032"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/07.pre-sha256",
+    "packed": "artifacts/issue543-attempt3/058-07.pre-sha256.gz",
+    "source_bytes": 279,
+    "source_sha256": "1e478f5c656022f8550bf97c78c8defd8a271a5a4f19b1d046a9fa49188ca06d",
+    "packed_bytes": 207,
+    "packed_sha256": "bdc21999c7cd014b55e79621c06ee32f0d8d40d38e6866d98d64df8d0771531e"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/07.pre-status",
+    "packed": "artifacts/issue543-attempt3/059-07.pre-status.gz",
+    "source_bytes": 90,
+    "source_sha256": "b8c71a7492d80e763dcb52e95016e70ef04b095fafbed643d210a28cf013267b",
+    "packed_bytes": 80,
+    "packed_sha256": "30ed28bf218f964806d381851216d135895a5313a6ebe2f41ad7b4325ab393b9"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/07.status",
+    "packed": "artifacts/issue543-attempt3/060-07.status.gz",
+    "source_bytes": 2,
+    "source_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "packed_bytes": 22,
+    "packed_sha256": "cabc3a30b39528db601f65ca3ced008dd775595c901102d08ac8ae8976b29bcf"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/07.stderr",
+    "packed": "artifacts/issue543-attempt3/061-07.stderr.gz",
+    "source_bytes": 92,
+    "source_sha256": "0d1a6fbf5821725c098ef84f1e66ea592797bb5902ec464aeccc083e4c46b8b7",
+    "packed_bytes": 100,
+    "packed_sha256": "aff33412a648013153bc62e579d318d104383d6f57ef4a7b4dff4ad9d78001ad"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/07.stdout",
+    "packed": "artifacts/issue543-attempt3/062-07.stdout.gz",
+    "source_bytes": 42,
+    "source_sha256": "25291a0093847c6dfc05306dfdf91b8c4184d23fd010e948b3310e908033ed93",
+    "packed_bytes": 61,
+    "packed_sha256": "be8d295062922ee44fd07122d185e9f077187a026c161be3aeef21f796060984"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/08.argv",
+    "packed": "artifacts/issue543-attempt3/063-08.argv.gz",
+    "source_bytes": 61,
+    "source_sha256": "a23b46c5c2833b2164bbc6eff101980550e4071d8b1df3e341a60a18694e410a",
+    "packed_bytes": 78,
+    "packed_sha256": "3f8cf736b2039322138978a53fb71a4dd908e75f3a01b621613408aefac99749"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/08.cwd",
+    "packed": "artifacts/issue543-attempt3/064-08.cwd.gz",
+    "source_bytes": 44,
+    "source_sha256": "2564b8f319e2573791786f76cc5b4537dddb9b97e2d0c8471614504c4e9f1eeb",
+    "packed_bytes": 64,
+    "packed_sha256": "c2b7c0c66ee3a0584ba28fa38e4e02d3d2ce01856afe497974a118f0566a07c7"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/08.env",
+    "packed": "artifacts/issue543-attempt3/065-08.env.gz",
+    "source_bytes": 38,
+    "source_sha256": "d23c3a0ff6dadd7864a4cbb1c2090c899c90861b029cd2667065e60bf7824eb1",
+    "packed_bytes": 56,
+    "packed_sha256": "c5435b67a01b5d9fa7c27af5f2e8158914499dc72eac8882d460567f7fdd202c"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/08.pre-head",
+    "packed": "artifacts/issue543-attempt3/066-08.pre-head.gz",
+    "source_bytes": 41,
+    "source_sha256": "ed44be2bf0d6c1642b86f4350e614d36acba940f7a6fcdcec6923adaf53b6305",
+    "packed_bytes": 59,
+    "packed_sha256": "29890c173cf8db3a508dc49cae8d102b5d008fd9d09016d5e5295a90fe921032"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/08.pre-sha256",
+    "packed": "artifacts/issue543-attempt3/067-08.pre-sha256.gz",
+    "source_bytes": 279,
+    "source_sha256": "1e478f5c656022f8550bf97c78c8defd8a271a5a4f19b1d046a9fa49188ca06d",
+    "packed_bytes": 207,
+    "packed_sha256": "bdc21999c7cd014b55e79621c06ee32f0d8d40d38e6866d98d64df8d0771531e"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/08.pre-status",
+    "packed": "artifacts/issue543-attempt3/068-08.pre-status.gz",
+    "source_bytes": 90,
+    "source_sha256": "b8c71a7492d80e763dcb52e95016e70ef04b095fafbed643d210a28cf013267b",
+    "packed_bytes": 80,
+    "packed_sha256": "30ed28bf218f964806d381851216d135895a5313a6ebe2f41ad7b4325ab393b9"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/08.status",
+    "packed": "artifacts/issue543-attempt3/069-08.status.gz",
+    "source_bytes": 2,
+    "source_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "packed_bytes": 22,
+    "packed_sha256": "cabc3a30b39528db601f65ca3ced008dd775595c901102d08ac8ae8976b29bcf"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/08.stderr",
+    "packed": "artifacts/issue543-attempt3/070-08.stderr.gz",
+    "source_bytes": 156,
+    "source_sha256": "213a701dd8719dc50ed65d7f66ac2a9b61869b6d746e09f6b82dfbfd7f9fa89d",
+    "packed_bytes": 150,
+    "packed_sha256": "7cf43d321e4a34737ffee7da765f453b3bfbdf0bf02b35f68f6e11f578f00ea3"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/08.stdout",
+    "packed": "artifacts/issue543-attempt3/071-08.stdout.gz",
+    "source_bytes": 51,
+    "source_sha256": "76da0fbc46314d7cac767d4698e41e72e625275b73537e2793fa37e2ce13959d",
+    "packed_bytes": 68,
+    "packed_sha256": "ebe5f570a77d93e3e3075f22ac0fddb5fa474a41f838e38b242d302610fa7fc1"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/09.argv",
+    "packed": "artifacts/issue543-attempt3/072-09.argv.gz",
+    "source_bytes": 27,
+    "source_sha256": "8e0af9339a6ac9581772530214219826478b8171f0d7c69765107b5ef4e883be",
+    "packed_bytes": 44,
+    "packed_sha256": "f6e4ded43a6249694ed150dc5de7b1cef34fdadf2087b946ee0687dc52c47c0e"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/09.cwd",
+    "packed": "artifacts/issue543-attempt3/073-09.cwd.gz",
+    "source_bytes": 44,
+    "source_sha256": "2564b8f319e2573791786f76cc5b4537dddb9b97e2d0c8471614504c4e9f1eeb",
+    "packed_bytes": 64,
+    "packed_sha256": "c2b7c0c66ee3a0584ba28fa38e4e02d3d2ce01856afe497974a118f0566a07c7"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/09.env",
+    "packed": "artifacts/issue543-attempt3/074-09.env.gz",
+    "source_bytes": 38,
+    "source_sha256": "d23c3a0ff6dadd7864a4cbb1c2090c899c90861b029cd2667065e60bf7824eb1",
+    "packed_bytes": 56,
+    "packed_sha256": "c5435b67a01b5d9fa7c27af5f2e8158914499dc72eac8882d460567f7fdd202c"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/09.pre-head",
+    "packed": "artifacts/issue543-attempt3/075-09.pre-head.gz",
+    "source_bytes": 41,
+    "source_sha256": "ed44be2bf0d6c1642b86f4350e614d36acba940f7a6fcdcec6923adaf53b6305",
+    "packed_bytes": 59,
+    "packed_sha256": "29890c173cf8db3a508dc49cae8d102b5d008fd9d09016d5e5295a90fe921032"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/09.pre-sha256",
+    "packed": "artifacts/issue543-attempt3/076-09.pre-sha256.gz",
+    "source_bytes": 279,
+    "source_sha256": "1e478f5c656022f8550bf97c78c8defd8a271a5a4f19b1d046a9fa49188ca06d",
+    "packed_bytes": 207,
+    "packed_sha256": "bdc21999c7cd014b55e79621c06ee32f0d8d40d38e6866d98d64df8d0771531e"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/09.pre-status",
+    "packed": "artifacts/issue543-attempt3/077-09.pre-status.gz",
+    "source_bytes": 90,
+    "source_sha256": "b8c71a7492d80e763dcb52e95016e70ef04b095fafbed643d210a28cf013267b",
+    "packed_bytes": 80,
+    "packed_sha256": "30ed28bf218f964806d381851216d135895a5313a6ebe2f41ad7b4325ab393b9"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/09.status",
+    "packed": "artifacts/issue543-attempt3/078-09.status.gz",
+    "source_bytes": 2,
+    "source_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "packed_bytes": 22,
+    "packed_sha256": "cabc3a30b39528db601f65ca3ced008dd775595c901102d08ac8ae8976b29bcf"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/09.stderr",
+    "packed": "artifacts/issue543-attempt3/079-09.stderr.gz",
+    "source_bytes": 0,
+    "source_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "packed_bytes": 20,
+    "packed_sha256": "f61f27bd17de546264aa58f40f3aafaac7021e0ef69c17f6b1b4cd7664a037ec"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/09.stdout",
+    "packed": "artifacts/issue543-attempt3/080-09.stdout.gz",
+    "source_bytes": 0,
+    "source_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "packed_bytes": 20,
+    "packed_sha256": "f61f27bd17de546264aa58f40f3aafaac7021e0ef69c17f6b1b4cd7664a037ec"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/10.argv",
+    "packed": "artifacts/issue543-attempt3/081-10.argv.gz",
+    "source_bytes": 39,
+    "source_sha256": "571038bcc76ef0ff72410c271f103279ad6d92cef1865e3bd4fb5d5775c584c9",
+    "packed_bytes": 58,
+    "packed_sha256": "9e473f4a80291398c2c235057771c0b0ef344fb45fe27f434a0275d54b3b7046"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/10.cwd",
+    "packed": "artifacts/issue543-attempt3/082-10.cwd.gz",
+    "source_bytes": 44,
+    "source_sha256": "2564b8f319e2573791786f76cc5b4537dddb9b97e2d0c8471614504c4e9f1eeb",
+    "packed_bytes": 64,
+    "packed_sha256": "c2b7c0c66ee3a0584ba28fa38e4e02d3d2ce01856afe497974a118f0566a07c7"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/10.env",
+    "packed": "artifacts/issue543-attempt3/083-10.env.gz",
+    "source_bytes": 38,
+    "source_sha256": "d23c3a0ff6dadd7864a4cbb1c2090c899c90861b029cd2667065e60bf7824eb1",
+    "packed_bytes": 56,
+    "packed_sha256": "c5435b67a01b5d9fa7c27af5f2e8158914499dc72eac8882d460567f7fdd202c"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/10.pre-head",
+    "packed": "artifacts/issue543-attempt3/084-10.pre-head.gz",
+    "source_bytes": 41,
+    "source_sha256": "ed44be2bf0d6c1642b86f4350e614d36acba940f7a6fcdcec6923adaf53b6305",
+    "packed_bytes": 59,
+    "packed_sha256": "29890c173cf8db3a508dc49cae8d102b5d008fd9d09016d5e5295a90fe921032"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/10.pre-sha256",
+    "packed": "artifacts/issue543-attempt3/085-10.pre-sha256.gz",
+    "source_bytes": 279,
+    "source_sha256": "1e478f5c656022f8550bf97c78c8defd8a271a5a4f19b1d046a9fa49188ca06d",
+    "packed_bytes": 207,
+    "packed_sha256": "bdc21999c7cd014b55e79621c06ee32f0d8d40d38e6866d98d64df8d0771531e"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/10.pre-status",
+    "packed": "artifacts/issue543-attempt3/086-10.pre-status.gz",
+    "source_bytes": 90,
+    "source_sha256": "b8c71a7492d80e763dcb52e95016e70ef04b095fafbed643d210a28cf013267b",
+    "packed_bytes": 80,
+    "packed_sha256": "30ed28bf218f964806d381851216d135895a5313a6ebe2f41ad7b4325ab393b9"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/10.status",
+    "packed": "artifacts/issue543-attempt3/087-10.status.gz",
+    "source_bytes": 2,
+    "source_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "packed_bytes": 22,
+    "packed_sha256": "cabc3a30b39528db601f65ca3ced008dd775595c901102d08ac8ae8976b29bcf"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/10.stderr",
+    "packed": "artifacts/issue543-attempt3/088-10.stderr.gz",
+    "source_bytes": 0,
+    "source_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "packed_bytes": 20,
+    "packed_sha256": "f61f27bd17de546264aa58f40f3aafaac7021e0ef69c17f6b1b4cd7664a037ec"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/10.stdout",
+    "packed": "artifacts/issue543-attempt3/089-10.stdout.gz",
+    "source_bytes": 21,
+    "source_sha256": "8261c11a9ad607004e800b131ad999fbad0194619b971b30aa45a6ba10eeb880",
+    "packed_bytes": 41,
+    "packed_sha256": "49f37ec25a0503736d8db0f4c21e2c93e3b7f4010acb93d077f80f4211efbc03"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/11.argv",
+    "packed": "artifacts/issue543-attempt3/090-11.argv.gz",
+    "source_bytes": 816,
+    "source_sha256": "295c61251f1b7b165ec8398528e12933b338c345cca0ca12ecda3edcf761b229",
+    "packed_bytes": 377,
+    "packed_sha256": "f477792a295c72de1129daddb187e37fb7b5c34d4cd1acc3e771e40cf3376dba"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/11.cwd",
+    "packed": "artifacts/issue543-attempt3/091-11.cwd.gz",
+    "source_bytes": 44,
+    "source_sha256": "2564b8f319e2573791786f76cc5b4537dddb9b97e2d0c8471614504c4e9f1eeb",
+    "packed_bytes": 64,
+    "packed_sha256": "c2b7c0c66ee3a0584ba28fa38e4e02d3d2ce01856afe497974a118f0566a07c7"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/11.env",
+    "packed": "artifacts/issue543-attempt3/092-11.env.gz",
+    "source_bytes": 38,
+    "source_sha256": "d23c3a0ff6dadd7864a4cbb1c2090c899c90861b029cd2667065e60bf7824eb1",
+    "packed_bytes": 56,
+    "packed_sha256": "c5435b67a01b5d9fa7c27af5f2e8158914499dc72eac8882d460567f7fdd202c"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/11.pre-head",
+    "packed": "artifacts/issue543-attempt3/093-11.pre-head.gz",
+    "source_bytes": 41,
+    "source_sha256": "ed44be2bf0d6c1642b86f4350e614d36acba940f7a6fcdcec6923adaf53b6305",
+    "packed_bytes": 59,
+    "packed_sha256": "29890c173cf8db3a508dc49cae8d102b5d008fd9d09016d5e5295a90fe921032"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/11.pre-sha256",
+    "packed": "artifacts/issue543-attempt3/094-11.pre-sha256.gz",
+    "source_bytes": 279,
+    "source_sha256": "1e478f5c656022f8550bf97c78c8defd8a271a5a4f19b1d046a9fa49188ca06d",
+    "packed_bytes": 207,
+    "packed_sha256": "bdc21999c7cd014b55e79621c06ee32f0d8d40d38e6866d98d64df8d0771531e"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/11.pre-status",
+    "packed": "artifacts/issue543-attempt3/095-11.pre-status.gz",
+    "source_bytes": 90,
+    "source_sha256": "b8c71a7492d80e763dcb52e95016e70ef04b095fafbed643d210a28cf013267b",
+    "packed_bytes": 80,
+    "packed_sha256": "30ed28bf218f964806d381851216d135895a5313a6ebe2f41ad7b4325ab393b9"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/11.status",
+    "packed": "artifacts/issue543-attempt3/096-11.status.gz",
+    "source_bytes": 2,
+    "source_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "packed_bytes": 22,
+    "packed_sha256": "cabc3a30b39528db601f65ca3ced008dd775595c901102d08ac8ae8976b29bcf"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/11.stderr",
+    "packed": "artifacts/issue543-attempt3/097-11.stderr.gz",
+    "source_bytes": 101,
+    "source_sha256": "289c5c1ac9fdf6994b0b9bb08af838032f36b3acb7155c29dd1c5aed947ff7b3",
+    "packed_bytes": 111,
+    "packed_sha256": "2ce0124a6dabdc4d8346ce5da0f52d514b309cedd9f1834f355aaa0dd7a2847c"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/11.stdout",
+    "packed": "artifacts/issue543-attempt3/098-11.stdout.gz",
+    "source_bytes": 318,
+    "source_sha256": "44ce3074a0fedd2b94cb144134ade656fad6bb122242122d2e2d846e7861ac8f",
+    "packed_bytes": 202,
+    "packed_sha256": "45e4ecd8e81ac7484cd7756abf792f5f463b13bb8f50764727dbc388f23ff789"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/12.argv",
+    "packed": "artifacts/issue543-attempt3/099-12.argv.gz",
+    "source_bytes": 17,
+    "source_sha256": "b8ad0136c01c9479d8c2672ef8c75cd62918a3a3e881093330887cad9452b458",
+    "packed_bytes": 37,
+    "packed_sha256": "868d3df14e126801e64e47c680c12b09ad085ddb4d6594f43235264d593ad2f7"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/12.cwd",
+    "packed": "artifacts/issue543-attempt3/100-12.cwd.gz",
+    "source_bytes": 44,
+    "source_sha256": "2564b8f319e2573791786f76cc5b4537dddb9b97e2d0c8471614504c4e9f1eeb",
+    "packed_bytes": 64,
+    "packed_sha256": "c2b7c0c66ee3a0584ba28fa38e4e02d3d2ce01856afe497974a118f0566a07c7"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/12.env",
+    "packed": "artifacts/issue543-attempt3/101-12.env.gz",
+    "source_bytes": 38,
+    "source_sha256": "d23c3a0ff6dadd7864a4cbb1c2090c899c90861b029cd2667065e60bf7824eb1",
+    "packed_bytes": 56,
+    "packed_sha256": "c5435b67a01b5d9fa7c27af5f2e8158914499dc72eac8882d460567f7fdd202c"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/12.pre-head",
+    "packed": "artifacts/issue543-attempt3/102-12.pre-head.gz",
+    "source_bytes": 41,
+    "source_sha256": "ed44be2bf0d6c1642b86f4350e614d36acba940f7a6fcdcec6923adaf53b6305",
+    "packed_bytes": 59,
+    "packed_sha256": "29890c173cf8db3a508dc49cae8d102b5d008fd9d09016d5e5295a90fe921032"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/12.pre-sha256",
+    "packed": "artifacts/issue543-attempt3/103-12.pre-sha256.gz",
+    "source_bytes": 279,
+    "source_sha256": "1e478f5c656022f8550bf97c78c8defd8a271a5a4f19b1d046a9fa49188ca06d",
+    "packed_bytes": 207,
+    "packed_sha256": "bdc21999c7cd014b55e79621c06ee32f0d8d40d38e6866d98d64df8d0771531e"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/12.pre-status",
+    "packed": "artifacts/issue543-attempt3/104-12.pre-status.gz",
+    "source_bytes": 90,
+    "source_sha256": "b8c71a7492d80e763dcb52e95016e70ef04b095fafbed643d210a28cf013267b",
+    "packed_bytes": 80,
+    "packed_sha256": "30ed28bf218f964806d381851216d135895a5313a6ebe2f41ad7b4325ab393b9"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/12.status",
+    "packed": "artifacts/issue543-attempt3/105-12.status.gz",
+    "source_bytes": 2,
+    "source_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "packed_bytes": 22,
+    "packed_sha256": "cabc3a30b39528db601f65ca3ced008dd775595c901102d08ac8ae8976b29bcf"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/12.stderr",
+    "packed": "artifacts/issue543-attempt3/106-12.stderr.gz",
+    "source_bytes": 0,
+    "source_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "packed_bytes": 20,
+    "packed_sha256": "f61f27bd17de546264aa58f40f3aafaac7021e0ef69c17f6b1b4cd7664a037ec"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-gates/12.stdout",
+    "packed": "artifacts/issue543-attempt3/107-12.stdout.gz",
+    "source_bytes": 0,
+    "source_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "packed_bytes": 20,
+    "packed_sha256": "f61f27bd17de546264aa58f40f3aafaac7021e0ef69c17f6b1b4cd7664a037ec"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna.command.json",
+    "packed": "artifacts/issue543-attempt3/108-attempt3-luna.command.json.gz",
+    "source_bytes": 405,
+    "source_sha256": "9075b83c1a34d8916506d18e8a6cfd22c4e3b6b3ddf6bd5417c871a169ed61bd",
+    "packed_bytes": 224,
+    "packed_sha256": "4c75c1515242c89705b01f61f5eb08e8ad021adb614018e1bd4239f91aa72f3d"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna.md",
+    "packed": "artifacts/issue543-attempt3/109-attempt3-luna.md.gz",
+    "source_bytes": 1322,
+    "source_sha256": "752c088e7fda36cfb8f046174e242b9449f8994a5040d9d3ca77e83cccf0b79d",
+    "packed_bytes": 738,
+    "packed_sha256": "50a0de86382d24180e002da03d80d28a75993e922f834215f59f82989c99567f"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna.status",
+    "packed": "artifacts/issue543-attempt3/110-attempt3-luna.status.gz",
+    "source_bytes": 2,
+    "source_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "packed_bytes": 22,
+    "packed_sha256": "cabc3a30b39528db601f65ca3ced008dd775595c901102d08ac8ae8976b29bcf"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna.stderr",
+    "packed": "artifacts/issue543-attempt3/111-attempt3-luna.stderr.gz",
+    "source_bytes": 97300,
+    "source_sha256": "f34ce010876fcabdc2c20f75d97498c9a29f31214360658f65a0b8c519f52359",
+    "packed_bytes": 28537,
+    "packed_sha256": "3f22df22dde32e9ae7fbe61cf8a9f0646cc574bcecd7322bc920f8bc29a6a349"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna.stdout",
+    "packed": "artifacts/issue543-attempt3/112-attempt3-luna.stdout.gz",
+    "source_bytes": 1323,
+    "source_sha256": "6a9b593a261b7808415b9caab096b9dc2d9e4c119926bffc388ba1c3edcde664",
+    "packed_bytes": 739,
+    "packed_sha256": "c9e11f6eb0dafcf31f3e4a5458dd2483078a5eba10022b69acc32b5d06b199d3"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-scope-amendment.md",
+    "packed": "artifacts/issue543-attempt3/113-attempt3-scope-amendment.md.gz",
+    "source_bytes": 5078,
+    "source_sha256": "93c99b62d813b4a12848d9f0bdd04d193c19d9483b35669ee39e444734774601",
+    "packed_bytes": 2216,
+    "packed_sha256": "d75025e247efdd252333df875a3615d8a101c0e1200850ebc2e0d10e8ae4ca94"
+  },
+  {
+    "source": "/tmp/issue543/attempt3-luna-prompt.md",
+    "packed": "artifacts/issue543-attempt3/114-attempt3-luna-prompt.md.gz",
+    "source_bytes": 3416,
+    "source_sha256": "3a4030bcfe5e47e0cd708d0677999fcad48f3ae7f474dbb29fc9e96e4d88d8e1",
+    "packed_bytes": 1604,
+    "packed_sha256": "510b3c186bd011c700a10da1d9f041d8ea676316876c8e7f26c8f98f648e4cb8"
+  },
+  {
+    "source": "/tmp/issue349-partials/543-artifact-job.log",
+    "packed": "artifacts/issue543-attempt3/115-543-artifact-job.log.gz",
+    "source_bytes": 27411,
+    "source_sha256": "179064edc3e4751a2150bdddfc0ed8a5365bce283e17285aa7b2d34ee7a1b1b1",
+    "packed_bytes": 6664,
+    "packed_sha256": "159145bee4111a4714940f1e5353a9e156b5415ea0c0858163d03a61ef6c5597"
+  },
+  {
+    "source": "/tmp/issue349-partials/543-policy-job.log",
+    "packed": "artifacts/issue543-attempt3/116-543-policy-job.log.gz",
+    "source_bytes": 78447,
+    "source_sha256": "8c093a7a36060350412c5a3b6079e7e7a200692b52176e66d19f5d9c37fa275f",
+    "packed_bytes": 15748,
+    "packed_sha256": "efcc4369ebaa5fc460679396b7b92bfb44328818c574649251be79ec04c6e5de"
+  }
+]

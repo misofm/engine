@@ -1,0 +1,266 @@
+[
+  {
+    "source": "/tmp/issue349-partials/555-root-a3-evidence-assessment.json",
+    "packed": "artifacts/issue555-handoff/000-555-root-a3-evidence-assessment.json.gz",
+    "source_bytes": 1689,
+    "source_sha256": "81714bbdd07a42fc6826f4d773faa502c131bdf00db82290feb765c06c345ef6",
+    "packed_bytes": 699,
+    "packed_sha256": "356525d7d257ecf4b7b9b525a47f5b7b10c3ab37c1f09f55a6ba9bb8e163096b"
+  },
+  {
+    "source": "/tmp/issue349-partials/555-root-git-identity-audit.json",
+    "packed": "artifacts/issue555-handoff/001-555-root-git-identity-audit.json.gz",
+    "source_bytes": 777,
+    "source_sha256": "9f0d2b2a0c7885df5ad299d9fc8895f95a27219069cb9dd0151ce23e8e500f9d",
+    "packed_bytes": 403,
+    "packed_sha256": "d5840cdcff90b5d93c4fd71123602394640204d16a68a38c293f5015358fccf5"
+  },
+  {
+    "source": "/tmp/issue349-partials/555-root-inventory-stop.json",
+    "packed": "artifacts/issue555-handoff/002-555-root-inventory-stop.json.gz",
+    "source_bytes": 6419,
+    "source_sha256": "01219e6df30fa07017d96151d617fa380a5d83f386cd8928b9ae996c2fa0e9fd",
+    "packed_bytes": 2153,
+    "packed_sha256": "5451e438ed50587856fda9c1e149f13bdb49a8c0326ab8a7143fad7e383ffdc9"
+  },
+  {
+    "source": "/tmp/issue349-partials/555-single-command-rebrief.command.json",
+    "packed": "artifacts/issue555-handoff/003-555-single-command-rebrief.command.json.gz",
+    "source_bytes": 462,
+    "source_sha256": "8f7fac106eb9900f809c52bce072ecaf121cf6412da1f475fbb7f14c6f2131b2",
+    "packed_bytes": 241,
+    "packed_sha256": "8b9bbdd2fdfef63009a581ece0df1f7ee7e9a9eb6d7ff6578a63cac8af351865"
+  },
+  {
+    "source": "/tmp/issue349-partials/555-single-command-rebrief.md",
+    "packed": "artifacts/issue555-handoff/004-555-single-command-rebrief.md.gz",
+    "source_bytes": 395,
+    "source_sha256": "7402ceaa7ae890a4f1c86200905ebf2b75513b8aea2cb4616a4de81218c2ccd2",
+    "packed_bytes": 275,
+    "packed_sha256": "e6f05e373bd385f6424170b5059b7361788d6f4deb79f59dc01c43afe334c5ea"
+  },
+  {
+    "source": "/tmp/issue349-partials/555-single-command-rebrief.status",
+    "packed": "artifacts/issue555-handoff/005-555-single-command-rebrief.status.gz",
+    "source_bytes": 2,
+    "source_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "packed_bytes": 22,
+    "packed_sha256": "cabc3a30b39528db601f65ca3ced008dd775595c901102d08ac8ae8976b29bcf"
+  },
+  {
+    "source": "/tmp/issue349-partials/555-single-command-rebrief.stderr",
+    "packed": "artifacts/issue555-handoff/006-555-single-command-rebrief.stderr.gz",
+    "source_bytes": 104116,
+    "source_sha256": "4e15463e9eead4ebe1c689f7065352bb932b2980c1ffb91c55eb19552657c164",
+    "packed_bytes": 11335,
+    "packed_sha256": "7ca54273ddac78b37a0255422f51f6bb01904ee7e12ec0fdc54b1094a224fa66"
+  },
+  {
+    "source": "/tmp/issue349-partials/555-single-command-rebrief.stdout",
+    "packed": "artifacts/issue555-handoff/007-555-single-command-rebrief.stdout.gz",
+    "source_bytes": 396,
+    "source_sha256": "41488ed656ca6c806a998c0578f476b8732f545125149f40eaa40a814e731d88",
+    "packed_bytes": 276,
+    "packed_sha256": "284db035daf430f465c4c3315967ed00e51db3a34723de009f865fab45a21908"
+  },
+  {
+    "source": "/tmp/issue543/555-single-command-rebrief.md",
+    "packed": "artifacts/issue555-handoff/008-555-single-command-rebrief.md.gz",
+    "source_bytes": 3899,
+    "source_sha256": "c8ccda5f6cce3e3cf1971fc7639d99a9bd900b5d624bf371e5eb694b24b24c74",
+    "packed_bytes": 1832,
+    "packed_sha256": "30193ecc9b627082b65edc787dccbe66c70f520676282f2d26d2c64eae314663"
+  },
+  {
+    "source": "/tmp/issue555-luna-a3/context.txt",
+    "packed": "artifacts/issue555-handoff/009-context.txt.gz",
+    "source_bytes": 781,
+    "source_sha256": "32a7f75a3af7b8bd5b51b20bf9744531059f352df9991b585847dac9bc7bf24f",
+    "packed_bytes": 506,
+    "packed_sha256": "6ca80e4733e607998924ccb937fd3239056a637074a928bc9d761c1d297e2869"
+  },
+  {
+    "source": "/tmp/issue555-luna-a3/frozen-path-oids.tsv",
+    "packed": "artifacts/issue555-handoff/010-frozen-path-oids.tsv.gz",
+    "source_bytes": 882352,
+    "source_sha256": "d55d5fffe2ee2b2b7d44cd4cbf799ff54e65d274cf2b08ab19b857c536afe4c4",
+    "packed_bytes": 197511,
+    "packed_sha256": "58dfb7d87376727876dcde531e3d49ed093417825803e3e9508adff2a6a21887"
+  },
+  {
+    "source": "/tmp/issue555-luna-a3/frozen-type-mode.tsv",
+    "packed": "artifacts/issue555-handoff/011-frozen-type-mode.tsv.gz",
+    "source_bytes": 586987,
+    "source_sha256": "059584321869daf4828af32a457c561598672e53965326245ae2891532f5dd99",
+    "packed_bytes": 48385,
+    "packed_sha256": "f5f78b0619683e89b9195d5ca71f7bb2180f5d7a3a1bbc313daab5e626e874b9"
+  },
+  {
+    "source": "/tmp/issue555-luna-a3/probe-path-oids.tsv",
+    "packed": "artifacts/issue555-handoff/012-probe-path-oids.tsv.gz",
+    "source_bytes": 882352,
+    "source_sha256": "d55d5fffe2ee2b2b7d44cd4cbf799ff54e65d274cf2b08ab19b857c536afe4c4",
+    "packed_bytes": 197511,
+    "packed_sha256": "58dfb7d87376727876dcde531e3d49ed093417825803e3e9508adff2a6a21887"
+  },
+  {
+    "source": "/tmp/issue555-luna-a3/probe-type-mode.tsv",
+    "packed": "artifacts/issue555-handoff/013-probe-type-mode.tsv.gz",
+    "source_bytes": 586987,
+    "source_sha256": "30dfd9d54c88fa753b17f2935a5b924cc8a50f2bb8350f92b05ff2063b2e37a1",
+    "packed_bytes": 48385,
+    "packed_sha256": "5ebbc33770788ac63a747d1a7f9e84e5486a098c48917536cdbaa0d49686930b"
+  },
+  {
+    "source": "/tmp/issue555-luna-a3/repin-probe.status",
+    "packed": "artifacts/issue555-handoff/014-repin-probe.status.gz",
+    "source_bytes": 2,
+    "source_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "packed_bytes": 22,
+    "packed_sha256": "cabc3a30b39528db601f65ca3ced008dd775595c901102d08ac8ae8976b29bcf"
+  },
+  {
+    "source": "/tmp/issue555-luna-a3/repin-probe.stderr",
+    "packed": "artifacts/issue555-handoff/015-repin-probe.stderr.gz",
+    "source_bytes": 3414,
+    "source_sha256": "e7b171a3e1fde0ce1a47455d22bd4bfc2e659007f7c5b1a59feaf213e92c7694",
+    "packed_bytes": 773,
+    "packed_sha256": "3f2ac39487b025f99d1b707a30bbc254dab8d13d20478daa44096e4dccfda490"
+  },
+  {
+    "source": "/tmp/issue555-luna-a3/repin-probe.stdout",
+    "packed": "artifacts/issue555-handoff/016-repin-probe.stdout.gz",
+    "source_bytes": 65,
+    "source_sha256": "1f432cfe1c599519f13a92390f3f302360498f174918a92e1f12f3ea9b282a8e",
+    "packed_bytes": 73,
+    "packed_sha256": "1a7f70fd7b567ff509cb86818f00d2047d38b4fa574858b5188de1c096e2079f"
+  },
+  {
+    "source": "/tmp/issue555-luna-prepin-a2.command.json",
+    "packed": "artifacts/issue555-handoff/017-issue555-luna-prepin-a2.command.json.gz",
+    "source_bytes": 419,
+    "source_sha256": "0b80365f95c5c00adb86d8e98869c25db7d64f80029a85ee671d9638c303e459",
+    "packed_bytes": 228,
+    "packed_sha256": "72554933f478b7e8230f2ef29d7be8a21b87f1294804dfeb2dfb0d7d5e31bf93"
+  },
+  {
+    "source": "/tmp/issue555-luna-prepin-a2.md",
+    "packed": "artifacts/issue555-handoff/018-issue555-luna-prepin-a2.md.gz",
+    "source_bytes": 303,
+    "source_sha256": "aac5716cc504f8797a57d080adcdedf0f7df25a730b0c6d0f266dd527f376e8e",
+    "packed_bytes": 253,
+    "packed_sha256": "8d5e341244139052177919f061eed5d16ed49d719cc1c4e3c52c7a841b44faf5"
+  },
+  {
+    "source": "/tmp/issue555-luna-prepin-a2.prompt.md",
+    "packed": "artifacts/issue555-handoff/019-issue555-luna-prepin-a2.prompt.md.gz",
+    "source_bytes": 5391,
+    "source_sha256": "67170ba721f2d605111b998b8c28ed0f6dea9ca27aa32220c697d396fd992a7a",
+    "packed_bytes": 2468,
+    "packed_sha256": "f9a7c881df40cdedbf461ee31634b0a5f04ab2eef74979ada15ea306a673f2c3"
+  },
+  {
+    "source": "/tmp/issue555-luna-prepin-a2.status",
+    "packed": "artifacts/issue555-handoff/020-issue555-luna-prepin-a2.status.gz",
+    "source_bytes": 2,
+    "source_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "packed_bytes": 22,
+    "packed_sha256": "cabc3a30b39528db601f65ca3ced008dd775595c901102d08ac8ae8976b29bcf"
+  },
+  {
+    "source": "/tmp/issue555-luna-prepin-a2.stderr",
+    "packed": "artifacts/issue555-handoff/021-issue555-luna-prepin-a2.stderr.gz",
+    "source_bytes": 45243,
+    "source_sha256": "e656cc78f7b259c50672867cfaef3c55be46b4de6761734286c973276cba03cb",
+    "packed_bytes": 17821,
+    "packed_sha256": "e82b22dda117e261398ef3601ee7518fbd5f15866fe95c24f50910978e67364c"
+  },
+  {
+    "source": "/tmp/issue555-luna-prepin-a2.stdout",
+    "packed": "artifacts/issue555-handoff/022-issue555-luna-prepin-a2.stdout.gz",
+    "source_bytes": 304,
+    "source_sha256": "2a9b5f38e849c4817db9e3263d2797c9fef634bbc1fd1dfeecf4501640eb9cfe",
+    "packed_bytes": 254,
+    "packed_sha256": "ecaee83054690c11ef64cc027568743abf73b1d8e90aa95f6ae450c41550931f"
+  },
+  {
+    "source": "/tmp/issue555-luna-prepin-a3.command.json",
+    "packed": "artifacts/issue555-handoff/023-issue555-luna-prepin-a3.command.json.gz",
+    "source_bytes": 419,
+    "source_sha256": "2787cf96ccca815c22679e31104acb35a881c68c6dc53e3b647ba3fe6d67d9db",
+    "packed_bytes": 228,
+    "packed_sha256": "c643c36dcb5f84c2e08f3745a1ed21bbe11a2070189c97c8a878217e8b2e2084"
+  },
+  {
+    "source": "/tmp/issue555-luna-prepin-a3.prompt.md",
+    "packed": "artifacts/issue555-handoff/024-issue555-luna-prepin-a3.prompt.md.gz",
+    "source_bytes": 7471,
+    "source_sha256": "9d8e3c365f0dfddc7e6627e74c631be524cf7e81f2aadc8f97c30e355f6b9e69",
+    "packed_bytes": 3215,
+    "packed_sha256": "fcb001cb45ba39c1aef4986fd6287c8a8b3a9e295d8203defb282b2338a87ece"
+  },
+  {
+    "source": "/tmp/issue555-luna-prepin-a3.stderr",
+    "packed": "artifacts/issue555-handoff/025-issue555-luna-prepin-a3.stderr.gz",
+    "source_bytes": 204658,
+    "source_sha256": "5b95af34b91383eb1dff634ed94ec06b1e913bb510f35f69007c650c962b1848",
+    "packed_bytes": 60730,
+    "packed_sha256": "5f72679a3efda4af72f8eae66b91b12bd4037703a29db07675d15fece5fd1bc1"
+  },
+  {
+    "source": "/tmp/issue555-luna-prepin-a3.stdout",
+    "packed": "artifacts/issue555-handoff/026-issue555-luna-prepin-a3.stdout.gz",
+    "source_bytes": 0,
+    "source_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "packed_bytes": 20,
+    "packed_sha256": "f61f27bd17de546264aa58f40f3aafaac7021e0ef69c17f6b1b4cd7664a037ec"
+  },
+  {
+    "source": "/tmp/issue555-probe-only.command.json",
+    "packed": "artifacts/issue555-handoff/027-issue555-probe-only.command.json.gz",
+    "source_bytes": 411,
+    "source_sha256": "1b1e6d02e22d0d2064a2cc732abf9a801886e52ed314c0fb6c81722df7184aba",
+    "packed_bytes": 226,
+    "packed_sha256": "e7e1da12878bc6c148f31af3c833af3e7f7a3c0afdf697a76460d867c6afcd02"
+  },
+  {
+    "source": "/tmp/issue555-probe-only.md",
+    "packed": "artifacts/issue555-handoff/028-issue555-probe-only.md.gz",
+    "source_bytes": 276,
+    "source_sha256": "fda5952b274eddc38ef80c9a3f5bec5b85e954a201969f19ac8626eac5681c33",
+    "packed_bytes": 173,
+    "packed_sha256": "627f17f194444be0a43533116cb3be490e9f80457ba88905bfd9db1805285832"
+  },
+  {
+    "source": "/tmp/issue555-probe-only.prompt.md",
+    "packed": "artifacts/issue555-handoff/029-issue555-probe-only.prompt.md.gz",
+    "source_bytes": 1236,
+    "source_sha256": "979a4c90ca46decbe16160299841bd98b9c8f33a747076c6338d62c2998ce5a4",
+    "packed_bytes": 721,
+    "packed_sha256": "09b3cd0e372afe365012e52df72fbcc2b55fc08e5bd4abf98c724d9544e818cd"
+  },
+  {
+    "source": "/tmp/issue555-probe-only.status",
+    "packed": "artifacts/issue555-handoff/030-issue555-probe-only.status.gz",
+    "source_bytes": 2,
+    "source_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "packed_bytes": 22,
+    "packed_sha256": "cabc3a30b39528db601f65ca3ced008dd775595c901102d08ac8ae8976b29bcf"
+  },
+  {
+    "source": "/tmp/issue555-probe-only.stderr",
+    "packed": "artifacts/issue555-handoff/031-issue555-probe-only.stderr.gz",
+    "source_bytes": 6446,
+    "source_sha256": "32e688c1aca761f5a7112c7ba4c86421dbff651bf5207ef8aad6e9a64a80798a",
+    "packed_bytes": 2603,
+    "packed_sha256": "0bc69a898031bec76941cfc4cf844574b297f90c54381a2d314e748ea779f66c"
+  },
+  {
+    "source": "/tmp/issue555-probe-only.stdout",
+    "packed": "artifacts/issue555-handoff/032-issue555-probe-only.stdout.gz",
+    "source_bytes": 277,
+    "source_sha256": "4a2c6b0cbd21ee768201322ba6237794ec205e4fb54286e004bca6bdac764e0b",
+    "packed_bytes": 173,
+    "packed_sha256": "eb5ce1e6c7123fb46e2936aaa843439bff7a241e2a9d767d07e366c17671359b"
+  }
+]

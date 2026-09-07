@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "qualificationRun": "34127598065",
+  "head": "3585c3a96c7b3518ab06ac4eff8ba591292f6401",
+  "files": [
+    {
+      "sha256": "e1b50836b3a741dbdb6326814077e9f8738fb8150e5bdef3a32d1bab5feb41aa",
+      "path": "artifacts/issue563-pr-attempt2-failure/job-101759956184.json.gz"
+    },
+    {
+      "sha256": "0fe272bf16388c40b121d9b37ae39dd7a48f21737a7c4a9a46345c0238b01cb8",
+      "path": "artifacts/issue563-pr-attempt2-failure/job-101759956184.log.gz"
+    },
+    {
+      "sha256": "3f012d44c7ef4fc64f09a39924771d5662dd09e262621dca21f2f5e09e67b9e6",
+      "path": "artifacts/issue563-pr-attempt2-failure/run-34127598065-in-progress.json.gz"
+    },
+    {
+      "sha256": "60b9a626478c9fb2d250b406700c0f2e85003666bc9de0db5c0f6a6946d26a9e",
+      "path": "artifacts/issue563-pr-attempt2-failure/sol-delivery-verdict.md"
+    }
+  ]
+}

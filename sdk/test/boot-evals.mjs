@@ -12,6 +12,7 @@ import { after, before, describe, test } from "node:test";
 import { MisoEngineAsset, sha256Hex } from "../src/core/asset.ts";
 import { WasmBoundary } from "../src/core/boundary.ts";
 import { MisoEngineError } from "../src/core/errors.ts";
+import { hexLower } from "../src/core/hex.ts";
 import { ABI_LAYOUT } from "../src/generated/abi.ts";
 import { createOfflineEngine, validate } from "../src/headless/engine.ts";
 import { moduleBytes, sessionDocument } from "./support.mjs";
@@ -29,6 +30,14 @@ WebAssembly.compile = (...args) => {
   compiles += 1;
   return realCompile(...args);
 };
+
+test("the SDK hex authority formats empty and fixed literal bytes", () => {
+  assert.equal(hexLower(new Uint8Array()), "");
+  assert.equal(
+    hexLower(new Uint8Array([0x00, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0xff])),
+    "000123456789abcdefff",
+  );
+});
 
 let bytes;
 let asset;

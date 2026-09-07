@@ -1,0 +1,26 @@
+[
+  {
+    "source": "/tmp/issue552/attempt3-amended-brief.md",
+    "packed": "artifacts/issue552-attempt3-brief/attempt3-amended-brief.md.gz",
+    "source_sha256": "48297be53ac6e793c7e76e3662ca7c359dc3b66a3b8bc5e882f2bd49b92f7fcc",
+    "source_bytes": 14389,
+    "packed_sha256": "513c36077a0ef80c4e529255a07bf286eca096f22a52553412610f1feea4cfc9",
+    "packed_bytes": 5891
+  },
+  {
+    "source": "/tmp/issue552/attempt3-sol-high-decision.md",
+    "packed": "artifacts/issue552-attempt3-brief/attempt3-sol-high-decision.md.gz",
+    "source_sha256": "c09ae599364333cab59dd7edbb547d0539029efdaff0a9477fcf1bb04f5fc43b",
+    "source_bytes": 3055,
+    "packed_sha256": "3c05c717ded2f2961f49e961a372276e62b4000c1b9bdf7bdb412d10b6010275",
+    "packed_bytes": 1610
+  },
+  {
+    "source": "/tmp/issue552/provenance-remedy.md",
+    "packed": "artifacts/issue552-attempt3-brief/provenance-remedy.md.gz",
+    "source_sha256": "89b79314f2f5a780d1ed9baa1df99e1e8294f560081290d4c9a9b99f85f7502d",
+    "source_bytes": 6168,
+    "packed_sha256": "98ed5a355efff77829cdcf281749398fdf54e0117b40e66bcb8ce57acaef0e96",
+    "packed_bytes": 2791
+  }
+]

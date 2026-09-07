@@ -1,0 +1,1 @@
+["node","--experimental-strip-types","/tmp/issue552/attempt3-direct.mjs"]

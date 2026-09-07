@@ -1,0 +1,16 @@
+[
+  {
+    "original_path": "artifacts/issue543-review/rebrief-rust-scope.md",
+    "bytes": 2474,
+    "sha256": "4aefb858eb9190849c586cedb97354b185f9d2dd6c7c4f26df47571745d50035",
+    "packed_path": "artifacts/issue543-review/rebrief-rust-scope.md.gz",
+    "packed_sha256": "7310f5e421cf1a6807a7f3c3fcfb41ff5c1c4438fbffd5a2419a9e39069b459f"
+  },
+  {
+    "original_path": "artifacts/issue543-review/rebrief-successor.md",
+    "bytes": 9116,
+    "sha256": "26925c8a596eeb6364d095b0a050c37083b46ef132f8be3d71338f0075abb6cc",
+    "packed_path": "artifacts/issue543-review/rebrief-successor.md.gz",
+    "packed_sha256": "5028fa295a20afb3ad32265204b0aaf1b15ca643a23cc6cc5f1c0da9e9151b9d"
+  }
+]

@@ -1,0 +1,22 @@
+{
+  "decision_owner": "root",
+  "decision": "Use one temporary symlink to existing byte-identical pinned dependencies; no installation or update.",
+  "source_path": "/home/bl/misofm/engine/hosts/host-web/qualification/node_modules",
+  "target_path": "/home/bl/misofm/engine-js-hex-recovery/hosts/host-web/qualification/node_modules",
+  "target_manifest": {
+    "package_json": "81a76f3233a35f3d387981087a4172fdafe81cee2be6f43417d1a3b3fbfebd6d",
+    "package_lock_json": "37bfedc97da4e4377a45a0d88f2351263b77e160cde109620d23eaa9952ab069"
+  },
+  "source_manifest": {
+    "package_json": "81a76f3233a35f3d387981087a4172fdafe81cee2be6f43417d1a3b3fbfebd6d",
+    "package_lock_json": "37bfedc97da4e4377a45a0d88f2351263b77e160cde109620d23eaa9952ab069"
+  },
+  "playwright": {
+    "version": "1.62.1",
+    "package_json_sha256": "ca170ec143a88ed3043ac953eb3b2377b2b97304104f4e1e23316684ce2c35af"
+  },
+  "playwright_core": {
+    "version": "1.62.1",
+    "package_json_sha256": "07c47543631fef9508760365dee9fbe958c562093ec8d122543949ed231f233f"
+  }
+}

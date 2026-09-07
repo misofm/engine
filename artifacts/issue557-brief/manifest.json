@@ -1,0 +1,18 @@
+[
+  {
+    "source": "/tmp/issue349-tool9/metadata-successor-brief.md",
+    "packed": "artifacts/issue557-brief/metadata-successor-brief.md.gz",
+    "source_bytes": 13547,
+    "source_sha256": "ba10a27f29b7f65c664c49240ac4622dc4ba2d5ac963aac68f2cebbab6eb690b",
+    "packed_bytes": 5295,
+    "packed_sha256": "9a24f7a1c263ddbaa97fd9ff62b7d974afa6b4613b033c9f5e2f915516776465"
+  },
+  {
+    "source": "/tmp/issue349-tool9/metadata-successor-decision.md",
+    "packed": "artifacts/issue557-brief/metadata-successor-decision.md.gz",
+    "source_bytes": 3374,
+    "source_sha256": "801bdd3f395cab430b913d213af3cb5569d949bbbb148bab187e50d4af19db19",
+    "packed_bytes": 1760,
+    "packed_sha256": "4ce80ddeafe60362e95b41c6dd8dc148a99ecd8c07e0ef25515a93e1ab0a9832"
+  }
+]

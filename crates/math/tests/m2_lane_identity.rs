@@ -149,7 +149,7 @@ fn digest(bits: &[u32]) -> [u8; 32] {
 }
 
 fn hex(bytes: &[u8; 32]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    engine::hex_lower(bytes)
 }
 
 /// Compare width 4 and width 8 against the scalar oracle, bit for bit.

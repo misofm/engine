@@ -1,0 +1,28 @@
+{
+  "issue": 555,
+  "stage": "browser-qualified",
+  "source_commit": "e4f46fa808e413507d204e81b6a4ebc27254869c",
+  "branch_head": "9b5482d6",
+  "candidate_wasm_sha256": "6452f0db237da1d57b3594e7d95dd53a089a604d5b0791ea8b3533c5930c5a1c",
+  "scratch_overlays": {
+    "results_json_fields": ["candidateCommit", "wasmSha256"],
+    "matrix_changed_lines": 1,
+    "record_matrix": false
+  },
+  "browser_qualification": {
+    "status": 0,
+    "chromium": {"version": "151.0.7922.34", "count": 1, "outcome": "all qualification gates passed"},
+    "firefox": {"version": "153.0", "count": 1, "outcome": "all qualification gates passed"},
+    "webkit": {"version": "26.5", "count": 1, "outcome": "all qualification gates passed"}
+  },
+  "mutations": {
+    "browser_mutations_per_browser": 12,
+    "browser_mutations_total": 36,
+    "artifact_set_mutations": 14,
+    "lineage_mutations": 2,
+    "all_passed": true
+  },
+  "astra_ready": true,
+  "repository_mutation": false,
+  "scratch_unrelated_tracked_mutation": false
+}

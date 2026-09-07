@@ -627,6 +627,7 @@ name = "effect-runtime"
 version = "0.1.0"
 dependencies = [
  "effect-contract",
+ "engine",
  "lane",
  "math",
  "sha2 0.11.0",
@@ -1382,6 +1383,7 @@ dependencies = [
 name = "math"
 version = "0.1.0"
 dependencies = [
+ "engine",
  "lane",
  "sha2 0.11.0",
 ]
@@ -1420,6 +1422,7 @@ name = "native-pcm-runner"
 version = "0.1.0"
 dependencies = [
  "capi",
+ "bench-support",
  "serde_json",
  "session",
  "sha2 0.11.0",
@@ -2033,6 +2036,7 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 name = "stem-hasher"
 version = "0.1.0"
 dependencies = [
+ "engine",
  "sha2 0.11.0",
  "source",
 ]

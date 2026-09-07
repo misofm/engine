@@ -1,0 +1,1220 @@
+TAP version 13
+# Subtest: eval 4 -- the SDK's lattice is the engine's lattice
+    # Subtest: every parameter in the shipped catalog reproduces the engine's digest
+    ok 1 - every parameter in the shipped catalog reproduces the engine's digest
+      ---
+      duration_ms: 1591.790806
+      type: 'test'
+      ...
+    1..1
+ok 1 - eval 4 -- the SDK's lattice is the engine's lattice
+  ---
+  duration_ms: 1592.817241
+  type: 'suite'
+  ...
+# Subtest: eval 4 -- round-trip losslessness
+    # Subtest: every lattice endpoint and an interior point round-trip exactly
+    ok 1 - every lattice endpoint and an interior point round-trip exactly
+      ---
+      duration_ms: 57.405467
+      type: 'test'
+      ...
+    # Subtest: a 0.3-class value survives, where a float round-trip would not
+    ok 2 - a 0.3-class value survives, where a float round-trip would not
+      ---
+      duration_ms: 0.504851
+      type: 'test'
+      ...
+    # Subtest: an off-lattice decimal is refused with the two points that bracket it
+    ok 3 - an off-lattice decimal is refused with the two points that bracket it
+      ---
+      duration_ms: 0.853366
+      type: 'test'
+      ...
+    # Subtest: step lands exactly k lattice points away, and clamps at the endpoints
+    ok 4 - step lands exactly k lattice points away, and clamps at the endpoints
+      ---
+      duration_ms: 0.854026
+      type: 'test'
+      ...
+    # Subtest: a diff of two states is expressible in integer steps
+    ok 5 - a diff of two states is expressible in integer steps
+      ---
+      duration_ms: 1.099854
+      type: 'test'
+      ...
+    # Subtest: setSteps refuses an out-of-range rank rather than clamping
+    ok 6 - setSteps refuses an out-of-range rank rather than clamping
+      ---
+      duration_ms: 0.384101
+      type: 'test'
+      ...
+    # Subtest: the generated catalog carries decimals, not floats
+    ok 7 - the generated catalog carries decimals, not floats
+      ---
+      duration_ms: 43.776308
+      type: 'test'
+      ...
+    1..7
+ok 2 - eval 4 -- round-trip losslessness
+  ---
+  duration_ms: 105.450505
+  type: 'suite'
+  ...
+# Subtest: eval 4 -- losslessness by physics, on the wasm engine
+    # Subtest: set -> render -> digest equals the same document authored with that value
+    ok 1 - set -> render -> digest equals the same document authored with that value
+      ---
+      duration_ms: 39.156519
+      type: 'test'
+      ...
+    1..1
+ok 3 - eval 4 -- losslessness by physics, on the wasm engine
+  ---
+  duration_ms: 55.037236
+  type: 'suite'
+  ...
+# Subtest: the SDK hex authority formats empty and fixed literal bytes
+ok 4 - the SDK hex authority formats empty and fixed literal bytes
+  ---
+  duration_ms: 26.395494
+  type: 'test'
+  ...
+# Subtest: eval 1 -- the three red probes at the SDK boundary
+    # Subtest: (a) a quoted-key 48k/128 raw document boots headless
+    ok 1 - (a) a quoted-key 48k/128 raw document boots headless
+      ---
+      duration_ms: 29.402241
+      type: 'test'
+      ...
+    # Subtest: (b) a quoted-key 96k/127 raw document boots and introspects its TRUE shape
+    ok 2 - (b) a quoted-key 96k/127 raw document boots and introspects its TRUE shape
+      ---
+      duration_ms: 2.343053
+      type: 'test'
+      ...
+    # Subtest: (c) a launch-rate refusal is typed, and costs no second compile
+    ok 3 - (c) a launch-rate refusal is typed, and costs no second compile
+      ---
+      duration_ms: 1.332608
+      type: 'test'
+      ...
+    # Subtest: (c companion) the deleted per-source rate key refuses typed at its own path
+    ok 4 - (c companion) the deleted per-source rate key refuses typed at its own path
+      ---
+      duration_ms: 0.808901
+      type: 'test'
+      ...
+    # Subtest: (c companion) the deleted per-source start_frame refuses the same way
+    ok 5 - (c companion) the deleted per-source start_frame refuses the same way
+      ---
+      duration_ms: 1.087852
+      type: 'test'
+      ...
+    # Subtest: no probe ever reports the browser's physical-mismatch code
+    ok 6 - no probe ever reports the browser's physical-mismatch code
+      ---
+      duration_ms: 5.929934
+      type: 'test'
+      ...
+    1..6
+ok 5 - eval 1 -- the three red probes at the SDK boundary
+  ---
+  duration_ms: 41.664827
+  type: 'suite'
+  ...
+# Subtest: eval 3 -- refusal time and admission without staging growth
+    # Subtest: an over-maximum document refuses typed WITHOUT growing wasm memory
+    ok 1 - an over-maximum document refuses typed WITHOUT growing wasm memory
+      ---
+      duration_ms: 1.712392
+      type: 'test'
+      ...
+    # Subtest: validate() of a large invalid document answers within a stated wall budget
+    ok 2 - validate() of a large invalid document answers within a stated wall budget
+      ---
+      duration_ms: 7.250039
+      type: 'test'
+      ...
+    1..2
+ok 6 - eval 3 -- refusal time and admission without staging growth
+  ---
+  duration_ms: 9.328487
+  type: 'suite'
+  ...
+# Subtest: eval 7 -- skew
+    # Subtest: a wrong asset digest is a typed abiMismatch at phase asset
+    ok 1 - a wrong asset digest is a typed abiMismatch at phase asset
+      ---
+      duration_ms: 13.061497
+      type: 'test'
+      ...
+    # Subtest: the real digest verifies, and is the digest the SDK reports
+    ok 2 - the real digest verifies, and is the digest the SDK reports
+      ---
+      duration_ms: 8.070441
+      type: 'test'
+      ...
+    # Subtest: a zero-ABI artifact is a typed abiMismatch, never a partial boot
+    ok 3 - a zero-ABI artifact is a typed abiMismatch, never a partial boot
+      ---
+      duration_ms: 0.899754
+      type: 'test'
+      ...
+    # Subtest: a mismatched ABI artifact is refused with direction-free wording
+    ok 4 - a mismatched ABI artifact is refused with direction-free wording
+      ---
+      duration_ms: 0.631192
+      type: 'test'
+      ...
+    # Subtest: the SDK's provenance names the ABI it was generated against
+    ok 5 - the SDK's provenance names the ABI it was generated against
+      ---
+      duration_ms: 0.151018
+      type: 'test'
+      ...
+    1..5
+ok 7 - eval 7 -- skew
+  ---
+  duration_ms: 23.109295
+  type: 'suite'
+  ...
+# Subtest: eval 8 -- lifecycle
+    # Subtest: a headless mix switch reboots the same instance onto another document
+    ok 1 - a headless mix switch reboots the same instance onto another document
+      ---
+      duration_ms: 2.674885
+      type: 'test'
+      ...
+    # Subtest: boot while live surfaces the typed lifecycle refusal
+    ok 2 - boot while live surfaces the typed lifecycle refusal
+      ---
+      duration_ms: 1.87454
+      type: 'test'
+      ...
+    # Subtest: a disposed engine refuses further use rather than reading a stale handle
+    ok 3 - a disposed engine refuses further use rather than reading a stale handle
+      ---
+      duration_ms: 1.111547
+      type: 'test'
+      ...
+    1..3
+ok 8 - eval 8 -- lifecycle
+  ---
+  duration_ms: 5.841756
+  type: 'suite'
+  ...
+# Subtest: scratch succeeds once after ready, correlates and ignores late events
+ok 9 - scratch succeeds once after ready, correlates and ignores late events
+  ---
+  duration_ms: 2.959386
+  type: 'test'
+  ...
+# Subtest: scratch closes on handshake timeout
+ok 10 - scratch closes on handshake timeout
+  ---
+  duration_ms: 19.980936
+  type: 'test'
+  ...
+# Subtest: scratch closes on handshake abort
+ok 11 - scratch closes on handshake abort
+  ---
+  duration_ms: 0.476929
+  type: 'test'
+  ...
+# Subtest: scratch closes on handshake error
+ok 12 - scratch closes on handshake error
+  ---
+  duration_ms: 0.431502
+  type: 'test'
+  ...
+# Subtest: scratch closes on handshake messageerror
+ok 13 - scratch closes on handshake messageerror
+  ---
+  duration_ms: 0.453224
+  type: 'test'
+  ...
+# Subtest: scratch closes on request timeout
+ok 14 - scratch closes on request timeout
+  ---
+  duration_ms: 20.464948
+  type: 'test'
+  ...
+# Subtest: scratch closes on request abort
+ok 15 - scratch closes on request abort
+  ---
+  duration_ms: 0.833648
+  type: 'test'
+  ...
+# Subtest: scratch closes on request error
+ok 16 - scratch closes on request error
+  ---
+  duration_ms: 0.326532
+  type: 'test'
+  ...
+# Subtest: scratch closes on request messageerror
+ok 17 - scratch closes on request messageerror
+  ---
+  duration_ms: 0.540159
+  type: 'test'
+  ...
+# Subtest: scratch closes on request post
+ok 18 - scratch closes on request post
+  ---
+  duration_ms: 0.732806
+  type: 'test'
+  ...
+# Subtest: scratch closes on request reject
+ok 19 - scratch closes on request reject
+  ---
+  duration_ms: 0.383621
+  type: 'test'
+  ...
+# Subtest: abort inside worker factory is observed before ready or request
+ok 20 - abort inside worker factory is observed before ready or request
+  ---
+  duration_ms: 0.323296
+  type: 'test'
+  ...
+# Subtest: default context + host preserve exact context, URLs and mapped policy
+ok 21 - default context + host preserve exact context, URLs and mapped policy
+  ---
+  duration_ms: 2.111762
+  type: 'test'
+  ...
+# Subtest: injected context and host independently retain default scratch worker
+ok 22 - injected context and host independently retain default scratch worker
+  ---
+  duration_ms: 0.482459
+  type: 'test'
+  ...
+# Subtest: default host failures close accepted context and preserve factory refusal
+ok 23 - default host failures close accepted context and preserve factory refusal
+  ---
+  duration_ms: 1.377875
+  type: 'test'
+  ...
+# Subtest: default host suspends a running native context before construction
+ok 24 - default host suspends a running native context before construction
+  ---
+  duration_ms: 0.769475
+  type: 'test'
+  ...
+# Subtest: suspension failure closes the accepted context and retains the error
+ok 25 - suspension failure closes the accepted context and retains the error
+  ---
+  duration_ms: 0.311924
+  type: 'test'
+  ...
+# Subtest: scratch settlement clears timers and abort listeners; removed callbacks remain inert
+ok 26 - scratch settlement clears timers and abort listeners; removed callbacks remain inert
+  ---
+  duration_ms: 1.844433
+  type: 'test'
+  ...
+# Subtest: actual scratch entry and client retain real Wasm refusal and usage error types
+ok 27 - actual scratch entry and client retain real Wasm refusal and usage error types
+  ---
+  duration_ms: 57.47016
+  type: 'test'
+  ...
+# Subtest: finding 3 -- the scratch and worklet boots agree on every policy word
+    # Subtest: the two option blocks are byte-equal with the two require_* words masked
+    ok 1 - the two option blocks are byte-equal with the two require_* words masked
+      ---
+      duration_ms: 1.315726
+      type: 'test'
+      ...
+    # Subtest: every shared policy word survives into both blocks with the caller's value
+    ok 2 - every shared policy word survives into both blocks with the caller's value
+      ---
+      duration_ms: 1.384818
+      type: 'test'
+      ...
+    # Subtest: the two role-defined words are exactly where the two boots differ
+    ok 3 - the two role-defined words are exactly where the two boots differ
+      ---
+      duration_ms: 0.551591
+      type: 'test'
+      ...
+    # Subtest: an empty policy still writes the handshake pair in both blocks
+    ok 4 - an empty policy still writes the handshake pair in both blocks
+      ---
+      duration_ms: 0.444637
+      type: 'test'
+      ...
+    1..4
+ok 28 - finding 3 -- the scratch and worklet boots agree on every policy word
+  ---
+  duration_ms: 4.786297
+  type: 'suite'
+  ...
+# Subtest: the pre-worklet quantum refusal
+    # Subtest: a matching quantum passes, including the absent-renderQuantumSize default
+    ok 1 - a matching quantum passes, including the absent-renderQuantumSize default
+      ---
+      duration_ms: 0.443295
+      type: 'test'
+      ...
+    # Subtest: a mismatch is typed, and names the worklet's own diagnostic
+    ok 2 - a mismatch is typed, and names the worklet's own diagnostic
+      ---
+      duration_ms: 0.740911
+      type: 'test'
+      ...
+    1..2
+ok 29 - the pre-worklet quantum refusal
+  ---
+  duration_ms: 1.403183
+  type: 'suite'
+  ...
+# Subtest: finding 6 -- web delivery is integer-only at launch
+    # Subtest: 16 and 24 open; 32f refuses typed, naming the token
+    ok 1 - 16 and 24 open; 32f refuses typed, naming the token
+      ---
+      duration_ms: 0.569174
+      type: 'test'
+      ...
+    # Subtest: the refusal is per source, and names which one
+    ok 2 - the refusal is per source, and names which one
+      ---
+      duration_ms: 0.315321
+      type: 'test'
+      ...
+    1..2
+ok 30 - finding 6 -- web delivery is integer-only at launch
+  ---
+  duration_ms: 1.34958
+  type: 'suite'
+  ...
+# Subtest: the browser open sequence
+    # Subtest: the scratch boot reads the document's shape from the engine
+    ok 1 - the scratch boot reads the document's shape from the engine
+      ---
+      duration_ms: 45.925953
+      type: 'test'
+      ...
+    # Subtest: a context that comes back at the wrong rate is closed and retried
+    ok 2 - a context that comes back at the wrong rate is closed and retried
+      ---
+      duration_ms: 6.393467
+      type: 'test'
+      ...
+    # Subtest: exhausting the attempts is a typed refusal, not a context left open
+    ok 3 - exhausting the attempts is a typed refusal, not a context left open
+      ---
+      duration_ms: 6.136628
+      type: 'test'
+      ...
+    # Subtest: a quantum mismatch refuses BEFORE the worklet is created, and closes the context
+    ok 4 - a quantum mismatch refuses BEFORE the worklet is created, and closes the context
+      ---
+      duration_ms: 10.323152
+      type: 'test'
+      ...
+    # Subtest: the worklet boot carries the physical shape as its backstop
+    ok 5 - the worklet boot carries the physical shape as its backstop
+      ---
+      duration_ms: 8.033862
+      type: 'test'
+      ...
+    # Subtest: close disposes the worklet before its context and is idempotent
+    ok 6 - close disposes the worklet before its context and is idempotent
+      ---
+      duration_ms: 5.188112
+      type: 'test'
+      ...
+    # Subtest: close still releases the AudioContext when host disposal rejects
+    ok 7 - close still releases the AudioContext when host disposal rejects
+      ---
+      duration_ms: 5.767646
+      type: 'test'
+      ...
+    # Subtest: a 32f source refuses before any context is constructed
+    ok 8 - a 32f source refuses before any context is constructed
+      ---
+      duration_ms: 0.399992
+      type: 'test'
+      ...
+    1..8
+ok 31 - the browser open sequence
+  ---
+  duration_ms: 116.190952
+  type: 'suite'
+  ...
+# Subtest: actual Wasm paused seek accepts target PCM before the first quantum with old queues full
+ok 32 - actual Wasm paused seek accepts target PCM before the first quantum with old queues full
+  ---
+  duration_ms: 82.0367
+  type: 'test'
+  ...
+# Subtest: MSB1 layout and writer preserve frozen bytes, headers, counters and reuse
+ok 33 - MSB1 layout and writer preserve frozen bytes, headers, counters and reuse
+  ---
+  duration_ms: 1.959251
+  type: 'test'
+  ...
+# Subtest: feed lifecycle preserves URL, typed seams, identity and terminal cleanup
+ok 34 - feed lifecycle preserves URL, typed seams, identity and terminal cleanup
+  ---
+  duration_ms: 3.11874
+  type: 'test'
+  ...
+# Subtest: attach-post cleanup releases engaged rings before throwing cleanup failures
+ok 35 - attach-post cleanup releases engaged rings before throwing cleanup failures
+  ---
+  duration_ms: 0.433415
+  type: 'test'
+  ...
+# Subtest: actual Wasm control-port preparation releases full stale SAB before exact first target render
+ok 36 - actual Wasm control-port preparation releases full stale SAB before exact first target render
+  ---
+  duration_ms: 29.179667
+  type: 'test'
+  ...
+# Subtest: prepareSeek bounds requests and rejects supersession, refusal, close and timeout
+ok 37 - prepareSeek bounds requests and rejects supersession, refusal, close and timeout
+  ---
+  duration_ms: 2.934429
+  type: 'test'
+  ...
+# Subtest: control preparation never discards or applies a superseding producer generation
+ok 38 - control preparation never discards or applies a superseding producer generation
+  ---
+  duration_ms: 3.036894
+  type: 'test'
+  ...
+# Subtest: moved prelude drains odd mono/stereo rings and allocation mutation turns red
+ok 39 - moved prelude drains odd mono/stereo rings and allocation mutation turns red
+  ---
+  duration_ms: 4.619368
+  type: 'test'
+  ...
+# Subtest: observer borrows reusable mono/stereo scratch without altering any shared byte
+ok 40 - observer borrows reusable mono/stereo scratch without altering any shared byte
+  ---
+  duration_ms: 1.73814
+  type: 'test'
+  ...
+# Subtest: observer bounds candidate work, catches up, wraps and remains independent of audio consumption
+ok 41 - observer bounds candidate work, catches up, wraps and remains independent of audio consumption
+  ---
+  duration_ms: 1.059288
+  type: 'test'
+  ...
+# Subtest: observer rejects stale, invalid and torn slots and follows full seek generations
+ok 42 - observer rejects stale, invalid and torn slots and follows full seek generations
+  ---
+  duration_ms: 0.473201
+  type: 'test'
+  ...
+# Subtest: observer drops PCM reused during copy before sequence publication, and seeks during copy
+ok 43 - observer drops PCM reused during copy before sequence publication, and seeks during copy
+  ---
+  duration_ms: 0.534327
+  type: 'test'
+  ...
+# Subtest: eval 5 -- the plan-equality gate
+    # Subtest: the gate is green across a corpus of built sessions
+    ok 1 - the gate is green across a corpus of built sessions
+      ---
+      duration_ms: 9.446142
+      type: 'test'
+      ...
+    # Subtest: declaration order does not change the normalized document
+    ok 2 - declaration order does not change the normalized document
+      ---
+      duration_ms: 1.730656
+      type: 'test'
+      ...
+    # Subtest: RED MUTATION: one source's wrong bit depth is caught, and the message names the path
+    ok 3 - RED MUTATION: one source's wrong bit depth is caught, and the message names the path
+      ---
+      duration_ms: 1.058947
+      type: 'test'
+      ...
+    # Subtest: the gate sees the bit-depth TOKEN, not just a number
+    ok 4 - the gate sees the bit-depth TOKEN, not just a number
+      ---
+      duration_ms: 0.413026
+      type: 'test'
+      ...
+    # Subtest: the gate reports the FIRST difference, deep inside a track
+    ok 5 - the gate reports the FIRST difference, deep inside a track
+      ---
+      duration_ms: 0.366709
+      type: 'test'
+      ...
+    # Subtest: the gate refuses a differing entity count at the array's own path
+    ok 6 - the gate refuses a differing entity count at the array's own path
+      ---
+      duration_ms: 0.313146
+      type: 'test'
+      ...
+    1..6
+ok 44 - eval 5 -- the plan-equality gate
+  ---
+  duration_ms: 33.647997
+  type: 'suite'
+  ...
+# Subtest: finding 6 -- the full bit-depth token set
+    # Subtest: 16 and 24 emit bare integers; "32f" emits a quoted string
+    ok 1 - 16 and 24 emit bare integers; "32f" emits a quoted string
+      ---
+      duration_ms: 1.828022
+      type: 'test'
+      ...
+    # Subtest: toJSON round-trips each token exactly, type included
+    ok 2 - toJSON round-trips each token exactly, type included
+      ---
+      duration_ms: 0.384983
+      type: 'test'
+      ...
+    # Subtest: a depth outside the token set is refused at its own path
+    ok 3 - a depth outside the token set is refused at its own path
+      ---
+      duration_ms: 0.402757
+      type: 'test'
+      ...
+    1..3
+ok 45 - finding 6 -- the full bit-depth token set
+  ---
+  duration_ms: 2.957203
+  type: 'suite'
+  ...
+# Subtest: the most important eval -- what the builder writes, the engine boots
+    # Subtest: a 16-bit document boots and introspects as declared
+    ok 1 - a 16-bit document boots and introspects as declared
+      ---
+      duration_ms: 30.393258
+      type: 'test'
+      ...
+    # Subtest: a 24-bit document boots and introspects as declared
+    ok 2 - a 24-bit document boots and introspects as declared
+      ---
+      duration_ms: 1.466282
+      type: 'test'
+      ...
+    # Subtest: a 32f-bit document boots and introspects as declared
+    ok 3 - a 32f-bit document boots and introspects as declared
+      ---
+      duration_ms: 1.424493
+      type: 'test'
+      ...
+    # Subtest: 48000/128 and 96000/127 both boot, and the ring follows the published rule
+    ok 4 - 48000/128 and 96000/127 both boot, and the ring follows the published rule
+      ---
+      duration_ms: 2.825131
+      type: 'test'
+      ...
+    # Subtest: every launch rate boots
+    ok 5 - every launch rate boots
+      ---
+      duration_ms: 5.94305
+      type: 'test'
+      ...
+    # Subtest: a rich session -- effects, submix, sidechain, matrix, automation -- boots
+    ok 6 - a rich session -- effects, submix, sidechain, matrix, automation -- boots
+      ---
+      duration_ms: 13.692079
+      type: 'test'
+      ...
+    # Subtest: the engine accepts the builder's document through the toJson() surface too
+    ok 7 - the engine accepts the builder's document through the toJson() surface too
+      ---
+      duration_ms: 2.230899
+      type: 'test'
+      ...
+    1..7
+ok 46 - the most important eval -- what the builder writes, the engine boots
+  ---
+  duration_ms: 59.881322
+  type: 'suite'
+  ...
+# Subtest: validation refusals name the offending path
+    # Subtest: an unsupported sample rate is refused before a document exists
+    ok 1 - an unsupported sample rate is refused before a document exists
+      ---
+      duration_ms: 0.261819
+      type: 'test'
+      ...
+    # Subtest: a duplicate source ID is refused at that source's path
+    ok 2 - a duplicate source ID is refused at that source's path
+      ---
+      duration_ms: 0.206574
+      type: 'test'
+      ...
+    # Subtest: a malformed content digest is refused at its own path
+    ok 3 - a malformed content digest is refused at its own path
+      ---
+      duration_ms: 0.35143
+      type: 'test'
+      ...
+    # Subtest: a track naming an undeclared source is refused at the track's source path
+    ok 4 - a track naming an undeclared source is refused at the track's source path
+      ---
+      duration_ms: 0.164874
+      type: 'test'
+      ...
+    # Subtest: a lane index beyond the source's channel count is refused
+    ok 5 - a lane index beyond the source's channel count is refused
+      ---
+      duration_ms: 0.142221
+      type: 'test'
+      ...
+    # Subtest: a route naming an undeclared endpoint is refused at that endpoint's path
+    ok 6 - a route naming an undeclared endpoint is refused at that endpoint's path
+      ---
+      duration_ms: 0.214899
+      type: 'test'
+      ...
+    # Subtest: the ID namespaces are enforced in both directions
+    ok 7 - the ID namespaces are enforced in both directions
+      ---
+      duration_ms: 0.259695
+      type: 'test'
+      ...
+    # Subtest: a prepared-only builtin is refused as an automation target
+    ok 8 - a prepared-only builtin is refused as an automation target
+      ---
+      duration_ms: 0.307817
+      type: 'test'
+      ...
+    # Subtest: an effect parameter outside its catalog domain is refused by name
+    ok 9 - an effect parameter outside its catalog domain is refused by name
+      ---
+      duration_ms: 0.20983
+      type: 'test'
+      ...
+    1..9
+ok 47 - validation refusals name the offending path
+  ---
+  duration_ms: 2.368992
+  type: 'suite'
+  ...
+# Subtest: issue \#278 -- the port table is enforced, not documented
+    # Subtest: the declared sidechain port is accepted, and it is the descriptor's own
+    ok 1 - the declared sidechain port is accepted, and it is the descriptor's own
+      ---
+      duration_ms: 0.312805
+      type: 'test'
+      ...
+    # Subtest: a misspelled port is refused at authoring time, naming the candidates
+    ok 2 - a misspelled port is refused at authoring time, naming the candidates
+      ---
+      duration_ms: 0.224448
+      type: 'test'
+      ...
+    # Subtest: a port that exists but is not a sidechain input is refused as what it is
+    ok 3 - a port that exists but is not a sidechain input is refused as what it is
+      ---
+      duration_ms: 0.14661
+      type: 'test'
+      ...
+    # Subtest: an effect that declares no sidechain input refuses every port
+    ok 4 - an effect that declares no sidechain input refuses every port
+      ---
+      duration_ms: 0.471928
+      type: 'test'
+      ...
+    # Subtest: every catalog port row is a launch descriptor row, and there are eighteen
+    ok 5 - every catalog port row is a launch descriptor row, and there are eighteen
+      ---
+      duration_ms: 0.148844
+      type: 'test'
+      ...
+    # Subtest: the engine still refuses an unknown port at boot -- this replaced nothing
+    ok 6 - the engine still refuses an unknown port at boot -- this replaced nothing
+      ---
+      duration_ms: 1.250041
+      type: 'test'
+      ...
+    1..6
+ok 48 - issue \#278 -- the port table is enforced, not documented
+  ---
+  duration_ms: 2.744717
+  type: 'suite'
+  ...
+# Subtest: canonical float spellings
+    # Subtest: integral values gain .0 so they stay schema floats
+    ok 1 - integral values gain .0 so they stay schema floats
+      ---
+      duration_ms: 0.423376
+      type: 'test'
+      ...
+    # Subtest: negative zero is preserved exactly as -0.0
+    ok 2 - negative zero is preserved exactly as -0.0
+      ---
+      duration_ms: 0.518698
+      type: 'test'
+      ...
+    # Subtest: shortest f32 Display, with no exponent anywhere
+    ok 3 - shortest f32 Display, with no exponent anywhere
+      ---
+      duration_ms: 0.795064
+      type: 'test'
+      ...
+    # Subtest: a value below the exponent threshold is written out in full
+    ok 4 - a value below the exponent threshold is written out in full
+      ---
+      duration_ms: 0.360938
+      type: 'test'
+      ...
+    # Subtest: every durable u64 normalizes to a decimal string through u64::MAX
+    ok 5 - every durable u64 normalizes to a decimal string through u64::MAX
+      ---
+      duration_ms: 0.479964
+      type: 'test'
+      ...
+    # Subtest: every emitted float parses back to the same f32 the model holds
+    ok 6 - every emitted float parses back to the same f32 the model holds
+      ---
+      duration_ms: 1.555092
+      type: 'test'
+      ...
+    # Subtest: the builder reproduces a checked-in canonical fixture byte for byte
+    ok 7 - the builder reproduces a checked-in canonical fixture byte for byte
+      ---
+      duration_ms: 21.219165
+      type: 'test'
+      ...
+    # Subtest: schema key order, never object construction order, controls canonical bytes
+    ok 8 - schema key order, never object construction order, controls canonical bytes
+      ---
+      duration_ms: 1.497032
+      type: 'test'
+      ...
+    # Subtest: the bounded Rust-authority corpus matches the actual SDK writer
+    ok 9 - the bounded Rust-authority corpus matches the actual SDK writer
+      ---
+      duration_ms: 9.349107
+      type: 'test'
+      ...
+    1..9
+ok 49 - canonical float spellings
+  ---
+  duration_ms: 36.579711
+  type: 'suite'
+  ...
+# Subtest: issue 321 -- complete headless ABI capability parity
+    # Subtest: status and sessionMap expose the compiled addressing authority
+    ok 1 - status and sessionMap expose the compiled addressing authority
+      ---
+      duration_ms: 32.278007
+      type: 'test'
+      ...
+    # Subtest: seek changes generation/frame and the source remains renderable
+    ok 2 - seek changes generation/frame and the source remains renderable
+      ---
+      duration_ms: 5.109511
+      type: 'test'
+      ...
+    # Subtest: meter lease and poll return one copied, ABI-shaped sample window
+    ok 3 - meter lease and poll return one copied, ABI-shaped sample window
+      ---
+      duration_ms: 6.759785
+      type: 'test'
+      ...
+    # Subtest: a session prepared without meters refuses the lease as unsupported
+    ok 4 - a session prepared without meters refuses the lease as unsupported
+      ---
+      duration_ms: 1.365621
+      type: 'test'
+      ...
+    1..4
+ok 50 - issue 321 -- complete headless ABI capability parity
+  ---
+  duration_ms: 72.508493
+  type: 'suite'
+  ...
+# Subtest: issue 322 -- shared semantic console
+    # Subtest: all eleven command kinds are built by name and admitted by live Wasm
+    ok 1 - all eleven command kinds are built by name and admitted by live Wasm
+      ---
+      duration_ms: 43.604451
+      type: 'test'
+      ...
+    # Subtest: unknown tracks and numeric domains refuse before transport
+    ok 2 - unknown tracks and numeric domains refuse before transport
+      ---
+      duration_ms: 0.690285
+      type: 'test'
+      ...
+    # Subtest: browser transport maps the same semantic record and acknowledgement
+    ok 3 - browser transport maps the same semantic record and acknowledgement
+      ---
+      duration_ms: 0.53555
+      type: 'test'
+      ...
+    # Subtest: a torn acknowledgement is rejected after, never before, transport answers
+    ok 4 - a torn acknowledgement is rejected after, never before, transport answers
+      ---
+      duration_ms: 0.347451
+      type: 'test'
+      ...
+    1..4
+ok 51 - issue 322 -- shared semantic console
+  ---
+  duration_ms: 65.510875
+  type: 'suite'
+  ...
+# Subtest: check-sdk-headless artifact path bytes
+    # Subtest: ordinary relative
+    ok 1 - ordinary relative
+      ---
+      duration_ms: 59.189755
+      type: 'test'
+      ...
+    # Subtest: absolute
+    ok 2 - absolute
+      ---
+      duration_ms: 61.117457
+      type: 'test'
+      ...
+    # Subtest: spaces
+    ok 3 - spaces
+      ---
+      duration_ms: 37.412197
+      type: 'test'
+      ...
+    # Subtest: tabs and metacharacters
+    ok 4 - tabs and metacharacters
+      ---
+      duration_ms: 41.653746
+      type: 'test'
+      ...
+    # Subtest: embedded newline
+    ok 5 - embedded newline
+      ---
+      duration_ms: 38.513054
+      type: 'test'
+      ...
+    # Subtest: one terminal newline
+    ok 6 - one terminal newline
+      ---
+      duration_ms: 38.115576
+      type: 'test'
+      ...
+    # Subtest: repeated terminal newlines
+    ok 7 - repeated terminal newlines
+      ---
+      duration_ms: 37.804233
+      type: 'test'
+      ...
+    # Subtest: sentinel-like final byte
+    ok 8 - sentinel-like final byte
+      ---
+      duration_ms: 38.185098
+      type: 'test'
+      ...
+    # Subtest: alternate script probe is exact
+    ok 9 - alternate script probe is exact
+      ---
+      duration_ms: 0.414349
+      type: 'test'
+      ...
+    # Subtest: workflow-relative invocation ignores CDPATH output and shadow selection
+    ok 10 - workflow-relative invocation ignores CDPATH output and shadow selection
+      ---
+      duration_ms: 76.625865
+      type: 'test'
+      ...
+    # Subtest: repository-root capture preserves repeated terminal newlines
+    ok 11 - repository-root capture preserves repeated terminal newlines
+      ---
+      duration_ms: 39.216353
+      type: 'test'
+      ...
+    # Subtest: artifact resolution ignores CDPATH for relative and absolute forms
+    ok 12 - artifact resolution ignores CDPATH for relative and absolute forms
+      ---
+      duration_ms: 74.805567
+      type: 'test'
+      ...
+    # Subtest: an ancestor symlink is accepted and physically resolved
+    ok 13 - an ancestor symlink is accepted and physically resolved
+      ---
+      duration_ms: 37.42987
+      type: 'test'
+      ...
+    # Subtest: support rejects missing and malformed artifact-directory hex
+    ok 14 - support rejects missing and malformed artifact-directory hex
+      ---
+      duration_ms: 118.298386
+      type: 'test'
+      ...
+    # Subtest: invalid-UTF-8 filename bytes survive ASCII hex transport
+    ok 15 - invalid-UTF-8 filename bytes survive ASCII hex transport
+      ---
+      duration_ms: 69.257951
+      type: 'test'
+      ...
+    # Subtest: usage and missing or non-directory inputs return 2
+    ok 16 - usage and missing or non-directory inputs return 2
+      ---
+      duration_ms: 11.848938
+      type: 'test'
+      ...
+    # Subtest: missing module and every direct-symlink directory spelling return 2
+    ok 17 - missing module and every direct-symlink directory spelling return 2
+      ---
+      duration_ms: 20.430563
+      type: 'test'
+      ...
+    # Subtest: unsearchable directory returns 2, including under a root test runner
+    ok 18 - unsearchable directory returns 2, including under a root test runner
+      ---
+      duration_ms: 5.260509
+      type: 'test'
+      ...
+    # Subtest: validated Node failure propagates unchanged
+    ok 19 - validated Node failure propagates unchanged
+      ---
+      duration_ms: 37.47156
+      type: 'test'
+      ...
+    1..19
+ok 52 - check-sdk-headless artifact path bytes
+  ---
+  duration_ms: 845.863866
+  type: 'suite'
+  ...
+# Subtest: package entry points
+    # Subtest: the internal canonical serializer is absent from every public runtime barrel
+    ok 1 - the internal canonical serializer is absent from every public runtime barrel
+      ---
+      duration_ms: 0.960189
+      type: 'test'
+      ...
+    # Subtest: every declared code subpath names emitted ESM and declarations
+    ok 2 - every declared code subpath names emitted ESM and declarations
+      ---
+      duration_ms: 7.443658
+      type: 'test'
+      ...
+    # Subtest: every import example in the README resolves
+    ok 3 - every import example in the README resolves
+      ---
+      duration_ms: 1.744132
+      type: 'test'
+      ...
+    # Subtest: the root entry is the module the evals deep-import
+    ok 4 - the root entry is the module the evals deep-import
+      ---
+      duration_ms: 0.323676
+      type: 'test'
+      ...
+    1..4
+ok 53 - package entry points
+  ---
+  duration_ms: 11.887451
+  type: 'suite'
+  ...
+# Subtest: barrel reachability
+    # Subtest: core/agent is on the root barrel, by identity
+    ok 1 - core/agent is on the root barrel, by identity
+      ---
+      duration_ms: 0.385986
+      type: 'test'
+      ...
+    # Subtest: core/writer is on the root barrel, by identity
+    ok 2 - core/writer is on the root barrel, by identity
+      ---
+      duration_ms: 0.148303
+      type: 'test'
+      ...
+    # Subtest: core/lattice is on the root barrel, by identity
+    ok 3 - core/lattice is on the root barrel, by identity
+      ---
+      duration_ms: 0.280524
+      type: 'test'
+      ...
+    # Subtest: browser/host-mirror is on the browser barrel, by identity
+    ok 4 - browser/host-mirror is on the browser barrel, by identity
+      ---
+      duration_ms: 0.337342
+      type: 'test'
+      ...
+    # Subtest: the pre-\#278 barrel surface is unchanged
+    ok 5 - the pre-\#278 barrel surface is unchanged
+      ---
+      duration_ms: 0.338825
+      type: 'test'
+      ...
+    1..5
+ok 54 - barrel reachability
+  ---
+  duration_ms: 2.146388
+  type: 'suite'
+  ...
+# Subtest: eval 2 -- 96k/127 end to end from the boot's own answer
+    # Subtest: the SDK's source generator is bit-identical to the native oracle's
+    ok 1 - the SDK's source generator is bit-identical to the native oracle's
+      ---
+      duration_ms: 1.231595
+      type: 'test'
+      ...
+    # Subtest: boot -> read shape -> prepare at the derived ring -> render -> native digest
+    ok 2 - boot -> read shape -> prepare at the derived ring -> render -> native digest
+      ---
+      duration_ms: 2775.247923
+      type: 'test'
+      ...
+    # Subtest: the same cross-check holds at 48k/128, so 96k/127 is not a special case
+    ok 3 - the same cross-check holds at 48k/128, so 96k/127 is not a special case
+      ---
+      duration_ms: 118.492556
+      type: 'test'
+      ...
+    # Subtest: a mono source renders identically on both sides
+    ok 4 - a mono source renders identically on both sides
+      ---
+      duration_ms: 115.737628
+      type: 'test'
+      ...
+    1..4
+ok 55 - eval 2 -- 96k/127 end to end from the boot's own answer
+  ---
+  duration_ms: 3031.044754
+  type: 'suite'
+  ...
+# Subtest: the writer contract -- paused
+    # Subtest: the 17th flush of 4 single-lane records surfaces typed reason-8
+    ok 1 - the 17th flush of 4 single-lane records surfaces typed reason-8
+      ---
+      duration_ms: 35.194863
+      type: 'test'
+      ...
+    # Subtest: a refusal is not terminal: after the first drain, the FINAL values land
+    ok 2 - a refusal is not terminal: after the first drain, the FINAL values land
+      ---
+      duration_ms: 6.640648
+      type: 'test'
+      ...
+    # Subtest: one both-lane record costs two queue slots: 32 fit, 33 do not
+    ok 3 - one both-lane record costs two queue slots: 32 fit, 33 do not
+      ---
+      duration_ms: 7.698603
+      type: 'test'
+      ...
+    # Subtest: a single oversized both-lane gesture from idle splits and coalesces under the same contract
+    ok 4 - a single oversized both-lane gesture from idle splits and coalesces under the same contract
+      ---
+      duration_ms: 1.781032
+      type: 'test'
+      ...
+    1..4
+ok 56 - the writer contract -- paused
+  ---
+  duration_ms: 72.731116
+  type: 'suite'
+  ...
+# Subtest: the writer contract -- playing
+    # Subtest: a steady cadence against a rendering transport never refuses
+    ok 1 - a steady cadence against a rendering transport never refuses
+      ---
+      duration_ms: 9.764287
+      type: 'test'
+      ...
+    1..1
+ok 57 - the writer contract -- playing
+  ---
+  duration_ms: 9.913291
+  type: 'suite'
+  ...
+# Subtest: the writer contract -- coalescing and escalation
+    # Subtest: a hundred positions of one control collapse to one pending record
+    ok 1 - a hundred positions of one control collapse to one pending record
+      ---
+      duration_ms: 0.401084
+      type: 'test'
+      ...
+    # Subtest: distinct addresses do not coalesce into each other
+    ok 2 - distinct addresses do not coalesce into each other
+      ---
+      duration_ms: 0.302847
+      type: 'test'
+      ...
+    # Subtest: a refusal that is NOT flow control throws rather than retrying forever
+    ok 3 - a refusal that is NOT flow control throws rather than retrying forever
+      ---
+      duration_ms: 1.804577
+      type: 'test'
+      ...
+    1..3
+ok 58 - the writer contract -- coalescing and escalation
+  ---
+  duration_ms: 3.025673
+  type: 'suite'
+  ...
+# Subtest: the writer contract -- the async submit boundary
+    # Subtest: an async submit produces the same outcomes and the same stats as a sync one
+    ok 1 - an async submit produces the same outcomes and the same stats as a sync one
+      ---
+      duration_ms: 10.519716
+      type: 'test'
+      ...
+    # Subtest: two flushes entered without awaiting the first serialize into two disjoint batches
+    ok 2 - two flushes entered without awaiting the first serialize into two disjoint batches
+      ---
+      duration_ms: 1.657677
+      type: 'test'
+      ...
+    1..2
+ok 59 - the writer contract -- the async submit boundary
+  ---
+  duration_ms: 12.323332
+  type: 'suite'
+  ...
+# Subtest: the writer contract -- races the async boundary opens
+    # Subtest: an edit staged while its own batch is in flight is not deleted by that batch's success (encoded)
+    ok 1 - an edit staged while its own batch is in flight is not deleted by that batch's success (encoded)
+      ---
+      duration_ms: 1.539111
+      type: 'test'
+      ...
+    # Subtest: an edit staged while its own batch is in flight is not deleted by that batch's success (semantic)
+    ok 2 - an edit staged while its own batch is in flight is not deleted by that batch's success (semantic)
+      ---
+      duration_ms: 1.305186
+      type: 'test'
+      ...
+    # Subtest: an escalation rejects its own caller and does not poison later flushes (encoded)
+    ok 3 - an escalation rejects its own caller and does not poison later flushes (encoded)
+      ---
+      duration_ms: 1.875763
+      type: 'test'
+      ...
+    # Subtest: an escalation rejects its own caller and does not poison later flushes (semantic)
+    ok 4 - an escalation rejects its own caller and does not poison later flushes (semantic)
+      ---
+      duration_ms: 1.469779
+      type: 'test'
+      ...
+    # Subtest: a refusal halves the count that was submitted, not the ceiling
+    ok 5 - a refusal halves the count that was submitted, not the ceiling
+      ---
+      duration_ms: 1.955825
+      type: 'test'
+      ...
+    1..5
+ok 60 - the writer contract -- races the async boundary opens
+  ---
+  duration_ms: 8.326449
+  type: 'suite'
+  ...
+# Subtest: writer construction requires exactly one callable submission path
+ok 61 - writer construction requires exactly one callable submission path
+  ---
+  duration_ms: 0.344737
+  type: 'test'
+  ...
+1..61
+# tests 169
+# suites 28
+# pass 169
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 3214.072726

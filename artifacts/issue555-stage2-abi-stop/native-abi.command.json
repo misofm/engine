@@ -1,0 +1,1 @@
+{"argv":["env","CARGO_TARGET_DIR=/tmp/issue555-native-target","bash","scripts/check-capi-abi.sh","."],"cwd":"/tmp/issue555-source-e4f46fa8","source_commit":"e4f46fa808e413507d204e81b6a4ebc27254869c"}

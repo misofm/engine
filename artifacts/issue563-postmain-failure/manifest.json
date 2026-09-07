@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "sourceMerge": "b20b27d5e3ddc1a1246d003d857ced0bf0cba0c4",
+  "failedRun": "34124982941",
+  "failedJob": "101751589069",
+  "files": [
+    {
+      "sha256": "ef1dc3510c8ca97bc02589654ed4185a0292216905cc9dc231479a998570f1a8",
+      "path": "artifacts/issue563-postmain-failure/run.json"
+    },
+    {
+      "sha256": "c12fa1f6ae3751067d3a32b2241673e9ce107fb3ee1f9247b69b8bf78028f0bb",
+      "path": "artifacts/issue563-postmain-failure/workspace-debug.log.gz"
+    }
+  ]
+}

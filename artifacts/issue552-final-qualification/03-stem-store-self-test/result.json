@@ -1,0 +1,10 @@
+{
+  "name": "03-stem-store-self-test",
+  "argv": [
+    "node",
+    "scripts/check-stem-store-v1.mjs",
+    "--self-test"
+  ],
+  "cwd": "/home/bl/misofm/engine-js-hex-recovery",
+  "status": 0
+}

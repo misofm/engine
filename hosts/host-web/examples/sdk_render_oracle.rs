@@ -127,10 +127,6 @@ fn main() {
         }
     }
 
-    let hex: String = digest
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
+    let hex = engine::hex_lower(&digest.finalize());
     writeln!(std::io::stdout(), "{hex}").expect("write the digest");
 }

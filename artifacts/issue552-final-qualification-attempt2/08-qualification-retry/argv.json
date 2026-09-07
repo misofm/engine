@@ -1,0 +1,1 @@
+["npm","run","qualify","--","--artifacts","/tmp/issue555-postpin-artifact","--browser","chromium","--check-matrix","--self-test-mutations"]

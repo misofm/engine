@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "files": [
+    {
+      "sha256": "0075ec308252fa81d966d5ddfdb4ba557b1fbef6881692c8cdf7a4eeba3ae5ab",
+      "path": "artifacts/issue555-final-pr-review/qualification-run.json"
+    },
+    {
+      "sha256": "d9633034ed5e6dc96d4bbc01bb2463c58edcc86c952c17871cf0fe640f912553",
+      "path": "artifacts/issue555-final-pr-review/sol-high.md"
+    }
+  ]
+}

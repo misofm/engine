@@ -1,0 +1,54 @@
+{
+  "utc_timestamp": "2026-09-07T14:31:55.127Z",
+  "cwd": "/home/bl/misofm/engine-js-hex-recovery/hosts/host-web/qualification\n",
+  "head": "89700161e53846b6dc8059bf4ba669d0b90c9f3f\n",
+  "status": "## codex/js-hex-recovery...origin/codex/js-hex-recovery\n?? node_modules\n",
+  "source_sha256": {
+    "sdk/src/core/hex.ts": "527c820b255dcdf9b4ce15ab0b9b59c3bea3f451b7f9941cc2ea4dd37bca4d1b",
+    "sdk/src/core/asset.ts": "6fa8225245c5176cbbf03df2671eddde34cd58d6e9a61b41380e12b9ee71d7da",
+    "sdk/test/boot-evals.mjs": "049242e78e76abbd841cb8f0f23c6cc7d89abbc0d02e1ce28a444bb9db3caa2a",
+    "hosts/host-web/web/hex-lower.js": "1eb5564599b0ae99ca404f0c139c0eb9abfe48d488bc55a4bad0b9aacd039560",
+    "hosts/host-web/web/stem-store/incremental-sha256.js": "e4519729bc0fede4f4ffd815492f7bb22b97c10d0899c05eb1f63e156f5b0e40",
+    "hosts/host-web/qualification/qualification.js": "30b29223fbb787aa71f40da8b0000a731c7b2bb72b75f7270c02cbd6b72e426b",
+    "hosts/host-web/qualification/server.mjs": "ca041e9d7af6a2e2e4ea2b70077b3bff4e2c51e8a6d89e944326462b0f87730e",
+    "hosts/host-web/tests/stem-store-hash-v1.mjs": "cf2125bd2a80d42cfe0963bd1ad63d2b95360a737bde39b035e4291570a25c34",
+    "hosts/host-web/web/stem-store/incremental-sha256.provenance.json": "fd6200bb0dd8b5663bd22354c957d15f7cca32a15555c2974caf86e87ded595d",
+    "scripts/check-stem-store-v1.mjs": "30833441be1d00fee9ddcf2eff05d6c6cb5b4b760151f055a76b84cd8fec9c63"
+  },
+  "artifact_inventory": {
+    "directory": "/tmp/issue555-postpin-artifact",
+    "regular_file_count": 6,
+    "files": [
+      {
+        "name": "miso-engine-v1-abi-layout.json",
+        "bytes": 9351,
+        "sha256": "40f6fe2e23e1b47500011c14871750a75922ab194136add8b387a4b40eb56919"
+      },
+      {
+        "name": "miso-engine-v1-audio-worklet-host.d.ts",
+        "bytes": 35347,
+        "sha256": "445254e7c6ddf3330bdf20cafa8cacec4d0e2489805f72a833859db52bc038cf"
+      },
+      {
+        "name": "miso-engine-v1-audio-worklet-host.js",
+        "bytes": 39457,
+        "sha256": "21c8947d8aad2d1d9a23e553c2c7b983dbd5a622aabfbab9a41c622d1a50229a"
+      },
+      {
+        "name": "miso-engine-v1-audio-worklet.js",
+        "bytes": 38447,
+        "sha256": "225bc06043ed6e2c62a38d63f1c2015b40480d673e3a53109c938eba481556cb"
+      },
+      {
+        "name": "miso-engine-v1-audio-worklet.simd128.wasm",
+        "bytes": 2728966,
+        "sha256": "6452f0db237da1d57b3594e7d95dd53a089a604d5b0791ea8b3533c5930c5a1c"
+      },
+      {
+        "name": "miso-engine-v1-parameter-metadata.json",
+        "bytes": 63907,
+        "sha256": "6eac2cb3e30931b6c01b10c63af4eedd2d59337274565a129c7a3f328a09938d"
+      }
+    ]
+  }
+}

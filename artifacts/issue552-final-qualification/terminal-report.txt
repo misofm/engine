@@ -1,0 +1,19 @@
+Issue #552/#558 final qualification — Luna HIGH
+
+Repository: /home/bl/misofm/engine-js-hex-recovery
+Sequence pre-command HEAD: 3881591d307c7b00e1cc7dfb431b3abf26874717
+Sequence pre-command status: clean (codex/js-hex-recovery...origin/codex/js-hex-recovery)
+Artifact: /tmp/issue555-postpin-artifact (exactly six regular files; required Wasm SHA-256 verified)
+
+01 direct: PASS (status 0)
+02 stem-store: PASS (status 0)
+03 stem-store --self-test: PASS (status 0; six provenance RED records plus prior controls)
+04 SDK types: PASS (status 0)
+05 SDK headless: PASS (status 0)
+06 SDK package: PASS (status 0)
+07 session-identities: PASS (status 0)
+08 qualification: FAIL (status 1); stopped before gates 09–11
+Failure: ERR_MODULE_NOT_FOUND — package playwright imported by hosts/host-web/qualification/run.mjs.
+Exact raw records: 08-qualification/stdout.raw and 08-qualification/stderr.raw; argv/cwd/status files are adjacent.
+
+Final worktree status: clean; no repository files changed by qualification.

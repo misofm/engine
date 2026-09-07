@@ -1,0 +1,8 @@
+stage=postpin-output-precondition-stop
+head=7c15603204a02eaad6d90adb72e4024ac24a4628
+approved_pin=6452f0db237da1d57b3594e7d95dd53a089a604d5b0791ea8b3533c5930c5a1c
+status=2
+failure=output must be an existing non-symlink directory
+artifact_files=0
+later_checks=not_run
+repository_mutation=false

@@ -372,10 +372,5 @@ pub(crate) fn hex_sha256(bytes: &[u8]) -> String {
     hex_digest(&Sha256::digest(bytes))
 }
 pub(crate) fn hex_digest(digest: &[u8]) -> String {
-    use core::fmt::Write;
-    let mut output = String::with_capacity(64);
-    for byte in digest {
-        write!(&mut output, "{byte:02x}").expect("writing to String");
-    }
-    output
+    engine::hex_lower(digest)
 }

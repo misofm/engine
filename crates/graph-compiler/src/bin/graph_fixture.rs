@@ -351,11 +351,7 @@ fn verify(root: &Path, expected: &[(String, Vec<u8>)]) -> Result<(), String> {
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
-    let mut output = String::with_capacity(64);
-    for byte in Sha256::digest(bytes) {
-        write!(&mut output, "{byte:02x}").expect("String write");
-    }
-    output
+    engine::hex_lower(&Sha256::digest(bytes))
 }
 
 #[cfg(test)]
