@@ -237,3 +237,16 @@ make no product-source edit unless a new integration defect is found and separat
 Per the coordinator's 2026-09-07 routing update, the final current-head adversarial verification is
 assigned to Astra low. The earlier actual Sol xhigh attempt verdicts above remain historical
 evidence and are not relabeled.
+
+## Luna high final integrated qualification PASS
+
+Luna high qualified exact head `f9c279075d22fb66640df4d7cb669f7e82c62f47` after the delivered
+main integration. Protocol default and test-support, conformance debug/release, the focused native
+corpus and deterministic million-mutation cases, actual scalar/SIMD Wasm parity with the full
+self-test, all three policy checks, the forbidden-export red control and byte-exact restoration,
+normal dependency/API absence, bench consumer compilation, strict affected Clippy/rustdoc,
+formatting/diff checks and the exact path census passed. The extracted test census remains 44
+controller, 17 message-wire and 19 session-wire tests with zero ignored in each module. The actual
+Wasm artifacts are pinned in the evidence manifest. Two malformed evidence probes are retained and
+explicitly denied gate credit; their corrected captures pass without product edits. Root commits
+and pushes this evidence before Astra low reviews the exact evidence-bearing head.
