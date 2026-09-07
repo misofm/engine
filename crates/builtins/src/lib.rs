@@ -3421,6 +3421,27 @@ impl FaderMuteRampBuiltins {
         BuiltinProcessReport::default()
     }
 
+    /// Completes a settled fader over a graph block whose shape was validated by preparation.
+    ///
+    /// This narrow raw-slice entry point is used only by the graph split-owner completion path;
+    /// it avoids a fallible render-time wrapper while retaining the same fader kernel and state.
+    pub fn process_pending(&mut self, left: &mut [f32], right: &mut [f32]) {
+        let frames = left.len();
+        self.stage.process(left, right, frames);
+    }
+
+    /// Completes a pending fader using an already shape-validated builtin block.
+    pub fn process_pending_block(&mut self, block: &mut DualMonoBlock<'_>) {
+        let frames = block.left.len();
+        self.stage.process(block.left, block.right, frames);
+    }
+
+    /// Whether both dual-mono lanes are settled and can use the stateless fader arithmetic.
+    #[must_use]
+    pub fn is_settled(&self) -> bool {
+        self.stage.is_settled()
+    }
+
     /// Runs the settled fader and matrix stages with the established fused scalar kernel.
     /// Returns `false` when either stage is ramping; callers must then run the original two-stage
     /// arithmetic for the whole block.

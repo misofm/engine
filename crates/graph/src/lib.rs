@@ -1406,6 +1406,38 @@ pub type ScalarPairFactory = fn(
     ),
 >;
 
+/// A prepared owner for a serialized scalar fader/matrix interval whose two graph operations
+/// remain at their original schedule positions.
+///
+/// The fader half begins at the fader operation, while the matrix half finishes at the matrix
+/// operation. A settled fader may leave its private in-place output unmaterialized between those
+/// positions; [`complete_pending`](Self::complete_pending) is the infallible completion path used
+/// before an intervening execution or observer error escapes the render call.
+pub trait GraphRuntimeSplitPairProcessor: Send + Any {
+    /// Runs the original fader boundary, possibly recording a settled fader for later completion.
+    fn begin_fader(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError>;
+
+    /// Runs the original matrix boundary and settles any pending fader before returning.
+    fn finish_matrix(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError>;
+
+    /// Materializes a pending settled fader in its original output buffer.
+    ///
+    /// The graph executor supplies a block shape validated by the prepared render quantum, so
+    /// this operation cannot fail and never drains the matrix owner.
+    fn complete_pending(&mut self, block: GraphBindingBlock<'_>);
+}
+
+pub type ScalarSplitPairFactory = fn(
+    Box<dyn GraphRuntimeProcessor>,
+    Box<dyn GraphRuntimeProcessor>,
+) -> Result<
+    Box<dyn GraphRuntimeSplitPairProcessor>,
+    (
+        Box<dyn GraphRuntimeProcessor>,
+        Box<dyn GraphRuntimeProcessor>,
+    ),
+>;
+
 pub trait GraphRuntimeProcessor: Send + Any {
     /// Process one block in place.
     ///
@@ -1434,6 +1466,12 @@ pub trait GraphRuntimeProcessor: Send + Any {
     /// Preparation-only hook for the serialized scalar fader/matrix pair.
     /// Render never queries this metadata.
     fn scalar_pair_factory(&self) -> Option<ScalarPairFactory> {
+        None
+    }
+
+    /// Preparation-only factory for a split-owner serialized fader/matrix interval.
+    /// Render never queries this metadata.
+    fn scalar_split_pair_factory(&self) -> Option<ScalarSplitPairFactory> {
         None
     }
 }
@@ -1599,8 +1637,14 @@ impl PreparedPlanExecutor for GraphExecutor {
             }
         }
         for unit in 0..runtime.units.len() {
-            runtime.execute(unit, time.absolute_sample)?;
-            runtime.observe_unit(unit, time.absolute_sample)?;
+            if let Err(error) = runtime.execute(unit, time.absolute_sample) {
+                runtime.complete_pending(time.absolute_sample);
+                return Err(error);
+            }
+            if let Err(error) = runtime.observe_unit(unit, time.absolute_sample) {
+                runtime.complete_pending(time.absolute_sample);
+                return Err(error);
+            }
         }
         let (left, right) = runtime.buffer(*output_buffer);
         output.plane_mut(0)?.copy_from_slice(left);
