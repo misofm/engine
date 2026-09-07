@@ -541,6 +541,13 @@ vocabulary checks, browser expected-resource comparator with its 26 red mutation
 check, formatting and diff checks all returned zero. This was a consistency rerun after applying
 reviewed lineage, not a second qualification or timing run.
 
+The first post-pin SDK package invocation returned 2 because this worktree had no installed SDK
+dependencies. Luna preserved that prerequisite refusal, ran the pinned SDK `npm ci --ignore-scripts`
+without changing either package manifest, and reran only the package check. It passed the exact
+six-file staging, 11 enginectl tests and publishable tarball. The artifact remained byte-identical to
+the pre-pin candidate; all durable evidence checksums, formatting and the committed-range whitespace
+gate passed. Losslessly compressed post-pin captures are included in the qualification evidence.
+
 ## Final Astra LOW source verdict
 
 Astra LOW returned **PASS** on exact clean pushed head `93a45188` against `origin/main`. Seven

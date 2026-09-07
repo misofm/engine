@@ -18,6 +18,9 @@ metadata pins their digest and source identity.
   oracle, independent native witness, and the expected stale-resource diagnosis.
 - `full/` preserves resource, SDK generation/deletion/type/headless/package, session identity,
   generated-matrix, three-browser, mutation, and hermetic host/worklet gates.
+- `postpin/` preserves the ordinary no-bypass rebuild, exact six-file comparison, static/resource/
+  matrix checks, the missing-SDK-dependency refusal, pinned dependency install, successful package
+  rerun, and final checksum verification.
 
 The first `full/01-browser-resources` invocation incorrectly ran the Python checker through Bash and
 returned 2 before a product gate. The corrected `python3 -B` invocation is preserved separately and
