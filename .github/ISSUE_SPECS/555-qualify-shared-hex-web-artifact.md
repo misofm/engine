@@ -142,3 +142,11 @@ These scratch files are comparison inputs, not repository repins or newly record
 Fresh Luna XHIGH proved that the `results.json` scratch overlay changed only `candidateCommit` and `wasmSha256`, every other parsed field and browser row remained identical, and regenerated matrix output changed exactly the corresponding lineage sentence. The unchanged browser command returned zero from the scratch source with `--browser all --check-matrix --self-test-mutations`: Chromium `151.0.7922.34`, Firefox `153.0` and WebKit `26.5` each passed all gates. Twelve red mutations per browser, 36 total, plus the artifact-set and lineage mutation proofs passed. `--record-matrix` was not used, and repository source, pin, results and matrix remain unchanged.
 
 The retained candidate and the full pre-pin chain are now ready for the required Astra MEDIUM read-only review. No repository pin edit is authorized until that exact review returns PASS.
+
+## Astra MEDIUM pre-pin verdict
+
+Astra MEDIUM returned PASS for clean pushed evidence head `eb1d89afd9aec686fcbd232a03cbc12b30013d42`, frozen product source `e4f46fa808e413507d204e81b6a4ebc27254869c`, and candidate Wasm `6452f0db237da1d57b3594e7d95dd53a089a604d5b0791ea8b3533c5930c5a1c`. Both six-file sets and all 153 packaged #555 payloads authenticated. Five artifact files are byte-identical to #537; the Wasm grows by ten bytes entirely inside allocator function 1920, `RawVecInner::reserve::do_reserve_and_handle`, while every other function body and non-code section is byte-identical. No DSP body changes.
+
+Native ABI/static, shipped Wasm object policy, resources, three PCM/native parity digests, 26 red controls, hermetic mutations, Chromium `151.0.7922.34`, Firefox `153.0`, WebKit `26.5`, 36 browser mutations, artifact-set/lineage controls and the exact three-file scratch overlay all passed independent review. Repository product/config bytes remain frozen and the earlier stops remain candid. The full verdict is `artifacts/issue555-astra-review/astra-medium-pre-pin.md`.
+
+Root now authorizes Luna XHIGH to edit only `hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256` to the approved candidate digest plus LF. Root must checkpoint that exact-path tranche before the ordinary no-bypass post-pin build.
