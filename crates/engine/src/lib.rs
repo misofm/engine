@@ -3,6 +3,18 @@
 //! SIMD kernels, lane widths and backend selection are `lane`'s (#83 D4/D10); this
 //! crate carries no architecture code and no backend enum.
 
+/// Encodes bytes as lowercase hexadecimal, with two characters per byte.
+#[must_use]
+pub fn hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
+}
+
 /// The version of the engine API represented by this build.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -83,8 +95,17 @@ pub mod realtime;
 mod tests {
     use super::{
         EXTENDED_COMPATIBILITY_SAMPLE_RATES, EngineVersion, LAUNCH_SAMPLE_RATES, QuantumFrames,
-        SampleRateHz, is_extended_compatibility_sample_rate, is_launch_sample_rate,
+        SampleRateHz, hex_lower, is_extended_compatibility_sample_rate, is_launch_sample_rate,
     };
+
+    #[test]
+    fn hex_lower_encodes_fixed_literal_cases() {
+        assert_eq!(hex_lower(&[]), "");
+        assert_eq!(
+            hex_lower(&[0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0xf0]),
+            "0123456789abcdeff0"
+        );
+    }
 
     #[test]
     fn sample_rate_tiers_are_exact_sorted_disjoint_and_classified() {

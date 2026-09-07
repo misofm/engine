@@ -1,0 +1,10 @@
+{
+  "argv": [
+    "cargo",
+    "fmt",
+    "--all",
+    "--",
+    "--check"
+  ],
+  "cwd": "/home/bl/misofm/engine-shared-hex-authority"
+}
