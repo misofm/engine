@@ -1,0 +1,34 @@
+{
+  "accepted": {
+    "bytes": 40830,
+    "sha256": "d3350f57a24aaebe8242d10676ab39f39fdbef2f3e2d8aee29e57fa19ba1129a"
+  },
+  "binary_sha256": "3dbd77e4281f0a4444f2afd0cd5bba9ede2b24bba6cd7113fab189233e0ed0ae",
+  "candidate_commit": "2f9f1fa7fe6cce6cc423d5bf1b90be5869909131",
+  "candidate_tree": "c71f66a4a7944ce4b95c83e99f3a61ae53d1c723",
+  "child_status": 0,
+  "issue": 431,
+  "kind": "builtins_current_benchmark_disposition",
+  "preflight_invocations": 1,
+  "raw": {
+    "bytes": 40830,
+    "sha256": "d3350f57a24aaebe8242d10676ab39f39fdbef2f3e2d8aee29e57fa19ba1129a"
+  },
+  "reason": "complete",
+  "round_1_complete": 1,
+  "round_2_complete": 1,
+  "runner_invocations": 1,
+  "runner_status": 0,
+  "schema_version": 1,
+  "status": "PASS",
+  "stderr": {
+    "bytes": 201,
+    "sha256": "db18fdc6b8c3cde0437579d899bfa2311c6e240a43b98d460a825253611ae020"
+  },
+  "timed_benchmark_invocations": 1,
+  "timed_started": 1,
+  "validation_status": "passed",
+  "warmup_complete": 1,
+  "workload_invocations": 1,
+  "workload_started": 1
+}

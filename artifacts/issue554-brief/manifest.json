@@ -1,0 +1,16 @@
+[
+  {
+    "original_path": "/tmp/issue349-tool9/sol-high-decision.md",
+    "bytes": 2089,
+    "sha256": "ce7e154bcd28455f982cc1e17e5ad2894d5f64c3b43ca7ff176df2818d7b7fbd",
+    "packed_path": "artifacts/issue554-brief/sol-high-decision.md.gz",
+    "packed_sha256": "b3d59d7d66bf14f2fb05a7d22a72c3265f63c1c07b70546f4b16d4791df0a15a"
+  },
+  {
+    "original_path": "/tmp/issue349-tool9/residual-map.md",
+    "bytes": 7361,
+    "sha256": "75b5b032f7327f33e4287d492215cc383bd66eebeb79ca690a153cf185a68fdd",
+    "packed_path": "artifacts/issue554-brief/residual-map.md.gz",
+    "packed_sha256": "839564b80959c7c26b3ceb78736a8a4ac149b42c9ccc2ad4440658505edc72a5"
+  }
+]

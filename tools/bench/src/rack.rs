@@ -4,7 +4,7 @@
 //! warmup/round environment, while this program owns fixed 48 kHz, 128-frame production DSP.
 use bench_support::alloc as bench_alloc;
 use bench_support::json::escape as json_escape;
-use bench_support::stats;
+use bench_support::stats::Percentiles;
 
 use bench_support::digest::{Sha256Sink, sha256_hex};
 use bench_support::timing;
@@ -842,7 +842,8 @@ fn record_json(
     identities: &Identities,
     metadata: &Metadata,
 ) -> String {
-    let p = Percentiles::from(&measurement.ns_per_frame);
+    assert_eq!(measurement.ns_per_frame.len(), OBSERVATIONS);
+    let p = Percentiles::from_samples(&measurement.ns_per_frame);
     let forbidden_total = measurement
         .audit
         .total()
@@ -887,31 +888,6 @@ fn record_json(
         metadata.missing_json()
     )
 }
-struct Percentiles {
-    min: u64,
-    p50: u64,
-    p95: u64,
-    p99: u64,
-    p999: u64,
-    max: u64,
-}
-impl Percentiles {
-    fn from(samples: &[u64]) -> Self {
-        assert_eq!(samples.len(), OBSERVATIONS);
-        let mut values = samples.to_vec();
-        values.sort_unstable();
-        let rank = |n: usize| stats::per_mille(&values, n);
-        Self {
-            min: values[0],
-            p50: rank(500),
-            p95: rank(950),
-            p99: rank(990),
-            p999: rank(999),
-            max: values[OBSERVATIONS - 1],
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -962,7 +938,7 @@ mod tests {
     #[test]
     fn nearest_rank_uses_the_frozen_one_thousand_observation_indices() {
         let samples: Vec<_> = (1..=1_000).collect();
-        let p = Percentiles::from(&samples);
+        let p = Percentiles::from_samples(&samples);
         assert_eq!(
             (p.min, p.p50, p.p95, p.p99, p.p999, p.max),
             (1, 500, 950, 990, 999, 1_000)

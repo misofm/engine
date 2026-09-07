@@ -1,0 +1,50 @@
+[
+  {
+    "source": "/tmp/issue555-luna-prepin-a1.command.json",
+    "packed": "artifacts/issue555-inventory-stop/issue555-luna-prepin-a1.command.json.gz",
+    "source_bytes": 419,
+    "source_sha256": "aa3151ca7ecdafd9345c28976e0f373861b3a8525d07b8b8af07f28a8c74dbc8",
+    "packed_bytes": 228,
+    "packed_sha256": "5818dd28a5e6ca153f5381c74e2e632833de115951b45d23f256767347d591f5"
+  },
+  {
+    "source": "/tmp/issue555-luna-prepin-a1.prompt.md",
+    "packed": "artifacts/issue555-inventory-stop/issue555-luna-prepin-a1.prompt.md.gz",
+    "source_bytes": 6603,
+    "source_sha256": "52cab85c9cc97a002ea654f8c98144bfb1df53486a73f364c99d15ba18f73686",
+    "packed_bytes": 2939,
+    "packed_sha256": "7a8a6038081e5ccb77c7898d775bdc60d447e24efc0274d6d5a2045a08ffcccf"
+  },
+  {
+    "source": "/tmp/issue555-luna-prepin-a1.status",
+    "packed": "artifacts/issue555-inventory-stop/issue555-luna-prepin-a1.status.gz",
+    "source_bytes": 2,
+    "source_sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+    "packed_bytes": 22,
+    "packed_sha256": "d381e5a9b7c1c71b5fb3fef202103bf4b6098ce288f148735de1ecf61d4e3b75"
+  },
+  {
+    "source": "/tmp/issue555-luna-prepin-a1.stderr",
+    "packed": "artifacts/issue555-inventory-stop/issue555-luna-prepin-a1.stderr.gz",
+    "source_bytes": 171278,
+    "source_sha256": "df1df5fbc51ed61d95a0126838637e6657ef7ae1445409e9f8b2bf8e9c065701",
+    "packed_bytes": 27858,
+    "packed_sha256": "043ba28959720a29edfda6fd117e70f0f9415776ea2fb7c34185e4498c0458f8"
+  },
+  {
+    "source": "/tmp/issue555-luna-prepin-a1.stdout",
+    "packed": "artifacts/issue555-inventory-stop/issue555-luna-prepin-a1.stdout.gz",
+    "source_bytes": 0,
+    "source_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "packed_bytes": 20,
+    "packed_sha256": "f61f27bd17de546264aa58f40f3aafaac7021e0ef69c17f6b1b4cd7664a037ec"
+  },
+  {
+    "source": "/tmp/issue349-partials/555-root-inventory-stop.json",
+    "packed": "artifacts/issue555-inventory-stop/555-root-inventory-stop.json.gz",
+    "source_bytes": 6419,
+    "source_sha256": "01219e6df30fa07017d96151d617fa380a5d83f386cd8928b9ae996c2fa0e9fd",
+    "packed_bytes": 2153,
+    "packed_sha256": "5451e438ed50587856fda9c1e149f13bdb49a8c0326ab8a7143fad7e383ffdc9"
+  }
+]
