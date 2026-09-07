@@ -8,6 +8,8 @@
  * whole and adversarial chunkings.
  */
 
+import { hexLower } from "../hex-lower.js"
+
 const INITIAL = new Uint32Array([
   0x6a09e667,
   0xbb67ae85,
@@ -108,7 +110,7 @@ export class IncrementalSha256 {
 
   /** @returns {string} */
   digestHex() {
-    return Array.from(this.digest(), (byte) => byte.toString(16).padStart(2, "0")).join("")
+    return hexLower(this.digest())
   }
 
   /** @param {Uint8Array} bytes @param {number} offset */
