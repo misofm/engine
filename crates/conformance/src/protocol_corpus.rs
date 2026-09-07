@@ -1,6 +1,215 @@
 //! Deterministic complete schema corpus shared by native and Wasm conformance runners.
 
-use crate::*;
+use protocol::*;
+
+use session::{Output, RackName, StableId, Submix};
+
+/// Build the checked-in canonical fixture transaction that contains every V1 edit opcode.
+///
+/// This is conformance data, not a session-edit convenience API.  It deliberately derives its
+/// nested values from the checked-in strict V1 JSON fixture, so the transaction follows the
+/// accepted typed model rather than maintaining a second shadow session representation.
+#[must_use]
+pub fn complete_all_opcode_fixture() -> Vec<SessionEdit> {
+    let session =
+        session::parse_session_json(include_str!("../../../fixtures/session/v1/canonical.json"))
+            .expect("checked-in canonical session fixture is valid");
+    let source = session.sources[0].clone();
+    let track = session.tracks[0].clone();
+    let effect = track.dynamic.effects[0].clone();
+    let route = session.routes[0].clone();
+    let automation = session.automation[0].clone();
+    let track_id = track.id.clone();
+    let effect_id = effect.id.clone();
+    let id = |value| StableId::parse(value).expect("literal stable ID");
+    vec![
+        SessionEdit::SetSessionId {
+            session_id: id("demo.session"),
+        },
+        SessionEdit::SetSampleRateHz {
+            sample_rate_hz: 48_000,
+        },
+        SessionEdit::SetQuantumFrames {
+            quantum_frames: 128,
+        },
+        SessionEdit::SetRenderProfile {
+            render_profile: session.render_profile.clone(),
+        },
+        SessionEdit::SetOutputProfile {
+            output_profile: session.output_profile.clone(),
+        },
+        SessionEdit::UpsertSource {
+            source: source.clone(),
+        },
+        SessionEdit::RemoveSource {
+            source_id: source.id.clone(),
+        },
+        SessionEdit::SetSourceContent {
+            source_id: source.id.clone(),
+            content: source.content.clone(),
+            channels: source.channels,
+            bit_depth: source.bit_depth,
+            frames: source.frames,
+        },
+        SessionEdit::UpsertTrack {
+            track: track.clone(),
+        },
+        SessionEdit::RemoveTrack {
+            track_id: track_id.clone(),
+        },
+        SessionEdit::SetTrackSourceAssignment {
+            track_id: track_id.clone(),
+            source_id: source.id.clone(),
+            left_source_channel: 0,
+            right_source_channel: 1,
+        },
+        SessionEdit::SetTrackBuiltins {
+            track_id: track_id.clone(),
+            builtins: track.builtins.clone(),
+        },
+        SessionEdit::SetTrackRack {
+            track_id: track_id.clone(),
+            rack_name: RackName::Dynamic,
+            rack: track.dynamic.clone(),
+        },
+        SessionEdit::PutTrackEffect {
+            track_id: track_id.clone(),
+            rack_name: RackName::Dynamic,
+            final_position: 0,
+            effect: effect.clone(),
+        },
+        SessionEdit::RemoveTrackEffect {
+            track_id: track_id.clone(),
+            rack_name: RackName::Dynamic,
+            effect_id: effect_id.clone(),
+        },
+        SessionEdit::SetTrackEffectOrder {
+            track_id: track_id.clone(),
+            rack_name: RackName::Dynamic,
+            effect_ids: vec![effect_id.clone()],
+        },
+        SessionEdit::SetEffectIdentity {
+            track_id: track_id.clone(),
+            rack_name: RackName::Dynamic,
+            effect_id: effect_id.clone(),
+            identity: effect.identity.clone(),
+        },
+        SessionEdit::SetEffectQuality {
+            track_id: track_id.clone(),
+            rack_name: RackName::Dynamic,
+            effect_id: effect_id.clone(),
+            quality: effect.quality,
+        },
+        SessionEdit::SetEffectBypass {
+            track_id: track_id.clone(),
+            rack_name: RackName::Dynamic,
+            effect_id: effect_id.clone(),
+            bypass: effect.bypass,
+        },
+        SessionEdit::SetEffectLinkMode {
+            track_id: track_id.clone(),
+            rack_name: RackName::Dynamic,
+            effect_id: effect_id.clone(),
+            link_mode: effect.link_mode,
+        },
+        SessionEdit::SetEffectSidechain {
+            track_id: track_id.clone(),
+            rack_name: RackName::Dynamic,
+            effect_id: effect_id.clone(),
+            sidechain: effect.sidechain.clone(),
+        },
+        SessionEdit::UpsertEffectParam {
+            track_id: track_id.clone(),
+            rack_name: RackName::Dynamic,
+            effect_id: effect_id.clone(),
+            param: effect.params[0].clone(),
+        },
+        SessionEdit::RemoveEffectParam {
+            track_id: track_id.clone(),
+            rack_name: RackName::Dynamic,
+            effect_id: effect_id.clone(),
+            parameter_id: effect.params[0].parameter_id,
+            channel: effect.params[0].channel,
+        },
+        SessionEdit::SetTrackFader {
+            track_id: track_id.clone(),
+            fader: track.fader.clone(),
+        },
+        SessionEdit::SetTrackMatrixOrPan {
+            track_id: track_id.clone(),
+            matrix_or_pan: track.matrix_or_pan.clone(),
+        },
+        SessionEdit::UpsertSubmix {
+            submix: Submix { id: id("drums") },
+        },
+        SessionEdit::RemoveSubmix {
+            submix_id: id("drums"),
+        },
+        SessionEdit::UpsertOutput {
+            output: Output { id: id("alt-out") },
+        },
+        SessionEdit::RemoveOutput {
+            output_id: id("alt-out"),
+        },
+        SessionEdit::UpsertRoute {
+            route: route.clone(),
+        },
+        SessionEdit::RemoveRoute {
+            route_id: route.id.clone(),
+        },
+        SessionEdit::SetRouteSource {
+            route_id: route.id.clone(),
+            source: route.source.clone(),
+        },
+        SessionEdit::SetRouteDestination {
+            route_id: route.id.clone(),
+            destination: route.destination.clone(),
+        },
+        SessionEdit::SetRouteChannelMatrix {
+            route_id: route.id.clone(),
+            channel_matrix: route.channel_matrix.clone(),
+        },
+        SessionEdit::SetRouteGainDb {
+            route_id: route.id.clone(),
+            gain_db: route.gain_db,
+        },
+        SessionEdit::UpsertAutomation {
+            automation: automation.clone(),
+        },
+        SessionEdit::RemoveAutomation {
+            automation_id: automation.id.clone(),
+        },
+        SessionEdit::SetAutomationTarget {
+            automation_id: automation.id.clone(),
+            target: automation.target.clone(),
+        },
+        SessionEdit::SetAutomationSegments {
+            automation_id: automation.id.clone(),
+            segments: automation.segments.clone(),
+        },
+    ]
+}
+
+/// Encode the complete fixture for test-only protocol consumers without exporting this crate's
+/// private `protocol` dependency type across the protocol test dependency cycle.
+#[must_use]
+pub fn complete_all_opcode_fixture_bytes() -> Vec<u8> {
+    let edits = complete_all_opcode_fixture();
+    let transaction = SessionTransactionFrame {
+        request_id: RequestId::new(1).expect("literal request ID"),
+        expected_revision: ExpectedRevision::Exact(SessionRevision(7)),
+        edits: &edits,
+    };
+    let codec = ProtocolCodec::default();
+    let required = codec
+        .encoded_session_transaction_len(&transaction)
+        .expect("conformance fixture encodes");
+    let mut bytes = vec![0; required];
+    codec
+        .encode_session_transaction(&transaction, &mut bytes)
+        .expect("conformance fixture encodes");
+    bytes
+}
 
 /// A canonical complete BTLV frame and the exact typed decoder that owns it.
 pub struct ConformanceFrame {
@@ -30,7 +239,7 @@ pub enum ConformanceDecoder {
 /// `0x0000_0100_0000_01b3`.
 ///
 /// This is the ONE pin. Before #274 the value was written out twice -- in
-/// `tests/conformance_corpus.rs` and again in `src/bin/protocol_wasm_golden.rs` --
+/// `tests/conformance_corpus.rs` and again in `src/main.rs` --
 /// and the Wasm copy silently fell two re-pins behind (`b454b230`, then #241's `04d291dd`)
 /// because the gate that should have caught it could not fail. Both runners now read this
 /// constant, so a re-pin is one edit and the two arms cannot disagree by omission; if the Wasm

@@ -107,7 +107,7 @@ success. The native `conformance_corpus` test asserts the same value. Native and
 have agreed throughout; what drifted was a second hand-written copy of the answer.
 
 That copy is now gone. `COMPLETE_SCHEMA_HASH` lives once, in
-`crates/protocol/src/conformance.rs`, next to the corpus it pins. The native test
+`crates/conformance/src/protocol_corpus.rs`, next to the corpus it pins. The native test
 asserts it; the Wasm guest computes the digest itself and compares against it. A future re-pin is
 one edit, and the two arms can no longer disagree by omission — only by genuinely computing
 different bytes, which is the divergence this gate exists to catch.

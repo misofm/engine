@@ -299,6 +299,8 @@ dependencies = [
  "effect-contract",
  "engine",
  "lane",
+ "protocol",
+ "session",
 ]
 
 [[package]]
@@ -1658,6 +1660,7 @@ dependencies = [
 name = "protocol"
 version = "0.1.0"
 dependencies = [
+ "conformance",
  "engine",
  "session",
 ]

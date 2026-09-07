@@ -1,10 +1,10 @@
 //! Frozen complete-schema byte and decoder conformance.
 
+use conformance::{COMPLETE_SCHEMA_HASH, ConformanceDecoder, complete_schema_corpus};
 use protocol::{
-    COMPLETE_SCHEMA_HASH, ConformanceDecoder, DecodeScratch, ParameterAutomationRate,
-    ParameterChannel, ParameterDescriptor, ParameterDomain, ParameterMapping,
-    ParameterMetadataPage, ParameterRack, ParameterUnit, ParameterValueKind, ProtocolCodec,
-    complete_schema_corpus,
+    DecodeScratch, ParameterAutomationRate, ParameterChannel, ParameterDescriptor, ParameterDomain,
+    ParameterMapping, ParameterMetadataPage, ParameterRack, ParameterUnit, ParameterValueKind,
+    ProtocolCodec,
 };
 
 #[test]

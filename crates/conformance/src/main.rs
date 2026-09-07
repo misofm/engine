@@ -9,9 +9,8 @@
 //! The digest itself is not re-stated here. It is `COMPLETE_SCHEMA_HASH`, the single pin the
 //! native `conformance_corpus` test asserts too, so the two arms cannot drift apart by omission.
 
-use protocol::{
-    COMPLETE_SCHEMA_HASH, ConformanceDecoder, DecodeScratch, ProtocolCodec, complete_schema_corpus,
-};
+use conformance::{COMPLETE_SCHEMA_HASH, ConformanceDecoder, complete_schema_corpus};
+use protocol::{DecodeScratch, ProtocolCodec};
 use std::process::ExitCode;
 
 /// Returned when the Wasm-computed corpus digest is not the pinned one. Distinct from a trap,

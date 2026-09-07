@@ -1,9 +1,7 @@
 //! Deterministic complete-schema mutation coverage for all typed BTLV dispatch paths.
 
-use protocol::{
-    ConformanceDecoder, DecodeError, DecodeScratch, ProtocolCodec, ProtocolLimits,
-    complete_schema_corpus,
-};
+use conformance::{ConformanceDecoder, complete_schema_corpus};
+use protocol::{DecodeError, DecodeScratch, ProtocolCodec, ProtocolLimits};
 
 const MUTATION_RUNS: usize = 1_000_000;
 const MAX_FRAME_BYTES: usize = 65_536;

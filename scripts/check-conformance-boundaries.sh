@@ -67,8 +67,8 @@ for production in "${production_crates[@]}"; do
     [[ -d "$crate_dir/src" ]] || { printf 'conformance boundary failure: unreadable source root for %s\n' "$production" >&2; exit 1; }
     source_files_raw="$(gate_find_collect "$production source discovery" "$crate_dir/src" -maxdepth 1 -name '*.rs' -type f -readable)" || exit $?
     [[ -n "$source_files_raw" ]] || { printf 'conformance boundary failure: unreadable source root for %s\n' "$production" >&2; exit 1; }
-    manifest_harness="$(gate_scan_collect "$production manifest harness predicate" \
-      '^(dsp-reference|conformance)([[:space:]]|\.workspace)' '' "$manifest")" || exit $?
+    manifest_dependencies="$(gate_toml_dependencies "$manifest" plain-target)" || exit $?
+    manifest_harness="$(printf '%s\n' "$manifest_dependencies" | awk '$0 == "dsp-reference" || $0 == "conformance"')"
     if [[ -n "$manifest_harness" ]]; then
         printf '%s\n' "$manifest_harness" >&2
         printf 'conformance boundary failure: %s must not depend on a harness crate\n' \
@@ -97,6 +97,9 @@ for production in "${production_crates[@]}"; do
     if [[ -n "$harness_pattern" ]]; then
         harness_uses="$(gate_scan_collect "${production} harness use scan" "\\b(${harness_pattern})::" '' "$crate_dir/src")" || exit $?
         filtered_uses="$(gate_filter_exclude "${production} harness comment filter" ':[0-9]+:[[:space:]]*//' "$harness_uses")" || exit $?
+        # Protocol's conformance dependency is deliberately dev-only. Its private unit-test
+        # children are the only source files permitted to name that dependency.
+        filtered_uses="$(gate_filter_exclude "${production} test-only harness filter" '/tests\.rs:' "$filtered_uses")" || exit $?
     else
         filtered_uses=''
     fi
@@ -134,11 +137,28 @@ dependency_names() { gate_toml_dependencies "$1" plain-target; }
 # #84 phase A: conformance drives lane-generic effect checks, so the Lane trait is in-boundary.
 # Sorted alphabetically by the *current* (post-prefix-strip) name -- `engine` (formerly `core`,
 # which sorted first under the old miso-engine- prefix) now sorts third, not first.
-expected_conformance=$'dsp-reference\neffect-contract\nengine\nlane'
+expected_conformance=$'dsp-reference\neffect-contract\nengine\nlane\nprotocol\nsession'
 [[ "$(dependency_names crates/conformance/Cargo.toml)" == "$expected_conformance" ]] || {
     printf 'conformance boundary failure: conformance dependencies changed\n' >&2
     exit 1
 }
+
+[[ ! -e crates/protocol/src/conformance.rs ]] || {
+    printf 'conformance boundary failure: stale protocol corpus source still exists\n' >&2
+    exit 1
+}
+[[ ! -e crates/protocol/src/bin/protocol_wasm_golden.rs ]] || {
+    printf 'conformance boundary failure: stale protocol Wasm runner still exists\n' >&2
+    exit 1
+}
+gate_scan_forbidden 'protocol default corpus exports' \
+    'COMPLETE_SCHEMA_HASH|ConformanceDecoder|ConformanceFrame|complete_schema_corpus|complete_all_opcode_fixture' \
+    '' crates/protocol/src/lib.rs || exit $?
+gate_scan_forbidden 'protocol production fixture definition' \
+    '^[[:space:]]*pub fn complete_all_opcode_fixture\b' '' crates/protocol/src/session_wire.rs || exit $?
+gate_scan_forbidden 'protocol inline extracted tests' \
+    '^[[:space:]]*mod[[:space:]]+tests[[:space:]]*\{' '' \
+    crates/protocol/src/controller.rs crates/protocol/src/message_wire.rs crates/protocol/src/session_wire.rs || exit $?
 expected_conformance_bench=$'bench-support\nbuiltins\nbuiltins-compiler\nconformance\nconsole-workload\neffect-compiler\neffect-contract\neffect-package\nengine\nflatbuffers\ngraph\ngraph-compiler\nlane\nprotocol\nrack\nsession\nsha2'
 [[ "$(dependency_names tools/bench/Cargo.toml)" == "$expected_conformance_bench" ]] || {
     printf 'conformance boundary failure: consolidated benchmark dependency union changed\n' >&2

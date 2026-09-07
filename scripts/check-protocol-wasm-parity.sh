@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Execute the same BTLV golden assertions in scalar and simd128 Wasm test binaries.
-# The temporary `main` export is a wasm-interp entry point only; the protocol crate exports no C ABI.
+# Execute the same BTLV golden assertions in scalar and simd128 Wasm conformance binaries.
+# The temporary `main` export is a wasm-interp entry point only; the conformance crate exports no C ABI.
 #
 # #274 -- why this gate reads a RETURNED VALUE and never trusts an exit status.
 #
@@ -28,7 +28,7 @@ set -euo pipefail
 script_directory="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repository_root="$(cd "$script_directory/.." && pwd)"
 readonly TARGET="wasm32-unknown-unknown"
-readonly BINARY="protocol_wasm_golden"
+readonly BINARY="conformance"
 # The one accepted interpreter result: `main` invoked with an empty argv, returning success.
 readonly EXPECTED_RESULT="main(i32:0, i32:0) => i32:0"
 
@@ -77,13 +77,14 @@ verify_artifact() {
 run_variant() {
     local name="$1"
     local feature="$2"
-    local target_directory="target/ci/issue005-wasm-$name"
+    local target_root="${CARGO_TARGET_DIR:-target/ci}"
+    local target_directory="$target_root/issue005-wasm-$name"
     local artifact="$target_directory/$TARGET/release/$BINARY.wasm"
 
     CARGO_TARGET_DIR="$target_directory" \
         RUSTFLAGS="-C target-feature=$feature -C link-arg=--export=main" \
         cargo build --locked --release --target "$TARGET" \
-            -p protocol --bin "$BINARY"
+            -p conformance --bin "$BINARY"
   wasm-objdump -x "$artifact" | rg -- '-> "main"'
     verify_artifact "issue-005 Wasm golden parity ($name)" "$artifact"
 }
@@ -92,8 +93,8 @@ run_variant() {
 # Each row rebuilds the guest from a scratch copy of the tree with one edit applied, and requires
 # the verdict to be RED. A mutation whose search text matches nothing is itself a failure: that is
 # how a renamed constant would otherwise quietly retire a row.
-PIN_FILE="crates/protocol/src/conformance.rs"
-GUEST_FILE="crates/protocol/src/bin/$BINARY.rs"
+PIN_FILE="crates/conformance/src/protocol_corpus.rs"
+GUEST_FILE="crates/conformance/src/main.rs"
 
 self_test_run() {
     local scratch failures=0 output status
@@ -102,14 +103,14 @@ self_test_run() {
     trap "rm -rf -- '$scratch'" RETURN
     tar -c --exclude=./target --exclude=./.git -C "$repository_root" . | tar -x -C "$scratch"
 
-    local selftest_target="$repository_root/target/ci/issue005-wasm-selftest"
+    local selftest_target="${CARGO_TARGET_DIR:-$repository_root/target/ci}/issue005-wasm-selftest"
     local scratch_artifact="$selftest_target/$TARGET/release/$BINARY.wasm"
 
     build_scratch() {
         CARGO_TARGET_DIR="$selftest_target" \
             RUSTFLAGS="-C target-feature=-simd128 -C link-arg=--export=main" \
             cargo build --locked --release --target "$TARGET" \
-                --manifest-path "$scratch/Cargo.toml" -p protocol --bin "$BINARY" \
+                --manifest-path "$scratch/Cargo.toml" -p conformance --bin "$BINARY" \
                 >/dev/null
     }
 
