@@ -1,0 +1,118 @@
+{
+  "source_head": "615787e92a209d7146110f7920bb9c09d7f93a3d",
+  "selection": [
+    {
+      "backend": "scalar",
+      "function_index": 716,
+      "start_address": "0a62b0",
+      "symbol": "_RNvMs9_Cs9onlXM9zWLg_17true_peak_limiterINtB5_11LimiterCorefE13process_blockB5_",
+      "original": "/tmp/issue539-root-lowering/scalar-disassemble.stdout",
+      "lines": [
+        317277,
+        333678
+      ],
+      "selected": "/tmp/issue539-root-lowering/scalar-limiter-production-func-716.wat.txt",
+      "bytes": 2380671,
+      "sha256": "fdee28d0a26ddb352be1a3f8637e80a05b4e6051eea2f76b222e8fd12e123f9d"
+    },
+    {
+      "backend": "scalar",
+      "function_index": 724,
+      "start_address": "0afff1",
+      "symbol": "_RNvXsd_Cs9onlXM9zWLg_17true_peak_limiterNtB5_23PreparedTruePeakLimiterNtCs7ywmIn0v2f9_15effect_contract20PreparedNativeEffect7process",
+      "original": "/tmp/issue539-root-lowering/scalar-disassemble.stdout",
+      "lines": [
+        335606,
+        335696
+      ],
+      "selected": "/tmp/issue539-root-lowering/scalar-limiter-production-func-724.wat.txt",
+      "bytes": 4880,
+      "sha256": "f63a44bcd51d7e00684725e80abd028b8e08f33f62b44c8475567d9cc3947275"
+    },
+    {
+      "backend": "simd128",
+      "function_index": 755,
+      "start_address": "0adaa5",
+      "symbol": "_RNvMs9_Cs9onlXM9zWLg_17true_peak_limiterINtB5_11LimiterCoreNtNtCshTO37R3KJUo_4wide6f32x4_5f32x4E13process_blockB5_",
+      "original": "/tmp/issue539-root-lowering/simd128-disassemble.stdout",
+      "lines": [
+        324689,
+        341559
+      ],
+      "selected": "/tmp/issue539-root-lowering/simd128-limiter-production-func-755.wat.txt",
+      "bytes": 1667622,
+      "sha256": "9d335d63b71ee314c00f1bef0bff7a2fe3c5191d3ca6a572e7a4b7251c2255ca"
+    },
+    {
+      "backend": "simd128",
+      "function_index": 756,
+      "start_address": "0b7e12",
+      "symbol": "_RNvMs9_Cs9onlXM9zWLg_17true_peak_limiterINtB5_11LimiterCoreNtNtCshTO37R3KJUo_4wide6f32x4_5f32x4E18process_block_monoB5_",
+      "original": "/tmp/issue539-root-lowering/simd128-disassemble.stdout",
+      "lines": [
+        341560,
+        350448
+      ],
+      "selected": "/tmp/issue539-root-lowering/simd128-limiter-production-func-756.wat.txt",
+      "bytes": 733151,
+      "sha256": "b4077931e16a6af17351627f434d4e99dbd9ccd23c4bc3ad0c0107e3eee9f667"
+    },
+    {
+      "backend": "simd128",
+      "function_index": 757,
+      "start_address": "0bd436",
+      "symbol": "_RNvMs9_Cs9onlXM9zWLg_17true_peak_limiterINtB5_11LimiterCorefE13process_blockB5_",
+      "original": "/tmp/issue539-root-lowering/simd128-disassemble.stdout",
+      "lines": [
+        350449,
+        371509
+      ],
+      "selected": "/tmp/issue539-root-lowering/simd128-limiter-production-func-757.wat.txt",
+      "bytes": 3196264,
+      "sha256": "1ce0bd42d9d9435ba836b4401e188753a322a20909e13cc0b52c8ba84136f41b"
+    },
+    {
+      "backend": "simd128",
+      "function_index": 767,
+      "start_address": "0cada5",
+      "symbol": "_RNvXsd_Cs9onlXM9zWLg_17true_peak_limiterNtB5_23PreparedTruePeakLimiterNtCs7ywmIn0v2f9_15effect_contract20PreparedNativeEffect7process",
+      "original": "/tmp/issue539-root-lowering/simd128-disassemble.stdout",
+      "lines": [
+        374324,
+        374404
+      ],
+      "selected": "/tmp/issue539-root-lowering/simd128-limiter-production-func-767.wat.txt",
+      "bytes": 4419,
+      "sha256": "98c1b663bcf86b487fc425f0802b6a764826739d01dd94a69fb5c5d137c54359"
+    },
+    {
+      "backend": "simd128",
+      "function_index": 769,
+      "start_address": "0cae8a",
+      "symbol": "_RNvXse_Cs9onlXM9zWLg_17true_peak_limiterINtB5_27PreparedTruePeakLimiterBankNtNtCshTO37R3KJUo_4wide6f32x4_5f32x4ENtCs7ywmIn0v2f9_15effect_contract24PreparedNativeEffectBank12process_bankB5_",
+      "original": "/tmp/issue539-root-lowering/simd128-disassemble.stdout",
+      "lines": [
+        374411,
+        374672
+      ],
+      "selected": "/tmp/issue539-root-lowering/simd128-limiter-production-func-769.wat.txt",
+      "bytes": 14939,
+      "sha256": "4a94dd8a8e8a4040eb04098c3e11b27ff7fcca6b0aab5186f8c60ccab5a35fc1"
+    },
+    {
+      "backend": "simd128",
+      "function_index": 770,
+      "start_address": "0cb0bd",
+      "symbol": "_RNvXse_Cs9onlXM9zWLg_17true_peak_limiterINtB5_27PreparedTruePeakLimiterBankNtNtCshTO37R3KJUo_4wide6f32x4_5f32x4ENtCs7ywmIn0v2f9_15effect_contract24PreparedNativeEffectBank17process_bank_monoB5_",
+      "original": "/tmp/issue539-root-lowering/simd128-disassemble.stdout",
+      "lines": [
+        374673,
+        374930
+      ],
+      "selected": "/tmp/issue539-root-lowering/simd128-limiter-production-func-770.wat.txt",
+      "bytes": 14722,
+      "sha256": "35b8cc6205926c4cf21642608a8c1cf938e220d0625022accfae793d4ccccab2"
+    }
+  ],
+  "limits": "Linked release inspection modules, not published artifact identities. Actual scalar process/core and SIMD128 scalar plus SIMD4 dual/mono process/core selected. Root/callee identity follows decoder symbols; no W8 Wasm dispatch claim."
+}

@@ -1,0 +1,88 @@
+
+running 30 tests
+test tests::an_open_window_is_never_stationary ... ok
+test tests::a_nonfinite_block_is_zeroed_reset_and_counted ... ok
+test tests::automation_retargets_linear_coefficients_and_counts_invalid_spans ... ok
+test tests::descriptor_metadata_and_exact_resource_rows_are_frozen ... ok
+test tests::bank_binding_validates_before_fallback_and_retains_exact_width_bytes ... ok
+test tests::automation_withdraws_the_claim_and_the_resident_tap_keeps_up ... ok
+test tests::both_resets_return_the_runtime_state_to_a_silent_lane ... ok
+test tests::the_gain_ramp_falls_gradually_and_arrives_at_the_requirement ... ok
+test tests::the_lane_ramp_reproduces_the_scalar_ramp_bit_for_bit ... ok
+test tests::the_stationary_hoist_reads_what_advancing_would_have_produced ... ok
+test tests::state_round_trips_and_rejects_corruption ... ok
+test tests::partition_invariance_holds_over_block_sizes ... ok
+test tests::a_restore_withdraws_the_silence_claim ... ok
+test tests::phase_outputs_match_the_frozen_scalar_order ... ok
+test tests::fixed_latency_guarded_ceiling_and_bypass_bits_hold ... ok
+test tests::automation_withdraws_the_claim_on_the_bank_path_too ... ok
+test tests::a_mixed_lookahead_cohort_falls_back_bit_identically ... ok
+test tests::a_restore_that_desyncs_the_phase_falls_back ... ok
+test tests::a_uniform_cohort_renders_exactly_the_per_lane_path ... ok
+test tests::a_de_zipper_window_open_across_a_block_boundary_refuses_the_claim ... ok
+test tests::the_segment_walk_visits_the_slots_a_frame_at_a_time_walk_visits ... ok
+test tests::bs1770_annex2_conformance_is_unchanged ... ok
+test tests::the_two_channels_of_a_uniform_cohort_keep_their_own_phases ... ok
+test tests::lane_identity_holds_across_widths ... ok
+test tests::stationary_dispatch_matches_runtime_oracle_and_observes_selected_body ... ok
+test tests::silence_restores_exact_identity_including_signed_zero ... ok
+test tests::a_limiter_still_releasing_through_the_silence_is_never_frozen ... ok
+test tests::a_settled_silent_limiter_renders_exactly_the_never_fast_path ... ok
+test tests::a_negative_zero_input_block_is_not_treated_as_silence ... ok
+test tests::a_stale_detector_history_refuses_the_claim ... ok
+
+test result: ok. 30 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.31s
+
+
+running 2 tests
+test the_own_thread_allocator_observes_an_allocate_and_free ... ok
+test the_render_path_allocates_nothing ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.23s
+
+
+running 1 test
+test bench_w8_ns_per_lane_sample ... ignored, descriptive benchmark, run by hand (AGENTS.md benchmark protocol)
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 1 test
+test passes_effect_contract_conformance ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.66s
+
+
+running 2 tests
+test shared_hex_adapter_matches_literal_bytes ... ok
+test every_case_has_one_digest_at_every_width ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
+
+
+running 2 tests
+test production_tracks_the_f64_oracle ... ok
+test output_true_peak_never_exceeds_the_ceiling ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.02s
+
+
+running 2 tests
+test a_desymmetrized_bank_is_a_never_collapsed_bank ... ok
+test the_collapsed_body_renders_the_dual_bodys_left_plane ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+
+running 3 tests
+test observing_between_blocks_does_not_move_a_single_output_sample ... ok
+test a_resident_read_is_repeatable_to_the_bit ... ok
+test the_limiter_reads_the_reduction_word_the_envelope_persists ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

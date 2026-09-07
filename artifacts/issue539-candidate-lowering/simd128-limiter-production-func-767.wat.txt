@@ -1,0 +1,81 @@
+0cada5 func[767] <_RNvXsd_Cs9onlXM9zWLg_17true_peak_limiterNtB5_23PreparedTruePeakLimiterNtCs7ywmIn0v2f9_15effect_contract20PreparedNativeEffect7process>:
+ 0cada6: 03 7f                      | local[1..3] type=i32
+ 0cada8: 01 7b                      | local[4] type=v128
+ 0cadaa: 02 7f                      | local[5..6] type=i32
+ 0cadac: 23 80 80 80 80 00          | global.get 0 <__stack_pointer>
+ 0cadb2: 41 30                      | i32.const 48
+ 0cadb4: 6b                         | i32.sub
+ 0cadb5: 22 03                      | local.tee 3
+ 0cadb7: 24 80 80 80 80 00          | global.set 0 <__stack_pointer>
+ 0cadbd: 20 02                      | local.get 2
+ 0cadbf: 28 02 10                   | i32.load 2 16
+ 0cadc2: 21 04                      | local.set 4
+ 0cadc4: 02 40                      | block
+ 0cadc6: 20 02                      |   local.get 2
+ 0cadc8: 28 02 14                   |   i32.load 2 20
+ 0cadcb: 22 05                      |   local.tee 5
+ 0cadcd: 45                         |   i32.eqz
+ 0cadce: 0d 00                      |   br_if 0
+ 0cadd0: 20 01                      |   local.get 1
+ 0cadd2: 41 00                      |   i32.const 0
+ 0cadd4: 3a 00 98 04                |   i32.store8 0 536
+ 0cadd8: 0b                         | end
+ 0cadd9: 20 03                      | local.get 3
+ 0caddb: 42 00                      | i64.const 0
+ 0caddd: 37 03 28                   | i64.store 3 40
+ 0cade0: 20 03                      | local.get 3
+ 0cade2: fd 0c 00 00 00 00 00 00 00 | v128.const 0x00000000 0x00000000 0x00000000 0x00000000
+ 0cadeb: 00 00 00 00 00 00 00 00 00 | 
+ 0cadf4: 22 06                      | local.tee 6
+ 0cadf6: fd 0b 03 18                | v128.store 3 24
+ 0cadfa: 20 03                      | local.get 3
+ 0cadfc: 20 06                      | local.get 6
+ 0cadfe: fd 0b 03 08                | v128.store 3 8
+ 0cae02: 20 02                      | local.get 2
+ 0cae04: 28 02 00                   | i32.load 2 0
+ 0cae07: 21 07                      | local.set 7
+ 0cae09: 20 02                      | local.get 2
+ 0cae0b: 28 02 04                   | i32.load 2 4
+ 0cae0e: 21 08                      | local.set 8
+ 0cae10: 20 04                      | local.get 4
+ 0cae12: 20 05                      | local.get 5
+ 0cae14: 20 01                      | local.get 1
+ 0cae16: 20 02                      | local.get 2
+ 0cae18: 29 03 28                   | i64.load 3 40
+ 0cae1b: 20 01                      | local.get 1
+ 0cae1d: 41 c4 02                   | i32.const 324
+ 0cae20: 6a                         | i32.add
+ 0cae21: 20 01                      | local.get 1
+ 0cae23: 41 a8 03                   | i32.const 424
+ 0cae26: 6a                         | i32.add
+ 0cae27: 41 00                      | i32.const 0
+ 0cae29: 20 03                      | local.get 3
+ 0cae2b: 41 08                      | i32.const 8
+ 0cae2d: 6a                         | i32.add
+ 0cae2e: 10 e1 85 80 80 00          | call 737 <_RNvCs9onlXM9zWLg_17true_peak_limiter16apply_automation>
+ 0cae34: 20 01                      | local.get 1
+ 0cae36: 20 07                      | local.get 7
+ 0cae38: 20 08                      | local.get 8
+ 0cae3a: 20 02                      | local.get 2
+ 0cae3c: 28 02 08                   | i32.load 2 8
+ 0cae3f: 20 02                      | local.get 2
+ 0cae41: 28 02 0c                   | i32.load 2 12
+ 0cae44: 20 08                      | local.get 8
+ 0cae46: 10 f5 85 80 80 00          | call 757 <_RNvMs9_Cs9onlXM9zWLg_17true_peak_limiterINtB5_11LimiterCorefE13process_blockB5_>
+ 0cae4c: 20 00                      | local.get 0
+ 0cae4e: 20 03                      | local.get 3
+ 0cae50: 29 03 28                   | i64.load 3 40
+ 0cae53: 37 03 20                   | i64.store 3 32
+ 0cae56: 20 00                      | local.get 0
+ 0cae58: 20 03                      | local.get 3
+ 0cae5a: fd 00 03 18                | v128.load 3 24
+ 0cae5e: fd 0b 03 10                | v128.store 3 16
+ 0cae62: 20 00                      | local.get 0
+ 0cae64: 20 03                      | local.get 3
+ 0cae66: fd 00 03 08                | v128.load 3 8
+ 0cae6a: fd 0b 03 00                | v128.store 3 0
+ 0cae6e: 20 03                      | local.get 3
+ 0cae70: 41 30                      | i32.const 48
+ 0cae72: 6a                         | i32.add
+ 0cae73: 24 80 80 80 80 00          | global.set 0 <__stack_pointer>
+ 0cae79: 0b                         | end

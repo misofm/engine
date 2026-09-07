@@ -1,0 +1,91 @@
+0afff1 func[724] <_RNvXsd_Cs9onlXM9zWLg_17true_peak_limiterNtB5_23PreparedTruePeakLimiterNtCs7ywmIn0v2f9_15effect_contract20PreparedNativeEffect7process>:
+ 0afff2: 05 7f                      | local[1..5] type=i32
+ 0afff4: 23 80 80 80 80 00          | global.get 0 <__stack_pointer>
+ 0afffa: 41 30                      | i32.const 48
+ 0afffc: 6b                         | i32.sub
+ 0afffd: 22 03                      | local.tee 3
+ 0affff: 24 80 80 80 80 00          | global.set 0 <__stack_pointer>
+ 0b0005: 20 02                      | local.get 2
+ 0b0007: 28 02 10                   | i32.load 2 16
+ 0b000a: 21 04                      | local.set 4
+ 0b000c: 02 40                      | block
+ 0b000e: 20 02                      |   local.get 2
+ 0b0010: 28 02 14                   |   i32.load 2 20
+ 0b0013: 22 05                      |   local.tee 5
+ 0b0015: 45                         |   i32.eqz
+ 0b0016: 0d 00                      |   br_if 0
+ 0b0018: 20 01                      |   local.get 1
+ 0b001a: 41 00                      |   i32.const 0
+ 0b001c: 3a 00 98 04                |   i32.store8 0 536
+ 0b0020: 0b                         | end
+ 0b0021: 20 03                      | local.get 3
+ 0b0023: 42 00                      | i64.const 0
+ 0b0025: 37 03 28                   | i64.store 3 40
+ 0b0028: 20 03                      | local.get 3
+ 0b002a: 42 00                      | i64.const 0
+ 0b002c: 37 03 20                   | i64.store 3 32
+ 0b002f: 20 03                      | local.get 3
+ 0b0031: 42 00                      | i64.const 0
+ 0b0033: 37 03 18                   | i64.store 3 24
+ 0b0036: 20 03                      | local.get 3
+ 0b0038: 42 00                      | i64.const 0
+ 0b003a: 37 03 10                   | i64.store 3 16
+ 0b003d: 20 03                      | local.get 3
+ 0b003f: 42 00                      | i64.const 0
+ 0b0041: 37 03 08                   | i64.store 3 8
+ 0b0044: 20 02                      | local.get 2
+ 0b0046: 28 02 00                   | i32.load 2 0
+ 0b0049: 21 06                      | local.set 6
+ 0b004b: 20 02                      | local.get 2
+ 0b004d: 28 02 04                   | i32.load 2 4
+ 0b0050: 21 07                      | local.set 7
+ 0b0052: 20 04                      | local.get 4
+ 0b0054: 20 05                      | local.get 5
+ 0b0056: 20 01                      | local.get 1
+ 0b0058: 20 02                      | local.get 2
+ 0b005a: 29 03 28                   | i64.load 3 40
+ 0b005d: 20 01                      | local.get 1
+ 0b005f: 41 c4 02                   | i32.const 324
+ 0b0062: 6a                         | i32.add
+ 0b0063: 20 01                      | local.get 1
+ 0b0065: 41 a8 03                   | i32.const 424
+ 0b0068: 6a                         | i32.add
+ 0b0069: 41 00                      | i32.const 0
+ 0b006b: 20 03                      | local.get 3
+ 0b006d: 41 08                      | i32.const 8
+ 0b006f: 6a                         | i32.add
+ 0b0070: 10 be 85 80 80 00          | call 702 <_RNvCs9onlXM9zWLg_17true_peak_limiter16apply_automation>
+ 0b0076: 20 01                      | local.get 1
+ 0b0078: 20 06                      | local.get 6
+ 0b007a: 20 07                      | local.get 7
+ 0b007c: 20 02                      | local.get 2
+ 0b007e: 28 02 08                   | i32.load 2 8
+ 0b0081: 20 02                      | local.get 2
+ 0b0083: 28 02 0c                   | i32.load 2 12
+ 0b0086: 20 07                      | local.get 7
+ 0b0088: 10 cc 85 80 80 00          | call 716 <_RNvMs9_Cs9onlXM9zWLg_17true_peak_limiterINtB5_11LimiterCorefE13process_blockB5_>
+ 0b008e: 20 00                      | local.get 0
+ 0b0090: 20 03                      | local.get 3
+ 0b0092: 29 03 28                   | i64.load 3 40
+ 0b0095: 37 03 20                   | i64.store 3 32
+ 0b0098: 20 00                      | local.get 0
+ 0b009a: 20 03                      | local.get 3
+ 0b009c: 29 03 20                   | i64.load 3 32
+ 0b009f: 37 03 18                   | i64.store 3 24
+ 0b00a2: 20 00                      | local.get 0
+ 0b00a4: 20 03                      | local.get 3
+ 0b00a6: 29 03 18                   | i64.load 3 24
+ 0b00a9: 37 03 10                   | i64.store 3 16
+ 0b00ac: 20 00                      | local.get 0
+ 0b00ae: 20 03                      | local.get 3
+ 0b00b0: 29 03 10                   | i64.load 3 16
+ 0b00b3: 37 03 08                   | i64.store 3 8
+ 0b00b6: 20 00                      | local.get 0
+ 0b00b8: 20 03                      | local.get 3
+ 0b00ba: 29 03 08                   | i64.load 3 8
+ 0b00bd: 37 03 00                   | i64.store 3 0
+ 0b00c0: 20 03                      | local.get 3
+ 0b00c2: 41 30                      | i32.const 48
+ 0b00c4: 6a                         | i32.add
+ 0b00c5: 24 80 80 80 80 00          | global.set 0 <__stack_pointer>
+ 0b00cb: 0b                         | end

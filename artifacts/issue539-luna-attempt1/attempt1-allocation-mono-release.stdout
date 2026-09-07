@@ -1,0 +1,14 @@
+
+running 2 tests
+test the_own_thread_allocator_observes_an_allocate_and_free ... ok
+test the_render_path_allocates_nothing ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 2 tests
+test a_desymmetrized_bank_is_a_never_collapsed_bank ... ok
+test the_collapsed_body_renders_the_dual_bodys_left_plane ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
