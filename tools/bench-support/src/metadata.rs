@@ -34,6 +34,15 @@ impl Metadata {
             .map_err(VarError::NotUnicode)
     }
 
+    /// Return a nonempty snapshot value, or "unknown" when it is absent, non-Unicode, or empty.
+    #[must_use]
+    pub fn nonempty_or_unknown(&self, name: &str) -> String {
+        self.var(name)
+            .ok()
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "unknown".to_owned())
+    }
+
     /// The eleven runner-supplied metadata names, in the order they appear in a record.
     ///
     /// One list, shared: the console benchmark and the #163 phase 2 wasm console arm write records
@@ -122,6 +131,10 @@ impl Metadata {
 #[cfg(test)]
 mod tests {
     use super::Metadata;
+    use std::collections::BTreeMap;
+    use std::ffi::OsString;
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStringExt;
 
     #[test]
     fn gather_is_memoized_and_matches_the_process_environment() {
@@ -131,5 +144,35 @@ mod tests {
         if let Ok(path) = first.var("PATH") {
             assert!(!path.is_empty());
         }
+    }
+
+    #[test]
+    fn nonempty_or_unknown_preserves_nonempty_values_and_maps_missing_or_empty() {
+        let mut values = BTreeMap::new();
+        values.insert(OsString::from("empty"), OsString::new());
+        values.insert(OsString::from("whitespace"), OsString::from(" \t\n"));
+        values.insert(OsString::from("unicode"), OsString::from("é 音"));
+        values.insert(OsString::from("default"), OsString::from("default"));
+        values.insert(
+            OsString::from("not_measured"),
+            OsString::from("not measured"),
+        );
+        values.insert(OsString::from("ordinary"), OsString::from("value"));
+        #[cfg(unix)]
+        values.insert(
+            OsString::from("non_unicode"),
+            OsString::from_vec(vec![0xff]),
+        );
+        let metadata = Metadata { values };
+
+        assert_eq!(metadata.nonempty_or_unknown("missing"), "unknown");
+        assert_eq!(metadata.nonempty_or_unknown("empty"), "unknown");
+        assert_eq!(metadata.nonempty_or_unknown("whitespace"), " \t\n");
+        assert_eq!(metadata.nonempty_or_unknown("unicode"), "é 音");
+        assert_eq!(metadata.nonempty_or_unknown("default"), "default");
+        assert_eq!(metadata.nonempty_or_unknown("not_measured"), "not measured");
+        assert_eq!(metadata.nonempty_or_unknown("ordinary"), "value");
+        #[cfg(unix)]
+        assert_eq!(metadata.nonempty_or_unknown("non_unicode"), "unknown");
     }
 }

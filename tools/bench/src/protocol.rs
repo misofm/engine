@@ -1517,11 +1517,7 @@ fn json_record(
 }
 
 fn variable(name: &str) -> String {
-    bench_support::metadata::Metadata::gather()
-        .var(name)
-        .ok()
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "unknown".to_owned())
+    bench_support::metadata::Metadata::gather().nonempty_or_unknown(name)
 }
 fn command(args: &[&str]) -> String {
     let Some((program, rest)) = args.split_first() else {
