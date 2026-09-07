@@ -35,3 +35,62 @@ One coherent Luna HIGH implementation pass and one Astra LOW adversarial verdict
 GitHub #570 and this title match the local stateless spec. Branch `codex/cp4-borrowed-sorted-bind` and isolated worktree `/home/bl/misofm/engine-cp4-borrowed-sorted-bind` start from clean delivered main `c8951bfe23164086ca1ce34b456ab5d600fd4a13`. The issue-boundary inventory found no local numbered spec lacking a GitHub issue; historical GitHub issues without local specs predate or sit outside this child creation and were not relabeled. Open draft PR #465 also touches `crates/graph/src/lib.rs` on a non-main stacked base; this issue does not integrate or rewrite it. Lane B claims only the current-main bind-validation block for #570 and has notified #559 before implementation. The paused lane-A limiter worktree and historical failed hex worktree remain untouched.
 
 Root reviewed current main, delivered #495/#498 specs and evidence, the exact remaining bind code, current open PR file overlap, and the #559 coordination boundary. The scope above is the smallest complete CP4 outcome and is approved for Luna HIGH attempt 1 after this spec/body checkpoint is upstream. Astra LOW is the sole new verifier.
+
+## Luna HIGH attempt 1 and Astra LOW source decision
+
+Luna HIGH replaced the five transient bind-validation trees with five capacity-sized vectors of
+borrowed keys. The vectors use the existing value `Ord`, sort and deduplicate without changing
+caller-owned order, compare supplied/source coverage through an allocation-free two-cursor union,
+check overlap through a second two-cursor walk, and validate observer pairs by adjacent value
+equality. The lexical block returns only booleans, so no reference survives into a returned failure
+or executor. The final production checkpoint is `f347ec06b58b004749633ba602b599f4011aa7c1`;
+later source changes add test assertions only.
+
+Root caught and corrected one duplicate-count expression before the first source commit. The first
+retained qualification then passed five focused tests in both profiles, 60/60 graph tests in both
+profiles, and strict Clippy, but stopped on one rustfmt line join. That authentic failure is
+preserved under `artifacts/issue570-attempt1/`. The formatting-only checkpoint and green bounded
+gates are under `artifacts/issue570-attempt2/`. Root and Astra LOW then found that existing tests did
+not distinguish duplicate public requirements or value-equal observer pairs across ownership
+lists. The one scoped fixture was added, passed 61/61 in both profiles with all source gates, and
+was finally extended to repair and rebind the returned observer owners. Exact-head repair evidence
+is under `artifacts/issue570-observer-repair/`. The malformed first Clippy wrapper, over-escaped
+first census command, and over-strict ad hoc diff assertion remain candid non-credit records.
+
+Astra LOW gave source PASS at clean pushed `e99818a289019839cd34e9d1c2b2664286f8c4f6`,
+including the final test/source checkpoint `6913563c661d9faaffd6c9b25d57fe04a8d37179`.
+The bind block has zero `BTreeSet` and `.clone()` tokens, five pre-sized vector families, preserved
+set/error/ownership semantics, and the required discriminating repair fixture. This is a
+source-mechanism allocation reduction only; no timing, speedup, allocation-free binding, persistent
+memory, or render optimization claim is made.
+
+## Qualified artifact and pre-PR delivery decision
+
+The single Astra-authorized frozen-source probe observed Wasm SHA-256
+`0d447edfd651bd1292ffbce81ec8923a8b20c063722b7bfacaf073e3fa36c357`; its immutable record is
+`artifacts/issue570-artifact-probe/`. Astra LOW verified the actual identity-only mismatch and
+authorized a detached exact-source qualification with a provisional pin. The ordinary builder
+produced the exact six-file artifact set. Static/object/ABI, unchanged browser resources with 26
+red mutations, SDK generation/deletion/type/headless/package, qualification install, session
+identity, and generated-matrix gates passed.
+
+The first all-browser invocation correctly failed before browser launch because checked
+`results.json` still carried the prior artifact identity; hermetic testing was skipped. Root
+preserved that failure at `6ba0c6ca` before Astra LOW authorized detached-only `results.json` and
+generated matrix lineage overlays. Exactly one corrected run then passed Chromium
+`151.0.7922.34`, Firefox `153.0`, and WebKit `26.5` with self-test mutations, followed by the green
+hermetic AudioWorklet gate and its negative controls. Numeric resource and PCM expectations did not
+change.
+
+Astra LOW authorized exactly three qualified repository updates: the artifact pin, the
+`results.json` candidate/hash fields, and the generated matrix lineage line. Root checkpointed
+those bytes at `bdb9586d32acc8b4e11c0846470ea4089267e58b`. A fresh ordinary post-pin build
+reproduced all six retained files byte-for-byte; static/ABI, frozen resources, matrix, pinned SDK
+install, and package gates passed, with manifests and lockfiles unchanged. Complete preflight,
+qualified, and post-pin records are under `artifacts/issue570-artifact-qualification/`; all 87
+manifest entries verify.
+
+Astra LOW gave pre-PR delivery PASS at clean pushed `93c34cad1c8ec673882393f2eba68245e95ea13a`.
+Root may record this decision and open the PR. Exact-head Astra LOW review, live main/base/head
+assertions, required qualification success, merge, post-main qualification, remote issue closure,
+#560/#559 synchronization, and clean worktree removal remain mandatory.
