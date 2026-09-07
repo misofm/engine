@@ -2013,21 +2013,35 @@ mod detector_access_tests {
     const RING_LEN: usize = 7;
 
     fn patterned_ring<const W: usize>() -> Vec<f32> {
-        const WORDS: [u32; 8] = [
-            0x0000_0000,
-            0x8000_0000,
-            0x3f80_0000,
-            0xbf80_0000,
-            0x4120_0000,
-            0xc120_0000,
-            0x0000_0001,
-            0x8000_0001,
-        ];
         let mut ring = vec![0.0f32; RING_LEN * W];
         for (index, word) in ring.iter_mut().enumerate() {
-            *word = f32::from_bits(WORDS[index % WORDS.len()]);
+            // Keep every row/lane word distinct. The first row also carries directed +0/-0
+            // values so the wrap case checks sign bits rather than numeric equality.
+            let bits = match index {
+                0 => 0x0000_0000,
+                1 => 0x8000_0000,
+                _ => 0x3f80_0000 + index as u32,
+            };
+            *word = f32::from_bits(bits);
         }
         ring
+    }
+
+    fn assert_rows_are_distinct<const W: usize>(ring: &[f32]) {
+        for left in 0..RING_LEN {
+            for right in left + 1..RING_LEN {
+                assert!(
+                    (0..W).any(|track| {
+                        ring[left * W + track].to_bits() != ring[right * W + track].to_bits()
+                    }),
+                    "rows {left} and {right} must remain distinguishable"
+                );
+            }
+        }
+        assert_eq!(ring[0].to_bits(), 0x0000_0000, "directed +0 fixture word");
+        if W > 1 {
+            assert_eq!(ring[1].to_bits(), 0x8000_0000, "directed -0 fixture word");
+        }
     }
 
     /// Independent old-index oracle: this deliberately spells out the one subtract rather than
@@ -2083,6 +2097,7 @@ mod detector_access_tests {
 
     fn width_word_witness<L: Lane, const W: usize>() {
         let ring = patterned_ring::<W>();
+        assert_rows_are_distinct::<W>(&ring);
         let uniform_one = [1usize; W];
         let uniform_interior = [3usize; W];
         let uniform_ring_end = [RING_LEN; W];
@@ -2227,6 +2242,45 @@ mod detector_access_tests {
                 DETECTOR_RAGGED_CALLS.load(Ordering::SeqCst),
                 2 * frames,
                 "W={W}: prepared mixed callsite ragged channel"
+            );
+        }
+
+        // Reverse the channel directions so the callsite witness covers uniform-left/ragged-right
+        // as well as the preceding ragged-left/uniform-right case.
+        let mut opposite_instance = Instance::<L, W>::new(
+            [left_defaults; W],
+            [right_defaults; W],
+            metadata,
+        )
+        .expect("opposite mixed instance");
+        opposite_instance.sides[0].detector_offset = [2; W];
+        opposite_instance.sides[1].detector_offset =
+            core::array::from_fn(|track| 1 + track % (opposite_instance.ring_len - 1));
+        let mut left = vec![0.25f32; frames * W];
+        let mut right = vec![-0.5f32; frames * W];
+        let mut reports = [ProcessReport::default(); W];
+        DETECTOR_UNIFORM_CALLS.store(0, Ordering::SeqCst);
+        DETECTOR_RAGGED_CALLS.store(0, Ordering::SeqCst);
+        render::<L, W, false>(
+            &mut opposite_instance,
+            &mut left,
+            &mut right,
+            frames,
+            &mut reports,
+        );
+        if W == 1 {
+            assert_eq!(DETECTOR_UNIFORM_CALLS.load(Ordering::SeqCst), 4 * frames);
+            assert_eq!(DETECTOR_RAGGED_CALLS.load(Ordering::SeqCst), 0);
+        } else {
+            assert_eq!(
+                DETECTOR_UNIFORM_CALLS.load(Ordering::SeqCst),
+                2 * frames,
+                "W={W}: opposite prepared mixed uniform channel"
+            );
+            assert_eq!(
+                DETECTOR_RAGGED_CALLS.load(Ordering::SeqCst),
+                2 * frames,
+                "W={W}: opposite prepared mixed ragged channel"
             );
         }
     }
