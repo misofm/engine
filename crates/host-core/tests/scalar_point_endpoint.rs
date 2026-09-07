@@ -1472,6 +1472,11 @@ fn preparation_resources_and_success_path_are_bounded() {
         "foreign free moved measured-thread deallocation audit"
     );
     assert_eq!(
+        foreign_current_thread,
+        bench_support::alloc::Counters::default(),
+        "foreign allocation moved measured-thread allocator counters"
+    );
+    assert_eq!(
         endpoint_diagnostic.current_thread,
         direct_diagnostic.current_thread
     );
