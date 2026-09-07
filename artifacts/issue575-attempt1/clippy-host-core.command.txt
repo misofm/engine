@@ -1,0 +1,1 @@
+cargo clippy --locked -p host-core --all-targets --all-features -- -D warnings

@@ -1,0 +1,1 @@
+env RUSTDOCFLAGS=-Dwarnings cargo doc --locked -p protocol --all-features --no-deps

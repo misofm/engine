@@ -351,6 +351,74 @@ fn public_b1b_uses_exactly_the_typed_reader_passes_and_replays_identical_bytes()
     assert!(limited.replay.is_empty());
 }
 
+#[test]
+fn public_b1b_automation_replay_uses_the_ordinary_queue() {
+    let records = [crate::AutomationRecord {
+        kind: crate::AutomationKind::Point,
+        handle: ParameterHandle(1),
+        start: SampleTime(0),
+        end: SampleTime(0),
+        start_value: 0.25,
+        end_value: 0.25,
+    }];
+    let input = full_command(
+        1,
+        ExpectedRevision::Exact(SessionRevision(7)),
+        crate::CommandPayload::AutomationEnqueue(crate::AutomationEnqueue { records: &records }),
+    );
+    let mut endpoint = controller(8, 2);
+    let first = endpoint
+        .process_b1b_btlv(&input, &mut DecodeScratch::new(&mut [0_u16; 32]))
+        .expect("ordinary B1b automation");
+    assert_eq!(first.status, StatusCode::Ok);
+    assert_eq!(
+        endpoint
+            .queues_mut()
+            .report(crate::QueueKind::Automation)
+            .occupancy,
+        1
+    );
+
+    let replay = endpoint
+        .process_b1b_btlv(&input, &mut DecodeScratch::new(&mut [0_u16; 32]))
+        .expect("ordinary B1b automation replay");
+    assert_eq!(replay, first);
+    assert_eq!(
+        endpoint
+            .queues_mut()
+            .report(crate::QueueKind::Automation)
+            .occupancy,
+        1
+    );
+
+    let changed_records = [crate::AutomationRecord {
+        start_value: 0.5,
+        end_value: 0.5,
+        ..records[0]
+    }];
+    let changed = full_command(
+        1,
+        ExpectedRevision::Exact(SessionRevision(7)),
+        crate::CommandPayload::AutomationEnqueue(crate::AutomationEnqueue {
+            records: &changed_records,
+        }),
+    );
+    assert_eq!(
+        endpoint
+            .process_b1b_btlv(&changed, &mut DecodeScratch::new(&mut [0_u16; 32]))
+            .expect("ordinary B1b changed reuse")
+            .status,
+        StatusCode::RequestIdReuse
+    );
+    assert_eq!(
+        endpoint
+            .queues_mut()
+            .report(crate::QueueKind::Automation)
+            .occupancy,
+        1
+    );
+}
+
 fn egress_controller(
     reliable_event_slots: usize,
     telemetry_slots: usize,

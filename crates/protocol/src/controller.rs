@@ -18,6 +18,16 @@ std::thread_local! {
     static TYPED_COMMAND_DECODES: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
 }
 
+#[cfg(test)]
+pub(crate) fn reset_typed_command_decodes() {
+    TYPED_COMMAND_DECODES.with(|decodes| decodes.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn typed_command_decodes() -> usize {
+    TYPED_COMMAND_DECODES.with(core::cell::Cell::get)
+}
+
 #[cfg(any(test, feature = "test-support"))]
 use crate::TransportState;
 use crate::delivery::{DeliveryContext, PreparedDeliveryCapabilities};
@@ -1642,6 +1652,15 @@ impl<P: ControlProvider> ProtocolController<P> {
         input: &[u8],
         scratch: &mut DecodeScratch<'_>,
     ) -> Result<ControllerResponse, DecodeError> {
+        self.process_b1b_btlv_with_delivery_context(input, scratch, None)
+    }
+
+    pub(crate) fn process_b1b_btlv_with_delivery_context(
+        &mut self,
+        input: &[u8],
+        scratch: &mut DecodeScratch<'_>,
+        context: Option<&mut DeliveryContext<'_>>,
+    ) -> Result<ControllerResponse, DecodeError> {
         let codec = self.codec;
         let decoded = codec.decode_typed_command_limited(
             input,
@@ -1658,12 +1677,15 @@ impl<P: ControlProvider> ProtocolController<P> {
                 }
             }
             DecodedCommandPayload::SessionTransactionApply(edits) => {
-                return Ok(self.process(ControllerRequest {
-                    request_id: header.request_id,
-                    expected_revision: header.expected_revision,
-                    canonical_bytes: input,
-                    command: ControlCommand::SessionTransactionApply { edits: &edits },
-                }));
+                return Ok(self.process_with_delivery_context(
+                    ControllerRequest {
+                        request_id: header.request_id,
+                        expected_revision: header.expected_revision,
+                        canonical_bytes: input,
+                        command: ControlCommand::SessionTransactionApply { edits: &edits },
+                    },
+                    context,
+                ));
             }
             DecodedCommandPayload::ParameterMetadataGet(request) => {
                 ControlCommand::ParameterMetadataGet { request }
@@ -1692,12 +1714,15 @@ impl<P: ControlProvider> ProtocolController<P> {
                 ControlCommand::DiagnosticsGet { request }
             }
         };
-        Ok(self.process(ControllerRequest {
-            request_id: header.request_id,
-            expected_revision: header.expected_revision,
-            canonical_bytes: input,
-            command,
-        }))
+        Ok(self.process_with_delivery_context(
+            ControllerRequest {
+                request_id: header.request_id,
+                expected_revision: header.expected_revision,
+                canonical_bytes: input,
+                command,
+            },
+            context,
+        ))
     }
 
     /// Process one complete schema-closed command and copy its canonical full response into the
@@ -1715,6 +1740,16 @@ impl<P: ControlProvider> ProtocolController<P> {
         scratch: &mut DecodeScratch<'_>,
         output: &mut [u8],
     ) -> Result<usize, CommandFrameProcessError> {
+        self.process_command_frame_into_with_delivery_context(input, scratch, output, None)
+    }
+
+    pub(crate) fn process_command_frame_into_with_delivery_context(
+        &mut self,
+        input: &[u8],
+        scratch: &mut DecodeScratch<'_>,
+        output: &mut [u8],
+        context: Option<&mut DeliveryContext<'_>>,
+    ) -> Result<usize, CommandFrameProcessError> {
         if self.structural_generation.load(Ordering::Acquire) & 1 != 0 {
             return Err(CommandFrameProcessError::PreparedCommandOutstanding);
         }
@@ -1722,9 +1757,12 @@ impl<P: ControlProvider> ProtocolController<P> {
             .codec
             .decode_command_header(input)
             .map_err(CommandFrameProcessError::Uncorrelatable)?;
+        if context.is_some() && header.message_id == MessageId::SessionTransactionApply {
+            return self.process_command_frame_into_legacy(input, scratch, output, context);
+        }
         match self.plan_structural_command(input, scratch, output.len(), header)? {
             StructuralCommandDisposition::Legacy => {
-                self.process_command_frame_into_legacy(input, scratch, output)
+                self.process_command_frame_into_legacy(input, scratch, output, context)
             }
             StructuralCommandDisposition::Immediate {
                 replay_plan,
@@ -2107,7 +2145,7 @@ impl<P: ControlProvider> ProtocolController<P> {
         PREPARED_IMMEDIATE_CALLS.with(|calls| calls.set(calls.get().saturating_add(1)));
         let capacity = output_capacity.min(self.replay.config().max_response_bytes);
         let mut bytes = vec![0_u8; capacity];
-        let written = self.process_command_frame_into_legacy(input, scratch, &mut bytes)?;
+        let written = self.process_command_frame_into_legacy(input, scratch, &mut bytes, None)?;
         bytes.truncate(written);
         Ok(PreparedCommandFrame::Immediate(
             PreparedImmediateCommandFrame { bytes },
@@ -2182,6 +2220,7 @@ impl<P: ControlProvider> ProtocolController<P> {
         input: &[u8],
         scratch: &mut DecodeScratch<'_>,
         output: &mut [u8],
+        context: Option<&mut DeliveryContext<'_>>,
     ) -> Result<usize, CommandFrameProcessError> {
         let header = self
             .codec
@@ -2223,7 +2262,7 @@ impl<P: ControlProvider> ProtocolController<P> {
         #[cfg(test)]
         TYPED_COMMAND_DECODES.with(|decodes| decodes.set(decodes.get().saturating_add(1)));
         let outcome = match self.codec.decode_typed_command(input, scratch) {
-            Ok(decoded) => self.execute_decoded_command(header, decoded.payload),
+            Ok(decoded) => self.execute_decoded_command(header, decoded.payload, context),
             Err(error) => self.non_ok(error.status(), None),
         };
         let (written, _, _) = self
@@ -2271,6 +2310,7 @@ impl<P: ControlProvider> ProtocolController<P> {
         &mut self,
         header: CommandHeader,
         payload: DecodedCommandPayload<'_>,
+        context: Option<&mut DeliveryContext<'_>>,
     ) -> Outcome {
         let command = match payload {
             DecodedCommandPayload::CapabilitiesGet => ControlCommand::CapabilitiesGet,
@@ -2281,12 +2321,15 @@ impl<P: ControlProvider> ProtocolController<P> {
                 }
             }
             DecodedCommandPayload::SessionTransactionApply(edits) => {
-                return self.execute(&ControllerRequest {
-                    request_id: header.request_id,
-                    expected_revision: header.expected_revision,
-                    canonical_bytes: &[],
-                    command: ControlCommand::SessionTransactionApply { edits: &edits },
-                });
+                return self.execute_with_delivery_context(
+                    &ControllerRequest {
+                        request_id: header.request_id,
+                        expected_revision: header.expected_revision,
+                        canonical_bytes: &[],
+                        command: ControlCommand::SessionTransactionApply { edits: &edits },
+                    },
+                    context,
+                );
             }
             DecodedCommandPayload::ParameterMetadataGet(request) => {
                 ControlCommand::ParameterMetadataGet { request }
@@ -2318,12 +2361,15 @@ impl<P: ControlProvider> ProtocolController<P> {
                 ControlCommand::DiagnosticsGet { request }
             }
         };
-        self.execute(&ControllerRequest {
-            request_id: header.request_id,
-            expected_revision: header.expected_revision,
-            canonical_bytes: &[],
-            command,
-        })
+        self.execute_with_delivery_context(
+            &ControllerRequest {
+                request_id: header.request_id,
+                expected_revision: header.expected_revision,
+                canonical_bytes: &[],
+                command,
+            },
+            context,
+        )
     }
 
     fn encode_outcome_into(
@@ -3030,10 +3076,6 @@ impl<P: ControlProvider> ProtocolController<P> {
                 values,
             };
         }
-    }
-
-    fn execute(&mut self, request: &ControllerRequest<'_>) -> Outcome {
-        self.execute_with_delivery_context(request, None)
     }
 
     fn execute_with_delivery_context(

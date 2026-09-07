@@ -17,16 +17,16 @@ use host_core::{
     prepare_scalar_point_endpoint,
 };
 use protocol::{
-    AutomationBatchError, AutomationBatchSlot, AutomationCancellationReason,
-    AutomationEnqueueError, AutomationKind, AutomationRecord, ControlCommand, ControlProvider,
-    ControllerAutomationDelivery, ControllerRequest, ControllerRetainedCapacity, CounterId,
-    CountersRequest, DecodeScratch, DecodedEventPayload, DecodedSuccessResponsePayload,
+    AutomationBatchError, AutomationBatchSlot, AutomationCancellationReason, AutomationEnqueue,
+    AutomationEnqueueError, AutomationKind, AutomationRecord, CommandPayload, ControlCommand,
+    ControlProvider, ControllerAutomationDelivery, ControllerRequest, ControllerRetainedCapacity,
+    CounterId, CountersRequest, DecodeScratch, DecodedEventPayload, DecodedSuccessResponsePayload,
     DecodedTypedEventFrame, DecodedTypedResponseFrame, DeliveryError, ExpectedRevision,
     HandoffResult, ParameterChannel as ProtocolParameterChannel, ParameterHandle,
     ParameterMetadataRequest, ParameterStateRequest, PreparedAutomationDelivery,
     PreparedDeliveryCapabilities, ProtocolCodec, ProtocolControllerConfig, ProtocolQueueConfig,
     ProviderFeatures, ReliablePayload, ReplayCacheConfig, RequestId, SampleTime, SessionRevision,
-    StatusCode,
+    StatusCode, TypedCommandFrame,
 };
 use std::sync::{
     Arc,
@@ -250,26 +250,11 @@ fn real_controller_fixture() -> RealControllerFixture {
     }
 }
 
-fn controller_enqueue<'a>(
+fn encoded_controller_enqueue(
     revision: SessionRevision,
     request_id: u64,
-    canonical_bytes: &'a [u8],
-    batch: AutomationBatchSlot,
-) -> ControllerRequest<'a> {
-    ControllerRequest {
-        request_id: RequestId::new(request_id).unwrap(),
-        expected_revision: ExpectedRevision::Exact(revision),
-        canonical_bytes,
-        command: ControlCommand::AutomationEnqueue { batch },
-    }
-}
-
-fn real_batch(
-    revision: SessionRevision,
-    request_id: u64,
-    handles: [ParameterHandle; 2],
     records: &[(ParameterHandle, u64, f32)],
-) -> AutomationBatchSlot {
+) -> Vec<u8> {
     let records: Vec<_> = records
         .iter()
         .map(|&(handle, sample, value)| AutomationRecord {
@@ -281,12 +266,68 @@ fn real_batch(
             end_value: value,
         })
         .collect();
-    assert!(
-        records
-            .iter()
-            .all(|record| handles.contains(&record.handle))
-    );
-    AutomationBatchSlot::new(revision, RequestId::new(request_id).unwrap(), &records).unwrap()
+    let codec = ProtocolCodec::default();
+    let mut bytes = vec![0_u8; 4_096];
+    let length = codec
+        .encode_command_frame_into(
+            &TypedCommandFrame {
+                request_id: RequestId::new(request_id).unwrap(),
+                expected_revision: ExpectedRevision::Exact(revision),
+                payload: CommandPayload::AutomationEnqueue(AutomationEnqueue { records: &records }),
+            },
+            &mut bytes,
+        )
+        .expect("encoded BTLV automation enqueue");
+    bytes.truncate(length);
+    bytes
+}
+
+fn process_controller_frame<P: ControlProvider>(
+    controller: &mut ControllerAutomationDelivery<P>,
+    input: &[u8],
+) -> Vec<u8> {
+    let mut output = vec![0_u8; 2_048];
+    let written = controller
+        .process_command_frame_into(
+            input,
+            &mut DecodeScratch::new(&mut [0_u16; 64]),
+            &mut output,
+        )
+        .expect("complete caller-buffer command frame");
+    output.truncate(written);
+    output
+}
+
+#[derive(Clone, Copy)]
+enum ControllerIngress {
+    CallerBuffer,
+    B1b,
+}
+
+fn process_controller_ingress<P: ControlProvider>(
+    controller: &mut ControllerAutomationDelivery<P>,
+    input: &[u8],
+    ingress: ControllerIngress,
+) -> Vec<u8> {
+    match ingress {
+        ControllerIngress::CallerBuffer => process_controller_frame(controller, input),
+        ControllerIngress::B1b => {
+            controller
+                .process_b1b_btlv(input, &mut DecodeScratch::new(&mut [0_u16; 64]))
+                .expect("complete B1b command frame")
+                .frame
+        }
+    }
+}
+
+fn response_status(frame: &[u8]) -> StatusCode {
+    match ProtocolCodec::default()
+        .decode_typed_response(frame, &mut DecodeScratch::new(&mut [0_u16; 64]))
+        .expect("typed response frame")
+    {
+        DecodedTypedResponseFrame::Success { header, .. }
+        | DecodedTypedResponseFrame::NonOk { header, .. } => header.status,
+    }
 }
 
 fn process_real(
@@ -1622,6 +1663,14 @@ fn preparation_resources_and_success_path_are_bounded() {
 
 #[test]
 fn controller_points_drive_real_asymmetric_pcm_replay_and_clock_refusal() {
+    for ingress in [ControllerIngress::CallerBuffer, ControllerIngress::B1b] {
+        run_controller_points_drive_real_asymmetric_pcm_replay_and_clock_refusal(ingress);
+    }
+}
+
+fn run_controller_points_drive_real_asymmetric_pcm_replay_and_clock_refusal(
+    ingress: ControllerIngress,
+) {
     let mut fixture = real_controller_fixture();
     let revision = fixture.session.revision();
     let handles = fixture.handles;
@@ -1681,12 +1730,11 @@ fn controller_points_drive_real_asymmetric_pcm_replay_and_clock_refusal() {
     );
 
     let records = [(handles[0], 3, 6.0), (handles[1], 128, -6.0)];
-    let batch = real_batch(revision, 1, handles, &records);
-    let canonical = b"typed-enqueue-left-right";
-    let response = controller.process(controller_enqueue(revision, 1, canonical, batch));
-    assert_eq!(response.status, StatusCode::Ok);
+    let encoded = encoded_controller_enqueue(revision, 1, &records);
+    let response = process_controller_ingress(&mut controller, &encoded, ingress);
+    assert_eq!(response_status(&response), StatusCode::Ok);
     let decoded = ProtocolCodec::default()
-        .decode_typed_response(&response.frame, &mut DecodeScratch::new(&mut [0_u16; 64]))
+        .decode_typed_response(&response, &mut DecodeScratch::new(&mut [0_u16; 64]))
         .expect("decode typed enqueue response");
     assert!(matches!(
         decoded,
@@ -1695,13 +1743,45 @@ fn controller_points_drive_real_asymmetric_pcm_replay_and_clock_refusal() {
             ..
         } if accepted.accepted_records == 2
     ));
-    let replay = controller.process(controller_enqueue(
+    let replay = process_controller_ingress(&mut controller, &encoded, ingress);
+    assert_eq!(replay, response);
+    let changed = encoded_controller_enqueue(
         revision,
         1,
-        canonical,
-        real_batch(revision, 1, handles, &records),
+        &[(handles[0], 3, 5.0), (handles[1], 128, -6.0)],
+    );
+    assert_eq!(
+        response_status(&process_controller_ingress(
+            &mut controller,
+            &changed,
+            ingress,
+        )),
+        StatusCode::RequestIdReuse
+    );
+    assert_eq!(controller.outstanding(), 1);
+    let malformed_outer = encoded[..encoded.len() - 1].to_vec();
+    let mut outer_output = vec![0_u8; 2_048];
+    assert!(matches!(
+        controller.process_command_frame_into(
+            &malformed_outer,
+            &mut DecodeScratch::new(&mut [0_u16; 64]),
+            &mut outer_output,
+        ),
+        Err(protocol::CommandFrameProcessError::Uncorrelatable(
+            protocol::DecodeError::BadPayloadLength
+        ))
     ));
-    assert_eq!(replay, response);
+    let mut malformed_payload = encoded.clone();
+    malformed_payload[24..32].copy_from_slice(&99_u64.to_le_bytes());
+    malformed_payload[protocol::OUTER_HEADER_BYTES + 8] = 0;
+    assert_eq!(
+        response_status(&process_controller_frame(
+            &mut controller,
+            &malformed_payload
+        )),
+        StatusCode::MalformedFrame
+    );
+    assert_eq!(controller.outstanding(), 1);
     let ticket = match controller.try_handoff_next().unwrap() {
         HandoffResult::HandedOff(ticket) => ticket,
         other => panic!("expected Point handoff, got {other:?}"),
@@ -1843,16 +1923,15 @@ fn controller_points_drive_real_asymmetric_pcm_replay_and_clock_refusal() {
         .clock
         .0
         .store(snapshot.next_sample.0, Ordering::Release);
-    let past = controller.process(controller_enqueue(
-        revision,
-        2,
-        b"typed-past",
-        real_batch(revision, 2, handles, &[(handles[0], 200, 1.0)]),
-    ));
-    assert_eq!(past.status, StatusCode::TimeInPast);
+    let past = process_controller_ingress(
+        &mut controller,
+        &encoded_controller_enqueue(revision, 100, &[(handles[0], 200, 1.0)]),
+        ingress,
+    );
+    assert_eq!(response_status(&past), StatusCode::TimeInPast);
     assert_eq!(controller.outstanding(), 0);
     let state = controller.process(ControllerRequest {
-        request_id: RequestId::new(3).unwrap(),
+        request_id: RequestId::new(101).unwrap(),
         expected_revision: ExpectedRevision::Exact(revision),
         canonical_bytes: b"state-get",
         command: ControlCommand::ParameterStateGet {
@@ -1867,6 +1946,14 @@ fn controller_points_drive_real_asymmetric_pcm_replay_and_clock_refusal() {
 
 #[test]
 fn controller_cancellation_keeps_real_prefix_event_credit_and_native_state() {
+    for ingress in [ControllerIngress::CallerBuffer, ControllerIngress::B1b] {
+        run_controller_cancellation_keeps_real_prefix_event_credit_and_native_state(ingress);
+    }
+}
+
+fn run_controller_cancellation_keeps_real_prefix_event_credit_and_native_state(
+    ingress: ControllerIngress,
+) {
     let mut fixture = real_controller_fixture();
     let revision = fixture.session.revision();
     let handles = fixture.handles;
@@ -1887,19 +1974,16 @@ fn controller_cancellation_keeps_real_prefix_event_credit_and_native_state() {
         },
     )
     .expect("combined cancellation preparation");
-    let batch = real_batch(
-        revision,
-        10,
-        handles,
-        &[(handles[0], 3, 6.0), (handles[1], 200, -6.0)],
+    let response = process_controller_ingress(
+        &mut controller,
+        &encoded_controller_enqueue(
+            revision,
+            10,
+            &[(handles[0], 3, 6.0), (handles[1], 200, -6.0)],
+        ),
+        ingress,
     );
-    let response = controller.process(controller_enqueue(
-        revision,
-        10,
-        b"cancel-two-records",
-        batch,
-    ));
-    assert_eq!(response.status, StatusCode::Ok);
+    assert_eq!(response_status(&response), StatusCode::Ok);
     let ticket = match controller.try_handoff_next().unwrap() {
         HandoffResult::HandedOff(ticket) => ticket,
         other => panic!("expected Point handoff, got {other:?}"),
@@ -2017,13 +2101,12 @@ fn controller_cancellation_keeps_real_prefix_event_credit_and_native_state() {
         Some(1)
     );
 
-    let replacement = controller.process(controller_enqueue(
-        revision,
-        12,
-        b"after-cancel",
-        real_batch(revision, 12, handles, &[(handles[0], 300, 2.0)]),
-    ));
-    assert_eq!(replacement.status, StatusCode::Ok);
+    let replacement = process_controller_ingress(
+        &mut controller,
+        &encoded_controller_enqueue(revision, 12, &[(handles[0], 300, 2.0)]),
+        ingress,
+    );
+    assert_eq!(response_status(&replacement), StatusCode::Ok);
     let replacement_ticket = match controller.try_handoff_next().unwrap() {
         HandoffResult::HandedOff(ticket) => ticket,
         other => panic!("expected replacement handoff, got {other:?}"),
