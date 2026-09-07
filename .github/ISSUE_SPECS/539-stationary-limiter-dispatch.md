@@ -120,3 +120,9 @@ Resolve the allocation-path ambiguity narrowly: `crates/true-peak-limiter/tests/
 No implementation attempt has started; this authorizes **attempt 1 of at most three**. No timing, projected gain, FX2 work, finding-status change, delivery acceptance or issue closure follows from this decision.
 
 Review was read-only: no edits, builds, tests, benchmarks, captures, Git/GitHub writes, agents or report-file writes.
+
+## Attempt 1 first coherent source/witness checkpoint — Luna high
+
+Only lib.rs changed: common-source stationary/ramping specialization retains original runtime-predicate behavior for the private oracle. Focused tests::stationary_dispatch_matches_runtime_oracle_and_observes_selected_body passed1/0/29filtered at sourceSHA5b25b0337de2106c58d48edd71dac0332eedce61322fa4ee0988e729defce28d, blob5b21199dc5df1a477407e7daa1613646702c5de0. Witness covers allfourW8routes and scalardualuniform, populatedPCM/fullstate/ramp and monorightplane. Initial compile failure101 and corrected green captures are preserved.
+
+Raw helper/target paths inherited luna2 in their names; this remains attempt1, not an attempt reset. Root checkpoints before the single frozen fallback control; mutation, broader gates, candidate lowering and consolidated Astra review remain pending. No source acceptance or speedup claim.

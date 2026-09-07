@@ -40,6 +40,9 @@
 //! `effect-runtime`.
 #![allow(missing_docs)]
 
+#[cfg(test)]
+use core::cell::Cell;
+
 pub mod corpus;
 
 use effect_contract::{
@@ -685,6 +688,109 @@ fn ramps_are_stationary(ramps: &[LinearRamp]) -> bool {
     ramps
         .iter()
         .all(|ramp| ramp.remaining == 0 && ramp.current.to_bits() == ramp.target.to_bits())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StationaryDispatch {
+    Runtime,
+    Stationary,
+    Ramping,
+}
+
+const DISPATCH_RUNTIME: u8 = 0;
+const DISPATCH_STATIONARY: u8 = 1;
+const DISPATCH_RAMPING: u8 = 2;
+
+#[inline(always)]
+fn dual_stationary(left: &ChannelState, right: &ChannelState) -> bool {
+    ramps_are_stationary(&left.limit)
+        && ramps_are_stationary(&left.release)
+        && ramps_are_stationary(&right.limit)
+        && ramps_are_stationary(&right.release)
+}
+
+#[inline(always)]
+fn mono_stationary(left: &ChannelState) -> bool {
+    ramps_are_stationary(&left.limit) && ramps_are_stationary(&left.release)
+}
+
+#[inline(always)]
+fn ramp_values<const DISPATCH: u8, L: Lane>(
+    stationary: bool,
+    limit: &mut RampLanes<L>,
+    release: &mut RampLanes<L>,
+) -> (L, L) {
+    match DISPATCH {
+        DISPATCH_RUNTIME => {
+            if stationary {
+                (limit.resting_value(), release.resting_value())
+            } else {
+                (limit.advance(), release.advance())
+            }
+        }
+        DISPATCH_STATIONARY => {
+            (limit.resting_value(), release.resting_value())
+        }
+        DISPATCH_RAMPING => (limit.advance(), release.advance()),
+        _ => unreachable!("invalid limiter dispatch"),
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DispatchRoute {
+    Unset,
+    DualPerLane,
+    DualUniform,
+    MonoPerLane,
+    MonoUniform,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DispatchObservation {
+    route: DispatchRoute,
+    mode: StationaryDispatch,
+}
+
+#[cfg(test)]
+thread_local! {
+    static DISPATCH_OBSERVATION: Cell<DispatchObservation> = const {
+        Cell::new(DispatchObservation {
+            route: DispatchRoute::Unset,
+            mode: StationaryDispatch::Runtime,
+        })
+    };
+}
+
+#[cfg(test)]
+fn clear_dispatch_observation() {
+    DISPATCH_OBSERVATION.with(|observation| {
+        observation.set(DispatchObservation {
+            route: DispatchRoute::Unset,
+            mode: StationaryDispatch::Runtime,
+        });
+    });
+}
+
+#[cfg(test)]
+fn observe_dispatch<const DISPATCH: u8>(route: DispatchRoute) {
+    DISPATCH_OBSERVATION.with(|observation| {
+        observation.set(DispatchObservation {
+            route,
+            mode: match DISPATCH {
+                DISPATCH_RUNTIME => StationaryDispatch::Runtime,
+                DISPATCH_STATIONARY => StationaryDispatch::Stationary,
+                DISPATCH_RAMPING => StationaryDispatch::Ramping,
+                _ => unreachable!("invalid limiter dispatch"),
+            },
+        });
+    });
+}
+
+#[cfg(test)]
+fn dispatch_observation() -> DispatchObservation {
+    DISPATCH_OBSERVATION.with(Cell::get)
 }
 
 /// A linear ramp of one coefficient, held as lanes for the block loop.
@@ -1582,14 +1688,55 @@ fn limiter_block<L: Lane>(
     right: &mut ChannelState,
     cursors: &mut Cursors,
 ) {
+    let stationary = dual_stationary(left, right);
     // Issue #182 S1: one whole-bank branch, taken here and nowhere else. Both channels must be
     // uniform, because both run the same body; a bank with a mixed left channel and a uniform
     // right one takes the per-lane path on both, which is the conservative direction and keeps the
     // decision one branch rather than two.
     if lanes_uniform(left) && lanes_uniform(right) {
-        limiter_block_uniform::<L>(left_io, right_io, frames, coef, shape, left, right, cursors);
+        if stationary {
+            limiter_block_uniform::<DISPATCH_STATIONARY, L>(
+                left_io, right_io, frames, coef, shape, left, right, cursors, true,
+            );
+        } else {
+            limiter_block_uniform::<DISPATCH_RAMPING, L>(
+                left_io, right_io, frames, coef, shape, left, right, cursors, false,
+            );
+        }
     } else {
-        limiter_block_per_lane::<L>(left_io, right_io, frames, coef, shape, left, right, cursors);
+        if stationary {
+            limiter_block_per_lane::<DISPATCH_STATIONARY, L>(
+                left_io, right_io, frames, coef, shape, left, right, cursors, true,
+            );
+        } else {
+            limiter_block_per_lane::<DISPATCH_RAMPING, L>(
+                left_io, right_io, frames, coef, shape, left, right, cursors, false,
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+#[inline(always)]
+fn limiter_block_runtime_oracle<L: Lane>(
+    left_io: &mut [f32],
+    right_io: &mut [f32],
+    frames: usize,
+    coef: &LimiterCoef<L>,
+    shape: &Shape,
+    left: &mut ChannelState,
+    right: &mut ChannelState,
+    cursors: &mut Cursors,
+) {
+    let stationary = dual_stationary(left, right);
+    if lanes_uniform(left) && lanes_uniform(right) {
+        limiter_block_uniform::<DISPATCH_RUNTIME, L>(
+            left_io, right_io, frames, coef, shape, left, right, cursors, stationary,
+        );
+    } else {
+        limiter_block_per_lane::<DISPATCH_RUNTIME, L>(
+            left_io, right_io, frames, coef, shape, left, right, cursors, stationary,
+        );
     }
 }
 
@@ -1627,7 +1774,7 @@ fn detector_chunk<L: Lane>(
 /// [`detector_chunk`] and the peak scratch is two named arrays instead of one indexed pair.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-fn limiter_block_per_lane<L: Lane>(
+fn limiter_block_per_lane<const DISPATCH: u8, L: Lane>(
     left_io: &mut [f32],
     right_io: &mut [f32],
     frames: usize,
@@ -1636,6 +1783,7 @@ fn limiter_block_per_lane<L: Lane>(
     left: &mut ChannelState,
     right: &mut ChannelState,
     cursors: &mut Cursors,
+    stationary: bool,
 ) {
     let width = L::WIDTH;
     debug_assert!(width <= MAXIMUM_WIDTH);
@@ -1646,21 +1794,8 @@ fn limiter_block_per_lane<L: Lane>(
 
     let mut hot_left = HotChannel::<L>::load(left);
     let mut hot_right = HotChannel::<L>::load(right);
-    // Issue #144 item 6, the stationary hoist, taken once per block at whole-bank granularity.
-    //
-    // Per-lane branching is forbidden here: one track's arithmetic must not depend on which
-    // cohort it landed in. So the block takes the hoist only when *every* lane of *all four*
-    // ramps is stationary, exactly as the compressor's `max_remaining` split and the matrix
-    // stage's `if maximum == 0` already do.
-    //
-    // The test is a bit compare, never a tolerance: `remaining == 0` says no window is open, and
-    // `current.to_bits() == target.to_bits()` says the value in force is exactly the value being
-    // held. The scalar ramps are read rather than the gathered lanes because this is
-    // control-plane bookkeeping done once, and because lanes at or above `width` are inert.
-    let stationary = ramps_are_stationary(&left.limit)
-        && ramps_are_stationary(&left.release)
-        && ramps_are_stationary(&right.limit)
-        && ramps_are_stationary(&right.release);
+    #[cfg(test)]
+    observe_dispatch::<DISPATCH>(DispatchRoute::DualPerLane);
     let all = L::zero().eq(L::zero());
     let none = L::mask_not(all);
     let link = if coef.link_max { all } else { none };
@@ -1698,21 +1833,13 @@ fn limiter_block_per_lane<L: Lane>(
 
         for frame in 0..span {
             let base = (chunk + frame) * width;
-            let (limit_left, release_left, limit_right, release_right) = if stationary {
-                (
-                    hot_left.limit.resting_value(),
-                    hot_left.release.resting_value(),
-                    hot_right.limit.resting_value(),
-                    hot_right.release.resting_value(),
-                )
-            } else {
-                (
-                    hot_left.limit.advance(),
-                    hot_left.release.advance(),
-                    hot_right.limit.advance(),
-                    hot_right.release.advance(),
-                )
-            };
+            let (limit_left, release_left) =
+                ramp_values::<DISPATCH, L>(stationary, &mut hot_left.limit, &mut hot_left.release);
+            let (limit_right, release_right) = ramp_values::<DISPATCH, L>(
+                stationary,
+                &mut hot_right.limit,
+                &mut hot_right.release,
+            );
 
             let peak_left = L::load(&peaks_left[frame * width..]);
             let peak_right = L::load(&peaks_right[frame * width..]);
@@ -1798,7 +1925,7 @@ fn limiter_block_per_lane<L: Lane>(
 /// state words the frame loop keeps in registers are argued in [`sliding_minimum_uniform`].
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-fn limiter_block_uniform<L: Lane>(
+fn limiter_block_uniform<const DISPATCH: u8, L: Lane>(
     left_io: &mut [f32],
     right_io: &mut [f32],
     frames: usize,
@@ -1807,6 +1934,7 @@ fn limiter_block_uniform<L: Lane>(
     left: &mut ChannelState,
     right: &mut ChannelState,
     cursors: &mut Cursors,
+    stationary: bool,
 ) {
     let width = L::WIDTH;
     debug_assert!(width <= MAXIMUM_WIDTH);
@@ -1817,12 +1945,8 @@ fn limiter_block_uniform<L: Lane>(
 
     let mut hot_left = HotChannel::<L>::load(left);
     let mut hot_right = HotChannel::<L>::load(right);
-    // Issue #144 item 6, the stationary hoist, taken once per block at whole-bank granularity, on
-    // the terms `limiter_block_per_lane` states.
-    let stationary = ramps_are_stationary(&left.limit)
-        && ramps_are_stationary(&left.release)
-        && ramps_are_stationary(&right.limit)
-        && ramps_are_stationary(&right.release);
+    #[cfg(test)]
+    observe_dispatch::<DISPATCH>(DispatchRoute::DualUniform);
     let all = L::zero().eq(L::zero());
     let none = L::mask_not(all);
     let link = if coef.link_max { all } else { none };
@@ -1887,21 +2011,16 @@ fn limiter_block_uniform<L: Lane>(
                     .zip(right_peaks.chunks_exact(width))
                     .enumerate()
                 {
-                    let (limit_left, release_left, limit_right, release_right) = if stationary {
-                        (
-                            hot_left.limit.resting_value(),
-                            hot_left.release.resting_value(),
-                            hot_right.limit.resting_value(),
-                            hot_right.release.resting_value(),
-                        )
-                    } else {
-                        (
-                            hot_left.limit.advance(),
-                            hot_left.release.advance(),
-                            hot_right.limit.advance(),
-                            hot_right.release.advance(),
-                        )
-                    };
+                    let (limit_left, release_left) = ramp_values::<DISPATCH, L>(
+                        stationary,
+                        &mut hot_left.limit,
+                        &mut hot_left.release,
+                    );
+                    let (limit_right, release_right) = ramp_values::<DISPATCH, L>(
+                        stationary,
+                        &mut hot_right.limit,
+                        &mut hot_right.release,
+                    );
 
                     let peak_left = L::load(left_peak);
                     let peak_right = L::load(right_peak);
@@ -2158,6 +2277,25 @@ impl<L: Lane> LimiterCore<L> {
         });
     }
 
+    #[cfg(test)]
+    fn process_block_runtime_oracle(
+        &mut self,
+        left_io: &mut [f32],
+        right_io: &mut [f32],
+        frames: usize,
+    ) {
+        limiter_block_runtime_oracle::<L>(
+            left_io,
+            right_io,
+            frames,
+            &self.coefficients,
+            &self.shape,
+            &mut self.left,
+            &mut self.right,
+            &mut self.cursors,
+        );
+    }
+
     /// [`process_block`](Self::process_block) over one plane: the collapsed track's live channel.
     ///
     /// Every leg of the `quiet` admission reads the left channel, which on a collapse-eligible
@@ -2206,6 +2344,18 @@ impl<L: Lane> LimiterCore<L> {
         self.right
             .reset_to_defaults(&shape, &self.right_defaults, rate);
         self.cursors = Cursors::default();
+    }
+
+    #[cfg(test)]
+    fn process_block_mono_runtime_oracle(&mut self, left_io: &mut [f32], frames: usize) {
+        limiter_block_mono_runtime_oracle::<L>(
+            left_io,
+            frames,
+            &self.coefficients,
+            &self.shape,
+            &mut self.left,
+            &mut self.cursors,
+        );
     }
 
     /// Copies the left channel's whole state onto the right (the collapse's disengage boundary).
@@ -3037,16 +3187,33 @@ fn limiter_block_mono<L: Lane>(
     left: &mut ChannelState,
     cursors: &mut Cursors,
 ) {
+    let stationary = mono_stationary(left);
     if lanes_uniform(left) {
-        limiter_block_uniform_mono::<L>(left_io, frames, coef, shape, left, cursors);
+        if stationary {
+            limiter_block_uniform_mono::<DISPATCH_STATIONARY, L>(
+                left_io, frames, coef, shape, left, cursors, true,
+            );
+        } else {
+            limiter_block_uniform_mono::<DISPATCH_RAMPING, L>(
+                left_io, frames, coef, shape, left, cursors, false,
+            );
+        }
     } else {
-        limiter_block_per_lane_mono::<L>(left_io, frames, coef, shape, left, cursors);
+        if stationary {
+            limiter_block_per_lane_mono::<DISPATCH_STATIONARY, L>(
+                left_io, frames, coef, shape, left, cursors, true,
+            );
+        } else {
+            limiter_block_per_lane_mono::<DISPATCH_RAMPING, L>(
+                left_io, frames, coef, shape, left, cursors, false,
+            );
+        }
     }
 }
 
-/// [`limiter_block_per_lane`] over one plane.
+#[cfg(test)]
 #[inline(always)]
-fn limiter_block_per_lane_mono<L: Lane>(
+fn limiter_block_mono_runtime_oracle<L: Lane>(
     left_io: &mut [f32],
     frames: usize,
     coef: &LimiterCoef<L>,
@@ -3054,13 +3221,37 @@ fn limiter_block_per_lane_mono<L: Lane>(
     left: &mut ChannelState,
     cursors: &mut Cursors,
 ) {
+    let stationary = mono_stationary(left);
+    if lanes_uniform(left) {
+        limiter_block_uniform_mono::<DISPATCH_RUNTIME, L>(
+            left_io, frames, coef, shape, left, cursors, stationary,
+        );
+    } else {
+        limiter_block_per_lane_mono::<DISPATCH_RUNTIME, L>(
+            left_io, frames, coef, shape, left, cursors, stationary,
+        );
+    }
+}
+
+/// [`limiter_block_per_lane`] over one plane.
+#[inline(always)]
+fn limiter_block_per_lane_mono<const DISPATCH: u8, L: Lane>(
+    left_io: &mut [f32],
+    frames: usize,
+    coef: &LimiterCoef<L>,
+    shape: &Shape,
+    left: &mut ChannelState,
+    cursors: &mut Cursors,
+    stationary: bool,
+) {
     let width = L::WIDTH;
     debug_assert!(width <= MAXIMUM_WIDTH);
     debug_assert_eq!(left.width, width);
     debug_assert_eq!(left_io.len(), frames * width);
 
     let mut hot_left = HotChannel::<L>::load(left);
-    let stationary = ramps_are_stationary(&left.limit) && ramps_are_stationary(&left.release);
+    #[cfg(test)]
+    observe_dispatch::<DISPATCH>(DispatchRoute::MonoPerLane);
     let all = L::zero().eq(L::zero());
     let none = L::mask_not(all);
     let link = if coef.link_max { all } else { none };
@@ -3083,14 +3274,8 @@ fn limiter_block_per_lane_mono<L: Lane>(
 
         for frame in 0..span {
             let base = (chunk + frame) * width;
-            let (limit_left, release_left) = if stationary {
-                (
-                    hot_left.limit.resting_value(),
-                    hot_left.release.resting_value(),
-                )
-            } else {
-                (hot_left.limit.advance(), hot_left.release.advance())
-            };
+            let (limit_left, release_left) =
+                ramp_values::<DISPATCH, L>(stationary, &mut hot_left.limit, &mut hot_left.release);
 
             let peak_left = L::load(&peaks_left[frame * width..]);
             let linked = peak_left.max(peak_left);
@@ -3130,13 +3315,14 @@ fn limiter_block_per_lane_mono<L: Lane>(
 
 /// [`limiter_block_uniform`] over one plane.
 #[inline(always)]
-fn limiter_block_uniform_mono<L: Lane>(
+fn limiter_block_uniform_mono<const DISPATCH: u8, L: Lane>(
     left_io: &mut [f32],
     frames: usize,
     coef: &LimiterCoef<L>,
     shape: &Shape,
     left: &mut ChannelState,
     cursors: &mut Cursors,
+    stationary: bool,
 ) {
     let width = L::WIDTH;
     debug_assert!(width <= MAXIMUM_WIDTH);
@@ -3144,7 +3330,8 @@ fn limiter_block_uniform_mono<L: Lane>(
     debug_assert_eq!(left_io.len(), frames * width);
 
     let mut hot_left = HotChannel::<L>::load(left);
-    let stationary = ramps_are_stationary(&left.limit) && ramps_are_stationary(&left.release);
+    #[cfg(test)]
+    observe_dispatch::<DISPATCH>(DispatchRoute::MonoUniform);
     let all = L::zero().eq(L::zero());
     let none = L::mask_not(all);
     let link = if coef.link_max { all } else { none };
@@ -3194,14 +3381,11 @@ fn limiter_block_uniform_mono<L: Lane>(
                     .zip(left_peaks.chunks_exact(width))
                     .enumerate()
                 {
-                    let (limit_left, release_left) = if stationary {
-                        (
-                            hot_left.limit.resting_value(),
-                            hot_left.release.resting_value(),
-                        )
-                    } else {
-                        (hot_left.limit.advance(), hot_left.release.advance())
-                    };
+                    let (limit_left, release_left) = ramp_values::<DISPATCH, L>(
+                        stationary,
+                        &mut hot_left.limit,
+                        &mut hot_left.release,
+                    );
 
                     let peak_left = L::load(left_peak);
                     let linked = peak_left.max(peak_left);
@@ -4482,31 +4666,217 @@ mod tests {
     fn state_bits<L: Lane>(core: &LimiterCore<L>) -> Vec<u32> {
         let mut words = vec![core.cursors.main, core.cursors.ring];
         for channel in [&core.left, &core.right] {
-            for plane in [
-                &channel.history,
-                &channel.main_ring,
-                &channel.required_ring,
-                &channel.box_ring,
-                &channel.reduction,
-                &channel.prefix,
-                &channel.box_sum,
-            ] {
-                words.extend(plane.iter().map(|value| value.to_bits()));
-            }
-            words.extend(channel.phase.iter().copied());
-            // The two coefficient ramps, which the fast path must not freeze. A skipped block
-            // advances no ramp, so a claim admitted while a de-zipper window was still open would
-            // strand `current` short of its target for as long as the silence lasted.
-            for ramps in [&channel.limit, &channel.release] {
-                for ramp in ramps.iter() {
-                    words.push(ramp.current.to_bits());
-                    words.push(ramp.target.to_bits());
-                    words.push(ramp.step.to_bits());
-                    words.push(ramp.remaining);
-                }
+            words.extend(channel_runtime_bits(channel));
+        }
+        words
+    }
+
+    fn channel_runtime_bits(channel: &ChannelState) -> Vec<u32> {
+        let mut words = Vec::new();
+        for plane in [
+            &channel.history,
+            &channel.main_ring,
+            &channel.required_ring,
+            &channel.box_ring,
+            &channel.reduction,
+            &channel.prefix,
+            &channel.box_sum,
+        ] {
+            words.extend(plane.iter().map(|value| value.to_bits()));
+        }
+        words.extend(channel.phase.iter().copied());
+        // The two coefficient ramps, which the fast path must not freeze. A skipped block
+        // advances no ramp, so a claim admitted while a de-zipper window was still open would
+        // strand `current` short of its target for as long as the silence lasted.
+        for ramps in [&channel.limit, &channel.release] {
+            for ramp in ramps.iter() {
+                words.push(ramp.current.to_bits());
+                words.push(ramp.target.to_bits());
+                words.push(ramp.step.to_bits());
+                words.push(ramp.remaining);
             }
         }
         words
+    }
+
+    /// Builds the two route shapes this witness needs without changing the production factory.
+    fn dispatch_witness_core<L: Lane>(uniform: bool) -> LimiterCore<L> {
+        let mut values = vec![values_with(-6.0, 100.0, 5.0); L::WIDTH];
+        if !uniform {
+            for (lane, values) in values.iter_mut().enumerate().skip(1) {
+                *values = values_with(-6.0, 100.0, if lane.is_multiple_of(2) { 1.0 } else { 5.0 });
+            }
+        }
+        let mut preparation = request(&values[0]);
+        preparation.link_mode = LinkMode::DualMono;
+        let metadata = expected_prepared_metadata(&TRUE_PEAK_LIMITER_DESCRIPTOR, preparation)
+            .expect("metadata");
+        let mut left_defaults = Vec::with_capacity(L::WIDTH);
+        let mut right_defaults = Vec::with_capacity(L::WIDTH);
+        for values in &values {
+            let (left, right) = initial_defaults(values).expect("defaults");
+            left_defaults.push(left);
+            right_defaults.push(right);
+        }
+        LimiterCore::<L>::new(
+            metadata,
+            left_defaults.into_boxed_slice(),
+            right_defaults.into_boxed_slice(),
+        )
+        .expect("core")
+    }
+
+    /// Opens every dual ramp so the first populated block crosses an endpoint internally.
+    fn open_dispatch_witness_ramps<L: Lane>(core: &mut LimiterCore<L>) {
+        for channel in [&mut core.left, &mut core.right] {
+            for ramp in channel.limit.iter_mut() {
+                ramp.set_target(limit_coefficient(-3.0), RAMP_UPDATES);
+            }
+            for ramp in channel.release.iter_mut() {
+                ramp.set_target(release_coefficient(200.0, 48_000), RAMP_UPDATES);
+            }
+        }
+    }
+
+    fn compare_dispatch_witness_case<L: Lane>(
+        label: &str,
+        uniform: bool,
+        mono: bool,
+        route: DispatchRoute,
+    ) {
+        const FRAMES: usize = 512;
+        let mut candidate = dispatch_witness_core::<L>(uniform);
+        let mut oracle = dispatch_witness_core::<L>(uniform);
+        open_dispatch_witness_ramps(&mut candidate);
+        open_dispatch_witness_ramps(&mut oracle);
+        let right_before = mono.then(|| channel_runtime_bits(&candidate.right));
+        let mut populated = false;
+
+        for block in 0..2 {
+            let mut candidate_left = silence_plane(block, FRAMES, L::WIDTH, None, 0.4, false);
+            let mut oracle_left = candidate_left.clone();
+            let mut candidate_right = silence_plane(block, FRAMES, L::WIDTH, None, 0.4, true);
+            let mut oracle_right = candidate_right.clone();
+            clear_dispatch_observation();
+            if mono {
+                candidate.process_block_mono(&mut candidate_left, FRAMES);
+            } else {
+                candidate.process_block(&mut candidate_left, &mut candidate_right, FRAMES);
+            }
+            let candidate_observation = dispatch_observation();
+            if mono {
+                oracle.process_block_mono_runtime_oracle(&mut oracle_left, FRAMES);
+            } else {
+                oracle.process_block_runtime_oracle(
+                    &mut oracle_left,
+                    &mut oracle_right,
+                    FRAMES,
+                );
+            }
+            let oracle_observation = dispatch_observation();
+
+            // Identity is checked before the positive specialization assertion. A later
+            // fallback-only control must keep these comparisons green and fail the same mechanism
+            // assertion below, rather than being allowed to pass through classification intent.
+            assert_eq!(
+                candidate_left
+                    .iter()
+                    .map(|sample| sample.to_bits())
+                    .collect::<Vec<_>>(),
+                oracle_left
+                    .iter()
+                    .map(|sample| sample.to_bits())
+                    .collect::<Vec<_>>(),
+                "{label}: left PCM block {block}"
+            );
+            if !mono {
+                assert_eq!(
+                    candidate_right
+                        .iter()
+                        .map(|sample| sample.to_bits())
+                        .collect::<Vec<_>>(),
+                    oracle_right
+                        .iter()
+                        .map(|sample| sample.to_bits())
+                        .collect::<Vec<_>>(),
+                    "{label}: right PCM block {block}"
+                );
+            }
+            assert_eq!(
+                state_bits(&candidate),
+                state_bits(&oracle),
+                "{label}: complete state block {block}"
+            );
+            assert_eq!(
+                candidate.silent_fixed_point, oracle.silent_fixed_point,
+                "{label}: silent state block {block}"
+            );
+            if let Some(right_before) = &right_before {
+                assert_eq!(
+                    channel_runtime_bits(&candidate.right),
+                    *right_before,
+                    "{label}: mono candidate accessed the right plane at block {block}"
+                );
+            }
+
+            assert_eq!(oracle_observation.mode, StationaryDispatch::Runtime);
+            assert_eq!(oracle_observation.route, route);
+            assert_eq!(candidate_observation.route, route);
+            assert_eq!(
+                candidate_observation.mode,
+                if block == 0 {
+                    StationaryDispatch::Ramping
+                } else {
+                    StationaryDispatch::Stationary
+                },
+                "{label}: selected specialization block {block}"
+            );
+            populated |= candidate_left.iter().any(|sample| sample.to_bits() != 0);
+            if !mono {
+                populated |= candidate_right.iter().any(|sample| sample.to_bits() != 0);
+            }
+        }
+
+        assert!(
+            populated,
+            "{label}: witness PCM never became populated"
+        );
+    }
+
+    /// The candidate and the shared runtime oracle agree on populated PCM and complete state while
+    /// the actual selected body proves all four W8 routes and scalar dual/uniform specialization.
+    #[test]
+    fn stationary_dispatch_matches_runtime_oracle_and_observes_selected_body() {
+        compare_dispatch_witness_case::<Simd8>(
+            "W8 dual per-lane",
+            false,
+            false,
+            DispatchRoute::DualPerLane,
+        );
+        compare_dispatch_witness_case::<Simd8>(
+            "W8 dual uniform",
+            true,
+            false,
+            DispatchRoute::DualUniform,
+        );
+        compare_dispatch_witness_case::<Simd8>(
+            "W8 mono per-lane",
+            false,
+            true,
+            DispatchRoute::MonoPerLane,
+        );
+        compare_dispatch_witness_case::<Simd8>(
+            "W8 mono uniform",
+            true,
+            true,
+            DispatchRoute::MonoUniform,
+        );
+        compare_dispatch_witness_case::<f32>(
+            "scalar dual uniform",
+            true,
+            false,
+            DispatchRoute::DualUniform,
+        );
     }
 
     /// What one arm of a silence comparison produced.
