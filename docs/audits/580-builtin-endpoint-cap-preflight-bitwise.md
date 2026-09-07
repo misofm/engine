@@ -48,5 +48,6 @@ The mutation was restored.
 Debug host-core all-target tests pass: 15 unit tests and 14 endpoint integration tests, plus the
 complete host-core integration suite. The endpoint integration suite passes in release mode.
 Strict Clippy, formatting, diff checks, rustdoc, host/workspace policy, CI routing, and Wasm scalar
-and `simd128` checks pass. Cargo.lock is restored and all changes remain uncommitted for root's
-checkpoint and final synchronization.
+and `simd128` checks pass. Cargo.lock was restored before root's source checkpoint. Astra LOW then
+independently passed exact pushed source head `42d9e09f5dd1f4d706af90f2f6d4d4e9b1defea3` with no blocking
+findings; `docs/audits/580-attempt1-review.md` records that verdict and its independent gates.
