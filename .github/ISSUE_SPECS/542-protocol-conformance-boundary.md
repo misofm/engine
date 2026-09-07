@@ -183,3 +183,9 @@ sound-quality, realtime-cost or performance gain is claimed.
 ## Root concurrency decision
 
 CP20 owns a first coherent checkpoint containing the new authority and the three protocol adapters. IO1 may begin nonoverlapping corpus/runner work immediately after its numbered brief is pushed; delay extraction or edits of those three adapters until root integrates the focused-green CP20 checkpoint into this worktree. CP20 must merge before IO1 final delivery. This permits four issues to progress without conflicting source edits. Cargo.lock changes induced solely by approved dependency edges are authorized. All implementation/revision attempts use Luna high under Sol high coordination.
+
+## Implementation dependency clarification
+
+Inspection found tools/bench/src/protocol.rs imports the removed ConformanceDecoder only for an unused From<ConformanceDecoder> for FrameDecoder conversion. Root verified the occurrences and authorizes deletion of exactly that stale import and unused conversion as part of the corpus ownership move. No benchmark workload, corpus, timing, pin or local FrameDecoder behavior changes are authorized. Include a compile check for the affected bench consumer.
+
+Root integrated CP20's focused-green shared authority and three protocol adapters (8ba9c5dc, evidence clarification acd57011) before any IO1 source writes. The first Luna inspection session was interrupted cleanly for integration; it made no implementation edits and is not a failed implementation verdict. Full attempt 1 may now proceed on the integrated source, preserving the three delegating adapters while extracting tests. CP20 delivery remains a prerequisite for IO1 merge.
