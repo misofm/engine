@@ -985,6 +985,7 @@ fn validate_provider_bindings<P: ControlProvider>(
 /// Session edits, locate, live `ParameterStateGet`, graph resolution, automatic scheduling, and
 /// framed ingress remain unavailable. After cancellation, drop both owners only after the render
 /// side acknowledges the boundary and the host is quiescent so reclamation stays off render.
+#[allow(clippy::too_many_arguments)] // Frozen constructor shape mirrors #530 after the two bindings.
 pub fn prepare_controller_scalar_point_endpoint<'a, P: ControlProvider>(
     processor: &'a mut dyn PreparedNativeEffect,
     handles: [ParameterHandle; 2],

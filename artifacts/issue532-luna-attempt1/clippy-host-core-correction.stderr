@@ -1,0 +1,26 @@
+    Checking host-core v0.1.0 (/home/bl/misofm/engine-controller-scalar-points/crates/host-core)
+error: used `assert_eq!` with a literal bool
+    --> crates/host-core/tests/scalar_point_endpoint.rs:2059:5
+     |
+2059 | /     assert_eq!(
+2060 | |         matches!(
+2061 | |             bad_native_result,
+2062 | |             Err(ControllerScalarPointPrepareError::ScalarPoint(
+...    |
+2066 | |         true
+2067 | |     );
+     | |_____^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#bool_assert_comparison
+     = note: `-D clippy::bool-assert-comparison` implied by `-D clippy::all`
+     = help: to override `-D clippy::all` add `#[allow(clippy::bool_assert_comparison)]`
+help: replace it with `assert!(..)`
+     |
+2059 ~     assert!(
+2060 |         matches!(
+ ...
+2064 |             ))
+2065 ~         )
+     |
+
+error: could not compile `host-core` (test "scalar_point_endpoint") due to 1 previous error

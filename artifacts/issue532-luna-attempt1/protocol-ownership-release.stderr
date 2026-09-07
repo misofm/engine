@@ -1,0 +1,3 @@
+   Compiling protocol v0.1.0 (/home/bl/misofm/engine-controller-scalar-points/crates/protocol)
+    Finished `release` profile [optimized + debuginfo] target(s) in 13.54s
+     Running tests/delivery_ownership.rs (/tmp/issue532-target/release/deps/delivery_ownership-e637aa2edf2406c0)

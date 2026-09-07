@@ -2056,15 +2056,12 @@ fn controller_scalar_preflight_rejections_and_single_allocation_authority() {
             counter_ids: 0,
         },
     );
-    assert_eq!(
-        matches!(
-            bad_native_result,
-            Err(ControllerScalarPointPrepareError::ScalarPoint(
-                host_core::ScalarPointPrepareError::InvalidProcessor
-            ))
-        ),
-        true
-    );
+    assert!(matches!(
+        bad_native_result,
+        Err(ControllerScalarPointPrepareError::ScalarPoint(
+            host_core::ScalarPointPrepareError::InvalidProcessor
+        ))
+    ));
     let mut bad_left = [0.1_f32; Q];
     let mut bad_right = [-0.1_f32; Q];
     warm(&mut *bad_native);
