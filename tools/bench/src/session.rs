@@ -1,7 +1,7 @@
 //! Fixed-work descriptive benchmark for issue-004 session control-plane operations.
 
 use bench_support::digest::sha256_hex;
-use bench_support::json::escape;
+use bench_support::json::{escape, json_string_array};
 use bench_support::stats::per_mille as percentile_nearest_rank;
 use bench_support::sysinfo::HostToolchainFacts;
 use std::{
@@ -400,15 +400,6 @@ fn variable(name: &str) -> String {
         .ok()
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "unknown".to_owned())
-}
-
-fn json_string_array(values: &[String]) -> String {
-    let body = values
-        .iter()
-        .map(|value| format!("\"{}\"", escape(value)))
-        .collect::<Vec<_>>()
-        .join(",");
-    format!("[{body}]")
 }
 
 const fn unlimited_caps() -> CompileCaps {

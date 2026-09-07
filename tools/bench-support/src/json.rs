@@ -34,9 +34,20 @@ pub fn escape(value: &str) -> String {
     escaped
 }
 
+/// Serialize string values as a JSON array, preserving order and duplicates.
+#[must_use]
+pub fn json_string_array(values: &[String]) -> String {
+    let body = values
+        .iter()
+        .map(|value| format!("\"{}\"", escape(value)))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("[{body}]")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::escape;
+    use super::{escape, json_string_array};
 
     #[test]
     fn escapes_every_rfc_8259_two_character_form() {
@@ -61,6 +72,36 @@ mod tests {
         assert_eq!(
             escape("x86_64-unknown-linux-gnu"),
             "x86_64-unknown-linux-gnu"
+        );
+    }
+
+    #[test]
+    fn serializes_empty_and_empty_element_arrays() {
+        assert_eq!(json_string_array(&[]), "[]");
+        assert_eq!(json_string_array(&[String::new()]), "[\"\"]");
+    }
+
+    #[test]
+    fn serializes_ordered_duplicate_elements() {
+        let values = ["first", "first", "second"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            json_string_array(&values),
+            "[\"first\",\"first\",\"second\"]"
+        );
+    }
+
+    #[test]
+    fn serializes_escaped_controls_and_unicode() {
+        let values = ["\"quoted\\slash", "\u{1}\n\t", "é 音 \u{1f600}"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            json_string_array(&values),
+            "[\"\\\"quoted\\\\slash\",\"\\u0001\\n\\t\",\"é 音 \u{1f600}\"]"
         );
     }
 }
