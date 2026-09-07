@@ -51,3 +51,7 @@ All finite gates returned zero: 39 bench-support tests; both scalar selectors in
 ## Attempt 1 adversarial verdict
 
 Astra MEDIUM reviewed exact pushed head `c13d202df07ca875ec1e3bb003bd92dc7f333ba5` and returned **FAIL**. The host-level foreign-thread control captured and printed `foreign_current_thread` but did not assert that its four fields were zero, so frozen behavior 4 was observed but not enforced at that boundary. The separate bench-support unit control did enforce the property. All other reviewed requirements passed: exact two-source scope, const non-dropping TLS, bounded no-allocation updates, unchanged `System` forwarding, global counter semantics, exact standalone and controller preparation deltas, authenticated evidence, issue synchronization, and preservation of the original post-main failure without a rerun. Attempt 2 is limited to adding that exact host assertion and rerunning the proportional affected gates.
+
+## Attempt 2 source checkpoint
+
+Luna XHIGH added the single missing exact assertion that the host control's foreign-thread `Counters` snapshot equals `Counters::default()`. No allocator or product source changed. The complete nine-test scalar endpoint suite, strict affected-target Clippy, formatting, diff check, and exact one-source-path census all returned zero. Root audited and committed the one-source correction at `6edf0992d580340e9e1da8402f1ce2ec01cfcc88`; the raw proportional evidence and implementation record are preserved in `artifacts/issue563-attempt2`. Final Astra MEDIUM review remains required.
