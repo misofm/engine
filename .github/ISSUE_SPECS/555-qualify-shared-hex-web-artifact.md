@@ -156,3 +156,9 @@ Root now authorizes Luna XHIGH to edit only `hosts/host-web/web/miso-engine-v1-a
 The single pin edit was checkpointed and pushed at `7c156032`. Luna XHIGH verified its exact 65 bytes but invoked the ordinary builder while `/tmp/issue555-postpin-artifact` was absent, despite the builder's documented requirement for an existing empty non-symlink directory. The builder returned two with exactly `output must be an existing non-symlink directory`; no build or later comparison ran and repository bytes remained clean.
 
 Root preserves this progress-only invocation error and ends that agent's assignment. A fresh Luna HIGH replacement must create the exact missing directory, prove it is empty and not a symlink, then invoke the ordinary no-bypass builder once. It may proceed to the six-file byte comparison and proportional pin/artifact policy checks only if the builder returns zero. No prior qualification gate is repeated.
+
+## Post-pin reproduction result
+
+Fresh Luna HIGH created and proved `/tmp/issue555-postpin-artifact` as an empty ordinary non-symlink directory, then ran the ordinary builder exactly once from pushed head `911c0510` with no repin or bypass environment. The builder returned zero and emitted the exact six-file set. Every file is byte-identical to the prequalified `/tmp/issue555-qualified-artifact`; the Wasm digest is the approved `6452f0db237da1d57b3594e7d95dd53a089a604d5b0791ea8b3533c5930c5a1c`. Repository pin proof, focused artifact-builder/pin policy and `git diff --check` returned zero. No earlier qualification gate was repeated.
+
+Local #555 acceptance is complete. Root must preserve this evidence, integrate the checkpoint into #543/PR553, obtain exact-head review and required `qualification` SUCCESS against current `main`, then synchronize delivery. #555 does not independently close CP20; #552 remains required.
