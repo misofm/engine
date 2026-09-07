@@ -289,3 +289,22 @@ the mutation is restored.
 Final proportional host-core tests, strict Clippy, formatting, and diff checks pass. Cargo.lock is
 restored. Root must complete release/rustdoc/target/policy/routing checks and the final review
 synchronization; this is the final #579 attempt and no fourth pass is authorized.
+
+## Attempt 3 hard stop
+
+Final source checkpoint `d67becc3d4dd7100faf3b172c6d18e87d963bfaa`
+passed all proportional gates. Astra LOW returned **FAIL**: actual endpoint queue
+allocation now precedes the retained/largest cap checks, regressing preflight refusal;
+and the two new native-bank/forced-scalar PCM comparisons use `f32` equality rather
+than the required `to_bits` arrays. The complete verdict is
+`docs/audits/579-attempt3-review.md`.
+
+The three-attempt hard stop is reached. No fourth #579 revision is authorized. Freeze
+and preserve `d67becc3` plus all three reviews. A newly numbered bounded successor may
+edit only the same endpoint/spec/evidence paths needed to restore report-only cap
+projection before queue allocation, add the allocator-backed zero-endpoint-allocation
+refusal discriminator, and replace the two PCM comparisons with mapped bits. It may
+not reopen the accepted cancellation, backend, meter, retained-layout, state,
+PostFader, pairing, protocol, graph, artifact, or lane-B work. #579 remains open and
+undelivered until that successor earns exact-head PASS and delivers the preserved
+source.
