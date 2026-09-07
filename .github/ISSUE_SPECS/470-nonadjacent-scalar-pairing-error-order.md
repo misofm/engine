@@ -435,3 +435,21 @@ builtins, browser, artifact, SDK, ABI declaration, Cargo or workflow path change
 checkpoint this coherent tranche before Luna begins the independently derived Wasm/browser
 resource and artifact qualification. This is delivery qualification under accepted attempt 2, not
 a new product attempt or a performance claim.
+
+## Exact-source pre-pin artifact probe
+
+On clean pushed checkpoint `6d3ef49c713f059e5c60b4000889eecaa9cff3db`, Luna HIGH ran the
+repin-probe form of `scripts/build-web-audioworklet.sh` exactly once. It returned zero and printed
+the lowercase Wasm digest `63dd5f8b0febf193847b697fa8e4d92e791b7e4775f3b4b6b61252783f153e9f`;
+the required output directory remained empty and the repository remained clean. The current
+delivered pin is still `6452f0db237da1d57b3594e7d95dd53a089a604d5b0791ea8b3533c5930c5a1c`.
+Raw stdout, stderr, status, command and source/pin identities are retained in
+`/tmp/issue470-prepin-probe` pending durable evidence assembly.
+
+This observed digest is a candidate, not authority to repin. Root created a detached exact-source
+scratch worktree and authorized only a provisional scratch pin overlay so the ordinary builder can
+retain the six-file candidate. Luna must derive the Wasm resource report from that actual artifact,
+classify every difference from the committed browser expectation, and complete the finite native,
+artifact, PCM, SDK and browser gates before Astra LOW pre-pin review. Repository pin, browser
+expectation, checked result and deployment matrix remain unchanged until the corresponding evidence
+is reviewed.
