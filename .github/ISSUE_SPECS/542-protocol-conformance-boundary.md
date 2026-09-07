@@ -3,7 +3,8 @@
 Issue #542; parent audit #349, IO-1. Local and GitHub identities must remain synchronized. Read-only brief base:
 `e5b86cf315487fcc602db420dc1a6121f1ac4837` on 2026-09-07. Root owns the issue, worktree, Git,
 GitHub, checkpoints and delivery. This issue is non-audio work: Sol high coordinates, Luna high
-implements attempt 1, and Sol xhigh performs the consolidated adversarial verification. Later
+implements and qualifies, and Astra low performs consolidated adversarial verification from the
+final integrated task onward. Historical Sol xhigh verdict provenance remains unchanged. Later
 attempts require the ordinary counted verdict/rescope workflow; no implementation starts until
 root assigns the numbered issue and its isolated worktree.
 
@@ -171,7 +172,7 @@ retained:
    repository policy/diff review pass. The complete workspace test population must retain the same
    semantic named tests and zero failures relative to the frozen baseline; changed test-binary
    grouping from extraction is not itself a failure.
-9. After source PASS, root performs the ordinary actual-PR-head/current-base Sol xhigh review,
+9. After source PASS, root performs the ordinary actual-PR-head/current-base Astra low review,
    required `qualification` success, merge, issue/body/evidence synchronization, #349 IO-1 delivery
    accounting, post-main check and completed-worktree cleanup. A local green move is not delivery.
 
@@ -219,3 +220,20 @@ Actual Luna high changed only check-conformance-boundaries.sh: exact controller/
 ## Actual Sol xhigh attempt2 PASS; predecessor hold
 
 Actual Sol xhigh accepteda2b0303d after verifying exact guarded-child exemptions, all three red controls/restorations, unchanged product/corpus/dependency contracts and explicit preserved Wasm hashes. No #542 correction remains. Required current-head PR qualification and #543 delivery still precede this issue merge. #543 PR553 presently has an AudioWorklet artifact-pin failure requiring separate qualification; #542 remains paused at this accepted source checkpoint while that predecessor is resolved.
+
+## Delivered dependencies and final integrated qualification
+
+#543/#555, #563 and #552/#558 are delivered on current main
+`b95c9b7b028ed07cfea2f7669467689c05320c37`. Root merged that exact main into the accepted #542
+branch at checkpoint `2a3c96a578c5b55ac964f614ed5b82bf8f20afb3` and pushed it. The merge was
+conflict-free, `git diff --check origin/main...HEAD` passed, and the resulting base-to-head diff is
+limited to the frozen #542 paths and evidence. The combined Cargo.lock change contains only the
+approved `conformance` normal dependencies on `protocol` and `session` and the `protocol`
+dev-dependency on `conformance`.
+
+The final integrated qualification is assigned to Luna high. It must capture contemporaneous
+command identity and exits on the exact candidate, run the complete proportional #542 gates, and
+make no product-source edit unless a new integration defect is found and separately checkpointed.
+Per the coordinator's 2026-09-07 routing update, the final current-head adversarial verification is
+assigned to Astra low. The earlier actual Sol xhigh attempt verdicts above remain historical
+evidence and are not relabeled.
