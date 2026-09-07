@@ -1,0 +1,21 @@
+
+running 1 test
+test oracle_pcm_within_derived_tolerance_scalar ... FAILED
+
+failures:
+
+---- oracle_pcm_within_derived_tolerance_scalar stdout ----
+DualMono: worst deviation from the f64 model 3.375e-4 dB (limit 0.02)
+
+thread 'oracle_pcm_within_derived_tolerance_scalar' (492153) panicked at crates/gate-expander/tests/oracle.rs:128:13:
+assertion `left == right` failed: Maximum left: an open gate is the exact identity at frame 5424
+  left: 995039245
+ right: 995049015
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    oracle_pcm_within_derived_tolerance_scalar
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.10s
+

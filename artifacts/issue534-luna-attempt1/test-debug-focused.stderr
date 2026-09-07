@@ -1,0 +1,5 @@
+error: unexpected argument 'kernel::tests::classification_ignores_inactive_padding_and_dual_mono_ignores_partner_words' found
+
+Usage: cargo test [OPTIONS] [TESTNAME] [-- [ARGS]...]
+
+For more information, try '--help'.
