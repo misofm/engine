@@ -1,6 +1,6 @@
 # Repair current operator paths and stale tool instructions
 
-Parent #349 TOOL14, based on Sol high census at e5b86cf315487fcc602db420dc1a6121f1ac4837. Queued successor; no implementation until assigned an active slot. Root owns Git/GitHub, checkpoints, qualification, exact-head/base review, merge/closure and completed-worktree cleanup. Sol high coordinates Luna high; Sol xhigh verifies nonaudio work. Maximum three counted attempts. Capture actual command/source/exit evidence, preserve failures, no benchmark or new fixture pin. TOOL14 remains partial until all children complete.
+Parent #349 TOOL14, based on Sol high census at e5b86cf315487fcc602db420dc1a6121f1ac4837. Active successor assigned the slot released by delivered #544/PR548; implementation base is1ce8fd3cb623f8dfe4cf306a01f539a96e8b92ca. Root owns Git/GitHub, checkpoints, qualification, exact-head/base review, merge/closure and completed-worktree cleanup. Sol high coordinates Luna high; Sol xhigh verifies nonaudio work. Maximum three counted attempts. Capture actual command/source/exit evidence, preserve failures, no benchmark or new fixture pin. TOOL14 remains partial until all children complete.
 
 Correct current instructions only: fixtures/stem-identity/v1/README.md must name stem-hasher rather than miso-engine-stem-hasher. scripts/operator/run-stem-store-browser-evals.cjs must document its actual scripts/operator location, resolve repository root with ../.., serve scripts/operator/stem-store-eval.html, and replace the deleted-sweep instruction with the current qualification/checker boundary. Preserve the explicitly historical sweep account in scripts/operator/README.md and all historical issues/derivations/rulings.
 
@@ -10,4 +10,26 @@ Gates: node --check and actual browser-free self-test via the existing stem-stor
 
 ## Numbered TOOL14 disposition
 
-This issue is #546. The complete residual is tracked by #545 orphan rack retirement, #546 current operator/path corrections and #547 native-runner process coverage. Only #545 is currently active; #546/#547 await a slot. FLAC retirement was delivered by #356. Closing one child does not close TOOL14.
+This issue is #546. The complete residual is tracked by #545 orphan rack retirement, #546 current operator/path corrections and #547 native-runner process coverage. #545 and #546 are active in separate slots; #547 awaits a slot. FLAC retirement was delivered by #356. Closing one child does not close TOOL14.
+
+## Active implementation boundary
+
+After #544 closure, root compared the union of current worktree numbered specs with all remote issues:268 local identities,361 remote issues, none missing. The first four active slots are #542,#543,#545,#546; #547 remains queued. The existing gate to extend is scripts/check-stem-store-v1.mjs. Sol high coordinates Luna high; Sol xhigh verifies. Root owns all Git/GitHub mutations. Preserve raw captures byte-exact in /tmp; whitespace-bearing logs will be stored losslessly compressed, with encoding/hashes, before the final full base-to-head diff check.
+
+## Attempt1 source checkpoint
+
+Sol high coordinated Luna high changes to the four authorized paths. Node syntax, direct path self-test, existing stem-store gate, fixture generator --check, locked stem-hasher tests and working diff checks passed. Frozen wrong-root and wrong-HTML mutations each failed the existing gate; byte-exact restoration was confirmed. Raw command captures are preserved losslessly as gzip with original/packed identities in artifacts/issue546-attempt1. No browser workload or package install ran. Sol xhigh review remains required, including the coordinator observation that fixture digest preparation still runs before path-self-test dispatch. This is not delivery.
+
+## Attempt1 Sol xhigh FAIL; bounded attempt2
+
+Actual Sol xhigh reviewed a80c94ca against1ce8fd3c and returned FAIL: path-self-test still prepares/hashes the 16MiB browser fixture at module load, violating the frozen path-only boundary. All other source/capture/negative-control checks passed. Preserve this verdict. Attempt2 authorizes Luna high under Sol high coordination to defer fixture/digest preparation behind browser-mode dispatch, preserving the existing browser workload inputs/results. Add a proportional witness that path mode does not perform fixture hashing or load Playwright; rerun affected syntax/path/existing gate and frozen path controls as needed, with byte-exact restoration. Do not launch browsers, install packages, change fixture pins or repeat unrelated Rust gates. One coherent revision then root checkpoint and Sol xhigh rereview.
+
+## Attempt2 focused-green revision
+
+Actual Luna high moved existing fixture byte generation/digest preparation into browser-mode dispatch and passed the unchanged digest to probe. Only the operator runner source changes. Sol high captures show syntax, direct path check, existing stem-store gate and instrumented path-boundary witness passed; witness reports zero createHash calls and zero Playwright loads. Both frozen wrong-root/wrong-HTML controls failed1 and byte-exact restoration passed; final path/gate/syntax/diff/source identity checks passed. No browser workload, install, fixture/pin change or unrelated Rust gate rerun occurred. Raw records and witness source are retained losslessly under artifacts/issue546-attempt2. Sol xhigh attempt2 review remains required; no delivery credit.
+
+Root integrated main86d5b4bd after attempt2. The add/add spec conflict retained the identical frozen contract and this branch’s newer active-slot/evidence record. No operator source conflict occurred. The initial merge failure and subsequent resolution are recorded; final committed-range diff check applies after resolution.
+
+## Attempt2 Sol xhigh PASS
+
+Actual Sol xhigh acceptedbb6f6175 against86d5b4bd, confirming the sole blocking path-mode preparation issue is fixed, fixture/browser behavior is preserved, both negative controls remain effective, all128 attempt2 capture identities validate and full committed diff is clean. Coordinator terminal report and post-checkpoint audit are preserved; its intermediate expected-old-HEAD audit failure reflects root’s documented concurrent checkpoint, not a source/gate failure. Root proceeds to required PR qualification and exact-head/base final review. #546 remains OPEN pending merged delivery.

@@ -11,3 +11,25 @@ Gates: actual process execution for both cases, existing native-pcm-runner tests
 ## Numbered TOOL14 disposition
 
 This issue is #547. The complete residual is tracked by #545 orphan rack retirement, #546 current operator/path corrections and #547 native-runner process coverage. Only #545 is currently active; #546/#547 await a slot. FLAC retirement was delivered by #356. Closing one child does not close TOOL14.
+
+## Active slot
+
+#545 is merged through PR549 at86d5b4bd and CLOSED, with its completed worktree removed. #547 now occupies that freed slot alongside #542, #543 and #546. Root activates this frozen smallest process-boundary slice from synchronized main86d5b4bd. Sol high coordinates Luna high implementation; Sol xhigh verifies. Production/audio changes remain out of scope.
+
+## Attempt1 focused-green source checkpoint
+
+Luna high under Sol high coordination added one process_boundary integration test using Cargo actual binary path. Accepted frozen riff-48000 case returns0 with empty diagnostics and8192 output bytes, without a retained partial file. Existing frames.zero rejection returns2 with exact typed stderr and no output/partial. The full runner suite passed19 library plus1 integration tests; strict Clippy, final format, workspace policy and diff checks passed. Direct executable captures independently record both cases. Initial focused compile failed101 for missing crate-level docs and initial formatting failed1; both are preserved and corrected before final gates. Expected rejected-process exit2 is success evidence for the rejection contract.
+
+Only the new integration test changes source; production/CLI/audio/fixtures/pins/manifests/lockfile remain byte-identical. Raw captures are preserved losslessly under artifacts/issue547-attempt1 with original/packed hashes. Sol xhigh review and required remote qualification remain; this checkpoint is not delivery.
+
+## Coordinator terminal evidence correction
+
+Sol high confirmed the focused-green implementation and identified mislabeled original direct metadata probes: their command JSON said stat although they were composite probes. Original captures remain unchanged. The coordinator added truthful read-only accepted-file/partial-absence and rejected-final/partial-absence captures, plus untracked-source diff check, without repeating process workloads or source changes. These supplements and the terminal coordinator report are preserved in artifacts/issue547-coordinator. Actual Sol xhigh verification was launched by root, not the coordinator; final review must include this evidence correction.
+
+## Attempt1 Sol xhigh verdict and attempt2 evidence submission
+
+Sol xhigh froze review at b331b87b and returned FAIL solely for inaccurate direct-metadata command descriptions; all implementation and gates passed. Before that verdict returned, Sol high had already supplied truthful separate read-only file/absence probes and root pushed63e1acf4 documenting the originals as mislabeled and preserving them. The FAIL remains preserved. Submit those already-pushed corrections as bounded attempt2 evidence for Sol xhigh assessment; no source revision or Cargo/process workload rerun is needed or authorized. Final review must assess artifacts/issue547-coordinator and the corrected issue record, not only the earlier b331b87b snapshot.
+
+## Attempt2 Sol xhigh PASS
+
+Actual Sol xhigh accepted23536b5e against86d5b4bd. Truthful coordinator probes close the sole metadata blocker; original inaccurate records and FAIL remain preserved. Integration-test blob is identical to the already accepted implementation atb331b87b; all20 coordinator captures validate and full committed diff check passes. No workloads repeated or product files changed. Root proceeds to PR required qualification and exact-head/base final delivery review; #547 remains OPEN until merge and synchronization.

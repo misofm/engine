@@ -1,0 +1,21 @@
+{
+  "argv": [
+    "/home/bl/.local/bin/codex",
+    "exec",
+    "-C",
+    "/home/bl/misofm/engine-operator-live-paths",
+    "-s",
+    "danger-full-access",
+    "resume",
+    "-m",
+    "gpt-5.6-sol",
+    "-c",
+    "model_reasoning_effort=\"xhigh\"",
+    "-o",
+    "/tmp/issue349-partials/546-sol-xhigh-attempt2.md",
+    "01a07b1b-8d20-7ee0-9f5d-61f03a68a837",
+    "-"
+  ],
+  "cwd": "/home/bl/misofm/engine-operator-live-paths",
+  "prompt": "/tmp/issue349-partials/546-attempt2-review-prompt.md"
+}
