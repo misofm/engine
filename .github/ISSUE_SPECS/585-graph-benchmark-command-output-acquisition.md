@@ -55,3 +55,7 @@ During review, main advanced disjointly through #580 / PR #582 to `defa979cbf0bf
 Luna HIGH completed the sole correction at source `90981e71578f27fd26db700b725bf6fbf7bce03f`, changing only `tools/bench/src/graph.rs`. Production `metadata()` now gathers raw command/environment inputs and delegates to a narrow `RawMetadata` projection. Deterministic tests exercise first compiler line, LLVM/host extraction, CPU and OS composition, accepted/sentinel/absent environment values and missing-field order. The attempt-1 command and fixed record oracles remain.
 
 Focused graph debug/release each pass 6 tests, complete bench debug passes 43 tests, and strict bench Clippy/rustdoc, format/diff checks pass. No benchmark or excluded path changed. Astra LOW attempt-2 review and later current-main integration remain pending.
+
+## Attempt 2 source verdict
+
+Astra LOW returned **PASS** at review head `5ceeff2f7d1555ce7fd77dac03bb7cac60147826`, correction source `90981e71578f27fd26db700b725bf6fbf7bce03f`. Production uses the tested raw projection; all extraction, composition, environment, missing-order, command and record gates pass independently, with no excluded-path drift. Current main is `defa979cbf0bf86b4ebba2f52b0647eb01b9ff29`; its #580 delta is disjoint. Current-base integration and final Astra LOW review remain required before PR authorization.
