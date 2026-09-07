@@ -1,0 +1,105 @@
+Diff in /home/bl/misofm/engine-controller-delivery/crates/protocol/src/controller_delivery.rs:802:
+             };
+             value
+         };
+-        let first_transport = endpoint.process(transport(
+-            1,
+-            b"transport-one",
+-            TransportState::Playing,
+-        ));
++        let first_transport =
++            endpoint.process(transport(1, b"transport-one", TransportState::Playing));
+         assert_eq!(first_transport.status, StatusCode::Ok);
+         let mut partial = batch(revision, 2, 7, 1);
+         let mut second = partial.records[0];
+Diff in /home/bl/misofm/engine-controller-delivery/crates/protocol/src/controller_delivery.rs:842:
+             canonical_bytes: b"transport-before-block",
+             command: ControlCommand::TransportGet,
+         });
+-        let blocked = endpoint.process(transport(
+-            3,
+-            b"blocked-transport",
+-            TransportState::Stopped,
+-        ));
++        let blocked = endpoint.process(transport(3, b"blocked-transport", TransportState::Stopped));
+         assert_eq!(blocked.status, StatusCode::Unavailable);
+         let transport_after = endpoint.process(ControllerRequest {
+             request_id: RequestId::new(11).unwrap(),
+Diff in /home/bl/misofm/engine-controller-delivery/crates/protocol/src/controller_delivery.rs:854:
+             canonical_bytes: b"transport-after-block",
+             command: ControlCommand::TransportGet,
+         });
+-        assert_eq!(decode_transport(&transport_before), decode_transport(&transport_after));
+-        assert_eq!(decode_transport(&transport_after).state, TransportState::Playing);
+         assert_eq!(
++            decode_transport(&transport_before),
++            decode_transport(&transport_after)
++        );
++        assert_eq!(
++            decode_transport(&transport_after).state,
++            TransportState::Playing
++        );
++        assert_eq!(
+             endpoint.process(transport(1, b"transport-one", TransportState::Playing)),
+             first_transport
+         );
+Diff in /home/bl/misofm/engine-controller-delivery/crates/protocol/src/controller_delivery.rs:881:
+             endpoint.process(transport(3, b"blocked-transport", TransportState::Stopped)),
+             blocked
+         );
+-        let later = endpoint.process(transport(
+-            4,
+-            b"transport-later",
+-            TransportState::Stopped,
+-        ));
++        let later = endpoint.process(transport(4, b"transport-later", TransportState::Stopped));
+         assert_eq!(later.status, StatusCode::Ok);
+         assert_eq!(endpoint.outstanding(), 0);
+ 
+Diff in /home/bl/misofm/engine-controller-delivery/crates/protocol/src/controller_delivery.rs:937:
+             .unwrap();
+         match decode_event(&ProtocolCodec::default(), &frame[..third]).payload {
+             DecodedEventPayload::TransportState(value) => {
+-                assert_eq!((value.event_sequence, value.state), (3, TransportState::Stopped));
++                assert_eq!(
++                    (value.event_sequence, value.state),
++                    (3, TransportState::Stopped)
++                );
+             }
+             _ => panic!("unexpected third event"),
+         }
+Diff in /home/bl/misofm/engine-controller-delivery/crates/protocol/src/controller_delivery.rs:1012:
+ 
+     #[test]
+     fn fixed_revision_refuses_structural_locate_and_state_without_model_change() {
+-        let (mut facade, mut render, _) =
+-            facade(8, &[(ParameterHandle(7), AutomationKind::Point)]);
++        let (mut facade, mut render, _) = facade(8, &[(ParameterHandle(7), AutomationKind::Point)]);
+         let revision = facade.session().revision();
+         let snapshot = facade.session().canonical_snapshot().to_owned();
+         let transport_before = facade.process(ControllerRequest {
+Diff in /home/bl/misofm/engine-controller-delivery/crates/protocol/src/controller_delivery.rs:1095:
+         assert_eq!(facade.session().canonical_snapshot(), snapshot);
+         assert_eq!(facade.session().revision(), revision);
+         assert_eq!(facade.outstanding(), 1);
+-        assert_eq!(render.pending(retained_ticket).unwrap().records, retained_batch.as_slice());
+         assert_eq!(
++            render.pending(retained_ticket).unwrap().records,
++            retained_batch.as_slice()
++        );
++        assert_eq!(
+             facade
+                 .process(ControllerRequest {
+                     request_id: RequestId::new(4).unwrap(),
+Diff in /home/bl/misofm/engine-controller-delivery/crates/protocol/src/controller_delivery.rs:1139:
+         assert_eq!(facade.session().canonical_snapshot(), snapshot);
+         assert_eq!(facade.session().revision(), revision);
+         assert_eq!(facade.outstanding(), 1);
+-        assert_eq!(render.pending(retained_ticket).unwrap().records, retained_batch.as_slice());
++        assert_eq!(
++            render.pending(retained_ticket).unwrap().records,
++            retained_batch.as_slice()
++        );
+     }
+ }
+ 

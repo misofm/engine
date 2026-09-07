@@ -64,6 +64,14 @@ pub struct ControllerAutomationResources {
 /// The facade fixes the prepared session revision and provider capability set for its lifetime.
 /// It exposes bounded typed processing and the actual #460 render half while retaining one
 /// ordinary controller as the sole queue, replay, and reliable-event sequence authority.
+/// Typed commands and canonical bytes are trusted to describe the same already-decoded request;
+/// this facade adds no decoder. Session edits, transport locates, and live parameter-state reads
+/// are unavailable. During cancellation, newly executed transport changes are also unavailable,
+/// while replay classification still returns an exact cached response before applying that policy.
+///
+/// The returned render half remains exclusively caller-owned. Both halves and their retained
+/// payloads must be reclaimed off render only after cancellation acknowledgment and quiescence.
+/// A marked render prefix is trusted consumer progress, not certification that DSP ran.
 pub struct ControllerAutomationDelivery<P: ControlProvider> {
     controller: ProtocolController<P>,
     delivery: AutomationDeliveryState,
@@ -119,7 +127,13 @@ impl<P: ControlProvider> ControllerAutomationDelivery<P> {
         ))
     }
 
-    /// Process one typed command with replay classification preceding facade policy.
+    /// Process one trusted typed command and its matching canonical request bytes.
+    ///
+    /// Exact replay precedes execution and all facade restrictions. New session transactions,
+    /// transport locates, and parameter-state requests return `Unavailable`; a pending cancellation
+    /// also refuses a newly executed non-locate transport change without provider mutation or an
+    /// event. Reusing that request ID returns the cached refusal, while retry after acknowledgment
+    /// requires a new request ID. This bounded control operation never transfers render ownership.
     pub fn process(&mut self, request: ControllerRequest<'_>) -> ControllerResponse {
         let mut context = DeliveryContext {
             state: &mut self.delivery,
@@ -765,23 +779,46 @@ mod tests {
         let (mut endpoint, mut render, canceled) =
             facade(8, &[(ParameterHandle(7), AutomationKind::Point)]);
         let revision = endpoint.session().revision();
-        let transport = |id, bytes| ControllerRequest {
+        let transport = |id, bytes, state| ControllerRequest {
             request_id: RequestId::new(id).unwrap(),
             expected_revision: ExpectedRevision::Exact(revision),
             canonical_bytes: bytes,
             command: ControlCommand::TransportSet {
                 request: TransportSetRequest {
-                    state: TransportState::Playing,
+                    state,
                     position: None,
                 },
             },
         };
-        let first_transport = endpoint.process(transport(1, b"transport-one"));
+        let decode_transport = |response: &ControllerResponse| {
+            let DecodedTypedResponseFrame::Success { payload, .. } = ProtocolCodec::default()
+                .decode_typed_response(&response.frame, &mut DecodeScratch::new(&mut [0_u16; 16]))
+                .unwrap()
+            else {
+                panic!("transport get must succeed")
+            };
+            let DecodedSuccessResponsePayload::TransportGetSnapshot(value) = payload else {
+                panic!("wrong transport payload")
+            };
+            value
+        };
+        let first_transport =
+            endpoint.process(transport(1, b"transport-one", TransportState::Playing));
         assert_eq!(first_transport.status, StatusCode::Ok);
+        let mut partial = batch(revision, 2, 7, 1);
+        let mut second = partial.records[0];
+        second.start = SampleTime(2);
+        second.end = SampleTime(2);
+        partial = AutomationBatchSlot::new(
+            revision,
+            RequestId::new(2).unwrap(),
+            &[partial.records[0], second],
+        )
+        .unwrap();
         let ticket = {
             assert_eq!(
                 endpoint
-                    .process(enqueue_request(2, b"partial", batch(revision, 2, 7, 1)))
+                    .process(enqueue_request(2, b"partial", partial))
                     .status,
                 StatusCode::Ok
             );
@@ -791,20 +828,36 @@ mod tests {
             }
         };
         render.begin_boundary(SampleTime(0)).unwrap();
-        render.mark_applied(ticket, 0).unwrap();
+        render.mark_applied(ticket, 1).unwrap();
         let token = endpoint
             .begin_cancel(AutomationCancellationReason::EndpointShutdown)
             .unwrap();
         assert!(endpoint.poll_cancel_boundary(token).unwrap().is_none());
-        let blocked = endpoint.process(transport(3, b"blocked-transport"));
-        assert_eq!(blocked.status, StatusCode::Unavailable);
         assert_eq!(
-            endpoint.process(transport(3, b"blocked-transport")),
-            blocked
+            endpoint.process(transport(1, b"transport-one", TransportState::Playing)),
+            first_transport
+        );
+        let transport_before = endpoint.process(ControllerRequest {
+            request_id: RequestId::new(3).unwrap(),
+            expected_revision: ExpectedRevision::Any,
+            canonical_bytes: b"transport-before-block",
+            command: ControlCommand::TransportGet,
+        });
+        let blocked = endpoint.process(transport(4, b"blocked-transport", TransportState::Stopped));
+        assert_eq!(blocked.status, StatusCode::Unavailable);
+        let transport_after = endpoint.process(ControllerRequest {
+            request_id: RequestId::new(5).unwrap(),
+            expected_revision: ExpectedRevision::Any,
+            canonical_bytes: b"transport-after-block",
+            command: ControlCommand::TransportGet,
+        });
+        assert_eq!(
+            decode_transport(&transport_before),
+            decode_transport(&transport_after)
         );
         assert_eq!(
-            endpoint.process(transport(1, b"transport-one")),
-            first_transport
+            decode_transport(&transport_after).state,
+            TransportState::Playing
         );
         assert!(render.begin_boundary(SampleTime(99)).is_none());
         let complete = endpoint.poll_cancel_boundary(token).unwrap().unwrap();
@@ -815,15 +868,21 @@ mod tests {
                 complete.canceled_records,
                 complete.applied_records
             ),
-            (SampleTime(99), 1, 1, 0)
+            (SampleTime(99), 1, 1, 1)
         );
         assert_eq!(canceled.load(Ordering::Relaxed), 1);
         assert_eq!(
             endpoint.poll_cancel_boundary(token),
             Err(DeliveryError::StaleTicket)
         );
-        let later = endpoint.process(transport(4, b"transport-later"));
+        assert_eq!(canceled.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            endpoint.process(transport(4, b"blocked-transport", TransportState::Stopped)),
+            blocked
+        );
+        let later = endpoint.process(transport(6, b"transport-later", TransportState::Stopped));
         assert_eq!(later.status, StatusCode::Ok);
+        assert_eq!(endpoint.outstanding(), 0);
 
         let mut short = [0_u8; 1];
         assert!(matches!(
@@ -871,9 +930,18 @@ mod tests {
             .dequeue_reliable_event_frame_into(&mut frame)
             .unwrap()
             .unwrap();
+        match decode_event(&ProtocolCodec::default(), &frame[..third]).payload {
+            DecodedEventPayload::TransportState(value) => {
+                assert_eq!(
+                    (value.event_sequence, value.state),
+                    (3, TransportState::Stopped)
+                );
+            }
+            _ => panic!("unexpected third event"),
+        }
         assert_eq!(
-            event_sequence(&ProtocolCodec::default(), &frame[..third]),
-            3
+            endpoint.dequeue_reliable_event_frame_into(&mut frame),
+            Ok(None)
         );
 
         let (mut full, _, _) = facade(1, &[(ParameterHandle(7), AutomationKind::Point)]);
@@ -942,14 +1010,49 @@ mod tests {
 
     #[test]
     fn fixed_revision_refuses_structural_locate_and_state_without_model_change() {
-        let (mut facade, _, _) = facade(8, &[(ParameterHandle(7), AutomationKind::Point)]);
+        let (mut facade, mut render, _) = facade(8, &[(ParameterHandle(7), AutomationKind::Point)]);
         let revision = facade.session().revision();
         let snapshot = facade.session().canonical_snapshot().to_owned();
-        let edits: [SessionEdit; 0] = [];
+        let transport_before = facade.process(ControllerRequest {
+            request_id: RequestId::new(1).unwrap(),
+            expected_revision: ExpectedRevision::Any,
+            canonical_bytes: b"transport-before",
+            command: ControlCommand::TransportGet,
+        });
+        let decode_transport = |response: &ControllerResponse| {
+            let DecodedTypedResponseFrame::Success { payload, .. } = ProtocolCodec::default()
+                .decode_typed_response(&response.frame, &mut DecodeScratch::new(&mut [0_u16; 16]))
+                .unwrap()
+            else {
+                panic!("transport get must succeed")
+            };
+            let DecodedSuccessResponsePayload::TransportGetSnapshot(value) = payload else {
+                panic!("wrong transport payload")
+            };
+            value
+        };
+        let retained_batch = batch(revision, 2, 7, 30);
+        assert_eq!(
+            facade
+                .process(enqueue_request(2, b"retained-owner", retained_batch))
+                .status,
+            StatusCode::Ok
+        );
+        let retained_ticket = match facade.try_handoff_next().unwrap() {
+            HandoffResult::HandedOff(ticket) => ticket,
+            other => panic!("{other:?}"),
+        };
+        let claim = render.begin_boundary(SampleTime(0)).unwrap();
+        assert_eq!(claim.ticket, retained_ticket);
+        assert_eq!(claim.applied_prefix, 0);
+        assert_eq!(claim.records, retained_batch.as_slice());
+        let edits = [SessionEdit::SetSessionId {
+            session_id: session::StableId::parse("refused-session-change").unwrap(),
+        }];
         assert_eq!(
             facade
                 .process(ControllerRequest {
-                    request_id: RequestId::new(1).unwrap(),
+                    request_id: RequestId::new(3).unwrap(),
                     expected_revision: ExpectedRevision::Exact(revision),
                     canonical_bytes: b"transaction",
                     command: ControlCommand::SessionTransactionApply { edits: &edits },
@@ -960,7 +1063,7 @@ mod tests {
         assert_eq!(
             facade
                 .process(ControllerRequest {
-                    request_id: RequestId::new(2).unwrap(),
+                    request_id: RequestId::new(4).unwrap(),
                     expected_revision: ExpectedRevision::Exact(revision),
                     canonical_bytes: b"locate",
                     command: ControlCommand::TransportSet {
@@ -976,7 +1079,7 @@ mod tests {
         assert_eq!(
             facade
                 .process(ControllerRequest {
-                    request_id: RequestId::new(3).unwrap(),
+                    request_id: RequestId::new(5).unwrap(),
                     expected_revision: ExpectedRevision::Exact(revision),
                     canonical_bytes: b"state",
                     command: ControlCommand::ParameterStateGet {
@@ -988,10 +1091,15 @@ mod tests {
         );
         assert_eq!(facade.session().canonical_snapshot(), snapshot);
         assert_eq!(facade.session().revision(), revision);
+        assert_eq!(facade.outstanding(), 1);
+        assert_eq!(
+            render.pending(retained_ticket).unwrap().records,
+            retained_batch.as_slice()
+        );
         assert_eq!(
             facade
                 .process(ControllerRequest {
-                    request_id: RequestId::new(4).unwrap(),
+                    request_id: RequestId::new(6).unwrap(),
                     expected_revision: ExpectedRevision::Any,
                     canonical_bytes: b"metadata",
                     command: ControlCommand::ParameterMetadataGet {
@@ -1007,7 +1115,7 @@ mod tests {
         assert_eq!(
             facade
                 .process(ControllerRequest {
-                    request_id: RequestId::new(5).unwrap(),
+                    request_id: RequestId::new(7).unwrap(),
                     expected_revision: ExpectedRevision::Any,
                     canonical_bytes: b"snapshot",
                     command: ControlCommand::SessionSnapshotGet {
@@ -1018,34 +1126,22 @@ mod tests {
                 .status,
             StatusCode::Ok
         );
-        let transport_before = facade.process(ControllerRequest {
-            request_id: RequestId::new(6).unwrap(),
-            expected_revision: ExpectedRevision::Any,
-            canonical_bytes: b"transport-before",
-            command: ControlCommand::TransportGet,
-        });
         let transport_after = facade.process(ControllerRequest {
-            request_id: RequestId::new(7).unwrap(),
+            request_id: RequestId::new(8).unwrap(),
             expected_revision: ExpectedRevision::Any,
             canonical_bytes: b"transport-after",
             command: ControlCommand::TransportGet,
         });
-        let decode_transport = |response: &ControllerResponse| {
-            let DecodedTypedResponseFrame::Success { payload, .. } = ProtocolCodec::default()
-                .decode_typed_response(&response.frame, &mut DecodeScratch::new(&mut [0_u16; 16]))
-                .unwrap()
-            else {
-                panic!("transport get must succeed")
-            };
-            let DecodedSuccessResponsePayload::TransportGetSnapshot(value) = payload else {
-                panic!("wrong transport payload")
-            };
-            value
-        };
         assert_eq!(
             decode_transport(&transport_before),
             decode_transport(&transport_after)
         );
-        assert_eq!(facade.outstanding(), 0);
+        assert_eq!(facade.session().canonical_snapshot(), snapshot);
+        assert_eq!(facade.session().revision(), revision);
+        assert_eq!(facade.outstanding(), 1);
+        assert_eq!(
+            render.pending(retained_ticket).unwrap().records,
+            retained_batch.as_slice()
+        );
     }
 }
