@@ -1,0 +1,19 @@
+
+running 1 test
+test populated_restore_reclassifies_equal_taps_before_the_next_render ... FAILED
+
+failures:
+
+---- populated_restore_reclassifies_equal_taps_before_the_next_render stdout ----
+transition debug: donor PCM [0.33688965, 0.38236085, 0.3397827, -0.27814943] [0.25344238, 0.109204106, 0.16821289, -0.2593506], equal PCM [0.33688965, 0.38236085, 0.3397827, -0.27814943] [0.25344238, 0.109204106, 0.16821289, -0.2593506], donor state (0.0, 1.0, 0.0, 1.0), equal state (0.0, 1.0, 0.0, 1.0)
+
+thread 'populated_restore_reclassifies_equal_taps_before_the_next_render' (504254) panicked at crates/gate-expander/tests/state.rs:501:5:
+equal and unequal populated detector routes must differ in next-render PCM
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    populated_restore_reclassifies_equal_taps_before_the_next_render
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+

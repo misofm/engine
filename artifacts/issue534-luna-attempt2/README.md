@@ -1,3 +1,9 @@
 # Luna xhigh attempt2: first repaired tranche
 
 Only kernel.rs changed from failed attempt1. Linked equal now supplies opposite own words as consumed partners; independent expectations cover class/route, genuine W1 unequal taps and actual unused partner indices. Two focused private tests and the existing independent scalar PCM oracle pass, each status0. Exact commands/source identities and original outputs are retained alongside this note. This is a coherent recovery checkpoint, not final source acceptance: public fixture/state, one mutation, candidate lowering and remaining frozen gates are pending. No timing or pin change.
+
+## Populated restore tranche
+
+Existing state cases used equal taps and did not prove reclassification. One bounded Maximum W8 restore case now primes600 frames with nonzero quiet values long enough to expire both holds, asserts closed/attenuated donor state and actual alternate ring/source words, restores unequal10/7ms lookahead into an equal bank with37-frame displaced cursor, and compares next128-frame PCM/full state against uninterrupted donor. A populated equal-tap control differs in PCM. Focused final debug passes1; changed state debug/release each pass9.
+
+All preliminary captures are preserved. Initial runtime failures were insensitive fully-open fixtures: track3 holds5/6ms and the right144-sample tap outlasted the short quiet interval. Root stopped parameter retries and identified that causal hold/tap mismatch. The final nonzero quiet prefix proves hold expiration explicitly. One intermediate debug-format error failed compilation; diagnostic development and the later successful debug7 capture are also retained. No production code, tolerance, pin or DSP rule changed.

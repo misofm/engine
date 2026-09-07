@@ -1,0 +1,3 @@
+   Compiling gate-expander v0.1.0 (/home/bl/misofm/engine-gate-detector-access/crates/gate-expander)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.29s
+     Running tests/state.rs (/tmp/issue534-luna2-target/debug/deps/state-8be55eb5b09784d1)

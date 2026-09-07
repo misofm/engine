@@ -1,0 +1,30 @@
+   Compiling gate-expander v0.1.0 (/home/bl/misofm/engine-gate-detector-access/crates/gate-expander)
+error: 8 positional arguments in format string, but there are 6 arguments
+   --> crates/gate-expander/tests/state.rs:483:38
+    |
+483 |           "transition debug: donor PCM {:?} {:?}, equal PCM {:?} {:?}, donor G/phase {:?}/{:?}, equal G/phase {:?}/{:?}",
+    |                                        ^^^^ ^^^^            ^^^^ ^^^^                ^^^^ ^^^^                ^^^^ ^^^^
+484 |           &expected_left[..4],
+    |           -------------------
+485 |           &expected_right[..4],
+    |           --------------------
+486 |           &equal_next_left[..4],
+    |           ---------------------
+487 |           &equal_next_right[..4],
+    |           ----------------------
+488 | /         (
+489 | |             float(&donor_next_left_payload, 0),
+490 | |             float(&donor_next_left_payload, 1),
+491 | |             float(&donor_next_right_payload, 0),
+492 | |             float(&donor_next_right_payload, 1),
+493 | |         ),
+    | |_________-
+494 | /         (
+495 | |             float(&equal_next_left_payload, 0),
+496 | |             float(&equal_next_left_payload, 1),
+497 | |             float(&equal_next_right_payload, 0),
+498 | |             float(&equal_next_right_payload, 1),
+499 | |         ),
+    | |_________-
+
+error: could not compile `gate-expander` (test "state") due to 1 previous error
