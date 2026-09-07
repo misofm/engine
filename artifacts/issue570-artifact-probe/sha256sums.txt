@@ -1,0 +1,6 @@
+f82def91fbe4386ad34d986ee274e83a9c41fe5a9af39de84db1f18a35c91076  artifacts/issue570-artifact-probe/README.md
+b2a75f62a49ed88850e90434cba85b094f466fc111b1bc042f41de87038e1b1b  artifacts/issue570-artifact-probe/post-command.txt.gz
+399814fd77d054498c6f41a0ae2c1607be6bd5c927a3c3b4db8dc4c0a5e260cc  artifacts/issue570-artifact-probe/pre-command.txt.gz
+de76e512a414e118fc8bc46cc3043f18cb60a7aa7b997d9564d30aae0cac9eee  artifacts/issue570-artifact-probe/status.txt.gz
+5076990701ac63986337c75f0b6eabe4b47df0d840f9bc74c1099d68782a8c20  artifacts/issue570-artifact-probe/stderr.raw.gz
+225228b46129587aa4fbb2341801f4e15d91ec00948b311cd1bc12e8968921e3  artifacts/issue570-artifact-probe/stdout.raw.gz
