@@ -17,6 +17,7 @@
 //! has disabled its own allocation gate.
 #![allow(unsafe_code)]
 
+use core::cell::Cell;
 use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use engine::realtime::audit::{ForbiddenOperation, record_allocator_violation};
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -35,6 +36,17 @@ static ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
 static DEALLOCATIONS: AtomicU64 = AtomicU64::new(0);
 static REALLOCATIONS: AtomicU64 = AtomicU64::new(0);
 static REQUESTED_BYTES: AtomicU64 = AtomicU64::new(0);
+
+thread_local! {
+    static CURRENT_THREAD: Cell<Counters> = const {
+        Cell::new(Counters {
+            allocations: 0,
+            deallocations: 0,
+            reallocations: 0,
+            requested_bytes: 0,
+        })
+    };
+}
 
 /// Set the process-wide violation mode. Only a deliberate probe may call this.
 pub fn set_mode(mode: Mode) {
@@ -86,6 +98,58 @@ pub fn delta_since(mark: Counters) -> Counters {
     }
 }
 
+/// Read the audited allocator totals for the calling thread since its thread started.
+///
+/// This is a separate view from [`counters`]: each allocator event updates both views, while
+/// events on other threads are visible only in the process-wide totals. The TLS cell is const
+/// initialized and the snapshot does not allocate, lock, or perform I/O.
+#[must_use]
+pub fn current_thread_counters() -> Counters {
+    CURRENT_THREAD.with(Cell::get)
+}
+
+/// Totals for the calling thread since `mark`, field-wise and saturating.
+#[must_use]
+pub fn current_thread_delta_since(mark: Counters) -> Counters {
+    let now = current_thread_counters();
+    Counters {
+        allocations: now.allocations.saturating_sub(mark.allocations),
+        deallocations: now.deallocations.saturating_sub(mark.deallocations),
+        reallocations: now.reallocations.saturating_sub(mark.reallocations),
+        requested_bytes: now.requested_bytes.saturating_sub(mark.requested_bytes),
+    }
+}
+
+#[inline]
+fn record_current_thread_allocation(bytes: usize) {
+    CURRENT_THREAD.with(|counters| {
+        let mut current = counters.get();
+        current.allocations = current.allocations.wrapping_add(1);
+        current.requested_bytes = current.requested_bytes.wrapping_add(bytes as u64);
+        counters.set(current);
+    });
+}
+
+#[inline]
+fn record_current_thread_reallocation(bytes: usize) {
+    CURRENT_THREAD.with(|counters| {
+        let mut current = counters.get();
+        current.allocations = current.allocations.wrapping_add(1);
+        current.reallocations = current.reallocations.wrapping_add(1);
+        current.requested_bytes = current.requested_bytes.wrapping_add(bytes as u64);
+        counters.set(current);
+    });
+}
+
+#[inline]
+fn record_current_thread_deallocation() {
+    CURRENT_THREAD.with(|counters| {
+        let mut current = counters.get();
+        current.deallocations = current.deallocations.wrapping_add(1);
+        counters.set(current);
+    });
+}
+
 /// The audited allocator. Installed as this process's `#[global_allocator]`.
 pub struct AuditedAllocator;
 
@@ -105,6 +169,7 @@ unsafe impl GlobalAlloc for AuditedAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
         REQUESTED_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
+        record_current_thread_allocation(layout.size());
         violated(ForbiddenOperation::Allocation);
         // SAFETY: the caller's valid layout is forwarded unchanged to the system allocator.
         unsafe { System.alloc(layout) }
@@ -113,6 +178,7 @@ unsafe impl GlobalAlloc for AuditedAllocator {
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
         REQUESTED_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
+        record_current_thread_allocation(layout.size());
         violated(ForbiddenOperation::Allocation);
         // SAFETY: the caller's valid layout is forwarded unchanged to the system allocator.
         unsafe { System.alloc_zeroed(layout) }
@@ -120,6 +186,7 @@ unsafe impl GlobalAlloc for AuditedAllocator {
 
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
         DEALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        record_current_thread_deallocation();
         violated(ForbiddenOperation::Deallocation);
         // SAFETY: the pointer/layout pair came from this allocator and is forwarded unchanged.
         unsafe { System.dealloc(pointer, layout) }
@@ -129,6 +196,7 @@ unsafe impl GlobalAlloc for AuditedAllocator {
         ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
         REALLOCATIONS.fetch_add(1, Ordering::Relaxed);
         REQUESTED_BYTES.fetch_add(new_size as u64, Ordering::Relaxed);
+        record_current_thread_reallocation(new_size);
         violated(ForbiddenOperation::Allocation);
         // SAFETY: the allocation came from this allocator; the original layout and the requested
         // new size are forwarded unchanged.
@@ -159,7 +227,10 @@ pub fn assert_installed() {
 
 #[cfg(test)]
 mod tests {
-    use super::{Counters, Mode, assert_installed, counters, delta_since, mode};
+    use super::{
+        Counters, Mode, assert_installed, counters, current_thread_counters,
+        current_thread_delta_since, delta_since, mode,
+    };
 
     #[test]
     fn default_mode_is_abort() {
@@ -190,5 +261,70 @@ mod tests {
             requested_bytes: u64::MAX,
         };
         assert_eq!(delta_since(future), Counters::default());
+    }
+
+    #[test]
+    fn current_thread_counts_every_allocator_operation() {
+        use std::alloc::{Layout, alloc, alloc_zeroed, dealloc, realloc};
+
+        let mark = current_thread_counters();
+        let layout = Layout::from_size_align(16, 8).unwrap();
+        let first = unsafe { alloc(layout) };
+        assert!(!first.is_null(), "test allocation failed");
+        let zeroed = unsafe { alloc_zeroed(layout) };
+        assert!(!zeroed.is_null(), "test zeroed allocation failed");
+        let grown = unsafe { realloc(first, layout, 32) };
+        assert!(!grown.is_null(), "test reallocation failed");
+        unsafe {
+            dealloc(zeroed, layout);
+            dealloc(
+                grown,
+                Layout::from_size_align(32, 8).expect("grown test layout"),
+            );
+        }
+
+        assert_eq!(
+            current_thread_delta_since(mark),
+            Counters {
+                allocations: 3,
+                deallocations: 2,
+                reallocations: 1,
+                requested_bytes: 64,
+            }
+        );
+    }
+
+    #[test]
+    fn foreign_thread_counts_are_global_but_not_current_thread() {
+        use std::hint::black_box;
+        use std::sync::{Arc, Barrier};
+
+        let ready = Arc::new(Barrier::new(2));
+        let start = Arc::new(Barrier::new(2));
+        let finished = Arc::new(Barrier::new(2));
+        let worker_ready = Arc::clone(&ready);
+        let worker_start = Arc::clone(&start);
+        let worker_finished = Arc::clone(&finished);
+        let worker = std::thread::spawn(move || {
+            worker_ready.wait();
+            worker_start.wait();
+            let allocation = Box::new([0_u8; 4096]);
+            black_box(&allocation);
+            drop(allocation);
+            worker_finished.wait();
+        });
+
+        ready.wait();
+        let global_mark = counters();
+        let current_mark = current_thread_counters();
+        start.wait();
+        finished.wait();
+        let global = delta_since(global_mark);
+        let current = current_thread_delta_since(current_mark);
+        worker.join().expect("foreign allocation probe worker");
+
+        assert!(global.allocations > 0, "foreign allocation was not global");
+        assert!(global.deallocations > 0, "foreign free was not global");
+        assert_eq!(current, Counters::default());
     }
 }
