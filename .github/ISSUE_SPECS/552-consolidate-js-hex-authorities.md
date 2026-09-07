@@ -433,3 +433,21 @@ decorated diagnostics/repin renderers, uppercase Unicode escaping, a fixed-width
 test literals. The lossless evidence is in `artifacts/issue552-final-qualification`. Closure remains
 pending independent Astra LOW PASS, required PR qualification, merge, GitHub synchronization, and
 successful post-main qualification.
+
+## Astra LOW final review attempt 1 — FAIL
+
+Actual Astra LOW reviewed exact pushed HEAD
+`27081c5e552485af0050d6dc305c62494674cfc2` and returned FAIL for evidence-only blockers. The
+qualification wrapper synthesized gates 1 through 8 pre-command identity records after execution;
+the browser retry recorded a clean status despite the temporary dependency symlink; the cleanup
+record named the wrong source path and used shell sequencing that masked intermediate failures; and
+the committed initial browser stdout record made both required exact-head `git diff --check`
+commands fail.
+
+Astra independently confirmed the product diff, all six artifact hashes, direct/type/self-test
+behavior, every named provenance mutation, manifest hashes, and synchronized OPEN issue bodies. No
+fourth #552 product repair occurred. Root accepts the FAIL and authorizes one evidence-only final
+qualification revision: actual Luna HIGH must capture every pre-command identity contemporaneously,
+record the real provisioned status, use fail-closed cleanup with the exact symlink path, and package
+only diff-clean evidence. Product and contract bytes remain frozen. Full attempt-1 verdict is in
+`artifacts/issue552-final-review-attempt1`.
