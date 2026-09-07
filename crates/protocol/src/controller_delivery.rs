@@ -192,3 +192,464 @@ impl<P: ControlProvider> ControllerAutomationDelivery<P> {
         self.controller.session()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::*;
+    use core::{num::NonZeroUsize, sync::atomic::{AtomicU64, Ordering}};
+    use session::{CompileCaps, parse_session_json};
+    use std::sync::Arc;
+
+    const EXAMPLE: &str = include_str!("../../../fixtures/session/v1/canonical.json");
+
+    #[derive(Clone)]
+    struct FixtureProvider {
+        sample: SampleTime,
+        transport: TransportSnapshot,
+        canceled: Arc<AtomicU64>,
+        descriptors: [ParameterDescriptor; 2],
+    }
+
+    impl FixtureProvider {
+        fn new(sample: SampleTime) -> (Self, Arc<AtomicU64>) {
+            let canceled = Arc::new(AtomicU64::new(0));
+            let descriptor = |handle| ParameterDescriptor {
+                handle,
+                track_id: "fixture".to_owned(),
+                rack: ParameterRack::Dynamic,
+                effect_id: "effect".to_owned(),
+                parameter_id: handle,
+                channel: ParameterChannel::Left,
+                value_kind: ParameterValueKind::F32,
+                unit: ParameterUnit::Linear,
+                domain: ParameterDomain::Continuous,
+                minimum: Some(-1.0),
+                maximum: Some(1.0),
+                default: 0.0,
+                mapping: ParameterMapping::Linear,
+                automation_rate: ParameterAutomationRate::Sample,
+                smoothing_samples: 0,
+                flags: 3,
+                display_name: None,
+                display_unit: None,
+                enum_choices: Vec::new(),
+            };
+            (
+                Self {
+                    sample,
+                    transport: TransportSnapshot {
+                        state: TransportState::Stopped,
+                        position: SampleTime(0),
+                        effective_sample: sample,
+                    },
+                    canceled: Arc::clone(&canceled),
+                    descriptors: [descriptor(7), descriptor(8)],
+                },
+                canceled,
+            )
+        }
+    }
+
+    impl ControlProvider for FixtureProvider {
+        fn current_sample(&mut self) -> SampleTime {
+            self.sample
+        }
+
+        fn parameter_metadata(
+            &mut self,
+            request: ParameterMetadataRequest,
+        ) -> Result<ParameterMetadataPage, ParameterProviderError> {
+            let descriptors = self
+                .descriptors
+                .iter()
+                .filter(|descriptor| descriptor.handle > request.after_handle)
+                .take(usize::from(request.limit))
+                .cloned()
+                .collect::<Vec<_>>();
+            let last_handle = descriptors
+                .last()
+                .map_or(request.after_handle, |descriptor| descriptor.handle);
+            Ok(ParameterMetadataPage {
+                last_handle,
+                eof: descriptors.len() < usize::from(request.limit),
+                descriptors,
+            })
+        }
+
+        fn parameter_state(
+            &mut self,
+            request: &ParameterStateRequest,
+        ) -> Result<ParameterStatePage, ParameterProviderError> {
+            Ok(ParameterStatePage {
+                observed_sample: self.sample.0,
+                records: request
+                    .handles
+                    .iter()
+                    .map(|handle| ParameterStateRecord {
+                        handle: *handle,
+                        flags: 1,
+                        value: 0.0,
+                    })
+                    .collect(),
+            })
+        }
+
+        fn parameter_descriptor(
+            &mut self,
+            handle: ParameterHandle,
+        ) -> Result<&ParameterDescriptor, ParameterProviderError> {
+            self.descriptors
+                .iter()
+                .find(|descriptor| descriptor.handle == handle.0)
+                .ok_or(ParameterProviderError::NotFound)
+        }
+
+        fn counters(
+            &mut self,
+            _request: &CountersRequest,
+        ) -> Result<CounterSnapshot, ParameterProviderError> {
+            Ok(CounterSnapshot {
+                observed_sample: self.sample,
+                values: Vec::new(),
+            })
+        }
+
+        fn record_canceled_automation(&mut self, records: u64) {
+            self.canceled.fetch_add(records, Ordering::Relaxed);
+        }
+
+        fn diagnostics(
+            &mut self,
+            request: DiagnosticsRequest,
+        ) -> Result<DiagnosticsPage, ParameterProviderError> {
+            Ok(DiagnosticsPage {
+                last_sequence: request.after_sequence,
+                eof: true,
+                diagnostics: Vec::new(),
+            })
+        }
+
+        fn transport_get(&mut self) -> TransportSnapshot {
+            self.transport
+        }
+
+        fn transport_set(&mut self, request: TransportSetRequest) -> TransportSnapshot {
+            self.transport.state = request.state;
+            if let Some(position) = request.position {
+                self.transport.position = position;
+            }
+            self.transport.effective_sample = self.sample;
+            self.transport
+        }
+
+        fn telemetry_configure(
+            &mut self,
+            configuration: TelemetryConfiguration,
+        ) -> TelemetryConfiguration {
+            configuration
+        }
+    }
+
+    fn queue_config(reliable_events: usize) -> ProtocolQueueConfig {
+        ProtocolQueueConfig {
+            control_command_slots: NonZeroUsize::new(2).unwrap(),
+            control_command_bytes: NonZeroUsize::new(512).unwrap(),
+            automation_batch_slots: NonZeroUsize::new(2).unwrap(),
+            reliable_response_slots: NonZeroUsize::new(2).unwrap(),
+            reliable_event_slots: NonZeroUsize::new(reliable_events).unwrap(),
+            telemetry_slots: NonZeroUsize::new(2).unwrap(),
+            per_block_automation_density: NonZeroUsize::new(256).unwrap(),
+            quantum_frames: NonZeroUsize::new(64).unwrap(),
+        }
+    }
+
+    fn session() -> SessionStore {
+        SessionStore::new(
+            parse_session_json(EXAMPLE).unwrap(),
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .unwrap()
+    }
+
+    fn replay() -> ReplayCacheConfig {
+        ReplayCacheConfig {
+            entries: NonZeroUsize::new(32).unwrap(),
+            bytes: NonZeroUsize::new(16 * 1024).unwrap(),
+            max_response_bytes: 2048,
+        }
+    }
+
+    fn facade(
+        reliable_events: usize,
+        capabilities: &[(ParameterHandle, AutomationKind)],
+    ) -> (
+        ControllerAutomationDelivery<FixtureProvider>,
+        AutomationDeliveryRender,
+        Arc<AtomicU64>,
+    ) {
+        let (provider, canceled) = FixtureProvider::new(SampleTime(0));
+        let capabilities = PreparedDeliveryCapabilities::new_exact(capabilities).unwrap();
+        let (facade, render, _) = ControllerAutomationDelivery::prepare(
+            session(),
+            queue_config(reliable_events),
+            provider,
+            replay(),
+            ProtocolCodec::default(),
+            ProtocolControllerConfig::default(),
+            ControllerRetainedCapacity {
+                meter_handles: 0,
+                counter_ids: 0,
+            },
+            capabilities,
+        )
+        .unwrap();
+        (facade, render, canceled)
+    }
+
+    fn batch(
+        revision: SessionRevision,
+        request_id: u64,
+        handle: u32,
+        start: u64,
+    ) -> AutomationBatchSlot {
+        AutomationBatchSlot::new(
+            revision,
+            RequestId::new(request_id).unwrap(),
+            &[AutomationRecord {
+                kind: AutomationKind::Point,
+                handle: ParameterHandle(handle),
+                start: SampleTime(start),
+                end: SampleTime(start),
+                start_value: 0.5,
+                end_value: 0.5,
+            }],
+        )
+        .unwrap()
+    }
+
+    fn enqueue_request<'a>(
+        request_id: u64,
+        bytes: &'a [u8],
+        batch: AutomationBatchSlot,
+    ) -> ControllerRequest<'a> {
+        ControllerRequest {
+            request_id: RequestId::new(request_id).unwrap(),
+            expected_revision: ExpectedRevision::Exact(batch.revision),
+            canonical_bytes: bytes,
+            command: ControlCommand::AutomationEnqueue { batch },
+        }
+    }
+
+    fn complete_render(
+        facade: &mut ControllerAutomationDelivery<FixtureProvider>,
+        render: &mut AutomationDeliveryRender,
+        ticket: DeliveryTicket,
+    ) {
+        let count = render.begin_boundary(SampleTime(0)).unwrap().records.len() as u16;
+        render.mark_applied(ticket, count).unwrap();
+        render.finish_applied(ticket, count).unwrap();
+        facade.collect_terminal(ticket).unwrap();
+    }
+
+    fn decode_event<'a>(codec: &ProtocolCodec, frame: &'a [u8]) -> DecodedTypedEventFrame<'a> {
+        codec
+            .decode_typed_event(frame, &mut DecodeScratch::new(&mut [0_u16; 32]))
+            .unwrap()
+    }
+
+    fn event_sequence(codec: &ProtocolCodec, frame: &[u8]) -> u64 {
+        match decode_event(codec, frame).payload {
+            DecodedEventPayload::TransportState(value) => value.event_sequence,
+            DecodedEventPayload::AutomationCanceled(value) => value.event_sequence,
+            _ => 0,
+        }
+    }
+
+    #[test]
+    fn real_admission_replay_shape_and_domain_guards_are_owned_by_facade() {
+        let (mut facade, mut render, _) = facade(
+            8,
+            &[(ParameterHandle(7), AutomationKind::Point)],
+        );
+        let revision = facade.session().revision();
+        let request = enqueue_request(1, b"enqueue-one", batch(revision, 1, 7, 1));
+        let response = facade.process(request);
+        assert_eq!(response.status, StatusCode::Ok);
+        let decoded = ProtocolCodec::default()
+            .decode_typed_response(&response.frame, &mut DecodeScratch::new(&mut [0_u16; 32]))
+            .unwrap();
+        let DecodedTypedResponseFrame::Success { payload, .. } = decoded else {
+            panic!("automation admission must return success payload")
+        };
+        let DecodedSuccessResponsePayload::AutomationEnqueued(accepted) = payload else {
+            panic!("wrong success payload")
+        };
+        assert_eq!((accepted.accepted_records, accepted.occupancy, accepted.capacity), (1, 1, 2));
+        let ticket = match facade.try_handoff_next().unwrap() {
+            HandoffResult::HandedOff(ticket) => ticket,
+            other => panic!("{other:?}"),
+        };
+        complete_render(&mut facade, &mut render, ticket);
+        assert_eq!(facade.outstanding(), 0);
+        assert_eq!(facade.process(enqueue_request(1, b"enqueue-one", batch(revision, 1, 7, 1))), response);
+        assert_eq!(facade.process(enqueue_request(1, b"changed", batch(revision, 1, 7, 1))).status, StatusCode::RequestIdReuse);
+
+        let mut malformed = batch(revision, 2, 7, 3);
+        malformed.len = 2;
+        malformed.records[1] = AutomationRecord {
+            kind: AutomationKind::Point,
+            handle: ParameterHandle(0),
+            start: SampleTime(4),
+            end: SampleTime(4),
+            start_value: 0.5,
+            end_value: 0.5,
+        };
+        let rejected = facade.process(enqueue_request(2, b"malformed", malformed));
+        assert_eq!(rejected.status, StatusCode::InvalidField);
+        assert_eq!(facade.outstanding(), 0);
+    }
+
+    #[test]
+    fn reservations_survive_render_completion_until_terminal_collection() {
+        let (mut facade, mut render, _) = facade(8, &[(ParameterHandle(7), AutomationKind::Point)]);
+        let revision = facade.session().revision();
+        let first = facade.process(enqueue_request(1, b"first", batch(revision, 1, 7, 1)));
+        assert_eq!(first.status, StatusCode::Ok);
+        let ticket = match facade.try_handoff_next().unwrap() {
+            HandoffResult::HandedOff(ticket) => ticket,
+            other => panic!("{other:?}"),
+        };
+        let count = render.begin_boundary(SampleTime(0)).unwrap().records.len() as u16;
+        render.mark_applied(ticket, count).unwrap();
+        render.finish_applied(ticket, count).unwrap();
+        assert_eq!(facade.process(enqueue_request(2, b"overlap", batch(revision, 2, 7, 1))).status, StatusCode::AutomationOrder);
+        assert_eq!(facade.process(enqueue_request(3, b"second", batch(revision, 3, 7, 2))).status, StatusCode::Ok);
+        assert_eq!(facade.process(enqueue_request(4, b"third", batch(revision, 4, 7, 3))).status, StatusCode::Backpressure);
+        facade.collect_terminal(ticket).unwrap();
+        assert_eq!(facade.process(enqueue_request(5, b"after-collect", batch(revision, 5, 7, 3))).status, StatusCode::Ok);
+    }
+
+    #[test]
+    fn unsupported_head_blocks_fifo_and_real_cancel_releases_all_owners() {
+        let (mut endpoint, mut render, canceled) = facade(8, &[(ParameterHandle(7), AutomationKind::Point)]);
+        let revision = endpoint.session().revision();
+        assert_eq!(endpoint.process(enqueue_request(1, b"unsupported", batch(revision, 1, 8, 1))).status, StatusCode::Ok);
+        assert_eq!(endpoint.process(enqueue_request(2, b"supported-follower", batch(revision, 2, 7, 2))).status, StatusCode::Ok);
+        assert_eq!(endpoint.try_handoff_next().unwrap(), HandoffResult::PendingUnsupported);
+        let token = endpoint.begin_cancel(AutomationCancellationReason::EndpointShutdown).unwrap();
+        assert!(endpoint.poll_cancel_boundary(token).unwrap().is_none());
+        assert!(render.begin_boundary(SampleTime(77)).is_none());
+        let complete = endpoint.poll_cancel_boundary(token).unwrap().unwrap();
+        assert_eq!((complete.canceled_events, complete.canceled_records), (2, 2));
+        assert_eq!(canceled.load(Ordering::Relaxed), 2);
+        assert_eq!(endpoint.outstanding(), 0);
+    }
+
+    #[test]
+    fn one_controller_queue_and_sequence_cover_transport_cancel_and_short_retry() {
+        let (mut endpoint, mut render, canceled) = facade(8, &[(ParameterHandle(7), AutomationKind::Point)]);
+        let revision = endpoint.session().revision();
+        let transport = |id, bytes| ControllerRequest {
+            request_id: RequestId::new(id).unwrap(),
+            expected_revision: ExpectedRevision::Exact(revision),
+            canonical_bytes: bytes,
+            command: ControlCommand::TransportSet {
+                request: TransportSetRequest { state: TransportState::Playing, position: None },
+            },
+        };
+        let first_transport = endpoint.process(transport(1, b"transport-one"));
+        assert_eq!(first_transport.status, StatusCode::Ok);
+        let ticket = {
+            assert_eq!(endpoint.process(enqueue_request(2, b"partial", batch(revision, 2, 7, 1))).status, StatusCode::Ok);
+            match endpoint.try_handoff_next().unwrap() {
+                HandoffResult::HandedOff(ticket) => ticket,
+                other => panic!("{other:?}"),
+            }
+        };
+        render.begin_boundary(SampleTime(0)).unwrap();
+        render.mark_applied(ticket, 0).unwrap();
+        let token = endpoint.begin_cancel(AutomationCancellationReason::EndpointShutdown).unwrap();
+        assert!(endpoint.poll_cancel_boundary(token).unwrap().is_none());
+        assert_eq!(endpoint.process(transport(3, b"blocked-transport")).status, StatusCode::Unavailable);
+        assert_eq!(endpoint.process(transport(1, b"transport-one")), first_transport);
+        assert!(render.begin_boundary(SampleTime(99)).is_none());
+        let complete = endpoint.poll_cancel_boundary(token).unwrap().unwrap();
+        assert_eq!((complete.effective_sample, complete.canceled_records), (SampleTime(99), 1));
+        assert_eq!(canceled.load(Ordering::Relaxed), 1);
+        let later = endpoint.process(transport(4, b"transport-later"));
+        assert_eq!(later.status, StatusCode::Ok);
+
+        let mut short = [0_u8; 1];
+        assert!(matches!(endpoint.dequeue_reliable_event_frame_into(&mut short), Err(EventEgressError::Encode(EncodeError::OutputTooSmall { .. }))));
+        let mut frame = [0_u8; 1024];
+        let first = endpoint.dequeue_reliable_event_frame_into(&mut frame).unwrap().unwrap();
+        let first_sequence = event_sequence(&ProtocolCodec::default(), &frame[..first]);
+        let second = endpoint.dequeue_reliable_event_frame_into(&mut frame).unwrap().unwrap();
+        let second_sequence = event_sequence(&ProtocolCodec::default(), &frame[..second]);
+        let third = endpoint.dequeue_reliable_event_frame_into(&mut frame).unwrap().unwrap();
+        let third_sequence = event_sequence(&ProtocolCodec::default(), &frame[..third]);
+        assert_eq!([first_sequence, second_sequence, third_sequence], [1, 2, 3]);
+
+        let (mut full, _, _) = facade(1, &[(ParameterHandle(7), AutomationKind::Point)]);
+        let full_revision = full.session().revision();
+        assert_eq!(full.process(transport_request(full_revision, 1, b"full-transport")).status, StatusCode::Ok);
+        assert_eq!(full.process(enqueue_request(2, b"full-batch", batch(full_revision, 2, 7, 1))).status, StatusCode::Ok);
+        let before = (full.outstanding(), full.automation_status());
+        assert!(matches!(full.begin_cancel(AutomationCancellationReason::EndpointShutdown), Err(DeliveryError::ReliableFull(_))));
+        assert_eq!((full.outstanding(), full.automation_status()), before);
+    }
+
+    fn transport_request<'a>(revision: SessionRevision, id: u64, bytes: &'a [u8]) -> ControllerRequest<'a> {
+        ControllerRequest {
+            request_id: RequestId::new(id).unwrap(),
+            expected_revision: ExpectedRevision::Exact(revision),
+            canonical_bytes: bytes,
+            command: ControlCommand::TransportSet {
+                request: TransportSetRequest { state: TransportState::Playing, position: None },
+            },
+        }
+    }
+
+    #[test]
+    fn fixed_revision_refuses_structural_locate_and_state_without_model_change() {
+        let (mut facade, _, _) = facade(8, &[(ParameterHandle(7), AutomationKind::Point)]);
+        let revision = facade.session().revision();
+        let snapshot = facade.session().canonical_snapshot().to_owned();
+        let edits: [SessionEdit; 0] = [];
+        assert_eq!(facade.process(ControllerRequest {
+            request_id: RequestId::new(1).unwrap(),
+            expected_revision: ExpectedRevision::Exact(revision),
+            canonical_bytes: b"transaction",
+            command: ControlCommand::SessionTransactionApply { edits: &edits },
+        }).status, StatusCode::Unavailable);
+        assert_eq!(facade.process(ControllerRequest {
+            request_id: RequestId::new(2).unwrap(),
+            expected_revision: ExpectedRevision::Exact(revision),
+            canonical_bytes: b"locate",
+            command: ControlCommand::TransportSet { request: TransportSetRequest { state: TransportState::Playing, position: Some(SampleTime(9)) } },
+        }).status, StatusCode::Unavailable);
+        assert_eq!(facade.process(ControllerRequest {
+            request_id: RequestId::new(3).unwrap(),
+            expected_revision: ExpectedRevision::Exact(revision),
+            canonical_bytes: b"state",
+            command: ControlCommand::ParameterStateGet { request: ParameterStateRequest { handles: vec![7] } },
+        }).status, StatusCode::Unavailable);
+        assert_eq!(facade.session().canonical_snapshot(), snapshot);
+        assert_eq!(facade.session().revision(), revision);
+        assert_eq!(facade.process(ControllerRequest {
+            request_id: RequestId::new(4).unwrap(),
+            expected_revision: ExpectedRevision::Any,
+            canonical_bytes: b"snapshot",
+            command: ControlCommand::SessionSnapshotGet { offset: 0, max_bytes: 1024 },
+        }).status, StatusCode::Ok);
+        assert_eq!(facade.outstanding(), 0);
+    }
+}

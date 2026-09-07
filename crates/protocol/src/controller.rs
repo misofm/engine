@@ -3194,7 +3194,9 @@ impl<P: ControlProvider> ProtocolController<P> {
                 Err(error) => self.non_ok(status_for_parameter(error), None),
             },
             ControlCommand::AutomationEnqueue { batch } => {
-                if let Err(error) = batch.validate_records() {
+                if delivery.is_some()
+                    && let Err(error) = batch.validate_records()
+                {
                     return self.non_ok(status_for_automation(error), None);
                 }
                 if batch.revision != self.session.revision() {

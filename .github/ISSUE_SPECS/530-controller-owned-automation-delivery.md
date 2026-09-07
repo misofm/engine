@@ -129,3 +129,7 @@ Largest allocation is not subtractable. Keep the existing exact standalone C byt
 ## Luna attempt 1 compiling source checkpoint
 
 The first tranche extracts concrete delivery state, adds the fixed-revision facade, and routes controller processing/cancellation through its existing queues and sequence. `cargo check -p protocol` and the unchanged `delivery_ownership` fixture (two tests) pass; raw command/source/stdout/stderr/status captures are preserved under `artifacts/issue530-luna-attempt1`. These initial commands omitted `--locked`; they are retained as actually run, and subsequent gates use `--locked`. This is a compiling source checkpoint only: the six new facade claim groups are still pending, with no acceptance or delivery claim. Root pauses/commits this exact four-path tranche before fixture implementation continues.
+
+## Luna attempt 1 initial functional fixture checkpoint
+
+Five functional fixture tests pass in locked `functional-debug-5` after preserved compile/fixture failures in captures1–4. The early batch-shape check is restricted to the new facade, preserving default validation order. Root freezes this source/test tranche before additional assertions and allocation evidence. These are initial useful fixtures, not a claim that all five numbered functional groups are complete; public length overflow, domain/past, density, duplicate terminal collection, reliable-full and full exact event/policy coverage still require verification against the brief. Gate6 remains pending. No consolidated verdict has occurred.

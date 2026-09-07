@@ -1,0 +1,4 @@
+   Compiling protocol v0.1.0 (/home/bl/misofm/engine-controller-delivery/crates/protocol)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.30s
+     Running unittests src/lib.rs (/tmp/issue530-target/debug/deps/protocol-8d85afa28ae00720)
+error: test failed, to rerun pass `-p protocol --lib`

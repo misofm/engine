@@ -1,0 +1,1652 @@
+   Compiling protocol v0.1.0 (/home/bl/misofm/engine-controller-delivery/crates/protocol)
+error[E0106]: missing lifetime specifier
+   --> crates/protocol/src/controller_delivery.rs:461:84
+    |
+461 |     fn decode_event(codec: &ProtocolCodec, frame: &[u8]) -> DecodedTypedEventFrame<'_> {
+    |                            --------------         -----                            ^^ expected named lifetime parameter
+    |
+    = help: this function's return type contains a borrowed value, but the signature does not say whether it is borrowed from `codec` or `frame`
+help: consider introducing a named lifetime parameter
+    |
+461 -     fn decode_event(codec: &ProtocolCodec, frame: &[u8]) -> DecodedTypedEventFrame<'_> {
+461 +     fn decode_event<'a>(codec: &'a ProtocolCodec, frame: &'a [u8]) -> DecodedTypedEventFrame<'a> {
+    |
+
+error[E0425]: cannot find type `SampleTime` in this scope
+   --> crates/protocol/src/controller_delivery.rs:207:17
+    |
+207 |         sample: SampleTime,
+    |                 ^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this struct through its public re-export
+    |
+198 +     use crate::SampleTime;
+    |
+
+error[E0425]: cannot find type `TransportSnapshot` in this scope
+   --> crates/protocol/src/controller_delivery.rs:208:20
+    |
+208 |         transport: TransportSnapshot,
+    |                    ^^^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this struct through its public re-export
+    |
+198 +     use crate::TransportSnapshot;
+    |
+
+error[E0425]: cannot find type `ParameterDescriptor` in this scope
+   --> crates/protocol/src/controller_delivery.rs:210:23
+    |
+210 |         descriptors: [ParameterDescriptor; 2],
+    |                       ^^^^^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this struct through its public re-export
+    |
+198 +     use crate::ParameterDescriptor;
+    |
+
+error[E0425]: cannot find type `SampleTime` in this scope
+   --> crates/protocol/src/controller_delivery.rs:214:24
+    |
+214 |         fn new(sample: SampleTime) -> (Self, Arc<AtomicU64>) {
+    |                        ^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this struct through its public re-export
+    |
+198 +     use crate::SampleTime;
+    |
+
+error[E0422]: cannot find struct, variant or union type `ParameterDescriptor` in this scope
+   --> crates/protocol/src/controller_delivery.rs:216:39
+    |
+216 |             let descriptor = |handle| ParameterDescriptor {
+    |                                       ^^^^^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this struct through its public re-export
+    |
+198 +     use crate::ParameterDescriptor;
+    |
+
+error[E0433]: cannot find type `ParameterRack` in this scope
+   --> crates/protocol/src/controller_delivery.rs:219:23
+    |
+219 |                 rack: ParameterRack::Dynamic,
+    |                       ^^^^^^^^^^^^^ use of undeclared type `ParameterRack`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::ParameterRack;
+    |
+
+error[E0433]: cannot find type `ParameterChannel` in this scope
+   --> crates/protocol/src/controller_delivery.rs:222:26
+    |
+222 |                 channel: ParameterChannel::Left,
+    |                          ^^^^^^^^^^^^^^^^ use of undeclared type `ParameterChannel`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::ParameterChannel;
+    |
+
+error[E0433]: cannot find type `ParameterValueKind` in this scope
+   --> crates/protocol/src/controller_delivery.rs:223:29
+    |
+223 |                 value_kind: ParameterValueKind::F32,
+    |                             ^^^^^^^^^^^^^^^^^^ use of undeclared type `ParameterValueKind`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::ParameterValueKind;
+    |
+
+error[E0433]: cannot find type `ParameterUnit` in this scope
+   --> crates/protocol/src/controller_delivery.rs:224:23
+    |
+224 |                 unit: ParameterUnit::Linear,
+    |                       ^^^^^^^^^^^^^ use of undeclared type `ParameterUnit`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::ParameterUnit;
+    |
+
+error[E0433]: cannot find type `ParameterDomain` in this scope
+   --> crates/protocol/src/controller_delivery.rs:225:25
+    |
+225 |                 domain: ParameterDomain::Continuous,
+    |                         ^^^^^^^^^^^^^^^ use of undeclared type `ParameterDomain`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::ParameterDomain;
+    |
+
+error[E0433]: cannot find type `ParameterMapping` in this scope
+   --> crates/protocol/src/controller_delivery.rs:229:26
+    |
+229 |                 mapping: ParameterMapping::Linear,
+    |                          ^^^^^^^^^^^^^^^^ use of undeclared type `ParameterMapping`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::ParameterMapping;
+    |
+
+error[E0433]: cannot find type `ParameterAutomationRate` in this scope
+   --> crates/protocol/src/controller_delivery.rs:230:34
+    |
+230 |                 automation_rate: ParameterAutomationRate::Sample,
+    |                                  ^^^^^^^^^^^^^^^^^^^^^^^ use of undeclared type `ParameterAutomationRate`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::ParameterAutomationRate;
+    |
+
+error[E0422]: cannot find struct, variant or union type `TransportSnapshot` in this scope
+   --> crates/protocol/src/controller_delivery.rs:240:32
+    |
+240 |                     transport: TransportSnapshot {
+    |                                ^^^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this struct through its public re-export
+    |
+198 +     use crate::TransportSnapshot;
+    |
+
+error[E0433]: cannot find type `TransportState` in this scope
+   --> crates/protocol/src/controller_delivery.rs:241:32
+    |
+241 |                         state: TransportState::Stopped,
+    |                                ^^^^^^^^^^^^^^ use of undeclared type `TransportState`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::TransportState;
+    |
+
+error[E0425]: cannot find function, tuple struct or tuple variant `SampleTime` in this scope
+   --> crates/protocol/src/controller_delivery.rs:242:35
+    |
+242 |                         position: SampleTime(0),
+    |                                   ^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this tuple struct through its public re-export
+    |
+198 +     use crate::SampleTime;
+    |
+
+error[E0425]: cannot find type `SampleTime` in this scope
+   --> crates/protocol/src/controller_delivery.rs:254:41
+    |
+254 |         fn current_sample(&mut self) -> SampleTime {
+    |                                         ^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this struct through its public re-export
+    |
+198 +     use crate::SampleTime;
+    |
+
+error[E0425]: cannot find type `ParameterMetadataRequest` in this scope
+   --> crates/protocol/src/controller_delivery.rs:260:22
+    |
+260 |             request: ParameterMetadataRequest,
+    |                      ^^^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this struct through its public re-export
+    |
+198 +     use crate::ParameterMetadataRequest;
+    |
+
+error[E0425]: cannot find type `ParameterMetadataPage` in this scope
+   --> crates/protocol/src/controller_delivery.rs:261:21
+    |
+261 |         ) -> Result<ParameterMetadataPage, ParameterProviderError> {
+    |                     ^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this struct through its public re-export
+    |
+198 +     use crate::ParameterMetadataPage;
+    |
+
+error[E0425]: cannot find type `ParameterProviderError` in this scope
+   --> crates/protocol/src/controller_delivery.rs:261:44
+    |
+261 |         ) -> Result<ParameterMetadataPage, ParameterProviderError> {
+    |                                            ^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::ParameterProviderError;
+    |
+
+error[E0422]: cannot find struct, variant or union type `ParameterMetadataPage` in this scope
+   --> crates/protocol/src/controller_delivery.rs:272:16
+    |
+272 |             Ok(ParameterMetadataPage {
+    |                ^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this struct through its public re-export
+    |
+198 +     use crate::ParameterMetadataPage;
+    |
+
+error[E0425]: cannot find type `ParameterStateRequest` in this scope
+   --> crates/protocol/src/controller_delivery.rs:281:23
+    |
+281 |             request: &ParameterStateRequest,
+    |                       ^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this struct through its public re-export
+    |
+198 +     use crate::ParameterStateRequest;
+    |
+
+error[E0425]: cannot find type `ParameterStatePage` in this scope
+   --> crates/protocol/src/controller_delivery.rs:282:21
+    |
+282 |         ) -> Result<ParameterStatePage, ParameterProviderError> {
+    |                     ^^^^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this struct through its public re-export
+    |
+198 +     use crate::ParameterStatePage;
+    |
+
+error[E0425]: cannot find type `ParameterProviderError` in this scope
+   --> crates/protocol/src/controller_delivery.rs:282:41
+    |
+282 |         ) -> Result<ParameterStatePage, ParameterProviderError> {
+    |                                         ^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::ParameterProviderError;
+    |
+
+error[E0422]: cannot find struct, variant or union type `ParameterStatePage` in this scope
+   --> crates/protocol/src/controller_delivery.rs:283:16
+    |
+283 |             Ok(ParameterStatePage {
+    |                ^^^^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this struct through its public re-export
+    |
+198 +     use crate::ParameterStatePage;
+    |
+
+error[E0422]: cannot find struct, variant or union type `ParameterStateRecord` in this scope
+   --> crates/protocol/src/controller_delivery.rs:288:35
+    |
+288 |                     .map(|handle| ParameterStateRecord {
+    |                                   ^^^^^^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this struct through its public re-export
+    |
+198 +     use crate::ParameterStateRecord;
+    |
+
+error[E0425]: cannot find type `ParameterHandle` in this scope
+   --> crates/protocol/src/controller_delivery.rs:299:21
+    |
+299 |             handle: ParameterHandle,
+    |                     ^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this struct through its public re-export
+    |
+198 +     use crate::ParameterHandle;
+    |
+
+error[E0425]: cannot find type `ParameterDescriptor` in this scope
+   --> crates/protocol/src/controller_delivery.rs:300:22
+    |
+300 |         ) -> Result<&ParameterDescriptor, ParameterProviderError> {
+    |                      ^^^^^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this struct through its public re-export
+    |
+198 +     use crate::ParameterDescriptor;
+    |
+
+error[E0425]: cannot find type `ParameterProviderError` in this scope
+   --> crates/protocol/src/controller_delivery.rs:300:43
+    |
+300 |         ) -> Result<&ParameterDescriptor, ParameterProviderError> {
+    |                                           ^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::ParameterProviderError;
+    |
+
+error[E0433]: cannot find type `ParameterProviderError` in this scope
+   --> crates/protocol/src/controller_delivery.rs:304:24
+    |
+304 |                 .ok_or(ParameterProviderError::NotFound)
+    |                        ^^^^^^^^^^^^^^^^^^^^^^ use of undeclared type `ParameterProviderError`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::ParameterProviderError;
+    |
+
+error[E0425]: cannot find type `CountersRequest` in this scope
+   --> crates/protocol/src/controller_delivery.rs:309:24
+    |
+309 |             _request: &CountersRequest,
+    |                        ^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this struct through its public re-export
+    |
+198 +     use crate::CountersRequest;
+    |
+
+error[E0425]: cannot find type `CounterSnapshot` in this scope
+   --> crates/protocol/src/controller_delivery.rs:310:21
+    |
+310 |         ) -> Result<CounterSnapshot, ParameterProviderError> {
+    |                     ^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this struct through its public re-export
+    |
+198 +     use crate::CounterSnapshot;
+    |
+
+error[E0425]: cannot find type `ParameterProviderError` in this scope
+   --> crates/protocol/src/controller_delivery.rs:310:38
+    |
+310 |         ) -> Result<CounterSnapshot, ParameterProviderError> {
+    |                                      ^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::ParameterProviderError;
+    |
+
+error[E0422]: cannot find struct, variant or union type `CounterSnapshot` in this scope
+   --> crates/protocol/src/controller_delivery.rs:311:16
+    |
+311 |             Ok(CounterSnapshot {
+    |                ^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing one of these items
+    |
+198 +     use crate::CounterSnapshot;
+    |
+198 +     use crate::DecodedEventPayload::CounterSnapshot;
+    |
+198 +     use crate::DecodedSuccessResponsePayload::CounterSnapshot;
+    |
+198 +     use crate::EventPayload::CounterSnapshot;
+    |
+    = and 2 other candidates
+
+error[E0425]: cannot find type `DiagnosticsRequest` in this scope
+   --> crates/protocol/src/controller_delivery.rs:323:22
+    |
+323 |             request: DiagnosticsRequest,
+    |                      ^^^^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this struct through its public re-export
+    |
+198 +     use crate::DiagnosticsRequest;
+    |
+
+error[E0425]: cannot find type `DiagnosticsPage` in this scope
+   --> crates/protocol/src/controller_delivery.rs:324:21
+    |
+324 |         ) -> Result<DiagnosticsPage, ParameterProviderError> {
+    |                     ^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this struct through its public re-export
+    |
+198 +     use crate::DiagnosticsPage;
+    |
+
+error[E0425]: cannot find type `ParameterProviderError` in this scope
+   --> crates/protocol/src/controller_delivery.rs:324:38
+    |
+324 |         ) -> Result<DiagnosticsPage, ParameterProviderError> {
+    |                                      ^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::ParameterProviderError;
+    |
+
+error[E0422]: cannot find struct, variant or union type `DiagnosticsPage` in this scope
+   --> crates/protocol/src/controller_delivery.rs:325:16
+    |
+325 |             Ok(DiagnosticsPage {
+    |                ^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing one of these items
+    |
+198 +     use crate::DecodedSuccessResponsePayload::DiagnosticsPage;
+    |
+198 +     use crate::DiagnosticsPage;
+    |
+198 +     use crate::SuccessResponsePayload::DiagnosticsPage;
+    |
+
+error[E0425]: cannot find type `TransportSnapshot` in this scope
+   --> crates/protocol/src/controller_delivery.rs:332:40
+    |
+332 |         fn transport_get(&mut self) -> TransportSnapshot {
+    |                                        ^^^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this struct through its public re-export
+    |
+198 +     use crate::TransportSnapshot;
+    |
+
+error[E0425]: cannot find type `TransportSetRequest` in this scope
+   --> crates/protocol/src/controller_delivery.rs:336:46
+    |
+336 |         fn transport_set(&mut self, request: TransportSetRequest) -> TransportSnapshot {
+    |                                              ^^^^^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this struct through its public re-export
+    |
+198 +     use crate::TransportSetRequest;
+    |
+
+error[E0425]: cannot find type `TransportSnapshot` in this scope
+   --> crates/protocol/src/controller_delivery.rs:336:70
+    |
+336 |         fn transport_set(&mut self, request: TransportSetRequest) -> TransportSnapshot {
+    |                                                                      ^^^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this struct through its public re-export
+    |
+198 +     use crate::TransportSnapshot;
+    |
+
+error[E0425]: cannot find type `TelemetryConfiguration` in this scope
+   --> crates/protocol/src/controller_delivery.rs:347:28
+    |
+347 |             configuration: TelemetryConfiguration,
+    |                            ^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this struct through its public re-export
+    |
+198 +     use crate::TelemetryConfiguration;
+    |
+
+error[E0425]: cannot find type `TelemetryConfiguration` in this scope
+   --> crates/protocol/src/controller_delivery.rs:348:14
+    |
+348 |         ) -> TelemetryConfiguration {
+    |              ^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this struct through its public re-export
+    |
+198 +     use crate::TelemetryConfiguration;
+    |
+
+error[E0425]: cannot find type `ParameterHandle` in this scope
+   --> crates/protocol/src/controller_delivery.rs:391:26
+    |
+391 |         capabilities: &[(ParameterHandle, AutomationKind)],
+    |                          ^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this struct through its public re-export
+    |
+198 +     use crate::ParameterHandle;
+    |
+
+error[E0425]: cannot find type `AutomationKind` in this scope
+   --> crates/protocol/src/controller_delivery.rs:391:43
+    |
+391 |         capabilities: &[(ParameterHandle, AutomationKind)],
+    |                                           ^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::AutomationKind;
+    |
+
+error[E0425]: cannot find function, tuple struct or tuple variant `SampleTime` in this scope
+   --> crates/protocol/src/controller_delivery.rs:397:57
+    |
+397 |         let (provider, canceled) = FixtureProvider::new(SampleTime(0));
+    |                                                         ^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this tuple struct through its public re-export
+    |
+198 +     use crate::SampleTime;
+    |
+
+error[E0425]: cannot find type `SessionRevision` in this scope
+   --> crates/protocol/src/controller_delivery.rs:417:19
+    |
+417 |         revision: SessionRevision,
+    |                   ^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this struct through its public re-export
+    |
+198 +     use crate::SessionRevision;
+    |
+
+error[E0425]: cannot find type `AutomationBatchSlot` in this scope
+   --> crates/protocol/src/controller_delivery.rs:421:10
+    |
+421 |     ) -> AutomationBatchSlot {
+    |          ^^^^^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this struct through its public re-export
+    |
+198 +     use crate::AutomationBatchSlot;
+    |
+
+error[E0433]: cannot find type `AutomationBatchSlot` in this scope
+   --> crates/protocol/src/controller_delivery.rs:422:9
+    |
+422 |         AutomationBatchSlot::new(
+    |         ^^^^^^^^^^^^^^^^^^^ use of undeclared type `AutomationBatchSlot`
+    |
+help: consider importing this struct through its public re-export
+    |
+198 +     use crate::AutomationBatchSlot;
+    |
+
+error[E0433]: cannot find type `RequestId` in this scope
+   --> crates/protocol/src/controller_delivery.rs:424:13
+    |
+424 |             RequestId::new(request_id).unwrap(),
+    |             ^^^^^^^^^ use of undeclared type `RequestId`
+    |
+help: consider importing this struct through its public re-export
+    |
+198 +     use crate::RequestId;
+    |
+
+error[E0422]: cannot find struct, variant or union type `AutomationRecord` in this scope
+   --> crates/protocol/src/controller_delivery.rs:425:15
+    |
+425 |             &[AutomationRecord {
+    |               ^^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this struct through its public re-export
+    |
+198 +     use crate::AutomationRecord;
+    |
+
+error[E0433]: cannot find type `AutomationKind` in this scope
+   --> crates/protocol/src/controller_delivery.rs:426:23
+    |
+426 |                 kind: AutomationKind::Point,
+    |                       ^^^^^^^^^^^^^^ use of undeclared type `AutomationKind`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::AutomationKind;
+    |
+
+error[E0425]: cannot find function, tuple struct or tuple variant `ParameterHandle` in this scope
+   --> crates/protocol/src/controller_delivery.rs:427:25
+    |
+427 |                 handle: ParameterHandle(handle),
+    |                         ^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this tuple struct through its public re-export
+    |
+198 +     use crate::ParameterHandle;
+    |
+
+error[E0425]: cannot find function, tuple struct or tuple variant `SampleTime` in this scope
+   --> crates/protocol/src/controller_delivery.rs:428:24
+    |
+428 |                 start: SampleTime(start),
+    |                        ^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this tuple struct through its public re-export
+    |
+198 +     use crate::SampleTime;
+    |
+
+error[E0425]: cannot find function, tuple struct or tuple variant `SampleTime` in this scope
+   --> crates/protocol/src/controller_delivery.rs:429:22
+    |
+429 |                 end: SampleTime(start),
+    |                      ^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this tuple struct through its public re-export
+    |
+198 +     use crate::SampleTime;
+    |
+
+error[E0425]: cannot find type `AutomationBatchSlot` in this scope
+   --> crates/protocol/src/controller_delivery.rs:440:16
+    |
+440 |         batch: AutomationBatchSlot,
+    |                ^^^^^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this struct through its public re-export
+    |
+198 +     use crate::AutomationBatchSlot;
+    |
+
+error[E0433]: cannot find type `RequestId` in this scope
+   --> crates/protocol/src/controller_delivery.rs:443:25
+    |
+443 |             request_id: RequestId::new(request_id).unwrap(),
+    |                         ^^^^^^^^^ use of undeclared type `RequestId`
+    |
+help: consider importing this struct through its public re-export
+    |
+198 +     use crate::RequestId;
+    |
+
+error[E0433]: cannot find type `ExpectedRevision` in this scope
+   --> crates/protocol/src/controller_delivery.rs:444:32
+    |
+444 |             expected_revision: ExpectedRevision::Exact(batch.revision),
+    |                                ^^^^^^^^^^^^^^^^ use of undeclared type `ExpectedRevision`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::ExpectedRevision;
+    |
+
+error[E0433]: cannot find type `ControlCommand` in this scope
+   --> crates/protocol/src/controller_delivery.rs:446:22
+    |
+446 |             command: ControlCommand::AutomationEnqueue { batch },
+    |                      ^^^^^^^^^^^^^^ use of undeclared type `ControlCommand`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::ControlCommand;
+    |
+
+error[E0425]: cannot find function, tuple struct or tuple variant `SampleTime` in this scope
+   --> crates/protocol/src/controller_delivery.rs:455:45
+    |
+455 |         let pending = render.begin_boundary(SampleTime(0)).unwrap();
+    |                                             ^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this tuple struct through its public re-export
+    |
+198 +     use crate::SampleTime;
+    |
+
+error[E0425]: cannot find type `DecodedTypedEventFrame` in this scope
+   --> crates/protocol/src/controller_delivery.rs:461:61
+    |
+461 |     fn decode_event(codec: &ProtocolCodec, frame: &[u8]) -> DecodedTypedEventFrame<'_> {
+    |                                                             ^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this struct through its public re-export
+    |
+198 +     use crate::DecodedTypedEventFrame;
+    |
+
+error[E0433]: cannot find type `DecodeScratch` in this scope
+   --> crates/protocol/src/controller_delivery.rs:463:45
+    |
+463 |             .decode_typed_event(frame, &mut DecodeScratch::new(&mut [0_u16; 32]))
+    |                                             ^^^^^^^^^^^^^ use of undeclared type `DecodeScratch`
+    |
+help: consider importing this struct through its public re-export
+    |
+198 +     use crate::DecodeScratch;
+    |
+
+error[E0425]: cannot find function, tuple struct or tuple variant `ParameterHandle` in this scope
+   --> crates/protocol/src/controller_delivery.rs:471:16
+    |
+471 |             &[(ParameterHandle(7), AutomationKind::Point)],
+    |                ^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this tuple struct through its public re-export
+    |
+198 +     use crate::ParameterHandle;
+    |
+
+error[E0433]: cannot find type `AutomationKind` in this scope
+   --> crates/protocol/src/controller_delivery.rs:471:36
+    |
+471 |             &[(ParameterHandle(7), AutomationKind::Point)],
+    |                                    ^^^^^^^^^^^^^^ use of undeclared type `AutomationKind`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::AutomationKind;
+    |
+
+error[E0433]: cannot find type `StatusCode` in this scope
+   --> crates/protocol/src/controller_delivery.rs:476:37
+    |
+476 |         assert_eq!(response.status, StatusCode::Ok);
+    |                                     ^^^^^^^^^^ use of undeclared type `StatusCode`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::StatusCode;
+    |
+
+error[E0433]: cannot find type `DecodeScratch` in this scope
+   --> crates/protocol/src/controller_delivery.rs:478:58
+    |
+478 |             .decode_typed_response(&response.frame, &mut DecodeScratch::new(&mut [0_u16; 32]))
+    |                                                          ^^^^^^^^^^^^^ use of undeclared type `DecodeScratch`
+    |
+help: consider importing this struct through its public re-export
+    |
+198 +     use crate::DecodeScratch;
+    |
+
+error[E0433]: cannot find type `DecodedTypedResponseFrame` in this scope
+   --> crates/protocol/src/controller_delivery.rs:480:13
+    |
+480 |         let DecodedTypedResponseFrame::Success { payload, .. } = decoded else {
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^ use of undeclared type `DecodedTypedResponseFrame`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::DecodedTypedResponseFrame;
+    |
+
+error[E0433]: cannot find type `DecodedSuccessResponsePayload` in this scope
+   --> crates/protocol/src/controller_delivery.rs:483:13
+    |
+483 |         let DecodedSuccessResponsePayload::AutomationEnqueued(accepted) = payload else {
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ use of undeclared type `DecodedSuccessResponsePayload`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::DecodedSuccessResponsePayload;
+    |
+
+error[E0433]: cannot find type `StatusCode` in this scope
+   --> crates/protocol/src/controller_delivery.rs:494:101
+    |
+494 |         assert_eq!(facade.process(enqueue_request(1, b"changed", batch(revision, 1, 7, 1))).status, StatusCode::RequestIdReuse);
+    |                                                                                                     ^^^^^^^^^^ use of undeclared type `StatusCode`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::StatusCode;
+    |
+
+error[E0422]: cannot find struct, variant or union type `AutomationBatchSlot` in this scope
+   --> crates/protocol/src/controller_delivery.rs:496:25
+    |
+496 |         let malformed = AutomationBatchSlot {
+    |                         ^^^^^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this struct through its public re-export
+    |
+198 +     use crate::AutomationBatchSlot;
+    |
+
+error[E0433]: cannot find type `RequestId` in this scope
+   --> crates/protocol/src/controller_delivery.rs:498:25
+    |
+498 |             request_id: RequestId::new(2).unwrap(),
+    |                         ^^^^^^^^^ use of undeclared type `RequestId`
+    |
+help: consider importing this struct through its public re-export
+    |
+198 +     use crate::RequestId;
+    |
+
+error[E0422]: cannot find struct, variant or union type `AutomationRecord` in this scope
+   --> crates/protocol/src/controller_delivery.rs:501:17
+    |
+501 |                 AutomationRecord {
+    |                 ^^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this struct through its public re-export
+    |
+198 +     use crate::AutomationRecord;
+    |
+
+error[E0433]: cannot find type `AutomationKind` in this scope
+   --> crates/protocol/src/controller_delivery.rs:502:27
+    |
+502 |                     kind: AutomationKind::Point,
+    |                           ^^^^^^^^^^^^^^ use of undeclared type `AutomationKind`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::AutomationKind;
+    |
+
+error[E0425]: cannot find function, tuple struct or tuple variant `ParameterHandle` in this scope
+   --> crates/protocol/src/controller_delivery.rs:503:29
+    |
+503 |                     handle: ParameterHandle(7),
+    |                             ^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this tuple struct through its public re-export
+    |
+198 +     use crate::ParameterHandle;
+    |
+
+error[E0425]: cannot find function, tuple struct or tuple variant `SampleTime` in this scope
+   --> crates/protocol/src/controller_delivery.rs:504:28
+    |
+504 |                     start: SampleTime(3),
+    |                            ^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this tuple struct through its public re-export
+    |
+198 +     use crate::SampleTime;
+    |
+
+error[E0425]: cannot find function, tuple struct or tuple variant `SampleTime` in this scope
+   --> crates/protocol/src/controller_delivery.rs:505:26
+    |
+505 |                     end: SampleTime(3),
+    |                          ^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this tuple struct through its public re-export
+    |
+198 +     use crate::SampleTime;
+    |
+
+error[E0422]: cannot find struct, variant or union type `AutomationRecord` in this scope
+   --> crates/protocol/src/controller_delivery.rs:509:17
+    |
+509 |                 AutomationRecord {
+    |                 ^^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this struct through its public re-export
+    |
+198 +     use crate::AutomationRecord;
+    |
+
+error[E0433]: cannot find type `AutomationKind` in this scope
+   --> crates/protocol/src/controller_delivery.rs:510:27
+    |
+510 |                     kind: AutomationKind::Point,
+    |                           ^^^^^^^^^^^^^^ use of undeclared type `AutomationKind`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::AutomationKind;
+    |
+
+error[E0425]: cannot find function, tuple struct or tuple variant `ParameterHandle` in this scope
+   --> crates/protocol/src/controller_delivery.rs:511:29
+    |
+511 |                     handle: ParameterHandle(0),
+    |                             ^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this tuple struct through its public re-export
+    |
+198 +     use crate::ParameterHandle;
+    |
+
+error[E0425]: cannot find function, tuple struct or tuple variant `SampleTime` in this scope
+   --> crates/protocol/src/controller_delivery.rs:512:28
+    |
+512 |                     start: SampleTime(4),
+    |                            ^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this tuple struct through its public re-export
+    |
+198 +     use crate::SampleTime;
+    |
+
+error[E0425]: cannot find function, tuple struct or tuple variant `SampleTime` in this scope
+   --> crates/protocol/src/controller_delivery.rs:513:26
+    |
+513 |                     end: SampleTime(4),
+    |                          ^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this tuple struct through its public re-export
+    |
+198 +     use crate::SampleTime;
+    |
+
+error[E0433]: cannot find type `StatusCode` in this scope
+   --> crates/protocol/src/controller_delivery.rs:521:37
+    |
+521 |         assert_eq!(rejected.status, StatusCode::InvalidField);
+    |                                     ^^^^^^^^^^ use of undeclared type `StatusCode`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::StatusCode;
+    |
+
+error[E0425]: cannot find function, tuple struct or tuple variant `ParameterHandle` in this scope
+   --> crates/protocol/src/controller_delivery.rs:527:56
+    |
+527 |         let (mut facade, mut render, _) = facade(8, &[(ParameterHandle(7), AutomationKind::Point)]);
+    |                                                        ^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this tuple struct through its public re-export
+    |
+198 +     use crate::ParameterHandle;
+    |
+
+error[E0433]: cannot find type `AutomationKind` in this scope
+   --> crates/protocol/src/controller_delivery.rs:527:76
+    |
+527 |         let (mut facade, mut render, _) = facade(8, &[(ParameterHandle(7), AutomationKind::Point)]);
+    |                                                                            ^^^^^^^^^^^^^^ use of undeclared type `AutomationKind`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::AutomationKind;
+    |
+
+error[E0433]: cannot find type `StatusCode` in this scope
+   --> crates/protocol/src/controller_delivery.rs:530:34
+    |
+530 |         assert_eq!(first.status, StatusCode::Ok);
+    |                                  ^^^^^^^^^^ use of undeclared type `StatusCode`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::StatusCode;
+    |
+
+error[E0425]: cannot find function, tuple struct or tuple variant `SampleTime` in this scope
+   --> crates/protocol/src/controller_delivery.rs:535:45
+    |
+535 |         let pending = render.begin_boundary(SampleTime(0)).unwrap();
+    |                                             ^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this tuple struct through its public re-export
+    |
+198 +     use crate::SampleTime;
+    |
+
+error[E0433]: cannot find type `StatusCode` in this scope
+   --> crates/protocol/src/controller_delivery.rs:538:101
+    |
+538 |         assert_eq!(facade.process(enqueue_request(2, b"overlap", batch(revision, 2, 7, 1))).status, StatusCode::AutomationOrder);
+    |                                                                                                     ^^^^^^^^^^ use of undeclared type `StatusCode`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::StatusCode;
+    |
+
+error[E0433]: cannot find type `StatusCode` in this scope
+   --> crates/protocol/src/controller_delivery.rs:539:100
+    |
+539 |         assert_eq!(facade.process(enqueue_request(3, b"second", batch(revision, 3, 7, 2))).status, StatusCode::Backpressure);
+    |                                                                                                    ^^^^^^^^^^ use of undeclared type `StatusCode`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::StatusCode;
+    |
+
+error[E0433]: cannot find type `StatusCode` in this scope
+   --> crates/protocol/src/controller_delivery.rs:541:107
+    |
+541 |         assert_eq!(facade.process(enqueue_request(4, b"after-collect", batch(revision, 4, 7, 2))).status, StatusCode::Ok);
+    |                                                                                                           ^^^^^^^^^^ use of undeclared type `StatusCode`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::StatusCode;
+    |
+
+error[E0425]: cannot find function, tuple struct or tuple variant `ParameterHandle` in this scope
+   --> crates/protocol/src/controller_delivery.rs:546:63
+    |
+546 |         let (mut facade, mut render, canceled) = facade(8, &[(ParameterHandle(7), AutomationKind::Point)]);
+    |                                                               ^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this tuple struct through its public re-export
+    |
+198 +     use crate::ParameterHandle;
+    |
+
+error[E0433]: cannot find type `AutomationKind` in this scope
+   --> crates/protocol/src/controller_delivery.rs:546:83
+    |
+546 |         let (mut facade, mut render, canceled) = facade(8, &[(ParameterHandle(7), AutomationKind::Point)]);
+    |                                                                                   ^^^^^^^^^^^^^^ use of undeclared type `AutomationKind`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::AutomationKind;
+    |
+
+error[E0433]: cannot find type `StatusCode` in this scope
+   --> crates/protocol/src/controller_delivery.rs:548:105
+    |
+548 |         assert_eq!(facade.process(enqueue_request(1, b"unsupported", batch(revision, 1, 8, 1))).status, StatusCode::Ok);
+    |                                                                                                         ^^^^^^^^^^ use of undeclared type `StatusCode`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::StatusCode;
+    |
+
+error[E0433]: cannot find type `StatusCode` in this scope
+   --> crates/protocol/src/controller_delivery.rs:549:112
+    |
+549 |         assert_eq!(facade.process(enqueue_request(2, b"supported-follower", batch(revision, 2, 7, 2))).status, StatusCode::Ok);
+    |                                                                                                                ^^^^^^^^^^ use of undeclared type `StatusCode`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::StatusCode;
+    |
+
+error[E0425]: cannot find function, tuple struct or tuple variant `SampleTime` in this scope
+   --> crates/protocol/src/controller_delivery.rs:553:39
+    |
+553 |         assert!(render.begin_boundary(SampleTime(77)).is_none());
+    |                                       ^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this tuple struct through its public re-export
+    |
+198 +     use crate::SampleTime;
+    |
+
+error[E0425]: cannot find function, tuple struct or tuple variant `ParameterHandle` in this scope
+   --> crates/protocol/src/controller_delivery.rs:562:63
+    |
+562 |         let (mut facade, mut render, canceled) = facade(8, &[(ParameterHandle(7), AutomationKind::Point)]);
+    |                                                               ^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this tuple struct through its public re-export
+    |
+198 +     use crate::ParameterHandle;
+    |
+
+error[E0433]: cannot find type `AutomationKind` in this scope
+   --> crates/protocol/src/controller_delivery.rs:562:83
+    |
+562 |         let (mut facade, mut render, canceled) = facade(8, &[(ParameterHandle(7), AutomationKind::Point)]);
+    |                                                                                   ^^^^^^^^^^^^^^ use of undeclared type `AutomationKind`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::AutomationKind;
+    |
+
+error[E0433]: cannot find type `RequestId` in this scope
+   --> crates/protocol/src/controller_delivery.rs:565:25
+    |
+565 |             request_id: RequestId::new(id).unwrap(),
+    |                         ^^^^^^^^^ use of undeclared type `RequestId`
+    |
+help: consider importing this struct through its public re-export
+    |
+198 +     use crate::RequestId;
+    |
+
+error[E0433]: cannot find type `ExpectedRevision` in this scope
+   --> crates/protocol/src/controller_delivery.rs:566:32
+    |
+566 |             expected_revision: ExpectedRevision::Exact(revision),
+    |                                ^^^^^^^^^^^^^^^^ use of undeclared type `ExpectedRevision`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::ExpectedRevision;
+    |
+
+error[E0433]: cannot find type `ControlCommand` in this scope
+   --> crates/protocol/src/controller_delivery.rs:568:22
+    |
+568 |             command: ControlCommand::TransportSet {
+    |                      ^^^^^^^^^^^^^^ use of undeclared type `ControlCommand`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::ControlCommand;
+    |
+
+error[E0422]: cannot find struct, variant or union type `TransportSetRequest` in this scope
+   --> crates/protocol/src/controller_delivery.rs:569:26
+    |
+569 |                 request: TransportSetRequest { state: TransportState::Playing, position: None },
+    |                          ^^^^^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this struct through its public re-export
+    |
+198 +     use crate::TransportSetRequest;
+    |
+
+error[E0433]: cannot find type `TransportState` in this scope
+   --> crates/protocol/src/controller_delivery.rs:569:55
+    |
+569 |                 request: TransportSetRequest { state: TransportState::Playing, position: None },
+    |                                                       ^^^^^^^^^^^^^^ use of undeclared type `TransportState`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::TransportState;
+    |
+
+error[E0433]: cannot find type `StatusCode` in this scope
+   --> crates/protocol/src/controller_delivery.rs:573:44
+    |
+573 |         assert_eq!(first_transport.status, StatusCode::Ok);
+    |                                            ^^^^^^^^^^ use of undeclared type `StatusCode`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::StatusCode;
+    |
+
+error[E0433]: cannot find type `StatusCode` in this scope
+   --> crates/protocol/src/controller_delivery.rs:575:105
+    |
+575 |             assert_eq!(facade.process(enqueue_request(2, b"partial", batch(revision, 2, 7, 1))).status, StatusCode::Ok);
+    |                                                                                                         ^^^^^^^^^^ use of undeclared type `StatusCode`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::StatusCode;
+    |
+
+error[E0425]: cannot find function, tuple struct or tuple variant `SampleTime` in this scope
+   --> crates/protocol/src/controller_delivery.rs:581:31
+    |
+581 |         render.begin_boundary(SampleTime(0)).unwrap();
+    |                               ^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this tuple struct through its public re-export
+    |
+198 +     use crate::SampleTime;
+    |
+
+error[E0433]: cannot find type `StatusCode` in this scope
+   --> crates/protocol/src/controller_delivery.rs:585:79
+    |
+585 |         assert_eq!(facade.process(transport(3, b"blocked-transport")).status, StatusCode::Unavailable);
+    |                                                                               ^^^^^^^^^^ use of undeclared type `StatusCode`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::StatusCode;
+    |
+
+error[E0425]: cannot find function, tuple struct or tuple variant `SampleTime` in this scope
+   --> crates/protocol/src/controller_delivery.rs:587:39
+    |
+587 |         assert!(render.begin_boundary(SampleTime(99)).is_none());
+    |                                       ^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this tuple struct through its public re-export
+    |
+198 +     use crate::SampleTime;
+    |
+
+error[E0425]: cannot find function, tuple struct or tuple variant `SampleTime` in this scope
+   --> crates/protocol/src/controller_delivery.rs:589:77
+    |
+589 |         assert_eq!((complete.effective_sample, complete.canceled_records), (SampleTime(99), 1));
+    |                                                                             ^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this tuple struct through its public re-export
+    |
+198 +     use crate::SampleTime;
+    |
+
+error[E0433]: cannot find type `StatusCode` in this scope
+   --> crates/protocol/src/controller_delivery.rs:592:34
+    |
+592 |         assert_eq!(later.status, StatusCode::Ok);
+    |                                  ^^^^^^^^^^ use of undeclared type `StatusCode`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::StatusCode;
+    |
+
+error[E0433]: cannot find type `EncodeError` in this scope
+   --> crates/protocol/src/controller_delivery.rs:595:109
+    |
+595 | ...ut short), Err(EventEgressError::Encode(EncodeError::OutputTooSmall { .. }))));
+    |                                            ^^^^^^^^^^^ use of undeclared type `EncodeError`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::EncodeError;
+    |
+
+error[E0433]: cannot find type `DecodedTypedEventFrame` in this scope
+   --> crates/protocol/src/controller_delivery.rs:604:13
+    |
+604 |             DecodedTypedEventFrame::Success { .. } => 0,
+    |             ^^^^^^^^^^^^^^^^^^^^^^ use of undeclared type `DecodedTypedEventFrame`
+    |
+help: consider importing this struct through its public re-export
+    |
+198 +     use crate::DecodedTypedEventFrame;
+    |
+
+error[E0433]: cannot find type `DecodedTypedEventFrame` in this scope
+   --> crates/protocol/src/controller_delivery.rs:605:13
+    |
+605 |             DecodedTypedEventFrame::Event { payload, .. } => match payload {
+    |             ^^^^^^^^^^^^^^^^^^^^^^ use of undeclared type `DecodedTypedEventFrame`
+    |
+help: consider importing this struct through its public re-export
+    |
+198 +     use crate::DecodedTypedEventFrame;
+    |
+
+error[E0433]: cannot find type `DecodedEventPayload` in this scope
+   --> crates/protocol/src/controller_delivery.rs:606:17
+    |
+606 |                 DecodedEventPayload::TransportState(value) => value.event_sequence,
+    |                 ^^^^^^^^^^^^^^^^^^^ use of undeclared type `DecodedEventPayload`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::DecodedEventPayload;
+    |
+
+error[E0433]: cannot find type `DecodedEventPayload` in this scope
+   --> crates/protocol/src/controller_delivery.rs:607:17
+    |
+607 |                 DecodedEventPayload::AutomationCanceled(value) => value.event_sequence,
+    |                 ^^^^^^^^^^^^^^^^^^^ use of undeclared type `DecodedEventPayload`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::DecodedEventPayload;
+    |
+
+error[E0425]: cannot find function, tuple struct or tuple variant `ParameterHandle` in this scope
+   --> crates/protocol/src/controller_delivery.rs:613:45
+    |
+613 |         let (mut full, _, _) = facade(1, &[(ParameterHandle(7), AutomationKind::Point)]);
+    |                                             ^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this tuple struct through its public re-export
+    |
+198 +     use crate::ParameterHandle;
+    |
+
+error[E0433]: cannot find type `AutomationKind` in this scope
+   --> crates/protocol/src/controller_delivery.rs:613:65
+    |
+613 |         let (mut full, _, _) = facade(1, &[(ParameterHandle(7), AutomationKind::Point)]);
+    |                                                                 ^^^^^^^^^^^^^^ use of undeclared type `AutomationKind`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::AutomationKind;
+    |
+
+error[E0433]: cannot find type `StatusCode` in this scope
+   --> crates/protocol/src/controller_delivery.rs:615:97
+    |
+615 |         assert_eq!(full.process(transport_request(full_revision, 1, b"full-transport")).status, StatusCode::Ok);
+    |                                                                                                 ^^^^^^^^^^ use of undeclared type `StatusCode`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::StatusCode;
+    |
+
+error[E0433]: cannot find type `StatusCode` in this scope
+   --> crates/protocol/src/controller_delivery.rs:616:107
+    |
+616 |         assert_eq!(full.process(enqueue_request(2, b"full-batch", batch(full_revision, 2, 7, 1))).status, StatusCode::Ok);
+    |                                                                                                           ^^^^^^^^^^ use of undeclared type `StatusCode`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::StatusCode;
+    |
+
+error[E0425]: cannot find type `SessionRevision` in this scope
+   --> crates/protocol/src/controller_delivery.rs:622:40
+    |
+622 |     fn transport_request<'a>(revision: SessionRevision, id: u64, bytes: &'a [u8]) -> ControllerRequest<'a> {
+    |                                        ^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this struct through its public re-export
+    |
+198 +     use crate::SessionRevision;
+    |
+
+error[E0433]: cannot find type `RequestId` in this scope
+   --> crates/protocol/src/controller_delivery.rs:624:25
+    |
+624 |             request_id: RequestId::new(id).unwrap(),
+    |                         ^^^^^^^^^ use of undeclared type `RequestId`
+    |
+help: consider importing this struct through its public re-export
+    |
+198 +     use crate::RequestId;
+    |
+
+error[E0433]: cannot find type `ExpectedRevision` in this scope
+   --> crates/protocol/src/controller_delivery.rs:625:32
+    |
+625 |             expected_revision: ExpectedRevision::Exact(revision),
+    |                                ^^^^^^^^^^^^^^^^ use of undeclared type `ExpectedRevision`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::ExpectedRevision;
+    |
+
+error[E0433]: cannot find type `ControlCommand` in this scope
+   --> crates/protocol/src/controller_delivery.rs:627:22
+    |
+627 |             command: ControlCommand::TransportSet {
+    |                      ^^^^^^^^^^^^^^ use of undeclared type `ControlCommand`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::ControlCommand;
+    |
+
+error[E0422]: cannot find struct, variant or union type `TransportSetRequest` in this scope
+   --> crates/protocol/src/controller_delivery.rs:628:26
+    |
+628 |                 request: TransportSetRequest { state: TransportState::Playing, position: None },
+    |                          ^^^^^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this struct through its public re-export
+    |
+198 +     use crate::TransportSetRequest;
+    |
+
+error[E0433]: cannot find type `TransportState` in this scope
+   --> crates/protocol/src/controller_delivery.rs:628:55
+    |
+628 |                 request: TransportSetRequest { state: TransportState::Playing, position: None },
+    |                                                       ^^^^^^^^^^^^^^ use of undeclared type `TransportState`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::TransportState;
+    |
+
+error[E0425]: cannot find function, tuple struct or tuple variant `ParameterHandle` in this scope
+   --> crates/protocol/src/controller_delivery.rs:635:47
+    |
+635 |         let (mut facade, _, _) = facade(8, &[(ParameterHandle(7), AutomationKind::Point)]);
+    |                                               ^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this tuple struct through its public re-export
+    |
+198 +     use crate::ParameterHandle;
+    |
+
+error[E0433]: cannot find type `AutomationKind` in this scope
+   --> crates/protocol/src/controller_delivery.rs:635:67
+    |
+635 |         let (mut facade, _, _) = facade(8, &[(ParameterHandle(7), AutomationKind::Point)]);
+    |                                                                   ^^^^^^^^^^^^^^ use of undeclared type `AutomationKind`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::AutomationKind;
+    |
+
+error[E0425]: cannot find type `SessionEdit` in this scope
+   --> crates/protocol/src/controller_delivery.rs:638:21
+    |
+638 |         let edits: [SessionEdit; 0] = [];
+    |                     ^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::SessionEdit;
+    |
+
+error[E0433]: cannot find type `RequestId` in this scope
+   --> crates/protocol/src/controller_delivery.rs:640:25
+    |
+640 |             request_id: RequestId::new(1).unwrap(),
+    |                         ^^^^^^^^^ use of undeclared type `RequestId`
+    |
+help: consider importing this struct through its public re-export
+    |
+198 +     use crate::RequestId;
+    |
+
+error[E0433]: cannot find type `ExpectedRevision` in this scope
+   --> crates/protocol/src/controller_delivery.rs:641:32
+    |
+641 |             expected_revision: ExpectedRevision::Exact(revision),
+    |                                ^^^^^^^^^^^^^^^^ use of undeclared type `ExpectedRevision`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::ExpectedRevision;
+    |
+
+error[E0433]: cannot find type `ControlCommand` in this scope
+   --> crates/protocol/src/controller_delivery.rs:643:22
+    |
+643 |             command: ControlCommand::SessionTransactionApply { edits: &edits },
+    |                      ^^^^^^^^^^^^^^ use of undeclared type `ControlCommand`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::ControlCommand;
+    |
+
+error[E0433]: cannot find type `StatusCode` in this scope
+   --> crates/protocol/src/controller_delivery.rs:644:20
+    |
+644 |         }).status, StatusCode::Unavailable);
+    |                    ^^^^^^^^^^ use of undeclared type `StatusCode`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::StatusCode;
+    |
+
+error[E0433]: cannot find type `RequestId` in this scope
+   --> crates/protocol/src/controller_delivery.rs:646:25
+    |
+646 |             request_id: RequestId::new(2).unwrap(),
+    |                         ^^^^^^^^^ use of undeclared type `RequestId`
+    |
+help: consider importing this struct through its public re-export
+    |
+198 +     use crate::RequestId;
+    |
+
+error[E0433]: cannot find type `ExpectedRevision` in this scope
+   --> crates/protocol/src/controller_delivery.rs:647:32
+    |
+647 |             expected_revision: ExpectedRevision::Exact(revision),
+    |                                ^^^^^^^^^^^^^^^^ use of undeclared type `ExpectedRevision`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::ExpectedRevision;
+    |
+
+error[E0433]: cannot find type `ControlCommand` in this scope
+   --> crates/protocol/src/controller_delivery.rs:649:22
+    |
+649 | ...   command: ControlCommand::TransportSet { request: TransportSetRequest { state: TransportState::Playing, position: Some(SampleT...
+    |                ^^^^^^^^^^^^^^ use of undeclared type `ControlCommand`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::ControlCommand;
+    |
+
+error[E0422]: cannot find struct, variant or union type `TransportSetRequest` in this scope
+   --> crates/protocol/src/controller_delivery.rs:649:62
+    |
+649 | ...   command: ControlCommand::TransportSet { request: TransportSetRequest { state: TransportState::Playing, position: Some(SampleT...
+    |                                                        ^^^^^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this struct through its public re-export
+    |
+198 +     use crate::TransportSetRequest;
+    |
+
+error[E0433]: cannot find type `TransportState` in this scope
+   --> crates/protocol/src/controller_delivery.rs:649:91
+    |
+649 | ...equest: TransportSetRequest { state: TransportState::Playing, position: Some(SampleTime(9)) } },
+    |                                         ^^^^^^^^^^^^^^ use of undeclared type `TransportState`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::TransportState;
+    |
+
+error[E0425]: cannot find function, tuple struct or tuple variant `SampleTime` in this scope
+   --> crates/protocol/src/controller_delivery.rs:649:131
+    |
+649 | ...state: TransportState::Playing, position: Some(SampleTime(9)) } },
+    |                                                   ^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this tuple struct through its public re-export
+    |
+198 +     use crate::SampleTime;
+    |
+
+error[E0433]: cannot find type `StatusCode` in this scope
+   --> crates/protocol/src/controller_delivery.rs:650:20
+    |
+650 |         }).status, StatusCode::Unavailable);
+    |                    ^^^^^^^^^^ use of undeclared type `StatusCode`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::StatusCode;
+    |
+
+error[E0433]: cannot find type `RequestId` in this scope
+   --> crates/protocol/src/controller_delivery.rs:652:25
+    |
+652 |             request_id: RequestId::new(3).unwrap(),
+    |                         ^^^^^^^^^ use of undeclared type `RequestId`
+    |
+help: consider importing this struct through its public re-export
+    |
+198 +     use crate::RequestId;
+    |
+
+error[E0433]: cannot find type `ExpectedRevision` in this scope
+   --> crates/protocol/src/controller_delivery.rs:653:32
+    |
+653 |             expected_revision: ExpectedRevision::Exact(revision),
+    |                                ^^^^^^^^^^^^^^^^ use of undeclared type `ExpectedRevision`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::ExpectedRevision;
+    |
+
+error[E0433]: cannot find type `ControlCommand` in this scope
+   --> crates/protocol/src/controller_delivery.rs:655:22
+    |
+655 |             command: ControlCommand::ParameterStateGet { request: ParameterStateRequest { handles: vec![7] } },
+    |                      ^^^^^^^^^^^^^^ use of undeclared type `ControlCommand`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::ControlCommand;
+    |
+
+error[E0422]: cannot find struct, variant or union type `ParameterStateRequest` in this scope
+   --> crates/protocol/src/controller_delivery.rs:655:67
+    |
+655 |             command: ControlCommand::ParameterStateGet { request: ParameterStateRequest { handles: vec![7] } },
+    |                                                                   ^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this struct through its public re-export
+    |
+198 +     use crate::ParameterStateRequest;
+    |
+
+error[E0433]: cannot find type `StatusCode` in this scope
+   --> crates/protocol/src/controller_delivery.rs:656:20
+    |
+656 |         }).status, StatusCode::Unavailable);
+    |                    ^^^^^^^^^^ use of undeclared type `StatusCode`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::StatusCode;
+    |
+
+error[E0433]: cannot find type `RequestId` in this scope
+   --> crates/protocol/src/controller_delivery.rs:660:25
+    |
+660 |             request_id: RequestId::new(4).unwrap(),
+    |                         ^^^^^^^^^ use of undeclared type `RequestId`
+    |
+help: consider importing this struct through its public re-export
+    |
+198 +     use crate::RequestId;
+    |
+
+error[E0433]: cannot find type `ExpectedRevision` in this scope
+   --> crates/protocol/src/controller_delivery.rs:661:32
+    |
+661 |             expected_revision: ExpectedRevision::Any,
+    |                                ^^^^^^^^^^^^^^^^ use of undeclared type `ExpectedRevision`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::ExpectedRevision;
+    |
+
+error[E0433]: cannot find type `ControlCommand` in this scope
+   --> crates/protocol/src/controller_delivery.rs:663:22
+    |
+663 |             command: ControlCommand::SessionSnapshotGet { offset: 0, max_bytes: 1024 },
+    |                      ^^^^^^^^^^^^^^ use of undeclared type `ControlCommand`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::ControlCommand;
+    |
+
+error[E0433]: cannot find type `StatusCode` in this scope
+   --> crates/protocol/src/controller_delivery.rs:664:20
+    |
+664 |         }).status, StatusCode::Ok);
+    |                    ^^^^^^^^^^ use of undeclared type `StatusCode`
+    |
+help: consider importing this enum through its public re-export
+    |
+198 +     use crate::StatusCode;
+    |
+
+warning: unused import: `canonical_session_json`
+   --> crates/protocol/src/controller_delivery.rs:200:32
+    |
+200 |     use session::{CompileCaps, canonical_session_json, parse_session_json};
+    |                                ^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+error[E0618]: expected function, found `controller_delivery::ControllerAutomationDelivery<FixtureProvider>`
+   --> crates/protocol/src/controller_delivery.rs:613:32
+    |
+389 | /     fn facade(
+390 | |         reliable_events: usize,
+391 | |         capabilities: &[(ParameterHandle, AutomationKind)],
+392 | |     ) -> (
+...   |
+395 | |         Arc<AtomicU64>,
+396 | |     ) {
+    | |_____- this function of the same name is available here, but it's shadowed by the local binding
+...
+562 |           let (mut facade, mut render, canceled) = facade(8, &[(ParameterHandle(7), AutomationKind::Point)]);
+    |                ---------- `facade` has type `controller_delivery::ControllerAutomationDelivery<FixtureProvider>`
+...
+613 |           let (mut full, _, _) = facade(1, &[(ParameterHandle(7), AutomationKind::Point)]);
+    |                                  ^^^^^^---------------------------------------------------
+    |                                  |
+    |                                  call expression requires function
+
+Some errors have detailed explanations: E0106, E0422, E0425, E0433, E0618.
+For more information about an error, try `rustc --explain E0106`.
+warning: `protocol` (lib test) generated 1 warning
+error: could not compile `protocol` (lib test) due to 147 previous errors; 1 warning emitted
