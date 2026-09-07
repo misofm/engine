@@ -1,0 +1,10 @@
+{
+  "captured_at": "post-test root checkpoint, not a claim of a pre-command manifest",
+  "base_head": "47a8adc7d8415a27de4d348b238a97b8a9ea6787",
+  "sources": {
+    "crates/engine/src/lib.rs": "5bc225a802f70ed207800ce039feac8a2b081da11b425f96bd3b50453b1708af",
+    "crates/protocol/src/controller.rs": "02385e1a14f216efa7c948efe2c15a1125fc9527f1584aff742e7234f36fb0db",
+    "crates/protocol/src/message_wire.rs": "aa74881ede863039c0a1634311b3ad42fb64020d3777ac6d7edffac2b64d555b",
+    "crates/protocol/src/session_wire.rs": "e318bfe36da0258e3348723ab3d240de220fdf8ec50ec3cacea20847ec994fc6"
+  }
+}

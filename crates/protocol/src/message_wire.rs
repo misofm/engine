@@ -5983,11 +5983,6 @@ mod tests {
     }
 
     fn hex(bytes: &[u8]) -> String {
-        let mut output = String::with_capacity(bytes.len() * 2);
-        for byte in bytes {
-            use core::fmt::Write as _;
-            write!(&mut output, "{byte:02x}").expect("string write");
-        }
-        output
+        engine::hex_lower(bytes)
     }
 }

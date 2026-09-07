@@ -1,0 +1,10 @@
+Diff in /home/bl/misofm/engine-shared-hex-authority/crates/engine/src/lib.rs:95:
+ mod tests {
+     use super::{
+         EXTENDED_COMPATIBILITY_SAMPLE_RATES, EngineVersion, LAUNCH_SAMPLE_RATES, QuantumFrames,
+-        SampleRateHz, hex_lower, is_extended_compatibility_sample_rate,
+-        is_launch_sample_rate,
++        SampleRateHz, hex_lower, is_extended_compatibility_sample_rate, is_launch_sample_rate,
+     };
+ 
+     #[test]
