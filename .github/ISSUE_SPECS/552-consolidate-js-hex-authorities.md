@@ -451,3 +451,24 @@ qualification revision: actual Luna HIGH must capture every pre-command identity
 record the real provisioned status, use fail-closed cleanup with the exact symlink path, and package
 only diff-clean evidence. Product and contract bytes remain frozen. Full attempt-1 verdict is in
 `artifacts/issue552-final-review-attempt1`.
+
+## Final qualification evidence attempt 2 — PASS pending Astra LOW review
+
+Actual Luna HIGH reran the frozen sequence on clean pushed HEAD
+`89700161e53846b6dc8059bf4ba669d0b90c9f3f` without changing product source. Each gate records a
+fresh UTC timestamp, actual cwd, actual pre-command HEAD/status, fresh source hashes, and exact-six-
+file artifact inventory before execution. Stdout, stderr, exit code, and signal are separate raw
+records. No pre-command fact was synthesized after execution.
+
+Gates 1 through 7 passed. Root-authorized provisioning verified byte-identical current-main package
+and lock identities plus Playwright/playwright-core `1.62.1`. Gate 8 accurately records the
+temporary untracked symlink and passed with Chromium `151.0.7922.34`. Five independent fail-closed
+cleanup steps verified the link, exact `/home/bl/misofm/engine` source, unlink, absence, and final
+clean status. Workspace policy, both committed-base diff checks, exact path census, and the complete
+semantic census then passed. The final worktree was clean at the same HEAD, and the manifest
+authenticated all 101 listed records.
+
+The lossless attempt-2 evidence is in `artifacts/issue552-final-qualification-attempt2`. Root's
+packaging check found it diff-clean before commit. Closure remains pending Astra LOW exact-head
+review, required PR qualification, merge, synchronized issue closure, and successful post-main
+qualification.

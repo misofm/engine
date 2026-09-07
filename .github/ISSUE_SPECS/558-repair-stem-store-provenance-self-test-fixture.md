@@ -150,3 +150,16 @@ all six attributable provenance mutations, and the frozen product/artifact scope
 single Luna HIGH evidence-capture revision with no product, checker, validator, provenance, pin,
 dependency, lock, artifact, or API change. Full verdict is in
 `artifacts/issue552-final-review-attempt1`.
+
+## Combined qualification evidence attempt 2 — PASS pending Astra LOW review
+
+Actual Luna HIGH repeated the full parent sequence on byte-identical product source at
+`89700161e53846b6dc8059bf4ba669d0b90c9f3f` with contemporaneous per-command identities, exact raw
+streams/status, accurate temporary-symlink state, and five independent fail-closed cleanup steps.
+All gates passed, including all six attributable provenance mutations, current-main package/lock
+and pinned Playwright verification, Chromium qualification, both committed-base whitespace checks,
+the exact path census, and the semantic census. The final worktree was clean and the 101-record
+manifest verified. Evidence is in `artifacts/issue552-final-qualification-attempt2`.
+
+No #558 checker or #552 product byte changed. Astra LOW exact-head review, required PR
+qualification, merge, synchronized closure, and post-main qualification remain.
