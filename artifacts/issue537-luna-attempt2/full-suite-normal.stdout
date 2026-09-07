@@ -1,0 +1,99 @@
+
+running 17 tests
+test detector_access_tests::detector_access_matches_old_words_and_prepared_callsite_route ... ok
+test shim::tests::the_link_combines_the_pair_per_mode ... ok
+test shim::tests::the_shims_are_width_independent ... ok
+test shim::tests::the_smoother_has_exact_ends ... ok
+test shim::tests::the_smoother_picks_the_attack_direction_and_matches_the_unfused_restatement ... ok
+test split::a_ramp_arriving_mid_block_arrives_on_the_same_sample ... ok
+test split::a_ramp_arriving_on_a_block_boundary_arrives_on_the_same_sample ... ok
+test split::a_ramp_in_flight_when_a_block_opens_stays_in_flight ... ok
+test split::a_restated_parameter_stays_on_the_flat_path ... ok
+test split::a_restatement_mid_flight_agrees ... ok
+test split::a_settled_bank_meets_the_flat_paths_precondition ... ok
+test split::a_settled_bank_renders_what_the_ramped_path_rendered ... ok
+test split::a_window_lands_on_its_target_on_the_exact_sample ... ok
+test split::overlapping_windows_on_different_tracks_agree ... ok
+test split::the_ramped_path_advances_both_channels ... ok
+test split::the_split_costs_what_it_costs ... ignored, descriptive measurement, not a gate
+test split::the_split_is_partition_invariant ... ok
+
+test result: ok. 16 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 1.18s
+
+
+running 1 test
+test passes_effect_contract_conformance ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.78s
+
+
+running 1 test
+test the_corpus_digests_are_pinned_and_width_independent ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s
+
+
+running 3 tests
+test the_design_guards_its_domain ... ok
+test the_recursive_words_are_flushed ... ok
+test the_two_stage_split_matches_the_reference_and_recombines_flat ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 12.18s
+
+
+running 1 test
+test descriptive_frame_cost ... ignored, descriptive measurement, not a gate
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 6 tests
+test a_restored_track_is_rotated_into_the_receiving_cursor ... ok
+test detector_offset_profiles_preserve_public_identity ... ok
+test lane_identity_across_widths ... ok
+test partition_invariance ... ok
+test resets_agree_across_widths ... ok
+test restored_offset_profiles_reclassify_on_next_segment ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.50s
+
+
+running 2 tests
+test the_band_sum_is_the_butterworth_allpass ... ok
+test two_section_bands_match_the_four_section_reference ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.09s
+
+
+running 3 tests
+test the_bank_render_path_allocates_nothing ... ok
+test the_scalar_render_path_allocates_nothing ... ok
+test tracking_allocator_proves_own_thread_allocation_and_free ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+
+running 3 tests
+test a_nonfinite_block_is_zeroed_reset_and_counted ... ok
+test recovery_restores_a_fresh_instance ... ok
+test the_boundary_is_the_shared_limit_and_a_bank_shares_its_reset ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+
+running 7 tests
+test a_rejected_restore_changes_nothing ... ok
+test bank_requests_are_validated_before_any_fallback ... ok
+test bypass_latency_automation_and_restore_are_transactional ... ok
+test descriptor_preparation_and_exact_four_rate_resources_are_frozen ... ok
+test isolated_low_and_high_band_compression_reduce_only_the_selected_band ... ok
+test unity_gain_output_is_the_delayed_lr4_sum ... ok
+test unity_gain_transition_has_no_step_at_crossover ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

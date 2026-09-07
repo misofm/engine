@@ -1,0 +1,11 @@
+
+running 6 tests
+test a_restored_track_is_rotated_into_the_receiving_cursor ... ok
+test detector_offset_profiles_preserve_public_identity ... ok
+test lane_identity_across_widths ... ok
+test partition_invariance ... ok
+test resets_agree_across_widths ... ok
+test restored_offset_profiles_reclassify_on_next_segment ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+

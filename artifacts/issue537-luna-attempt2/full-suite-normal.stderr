@@ -1,0 +1,13 @@
+   Compiling multiband-compressor v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/multiband-compressor)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.11s
+     Running unittests src/lib.rs (/tmp/issue537-luna2-target/debug/deps/multiband_compressor-d7fa5ded05fdb86e)
+     Running tests/conformance.rs (/tmp/issue537-luna2-target/debug/deps/conformance-8ac9b0e10df0fb42)
+     Running tests/cross_target_digest.rs (/tmp/issue537-luna2-target/debug/deps/cross_target_digest-83af2054564d6686)
+     Running tests/crossover.rs (/tmp/issue537-luna2-target/debug/deps/crossover-a2c14a3daec79216)
+     Running tests/descriptive_frame_cost.rs (/tmp/issue537-luna2-target/debug/deps/descriptive_frame_cost-ac5eea64d434f3d4)
+     Running tests/identity.rs (/tmp/issue537-luna2-target/debug/deps/identity-edb08f00da434ccb)
+     Running tests/lr4_two_section_mapping_f64.rs (/tmp/issue537-luna2-target/debug/deps/lr4_two_section_mapping_f64-4db988d24d6e884a)
+     Running tests/no_alloc_render.rs (/tmp/issue537-luna2-target/debug/deps/no_alloc_render-249c7406eb7c01a4)
+     Running tests/nonfinite.rs (/tmp/issue537-luna2-target/debug/deps/nonfinite-977d86c0dfc223f3)
+     Running tests/product.rs (/tmp/issue537-luna2-target/debug/deps/product-c1a18e8ac26ee3ad)
+   Doc-tests multiband_compressor
