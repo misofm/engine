@@ -208,3 +208,7 @@ Source PASS remains unchanged. This ruling grants neither passing artifact quali
 ## Exact approved artifact-pin checkpoint
 
 Luna xhigh updated only the artifact pin to the builder-observed e70a4311da3f053ea77fc0ec7ac00348d534dfb2919e05591fefed515988802d with its newline preserved. Root verified the exact value. DSP/build source remains unchanged; ordinary verified rebuild and artifact qualification are pending, and the pin alone receives no qualification credit.
+
+## Completed local artifact qualification
+
+Ordinary verified rebuild reproduces e70a4311da3f053ea77fc0ec7ac00348d534dfb2919e05591fefed515988802d (2717984 bytes) and the exact six-file shipped set, independently rehashed. Static/object, expected-resource/native-witness checks with26 negative controls and hermetic tests pass. Actual Chromium151.0.7922.34, Firefox153.0 and WebKit26.5 qualification with mutations passes; generated results/matrix identify actual candidate34071c8763468f8c20186466a5d15cf5c2f0a636 and built output. Matrix verification passes. Original captures and artifact identities are retained in artifacts/issue534-delivery. No new numerical/corpus/resource expectation or target matrix changed. Exact PR/current-base review and required qualification CI remain before merge/closure.

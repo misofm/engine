@@ -1,0 +1,5 @@
+# Gate access delivery evidence
+
+Native shared/static C ABI passes on unchanged accepted DSP source. The first ordinary builder compiled and stopped at the old artifact pin, exactly as retained. Astra low approved the bounded observed-pin update; Luna xhigh implemented only that pin. The ordinary verified rebuild then passed and independently rehashed shipped module e70a4311da3f053ea77fc0ec7ac00348d534dfb2919e05591fefed515988802d,2717984bytes, in the exact six-file set.
+
+Candidate34071c8763468f8c20186466a5d15cf5c2f0a636 is the actual builder/browser input commit. Static/object checks, expected resources/native witness with26 negative controls and hermetic tests pass. Actual Chromium151.0.7922.34, Firefox153.0 and WebKit26.5 qualification passes with mutations; generated results/matrix record that actual candidate/output, and matrix check passes. No earlier browser result is substituted. Subsequent generated records/evidence commits do not change DSP/build source or pin. Original artifact directory remains /tmp/issue534-delivery/artifact with complete identities recorded. No timing claim. Exact PR-head/current-base review and required CI remain before merge.
