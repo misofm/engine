@@ -2895,6 +2895,16 @@ mod tests {
         assert_eq!(failure.code, "graph.plan.observer");
         assert_eq!(failure.plan.observers.len(), 1);
         assert_eq!(failure.bindings.observers.len(), 1);
+        let returned_plan = *failure.plan;
+        let mut returned_bindings = failure.bindings;
+        returned_bindings
+            .observers
+            .pop()
+            .expect("returned caller observer");
+        match returned_plan.bind(returned_bindings) {
+            Ok(_) => {}
+            Err(failure) => panic!("repaired observer bind rejected: {}", failure.code),
+        }
     }
 
     #[test]
