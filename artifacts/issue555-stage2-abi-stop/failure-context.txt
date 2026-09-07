@@ -1,0 +1,69 @@
+repository_status:
+## codex/hex-artifact-qualification...origin/codex/hex-artifact-qualification
+repository_pin:
+1bc18ab8cfb3e2a3e5a0ebeda185a64551e8398870abb2f3581077da0dfd3a3f
+scratch_target_outputs:
+/tmp/issue555-native-target/release/deps/math-2e3f7d9b87215f7f.d	5554 bytes
+/tmp/issue555-native-target/release/deps/multiband_compressor-83c62f653f2ce1dc.d	950 bytes
+/tmp/issue555-native-target/release/deps/once_cell-a5f48d16dc310a33.d	955 bytes
+/tmp/issue555-native-target/release/deps/parametric_eq-2ee3776d8960a1bc.d	511 bytes
+/tmp/issue555-native-target/release/deps/proc_macro2-4d498c563343c641.d	4642 bytes
+/tmp/issue555-native-target/release/deps/proc_macro_error-14719839471d2409.d	2656 bytes
+/tmp/issue555-native-target/release/deps/proc_macro_error_attr-265005e334c52653.d	1105 bytes
+/tmp/issue555-native-target/release/deps/protocol-4c32534cfba8c72e.d	2184 bytes
+/tmp/issue555-native-target/release/deps/quote-53adbc887b875769.d	2744 bytes
+/tmp/issue555-native-target/release/deps/rack-8f73487733fa2967.d	307 bytes
+/tmp/issue555-native-target/release/deps/rack_compiler-01654602ae7315b8.d	370 bytes
+/tmp/issue555-native-target/release/deps/safe_arch-6e871e025c6293db.d	8145 bytes
+/tmp/issue555-native-target/release/deps/session-81127d800aab54d7.d	1663 bytes
+/tmp/issue555-native-target/release/deps/sha2-61ecefa878cb4515.d	4666 bytes
+/tmp/issue555-native-target/release/deps/smallstr-d6db786ab9472822.d	944 bytes
+/tmp/issue555-native-target/release/deps/smallvec-1f7edf13a80b7a12.d	583 bytes
+/tmp/issue555-native-target/release/deps/soft_clip-932410db16c690d1.d	749 bytes
+/tmp/issue555-native-target/release/deps/source-44c6e7841c77c54c.d	595 bytes
+/tmp/issue555-native-target/release/deps/syn-2282d6be41fc76be.d	14102 bytes
+/tmp/issue555-native-target/release/deps/transient_shaper-e2541ecf05e7b115.d	544 bytes
+/tmp/issue555-native-target/release/deps/true_peak_limiter-6a351f14374727ee.d	555 bytes
+/tmp/issue555-native-target/release/deps/typenum-bfe75be390533a3b.d	5469 bytes
+/tmp/issue555-native-target/release/deps/unicode_ident-59d9c919ee98e5f0.d	1007 bytes
+/tmp/issue555-native-target/release/deps/utf8_decode-363e8f4ca571ed11.d	969 bytes
+/tmp/issue555-native-target/release/deps/version_check-68692a67178d22e2.d	1769 bytes
+/tmp/issue555-native-target/release/deps/wide-d343d0744b1f6bcc.d	11775 bytes
+/tmp/issue555-native-target/release/libcapi.a	107367512 bytes
+/tmp/issue555-native-target/release/libcapi.d	10851 bytes
+/tmp/issue555-native-target/release/libcapi.rlib	2291704 bytes
+/tmp/issue555-native-target/release/libcapi.so	29957912 bytes
+expected_relative_native_outputs:
+/tmp/issue555-source-e4f46fa8/target/release/deps/math-2e3f7d9b87215f7f.d	5581 bytes
+/tmp/issue555-source-e4f46fa8/target/release/deps/multiband_compressor-bcc58b95adc95528.d	977 bytes
+/tmp/issue555-source-e4f46fa8/target/release/deps/once_cell-a5f48d16dc310a33.d	982 bytes
+/tmp/issue555-source-e4f46fa8/target/release/deps/parameter_metadata-3c3ecbb2897f469c	21309776 bytes
+/tmp/issue555-source-e4f46fa8/target/release/deps/parameter_metadata-3c3ecbb2897f469c.d	290 bytes
+/tmp/issue555-source-e4f46fa8/target/release/deps/parameter_metadata-9bc9da48e89e297d.d	601 bytes
+/tmp/issue555-source-e4f46fa8/target/release/deps/parametric_eq-bbfa80d8fbf286c2.d	538 bytes
+/tmp/issue555-source-e4f46fa8/target/release/deps/proc_macro2-4d498c563343c641.d	4669 bytes
+/tmp/issue555-source-e4f46fa8/target/release/deps/proc_macro_error-14719839471d2409.d	2683 bytes
+/tmp/issue555-source-e4f46fa8/target/release/deps/proc_macro_error_attr-265005e334c52653.d	1123 bytes
+/tmp/issue555-source-e4f46fa8/target/release/deps/quote-53adbc887b875769.d	2771 bytes
+/tmp/issue555-source-e4f46fa8/target/release/deps/rack-707518deaf5cd646.d	334 bytes
+/tmp/issue555-source-e4f46fa8/target/release/deps/rack_compiler-6810363e1cb38a29.d	397 bytes
+/tmp/issue555-source-e4f46fa8/target/release/deps/safe_arch-6e871e025c6293db.d	8172 bytes
+/tmp/issue555-source-e4f46fa8/target/release/deps/session-0cc3aaee019b6955.d	1690 bytes
+/tmp/issue555-source-e4f46fa8/target/release/deps/sha2-61ecefa878cb4515.d	4693 bytes
+/tmp/issue555-source-e4f46fa8/target/release/deps/smallstr-d6db786ab9472822.d	971 bytes
+/tmp/issue555-source-e4f46fa8/target/release/deps/smallvec-1f7edf13a80b7a12.d	610 bytes
+/tmp/issue555-source-e4f46fa8/target/release/deps/soft_clip-7456cde8a70c0cd0.d	776 bytes
+/tmp/issue555-source-e4f46fa8/target/release/deps/source-646d2edd18490025.d	622 bytes
+/tmp/issue555-source-e4f46fa8/target/release/deps/syn-2282d6be41fc76be.d	14129 bytes
+/tmp/issue555-source-e4f46fa8/target/release/deps/transient_shaper-1314d2d463043934.d	571 bytes
+/tmp/issue555-source-e4f46fa8/target/release/deps/true_peak_limiter-9a11d7092358481f.d	582 bytes
+/tmp/issue555-source-e4f46fa8/target/release/deps/typenum-bfe75be390533a3b.d	5496 bytes
+/tmp/issue555-source-e4f46fa8/target/release/deps/unicode_ident-59d9c919ee98e5f0.d	1034 bytes
+/tmp/issue555-source-e4f46fa8/target/release/deps/utf8_decode-363e8f4ca571ed11.d	996 bytes
+/tmp/issue555-source-e4f46fa8/target/release/deps/version_check-68692a67178d22e2.d	1796 bytes
+/tmp/issue555-source-e4f46fa8/target/release/deps/wide-d343d0744b1f6bcc.d	11802 bytes
+/tmp/issue555-source-e4f46fa8/target/release/parameter_metadata	21309776 bytes
+/tmp/issue555-source-e4f46fa8/target/release/parameter_metadata.d	10166 bytes
+captured_statuses:
+build.status	0
+native-abi.status	1

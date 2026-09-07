@@ -55,7 +55,7 @@ Step 0 is a hard precondition: root assigns `QUALIFICATION_SOURCE_CHECKPOINT` on
 
 4. Qualify the retained candidate artifact with existing gates only:
 
-   - Native shared/static ABI: `env CARGO_TARGET_DIR=/tmp/issue555-native-target bash scripts/check-capi-abi.sh .`
+   - Native shared/static ABI: `env CARGO_TARGET_DIR=/tmp/issue555-native-target MISO_ENGINE_CAPI_LIBRARY=/tmp/issue555-native-target/release/libcapi.so MISO_ENGINE_CAPI_STATIC_LIBRARY=/tmp/issue555-native-target/release/libcapi.a bash scripts/check-capi-abi.sh .`
    - Shipped Wasm ABI/export/import/memory/realtime-callgraph/SIMD/static/metadata/vocabulary/resource-budget gates: `bash scripts/check-web-audioworklet.sh /tmp/issue555-qualified-artifact`
    - Resource rows plus all current red controls and the three pinned PCM/native parity digests: `env CARGO_TARGET_DIR=/tmp/issue555-native-target python3 -B scripts/check-browser-expected-resources.py --artifacts /tmp/issue555-qualified-artifact`
    - Hermetic host/worklet policy and mutation tests: `env CARGO_TARGET_DIR=/tmp/issue555-hermetic-target bash scripts/test-web-audioworklet.sh`
@@ -99,3 +99,11 @@ Sol MEDIUM selected a bounded replacement proof using Git blob identity and Git 
 SolMEDIUM accepted independentrootGitidentityproof for all8439entries in /tmp/issue555-luna-a3/probe-source, productsourcee4f46fa8. ActualLunaHIGH then ran only the existing repinprobeonce. Status0 and stdout exactly6452f0db237da1d57b3594e7d95dd53a089a604d5b0791ea8b3533c5930c5a1c plusnewline were verifiedbyroot; /tmp/issue555-repin-probe-empty remains emptynonsymlinkdirectory. Rawprobe, actualargv, SolMEDIUMruling, identitytables and priorfailure/interruption records are losslesslypreserved in artifacts/issue555-handoff.
 
 User requests a cleanstop. No candidateartifact was retained by probe design; no laterABI/resource/PCM/browser gate or Astraverification ran, and repositorypin is unchanged. Nextowner starts step2 from the verifiedfrozenexport, provisionalpin in isolatedscratchonly, then fulloriginalqualification and AstraMEDIUM-before-pin. Do not rerun sourceinventory/wrapper campaigns. Productfreeze is e4f46fa8; orchestrationHEAD advanced only for this evidence, so do not reuse staleexpectedHEAD2c865f18 as a productidentity check. On anotherhost, recreateexportfromexactproductcommit and obtain/reproduce approved537baselineartifact from its recordedproducer; /tmp paths are conveniences, not remotelyavailable artifacts. Alllatergates, postpinbyteidentity and exactCI remainmandatory.
+
+## Root decision after retained artifact and native-ABI invocation stop
+
+Luna HIGH retained the exact six-file artifact from frozen product source `e4f46fa808e413507d204e81b6a4ebc27254869c`; the ordinary builder returned zero and the Wasm independently reproduced `6452f0db237da1d57b3594e7d95dd53a089a604d5b0791ea8b3533c5930c5a1c`. The five non-Wasm files byte-match the approved #537 baseline, and the Wasm is the sole classified delta at ten additional bytes. Repository source and pin remain unchanged.
+
+The first native ABI invocation returned one after successfully building both libraries under `/tmp/issue555-native-target/release`: `check-capi-abi.sh` honored `CARGO_TARGET_DIR` for Cargo but its default lookup remained `target/release/libcapi.so` and `target/release/libcapi.a`. This is an invocation mismatch, not an observed ABI, link, symbol, or header failure. The script already exposes `MISO_ENGINE_CAPI_LIBRARY` and `MISO_ENGINE_CAPI_STATIC_LIBRARY` as first-class overrides, so no checker or product change is justified.
+
+Root preserves that failed invocation and amends only the native ABI command in step 4 to pass both actual isolated-target paths explicitly. The next Luna HIGH tranche runs that amended command once against the already-built frozen-source libraries. If it returns zero, continue with the remaining step-4 gates in their original order; do not rebuild the candidate artifact, rerun the probe, change the checker, or omit the preserved failure. Any further failure stops again for root assessment. Astra MEDIUM review and the no-pin-before-PASS rule remain unchanged.
