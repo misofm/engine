@@ -141,3 +141,9 @@ User requested a safe stop for two fresh-agent handoffs. No SolXHIGHreview or PR
 Independent Sol HIGH review of exact pushed head `6afbda17c384a14cc34d48c61e47d733b061ed8f` and source commit `ffebeabc05f8a2b793b434eb6a449e230eded282` against base/current `main` `30f658ee1c0c7d86002f5f2fea075a5dfa8a7c2c` returned FAIL. Three bounded corrections are required: make absent and non-Unicode environment snapshot values independently injectable and tested; remove the Linux/x86-64 assumptions from the two exact projection tests while retaining exact contract-owned bytes; and add the gate-nine durable diff audit covering every named record-contract category. All other reviewed source behavior, finite gates, evidence integrity, scope, lineage and #559 overlap checks passed. The full verdict is preserved in `artifacts/issue557-review/sol-high-attempt1.md`.
 
 Luna HIGH owns attempt two and may edit only the already frozen source/policy paths plus evidence and this spec. It must not weaken the fallback matrix, loosen exact record assertions, run a timed workload, or expand TOOL9 scope.
+
+## Sol HIGH attempt-two review
+
+Independent Sol HIGH review returned PASS for exact source head `a788c01b82b212cc99016bba8de575059aaa403d`, correction parent `6946339057fb449492467ce245b2367dc8f65845`, and base/current `main` `30f658ee1c0c7d86002f5f2fea075a5dfa8a7c2c`. All three attempt-one blockers are corrected. Eleven sysinfo tests, both exact projection tests, all 37 bench tests, policy and mutation gates, strict clippy, format, workspace policy, full-range diff checks, native and Wasm target checks, evidence manifests, remote identities and #559 ownership checks passed. No benchmark or timed workload ran. The full PASS is preserved in `artifacts/issue557-review/sol-high-attempt2.md`.
+
+Remote required `qualification`, merge, post-main verification, issue closure and worktree cleanup remain delivery steps. TOOL9 remains partial after this bounded slice.
