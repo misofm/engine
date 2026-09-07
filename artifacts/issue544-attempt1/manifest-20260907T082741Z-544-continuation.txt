@@ -1,0 +1,44 @@
+Issue #544 attempt 1 continuation after bounded launcher error
+timestamp_utc=2026-09-07T08:27:41Z
+cwd=/home/bl/misofm/engine-audit-subject-disposition
+head=d7857eaf71dece44e10fbf0ae966e76a7eabf8fd
+git_status_before_workflow_edit=clean
+sha256_tools/audit/src/capi.rs=9acafedab02797c1cb7d24a3e4f278f429b54625950fa27d225c93827d10a413
+sha256_tools/audit/src/source_duration.rs=9840b4f8127ce0338f0fbf612eaf4f5d7cb361b53bdbcc825b6c343eced1ff5
+sha256_.github/workflows/qualification.yml.before=3434631972bf97a6c01a2c29090d89bd02969b28a0ae1d7956f8be2ec17eddcc
+release_binary=/tmp/issue544-target/release/audit
+sha256_release_binary=b40baf9702af9df08c4b0ad1549946376e4c622ff74a95d72f8cbe6b4a5e384f
+prior_failed_launch_evidence_preserved=true
+
+Actual subjects below were each launched exactly once from this continuation.
+
+command_01_argv=["/tmp/issue544-target/release/audit","capi"]
+command_01_env=["PATH=/home/bl/.cargo/bin:$PATH"]
+command_01_capture_stdout=/tmp/issue544/capi-stdout-20260907T082741Z-continuation.json
+command_01_capture_stderr=/tmp/issue544/capi-stderr-20260907T082741Z-continuation.txt
+command_01_capture_status=/tmp/issue544/capi-exit-20260907T082741Z-continuation.txt
+command_01_numeric_exit_status=0
+command_01_stdout_bytes=349
+command_01_stderr_bytes=0
+command_01_stdout_sha256=6c1be4989a512252706d85ef0e00d3161fb0beddc17004bc3ee2ebba79abc1aa
+command_01_stderr_sha256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+command_01_status_sha256=9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa
+command_01_outcome=actual audit passed
+command_01_decisive_fields=calls=100000 sample_rate_hz=48000 quantum_frames=128 stable_output_address=true render_errors=0 all_forbidden_operation_counters=0 total_violations=0 pcm_digest=ff6cdcb96cdcdad5
+
+command_02_argv=["/tmp/issue544-target/release/audit","source-duration"]
+command_02_env=["PATH=/home/bl/.cargo/bin:$PATH"]
+command_02_capture_stdout=/tmp/issue544/source-duration-stdout-20260907T082741Z-continuation.json
+command_02_capture_stderr=/tmp/issue544/source-duration-stderr-20260907T082741Z-continuation.txt
+command_02_capture_status=/tmp/issue544/source-duration-exit-20260907T082741Z-continuation.txt
+command_02_numeric_exit_status=0
+command_02_stdout_bytes=463
+command_02_stderr_bytes=0
+command_02_stdout_sha256=44546e6b4033d46192883964c347cf4dd7a6e81c73ba972a05ce0cbab91aeeed
+command_02_stderr_sha256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+command_02_status_sha256=9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa
+command_02_outcome=actual audit passed
+command_02_decisive_fields=minute_frames=2880000 multi_hour_frames=518400000 minute_file_bytes=11520044 multi_hour_file_bytes=2073600044 layout_entries=17 layout_total_bytes=6416 layout_equal=true source_report_equal=true graph_report_equal=true timed_benchmark_invocations=0 minute_rss_bytes=3801088 multi_hour_rss_bytes=3936256 os=linux arch=x86_64 rust=rustc 1.97.1 (8bab26f4f 2026-07-14)
+
+offline_capture_validation=pass
+offline_validation_subjects_not_rerun=true
