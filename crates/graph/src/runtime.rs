@@ -1189,6 +1189,10 @@ impl Runtime {
         self.folds
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the prepared runtime constructor keeps its fixed ownership partitions explicit"
+    )]
     pub(crate) fn new(
         lease: ArenaLease,
         delays: Vec<CompensationDelay>,
@@ -1255,10 +1259,13 @@ impl Runtime {
             return;
         };
         let (left, right) = self.buffer(ARENA_BASE + buffer);
-        let mut capture = TestOnlyFailedBufferCapture::default();
-        capture.captured = true;
-        capture.frames = left.len();
-        capture.overflow = left.len() > TEST_ONLY_FAILED_BUFFER_CAPACITY;
+        let mut capture = TestOnlyFailedBufferCapture {
+            captured: true,
+            frames: left.len(),
+            overflow: left.len() > TEST_ONLY_FAILED_BUFFER_CAPACITY,
+            left: [0; TEST_ONLY_FAILED_BUFFER_CAPACITY],
+            right: [0; TEST_ONLY_FAILED_BUFFER_CAPACITY],
+        };
         for (index, sample) in left
             .iter()
             .take(TEST_ONLY_FAILED_BUFFER_CAPACITY)
@@ -2536,8 +2543,7 @@ pub(crate) fn build_sequential(
             continue;
         }
         let fader = fader_ops[0];
-        for matrix_run in (fader_run + 2)..run_units.len() {
-            let (matrix_membership, matrix_ops) = &run_units[matrix_run];
+        for (matrix_membership, matrix_ops) in run_units.iter().skip(fader_run + 2) {
             if !matrix_membership.is_empty() || matrix_ops.len() != 1 {
                 continue;
             }
