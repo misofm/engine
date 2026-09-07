@@ -72,6 +72,15 @@ traffic is not equated with retained storage. Repeat prepare/render/cancel/colle
 reuse cycles and retain the real allocator positive control plus zero allocation/free
 render assertions.
 
+Factor actual endpoint queue preparation into the same helper used by production.
+After warming allocator TLS, measure current-thread counters around that helper alone,
+excluding host preparation, while every returned owner stays alive. Require exact
+requested bytes and allocation count with zero frees and reallocations, compare bytes
+and count with the independent concrete layouts, and then require the same allocation
+count to be reclaimed off render. The allocator does not report freed bytes or largest
+allocation, so validate largest allocation only from the independent individual
+queue/header/ledger layouts and do not claim it was directly measured.
+
 ### Direct discriminators
 
 Add a private test-only deterministic seam immediately after the single generic claim
@@ -109,6 +118,12 @@ Allowed implementation paths:
 
 - `crates/host-core/src/builtin_batch_endpoint.rs`
 - `crates/host-core/tests/builtin_batch_endpoint.rs`
+- `crates/host-core/src/prepare.rs`, only for one crate-private `cfg(test)` backend
+  selection seam used by endpoint unit tests; production remains pinned to
+  `Backend::current()` and exposes no override
+- `crates/host-core/Cargo.toml`, only to enable the existing
+  `builtins-compiler/test-support` feature on the existing dev-dependency; the normal
+  dependency and production feature graph remain unchanged
 - this numbered spec
 - #576's local spec only for final successor/delivery linkage
 - focused successor and final review evidence under `docs/audits/`
@@ -116,11 +131,12 @@ Allowed implementation paths:
 Minimal correction of #576's existing `crates/host-core/src/lib.rs` export is allowed
 only if a renamed public resource type requires it; otherwise keep it byte-identical.
 Do not edit protocol, scalar Point, graph, engine, builtins, builtins-compiler, any
-other host-core module, manifests/lockfile, hosts, C ABI, browser, SDK, artifacts,
-policies or workflows. Active lane B #578 retains its controller,
+other host-core module, any other manifest, lockfile, hosts, C ABI, browser, SDK,
+artifacts, policies or workflows. Active lane B #578 retains its controller,
 controller-delivery, controller-test and scalar Point test paths and explicitly
 excludes every production host-core file. If a required proof needs a broader
-production seam, stop and rebrief instead of widening.
+production seam beyond that one amended test seam, stop and rebrief instead of
+widening.
 
 ## Objective gates
 
@@ -229,3 +245,22 @@ Mutation 5 was changed to clear the sticky post-graph fault and render the cance
 The clean `Err(Empty)` collection assertion then failed with an actual `Ok(BuiltinBatchCompletion
 { disposition: Canceled, acknowledged_sample: Some(SampleTime(128)), .. })`; the mutation was
 restored. Cargo.lock was restored after the gates.
+
+## Attempt 2 review and final-attempt amendment
+
+Luna HIGH correction checkpoint `62b034c83251c3ea2e37092a81a26f9659b9e948`
+passed its focused and proportional gates. Astra LOW returned **FAIL**: immediate empty
+or already-collected cancellation reports its completion twice and keeps publication
+blocked; the required scalar execution is structurally unavailable through pinned
+native preparation; proof-only PostFader meters changed the public constructor's cap
+behavior; and allocator liveness still does not compare actual retained endpoint
+bytes/count/largest allocation with the report. The full verdict is
+`docs/audits/579-attempt2-review.md`.
+
+Attempt 3 is final. It may add only the crate-private `cfg(test)` backend-selection
+seam in `crates/host-core/src/prepare.rs` and dev-dependency-only test-support feature
+amendment in `crates/host-core/Cargo.toml` recorded above, keep production pinned to
+`Backend::current()`, revert proof-only public telemetry, unify exact-once cancellation
+finalization, and finish actual-retention plus native-bank/forced-scalar evidence. No
+other path or product expansion is authorized. A third FAIL hard-stops #579; gates may
+not be weakened.
