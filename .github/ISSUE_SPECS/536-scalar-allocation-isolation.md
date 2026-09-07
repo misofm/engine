@@ -114,3 +114,9 @@ All **seven corrected captures returned status0**: both exact selectors through 
 The evidence supports removing the identified concurrent libtest bookkeeping opportunity. It does **not** establish the historical failure’s cause or guarantee immunity from arbitrary future worker activity.
 
 The complete accepted package may now be integrated into existing PR535. A new exact-head/current-base review and actual required qualification **SUCCESS** remain mandatory before merge; this PASS is not merge authorization.
+
+## Combined delivery after CI allocation-fixture blocker
+
+The first PR535 qualification run34080063161 failed in an existing host-core scalar allocation child (31 versus 27); its raw failure is retained under issue536. No failed gate was waived or rerun without correction. Separately briefed issue536 attempt1 (Luna xhigh) added paired global/TLS diagnostics and a deterministic foreign-thread control, then explicit --test-threads=1 to both existing children after Astra medium approval. Strict equality, controller +2 allocations/+2 frees/+9 bytes, realtime and admission gates remain unchanged. All finite local gates passed and consolidated Astra medium review passed at 6b9cf41a; acceptance record96a17482 is upstream.
+
+The accepted corrective branch was fast-forwarded into the existing gate PR branch. Gate DSP, build inputs and artifact pin are unchanged. The exact original six artifact files were independently rehashed against the retained identity; local native/ABI/artifact/browser evidence remains attributed to its original candidate34071c8763468f8c20186466a5d15cf5c2f0a636, not a new run. Both issues remain OPEN pending new exact-head/current-base review and fresh required qualification SUCCESS. No timing gain or historical allocation-failure cause is claimed.
