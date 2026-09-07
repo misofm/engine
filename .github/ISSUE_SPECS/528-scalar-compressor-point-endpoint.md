@@ -305,3 +305,7 @@ Root adopts this bounded FAIL. Sol attempt 3 is authorized only for the two froz
 ## Final Sol attempt 3 source checkpoint
 
 Sol supplied exactly the two frozen corrections: explicit compact Delivery/Pending fault after successful mark, and a positive allocation/free probe inside the same render-audit scope used by gate6. The unchanged six focused debug tests pass (plus the isolated gate6 child); raw capture is `/tmp/issue528-sol3/focused-debug.*`, to be preserved with the final package. Root inspected the exact two-path diff and checkpoints before the remaining proportional gates. This is not source acceptance or delivery.
+
+## Final Sol attempt 3 evidence freeze
+
+Source checkpoint `e33a4cae977536870e9e83bafbde1269c4c2880b` is unchanged throughout the final proportional gates. Focused debug/release each pass all six tests plus the isolated child; feature host-core passes 84 entries with two ignored. Strict affected Clippy, formatting/source diff, workspace/host-core/realtime policies and feature-enabled scalar/SIMD Wasm pass. `artifacts/issue528-sol-attempt3/sol3-report.md` and adjacent raw captures preserve actual identities and explicit reuse of unchanged default-host/protocol evidence. No timing claim. Final consolidated Astra verdict is pending; issue remains OPEN.
