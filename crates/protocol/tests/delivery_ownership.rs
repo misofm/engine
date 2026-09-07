@@ -334,6 +334,133 @@ fn generic_boundary_cancel_uses_separate_threads_and_holds_credit_after_ack() {
 }
 
 #[test]
+fn generic_boundary_cancel_thread_schedule_covers_zero_partial_and_full_application() {
+    for (case, prefix, expect_applied) in [(0_u16, 0_u16, false), (1, 1, false), (3, 3, true)] {
+        let (mut control, mut render) =
+            PreparedDelivery::<u32>::prepare(NonZeroUsize::new(2).unwrap()).unwrap();
+        let first = control.try_publish(10, 3).unwrap();
+        let second = control.try_publish(20, 2).unwrap();
+        let ready = Barrier::new(2);
+        let go = Barrier::new(2);
+        let application_done = Barrier::new(2);
+        let request_visible = Barrier::new(2);
+        let acknowledged = Barrier::new(2);
+        let collected = Barrier::new(2);
+        std::thread::scope(|scope| {
+            let render_thread = scope.spawn(|| {
+                ready.wait();
+                go.wait();
+                if prefix != 0 {
+                    assert_eq!(render.begin().unwrap(), (first, 10));
+                    render.mark_progress(first, prefix).unwrap();
+                    if prefix == 3 {
+                        render.finish(first, prefix).unwrap();
+                    }
+                }
+                application_done.wait();
+                request_visible.wait();
+                let (_, counts) = measured(|| {
+                    render
+                        .cancel_boundary(SampleTime(200 + u64::from(case)))
+                        .unwrap()
+                });
+                assert_eq!((counts.0, counts.1), (0, 0));
+                acknowledged.wait();
+                collected.wait();
+            });
+            ready.wait();
+            go.wait();
+            application_done.wait();
+            let token = control.begin_cancel().unwrap();
+            request_visible.wait();
+            assert_eq!(control.poll_cancel_boundary(token).unwrap(), None);
+            acknowledged.wait();
+            let complete = control.poll_cancel_boundary(token).unwrap().unwrap();
+            assert_eq!(complete.frontier, Some(second.serial));
+            assert_eq!(
+                complete.acknowledged_sample,
+                SampleTime(200 + u64::from(case))
+            );
+            assert_eq!(
+                control.try_publish(30, 1),
+                Err(DeliveryError::CancellationPending)
+            );
+            let first_result = control.collect(first).unwrap();
+            assert_eq!(first_result.applied_prefix, prefix);
+            assert_eq!(first_result.remaining_count, 3 - prefix);
+            assert_eq!(
+                first_result.disposition,
+                if expect_applied {
+                    CoreTerminalDisposition::Applied
+                } else {
+                    CoreTerminalDisposition::Canceled
+                }
+            );
+            assert_eq!(
+                first_result.acknowledged_sample,
+                if expect_applied {
+                    None
+                } else {
+                    Some(SampleTime(200 + u64::from(case)))
+                }
+            );
+            assert_eq!(
+                control.try_publish(31, 1),
+                Err(DeliveryError::CancellationPending)
+            );
+            let second_result = control.collect(second).unwrap();
+            assert_eq!(
+                (
+                    second_result.disposition,
+                    second_result.applied_prefix,
+                    second_result.remaining_count,
+                    second_result.acknowledged_sample,
+                ),
+                (
+                    CoreTerminalDisposition::Canceled,
+                    0,
+                    2,
+                    Some(SampleTime(200 + u64::from(case))),
+                )
+            );
+            collected.wait();
+            render_thread.join().unwrap();
+        });
+        assert!(control.try_publish(32, 1).is_ok());
+    }
+}
+
+#[test]
+fn generic_preparation_report_matches_allocation_and_repeated_reuse_stays_zero_alloc() {
+    let capacity = NonZeroUsize::new(2).unwrap();
+    let report = PreparedDelivery::<u32>::resource_report(capacity).unwrap();
+    let ((control, render), counts) =
+        measured(|| PreparedDelivery::<u32>::prepare(capacity).unwrap());
+    assert_eq!(counts.1, 0);
+    assert_eq!(counts.2, report.retained_payload_bytes);
+    assert_eq!(counts.3, report.largest_allocation_bytes);
+    let teardown = std::thread::scope(|scope| {
+        scope
+            .spawn(move || measured(|| drop((control, render))).1)
+            .join()
+            .unwrap()
+    });
+    assert!(teardown.1 > 0);
+
+    let (mut control, mut render) = PreparedDelivery::<u32>::prepare(capacity).unwrap();
+    for cycle in 0..16_u64 {
+        let ticket = control.try_publish(cycle as u32, 1).unwrap();
+        let token = control.begin_cancel().unwrap();
+        let (_, counts) = measured(|| render.cancel_boundary(SampleTime(500 + cycle)).unwrap());
+        assert_eq!((counts.0, counts.1), (0, 0));
+        let complete = control.poll_cancel_boundary(token).unwrap().unwrap();
+        assert_eq!(complete.acknowledged_sample, SampleTime(500 + cycle));
+        let completion = control.collect(ticket).unwrap();
+        assert_eq!(completion.disposition, CoreTerminalDisposition::Canceled);
+    }
+}
+
+#[test]
 fn staged_automation_remains_non_applicable_while_cancel_races_boundary() {
     let (mut control, mut render) = PreparedAutomationDelivery::prepare(config(), 41).unwrap();
     control.try_admit(SampleTime(0), batch(1)).unwrap();

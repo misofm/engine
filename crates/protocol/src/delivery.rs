@@ -1911,6 +1911,116 @@ mod tests {
     }
 
     #[test]
+    fn generic_serial_and_generation_overflow_refusals_are_transactional() {
+        let (mut control, _render) =
+            PreparedDelivery::<u32>::prepare(NonZeroUsize::new(1).unwrap()).unwrap();
+        control.serial = u64::MAX;
+        assert_eq!(
+            control.try_publish(1, 1),
+            Err(DeliveryError::SequenceOverflow)
+        );
+        assert_eq!(control.outstanding(), 0);
+
+        let (mut control, mut render) =
+            PreparedDelivery::<u32>::prepare(NonZeroUsize::new(1).unwrap()).unwrap();
+        control.generation = u64::MAX;
+        let ticket = control.try_publish(2, 1).unwrap();
+        assert_eq!(control.begin_cancel(), Err(DeliveryError::SequenceOverflow));
+        assert!(control.cancel.is_none());
+        assert!(control.entries[ticket.slot].is_some());
+        assert_eq!(render.begin().unwrap(), (ticket, 2));
+    }
+
+    #[test]
+    fn generic_physical_credit_and_terminal_identity_are_held_until_collection() {
+        let (mut control, mut render) =
+            PreparedDelivery::<u32>::prepare(NonZeroUsize::new(1).unwrap()).unwrap();
+        let ticket = control.try_publish(3, 1).unwrap();
+        assert_eq!(render.begin().unwrap(), (ticket, 3));
+        render.mark_progress(ticket, 1).unwrap();
+        render.finish(ticket, 1).unwrap();
+        assert_eq!(render.finish(ticket, 1), Err(DeliveryError::Empty));
+        assert!(control.entries[ticket.slot].is_some());
+        let completion = control.collect(ticket).unwrap();
+        assert_eq!(completion.ticket, ticket);
+        assert!(control.entries[ticket.slot].is_none());
+        assert_eq!(control.collect(ticket), Err(DeliveryError::StaleTicket));
+
+        let replacement = control.try_publish(4, 1).unwrap();
+        assert_ne!(replacement, ticket);
+        assert_eq!(control.collect(ticket), Err(DeliveryError::StaleTicket));
+        assert_eq!(render.begin().unwrap(), (replacement, 4));
+        render.mark_progress(replacement, 1).unwrap();
+        render.finish(replacement, 1).unwrap();
+        assert_eq!(control.collect(replacement).unwrap().payload, 4);
+    }
+
+    #[test]
+    fn generic_old_cancel_token_is_stale_after_reuse_generation() {
+        let (mut control, mut render) =
+            PreparedDelivery::<u32>::prepare(NonZeroUsize::new(1).unwrap()).unwrap();
+        let first = control.try_publish(5, 1).unwrap();
+        let old_token = control.begin_cancel().unwrap();
+        render.cancel_boundary(SampleTime(10)).unwrap();
+        assert!(control.poll_cancel_boundary(old_token).unwrap().is_some());
+        control.collect(first).unwrap();
+
+        let second = control.try_publish(6, 1).unwrap();
+        let new_token = control.begin_cancel().unwrap();
+        assert_eq!(
+            control.poll_cancel_boundary(old_token),
+            Err(DeliveryError::StaleTicket)
+        );
+        render.cancel_boundary(SampleTime(11)).unwrap();
+        assert!(control.poll_cancel_boundary(new_token).unwrap().is_some());
+        control.collect(second).unwrap();
+    }
+
+    #[test]
+    fn cancellation_keeps_staged_and_newly_owned_automation_unpublished() {
+        let (mut control, mut render) = PreparedAutomationDelivery::prepare(config(2), 41).unwrap();
+        control.try_admit(SampleTime(0), batch(1, 7)).unwrap();
+        control.try_admit(SampleTime(2), batch(2, 7)).unwrap();
+        let unsupported = PreparedDeliveryCapabilities::new(&[ParameterHandle(99)]).unwrap();
+        assert!(matches!(
+            control.try_handoff_next(&unsupported).unwrap(),
+            HandoffResult::PendingUnsupported
+        ));
+        assert!(render.begin_boundary(SampleTime(0)).is_none());
+
+        let token = control
+            .begin_cancel(
+                AutomationCancellationReason::EndpointShutdown,
+                SessionRevision(4),
+            )
+            .unwrap();
+        assert_eq!(control.state.core.outstanding(), 2);
+        assert!(
+            control
+                .state
+                .core
+                .entries
+                .iter()
+                .flatten()
+                .all(|entry| !entry.published)
+        );
+        assert!(render.begin_boundary(SampleTime(1)).is_none());
+
+        assert!(render.begin_boundary(SampleTime(77)).is_none());
+        assert!(
+            control
+                .state
+                .core
+                .entries
+                .iter()
+                .flatten()
+                .all(|entry| !entry.published)
+        );
+        let done = control.poll_cancel_boundary(token).unwrap().unwrap();
+        assert_eq!((done.canceled_events, done.canceled_records), (2, 2));
+    }
+
+    #[test]
     fn generic_core_slot_identity_covers_capacity_above_u16() {
         let capacity = NonZeroUsize::new(usize::from(u16::MAX) + 2).unwrap();
         let (mut control, _render) = PreparedDelivery::<u8>::prepare(capacity).unwrap();

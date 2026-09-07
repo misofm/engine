@@ -1,4 +1,4 @@
-# Issue 571 attempt 2 evidence
+# Issue 571 attempt 2 and attempt 3 evidence
 
 Reviewed implementation paths are `crates/protocol/src/delivery.rs`,
 `crates/protocol/src/lib.rs`, and `crates/protocol/tests/delivery_ownership.rs`.
@@ -38,4 +38,45 @@ Green checks on the restored source:
 - `cargo clippy -p protocol --all-targets -- -D warnings`: passed for protocol;
   repository configuration emits existing invalid-path warnings for the unrelated
   math fast-db allowlist.
+- `cargo fmt --all -- --check` and `git diff --check`: passed.
+
+## Attempt 3 evidence
+
+The private inline delivery test now inspects every retained core entry across
+`begin_cancel`, the render boundary acknowledgement, and control reconciliation.
+Both the staged unsupported batch and the newly owned queued batch remain
+`published == false`, and a direct render `begin` remains empty before the cancel
+boundary runs.
+
+The parameterized generic schedule uses two separately owned threads and two tickets
+for zero, partial, and full pre-cancel application. Each case checks the captured
+frontier, pre-ack `None`, acknowledged sample, applied/canceled disposition, exact
+prefix and remainder, publication refusal after one collection, and final reuse.
+Preparation allocation bytes and largest allocation match the exact generic resource
+report. A positive teardown measurement observes off-render frees, and sixteen
+cancel/reuse cycles on the same endpoints measure zero render allocations and frees.
+Private tests cover serial and generation overflow transactionality, stale old cancel
+tokens across a new generation, duplicate finish/collect, and reused-ticket rejection.
+
+A temporary physical-credit mutation inserted `self.entries[ticket.slot] = None`
+before `collect` drained its terminal. The focused test failed exactly with:
+
+```
+called `Result::unwrap()` on an `Err` value: StaleTicket
+```
+
+The mutation was restored. The earlier accepted early-ack and early-publication
+mutation records remain above unchanged.
+
+Final attempt-3 checks on the restored source:
+
+- `cargo test -p protocol --all-targets --features test-support`: 149 library
+  tests, 10 delivery ownership tests, 1 controller API test, and 3 builtins-rack
+  tests passed.
+- `cargo clippy -p protocol --all-targets --features test-support -- -D warnings`:
+  passed for protocol with the repository's existing unrelated math fast-db
+  allowlist warnings.
+- `bash scripts/check-workspace-policy.sh`, `bash scripts/test-workspace-policy.sh`,
+  and the protocol path router check passed. The workspace mutation harness emits
+  its expected directed-mutant diagnostics while returning success.
 - `cargo fmt --all -- --check` and `git diff --check`: passed.
