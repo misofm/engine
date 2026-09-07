@@ -10,15 +10,24 @@ use effect_contract::{
     ProcessReport, ResetKind, StatePayloadError, StatePayloadInput, StatePayloadOutput,
 };
 use host_core::{
-    ScalarPointAdmissionError, ScalarPointCancelBoundaryError, ScalarPointFault,
+    PlanSampleSource, ScalarPointAdmissionError, ScalarPointCancelBoundaryError, ScalarPointFault,
     ScalarPointFaultCause, ScalarPointFaultProgress, ScalarPointNativeOperation,
-    ScalarPointRenderError, prepare_scalar_point_endpoint,
+    ScalarPointRenderError, SessionControlProvider, prepare_controller_scalar_point_endpoint,
+    prepare_scalar_point_endpoint,
 };
 use protocol::{
     AutomationBatchError, AutomationBatchSlot, AutomationCancellationReason,
-    AutomationEnqueueError, AutomationKind, AutomationRecord, DeliveryError, HandoffResult,
-    ParameterHandle, PreparedAutomationDelivery, ProtocolQueueConfig, ReliablePayload, RequestId,
-    SampleTime, SessionRevision,
+    AutomationEnqueueError, AutomationKind, AutomationRecord, ControlCommand, ControlProvider,
+    ControllerRequest, ControllerRetainedCapacity, DecodeScratch, DecodedSuccessResponsePayload,
+    DecodedTypedResponseFrame, DeliveryError, ExpectedRevision, HandoffResult,
+    ParameterChannel as ProtocolParameterChannel, ParameterHandle, ParameterMetadataRequest,
+    ParameterStateRequest, PreparedAutomationDelivery, ProtocolCodec, ProtocolControllerConfig,
+    ProtocolQueueConfig, ProviderFeatures, ReliablePayload, ReplayCacheConfig, RequestId,
+    SampleTime, SessionRevision, StatusCode,
+};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
 };
 
 const Q: usize = 16;
@@ -35,6 +44,177 @@ fn config() -> ProtocolQueueConfig {
         per_block_automation_density: NonZeroUsize::new(256).unwrap(),
         quantum_frames: NonZeroUsize::new(Q).unwrap(),
     }
+}
+
+const REAL_SESSION: &str =
+    include_str!("../../../fixtures/session/v1/compressor-dynamic-observation.json");
+
+fn compile_caps() -> session::CompileCaps {
+    session::CompileCaps {
+        max_compiled_model_bytes: u64::MAX,
+        max_requested_runtime_bytes: u64::MAX,
+        max_single_allocation_bytes: u64::MAX,
+        max_queue_items: u64::MAX,
+        max_source_ring_frames: u64::MAX,
+        max_source_ring_bytes: u64::MAX,
+    }
+}
+
+fn controller_config() -> ProtocolControllerConfig {
+    ProtocolControllerConfig {
+        maximum_transaction_edits: 0,
+        maximum_response_diagnostics: 8,
+        provider_features: ProviderFeatures::ALL,
+    }
+}
+
+fn controller_queue_config() -> ProtocolQueueConfig {
+    ProtocolQueueConfig {
+        control_command_slots: NonZeroUsize::new(2).unwrap(),
+        control_command_bytes: NonZeroUsize::new(1_024).unwrap(),
+        automation_batch_slots: NonZeroUsize::new(2).unwrap(),
+        reliable_response_slots: NonZeroUsize::new(2).unwrap(),
+        reliable_event_slots: NonZeroUsize::new(4).unwrap(),
+        telemetry_slots: NonZeroUsize::new(2).unwrap(),
+        per_block_automation_density: NonZeroUsize::new(256).unwrap(),
+        quantum_frames: NonZeroUsize::new(128).unwrap(),
+    }
+}
+
+fn controller_replay_config() -> ReplayCacheConfig {
+    ReplayCacheConfig {
+        entries: NonZeroUsize::new(16).unwrap(),
+        bytes: NonZeroUsize::new(16 * 1024).unwrap(),
+        max_response_bytes: 2_048,
+    }
+}
+
+struct RealClock(AtomicU64);
+
+impl PlanSampleSource for RealClock {
+    fn next_absolute_sample(&self) -> u64 {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
+struct RealControllerFixture {
+    effects: effect_compiler::EffectPreparedSession,
+    session: protocol::SessionStore,
+    provider: SessionControlProvider,
+    clock: Arc<RealClock>,
+    handles: [ParameterHandle; 2],
+}
+
+fn real_controller_fixture() -> RealControllerFixture {
+    let model = session::parse_session_json(REAL_SESSION).expect("real compressor fixture");
+    let compiled = session::compile_session(&model, compile_caps()).expect("compiled fixture");
+    let registry = effect_compiler::launch_native_effect_registry().expect("native registry");
+    let effects = effect_compiler::prepare_native_session_effects(
+        &compiled,
+        &registry,
+        effect_compiler::EffectCompileCaps {
+            maximum_total_state_bytes: u64::MAX,
+            maximum_scratch_bytes: u64::MAX,
+            maximum_automation_spans_per_block: u32::MAX,
+        },
+    )
+    .expect("prepared real compressor");
+    assert_eq!(effects.entries.len(), 1);
+    let catalog = SessionControlProvider::prepare_session(&effects.entries).expect("catalog");
+    let clock = Arc::new(RealClock(AtomicU64::new(0)));
+    let mut provider = SessionControlProvider::try_new(
+        catalog,
+        Arc::clone(&clock) as Arc<dyn PlanSampleSource>,
+        ControllerRetainedCapacity {
+            meter_handles: 0,
+            counter_ids: 0,
+        },
+        2,
+    )
+    .expect("provider");
+    let metadata = provider
+        .parameter_metadata(ParameterMetadataRequest {
+            after_handle: 0,
+            limit: u16::MAX,
+        })
+        .expect("catalog metadata");
+    let mut handles = [None, None];
+    for descriptor in metadata.descriptors {
+        if descriptor.track_id == "comp0"
+            && descriptor.effect_id == "comp"
+            && descriptor.parameter_id == 6
+        {
+            match descriptor.channel {
+                ProtocolParameterChannel::Left => {
+                    handles[0] = Some(ParameterHandle(descriptor.handle))
+                }
+                ProtocolParameterChannel::Right => {
+                    handles[1] = Some(ParameterHandle(descriptor.handle))
+                }
+                ProtocolParameterChannel::Both => {}
+            }
+        }
+    }
+    let handles = [
+        handles[0].expect("actual Left makeup handle"),
+        handles[1].expect("actual Right makeup handle"),
+    ];
+    RealControllerFixture {
+        effects,
+        session: protocol::SessionStore::new(model, compile_caps()).expect("session store"),
+        provider,
+        clock,
+        handles,
+    }
+}
+
+fn controller_enqueue<'a>(
+    revision: SessionRevision,
+    request_id: u64,
+    canonical_bytes: &'a [u8],
+    batch: AutomationBatchSlot,
+) -> ControllerRequest<'a> {
+    ControllerRequest {
+        request_id: RequestId::new(request_id).unwrap(),
+        expected_revision: ExpectedRevision::Exact(revision),
+        canonical_bytes,
+        command: ControlCommand::AutomationEnqueue { batch },
+    }
+}
+
+fn real_batch(
+    revision: SessionRevision,
+    request_id: u64,
+    handles: [ParameterHandle; 2],
+    records: &[(ParameterHandle, u64, f32)],
+) -> AutomationBatchSlot {
+    let records: Vec<_> = records
+        .iter()
+        .map(|&(handle, sample, value)| AutomationRecord {
+            kind: AutomationKind::Point,
+            handle,
+            start: SampleTime(sample),
+            end: SampleTime(sample),
+            start_value: value,
+            end_value: value,
+        })
+        .collect();
+    assert!(
+        records
+            .iter()
+            .all(|record| handles.contains(&record.handle))
+    );
+    AutomationBatchSlot::new(revision, RequestId::new(request_id).unwrap(), &records).unwrap()
+}
+
+fn process_real(
+    effect: &mut dyn PreparedNativeEffect,
+    left: &mut [f32],
+    right: &mut [f32],
+    first: u64,
+) -> ProcessReport {
+    let frames = left.len() as u32;
+    effect.process(EffectProcessBlock::new(left, right, None, first, &[], frames).unwrap())
 }
 fn effect() -> Box<dyn PreparedNativeEffect> {
     let values: Vec<_> = compressor::COMPRESSOR_PARAMETERS
@@ -1319,4 +1499,155 @@ fn preparation_resources_and_success_path_are_bounded() {
     assert_eq!(control.outstanding(), 0);
     drop(render.stop());
     assert_eq!(failing.processed_frames, 7);
+}
+
+#[test]
+fn controller_points_drive_real_asymmetric_pcm_replay_and_clock_refusal() {
+    let mut fixture = real_controller_fixture();
+    let revision = fixture.session.revision();
+    let handles = fixture.handles;
+    let preparation = fixture.effects.entries[0].bank_preparation.clone();
+    let mut reference = fixture.effects.entries[0]
+        .factory
+        .prepare(PrepareEffectRequest {
+            sample_rate: preparation.sample_rate,
+            quantum: preparation.quantum,
+            quality: preparation.quality,
+            bypass: preparation.bypass,
+            link_mode: preparation.link_mode,
+            ports: preparation.ports,
+            initial_values: &preparation.initial_values,
+            limits: preparation.limits,
+        })
+        .expect("independent scalar reference");
+    let processor = fixture.effects.entries[0].processor.as_mut();
+    let (mut controller, render, resources) = prepare_controller_scalar_point_endpoint(
+        processor,
+        handles,
+        fixture.session,
+        controller_queue_config(),
+        fixture.provider,
+        controller_replay_config(),
+        ProtocolCodec::default(),
+        controller_config(),
+        ControllerRetainedCapacity {
+            meter_handles: 0,
+            counter_ids: 0,
+        },
+    )
+    .expect("combined controller/scalar preparation");
+    assert_eq!(
+        resources.controller.queue_and_delivery,
+        PreparedAutomationDelivery::resource_report_for_config(controller_queue_config()).unwrap()
+    );
+    assert_eq!(
+        resources.scalar_render_inline_bytes,
+        core::mem::size_of_val(&render)
+    );
+
+    let records = [(handles[0], 3, 6.0), (handles[1], 127, -6.0)];
+    let batch = real_batch(revision, 1, handles, &records);
+    let canonical = b"typed-enqueue-left-right";
+    let response = controller.process(controller_enqueue(revision, 1, canonical, batch));
+    assert_eq!(response.status, StatusCode::Ok);
+    let decoded = ProtocolCodec::default()
+        .decode_typed_response(&response.frame, &mut DecodeScratch::new(&mut [0_u16; 64]))
+        .expect("decode typed enqueue response");
+    assert!(matches!(
+        decoded,
+        DecodedTypedResponseFrame::Success {
+            payload: DecodedSuccessResponsePayload::AutomationEnqueued(accepted),
+            ..
+        } if accepted.accepted_records == 2
+    ));
+    let replay = controller.process(controller_enqueue(
+        revision,
+        1,
+        canonical,
+        real_batch(revision, 1, handles, &records),
+    ));
+    assert_eq!(replay, response);
+    let ticket = match controller.try_handoff_next().unwrap() {
+        HandoffResult::HandedOff(ticket) => ticket,
+        other => panic!("expected Point handoff, got {other:?}"),
+    };
+    let mut render = render.start().unwrap_or_else(|_| panic!("render start"));
+    let mut left = signal(128, 0x0532_0001, 0.69);
+    let mut right = signal(128, 0x0532_0002, 0.57);
+    let mut expected_left = left.clone();
+    let mut expected_right = right.clone();
+    let mut expected_report = ProcessReport::default();
+    add_report(
+        &mut expected_report,
+        process_real(
+            &mut *reference,
+            &mut expected_left[..3],
+            &mut expected_right[..3],
+            0,
+        ),
+    );
+    reference
+        .apply_parameter_point(5, ParameterChannel::Left, 6.0)
+        .unwrap();
+    add_report(
+        &mut expected_report,
+        process_real(
+            &mut *reference,
+            &mut expected_left[3..127],
+            &mut expected_right[3..127],
+            3,
+        ),
+    );
+    reference
+        .apply_parameter_point(5, ParameterChannel::Right, -6.0)
+        .unwrap();
+    add_report(
+        &mut expected_report,
+        process_real(
+            &mut *reference,
+            &mut expected_left[127..],
+            &mut expected_right[127..],
+            127,
+        ),
+    );
+    let report = render
+        .render(&mut left, &mut right, SampleTime(0))
+        .expect("real PCM render");
+    assert_eq!(report.native, expected_report);
+    assert_eq!(report.process_invocations, 3);
+    assert_pcm_bits(&left, &expected_left);
+    assert_pcm_bits(&right, &expected_right);
+    let snapshot = render.snapshot().unwrap();
+    assert_eq!(snapshot.applied, 2);
+    assert_eq!(snapshot.pending, None);
+    assert_eq!(snapshot.state[0].target_value.to_bits(), 6.0_f32.to_bits());
+    assert_eq!(
+        snapshot.state[1].target_value.to_bits(),
+        (-6.0_f32).to_bits()
+    );
+    assert_eq!(
+        controller.collect_terminal(ticket).unwrap().applied_prefix,
+        2
+    );
+    fixture.clock.0.store(256, Ordering::Release);
+    let past = controller.process(controller_enqueue(
+        revision,
+        2,
+        b"typed-past",
+        real_batch(revision, 2, handles, &[(handles[0], 200, 1.0)]),
+    ));
+    assert_eq!(past.status, StatusCode::TimeInPast);
+    assert_eq!(controller.outstanding(), 0);
+    let state = controller.process(ControllerRequest {
+        request_id: RequestId::new(3).unwrap(),
+        expected_revision: ExpectedRevision::Exact(revision),
+        canonical_bytes: b"state-get",
+        command: ControlCommand::ParameterStateGet {
+            request: ParameterStateRequest {
+                handles: vec![handles[0].0, handles[1].0],
+            },
+        },
+    });
+    assert_eq!(state.status, StatusCode::Unavailable);
+    drop(render.stop());
 }
