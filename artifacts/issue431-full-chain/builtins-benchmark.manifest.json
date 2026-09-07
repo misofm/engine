@@ -1,0 +1,8 @@
+{
+  "fixture_manifest_sha256": "31798260263396c242c0b90042e01abb18624f383fd88029341dffecde662796",
+  "input_tree_sha256": "54fc267fcdcfda04f008bbadb3b46d9c4fec9100ad9842958d669bee4f8ecb9d",
+  "inputs": 16,
+  "issue": 431,
+  "kind": "builtins_current_input_manifest",
+  "schema_version": 1
+}
