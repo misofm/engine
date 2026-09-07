@@ -203,3 +203,9 @@ For attempt 2, preserve all attempt-1 evidence and the successful mechanism cont
 Ordinary native ABI, published-artifact/browser qualification, exact PR-head/current-base review, required CI, merge, synchronization and eventual worktree cleanup remain delivery work. No issue closure or audit-finding status change is approved here.
 
 Review was read-only; no files, builds, tests, mutations, captures, Git/GitHub state or agents were created or changed.
+
+## Attempt 2 disengagement-state checkpoint — Luna high
+
+Only tests/mono_collapse.rs changed. The existing transition fixture nowcomparescompletealltrack/common/left/rightstate immediatelyafterdesymmetrize_channels beforeanother render, andafterfirstresumeddualblock; retainedPCMcomparisons andpopulatedhistory/main/requiredgain/boxringguards. Debugandrelease fullmonobinary eachpassed2tests; affectedClippy andtargetedtestformatcheckpassed. NativeW8executed. TestsourceSHA1f42a58d6f71232a3af6a0a72717ae57bcf1acc0391a9384eb07e21bfbb2dd6d/bloba41629b70ce08b8ca7c99882325fecec6a1db8c2. Productionlib/allocationremainbyteunchanged.
+
+Workspacefmtcheckstatus1 isretained: besidesnewtestformatting subsequentlyfixed, itrevealedthreeexistinglib.rsformatdifferences leftintheearlierattempt. A successfulprior cargo fmt invocationdidnotestablishfinalfmtcheckcleanliness. Rootrequiresonlymechanicalformatterchanges atthose threesites pluscleanfmtcheckbefore consolidatedattempt2review; no DSPmath/state/assertion change or newmutation/baseline is authorized. This focusedgreencheckpointhasremainingformatworkexplicitlydocumented, notsourceacceptance.
