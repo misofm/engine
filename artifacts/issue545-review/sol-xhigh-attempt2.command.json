@@ -1,0 +1,21 @@
+{
+  "argv": [
+    "/home/bl/.local/bin/codex",
+    "exec",
+    "-C",
+    "/home/bl/misofm/engine-tooling-orphan-cleanup",
+    "-s",
+    "danger-full-access",
+    "resume",
+    "-m",
+    "gpt-5.6-sol",
+    "-c",
+    "model_reasoning_effort=\"xhigh\"",
+    "-o",
+    "/tmp/issue349-partials/545-sol-xhigh-attempt2.md",
+    "01a07b01-cd96-7b11-8a48-a0f5748e67a1",
+    "-"
+  ],
+  "cwd": "/home/bl/misofm/engine-tooling-orphan-cleanup",
+  "prompt": "/tmp/issue349-partials/545-attempt2-prompt.md"
+}

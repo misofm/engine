@@ -1,0 +1,10 @@
+{
+  "/tmp/issue544/luna-attempt1-20260907.stderr": {
+    "sha256": "f50b5525fcb56261ab52a479c87e5f9a778608b23cd51c1f6072f0590205cf29",
+    "bytes": 159770
+  },
+  "/tmp/issue544/luna-attempt1-continuation-20260907.stderr": {
+    "sha256": "a2b7e96549b801f63ace0c243bbf37fde66971dddbe826ac2f61d37a7febd2f0",
+    "bytes": 279863
+  }
+}

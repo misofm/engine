@@ -1,0 +1,19 @@
+{
+  "argv": [
+    "/home/bl/.local/bin/codex",
+    "exec",
+    "-C",
+    "/home/bl/misofm/engine-audit-subject-disposition",
+    "-s",
+    "danger-full-access",
+    "-m",
+    "gpt-6-astra",
+    "-c",
+    "model_reasoning_effort=\"medium\"",
+    "-o",
+    "/tmp/issue349-partials/544-astra-medium-review.md",
+    "-"
+  ],
+  "cwd": "/home/bl/misofm/engine-audit-subject-disposition",
+  "prompt": "/tmp/issue349-partials/544-review-prompt.md"
+}
