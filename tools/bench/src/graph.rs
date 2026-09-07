@@ -102,6 +102,13 @@ struct Metadata {
     missing: Vec<String>,
 }
 
+struct RawMetadata {
+    rustc_verbose: String,
+    cpu: String,
+    kernel: String,
+    environment: Vec<(String, Option<String>)>,
+}
+
 pub(crate) fn main() {
     let arguments: Vec<_> = env::args().skip(1).collect();
     assert!(arguments.is_empty(), "usage: graph_bench");
@@ -470,30 +477,68 @@ fn unlimited_graph_caps() -> GraphCompileCaps {
 }
 
 fn metadata() -> Metadata {
+    let environment = [
+        "MISO_ENGINE_BENCH_GOVERNOR_OR_POWER_MODE",
+        "MISO_ENGINE_BENCH_POWER_SOURCE",
+        "MISO_ENGINE_BENCH_TARGET_FEATURES",
+        "MISO_ENGINE_BENCH_OPT_LEVEL",
+        "MISO_ENGINE_BENCH_LTO",
+        "MISO_ENGINE_BENCH_CODEGEN_UNITS",
+        "MISO_ENGINE_BENCH_BACKGROUND_LOAD_NOTE",
+    ]
+    .into_iter()
+    .map(|name| {
+        (
+            name.to_owned(),
+            bench_support::metadata::Metadata::gather().var(name).ok(),
+        )
+    })
+    .collect();
+    let raw = RawMetadata {
+        rustc_verbose: command("rustc", &["-vV"]),
+        cpu: command(
+            "sh",
+            &["-c", "awk -F: '/model name/{print $2; exit}' /proc/cpuinfo"],
+        ),
+        kernel: command("uname", &["-r"]),
+        environment,
+    };
+    metadata_from_raw(
+        raw,
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_secs(),
+    )
+}
+
+fn metadata_from_raw(raw: RawMetadata, timestamp_epoch_seconds: u64) -> Metadata {
     let mut missing = Vec::new();
-    let value =
-        |name: &str, missing: &mut Vec<String>| match bench_support::metadata::Metadata::gather()
-            .var(name)
+    let value = |name: &str, missing: &mut Vec<String>| match raw
+        .environment
+        .iter()
+        .find(|(candidate, _)| candidate == name)
+        .and_then(|(_, value)| value.as_deref())
+    {
+        Some(value)
+            if !value.is_empty()
+                && !matches!(
+                    value,
+                    "unknown" | "not measured" | "default" | "target-default"
+                ) =>
         {
-            Ok(value)
-                if !value.is_empty()
-                    && !matches!(
-                        value.as_str(),
-                        "unknown" | "not measured" | "default" | "target-default"
-                    ) =>
-            {
-                value
-            }
-            Ok(value) if !value.is_empty() => {
-                missing.push(name.to_owned());
-                value
-            }
-            _ => {
-                missing.push(name.to_owned());
-                "unknown".to_owned()
-            }
-        };
-    let rustc_verbose = command("rustc", &["-vV"]);
+            value.to_owned()
+        }
+        Some(value) if !value.is_empty() => {
+            missing.push(name.to_owned());
+            value.to_owned()
+        }
+        _ => {
+            missing.push(name.to_owned());
+            "unknown".to_owned()
+        }
+    };
+    let rustc_verbose = raw.rustc_verbose;
     let rustc = rustc_verbose.lines().next().unwrap_or("unknown").to_owned();
     let llvm = rustc_verbose
         .lines()
@@ -506,17 +551,9 @@ fn metadata() -> Metadata {
         .unwrap_or("unknown")
         .to_owned();
     Metadata {
-        timestamp_epoch_seconds: SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock")
-            .as_secs(),
-        cpu: command(
-            "sh",
-            &["-c", "awk -F: '/model name/{print $2; exit}' /proc/cpuinfo"],
-        )
-        .trim()
-        .to_owned(),
-        os: format!("{} {}", env::consts::OS, command("uname", &["-r"])),
+        timestamp_epoch_seconds,
+        cpu: raw.cpu,
+        os: format!("{} {}", env::consts::OS, raw.kernel),
         governor_or_power_mode: value("MISO_ENGINE_BENCH_GOVERNOR_OR_POWER_MODE", &mut missing),
         power_source: value("MISO_ENGINE_BENCH_POWER_SOURCE", &mut missing),
         rustc,
@@ -622,6 +659,65 @@ mod tests {
             "unknown"
         );
         assert_eq!(command("/bin/sh", &["-c", r"printf '\377'"]), "unknown");
+    }
+
+    #[test]
+    fn raw_metadata_projection_extracts_commands_and_tracks_environment_states() {
+        let metadata = metadata_from_raw(
+            RawMetadata {
+                rustc_verbose: "rustc test 1.0\nLLVM version: LLVM test\nhost: x86_64-test"
+                    .to_owned(),
+                cpu: "Test CPU".to_owned(),
+                kernel: "test-kernel".to_owned(),
+                environment: vec![
+                    (
+                        "MISO_ENGINE_BENCH_GOVERNOR_OR_POWER_MODE".to_owned(),
+                        Some("performance".to_owned()),
+                    ),
+                    (
+                        "MISO_ENGINE_BENCH_POWER_SOURCE".to_owned(),
+                        Some("default".to_owned()),
+                    ),
+                    ("MISO_ENGINE_BENCH_TARGET_FEATURES".to_owned(), None),
+                    (
+                        "MISO_ENGINE_BENCH_OPT_LEVEL".to_owned(),
+                        Some("2".to_owned()),
+                    ),
+                    (
+                        "MISO_ENGINE_BENCH_LTO".to_owned(),
+                        Some("not measured".to_owned()),
+                    ),
+                    (
+                        "MISO_ENGINE_BENCH_CODEGEN_UNITS".to_owned(),
+                        Some("16".to_owned()),
+                    ),
+                    ("MISO_ENGINE_BENCH_BACKGROUND_LOAD_NOTE".to_owned(), None),
+                ],
+            },
+            1_700_000_000,
+        );
+        assert_eq!(metadata.timestamp_epoch_seconds, 1_700_000_000);
+        assert_eq!(metadata.rustc, "rustc test 1.0");
+        assert_eq!(metadata.llvm, "LLVM test");
+        assert_eq!(metadata.target_triple, "x86_64-test");
+        assert_eq!(metadata.cpu, "Test CPU");
+        assert_eq!(metadata.os, format!("{} test-kernel", env::consts::OS));
+        assert_eq!(metadata.governor_or_power_mode, "performance");
+        assert_eq!(metadata.power_source, "default");
+        assert_eq!(metadata.target_features, "unknown");
+        assert_eq!(metadata.opt_level, "2");
+        assert_eq!(metadata.lto, "not measured");
+        assert_eq!(metadata.codegen_units, "16");
+        assert_eq!(metadata.background_load, "unknown");
+        assert_eq!(
+            metadata.missing,
+            vec![
+                "MISO_ENGINE_BENCH_POWER_SOURCE",
+                "MISO_ENGINE_BENCH_TARGET_FEATURES",
+                "MISO_ENGINE_BENCH_LTO",
+                "MISO_ENGINE_BENCH_BACKGROUND_LOAD_NOTE",
+            ]
+        );
     }
 
     #[test]
