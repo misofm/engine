@@ -1,0 +1,11 @@
+{
+  "utc": "2026-09-07T15:35:14.418907+00:00",
+  "command": [
+    "env",
+    "CHECKER=/tmp/issue542-review-sort-ex2tu0v4/check-conformance-boundaries.sh",
+    "bash",
+    "scripts/test-conformance-boundaries.sh"
+  ],
+  "mutation": "Only scratch gate_sort_lines sort failure branch: rc=$? -> rc=0; production source untouched",
+  "exit": 0
+}

@@ -1,0 +1,6 @@
+Original all-opcode fixture function byte-identical (including all 39 edit entries).
+controller: original ordered test names preserved: 44 (including the attributed test); extracted-body diff inspected (imports, fixture byte bridge, relative paths, formatting only).
+message_wire: original ordered test names preserved: 17; extracted-body diff inspected (imports, fixture byte bridge, relative paths, formatting only).
+session_wire: original ordered test names preserved: 19; extracted-body diff inspected (imports, fixture byte bridge, relative paths, formatting only).
+2026-09-07T15:11:13.542672+00:00 scalar: SHA256 c881d6288a6d130c25643a0198ad6e5c0086a70f95a98f5c6fa21365109e5240, 2734565 bytes verified; command ['wasm-interp', '/tmp/issue542-final-target/issue005-wasm-scalar/wasm32-unknown-unknown/release/conformance.wasm', '-r', 'main', '-a', 'i32:0', '-a', 'i32:0']; exit=0; output='main(i32:0, i32:0) => i32:0'
+2026-09-07T15:11:13.596033+00:00 simd128: SHA256 765b42cc97612d79e9da775771485e1cb7b08e1d1b3c425c9109c2fef8bf98b5, 2728061 bytes verified; command ['wasm-interp', '/tmp/issue542-final-target/issue005-wasm-simd128/wasm32-unknown-unknown/release/conformance.wasm', '-r', 'main', '-a', 'i32:0', '-a', 'i32:0']; exit=0; output='main(i32:0, i32:0) => i32:0'
