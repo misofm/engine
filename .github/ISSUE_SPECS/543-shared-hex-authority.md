@@ -142,3 +142,7 @@ All19 captured records returned0: before/after census; formatting/diff; explicit
 This focused-green checkpoint precedes #545 integration and final workspace gates. It is not final census acceptance or CP20 closure; Sol xhigh review and remote qualification/merge remain. No benchmark or repinning occurred.
 
 The terminal Luna report is now retained. The additional nineteenth record repeats only final read-only inspection after a harmless printf label warning; no tests or source work were repeated. The worker was paused before root committed7c0d9586; its acd57011 identity is the test-time base. The graph-compiler focused suite passed84 here because it still contains the pending #545 orphan-validator test; #545 removes that one target/test and records83. No final whole-finding count or delivery is inferred from either number.
+
+## Lossless evidence packaging before final review
+
+Luna high replaced14 whitespace-bearing stdout files with deterministic gzip captures and a manifest of original/packed paths, byte counts and hashes. Root independently decoded each and compared it byte-for-byte with its original committed blob at b5317fe2. No source, dependency or test execution changed. The working-tree diff check passed; root will additionally check the full committed range before integration/final review. This is still attempt1 and is not a formal review retry.
