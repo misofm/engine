@@ -52,3 +52,11 @@ The slice is one small shared acquisition operation plus two existing consumer c
 Astra LOW reviewed current main `735197b1bc94006eeb1c42ad447ab02bf61696d5` after #578. Protocol and conformance still each spawn a metadata command, require success and valid UTF-8, and trim stdout; `bench-support::sysinfo` already owns the delivered #557 command acquisition law. The only intentional consumer difference is empty-output policy, especially clean `git status --porcelain` in conformance.
 
 This TOOL9 slice is smaller than IO5 live-state publication, host activation, lifecycle/clock, graph/bank/effect/parameter rollout or segment execution, and smaller than TOOL11's remaining declarative-rule contract. It is disjoint from active lane-A #580. Astra LOW returned conditional PASS for this product shape and is sufficient for all review. Activation still requires matching numbered local/GitHub identity, an exact pushed brief, current-base and ownership checks, and an Astra LOW scope verdict. No implementation is authorized by this preliminary audit alone.
+
+## Numbered current-base scope review
+
+Astra LOW returned **PASS** for exact pushed brief `873a7b5caa19d3d2672a8271f272ebbfebe7f6ea` on base and merge-base `735197b1bc94006eeb1c42ad447ab02bf61696d5`. GitHub #583 is open with matching number, title and exact body; the worktree is clean and pushed, the sole base-to-head delta is this spec, diff checks pass, and base post-main qualification `34163575770` succeeded.
+
+The frozen law distinguishes successful empty stdout from spawn, exit-status and UTF-8 failures while leaving protocol and conformance projection policy local. The allowed paths and gates are sufficient for one half-day acquisition consolidation. Manifests, locks, policies, timing loops and artifacts remain excluded; conditional target wording does not claim unsupported Wasm execution of host commands. Ownership is disjoint from #580 at clean pushed head `517bbf486f84fdfd6d59c42f7683348b55cea781`. #580 and #583 occupy the two active slots, and the historical dependency/verdict order remains unchanged.
+
+No corrections are required. Astra LOW is sufficient for this bounded non-audio verification. Luna HIGH attempt 1 may begin only from this reviewed brief/base and must pause at the first coherent focused-green tranche for root checkpointing. TOOL9 remains partial after this child.
