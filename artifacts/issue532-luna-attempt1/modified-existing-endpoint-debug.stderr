@@ -1,0 +1,11 @@
+warning: unused variable: `revision`
+    --> crates/host-core/src/scalar_point_endpoint.rs:1015:9
+     |
+1015 |     let revision = session.revision();
+     |         ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_revision`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `host-core` (lib) generated 1 warning (run `cargo fix --lib -p host-core` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.07s
+     Running tests/scalar_point_endpoint.rs (/tmp/issue532-target/debug/deps/scalar_point_endpoint-fb9af70fce4ccb65)

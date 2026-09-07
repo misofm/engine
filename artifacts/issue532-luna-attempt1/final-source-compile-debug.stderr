@@ -1,0 +1,3 @@
+   Compiling host-core v0.1.0 (/home/bl/misofm/engine-controller-scalar-points/crates/host-core)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.66s
+  Executable tests/scalar_point_endpoint.rs (/tmp/issue532-target/debug/deps/scalar_point_endpoint-fb9af70fce4ccb65)
