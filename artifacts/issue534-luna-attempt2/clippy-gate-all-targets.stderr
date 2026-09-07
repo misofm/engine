@@ -1,0 +1,38 @@
+    Checking bytemuck v1.25.2
+    Checking typenum v1.20.1
+    Checking engine v0.1.0 (/home/bl/misofm/engine-gate-detector-access/crates/engine)
+    Checking cfg-if v1.0.4
+    Checking cpufeatures v0.3.0
+    Checking dsp-reference v0.1.0 (/home/bl/misofm/engine-gate-detector-access/crates/dsp-reference)
+    Checking safe_arch v1.2.0
+    Checking wide v1.6.1
+    Checking hybrid-array v0.4.14
+    Checking block-buffer v0.12.1
+    Checking crypto-common v0.2.2
+    Checking digest v0.11.3
+    Checking sha2 v0.11.0
+    Checking bench-support v0.1.0 (/home/bl/misofm/engine-gate-detector-access/tools/bench-support)
+    Checking lane v0.1.0 (/home/bl/misofm/engine-gate-detector-access/crates/lane)
+    Checking math v0.1.0 (/home/bl/misofm/engine-gate-detector-access/crates/math)
+    Checking effect-contract v0.1.0 (/home/bl/misofm/engine-gate-detector-access/crates/effect-contract)
+    Checking effect-runtime v0.1.0 (/home/bl/misofm/engine-gate-detector-access/crates/effect-runtime)
+    Checking conformance v0.1.0 (/home/bl/misofm/engine-gate-detector-access/crates/conformance)
+    Checking gate-expander v0.1.0 (/home/bl/misofm/engine-gate-detector-access/crates/gate-expander)
+error: this function has too many arguments (9/7)
+   --> crates/gate-expander/src/kernel.rs:217:1
+    |
+217 | / fn gather_detector(
+218 | |     access: DetectorAccess,
+219 | |     now: u32,
+220 | |     slot_mask: u32,
+...   |
+226 | |     taps: &mut [[f32; MAX_WIDTH]; 4],
+227 | | ) -> DetectorLoadRoute {
+    | |______________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#too_many_arguments
+    = note: `-D clippy::too-many-arguments` implied by `-D clippy::all`
+    = help: to override `-D clippy::all` add `#[allow(clippy::too_many_arguments)]`
+
+error: could not compile `gate-expander` (lib) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...

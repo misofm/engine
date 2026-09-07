@@ -214,6 +214,7 @@ pub struct GateArgs<'a, L: Lane> {
 /// equal taps reuse the opposite channel's own word, preserving the original four tap arguments
 /// after only the two own source reads.
 #[inline(always)]
+#[allow(clippy::too_many_arguments)]
 fn gather_detector(
     access: DetectorAccess,
     now: u32,
