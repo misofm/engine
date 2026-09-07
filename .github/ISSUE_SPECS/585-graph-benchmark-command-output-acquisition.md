@@ -41,3 +41,11 @@ Astra LOW returned **PASS** for exact pushed brief `7353a61c54a209ea3ae797675a2f
 Luna HIGH delivered the one-file source checkpoint `d49cd93feaf3965686f951f778ce8358b32cc69b`. Graph's private `Command::output` body is removed; its local `command` projection delegates to `bench_support::sysinfo::command_output` and retains `None` → `"unknown"` while successful empty stays empty. Unix fixtures cover trimmed text, empty/whitespace success, nonzero plausible stdout, spawn failure and invalid UTF-8. A fixed metadata/record fixture pins all graph metadata fields, Unicode escaping, incomplete status and missing-field output.
 
 Focused graph debug/release each pass 5 tests, complete bench debug passes 42 tests, and strict bench Clippy/rustdoc, formatting and diff checks pass. Only `tools/bench/src/graph.rs` changed; no benchmark, helper, manifest, lock, policy, artifact or #580 path changed. Astra LOW adversarial source review remains pending.
+
+## Attempt 1 source verdict
+
+Astra LOW returned **FAIL** at exact pushed head `00bfaf031a383db8b654ee8a1f180c89e8e63309`, source `d49cd93feaf3965686f951f778ce8358b32cc69b`, merge-base `4ef2ee1cae8553847851e0f5a886be8929be388d`. The acquisition change is correct, all proportional gates pass, issue/upstream identity is exact, and no scope or #580 overlap exists.
+
+Attempt 1 fails because the fixed record test constructs already-projected `Metadata`; it cannot detect broken compiler-line/LLVM/host extraction, CPU/OS composition or environment sentinel/missing-field handling. Attempt 2 may add only a narrow production-used projection seam with deterministic raw command and environment inputs, assert those outputs including absent and sentinel cases, and retain the record oracle. No other change is authorized.
+
+During review, main advanced disjointly through #580 / PR #582 to `defa979cbf0bf86b4ebba2f52b0647eb01b9ff29`. That delta changes neither bench nor bench-support. Final delivery still requires integration and exact current-base review after source PASS.
