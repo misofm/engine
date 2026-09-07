@@ -140,3 +140,29 @@ Luna must pause at each coherent compiling/focused-green tranche for root's exac
 commit and upstream audit. This is attempt 1. If the implementation needs a second scheduler,
 arbitrary processor rollback, queue API changes or PCM scratch, stop and request a bounded
 rebrief rather than widening the slice.
+
+## Luna attempt 1 mechanism checkpoint
+
+Pushed head `73591f76d353d5ceccd4155158f0ad77afb2d3d8` implements the first coherent
+split-owner mechanism tranche in the four authorized source files
+`graph/src/{lib,runtime}.rs`, `builtins/src/lib.rs` and `builtins-compiler/src/lib.rs`.
+Graph now carries a preparation-only split-pair factory/owner, stores the owner outside the two
+original runtime ops, invokes fader begin and matrix finish at their original positions, and
+materializes pending faders before returning an execution or observer error. The concrete builtin
+owner defers only settled fader arithmetic, preserves ramping execution at the fader boundary, and
+uses the existing fused kernel only at the matrix boundary. Selection proves same-buffer dataflow,
+private physical-buffer interval, serialized exact owners and the existing observation/send/
+sidechain declines, then admits at most one deterministic nonadjacent interval.
+
+The tranche includes focused unit coverage for split completion, an explicit two-track level-major
+schedule, settled fused selection and matrix-error completion against separate owners. Luna and
+root independently ran `cargo test --locked -p graph --lib` (58 passed) and
+`cargo test --locked -p builtins-compiler --lib` (40 passed); `cargo fmt --all -- --check` and
+`git diff --check` also passed. Root confirmed only the four authorized paths changed and pushed
+the exact checkpoint.
+
+This is not source PASS or attempt-1 review. The required actual graph-compiler-produced fixture,
+full invalid `F_A/F_B/M_A/M_B` and retry table, intervening observer error, ramp/retarget and
+selection mutation proofs, complete decline/conflict/overlap matrix, resource charging,
+allocation/free/off-render ownership evidence, release gates and target/artifact qualification
+remain. No benchmark or artifact qualification ran, and no performance claim is made.
