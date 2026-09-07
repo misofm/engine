@@ -1,0 +1,1 @@
+bash scripts/check-artifact-evidence-leak.sh

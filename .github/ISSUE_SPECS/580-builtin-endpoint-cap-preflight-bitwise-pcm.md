@@ -59,3 +59,22 @@ unchanged. The committed lockfile, manifest, and frozen preparation seam are unc
 Current-main integration, an Astra LOW exact integrated-head review, required pull-request
 qualification, merge, post-main qualification, GitHub synchronization, and clean delivered-worktree
 removal remain delivery gates.
+
+## Artifact qualification
+
+Lane B qualified candidate commit `517bbf486f84fdfd6d59c42f7683348b55cea781` after the pre-pin
+repin probe and independent pre-pin static/object/ABI/resource/PCM checks. The ordinary locked
+AudioWorklet build produced the exact candidate SHA-256
+`29abe2fa838ad4c24cbf19db9ac4185ac95c98d8e4f9e49ed8d668a35e577226` and reproduced it after
+applying the shipped pin; all six shipped files matched the pre-pin candidate byte-for-byte.
+(The candidate hash is recorded in the pin and durable evidence; the repeated digest is
+`29abe2fa838ad4c24cbf19db9ac4185ac95c98d8e4f9e49ed8d668a35e577226`.)
+
+Final static/object/ABI checks and expected-resource/native-PCM checks passed, including the
+26-resource red mutations. SDK dependency installation and publishable package/self-test passed
+with all 11 tests. Playwright 1.62.1 qualification with artifact-set and semantic red mutations
+passed for Chromium 151.0.7922.34, Firefox 153.0, and WebKit 26.5. `results.json` and
+`BROWSER_DEPLOYMENT_MATRIX.md` now carry this candidate and artifact lineage. Exact commands,
+raw streams, statuses, and checksums are preserved under
+`artifacts/issue580-artifact-qualification/`; `Cargo.lock` is restored and no target output is
+owned by the tranche.

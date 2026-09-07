@@ -1,0 +1,6 @@
+test-artifact-evidence-leak: red as required: missing-qualification
+test-artifact-evidence-leak: red as required: conformance-back-in-the-scalar-wasm-artifact
+test-artifact-evidence-leak: red as required: wasm-compile-coverage-deleted
+test-artifact-evidence-leak: red as required: cross-targets-script-mixes-effect-package-with-conformance
+test-artifact-evidence-leak: red as required: workflow-mixes-effect-package-with-conformance
+artifact evidence gate mutations: ok

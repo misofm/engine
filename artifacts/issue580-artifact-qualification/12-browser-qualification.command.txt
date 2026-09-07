@@ -1,0 +1,1 @@
+npm --prefix hosts/host-web/qualification run qualify -- --artifacts /tmp/issue580-artifact-517bbf48 --record-matrix --candidate-commit 517bbf486f84fdfd6d59c42f7683348b55cea781 --self-test-mutations
