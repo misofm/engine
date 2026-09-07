@@ -246,6 +246,23 @@ Attempt 3 is the final allowed attempt and must repair only these findings withi
 same exact paths. A third FAIL triggers the hard stop and bounded successor; no fourth
 revision or weakened gate is authorized.
 
+## Attempt 3 hard stop
+
+Final source checkpoint `bb839fcc57651695b35276d578d8f6215a313817`
+passed eleven endpoint tests and all proportional local gates. Astra LOW returned
+**FAIL** on the final attempt: cancellation polling still bypasses endpoint
+reconciliation; the post-claim schedule does not publish inside an active render;
+nonbanked scalar state/post-fader/dispatch evidence is absent; resource fields and
+their oracle remain incomplete; and the mutation record does not target the frozen
+claims precisely. The complete verdict is `docs/audits/576-attempt3-review.md`.
+
+The three-attempt hard stop is reached. No fourth #576 revision is authorized. Freeze
+and preserve source head `bb839fcc` plus all three verdicts. A newly numbered bounded
+successor may edit only the same host-core endpoint/test/spec/evidence boundary to
+finish cancellation reconciliation, truthful resource reporting, and the missing
+discriminating tests/mutations. #576 remains open and undelivered until that successor
+earns exact-head PASS and delivers the preserved source.
+
 ## Attempt 2 implementation record
 
 Attempt 2 stages the endpoint outcome queue before calling generic `collect`. A missing or
