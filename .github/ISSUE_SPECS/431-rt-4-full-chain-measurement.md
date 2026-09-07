@@ -91,3 +91,73 @@ Numbered #473 owns the bounded current manifest/descriptor identity correction a
 zero-launch hermetic proof are implemented for source review. No real preflight, runner, benchmark,
 audio or timed workload was invoked by #473. This issue's sole controlled capture remains UNSPENT
 and UNAUTHORIZED until its own separately frozen root assignment.
+
+## Current-main capture preparation scope
+
+#473/PR #481 is delivered as `59f35c627ed4bd8bcaf2e7a0944f014f521cbd94`, so the
+dedicated validator, preflight, runner and zero-launch lifecycle blockers are resolved. The old
+`b244da45...` manifest and "implemented for source review" status above are historical. Astra
+MEDIUM approved preparation scope on delivered `main`
+`30f658ee1c0c7d86002f5f2fea075a5dfa8a7c2c`, tree
+`7319b7c13d0bb6f94763d787f14f2661e04bc5f7`, or an explicitly verified documentation-only
+descendant. The handoff branch itself is stale measurement source and must not build the binary.
+
+The current builtins manifest SHA-256 is
+`31798260263396c242c0b90042e01abb18624f383fd88029341dffecde662796`. Since #473,
+only its `resources.jsonl` digest row changed. All ten approved benchmark descriptors, four PCM
+files and canonical JSON retain their frozen bytes; the ordered sixteen-input
+`sha256  path` identity is
+`54fc267fcdcfda04f008bbadb3b46d9c4fec9100ad9842958d669bee4f8ecb9d`.
+Current main already synchronizes the workload guard, preflight, validators and lifecycle suite to
+that manifest. Delivered shared digest and percentile refactors retain lowercase SHA encoding and
+the same six nearest-rank statistics; they do not change workload loops, parameters or record
+schema. Adopt current delivered inputs without historical output equivalence or speedup
+attribution.
+
+Frozen current file SHA-256 identities are:
+
+- `tools/bench/src/builtins.rs`: `99200cdbb362afc8e2d5389779accd6f11412f911dea903a5278b5343b4586fc`
+- `scripts/preflight-builtins-current-benchmark.sh`: `ba86c79cfd4280c7f983e84de055754e122954054693d8ecc7755333e1dc7478`
+- `scripts/run-builtins-current-benchmark.sh`: `a024f5ff5d5355478a4fc86da92f9a651fed0af59d520a61c17fa5ba4edc0537`
+- `scripts/builtins-current-benchmark-record-validator.jq`: `10253acaf52e3c8778a1b6332dd1a73c8a039602f4e5165c1af4b61a2471e160`
+- `scripts/builtins-current-benchmark-validator.jq`: `ec2fadf8deb9b4ba3ece824f8ffe3dff9a73c755adbc15f1d50cc4f56cbf0720`
+- `scripts/test-builtins-current-benchmark.sh`: `bee77da0d220fdb4d3675e176e662d3a0869cadbc7062a308d8d5967eb3862ec`
+- `scripts/check-bench-preconditions.sh`: `f90a9ae8bbe4358b33fe3f18067e849439de704baf961681a7ed75e751075626`
+- `Cargo.lock`: `ef85bfaac8b4df80b651fa89e5e9a67bfef141b58076bdaac513044161b0b853`
+- `Cargo.toml`: `471660ddca768e90ec87550807e140b4754454509f6f5f59986a80764b53effb`
+- `.cargo/config.toml`: `03b0fbd88c069abb0a8fbdca5921ba6a9899298291fe087977b509a29ebb7d0e`
+
+Root independently confirmed the current commit/tree, manifest and precondition hashes, a clean
+main checkout, and absence of both `artifacts/issue431-full-chain` and
+`target/issue431-prepared`. This authorizes the zero-workload preparation command only, from a
+clean isolated checkout of the frozen source:
+
+`bash scripts/preflight-builtins-current-benchmark.sh`
+
+Preflight builds once for explicit `x86_64-unknown-linux-gnu` into
+`target/issue431-prepared/build`, publishes `target/issue431-prepared/bench`, launches no DSP, and
+records the actual binary/toolchain/profile authority in the READY seal. Root must inspect that
+seal and binary identity before separately authorizing the sole runner invocation. The runner
+command is fixed as `bash scripts/run-builtins-current-benchmark.sh` with no arguments, but is not
+yet authorized by this preparation scope.
+
+The only output authority is `artifacts/issue431-full-chain/`. Keep command, environment,
+stdout/stderr and status capture outside the checkout until the runner completes so untracked
+evidence cannot trip candidate-cleanliness checks. After preparation, require the built-in
+60-second binary cooldown, successful affinity, load at or below 0.50 and sibling activity at or
+below 5 percent over 0.2 seconds. A load snapshot is not a quiet-window certificate. Coordinate
+both lanes before launch; a reserved prelaunch refusal consumes the sole invocation, so the runner
+must not be used as a readiness probe.
+
+The single run remains one child invocation with one internal warmup and two measured rounds:
+exactly twenty records over five workloads, two rates and Q128. Accept only child status zero,
+exactly one of each five phase markers, complete current record and aggregate validation, twenty
+unique workload/rate/round rows, paired output identity and byte-identical raw/accepted promotion.
+On any failure preserve raw evidence and disposition; no retry, tuning, authority reset or
+automatic successor capture.
+
+Report only the eight full-chain/identity p50 nanoseconds-per-operation rows by
+workload/rate/round. Retain matrix, meter and preparation rows under their existing scopes. No
+cycle count, causal speedup, historical matched-input comparison, live bank/scalar/Concurrent
+measurement, new budget or full RT4 closure follows. The sole capture remains UNSPENT until the
+prepared seal is inspected and root records the final launch decision.
