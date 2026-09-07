@@ -1,0 +1,19 @@
+{
+  "argv": [
+    "/home/bl/.local/bin/codex",
+    "exec",
+    "-C",
+    "/home/bl/misofm/engine-tooling-orphan-cleanup",
+    "-s",
+    "danger-full-access",
+    "-m",
+    "gpt-5.6-sol",
+    "-c",
+    "model_reasoning_effort=\"xhigh\"",
+    "-o",
+    "/tmp/issue349-partials/545-sol-xhigh-review.md",
+    "-"
+  ],
+  "cwd": "/home/bl/misofm/engine-tooling-orphan-cleanup",
+  "prompt": "/tmp/issue349-partials/545-review-prompt.md"
+}
