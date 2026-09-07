@@ -48,6 +48,13 @@ frontier, disposition, prefix/remainder, sample, collection, and reuse assertion
 The release-before-poll mutation failed deterministically without hanging; its exact
 output is preserved in `docs/audits/572-deterministic-cancellation-proof.md`.
 
+Astra LOW reviewed exact head `9f0e40b0bff0891c734ee18085dc04f5005502f4`
+and returned **FAIL** on failure-path ownership. The outer `release_tx` remains alive
+while `thread::scope` joins after a control assertion panic, so render can block
+forever on `recv`. Normal ordering and all runtime evidence were accepted. Attempt 2
+must move the sender into the scope body's ownership and add a discriminating
+pre-release unwind/error test; `docs/audits/572-attempt1-review.md` is authoritative.
+
 ## Workflow and completion
 
 Luna HIGH implements attempt 1. Astra LOW performs adversarial exact-head review. Retain at most three successor attempts, though this slice should close in one. Root checkpoints and pushes each coherent tranche, keeps both issues and #559/#560 synchronized, and opens a PR only after source PASS.
