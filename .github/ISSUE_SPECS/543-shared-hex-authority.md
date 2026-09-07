@@ -1,3 +1,37 @@
+# 543: Share one lowercase byte-hex encoding authority across Rust packages
+
+One-line summary: Deliver the smallest independently closable Rust slice of audit #349 CP-20 by establishing dependency-free `engine::hex_lower`, delegating every live equivalent Rust encoder to it or recording its separately delivered retirement, and preserving all strings, canonical values, digest pins, public adapters, and hashing ownership.
+
+## Amended scope and completion boundary
+
+Issue #543 is the Rust-package slice of #349 CP-20. It establishes `engine::hex_lower` as the shared lowercase byte-hex authority for Rust packages, delegates every live equivalent Rust encoder, and records the separately delivered #545 retirement of the obsolete `rack_fixture` consumer. Its Rust implementation, dependency edges, pins, APIs, hashing ownership, and full workspace qualification are independently useful and remain accepted evidence.
+
+Issue #543 does not close CP-20. Sol XHIGH attempt 1 correctly found that the original workspace-wide census searched Rust only and omitted three live equivalent encoders:
+
+- `sdk/src/core/asset.ts`: `sha256Hex`;
+- `hosts/host-web/qualification/qualification.js`: `bytesToHex`;
+- `hosts/host-web/web/stem-store/incremental-sha256.js`: `digestHex`.
+
+These are transferred obligations owned by [#552](https://github.com/misofm/engine/issues/552). They are not exclusions and are not evidence that the original finding is complete. The original workspace-wide completion language is superseded by this amended Rust boundary.
+
+Issue #543 may close only as the reviewed and delivered Rust slice. Audit #349 CP-20 must remain `PARTIAL` until [#552](https://github.com/misofm/engine/issues/552) is reviewed, delivered, merged, and synchronized. CP-20 delivery must cite both #543 and that successor.
+
+## Preserved acceptance
+
+- Exactly one dependency-free Rust implementation remains: `engine::hex_lower`.
+- All live equivalent Rust encoders delegate to it or were removed by separately reviewed #545.
+- Existing adapters, public APIs, SHA-256 ownership, call placement, canonical strings, fixtures, and pins remain unchanged.
+- Existing parser, decorated diagnostic/repin, fixed-width integer, uppercase, and word-oriented formats retain the concrete semantic exclusions already recorded by #543.
+- The independent fixed-literal engine test and the recorded focused and full Rust workspace gates remain acceptance evidence.
+- No claim of cross-language or whole-CP20 completion is made by #543.
+
+
+## Governing rebrief and retained record
+
+Sol high approved this split because the remaining JS/TS work crosses independently shipped package boundaries. #552 has a matching numbered spec and OPEN GitHub issue, pushed0e147aa2. Its complete contract owns all three discovered non-Rust sites and final cross-language census; no obligation is discarded. Submit this amended claim as attempt2 for actual Sol xhigh review. No Rust implementation or gate changed. The detailed Rust site roster, invariants and gates in the original record below remain applicable; original whole-workspace completion claims are historical and superseded by the governing scope above.
+
+## Historical original brief and implementation record
+
 # 543: Share one lowercase byte-hex encoding authority workspace-wide
 
 One-line summary: Finish audit #349 CP-20 by making `engine::hex_lower` the single implementation of whole-byte-stream lowercase hexadecimal encoding, delegating every current equivalent workspace encoder to it while preserving all strings, canonical SHA-256 values, digest pins, public adapters, and test ownership.
