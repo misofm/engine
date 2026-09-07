@@ -213,6 +213,11 @@ printf '\nfn percentile(sorted: &[u64], p: usize) -> u64 {\n    sorted[p]\n}\n' 
     >>"$case_root/tools/bench/src/graph.rs"
 expect_failure second-percentile
 
+new_case second-percentile-summary-owner
+printf '\nstruct Percentiles { min: u64 }\n' \
+    >>"$case_root/tools/bench/src/graph.rs"
+expect_failure second-percentile-summary-owner
+
 new_case second-digest-sink
 printf '\nstruct Sha256Sink;\n' \
     >>"$case_root/tools/bench/src/builtins.rs"
