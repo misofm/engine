@@ -269,12 +269,18 @@ mod tests {
 
         let mark = current_thread_counters();
         let layout = Layout::from_size_align(16, 8).unwrap();
+        // SAFETY: `layout` was constructed by `Layout::from_size_align`, so it is valid.
         let first = unsafe { alloc(layout) };
         assert!(!first.is_null(), "test allocation failed");
+        // SAFETY: `layout` was constructed by `Layout::from_size_align`, so it is valid.
         let zeroed = unsafe { alloc_zeroed(layout) };
         assert!(!zeroed.is_null(), "test zeroed allocation failed");
+        // SAFETY: `first` is the non-null allocation returned by `alloc` with `layout`, and the
+        // requested replacement size is valid.
         let grown = unsafe { realloc(first, layout, 32) };
         assert!(!grown.is_null(), "test reallocation failed");
+        // SAFETY: `zeroed` and `grown` are non-null allocations returned by the matching
+        // allocation operations and each is deallocated exactly once with its matching layout.
         unsafe {
             dealloc(zeroed, layout);
             dealloc(
