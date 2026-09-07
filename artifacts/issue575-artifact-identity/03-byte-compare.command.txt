@@ -1,1 +1,0 @@
-bash /tmp/issue575-compare-six.sh 

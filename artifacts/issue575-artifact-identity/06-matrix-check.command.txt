@@ -1,1 +1,0 @@
-node hosts/host-web/qualification/generate-matrix.mjs --check 
