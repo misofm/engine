@@ -297,3 +297,32 @@ existing graph/plan/largest-allocation checks, and return the existing resource 
 ownership on overflow or limit failure. No scheduler, lowering, canonical identity, cap schema or
 unrelated compiler change is authorized. Luna reverted its exploratory edit before this amendment;
 the preserved uncommitted tranche touched only the previously authorized graph and builtins paths.
+
+## Luna attempt 2 runtime-resource checkpoint
+
+Pushed source `9728ec21` completes the retained-metadata correction in the six authorized graph,
+graph-compiler and builtins paths. Every compiled graph now folds a derived runtime reservation
+before the existing caps. Old-layout mirrors establish the current deltas without byte literals:
+the split slot adds 16 bytes to `RuntimeOp`, 8 bytes to its `RuntimeUnit` container, and the table
+field adds 16 bytes to the boxed `GraphExecutor`. The report charges the larger op/unit delta once
+per bounded emitted op, uses the full containing allocations for the largest-allocation cap, and
+keeps the semantic canonical estimate unchanged. Eligible serialized scalar builtins separately
+reserve the one-entry boxed split-owner table; no runtime field or op bytes are double charged.
+
+The graph gates prove derived layout identities, zero/one table estimates, checked multiplication
+overflow and transactional estimate rollback. Graph-compiler proves the runtime term is published
+once, exact caps admit it, and each one-below graph/plan/largest cap rejects with ownership
+returned. The allocation tracker observes the actual selected one-entry table allocation, an
+ineligible reference with no table allocation, zero allocations/frees on settled success and an
+injected observer failure, a completion-disable mutation, and one off-render release of the
+original owners and split outer.
+
+Luna and root reproduced `cargo test --locked -p graph --lib` (60 passed),
+`cargo test --locked -p graph-compiler --lib` (65 passed),
+`cargo test --locked -p builtins-compiler --features test-support --lib` (44 passed), and
+`cargo test --locked -p builtins-compiler --features test-support --test allocation_tracker`
+(9 passed). `cargo check` with `test-support`, format and diff checks are warning-free and green.
+This remains an attempt-2 checkpoint rather than source PASS. Split-specific ramp/retarget,
+physical-conflict/overlap and selection-mutation gates plus proportional release/static/supported-
+target qualification remain. Lane B still owns artifact qualification and pinning after source
+freeze.
