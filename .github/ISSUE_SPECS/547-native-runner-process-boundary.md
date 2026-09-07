@@ -15,3 +15,9 @@ This issue is #547. The complete residual is tracked by #545 orphan rack retirem
 ## Active slot
 
 #545 is merged through PR549 at86d5b4bd and CLOSED, with its completed worktree removed. #547 now occupies that freed slot alongside #542, #543 and #546. Root activates this frozen smallest process-boundary slice from synchronized main86d5b4bd. Sol high coordinates Luna high implementation; Sol xhigh verifies. Production/audio changes remain out of scope.
+
+## Attempt1 focused-green source checkpoint
+
+Luna high under Sol high coordination added one process_boundary integration test using Cargo actual binary path. Accepted frozen riff-48000 case returns0 with empty diagnostics and8192 output bytes, without a retained partial file. Existing frames.zero rejection returns2 with exact typed stderr and no output/partial. The full runner suite passed19 library plus1 integration tests; strict Clippy, final format, workspace policy and diff checks passed. Direct executable captures independently record both cases. Initial focused compile failed101 for missing crate-level docs and initial formatting failed1; both are preserved and corrected before final gates. Expected rejected-process exit2 is success evidence for the rejection contract.
+
+Only the new integration test changes source; production/CLI/audio/fixtures/pins/manifests/lockfile remain byte-identical. Raw captures are preserved losslessly under artifacts/issue547-attempt1 with original/packed hashes. Sol xhigh review and required remote qualification remain; this checkpoint is not delivery.
