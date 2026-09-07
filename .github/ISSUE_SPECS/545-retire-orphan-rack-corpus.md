@@ -21,3 +21,9 @@ Remaining TOOL14 obligations stay explicitly open under queued successor specs: 
 ## Numbered TOOL14 disposition
 
 This issue is #545. The complete residual is tracked by #545 orphan rack retirement, #546 current operator/path corrections and #547 native-runner process coverage. Only #545 is currently active; #546/#547 await a slot. FLAC retirement was delivered by #356. Closing one child does not close TOOL14.
+
+## Attempt 1 coherent deletion checkpoint
+
+Luna high removed exactly five tracked files: rack_fixture.rs and the four files under fixtures/rack/v1. Sol high coordinator reports the worker paused at green: metadata removes only the rack_fixture target, 83 graph-compiler tests pass, and final policy/fmt/diff checks pass. Root independently compared before/after metadata and verified every protected issue038 fixture/checker byte against e5b86cf3; hashes and raw available outputs are retained in artifacts/issue545-attempt1.
+
+The initial direct workspace-policy invocation failed with permission denied; its stderr is retained, and the explicit bash invocation passed. The coordinator is collecting the exact command/status ledger before adversarial review; this checkpoint does not substitute its summary for that pending provenance. No further deletion or source implementation is authorized. Sol xhigh verification, required qualification and remote delivery remain pending. #546/#547 remain queued and TOOL14 remains partial.

@@ -1,0 +1,71 @@
+   Compiling bytemuck v1.25.2
+   Compiling engine v0.1.0 (/home/bl/misofm/engine-tooling-orphan-cleanup/crates/engine)
+   Compiling version_check v0.9.5
+   Compiling proc-macro2 v1.0.107
+   Compiling lexical-util v1.0.7
+   Compiling cfg-if v1.0.4
+   Compiling quote v1.0.47
+   Compiling libc v0.2.189
+   Compiling unicode-ident v1.0.24
+   Compiling syn v1.0.109
+   Compiling typenum v1.20.1
+   Compiling autocfg v1.5.1
+   Compiling once_cell v1.21.4
+   Compiling smallvec v1.15.2
+   Compiling decoded-char v0.1.1
+   Compiling utf8-decode v1.0.1
+   Compiling cpufeatures v0.3.0
+   Compiling locspan v0.8.2
+   Compiling dsp-reference v0.1.0 (/home/bl/misofm/engine-tooling-orphan-cleanup/crates/dsp-reference)
+   Compiling safe_arch v1.2.0
+   Compiling smallstr v0.3.1
+   Compiling ahash v0.7.8
+   Compiling proc-macro-error-attr v1.0.4
+   Compiling proc-macro-error v1.0.4
+   Compiling indexmap v1.9.3
+   Compiling wide v1.6.1
+   Compiling lexical-write-integer v1.0.6
+   Compiling lexical-parse-integer v1.0.6
+   Compiling lexical-parse-float v1.0.6
+   Compiling hybrid-array v0.4.14
+   Compiling lexical-write-float v1.0.6
+   Compiling getrandom v0.2.17
+   Compiling lexical-core v1.0.6
+   Compiling lexical v7.0.5
+   Compiling json-number v0.4.10
+   Compiling block-buffer v0.12.1
+   Compiling crypto-common v0.2.2
+   Compiling hashbrown v0.12.3
+   Compiling digest v0.11.3
+   Compiling sha2 v0.11.0
+   Compiling locspan-derive v0.6.0
+   Compiling json-syntax v0.12.5
+   Compiling session v0.1.0 (/home/bl/misofm/engine-tooling-orphan-cleanup/crates/session)
+   Compiling lane v0.1.0 (/home/bl/misofm/engine-tooling-orphan-cleanup/crates/lane)
+   Compiling math v0.1.0 (/home/bl/misofm/engine-tooling-orphan-cleanup/crates/math)
+   Compiling effect-contract v0.1.0 (/home/bl/misofm/engine-tooling-orphan-cleanup/crates/effect-contract)
+   Compiling effect-runtime v0.1.0 (/home/bl/misofm/engine-tooling-orphan-cleanup/crates/effect-runtime)
+   Compiling rack v0.1.0 (/home/bl/misofm/engine-tooling-orphan-cleanup/crates/rack)
+   Compiling gate-expander v0.1.0 (/home/bl/misofm/engine-tooling-orphan-cleanup/crates/gate-expander)
+   Compiling builtins v0.1.0 (/home/bl/misofm/engine-tooling-orphan-cleanup/crates/builtins)
+   Compiling delay v0.1.0 (/home/bl/misofm/engine-tooling-orphan-cleanup/crates/delay)
+   Compiling true-peak-limiter v0.1.0 (/home/bl/misofm/engine-tooling-orphan-cleanup/crates/true-peak-limiter)
+   Compiling parametric-eq v0.1.0 (/home/bl/misofm/engine-tooling-orphan-cleanup/crates/parametric-eq)
+   Compiling multiband-compressor v0.1.0 (/home/bl/misofm/engine-tooling-orphan-cleanup/crates/multiband-compressor)
+   Compiling soft-clip v0.1.0 (/home/bl/misofm/engine-tooling-orphan-cleanup/crates/soft-clip)
+   Compiling transient-shaper v0.1.0 (/home/bl/misofm/engine-tooling-orphan-cleanup/crates/transient-shaper)
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-tooling-orphan-cleanup/crates/compressor)
+   Compiling conformance v0.1.0 (/home/bl/misofm/engine-tooling-orphan-cleanup/crates/conformance)
+   Compiling graph v0.1.0 (/home/bl/misofm/engine-tooling-orphan-cleanup/crates/graph)
+   Compiling rack-compiler v0.1.0 (/home/bl/misofm/engine-tooling-orphan-cleanup/crates/rack-compiler)
+   Compiling effect-package v0.1.0 (/home/bl/misofm/engine-tooling-orphan-cleanup/crates/effect-package)
+   Compiling effect-compiler v0.1.0 (/home/bl/misofm/engine-tooling-orphan-cleanup/crates/effect-compiler)
+   Compiling builtins-compiler v0.1.0 (/home/bl/misofm/engine-tooling-orphan-cleanup/crates/builtins-compiler)
+   Compiling graph-compiler v0.1.0 (/home/bl/misofm/engine-tooling-orphan-cleanup/crates/graph-compiler)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 10.75s
+     Running unittests src/lib.rs (/tmp/issue545-target/debug/deps/graph_compiler-12dea0a01d43bb77)
+     Running unittests src/bin/graph_fixture.rs (/tmp/issue545-target/debug/deps/graph_fixture-c48e2ea9e79f7bb1)
+     Running tests/route_gain.rs (/tmp/issue545-target/debug/deps/route_gain-b2edfc627bbe7ab6)
+     Running tests/scale.rs (/tmp/issue545-target/debug/deps/scale-ea4e03665071139f)
+     Running tests/track_delay.rs (/tmp/issue545-target/debug/deps/track_delay-5b80d4068b687b69)
+   Doc-tests graph_compiler
