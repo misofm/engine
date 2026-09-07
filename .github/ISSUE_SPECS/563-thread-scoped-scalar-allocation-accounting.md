@@ -41,3 +41,9 @@ Before editing, Luna HIGH records exact model/effort, argv, cwd, clean head/stat
 6. After Astra PASS, obtain required PR `qualification` SUCCESS on the exact reviewed head/current base, merge, verify issue closure and post-main `qualification` SUCCESS, then resume #560's preserved #558/#552 and #542 slots. Remove the clean successor worktree after delivery.
 
 This issue repairs a mandatory post-main gate for delivered PR #553. It does not reopen #543/#555 product scope or count as an original audit finding, and it does not authorize starting an original open finding before the eight partials finish.
+
+## Attempt 1 source checkpoint
+
+Luna XHIGH completed the exact two-source correction from clean brief head `5e1f069e`. `bench_support::alloc` adds const initialized current-thread `Counters` and mirrors every existing global allocator event without changing the `System` call. Both scalar preparation tests now use exact current-thread totals, retain global diagnostics/dominance and the existing realtime audit, and preserve standalone equality plus the controller's exact `+2 allocations`, `+2 deallocations`, `+0 reallocations`, and `+9 requested bytes`.
+
+All finite gates returned zero: 39 bench-support tests; both scalar selectors in debug and release through parent/child; the complete nine-test scalar endpoint suite; strict Clippy; formatting; diff check; and exact two-path census. The synchronized foreign-thread controls moved process totals while leaving the caller's allocator and realtime-audit totals at zero. Root independently audited and committed exactly the two allowed source paths at `4b5c624270befc4a2ca9d7dc338967fa5ee4e873`. Raw evidence and the implementation record are preserved in `artifacts/issue563-attempt1`. Astra MEDIUM adversarial review remains required before PR delivery.
