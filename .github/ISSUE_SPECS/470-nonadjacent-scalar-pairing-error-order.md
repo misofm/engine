@@ -419,3 +419,19 @@ browser resource pin is `hosts/host-web/tests/browser-v1/expected.json`; its Was
 derived and qualified independently rather than copying the native delta. Debug/release focused
 CAPI and full resource-lifecycle gates plus ordinary browser expected-resource checks remain lane
 B work.
+
+## Lane B native resource-consumer checkpoint
+
+Root integrated delivered main `3ac24f7f` without conflict and pushed merge checkpoint `ab31615e`.
+Luna HIGH then changed only `crates/capi/tests/resource_lifecycle.rs`: the three single-plan graph
+totals add the derived 1,328 bytes, while two explicit primitive rows charge the 16-byte runtime
+table field and 82 × 16-byte op/unit reservation per live plan. The double-live graph peak is
+therefore 506,788; the largest-allocation values remain unchanged and the external exact/one-below
+cap checks continue to use the independently summed primitive oracle.
+
+Both debug and release `capi --test resource_lifecycle` suites passed four tests. The ordinary CAPI
+ABI linkage check and its mutation self-test passed, as did formatting and diff checks. No graph,
+builtins, browser, artifact, SDK, ABI declaration, Cargo or workflow path changed. Root must
+checkpoint this coherent tranche before Luna begins the independently derived Wasm/browser
+resource and artifact qualification. This is delivery qualification under accepted attempt 2, not
+a new product attempt or a performance claim.

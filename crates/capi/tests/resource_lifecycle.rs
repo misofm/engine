@@ -528,9 +528,11 @@ fn frozen_scratch_report(capi_retained_bytes: u64) -> PlanResourceReport {
         // still reports the chosen ring exactly in the source rows below.
         // #430 conservatively charges one 16-byte two-pointer outer owner for each of the two
         // potentially pairable fader banks. The owners are graph-plan payload.
-        graph_session_plus_plan_bytes: 226_196 + slot_coexistence,
-        graph_incremental_plan_bytes: 226_196 + slot_coexistence,
-        graph_metadata_bytes: 50_295 + slot_coexistence,
+        // #470 adds 1,328 bytes to each single-plan graph total: the 16-byte runtime owner-table
+        // field plus the accepted 82 emitted-op/unit reservation at 16 bytes per operation.
+        graph_session_plus_plan_bytes: 226_196 + slot_coexistence + 1_328,
+        graph_incremental_plan_bytes: 226_196 + slot_coexistence + 1_328,
+        graph_metadata_bytes: 50_295 + slot_coexistence + 1_328,
         graph_delay_bytes: 0,
         effect_bank_scratch_bytes: 8_192,
         effect_bank_runtime_buffer_bytes: 8_192,
@@ -1641,6 +1643,16 @@ fn graph_owners() -> Vec<PrimitiveOwner> {
     // **three** strip stages carry one since #210 phase 3 gave the input bank its drain; the three
     // record types are all 12 bytes, so one term serves all three rows.
     let strip_control_array = bytes::<Option<ConsumerMirror>>(bank_lanes as usize);
+    // #470's prepared split owner adds one two-word runtime table field and one conservative
+    // two-word reservation for each of the 82 emitted runtime operations/units. Keep these as
+    // independent primitive rows so the double-live oracle charges both plans exactly once.
+    let split_owner_table_field = bytes::<[usize; 2]>(1);
+    let split_runtime_op_unit_reservation = bytes::<[usize; 2]>(82);
+    assert_eq!(
+        (split_owner_table_field, split_runtime_op_unit_reservation),
+        (16, 1_312),
+        "primitive split-owner runtime metadata"
+    );
     vec![
         // #241 deletes the session control queue and declarative source-ring projection. Their
         // absence is the assertion here: the chosen ring is charged exactly by `source_owners`,
@@ -1760,6 +1772,14 @@ fn graph_owners() -> Vec<PrimitiveOwner> {
         PrimitiveOwner {
             name: "runtime bank-slot coexistence reservation",
             bytes: scratch_slot_reservation().0,
+        },
+        PrimitiveOwner {
+            name: "split-owner runtime table field",
+            bytes: split_owner_table_field,
+        },
+        PrimitiveOwner {
+            name: "split-owner runtime op/unit reservation",
+            bytes: split_runtime_op_unit_reservation,
         },
     ]
 }
@@ -1941,10 +1961,11 @@ fn primitive_replacement_oracle(current: &str, prospective: &str) -> PrimitiveRe
     // phase adds no schema key.
     // #241: the two plans lose 4_096 queue + 8_192 ring projection each (-24_576), and the two
     // compiled models each shrink by 200 bytes (-400): 510_720 - 24_576 - 400 = 485_744.
-    // #338: canonical JSON adds 8,082 retained bytes to each of the two live models.
+    // #338: canonical JSON adds 8,082 retained bytes to each of the two live models. #470's
+    // split-owner runtime metadata rows above add 2,656 across the two live plans.
     assert_effective_owner_mutations(
         &graph,
-        502_228 + 2 * scratch_slot_reservation().0,
+        502_228 + 2 * scratch_slot_reservation().0 + 2_656,
         "double-live graph/model",
     );
 
@@ -2347,8 +2368,13 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
     // builtin control-delivery metadata adds the corresponding concrete-owner layout bytes.
     // See
     // `primitive_replacement_oracle` for the per-bank arithmetic.
-    // #241: 510_720 - 2 x (4_096 queue + 8_192 ring) - 2 x 200 = 485_744.
-    assert_eq!(oracle.graph, 502_228 + 2 * scratch_slot_reservation().0);
+    // #241: 510_720 - 2 x (4_096 queue + 8_192 ring) - 2 x 200 = 485_744. #470 adds
+    // 2,656 bytes to the double-live graph peak: the runtime owner-table field and the accepted
+    // 82 emitted-op/unit reservation are both live for each of the two plans.
+    assert_eq!(
+        oracle.graph,
+        502_228 + 2 * scratch_slot_reservation().0 + 2_656
+    );
     assert_eq!(oracle.source_total, 22_108);
     assert_eq!(oracle.source_overhead, 5_724);
     assert_eq!(oracle.effect_state, 15_120);
