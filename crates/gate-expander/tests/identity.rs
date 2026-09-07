@@ -43,6 +43,14 @@ fn track_values() -> [Values; 8] {
     })
 }
 
+/// The equal-tap profile above remains the baseline; this one makes one linked lane exercise the
+/// four-read fallback with genuinely different cross-plane tap positions.
+fn nonpalindromic_track_values() -> [Values; 8] {
+    let mut values = track_values();
+    set_parameter(&mut values[3], 7, 10.0, 7.0);
+    values
+}
+
 /// Seeded noise with 200-sample tone bursts on top, so the gate opens and closes repeatedly.
 fn source(seed: u64, frames: usize) -> Vec<f32> {
     let mut signal = noise(seed, frames, 0.002);
@@ -59,106 +67,112 @@ fn lane_identity_scalar_w8() {
     const BLOCK: usize = 128;
     const BLOCKS: usize = 64;
     const FRAMES: usize = BLOCK * BLOCKS;
-    for link in [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average] {
-        let values = track_values();
-        let Some(mut bank) = prepare_bank_w8(&values, link) else {
-            eprintln!("no eight-lane backend on this build");
-            return;
-        };
-        let mut scalars: Vec<_> = (0..8)
-            .map(|track| {
-                let mut request = request(&values[track]);
-                request.link_mode = link;
-                prepare(request)
-            })
-            .collect();
-
-        let left_source: Vec<Vec<f32>> = (0..8).map(|t| source(11 + t as u64, FRAMES)).collect();
-        let right_source: Vec<Vec<f32>> = (0..8).map(|t| source(91 + t as u64, FRAMES)).collect();
-        let mut bank_left = packed_w8(&left_source);
-        let mut bank_right = packed_w8(&right_source);
-        let mut scalar_left = left_source.clone();
-        let mut scalar_right = right_source.clone();
-        let mut scalar_reports = [ProcessReport::default(); 8];
-        let mut bank_reports = [ProcessReport::default(); 8];
-
-        let mut start = 0;
-        while start < FRAMES {
-            // The last block is 17 frames, so a partial block is inside the identity claim.
-            let block = if FRAMES - start < BLOCK + 17 {
-                17
-            } else {
-                BLOCK
+    for (profile, values) in [
+        ("equal-taps", track_values()),
+        ("nonpalindromic", nonpalindromic_track_values()),
+    ] {
+        for link in [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average] {
+            let Some(mut bank) = prepare_bank_w8(&values, link) else {
+                eprintln!("no eight-lane backend on this build");
+                return;
             };
-            let end = (start + block).min(FRAMES);
-            let spans: Vec<PreparedAutomationSpan> = if start % 1_024 == 0 && start != 0 {
-                retarget_spans(start as u64).to_vec()
-            } else {
-                Vec::new()
-            };
-            // Every track receives the same automation batch, so the bank's per-track offsets
-            // enumerate the same spans eight times.
-            let mut automation = Vec::new();
-            let mut offsets = [0_u32; 9];
-            for track in 0..8 {
-                automation.extend_from_slice(&spans);
-                offsets[track + 1] = automation.len() as u32;
-            }
-            let report = bank.process_bank(
-                EffectBankProcessBlock::new(
-                    &mut bank_left[start * 8..end * 8],
-                    &mut bank_right[start * 8..end * 8],
-                    None,
-                    (end - start) as u32,
-                    BankWidth::Eight,
-                    start as u64,
-                    &automation,
-                    &offsets,
-                    128,
-                )
-                .expect("bank block"),
-            );
-            for track in 0..8 {
-                add_report(&mut bank_reports[track], report.reports[track]);
-                let single = render_scalar_sidechain(
-                    scalars[track].as_mut(),
-                    &mut scalar_left[track][start..end],
-                    &mut scalar_right[track][start..end],
-                    None,
-                    end - start,
-                    &spans,
-                    start as u64,
+            let mut scalars: Vec<_> = (0..8)
+                .map(|track| {
+                    let mut request = request(&values[track]);
+                    request.link_mode = link;
+                    prepare(request)
+                })
+                .collect();
+
+            let left_source: Vec<Vec<f32>> =
+                (0..8).map(|t| source(11 + t as u64, FRAMES)).collect();
+            let right_source: Vec<Vec<f32>> =
+                (0..8).map(|t| source(91 + t as u64, FRAMES)).collect();
+            let mut bank_left = packed_w8(&left_source);
+            let mut bank_right = packed_w8(&right_source);
+            let mut scalar_left = left_source.clone();
+            let mut scalar_right = right_source.clone();
+            let mut scalar_reports = [ProcessReport::default(); 8];
+            let mut bank_reports = [ProcessReport::default(); 8];
+
+            let mut start = 0;
+            while start < FRAMES {
+                // The last block is 17 frames, so a partial block is inside the identity claim.
+                let block = if FRAMES - start < BLOCK + 17 {
+                    17
+                } else {
+                    BLOCK
+                };
+                let end = (start + block).min(FRAMES);
+                let spans: Vec<PreparedAutomationSpan> = if start % 1_024 == 0 && start != 0 {
+                    retarget_spans(start as u64).to_vec()
+                } else {
+                    Vec::new()
+                };
+                // Every track receives the same automation batch, so the bank's per-track offsets
+                // enumerate the same spans eight times.
+                let mut automation = Vec::new();
+                let mut offsets = [0_u32; 9];
+                for track in 0..8 {
+                    automation.extend_from_slice(&spans);
+                    offsets[track + 1] = automation.len() as u32;
+                }
+                let report = bank.process_bank(
+                    EffectBankProcessBlock::new(
+                        &mut bank_left[start * 8..end * 8],
+                        &mut bank_right[start * 8..end * 8],
+                        None,
+                        (end - start) as u32,
+                        BankWidth::Eight,
+                        start as u64,
+                        &automation,
+                        &offsets,
+                        128,
+                    )
+                    .expect("bank block"),
                 );
-                add_report(&mut scalar_reports[track], single);
+                for track in 0..8 {
+                    add_report(&mut bank_reports[track], report.reports[track]);
+                    let single = render_scalar_sidechain(
+                        scalars[track].as_mut(),
+                        &mut scalar_left[track][start..end],
+                        &mut scalar_right[track][start..end],
+                        None,
+                        end - start,
+                        &spans,
+                        start as u64,
+                    );
+                    add_report(&mut scalar_reports[track], single);
+                }
+                start = end;
             }
-            start = end;
-        }
 
-        for track in 0..8 {
-            assert_bits_eq(
-                &track_of(&bank_left, track, 8),
-                &scalar_left[track],
-                &format!("{link:?} left track {track}"),
-            );
-            assert_bits_eq(
-                &track_of(&bank_right, track, 8),
-                &scalar_right[track],
-                &format!("{link:?} right track {track}"),
-            );
-            assert_eq!(
-                bank_reports[track], scalar_reports[track],
-                "{link:?} reports track {track}"
-            );
-            assert_eq!(
-                snapshot_bank(bank.as_ref(), track as u32),
-                snapshot(scalars[track].as_ref()),
-                "{link:?} payload track {track}"
+            for track in 0..8 {
+                assert_bits_eq(
+                    &track_of(&bank_left, track, 8),
+                    &scalar_left[track],
+                    &format!("{profile} {link:?} left track {track}"),
+                );
+                assert_bits_eq(
+                    &track_of(&bank_right, track, 8),
+                    &scalar_right[track],
+                    &format!("{profile} {link:?} right track {track}"),
+                );
+                assert_eq!(
+                    bank_reports[track], scalar_reports[track],
+                    "{profile} {link:?} reports track {track}"
+                );
+                assert_eq!(
+                    snapshot_bank(bank.as_ref(), track as u32),
+                    snapshot(scalars[track].as_ref()),
+                    "{profile} {link:?} payload track {track}"
+                );
+            }
+            assert!(
+                bank_left.iter().any(|sample| *sample != 0.0),
+                "{profile} {link:?}: the identity comparison must not be vacuous"
             );
         }
-        assert!(
-            bank_left.iter().any(|sample| *sample != 0.0),
-            "{link:?}: the identity comparison must not be vacuous"
-        );
     }
 }
 

@@ -150,3 +150,7 @@ Use Sol high for documentation-related and other verification that is neither pe
 ## Attempt2 first coherent repair checkpoint
 
 Luna xhigh repaired the linked-equal consumed partner mapping and the same private oracle. Both focused tests pass and the previously failing independent scalar oracle now passes on exact captured kernel SHA256298cfdeee6391c6b0ceb91ca561db52abd00df63da3c7c0ea797a38820be71d4; lib.rs is unchanged. Original captures are in artifacts/issue534-luna-attempt2. Root verified capture/source identities and paused implementation for this checkpoint. Remaining bounded fixture/state, mutation, lowering and proportional gates precede one consolidated Astra medium attempt2 review; no source PASS, PR, closure or performance measurement is claimed.
+
+## Attempt2 public identity fixture checkpoint
+
+The existing scalar/W8 identity test retains its equal profile and adds one non-palindromic lookahead profile under all three link modes. identity debug/release each pass3 tests; unchanged state debug/release each pass8. All captures include actual identity/state source hashes. Only identity.rs changes in this tranche. Existing state-suite PASS is regression evidence; it does not by itself establish a populated equal/unequal reclassification transition. That precise state-coverage attribution remains to be resolved within the frozen bounded case before final review. Mutation, lowering and remaining proportional gates are pending.

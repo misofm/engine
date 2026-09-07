@@ -15,6 +15,8 @@ prefix.parent.mkdir(parents=True, exist_ok=True)
 paths = [
     "crates/gate-expander/src/kernel.rs",
     "crates/gate-expander/src/lib.rs",
+    "crates/gate-expander/tests/identity.rs",
+    "crates/gate-expander/tests/state.rs",
     "Cargo.lock",
     ".cargo/config.toml",
     "rust-toolchain.toml",
