@@ -199,16 +199,8 @@ struct Metadata {
 impl Metadata {
     fn gather() -> Self {
         let git_commit = command(&["git", "rev-parse", "HEAD"]);
-        let workspace_dirty = command_allow_empty(&["git", "status", "--porcelain"]).map_or_else(
-            || "unknown".to_owned(),
-            |value| {
-                if value.is_empty() {
-                    "false".to_owned()
-                } else {
-                    "true".to_owned()
-                }
-            },
-        );
+        let workspace_dirty =
+            workspace_dirty(command_allow_empty(&["git", "status", "--porcelain"]));
         let facts = HostToolchainFacts::gather();
         Self::from_facts(
             facts,
@@ -311,6 +303,19 @@ fn command_allow_empty(args: &[&str]) -> Option<String> {
     bench_support::sysinfo::command_output(program, rest)
 }
 
+fn workspace_dirty(value: Option<String>) -> String {
+    value.map_or_else(
+        || "unknown".to_owned(),
+        |value| {
+            if value.trim().is_empty() {
+                "false".to_owned()
+            } else {
+                "true".to_owned()
+            }
+        },
+    )
+}
+
 fn json_string_array(values: &[String]) -> String {
     let body = values
         .iter()
@@ -347,7 +352,7 @@ fn parse_rounds() -> u8 {
 
 #[cfg(test)]
 mod tests {
-    use super::{Metadata, Round, escape, json_record, percentile_nearest_rank};
+    use super::{Metadata, Round, escape, json_record, percentile_nearest_rank, workspace_dirty};
     use bench_support::sysinfo::HostToolchainFacts;
     use std::env;
 
@@ -433,5 +438,13 @@ mod tests {
             super::command_allow_empty(&["/bin/sh", "-c", r"printf '\377'"]),
             None
         );
+    }
+
+    #[test]
+    fn workspace_dirty_projection_preserves_clean_dirty_and_unavailable_states() {
+        assert_eq!(workspace_dirty(Some(String::new())), "false");
+        assert_eq!(workspace_dirty(Some(" \n\t".to_owned())), "false");
+        assert_eq!(workspace_dirty(Some(" M changed-file".to_owned())), "true");
+        assert_eq!(workspace_dirty(None), "unknown");
     }
 }
