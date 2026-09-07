@@ -74,3 +74,7 @@ Root commits each coherent exact-path tranche before more implementation is laye
 ## Parent accounting
 
 This child earns reusable generic cancellation and closes no #444 PCM or pairing outcome. After delivery, #444 still requires a prepared Rust typed builtin batch endpoint with an explicit requested block sample/revision, one closed claim/cutoff and late-outcome contract, application through separate bank/scalar owners, and lifecycle publication decisions. Bank pairing and scalar pairing then follow under that endpoint contract. Existing raw concurrent producer endpoints retain their present separate behavior.
+
+## Attempt record
+
+Attempt 1 source checkpoint `1716c5fb6dce228ef969411d6f7bc5c757203317` was focused-green but received Astra LOW **FAIL**. Automation cancellation could publish unsupported/control-retained batches before the cancel request became visible, and the adapter lost a pre-dequeue identity-overflow preflight. Required generic concurrency, mutation, resource/overflow and repeated allocation evidence was also incomplete; strict Clippy found one finite lint. The full exact-head review is preserved in `docs/audits/571-attempt1-review.md`. Attempt 2 remains within the same exact three protocol paths and must correct those findings before a fresh Astra LOW review.
