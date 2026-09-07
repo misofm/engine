@@ -1,0 +1,1 @@
+Astra medium consolidated attempt-2 PASS at 5c0c3875. The CLI final-message output overwrote its own requested report path with a short answer. The full report is recovered verbatim from the successful report-write command retained in stderr; no command was re-executed. Source review only; artifact/browser/PR/CI delivery remains pending.
