@@ -1,0 +1,19 @@
+{
+  "argv": [
+    "/home/bl/.local/bin/codex",
+    "exec",
+    "-C",
+    "/home/bl/misofm/engine-audit-subject-disposition",
+    "-s",
+    "danger-full-access",
+    "-m",
+    "gpt-5.6-sol",
+    "-c",
+    "model_reasoning_effort=\"medium\"",
+    "-o",
+    "/tmp/issue349-partials/TOOL3-coordinate.md",
+    "-"
+  ],
+  "cwd": "/home/bl/misofm/engine-audit-subject-disposition",
+  "prompt": "/tmp/issue349-partials/TOOL3-coordinate-prompt.md"
+}
