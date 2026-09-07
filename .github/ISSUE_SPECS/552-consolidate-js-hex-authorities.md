@@ -377,3 +377,9 @@ This successor is #552, occupying the slot freed by delivered #547. Source imple
 ## Implementation authorized
 
 #546/PR551 is delivered at a3b4ed763c47658e10fc111e2cfcbd141c77f064 and integrated here. The frozen implementation may now proceed under Sol high coordination using actual Luna high, one focused-green tranche then pause for root checkpoint. Existing operator/path gate is read-only. No cross-language obligation is removed.
+
+## Attempt3 failed checkpoint — implementation stopped
+
+Actual Luna HIGH completed the three-path correction and stopped at frozen gate4 FAILURE. Direct helper/SHA vectors, strict SDK types and the complete ordinary stem-store gate passed. The mutation harness copied the primary source into a temporary root without preserving the ../hex-lower.js relationship; helper mutation failed with ENOENT for /tmp/hex-lower.js. Gate5 was NOT RUN. The zero launcher status means the worker reported normally, not that the gates passed. No repair or retry occurred.
+
+This checkpoint is intentionally failed but buildable: product vectors, types and ordinary behavior pass; required mutation proof does not. Exact source, command evidence, terminal report and actual Luna HIGH argv are preserved in artifacts/issue552-attempt3-failure. Root's independent checkpoint whitespace check is not credited as the unrun worker gate5. The three-attempt sequence is exhausted; actual Sol XHIGH failure adjudication and a bounded Sol HIGH rescope must precede any further implementation. All original product, provenance and final artifact/census obligations remain required. No closure or PASS is claimed.
