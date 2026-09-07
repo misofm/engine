@@ -1,0 +1,43 @@
+{
+  "argv": [
+    "cargo",
+    "test",
+    "--locked",
+    "-p",
+    "host-core",
+    "--test",
+    "scalar_point_endpoint",
+    "--features",
+    "control-provider",
+    "--",
+    "--nocapture"
+  ],
+  "cwd": "/home/bl/misofm/engine-scalar-allocation-isolation",
+  "head": "bc53500a3c37e1ec15bb59091ef248111ae7207f",
+  "branch": "codex/scalar-allocation-isolation",
+  "status": "",
+  "env": {
+    "PATH": "/home/bl/.cargo/bin:/home/bl/.cargo/bin:/home/bl/.local/bin:/home/bl/.codex/packages/standalone/releases/0.153.4-x86_64-unknown-linux-musl/codex-path:/home/bl/.codex1/tmp/arg0/codex-arg032GUSu:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin",
+    "RUST_TEST_THREADS": "2",
+    "RUSTFLAGS": null,
+    "CARGO_TARGET_DIR": "/tmp/issue536-luna1-target"
+  },
+  "source": {
+    "crates/host-core/tests/scalar_point_endpoint.rs": {
+      "sha256": "15dedf93497aacf0304b756ed39ea30383c2e8b037b4a4811e1fc155d3fab246",
+      "git_blob": "0b801594a2ebb0175b58f580af8b7fc837cebf50"
+    },
+    "Cargo.lock": {
+      "sha256": "ef85bfaac8b4df80b651fa89e5e9a67bfef141b58076bdaac513044161b0b853",
+      "git_blob": "1b74fb016a04a090d2d1d37ea15fd2917fb85491"
+    },
+    ".cargo/config.toml": {
+      "sha256": "03b0fbd88c069abb0a8fbdca5921ba6a9899298291fe087977b509a29ebb7d0e",
+      "git_blob": "de2180972c37406f1f16913901bd1d4fc2e660e3"
+    },
+    "rust-toolchain.toml": {
+      "sha256": "85a45cac04c296adac076f8f0609ca8f4c8ca658957f1f24cbd1e054b6cc44e0",
+      "git_blob": "6b6739839ba23906921aeb4c268d275dcc459fb6"
+    }
+  }
+}

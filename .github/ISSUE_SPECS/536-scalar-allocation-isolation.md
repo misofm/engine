@@ -93,3 +93,7 @@ This is the diagnostic decision only; consolidated attempt review and required P
 ## Attempt 1 correction checkpoint
 
 Luna xhigh added --test-threads=1 to both existing child launchers and applied formatting. The first corrected resource selector passed in debug with inherited RUST_TEST_THREADS=2, parent and child each 1 pass. Direct/wrapped counts remain 27 allocations, 0 frees/reallocations and 102496 bytes; measured-thread counts agree. Source SHA-256: 15dedf93497aacf0304b756ed39ea30383c2e8b037b4a4811e1fc155d3fab246. Remaining frozen gates and consolidated review are pending.
+
+## Attempt 1 finite final gates
+
+All seven corrected invocations passed: both exact allocation selectors in debug and release, each with inherited RUST_TEST_THREADS=2 and explicit child concurrency1; the full nine-test scalar_point_endpoint binary once; affected strict Clippy; and cargo fmt --all --check. Each exact invocation executed one parent and one child. Resource equality remained 27 allocations/0 frees/0 reallocations/102496 bytes. Controller direct 31/0/0/120280 versus wrapped 33/2/0/120289 preserved the original +2 allocations/+2 frees/+9 bytes. The foreign-thread control retained global 1 allocation/2 frees/4096 bytes versus measured-thread 0/0. Full captures use source SHA-256 15dedf93497aacf0304b756ed39ea30383c2e8b037b4a4811e1fc155d3fab246. No further source change or test repetition followed these passing gates. Consolidated Astra medium attempt 1 review and required PR CI remain pending.
