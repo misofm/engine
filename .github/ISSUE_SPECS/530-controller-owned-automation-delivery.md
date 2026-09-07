@@ -145,3 +145,7 @@ The final functional fixture command (`final-functional-debug-4`) passes five te
 ## Proportional gates and bounded lint correction
 
 Focused debug/release, feature-enabled delivery ownership debug/release, and full default/test-support protocol regressions pass on the captured pre-lint source. Initial strict Clippy failed on needless option conversion and the frozen eight-argument constructor. Luna applied the two-line correction before the requested root pause; root inspected it, preserved that failure, and reran focused functional (five tests) plus feature-enabled ownership (three tests) on the corrected source, both PASS. Corrected strict Clippy, rustdoc, formatting and workspace/realtime/protocol policy gates also pass. Raw captures retain their actual pre/post-correction source hashes. Root checkpoints this bounded correction before Wasm target checks and final report. This remains Luna attempt1 pending one consolidated Astra verdict.
+
+## Luna attempt 1 evidence freeze
+
+All final proportional gates pass. Default protocol totals154 and test-support155 passing entries, with zero failures/ignored. Isolated scalar/SIMD protocol checks pass on clean `81b82214`. `artifacts/issue530-luna-attempt1/luna1-report.md` preserves exact identities, pre/post-lint attribution, raw failures and the candid limitation of one additional uncaptured initial successful direct compile. No failed uncaptured command is known. The package is frozen for one consolidated Astra review; #530 remains OPEN and no delivery/PCM claim is made.
