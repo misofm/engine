@@ -1,33 +1,34 @@
 #!/usr/bin/env node
 "use strict"
 
-// The stem store's browser legs: incremental SHA-256 throughput, the cold/warm OPFS ingest
-// budgets, and (issue #278) the pump Worker's opt-in `selfDriving` cadence in a real Worker.
+// The stem store's human-triggered browser workload: incremental SHA-256 throughput, the
+// cold/warm OPFS ingest budgets, and (issue #278) the pump Worker's opt-in `selfDriving` cadence
+// in a real Worker. The hermetic path check is the separate `--path-self-test` mode below.
 //
-// Not a sweep row: it needs playwright and downloaded browsers, and every sweep row is hermetic.
+// The browser legs need Playwright and downloaded browsers and are outside the hermetic gate.
 // `playwright` lives in `hosts/host-web/qualification/node_modules` rather than beside
-// this script, and Node resolves a CommonJS `require` from the SCRIPT's directory, not the working
-// directory -- so an invocation from the qualification directory alone is not enough:
+// this script, and Node resolves a CommonJS `require` from the script's directory, not the working
+// directory. From the repository root, install the qualification dependencies and invoke this
+// script from its actual `scripts/operator` location:
 //
 //   cd hosts/host-web/qualification && npm ci
-//   NODE_PATH=$PWD/node_modules node ../../../scripts/run-stem-store-browser-evals.cjs [leg...]
+//   NODE_PATH=$PWD/node_modules node ../../../scripts/operator/run-stem-store-browser-evals.cjs [leg...]
 //
 // Legs default to all three. A leg whose browser lacks OPFS reports `available: false` with a
 // reason rather than failing: WebKit does that today for `navigator.storage.getDirectory`.
 //
-// Remove that `node_modules` again before running `scripts/sweep.sh`. `playwright-core` ships
-// `lib/webp_codec.wasm`, and `check-effect-interchange-qualification.sh`'s "generated artifact
-// exists under a source path" scan prunes only `./target`, so an installed qualification tree
-// turns an unrelated policy row red. That is a defect in the scan's prune list rather than in this
-// runner, and widening a policy gate is its own issue, so it is recorded here rather than fixed.
+// This browser workload is intentionally outside the hermetic qualification/checker boundary:
+// the existing stem-store checker invokes only `--path-self-test`, while a human may invoke the
+// browser legs after installing the qualification dependencies. Do not add those dependencies to
+// the gate or run this workload from a checker.
 
 const { createHash } = require("node:crypto")
 const { readFile, stat } = require("node:fs/promises")
 const http = require("node:http")
 const { extname, join, normalize, resolve } = require("node:path")
-const { chromium, firefox, webkit } = require("playwright")
-
-const repository = resolve(__dirname, "..")
+const repository = resolve(__dirname, "../..")
+const operatorHtml = join(repository, "scripts/operator/stem-store-eval.html")
+const stemStoreModule = join(repository, "hosts/host-web/web/stem-store/index.js")
 const fixtureBytes = 16 * 1024 * 1024
 const expected = createHash("sha256")
 for (let offset = 0; offset < fixtureBytes; offset += 64 * 1024) {
@@ -49,7 +50,7 @@ const mime = {
 async function listen() {
   const server = http.createServer(async (request, response) => {
     try {
-      const requested = request.url === "/" ? "/scripts/stem-store-eval.html" : request.url
+      const requested = request.url === "/" ? "/scripts/operator/stem-store-eval.html" : request.url
       const path = normalize(join(repository, decodeURIComponent(requested.split("?")[0])))
       if (!path.startsWith(`${repository}/`)) throw new Error("path escaped repository")
       const info = await stat(path)
@@ -70,6 +71,43 @@ async function listen() {
     server.listen(0, "127.0.0.1", resolveListen)
   })
   return { server, port: server.address().port }
+}
+
+function get(port, pathname) {
+  return new Promise((resolveGet, rejectGet) => {
+    const request = http.get(`http://127.0.0.1:${port}${pathname}`, (response) => {
+      const chunks = []
+      response.on("data", (chunk) => chunks.push(chunk))
+      response.on("end", () =>
+        resolveGet({ statusCode: response.statusCode, body: Buffer.concat(chunks) })
+      )
+      response.on("error", rejectGet)
+    })
+    request.on("error", rejectGet)
+  })
+}
+
+async function pathSelfTest() {
+  const { server, port } = await listen()
+  try {
+    const paths = [
+      ["operator HTML", "/", operatorHtml],
+      ["host stem-store module", "/hosts/host-web/web/stem-store/index.js", stemStoreModule],
+    ]
+    for (const [label, pathname, sourcePath] of paths) {
+      const expectedBytes = await readFile(sourcePath)
+      const served = await get(port, pathname)
+      if (served.statusCode !== 200) {
+        throw new Error(`path self-test: ${label} returned HTTP ${served.statusCode}`)
+      }
+      if (!served.body.equals(expectedBytes)) {
+        throw new Error(`path self-test: ${label} was not served from the repository`)
+      }
+    }
+    process.stdout.write("stem-store operator path self-test: PASS\n")
+  } finally {
+    await new Promise((resolveClose) => server.close(resolveClose))
+  }
 }
 
 async function probe(browserType) {
@@ -283,6 +321,11 @@ async function probe(browserType) {
 }
 
 async function main() {
+  if (process.argv.includes("--path-self-test")) {
+    await pathSelfTest()
+    return
+  }
+  const { chromium, firefox, webkit } = require("playwright")
   const types = { chromium, firefox, webkit }
   const requested = process.argv.slice(2)
   const legs = requested.length === 0 ? Object.keys(types) : requested

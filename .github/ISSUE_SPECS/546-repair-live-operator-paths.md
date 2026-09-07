@@ -15,3 +15,7 @@ This issue is #546. The complete residual is tracked by #545 orphan rack retirem
 ## Active implementation boundary
 
 After #544 closure, root compared the union of current worktree numbered specs with all remote issues:268 local identities,361 remote issues, none missing. The first four active slots are #542,#543,#545,#546; #547 remains queued. The existing gate to extend is scripts/check-stem-store-v1.mjs. Sol high coordinates Luna high; Sol xhigh verifies. Root owns all Git/GitHub mutations. Preserve raw captures byte-exact in /tmp; whitespace-bearing logs will be stored losslessly compressed, with encoding/hashes, before the final full base-to-head diff check.
+
+## Attempt1 source checkpoint
+
+Sol high coordinated Luna high changes to the four authorized paths. Node syntax, direct path self-test, existing stem-store gate, fixture generator --check, locked stem-hasher tests and working diff checks passed. Frozen wrong-root and wrong-HTML mutations each failed the existing gate; byte-exact restoration was confirmed. Raw command captures are preserved losslessly as gzip with original/packed identities in artifacts/issue546-attempt1. No browser workload or package install ran. Sol xhigh review remains required, including the coordinator observation that fixture digest preparation still runs before path-self-test dispatch. This is not delivery.
