@@ -161,3 +161,48 @@ workload/rate/round. Retain matrix, meter and preparation rows under their exist
 cycle count, causal speedup, historical matched-input comparison, live bank/scalar/Concurrent
 measurement, new budget or full RT4 closure follows. The sole capture remains UNSPENT until the
 prepared seal is inspected and root records the final launch decision.
+
+## Sole controlled capture evidence
+
+Root ran the authorized preflight once from clean documentation-only descendant
+`2f9f1fa7fe6cce6cc423d5bf1b90be5869909131`, tree
+`c71f66a4a7944ce4b95c83e99f3a61ae53d1c723`. It completed READY with counters
+`preflight/runner/workload/timed=1/0/0/0`, built no second binary, and launched no DSP. The seal
+matched every frozen input and tool identity above and recorded rustc/cargo 1.97.1, LLVM 22.1.6,
+explicit `x86_64-unknown-linux-gnu`, `+avx2,+fma`, release opt-level 3, fat LTO, one codegen unit,
+abort panic, debug 1, disabled assertions/overflow/incremental/rpath, strip none and split-debuginfo
+off. The prepared binary is 29,314,528 bytes with SHA-256
+`3dbd77e4281f0a4444f2afd0cd5bba9ede2b24bba6cd7113fab189233e0ed0ae`.
+
+After the build, root inspected the READY seal and waited beyond the 60-second cooldown. The first
+independent readiness sample at binary age 43 seconds recorded load 0.47 and sibling CPU15 at
+0.00 percent, so it was rejected solely as premature. The second sample at age 91 seconds recorded
+load 0.26, valid affinity to CPU31, sibling CPU15 at 0.00 percent, and no cargo/rustc/browser build
+process. Root then authorized the already frozen no-argument runner command exactly once.
+
+The sole runner invocation returned status zero and promoted
+`artifacts/issue431-full-chain/builtins-benchmark.jsonl`. Final disposition is PASS/complete with
+child, validation and runner status zero; counters are
+`preflight/runner/workload/timed=1/1/1/1`, and each workload-started, warmup-complete,
+timed-started, round-one-complete and round-two-complete marker occurs exactly once. Both current
+record and aggregate validators independently pass all twenty unique workload/rate/round records.
+Every row reports zero render errors and zero forbidden realtime operations. Raw and accepted files
+are byte-identical at 40,830 bytes with SHA-256
+`d3350f57a24aaebe8242d10676ab39f39fdbef2f3e2d8aee29e57fa19ba1129a`.
+
+The reportable descriptive p50 values, in nanoseconds per operation, are:
+
+| Workload | Rate | Round 1 | Round 2 |
+| --- | ---: | ---: | ---: |
+| `full_chain_filters` | 48,000 Hz | 2,254 | 2,246 |
+| `full_chain_filters` | 96,000 Hz | 2,253 | 2,248 |
+| `identity_chain` | 48,000 Hz | 210 | 209 |
+| `identity_chain` | 96,000 Hz | 216 | 214 |
+
+These are one descriptive capture of the delivered public full-chain seam. They do not establish a
+causal speedup, historical matched-input comparison, live bank/scalar/Concurrent measurement,
+cycle count or release budget. The other twelve rows retain their existing matrix, meter and
+preparation scopes. The sole #431 invocation is SPENT and must never be retried or reset. Preserve
+the generated preflight README and seal bytes exactly: their preparation-time text/hash is part of
+the authority chain, while this decision record states the later successful launch. Astra MEDIUM
+must adversarially review the exact evidence checkpoint before PR/required-CI delivery and closure.
