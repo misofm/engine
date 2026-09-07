@@ -16,10 +16,11 @@ use builtins_compiler::{
     BuiltinCompileCaps, MeterRequest, TestOnlyFaderMatrixPair, TrackControlRecord,
     TrackFaderRecord, prepare_session_builtins, test_only_begin_phase_two_allocation_observation,
     test_only_fader_matrix_witness, test_only_observed_scalar_pair_binding,
-    test_only_phase_two_allocation_snapshot, test_only_record_phase_two_allocation,
-    test_only_record_phase_two_deallocation, test_only_reset_fader_matrix_witness,
-    test_only_reset_phase_two_allocation_tracker, test_only_scalar_outer_lifetime,
-    test_only_scalar_owner_drops, test_only_scalar_owner_layouts,
+    test_only_phase_two_allocation_snapshot, test_only_prepared_scalar_split_pair_graph,
+    test_only_record_phase_two_allocation, test_only_record_phase_two_deallocation,
+    test_only_reset_fader_matrix_witness, test_only_reset_phase_two_allocation_tracker,
+    test_only_scalar_outer_lifetime, test_only_scalar_owner_drops, test_only_scalar_owner_layouts,
+    test_only_scalar_split_outer_layout,
 };
 use engine::realtime::{PlanarBufferMut, RenderIo, RenderTime};
 use session::{CompileCaps, RouteSource, SendTap, StableId, compile_session, parse_session_json};
@@ -427,17 +428,47 @@ fn actual_queued_scalar_graph_allocates_and_frees_nothing() {
 }
 
 #[test]
+fn actual_queued_scalar_split_graph_allocates_and_frees_nothing() {
+    let _session_guard = SESSION
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut output = [0.0_f32; 128];
+    test_only_reset_fader_matrix_witness();
+    let mut selected = test_only_prepared_scalar_split_pair_graph();
+    let prepared = test_only_fader_matrix_witness();
+    assert_eq!((prepared.factory_calls, prepared.factory_members), (1, 1));
+
+    let settled = audit_graph_render(&mut selected, &mut output, 0);
+    assert_eq!((settled.fused_calls, settled.fallback_calls), (1, 0));
+    assert_eq!(settled.process_members, 1);
+
+    LIVE_ALLOCS.set(0);
+    LIVE_FREES.set(0);
+    test_only_reset_fader_matrix_witness();
+    armed(|| drop(selected));
+    assert_eq!(
+        LIVE_ALLOCS.get(),
+        0,
+        "split owner release does not allocate"
+    );
+    assert!(LIVE_FREES.get() > 0, "split owner releases off render");
+    assert_eq!(test_only_scalar_owner_drops(), [2, 2, 1]);
+    assert_eq!(test_only_scalar_outer_lifetime(), [1, 0, 1]);
+}
+
+#[test]
 fn actual_scalar_prepare_and_bind_retain_the_charged_owner_layouts() {
     let _session_guard = SESSION
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let [fader, matrix, outer] = test_only_scalar_owner_layouts();
+    let split_outer = test_only_scalar_split_outer_layout();
     let retained_owner_bytes_expected =
         2 * fader.size_bytes + 2 * matrix.size_bytes + outer.size_bytes;
     let owner_max = fader
         .size_bytes
         .max(matrix.size_bytes)
-        .max(outer.size_bytes);
+        .max(split_outer.size_bytes);
 
     test_only_reset_phase_two_allocation_tracker();
     let (bound, admitted, scalar_allowance, preparation, binding) =
@@ -492,7 +523,7 @@ fn actual_scalar_prepare_and_bind_retain_the_charged_owner_layouts() {
         binding.layouts.iter().any(|observed| {
             observed.size_bytes == outer.size_bytes && observed.align_bytes == outer.align_bytes
         }),
-        "binding allocates the charged two-pointer scalar outer: {:?}",
+        "binding allocates the selected scalar outer: {:?}",
         binding.layouts
     );
     let outer_allocations = binding
@@ -524,7 +555,11 @@ fn actual_scalar_prepare_and_bind_retain_the_charged_owner_layouts() {
         .total_bytes
         .checked_sub(retained_owner_bytes_expected)
         .expect("actual owners fit conservative scalar allowance");
-    assert_eq!(conservative_spare_outer, outer.size_bytes);
+    assert_eq!(
+        conservative_spare_outer,
+        2 * split_outer.size_bytes - outer.size_bytes,
+        "the scalar allowance reserves two possible split owners while this adjacent bind uses the smaller outer"
+    );
     assert!(scalar_allowance.total_bytes <= admitted.session_plus_plan_bytes);
 
     LIVE_ALLOCS.set(0);

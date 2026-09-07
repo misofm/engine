@@ -6717,6 +6717,43 @@ mod tests {
         );
     }
 
+    #[test]
+    fn graph_compiler_produces_nonadjacent_scalar_split_schedule_fixture() {
+        let mut model = parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
+            .expect("intended fixture");
+        model.tracks.truncate(2);
+        model.routes.retain(|route| {
+            matches!(
+                &route.source,
+                RouteSource::Track { track_id, .. }
+                    if matches!(track_id.as_str(), "ch00" | "ch01")
+            )
+        });
+        let artifact =
+            compile_console_model_with_builtins(&model, 2_140, &[], &scalar_console_registry());
+        let schedule = &artifact.graph().sequential_schedule;
+        let position = |track: &str, stage: TrackStage| {
+            schedule
+                .iter()
+                .position(|node| {
+                    *node
+                        == GraphNodeId::TrackStage {
+                            track_id: gid(track),
+                            stage,
+                        }
+                })
+                .expect("stage in compiler schedule")
+        };
+        let fader_a = position("ch00", TrackStage::PostFader);
+        let fader_b = position("ch01", TrackStage::PostFader);
+        let matrix_a = position("ch00", TrackStage::PostMatrix);
+        let matrix_b = position("ch01", TrackStage::PostMatrix);
+        assert!(
+            fader_a < fader_b && fader_b < matrix_a && matrix_a < matrix_b,
+            "the compiler must provide F_A -> F_B -> M_A -> M_B: {fader_a}, {fader_b}, {matrix_a}, {matrix_b}"
+        );
+    }
+
     /// Issue #212: a meter leased at `PostFader` splits the chain there, and still meters right.
     ///
     /// # The cliff, stated from both sides

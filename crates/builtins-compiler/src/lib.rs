@@ -1496,6 +1496,17 @@ pub fn test_only_scalar_owner_layouts() -> [BuiltinRetainedLayout; 3] {
         layout(core::alloc::Layout::new::<ScalarPairProcessor>()),
     ]
 }
+
+#[cfg(feature = "test-support")]
+#[must_use]
+#[doc(hidden)]
+pub fn test_only_scalar_split_outer_layout() -> BuiltinRetainedLayout {
+    BuiltinRetainedLayout {
+        size_bytes: core::mem::size_of::<ScalarSplitPairProcessor>() as u64,
+        align_bytes: core::mem::align_of::<ScalarSplitPairProcessor>() as u64,
+        allocation_count: 1,
+    }
+}
 #[cfg(any(test, feature = "test-support"))]
 impl Drop for TestPhaseTwoAllocationGuard {
     fn drop(&mut self) {
@@ -2065,7 +2076,11 @@ impl PreparedBuiltinsSession {
     ) -> Option<graph::GraphScalarOwnerResourceEstimate> {
         let fader = u64::try_from(core::mem::size_of::<ConsoleFaderProcessor>()).ok()?;
         let matrix = u64::try_from(core::mem::size_of::<ConsoleMatrixProcessor>()).ok()?;
-        let outer = u64::try_from(core::mem::size_of::<ScalarPairProcessor>()).ok()?;
+        let outer = u64::try_from(
+            core::mem::size_of::<ScalarPairProcessor>()
+                .max(core::mem::size_of::<ScalarSplitPairProcessor>()),
+        )
+        .ok()?;
         let banked: std::collections::BTreeSet<_> =
             planned_strip_banks(&self.seal.tracks, dispatch, levels, classes)
                 .into_iter()
@@ -3865,6 +3880,23 @@ struct ScalarSplitPairProcessor {
     pending_fader: bool,
 }
 
+#[cfg(any(test, feature = "test-support"))]
+impl Drop for ScalarSplitPairProcessor {
+    fn drop(&mut self) {
+        SCALAR_OWNER_DROPS.with(|value| {
+            let mut drops = value.get();
+            drops[2] = drops[2].saturating_add(1);
+            value.set(drops);
+        });
+        SCALAR_OUTER_LIFETIME.with(|value| {
+            let mut lifetime = value.get();
+            lifetime[1] = lifetime[1].checked_sub(1).expect("live scalar split outer");
+            lifetime[2] = lifetime[2].saturating_add(1);
+            value.set(lifetime);
+        });
+    }
+}
+
 impl GraphRuntimeSplitPairProcessor for ScalarSplitPairProcessor {
     fn begin_fader(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
         #[cfg(any(test, feature = "test-support"))]
@@ -4033,6 +4065,13 @@ fn make_scalar_split_pair(
         counters[3] = counters[3].saturating_add(1);
         counters[5] = counters[5].saturating_add(1);
         value.set(counters);
+    });
+    #[cfg(any(test, feature = "test-support"))]
+    SCALAR_OUTER_LIFETIME.with(|value| {
+        let mut lifetime = value.get();
+        lifetime[0] = lifetime[0].saturating_add(1);
+        lifetime[1] = lifetime[1].saturating_add(1);
+        value.set(lifetime);
     });
     Ok(Box::new(ScalarSplitPairProcessor {
         fader,
@@ -4237,7 +4276,10 @@ pub use tests::test_only_observed_scalar_pair_binding;
 pub use tests::test_only_prepared_unpaired_graph;
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
-pub use tests::{test_only_prepared_pair_graph, test_only_prepared_scalar_pair_graph};
+pub use tests::{
+    test_only_prepared_pair_graph, test_only_prepared_scalar_pair_graph,
+    test_only_prepared_scalar_split_pair_graph,
+};
 
 #[cfg(any(test, feature = "test-support"))]
 #[cfg_attr(not(test), allow(dead_code))]
@@ -5022,6 +5064,7 @@ mod tests {
     }
 
     static ALIAS_OBSERVATIONS: AtomicUsize = AtomicUsize::new(0);
+    static INTERVENING_OBSERVER_ERRORS: AtomicUsize = AtomicUsize::new(0);
     thread_local! {
         static ALIAS_CAPTURE: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
     }
@@ -5035,6 +5078,21 @@ mod tests {
                 capture.extend(block.right.iter().map(|sample| sample.to_bits()));
             });
             Ok(())
+        }
+    }
+
+    struct InterveningErrorObserver {
+        fail_once: bool,
+    }
+    impl GraphRuntimeObserver for InterveningErrorObserver {
+        fn observe(&mut self, _block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
+            INTERVENING_OBSERVER_ERRORS.fetch_add(1, Ordering::Relaxed);
+            if self.fail_once {
+                self.fail_once = false;
+                Err(RenderError::InvalidEnvelope)
+            } else {
+                Ok(())
+            }
         }
     }
 
@@ -5731,6 +5789,23 @@ mod tests {
 
     #[cfg(feature = "test-support")]
     #[must_use]
+    pub fn test_only_prepared_scalar_split_pair_graph() -> PreparedBuiltinsGraphBound {
+        prepared_pair_graph_variant(
+            false,
+            false,
+            false,
+            true,
+            None,
+            Backend::Scalar,
+            2,
+            BoundaryVariant::Nonadjacent,
+            1,
+            None,
+        )
+    }
+
+    #[cfg(feature = "test-support")]
+    #[must_use]
     pub fn test_only_observed_scalar_pair_binding() -> (
         PreparedBuiltinsGraphBound,
         graph::GraphResourceEstimate,
@@ -5751,6 +5826,7 @@ mod tests {
                 1,
                 None,
                 true,
+                false,
             );
         (
             bound,
@@ -5809,6 +5885,7 @@ mod tests {
             meter_track,
             extra_post_matrix_capture,
             false,
+            false,
         )
         .0
     }
@@ -5826,6 +5903,7 @@ mod tests {
         meter_track: usize,
         extra_post_matrix_capture: Option<(usize, Arc<std::sync::Mutex<Vec<u32>>>)>,
         observe_binding: bool,
+        intervening_observer_error: bool,
     ) -> (
         PreparedBuiltinsGraphBound,
         graph::GraphResourceEstimate,
@@ -6025,6 +6103,18 @@ mod tests {
                     },
                     0x459a,
                     Box::new(Capture(capture)),
+                ));
+        }
+        if intervening_observer_error {
+            artifact
+                .builtin_observers
+                .push(GraphNodeObserverBinding::new(
+                    GraphNodeId::TrackStage {
+                        track_id: StableGraphId::parse(&track_name(0)).expect("observer track"),
+                        stage: TrackStage::PostMatrix,
+                    },
+                    0x459b,
+                    Box::new(InterveningErrorObserver { fail_once: true }),
                 ));
         }
         let envelope = artifact.graph.envelope;
@@ -6459,6 +6549,330 @@ mod tests {
             "settled split pair uses fused arithmetic"
         );
         assert_eq!(settled.fallback_calls, 0);
+    }
+
+    #[test]
+    fn actual_scalar_nonadjacent_intervening_observer_error_completes_and_retries() {
+        let _guard = PAIR_WITNESS_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let paired_capture = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let separate_capture = Arc::new(std::sync::Mutex::new(Vec::new()));
+        test_only_reset_fader_matrix_witness();
+        let mut paired = prepared_pair_graph_variant_observed(
+            false,
+            false,
+            false,
+            true,
+            Some(Arc::clone(&paired_capture)),
+            Backend::Scalar,
+            2,
+            BoundaryVariant::Nonadjacent,
+            1,
+            None,
+            false,
+            true,
+        )
+        .0;
+        let paired_prepared = test_only_fader_matrix_witness();
+        assert_eq!(
+            (
+                paired_prepared.factory_calls,
+                paired_prepared.factory_members
+            ),
+            (1, 1)
+        );
+        test_only_reset_fader_matrix_witness();
+        let mut separate = prepared_pair_graph_variant_observed(
+            false,
+            false,
+            false,
+            false,
+            Some(Arc::clone(&separate_capture)),
+            Backend::Scalar,
+            2,
+            BoundaryVariant::Nonadjacent,
+            1,
+            None,
+            false,
+            true,
+        )
+        .0;
+        let separate_prepared = test_only_fader_matrix_witness();
+        assert_eq!(
+            (
+                separate_prepared.factory_calls,
+                separate_prepared.factory_members
+            ),
+            (0, 0)
+        );
+        let fader = TrackFaderRecord::FaderDb {
+            lanes: BuiltinLaneSelector::Both,
+            db: -6.0,
+            smoothing_samples: 0,
+        };
+        let matrix = TrackControlRecord {
+            matrix: Matrix2x2 {
+                ll: 0.5,
+                lr: 0.25,
+                rl: -0.25,
+                rr: 0.75,
+            },
+            smoothing_samples: 0,
+        };
+        for bound in [&mut paired, &mut separate] {
+            bound.track_controls[1].fader.try_push(fader).unwrap();
+            bound.track_controls[1].producer.try_push(matrix).unwrap();
+        }
+
+        INTERVENING_OBSERVER_ERRORS.store(0, Ordering::Relaxed);
+        test_only_reset_fader_matrix_witness();
+        let mut paired_pcm = vec![0.0_f32; HARNESS_QUANTUM as usize * 2];
+        let paired_error = render_bound_result(&mut paired, 0, &mut paired_pcm).unwrap_err();
+        let paired_failed = test_only_fader_matrix_witness();
+        assert_eq!(paired_error, RenderError::InvalidEnvelope);
+        assert_eq!(INTERVENING_OBSERVER_ERRORS.load(Ordering::Relaxed), 1);
+        assert_eq!(paired_failed.fader_records_drained, 1);
+        assert_eq!(paired_failed.matrix_records_drained, 0);
+
+        INTERVENING_OBSERVER_ERRORS.store(0, Ordering::Relaxed);
+        test_only_reset_fader_matrix_witness();
+        let mut separate_pcm = vec![0.0_f32; HARNESS_QUANTUM as usize * 2];
+        let separate_error = render_bound_result(&mut separate, 0, &mut separate_pcm).unwrap_err();
+        let separate_failed = test_only_fader_matrix_witness();
+        assert_eq!(separate_error, paired_error);
+        assert_eq!(separate_failed.fader_records_drained, 1);
+        assert_eq!(separate_failed.matrix_records_drained, 0);
+        assert_eq!(
+            paired_failed.scalar_fader_words, separate_failed.scalar_fader_words,
+            "observer error preserves fader state before retry"
+        );
+        assert_eq!(
+            paired_failed.scalar_matrix_words, separate_failed.scalar_matrix_words,
+            "observer error leaves the later matrix command untouched"
+        );
+
+        INTERVENING_OBSERVER_ERRORS.store(0, Ordering::Relaxed);
+        test_only_reset_fader_matrix_witness();
+        paired_pcm.fill(0.0);
+        render_bound_result(&mut paired, HARNESS_QUANTUM as u64, &mut paired_pcm)
+            .expect("paired retry after observer error");
+        let paired_retry = test_only_fader_matrix_witness();
+        INTERVENING_OBSERVER_ERRORS.store(0, Ordering::Relaxed);
+        test_only_reset_fader_matrix_witness();
+        separate_pcm.fill(0.0);
+        render_bound_result(&mut separate, HARNESS_QUANTUM as u64, &mut separate_pcm)
+            .expect("separate retry after observer error");
+        let separate_retry = test_only_fader_matrix_witness();
+        assert_eq!(
+            paired_pcm
+                .iter()
+                .map(|sample| sample.to_bits())
+                .collect::<Vec<_>>(),
+            separate_pcm
+                .iter()
+                .map(|sample| sample.to_bits())
+                .collect::<Vec<_>>(),
+            "retry renders the same PCM after the observer error"
+        );
+        assert_eq!(paired_retry.matrix_records_drained, 1);
+        assert_eq!(
+            paired_retry.scalar_fader_words,
+            separate_retry.scalar_fader_words
+        );
+        assert_eq!(
+            paired_retry.scalar_matrix_words,
+            separate_retry.scalar_matrix_words
+        );
+        assert_eq!(
+            (paired_retry.fused_calls, paired_retry.fallback_calls),
+            (1, 0)
+        );
+        assert_eq!(
+            std::mem::take(&mut *paired_capture.lock().unwrap()),
+            std::mem::take(&mut *separate_capture.lock().unwrap())
+        );
+    }
+
+    #[test]
+    fn actual_scalar_nonadjacent_invalid_fader_matrix_boundaries_preserve_retry_order() {
+        let _guard = PAIR_WITNESS_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let cases = [
+            ("F_A", 0_usize, true, false),
+            ("F_B", 1_usize, true, false),
+            ("M_A", 0_usize, false, true),
+            ("M_B", 1_usize, false, true),
+        ];
+        for (label, track, invalid_fader, _invalid_matrix) in cases {
+            let paired_capture = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let separate_capture = Arc::new(std::sync::Mutex::new(Vec::new()));
+            test_only_reset_fader_matrix_witness();
+            let mut paired = prepared_pair_graph_variant(
+                false,
+                false,
+                false,
+                true,
+                Some(Arc::clone(&paired_capture)),
+                Backend::Scalar,
+                2,
+                BoundaryVariant::Nonadjacent,
+                1,
+                None,
+            );
+            let paired_prepared = test_only_fader_matrix_witness();
+            assert_eq!(
+                (
+                    paired_prepared.factory_calls,
+                    paired_prepared.factory_members
+                ),
+                (1, 1),
+                "{label} paired preparation selects one split owner"
+            );
+            test_only_reset_fader_matrix_witness();
+            let mut separate = prepared_pair_graph_variant(
+                false,
+                false,
+                false,
+                false,
+                Some(Arc::clone(&separate_capture)),
+                Backend::Scalar,
+                2,
+                BoundaryVariant::Nonadjacent,
+                1,
+                None,
+            );
+            let separate_prepared = test_only_fader_matrix_witness();
+            assert_eq!(
+                (
+                    separate_prepared.factory_calls,
+                    separate_prepared.factory_members
+                ),
+                (0, 0),
+                "{label} reference preparation keeps separate owners"
+            );
+            for bound in [&mut paired, &mut separate] {
+                if invalid_fader {
+                    bound.track_controls[track]
+                        .fader
+                        .try_push(TrackFaderRecord::FaderDb {
+                            lanes: BuiltinLaneSelector::Both,
+                            db: -6.0,
+                            smoothing_samples: 0,
+                        })
+                        .unwrap();
+                    bound.track_controls[track]
+                        .fader
+                        .try_push(TrackFaderRecord::FaderDb {
+                            lanes: BuiltinLaneSelector::Both,
+                            db: f32::NAN,
+                            smoothing_samples: 0,
+                        })
+                        .unwrap();
+                    bound.track_controls[track]
+                        .fader
+                        .try_push(TrackFaderRecord::FaderDb {
+                            lanes: BuiltinLaneSelector::Both,
+                            db: -3.0,
+                            smoothing_samples: 0,
+                        })
+                        .unwrap();
+                } else {
+                    bound.track_controls[track]
+                        .producer
+                        .try_push(TrackControlRecord {
+                            matrix: Matrix2x2::IDENTITY,
+                            smoothing_samples: 0,
+                        })
+                        .unwrap();
+                    bound.track_controls[track]
+                        .producer
+                        .try_push(TrackControlRecord {
+                            matrix: Matrix2x2 {
+                                ll: f32::NAN,
+                                ..Matrix2x2::IDENTITY
+                            },
+                            smoothing_samples: 0,
+                        })
+                        .unwrap();
+                    bound.track_controls[track]
+                        .producer
+                        .try_push(TrackControlRecord {
+                            matrix: Matrix2x2::IDENTITY,
+                            smoothing_samples: 0,
+                        })
+                        .unwrap();
+                }
+            }
+
+            let mut paired_pcm = vec![0.0_f32; HARNESS_QUANTUM as usize * 2];
+            let mut separate_pcm = vec![0.0_f32; HARNESS_QUANTUM as usize * 2];
+            test_only_reset_fader_matrix_witness();
+            let paired_error = render_bound_result(&mut paired, 0, &mut paired_pcm)
+                .expect_err(&format!("{label} paired boundary must fail"));
+            let paired_failed = test_only_fader_matrix_witness();
+            test_only_reset_fader_matrix_witness();
+            let separate_error = render_bound_result(&mut separate, 0, &mut separate_pcm)
+                .expect_err(&format!("{label} separate boundary must fail"));
+            let separate_failed = test_only_fader_matrix_witness();
+            assert_eq!(paired_error, separate_error, "{label} error identity");
+            if invalid_fader {
+                assert_eq!(
+                    paired_failed.fader_records_drained, 2,
+                    "{label} fader prefix"
+                );
+                assert_eq!(
+                    paired_failed.matrix_records_drained, 0,
+                    "{label} matrix untouched"
+                );
+            } else {
+                assert_eq!(
+                    paired_failed.fader_records_drained, 0,
+                    "{label} fader untouched"
+                );
+                assert_eq!(
+                    paired_failed.matrix_records_drained, 2,
+                    "{label} matrix prefix"
+                );
+            }
+            assert_eq!(
+                paired_failed.fader_records_drained, separate_failed.fader_records_drained,
+                "{label} fader drain order"
+            );
+            assert_eq!(
+                paired_failed.matrix_records_drained, separate_failed.matrix_records_drained,
+                "{label} matrix drain order"
+            );
+            if invalid_fader {
+                assert_eq!(
+                    paired_failed.scalar_fader_words, separate_failed.scalar_fader_words,
+                    "{label} fader state before retry"
+                );
+            }
+
+            let retry = render_scalar_pair_and_compare(
+                &mut paired,
+                &mut separate,
+                &paired_capture,
+                &separate_capture,
+                HARNESS_QUANTUM as u64,
+                (1, 0),
+            );
+            if invalid_fader {
+                assert_eq!(retry.fader_records_drained, 1, "{label} fader tail retry");
+                assert_eq!(
+                    retry.matrix_records_drained, 0,
+                    "{label} matrix remains empty"
+                );
+            } else {
+                assert_eq!(
+                    retry.fader_records_drained, 0,
+                    "{label} fader remains empty"
+                );
+                assert_eq!(retry.matrix_records_drained, 1, "{label} matrix tail retry");
+            }
+        }
     }
 
     #[test]
@@ -8545,11 +8959,16 @@ mod tests {
         let classes = SessionPoolClasses::from_session(&compiled);
         let fader = core::mem::size_of::<ConsoleFaderProcessor>() as u64;
         let matrix = core::mem::size_of::<ConsoleMatrixProcessor>() as u64;
-        let outer = core::mem::size_of::<ScalarPairProcessor>() as u64;
+        let pair_outer = core::mem::size_of::<ScalarPairProcessor>() as u64;
+        let split_outer = core::mem::size_of::<ScalarSplitPairProcessor>() as u64;
+        let outer = pair_outer.max(split_outer);
+        assert!(
+            split_outer > pair_outer,
+            "the split owner's pending flag is included in the bounded outer reservation"
+        );
         assert_eq!(
-            outer,
-            2 * core::mem::size_of::<usize>() as u64,
-            "the composite allocation contains exactly the two retained typed boxes"
+            outer, split_outer,
+            "the charged outer covers the larger split owner"
         );
         let fader_fields = core::mem::size_of::<FaderMuteRampBuiltins>()
             + core::mem::size_of::<Consumer<TrackFaderRecord>>()
