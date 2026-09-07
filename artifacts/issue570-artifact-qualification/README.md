@@ -30,5 +30,12 @@ Numeric resource and PCM expectations remain frozen and passed unchanged. No rep
 generated consumer is authorized by this evidence checkpoint; Astra LOW must review the complete
 qualification before root applies the exact three changes to the feature branch.
 
-Raw command metadata and output are retained losslessly under `prepin/` and `qualified/`.
-`sha256sums.txt` covers every retained payload except itself.
+Astra LOW passed that review and authorized the exact qualified bytes. Root checkpointed only the
+artifact pin, the two `results.json` lineage fields, and the generated matrix lineage line at
+`bdb9586d32acc8b4e11c0846470ea4089267e58b`. A fresh ordinary build from that pushed head
+reproduced the same exact six files byte-for-byte. Static/object/ABI, unchanged browser resources,
+generated matrix, pinned SDK install, and SDK package gates all passed post-pin. Repository
+manifests and lockfiles did not change.
+
+Raw command metadata and output are retained losslessly under `prepin/`, `qualified/`, and
+`postpin/`. `sha256sums.txt` covers every retained payload except itself.
