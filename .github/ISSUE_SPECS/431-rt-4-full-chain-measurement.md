@@ -182,13 +182,23 @@ process. Root then authorized the already frozen no-argument runner command exac
 
 The sole runner invocation returned status zero and promoted
 `artifacts/issue431-full-chain/builtins-benchmark.jsonl`. Final disposition is PASS/complete with
-child, validation and runner status zero; counters are
+child and runner status zero and `validation_status` `"passed"`; counters are
 `preflight/runner/workload/timed=1/1/1/1`, and each workload-started, warmup-complete,
 timed-started, round-one-complete and round-two-complete marker occurs exactly once. Both current
 record and aggregate validators independently pass all twenty unique workload/rate/round records.
-Every row reports zero render errors and zero forbidden realtime operations. Raw and accepted files
-are byte-identical at 40,830 bytes with SHA-256
+All sixteen render rows report zero render errors and zero forbidden realtime operations; the four
+preparation rows correctly report those render-only fields as `not_applicable`. Raw and accepted
+files are byte-identical at 40,830 bytes with SHA-256
 `d3350f57a24aaebe8242d10676ab39f39fdbef2f3e2d8aee29e57fa19ba1129a`.
+
+The external executor record is preserved in
+`artifacts/issue431-full-chain/coordinator-capture.md`. It contains the exact preflight and runner
+commands, executor timestamps/identities, stdout/stderr/status, and both independent readiness
+samples. The executor applied no explicit per-command environment override. Its inherited process
+environment was not emitted and cannot be reconstructed after the run; the record states this
+limitation rather than inventing historical values. The READY seal preserves the actual
+build-relevant tool paths, hashes, versions, target, target features and release profile, while the
+runner/disposition preserve the benchmark child environment and controlled-load note.
 
 The reportable descriptive p50 values, in nanoseconds per operation, are:
 
