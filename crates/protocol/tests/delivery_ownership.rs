@@ -340,41 +340,40 @@ fn generic_boundary_cancel_thread_schedule_covers_zero_partial_and_full_applicat
             PreparedDelivery::<u32>::prepare(NonZeroUsize::new(2).unwrap()).unwrap();
         let first = control.try_publish(10, 3).unwrap();
         let second = control.try_publish(20, 2).unwrap();
-        let ready = Barrier::new(2);
-        let go = Barrier::new(2);
-        let application_done = Barrier::new(2);
-        let request_visible = Barrier::new(2);
-        let acknowledged = Barrier::new(2);
-        let collected = Barrier::new(2);
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+        let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
         std::thread::scope(|scope| {
-            let render_thread = scope.spawn(|| {
-                ready.wait();
-                go.wait();
-                if prefix != 0 {
-                    assert_eq!(render.begin().unwrap(), (first, 10));
-                    render.mark_progress(first, prefix).unwrap();
-                    if prefix == 3 {
-                        render.finish(first, prefix).unwrap();
+            let render_thread = scope.spawn(move || {
+                let setup = (|| {
+                    if prefix != 0 {
+                        if render.begin()? != (first, 10) {
+                            return Err(DeliveryError::StaleTicket);
+                        }
+                        render.mark_progress(first, prefix)?;
+                        if prefix == 3 {
+                            render.finish(first, prefix)?;
+                        }
                     }
+                    Ok(())
+                })();
+                if ready_tx.send(setup).is_err() {
+                    return;
                 }
-                application_done.wait();
-                request_visible.wait();
-                let (_, counts) = measured(|| {
-                    render
-                        .cancel_boundary(SampleTime(200 + u64::from(case)))
-                        .unwrap()
-                });
-                assert_eq!((counts.0, counts.1), (0, 0));
-                acknowledged.wait();
-                collected.wait();
+                if setup.is_err() || release_rx.recv().is_err() {
+                    return;
+                }
+                let (result, counts) =
+                    measured(|| render.cancel_boundary(SampleTime(200 + u64::from(case))));
+                let _ = done_tx.send((result, counts));
             });
-            ready.wait();
-            go.wait();
-            application_done.wait();
+            assert_eq!(ready_rx.recv().unwrap(), Ok(()));
             let token = control.begin_cancel().unwrap();
-            request_visible.wait();
             assert_eq!(control.poll_cancel_boundary(token).unwrap(), None);
-            acknowledged.wait();
+            release_tx.send(()).unwrap();
+            let (boundary_result, counts) = done_rx.recv().unwrap();
+            assert_eq!(boundary_result, Ok(()));
+            assert_eq!((counts.0, counts.1), (0, 0));
             let complete = control.poll_cancel_boundary(token).unwrap().unwrap();
             assert_eq!(complete.frontier, Some(second.serial));
             assert_eq!(
@@ -423,7 +422,6 @@ fn generic_boundary_cancel_thread_schedule_covers_zero_partial_and_full_applicat
                     Some(SampleTime(200 + u64::from(case))),
                 )
             );
-            collected.wait();
             render_thread.join().unwrap();
         });
         assert!(control.try_publish(32, 1).is_ok());

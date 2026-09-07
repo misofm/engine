@@ -39,6 +39,15 @@ Do not edit `crates/protocol/src/delivery.rs`, `crates/protocol/src/lib.rs`, Car
 - Failure-safe rendezvous has no unmatched blocking wait after a peer error. A focused test mutation that restores the old release-before-poll ordering, or otherwise removes the hold, must fail the schedule's ordering discriminator without hanging; restore it afterward and preserve the result.
 - Rerun #571's unchanged full protocol tests with `test-support`, strict Clippy, formatting, diff, workspace policy, and CI routing/classifier checks. Confirm the branch contains no runtime-source delta after `d2e16082` and no out-of-scope file.
 
+## Attempt 1 evidence
+
+The faulty barrier schedule was replaced with failure-safe bounded channel rendezvous.
+Render is held before `cancel_boundary`, control proves pre-ack `None`, and render is
+released only afterward. Zero, partial, and full application retain all exact
+frontier, disposition, prefix/remainder, sample, collection, and reuse assertions.
+The release-before-poll mutation failed deterministically without hanging; its exact
+output is preserved in `docs/audits/572-deterministic-cancellation-proof.md`.
+
 ## Workflow and completion
 
 Luna HIGH implements attempt 1. Astra LOW performs adversarial exact-head review. Retain at most three successor attempts, though this slice should close in one. Root checkpoints and pushes each coherent tranche, keeps both issues and #559/#560 synchronized, and opens a PR only after source PASS.
