@@ -256,3 +256,31 @@ distinct-output conclusion. Root inspected the final diff and reproduced the exa
 fixture test; format and diff checks pass. The applicability correction is a green checkpoint, not
 attempt-2 PASS. Failed-call PCM observation, full runtime metadata charging, direct settled-envelope
 validation, ramp/retarget/decline/failure-allocation and release/target gates remain.
+
+## Luna attempt 2 failure-completion checkpoint
+
+Pushed source `78b1ca82` closes the failed-call observability and direct-envelope findings in the
+three authorized paths `builtins-compiler/src/lib.rs` and `graph/src/{lib,runtime}.rs`. The graph
+test seam records the bind-time selected split fader node and physical buffer, copies that private
+buffer into fixed-capacity word storage only after an error, and can disable pending completion for
+one mutation control. The concrete fixture selects track `t00` and proves the production-minimum
+`F_A,F_B,M_A,M_B` interval, while its separate-owner arm binds no split owner.
+
+With asymmetric nonunity fader and matrix controls, both an intervening `F_B` observer error and an
+`M_A` matrix-record error now compare failed-call post-fader words, owner-tagged fader/matrix state,
+drained prefixes and untouched tails against separate execution. Disabling completion makes the
+same failed-call buffer equality fail. The fixed state trace and PCM capture report overflow rather
+than silently truncating. A direct malformed settled fader envelope drains the fader prefix, leaves
+the matrix queue untouched, arms no pending work and changes no buffer on a later completion call.
+
+Luna and root reproduced the focused failure test and the complete
+`cargo test --locked -p builtins-compiler --features test-support --lib` suite (44 passed); root also
+ran `cargo test --locked -p graph --lib` (58 passed), format and diff checks. Compiler
+`-Zprint-type-sizes` evidence shows that the test-only owner tag occupies existing padding: the
+fader processor remains 232 bytes and the matrix processor 184 bytes both with and without
+`test-support`.
+
+This remains a green attempt-2 checkpoint rather than source PASS. Complete runtime metadata
+charging on an actually selected binding, split-specific ramp/retarget and decline/overlap gates,
+failure-path allocation/free evidence and the proportional release/static/supported-target gates
+remain. Artifact qualification and pinning remain lane B's responsibility after source freeze.
