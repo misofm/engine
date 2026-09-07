@@ -574,6 +574,32 @@ mod tests {
         )
     }
 
+    fn process_frame<P: ControlProvider>(
+        facade: &mut ControllerAutomationDelivery<P>,
+        input: &[u8],
+    ) -> Vec<u8> {
+        let mut output = vec![0_u8; 2048];
+        let written = facade
+            .process_command_frame_into(
+                input,
+                &mut DecodeScratch::new(&mut [0_u16; 32]),
+                &mut output,
+            )
+            .expect("complete facade command frame");
+        output.truncate(written);
+        output
+    }
+
+    fn frame_status(frame: &[u8]) -> StatusCode {
+        match ProtocolCodec::default()
+            .decode_typed_response(frame, &mut DecodeScratch::new(&mut [0_u16; 32]))
+            .expect("typed facade response")
+        {
+            DecodedTypedResponseFrame::Success { header, .. }
+            | DecodedTypedResponseFrame::NonOk { header, .. } => header.status,
+        }
+    }
+
     fn decode_event<'a>(codec: &ProtocolCodec, frame: &'a [u8]) -> DecodedTypedEventFrame<'a> {
         codec
             .decode_typed_event(frame, &mut DecodeScratch::new(&mut [0_u16; 32]))
@@ -719,6 +745,148 @@ mod tests {
             DecodedTypedResponseFrame::Success { .. } => panic!("structural command succeeded"),
         };
         assert_eq!(header.status, StatusCode::Unavailable);
+        assert_eq!(facade.session().revision(), revision);
+        assert_eq!(facade.outstanding(), 0);
+    }
+
+    #[test]
+    fn caller_buffer_frame_rejections_saturate_and_cancel_whole_unsupported_batches() {
+        let (mut primary, mut render, canceled) =
+            facade(8, &[(ParameterHandle(7), AutomationKind::Point)]);
+        let revision = primary.session().revision();
+        let point = |request_id, revision, handle, sample, value| {
+            let records = [AutomationRecord {
+                kind: AutomationKind::Point,
+                handle: ParameterHandle(handle),
+                start: SampleTime(sample),
+                end: SampleTime(sample),
+                start_value: value,
+                end_value: value,
+            }];
+            encoded_enqueue(request_id, revision, &records)
+        };
+
+        assert_eq!(
+            frame_status(&process_frame(
+                &mut primary,
+                &point(1, SessionRevision(revision.0 + 1), 7, 1, 0.5),
+            )),
+            StatusCode::RevisionConflict
+        );
+        assert_eq!(
+            frame_status(&process_frame(&mut primary, &point(2, revision, 7, 1, 2.0))),
+            StatusCode::InvalidField
+        );
+        assert_eq!(
+            frame_status(&process_frame(
+                &mut primary,
+                &point(3, revision, 99, 1, 0.5)
+            )),
+            StatusCode::NotFound
+        );
+        assert_eq!(
+            frame_status(&process_frame(&mut primary, &point(4, revision, 7, 1, 0.5))),
+            StatusCode::Ok
+        );
+        assert_eq!(
+            frame_status(&process_frame(&mut primary, &point(5, revision, 7, 2, 0.5))),
+            StatusCode::Ok
+        );
+        assert_eq!(
+            frame_status(&process_frame(&mut primary, &point(6, revision, 7, 3, 0.5))),
+            StatusCode::Backpressure
+        );
+        assert_eq!(primary.outstanding(), 2);
+        assert_eq!(primary.automation_status().occupancy, 2);
+
+        let (mut unsupported, mut unsupported_render, unsupported_canceled) =
+            facade(8, &[(ParameterHandle(7), AutomationKind::Point)]);
+        let unsupported_records = [AutomationRecord {
+            kind: AutomationKind::Linear,
+            handle: ParameterHandle(7),
+            start: SampleTime(1),
+            end: SampleTime(2),
+            start_value: 0.5,
+            end_value: 0.75,
+        }];
+        assert_eq!(
+            frame_status(&process_frame(
+                &mut unsupported,
+                &encoded_enqueue(1, revision, &unsupported_records),
+            )),
+            StatusCode::Ok
+        );
+        assert_eq!(
+            frame_status(&process_frame(
+                &mut unsupported,
+                &point(2, revision, 7, 3, 0.5),
+            )),
+            StatusCode::Ok
+        );
+        assert_eq!(
+            unsupported.try_handoff_next().unwrap(),
+            HandoffResult::PendingUnsupported
+        );
+        let token = unsupported
+            .begin_cancel(AutomationCancellationReason::EndpointShutdown)
+            .unwrap();
+        assert!(unsupported.poll_cancel_boundary(token).unwrap().is_none());
+        assert!(unsupported_render.begin_boundary(SampleTime(77)).is_none());
+        let complete = unsupported.poll_cancel_boundary(token).unwrap().unwrap();
+        assert_eq!(
+            (complete.canceled_records, complete.canceled_events),
+            (2, 2)
+        );
+        assert_eq!(unsupported_canceled.load(Ordering::Relaxed), 2);
+        assert_eq!(unsupported.outstanding(), 0);
+        assert_eq!(canceled.load(Ordering::Relaxed), 0);
+        assert!(render.begin_boundary(SampleTime(0)).is_none());
+    }
+
+    #[test]
+    fn caller_buffer_frame_limits_remain_unavailable_without_model_effects() {
+        let (mut facade, _, _) = facade(8, &[(ParameterHandle(7), AutomationKind::Point)]);
+        let revision = facade.session().revision();
+        let state = ParameterStateRequest { handles: vec![7] };
+        assert_eq!(
+            frame_status(&process_frame(
+                &mut facade,
+                &encoded_command(
+                    1,
+                    ExpectedRevision::Any,
+                    CommandPayload::ParameterStateGet(&state),
+                ),
+            )),
+            StatusCode::Unavailable
+        );
+        let edits = [SessionEdit::SetSessionId {
+            session_id: session::StableId::parse("caller-buffer-frame-refused").unwrap(),
+        }];
+        assert_eq!(
+            frame_status(&process_frame(
+                &mut facade,
+                &encoded_command(
+                    2,
+                    ExpectedRevision::Exact(revision),
+                    CommandPayload::SessionTransactionApply(&edits),
+                ),
+            )),
+            StatusCode::Unavailable
+        );
+        assert_eq!(
+            frame_status(&process_frame(
+                &mut facade,
+                &encoded_command(
+                    3,
+                    ExpectedRevision::Exact(revision),
+                    CommandPayload::TransportSet(TransportSetRequest {
+                        state: TransportState::Playing,
+                        position: Some(SampleTime(9)),
+                    }),
+                ),
+            )),
+            StatusCode::Unavailable
+        );
         assert_eq!(facade.session().revision(), revision);
         assert_eq!(facade.outstanding(), 0);
     }

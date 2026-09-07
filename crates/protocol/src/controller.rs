@@ -2351,12 +2351,15 @@ impl<P: ControlProvider> ProtocolController<P> {
                 ControlCommand::DiagnosticsGet { request }
             }
         };
-        self.execute(&ControllerRequest {
-            request_id: header.request_id,
-            expected_revision: header.expected_revision,
-            canonical_bytes: &[],
-            command,
-        })
+        self.execute_with_delivery_context(
+            &ControllerRequest {
+                request_id: header.request_id,
+                expected_revision: header.expected_revision,
+                canonical_bytes: &[],
+                command,
+            },
+            context,
+        )
     }
 
     fn encode_outcome_into(
@@ -3063,10 +3066,6 @@ impl<P: ControlProvider> ProtocolController<P> {
                 values,
             };
         }
-    }
-
-    fn execute(&mut self, request: &ControllerRequest<'_>) -> Outcome {
-        self.execute_with_delivery_context(request, None)
     }
 
     fn execute_with_delivery_context(
