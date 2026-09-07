@@ -9,10 +9,11 @@ mod support;
 
 use effect_contract::{
     BankWidth, EffectBankProcessBlock, InitialParameterValue, LinkMode, NativeEffectFactory,
-    ParameterChannel, PreparedAutomationSpan, PreparedNativeEffect, ResetKind,
+    ParameterChannel, PreparedAutomationSpan, PreparedNativeEffect, PreparedNativeEffectBank,
+    ResetKind, StatePayloadInput,
 };
 use multiband_compressor::MultibandCompressorFactory;
-use support::{point, process, request_with, snapshot, snapshot_track, varied_values};
+use support::{point, process, request_with, restore, snapshot, snapshot_track, varied_values};
 
 /// Twelve blocks of 128 frames over eight tracks, with a threshold point on track 0 at block 0.
 const BLOCKS: usize = 12;
@@ -29,6 +30,8 @@ fn track_signal(track: usize) -> (Vec<f32>, Vec<f32>) {
 enum OffsetProfile {
     Uniform,
     UnequalUniform,
+    UniformLeftRaggedRight,
+    RaggedLeftUniformRight,
     Mixed,
 }
 
@@ -37,6 +40,14 @@ fn profile_values(track: usize, profile: OffsetProfile) -> [InitialParameterValu
     let (left, right) = match profile {
         OffsetProfile::Uniform => (5.0, 5.0),
         OffsetProfile::UnequalUniform => (0.0, 20.0),
+        OffsetProfile::UniformLeftRaggedRight => {
+            const RIGHT: [f32; TRACKS] = [0.0, 5.0, 20.0, 10.0, 0.0, 5.0, 20.0, 10.0];
+            (5.0, RIGHT[track])
+        }
+        OffsetProfile::RaggedLeftUniformRight => {
+            const LEFT: [f32; TRACKS] = [0.0, 5.0, 20.0, 10.0, 0.0, 5.0, 20.0, 10.0];
+            (LEFT[track], 5.0)
+        }
         OffsetProfile::Mixed => {
             const LEFT: [f32; TRACKS] = [0.0, 5.0, 20.0, 10.0, 0.0, 5.0, 20.0, 10.0];
             const RIGHT: [f32; TRACKS] = [20.0, 10.0, 5.0, 0.0, 20.0, 10.0, 5.0, 0.0];
@@ -65,19 +76,111 @@ fn assert_populated(
     assert!(
         channels
             .iter()
-            .any(|channel| channel[960..].iter().any(|sample| sample.to_bits() != 0)),
+            .any(|channel| {
+                channel[960..].iter().any(|sample| {
+                    let bits = sample.to_bits();
+                    bits != 0 && bits != 0x8000_0000
+                })
+            }),
         "{label}: output after latency must be populated"
     );
     for (track, (_, left, right)) in states.iter().enumerate() {
         assert!(
-            left[48 * 4..].iter().any(|byte| *byte != 0),
+            state_ring_populated(left),
             "{label}: track {track} left ring must be populated"
         );
         assert!(
-            right[48 * 4..].iter().any(|byte| *byte != 0),
+            state_ring_populated(right),
             "{label}: track {track} right ring must be populated"
         );
     }
+}
+
+fn state_ring_populated(section: &[u8]) -> bool {
+    section[48 * 4..].chunks_exact(4).any(|word| {
+        let bits = u32::from_le_bytes([word[0], word[1], word[2], word[3]]);
+        bits != 0 && bits != 0x8000_0000
+    })
+}
+
+fn assert_state_populated(label: &str, state: &(Vec<u8>, Vec<u8>, Vec<u8>)) {
+    assert!(
+        state_ring_populated(&state.1),
+        "{label}: left ring must contain a numeric nonzero word"
+    );
+    assert!(
+        state_ring_populated(&state.2),
+        "{label}: right ring must contain a numeric nonzero word"
+    );
+}
+
+fn process_scalar_frames(
+    effect: &mut dyn PreparedNativeEffect,
+    left: &mut [f32],
+    right: &mut [f32],
+    first_sample: u64,
+) {
+    assert_eq!(left.len(), right.len());
+    let mut position = 0;
+    while position < left.len() {
+        let frames = (left.len() - position).min(FRAMES);
+        process(
+            effect,
+            &mut left[position..position + frames],
+            &mut right[position..position + frames],
+            first_sample + position as u64,
+            &[],
+            FRAMES as u32,
+        );
+        position += frames;
+    }
+}
+
+fn process_bank_frames(
+    bank: &mut dyn PreparedNativeEffectBank,
+    width: BankWidth,
+    left: &mut [f32],
+    right: &mut [f32],
+    first_sample: u64,
+) {
+    let lanes = width.lanes() as usize;
+    assert_eq!(left.len(), right.len());
+    assert_eq!(left.len() % lanes, 0);
+    let total = left.len() / lanes;
+    let offsets = vec![0u32; lanes + 1];
+    let mut position = 0;
+    while position < total {
+        let frames = (total - position).min(FRAMES);
+        bank.process_bank(
+            EffectBankProcessBlock::new(
+                &mut left[position * lanes..(position + frames) * lanes],
+                &mut right[position * lanes..(position + frames) * lanes],
+                None,
+                frames as u32,
+                width,
+                first_sample + position as u64,
+                &[],
+                &offsets,
+                FRAMES as u32,
+            )
+            .expect("bank block"),
+        );
+        position += frames;
+    }
+}
+
+fn bank_signal(frames: usize, lanes: usize, seed: u64) -> (Vec<f32>, Vec<f32>) {
+    let mut left = vec![0.0f32; frames * lanes];
+    let mut right = vec![0.0f32; frames * lanes];
+    for lane in 0..lanes {
+        let lane_left = support::signal(frames, seed + lane as u64 * 7);
+        let lane_right = support::signal(frames, seed + 0x1000 + lane as u64 * 11);
+        for frame in 0..frames {
+            left[frame * lanes + lane] = lane_left[frame];
+            right[frame * lanes + lane] = lane_right[frame];
+        }
+    }
+    (left, right)
 }
 
 /// Runs the eight tracks as `TRACKS / lanes` banks of `lanes` and returns their interleaved PCM,
@@ -282,6 +385,8 @@ fn detector_offset_profiles_preserve_public_identity() {
     for profile in [
         OffsetProfile::Uniform,
         OffsetProfile::UnequalUniform,
+        OffsetProfile::UniformLeftRaggedRight,
+        OffsetProfile::RaggedLeftUniformRight,
         OffsetProfile::Mixed,
     ] {
         let sets = (0..TRACKS)
@@ -309,6 +414,272 @@ fn detector_offset_profiles_preserve_public_identity() {
                     bank_reports, scalar_reports,
                     "profile={profile:?} link={link:?} width={width:?}"
                 );
+            }
+        }
+    }
+}
+
+const RESTORE_PREFIX: usize = BLOCKS * FRAMES;
+const RESTORE_TAIL: usize = 4_096;
+
+fn assert_scalar_restore_transition(
+    source: OffsetProfile,
+    destination: OffsetProfile,
+    link: LinkMode,
+) {
+    let source_values = profile_values(3, source);
+    let destination_values = profile_values(3, destination);
+    let mut donor = MultibandCompressorFactory
+        .prepare(request_with(&source_values, link, FRAMES as u32, false))
+        .expect("source scalar");
+    let sizes = donor.metadata().state_sizes;
+    let mut donor_left = support::signal(RESTORE_PREFIX, 0xC0DE_0101);
+    let mut donor_right = support::signal(RESTORE_PREFIX, 0xC0DE_0202);
+    process_scalar_frames(donor.as_mut(), &mut donor_left, &mut donor_right, 0);
+    let saved = snapshot(donor.as_ref());
+    assert_state_populated("scalar donor", &saved);
+
+    let mut reference = MultibandCompressorFactory
+        .prepare(request_with(&source_values, link, FRAMES as u32, false))
+        .expect("source reference");
+    let mut reference_left = support::signal(RESTORE_PREFIX, 0xC0DE_0101);
+    let mut reference_right = support::signal(RESTORE_PREFIX, 0xC0DE_0202);
+    process_scalar_frames(
+        reference.as_mut(),
+        &mut reference_left,
+        &mut reference_right,
+        0,
+    );
+
+    let mut receiver = MultibandCompressorFactory
+        .prepare(request_with(&destination_values, link, FRAMES as u32, false))
+        .expect("destination scalar");
+    let mut warm_left = support::signal(RESTORE_PREFIX, 0xBEEF_0303);
+    let mut warm_right = support::signal(RESTORE_PREFIX, 0xBEEF_0404);
+    process_scalar_frames(receiver.as_mut(), &mut warm_left, &mut warm_right, 0);
+    assert_ne!(
+        snapshot(receiver.as_ref()),
+        saved,
+        "{source:?}->{destination:?} link={link:?}: warm state must differ"
+    );
+    assert_eq!(
+        restore(receiver.as_mut(), 1, &saved, sizes),
+        Ok(()),
+        "{source:?}->{destination:?} link={link:?}: restore"
+    );
+    assert_eq!(snapshot(receiver.as_ref()), saved);
+
+    let mut expected_tail_left = support::signal(RESTORE_TAIL, 0xC0DE_0505);
+    let mut expected_tail_right = support::signal(RESTORE_TAIL, 0xC0DE_0606);
+    process_scalar_frames(
+        reference.as_mut(),
+        &mut expected_tail_left,
+        &mut expected_tail_right,
+        RESTORE_PREFIX as u64,
+    );
+    let mut restored_tail_left = support::signal(RESTORE_TAIL, 0xC0DE_0505);
+    let mut restored_tail_right = support::signal(RESTORE_TAIL, 0xC0DE_0606);
+    process_scalar_frames(
+        receiver.as_mut(),
+        &mut restored_tail_left,
+        &mut restored_tail_right,
+        RESTORE_PREFIX as u64,
+    );
+    assert!(
+        expected_tail_left[960..].iter().any(|sample| {
+            let bits = sample.to_bits();
+            bits != 0 && bits != 0x8000_0000
+        }),
+        "{source:?}->{destination:?} link={link:?}: restored tail must be populated"
+    );
+    for frame in 0..RESTORE_TAIL {
+        assert_eq!(
+            restored_tail_left[frame].to_bits(),
+            expected_tail_left[frame].to_bits(),
+            "{source:?}->{destination:?} link={link:?} left frame={frame}"
+        );
+        assert_eq!(
+            restored_tail_right[frame].to_bits(),
+            expected_tail_right[frame].to_bits(),
+            "{source:?}->{destination:?} link={link:?} right frame={frame}"
+        );
+    }
+    assert_eq!(
+        snapshot(receiver.as_ref()),
+        snapshot(reference.as_ref()),
+        "{source:?}->{destination:?} link={link:?}: restored state"
+    );
+
+    receiver.reset(ResetKind::FullToDefaults);
+    let mut reset_reference = MultibandCompressorFactory
+        .prepare(request_with(&destination_values, link, FRAMES as u32, false))
+        .expect("reset reference");
+    let mut reset_left = support::signal(RESTORE_PREFIX, 0xD00D_0707);
+    let mut reset_right = support::signal(RESTORE_PREFIX, 0xD00D_0808);
+    let mut reset_reference_left = reset_left.clone();
+    let mut reset_reference_right = reset_right.clone();
+    process_scalar_frames(
+        receiver.as_mut(),
+        &mut reset_left,
+        &mut reset_right,
+        0,
+    );
+    process_scalar_frames(
+        reset_reference.as_mut(),
+        &mut reset_reference_left,
+        &mut reset_reference_right,
+        0,
+    );
+    assert_populated(
+        "full reset scalar",
+        &[reset_left.clone(), reset_right.clone()],
+        &[snapshot(receiver.as_ref())],
+    );
+    assert_eq!(reset_left, reset_reference_left);
+    assert_eq!(reset_right, reset_reference_right);
+    assert_eq!(
+        snapshot(receiver.as_ref()),
+        snapshot(reset_reference.as_ref()),
+        "{source:?}->{destination:?} link={link:?}: full reset state"
+    );
+}
+
+fn assert_bank_restore_transition(
+    source: OffsetProfile,
+    destination: OffsetProfile,
+    link: LinkMode,
+    width: BankWidth,
+) {
+    let lanes = width.lanes() as usize;
+    let source_sets = (0..lanes)
+        .map(|track| profile_values(track, source))
+        .collect::<Vec<_>>();
+    let destination_sets = (0..lanes)
+        .map(|track| profile_values(track, destination))
+        .collect::<Vec<_>>();
+    let source_requests = source_sets
+        .iter()
+        .map(|values| request_with(values, link, FRAMES as u32, false))
+        .collect::<Vec<_>>();
+    let destination_requests = destination_sets
+        .iter()
+        .map(|values| request_with(values, link, FRAMES as u32, false))
+        .collect::<Vec<_>>();
+    let mut donor = support::bank(width, &source_requests);
+    let sizes = donor.metadata().program_key.state_sizes;
+    let (mut donor_left, mut donor_right) = bank_signal(RESTORE_PREFIX, lanes, 0xABCD_0101);
+    process_bank_frames(
+        donor.as_mut(),
+        width,
+        &mut donor_left,
+        &mut donor_right,
+        0,
+    );
+    let saved = (0..lanes)
+        .map(|lane| snapshot_track(donor.as_ref(), lane as u32, sizes))
+        .collect::<Vec<_>>();
+    for (lane, state) in saved.iter().enumerate() {
+        assert_state_populated(&format!("bank donor lane {lane}"), state);
+    }
+
+    let mut reference = support::bank(width, &source_requests);
+    let (mut reference_left, mut reference_right) =
+        bank_signal(RESTORE_PREFIX, lanes, 0xABCD_0101);
+    process_bank_frames(
+        reference.as_mut(),
+        width,
+        &mut reference_left,
+        &mut reference_right,
+        0,
+    );
+
+    let mut receiver = support::bank(width, &destination_requests);
+    let (mut warm_left, mut warm_right) = bank_signal(RESTORE_PREFIX, lanes, 0xDCBA_0202);
+    process_bank_frames(
+        receiver.as_mut(),
+        width,
+        &mut warm_left,
+        &mut warm_right,
+        0,
+    );
+    let warm_state = (0..lanes)
+        .map(|lane| snapshot_track(receiver.as_ref(), lane as u32, sizes))
+        .collect::<Vec<_>>();
+    assert_ne!(warm_state, saved, "{source:?}->{destination:?} width={width:?}");
+    for (lane, state) in saved.iter().enumerate() {
+        receiver
+            .restore_track_state_payload(
+                lane as u32,
+                1,
+                StatePayloadInput::new(&state.0, &state.1, &state.2, sizes)
+                    .expect("restore payload"),
+            )
+            .expect("restore track");
+    }
+    for (lane, state) in saved.iter().enumerate() {
+        assert_eq!(
+            snapshot_track(receiver.as_ref(), lane as u32, sizes),
+            *state,
+            "{source:?}->{destination:?} link={link:?} width={width:?} lane={lane} restore"
+        );
+    }
+
+    let (mut expected_tail_left, mut expected_tail_right) =
+        bank_signal(RESTORE_TAIL, lanes, 0xABCD_0303);
+    process_bank_frames(
+        reference.as_mut(),
+        width,
+        &mut expected_tail_left,
+        &mut expected_tail_right,
+        RESTORE_PREFIX as u64,
+    );
+    let (mut restored_tail_left, mut restored_tail_right) =
+        bank_signal(RESTORE_TAIL, lanes, 0xABCD_0303);
+    process_bank_frames(
+        receiver.as_mut(),
+        width,
+        &mut restored_tail_left,
+        &mut restored_tail_right,
+        RESTORE_PREFIX as u64,
+    );
+    assert!(
+        expected_tail_left[960 * lanes..].iter().any(|sample| {
+            let bits = sample.to_bits();
+            bits != 0 && bits != 0x8000_0000
+        }),
+        "{source:?}->{destination:?} link={link:?} width={width:?}: restored tail must be populated"
+    );
+    for index in 0..expected_tail_left.len() {
+        assert_eq!(
+            restored_tail_left[index].to_bits(),
+            expected_tail_left[index].to_bits(),
+            "{source:?}->{destination:?} link={link:?} width={width:?} left index={index}"
+        );
+        assert_eq!(
+            restored_tail_right[index].to_bits(),
+            expected_tail_right[index].to_bits(),
+            "{source:?}->{destination:?} link={link:?} width={width:?} right index={index}"
+        );
+    }
+    for lane in 0..lanes {
+        assert_eq!(
+            snapshot_track(reference.as_ref(), lane as u32, sizes),
+            snapshot_track(receiver.as_ref(), lane as u32, sizes),
+            "{source:?}->{destination:?} link={link:?} width={width:?} lane={lane} final state"
+        );
+    }
+}
+
+#[test]
+fn restored_offset_profiles_reclassify_on_next_segment() {
+    for (source, destination) in [
+        (OffsetProfile::Uniform, OffsetProfile::Mixed),
+        (OffsetProfile::Mixed, OffsetProfile::Uniform),
+    ] {
+        for link in [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average] {
+            assert_scalar_restore_transition(source, destination, link);
+            for width in [BankWidth::Four, BankWidth::Eight] {
+                assert_bank_restore_transition(source, destination, link, width);
             }
         }
     }

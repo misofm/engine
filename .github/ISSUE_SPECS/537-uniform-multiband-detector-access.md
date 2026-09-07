@@ -1,6 +1,6 @@
 # Specialize uniform multiband detector access without changing DSP
 
-Status: baseline-first DYN3 child of audit349/518, based on delivered main375a86c280ac5be83004dc78dc25541bfa6371ba after PR535. Root owns all Git/GitHub and checkpoint pushes. Luna high/xhigh implements; Astra medium briefs and reviews this audio-path change, with Astra low permitted for simple delivery checks. Maximum three implementation attempts, one consolidated adversarial verdict each. No timing authority or measured/projected speedup claim.
+Status: OPEN #537. Luna xhigh attempt2 has a discriminating actual-route control and focused public identity/restoration gates; final allocation/candidate qualification and consolidated Astra medium review remain pending. Native baseline accepted; attempt1 FAIL is preserved below. Root owns Git/GitHub/checkpoint pushes. Maximum three total implementation attempts. No timing authority or measured/projected speedup claim.
 
 ## Smallest closable outcome and prerequisite
 
@@ -120,3 +120,9 @@ Assertions were reordered without changing their contents so the old-index/actua
 ## Attempt 2 public identity checkpoint
 
 Existing identity runners now accept directed offset profiles while retaining the original varied-values fixture. Uniform, unequal-channel uniform (0/20ms), and ragged-lane profiles compare exact scalar/W4/W8 PCM, full snapshots and reports across all three links for1536frames, including first-block parameter ramps and settled post-latency output. Assertions require populated output/ring payloads. Focused debug identity profile test passed1/0,status0 at identity.rs SHA4c59f1743fec93a6c7477b240957e1daae5d9fa0ae930e0f0c7bc95db309010f. No production source changed. Dedicated mixed uniform/ragged channel profiles, populated restore transitions, reset/bypass and later gates are still pending.
+
+## Attempt 2 populated public transition checkpoint
+
+Dedicated uniform-left/ragged-right and ragged-left/uniform-right public profiles now join the exact scalar/W4/W8 × three-link identity comparisons. Existing restoration machinery exercises populated1536-frame donors and warmed receivers in both profile directions, followed by4096frames through cursor wrap and full-reset comparison with a fresh destination baseline. Ring/output population checks use numeric nonzero values; unchanged bypass regression remains part of the final suite.
+
+Expanded-profile and transition selectors each passed1/0 in debug and release (four successful invocations), at identity.rs SHAa45d7921282dde5f9a562e7d982b9b3a88db7e9bbffbac1d9ff81fe9864fba24. The first compile diagnostic from a missing restore import is preserved as status101; no production or expectation change repaired it. Allocation/liveness, final suite/format/Clippy, candidate lowering and consolidated review remain pending.
