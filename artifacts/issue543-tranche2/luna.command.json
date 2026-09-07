@@ -1,0 +1,19 @@
+{
+  "argv": [
+    "/home/bl/.local/bin/codex",
+    "exec",
+    "-C",
+    "/home/bl/misofm/engine-shared-hex-authority",
+    "-s",
+    "danger-full-access",
+    "-m",
+    "gpt-5.6-luna",
+    "-c",
+    "model_reasoning_effort=\"high\"",
+    "-o",
+    "/tmp/issue543/tranche2/luna.md",
+    "-"
+  ],
+  "cwd": "/home/bl/misofm/engine-shared-hex-authority",
+  "prompt": "/tmp/issue543/tranche2-prompt.md"
+}

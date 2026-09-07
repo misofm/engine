@@ -1272,14 +1272,7 @@ fn native_identity_session_digest_pins_the_wasm_parity() {
             }
         }
     }
-    let native = digest
-        .finalize()
-        .iter()
-        .fold(String::with_capacity(64), |mut text, byte| {
-            use core::fmt::Write as _;
-            let _ = write!(&mut text, "{byte:02x}");
-            text
-        });
+    let native = engine::hex_lower(&digest.finalize());
 
     let expected: serde_pin::Pin =
         serde_pin::read(include_str!("../tests/browser-v1/expected.json"));
@@ -1547,14 +1540,7 @@ fn native_command_timeline_digest_pins_the_wasm_parity() {
             }
         }
     }
-    let native = digest
-        .finalize()
-        .iter()
-        .fold(String::with_capacity(64), |mut text, byte| {
-            use core::fmt::Write as _;
-            let _ = write!(&mut text, "{byte:02x}");
-            text
-        });
+    let native = engine::hex_lower(&digest.finalize());
 
     let expected: serde_pin::Pin =
         serde_pin::read(include_str!("../tests/browser-v1/expected.json"));
@@ -4058,14 +4044,7 @@ fn native_observation_timeline_digest_pins_the_wasm_parity() {
                 }
             }
         }
-        let hex = digest
-            .finalize()
-            .iter()
-            .fold(String::with_capacity(64), |mut text, byte| {
-                use core::fmt::Write as _;
-                let _ = write!(&mut text, "{byte:02x}");
-                text
-            });
+        let hex = engine::hex_lower(&digest.finalize());
         (
             hex,
             armed,

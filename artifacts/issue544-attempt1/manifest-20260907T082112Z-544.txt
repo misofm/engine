@@ -1,0 +1,26 @@
+Issue #544 attempt 1 pre-edit manifest
+timestamp_utc=2026-09-07T08:21:12Z
+cwd=/home/bl/misofm/engine-audit-subject-disposition
+head=d7857eaf71dece44e10fbf0ae966e76a7eabf8fd
+sha256_tools/audit/src/capi.rs=9acafedab02797c1cb7d24a3e4f278f429b54625950fa27d225c93827d10a413
+sha256_tools/audit/src/source_duration.rs=9840b4f8127ce0338f0fbf612eaf4f5d7cb361b53bdbcc825b6c343eced1ff5
+sha256_.github/workflows/qualification.yml.before=3434631972bf97a6c01a2c29090d89bd02969b28a0ae1d7956f8be2ec17eddcc
+
+Commands will be appended with exact argv arrays and outcomes.
+
+command_01_argv=["cargo","build","--locked","--release","-p","audit"]
+command_01_env=["PATH=/home/bl/.cargo/bin:$PATH","CARGO_TARGET_DIR=/tmp/issue544-target"]
+command_01_outcome=exit_0; release build finished successfully
+command_02_argv=["cargo","test","--locked","--release","-p","audit"]
+command_02_env=["PATH=/home/bl/.cargo/bin:$PATH","CARGO_TARGET_DIR=/tmp/issue544-target"]
+command_02_outcome=exit_0; 36 passed, 0 failed, 0 ignored
+command_03_argv=["./target/release/audit","capi"]
+command_03_env=["PATH=/home/bl/.cargo/bin:$PATH","CARGO_TARGET_DIR=/tmp/issue544-target"]
+command_03_capture=["/tmp/issue544/capi-stdout.json","/tmp/issue544/capi-stderr.txt","/tmp/issue544/capi-exit.txt"]
+command_03_outcome=exit_127; launcher failed before audit subject start because ./target/release/audit was absent; source-duration was not run per stop-on-failure protocol
+command_03_observed_stdout_bytes=0
+command_03_observed_stderr=/bin/bash: line 1: ./target/release/audit: No such file or directory
+command_03_numeric_exit_status=127
+
+sha256_.github/workflows/qualification.yml.after=3434631972bf97a6c01a2c29090d89bd02969b28a0ae1d7956f8be2ec17eddcc
+git_status_after=clean

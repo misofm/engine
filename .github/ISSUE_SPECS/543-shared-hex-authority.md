@@ -132,3 +132,21 @@ The new engine::hex_lower uses one lowercase nibble table and exact two-characte
 This is a recoverable implementation checkpoint, not whole-attempt verification or delivery. Remaining consumer census/adapters, affected/workspace gates and Sol xhigh review remain. Root will integrate this checkpoint into #542 before protocol test extraction. No runtime performance claim.
 
 Root corrected the first checkpoint prose immediately after comparing the raw formatting statuses: the initial check was 1, not 0. This correction preserves the failure record and does not rerun or change source.
+
+## Attempt 1 remaining-consumer checkpoint
+
+Luna high delegated the remaining current in-scope byte encoders, except rack_fixture owned by pending #545 retirement. The exact tranche touches20 files (25 insertions/83 deletions), including four approved engine dependency entries in Cargo.lock. Protocol and rack_fixture sources are unchanged. Existing hashing ownership, word-oriented formats, decorated/uppercase/integer emitters and parsers remain distinct; pins are unchanged.
+
+All19 captured records returned0: before/after census; formatting/diff; explicit non-locked bench-support digest test for the approved lock update; locked graph/compiler, math lane identity/determinism, runtime determinism, native runner, wasm-gates, effect-package, effect-compiler, stem-hasher, selected host-web native tests/example build, parameter-metadata tests/lattice build; final checkpoint inspection. Exact commands/environment/pre-command source hashes and raw results are under artifacts/issue543-tranche2. Source implementation is paused.
+
+This focused-green checkpoint precedes #545 integration and final workspace gates. It is not final census acceptance or CP20 closure; Sol xhigh review and remote qualification/merge remain. No benchmark or repinning occurred.
+
+The terminal Luna report is now retained. The additional nineteenth record repeats only final read-only inspection after a harmless printf label warning; no tests or source work were repeated. The worker was paused before root committed7c0d9586; its acd57011 identity is the test-time base. The graph-compiler focused suite passed84 here because it still contains the pending #545 orphan-validator test; #545 removes that one target/test and records83. No final whole-finding count or delivery is inferred from either number.
+
+## Lossless evidence packaging before final review
+
+Luna high replaced14 whitespace-bearing stdout files with deterministic gzip captures and a manifest of original/packed paths, byte counts and hashes. Root independently decoded each and compared it byte-for-byte with its original committed blob at b5317fe2. No source, dependency or test execution changed. The working-tree diff check passed; root will additionally check the full committed range before integration/final review. This is still attempt1 and is not a formal review retry.
+
+## Integrated final qualification candidate
+
+Root verified the full original-base committed diff after lossless packaging e724a02b, then integrated accepted #545 checkpoint c6fa0c0e at f8688ee0 and pushed it. The orphan rack_fixture encoder is absent through that separately reviewed retirement. Sol high now coordinates Luna high final locked workspace tests, strict workspace Clippy, formatting, policy and semantic census on this integrated candidate. #545 must merge before this issue delivery; neither integration nor started gates supplies completion credit.
