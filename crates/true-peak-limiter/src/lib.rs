@@ -729,9 +729,7 @@ fn ramp_values<const DISPATCH: u8, L: Lane>(
                 (limit.advance(), release.advance())
             }
         }
-        DISPATCH_STATIONARY => {
-            (limit.resting_value(), release.resting_value())
-        }
+        DISPATCH_STATIONARY => (limit.resting_value(), release.resting_value()),
         DISPATCH_RAMPING => (limit.advance(), release.advance()),
         _ => unreachable!("invalid limiter dispatch"),
     }
@@ -4769,11 +4767,7 @@ mod tests {
             if mono {
                 oracle.process_block_mono_runtime_oracle(&mut oracle_left, FRAMES);
             } else {
-                oracle.process_block_runtime_oracle(
-                    &mut oracle_left,
-                    &mut oracle_right,
-                    FRAMES,
-                );
+                oracle.process_block_runtime_oracle(&mut oracle_left, &mut oracle_right, FRAMES);
             }
             let oracle_observation = dispatch_observation();
 
@@ -4839,10 +4833,7 @@ mod tests {
             }
         }
 
-        assert!(
-            populated,
-            "{label}: witness PCM never became populated"
-        );
+        assert!(populated, "{label}: witness PCM never became populated");
     }
 
     /// The candidate and the shared runtime oracle agree on populated PCM and complete state while

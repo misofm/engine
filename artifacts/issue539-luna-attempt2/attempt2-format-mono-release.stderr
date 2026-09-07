@@ -1,0 +1,3 @@
+   Compiling true-peak-limiter v0.1.0 (/home/bl/misofm/engine-limiter-stationary-dispatch/crates/true-peak-limiter)
+    Finished `release` profile [optimized + debuginfo] target(s) in 8.69s
+     Running tests/mono_collapse.rs (/tmp/issue539-luna2-target/release/deps/mono_collapse-4d44ee22e0679d15)
