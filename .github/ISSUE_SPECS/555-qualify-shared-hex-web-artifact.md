@@ -136,3 +136,9 @@ The original single-overlay premise is therefore insufficient for the existing `
 - regenerate only the scratch `hosts/host-web/BROWSER_DEPLOYMENT_MATRIX.md` from that overlaid result using the repository's unchanged `generate-matrix.mjs`, and prove its diff is limited to the corresponding source/artifact lineage text.
 
 These scratch files are comparison inputs, not repository repins or newly recorded qualification results. Preserve exact before/after diffs and semantic equality of all non-lineage JSON fields. Then run the unchanged `--check-matrix --self-test-mutations` browser command once from the scratch source. It must compare actual Chromium, Firefox and WebKit rows with the unchanged #537 browser expectations and exercise every mutation control. `--record-matrix` remains forbidden. Any overlay proof or browser failure stops; repository pin/results/matrix remain read-only until Astra MEDIUM reviews the completed candidate evidence.
+
+## Scratch lineage and browser qualification result
+
+Fresh Luna XHIGH proved that the `results.json` scratch overlay changed only `candidateCommit` and `wasmSha256`, every other parsed field and browser row remained identical, and regenerated matrix output changed exactly the corresponding lineage sentence. The unchanged browser command returned zero from the scratch source with `--browser all --check-matrix --self-test-mutations`: Chromium `151.0.7922.34`, Firefox `153.0` and WebKit `26.5` each passed all gates. Twelve red mutations per browser, 36 total, plus the artifact-set and lineage mutation proofs passed. `--record-matrix` was not used, and repository source, pin, results and matrix remain unchanged.
+
+The retained candidate and the full pre-pin chain are now ready for the required Astra MEDIUM read-only review. No repository pin edit is authorized until that exact review returns PASS.

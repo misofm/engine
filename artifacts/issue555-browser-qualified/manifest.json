@@ -1,0 +1,102 @@
+{
+  "schema_version": 1,
+  "issue": 555,
+  "stage": "browser-qualified",
+  "source_commit": "e4f46fa808e413507d204e81b6a4ebc27254869c",
+  "branch_head": "9b5482d6",
+  "candidate_wasm_sha256": "6452f0db237da1d57b3594e7d95dd53a089a604d5b0791ea8b3533c5930c5a1c",
+  "capture_source": "/tmp/issue555-browser-lineage-overlay",
+  "overlay": {
+    "scratch_only": true,
+    "results_json_fields": {
+      "candidateCommit": "e4f46fa808e413507d204e81b6a4ebc27254869c",
+      "wasmSha256": "6452f0db237da1d57b3594e7d95dd53a089a604d5b0791ea8b3533c5930c5a1c"
+    },
+    "results_other_parsed_fields_equal": true,
+    "results_browser_rows_equal": true,
+    "matrix_changed_lines": 1,
+    "matrix_change_scope": "corresponding candidate and Wasm lineage text only",
+    "record_matrix": false
+  },
+  "browser_qualification": {
+    "status": 0,
+    "started": true,
+    "argv": "qualify.argv.json",
+    "cwd": "qualify.cwd",
+    "environment": "qualify.environment.txt",
+    "stdout": "qualify.stdout",
+    "stderr": "qualify.stderr",
+    "browsers": {
+      "chromium": {"count": 1, "identity": "151.0.7922.34", "result": "all qualification gates passed"},
+      "firefox": {"count": 1, "identity": "153.0", "result": "all qualification gates passed"},
+      "webkit": {"count": 1, "identity": "26.5", "result": "all qualification gates passed"}
+    }
+  },
+  "mutation_controls": {
+    "browser_mutations_per_browser": 12,
+    "browser_mutations_total": 36,
+    "artifact_set_mutations": 14,
+    "lineage_mutations": 2,
+    "all_passed": true
+  },
+  "before_after": {
+    "results_before": {
+      "bytes": 1416,
+      "sha256": "50dff29d86cf49426c1aec42aa427af6c71f6fadf5c790b3aa0e03f468099433"
+    },
+    "results_after": {
+      "bytes": 1416,
+      "sha256": "640d4d0c1534ddd5c8c514507120fde90d2e96998a18d7057c25d91a2ce7bd7d"
+    },
+    "matrix_before": {
+      "bytes": 2526,
+      "sha256": "ce35d9cbed93f7cfa215ecc7af3f982fb7144a31017748b794ba3af76a153eca"
+    },
+    "matrix_after": {
+      "bytes": 2526,
+      "sha256": "96ac537d2ef9e022ff0c94be7350d3f51beb6bc6137501d9b66ec008ea487f46"
+    }
+  },
+  "environment_streams": {
+    "omitted_binary_payloads": ["matrix.environment.env0", "qualify.environment.env0"],
+    "reason": "NUL-delimited environment streams are binary; readable environment.txt captures are preserved.",
+    "source_bytes_each": 3151,
+    "source_sha256_each": "4e0501db9290b33ca95de73d3644e17525f9c4b9dc0222e76014324a8ce0dc67"
+  },
+  "compressed_streams": [],
+  "no_repository_mutation": true,
+  "no_unrelated_scratch_tracked_mutation": true,
+  "representation": "Manifest excludes itself. Listed readable files are lossless capture copies. matrix.overlay.diff.gz is deterministic gzip whose decompressed byte count and SHA-256 preserve the raw diff exactly while keeping git diff --check clean.",
+  "files": [
+    {"path": "before/hosts/host-web/qualification/results.json", "bytes": 1416, "sha256": "50dff29d86cf49426c1aec42aa427af6c71f6fadf5c790b3aa0e03f468099433"},
+    {"path": "before/hosts/host-web/BROWSER_DEPLOYMENT_MATRIX.md", "bytes": 2526, "sha256": "ce35d9cbed93f7cfa215ecc7af3f982fb7144a31017748b794ba3af76a153eca"},
+    {"path": "after/hosts/host-web/qualification/results.json", "bytes": 1416, "sha256": "640d4d0c1534ddd5c8c514507120fde90d2e96998a18d7057c25d91a2ce7bd7d"},
+    {"path": "after/hosts/host-web/BROWSER_DEPLOYMENT_MATRIX.md", "bytes": 2526, "sha256": "96ac537d2ef9e022ff0c94be7350d3f51beb6bc6137501d9b66ec008ea487f46"},
+    {"path": "before.bytes", "bytes": 107, "sha256": "25c7000a8c4e4208242ee7bcc7d8385d1fc3351879700604893dc1a6fd7f6571"},
+    {"path": "before.sha256", "bytes": 218, "sha256": "69624882fab7619ddc11eb39c4e599afb0ebd6e9f8c5a1c820a7b3e40c157914"},
+    {"path": "before.stat", "bytes": 134, "sha256": "acc3f4b772aebad8416dbc9141bfde00f7fd5a9b2f2de8f87b509bb65c7b5ee1"},
+    {"path": "after.bytes", "bytes": 107, "sha256": "25c7000a8c4e4208242ee7bcc7d8385d1fc3351879700604893dc1a6fd7f6571"},
+    {"path": "after.sha256", "bytes": 218, "sha256": "cc47852a710a3f6096162296a7b9be923b736a913fe94a1fb3504ec10148b7a4"},
+    {"path": "matrix.argv.json", "bytes": 107, "sha256": "dd873c0f66899db12c7a36b0fc2e178150a6e3a2a01e354600b6ac72e28fd13d"},
+    {"path": "matrix.cwd", "bytes": 30, "sha256": "da0aedaf81bcc2da2a79b1c75704f82f8c3074a22051afee65f08663092b9fc1"},
+    {"path": "matrix.environment.txt", "bytes": 3151, "sha256": "e686bb03824a5cc5b7369b51bb6ff024f9c4e4b1b4ac156fef8775a0dc97abfd"},
+    {"path": "matrix.diff.status", "bytes": 2, "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"},
+    {"path": "matrix.overlay-proof.json", "bytes": 346, "sha256": "c2c8538f3ad36a311b22e58f1f31cf49d35898bb896216ab77616457122d6e6c"},
+    {"path": "matrix.overlay-proof.status", "bytes": 2, "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"},
+    {"path": "matrix.overlay.diff.gz", "bytes": 626, "sha256": "1dbd849d55a6b9029ae9208a037c008606b0931a604fddb4845a08d909b76f0f", "decompressed_bytes": 1256, "decompressed_sha256": "89b8e1455997e56f6031ab3c5abb32e111abe55b52809dc23e6fd6917ad3288b"},
+    {"path": "matrix.status", "bytes": 2, "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"},
+    {"path": "matrix.stderr", "bytes": 0, "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},
+    {"path": "matrix.stdout", "bytes": 0, "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},
+    {"path": "qualify.argv.json", "bytes": 226, "sha256": "f65647f2d2a26e3c84e2af2ac00a32ccc143777e318a3ad7b3ca74d410faa735"},
+    {"path": "qualify.cwd", "bytes": 30, "sha256": "da0aedaf81bcc2da2a79b1c75704f82f8c3074a22051afee65f08663092b9fc1"},
+    {"path": "qualify.environment.txt", "bytes": 3151, "sha256": "e686bb03824a5cc5b7369b51bb6ff024f9c4e4b1b4ac156fef8775a0dc97abfd"},
+    {"path": "qualify.status", "bytes": 2, "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"},
+    {"path": "qualify.stderr", "bytes": 0, "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},
+    {"path": "qualify.stdout", "bytes": 441, "sha256": "4bcef2fd11c049023f2b89091aa839237e680351d46395082d046537c43d8676"},
+    {"path": "results.diff.status", "bytes": 2, "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"},
+    {"path": "results.overlay-proof.json", "bytes": 231, "sha256": "d211099e993d8c2a0fd28325b372f441702e9ed3dc662c0d1ebaa78095e2e9c1"},
+    {"path": "results.overlay-proof.status", "bytes": 2, "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"},
+    {"path": "results.overlay.diff", "bytes": 577, "sha256": "6e8ddf7d5ddd32ca2942d93e791fbd38b17512e7b96ad0cfff5ef9b82d656d93"},
+    {"path": "summary.json", "bytes": 1011, "sha256": "79682ddcced11a4abe8516a4a310d2fa050f970600124078e6eaef9b6d87af10"}
+  ]
+}
