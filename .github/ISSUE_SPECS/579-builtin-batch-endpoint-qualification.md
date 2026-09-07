@@ -165,6 +165,23 @@ successor, close both issues after upstream evidence, verify post-main qualifica
 and remove both clean delivered worktrees. Delivery advances #444 but does not close
 its bank pairing, scalar pairing or automatic lifecycle children.
 
+## Attempt 1 review
+
+Luna HIGH implementation checkpoint `2744cc7ba0d344553878fdd5ed590527f491ae57`
+passed its focused and proportional gates. Astra LOW returned **FAIL**: cached polling
+does not validate token identity; the endpoint admits or starts another cancellation
+after captured collection but before reporting the retained completion; the audio gate
+lacks direct existing bank/scalar pairing witnesses, addressed scalar state and
+PostFader evidence; the resource oracle repeats layout arithmetic without observing
+actual retained endpoint allocation; and the sticky-fault mutation targets fault
+reporting rather than false cancellation. The full verdict is
+`docs/audits/579-attempt1-review.md`.
+
+Attempt 2 must correct only those five findings in the existing exact paths. Existing
+builtins-compiler test-support witnesses and same-module stopped-plan inspection are
+sufficient; no render-session, protocol, manifest, artifact, pairing or lane-B path is
+added.
+
 ## Attempt 1 implementation record
 
 Attempt 1 preserves the #576 product surface and closes the bounded qualification gaps. The
