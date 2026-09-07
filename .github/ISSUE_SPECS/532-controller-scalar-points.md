@@ -77,3 +77,7 @@ Checkpoint audit corrected an earlier reporting error: the first three captures 
 ### Real catalog fixture checkpoint (partial Group1)
 
 The real session/compiler/provider fixture resolves actual makeup handles and exercises typed admission, encoded ack, exact replay, scalar rendering, terminal collection, and StateGet refusal. `group1-focused-debug-final` passes one test on its captured source; preceding compile/fixture failures are preserved. This checkpoint does **not** finish frozen Group1: root inspection found the comparator currently repeats Point application instead of using the independent span API, lacks warmup/future-block boundary/native-current comparisons, and publishes clock256 after only128 rendered frames. The next tranche must correct these specific missing claims before adding Group2. No product/review acceptance is inferred from this passing partial test.
+
+### Group1 completion checkpoint
+
+`group1-complete-debug` passes one focused test on test SHA256 `a78ea2567fb09c47cd16fbe0bd0da247e57cd8755d2207be0d7d5a1a14a15a18` (the raw command manifest is authoritative). Warmed asymmetric signals compare bitwise against independent Point-span processing and differ from a no-event reference. Sample3 applies in block1; sample128 remains pending until block2, then native current/target readback agrees with the independent reference. Exact replay does not create a second outstanding batch. Caller clock publication uses actual endpoint next_sample128/256 before nonzero past-time refusal. Groups2/3 and consolidated review remain pending.

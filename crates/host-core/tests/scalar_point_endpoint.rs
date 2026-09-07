@@ -212,9 +212,19 @@ fn process_real(
     left: &mut [f32],
     right: &mut [f32],
     first: u64,
+    spans: &[PreparedAutomationSpan],
 ) -> ProcessReport {
     let frames = left.len() as u32;
-    effect.process(EffectProcessBlock::new(left, right, None, first, &[], frames).unwrap())
+    effect.process(EffectProcessBlock::new(left, right, None, first, spans, frames).unwrap())
+}
+
+fn warm_real(effect: &mut dyn PreparedNativeEffect) {
+    const FRAMES: usize = 1_152;
+    let mut left = signal(FRAMES, 0x0532_1001, 0.73);
+    let mut right = signal(FRAMES, 0x0532_1002, 0.61);
+    for (block, (left, right)) in left.chunks_mut(128).zip(right.chunks_mut(128)).enumerate() {
+        process_real(effect, left, right, (block * 128) as u64, &[]);
+    }
 }
 fn effect() -> Box<dyn PreparedNativeEffect> {
     let values: Vec<_> = compressor::COMPRESSOR_PARAMETERS
@@ -1520,7 +1530,23 @@ fn controller_points_drive_real_asymmetric_pcm_replay_and_clock_refusal() {
             limits: preparation.limits,
         })
         .expect("independent scalar reference");
+    let mut no_event = fixture.effects.entries[0]
+        .factory
+        .prepare(PrepareEffectRequest {
+            sample_rate: preparation.sample_rate,
+            quantum: preparation.quantum,
+            quality: preparation.quality,
+            bypass: preparation.bypass,
+            link_mode: preparation.link_mode,
+            ports: preparation.ports,
+            initial_values: &preparation.initial_values,
+            limits: preparation.limits,
+        })
+        .expect("no-event scalar reference");
+    warm_real(&mut *reference);
+    warm_real(&mut *no_event);
     let processor = fixture.effects.entries[0].processor.as_mut();
+    warm_real(processor);
     let (mut controller, render, resources) = prepare_controller_scalar_point_endpoint(
         processor,
         handles,
@@ -1545,7 +1571,7 @@ fn controller_points_drive_real_asymmetric_pcm_replay_and_clock_refusal() {
         core::mem::size_of_val(&render)
     );
 
-    let records = [(handles[0], 3, 6.0), (handles[1], 127, -6.0)];
+    let records = [(handles[0], 3, 6.0), (handles[1], 128, -6.0)];
     let batch = real_batch(revision, 1, handles, &records);
     let canonical = b"typed-enqueue-left-right";
     let response = controller.process(controller_enqueue(revision, 1, canonical, batch));
@@ -1576,6 +1602,8 @@ fn controller_points_drive_real_asymmetric_pcm_replay_and_clock_refusal() {
     let mut right = signal(128, 0x0532_0002, 0.57);
     let mut expected_left = left.clone();
     let mut expected_right = right.clone();
+    let mut no_event_left = left.clone();
+    let mut no_event_right = right.clone();
     let mut expected_report = ProcessReport::default();
     add_report(
         &mut expected_report,
@@ -1584,42 +1612,115 @@ fn controller_points_drive_real_asymmetric_pcm_replay_and_clock_refusal() {
             &mut expected_left[..3],
             &mut expected_right[..3],
             0,
+            &[],
         ),
     );
-    reference
-        .apply_parameter_point(5, ParameterChannel::Left, 6.0)
-        .unwrap();
     add_report(
         &mut expected_report,
         process_real(
             &mut *reference,
-            &mut expected_left[3..127],
-            &mut expected_right[3..127],
+            &mut expected_left[3..],
+            &mut expected_right[3..],
             3,
+            &[point_span(3, ParameterChannel::Left, 6.0)],
         ),
     );
-    reference
-        .apply_parameter_point(5, ParameterChannel::Right, -6.0)
-        .unwrap();
-    add_report(
-        &mut expected_report,
-        process_real(
-            &mut *reference,
-            &mut expected_left[127..],
-            &mut expected_right[127..],
-            127,
-        ),
+    process_real(
+        &mut *no_event,
+        &mut no_event_left,
+        &mut no_event_right,
+        0,
+        &[],
     );
     let report = render
         .render(&mut left, &mut right, SampleTime(0))
         .expect("real PCM render");
     assert_eq!(report.native, expected_report);
-    assert_eq!(report.process_invocations, 3);
+    assert_eq!(report.process_invocations, 2);
     assert_pcm_bits(&left, &expected_left);
     assert_pcm_bits(&right, &expected_right);
+    assert!(
+        left.iter()
+            .zip(&no_event_left)
+            .chain(right.iter().zip(&no_event_right))
+            .any(|(actual, baseline)| actual.to_bits() != baseline.to_bits())
+    );
+    assert!(
+        left.iter()
+            .chain(&right)
+            .any(|sample| sample.to_bits() & 0x7fff_ffff != 0)
+    );
+    let first_snapshot = render.snapshot().unwrap();
+    assert_eq!(first_snapshot.applied, 1);
+    assert_eq!(first_snapshot.pending.unwrap().1, 1);
+    assert_eq!(first_snapshot.pending.unwrap().3, Some(SampleTime(128)));
+    assert_state_bits(
+        first_snapshot.state[0],
+        reference
+            .parameter_state(5, ParameterChannel::Left)
+            .unwrap(),
+    );
+    assert_state_bits(
+        first_snapshot.state[1],
+        reference
+            .parameter_state(5, ParameterChannel::Right)
+            .unwrap(),
+    );
+    fixture
+        .clock
+        .0
+        .store(first_snapshot.next_sample.0, Ordering::Release);
+
+    let mut next_left = signal(128, 0x0532_0003, 0.69);
+    let mut next_right = signal(128, 0x0532_0004, 0.57);
+    let mut next_expected_left = next_left.clone();
+    let mut next_expected_right = next_right.clone();
+    let mut next_no_event_left = next_left.clone();
+    let mut next_no_event_right = next_right.clone();
+    let expected_second_report = process_real(
+        &mut *reference,
+        &mut next_expected_left,
+        &mut next_expected_right,
+        128,
+        &[point_span(128, ParameterChannel::Right, -6.0)],
+    );
+    process_real(
+        &mut *no_event,
+        &mut next_no_event_left,
+        &mut next_no_event_right,
+        128,
+        &[],
+    );
+    let second_report = render
+        .render(&mut next_left, &mut next_right, SampleTime(128))
+        .expect("future boundary PCM render");
+    assert_eq!(second_report.native, expected_second_report);
+    assert_eq!(second_report.process_invocations, 1);
+    assert_pcm_bits(&next_left, &next_expected_left);
+    assert_pcm_bits(&next_right, &next_expected_right);
+    assert!(
+        next_left
+            .iter()
+            .zip(&next_no_event_left)
+            .chain(next_right.iter().zip(&next_no_event_right))
+            .any(|(actual, baseline)| actual.to_bits() != baseline.to_bits())
+    );
     let snapshot = render.snapshot().unwrap();
     assert_eq!(snapshot.applied, 2);
     assert_eq!(snapshot.pending, None);
+    assert_eq!(snapshot.next_sample, SampleTime(256));
+    assert_state_bits(
+        snapshot.state[0],
+        reference
+            .parameter_state(5, ParameterChannel::Left)
+            .unwrap(),
+    );
+    assert_state_bits(
+        snapshot.state[1],
+        reference
+            .parameter_state(5, ParameterChannel::Right)
+            .unwrap(),
+    );
     assert_eq!(snapshot.state[0].target_value.to_bits(), 6.0_f32.to_bits());
     assert_eq!(
         snapshot.state[1].target_value.to_bits(),
@@ -1629,7 +1730,10 @@ fn controller_points_drive_real_asymmetric_pcm_replay_and_clock_refusal() {
         controller.collect_terminal(ticket).unwrap().applied_prefix,
         2
     );
-    fixture.clock.0.store(256, Ordering::Release);
+    fixture
+        .clock
+        .0
+        .store(snapshot.next_sample.0, Ordering::Release);
     let past = controller.process(controller_enqueue(
         revision,
         2,
