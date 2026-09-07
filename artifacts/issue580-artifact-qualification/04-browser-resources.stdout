@@ -1,0 +1,2 @@
+browser-correctness expected.json resource rows and digests agree with the built simd128 module, and the native witness agrees where the rows are target-independent
+browser expected-resources self-test passed (26 red mutations)

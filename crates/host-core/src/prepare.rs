@@ -498,7 +498,26 @@ pub fn prepare_host_runtime_with_console(
     caps: &HostPrepareCaps,
     console: &HostConsoleRequest,
 ) -> Result<(PreparedHost, HostConsoleHandles), PrepareDiagnostics> {
-    prepare_host_runtime_with_console_policy(compiled, caps, console, None, false)
+    prepare_host_runtime_with_console_policy(
+        compiled,
+        caps,
+        console,
+        None,
+        false,
+        Backend::current(),
+    )
+}
+
+/// Test-only preparation seam for exercising the scalar lowering against the native bank.
+/// Production callers remain pinned to [`Backend::current`].
+#[cfg(test)]
+pub(crate) fn prepare_host_runtime_with_console_backend(
+    compiled: &CompiledSession,
+    caps: &HostPrepareCaps,
+    console: &HostConsoleRequest,
+    backend: Backend,
+) -> Result<(PreparedHost, HostConsoleHandles), PrepareDiagnostics> {
+    prepare_host_runtime_with_console_policy(compiled, caps, console, None, false, backend)
 }
 
 /// Prepare a host whose caller retains every returned producer endpoint and admits records only
@@ -512,7 +531,14 @@ pub fn prepare_host_runtime_between_render_calls(
     caps: &HostPrepareCaps,
     console: &HostConsoleRequest,
 ) -> Result<(PreparedHost, HostConsoleHandles), PrepareDiagnostics> {
-    prepare_host_runtime_with_console_policy(compiled, caps, console, None, true)
+    prepare_host_runtime_with_console_policy(
+        compiled,
+        caps,
+        console,
+        None,
+        true,
+        Backend::current(),
+    )
 }
 
 /// Prepare a serialized host with exactly the caller-selected meter observers.
@@ -523,7 +549,14 @@ pub fn prepare_host_runtime_with_selected_meters_between_render_calls(
     console: &HostConsoleRequest,
     meters: &[HostMeterRequest],
 ) -> Result<(PreparedHost, HostConsoleHandles), PrepareDiagnostics> {
-    prepare_host_runtime_with_console_policy(compiled, caps, console, Some(meters), true)
+    prepare_host_runtime_with_console_policy(
+        compiled,
+        caps,
+        console,
+        Some(meters),
+        true,
+        Backend::current(),
+    )
 }
 
 #[allow(clippy::too_many_lines)]
@@ -533,6 +566,7 @@ fn prepare_host_runtime_with_console_policy(
     console: &HostConsoleRequest,
     selected_meters: Option<&[HostMeterRequest]>,
     between_render_calls: bool,
+    backend: Backend,
 ) -> Result<(PreparedHost, HostConsoleHandles), PrepareDiagnostics> {
     let model = compiled.normalized_model();
     let track_count = u64::try_from(model.tracks.len()).map_err(|_| platform("host.count"))?;
@@ -794,7 +828,7 @@ fn prepare_host_runtime_with_console_policy(
     })?;
     let builtin_resources = builtins.resource_report();
     let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
-        dispatch: Backend::current(),
+        dispatch: backend,
         plan_id: 1,
         effects,
         builtins,
