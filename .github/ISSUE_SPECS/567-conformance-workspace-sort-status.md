@@ -31,3 +31,19 @@ Allowed paths are:
 7. Luna HIGH pauses with a coherent focused-green tranche for root checkpoint. Astra LOW reviews the exact committed head and evidence. Required PR `qualification`, merge, synchronized #567/#542/#560 GitHub state, post-main qualification and clean worktree removal complete delivery.
 
 No performance, audio, wire, corpus, dependency or runtime behavior claim is made.
+
+## Attempt 1 focused-green checkpoint
+
+Luna high changed only `scripts/test-conformance-boundaries.sh`. A manifest-path discriminator now
+lets earlier TOML dependency sorts succeed and injects status 8 at the workspace manifest
+`gate_sort_lines` call, in both empty and partial-output modes. The separate engine and conformance
+TOML dependency-sort controls remain live. The candidate suite also contains a directed scratch
+counter-mutant for `gate_sort_lines`; it fails causally when the helper swallows the injected sort
+status. Two earlier quoted-shell probes that failed to apply that mutation are preserved and denied
+gate credit; the direct verified capture and the in-suite control apply the exact mutation.
+
+Shell syntax, the production checker, complete hermetic suite, protocol default and test-support,
+normal dependency/API absence, live extracted-test census/lists, formatting and exact scope/diff
+checks pass at pre-commit candidate `c0a00b4296ced4e8709ff882e57ead5ec9b2d3b0`. No product,
+production checker, shared helper, dependency, lockfile, Wasm, benchmark or prior evidence byte
+changed. Root commits and pushes this tranche before Astra low review.

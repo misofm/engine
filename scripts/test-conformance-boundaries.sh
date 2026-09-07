@@ -116,6 +116,9 @@ reset; make_shim "$scratch/awk-unique" awk 'case "$*" in *"!seen"*) [[ -z ${SHIM
 reset; make_shim "$scratch/awk-target" awk 'case "$*" in *"in_lib = 1"*) exec /usr/bin/awk "$@";; *"crates/conformance/Cargo.toml"*) [[ -z ${SHIM_PARTIAL:-} ]] || printf "dsp-reference\neffect-contract\nengine\nlane\n"; exit 8;; esac; exec /usr/bin/awk "$@"'; for partial in '' 1; do fail 'dependency extraction failed for crates/conformance/Cargo.toml (awk status 8)' env SHIM_PARTIAL="$partial" PATH="$scratch/awk-target:$PATH" bash "$checker" "$work"; done
 reset; make_shim "$scratch/sort-error" sort '/usr/bin/sort "$@"; printf "engine\n"; exit 8'; fail 'dependency extraction failed for crates/engine/Cargo.toml (sort status 8)' env PATH="$scratch/sort-error:$PATH" bash "$checker" "$work"
 reset; mkdir -p "$scratch/sort-target"; make_shim "$scratch/sort-target" sort 'input=$(cat); if [[ "$input" == dsp-reference* && "$input" == *session && "$input" != */* ]]; then [[ -z ${SHIM_PARTIAL:-} ]] || { printf "%s\\n" "$input"; printf "lane\\n"; }; exit 8; fi; printf "%s\\n" "$input" | exec /usr/bin/sort "$@"'; for partial in '' 1; do fail 'dependency extraction failed for crates/conformance/Cargo.toml (sort status 8)' env SHIM_PARTIAL="$partial" PATH="$scratch/sort-target:$PATH" bash "$checker" "$work"; done
+printf 'counterexample rejected: TOML dependency-sort controls (engine and conformance)\n'
+reset; mkdir -p "$scratch/sort-workspace"; make_shim "$scratch/sort-workspace" sort 'input=$(cat); if [[ "$input" == *"crates/engine/Cargo.toml"* && "$input" == *"crates/protocol/Cargo.toml"* ]]; then [[ -z ${SHIM_PARTIAL:-} ]] || { printf "%s\\n" "$input"; printf "workspace-sort-sentinel\\n"; }; exit 8; fi; printf "%s\\n" "$input" | exec /usr/bin/sort "$@"'; for partial in '' 1; do fail 'workspace library manifest discovery sort errored (sort status 8)' env SHIM_PARTIAL="$partial" PATH="$scratch/sort-workspace:$PATH" bash "$checker" "$work"; done
+printf 'counterexample rejected: workspace gate_sort_lines manifest sort (two partial-output modes)\n'
 reset; make_shim "$scratch/paste-error" paste '[[ -z ${SHIM_PARTIAL:-} ]] || printf "engine|lane\n"; exit 9'; for partial in '' 1; do fail 'join errored (paste status 9)' env SHIM_PARTIAL="$partial" PATH="$scratch/paste-error:$PATH" bash "$checker" "$work"; done
 reset; make_shim "$scratch/rg-manifest" rg 'case "$*" in *"engine/src/lib.rs"*) [[ -z ${SHIM_PARTIAL:-} ]] || printf "crates/engine/src/lib.rs:1:mod dsp_reference;\n"; exit 7;; esac; exec /usr/bin/rg "$@"'; for partial in '' 1; do fail 'engine dsp_reference module probe scan errored (rg exit 7)' env SHIM_PARTIAL="$partial" PATH="$scratch/rg-manifest:$PATH" bash "$checker" "$work"; done
 reset; make_shim "$scratch/rg-module" rg 'case "$*" in *"mod[[:space:]]"*"engine/src/lib.rs"*) [[ -z ${SHIM_PARTIAL:-} ]] || printf "crates/engine/src/lib.rs:1:mod dsp_reference;\n"; exit 7;; esac; exec /usr/bin/rg "$@"'; for partial in '' 1; do fail 'engine dsp_reference module probe scan errored (rg exit 7)' env SHIM_PARTIAL="$partial" PATH="$scratch/rg-module:$PATH" bash "$checker" "$work"; done
@@ -131,6 +134,26 @@ reset; rm "$work/crates/protocol/src/controller/tests.rs"; if require_protocol_f
 reset; sed -i '/^#\[cfg(test)\]$/d' "$work/crates/protocol/src/controller.rs"; fail 'crates/protocol/src/controller.rs must contain exactly one literal adjacent' bash "$checker" "$work"
 reset; sed -i 's/^#\[cfg(test)\]$/#[cfg(any(test))]/' "$work/crates/protocol/src/message_wire.rs"; fail 'crates/protocol/src/message_wire.rs must contain exactly one literal adjacent' bash "$checker" "$work"
 reset; printf 'use conformance::complete_schema_corpus;\n' >>"$work/crates/protocol/src/session_wire.rs"; fail 'protocol production code must not use a harness crate' bash "$checker" "$work"
+
+# The workspace-sort status assertion must reject a scratch-only helper that swallows a failing
+# `sort` status. The mutation touches only the copied helper; the candidate checker and fixture
+# remain byte-identical, and the same workspace discriminator drives the red assertion.
+if [[ -z ${MUTANT_RUN:-} ]]; then
+  sort_mutant_root="$scratch/sort-status-mutant/scripts"; mkdir -p "$sort_mutant_root/lib"
+  cp "$checker" "$sort_mutant_root/check-conformance-boundaries.sh"; cp "$root/scripts/lib/gate.sh" "$sort_mutant_root/lib/gate.sh"
+  sed -i '/^gate_sort_lines()/,/^}/ s/else rc=\$?/else rc=0/' "$sort_mutant_root/lib/gate.sh"
+  if MUTANT_RUN=1 CHECKER="$sort_mutant_root/check-conformance-boundaries.sh" bash "$root/scripts/test-conformance-boundaries.sh" >"$scratch/sort-status-mutant.log" 2>&1; then
+    echo 'workspace sort fail-open mutant escaped focused acceptance' >&2; exit 1
+  else
+    sort_mutant_rc=$?
+  fi
+  rg -q 'wrong conformance diagnostic for workspace library manifest discovery sort errored' "$scratch/sort-status-mutant.log" || {
+    echo 'workspace sort mutant failed outside intended assertion' >&2
+    cat "$scratch/sort-status-mutant.log" >&2
+    exit 1
+  }
+  printf 'counter-mutant rejected: workspace gate_sort_lines status (status %s)\n' "$sort_mutant_rc"
+fi
 
 # The directed module assertion must reject Astra's exact fail-open consumer mutant.
 if [[ -z ${MUTANT_RUN:-} ]]; then
