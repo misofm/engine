@@ -44,3 +44,99 @@ This is #470. #443 retains adjacent serialized scalar integration; #470 retains 
 ## Orthogonal buffer-identity retention
 
 New #476 classifies and retains distinct-output serialized scalar pairing. It does not replace or narrow this issue: #470 remains about nonadjacent scheduling and intervening errors. #443 now requires explicit same-output/in-place eligibility in its adjacent slice. Neither retained issue claims a measured improvement or authorizes speculative architecture.
+
+## Current-main scope and reachable population
+
+#443/PR #482 is delivered on current `main`
+`30f658ee1c0c7d86002f5f2fea075a5dfa8a7c2c`; #476 is closed as a proved
+distinct-output non-applicability decision. The remaining #470 population is real and same-buffer.
+The production level-major scalar schedule for two independent equal-depth live tracks is
+`F_A -> F_B -> M_A -> M_B`. Both fader-to-matrix edges may satisfy sole-reader, undelayed,
+unobserved, in-place and `BetweenRenderCalls` eligibility, but the adjacent #443 selector cannot
+pair either one. The existing builtins-compiler scalar helper rewrites its fixture into track-major
+singleton levels, so it cannot stand in for this production trigger.
+
+The original error order is also real. Each owner drains its queue FIFO, applies a valid prefix,
+consumes the first invalid record, leaves the tail queued, and returns before arithmetic. An invalid
+`F_B` must therefore leave fully completed `F_A` effects while `M_A` remains untouched; an invalid
+`M_A` must follow both completed faders. Eagerly running A's existing composite at `F_A` moves
+`M_A` before `F_B`, while delaying the whole composite to `M_A` omits `F_A` effects on an
+intervening error. `BetweenRenderCalls` excludes producer races but does not remove these failures.
+
+## Root architecture ruling and smallest product slice
+
+Root adopts a narrow split-owner mechanism with deferred settled fader arithmetic. The literal
+contents of a private, unobserved post-fader buffer may remain temporarily unmaterialized inside
+one render call. Every observable boundary remains unchanged, and the correct settled fader output
+must be materialized before any execution or observer error returns. This is the explicit decision
+that the earlier brief withheld; it does not authorize a scheduler redesign, rollback, speculative
+processor execution, queue peek/staging API or generic fallibility metadata.
+
+At the fader's original op, run its original reduction and queue drain. A ramping fader executes
+its complete original arithmetic immediately. A settled fader records a bounded pending state and
+defers only its stateless settled arithmetic. At the matrix's original op, retain the existing
+self-copy reduction, drain matrix commands, then use the existing settled fused kernel when both
+stages are settled; otherwise materialize the fader and run the original matrix arithmetic. On a
+matrix drain failure, materialize the pending fader before returning the original error, preserving
+the matrix prefix and queue tail. Before propagating any intervening execution or observer error,
+materialize every earlier pending fader in original order without draining its matrix. Pending
+state must be cleared on every success and failure path and may never cross a render return.
+
+The first product slice selects deterministic nonoverlapping scalar pair intervals and permits at
+most one deferred interval at a time. It must earn the ordinary two-track A pair across `F_B`;
+overlapping candidates and every unproved interval remain separate. Preparation must prove the
+exact concrete live owners and serialized delivery, same-track PostFader/PostMatrix identity, one
+undelayed in-place matrix input, no bank/retired/redirect ownership, no direct or aliased observer,
+send, sidechain or output crossing, and no intervening read/write/observer of the deferred physical
+buffer. #444 retains Concurrent delivery and pairing; #431 retains its one descriptive capture.
+
+Authorize one narrow prepared split-pair owner interface in graph, implemented only by the exact
+builtins-compiler owners. The owner exposes original-position fader begin, matrix finish and
+infallible pending-fader completion; the preparation-only factory performs safe checked ownership
+transfer. Preserve the delivered adjacent factory and behavior. Allocate all owner/index metadata
+at preparation, charge the actual retained layouts and largest allocation before admission, and
+release the original owners once off render. Render adds no PCM scratch, allocation/free, lock,
+syscall, queue refill or general processor call during failure completion.
+
+## Exact path ownership
+
+Luna attempt 1 may edit only:
+
+- `crates/graph/src/lib.rs`
+- `crates/graph/src/runtime.rs`
+- `crates/builtins-compiler/src/lib.rs`
+- `crates/builtins/src/lib.rs`
+- `crates/builtins-compiler/tests/allocation_tracker.rs`
+- `crates/graph-compiler/src/lib.rs`
+- this issue spec and the lane-A tracker/evidence paths
+
+Lane A claims those paths for #470 until a coherent checkpoint is reviewed and delivered. No
+scheduler/lowering, SPSC, protocol, host, DSP-kernel, Cargo, workflow or artifact-pin edit is
+authorized. Shared paths must remain yielded by lane B. Lane B alone orchestrates any required
+AudioWorklet artifact qualification and pin changes after a frozen source checkpoint.
+
+## Objective gates for attempt 1
+
+1. Use an actual production-compiled two-track Scalar graph and assert
+   `F_A,F_B,M_A,M_B`, absence of banks, same-buffer identities and actual selection. Compare with
+   independent separate owners; do not reuse the track-major #443 helper unchanged.
+2. Prove exact PCM, retained state, queue prefix/tail, first error and retry behavior for success
+   and invalid `F_A`, `F_B`, `M_A` and `M_B` records.
+3. Inject an intervening observer error after completed `F_B`; prove pending `F_A` materializes
+   before return and `M_A` does not drain.
+4. Prove settled/settled uses the fused arithmetic with a SAME-assertion selection control.
+   Ramping fader executes at `F_A`; matrix ramp/retarget falls back at `M_A` with unchanged bits
+   and state. A failed render followed by retry detects pending leakage or double processing.
+5. Preserve direct/aliased observation data, nonunity send, sidechain, Concurrent, physical-buffer
+   conflict and overlapping-interval declines.
+6. Reuse the existing allocator/resource machinery to prove zero render allocations and frees on
+   success and failure, positive audit liveness, exact retained bytes/largest allocation/cap and
+   overflow refusal, and single off-render owner release.
+7. Run proportional affected debug/release suites, strict lint/format/realtime policy, supported
+   scalar and SIMD target qualification, then freeze the source for Astra MEDIUM adversarial
+   review. Coordinate any browser artifact qualification with lane B. No timing is authorized.
+
+Luna must pause at each coherent compiling/focused-green tranche for root's exact-path status,
+commit and upstream audit. This is attempt 1. If the implementation needs a second scheduler,
+arbitrary processor rollback, queue API changes or PCM scratch, stop and request a bounded
+rebrief rather than widening the slice.
