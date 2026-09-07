@@ -1,0 +1,49 @@
+COMPLETE CENSUS: toString(16) hits
+sdk/src/core/asset.ts:135:        `the engine asset reports ABI 0x${version.toString(16).padStart(8, "0")}, `
+sdk/src/core/asset.ts:136:        + `but this SDK was generated against 0x${ABI_LAYOUT.abiVersion.toString(16).padStart(8, "0")}`,
+sdk/src/core/boundary.ts:602:    throw new MisoEngineError(`the instance reports ABI 0x${version.toString(16)}`, {
+sdk/src/internal/session-json.ts:174:        ? `\\u${code.toString(16).padStart(4, "0").toUpperCase()}`
+sdk/test/support.mjs:126:  return hash.toString(16).padStart(16, "0");
+COMPLETE CENSUS: toString(16) paired with padStart
+sdk/src/core/asset.ts:135:        `the engine asset reports ABI 0x${version.toString(16).padStart(8, "0")}, `
+sdk/src/core/asset.ts:136:        + `but this SDK was generated against 0x${ABI_LAYOUT.abiVersion.toString(16).padStart(8, "0")}`,
+sdk/src/internal/session-json.ts:174:        ? `\\u${code.toString(16).padStart(4, "0").toUpperCase()}`
+sdk/test/support.mjs:126:  return hash.toString(16).padStart(16, "0");
+COMPLETE CENSUS: lowercase nibble tables and literals
+sdk/src/core/hex.ts:1:const HEX_DIGITS = "0123456789abcdef";
+hosts/host-web/web/hex-lower.js:1:const HEX_DIGITS = "0123456789abcdef"
+hosts/host-web/tests/stem-store-hash-v1.mjs:13:  "000123456789abcdefff",
+sdk/test/boot-evals.mjs:38:    "000123456789abcdefff",
+crates/engine/src/lib.rs:9:    const HEX: &[u8; 16] = b"0123456789abcdef";
+crates/engine/src/lib.rs:106:            "0123456789abcdeff0"
+COMPLETE CENSUS: Rust byte formatting and char::from_digit
+tools/wasm-gates/src/lib.rs:379:            let _ = write!(text, "0x{byte:02X}");
+crates/true-peak-limiter/tests/determinism.rs:66:        let bytes: Vec<String> = scalar.iter().map(|byte| format!("0x{byte:02x}")).collect();
+crates/builtins/tests/determinism.rs:48:        let bytes: Vec<String> = scalar.iter().map(|byte| format!("0x{byte:02x}")).collect();
+crates/compressor/tests/cross_target.rs:84:        let bytes: Vec<String> = scalar.iter().map(|byte| format!("0x{byte:02x}")).collect();
+crates/effect-runtime/tests/determinism.rs:64:        let bytes: Vec<String> = scalar.iter().map(|b| format!("0x{b:02x}")).collect();
+crates/effect-runtime/tests/determinism.rs:132:        let bytes: Vec<String> = digest.iter().map(|b| format!("0x{b:02x}")).collect();
+crates/multiband-compressor/tests/cross_target_digest.rs:46:            repin.push_str(&format!("0x{byte:02x}, "));
+crates/soft-clip/tests/determinism.rs:29:        text.push_str(&format!("0x{byte:02x}, "));
+crates/gate-expander/tests/determinism.rs:55:            let bytes: Vec<String> = row.iter().map(|byte| format!("0x{byte:02x},")).collect();
+crates/parametric-eq/tests/determinism.rs:69:        let bytes: Vec<String> = scalar.iter().map(|byte| format!("0x{byte:02x}")).collect();
+crates/parametric-eq/tests/determinism.rs:139:        let bytes: Vec<String> = digest.iter().map(|byte| format!("0x{byte:02x}")).collect();
+crates/delay/tests/determinism.rs:40:        let bytes: Vec<String> = scalar.iter().map(|byte| format!("0x{byte:02X}")).collect();
+crates/delay/tests/determinism.rs:88:        let words: Vec<String> = bytes.iter().map(|byte| format!("0x{byte:02X}")).collect();
+crates/transient-shaper/tests/cross_target.rs:77:            .map(|byte| format!("0x{byte:02x}"))
+SUPPLEMENTAL AUTHORITY CENSUS
+hosts/host-web/web/stem-store/incremental-sha256.js:11:import { hexLower } from "../hex-lower.js"
+hosts/host-web/web/stem-store/incremental-sha256.js:113:    return hexLower(this.digest())
+sdk/src/core/hex.ts:9:export function hexLower(bytes: Uint8Array): string {
+hosts/host-web/qualification/qualification.js:1:import { hexLower } from "../web/hex-lower.js";
+hosts/host-web/qualification/qualification.js:81:  return hexLower(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)));
+sdk/src/core/asset.ts:4:import { hexLower } from "./hex.ts";
+sdk/src/core/asset.ts:162:  return hexLower(new Uint8Array(digest));
+hosts/host-web/web/hex-lower.js:3:export function hexLower(bytes) {
+CLASSIFICATIONS
+asset.ts ABI diagnostics use 0x plus toString(16).padStart(8); boundary.ts ABI diagnostics are decorated; neither encodes bytes.
+session-json.ts emits uppercase Unicode \\u escapes; sdk/test/support.mjs emits fixed-width 64-bit FNV words.
+The three lowercase nibble tables are engine::hex_lower, SDK hexLower, and host-web hexLower; test literals are fixed expected values.
+Every Rust :02x/:02X hit is 0x-prefixed diagnostic or repin output; no char::from_digit hits exist.
+The three #552 residual call sites delegate to SDK or host-web hexLower as appropriate.
+semantic census: PASS

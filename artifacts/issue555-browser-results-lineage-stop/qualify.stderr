@@ -1,0 +1,11 @@
+file:///tmp/issue555-source-e4f46fa8/hosts/host-web/qualification/run.mjs:39
+  if (!condition) throw new Error(`${browserName}: ${name}: ${detail}`);
+                        ^
+
+Error: matrix: artifact-lineage: checked wasmSha256 differs from the artifact under qualification
+    at gate (file:///tmp/issue555-source-e4f46fa8/hosts/host-web/qualification/run.mjs:39:25)
+    at validateLineage (file:///tmp/issue555-source-e4f46fa8/hosts/host-web/qualification/run.mjs:49:3)
+    at main (file:///tmp/issue555-source-e4f46fa8/hosts/host-web/qualification/run.mjs:364:5)
+    at async file:///tmp/issue555-source-e4f46fa8/hosts/host-web/qualification/run.mjs:402:1
+
+Node.js v22.23.2

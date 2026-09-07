@@ -1,10 +1,17 @@
 import assert from "node:assert/strict"
 import { createHash } from "node:crypto"
+import { hexLower } from "../web/hex-lower.js"
 import { IncrementalSha256, sha256Stream } from "../web/stem-store/incremental-sha256.js"
 import {
   FetchStemResolver,
   MemoryStemResolver,
 } from "../web/stem-store/resolver.js"
+
+assert.equal(hexLower(new Uint8Array()), "")
+assert.equal(
+  hexLower(new Uint8Array([0x00, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0xff])),
+  "000123456789abcdefff",
+)
 
 const vectors = [
   [new Uint8Array(), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"],

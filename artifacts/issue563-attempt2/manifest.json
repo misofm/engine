@@ -1,0 +1,98 @@
+{
+  "schema": 1,
+  "implementationSource": "6edf0992d580340e9e1da8402f1ce2ec01cfcc88",
+  "files": [
+    {
+      "sha256": "7042b5f3fcfd8dc0b7f11a0611db1491ef787fc6dd073b8066d3cc648ae20c49",
+      "path": "artifacts/issue563-attempt2/issue563-attempt2-clippy.meta.gz"
+    },
+    {
+      "sha256": "de76e512a414e118fc8bc46cc3043f18cb60a7aa7b997d9564d30aae0cac9eee",
+      "path": "artifacts/issue563-attempt2/issue563-attempt2-clippy.status.gz"
+    },
+    {
+      "sha256": "8d3c1c280e1a89c6bf60d1d3b3455aa3f68b4f21790e7ca33044f4bb281d8d7e",
+      "path": "artifacts/issue563-attempt2/issue563-attempt2-clippy.stderr.gz"
+    },
+    {
+      "sha256": "59869db34853933b239f1e2219cf7d431da006aa919635478511fabbfc8849d2",
+      "path": "artifacts/issue563-attempt2/issue563-attempt2-clippy.stdout.gz"
+    },
+    {
+      "sha256": "835771df03e561546e98911646602650c7cc45a90dce8d19d878e079c16a1019",
+      "path": "artifacts/issue563-attempt2/issue563-attempt2-diff-check.meta.gz"
+    },
+    {
+      "sha256": "de76e512a414e118fc8bc46cc3043f18cb60a7aa7b997d9564d30aae0cac9eee",
+      "path": "artifacts/issue563-attempt2/issue563-attempt2-diff-check.status.gz"
+    },
+    {
+      "sha256": "59869db34853933b239f1e2219cf7d431da006aa919635478511fabbfc8849d2",
+      "path": "artifacts/issue563-attempt2/issue563-attempt2-diff-check.stderr.gz"
+    },
+    {
+      "sha256": "59869db34853933b239f1e2219cf7d431da006aa919635478511fabbfc8849d2",
+      "path": "artifacts/issue563-attempt2/issue563-attempt2-diff-check.stdout.gz"
+    },
+    {
+      "sha256": "4532e71dbe29aa451ee9b417e2e4a3f38b5a2c73ed9dbfd0d512a2189114fef1",
+      "path": "artifacts/issue563-attempt2/issue563-attempt2-fmt.meta.gz"
+    },
+    {
+      "sha256": "de76e512a414e118fc8bc46cc3043f18cb60a7aa7b997d9564d30aae0cac9eee",
+      "path": "artifacts/issue563-attempt2/issue563-attempt2-fmt.status.gz"
+    },
+    {
+      "sha256": "59869db34853933b239f1e2219cf7d431da006aa919635478511fabbfc8849d2",
+      "path": "artifacts/issue563-attempt2/issue563-attempt2-fmt.stderr.gz"
+    },
+    {
+      "sha256": "59869db34853933b239f1e2219cf7d431da006aa919635478511fabbfc8849d2",
+      "path": "artifacts/issue563-attempt2/issue563-attempt2-fmt.stdout.gz"
+    },
+    {
+      "sha256": "da1ad9437b3cfc582750fd2d1b8b64883242e7576fe4c4032c5236ba8641e62f",
+      "path": "artifacts/issue563-attempt2/issue563-attempt2-full-debug.meta.gz"
+    },
+    {
+      "sha256": "de76e512a414e118fc8bc46cc3043f18cb60a7aa7b997d9564d30aae0cac9eee",
+      "path": "artifacts/issue563-attempt2/issue563-attempt2-full-debug.status.gz"
+    },
+    {
+      "sha256": "08e88da65f3bba2b70626b16679d645c9f5943d3578b8c365d36a2aeec4c45b5",
+      "path": "artifacts/issue563-attempt2/issue563-attempt2-full-debug.stderr.gz"
+    },
+    {
+      "sha256": "a05dd1b4b060bd5a4ba5aff49deb73ad123f4e534bc5e2104f1982e537785f57",
+      "path": "artifacts/issue563-attempt2/issue563-attempt2-full-debug.stdout.gz"
+    },
+    {
+      "sha256": "232ee2692a881eeca7a8d464266176beeae737c8f28c8e8168eae9eb351ae0cd",
+      "path": "artifacts/issue563-attempt2/issue563-attempt2-scope-census.actual.gz"
+    },
+    {
+      "sha256": "232ee2692a881eeca7a8d464266176beeae737c8f28c8e8168eae9eb351ae0cd",
+      "path": "artifacts/issue563-attempt2/issue563-attempt2-scope-census.expected.gz"
+    },
+    {
+      "sha256": "5e313e35687a53122dd9155bef1f97f3ccf8f1f038ebce434ae11713c601ff05",
+      "path": "artifacts/issue563-attempt2/issue563-attempt2-scope-census.meta.gz"
+    },
+    {
+      "sha256": "de76e512a414e118fc8bc46cc3043f18cb60a7aa7b997d9564d30aae0cac9eee",
+      "path": "artifacts/issue563-attempt2/issue563-attempt2-scope-census.status.gz"
+    },
+    {
+      "sha256": "59869db34853933b239f1e2219cf7d431da006aa919635478511fabbfc8849d2",
+      "path": "artifacts/issue563-attempt2/issue563-attempt2-scope-census.stderr.gz"
+    },
+    {
+      "sha256": "9b0ee0ebdd059b05a74d958fc8cad782e86bb5c06800842baaef63cc04c90c87",
+      "path": "artifacts/issue563-attempt2/issue563-attempt2-scope-census.stdout.gz"
+    },
+    {
+      "sha256": "ceb7b3a29920fe0666f7a51b1c24de45766872b8adbac533bf02d06caac019ee",
+      "path": "artifacts/issue563-attempt2/luna-xhigh-result.md"
+    }
+  ]
+}

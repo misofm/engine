@@ -49,6 +49,7 @@ export async function exactArtifacts(directory) {
 }
 
 function routePath(urlPath, artifactDirectory) {
+  if (urlPath === "/web/hex-lower.js") return path.join(HOST_WEB, "web", "hex-lower.js");
   const routes = [
     ["/artifacts/", artifactDirectory],
     ["/fixture/", FIXTURE],

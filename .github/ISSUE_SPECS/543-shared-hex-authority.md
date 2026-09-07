@@ -1,3 +1,37 @@
+# 543: Share one lowercase byte-hex encoding authority across Rust packages
+
+One-line summary: Deliver the smallest independently closable Rust slice of audit #349 CP-20 by establishing dependency-free `engine::hex_lower`, delegating every live equivalent Rust encoder to it or recording its separately delivered retirement, and preserving all strings, canonical values, digest pins, public adapters, and hashing ownership.
+
+## Amended scope and completion boundary
+
+Issue #543 is the Rust-package slice of #349 CP-20. It establishes `engine::hex_lower` as the shared lowercase byte-hex authority for Rust packages, delegates every live equivalent Rust encoder, and records the separately delivered #545 retirement of the obsolete `rack_fixture` consumer. Its Rust implementation, dependency edges, pins, APIs, hashing ownership, and full workspace qualification are independently useful and remain accepted evidence.
+
+Issue #543 does not close CP-20. Sol XHIGH attempt 1 correctly found that the original workspace-wide census searched Rust only and omitted three live equivalent encoders:
+
+- `sdk/src/core/asset.ts`: `sha256Hex`;
+- `hosts/host-web/qualification/qualification.js`: `bytesToHex`;
+- `hosts/host-web/web/stem-store/incremental-sha256.js`: `digestHex`.
+
+These are transferred obligations owned by [#552](https://github.com/misofm/engine/issues/552). They are not exclusions and are not evidence that the original finding is complete. The original workspace-wide completion language is superseded by this amended Rust boundary.
+
+Issue #543 may close only as the reviewed and delivered Rust slice. Audit #349 CP-20 must remain `PARTIAL` until [#552](https://github.com/misofm/engine/issues/552) is reviewed, delivered, merged, and synchronized. CP-20 delivery must cite both #543 and that successor.
+
+## Preserved acceptance
+
+- Exactly one dependency-free Rust implementation remains: `engine::hex_lower`.
+- All live equivalent Rust encoders delegate to it or were removed by separately reviewed #545.
+- Existing adapters, public APIs, SHA-256 ownership, call placement, canonical strings, fixtures, and pins remain unchanged.
+- Existing parser, decorated diagnostic/repin, fixed-width integer, uppercase, and word-oriented formats retain the concrete semantic exclusions already recorded by #543.
+- The independent fixed-literal engine test and the recorded focused and full Rust workspace gates remain acceptance evidence.
+- No claim of cross-language or whole-CP20 completion is made by #543.
+
+
+## Governing rebrief and retained record
+
+Sol high approved this split because the remaining JS/TS work crosses independently shipped package boundaries. #552 has a matching numbered spec and OPEN GitHub issue, pushed0e147aa2. Its complete contract owns all three discovered non-Rust sites and final cross-language census; no obligation is discarded. Submit this amended claim as attempt2 for actual Sol xhigh review. No Rust implementation or gate changed. The detailed Rust site roster, invariants and gates in the original record below remain applicable; original whole-workspace completion claims are historical and superseded by the governing scope above.
+
+## Historical original brief and implementation record
+
 # 543: Share one lowercase byte-hex encoding authority workspace-wide
 
 One-line summary: Finish audit #349 CP-20 by making `engine::hex_lower` the single implementation of whole-byte-stream lowercase hexadecimal encoding, delegating every current equivalent workspace encoder to it while preserving all strings, canonical SHA-256 values, digest pins, public adapters, and test ownership.
@@ -150,3 +184,39 @@ Luna high replaced14 whitespace-bearing stdout files with deterministic gzip cap
 ## Integrated final qualification candidate
 
 Root verified the full original-base committed diff after lossless packaging e724a02b, then integrated accepted #545 checkpoint c6fa0c0e at f8688ee0 and pushed it. The orphan rack_fixture encoder is absent through that separately reviewed retirement. Sol high now coordinates Luna high final locked workspace tests, strict workspace Clippy, formatting, policy and semantic census on this integrated candidate. #545 must merge before this issue delivery; neither integration nor started gates supplies completion credit.
+
+## Final workspace qualification
+
+All nine final records returned0 on source3a996760: locked full workspace tests; locked workspace Clippy all-targets/all-features with warnings denied; formatting; workspace policy; full original/current-base committed diff checks; semantic and authority censuses; final clean status. Captures include precommand identities and are preserved losslessly under artifacts/issue543-final-qualification. Remaining lowercase-byte arithmetic census consists only of the shared engine authority and explicitly decorated repin emitters. No source, pins or dependencies changed during final qualification. Root will integrate delivered main86d5b4bd, whose source is already present through accepted #545, before actual Sol xhigh whole-attempt verification. This is not delivery or CP20 closure.
+
+The terminal Sol high coordination report confirms actual Luna high launcher provenance and the single successful frozen qualification candidate. An earlier mis-prefixed invocation was interrupted130 before any gate status; no result is credited. Exact untracked generated captures were removed, clean source verified, and the successful run used fixed absolute capture prefixes. The interrupted transcript and successful terminal report are now retained losslessly. Aggregate captured suite results are1709 passed,0 failed,25 ignored,18 filtered across280 result summaries; individual command/output records remain the acceptance evidence.
+
+## Attempt1 Sol xhigh FAIL: cross-language census gap
+
+Actual Sol xhigh reviewed55eb15e0 against86d5b4bd and accepted all enumerated Rust implementation/dependency/pin/qualification evidence, but returned FAIL because three equivalent JS/TS encoders remain in sdk/src/core/asset.ts, hosts/host-web/qualification/qualification.js and hosts/host-web/web/stem-store/incremental-sha256.js. The Rust-only census cannot prove the frozen workspace-wide semantic claim. Original claims are superseded by this explicit incomplete finding.
+
+Root requested Sol high rebrief under the standing split rule for work crossing original crates/dependency boundaries: preserve a smallest Rust product slice and separately numbered concrete JS/TS successor, without introducing a new Wasm ABI merely to call Rust formatting from JS. No narrowed acceptance is adopted yet; CP20 remains partial until the entire residual, including JS/TS, is addressed. No new implementation is authorized before that stateless scope is approved and numbered.
+
+Root integrated current main a3b4ed76 at0c37a68c. Final committed diff check caught terminal blank lines in two copied rebrief evidence files; both are now stored losslessly as gzip with original/packed identities, without changing their content or Rust source. The failed check is acknowledged; final committed-range validation follows the packaging checkpoint.
+
+## Attempt2 Sol xhigh PASS: Rust slice only
+
+Actual Sol xhigh accepted77c85d5b againsta3b4ed76. The amended claim preserves all original obligations through explicit #552 ownership, exact remote issue synchronization and unchanged qualified Rust source. No additional local gate is required for scope/evidence-only attempt2; required PR qualification and exact-head/base final review remain. CP20 must stay PARTIAL until #552 delivers.
+
+## Counted attempt 3: preserve the native runner ABI boundary
+
+Required qualification34108626421 failed on97915c6d: shipped artifact job101699476520 reported the retained pin mismatch, and policy job101699476598 rejected the direct engine dev-dependency. Sol HIGH approved this bounded final correction. Native-pcm-runner's remaining encoder is test-only, but issue073 forbids a direct engine manifest dependency in every section. Route its test-local hex_digest through the existing bench_support::digest::hex adapter under dev-dependencies. Preserve exactly four normal runner dependencies, add no encoder or cycle, and leave engine::hex_lower as the sole Rust implementation. Do not change the checker.
+
+Only tools/native-pcm-runner/Cargo.toml (engine dev-dependency to bench-support), tools/native-pcm-runner/src/lib.rs (one test-local delegate), and the corresponding Cargo.lock edge may change. Luna HIGH implements; Sol XHIGH supplies the counted attempt3 adversarial verdict. A substantive failure stops this attempt sequence. Root owns Git and evidence records.
+
+Frozen focused gates: inspect locked normal and normal/dev dependency trees; bench-support digest tests; all native-pcm-runner tests; strict all-target native-pcm-runner clippy; existing native runner check and both current native runner policy mutation suites; workspace formatting/policy; Rust authority census; exact-path and committed-range diff checks. No benchmark, policy edit, production runner change, or pin edit is authorized. Artifact qualification freezes only after this corrected source checkpoint and remains a separate delivery obligation.
+
+## Attempt3 focused checkpoint
+
+Actual Luna HIGH correction is pushed at e4f46fa808e413507d204e81b6a4ebc27254869c. Exactly three one-line substitutions preserve the four normal runner dependencies and unchanged policy scripts. All12 frozen focused gates returned0, including both policy mutation suites, complete runner tests and strict clippy. Raw commands/streams/statuses, actual model argv, source identities, and original failed CI job logs are retained losslessly with a manifest in artifacts/issue543-attempt3. Sol XHIGH attempt3 review is pending. This exact corrected source is the artifact qualification source freeze; no pin has changed and delivery remains incomplete.
+
+## Counted attempt3 adversarial PASS
+
+Actual Sol XHIGH returned PASS at f2e87ab0b010b5f706038c5eaa8461a1e26fa7a4 against maina3b4ed763c47658e10fc111e2cfcbd141c77f064. It verified exactly three one-line changes, unchanged four normal dependencies and policy checkers, test-only bench-support reachability, sole Rust hex implementation, source identities and all117 lossless records. Gate11 contained an invalid rg -E subscan despite its aggregate zero status: that subscan is not credited. The reviewer independently ran a correct read-only scan and inspected the exact source diff; no substantive blocker remains. Raw evidence is retained unchanged and the full verdict/provenance are in artifacts/issue543-attempt3-review.
+
+Artifact qualification555 remains pending against sourcee4f46fa8. No pin changed, required deliveryCI is not satisfied, and CP20 remains partial pending delivered552. This PASS is implementation acceptance only.

@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "issue": 555,
+  "stage": "stage2-abi-stop",
+  "source_commit": "e4f46fa808e413507d204e81b6a4ebc27254869c",
+  "candidate_wasm_sha256": "6452f0db237da1d57b3594e7d95dd53a089a604d5b0791ea8b3533c5930c5a1c",
+  "repository_pin_before": "1bc18ab8cfb3e2a3e5a0ebeda185a64551e8398870abb2f3581077da0dfd3a3f",
+  "payload_source": "/tmp/issue555-capture",
+  "representation": "The 19 payload files below preserve the captured source bytes and newlines byte-for-byte. The manifest excludes itself to avoid a self-referential digest.",
+  "files": [
+    {"path":"artifact-delta-classification.tsv","bytes":1238,"sha256":"4d709b5220b9aa35db26eb8d97f08466928218a491e1080e875abb8efe7ded54"},
+    {"path":"baseline-manifest.tsv","bytes":671,"sha256":"76cf6fb9154782143842825aa19e93aa76588d688670af072a8f94d9afee75a5"},
+    {"path":"build.command.json","bytes":276,"sha256":"ed3a0353e6ad97063d71e53ef0bf1a6a823570e15cf3f204c1ca5531ef6349f4"},
+    {"path":"build.environment.txt","bytes":351,"sha256":"f85975b1dc46d3fb58d03ba7ee01ac7a6968a0fc62165ff29f4b7dd15c5d9b7b"},
+    {"path":"build.status","bytes":2,"sha256":"9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"},
+    {"path":"build.stderr","bytes":3289,"sha256":"629e358e21d4613b8b1c94bdf287a83cc422230a1257a95f7e1e8ba27f4ea75e"},
+    {"path":"build.stdout","bytes":0,"sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},
+    {"path":"failure-context.txt","bytes":5376,"sha256":"af47b298b61cad972b0a53e0ee2d54a3355d23adb988023d4402feb1af3d49fe"},
+    {"path":"native-abi.command.json","bytes":200,"sha256":"1fd0e8c80a388257bd3b5f948483bf6b18053b265f5abbb13b7e4ce7ba4fa5c7"},
+    {"path":"native-abi.status","bytes":2,"sha256":"4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"},
+    {"path":"native-abi.stderr","bytes":3550,"sha256":"68e3e354aa7acf64b8e04af6206a84eb1dcfb627a9bcf99c40c3b30ce568bd7c"},
+    {"path":"native-abi.stdout","bytes":0,"sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},
+    {"path":"pin-after.txt","bytes":65,"sha256":"1f432cfe1c599519f13a92390f3f302360498f174918a92e1f12f3ea9b282a8e"},
+    {"path":"pin-before.txt","bytes":65,"sha256":"493ba74ea71b39a730b612bb84d92a4d9573d018d4b72196ab5dfc9219be7b2b"},
+    {"path":"qualified-manifest.tsv","bytes":671,"sha256":"d7030851608b5ce292f8eb57845064b6b905bcf1dc385dcf732bc0751d132a10"},
+    {"path":"qualified-names.txt","bytes":220,"sha256":"1ae45b52f1922ab5e35bf4f76cfe426dede11245a56df9d277bf09e8423cef37"},
+    {"path":"scratch-overlay.diff","bytes":297,"sha256":"ee5b52dd112d7d4dfa7cc25691907ca98c8d6a69a2f8081629715bafd46a53d7"},
+    {"path":"scratch-pin.sha256","bytes":160,"sha256":"e729e9f3bcb33177a41fb82832fd3457a95579b4acf86d96f5b495d8a7e2a6c5"},
+    {"path":"source-context.txt","bytes":131,"sha256":"e8c7bcdc9cc515c7569cbdaef67377539a8b1ef480084686f603f2453c22eb64"}
+  ]
+}

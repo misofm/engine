@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "issue": 555,
+  "stage": "browser-proof-wrapper-stop",
+  "source_commit": "e4f46fa808e413507d204e81b6a4ebc27254869c",
+  "qualification_worktree_head": "34564a1dc243ba08d1599165baa8dab3b367c63d",
+  "candidate_wasm_sha256": "6452f0db237da1d57b3594e7d95dd53a089a604d5b0791ea8b3533c5930c5a1c",
+  "proof_source": "/tmp/issue555-browser-scratch",
+  "tracked_records": 8439,
+  "excluded_overlay": 1,
+  "checked_paths": 8438,
+  "missing_paths": 0,
+  "mismatched_paths": 0,
+  "wrapper_status": 1,
+  "failure": "The proof wrapper's final assertion used a literal backslash-n (\\\\n) instead of a newline (\\n), after the object comparison had already reported zero missing and zero mismatched paths. The captured stderr is the authoritative failure stream.",
+  "browser_command_run": false,
+  "representation": "The five payload files below preserve the captured command, environment, status, stdout and stderr bytes/newlines byte-for-byte. This manifest excludes itself to avoid a self-referential digest.",
+  "files": [
+    {"path":"proof.command.json","bytes":363,"sha256":"a623f67a2754c23d2f68aea688ad947c7f3595316a3cd8ea13cb1b175071691d"},
+    {"path":"proof.environment.txt","bytes":351,"sha256":"f85975b1dc46d3fb58d03ba7ee01ac7a6968a0fc62165ff29f4b7dd15c5d9b7b"},
+    {"path":"proof.status","bytes":2,"sha256":"4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"},
+    {"path":"proof.stderr","bytes":89,"sha256":"317986c9b6cfa719576869a5a656b0a23401d9229e86dba5cdf1bfe89fde6d67"},
+    {"path":"proof.stdout","bytes":164,"sha256":"a4f4fe4af0a9913371d98bfeda85c930fed5ff438b87d7e0f6e30fe5d70099d8"}
+  ]
+}

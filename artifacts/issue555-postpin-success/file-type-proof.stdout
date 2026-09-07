@@ -1,0 +1,7 @@
+/tmp/issue555-postpin-artifact/miso-engine-v1-abi-layout.json\ttype=regular file\tmode=664\tsize=9351
+/tmp/issue555-postpin-artifact/miso-engine-v1-audio-worklet-host.d.ts\ttype=regular file\tmode=664\tsize=35347
+/tmp/issue555-postpin-artifact/miso-engine-v1-audio-worklet-host.js\ttype=regular file\tmode=664\tsize=39457
+/tmp/issue555-postpin-artifact/miso-engine-v1-audio-worklet.js\ttype=regular file\tmode=664\tsize=38447
+/tmp/issue555-postpin-artifact/miso-engine-v1-audio-worklet.simd128.wasm\ttype=regular file\tmode=775\tsize=2728966
+/tmp/issue555-postpin-artifact/miso-engine-v1-parameter-metadata.json\ttype=regular file\tmode=664\tsize=63907
+regular_non_symlink_six_files=PASS

@@ -1,0 +1,42 @@
+QUERY 1: JavaScript/TypeScript toString(16) paired with padStart(2)
+QUERY 2: lowercase nibble tables
+sdk/src/core/hex.ts:1:const HEX_DIGITS = "0123456789abcdef";
+hosts/host-web/web/hex-lower.js:1:const HEX_DIGITS = "0123456789abcdef"
+sdk/test/boot-evals.mjs:38:    "000123456789abcdefff",
+hosts/host-web/tests/stem-store-hash-v1.mjs:13:  "000123456789abcdefff",
+crates/engine/src/lib.rs:9:    const HEX: &[u8; 16] = b"0123456789abcdef";
+crates/engine/src/lib.rs:106:            "0123456789abcdeff0"
+QUERY 3: Rust :02x byte formatting
+crates/true-peak-limiter/tests/determinism.rs:66:        let bytes: Vec<String> = scalar.iter().map(|byte| format!("0x{byte:02x}")).collect();
+tools/wasm-gates/src/lib.rs:379:            let _ = write!(text, "0x{byte:02X}");
+crates/transient-shaper/tests/cross_target.rs:77:            .map(|byte| format!("0x{byte:02x}"))
+crates/gate-expander/tests/determinism.rs:55:            let bytes: Vec<String> = row.iter().map(|byte| format!("0x{byte:02x},")).collect();
+crates/parametric-eq/tests/determinism.rs:69:        let bytes: Vec<String> = scalar.iter().map(|byte| format!("0x{byte:02x}")).collect();
+crates/parametric-eq/tests/determinism.rs:139:        let bytes: Vec<String> = digest.iter().map(|byte| format!("0x{byte:02x}")).collect();
+crates/delay/tests/determinism.rs:40:        let bytes: Vec<String> = scalar.iter().map(|byte| format!("0x{byte:02X}")).collect();
+crates/delay/tests/determinism.rs:88:        let words: Vec<String> = bytes.iter().map(|byte| format!("0x{byte:02X}")).collect();
+crates/multiband-compressor/tests/cross_target_digest.rs:46:            repin.push_str(&format!("0x{byte:02x}, "));
+crates/builtins/tests/determinism.rs:48:        let bytes: Vec<String> = scalar.iter().map(|byte| format!("0x{byte:02x}")).collect();
+crates/compressor/tests/cross_target.rs:84:        let bytes: Vec<String> = scalar.iter().map(|byte| format!("0x{byte:02x}")).collect();
+crates/effect-runtime/tests/determinism.rs:64:        let bytes: Vec<String> = scalar.iter().map(|b| format!("0x{b:02x}")).collect();
+crates/effect-runtime/tests/determinism.rs:132:        let bytes: Vec<String> = digest.iter().map(|b| format!("0x{b:02x}")).collect();
+crates/soft-clip/tests/determinism.rs:29:        text.push_str(&format!("0x{byte:02x}, "));
+QUERY 4: Rust char::from_digit
+AUTHORITY DELEGATION CHECKS
+hosts/host-web/qualification/qualification.js:1:import { hexLower } from "../web/hex-lower.js";
+hosts/host-web/qualification/qualification.js:81:  return hexLower(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)));
+hosts/host-web/web/hex-lower.js:3:export function hexLower(bytes) {
+hosts/host-web/web/stem-store/incremental-sha256.js:11:import { hexLower } from "../hex-lower.js"
+hosts/host-web/web/stem-store/incremental-sha256.js:113:    return hexLower(this.digest())
+sdk/src/core/hex.ts:9:export function hexLower(bytes: Uint8Array): string {
+sdk/src/core/asset.ts:4:import { hexLower } from "./hex.ts";
+sdk/src/core/asset.ts:162:  return hexLower(new Uint8Array(digest));
+CLASSIFICATIONS
+toString(16)+padStart(2) hits in sdk/src/core/asset.ts and sdk/src/core/boundary.ts are decorated ABI diagnostic strings (0x prefix), not byte encoders.
+toString(16)+padStart(2) in sdk/src/internal/session-json.ts is an uppercase Unicode escape formatter (\\u plus four digits), not a byte encoder.
+toString(16)+padStart(2) in sdk/test/support.mjs is a fixed-width 64-bit FNV word formatter (16 digits), not a byte encoder.
+The lowercase nibble tables in crates/engine/src/lib.rs, sdk/src/core/hex.ts, and hosts/host-web/web/hex-lower.js are exactly the three approved raw unprefixed byte authorities.
+All Rust :02x hits are decorated 0x diagnostic/repin fixture renderers; none is an unprefixed production byte encoder.
+No char::from_digit hits were found.
+The three #552 residual call sites delegate: SDK asset sha256Hex -> SDK hexLower; incremental digestHex -> host-web hexLower; qualification PCM digest adapter -> host-web hexLower.
+semantic census: PASS (all hits classified; raw authorities exactly engine::hex_lower, SDK hexLower, host-web hexLower)

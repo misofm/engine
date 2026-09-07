@@ -1,0 +1,22 @@
+import { mkdir, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { spawn } from 'node:child_process';
+const dir = '/tmp/issue552-final-qualification-luna/08-qualification-retry';
+const cwd = '/home/bl/misofm/engine-js-hex-recovery/hosts/host-web/qualification';
+const argv = ['npm', 'run', 'qualify', '--', '--artifacts', '/tmp/issue555-postpin-artifact', '--browser', 'chromium', '--check-matrix', '--self-test-mutations'];
+await mkdir(dir, { recursive: true });
+await writeFile(join(dir, 'pre-command-head.txt'), '3881591d307c7b00e1cc7dfb431b3abf26874717\n');
+await writeFile(join(dir, 'pre-command-status.txt'), '## codex/js-hex-recovery...origin/codex/js-hex-recovery\n');
+await writeFile(join(dir, 'argv.txt'), JSON.stringify(argv) + '\n');
+await writeFile(join(dir, 'cwd.txt'), cwd + '\n');
+const child = spawn(argv[0], argv.slice(1), { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+const out = [], err = [];
+child.stdout.on('data', (b) => out.push(b));
+child.stderr.on('data', (b) => err.push(b));
+child.on('close', async (code, signal) => {
+  await writeFile(join(dir, 'stdout.raw'), Buffer.concat(out));
+  await writeFile(join(dir, 'stderr.raw'), Buffer.concat(err));
+  await writeFile(join(dir, 'status.txt'), `${code ?? 'null'}${signal ? ` signal=${signal}` : ''}\n`);
+  await writeFile(join(dir, 'result.json'), JSON.stringify({ argv, cwd, status: code, signal }, null, 2) + '\n');
+  process.exitCode = code ?? 1;
+});

@@ -1,0 +1,10 @@
+{
+  "name": "01-direct",
+  "argv": [
+    "node",
+    "--experimental-strip-types",
+    "/tmp/issue552/attempt3-direct.mjs"
+  ],
+  "cwd": "/home/bl/misofm/engine-js-hex-recovery",
+  "status": 0
+}

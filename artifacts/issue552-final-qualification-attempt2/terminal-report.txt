@@ -1,0 +1,1 @@
+PASS: gates 1-7, gate 8 retry, fail-closed cleanup, and gates 9-11 passed. HEAD 89700161e53846b6dc8059bf4ba669d0b90c9f3f; worktree clean.

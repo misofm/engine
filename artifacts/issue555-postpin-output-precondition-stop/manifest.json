@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "issue": 555,
+  "stage": "postpin-output-precondition-stop",
+  "head": "7c15603204a02eaad6d90adb72e4024ac24a4628",
+  "pin": {
+    "path": "hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256",
+    "digest": "6452f0db237da1d57b3594e7d95dd53a089a604d5b0791ea8b3533c5930c5a1c",
+    "bytes": 65,
+    "sha256": "1f432cfe1c599519f13a92390f3f302360498f174918a92e1f12f3ea9b282a8e",
+    "suffix": "single LF"
+  },
+  "output": {
+    "path": "/tmp/issue555-postpin-artifact",
+    "initial_state": "absent",
+    "non_symlink_directory": false,
+    "emitted_files": 0
+  },
+  "builder": {
+    "argv": "build.argv.json",
+    "cwd": "build.cwd",
+    "environment": "build.environment.txt",
+    "status": 2,
+    "stdout": "build.stdout",
+    "stderr": "build.stderr",
+    "error": "output must be an existing non-symlink directory",
+    "repin_environment": false
+  },
+  "later_checks": {
+    "ran": false,
+    "reason": "stop on builder failure"
+  },
+  "no_mutation": {
+    "repository": true,
+    "spec": true,
+    "source": true,
+    "pin": true,
+    "output_created": false
+  },
+  "environment": {
+    "omitted_binary_payload": "build.environment.env0",
+    "reason": "NUL-delimited environment capture is binary; readable build.environment.txt is preserved.",
+    "source_bytes": 3171,
+    "source_sha256": "1ce85ba4720738a64a78f400fac57e93b0914e107d7223f00d4c599c8bf3549e"
+  },
+  "compressed_streams": [],
+  "representation": "Manifest excludes itself. Every listed readable file is a lossless copy of /tmp/issue555-postpin-capture; git diff --check passed, so no stream required compression.",
+  "files": [
+    {"path": "build.argv.json", "bytes": 145, "sha256": "c8d6ce5d1f7ed7427e1e799f89dc055b0176e47c693973b858091d644fe3a191"},
+    {"path": "build.cwd", "bytes": 50, "sha256": "1effd7bbd813d2fee3ba537c42503b081082652d06095beaefa74edc1523150f"},
+    {"path": "build.environment.txt", "bytes": 3171, "sha256": "523f7d29778c4af17e835a584c8e1485362ef2f5ee199e7c982fd0b35f00ecd8"},
+    {"path": "build.status", "bytes": 2, "sha256": "53c234e5e8472b6ac51c1ae1cab3fe06fad053beb8ebfd8977b010655bfdd3c3"},
+    {"path": "build.stderr", "bytes": 49, "sha256": "8ff9de81e19cd552f400a3e050eff79b9de7714a28713ea159fc75e47d4f6c09"},
+    {"path": "build.stdout", "bytes": 0, "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},
+    {"path": "pin-proof.txt", "bytes": 255, "sha256": "7ce0f82f25263295eae05de6031cdbfbc80791364adce6691c218c4104b28bd8"},
+    {"path": "output-precondition.txt", "bytes": 277, "sha256": "81cb4c175a1b50204ace2fb9dec877400237eb7c5bfbe61673210289bf999465"},
+    {"path": "summary.txt", "bytes": 293, "sha256": "68195eb643a539e5cf2668bb5b5e2d9d0ef277228ccd316ad7f96431ea5fd2e5"}
+  ]
+}
