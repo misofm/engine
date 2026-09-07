@@ -1,0 +1,7 @@
+{
+  "before_available_bytes": 808074334208,
+  "after_available_bytes": 842206527488,
+  "available_increase_bytes": 34132193280,
+  "available_increase_gib": 31.788082122802734,
+  "note": "Filesystem available-space delta during cleanup; concurrent processes may affect it."
+}

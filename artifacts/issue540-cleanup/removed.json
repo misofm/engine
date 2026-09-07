@@ -1,0 +1,56 @@
+[
+  {
+    "path": "/home/bl/misofm/engine-478-layout-before",
+    "head": "9f6007dad56b5d72e6d5cf3260e4e1f2948f6b88",
+    "branch": null,
+    "pr": null
+  },
+  {
+    "path": "/home/bl/misofm/engine-controller-delivery",
+    "head": "8fb43835bef54c268ee9d7751ecf0c02c6e0c23a",
+    "branch": "codex/controller-delivery",
+    "pr": 531
+  },
+  {
+    "path": "/home/bl/misofm/engine-controller-scalar-points",
+    "head": "67372bd2a013040dc71203be1b3b03f819d72c24",
+    "branch": "codex/controller-scalar-points",
+    "pr": 533
+  },
+  {
+    "path": "/home/bl/misofm/engine-gate-detector-access",
+    "head": "5ce38848f2a46bbf2ec3aaec07f900e4c0b2f265",
+    "branch": "codex/gate-detector-access",
+    "pr": 535
+  },
+  {
+    "path": "/home/bl/misofm/engine-multiband-detector-access",
+    "head": "3ffd4b58c2957b773359f384dfe78dc5e235b36a",
+    "branch": "codex/multiband-detector-access",
+    "pr": 538
+  },
+  {
+    "path": "/home/bl/misofm/engine-native-points",
+    "head": "448b3a2f75334a73c2a6519ae070163d4671630f",
+    "branch": "codex/native-compressor-points",
+    "pr": 527
+  },
+  {
+    "path": "/home/bl/misofm/engine-rt8-plan",
+    "head": "75035a80ff456bdecc7a5d4e0bef1f68e3c0d50a",
+    "branch": "codex/rt8-prepared-slot-activity",
+    "pr": 523
+  },
+  {
+    "path": "/home/bl/misofm/engine-scalar-allocation-isolation",
+    "head": "96a1748283cdf90e07e7e7736c3f5b203789f159",
+    "branch": "codex/scalar-allocation-isolation",
+    "pr": 535
+  },
+  {
+    "path": "/home/bl/misofm/engine-scalar-point-endpoint",
+    "head": "de6bd286a9b58a29ad73f4892086ca2b8d8baaa2",
+    "branch": "codex/scalar-point-endpoint",
+    "pr": 529
+  }
+]

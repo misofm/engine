@@ -1,0 +1,167 @@
+[
+  {
+    "path": "/home/bl/misofm/engine-478-layout-before",
+    "branch": null,
+    "head": "9f6007dad56b5d72e6d5cf3260e4e1f2948f6b88",
+    "status": "",
+    "ignored": "",
+    "upstream": null,
+    "upstream_head": null,
+    "merged_pr": null,
+    "reason": "Detached completed #478 baseline; commit is reachable from origin/main",
+    "archived_ignored": []
+  },
+  {
+    "path": "/home/bl/misofm/engine-controller-delivery",
+    "branch": "codex/controller-delivery",
+    "head": "8fb43835bef54c268ee9d7751ecf0c02c6e0c23a",
+    "status": "",
+    "ignored": "!! target/",
+    "upstream": "origin/codex/controller-delivery",
+    "upstream_head": "8fb43835bef54c268ee9d7751ecf0c02c6e0c23a",
+    "merged_pr": {
+      "headRefName": "codex/controller-delivery",
+      "headRefOid": "6b88ce410ab22ed586c903c5ddcece97a5325f7e",
+      "mergedAt": "2026-09-07T01:10:43Z",
+      "number": 531,
+      "url": "https://github.com/misofm/engine/pull/531"
+    },
+    "archived_ignored": []
+  },
+  {
+    "path": "/home/bl/misofm/engine-controller-scalar-points",
+    "branch": "codex/controller-scalar-points",
+    "head": "67372bd2a013040dc71203be1b3b03f819d72c24",
+    "status": "",
+    "ignored": "",
+    "upstream": "origin/codex/controller-scalar-points",
+    "upstream_head": "67372bd2a013040dc71203be1b3b03f819d72c24",
+    "merged_pr": {
+      "headRefName": "codex/controller-scalar-points",
+      "headRefOid": "a410921cc7f7953688456b73fdd9c8d1507a0d3b",
+      "mergedAt": "2026-09-07T02:03:47Z",
+      "number": 533,
+      "url": "https://github.com/misofm/engine/pull/533"
+    },
+    "archived_ignored": []
+  },
+  {
+    "path": "/home/bl/misofm/engine-gate-detector-access",
+    "branch": "codex/gate-detector-access",
+    "head": "5ce38848f2a46bbf2ec3aaec07f900e4c0b2f265",
+    "status": "",
+    "ignored": "!! hosts/host-web/qualification/node_modules/\n!! target/",
+    "upstream": "origin/codex/gate-detector-access",
+    "upstream_head": "5ce38848f2a46bbf2ec3aaec07f900e4c0b2f265",
+    "merged_pr": {
+      "headRefName": "codex/gate-detector-access",
+      "headRefOid": "ae0bbf6539d411258f32f472c625576056b325cb",
+      "mergedAt": "2026-09-07T04:24:57Z",
+      "number": 535,
+      "url": "https://github.com/misofm/engine/pull/535"
+    },
+    "archived_ignored": []
+  },
+  {
+    "path": "/home/bl/misofm/engine-multiband-detector-access",
+    "branch": "codex/multiband-detector-access",
+    "head": "3ffd4b58c2957b773359f384dfe78dc5e235b36a",
+    "status": "",
+    "ignored": "!! hosts/host-web/qualification/node_modules/\n!! target/",
+    "upstream": "origin/codex/multiband-detector-access",
+    "upstream_head": "3ffd4b58c2957b773359f384dfe78dc5e235b36a",
+    "merged_pr": {
+      "headRefName": "codex/multiband-detector-access",
+      "headRefOid": "3a673979e6b1d0703c54775b00d60ab4554b1a0f",
+      "mergedAt": "2026-09-07T06:02:56Z",
+      "number": 538,
+      "url": "https://github.com/misofm/engine/pull/538"
+    },
+    "archived_ignored": []
+  },
+  {
+    "path": "/home/bl/misofm/engine-native-points",
+    "branch": "codex/native-compressor-points",
+    "head": "448b3a2f75334a73c2a6519ae070163d4671630f",
+    "status": "",
+    "ignored": "!! hosts/host-web/qualification/node_modules/\n!! sdk/node_modules/\n!! target/",
+    "upstream": "origin/codex/native-compressor-points",
+    "upstream_head": "448b3a2f75334a73c2a6519ae070163d4671630f",
+    "merged_pr": {
+      "headRefName": "codex/native-compressor-points",
+      "headRefOid": "73f1f683f18e3fac152235475fae3eb558014d89",
+      "mergedAt": "2026-09-06T13:45:48Z",
+      "number": 527,
+      "url": "https://github.com/misofm/engine/pull/527"
+    },
+    "archived_ignored": []
+  },
+  {
+    "path": "/home/bl/misofm/engine-rt8-plan",
+    "branch": "codex/rt8-prepared-slot-activity",
+    "head": "75035a80ff456bdecc7a5d4e0bef1f68e3c0d50a",
+    "status": "",
+    "ignored": "!! hosts/host-web/qualification/node_modules/\n!! sdk/node_modules/\n!! target/",
+    "upstream": "origin/codex/rt8-prepared-slot-activity",
+    "upstream_head": "75035a80ff456bdecc7a5d4e0bef1f68e3c0d50a",
+    "merged_pr": {
+      "headRefName": "codex/rt8-prepared-slot-activity",
+      "headRefOid": "b0c75b8647543dee059f3b61dcdc46793a89c093",
+      "mergedAt": "2026-09-06T12:06:11Z",
+      "number": 523,
+      "url": "https://github.com/misofm/engine/pull/523"
+    },
+    "archived_ignored": []
+  },
+  {
+    "path": "/home/bl/misofm/engine-scalar-allocation-isolation",
+    "branch": "codex/scalar-allocation-isolation",
+    "head": "96a1748283cdf90e07e7e7736c3f5b203789f159",
+    "status": "",
+    "ignored": "!! artifacts/issue536-brief/ci-workspace-failure.log",
+    "upstream": "origin/codex/scalar-allocation-isolation",
+    "upstream_head": "96a1748283cdf90e07e7e7736c3f5b203789f159",
+    "merged_pr": null,
+    "integrated_via_pr": 535,
+    "archived_ignored": [
+      {
+        "path": "artifacts/issue536-brief/ci-workspace-failure.log",
+        "archive": "/tmp/worktree-cleanup/preserved-ignored/engine-scalar-allocation-isolation/artifacts/issue536-brief/ci-workspace-failure.log",
+        "sha256": "81129efd26fb9f8519324d68caaf22766afefe077350cf7fcbfa9fdc3d1f7ed7"
+      }
+    ]
+  },
+  {
+    "path": "/home/bl/misofm/engine-scalar-point-endpoint",
+    "branch": "codex/scalar-point-endpoint",
+    "head": "de6bd286a9b58a29ad73f4892086ca2b8d8baaa2",
+    "status": "",
+    "ignored": "!! artifacts/issue528-sol-attempt2/check-source-2.log\n!! artifacts/issue528-sol-attempt2/check-source.log\n!! artifacts/issue528-sol-attempt2/focused-prelim.log\n!! hosts/host-web/qualification/node_modules/\n!! target/",
+    "upstream": "origin/codex/scalar-point-endpoint",
+    "upstream_head": "de6bd286a9b58a29ad73f4892086ca2b8d8baaa2",
+    "merged_pr": {
+      "headRefName": "codex/scalar-point-endpoint",
+      "headRefOid": "ffbc61dbec6e9b7a1eb4ff1ed0a13f60c76a5dff",
+      "mergedAt": "2026-09-07T00:13:21Z",
+      "number": 529,
+      "url": "https://github.com/misofm/engine/pull/529"
+    },
+    "archived_ignored": [
+      {
+        "path": "artifacts/issue528-sol-attempt2/check-source-2.log",
+        "archive": "/tmp/worktree-cleanup/preserved-ignored/engine-scalar-point-endpoint/artifacts/issue528-sol-attempt2/check-source-2.log",
+        "sha256": "ed3369e70f15be0547136dc22268b826a57b51da76262c40637987ce0eb7d088"
+      },
+      {
+        "path": "artifacts/issue528-sol-attempt2/check-source.log",
+        "archive": "/tmp/worktree-cleanup/preserved-ignored/engine-scalar-point-endpoint/artifacts/issue528-sol-attempt2/check-source.log",
+        "sha256": "0f8162840fd557b367aa6e5955175a22f65e0171810b9338e8764bfd33da0ba7"
+      },
+      {
+        "path": "artifacts/issue528-sol-attempt2/focused-prelim.log",
+        "archive": "/tmp/worktree-cleanup/preserved-ignored/engine-scalar-point-endpoint/artifacts/issue528-sol-attempt2/focused-prelim.log",
+        "sha256": "ae5b9cf82483e68286880a0e3bce68734778480332870481044820649e75d7eb"
+      }
+    ]
+  }
+]
