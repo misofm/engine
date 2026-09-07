@@ -1,4 +1,0 @@
-
-> @miso/engine-v1-browser-qualification@0.0.0 qualify
-> node ./run.mjs --artifacts /tmp/issue555-postpin-artifact --browser chromium --check-matrix --self-test-mutations
-
