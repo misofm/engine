@@ -395,11 +395,26 @@ mod tests {
         AutomationDeliveryRender,
         Arc<AtomicU64>,
     ) {
-        let (provider, canceled) = FixtureProvider::new(SampleTime(0));
+        facade_with(reliable_events, capabilities, SampleTime(0), 256)
+    }
+
+    fn facade_with(
+        reliable_events: usize,
+        capabilities: &[(ParameterHandle, AutomationKind)],
+        sample: SampleTime,
+        density: usize,
+    ) -> (
+        ControllerAutomationDelivery<FixtureProvider>,
+        AutomationDeliveryRender,
+        Arc<AtomicU64>,
+    ) {
+        let (provider, canceled) = FixtureProvider::new(sample);
         let capabilities = PreparedDeliveryCapabilities::new_exact(capabilities).unwrap();
+        let mut queues = queue_config(reliable_events);
+        queues.per_block_automation_density = NonZeroUsize::new(density).unwrap();
         let (facade, render, _) = ControllerAutomationDelivery::prepare(
             session(),
-            queue_config(reliable_events),
+            queues,
             provider,
             replay(),
             ProtocolCodec::default(),
@@ -431,6 +446,31 @@ mod tests {
                 start_value: 0.5,
                 end_value: 0.5,
             }],
+        )
+        .unwrap()
+    }
+
+    fn mixed_batch(revision: SessionRevision, request_id: u64) -> AutomationBatchSlot {
+        let first = AutomationRecord {
+            kind: AutomationKind::Point,
+            handle: ParameterHandle(7),
+            start: SampleTime(1),
+            end: SampleTime(1),
+            start_value: 0.5,
+            end_value: 0.5,
+        };
+        AutomationBatchSlot::new(
+            revision,
+            RequestId::new(request_id).unwrap(),
+            &[
+                first,
+                AutomationRecord {
+                    handle: ParameterHandle(8),
+                    start: SampleTime(2),
+                    end: SampleTime(2),
+                    ..first
+                },
+            ],
         )
         .unwrap()
     }
@@ -515,6 +555,20 @@ mod tests {
         let rejected = facade.process(enqueue_request(2, b"malformed", malformed));
         assert_eq!(rejected.status, StatusCode::InvalidField);
         assert_eq!(facade.outstanding(), 0);
+
+        let mut too_long = batch(revision, 3, 7, 3);
+        too_long.len = 257;
+        assert_eq!(facade.process(enqueue_request(3, b"too-long", too_long)).status, StatusCode::LimitExceeded);
+
+        let mut outside_domain = batch(revision, 4, 7, 4);
+        outside_domain.records[0].start_value = 2.0;
+        outside_domain.records[0].end_value = 2.0;
+        assert_eq!(facade.process(enqueue_request(4, b"outside-domain", outside_domain)).status, StatusCode::InvalidField);
+
+        let (mut past_facade, _, _) = facade_with(8, &[(ParameterHandle(7), AutomationKind::Point)], SampleTime(10), 256);
+        let past_revision = past_facade.session().revision();
+        assert_eq!(past_facade.process(enqueue_request(1, b"past", batch(past_revision, 1, 7, 9))).status, StatusCode::TimeInPast);
+        assert_eq!(past_facade.outstanding(), 0);
     }
 
     #[test]
@@ -534,22 +588,33 @@ mod tests {
         assert_eq!(facade.process(enqueue_request(3, b"second", batch(revision, 3, 7, 2))).status, StatusCode::Ok);
         assert_eq!(facade.process(enqueue_request(4, b"third", batch(revision, 4, 7, 3))).status, StatusCode::Backpressure);
         facade.collect_terminal(ticket).unwrap();
+        assert_eq!(facade.collect_terminal(ticket), Err(DeliveryError::StaleTicket));
         assert_eq!(facade.process(enqueue_request(5, b"after-collect", batch(revision, 5, 7, 3))).status, StatusCode::Ok);
+
+        let (mut dense, _, _) = facade_with(
+            8,
+            &[(ParameterHandle(7), AutomationKind::Point), (ParameterHandle(8), AutomationKind::Point)],
+            SampleTime(0),
+            1,
+        );
+        let dense_revision = dense.session().revision();
+        assert_eq!(dense.process(enqueue_request(10, b"dense-first", batch(dense_revision, 10, 7, 1))).status, StatusCode::Ok);
+        assert_eq!(dense.process(enqueue_request(11, b"dense-second", batch(dense_revision, 11, 8, 1))).status, StatusCode::LimitExceeded);
     }
 
     #[test]
     fn unsupported_head_blocks_fifo_and_real_cancel_releases_all_owners() {
         let (mut endpoint, mut render, canceled) = facade(8, &[(ParameterHandle(7), AutomationKind::Point)]);
         let revision = endpoint.session().revision();
-        assert_eq!(endpoint.process(enqueue_request(1, b"unsupported", batch(revision, 1, 8, 1))).status, StatusCode::Ok);
+        assert_eq!(endpoint.process(enqueue_request(1, b"unsupported", mixed_batch(revision, 1))).status, StatusCode::Ok);
         assert_eq!(endpoint.process(enqueue_request(2, b"supported-follower", batch(revision, 2, 7, 2))).status, StatusCode::Ok);
         assert_eq!(endpoint.try_handoff_next().unwrap(), HandoffResult::PendingUnsupported);
         let token = endpoint.begin_cancel(AutomationCancellationReason::EndpointShutdown).unwrap();
         assert!(endpoint.poll_cancel_boundary(token).unwrap().is_none());
         assert!(render.begin_boundary(SampleTime(77)).is_none());
         let complete = endpoint.poll_cancel_boundary(token).unwrap().unwrap();
-        assert_eq!((complete.canceled_events, complete.canceled_records), (2, 2));
-        assert_eq!(canceled.load(Ordering::Relaxed), 2);
+        assert_eq!((complete.canceled_events, complete.canceled_records), (2, 3));
+        assert_eq!(canceled.load(Ordering::Relaxed), 3);
         assert_eq!(endpoint.outstanding(), 0);
     }
 

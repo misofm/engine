@@ -133,3 +133,7 @@ The first tranche extracts concrete delivery state, adds the fixed-revision faca
 ## Luna attempt 1 initial functional fixture checkpoint
 
 Five functional fixture tests pass in locked `functional-debug-5` after preserved compile/fixture failures in captures1–4. The early batch-shape check is restricted to the new facade, preserving default validation order. Root freezes this source/test tranche before additional assertions and allocation evidence. These are initial useful fixtures, not a claim that all five numbered functional groups are complete; public length overflow, domain/past, density, duplicate terminal collection, reliable-full and full exact event/policy coverage still require verification against the brief. Gate6 remains pending. No consolidated verdict has occurred.
+
+## Luna functional assertions checkpoint
+
+Locked `gates1-3-debug-1` passes the five functional tests after adding public length overflow, native-independent provider domain/past rejection, density, duplicate terminal collection and mixed-capability whole-batch cancellation assertions. Root preserves the exact source and capture before the remaining event/policy and allocation fixtures. Final source review remains pending; this is not acceptance of complete gate coverage.
