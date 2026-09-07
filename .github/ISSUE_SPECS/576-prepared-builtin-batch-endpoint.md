@@ -219,3 +219,15 @@ base before merge, verifies post-main qualification and closure, and removes the
 clean delivered worktree. Delivery advances #444 but does not close it: concurrent
 bank pairing, scalar pairing and automatic lifecycle integration remain separately
 numbered outcomes.
+
+## Attempt 1 review
+
+Luna HIGH source checkpoint `700fc8d0923d18a2df79b0c203a47a558eaf2316`
+passed its focused and full host-core checks. Astra LOW returned **FAIL**: generic
+credit can release before endpoint outcome validation, cancellation completion
+bypasses outcome reconciliation, new allocations are not preflighted against every
+configured cap, resource fields misstate partial retention/inline ownership, and the
+three sequential tests omit most frozen discriminators. The complete verdict is
+`docs/audits/576-attempt1-review.md`. Attempt 2 must correct only those findings
+inside the existing exact paths; it may not widen protocol, graph, engine, builtin,
+manifest, artifact or lane B #575 ownership.
