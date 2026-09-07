@@ -83,7 +83,8 @@ pub use controller_delivery::{
 };
 pub use delivery::{
     AutomationDeliveryControl, AutomationDeliveryRender, CancelComplete, CancelToken,
-    CoreCompletion, CoreTicket, DeliveryCoreControl, DeliveryCoreRender, DeliveryError,
-    DeliveryResourceReport, DeliveryTicket, HandoffResult, PendingAutomation,
-    PreparedAutomationDelivery, PreparedDelivery, PreparedDeliveryCapabilities, TerminalAutomation,
+    CoreCancelComplete, CoreCancelToken, CoreCompletion, CoreTerminalDisposition, CoreTicket,
+    DeliveryCoreControl, DeliveryCoreRender, DeliveryError, DeliveryResourceReport, DeliveryTicket,
+    HandoffResult, PendingAutomation, PreparedAutomationDelivery, PreparedDelivery,
+    PreparedDeliveryCapabilities, TerminalAutomation,
 };

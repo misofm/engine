@@ -219,6 +219,80 @@ fn prepared_heaps_free_off_thread_and_realtime_owner_operations_are_zero_zero() 
     assert!(teardown.1 > 0);
 }
 
+#[test]
+fn generic_boundary_cancel_reports_zero_partial_and_full_without_releasing_credits_early() {
+    for (logical_count, applied_prefix) in [(1_u16, 0_u16), (3, 1), (2, 2)] {
+        let (mut control, mut render) =
+            PreparedDelivery::<u32>::prepare(NonZeroUsize::new(2).unwrap()).unwrap();
+        let ticket = control.try_publish(17, logical_count).unwrap();
+        if applied_prefix != 0 {
+            assert_eq!(render.begin().unwrap(), (ticket, 17));
+            render.mark_progress(ticket, applied_prefix).unwrap();
+            if applied_prefix == logical_count {
+                render.finish(ticket, applied_prefix).unwrap();
+            }
+        }
+        let token = control.begin_cancel().unwrap();
+        assert_eq!(control.poll_cancel_boundary(token).unwrap(), None);
+        let (_, render_counts) = measured(|| render.cancel_boundary(SampleTime(91)).unwrap());
+        assert_eq!((render_counts.0, render_counts.1), (0, 0));
+        let complete = control.poll_cancel_boundary(token).unwrap().unwrap();
+        assert_eq!(complete.acknowledged_sample, SampleTime(91));
+        let result = control.collect(ticket).unwrap();
+        assert_eq!(result.applied_prefix, applied_prefix);
+        assert_eq!(result.remaining_count, logical_count - applied_prefix);
+        assert_eq!(
+            result.disposition,
+            if applied_prefix == logical_count {
+                CoreTerminalDisposition::Applied
+            } else {
+                CoreTerminalDisposition::Canceled
+            }
+        );
+        assert_eq!(
+            result.acknowledged_sample,
+            if applied_prefix == logical_count {
+                None
+            } else {
+                Some(SampleTime(91))
+            }
+        );
+        let next = control.try_publish(18, 1).unwrap();
+        assert_ne!(next.generation, ticket.generation);
+    }
+}
+
+#[test]
+fn generic_boundary_cancel_has_independent_request_capacity_and_exact_frontier() {
+    let (mut control, mut render) =
+        PreparedDelivery::<u32>::prepare(NonZeroUsize::new(2).unwrap()).unwrap();
+    let first = control.try_publish(1, 1).unwrap();
+    let second = control.try_publish(2, 1).unwrap();
+    assert_eq!(control.try_publish(3, 1), Err(DeliveryError::Full));
+    let token = control.begin_cancel().unwrap();
+    assert_eq!(
+        control.try_publish(4, 1),
+        Err(DeliveryError::CancellationPending)
+    );
+    render.cancel_boundary(SampleTime(12)).unwrap();
+    assert_eq!(
+        control
+            .poll_cancel_boundary(token)
+            .unwrap()
+            .unwrap()
+            .frontier,
+        Some(second.serial)
+    );
+    assert_eq!(control.collect(first).unwrap().remaining_count, 1);
+    assert_eq!(control.collect(second).unwrap().remaining_count, 1);
+    assert_eq!(
+        control.poll_cancel_boundary(token),
+        Err(DeliveryError::StaleTicket)
+    );
+    let replacement = control.try_publish(5, 1).unwrap();
+    assert!(replacement.serial > second.serial);
+}
+
 #[derive(Clone, Copy)]
 enum Position {
     Queued,
