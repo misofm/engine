@@ -170,3 +170,15 @@ trace overflow. The accepted PostFader decline and mutation evidence are unchang
 Six endpoint unit tests, fourteen integration tests, the focused release test,
 strict Clippy, rustdoc, formatting, and diff checks pass. Full record:
 `docs/audits/587-builtin-endpoint-pairing-attempt2.md`.
+
+## Attempt 2 review
+
+Astra LOW returned **PASS** at exact clean upstream head
+`a439cfa5c3425a2b1d6f84429f5b30ffb8f524da`. The public native and private forced-scalar
+paths cover all six transitions with bitwise reference PCM, isolated exact dispatch
+and drain accounting, and addressed scalar state. Existing PostFader declines and
+both mutations remain valid; routing, cancellation, realtime, resource, public API,
+and frozen-path behavior is preserved. Independent full host-core debug/release,
+strict Clippy/rustdoc, formatting/diff, workspace/host policies, CI routing, native,
+and Wasm checks pass. Two attempts were used. Full verdict:
+`docs/audits/587-attempt2-review.md`.
