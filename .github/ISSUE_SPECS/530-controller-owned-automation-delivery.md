@@ -187,3 +187,7 @@ Root adopts this bounded FAIL. Sol attempt2 is authorized only for the two exist
 ## Sol attempt2 corrected fixture checkpoint
 
 Sol changes only `controller_delivery.rs` tests and public rustdoc: real two-record/prefix1 cancellation; observable blocked transport and cached refusal after acknowledgment; a nonempty persistent edit with pre-command model/revision/transport and retained owner/payload; and the frozen public trust/replay/restriction/quiescence contract. Focused debug passes all five tests in `focused-debug-2`. The first run exposed fixture request-ID sequencing (`ReplayExpired`), corrected without runtime changes; both it and initial formatting output are preserved in `artifacts/issue530-sol-attempt2`. Root checkpoints the coherent correction before remaining proportional checks.
+
+## Sol attempt2 final evidence freeze
+
+Clean source checkpoint `09ef76f78932480c02b25574b81874bd66dd1ccc` passes focused release (five), feature-enabled ownership/Gate6 (three), strict all-target/all-feature Clippy, rustdoc, formatting/source diff, and workspace/realtime/protocol-control checks. Adjacent `sol2-report.md` records all14 captures with exact dirty precommit debug versus clean final identities, preserved fixture failures and attributed reuse of unchanged broad protocol/target/policy-selftest evidence. No runtime edits occurred. The complete package is frozen for one consolidated Astra Sol2 verdict; #530 remains OPEN.
