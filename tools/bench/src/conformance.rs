@@ -1,6 +1,6 @@
 //! Bounded descriptive benchmark for conformance primitives.
 
-use bench_support::json::escape;
+use bench_support::json::{escape, json_string_array};
 use bench_support::stats::per_mille as percentile_nearest_rank;
 use bench_support::sysinfo::HostToolchainFacts;
 use std::{
@@ -314,15 +314,6 @@ fn workspace_dirty(value: Option<String>) -> String {
             }
         },
     )
-}
-
-fn json_string_array(values: &[String]) -> String {
-    let body = values
-        .iter()
-        .map(|value| format!("\"{}\"", escape(value)))
-        .collect::<Vec<_>>()
-        .join(",");
-    format!("[{body}]")
 }
 
 fn generated_samples() -> Vec<f32> {
