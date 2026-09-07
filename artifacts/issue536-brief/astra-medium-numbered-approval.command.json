@@ -1,0 +1,20 @@
+{
+  "argv": [
+    "codex",
+    "exec",
+    "-C",
+    "/home/bl/misofm/engine-scalar-allocation-isolation",
+    "-s",
+    "danger-full-access",
+    "resume",
+    "-m",
+    "gpt-6-astra",
+    "-c",
+    "model_reasoning_effort=\"medium\"",
+    "-o",
+    "/tmp/issue536-astra-medium-brief.md",
+    "01a079c1-6706-7970-a437-77afe015d26a",
+    "-"
+  ],
+  "prompt": "/tmp/issue536-astra-medium-brief.prompt.md"
+}
