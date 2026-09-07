@@ -15,10 +15,20 @@ artifact hash. No browser launched, the hermetic gate was not run, and no result
 that invocation.
 
 This is an authentic setup failure: the provisional pin alone cannot satisfy the runner's checked
-lineage. The two generated lineage files remained unchanged. Root preserved the failure before
-requesting a bounded ruling on provisional `results.json` and matrix overlays. Numeric resource
-and PCM expectations remain frozen. No repository pin or generated consumer is authorized by this
-checkpoint.
+lineage. Root preserved the failure before requesting a bounded ruling on provisional
+`results.json` and matrix overlays.
 
-Raw command metadata and output are retained losslessly under `prepin/`. `sha256sums.txt` covers
-every retained payload except itself.
+Astra LOW then authorized detached-worktree-only overlays setting `results.json` candidate commit
+to `3871e137b519815540c1b3abcd6cfcec7932efa7` and Wasm identity to the observed candidate, plus
+regeneration of `BROWSER_DEPLOYMENT_MATRIX.md`. Exactly one corrected all-browser command passed
+Chromium `151.0.7922.34`, Firefox `153.0`, and WebKit `26.5`, with session identity, exact artifact
+set, matrix, browser, and self-test mutation checks enabled. The previously skipped hermetic
+AudioWorklet gate then passed, including its negative controls. The detached worktree contains
+exactly those three provisional overlays.
+
+Numeric resource and PCM expectations remain frozen and passed unchanged. No repository pin or
+generated consumer is authorized by this evidence checkpoint; Astra LOW must review the complete
+qualification before root applies the exact three changes to the feature branch.
+
+Raw command metadata and output are retained losslessly under `prepin/` and `qualified/`.
+`sha256sums.txt` covers every retained payload except itself.
