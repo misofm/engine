@@ -191,21 +191,27 @@ pub struct BuiltinBatchResources {
     /// Endpoint outcome queue storage.
     pub outcome: DeliveryResourceReport,
     /// Retained bytes reported by existing host preparation.
-    pub host_retained_bytes: u64,
+    pub host_builtin_retained_payload_bytes: u64,
     /// Retained heap bytes added by the generic delivery and endpoint outcome queues.
-    pub endpoint_retained_bytes: u64,
+    pub endpoint_retained_heap_bytes: u64,
     /// Checked host-plus-endpoint retained heap composition.
-    pub retained_bytes: u64,
-    /// Largest actual retained heap allocation.
-    pub largest_allocation_bytes: u64,
+    pub composed_retained_heap_bytes: u64,
+    /// Largest endpoint-owned retained heap allocation.
+    pub largest_endpoint_heap_allocation_bytes: u64,
+    /// Largest retained heap allocation reported by the unchanged host preparation.
+    pub largest_host_engine_allocation_bytes: u64,
+    /// Largest actual heap allocation across host and endpoint rows.
+    pub largest_composed_heap_allocation_bytes: u64,
     /// Prepared endpoint owner bytes held inline by the control/render owners.
     pub inline_owner_bytes: u64,
     /// Largest inline owner size, reported separately from heap allocations.
     pub largest_inline_owner_bytes: u64,
     /// Inline control owner size.
     pub control_inline_bytes: usize,
-    /// Inline prepared render owner size.
-    pub render_inline_bytes: usize,
+    /// Inline prepared render wrapper size before FP/thread attestation.
+    pub prepared_render_inline_bytes: usize,
+    /// Inline started render wrapper size, including the plan and sticky fault field.
+    pub started_render_inline_bytes: usize,
 }
 
 /// Endpoint construction failure before any owner is published.
@@ -232,6 +238,7 @@ pub struct BuiltinBatchControl {
     staged_outcome: Option<BuiltinBatchOutcome>,
     cancellation_started: bool,
     cancel_complete: Option<CoreCancelComplete>,
+    cancel_completion_reported: bool,
     last_collected: Option<CoreTicket>,
 }
 
@@ -306,6 +313,7 @@ impl BuiltinBatchControl {
         let token = self.delivery.begin_cancel()?;
         self.cancellation_started = true;
         self.cancel_complete = None;
+        self.cancel_completion_reported = false;
         Ok(token)
     }
 
@@ -314,15 +322,29 @@ impl BuiltinBatchControl {
         &mut self,
         token: CoreCancelToken,
     ) -> Result<Option<CoreCancelComplete>, DeliveryError> {
+        if let Some(complete) = self.cancel_complete {
+            if self.outstanding != 0 {
+                return Ok(None);
+            }
+            if self.cancel_completion_reported {
+                return Err(DeliveryError::StaleTicket);
+            }
+            self.cancel_completion_reported = true;
+            return Ok(Some(complete));
+        }
         let complete = self.delivery.poll_cancel_boundary(token)?;
         if let Some(complete) = complete {
             self.cancel_complete = Some(complete);
             if self.outstanding == 0 {
                 self.cancellation_started = false;
-                self.cancel_complete = None;
             }
         }
-        Ok(complete)
+        if self.outstanding == 0 {
+            self.cancel_completion_reported = true;
+            Ok(complete)
+        } else {
+            Ok(None)
+        }
     }
 
     /// Reconcile one terminal and release its generic credit only after outcome reconciliation.
@@ -361,7 +383,6 @@ impl BuiltinBatchControl {
         self.last_collected = Some(ticket);
         if self.outstanding == 0 {
             self.cancellation_started = false;
-            self.cancel_complete = None;
         }
         Ok(completion_from_core(completion, outcome))
     }
@@ -419,6 +440,10 @@ pub struct StartedBuiltinBatchRender {
     fault: Option<BuiltinBatchRenderError>,
     #[cfg(test)]
     fail_after_graph: bool,
+    #[cfg(test)]
+    claim_hold_sender: Option<std::sync::mpsc::SyncSender<()>>,
+    #[cfg(test)]
+    claim_release_receiver: Option<std::sync::mpsc::Receiver<()>>,
 }
 
 /// Result of one healthy endpoint render boundary.
@@ -457,6 +482,16 @@ impl StartedBuiltinBatchRender {
     #[allow(dead_code)]
     fn inject_post_graph_fault_for_test(&mut self) {
         self.fail_after_graph = true;
+    }
+
+    #[cfg(test)]
+    fn hold_after_claim_for_test(
+        &mut self,
+        sender: std::sync::mpsc::SyncSender<()>,
+        receiver: std::sync::mpsc::Receiver<()>,
+    ) {
+        self.claim_hold_sender = Some(sender);
+        self.claim_release_receiver = Some(receiver);
     }
 
     /// Render one prepared planar block and service cancellation before any builtin injection.
@@ -503,7 +538,18 @@ impl StartedBuiltinBatchRender {
         }
         if self.pending.is_none() {
             match self.delivery.begin() {
-                Ok((ticket, batch)) => self.pending = Some((ticket, batch)),
+                Ok((ticket, batch)) => {
+                    self.pending = Some((ticket, batch));
+                    #[cfg(test)]
+                    if let Some(sender) = self.claim_hold_sender.take() {
+                        let _ = sender.send(());
+                        if let Some(receiver) = self.claim_release_receiver.take()
+                            && receiver.recv().is_err()
+                        {
+                            return self.sticky(BuiltinBatchRenderError::Fault);
+                        }
+                    }
+                }
                 Err(DeliveryError::Empty) => {}
                 Err(error) => return self.sticky(BuiltinBatchRenderError::Delivery(error)),
             }
@@ -615,6 +661,10 @@ impl StartedBuiltinBatchRender {
             fault,
             #[cfg(test)]
                 fail_after_graph: _,
+            #[cfg(test)]
+                claim_hold_sender: _,
+            #[cfg(test)]
+                claim_release_receiver: _,
         } = self;
         StoppedBuiltinBatchRender {
             plan: plan.stop(),
@@ -684,15 +734,21 @@ pub fn prepare_builtin_batch_endpoint(
         .ok_or(BuiltinBatchPrepareError::ResourceLimit)?;
     let control_inline_bytes = u64::try_from(core::mem::size_of::<BuiltinBatchControl>())
         .map_err(|_| BuiltinBatchPrepareError::ResourceLimit)?;
-    let render_inline_bytes = u64::try_from(core::mem::size_of::<PreparedBuiltinBatchRender>())
-        .map_err(|_| BuiltinBatchPrepareError::ResourceLimit)?;
+    let prepared_render_inline_bytes =
+        u64::try_from(core::mem::size_of::<PreparedBuiltinBatchRender>())
+            .map_err(|_| BuiltinBatchPrepareError::ResourceLimit)?;
+    let started_render_inline_bytes =
+        u64::try_from(core::mem::size_of::<StartedBuiltinBatchRender>())
+            .map_err(|_| BuiltinBatchPrepareError::ResourceLimit)?;
     let inline_owner_bytes = control_inline_bytes
-        .checked_add(render_inline_bytes)
+        .checked_add(started_render_inline_bytes)
         .ok_or(BuiltinBatchPrepareError::ResourceLimit)?;
     let endpoint_largest = delivery_report
         .largest_allocation_bytes
         .max(outcome_report.largest_allocation_bytes);
-    let largest_inline_owner = control_inline_bytes.max(render_inline_bytes);
+    let largest_inline_owner = control_inline_bytes
+        .max(prepared_render_inline_bytes)
+        .max(started_render_inline_bytes);
     if endpoint_retained_bytes > caps.maximum_builtin_retained_bytes
         || endpoint_largest > caps.maximum_named_allocation_bytes
     {
@@ -744,14 +800,19 @@ pub fn prepare_builtin_batch_endpoint(
             host: host_report,
             delivery: delivery_report,
             outcome: outcome_report,
-            host_retained_bytes: host_report.builtin_retained_payload_bytes,
-            endpoint_retained_bytes,
-            retained_bytes,
-            largest_allocation_bytes: largest,
+            host_builtin_retained_payload_bytes: host_report.builtin_retained_payload_bytes,
+            endpoint_retained_heap_bytes: endpoint_retained_bytes,
+            composed_retained_heap_bytes: retained_bytes,
+            largest_endpoint_heap_allocation_bytes: endpoint_largest,
+            largest_host_engine_allocation_bytes: host_report.largest_engine_allocation_bytes,
+            largest_composed_heap_allocation_bytes: largest,
             inline_owner_bytes,
             largest_inline_owner_bytes: largest_inline_owner,
             control_inline_bytes: usize::try_from(control_inline_bytes).unwrap_or(usize::MAX),
-            render_inline_bytes: usize::try_from(render_inline_bytes).unwrap_or(usize::MAX),
+            prepared_render_inline_bytes: usize::try_from(prepared_render_inline_bytes)
+                .unwrap_or(usize::MAX),
+            started_render_inline_bytes: usize::try_from(started_render_inline_bytes)
+                .unwrap_or(usize::MAX),
         },
     })
 }
@@ -829,6 +890,10 @@ impl PreparedBuiltinBatchEndpoint {
             fault: None,
             #[cfg(test)]
             fail_after_graph: false,
+            #[cfg(test)]
+            claim_hold_sender: None,
+            #[cfg(test)]
+            claim_release_receiver: None,
         };
         let control = BuiltinBatchControl {
             delivery: control,
@@ -842,6 +907,7 @@ impl PreparedBuiltinBatchEndpoint {
             staged_outcome: None,
             cancellation_started: false,
             cancel_complete: None,
+            cancel_completion_reported: false,
             last_collected: None,
         };
         Ok((control, render, resources))
@@ -947,6 +1013,82 @@ mod tests {
             render.render(&mut samples, 2, 128, 128, SampleTime(0)),
             Err(BuiltinBatchRenderError::Fault)
         );
+        let cancel = control.begin_cancel().expect("cancel after fault");
+        assert_eq!(control.poll_cancel_boundary(cancel), Ok(None));
         assert_eq!(control.collect(ticket), Err(DeliveryError::Empty));
+        assert_eq!(control.outstanding(), 1);
+    }
+
+    #[test]
+    fn private_post_claim_hold_rejects_same_block_second_claim() {
+        use std::sync::mpsc::sync_channel;
+
+        let document = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
+        let compiled = crate::compile_host_session(document, &caps()).expect("compile fixture");
+        std::thread::scope(|scope| {
+            let (control_tx, control_rx) = sync_channel(1);
+            let (step_tx, step_rx) = sync_channel(0);
+            let (report_tx, report_rx) = sync_channel(1);
+            let (claimed_tx, claimed_rx) = sync_channel(0);
+            let (release_tx, release_rx) = sync_channel(0);
+            let render_thread = scope.spawn(move || {
+                let (control, mut render, _) = prepare_builtin_batch_endpoint(
+                    &compiled,
+                    &caps(),
+                    SessionRevision(42),
+                    NonZeroUsize::new(2).unwrap(),
+                )
+                .expect("prepare")
+                .start()
+                .unwrap_or_else(|_| panic!("start"));
+                render.hold_after_claim_for_test(claimed_tx, release_rx);
+                control_tx.send(control).expect("control handoff");
+                for first in [0_u64, 128] {
+                    step_rx.recv().expect("render step");
+                    let mut samples = [0.0_f32; 256];
+                    let report = render
+                        .render(&mut samples, 2, 128, 128, SampleTime(first))
+                        .expect("render");
+                    report_tx.send(report).expect("render report");
+                }
+            });
+            let mut control = control_rx.recv().expect("control owner");
+            let batch = |track_index| {
+                BuiltinBatch::new(
+                    SessionRevision(42),
+                    SampleTime(0),
+                    &[BuiltinBatchRecord::Fader {
+                        track_index,
+                        record: TrackFaderRecord::Mute {
+                            lanes: builtins::BuiltinLaneSelector::Both,
+                            muted: track_index == 0,
+                            smoothing_samples: 0,
+                        },
+                    }],
+                )
+                .expect("batch")
+            };
+            let first = control.try_publish(batch(0)).expect("first publish");
+            step_tx.send(()).expect("first step");
+            claimed_rx.recv().expect("claim hold");
+            let second = control.try_publish(batch(1)).expect("post-claim publish");
+            assert_eq!(control.outstanding(), 2);
+            release_tx.send(()).expect("claim release");
+            let first_report = report_rx.recv().expect("first report");
+            let first_application = first_report.applied.expect("first application");
+            assert_eq!(first_application.ticket, first);
+            assert_eq!(first_application.actual_sample, SampleTime(0));
+            control.collect(first).expect("first collect");
+            step_tx.send(()).expect("second step");
+            let second_report = report_rx.recv().expect("second report");
+            let second_application = second_report.applied.expect("second application");
+            assert_eq!(second_application.ticket, second);
+            assert_eq!(second_application.actual_sample, SampleTime(128));
+            assert!(second_application.late);
+            let second_completion = control.collect(second).expect("second collect");
+            assert_eq!(second_completion.actual_sample, Some(SampleTime(128)));
+            assert!(second_completion.late);
+            render_thread.join().expect("render join");
+        });
     }
 }

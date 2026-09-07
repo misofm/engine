@@ -164,3 +164,28 @@ exact reviewed head. On PASS, deliver the complete preserved #576 source with th
 successor, close both issues after upstream evidence, verify post-main qualification,
 and remove both clean delivered worktrees. Delivery advances #444 but does not close
 its bank pairing, scalar pairing or automatic lifecycle children.
+
+## Attempt 1 implementation record
+
+Attempt 1 preserves the #576 product surface and closes the bounded qualification gaps. The
+endpoint now retains the generic cancellation acknowledgement until all captured endpoint
+tickets are collected, stages Applied outcome metadata before generic collection, and leaves a
+missing post-ack outcome as the never-injected Canceled case. It reports separately named host
+payload, endpoint heap, composed heap, largest endpoint/host/composed heap, and prepared/started
+render inline rows. The focused tests include an independent concrete SPSC/ledger layout oracle,
+exact and one-below cap checks, allocator liveness, and zero render allocation/free cycles.
+
+The private cfg(test) post-claim hold uses scoped control/render owners to publish a second ticket
+while the first is held; the second is shown to apply only at the next boundary and to be late.
+The ordinary endpoint PCM is compared bitwise against a separately prepared console owner with
+identical source and records. The post-graph fault test refuses cancellation success and retains
+the outstanding ticket. Five direct source mutations were run, recorded, and restored; see
+[`docs/audits/579-builtin-batch-endpoint-qualification.md`](../../docs/audits/579-builtin-batch-endpoint-qualification.md).
+
+Focused result: 12 integration tests and the private post-claim source test pass. Full debug,
+release, strict Clippy/rustdoc, target, policy, and CI-routing results remain to be attached at
+the root checkpoint. The paired bank/scalar dispatch-counter witness remains an explicit blocker:
+the exact allowed paths cannot read the private `StartedRenderSession` plan, and the report's bank
+scratch row plus PCM equality do not prove post-render paired dispatch counts. A smallest
+test-only accessor in `render_session.rs` or a rebriefed successor is required before claiming
+this gate.

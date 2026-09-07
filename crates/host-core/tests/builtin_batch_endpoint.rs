@@ -79,11 +79,121 @@ fn render_block(
         .expect("render block")
 }
 
+/// Independent layout oracle for the endpoint's retained queue rows. These private-shape mirrors
+/// intentionally live in the qualification test: the production report remains the source of
+/// caps, while this calculation checks the concrete queue payloads and ledger storage separately.
+#[allow(dead_code)]
+#[derive(Clone, Copy)]
+struct OracleMessage {
+    ticket: protocol::CoreTicket,
+    payload: BuiltinBatch,
+    logical_count: u16,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy)]
+struct OracleTerminal {
+    ticket: protocol::CoreTicket,
+    applied_prefix: u16,
+    record_count: u16,
+    disposition: CoreTerminalDisposition,
+    acknowledged_sample: Option<SampleTime>,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy)]
+enum OracleBoundary {
+    Cancel {
+        token: protocol::CoreCancelToken,
+        frontier: Option<u64>,
+    },
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy)]
+struct OracleCancelAck {
+    token: protocol::CoreCancelToken,
+    acknowledged_sample: SampleTime,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy)]
+struct OracleEntry {
+    ticket: protocol::CoreTicket,
+    payload: BuiltinBatch,
+    published: bool,
+    logical_count: u16,
+    terminal: Option<OracleTerminal>,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy)]
+struct OracleOutcome {
+    ticket: protocol::CoreTicket,
+    requested_sample: SampleTime,
+    actual_sample: SampleTime,
+}
+
+fn oracle_queue_bytes<T: Copy + Send + 'static>(capacity: usize) -> (u64, u64) {
+    let layout =
+        engine::realtime::bounded_spsc_retained_payload::<T>(NonZeroUsize::new(capacity).unwrap())
+            .expect("oracle queue layout");
+    (
+        u64::try_from(layout.total_bytes().unwrap()).unwrap(),
+        u64::try_from(layout.largest_allocation_bytes()).unwrap(),
+    )
+}
+
+fn oracle_endpoint_delivery(capacity: usize) -> (u64, u64) {
+    let mut total = 0_u64;
+    let mut largest = 0_u64;
+    for (bytes, largest_row) in [
+        oracle_queue_bytes::<OracleMessage>(capacity),
+        oracle_queue_bytes::<OracleTerminal>(capacity),
+        oracle_queue_bytes::<OracleBoundary>(1),
+        oracle_queue_bytes::<OracleCancelAck>(1),
+    ] {
+        total += bytes;
+        largest = largest.max(largest_row);
+    }
+    let entries = core::alloc::Layout::array::<Option<OracleEntry>>(capacity)
+        .expect("oracle entries layout")
+        .size() as u64;
+    (total + entries, largest.max(entries))
+}
+
+fn oracle_outcome(capacity: usize) -> (u64, u64) {
+    oracle_queue_bytes::<OracleOutcome>(capacity)
+}
+
 #[test]
 fn prepared_and_control_halves_have_transferable_ownership() {
     assert_send::<host_core::PreparedBuiltinBatchEndpoint>();
     assert_send::<host_core::PreparedBuiltinBatchRender>();
     assert_send::<host_core::BuiltinBatchControl>();
+}
+
+#[test]
+fn retained_endpoint_report_matches_independent_concrete_layout_oracle() {
+    let capacity = 4;
+    let (_, _, resources) = endpoint_with_capacity(capacity);
+    let (delivery_bytes, delivery_largest) = oracle_endpoint_delivery(capacity);
+    let (outcome_bytes, outcome_largest) = oracle_outcome(capacity);
+    assert_eq!(resources.delivery.retained_payload_bytes, delivery_bytes);
+    assert_eq!(
+        resources.delivery.largest_allocation_bytes,
+        delivery_largest
+    );
+    assert_eq!(resources.outcome.retained_payload_bytes, outcome_bytes);
+    assert_eq!(resources.outcome.largest_allocation_bytes, outcome_largest);
+    assert_eq!(
+        resources.endpoint_retained_heap_bytes,
+        delivery_bytes + outcome_bytes
+    );
+    assert_eq!(
+        resources.largest_endpoint_heap_allocation_bytes,
+        delivery_largest.max(outcome_largest)
+    );
 }
 
 #[test]
@@ -139,9 +249,9 @@ fn repeated_render_and_cancellation_boundaries_are_allocation_free() {
 #[test]
 fn batch_applies_one_fifo_ticket_at_a_late_boundary_and_reconciles() {
     let (mut control, mut render, resources) = endpoint();
-    assert!(resources.retained_bytes > resources.delivery.retained_payload_bytes);
+    assert!(resources.composed_retained_heap_bytes > resources.delivery.retained_payload_bytes);
     assert_eq!(
-        resources.endpoint_retained_bytes,
+        resources.endpoint_retained_heap_bytes,
         resources
             .delivery
             .retained_payload_bytes
@@ -153,15 +263,17 @@ fn batch_applies_one_fifo_ticket_at_a_late_boundary_and_reconciles() {
         u64::try_from(resources.control_inline_bytes)
             .expect("control inline bytes")
             .checked_add(
-                u64::try_from(resources.render_inline_bytes).expect("render inline bytes"),
+                u64::try_from(resources.started_render_inline_bytes)
+                    .expect("started render inline bytes"),
             )
             .expect("inline owner sum")
     );
+    assert!(resources.started_render_inline_bytes >= resources.prepared_render_inline_bytes);
     assert_eq!(
-        resources.retained_bytes,
+        resources.composed_retained_heap_bytes,
         resources
-            .host_retained_bytes
-            .checked_add(resources.endpoint_retained_bytes)
+            .host_builtin_retained_payload_bytes
+            .checked_add(resources.endpoint_retained_heap_bytes)
             .expect("composed resource sum")
     );
     assert!(
@@ -243,6 +355,26 @@ fn outcome_is_staged_before_credit_release_and_fifo_late_pair_is_exact() {
         Err(protocol::DeliveryError::StaleTicket)
     );
     assert_eq!(control.outstanding(), 2);
+    let replacement = BuiltinBatch::new(
+        REVISION,
+        SampleTime(QUANTUM as u64 * 2),
+        &[BuiltinBatchRecord::Fader {
+            track_index: 2,
+            record: TrackFaderRecord::Mute {
+                lanes: BuiltinLaneSelector::Left,
+                muted: false,
+                smoothing_samples: 0,
+            },
+        }],
+    )
+    .unwrap();
+    assert!(matches!(
+        control.try_publish(replacement),
+        Err(BuiltinBatchAdmissionError::Delivery {
+            error: protocol::DeliveryError::Full,
+            ..
+        })
+    ));
     let first_completion = control.collect(first).expect("first terminal");
     assert_eq!(first_completion.actual_sample, Some(SampleTime(0)));
     let second_completion = control.collect(second).expect("second terminal");
@@ -379,8 +511,8 @@ fn invalid_and_saturated_publication_are_atomic_and_resources_have_exact_caps() 
 
     let compiled = host_core::compile_host_session(SESSION, &caps()).expect("compile fixture");
     let mut exact = caps();
-    exact.maximum_builtin_retained_bytes = resources.retained_bytes;
-    exact.maximum_named_allocation_bytes = resources.largest_allocation_bytes;
+    exact.maximum_builtin_retained_bytes = resources.composed_retained_heap_bytes;
+    exact.maximum_named_allocation_bytes = resources.largest_composed_heap_allocation_bytes;
     prepare_builtin_batch_endpoint(&compiled, &exact, REVISION, NonZeroUsize::new(1).unwrap())
         .expect("exact resource caps");
     exact.maximum_builtin_retained_bytes -= 1;
@@ -391,10 +523,9 @@ fn invalid_and_saturated_publication_are_atomic_and_resources_have_exact_caps() 
     let mut largest_below = caps();
     largest_below.maximum_builtin_retained_bytes = u64::MAX;
     largest_below.maximum_named_allocation_bytes = resources
-        .delivery
-        .largest_allocation_bytes
-        .max(resources.outcome.largest_allocation_bytes)
-        - 1;
+        .largest_endpoint_heap_allocation_bytes
+        .checked_sub(1)
+        .expect("endpoint largest allocation is nonzero");
     assert!(matches!(
         prepare_builtin_batch_endpoint(
             &compiled,
@@ -657,17 +788,56 @@ fn cancellation_before_claim_is_render_only_and_releases_after_collection() {
     assert!(boundary.cancellation_only);
     assert_eq!(control.collect(ticket), Err(protocol::DeliveryError::Empty));
     assert_eq!(control.outstanding(), 1);
-    let complete = control
-        .poll_cancel_boundary(token)
-        .expect("cancel poll")
-        .expect("cancel complete");
-    assert_eq!(complete.acknowledged_sample, SampleTime(0));
+    assert!(
+        control
+            .poll_cancel_boundary(token)
+            .expect("cancel poll")
+            .is_none()
+    );
     let completion = control.collect(ticket).expect("canceled collection");
     assert_eq!(completion.disposition, CoreTerminalDisposition::Canceled);
     assert_eq!(completion.applied_prefix, 0);
     assert_eq!(completion.actual_sample, None);
     assert_eq!(completion.acknowledged_sample, Some(SampleTime(0)));
     assert_eq!(control.outstanding(), 0);
+    let complete = control
+        .poll_cancel_boundary(token)
+        .expect("final cancel poll")
+        .expect("cancel complete");
+    assert_eq!(complete.acknowledged_sample, SampleTime(0));
+    assert_eq!(
+        control.poll_cancel_boundary(token),
+        Err(protocol::DeliveryError::StaleTicket)
+    );
+    let next_batch = BuiltinBatch::new(
+        REVISION,
+        SampleTime(0),
+        &[BuiltinBatchRecord::Fader {
+            track_index: 2,
+            record: TrackFaderRecord::Mute {
+                lanes: BuiltinLaneSelector::Both,
+                muted: false,
+                smoothing_samples: 0,
+            },
+        }],
+    )
+    .unwrap();
+    let next_ticket = control
+        .try_publish(next_batch)
+        .expect("next generation ticket");
+    assert_ne!(next_ticket.generation, ticket.generation);
+    assert!(render_block(&mut render, 0).applied.is_some());
+    assert_eq!(
+        control
+            .collect(next_ticket)
+            .expect("next generation collect")
+            .disposition,
+        CoreTerminalDisposition::Applied
+    );
+    assert_eq!(
+        control.poll_cancel_boundary(token),
+        Err(protocol::DeliveryError::StaleTicket)
+    );
 }
 
 #[test]
@@ -705,11 +875,12 @@ fn cancellation_reconciles_applied_and_future_frontier_dispositions() {
     let token = control.begin_cancel().expect("cancel begun");
     let boundary = render_block(&mut render, QUANTUM as u64);
     assert!(boundary.cancellation_only);
-    let complete = control
-        .poll_cancel_boundary(token)
-        .expect("cancel poll")
-        .expect("cancel complete");
-    assert_eq!(complete.frontier, Some(canceled_ticket.serial));
+    assert!(
+        control
+            .poll_cancel_boundary(token)
+            .expect("cancel poll")
+            .is_none()
+    );
     assert_eq!(
         control
             .collect(applied_ticket)
@@ -726,4 +897,9 @@ fn cancellation_reconciles_applied_and_future_frontier_dispositions() {
         canceled.acknowledged_sample,
         Some(SampleTime(QUANTUM as u64))
     );
+    let complete = control
+        .poll_cancel_boundary(token)
+        .expect("final cancel poll")
+        .expect("cancel complete");
+    assert_eq!(complete.frontier, Some(canceled_ticket.serial));
 }
