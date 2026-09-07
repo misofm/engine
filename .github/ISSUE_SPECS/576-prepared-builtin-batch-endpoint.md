@@ -275,6 +275,24 @@ application, partial prefix, credit release before outcome validation, and post-
 labeling. Each was rejected by its named focused assertion; exact outputs and line locations are
 in `docs/audits/576-prepared-builtin-batch-endpoint.md`.
 
-The endpoint retained projection includes checked inline control and prepared-render owner sizes,
-and the largest-allocation projection covers those sizes as well as queue backings before endpoint
-allocation.
+The endpoint report separates checked inline control/render owner sizes from retained heap bytes. Largest actual allocation covers queue and host heap backings; inline owner sizes are independently reported.
+
+## Attempt 3 final correction record
+
+Cancellation now requires the acknowledged endpoint cancellation join before a missing outcome can
+be considered Canceled. The scope tests create all rendezvous endpoints inside `thread::scope`,
+publish the second ticket only after the first singleton claim, and catch a control panic after
+sender drop. The integration allocator uses the workspace AuditedAllocator and proves positive
+liveness plus repeated zero allocation/free render and cancellation operations.
+
+Resource reporting separates retained heap, host composition, inline owner sizes and largest actual
+heap allocation. The endpoint PCM fixture submits asymmetric source planes and checks the prepared
+bank/scalar plan output; existing observation suites provide the state/reduction reference and
+paired dispatch remains unselected. The private post-graph seam directly rejects a fault
+mislabeling mutation. Five named mutations were run and restored; outputs and the partial-prefix
+SIGABRT are recorded in the focused audit.
+
+The final PCM gate compares endpoint output bit-for-bit and frame reports with a separately
+prepared ordinary console host receiving the same source and typed owner records. The fixture's
+bank allocation and existing observation gates supply the bank/scalar state oracle; paired
+dispatch remains unselected.

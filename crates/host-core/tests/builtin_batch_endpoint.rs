@@ -7,7 +7,8 @@ use builtins::{BuiltinLaneSelector, Matrix2x2};
 use builtins_compiler::{TrackControlRecord, TrackFaderRecord};
 use host_core::{
     BuiltinBatch, BuiltinBatchAdmissionError, BuiltinBatchRecord, BuiltinBatchRenderReport,
-    HostPrepareCaps, HostShapePolicy, SourceSubmission, prepare_builtin_batch_endpoint,
+    HostConsoleRequest, HostPrepareCaps, HostShapePolicy, SourceSubmission,
+    prepare_builtin_batch_endpoint, prepare_host_runtime_with_console,
 };
 use protocol::{CoreTerminalDisposition, SampleTime, SessionRevision};
 use std::sync::mpsc::sync_channel;
@@ -87,7 +88,17 @@ fn prepared_and_control_halves_have_transferable_ownership() {
 
 #[test]
 fn repeated_render_and_cancellation_boundaries_are_allocation_free() {
+    use bench_support::alloc as bench_alloc;
     use engine::realtime::audit;
+
+    bench_alloc::assert_installed();
+    let liveness_mark = bench_alloc::counters();
+    let allocation = Box::new([0_u8; 128]);
+    std::hint::black_box(&allocation);
+    drop(allocation);
+    let liveness = bench_alloc::delta_since(liveness_mark);
+    assert!(liveness.allocations > 0);
+    assert!(liveness.deallocations > 0);
 
     let (mut control, mut render, _) = endpoint_with_capacity(2);
     let batch = BuiltinBatch::new(
@@ -135,14 +146,16 @@ fn batch_applies_one_fifo_ticket_at_a_late_boundary_and_reconciles() {
             .delivery
             .retained_payload_bytes
             .checked_add(resources.outcome.retained_payload_bytes)
-            .and_then(|bytes| {
-                bytes.checked_add(
-                    u64::try_from(resources.control_inline_bytes).expect("control inline bytes")
-                        + u64::try_from(resources.render_inline_bytes)
-                            .expect("render inline bytes"),
-                )
-            })
             .expect("endpoint resource sum")
+    );
+    assert_eq!(
+        resources.inline_owner_bytes,
+        u64::try_from(resources.control_inline_bytes)
+            .expect("control inline bytes")
+            .checked_add(
+                u64::try_from(resources.render_inline_bytes).expect("render inline bytes"),
+            )
+            .expect("inline owner sum")
     );
     assert_eq!(
         resources.retained_bytes,
@@ -399,10 +412,10 @@ fn separate_control_and_render_threads_preserve_single_claim() {
     let prepared =
         prepare_builtin_batch_endpoint(&compiled, &caps(), REVISION, NonZeroUsize::new(2).unwrap())
             .expect("prepared endpoint");
-    let (control_tx, control_rx) = sync_channel(1);
-    let (step_tx, step_rx) = sync_channel(0);
-    let (report_tx, report_rx) = sync_channel(1);
     std::thread::scope(|scope| {
+        let (control_tx, control_rx) = sync_channel(1);
+        let (step_tx, step_rx) = sync_channel(0);
+        let (report_tx, report_rx) = sync_channel(1);
         scope.spawn(move || {
             let (control, mut render, _) = prepared
                 .start()
@@ -429,6 +442,15 @@ fn separate_control_and_render_threads_preserve_single_claim() {
             }],
         )
         .unwrap();
+        let first_ticket = control.try_publish(first).expect("first publish");
+        step_tx.send(()).expect("first step");
+        let first_report = report_rx.recv().expect("first report");
+        assert!(first_report.applied.is_some());
+        assert_eq!(control.outstanding(), 1);
+        control.collect(first_ticket).expect("first collect");
+
+        // The second publication crosses the first singleton claim and cannot be applied in the
+        // same render block. It is explicitly owned for the next block.
         let second = BuiltinBatch::new(
             REVISION,
             SampleTime(0),
@@ -442,13 +464,9 @@ fn separate_control_and_render_threads_preserve_single_claim() {
             }],
         )
         .unwrap();
-        let first_ticket = control.try_publish(first).expect("first publish");
-        let second_ticket = control.try_publish(second).expect("second publish");
-        step_tx.send(()).expect("first step");
-        let first_report = report_rx.recv().expect("first report");
-        assert!(first_report.applied.is_some());
-        assert_eq!(control.outstanding(), 2);
-        control.collect(first_ticket).expect("first collect");
+        let second_ticket = control
+            .try_publish(second)
+            .expect("second publish after claim");
         step_tx.send(()).expect("second step");
         let second_report = report_rx.recv().expect("second report");
         assert!(second_report.applied.is_some());
@@ -457,25 +475,74 @@ fn separate_control_and_render_threads_preserve_single_claim() {
 }
 
 #[test]
+fn scoped_render_receiver_exits_when_control_sender_drops_on_panic() {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        std::thread::scope(|scope| {
+            let (step_tx, step_rx) = sync_channel::<()>(0);
+            scope.spawn(move || assert!(step_rx.recv().is_err(), "sender remained live"));
+            drop(step_tx);
+            panic!("synthetic control failure");
+        });
+    }));
+    assert!(result.is_err());
+}
+
+#[test]
 fn endpoint_drives_nonzero_pcm_through_the_prepared_bank_and_scalar_plan() {
-    let (mut control, mut render, resources) = endpoint();
+    let compiled = host_core::compile_host_session(SESSION, &caps()).expect("compile fixture");
+    let console = HostConsoleRequest {
+        control_queue_depth: Some(NonZeroUsize::new(host_core::BUILTIN_BATCH_MAX_RECORDS).unwrap()),
+        ..HostConsoleRequest::default()
+    };
+    let (baseline_host, mut baseline_handles) =
+        prepare_host_runtime_with_console(&compiled, &caps(), &console).expect("baseline host");
+    let (mut baseline_render, mut baseline_sources, _) = baseline_host
+        .start_render_session()
+        .unwrap_or_else(|_| panic!("baseline start"));
+    let (mut control, mut render, resources) =
+        prepare_builtin_batch_endpoint(&compiled, &caps(), REVISION, NonZeroUsize::new(4).unwrap())
+            .expect("endpoint")
+            .start()
+            .unwrap_or_else(|_| panic!("endpoint start"));
     assert!(resources.host.effect_bank_scratch_bytes > 0);
     let left = [0.25_f32; QUANTUM];
     let right = [-0.5_f32; QUANTUM];
+    let submission = SourceSubmission {
+        generation: 1,
+        start_frame: 0,
+        sample_rate_hz: 48_000,
+        planes: &[&left, &right],
+        frames: QUANTUM as u32,
+        end_of_region: false,
+    };
     control
         .sources()
-        .submit(
-            b"fixture-source",
-            SourceSubmission {
-                generation: 1,
-                start_frame: 0,
-                sample_rate_hz: 48_000,
-                planes: &[&left, &right],
-                frames: QUANTUM as u32,
-                end_of_region: false,
-            },
-        )
+        .submit(b"fixture-source", submission)
         .expect("source block");
+    baseline_sources
+        .submit(b"fixture-source", submission)
+        .expect("baseline source block");
+    let matrix = TrackControlRecord {
+        matrix: Matrix2x2 {
+            ll: 0.7,
+            lr: 0.2,
+            rl: -0.1,
+            rr: 0.8,
+        },
+        smoothing_samples: 16,
+    };
+    baseline_handles.track_controls[0]
+        .fader
+        .try_push(TrackFaderRecord::FaderDb {
+            lanes: BuiltinLaneSelector::Left,
+            db: -6.0,
+            smoothing_samples: 16,
+        })
+        .expect("baseline fader");
+    baseline_handles.track_controls[1]
+        .producer
+        .try_push(matrix)
+        .expect("baseline matrix");
     let batch = BuiltinBatch::new(
         REVISION,
         SampleTime(0),
@@ -490,26 +557,27 @@ fn endpoint_drives_nonzero_pcm_through_the_prepared_bank_and_scalar_plan() {
             },
             BuiltinBatchRecord::Matrix {
                 track_index: 1,
-                record: TrackControlRecord {
-                    matrix: Matrix2x2 {
-                        ll: 0.7,
-                        lr: 0.2,
-                        rl: -0.1,
-                        rr: 0.8,
-                    },
-                    smoothing_samples: 16,
-                },
+                record: matrix,
             },
         ],
     )
     .expect("batch");
     let ticket = control.try_publish(batch).expect("publish");
-    let mut samples = [0.0_f32; QUANTUM * 2];
+    let mut endpoint_samples = [0.0_f32; QUANTUM * 2];
+    let mut baseline_samples = [0.0_f32; QUANTUM * 2];
     let report = render
-        .render(&mut samples, 2, QUANTUM, QUANTUM, SampleTime(0))
+        .render(&mut endpoint_samples, 2, QUANTUM, QUANTUM, SampleTime(0))
         .expect("render");
+    let baseline_report = baseline_render
+        .render_planar(&mut baseline_samples, 2, QUANTUM, QUANTUM, 0)
+        .expect("baseline render");
     assert!(report.applied.is_some());
-    assert!(samples.iter().any(|sample| sample.to_bits() != 0));
+    assert_eq!(
+        report.graph.map(|value| value.frames),
+        Some(baseline_report.frames)
+    );
+    assert_eq!(endpoint_samples, baseline_samples);
+    assert!(endpoint_samples.iter().any(|sample| sample.to_bits() != 0));
     assert_eq!(
         control.collect(ticket).expect("collect").disposition,
         CoreTerminalDisposition::Applied
@@ -587,6 +655,8 @@ fn cancellation_before_claim_is_render_only_and_releases_after_collection() {
     let token = control.begin_cancel().expect("cancel begun");
     let boundary = render_block(&mut render, 0);
     assert!(boundary.cancellation_only);
+    assert_eq!(control.collect(ticket), Err(protocol::DeliveryError::Empty));
+    assert_eq!(control.outstanding(), 1);
     let complete = control
         .poll_cancel_boundary(token)
         .expect("cancel poll")

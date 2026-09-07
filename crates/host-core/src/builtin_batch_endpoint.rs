@@ -192,12 +192,16 @@ pub struct BuiltinBatchResources {
     pub outcome: DeliveryResourceReport,
     /// Retained bytes reported by existing host preparation.
     pub host_retained_bytes: u64,
-    /// Retained bytes added by the generic delivery and endpoint outcome queues.
+    /// Retained heap bytes added by the generic delivery and endpoint outcome queues.
     pub endpoint_retained_bytes: u64,
-    /// Checked composition of host and endpoint retained bytes.
+    /// Checked host-plus-endpoint retained heap composition.
     pub retained_bytes: u64,
-    /// Largest retained endpoint allocation.
+    /// Largest actual retained heap allocation.
     pub largest_allocation_bytes: u64,
+    /// Prepared endpoint owner bytes held inline by the control/render owners.
+    pub inline_owner_bytes: u64,
+    /// Largest inline owner size, reported separately from heap allocations.
+    pub largest_inline_owner_bytes: u64,
     /// Inline control owner size.
     pub control_inline_bytes: usize,
     /// Inline prepared render owner size.
@@ -227,6 +231,7 @@ pub struct BuiltinBatchControl {
     outstanding: usize,
     staged_outcome: Option<BuiltinBatchOutcome>,
     cancellation_started: bool,
+    cancel_complete: Option<CoreCancelComplete>,
     last_collected: Option<CoreTicket>,
 }
 
@@ -300,6 +305,7 @@ impl BuiltinBatchControl {
     pub fn begin_cancel(&mut self) -> Result<CoreCancelToken, DeliveryError> {
         let token = self.delivery.begin_cancel()?;
         self.cancellation_started = true;
+        self.cancel_complete = None;
         Ok(token)
     }
 
@@ -308,7 +314,15 @@ impl BuiltinBatchControl {
         &mut self,
         token: CoreCancelToken,
     ) -> Result<Option<CoreCancelComplete>, DeliveryError> {
-        self.delivery.poll_cancel_boundary(token)
+        let complete = self.delivery.poll_cancel_boundary(token)?;
+        if let Some(complete) = complete {
+            self.cancel_complete = Some(complete);
+            if self.outstanding == 0 {
+                self.cancellation_started = false;
+                self.cancel_complete = None;
+            }
+        }
+        Ok(complete)
     }
 
     /// Reconcile one terminal and release its generic credit only after outcome reconciliation.
@@ -322,7 +336,7 @@ impl BuiltinBatchControl {
                     self.staged_outcome = Some(outcome);
                     return Err(DeliveryError::StaleTicket);
                 }
-                Err(_) if !self.cancellation_started => {
+                Err(_) if !self.cancellation_started || self.cancel_complete.is_none() => {
                     return Err(if self.last_collected == Some(ticket) {
                         DeliveryError::StaleTicket
                     } else {
@@ -347,6 +361,7 @@ impl BuiltinBatchControl {
         self.last_collected = Some(ticket);
         if self.outstanding == 0 {
             self.cancellation_started = false;
+            self.cancel_complete = None;
         }
         Ok(completion_from_core(completion, outcome))
     }
@@ -666,20 +681,18 @@ pub fn prepare_builtin_batch_endpoint(
     let endpoint_retained_bytes = delivery_report
         .retained_payload_bytes
         .checked_add(outcome_report.retained_payload_bytes)
-        .and_then(|value| {
-            value.checked_add(u64::try_from(core::mem::size_of::<BuiltinBatchControl>()).ok()?)
-        })
-        .and_then(|value| {
-            value.checked_add(
-                u64::try_from(core::mem::size_of::<PreparedBuiltinBatchRender>()).ok()?,
-            )
-        })
+        .ok_or(BuiltinBatchPrepareError::ResourceLimit)?;
+    let control_inline_bytes = u64::try_from(core::mem::size_of::<BuiltinBatchControl>())
+        .map_err(|_| BuiltinBatchPrepareError::ResourceLimit)?;
+    let render_inline_bytes = u64::try_from(core::mem::size_of::<PreparedBuiltinBatchRender>())
+        .map_err(|_| BuiltinBatchPrepareError::ResourceLimit)?;
+    let inline_owner_bytes = control_inline_bytes
+        .checked_add(render_inline_bytes)
         .ok_or(BuiltinBatchPrepareError::ResourceLimit)?;
     let endpoint_largest = delivery_report
         .largest_allocation_bytes
-        .max(outcome_report.largest_allocation_bytes)
-        .max(u64::try_from(core::mem::size_of::<BuiltinBatchControl>()).unwrap_or(u64::MAX))
-        .max(u64::try_from(core::mem::size_of::<PreparedBuiltinBatchRender>()).unwrap_or(u64::MAX));
+        .max(outcome_report.largest_allocation_bytes);
+    let largest_inline_owner = control_inline_bytes.max(render_inline_bytes);
     if endpoint_retained_bytes > caps.maximum_builtin_retained_bytes
         || endpoint_largest > caps.maximum_named_allocation_bytes
     {
@@ -735,8 +748,10 @@ pub fn prepare_builtin_batch_endpoint(
             endpoint_retained_bytes,
             retained_bytes,
             largest_allocation_bytes: largest,
-            control_inline_bytes: core::mem::size_of::<BuiltinBatchControl>(),
-            render_inline_bytes: core::mem::size_of::<PreparedBuiltinBatchRender>(),
+            inline_owner_bytes,
+            largest_inline_owner_bytes: largest_inline_owner,
+            control_inline_bytes: usize::try_from(control_inline_bytes).unwrap_or(usize::MAX),
+            render_inline_bytes: usize::try_from(render_inline_bytes).unwrap_or(usize::MAX),
         },
     })
 }
@@ -826,6 +841,7 @@ impl PreparedBuiltinBatchEndpoint {
             outstanding: 0,
             staged_outcome: None,
             cancellation_started: false,
+            cancel_complete: None,
             last_collected: None,
         };
         Ok((control, render, resources))

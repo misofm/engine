@@ -68,11 +68,47 @@ The credit-release mutation was run as a single deterministic test to avoid the 
 threaded rendezvous mutation leaving a worker waiting after its assertion panic. Every mutation
 source was restored before the green rerun.
 
-The endpoint retained projection also includes the checked inline control and prepared-render owner
-sizes; the host row remains separate and is composed exactly once. The largest-allocation projection
-covers queue backings and both inline owner sizes before endpoint allocation.
+The endpoint report separates retained heap bytes from checked inline control/render owner bytes; the host row remains separate and is composed exactly once. Largest actual allocation reports cover queue and host heap backings, while inline owner sizes are reported independently.
 
 The endpoint specific PCM gate submits the fixture source, applies asymmetric fader/matrix records,
 and observes nonzero output through the prepared plan. Existing host observation gates provide the
 independent bank-lane and scalar-owner state/reduction oracle; the endpoint retains the Concurrent
 lowering and does not select paired dispatch.
+
+## Attempt 3 final correction record
+
+Attempt 3 gates cancellation collection on the acknowledged endpoint cancellation join. A started
+cancel alone no longer authorizes a missing outcome: `poll_cancel_boundary` records the generic
+acknowledgement, Applied outcomes are still staged first, and a no-outcome generic terminal can
+only be collected after that acknowledgement. The cancellation tests exercise collection before
+acknowledgement, applied-plus-future frontier reconciliation, and exact acknowledgement samples.
+
+The endpoint integration uses the workspace `bench_support::alloc::AuditedAllocator` (the crate's
+real global wrapper; installing a second wrapper conflicts at link time) and calls
+`assert_installed`. A positive allocation/free probe precedes repeated render and cancellation
+scopes, whose audit snapshots remain at zero allocations and frees. Resource fields now separate
+retained heap bytes, host composition, inline control/render ownership, and largest actual heap
+allocation; the endpoint test independently sums each row.
+
+The scoped concurrency fixture creates every channel inside `thread::scope`. It publishes the
+second ticket only after the first render thread report crosses the first singleton claim, then
+proves the second ticket waits for the next block. A caught panic with sender drop proves the
+render receiver exits and scope joins without a timeout.
+
+The endpoint PCM fixture submits asymmetric source planes, applies asymmetric fader and matrix
+records, and asserts nonzero output through the prepared bank/scalar plan. Existing host
+observation suites remain the independent state/reduction oracle, and this endpoint does not select
+paired dispatch. The private cfg(test) post-graph seam directly proves a possibly applied fault
+remains sticky and cannot become Canceled.
+
+The final five source mutations were applied individually and restored from the clean attempt-3
+source: second claim, post-claim publication, partial injection, premature credit, and fault
+mislabel. The first, second, fourth and fifth failed their focused assertions; the partial-prefix
+mutation terminated the audit binary with the expected SIGABRT after the render assertion, so its
+failure is recorded candidly rather than treated as a green test result.
+
+The endpoint PCM test now prepares a second host through the ordinary console path, submits the
+same source planes, pushes the same typed fader/matrix records into its separate track producers,
+and compares endpoint PCM bit-for-bit with that independently owned reference. It also compares
+render frame reports and asserts nonzero output; the fixture's bank allocation and existing
+observation suites provide the bank/scalar state oracle while paired dispatch remains unselected.
