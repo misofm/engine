@@ -1217,46 +1217,137 @@ impl PreparedGraphPlan {
             &'static str,
         ),
     > {
-        let supplied: BTreeSet<_> = bindings
-            .nodes
-            .iter()
-            .map(|binding| binding.node.clone())
-            .collect();
-        let builtin_bank_members: BTreeSet<_> = self.builtin_bank_members().cloned().collect();
-        let required: BTreeSet<_> = self
-            .required_bindings
-            .iter()
-            .filter(|node| !builtin_bank_members.contains(*node))
-            .cloned()
-            .collect();
-        let duplicate_binding = supplied.len() != bindings.nodes.len();
-        let source_claims = source_set
-            .as_ref()
-            .map(GraphPreparedSourceSet::claims)
-            .unwrap_or_default();
-        let source_claim_set: BTreeSet<_> = source_claims
-            .iter()
-            .map(|claim| claim.node.clone())
-            .collect();
-        let source_claims_valid = source_set.as_ref().is_none_or(|set| {
-            set.envelope == self.envelope
-                && set.is_valid()
-                && source_claim_set.len() == source_claims.len()
-        });
-        let coverage_matches = supplied.union(&source_claim_set).eq(required.iter());
-        let source_overlap = supplied.iter().any(|node| source_claim_set.contains(node));
-        let valid_observers = self
-            .observers
-            .iter()
-            .chain(bindings.observers.iter())
-            .all(|binding| matches!(binding.node, GraphNodeId::TrackStage { .. }))
-            && {
-                let mut pairs: BTreeSet<_> = BTreeSet::new();
+        let (
+            duplicate_binding,
+            coverage_matches,
+            source_overlap,
+            source_claims_valid,
+            valid_observers,
+        ) = {
+            let mut supplied = Vec::with_capacity(bindings.nodes.len());
+            supplied.extend(bindings.nodes.iter().map(|binding| &binding.node));
+            let supplied_count = supplied.len();
+            supplied.sort_unstable();
+            supplied.dedup();
+
+            let mut builtin_bank_members = Vec::with_capacity(self.builtin_bank_members().count());
+            builtin_bank_members.extend(self.builtin_bank_members());
+            builtin_bank_members.sort_unstable();
+            builtin_bank_members.dedup();
+
+            let mut required = Vec::with_capacity(self.required_bindings.len());
+            required.extend(self.required_bindings.iter().filter(|node| {
+                builtin_bank_members
+                    .binary_search_by(|member| member.cmp(node))
+                    .is_err()
+            }));
+            required.sort_unstable();
+            required.dedup();
+
+            let source_claims = source_set
+                .as_ref()
+                .map(GraphPreparedSourceSet::claims)
+                .unwrap_or_default();
+            let mut source_claim_nodes = Vec::with_capacity(source_claims.len());
+            source_claim_nodes.extend(source_claims.iter().map(|claim| &claim.node));
+            let source_claim_count = source_claim_nodes.len();
+            source_claim_nodes.sort_unstable();
+            source_claim_nodes.dedup();
+
+            let source_claims_valid = source_set.as_ref().is_none_or(|set| {
+                set.envelope == self.envelope
+                    && set.is_valid()
+                    && source_claim_nodes.len() == source_claim_count
+            });
+
+            // Both inputs are already sorted and unique, so equal keys advance both cursors and
+            // are emitted once into the comparison. No combined coverage collection is needed.
+            let coverage_matches = 'coverage: {
+                let mut supplied_index = 0;
+                let mut source_index = 0;
+                let mut required_index = 0;
+                while supplied_index < supplied.len() || source_index < source_claim_nodes.len() {
+                    let next = match (
+                        supplied.get(supplied_index),
+                        source_claim_nodes.get(source_index),
+                    ) {
+                        (Some(supplied), Some(source)) => match supplied.cmp(source) {
+                            core::cmp::Ordering::Less => {
+                                supplied_index += 1;
+                                *supplied
+                            }
+                            core::cmp::Ordering::Equal => {
+                                supplied_index += 1;
+                                source_index += 1;
+                                *supplied
+                            }
+                            core::cmp::Ordering::Greater => {
+                                source_index += 1;
+                                *source
+                            }
+                        },
+                        (Some(supplied), None) => {
+                            supplied_index += 1;
+                            *supplied
+                        }
+                        (None, Some(source)) => {
+                            source_index += 1;
+                            *source
+                        }
+                        (None, None) => unreachable!("union loop has a remaining input"),
+                    };
+                    if required
+                        .get(required_index)
+                        .is_none_or(|required| *required != next)
+                    {
+                        break 'coverage false;
+                    }
+                    required_index += 1;
+                }
+                required_index == required.len()
+            };
+
+            let source_overlap = {
+                let mut supplied_index = 0;
+                let mut source_index = 0;
+                let mut overlaps = false;
+                while supplied_index < supplied.len() && source_index < source_claim_nodes.len() {
+                    match supplied[supplied_index].cmp(source_claim_nodes[source_index]) {
+                        core::cmp::Ordering::Less => supplied_index += 1,
+                        core::cmp::Ordering::Greater => source_index += 1,
+                        core::cmp::Ordering::Equal => {
+                            overlaps = true;
+                            break;
+                        }
+                    }
+                }
+                overlaps
+            };
+
+            let mut observer_pairs =
+                Vec::with_capacity(self.observers.len() + bindings.observers.len());
+            observer_pairs.extend(
                 self.observers
                     .iter()
                     .chain(bindings.observers.iter())
-                    .all(|binding| pairs.insert((binding.node.clone(), binding.handle)))
-            };
+                    .map(|binding| (&binding.node, binding.handle)),
+            );
+            let valid_observers = observer_pairs
+                .iter()
+                .all(|(node, _)| matches!(node, GraphNodeId::TrackStage { .. }))
+                && {
+                    observer_pairs.sort_unstable();
+                    observer_pairs.windows(2).all(|pair| pair[0] != pair[1])
+                };
+
+            (
+                supplied.len() != supplied_count,
+                coverage_matches,
+                source_overlap,
+                source_claims_valid,
+                valid_observers,
+            )
+        };
         if bindings.envelope != self.envelope
             || !coverage_matches
             || duplicate_binding
@@ -2742,6 +2833,78 @@ mod tests {
             },
             Box::new(SilentSourceSetDriver { claims: 1 }),
         )
+    }
+
+    #[test]
+    fn borrowed_sorted_bind_validation_preserves_set_semantics() {
+        // Caller order and duplicate/unsorted plan requirements retain the old set semantics.
+        let (mut plan, mut bindings, _) = binding_plan();
+        let output = plan
+            .required_bindings
+            .iter()
+            .find(|node| matches!(node, GraphNodeId::Output { .. }))
+            .cloned()
+            .expect("output");
+        let input = plan
+            .required_bindings
+            .iter()
+            .find(|node| matches!(node, GraphNodeId::TrackStage { .. }))
+            .cloned()
+            .expect("input");
+        plan.required_bindings = vec![output.clone(), input.clone(), output];
+        bindings.nodes.reverse();
+        match plan.bind(bindings) {
+            Ok(_) => {}
+            Err(failure) => panic!("set-equivalent binding rejected: {}", failure.code),
+        }
+
+        // A duplicated requirement for a bank-excluded member is filtered before set comparison.
+        let (mut bank_plan, bank_bindings, _) = four_track_builtin_plan(57_001, true, false);
+        let excluded = bank_plan.builtin_banks[0].members[0].clone();
+        bank_plan
+            .required_bindings
+            .extend([excluded.clone(), excluded]);
+        let bound = bank_plan
+            .bind(bank_bindings)
+            .unwrap_or_else(|failure| panic!("bank-excluded duplicate rejected: {}", failure.code));
+        assert_eq!(
+            render_three_blocks(bound).0.map(f32::to_bits),
+            [10.0, -15.0, 20.0, -30.0, 30.0, -45.0].map(f32::to_bits)
+        );
+
+        // Equal observer values split across plan and caller ownership reject and return both.
+        let (mut plan, mut bindings, input) = binding_plan();
+        let order = Arc::new(AtomicU64::new(0));
+        plan.observers.push(GraphNodeObserverBinding::new(
+            input.clone(),
+            7,
+            Box::new(W4OrderObserver {
+                lane: 0,
+                order: Arc::clone(&order),
+            }),
+        ));
+        bindings.observers.push(GraphNodeObserverBinding::new(
+            input,
+            7,
+            Box::new(W4OrderObserver { lane: 0, order }),
+        ));
+        let failure = match plan.bind(bindings) {
+            Ok(_) => panic!("value-equal split observers accepted"),
+            Err(failure) => failure,
+        };
+        assert_eq!(failure.code, "graph.plan.observer");
+        assert_eq!(failure.plan.observers.len(), 1);
+        assert_eq!(failure.bindings.observers.len(), 1);
+        let returned_plan = *failure.plan;
+        let mut returned_bindings = failure.bindings;
+        returned_bindings
+            .observers
+            .pop()
+            .expect("returned caller observer");
+        match returned_plan.bind(returned_bindings) {
+            Ok(_) => {}
+            Err(failure) => panic!("repaired observer bind rejected: {}", failure.code),
+        }
     }
 
     #[test]
