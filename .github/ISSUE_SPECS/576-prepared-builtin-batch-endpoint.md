@@ -232,6 +232,20 @@ three sequential tests omit most frozen discriminators. The complete verdict is
 inside the existing exact paths; it may not widen protocol, graph, engine, builtin,
 manifest, artifact or lane B #575 ownership.
 
+## Attempt 2 review
+
+Luna HIGH correction checkpoint `e6df0a6c7b3f3c9264a95ed5767c13cb7b07c7f2`
+passed ten endpoint tests and the proportional local gates. Astra LOW returned
+**FAIL**: cancellation can still race an Applied outcome and release generic credit
+before endpoint reconciliation; polling still bypasses that join; allocation counters
+lack a real allocator/liveness control; threaded rendezvous can strand render after a
+control panic; audio/state/observation and the five mutations do not discriminate the
+frozen claims; and resource fields still mix incomplete retained, inline and largest
+allocation quantities. The full verdict is `docs/audits/576-attempt2-review.md`.
+Attempt 3 is the final allowed attempt and must repair only these findings within the
+same exact paths. A third FAIL triggers the hard stop and bounded successor; no fourth
+revision or weakened gate is authorized.
+
 ## Attempt 2 implementation record
 
 Attempt 2 stages the endpoint outcome queue before calling generic `collect`. A missing or
