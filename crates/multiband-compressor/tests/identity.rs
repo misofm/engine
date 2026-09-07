@@ -8,8 +8,8 @@
 mod support;
 
 use effect_contract::{
-    BankWidth, EffectBankProcessBlock, LinkMode, NativeEffectFactory, ParameterChannel,
-    PreparedAutomationSpan, PreparedNativeEffect, ResetKind,
+    BankWidth, EffectBankProcessBlock, InitialParameterValue, LinkMode, NativeEffectFactory,
+    ParameterChannel, PreparedAutomationSpan, PreparedNativeEffect, ResetKind,
 };
 use multiband_compressor::MultibandCompressorFactory;
 use support::{point, process, request_with, snapshot, snapshot_track, varied_values};
@@ -25,19 +25,75 @@ fn track_signal(track: usize) -> (Vec<f32>, Vec<f32>) {
     (left, right)
 }
 
+#[derive(Clone, Copy, Debug)]
+enum OffsetProfile {
+    Uniform,
+    UnequalUniform,
+    Mixed,
+}
+
+fn profile_values(track: usize, profile: OffsetProfile) -> [InitialParameterValue; 24] {
+    let mut values = varied_values(track);
+    let (left, right) = match profile {
+        OffsetProfile::Uniform => (5.0, 5.0),
+        OffsetProfile::UnequalUniform => (0.0, 20.0),
+        OffsetProfile::Mixed => {
+            const LEFT: [f32; TRACKS] = [0.0, 5.0, 20.0, 10.0, 0.0, 5.0, 20.0, 10.0];
+            const RIGHT: [f32; TRACKS] = [20.0, 10.0, 5.0, 0.0, 20.0, 10.0, 5.0, 0.0];
+            (LEFT[track], RIGHT[track])
+        }
+    };
+    values[2].value = left;
+    values[3].value = right;
+    values
+}
+
+fn profile_automation() -> [PreparedAutomationSpan; 4] {
+    [
+        point(2, ParameterChannel::Left, 0, -30.0),
+        point(2, ParameterChannel::Right, 0, -27.0),
+        point(11, ParameterChannel::Left, 0, 2.0),
+        point(11, ParameterChannel::Right, 0, -3.0),
+    ]
+}
+
+fn assert_populated(
+    label: &str,
+    channels: &[Vec<f32>],
+    states: &[(Vec<u8>, Vec<u8>, Vec<u8>)],
+) {
+    assert!(
+        channels
+            .iter()
+            .any(|channel| channel[960..].iter().any(|sample| sample.to_bits() != 0)),
+        "{label}: output after latency must be populated"
+    );
+    for (track, (_, left, right)) in states.iter().enumerate() {
+        assert!(
+            left[48 * 4..].iter().any(|byte| *byte != 0),
+            "{label}: track {track} left ring must be populated"
+        );
+        assert!(
+            right[48 * 4..].iter().any(|byte| *byte != 0),
+            "{label}: track {track} right ring must be populated"
+        );
+    }
+}
+
 /// Runs the eight tracks as `TRACKS / lanes` banks of `lanes` and returns their interleaved PCM,
 /// their per-track snapshots and their per-track reports.
 #[allow(clippy::type_complexity)]
-fn run_banks(
+fn run_banks_with_sets(
     width: BankWidth,
     link: LinkMode,
+    sets: &[[InitialParameterValue; 24]],
+    automation: &[PreparedAutomationSpan],
 ) -> (
     Vec<Vec<f32>>,
     Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>,
     Vec<effect_contract::ProcessReport>,
 ) {
     let lanes = width.lanes() as usize;
-    let sets = (0..TRACKS).map(varied_values).collect::<Vec<_>>();
     let mut channels = vec![Vec::new(); TRACKS * 2];
     for track in 0..TRACKS {
         let (left, right) = track_signal(track);
@@ -72,10 +128,10 @@ fn run_banks(
                     right[frame * lanes + lane] = channels[track * 2 + 1][block * FRAMES + frame];
                 }
             }
-            let spans: Vec<PreparedAutomationSpan> = if block == 0 && group == 0 {
-                vec![point(2, ParameterChannel::Left, 0, -30.0)]
+            let spans: &[PreparedAutomationSpan] = if block == 0 && group == 0 {
+                automation
             } else {
-                Vec::new()
+                &[]
             };
             let mut offsets = vec![0u32; lanes + 1];
             for slot in offsets.iter_mut().skip(1) {
@@ -115,9 +171,8 @@ fn run_banks(
     (channels, snapshots, reports)
 }
 
-/// The eight tracks run one at a time through the scalar product.
-#[allow(clippy::type_complexity)]
-fn run_scalar(
+fn run_banks(
+    width: BankWidth,
     link: LinkMode,
 ) -> (
     Vec<Vec<f32>>,
@@ -125,6 +180,21 @@ fn run_scalar(
     Vec<effect_contract::ProcessReport>,
 ) {
     let sets = (0..TRACKS).map(varied_values).collect::<Vec<_>>();
+    let automation = [point(2, ParameterChannel::Left, 0, -30.0)];
+    run_banks_with_sets(width, link, &sets, &automation)
+}
+
+/// The eight tracks run one at a time through the scalar product.
+#[allow(clippy::type_complexity)]
+fn run_scalar_with_sets(
+    link: LinkMode,
+    sets: &[[InitialParameterValue; 24]],
+    automation: &[PreparedAutomationSpan],
+) -> (
+    Vec<Vec<f32>>,
+    Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>,
+    Vec<effect_contract::ProcessReport>,
+) {
     let mut channels = vec![Vec::new(); TRACKS * 2];
     let mut snapshots = Vec::new();
     let mut reports = Vec::new();
@@ -137,7 +207,7 @@ fn run_scalar(
         for block in 0..BLOCKS {
             let start = block * FRAMES;
             let spans: &[PreparedAutomationSpan] = if block == 0 && track == 0 {
-                &[point(2, ParameterChannel::Left, 0, -30.0)]
+                automation
             } else {
                 &[]
             };
@@ -159,6 +229,18 @@ fn run_scalar(
         channels[track * 2 + 1] = right;
     }
     (channels, snapshots, reports)
+}
+
+fn run_scalar(
+    link: LinkMode,
+) -> (
+    Vec<Vec<f32>>,
+    Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>,
+    Vec<effect_contract::ProcessReport>,
+) {
+    let sets = (0..TRACKS).map(varied_values).collect::<Vec<_>>();
+    let automation = [point(2, ParameterChannel::Left, 0, -30.0)];
+    run_scalar_with_sets(link, &sets, &automation)
 }
 
 /// E3. `WIDTH = 1`, 4 and 8 render the same bits, keep the same state and file the same reports.
@@ -187,6 +269,47 @@ fn lane_identity_across_widths() {
                 bank_reports, scalar_reports,
                 "link={link:?} width={width:?}"
             );
+        }
+    }
+}
+
+/// Uniform, unequal-channel and mixed lane offsets keep the public scalar and bank products
+/// bit-identical. The first block carries settled-to-ramped control points; the remaining blocks
+/// exercise the settled segment path after the rings have passed the declared latency.
+#[test]
+fn detector_offset_profiles_preserve_public_identity() {
+    let automation = profile_automation();
+    for profile in [
+        OffsetProfile::Uniform,
+        OffsetProfile::UnequalUniform,
+        OffsetProfile::Mixed,
+    ] {
+        let sets = (0..TRACKS)
+            .map(|track| profile_values(track, profile))
+            .collect::<Vec<_>>();
+        for link in [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average] {
+            let (scalar_pcm, scalar_state, scalar_reports) =
+                run_scalar_with_sets(link, &sets, &automation);
+            assert_populated("scalar profile", &scalar_pcm, &scalar_state);
+            for width in [BankWidth::Four, BankWidth::Eight] {
+                let (bank_pcm, bank_state, bank_reports) =
+                    run_banks_with_sets(width, link, &sets, &automation);
+                assert_populated("bank profile", &bank_pcm, &bank_state);
+                for channel in 0..TRACKS * 2 {
+                    for frame in 0..BLOCKS * FRAMES {
+                        assert_eq!(
+                            bank_pcm[channel][frame].to_bits(),
+                            scalar_pcm[channel][frame].to_bits(),
+                            "profile={profile:?} link={link:?} width={width:?} channel={channel} frame={frame}"
+                        );
+                    }
+                }
+                assert_eq!(bank_state, scalar_state, "profile={profile:?} link={link:?}");
+                assert_eq!(
+                    bank_reports, scalar_reports,
+                    "profile={profile:?} link={link:?} width={width:?}"
+                );
+            }
         }
     }
 }
