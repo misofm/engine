@@ -163,3 +163,14 @@ manifest verified. Evidence is in `artifacts/issue552-final-qualification-attemp
 
 No #558 checker or #552 product byte changed. Astra LOW exact-head review, required PR
 qualification, merge, synchronized closure, and post-main qualification remain.
+
+## Astra LOW combined review attempt 2 — PASS
+
+Actual Astra LOW returned PASS on exact pushed HEAD
+`fe5fce4f301c3c71f9090af7cc214f30ff4bc2e9`. It authenticated the corrected 101-record capture,
+verified all six attributable provenance mutations, confirmed the #558 six-line scope remained
+unchanged, and passed both exact-head whitespace checks. The full verdict is in
+`artifacts/issue552-final-review-attempt2`.
+
+Required PR qualification, merge, synchronized #558/#552 closure, post-main qualification, and
+clean worktree removal remain.
