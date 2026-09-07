@@ -6,7 +6,6 @@ use bench_support::sysinfo::HostToolchainFacts;
 use std::{
     env,
     hint::black_box,
-    process::Command,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -308,11 +307,8 @@ fn command(args: &[&str]) -> String {
 }
 
 fn command_allow_empty(args: &[&str]) -> Option<String> {
-    let output = Command::new(args[0]).args(&args[1..]).output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    Some(String::from_utf8(output.stdout).ok()?.trim().to_owned())
+    let (program, rest) = args.split_first()?;
+    bench_support::sysinfo::command_output(program, rest)
 }
 
 fn json_string_array(values: &[String]) -> String {
@@ -407,5 +403,35 @@ mod tests {
         );
         assert!(record.contains(&expected_metadata));
         assert!(record.contains("\"background_load_note\":\"quiet\",\"metadata_incomplete\":true,\"missing_metadata\":[\"logical_cores\"]"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn metadata_command_projection_preserves_empty_status_and_unknown_failures() {
+        assert_eq!(
+            super::command_allow_empty(&["/bin/sh", "-c", "true"]),
+            Some(String::new())
+        );
+        assert_eq!(
+            super::command_allow_empty(&["/bin/sh", "-c", "printf ' \\n\\t'"]),
+            Some(String::new())
+        );
+        assert_eq!(super::command(&["/bin/sh", "-c", "true"]), "unknown");
+        assert_eq!(
+            super::command(&["/bin/sh", "-c", "printf '  dirty  \\n'"]),
+            "dirty"
+        );
+        assert_eq!(
+            super::command_allow_empty(&["/bin/sh", "-c", "printf plausible; exit 7"]),
+            None
+        );
+        assert_eq!(
+            super::command_allow_empty(&["/definitely/missing/metadata-command"]),
+            None
+        );
+        assert_eq!(
+            super::command_allow_empty(&["/bin/sh", "-c", r"printf '\377'"]),
+            None
+        );
     }
 }
