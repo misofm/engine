@@ -353,3 +353,25 @@ audited the one-file exact-path diff and reproduced the complete 47-test library
 green source checkpoint, not attempt-2 PASS. Root must integrate current delivered main, run the
 proportional debug/release/static/supported-target gates, coordinate artifact qualification with
 lane B after source acceptance, and obtain the required Astra LOW exact-head adversarial verdict.
+
+## Attempt 2 integrated source qualification
+
+Root merged delivered main `b95c9b7b` without conflicts at pushed checkpoint `b441d820`; no
+intervening main commit touched a #470 graph or builtins source path. On that combined source the
+complete affected debug suites passed: graph 60, graph-compiler 65, builtins 9,
+builtins-compiler 47 and allocation tracker 9. The same five suites passed in release.
+
+The first strict affected Clippy run then rejected three finite source-shape details introduced by
+the mechanism: the fixed preparation constructor's eighth ownership argument, test-only capture
+field assignment after `Default`, and an index-only range loop in the selector. No semantic test
+failed. Luna made only those three corrections in `crates/graph/src/runtime.rs`; root audited,
+tested and pushed them as `9d2e443c`. The final exact-head graph 60, graph-compiler 65,
+builtins-compiler 47 and allocation-tracker 9 release suites pass.
+
+Strict affected all-target Clippy with test support, formatting, diff check, realtime policy
+(42 regions in 12 files), builtins policy, lane policy, unfused seal (eight registered calls), and
+workspace policy all pass. The existing supported cross-target matrix passes for native
+x86-64-v3 plus Wasm scalar and simd128; native AArch64 remains unsupported under #378. No timing
+or performance claim is made. Source and proportional local qualification are frozen at
+`9d2e443c` for Astra LOW adversarial review. Lane B alone retains normal AudioWorklet artifact
+qualification and any necessary pin work after source acceptance.
