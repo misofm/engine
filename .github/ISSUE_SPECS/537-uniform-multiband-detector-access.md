@@ -188,3 +188,7 @@ Conditions:
 Attempt-2 source PASS remains intact; attempt-1 FAIL remains counted. This ruling establishes neither published-artifact success nor speedup, completed delivery, PR/merge approval, or issue closure. Exact-head/current-base and required CI obligations remain.
 
 Review was read-only: no edits, builds/tests, agents, Git/GitHub mutations, or report-file writes.
+
+## Approved pin checkpoint — Luna xhigh
+
+Luna applied only the approved exact hash replacement, preserving the newline. Original failure and bounded Astra low ruling remain retained. DSP/build source remains frozen. The ordinary verified builder and remaining delivery checks are pending; this checkpoint claims no artifact qualification.
