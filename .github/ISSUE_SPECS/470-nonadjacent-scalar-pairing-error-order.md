@@ -453,3 +453,26 @@ classify every difference from the committed browser expectation, and complete t
 artifact, PCM, SDK and browser gates before Astra LOW pre-pin review. Repository pin, browser
 expectation, checked result and deployment matrix remain unchanged until the corresponding evidence
 is reviewed.
+
+## Wasm resource-consumer checkpoint
+
+From the detached exact-source scratch worktree, the ordinary no-bypass builder ran once and
+retained the exact six-file candidate in `/tmp/issue470-qualified-artifact`. Its Wasm is 2,747,774
+bytes and reproduces candidate digest `63dd5f8b0febf193847b697fa8e4d92e791b7e4775f3b4b6b61252783f153e9f`.
+The shipped artifact static/object/ABI checks passed. Independent direct-Wasm and native fixture
+oracles returned zero. Identity, command-timeline and observation-timeline PCM digests remain
+bit-identical to their committed Wasm and native expectations.
+
+The stale browser-resource gate reported exactly three Wasm target-sensitive changes and passed
+all 26 red self-test mutations: `graphSessionPlusPlanBytes` and `graphIncrementalPlanBytes` each
+move from 29,498 to 29,578, and `graphMetadataBytes` moves from 3,659 to 3,739. The independent
+native witness reported 45,050, 45,050 and 6,159 for those rows; these values were evidence for the
+target-sensitive classification and were not copied into the Wasm fixture.
+
+Luna HIGH changed only those three values in
+`hosts/host-web/tests/browser-v1/expected.json`. The artifact-backed expected-resource gate, its 26
+mutations, focused host-web resource/layout checks, all three native parity digest tests, formatting,
+diff and exact semantic-scope checks pass. Repository artifact pin, checked browser results and
+deployment matrix remain unchanged. Root must checkpoint this tranche before the remaining SDK and
+three-browser pre-pin qualification; candidate artifact and raw evidence remain under `/tmp` until
+durable evidence assembly.
