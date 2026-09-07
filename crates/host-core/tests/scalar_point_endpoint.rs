@@ -1379,6 +1379,7 @@ fn preparation_resources_and_success_path_are_bounded() {
         let status = std::process::Command::new(std::env::current_exe().expect("test executable"))
             .arg("--exact")
             .arg("preparation_resources_and_success_path_are_bounded")
+            .arg("--test-threads=1")
             .arg("--nocapture")
             .env(CHILD, "1")
             .status()
@@ -1427,9 +1428,8 @@ fn preparation_resources_and_success_path_are_bounded() {
 
     let mut fx = asymmetric_effect();
     warm(&mut *fx);
-    let ((mut control, render, resources), endpoint_diagnostic) = measure_preparation(|| {
-        prepare_scalar_point_endpoint(&mut *fx, REV, H, cfg, 1).unwrap()
-    });
+    let ((mut control, render, resources), endpoint_diagnostic) =
+        measure_preparation(|| prepare_scalar_point_endpoint(&mut *fx, REV, H, cfg, 1).unwrap());
     let (foreign_global, foreign_thread_audit) = foreign_thread_allocation_probe();
     eprintln!(
         "scalar Point preparation diagnostics: direct global={direct_global:?} thread={direct_thread:?}; wrapped global={wrapped_global:?} thread={wrapped_thread:?}; foreign global={foreign_global:?} thread={foreign_thread_audit:?}",
@@ -2041,6 +2041,7 @@ fn controller_scalar_preflight_rejections_and_single_allocation_authority() {
         let status = std::process::Command::new(std::env::current_exe().expect("test executable"))
             .arg("--exact")
             .arg("controller_scalar_preflight_rejections_and_single_allocation_authority")
+            .arg("--test-threads=1")
             .arg("--nocapture")
             .env(CHILD, "1")
             .status()
@@ -2064,18 +2065,18 @@ fn controller_scalar_preflight_rejections_and_single_allocation_authority() {
     let ((direct_controller, direct_render, direct_resources), direct_diagnostic) =
         measure_preparation(|| {
             ControllerAutomationDelivery::prepare(
-            direct_fixture.session,
-            controller_queue_config(),
-            direct_fixture.provider,
-            controller_replay_config(),
-            ProtocolCodec::default(),
-            controller_config(),
-            ControllerRetainedCapacity {
-                meter_handles: 0,
-                counter_ids: 0,
-            },
-            direct_capabilities,
-        )
+                direct_fixture.session,
+                controller_queue_config(),
+                direct_fixture.provider,
+                controller_replay_config(),
+                ProtocolCodec::default(),
+                controller_config(),
+                ControllerRetainedCapacity {
+                    meter_handles: 0,
+                    counter_ids: 0,
+                },
+                direct_capabilities,
+            )
             .expect("direct #530 preparation")
         });
     black_box((&direct_controller, &direct_render, &direct_resources));
@@ -2086,19 +2087,19 @@ fn controller_scalar_preflight_rejections_and_single_allocation_authority() {
     let ((combined_controller, combined_render, resources), combined_diagnostic) =
         measure_preparation(|| {
             prepare_controller_scalar_point_endpoint(
-            processor,
-            combined_handles,
-            combined_fixture.session,
-            controller_queue_config(),
-            combined_fixture.provider,
-            controller_replay_config(),
-            ProtocolCodec::default(),
-            controller_config(),
-            ControllerRetainedCapacity {
-                meter_handles: 0,
-                counter_ids: 0,
-            },
-        )
+                processor,
+                combined_handles,
+                combined_fixture.session,
+                controller_queue_config(),
+                combined_fixture.provider,
+                controller_replay_config(),
+                ProtocolCodec::default(),
+                controller_config(),
+                ControllerRetainedCapacity {
+                    meter_handles: 0,
+                    counter_ids: 0,
+                },
+            )
             .expect("combined preparation")
         });
     eprintln!(

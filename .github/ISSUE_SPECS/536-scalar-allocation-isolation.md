@@ -89,3 +89,7 @@ The comparisons did **not** reproduce or explain the historical 31-versus-27 fai
 Luna high/xhigh may make only the two argument additions and necessary formatting. Complete the spec’s finite gates: both exact selectors through parent/child in debug and release, inherited concurrency2 override verification, the full nine-test binary once, affected strict Clippy and formatting, using `--locked --features control-provider`. Preserve complete captures and every failure.
 
 This is the diagnostic decision only; consolidated attempt review and required PR qualification remain outstanding.
+
+## Attempt 1 correction checkpoint
+
+Luna xhigh added --test-threads=1 to both existing child launchers and applied formatting. The first corrected resource selector passed in debug with inherited RUST_TEST_THREADS=2, parent and child each 1 pass. Direct/wrapped counts remain 27 allocations, 0 frees/reallocations and 102496 bytes; measured-thread counts agree. Source SHA-256: 15dedf93497aacf0304b756ed39ea30383c2e8b037b4a4811e1fc155d3fab246. Remaining frozen gates and consolidated review are pending.
