@@ -87,3 +87,9 @@ Step 0 is a hard precondition: root assigns `QUALIFICATION_SOURCE_CHECKPOINT` on
 - The post-pin no-bypass build produces six files byte-identical to the prequalified artifact.
 - Required `qualification` reports actual SUCCESS on the delivered exact head/base candidate.
 - #543 remains the accepted Rust slice; #552 remains required to close CP-20.
+
+## Root stop and bounded prequalification recovery
+
+Root intentionally interrupted the first Luna HIGH worker (PID975263) and its verified inventory script after three inventory passes before any specified artifact build or qualification gate. This was a root throughput intervention, not an unexplained external host timeout. The worker exited1 without a terminal verdict. Raw launch records/streams, partial inventory outputs under /tmp/issue555-luna-a1, and exact root interruption record remain preserved; no partial inventory is PASS evidence. Repository product and pin bytes remain unchanged.
+
+Sol MEDIUM selected a bounded replacement proof using Git blob identity and Git tracked executable/symlink semantics. Root authorizes one fresh actual Luna HIGH pre-pin invocation on the same frozen source and original finite gates, with a new capture prefix. It must preserve the stopped invocation, prove exact file identities without another general inventory framework, and stop on a failed source proof or specified qualification gate. No repository pin edit is authorized. The existing artifact/ABI/resource/PCM/browser gates and Astra MEDIUM-before-pin requirement remain unchanged. New issue/evidence bookkeeping must not be mistaken for product-source changes.
