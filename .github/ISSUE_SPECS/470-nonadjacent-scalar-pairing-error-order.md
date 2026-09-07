@@ -201,3 +201,38 @@ Before review, root must resolve this applicability contradiction against the is
 production same-buffer population rather than relabel the harness as production. Ramping and
 retarget boundary assertions, the complete physical-conflict/overlap decline table, failure-path
 allocation evidence, release/static/target gates and lane-B artifact qualification also remain.
+
+## Astra MEDIUM attempt 1 review — FAIL
+
+Astra reviewed exact pushed head `a4f9be3f` read-only and rejected source PASS while retaining the
+approved split-owner architecture. The graph-compiler fixture was misconfigured rather than proof
+of an applicability blocker: `compile_console_model_with_builtins` uses host dispatch and prepares
+no live controls, while `scalar_console_registry` changes only effect-bank eligibility. Attempt 2
+must use existing graph-compiler APIs with explicit `Backend::Scalar`,
+`prepare_session_builtins_between_render_calls` and actual track-control requests, then assert no
+builtin banks, the real `F_A,F_B,M_A,M_B` schedule, physical fader/matrix buffer identity, bind-time
+split selection and nonzero output. The existing program permits the sole undelayed matrix reader
+to consume a nondedicated fader buffer in place; the corrected fixture must turn that source
+conclusion into executed evidence without changing coloring.
+
+The new failure tests compare independent owners after root's pre-review correction, but they do
+not observe the failed call's private post-fader buffer. Settled completion changes neither retained
+state nor queue counters, and retry input overwrites that buffer. Attempt 2 must inspect failed-call
+buffer bits through existing narrow graph/runtime test seams against asymmetric nonunity separate
+execution, including matrix state, and show that removing completion makes the same assertion
+fail.
+
+The larger split outer is charged, but runtime also retains the boxed split-owner table, an
+`Option<SplitPairSlot>` in every runtime op and the new runtime owner-table field. The current
+accounting test observes an adjacent fixture and cannot prove those layout/allocation deltas fit a
+named cap. Attempt 2 must name and bound every new retained allocation/layout through existing
+checked-add and allocator machinery on an actually selected split binding. It must also validate
+the settled fader envelope after draining and before setting pending state; a direct invalid
+envelope must leave the later matrix queue untouched with no pending completion.
+
+Finally, attempt 2 retains split-specific ramp/retarget boundary proof, physical-conflict and
+overlap declines, failure-path zero allocation/free, selection mutation and proportional
+release/static/supported-target gates. The production minimum is track A across `F_B`; the existing
+synthetic B-across-`M_A` harness does not substitute for it. No artifact qualification, benchmark
+or performance claim is authorized. This is failed attempt 1 of the three-attempt maximum; preserve
+its commits and evidence without weakening any gate.
