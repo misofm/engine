@@ -577,6 +577,19 @@ pub(crate) struct RuntimeOp {
     pub(crate) observers: Box<[GraphNodeObserverBinding]>,
 }
 
+/// Old-layout witness for one executable op before the split-pair slot was added. The graph
+/// estimate derives the inline delta from this mirror and charges the larger op/unit delta once
+/// for the bounded emitted-op population.
+#[allow(dead_code)]
+pub(crate) struct RuntimeOpWithoutSplitPairSlot {
+    pub(crate) inputs: Box<[u32]>,
+    pub(crate) staged: Box<[StagedInput]>,
+    pub(crate) sidechain: Option<u32>,
+    pub(crate) output: u32,
+    pub(crate) kind: NodeKind,
+    pub(crate) observers: Box<[GraphNodeObserverBinding]>,
+}
+
 /// One scheduling unit: a single op, or a whole homogeneous bank.
 pub(crate) enum RuntimeUnit {
     Op(RuntimeOp),
@@ -598,6 +611,35 @@ pub(crate) enum RuntimeUnit {
         /// The master buffer a folded lane accumulates into. Meaningless when `fold` is empty.
         master: u32,
     },
+}
+
+#[allow(dead_code)]
+pub(crate) enum RuntimeUnitWithoutSplitPairSlot {
+    Op(RuntimeOpWithoutSplitPairSlot),
+    Bank {
+        members: Box<[RuntimeOpWithoutSplitPairSlot]>,
+        lanes: usize,
+        chain: BankChain,
+        fold: Box<[FoldLane]>,
+        master: u32,
+    },
+}
+
+pub(crate) fn scalar_split_op_layout() -> (u64, u64) {
+    (
+        u64::try_from(
+            core::mem::size_of::<RuntimeOp>()
+                .checked_sub(core::mem::size_of::<RuntimeOpWithoutSplitPairSlot>())
+                .expect("split op slot layout is retained"),
+        )
+        .expect("split op slot layout fits u64"),
+        u64::try_from(
+            core::mem::size_of::<RuntimeUnit>()
+                .checked_sub(core::mem::size_of::<RuntimeUnitWithoutSplitPairSlot>())
+                .expect("split op containing-unit layout is retained"),
+        )
+        .expect("split op containing-unit layout fits u64"),
+    )
 }
 
 impl RuntimeUnit {
@@ -1019,6 +1061,66 @@ pub(crate) struct Runtime {
     folds: u64,
 }
 
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TestOnlySplitPairTableWitness {
+    pub allocations: u64,
+    pub entries: u64,
+    pub bytes: u64,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static TEST_ONLY_SPLIT_PAIR_TABLE: std::cell::Cell<TestOnlySplitPairTableWitness> =
+        const { std::cell::Cell::new(TestOnlySplitPairTableWitness { allocations: 0, entries: 0, bytes: 0 }) };
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn test_only_reset_split_pair_table_witness() {
+    TEST_ONLY_SPLIT_PAIR_TABLE.with(|value| {
+        value.set(TestOnlySplitPairTableWitness {
+            allocations: 0,
+            entries: 0,
+            bytes: 0,
+        })
+    });
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[must_use]
+pub fn test_only_split_pair_table_witness() -> TestOnlySplitPairTableWitness {
+    TEST_ONLY_SPLIT_PAIR_TABLE.with(std::cell::Cell::get)
+}
+
+/// Layout witness for the retained [`Runtime`] owner without its split-owner table field. The
+/// runtime resource report charges the difference between this same-field layout and `Runtime`;
+/// the split table itself remains a separate boxed allocation.
+#[allow(dead_code)]
+pub(crate) struct RuntimeWithoutSplitPairTable {
+    lease: ArenaLease,
+    delays: Box<[CompensationDelay]>,
+    track_delays: Box<[TrackDelayLine]>,
+    units: Box<[RuntimeUnit]>,
+    identity: Box<[UnitIdentity]>,
+    bank_inputs: Box<[u32]>,
+    bank_outputs: Box<[u32]>,
+    redirects: u64,
+    folds: u64,
+}
+
+pub(crate) fn scalar_split_runtime_layout() -> (u64, u64) {
+    (
+        u64::try_from(core::mem::size_of::<Box<dyn GraphRuntimeSplitPairProcessor>>())
+            .expect("split table entry fits u64"),
+        u64::try_from(
+            core::mem::size_of::<Runtime>()
+                .checked_sub(core::mem::size_of::<RuntimeWithoutSplitPairTable>())
+                .expect("split runtime field layout is retained"),
+        )
+        .expect("split runtime field layout fits u64"),
+    )
+}
+
 impl Runtime {
     /// Lanes whose scatter this bind pointed at their consumer's buffer (issue #202 rec 3).
     pub(crate) const fn scatter_redirects(&self) -> u64 {
@@ -1098,6 +1200,22 @@ impl Runtime {
         folds: u64,
     ) -> Self {
         debug_assert_eq!(identity.len(), units.len());
+        #[cfg(any(test, feature = "test-support"))]
+        if !split_pairs.is_empty() {
+            TEST_ONLY_SPLIT_PAIR_TABLE.with(|value| {
+                let mut witness = value.get();
+                witness.allocations = witness.allocations.saturating_add(1);
+                witness.entries = witness
+                    .entries
+                    .saturating_add(u64::try_from(split_pairs.len()).expect("table length"));
+                witness.bytes = witness.bytes.saturating_add(
+                    u64::try_from(core::mem::size_of::<Box<dyn GraphRuntimeSplitPairProcessor>>())
+                        .expect("table entry size")
+                        .saturating_mul(u64::try_from(split_pairs.len()).expect("table length")),
+                );
+                value.set(witness);
+            });
+        }
         let widest = units
             .iter()
             .map(|unit| match unit {

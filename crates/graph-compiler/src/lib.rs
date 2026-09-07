@@ -2339,6 +2339,26 @@ mod tests {
             *live_resource,
             "published pre-bind estimate"
         );
+        let emitted_op_count = live
+            .graph()
+            .dependency_levels
+            .iter()
+            .map(|level| u64::try_from(level.nodes.len()).expect("fixture level fits u64"))
+            .sum::<u64>();
+        let runtime_metadata =
+            graph::GraphRuntimeMetadataResourceEstimate::checked_for(emitted_op_count)
+                .expect("runtime metadata estimate");
+        assert_eq!(
+            plain.report().estimate.graph_metadata_bytes
+                - plain.report().semantic_estimate.graph_metadata_bytes,
+            runtime_metadata.total_bytes,
+            "runtime metadata is admitted once for every graph before builtin owners"
+        );
+        assert!(
+            plain.report().estimate.largest_allocation_bytes
+                >= runtime_metadata.largest_allocation_bytes,
+            "reported largest allocation covers the runtime owner and op/unit bound"
+        );
 
         let mut exact = integration_caps();
         exact.maximum_graph_bytes = live_resource.graph_metadata_bytes;

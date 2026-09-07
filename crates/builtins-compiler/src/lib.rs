@@ -708,7 +708,7 @@ pub struct TestOnlyScalarStateTrace {
     pub matrix_words: [[u32; 15]; SCALAR_STATE_TRACE_CAPACITY],
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct TestOnlyInitialMatrixTrace {
     len: usize,
@@ -728,7 +728,7 @@ const EMPTY_SCALAR_STATE_TRACE: TestOnlyScalarStateTrace = TestOnlyScalarStateTr
     matrix_words: [[0; 15]; SCALAR_STATE_TRACE_CAPACITY],
 };
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 const EMPTY_INITIAL_MATRIX_TRACE: TestOnlyInitialMatrixTrace = TestOnlyInitialMatrixTrace {
     len: 0,
     owners: [0; SCALAR_STATE_TRACE_CAPACITY],
@@ -743,6 +743,7 @@ thread_local! {
     static SCALAR_MATRIX_STATE_WITNESS: std::cell::Cell<[u32; 15]> = const { std::cell::Cell::new([0; 15]) };
     static SCALAR_STATE_TRACE: std::cell::Cell<TestOnlyScalarStateTrace> =
         const { std::cell::Cell::new(EMPTY_SCALAR_STATE_TRACE) };
+    #[cfg(test)]
     static SCALAR_INITIAL_MATRIX_TRACE: std::cell::Cell<TestOnlyInitialMatrixTrace> =
         const { std::cell::Cell::new(EMPTY_INITIAL_MATRIX_TRACE) };
     static SCALAR_OWNER_DROPS: std::cell::Cell<[u64; 3]> = const { std::cell::Cell::new([0; 3]) };
@@ -818,7 +819,7 @@ pub fn test_only_scalar_state_trace() -> TestOnlyScalarStateTrace {
     SCALAR_STATE_TRACE.with(std::cell::Cell::get)
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 fn record_initial_matrix_state(owner: u16, matrix: &MatrixBuiltins) {
     let words = builtins::test_support::scalar_matrix_words(matrix);
     SCALAR_INITIAL_MATRIX_TRACE.with(|value| {
@@ -841,7 +842,7 @@ fn record_initial_matrix_state(owner: u16, matrix: &MatrixBuiltins) {
     });
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 fn initial_matrix_state(owner: u16) -> Option<[u32; 15]> {
     SCALAR_INITIAL_MATRIX_TRACE.with(|value| {
         let trace = value.get();
@@ -2111,7 +2112,7 @@ impl PreparedBuiltinsSession {
             } = strip;
             #[cfg(any(test, feature = "test-support"))]
             let test_only_owner = scalar_owner_id(&graph_id);
-            #[cfg(any(test, feature = "test-support"))]
+            #[cfg(test)]
             if control.is_some() {
                 record_initial_matrix_state(test_only_owner, &matrix);
             }
@@ -2260,7 +2261,22 @@ impl PreparedBuiltinsSession {
         } else {
             0
         };
-        let total_bytes = owners.checked_add(outer_total)?;
+        // Reserve one bounded table entry for an eligible serialized scalar population even when
+        // a particular graph later declines selection. The table is a distinct allocation; all
+        // runtime and op/unit layout terms are charged by the graph compiler for every graph.
+        let split_runtime = if dispatch == Backend::Scalar
+            && self.control_delivery == BuiltinControlDelivery::BetweenRenderCalls
+            && count != 0
+        {
+            graph::GraphScalarSplitRuntimeResourceEstimate::checked_for(1)?
+        } else {
+            graph::GraphScalarSplitRuntimeResourceEstimate::default()
+        };
+        // This owner term adds only the distinct boxed split table. The containing runtime owner
+        // and the per-op split-slot layout are admitted once by the graph compiler.
+        let total_bytes = owners
+            .checked_add(outer_total)?
+            .checked_add(split_runtime.split_pair_table_bytes)?;
         Some(graph::GraphScalarOwnerResourceEstimate {
             total_bytes,
             largest_allocation_bytes: if count == 0 {
@@ -2269,7 +2285,9 @@ impl PreparedBuiltinsSession {
                 fader
                     .max(matrix)
                     .max(if outer_total == 0 { 0 } else { outer })
+                    .max(split_runtime.split_pair_table_bytes)
             },
+            split_pair_table_bytes: split_runtime.split_pair_table_bytes,
         })
     }
 
@@ -4487,8 +4505,10 @@ pub use tests::test_only_prepared_unpaired_graph;
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
 pub use tests::{
-    test_only_prepared_pair_graph, test_only_prepared_scalar_pair_graph,
-    test_only_prepared_scalar_split_pair_graph,
+    test_only_observed_scalar_declined_split_pair_binding,
+    test_only_observed_scalar_split_pair_binding, test_only_prepared_pair_graph,
+    test_only_prepared_scalar_pair_graph, test_only_prepared_scalar_split_pair_graph,
+    test_only_prepared_scalar_split_pair_graph_with_observer_error,
 };
 
 #[cfg(any(test, feature = "test-support"))]
@@ -6014,10 +6034,31 @@ mod tests {
             None,
             Backend::Scalar,
             2,
-            BoundaryVariant::Nonadjacent,
+            BoundaryVariant::NonadjacentTrackA,
             1,
             None,
         )
+    }
+
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn test_only_prepared_scalar_split_pair_graph_with_observer_error()
+    -> PreparedBuiltinsGraphBound {
+        prepared_pair_graph_variant_observed(
+            false,
+            false,
+            false,
+            true,
+            None,
+            Backend::Scalar,
+            2,
+            BoundaryVariant::NonadjacentTrackA,
+            1,
+            None,
+            false,
+            true,
+        )
+        .0
     }
 
     #[cfg(feature = "test-support")]
@@ -6039,6 +6080,72 @@ mod tests {
                 Backend::Scalar,
                 2,
                 BoundaryVariant::Plain,
+                1,
+                None,
+                true,
+                false,
+            );
+        (
+            bound,
+            estimate,
+            scalar_resource,
+            owners.unwrap(),
+            binding.unwrap(),
+        )
+    }
+
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn test_only_observed_scalar_split_pair_binding() -> (
+        PreparedBuiltinsGraphBound,
+        graph::GraphResourceEstimate,
+        graph::GraphScalarOwnerResourceEstimate,
+        TestPhaseTwoAllocationSnapshot,
+        TestPhaseTwoAllocationSnapshot,
+    ) {
+        let (bound, estimate, scalar_resource, owners, binding) =
+            prepared_pair_graph_variant_observed(
+                false,
+                false,
+                false,
+                true,
+                None,
+                Backend::Scalar,
+                2,
+                BoundaryVariant::NonadjacentTrackA,
+                1,
+                None,
+                true,
+                false,
+            );
+        (
+            bound,
+            estimate,
+            scalar_resource,
+            owners.unwrap(),
+            binding.unwrap(),
+        )
+    }
+
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn test_only_observed_scalar_declined_split_pair_binding() -> (
+        PreparedBuiltinsGraphBound,
+        graph::GraphResourceEstimate,
+        graph::GraphScalarOwnerResourceEstimate,
+        TestPhaseTwoAllocationSnapshot,
+        TestPhaseTwoAllocationSnapshot,
+    ) {
+        let (bound, estimate, scalar_resource, owners, binding) =
+            prepared_pair_graph_variant_observed(
+                false,
+                false,
+                false,
+                false,
+                None,
+                Backend::Scalar,
+                2,
+                BoundaryVariant::NonadjacentTrackA,
                 1,
                 None,
                 true,
@@ -6307,6 +6414,18 @@ mod tests {
             .estimate
             .checked_add_scalar_owners(scalar_resource)
             .expect("fixture scalar owner estimate");
+        let emitted_op_count = levels.iter().fold(0_u64, |total, level| {
+            total
+                .checked_add(u64::try_from(level.nodes.len()).expect("fixture level fits u64"))
+                .expect("fixture runtime metadata count")
+        });
+        let runtime_resource =
+            graph::GraphRuntimeMetadataResourceEstimate::checked_for(emitted_op_count)
+                .expect("fixture runtime metadata estimate");
+        graph
+            .estimate
+            .checked_add_runtime_metadata(runtime_resource)
+            .expect("fixture runtime metadata estimate fold");
         let owner_observation =
             observe_binding.then(test_only_begin_phase_two_allocation_observation);
         let mut artifact =
@@ -7004,7 +7123,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "test-support")]
+    #[cfg(all(test, feature = "test-support"))]
     #[test]
     fn actual_scalar_nonadjacent_failed_render_materializes_post_fader_before_error() {
         let _guard = PAIR_WITNESS_LOCK
@@ -9656,10 +9775,16 @@ mod tests {
                 .expect("serialized owners")
                 .graph_scalar_owner_resource(Backend::Scalar, &levels, &classes)
                 .expect("checked scalar estimate");
-        assert_eq!(serialized.total_bytes, 3 * (fader + matrix + outer));
+        let split_table_entry =
+            core::mem::size_of::<Box<dyn GraphRuntimeSplitPairProcessor>>() as u64;
+        assert_eq!(serialized.split_pair_table_bytes, split_table_entry);
+        assert_eq!(
+            serialized.total_bytes,
+            3 * (fader + matrix + outer) + split_table_entry
+        );
         assert_eq!(
             serialized.largest_allocation_bytes,
-            fader.max(matrix).max(outer)
+            fader.max(matrix).max(outer).max(split_table_entry)
         );
 
         let concurrent = prepare_session_builtins_with_console(&compiled, &[], &controls, caps())

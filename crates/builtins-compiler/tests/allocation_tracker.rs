@@ -15,8 +15,10 @@ use builtins::{BuiltinLaneSelector, Matrix2x2, MeterConfig, MeterTap};
 use builtins_compiler::{
     BuiltinCompileCaps, MeterRequest, TestOnlyFaderMatrixPair, TrackControlRecord,
     TrackFaderRecord, prepare_session_builtins, test_only_begin_phase_two_allocation_observation,
-    test_only_fader_matrix_witness, test_only_observed_scalar_pair_binding,
+    test_only_fader_matrix_witness, test_only_observed_scalar_declined_split_pair_binding,
+    test_only_observed_scalar_pair_binding, test_only_observed_scalar_split_pair_binding,
     test_only_phase_two_allocation_snapshot, test_only_prepared_scalar_split_pair_graph,
+    test_only_prepared_scalar_split_pair_graph_with_observer_error,
     test_only_record_phase_two_allocation, test_only_record_phase_two_deallocation,
     test_only_reset_fader_matrix_witness, test_only_reset_phase_two_allocation_tracker,
     test_only_scalar_outer_lifetime, test_only_scalar_owner_drops, test_only_scalar_owner_layouts,
@@ -218,6 +220,38 @@ fn audit_graph_render(
         "actual queued graph render allocation/free gate"
     );
     witness
+}
+
+fn audit_failed_graph_render(
+    bound: &mut builtins_compiler::PreparedBuiltinsGraphBound,
+    output: &mut [f32],
+    absolute_sample: u64,
+    target: u32,
+    completion_disabled: bool,
+) -> graph::TestOnlyFailedBufferCapture {
+    graph::test_only_arm_failed_buffer_capture(target);
+    graph::test_only_set_completion_disabled(completion_disabled);
+    LIVE_ALLOCS.set(0);
+    LIVE_FREES.set(0);
+    armed(|| {
+        bound
+            .plan
+            .render(
+                RenderIo {
+                    input: None,
+                    output: PlanarBufferMut::try_new(output, 2, 64, 64).expect("output"),
+                },
+                RenderTime { absolute_sample },
+            )
+            .expect_err("injected observer render failure");
+    });
+    graph::test_only_set_completion_disabled(false);
+    assert_eq!(
+        (LIVE_ALLOCS.get(), LIVE_FREES.get()),
+        (0, 0),
+        "failed render allocation/free gate"
+    );
+    graph::test_only_failed_buffer_capture()
 }
 
 struct RuntimeBankPlanes {
@@ -457,6 +491,108 @@ fn actual_queued_scalar_split_graph_allocates_and_frees_nothing() {
 }
 
 #[test]
+fn actual_scalar_split_table_and_failed_render_fit_the_resource_gate() {
+    let _session_guard = SESSION
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let table_layout = Layout::array::<Box<dyn graph::GraphRuntimeSplitPairProcessor>>(1)
+        .expect("one split table entry");
+
+    test_only_reset_phase_two_allocation_tracker();
+    graph::test_only_reset_split_pair_table_witness();
+    let (declined, declined_estimate, declined_resource, _, declined_binding) =
+        armed(test_only_observed_scalar_declined_split_pair_binding);
+    assert_eq!(declined_resource.split_pair_table_bytes, 0);
+    assert!(!declined_binding.overflowed);
+    assert_eq!(
+        graph::test_only_split_pair_table_witness(),
+        graph::TestOnlySplitPairTableWitness {
+            allocations: 0,
+            entries: 0,
+            bytes: 0,
+        },
+        "declined split has no boxed table allocation"
+    );
+    drop(declined);
+
+    test_only_reset_phase_two_allocation_tracker();
+    graph::test_only_reset_split_pair_table_witness();
+    let (mut selected, selected_estimate, selected_resource, _, selected_binding) =
+        armed(test_only_observed_scalar_split_pair_binding);
+    assert_eq!(
+        selected_resource.split_pair_table_bytes,
+        table_layout.size() as u64
+    );
+    assert!(!selected_binding.overflowed);
+    assert!(selected_estimate.graph_metadata_bytes >= selected_resource.total_bytes);
+    let scalar_delta = selected_resource
+        .total_bytes
+        .checked_sub(declined_resource.total_bytes)
+        .expect("selected scalar resource delta");
+    assert_eq!(
+        selected_estimate.graph_metadata_bytes - declined_estimate.graph_metadata_bytes,
+        scalar_delta,
+        "selected report adds exactly the retained scalar owner/table term"
+    );
+    assert_eq!(
+        selected_estimate.incremental_plan_bytes - declined_estimate.incremental_plan_bytes,
+        scalar_delta
+    );
+    assert_eq!(
+        graph::test_only_split_pair_table_witness(),
+        graph::TestOnlySplitPairTableWitness {
+            allocations: 1,
+            entries: 1,
+            bytes: table_layout.size() as u64,
+        },
+        "selected split retains exactly one boxed table entry"
+    );
+    assert!(selected_binding.layouts.iter().any(|layout| {
+        layout.size_bytes == table_layout.size() as u64
+            && layout.align_bytes == table_layout.align() as u64
+    }));
+    let mut output = [0.0_f32; 128];
+    let settled = audit_graph_render(&mut selected, &mut output, 0);
+    assert_eq!((settled.fused_calls, settled.fallback_calls), (1, 0));
+
+    test_only_reset_fader_matrix_witness();
+    LIVE_ALLOCS.set(0);
+    LIVE_FREES.set(0);
+    armed(|| drop(selected));
+    assert_eq!(
+        LIVE_ALLOCS.get(),
+        0,
+        "off-render selected owner release allocates nothing"
+    );
+    assert!(
+        LIVE_FREES.get() > 0,
+        "selected owner release occurs off render"
+    );
+    assert_eq!(test_only_scalar_owner_drops(), [2, 2, 1]);
+    assert_eq!(test_only_scalar_outer_lifetime(), [1, 0, 1]);
+
+    let mut failed = test_only_prepared_scalar_split_pair_graph_with_observer_error();
+    let target = failed
+        .test_only_post_fader_buffer
+        .expect("selected split post-fader buffer");
+    let failed_capture = audit_failed_graph_render(&mut failed, &mut output, 0, target, false);
+    assert!(failed_capture.captured && !failed_capture.overflow);
+
+    let mut disabled = test_only_prepared_scalar_split_pair_graph_with_observer_error();
+    let disabled_target = disabled
+        .test_only_post_fader_buffer
+        .expect("selected split post-fader buffer");
+    let disabled_capture =
+        audit_failed_graph_render(&mut disabled, &mut output, 0, disabled_target, true);
+    assert_ne!(
+        disabled_capture, failed_capture,
+        "completion-disable mutation must fail the same failed-buffer assertion"
+    );
+    drop(failed);
+    drop(disabled);
+}
+
+#[test]
 fn actual_scalar_prepare_and_bind_retain_the_charged_owner_layouts() {
     let _session_guard = SESSION
         .lock()
@@ -557,8 +693,9 @@ fn actual_scalar_prepare_and_bind_retain_the_charged_owner_layouts() {
         .expect("actual owners fit conservative scalar allowance");
     assert_eq!(
         conservative_spare_outer,
-        2 * split_outer.size_bytes - outer.size_bytes,
-        "the scalar allowance reserves two possible split owners while this adjacent bind uses the smaller outer"
+        2 * split_outer.size_bytes - outer.size_bytes
+            + core::mem::size_of::<Box<dyn graph::GraphRuntimeSplitPairProcessor>>() as u64,
+        "the scalar allowance reserves two possible split owners and one possible table entry while this adjacent bind uses the smaller outer"
     );
     assert!(scalar_allowance.total_bytes <= admitted.session_plus_plan_bytes);
 
