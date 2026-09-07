@@ -1,0 +1,7 @@
+non-browser static lineage preflight: PASS
+candidateCommit: canonical lowercase 40-hex
+retained artifact: /tmp/issue555-postpin-artifact
+exact artifact files: 6
+wasmSha256: 6452f0db237da1d57b3594e7d95dd53a089a604d5b0791ea8b3533c5930c5a1c
+browser launch: not performed
+static-preflight-exit=0

@@ -1,0 +1,11 @@
+   Compiling math v0.1.0 (/home/bl/misofm/engine-shared-hex-authority/crates/math)
+   Compiling effect-contract v0.1.0 (/home/bl/misofm/engine-shared-hex-authority/crates/effect-contract)
+   Compiling rack v0.1.0 (/home/bl/misofm/engine-shared-hex-authority/crates/rack)
+   Compiling graph v0.1.0 (/home/bl/misofm/engine-shared-hex-authority/crates/graph)
+   Compiling source v0.1.0 (/home/bl/misofm/engine-shared-hex-authority/crates/source)
+   Compiling stem-hasher v0.1.0 (/home/bl/misofm/engine-shared-hex-authority/tools/stem-hasher)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.91s
+     Running unittests src/lib.rs (/tmp/issue543-target/debug/deps/stem_hasher-0d93247de033ccab)
+     Running unittests src/main.rs (/tmp/issue543-target/debug/deps/stem_hasher-17424b9f773fdf36)
+     Running tests/conformance.rs (/tmp/issue543-target/debug/deps/conformance-7efa1a9a36984160)
+   Doc-tests stem_hasher

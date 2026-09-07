@@ -75,12 +75,7 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 /// Encode bytes as lowercase hexadecimal without hashing them.
 #[must_use]
 pub fn hex(digest: &[u8]) -> String {
-    let mut text = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        text.push(char::from_digit(u32::from(byte >> 4), 16).expect("nibble"));
-        text.push(char::from_digit(u32::from(byte & 0x0f), 16).expect("nibble"));
-    }
-    text
+    engine::hex_lower(digest)
 }
 
 #[cfg(test)]

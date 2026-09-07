@@ -1,0 +1,4 @@
+   Compiling math v0.1.0 (/home/bl/misofm/engine-shared-hex-authority/crates/math)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.34s
+     Running tests/m2_lane_identity.rs (/tmp/issue543-target/debug/deps/m2_lane_identity-8e4e1e28fb24db2f)
+     Running tests/m3_determinism.rs (/tmp/issue543-target/debug/deps/m3_determinism-cc48c3c087f71afd)

@@ -1,0 +1,11 @@
+   Compiling typenum v1.20.1
+   Compiling cpufeatures v0.3.0
+   Compiling engine v0.1.0 (/home/bl/misofm/engine-shared-hex-authority/crates/engine)
+   Compiling hybrid-array v0.4.14
+   Compiling crypto-common v0.2.2
+   Compiling block-buffer v0.12.1
+   Compiling digest v0.11.3
+   Compiling sha2 v0.11.0
+   Compiling bench-support v0.1.0 (/home/bl/misofm/engine-shared-hex-authority/tools/bench-support)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.10s
+     Running unittests src/lib.rs (/tmp/issue543-target/debug/deps/bench_support-e15bfd8a9bc9d9e9)

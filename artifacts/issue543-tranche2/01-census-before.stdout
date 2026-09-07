@@ -1,0 +1,20 @@
+tools/wasm-gates/src/lib.rs:175:        let _ = write!(text, "{byte:02x}");
+tools/native-pcm-runner/src/lib.rs:1573:        digest.iter().map(|byte| format!("{byte:02x}")).collect()
+crates/graph-compiler/src/bin/rack_fixture.rs:174:        write!(output, "{byte:02x}").expect("string");
+crates/effect-runtime/tests/determinism.rs:27:    bytes.iter().map(|b| format!("{b:02x}")).collect()
+crates/effect-runtime/tests/determinism.rs:64:        let bytes: Vec<String> = scalar.iter().map(|b| format!("0x{b:02x}")).collect();
+crates/effect-runtime/tests/determinism.rs:132:        let bytes: Vec<String> = digest.iter().map(|b| format!("0x{b:02x}")).collect();
+crates/math/tests/m3_determinism.rs:45:    bytes.iter().map(|b| format!("{b:02x}")).collect()
+tools/stem-hasher/tests/conformance.rs:230:    const HEX: &[u8; 16] = b"0123456789abcdef";
+crates/math/tests/m2_lane_identity.rs:152:    bytes.iter().map(|b| format!("{b:02x}")).collect()
+tools/stem-hasher/src/lib.rs:306:    const HEX: &[u8; 16] = b"0123456789abcdef";
+crates/graph-compiler/src/canonical.rs:378:        write!(&mut output, "{byte:02x}").expect("writing to String");
+tools/parameter-metadata/src/bin/lattice_oracle.rs:56:        .map(|byte| format!("{byte:02x}"))
+tools/bench-support/src/digest.rs:80:        text.push(char::from_digit(u32::from(byte >> 4), 16).expect("nibble"));
+tools/bench-support/src/digest.rs:81:        text.push(char::from_digit(u32::from(byte & 0x0f), 16).expect("nibble"));
+crates/graph-compiler/src/bin/graph_fixture.rs:356:        write!(&mut output, "{byte:02x}").expect("String write");
+hosts/host-web/examples/sdk_render_oracle.rs:133:        .map(|byte| format!("{byte:02x}"))
+crates/effect-compiler/tests/migration_terminal.rs:1974:    let digest_hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+hosts/host-web/src/tests.rs:1280:            let _ = write!(&mut text, "{byte:02x}");
+hosts/host-web/src/tests.rs:1555:            let _ = write!(&mut text, "{byte:02x}");
+hosts/host-web/src/tests.rs:4066:                let _ = write!(&mut text, "{byte:02x}");

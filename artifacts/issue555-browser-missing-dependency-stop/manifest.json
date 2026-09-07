@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "issue": 555,
+  "stage": "browser-missing-dependency-stop",
+  "source_commit": "e4f46fa808e413507d204e81b6a4ebc27254869c",
+  "candidate_wasm_sha256": "6452f0db237da1d57b3594e7d95dd53a089a604d5b0791ea8b3533c5930c5a1c",
+  "cwd": "/tmp/issue555-source-e4f46fa8",
+  "argv": [
+    "npm",
+    "--prefix",
+    "hosts/host-web/qualification",
+    "run",
+    "qualify",
+    "--",
+    "--artifacts",
+    "/tmp/issue555-qualified-artifact",
+    "--browser",
+    "all",
+    "--check-matrix",
+    "--self-test-mutations"
+  ],
+  "status": 1,
+  "failure": {
+    "code": "ERR_MODULE_NOT_FOUND",
+    "detail": "Cannot find package 'playwright' imported from /tmp/issue555-source-e4f46fa8/hosts/host-web/qualification/run.mjs",
+    "node": "v22.23.2"
+  },
+  "browser_execution": {
+    "chromium": {"count": 0, "identity": null},
+    "firefox": {"count": 0, "identity": null},
+    "webkit": {"count": 0, "identity": null},
+    "mutation_controls_run": false
+  },
+  "no_mutation": {
+    "repository": true,
+    "scratch": true,
+    "rerun": false,
+    "record_matrix": false
+  },
+  "pin_proof": {
+    "path": "/tmp/issue555-source-e4f46fa8/hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256",
+    "bytes": 65,
+    "sha256": "1f432cfe1c599519f13a92390f3f302360498f174918a92e1f12f3ea9b282a8e",
+    "content": "6452f0db237da1d57b3594e7d95dd53a089a604d5b0791ea8b3533c5930c5a1c",
+    "suffix_hex": "0a",
+    "exact_expected": true,
+    "record": "pin-proof.txt"
+  },
+  "prior_proof": {
+    "commit": "9c82a56a3bd13a255ddcab42c1652363052928e1",
+    "path": "artifacts/issue555-browser-proof-wrapper-stop/proof.stdout",
+    "tracked_records": 8439,
+    "excluded_overlay": 1,
+    "checked_non_overlay_paths": 8438,
+    "missing_paths": 0,
+    "mismatched_paths": 0,
+    "record": "prior-proof-reference.txt"
+  },
+  "environment": {
+    "committed_readable": "environment.txt",
+    "bytes": 3151,
+    "sha256": "e686bb03824a5cc5b7369b51bb6ff024f9c4e4b1b4ac156fef8775a0dc97abfd",
+    "omitted_payload": "environment.env0",
+    "omitted_reason": "NUL-delimited environment stream is binary; apply_patch-preserved environment.txt is the committed readable environment.",
+    "omitted_source_bytes": 3151,
+    "omitted_source_sha256": "4e0501db9290b33ca95de73d3644e17525f9c4b9dc0222e76014324a8ce0dc67"
+  },
+  "representation": "Manifest excludes itself. Five readable command payloads are byte-identical to /tmp/issue555-browser-xhigh; stdout.gz is deterministic gzip whose decompressed 169 bytes and SHA-256 83a4c567e6b93529e6549d2afb1256590aa34cbbc49bad924b6233dccb706c1f match the captured stdout exactly. pin-proof.txt, prior-proof-reference.txt and summary.txt record the bounded proof and stop.",
+  "files": [
+    {"path": "argv.json", "bytes": 226, "sha256": "f65647f2d2a26e3c84e2af2ac00a32ccc143777e318a3ad7b3ca74d410faa735"},
+    {"path": "cwd", "bytes": 30, "sha256": "da0aedaf81bcc2da2a79b1c75704f82f8c3074a22051afee65f08663092b9fc1"},
+    {"path": "environment.txt", "bytes": 3151, "sha256": "e686bb03824a5cc5b7369b51bb6ff024f9c4e4b1b4ac156fef8775a0dc97abfd"},
+    {"path": "stderr", "bytes": 898, "sha256": "971eef63c52509943f8cafd071d88331e2644bc31077bedf8369aeeb55ae1689"},
+    {"path": "stdout.gz", "bytes": 143, "sha256": "c93616a6cb2027e041b57896264b335fff2a5e1a3aa9e8cc92427c8792325b65", "decompressed_bytes": 169, "decompressed_sha256": "83a4c567e6b93529e6549d2afb1256590aa34cbbc49bad924b6233dccb706c1f"},
+    {"path": "status", "bytes": 2, "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"},
+    {"path": "pin-proof.txt", "bytes": 297, "sha256": "60b5a0ad2f610bb9f02ec136aee3c4d2a3e72a0b6c5a49e344b25ee9549a3e86"},
+    {"path": "prior-proof-reference.txt", "bytes": 334, "sha256": "87ca9a2cd6461c7729f57b89357c5a354d972aa26949de85c28223d043f68785"},
+    {"path": "summary.txt", "bytes": 460, "sha256": "7d90eba24d1485e804ad8cd290638db6177163b7678b36db7af7c920a7d310c1"}
+  ]
+}
