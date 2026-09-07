@@ -142,3 +142,7 @@ The direct correctness regression, non-discriminating oracle and remaining finit
 ## User implementation-model override
 
 The user explicitly requires Luna high or xhigh for implementation work. This supersedes the prior Sol model assignment for revision attempts; attempt2 will use Luna xhigh under the exact bounded repair/completion brief above. Astra remains the adversarial reviewer. Attempt1 remains FAIL, the attempt counter is not reset, and the hard three-attempt limit and checkpoint gates are unchanged. References to Sol2 above identify the second attempt, not its newly overridden model.
+
+## User verification-model override
+
+Use Sol high for documentation-related and other verification that is neither performance- nor correctness-critical. Audio-path verification uses Astra low for simpler checks or Astra medium for complex reviews. The current gate detector mapping, mechanism, native/Wasm lowering and PCM/state review is audio-path correctness/performance work and will use Astra medium. Implementation remains Luna high/xhigh; attempt counters and objective gates are unchanged.
