@@ -1,0 +1,320 @@
+# Move protocol conformance fixtures and inline tests out of production modules
+
+Issue #542; parent audit #349, IO-1. Local and GitHub identities must remain synchronized. Read-only brief base:
+`e5b86cf315487fcc602db420dc1a6121f1ac4837` on 2026-09-07. Root owns the issue, worktree, Git,
+GitHub, checkpoints and delivery. This issue is non-audio work: Sol high coordinates, Luna high
+implements and qualifies, and Astra low performs consolidated adversarial verification from the
+final integrated task onward. Historical Sol xhigh verdict provenance remains unchanged. Later
+attempts require the ordinary counted verdict/rescope workflow; no implementation starts until
+root assigns the numbered issue and its isolated worktree.
+
+## Problem and original obligation
+
+The original IO-1 finding had three independently visible parts:
+
+1. `protocol` ships the 487-line complete-schema corpus, its decoder selector and digest pin, plus
+   `complete_all_opcode_fixture`, even though these values exist only to drive conformance tests,
+   mutation seeds and the scalar/SIMD Wasm golden runner.
+2. `MockProvider` and `MockProviderConfig` shipped on the default production surface.
+3. The complete test bodies for `controller.rs`, `message_wire.rs` and `session_wire.rs` remain
+   inline in three already large implementation files.
+
+Part 2 is delivered by #369/PR375: the production C ABI uses `SessionControlProvider`, and the mock
+exports and definitions are gated by `cfg(any(test, feature = "test-support"))`. Do not reopen or
+reimplement it. The current audit reconciliation therefore marks IO-1 partial: `protocol/src/lib.rs`
+still declares and publicly exports `COMPLETE_SCHEMA_HASH`, `ConformanceDecoder`,
+`ConformanceFrame` and `complete_schema_corpus`; `session_wire.rs` still defines and `lib.rs`
+exports `complete_all_opcode_fixture`; the three named implementation files still contain their
+large inline test bodies. The audit-era 33.8 percent and line-reduction estimates are historical and
+are not acceptance claims.
+
+Close the full remaining IO-1 outcome. Do not declare IO-1 delivered after relocating only the
+corpus or only one test module.
+
+## Smallest closable implementation
+
+Make `crates/conformance` the sole owner of the protocol fixture corpus. Add a
+`protocol_corpus` module that owns the exact current 46-frame builder, `ConformanceFrame`,
+`ConformanceDecoder`, the single `COMPLETE_SCHEMA_HASH` pin and the 39-edit all-opcode fixture.
+The module may depend on the public typed `protocol` and `session` surfaces; it must not require a
+new production escape hatch. Remove `protocol/src/conformance.rs`, the fixture definition in
+`protocol/src/session_wire.rs`, their declarations and public re-exports from `protocol/src/lib.rs`,
+and the protocol package's golden runner.
+
+Move the Wasm returned-verdict runner to `crates/conformance/src/main.rs`. It is the package's
+same-named `conformance` binary, so its target identity complies with the package/bin naming rule.
+Update `scripts/check-protocol-wasm-parity.sh` to build `-p conformance --bin conformance`, locate
+that artifact, and mutate/restore the new sole pin and guest files. Preserve its exact contract:
+both scalar and simd128 guests execute the exported `main`; success is the one expected returned
+zero result; silence, interpreter error/trap, digest mismatch and corpus-count panic are red; the
+existing unmutated control and three rebuilt red mutations remain causal. Do not turn a failed
+decoder/build/interpreter status into a clean result.
+
+Relocate the existing native corpus and deterministic million-mutation consumers to the
+conformance owner, or otherwise make them conformance-package tests without adding a normal
+`conformance` dependency to `protocol`. Preserve every existing corpus/mutation assertion and test
+name unless a path-only rename is necessary. Protocol unit tests that need the all-opcode fixture
+may use the conformance dev dependency only from test-only code; they must not cause fixture code or
+an external harness dependency to enter the default protocol library.
+
+Extract the complete inline `#[cfg(test)] mod tests { ... }` bodies from
+`protocol/src/controller.rs`, `message_wire.rs` and `session_wire.rs`. Put public-surface tests in
+`crates/protocol/tests/` where that requires no API change. Put tests that legitimately inspect
+private implementation state in dedicated test-only child files such as
+`src/controller/tests.rs`, `src/message_wire/tests.rs` and `src/session_wire/tests.rs`, included by
+small `cfg(test)` module declarations. Do not add public or `test-support` exports merely to make an
+integration test compile. Preserve all existing tests and assertions; this is organization, not a
+test-pruning or coverage-redefinition issue.
+
+`check-conformance-boundaries.sh` currently pins the exact conformance dependency set and treats
+protocol's same-named local conformance module specially. Update it for the intentional direction:
+the harness may depend on `protocol` (and `session` if the moved all-opcode builder needs its public
+model), while production `protocol` may not normally depend on `conformance`. Retain checked
+producer/status behavior. Add only a small structural boundary assertion to the existing checker:
+the default protocol library no longer declares/exports the corpus or all-opcode fixture, the old
+production fixture source/bin paths are absent, and the three named implementation files no longer
+contain inline test bodies. This assertion protects ownership and organization; do not build a new
+source corpus, byte pin, or implementation-mirror test.
+
+## Frozen behavior
+
+- The corpus remains exactly 46 stable labels and canonical byte frames: 11 commands including
+  the all-opcode transaction, 11 successful responses, 18 registered non-OK responses and six
+  events.
+- The label-and-byte FNV-1a-64 pin remains `0xbdeb_b0f8_1c38_ec42`. There is one authoritative
+  literal shared by native and Wasm verdicts. Relocation alone does not authorize a repin.
+- Every frame still succeeds through its current typed command, response, event or session
+  transaction decoder. The deep transaction remains a typed command-dispatch case.
+- The all-opcode fixture remains the current 39 edits, in the same order and with the same strict
+  canonical session-derived values.
+- The one-million deterministic mutation run keeps the same seed scheduling, mutation generation,
+  decoder selection, limit classification and repeatability assertions.
+- The protocol wire bytes, public production codec/controller/session types, message IDs, status
+  and error precedence, replay behavior, queue/admission semantics and test-support MockProvider
+  behavior do not change.
+- Default `protocol` consumers no longer compile or expose the conformance corpus/decoder/frame,
+  digest pin or all-opcode fixture. Test-only consumers retain them from `conformance`.
+- All existing tests from the three extracted modules remain live with their original semantic
+  assertions. Moving a test must not turn it into ignored or feature-only coverage beyond the
+  feature condition it already had.
+
+## Exact path authority
+
+Allowed implementation paths:
+
+- `crates/protocol/Cargo.toml`
+- `crates/protocol/src/lib.rs`
+- `crates/protocol/src/controller.rs`
+- `crates/protocol/src/message_wire.rs`
+- `crates/protocol/src/session_wire.rs`
+- removal of `crates/protocol/src/conformance.rs`
+- removal of `crates/protocol/src/bin/protocol_wasm_golden.rs` and the empty directory if applicable
+- existing/new test-only files under `crates/protocol/tests/`,
+  `crates/protocol/src/controller/`, `crates/protocol/src/message_wire/` and
+  `crates/protocol/src/session_wire/`
+- `crates/conformance/Cargo.toml`
+- `crates/conformance/src/lib.rs`
+- new `crates/conformance/src/protocol_corpus.rs`
+- new `crates/conformance/src/main.rs`
+- existing/new focused tests under `crates/conformance/tests/`
+- `scripts/check-protocol-wasm-parity.sh`
+- `scripts/check-conformance-boundaries.sh`
+- `scripts/test-conformance-boundaries.sh`, only for the hermetic fixture and focused mutations
+  required to exercise this issue's guarded protocol test-child contract
+- only directly stale location/provenance text in `docs/CONTROL_PROTOCOL_CONFORMANCE.md`,
+  `docs/derivations/241-schema-repins.md` and `docs/derivations/274-parity-repin.md`
+- this numbered decision/evidence record, owned by root
+
+No schema, wire-format, decoder, encoder, controller, queue, delivery, host, C ABI, session model,
+render, DSP, fixture byte, fuzz corpus, Cargo workspace membership, CI workflow or unrelated
+conformance-harness behavior change is authorized. No new generic harness, test-pruning campaign,
+benchmark, timing run or artifact publication belongs here.
+
+## Coordination and overlap
+
+CP-20 has a direct mechanical overlap: its planned shared lowercase-hex authority replaces the
+three test-only `hex` bodies currently in `controller.rs`, `message_wire.rs` and `session_wire.rs`.
+CP-20 must deliver first. Rebase and freeze this issue on that delivered source, then relocate the
+already-delegating helpers unchanged; IO-1 owns no hex behavior or authority change.
+
+IO-2 and IO-3 also touch `message_wire.rs`, `controller.rs`, `schema.rs` and their tests. Serialize
+them after this relocation, or rebrief them on the delivered paths; do not mix their codec/registry
+rewrites into this issue. #369 remains delivered. #140/IO-5 automation, protocol response IO-16,
+conformance semantics and all host/audio work remain separate.
+
+## Objective gates and evidence
+
+Run from the exact assigned candidate with commands, numeric exits and selected test counts
+retained:
+
+1. Focused native corpus tests prove all 46 names/bytes, the unchanged single hash, all typed
+   decoder successes, the deep transaction command dispatch and the exact 39-edit fixture.
+2. The existing deterministic million-mutation test passes unchanged in debug and release. Do not
+   create a second mutation generator.
+3. `cargo test --locked -p protocol` and
+   `cargo test --locked -p protocol --features test-support` pass. Record the extracted test names
+   and show that none became ignored or silently unselected.
+4. `cargo test --locked -p conformance` passes in debug and release for the moved focused protocol
+   corpus tests and the crate's existing suite.
+5. `bash scripts/check-protocol-wasm-parity.sh --self-test` passes both scalar and simd128 actual
+   guests, the unmutated scratch control, the historical inert-invocation rejection, both digest
+   mismatch rebuilds and the corpus-count panic rebuild. Record compiler/interpreter statuses and
+   actual artifact identities.
+6. `bash scripts/check-conformance-boundaries.sh`,
+   `bash scripts/test-conformance-boundaries.sh`,
+   `bash scripts/check-protocol-control-policy.sh` and
+   `bash scripts/check-workspace-policy.sh` pass. The boundary checker must reject a focused
+   temporary counterexample that restores one forbidden default protocol fixture export/source;
+   restore it byte-exactly. This single structural control is sufficient; do not add a mutation
+   framework.
+7. A default production protocol build and dependency inspection demonstrate no normal
+   `conformance` dependency and no fixture exports. Supported scalar and simd128 Wasm compilation
+   remains green through the parity gate. Do not claim that source relocation changes runtime DSP,
+   PCM, allocation or speed.
+8. Affected strict Clippy and rustdoc, `cargo fmt --all --check`, `git diff --check`, and the ordinary
+   repository policy/diff review pass. The complete workspace test population must retain the same
+   semantic named tests and zero failures relative to the frozen baseline; changed test-binary
+   grouping from extraction is not itself a failure.
+9. After source PASS, root performs the ordinary actual-PR-head/current-base Astra low review,
+   required `qualification` success, merge, issue/body/evidence synchronization, #349 IO-1 delivery
+   accounting, post-main check and completed-worktree cleanup. A local green move is not delivery.
+
+The evidence record must distinguish the baseline, implementation source, structural control,
+native results, Wasm artifacts and final reviewed/delivered heads. File movement is credited only
+with the production-boundary and maintained-test evidence above. No audio path is touched, and no
+sound-quality, realtime-cost or performance gain is claimed.
+
+## Root concurrency decision
+
+CP20 owns a first coherent checkpoint containing the new authority and the three protocol adapters. IO1 may begin nonoverlapping corpus/runner work immediately after its numbered brief is pushed; delay extraction or edits of those three adapters until root integrates the focused-green CP20 checkpoint into this worktree. CP20 must merge before IO1 final delivery. This permits four issues to progress without conflicting source edits. Cargo.lock changes induced solely by approved dependency edges are authorized. All implementation/revision attempts use Luna high under Sol high coordination.
+
+## Implementation dependency clarification
+
+Inspection found tools/bench/src/protocol.rs imports the removed ConformanceDecoder only for an unused From<ConformanceDecoder> for FrameDecoder conversion. Root verified the occurrences and authorizes deletion of exactly that stale import and unused conversion as part of the corpus ownership move. No benchmark workload, corpus, timing, pin or local FrameDecoder behavior changes are authorized. Include a compile check for the affected bench consumer.
+
+Root integrated CP20's focused-green shared authority and three protocol adapters (8ba9c5dc, evidence clarification acd57011) before any IO1 source writes. The first Luna inspection session was interrupted cleanly for integration; it made no implementation edits and is not a failed implementation verdict. Full attempt 1 may now proceed on the integrated source, preserving the three delegating adapters while extracting tests. CP20 delivery remains a prerequisite for IO1 merge.
+
+## Attempt 1 first complete source checkpoint
+
+Luna high completed the corpus/runner move and all three inline test extractions under Sol high coordination, then paused for root checkpoint. Exact source scope remains the approved protocol/conformance paths, two parity derivation path updates, two ownership/parity scripts, the stale bench adapter removal and induced Cargo.lock update. No audio, wire, corpus pin or benchmark change is claimed.
+
+Coordinator reports actual green results: protocol default150 and test-support151 tests; conformance debug/release27 each including corpus3 and million-mutation1; scalar/SIMD Wasm parity and unmutated/inert-invocation/three red rebuilds; boundary/control/workspace checks, bench compile, affected strict Clippy/rustdoc, formatting and working diff check. The one structural counterexample returned1 for the forbidden restored export, then byte-exact restoration returned0. Logs carry actual statuses and remain byte-exact under artifacts/issue542-attempt1 as gzip captures with raw/packed SHA256 identities.
+
+Initial failures are retained: locked check101 required the approved lock refresh; first protocol compilation101 exposed moved include paths and duplicate protocol test types across the dev-dependency cycle. Tests now consume conformance-owned encoded fixture bytes through the local protocol decoder, preserving the actual local-type test contract. Three initial boundary checks failed for overbroad dev-dependency detection, test-use filtering and regex escaping before the final corrected gate passed. These are implementation-pass corrections, not discarded evidence or new formal review attempts.
+
+The worker's test-time base is9cce4350; no source changes were layered after green. Sol xhigh source verification, integration with the complete #543 dependency, final evidence-bearing base-to-head diff check and remote qualification/delivery remain. Inherited #543 raw-output packaging is being corrected separately without changing its source; this working diff0 is not a claim that the entire inherited branch already passes the final base-to-head whitespace gate.
+
+## Review routing correction
+
+Root inspected the live process and original command manifest for /tmp/issue542/sol-xhigh-review-run: the launcher actually selected gpt-5.6-luna with xhigh effort, despite the Sol label. Any resulting gates/review observations are Luna evidence only and do not satisfy the required Sol xhigh verification. Preserve original captures and failures without relabeling their model. Root will launch actual Sol xhigh final verification after complete #543 dependency integration; no source acceptance or closure credit is assigned to this mislabeled process.
+
+The misrouted Luna process is now stopped without a completed verdict. Its24 independent gate results and a concrete boundary-checker bypass are retained as incomplete Luna evidence: the blanket tests.rs exemption accepts a scratch controller child module with cfg(test) removed and an added conformance import. The bypass command itself records failure because the checker incorrectly printed OK/status0. Source was unchanged/restored; actual Sol xhigh must assess this finding before any PASS. This is not permission to weaken the boundary gate or treat the mislabeled process as required verification.
+
+## Actual Sol xhigh attempt1 FAIL; bounded attempt2
+
+Actual Sol xhigh reviewed aecc86d9 against shared-hex base3a996760 and integrated main86d5b4bd. Corpus46/39edit/million-mutation and all80 relocated inline tests, production dependency/API boundaries and captured native/Wasm evidence passed. The sole blocker is blanket tests.rs filtering: exemptions are not tied to verified cfg(test) parent declarations.
+
+Attempt2 is limited to check-conformance-boundaries.sh: exempt only the exact required protocol child files, and require literal cfg(test) mod tests parent guards. Sol high coordinates actual Luna high. Gates: normal positive/shell syntax; unguarded controller and session-wire mutations red; existing forbidden production-export counterexample red; exact restoration plus green checker; normal protocol dependency assertion; full committed diff check. Preserve existing scalar/SIMD artifact sizes and hashes in explicit evidence without rebuilding; no native/million-mutation/Wasm reruns needed. Root checkpoints before actual Sol xhigh rereview. #543 still delivers before #542.
+
+## Attempt2 focused-green checker checkpoint
+
+Actual Luna high changed only check-conformance-boundaries.sh: exact controller/message_wire/session_wire child exemptions require exactly one literal adjacent cfg(test) then mod tests declaration in each parent. Shell/live checker, locked protocol normal dependency checks/tree assertion and diff checks passed. Controller guard removal, session-wire guard removal and forbidden export controls each failed1; exact restoration and positive checker passed each time. Preserved scalar/SIMD artifact manifest matches accepted sizes/hashes without rebuild. No corpus/runtime/audio/million-mutation/Wasm changes or suite reruns. An initial apply_patch context mismatch was preserved before the correct patch; no source result is credited to that failed edit. Raw reports/commands/logs are losslessly preserved in artifacts/issue542-attempt2. Root checkpoints before actual Sol xhigh attempt2 review; no delivery claim.
+
+## Actual Sol xhigh attempt2 PASS; predecessor hold
+
+Actual Sol xhigh accepteda2b0303d after verifying exact guarded-child exemptions, all three red controls/restorations, unchanged product/corpus/dependency contracts and explicit preserved Wasm hashes. No #542 correction remains. Required current-head PR qualification and #543 delivery still precede this issue merge. #543 PR553 presently has an AudioWorklet artifact-pin failure requiring separate qualification; #542 remains paused at this accepted source checkpoint while that predecessor is resolved.
+
+## Delivered dependencies and final integrated qualification
+
+#543/#555, #563 and #552/#558 are delivered on current main
+`b95c9b7b028ed07cfea2f7669467689c05320c37`. Root merged that exact main into the accepted #542
+branch at checkpoint `2a3c96a578c5b55ac964f614ed5b82bf8f20afb3` and pushed it. The merge was
+conflict-free, `git diff --check origin/main...HEAD` passed, and the resulting base-to-head diff is
+limited to the frozen #542 paths and evidence. The combined Cargo.lock change contains only the
+approved `conformance` normal dependencies on `protocol` and `session` and the `protocol`
+dev-dependency on `conformance`.
+
+The final integrated qualification is assigned to Luna high. It must capture contemporaneous
+command identity and exits on the exact candidate, run the complete proportional #542 gates, and
+make no product-source edit unless a new integration defect is found and separately checkpointed.
+Per the coordinator's 2026-09-07 routing update, the final current-head adversarial verification is
+assigned to Astra low. The earlier actual Sol xhigh attempt verdicts above remain historical
+evidence and are not relabeled.
+
+## Luna high final integrated qualification PASS
+
+Luna high qualified exact head `f9c279075d22fb66640df4d7cb669f7e82c62f47` after the delivered
+main integration. Protocol default and test-support, conformance debug/release, the focused native
+corpus and deterministic million-mutation cases, actual scalar/SIMD Wasm parity with the full
+self-test, all three policy checks, the forbidden-export red control and byte-exact restoration,
+normal dependency/API absence, bench consumer compilation, strict affected Clippy/rustdoc,
+formatting/diff checks and the exact path census passed. The extracted test census remains 44
+controller, 17 message-wire and 19 session-wire tests with zero ignored in each module. The actual
+Wasm artifacts are pinned in the evidence manifest. Two malformed evidence probes are retained and
+explicitly denied gate credit; their corrected captures pass without product edits. Root commits
+and pushes this evidence before Astra low reviews the exact evidence-bearing head.
+
+## Astra low final integrated review PASS
+
+Astra low reviewed exact evidence head `859b820bf6820c00f235364a827f9d5814e21a70` against current
+main `b95c9b7b028ed07cfea2f7669467689c05320c37` and returned PASS. The review found no
+product-source, scope, dependency, corpus, extracted-test, Wasm or boundary-policy blocker. It
+decoded all 24 final qualification capture pairs, matched all 833 recorded source-hash entries,
+and independently matched both retained Wasm artifact identities and their returned zero verdicts.
+
+The review records one nonblocking evidence limit: the fresh final forbidden-export control used
+literal backslash-n bytes around the exact forbidden token, so that capture proves the structural
+token predicate and byte-exact restoration rather than compilable Rust. The preserved attempt-two
+control supplies the proper Rust export mutation against byte-identical current `lib.rs` and
+boundary-checker content. No compile-success claim is made for either deliberate mutation. Root
+commits this verdict, then Astra low checks the exact verdict-bearing head before PR creation.
+
+## Required-qualification failure; bounded attempt 3
+
+PR #566 opened at exact reviewed head `fc6798e426ffc34407e0280add664a38c763bdcb`. Required
+qualification run `34137274043` reproduced a failure in `bash scripts/test-conformance-boundaries.sh`:
+the production checker passed, then the hermetic mutation fixture failed because its synthetic
+protocol crate did not create `controller.rs`, `message_wire.rs`, `session_wire.rs` and their exact
+guarded test children. Root reproduced the same exit locally. This is a fixture integration defect;
+the accepted product source and production checker behavior are unchanged. Root canceled the
+already-failed run and closed PR #566 while correcting it, avoiding further CI work on a known-red
+head.
+
+Attempt 3 is limited to `scripts/test-conformance-boundaries.sh`. Luna high must extend the
+hermetic clean fixture with the three exact parent guards and test-child files required by the
+checker, retain every existing fail-open/status mutation, and add focused red mutations for a
+missing child, a missing/changed parent guard, and a forbidden conformance use outside the three
+exact child paths. Required gates are the hermetic fixture suite, the production checker, shell
+syntax, the three focused red controls with exact restoration, and the existing protocol/default
+dependency and extracted-test checks. No product, corpus, Wasm, dependency, benchmark or unrelated
+policy change is authorized. Root checkpoints before Astra low attempt-three review; no fourth
+implementation attempt is permitted without rescoping.
+
+## Attempt 3 focused-green fixture checkpoint
+
+Luna high changed only `scripts/test-conformance-boundaries.sh`. Its clean hermetic base now models
+the approved `conformance` dependency set plus all three exact cfg(test)-guarded protocol parents
+and test children. The complete prior mutation/status suite remains live, and focused controls now
+reject a missing required child, a missing guard, a changed guard and an outside-path
+`conformance` use. Shell syntax, the production checker, the full hermetic suite, protocol default
+and test-support tests, normal dependency/API absence, the live 44/17/19 extracted-test census and
+lists, formatting and scope/diff checks all pass at pre-commit candidate
+`cbfbc70cd972ffbb2d7c7d7c80a62d7acdb44845`. Root found and corrected one evidence-only sentence
+that had conflated the one-test synthetic children with the live test census; no gate or source
+result changed. Root commits this exact tranche before Astra low attempt-three review.
+
+## Astra low attempt 3 FAIL; mandatory rescope
+
+Astra low reviewed exact attempt-three checkpoint
+`57fb9ca0f9ffe9d1ade8c42d2a557d4d6358386e` and returned FAIL. The clean fixture and all ordinary
+gates pass, but the correction moved the preexisting generic sort-error row onto an earlier engine
+TOML dependency-sort failure. The next row also targets TOML dependency sorting, leaving the
+independent workspace manifest/name `gate_sort_lines` status path without a red control. A scratch
+counter-mutant that changes that helper to swallow a failing sort status passes the complete
+fixture suite. The exact mutant and exit are preserved under `artifacts/issue542-attempt3-review/`.
+
+This is the third attempt and no further #542 implementation is authorized. Root preserves this
+failed checkpoint. Successor #567 owns one workspace-sort status injection that
+runs after TOML extraction succeeds, while retaining the separate TOML sort controls. #542 remains
+open and undelivered until the successor carries the already accepted product source through
+review, required qualification, merge, GitHub synchronization and cleanup.

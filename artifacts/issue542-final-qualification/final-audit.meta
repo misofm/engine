@@ -1,0 +1,20 @@
+capture_utc=2026-09-07T15:07:41Z
+cwd=/home/bl/misofm/engine-protocol-conformance-boundary
+head=f9c279075d22fb66640df4d7cb669f7e82c62f47
+status_begin
+?? artifacts/issue542-final-qualification/
+status_end
+source_hashes_begin
+92db9698cc062bd5ccc0a90f0ee43f051d77ce7e52f785ce9718fae3f400b753  Cargo.lock
+9f8dda584f89803a1e67856d6f2b7f2e2eb338a136186e28c99545c389cf2b10  crates/protocol/src/lib.rs
+5f05c0c0e0ab39111651a687b71a203da8d30a1e02b200b2b5b49ad18d196272  crates/protocol/src/controller.rs
+e3f504924dec15f4f262f2c11ee6b516d0e66ea89521716ea9dcf05779be0131  crates/protocol/src/message_wire.rs
+5c0ede886971a286ac218764283542bd59ec764b0b263a9bc1cdf7bfea316747  crates/protocol/src/session_wire.rs
+64b55a3f4b064ac9f33b14232c23e9bbb9dbdfec3eaa4bc49f2be8f12b8889e3  crates/conformance/src/lib.rs
+b3d406ed2df9497604498b4980510ecbb4baca2dd9c7e488b96f52834242962c  crates/conformance/src/main.rs
+3ccb339c5e9f119966a13234c0c79383907998c568166f414821a0738891489e  crates/conformance/src/protocol_corpus.rs
+812cbdbf3b3fa1cd30214f5c42c178152a54db212a81e8d9850c452855ca8766  scripts/check-conformance-boundaries.sh
+f60c4bee8d1124498b3c67d3a93da40235e47709c1daa3131d27b33bbba66b97  scripts/check-protocol-wasm-parity.sh
+source_hashes_end
+command=test "$(git rev-parse HEAD)" = f9c279075d22fb66640df4d7cb669f7e82c62f47; git diff --check origin/main...HEAD; for f in artifacts/issue542-final-qualification/*.raw.gz; do gzip -t "$f"; done; if rg -n "[[:blank:]]+$" artifacts/issue542-final-qualification -g "*.meta" -g "*.md" -g "*.txt"; then exit 1; else rc=$?; test "$rc" -eq 1; fi; printf "source_status_begin\\n"; git status --short; printf "source_status_end\\n"; sha256sum crates/protocol/src/lib.rs crates/protocol/src/controller.rs crates/protocol/src/message_wire.rs crates/protocol/src/session_wire.rs crates/conformance/src/lib.rs crates/conformance/src/main.rs crates/conformance/src/protocol_corpus.rs
+exit=0

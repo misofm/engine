@@ -14,15 +14,14 @@ use std::{cell::Cell, env, fs, process::Command, time::Instant};
 
 use protocol::{
     AutomationEnqueue, AutomationKind, AutomationRecord, Backpressure, BackpressureQueueKind,
-    Capabilities, CapabilityFlags, CommandPayload, ConformanceDecoder, CounterId, CounterSnapshot,
-    CounterValue, DecodeScratch, Diagnostic, DiagnosticSeverity, DiagnosticsPage, EventPayload,
-    ExpectedRevision, MessageId, MeterBatch, MeterComponent, MeterRecord, NonOkResponse,
-    ParameterAutomationRate, ParameterChannel, ParameterDescriptor, ParameterDomain,
-    ParameterMapping, ParameterMetadataPage, ParameterRack, ParameterStatePage,
-    ParameterStateRecord, ParameterUnit, ParameterValueKind, ProtocolCodec, ProtocolVersion,
-    RequestId, SampleTime, SessionEdit, SessionRevision, StatusCode, SuccessResponsePayload,
-    TransactionApplied, TypedCommandFrame, TypedEventFrame, TypedNonOkResponseFrame,
-    TypedSuccessResponseFrame,
+    Capabilities, CapabilityFlags, CommandPayload, CounterId, CounterSnapshot, CounterValue,
+    DecodeScratch, Diagnostic, DiagnosticSeverity, DiagnosticsPage, EventPayload, ExpectedRevision,
+    MessageId, MeterBatch, MeterComponent, MeterRecord, NonOkResponse, ParameterAutomationRate,
+    ParameterChannel, ParameterDescriptor, ParameterDomain, ParameterMapping,
+    ParameterMetadataPage, ParameterRack, ParameterStatePage, ParameterStateRecord, ParameterUnit,
+    ParameterValueKind, ProtocolCodec, ProtocolVersion, RequestId, SampleTime, SessionEdit,
+    SessionRevision, StatusCode, SuccessResponsePayload, TransactionApplied, TypedCommandFrame,
+    TypedEventFrame, TypedNonOkResponseFrame, TypedSuccessResponseFrame,
 };
 use session::StableId;
 
@@ -91,17 +90,6 @@ enum FrameDecoder {
     Response,
     Event,
     Transaction,
-}
-
-impl From<ConformanceDecoder> for FrameDecoder {
-    fn from(value: ConformanceDecoder) -> Self {
-        match value {
-            ConformanceDecoder::Command => Self::Command,
-            ConformanceDecoder::Response => Self::Response,
-            ConformanceDecoder::Event => Self::Event,
-            ConformanceDecoder::Transaction => Self::Transaction,
-        }
-    }
 }
 
 struct WorkFrame {

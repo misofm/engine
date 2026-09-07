@@ -7,6 +7,7 @@ mod effect;
 mod fixture;
 mod manifest;
 mod prng;
+mod protocol_corpus;
 
 pub use block::{BlockError, PlanarBlock};
 pub use compare::{
@@ -23,6 +24,10 @@ pub use engine::SampleRateHz;
 pub use fixture::{FixtureError, FixtureLimits, PcmFixture, crc32c};
 pub use manifest::{ManifestEntry, ManifestError, parse_manifest};
 pub use prng::SplitMix64;
+pub use protocol_corpus::{
+    COMPLETE_SCHEMA_HASH, ConformanceDecoder, ConformanceFrame, complete_all_opcode_fixture,
+    complete_all_opcode_fixture_bytes, complete_schema_corpus,
+};
 
 #[cfg(test)]
 mod tests {

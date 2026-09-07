@@ -1,0 +1,15 @@
+capture_utc=2026-09-07T15:04:30Z
+cwd=/home/bl/misofm/engine-protocol-conformance-boundary
+head=f9c279075d22fb66640df4d7cb669f7e82c62f47
+status_begin
+?? artifacts/issue542-final-qualification/
+status_end
+source_hashes_begin
+92db9698cc062bd5ccc0a90f0ee43f051d77ce7e52f785ce9718fae3f400b753  Cargo.lock
+7b62b0a3f9b4df490a9aac4641f34f69067c1f0b9edadd56587b489c6896dd2a  crates/protocol/Cargo.toml
+9f8dda584f89803a1e67856d6f2b7f2e2eb338a136186e28c99545c389cf2b10  crates/protocol/src/lib.rs
+5c0ede886971a286ac218764283542bd59ec764b0b263a9bc1cdf7bfea316747  crates/protocol/src/session_wire.rs
+812cbdbf3b3fa1cd30214f5c42c178152a54db212a81e8d9850c452855ca8766  scripts/check-conformance-boundaries.sh
+source_hashes_end
+command=scratch=$(mktemp -d /tmp/issue542-boundary-counterexample.XXXXXX); trap 'rm -rf "$scratch"' EXIT; cp -- crates/protocol/src/lib.rs "$scratch/lib.rs"; before=$(sha256sum crates/protocol/src/lib.rs); printf '\\npub use session_wire::complete_all_opcode_fixture;\\n' >> crates/protocol/src/lib.rs; set +e; bash scripts/check-conformance-boundaries.sh >"$scratch/check.log" 2>&1; rc=$?; set -e; printf "mutated_checker_exit=%d\\n" "$rc"; cat "$scratch/check.log"; test "$rc" -eq 1; cp -- "$scratch/lib.rs" crates/protocol/src/lib.rs; after=$(sha256sum crates/protocol/src/lib.rs); printf "before=%s\\nafter=%s\\n" "$before" "$after"; cmp -s "$scratch/lib.rs" crates/protocol/src/lib.rs
+exit=0

@@ -1,0 +1,16 @@
+capture_utc=2026-09-07T15:43:32Z
+cwd=/home/bl/misofm/engine-conformance-workspace-sort-status
+head=c0a00b4296ced4e8709ff882e57ead5ec9b2d3b0
+status_begin
+ M scripts/test-conformance-boundaries.sh
+?? artifacts/issue567-attempt1/
+status_end
+source_hashes_begin
+d056647deb94c1e03c62b895883b75bda0f27ba4409094aedb61362a3c3b61e5  scripts/test-conformance-boundaries.sh
+812cbdbf3b3fa1cd30214f5c42c178152a54db212a81e8d9850c452855ca8766  scripts/check-conformance-boundaries.sh
+bd40a610b4dd391f723bd8b576e2a6415523d934a85806333244d258d09c5783  scripts/lib/gate.sh
+7b62b0a3f9b4df490a9aac4641f34f69067c1f0b9edadd56587b489c6896dd2a  crates/protocol/Cargo.toml
+9f8dda584f89803a1e67856d6f2b7f2e2eb338a136186e28c99545c389cf2b10  crates/protocol/src/lib.rs
+source_hashes_end
+command=bash scripts/check-conformance-boundaries.sh
+exit=0

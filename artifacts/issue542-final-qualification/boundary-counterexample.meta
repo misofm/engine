@@ -1,0 +1,51 @@
+capture_utc=2026-09-07T15:04:03Z
+cwd=/home/bl/misofm/engine-protocol-conformance-boundary
+head=f9c279075d22fb66640df4d7cb669f7e82c62f47
+status_begin
+?? artifacts/issue542-final-qualification/
+status_end
+source_hashes_begin
+92db9698cc062bd5ccc0a90f0ee43f051d77ce7e52f785ce9718fae3f400b753  Cargo.lock
+7b62b0a3f9b4df490a9aac4641f34f69067c1f0b9edadd56587b489c6896dd2a  crates/protocol/Cargo.toml
+d15219dcd782a4e49478b65aa1e1a1e971d007aac1e08b47f87665f18dc504c8  crates/protocol/src/btlv.rs
+5f05c0c0e0ab39111651a687b71a203da8d30a1e02b200b2b5b49ad18d196272  crates/protocol/src/controller.rs
+efde0b8a7763519d593e81238dc7b2607064ba12ad93fbb04127962d88d9454c  crates/protocol/src/controller_delivery.rs
+0c711032042aad905fc2111319488a7680ff6e2d1063bd0a8760d2e805e6cd8d  crates/protocol/src/delivery.rs
+9f8dda584f89803a1e67856d6f2b7f2e2eb338a136186e28c99545c389cf2b10  crates/protocol/src/lib.rs
+e3f504924dec15f4f262f2c11ee6b516d0e66ea89521716ea9dcf05779be0131  crates/protocol/src/message_wire.rs
+280295a6cf846812e7724ecddfc4c3365c9985fbfee5b95582e15701049ef861  crates/protocol/src/model.rs
+34627d7f38b4de3eaa4769c088cb5d963f40a584932aae4b1e864508b09594ef  crates/protocol/src/queue.rs
+4b185c4593d38429d0682e19868a9f8967f557f1e196b1ae13ea4b9dc84fd778  crates/protocol/src/schema.rs
+5c0ede886971a286ac218764283542bd59ec764b0b263a9bc1cdf7bfea316747  crates/protocol/src/session_wire.rs
+2280ffd52e4c828d6148b55bf5b38192eabbfd9796ff23c38fd4b64fc18cd45c  crates/protocol/src/typed_frame.rs
+6cba1325f07a92068a8a9dae85bd676fbf484570d92505b3cab1195e8b43cdb4  crates/protocol/src/wire.rs
+4ca2e5020ce37ce5f6affc4a0c5f80b36f8b1c9bf71dd62e29dd259b16b3595a  crates/protocol/src/controller/tests.rs
+caf399f7756eb07bdeeddb70ae6bbcf987cd556e4e47a65dabe363035958c64f  crates/protocol/src/message_wire/tests.rs
+8f2deb656993abcd8cd38e9f0a7055d4b49ccf767426200459dcaac107bcbe1a  crates/protocol/src/session_wire/tests.rs
+89b7184510ab737cc2bb77ad38d345cd82b51e594b0200db08623ca65914375b  crates/conformance/Cargo.toml
+3f4381156f88984b4c169ca680101fd14e29f3cda111603da2fc22e2b3616fdf  crates/conformance/src/block.rs
+14472beb11567ac6204d7b69d6443946e30636e68510a970e46c8273d25322a0  crates/conformance/src/compare.rs
+1ac5a6abb34af508fb32291642b40ff40eddd1fa60441af2e052b67fee049fe8  crates/conformance/src/determinism.rs
+401e21b682a03473729ce70f8d015f1c558c6ea100ec7fd157581f6acb94494b  crates/conformance/src/effect.rs
+9052836e5a3e1d71bf453b53cac6288c8bf785ef7db9f47b35910d232afce345  crates/conformance/src/fixture.rs
+64b55a3f4b064ac9f33b14232c23e9bbb9dbdfec3eaa4bc49f2be8f12b8889e3  crates/conformance/src/lib.rs
+b3d406ed2df9497604498b4980510ecbb4baca2dd9c7e488b96f52834242962c  crates/conformance/src/main.rs
+790f2094eb430023243368b68df5a9db10f33c9c4a22a2262bf1d620682861ed  crates/conformance/src/manifest.rs
+acc2da3a30a8694900b1752564791f834a3819ccf781ad88c47269bb851aedd1  crates/conformance/src/prng.rs
+3ccb339c5e9f119966a13234c0c79383907998c568166f414821a0738891489e  crates/conformance/src/protocol_corpus.rs
+fd30a1243bbbee05ca85b2c74f3ae394ec372d599ac05dad8d9e7906bb8a3928  crates/conformance/tests/api_metrics.rs
+0b477b4951df0fc288a619c6ba638d6bd94f7aeabb03889a9f6d88bd7bd3caae  crates/conformance/tests/conformance_corpus.rs
+cccd0c25cd1eb72f0548d4b7e9c5a7e13bdee3a36af8b666eeaf4772c06ec7c9  crates/conformance/tests/effect_contract.rs
+93019b12e60b24e08dc8635a35ee2c261806640777ba840583ff43c2ee7e2d9a  crates/conformance/tests/fixture_corruption.rs
+9717b349044da9b3ced50190e62ab43910ddc41b571953e0eda29812af2b5589  crates/conformance/tests/fixtures.rs
+2ce6427ff364d14f767d8917d8dcd59f9c0c301d3e5b1a1de0d00e131d3db62a  crates/conformance/tests/mutation_million.rs
+812cbdbf3b3fa1cd30214f5c42c178152a54db212a81e8d9850c452855ca8766  scripts/check-conformance-boundaries.sh
+f60c4bee8d1124498b3c67d3a93da40235e47709c1daa3131d27b33bbba66b97  scripts/check-protocol-wasm-parity.sh
+ad8688fe8c86c65b594adf6d367ec537043c0993483d5b218973fc2c4fc57adc  scripts/check-protocol-control-policy.sh
+1dc1af67d477b583af2cfc5cdf334ae90fcb3404ce283231ff013688973317bc  scripts/check-workspace-policy.sh
+07686ea444d5bb1f0f99ba993fc4a7752c76d89f7b3c0abb8fa66897469478bf  tools/bench/src/protocol.rs
+742a85cc7352380baf606c37f0cbe9ba172a728879c542dce58e34fe00bbba85  docs/derivations/241-schema-repins.md
+2c59b14586158caa5f873b1bd91290789ef00ff411152dda123539ecbe2d58f0  docs/derivations/274-parity-repin.md
+source_hashes_end
+command=scratch=$(mktemp -d /tmp/issue542-boundary-counterexample.XXXXXX); trap 'rm -rf "$scratch"' EXIT; cp -- crates/protocol/src/lib.rs "$scratch/lib.rs"; before=$(sha256sum crates/protocol/src/lib.rs); sed -i '/^pub use session_wire::DecodedSessionTransaction;/a pub use session_wire::complete_all_opcode_fixture;' crates/protocol/src/lib.rs; set +e; bash scripts/check-conformance-boundaries.sh >"$scratch/check.log" 2>&1; rc=$?; set -e; printf "mutated_checker_exit=%d\\n" "$rc"; cat "$scratch/check.log"; test "$rc" -eq 1; cp -- "$scratch/lib.rs" crates/protocol/src/lib.rs; after=$(sha256sum crates/protocol/src/lib.rs); printf "before=%s\\nafter=%s\\n" "$before" "$after"; cmp -s "$scratch/lib.rs" crates/protocol/src/lib.rs
+exit=1
