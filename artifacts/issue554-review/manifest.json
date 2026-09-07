@@ -1,0 +1,42 @@
+[
+  {
+    "source": "/tmp/issue349-partials/554-sol-xhigh-attempt1.command.json",
+    "packed": "artifacts/issue554-review/554-sol-xhigh-attempt1.command.json.gz",
+    "source_sha256": "4181cd7b8a5a25d2ca71c8bf303e88280f030b56508cade10d05d0afbc1dd06e",
+    "source_bytes": 449,
+    "packed_sha256": "cc58a62bfea3e29e272e10a8a034a3f5cc03036413becd83dd3f1a0d8de2b825",
+    "packed_bytes": 245
+  },
+  {
+    "source": "/tmp/issue349-partials/554-sol-xhigh-attempt1.md",
+    "packed": "artifacts/issue554-review/554-sol-xhigh-attempt1.md.gz",
+    "source_sha256": "46116997c0a04ed1a9d3c44813d4bc57e265b7c8dbefa28c9781eba16dacfb79",
+    "source_bytes": 2323,
+    "packed_sha256": "87cccfd0713d99c6d8f7b61813eb1b0bfea21d340b63bef9f9adc5c1d274309d",
+    "packed_bytes": 1206
+  },
+  {
+    "source": "/tmp/issue349-partials/554-sol-xhigh-attempt1.status",
+    "packed": "artifacts/issue554-review/554-sol-xhigh-attempt1.status.gz",
+    "source_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "source_bytes": 2,
+    "packed_sha256": "cabc3a30b39528db601f65ca3ced008dd775595c901102d08ac8ae8976b29bcf",
+    "packed_bytes": 22
+  },
+  {
+    "source": "/tmp/issue349-partials/554-sol-xhigh-attempt1.stderr",
+    "packed": "artifacts/issue554-review/554-sol-xhigh-attempt1.stderr.gz",
+    "source_sha256": "f6e8df6b6166fbc6fcec4911b9ddace90d50ad728aa12cd1770b10f36780e563",
+    "source_bytes": 552889,
+    "packed_sha256": "9525d380348f6c2e644e3f4bb45829a6926c96203991a06893efb759b7fda57f",
+    "packed_bytes": 119989
+  },
+  {
+    "source": "/tmp/issue349-partials/554-sol-xhigh-attempt1.stdout",
+    "packed": "artifacts/issue554-review/554-sol-xhigh-attempt1.stdout.gz",
+    "source_sha256": "471cb452ba5334795642773d378308c417215e31ec516763a9e247b48ffec8cd",
+    "source_bytes": 2324,
+    "packed_sha256": "ce2d48fb0a413a46eccb5f0b4f30d896009c8d10443e0df1aa76d510a67545c0",
+    "packed_bytes": 1206
+  }
+]
