@@ -1,0 +1,38 @@
+{
+  "argv": [
+    "cargo",
+    "fmt",
+    "--all"
+  ],
+  "cwd": "/home/bl/misofm/engine-gate-detector-access",
+  "head": "23f2b4c1a2d5749491948daea7518ad43b48ac02",
+  "branch": "codex/gate-detector-access",
+  "status": " M crates/gate-expander/src/kernel.rs\n M crates/gate-expander/src/lib.rs\n",
+  "env": {
+    "PATH": "/home/bl/.cargo/bin:/home/bl/.cargo/bin:/home/bl/.local/bin:/home/bl/.codex/packages/standalone/releases/0.153.4-x86_64-unknown-linux-musl/codex-path:/home/bl/.codex1/tmp/arg0/codex-arg032GUSu:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin",
+    "RUSTFLAGS": null,
+    "CARGO_TARGET_DIR": "/tmp/issue534-candidate-target"
+  },
+  "source": {
+    "crates/gate-expander/src/kernel.rs": {
+      "sha256": "7aafd11117e2e325b59314314b413d21ef150dac50154b362d71120d6da9e535",
+      "git_blob": "fe7553d8c6ba53795980644e1b3fe00feeeb33bd"
+    },
+    "crates/gate-expander/src/lib.rs": {
+      "sha256": "bbfc1384695b5bcaaf7f53d6de1da59cefca88763e68e9b4063d8ac613020bf3",
+      "git_blob": "d3ae9745a054952b2c5aeee4c83dea5ad065970c"
+    },
+    "Cargo.lock": {
+      "sha256": "ef85bfaac8b4df80b651fa89e5e9a67bfef141b58076bdaac513044161b0b853",
+      "git_blob": "1b74fb016a04a090d2d1d37ea15fd2917fb85491"
+    },
+    ".cargo/config.toml": {
+      "sha256": "03b0fbd88c069abb0a8fbdca5921ba6a9899298291fe087977b509a29ebb7d0e",
+      "git_blob": "de2180972c37406f1f16913901bd1d4fc2e660e3"
+    },
+    "rust-toolchain.toml": {
+      "sha256": "85a45cac04c296adac076f8f0609ca8f4c8ca658957f1f24cbd1e054b6cc44e0",
+      "git_blob": "6b6739839ba23906921aeb4c268d275dcc459fb6"
+    }
+  }
+}

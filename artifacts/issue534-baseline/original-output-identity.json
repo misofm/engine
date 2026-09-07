@@ -1,0 +1,82 @@
+{
+  "capture_head": "867bbfd327f5fb0c2f57769a50da2aa26a013774",
+  "originals": [
+    {
+      "path": "/tmp/issue534-baseline-target/release/deps/gate_expander-a68433203a7e3c7a.ll",
+      "bytes": 3680496,
+      "sha256": "70d9633d05b0f040c4f8d60e5b4b1ee99de184264fb05ce39aa30b93023ea911"
+    },
+    {
+      "path": "/tmp/issue534-baseline-target/release/deps/gate_expander-a68433203a7e3c7a.s",
+      "bytes": 1927109,
+      "sha256": "c49178247fb551f89d6f4c5b46e8b2a7416fd2e00801146c4624341624dc300f"
+    }
+  ],
+  "selected": [
+    {
+      "path": "selected/asm-source-context.txt",
+      "bytes": 82548,
+      "sha256": "bb8ef366e004581998327428685273061fe301c33dc0146a686f75fb6dbaa68b"
+    },
+    {
+      "path": "selected/manifest.txt",
+      "bytes": 1528,
+      "sha256": "28cdf22aae71bf58a87225cfd0fa735c3bc17b1e322fa85959cf1964d673e076"
+    },
+    {
+      "path": "selected/process-bank-w4.ll",
+      "bytes": 203342,
+      "sha256": "02a2cf2b8e56a5e54c014876a17bd533e9623b10fcb74bc2d781231af5d0ddd9"
+    },
+    {
+      "path": "selected/process-bank-w4.s",
+      "bytes": 85529,
+      "sha256": "f3ee168421bae499f3ac3b0cb7408137599ca4fa3cd19fa45789f3a5075aa864"
+    },
+    {
+      "path": "selected/process-bank-w8.ll",
+      "bytes": 231040,
+      "sha256": "d5b0e4f8efc0ca3f3a996035de01539ab9d3476408f7b8d02b51965dc926fb5c"
+    },
+    {
+      "path": "selected/process-bank-w8.s",
+      "bytes": 100644,
+      "sha256": "9cac6eb8d15cafa6f541e82368199ebe88e336d22a7acd409d592e94b18afed3"
+    },
+    {
+      "path": "selected/process-scalar-connected.ll",
+      "bytes": 34175,
+      "sha256": "525caddb4e0edbc892ece7202d5d55db4a7cf47423781bd4060047ba0a3aa7cb"
+    },
+    {
+      "path": "selected/process-scalar-connected.s",
+      "bytes": 14989,
+      "sha256": "3e483621f9ca92612cd7bc288dfa7ed3e5d6639ae8f77881b71a75bf3d034867"
+    },
+    {
+      "path": "selected/process-scalar-disconnected.ll",
+      "bytes": 232641,
+      "sha256": "89f77a786de6e3636054d8f04474226e544fb4da14937aa57c2dd6e514de8f6b"
+    },
+    {
+      "path": "selected/process-scalar-disconnected.s",
+      "bytes": 118538,
+      "sha256": "108eef7bd8eda69792791f3e96a4957b6c50370be07fddfe6cc9c1f36d894d25"
+    },
+    {
+      "path": "selected/run-block-scalar-connected.ll",
+      "bytes": 494705,
+      "sha256": "c583aaae90babbf048c501b75d538a4ee75169382e28657fa45ef3b0973058e5"
+    },
+    {
+      "path": "selected/run-block-scalar-connected.s",
+      "bytes": 249030,
+      "sha256": "c84675f1a0029dd5578d94bd4d8744304023d7274283ccee7e5709b3486255ed"
+    },
+    {
+      "path": "selected/source-mapping.txt",
+      "bytes": 105584,
+      "sha256": "d9bfa6db26ab255dea8dbf204b51c59ff604e0f22314d4c07c0e47f8f0512282"
+    }
+  ]
+}

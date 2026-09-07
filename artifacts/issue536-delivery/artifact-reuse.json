@@ -1,0 +1,31 @@
+{
+  "checked_head": "96a1748283cdf90e07e7e7736c3f5b203789f159",
+  "qualified_candidate": "34071c8763468f8c20186466a5d15cf5c2f0a636",
+  "files": {
+    "miso-engine-v1-abi-layout.json": {
+      "bytes": 9351,
+      "sha256": "40f6fe2e23e1b47500011c14871750a75922ab194136add8b387a4b40eb56919"
+    },
+    "miso-engine-v1-audio-worklet-host.d.ts": {
+      "bytes": 35347,
+      "sha256": "445254e7c6ddf3330bdf20cafa8cacec4d0e2489805f72a833859db52bc038cf"
+    },
+    "miso-engine-v1-audio-worklet-host.js": {
+      "bytes": 39457,
+      "sha256": "21c8947d8aad2d1d9a23e553c2c7b983dbd5a622aabfbab9a41c622d1a50229a"
+    },
+    "miso-engine-v1-audio-worklet.js": {
+      "bytes": 38447,
+      "sha256": "225bc06043ed6e2c62a38d63f1c2015b40480d673e3a53109c938eba481556cb"
+    },
+    "miso-engine-v1-audio-worklet.simd128.wasm": {
+      "bytes": 2717984,
+      "sha256": "e70a4311da3f053ea77fc0ec7ac00348d534dfb2919e05591fefed515988802d"
+    },
+    "miso-engine-v1-parameter-metadata.json": {
+      "bytes": 63907,
+      "sha256": "6eac2cb3e30931b6c01b10c63af4eedd2d59337274565a129c7a3f328a09938d"
+    }
+  },
+  "attribution": "Original local artifact/browser qualification at candidate34071 is reused. Issue536 changes only test source and evidence; production and build inputs remain unchanged. New exact-head review and required CI remain mandatory."
+}

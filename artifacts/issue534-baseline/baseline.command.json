@@ -1,0 +1,64 @@
+{
+  "argv": [
+    "cargo",
+    "rustc",
+    "--locked",
+    "--release",
+    "-p",
+    "gate-expander",
+    "--lib",
+    "--",
+    "--emit=asm,llvm-ir"
+  ],
+  "cwd": "/home/bl/misofm/engine-gate-detector-access",
+  "head": "867bbfd327f5fb0c2f57769a50da2aa26a013774",
+  "git_identity": {
+    "branch": "codex/gate-detector-access",
+    "commit": "867bbfd327f5fb0c2f57769a50da2aa26a013774\nBL <197889486+tamashi095@users.noreply.github.com>\nMon Sep 7 02:10:27 2026 +0000\ndocs: approve gate detector baseline capture",
+    "remote": "origin\thttps://github.com/misofm/engine (fetch)\norigin\thttps://github.com/misofm/engine (push)\n"
+  },
+  "status": "## codex/gate-detector-access...origin/codex/gate-detector-access\n",
+  "env": {
+    "PATH": "/home/bl/.cargo/bin:/home/bl/.cargo/bin:/home/bl/.cargo/bin:/home/bl/.local/bin:/home/bl/.codex/packages/standalone/releases/0.153.4-x86_64-unknown-linux-musl/codex-path:/home/bl/.codex1/tmp/arg0/codex-arg032GUSu:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin",
+    "RUSTFLAGS": null,
+    "CARGO_TARGET_DIR": "/tmp/issue534-baseline-target",
+    "CARGO_PROFILE_RELEASE_LTO": null,
+    "CARGO_PROFILE_RELEASE_CODEGEN_UNITS": null
+  },
+  "toolchain": {
+    "rustc": {
+      "status": 0,
+      "output": "rustc 1.97.1 (8bab26f4f 2026-07-14)\nbinary: rustc\ncommit-hash: 8bab26f4f68e0e26f0bb7960be334d5b520ea452\ncommit-date: 2026-07-14\nhost: x86_64-unknown-linux-gnu\nrelease: 1.97.1\nLLVM version: 22.1.6\n"
+    },
+    "cargo": {
+      "status": 0,
+      "output": "cargo 1.97.1 (c980f4866 2026-06-30)\n"
+    },
+    "rustup_toolchain": {
+      "status": 0,
+      "output": "1.97.1-x86_64-unknown-linux-gnu (overridden by '/home/bl/misofm/engine-gate-detector-access/rust-toolchain.toml')\n"
+    }
+  },
+  "source": {
+    "crates/gate-expander/src/kernel.rs": {
+      "sha256": "edba1190fda2126581e3bbdec4ae65390f52bc9e65d7502d5979b38c3f381cf7",
+      "git_blob": "2f5b87e91314ded9dff955c57e6c71a138b39240"
+    },
+    "crates/gate-expander/src/lib.rs": {
+      "sha256": "7e9396d4d53131767d0f9a83743e1403c953fd8e7419fb87c3f63dc2ec6b5d7b",
+      "git_blob": "477641db32e3eff18766d1f49d592ea07184e9d1"
+    },
+    "Cargo.lock": {
+      "sha256": "ef85bfaac8b4df80b651fa89e5e9a67bfef141b58076bdaac513044161b0b853",
+      "git_blob": "1b74fb016a04a090d2d1d37ea15fd2917fb85491"
+    },
+    ".cargo/config.toml": {
+      "sha256": "03b0fbd88c069abb0a8fbdca5921ba6a9899298291fe087977b509a29ebb7d0e",
+      "git_blob": "de2180972c37406f1f16913901bd1d4fc2e660e3"
+    },
+    "rust-toolchain.toml": {
+      "sha256": "85a45cac04c296adac076f8f0609ca8f4c8ca658957f1f24cbd1e054b6cc44e0",
+      "git_blob": "6b6739839ba23906921aeb4c268d275dcc459fb6"
+    }
+  }
+}

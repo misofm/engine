@@ -14,6 +14,7 @@ use support::{
 
 const LATENCY: usize = 480;
 const RAMP_WORD: usize = 7;
+const RING_WORD: usize = 23;
 
 fn word(payload: &[u8], index: usize) -> u32 {
     u32::from_le_bytes(payload[index * 4..index * 4 + 4].try_into().expect("word"))
@@ -33,6 +34,14 @@ fn track_values() -> [Values; 8] {
         set_parameter(&mut values, 7, lookaheads[track], lookaheads[7 - track]);
         values
     })
+}
+
+/// The state fixtures retain their equal-tap profile; this donor changes one lane's right tap so
+/// restore must rederive an unequal cross-plane classification before the next populated render.
+fn nonpalindromic_track_values() -> [Values; 8] {
+    let mut values = track_values();
+    set_parameter(&mut values[3], 7, 10.0, 7.0);
+    values
 }
 
 /// Asserts the runtime words of a payload are the prepared resting state.
@@ -297,6 +306,210 @@ fn a_track_restores_into_a_bank_whose_cursor_is_elsewhere() {
         &track_of(&bank_right, 3, 8),
         &expected_right,
         "restored bank track 3 right",
+    );
+}
+
+#[test]
+fn populated_restore_reclassifies_equal_taps_before_the_next_render() {
+    const PREFIX: usize = 600;
+    const CONTINUATION: usize = 128;
+    const LEFT_LOOKAHEAD: f32 = 10.0;
+    const RIGHT_LOOKAHEAD: f32 = 7.0;
+    const RIGHT_TAP: usize = LATENCY - 336;
+
+    let equal_values = track_values();
+    let unequal_values = nonpalindromic_track_values();
+    assert_eq!(equal_values[3][15].value, LEFT_LOOKAHEAD);
+    assert_eq!(unequal_values[3][14].value, LEFT_LOOKAHEAD);
+    assert_eq!(unequal_values[3][15].value, RIGHT_LOOKAHEAD);
+    assert_ne!(
+        unequal_values[3][14].value.to_bits(),
+        unequal_values[3][15].value.to_bits()
+    );
+
+    let mut source_left = noise(707, PREFIX + CONTINUATION, 0.4);
+    let mut source_right = noise(808, PREFIX + CONTINUATION, 0.4);
+    // Keep the ring populated, but make the alternate tap a quiet interval and the next source
+    // sample loud. The equal control therefore reopens on the current word while the unequal
+    // right detector still sees the quiet word 144 samples earlier.
+    for frame in 100..PREFIX {
+        source_left[frame] = 0.0005;
+        source_right[frame] = 0.0005;
+    }
+    source_left[PREFIX] = 0.5;
+    source_right[PREFIX] = 0.5;
+    let alternate = PREFIX - RIGHT_TAP;
+    assert_ne!(
+        source_left[PREFIX].to_bits(),
+        source_left[alternate].to_bits(),
+        "left alternate tap words differ"
+    );
+    assert_ne!(
+        source_right[PREFIX].to_bits(),
+        source_right[alternate].to_bits(),
+        "right alternate tap words differ"
+    );
+
+    let mut donor_request = request(&unequal_values[3]);
+    donor_request.link_mode = LinkMode::Maximum;
+    let mut donor = prepare(donor_request);
+    let mut donor_prefix_left = source_left[..PREFIX].to_vec();
+    let mut donor_prefix_right = source_right[..PREFIX].to_vec();
+    render_scalar_sidechain(
+        donor.as_mut(),
+        &mut donor_prefix_left,
+        &mut donor_prefix_right,
+        None,
+        128,
+        &[],
+        0,
+    );
+    let (common, donor_left_payload, donor_right_payload) = snapshot(donor.as_ref());
+    assert_eq!(
+        float(&donor_left_payload, 1).to_bits(),
+        0,
+        "populated unequal donor left is closed before restore"
+    );
+    assert_eq!(
+        float(&donor_right_payload, 1).to_bits(),
+        0,
+        "populated unequal donor right is closed before restore"
+    );
+    assert!(
+        float(&donor_left_payload, 0) < 0.0 && float(&donor_right_payload, 0) < 0.0,
+        "populated unequal donor has attenuated state before restore"
+    );
+    assert_eq!(
+        float(&donor_left_payload, 3).to_bits(),
+        LEFT_LOOKAHEAD.to_bits(),
+        "populated donor left timing"
+    );
+    assert_eq!(
+        float(&donor_right_payload, 3).to_bits(),
+        RIGHT_LOOKAHEAD.to_bits(),
+        "populated donor right timing"
+    );
+    let ring_offset = alternate - (PREFIX - LATENCY);
+    assert_eq!(
+        ring_offset, 336,
+        "the alternate word is inside the payload ring"
+    );
+    assert_ne!(
+        float(&donor_left_payload, RING_WORD + ring_offset).to_bits(),
+        0,
+        "populated left alternate ring word"
+    );
+    assert_ne!(
+        float(&donor_right_payload, RING_WORD + ring_offset).to_bits(),
+        0,
+        "populated right alternate ring word"
+    );
+    assert_eq!(
+        float(&donor_left_payload, RING_WORD + ring_offset).to_bits(),
+        source_left[alternate].to_bits(),
+        "left alternate ring word is the source word"
+    );
+    assert_eq!(
+        float(&donor_right_payload, RING_WORD + ring_offset).to_bits(),
+        source_right[alternate].to_bits(),
+        "right alternate ring word is the source word"
+    );
+
+    // The destination lane starts with equal taps, then receives the unequal donor timing. The
+    // 37-frame warm-up leaves the bank cursor elsewhere, so this also exercises cursor-normalised
+    // payload placement before the next render.
+    let Some(mut bank) = prepare_bank_w8(&equal_values, LinkMode::Maximum) else {
+        return;
+    };
+    let mut warm_left = vec![0.0_f32; 37 * 8];
+    let mut warm_right = vec![0.0_f32; 37 * 8];
+    render_bank(bank.as_mut(), &mut warm_left, &mut warm_right, 37);
+    let sizes = bank.metadata().program_key.state_sizes;
+    bank.restore_track_state_payload(
+        3,
+        1,
+        StatePayloadInput::new(&common, &donor_left_payload, &donor_right_payload, sizes)
+            .expect("sizes"),
+    )
+    .expect("restore unequal donor into equal-tap bank lane");
+
+    let mut expected_left = source_left[PREFIX..].to_vec();
+    let mut expected_right = source_right[PREFIX..].to_vec();
+    render_scalar_sidechain(
+        donor.as_mut(),
+        &mut expected_left,
+        &mut expected_right,
+        None,
+        128,
+        &[],
+        PREFIX as u64,
+    );
+
+    let mut bank_left = packed_w8(&vec![source_left[PREFIX..].to_vec(); 8]);
+    let mut bank_right = packed_w8(&vec![source_right[PREFIX..].to_vec(); 8]);
+    render_bank(bank.as_mut(), &mut bank_left, &mut bank_right, 128);
+    assert_bits_eq(
+        &track_of(&bank_left, 3, 8),
+        &expected_left,
+        "restored unequal lane left after reclassification",
+    );
+    assert_bits_eq(
+        &track_of(&bank_right, 3, 8),
+        &expected_right,
+        "restored unequal lane right after reclassification",
+    );
+    assert_eq!(
+        snapshot_bank(bank.as_ref(), 3),
+        snapshot(donor.as_ref()),
+        "restored unequal lane state after reclassification"
+    );
+
+    // A fresh equal-tap scalar control must take a different detector route on this populated
+    // input; otherwise the transition assertion would be satisfied by an insensitive fixture.
+    let mut equal_request = request(&equal_values[3]);
+    equal_request.link_mode = LinkMode::Maximum;
+    let mut equal_control = prepare(equal_request);
+    let mut equal_prefix_left = source_left[..PREFIX].to_vec();
+    let mut equal_prefix_right = source_right[..PREFIX].to_vec();
+    render_scalar_sidechain(
+        equal_control.as_mut(),
+        &mut equal_prefix_left,
+        &mut equal_prefix_right,
+        None,
+        128,
+        &[],
+        0,
+    );
+    let (_, equal_prefix_left_payload, equal_prefix_right_payload) =
+        snapshot(equal_control.as_ref());
+    assert_eq!(
+        float(&equal_prefix_left_payload, 1).to_bits(),
+        0,
+        "populated equal control left is closed before next render"
+    );
+    assert_eq!(
+        float(&equal_prefix_right_payload, 1).to_bits(),
+        0,
+        "populated equal control right is closed before next render"
+    );
+    let mut equal_next_left = source_left[PREFIX..].to_vec();
+    let mut equal_next_right = source_right[PREFIX..].to_vec();
+    render_scalar_sidechain(
+        equal_control.as_mut(),
+        &mut equal_next_left,
+        &mut equal_next_right,
+        None,
+        128,
+        &[],
+        PREFIX as u64,
+    );
+    assert!(
+        expected_left
+            .iter()
+            .zip(&equal_next_left)
+            .chain(expected_right.iter().zip(&equal_next_right))
+            .any(|(unequal, equal)| unequal.to_bits() != equal.to_bits()),
+        "equal and unequal populated detector routes must differ in next-render PCM"
     );
 }
 

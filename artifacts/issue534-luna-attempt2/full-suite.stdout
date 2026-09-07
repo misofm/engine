@@ -1,0 +1,71 @@
+
+running 4 tests
+test kernel::tests::access_routes_agree_with_old_words_at_all_supported_widths_and_wraps ... ok
+test kernel::tests::classification_ignores_inactive_padding_and_dual_mono_ignores_partner_words ... ok
+test tests::the_runtime_parameter_specs_agree_with_the_frozen_descriptor ... ok
+test tests::injected_nonfinite_gain_has_scalar_w8_parity ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+
+running 1 test
+test passes_effect_contract_conformance ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.58s
+
+
+running 9 tests
+test descriptor_and_exact_resources_are_frozen ... ok
+test the_payload_header_names_the_layout ... ok
+test bank_validation_precedes_fallback_and_unavailable_w4_is_legal ... ok
+test active_sidechain_and_exact_automation_state_are_observable ... ok
+test independent_curve_and_exact_hold_transitions_agree ... ok
+test an_open_gate_rearms_at_a_level_exactly_equal_to_the_close_threshold ... ok
+test a_closed_gate_opens_at_a_level_exactly_equal_to_the_threshold ... ok
+test the_lookahead_tap_lands_the_detector_exactly_where_the_brief_says ... ok
+test all_rate_caps_lookahead_and_fixed_latency_are_exact ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+
+running 2 tests
+test no_case_is_vacuous ... ok
+test every_case_agrees_at_every_width_and_matches_its_pin ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
+
+
+running 3 tests
+test signed_zero_identity_is_bit_exact ... ok
+test partition_invariance ... ok
+test lane_identity_scalar_w8 ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.66s
+
+
+running 3 tests
+test every_decision_is_at_least_one_decibel_clear_of_a_threshold ... ok
+test oracle_pcm_within_derived_tolerance_scalar ... ok
+test oracle_pcm_within_derived_tolerance_w8 ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.31s
+
+
+running 9 tests
+test a_malformed_phase_word_rejects_and_leaves_both_lanes_untouched ... ok
+test reset_kinds_are_word_exact ... ok
+test nonfinite_input_recovers_lane_locally_at_the_block_boundary ... ok
+test populated_restore_reclassifies_equal_taps_before_the_next_render ... ok
+test reset_kinds_are_word_exact_for_every_lane_of_a_bank ... ok
+test the_gain_word_is_flushed_to_zero_once_it_decays_below_the_band ... ok
+test a_track_restores_into_a_bank_whose_cursor_is_elsewhere ... ok
+test active_restore_continues_against_uninterrupted ... ok
+test nonfinite_input_recovers_one_lane_of_a_bank ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

@@ -47,7 +47,10 @@ use effect_runtime::ramp::LinearRamp;
 use effect_runtime::state_payload as payload;
 use lane::{Backend, Lane, Simd4, Simd8};
 
-use kernel::{GateArgs, GateCoef, GateRing, GateState, MAX_WIDTH, RAMP_COUNT, gate_block};
+use kernel::{
+    GateArgs, GateCoef, GateRing, GateState, MAX_WIDTH, RAMP_COUNT, classify_detector_access,
+    gate_block_with_access,
+};
 
 const PARAMETER_COUNT: usize = 8;
 
@@ -718,29 +721,34 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
             detector: detector_right,
             tap: tap_right,
         } = &mut ring_right[0];
-        gate_block::<L, CONNECTED, RAMPING>(GateArgs {
-            left,
-            right,
-            sidechain,
-            frames,
-            coef: (&self.coef[0], &self.coef[1]),
-            state: (&mut state_left[0], &mut state_right[0]),
-            rings: (
-                GateRing {
-                    main: main_left,
-                    detector: detector_left,
-                    tap: tap_left,
-                },
-                GateRing {
-                    main: main_right,
-                    detector: detector_right,
-                    tap: tap_right,
-                },
-            ),
-            cursor: &mut self.cursor,
-            slot_mask: self.slot_mask,
-            delay: self.delay,
-        });
+        let detector_access =
+            classify_detector_access(self.metadata.link_mode, L::WIDTH, tap_left, tap_right);
+        gate_block_with_access::<L, CONNECTED, RAMPING>(
+            GateArgs {
+                left,
+                right,
+                sidechain,
+                frames,
+                coef: (&self.coef[0], &self.coef[1]),
+                state: (&mut state_left[0], &mut state_right[0]),
+                rings: (
+                    GateRing {
+                        main: main_left,
+                        detector: detector_left,
+                        tap: tap_left,
+                    },
+                    GateRing {
+                        main: main_right,
+                        detector: detector_right,
+                        tap: tap_right,
+                    },
+                ),
+                cursor: &mut self.cursor,
+                slot_mask: self.slot_mask,
+                delay: self.delay,
+            },
+            detector_access,
+        );
     }
 
     /// The D7 boundary check, once per block per channel, and the lane-local recovery.

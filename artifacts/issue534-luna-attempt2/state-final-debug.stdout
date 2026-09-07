@@ -1,0 +1,14 @@
+
+running 9 tests
+test a_malformed_phase_word_rejects_and_leaves_both_lanes_untouched ... ok
+test reset_kinds_are_word_exact ... ok
+test nonfinite_input_recovers_lane_locally_at_the_block_boundary ... ok
+test populated_restore_reclassifies_equal_taps_before_the_next_render ... ok
+test reset_kinds_are_word_exact_for_every_lane_of_a_bank ... ok
+test the_gain_word_is_flushed_to_zero_once_it_decays_below_the_band ... ok
+test active_restore_continues_against_uninterrupted ... ok
+test a_track_restores_into_a_bank_whose_cursor_is_elsewhere ... ok
+test nonfinite_input_recovers_one_lane_of_a_bank ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+

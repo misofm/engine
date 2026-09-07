@@ -1,0 +1,11 @@
+{
+  "head": "406303595ca2a15173984957a16ff6080bb9fd9a",
+  "current_main": "fe58709c04c880b14dd72f9bd4a25ef5f7071202",
+  "source_changes": [
+    "crates/gate-expander/src/kernel.rs",
+    "crates/gate-expander/src/lib.rs",
+    "crates/gate-expander/tests/identity.rs",
+    "crates/gate-expander/tests/state.rs"
+  ],
+  "evidence_file_count": 255
+}

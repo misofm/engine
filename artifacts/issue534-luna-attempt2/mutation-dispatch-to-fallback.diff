@@ -1,0 +1,16 @@
+diff --git a/crates/gate-expander/src/kernel.rs b/crates/gate-expander/src/kernel.rs
+index 1623cc78..8425022f 100644
+--- a/crates/gate-expander/src/kernel.rs
++++ b/crates/gate-expander/src/kernel.rs
+@@ -225,6 +225,11 @@ fn gather_detector(
+     source_right: &[f32],
+     taps: &mut [[f32; MAX_WIDTH]; 4],
+ ) -> DetectorLoadRoute {
++    let access = if matches!(access, DetectorAccess::LinkedEqual) {
++        DetectorAccess::LinkedUnequal
++    } else {
++        access
++    };
+     match access {
+         DetectorAccess::DualMono => {
+             #[allow(clippy::needless_range_loop)]

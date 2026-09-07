@@ -28,6 +28,7 @@
 //! rendered bits and would break the hold semantics issue #48 froze, so the gate keeps its own
 //! transition and shares the representation.
 
+use effect_contract::LinkMode;
 use effect_runtime::envelope::HysteresisState;
 use lane::{Lane, flush};
 use math::fast_db::{fast_gain_from_db, fast_level_db};
@@ -37,6 +38,45 @@ pub const RAMP_COUNT: usize = 4;
 
 /// The widest backend, and so the length of every per-lane scratch array.
 pub const MAX_WIDTH: usize = 8;
+
+/// The detector accesses needed for one immutable run segment.
+///
+/// The link mode comes from prepared metadata. Equality is checked across the two tap planes
+/// for active lanes only; padding lanes never influence this transient classification.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DetectorAccess {
+    DualMono,
+    LinkedEqual,
+    LinkedUnequal,
+}
+
+/// Classifies the detector route once at the start of a run segment.
+#[inline]
+pub(crate) fn classify_detector_access(
+    link_mode: LinkMode,
+    width: usize,
+    left_tap: &[u32],
+    right_tap: &[u32],
+) -> DetectorAccess {
+    if link_mode == LinkMode::DualMono {
+        return DetectorAccess::DualMono;
+    }
+    let equal = left_tap[..width]
+        .iter()
+        .zip(&right_tap[..width])
+        .all(|(left, right)| left == right);
+    if equal {
+        DetectorAccess::LinkedEqual
+    } else {
+        DetectorAccess::LinkedUnequal
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DetectorLoadRoute {
+    OwnOnly,
+    FourReads,
+}
 
 /// `20 * log10(2)`, rounded once: the factor that turns a `log2` into decibels.
 ///
@@ -167,6 +207,72 @@ pub struct GateArgs<'a, L: Lane> {
     pub delay: u32,
 }
 
+/// Gathers detector words for one frame and returns the route actually taken by the loads.
+///
+/// The returned route is private test evidence for the branch itself; production code does not
+/// count or retain it. DualMono supplies each channel's own word as its ignored partner. Linked
+/// equal taps reuse the opposite channel's own word, preserving the original four tap arguments
+/// after only the two own source reads.
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn gather_detector(
+    access: DetectorAccess,
+    now: u32,
+    slot_mask: u32,
+    width: usize,
+    left_tap: &[u32],
+    right_tap: &[u32],
+    source_left: &[f32],
+    source_right: &[f32],
+    taps: &mut [[f32; MAX_WIDTH]; 4],
+) -> DetectorLoadRoute {
+    match access {
+        DetectorAccess::DualMono => {
+            #[allow(clippy::needless_range_loop)]
+            for lane in 0..width {
+                let left = ((now.wrapping_sub(left_tap[lane]) & slot_mask) as usize) * width + lane;
+                let right =
+                    ((now.wrapping_sub(right_tap[lane]) & slot_mask) as usize) * width + lane;
+                let left_own = source_left[left];
+                let right_own = source_right[right];
+                taps[0][lane] = left_own;
+                taps[1][lane] = left_own;
+                taps[2][lane] = right_own;
+                taps[3][lane] = right_own;
+            }
+            DetectorLoadRoute::OwnOnly
+        }
+        DetectorAccess::LinkedEqual => {
+            #[allow(clippy::needless_range_loop)]
+            for lane in 0..width {
+                let left = ((now.wrapping_sub(left_tap[lane]) & slot_mask) as usize) * width + lane;
+                let right =
+                    ((now.wrapping_sub(right_tap[lane]) & slot_mask) as usize) * width + lane;
+                let left_own = source_left[left];
+                let right_own = source_right[right];
+                taps[0][lane] = left_own;
+                taps[1][lane] = right_own;
+                taps[2][lane] = right_own;
+                taps[3][lane] = left_own;
+            }
+            DetectorLoadRoute::OwnOnly
+        }
+        DetectorAccess::LinkedUnequal => {
+            #[allow(clippy::needless_range_loop)]
+            for lane in 0..width {
+                let left = ((now.wrapping_sub(left_tap[lane]) & slot_mask) as usize) * width + lane;
+                let right =
+                    ((now.wrapping_sub(right_tap[lane]) & slot_mask) as usize) * width + lane;
+                taps[0][lane] = source_left[left];
+                taps[1][lane] = source_right[left];
+                taps[2][lane] = source_right[right];
+                taps[3][lane] = source_left[right];
+            }
+            DetectorLoadRoute::FourReads
+        }
+    }
+}
+
 /// Runs one block of the gate through one lane width.
 ///
 /// `CONNECTED` selects the sidechain detector, `RAMPING` the parameter-smoothing prologue; both
@@ -214,6 +320,15 @@ pub struct GateArgs<'a, L: Lane> {
 /// without a sidechain.
 #[inline(always)]
 pub fn gate_block<L: Lane, const CONNECTED: bool, const RAMPING: bool>(args: GateArgs<'_, L>) {
+    gate_block_with_access::<L, CONNECTED, RAMPING>(args, DetectorAccess::LinkedUnequal);
+}
+
+/// Runs one block with a route classified from the prepared metadata at segment entry.
+#[inline(always)]
+pub(crate) fn gate_block_with_access<L: Lane, const CONNECTED: bool, const RAMPING: bool>(
+    args: GateArgs<'_, L>,
+    detector_access: DetectorAccess,
+) {
     let GateArgs {
         left,
         right,
@@ -264,18 +379,19 @@ pub fn gate_block<L: Lane, const CONNECTED: bool, const RAMPING: bool>(args: Gat
         } else {
             (&*ring_left.main, &*ring_right.main)
         };
-        // Four disjoint destination arrays written at the same index, from two tap arrays read at
-        // that index: an iterator chain over all six would hide what the index means.
-        #[allow(clippy::needless_range_loop)]
-        for lane in 0..width {
-            let own = ((now.wrapping_sub(ring_left.tap[lane]) & slot_mask) as usize) * width + lane;
-            let partner =
-                ((now.wrapping_sub(ring_right.tap[lane]) & slot_mask) as usize) * width + lane;
-            taps[0][lane] = source_left[own];
-            taps[1][lane] = source_right[own];
-            taps[2][lane] = source_right[partner];
-            taps[3][lane] = source_left[partner];
-        }
+        // The access route is immutable for this segment. FourReads preserves the original
+        // source/index mapping; OwnOnly supplies each channel's own word as its ignored partner.
+        let _route = gather_detector(
+            detector_access,
+            now,
+            slot_mask,
+            width,
+            ring_left.tap,
+            ring_right.tap,
+            source_left,
+            source_right,
+            &mut taps,
+        );
 
         let out_left = channel_step::<L, RAMPING>(
             coef_left,
@@ -397,4 +513,191 @@ fn channel_step<L: Lane, const RAMPING: bool>(
     let gain = fast_gain_from_db(gain_db);
     let identity = L::mask_or(gain_db.eq(zero), coef.bypass.gt(zero));
     L::select(identity, dry, dry.mul(gain))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MASK: u32 = 7;
+    const SLOTS: usize = 8;
+
+    fn source_words(seed: f32) -> [f32; SLOTS * MAX_WIDTH] {
+        core::array::from_fn(|index| seed + index as f32 * 0.25 + (index % 7) as f32)
+    }
+
+    fn old_gather(
+        width: usize,
+        now: u32,
+        left_tap: &[u32; MAX_WIDTH],
+        right_tap: &[u32; MAX_WIDTH],
+        source_left: &[f32],
+        source_right: &[f32],
+    ) -> [[f32; MAX_WIDTH]; 4] {
+        let mut taps = [[0.0; MAX_WIDTH]; 4];
+        for lane in 0..width {
+            let left = ((now.wrapping_sub(left_tap[lane]) & MASK) as usize) * width + lane;
+            let right = ((now.wrapping_sub(right_tap[lane]) & MASK) as usize) * width + lane;
+            taps[0][lane] = source_left[left];
+            taps[1][lane] = source_right[left];
+            taps[2][lane] = source_right[right];
+            taps[3][lane] = source_left[right];
+        }
+        taps
+    }
+
+    fn check_case(
+        width: usize,
+        link_mode: LinkMode,
+        expected_access: DetectorAccess,
+        expected_route: DetectorLoadRoute,
+        left_tap: [u32; MAX_WIDTH],
+        right_tap: [u32; MAX_WIDTH],
+        now: u32,
+    ) {
+        let source_left = source_words(-17.0);
+        let source_right = source_words(31.0);
+        let old = old_gather(
+            width,
+            now,
+            &left_tap,
+            &right_tap,
+            &source_left,
+            &source_right,
+        );
+        let access = classify_detector_access(link_mode, width, &left_tap, &right_tap);
+        assert_eq!(access, expected_access);
+        let mut actual = [[0.0; MAX_WIDTH]; 4];
+        let route = gather_detector(
+            access,
+            now,
+            MASK,
+            width,
+            &left_tap,
+            &right_tap,
+            &source_left,
+            &source_right,
+            &mut actual,
+        );
+        match expected_access {
+            DetectorAccess::DualMono => {
+                // DualMono's partner arguments are not consumed by channel_step. Compare the
+                // two actual own words against the independent old mapping only.
+                for lane in 0..width {
+                    assert_eq!(actual[0][lane].to_bits(), old[0][lane].to_bits());
+                    assert_eq!(actual[2][lane].to_bits(), old[2][lane].to_bits());
+                }
+            }
+            DetectorAccess::LinkedEqual | DetectorAccess::LinkedUnequal => {
+                // Linked modes consume all four detector arguments, so every old word is part of
+                // the independent bit-for-bit comparison.
+                for lane in 0..width {
+                    for (channel, word) in old.iter().enumerate() {
+                        assert_eq!(actual[channel][lane].to_bits(), word[lane].to_bits());
+                    }
+                }
+            }
+        }
+        // Assert the mechanism only after the consumed-word semantics have passed.
+        assert_eq!(route, expected_route);
+    }
+
+    #[test]
+    fn access_routes_agree_with_old_words_at_all_supported_widths_and_wraps() {
+        for width in [1, 4, 8] {
+            let equal_ragged = core::array::from_fn(|lane| lane as u32);
+            let unequal_left = core::array::from_fn(|lane| lane as u32 * 2);
+            let unequal_right = core::array::from_fn(|lane| lane as u32 * 2 + 1);
+            let all_zero = [0; MAX_WIDTH];
+            check_case(
+                width,
+                LinkMode::DualMono,
+                DetectorAccess::DualMono,
+                DetectorLoadRoute::OwnOnly,
+                all_zero,
+                unequal_right,
+                0,
+            );
+            check_case(
+                width,
+                LinkMode::Maximum,
+                DetectorAccess::LinkedEqual,
+                DetectorLoadRoute::OwnOnly,
+                equal_ragged,
+                equal_ragged,
+                5,
+            );
+            check_case(
+                width,
+                LinkMode::Average,
+                DetectorAccess::LinkedEqual,
+                DetectorLoadRoute::OwnOnly,
+                equal_ragged,
+                equal_ragged,
+                u32::MAX,
+            );
+            check_case(
+                width,
+                LinkMode::Maximum,
+                DetectorAccess::LinkedUnequal,
+                DetectorLoadRoute::FourReads,
+                unequal_left,
+                unequal_right,
+                1,
+            );
+        }
+    }
+
+    #[test]
+    fn classification_ignores_inactive_padding_and_dual_mono_ignores_partner_words() {
+        let left = [0, 1, 2, 3, 11, 12, 13, 14];
+        let right = [0, 1, 2, 3, 99, 98, 97, 96];
+        assert_eq!(
+            classify_detector_access(LinkMode::Average, 4, &left, &right),
+            DetectorAccess::LinkedEqual
+        );
+
+        let mut source_left = source_words(-9.0);
+        let mut source_right = source_words(23.0);
+        // W1 uses genuinely unequal taps: left own is slot 3 and right own is slot 1. The
+        // opposite-plane partner positions (right slot 3 and left slot 1) are therefore unused
+        // by DualMono and can be mutated without changing either consumed own word.
+        let left_tap = [0; MAX_WIDTH];
+        let right_tap = [2; MAX_WIDTH];
+        let old = old_gather(1, 3, &left_tap, &right_tap, &source_left, &source_right);
+        let mut actual = [[0.0; MAX_WIDTH]; 4];
+        let route = gather_detector(
+            DetectorAccess::DualMono,
+            3,
+            MASK,
+            1,
+            &left_tap,
+            &right_tap,
+            &source_left,
+            &source_right,
+            &mut actual,
+        );
+        assert_eq!(actual[0][0].to_bits(), old[0][0].to_bits());
+        assert_eq!(actual[2][0].to_bits(), old[2][0].to_bits());
+
+        source_left[1] += 1000.0;
+        source_right[3] -= 1000.0;
+        let mut changed = [[0.0; MAX_WIDTH]; 4];
+        let changed_route = gather_detector(
+            DetectorAccess::DualMono,
+            3,
+            MASK,
+            1,
+            &left_tap,
+            &right_tap,
+            &source_left,
+            &source_right,
+            &mut changed,
+        );
+        assert_eq!(changed[0][0].to_bits(), actual[0][0].to_bits());
+        assert_eq!(changed[2][0].to_bits(), actual[2][0].to_bits());
+        // Keep this positive branch witness after the independent consumed-word checks.
+        assert_eq!(route, DetectorLoadRoute::OwnOnly);
+        assert_eq!(changed_route, DetectorLoadRoute::OwnOnly);
+    }
 }

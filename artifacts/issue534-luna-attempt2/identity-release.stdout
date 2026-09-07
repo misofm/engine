@@ -1,0 +1,8 @@
+
+running 3 tests
+test signed_zero_identity_is_bit_exact ... ok
+test partition_invariance ... ok
+test lane_identity_scalar_w8 ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+

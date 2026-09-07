@@ -1,0 +1,20 @@
+
+running 1 test
+test kernel::tests::access_routes_agree_with_old_words_at_all_supported_widths_and_wraps ... FAILED
+
+failures:
+
+---- kernel::tests::access_routes_agree_with_old_words_at_all_supported_widths_and_wraps stdout ----
+
+thread 'kernel::tests::access_routes_agree_with_old_words_at_all_supported_widths_and_wraps' (507077) panicked at crates/gate-expander/src/kernel.rs:606:9:
+assertion `left == right` failed
+  left: FourReads
+ right: OwnOnly
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    kernel::tests::access_routes_agree_with_old_words_at_all_supported_widths_and_wraps
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+

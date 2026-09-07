@@ -1,0 +1,4 @@
+   Compiling gate-expander v0.1.0 (/home/bl/misofm/engine-gate-detector-access/crates/gate-expander)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.69s
+     Running tests/oracle.rs (/tmp/issue534-candidate-target/debug/deps/oracle-679f6a5d0368d754)
+error: test failed, to rerun pass `-p gate-expander --test oracle`

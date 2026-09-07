@@ -1,0 +1,10 @@
+   Compiling gate-expander v0.1.0 (/home/bl/misofm/engine-gate-detector-access/crates/gate-expander)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.49s
+     Running unittests src/lib.rs (/tmp/issue534-luna2-target/debug/deps/gate_expander-568cd71602912dfe)
+     Running tests/conformance.rs (/tmp/issue534-luna2-target/debug/deps/conformance-cd8e68eaf40eb8bc)
+     Running tests/contract.rs (/tmp/issue534-luna2-target/debug/deps/contract-a7b69bade72b6c59)
+     Running tests/determinism.rs (/tmp/issue534-luna2-target/debug/deps/determinism-4c2cd1ca17d202fd)
+     Running tests/identity.rs (/tmp/issue534-luna2-target/debug/deps/identity-569acb1688dbd896)
+     Running tests/oracle.rs (/tmp/issue534-luna2-target/debug/deps/oracle-679f6a5d0368d754)
+     Running tests/state.rs (/tmp/issue534-luna2-target/debug/deps/state-8be55eb5b09784d1)
+   Doc-tests gate_expander
