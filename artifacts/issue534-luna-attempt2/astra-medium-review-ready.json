@@ -1,0 +1,13 @@
+{
+  "package_head": "580c0d8a4f312ee05bb89efea7c57543e1bab0ec",
+  "base": "fe58709c04c880b14dd72f9bd4a25ef5f7071202",
+  "report": "artifacts/issue534-luna-attempt2/native-policy-final-report.md",
+  "native_directory": "artifacts/issue534-luna-attempt2/native-selected",
+  "source_sha256": {
+    "crates/gate-expander/src/kernel.rs": "0cc1b0115f8878559c1b492174d1e2e906a83b3858bcee4587750f9a3c21a8bd",
+    "crates/gate-expander/src/lib.rs": "24e31168d4488da30a8c519971b4af7c1e723e8485bdcdf67127c45054ce64a1",
+    "crates/gate-expander/tests/identity.rs": "36baa96332ba8e5e2d81639046cd430bbfe4f500a23242f6eb5d646c92b88aa1",
+    "crates/gate-expander/tests/state.rs": "786702191ed9cc3e682dffb113712498b461b8d83b51b558ae23fa2dc8443645"
+  },
+  "root_verification": "Clean/upstream and current base verified; original native hashes/all ten extracts checked against exact original line ranges. Full suite raw count31pass0fail0ignored. No source changes since8b74e950."
+}

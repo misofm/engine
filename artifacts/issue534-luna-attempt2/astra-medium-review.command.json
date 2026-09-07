@@ -1,0 +1,19 @@
+{
+  "argv": [
+    "codex",
+    "exec",
+    "-s",
+    "danger-full-access",
+    "resume",
+    "-m",
+    "gpt-6-astra",
+    "-c",
+    "model_reasoning_effort=\"medium\"",
+    "-o",
+    "/tmp/issue534-attempt2-astra-medium-review.md",
+    "01a079c1-6706-7970-a437-77afe015d26a",
+    "-"
+  ],
+  "cwd": "/home/bl/misofm/engine-gate-detector-access",
+  "prompt": "/tmp/issue534-attempt2-review-prompt.md"
+}

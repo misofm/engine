@@ -1,0 +1,11 @@
+OpenAI Codex v0.153.4
+--------
+workdir: /home/bl/misofm/engine-gate-detector-access
+model: gpt-6-astra
+provider: openai
+approval: never
+sandbox: danger-full-access
+reasoning effort: medium
+reasoning summaries: none
+session id: 01a079c1-6706-7970-a437-77afe015d26a
+--------
