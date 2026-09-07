@@ -59,3 +59,9 @@ Focused graph debug/release each pass 6 tests, complete bench debug passes 43 te
 ## Attempt 2 source verdict
 
 Astra LOW returned **PASS** at review head `5ceeff2f7d1555ce7fd77dac03bb7cac60147826`, correction source `90981e71578f27fd26db700b725bf6fbf7bce03f`. Production uses the tested raw projection; all extraction, composition, environment, missing-order, command and record gates pass independently, with no excluded-path drift. Current main is `defa979cbf0bf86b4ebba2f52b0647eb01b9ff29`; its #580 delta is disjoint. Current-base integration and final Astra LOW review remain required before PR authorization.
+
+## Integrated current-base qualification
+
+The accepted source was merged with current main `defa979cbf0bf86b4ebba2f52b0647eb01b9ff29` at integrated head `a3b6ae0dab94c748f8d37dd0eeb7ec4f490f77a5`; the merge-base is that exact main commit. The integration is conflict-free and the #580 delta remains disjoint from `tools/bench`, `tools/bench-support` and this issue's owned paths.
+
+On the integrated tree, focused graph debug/release each pass 6 tests, complete bench debug passes 43 tests, strict bench Clippy and rustdoc pass, and formatting, diff, workspace policy, bench policy and bench-policy mutation gates pass. A generated dependency-order-only `Cargo.lock` shuffle was restored; the worktree is clean and no excluded path is part of the branch diff. No timed benchmark, browser, audio or artifact qualification ran. Final exact-head/current-base Astra LOW review remains required before PR authorization.
