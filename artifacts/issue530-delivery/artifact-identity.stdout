@@ -1,0 +1,41 @@
+{
+  "actual_browser_candidate": "0df067cbc8366607d2dcec7912364aa437c7f573",
+  "current_head": "efcb3c221ba8d2f316269ece1db3a7646878055e",
+  "six_files": [
+    {
+      "name": "miso-engine-v1-abi-layout.json",
+      "sha256": "40f6fe2e23e1b47500011c14871750a75922ab194136add8b387a4b40eb56919",
+      "bytes": 9351
+    },
+    {
+      "name": "miso-engine-v1-audio-worklet-host.d.ts",
+      "sha256": "445254e7c6ddf3330bdf20cafa8cacec4d0e2489805f72a833859db52bc038cf",
+      "bytes": 35347
+    },
+    {
+      "name": "miso-engine-v1-audio-worklet-host.js",
+      "sha256": "21c8947d8aad2d1d9a23e553c2c7b983dbd5a622aabfbab9a41c622d1a50229a",
+      "bytes": 39457
+    },
+    {
+      "name": "miso-engine-v1-audio-worklet.js",
+      "sha256": "225bc06043ed6e2c62a38d63f1c2015b40480d673e3a53109c938eba481556cb",
+      "bytes": 38447
+    },
+    {
+      "name": "miso-engine-v1-audio-worklet.simd128.wasm",
+      "sha256": "04f938f667180d0e7b972e1cc2236af3a5d5e3f7b73d1ed503dde72e83aa9bce",
+      "bytes": 2714120
+    },
+    {
+      "name": "miso-engine-v1-parameter-metadata.json",
+      "sha256": "6eac2cb3e30931b6c01b10c63af4eedd2d59337274565a129c7a3f328a09938d",
+      "bytes": 63907
+    }
+  ],
+  "input_diff": [
+    "hosts/host-web/BROWSER_DEPLOYMENT_MATRIX.md",
+    "hosts/host-web/qualification/results.json"
+  ],
+  "evidence": "Reuses prior actual three-browser run; this command runs no browser."
+}
