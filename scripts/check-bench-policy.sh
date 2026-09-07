@@ -167,7 +167,7 @@ sole_owner 'more than one global allocator is registered under tools/' \
 sole_owner_or_delegate 'the JSON string escaper has more than one implementation' \
     "$support/src/json.rs" '^\s*(pub(\([a-z]+\))? )?fn (json_(escape|string|quote)|escape)\('
 sole_owner 'the nearest-rank percentile has more than one implementation' \
-    "$support/src/stats.rs" '^(pub )?fn (percentile|nearest_rank|per_mille|percentile_nearest_rank)'
+    "$support/src/stats.rs" '^(pub )?(struct Percentiles|fn (percentile|nearest_rank|per_mille|percentile_nearest_rank))'
 sole_owner 'the counted SHA-256 sink has more than one implementation' \
     "$support/src/digest.rs" '^(pub )?struct Sha256Sink'
 forbidden_under_tools 'a private SHA-256 initial hash word (H0) or round-constant table (K) reappeared under tools/' \
