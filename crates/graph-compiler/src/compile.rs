@@ -533,6 +533,40 @@ impl GraphCompiler {
         // the pre-bank estimate for canonical bytes while publishing and capping the exact
         // retained candidate estimate below.
         let semantic_estimate = estimate.clone();
+        let Some(emitted_op_count) = levels.iter().try_fold(0_u64, |total, level| {
+            total.checked_add(u64::try_from(level.nodes.len()).ok()?)
+        }) else {
+            return Err(failure(
+                effects,
+                vec![diag(
+                    "graph.resource.arithmetic_overflow",
+                    "$.graph.runtime_metadata",
+                )],
+            ));
+        };
+        let Some(runtime_resource) =
+            graph::GraphRuntimeMetadataResourceEstimate::checked_for(emitted_op_count)
+        else {
+            return Err(failure(
+                effects,
+                vec![diag(
+                    "graph.resource.arithmetic_overflow",
+                    "$.graph.runtime_metadata",
+                )],
+            ));
+        };
+        if estimate
+            .checked_add_runtime_metadata(runtime_resource)
+            .is_none()
+        {
+            return Err(failure(
+                effects,
+                vec![diag(
+                    "graph.resource.arithmetic_overflow",
+                    "$.graph.runtime_metadata",
+                )],
+            ));
+        }
         let Some(bank_resource) = effect_bank_resource(&banks, session.quantum().0) else {
             return Err(failure(
                 effects,

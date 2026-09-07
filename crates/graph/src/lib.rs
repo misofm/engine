@@ -15,6 +15,16 @@ pub use runtime::{
     test_only_prepare_bank_chain_inputs, test_only_reset_bank_chain_construction_facts,
 };
 
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub use runtime::{
+    TestOnlyFailedBufferCapture, TestOnlySelectedSplitFader, TestOnlySplitPairTableWitness,
+    test_only_arm_failed_buffer_capture, test_only_completion_disabled,
+    test_only_failed_buffer_capture, test_only_reset_selected_split_fader,
+    test_only_reset_split_pair_table_witness, test_only_selected_split_fader,
+    test_only_set_completion_disabled, test_only_split_pair_table_witness,
+};
+
 use core::cell::Cell;
 use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet};
@@ -217,6 +227,96 @@ pub struct GraphBuiltinBankResourceEstimate {
 pub struct GraphScalarOwnerResourceEstimate {
     pub total_bytes: u64,
     pub largest_allocation_bytes: u64,
+    /// The bounded boxed table reserved for possible serialized split owners. This is a separate
+    /// retained allocation from the two concrete fader/matrix owner boxes.
+    pub split_pair_table_bytes: u64,
+}
+
+/// Checked retained storage for the eligible bounded serialized split-owner table.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct GraphScalarSplitRuntimeResourceEstimate {
+    /// Number of split-owner entries the preparation bound reserves for possible selection.
+    pub possible_pair_count: u64,
+    /// Bytes in the boxed `[Box<dyn GraphRuntimeSplitPairProcessor>]` table allocation.
+    pub split_pair_table_bytes: u64,
+    pub total_bytes: u64,
+    pub largest_allocation_bytes: u64,
+}
+
+/// Checked runtime metadata retained by every graph executor. The semantic graph estimate does
+/// not include the lowered runtime layouts. A plain op stores its split slot inside `RuntimeUnit`;
+/// a bank stores it inside each `RuntimeOp` member. The larger derived delta is therefore the
+/// single safe per-emitted-op charge for mixed graphs. The corresponding containing allocation is
+/// bounded by the larger current `RuntimeUnit`/`RuntimeOp` layout multiplied by the same
+/// emitted-op bound. The inline slot is charged once, never once as an op and again as a unit.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct GraphRuntimeMetadataResourceEstimate {
+    pub emitted_op_count: u64,
+    /// `Runtime`'s inline split-owner table field delta; this is the retained owner term charged.
+    pub runtime_field_bytes: u64,
+    pub runtime_op_layout_delta_bytes: u64,
+    pub runtime_unit_layout_delta_bytes: u64,
+    pub emitted_op_layout_delta_bytes: u64,
+    pub runtime_op_containing_bytes: u64,
+    pub runtime_unit_containing_bytes: u64,
+    /// The same table field measured in its containing `GraphExecutor` owner layout. It is
+    /// reported for the largest-allocation proof, but is not added a second time to `total_bytes`.
+    pub runtime_owner_field_bytes: u64,
+    pub runtime_owner_allocation_bytes: u64,
+    pub total_bytes: u64,
+    pub largest_allocation_bytes: u64,
+}
+
+impl GraphRuntimeMetadataResourceEstimate {
+    /// Computes the checked retained field and conservative mixed op/unit allocation bound.
+    pub fn checked_for(emitted_op_count: u64) -> Option<Self> {
+        let (_, runtime_field_bytes) = runtime::scalar_split_runtime_layout();
+        let (op_layout_delta_bytes, runtime_unit_layout_delta_bytes) =
+            runtime::scalar_split_op_layout();
+        let (runtime_owner_field_bytes, runtime_owner_allocation_bytes) =
+            scalar_split_runtime_owner_layout();
+        let runtime_op_bytes = u64::try_from(core::mem::size_of::<runtime::RuntimeOp>())
+            .expect("runtime op layout fits u64");
+        let runtime_unit_bytes = u64::try_from(core::mem::size_of::<runtime::RuntimeUnit>())
+            .expect("runtime unit layout fits u64");
+        let emitted_op_layout_delta_bytes =
+            op_layout_delta_bytes.max(runtime_unit_layout_delta_bytes);
+        let emitted_op_delta_bytes = emitted_op_layout_delta_bytes.checked_mul(emitted_op_count)?;
+        let runtime_op_containing_bytes = runtime_op_bytes.checked_mul(emitted_op_count)?;
+        let runtime_unit_containing_bytes = runtime_unit_bytes.checked_mul(emitted_op_count)?;
+        let total_bytes = runtime_field_bytes.checked_add(emitted_op_delta_bytes)?;
+        Some(Self {
+            emitted_op_count,
+            runtime_field_bytes,
+            runtime_op_layout_delta_bytes: op_layout_delta_bytes,
+            runtime_unit_layout_delta_bytes,
+            emitted_op_layout_delta_bytes,
+            runtime_op_containing_bytes,
+            runtime_unit_containing_bytes,
+            runtime_owner_field_bytes,
+            runtime_owner_allocation_bytes,
+            total_bytes,
+            largest_allocation_bytes: runtime_owner_allocation_bytes
+                .max(runtime_op_containing_bytes)
+                .max(runtime_unit_containing_bytes),
+        })
+    }
+}
+
+impl GraphScalarSplitRuntimeResourceEstimate {
+    /// Computes only the checked split-table charge. Runtime and op/unit layout deltas are charged
+    /// by [`GraphRuntimeMetadataResourceEstimate`] for every graph.
+    pub fn checked_for(possible_pair_count: u64) -> Option<Self> {
+        let (table_entry_bytes, _) = runtime::scalar_split_runtime_layout();
+        let split_pair_table_bytes = table_entry_bytes.checked_mul(possible_pair_count)?;
+        let total_bytes = split_pair_table_bytes;
+        Some(Self {
+            possible_pair_count,
+            split_pair_table_bytes,
+            total_bytes,
+            largest_allocation_bytes: split_pair_table_bytes,
+        })
+    }
 }
 
 /// Conservative coexistence reservation for runtime bank slots and their masks.
@@ -307,6 +407,28 @@ impl GraphResourceEstimate {
     pub fn checked_add_scalar_owners(
         &mut self,
         resource: GraphScalarOwnerResourceEstimate,
+    ) -> Option<()> {
+        let mut next = self.clone();
+        next.graph_metadata_bytes = next
+            .graph_metadata_bytes
+            .checked_add(resource.total_bytes)?;
+        next.incremental_plan_bytes = next
+            .incremental_plan_bytes
+            .checked_add(resource.total_bytes)?;
+        next.session_plus_plan_bytes = next
+            .session_plus_plan_bytes
+            .checked_add(resource.total_bytes)?;
+        next.largest_allocation_bytes = next
+            .largest_allocation_bytes
+            .max(resource.largest_allocation_bytes);
+        *self = next;
+        Some(())
+    }
+
+    /// Folds the retained executor/runtime metadata once, before graph caps are applied.
+    pub fn checked_add_runtime_metadata(
+        &mut self,
+        resource: GraphRuntimeMetadataResourceEstimate,
     ) -> Option<()> {
         let mut next = self.clone();
         next.graph_metadata_bytes = next
@@ -498,13 +620,10 @@ pub struct GraphPreparedEffect {
 ///
 /// # Why beside, and not a field of [`GraphPreparedEffect`]
 ///
-/// `GraphPreparedEffect` is the payload of `runtime::NodeKind::Effect`, and
-/// `core::mem::size_of::<runtime::RuntimeOp>()` is a **reported byte** -- the native scheduler's
-/// `graph_job_bytes` folds it, and the audit tool's frozen preparation matrix folds that. Adding
-/// an eight-byte field to the effect would therefore have moved the retained-byte report of every
-/// session in the workspace, console or not. Keeping the channel in its own vector leaves
-/// `NodeKind`'s largest variant untouched: the new `NodeKind::ConsoleEffect(Box<ConsoleEffect>)`
-/// is one pointer, far below it, so a console-free plan reports the same bytes it always did.
+/// `GraphPreparedEffect` is the payload of `runtime::NodeKind::Effect`. Runtime op/unit layout
+/// changes are admitted separately by the derived runtime metadata reservation, while this
+/// channel remains in its own vector so `NodeKind`'s largest variant stays unchanged. A
+/// console-free plan therefore retains no control-channel payload.
 pub struct GraphEffectControlBinding {
     /// The effect node this channel drives.
     pub node: EffectNodeId,
@@ -514,10 +633,8 @@ pub struct GraphEffectControlBinding {
 
 /// One prepared effect's observation taps, carried beside the prepared effects (issue #143 D3).
 ///
-/// Beside, and not inside, for exactly the reason
-/// [`GraphEffectControlBinding`] is: `size_of::<runtime::RuntimeOp>()` is a reported byte, so a
-/// field on `GraphPreparedEffect` would move the retained-byte report of every session in the
-/// workspace, observed or not.
+/// Beside, and not inside, for the same ownership reason as [`GraphEffectControlBinding`]: an
+/// observation channel is retained only for the prepared observation population.
 pub struct GraphEffectObservationBinding {
     /// The effect node these taps observe.
     pub node: EffectNodeId,
@@ -1406,6 +1523,38 @@ pub type ScalarPairFactory = fn(
     ),
 >;
 
+/// A prepared owner for a serialized scalar fader/matrix interval whose two graph operations
+/// remain at their original schedule positions.
+///
+/// The fader half begins at the fader operation, while the matrix half finishes at the matrix
+/// operation. A settled fader may leave its private in-place output unmaterialized between those
+/// positions; [`complete_pending`](Self::complete_pending) is the infallible completion path used
+/// before an intervening execution or observer error escapes the render call.
+pub trait GraphRuntimeSplitPairProcessor: Send + Any {
+    /// Runs the original fader boundary, possibly recording a settled fader for later completion.
+    fn begin_fader(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError>;
+
+    /// Runs the original matrix boundary and settles any pending fader before returning.
+    fn finish_matrix(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError>;
+
+    /// Materializes a pending settled fader in its original output buffer.
+    ///
+    /// The graph executor supplies a block shape validated by the prepared render quantum, so
+    /// this operation cannot fail and never drains the matrix owner.
+    fn complete_pending(&mut self, block: GraphBindingBlock<'_>);
+}
+
+pub type ScalarSplitPairFactory = fn(
+    Box<dyn GraphRuntimeProcessor>,
+    Box<dyn GraphRuntimeProcessor>,
+) -> Result<
+    Box<dyn GraphRuntimeSplitPairProcessor>,
+    (
+        Box<dyn GraphRuntimeProcessor>,
+        Box<dyn GraphRuntimeProcessor>,
+    ),
+>;
+
 pub trait GraphRuntimeProcessor: Send + Any {
     /// Process one block in place.
     ///
@@ -1434,6 +1583,12 @@ pub trait GraphRuntimeProcessor: Send + Any {
     /// Preparation-only hook for the serialized scalar fader/matrix pair.
     /// Render never queries this metadata.
     fn scalar_pair_factory(&self) -> Option<ScalarPairFactory> {
+        None
+    }
+
+    /// Preparation-only factory for a split-owner serialized fader/matrix interval.
+    /// Render never queries this metadata.
+    fn scalar_split_pair_factory(&self) -> Option<ScalarSplitPairFactory> {
         None
     }
 }
@@ -1500,6 +1655,28 @@ struct GraphExecutor {
     source_set: Option<GraphPreparedSourceSet>,
     /// `(claim index, arena buffer)` for every track input the coordinator's source set fills.
     source_input_buffers: Box<[(usize, u32)]>,
+}
+
+/// Same retained executor owner with the split-table field removed from its embedded runtime.
+/// This layout witness lets resource accounting charge the field delta while using the complete
+/// `GraphExecutor` allocation for the largest-allocation cap.
+#[allow(dead_code)]
+struct GraphExecutorWithoutSplitPairTable {
+    runtime: runtime::RuntimeWithoutSplitPairTable,
+    output: u32,
+    source_set: Option<GraphPreparedSourceSet>,
+    source_input_buffers: Box<[(usize, u32)]>,
+}
+
+fn scalar_split_runtime_owner_layout() -> (u64, u64) {
+    let field_delta = core::mem::size_of::<GraphExecutor>()
+        .checked_sub(core::mem::size_of::<GraphExecutorWithoutSplitPairTable>())
+        .expect("split runtime owner field layout is retained");
+    (
+        u64::try_from(field_delta).expect("split runtime owner field layout fits u64"),
+        u64::try_from(core::mem::size_of::<GraphExecutor>())
+            .expect("split runtime owner allocation fits u64"),
+    )
 }
 
 impl GraphExecutor {
@@ -1599,8 +1776,28 @@ impl PreparedPlanExecutor for GraphExecutor {
             }
         }
         for unit in 0..runtime.units.len() {
-            runtime.execute(unit, time.absolute_sample)?;
-            runtime.observe_unit(unit, time.absolute_sample)?;
+            if let Err(error) = runtime.execute(unit, time.absolute_sample) {
+                #[cfg(any(test, feature = "test-support"))]
+                if !runtime::test_only_completion_disabled() {
+                    runtime.complete_pending(time.absolute_sample);
+                }
+                #[cfg(any(test, feature = "test-support"))]
+                runtime.test_only_capture_failed_buffer();
+                #[cfg(not(any(test, feature = "test-support")))]
+                runtime.complete_pending(time.absolute_sample);
+                return Err(error);
+            }
+            if let Err(error) = runtime.observe_unit(unit, time.absolute_sample) {
+                #[cfg(any(test, feature = "test-support"))]
+                if !runtime::test_only_completion_disabled() {
+                    runtime.complete_pending(time.absolute_sample);
+                }
+                #[cfg(any(test, feature = "test-support"))]
+                runtime.test_only_capture_failed_buffer();
+                #[cfg(not(any(test, feature = "test-support")))]
+                runtime.complete_pending(time.absolute_sample);
+                return Err(error);
+            }
         }
         let (left, right) = runtime.buffer(*output_buffer);
         output.plane_mut(0)?.copy_from_slice(left);
@@ -1717,10 +1914,9 @@ pub fn quantum_samples(quantum: QuantumFrames, count: u64) -> Option<u64> {
 mod observation_size_accounting {
     //! Issue #143 R7: the byte accounting for what the binding added, derived rather than pinned.
     //!
-    //! `size_of::<runtime::RuntimeOp>()` and `size_of::<runtime::RuntimeUnit>()` are *reported*
-    //! bytes: `native_graph_job_bytes` folds them, the scheduler's resource report folds that, and
-    //! the audit tool's frozen preparation matrix folds that. So the question this phase has to
-    //! answer with numbers is "what exactly grew, and by how much".
+    //! Runtime op/unit layout is charged by the derived runtime metadata reservation. This phase
+    //! answers the narrower observation question with numbers: "what exactly grew, and by how
+    //! much".
     //!
     //! The answer is: `ConsoleEffect` grew by exactly one nullable pointer, and nothing else grew
     //! at all, because `ConsoleEffect` is behind a `Box` inside `NodeKind`. Both halves are stated
@@ -2056,12 +2252,90 @@ mod tests {
             estimate.checked_add_scalar_owners(GraphScalarOwnerResourceEstimate {
                 total_bytes: u64::MAX,
                 largest_allocation_bytes: 64,
+                split_pair_table_bytes: 0,
             }),
             None
         );
         assert_eq!(
             estimate, before,
             "overflow cannot partially mutate the report"
+        );
+    }
+
+    #[test]
+    fn runtime_metadata_charge_covers_mixed_ops_once_and_refuses_overflow() {
+        let emitted = 3_u64;
+        let resource = GraphRuntimeMetadataResourceEstimate::checked_for(emitted)
+            .expect("checked runtime metadata");
+        let (op_delta, unit_delta) = runtime::scalar_split_op_layout();
+        let (op_size, unit_size) = (
+            u64::try_from(core::mem::size_of::<runtime::RuntimeOp>()).expect("op size"),
+            u64::try_from(core::mem::size_of::<runtime::RuntimeUnit>()).expect("unit size"),
+        );
+        let (_, runtime_field) = runtime::scalar_split_runtime_layout();
+        let (executor_field, executor_size) = scalar_split_runtime_owner_layout();
+        assert_eq!(resource.runtime_field_bytes, runtime_field);
+        assert_eq!(resource.runtime_op_layout_delta_bytes, op_delta);
+        assert_eq!(resource.runtime_unit_layout_delta_bytes, unit_delta);
+        assert_eq!(resource.runtime_owner_field_bytes, executor_field);
+        assert_eq!(
+            resource.emitted_op_layout_delta_bytes,
+            op_delta.max(unit_delta)
+        );
+        assert_eq!(resource.runtime_op_containing_bytes, op_size * emitted);
+        assert_eq!(resource.runtime_unit_containing_bytes, unit_size * emitted);
+        assert_eq!(
+            resource.total_bytes,
+            runtime_field + op_delta.max(unit_delta) * emitted
+        );
+        assert_eq!(
+            resource.largest_allocation_bytes,
+            executor_size
+                .max(op_size * emitted)
+                .max(unit_size * emitted)
+        );
+
+        let mut estimate = empty_estimate();
+        estimate
+            .checked_add_runtime_metadata(resource)
+            .expect("runtime metadata fold");
+        assert_eq!(estimate.graph_metadata_bytes, resource.total_bytes);
+        assert_eq!(estimate.incremental_plan_bytes, resource.total_bytes);
+        assert_eq!(estimate.session_plus_plan_bytes, resource.total_bytes);
+        assert_eq!(
+            estimate.largest_allocation_bytes,
+            resource.largest_allocation_bytes
+        );
+
+        assert_eq!(
+            GraphRuntimeMetadataResourceEstimate::checked_for(u64::MAX),
+            None,
+            "the bounded emitted-op multiplication refuses overflow"
+        );
+        let before = estimate.clone();
+        estimate.graph_metadata_bytes = u64::MAX;
+        let overflow_before = estimate.clone();
+        assert!(estimate.checked_add_runtime_metadata(resource).is_none());
+        assert_eq!(estimate, overflow_before);
+        assert_ne!(overflow_before, before);
+    }
+
+    #[test]
+    fn split_table_resource_is_zero_when_declined_and_one_entry_when_eligible() {
+        let zero =
+            GraphScalarSplitRuntimeResourceEstimate::checked_for(0).expect("zero split table");
+        assert_eq!(zero, GraphScalarSplitRuntimeResourceEstimate::default());
+        let one =
+            GraphScalarSplitRuntimeResourceEstimate::checked_for(1).expect("one split table entry");
+        let entry = u64::try_from(core::mem::size_of::<Box<dyn GraphRuntimeSplitPairProcessor>>())
+            .expect("split table entry");
+        assert_eq!(one.possible_pair_count, 1);
+        assert_eq!(one.split_pair_table_bytes, entry);
+        assert_eq!(one.total_bytes, entry);
+        assert_eq!(one.largest_allocation_bytes, entry);
+        assert_eq!(
+            GraphScalarSplitRuntimeResourceEstimate::checked_for(u64::MAX),
+            None
         );
     }
 
