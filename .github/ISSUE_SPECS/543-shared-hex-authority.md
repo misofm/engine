@@ -202,3 +202,11 @@ Root integrated current main a3b4ed76 at0c37a68c. Final committed diff check cau
 ## Attempt2 Sol xhigh PASS: Rust slice only
 
 Actual Sol xhigh accepted77c85d5b againsta3b4ed76. The amended claim preserves all original obligations through explicit #552 ownership, exact remote issue synchronization and unchanged qualified Rust source. No additional local gate is required for scope/evidence-only attempt2; required PR qualification and exact-head/base final review remain. CP20 must stay PARTIAL until #552 delivers.
+
+## Counted attempt 3: preserve the native runner ABI boundary
+
+Required qualification34108626421 failed on97915c6d: shipped artifact job101699476520 reported the retained pin mismatch, and policy job101699476598 rejected the direct engine dev-dependency. Sol HIGH approved this bounded final correction. Native-pcm-runner's remaining encoder is test-only, but issue073 forbids a direct engine manifest dependency in every section. Route its test-local hex_digest through the existing bench_support::digest::hex adapter under dev-dependencies. Preserve exactly four normal runner dependencies, add no encoder or cycle, and leave engine::hex_lower as the sole Rust implementation. Do not change the checker.
+
+Only tools/native-pcm-runner/Cargo.toml (engine dev-dependency to bench-support), tools/native-pcm-runner/src/lib.rs (one test-local delegate), and the corresponding Cargo.lock edge may change. Luna HIGH implements; Sol XHIGH supplies the counted attempt3 adversarial verdict. A substantive failure stops this attempt sequence. Root owns Git and evidence records.
+
+Frozen focused gates: inspect locked normal and normal/dev dependency trees; bench-support digest tests; all native-pcm-runner tests; strict all-target native-pcm-runner clippy; existing native runner check and both current native runner policy mutation suites; workspace formatting/policy; Rust authority census; exact-path and committed-range diff checks. No benchmark, policy edit, production runner change, or pin edit is authorized. Artifact qualification freezes only after this corrected source checkpoint and remains a separate delivery obligation.
