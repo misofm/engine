@@ -35,3 +35,9 @@ This one-file extraction is disjoint from active #580 source `2b1a7d5a46a2caaaba
 Astra LOW returned **PASS** for exact pushed brief `7353a61c54a209ea3ae797675a2fe1717f858c36` on base and merge-base `4ef2ee1cae8553847851e0f5a886be8929be388d`. The clean exact upstream contains only this spec, diff checks pass, GitHub #585 has exact number/title/body identity, and base qualification `34166341583` succeeded. The shared helper plus graph's local unavailable projection preserve successful-empty behavior. Narrow fixed metadata seams can cover compiler/LLVM/host/CPU/OS/missing-field projections without schema or timing changes.
 
 #580 remains disjoint at source `2b1a7d5a46a2caaaba599f30e12b1c6e36d119ff` and qualification `370ef7cd6f0f1d07094af2a08ad1545b53a676f9`. No correction, helper/manifest/lock/policy/artifact change or broader migration is authorized. Astra LOW is sufficient. Luna HIGH attempt 1 may begin and must pause at its first coherent focused-green tranche. TOOL9 remains partial.
+
+## Attempt 1 implementation checkpoint
+
+Luna HIGH delivered the one-file source checkpoint `d49cd93feaf3965686f951f778ce8358b32cc69b`. Graph's private `Command::output` body is removed; its local `command` projection delegates to `bench_support::sysinfo::command_output` and retains `None` → `"unknown"` while successful empty stays empty. Unix fixtures cover trimmed text, empty/whitespace success, nonzero plausible stdout, spawn failure and invalid UTF-8. A fixed metadata/record fixture pins all graph metadata fields, Unicode escaping, incomplete status and missing-field output.
+
+Focused graph debug/release each pass 5 tests, complete bench debug passes 42 tests, and strict bench Clippy/rustdoc, formatting and diff checks pass. Only `tools/bench/src/graph.rs` changed; no benchmark, helper, manifest, lock, policy, artifact or #580 path changed. Astra LOW adversarial source review remains pending.
