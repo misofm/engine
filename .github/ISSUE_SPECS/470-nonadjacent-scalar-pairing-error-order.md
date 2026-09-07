@@ -476,3 +476,18 @@ diff and exact semantic-scope checks pass. Repository artifact pin, checked brow
 deployment matrix remain unchanged. Root must checkpoint this tranche before the remaining SDK and
 three-browser pre-pin qualification; candidate artifact and raw evidence remain under `/tmp` until
 durable evidence assembly.
+
+## Astra LOW pre-pin finite blockers resolved
+
+The stale CAPI delivery consumer comment in `crates/capi/tests/resource_lifecycle.rs` now states
+the two accounting cases precisely: the historical uniform strip shift cancels in the double-live
+comparison, while #470's per-plan runtime-metadata reservation contributes +2,656 across its two
+live plans. This is a comment-only correction; no CAPI arithmetic or source behavior changed.
+
+The Wasm/browser +80 is independently derived in durable evidence at
+`artifacts/issue470-wasm-resource-derivation.md`. The actual fixture source has one track, seven
+unconditional track stages, one route and one output, hence nine emitted operations. The Wasm
+layout witness reports an 8-byte runtime table field and 8-byte op and unit deltas, yielding
+`8 + 9 * max(8, 8) = 80`. The candidate direct oracle observes 29,578/29,578/3,739 from prior
+29,498/29,498/3,659. No native 82-entry count was copied, and neither the browser expected JSON
+nor the repository artifact pin was edited in this tranche.

@@ -484,10 +484,11 @@ fn frozen_scratch_report(capi_retained_bytes: u64) -> PlanResourceReport {
         // Strip round job 1: `InputStage` gained the elision plan, and the field changed the
         // struct's layout such that `size_of::<BuiltinBankProcessor>()` went 1248 -> 1216. This
         // fixture binds two banks, so every absolute figure below that carries the processor
-        // payload moves by -64. The double-live oracle above does not move: it is a difference
-        // between two live compiles, and a uniform shift cancels in it. That asymmetry is the
-        // point of holding both -- the oracle proves the model tracks the tree, and these
-        // literals prove the absolute report is still the one that was reviewed.
+        // payload moves by -64. That historical uniform shift cancels in the double-live oracle
+        // above; #470's per-plan runtime-metadata reservation is charged separately there
+        // (+2,656 across the two live plans). That asymmetry is the point of holding both -- the
+        // oracle proves the model tracks the tree, and these literals prove the absolute report
+        // is still the one that was reviewed.
         //
         // Strip round job 2 banked the strip's own fader and matrix, so this nine-track fixture
         // now binds **six** builtin banks where it bound two: `9.div_ceil(8) == 2` per bankable
