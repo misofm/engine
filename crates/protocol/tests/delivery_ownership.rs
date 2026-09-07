@@ -4,7 +4,10 @@
 
 use core::{alloc::Layout, cell::Cell, num::NonZeroUsize};
 use std::alloc::{GlobalAlloc, System};
-use std::sync::Barrier;
+use std::sync::{
+    Arc, Barrier,
+    atomic::{AtomicBool, Ordering},
+};
 
 use protocol::*;
 
@@ -340,10 +343,10 @@ fn generic_boundary_cancel_thread_schedule_covers_zero_partial_and_full_applicat
             PreparedDelivery::<u32>::prepare(NonZeroUsize::new(2).unwrap()).unwrap();
         let first = control.try_publish(10, 3).unwrap();
         let second = control.try_publish(20, 2).unwrap();
-        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
-        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
-        let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
         std::thread::scope(|scope| {
+            let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+            let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+            let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
             let render_thread = scope.spawn(move || {
                 let setup = (|| {
                     if prefix != 0 {
@@ -426,6 +429,27 @@ fn generic_boundary_cancel_thread_schedule_covers_zero_partial_and_full_applicat
         });
         assert!(control.try_publish(32, 1).is_ok());
     }
+}
+
+#[test]
+fn generic_boundary_cancel_scope_drops_release_on_control_failure() {
+    let render_exited = Arc::new(AtomicBool::new(false));
+    let render_exited_in_thread = Arc::clone(&render_exited);
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        std::thread::scope(|scope| {
+            let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+            let (_release_tx, release_rx) = std::sync::mpsc::sync_channel::<()>(0);
+            scope.spawn(move || {
+                ready_tx.send(()).unwrap();
+                let received = release_rx.recv();
+                render_exited_in_thread.store(received.is_err(), Ordering::SeqCst);
+            });
+            ready_rx.recv().unwrap();
+            panic!("forced pre-release control failure");
+        });
+    }));
+    assert!(caught.is_err());
+    assert!(render_exited.load(Ordering::SeqCst));
 }
 
 #[test]

@@ -33,3 +33,17 @@ right: None
 
 The mutation was restored. Final validation used the unchanged accepted #571 runtime
 source and the corrected test schedule.
+
+## Attempt 2 evidence
+
+The failure-path ownership review found that the normal schedule's `release_tx` was
+outside `thread::scope`; a control panic before release could therefore leave the
+render receiver waiting while scope attempted to join it. All three rendezvous
+channels are now created inside the scope body, so unwinding the control closure
+drops its release sender before scoped joining begins.
+
+`generic_boundary_cancel_scope_drops_release_on_control_failure` establishes render
+readiness, deliberately panics before release, catches the scoped panic, and records
+that the render receiver returned `Err(RecvError)`. It uses no sleep or timeout. The
+normal five-test cancellation selection passed 20 consecutive runs, including the
+zero/partial/full schedule and this caught-unwind discriminator.
