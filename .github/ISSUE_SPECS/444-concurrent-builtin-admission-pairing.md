@@ -10,7 +10,7 @@ Do not substitute queue emptiness, a length snapshot, arbitrary pop cap, earlier
 
 Eventual discriminating gates must drive real concurrent admission/application, distinguish before/after cutoff behavior and queue saturation, prove accepted record loss/cancellation behavior, and compare actual paired versus separate PCM/state plus post-fader observations. No timing authority is granted. #430 serialized bank integration and the scalar successor do not close this retained native outcome or #349 RT-4.
 
-Astra briefs/reviews, Luna1, Sol2/3 then explicit hard-stop rebrief; root owns exact-path checkpoints and synchronized issue/PR delivery with exact-head Astra PASS and required CI.
+Astra LOW briefs and reviews every attempt; Luna HIGH implements, with at most three total attempts before an explicit hard-stop rebrief. Root owns exact-path checkpoints and synchronized issue/PR delivery with exact-head Astra PASS and required CI.
 
 ## Numbered accounting
 
@@ -75,4 +75,10 @@ Root is obtaining a stateless, exact-API child brief for the common #140 prerequ
 
 ## Numbered common service dependency #460
 
-#460 now owns the prepared ownership/reservation prerequisite shared with #140. Root verified its number/title/body and adopted the exact standalone sequence/publication contract before implementation. The service remains queued and undelivered. It does not establish a builtin application cutoff, enable a production host, or implement native pairing; this issue retains all endpoint/late/lifecycle decisions and both bank/scalar outcomes. No second ledger for the same accepted ticket is authorized.
+#460 delivered the prepared ownership/reservation prerequisite shared with #140 in PR #472, merged as `4a814f34`. It establishes bounded generic publication/completion plus automation-specific boundary cancellation, but it does not establish a builtin application cutoff, enable a production host, or implement native pairing. This issue retains all endpoint/late/lifecycle decisions and both bank/scalar outcomes. No second ledger for the same accepted ticket is authorized.
+
+## Astra LOW child split and active child #571
+
+Astra LOW reviewed current delivered main `c8951bfe` and ruled that implementation must proceed through independently closable children. The first child is #571, **Add boundary cancellation to generic prepared delivery**. It exposes the delivered automation adapter's boundary cutoff through the existing `PreparedDelivery<P>` ticket authority, including typed applied/canceled dispositions, exact prefix/remainder accounting, independent cancel capacity, and control-side reconciliation. Its exact implementation ownership is limited to `crates/protocol/src/delivery.rs`, `crates/protocol/src/lib.rs`, `crates/protocol/tests/delivery_ownership.rs`, and numbered evidence/spec paths. It adds no builtin payload, PCM, host, graph, C ABI, plan swap, locate, or application-sample scheduling.
+
+After #571, separately number and brief: (1) the prepared Rust builtin batch endpoint applying through separate bank/scalar owners, (2) bank pairing under that endpoint contract, and (3) scalar pairing under the same contract. The two pairing children may merge only if the later brief proves one small shared dispatch change. Automatic host plan-swap/locate publication remains its own child if parent closure requires it. Existing raw Concurrent endpoints remain separate.
