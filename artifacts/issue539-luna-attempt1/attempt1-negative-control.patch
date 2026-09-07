@@ -1,0 +1,40 @@
+diff --git a/crates/true-peak-limiter/src/lib.rs b/crates/true-peak-limiter/src/lib.rs
+index 5b21199d..b28d82e2 100644
+--- a/crates/true-peak-limiter/src/lib.rs
++++ b/crates/true-peak-limiter/src/lib.rs
+@@ -1695,7 +1695,7 @@ fn limiter_block<L: Lane>(
+     // decision one branch rather than two.
+     if lanes_uniform(left) && lanes_uniform(right) {
+         if stationary {
+-            limiter_block_uniform::<DISPATCH_STATIONARY, L>(
++            limiter_block_uniform::<DISPATCH_RUNTIME, L>(
+                 left_io, right_io, frames, coef, shape, left, right, cursors, true,
+             );
+         } else {
+@@ -1705,7 +1705,7 @@ fn limiter_block<L: Lane>(
+         }
+     } else {
+         if stationary {
+-            limiter_block_per_lane::<DISPATCH_STATIONARY, L>(
++            limiter_block_per_lane::<DISPATCH_RUNTIME, L>(
+                 left_io, right_io, frames, coef, shape, left, right, cursors, true,
+             );
+         } else {
+@@ -3190,7 +3190,7 @@ fn limiter_block_mono<L: Lane>(
+     let stationary = mono_stationary(left);
+     if lanes_uniform(left) {
+         if stationary {
+-            limiter_block_uniform_mono::<DISPATCH_STATIONARY, L>(
++            limiter_block_uniform_mono::<DISPATCH_RUNTIME, L>(
+                 left_io, frames, coef, shape, left, cursors, true,
+             );
+         } else {
+@@ -3200,7 +3200,7 @@ fn limiter_block_mono<L: Lane>(
+         }
+     } else {
+         if stationary {
+-            limiter_block_per_lane_mono::<DISPATCH_STATIONARY, L>(
++            limiter_block_per_lane_mono::<DISPATCH_RUNTIME, L>(
+                 left_io, frames, coef, shape, left, cursors, true,
+             );
+         } else {

@@ -1,0 +1,20 @@
+
+running 1 test
+test tests::stationary_dispatch_matches_runtime_oracle_and_observes_selected_body ... FAILED
+
+failures:
+
+---- tests::stationary_dispatch_matches_runtime_oracle_and_observes_selected_body stdout ----
+
+thread 'tests::stationary_dispatch_matches_runtime_oracle_and_observes_selected_body' (667613) panicked at crates/true-peak-limiter/src/lib.rs:4825:13:
+assertion `left == right` failed: W8 dual per-lane: selected specialization block 1
+  left: Runtime
+ right: Stationary
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::stationary_dispatch_matches_runtime_oracle_and_observes_selected_body
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 29 filtered out; finished in 0.02s
+

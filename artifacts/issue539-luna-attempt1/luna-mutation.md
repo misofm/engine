@@ -1,0 +1,9 @@
+Completed bounded negative control; no commit/push.
+
+- Mutation: four stationary callsites changed to `DISPATCH_RUNTIME` only.
+- Failure: `lib.rs:4825`, `W8 dual per-lane: selected specialization block 1`; observed `Runtime`, expected `Stationary`.
+- Preceding identities passed: left/right PCM, complete state, and silent-state identity.
+- Raw labels: `attempt1-negative-control` (101), `attempt1-negative-control-restored` (101 stale incremental binary), `attempt1-negative-control-restored-green` (0).
+- Patch: [`attempt1-negative-control.patch`](/tmp/issue539-luna2/attempt1-negative-control.patch), SHA256 `f9e2…719b1`.
+- Pristine/mutant source hashes: `5b25…ce28d` / `768f…1465`.
+- Restored source hash: `5b25…ce28d`; `git status` clean.
