@@ -19,5 +19,5 @@ Run:
 
 ```sh
 python3 fixtures/stem-identity/v1/generate.py --check
-cargo test --locked -p miso-engine-stem-hasher
+cargo test --locked -p stem-hasher
 ```
