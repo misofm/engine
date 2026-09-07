@@ -1,0 +1,14 @@
+capture_utc=2026-09-07T15:31:12Z
+cwd=/home/bl/misofm/engine-protocol-conformance-boundary
+head=cbfbc70cd972ffbb2d7c7d7c80a62d7acdb44845
+status_begin
+ M scripts/test-conformance-boundaries.sh
+?? artifacts/issue542-attempt3/
+status_end
+source_hashes_begin
+9716c3287cc6c91dc6eb32776e338c27e797507d1f981567dfb62924851558d6  scripts/test-conformance-boundaries.sh
+812cbdbf3b3fa1cd30214f5c42c178152a54db212a81e8d9850c452855ca8766  scripts/check-conformance-boundaries.sh
+bd40a610b4dd391f723bd8b576e2a6415523d934a85806333244d258d09c5783  scripts/lib/gate.sh
+source_hashes_end
+command=test "$(git rev-parse HEAD)" = cbfbc70cd972ffbb2d7c7d7c80a62d7acdb44845; bash -n scripts/test-conformance-boundaries.sh scripts/check-conformance-boundaries.sh; git diff --check; git diff --check origin/main...HEAD; for f in artifacts/issue542-attempt3/*.raw.gz; do gzip -t "$f"; done; if rg -n "[[:blank:]]+$" artifacts/issue542-attempt3 -g "*.meta" -g "*.md" -g "*.txt"; then exit 1; else test $? -eq 1; fi; test "$(git diff --name-only)" = scripts/test-conformance-boundaries.sh; sha256sum scripts/test-conformance-boundaries.sh; git status --short
+exit=0

@@ -289,3 +289,16 @@ syntax, the three focused red controls with exact restoration, and the existing 
 dependency and extracted-test checks. No product, corpus, Wasm, dependency, benchmark or unrelated
 policy change is authorized. Root checkpoints before Astra low attempt-three review; no fourth
 implementation attempt is permitted without rescoping.
+
+## Attempt 3 focused-green fixture checkpoint
+
+Luna high changed only `scripts/test-conformance-boundaries.sh`. Its clean hermetic base now models
+the approved `conformance` dependency set plus all three exact cfg(test)-guarded protocol parents
+and test children. The complete prior mutation/status suite remains live, and focused controls now
+reject a missing required child, a missing guard, a changed guard and an outside-path
+`conformance` use. Shell syntax, the production checker, the full hermetic suite, protocol default
+and test-support tests, normal dependency/API absence, the live 44/17/19 extracted-test census and
+lists, formatting and scope/diff checks all pass at pre-commit candidate
+`cbfbc70cd972ffbb2d7c7d7c80a62d7acdb44845`. Root found and corrected one evidence-only sentence
+that had conflated the one-test synthetic children with the live test census; no gate or source
+result changed. Root commits this exact tranche before Astra low attempt-three review.

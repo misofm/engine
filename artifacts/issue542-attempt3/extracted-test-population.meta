@@ -1,0 +1,19 @@
+capture_utc=2026-09-07T15:30:24Z
+cwd=/home/bl/misofm/engine-protocol-conformance-boundary
+head=cbfbc70cd972ffbb2d7c7d7c80a62d7acdb44845
+status_begin
+ M scripts/test-conformance-boundaries.sh
+?? artifacts/issue542-attempt3/
+status_end
+source_hashes_begin
+9716c3287cc6c91dc6eb32776e338c27e797507d1f981567dfb62924851558d6  scripts/test-conformance-boundaries.sh
+812cbdbf3b3fa1cd30214f5c42c178152a54db212a81e8d9850c452855ca8766  scripts/check-conformance-boundaries.sh
+bd40a610b4dd391f723bd8b576e2a6415523d934a85806333244d258d09c5783  scripts/lib/gate.sh
+7b62b0a3f9b4df490a9aac4641f34f69067c1f0b9edadd56587b489c6896dd2a  crates/protocol/Cargo.toml
+9f8dda584f89803a1e67856d6f2b7f2e2eb338a136186e28c99545c389cf2b10  crates/protocol/src/lib.rs
+5f05c0c0e0ab39111651a687b71a203da8d30a1e02b200b2b5b49ad18d196272  crates/protocol/src/controller.rs
+e3f504924dec15f4f262f2c11ee6b516d0e66ea89521716ea9dcf05779be0131  crates/protocol/src/message_wire.rs
+5c0ede886971a286ac218764283542bd59ec764b0b263a9bc1cdf7bfea316747  crates/protocol/src/session_wire.rs
+source_hashes_end
+command=for path in crates/protocol/src/controller/tests.rs crates/protocol/src/message_wire/tests.rs crates/protocol/src/session_wire/tests.rs; do count=$(rg -c "^[[:space:]]*#\\[test\\]" "$path" || true); ignored=$(rg -c "^[[:space:]]*#\\[ignore" "$path" || true); [[ -n "$count" ]] || count=0; [[ -n "$ignored" ]] || ignored=0; printf "%s tests=%s ignored=%s\\n" "$path" "$count" "$ignored"; test "$ignored" -eq 0; done; if rg -n "^[[:space:]]*#\\[ignore" crates/protocol/src/controller/tests.rs crates/protocol/src/message_wire/tests.rs crates/protocol/src/session_wire/tests.rs; then exit 1; else test $? -eq 1; fi; printf "extracted_ignored_rows=0\\n"
+exit=0
