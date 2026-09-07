@@ -1,0 +1,142 @@
+[
+  {
+    "original_path": "/tmp/issue547/sol-review-accepted-file.command.json",
+    "bytes": 215,
+    "sha256": "6fc38d6f1b1abd364232bbdd02ac35b7b3f517b76cb0df445376b65ea3fed4e8",
+    "packed_path": "artifacts/issue547-coordinator/sol-review-accepted-file.command.json.gz",
+    "packed_sha256": "d86afccec0e985e65df22a3b1edf923a84dae6d30ca0a5c26fa3d9bf3672098e"
+  },
+  {
+    "original_path": "/tmp/issue547/sol-review-accepted-file.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "packed_path": "artifacts/issue547-coordinator/sol-review-accepted-file.status.gz",
+    "packed_sha256": "cabc3a30b39528db601f65ca3ced008dd775595c901102d08ac8ae8976b29bcf"
+  },
+  {
+    "original_path": "/tmp/issue547/sol-review-accepted-file.stderr",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "packed_path": "artifacts/issue547-coordinator/sol-review-accepted-file.stderr.gz",
+    "packed_sha256": "f61f27bd17de546264aa58f40f3aafaac7021e0ef69c17f6b1b4cd7664a037ec"
+  },
+  {
+    "original_path": "/tmp/issue547/sol-review-accepted-file.stdout",
+    "bytes": 5,
+    "sha256": "131e490ede5d344e5a8539d4a5335ccc70db7eacb397b876cffc72578b1331bf",
+    "packed_path": "artifacts/issue547-coordinator/sol-review-accepted-file.stdout.gz",
+    "packed_sha256": "bd5a6efa977c56a44e39c45bc1c069ebd897522a10ca5896e00029627b7bc138"
+  },
+  {
+    "original_path": "/tmp/issue547/sol-review-accepted-partial-absence.command.json",
+    "bytes": 240,
+    "sha256": "de4315e44e8dc5b242741275c0a8946be8990daa5fa89902a43872eea8931712",
+    "packed_path": "artifacts/issue547-coordinator/sol-review-accepted-partial-absence.command.json.gz",
+    "packed_sha256": "3ba4d1aecda2e1d6b4f9adb8ce8b115b2d7b855ee3d5f238307b5d3495ca3d08"
+  },
+  {
+    "original_path": "/tmp/issue547/sol-review-accepted-partial-absence.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "packed_path": "artifacts/issue547-coordinator/sol-review-accepted-partial-absence.status.gz",
+    "packed_sha256": "cabc3a30b39528db601f65ca3ced008dd775595c901102d08ac8ae8976b29bcf"
+  },
+  {
+    "original_path": "/tmp/issue547/sol-review-accepted-partial-absence.stderr",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "packed_path": "artifacts/issue547-coordinator/sol-review-accepted-partial-absence.stderr.gz",
+    "packed_sha256": "f61f27bd17de546264aa58f40f3aafaac7021e0ef69c17f6b1b4cd7664a037ec"
+  },
+  {
+    "original_path": "/tmp/issue547/sol-review-accepted-partial-absence.stdout",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "packed_path": "artifacts/issue547-coordinator/sol-review-accepted-partial-absence.stdout.gz",
+    "packed_sha256": "f61f27bd17de546264aa58f40f3aafaac7021e0ef69c17f6b1b4cd7664a037ec"
+  },
+  {
+    "original_path": "/tmp/issue547/sol-review-rejected-final-absence.command.json",
+    "bytes": 223,
+    "sha256": "5c241503d4e2bedae252cc42e997a8cf8205ad1814c32b2ee1d7663ab6489cd1",
+    "packed_path": "artifacts/issue547-coordinator/sol-review-rejected-final-absence.command.json.gz",
+    "packed_sha256": "54ea2776dbe823896185a280a962b87175e9886d949baa2377989c3b79fbfb57"
+  },
+  {
+    "original_path": "/tmp/issue547/sol-review-rejected-final-absence.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "packed_path": "artifacts/issue547-coordinator/sol-review-rejected-final-absence.status.gz",
+    "packed_sha256": "cabc3a30b39528db601f65ca3ced008dd775595c901102d08ac8ae8976b29bcf"
+  },
+  {
+    "original_path": "/tmp/issue547/sol-review-rejected-final-absence.stderr",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "packed_path": "artifacts/issue547-coordinator/sol-review-rejected-final-absence.stderr.gz",
+    "packed_sha256": "f61f27bd17de546264aa58f40f3aafaac7021e0ef69c17f6b1b4cd7664a037ec"
+  },
+  {
+    "original_path": "/tmp/issue547/sol-review-rejected-final-absence.stdout",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "packed_path": "artifacts/issue547-coordinator/sol-review-rejected-final-absence.stdout.gz",
+    "packed_sha256": "f61f27bd17de546264aa58f40f3aafaac7021e0ef69c17f6b1b4cd7664a037ec"
+  },
+  {
+    "original_path": "/tmp/issue547/sol-review-rejected-partial-absence.command.json",
+    "bytes": 240,
+    "sha256": "2b30954c1ad957e3093ebba83f5c8ac40c571bac08fe18cce2519e11df102ebc",
+    "packed_path": "artifacts/issue547-coordinator/sol-review-rejected-partial-absence.command.json.gz",
+    "packed_sha256": "a432ad516244d9e760f161ef12b84c6f0b1ce78f5d6cd78bdcf6a0bf7455b1ce"
+  },
+  {
+    "original_path": "/tmp/issue547/sol-review-rejected-partial-absence.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "packed_path": "artifacts/issue547-coordinator/sol-review-rejected-partial-absence.status.gz",
+    "packed_sha256": "cabc3a30b39528db601f65ca3ced008dd775595c901102d08ac8ae8976b29bcf"
+  },
+  {
+    "original_path": "/tmp/issue547/sol-review-rejected-partial-absence.stderr",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "packed_path": "artifacts/issue547-coordinator/sol-review-rejected-partial-absence.stderr.gz",
+    "packed_sha256": "f61f27bd17de546264aa58f40f3aafaac7021e0ef69c17f6b1b4cd7664a037ec"
+  },
+  {
+    "original_path": "/tmp/issue547/sol-review-rejected-partial-absence.stdout",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "packed_path": "artifacts/issue547-coordinator/sol-review-rejected-partial-absence.stdout.gz",
+    "packed_sha256": "f61f27bd17de546264aa58f40f3aafaac7021e0ef69c17f6b1b4cd7664a037ec"
+  },
+  {
+    "original_path": "/tmp/issue547/sol-review-untracked-diff-check.command.json",
+    "bytes": 270,
+    "sha256": "d6707ecc7dff924d55afe44e4f15b9eeb83f569ccc0dfafcab5492fd96d00d76",
+    "packed_path": "artifacts/issue547-coordinator/sol-review-untracked-diff-check.command.json.gz",
+    "packed_sha256": "671f026b51d40d4f2cb20d9eff01e4ef44e0843ade88421951c79271990d2637"
+  },
+  {
+    "original_path": "/tmp/issue547/sol-review-untracked-diff-check.status",
+    "bytes": 2,
+    "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+    "packed_path": "artifacts/issue547-coordinator/sol-review-untracked-diff-check.status.gz",
+    "packed_sha256": "d381e5a9b7c1c71b5fb3fef202103bf4b6098ce288f148735de1ecf61d4e3b75"
+  },
+  {
+    "original_path": "/tmp/issue547/sol-review-untracked-diff-check.stderr",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "packed_path": "artifacts/issue547-coordinator/sol-review-untracked-diff-check.stderr.gz",
+    "packed_sha256": "f61f27bd17de546264aa58f40f3aafaac7021e0ef69c17f6b1b4cd7664a037ec"
+  },
+  {
+    "original_path": "/tmp/issue547/sol-review-untracked-diff-check.stdout",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "packed_path": "artifacts/issue547-coordinator/sol-review-untracked-diff-check.stdout.gz",
+    "packed_sha256": "f61f27bd17de546264aa58f40f3aafaac7021e0ef69c17f6b1b4cd7664a037ec"
+  }
+]
