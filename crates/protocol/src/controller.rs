@@ -1642,6 +1642,15 @@ impl<P: ControlProvider> ProtocolController<P> {
         input: &[u8],
         scratch: &mut DecodeScratch<'_>,
     ) -> Result<ControllerResponse, DecodeError> {
+        self.process_b1b_btlv_with_delivery_context(input, scratch, None)
+    }
+
+    pub(crate) fn process_b1b_btlv_with_delivery_context(
+        &mut self,
+        input: &[u8],
+        scratch: &mut DecodeScratch<'_>,
+        context: Option<&mut DeliveryContext<'_>>,
+    ) -> Result<ControllerResponse, DecodeError> {
         let codec = self.codec;
         let decoded = codec.decode_typed_command_limited(
             input,
@@ -1658,12 +1667,15 @@ impl<P: ControlProvider> ProtocolController<P> {
                 }
             }
             DecodedCommandPayload::SessionTransactionApply(edits) => {
-                return Ok(self.process(ControllerRequest {
-                    request_id: header.request_id,
-                    expected_revision: header.expected_revision,
-                    canonical_bytes: input,
-                    command: ControlCommand::SessionTransactionApply { edits: &edits },
-                }));
+                return Ok(self.process_with_delivery_context(
+                    ControllerRequest {
+                        request_id: header.request_id,
+                        expected_revision: header.expected_revision,
+                        canonical_bytes: input,
+                        command: ControlCommand::SessionTransactionApply { edits: &edits },
+                    },
+                    context,
+                ));
             }
             DecodedCommandPayload::ParameterMetadataGet(request) => {
                 ControlCommand::ParameterMetadataGet { request }
@@ -1692,12 +1704,15 @@ impl<P: ControlProvider> ProtocolController<P> {
                 ControlCommand::DiagnosticsGet { request }
             }
         };
-        Ok(self.process(ControllerRequest {
-            request_id: header.request_id,
-            expected_revision: header.expected_revision,
-            canonical_bytes: input,
-            command,
-        }))
+        Ok(self.process_with_delivery_context(
+            ControllerRequest {
+                request_id: header.request_id,
+                expected_revision: header.expected_revision,
+                canonical_bytes: input,
+                command,
+            },
+            context,
+        ))
     }
 
     /// Process one complete schema-closed command and copy its canonical full response into the

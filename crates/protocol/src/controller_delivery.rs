@@ -6,10 +6,10 @@ use crate::delivery::{AutomationDeliveryState, DeliveryContext, PreparedAutomati
 use crate::{
     AutomationCancellationReason, AutomationDeliveryRender, CancelComplete, CancelToken,
     ControllerRequest, ControllerResourceAllocationError, ControllerResponse,
-    ControllerRetainedCapacity, DeliveryError, DeliveryResourceReport, DeliveryTicket,
-    EventEgressError, HandoffResult, ProtocolCodec, ProtocolController, ProtocolControllerConfig,
-    ProtocolQueueConfig, ProtocolQueueError, ProtocolQueues, QueueKind, QueueReport, ReplayCache,
-    ReplayCacheConfig, SessionStore, TerminalAutomation,
+    ControllerRetainedCapacity, DecodeError, DecodeScratch, DeliveryError, DeliveryResourceReport,
+    DeliveryTicket, EventEgressError, HandoffResult, ProtocolCodec, ProtocolController,
+    ProtocolControllerConfig, ProtocolQueueConfig, ProtocolQueueError, ProtocolQueues, QueueKind,
+    QueueReport, ReplayCache, ReplayCacheConfig, SessionStore, TerminalAutomation,
 };
 use crate::{ControlProvider, PreparedDeliveryCapabilities};
 
@@ -140,6 +140,19 @@ impl<P: ControlProvider> ControllerAutomationDelivery<P> {
         };
         self.controller
             .process_with_delivery_context(request, Some(&mut context))
+    }
+
+    /// Decode one B1b BTLV command and dispatch it through this facade's delivery context.
+    pub fn process_b1b_btlv(
+        &mut self,
+        input: &[u8],
+        scratch: &mut DecodeScratch<'_>,
+    ) -> Result<ControllerResponse, DecodeError> {
+        let mut context = DeliveryContext {
+            state: &mut self.delivery,
+        };
+        self.controller
+            .process_b1b_btlv_with_delivery_context(input, scratch, Some(&mut context))
     }
 
     /// Hand off the next admitted batch to the render half when its fixed capability set supports
@@ -508,6 +521,27 @@ mod tests {
         }
     }
 
+    fn encoded_enqueue(
+        request_id: u64,
+        revision: SessionRevision,
+        records: &[AutomationRecord],
+    ) -> Vec<u8> {
+        let codec = ProtocolCodec::default();
+        let mut bytes = vec![0_u8; 16 * 1024];
+        let length = codec
+            .encode_command_frame_into(
+                &TypedCommandFrame {
+                    request_id: RequestId::new(request_id).unwrap(),
+                    expected_revision: ExpectedRevision::Exact(revision),
+                    payload: CommandPayload::AutomationEnqueue(AutomationEnqueue { records }),
+                },
+                &mut bytes,
+            )
+            .expect("encoded automation frame");
+        bytes.truncate(length);
+        bytes
+    }
+
     fn decode_event<'a>(codec: &ProtocolCodec, frame: &'a [u8]) -> DecodedTypedEventFrame<'a> {
         codec
             .decode_typed_event(frame, &mut DecodeScratch::new(&mut [0_u16; 32]))
@@ -520,6 +554,47 @@ mod tests {
             DecodedEventPayload::AutomationCanceled(value) => value.event_sequence,
             _ => 0,
         }
+    }
+
+    #[test]
+    fn encoded_point_ingress_uses_facade_delivery_context_and_replays() {
+        let (mut facade, mut render, _) = facade(8, &[(ParameterHandle(7), AutomationKind::Point)]);
+        let revision = facade.session().revision();
+        let records = [AutomationRecord {
+            kind: AutomationKind::Point,
+            handle: ParameterHandle(7),
+            start: SampleTime(1),
+            end: SampleTime(1),
+            start_value: 0.5,
+            end_value: 0.5,
+        }];
+        let encoded = encoded_enqueue(1, revision, &records);
+        let response = facade
+            .process_b1b_btlv(&encoded, &mut DecodeScratch::new(&mut [0_u16; 32]))
+            .expect("encoded point ingress");
+        assert_eq!(response.status, StatusCode::Ok);
+        assert_eq!(facade.outstanding(), 1);
+        assert_eq!(
+            facade
+                .process_b1b_btlv(&encoded, &mut DecodeScratch::new(&mut [0_u16; 32]))
+                .expect("encoded point replay"),
+            response
+        );
+        assert_eq!(facade.outstanding(), 1);
+
+        let ticket = match facade.try_handoff_next().expect("handoff") {
+            HandoffResult::HandedOff(ticket) => ticket,
+            other => panic!("unexpected handoff: {other:?}"),
+        };
+        let pending = render.begin_boundary(SampleTime(0)).expect("boundary");
+        assert_eq!(pending.records, records);
+        let count = pending.records.len() as u16;
+        render.mark_applied(ticket, count).expect("mark applied");
+        render
+            .finish_applied(ticket, count)
+            .expect("finish applied");
+        facade.collect_terminal(ticket).expect("collect terminal");
+        assert_eq!(facade.outstanding(), 0);
     }
 
     #[test]
