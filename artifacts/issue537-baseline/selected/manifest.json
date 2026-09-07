@@ -1,0 +1,84 @@
+{
+  "source_llvm": "/tmp/issue537-baseline-target/release/deps/multiband_compressor-524a987dfea296bf.ll",
+  "source_asm": "/tmp/issue537-baseline-target/release/deps/multiband_compressor-524a987dfea296bf.s",
+  "functions": [
+    {
+      "label": "process-scalar",
+      "kind": "llvm",
+      "path": "/tmp/issue537-baseline/selected/process-scalar.ll",
+      "original": "/tmp/issue537-baseline-target/release/deps/multiband_compressor-524a987dfea296bf.ll",
+      "lines": [
+        8663,
+        15496
+      ],
+      "bytes": 587244,
+      "sha256": "8e6b7fd64e1763224c029fa6ae714242c6a4470671de8913d8db9eabff384f60",
+      "symbol": "_RNvXs6_Cs5xZ4lC6BZIV_20multiband_compressorNtB5_27PreparedMultibandCompressorNtCsfGpaX3jkkqY_15effect_contract20PreparedNativeEffect7process"
+    },
+    {
+      "label": "process-scalar",
+      "kind": "asm",
+      "path": "/tmp/issue537-baseline/selected/process-scalar.s",
+      "original": "/tmp/issue537-baseline-target/release/deps/multiband_compressor-524a987dfea296bf.s",
+      "lines": [
+        11837,
+        21863
+      ],
+      "bytes": 209072,
+      "sha256": "8181969f634aafbed2a3b1169bcea931c04af1be32526e703a57d4e715ea2caa",
+      "symbol": "_RNvXs6_Cs5xZ4lC6BZIV_20multiband_compressorNtB5_27PreparedMultibandCompressorNtCsfGpaX3jkkqY_15effect_contract20PreparedNativeEffect7process"
+    },
+    {
+      "label": "process-bank-w4",
+      "kind": "llvm",
+      "path": "/tmp/issue537-baseline/selected/process-bank-w4.ll",
+      "original": "/tmp/issue537-baseline-target/release/deps/multiband_compressor-524a987dfea296bf.ll",
+      "lines": [
+        15508,
+        26383
+      ],
+      "bytes": 1041654,
+      "sha256": "1931a3e6fde94d99e7ac3d36db808d9c216e7a09cde84bb269ef865abe1966df",
+      "symbol": "_RNvXs7_Cs5xZ4lC6BZIV_20multiband_compressorINtB5_31PreparedMultibandCompressorBankNtNtCsdw0XaoyMD7p_4wide6f32x4_5f32x4Kj4_ENtCsfGpaX3jkkqY_15effect_contract24PreparedNativeEffectBank12process_bankB5_"
+    },
+    {
+      "label": "process-bank-w4",
+      "kind": "asm",
+      "path": "/tmp/issue537-baseline/selected/process-bank-w4.s",
+      "original": "/tmp/issue537-baseline-target/release/deps/multiband_compressor-524a987dfea296bf.s",
+      "lines": [
+        21981,
+        35088
+      ],
+      "bytes": 274477,
+      "sha256": "4f509883f16d9391c9ea2cb5264f33a6cb48ab50e81525631cafb4b610b1cfe2",
+      "symbol": "_RNvXs7_Cs5xZ4lC6BZIV_20multiband_compressorINtB5_31PreparedMultibandCompressorBankNtNtCsdw0XaoyMD7p_4wide6f32x4_5f32x4Kj4_ENtCsfGpaX3jkkqY_15effect_contract24PreparedNativeEffectBank12process_bankB5_"
+    },
+    {
+      "label": "process-bank-w8",
+      "kind": "llvm",
+      "path": "/tmp/issue537-baseline/selected/process-bank-w8.ll",
+      "original": "/tmp/issue537-baseline-target/release/deps/multiband_compressor-524a987dfea296bf.ll",
+      "lines": [
+        27169,
+        41879
+      ],
+      "bytes": 1443613,
+      "sha256": "85a76cc379781eb06a9cd60aa6cbd4dea9fbd4c8a1a6f9353119336b4a724184",
+      "symbol": "_RNvXs7_Cs5xZ4lC6BZIV_20multiband_compressorINtB5_31PreparedMultibandCompressorBankNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8Kj8_ENtCsfGpaX3jkkqY_15effect_contract24PreparedNativeEffectBank12process_bankB5_"
+    },
+    {
+      "label": "process-bank-w8",
+      "kind": "asm",
+      "path": "/tmp/issue537-baseline/selected/process-bank-w8.s",
+      "original": "/tmp/issue537-baseline-target/release/deps/multiband_compressor-524a987dfea296bf.s",
+      "lines": [
+        36331,
+        55203
+      ],
+      "bytes": 383220,
+      "sha256": "469cffe1c27f52ff3af46fbb0849eec660b9b0ef2ec4356ffa2ae937a87d5b25",
+      "symbol": "_RNvXs7_Cs5xZ4lC6BZIV_20multiband_compressorINtB5_31PreparedMultibandCompressorBankNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8Kj8_ENtCsfGpaX3jkkqY_15effect_contract24PreparedNativeEffectBank12process_bankB5_"
+    }
+  ]
+}

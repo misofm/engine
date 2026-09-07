@@ -1,0 +1,52 @@
+   Compiling bytemuck v1.25.2
+   Compiling engine v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/engine)
+   Compiling typenum v1.20.1
+   Compiling cfg-if v1.0.4
+   Compiling wide v1.6.1
+   Compiling hybrid-array v0.4.14
+   Compiling block-buffer v0.12.1
+   Compiling crypto-common v0.2.2
+   Compiling digest v0.11.3
+   Compiling sha2 v0.11.0
+   Compiling lane v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/lane)
+   Compiling math v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/math)
+   Compiling effect-contract v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/effect-contract)
+   Compiling effect-runtime v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/effect-runtime)
+   Compiling parametric-eq v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/parametric-eq)
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/compressor)
+   Compiling gate-expander v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/gate-expander)
+   Compiling soft-clip v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/soft-clip)
+   Compiling delay v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/delay)
+   Compiling multiband-compressor v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/multiband-compressor)
+   Compiling builtins v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/builtins)
+   Compiling true-peak-limiter v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/true-peak-limiter)
+   Compiling transient-shaper v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/transient-shaper)
+   Compiling wasm-gate-corpus v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/tools/wasm-gate-corpus)
+   Compiling wasm-gate-guest v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/tools/wasm-gate-guest)
+    Finished `release` profile [optimized + debuginfo] target(s) in 17.70s
+   Compiling bytemuck v1.25.2
+   Compiling engine v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/engine)
+   Compiling typenum v1.20.1
+   Compiling cfg-if v1.0.4
+   Compiling wide v1.6.1
+   Compiling hybrid-array v0.4.14
+   Compiling crypto-common v0.2.2
+   Compiling block-buffer v0.12.1
+   Compiling digest v0.11.3
+   Compiling sha2 v0.11.0
+   Compiling lane v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/lane)
+   Compiling math v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/math)
+   Compiling effect-contract v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/effect-contract)
+   Compiling effect-runtime v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/effect-runtime)
+   Compiling soft-clip v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/soft-clip)
+   Compiling true-peak-limiter v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/true-peak-limiter)
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/compressor)
+   Compiling parametric-eq v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/parametric-eq)
+   Compiling delay v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/delay)
+   Compiling transient-shaper v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/transient-shaper)
+   Compiling gate-expander v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/gate-expander)
+   Compiling builtins v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/builtins)
+   Compiling multiband-compressor v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/multiband-compressor)
+   Compiling wasm-gate-corpus v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/tools/wasm-gate-corpus)
+   Compiling wasm-gate-guest v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/tools/wasm-gate-guest)
+    Finished `release` profile [optimized + debuginfo] target(s) in 13.09s

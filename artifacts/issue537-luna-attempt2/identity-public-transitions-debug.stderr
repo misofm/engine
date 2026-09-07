@@ -1,0 +1,14 @@
+   Compiling multiband-compressor v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/multiband-compressor)
+error[E0425]: cannot find function `restore` in this scope
+   --> crates/multiband-compressor/tests/identity.rs:466:9
+    |
+466 |         restore(receiver.as_mut(), 1, &saved, sizes),
+    |         ^^^^^^^ not found in this scope
+    |
+help: consider importing this function
+    |
+ 10 + use crate::support::restore;
+    |
+
+For more information about this error, try `rustc --explain E0425`.
+error: could not compile `multiband-compressor` (test "identity") due to 1 previous error

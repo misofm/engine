@@ -1,0 +1,17 @@
+    Checking multiband-compressor v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/multiband-compressor)
+error: very complex type used. Consider factoring parts into `type` definitions
+   --> crates/multiband-compressor/tests/identity.rs:334:6
+    |
+334 |   ) -> (
+    |  ______^
+335 | |     Vec<Vec<f32>>,
+336 | |     Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>,
+337 | |     Vec<effect_contract::ProcessReport>,
+338 | | ) {
+    | |_^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#type_complexity
+    = note: `-D clippy::type-complexity` implied by `-D clippy::all`
+    = help: to override `-D clippy::all` add `#[allow(clippy::type_complexity)]`
+
+error: could not compile `multiband-compressor` (test "identity") due to 1 previous error

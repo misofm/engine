@@ -1,0 +1,34 @@
+{
+  "/tmp/issue537-candidate-target/release/deps/multiband_compressor-524a987dfea296bf.ll": {
+    "bytes": 8166976,
+    "sha256": "7091c15cb327c9fc36f1fc8bec5f05e60cb3c5b5565bb685a6173ff86ae295b0"
+  },
+  "/tmp/issue537-candidate-target/release/deps/multiband_compressor-524a987dfea296bf.s": {
+    "bytes": 2151871,
+    "sha256": "874fd8c4a5787b7801e2ce2ec0e6203f9a5513fd31f442727148aba0a35337fd"
+  },
+  "/tmp/issue537-web-scalar/wasm32-unknown-unknown/release/host_web.wasm": {
+    "bytes": 24477946,
+    "sha256": "26e9894e06324bb2bdf3f4baf41c9e6470e24c6c1412d6ecd195df1a95adaff4"
+  },
+  "/tmp/issue537-root-lowering/decode-scalar.stdout": {
+    "bytes": 95334433,
+    "sha256": "c0f385133067047c75b6b2965b7f59ab83e2e44934ed02067076eca2552735fc"
+  },
+  "/tmp/issue537-root-lowering/metadata-scalar.stdout": {
+    "bytes": 1514273,
+    "sha256": "fac1a7270287796cae5dd6ba657c6ffd555cca5ebfa7b417ac672d24c82a0ad2"
+  },
+  "/tmp/issue537-web-simd128/wasm32-unknown-unknown/release/host_web.wasm": {
+    "bytes": 23411280,
+    "sha256": "382a333e68551f3c55099dad81f42f494e44c97de0ccf3e26e83cf12b23fa7e0"
+  },
+  "/tmp/issue537-root-lowering/decode-simd128.stdout": {
+    "bytes": 81219607,
+    "sha256": "89aec348149bc7c1013eadbab0e91a256fa1fd5bb0628860336e7a64f2b0eeeb"
+  },
+  "/tmp/issue537-root-lowering/metadata-simd128.stdout": {
+    "bytes": 1594371,
+    "sha256": "8703d553dac3b0c0bc35e5866b9f4df489ccb41652d4806526ac8b45fb07e8a5"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "/tmp/issue537-baseline-target/release/deps/multiband_compressor-524a987dfea296bf.ll": {
+    "bytes": 7688799,
+    "sha256": "fbc3e01eac068449ab3589bd33e74a155dc60c14ab46a22070cb971284be12dd"
+  },
+  "/tmp/issue537-baseline-target/release/deps/multiband_compressor-524a987dfea296bf.s": {
+    "bytes": 1986754,
+    "sha256": "70745fbb77d26f4f7d2ca6031f3542c3e39e6d01d584e0964274aeee58ffa6e0"
+  }
+}

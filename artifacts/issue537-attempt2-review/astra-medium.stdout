@@ -1,0 +1,7 @@
+**PASS — consolidated attempt-2 verification.** No blocking findings within the frozen scope. Attempt 1 remains counted as FAIL.
+
+Verified source/remote identities, discriminating mutation, returned-word oracle, public state/PCM gates, allocator liveness, and native/supported Wasm detector lowering from recorded evidence.
+
+[Full report](/tmp/issue537-attempt2-astra-medium.md)
+
+Published-artifact/browser qualification and exact-head/base/CI delivery review remain pending. No checks rerun or performance gains claimed.

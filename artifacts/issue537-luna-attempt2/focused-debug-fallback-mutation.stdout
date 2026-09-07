@@ -1,0 +1,20 @@
+
+running 1 test
+test detector_access_tests::detector_access_matches_old_words_and_prepared_callsite_route ... FAILED
+
+failures:
+
+---- detector_access_tests::detector_access_matches_old_words_and_prepared_callsite_route stdout ----
+
+thread 'detector_access_tests::detector_access_matches_old_words_and_prepared_callsite_route' (600078) panicked at crates/multiband-compressor/src/lib.rs:2313:9:
+assertion `left == right` failed: prepared uniform channels: executed uniform calls
+  left: 0
+ right: 12
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    detector_access_tests::detector_access_matches_old_words_and_prepared_callsite_route
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 16 filtered out; finished in 0.00s
+

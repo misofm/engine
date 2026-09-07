@@ -1,0 +1,13 @@
+diff --git a/crates/multiband-compressor/src/lib.rs b/crates/multiband-compressor/src/lib.rs
+index e37df684..907bd808 100644
+--- a/crates/multiband-compressor/src/lib.rs
++++ b/crates/multiband-compressor/src/lib.rs
+@@ -909,7 +909,7 @@ fn detector_tap<L: Lane, const W: usize>(
+         };
+         counter.fetch_add(1, Ordering::Relaxed);
+     }
+-    if uniform {
++    if false {
+         let row = wrap(cursor + offsets[0], ring_len);
+         return L::load(&ring[row * W..]);
+     }

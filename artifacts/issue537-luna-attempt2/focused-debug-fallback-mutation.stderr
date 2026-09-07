@@ -1,0 +1,13 @@
+   Compiling multiband-compressor v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/multiband-compressor)
+warning: unused variable: `uniform`
+   --> crates/multiband-compressor/src/lib.rs:944:5
+    |
+944 |     uniform: bool,
+    |     ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_uniform`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `multiband-compressor` (lib test) generated 1 warning (run `cargo fix --lib -p multiband-compressor --tests` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.90s
+     Running unittests src/lib.rs (/tmp/issue537-luna2-target/debug/deps/multiband_compressor-d7fa5ded05fdb86e)
+error: test failed, to rerun pass `-p multiband-compressor --lib`

@@ -1,0 +1,62 @@
+{
+  "argv": [
+    "npm",
+    "--prefix",
+    "hosts/host-web/qualification",
+    "run",
+    "matrix",
+    "--",
+    "--check"
+  ],
+  "cwd": "/home/bl/misofm/engine-multiband-detector-access",
+  "head": "62366ba20cab5742aa6e0636f428ec18365104bf",
+  "branch": "codex/multiband-detector-access",
+  "status": " M hosts/host-web/BROWSER_DEPLOYMENT_MATRIX.md\n M hosts/host-web/qualification/results.json\n",
+  "env": {
+    "PATH": "/home/bl/.cargo/bin:/home/bl/.codex/packages/standalone/releases/0.153.4-x86_64-unknown-linux-musl/codex-path:/home/bl/.cargo/bin:/home/bl/.local/bin:/home/bl/.codex1/tmp/arg0/codex-arg032GUSu:/home/bl/.codex/packages/standalone/releases/0.153.4-x86_64-unknown-linux-musl/codex-path:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin",
+    "RUSTFLAGS": null,
+    "CARGO_TARGET_DIR": "/tmp/issue537-delivery-target"
+  },
+  "source": {
+    "crates/multiband-compressor/src/lib.rs": {
+      "sha256": "efd7523a19b5355b53cdd8620a0abc75161a7d39440d54c286c288e5512e09f2",
+      "git_blob": "ebe08f5c6b013d56a74203729ffee64f147b3c6e"
+    },
+    "crates/multiband-compressor/tests/identity.rs": {
+      "sha256": "e27bb19cb841f7101bf7a8c31d23f500021bf93dd6f4b564828bdeeaa7dee526",
+      "git_blob": "9b2bfb4459634a193f8e4267fef49268d869a03c"
+    },
+    "crates/multiband-compressor/tests/no_alloc_render.rs": {
+      "sha256": "04033e9535455d151de254f69101a3062b45e9e5cee87479b5e7763bf4e6be4e",
+      "git_blob": "984d38c45915460d144eeac76e860039a98ac964"
+    },
+    "hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256": {
+      "sha256": "493ba74ea71b39a730b612bb84d92a4d9573d018d4b72196ab5dfc9219be7b2b",
+      "git_blob": "7a4aa4c11bf724772d56acd2786de88338437361"
+    },
+    "hosts/host-web/qualification/package-lock.json": {
+      "sha256": "37bfedc97da4e4377a45a0d88f2351263b77e160cde109620d23eaa9952ab069",
+      "git_blob": "f6b765afae41a3cc8f88bd579c8dd6291f3b1bb3"
+    },
+    "hosts/host-web/qualification/results.json": {
+      "sha256": "50dff29d86cf49426c1aec42aa427af6c71f6fadf5c790b3aa0e03f468099433",
+      "git_blob": "56fc3b10965c0069c80bd3614425a35bdecb2632"
+    },
+    "hosts/host-web/BROWSER_DEPLOYMENT_MATRIX.md": {
+      "sha256": "ce35d9cbed93f7cfa215ecc7af3f982fb7144a31017748b794ba3af76a153eca",
+      "git_blob": "1cd152255e830ea507e8e297eb9657e57fb9bf53"
+    },
+    "Cargo.lock": {
+      "sha256": "ef85bfaac8b4df80b651fa89e5e9a67bfef141b58076bdaac513044161b0b853",
+      "git_blob": "1b74fb016a04a090d2d1d37ea15fd2917fb85491"
+    },
+    ".cargo/config.toml": {
+      "sha256": "03b0fbd88c069abb0a8fbdca5921ba6a9899298291fe087977b509a29ebb7d0e",
+      "git_blob": "de2180972c37406f1f16913901bd1d4fc2e660e3"
+    },
+    "rust-toolchain.toml": {
+      "sha256": "85a45cac04c296adac076f8f0609ca8f4c8ca658957f1f24cbd1e054b6cc44e0",
+      "git_blob": "6b6739839ba23906921aeb4c268d275dcc459fb6"
+    }
+  }
+}

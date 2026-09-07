@@ -1,0 +1,60 @@
+    Checking bytemuck v1.25.2
+    Checking typenum v1.20.1
+    Checking engine v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/engine)
+    Checking cpufeatures v0.3.0
+    Checking cfg-if v1.0.4
+    Checking dsp-reference v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/dsp-reference)
+    Checking safe_arch v1.2.0
+    Checking wide v1.6.1
+    Checking hybrid-array v0.4.14
+    Checking block-buffer v0.12.1
+    Checking crypto-common v0.2.2
+    Checking digest v0.11.3
+    Checking sha2 v0.11.0
+    Checking bench-support v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/tools/bench-support)
+    Checking lane v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/lane)
+    Checking math v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/math)
+    Checking effect-contract v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/effect-contract)
+    Checking effect-runtime v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/effect-runtime)
+    Checking conformance v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/conformance)
+    Checking multiband-compressor v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/multiband-compressor)
+error: this expression creates a reference which is immediately dereferenced by the compiler
+   --> crates/multiband-compressor/tests/identity.rs:245:21
+    |
+245 |                     &spans,
+    |                     ^^^^^^ help: change this to: `spans`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#needless_borrow
+    = note: `-D clippy::needless-borrow` implied by `-D clippy::all`
+    = help: to override `-D clippy::all` add `#[allow(clippy::needless_borrow)]`
+
+error: very complex type used. Consider factoring parts into `type` definitions
+   --> crates/multiband-compressor/tests/identity.rs:274:6
+    |
+274 |   ) -> (
+    |  ______^
+275 | |     Vec<Vec<f32>>,
+276 | |     Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>,
+277 | |     Vec<effect_contract::ProcessReport>,
+278 | | ) {
+    | |_^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#type_complexity
+    = note: `-D clippy::type-complexity` implied by `-D clippy::all`
+    = help: to override `-D clippy::all` add `#[allow(clippy::type_complexity)]`
+
+error: very complex type used. Consider factoring parts into `type` definitions
+   --> crates/multiband-compressor/tests/identity.rs:333:6
+    |
+333 |   ) -> (
+    |  ______^
+334 | |     Vec<Vec<f32>>,
+335 | |     Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>,
+336 | |     Vec<effect_contract::ProcessReport>,
+337 | | ) {
+    | |_^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#type_complexity
+
+error: could not compile `multiband-compressor` (test "identity") due to 3 previous errors
+warning: build failed, waiting for other jobs to finish...

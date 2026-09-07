@@ -1,0 +1,18 @@
+{
+  "main": "375a86c280ac5be83004dc78dc25541bfa6371ba",
+  "local_numbered_specs": 258,
+  "remote_issues": 352,
+  "missing_remote_for_local": [],
+  "closed_issues": [
+    {
+      "number": 534,
+      "state": "CLOSED",
+      "title": "Avoid redundant gate detector gathers"
+    },
+    {
+      "number": 536,
+      "state": "CLOSED",
+      "title": "Isolate scalar Point allocation probes from libtest bookkeeping"
+    }
+  ]
+}

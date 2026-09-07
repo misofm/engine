@@ -861,6 +861,76 @@ fn wrap(index: usize, modulus: usize) -> usize {
     }
 }
 
+/// Classifies one channel's detector offsets for the current segment.
+///
+/// The first read and the loop together inspect exactly `W` offsets, once per segment. The result
+/// is transient: changing a prepared parameter or restoring state therefore takes effect at the
+/// next segment without any cache invalidation.
+#[inline(always)]
+fn detector_offsets_uniform<const W: usize>(offsets: &[usize; W]) -> bool {
+    let first = offsets[0];
+    let mut track = 1;
+    while track < W {
+        if offsets[track] != first {
+            return false;
+        }
+        track += 1;
+    }
+    true
+}
+
+#[cfg(test)]
+const DETECTOR_OBSERVATION_CAPACITY: usize = 64;
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+struct DetectorObservation {
+    uniform_calls: usize,
+    ragged_calls: usize,
+    entries: usize,
+    widths: [u8; DETECTOR_OBSERVATION_CAPACITY],
+    words: [[u32; 8]; DETECTOR_OBSERVATION_CAPACITY],
+}
+
+#[cfg(test)]
+impl DetectorObservation {
+    const fn new() -> Self {
+        Self {
+            uniform_calls: 0,
+            ragged_calls: 0,
+            entries: 0,
+            widths: [0; DETECTOR_OBSERVATION_CAPACITY],
+            words: [[0; 8]; DETECTOR_OBSERVATION_CAPACITY],
+        }
+    }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static DETECTOR_OBSERVATION: core::cell::Cell<DetectorObservation> =
+        const { core::cell::Cell::new(DetectorObservation::new()) };
+}
+
+#[cfg(test)]
+#[inline(never)]
+fn record_detector_observation<L: Lane>(uniform: bool, value: L) {
+    DETECTOR_OBSERVATION.with(|observation| {
+        let mut current = observation.get();
+        if uniform {
+            current.uniform_calls += 1;
+        } else {
+            current.ragged_calls += 1;
+        }
+        if current.entries < DETECTOR_OBSERVATION_CAPACITY {
+            let entry = current.entries;
+            current.widths[entry] = L::WIDTH as u8;
+            value.store_bits(&mut current.words[entry][..L::WIDTH]);
+            current.entries += 1;
+        }
+        observation.set(current);
+    });
+}
+
 /// The per-track detector tap of one ring, gathered into one lane.
 ///
 /// The only non-contiguous access on the render path, and it is loads only: lookahead is a
@@ -871,12 +941,23 @@ fn detector_tap<L: Lane, const W: usize>(
     cursor: usize,
     offsets: &[usize; W],
     ring_len: usize,
+    uniform: bool,
 ) -> L {
+    if uniform {
+        let row = wrap(cursor + offsets[0], ring_len);
+        let value = L::load(&ring[row * W..]);
+        #[cfg(test)]
+        record_detector_observation(true, value);
+        return value;
+    }
     let mut values = [0.0f32; 8];
     for track in 0..W {
         values[track] = ring[wrap(cursor + offsets[track], ring_len) * W + track];
     }
-    L::load(&values[..W])
+    let value = L::load(&values[..W]);
+    #[cfg(test)]
+    record_detector_observation(false, value);
+    value
 }
 
 /// One band's amplitude for one frame: detector level, static curve, smoother, makeup.
@@ -974,6 +1055,8 @@ fn run_segment<L: Lane, const W: usize, const LINK: u8, const BYPASS: bool, cons
     let mut gain_near = near.gain_db;
     let mut gain_far = far.gain_db;
     let mut position = *cursor;
+    let near_detector_uniform = detector_offsets_uniform(&near.detector_offset);
+    let far_detector_uniform = detector_offsets_uniform(&far.detector_offset);
     for frame in 0..frames {
         if RAMPING {
             for index in 0..RAMP_COUNT {
@@ -1002,14 +1085,34 @@ fn run_segment<L: Lane, const W: usize, const LINK: u8, const BYPASS: bool, cons
         low_far.store(&mut far.low_ring[slot..]);
         high_far.store(&mut far.high_ring[slot..]);
 
-        let detector_near_low =
-            detector_tap::<L, W>(&near.low_ring, position, &near.detector_offset, ring_len);
-        let detector_near_high =
-            detector_tap::<L, W>(&near.high_ring, position, &near.detector_offset, ring_len);
-        let detector_far_low =
-            detector_tap::<L, W>(&far.low_ring, position, &far.detector_offset, ring_len);
-        let detector_far_high =
-            detector_tap::<L, W>(&far.high_ring, position, &far.detector_offset, ring_len);
+        let detector_near_low = detector_tap::<L, W>(
+            &near.low_ring,
+            position,
+            &near.detector_offset,
+            ring_len,
+            near_detector_uniform,
+        );
+        let detector_near_high = detector_tap::<L, W>(
+            &near.high_ring,
+            position,
+            &near.detector_offset,
+            ring_len,
+            near_detector_uniform,
+        );
+        let detector_far_low = detector_tap::<L, W>(
+            &far.low_ring,
+            position,
+            &far.detector_offset,
+            ring_len,
+            far_detector_uniform,
+        );
+        let detector_far_high = detector_tap::<L, W>(
+            &far.high_ring,
+            position,
+            &far.detector_offset,
+            ring_len,
+            far_detector_uniform,
+        );
         let (linked_near_low, linked_far_low) =
             link_levels::<L, LINK>(detector_near_low, detector_far_low);
         let (linked_near_high, linked_far_high) =
@@ -1936,4 +2039,342 @@ fn checked_track(track_index: u32, width: usize) -> Result<usize, StatePayloadEr
         return Err(state_error("effect.state.track"));
     }
     Ok(track)
+}
+
+#[cfg(test)]
+mod detector_access_tests {
+    use super::*;
+
+    const RING_LEN: usize = 7;
+
+    fn patterned_ring<const W: usize>() -> Vec<f32> {
+        let mut ring = vec![0.0f32; RING_LEN * W];
+        for (index, word) in ring.iter_mut().enumerate() {
+            // Keep every row/lane word distinct. The first row also carries directed +0/-0
+            // values so the wrap case checks sign bits rather than numeric equality.
+            let bits = match index {
+                0 => 0x0000_0000,
+                1 => 0x8000_0000,
+                _ => 0x3f80_0000 + index as u32,
+            };
+            *word = f32::from_bits(bits);
+        }
+        ring
+    }
+
+    fn assert_rows_are_distinct<const W: usize>(ring: &[f32]) {
+        for left in 0..RING_LEN {
+            for right in left + 1..RING_LEN {
+                assert!(
+                    (0..W).any(|track| {
+                        ring[left * W + track].to_bits() != ring[right * W + track].to_bits()
+                    }),
+                    "rows {left} and {right} must remain distinguishable"
+                );
+            }
+        }
+        assert_eq!(ring[0].to_bits(), 0x0000_0000, "directed +0 fixture word");
+        if W > 1 {
+            assert_eq!(ring[1].to_bits(), 0x8000_0000, "directed -0 fixture word");
+        }
+    }
+
+    /// Independent old-index oracle: this deliberately spells out the one subtract rather than
+    /// calling the production `wrap`, so a changed access route cannot make its own oracle pass.
+    fn old_detector_words<const W: usize>(
+        ring: &[f32],
+        cursor: usize,
+        offsets: &[usize; W],
+        ring_len: usize,
+    ) -> [u32; W] {
+        core::array::from_fn(|track| {
+            let index = cursor + offsets[track];
+            let row = if index >= ring_len {
+                index - ring_len
+            } else {
+                index
+            };
+            ring[row * W + track].to_bits()
+        })
+    }
+
+    fn lane_words<L: Lane, const W: usize>(value: L) -> [u32; W] {
+        let mut words = [0u32; 8];
+        value.store_bits(&mut words[..W]);
+        core::array::from_fn(|track| words[track])
+    }
+
+    fn assert_tap_case<L: Lane, const W: usize>(
+        ring: &[f32],
+        cursor: usize,
+        offsets: [usize; W],
+        expected_uniform: bool,
+        label: &str,
+    ) {
+        assert_eq!(
+            detector_offsets_uniform(&offsets),
+            expected_uniform,
+            "{label}: classification"
+        );
+        let expected = old_detector_words(ring, cursor, &offsets, RING_LEN);
+        let selected = detector_tap::<L, W>(ring, cursor, &offsets, RING_LEN, expected_uniform);
+        assert_eq!(lane_words(selected), expected, "{label}: selected route");
+
+        let fallback = detector_tap::<L, W>(ring, cursor, &offsets, RING_LEN, false);
+        assert_eq!(lane_words(fallback), expected, "{label}: old fallback");
+    }
+
+    fn width_word_witness<L: Lane, const W: usize>() {
+        let ring = patterned_ring::<W>();
+        assert_rows_are_distinct::<W>(&ring);
+        let uniform_one = [1usize; W];
+        let uniform_interior = [3usize; W];
+        let uniform_ring_end = [RING_LEN; W];
+        assert_tap_case::<L, W>(&ring, 0, uniform_one, true, "O=1");
+        assert_tap_case::<L, W>(&ring, RING_LEN - 1, uniform_one, true, "O=1 wrap");
+        assert_tap_case::<L, W>(&ring, 2, uniform_interior, true, "interior");
+        assert_tap_case::<L, W>(&ring, RING_LEN - 1, uniform_ring_end, true, "O=B wrap");
+
+        if W > 1 {
+            let ragged = core::array::from_fn(|track| 1 + track % (RING_LEN - 1));
+            assert_tap_case::<L, W>(&ring, RING_LEN - 1, ragged, false, "ragged wrap");
+
+            // Distinct uniform channel words are both eligible, while they must not be merged.
+            let near_uniform = [2usize; W];
+            let far_uniform = [5usize; W];
+            assert_tap_case::<L, W>(&ring, 1, near_uniform, true, "near uniform");
+            assert_tap_case::<L, W>(&ring, 1, far_uniform, true, "far unequal uniform");
+
+            // Exercise both channel directions of the mixed uniform/ragged contract.
+            assert_tap_case::<L, W>(&ring, 4, near_uniform, true, "uniform/ragged uniform");
+            assert_tap_case::<L, W>(&ring, 4, ragged, false, "uniform/ragged ragged");
+            assert_tap_case::<L, W>(&ring, 5, ragged, false, "ragged/uniform ragged");
+            assert_tap_case::<L, W>(&ring, 5, far_uniform, true, "ragged/uniform uniform");
+        }
+    }
+
+    fn default_initial_values() -> [InitialParameterValue; PARAMETER_COUNT * 2] {
+        core::array::from_fn(|index| InitialParameterValue {
+            parameter_index: (index / 2) as u32,
+            channel: if index % 2 == 0 {
+                ParameterChannel::Left
+            } else {
+                ParameterChannel::Right
+            },
+            value: MULTIBAND_COMPRESSOR_PARAMETERS[index / 2].default_value,
+        })
+    }
+
+    fn test_metadata(
+        initial_values: &[InitialParameterValue; PARAMETER_COUNT * 2],
+    ) -> PreparedEffectMetadata {
+        expected_prepared_metadata(
+            &MULTIBAND_COMPRESSOR_DESCRIPTOR,
+            PrepareEffectRequest {
+                sample_rate: 48_000,
+                quantum: 128,
+                quality: EffectQuality::Normal,
+                bypass: false,
+                link_mode: LinkMode::DualMono,
+                ports: effect_contract::PreparedPorts {
+                    sidechain: effect_contract::PreparedSidechainPort::None,
+                },
+                initial_values,
+                limits: effect_contract::PrepareEffectLimits {
+                    maximum_total_state_bytes: u64::MAX,
+                    maximum_scratch_bytes: u64::MAX,
+                    maximum_automation_spans_per_block: 32,
+                },
+            },
+        )
+        .expect("test metadata")
+    }
+
+    fn clear_detector_observation() {
+        DETECTOR_OBSERVATION.with(|observation| observation.set(DetectorObservation::new()));
+    }
+
+    fn detector_observation() -> DetectorObservation {
+        DETECTOR_OBSERVATION.with(|observation| observation.get())
+    }
+
+    fn seed_ring<const W: usize>(ring: &mut [f32], identity: u32) {
+        assert_eq!(ring.len() % W, 0);
+        for (index, sample) in ring.iter_mut().enumerate() {
+            let bits = match (identity, index) {
+                (0, 0) => 0x0000_0000,
+                (0, 1) => 0x8000_0000,
+                _ => 0x3f80_0000 + identity * 0x0010_0000 + index as u32,
+            };
+            *sample = f32::from_bits(bits);
+        }
+    }
+
+    fn seed_instance_rings<L: Lane, const W: usize>(instance: &mut Instance<L, W>) {
+        seed_ring::<W>(&mut instance.sides[0].low_ring, 0);
+        seed_ring::<W>(&mut instance.sides[0].high_ring, 1);
+        seed_ring::<W>(&mut instance.sides[1].low_ring, 2);
+        seed_ring::<W>(&mut instance.sides[1].high_ring, 3);
+    }
+
+    fn padded_words<const W: usize>(words: [u32; W]) -> [u32; 8] {
+        let mut padded = [0u32; 8];
+        padded[..W].copy_from_slice(&words);
+        padded
+    }
+
+    fn push_expected_tap<const W: usize>(
+        expected: &mut Vec<[u32; 8]>,
+        ring: &[f32],
+        cursor: usize,
+        offsets: &[usize; W],
+        ring_len: usize,
+    ) {
+        expected.push(padded_words(old_detector_words(
+            ring, cursor, offsets, ring_len,
+        )));
+    }
+
+    fn expected_callsite_words<const W: usize>(
+        rings: [&[f32]; 4],
+        near_offsets: &[usize; W],
+        far_offsets: &[usize; W],
+        ring_len: usize,
+        frames: usize,
+    ) -> Vec<[u32; 8]> {
+        let mut expected = Vec::with_capacity(frames * 4);
+        for cursor in 0..frames {
+            push_expected_tap(&mut expected, rings[0], cursor, near_offsets, ring_len);
+            push_expected_tap(&mut expected, rings[1], cursor, near_offsets, ring_len);
+            push_expected_tap(&mut expected, rings[2], cursor, far_offsets, ring_len);
+            push_expected_tap(&mut expected, rings[3], cursor, far_offsets, ring_len);
+        }
+        expected
+    }
+
+    fn assert_actual_observation<const W: usize>(
+        expected: &[[u32; 8]],
+        expected_uniform_calls: usize,
+        expected_ragged_calls: usize,
+        label: &str,
+    ) {
+        let observed = detector_observation();
+        assert_eq!(
+            observed.entries,
+            expected.len(),
+            "{label}: observed entry count"
+        );
+        for (index, expected_words) in expected.iter().enumerate() {
+            assert_eq!(
+                observed.widths[index] as usize, W,
+                "{label}: observed width at entry {index}"
+            );
+            assert_eq!(
+                observed.words[index], *expected_words,
+                "{label}: actual accessed words at entry {index}"
+            );
+        }
+        assert_eq!(
+            observed.uniform_calls, expected_uniform_calls,
+            "{label}: executed uniform calls"
+        );
+        assert_eq!(
+            observed.ragged_calls, expected_ragged_calls,
+            "{label}: executed ragged calls"
+        );
+    }
+
+    fn prepared_callsite_case<L: Lane, const W: usize>(
+        metadata: PreparedEffectMetadata,
+        left_defaults: [f32; PARAMETER_COUNT],
+        right_defaults: [f32; PARAMETER_COUNT],
+        near_offsets: [usize; W],
+        far_offsets: [usize; W],
+        label: &str,
+    ) {
+        const FRAMES: usize = 3;
+        let mut instance = Instance::<L, W>::new([left_defaults; W], [right_defaults; W], metadata)
+            .expect("prepared witness instance");
+        instance.sides[0].detector_offset = near_offsets;
+        instance.sides[1].detector_offset = far_offsets;
+        seed_instance_rings(&mut instance);
+        let ring_copies = [
+            instance.sides[0].low_ring.to_vec(),
+            instance.sides[0].high_ring.to_vec(),
+            instance.sides[1].low_ring.to_vec(),
+            instance.sides[1].high_ring.to_vec(),
+        ];
+        let expected = expected_callsite_words(
+            [
+                &ring_copies[0],
+                &ring_copies[1],
+                &ring_copies[2],
+                &ring_copies[3],
+            ],
+            &near_offsets,
+            &far_offsets,
+            instance.ring_len,
+            FRAMES,
+        );
+        let near_uniform = detector_offsets_uniform(&near_offsets);
+        let far_uniform = detector_offsets_uniform(&far_offsets);
+        let expected_uniform_calls = 2 * FRAMES * (near_uniform as usize + far_uniform as usize);
+        let expected_ragged_calls =
+            2 * FRAMES * ((!near_uniform) as usize + (!far_uniform) as usize);
+        let mut left = vec![0.25f32; FRAMES * W];
+        let mut right = vec![-0.5f32; FRAMES * W];
+        let mut reports = [ProcessReport::default(); W];
+        clear_detector_observation();
+        render::<L, W, false>(&mut instance, &mut left, &mut right, FRAMES, &mut reports);
+        assert_actual_observation::<W>(
+            &expected,
+            expected_uniform_calls,
+            expected_ragged_calls,
+            label,
+        );
+    }
+
+    fn prepared_callsite_witness<L: Lane, const W: usize>() {
+        let initial_values = default_initial_values();
+        let metadata = test_metadata(&initial_values);
+        let (left_defaults, right_defaults) = initial_defaults(&initial_values).expect("defaults");
+        let uniform_near = [1usize; W];
+        let uniform_far = [2usize; W];
+        let ragged = core::array::from_fn(|track| 1 + track % (RING_LEN - 1));
+
+        prepared_callsite_case::<L, W>(
+            metadata,
+            left_defaults,
+            right_defaults,
+            uniform_near,
+            uniform_far,
+            "prepared uniform channels",
+        );
+        prepared_callsite_case::<L, W>(
+            metadata,
+            left_defaults,
+            right_defaults,
+            ragged,
+            uniform_far,
+            "prepared ragged-left uniform-right",
+        );
+        prepared_callsite_case::<L, W>(
+            metadata,
+            left_defaults,
+            right_defaults,
+            uniform_near,
+            ragged,
+            "prepared uniform-left ragged-right",
+        );
+    }
+
+    #[test]
+    fn detector_access_matches_old_words_and_prepared_callsite_route() {
+        width_word_witness::<f32, 1>();
+        width_word_witness::<Simd4, 4>();
+        width_word_witness::<Simd8, 8>();
+        prepared_callsite_witness::<f32, 1>();
+        prepared_callsite_witness::<Simd4, 4>();
+        prepared_callsite_witness::<Simd8, 8>();
+    }
 }

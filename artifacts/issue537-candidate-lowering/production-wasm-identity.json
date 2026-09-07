@@ -1,0 +1,48 @@
+{
+  "source_head": "13d0580b66c287edc412090dfa7174a2800e05b1",
+  "selection": [
+    {
+      "backend": "scalar",
+      "function_index": 761,
+      "start_address": "0b60e5",
+      "symbol": "_RNvXs6_Cs9el6FW75Uks_20multiband_compressorNtB5_27PreparedMultibandCompressorNtCs7ywmIn0v2f9_15effect_contract20PreparedNativeEffect7process",
+      "original": "/tmp/issue537-root-lowering/decode-scalar.stdout",
+      "lines": [
+        345632,
+        358760
+      ],
+      "selected": "/tmp/issue537-root-lowering/scalar-prepared-multiband-func-761.wat.txt",
+      "bytes": 3301724,
+      "sha256": "12c6f7abb854b3e9ca32cc17afa4c47319f56cc5e60b9d20634b7680e8f273b8"
+    },
+    {
+      "backend": "simd128",
+      "function_index": 811,
+      "start_address": "0c7093",
+      "symbol": "_RNvXs6_Cs9el6FW75Uks_20multiband_compressorNtB5_27PreparedMultibandCompressorNtCs7ywmIn0v2f9_15effect_contract20PreparedNativeEffect7process",
+      "original": "/tmp/issue537-root-lowering/decode-simd128.stdout",
+      "lines": [
+        368748,
+        380140
+      ],
+      "selected": "/tmp/issue537-root-lowering/simd128-prepared-multiband-func-811.wat.txt",
+      "bytes": 2810523,
+      "sha256": "d52c2ae5068e439a1364c45e67d4b7e0e768bcbaa39fe3d8eaef13000296f320"
+    },
+    {
+      "backend": "simd128",
+      "function_index": 813,
+      "start_address": "0cdc94",
+      "symbol": "_RNvXs7_Cs9el6FW75Uks_20multiband_compressorINtB5_31PreparedMultibandCompressorBankNtNtCshTO37R3KJUo_4wide6f32x4_5f32x4Kj4_ENtCs7ywmIn0v2f9_15effect_contract24PreparedNativeEffectBank12process_bankB5_",
+      "original": "/tmp/issue537-root-lowering/decode-simd128.stdout",
+      "lines": [
+        380147,
+        404394
+      ],
+      "selected": "/tmp/issue537-root-lowering/simd128-prepared-multiband-func-813.wat.txt",
+      "bytes": 4141435,
+      "sha256": "fac11fae6c2bdf087e3e2ff9a541d0db24cd61bcff6fad70e44d0c652e93a562"
+    }
+  ],
+  "limits": "Linked release inspection modules, not published artifact identities. Scalar Prepared effect and SIMD128 scalar/SIMD4 bank selected. Emitted W8 Wasm/mono wrappers not credited as supported dispatch."
+}

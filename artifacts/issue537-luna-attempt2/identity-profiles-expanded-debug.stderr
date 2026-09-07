@@ -1,0 +1,3 @@
+   Compiling multiband-compressor v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/multiband-compressor)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.37s
+     Running tests/identity.rs (/tmp/issue537-luna2-target/debug/deps/identity-edb08f00da434ccb)

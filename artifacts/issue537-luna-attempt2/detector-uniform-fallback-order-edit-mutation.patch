@@ -1,0 +1,11 @@
+--- lib-frozen-order-edit.rs
++++ lib-fallback-mutation.rs
+@@ -943,7 +943,7 @@
+     ring_len: usize,
+     uniform: bool,
+ ) -> L {
+-    if uniform {
++    if false {
+         let row = wrap(cursor + offsets[0], ring_len);
+         let value = L::load(&ring[row * W..]);
+         #[cfg(test)]

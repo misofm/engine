@@ -1,0 +1,8 @@
+
+running 3 tests
+test the_bank_render_path_allocates_nothing ... ok
+test the_scalar_render_path_allocates_nothing ... ok
+test tracking_allocator_proves_own_thread_allocation_and_free ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
