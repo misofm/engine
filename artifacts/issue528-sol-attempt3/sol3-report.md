@@ -4,7 +4,7 @@ Final clean checkpoint: `e33a4cae977536870e9e83bafbde1269c4c2880b`.
 
 - Endpoint source: SHA-256 `d08e5d958dad00a76cb8357c277a0a50e3f3da2ae57bfca59999c63be3a69f92`, Git blob `38325e0b6f7d1334ae83951b861b4b20f3f412e7`.
 - Endpoint tests: SHA-256 `b33f0773da835856447f64e875a47c67a97b10cbf2f6e7e4e98d88d7e97c1354`, Git blob `304081e4502337fb20e42b65bf14885ada0ff24c`.
-- Worktree was clean for every final proportional command.
+- Focused debug ran before checkpoint at `4ac231ea` with exactly the two final source/test edits; its captured hashes match the final source. All subsequent proportional commands ran on clean `e33a4cae`.
 
 The two Astra attempt-2 findings are corrected without API or scope expansion. The post-mark
 `pending(ticket)` lookup now maps every error to the existing sticky Delivery/Pending fault with
