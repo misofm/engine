@@ -463,9 +463,7 @@ impl<P: Copy + Send + 'static> DeliveryCoreControl<P> {
                     Err(_) => return Ok(()),
                 }
             };
-            if let Err(error) = self.record_terminal(terminal) {
-                return Err(error);
-            }
+            self.record_terminal(terminal)?;
         }
     }
 
@@ -475,15 +473,6 @@ impl<P: Copy + Send + 'static> DeliveryCoreControl<P> {
             .and_then(|entry| *entry)
             .filter(|entry| entry.ticket == ticket)
             .map(|entry| entry.payload)
-            .ok_or(DeliveryError::StaleTicket)
-    }
-
-    fn is_published(&self, ticket: CoreTicket) -> Result<bool, DeliveryError> {
-        self.entries
-            .get(ticket.slot)
-            .and_then(|entry| *entry)
-            .filter(|entry| entry.ticket == ticket)
-            .map(|entry| entry.published)
             .ok_or(DeliveryError::StaleTicket)
     }
 
@@ -513,6 +502,17 @@ impl<P: Copy + Send + 'static> DeliveryCoreControl<P> {
         self.cancel_producer
             .try_push(CoreBoundaryMessage::Cancel { token, frontier })
             .map_err(|_| DeliveryError::Full)?;
+        for entry in self.entries.iter_mut().flatten() {
+            if !entry.published {
+                entry.terminal = Some(CoreTerminal {
+                    ticket: entry.ticket,
+                    applied_prefix: 0,
+                    record_count: entry.logical_count,
+                    disposition: CoreTerminalDisposition::Canceled,
+                    acknowledged_sample: None,
+                });
+            }
+        }
         self.cancel = Some(CoreCancelState {
             token,
             frontier,
@@ -565,6 +565,13 @@ impl<P: Copy + Send + 'static> DeliveryCoreControl<P> {
             return Ok(None);
         }
         let sample = acknowledged_sample.expect("acknowledged above");
+        for entry in self.entries.iter_mut().flatten() {
+            if let Some(terminal) = entry.terminal.as_mut()
+                && terminal.disposition == CoreTerminalDisposition::Canceled
+            {
+                terminal.acknowledged_sample = Some(sample);
+            }
+        }
         self.cancel
             .as_mut()
             .expect("checked above")
@@ -1035,28 +1042,6 @@ impl AutomationDeliveryState {
         queues.release_automation_admission(&batch);
     }
 
-    fn publish_unpublished(&mut self) -> Result<(), DeliveryError> {
-        let mut last_order = 0u64;
-        for _ in 0..self.owners.len() {
-            let Some(owner) = self
-                .owners
-                .iter()
-                .flatten()
-                .copied()
-                .filter(|owner| owner.order > last_order)
-                .min_by_key(|owner| owner.order)
-            else {
-                break;
-            };
-            last_order = owner.order;
-            let published = self.core.is_published(owner.ticket)?;
-            if !published {
-                self.core.publish_reserved(owner.ticket)?;
-            }
-        }
-        Ok(())
-    }
-
     pub(crate) fn begin_cancel(
         &mut self,
         queues: &mut ProtocolQueues,
@@ -1079,6 +1064,10 @@ impl AutomationDeliveryState {
         self.next_order
             .checked_add(u64::try_from(queued).map_err(|_| DeliveryError::SequenceOverflow)?)
             .ok_or(DeliveryError::SequenceOverflow)?;
+        self.core
+            .serial
+            .checked_add(u64::try_from(queued).map_err(|_| DeliveryError::SequenceOverflow)?)
+            .ok_or(DeliveryError::SequenceOverflow)?;
         let next_generation = self
             .next_generation
             .checked_add(1)
@@ -1091,7 +1080,6 @@ impl AutomationDeliveryState {
             self.own(batch)
                 .expect("prevalidated cancellation ownership");
         }
-        self.publish_unpublished()?;
         let core_token = match self.core.begin_cancel() {
             Ok(token) => token,
             Err(error) => {
@@ -1677,6 +1665,37 @@ mod tests {
             cancellation_payload(control.try_dequeue_event().unwrap()),
             (10, RequestId::new(2).unwrap(), 1, SampleTime(55))
         );
+    }
+
+    #[test]
+    fn cancellation_identity_overflow_is_preflighted_before_dequeue_or_reservation() {
+        for (serial, order) in [(u64::MAX - 1, 1), (1, u64::MAX - 1)] {
+            let (mut control, _render) = PreparedAutomationDelivery::prepare(config(2), 9).unwrap();
+            control.try_admit(SampleTime(0), batch(1, 7)).unwrap();
+            control.try_admit(SampleTime(2), batch(2, 7)).unwrap();
+            control.state.core.serial = serial;
+            control.state.next_order = order;
+            let before = (
+                control.outstanding(),
+                control.resident_automation(),
+                control.sequence,
+            );
+            assert_eq!(
+                control.begin_cancel(
+                    AutomationCancellationReason::EndpointShutdown,
+                    SessionRevision(2)
+                ),
+                Err(DeliveryError::SequenceOverflow)
+            );
+            assert_eq!(
+                (
+                    control.outstanding(),
+                    control.resident_automation(),
+                    control.sequence
+                ),
+                before
+            );
+        }
     }
 
     #[test]
