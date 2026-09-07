@@ -38,3 +38,9 @@ One Luna HIGH attempt receives one Astra LOW adversarial verdict and pauses at t
 Astra LOW reviewed current main `08dabaf7a8b55a5e89a6b7e2a41bf89d445267f6` and found the exact policy duplicated in `tools/bench/src/session.rs` and `tools/bench/src/protocol.rs`. Both use the frozen `bench_support::metadata::Metadata` snapshot, retain nonempty Unicode strings unchanged, and map absence, invalid Unicode and empty strings to `"unknown"`. Session uses the result for runtime/browser metadata; protocol uses it for target/Wasm metadata and subsequent local numeric parsing.
 
 Rack's ASCII rule, builtins' non-control-Unicode rule, graph's sentinel tracking and interchange's missing-value policy are intentional differences and are excluded. TOOL11 and IO5 still require broader contracts. This child is disjoint from #587 and the live PR/worktree roster. Astra LOW is sufficient for all review. Activation requires exact local/GitHub numbered identity, a pushed clean brief, current-base and ownership checks, and Astra LOW scope PASS.
+
+## Numbered current-base scope review
+
+Astra LOW returned **PASS** for exact brief and upstream `103775b5877edde27774a7fb9e6251fdc8c0dade`, with current main and merge-base `08dabaf7a8b55a5e89a6b7e2a41bf89d445267f6`. The clean tree's sole delta is this spec, diff checks pass, GitHub #590 has exact open identity, and base qualification `34170256498` succeeded. #560 activation, #559/#587 ownership and the live PR/worktree boundaries are consistent and disjoint.
+
+The policy bodies are identical. Three-file ownership and the injected-snapshot gates adequately preserve all value distinctions, `Metadata::var`, other consumers, record oracles and protocol numeric defaults. No correction is required; Astra LOW is sufficient. Luna HIGH attempt 1 may begin from this exact brief/base and must pause at its first focused-green checkpoint. No audio, browser, artifact or timed benchmark work is authorized.
