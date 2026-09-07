@@ -51,7 +51,6 @@ impl HostToolchainFacts {
         let raw_cpuinfo = utf8_file(sources.cpuinfo);
         let physical_cores = sources
             .lscpu
-            .and_then(command_stdout)
             .map_or_else(|| "unknown".to_owned(), |text| count_cores(&text));
         let logical_cores = sources
             .logical_cores
@@ -104,13 +103,22 @@ const COMMON_VARIABLES: [&str; 8] = [
 /// The number of distinct physical cores this host reports, or `"unknown"` when unavailable.
 #[must_use]
 pub fn physical_core_count() -> String {
-    Command::new("lscpu")
-        .arg("-p=CORE,SOCKET")
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| String::from_utf8(output.stdout).ok())
+    command_output("lscpu", &["-p=CORE,SOCKET"])
         .map_or_else(|| "unknown".to_owned(), |text| count_cores(&text))
+}
+
+/// Run one explicitly supplied metadata command and return its trimmed UTF-8 stdout.
+///
+/// Successful empty or whitespace-only stdout is returned as `Some("")`; spawn failure,
+/// nonzero exit and invalid UTF-8 are all unavailable and return `None`.
+#[must_use]
+pub fn command_output(program: &str, args: &[&str]) -> Option<String> {
+    let output = Command::new(program).args(args).output().ok()?;
+    output.status.success().then(|| {
+        String::from_utf8(output.stdout)
+            .ok()
+            .map(|text| text.trim().to_owned())
+    })?
 }
 
 fn count_cores(lscpu_stdout: &str) -> String {
@@ -139,19 +147,11 @@ fn field(text: &str, prefix: &str) -> String {
         .unwrap_or_else(|| "unknown".to_owned())
 }
 
-fn command_value(command: Option<CommandOutput>) -> String {
+fn command_value(command: Option<String>) -> String {
     command
-        .and_then(command_stdout)
         .map(|text| text.trim().to_owned())
         .filter(|text| !text.is_empty())
         .unwrap_or_else(|| "unknown".to_owned())
-}
-
-fn command_stdout(command: CommandOutput) -> Option<String> {
-    command
-        .successful
-        .then(|| String::from_utf8(command.stdout).ok())
-        .flatten()
 }
 
 fn utf8_file(file: Option<Vec<u8>>) -> Option<String> {
@@ -168,10 +168,10 @@ fn source_variable(environment: &BTreeMap<&'static str, SourceValue>, name: &str
 struct Sources {
     cpuinfo: Option<Vec<u8>>,
     governor: Option<Vec<u8>>,
-    lscpu: Option<CommandOutput>,
-    rustc_version: Option<CommandOutput>,
-    rustc_verbose: Option<CommandOutput>,
-    kernel: Option<CommandOutput>,
+    lscpu: Option<String>,
+    rustc_version: Option<String>,
+    rustc_verbose: Option<String>,
+    kernel: Option<String>,
     logical_cores: Option<usize>,
     environment: BTreeMap<&'static str, SourceValue>,
 }
@@ -182,10 +182,10 @@ impl Sources {
         Self {
             cpuinfo: fs::read("/proc/cpuinfo").ok(),
             governor: fs::read("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor").ok(),
-            lscpu: run_command("lscpu", &["-p=CORE,SOCKET"]),
-            rustc_version: run_command("rustc", &["-V"]),
-            rustc_verbose: run_command("rustc", &["-Vv"]),
-            kernel: run_command("uname", &["-r"]),
+            lscpu: command_output("lscpu", &["-p=CORE,SOCKET"]),
+            rustc_version: command_output("rustc", &["-V"]),
+            rustc_verbose: command_output("rustc", &["-Vv"]),
+            kernel: command_output("uname", &["-r"]),
             logical_cores: std::thread::available_parallelism()
                 .ok()
                 .map(|value| value.get()),
@@ -200,19 +200,6 @@ fn bench_environment() -> BTreeMap<&'static str, SourceValue> {
         .into_iter()
         .map(|name| (name, SourceValue::from_snapshot(snapshot, name)))
         .collect()
-}
-
-fn run_command(program: &str, args: &[&str]) -> Option<CommandOutput> {
-    let output = Command::new(program).args(args).output().ok()?;
-    Some(CommandOutput {
-        successful: output.status.success(),
-        stdout: output.stdout,
-    })
-}
-
-struct CommandOutput {
-    successful: bool,
-    stdout: Vec<u8>,
 }
 
 enum SourceValue {
@@ -234,7 +221,7 @@ impl SourceValue {
 #[cfg(test)]
 mod tests {
     use super::{
-        CommandOutput, HostToolchainFacts, SourceValue, Sources, count_cores, physical_core_count,
+        HostToolchainFacts, SourceValue, Sources, command_output, count_cores, physical_core_count,
         source_variable,
     };
     use std::collections::BTreeMap;
@@ -245,11 +232,10 @@ mod tests {
         values.into_iter().collect()
     }
 
-    fn command(successful: bool, stdout: &[u8]) -> Option<CommandOutput> {
-        Some(CommandOutput {
-            successful,
-            stdout: stdout.to_vec(),
-        })
+    fn command(successful: bool, stdout: &[u8]) -> Option<String> {
+        successful
+            .then(|| String::from_utf8(stdout.to_vec()).ok())
+            .flatten()
     }
 
     fn populated_sources() -> Sources {
@@ -401,10 +387,10 @@ mod tests {
     #[test]
     fn unsuccessful_and_non_utf8_commands_are_unknown() {
         let mut sources = populated_sources();
-        sources.lscpu = command(false, b"0,0");
-        sources.rustc_version = command(false, b"rustc");
-        sources.rustc_verbose = command(true, &[0xff]);
-        sources.kernel = command(true, &[0xff]);
+        sources.lscpu = None;
+        sources.rustc_version = None;
+        sources.rustc_verbose = None;
+        sources.kernel = None;
         let facts = HostToolchainFacts::from_sources(sources);
         assert_eq!(facts.physical_cores, "unknown");
         assert_eq!(facts.rustc_version, "unknown");
@@ -451,6 +437,32 @@ mod tests {
     #[test]
     fn header_only_output_is_unknown() {
         assert_eq!(count_cores("# header only\n"), "unknown");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_output_distinguishes_success_and_unavailable_results() {
+        assert_eq!(
+            command_output("/bin/sh", &["-c", "printf '  text  \\n'"]),
+            Some("text".to_owned())
+        );
+        assert_eq!(
+            command_output("/bin/sh", &["-c", "true"]),
+            Some(String::new())
+        );
+        assert_eq!(
+            command_output("/bin/sh", &["-c", "printf ' \\n\\t'"]),
+            Some(String::new())
+        );
+        assert_eq!(
+            command_output("/bin/sh", &["-c", "printf plausible; exit 7"]),
+            None
+        );
+        assert_eq!(
+            command_output("/definitely/missing/metadata-command", &[]),
+            None
+        );
+        assert_eq!(command_output("/bin/sh", &["-c", r"printf '\377'"]), None);
     }
 
     #[test]

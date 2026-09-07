@@ -6,7 +6,6 @@ use bench_support::sysinfo::HostToolchainFacts;
 use std::{
     env,
     hint::black_box,
-    process::Command,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -200,16 +199,8 @@ struct Metadata {
 impl Metadata {
     fn gather() -> Self {
         let git_commit = command(&["git", "rev-parse", "HEAD"]);
-        let workspace_dirty = command_allow_empty(&["git", "status", "--porcelain"]).map_or_else(
-            || "unknown".to_owned(),
-            |value| {
-                if value.is_empty() {
-                    "false".to_owned()
-                } else {
-                    "true".to_owned()
-                }
-            },
-        );
+        let workspace_dirty =
+            workspace_dirty(command_allow_empty(&["git", "status", "--porcelain"]));
         let facts = HostToolchainFacts::gather();
         Self::from_facts(
             facts,
@@ -308,11 +299,21 @@ fn command(args: &[&str]) -> String {
 }
 
 fn command_allow_empty(args: &[&str]) -> Option<String> {
-    let output = Command::new(args[0]).args(&args[1..]).output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    Some(String::from_utf8(output.stdout).ok()?.trim().to_owned())
+    let (program, rest) = args.split_first()?;
+    bench_support::sysinfo::command_output(program, rest)
+}
+
+fn workspace_dirty(value: Option<String>) -> String {
+    value.map_or_else(
+        || "unknown".to_owned(),
+        |value| {
+            if value.trim().is_empty() {
+                "false".to_owned()
+            } else {
+                "true".to_owned()
+            }
+        },
+    )
 }
 
 fn json_string_array(values: &[String]) -> String {
@@ -351,7 +352,7 @@ fn parse_rounds() -> u8 {
 
 #[cfg(test)]
 mod tests {
-    use super::{Metadata, Round, escape, json_record, percentile_nearest_rank};
+    use super::{Metadata, Round, escape, json_record, percentile_nearest_rank, workspace_dirty};
     use bench_support::sysinfo::HostToolchainFacts;
     use std::env;
 
@@ -407,5 +408,43 @@ mod tests {
         );
         assert!(record.contains(&expected_metadata));
         assert!(record.contains("\"background_load_note\":\"quiet\",\"metadata_incomplete\":true,\"missing_metadata\":[\"logical_cores\"]"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn metadata_command_projection_preserves_empty_status_and_unknown_failures() {
+        assert_eq!(
+            super::command_allow_empty(&["/bin/sh", "-c", "true"]),
+            Some(String::new())
+        );
+        assert_eq!(
+            super::command_allow_empty(&["/bin/sh", "-c", "printf ' \\n\\t'"]),
+            Some(String::new())
+        );
+        assert_eq!(super::command(&["/bin/sh", "-c", "true"]), "unknown");
+        assert_eq!(
+            super::command(&["/bin/sh", "-c", "printf '  dirty  \\n'"]),
+            "dirty"
+        );
+        assert_eq!(
+            super::command_allow_empty(&["/bin/sh", "-c", "printf plausible; exit 7"]),
+            None
+        );
+        assert_eq!(
+            super::command_allow_empty(&["/definitely/missing/metadata-command"]),
+            None
+        );
+        assert_eq!(
+            super::command_allow_empty(&["/bin/sh", "-c", r"printf '\377'"]),
+            None
+        );
+    }
+
+    #[test]
+    fn workspace_dirty_projection_preserves_clean_dirty_and_unavailable_states() {
+        assert_eq!(workspace_dirty(Some(String::new())), "false");
+        assert_eq!(workspace_dirty(Some(" \n\t".to_owned())), "false");
+        assert_eq!(workspace_dirty(Some(" M changed-file".to_owned())), "true");
+        assert_eq!(workspace_dirty(None), "unknown");
     }
 }
