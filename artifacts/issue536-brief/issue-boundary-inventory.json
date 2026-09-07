@@ -1,0 +1,11 @@
+{
+  "local_numbered_specs": 257,
+  "remote_issues": 351,
+  "missing_remote_for_local": [],
+  "active534": {
+    "number": 534,
+    "state": "OPEN",
+    "title": "Avoid redundant gate detector gathers"
+  },
+  "rule": "Historical title decoration and stateless plan language are not automatic evidence of stale state; no historical entries rewritten."
+}
