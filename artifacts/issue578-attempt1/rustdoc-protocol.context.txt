@@ -1,0 +1,12 @@
+utc=2026-09-07T20:36:21Z
+cwd=/home/bl/misofm/engine-io5-delivery-frame-into
+head=5065515af4f44c860e40687513b419e3c808c9de
+upstream=origin/codex/io5-delivery-frame-into
+status=
+## codex/io5-delivery-frame-into...origin/codex/io5-delivery-frame-into
+?? artifacts/issue578-attempt1/
+source-sha256=
+9763f44b80866d0f6252d8982c8ecf9b4906f3de8f4b3ebc59016e028139553d  /home/bl/misofm/engine-io5-delivery-frame-into/crates/protocol/src/controller.rs
+f002cf28d0e8e03bb2b77c7fef910fa4c61dc64dc98be680ea13942c9860d06f  /home/bl/misofm/engine-io5-delivery-frame-into/crates/protocol/src/controller_delivery.rs
+609c48ab83fe13c573bcf66a43189f36e1decc13ac421cc09bca88265e4d448b  /home/bl/misofm/engine-io5-delivery-frame-into/crates/host-core/tests/scalar_point_endpoint.rs
+92db9698cc062bd5ccc0a90f0ee43f051d77ce7e52f785ce9718fae3f400b753  /home/bl/misofm/engine-io5-delivery-frame-into/Cargo.lock
