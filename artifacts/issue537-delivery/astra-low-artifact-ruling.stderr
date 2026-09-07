@@ -1,0 +1,1177 @@
+OpenAI Codex v0.153.4
+--------
+workdir: /home/bl/misofm/engine-multiband-detector-access
+model: gpt-6-astra
+provider: openai
+approval: never
+sandbox: danger-full-access
+reasoning effort: low
+reasoning summaries: none
+session id: 01a07a69-7ba0-7792-90e5-4a4dc6f9154a
+--------
+user
+Astra LOW read-only bounded artifact-pin scope decision for issue537. Do not edit files, run builds/tests, create agents, or mutate Git/GitHub. Return your COMPLETE review in final output; do not write the output report yourself (CLI captures final). Worktree /home/bl/misofm/engine-multiband-detector-access clean pushed e8c9c5f6, base375a86c. Read applicable AGENTS and numbered537 issue; consolidated attempt2 Astra medium PASS artifacts/issue537-attempt2-review/astra-medium-full.md. No production source changes since frozen13d0580b. Root native ABI /tmp/issue537-delivery/native-abi.{command.json,stdout,stderr,status} status0. Ordinary published builder /tmp/issue537-delivery/ordinary-artifact.* built successfully and failed1 solely artifact-pin mismatch expected e70a4311da3f053ea77fc0ec7ac00348d534dfb2919e05591fefed515988802d observed 1bc18ab8cfb3e2a3e5a0ebeda185a64551e8398870abb2f3581077da0dfd3a3f. Inspect actual source/capture/script and existing bounded precedent artifacts/issue534-delivery/astra-low-artifact-ruling.md if available in branch or /home/bl/misofm/engine-gate-detector-access. Rule whether root may checkpoint decision and authorize Luna xhigh to change ONLY hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256 to exact observed hash, preserving failure provenance, followed by ordinary verified builder (no bypass), static/resource26controls/hermetic/actual3browser mutations and matrix verification. No numerical/corpus/resource/policy/CI changes, no source acceptance reset, no speedup or published artifact success yet. On mismatch builder deletes temp and leaves output empty: observed hash is builder observation, not independently rehashed retained artifact. Inspect narrow evidence; no redundant broad audit. Return approval or concrete block and conditions.
+
+codex
+I’ll read the issue, review record, builder captures, and bounded precedent, then give a scope ruling without changing files or running checks.
+
+exec
+/bin/bash -lc "pwd; rg --files -g AGENTS.md -g '*537*' -g '*artifact*ruling*' -g '*artifact*.sha256' -g '*artifact*.sh' -g '*artifact*.py'" in /home/bl/misofm/engine-multiband-detector-access
+ succeeded in 0ms:
+/home/bl/misofm/engine-multiband-detector-access
+scripts/test-sdk-artifact-builder-output-contract.sh
+scripts/check-artifact-evidence-leak.sh
+scripts/test-artifact-evidence-leak.sh
+AGENTS.md
+hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256
+artifacts/issue492-host-diagnostic-projections/492-artifact-qualification.py
+artifacts/issue492-host-diagnostic-projections/astra-492-artifact-integration-ruling.md
+artifacts/issue511-integrated-qualification/511-artifact-qualification.py
+artifacts/issue511-integrated-qualification/astra-511-artifact-integration-ruling.md
+artifacts/issue511-integrated-qualification/511-artifact-consumer-resume.py
+artifacts/issue500-integrated-delivery/astra-500-artifact-integration-ruling.md
+artifacts/issue500-integrated-delivery/500-artifact-qualification.py
+artifacts/issue496-integrated-delivery/496-artifact-qualification.py
+artifacts/issue478-delivery/artifact-integration-ruling.md
+artifacts/issue496-integrated-delivery/astra-496-artifact-integration-ruling.md
+artifacts/issue532-delivery/verify-artifact-reuse.py
+artifacts/issue534-delivery/astra-low-artifact-ruling.md
+artifacts/issue534-delivery/astra-low-artifact-ruling.status
+artifacts/issue534-delivery/astra-low-artifact-ruling.command.json
+artifacts/issue534-delivery/astra-low-artifact-ruling.prompt.md
+artifacts/issue524-delivery/artifact-integration-ruling.md
+artifacts/issue496-luna-attempt1/496-luna1-libfull-1788675371492546345.meta
+artifacts/issue496-luna-attempt1/496-luna1-libfull-1788675371434060973.stdout
+artifacts/issue496-luna-attempt1/496-luna1-libfull-1788675371492546345.stdout
+artifacts/issue429-qualification/astra-429-artifact-qualification-ruling.md
+artifacts/issue463-integrated-delivery/463-artifact-qualification.py
+artifacts/issue496-luna-attempt1/496-luna1-libfull-1788675371434060973.meta
+artifacts/issue496-luna-attempt1/496-luna1-libfull-1788675371492546345.stderr
+artifacts/issue496-luna-attempt1/496-luna1-libfull-1788675371434060973.stderr
+artifacts/issue495-borrowed-binding-coverage/495-artifact-qualification.py
+artifacts/issue530-delivery/verify-artifact-reuse.py
+artifacts/issue485-scalar-error-propagation/astra-487-artifact-integration-ruling.md
+artifacts/issue495-borrowed-binding-coverage/astra-495-artifact-integration-ruling.md
+artifacts/issue475-integrated-delivery/astra-475-artifact-integration-ruling.md
+artifacts/issue490-total-route-mapping/astra-490-artifact-integration-ruling.md
+artifacts/issue475-integrated-delivery/475-artifact-qualification.py
+artifacts/issue528-delivery/verify-artifact-reuse.py
+artifacts/issue514-integrated-qualification/514-artifact-qualification.py
+artifacts/issue514-integrated-qualification/514-artifact-consumer-resume.py
+artifacts/issue514-integrated-qualification/astra-514-artifact-integration-ruling.md
+artifacts/issue498-direct-source-claims/astra-498-artifact-integration-ruling.md
+artifacts/issue498-direct-source-claims/498-artifact-qualification.py
+
+exec
+/bin/bash -lc 'ls /tmp/issue537-delivery; cat /home/bl/AGENTS.md /home/bl/misofm/AGENTS.md 2>/dev/null' in /home/bl/misofm/engine-multiband-detector-access
+ exited 1 in 0ms:
+artifact
+artifact-ruling-prompt.md
+astra-low-artifact-ruling.command.json
+astra-low-artifact-ruling.stderr
+astra-low-artifact-ruling.stdout
+capture.py
+native-abi.command.json
+native-abi.status
+native-abi.stderr
+native-abi.stdout
+ordinary-artifact.command.json
+ordinary-artifact.status
+ordinary-artifact.stderr
+ordinary-artifact.stdout
+review-fresh.py
+
+exec
+/bin/bash -lc "cat AGENTS.md; rg --files --hidden .github/ISSUE_SPECS | rg '537'; cat artifacts/issue537-attempt2-review/astra-medium-full.md artifacts/issue534-delivery/astra-low-artifact-ruling.md" in /home/bl/misofm/engine-multiband-detector-access
+ succeeded in 0ms:
+# Engine V1 agent guide
+
+## Mission
+
+`misofm/engine` is a greenfield, headless Rust music-production engine for agents that work between musicians and the engine.  Agents require a deliberately broad, granular semantic API; the runtime ABI remains narrow, stable, and efficient.  Build for native/cloud embedding, iOS, Android, and browser WebAssembly.  PCM is the engine output; delivery codecs live outside this repository.
+
+Never inspect, copy, benchmark against, or inherit an architecture from a legacy engine source.  A useful idea may be independently re-derived and justified, but this engine is not a port.
+
+## Product principles
+
+- Sound quality and DSP correctness are first-class release criteria, not marketing language.  Prefer academically documented methods and verify them with fixtures and listening tests.
+- Optimize ruthlessly but simply.  Ship a correct measurable implementation, record diminishing-return work as an issue, and reserve systematic optimization for the weekly performance pass.
+- Make realtime processing allocation-free.  Allocate, parse, compile plans, perform I/O, decode, and load effects only on control/worker threads.
+- Support arbitrary track counts constrained only by configured resources: never introduce a compiled `MAX_TRACKS`.
+- Use SIMD at macro and micro levels: Wasm `simd128` and AArch64 NEON four-lane `f32` banks, AVX2 eight-lane specializations, and scalar/tail fallback.  Native x86 is x86-64-v3: AVX2 and FMA are pinned at compile time and attested once at boot (issue #83, master plan D4), never dispatched at runtime.
+- Sessions are strict, versioned canonical JSON.  The control schema is expressive; session compilation is transactional.  Protocol mutations update the same typed session model and must be snapshot-able back to canonical JSON.
+- Every Cargo package under `crates/`, `hosts/`, `tools/` and `sidecars/` uses a short, unprefixed name -- no `miso-engine-` prefix (e.g. `crates/session`, `tools/audit`).  `[lib]`/`[[bin]]` identifiers equal the package name with hyphens turned to underscores, uniformly and without exception; the directory basename equals the package name exactly.  The render engine's foundation crate is named `engine` (`crates/engine`, lib `engine`) -- deliberately not `core`: a package literally named `core` silently shadows Rust's own sysroot `core` crate for every dependent (it compiles, then fails downstream with no diagnostic that explains itself, and collapses the prelude and the `derive` attribute outright in a `no_std` crate), and neither `::core::` nor `extern crate core as x` escapes it.  No package may be named `core`, `std`, `alloc`, `proc_macro` or `test` for the same reason (`scripts/check-workspace-policy.sh` gates this exactly).  This scheme replaced the repo's earlier `miso-engine-`-prefixed convention in full; `docs/rulings/prefix-strip-inventory.md` is the classification and the evidence, on the same model as issue #215's `docs/rulings/de-versioning-inventory.md`.  Wire tags, exported C-ABI symbols and other gate-pinned or sealed spellings (`miso_engine_v1_*`, `miso_engine_web_v1_*`, `miso_engine_effect_*_v1`, `miso_engine_graph_v1`) are contract identity, not crate-name decoration, and this rename does not touch them -- see the version-suffix rule below, which draws exactly this distinction.
+- A version suffix is contract identity, never decoration. Internal implementation names -- types, functions, constants, test oracles, kernels, stages, banks, records -- are **born unversioned**. Where a wire tag, schema, exported ABI symbol, gate-pinned spelling, or sealed contract genuinely needs a version, its prelaunch identity is `V1`/`_v1`; no live product surface may claim a later generation before launch. The judgment is about the **name's** visibility, not the payload's: a Rust struct whose bytes go on a wire but whose name never leaves the binary is unversioned. Issue #215 removed the internal prelaunch suffixes, and issue #313 reset live boundary identities to V1; `docs/rulings/de-versioning-inventory.md` records the earlier classification.
+
+## Approved audio architecture
+
+The realtime plane exclusively owns a preallocated `PreparedRenderPlan` at a caller-supplied explicit `u32` sample rate and render quantum.  Its graph, schedule, capacities, and parameter schema are structurally immutable while its preallocated DSP state is intentionally mutated by `render(&mut self, ...)`.  Render must perform **zero allocations/frees, locks, file/network I/O, logging, syscalls, structural plan mutation, or data-dependent unbounded calls**, with no exception: the native dependency-wave scheduler that once justified a single `Thread::unpark` per block has been removed, so render is syscall-free outright (see `docs/REALTIME_DEPENDENCY_POLICY.md`).  Every structural control-plane mutation produces and validates a replacement plan, then transfers ownership only at a documented block boundary.  The displaced plan goes to a bounded retirement queue and is reclaimed off the render thread; a full retirement queue defers the swap rather than dropping on render.
+
+Tracks are dual-mono: left and right have independent state and parameters.  A processor that links channels must expose its detector-link mode.  Cross-channel operation uses an explicit smoothed 2x2 matrix; it is never implicit “stereo.”  “Builtins” is an umbrella over fixed input and output sections.  The required chain is:
+
+`input -> polarity/trim/HPF/LPF -> SIMD rack 1 -> dynamic rack -> SIMD rack 2 -> fader/mute -> 2x2 matrix/pan -> routes`
+
+Meters may observe any boundary without changing signal flow.  Send taps are explicit stable enum values: input, post-input-builtins, post-SIMD1, post-dynamic, post-SIMD2/pre-fader, post-fader, and post-matrix.  Graphs are typed and acyclic; compilation has deterministic topological ordering/reductions and exact integer-sample plugin-delay compensation (PDC), including sends and sidechains.  Prepared effect latency is fixed, and bypass must preserve it.  Feedback is a future capability and must have an explicit positive-latency edge.
+
+Audio buffers are planar `f32`, banked AoSoA across tracks: at each sample, a vector contains the same dual-mono lane from four Wasm/NEON tracks or eight AVX2 tracks.  L and R use separate vectors and state.  A bank cohort shares an effect-program signature (slot types/order, quality, and compatible routing), while parameters/state remain per-track; absent slots are identity kernels and incompatible tracks form another cohort or take a documented scalar/dynamic fallback.  Scalar tails support every track count.  Base Wasm SIMD uses multiply plus add because fused multiply-add is not guaranteed; relaxed SIMD is optional and correctness must not depend on it.  Native and browser launch are both single render-thread. Preallocated deterministic dependency waves were built, qualified and then removed as production-unreachable; reintroducing multicore render requires a new issue that re-earns it, not a revival.
+
+Single-thread execution is the render model.  Should multicore render return, the standing rules are that workers write disjoint outputs and reduce in stable node-ID order, are prestarted, and cannot allocate, steal heap jobs, or make the render coordinator wait on an OS mutex.
+
+Sources stream just-in-time: native WAV/RF64 decode workers fill bounded SPSC PCM rings, seeks are generation-tagged, and underrun emits zero plus a counter.  Browser/mobile hosts provide decoded chunks to equivalent bounded rings.  Never load whole stems solely to render a session.  Launch-supported session/render rates are exactly 44.1, 48, 88.2, and 96 kHz; 176.4, 192, 352.8, and 384 kHz are extended compatibility/research evidence only, not host or release support.  There is no implicit SRC in this sprint; host-rate mismatch is rejected or made explicit in a later plan.
+
+## Effects and plugins
+
+The initial native effect library is EQ, compressor, gate/expander, de-esser, true-peak limiter, dynamic EQ, multiband compressor, antialiased saturator/clipper, transient shaper, and dual-mono/stereo delay.  Every effect exposes stable numeric parameter IDs, units, domains, mappings, defaults, automation rate, smoothing, state, ports/sidechains, link modes, latency, tail, quality modes, reset semantics, and safe NaN/denormal behavior.  A native effect may run track-locally in any rack.  Bank eligibility is decided by the effect's homogeneous bank kernel contract, never by which rack the session placed it in: a native effect that carries the contract banks in the dynamic rack exactly as it does in a SIMD rack, and one that does not carry it renders per node in a SIMD rack exactly as it does in the dynamic rack (issue #163 phase 1).  Banking regroups lanes; it never changes per-lane arithmetic, so a placement change must not move a rendered bit.
+
+Third-party effects are designed now but do not execute at launch.  Sessions identify them by a deterministic CIDv1 over a canonical package byte sequence; a CID identifies exact bytes, not trust, quality, or cross-CPU bit identity.  Resolution, download, signature policy and cache verification happen off render, with no installation or licensing-dongle dependency; a public repository/resolver is future product scope.  Third-party core Wasm has no WASI/syscalls, bounded memory/state/scratch, declared latency/tail, and is compiled/validated off the render thread.  It is permitted only in the dynamic rack, and it never banks anywhere: opaque per-instance Wasm supplies no homogeneous/fused SIMD bank kernel.  This is the one boundary rack placement does not decide either -- opacity disqualifies a bank wherever the effect sits, and the dynamic rack becoming a bank location does not relax it.  A future executor must run it on sandbox workers through a bounded, at-least-one-quantum latency pipeline; the callback never invokes a general-purpose Wasm runtime and uses deterministic latency-preserving bypass on faults or late blocks.  Promotion to native requires audit, licensing, conformance, sound-quality, and performance evidence.
+
+## Interfaces and transports
+
+Expose a broad semantic control model and a narrow C ABI.  The control protocol is versioned, binary, transport-neutral, request-id/revision aware, uses absolute sample-time parameter events, and never transports PCM.  High-rate automation may use bounded point batches or step/linear/exponential segments.  Queue saturation returns typed backpressure; commands are never silently lost, while explicitly noncritical telemetry may be coalesced or dropped with counters.  In-process calls and shared/ring interfaces serve embedded hosts; a local sidecar may use local IPC; binary WebSocket is optional only at cloud/browser network boundaries, never in a render path.
+
+## Realtime, quality, and research evidence
+
+Every effect issue and implementation note must state: equations/algorithm; coefficient and update rules; numerical and stability limits; latency and tail; units and smoothing; denormal/NaN behavior; primary/official citations; fixtures; objective tests; benchmarks; and listening evidence.  Cite concise paraphrases, not copied prose.  Start with the repo research corpus and primary/official material, including:
+
+- [RBJ Audio EQ Cookbook](https://webaudio.github.io/Audio-EQ-Cookbook/audio-eq-cookbook.html)
+- [Giannoulis, Massberg and Reiss, dynamic range compression](https://eecs.qmul.ac.uk/~josh/documents/2012/GiannoulisMassbergReiss-dynamicrangecompression-JAES2012.pdf)
+- [ITU-R BS.1770-5](https://www.itu.int/rec/R-REC-BS.1770-5-202311-I) and [EBU R 128](https://tech.ebu.ch/publications/r128)
+- Sophocles Orfanidis, *Introduction to Signal Processing*; P. P. Vaidyanathan, *Multirate Systems and Filter Banks*; and Julius O. Smith, *Spectral Audio Signal Processing*
+- AES17 measurement methods and peer-reviewed antiderivative/oversampled antialiasing literature for nonlinear processors
+- [Rust browser Wasm target](https://doc.rust-lang.org/rustc/platform-support/wasm32-unknown-unknown.html), [Web Audio](https://www.w3.org/TR/webaudio-1.1/), and [WebAssembly core spec](https://webassembly.github.io/spec/core/)
+- [Apple render-block guidance](https://developer.apple.com/documentation/audiotoolbox/auaudiounit/renderblock) and [Android low-latency guidance](https://developer.android.com/games/sdk/oboe/low-latency-audio)
+- [CIDv1 specification](https://specs.ipfs.tech/cid/), [RFC 6455](https://www.rfc-editor.org/rfc/rfc6455.html), and [VST3 latency contract](https://steinbergmedia.github.io/vst3_doc/vstinterfaces/classSteinberg_1_1Vst_1_1IAudioProcessor.html)
+
+The corpus must also compare official routing/channel/bus/latency/automation documentation for at least three current large-format hardware consoles and two production DAWs.  DiGiCo, SSL, Lawo, Avid, Logic, and Ableton are candidate families, not designs to copy.  Record common patterns, conflicting choices, and the measured reason for every V1 adoption.
+
+Use objective gates: allocation counters, deterministic fixtures, SIMD/scalar tolerances, PDC sample counts, memory ceilings independent of stem duration, cycle/CPU measurements, fault injection, and documented blinded listening evidence.  Subjective superlatives and unevidenced sound-quality claims are never acceptance gates.
+
+## Issue-first execution and review workflow
+
+Work only from a stateless issue body in `.github/ISSUE_SPECS/`; update its evidence/decision record as implementation learns facts.  Do not make cross-cutting architecture changes without a new or amended issue.
+
+Create local Git checkpoint commits frequently at coherent, compiling or otherwise explicitly documented milestones so work is recoverable.  Push those checkpoints promptly when the current delivery mode calls for checkpoint pushes.  When the user requests CI-conscious batching, checkpoint locally on one dedicated feature branch and defer upstream pushes until the coherent batch boundary; batching changes push frequency, never local commit frequency.  A failed attempt may be committed when its evidence is candid and the tree is a useful checkpoint.  Never commit `target/`, fuzz artifacts, secrets, or unrelated generated output; do not rewrite or discard another agent's/user's history.
+
+1. **Sol briefs** the issue and approves its scope, decision record, and objective gates.
+2. **Terra implements attempt 1** and attaches required evidence.
+3. **Sol adversarially reviews** the implementation against the issue, architecture, realtime rules, portability, and evidence.
+4. If needed, **Sol performs up to two implementation/revision attempts**, each re-reviewed adversarially by Sol.
+5. After three failed attempts total, stop.  Do not weaken gates to declare success.  Rescope/rebrief the issue, then restart the same workflow.
+
+Research delegation should use Terra agents where possible to preserve Sol review capacity.  The workflow records who supplied evidence but never substitutes authority for testable gates.
+
+### Delivery-control rules
+
+GitHub state is part of the deliverable, not optional bookkeeping.  The local spec and its matching
+GitHub issue must stay synchronized:
+
+- When a local numbered issue spec is created, create the matching GitHub issue in the same
+  checkpoint.  Confirm that its GitHub number and title match the local filename/index before
+  starting implementation.
+- After every pushed implementation checkpoint, add or refresh concise GitHub evidence when it
+  materially changes the issue's status.  Never let a completed issue exist only as a local
+  decision record.
+- As soon as Sol records PASS and the evidence commit is upstream, close the GitHub issue in that
+  same workflow.  Verify the remote state after closing it.  A task does not count as complete in
+  progress reporting until GitHub is synchronized.
+- At every issue boundary, compare `.github/ISSUE_SPECS/` with `gh issue list --state all` and fix
+  missing, stale, or incorrectly closed entries before starting the next issue.
+
+Recovery and throughput are also hard delivery requirements:
+
+- Keep at most one uncommitted implementation tranche in the shared worktree.  As soon as a tranche
+  compiles and its focused tests pass, its owner must pause; the root agent commits that exact-path
+  checkpoint before more implementation is layered onto it.  Push immediately in checkpoint-push
+  mode, or retain the commit locally on the active batch branch in CI-conscious batch mode.
+- Do not carry a coherent checkpoint across three agent handoffs or more than 30 minutes of active
+  work without committing it.  If the slice is not green, commit only when the failure is candidly
+  documented and the tree remains useful and buildable; otherwise reduce the slice until it is.
+- The root agent performs a status/commit/upstream audit at every checkpoint notification.  A new
+  implementation tranche must not start while an earlier coherent tranche is waiting to be
+  committed.  In checkpoint-push mode it must not wait for a required push either; in CI-conscious
+  batch mode a local checkpoint commit is sufficient until the declared batch boundary.
+- Limit active implementation WIP to one launch-critical feature issue.  Other agents may brief,
+  review, or work on genuinely independent bounded issues, but must not create overlapping edits or
+  make broad workspace gates unreliable.
+- Briefs must identify a smallest closable product slice and separate qualification/tooling work
+  before implementation.  If a feature cannot reasonably reach that slice in half a working day,
+  split it up front.  Fixture expansion, long audits, target matrices, listening, and benchmark
+  machinery must not keep an otherwise usable product slice open when they can be stateless
+  successor issues.
+- Report throughput as pushed, remotely synchronized capabilities.  After two consecutive
+  checkpoints without closing or materially advancing an issue, root must stop the current shape,
+  reduce scope, or create a bounded successor before authorizing more implementation.
+
+### CI-conscious batch delivery
+
+When the user requests fewer CI/CD invocations, use this delivery mode until they change it:
+
+- Create one local `codex/batch-*` feature branch from the synchronized default branch.  Keep
+  frequent exact-path local checkpoint commits, but do not push each checkpoint.
+- Do not open or refresh a pull request while the batch is still accumulating.  A pull-request
+  update is a CI event even when ordinary feature-branch pushes are ignored.
+- At a coherent batch boundary, run the proportional local gates once, push the batch branch at
+  most once if remote review is needed, then merge or fast-forward and push `main` once.  Do not
+  manufacture empty commits or force-push merely to obtain another CI run.
+- GitHub issue evidence may be prepared locally during the batch, but do not claim remote
+  synchronization or close an issue until its evidence commit is actually upstream.  Synchronize
+  all completed issue bodies/states immediately after the single batch push.
+- `.github/workflows/qualification.yml` is the only required status check on `main` (design #359;
+  its `verdict` job's own `name:` is `qualification`).  It ignores ordinary feature-branch pushes,
+  runs for `main` pushes and pull requests targeting `main`, and cancels superseded pull-request
+  runs for the same ref (never a `main` push, so a superseded push cannot starve its own
+  `rust-cache` saves).  It carries no `paths:`/`paths-ignore:` filter on any trigger -- a required
+  workflow that a path filter can skip leaves that PR's required context pending forever -- so
+  every leaf job is instead gated by its own router's `route` output, and the verdict enforces
+  that every job's result matches a static expectation table.
+- A job that cannot fail a merge does not belong on `qualification.yml`.  `fuzz.yml` and
+  `nightly.yml` are the non-required workflows: `fuzz.yml` is a paths-filtered per-PR workflow for
+  the two bounded fuzz jobs, and `nightly.yml` carries the jobs that gate nothing at all (the
+  non-blocking vectorization report, the descriptive benchmarks, the release-workspace link proof)
+  plus the deep fuzzing and math sweeps the per-PR budget cannot afford.  A check that stops
+  reporting on some pull requests must be removed from `main`'s required status checks first, or
+  every pull request that skips it stays permanently pending.
+
+Keep feature issues small enough to ship.  A feature issue owns the minimum implementation and
+evidence needed to prove its product contract; generic harness hardening, artifact promotion,
+extended compatibility research, and human scheduling belong in separate stateless issues.  Split
+the work before implementation when any of these are true:
+
+- the brief combines more than one independently useful product outcome;
+- new review findings require a second benchmark framework, a second large fixture corpus, or an
+  unrelated host/tooling subsystem;
+- the correction would materially expand the issue beyond its original crates or dependency
+  boundary; or
+- a benchmark-runner defect remains after one bounded correction.
+
+The three-attempt rule is a hard delivery stop, not permission for an issue to consume unlimited
+sub-rounds.  Each attempt gets one coherent implementation pass and one adversarial verdict.
+Progress-only agent turns do not create extra attempts, but they must be consolidated or reassigned
+when they stop producing commit-ready checkpoints.  After attempt three fails, preserve evidence,
+split or rescope once, and move to the newly bounded issue; never perform a disguised fourth retry.
+
+Benchmarks are descriptive during feature development.  Freeze the workload and validator before
+timing, run exactly one invocation with one warmup and two measured rounds, and do not tune or
+retry.  Benchmark infrastructure must preflight arguments, schema, output persistence, shell exit
+semantics, and overwrite refusal without launching the timed workload.  If post-workload tooling
+fails, preserve the raw output, record the failure, and move runner repair/promotion to a tooling
+issue rather than blocking unrelated engine implementation.  Do not optimize merely to improve a
+descriptive number; open a weekly optimization issue unless a named release budget is actually
+missed.
+
+An effect-optimization loop exits on its own terms and reports on the floor's.  The two-stalled-
+rounds circuit breaker stands, and the exit report must state, per effect, the measured
+`isolated_cycles_per_lane_sample` from a console record, the derived class-A floor, the residual
+gap between them, and a named reason for that gap; "not investigated" is a reason and "diminishing
+returns" is not.  A gap attributable to the algorithm rather than the implementation is class B: it
+is flagged for owner ruling and never chased unilaterally, and no projected win may be quoted for a
+change nobody has ruled on.  The floors, their derivation and the clause in full are
+`docs/rulings/effect-floor-accounting.md`.
+
+Prefer a working vertical slice over exhaustive evidence scaffolding that delays downstream
+features.  Launch-critical correctness, realtime safety, deterministic behavior, target builds,
+and academically grounded DSP remain mandatory; additional matrix expansion should be recorded as
+a follow-up once representative adversarial gates cover the frozen contract.  Report progress using
+closed GitHub issues and deployable capabilities, not local file counts or unpushed evidence.
+
+## Scope boundaries for this sprint
+
+Deliver a mixing/mastering engine, session compiler, effect foundation, PCM runner, host adapters, streaming, and control foundation.  Do not deliver a timeline editor, human-oriented DAW UI, delivery codecs, unlimited in-memory stem cache, implicit feedback graph, third-party Wasm execution before its post-launch issue, or a general remote audio-streaming protocol.
+
+- **The acked-batch question**: v1's worst correctness bug was a fully validated, *acked* event batch silently dropped at queue overflow while the ledger advanced. Our #139/#140 admission already encodes the lesson (validate-everything-then-admit-atomically; ack carries application sample); keep it as the review question for every future queue: *can an ack ever precede a drop?*
+- **The ceremony boundary**: the legacy engine drowned in evidence (924 record files, a comment-digest ledger, `Cargo.lock` SHA pinned inside a test) while its headline number stayed fiction — every byte-gate green. The next abandoned attempt spent ~50 PRs on certification cadence and never shipped an effect. Gates must discriminate *claims*; byte-pinning prose is cost without evidence. Adopt the useful artifacts of both predecessors, never their pace.
+.github/ISSUE_SPECS/537-uniform-multiband-detector-access.md
+**PASS — consolidated adversarial attempt-2 verification for #537 (Astra medium).**
+
+Reviewed clean, pushed `5c0c387501c05b9da382f1b60ec06a3113bf40b9` against live main `375a86c280ac5be83004dc78dc25541bfa6371ba`. GitHub #537 is OPEN with matching number, title and byte-exact body. Source remains frozen at `13d0580b`; all three supplied final hashes match. Attempt 1 remains FAIL and counted; this is Luna xhigh attempt 2, with no attempt relabeling.
+
+No blocking finding remains within the frozen implementation scope:
+
+- [Production access](/home/bl/misofm/engine-multiband-detector-access/crates/multiband-compressor/src/lib.rs:939) retains the old ragged indexing and safe lane load. [Classification](/home/bl/misofm/engine-multiband-detector-access/crates/multiband-compressor/src/lib.rs:1058) is transient, per channel, outside the frame loop, over the W offsets matching L::WIDTH; its result serves both bands. Ring writes precede detector reads. Arithmetic/link order, state/layout/resources, restore/reset logic, public API and dependencies are unchanged. Test instrumentation is cfg(test)-only.
+- [Executed-arm observation](/home/bl/misofm/engine-multiband-detector-access/crates/multiband-compressor/src/lib.rs:916) now records returned words inside each arm using fixed-capacity thread-local storage. The independent old-index oracle distinguishes rows/lanes, including signed zeros; the actual render witness checks four separately seeded channel/band rings and both mixed directions. [Word assertions precede mechanism assertions](/home/bl/misofm/engine-multiband-detector-access/crates/multiband-compressor/src/lib.rs:2255). The sole attempt-2 fallback-only mutation reconstructs to captured SHA `c970cf23…f680861`: status101, expected executed-uniform count12 versus actual0, after word checks. Restored SHA `af277655…e1121fa` passed; later lib changes are formatting, not altered mechanism or assertions. Attempt-1 failure evidence remains retained.
+- [Public identities](/home/bl/misofm/engine-multiband-detector-access/crates/multiband-compressor/tests/identity.rs:379) cover all three links and scalar/W4/W8, uniform/unequal/mixed profiles, ramps and settled rendering, exact PCM/full state/reports and populated rings. [Bidirectional populated restoration](/home/bl/misofm/engine-multiband-detector-access/crates/multiband-compressor/tests/identity.rs:668) continues through4096 frames; scalar full-reset comparison and existing bank reset/bypass regressions are retained. [Allocation liveness](/home/bl/misofm/engine-multiband-detector-access/crates/multiband-compressor/tests/no_alloc_render.rs:142) proves own-thread allocate/free detection; prepared scalar and uniform/ragged bank paths require zero events.
+- Native W8 classification (selected ASM5912 onward) produces per-channel flags before the frame loop. ASM6317–6366 selects guarded contiguous loads from detector ring bases; LBB40_176 retains per-lane fallback. Supported host-web SIMD4 func813 independently compares offsets1264–1276 and2560–2572 before its loop (selected lines2228–2274); flags5/9 select detector arms. Wrapped row indexing feeds guarded v128 loads from low/high bases1280/1288 and2576/2584 (2701–2714,3011–3024); fallback retains scalar/lane insertion (2724–2779,3034 onward). These are detector loads, not coefficient loads. Scalar-module func761 and SIMD-module scalar func811 retain bounded single-lane detector reads using offsets372/708. W8 Wasm is not credited as supported dispatch.
+
+Recorded final checks: full suite42 passed/0 failed/2 descriptive ignored; release private oracle1, identity6 and allocator3 passed; strict Clippy, format and four policy checks passed. Final capture source hashes match. All99 attempt-2 and40 lowering capture files match raw copies; native/Wasm selected ranges, sizes and hashes match originals, including linked module identities. The immutable corpus passed139 cases/349 comparisons per native/scalar/simd leg; it proves arithmetic regression only, not ring composition. No checks were rerun.
+
+This PASS accepts the bounded source/evidence slice, not completed delivery. Published-artifact/browser qualification, exact PR head/current-base/required-CI review, merge and remote closure remain subsequent gates. Inspection modules are not published artifact identities. No speedup claim, benchmark claim or credit for already-CSE’d low/high index calculations is made. No repository edits, builds, tests, mutations, Git/GitHub writes or agents were performed; only this requested report was written outside the worktree.
+**Approve the bounded artifact-pin update**, following the existing #475 precedent.
+
+Verified clean HEAD `406303595ca2a15173984957a16ff6080bb9fd9a`, matching captured source hashes and unchanged DSP/build source since source PASS. Native shared/static ABI completed with status0. The ordinary builder compiled successfully, then exited1 solely at the pin comparison:
+
+- Existing: `04f938f667180d0e7b972e1cc2236af3a5d5e3f7b73d1ed503dde72e83aa9bce`
+- Builder-observed: `e70a4311da3f053ea77fc0ec7ac00348d534dfb2919e05591fefed515988802d`
+
+Root may checkpoint this ruling, then authorize Luna to update only [the artifact pin](/home/bl/misofm/engine-gate-detector-access/hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256) to that exact observed hash, with retained provenance.
+
+Conditions:
+
+1. Preserve original commands, source identities, output and failure status. The builder hashes its temporary module before comparison; failure leaves the output directory empty and deletes the temporary build. This is a recorded builder observation, not an independently rehashed retained artifact.
+2. Run the ordinary verified builder without repin bypass on unchanged DSP/build source. It must reproduce the pinned hash and publish the actual output.
+3. Complete existing static/object, resource checks with 26 red controls, hermetic tests, actual Chromium/Firefox/WebKit qualification with mutations, and matrix verification.
+4. Generated candidate/hash records must identify the actual qualified source/output. No numerical, corpus, resource-expectation, policy, CI or matrix changes are authorized. Any further discrepancy requires concrete assessment.
+
+Source PASS remains unchanged. This ruling grants neither passing artifact qualification nor PR/merge approval. Review was read-only; the worktree remains clean.
+exec
+/bin/bash -lc "cat /tmp/issue537-delivery/native-abi.{command.json,stdout,stderr,status} /tmp/issue537-delivery/ordinary-artifact.{command.json,stdout,stderr,status} /tmp/issue537-delivery/capture.py; rg -n 'artifact.sha256|artifact-pin|sha256|mktemp|trap' scripts/build* hosts/host-web/scripts/* 2>/dev/null; git status --short; git diff --stat 13d0580b HEAD" in /home/bl/misofm/engine-multiband-detector-access
+ succeeded in 0ms:
+{
+  "argv": [
+    "env",
+    "CARGO_TARGET_DIR=/tmp/issue537-delivery-native-target",
+    "MISO_ENGINE_CAPI_LIBRARY=/tmp/issue537-delivery-native-target/release/libcapi.so",
+    "MISO_ENGINE_CAPI_STATIC_LIBRARY=/tmp/issue537-delivery-native-target/release/libcapi.a",
+    "bash",
+    "scripts/check-capi-abi.sh",
+    "."
+  ],
+  "cwd": "/home/bl/misofm/engine-multiband-detector-access",
+  "head": "e8c9c5f603c3815d76efe72d2a4092e40dc9b62d",
+  "branch": "codex/multiband-detector-access",
+  "status": "",
+  "env": {
+    "PATH": "/home/bl/.cargo/bin:/home/bl/.codex/packages/standalone/releases/0.153.4-x86_64-unknown-linux-musl/codex-path:/home/bl/.cargo/bin:/home/bl/.local/bin:/home/bl/.codex1/tmp/arg0/codex-arg032GUSu:/home/bl/.codex/packages/standalone/releases/0.153.4-x86_64-unknown-linux-musl/codex-path:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin",
+    "RUSTFLAGS": null,
+    "CARGO_TARGET_DIR": "/tmp/issue537-delivery-target"
+  },
+  "source": {
+    "crates/multiband-compressor/src/lib.rs": {
+      "sha256": "efd7523a19b5355b53cdd8620a0abc75161a7d39440d54c286c288e5512e09f2",
+      "git_blob": "ebe08f5c6b013d56a74203729ffee64f147b3c6e"
+    },
+    "crates/multiband-compressor/tests/identity.rs": {
+      "sha256": "e27bb19cb841f7101bf7a8c31d23f500021bf93dd6f4b564828bdeeaa7dee526",
+      "git_blob": "9b2bfb4459634a193f8e4267fef49268d869a03c"
+    },
+    "crates/multiband-compressor/tests/no_alloc_render.rs": {
+      "sha256": "04033e9535455d151de254f69101a3062b45e9e5cee87479b5e7763bf4e6be4e",
+      "git_blob": "984d38c45915460d144eeac76e860039a98ac964"
+    },
+    "hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256": {
+      "sha256": "c90631eb21a5539987b8b9fb5b8920963f74ccb3416fcd7ba2cc5a440cc8e76b",
+      "git_blob": "c256a2ffbc07464d39a7091ac89d6cc1894a233e"
+    },
+    "hosts/host-web/qualification/package-lock.json": {
+      "sha256": "37bfedc97da4e4377a45a0d88f2351263b77e160cde109620d23eaa9952ab069",
+      "git_blob": "f6b765afae41a3cc8f88bd579c8dd6291f3b1bb3"
+    },
+    "hosts/host-web/qualification/results.json": {
+      "sha256": "6ab8e8611dc9ce65f62094f641ebb7571434e35cb8798b9c0f8f4bd4ad2c4a47",
+      "git_blob": "553e9ad4f8fa3ab324a1e36c4bfdd940d036002d"
+    },
+    "hosts/host-web/BROWSER_DEPLOYMENT_MATRIX.md": {
+      "sha256": "f9e9eaf589f215d76e58ac79c1a92d7f5a621fe2a5e3346d5911991ad9c60a36",
+      "git_blob": "da8ba02314db704457a07c8be0ed2472a5f5f790"
+    },
+    "Cargo.lock": {
+      "sha256": "ef85bfaac8b4df80b651fa89e5e9a67bfef141b58076bdaac513044161b0b853",
+      "git_blob": "1b74fb016a04a090d2d1d37ea15fd2917fb85491"
+    },
+    ".cargo/config.toml": {
+      "sha256": "03b0fbd88c069abb0a8fbdca5921ba6a9899298291fe087977b509a29ebb7d0e",
+      "git_blob": "de2180972c37406f1f16913901bd1d4fc2e660e3"
+    },
+    "rust-toolchain.toml": {
+      "sha256": "85a45cac04c296adac076f8f0609ca8f4c8ca658957f1f24cbd1e054b6cc44e0",
+      "git_blob": "6b6739839ba23906921aeb4c268d275dcc459fb6"
+    }
+  }
+}
+C ABI check: ok (x86_64-unknown-linux-gnu, shared and static linkage)
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+   Compiling bytemuck v1.25.2
+   Compiling engine v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/engine)
+   Compiling version_check v0.9.5
+   Compiling lexical-util v1.0.7
+   Compiling proc-macro2 v1.0.107
+   Compiling cfg-if v1.0.4
+   Compiling quote v1.0.47
+   Compiling libc v0.2.189
+   Compiling unicode-ident v1.0.24
+   Compiling syn v1.0.109
+   Compiling once_cell v1.21.4
+   Compiling autocfg v1.5.1
+   Compiling typenum v1.20.1
+   Compiling smallvec v1.15.2
+   Compiling decoded-char v0.1.1
+   Compiling utf8-decode v1.0.1
+   Compiling locspan v0.8.2
+   Compiling cpufeatures v0.3.0
+   Compiling safe_arch v1.2.0
+   Compiling proc-macro-error-attr v1.0.4
+   Compiling ahash v0.7.8
+   Compiling proc-macro-error v1.0.4
+   Compiling smallstr v0.3.1
+   Compiling indexmap v1.9.3
+   Compiling lexical-parse-integer v1.0.6
+   Compiling lexical-write-integer v1.0.6
+   Compiling wide v1.6.1
+   Compiling hybrid-array v0.4.14
+   Compiling lexical-parse-float v1.0.6
+   Compiling lexical-write-float v1.0.6
+   Compiling getrandom v0.2.17
+   Compiling lexical-core v1.0.6
+   Compiling lexical v7.0.5
+   Compiling block-buffer v0.12.1
+   Compiling crypto-common v0.2.2
+   Compiling json-number v0.4.10
+   Compiling hashbrown v0.12.3
+   Compiling digest v0.11.3
+   Compiling sha2 v0.11.0
+   Compiling locspan-derive v0.6.0
+   Compiling json-syntax v0.12.5
+   Compiling session v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/session)
+   Compiling protocol v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/protocol)
+   Compiling lane v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/lane)
+   Compiling math v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/math)
+   Compiling effect-contract v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/effect-contract)
+   Compiling effect-runtime v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/effect-runtime)
+   Compiling rack v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/rack)
+   Compiling transient-shaper v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/transient-shaper)
+   Compiling builtins v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/builtins)
+   Compiling gate-expander v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/gate-expander)
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/compressor)
+   Compiling multiband-compressor v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/multiband-compressor)
+   Compiling delay v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/delay)
+   Compiling parametric-eq v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/parametric-eq)
+   Compiling soft-clip v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/soft-clip)
+   Compiling true-peak-limiter v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/true-peak-limiter)
+   Compiling graph v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/graph)
+   Compiling rack-compiler v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/rack-compiler)
+   Compiling builtins-compiler v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/builtins-compiler)
+   Compiling source v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/source)
+   Compiling effect-package v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/effect-package)
+   Compiling effect-compiler v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/effect-compiler)
+   Compiling graph-compiler v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/graph-compiler)
+   Compiling host-core v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/host-core)
+   Compiling capi v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/capi)
+    Finished `release` profile [optimized + debuginfo] target(s) in 20.44s
+0
+{
+  "argv": [
+    "env",
+    "CARGO_TARGET_DIR=/tmp/issue537-delivery-web-target",
+    "bash",
+    "scripts/build-web-audioworklet.sh",
+    "/tmp/issue537-delivery/artifact"
+  ],
+  "cwd": "/home/bl/misofm/engine-multiband-detector-access",
+  "head": "e8c9c5f603c3815d76efe72d2a4092e40dc9b62d",
+  "branch": "codex/multiband-detector-access",
+  "status": "",
+  "env": {
+    "PATH": "/home/bl/.cargo/bin:/home/bl/.codex/packages/standalone/releases/0.153.4-x86_64-unknown-linux-musl/codex-path:/home/bl/.cargo/bin:/home/bl/.local/bin:/home/bl/.codex1/tmp/arg0/codex-arg032GUSu:/home/bl/.codex/packages/standalone/releases/0.153.4-x86_64-unknown-linux-musl/codex-path:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin",
+    "RUSTFLAGS": null,
+    "CARGO_TARGET_DIR": "/tmp/issue537-delivery-target"
+  },
+  "source": {
+    "crates/multiband-compressor/src/lib.rs": {
+      "sha256": "efd7523a19b5355b53cdd8620a0abc75161a7d39440d54c286c288e5512e09f2",
+      "git_blob": "ebe08f5c6b013d56a74203729ffee64f147b3c6e"
+    },
+    "crates/multiband-compressor/tests/identity.rs": {
+      "sha256": "e27bb19cb841f7101bf7a8c31d23f500021bf93dd6f4b564828bdeeaa7dee526",
+      "git_blob": "9b2bfb4459634a193f8e4267fef49268d869a03c"
+    },
+    "crates/multiband-compressor/tests/no_alloc_render.rs": {
+      "sha256": "04033e9535455d151de254f69101a3062b45e9e5cee87479b5e7763bf4e6be4e",
+      "git_blob": "984d38c45915460d144eeac76e860039a98ac964"
+    },
+    "hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256": {
+      "sha256": "c90631eb21a5539987b8b9fb5b8920963f74ccb3416fcd7ba2cc5a440cc8e76b",
+      "git_blob": "c256a2ffbc07464d39a7091ac89d6cc1894a233e"
+    },
+    "hosts/host-web/qualification/package-lock.json": {
+      "sha256": "37bfedc97da4e4377a45a0d88f2351263b77e160cde109620d23eaa9952ab069",
+      "git_blob": "f6b765afae41a3cc8f88bd579c8dd6291f3b1bb3"
+    },
+    "hosts/host-web/qualification/results.json": {
+      "sha256": "6ab8e8611dc9ce65f62094f641ebb7571434e35cb8798b9c0f8f4bd4ad2c4a47",
+      "git_blob": "553e9ad4f8fa3ab324a1e36c4bfdd940d036002d"
+    },
+    "hosts/host-web/BROWSER_DEPLOYMENT_MATRIX.md": {
+      "sha256": "f9e9eaf589f215d76e58ac79c1a92d7f5a621fe2a5e3346d5911991ad9c60a36",
+      "git_blob": "da8ba02314db704457a07c8be0ed2472a5f5f790"
+    },
+    "Cargo.lock": {
+      "sha256": "ef85bfaac8b4df80b651fa89e5e9a67bfef141b58076bdaac513044161b0b853",
+      "git_blob": "1b74fb016a04a090d2d1d37ea15fd2917fb85491"
+    },
+    ".cargo/config.toml": {
+      "sha256": "03b0fbd88c069abb0a8fbdca5921ba6a9899298291fe087977b509a29ebb7d0e",
+      "git_blob": "de2180972c37406f1f16913901bd1d4fc2e660e3"
+    },
+    "rust-toolchain.toml": {
+      "sha256": "85a45cac04c296adac076f8f0609ca8f4c8ca658957f1f24cbd1e054b6cc44e0",
+      "git_blob": "6b6739839ba23906921aeb4c268d275dcc459fb6"
+    }
+  }
+}
+    Blocking waiting for file lock on package cache
+   Compiling bytemuck v1.25.2
+   Compiling engine v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/engine)
+   Compiling version_check v0.9.5
+   Compiling lexical-util v1.0.7
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.47
+   Compiling syn v1.0.109
+   Compiling typenum v1.20.1
+   Compiling autocfg v1.5.1
+   Compiling once_cell v1.21.4
+   Compiling smallvec v1.15.2
+   Compiling decoded-char v0.1.1
+   Compiling locspan v0.8.2
+   Compiling utf8-decode v1.0.1
+   Compiling cfg-if v1.0.4
+   Compiling wide v1.6.1
+   Compiling smallstr v0.3.1
+   Compiling proc-macro-error-attr v1.0.4
+   Compiling ahash v0.7.8
+   Compiling proc-macro-error v1.0.4
+   Compiling indexmap v1.9.3
+   Compiling hashbrown v0.12.3
+   Compiling lexical-parse-integer v1.0.6
+   Compiling lexical-write-integer v1.0.6
+   Compiling lexical-parse-float v1.0.6
+   Compiling hybrid-array v0.4.14
+   Compiling lexical-write-float v1.0.6
+   Compiling lexical-core v1.0.6
+   Compiling lexical v7.0.5
+   Compiling block-buffer v0.12.1
+   Compiling crypto-common v0.2.2
+   Compiling json-number v0.4.10
+   Compiling digest v0.11.3
+   Compiling sha2 v0.11.0
+   Compiling locspan-derive v0.6.0
+   Compiling json-syntax v0.12.5
+   Compiling session v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/session)
+   Compiling lane v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/lane)
+   Compiling math v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/math)
+   Compiling effect-contract v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/effect-contract)
+   Compiling effect-runtime v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/effect-runtime)
+   Compiling rack v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/rack)
+   Compiling true-peak-limiter v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/true-peak-limiter)
+   Compiling parametric-eq v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/parametric-eq)
+   Compiling transient-shaper v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/transient-shaper)
+   Compiling delay v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/delay)
+   Compiling gate-expander v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/gate-expander)
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/compressor)
+   Compiling multiband-compressor v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/multiband-compressor)
+   Compiling builtins v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/builtins)
+   Compiling soft-clip v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/soft-clip)
+   Compiling graph v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/graph)
+   Compiling rack-compiler v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/rack-compiler)
+   Compiling builtins-compiler v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/builtins-compiler)
+   Compiling source v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/source)
+   Compiling effect-package v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/effect-package)
+   Compiling effect-compiler v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/effect-compiler)
+   Compiling graph-compiler v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/graph-compiler)
+   Compiling host-core v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/crates/host-core)
+   Compiling host-web v0.1.0 (/home/bl/misofm/engine-multiband-detector-access/hosts/host-web)
+    Finished `release` profile [optimized + debuginfo] target(s) in 18.43s
+AudioWorklet artifact pin mismatch: expected=e70a4311da3f053ea77fc0ec7ac00348d534dfb2919e05591fefed515988802d observed=1bc18ab8cfb3e2a3e5a0ebeda185a64551e8398870abb2f3581077da0dfd3a3f
+1
+from pathlib import Path
+import hashlib
+import json
+import os
+import subprocess
+import sys
+
+label = sys.argv[1]
+argv = sys.argv[2:]
+assert label and all(character.isalnum() or character == "-" for character in label)
+assert argv
+root = Path("/home/bl/misofm/engine-multiband-detector-access")
+prefix = Path("/tmp/issue537-delivery") / label
+prefix.parent.mkdir(parents=True, exist_ok=True)
+paths = [
+    "crates/multiband-compressor/src/lib.rs",
+    "crates/multiband-compressor/tests/identity.rs",
+    "crates/multiband-compressor/tests/no_alloc_render.rs",
+    "hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256",
+    "hosts/host-web/qualification/package-lock.json",
+    "hosts/host-web/qualification/results.json",
+    "hosts/host-web/BROWSER_DEPLOYMENT_MATRIX.md",
+    "Cargo.lock",
+    ".cargo/config.toml",
+    "rust-toolchain.toml",
+]
+paths = [path for path in paths if (root / path).exists()]
+environment = os.environ.copy()
+environment["PATH"] = "/home/bl/.cargo/bin:" + environment.get("PATH", "")
+environment["CARGO_TARGET_DIR"] = "/tmp/issue537-delivery-target"
+metadata = {
+    "argv": argv,
+    "cwd": str(root),
+    "head": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip(),
+    "branch": subprocess.check_output(["git", "branch", "--show-current"], cwd=root, text=True).strip(),
+    "status": subprocess.check_output(["git", "status", "--porcelain=v1"], cwd=root, text=True),
+    "env": {key: environment.get(key) for key in ["PATH", "RUSTFLAGS", "CARGO_TARGET_DIR"]},
+    "source": {
+        path: {
+            "sha256": hashlib.sha256((root / path).read_bytes()).hexdigest(),
+            "git_blob": subprocess.check_output(["git", "hash-object", path], cwd=root, text=True).strip(),
+        }
+        for path in paths
+    },
+}
+with prefix.with_suffix(".command.json").open("x") as command_file:
+    json.dump(metadata, command_file, indent=2)
+    command_file.write("\n")
+with prefix.with_suffix(".stdout").open("xb") as stdout_file, prefix.with_suffix(".stderr").open("xb") as stderr_file:
+    result = subprocess.run(argv, cwd=root, env=environment, stdout=stdout_file, stderr=stderr_file, check=False)
+with prefix.with_suffix(".status").open("x") as status_file:
+    status_file.write(f"{result.returncode}\n")
+print(label, result.returncode, flush=True)
+sys.exit(result.returncode)
+scripts/build-web-audioworklet.sh:20:simd_target=$(mktemp -d)
+scripts/build-web-audioworklet.sh:24:trap cleanup EXIT
+scripts/build-web-audioworklet.sh:65:observed=$(sha256sum "$artifact" | awk '{print $1}')
+scripts/build-web-audioworklet.sh:66:pin_file="$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256"
+ .../537-uniform-multiband-detector-access.md       |    30 +-
+ artifacts/issue537-attempt2-review/README.md       |     1 +
+ .../issue537-attempt2-review/astra-medium-full.md  |    14 +
+ .../astra-medium.command.json                      |    21 +
+ artifacts/issue537-attempt2-review/astra-medium.md |     7 +
+ .../issue537-attempt2-review/astra-medium.status   |     1 +
+ .../issue537-attempt2-review/astra-medium.stderr   |  5313 ++++
+ .../issue537-attempt2-review/astra-medium.stdout   |     7 +
+ artifacts/issue537-attempt2-review/prompt.md       |     4 +
+ artifacts/issue537-candidate-lowering/README.md    |     9 +
+ artifacts/issue537-candidate-lowering/capture.py   |    51 +
+ .../decode-scalar.command.json                     |    46 +
+ .../decode-scalar.status                           |     1 +
+ .../decode-scalar.stderr                           |     0
+ .../decode-simd128.command.json                    |    46 +
+ .../decode-simd128.status                          |     1 +
+ .../decode-simd128.stderr                          |     0
+ .../decoder-version.command.json                   |    45 +
+ .../decoder-version.status                         |     1 +
+ .../decoder-version.stderr                         |     0
+ .../decoder-version.stdout                         |     1 +
+ .../issue537-candidate-lowering/extract-native.py  |    39 +
+ .../host-web-scalar.command.json                   |    54 +
+ .../host-web-scalar.status                         |     1 +
+ .../host-web-scalar.stderr                         |    63 +
+ .../host-web-scalar.stdout                         |     0
+ .../host-web-simd128.command.json                  |    54 +
+ .../host-web-simd128.status                        |     1 +
+ .../host-web-simd128.stderr                        |    62 +
+ .../host-web-simd128.stdout                        |     0
+ .../metadata-scalar.command.json                   |    46 +
+ .../metadata-scalar.status                         |     1 +
+ .../metadata-scalar.stderr                         |     0
+ .../metadata-simd128.command.json                  |    46 +
+ .../metadata-simd128.status                        |     1 +
+ .../metadata-simd128.stderr                        |     0
+ .../native-candidate.command.json                  |    54 +
+ .../native-candidate.status                        |     1 +
+ .../native-candidate.stderr                        |    11 +
+ .../native-candidate.stdout                        |     0
+ .../native-selected.command.json                   |    45 +
+ .../native-selected.status                         |     1 +
+ .../native-selected.stderr                         |     0
+ .../native-selected.stdout                         |     7 +
+ .../native-selected/manifest.json                  |    84 +
+ .../native-selected/process-bank-w4.ll             | 12076 +++++++++
+ .../native-selected/process-bank-w4.s              | 14560 +++++++++++
+ .../native-selected/process-bank-w8.ll             | 16487 +++++++++++++
+ .../native-selected/process-bank-w8.s              | 21391 ++++++++++++++++
+ .../native-selected/process-scalar.ll              |  7050 ++++++
+ .../native-selected/process-scalar.s               | 10443 ++++++++
+ .../original-output-identities.json                |    34 +
+ .../production-wasm-identity.json                  |    48 +
+ .../rustc-version.command.json                     |    45 +
+ .../rustc-version.status                           |     1 +
+ .../rustc-version.stderr                           |     0
+ .../rustc-version.stdout                           |     7 +
+ .../scalar-prepared-multiband-func-761.wat.txt     | 13129 ++++++++++
+ .../select-production-wasm.command.json            |    45 +
+ .../select-production-wasm.py                      |    27 +
+ .../select-production-wasm.status                  |     1 +
+ .../select-production-wasm.stderr                  |     0
+ .../select-production-wasm.stdout                  |     3 +
+ .../simd128-prepared-multiband-func-811.wat.txt    | 11393 +++++++++
+ .../simd128-prepared-multiband-func-813.wat.txt    | 24248 +++++++++++++++++++
+ artifacts/issue537-luna-attempt2/final-gates.md    |     6 +
+ .../issue537-luna-attempt2/fmt-check.command.json  |    62 +
+ artifacts/issue537-luna-attempt2/fmt-check.status  |     1 +
+ artifacts/issue537-luna-attempt2/fmt-check.stderr  |     0
+ artifacts/issue537-luna-attempt2/fmt-check.stdout  |     0
+ .../full-suite-normal.command.json                 |    64 +
+ .../full-suite-normal.status                       |     1 +
+ .../full-suite-normal.stderr                       |    13 +
+ .../full-suite-normal.stdout                       |    99 +
+ .../identity-full-release.command.json             |    67 +
+ .../identity-full-release.status                   |     1 +
+ .../identity-full-release.stderr                   |     3 +
+ .../identity-full-release.stdout                   |    11 +
+ .../no-alloc-release.command.json                  |    67 +
+ .../issue537-luna-attempt2/no-alloc-release.status |     1 +
+ .../issue537-luna-attempt2/no-alloc-release.stderr |     3 +
+ .../issue537-luna-attempt2/no-alloc-release.stdout |     8 +
+ .../policy-env-bash.command.json                   |    59 +
+ .../issue537-luna-attempt2/policy-env-bash.status  |     1 +
+ .../issue537-luna-attempt2/policy-env-bash.stderr  |     0
+ .../issue537-luna-attempt2/policy-env-bash.stdout  |     1 +
+ .../policy-lane-bash.command.json                  |    59 +
+ .../issue537-luna-attempt2/policy-lane-bash.status |     1 +
+ .../issue537-luna-attempt2/policy-lane-bash.stderr |     0
+ .../issue537-luna-attempt2/policy-lane-bash.stdout |     1 +
+ .../policy-realtime-bash.command.json              |    59 +
+ .../policy-realtime-bash.status                    |     1 +
+ .../policy-realtime-bash.stderr                    |     0
+ .../policy-realtime-bash.stdout                    |     1 +
+ .../policy-realtime.command.json                   |    58 +
+ .../issue537-luna-attempt2/policy-realtime.stderr  |     0
+ .../issue537-luna-attempt2/policy-realtime.stdout  |     0
+ .../policy-workspace-bash.command.json             |    59 +
+ .../policy-workspace-bash.status                   |     1 +
+ .../policy-workspace-bash.stderr                   |     0
+ .../policy-workspace-bash.stdout                   |     1 +
+ .../private-oracle-release.command.json            |    68 +
+ .../private-oracle-release.status                  |     1 +
+ .../private-oracle-release.stderr                  |     3 +
+ .../private-oracle-release.stdout                  |     6 +
+ .../wasm-gates-final.command.json                  |    60 +
+ .../issue537-luna-attempt2/wasm-gates-final.status |     1 +
+ .../issue537-luna-attempt2/wasm-gates-final.stderr |    52 +
+ .../issue537-luna-attempt2/wasm-gates-final.stdout |     5 +
+ artifacts/issue537-luna-attempt2/wasm-gates.jsonl  |     3 +
+ 110 files changed, 138065 insertions(+), 1 deletion(-)
+
+exec
+/bin/bash -lc 'cat .github/ISSUE_SPECS/537-uniform-multiband-detector-access.md artifacts/issue537-attempt2-review/astra-medium-full.md artifacts/issue534-delivery/astra-low-artifact-ruling.md scripts/build-web-audioworklet.sh' in /home/bl/misofm/engine-multiband-detector-access
+ succeeded in 0ms:
+# Specialize uniform multiband detector access without changing DSP
+
+Status: OPEN #537. Consolidated Astra medium attempt2 PASS recorded; artifact/ABI/browser and exact-head/base/CI delivery remain pending. Attempt1 FAIL remains counted. Root owns Git/GitHub/checkpoint pushes. No measured or projected speedup claim.
+
+## Smallest closable outcome and prerequisite
+
+Determine whether native production lowering retains useful scalar gather/packing work in multiband detector_tap when channel offsets are uniform. Only if baseline evidence and a bounded Astra decision support it, replace those uniform accesses with one contiguous row load, retaining original ragged access and every DSP/state contract. Native baseline inspection precedes any source edit. If the compiler already removes the claimed work, record no-change or narrowly rebrief the surviving residual; source temporary arrays do not prove stack traffic.
+
+The previous gate/compressor issues do not deliver this effect. The multiband ring is slot-major B*W with B=Fs/50+1. Offset O=1+round(lookahead*Fs/1000) is clamped to [1,B]; row=wrap(cursor+O,B) using the existing compare/subtract. O=B reads the just-written row; O=1 selects output-delay row. Four calls read low/high for each of two channels, sharing each channel's offset array. Signed detector words are read before magnitude and DualMono/Maximum/Average linking. Preserve independent channel offsets, write-before-read, operation ordering and existing bounds checks. No cross-effect helper.
+
+## Conditional implementation scope
+
+Only crates/multiband-compressor/src/lib.rs, tests/identity.rs, tests/no_alloc_render.rs, and narrowly required tests/support/mod.rs, plus this spec/evidence. Classify exactly L::WIDTH offsets once per actual segment outside the frame loop, independently for each channel; reuse for its two bands. Width1 is naturally uniform. Uniform access derives the original wrapped row then safe L::load from its contiguous existing W words. Ragged access remains the old index traversal and load. Use a transient classification: no persistent cache, state/layout/ring change, resource change, unsafe access, new public API, allocation or per-frame equality scan. Restore/reset must affect the next actual segment. Ramped and settled paths share this seam; bypass remains unchanged.
+
+No changes to split/shim/lane/effect-runtime math, Cargo/dependencies, corpus/pins, SIMD dispatch/target policy, CI/runner, cohort eligibility, staging or mono-collapse. Any necessary expansion must be ruled on before edits, not smuggled into this feature.
+
+## Frozen bounded sequence and gates
+
+1. After numbered/current-base approval, Luna captures one untimed native release production compiler output before editing. Use current pinned toolchain, x86-64-v3 AVX2/FMA, release LTO/codegen settings, isolated target, --locked; retain actual argv/cwd/source/config/toolchain/env/stdout/stderr/numeric status and original IR/assembly sizes/hashes. Select complete actual production scalar/W4/W8 callers as emitted, distinguish W4 emitted-only from native W8 dispatch, follow real instructions/branches/addresses rather than debug-location counts. Reuse issue534 capture methodology, no new framework. Root checkpoints/pushes baseline; Astra decides whether useful access work survives before implementation. No timed workload.
+2. Conditional compact source tranche plus independent old-index oracle: W1/W4/W8, distinct lane/frame/band words including signed zeros, O=1/interior/B, wrap boundaries, unequal uniform channels, uniform/ragged and ragged/uniform channels. Test the actual prepared-callsite classification/access route, not only a standalone helper. One actual uniform-to-fallback mutation must fail the SAME positive mechanism assertion while old-word equality still agrees. Preserve exact mutation and failure, restore original source; no wider mutation campaign.
+3. Extend existing public identity/state fixture narrowly for uniform and mixed offsets, three link modes, settled/ramped segments and populated restore transitions in both directions. Reuse existing 1536/4096-frame fixtures, render beyond latency where needed, and keep ring/state nonzero so continuation is discriminating. Preserve full reset and bypass regression. Do not create a second fixture corpus or assert undocumented mid-ramp restoration identity; compare appropriate equivalently restored baselines.
+4. Reuse installed allocation/free audit and own-thread positive liveness; actual prepared uniform and ragged render must allocate/free zero. Setup/state serialization/destruction outside measurement. Existing PCM/state/latency/nonfinite/crossover/resource gates remain. Run full multiband suite once and changed focused cases debug/release, strict affected Clippy/fmt and proportional existing policy checks. No numerical tolerance/count/pin changes.
+5. After source is frozen, capture comparable native lowering plus existing actual linked host-web scalar/simd128 production lowering as applicable. Existing multiband corpus explicitly excludes ring/tap composition: its unchanged digests remain regression checks, never evidence for the new route. Use current native/scalar-Wasm/simd128 corpus runner once with immutable pins. No new corpus/target matrix or false claim that the fallback wrapper is optimized production.
+
+Pause each coherent compiling/focused-green tranche for root exact-path commit and push before more edits. Benchmarks are not needed to prove this access-only contract; any timing remains separately authorized weekly work. Baseline/candidate lowering is untimed mechanism evidence. Generic runner repair, extended targets and listening scheduling do not expand this slice. Three failed attempts requires honest stop/rescope, no fourth retry.
+
+## Inherited DSP and research contract
+
+This changes data access only. Keep current two-stage TPT LR4 split: first stage v1/lp1, all-pass ap=x-2*k*v1 with k=sqrt(2), second low=LP2(lp1), high=ap-low. Each band uses the existing Giannoulis-Massberg-Reiss fixed 6 dB knee gain curve, branching smoother and exact update order. Launch sample rates, prepared crossover/lookahead, existing 64-update parameter ramps, bounded numeric domains, coefficient conditioning, safe NaN/denormal/reset semantics, latency Fs/50 and infinite tail remain authoritative in current lib.rs, shim.rs, lane/effect-runtime and docs/EFFECT_CONTRACT_V1.md. No algebraic reassociation, coefficient redesign, sound-quality claim or algorithmic class-B ruling is authorized.
+
+Standing equations/fixtures/objective/listening evidence and limitations are in issue018, issue051, issue094 and docs/rulings/multiband-ramping-split-boundary.md. Primary research authority remains REISS-COMP (Giannoulis, Massberg and Reiss, 2012), ORFANIDIS-ISP, SMITH-SASP and VST3-LATENCY as recorded by issue018; accepted builtin TPT/LR4 mapping evidence remains unchanged. No new listening session is claimed and no timing estimate is acceptance evidence.
+
+## Delivery
+
+The preceding boundary inventory found258 local numbered specs/352 remote issues, no missing identities, and verified534/536 CLOSED before this issue was created. Match this issue's actual GitHub number/title/body and clean base before any baseline capture. After consolidated Astra PASS and unchanged-source local delivery qualification (native/ABI/current artifact/browser obligations proportionate to changed binary), root obtains exact-head/current-base review and actual required qualification SUCCESS. Assert live main immediately before exact-head merge and verify actual parents. Synchronize closure only once accepted evidence is upstream. Post-main CI and audit349/518 continuation remain part of delivery. PR535 post-main34083008320 is currently running and is not claimed successful.
+
+## Numbered/current-base approval — Astra medium
+
+**PASS — baseline-only authorization for #537.**
+
+- Verified clean, pushed `da550e463ea256a0e1c229eaba03398779419361`, directly based on live main `375a86c280ac5be83004dc78dc25541bfa6371ba`. Only the issue brief and retained evidence differ.
+- GitHub #537 is **OPEN**, with matching number, title and byte-exact body. #534/#536 are **CLOSED**, delivered through merged PR535. Required run `34082558237` succeeded; post-main `34083008320` remains **in progress**.
+- Current detector/callsite/ring/restore code supports the narrow boundary: independent channel offsets, four signed reads after ring writes, existing wrap semantics, and a shared ramped/settled segment seam. Transient classification avoids restore/reset cache invalidation.
+- Proposed finite gates are adequate: independent old-index oracle, actual-callsite mechanism assertion and fallback mutation, populated bidirectional restore transitions, PCM/state identity, and allocation/free checks. The current allocator fixture lacks a positive liveness test; supply the brief’s required own-thread control within the allowed test file. Corpus digests remain arithmetic regression evidence only.
+
+Next: Luna high/xhigh captures the unchanged native production baseline; root checkpoints/pushes it; Astra low/medium reviews surviving access work before any rewrite. If useful work does not survive lowering, record no-change or narrowly rebrief. Keep the three-attempt limit.
+
+No implementation acceptance or speedup claim. No edits, builds, benchmarks, Git/GitHub writes, or agents were performed.
+
+## Unchanged native baseline checkpoint — Luna xhigh
+
+One native release capture passed at69acb3cb with unchanged multiband source SHA1058d6043d38c80f5ee3f61e794b5e35a8a4b35bf447661ed077c46739879779, pinned Rust1.97.1/LLVM22.1.6, fatLTO/codegen1/debug1 and configured AVX2/FMA. Full metadata/output identities and six complete scalar/W4/W8 compiler extracts are retained under artifacts/issue537-baseline. Root independently verified all selected files against exact original line ranges, sizes and hashes.
+
+The report identifies surviving per-lane wrapped addressing/checks and scalar-load/pin assembly in native W8 (selected ASM6246–6566 and6673–6752), with analogous W4 emitted-only evidence. Scalar W1 naturally has no cross-lane packing opportunity. Source arrays/debug locations alone are not credited; no machine-address or runtime speedup claim is made. No source rewrite has occurred. Bounded Astra review of surviving work is required before implementation.
+
+## Bounded baseline decision and attempt 1 authority — Astra medium
+
+**PASS — bounded baseline decision: authorize Luna xhigh attempt 1’s first compact tranche.**
+
+Verified clean, pushed `ce3fb612` against live main `375a86c`; #537 is OPEN with exact matching title/body. Source SHA matches `1058d604…39879779`. Retained original LLVM/ASM sizes and hashes match; capture status is 0 under the pinned release configuration. Post-main `34083008320` is **SUCCESS**.
+
+Native W8 instructions confirm surviving per-lane offset loads, wrap/index calculations, bounds checks, and `vmovd`/`vpinsrd` packing with `vinserti128`. No uniform-offset arm bypasses this work. W4 corroborates the mechanism **as emitted-only evidence**; W1 offers no cross-lane packing opportunity.
+
+**Narrowing:** low/high bands already reuse computed indices through compiler CSE. Do not credit eliminating duplicate wrap/address calculations across those bands, or infer temporary-array stack traffic.
+
+Authorize only transient per-channel classification of exactly `L::WIDTH` offsets once per actual segment, safe contiguous row loads for uniform offsets, and original ragged fallback. Preserve arithmetic, state, resources, bounds safety and bypass.
+
+First tranche: compact source change plus independent old-index oracle and actual-callsite witness, including the frozen fallback mutation. Pause immediately when compiling/focused-green for root’s exact-path checkpoint/push. Public transitions, allocation/liveness and candidate lowerings follow under the frozen spec; maximum three attempts.
+
+This is no implementation acceptance or projected speedup claim.
+
+## Attempt 1 compact source checkpoint — Luna xhigh
+
+The sole changed source lib.rs classifies channel offsets once per segment, uses a safe contiguous row load for uniform offsets and preserves the old ragged gather. Private test-only route counters and an independent old-index word oracle cover W1/W4/W8, offsets1/interior/B, wrap, signed words, unequal uniform channels and both mixed directions, including an actual render callsite witness. Corrected fully-qualified focused selector executed1 test:1pass/0fail,status0. Source SHA3309e4ead47d586413d4d57b85ce1295fb11fc13c74881b96a8f0a7a3d7d5587.
+
+The first status0 invocation selected0 tests/17filtered and is retained as compile/filter evidence only; it is not credited as a passing fixture. Both captures are in artifacts/issue537-luna-attempt1. This is a recoverable first checkpoint, not source acceptance. The one forced-fallback mutation, public populated transitions/allocation evidence, candidate lowering and final gates remain pending.
+
+## Attempt 1 oracle discrimination correction
+
+Root found the original eight-word periodic fixture made all W8 rows identical and W4 rows repeat, weakening wrapped-row discrimination. Luna xhigh replaced it with distinct row/lane bit patterns, explicit +0/-0 words and pairwise row-distinctness assertions. The actual prepared-callsite witness now covers both mixed channel directions. Same fully-qualified focused test passed1/0,status0 at sourcedbdc6847ab29ebeafeb84e04752559b0b95936c30d7170764464db43d88c1932. Prior capture is retained honestly, not credited for discriminating W8 wrap. No mutation or public/candidate qualification has run yet.
+
+## Attempt 1 failed mechanism gate — implementation paused
+
+The single frozen mutation changed actual uniform access `if uniform` to `if false`, but the fully-qualified fixture still passed1/0,status0. This is a FAILED negative-control gate, not evidence of correct mechanism coverage. Root identified that the test-only counter increments from classification before the branch, so it records intent rather than executed access. The passing mutant source SHA13ca418cc782a7ad47e154969f55e4d154022dbac1c99e87fc56be40a7bab6df and exact patch/command/output/status are retained. No assertion was weakened.
+
+Luna prepared a second observability patch but did not execute it; its explicitly unrun patch is retained separately and is not accepted implementation or mutation evidence. Root stopped further source/public-fixture work. Original source was restored byte-for-byte to SHA dbdc6847ab29ebeafeb84e04752559b0b95936c30d7170764464db43d88c1932, and the one actual restored focused invocation passed1/0,status0. A prior restored invocation used a nonexistent worktree path and started no command/capture. No second mutation ran.
+
+The useful source checkpoint remains buildable, but this attempt lacks the required discriminating actual-route control and remaining public transition/allocation/candidate qualification. One consolidated Astra medium attempt1 verdict is now required before a revision. Do not relabel a further mutation as the original frozen run or reset the attempt counter.
+
+## Consolidated attempt 1 verdict and bounded attempt 2 — Astra medium
+
+**FAIL — consolidated attempt-1 verdict. Attempt 2 is authorized within #537.**
+
+Verified clean, pushed `c73e4b56`, live base `375a86c`, and OPEN #537 with exact title/body identity. Restored source matches `dbdc6847…88c1932`.
+
+The frozen negative control failed: forcing actual uniform access to fallback still produced **1 passed, status 0**. [The counter records classification before executing the branch](/home/bl/misofm/engine-multiband-detector-access/crates/multiband-compressor/src/lib.rs:900), so it cannot prove uniform access occurred. Plausible arithmetic does not satisfy this gate.
+
+Additional bounded corrections:
+
+- Global counters can receive calls from concurrently running `split` tests; isolate observation to the witness’s test thread.
+- Corrected words distinguish rows/lanes, but the single-ring oracle and count-only render witness do not establish distinct band/channel dataflow. Add distinguishable band/channel words and check actual accessed words against the old-index oracle.
+
+The production diff retains safe loads, original ragged indexing, width-bounded transient classification and unchanged DSP/state layout. This does not establish acceptance.
+
+**Attempt 2 — Luna xhigh:**
+
+1. Correct executed-branch observability first, retaining W1/W4/W8 and mixed-channel coverage. Freeze the corrected candidate; run one fallback-only control that fails the **same mechanism assertion** while old-word equality passes. Restore byte-exactly, verify focused green, then pause for root checkpoint/push.
+2. Complete frozen populated PCM/state/report transitions, reset/bypass, allocation/free and own-thread liveness gates; then candidate native/Wasm lowering and final checks.
+
+Preserve the zero-selected capture, periodic-oracle correction, passing mutant and restored pass. The prepared second patch remains **unexecuted**, not evidence. No baseline redo, new framework/corpus, gate weakening or performance claim. Maximum **three total attempts**.
+
+## Attempt 2 first coherent observability checkpoint — Luna xhigh
+
+Test-only observation now uses fixed-capacity thread-local storage, records values inside the actual selected access arm, and compares actual returned words against independently indexed copies of four distinguishable channel/band rings. Existing W1/W4/W8 private wrap/offset oracle and actual mixed-direction callsite cases remain. Corrected fully-qualified focused invocation passed1/0,status0 at sourceSHA ad34dd9adfc1753fb4db3a6bbc96d94a9c3f5c3a836bfa5f8f3853fb4d345331. The prior status101 fixture compile diagnostic (missing const-generic annotation) is retained; no production algorithm change was made to repair it. Fresh frozen attempt2 mutation and remaining public/candidate gates are pending.
+
+## Attempt 2 discriminating mechanism control
+
+Assertions were reordered without changing their contents so the old-index/actual accessed-word checks precede the same positive executed-route assertion. Frozen source SHAaf2776551abe0abc08a4bd80fbddfb6e461cfc9d64f1567dbbb6efa54e1121fa. The one fresh attempt2 mutation changes only `if uniform` to `if false`; it returned101 after old-word and first actual-callsite word equality completed, failing `prepared uniform channels: executed uniform calls` at0 versus12. The source was restored byte-for-byte and the same fully-qualified focused test passed1/0,status0. Full mutation/restoration captures and exact patch are retained. No second attempt2 mutation ran. Public/candidate gates and consolidated attempt2 review remain pending.
+
+## Attempt 2 public identity checkpoint
+
+Existing identity runners now accept directed offset profiles while retaining the original varied-values fixture. Uniform, unequal-channel uniform (0/20ms), and ragged-lane profiles compare exact scalar/W4/W8 PCM, full snapshots and reports across all three links for1536frames, including first-block parameter ramps and settled post-latency output. Assertions require populated output/ring payloads. Focused debug identity profile test passed1/0,status0 at identity.rs SHA4c59f1743fec93a6c7477b240957e1daae5d9fa0ae930e0f0c7bc95db309010f. No production source changed. Dedicated mixed uniform/ragged channel profiles, populated restore transitions, reset/bypass and later gates are still pending.
+
+## Attempt 2 populated public transition checkpoint
+
+Dedicated uniform-left/ragged-right and ragged-left/uniform-right public profiles now join the exact scalar/W4/W8 × three-link identity comparisons. Existing restoration machinery exercises populated1536-frame donors and warmed receivers in both profile directions, followed by4096frames through cursor wrap and full-reset comparison with a fresh destination baseline. Ring/output population checks use numeric nonzero values; unchanged bypass regression remains part of the final suite.
+
+Expanded-profile and transition selectors each passed1/0 in debug and release (four successful invocations), at identity.rs SHAa45d7921282dde5f9a562e7d982b9b3a88db7e9bbffbac1d9ff81fe9864fba24. The first compile diagnostic from a missing restore import is preserved as status101; no production or expectation change repaired it. Allocation/liveness, final suite/format/Clippy, candidate lowering and consolidated review remain pending.
+
+## Attempt 2 final implementation / allocation checkpoint
+
+The existing thread-local TrackingAllocator now has distinct own-thread positive allocate/free controls outside realtime windows, and prepared W4/W8 uniform/ragged/mixed bank render requires zero events. Original scalar/bank reset/restore checks remain. Focused allocation binary passed3/0/0filtered. Strict affected all-target/all-feature Clippy passed after two retained status101 lint diagnostics (needless borrow/type complexity); fixes were test-only annotations/borrows and formatting, not DSP or gate changes. cargo fmt was applied.
+
+Frozen source hashes: lib.rs efd7523a19b5355b53cdd8620a0abc75161a7d39440d54c286c288e5512e09f2; identity.rs e27bb19cb841f7101bf7a8c31d23f500021bf93dd6f4b564828bdeeaa7dee526; no_alloc_render.rs 04033e9535455d151de254f69101a3062b45e9e5cee87479b5e7763bf4e6be4e. Full suite, final release checks, existing corpus, candidate native/production Wasm lowering and consolidated review remain pending; no acceptance or speedup claim.
+
+## Attempt 2 frozen-source final gates and lowering package
+
+All remaining local gates passed on source13d0580b: full suite42passed/0failed/2descriptiveignored; private oracle release1pass; full identity release6pass; allocation release3pass; format and four existing policy checks. The existing native/scalar-Wasm/simd128 corpus run returned139cases/349comparisons/0mismatches per leg, with immutable pins. It is arithmetic regression evidence only, not multiband ring/tap-route evidence. No ignored benchmark was run.
+
+A direct attempt to execute non-executable check-realtime-policy.sh failed before spawning a child (implementation agent reported PermissionError13); its metadata/empty streams and absent child status are preserved. The canonical bash invocation passed separately. No numeric child exit status is invented for a process that never started.
+
+Root captured comparable native release compiler outputs and both linked host-web scalar/simd128 release modules successfully. Complete selected native scalar/W4/W8 bodies and actual Wasm scalar func761, SIMD-module scalar func811 and supported SIMD4 bank func813 are retained with original-output identities and command/status records. Root verified every selected byte range/hash against its original decoder/compiler output. Emitted W8 Wasm/mono wrappers are not credited as supported dispatch; inspection modules are not published artifact identities.
+
+Native W8 candidate selected ASM6317–6366 shows the uniform condition, safe row-length guards and contiguous vector loads bypassing the ragged arm at LBB40_176; original low/high index-CSE narrowing remains. These are inspection pointers, not consolidated acceptance or a net speedup claim. Candidate conditional access and preserved semantics await one consolidated Astra medium attempt2 review. Full original outputs remain at manifest paths under /tmp; no source changed after13d0580b.
+
+## Consolidated attempt 2 verdict — Astra medium
+
+**PASS — consolidated adversarial attempt-2 verification for #537 (Astra medium).**
+
+Reviewed clean, pushed `5c0c387501c05b9da382f1b60ec06a3113bf40b9` against live main `375a86c280ac5be83004dc78dc25541bfa6371ba`. GitHub #537 is OPEN with matching number, title and byte-exact body. Source remains frozen at `13d0580b`; all three supplied final hashes match. Attempt 1 remains FAIL and counted; this is Luna xhigh attempt 2, with no attempt relabeling.
+
+No blocking finding remains within the frozen implementation scope:
+
+- [Production access](/home/bl/misofm/engine-multiband-detector-access/crates/multiband-compressor/src/lib.rs:939) retains the old ragged indexing and safe lane load. [Classification](/home/bl/misofm/engine-multiband-detector-access/crates/multiband-compressor/src/lib.rs:1058) is transient, per channel, outside the frame loop, over the W offsets matching L::WIDTH; its result serves both bands. Ring writes precede detector reads. Arithmetic/link order, state/layout/resources, restore/reset logic, public API and dependencies are unchanged. Test instrumentation is cfg(test)-only.
+- [Executed-arm observation](/home/bl/misofm/engine-multiband-detector-access/crates/multiband-compressor/src/lib.rs:916) now records returned words inside each arm using fixed-capacity thread-local storage. The independent old-index oracle distinguishes rows/lanes, including signed zeros; the actual render witness checks four separately seeded channel/band rings and both mixed directions. [Word assertions precede mechanism assertions](/home/bl/misofm/engine-multiband-detector-access/crates/multiband-compressor/src/lib.rs:2255). The sole attempt-2 fallback-only mutation reconstructs to captured SHA `c970cf23…f680861`: status101, expected executed-uniform count12 versus actual0, after word checks. Restored SHA `af277655…e1121fa` passed; later lib changes are formatting, not altered mechanism or assertions. Attempt-1 failure evidence remains retained.
+- [Public identities](/home/bl/misofm/engine-multiband-detector-access/crates/multiband-compressor/tests/identity.rs:379) cover all three links and scalar/W4/W8, uniform/unequal/mixed profiles, ramps and settled rendering, exact PCM/full state/reports and populated rings. [Bidirectional populated restoration](/home/bl/misofm/engine-multiband-detector-access/crates/multiband-compressor/tests/identity.rs:668) continues through4096 frames; scalar full-reset comparison and existing bank reset/bypass regressions are retained. [Allocation liveness](/home/bl/misofm/engine-multiband-detector-access/crates/multiband-compressor/tests/no_alloc_render.rs:142) proves own-thread allocate/free detection; prepared scalar and uniform/ragged bank paths require zero events.
+- Native W8 classification (selected ASM5912 onward) produces per-channel flags before the frame loop. ASM6317–6366 selects guarded contiguous loads from detector ring bases; LBB40_176 retains per-lane fallback. Supported host-web SIMD4 func813 independently compares offsets1264–1276 and2560–2572 before its loop (selected lines2228–2274); flags5/9 select detector arms. Wrapped row indexing feeds guarded v128 loads from low/high bases1280/1288 and2576/2584 (2701–2714,3011–3024); fallback retains scalar/lane insertion (2724–2779,3034 onward). These are detector loads, not coefficient loads. Scalar-module func761 and SIMD-module scalar func811 retain bounded single-lane detector reads using offsets372/708. W8 Wasm is not credited as supported dispatch.
+
+Recorded final checks: full suite42 passed/0 failed/2 descriptive ignored; release private oracle1, identity6 and allocator3 passed; strict Clippy, format and four policy checks passed. Final capture source hashes match. All99 attempt-2 and40 lowering capture files match raw copies; native/Wasm selected ranges, sizes and hashes match originals, including linked module identities. The immutable corpus passed139 cases/349 comparisons per native/scalar/simd leg; it proves arithmetic regression only, not ring composition. No checks were rerun.
+
+This PASS accepts the bounded source/evidence slice, not completed delivery. Published-artifact/browser qualification, exact PR head/current-base/required-CI review, merge and remote closure remain subsequent gates. Inspection modules are not published artifact identities. No speedup claim, benchmark claim or credit for already-CSE’d low/high index calculations is made. No repository edits, builds, tests, mutations, Git/GitHub writes or agents were performed; only this requested report was written outside the worktree.
+
+**PASS — consolidated adversarial attempt-2 verification for #537 (Astra medium).**
+
+Reviewed clean, pushed `5c0c387501c05b9da382f1b60ec06a3113bf40b9` against live main `375a86c280ac5be83004dc78dc25541bfa6371ba`. GitHub #537 is OPEN with matching number, title and byte-exact body. Source remains frozen at `13d0580b`; all three supplied final hashes match. Attempt 1 remains FAIL and counted; this is Luna xhigh attempt 2, with no attempt relabeling.
+
+No blocking finding remains within the frozen implementation scope:
+
+- [Production access](/home/bl/misofm/engine-multiband-detector-access/crates/multiband-compressor/src/lib.rs:939) retains the old ragged indexing and safe lane load. [Classification](/home/bl/misofm/engine-multiband-detector-access/crates/multiband-compressor/src/lib.rs:1058) is transient, per channel, outside the frame loop, over the W offsets matching L::WIDTH; its result serves both bands. Ring writes precede detector reads. Arithmetic/link order, state/layout/resources, restore/reset logic, public API and dependencies are unchanged. Test instrumentation is cfg(test)-only.
+- [Executed-arm observation](/home/bl/misofm/engine-multiband-detector-access/crates/multiband-compressor/src/lib.rs:916) now records returned words inside each arm using fixed-capacity thread-local storage. The independent old-index oracle distinguishes rows/lanes, including signed zeros; the actual render witness checks four separately seeded channel/band rings and both mixed directions. [Word assertions precede mechanism assertions](/home/bl/misofm/engine-multiband-detector-access/crates/multiband-compressor/src/lib.rs:2255). The sole attempt-2 fallback-only mutation reconstructs to captured SHA `c970cf23…f680861`: status101, expected executed-uniform count12 versus actual0, after word checks. Restored SHA `af277655…e1121fa` passed; later lib changes are formatting, not altered mechanism or assertions. Attempt-1 failure evidence remains retained.
+- [Public identities](/home/bl/misofm/engine-multiband-detector-access/crates/multiband-compressor/tests/identity.rs:379) cover all three links and scalar/W4/W8, uniform/unequal/mixed profiles, ramps and settled rendering, exact PCM/full state/reports and populated rings. [Bidirectional populated restoration](/home/bl/misofm/engine-multiband-detector-access/crates/multiband-compressor/tests/identity.rs:668) continues through4096 frames; scalar full-reset comparison and existing bank reset/bypass regressions are retained. [Allocation liveness](/home/bl/misofm/engine-multiband-detector-access/crates/multiband-compressor/tests/no_alloc_render.rs:142) proves own-thread allocate/free detection; prepared scalar and uniform/ragged bank paths require zero events.
+- Native W8 classification (selected ASM5912 onward) produces per-channel flags before the frame loop. ASM6317–6366 selects guarded contiguous loads from detector ring bases; LBB40_176 retains per-lane fallback. Supported host-web SIMD4 func813 independently compares offsets1264–1276 and2560–2572 before its loop (selected lines2228–2274); flags5/9 select detector arms. Wrapped row indexing feeds guarded v128 loads from low/high bases1280/1288 and2576/2584 (2701–2714,3011–3024); fallback retains scalar/lane insertion (2724–2779,3034 onward). These are detector loads, not coefficient loads. Scalar-module func761 and SIMD-module scalar func811 retain bounded single-lane detector reads using offsets372/708. W8 Wasm is not credited as supported dispatch.
+
+Recorded final checks: full suite42 passed/0 failed/2 descriptive ignored; release private oracle1, identity6 and allocator3 passed; strict Clippy, format and four policy checks passed. Final capture source hashes match. All99 attempt-2 and40 lowering capture files match raw copies; native/Wasm selected ranges, sizes and hashes match originals, including linked module identities. The immutable corpus passed139 cases/349 comparisons per native/scalar/simd leg; it proves arithmetic regression only, not ring composition. No checks were rerun.
+
+This PASS accepts the bounded source/evidence slice, not completed delivery. Published-artifact/browser qualification, exact PR head/current-base/required-CI review, merge and remote closure remain subsequent gates. Inspection modules are not published artifact identities. No speedup claim, benchmark claim or credit for already-CSE’d low/high index calculations is made. No repository edits, builds, tests, mutations, Git/GitHub writes or agents were performed; only this requested report was written outside the worktree.
+**Approve the bounded artifact-pin update**, following the existing #475 precedent.
+
+Verified clean HEAD `406303595ca2a15173984957a16ff6080bb9fd9a`, matching captured source hashes and unchanged DSP/build source since source PASS. Native shared/static ABI completed with status0. The ordinary builder compiled successfully, then exited1 solely at the pin comparison:
+
+- Existing: `04f938f667180d0e7b972e1cc2236af3a5d5e3f7b73d1ed503dde72e83aa9bce`
+- Builder-observed: `e70a4311da3f053ea77fc0ec7ac00348d534dfb2919e05591fefed515988802d`
+
+Root may checkpoint this ruling, then authorize Luna to update only [the artifact pin](/home/bl/misofm/engine-gate-detector-access/hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256) to that exact observed hash, with retained provenance.
+
+Conditions:
+
+1. Preserve original commands, source identities, output and failure status. The builder hashes its temporary module before comparison; failure leaves the output directory empty and deletes the temporary build. This is a recorded builder observation, not an independently rehashed retained artifact.
+2. Run the ordinary verified builder without repin bypass on unchanged DSP/build source. It must reproduce the pinned hash and publish the actual output.
+3. Complete existing static/object, resource checks with 26 red controls, hermetic tests, actual Chromium/Firefox/WebKit qualification with mutations, and matrix verification.
+4. Generated candidate/hash records must identify the actual qualified source/output. No numerical, corpus, resource-expectation, policy, CI or matrix changes are authorized. Any further discrepancy requires concrete assessment.
+
+Source PASS remains unchanged. This ruling grants neither passing artifact qualification nor PR/merge approval. Review was read-only; the worktree remains clean.#!/usr/bin/env bash
+set -euo pipefail
+
+if (($# != 1)); then
+  echo "usage: $0 EMPTY_OUTPUT_DIRECTORY" >&2
+  exit 2
+fi
+
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
+output_dir=$1
+if [[ ! -d "$output_dir" || -L "$output_dir" ]]; then
+  echo "output must be an existing non-symlink directory" >&2
+  exit 2
+fi
+if [[ -n "$(find "$output_dir" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+  echo "output directory must be empty; refusing overwrite" >&2
+  exit 2
+fi
+
+simd_target=$(mktemp -d)
+cleanup() {
+  rm -rf -- "$simd_target"
+}
+trap cleanup EXIT
+
+# Owner decision W4-D1 (#83, 2026-08-24): the app's browser floor guarantees `simd128`, so exactly
+# one artifact ships. The scalar worklet build and the dual-artifact selection in `host.js` are
+# gone; `host.js` probes `simd128` at init and fails with a typed `miso.unsupported.v1` error when
+# the probe fails -- the browser twin of D4's native boot attestation. The scalar *cargo check*
+# stays in CI: `lane`'s wasm-scalar path is still gated, it just is not shipped.
+#
+# The browser artifact is the one place the workspace's `debug = 1` (issue 083 D12) is pure cost.
+# It exists so a native profile or core dump names a kernel; a downloaded AudioWorklet module pays
+# for the DWARF on every page load and cannot use it in production. Measured on this repository:
+# 2,153,061 bytes before D12, 16,661,225 with `debug = 1`, 1,940,863 with the debug
+# information stripped -- fat LTO alone makes the module *smaller* than it was, and the whole of
+# the growth is DWARF.
+#
+# Stripped here, in the delivery script, and deliberately not in `[profile.release]`: the native
+# artifacts keep their line tables. To build a debuggable browser module, override this with
+# `MISO_ENGINE_WEB_STRIP=none`.
+strip_flag="-C strip=${MISO_ENGINE_WEB_STRIP:-debuginfo}"
+
+# The artifact is content-addressed, so every path rustc embeds in it must be a
+# function of the SOURCE and nothing else. It is not by default: dependency
+# sources live under CARGO_HOME, whose absolute path differs between a
+# developer's machine and CI (`/root/.cargo` vs `/home/runner/.cargo`), and
+# rustc bakes those paths into panic locations. Without remapping, that would
+# make the artifact digest a function of WHERE cargo's registry sits.
+#
+# Remapping both roots to fixed labels makes the digest reproducible anywhere.
+# Verified: with these flags the digest is identical under CARGO_HOME=/root/.cargo
+# and CARGO_HOME=/home/runner/.cargo, which previously produced two different ones,
+# and also under a third repo-path/CARGO_HOME combination.
+cargo_home=${CARGO_HOME:-$HOME/.cargo}
+remap="--remap-path-prefix=$cargo_home=/cargo --remap-path-prefix=$repo_root=/repo"
+
+(
+  cd "$repo_root"
+  CARGO_TARGET_DIR="$simd_target" RUSTFLAGS="-C target-feature=+simd128 $strip_flag $remap" \
+    cargo build --locked --release --target wasm32-unknown-unknown -p host-web
+)
+
+artifact="$simd_target/wasm32-unknown-unknown/release/host_web.wasm"
+observed=$(sha256sum "$artifact" | awk '{print $1}')
+pin_file="$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256"
+expected=$(tr -d '\n' <"$pin_file")
+
+if [[ "${MISO_ENGINE_WEB_AUDIOWORKLET_REPIN:-0}" == 1 ]]; then
+  printf '%s\n' "$observed"
+  exit 0
+fi
+[[ "$observed" == "$expected" ]] || {
+  printf 'AudioWorklet artifact pin mismatch: expected=%s observed=%s\n' \
+    "$expected" "$observed" >&2
+  exit 1
+}
+
+cp "$artifact" "$output_dir/miso-engine-v1-audio-worklet.simd128.wasm"
+cp "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet.js" "$output_dir/"
+cp "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-host.js" "$output_dir/"
+cp "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts" "$output_dir/"
+
+# Issue #137 D4: the parameter metadata ships beside the module, so the app never introspects the
+# Wasm for names, units, ranges, defaults or enumerations. The effect list is read from
+# `launch_native_effect_registry()`, so an effect cannot be in the engine and missing here.
+(
+  cd "$repo_root"
+  cargo run --locked --release -q -p parameter-metadata -- --write "$output_dir"
+) >/dev/null
+
+codex
+The builder capture and script agree: compilation finished, the pin comparison failed, and publication was never reached. The #534 precedent permits this narrow update, provided a subsequent ordinary build reproduces the hash and the existing delivery gates pass.
+
+exec
+/bin/bash -lc "sed -n '930,980p' crates/multiband-compressor/src/lib.rs; sed -n '1045,1080p' crates/multiband-compressor/src/lib.rs; cat /tmp/issue537-delivery/native-abi.stdout; head -18 /tmp/issue537-delivery/native-abi.command.json; cat hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256; ls -la /tmp/issue537-delivery/artifact; git diff --name-only 13d0580b HEAD -- crates hosts scripts Cargo.toml Cargo.lock .cargo rust-toolchain.toml; git rev-parse HEAD; rg --files --hidden hosts crates scripts .github | rg '("'^|/)AGENTS.md$'"'" in /home/bl/misofm/engine-multiband-detector-access
+ exited 1 in 0ms:
+        observation.set(current);
+    });
+}
+
+/// The per-track detector tap of one ring, gathered into one lane.
+///
+/// The only non-contiguous access on the render path, and it is loads only: lookahead is a
+/// per-track parameter, so each track reads a different slot of the shared ring.
+#[inline(always)]
+fn detector_tap<L: Lane, const W: usize>(
+    ring: &[f32],
+    cursor: usize,
+    offsets: &[usize; W],
+    ring_len: usize,
+    uniform: bool,
+) -> L {
+    if uniform {
+        let row = wrap(cursor + offsets[0], ring_len);
+        let value = L::load(&ring[row * W..]);
+        #[cfg(test)]
+        record_detector_observation(true, value);
+        return value;
+    }
+    let mut values = [0.0f32; 8];
+    for track in 0..W {
+        values[track] = ring[wrap(cursor + offsets[track], ring_len) * W + track];
+    }
+    let value = L::load(&values[..W]);
+    #[cfg(test)]
+    record_detector_observation(false, value);
+    value
+}
+
+/// One band's amplitude for one frame: detector level, static curve, smoother, makeup.
+///
+/// Frozen operation order:
+/// 1. `level = clamp(level_db(max(detector, 1e-8)), -160, 24)` — the `-160 dB` floor is the
+///    version-1 detector floor, kept so the curve sees the same silence
+/// 2. `target = clamp(gain_delta_db(level), -100, 0)` — Giannoulis et al. equation 4, 6 dB knee
+/// 3. `state = flush(branching_smooth(state, target, attack, release))` — D7 applies: this is a
+///    recurrence
+/// 4. `gain_from_db(state + makeup)`
+///
+/// Every clamp is the D8 select form, so a NaN detector floors at `-160 dB` instead of
+/// propagating into the smoother; a NaN that matters comes from the filter state and reaches the
+/// output, where the once-per-block boundary check catches it.
+#[inline(always)]
+// FAST-DB-CROSSING X5 and X6's `#[expect]`: the crossing registry entries this replaces lived in
+// `scripts/check-fast-db-seal.sh`, retired in favour of `clippy.toml`'s `disallowed-methods`.
+#[expect(
+    clippy::disallowed_methods,
+    right: &mut [f32],
+    frames: usize,
+    segments: &mut [Segment<L>; 2],
+    coefficients: &[[BandCoef<L>; 2]; 2],
+) {
+    let (head, tail) = sides.split_at_mut(1);
+    let near = &mut head[0];
+    let far = &mut tail[0];
+    let mut filter_near = near.filter;
+    let mut filter_far = far.filter;
+    let mut gain_near = near.gain_db;
+    let mut gain_far = far.gain_db;
+    let mut position = *cursor;
+    let near_detector_uniform = detector_offsets_uniform(&near.detector_offset);
+    let far_detector_uniform = detector_offsets_uniform(&far.detector_offset);
+    for frame in 0..frames {
+        if RAMPING {
+            for index in 0..RAMP_COUNT {
+                segments[0].current[index] =
+                    segments[0].current[index].add(segments[0].step[index]);
+                segments[1].current[index] =
+                    segments[1].current[index].add(segments[1].step[index]);
+            }
+        }
+        let slot = position * W;
+        let delayed = wrap(position + 1, ring_len) * W;
+        let input_near = L::load(&left[frame * W..]);
+        let input_far = L::load(&right[frame * W..]);
+        if BYPASS {
+            input_near.store(&mut near.low_ring[slot..]);
+            input_far.store(&mut far.low_ring[slot..]);
+            L::load(&near.low_ring[delayed..]).store(&mut left[frame * W..]);
+            L::load(&far.low_ring[delayed..]).store(&mut right[frame * W..]);
+            position = wrap(position + 1, ring_len);
+            continue;
+        }
+C ABI check: ok (x86_64-unknown-linux-gnu, shared and static linkage)
+{
+  "argv": [
+    "env",
+    "CARGO_TARGET_DIR=/tmp/issue537-delivery-native-target",
+    "MISO_ENGINE_CAPI_LIBRARY=/tmp/issue537-delivery-native-target/release/libcapi.so",
+    "MISO_ENGINE_CAPI_STATIC_LIBRARY=/tmp/issue537-delivery-native-target/release/libcapi.a",
+    "bash",
+    "scripts/check-capi-abi.sh",
+    "."
+  ],
+  "cwd": "/home/bl/misofm/engine-multiband-detector-access",
+  "head": "e8c9c5f603c3815d76efe72d2a4092e40dc9b62d",
+  "branch": "codex/multiband-detector-access",
+  "status": "",
+  "env": {
+    "PATH": "/home/bl/.cargo/bin:/home/bl/.codex/packages/standalone/releases/0.153.4-x86_64-unknown-linux-musl/codex-path:/home/bl/.cargo/bin:/home/bl/.local/bin:/home/bl/.codex1/tmp/arg0/codex-arg032GUSu:/home/bl/.codex/packages/standalone/releases/0.153.4-x86_64-unknown-linux-musl/codex-path:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin",
+    "RUSTFLAGS": null,
+    "CARGO_TARGET_DIR": "/tmp/issue537-delivery-target"
+e70a4311da3f053ea77fc0ec7ac00348d534dfb2919e05591fefed515988802d
+total 8
+drwxrwxr-x 2 bl bl 4096 Sep  7 05:47 .
+drwxrwxr-x 3 bl bl 4096 Sep  7 05:48 ..
+e8c9c5f603c3815d76efe72d2a4092e40dc9b62d
+
+codex
+**APPROVE — bounded artifact-pin scope expansion for #537.**
+
+Root may checkpoint this decision and authorize Luna xhigh to change only `hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256` from:
+
+`e70a4311da3f053ea77fc0ec7ac00348d534dfb2919e05591fefed515988802d`
+
+to:
+
+`1bc18ab8cfb3e2a3e5a0ebeda185a64551e8398870abb2f3581077da0dfd3a3f`
+
+Reviewed applicable AGENTS, numbered #537, consolidated attempt-2 PASS, actual detector source, delivery captures/capture script, ordinary builder, and the branch’s #534 ruling. HEAD is clean `e8c9c5f6`; production/build paths are unchanged since frozen `13d0580b`. Native shared/static ABI capture reports status 0. Ordinary artifact compilation completed, then exited 1 at the exact pin mismatch above.
+
+The builder hashes its temporary module before comparison, exits before copying output on mismatch, and deletes its temporary directory through its exit trap. The output directory is empty. **The new hash is a recorded builder observation, not an independently rehashed retained artifact.** This matches the bounded #534 precedent.
+
+Conditions:
+
+1. Preserve original command metadata, source identities, stdout, stderr and status 1 as failure provenance; record this explicit exception to #537’s original pin prohibition.
+2. Keep Luna’s edit limited to the exact pin replacement. No numerical, corpus, resource expectations, policy, CI, build-script or production-source changes.
+3. Run the ordinary verified builder with no repin bypass on unchanged accepted source/build inputs. It must reproduce this hash and successfully emit the actual artifact; retain its identity and successful capture.
+4. Complete existing static/object checks, resource checks with all 26 red controls, hermetic tests, actual Chromium/Firefox/WebKit qualification with mutations, and matrix verification. Qualification records must identify the actual candidate/output; do not relax matrix requirements.
+5. Any further hash discrepancy or qualification failure requires concrete assessment, not another automatic repin or weakened gate.
+
+Attempt-2 source PASS remains intact; attempt-1 FAIL remains counted. This ruling establishes neither published-artifact success nor speedup, completed delivery, PR/merge approval, or issue closure. Exact-head/current-base and required CI obligations remain.
+
+Review was read-only: no edits, builds/tests, agents, Git/GitHub mutations, or report-file writes.
+tokens used
+33,911

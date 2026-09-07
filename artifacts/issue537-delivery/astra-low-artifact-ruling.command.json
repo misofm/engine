@@ -1,0 +1,19 @@
+{
+  "argv": [
+    "/home/bl/.local/bin/codex",
+    "exec",
+    "-C",
+    "/home/bl/misofm/engine-multiband-detector-access",
+    "-s",
+    "danger-full-access",
+    "-m",
+    "gpt-6-astra",
+    "-c",
+    "model_reasoning_effort=\"low\"",
+    "-o",
+    "/tmp/issue537-delivery/astra-low-artifact-ruling.md",
+    "-"
+  ],
+  "cwd": "/home/bl/misofm/engine-multiband-detector-access",
+  "prompt": "/tmp/issue537-delivery/artifact-ruling-prompt.md"
+}

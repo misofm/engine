@@ -1,0 +1,25 @@
+**APPROVE — bounded artifact-pin scope expansion for #537.**
+
+Root may checkpoint this decision and authorize Luna xhigh to change only `hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256` from:
+
+`e70a4311da3f053ea77fc0ec7ac00348d534dfb2919e05591fefed515988802d`
+
+to:
+
+`1bc18ab8cfb3e2a3e5a0ebeda185a64551e8398870abb2f3581077da0dfd3a3f`
+
+Reviewed applicable AGENTS, numbered #537, consolidated attempt-2 PASS, actual detector source, delivery captures/capture script, ordinary builder, and the branch’s #534 ruling. HEAD is clean `e8c9c5f6`; production/build paths are unchanged since frozen `13d0580b`. Native shared/static ABI capture reports status 0. Ordinary artifact compilation completed, then exited 1 at the exact pin mismatch above.
+
+The builder hashes its temporary module before comparison, exits before copying output on mismatch, and deletes its temporary directory through its exit trap. The output directory is empty. **The new hash is a recorded builder observation, not an independently rehashed retained artifact.** This matches the bounded #534 precedent.
+
+Conditions:
+
+1. Preserve original command metadata, source identities, stdout, stderr and status 1 as failure provenance; record this explicit exception to #537’s original pin prohibition.
+2. Keep Luna’s edit limited to the exact pin replacement. No numerical, corpus, resource expectations, policy, CI, build-script or production-source changes.
+3. Run the ordinary verified builder with no repin bypass on unchanged accepted source/build inputs. It must reproduce this hash and successfully emit the actual artifact; retain its identity and successful capture.
+4. Complete existing static/object checks, resource checks with all 26 red controls, hermetic tests, actual Chromium/Firefox/WebKit qualification with mutations, and matrix verification. Qualification records must identify the actual candidate/output; do not relax matrix requirements.
+5. Any further hash discrepancy or qualification failure requires concrete assessment, not another automatic repin or weakened gate.
+
+Attempt-2 source PASS remains intact; attempt-1 FAIL remains counted. This ruling establishes neither published-artifact success nor speedup, completed delivery, PR/merge approval, or issue closure. Exact-head/current-base and required CI obligations remain.
+
+Review was read-only: no edits, builds/tests, agents, Git/GitHub mutations, or report-file writes.
