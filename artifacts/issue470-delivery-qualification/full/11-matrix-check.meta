@@ -1,0 +1,14 @@
+pre_command_utc=2026-09-07T16:46:16Z
+pre_command_cwd=/tmp/issue470-qual-source-d6f78803
+pre_command_head=d6f7880304f22ee7bd518506ed3dc1f61c66e474
+pre_command_status=## HEAD (no branch)
+ M hosts/host-web/BROWSER_DEPLOYMENT_MATRIX.md
+ M hosts/host-web/qualification/results.json
+ M hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256
+argv=npm --prefix hosts/host-web/qualification run matrix -- --check 
+f01f598a9d340ba9125025a9b89d3a3ce26e9efbf28467b79850afa8fe306ecf  /tmp/issue470-qual-source-d6f78803/hosts/host-web/BROWSER_DEPLOYMENT_MATRIX.md
+ce66ab3dc06cdffa9016c916a5357ae0fc78a89b905f9f5d70c336087f19a122  /tmp/issue470-qual-source-d6f78803/hosts/host-web/qualification/results.json
+f92525e41d56d03f2e470dc3f84205d12de1f304450d061961e598b283e1b9e3  /tmp/issue470-qual-source-d6f78803/hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256
+88c4410cac9f33bef1984588869878153c61e0ab70ae07aad27883152c6ac59e  /tmp/issue470-qual-source-d6f78803/hosts/host-web/tests/browser-v1/expected.json
+63dd5f8b0febf193847b697fa8e4d92e791b7e4775f3b4b6b61252783f153e9f  /tmp/issue470-qualified-artifact/miso-engine-v1-audio-worklet.simd128.wasm
+exit=0

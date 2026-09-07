@@ -1,0 +1,1 @@
+FAIL browser expected resources: expected.json's resource rows are stale against the built module (pinned -> actual): graphIncrementalPlanBytes 29498 -> 29578, graphMetadataBytes 3659 -> 3739, graphSessionPlusPlanBytes 29498 -> 29578. Re-derive with MISO_ENGINE_WEB_ORACLE_PRINT=1 and re-pin with the byte accounting for each moved row in the commit message.

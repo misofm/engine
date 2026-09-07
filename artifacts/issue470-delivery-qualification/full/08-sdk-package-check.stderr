@@ -1,0 +1,97 @@
+npm notice
+npm notice 📦  @misofm/engine@0.2.1
+npm notice Tarball Contents
+npm notice 18.4kB README.md
+npm notice 1.8kB dist/assets.d.ts
+npm notice 1.9kB dist/assets.js
+npm notice 9.4kB dist/assets/miso-engine-v1-abi-layout.json
+npm notice 35.3kB dist/assets/miso-engine-v1-audio-worklet-host.d.ts
+npm notice 39.5kB dist/assets/miso-engine-v1-audio-worklet-host.js
+npm notice 38.4kB dist/assets/miso-engine-v1-audio-worklet.js
+npm notice 2.7MB dist/assets/miso-engine-v1-audio-worklet.simd128.wasm
+npm notice 63.9kB dist/assets/miso-engine-v1-parameter-metadata.json
+npm notice 23.3kB dist/assets/miso-engine-v1-pcm-feed-worklet.js
+npm notice 1.1kB dist/assets/miso-engine-v1-sdk-manifest.json
+npm notice 288B dist/browser/console.d.ts
+npm notice 1.7kB dist/browser/console.js
+npm notice 985B dist/browser/default-host.d.ts
+npm notice 2.1kB dist/browser/default-host.js
+npm notice 7.7kB dist/browser/engine.d.ts
+npm notice 5.9kB dist/browser/engine.js
+npm notice 1.8kB dist/browser/host-mirror.d.ts
+npm notice 4.0kB dist/browser/host-mirror.js
+npm notice 473B dist/browser/index.d.ts
+npm notice 644B dist/browser/index.js
+npm notice 2.7kB dist/browser/pcm-feed.d.ts
+npm notice 7.9kB dist/browser/pcm-feed.js
+npm notice 3.6kB dist/browser/pcm-ring.d.ts
+npm notice 12.1kB dist/browser/pcm-ring.js
+npm notice 5.6kB dist/browser/policy.d.ts
+npm notice 7.8kB dist/browser/policy.js
+npm notice 11B dist/browser/scratch-worker.d.ts
+npm notice 44.5kB dist/browser/scratch-worker.js
+npm notice 1.9kB dist/browser/scratch.d.ts
+npm notice 4.6kB dist/browser/scratch.js
+npm notice 35.3kB dist/browser/shipped-host.d.ts
+npm notice 752B dist/cli/session-request.d.ts
+npm notice 14.4kB dist/cli/session-request.js
+npm notice 4.3kB dist/core/abi.d.ts
+npm notice 6.7kB dist/core/abi.js
+npm notice 6.3kB dist/core/agent.d.ts
+npm notice 7.7kB dist/core/agent.js
+npm notice 3.4kB dist/core/asset.d.ts
+npm notice 6.4kB dist/core/asset.js
+npm notice 7.0kB dist/core/boundary.d.ts
+npm notice 21.6kB dist/core/boundary.js
+npm notice 3.7kB dist/core/console.d.ts
+npm notice 8.8kB dist/core/console.js
+npm notice 3.5kB dist/core/decimal.d.ts
+npm notice 8.2kB dist/core/decimal.js
+npm notice 3.4kB dist/core/errors.d.ts
+npm notice 2.9kB dist/core/errors.js
+npm notice 61B dist/core/hex.d.ts
+npm notice 387B dist/core/hex.js
+npm notice 4.8kB dist/core/lattice.d.ts
+npm notice 10.1kB dist/core/lattice.js
+npm notice 8.5kB dist/core/session.d.ts
+npm notice 44.9kB dist/core/session.js
+npm notice 9.5kB dist/core/types.d.ts
+npm notice 11B dist/core/types.js
+npm notice 7.1kB dist/core/writer.d.ts
+npm notice 10.4kB dist/core/writer.js
+npm notice 31B dist/enginectl.d.ts
+npm notice 11.6kB dist/enginectl.js
+npm notice 18.9kB dist/generated/abi.d.ts
+npm notice 19.5kB dist/generated/abi.js
+npm notice 117.1kB dist/generated/catalog.d.ts
+npm notice 121.1kB dist/generated/catalog.js
+npm notice 778B dist/generated/provenance.d.ts
+npm notice 1.3kB dist/generated/provenance.js
+npm notice 614B dist/headless/assets.d.ts
+npm notice 4.1kB dist/headless/assets.js
+npm notice 6.0kB dist/headless/engine.d.ts
+npm notice 6.3kB dist/headless/engine.js
+npm notice 870B dist/headless/index.d.ts
+npm notice 508B dist/headless/index.js
+npm notice 1.8kB dist/index.d.ts
+npm notice 1.6kB dist/index.js
+npm notice 434B dist/internal/session-json.d.ts
+npm notice 8.9kB dist/internal/session-json.js
+npm notice 11.4kB dist/LICENSE
+npm notice 829B dist/NOTICE
+npm notice 1.6kB package.json
+npm notice Tarball Details
+npm notice name: @misofm/engine
+npm notice version: 0.2.1
+npm notice filename: misofm-engine-0.2.1.tgz
+npm notice package size: 984.5 kB
+npm notice unpacked size: 3.7 MB
+npm notice shasum: b1fd0e62310dcb844374531820aa584814daf549
+npm notice integrity: sha512-iKufJ8SHtIFX2[...]UKW87lphDNKWw==
+npm notice total files: 79
+npm notice
+npm notice
+npm notice New major version of npm available! 10.9.8 -> 12.0.2
+npm notice Changelog: https://github.com/npm/cli/releases/tag/v12.0.2
+npm notice To update run: npm install -g npm@12.0.2
+npm notice

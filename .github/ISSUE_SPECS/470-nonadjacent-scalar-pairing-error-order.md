@@ -480,9 +480,10 @@ durable evidence assembly.
 ## Astra LOW pre-pin finite blockers resolved
 
 The stale CAPI delivery consumer comment in `crates/capi/tests/resource_lifecycle.rs` now states
-the two accounting cases precisely: the historical uniform strip shift cancels in the double-live
-comparison, while #470's per-plan runtime-metadata reservation contributes +2,656 across its two
-live plans. This is a comment-only correction; no CAPI arithmetic or source behavior changed.
+the two accounting cases precisely: the single-plan literals track the historical -64 directly,
+while the double-live peak separately sums both live reports. #470's runtime metadata adds 1,328
+to each live plan, 2,656 total. This is a comment-only correction; no CAPI arithmetic or source
+behavior changed.
 
 The Wasm/browser +80 is independently derived in durable evidence at
 `artifacts/issue470-wasm-resource-derivation.md`. The actual fixture source has one track, seven
@@ -491,3 +492,32 @@ layout witness reports an 8-byte runtime table field and 8-byte op and unit delt
 `8 + 9 * max(8, 8) = 80`. The candidate direct oracle observes 29,578/29,578/3,739 from prior
 29,498/29,498/3,659. No native 82-entry count was copied, and neither the browser expected JSON
 nor the repository artifact pin was edited in this tranche.
+
+## Full pre-pin artifact and package qualification
+
+Astra LOW's pre-pin review of `d6f78803` returned **FAIL for pin readiness** while accepting the
+native and Wasm numeric resource changes and candidate digest. It required the corrected CAPI
+double-live explanation and the target-specific Wasm `+80` derivation above. Luna HIGH independently
+verified both bounded corrections; root checkpointed them at `e4f34e8e`. This is an evidence
+correction within accepted attempt 2, not another product attempt.
+
+Using the same retained six-file artifact, the artifact-backed browser resource gate and 26 red
+mutations passed. SDK generated/deletion/type/headless/package gates passed, including 37 deletion
+mutations, 169 headless tests, 11 enginectl package tests, the exact six-file tarball closure and
+unchanged npm manifests/locks. Three session-identity documents and the generated matrix check
+passed. Chromium `151.0.7922.34`, Firefox `153.0` and WebKit `26.5` each passed attestation,
+AudioWorklet boot, native-corpus digest, control, observation and main-thread-stall gates, together
+with 36 browser mutations, 14 artifact-set mutations and three matrix mutations. The hermetic
+host/worklet suite also passed its command, session-map, policy, callgraph and allocator controls.
+No browser result was recorded and no benchmark ran.
+
+Two setup mistakes are preserved candidly. The first browser-resource invocation ran the Python
+checker through Bash and returned 2 before a product gate; the corrected `python3 -B` invocation
+passed. The first SDK type gate returned 2 because `sdk/node_modules` was absent; pinned dependency
+installation changed no tracked file and the subsequent type gate passed. Raw commands, source and
+artifact identities, stdout, stderr and statuses for both failures and every passing gate are
+preserved under `artifacts/issue470-delivery-qualification/` with a checksum manifest.
+
+The repository artifact pin, checked browser result and generated deployment-matrix lineage remain
+unchanged. Astra LOW must now re-review the exact pushed evidence head and retained artifact. Only
+an Astra PASS authorizes the three already-qualified lineage changes to become repository state.

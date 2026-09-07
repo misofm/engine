@@ -1,0 +1,8 @@
+utc=2026-09-07T16:31:07Z
+cwd=/tmp/issue470-source-6d3ef49c
+head=6d3ef49c713f059e5c60b4000889eecaa9cff3db
+status<<EOF
+## HEAD (no branch)
+ M hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256EOF
+expected_sha256=041f18c68cfc52aa06e33d61bbd3e804c94cfdb401b105dc764302e5d240f918  hosts/host-web/tests/browser-v1/expected.json
+argv=cargo run --locked --release -q -p host-web --example browser_fixture_resources

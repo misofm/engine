@@ -1,0 +1,11 @@
+utc=2026-09-07T16:28:24Z
+cwd=/tmp/issue470-source-6d3ef49c
+head=6d3ef49c713f059e5c60b4000889eecaa9cff3db
+status_begin<<EOF
+## HEAD (no branch)
+ M hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256EOF
+builder_sha256=44a7f72fc27f93906472c7f8061e6492194949d7b2a3f6e45c53dfdbc689075d  scripts/build-web-audioworklet.sh
+pin_sha256=f92525e41d56d03f2e470dc3f84205d12de1f304450d061961e598b283e1b9e3  hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256
+pin_value=63dd5f8b0febf193847b697fa8e4d92e791b7e4775f3b4b6b61252783f153e9f
+argv=bash scripts/build-web-audioworklet.sh /tmp/issue470-qualified-artifact
+output_dir=/tmp/issue470-qualified-artifact
