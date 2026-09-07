@@ -1217,46 +1217,138 @@ impl PreparedGraphPlan {
             &'static str,
         ),
     > {
-        let supplied: BTreeSet<_> = bindings
-            .nodes
-            .iter()
-            .map(|binding| binding.node.clone())
-            .collect();
-        let builtin_bank_members: BTreeSet<_> = self.builtin_bank_members().cloned().collect();
-        let required: BTreeSet<_> = self
-            .required_bindings
-            .iter()
-            .filter(|node| !builtin_bank_members.contains(*node))
-            .cloned()
-            .collect();
-        let duplicate_binding = supplied.len() != bindings.nodes.len();
-        let source_claims = source_set
-            .as_ref()
-            .map(GraphPreparedSourceSet::claims)
-            .unwrap_or_default();
-        let source_claim_set: BTreeSet<_> = source_claims
-            .iter()
-            .map(|claim| claim.node.clone())
-            .collect();
-        let source_claims_valid = source_set.as_ref().is_none_or(|set| {
-            set.envelope == self.envelope
-                && set.is_valid()
-                && source_claim_set.len() == source_claims.len()
-        });
-        let coverage_matches = supplied.union(&source_claim_set).eq(required.iter());
-        let source_overlap = supplied.iter().any(|node| source_claim_set.contains(node));
-        let valid_observers = self
-            .observers
-            .iter()
-            .chain(bindings.observers.iter())
-            .all(|binding| matches!(binding.node, GraphNodeId::TrackStage { .. }))
-            && {
-                let mut pairs: BTreeSet<_> = BTreeSet::new();
+        let (
+            duplicate_binding,
+            coverage_matches,
+            source_overlap,
+            source_claims_valid,
+            valid_observers,
+        ) = {
+            let mut supplied = Vec::with_capacity(bindings.nodes.len());
+            supplied.extend(bindings.nodes.iter().map(|binding| &binding.node));
+            let supplied_count = supplied.len();
+            supplied.sort_unstable();
+            supplied.dedup();
+
+            let mut builtin_bank_members =
+                Vec::with_capacity(self.builtin_bank_members().count());
+            builtin_bank_members.extend(self.builtin_bank_members());
+            builtin_bank_members.sort_unstable();
+            builtin_bank_members.dedup();
+
+            let mut required = Vec::with_capacity(self.required_bindings.len());
+            required.extend(self.required_bindings.iter().filter(|node| {
+                builtin_bank_members
+                    .binary_search_by(|member| member.cmp(node))
+                    .is_err()
+            }));
+            required.sort_unstable();
+            required.dedup();
+
+            let source_claims = source_set
+                .as_ref()
+                .map(GraphPreparedSourceSet::claims)
+                .unwrap_or_default();
+            let mut source_claim_nodes = Vec::with_capacity(source_claims.len());
+            source_claim_nodes.extend(source_claims.iter().map(|claim| &claim.node));
+            let source_claim_count = source_claim_nodes.len();
+            source_claim_nodes.sort_unstable();
+            source_claim_nodes.dedup();
+
+            let source_claims_valid = source_set.as_ref().is_none_or(|set| {
+                set.envelope == self.envelope
+                    && set.is_valid()
+                    && source_claim_nodes.len() == source_claim_count
+            });
+
+            // Both inputs are already sorted and unique, so equal keys advance both cursors and
+            // are emitted once into the comparison. No combined coverage collection is needed.
+            let coverage_matches = 'coverage: {
+                let mut supplied_index = 0;
+                let mut source_index = 0;
+                let mut required_index = 0;
+                while supplied_index < supplied.len() || source_index < source_claim_nodes.len() {
+                    let next = match (
+                        supplied.get(supplied_index),
+                        source_claim_nodes.get(source_index),
+                    ) {
+                        (Some(supplied), Some(source)) => match supplied.cmp(source) {
+                            core::cmp::Ordering::Less => {
+                                supplied_index += 1;
+                                *supplied
+                            }
+                            core::cmp::Ordering::Equal => {
+                                supplied_index += 1;
+                                source_index += 1;
+                                *supplied
+                            }
+                            core::cmp::Ordering::Greater => {
+                                source_index += 1;
+                                *source
+                            }
+                        },
+                        (Some(supplied), None) => {
+                            supplied_index += 1;
+                            *supplied
+                        }
+                        (None, Some(source)) => {
+                            source_index += 1;
+                            *source
+                        }
+                        (None, None) => unreachable!("union loop has a remaining input"),
+                    };
+                    if required
+                        .get(required_index)
+                        .is_none_or(|required| *required != next)
+                    {
+                        break 'coverage false;
+                    }
+                    required_index += 1;
+                }
+                required_index == required.len()
+            };
+
+            let source_overlap = {
+                let mut supplied_index = 0;
+                let mut source_index = 0;
+                let mut overlaps = false;
+                while supplied_index < supplied.len() && source_index < source_claim_nodes.len() {
+                    match supplied[supplied_index].cmp(source_claim_nodes[source_index]) {
+                        core::cmp::Ordering::Less => supplied_index += 1,
+                        core::cmp::Ordering::Greater => source_index += 1,
+                        core::cmp::Ordering::Equal => {
+                            overlaps = true;
+                            break;
+                        }
+                    }
+                }
+                overlaps
+            };
+
+            let mut observer_pairs =
+                Vec::with_capacity(self.observers.len() + bindings.observers.len());
+            observer_pairs.extend(
                 self.observers
                     .iter()
                     .chain(bindings.observers.iter())
-                    .all(|binding| pairs.insert((binding.node.clone(), binding.handle)))
-            };
+                    .map(|binding| (&binding.node, binding.handle)),
+            );
+            let valid_observers = observer_pairs
+                .iter()
+                .all(|(node, _)| matches!(node, GraphNodeId::TrackStage { .. }))
+                && {
+                    observer_pairs.sort_unstable();
+                    observer_pairs.windows(2).all(|pair| pair[0] != pair[1])
+                };
+
+            (
+                supplied.len() != supplied_count,
+                coverage_matches,
+                source_overlap,
+                source_claims_valid,
+                valid_observers,
+            )
+        };
         if bindings.envelope != self.envelope
             || !coverage_matches
             || duplicate_binding
