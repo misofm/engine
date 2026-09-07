@@ -1,6 +1,6 @@
 # Specialize uniform multiband detector access without changing DSP
 
-Status: OPEN #537. Consolidated Astra medium attempt2 PASS recorded; artifact/ABI/browser and exact-head/base/CI delivery remain pending. Attempt1 FAIL remains counted. Root owns Git/GitHub/checkpoint pushes. No measured or projected speedup claim.
+Status: OPEN #537. Astra medium attempt2 source PASS and all local artifact/ABI/browser gates passed. Exact-head/current-base review and required CI/merge remain pending. Attempt1 FAIL remains counted. No measured or projected speedup claim.
 
 ## Smallest closable outcome and prerequisite
 
@@ -192,3 +192,7 @@ Review was read-only: no edits, builds/tests, agents, Git/GitHub mutations, or r
 ## Approved pin checkpoint — Luna xhigh
 
 Luna applied only the approved exact hash replacement, preserving the newline. Original failure and bounded Astra low ruling remain retained. DSP/build source remains frozen. The ordinary verified builder and remaining delivery checks are pending; this checkpoint claims no artifact qualification.
+
+## Local delivery qualification checkpoint
+
+Ordinary verified builder reproduced pin1bc18ab8cfb3e2a3e5a0ebeda185a64551e8398870abb2f3581077da0dfd3a3f and emitted the actual2,728,956-byte module at candidate62366ba20cab5742aa6e0636f428ec18365104bf. Root independently hashed the retained output and recorded all six file identities. Native shared/static ABI, static/object checks, resource expectations with26 red controls, hermetic AudioWorklet tests, actual Chromium151.0.7922.34/Firefox153.0/WebKit26.5 with mutations, and matrix verification all returned0. Browser records identify that actual candidate/output. No accepted DSP/build-source change or corpus/resource/gate relaxation. PR exact-head/base/required CI and remote delivery remain pending.
