@@ -1085,38 +1085,34 @@ fn run_segment<L: Lane, const W: usize, const LINK: u8, const BYPASS: bool, cons
         low_far.store(&mut far.low_ring[slot..]);
         high_far.store(&mut far.high_ring[slot..]);
 
-        let detector_near_low =
-            detector_tap::<L, W>(
-                &near.low_ring,
-                position,
-                &near.detector_offset,
-                ring_len,
-                near_detector_uniform,
-            );
-        let detector_near_high =
-            detector_tap::<L, W>(
-                &near.high_ring,
-                position,
-                &near.detector_offset,
-                ring_len,
-                near_detector_uniform,
-            );
-        let detector_far_low =
-            detector_tap::<L, W>(
-                &far.low_ring,
-                position,
-                &far.detector_offset,
-                ring_len,
-                far_detector_uniform,
-            );
-        let detector_far_high =
-            detector_tap::<L, W>(
-                &far.high_ring,
-                position,
-                &far.detector_offset,
-                ring_len,
-                far_detector_uniform,
-            );
+        let detector_near_low = detector_tap::<L, W>(
+            &near.low_ring,
+            position,
+            &near.detector_offset,
+            ring_len,
+            near_detector_uniform,
+        );
+        let detector_near_high = detector_tap::<L, W>(
+            &near.high_ring,
+            position,
+            &near.detector_offset,
+            ring_len,
+            near_detector_uniform,
+        );
+        let detector_far_low = detector_tap::<L, W>(
+            &far.low_ring,
+            position,
+            &far.detector_offset,
+            ring_len,
+            far_detector_uniform,
+        );
+        let detector_far_high = detector_tap::<L, W>(
+            &far.high_ring,
+            position,
+            &far.detector_offset,
+            ring_len,
+            far_detector_uniform,
+        );
         let (linked_near_low, linked_far_low) =
             link_levels::<L, LINK>(detector_near_low, detector_far_low);
         let (linked_near_high, linked_far_high) =
@@ -2121,13 +2117,7 @@ mod detector_access_tests {
             "{label}: classification"
         );
         let expected = old_detector_words(ring, cursor, &offsets, RING_LEN);
-        let selected = detector_tap::<L, W>(
-            ring,
-            cursor,
-            &offsets,
-            RING_LEN,
-            expected_uniform,
-        );
+        let selected = detector_tap::<L, W>(ring, cursor, &offsets, RING_LEN, expected_uniform);
         assert_eq!(lane_words(selected), expected, "{label}: selected route");
 
         let fallback = detector_tap::<L, W>(ring, cursor, &offsets, RING_LEN, false);
@@ -2143,13 +2133,7 @@ mod detector_access_tests {
         assert_tap_case::<L, W>(&ring, 0, uniform_one, true, "O=1");
         assert_tap_case::<L, W>(&ring, RING_LEN - 1, uniform_one, true, "O=1 wrap");
         assert_tap_case::<L, W>(&ring, 2, uniform_interior, true, "interior");
-        assert_tap_case::<L, W>(
-            &ring,
-            RING_LEN - 1,
-            uniform_ring_end,
-            true,
-            "O=B wrap",
-        );
+        assert_tap_case::<L, W>(&ring, RING_LEN - 1, uniform_ring_end, true, "O=B wrap");
 
         if W > 1 {
             let ragged = core::array::from_fn(|track| 1 + track % (RING_LEN - 1));
@@ -2260,34 +2244,10 @@ mod detector_access_tests {
     ) -> Vec<[u32; 8]> {
         let mut expected = Vec::with_capacity(frames * 4);
         for cursor in 0..frames {
-            push_expected_tap(
-                &mut expected,
-                rings[0],
-                cursor,
-                near_offsets,
-                ring_len,
-            );
-            push_expected_tap(
-                &mut expected,
-                rings[1],
-                cursor,
-                near_offsets,
-                ring_len,
-            );
-            push_expected_tap(
-                &mut expected,
-                rings[2],
-                cursor,
-                far_offsets,
-                ring_len,
-            );
-            push_expected_tap(
-                &mut expected,
-                rings[3],
-                cursor,
-                far_offsets,
-                ring_len,
-            );
+            push_expected_tap(&mut expected, rings[0], cursor, near_offsets, ring_len);
+            push_expected_tap(&mut expected, rings[1], cursor, near_offsets, ring_len);
+            push_expected_tap(&mut expected, rings[2], cursor, far_offsets, ring_len);
+            push_expected_tap(&mut expected, rings[3], cursor, far_offsets, ring_len);
         }
         expected
     }
@@ -2299,7 +2259,11 @@ mod detector_access_tests {
         label: &str,
     ) {
         let observed = detector_observation();
-        assert_eq!(observed.entries, expected.len(), "{label}: observed entry count");
+        assert_eq!(
+            observed.entries,
+            expected.len(),
+            "{label}: observed entry count"
+        );
         for (index, expected_words) in expected.iter().enumerate() {
             assert_eq!(
                 observed.widths[index] as usize, W,
@@ -2329,12 +2293,8 @@ mod detector_access_tests {
         label: &str,
     ) {
         const FRAMES: usize = 3;
-        let mut instance = Instance::<L, W>::new(
-            [left_defaults; W],
-            [right_defaults; W],
-            metadata,
-        )
-        .expect("prepared witness instance");
+        let mut instance = Instance::<L, W>::new([left_defaults; W], [right_defaults; W], metadata)
+            .expect("prepared witness instance");
         instance.sides[0].detector_offset = near_offsets;
         instance.sides[1].detector_offset = far_offsets;
         seed_instance_rings(&mut instance);
@@ -2359,18 +2319,13 @@ mod detector_access_tests {
         let near_uniform = detector_offsets_uniform(&near_offsets);
         let far_uniform = detector_offsets_uniform(&far_offsets);
         let expected_uniform_calls = 2 * FRAMES * (near_uniform as usize + far_uniform as usize);
-        let expected_ragged_calls = 2 * FRAMES * ((!near_uniform) as usize + (!far_uniform) as usize);
+        let expected_ragged_calls =
+            2 * FRAMES * ((!near_uniform) as usize + (!far_uniform) as usize);
         let mut left = vec![0.25f32; FRAMES * W];
         let mut right = vec![-0.5f32; FRAMES * W];
         let mut reports = [ProcessReport::default(); W];
         clear_detector_observation();
-        render::<L, W, false>(
-            &mut instance,
-            &mut left,
-            &mut right,
-            FRAMES,
-            &mut reports,
-        );
+        render::<L, W, false>(&mut instance, &mut left, &mut right, FRAMES, &mut reports);
         assert_actual_observation::<W>(
             &expected,
             expected_uniform_calls,

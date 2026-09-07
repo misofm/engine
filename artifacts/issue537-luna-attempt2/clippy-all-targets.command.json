@@ -1,0 +1,67 @@
+{
+  "argv": [
+    "cargo",
+    "clippy",
+    "--locked",
+    "-p",
+    "multiband-compressor",
+    "--all-targets",
+    "--all-features",
+    "--",
+    "-D",
+    "warnings"
+  ],
+  "cwd": "/home/bl/misofm/engine-multiband-detector-access",
+  "head": "14b623e6a75ded8b4cc0fb6049149df6cd56e708",
+  "branch": "codex/multiband-detector-access",
+  "status": " M crates/multiband-compressor/src/lib.rs\n M crates/multiband-compressor/tests/identity.rs\n M crates/multiband-compressor/tests/no_alloc_render.rs\n",
+  "env": {
+    "PATH": "/home/bl/.cargo/bin:/home/bl/.cargo/bin:/home/bl/.local/bin:/home/bl/.codex/packages/standalone/releases/0.153.4-x86_64-unknown-linux-musl/codex-path:/home/bl/.codex1/tmp/arg0/codex-arg032GUSu:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin",
+    "RUSTFLAGS": null,
+    "CARGO_TARGET_DIR": "/tmp/issue537-luna2-target"
+  },
+  "toolchain": {
+    "rustc": {
+      "status": 0,
+      "output": "rustc 1.97.1 (8bab26f4f 2026-07-14)\nbinary: rustc\ncommit-hash: 8bab26f4f68e0e26f0bb7960be334d5b520ea452\ncommit-date: 2026-07-14\nhost: x86_64-unknown-linux-gnu\nrelease: 1.97.1\nLLVM version: 22.1.6\n"
+    },
+    "cargo": {
+      "status": 0,
+      "output": "cargo 1.97.1 (c980f4866 2026-06-30)\n"
+    },
+    "rustup_toolchain": {
+      "status": 0,
+      "output": "1.97.1-x86_64-unknown-linux-gnu (overridden by '/home/bl/misofm/engine-multiband-detector-access/rust-toolchain.toml')\n"
+    }
+  },
+  "source": {
+    "crates/multiband-compressor/src/lib.rs": {
+      "sha256": "efd7523a19b5355b53cdd8620a0abc75161a7d39440d54c286c288e5512e09f2",
+      "git_blob": "ebe08f5c6b013d56a74203729ffee64f147b3c6e"
+    },
+    "crates/multiband-compressor/tests/identity.rs": {
+      "sha256": "607a788ed93f1fa59741bc12219c850dda83529a74737dc2d99dffac61158bfe",
+      "git_blob": "b7e3b9a5a35267ac15887bac73d5e80341ed496e"
+    },
+    "crates/multiband-compressor/tests/no_alloc_render.rs": {
+      "sha256": "04033e9535455d151de254f69101a3062b45e9e5cee87479b5e7763bf4e6be4e",
+      "git_blob": "984d38c45915460d144eeac76e860039a98ac964"
+    },
+    "Cargo.toml": {
+      "sha256": "471660ddca768e90ec87550807e140b4754454509f6f5f59986a80764b53effb",
+      "git_blob": "23944595dc9167dbb5a3a2ced7234dfdbadf3d0d"
+    },
+    "Cargo.lock": {
+      "sha256": "ef85bfaac8b4df80b651fa89e5e9a67bfef141b58076bdaac513044161b0b853",
+      "git_blob": "1b74fb016a04a090d2d1d37ea15fd2917fb85491"
+    },
+    ".cargo/config.toml": {
+      "sha256": "03b0fbd88c069abb0a8fbdca5921ba6a9899298291fe087977b509a29ebb7d0e",
+      "git_blob": "de2180972c37406f1f16913901bd1d4fc2e660e3"
+    },
+    "rust-toolchain.toml": {
+      "sha256": "85a45cac04c296adac076f8f0609ca8f4c8ca658957f1f24cbd1e054b6cc44e0",
+      "git_blob": "6b6739839ba23906921aeb4c268d275dcc459fb6"
+    }
+  }
+}

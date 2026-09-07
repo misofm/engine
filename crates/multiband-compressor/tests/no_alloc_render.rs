@@ -13,6 +13,7 @@ mod support;
 use core::alloc::Layout;
 use core::cell::Cell;
 use std::alloc::{GlobalAlloc, System};
+use std::hint::black_box;
 
 use effect_contract::{
     BankWidth, EffectBankProcessBlock, LinkMode, NativeEffectFactory, ParameterChannel, ResetKind,
@@ -29,12 +30,24 @@ static ALLOCATOR: TrackingAllocator = TrackingAllocator;
 thread_local! {
     static ACTIVE: Cell<bool> = const { Cell::new(false) };
     static EVENTS: Cell<u64> = const { Cell::new(0) };
+    static ALLOCATIONS: Cell<u64> = const { Cell::new(0) };
+    static DEALLOCATIONS: Cell<u64> = const { Cell::new(0) };
 }
 
-fn record() {
+fn record_allocation() {
     ACTIVE.with(|active| {
         if active.get() {
             EVENTS.with(|events| events.set(events.get() + 1));
+            ALLOCATIONS.with(|allocations| allocations.set(allocations.get() + 1));
+        }
+    });
+}
+
+fn record_deallocation() {
+    ACTIVE.with(|active| {
+        if active.get() {
+            EVENTS.with(|events| events.set(events.get() + 1));
+            DEALLOCATIONS.with(|deallocations| deallocations.set(deallocations.get() + 1));
         }
     });
 }
@@ -46,7 +59,7 @@ unsafe impl GlobalAlloc for TrackingAllocator {
         // SAFETY: delegates the allocator-provided layout unchanged.
         let pointer = unsafe { System.alloc(layout) };
         if !pointer.is_null() {
-            record();
+            record_allocation();
         }
         pointer
     }
@@ -55,13 +68,13 @@ unsafe impl GlobalAlloc for TrackingAllocator {
         // SAFETY: delegates the allocator-provided layout unchanged.
         let pointer = unsafe { System.alloc_zeroed(layout) };
         if !pointer.is_null() {
-            record();
+            record_allocation();
         }
         pointer
     }
 
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        record();
+        record_deallocation();
         // SAFETY: delegates the original pointer and layout unchanged.
         unsafe { System.dealloc(pointer, layout) }
     }
@@ -70,7 +83,7 @@ unsafe impl GlobalAlloc for TrackingAllocator {
         // SAFETY: delegates the original pointer, layout and requested size unchanged.
         let replacement = unsafe { System.realloc(pointer, layout, new_size) };
         if !replacement.is_null() {
-            record();
+            record_allocation();
         }
         replacement
     }
@@ -78,11 +91,64 @@ unsafe impl GlobalAlloc for TrackingAllocator {
 
 /// Counts allocator events during `operation`.
 fn events(operation: impl FnOnce()) -> u64 {
+    allocator_counts(operation).0
+}
+
+/// Counts all allocator events and keeps allocation/free counts separate for the liveness control.
+fn allocator_counts(operation: impl FnOnce()) -> (u64, u64, u64) {
     EVENTS.with(|events| events.set(0));
+    ALLOCATIONS.with(|allocations| allocations.set(0));
+    DEALLOCATIONS.with(|deallocations| deallocations.set(0));
     ACTIVE.with(|active| active.set(true));
     operation();
     ACTIVE.with(|active| active.set(false));
-    EVENTS.with(Cell::get)
+    (
+        EVENTS.with(Cell::get),
+        ALLOCATIONS.with(Cell::get),
+        DEALLOCATIONS.with(Cell::get),
+    )
+}
+
+#[derive(Clone, Copy, Debug)]
+enum BankOffsetProfile {
+    Uniform,
+    Ragged,
+    Mixed,
+}
+
+fn bank_profile_values(
+    track: usize,
+    profile: BankOffsetProfile,
+) -> [effect_contract::InitialParameterValue; 24] {
+    let mut values = varied_values(track);
+    let (left, right) = match profile {
+        BankOffsetProfile::Uniform => (5.0, 5.0),
+        BankOffsetProfile::Ragged => {
+            const OFFSETS: [f32; 8] = [0.0, 5.0, 20.0, 10.0, 0.0, 5.0, 20.0, 10.0];
+            (OFFSETS[track], OFFSETS[track])
+        }
+        BankOffsetProfile::Mixed => {
+            const LEFT: [f32; 8] = [0.0, 5.0, 20.0, 10.0, 0.0, 5.0, 20.0, 10.0];
+            const RIGHT: [f32; 8] = [20.0, 10.0, 5.0, 0.0, 20.0, 10.0, 5.0, 0.0];
+            (LEFT[track], RIGHT[track])
+        }
+    };
+    values[2].value = left;
+    values[3].value = right;
+    values
+}
+
+#[test]
+fn tracking_allocator_proves_own_thread_allocation_and_free() {
+    let (events, allocations, deallocations) = allocator_counts(|| {
+        let value = Box::new([black_box(0x5Au8); 64]);
+        black_box(value.as_ptr());
+        black_box(&value[..]);
+        drop(value);
+    });
+    assert!(allocations > 0, "own-thread control saw no allocation");
+    assert!(deallocations > 0, "own-thread control saw no free");
+    assert_eq!(events, allocations + deallocations);
 }
 
 #[test]
@@ -128,61 +194,77 @@ fn the_scalar_render_path_allocates_nothing() {
 fn the_bank_render_path_allocates_nothing() {
     for width in [BankWidth::Four, BankWidth::Eight] {
         let lanes = width.lanes() as usize;
-        let sets = (0..lanes).map(varied_values).collect::<Vec<_>>();
-        let requests = sets
-            .iter()
-            .map(|set| request_with(set, LinkMode::Average, 128, false))
-            .collect::<Vec<_>>();
-        let mut bank = support::bank(width, &requests);
-        let sizes = MultibandCompressorFactory
-            .prepare(requests[0])
-            .expect("scalar")
-            .metadata()
-            .state_sizes;
-        let mut left = support::signal(128 * lanes, 0x00C0_FFEE);
-        let mut right = support::signal(128 * lanes, 0x00DE_CAF0);
-        let offsets = vec![0u32; lanes + 1];
-        let mut sections = new_sections(sizes);
-        let run = |bank: &mut dyn effect_contract::PreparedNativeEffectBank,
-                   left: &mut [f32],
-                   right: &mut [f32],
-                   first: u64| {
-            bank.process_bank(
-                EffectBankProcessBlock::new(
-                    left,
-                    right,
-                    None,
-                    128,
-                    width,
-                    first,
-                    &[],
-                    &offsets,
-                    128,
-                )
-                .expect("bank block"),
-            );
-        };
-        run(bank.as_mut(), &mut left, &mut right, 0);
+        for profile in [
+            BankOffsetProfile::Uniform,
+            BankOffsetProfile::Ragged,
+            BankOffsetProfile::Mixed,
+        ] {
+            let sets = (0..lanes)
+                .map(|track| bank_profile_values(track, profile))
+                .collect::<Vec<_>>();
+            let requests = sets
+                .iter()
+                .map(|set| request_with(set, LinkMode::Average, 128, false))
+                .collect::<Vec<_>>();
+            let mut bank = support::bank(width, &requests);
+            let sizes = MultibandCompressorFactory
+                .prepare(requests[0])
+                .expect("scalar")
+                .metadata()
+                .state_sizes;
+            let mut left = support::signal(128 * lanes, 0x00C0_FFEE);
+            let mut right = support::signal(128 * lanes, 0x00DE_CAF0);
+            let offsets = vec![0u32; lanes + 1];
+            let mut sections = new_sections(sizes);
+            let run = |bank: &mut dyn effect_contract::PreparedNativeEffectBank,
+                       left: &mut [f32],
+                       right: &mut [f32],
+                       first: u64| {
+                bank.process_bank(
+                    EffectBankProcessBlock::new(
+                        left,
+                        right,
+                        None,
+                        128,
+                        width,
+                        first,
+                        &[],
+                        &offsets,
+                        128,
+                    )
+                    .expect("bank block"),
+                );
+            };
+            run(bank.as_mut(), &mut left, &mut right, 0);
 
-        let counted = events(|| {
-            run(bank.as_mut(), &mut left, &mut right, 128);
-            bank.reset(ResetKind::DiscontinuityKeepParameters);
-            bank.reset(ResetKind::FullToDefaults);
-            run(bank.as_mut(), &mut left, &mut right, 256);
-            bank.snapshot_track_state_payload(
-                1,
-                StatePayloadOutput::new(&mut sections.0, &mut sections.1, &mut sections.2, sizes)
+            let counted = events(|| {
+                run(bank.as_mut(), &mut left, &mut right, 128);
+                bank.reset(ResetKind::DiscontinuityKeepParameters);
+                bank.reset(ResetKind::FullToDefaults);
+                run(bank.as_mut(), &mut left, &mut right, 256);
+                bank.snapshot_track_state_payload(
+                    1,
+                    StatePayloadOutput::new(
+                        &mut sections.0,
+                        &mut sections.1,
+                        &mut sections.2,
+                        sizes,
+                    )
                     .expect("payload"),
-            )
-            .expect("snapshot");
-            bank.restore_track_state_payload(
-                1,
-                1,
-                StatePayloadInput::new(&sections.0, &sections.1, &sections.2, sizes)
-                    .expect("payload"),
-            )
-            .expect("restore");
-        });
-        assert_eq!(counted, 0, "{width:?} allocated {counted} times");
+                )
+                .expect("snapshot");
+                bank.restore_track_state_payload(
+                    1,
+                    1,
+                    StatePayloadInput::new(&sections.0, &sections.1, &sections.2, sizes)
+                        .expect("payload"),
+                )
+                .expect("restore");
+            });
+            assert_eq!(
+                counted, 0,
+                "{width:?} {profile:?} allocated {counted} times"
+            );
+        }
     }
 }

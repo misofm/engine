@@ -15,6 +15,7 @@ prefix.parent.mkdir(parents=True, exist_ok=True)
 paths = [
     "crates/multiband-compressor/src/lib.rs",
     "crates/multiband-compressor/tests/identity.rs",
+    "crates/multiband-compressor/tests/no_alloc_render.rs",
     "Cargo.toml",
     "Cargo.lock",
     ".cargo/config.toml",

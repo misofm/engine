@@ -68,20 +68,14 @@ fn profile_automation() -> [PreparedAutomationSpan; 4] {
     ]
 }
 
-fn assert_populated(
-    label: &str,
-    channels: &[Vec<f32>],
-    states: &[(Vec<u8>, Vec<u8>, Vec<u8>)],
-) {
+fn assert_populated(label: &str, channels: &[Vec<f32>], states: &[(Vec<u8>, Vec<u8>, Vec<u8>)]) {
     assert!(
-        channels
-            .iter()
-            .any(|channel| {
-                channel[960..].iter().any(|sample| {
-                    let bits = sample.to_bits();
-                    bits != 0 && bits != 0x8000_0000
-                })
-            }),
+        channels.iter().any(|channel| {
+            channel[960..].iter().any(|sample| {
+                let bits = sample.to_bits();
+                bits != 0 && bits != 0x8000_0000
+            })
+        }),
         "{label}: output after latency must be populated"
     );
     for (track, (_, left, right)) in states.iter().enumerate() {
@@ -248,7 +242,7 @@ fn run_banks_with_sets(
                     FRAMES as u32,
                     width,
                     (block * FRAMES) as u64,
-                    &spans,
+                    spans,
                     &offsets,
                     FRAMES as u32,
                 )
@@ -274,6 +268,7 @@ fn run_banks_with_sets(
     (channels, snapshots, reports)
 }
 
+#[allow(clippy::type_complexity)]
 fn run_banks(
     width: BankWidth,
     link: LinkMode,
@@ -334,6 +329,7 @@ fn run_scalar_with_sets(
     (channels, snapshots, reports)
 }
 
+#[allow(clippy::type_complexity)]
 fn run_scalar(
     link: LinkMode,
 ) -> (
@@ -409,7 +405,10 @@ fn detector_offset_profiles_preserve_public_identity() {
                         );
                     }
                 }
-                assert_eq!(bank_state, scalar_state, "profile={profile:?} link={link:?}");
+                assert_eq!(
+                    bank_state, scalar_state,
+                    "profile={profile:?} link={link:?}"
+                );
                 assert_eq!(
                     bank_reports, scalar_reports,
                     "profile={profile:?} link={link:?} width={width:?}"
@@ -452,7 +451,12 @@ fn assert_scalar_restore_transition(
     );
 
     let mut receiver = MultibandCompressorFactory
-        .prepare(request_with(&destination_values, link, FRAMES as u32, false))
+        .prepare(request_with(
+            &destination_values,
+            link,
+            FRAMES as u32,
+            false,
+        ))
         .expect("destination scalar");
     let mut warm_left = support::signal(RESTORE_PREFIX, 0xBEEF_0303);
     let mut warm_right = support::signal(RESTORE_PREFIX, 0xBEEF_0404);
@@ -512,18 +516,18 @@ fn assert_scalar_restore_transition(
 
     receiver.reset(ResetKind::FullToDefaults);
     let mut reset_reference = MultibandCompressorFactory
-        .prepare(request_with(&destination_values, link, FRAMES as u32, false))
+        .prepare(request_with(
+            &destination_values,
+            link,
+            FRAMES as u32,
+            false,
+        ))
         .expect("reset reference");
     let mut reset_left = support::signal(RESTORE_PREFIX, 0xD00D_0707);
     let mut reset_right = support::signal(RESTORE_PREFIX, 0xD00D_0808);
     let mut reset_reference_left = reset_left.clone();
     let mut reset_reference_right = reset_right.clone();
-    process_scalar_frames(
-        receiver.as_mut(),
-        &mut reset_left,
-        &mut reset_right,
-        0,
-    );
+    process_scalar_frames(receiver.as_mut(), &mut reset_left, &mut reset_right, 0);
     process_scalar_frames(
         reset_reference.as_mut(),
         &mut reset_reference_left,
@@ -568,13 +572,7 @@ fn assert_bank_restore_transition(
     let mut donor = support::bank(width, &source_requests);
     let sizes = donor.metadata().program_key.state_sizes;
     let (mut donor_left, mut donor_right) = bank_signal(RESTORE_PREFIX, lanes, 0xABCD_0101);
-    process_bank_frames(
-        donor.as_mut(),
-        width,
-        &mut donor_left,
-        &mut donor_right,
-        0,
-    );
+    process_bank_frames(donor.as_mut(), width, &mut donor_left, &mut donor_right, 0);
     let saved = (0..lanes)
         .map(|lane| snapshot_track(donor.as_ref(), lane as u32, sizes))
         .collect::<Vec<_>>();
@@ -583,8 +581,7 @@ fn assert_bank_restore_transition(
     }
 
     let mut reference = support::bank(width, &source_requests);
-    let (mut reference_left, mut reference_right) =
-        bank_signal(RESTORE_PREFIX, lanes, 0xABCD_0101);
+    let (mut reference_left, mut reference_right) = bank_signal(RESTORE_PREFIX, lanes, 0xABCD_0101);
     process_bank_frames(
         reference.as_mut(),
         width,
@@ -595,17 +592,14 @@ fn assert_bank_restore_transition(
 
     let mut receiver = support::bank(width, &destination_requests);
     let (mut warm_left, mut warm_right) = bank_signal(RESTORE_PREFIX, lanes, 0xDCBA_0202);
-    process_bank_frames(
-        receiver.as_mut(),
-        width,
-        &mut warm_left,
-        &mut warm_right,
-        0,
-    );
+    process_bank_frames(receiver.as_mut(), width, &mut warm_left, &mut warm_right, 0);
     let warm_state = (0..lanes)
         .map(|lane| snapshot_track(receiver.as_ref(), lane as u32, sizes))
         .collect::<Vec<_>>();
-    assert_ne!(warm_state, saved, "{source:?}->{destination:?} width={width:?}");
+    assert_ne!(
+        warm_state, saved,
+        "{source:?}->{destination:?} width={width:?}"
+    );
     for (lane, state) in saved.iter().enumerate() {
         receiver
             .restore_track_state_payload(
