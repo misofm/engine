@@ -632,6 +632,49 @@ fn invalid_and_saturated_publication_are_atomic_and_resources_have_exact_caps() 
     control.collect(ticket).expect("valid collection");
 
     let compiled = host_core::compile_host_session(SESSION, &caps()).expect("compile fixture");
+    {
+        use bench_support::alloc as bench_alloc;
+
+        bench_alloc::assert_installed();
+        let warm = Box::new([0_u8; 64]);
+        std::hint::black_box(&warm);
+        drop(warm);
+        let mut retained_below = caps();
+        retained_below.maximum_builtin_retained_bytes = resources
+            .endpoint_retained_heap_bytes
+            .checked_sub(1)
+            .expect("endpoint retained bytes are nonzero");
+        let retained_mark = bench_alloc::current_thread_counters();
+        assert!(matches!(
+            prepare_builtin_batch_endpoint(
+                &compiled,
+                &retained_below,
+                REVISION,
+                NonZeroUsize::new(1).unwrap()
+            ),
+            Err(host_core::BuiltinBatchPrepareError::ResourceLimit)
+        ));
+        let retained_delta = bench_alloc::current_thread_delta_since(retained_mark);
+        assert_eq!(retained_delta, bench_support::alloc::Counters::default());
+
+        let mut largest_below = caps();
+        largest_below.maximum_named_allocation_bytes = resources
+            .largest_endpoint_heap_allocation_bytes
+            .checked_sub(1)
+            .expect("endpoint largest allocation is nonzero");
+        let largest_mark = bench_alloc::current_thread_counters();
+        assert!(matches!(
+            prepare_builtin_batch_endpoint(
+                &compiled,
+                &largest_below,
+                REVISION,
+                NonZeroUsize::new(1).unwrap()
+            ),
+            Err(host_core::BuiltinBatchPrepareError::ResourceLimit)
+        ));
+        let largest_delta = bench_alloc::current_thread_delta_since(largest_mark);
+        assert_eq!(largest_delta, bench_support::alloc::Counters::default());
+    }
     let mut exact = caps();
     exact.maximum_builtin_retained_bytes = resources.composed_retained_heap_bytes;
     exact.maximum_named_allocation_bytes = resources.largest_composed_heap_allocation_bytes;
@@ -859,7 +902,13 @@ fn endpoint_drives_nonzero_pcm_through_the_prepared_bank_and_scalar_plan() {
         report.graph.map(|value| value.frames),
         Some(baseline_report.frames)
     );
-    assert_eq!(endpoint_samples, baseline_samples);
+    let to_bits = |samples: &[f32]| {
+        samples
+            .iter()
+            .map(|sample| sample.to_bits())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(to_bits(&endpoint_samples), to_bits(&baseline_samples));
     assert!(endpoint_samples.iter().any(|sample| sample.to_bits() != 0));
     assert_eq!(
         control.collect(ticket).expect("collect").disposition,

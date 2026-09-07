@@ -740,16 +740,23 @@ struct PreparedEndpointQueues {
     render: DeliveryCoreRender<BuiltinBatch>,
     outcomes: engine::realtime::Consumer<BuiltinBatchOutcome>,
     outcome_producer: Producer<BuiltinBatchOutcome>,
-    delivery_report: DeliveryResourceReport,
-    outcome_report: DeliveryResourceReport,
+}
+
+fn endpoint_queue_reports(
+    ticket_capacity: NonZeroUsize,
+) -> Result<(DeliveryResourceReport, DeliveryResourceReport), BuiltinBatchPrepareError> {
+    let delivery_report = PreparedDelivery::<BuiltinBatch>::resource_report(ticket_capacity)
+        .map_err(BuiltinBatchPrepareError::Delivery)?;
+    let outcome_report = outcome_resource_report(ticket_capacity)?;
+    Ok((delivery_report, outcome_report))
 }
 
 fn prepare_endpoint_queues(
     ticket_capacity: NonZeroUsize,
+    delivery_report: DeliveryResourceReport,
+    outcome_report: DeliveryResourceReport,
 ) -> Result<PreparedEndpointQueues, BuiltinBatchPrepareError> {
-    let delivery_report = PreparedDelivery::<BuiltinBatch>::resource_report(ticket_capacity)
-        .map_err(BuiltinBatchPrepareError::Delivery)?;
-    let outcome_report = outcome_resource_report(ticket_capacity)?;
+    let _preflight_reports = (delivery_report, outcome_report);
     let (control, render) = PreparedDelivery::<BuiltinBatch>::prepare(ticket_capacity)
         .map_err(BuiltinBatchPrepareError::Delivery)?;
     let (outcome_producer, outcomes) =
@@ -761,8 +768,6 @@ fn prepare_endpoint_queues(
         render,
         outcomes,
         outcome_producer,
-        delivery_report,
-        outcome_report,
     })
 }
 
@@ -811,9 +816,7 @@ fn prepare_builtin_batch_endpoint_with_backend(
 ) -> Result<PreparedBuiltinBatchEndpoint, BuiltinBatchPrepareError> {
     // Project endpoint storage before asking host preparation to allocate anything.  This makes
     // the endpoint's own aggregate and largest-allocation caps fail atomically.
-    let queues = prepare_endpoint_queues(ticket_capacity)?;
-    let delivery_report = queues.delivery_report;
-    let outcome_report = queues.outcome_report;
+    let (delivery_report, outcome_report) = endpoint_queue_reports(ticket_capacity)?;
     let endpoint_retained_bytes = delivery_report
         .retained_payload_bytes
         .checked_add(outcome_report.retained_payload_bytes)
@@ -867,12 +870,12 @@ fn prepare_builtin_batch_endpoint_with_backend(
     };
     let (host, handles) = host_result.map_err(BuiltinBatchPrepareError::Host)?;
     let host_report = host.report;
+    let queues = prepare_endpoint_queues(ticket_capacity, delivery_report, outcome_report)?;
     let PreparedEndpointQueues {
         control: delivery,
         render: render_delivery,
         outcomes: outcome_consumer,
         outcome_producer,
-        ..
     } = queues;
     let retained_bytes = host_report
         .builtin_retained_payload_bytes
@@ -1317,8 +1320,14 @@ mod tests {
             .expect("scalar endpoint render");
         let scalar_endpoint_state = test_only_scalar_state_trace();
         let scalar_endpoint_witness = test_only_fader_matrix_witness();
-        assert_eq!(bank_reference, bank_endpoint);
-        assert_eq!(scalar_reference, scalar_endpoint);
+        let to_bits = |samples: &[f32]| {
+            samples
+                .iter()
+                .map(|sample| sample.to_bits())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(to_bits(&bank_reference), to_bits(&bank_endpoint));
+        assert_eq!(to_bits(&scalar_reference), to_bits(&scalar_endpoint));
         assert!(scalar_endpoint_state.fader_len > 0);
         assert!(scalar_endpoint_state.matrix_len > 0);
         assert_eq!(scalar_endpoint_state, scalar_reference_state);
@@ -1391,6 +1400,17 @@ mod tests {
     }
 
     #[test]
+    fn pcm_bitwise_discriminator_rejects_signed_zero() {
+        let to_bits = |samples: &[f32]| {
+            samples
+                .iter()
+                .map(|sample| sample.to_bits())
+                .collect::<Vec<_>>()
+        };
+        assert_ne!(to_bits(&[0.0]), to_bits(&[-0.0]));
+    }
+
+    #[test]
     fn endpoint_queue_retention_matches_layout_and_reclaims_off_render() {
         use bench_support::alloc as bench_alloc;
 
@@ -1400,12 +1420,14 @@ mod tests {
         drop(warm);
         let capacity = NonZeroUsize::new(2).unwrap();
         let thread_mark = bench_alloc::current_thread_counters();
-        let queues = prepare_endpoint_queues(capacity).expect("queue preparation");
+        let (delivery_report, outcome_report) =
+            endpoint_queue_reports(capacity).expect("queue report");
+        let queues = prepare_endpoint_queues(capacity, delivery_report, outcome_report)
+            .expect("queue preparation");
         let thread_live = bench_alloc::current_thread_delta_since(thread_mark);
-        let expected_bytes = queues
-            .delivery_report
+        let expected_bytes = delivery_report
             .retained_payload_bytes
-            .saturating_add(queues.outcome_report.retained_payload_bytes);
+            .saturating_add(outcome_report.retained_payload_bytes);
         assert_eq!(thread_live.deallocations, 0);
         assert_eq!(thread_live.reallocations, 0);
         assert_eq!(thread_live.requested_bytes, expected_bytes);

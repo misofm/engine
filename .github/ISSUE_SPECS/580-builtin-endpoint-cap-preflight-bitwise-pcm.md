@@ -26,3 +26,20 @@ Allowed paths are `crates/host-core/src/builtin_batch_endpoint.rs`, `crates/host
 ## Workflow and completion
 
 Luna HIGH implements attempt 1. Astra LOW performs every adversarial source and exact-head/current-base review. Root checkpoints each coherent exact-path tranche, pushes promptly, synchronizes this issue plus #576/#579/#444/#559/#560, and obtains required CI on the exact reviewed head. On PASS, deliver the preserved #576/#579 chain, close all three child issues after upstream evidence, verify post-main qualification, and remove their clean delivered worktrees. The successor has at most three attempts; stop and rescope after a third FAIL without weakening gates.
+
+## Attempt 1 implementation record
+
+Attempt 1 restored report-only endpoint queue projections and validates endpoint retained/largest
+caps before host preparation or actual queue allocation. Exact and one-below behavior remains
+covered; warmed current-thread allocator checks prove both one-below refusals have zero allocation,
+free, realloc, and byte traffic, while the accepted positive retention test remains green. Moving
+queue construction before the cap check fails with 11 allocations, 11 frees, and 23,256 requested
+bytes; the mutation was restored.
+
+Native-bank and forced-scalar endpoint/reference PCM comparisons now compare mapped `f32::to_bits`
+arrays. A signed-zero discriminator rejects `+0.0` versus `-0.0`; changing it back to `f32`
+equality fails with the exact `[0.0]`/`[-0.0]` assertion. All mutations were restored.
+
+Debug all-target host-core tests, release endpoint tests, strict Clippy/rustdoc, formatting/diff,
+host/workspace policy, CI routing, and Wasm scalar/simd128 checks pass. Cargo.lock is restored;
+root owns checkpoint, review, GitHub synchronization, and final delivery gates.

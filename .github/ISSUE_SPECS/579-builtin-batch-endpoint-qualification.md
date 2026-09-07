@@ -308,3 +308,7 @@ not reopen the accepted cancellation, backend, meter, retained-layout, state,
 PostFader, pairing, protocol, graph, artifact, or lane-B work. #579 remains open and
 undelivered until that successor earns exact-head PASS and delivers the preserved
 source.
+
+## Successor #580 linkage
+
+Issue #580 attempt 1 preserves the accepted #579 source and closes the two residual defects: report-only endpoint retained/largest preflight before host/queue allocation, and mapped bitwise PCM plus signed-zero discrimination. Its focused evidence is `docs/audits/580-builtin-endpoint-cap-preflight-bitwise.md`.
