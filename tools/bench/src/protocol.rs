@@ -10,7 +10,7 @@
 
 use bench_support::alloc as bench_alloc;
 use bench_support::json::escape;
-use std::{cell::Cell, env, fs, process::Command, time::Instant};
+use std::{cell::Cell, env, fs, time::Instant};
 
 use protocol::{
     AutomationEnqueue, AutomationKind, AutomationRecord, Backpressure, BackpressureQueueKind,
@@ -1527,13 +1527,7 @@ fn command(args: &[&str]) -> String {
     let Some((program, rest)) = args.split_first() else {
         return "unknown".to_owned();
     };
-    Command::new(program)
-        .args(rest)
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| String::from_utf8(output.stdout).ok())
-        .map(|output| output.trim().to_owned())
+    bench_support::sysinfo::command_output(program, rest)
         .filter(|output| !output.is_empty())
         .unwrap_or_else(|| "unknown".to_owned())
 }
@@ -1661,5 +1655,22 @@ mod tests {
         ] {
             assert!(record.contains(required), "missing schema field {required}");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn metadata_command_projection_maps_empty_and_failures_to_unknown() {
+        assert_eq!(command(&["/bin/sh", "-c", "printf '  text  \\n'"]), "text");
+        assert_eq!(command(&["/bin/sh", "-c", "true"]), "unknown");
+        assert_eq!(command(&["/bin/sh", "-c", "printf ' \\n\\t'"]), "unknown");
+        assert_eq!(
+            command(&["/bin/sh", "-c", "printf plausible; exit 7"]),
+            "unknown"
+        );
+        assert_eq!(
+            command(&["/definitely/missing/metadata-command"]),
+            "unknown"
+        );
+        assert_eq!(command(&["/bin/sh", "-c", r"printf '\377'"]), "unknown");
     }
 }
