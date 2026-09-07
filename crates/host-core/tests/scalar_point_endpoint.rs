@@ -10,21 +10,23 @@ use effect_contract::{
     ProcessReport, ResetKind, StatePayloadError, StatePayloadInput, StatePayloadOutput,
 };
 use host_core::{
-    PlanSampleSource, ScalarPointAdmissionError, ScalarPointCancelBoundaryError, ScalarPointFault,
-    ScalarPointFaultCause, ScalarPointFaultProgress, ScalarPointNativeOperation,
-    ScalarPointRenderError, SessionControlProvider, prepare_controller_scalar_point_endpoint,
+    ControllerScalarPointPrepareError, PlanSampleSource, ScalarPointAdmissionError,
+    ScalarPointCancelBoundaryError, ScalarPointFault, ScalarPointFaultCause,
+    ScalarPointFaultProgress, ScalarPointNativeOperation, ScalarPointRenderError,
+    SessionControlProvider, prepare_controller_scalar_point_endpoint,
     prepare_scalar_point_endpoint,
 };
 use protocol::{
     AutomationBatchError, AutomationBatchSlot, AutomationCancellationReason,
     AutomationEnqueueError, AutomationKind, AutomationRecord, ControlCommand, ControlProvider,
-    ControllerRequest, ControllerRetainedCapacity, CounterId, CountersRequest, DecodeScratch,
-    DecodedEventPayload, DecodedSuccessResponsePayload, DecodedTypedEventFrame,
-    DecodedTypedResponseFrame, DeliveryError, ExpectedRevision, HandoffResult,
-    ParameterChannel as ProtocolParameterChannel, ParameterHandle, ParameterMetadataRequest,
-    ParameterStateRequest, PreparedAutomationDelivery, ProtocolCodec, ProtocolControllerConfig,
-    ProtocolQueueConfig, ProviderFeatures, ReliablePayload, ReplayCacheConfig, RequestId,
-    SampleTime, SessionRevision, StatusCode,
+    ControllerAutomationDelivery, ControllerRequest, ControllerRetainedCapacity, CounterId,
+    CountersRequest, DecodeScratch, DecodedEventPayload, DecodedSuccessResponsePayload,
+    DecodedTypedEventFrame, DecodedTypedResponseFrame, DeliveryError, ExpectedRevision,
+    HandoffResult, ParameterChannel as ProtocolParameterChannel, ParameterHandle,
+    ParameterMetadataRequest, ParameterStateRequest, PreparedAutomationDelivery,
+    PreparedDeliveryCapabilities, ProtocolCodec, ProtocolControllerConfig, ProtocolQueueConfig,
+    ProviderFeatures, ReliablePayload, ReplayCacheConfig, RequestId, SampleTime, SessionRevision,
+    StatusCode,
 };
 use std::sync::{
     Arc,
@@ -1942,4 +1944,181 @@ fn controller_cancellation_keeps_real_prefix_event_credit_and_native_state() {
     );
     assert_eq!(controller.outstanding(), 0);
     drop(render.stop());
+}
+
+#[test]
+fn controller_scalar_preflight_rejections_and_single_allocation_authority() {
+    const CHILD: &str = "MISO_ENGINE_CONTROLLER_SCALAR_GROUP3_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let status = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .arg("--exact")
+            .arg("controller_scalar_preflight_rejections_and_single_allocation_authority")
+            .arg("--nocapture")
+            .env(CHILD, "1")
+            .status()
+            .expect("isolated Group3 child");
+        assert!(status.success(), "isolated Group3 child failed");
+        return;
+    }
+
+    use bench_support::alloc as bench_alloc;
+    use std::hint::black_box;
+
+    bench_alloc::set_mode(bench_alloc::Mode::Count);
+    bench_alloc::assert_installed();
+    let direct_fixture = real_controller_fixture();
+    let direct_handles = direct_fixture.handles;
+    let direct_capabilities = PreparedDeliveryCapabilities::new_exact(&[
+        (direct_handles[0], AutomationKind::Point),
+        (direct_handles[1], AutomationKind::Point),
+    ])
+    .expect("direct Point capabilities");
+    let direct_mark = bench_alloc::counters();
+    let (direct_controller, direct_render, direct_resources) =
+        ControllerAutomationDelivery::prepare(
+            direct_fixture.session,
+            controller_queue_config(),
+            direct_fixture.provider,
+            controller_replay_config(),
+            ProtocolCodec::default(),
+            controller_config(),
+            ControllerRetainedCapacity {
+                meter_handles: 0,
+                counter_ids: 0,
+            },
+            direct_capabilities,
+        )
+        .expect("direct #530 preparation");
+    let direct_delta = bench_alloc::delta_since(direct_mark);
+    black_box((&direct_controller, &direct_render, &direct_resources));
+
+    let mut combined_fixture = real_controller_fixture();
+    let combined_handles = combined_fixture.handles;
+    let processor = combined_fixture.effects.entries[0].processor.as_mut();
+    let combined_mark = bench_alloc::counters();
+    let (combined_controller, combined_render, resources) =
+        prepare_controller_scalar_point_endpoint(
+            processor,
+            combined_handles,
+            combined_fixture.session,
+            controller_queue_config(),
+            combined_fixture.provider,
+            controller_replay_config(),
+            ProtocolCodec::default(),
+            controller_config(),
+            ControllerRetainedCapacity {
+                meter_handles: 0,
+                counter_ids: 0,
+            },
+        )
+        .expect("combined preparation");
+    let combined_delta = bench_alloc::delta_since(combined_mark);
+    let transient_bytes = ("comp0".len() + "comp".len()) as u64;
+    assert_eq!(combined_delta.allocations, direct_delta.allocations + 2);
+    assert_eq!(combined_delta.deallocations, direct_delta.deallocations + 2);
+    assert_eq!(combined_delta.reallocations, direct_delta.reallocations);
+    assert_eq!(
+        combined_delta.requested_bytes,
+        direct_delta.requested_bytes + transient_bytes
+    );
+    assert_eq!(
+        resources.controller.queue_and_delivery,
+        direct_resources.queue_and_delivery
+    );
+    assert_eq!(
+        resources.controller.queue_and_delivery,
+        PreparedAutomationDelivery::resource_report_for_config(controller_queue_config()).unwrap()
+    );
+    assert_eq!(
+        resources.scalar_render_inline_bytes,
+        core::mem::size_of_val(&combined_render)
+    );
+    black_box((&combined_controller, &combined_render, &resources));
+    drop(combined_render);
+    drop(combined_controller);
+    drop(direct_render);
+    drop(direct_controller);
+
+    let bad_native_fixture = real_controller_fixture();
+    let bad_native_handles = bad_native_fixture.handles;
+    let mut bad_native = effect();
+    let bad_native_result = prepare_controller_scalar_point_endpoint(
+        &mut *bad_native,
+        bad_native_handles,
+        bad_native_fixture.session,
+        controller_queue_config(),
+        bad_native_fixture.provider,
+        controller_replay_config(),
+        ProtocolCodec::default(),
+        controller_config(),
+        ControllerRetainedCapacity {
+            meter_handles: 0,
+            counter_ids: 0,
+        },
+    );
+    assert_eq!(
+        matches!(
+            bad_native_result,
+            Err(ControllerScalarPointPrepareError::ScalarPoint(
+                host_core::ScalarPointPrepareError::InvalidProcessor
+            ))
+        ),
+        true
+    );
+    let mut bad_left = [0.1_f32; Q];
+    let mut bad_right = [-0.1_f32; Q];
+    warm(&mut *bad_native);
+    process(&mut *bad_native, &mut bad_left, &mut bad_right, 0, &[]);
+    assert!(
+        bad_left
+            .iter()
+            .chain(&bad_right)
+            .any(|sample| *sample != 0.0)
+    );
+
+    let mut bad_binding_fixture = real_controller_fixture();
+    let bad_binding_handles = bad_binding_fixture.handles;
+    let wrong_right = ParameterHandle(bad_binding_handles[1].0 + 1);
+    let bad_binding = prepare_controller_scalar_point_endpoint(
+        bad_binding_fixture.effects.entries[0].processor.as_mut(),
+        [bad_binding_handles[0], wrong_right],
+        bad_binding_fixture.session,
+        controller_queue_config(),
+        bad_binding_fixture.provider,
+        controller_replay_config(),
+        ProtocolCodec::default(),
+        controller_config(),
+        ControllerRetainedCapacity {
+            meter_handles: 0,
+            counter_ids: 0,
+        },
+    );
+    assert!(matches!(
+        bad_binding,
+        Err(ControllerScalarPointPrepareError::InvalidProviderBinding)
+    ));
+
+    let mut bad_clock_fixture = real_controller_fixture();
+    let bad_clock_handles = bad_clock_fixture.handles;
+    bad_clock_fixture.clock.0.store(1, Ordering::Release);
+    let bad_clock = prepare_controller_scalar_point_endpoint(
+        bad_clock_fixture.effects.entries[0].processor.as_mut(),
+        bad_clock_handles,
+        bad_clock_fixture.session,
+        controller_queue_config(),
+        bad_clock_fixture.provider,
+        controller_replay_config(),
+        ProtocolCodec::default(),
+        controller_config(),
+        ControllerRetainedCapacity {
+            meter_handles: 0,
+            counter_ids: 0,
+        },
+    );
+    assert!(matches!(
+        bad_clock,
+        Err(ControllerScalarPointPrepareError::InitialSampleMismatch {
+            observed: SampleTime(1)
+        })
+    ));
 }
