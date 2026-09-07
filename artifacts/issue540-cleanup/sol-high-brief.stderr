@@ -1,0 +1,748 @@
+OpenAI Codex v0.153.4
+--------
+workdir: /home/bl/misofm/engine-worktree-cleanup
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: danger-full-access
+reasoning effort: high
+reasoning summaries: none
+session id: 01a07aa7-98c4-7b23-8f45-6b0538ffc34c
+--------
+user
+Sol HIGH bounded documentation-only brief approval for user-requested #540. Worktree /home/bl/misofm/engine-worktree-cleanup clean pushedae666af7, base32a4c205. Read applicableAGENTS and .github/ISSUE_SPECS/540-merged-worktree-cleanup.md. User explicitly wants merged localworktreesremoved to reclaimspace; rootalreadyremoved9clean/upstream-preservedcompletedworktrees, ~31.8GiB availabledelta recorded artifacts/issue540-cleanup; activeprimary/audithandoff/limiter preserved. No audio/performance/correctnessreview; no builds/tests/edits/Git/GitHub writes/agents. Return COMPLETE concise finalreport; don'twrite ownreportfile. Approve smallest documentation change only AGENTS.md delivery-control bullet: aftermerge finishrequired evidence/GitHubsync, verifycleanandallcheckpointspushed/requiredevidencepreservedoutside, removecompletedworktree usinggitworktreeremove (alsointegratedviaanotherPR/completeddetachedbaselines), retainbranches/history andactive/primarycheckouts, reportconcreteblocker ratherthandiscardunique work/evidence. No newcleanupframework or permissionceremony. Rootuserauthorizationcoverscleanup; no needreaskuser. Verify numberedremote540identity/body/currentbase and conciseevidenceenoughtorule, notallhistoricalengineissues. Return baseline/scopePASSauthorizingLuna high exactdocedit or concrete necessarycorrection. FinalSolhighdiffreview+requiredCI/merge/closure/selfworktreeremoval follow.
+
+codex
+I’ll verify the governing instructions, #540’s local/remote identity and body, the cleanup evidence, and the current clean/pushed baseline. I’ll keep this strictly read-only and return only a bounded brief verdict.
+exec
+/bin/bash -lc "pwd && rg --files -g 'AGENTS.md' -g '.github/ISSUE_SPECS/540-merged-worktree-cleanup.md' -g 'artifacts/issue540-cleanup/**' | sort && git status --short --branch && git rev-parse HEAD && git rev-parse --abbrev-ref HEAD && git remote -v" in /home/bl/misofm/engine-worktree-cleanup
+ succeeded in 0ms:
+/home/bl/misofm/engine-worktree-cleanup
+AGENTS.md
+artifacts/issue540-cleanup/approved-removals.json
+artifacts/issue540-cleanup/inventory.json
+artifacts/issue540-cleanup/removed.json
+artifacts/issue540-cleanup/space.json
+## codex/merged-worktree-cleanup...origin/codex/merged-worktree-cleanup
+ae666af7784c0c24f1be0c6850888dac981f61e9
+codex/merged-worktree-cleanup
+origin	https://github.com/misofm/engine (fetch)
+origin	https://github.com/misofm/engine (push)
+
+exec
+/bin/bash -lc "wc -l AGENTS.md .github/ISSUE_SPECS/540-merged-worktree-cleanup.md artifacts/issue540-cleanup/*.json && sed -n '1,260p' AGENTS.md && sed -n '261,520p' AGENTS.md && sed -n '1,260p' .github/ISSUE_SPECS/540-merged-worktree-cleanup.md" in /home/bl/misofm/engine-worktree-cleanup
+ succeeded in 0ms:
+  196 AGENTS.md
+   11 .github/ISSUE_SPECS/540-merged-worktree-cleanup.md
+  167 artifacts/issue540-cleanup/approved-removals.json
+  164 artifacts/issue540-cleanup/inventory.json
+   56 artifacts/issue540-cleanup/removed.json
+    7 artifacts/issue540-cleanup/space.json
+  601 total
+# Engine V1 agent guide
+
+## Mission
+
+`misofm/engine` is a greenfield, headless Rust music-production engine for agents that work between musicians and the engine.  Agents require a deliberately broad, granular semantic API; the runtime ABI remains narrow, stable, and efficient.  Build for native/cloud embedding, iOS, Android, and browser WebAssembly.  PCM is the engine output; delivery codecs live outside this repository.
+
+Never inspect, copy, benchmark against, or inherit an architecture from a legacy engine source.  A useful idea may be independently re-derived and justified, but this engine is not a port.
+
+## Product principles
+
+- Sound quality and DSP correctness are first-class release criteria, not marketing language.  Prefer academically documented methods and verify them with fixtures and listening tests.
+- Optimize ruthlessly but simply.  Ship a correct measurable implementation, record diminishing-return work as an issue, and reserve systematic optimization for the weekly performance pass.
+- Make realtime processing allocation-free.  Allocate, parse, compile plans, perform I/O, decode, and load effects only on control/worker threads.
+- Support arbitrary track counts constrained only by configured resources: never introduce a compiled `MAX_TRACKS`.
+- Use SIMD at macro and micro levels: Wasm `simd128` and AArch64 NEON four-lane `f32` banks, AVX2 eight-lane specializations, and scalar/tail fallback.  Native x86 is x86-64-v3: AVX2 and FMA are pinned at compile time and attested once at boot (issue #83, master plan D4), never dispatched at runtime.
+- Sessions are strict, versioned canonical JSON.  The control schema is expressive; session compilation is transactional.  Protocol mutations update the same typed session model and must be snapshot-able back to canonical JSON.
+- Every Cargo package under `crates/`, `hosts/`, `tools/` and `sidecars/` uses a short, unprefixed name -- no `miso-engine-` prefix (e.g. `crates/session`, `tools/audit`).  `[lib]`/`[[bin]]` identifiers equal the package name with hyphens turned to underscores, uniformly and without exception; the directory basename equals the package name exactly.  The render engine's foundation crate is named `engine` (`crates/engine`, lib `engine`) -- deliberately not `core`: a package literally named `core` silently shadows Rust's own sysroot `core` crate for every dependent (it compiles, then fails downstream with no diagnostic that explains itself, and collapses the prelude and the `derive` attribute outright in a `no_std` crate), and neither `::core::` nor `extern crate core as x` escapes it.  No package may be named `core`, `std`, `alloc`, `proc_macro` or `test` for the same reason (`scripts/check-workspace-policy.sh` gates this exactly).  This scheme replaced the repo's earlier `miso-engine-`-prefixed convention in full; `docs/rulings/prefix-strip-inventory.md` is the classification and the evidence, on the same model as issue #215's `docs/rulings/de-versioning-inventory.md`.  Wire tags, exported C-ABI symbols and other gate-pinned or sealed spellings (`miso_engine_v1_*`, `miso_engine_web_v1_*`, `miso_engine_effect_*_v1`, `miso_engine_graph_v1`) are contract identity, not crate-name decoration, and this rename does not touch them -- see the version-suffix rule below, which draws exactly this distinction.
+- A version suffix is contract identity, never decoration. Internal implementation names -- types, functions, constants, test oracles, kernels, stages, banks, records -- are **born unversioned**. Where a wire tag, schema, exported ABI symbol, gate-pinned spelling, or sealed contract genuinely needs a version, its prelaunch identity is `V1`/`_v1`; no live product surface may claim a later generation before launch. The judgment is about the **name's** visibility, not the payload's: a Rust struct whose bytes go on a wire but whose name never leaves the binary is unversioned. Issue #215 removed the internal prelaunch suffixes, and issue #313 reset live boundary identities to V1; `docs/rulings/de-versioning-inventory.md` records the earlier classification.
+
+## Approved audio architecture
+
+The realtime plane exclusively owns a preallocated `PreparedRenderPlan` at a caller-supplied explicit `u32` sample rate and render quantum.  Its graph, schedule, capacities, and parameter schema are structurally immutable while its preallocated DSP state is intentionally mutated by `render(&mut self, ...)`.  Render must perform **zero allocations/frees, locks, file/network I/O, logging, syscalls, structural plan mutation, or data-dependent unbounded calls**, with no exception: the native dependency-wave scheduler that once justified a single `Thread::unpark` per block has been removed, so render is syscall-free outright (see `docs/REALTIME_DEPENDENCY_POLICY.md`).  Every structural control-plane mutation produces and validates a replacement plan, then transfers ownership only at a documented block boundary.  The displaced plan goes to a bounded retirement queue and is reclaimed off the render thread; a full retirement queue defers the swap rather than dropping on render.
+
+Tracks are dual-mono: left and right have independent state and parameters.  A processor that links channels must expose its detector-link mode.  Cross-channel operation uses an explicit smoothed 2x2 matrix; it is never implicit “stereo.”  “Builtins” is an umbrella over fixed input and output sections.  The required chain is:
+
+`input -> polarity/trim/HPF/LPF -> SIMD rack 1 -> dynamic rack -> SIMD rack 2 -> fader/mute -> 2x2 matrix/pan -> routes`
+
+Meters may observe any boundary without changing signal flow.  Send taps are explicit stable enum values: input, post-input-builtins, post-SIMD1, post-dynamic, post-SIMD2/pre-fader, post-fader, and post-matrix.  Graphs are typed and acyclic; compilation has deterministic topological ordering/reductions and exact integer-sample plugin-delay compensation (PDC), including sends and sidechains.  Prepared effect latency is fixed, and bypass must preserve it.  Feedback is a future capability and must have an explicit positive-latency edge.
+
+Audio buffers are planar `f32`, banked AoSoA across tracks: at each sample, a vector contains the same dual-mono lane from four Wasm/NEON tracks or eight AVX2 tracks.  L and R use separate vectors and state.  A bank cohort shares an effect-program signature (slot types/order, quality, and compatible routing), while parameters/state remain per-track; absent slots are identity kernels and incompatible tracks form another cohort or take a documented scalar/dynamic fallback.  Scalar tails support every track count.  Base Wasm SIMD uses multiply plus add because fused multiply-add is not guaranteed; relaxed SIMD is optional and correctness must not depend on it.  Native and browser launch are both single render-thread. Preallocated deterministic dependency waves were built, qualified and then removed as production-unreachable; reintroducing multicore render requires a new issue that re-earns it, not a revival.
+
+Single-thread execution is the render model.  Should multicore render return, the standing rules are that workers write disjoint outputs and reduce in stable node-ID order, are prestarted, and cannot allocate, steal heap jobs, or make the render coordinator wait on an OS mutex.
+
+Sources stream just-in-time: native WAV/RF64 decode workers fill bounded SPSC PCM rings, seeks are generation-tagged, and underrun emits zero plus a counter.  Browser/mobile hosts provide decoded chunks to equivalent bounded rings.  Never load whole stems solely to render a session.  Launch-supported session/render rates are exactly 44.1, 48, 88.2, and 96 kHz; 176.4, 192, 352.8, and 384 kHz are extended compatibility/research evidence only, not host or release support.  There is no implicit SRC in this sprint; host-rate mismatch is rejected or made explicit in a later plan.
+
+## Effects and plugins
+
+The initial native effect library is EQ, compressor, gate/expander, de-esser, true-peak limiter, dynamic EQ, multiband compressor, antialiased saturator/clipper, transient shaper, and dual-mono/stereo delay.  Every effect exposes stable numeric parameter IDs, units, domains, mappings, defaults, automation rate, smoothing, state, ports/sidechains, link modes, latency, tail, quality modes, reset semantics, and safe NaN/denormal behavior.  A native effect may run track-locally in any rack.  Bank eligibility is decided by the effect's homogeneous bank kernel contract, never by which rack the session placed it in: a native effect that carries the contract banks in the dynamic rack exactly as it does in a SIMD rack, and one that does not carry it renders per node in a SIMD rack exactly as it does in the dynamic rack (issue #163 phase 1).  Banking regroups lanes; it never changes per-lane arithmetic, so a placement change must not move a rendered bit.
+
+Third-party effects are designed now but do not execute at launch.  Sessions identify them by a deterministic CIDv1 over a canonical package byte sequence; a CID identifies exact bytes, not trust, quality, or cross-CPU bit identity.  Resolution, download, signature policy and cache verification happen off render, with no installation or licensing-dongle dependency; a public repository/resolver is future product scope.  Third-party core Wasm has no WASI/syscalls, bounded memory/state/scratch, declared latency/tail, and is compiled/validated off the render thread.  It is permitted only in the dynamic rack, and it never banks anywhere: opaque per-instance Wasm supplies no homogeneous/fused SIMD bank kernel.  This is the one boundary rack placement does not decide either -- opacity disqualifies a bank wherever the effect sits, and the dynamic rack becoming a bank location does not relax it.  A future executor must run it on sandbox workers through a bounded, at-least-one-quantum latency pipeline; the callback never invokes a general-purpose Wasm runtime and uses deterministic latency-preserving bypass on faults or late blocks.  Promotion to native requires audit, licensing, conformance, sound-quality, and performance evidence.
+
+## Interfaces and transports
+
+Expose a broad semantic control model and a narrow C ABI.  The control protocol is versioned, binary, transport-neutral, request-id/revision aware, uses absolute sample-time parameter events, and never transports PCM.  High-rate automation may use bounded point batches or step/linear/exponential segments.  Queue saturation returns typed backpressure; commands are never silently lost, while explicitly noncritical telemetry may be coalesced or dropped with counters.  In-process calls and shared/ring interfaces serve embedded hosts; a local sidecar may use local IPC; binary WebSocket is optional only at cloud/browser network boundaries, never in a render path.
+
+## Realtime, quality, and research evidence
+
+Every effect issue and implementation note must state: equations/algorithm; coefficient and update rules; numerical and stability limits; latency and tail; units and smoothing; denormal/NaN behavior; primary/official citations; fixtures; objective tests; benchmarks; and listening evidence.  Cite concise paraphrases, not copied prose.  Start with the repo research corpus and primary/official material, including:
+
+- [RBJ Audio EQ Cookbook](https://webaudio.github.io/Audio-EQ-Cookbook/audio-eq-cookbook.html)
+- [Giannoulis, Massberg and Reiss, dynamic range compression](https://eecs.qmul.ac.uk/~josh/documents/2012/GiannoulisMassbergReiss-dynamicrangecompression-JAES2012.pdf)
+- [ITU-R BS.1770-5](https://www.itu.int/rec/R-REC-BS.1770-5-202311-I) and [EBU R 128](https://tech.ebu.ch/publications/r128)
+- Sophocles Orfanidis, *Introduction to Signal Processing*; P. P. Vaidyanathan, *Multirate Systems and Filter Banks*; and Julius O. Smith, *Spectral Audio Signal Processing*
+- AES17 measurement methods and peer-reviewed antiderivative/oversampled antialiasing literature for nonlinear processors
+- [Rust browser Wasm target](https://doc.rust-lang.org/rustc/platform-support/wasm32-unknown-unknown.html), [Web Audio](https://www.w3.org/TR/webaudio-1.1/), and [WebAssembly core spec](https://webassembly.github.io/spec/core/)
+- [Apple render-block guidance](https://developer.apple.com/documentation/audiotoolbox/auaudiounit/renderblock) and [Android low-latency guidance](https://developer.android.com/games/sdk/oboe/low-latency-audio)
+- [CIDv1 specification](https://specs.ipfs.tech/cid/), [RFC 6455](https://www.rfc-editor.org/rfc/rfc6455.html), and [VST3 latency contract](https://steinbergmedia.github.io/vst3_doc/vstinterfaces/classSteinberg_1_1Vst_1_1IAudioProcessor.html)
+
+The corpus must also compare official routing/channel/bus/latency/automation documentation for at least three current large-format hardware consoles and two production DAWs.  DiGiCo, SSL, Lawo, Avid, Logic, and Ableton are candidate families, not designs to copy.  Record common patterns, conflicting choices, and the measured reason for every V1 adoption.
+
+Use objective gates: allocation counters, deterministic fixtures, SIMD/scalar tolerances, PDC sample counts, memory ceilings independent of stem duration, cycle/CPU measurements, fault injection, and documented blinded listening evidence.  Subjective superlatives and unevidenced sound-quality claims are never acceptance gates.
+
+## Issue-first execution and review workflow
+
+Work only from a stateless issue body in `.github/ISSUE_SPECS/`; update its evidence/decision record as implementation learns facts.  Do not make cross-cutting architecture changes without a new or amended issue.
+
+Create local Git checkpoint commits frequently at coherent, compiling or otherwise explicitly documented milestones so work is recoverable.  Push those checkpoints promptly when the current delivery mode calls for checkpoint pushes.  When the user requests CI-conscious batching, checkpoint locally on one dedicated feature branch and defer upstream pushes until the coherent batch boundary; batching changes push frequency, never local commit frequency.  A failed attempt may be committed when its evidence is candid and the tree is a useful checkpoint.  Never commit `target/`, fuzz artifacts, secrets, or unrelated generated output; do not rewrite or discard another agent's/user's history.
+
+1. **Sol briefs** the issue and approves its scope, decision record, and objective gates.
+2. **Terra implements attempt 1** and attaches required evidence.
+3. **Sol adversarially reviews** the implementation against the issue, architecture, realtime rules, portability, and evidence.
+4. If needed, **Sol performs up to two implementation/revision attempts**, each re-reviewed adversarially by Sol.
+5. After three failed attempts total, stop.  Do not weaken gates to declare success.  Rescope/rebrief the issue, then restart the same workflow.
+
+Research delegation should use Terra agents where possible to preserve Sol review capacity.  The workflow records who supplied evidence but never substitutes authority for testable gates.
+
+### Delivery-control rules
+
+GitHub state is part of the deliverable, not optional bookkeeping.  The local spec and its matching
+GitHub issue must stay synchronized:
+
+- When a local numbered issue spec is created, create the matching GitHub issue in the same
+  checkpoint.  Confirm that its GitHub number and title match the local filename/index before
+  starting implementation.
+- After every pushed implementation checkpoint, add or refresh concise GitHub evidence when it
+  materially changes the issue's status.  Never let a completed issue exist only as a local
+  decision record.
+- As soon as Sol records PASS and the evidence commit is upstream, close the GitHub issue in that
+  same workflow.  Verify the remote state after closing it.  A task does not count as complete in
+  progress reporting until GitHub is synchronized.
+- At every issue boundary, compare `.github/ISSUE_SPECS/` with `gh issue list --state all` and fix
+  missing, stale, or incorrectly closed entries before starting the next issue.
+
+Recovery and throughput are also hard delivery requirements:
+
+- Keep at most one uncommitted implementation tranche in the shared worktree.  As soon as a tranche
+  compiles and its focused tests pass, its owner must pause; the root agent commits that exact-path
+  checkpoint before more implementation is layered onto it.  Push immediately in checkpoint-push
+  mode, or retain the commit locally on the active batch branch in CI-conscious batch mode.
+- Do not carry a coherent checkpoint across three agent handoffs or more than 30 minutes of active
+  work without committing it.  If the slice is not green, commit only when the failure is candidly
+  documented and the tree remains useful and buildable; otherwise reduce the slice until it is.
+- The root agent performs a status/commit/upstream audit at every checkpoint notification.  A new
+  implementation tranche must not start while an earlier coherent tranche is waiting to be
+  committed.  In checkpoint-push mode it must not wait for a required push either; in CI-conscious
+  batch mode a local checkpoint commit is sufficient until the declared batch boundary.
+- Limit active implementation WIP to one launch-critical feature issue.  Other agents may brief,
+  review, or work on genuinely independent bounded issues, but must not create overlapping edits or
+  make broad workspace gates unreliable.
+- Briefs must identify a smallest closable product slice and separate qualification/tooling work
+  before implementation.  If a feature cannot reasonably reach that slice in half a working day,
+  split it up front.  Fixture expansion, long audits, target matrices, listening, and benchmark
+  machinery must not keep an otherwise usable product slice open when they can be stateless
+  successor issues.
+- Report throughput as pushed, remotely synchronized capabilities.  After two consecutive
+  checkpoints without closing or materially advancing an issue, root must stop the current shape,
+  reduce scope, or create a bounded successor before authorizing more implementation.
+
+### CI-conscious batch delivery
+
+When the user requests fewer CI/CD invocations, use this delivery mode until they change it:
+
+- Create one local `codex/batch-*` feature branch from the synchronized default branch.  Keep
+  frequent exact-path local checkpoint commits, but do not push each checkpoint.
+- Do not open or refresh a pull request while the batch is still accumulating.  A pull-request
+  update is a CI event even when ordinary feature-branch pushes are ignored.
+- At a coherent batch boundary, run the proportional local gates once, push the batch branch at
+  most once if remote review is needed, then merge or fast-forward and push `main` once.  Do not
+  manufacture empty commits or force-push merely to obtain another CI run.
+- GitHub issue evidence may be prepared locally during the batch, but do not claim remote
+  synchronization or close an issue until its evidence commit is actually upstream.  Synchronize
+  all completed issue bodies/states immediately after the single batch push.
+- `.github/workflows/qualification.yml` is the only required status check on `main` (design #359;
+  its `verdict` job's own `name:` is `qualification`).  It ignores ordinary feature-branch pushes,
+  runs for `main` pushes and pull requests targeting `main`, and cancels superseded pull-request
+  runs for the same ref (never a `main` push, so a superseded push cannot starve its own
+  `rust-cache` saves).  It carries no `paths:`/`paths-ignore:` filter on any trigger -- a required
+  workflow that a path filter can skip leaves that PR's required context pending forever -- so
+  every leaf job is instead gated by its own router's `route` output, and the verdict enforces
+  that every job's result matches a static expectation table.
+- A job that cannot fail a merge does not belong on `qualification.yml`.  `fuzz.yml` and
+  `nightly.yml` are the non-required workflows: `fuzz.yml` is a paths-filtered per-PR workflow for
+  the two bounded fuzz jobs, and `nightly.yml` carries the jobs that gate nothing at all (the
+  non-blocking vectorization report, the descriptive benchmarks, the release-workspace link proof)
+  plus the deep fuzzing and math sweeps the per-PR budget cannot afford.  A check that stops
+  reporting on some pull requests must be removed from `main`'s required status checks first, or
+  every pull request that skips it stays permanently pending.
+
+Keep feature issues small enough to ship.  A feature issue owns the minimum implementation and
+evidence needed to prove its product contract; generic harness hardening, artifact promotion,
+extended compatibility research, and human scheduling belong in separate stateless issues.  Split
+the work before implementation when any of these are true:
+
+- the brief combines more than one independently useful product outcome;
+- new review findings require a second benchmark framework, a second large fixture corpus, or an
+  unrelated host/tooling subsystem;
+- the correction would materially expand the issue beyond its original crates or dependency
+  boundary; or
+- a benchmark-runner defect remains after one bounded correction.
+
+The three-attempt rule is a hard delivery stop, not permission for an issue to consume unlimited
+sub-rounds.  Each attempt gets one coherent implementation pass and one adversarial verdict.
+Progress-only agent turns do not create extra attempts, but they must be consolidated or reassigned
+when they stop producing commit-ready checkpoints.  After attempt three fails, preserve evidence,
+split or rescope once, and move to the newly bounded issue; never perform a disguised fourth retry.
+
+Benchmarks are descriptive during feature development.  Freeze the workload and validator before
+timing, run exactly one invocation with one warmup and two measured rounds, and do not tune or
+retry.  Benchmark infrastructure must preflight arguments, schema, output persistence, shell exit
+semantics, and overwrite refusal without launching the timed workload.  If post-workload tooling
+fails, preserve the raw output, record the failure, and move runner repair/promotion to a tooling
+issue rather than blocking unrelated engine implementation.  Do not optimize merely to improve a
+descriptive number; open a weekly optimization issue unless a named release budget is actually
+missed.
+
+An effect-optimization loop exits on its own terms and reports on the floor's.  The two-stalled-
+rounds circuit breaker stands, and the exit report must state, per effect, the measured
+`isolated_cycles_per_lane_sample` from a console record, the derived class-A floor, the residual
+gap between them, and a named reason for that gap; "not investigated" is a reason and "diminishing
+returns" is not.  A gap attributable to the algorithm rather than the implementation is class B: it
+is flagged for owner ruling and never chased unilaterally, and no projected win may be quoted for a
+change nobody has ruled on.  The floors, their derivation and the clause in full are
+`docs/rulings/effect-floor-accounting.md`.
+
+Prefer a working vertical slice over exhaustive evidence scaffolding that delays downstream
+features.  Launch-critical correctness, realtime safety, deterministic behavior, target builds,
+and academically grounded DSP remain mandatory; additional matrix expansion should be recorded as
+a follow-up once representative adversarial gates cover the frozen contract.  Report progress using
+closed GitHub issues and deployable capabilities, not local file counts or unpushed evidence.
+
+## Scope boundaries for this sprint
+
+Deliver a mixing/mastering engine, session compiler, effect foundation, PCM runner, host adapters, streaming, and control foundation.  Do not deliver a timeline editor, human-oriented DAW UI, delivery codecs, unlimited in-memory stem cache, implicit feedback graph, third-party Wasm execution before its post-launch issue, or a general remote audio-streaming protocol.
+
+- **The acked-batch question**: v1's worst correctness bug was a fully validated, *acked* event batch silently dropped at queue overflow while the ledger advanced. Our #139/#140 admission already encodes the lesson (validate-everything-then-admit-atomically; ack carries application sample); keep it as the review question for every future queue: *can an ack ever precede a drop?*
+- **The ceremony boundary**: the legacy engine drowned in evidence (924 record files, a comment-digest ledger, `Cargo.lock` SHA pinned inside a test) while its headline number stayed fiction — every byte-gate green. The next abandoned attempt spent ~50 PRs on certification cadence and never shipped an effect. Gates must discriminate *claims*; byte-pinning prose is cost without evidence. Adopt the useful artifacts of both predecessors, never their pace.
+# Remove completed local worktrees after merged delivery
+
+Status: OPEN #540; documentation-only brief.
+
+The user requires merged local worktrees to be removed to reclaim space. Add the rule to AGENTS.md delivery control, then apply it to completed worktrees. This is documentation/housekeeping only and independent of active limiter #539.
+
+Scope: AGENTS.md plus this issue and concise cleanup evidence. After a merge, finish required evidence/issue synchronization and verify every local checkpoint is pushed. Remove the clean completed worktree with git worktree remove, preserving branches/history and any evidence needed outside it. Account for work integrated through another PR and completed detached baselines. Keep active worktrees and the primary checkout. Do not discard uncommitted/unpushed work or unique evidence; preserve it first and report any concrete blocker. Record the removed paths and reclaimed space without claiming timing/engine performance.
+
+Luna high implements the concise guide addition; Sol high verifies this noncritical documentation change. Root owns Git/GitHub and removal. Nine completed clean/upstream-preserved worktrees have already been removed, increasing available space by approximately31.8GiB; ignored evidence logs were preserved under /tmp/worktree-cleanup/preserved-ignored. Main/audit-handoff/active limiter remain.
+
+Gates: inspect exact guide diff and cleanup records, confirm actual merged PRs/ancestor reachability and clean/pushed checkpoints, required CI for the documentation PR, then merge/synchronize closure and remove this worktree under the new rule. No audio-path changes, new cleanup framework, benchmark, or history rewrite.
+
+codex
+The local spec is correctly narrow: one delivery-control rule plus concise records, with active checkouts and unique work explicitly protected. I’m now checking whether the remote issue and branch/base facts match that brief and whether the existing evidence is sufficient for this rule—without expanding into historical issue auditing.
+exec
+/bin/bash -lc "gh issue view 540 --repo misofm/engine --json number,title,state,body,url && gh api repos/misofm/engine/branches/main --jq '{sha: .commit.sha, protected: .protected}' && gh api repos/misofm/engine/git/ref/heads/codex/merged-worktree-cleanup --jq '{ref: .ref, sha: .object.sha}' && git merge-base HEAD origin/main && git rev-parse origin/main && git log -1 --format='%H%n%P%n%s' HEAD && git diff --stat origin/main...HEAD && git diff --name-status origin/main...HEAD" in /home/bl/misofm/engine-worktree-cleanup
+ succeeded in 1091ms:
+{"body":"# Remove completed local worktrees after merged delivery\n\nStatus: OPEN #540; documentation-only brief.\n\nThe user requires merged local worktrees to be removed to reclaim space. Add the rule to AGENTS.md delivery control, then apply it to completed worktrees. This is documentation/housekeeping only and independent of active limiter #539.\n\nScope: AGENTS.md plus this issue and concise cleanup evidence. After a merge, finish required evidence/issue synchronization and verify every local checkpoint is pushed. Remove the clean completed worktree with git worktree remove, preserving branches/history and any evidence needed outside it. Account for work integrated through another PR and completed detached baselines. Keep active worktrees and the primary checkout. Do not discard uncommitted/unpushed work or unique evidence; preserve it first and report any concrete blocker. Record the removed paths and reclaimed space without claiming timing/engine performance.\n\nLuna high implements the concise guide addition; Sol high verifies this noncritical documentation change. Root owns Git/GitHub and removal. Nine completed clean/upstream-preserved worktrees have already been removed, increasing available space by approximately31.8GiB; ignored evidence logs were preserved under /tmp/worktree-cleanup/preserved-ignored. Main/audit-handoff/active limiter remain.\n\nGates: inspect exact guide diff and cleanup records, confirm actual merged PRs/ancestor reachability and clean/pushed checkpoints, required CI for the documentation PR, then merge/synchronize closure and remove this worktree under the new rule. No audio-path changes, new cleanup framework, benchmark, or history rewrite.\n","number":540,"state":"OPEN","title":"Remove completed local worktrees after merged delivery","url":"https://github.com/misofm/engine/issues/540"}
+{"protected":true,"sha":"32a4c2058f2c01dea78af32affab660dbc17cae0"}
+{"ref":"refs/heads/codex/merged-worktree-cleanup","sha":"ae666af7784c0c24f1be0c6850888dac981f61e9"}
+32a4c2058f2c01dea78af32affab660dbc17cae0
+32a4c2058f2c01dea78af32affab660dbc17cae0
+ae666af7784c0c24f1be0c6850888dac981f61e9
+32a4c2058f2c01dea78af32affab660dbc17cae0
+Brief requested merged-worktree cleanup and record reclaimed space
+ .github/ISSUE_SPECS/540-merged-worktree-cleanup.md |  11 ++
+ artifacts/issue540-cleanup/approved-removals.json  | 167 +++++++++++++++++++++
+ artifacts/issue540-cleanup/inventory.json          | 164 ++++++++++++++++++++
+ artifacts/issue540-cleanup/removed.json            |  56 +++++++
+ artifacts/issue540-cleanup/space.json              |   7 +
+ 5 files changed, 405 insertions(+)
+A	.github/ISSUE_SPECS/540-merged-worktree-cleanup.md
+A	artifacts/issue540-cleanup/approved-removals.json
+A	artifacts/issue540-cleanup/inventory.json
+A	artifacts/issue540-cleanup/removed.json
+A	artifacts/issue540-cleanup/space.json
+
+exec
+/bin/bash -lc 'for f in artifacts/issue540-cleanup/inventory.json artifacts/issue540-cleanup/approved-removals.json artifacts/issue540-cleanup/removed.json artifacts/issue540-cleanup/space.json; do jq . "$f"; done' in /home/bl/misofm/engine-worktree-cleanup
+ succeeded in 0ms:
+[
+  {
+    "path": "/home/bl/misofm/engine",
+    "branch": "main",
+    "head": "fe58709c04c880b14dd72f9bd4a25ef5f7071202",
+    "status": "",
+    "ignored": "!! hosts/host-web/qualification/node_modules/\n!! sdk/node_modules/\n!! target/",
+    "upstream": "origin/main",
+    "upstream_head": "32a4c2058f2c01dea78af32affab660dbc17cae0",
+    "merged_pr": null
+  },
+  {
+    "path": "/home/bl/misofm/engine-478-layout-before",
+    "branch": null,
+    "head": "9f6007dad56b5d72e6d5cf3260e4e1f2948f6b88",
+    "status": "",
+    "ignored": "",
+    "upstream": null,
+    "upstream_head": null,
+    "merged_pr": null
+  },
+  {
+    "path": "/home/bl/misofm/engine-audit-handoff",
+    "branch": "codex/audit-349-priority-handoff",
+    "head": "865bc248d946f77b018252e7508327b7f84158e1",
+    "status": "",
+    "ignored": "",
+    "upstream": "origin/codex/audit-349-priority-handoff",
+    "upstream_head": "865bc248d946f77b018252e7508327b7f84158e1",
+    "merged_pr": null
+  },
+  {
+    "path": "/home/bl/misofm/engine-controller-delivery",
+    "branch": "codex/controller-delivery",
+    "head": "8fb43835bef54c268ee9d7751ecf0c02c6e0c23a",
+    "status": "",
+    "ignored": "!! target/",
+    "upstream": "origin/codex/controller-delivery",
+    "upstream_head": "8fb43835bef54c268ee9d7751ecf0c02c6e0c23a",
+    "merged_pr": {
+      "headRefName": "codex/controller-delivery",
+      "headRefOid": "6b88ce410ab22ed586c903c5ddcece97a5325f7e",
+      "mergedAt": "2026-09-07T01:10:43Z",
+      "number": 531,
+      "url": "https://github.com/misofm/engine/pull/531"
+    }
+  },
+  {
+    "path": "/home/bl/misofm/engine-controller-scalar-points",
+    "branch": "codex/controller-scalar-points",
+    "head": "67372bd2a013040dc71203be1b3b03f819d72c24",
+    "status": "",
+    "ignored": "",
+    "upstream": "origin/codex/controller-scalar-points",
+    "upstream_head": "67372bd2a013040dc71203be1b3b03f819d72c24",
+    "merged_pr": {
+      "headRefName": "codex/controller-scalar-points",
+      "headRefOid": "a410921cc7f7953688456b73fdd9c8d1507a0d3b",
+      "mergedAt": "2026-09-07T02:03:47Z",
+      "number": 533,
+      "url": "https://github.com/misofm/engine/pull/533"
+    }
+  },
+  {
+    "path": "/home/bl/misofm/engine-gate-detector-access",
+    "branch": "codex/gate-detector-access",
+    "head": "5ce38848f2a46bbf2ec3aaec07f900e4c0b2f265",
+    "status": "",
+    "ignored": "!! hosts/host-web/qualification/node_modules/\n!! target/",
+    "upstream": "origin/codex/gate-detector-access",
+    "upstream_head": "5ce38848f2a46bbf2ec3aaec07f900e4c0b2f265",
+    "merged_pr": {
+      "headRefName": "codex/gate-detector-access",
+      "headRefOid": "ae0bbf6539d411258f32f472c625576056b325cb",
+      "mergedAt": "2026-09-07T04:24:57Z",
+      "number": 535,
+      "url": "https://github.com/misofm/engine/pull/535"
+    }
+  },
+  {
+    "path": "/home/bl/misofm/engine-limiter-stationary-dispatch",
+    "branch": "codex/limiter-stationary-dispatch",
+    "head": "615787e92a209d7146110f7920bb9c09d7f93a3d",
+    "status": "",
+    "ignored": "",
+    "upstream": "origin/codex/limiter-stationary-dispatch",
+    "upstream_head": "615787e92a209d7146110f7920bb9c09d7f93a3d",
+    "merged_pr": null
+  },
+  {
+    "path": "/home/bl/misofm/engine-multiband-detector-access",
+    "branch": "codex/multiband-detector-access",
+    "head": "3ffd4b58c2957b773359f384dfe78dc5e235b36a",
+    "status": "",
+    "ignored": "!! hosts/host-web/qualification/node_modules/\n!! target/",
+    "upstream": "origin/codex/multiband-detector-access",
+    "upstream_head": "3ffd4b58c2957b773359f384dfe78dc5e235b36a",
+    "merged_pr": {
+      "headRefName": "codex/multiband-detector-access",
+      "headRefOid": "3a673979e6b1d0703c54775b00d60ab4554b1a0f",
+      "mergedAt": "2026-09-07T06:02:56Z",
+      "number": 538,
+      "url": "https://github.com/misofm/engine/pull/538"
+    }
+  },
+  {
+    "path": "/home/bl/misofm/engine-native-points",
+    "branch": "codex/native-compressor-points",
+    "head": "448b3a2f75334a73c2a6519ae070163d4671630f",
+    "status": "",
+    "ignored": "!! hosts/host-web/qualification/node_modules/\n!! sdk/node_modules/\n!! target/",
+    "upstream": "origin/codex/native-compressor-points",
+    "upstream_head": "448b3a2f75334a73c2a6519ae070163d4671630f",
+    "merged_pr": {
+      "headRefName": "codex/native-compressor-points",
+      "headRefOid": "73f1f683f18e3fac152235475fae3eb558014d89",
+      "mergedAt": "2026-09-06T13:45:48Z",
+      "number": 527,
+      "url": "https://github.com/misofm/engine/pull/527"
+    }
+  },
+  {
+    "path": "/home/bl/misofm/engine-rt8-plan",
+    "branch": "codex/rt8-prepared-slot-activity",
+    "head": "75035a80ff456bdecc7a5d4e0bef1f68e3c0d50a",
+    "status": "",
+    "ignored": "!! hosts/host-web/qualification/node_modules/\n!! sdk/node_modules/\n!! target/",
+    "upstream": "origin/codex/rt8-prepared-slot-activity",
+    "upstream_head": "75035a80ff456bdecc7a5d4e0bef1f68e3c0d50a",
+    "merged_pr": {
+      "headRefName": "codex/rt8-prepared-slot-activity",
+      "headRefOid": "b0c75b8647543dee059f3b61dcdc46793a89c093",
+      "mergedAt": "2026-09-06T12:06:11Z",
+      "number": 523,
+      "url": "https://github.com/misofm/engine/pull/523"
+    }
+  },
+  {
+    "path": "/home/bl/misofm/engine-scalar-allocation-isolation",
+    "branch": "codex/scalar-allocation-isolation",
+    "head": "96a1748283cdf90e07e7e7736c3f5b203789f159",
+    "status": "",
+    "ignored": "!! artifacts/issue536-brief/ci-workspace-failure.log",
+    "upstream": "origin/codex/scalar-allocation-isolation",
+    "upstream_head": "96a1748283cdf90e07e7e7736c3f5b203789f159",
+    "merged_pr": null
+  },
+  {
+    "path": "/home/bl/misofm/engine-scalar-point-endpoint",
+    "branch": "codex/scalar-point-endpoint",
+    "head": "de6bd286a9b58a29ad73f4892086ca2b8d8baaa2",
+    "status": "",
+    "ignored": "!! artifacts/issue528-sol-attempt2/check-source-2.log\n!! artifacts/issue528-sol-attempt2/check-source.log\n!! artifacts/issue528-sol-attempt2/focused-prelim.log\n!! hosts/host-web/qualification/node_modules/\n!! target/",
+    "upstream": "origin/codex/scalar-point-endpoint",
+    "upstream_head": "de6bd286a9b58a29ad73f4892086ca2b8d8baaa2",
+    "merged_pr": {
+      "headRefName": "codex/scalar-point-endpoint",
+      "headRefOid": "ffbc61dbec6e9b7a1eb4ff1ed0a13f60c76a5dff",
+      "mergedAt": "2026-09-07T00:13:21Z",
+      "number": 529,
+      "url": "https://github.com/misofm/engine/pull/529"
+    }
+  }
+]
+[
+  {
+    "path": "/home/bl/misofm/engine-478-layout-before",
+    "branch": null,
+    "head": "9f6007dad56b5d72e6d5cf3260e4e1f2948f6b88",
+    "status": "",
+    "ignored": "",
+    "upstream": null,
+    "upstream_head": null,
+    "merged_pr": null,
+    "reason": "Detached completed #478 baseline; commit is reachable from origin/main",
+    "archived_ignored": []
+  },
+  {
+    "path": "/home/bl/misofm/engine-controller-delivery",
+    "branch": "codex/controller-delivery",
+    "head": "8fb43835bef54c268ee9d7751ecf0c02c6e0c23a",
+    "status": "",
+    "ignored": "!! target/",
+    "upstream": "origin/codex/controller-delivery",
+    "upstream_head": "8fb43835bef54c268ee9d7751ecf0c02c6e0c23a",
+    "merged_pr": {
+      "headRefName": "codex/controller-delivery",
+      "headRefOid": "6b88ce410ab22ed586c903c5ddcece97a5325f7e",
+      "mergedAt": "2026-09-07T01:10:43Z",
+      "number": 531,
+      "url": "https://github.com/misofm/engine/pull/531"
+    },
+    "archived_ignored": []
+  },
+  {
+    "path": "/home/bl/misofm/engine-controller-scalar-points",
+    "branch": "codex/controller-scalar-points",
+    "head": "67372bd2a013040dc71203be1b3b03f819d72c24",
+    "status": "",
+    "ignored": "",
+    "upstream": "origin/codex/controller-scalar-points",
+    "upstream_head": "67372bd2a013040dc71203be1b3b03f819d72c24",
+    "merged_pr": {
+      "headRefName": "codex/controller-scalar-points",
+      "headRefOid": "a410921cc7f7953688456b73fdd9c8d1507a0d3b",
+      "mergedAt": "2026-09-07T02:03:47Z",
+      "number": 533,
+      "url": "https://github.com/misofm/engine/pull/533"
+    },
+    "archived_ignored": []
+  },
+  {
+    "path": "/home/bl/misofm/engine-gate-detector-access",
+    "branch": "codex/gate-detector-access",
+    "head": "5ce38848f2a46bbf2ec3aaec07f900e4c0b2f265",
+    "status": "",
+    "ignored": "!! hosts/host-web/qualification/node_modules/\n!! target/",
+    "upstream": "origin/codex/gate-detector-access",
+    "upstream_head": "5ce38848f2a46bbf2ec3aaec07f900e4c0b2f265",
+    "merged_pr": {
+      "headRefName": "codex/gate-detector-access",
+      "headRefOid": "ae0bbf6539d411258f32f472c625576056b325cb",
+      "mergedAt": "2026-09-07T04:24:57Z",
+      "number": 535,
+      "url": "https://github.com/misofm/engine/pull/535"
+    },
+    "archived_ignored": []
+  },
+  {
+    "path": "/home/bl/misofm/engine-multiband-detector-access",
+    "branch": "codex/multiband-detector-access",
+    "head": "3ffd4b58c2957b773359f384dfe78dc5e235b36a",
+    "status": "",
+    "ignored": "!! hosts/host-web/qualification/node_modules/\n!! target/",
+    "upstream": "origin/codex/multiband-detector-access",
+    "upstream_head": "3ffd4b58c2957b773359f384dfe78dc5e235b36a",
+    "merged_pr": {
+      "headRefName": "codex/multiband-detector-access",
+      "headRefOid": "3a673979e6b1d0703c54775b00d60ab4554b1a0f",
+      "mergedAt": "2026-09-07T06:02:56Z",
+      "number": 538,
+      "url": "https://github.com/misofm/engine/pull/538"
+    },
+    "archived_ignored": []
+  },
+  {
+    "path": "/home/bl/misofm/engine-native-points",
+    "branch": "codex/native-compressor-points",
+    "head": "448b3a2f75334a73c2a6519ae070163d4671630f",
+    "status": "",
+    "ignored": "!! hosts/host-web/qualification/node_modules/\n!! sdk/node_modules/\n!! target/",
+    "upstream": "origin/codex/native-compressor-points",
+    "upstream_head": "448b3a2f75334a73c2a6519ae070163d4671630f",
+    "merged_pr": {
+      "headRefName": "codex/native-compressor-points",
+      "headRefOid": "73f1f683f18e3fac152235475fae3eb558014d89",
+      "mergedAt": "2026-09-06T13:45:48Z",
+      "number": 527,
+      "url": "https://github.com/misofm/engine/pull/527"
+    },
+    "archived_ignored": []
+  },
+  {
+    "path": "/home/bl/misofm/engine-rt8-plan",
+    "branch": "codex/rt8-prepared-slot-activity",
+    "head": "75035a80ff456bdecc7a5d4e0bef1f68e3c0d50a",
+    "status": "",
+    "ignored": "!! hosts/host-web/qualification/node_modules/\n!! sdk/node_modules/\n!! target/",
+    "upstream": "origin/codex/rt8-prepared-slot-activity",
+    "upstream_head": "75035a80ff456bdecc7a5d4e0bef1f68e3c0d50a",
+    "merged_pr": {
+      "headRefName": "codex/rt8-prepared-slot-activity",
+      "headRefOid": "b0c75b8647543dee059f3b61dcdc46793a89c093",
+      "mergedAt": "2026-09-06T12:06:11Z",
+      "number": 523,
+      "url": "https://github.com/misofm/engine/pull/523"
+    },
+    "archived_ignored": []
+  },
+  {
+    "path": "/home/bl/misofm/engine-scalar-allocation-isolation",
+    "branch": "codex/scalar-allocation-isolation",
+    "head": "96a1748283cdf90e07e7e7736c3f5b203789f159",
+    "status": "",
+    "ignored": "!! artifacts/issue536-brief/ci-workspace-failure.log",
+    "upstream": "origin/codex/scalar-allocation-isolation",
+    "upstream_head": "96a1748283cdf90e07e7e7736c3f5b203789f159",
+    "merged_pr": null,
+    "integrated_via_pr": 535,
+    "archived_ignored": [
+      {
+        "path": "artifacts/issue536-brief/ci-workspace-failure.log",
+        "archive": "/tmp/worktree-cleanup/preserved-ignored/engine-scalar-allocation-isolation/artifacts/issue536-brief/ci-workspace-failure.log",
+        "sha256": "81129efd26fb9f8519324d68caaf22766afefe077350cf7fcbfa9fdc3d1f7ed7"
+      }
+    ]
+  },
+  {
+    "path": "/home/bl/misofm/engine-scalar-point-endpoint",
+    "branch": "codex/scalar-point-endpoint",
+    "head": "de6bd286a9b58a29ad73f4892086ca2b8d8baaa2",
+    "status": "",
+    "ignored": "!! artifacts/issue528-sol-attempt2/check-source-2.log\n!! artifacts/issue528-sol-attempt2/check-source.log\n!! artifacts/issue528-sol-attempt2/focused-prelim.log\n!! hosts/host-web/qualification/node_modules/\n!! target/",
+    "upstream": "origin/codex/scalar-point-endpoint",
+    "upstream_head": "de6bd286a9b58a29ad73f4892086ca2b8d8baaa2",
+    "merged_pr": {
+      "headRefName": "codex/scalar-point-endpoint",
+      "headRefOid": "ffbc61dbec6e9b7a1eb4ff1ed0a13f60c76a5dff",
+      "mergedAt": "2026-09-07T00:13:21Z",
+      "number": 529,
+      "url": "https://github.com/misofm/engine/pull/529"
+    },
+    "archived_ignored": [
+      {
+        "path": "artifacts/issue528-sol-attempt2/check-source-2.log",
+        "archive": "/tmp/worktree-cleanup/preserved-ignored/engine-scalar-point-endpoint/artifacts/issue528-sol-attempt2/check-source-2.log",
+        "sha256": "ed3369e70f15be0547136dc22268b826a57b51da76262c40637987ce0eb7d088"
+      },
+      {
+        "path": "artifacts/issue528-sol-attempt2/check-source.log",
+        "archive": "/tmp/worktree-cleanup/preserved-ignored/engine-scalar-point-endpoint/artifacts/issue528-sol-attempt2/check-source.log",
+        "sha256": "0f8162840fd557b367aa6e5955175a22f65e0171810b9338e8764bfd33da0ba7"
+      },
+      {
+        "path": "artifacts/issue528-sol-attempt2/focused-prelim.log",
+        "archive": "/tmp/worktree-cleanup/preserved-ignored/engine-scalar-point-endpoint/artifacts/issue528-sol-attempt2/focused-prelim.log",
+        "sha256": "ae5b9cf82483e68286880a0e3bce68734778480332870481044820649e75d7eb"
+      }
+    ]
+  }
+]
+[
+  {
+    "path": "/home/bl/misofm/engine-478-layout-before",
+    "head": "9f6007dad56b5d72e6d5cf3260e4e1f2948f6b88",
+    "branch": null,
+    "pr": null
+  },
+  {
+    "path": "/home/bl/misofm/engine-controller-delivery",
+    "head": "8fb43835bef54c268ee9d7751ecf0c02c6e0c23a",
+    "branch": "codex/controller-delivery",
+    "pr": 531
+  },
+  {
+    "path": "/home/bl/misofm/engine-controller-scalar-points",
+    "head": "67372bd2a013040dc71203be1b3b03f819d72c24",
+    "branch": "codex/controller-scalar-points",
+    "pr": 533
+  },
+  {
+    "path": "/home/bl/misofm/engine-gate-detector-access",
+    "head": "5ce38848f2a46bbf2ec3aaec07f900e4c0b2f265",
+    "branch": "codex/gate-detector-access",
+    "pr": 535
+  },
+  {
+    "path": "/home/bl/misofm/engine-multiband-detector-access",
+    "head": "3ffd4b58c2957b773359f384dfe78dc5e235b36a",
+    "branch": "codex/multiband-detector-access",
+    "pr": 538
+  },
+  {
+    "path": "/home/bl/misofm/engine-native-points",
+    "head": "448b3a2f75334a73c2a6519ae070163d4671630f",
+    "branch": "codex/native-compressor-points",
+    "pr": 527
+  },
+  {
+    "path": "/home/bl/misofm/engine-rt8-plan",
+    "head": "75035a80ff456bdecc7a5d4e0bef1f68e3c0d50a",
+    "branch": "codex/rt8-prepared-slot-activity",
+    "pr": 523
+  },
+  {
+    "path": "/home/bl/misofm/engine-scalar-allocation-isolation",
+    "head": "96a1748283cdf90e07e7e7736c3f5b203789f159",
+    "branch": "codex/scalar-allocation-isolation",
+    "pr": 535
+  },
+  {
+    "path": "/home/bl/misofm/engine-scalar-point-endpoint",
+    "head": "de6bd286a9b58a29ad73f4892086ca2b8d8baaa2",
+    "branch": "codex/scalar-point-endpoint",
+    "pr": 529
+  }
+]
+{
+  "before_available_bytes": 808074334208,
+  "after_available_bytes": 842206527488,
+  "available_increase_bytes": 34132193280,
+  "available_increase_gib": 31.788082122802734,
+  "note": "Filesystem available-space delta during cleanup; concurrent processes may affect it."
+}
+
+exec
+/bin/bash -lc 'git worktree list --porcelain && for d in /home/bl/misofm/engine-478-layout-before /home/bl/misofm/engine-controller-delivery /home/bl/misofm/engine-controller-scalar-points /home/bl/misofm/engine-gate-detector-access /home/bl/misofm/engine-multiband-detector-access /home/bl/misofm/engine-native-points /home/bl/misofm/engine-rt8-plan /home/bl/misofm/engine-scalar-allocation-isolation /home/bl/misofm/engine-scalar-point-endpoint; do if test -e "$d"; then echo "PRESENT $d"; else echo "ABSENT $d"; fi; done
+for f in /tmp/worktree-cleanup/preserved-ignored/engine-scalar-allocation-isolation/artifacts/issue536-brief/ci-workspace-failure.log /tmp/worktree-cleanup/preserved-ignored/engine-scalar-point-endpoint/artifacts/issue528-sol-attempt2/check-source-2.log /tmp/worktree-cleanup/preserved-ignored/engine-scalar-point-endpoint/artifacts/issue528-sol-attempt2/check-source.log /tmp/worktree-cleanup/preserved-ignored/engine-scalar-point-endpoint/artifacts/issue528-sol-attempt2/focused-prelim.log; do if test -f "$f"; then sha256sum "$f"; else echo "MISSING $f"; fi; done' in /home/bl/misofm/engine-worktree-cleanup
+ succeeded in 0ms:
+worktree /home/bl/misofm/engine
+HEAD fe58709c04c880b14dd72f9bd4a25ef5f7071202
+branch refs/heads/main
+
+worktree /home/bl/misofm/engine-audit-handoff
+HEAD 865bc248d946f77b018252e7508327b7f84158e1
+branch refs/heads/codex/audit-349-priority-handoff
+
+worktree /home/bl/misofm/engine-limiter-stationary-dispatch
+HEAD 615787e92a209d7146110f7920bb9c09d7f93a3d
+branch refs/heads/codex/limiter-stationary-dispatch
+
+worktree /home/bl/misofm/engine-worktree-cleanup
+HEAD ae666af7784c0c24f1be0c6850888dac981f61e9
+branch refs/heads/codex/merged-worktree-cleanup
+
+ABSENT /home/bl/misofm/engine-478-layout-before
+ABSENT /home/bl/misofm/engine-controller-delivery
+ABSENT /home/bl/misofm/engine-controller-scalar-points
+ABSENT /home/bl/misofm/engine-gate-detector-access
+ABSENT /home/bl/misofm/engine-multiband-detector-access
+ABSENT /home/bl/misofm/engine-native-points
+ABSENT /home/bl/misofm/engine-rt8-plan
+ABSENT /home/bl/misofm/engine-scalar-allocation-isolation
+ABSENT /home/bl/misofm/engine-scalar-point-endpoint
+81129efd26fb9f8519324d68caaf22766afefe077350cf7fcbfa9fdc3d1f7ed7  /tmp/worktree-cleanup/preserved-ignored/engine-scalar-allocation-isolation/artifacts/issue536-brief/ci-workspace-failure.log
+ed3369e70f15be0547136dc22268b826a57b51da76262c40637987ce0eb7d088  /tmp/worktree-cleanup/preserved-ignored/engine-scalar-point-endpoint/artifacts/issue528-sol-attempt2/check-source-2.log
+0f8162840fd557b367aa6e5955175a22f65e0171810b9338e8764bfd33da0ba7  /tmp/worktree-cleanup/preserved-ignored/engine-scalar-point-endpoint/artifacts/issue528-sol-attempt2/check-source.log
+ae5b9cf82483e68286880a0e3bce68734778480332870481044820649e75d7eb  /tmp/worktree-cleanup/preserved-ignored/engine-scalar-point-endpoint/artifacts/issue528-sol-attempt2/focused-prelim.log
+
+exec
+/bin/bash -lc 'for n in 523 527 529 531 533 535 538; do gh pr view "$n" --repo misofm/engine --json number,state,mergedAt,headRefName,headRefOid,mergeCommit,url; done
+for b in codex/controller-delivery codex/controller-scalar-points codex/gate-detector-access codex/multiband-detector-access codex/native-compressor-points codex/rt8-prepared-slot-activity codex/scalar-allocation-isolation codex/scalar-point-endpoint; do gh api "repos/misofm/engine/git/ref/heads/$b" --jq '"'[.ref,.object.sha] | @tsv'; done
+jq -r '.[] | [.path, (.head // \"\"), (.merged_pr.headRefOid // \"\"), (.integrated_via_pr // \"\")] | @tsv' artifacts/issue540-cleanup/approved-removals.json | while IFS="'$'"'\\t' read -r p head prhead via; do hmain=no; test -n \""'$head" && git merge-base --is-ancestor "$head" origin/main && hmain=yes; relation=na; if test -n "$prhead"; then relation=no; git merge-base --is-ancestor "$prhead" "$head" && relation=yes; fi; printf '"'%s\\thead_on_main=%s\\tpr_head_ancestor_of_saved_head=%s\\tintegrated_via=%s\\n' \""'$p" "$hmain" "$relation" "$via"; done' in /home/bl/misofm/engine-worktree-cleanup
+ succeeded in 7315ms:
+{"headRefName":"codex/rt8-prepared-slot-activity","headRefOid":"b0c75b8647543dee059f3b61dcdc46793a89c093","mergeCommit":{"oid":"70ce3d7b3eb57513390096f84a25e0a675d0bb22"},"mergedAt":"2026-09-06T12:06:11Z","number":523,"state":"MERGED","url":"https://github.com/misofm/engine/pull/523"}
+{"headRefName":"codex/native-compressor-points","headRefOid":"73f1f683f18e3fac152235475fae3eb558014d89","mergeCommit":{"oid":"af22dfa45b037d54a70e7b74c038ccae6154fabf"},"mergedAt":"2026-09-06T13:45:48Z","number":527,"state":"MERGED","url":"https://github.com/misofm/engine/pull/527"}
+{"headRefName":"codex/scalar-point-endpoint","headRefOid":"ffbc61dbec6e9b7a1eb4ff1ed0a13f60c76a5dff","mergeCommit":{"oid":"301a57c6fb9982025b6fb0a49f3d35843c3e6f60"},"mergedAt":"2026-09-07T00:13:21Z","number":529,"state":"MERGED","url":"https://github.com/misofm/engine/pull/529"}
+{"headRefName":"codex/controller-delivery","headRefOid":"6b88ce410ab22ed586c903c5ddcece97a5325f7e","mergeCommit":{"oid":"f39c9fa74016d4c0d460778a9c787668cbeb1e70"},"mergedAt":"2026-09-07T01:10:43Z","number":531,"state":"MERGED","url":"https://github.com/misofm/engine/pull/531"}
+{"headRefName":"codex/controller-scalar-points","headRefOid":"a410921cc7f7953688456b73fdd9c8d1507a0d3b","mergeCommit":{"oid":"fe58709c04c880b14dd72f9bd4a25ef5f7071202"},"mergedAt":"2026-09-07T02:03:47Z","number":533,"state":"MERGED","url":"https://github.com/misofm/engine/pull/533"}
+{"headRefName":"codex/gate-detector-access","headRefOid":"ae0bbf6539d411258f32f472c625576056b325cb","mergeCommit":{"oid":"375a86c280ac5be83004dc78dc25541bfa6371ba"},"mergedAt":"2026-09-07T04:24:57Z","number":535,"state":"MERGED","url":"https://github.com/misofm/engine/pull/535"}
+{"headRefName":"codex/multiband-detector-access","headRefOid":"3a673979e6b1d0703c54775b00d60ab4554b1a0f","mergeCommit":{"oid":"32a4c2058f2c01dea78af32affab660dbc17cae0"},"mergedAt":"2026-09-07T06:02:56Z","number":538,"state":"MERGED","url":"https://github.com/misofm/engine/pull/538"}
+refs/heads/codex/controller-delivery	8fb43835bef54c268ee9d7751ecf0c02c6e0c23a
+refs/heads/codex/controller-scalar-points	67372bd2a013040dc71203be1b3b03f819d72c24
+refs/heads/codex/gate-detector-access	5ce38848f2a46bbf2ec3aaec07f900e4c0b2f265
+refs/heads/codex/multiband-detector-access	3ffd4b58c2957b773359f384dfe78dc5e235b36a
+refs/heads/codex/native-compressor-points	448b3a2f75334a73c2a6519ae070163d4671630f
+refs/heads/codex/rt8-prepared-slot-activity	75035a80ff456bdecc7a5d4e0bef1f68e3c0d50a
+refs/heads/codex/scalar-allocation-isolation	96a1748283cdf90e07e7e7736c3f5b203789f159
+refs/heads/codex/scalar-point-endpoint	de6bd286a9b58a29ad73f4892086ca2b8d8baaa2
+/home/bl/misofm/engine-478-layout-before	head_on_main=yes	pr_head_ancestor_of_saved_head=na	integrated_via=
+/home/bl/misofm/engine-controller-delivery	head_on_main=no	pr_head_ancestor_of_saved_head=yes	integrated_via=
+/home/bl/misofm/engine-controller-scalar-points	head_on_main=no	pr_head_ancestor_of_saved_head=yes	integrated_via=
+/home/bl/misofm/engine-gate-detector-access	head_on_main=no	pr_head_ancestor_of_saved_head=yes	integrated_via=
+/home/bl/misofm/engine-multiband-detector-access	head_on_main=no	pr_head_ancestor_of_saved_head=yes	integrated_via=
+/home/bl/misofm/engine-native-points	head_on_main=no	pr_head_ancestor_of_saved_head=yes	integrated_via=
+/home/bl/misofm/engine-rt8-plan	head_on_main=no	pr_head_ancestor_of_saved_head=yes	integrated_via=
+fatal: Not a valid object name 535
+/home/bl/misofm/engine-scalar-allocation-isolation	head_on_main=yes	pr_head_ancestor_of_saved_head=no	integrated_via=
+/home/bl/misofm/engine-scalar-point-endpoint	head_on_main=no	pr_head_ancestor_of_saved_head=yes	integrated_via=
+
+codex
+COMPLETE — Sol HIGH brief approval: **PASS**.
+
+- Remote #540 identity/body matches the local spec and remains OPEN.
+- Clean, pushed baseline verified: `ae666af7`; base/current remote `main`: `32a4c205`.
+- Evidence adequately records nine removals, preserved ignored evidence, active checkout retention, and a qualified 31.788 GiB available-space delta.
+- Scope authorizes Luna HIGH to add exactly one concise `AGENTS.md` delivery-control bullet covering the requested safeguards.
+- No new framework, permission ceremony, tests, builds, or unrelated review is warranted.
+- No blocker found. Final Sol diff review, required CI, merge/closure synchronization, and removal of this completed worktree remain required.
+tokens used
+29,351

@@ -1,3 +1,59 @@
+OpenAI Codex v0.153.4
+--------
+workdir: /home/bl/misofm/engine-worktree-cleanup
+model: gpt-5.6-luna
+provider: openai
+approval: never
+sandbox: danger-full-access
+reasoning effort: high
+reasoning summaries: none
+session id: 01a07aa9-b505-7363-8c1a-9ddf6034c4f5
+--------
+user
+Luna HIGH documentation implementation #540, exactly one bullet. Worktree /home/bl/misofm/engine-worktree-cleanup clean pushed1aa47715, SolhighbriefPASS in numbered540spec. Read applicableAGENTS/spec; edit ONLY AGENTS.md under Delivery-control rules to add concisebullet requiring removal of completedlocalworktree with gitworktreeremove after merged delivery/evidence/GitHubsync, once clean/allcheckpointspushed/requiredevidencepreservedoutside. Include workintegratedviaanotherPR and completeddetachedbaselines; retainactiveworktrees/primarycheckout/branches/history, preserveuniqueuncommitted/unpushedwork/evidence and reportconcreteblocker. Userexplicitlyrequestedcleanup; no permissionceremony/newframework. No otheredits/tests/builds/Git/GitHubwrites/agents. Return completeconcise finaldiff/pathandpause forrootcheckpoint; do notwrite ownreportfile.
+
+codex
+I’ll read the numbered #540 spec and the local guidance, then make the single requested bullet-only edit in `AGENTS.md`. I’ll avoid tests, builds, Git/GitHub writes, and any other file changes, then report the exact diff and pause for the root checkpoint.
+exec
+/bin/bash -lc "pwd && rg --files -g 'AGENTS.md' -g '.github/ISSUE_SPECS/*540*' -g '*540*' | sort && git status --short --branch" in /home/bl/misofm/engine-worktree-cleanup
+ succeeded in 0ms:
+/home/bl/misofm/engine-worktree-cleanup
+AGENTS.md
+## codex/merged-worktree-cleanup...origin/codex/merged-worktree-cleanup
+
+exec
+/bin/bash -lc "find .github/ISSUE_SPECS -maxdepth 1 -type f -print | sort | tail -30; sed -n '1,260p' AGENTS.md" in /home/bl/misofm/engine-worktree-cleanup
+ succeeded in 0ms:
+.github/ISSUE_SPECS/483-console-floor-parity.md
+.github/ISSUE_SPECS/485-scalar-error-witness-propagation.md
+.github/ISSUE_SPECS/488-independent-bank-schedule-oracle.md
+.github/ISSUE_SPECS/490-total-route-node-mapping.md
+.github/ISSUE_SPECS/492-host-diagnostic-projections.md
+.github/ISSUE_SPECS/495-borrowed-binding-coverage.md
+.github/ISSUE_SPECS/496-post-ramp-symmetry-extraction.md
+.github/ISSUE_SPECS/498-direct-source-claim-sets.md
+.github/ISSUE_SPECS/499-populated-w4-transition-proof.md
+.github/ISSUE_SPECS/500-identity-token-emission.md
+.github/ISSUE_SPECS/503-compressor-allocation-attribution.md
+.github/ISSUE_SPECS/506-bench-hex-authority.md
+.github/ISSUE_SPECS/509-audit-hash-authority.md
+.github/ISSUE_SPECS/511-runtime-bank-slot-reservation.md
+.github/ISSUE_SPECS/512-dsp-test-hex-authority.md
+.github/ISSUE_SPECS/514-idle-admission-counter-clear.md
+.github/ISSUE_SPECS/516-engine-metering-coherent-objective-measurements-and-selective-computation.md
+.github/ISSUE_SPECS/519-selective-engine-meter-computation-and-observer-binding.md
+.github/ISSUE_SPECS/520-skip-empty-browser-meter-scans-with-prepared-publication-readiness.md
+.github/ISSUE_SPECS/522-repair-metering-timing-fixture-final-chunk-admission.md
+.github/ISSUE_SPECS/524-native-compressor-points.md
+.github/ISSUE_SPECS/525-release-objective-metering-through-the-sdk-and-npm-consumers.md
+.github/ISSUE_SPECS/528-scalar-compressor-point-endpoint.md
+.github/ISSUE_SPECS/530-controller-owned-automation-delivery.md
+.github/ISSUE_SPECS/532-controller-scalar-points.md
+.github/ISSUE_SPECS/534-gate-detector-access.md
+.github/ISSUE_SPECS/536-scalar-allocation-isolation.md
+.github/ISSUE_SPECS/537-uniform-multiband-detector-access.md
+.github/ISSUE_SPECS/540-merged-worktree-cleanup.md
+.github/ISSUE_SPECS/README.md
 # Engine V1 agent guide
 
 ## Mission
@@ -90,7 +146,6 @@ GitHub issue must stay synchronized:
   progress reporting until GitHub is synchronized.
 - At every issue boundary, compare `.github/ISSUE_SPECS/` with `gh issue list --state all` and fix
   missing, stale, or incorrectly closed entries before starting the next issue.
-- After merged delivery, required evidence, and GitHub synchronization, remove each completed local worktree with `git worktree remove` once it is clean, all checkpoints are pushed, and required evidence is preserved outside it, including work integrated through another PR and completed detached baselines; retain active worktrees, the primary checkout, branches, and history, preserve unique uncommitted/unpushed work or evidence, and report a concrete blocker instead of discarding it.
 
 Recovery and throughput are also hard delivery requirements:
 
@@ -195,3 +250,110 @@ Deliver a mixing/mastering engine, session compiler, effect foundation, PCM runn
 
 - **The acked-batch question**: v1's worst correctness bug was a fully validated, *acked* event batch silently dropped at queue overflow while the ledger advanced. Our #139/#140 admission already encodes the lesson (validate-everything-then-admit-atomically; ack carries application sample); keep it as the review question for every future queue: *can an ack ever precede a drop?*
 - **The ceremony boundary**: the legacy engine drowned in evidence (924 record files, a comment-digest ledger, `Cargo.lock` SHA pinned inside a test) while its headline number stayed fiction — every byte-gate green. The next abandoned attempt spent ~50 PRs on certification cadence and never shipped an effect. Gates must discriminate *claims*; byte-pinning prose is cost without evidence. Adopt the useful artifacts of both predecessors, never their pace.
+
+exec
+/bin/bash -lc "sed -n '1,240p' .github/ISSUE_SPECS/540-merged-worktree-cleanup.md" in /home/bl/misofm/engine-worktree-cleanup
+ succeeded in 0ms:
+# Remove completed local worktrees after merged delivery
+
+Status: OPEN #540; documentation-only brief.
+
+The user requires merged local worktrees to be removed to reclaim space. Add the rule to AGENTS.md delivery control, then apply it to completed worktrees. This is documentation/housekeeping only and independent of active limiter #539.
+
+Scope: AGENTS.md plus this issue and concise cleanup evidence. After a merge, finish required evidence/issue synchronization and verify every local checkpoint is pushed. Remove the clean completed worktree with git worktree remove, preserving branches/history and any evidence needed outside it. Account for work integrated through another PR and completed detached baselines. Keep active worktrees and the primary checkout. Do not discard uncommitted/unpushed work or unique evidence; preserve it first and report any concrete blocker. Record the removed paths and reclaimed space without claiming timing/engine performance.
+
+Luna high implements the concise guide addition; Sol high verifies this noncritical documentation change. Root owns Git/GitHub and removal. Nine completed clean/upstream-preserved worktrees have already been removed, increasing available space by approximately31.8GiB; ignored evidence logs were preserved under /tmp/worktree-cleanup/preserved-ignored. Main/audit-handoff/active limiter remain.
+
+Gates: inspect exact guide diff and cleanup records, confirm actual merged PRs/ancestor reachability and clean/pushed checkpoints, required CI for the documentation PR, then merge/synchronize closure and remove this worktree under the new rule. No audio-path changes, new cleanup framework, benchmark, or history rewrite.
+
+## Sol high brief approval
+
+COMPLETE — Sol HIGH brief approval: **PASS**.
+
+- Remote #540 identity/body matches the local spec and remains OPEN.
+- Clean, pushed baseline verified: `ae666af7`; base/current remote `main`: `32a4c205`.
+- Evidence adequately records nine removals, preserved ignored evidence, active checkout retention, and a qualified 31.788 GiB available-space delta.
+- Scope authorizes Luna HIGH to add exactly one concise `AGENTS.md` delivery-control bullet covering the requested safeguards.
+- No new framework, permission ceremony, tests, builds, or unrelated review is warranted.
+- No blocker found. Final Sol diff review, required CI, merge/closure synchronization, and removal of this completed worktree remain required.
+
+codex
+The #540 brief authorizes exactly one concise `AGENTS.md` bullet and explicitly excludes tests, builds, cleanup tooling, and Git/GitHub actions. I’m adding it under Delivery-control rules with all requested safeguards, including alternate-PR integration and detached baselines.
+apply patch
+patch: completed
+/home/bl/misofm/engine-worktree-cleanup/AGENTS.md
+diff --git a/AGENTS.md b/AGENTS.md
+index 1e41740c493e9fd551b365701a1da89631cd74ce..6b791f462948c0b774efe432f02c122d81d3bba4
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -90,6 +90,7 @@
+   progress reporting until GitHub is synchronized.
+ - At every issue boundary, compare `.github/ISSUE_SPECS/` with `gh issue list --state all` and fix
+   missing, stale, or incorrectly closed entries before starting the next issue.
++- After merged delivery, required evidence, and GitHub synchronization, remove each completed local worktree with `git worktree remove` once it is clean, all checkpoints are pushed, and required evidence is preserved outside it, including work integrated through another PR and completed detached baselines; retain active worktrees, the primary checkout, branches, and history, preserve unique uncommitted/unpushed work or evidence, and report a concrete blocker instead of discarding it.
+ 
+ Recovery and throughput are also hard delivery requirements:
+ 
+
+diff --git a/AGENTS.md b/AGENTS.md
+index 1e41740c493e9fd551b365701a1da89631cd74ce..6b791f462948c0b774efe432f02c122d81d3bba4
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -90,6 +90,7 @@
+   progress reporting until GitHub is synchronized.
+ - At every issue boundary, compare `.github/ISSUE_SPECS/` with `gh issue list --state all` and fix
+   missing, stale, or incorrectly closed entries before starting the next issue.
++- After merged delivery, required evidence, and GitHub synchronization, remove each completed local worktree with `git worktree remove` once it is clean, all checkpoints are pushed, and required evidence is preserved outside it, including work integrated through another PR and completed detached baselines; retain active worktrees, the primary checkout, branches, and history, preserve unique uncommitted/unpushed work or evidence, and report a concrete blocker instead of discarding it.
+ 
+ Recovery and throughput are also hard delivery requirements:
+ 
+
+exec
+/bin/bash -lc 'git diff --check && git diff -- AGENTS.md && git status --short' in /home/bl/misofm/engine-worktree-cleanup
+ succeeded in 0ms:
+diff --git a/AGENTS.md b/AGENTS.md
+index 1e41740c..6b791f46 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -90,6 +90,7 @@ GitHub issue must stay synchronized:
+   progress reporting until GitHub is synchronized.
+ - At every issue boundary, compare `.github/ISSUE_SPECS/` with `gh issue list --state all` and fix
+   missing, stale, or incorrectly closed entries before starting the next issue.
++- After merged delivery, required evidence, and GitHub synchronization, remove each completed local worktree with `git worktree remove` once it is clean, all checkpoints are pushed, and required evidence is preserved outside it, including work integrated through another PR and completed detached baselines; retain active worktrees, the primary checkout, branches, and history, preserve unique uncommitted/unpushed work or evidence, and report a concrete blocker instead of discarding it.
+ 
+ Recovery and throughput are also hard delivery requirements:
+ 
+ M AGENTS.md
+
+diff --git a/AGENTS.md b/AGENTS.md
+index 1e41740c493e9fd551b365701a1da89631cd74ce..6b791f462948c0b774efe432f02c122d81d3bba4
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -90,6 +90,7 @@
+   progress reporting until GitHub is synchronized.
+ - At every issue boundary, compare `.github/ISSUE_SPECS/` with `gh issue list --state all` and fix
+   missing, stale, or incorrectly closed entries before starting the next issue.
++- After merged delivery, required evidence, and GitHub synchronization, remove each completed local worktree with `git worktree remove` once it is clean, all checkpoints are pushed, and required evidence is preserved outside it, including work integrated through another PR and completed detached baselines; retain active worktrees, the primary checkout, branches, and history, preserve unique uncommitted/unpushed work or evidence, and report a concrete blocker instead of discarding it.
+ 
+ Recovery and throughput are also hard delivery requirements:
+ 
+
+codex
+Updated only [AGENTS.md](/home/bl/misofm/engine-worktree-cleanup/AGENTS.md:93) with the single requested Delivery-control bullet covering cleanup safeguards, alternate PRs, and detached baselines.
+
+`git diff --check` passed. No tests, builds, or Git/GitHub writes performed. Pausing for root checkpoint.
+diff --git a/AGENTS.md b/AGENTS.md
+index 1e41740c493e9fd551b365701a1da89631cd74ce..6b791f462948c0b774efe432f02c122d81d3bba4
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -90,6 +90,7 @@
+   progress reporting until GitHub is synchronized.
+ - At every issue boundary, compare `.github/ISSUE_SPECS/` with `gh issue list --state all` and fix
+   missing, stale, or incorrectly closed entries before starting the next issue.
++- After merged delivery, required evidence, and GitHub synchronization, remove each completed local worktree with `git worktree remove` once it is clean, all checkpoints are pushed, and required evidence is preserved outside it, including work integrated through another PR and completed detached baselines; retain active worktrees, the primary checkout, branches, and history, preserve unique uncommitted/unpushed work or evidence, and report a concrete blocker instead of discarding it.
+ 
+ Recovery and throughput are also hard delivery requirements:
+ 
+
+tokens used
+21,832

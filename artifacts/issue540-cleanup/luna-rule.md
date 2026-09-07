@@ -1,0 +1,3 @@
+Updated only [AGENTS.md](/home/bl/misofm/engine-worktree-cleanup/AGENTS.md:93) with the single requested Delivery-control bullet covering cleanup safeguards, alternate PRs, and detached baselines.
+
+`git diff --check` passed. No tests, builds, or Git/GitHub writes performed. Pausing for root checkpoint.
