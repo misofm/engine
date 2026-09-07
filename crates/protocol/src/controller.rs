@@ -3210,7 +3210,7 @@ impl<P: ControlProvider> ProtocolController<P> {
                     return self.non_ok(error, None);
                 }
                 let current_sample = self.provider.current_sample();
-                let result = if let Some(context) = delivery.as_deref_mut() {
+                let result = if let Some(context) = delivery.as_mut() {
                     context
                         .state
                         .try_admit(&mut self.queues, current_sample, *batch)

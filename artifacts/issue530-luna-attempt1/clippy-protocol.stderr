@@ -1,0 +1,32 @@
+    Checking engine v0.1.0 (/home/bl/misofm/engine-controller-delivery/crates/engine)
+    Checking session v0.1.0 (/home/bl/misofm/engine-controller-delivery/crates/session)
+    Checking protocol v0.1.0 (/home/bl/misofm/engine-controller-delivery/crates/protocol)
+error: derefed type is same as origin
+    --> crates/protocol/src/controller.rs:3213:53
+     |
+3213 |                 let result = if let Some(context) = delivery.as_deref_mut() {
+     |                                                     ^^^^^^^^^^^^^^^^^^^^^^^ help: try: `delivery`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#needless_option_as_deref
+     = note: `-D clippy::needless-option-as-deref` implied by `-D clippy::all`
+     = help: to override `-D clippy::all` add `#[allow(clippy::needless_option_as_deref)]`
+
+error: this function has too many arguments (8/7)
+  --> crates/protocol/src/controller_delivery.rs:75:5
+   |
+75 | /     pub fn prepare(
+76 | |         session: SessionStore,
+77 | |         queues: ProtocolQueueConfig,
+78 | |         provider: P,
+...  |
+90 | |         ControllerAutomationPrepareError,
+91 | |     > {
+   | |_____^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#too_many_arguments
+   = note: `-D clippy::too-many-arguments` implied by `-D clippy::all`
+   = help: to override `-D clippy::all` add `#[allow(clippy::too_many_arguments)]`
+
+error: could not compile `protocol` (lib) due to 2 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `protocol` (lib test) due to 2 previous errors

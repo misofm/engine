@@ -72,6 +72,7 @@ pub struct ControllerAutomationDelivery<P: ControlProvider> {
 
 impl<P: ControlProvider> ControllerAutomationDelivery<P> {
     /// Prepare fresh queues, replay storage, ordinary controller state, and delivery ownership.
+    #[allow(clippy::too_many_arguments)] // Frozen #530 constructor shape.
     pub fn prepare(
         session: SessionStore,
         queues: ProtocolQueueConfig,
