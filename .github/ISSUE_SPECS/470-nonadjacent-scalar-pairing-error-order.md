@@ -108,6 +108,8 @@ Luna attempt 1 may edit only:
 - `crates/builtins/src/lib.rs`
 - `crates/builtins-compiler/tests/allocation_tracker.rs`
 - `crates/graph-compiler/src/lib.rs`
+- `crates/graph-compiler/src/compile.rs` solely to fold the derived runtime-metadata reservation
+  into the existing pre-cap admission path
 - this issue spec and the lane-A tracker/evidence paths
 
 Lane A claims those paths for #470 until a coherent checkpoint is reviewed and delivered. No
@@ -284,3 +286,14 @@ This remains a green attempt-2 checkpoint rather than source PASS. Complete runt
 charging on an actually selected binding, split-specific ramp/retarget and decline/overlap gates,
 failure-path allocation/free evidence and the proportional release/static/supported-target gates
 remain. Artifact qualification and pinning remain lane B's responsibility after source freeze.
+
+## Attempt 2 exact-path amendment for runtime metadata admission
+
+The resource checkpoint found that the existing cap fold is implemented in
+`crates/graph-compiler/src/compile.rs`, while the original exact-path list named only that crate's
+`lib.rs`. Authorize `compile.rs` solely for the smallest required change: derive the new runtime
+metadata reservation, fold it transactionally into the published/capped graph estimate before the
+existing graph/plan/largest-allocation checks, and return the existing resource diagnostic and all
+ownership on overflow or limit failure. No scheduler, lowering, canonical identity, cap schema or
+unrelated compiler change is authorized. Luna reverted its exploratory edit before this amendment;
+the preserved uncommitted tranche touched only the previously authorized graph and builtins paths.
