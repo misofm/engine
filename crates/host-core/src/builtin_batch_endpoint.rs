@@ -18,9 +18,10 @@ use protocol::{
 };
 
 use crate::diagnostics::PrepareDiagnostics;
-#[cfg(not(test))]
-use crate::prepare::prepare_host_runtime_with_console;
-use crate::prepare::{HostConsoleRequest, HostPrepareCaps, HostPrepareReport, PreparedHost};
+use crate::prepare::{
+    HostConsoleRequest, HostPrepareCaps, HostPrepareReport, PreparedHost,
+    prepare_host_runtime_between_render_calls_with_backend,
+};
 use crate::render_session::StartedRenderSession;
 use crate::source::SourceControlSet;
 #[cfg(test)]
@@ -796,13 +797,32 @@ fn prepare_builtin_batch_endpoint_for_test(
     ticket_capacity: NonZeroUsize,
     backend: Backend,
 ) -> Result<PreparedBuiltinBatchEndpoint, BuiltinBatchPrepareError> {
-    prepare_builtin_batch_endpoint_with_backend(
+    prepare_builtin_batch_endpoint_for_test_with_meters(
         compiled,
         caps,
         revision,
         ticket_capacity,
         backend,
         true,
+    )
+}
+
+#[cfg(test)]
+fn prepare_builtin_batch_endpoint_for_test_with_meters(
+    compiled: &session::CompiledSession,
+    caps: &HostPrepareCaps,
+    revision: SessionRevision,
+    ticket_capacity: NonZeroUsize,
+    backend: Backend,
+    test_meters: bool,
+) -> Result<PreparedBuiltinBatchEndpoint, BuiltinBatchPrepareError> {
+    prepare_builtin_batch_endpoint_with_backend(
+        compiled,
+        caps,
+        revision,
+        ticket_capacity,
+        backend,
+        test_meters,
     )
 }
 
@@ -858,16 +878,9 @@ fn prepare_builtin_batch_endpoint_with_backend(
     } else {
         console
     };
-    #[cfg(test)]
-    let host_result = crate::prepare::prepare_host_runtime_with_console_backend(
-        compiled, caps, &console, backend,
-    );
-    #[cfg(not(test))]
-    let host_result = {
-        let _ = backend;
-        let _ = test_meters;
-        prepare_host_runtime_with_console(compiled, caps, &console)
-    };
+    let _ = test_meters;
+    let host_result =
+        prepare_host_runtime_between_render_calls_with_backend(compiled, caps, &console, backend);
     let (host, handles) = host_result.map_err(BuiltinBatchPrepareError::Host)?;
     let host_report = host.report;
     let queues = prepare_endpoint_queues(ticket_capacity, delivery_report, outcome_report)?;
@@ -1397,6 +1410,166 @@ mod tests {
         scalar_control
             .collect(scalar_ticket)
             .expect("scalar collect");
+    }
+
+    #[test]
+    fn endpoint_selects_existing_pair_factories_without_observer_barriers() {
+        use builtins::{BuiltinLaneSelector, Matrix2x2};
+        use builtins_compiler::{
+            test_only_fader_matrix_witness, test_only_reset_fader_matrix_witness,
+        };
+
+        let document = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
+        let compiled = crate::compile_host_session(document, &caps()).expect("compile fixture");
+        let console = HostConsoleRequest {
+            control_queue_depth: Some(NonZeroUsize::new(BUILTIN_BATCH_MAX_RECORDS).unwrap()),
+            ..HostConsoleRequest::default()
+        };
+        let batch = || {
+            BuiltinBatch::new(
+                SessionRevision(42),
+                SampleTime(0),
+                &[
+                    BuiltinBatchRecord::Fader {
+                        track_index: 8,
+                        record: TrackFaderRecord::FaderDb {
+                            lanes: BuiltinLaneSelector::Both,
+                            db: -6.0,
+                            smoothing_samples: 16,
+                        },
+                    },
+                    BuiltinBatchRecord::Matrix {
+                        track_index: 8,
+                        record: TrackControlRecord {
+                            matrix: Matrix2x2 {
+                                ll: 0.5,
+                                lr: 0.25,
+                                rl: -0.25,
+                                rr: 0.75,
+                            },
+                            smoothing_samples: 11,
+                        },
+                    },
+                ],
+            )
+            .expect("batch")
+        };
+        let run = |backend| {
+            let (host, mut handles) = crate::prepare::prepare_host_runtime_with_console_backend(
+                &compiled,
+                &caps(),
+                &console,
+                backend,
+            )
+            .expect("prepare reference");
+            let (mut reference, mut reference_sources, _) =
+                host.start_render_session().expect("reference start");
+            test_only_reset_fader_matrix_witness();
+            let (mut control, mut render, _) = prepare_builtin_batch_endpoint_for_test_with_meters(
+                &compiled,
+                &caps(),
+                SessionRevision(42),
+                NonZeroUsize::new(2).unwrap(),
+                backend,
+                false,
+            )
+            .expect("endpoint prepare")
+            .start()
+            .unwrap_or_else(|_| panic!("endpoint start"));
+            let source_left = [0.25_f32; 128];
+            let source_right = [-0.5_f32; 128];
+            let submission = crate::SourceSubmission {
+                generation: 1,
+                start_frame: 0,
+                sample_rate_hz: 48_000,
+                planes: &[&source_left, &source_right],
+                frames: 128,
+                end_of_region: false,
+            };
+            reference_sources
+                .submit(b"fixture-source", submission)
+                .expect("reference source");
+            control
+                .sources()
+                .submit(b"fixture-source", submission)
+                .expect("endpoint source");
+            handles.track_controls[8]
+                .fader
+                .try_push(TrackFaderRecord::FaderDb {
+                    lanes: BuiltinLaneSelector::Both,
+                    db: -6.0,
+                    smoothing_samples: 16,
+                })
+                .expect("reference fader");
+            handles.track_controls[8]
+                .producer
+                .try_push(TrackControlRecord {
+                    matrix: Matrix2x2 {
+                        ll: 0.5,
+                        lr: 0.25,
+                        rl: -0.25,
+                        rr: 0.75,
+                    },
+                    smoothing_samples: 11,
+                })
+                .expect("reference matrix");
+            let ticket = control.try_publish(batch()).expect("ticket");
+            let mut reference_output = [0.0_f32; 256];
+            let mut endpoint_output = [0.0_f32; 256];
+            reference
+                .render_planar(&mut reference_output, 2, 128, 128, 0)
+                .expect("reference render");
+            render
+                .render(&mut endpoint_output, 2, 128, 128, SampleTime(0))
+                .expect("endpoint render");
+            let witness = test_only_fader_matrix_witness();
+            control.collect(ticket).expect("collect");
+            let bits = |samples: &[f32]| {
+                samples
+                    .iter()
+                    .map(|sample| sample.to_bits())
+                    .collect::<Vec<_>>()
+            };
+            (bits(&reference_output), bits(&endpoint_output), witness)
+        };
+
+        let (bank_reference, bank_endpoint, bank_witness) = run(Backend::current());
+        assert_eq!(bank_reference, bank_endpoint);
+        assert!(
+            bank_witness.factory_calls > 0,
+            "native bank pair factory was not selected: {bank_witness:?}"
+        );
+        assert!(
+            bank_witness.process_calls > 0,
+            "native bank pair was not processed: {bank_witness:?}"
+        );
+        assert!(bank_witness.factory_members > 0);
+        assert!(bank_witness.process_members > 0);
+
+        let (scalar_reference, scalar_endpoint, scalar_witness) = run(Backend::Scalar);
+        assert_eq!(scalar_reference, scalar_endpoint);
+        assert!(
+            scalar_witness.factory_calls > 0,
+            "scalar pair factory was not selected: {scalar_witness:?}"
+        );
+        assert!(
+            scalar_witness.process_calls > 0,
+            "scalar pair was not processed: {scalar_witness:?}"
+        );
+        assert!(scalar_witness.factory_members > 0);
+        assert!(scalar_witness.process_members > 0);
+        assert!(
+            scalar_witness
+                .scalar_fader_words
+                .iter()
+                .any(|word| *word != 0)
+        );
+        assert!(
+            scalar_witness
+                .scalar_matrix_words
+                .iter()
+                .any(|word| *word != 0)
+        );
     }
 
     #[test]
