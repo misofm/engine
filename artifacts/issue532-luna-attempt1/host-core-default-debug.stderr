@@ -1,0 +1,13 @@
+   Compiling host-core v0.1.0 (/home/bl/misofm/engine-controller-scalar-points/crates/host-core)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.29s
+     Running unittests src/lib.rs (/tmp/issue532-target/debug/deps/host_core-22baec08e25ea965)
+     Running tests/effect_console.rs (/tmp/issue532-target/debug/deps/effect_console-229598f13c15eace)
+     Running tests/effect_observation.rs (/tmp/issue532-target/debug/deps/effect_observation-77bfd9746a249ea8)
+     Running tests/fp_environment.rs (/tmp/issue532-target/debug/deps/fp_environment-f978361caf46014f)
+     Running tests/input_liveness_console.rs (/tmp/issue532-target/debug/deps/input_liveness_console-2e8cf8d705441f05)
+     Running tests/prepare.rs (/tmp/issue532-target/debug/deps/prepare-97ae02c497fa4c48)
+     Running tests/scalar_point_endpoint.rs (/tmp/issue532-target/debug/deps/scalar_point_endpoint-5cc549b4e4165bb8)
+     Running tests/source_diagnostics.rs (/tmp/issue532-target/debug/deps/source_diagnostics-5f744494a927fc71)
+     Running tests/symmetry_witness.rs (/tmp/issue532-target/debug/deps/symmetry_witness-a1f878c36a6c9055)
+     Running tests/track_delay.rs (/tmp/issue532-target/debug/deps/track_delay-8716f23e41042fdf)
+   Doc-tests host_core

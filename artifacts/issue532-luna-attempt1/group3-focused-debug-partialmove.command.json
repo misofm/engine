@@ -1,0 +1,42 @@
+{
+  "argv": [
+    "cargo",
+    "test",
+    "--locked",
+    "-p",
+    "host-core",
+    "--features",
+    "control-provider",
+    "--test",
+    "scalar_point_endpoint",
+    "controller_scalar_preflight_rejections_and_single_allocation_authority",
+    "--",
+    "--exact"
+  ],
+  "cwd": "/home/bl/misofm/engine-controller-scalar-points",
+  "head": "3b6d1781dc3c50645521e9d8fe84e465c1f9e327",
+  "status": " M crates/host-core/tests/scalar_point_endpoint.rs\n",
+  "env": {
+    "PATH": "/home/bl/.cargo/bin:/home/bl/.cargo/bin:/home/bl/.local/bin:/home/bl/.codex/packages/standalone/releases/0.153.4-x86_64-unknown-linux-musl/codex-path:/home/bl/.codex1/tmp/arg0/codex-arg032GUSu:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin",
+    "RUSTFLAGS": null,
+    "CARGO_TARGET_DIR": "/tmp/issue532-target"
+  },
+  "source": {
+    "crates/host-core/src/scalar_point_endpoint.rs": {
+      "sha256": "f09c6b71906ee0340c5be368ca010d1612af0cd87c30f053981124991f372982",
+      "git_blob": "dbad8d7de7c8b19bb68662064c36a9814a89d2b7"
+    },
+    "crates/host-core/src/lib.rs": {
+      "sha256": "e4aa005ee796ff1a0f7fc60db16a1db447ae76612a18d773ab4298821bb6904a",
+      "git_blob": "49ea22791147e9f2b0c3884c5fca69819a247469"
+    },
+    "crates/host-core/tests/scalar_point_endpoint.rs": {
+      "sha256": "dab3bb487b116fd534e707d5665584eb4d910c65f3e25adde1063275656ac038",
+      "git_blob": "5a0318fa6d695843b35da095f03dc85cfe35176c"
+    },
+    "Cargo.lock": {
+      "sha256": "ef85bfaac8b4df80b651fa89e5e9a67bfef141b58076bdaac513044161b0b853",
+      "git_blob": "1b74fb016a04a090d2d1d37ea15fd2917fb85491"
+    }
+  }
+}

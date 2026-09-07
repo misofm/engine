@@ -1,0 +1,40 @@
+
+running 5 tests
+test controller_delivery::tests::unsupported_head_blocks_fifo_and_real_cancel_releases_all_owners ... ok
+test controller_delivery::tests::fixed_revision_refuses_structural_locate_and_state_without_model_change ... ok
+test controller_delivery::tests::reservations_survive_render_completion_until_terminal_collection ... ok
+test controller_delivery::tests::real_admission_replay_shape_and_domain_guards_are_owned_by_facade ... ok
+test controller_delivery::tests::one_controller_queue_and_sequence_cover_transport_cancel_and_short_retry ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 139 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+

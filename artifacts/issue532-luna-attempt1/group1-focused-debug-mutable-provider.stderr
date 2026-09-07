@@ -1,0 +1,4 @@
+   Compiling host-core v0.1.0 (/home/bl/misofm/engine-controller-scalar-points/crates/host-core)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.77s
+     Running tests/scalar_point_endpoint.rs (/tmp/issue532-target/debug/deps/scalar_point_endpoint-fb9af70fce4ccb65)
+error: test failed, to rerun pass `-p host-core --test scalar_point_endpoint`

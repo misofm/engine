@@ -1,0 +1,135 @@
+
+running 8 tests
+test solo::tests::a_two_record_delta_is_exactly_the_disagreeing_case ... ok
+test solo::tests::an_unknown_track_is_refused ... ok
+test solo::tests::engaging_solo_mutes_the_complement_and_only_the_complement ... ok
+test solo::tests::mute_while_soloed_survives_the_un_solo ... ok
+test solo::tests::per_lane_user_mute_restores_as_two_records ... ok
+test solo::tests::rollback_restores_every_word ... ok
+test solo::tests::solo_count_tracks_engaged_bits_exactly ... ok
+test prepare::tests::typed_diagnostic_adapters_preserve_projection_and_bound ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+
+running 2 tests
+test a_banked_effect_applies_each_lanes_own_command_and_no_others ... ok
+test two_lanes_of_one_bank_take_two_different_commands ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+
+running 11 tests
+test observation_cost_classes_are_separated_from_a_computed_scan_in_release ... ignored, release-mode budget; runs nightly
+test observation_cost_classes_are_what_they_claim ... ok
+test the_per_node_scalar_path_publishes_its_own_block ... ok
+test observation_without_a_control_channel_is_refused ... ok
+test observation_retained_bytes_are_the_declared_menu_times_one_row_and_one_slot ... ok
+test a_session_that_asked_for_no_observation_holds_none ... ok
+test a_plan_replacement_drops_every_subscription ... ok
+test the_first_window_at_or_after_applied_at_sample_reflects_the_command ... ok
+test every_bank_lane_publishes_its_own_reduction ... ok
+test observation_is_identical_across_rack_placement ... ok
+test every_observation_leg_renders_the_corpus_to_the_same_bytes ... ok
+
+test result: ok. 10 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.26s
+
+
+running 3 tests
+test a_started_session_hands_the_plan_back_when_it_stops ... ok
+test x86::the_callers_word_is_restored_bit_exactly_after_every_block ... ok
+test x86::a_caller_with_ftz_and_daz_renders_the_canonical_bytes ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+
+running 10 tests
+test a_command_takes_effect_on_the_whole_block_that_drains_it ... ok
+test two_commands_are_not_interchangeable ... ok
+test the_stereo_arm_is_a_never_collapsed_oracle ... ok
+test a_both_lane_record_drained_while_collapsed_keeps_the_collapse ... ok
+test a_symmetric_ride_renders_the_same_bits_collapsed_or_not ... ok
+test re_equalising_after_a_disengaging_drain_holds_the_never_collapsed_bits ... ok
+test the_collapse_census_follows_the_commands ... ok
+test an_uncommanded_console_renders_the_console_free_bytes ... ok
+test a_command_moves_exactly_the_addressed_track ... ok
+test a_per_lane_record_drained_on_the_disengaging_block_reaches_one_channel ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.47s
+
+
+running 14 tests
+test dense_refusal_diagnostics_finish_under_one_second_in_release ... ignored, release-mode budget; runs nightly
+test contract_types_are_send_and_not_sync ... ok
+test default_ring_derivation_covers_the_stall_and_two_in_flight_quanta ... ok
+test dense_refusal_diagnostics_are_count_bounded ... ok
+test source_control_errors_are_typed ... ok
+test prepare_reports_the_session_shape_and_feeds_sources_independently ... ok
+test retained_bytes_projection_matches_the_live_set ... ok
+test console_attaches_bounded_control_and_meter_halves_in_canonical_track_order ... ok
+test selected_meter_observers_preserve_caller_order_taps_and_metric_identity ... ok
+test source_channel_cap_is_optional ... ok
+test no_console_request_attaches_nothing_and_charges_nothing ... ok
+test shape_policy_pins_rate_and_quantum ... ok
+test session_validation_owns_the_launch_rate_set ... ok
+test every_byte_cap_admits_its_reported_row_and_rejects_one_byte_below ... ok
+
+test result: ok. 13 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.14s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 3 tests
+test classification_partitions_the_table ... ok
+test only_the_documented_pairs_share_a_code ... ok
+test every_source_rejection_reports_its_own_pinned_diagnostic ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 11 tests
+test an_observe_record_never_moves_the_witness ... ok
+test a_left_channel_command_declines_exactly_one_lane ... ok
+test seam_side_console_traffic_leaves_every_lane_eligible ... ok
+test a_live_bypass_declines_its_lane_and_lifting_it_re_earns_the_term ... ok
+test a_prepare_time_bypass_seeds_the_unbypassed_term_before_any_render ... ok
+test a_both_channel_command_preserves_every_lane_including_mid_ramp ... ok
+test the_scalar_console_effect_arm_maintains_its_own_live_terms ... ok
+test two_per_lane_writes_that_agree_still_decline_the_lane ... ok
+test the_two_halves_of_the_witness_are_decided_independently ... ok
+test an_asymmetric_input_builtin_declines_its_own_track_only ... ok
+test the_structural_witness_follows_the_source_mapping ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+
+running 8 tests
+test a_zero_delay_arm_never_lowers_a_delay_node ... ok
+test an_asymmetric_delay_declines_exactly_its_own_track ... ok
+test the_pre_delay_region_is_exactly_positive_zero ... ok
+test the_two_lanes_carry_independent_delays ... ok
+test a_symmetric_delay_keeps_every_track_eligible ... ok
+test the_delay_survives_the_banked_path ... ok
+test a_symmetric_delay_renders_the_same_bits_collapsed_as_dual ... ok
+test a_declared_delay_is_exactly_a_pre_padded_source ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+
+running 1 test
+test crates/host-core/src/prepare.rs - prepare::PreparedHost (line 367) ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 3 tests
+test crates/host-core/src/render_session.rs - render_session::StartedRenderSession (line 49) - compile fail ... ok
+test crates/host-core/src/prepare.rs - prepare::PreparedHost (line 360) - compile fail ... ok
+test crates/host-core/src/render_session.rs - render_session::StartedRenderSession (line 54) - compile fail ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+all doctests ran in 0.41s; merged doctests compilation took 0.35s

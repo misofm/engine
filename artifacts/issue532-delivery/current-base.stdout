@@ -1,0 +1,9 @@
+{
+  "head": "0726eb9af4690275e66e76a2e0a3c21c8f5f4b78",
+  "current_main": "f39c9fa74016d4c0d460778a9c787668cbeb1e70",
+  "source_changes": [
+    "crates/host-core/src/scalar_point_endpoint.rs",
+    "crates/host-core/tests/scalar_point_endpoint.rs"
+  ],
+  "evidence_file_count": 166
+}

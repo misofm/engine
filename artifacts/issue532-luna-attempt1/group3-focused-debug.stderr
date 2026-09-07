@@ -1,0 +1,16 @@
+   Compiling host-core v0.1.0 (/home/bl/misofm/engine-controller-scalar-points/crates/host-core)
+error[E0425]: cannot find type `ProtocolControllerConfig` in this scope
+  --> crates/host-core/tests/scalar_point_endpoint.rs:65:27
+   |
+65 | fn controller_config() -> ProtocolControllerConfig {
+   |                           ^^^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+
+error[E0422]: cannot find struct, variant or union type `ProtocolControllerConfig` in this scope
+  --> crates/host-core/tests/scalar_point_endpoint.rs:66:5
+   |
+66 |     ProtocolControllerConfig {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^ not found in this scope
+
+Some errors have detailed explanations: E0422, E0425.
+For more information about an error, try `rustc --explain E0422`.
+error: could not compile `host-core` (test "scalar_point_endpoint") due to 2 previous errors

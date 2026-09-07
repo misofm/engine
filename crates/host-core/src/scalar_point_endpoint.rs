@@ -34,9 +34,15 @@ use effect_contract::{
 use lane::CanonicalFpEnv;
 use protocol::{
     AutomationBatchError, AutomationBatchSlot, AutomationCancellationReason,
-    AutomationEnqueueError, DeliveryError, DeliveryTicket, HandoffResult, ParameterHandle,
-    PreparedAutomationDelivery, PreparedDeliveryCapabilities, ProtocolQueueConfig, QueueKind,
-    QueueReport, SampleTime, SessionRevision,
+    AutomationDeliveryRender, AutomationEnqueueError, ControlProvider,
+    ControllerAutomationDelivery, ControllerAutomationPrepareError, ControllerAutomationResources,
+    ControllerRetainedCapacity, DeliveryError, DeliveryTicket, HandoffResult,
+    ParameterAutomationRate, ParameterChannel as ProtocolParameterChannel, ParameterDescriptor,
+    ParameterDomain as ProtocolParameterDomain, ParameterHandle, ParameterMapping,
+    ParameterProviderError, ParameterUnit as ProtocolParameterUnit, ParameterValueKind,
+    PreparedAutomationDelivery, PreparedDeliveryCapabilities, ProtocolCodec,
+    ProtocolControllerConfig, ProtocolQueueConfig, QueueKind, QueueReport, ReplayCacheConfig,
+    SampleTime, SessionRevision, SessionStore,
 };
 
 const MAKEUP_INDEX: u32 = 5;
@@ -54,6 +60,45 @@ pub enum ScalarPointPrepareError {
     InvalidQueue,
     /// The bounded delivery service rejected the queue configuration or initial sequence.
     Delivery(protocol::ProtocolQueueError),
+}
+
+/// Rejection from the combined typed-controller/scalar Point constructor.
+///
+/// The native processor and handle/quantum checks retain [`ScalarPointPrepareError`]. Provider
+/// descriptor lookup is reported as the provider's typed error. The caller supplies the prepared
+/// session/provider association and the render clock; this constructor checks their declared
+/// metadata and requires the clock to start at sample zero, but does not reconstruct pointer
+/// identity or publish clock progress automatically.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ControllerScalarPointPrepareError {
+    /// Native processor, handle, or quantum validation failed.
+    ScalarPoint(ScalarPointPrepareError),
+    /// A requested provider descriptor could not be read.
+    Provider(ParameterProviderError),
+    /// Provider descriptor fields do not identify the requested Point binding.
+    InvalidProviderBinding,
+    /// The caller's provider clock was not at the render owner's initial sample.
+    InitialSampleMismatch {
+        /// Sample observed from the caller-owned provider clock.
+        observed: SampleTime,
+    },
+    /// Fresh controller preparation failed before publication.
+    Controller(ControllerAutomationPrepareError),
+}
+
+/// Combined controller and scalar render resource projection.
+///
+/// `scalar_render_inline_bytes` includes the embedded controller delivery render half and replaces
+/// the controller report's `render_inline_bytes` when callers aggregate the two reports. Borrowed
+/// processor, caller PCM, session/provider storage, and transient descriptor-location copies are
+/// excluded. Both owners are reclaimed off render after cancellation acknowledgment and host
+/// quiescence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ControllerScalarPointResources {
+    /// Existing #530 controller queue/delivery and inline resource projection.
+    pub controller: ControllerAutomationResources,
+    /// Actual inline size of the combined scalar render owner.
+    pub scalar_render_inline_bytes: usize,
 }
 /// Delivery heap and endpoint inline accounting; excludes borrowed compressor and caller PCM.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -772,6 +817,33 @@ pub fn prepare_scalar_point_endpoint<'a>(
     ),
     ScalarPointPrepareError,
 > {
+    let quantum = validate_scalar_point_processor(processor, handles, queues)?;
+    let caps = point_capabilities(handles)?;
+    let resources = ScalarPointResources {
+        delivery: PreparedAutomationDelivery::resource_report_for_config(queues)
+            .map_err(ScalarPointPrepareError::Delivery)?,
+        control_size: core::mem::size_of::<ScalarPointControl>(),
+        render_size: core::mem::size_of::<PreparedScalarPointRender<'static>>(),
+    };
+    let (c, r) = PreparedAutomationDelivery::prepare(queues, sequence)
+        .map_err(ScalarPointPrepareError::Delivery)?;
+    Ok((
+        ScalarPointControl {
+            delivery: c,
+            revision,
+            handles,
+            capabilities: caps,
+        },
+        assemble_scalar_point_render(processor, r, handles, quantum),
+        resources,
+    ))
+}
+
+fn validate_scalar_point_processor(
+    processor: &mut dyn PreparedNativeEffect,
+    handles: [ParameterHandle; 2],
+    queues: ProtocolQueueConfig,
+) -> Result<u32, ScalarPointPrepareError> {
     if handles[0].0 == 0 || handles[1].0 == 0 || handles[0] >= handles[1] {
         return Err(ScalarPointPrepareError::InvalidBindings);
     }
@@ -817,39 +889,148 @@ pub fn prepare_scalar_point_endpoint<'a>(
             .parameter_state(MAKEUP_INDEX, ParameterChannel::Right)
             .map_err(|_| ScalarPointPrepareError::InvalidProcessor)?;
     }
-    let caps = PreparedDeliveryCapabilities::new_exact(&[
+    Ok(quantum)
+}
+
+fn point_capabilities(
+    handles: [ParameterHandle; 2],
+) -> Result<PreparedDeliveryCapabilities, ScalarPointPrepareError> {
+    PreparedDeliveryCapabilities::new_exact(&[
         (handles[0], protocol::AutomationKind::Point),
         (handles[1], protocol::AutomationKind::Point),
     ])
-    .ok_or(ScalarPointPrepareError::InvalidBindings)?;
-    let resources = ScalarPointResources {
-        delivery: PreparedAutomationDelivery::resource_report_for_config(queues)
-            .map_err(ScalarPointPrepareError::Delivery)?,
-        control_size: core::mem::size_of::<ScalarPointControl>(),
-        render_size: core::mem::size_of::<PreparedScalarPointRender<'static>>(),
+    .ok_or(ScalarPointPrepareError::InvalidBindings)
+}
+
+fn assemble_scalar_point_render<'a>(
+    processor: &'a mut dyn PreparedNativeEffect,
+    delivery: AutomationDeliveryRender,
+    handles: [ParameterHandle; 2],
+    quantum: u32,
+) -> PreparedScalarPointRender<'a> {
+    PreparedScalarPointRender {
+        processor,
+        delivery,
+        handles,
+        quantum,
+        next_sample: SampleTime(0),
+        observed_sample: SampleTime(0),
+        last_application: [None; 2],
+        applied: 0,
+        late: 0,
+        claimed: None,
+        fault: None,
+    }
+}
+
+fn validate_provider_descriptor(
+    descriptor: &ParameterDescriptor,
+    handle: ParameterHandle,
+    channel: ProtocolParameterChannel,
+) -> bool {
+    descriptor.handle == handle.0
+        && descriptor.parameter_id == MAKEUP_ID
+        && descriptor.channel == channel
+        && descriptor.value_kind == ParameterValueKind::F32
+        && descriptor.unit == ProtocolParameterUnit::Db
+        && descriptor.domain == ProtocolParameterDomain::Continuous
+        && descriptor.minimum == Some(-24.0)
+        && descriptor.maximum == Some(24.0)
+        && descriptor.default.to_bits() == 0.0_f32.to_bits()
+        && descriptor.mapping == ParameterMapping::Linear
+        && descriptor.automation_rate == ParameterAutomationRate::Block
+        && descriptor.smoothing_samples == 64
+        && descriptor.flags & 7 == 7
+        && descriptor.enum_choices.is_empty()
+}
+
+fn validate_provider_bindings<P: ControlProvider>(
+    provider: &mut P,
+    handles: [ParameterHandle; 2],
+) -> Result<(), ControllerScalarPointPrepareError> {
+    let (track_id, effect_id, rack) = {
+        let descriptor = provider
+            .parameter_descriptor(handles[0])
+            .map_err(ControllerScalarPointPrepareError::Provider)?;
+        if !validate_provider_descriptor(descriptor, handles[0], ProtocolParameterChannel::Left) {
+            return Err(ControllerScalarPointPrepareError::InvalidProviderBinding);
+        }
+        (
+            descriptor.track_id.clone(),
+            descriptor.effect_id.clone(),
+            descriptor.rack,
+        )
     };
-    let (c, r) = PreparedAutomationDelivery::prepare(queues, sequence)
-        .map_err(ScalarPointPrepareError::Delivery)?;
+    let descriptor = provider
+        .parameter_descriptor(handles[1])
+        .map_err(ControllerScalarPointPrepareError::Provider)?;
+    if !validate_provider_descriptor(descriptor, handles[1], ProtocolParameterChannel::Right)
+        || descriptor.track_id != track_id
+        || descriptor.effect_id != effect_id
+        || descriptor.rack != rack
+    {
+        return Err(ControllerScalarPointPrepareError::InvalidProviderBinding);
+    }
+    Ok(())
+}
+
+/// Prepare one typed controller and scalar compressor owner sharing the controller's sole
+/// delivery service.
+///
+/// The caller supplies a trusted, already prepared session/provider/effect association. The
+/// constructor validates the native effect and both typed descriptors, requires the provider clock
+/// at sample zero, then calls controller preparation exactly once and moves its returned render
+/// half into the scalar owner. The provider clock must be advanced by the caller at successful
+/// render or cancellation boundaries before later admissions; snapshots do not publish time.
+/// Session edits, locate, live `ParameterStateGet`, graph resolution, automatic scheduling, and
+/// framed ingress remain unavailable. After cancellation, drop both owners only after the render
+/// side acknowledges the boundary and the host is quiescent so reclamation stays off render.
+#[allow(clippy::too_many_arguments)] // Frozen constructor shape mirrors #530 after the two bindings.
+pub fn prepare_controller_scalar_point_endpoint<'a, P: ControlProvider>(
+    processor: &'a mut dyn PreparedNativeEffect,
+    handles: [ParameterHandle; 2],
+    session: SessionStore,
+    queues: ProtocolQueueConfig,
+    mut provider: P,
+    replay: ReplayCacheConfig,
+    codec: ProtocolCodec,
+    config: ProtocolControllerConfig,
+    retained: ControllerRetainedCapacity,
+) -> Result<
+    (
+        ControllerAutomationDelivery<P>,
+        PreparedScalarPointRender<'a>,
+        ControllerScalarPointResources,
+    ),
+    ControllerScalarPointPrepareError,
+> {
+    let quantum = validate_scalar_point_processor(processor, handles, queues)
+        .map_err(ControllerScalarPointPrepareError::ScalarPoint)?;
+    validate_provider_bindings(&mut provider, handles)?;
+    let observed = provider.current_sample();
+    if observed != SampleTime(0) {
+        return Err(ControllerScalarPointPrepareError::InitialSampleMismatch { observed });
+    }
+    let capabilities =
+        point_capabilities(handles).map_err(ControllerScalarPointPrepareError::ScalarPoint)?;
+    let (controller, delivery, resources) = ControllerAutomationDelivery::prepare(
+        session,
+        queues,
+        provider,
+        replay,
+        codec,
+        config,
+        retained,
+        capabilities,
+    )
+    .map_err(ControllerScalarPointPrepareError::Controller)?;
+    let combined_resources = ControllerScalarPointResources {
+        controller: resources,
+        scalar_render_inline_bytes: core::mem::size_of::<PreparedScalarPointRender<'static>>(),
+    };
     Ok((
-        ScalarPointControl {
-            delivery: c,
-            revision,
-            handles,
-            capabilities: caps,
-        },
-        PreparedScalarPointRender {
-            processor,
-            delivery: r,
-            handles,
-            quantum,
-            next_sample: SampleTime(0),
-            observed_sample: SampleTime(0),
-            last_application: [None; 2],
-            applied: 0,
-            late: 0,
-            claimed: None,
-            fault: None,
-        },
-        resources,
+        controller,
+        assemble_scalar_point_render(processor, delivery, handles, quantum),
+        combined_resources,
     ))
 }

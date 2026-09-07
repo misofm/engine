@@ -1,0 +1,67 @@
+   Compiling host-core v0.1.0 (/home/bl/misofm/engine-controller-scalar-points/crates/host-core)
+warning: unused import: `ControllerScalarPointPrepareError`
+  --> crates/host-core/tests/scalar_point_endpoint.rs:13:5
+   |
+13 |     ControllerScalarPointPrepareError, PlanSampleSource, ScalarPointAdmissionError,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+error[E0599]: no method named `parameter_metadata` found for struct `SessionControlProvider` in the current scope
+   --> crates/host-core/tests/scalar_point_endpoint.rs:137:10
+    |
+136 |       let metadata = provider
+    |  ____________________-
+137 | |         .parameter_metadata(ParameterMetadataRequest {
+    | |         -^^^^^^^^^^^^^^^^^^ private field, not a method
+    | |_________|
+    |
+    |
+   ::: crates/protocol/src/controller.rs:571:8
+    |
+571 |       fn parameter_metadata(
+    |          ------------------ the method is available for `SessionControlProvider` here
+    |
+    = help: items from traits can only be used if the trait is in scope
+help: trait `ControlProvider` which provides `parameter_metadata` is implemented but not in scope; perhaps you want to import it
+    |
+  4 + use protocol::ControlProvider;
+    |
+help: there is a method `parameter_state` with a similar name
+    |
+137 -         .parameter_metadata(ParameterMetadataRequest {
+137 +         .parameter_state(ParameterMetadataRequest {
+    |
+
+error[E0277]: `PreparedScalarPointRender<'_>` doesn't implement `Debug`
+    --> crates/host-core/tests/scalar_point_endpoint.rs:1575:37
+     |
+1575 |     let mut render = render.start().expect("render start");
+     |                                     ^^^^^^ the trait `Debug` is not implemented for `PreparedScalarPointRender<'_>`
+     |
+     = help: the following other types implement trait `Debug`:
+               ()
+               (A, Z, Y, X, W, V, U, T)
+               (B, A, Z, Y, X, W, V, U, T)
+               (C, B, A, Z, Y, X, W, V, U, T)
+               (D, C, B, A, Z, Y, X, W, V, U, T)
+               (E, D, C, B, A, Z, Y, X, W, V, U, T)
+               (T,)
+               (U, T)
+             and 5 others
+     = note: required for `(PreparedScalarPointRender<'_>, FpEnvironmentRejection)` to implement `Debug`
+note: required by a bound in `Result::<T, E>::expect`
+    --> /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/result.rs:1179:4
+
+error[E0600]: cannot apply unary operator `-` to type `u32`
+    --> crates/host-core/tests/scalar_point_endpoint.rs:1625:58
+     |
+1625 |     assert_eq!(snapshot.state[1].target_value.to_bits(), -6.0_f32.to_bits());
+     |                                                          ^^^^^^^^^^^^^^^^^^ cannot apply unary operator `-`
+     |
+     = note: unsigned values cannot be negated
+
+Some errors have detailed explanations: E0277, E0599, E0600.
+For more information about an error, try `rustc --explain E0277`.
+warning: `host-core` (test "scalar_point_endpoint") generated 1 warning
+error: could not compile `host-core` (test "scalar_point_endpoint") due to 3 previous errors; 1 warning emitted
