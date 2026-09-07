@@ -69,33 +69,47 @@ manifest, hosts, C ABI, browser, SDK, artifacts, policies, workflows, or lane B 
 path `tools/bench/src/graph.rs`. If selection requires a compiler/graph change or a
 new public seam, stop and rebrief rather than widening this issue.
 
+The only exception is direct red-mutation evidence: Luna may temporarily change one
+named paired arithmetic operation in `crates/builtins-compiler/src/lib.rs`, run the
+focused endpoint/reference discriminator, then restore it. That mutation is never
+staged or committed and does not authorize production or test instrumentation there.
+
 ## Objective gates
 
 1. Through the public prepared endpoint on native x86-64-v3, address an eligible
    bank lane with asymmetric fader, mute, crossfeed, and smoothing records. Directly
    read the existing test-support witness after preparation and render: a pair
    factory was selected, paired process/member counts are nonzero and internally
-   consistent, and separate fader/matrix process calls for those paired members did
-   not execute.
+   consistent, the complete fader/matrix record set was drained once, and state
+   advances through the selected pair. Across immediate, ramping, settled, mid-ramp
+   retarget, mute, and unmute blocks, compare mapped PCM bits, applicable target/ramp
+   state, and PostFader observation bits with an independently prepared separate
+   `Concurrent` reference. These combined witnesses are the available dispatch
+   accounting; do not invent a separate-bank call counter.
 2. Through the private test-only scalar-backend endpoint, address a real scalar
    owner with nontrivial ramps and retargeting. Directly prove the existing scalar
    pair factory and paired processor were selected. Compare target/ramp state,
    PostFader observation, and output PCM bits with an independently prepared
    separate `Concurrent` reference across immediate, ramping, settled, mid-ramp
    retarget, mute, and unmute blocks.
-3. Exercise at least one existing eligibility barrier for bank and scalar execution,
-   including a selected PostFader observation or buffer-alias constraint. Prove the
-   compiler declines the pair, the separate processors run, and endpoint/reference
-   state plus PCM bits remain equal. Do not weaken the observation to obtain a pair.
+3. Preserve selected PostFader observations while pairing where the existing split
+   pair supports them. Separately exercise demonstrated existing eligibility-barrier
+   fixtures for bank and scalar execution, such as a compiler-proven buffer alias or
+   incompatible boundary. Prove the compiler declines each candidate, the records
+   and state progress through separate processors, and endpoint/reference state plus
+   PCM bits remain equal. Do not assume an observation declines pairing or weaken an
+   observation to obtain a pair.
 4. Preserve one-claim-per-block and after-claim publication behavior, FIFO/late
    reporting, atomic batch injection, cancellation exact-once/token/generation
    behavior, sticky-fault retention, cap preflight, resource accounting, allocator
    liveness, and zero render allocations/frees. Re-run the complete #576/#579/#580
    endpoint suite, including native-bank and forced-scalar cases.
 5. Run two direct red mutations against the exact claims and restore source: force
-   the endpoint back to `Concurrent` so the selected-pair witness fails; corrupt one
-   existing paired arithmetic result through a temporary test mutation so the
-   endpoint/reference bitwise equivalence gate fails. A mutation that fails only a
+   the endpoint back to `Concurrent` so the selected-pair witness fails; then make a
+   temporary, uncommitted change to one arithmetic operation in the selected bank or
+   scalar pair processor in `crates/builtins-compiler/src/lib.rs` so the
+   endpoint/reference bitwise equivalence gate fails. Record the named operation,
+   failing assertion, restored diff, and clean status. A mutation that fails only a
    prose, source-text, or construction assertion is insufficient.
 6. Pass focused host-core tests in debug and release, strict Clippy and rustdoc,
    formatting and diff checks, workspace/host policies, CI routing checks, native
