@@ -1,0 +1,10 @@
+   Compiling bytemuck v1.25.2
+   Compiling engine v0.1.0 (/home/bl/misofm/engine-gate-detector-access/crates/engine)
+   Compiling safe_arch v1.2.0
+   Compiling wide v1.6.1
+   Compiling lane v0.1.0 (/home/bl/misofm/engine-gate-detector-access/crates/lane)
+   Compiling math v0.1.0 (/home/bl/misofm/engine-gate-detector-access/crates/math)
+   Compiling effect-runtime v0.1.0 (/home/bl/misofm/engine-gate-detector-access/crates/effect-runtime)
+   Compiling effect-contract v0.1.0 (/home/bl/misofm/engine-gate-detector-access/crates/effect-contract)
+   Compiling gate-expander v0.1.0 (/home/bl/misofm/engine-gate-detector-access/crates/gate-expander)
+    Finished `release` profile [optimized + debuginfo] target(s) in 6.47s

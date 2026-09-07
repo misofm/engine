@@ -1,0 +1,2967 @@
+ASM: /tmp/issue534-baseline-target/release/deps/gate_expander-a68433203a7e3c7a.s sha256=c49178247fb551f89d6f4c5b46e8b2a7416fd2e00801146c4624341624dc300f
+Contexts are native .loc records for kernel.rs gather lines 271-277.
+
+--- asm line 13129 ---
+13126:	jbe	.LBB21_473
+13127:	cmpq	%r13, %rcx
+13128:.Ltmp2204:
+13129:	.loc	21 275 29 is_stmt 1
+13130:	jbe	.LBB21_472
+13131:.Ltmp2205:
+13132:	.loc	21 0 29 is_stmt 0
+13133:	movl	200(%rbx), %ebp
+13134:	notl	%ebp
+13135:	addl	%r8d, %ebp
+13136:	andl	%edi, %ebp
+--- asm line 14359 ---
+14356:	movq	32(%rsp), %rcx
+14357:	cmpq	%r13, %rcx
+14358:.Ltmp2544:
+14359:	.loc	21 275 29 is_stmt 1
+14360:	jbe	.LBB21_472
+14361:	.loc	21 0 29 is_stmt 0
+14362:	movl	200(%rbx), %ebp
+14363:	notl	%ebp
+14364:	addl	%r8d, %ebp
+14365:	andl	%edi, %ebp
+14366:	cmpq	%rbp, %rcx
+--- asm line 14369 ---
+14366:	cmpq	%rbp, %rcx
+14367:	jbe	.LBB21_471
+14368:	cmpq	%rbp, (%rsp)
+14369:	.loc	21 277 29 is_stmt 1
+14370:	jbe	.LBB21_470
+14371:.Ltmp2545:
+14372:	.loc	21 323 26
+14373:	vmovss	804(%rbx), %xmm9
+14374:.Ltmp2546:
+14375:	.loc	26 134 14
+14376:	vucomiss	%xmm0, %xmm9
+--- asm line 15814 ---
+15811:	vmovss	.LCPI21_1(%rip), %xmm6
+15812:	vbroadcastss	.LCPI21_2(%rip), %xmm14
+15813:.Ltmp2911:
+15814:	.loc	21 275 29 is_stmt 1
+15815:	jbe	.LBB21_703
+15816:	.loc	21 0 29 is_stmt 0
+15817:	leal	(%r11,%r14), %r8d
+15818:	decl	%r8d
+15819:	andl	%ecx, %r8d
+15820:	cmpq	%r8, %rsi
+15821:	jbe	.LBB21_702
+--- asm line 15823 ---
+15820:	cmpq	%r8, %rsi
+15821:	jbe	.LBB21_702
+15822:	cmpq	%r8, %rdx
+15823:	.loc	21 277 29 is_stmt 1
+15824:	jbe	.LBB21_701
+15825:.Ltmp2912:
+15826:	.loc	21 0 29 is_stmt 0
+15827:	movq	8(%rsp), %rdx
+15828:	vmovss	(%rdx,%rdi,4), %xmm0
+15829:	movq	(%rsp), %rdx
+15830:.Ltmp2913:
+--- asm line 16654 ---
+16651:	vmovss	.LCPI21_1(%rip), %xmm6
+16652:	vbroadcastss	.LCPI21_2(%rip), %xmm13
+16653:.Ltmp3131:
+16654:	.loc	21 275 29 is_stmt 1
+16655:	jbe	.LBB21_703
+16656:	.loc	21 0 29 is_stmt 0
+16657:	leal	(%r11,%r14), %r8d
+16658:	decl	%r8d
+16659:	andl	%ecx, %r8d
+16660:	cmpq	%r8, %rsi
+16661:	jbe	.LBB21_702
+--- asm line 16663 ---
+16660:	cmpq	%r8, %rsi
+16661:	jbe	.LBB21_702
+16662:	cmpq	%r8, %rdx
+16663:	.loc	21 277 29 is_stmt 1
+16664:	jbe	.LBB21_701
+16665:.Ltmp3132:
+16666:	.loc	21 0 29 is_stmt 0
+16667:	movq	8(%rsp), %rdx
+16668:	vmovss	(%rdx,%rdi,4), %xmm0
+16669:	movq	(%rsp), %rdx
+16670:.Ltmp3133:
+--- asm line 17493 ---
+17490:	jbe	.LBB21_704
+17491:	cmpq	%rdi, %rdx
+17492:.Ltmp3349:
+17493:	.loc	21 275 29 is_stmt 1
+17494:	jbe	.LBB21_703
+17495:	.loc	21 0 29 is_stmt 0
+17496:	leal	(%r9,%r14), %r8d
+17497:	decl	%r8d
+17498:	andl	%ecx, %r8d
+17499:	cmpq	%r8, %rdx
+17500:	jbe	.LBB21_702
+--- asm line 17502 ---
+17499:	cmpq	%r8, %rdx
+17500:	jbe	.LBB21_702
+17501:	cmpq	%r8, 160(%rsp)
+17502:	.loc	21 277 29 is_stmt 1
+17503:	jbe	.LBB21_701
+17504:.Ltmp3350:
+17505:	.loc	21 0 29 is_stmt 0
+17506:	movq	8(%rsp), %rdx
+17507:	vmovss	(%rdx,%rdi,4), %xmm8
+17508:	movq	(%rsp), %rdx
+17509:.Ltmp3351:
+--- asm line 18305 ---
+18302:	jbe	.LBB21_704
+18303:	cmpq	%rdi, %rsi
+18304:.Ltmp3562:
+18305:	.loc	21 275 29 is_stmt 1
+18306:	jbe	.LBB21_703
+18307:	.loc	21 0 29 is_stmt 0
+18308:	movq	296(%rsp), %r8
+18309:	addl	%r14d, %r8d
+18310:	decl	%r8d
+18311:	andl	%ecx, %r8d
+18312:	cmpq	%r8, %rsi
+--- asm line 18316 ---
+18313:	jbe	.LBB21_702
+18314:	cmpq	%r8, %rdx
+18315:	movl	$8388608, %esi
+18316:	.loc	21 277 29 is_stmt 1
+18317:	jbe	.LBB21_701
+18318:.Ltmp3563:
+18319:	.loc	21 0 29 is_stmt 0
+18320:	movq	8(%rsp), %rdx
+18321:	vmovss	(%rdx,%rdi,4), %xmm8
+18322:	movq	(%rsp), %rdx
+18323:.Ltmp3564:
+--- asm line 19889 ---
+19886:	movq	56(%rsp), %r15
+19887:	cmpq	%rdi, %r15
+19888:.Ltmp3979:
+19889:	.loc	21 275 29 is_stmt 1
+19890:	jbe	.LBB21_703
+19891:.Ltmp3980:
+19892:	.loc	21 0 29 is_stmt 0
+19893:	leal	(%rax,%r14), %r8d
+19894:	decl	%r8d
+19895:	andl	%ecx, %r8d
+19896:	cmpq	%r8, %r15
+--- asm line 20706 ---
+20703:	movq	56(%rsp), %r15
+20704:	cmpq	%rdi, %r15
+20705:.Ltmp4193:
+20706:	.loc	21 275 29 is_stmt 1
+20707:	jbe	.LBB21_703
+20708:	.loc	21 0 29 is_stmt 0
+20709:	leal	(%rax,%r14), %r8d
+20710:	decl	%r8d
+20711:	andl	%ecx, %r8d
+20712:	cmpq	%r8, %r15
+20713:	jbe	.LBB21_702
+--- asm line 20715 ---
+20712:	cmpq	%r8, %r15
+20713:	jbe	.LBB21_702
+20714:	cmpq	%r8, %r13
+20715:	.loc	21 277 29 is_stmt 1
+20716:	jbe	.LBB21_701
+20717:.Ltmp4194:
+20718:	.loc	21 0 29 is_stmt 0
+20719:	movq	8(%rsp), %rsi
+20720:	vmovss	(%rsi,%rdi,4), %xmm8
+20721:	movq	(%rsp), %r15
+20722:.Ltmp4195:
+--- asm line 21880 ---
+21877:	callq	*_RNvNtNtCs4NRVxsYgnAr_4core5slice5index16slice_index_fail@GOTPCREL(%rip)
+21878:.Ltmp4451:
+21879:.LBB21_473:
+21880:	.loc	21 274 29
+21881:	leaq	.Lalloc_b53d553f9945f7702333f7af20204159(%rip), %rdx
+21882:	movq	%r13, %rdi
+21883:	movq	(%rsp), %rsi
+21884:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+21885:.LBB21_472:
+21886:	.loc	21 275 29
+21887:	leaq	.Lalloc_30bf8a301493a607abcc78dbf93977e0(%rip), %rdx
+--- asm line 21886 ---
+21883:	movq	(%rsp), %rsi
+21884:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+21885:.LBB21_472:
+21886:	.loc	21 275 29
+21887:	leaq	.Lalloc_30bf8a301493a607abcc78dbf93977e0(%rip), %rdx
+21888:	movq	%r13, %rdi
+21889:	movq	32(%rsp), %rsi
+21890:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+21891:.LBB21_471:
+21892:	.loc	21 276 29
+21893:	leaq	.Lalloc_5833dd3f10f38ea96ec24c6054ff083c(%rip), %rdx
+--- asm line 21892 ---
+21889:	movq	32(%rsp), %rsi
+21890:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+21891:.LBB21_471:
+21892:	.loc	21 276 29
+21893:	leaq	.Lalloc_5833dd3f10f38ea96ec24c6054ff083c(%rip), %rdx
+21894:	movq	%rbp, %rdi
+21895:	movq	32(%rsp), %rsi
+21896:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+21897:.LBB21_470:
+21898:	.loc	21 277 29
+21899:	leaq	.Lalloc_c5ae5decb60097d7e1183cb43cae6b3f(%rip), %rdx
+--- asm line 21898 ---
+21895:	movq	32(%rsp), %rsi
+21896:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+21897:.LBB21_470:
+21898:	.loc	21 277 29
+21899:	leaq	.Lalloc_c5ae5decb60097d7e1183cb43cae6b3f(%rip), %rdx
+21900:	movq	%rbp, %rdi
+21901:	movq	(%rsp), %rsi
+21902:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+21903:.Ltmp4452:
+21904:.LBB21_702:
+21905:	.loc	21 276 29
+--- asm line 21905 ---
+21902:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+21903:.Ltmp4452:
+21904:.LBB21_702:
+21905:	.loc	21 276 29
+21906:	leaq	.Lalloc_5833dd3f10f38ea96ec24c6054ff083c(%rip), %rdx
+21907:	movq	%r8, %rdi
+21908:	movq	56(%rsp), %rsi
+21909:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+21910:.LBB21_703:
+21911:	.loc	21 275 29
+21912:	leaq	.Lalloc_30bf8a301493a607abcc78dbf93977e0(%rip), %rdx
+--- asm line 21911 ---
+21908:	movq	56(%rsp), %rsi
+21909:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+21910:.LBB21_703:
+21911:	.loc	21 275 29
+21912:	leaq	.Lalloc_30bf8a301493a607abcc78dbf93977e0(%rip), %rdx
+21913:	movq	56(%rsp), %rsi
+21914:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+21915:.LBB21_704:
+21916:	.loc	21 274 29
+21917:	leaq	.Lalloc_b53d553f9945f7702333f7af20204159(%rip), %rdx
+21918:	movq	160(%rsp), %rsi
+--- asm line 21916 ---
+21913:	movq	56(%rsp), %rsi
+21914:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+21915:.LBB21_704:
+21916:	.loc	21 274 29
+21917:	leaq	.Lalloc_b53d553f9945f7702333f7af20204159(%rip), %rdx
+21918:	movq	160(%rsp), %rsi
+21919:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+21920:.LBB21_701:
+21921:	.loc	21 277 29
+21922:	leaq	.Lalloc_c5ae5decb60097d7e1183cb43cae6b3f(%rip), %rdx
+21923:	movq	%r8, %rdi
+--- asm line 21921 ---
+21918:	movq	160(%rsp), %rsi
+21919:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+21920:.LBB21_701:
+21921:	.loc	21 277 29
+21922:	leaq	.Lalloc_c5ae5decb60097d7e1183cb43cae6b3f(%rip), %rdx
+21923:	movq	%r8, %rdi
+21924:	movq	160(%rsp), %rsi
+21925:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+21926:.Ltmp4453:
+21927:.Lfunc_end21:
+21928:	.size	_RNvMCsdOTRa1MFkeb_13gate_expanderINtB2_12PreparedGatefKb1_E9run_blockB2_, .Lfunc_end21-_RNvMCsdOTRa1MFkeb_13gate_expanderINtB2_12PreparedGatefKb1_E9run_blockB2_
+--- asm line 27354 ---
+27351:	jbe	.LBB32_280
+27352:	cmpq	%r8, %r10
+27353:.Ltmp5210:
+27354:	.loc	21 275 29 is_stmt 1
+27355:	jbe	.LBB32_279
+27356:.Ltmp5211:
+27357:	.loc	21 0 29 is_stmt 0
+27358:	movq	88(%rsp), %r9
+27359:	addl	%ecx, %r9d
+27360:	andl	%edx, %r9d
+27361:	cmpq	%r9, %r10
+--- asm line 28548 ---
+28545:	jbe	.LBB32_278
+28546:	cmpq	%r9, %rax
+28547:.Ltmp5537:
+28548:	.loc	21 277 29 is_stmt 1
+28549:	jbe	.LBB32_277
+28550:.Ltmp5538:
+28551:	.loc	21 323 26
+28552:	vmovss	804(%r14), %xmm1
+28553:.Ltmp5539:
+28554:	.loc	26 134 14
+28555:	vucomiss	%xmm8, %xmm1
+--- asm line 29863 ---
+29860:	jbe	.LBB32_375
+29861:	cmpq	%r11, %r15
+29862:.Ltmp5874:
+29863:	.loc	21 275 29 is_stmt 1
+29864:	jbe	.LBB32_374
+29865:	.loc	21 0 29 is_stmt 0
+29866:	movq	408(%rsp), %rsi
+29867:	leal	(%rsi,%r9), %r10d
+29868:	decl	%r10d
+29869:	andl	%ebx, %r10d
+29870:	cmpq	%r10, %r15
+--- asm line 29873 ---
+29870:	cmpq	%r10, %r15
+29871:	jbe	.LBB32_373
+29872:	cmpq	%r10, %rax
+29873:	.loc	21 277 29 is_stmt 1
+29874:	jbe	.LBB32_372
+29875:.Ltmp5875:
+29876:	.loc	21 0 29 is_stmt 0
+29877:	vmovss	(%rbp,%r11,4), %xmm3
+29878:.Ltmp5876:
+29879:	.loc	26 103 24 is_stmt 1
+29880:	vmovss	(%r8,%r11,4), %xmm5
+--- asm line 30617 ---
+30614:	cmpq	%r11, %r15
+30615:	vbroadcastss	.LCPI32_4(%rip), %xmm8
+30616:.Ltmp6076:
+30617:	.loc	21 275 29 is_stmt 1
+30618:	jbe	.LBB32_374
+30619:.Ltmp6077:
+30620:	.loc	21 0 29 is_stmt 0
+30621:	movq	312(%rsp), %rsi
+30622:	leal	(%rsi,%rcx), %r10d
+30623:	andl	%ebx, %r10d
+30624:	cmpq	%r10, %r15
+--- asm line 31350 ---
+31347:	jbe	.LBB32_373
+31348:	cmpq	%r10, %rax
+31349:.Ltmp6276:
+31350:	.loc	21 277 29 is_stmt 1
+31351:	jbe	.LBB32_372
+31352:.Ltmp6277:
+31353:	.loc	21 0 29 is_stmt 0
+31354:	vmovss	(%rbp,%r11,4), %xmm3
+31355:.Ltmp6278:
+31356:	.loc	26 103 24 is_stmt 1
+31357:	vmovss	(%r8,%r11,4), %xmm5
+--- asm line 32373 ---
+32370:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+32371:.Ltmp6507:
+32372:.LBB32_280:
+32373:	.loc	21 274 29
+32374:	leaq	.Lalloc_b53d553f9945f7702333f7af20204159(%rip), %rdx
+32375:	movq	%r8, %rdi
+32376:	movq	%rax, %rsi
+32377:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+32378:.LBB32_278:
+32379:	.loc	21 276 29
+32380:	leaq	.Lalloc_5833dd3f10f38ea96ec24c6054ff083c(%rip), %rdx
+--- asm line 32379 ---
+32376:	movq	%rax, %rsi
+32377:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+32378:.LBB32_278:
+32379:	.loc	21 276 29
+32380:	leaq	.Lalloc_5833dd3f10f38ea96ec24c6054ff083c(%rip), %rdx
+32381:	movq	%r9, %rdi
+32382:	movq	%r10, %rsi
+32383:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+32384:.Ltmp6508:
+32385:.LBB32_375:
+32386:	.loc	21 274 29
+--- asm line 32386 ---
+32383:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+32384:.Ltmp6508:
+32385:.LBB32_375:
+32386:	.loc	21 274 29
+32387:	leaq	.Lalloc_b53d553f9945f7702333f7af20204159(%rip), %rdx
+32388:	movq	%r11, %rdi
+32389:	movq	%rax, %rsi
+32390:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+32391:.LBB32_373:
+32392:	.loc	21 276 29
+32393:	leaq	.Lalloc_5833dd3f10f38ea96ec24c6054ff083c(%rip), %rdx
+--- asm line 32392 ---
+32389:	movq	%rax, %rsi
+32390:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+32391:.LBB32_373:
+32392:	.loc	21 276 29
+32393:	leaq	.Lalloc_5833dd3f10f38ea96ec24c6054ff083c(%rip), %rdx
+32394:	movq	%r10, %rdi
+32395:	movq	%r15, %rsi
+32396:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+32397:.LBB32_372:
+32398:	.loc	21 277 29
+32399:	leaq	.Lalloc_c5ae5decb60097d7e1183cb43cae6b3f(%rip), %rdx
+--- asm line 32398 ---
+32395:	movq	%r15, %rsi
+32396:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+32397:.LBB32_372:
+32398:	.loc	21 277 29
+32399:	leaq	.Lalloc_c5ae5decb60097d7e1183cb43cae6b3f(%rip), %rdx
+32400:	movq	%r10, %rdi
+32401:	movq	%rax, %rsi
+32402:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+32403:.LBB32_374:
+32404:	.loc	21 275 29
+32405:	leaq	.Lalloc_30bf8a301493a607abcc78dbf93977e0(%rip), %rdx
+--- asm line 32404 ---
+32401:	movq	%rax, %rsi
+32402:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+32403:.LBB32_374:
+32404:	.loc	21 275 29
+32405:	leaq	.Lalloc_30bf8a301493a607abcc78dbf93977e0(%rip), %rdx
+32406:	movq	%r11, %rdi
+32407:	movq	%r15, %rsi
+32408:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+32409:.Ltmp6509:
+32410:.LBB32_277:
+32411:	.loc	21 277 29
+--- asm line 32411 ---
+32408:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+32409:.Ltmp6509:
+32410:.LBB32_277:
+32411:	.loc	21 277 29
+32412:	leaq	.Lalloc_c5ae5decb60097d7e1183cb43cae6b3f(%rip), %rdx
+32413:	movq	%r9, %rdi
+32414:	movq	%rax, %rsi
+32415:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+32416:.LBB32_279:
+32417:	.loc	21 275 29
+32418:	leaq	.Lalloc_30bf8a301493a607abcc78dbf93977e0(%rip), %rdx
+--- asm line 32417 ---
+32414:	movq	%rax, %rsi
+32415:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+32416:.LBB32_279:
+32417:	.loc	21 275 29
+32418:	leaq	.Lalloc_30bf8a301493a607abcc78dbf93977e0(%rip), %rdx
+32419:	movq	%r8, %rdi
+32420:	movq	%r10, %rsi
+32421:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+32422:.Ltmp6510:
+32423:.Lfunc_end32:
+32424:	.size	_RNvXs_CsdOTRa1MFkeb_13gate_expanderINtB4_12PreparedGatefKb0_ENtCsfGpaX3jkkqY_15effect_contract20PreparedNativeEffect7processB4_, .Lfunc_end32-_RNvXs_CsdOTRa1MFkeb_13gate_expanderINtB4_12PreparedGatefKb0_ENtCsfGpaX3jkkqY_15effect_contract20PreparedNativeEffect7processB4_
+--- asm line 35347 ---
+35344:	cmpq	%rbp, %rsi
+35345:	ja	.LBB40_150
+35346:.Ltmp6921:
+35347:	.loc	21 271 24 is_stmt 1
+35348:	leal	(%r15,%rcx), %esi
+35349:	movl	%esi, %edi
+35350:	movq	40(%rsp), %rax
+35351:	subl	800(%rax), %edi
+35352:	andl	%r8d, %edi
+35353:	.loc	21 271 23 is_stmt 0
+35354:	shlq	$2, %rdi
+--- asm line 35353 ---
+35350:	movq	40(%rsp), %rax
+35351:	subl	800(%rax), %edi
+35352:	andl	%r8d, %edi
+35353:	.loc	21 271 23 is_stmt 0
+35354:	shlq	$2, %rdi
+35355:.Ltmp6922:
+35356:	.loc	21 274 29 is_stmt 1
+35357:	cmpq	%rdx, %rdi
+35358:	jae	.LBB40_171
+35359:	.loc	21 275 29
+35360:	cmpq	%rbp, %rdi
+--- asm line 35356 ---
+35353:	.loc	21 271 23 is_stmt 0
+35354:	shlq	$2, %rdi
+35355:.Ltmp6922:
+35356:	.loc	21 274 29 is_stmt 1
+35357:	cmpq	%rdx, %rdi
+35358:	jae	.LBB40_171
+35359:	.loc	21 275 29
+35360:	cmpq	%rbp, %rdi
+35361:	jae	.LBB40_180
+35362:.Ltmp6923:
+35363:	.loc	21 0 29 is_stmt 0
+--- asm line 35359 ---
+35356:	.loc	21 274 29 is_stmt 1
+35357:	cmpq	%rdx, %rdi
+35358:	jae	.LBB40_171
+35359:	.loc	21 275 29
+35360:	cmpq	%rbp, %rdi
+35361:	jae	.LBB40_180
+35362:.Ltmp6923:
+35363:	.loc	21 0 29 is_stmt 0
+35364:	movq	40(%rsp), %rax
+35365:	subl	864(%rax), %esi
+35366:	andl	%r8d, %esi
+--- asm line 35369 ---
+35366:	andl	%r8d, %esi
+35367:	shlq	$2, %rsi
+35368:.Ltmp6924:
+35369:	.loc	21 276 29 is_stmt 1
+35370:	cmpq	%rbp, %rsi
+35371:	jae	.LBB40_178
+35372:	.loc	21 0 29 is_stmt 0
+35373:	movq	%rbx, 88(%rsp)
+35374:	movq	%r10, 64(%rsp)
+35375:	.loc	21 277 29 is_stmt 1
+35376:	cmpq	%rdx, %rsi
+--- asm line 35375 ---
+35372:	.loc	21 0 29 is_stmt 0
+35373:	movq	%rbx, 88(%rsp)
+35374:	movq	%r10, 64(%rsp)
+35375:	.loc	21 277 29 is_stmt 1
+35376:	cmpq	%rdx, %rsi
+35377:	jae	.LBB40_175
+35378:.Ltmp6925:
+35379:	.loc	21 271 24
+35380:	leal	(%r15,%rcx), %eax
+35381:	movl	%eax, %ebx
+35382:	movq	40(%rsp), %r10
+--- asm line 35379 ---
+35376:	cmpq	%rdx, %rsi
+35377:	jae	.LBB40_175
+35378:.Ltmp6925:
+35379:	.loc	21 271 24
+35380:	leal	(%r15,%rcx), %eax
+35381:	movl	%eax, %ebx
+35382:	movq	40(%rsp), %r10
+35383:	subl	804(%r10), %ebx
+35384:	andl	%r8d, %ebx
+35385:	.loc	21 271 23 is_stmt 0
+35386:	leaq	1(,%rbx,4), %r13
+--- asm line 35385 ---
+35382:	movq	40(%rsp), %r10
+35383:	subl	804(%r10), %ebx
+35384:	andl	%r8d, %ebx
+35385:	.loc	21 271 23 is_stmt 0
+35386:	leaq	1(,%rbx,4), %r13
+35387:.Ltmp6926:
+35388:	.loc	21 274 29 is_stmt 1
+35389:	cmpq	%rdx, %r13
+35390:	jae	.LBB40_168
+35391:	.loc	21 275 29
+35392:	cmpq	%rbp, %r13
+--- asm line 35388 ---
+35385:	.loc	21 271 23 is_stmt 0
+35386:	leaq	1(,%rbx,4), %r13
+35387:.Ltmp6926:
+35388:	.loc	21 274 29 is_stmt 1
+35389:	cmpq	%rdx, %r13
+35390:	jae	.LBB40_168
+35391:	.loc	21 275 29
+35392:	cmpq	%rbp, %r13
+35393:	jae	.LBB40_166
+35394:.Ltmp6927:
+35395:	.loc	21 0 29 is_stmt 0
+--- asm line 35391 ---
+35388:	.loc	21 274 29 is_stmt 1
+35389:	cmpq	%rdx, %r13
+35390:	jae	.LBB40_168
+35391:	.loc	21 275 29
+35392:	cmpq	%rbp, %r13
+35393:	jae	.LBB40_166
+35394:.Ltmp6927:
+35395:	.loc	21 0 29 is_stmt 0
+35396:	movq	40(%rsp), %rbx
+35397:	subl	868(%rbx), %eax
+35398:	andl	%r8d, %eax
+--- asm line 35401 ---
+35398:	andl	%r8d, %eax
+35399:	leaq	1(,%rax,4), %rbx
+35400:.Ltmp6928:
+35401:	.loc	21 276 29 is_stmt 1
+35402:	cmpq	%rbp, %rbx
+35403:	jae	.LBB40_176
+35404:	.loc	21 0 29 is_stmt 0
+35405:	movq	%r14, 240(%rsp)
+35406:	.loc	21 277 29 is_stmt 1
+35407:	cmpq	%rdx, %rbx
+35408:	jae	.LBB40_173
+--- asm line 35406 ---
+35403:	jae	.LBB40_176
+35404:	.loc	21 0 29 is_stmt 0
+35405:	movq	%r14, 240(%rsp)
+35406:	.loc	21 277 29 is_stmt 1
+35407:	cmpq	%rdx, %rbx
+35408:	jae	.LBB40_173
+35409:.Ltmp6929:
+35410:	.loc	21 271 24
+35411:	leal	(%r15,%rcx), %eax
+35412:	movl	%eax, %r14d
+35413:	movq	40(%rsp), %r10
+--- asm line 35410 ---
+35407:	cmpq	%rdx, %rbx
+35408:	jae	.LBB40_173
+35409:.Ltmp6929:
+35410:	.loc	21 271 24
+35411:	leal	(%r15,%rcx), %eax
+35412:	movl	%eax, %r14d
+35413:	movq	40(%rsp), %r10
+35414:	subl	808(%r10), %r14d
+35415:	andl	%r8d, %r14d
+35416:	.loc	21 271 23 is_stmt 0
+35417:	leaq	2(,%r14,4), %r14
+--- asm line 35416 ---
+35413:	movq	40(%rsp), %r10
+35414:	subl	808(%r10), %r14d
+35415:	andl	%r8d, %r14d
+35416:	.loc	21 271 23 is_stmt 0
+35417:	leaq	2(,%r14,4), %r14
+35418:.Ltmp6930:
+35419:	.loc	21 274 29 is_stmt 1
+35420:	cmpq	%rdx, %r14
+35421:	jae	.LBB40_169
+35422:	.loc	21 275 29
+35423:	cmpq	%rbp, %r14
+--- asm line 35419 ---
+35416:	.loc	21 271 23 is_stmt 0
+35417:	leaq	2(,%r14,4), %r14
+35418:.Ltmp6930:
+35419:	.loc	21 274 29 is_stmt 1
+35420:	cmpq	%rdx, %r14
+35421:	jae	.LBB40_169
+35422:	.loc	21 275 29
+35423:	cmpq	%rbp, %r14
+35424:	jae	.LBB40_167
+35425:.Ltmp6931:
+35426:	.loc	21 0 29 is_stmt 0
+--- asm line 35422 ---
+35419:	.loc	21 274 29 is_stmt 1
+35420:	cmpq	%rdx, %r14
+35421:	jae	.LBB40_169
+35422:	.loc	21 275 29
+35423:	cmpq	%rbp, %r14
+35424:	jae	.LBB40_167
+35425:.Ltmp6931:
+35426:	.loc	21 0 29 is_stmt 0
+35427:	movq	40(%rsp), %r15
+35428:	subl	872(%r15), %eax
+35429:	andl	%r8d, %eax
+--- asm line 35432 ---
+35429:	andl	%r8d, %eax
+35430:	leaq	2(,%rax,4), %r15
+35431:.Ltmp6932:
+35432:	.loc	21 276 29 is_stmt 1
+35433:	cmpq	%rbp, %r15
+35434:	jae	.LBB40_177
+35435:	.loc	21 277 29
+35436:	cmpq	%rdx, %r15
+35437:	jae	.LBB40_174
+35438:.Ltmp6933:
+35439:	.loc	21 0 29 is_stmt 0
+--- asm line 35435 ---
+35432:	.loc	21 276 29 is_stmt 1
+35433:	cmpq	%rbp, %r15
+35434:	jae	.LBB40_177
+35435:	.loc	21 277 29
+35436:	cmpq	%rdx, %r15
+35437:	jae	.LBB40_174
+35438:.Ltmp6933:
+35439:	.loc	21 0 29 is_stmt 0
+35440:	movq	144(%rsp), %rax
+35441:	.loc	21 271 24 is_stmt 1
+35442:	leal	(%rax,%rcx), %ebp
+--- asm line 35441 ---
+35438:.Ltmp6933:
+35439:	.loc	21 0 29 is_stmt 0
+35440:	movq	144(%rsp), %rax
+35441:	.loc	21 271 24 is_stmt 1
+35442:	leal	(%rax,%rcx), %ebp
+35443:	movl	%ebp, %eax
+35444:	movq	40(%rsp), %r10
+35445:	subl	812(%r10), %eax
+35446:	andl	%r8d, %eax
+35447:	.loc	21 271 23 is_stmt 0
+35448:	leaq	3(,%rax,4), %rax
+--- asm line 35447 ---
+35444:	movq	40(%rsp), %r10
+35445:	subl	812(%r10), %eax
+35446:	andl	%r8d, %eax
+35447:	.loc	21 271 23 is_stmt 0
+35448:	leaq	3(,%rax,4), %rax
+35449:.Ltmp6934:
+35450:	.loc	21 274 29 is_stmt 1
+35451:	cmpq	%rdx, %rax
+35452:	jae	.LBB40_170
+35453:	.loc	21 0 29 is_stmt 0
+35454:	movq	48(%rsp), %rdx
+--- asm line 35450 ---
+35447:	.loc	21 271 23 is_stmt 0
+35448:	leaq	3(,%rax,4), %rax
+35449:.Ltmp6934:
+35450:	.loc	21 274 29 is_stmt 1
+35451:	cmpq	%rdx, %rax
+35452:	jae	.LBB40_170
+35453:	.loc	21 0 29 is_stmt 0
+35454:	movq	48(%rsp), %rdx
+35455:	.loc	21 275 29 is_stmt 1
+35456:	cmpq	%rdx, %rax
+35457:	jae	.LBB40_179
+--- asm line 35455 ---
+35452:	jae	.LBB40_170
+35453:	.loc	21 0 29 is_stmt 0
+35454:	movq	48(%rsp), %rdx
+35455:	.loc	21 275 29 is_stmt 1
+35456:	cmpq	%rdx, %rax
+35457:	jae	.LBB40_179
+35458:.Ltmp6935:
+35459:	.loc	21 0 29 is_stmt 0
+35460:	movq	40(%rsp), %r10
+35461:	subl	876(%r10), %ebp
+35462:	andl	%r8d, %ebp
+--- asm line 35465 ---
+35462:	andl	%r8d, %ebp
+35463:	leaq	3(,%rbp,4), %rbp
+35464:.Ltmp6936:
+35465:	.loc	21 276 29 is_stmt 1
+35466:	cmpq	%rdx, %rbp
+35467:	jae	.LBB40_172
+35468:	.loc	21 277 29
+35469:	cmpq	96(%rsp), %rbp
+35470:	jae	.LBB40_165
+35471:.Ltmp6937:
+35472:	.loc	21 0 0 is_stmt 0
+--- asm line 35468 ---
+35465:	.loc	21 276 29 is_stmt 1
+35466:	cmpq	%rdx, %rbp
+35467:	jae	.LBB40_172
+35468:	.loc	21 277 29
+35469:	cmpq	96(%rsp), %rbp
+35470:	jae	.LBB40_165
+35471:.Ltmp6937:
+35472:	.loc	21 0 0 is_stmt 0
+35473:	vmovups	(%r12,%r9,4), %xmm1
+35474:	vmovaps	%xmm1, 208(%rsp)
+35475:.Ltmp6938:
+--- asm line 36649 ---
+36646:	.loc	25 0 16
+36647:	movq	264(%rsp), %rdx
+36648:.Ltmp7255:
+36649:	.loc	21 271 24 is_stmt 1
+36650:	leal	(%rdx,%r13), %r11d
+36651:	andl	%eax, %r11d
+36652:	.loc	21 271 23 is_stmt 0
+36653:	shlq	$2, %r11
+36654:.Ltmp7256:
+36655:	.loc	21 274 29 is_stmt 1
+36656:	cmpq	%rbx, %r11
+--- asm line 36652 ---
+36649:	.loc	21 271 24 is_stmt 1
+36650:	leal	(%rdx,%r13), %r11d
+36651:	andl	%eax, %r11d
+36652:	.loc	21 271 23 is_stmt 0
+36653:	shlq	$2, %r11
+36654:.Ltmp7256:
+36655:	.loc	21 274 29 is_stmt 1
+36656:	cmpq	%rbx, %r11
+36657:	jae	.LBB40_196
+36658:	.loc	21 275 29
+36659:	cmpq	%r10, %r11
+--- asm line 36655 ---
+36652:	.loc	21 271 23 is_stmt 0
+36653:	shlq	$2, %r11
+36654:.Ltmp7256:
+36655:	.loc	21 274 29 is_stmt 1
+36656:	cmpq	%rbx, %r11
+36657:	jae	.LBB40_196
+36658:	.loc	21 275 29
+36659:	cmpq	%r10, %r11
+36660:	jae	.LBB40_189
+36661:.Ltmp7257:
+36662:	.loc	21 0 29 is_stmt 0
+--- asm line 36658 ---
+36655:	.loc	21 274 29 is_stmt 1
+36656:	cmpq	%rbx, %r11
+36657:	jae	.LBB40_196
+36658:	.loc	21 275 29
+36659:	cmpq	%r10, %r11
+36660:	jae	.LBB40_189
+36661:.Ltmp7257:
+36662:	.loc	21 0 29 is_stmt 0
+36663:	movq	256(%rsp), %rdx
+36664:	leal	(%rdx,%r13), %esi
+36665:	andl	%eax, %esi
+--- asm line 36668 ---
+36665:	andl	%eax, %esi
+36666:	shlq	$2, %rsi
+36667:.Ltmp7258:
+36668:	.loc	21 276 29 is_stmt 1
+36669:	cmpq	%r10, %rsi
+36670:	jae	.LBB40_194
+36671:	.loc	21 277 29
+36672:	cmpq	%rbx, %rsi
+36673:	jae	.LBB40_192
+36674:.Ltmp7259:
+36675:	.loc	21 0 29 is_stmt 0
+--- asm line 36671 ---
+36668:	.loc	21 276 29 is_stmt 1
+36669:	cmpq	%r10, %rsi
+36670:	jae	.LBB40_194
+36671:	.loc	21 277 29
+36672:	cmpq	%rbx, %rsi
+36673:	jae	.LBB40_192
+36674:.Ltmp7259:
+36675:	.loc	21 0 29 is_stmt 0
+36676:	movq	368(%rsp), %rdx
+36677:	.loc	21 271 24 is_stmt 1
+36678:	addl	%r13d, %edx
+--- asm line 36677 ---
+36674:.Ltmp7259:
+36675:	.loc	21 0 29 is_stmt 0
+36676:	movq	368(%rsp), %rdx
+36677:	.loc	21 271 24 is_stmt 1
+36678:	addl	%r13d, %edx
+36679:	andl	%eax, %edx
+36680:	.loc	21 271 23 is_stmt 0
+36681:	leaq	1(,%rdx,4), %r12
+36682:.Ltmp7260:
+36683:	.loc	21 274 29 is_stmt 1
+36684:	cmpq	%rbx, %r12
+--- asm line 36680 ---
+36677:	.loc	21 271 24 is_stmt 1
+36678:	addl	%r13d, %edx
+36679:	andl	%eax, %edx
+36680:	.loc	21 271 23 is_stmt 0
+36681:	leaq	1(,%rdx,4), %r12
+36682:.Ltmp7260:
+36683:	.loc	21 274 29 is_stmt 1
+36684:	cmpq	%rbx, %r12
+36685:	jae	.LBB40_186
+36686:	.loc	21 275 29
+36687:	cmpq	%r10, %r12
+--- asm line 36683 ---
+36680:	.loc	21 271 23 is_stmt 0
+36681:	leaq	1(,%rdx,4), %r12
+36682:.Ltmp7260:
+36683:	.loc	21 274 29 is_stmt 1
+36684:	cmpq	%rbx, %r12
+36685:	jae	.LBB40_186
+36686:	.loc	21 275 29
+36687:	cmpq	%r10, %r12
+36688:	jae	.LBB40_181
+36689:.Ltmp7261:
+36690:	.loc	21 0 29 is_stmt 0
+--- asm line 36686 ---
+36683:	.loc	21 274 29 is_stmt 1
+36684:	cmpq	%rbx, %r12
+36685:	jae	.LBB40_186
+36686:	.loc	21 275 29
+36687:	cmpq	%r10, %r12
+36688:	jae	.LBB40_181
+36689:.Ltmp7261:
+36690:	.loc	21 0 29 is_stmt 0
+36691:	movq	448(%rsp), %rdx
+36692:	addl	%r13d, %edx
+36693:	andl	%eax, %edx
+--- asm line 36696 ---
+36693:	andl	%eax, %edx
+36694:	leaq	1(,%rdx,4), %r14
+36695:.Ltmp7262:
+36696:	.loc	21 276 29 is_stmt 1
+36697:	cmpq	%r10, %r14
+36698:	jae	.LBB40_190
+36699:	.loc	21 277 29
+36700:	cmpq	%rbx, %r14
+36701:	jae	.LBB40_184
+36702:.Ltmp7263:
+36703:	.loc	21 0 29 is_stmt 0
+--- asm line 36699 ---
+36696:	.loc	21 276 29 is_stmt 1
+36697:	cmpq	%r10, %r14
+36698:	jae	.LBB40_190
+36699:	.loc	21 277 29
+36700:	cmpq	%rbx, %r14
+36701:	jae	.LBB40_184
+36702:.Ltmp7263:
+36703:	.loc	21 0 29 is_stmt 0
+36704:	movq	440(%rsp), %rdx
+36705:	.loc	21 271 24 is_stmt 1
+36706:	addl	%r13d, %edx
+--- asm line 36705 ---
+36702:.Ltmp7263:
+36703:	.loc	21 0 29 is_stmt 0
+36704:	movq	440(%rsp), %rdx
+36705:	.loc	21 271 24 is_stmt 1
+36706:	addl	%r13d, %edx
+36707:	andl	%eax, %edx
+36708:	.loc	21 271 23 is_stmt 0
+36709:	leaq	2(,%rdx,4), %rdx
+36710:.Ltmp7264:
+36711:	.loc	21 274 29 is_stmt 1
+36712:	cmpq	%rbx, %rdx
+--- asm line 36708 ---
+36705:	.loc	21 271 24 is_stmt 1
+36706:	addl	%r13d, %edx
+36707:	andl	%eax, %edx
+36708:	.loc	21 271 23 is_stmt 0
+36709:	leaq	2(,%rdx,4), %rdx
+36710:.Ltmp7264:
+36711:	.loc	21 274 29 is_stmt 1
+36712:	cmpq	%rbx, %rdx
+36713:	jae	.LBB40_195
+36714:	.loc	21 0 29 is_stmt 0
+36715:	movq	%rbp, 88(%rsp)
+--- asm line 36711 ---
+36708:	.loc	21 271 23 is_stmt 0
+36709:	leaq	2(,%rdx,4), %rdx
+36710:.Ltmp7264:
+36711:	.loc	21 274 29 is_stmt 1
+36712:	cmpq	%rbx, %rdx
+36713:	jae	.LBB40_195
+36714:	.loc	21 0 29 is_stmt 0
+36715:	movq	%rbp, 88(%rsp)
+36716:	movq	%r9, 64(%rsp)
+36717:	.loc	21 275 29 is_stmt 1
+36718:	cmpq	%r10, %rdx
+--- asm line 36717 ---
+36714:	.loc	21 0 29 is_stmt 0
+36715:	movq	%rbp, 88(%rsp)
+36716:	movq	%r9, 64(%rsp)
+36717:	.loc	21 275 29 is_stmt 1
+36718:	cmpq	%r10, %rdx
+36719:	jae	.LBB40_187
+36720:.Ltmp7265:
+36721:	.loc	21 0 29 is_stmt 0
+36722:	movq	432(%rsp), %r9
+36723:	addl	%r13d, %r9d
+36724:	andl	%eax, %r9d
+--- asm line 36727 ---
+36724:	andl	%eax, %r9d
+36725:	leaq	2(,%r9,4), %rbp
+36726:.Ltmp7266:
+36727:	.loc	21 276 29 is_stmt 1
+36728:	cmpq	%r10, %rbp
+36729:	jae	.LBB40_183
+36730:	.loc	21 277 29
+36731:	cmpq	%rbx, %rbp
+36732:	jae	.LBB40_191
+36733:.Ltmp7267:
+36734:	.loc	21 0 29 is_stmt 0
+--- asm line 36730 ---
+36727:	.loc	21 276 29 is_stmt 1
+36728:	cmpq	%r10, %rbp
+36729:	jae	.LBB40_183
+36730:	.loc	21 277 29
+36731:	cmpq	%rbx, %rbp
+36732:	jae	.LBB40_191
+36733:.Ltmp7267:
+36734:	.loc	21 0 29 is_stmt 0
+36735:	movq	424(%rsp), %r9
+36736:	.loc	21 271 24 is_stmt 1
+36737:	addl	%r13d, %r9d
+--- asm line 36736 ---
+36733:.Ltmp7267:
+36734:	.loc	21 0 29 is_stmt 0
+36735:	movq	424(%rsp), %r9
+36736:	.loc	21 271 24 is_stmt 1
+36737:	addl	%r13d, %r9d
+36738:	andl	%eax, %r9d
+36739:	.loc	21 271 23 is_stmt 0
+36740:	leaq	3(,%r9,4), %r9
+36741:.Ltmp7268:
+36742:	.loc	21 274 29 is_stmt 1
+36743:	cmpq	%rbx, %r9
+--- asm line 36739 ---
+36736:	.loc	21 271 24 is_stmt 1
+36737:	addl	%r13d, %r9d
+36738:	andl	%eax, %r9d
+36739:	.loc	21 271 23 is_stmt 0
+36740:	leaq	3(,%r9,4), %r9
+36741:.Ltmp7268:
+36742:	.loc	21 274 29 is_stmt 1
+36743:	cmpq	%rbx, %r9
+36744:	jae	.LBB40_185
+36745:	.loc	21 275 29
+36746:	cmpq	%r10, %r9
+--- asm line 36742 ---
+36739:	.loc	21 271 23 is_stmt 0
+36740:	leaq	3(,%r9,4), %r9
+36741:.Ltmp7268:
+36742:	.loc	21 274 29 is_stmt 1
+36743:	cmpq	%rbx, %r9
+36744:	jae	.LBB40_185
+36745:	.loc	21 275 29
+36746:	cmpq	%r10, %r9
+36747:	jae	.LBB40_188
+36748:.Ltmp7269:
+36749:	.loc	21 0 29 is_stmt 0
+--- asm line 36745 ---
+36742:	.loc	21 274 29 is_stmt 1
+36743:	cmpq	%rbx, %r9
+36744:	jae	.LBB40_185
+36745:	.loc	21 275 29
+36746:	cmpq	%r10, %r9
+36747:	jae	.LBB40_188
+36748:.Ltmp7269:
+36749:	.loc	21 0 29 is_stmt 0
+36750:	movq	416(%rsp), %rbx
+36751:	addl	%r13d, %ebx
+36752:	andl	%eax, %ebx
+--- asm line 36755 ---
+36752:	andl	%eax, %ebx
+36753:	leaq	3(,%rbx,4), %rbx
+36754:.Ltmp7270:
+36755:	.loc	21 276 29 is_stmt 1
+36756:	cmpq	%r10, %rbx
+36757:	jae	.LBB40_193
+36758:	.loc	21 0 29 is_stmt 0
+36759:	vmovaps	%xmm3, 240(%rsp)
+36760:	.loc	21 277 29 is_stmt 1
+36761:	cmpq	48(%rsp), %rbx
+36762:	jae	.LBB40_182
+--- asm line 36760 ---
+36757:	jae	.LBB40_193
+36758:	.loc	21 0 29 is_stmt 0
+36759:	vmovaps	%xmm3, 240(%rsp)
+36760:	.loc	21 277 29 is_stmt 1
+36761:	cmpq	48(%rsp), %rbx
+36762:	jae	.LBB40_182
+36763:.Ltmp7271:
+36764:	.loc	21 0 0 is_stmt 0
+36765:	vmovups	(%r8,%r15,4), %xmm0
+36766:	vmovaps	%xmm0, 208(%rsp)
+36767:.Ltmp7272:
+--- asm line 38327 ---
+38324:.LBB40_165:
+38325:	movq	%rbp, %rsi
+38326:.Ltmp7590:
+38327:	.loc	21 277 29 is_stmt 1
+38328:	leaq	.Lalloc_c5ae5decb60097d7e1183cb43cae6b3f(%rip), %rdx
+38329:	movq	%rsi, %rdi
+38330:	movq	96(%rsp), %rsi
+38331:	vzeroupper
+38332:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+38333:.LBB40_166:
+38334:	.loc	21 0 29 is_stmt 0
+--- asm line 38336 ---
+38333:.LBB40_166:
+38334:	.loc	21 0 29 is_stmt 0
+38335:	movq	%r13, %rdi
+38336:	.loc	21 275 29 is_stmt 1
+38337:	leaq	.Lalloc_30bf8a301493a607abcc78dbf93977e0(%rip), %rdx
+38338:	movq	48(%rsp), %rsi
+38339:	vzeroupper
+38340:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+38341:.LBB40_167:
+38342:	.loc	21 0 29 is_stmt 0
+38343:	movq	%r14, %rdi
+--- asm line 38344 ---
+38341:.LBB40_167:
+38342:	.loc	21 0 29 is_stmt 0
+38343:	movq	%r14, %rdi
+38344:	.loc	21 275 29
+38345:	leaq	.Lalloc_30bf8a301493a607abcc78dbf93977e0(%rip), %rdx
+38346:	movq	48(%rsp), %rsi
+38347:	vzeroupper
+38348:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+38349:.LBB40_168:
+38350:	.loc	21 0 29
+38351:	movq	%r13, %rdi
+--- asm line 38352 ---
+38349:.LBB40_168:
+38350:	.loc	21 0 29
+38351:	movq	%r13, %rdi
+38352:	.loc	21 274 29 is_stmt 1
+38353:	leaq	.Lalloc_b53d553f9945f7702333f7af20204159(%rip), %rdx
+38354:	movq	96(%rsp), %rsi
+38355:	vzeroupper
+38356:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+38357:.LBB40_169:
+38358:	.loc	21 0 29 is_stmt 0
+38359:	movq	%r14, %rdi
+--- asm line 38360 ---
+38357:.LBB40_169:
+38358:	.loc	21 0 29 is_stmt 0
+38359:	movq	%r14, %rdi
+38360:	.loc	21 274 29
+38361:	leaq	.Lalloc_b53d553f9945f7702333f7af20204159(%rip), %rdx
+38362:	movq	96(%rsp), %rsi
+38363:	vzeroupper
+38364:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+38365:.LBB40_170:
+38366:	.loc	21 0 29
+38367:	movq	%rax, %rdi
+--- asm line 38369 ---
+38366:	.loc	21 0 29
+38367:	movq	%rax, %rdi
+38368:.LBB40_171:
+38369:	.loc	21 274 29 is_stmt 1
+38370:	leaq	.Lalloc_b53d553f9945f7702333f7af20204159(%rip), %rdx
+38371:	movq	96(%rsp), %rsi
+38372:	vzeroupper
+38373:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+38374:.LBB40_172:
+38375:	.loc	21 0 29 is_stmt 0
+38376:	movq	%rbp, %rsi
+--- asm line 38377 ---
+38374:.LBB40_172:
+38375:	.loc	21 0 29 is_stmt 0
+38376:	movq	%rbp, %rsi
+38377:	.loc	21 276 29 is_stmt 1
+38378:	leaq	.Lalloc_5833dd3f10f38ea96ec24c6054ff083c(%rip), %rdx
+38379:.Ltmp7591:
+38380:	.loc	6 0 0 is_stmt 0
+38381:	movq	%rsi, %rdi
+38382:	movq	48(%rsp), %rsi
+38383:	vzeroupper
+38384:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+--- asm line 38388 ---
+38385:.LBB40_173:
+38386:	movq	%rbx, %rsi
+38387:.Ltmp7592:
+38388:	.loc	21 277 29 is_stmt 1
+38389:	leaq	.Lalloc_c5ae5decb60097d7e1183cb43cae6b3f(%rip), %rdx
+38390:	movq	%rsi, %rdi
+38391:	movq	96(%rsp), %rsi
+38392:	vzeroupper
+38393:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+38394:.LBB40_174:
+38395:	.loc	21 0 29 is_stmt 0
+--- asm line 38398 ---
+38395:	.loc	21 0 29 is_stmt 0
+38396:	movq	%r15, %rsi
+38397:.LBB40_175:
+38398:	.loc	21 277 29 is_stmt 1
+38399:	leaq	.Lalloc_c5ae5decb60097d7e1183cb43cae6b3f(%rip), %rdx
+38400:	movq	%rsi, %rdi
+38401:	movq	96(%rsp), %rsi
+38402:	vzeroupper
+38403:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+38404:.LBB40_176:
+38405:	.loc	21 0 29 is_stmt 0
+--- asm line 38407 ---
+38404:.LBB40_176:
+38405:	.loc	21 0 29 is_stmt 0
+38406:	movq	%rbx, %rsi
+38407:	.loc	21 276 29 is_stmt 1
+38408:	leaq	.Lalloc_5833dd3f10f38ea96ec24c6054ff083c(%rip), %rdx
+38409:.Ltmp7593:
+38410:	.loc	6 0 0 is_stmt 0
+38411:	movq	%rsi, %rdi
+38412:	movq	48(%rsp), %rsi
+38413:	vzeroupper
+38414:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+--- asm line 38419 ---
+38416:	movq	%r15, %rsi
+38417:.LBB40_178:
+38418:.Ltmp7594:
+38419:	.loc	21 276 29 is_stmt 1
+38420:	leaq	.Lalloc_5833dd3f10f38ea96ec24c6054ff083c(%rip), %rdx
+38421:.Ltmp7595:
+38422:	.loc	6 0 0 is_stmt 0
+38423:	movq	%rsi, %rdi
+38424:	movq	48(%rsp), %rsi
+38425:	vzeroupper
+38426:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+--- asm line 38431 ---
+38428:	movq	%rax, %rdi
+38429:.LBB40_180:
+38430:.Ltmp7596:
+38431:	.loc	21 275 29 is_stmt 1
+38432:	leaq	.Lalloc_30bf8a301493a607abcc78dbf93977e0(%rip), %rdx
+38433:	movq	48(%rsp), %rsi
+38434:	vzeroupper
+38435:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+38436:.Ltmp7597:
+38437:.LBB40_181:
+38438:	.loc	21 0 29 is_stmt 0
+--- asm line 38441 ---
+38438:	.loc	21 0 29 is_stmt 0
+38439:	movq	%r12, %r11
+38440:.Ltmp7598:
+38441:	.loc	21 275 29
+38442:	leaq	.Lalloc_30bf8a301493a607abcc78dbf93977e0(%rip), %rdx
+38443:	movq	%r11, %rdi
+38444:	movq	%r10, %rsi
+38445:	vzeroupper
+38446:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+38447:.LBB40_182:
+38448:	.loc	21 0 29
+--- asm line 38450 ---
+38447:.LBB40_182:
+38448:	.loc	21 0 29
+38449:	movq	%rbx, %rsi
+38450:	.loc	21 277 29 is_stmt 1
+38451:	leaq	.Lalloc_c5ae5decb60097d7e1183cb43cae6b3f(%rip), %rdx
+38452:.Ltmp7599:
+38453:	.loc	6 0 0 is_stmt 0
+38454:	movq	%rsi, %rdi
+38455:	movq	48(%rsp), %rsi
+38456:	vzeroupper
+38457:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+--- asm line 38461 ---
+38458:.LBB40_183:
+38459:	movq	%rbp, %rsi
+38460:.Ltmp7600:
+38461:	.loc	21 276 29 is_stmt 1
+38462:	leaq	.Lalloc_5833dd3f10f38ea96ec24c6054ff083c(%rip), %rdx
+38463:.Ltmp7601:
+38464:	.loc	6 0 0 is_stmt 0
+38465:	movq	%rsi, %rdi
+38466:	movq	%r10, %rsi
+38467:	vzeroupper
+38468:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+--- asm line 38472 ---
+38469:.LBB40_184:
+38470:	movq	%r14, %rsi
+38471:.Ltmp7602:
+38472:	.loc	21 277 29 is_stmt 1
+38473:	leaq	.Lalloc_c5ae5decb60097d7e1183cb43cae6b3f(%rip), %rdx
+38474:.Ltmp7603:
+38475:	.loc	6 0 0 is_stmt 0
+38476:	movq	%rsi, %rdi
+38477:	movq	48(%rsp), %rsi
+38478:	vzeroupper
+38479:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+--- asm line 38483 ---
+38480:.LBB40_185:
+38481:	movq	%r9, %r11
+38482:.Ltmp7604:
+38483:	.loc	21 274 29 is_stmt 1
+38484:	leaq	.Lalloc_b53d553f9945f7702333f7af20204159(%rip), %rdx
+38485:	movq	%r11, %rdi
+38486:	movq	48(%rsp), %rsi
+38487:	vzeroupper
+38488:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+38489:.LBB40_186:
+38490:	.loc	21 0 29 is_stmt 0
+--- asm line 38492 ---
+38489:.LBB40_186:
+38490:	.loc	21 0 29 is_stmt 0
+38491:	movq	%r12, %r11
+38492:	.loc	21 274 29
+38493:	leaq	.Lalloc_b53d553f9945f7702333f7af20204159(%rip), %rdx
+38494:	movq	%r11, %rdi
+38495:	movq	48(%rsp), %rsi
+38496:	vzeroupper
+38497:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+38498:.LBB40_187:
+38499:	.loc	21 0 29
+--- asm line 38501 ---
+38498:.LBB40_187:
+38499:	.loc	21 0 29
+38500:	movq	%rdx, %r11
+38501:	.loc	21 275 29 is_stmt 1
+38502:	leaq	.Lalloc_30bf8a301493a607abcc78dbf93977e0(%rip), %rdx
+38503:	movq	%r11, %rdi
+38504:	movq	%r10, %rsi
+38505:	vzeroupper
+38506:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+38507:.LBB40_188:
+38508:	.loc	21 0 29 is_stmt 0
+--- asm line 38511 ---
+38508:	.loc	21 0 29 is_stmt 0
+38509:	movq	%r9, %r11
+38510:.LBB40_189:
+38511:	.loc	21 275 29 is_stmt 1
+38512:	leaq	.Lalloc_30bf8a301493a607abcc78dbf93977e0(%rip), %rdx
+38513:	movq	%r11, %rdi
+38514:	movq	%r10, %rsi
+38515:	vzeroupper
+38516:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+38517:.LBB40_190:
+38518:	.loc	21 0 29 is_stmt 0
+--- asm line 38520 ---
+38517:.LBB40_190:
+38518:	.loc	21 0 29 is_stmt 0
+38519:	movq	%r14, %rsi
+38520:	.loc	21 276 29 is_stmt 1
+38521:	leaq	.Lalloc_5833dd3f10f38ea96ec24c6054ff083c(%rip), %rdx
+38522:.Ltmp7605:
+38523:	.loc	6 0 0 is_stmt 0
+38524:	movq	%rsi, %rdi
+38525:	movq	%r10, %rsi
+38526:	vzeroupper
+38527:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+--- asm line 38532 ---
+38529:	movq	%rbp, %rsi
+38530:.LBB40_192:
+38531:.Ltmp7606:
+38532:	.loc	21 277 29 is_stmt 1
+38533:	leaq	.Lalloc_c5ae5decb60097d7e1183cb43cae6b3f(%rip), %rdx
+38534:.Ltmp7607:
+38535:	.loc	6 0 0 is_stmt 0
+38536:	movq	%rsi, %rdi
+38537:	movq	48(%rsp), %rsi
+38538:	vzeroupper
+38539:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+--- asm line 38544 ---
+38541:	movq	%rbx, %rsi
+38542:.LBB40_194:
+38543:.Ltmp7608:
+38544:	.loc	21 276 29 is_stmt 1
+38545:	leaq	.Lalloc_5833dd3f10f38ea96ec24c6054ff083c(%rip), %rdx
+38546:.Ltmp7609:
+38547:	.loc	6 0 0 is_stmt 0
+38548:	movq	%rsi, %rdi
+38549:	movq	%r10, %rsi
+38550:	vzeroupper
+38551:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+--- asm line 38556 ---
+38553:	movq	%rdx, %r11
+38554:.LBB40_196:
+38555:.Ltmp7610:
+38556:	.loc	21 274 29 is_stmt 1
+38557:	leaq	.Lalloc_b53d553f9945f7702333f7af20204159(%rip), %rdx
+38558:	movq	%r11, %rdi
+38559:	movq	48(%rsp), %rsi
+38560:	vzeroupper
+38561:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+38562:.Ltmp7611:
+38563:.Lfunc_end40:
+--- asm line 40798 ---
+40795:	cmpq	%rbx, %rsi
+40796:	ja	.LBB46_181
+40797:.Ltmp7881:
+40798:	.loc	21 271 24 is_stmt 1
+40799:	leal	(%r12,%r14), %esi
+40800:	movl	%esi, %r11d
+40801:	subl	1184(%r10), %r11d
+40802:	andl	%r15d, %r11d
+40803:	.loc	21 271 23 is_stmt 0
+40804:	shlq	$3, %r11
+40805:.Ltmp7882:
+--- asm line 40803 ---
+40800:	movl	%esi, %r11d
+40801:	subl	1184(%r10), %r11d
+40802:	andl	%r15d, %r11d
+40803:	.loc	21 271 23 is_stmt 0
+40804:	shlq	$3, %r11
+40805:.Ltmp7882:
+40806:	.loc	21 274 29 is_stmt 1
+40807:	cmpq	%r13, %r11
+40808:	jae	.LBB46_230
+40809:	.loc	21 275 29
+40810:	cmpq	%rbx, %r11
+--- asm line 40806 ---
+40803:	.loc	21 271 23 is_stmt 0
+40804:	shlq	$3, %r11
+40805:.Ltmp7882:
+40806:	.loc	21 274 29 is_stmt 1
+40807:	cmpq	%r13, %r11
+40808:	jae	.LBB46_230
+40809:	.loc	21 275 29
+40810:	cmpq	%rbx, %r11
+40811:	jae	.LBB46_228
+40812:.Ltmp7883:
+40813:	.loc	21 0 0 is_stmt 0
+--- asm line 40809 ---
+40806:	.loc	21 274 29 is_stmt 1
+40807:	cmpq	%r13, %r11
+40808:	jae	.LBB46_230
+40809:	.loc	21 275 29
+40810:	cmpq	%rbx, %r11
+40811:	jae	.LBB46_228
+40812:.Ltmp7883:
+40813:	.loc	21 0 0 is_stmt 0
+40814:	subl	1248(%r10), %esi
+40815:	andl	%r15d, %esi
+40816:	shlq	$3, %rsi
+--- asm line 40818 ---
+40815:	andl	%r15d, %esi
+40816:	shlq	$3, %rsi
+40817:.Ltmp7884:
+40818:	.loc	21 276 29 is_stmt 1
+40819:	cmpq	%rbx, %rsi
+40820:	jae	.LBB46_221
+40821:	.loc	21 277 29
+40822:	cmpq	%r13, %rsi
+40823:	jae	.LBB46_226
+40824:.Ltmp7885:
+40825:	.loc	21 271 24
+--- asm line 40821 ---
+40818:	.loc	21 276 29 is_stmt 1
+40819:	cmpq	%rbx, %rsi
+40820:	jae	.LBB46_221
+40821:	.loc	21 277 29
+40822:	cmpq	%r13, %rsi
+40823:	jae	.LBB46_226
+40824:.Ltmp7885:
+40825:	.loc	21 271 24
+40826:	leal	(%r12,%r14), %eax
+40827:	movl	%eax, %ecx
+40828:	subl	1188(%r10), %ecx
+--- asm line 40825 ---
+40822:	cmpq	%r13, %rsi
+40823:	jae	.LBB46_226
+40824:.Ltmp7885:
+40825:	.loc	21 271 24
+40826:	leal	(%r12,%r14), %eax
+40827:	movl	%eax, %ecx
+40828:	subl	1188(%r10), %ecx
+40829:	andl	%r15d, %ecx
+40830:	.loc	21 271 23 is_stmt 0
+40831:	leaq	1(,%rcx,8), %rdi
+40832:.Ltmp7886:
+--- asm line 40830 ---
+40827:	movl	%eax, %ecx
+40828:	subl	1188(%r10), %ecx
+40829:	andl	%r15d, %ecx
+40830:	.loc	21 271 23 is_stmt 0
+40831:	leaq	1(,%rcx,8), %rdi
+40832:.Ltmp7886:
+40833:	.loc	21 274 29 is_stmt 1
+40834:	cmpq	%r13, %rdi
+40835:	jae	.LBB46_229
+40836:	.loc	21 275 29
+40837:	cmpq	%rbx, %rdi
+--- asm line 40833 ---
+40830:	.loc	21 271 23 is_stmt 0
+40831:	leaq	1(,%rcx,8), %rdi
+40832:.Ltmp7886:
+40833:	.loc	21 274 29 is_stmt 1
+40834:	cmpq	%r13, %rdi
+40835:	jae	.LBB46_229
+40836:	.loc	21 275 29
+40837:	cmpq	%rbx, %rdi
+40838:	jae	.LBB46_219
+40839:.Ltmp7887:
+40840:	.loc	21 0 0 is_stmt 0
+--- asm line 40836 ---
+40833:	.loc	21 274 29 is_stmt 1
+40834:	cmpq	%r13, %rdi
+40835:	jae	.LBB46_229
+40836:	.loc	21 275 29
+40837:	cmpq	%rbx, %rdi
+40838:	jae	.LBB46_219
+40839:.Ltmp7887:
+40840:	.loc	21 0 0 is_stmt 0
+40841:	subl	1252(%r10), %eax
+40842:	andl	%r15d, %eax
+40843:	leaq	1(,%rax,8), %rax
+--- asm line 40845 ---
+40842:	andl	%r15d, %eax
+40843:	leaq	1(,%rax,8), %rax
+40844:.Ltmp7888:
+40845:	.loc	21 276 29 is_stmt 1
+40846:	cmpq	%rbx, %rax
+40847:	jae	.LBB46_198
+40848:	.loc	21 0 29 is_stmt 0
+40849:	movq	%rax, 160(%rsp)
+40850:	.loc	21 277 29 is_stmt 1
+40851:	cmpq	%r13, %rax
+40852:	jae	.LBB46_214
+--- asm line 40850 ---
+40847:	jae	.LBB46_198
+40848:	.loc	21 0 29 is_stmt 0
+40849:	movq	%rax, 160(%rsp)
+40850:	.loc	21 277 29 is_stmt 1
+40851:	cmpq	%r13, %rax
+40852:	jae	.LBB46_214
+40853:.Ltmp7889:
+40854:	.loc	21 271 24
+40855:	leal	(%r12,%r14), %eax
+40856:	movl	%eax, %ecx
+40857:	subl	1192(%r10), %ecx
+--- asm line 40854 ---
+40851:	cmpq	%r13, %rax
+40852:	jae	.LBB46_214
+40853:.Ltmp7889:
+40854:	.loc	21 271 24
+40855:	leal	(%r12,%r14), %eax
+40856:	movl	%eax, %ecx
+40857:	subl	1192(%r10), %ecx
+40858:	andl	%r15d, %ecx
+40859:	.loc	21 271 23 is_stmt 0
+40860:	leaq	2(,%rcx,8), %rcx
+40861:.Ltmp7890:
+--- asm line 40859 ---
+40856:	movl	%eax, %ecx
+40857:	subl	1192(%r10), %ecx
+40858:	andl	%r15d, %ecx
+40859:	.loc	21 271 23 is_stmt 0
+40860:	leaq	2(,%rcx,8), %rcx
+40861:.Ltmp7890:
+40862:	.loc	21 274 29 is_stmt 1
+40863:	cmpq	%r13, %rcx
+40864:	jae	.LBB46_207
+40865:	.loc	21 275 29
+40866:	cmpq	%rbx, %rcx
+--- asm line 40862 ---
+40859:	.loc	21 271 23 is_stmt 0
+40860:	leaq	2(,%rcx,8), %rcx
+40861:.Ltmp7890:
+40862:	.loc	21 274 29 is_stmt 1
+40863:	cmpq	%r13, %rcx
+40864:	jae	.LBB46_207
+40865:	.loc	21 275 29
+40866:	cmpq	%rbx, %rcx
+40867:	jae	.LBB46_202
+40868:.Ltmp7891:
+40869:	.loc	21 0 0 is_stmt 0
+--- asm line 40865 ---
+40862:	.loc	21 274 29 is_stmt 1
+40863:	cmpq	%r13, %rcx
+40864:	jae	.LBB46_207
+40865:	.loc	21 275 29
+40866:	cmpq	%rbx, %rcx
+40867:	jae	.LBB46_202
+40868:.Ltmp7891:
+40869:	.loc	21 0 0 is_stmt 0
+40870:	subl	1256(%r10), %eax
+40871:	andl	%r15d, %eax
+40872:	leaq	2(,%rax,8), %rax
+--- asm line 40874 ---
+40871:	andl	%r15d, %eax
+40872:	leaq	2(,%rax,8), %rax
+40873:.Ltmp7892:
+40874:	.loc	21 276 29 is_stmt 1
+40875:	cmpq	%rbx, %rax
+40876:	jae	.LBB46_198
+40877:	.loc	21 0 29 is_stmt 0
+40878:	movq	%rcx, 104(%rsp)
+40879:	movq	%rax, 128(%rsp)
+40880:	.loc	21 277 29 is_stmt 1
+40881:	cmpq	%r13, %rax
+--- asm line 40880 ---
+40877:	.loc	21 0 29 is_stmt 0
+40878:	movq	%rcx, 104(%rsp)
+40879:	movq	%rax, 128(%rsp)
+40880:	.loc	21 277 29 is_stmt 1
+40881:	cmpq	%r13, %rax
+40882:	jae	.LBB46_208
+40883:.Ltmp7893:
+40884:	.loc	21 271 24
+40885:	leal	(%r12,%r14), %eax
+40886:	movl	%eax, %ecx
+40887:	subl	1196(%r10), %ecx
+--- asm line 40884 ---
+40881:	cmpq	%r13, %rax
+40882:	jae	.LBB46_208
+40883:.Ltmp7893:
+40884:	.loc	21 271 24
+40885:	leal	(%r12,%r14), %eax
+40886:	movl	%eax, %ecx
+40887:	subl	1196(%r10), %ecx
+40888:	andl	%r15d, %ecx
+40889:	.loc	21 271 23 is_stmt 0
+40890:	leaq	3(,%rcx,8), %rcx
+40891:.Ltmp7894:
+--- asm line 40889 ---
+40886:	movl	%eax, %ecx
+40887:	subl	1196(%r10), %ecx
+40888:	andl	%r15d, %ecx
+40889:	.loc	21 271 23 is_stmt 0
+40890:	leaq	3(,%rcx,8), %rcx
+40891:.Ltmp7894:
+40892:	.loc	21 274 29 is_stmt 1
+40893:	cmpq	%r13, %rcx
+40894:	jae	.LBB46_207
+40895:	.loc	21 275 29
+40896:	cmpq	%rbx, %rcx
+--- asm line 40892 ---
+40889:	.loc	21 271 23 is_stmt 0
+40890:	leaq	3(,%rcx,8), %rcx
+40891:.Ltmp7894:
+40892:	.loc	21 274 29 is_stmt 1
+40893:	cmpq	%r13, %rcx
+40894:	jae	.LBB46_207
+40895:	.loc	21 275 29
+40896:	cmpq	%rbx, %rcx
+40897:	jae	.LBB46_202
+40898:.Ltmp7895:
+40899:	.loc	21 0 0 is_stmt 0
+--- asm line 40895 ---
+40892:	.loc	21 274 29 is_stmt 1
+40893:	cmpq	%r13, %rcx
+40894:	jae	.LBB46_207
+40895:	.loc	21 275 29
+40896:	cmpq	%rbx, %rcx
+40897:	jae	.LBB46_202
+40898:.Ltmp7895:
+40899:	.loc	21 0 0 is_stmt 0
+40900:	subl	1260(%r10), %eax
+40901:	andl	%r15d, %eax
+40902:	leaq	3(,%rax,8), %r10
+--- asm line 40904 ---
+40901:	andl	%r15d, %eax
+40902:	leaq	3(,%rax,8), %r10
+40903:.Ltmp7896:
+40904:	.loc	21 276 29 is_stmt 1
+40905:	cmpq	%rbx, %r10
+40906:	jae	.LBB46_216
+40907:	.loc	21 0 29 is_stmt 0
+40908:	movq	%rcx, 448(%rsp)
+40909:	movq	%r8, 480(%rsp)
+40910:	movq	%rdx, 120(%rsp)
+40911:	.loc	21 277 29 is_stmt 1
+--- asm line 40911 ---
+40908:	movq	%rcx, 448(%rsp)
+40909:	movq	%r8, 480(%rsp)
+40910:	movq	%rdx, 120(%rsp)
+40911:	.loc	21 277 29 is_stmt 1
+40912:	cmpq	%r13, %r10
+40913:	jae	.LBB46_210
+40914:.Ltmp7897:
+40915:	.loc	21 271 24
+40916:	leal	(%r12,%r14), %eax
+40917:	movl	%eax, %ecx
+40918:	movq	48(%rsp), %rdx
+--- asm line 40915 ---
+40912:	cmpq	%r13, %r10
+40913:	jae	.LBB46_210
+40914:.Ltmp7897:
+40915:	.loc	21 271 24
+40916:	leal	(%r12,%r14), %eax
+40917:	movl	%eax, %ecx
+40918:	movq	48(%rsp), %rdx
+40919:	subl	1200(%rdx), %ecx
+40920:	andl	%r15d, %ecx
+40921:	.loc	21 271 23 is_stmt 0
+40922:	leaq	4(,%rcx,8), %r8
+--- asm line 40921 ---
+40918:	movq	48(%rsp), %rdx
+40919:	subl	1200(%rdx), %ecx
+40920:	andl	%r15d, %ecx
+40921:	.loc	21 271 23 is_stmt 0
+40922:	leaq	4(,%rcx,8), %r8
+40923:.Ltmp7898:
+40924:	.loc	21 274 29 is_stmt 1
+40925:	cmpq	%r13, %r8
+40926:	jae	.LBB46_204
+40927:	.loc	21 275 29
+40928:	cmpq	%rbx, %r8
+--- asm line 40924 ---
+40921:	.loc	21 271 23 is_stmt 0
+40922:	leaq	4(,%rcx,8), %r8
+40923:.Ltmp7898:
+40924:	.loc	21 274 29 is_stmt 1
+40925:	cmpq	%r13, %r8
+40926:	jae	.LBB46_204
+40927:	.loc	21 275 29
+40928:	cmpq	%rbx, %r8
+40929:	jae	.LBB46_224
+40930:.Ltmp7899:
+40931:	.loc	21 0 29 is_stmt 0
+--- asm line 40927 ---
+40924:	.loc	21 274 29 is_stmt 1
+40925:	cmpq	%r13, %r8
+40926:	jae	.LBB46_204
+40927:	.loc	21 275 29
+40928:	cmpq	%rbx, %r8
+40929:	jae	.LBB46_224
+40930:.Ltmp7899:
+40931:	.loc	21 0 29 is_stmt 0
+40932:	movq	48(%rsp), %rcx
+40933:	subl	1264(%rcx), %eax
+40934:	andl	%r15d, %eax
+--- asm line 40937 ---
+40934:	andl	%r15d, %eax
+40935:	leaq	4(,%rax,8), %rdx
+40936:.Ltmp7900:
+40937:	.loc	21 276 29 is_stmt 1
+40938:	cmpq	%rbx, %rdx
+40939:	jae	.LBB46_217
+40940:	.loc	21 0 29 is_stmt 0
+40941:	movq	%rdi, 512(%rsp)
+40942:	.loc	21 277 29 is_stmt 1
+40943:	cmpq	%r13, %rdx
+40944:	jae	.LBB46_212
+--- asm line 40942 ---
+40939:	jae	.LBB46_217
+40940:	.loc	21 0 29 is_stmt 0
+40941:	movq	%rdi, 512(%rsp)
+40942:	.loc	21 277 29 is_stmt 1
+40943:	cmpq	%r13, %rdx
+40944:	jae	.LBB46_212
+40945:.Ltmp7901:
+40946:	.loc	21 271 24
+40947:	leal	(%r12,%r14), %ecx
+40948:	movl	%ecx, %eax
+40949:	movq	48(%rsp), %rdi
+--- asm line 40946 ---
+40943:	cmpq	%r13, %rdx
+40944:	jae	.LBB46_212
+40945:.Ltmp7901:
+40946:	.loc	21 271 24
+40947:	leal	(%r12,%r14), %ecx
+40948:	movl	%ecx, %eax
+40949:	movq	48(%rsp), %rdi
+40950:	subl	1204(%rdi), %eax
+40951:	andl	%r15d, %eax
+40952:	.loc	21 271 23 is_stmt 0
+40953:	leaq	5(,%rax,8), %rax
+--- asm line 40952 ---
+40949:	movq	48(%rsp), %rdi
+40950:	subl	1204(%rdi), %eax
+40951:	andl	%r15d, %eax
+40952:	.loc	21 271 23 is_stmt 0
+40953:	leaq	5(,%rax,8), %rax
+40954:.Ltmp7902:
+40955:	.loc	21 274 29 is_stmt 1
+40956:	cmpq	%r13, %rax
+40957:	jae	.LBB46_205
+40958:	.loc	21 0 29 is_stmt 0
+40959:	movq	%r14, 40(%rsp)
+--- asm line 40955 ---
+40952:	.loc	21 271 23 is_stmt 0
+40953:	leaq	5(,%rax,8), %rax
+40954:.Ltmp7902:
+40955:	.loc	21 274 29 is_stmt 1
+40956:	cmpq	%r13, %rax
+40957:	jae	.LBB46_205
+40958:	.loc	21 0 29 is_stmt 0
+40959:	movq	%r14, 40(%rsp)
+40960:	.loc	21 275 29 is_stmt 1
+40961:	cmpq	%rbx, %rax
+40962:	jae	.LBB46_227
+--- asm line 40960 ---
+40957:	jae	.LBB46_205
+40958:	.loc	21 0 29 is_stmt 0
+40959:	movq	%r14, 40(%rsp)
+40960:	.loc	21 275 29 is_stmt 1
+40961:	cmpq	%rbx, %rax
+40962:	jae	.LBB46_227
+40963:.Ltmp7903:
+40964:	.loc	21 0 29 is_stmt 0
+40965:	movq	48(%rsp), %rdi
+40966:	subl	1268(%rdi), %ecx
+40967:	andl	%r15d, %ecx
+--- asm line 40970 ---
+40967:	andl	%r15d, %ecx
+40968:	leaq	5(,%rcx,8), %r14
+40969:.Ltmp7904:
+40970:	.loc	21 276 29 is_stmt 1
+40971:	cmpq	%rbx, %r14
+40972:	jae	.LBB46_218
+40973:	.loc	21 0 29 is_stmt 0
+40974:	movq	%r10, 672(%rsp)
+40975:	.loc	21 277 29 is_stmt 1
+40976:	cmpq	%r13, %r14
+40977:	jae	.LBB46_213
+--- asm line 40975 ---
+40972:	jae	.LBB46_218
+40973:	.loc	21 0 29 is_stmt 0
+40974:	movq	%r10, 672(%rsp)
+40975:	.loc	21 277 29 is_stmt 1
+40976:	cmpq	%r13, %r14
+40977:	jae	.LBB46_213
+40978:.Ltmp7905:
+40979:	.loc	21 0 29 is_stmt 0
+40980:	movq	40(%rsp), %rcx
+40981:	.loc	21 271 24 is_stmt 1
+40982:	addl	%r12d, %ecx
+--- asm line 40981 ---
+40978:.Ltmp7905:
+40979:	.loc	21 0 29 is_stmt 0
+40980:	movq	40(%rsp), %rcx
+40981:	.loc	21 271 24 is_stmt 1
+40982:	addl	%r12d, %ecx
+40983:	movl	%ecx, %edi
+40984:	movq	48(%rsp), %r15
+40985:	subl	1208(%r15), %edi
+40986:	movl	56(%rsp), %r10d
+40987:	andl	%r10d, %edi
+40988:	.loc	21 271 23 is_stmt 0
+--- asm line 40988 ---
+40985:	subl	1208(%r15), %edi
+40986:	movl	56(%rsp), %r10d
+40987:	andl	%r10d, %edi
+40988:	.loc	21 271 23 is_stmt 0
+40989:	leaq	6(,%rdi,8), %r15
+40990:.Ltmp7906:
+40991:	.loc	21 274 29 is_stmt 1
+40992:	cmpq	%r13, %r15
+40993:	jae	.LBB46_206
+40994:	.loc	21 275 29
+40995:	cmpq	%rbx, %r15
+--- asm line 40991 ---
+40988:	.loc	21 271 23 is_stmt 0
+40989:	leaq	6(,%rdi,8), %r15
+40990:.Ltmp7906:
+40991:	.loc	21 274 29 is_stmt 1
+40992:	cmpq	%r13, %r15
+40993:	jae	.LBB46_206
+40994:	.loc	21 275 29
+40995:	cmpq	%rbx, %r15
+40996:	jae	.LBB46_201
+40997:.Ltmp7907:
+40998:	.loc	21 0 29 is_stmt 0
+--- asm line 40994 ---
+40991:	.loc	21 274 29 is_stmt 1
+40992:	cmpq	%r13, %r15
+40993:	jae	.LBB46_206
+40994:	.loc	21 275 29
+40995:	cmpq	%rbx, %r15
+40996:	jae	.LBB46_201
+40997:.Ltmp7907:
+40998:	.loc	21 0 29 is_stmt 0
+40999:	movq	48(%rsp), %rdi
+41000:	subl	1272(%rdi), %ecx
+41001:	andl	%r10d, %ecx
+--- asm line 41004 ---
+41001:	andl	%r10d, %ecx
+41002:	leaq	6(,%rcx,8), %r12
+41003:.Ltmp7908:
+41004:	.loc	21 276 29 is_stmt 1
+41005:	cmpq	%rbx, %r12
+41006:	jae	.LBB46_220
+41007:	.loc	21 0 29 is_stmt 0
+41008:	movq	%r15, 416(%rsp)
+41009:	.loc	21 277 29 is_stmt 1
+41010:	cmpq	%r13, %r12
+41011:	jae	.LBB46_215
+--- asm line 41009 ---
+41006:	jae	.LBB46_220
+41007:	.loc	21 0 29 is_stmt 0
+41008:	movq	%r15, 416(%rsp)
+41009:	.loc	21 277 29 is_stmt 1
+41010:	cmpq	%r13, %r12
+41011:	jae	.LBB46_215
+41012:.Ltmp7909:
+41013:	.loc	21 0 29 is_stmt 0
+41014:	movq	%r13, %rbx
+41015:	movq	112(%rsp), %rcx
+41016:	movq	40(%rsp), %rdi
+--- asm line 41017 ---
+41014:	movq	%r13, %rbx
+41015:	movq	112(%rsp), %rcx
+41016:	movq	40(%rsp), %rdi
+41017:	.loc	21 271 24 is_stmt 1
+41018:	addl	%ecx, %edi
+41019:	movl	%edi, %ecx
+41020:	movq	48(%rsp), %r13
+41021:	subl	1212(%r13), %ecx
+41022:	andl	%r10d, %ecx
+41023:	.loc	21 271 23 is_stmt 0
+41024:	leaq	7(,%rcx,8), %rcx
+--- asm line 41023 ---
+41020:	movq	48(%rsp), %r13
+41021:	subl	1212(%r13), %ecx
+41022:	andl	%r10d, %ecx
+41023:	.loc	21 271 23 is_stmt 0
+41024:	leaq	7(,%rcx,8), %rcx
+41025:.Ltmp7910:
+41026:	.loc	21 274 29 is_stmt 1
+41027:	cmpq	%rbx, %rcx
+41028:	jae	.LBB46_209
+41029:	.loc	21 0 29 is_stmt 0
+41030:	movq	88(%rsp), %rbx
+--- asm line 41026 ---
+41023:	.loc	21 271 23 is_stmt 0
+41024:	leaq	7(,%rcx,8), %rcx
+41025:.Ltmp7910:
+41026:	.loc	21 274 29 is_stmt 1
+41027:	cmpq	%rbx, %rcx
+41028:	jae	.LBB46_209
+41029:	.loc	21 0 29 is_stmt 0
+41030:	movq	88(%rsp), %rbx
+41031:	.loc	21 275 29 is_stmt 1
+41032:	cmpq	%rbx, %rcx
+41033:	jae	.LBB46_202
+--- asm line 41031 ---
+41028:	jae	.LBB46_209
+41029:	.loc	21 0 29 is_stmt 0
+41030:	movq	88(%rsp), %rbx
+41031:	.loc	21 275 29 is_stmt 1
+41032:	cmpq	%rbx, %rcx
+41033:	jae	.LBB46_202
+41034:.Ltmp7911:
+41035:	.loc	21 0 29 is_stmt 0
+41036:	movq	48(%rsp), %r13
+41037:	subl	1276(%r13), %edi
+41038:	andl	56(%rsp), %edi
+--- asm line 41041 ---
+41038:	andl	56(%rsp), %edi
+41039:	leaq	7(,%rdi,8), %rdi
+41040:.Ltmp7912:
+41041:	.loc	21 276 29 is_stmt 1
+41042:	cmpq	%rbx, %rdi
+41043:	jae	.LBB46_211
+41044:	.loc	21 277 29
+41045:	cmpq	96(%rsp), %rdi
+41046:	jae	.LBB46_225
+41047:.Ltmp7913:
+41048:	.loc	21 0 29 is_stmt 0
+--- asm line 41044 ---
+41041:	.loc	21 276 29 is_stmt 1
+41042:	cmpq	%rbx, %rdi
+41043:	jae	.LBB46_211
+41044:	.loc	21 277 29
+41045:	cmpq	96(%rsp), %rdi
+41046:	jae	.LBB46_225
+41047:.Ltmp7913:
+41048:	.loc	21 0 29 is_stmt 0
+41049:	movq	%rcx, %rbx
+41050:	movq	64(%rsp), %rcx
+41051:.Ltmp7914:
+--- asm line 42286 ---
+42283:	.loc	25 0 16
+42284:	movq	%rdi, 88(%rsp)
+42285:.Ltmp8258:
+42286:	.loc	21 271 24 is_stmt 1
+42287:	leal	(%rbx,%r12), %esi
+42288:	movl	%esi, %edi
+42289:	subl	1184(%r10), %edi
+42290:	andl	40(%rsp), %edi
+42291:	.loc	21 271 23 is_stmt 0
+42292:	shlq	$3, %rdi
+42293:.Ltmp8259:
+--- asm line 42291 ---
+42288:	movl	%esi, %edi
+42289:	subl	1184(%r10), %edi
+42290:	andl	40(%rsp), %edi
+42291:	.loc	21 271 23 is_stmt 0
+42292:	shlq	$3, %rdi
+42293:.Ltmp8259:
+42294:	.loc	21 274 29 is_stmt 1
+42295:	cmpq	%rdx, %rdi
+42296:	jae	.LBB46_248
+42297:	.loc	21 275 29
+42298:	cmpq	%r13, %rdi
+--- asm line 42294 ---
+42291:	.loc	21 271 23 is_stmt 0
+42292:	shlq	$3, %rdi
+42293:.Ltmp8259:
+42294:	.loc	21 274 29 is_stmt 1
+42295:	cmpq	%rdx, %rdi
+42296:	jae	.LBB46_248
+42297:	.loc	21 275 29
+42298:	cmpq	%r13, %rdi
+42299:	jae	.LBB46_245
+42300:.Ltmp8260:
+42301:	.loc	21 0 0 is_stmt 0
+--- asm line 42297 ---
+42294:	.loc	21 274 29 is_stmt 1
+42295:	cmpq	%rdx, %rdi
+42296:	jae	.LBB46_248
+42297:	.loc	21 275 29
+42298:	cmpq	%r13, %rdi
+42299:	jae	.LBB46_245
+42300:.Ltmp8260:
+42301:	.loc	21 0 0 is_stmt 0
+42302:	subl	1248(%r10), %esi
+42303:	andl	40(%rsp), %esi
+42304:	shlq	$3, %rsi
+--- asm line 42306 ---
+42303:	andl	40(%rsp), %esi
+42304:	shlq	$3, %rsi
+42305:.Ltmp8261:
+42306:	.loc	21 276 29 is_stmt 1
+42307:	cmpq	%r13, %rsi
+42308:	jae	.LBB46_195
+42309:	.loc	21 0 29 is_stmt 0
+42310:	movq	%rcx, 112(%rsp)
+42311:	.loc	21 277 29 is_stmt 1
+42312:	cmpq	%rdx, %rsi
+42313:	jae	.LBB46_250
+--- asm line 42311 ---
+42308:	jae	.LBB46_195
+42309:	.loc	21 0 29 is_stmt 0
+42310:	movq	%rcx, 112(%rsp)
+42311:	.loc	21 277 29 is_stmt 1
+42312:	cmpq	%rdx, %rsi
+42313:	jae	.LBB46_250
+42314:.Ltmp8262:
+42315:	.loc	21 271 24
+42316:	leal	(%rbx,%r12), %eax
+42317:	movl	%eax, %ecx
+42318:	subl	1188(%r10), %ecx
+--- asm line 42315 ---
+42312:	cmpq	%rdx, %rsi
+42313:	jae	.LBB46_250
+42314:.Ltmp8262:
+42315:	.loc	21 271 24
+42316:	leal	(%rbx,%r12), %eax
+42317:	movl	%eax, %ecx
+42318:	subl	1188(%r10), %ecx
+42319:	andl	40(%rsp), %ecx
+42320:	.loc	21 271 23 is_stmt 0
+42321:	leaq	1(,%rcx,8), %rcx
+42322:.Ltmp8263:
+--- asm line 42320 ---
+42317:	movl	%eax, %ecx
+42318:	subl	1188(%r10), %ecx
+42319:	andl	40(%rsp), %ecx
+42320:	.loc	21 271 23 is_stmt 0
+42321:	leaq	1(,%rcx,8), %rcx
+42322:.Ltmp8263:
+42323:	.loc	21 274 29 is_stmt 1
+42324:	cmpq	%rdx, %rcx
+42325:	jae	.LBB46_196
+42326:	.loc	21 275 29
+42327:	cmpq	%r13, %rcx
+--- asm line 42323 ---
+42320:	.loc	21 271 23 is_stmt 0
+42321:	leaq	1(,%rcx,8), %rcx
+42322:.Ltmp8263:
+42323:	.loc	21 274 29 is_stmt 1
+42324:	cmpq	%rdx, %rcx
+42325:	jae	.LBB46_196
+42326:	.loc	21 275 29
+42327:	cmpq	%r13, %rcx
+42328:	jae	.LBB46_197
+42329:.Ltmp8264:
+42330:	.loc	21 0 0 is_stmt 0
+--- asm line 42326 ---
+42323:	.loc	21 274 29 is_stmt 1
+42324:	cmpq	%rdx, %rcx
+42325:	jae	.LBB46_196
+42326:	.loc	21 275 29
+42327:	cmpq	%r13, %rcx
+42328:	jae	.LBB46_197
+42329:.Ltmp8264:
+42330:	.loc	21 0 0 is_stmt 0
+42331:	subl	1252(%r10), %eax
+42332:	andl	40(%rsp), %eax
+42333:	leaq	1(,%rax,8), %rax
+--- asm line 42335 ---
+42332:	andl	40(%rsp), %eax
+42333:	leaq	1(,%rax,8), %rax
+42334:.Ltmp8265:
+42335:	.loc	21 276 29 is_stmt 1
+42336:	cmpq	%r13, %rax
+42337:	jae	.LBB46_194
+42338:	.loc	21 0 29 is_stmt 0
+42339:	movq	%rcx, 224(%rsp)
+42340:	movq	%rax, 320(%rsp)
+42341:	.loc	21 277 29 is_stmt 1
+42342:	cmpq	%rdx, %rax
+--- asm line 42341 ---
+42338:	.loc	21 0 29 is_stmt 0
+42339:	movq	%rcx, 224(%rsp)
+42340:	movq	%rax, 320(%rsp)
+42341:	.loc	21 277 29 is_stmt 1
+42342:	cmpq	%rdx, %rax
+42343:	jae	.LBB46_246
+42344:.Ltmp8266:
+42345:	.loc	21 271 24
+42346:	leal	(%rbx,%r12), %eax
+42347:	movl	%eax, %ecx
+42348:	subl	1192(%r10), %ecx
+--- asm line 42345 ---
+42342:	cmpq	%rdx, %rax
+42343:	jae	.LBB46_246
+42344:.Ltmp8266:
+42345:	.loc	21 271 24
+42346:	leal	(%rbx,%r12), %eax
+42347:	movl	%eax, %ecx
+42348:	subl	1192(%r10), %ecx
+42349:	andl	40(%rsp), %ecx
+42350:	.loc	21 271 23 is_stmt 0
+42351:	leaq	2(,%rcx,8), %rcx
+42352:.Ltmp8267:
+--- asm line 42350 ---
+42347:	movl	%eax, %ecx
+42348:	subl	1192(%r10), %ecx
+42349:	andl	40(%rsp), %ecx
+42350:	.loc	21 271 23 is_stmt 0
+42351:	leaq	2(,%rcx,8), %rcx
+42352:.Ltmp8267:
+42353:	.loc	21 274 29 is_stmt 1
+42354:	cmpq	%rdx, %rcx
+42355:	jae	.LBB46_196
+42356:	.loc	21 275 29
+42357:	cmpq	%r13, %rcx
+--- asm line 42353 ---
+42350:	.loc	21 271 23 is_stmt 0
+42351:	leaq	2(,%rcx,8), %rcx
+42352:.Ltmp8267:
+42353:	.loc	21 274 29 is_stmt 1
+42354:	cmpq	%rdx, %rcx
+42355:	jae	.LBB46_196
+42356:	.loc	21 275 29
+42357:	cmpq	%r13, %rcx
+42358:	jae	.LBB46_197
+42359:.Ltmp8268:
+42360:	.loc	21 0 0 is_stmt 0
+--- asm line 42356 ---
+42353:	.loc	21 274 29 is_stmt 1
+42354:	cmpq	%rdx, %rcx
+42355:	jae	.LBB46_196
+42356:	.loc	21 275 29
+42357:	cmpq	%r13, %rcx
+42358:	jae	.LBB46_197
+42359:.Ltmp8268:
+42360:	.loc	21 0 0 is_stmt 0
+42361:	subl	1256(%r10), %eax
+42362:	andl	40(%rsp), %eax
+42363:	leaq	2(,%rax,8), %rax
+--- asm line 42365 ---
+42362:	andl	40(%rsp), %eax
+42363:	leaq	2(,%rax,8), %rax
+42364:.Ltmp8269:
+42365:	.loc	21 276 29 is_stmt 1
+42366:	cmpq	%r13, %rax
+42367:	jae	.LBB46_194
+42368:	.loc	21 0 29 is_stmt 0
+42369:	movq	%rcx, 128(%rsp)
+42370:	movq	%rax, 160(%rsp)
+42371:	.loc	21 277 29 is_stmt 1
+42372:	cmpq	%rdx, %rax
+--- asm line 42371 ---
+42368:	.loc	21 0 29 is_stmt 0
+42369:	movq	%rcx, 128(%rsp)
+42370:	movq	%rax, 160(%rsp)
+42371:	.loc	21 277 29 is_stmt 1
+42372:	cmpq	%rdx, %rax
+42373:	jae	.LBB46_239
+42374:.Ltmp8270:
+42375:	.loc	21 0 29 is_stmt 0
+42376:	movq	%r12, 56(%rsp)
+42377:	.loc	21 271 24 is_stmt 1
+42378:	leal	(%rbx,%r12), %eax
+--- asm line 42377 ---
+42374:.Ltmp8270:
+42375:	.loc	21 0 29 is_stmt 0
+42376:	movq	%r12, 56(%rsp)
+42377:	.loc	21 271 24 is_stmt 1
+42378:	leal	(%rbx,%r12), %eax
+42379:	movl	%eax, %ecx
+42380:	subl	1196(%r10), %ecx
+42381:	andl	40(%rsp), %ecx
+42382:	.loc	21 271 23 is_stmt 0
+42383:	leaq	3(,%rcx,8), %r12
+42384:.Ltmp8271:
+--- asm line 42382 ---
+42379:	movl	%eax, %ecx
+42380:	subl	1196(%r10), %ecx
+42381:	andl	40(%rsp), %ecx
+42382:	.loc	21 271 23 is_stmt 0
+42383:	leaq	3(,%rcx,8), %r12
+42384:.Ltmp8271:
+42385:	.loc	21 274 29 is_stmt 1
+42386:	cmpq	%rdx, %r12
+42387:	jae	.LBB46_232
+42388:	.loc	21 275 29
+42389:	cmpq	%r13, %r12
+--- asm line 42385 ---
+42382:	.loc	21 271 23 is_stmt 0
+42383:	leaq	3(,%rcx,8), %r12
+42384:.Ltmp8271:
+42385:	.loc	21 274 29 is_stmt 1
+42386:	cmpq	%rdx, %r12
+42387:	jae	.LBB46_232
+42388:	.loc	21 275 29
+42389:	cmpq	%r13, %r12
+42390:	jae	.LBB46_242
+42391:.Ltmp8272:
+42392:	.loc	21 0 0 is_stmt 0
+--- asm line 42388 ---
+42385:	.loc	21 274 29 is_stmt 1
+42386:	cmpq	%rdx, %r12
+42387:	jae	.LBB46_232
+42388:	.loc	21 275 29
+42389:	cmpq	%r13, %r12
+42390:	jae	.LBB46_242
+42391:.Ltmp8272:
+42392:	.loc	21 0 0 is_stmt 0
+42393:	subl	1260(%r10), %eax
+42394:	andl	40(%rsp), %eax
+42395:	leaq	3(,%rax,8), %rax
+--- asm line 42397 ---
+42394:	andl	40(%rsp), %eax
+42395:	leaq	3(,%rax,8), %rax
+42396:.Ltmp8273:
+42397:	.loc	21 276 29 is_stmt 1
+42398:	cmpq	%r13, %rax
+42399:	jae	.LBB46_194
+42400:	.loc	21 0 29 is_stmt 0
+42401:	movq	%r8, 120(%rsp)
+42402:	movq	%rax, 104(%rsp)
+42403:	.loc	21 277 29 is_stmt 1
+42404:	cmpq	%rdx, %rax
+--- asm line 42403 ---
+42400:	.loc	21 0 29 is_stmt 0
+42401:	movq	%r8, 120(%rsp)
+42402:	movq	%rax, 104(%rsp)
+42403:	.loc	21 277 29 is_stmt 1
+42404:	cmpq	%rdx, %rax
+42405:	jae	.LBB46_235
+42406:.Ltmp8274:
+42407:	.loc	21 0 29 is_stmt 0
+42408:	movq	56(%rsp), %rax
+42409:	.loc	21 271 24 is_stmt 1
+42410:	addl	%ebx, %eax
+--- asm line 42409 ---
+42406:.Ltmp8274:
+42407:	.loc	21 0 29 is_stmt 0
+42408:	movq	56(%rsp), %rax
+42409:	.loc	21 271 24 is_stmt 1
+42410:	addl	%ebx, %eax
+42411:	movl	%eax, %ecx
+42412:	subl	1200(%r10), %ecx
+42413:	andl	40(%rsp), %ecx
+42414:	.loc	21 271 23 is_stmt 0
+42415:	leaq	4(,%rcx,8), %r8
+42416:.Ltmp8275:
+--- asm line 42414 ---
+42411:	movl	%eax, %ecx
+42412:	subl	1200(%r10), %ecx
+42413:	andl	40(%rsp), %ecx
+42414:	.loc	21 271 23 is_stmt 0
+42415:	leaq	4(,%rcx,8), %r8
+42416:.Ltmp8275:
+42417:	.loc	21 274 29 is_stmt 1
+42418:	cmpq	%rdx, %r8
+42419:	jae	.LBB46_247
+42420:	.loc	21 275 29
+42421:	cmpq	%r13, %r8
+--- asm line 42417 ---
+42414:	.loc	21 271 23 is_stmt 0
+42415:	leaq	4(,%rcx,8), %r8
+42416:.Ltmp8275:
+42417:	.loc	21 274 29 is_stmt 1
+42418:	cmpq	%rdx, %r8
+42419:	jae	.LBB46_247
+42420:	.loc	21 275 29
+42421:	cmpq	%r13, %r8
+42422:	jae	.LBB46_240
+42423:.Ltmp8276:
+42424:	.loc	21 0 0 is_stmt 0
+--- asm line 42420 ---
+42417:	.loc	21 274 29 is_stmt 1
+42418:	cmpq	%rdx, %r8
+42419:	jae	.LBB46_247
+42420:	.loc	21 275 29
+42421:	cmpq	%r13, %r8
+42422:	jae	.LBB46_240
+42423:.Ltmp8276:
+42424:	.loc	21 0 0 is_stmt 0
+42425:	subl	1264(%r10), %eax
+42426:	andl	40(%rsp), %eax
+42427:	leaq	4(,%rax,8), %rax
+--- asm line 42429 ---
+42426:	andl	40(%rsp), %eax
+42427:	leaq	4(,%rax,8), %rax
+42428:.Ltmp8277:
+42429:	.loc	21 276 29 is_stmt 1
+42430:	cmpq	%r13, %rax
+42431:	jae	.LBB46_194
+42432:	.loc	21 0 29 is_stmt 0
+42433:	movq	%rax, 480(%rsp)
+42434:	.loc	21 277 29 is_stmt 1
+42435:	cmpq	%rdx, %rax
+42436:	jae	.LBB46_234
+--- asm line 42434 ---
+42431:	jae	.LBB46_194
+42432:	.loc	21 0 29 is_stmt 0
+42433:	movq	%rax, 480(%rsp)
+42434:	.loc	21 277 29 is_stmt 1
+42435:	cmpq	%rdx, %rax
+42436:	jae	.LBB46_234
+42437:.Ltmp8278:
+42438:	.loc	21 0 29 is_stmt 0
+42439:	movq	56(%rsp), %rax
+42440:	.loc	21 271 24 is_stmt 1
+42441:	addl	%ebx, %eax
+--- asm line 42440 ---
+42437:.Ltmp8278:
+42438:	.loc	21 0 29 is_stmt 0
+42439:	movq	56(%rsp), %rax
+42440:	.loc	21 271 24 is_stmt 1
+42441:	addl	%ebx, %eax
+42442:	movl	%eax, %ecx
+42443:	subl	1204(%r10), %ecx
+42444:	andl	40(%rsp), %ecx
+42445:	.loc	21 271 23 is_stmt 0
+42446:	leaq	5(,%rcx,8), %r10
+42447:.Ltmp8279:
+--- asm line 42445 ---
+42442:	movl	%eax, %ecx
+42443:	subl	1204(%r10), %ecx
+42444:	andl	40(%rsp), %ecx
+42445:	.loc	21 271 23 is_stmt 0
+42446:	leaq	5(,%rcx,8), %r10
+42447:.Ltmp8279:
+42448:	.loc	21 274 29 is_stmt 1
+42449:	cmpq	%rdx, %r10
+42450:	jae	.LBB46_243
+42451:	.loc	21 275 29
+42452:	cmpq	%r13, %r10
+--- asm line 42448 ---
+42445:	.loc	21 271 23 is_stmt 0
+42446:	leaq	5(,%rcx,8), %r10
+42447:.Ltmp8279:
+42448:	.loc	21 274 29 is_stmt 1
+42449:	cmpq	%rdx, %r10
+42450:	jae	.LBB46_243
+42451:	.loc	21 275 29
+42452:	cmpq	%r13, %r10
+42453:	jae	.LBB46_237
+42454:.Ltmp8280:
+42455:	.loc	21 0 29 is_stmt 0
+--- asm line 42451 ---
+42448:	.loc	21 274 29 is_stmt 1
+42449:	cmpq	%rdx, %r10
+42450:	jae	.LBB46_243
+42451:	.loc	21 275 29
+42452:	cmpq	%r13, %r10
+42453:	jae	.LBB46_237
+42454:.Ltmp8280:
+42455:	.loc	21 0 29 is_stmt 0
+42456:	movq	48(%rsp), %rcx
+42457:	subl	1268(%rcx), %eax
+42458:	andl	40(%rsp), %eax
+--- asm line 42461 ---
+42458:	andl	40(%rsp), %eax
+42459:	leaq	5(,%rax,8), %rax
+42460:.Ltmp8281:
+42461:	.loc	21 276 29 is_stmt 1
+42462:	cmpq	%r13, %rax
+42463:	jae	.LBB46_194
+42464:	.loc	21 277 29
+42465:	cmpq	%rdx, %rax
+42466:	jae	.LBB46_231
+42467:.Ltmp8282:
+42468:	.loc	21 0 29 is_stmt 0
+--- asm line 42464 ---
+42461:	.loc	21 276 29 is_stmt 1
+42462:	cmpq	%r13, %rax
+42463:	jae	.LBB46_194
+42464:	.loc	21 277 29
+42465:	cmpq	%rdx, %rax
+42466:	jae	.LBB46_231
+42467:.Ltmp8282:
+42468:	.loc	21 0 29 is_stmt 0
+42469:	movq	%r9, %r14
+42470:	movq	56(%rsp), %rcx
+42471:	.loc	21 271 24 is_stmt 1
+--- asm line 42471 ---
+42468:	.loc	21 0 29 is_stmt 0
+42469:	movq	%r9, %r14
+42470:	movq	56(%rsp), %rcx
+42471:	.loc	21 271 24 is_stmt 1
+42472:	addl	%ecx, %ebx
+42473:	movl	%ebx, %ecx
+42474:	movq	48(%rsp), %r9
+42475:	subl	1208(%r9), %ecx
+42476:	andl	40(%rsp), %ecx
+42477:	.loc	21 271 23 is_stmt 0
+42478:	leaq	6(,%rcx,8), %rcx
+--- asm line 42477 ---
+42474:	movq	48(%rsp), %r9
+42475:	subl	1208(%r9), %ecx
+42476:	andl	40(%rsp), %ecx
+42477:	.loc	21 271 23 is_stmt 0
+42478:	leaq	6(,%rcx,8), %rcx
+42479:.Ltmp8283:
+42480:	.loc	21 274 29 is_stmt 1
+42481:	cmpq	%rdx, %rcx
+42482:	jae	.LBB46_196
+42483:	.loc	21 275 29
+42484:	cmpq	%r13, %rcx
+--- asm line 42480 ---
+42477:	.loc	21 271 23 is_stmt 0
+42478:	leaq	6(,%rcx,8), %rcx
+42479:.Ltmp8283:
+42480:	.loc	21 274 29 is_stmt 1
+42481:	cmpq	%rdx, %rcx
+42482:	jae	.LBB46_196
+42483:	.loc	21 275 29
+42484:	cmpq	%r13, %rcx
+42485:	jae	.LBB46_197
+42486:.Ltmp8284:
+42487:	.loc	21 0 29 is_stmt 0
+--- asm line 42483 ---
+42480:	.loc	21 274 29 is_stmt 1
+42481:	cmpq	%rdx, %rcx
+42482:	jae	.LBB46_196
+42483:	.loc	21 275 29
+42484:	cmpq	%r13, %rcx
+42485:	jae	.LBB46_197
+42486:.Ltmp8284:
+42487:	.loc	21 0 29 is_stmt 0
+42488:	movq	48(%rsp), %r15
+42489:	subl	1272(%r15), %ebx
+42490:	andl	40(%rsp), %ebx
+--- asm line 42493 ---
+42490:	andl	40(%rsp), %ebx
+42491:	leaq	6(,%rbx,8), %r15
+42492:.Ltmp8285:
+42493:	.loc	21 276 29 is_stmt 1
+42494:	cmpq	%r13, %r15
+42495:	jae	.LBB46_238
+42496:	.loc	21 277 29
+42497:	cmpq	%rdx, %r15
+42498:	movq	96(%rsp), %r9
+42499:	jae	.LBB46_249
+42500:.Ltmp8286:
+--- asm line 42496 ---
+42493:	.loc	21 276 29 is_stmt 1
+42494:	cmpq	%r13, %r15
+42495:	jae	.LBB46_238
+42496:	.loc	21 277 29
+42497:	cmpq	%rdx, %r15
+42498:	movq	96(%rsp), %r9
+42499:	jae	.LBB46_249
+42500:.Ltmp8286:
+42501:	.loc	21 0 29 is_stmt 0
+42502:	movq	56(%rsp), %rbx
+42503:	.loc	21 271 24 is_stmt 1
+--- asm line 42503 ---
+42500:.Ltmp8286:
+42501:	.loc	21 0 29 is_stmt 0
+42502:	movq	56(%rsp), %rbx
+42503:	.loc	21 271 24 is_stmt 1
+42504:	leal	(%r9,%rbx), %r13d
+42505:	movl	%r13d, %ebx
+42506:	movq	48(%rsp), %r9
+42507:	subl	1212(%r9), %ebx
+42508:	andl	40(%rsp), %ebx
+42509:	.loc	21 271 23 is_stmt 0
+42510:	leaq	7(,%rbx,8), %rbx
+--- asm line 42509 ---
+42506:	movq	48(%rsp), %r9
+42507:	subl	1212(%r9), %ebx
+42508:	andl	40(%rsp), %ebx
+42509:	.loc	21 271 23 is_stmt 0
+42510:	leaq	7(,%rbx,8), %rbx
+42511:.Ltmp8287:
+42512:	.loc	21 274 29 is_stmt 1
+42513:	cmpq	%rdx, %rbx
+42514:	jae	.LBB46_241
+42515:	.loc	21 0 29 is_stmt 0
+42516:	movq	80(%rsp), %rdx
+--- asm line 42512 ---
+42509:	.loc	21 271 23 is_stmt 0
+42510:	leaq	7(,%rbx,8), %rbx
+42511:.Ltmp8287:
+42512:	.loc	21 274 29 is_stmt 1
+42513:	cmpq	%rdx, %rbx
+42514:	jae	.LBB46_241
+42515:	.loc	21 0 29 is_stmt 0
+42516:	movq	80(%rsp), %rdx
+42517:	.loc	21 275 29 is_stmt 1
+42518:	cmpq	%rdx, %rbx
+42519:	jae	.LBB46_244
+--- asm line 42517 ---
+42514:	jae	.LBB46_241
+42515:	.loc	21 0 29 is_stmt 0
+42516:	movq	80(%rsp), %rdx
+42517:	.loc	21 275 29 is_stmt 1
+42518:	cmpq	%rdx, %rbx
+42519:	jae	.LBB46_244
+42520:.Ltmp8288:
+42521:	.loc	21 0 29 is_stmt 0
+42522:	movq	48(%rsp), %r9
+42523:	subl	1276(%r9), %r13d
+42524:	andl	40(%rsp), %r13d
+--- asm line 42527 ---
+42524:	andl	40(%rsp), %r13d
+42525:	leaq	7(,%r13,8), %r13
+42526:.Ltmp8289:
+42527:	.loc	21 276 29 is_stmt 1
+42528:	cmpq	%rdx, %r13
+42529:	jae	.LBB46_233
+42530:	.loc	21 277 29
+42531:	cmpq	64(%rsp), %r13
+42532:	jae	.LBB46_236
+42533:.Ltmp8290:
+42534:	.loc	21 0 29 is_stmt 0
+--- asm line 42530 ---
+42527:	.loc	21 276 29 is_stmt 1
+42528:	cmpq	%rdx, %r13
+42529:	jae	.LBB46_233
+42530:	.loc	21 277 29
+42531:	cmpq	64(%rsp), %r13
+42532:	jae	.LBB46_236
+42533:.Ltmp8290:
+42534:	.loc	21 0 29 is_stmt 0
+42535:	movq	%r14, %r9
+42536:.Ltmp8291:
+42537:	.loc	1 551 14 is_stmt 1
+--- asm line 44295 ---
+44292:	movq	%rax, %rsi
+44293:.LBB46_195:
+44294:.Ltmp8657:
+44295:	.loc	21 276 29 is_stmt 1
+44296:	leaq	.Lalloc_5833dd3f10f38ea96ec24c6054ff083c(%rip), %rdx
+44297:	movq	%rsi, %rdi
+44298:	movq	80(%rsp), %rsi
+44299:	vzeroupper
+44300:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+44301:.Ltmp8658:
+44302:.LBB46_202:
+--- asm line 44306 ---
+44303:	.loc	21 0 29 is_stmt 0
+44304:	movq	%rcx, %r11
+44305:.Ltmp8659:
+44306:	.loc	21 275 29 is_stmt 1
+44307:	leaq	.Lalloc_30bf8a301493a607abcc78dbf93977e0(%rip), %rdx
+44308:	movq	%r11, %rdi
+44309:	movq	%rbx, %rsi
+44310:	vzeroupper
+44311:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+44312:.Ltmp8660:
+44313:.LBB46_196:
+--- asm line 44317 ---
+44314:	.loc	21 0 29 is_stmt 0
+44315:	movq	%rcx, %rdi
+44316:.Ltmp8661:
+44317:	.loc	21 274 29 is_stmt 1
+44318:	leaq	.Lalloc_b53d553f9945f7702333f7af20204159(%rip), %rdx
+44319:	movq	64(%rsp), %rsi
+44320:	vzeroupper
+44321:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+44322:.LBB46_197:
+44323:	.loc	21 0 29 is_stmt 0
+44324:	movq	%rcx, %rdi
+--- asm line 44325 ---
+44322:.LBB46_197:
+44323:	.loc	21 0 29 is_stmt 0
+44324:	movq	%rcx, %rdi
+44325:	.loc	21 275 29 is_stmt 1
+44326:	leaq	.Lalloc_30bf8a301493a607abcc78dbf93977e0(%rip), %rdx
+44327:	movq	80(%rsp), %rsi
+44328:	vzeroupper
+44329:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+44330:.Ltmp8662:
+44331:.LBB46_198:
+44332:	.loc	21 0 29 is_stmt 0
+--- asm line 44335 ---
+44332:	.loc	21 0 29 is_stmt 0
+44333:	movq	%rax, %rsi
+44334:.Ltmp8663:
+44335:	.loc	21 276 29 is_stmt 1
+44336:	leaq	.Lalloc_5833dd3f10f38ea96ec24c6054ff083c(%rip), %rdx
+44337:	movq	%rsi, %rdi
+44338:	movq	%rbx, %rsi
+44339:	vzeroupper
+44340:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+44341:.Ltmp8664:
+44342:.LBB46_199:
+--- asm line 44362 ---
+44359:	.loc	6 0 31 is_stmt 0
+44360:	movq	%r15, %r11
+44361:.Ltmp8667:
+44362:	.loc	21 275 29 is_stmt 1
+44363:	leaq	.Lalloc_30bf8a301493a607abcc78dbf93977e0(%rip), %rdx
+44364:	movq	%r11, %rdi
+44365:	movq	%rbx, %rsi
+44366:	vzeroupper
+44367:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+44368:.LBB46_204:
+44369:	.loc	21 0 29 is_stmt 0
+--- asm line 44371 ---
+44368:.LBB46_204:
+44369:	.loc	21 0 29 is_stmt 0
+44370:	movq	%r8, %r11
+44371:	.loc	21 274 29 is_stmt 1
+44372:	leaq	.Lalloc_b53d553f9945f7702333f7af20204159(%rip), %rdx
+44373:	movq	%r11, %rdi
+44374:	movq	%r13, %rsi
+44375:	vzeroupper
+44376:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+44377:.LBB46_205:
+44378:	.loc	21 0 29 is_stmt 0
+--- asm line 44380 ---
+44377:.LBB46_205:
+44378:	.loc	21 0 29 is_stmt 0
+44379:	movq	%rax, %r11
+44380:	.loc	21 274 29
+44381:	leaq	.Lalloc_b53d553f9945f7702333f7af20204159(%rip), %rdx
+44382:	movq	%r11, %rdi
+44383:	movq	%r13, %rsi
+44384:	vzeroupper
+44385:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+44386:.LBB46_206:
+44387:	.loc	21 0 29
+--- asm line 44389 ---
+44386:.LBB46_206:
+44387:	.loc	21 0 29
+44388:	movq	%r15, %r11
+44389:	.loc	21 274 29
+44390:	leaq	.Lalloc_b53d553f9945f7702333f7af20204159(%rip), %rdx
+44391:	movq	%r11, %rdi
+44392:	movq	%r13, %rsi
+44393:	vzeroupper
+44394:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+44395:.LBB46_208:
+44396:	.loc	21 0 29
+--- asm line 44398 ---
+44395:.LBB46_208:
+44396:	.loc	21 0 29
+44397:	movq	128(%rsp), %rsi
+44398:	.loc	21 277 29 is_stmt 1
+44399:	leaq	.Lalloc_c5ae5decb60097d7e1183cb43cae6b3f(%rip), %rdx
+44400:	movq	%rsi, %rdi
+44401:	movq	96(%rsp), %rsi
+44402:	vzeroupper
+44403:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+44404:.LBB46_209:
+44405:	.loc	21 0 29 is_stmt 0
+--- asm line 44409 ---
+44406:	movq	%rbx, %r13
+44407:.LBB46_207:
+44408:	movq	%rcx, %r11
+44409:	.loc	21 274 29 is_stmt 1
+44410:	leaq	.Lalloc_b53d553f9945f7702333f7af20204159(%rip), %rdx
+44411:	movq	%r11, %rdi
+44412:	movq	%r13, %rsi
+44413:	vzeroupper
+44414:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+44415:.LBB46_210:
+44416:	.loc	21 0 29 is_stmt 0
+--- asm line 44418 ---
+44415:.LBB46_210:
+44416:	.loc	21 0 29 is_stmt 0
+44417:	movq	%r10, %rsi
+44418:	.loc	21 277 29 is_stmt 1
+44419:	leaq	.Lalloc_c5ae5decb60097d7e1183cb43cae6b3f(%rip), %rdx
+44420:	movq	%rsi, %rdi
+44421:	movq	96(%rsp), %rsi
+44422:	vzeroupper
+44423:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+44424:.LBB46_211:
+44425:	.loc	21 0 29 is_stmt 0
+--- asm line 44427 ---
+44424:.LBB46_211:
+44425:	.loc	21 0 29 is_stmt 0
+44426:	movq	%rdi, %rsi
+44427:	.loc	21 276 29 is_stmt 1
+44428:	leaq	.Lalloc_5833dd3f10f38ea96ec24c6054ff083c(%rip), %rdx
+44429:	movq	%rsi, %rdi
+44430:	movq	%rbx, %rsi
+44431:	vzeroupper
+44432:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+44433:.LBB46_212:
+44434:	.loc	21 0 29 is_stmt 0
+--- asm line 44436 ---
+44433:.LBB46_212:
+44434:	.loc	21 0 29 is_stmt 0
+44435:	movq	%rdx, %rsi
+44436:	.loc	21 277 29 is_stmt 1
+44437:	leaq	.Lalloc_c5ae5decb60097d7e1183cb43cae6b3f(%rip), %rdx
+44438:	movq	%rsi, %rdi
+44439:	movq	96(%rsp), %rsi
+44440:	vzeroupper
+44441:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+44442:.LBB46_213:
+44443:	.loc	21 0 29 is_stmt 0
+--- asm line 44445 ---
+44442:.LBB46_213:
+44443:	.loc	21 0 29 is_stmt 0
+44444:	movq	%r14, %rsi
+44445:	.loc	21 277 29
+44446:	leaq	.Lalloc_c5ae5decb60097d7e1183cb43cae6b3f(%rip), %rdx
+44447:	movq	%rsi, %rdi
+44448:	movq	96(%rsp), %rsi
+44449:	vzeroupper
+44450:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+44451:.LBB46_214:
+44452:	.loc	21 0 29
+--- asm line 44454 ---
+44451:.LBB46_214:
+44452:	.loc	21 0 29
+44453:	movq	160(%rsp), %rsi
+44454:	.loc	21 277 29
+44455:	leaq	.Lalloc_c5ae5decb60097d7e1183cb43cae6b3f(%rip), %rdx
+44456:	movq	%rsi, %rdi
+44457:	movq	96(%rsp), %rsi
+44458:	vzeroupper
+44459:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+44460:.LBB46_215:
+44461:	.loc	21 0 29
+--- asm line 44463 ---
+44460:.LBB46_215:
+44461:	.loc	21 0 29
+44462:	movq	%r12, %rsi
+44463:	.loc	21 277 29
+44464:	leaq	.Lalloc_c5ae5decb60097d7e1183cb43cae6b3f(%rip), %rdx
+44465:	movq	%rsi, %rdi
+44466:	movq	96(%rsp), %rsi
+44467:	vzeroupper
+44468:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+44469:.LBB46_216:
+44470:	.loc	21 0 29
+--- asm line 44472 ---
+44469:.LBB46_216:
+44470:	.loc	21 0 29
+44471:	movq	%r10, %rsi
+44472:	.loc	21 276 29 is_stmt 1
+44473:	leaq	.Lalloc_5833dd3f10f38ea96ec24c6054ff083c(%rip), %rdx
+44474:	movq	%rsi, %rdi
+44475:	movq	%rbx, %rsi
+44476:	vzeroupper
+44477:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+44478:.LBB46_217:
+44479:	.loc	21 0 29 is_stmt 0
+--- asm line 44481 ---
+44478:.LBB46_217:
+44479:	.loc	21 0 29 is_stmt 0
+44480:	movq	%rdx, %rsi
+44481:	.loc	21 276 29
+44482:	leaq	.Lalloc_5833dd3f10f38ea96ec24c6054ff083c(%rip), %rdx
+44483:	movq	%rsi, %rdi
+44484:	movq	%rbx, %rsi
+44485:	vzeroupper
+44486:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+44487:.LBB46_218:
+44488:	.loc	21 0 29
+--- asm line 44490 ---
+44487:.LBB46_218:
+44488:	.loc	21 0 29
+44489:	movq	%r14, %rsi
+44490:	.loc	21 276 29
+44491:	leaq	.Lalloc_5833dd3f10f38ea96ec24c6054ff083c(%rip), %rdx
+44492:	movq	%rsi, %rdi
+44493:	movq	%rbx, %rsi
+44494:	vzeroupper
+44495:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+44496:.LBB46_219:
+44497:	.loc	21 0 29
+--- asm line 44499 ---
+44496:.LBB46_219:
+44497:	.loc	21 0 29
+44498:	movq	%rdi, %r11
+44499:	.loc	21 275 29 is_stmt 1
+44500:	leaq	.Lalloc_30bf8a301493a607abcc78dbf93977e0(%rip), %rdx
+44501:	movq	%r11, %rdi
+44502:	movq	%rbx, %rsi
+44503:	vzeroupper
+44504:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+44505:.LBB46_220:
+44506:	.loc	21 0 29 is_stmt 0
+--- asm line 44510 ---
+44507:	movq	%r12, %rsi
+44508:	movq	88(%rsp), %rbx
+44509:.LBB46_221:
+44510:	.loc	21 276 29 is_stmt 1
+44511:	leaq	.Lalloc_5833dd3f10f38ea96ec24c6054ff083c(%rip), %rdx
+44512:	movq	%rsi, %rdi
+44513:	movq	%rbx, %rsi
+44514:	vzeroupper
+44515:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+44516:.LBB46_224:
+44517:	.loc	21 0 29 is_stmt 0
+--- asm line 44519 ---
+44516:.LBB46_224:
+44517:	.loc	21 0 29 is_stmt 0
+44518:	movq	%r8, %r11
+44519:	.loc	21 275 29 is_stmt 1
+44520:	leaq	.Lalloc_30bf8a301493a607abcc78dbf93977e0(%rip), %rdx
+44521:	movq	%r11, %rdi
+44522:	movq	%rbx, %rsi
+44523:	vzeroupper
+44524:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+44525:.LBB46_225:
+44526:	.loc	21 0 29 is_stmt 0
+--- asm line 44529 ---
+44526:	.loc	21 0 29 is_stmt 0
+44527:	movq	%rdi, %rsi
+44528:.LBB46_226:
+44529:	.loc	21 277 29 is_stmt 1
+44530:	leaq	.Lalloc_c5ae5decb60097d7e1183cb43cae6b3f(%rip), %rdx
+44531:	movq	%rsi, %rdi
+44532:	movq	96(%rsp), %rsi
+44533:	vzeroupper
+44534:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+44535:.LBB46_227:
+44536:	.loc	21 0 29 is_stmt 0
+--- asm line 44539 ---
+44536:	.loc	21 0 29 is_stmt 0
+44537:	movq	%rax, %r11
+44538:.LBB46_228:
+44539:	.loc	21 275 29 is_stmt 1
+44540:	leaq	.Lalloc_30bf8a301493a607abcc78dbf93977e0(%rip), %rdx
+44541:	movq	%r11, %rdi
+44542:	movq	%rbx, %rsi
+44543:	vzeroupper
+44544:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+44545:.LBB46_229:
+44546:	.loc	21 0 29 is_stmt 0
+--- asm line 44549 ---
+44546:	.loc	21 0 29 is_stmt 0
+44547:	movq	%rdi, %r11
+44548:.LBB46_230:
+44549:	.loc	21 274 29 is_stmt 1
+44550:	leaq	.Lalloc_b53d553f9945f7702333f7af20204159(%rip), %rdx
+44551:	movq	%r11, %rdi
+44552:	movq	%r13, %rsi
+44553:	vzeroupper
+44554:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+44555:.Ltmp8668:
+44556:.LBB46_231:
+--- asm line 44560 ---
+44557:	.loc	21 0 29 is_stmt 0
+44558:	movq	%rax, %rsi
+44559:.Ltmp8669:
+44560:	.loc	21 277 29 is_stmt 1
+44561:	leaq	.Lalloc_c5ae5decb60097d7e1183cb43cae6b3f(%rip), %rdx
+44562:	movq	%rsi, %rdi
+44563:	movq	64(%rsp), %rsi
+44564:	vzeroupper
+44565:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+44566:.LBB46_232:
+44567:	.loc	21 0 29 is_stmt 0
+--- asm line 44569 ---
+44566:.LBB46_232:
+44567:	.loc	21 0 29 is_stmt 0
+44568:	movq	%r12, %rdi
+44569:	.loc	21 274 29 is_stmt 1
+44570:	leaq	.Lalloc_b53d553f9945f7702333f7af20204159(%rip), %rdx
+44571:	movq	64(%rsp), %rsi
+44572:	vzeroupper
+44573:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+44574:.LBB46_233:
+44575:	.loc	21 0 29 is_stmt 0
+44576:	movq	%r13, %rsi
+--- asm line 44577 ---
+44574:.LBB46_233:
+44575:	.loc	21 0 29 is_stmt 0
+44576:	movq	%r13, %rsi
+44577:	.loc	21 276 29 is_stmt 1
+44578:	leaq	.Lalloc_5833dd3f10f38ea96ec24c6054ff083c(%rip), %rdx
+44579:	movq	%rsi, %rdi
+44580:	movq	80(%rsp), %rsi
+44581:	vzeroupper
+44582:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+44583:.LBB46_234:
+44584:	.loc	21 0 29 is_stmt 0
+--- asm line 44586 ---
+44583:.LBB46_234:
+44584:	.loc	21 0 29 is_stmt 0
+44585:	movq	480(%rsp), %rsi
+44586:	.loc	21 277 29 is_stmt 1
+44587:	leaq	.Lalloc_c5ae5decb60097d7e1183cb43cae6b3f(%rip), %rdx
+44588:	movq	%rsi, %rdi
+44589:	movq	64(%rsp), %rsi
+44590:	vzeroupper
+44591:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+44592:.LBB46_235:
+44593:	.loc	21 0 29 is_stmt 0
+--- asm line 44595 ---
+44592:.LBB46_235:
+44593:	.loc	21 0 29 is_stmt 0
+44594:	movq	104(%rsp), %rsi
+44595:	.loc	21 277 29
+44596:	leaq	.Lalloc_c5ae5decb60097d7e1183cb43cae6b3f(%rip), %rdx
+44597:	movq	%rsi, %rdi
+44598:	movq	64(%rsp), %rsi
+44599:	vzeroupper
+44600:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+44601:.LBB46_236:
+44602:	.loc	21 0 29
+--- asm line 44604 ---
+44601:.LBB46_236:
+44602:	.loc	21 0 29
+44603:	movq	%r13, %rsi
+44604:	.loc	21 277 29
+44605:	leaq	.Lalloc_c5ae5decb60097d7e1183cb43cae6b3f(%rip), %rdx
+44606:	movq	%rsi, %rdi
+44607:	movq	64(%rsp), %rsi
+44608:	vzeroupper
+44609:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+44610:.LBB46_237:
+44611:	.loc	21 0 29
+--- asm line 44613 ---
+44610:.LBB46_237:
+44611:	.loc	21 0 29
+44612:	movq	%r10, %rdi
+44613:	.loc	21 275 29 is_stmt 1
+44614:	leaq	.Lalloc_30bf8a301493a607abcc78dbf93977e0(%rip), %rdx
+44615:	movq	80(%rsp), %rsi
+44616:	vzeroupper
+44617:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+44618:.LBB46_238:
+44619:	.loc	21 0 29 is_stmt 0
+44620:	movq	%r15, %rsi
+--- asm line 44621 ---
+44618:.LBB46_238:
+44619:	.loc	21 0 29 is_stmt 0
+44620:	movq	%r15, %rsi
+44621:	.loc	21 276 29 is_stmt 1
+44622:	leaq	.Lalloc_5833dd3f10f38ea96ec24c6054ff083c(%rip), %rdx
+44623:	movq	%rsi, %rdi
+44624:	movq	80(%rsp), %rsi
+44625:	vzeroupper
+44626:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+44627:.LBB46_239:
+44628:	.loc	21 0 29 is_stmt 0
+--- asm line 44630 ---
+44627:.LBB46_239:
+44628:	.loc	21 0 29 is_stmt 0
+44629:	movq	160(%rsp), %rsi
+44630:	.loc	21 277 29 is_stmt 1
+44631:	leaq	.Lalloc_c5ae5decb60097d7e1183cb43cae6b3f(%rip), %rdx
+44632:	movq	%rsi, %rdi
+44633:	movq	64(%rsp), %rsi
+44634:	vzeroupper
+44635:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+44636:.LBB46_240:
+44637:	.loc	21 0 29 is_stmt 0
+--- asm line 44639 ---
+44636:.LBB46_240:
+44637:	.loc	21 0 29 is_stmt 0
+44638:	movq	%r8, %rdi
+44639:	.loc	21 275 29 is_stmt 1
+44640:	leaq	.Lalloc_30bf8a301493a607abcc78dbf93977e0(%rip), %rdx
+44641:	movq	80(%rsp), %rsi
+44642:	vzeroupper
+44643:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+44644:.LBB46_241:
+44645:	.loc	21 0 29 is_stmt 0
+44646:	movq	%rbx, %rdi
+--- asm line 44647 ---
+44644:.LBB46_241:
+44645:	.loc	21 0 29 is_stmt 0
+44646:	movq	%rbx, %rdi
+44647:	.loc	21 274 29 is_stmt 1
+44648:	leaq	.Lalloc_b53d553f9945f7702333f7af20204159(%rip), %rdx
+44649:	movq	64(%rsp), %rsi
+44650:	vzeroupper
+44651:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+44652:.LBB46_242:
+44653:	.loc	21 0 29 is_stmt 0
+44654:	movq	%r12, %rdi
+--- asm line 44655 ---
+44652:.LBB46_242:
+44653:	.loc	21 0 29 is_stmt 0
+44654:	movq	%r12, %rdi
+44655:	.loc	21 275 29 is_stmt 1
+44656:	leaq	.Lalloc_30bf8a301493a607abcc78dbf93977e0(%rip), %rdx
+44657:	movq	80(%rsp), %rsi
+44658:	vzeroupper
+44659:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+44660:.LBB46_243:
+44661:	.loc	21 0 29 is_stmt 0
+44662:	movq	%r10, %rdi
+--- asm line 44663 ---
+44660:.LBB46_243:
+44661:	.loc	21 0 29 is_stmt 0
+44662:	movq	%r10, %rdi
+44663:	.loc	21 274 29 is_stmt 1
+44664:	leaq	.Lalloc_b53d553f9945f7702333f7af20204159(%rip), %rdx
+44665:	movq	64(%rsp), %rsi
+44666:	vzeroupper
+44667:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+44668:.LBB46_244:
+44669:	.loc	21 0 29 is_stmt 0
+44670:	movq	%rbx, %rdi
+--- asm line 44672 ---
+44669:	.loc	21 0 29 is_stmt 0
+44670:	movq	%rbx, %rdi
+44671:.LBB46_245:
+44672:	.loc	21 275 29 is_stmt 1
+44673:	leaq	.Lalloc_30bf8a301493a607abcc78dbf93977e0(%rip), %rdx
+44674:	movq	80(%rsp), %rsi
+44675:	vzeroupper
+44676:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+44677:.LBB46_246:
+44678:	.loc	21 0 29 is_stmt 0
+44679:	movq	320(%rsp), %rsi
+--- asm line 44680 ---
+44677:.LBB46_246:
+44678:	.loc	21 0 29 is_stmt 0
+44679:	movq	320(%rsp), %rsi
+44680:	.loc	21 277 29 is_stmt 1
+44681:	leaq	.Lalloc_c5ae5decb60097d7e1183cb43cae6b3f(%rip), %rdx
+44682:	movq	%rsi, %rdi
+44683:	movq	64(%rsp), %rsi
+44684:	vzeroupper
+44685:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+44686:.LBB46_247:
+44687:	.loc	21 0 29 is_stmt 0
+--- asm line 44690 ---
+44687:	.loc	21 0 29 is_stmt 0
+44688:	movq	%r8, %rdi
+44689:.LBB46_248:
+44690:	.loc	21 274 29 is_stmt 1
+44691:	leaq	.Lalloc_b53d553f9945f7702333f7af20204159(%rip), %rdx
+44692:	movq	64(%rsp), %rsi
+44693:	vzeroupper
+44694:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+44695:.LBB46_249:
+44696:	.loc	21 0 29 is_stmt 0
+44697:	movq	%r15, %rsi
+--- asm line 44699 ---
+44696:	.loc	21 0 29 is_stmt 0
+44697:	movq	%r15, %rsi
+44698:.LBB46_250:
+44699:	.loc	21 277 29 is_stmt 1
+44700:	leaq	.Lalloc_c5ae5decb60097d7e1183cb43cae6b3f(%rip), %rdx
+44701:	movq	%rsi, %rdi
+44702:	movq	64(%rsp), %rsi
+44703:	vzeroupper
+44704:	callq	*_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check@GOTPCREL(%rip)
+44705:.Ltmp8670:
+44706:.Lfunc_end46:

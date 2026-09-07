@@ -1,0 +1,919 @@
+Production caller/source mapping for issue #534 baseline
+IR: /tmp/issue534-baseline-target/release/deps/gate_expander-a68433203a7e3c7a.ll sha256=70d9633d05b0f040c4f8d60e5b4b1ee99de184264fb05ce39aa30b93023ea911
+Source gather lines: kernel.rs:271-277; assignment lines are not counted as executed loads.
+
+[process-scalar-disconnected] _RNvXs_CsdOTRa1MFkeb_13gate_expanderINtB4_12PreparedGatefKb0_ENtCsfGpaX3jkkqY_15effect_contract20PreparedNativeEffect7processB4_
+LL:13674 source-line:277   br i1 %_88.i.us.us.us.i.i, label %bb28.i.us.us.lr.ph.us.us.us.i.i, label %bb24.i.us.lr.ph.split.us.panic24.i.split.us.split.us_crit_edge.i.i, !dbg !6386
+LL:14085 source-line:275   br i1 %_84.i.us.i.i, label %bb24.i.us.lr.ph.us.i.i, label %bb63.i.split.us.panic20.i.split.us_crit_edge.i.i, !dbg !6824
+LL:14474 source-line:277   tail call void @_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check(i64 noundef %_72.i.us.us.us.i.i, i64 noundef %_58.1.i.i, ptr noalias noundef readonly align 8 captures(address, read_provenance) dereferenceable(24) @alloc_c5ae5decb60097d7e1183cb43cae6b3f) #24, !dbg !6386, !noalias !6274
+LL:14475 source-line:277   unreachable, !dbg !6386
+LL:14480 source-line:276   tail call void @_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check(i64 noundef %.us-phi1141.i.i, i64 noundef %_60.1.i.i, ptr noalias noundef readonly align 8 captures(address, read_provenance) dereferenceable(24) @alloc_5833dd3f10f38ea96ec24c6054ff083c) #24, !dbg !6830, !noalias !6274
+LL:14481 source-line:276   unreachable, !dbg !6830
+LL:14485 source-line:275   tail call void @_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check(i64 noundef %_64.i.us.i.i, i64 noundef %_60.1.i.i, ptr noalias noundef readonly align 8 captures(address, read_provenance) dereferenceable(24) @alloc_30bf8a301493a607abcc78dbf93977e0) #24, !dbg !6824, !noalias !6274
+LL:14486 source-line:275   unreachable, !dbg !6824
+LL:14491 source-line:274   tail call void @_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check(i64 noundef %.us-phi1113.i.i, i64 noundef %_58.1.i.i, ptr noalias noundef readonly align 8 captures(address, read_provenance) dereferenceable(24) @alloc_b53d553f9945f7702333f7af20204159) #24, !dbg !6831, !noalias !6274
+LL:14492 source-line:274   unreachable, !dbg !6831
+LL:14915 source-line:277   br i1 %_88.i.us.us.us.i74.i, label %bb28.i.us.us.lr.ph.us.us.us.i84.i, label %bb24.i.us.lr.ph.split.us.panic24.i.split.us.split.us_crit_edge.i83.i, !dbg !7269
+LL:15200 source-line:275   br i1 %_84.i.us.i154.i, label %bb24.i.us.lr.ph.us.i155.i, label %bb63.i.split.us.panic20.i.split.us_crit_edge.i78.i, !dbg !7645
+LL:15527 source-line:275   br i1 %_84.i.i.i, label %bb24.i.us.lr.ph.i.i, label %bb63.i.split.us.panic20.i.split.us_crit_edge.i78.i, !dbg !7645
+LL:15534 source-line:277   br i1 %_88.i.i.i, label %bb28.i.us.us.lr.ph.i.i, label %bb24.i.us.lr.ph.split.us.panic24.i.split.us.split.us_crit_edge.i83.i, !dbg !7269
+LL:15764 source-line:277   tail call void @_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check(i64 noundef %.us-phi1063.i.i, i64 noundef %_58.1.i22.i, ptr noalias noundef readonly align 8 captures(address, read_provenance) dereferenceable(24) @alloc_c5ae5decb60097d7e1183cb43cae6b3f) #24, !dbg !7269, !noalias !7211
+LL:15765 source-line:277   unreachable, !dbg !7269
+LL:15770 source-line:276   tail call void @_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check(i64 noundef %.us-phi1045.i.i, i64 noundef %_60.1.i25.i, ptr noalias noundef readonly align 8 captures(address, read_provenance) dereferenceable(24) @alloc_5833dd3f10f38ea96ec24c6054ff083c) #24, !dbg !7654, !noalias !7211
+LL:15771 source-line:276   unreachable, !dbg !7654
+LL:15776 source-line:275   tail call void @_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check(i64 noundef %.us-phi1039.i.i, i64 noundef %_60.1.i25.i, ptr noalias noundef readonly align 8 captures(address, read_provenance) dereferenceable(24) @alloc_30bf8a301493a607abcc78dbf93977e0) #24, !dbg !7645, !noalias !7211
+LL:15777 source-line:275   unreachable, !dbg !7645
+LL:15782 source-line:274   tail call void @_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check(i64 noundef %.us-phi1017.i.i, i64 noundef %_58.1.i22.i, ptr noalias noundef readonly align 8 captures(address, read_provenance) dereferenceable(24) @alloc_b53d553f9945f7702333f7af20204159) #24, !dbg !7655, !noalias !7211
+LL:15783 source-line:274   unreachable, !dbg !7655
+Actual gather load candidates (value loads; source assignments are excluded):
+LL:13481   %87 = load i32, ptr %_47.i, align 4, !dbg !6182, !range !5716, !noalias !6039, !noundef !12
+LL:13568   %_87.i110666.i.i = load i32, ptr %93, align 4, !alias.scope !6255, !noalias !6256
+LL:13585   %_87.i22688.i.i = load i32, ptr %_32.i.i, align 4, !alias.scope !6255, !noalias !6256
+LL:13670   %_82.i.us.us.us.us.i.i = load float, ptr %142, align 4, !noalias !6274, !noundef !12
+LL:13677   %_87.i.us.us.us.us.us.i.i = load float, ptr %141, align 4, !noalias !6274, !noundef !12
+LL:13678   %_85.i.us.us.le911.us.us.us.i.i = load float, ptr %140, align 4, !noalias !6274, !noundef !12
+LL:13679   %_78.i.us.le.us.us.us.i.i = load float, ptr %139, align 4, !noalias !6274, !noundef !12
+LL:14091   %_82.i.us.us.i.i = load float, ptr %175, align 4, !noalias !6274, !noundef !12
+LL:14092   %_87.i.us.us.us.i.i = load float, ptr %177, align 4, !noalias !6274, !noundef !12
+LL:14093   %_85.i.us.us.le911.us.i.i = load float, ptr %176, align 4, !noalias !6274, !noundef !12
+LL:14094   %_78.i.us.le.us.i.i = load float, ptr %174, align 4, !noalias !6274, !noundef !12
+LL:14817   %_87.i88567.i.i = load i32, ptr %247, align 4, !alias.scope !7137, !noalias !7138
+LL:14844   %_87.i21584.i.i = load i32, ptr %_32.i20.i, align 4, !alias.scope !7137, !noalias !7138
+LL:14911   %_82.i.us.us.us.us.i80.i = load float, ptr %280, align 4, !noalias !7211, !noundef !12
+LL:14918   %_87.i.us.us.us.us.us.i85.i = load float, ptr %279, align 4, !noalias !7211, !noundef !12
+LL:14919   %_85.i.us.us.le807.us.us.us.i.i = load float, ptr %278, align 4, !noalias !7211, !noundef !12
+LL:14920   %_78.i.us.le.us.us.us.i86.i = load float, ptr %277, align 4, !noalias !7211, !noundef !12
+LL:15206   %_82.i.us.us.i156.i = load float, ptr %303, align 4, !noalias !7211, !noundef !12
+LL:15207   %_87.i.us.us.us.i159.i = load float, ptr %305, align 4, !noalias !7211, !noundef !12
+LL:15208   %_85.i.us.us.le807.us.i.i = load float, ptr %304, align 4, !noalias !7211, !noundef !12
+LL:15209   %_78.i.us.le.us.i160.i = load float, ptr %302, align 4, !noalias !7211, !noundef !12
+LL:15530   %_82.i.us.i.i = load float, ptr %328, align 4, !noalias !7211, !noundef !12
+LL:15537   %_87.i.us.us.i.i = load float, ptr %330, align 4, !noalias !7211, !noundef !12
+LL:15538   %_85.i.us.us.le807.i.i = load float, ptr %329, align 4, !noalias !7211, !noundef !12
+LL:15539   %_78.i.us.le.i.i = load float, ptr %327, align 4, !noalias !7211, !noundef !12
+
+[process-scalar-connected] _RNvXs_CsdOTRa1MFkeb_13gate_expanderINtB4_12PreparedGatefKb1_ENtCsfGpaX3jkkqY_15effect_contract20PreparedNativeEffect7processB4_
+Actual gather load candidates (value loads; source assignments are excluded):
+LL:16949   %87 = load i32, ptr %_47.i, align 4, !dbg !8140, !range !5716, !noalias !8028, !noundef !12
+
+[run-block-scalar-connected] _RNvMCsdOTRa1MFkeb_13gate_expanderINtB2_12PreparedGatefKb1_E9run_blockB2_
+LL:5017 source-line:275   br i1 %_84.i.us.us.us.us.us.us.us.i, label %bb24.i.us.lr.ph.us.us.us.us.us.us.us.i, label %bb63.i.split.us.panic20.i.split.us_crit_edge.i, !dbg !2830
+LL:5024 source-line:277   br i1 %_88.i.us.us.us.us.us.us.us.i, label %bb28.i.us.us.lr.ph.us.us.us.us.us.us.us.i, label %bb24.i.us.lr.ph.split.us.panic24.i.split.us.split.us_crit_edge.i, !dbg !2838
+LL:5467 source-line:275   br i1 %_84.i.us.us.us.us.us.i, label %bb24.i.us.lr.ph.us.us.us.us.us.i, label %bb63.i.split.us.panic20.i.split.us_crit_edge.i, !dbg !2830
+LL:5919 source-line:275   br i1 %_84.i.us.us.us.i, label %bb24.i.us.lr.ph.us.us.us.i, label %bb63.i.split.us.panic20.i.split.us_crit_edge.i, !dbg !2830
+LL:5926 source-line:277   br i1 %_88.i.us.us.us.i, label %bb28.i.us.us.lr.ph.us.us.us.i, label %bb24.i.us.lr.ph.split.us.panic24.i.split.us.split.us_crit_edge.i, !dbg !2838
+LL:6374 source-line:275   br i1 %_84.i.us.us.i, label %bb24.i.us.lr.ph.us.us.i, label %bb63.i.split.us.panic20.i.split.us_crit_edge.i, !dbg !2830
+LL:6381 source-line:277   br i1 %_88.i.us.us.i, label %bb28.i.us.us.lr.ph.us.us.i, label %bb24.i.us.lr.ph.split.us.panic24.i.split.us.split.us_crit_edge.i, !dbg !2838
+LL:6841 source-line:275   br i1 %_84.i.us.i, label %bb24.i.us.lr.ph.us.i, label %bb63.i.split.us.panic20.i.split.us_crit_edge.i, !dbg !2830
+LL:6848 source-line:277   br i1 %_88.i.us.i, label %bb28.i.us.us.lr.ph.us.i, label %bb24.i.us.lr.ph.split.us.panic24.i.split.us.split.us_crit_edge.i, !dbg !2838
+LL:7282 source-line:277   tail call void @_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check(i64 noundef %.us-phi1225.i, i64 noundef %_59.1.i, ptr noalias noundef readonly align 8 captures(address, read_provenance) dereferenceable(24) @alloc_c5ae5decb60097d7e1183cb43cae6b3f) #24, !dbg !2838, !noalias !2663
+LL:7283 source-line:277   unreachable, !dbg !2838
+LL:7288 source-line:276   tail call void @_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check(i64 noundef %.us-phi1207.i, i64 noundef %_61.1.i, ptr noalias noundef readonly align 8 captures(address, read_provenance) dereferenceable(24) @alloc_5833dd3f10f38ea96ec24c6054ff083c) #24, !dbg !3405, !noalias !2663
+LL:7289 source-line:276   unreachable, !dbg !3405
+LL:7294 source-line:275   tail call void @_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check(i64 noundef %.us-phi1201.i, i64 noundef %_61.1.i, ptr noalias noundef readonly align 8 captures(address, read_provenance) dereferenceable(24) @alloc_30bf8a301493a607abcc78dbf93977e0) #24, !dbg !2830, !noalias !2663
+LL:7295 source-line:275   unreachable, !dbg !2830
+LL:7300 source-line:274   tail call void @_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check(i64 noundef %.us-phi1179.i, i64 noundef %_59.1.i, ptr noalias noundef readonly align 8 captures(address, read_provenance) dereferenceable(24) @alloc_b53d553f9945f7702333f7af20204159) #24, !dbg !3406, !noalias !2663
+LL:7301 source-line:274   unreachable, !dbg !3406
+LL:7842 source-line:275   br i1 %_84.i.us.us.us.us.us.us.us.i92, label %bb24.i.us.lr.ph.us.us.us.us.us.us.us.i94, label %bb63.i.split.us.panic20.i.split.us_crit_edge.i93, !dbg !4029
+LL:7849 source-line:277   br i1 %_88.i.us.us.us.us.us.us.us.i89, label %bb28.i.us.us.lr.ph.us.us.us.us.us.us.us.i99, label %bb24.i.us.lr.ph.split.us.panic24.i.split.us.split.us_crit_edge.i98, !dbg !4037
+LL:8142 source-line:275   br i1 %_84.i.us.us.us.us.us.i175, label %bb24.i.us.lr.ph.us.us.us.us.us.i176, label %bb63.i.split.us.panic20.i.split.us_crit_edge.i93, !dbg !4029
+LL:8440 source-line:275   br i1 %_84.i.us.us.us.us.i248, label %bb24.i.us.lr.ph.us.us.us.us.i249, label %bb63.i.split.us.panic20.i.split.us_crit_edge.i93, !dbg !4029
+LL:8447 source-line:277   br i1 %_88.i.us.us.us.us.i246, label %bb28.i.us.us.lr.ph.us.us.us.us.i252, label %bb24.i.us.lr.ph.split.us.panic24.i.split.us.split.us_crit_edge.i98, !dbg !4037
+LL:8749 source-line:275   br i1 %_84.i.us.us.us.i326, label %bb24.i.us.lr.ph.us.us.us.i327, label %bb63.i.split.us.panic20.i.split.us_crit_edge.i93, !dbg !4029
+LL:8756 source-line:277   br i1 %_88.i.us.us.us.i324, label %bb28.i.us.us.lr.ph.us.us.us.i330, label %bb24.i.us.lr.ph.split.us.panic24.i.split.us.split.us_crit_edge.i98, !dbg !4037
+LL:9058 source-line:275   br i1 %_84.i.us.us.i402, label %bb24.i.us.lr.ph.us.us.i403, label %bb63.i.split.us.panic20.i.split.us_crit_edge.i93, !dbg !4029
+LL:9065 source-line:277   br i1 %_88.i.us.us.i400, label %bb28.i.us.us.lr.ph.us.us.i406, label %bb24.i.us.lr.ph.split.us.panic24.i.split.us.split.us_crit_edge.i98, !dbg !4037
+LL:9379 source-line:275   br i1 %_84.i.us.i483, label %bb24.i.us.lr.ph.us.i484, label %bb63.i.split.us.panic20.i.split.us_crit_edge.i93, !dbg !4029
+LL:9386 source-line:277   br i1 %_88.i.us.i481, label %bb28.i.us.us.lr.ph.us.i487, label %bb24.i.us.lr.ph.split.us.panic24.i.split.us.split.us_crit_edge.i98, !dbg !4037
+LL:9765 source-line:275   br i1 %_84.i.i, label %bb24.i.us.lr.ph.i, label %bb63.i.split.us.panic20.i.split.us_crit_edge.i93, !dbg !4029
+LL:9772 source-line:277   br i1 %_88.i.i, label %bb28.i.us.us.lr.ph.i, label %bb24.i.us.lr.ph.split.us.panic24.i.split.us.split.us_crit_edge.i98, !dbg !4037
+LL:10002 source-line:277   tail call void @_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check(i64 noundef %.us-phi1129.i, i64 noundef %_59.1.i22, ptr noalias noundef readonly align 8 captures(address, read_provenance) dereferenceable(24) @alloc_c5ae5decb60097d7e1183cb43cae6b3f) #24, !dbg !4037, !noalias !3868
+LL:10003 source-line:277   unreachable, !dbg !4037
+LL:10008 source-line:276   tail call void @_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check(i64 noundef %.us-phi1111.i, i64 noundef %_61.1.i27, ptr noalias noundef readonly align 8 captures(address, read_provenance) dereferenceable(24) @alloc_5833dd3f10f38ea96ec24c6054ff083c) #24, !dbg !4455, !noalias !3868
+LL:10009 source-line:276   unreachable, !dbg !4455
+LL:10014 source-line:275   tail call void @_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check(i64 noundef %.us-phi1105.i, i64 noundef %_61.1.i27, ptr noalias noundef readonly align 8 captures(address, read_provenance) dereferenceable(24) @alloc_30bf8a301493a607abcc78dbf93977e0) #24, !dbg !4029, !noalias !3868
+LL:10015 source-line:275   unreachable, !dbg !4029
+LL:10020 source-line:274   tail call void @_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check(i64 noundef %.us-phi1083.i, i64 noundef %_59.1.i22, ptr noalias noundef readonly align 8 captures(address, read_provenance) dereferenceable(24) @alloc_b53d553f9945f7702333f7af20204159) #24, !dbg !4456, !noalias !3868
+LL:10021 source-line:274   unreachable, !dbg !4456
+Actual gather load candidates (value loads; source assignments are excluded):
+LL:5020   %_82.i.us.us.us.us.us.us.us.us.i = load float, ptr %126, align 4, !noalias !2663, !noundef !12
+LL:5027   %_87.i.us.us.us.us.us.us.us.us.us.i = load float, ptr %128, align 4, !noalias !2663, !noundef !12
+LL:5028   %_85.i.us.us.le931.us.us.us.us.us.us.us.i = load float, ptr %127, align 4, !noalias !2663, !noundef !12
+LL:5029   %_78.i.us.le.us.us.us.us.us.us.us.i = load float, ptr %125, align 4, !noalias !2663, !noundef !12
+LL:5175   %_87.i112670.us.us.us.us.us.us.us.i = load i32, ptr %2, align 4, !dbg !3063, !alias.scope !2897, !noalias !2898, !noundef !12
+LL:5339   %_87.i24692.us.us.us.us.us.us.us.i = load i32, ptr %_32.i, align 4, !dbg !3279, !alias.scope !3152, !noalias !3153, !noundef !12
+LL:5473   %_82.i.us.us.us.us.us.us.i = load float, ptr %161, align 4, !noalias !2663, !noundef !12
+LL:5474   %_87.i.us.us.us.us.us.us.us.i = load float, ptr %163, align 4, !noalias !2663, !noundef !12
+LL:5475   %_85.i.us.us.le931.us.us.us.us.us.i = load float, ptr %162, align 4, !noalias !2663, !noundef !12
+LL:5476   %_78.i.us.le.us.us.us.us.us.i = load float, ptr %160, align 4, !noalias !2663, !noundef !12
+LL:5622   %_87.i112670.us.us.us.us.us.i = load i32, ptr %2, align 4, !dbg !3063, !alias.scope !2897, !noalias !2898, !noundef !12
+LL:5786   %_87.i24692.us.us.us.us.us.i = load i32, ptr %_32.i, align 4, !dbg !3279, !alias.scope !3152, !noalias !3153, !noundef !12
+LL:5922   %_82.i.us.us.us.us.i = load float, ptr %196, align 4, !noalias !2663, !noundef !12
+LL:5929   %_87.i.us.us.us.us.us.i = load float, ptr %198, align 4, !noalias !2663, !noundef !12
+LL:5930   %_85.i.us.us.le931.us.us.us.i = load float, ptr %197, align 4, !noalias !2663, !noundef !12
+LL:5931   %_78.i.us.le.us.us.us.i = load float, ptr %195, align 4, !noalias !2663, !noundef !12
+LL:6077   %_87.i112670.us.us.us.i = load i32, ptr %2, align 4, !dbg !3063, !alias.scope !2897, !noalias !2898, !noundef !12
+LL:6241   %_87.i24692.us.us.us.i = load i32, ptr %_32.i, align 4, !dbg !3279, !alias.scope !3152, !noalias !3153, !noundef !12
+LL:6377   %_82.i.us.us.us.i = load float, ptr %231, align 4, !noalias !2663, !noundef !12
+LL:6384   %_87.i.us.us.us.us.i = load float, ptr %233, align 4, !noalias !2663, !noundef !12
+LL:6385   %_85.i.us.us.le931.us.us.i = load float, ptr %232, align 4, !noalias !2663, !noundef !12
+LL:6386   %_78.i.us.le.us.us.i = load float, ptr %230, align 4, !noalias !2663, !noundef !12
+LL:6532   %_87.i112670.us.us.i = load i32, ptr %2, align 4, !dbg !3063, !alias.scope !2897, !noalias !2898, !noundef !12
+LL:6696   %_87.i24692.us.us.i = load i32, ptr %_32.i, align 4, !dbg !3279, !alias.scope !3152, !noalias !3153, !noundef !12
+LL:6844   %_82.i.us.us.i = load float, ptr %266, align 4, !noalias !2663, !noundef !12
+LL:6851   %_87.i.us.us.us.i = load float, ptr %268, align 4, !noalias !2663, !noundef !12
+LL:6852   %_85.i.us.us.le931.us.i = load float, ptr %267, align 4, !noalias !2663, !noundef !12
+LL:6853   %_78.i.us.le.us.i = load float, ptr %265, align 4, !noalias !2663, !noundef !12
+LL:6999   %_87.i112670.us.i = load i32, ptr %2, align 4, !dbg !3063, !alias.scope !2897, !noalias !2898, !noundef !12
+LL:7163   %_87.i24692.us.i = load i32, ptr %_32.i, align 4, !dbg !3279, !alias.scope !3152, !noalias !3153, !noundef !12
+LL:7719   %_87.i90571.i = load i32, ptr %342, align 4, !alias.scope !3812, !noalias !3841
+LL:7746   %_87.i23588.i = load i32, ptr %_32.i18, align 4, !alias.scope !3812, !noalias !3841
+LL:7845   %_82.i.us.us.us.us.us.us.us.us.i95 = load float, ptr %380, align 4, !noalias !3868, !noundef !12
+LL:7852   %_87.i.us.us.us.us.us.us.us.us.us.i100 = load float, ptr %382, align 4, !noalias !3868, !noundef !12
+LL:7853   %_85.i.us.us.le827.us.us.us.us.us.us.us.i = load float, ptr %381, align 4, !noalias !3868, !noundef !12
+LL:7854   %_78.i.us.le.us.us.us.us.us.us.us.i101 = load float, ptr %379, align 4, !noalias !3868, !noundef !12
+LL:8148   %_82.i.us.us.us.us.us.us.i177 = load float, ptr %405, align 4, !noalias !3868, !noundef !12
+LL:8149   %_87.i.us.us.us.us.us.us.us.i180 = load float, ptr %407, align 4, !noalias !3868, !noundef !12
+LL:8150   %_85.i.us.us.le827.us.us.us.us.us.i = load float, ptr %406, align 4, !noalias !3868, !noundef !12
+LL:8151   %_78.i.us.le.us.us.us.us.us.i181 = load float, ptr %404, align 4, !noalias !3868, !noundef !12
+LL:8443   %_82.i.us.us.us.us.us.i250 = load float, ptr %430, align 4, !noalias !3868, !noundef !12
+LL:8450   %_87.i.us.us.us.us.us.us.i253 = load float, ptr %432, align 4, !noalias !3868, !noundef !12
+LL:8451   %_85.i.us.us.le827.us.us.us.us.i = load float, ptr %431, align 4, !noalias !3868, !noundef !12
+LL:8452   %_78.i.us.le.us.us.us.us.i254 = load float, ptr %429, align 4, !noalias !3868, !noundef !12
+LL:8752   %_82.i.us.us.us.us.i328 = load float, ptr %455, align 4, !noalias !3868, !noundef !12
+LL:8759   %_87.i.us.us.us.us.us.i331 = load float, ptr %457, align 4, !noalias !3868, !noundef !12
+LL:8760   %_85.i.us.us.le827.us.us.us.i = load float, ptr %456, align 4, !noalias !3868, !noundef !12
+LL:8761   %_78.i.us.le.us.us.us.i332 = load float, ptr %454, align 4, !noalias !3868, !noundef !12
+LL:9061   %_82.i.us.us.us.i404 = load float, ptr %480, align 4, !noalias !3868, !noundef !12
+LL:9068   %_87.i.us.us.us.us.i407 = load float, ptr %482, align 4, !noalias !3868, !noundef !12
+LL:9069   %_85.i.us.us.le827.us.us.i = load float, ptr %481, align 4, !noalias !3868, !noundef !12
+LL:9070   %_78.i.us.le.us.us.i408 = load float, ptr %479, align 4, !noalias !3868, !noundef !12
+LL:9382   %_82.i.us.us.i485 = load float, ptr %505, align 4, !noalias !3868, !noundef !12
+LL:9389   %_87.i.us.us.us.i488 = load float, ptr %507, align 4, !noalias !3868, !noundef !12
+LL:9390   %_85.i.us.us.le827.us.i = load float, ptr %506, align 4, !noalias !3868, !noundef !12
+LL:9391   %_78.i.us.le.us.i489 = load float, ptr %504, align 4, !noalias !3868, !noundef !12
+LL:9768   %_82.i.us.i = load float, ptr %530, align 4, !noalias !3868, !noundef !12
+LL:9775   %_87.i.us.us.i = load float, ptr %532, align 4, !noalias !3868, !noundef !12
+LL:9776   %_85.i.us.us.le827.i = load float, ptr %531, align 4, !noalias !3868, !noundef !12
+LL:9777   %_78.i.us.le.i = load float, ptr %529, align 4, !noalias !3868, !noundef !12
+
+[process-bank-w4] _RNvXsd_CsdOTRa1MFkeb_13gate_expanderINtB5_12PreparedGateNtNtCsdw0XaoyMD7p_4wide6f32x4_5f32x4Kb0_ENtCsfGpaX3jkkqY_15effect_contract24PreparedNativeEffectBank12process_bank
+LL:17254 source-line:271   %_67.i.i.i = load i32, ptr %_45.i.i, align 4, !dbg !8437, !alias.scope !8287, !noalias !8306, !noundef !12
+LL:17256 source-line:271   %_65.i.i.i = and i32 %_66.i.i.i, %_52.i.i, !dbg !8445
+LL:17257 source-line:271   %_64.i.i.i = zext i32 %_65.i.i.i to i64, !dbg !8446
+LL:17258 source-line:271   %_63.i.i.i = shl nuw nsw i64 %_64.i.i.i, 2, !dbg !8446
+LL:17259 source-line:273   %_75.i.i.i = load i32, ptr %_50.i.i, align 4, !dbg !8447, !alias.scope !8287, !noalias !8306, !noundef !12
+LL:17261 source-line:273   %_73.i.i.i = and i32 %_74.i.i.i, %_52.i.i, !dbg !8451
+LL:17262 source-line:273   %_72.i.i.i = zext i32 %_73.i.i.i to i64, !dbg !8452
+LL:17263 source-line:273   %_71.i.i.i = shl nuw nsw i64 %_72.i.i.i, 2, !dbg !8452
+LL:17264 source-line:274   %_80.i.i.i = icmp ult i64 %_63.i.i.i, %_58.1.i.i, !dbg !8453
+LL:17265 source-line:274   br i1 %_80.i.i.i, label %bb22.i.i.i, label %panic18.i.i.i, !dbg !8453
+LL:17268 source-line:276   %74 = getelementptr inbounds nuw float, ptr %_60.0.i.i, i64 %partner.i.3.i.i, !dbg !8455
+LL:17269 source-line:276   %_85.i.32146.i.i = load i32, ptr %74, align 4, !dbg !8455, !noalias !8306, !noundef !12
+LL:17270 source-line:277   %75 = getelementptr inbounds nuw float, ptr %_58.0.i.i, i64 %partner.i.3.i.i, !dbg !8456
+LL:17271 source-line:277   %_87.i.32147.i.i = load i32, ptr %75, align 4, !dbg !8456, !noalias !8306, !noundef !12
+LL:17728 source-line:271   %own.i.lcssa.i.i = phi i64 [ %_63.i.i.i, %bb63.i.i.i ], [ %own.i.1.i.i, %bb28.i.i.i ], [ %own.i.2.i.i, %bb28.i.1.i.i ], [ %own.i.3.i.i, %bb28.i.2.i.i ], !dbg !8446
+LL:17730 source-line:274   tail call void @_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check(i64 noundef %own.i.lcssa.i.i, i64 noundef %_58.1.i.i, ptr noalias noundef readonly align 8 captures(address, read_provenance) dereferenceable(24) @alloc_b53d553f9945f7702333f7af20204159) #24, !dbg !8453, !noalias !8306
+LL:17731 source-line:274   unreachable, !dbg !8453
+LL:17734 source-line:274   %426 = getelementptr inbounds nuw float, ptr %_58.0.i.i, i64 %_63.i.i.i, !dbg !8453
+LL:17735 source-line:274   %_78.i2132.i.i = load i32, ptr %426, align 4, !dbg !8453, !noalias !8306, !noundef !12
+LL:17736 source-line:275   %_84.i.i.i = icmp ult i64 %_63.i.i.i, %_60.1.i.i, !dbg !9711
+LL:17737 source-line:275   br i1 %_84.i.i.i, label %bb24.i.i.i, label %panic20.i.i.i, !dbg !9711
+LL:17740 source-line:271   %own.i.lcssa1835.i.i = phi i64 [ %_63.i.i.i, %bb22.i.i.i ], [ %own.i.1.i.i, %bb22.i.1.i.i ], [ %own.i.2.i.i, %bb22.i.2.i.i ], [ %own.i.3.i.i, %bb22.i.3.i.i ], !dbg !8446
+LL:17742 source-line:275   tail call void @_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check(i64 noundef %own.i.lcssa1835.i.i, i64 noundef %_60.1.i.i, ptr noalias noundef readonly align 8 captures(address, read_provenance) dereferenceable(24) @alloc_30bf8a301493a607abcc78dbf93977e0) #24, !dbg !9711, !noalias !8306
+LL:17743 source-line:275   unreachable, !dbg !9711
+LL:17746 source-line:275   %427 = getelementptr inbounds nuw float, ptr %_60.0.i.i, i64 %_63.i.i.i, !dbg !9711
+LL:17747 source-line:275   %_82.i2133.i.i = load i32, ptr %427, align 4, !dbg !9711, !noalias !8306, !noundef !12
+LL:17748 source-line:276   %_86.i.i.i = icmp ult i64 %_71.i.i.i, %_60.1.i.i, !dbg !8455
+LL:17749 source-line:276   br i1 %_86.i.i.i, label %bb26.i.i.i, label %panic22.i.i.i, !dbg !8455
+LL:17752 source-line:273   %partner.i.lcssa1832.i.i = phi i64 [ %_71.i.i.i, %bb24.i.i.i ], [ %partner.i.1.i.i, %bb24.i.1.i.i ], [ %partner.i.2.i.i, %bb24.i.2.i.i ], [ %partner.i.3.i.i, %bb24.i.3.i.i ], !dbg !8452
+LL:17754 source-line:276   tail call void @_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check(i64 noundef %partner.i.lcssa1832.i.i, i64 noundef %_60.1.i.i, ptr noalias noundef readonly align 8 captures(address, read_provenance) dereferenceable(24) @alloc_5833dd3f10f38ea96ec24c6054ff083c) #24, !dbg !8455, !noalias !8306
+LL:17755 source-line:276   unreachable, !dbg !8455
+LL:17758 source-line:276   %428 = getelementptr inbounds nuw float, ptr %_60.0.i.i, i64 %_71.i.i.i, !dbg !8455
+LL:17759 source-line:276   %_85.i2134.i.i = load i32, ptr %428, align 4, !dbg !8455, !noalias !8306, !noundef !12
+LL:17760 source-line:277   %_88.i.i.i = icmp ult i64 %_71.i.i.i, %_58.1.i.i, !dbg !8456
+LL:17761 source-line:277   br i1 %_88.i.i.i, label %bb28.i.i.i, label %panic24.i.i.i, !dbg !8456
+LL:17764 source-line:273   %partner.i.lcssa1833.i.i = phi i64 [ %_71.i.i.i, %bb26.i.i.i ], [ %partner.i.1.i.i, %bb26.i.1.i.i ], [ %partner.i.2.i.i, %bb26.i.2.i.i ], [ %partner.i.3.i.i, %bb26.i.3.i.i ], !dbg !8452
+LL:17766 source-line:277   tail call void @_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check(i64 noundef %partner.i.lcssa1833.i.i, i64 noundef %_58.1.i.i, ptr noalias noundef readonly align 8 captures(address, read_provenance) dereferenceable(24) @alloc_c5ae5decb60097d7e1183cb43cae6b3f) #24, !dbg !8456, !noalias !8306
+LL:17767 source-line:277   unreachable, !dbg !8456
+LL:17770 source-line:277   %429 = getelementptr inbounds nuw float, ptr %_58.0.i.i, i64 %_71.i.i.i, !dbg !8456
+LL:17771 source-line:277   %_87.i2135.i.i = load i32, ptr %429, align 4, !dbg !8456, !noalias !8306, !noundef !12
+LL:17772 source-line:271   %_67.i.1.i.i = load i32, ptr %43, align 4, !dbg !8437, !alias.scope !8287, !noalias !8306, !noundef !12
+LL:17774 source-line:271   %_65.i.1.i.i = and i32 %_66.i.1.i.i, %_52.i.i, !dbg !8445
+LL:17775 source-line:271   %_64.i.1.i.i = zext i32 %_65.i.1.i.i to i64, !dbg !8446
+LL:17776 source-line:271   %_63.i.1.i.i = shl nuw nsw i64 %_64.i.1.i.i, 2, !dbg !8446
+LL:17777 source-line:271   %own.i.1.i.i = or disjoint i64 %_63.i.1.i.i, 1, !dbg !8446
+LL:17778 source-line:273   %_75.i.1.i.i = load i32, ptr %44, align 4, !dbg !8447, !alias.scope !8287, !noalias !8306, !noundef !12
+LL:17780 source-line:273   %_73.i.1.i.i = and i32 %_74.i.1.i.i, %_52.i.i, !dbg !8451
+LL:17781 source-line:273   %_72.i.1.i.i = zext i32 %_73.i.1.i.i to i64, !dbg !8452
+LL:17782 source-line:273   %_71.i.1.i.i = shl nuw nsw i64 %_72.i.1.i.i, 2, !dbg !8452
+LL:17783 source-line:273   %partner.i.1.i.i = or disjoint i64 %_71.i.1.i.i, 1, !dbg !8452
+LL:17784 source-line:274   %_80.i.1.i.i = icmp ult i64 %own.i.1.i.i, %_58.1.i.i, !dbg !8453
+LL:17785 source-line:274   br i1 %_80.i.1.i.i, label %bb22.i.1.i.i, label %panic18.i.i.i, !dbg !8453
+LL:17788 source-line:274   %430 = getelementptr inbounds nuw float, ptr %_58.0.i.i, i64 %own.i.1.i.i, !dbg !8453
+LL:17789 source-line:274   %_78.i.12136.i.i = load i32, ptr %430, align 4, !dbg !8453, !noalias !8306, !noundef !12
+LL:17790 source-line:275   %_84.i.1.i.i = icmp ult i64 %own.i.1.i.i, %_60.1.i.i, !dbg !9711
+LL:17791 source-line:275   br i1 %_84.i.1.i.i, label %bb24.i.1.i.i, label %panic20.i.i.i, !dbg !9711
+LL:17794 source-line:275   %431 = getelementptr inbounds nuw float, ptr %_60.0.i.i, i64 %own.i.1.i.i, !dbg !9711
+LL:17795 source-line:275   %_82.i.12137.i.i = load i32, ptr %431, align 4, !dbg !9711, !noalias !8306, !noundef !12
+LL:17796 source-line:276   %_86.i.1.i.i = icmp ult i64 %partner.i.1.i.i, %_60.1.i.i, !dbg !8455
+LL:17797 source-line:276   br i1 %_86.i.1.i.i, label %bb26.i.1.i.i, label %panic22.i.i.i, !dbg !8455
+LL:17800 source-line:276   %432 = getelementptr inbounds nuw float, ptr %_60.0.i.i, i64 %partner.i.1.i.i, !dbg !8455
+LL:17801 source-line:276   %_85.i.12138.i.i = load i32, ptr %432, align 4, !dbg !8455, !noalias !8306, !noundef !12
+LL:17802 source-line:277   %_88.i.1.i.i = icmp ult i64 %partner.i.1.i.i, %_58.1.i.i, !dbg !8456
+LL:17803 source-line:277   br i1 %_88.i.1.i.i, label %bb28.i.1.i.i, label %panic24.i.i.i, !dbg !8456
+LL:17806 source-line:277   %433 = getelementptr inbounds nuw float, ptr %_58.0.i.i, i64 %partner.i.1.i.i, !dbg !8456
+LL:17807 source-line:277   %_87.i.12139.i.i = load i32, ptr %433, align 4, !dbg !8456, !noalias !8306, !noundef !12
+LL:17808 source-line:271   %_67.i.2.i.i = load i32, ptr %45, align 4, !dbg !8437, !alias.scope !8287, !noalias !8306, !noundef !12
+LL:17810 source-line:271   %_65.i.2.i.i = and i32 %_66.i.2.i.i, %_52.i.i, !dbg !8445
+LL:17811 source-line:271   %_64.i.2.i.i = zext i32 %_65.i.2.i.i to i64, !dbg !8446
+LL:17812 source-line:271   %_63.i.2.i.i = shl nuw nsw i64 %_64.i.2.i.i, 2, !dbg !8446
+LL:17813 source-line:271   %own.i.2.i.i = or disjoint i64 %_63.i.2.i.i, 2, !dbg !8446
+LL:17814 source-line:273   %_75.i.2.i.i = load i32, ptr %46, align 4, !dbg !8447, !alias.scope !8287, !noalias !8306, !noundef !12
+LL:17816 source-line:273   %_73.i.2.i.i = and i32 %_74.i.2.i.i, %_52.i.i, !dbg !8451
+LL:17817 source-line:273   %_72.i.2.i.i = zext i32 %_73.i.2.i.i to i64, !dbg !8452
+LL:17818 source-line:273   %_71.i.2.i.i = shl nuw nsw i64 %_72.i.2.i.i, 2, !dbg !8452
+LL:17819 source-line:273   %partner.i.2.i.i = or disjoint i64 %_71.i.2.i.i, 2, !dbg !8452
+LL:17820 source-line:274   %_80.i.2.i.i = icmp ult i64 %own.i.2.i.i, %_58.1.i.i, !dbg !8453
+LL:17821 source-line:274   br i1 %_80.i.2.i.i, label %bb22.i.2.i.i, label %panic18.i.i.i, !dbg !8453
+LL:17824 source-line:274   %434 = getelementptr inbounds nuw float, ptr %_58.0.i.i, i64 %own.i.2.i.i, !dbg !8453
+LL:17825 source-line:274   %_78.i.22140.i.i = load i32, ptr %434, align 4, !dbg !8453, !noalias !8306, !noundef !12
+LL:17826 source-line:275   %_84.i.2.i.i = icmp ult i64 %own.i.2.i.i, %_60.1.i.i, !dbg !9711
+LL:17827 source-line:275   br i1 %_84.i.2.i.i, label %bb24.i.2.i.i, label %panic20.i.i.i, !dbg !9711
+LL:17830 source-line:275   %435 = getelementptr inbounds nuw float, ptr %_60.0.i.i, i64 %own.i.2.i.i, !dbg !9711
+LL:17831 source-line:275   %_82.i.22141.i.i = load i32, ptr %435, align 4, !dbg !9711, !noalias !8306, !noundef !12
+LL:17832 source-line:276   %_86.i.2.i.i = icmp ult i64 %partner.i.2.i.i, %_60.1.i.i, !dbg !8455
+LL:17833 source-line:276   br i1 %_86.i.2.i.i, label %bb26.i.2.i.i, label %panic22.i.i.i, !dbg !8455
+LL:17836 source-line:276   %436 = getelementptr inbounds nuw float, ptr %_60.0.i.i, i64 %partner.i.2.i.i, !dbg !8455
+LL:17837 source-line:276   %_85.i.22142.i.i = load i32, ptr %436, align 4, !dbg !8455, !noalias !8306, !noundef !12
+LL:17838 source-line:277   %_88.i.2.i.i = icmp ult i64 %partner.i.2.i.i, %_58.1.i.i, !dbg !8456
+LL:17839 source-line:277   br i1 %_88.i.2.i.i, label %bb28.i.2.i.i, label %panic24.i.i.i, !dbg !8456
+LL:17842 source-line:277   %437 = getelementptr inbounds nuw float, ptr %_58.0.i.i, i64 %partner.i.2.i.i, !dbg !8456
+LL:17843 source-line:277   %_87.i.22143.i.i = load i32, ptr %437, align 4, !dbg !8456, !noalias !8306, !noundef !12
+LL:17844 source-line:271   %_67.i.3.i.i = load i32, ptr %47, align 4, !dbg !8437, !alias.scope !8287, !noalias !8306, !noundef !12
+LL:17846 source-line:271   %_65.i.3.i.i = and i32 %_66.i.3.i.i, %_52.i.i, !dbg !8445
+LL:17847 source-line:271   %_64.i.3.i.i = zext i32 %_65.i.3.i.i to i64, !dbg !8446
+LL:17848 source-line:271   %_63.i.3.i.i = shl nuw nsw i64 %_64.i.3.i.i, 2, !dbg !8446
+LL:17849 source-line:271   %own.i.3.i.i = or disjoint i64 %_63.i.3.i.i, 3, !dbg !8446
+LL:17850 source-line:273   %_75.i.3.i.i = load i32, ptr %48, align 4, !dbg !8447, !alias.scope !8287, !noalias !8306, !noundef !12
+LL:17852 source-line:273   %_73.i.3.i.i = and i32 %_74.i.3.i.i, %_52.i.i, !dbg !8451
+LL:17853 source-line:273   %_72.i.3.i.i = zext i32 %_73.i.3.i.i to i64, !dbg !8452
+LL:17854 source-line:273   %_71.i.3.i.i = shl nuw nsw i64 %_72.i.3.i.i, 2, !dbg !8452
+LL:17855 source-line:273   %partner.i.3.i.i = or disjoint i64 %_71.i.3.i.i, 3, !dbg !8452
+LL:17856 source-line:274   %_80.i.3.i.i = icmp ult i64 %own.i.3.i.i, %_58.1.i.i, !dbg !8453
+LL:17857 source-line:274   br i1 %_80.i.3.i.i, label %bb22.i.3.i.i, label %panic18.i.i.i, !dbg !8453
+LL:17860 source-line:274   %438 = getelementptr inbounds nuw float, ptr %_58.0.i.i, i64 %own.i.3.i.i, !dbg !8453
+LL:17861 source-line:274   %_78.i.32144.i.i = load i32, ptr %438, align 4, !dbg !8453, !noalias !8306, !noundef !12
+LL:17862 source-line:275   %_84.i.3.i.i = icmp ult i64 %own.i.3.i.i, %_60.1.i.i, !dbg !9711
+LL:17863 source-line:275   br i1 %_84.i.3.i.i, label %bb24.i.3.i.i, label %panic20.i.i.i, !dbg !9711
+LL:17866 source-line:275   %439 = getelementptr inbounds nuw float, ptr %_60.0.i.i, i64 %own.i.3.i.i, !dbg !9711
+LL:17867 source-line:275   %_82.i.32145.i.i = load i32, ptr %439, align 4, !dbg !9711, !noalias !8306, !noundef !12
+LL:17868 source-line:276   %_86.i.3.i.i = icmp ult i64 %partner.i.3.i.i, %_60.1.i.i, !dbg !8455
+LL:17869 source-line:276   br i1 %_86.i.3.i.i, label %bb26.i.3.i.i, label %panic22.i.i.i, !dbg !8455
+LL:17872 source-line:277   %_88.i.3.i.i = icmp ult i64 %partner.i.3.i.i, %_58.1.i.i, !dbg !8456
+LL:17873 source-line:277   br i1 %_88.i.3.i.i, label %_RINvNtCshmZ46FhrXRY_4math7fast_db9fast_exp2NtNtCsdw0XaoyMD7p_4wide6f32x4_5f32x4ECsdOTRa1MFkeb_13gate_expander.exit163.i.i, label %panic24.i.i.i, !dbg !8456
+LL:18527 source-line:271   %_65.i.i80.i = and i32 %_66.i.i79.i, %_52.i29.i, !dbg !10410
+LL:18528 source-line:271   %_64.i.i81.i = zext i32 %_65.i.i80.i to i64, !dbg !10411
+LL:18529 source-line:271   %_63.i.i82.i = shl nuw nsw i64 %_64.i.i81.i, 2, !dbg !10411
+LL:18531 source-line:273   %_73.i.i84.i = and i32 %_74.i.i83.i, %_52.i29.i, !dbg !10415
+LL:18532 source-line:273   %_72.i.i85.i = zext i32 %_73.i.i84.i to i64, !dbg !10416
+LL:18533 source-line:273   %_71.i.i86.i = shl nuw nsw i64 %_72.i.i85.i, 2, !dbg !10416
+LL:18534 source-line:274   %_80.i.i87.i = icmp ult i64 %_63.i.i82.i, %_58.1.i23.i, !dbg !10417
+LL:18535 source-line:274   br i1 %_80.i.i87.i, label %bb22.i.i90.i, label %panic18.i.i88.i, !dbg !10417
+LL:18538 source-line:276   %588 = getelementptr inbounds nuw float, ptr %_60.0.i25.i, i64 %partner.i.3.i145.i, !dbg !10419
+LL:18539 source-line:276   %_85.i.31969.i.i = load i32, ptr %588, align 4, !dbg !10419, !noalias !10305, !noundef !12
+LL:18540 source-line:277   %589 = getelementptr inbounds nuw float, ptr %_58.0.i22.i, i64 %partner.i.3.i145.i, !dbg !10420
+LL:18541 source-line:277   %_87.i.31970.i.i = load i32, ptr %589, align 4, !dbg !10420, !noalias !10305, !noundef !12
+LL:18820 source-line:271   %own.i.lcssa.i89.i = phi i64 [ %_63.i.i82.i, %bb63.i.i77.i ], [ %own.i.1.i104.i, %bb28.i.i99.i ], [ %own.i.2.i122.i, %bb28.i.1.i117.i ], [ %own.i.3.i140.i, %bb28.i.2.i135.i ], !dbg !10411
+LL:18822 source-line:274   tail call void @_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check(i64 noundef %own.i.lcssa.i89.i, i64 noundef %_58.1.i23.i, ptr noalias noundef readonly align 8 captures(address, read_provenance) dereferenceable(24) @alloc_b53d553f9945f7702333f7af20204159) #24, !dbg !10417, !noalias !10305
+LL:18823 source-line:274   unreachable, !dbg !10417
+LL:18826 source-line:274   %834 = getelementptr inbounds nuw float, ptr %_58.0.i22.i, i64 %_63.i.i82.i, !dbg !10417
+LL:18827 source-line:274   %_78.i1955.i.i = load i32, ptr %834, align 4, !dbg !10417, !noalias !10305, !noundef !12
+LL:18828 source-line:275   %_84.i.i91.i = icmp ult i64 %_63.i.i82.i, %_60.1.i26.i, !dbg !11334
+LL:18829 source-line:275   br i1 %_84.i.i91.i, label %bb24.i.i93.i, label %panic20.i.i92.i, !dbg !11334
+LL:18832 source-line:271   %own.i.lcssa1658.i.i = phi i64 [ %_63.i.i82.i, %bb22.i.i90.i ], [ %own.i.1.i104.i, %bb22.i.1.i111.i ], [ %own.i.2.i122.i, %bb22.i.2.i129.i ], [ %own.i.3.i140.i, %bb22.i.3.i147.i ], !dbg !10411
+LL:18834 source-line:275   tail call void @_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check(i64 noundef %own.i.lcssa1658.i.i, i64 noundef %_60.1.i26.i, ptr noalias noundef readonly align 8 captures(address, read_provenance) dereferenceable(24) @alloc_30bf8a301493a607abcc78dbf93977e0) #24, !dbg !11334, !noalias !10305
+LL:18835 source-line:275   unreachable, !dbg !11334
+LL:18838 source-line:275   %835 = getelementptr inbounds nuw float, ptr %_60.0.i25.i, i64 %_63.i.i82.i, !dbg !11334
+LL:18839 source-line:275   %_82.i1956.i.i = load i32, ptr %835, align 4, !dbg !11334, !noalias !10305, !noundef !12
+LL:18840 source-line:276   %_86.i.i94.i = icmp ult i64 %_71.i.i86.i, %_60.1.i26.i, !dbg !10419
+LL:18841 source-line:276   br i1 %_86.i.i94.i, label %bb26.i.i96.i, label %panic22.i.i95.i, !dbg !10419
+LL:18844 source-line:273   %partner.i.lcssa1655.i.i = phi i64 [ %_71.i.i86.i, %bb24.i.i93.i ], [ %partner.i.1.i109.i, %bb24.i.1.i113.i ], [ %partner.i.2.i127.i, %bb24.i.2.i131.i ], [ %partner.i.3.i145.i, %bb24.i.3.i149.i ], !dbg !10416
+LL:18846 source-line:276   tail call void @_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check(i64 noundef %partner.i.lcssa1655.i.i, i64 noundef %_60.1.i26.i, ptr noalias noundef readonly align 8 captures(address, read_provenance) dereferenceable(24) @alloc_5833dd3f10f38ea96ec24c6054ff083c) #24, !dbg !10419, !noalias !10305
+LL:18847 source-line:276   unreachable, !dbg !10419
+LL:18850 source-line:276   %836 = getelementptr inbounds nuw float, ptr %_60.0.i25.i, i64 %_71.i.i86.i, !dbg !10419
+LL:18851 source-line:276   %_85.i1957.i.i = load i32, ptr %836, align 4, !dbg !10419, !noalias !10305, !noundef !12
+LL:18852 source-line:277   %_88.i.i97.i = icmp ult i64 %_71.i.i86.i, %_58.1.i23.i, !dbg !10420
+LL:18853 source-line:277   br i1 %_88.i.i97.i, label %bb28.i.i99.i, label %panic24.i.i98.i, !dbg !10420
+LL:18856 source-line:273   %partner.i.lcssa1656.i.i = phi i64 [ %_71.i.i86.i, %bb26.i.i96.i ], [ %partner.i.1.i109.i, %bb26.i.1.i115.i ], [ %partner.i.2.i127.i, %bb26.i.2.i133.i ], [ %partner.i.3.i145.i, %bb26.i.3.i151.i ], !dbg !10416
+LL:18858 source-line:277   tail call void @_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check(i64 noundef %partner.i.lcssa1656.i.i, i64 noundef %_58.1.i23.i, ptr noalias noundef readonly align 8 captures(address, read_provenance) dereferenceable(24) @alloc_c5ae5decb60097d7e1183cb43cae6b3f) #24, !dbg !10420, !noalias !10305
+LL:18859 source-line:277   unreachable, !dbg !10420
+LL:18862 source-line:277   %837 = getelementptr inbounds nuw float, ptr %_58.0.i22.i, i64 %_71.i.i86.i, !dbg !10420
+LL:18863 source-line:277   %_87.i1958.i.i = load i32, ptr %837, align 4, !dbg !10420, !noalias !10305, !noundef !12
+LL:18865 source-line:271   %_65.i.1.i101.i = and i32 %_66.i.1.i100.i, %_52.i29.i, !dbg !10410
+LL:18866 source-line:271   %_64.i.1.i102.i = zext i32 %_65.i.1.i101.i to i64, !dbg !10411
+LL:18867 source-line:271   %_63.i.1.i103.i = shl nuw nsw i64 %_64.i.1.i102.i, 2, !dbg !10411
+LL:18868 source-line:271   %own.i.1.i104.i = or disjoint i64 %_63.i.1.i103.i, 1, !dbg !10411
+LL:18870 source-line:273   %_73.i.1.i106.i = and i32 %_74.i.1.i105.i, %_52.i29.i, !dbg !10415
+LL:18871 source-line:273   %_72.i.1.i107.i = zext i32 %_73.i.1.i106.i to i64, !dbg !10416
+LL:18872 source-line:273   %_71.i.1.i108.i = shl nuw nsw i64 %_72.i.1.i107.i, 2, !dbg !10416
+LL:18873 source-line:273   %partner.i.1.i109.i = or disjoint i64 %_71.i.1.i108.i, 1, !dbg !10416
+LL:18874 source-line:274   %_80.i.1.i110.i = icmp ult i64 %own.i.1.i104.i, %_58.1.i23.i, !dbg !10417
+LL:18875 source-line:274   br i1 %_80.i.1.i110.i, label %bb22.i.1.i111.i, label %panic18.i.i88.i, !dbg !10417
+LL:18878 source-line:274   %838 = getelementptr inbounds nuw float, ptr %_58.0.i22.i, i64 %own.i.1.i104.i, !dbg !10417
+LL:18879 source-line:274   %_78.i.11959.i.i = load i32, ptr %838, align 4, !dbg !10417, !noalias !10305, !noundef !12
+LL:18880 source-line:275   %_84.i.1.i112.i = icmp ult i64 %own.i.1.i104.i, %_60.1.i26.i, !dbg !11334
+LL:18881 source-line:275   br i1 %_84.i.1.i112.i, label %bb24.i.1.i113.i, label %panic20.i.i92.i, !dbg !11334
+LL:18884 source-line:275   %839 = getelementptr inbounds nuw float, ptr %_60.0.i25.i, i64 %own.i.1.i104.i, !dbg !11334
+LL:18885 source-line:275   %_82.i.11960.i.i = load i32, ptr %839, align 4, !dbg !11334, !noalias !10305, !noundef !12
+LL:18886 source-line:276   %_86.i.1.i114.i = icmp ult i64 %partner.i.1.i109.i, %_60.1.i26.i, !dbg !10419
+LL:18887 source-line:276   br i1 %_86.i.1.i114.i, label %bb26.i.1.i115.i, label %panic22.i.i95.i, !dbg !10419
+LL:18890 source-line:276   %840 = getelementptr inbounds nuw float, ptr %_60.0.i25.i, i64 %partner.i.1.i109.i, !dbg !10419
+LL:18891 source-line:276   %_85.i.11961.i.i = load i32, ptr %840, align 4, !dbg !10419, !noalias !10305, !noundef !12
+LL:18892 source-line:277   %_88.i.1.i116.i = icmp ult i64 %partner.i.1.i109.i, %_58.1.i23.i, !dbg !10420
+LL:18893 source-line:277   br i1 %_88.i.1.i116.i, label %bb28.i.1.i117.i, label %panic24.i.i98.i, !dbg !10420
+LL:18896 source-line:277   %841 = getelementptr inbounds nuw float, ptr %_58.0.i22.i, i64 %partner.i.1.i109.i, !dbg !10420
+LL:18897 source-line:277   %_87.i.11962.i.i = load i32, ptr %841, align 4, !dbg !10420, !noalias !10305, !noundef !12
+LL:18899 source-line:271   %_65.i.2.i119.i = and i32 %_66.i.2.i118.i, %_52.i29.i, !dbg !10410
+LL:18900 source-line:271   %_64.i.2.i120.i = zext i32 %_65.i.2.i119.i to i64, !dbg !10411
+LL:18901 source-line:271   %_63.i.2.i121.i = shl nuw nsw i64 %_64.i.2.i120.i, 2, !dbg !10411
+LL:18902 source-line:271   %own.i.2.i122.i = or disjoint i64 %_63.i.2.i121.i, 2, !dbg !10411
+LL:18904 source-line:273   %_73.i.2.i124.i = and i32 %_74.i.2.i123.i, %_52.i29.i, !dbg !10415
+LL:18905 source-line:273   %_72.i.2.i125.i = zext i32 %_73.i.2.i124.i to i64, !dbg !10416
+LL:18906 source-line:273   %_71.i.2.i126.i = shl nuw nsw i64 %_72.i.2.i125.i, 2, !dbg !10416
+LL:18907 source-line:273   %partner.i.2.i127.i = or disjoint i64 %_71.i.2.i126.i, 2, !dbg !10416
+LL:18908 source-line:274   %_80.i.2.i128.i = icmp ult i64 %own.i.2.i122.i, %_58.1.i23.i, !dbg !10417
+LL:18909 source-line:274   br i1 %_80.i.2.i128.i, label %bb22.i.2.i129.i, label %panic18.i.i88.i, !dbg !10417
+LL:18912 source-line:274   %842 = getelementptr inbounds nuw float, ptr %_58.0.i22.i, i64 %own.i.2.i122.i, !dbg !10417
+LL:18913 source-line:274   %_78.i.21963.i.i = load i32, ptr %842, align 4, !dbg !10417, !noalias !10305, !noundef !12
+LL:18914 source-line:275   %_84.i.2.i130.i = icmp ult i64 %own.i.2.i122.i, %_60.1.i26.i, !dbg !11334
+LL:18915 source-line:275   br i1 %_84.i.2.i130.i, label %bb24.i.2.i131.i, label %panic20.i.i92.i, !dbg !11334
+LL:18918 source-line:275   %843 = getelementptr inbounds nuw float, ptr %_60.0.i25.i, i64 %own.i.2.i122.i, !dbg !11334
+LL:18919 source-line:275   %_82.i.21964.i.i = load i32, ptr %843, align 4, !dbg !11334, !noalias !10305, !noundef !12
+LL:18920 source-line:276   %_86.i.2.i132.i = icmp ult i64 %partner.i.2.i127.i, %_60.1.i26.i, !dbg !10419
+LL:18921 source-line:276   br i1 %_86.i.2.i132.i, label %bb26.i.2.i133.i, label %panic22.i.i95.i, !dbg !10419
+LL:18924 source-line:276   %844 = getelementptr inbounds nuw float, ptr %_60.0.i25.i, i64 %partner.i.2.i127.i, !dbg !10419
+LL:18925 source-line:276   %_85.i.21965.i.i = load i32, ptr %844, align 4, !dbg !10419, !noalias !10305, !noundef !12
+LL:18926 source-line:277   %_88.i.2.i134.i = icmp ult i64 %partner.i.2.i127.i, %_58.1.i23.i, !dbg !10420
+LL:18927 source-line:277   br i1 %_88.i.2.i134.i, label %bb28.i.2.i135.i, label %panic24.i.i98.i, !dbg !10420
+LL:18930 source-line:277   %845 = getelementptr inbounds nuw float, ptr %_58.0.i22.i, i64 %partner.i.2.i127.i, !dbg !10420
+LL:18931 source-line:277   %_87.i.21966.i.i = load i32, ptr %845, align 4, !dbg !10420, !noalias !10305, !noundef !12
+LL:18933 source-line:271   %_65.i.3.i137.i = and i32 %_66.i.3.i136.i, %_52.i29.i, !dbg !10410
+LL:18934 source-line:271   %_64.i.3.i138.i = zext i32 %_65.i.3.i137.i to i64, !dbg !10411
+LL:18935 source-line:271   %_63.i.3.i139.i = shl nuw nsw i64 %_64.i.3.i138.i, 2, !dbg !10411
+LL:18936 source-line:271   %own.i.3.i140.i = or disjoint i64 %_63.i.3.i139.i, 3, !dbg !10411
+LL:18938 source-line:273   %_73.i.3.i142.i = and i32 %_74.i.3.i141.i, %_52.i29.i, !dbg !10415
+LL:18939 source-line:273   %_72.i.3.i143.i = zext i32 %_73.i.3.i142.i to i64, !dbg !10416
+LL:18940 source-line:273   %_71.i.3.i144.i = shl nuw nsw i64 %_72.i.3.i143.i, 2, !dbg !10416
+LL:18941 source-line:273   %partner.i.3.i145.i = or disjoint i64 %_71.i.3.i144.i, 3, !dbg !10416
+LL:18942 source-line:274   %_80.i.3.i146.i = icmp ult i64 %own.i.3.i140.i, %_58.1.i23.i, !dbg !10417
+LL:18943 source-line:274   br i1 %_80.i.3.i146.i, label %bb22.i.3.i147.i, label %panic18.i.i88.i, !dbg !10417
+LL:18946 source-line:274   %846 = getelementptr inbounds nuw float, ptr %_58.0.i22.i, i64 %own.i.3.i140.i, !dbg !10417
+LL:18947 source-line:274   %_78.i.31967.i.i = load i32, ptr %846, align 4, !dbg !10417, !noalias !10305, !noundef !12
+LL:18948 source-line:275   %_84.i.3.i148.i = icmp ult i64 %own.i.3.i140.i, %_60.1.i26.i, !dbg !11334
+LL:18949 source-line:275   br i1 %_84.i.3.i148.i, label %bb24.i.3.i149.i, label %panic20.i.i92.i, !dbg !11334
+LL:18952 source-line:275   %847 = getelementptr inbounds nuw float, ptr %_60.0.i25.i, i64 %own.i.3.i140.i, !dbg !11334
+LL:18953 source-line:275   %_82.i.31968.i.i = load i32, ptr %847, align 4, !dbg !11334, !noalias !10305, !noundef !12
+LL:18954 source-line:276   %_86.i.3.i150.i = icmp ult i64 %partner.i.3.i145.i, %_60.1.i26.i, !dbg !10419
+LL:18955 source-line:276   br i1 %_86.i.3.i150.i, label %bb26.i.3.i151.i, label %panic22.i.i95.i, !dbg !10419
+LL:18958 source-line:277   %_88.i.3.i152.i = icmp ult i64 %partner.i.3.i145.i, %_58.1.i23.i, !dbg !10420
+LL:18959 source-line:277   br i1 %_88.i.3.i152.i, label %_RINvNtCshmZ46FhrXRY_4math7fast_db9fast_exp2NtNtCsdw0XaoyMD7p_4wide6f32x4_5f32x4ECsdOTRa1MFkeb_13gate_expander.exit133.i.i, label %panic24.i.i98.i, !dbg !10420
+Actual gather load candidates (value loads; source assignments are excluded):
+LL:17269   %_85.i.32146.i.i = load i32, ptr %74, align 4, !dbg !8455, !noalias !8306, !noundef !12
+LL:17271   %_87.i.32147.i.i = load i32, ptr %75, align 4, !dbg !8456, !noalias !8306, !noundef !12
+LL:17735   %_78.i2132.i.i = load i32, ptr %426, align 4, !dbg !8453, !noalias !8306, !noundef !12
+LL:17747   %_82.i2133.i.i = load i32, ptr %427, align 4, !dbg !9711, !noalias !8306, !noundef !12
+LL:17759   %_85.i2134.i.i = load i32, ptr %428, align 4, !dbg !8455, !noalias !8306, !noundef !12
+LL:17771   %_87.i2135.i.i = load i32, ptr %429, align 4, !dbg !8456, !noalias !8306, !noundef !12
+LL:17789   %_78.i.12136.i.i = load i32, ptr %430, align 4, !dbg !8453, !noalias !8306, !noundef !12
+LL:17795   %_82.i.12137.i.i = load i32, ptr %431, align 4, !dbg !9711, !noalias !8306, !noundef !12
+LL:17801   %_85.i.12138.i.i = load i32, ptr %432, align 4, !dbg !8455, !noalias !8306, !noundef !12
+LL:17807   %_87.i.12139.i.i = load i32, ptr %433, align 4, !dbg !8456, !noalias !8306, !noundef !12
+LL:17825   %_78.i.22140.i.i = load i32, ptr %434, align 4, !dbg !8453, !noalias !8306, !noundef !12
+LL:17831   %_82.i.22141.i.i = load i32, ptr %435, align 4, !dbg !9711, !noalias !8306, !noundef !12
+LL:17837   %_85.i.22142.i.i = load i32, ptr %436, align 4, !dbg !8455, !noalias !8306, !noundef !12
+LL:17843   %_87.i.22143.i.i = load i32, ptr %437, align 4, !dbg !8456, !noalias !8306, !noundef !12
+LL:17861   %_78.i.32144.i.i = load i32, ptr %438, align 4, !dbg !8453, !noalias !8306, !noundef !12
+LL:17867   %_82.i.32145.i.i = load i32, ptr %439, align 4, !dbg !9711, !noalias !8306, !noundef !12
+LL:18539   %_85.i.31969.i.i = load i32, ptr %588, align 4, !dbg !10419, !noalias !10305, !noundef !12
+LL:18541   %_87.i.31970.i.i = load i32, ptr %589, align 4, !dbg !10420, !noalias !10305, !noundef !12
+LL:18827   %_78.i1955.i.i = load i32, ptr %834, align 4, !dbg !10417, !noalias !10305, !noundef !12
+LL:18839   %_82.i1956.i.i = load i32, ptr %835, align 4, !dbg !11334, !noalias !10305, !noundef !12
+LL:18851   %_85.i1957.i.i = load i32, ptr %836, align 4, !dbg !10419, !noalias !10305, !noundef !12
+LL:18863   %_87.i1958.i.i = load i32, ptr %837, align 4, !dbg !10420, !noalias !10305, !noundef !12
+LL:18879   %_78.i.11959.i.i = load i32, ptr %838, align 4, !dbg !10417, !noalias !10305, !noundef !12
+LL:18885   %_82.i.11960.i.i = load i32, ptr %839, align 4, !dbg !11334, !noalias !10305, !noundef !12
+LL:18891   %_85.i.11961.i.i = load i32, ptr %840, align 4, !dbg !10419, !noalias !10305, !noundef !12
+LL:18897   %_87.i.11962.i.i = load i32, ptr %841, align 4, !dbg !10420, !noalias !10305, !noundef !12
+LL:18913   %_78.i.21963.i.i = load i32, ptr %842, align 4, !dbg !10417, !noalias !10305, !noundef !12
+LL:18919   %_82.i.21964.i.i = load i32, ptr %843, align 4, !dbg !11334, !noalias !10305, !noundef !12
+LL:18925   %_85.i.21965.i.i = load i32, ptr %844, align 4, !dbg !10419, !noalias !10305, !noundef !12
+LL:18931   %_87.i.21966.i.i = load i32, ptr %845, align 4, !dbg !10420, !noalias !10305, !noundef !12
+LL:18947   %_78.i.31967.i.i = load i32, ptr %846, align 4, !dbg !10417, !noalias !10305, !noundef !12
+LL:18953   %_82.i.31968.i.i = load i32, ptr %847, align 4, !dbg !11334, !noalias !10305, !noundef !12
+LL:19091   %859 = load i32, ptr %iter1.sroa.0.0.ptr.i, align 4, !dbg !11438, !range !5716, !noalias !11393, !noundef !12
+LL:19196   %877 = load i32, ptr %iter2.sroa.0.0.ptr106.us.2.i, align 4, !dbg !11438, !range !5716, !noalias !11393, !noundef !12
+
+[process-bank-w8] _RNvXse_CsdOTRa1MFkeb_13gate_expanderINtB5_12PreparedGateNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8Kb0_ENtCsfGpaX3jkkqY_15effect_contract24PreparedNativeEffectBank12process_bank
+LL:20501 source-line:271   %_67.i.i.i = load i32, ptr %_45.i.i, align 4, !dbg !12305, !alias.scope !12151, !noalias !12170, !noundef !12
+LL:20503 source-line:271   %_65.i.i.i = and i32 %_66.i.i.i, %_52.i.i, !dbg !12313
+LL:20504 source-line:271   %_64.i.i.i = zext i32 %_65.i.i.i to i64, !dbg !12314
+LL:20505 source-line:271   %_63.i.i.i = shl nuw nsw i64 %_64.i.i.i, 3, !dbg !12314
+LL:20506 source-line:273   %_75.i.i.i = load i32, ptr %_50.i.i, align 4, !dbg !12315, !alias.scope !12151, !noalias !12170, !noundef !12
+LL:20508 source-line:273   %_73.i.i.i = and i32 %_74.i.i.i, %_52.i.i, !dbg !12319
+LL:20509 source-line:273   %_72.i.i.i = zext i32 %_73.i.i.i to i64, !dbg !12320
+LL:20510 source-line:273   %_71.i.i.i = shl nuw nsw i64 %_72.i.i.i, 3, !dbg !12320
+LL:20511 source-line:274   %_80.i.i.i = icmp ult i64 %_63.i.i.i, %_58.1.i.i, !dbg !12321
+LL:20512 source-line:274   br i1 %_80.i.i.i, label %bb22.i.i.i, label %panic18.i.i.i, !dbg !12321
+LL:20515 source-line:276   %82 = getelementptr inbounds nuw float, ptr %_60.0.i.i, i64 %partner.i.7.i.i, !dbg !12323
+LL:20516 source-line:276   %_85.i.72341.i.i = load i32, ptr %82, align 4, !dbg !12323, !noalias !12170, !noundef !12
+LL:20517 source-line:277   %83 = getelementptr inbounds nuw float, ptr %_58.0.i.i, i64 %partner.i.7.i.i, !dbg !12324
+LL:20518 source-line:277   %_87.i.72342.i.i = load i32, ptr %83, align 4, !dbg !12324, !noalias !12170, !noundef !12
+LL:20971 source-line:271   %own.i.lcssa.i.i = phi i64 [ %_63.i.i.i, %bb63.i.i.i ], [ %own.i.1.i.i, %bb28.i.i.i ], [ %own.i.2.i.i, %bb28.i.1.i.i ], [ %own.i.3.i.i, %bb28.i.2.i.i ], [ %own.i.4.i.i, %bb28.i.3.i.i ], [ %own.i.5.i.i, %bb28.i.4.i.i ], [ %own.i.6.i.i, %bb28.i.5.i.i ], [ %own.i.7.i.i, %bb28.i.6.i.i ], !dbg !12314
+LL:20973 source-line:274   tail call void @_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check(i64 noundef %own.i.lcssa.i.i, i64 noundef %_58.1.i.i, ptr noalias noundef readonly align 8 captures(address, read_provenance) dereferenceable(24) @alloc_b53d553f9945f7702333f7af20204159) #24, !dbg !12321, !noalias !12170
+LL:20974 source-line:274   unreachable, !dbg !12321
+LL:20977 source-line:274   %414 = getelementptr inbounds nuw float, ptr %_58.0.i.i, i64 %_63.i.i.i, !dbg !12321
+LL:20978 source-line:274   %_78.i2311.i.i = load i32, ptr %414, align 4, !dbg !12321, !noalias !12170, !noundef !12
+LL:20979 source-line:275   %_84.i.i.i = icmp ult i64 %_63.i.i.i, %_60.1.i.i, !dbg !13562
+LL:20980 source-line:275   br i1 %_84.i.i.i, label %bb24.i.i.i, label %panic20.i.i.i, !dbg !13562
+LL:20983 source-line:271   %own.i.lcssa1889.i.i = phi i64 [ %_63.i.i.i, %bb22.i.i.i ], [ %own.i.1.i.i, %bb22.i.1.i.i ], [ %own.i.2.i.i, %bb22.i.2.i.i ], [ %own.i.3.i.i, %bb22.i.3.i.i ], [ %own.i.4.i.i, %bb22.i.4.i.i ], [ %own.i.5.i.i, %bb22.i.5.i.i ], [ %own.i.6.i.i, %bb22.i.6.i.i ], [ %own.i.7.i.i, %bb22.i.7.i.i ], !dbg !12314
+LL:20985 source-line:275   tail call void @_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check(i64 noundef %own.i.lcssa1889.i.i, i64 noundef %_60.1.i.i, ptr noalias noundef readonly align 8 captures(address, read_provenance) dereferenceable(24) @alloc_30bf8a301493a607abcc78dbf93977e0) #24, !dbg !13562, !noalias !12170
+LL:20986 source-line:275   unreachable, !dbg !13562
+LL:20989 source-line:275   %415 = getelementptr inbounds nuw float, ptr %_60.0.i.i, i64 %_63.i.i.i, !dbg !13562
+LL:20990 source-line:275   %_82.i2312.i.i = load i32, ptr %415, align 4, !dbg !13562, !noalias !12170, !noundef !12
+LL:20991 source-line:276   %_86.i.i.i = icmp ult i64 %_71.i.i.i, %_60.1.i.i, !dbg !12323
+LL:20992 source-line:276   br i1 %_86.i.i.i, label %bb26.i.i.i, label %panic22.i.i.i, !dbg !12323
+LL:20995 source-line:273   %partner.i.lcssa1886.i.i = phi i64 [ %_71.i.i.i, %bb24.i.i.i ], [ %partner.i.1.i.i, %bb24.i.1.i.i ], [ %partner.i.2.i.i, %bb24.i.2.i.i ], [ %partner.i.3.i.i, %bb24.i.3.i.i ], [ %partner.i.4.i.i, %bb24.i.4.i.i ], [ %partner.i.5.i.i, %bb24.i.5.i.i ], [ %partner.i.6.i.i, %bb24.i.6.i.i ], [ %partner.i.7.i.i, %bb24.i.7.i.i ], !dbg !12320
+LL:20997 source-line:276   tail call void @_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check(i64 noundef %partner.i.lcssa1886.i.i, i64 noundef %_60.1.i.i, ptr noalias noundef readonly align 8 captures(address, read_provenance) dereferenceable(24) @alloc_5833dd3f10f38ea96ec24c6054ff083c) #24, !dbg !12323, !noalias !12170
+LL:20998 source-line:276   unreachable, !dbg !12323
+LL:21001 source-line:276   %416 = getelementptr inbounds nuw float, ptr %_60.0.i.i, i64 %_71.i.i.i, !dbg !12323
+LL:21002 source-line:276   %_85.i2313.i.i = load i32, ptr %416, align 4, !dbg !12323, !noalias !12170, !noundef !12
+LL:21003 source-line:277   %_88.i.i.i = icmp ult i64 %_71.i.i.i, %_58.1.i.i, !dbg !12324
+LL:21004 source-line:277   br i1 %_88.i.i.i, label %bb28.i.i.i, label %panic24.i.i.i, !dbg !12324
+LL:21007 source-line:273   %partner.i.lcssa1887.i.i = phi i64 [ %_71.i.i.i, %bb26.i.i.i ], [ %partner.i.1.i.i, %bb26.i.1.i.i ], [ %partner.i.2.i.i, %bb26.i.2.i.i ], [ %partner.i.3.i.i, %bb26.i.3.i.i ], [ %partner.i.4.i.i, %bb26.i.4.i.i ], [ %partner.i.5.i.i, %bb26.i.5.i.i ], [ %partner.i.6.i.i, %bb26.i.6.i.i ], [ %partner.i.7.i.i, %bb26.i.7.i.i ], !dbg !12320
+LL:21009 source-line:277   tail call void @_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check(i64 noundef %partner.i.lcssa1887.i.i, i64 noundef %_58.1.i.i, ptr noalias noundef readonly align 8 captures(address, read_provenance) dereferenceable(24) @alloc_c5ae5decb60097d7e1183cb43cae6b3f) #24, !dbg !12324, !noalias !12170
+LL:21010 source-line:277   unreachable, !dbg !12324
+LL:21013 source-line:277   %417 = getelementptr inbounds nuw float, ptr %_58.0.i.i, i64 %_71.i.i.i, !dbg !12324
+LL:21014 source-line:277   %_87.i2314.i.i = load i32, ptr %417, align 4, !dbg !12324, !noalias !12170, !noundef !12
+LL:21015 source-line:271   %_67.i.1.i.i = load i32, ptr %43, align 4, !dbg !12305, !alias.scope !12151, !noalias !12170, !noundef !12
+LL:21017 source-line:271   %_65.i.1.i.i = and i32 %_66.i.1.i.i, %_52.i.i, !dbg !12313
+LL:21018 source-line:271   %_64.i.1.i.i = zext i32 %_65.i.1.i.i to i64, !dbg !12314
+LL:21019 source-line:271   %_63.i.1.i.i = shl nuw nsw i64 %_64.i.1.i.i, 3, !dbg !12314
+LL:21020 source-line:271   %own.i.1.i.i = or disjoint i64 %_63.i.1.i.i, 1, !dbg !12314
+LL:21021 source-line:273   %_75.i.1.i.i = load i32, ptr %44, align 4, !dbg !12315, !alias.scope !12151, !noalias !12170, !noundef !12
+LL:21023 source-line:273   %_73.i.1.i.i = and i32 %_74.i.1.i.i, %_52.i.i, !dbg !12319
+LL:21024 source-line:273   %_72.i.1.i.i = zext i32 %_73.i.1.i.i to i64, !dbg !12320
+LL:21025 source-line:273   %_71.i.1.i.i = shl nuw nsw i64 %_72.i.1.i.i, 3, !dbg !12320
+LL:21026 source-line:273   %partner.i.1.i.i = or disjoint i64 %_71.i.1.i.i, 1, !dbg !12320
+LL:21027 source-line:274   %_80.i.1.i.i = icmp ult i64 %own.i.1.i.i, %_58.1.i.i, !dbg !12321
+LL:21028 source-line:274   br i1 %_80.i.1.i.i, label %bb22.i.1.i.i, label %panic18.i.i.i, !dbg !12321
+LL:21031 source-line:274   %418 = getelementptr inbounds nuw float, ptr %_58.0.i.i, i64 %own.i.1.i.i, !dbg !12321
+LL:21032 source-line:274   %_78.i.12315.i.i = load i32, ptr %418, align 4, !dbg !12321, !noalias !12170, !noundef !12
+LL:21033 source-line:275   %_84.i.1.i.i = icmp ult i64 %own.i.1.i.i, %_60.1.i.i, !dbg !13562
+LL:21034 source-line:275   br i1 %_84.i.1.i.i, label %bb24.i.1.i.i, label %panic20.i.i.i, !dbg !13562
+LL:21037 source-line:275   %419 = getelementptr inbounds nuw float, ptr %_60.0.i.i, i64 %own.i.1.i.i, !dbg !13562
+LL:21038 source-line:275   %_82.i.12316.i.i = load i32, ptr %419, align 4, !dbg !13562, !noalias !12170, !noundef !12
+LL:21039 source-line:276   %_86.i.1.i.i = icmp ult i64 %partner.i.1.i.i, %_60.1.i.i, !dbg !12323
+LL:21040 source-line:276   br i1 %_86.i.1.i.i, label %bb26.i.1.i.i, label %panic22.i.i.i, !dbg !12323
+LL:21043 source-line:276   %420 = getelementptr inbounds nuw float, ptr %_60.0.i.i, i64 %partner.i.1.i.i, !dbg !12323
+LL:21044 source-line:276   %_85.i.12317.i.i = load i32, ptr %420, align 4, !dbg !12323, !noalias !12170, !noundef !12
+LL:21045 source-line:277   %_88.i.1.i.i = icmp ult i64 %partner.i.1.i.i, %_58.1.i.i, !dbg !12324
+LL:21046 source-line:277   br i1 %_88.i.1.i.i, label %bb28.i.1.i.i, label %panic24.i.i.i, !dbg !12324
+LL:21049 source-line:277   %421 = getelementptr inbounds nuw float, ptr %_58.0.i.i, i64 %partner.i.1.i.i, !dbg !12324
+LL:21050 source-line:277   %_87.i.12318.i.i = load i32, ptr %421, align 4, !dbg !12324, !noalias !12170, !noundef !12
+LL:21051 source-line:271   %_67.i.2.i.i = load i32, ptr %45, align 4, !dbg !12305, !alias.scope !12151, !noalias !12170, !noundef !12
+LL:21053 source-line:271   %_65.i.2.i.i = and i32 %_66.i.2.i.i, %_52.i.i, !dbg !12313
+LL:21054 source-line:271   %_64.i.2.i.i = zext i32 %_65.i.2.i.i to i64, !dbg !12314
+LL:21055 source-line:271   %_63.i.2.i.i = shl nuw nsw i64 %_64.i.2.i.i, 3, !dbg !12314
+LL:21056 source-line:271   %own.i.2.i.i = or disjoint i64 %_63.i.2.i.i, 2, !dbg !12314
+LL:21057 source-line:273   %_75.i.2.i.i = load i32, ptr %46, align 4, !dbg !12315, !alias.scope !12151, !noalias !12170, !noundef !12
+LL:21059 source-line:273   %_73.i.2.i.i = and i32 %_74.i.2.i.i, %_52.i.i, !dbg !12319
+LL:21060 source-line:273   %_72.i.2.i.i = zext i32 %_73.i.2.i.i to i64, !dbg !12320
+LL:21061 source-line:273   %_71.i.2.i.i = shl nuw nsw i64 %_72.i.2.i.i, 3, !dbg !12320
+LL:21062 source-line:273   %partner.i.2.i.i = or disjoint i64 %_71.i.2.i.i, 2, !dbg !12320
+LL:21063 source-line:274   %_80.i.2.i.i = icmp ult i64 %own.i.2.i.i, %_58.1.i.i, !dbg !12321
+LL:21064 source-line:274   br i1 %_80.i.2.i.i, label %bb22.i.2.i.i, label %panic18.i.i.i, !dbg !12321
+LL:21067 source-line:274   %422 = getelementptr inbounds nuw float, ptr %_58.0.i.i, i64 %own.i.2.i.i, !dbg !12321
+LL:21068 source-line:274   %_78.i.22319.i.i = load i32, ptr %422, align 4, !dbg !12321, !noalias !12170, !noundef !12
+LL:21069 source-line:275   %_84.i.2.i.i = icmp ult i64 %own.i.2.i.i, %_60.1.i.i, !dbg !13562
+LL:21070 source-line:275   br i1 %_84.i.2.i.i, label %bb24.i.2.i.i, label %panic20.i.i.i, !dbg !13562
+LL:21073 source-line:275   %423 = getelementptr inbounds nuw float, ptr %_60.0.i.i, i64 %own.i.2.i.i, !dbg !13562
+LL:21074 source-line:275   %_82.i.22320.i.i = load i32, ptr %423, align 4, !dbg !13562, !noalias !12170, !noundef !12
+LL:21075 source-line:276   %_86.i.2.i.i = icmp ult i64 %partner.i.2.i.i, %_60.1.i.i, !dbg !12323
+LL:21076 source-line:276   br i1 %_86.i.2.i.i, label %bb26.i.2.i.i, label %panic22.i.i.i, !dbg !12323
+LL:21079 source-line:276   %424 = getelementptr inbounds nuw float, ptr %_60.0.i.i, i64 %partner.i.2.i.i, !dbg !12323
+LL:21080 source-line:276   %_85.i.22321.i.i = load i32, ptr %424, align 4, !dbg !12323, !noalias !12170, !noundef !12
+LL:21081 source-line:277   %_88.i.2.i.i = icmp ult i64 %partner.i.2.i.i, %_58.1.i.i, !dbg !12324
+LL:21082 source-line:277   br i1 %_88.i.2.i.i, label %bb28.i.2.i.i, label %panic24.i.i.i, !dbg !12324
+LL:21085 source-line:277   %425 = getelementptr inbounds nuw float, ptr %_58.0.i.i, i64 %partner.i.2.i.i, !dbg !12324
+LL:21086 source-line:277   %_87.i.22322.i.i = load i32, ptr %425, align 4, !dbg !12324, !noalias !12170, !noundef !12
+LL:21087 source-line:271   %_67.i.3.i.i = load i32, ptr %47, align 4, !dbg !12305, !alias.scope !12151, !noalias !12170, !noundef !12
+LL:21089 source-line:271   %_65.i.3.i.i = and i32 %_66.i.3.i.i, %_52.i.i, !dbg !12313
+LL:21090 source-line:271   %_64.i.3.i.i = zext i32 %_65.i.3.i.i to i64, !dbg !12314
+LL:21091 source-line:271   %_63.i.3.i.i = shl nuw nsw i64 %_64.i.3.i.i, 3, !dbg !12314
+LL:21092 source-line:271   %own.i.3.i.i = or disjoint i64 %_63.i.3.i.i, 3, !dbg !12314
+LL:21093 source-line:273   %_75.i.3.i.i = load i32, ptr %48, align 4, !dbg !12315, !alias.scope !12151, !noalias !12170, !noundef !12
+LL:21095 source-line:273   %_73.i.3.i.i = and i32 %_74.i.3.i.i, %_52.i.i, !dbg !12319
+LL:21096 source-line:273   %_72.i.3.i.i = zext i32 %_73.i.3.i.i to i64, !dbg !12320
+LL:21097 source-line:273   %_71.i.3.i.i = shl nuw nsw i64 %_72.i.3.i.i, 3, !dbg !12320
+LL:21098 source-line:273   %partner.i.3.i.i = or disjoint i64 %_71.i.3.i.i, 3, !dbg !12320
+LL:21099 source-line:274   %_80.i.3.i.i = icmp ult i64 %own.i.3.i.i, %_58.1.i.i, !dbg !12321
+LL:21100 source-line:274   br i1 %_80.i.3.i.i, label %bb22.i.3.i.i, label %panic18.i.i.i, !dbg !12321
+LL:21103 source-line:274   %426 = getelementptr inbounds nuw float, ptr %_58.0.i.i, i64 %own.i.3.i.i, !dbg !12321
+LL:21104 source-line:274   %_78.i.32323.i.i = load i32, ptr %426, align 4, !dbg !12321, !noalias !12170, !noundef !12
+LL:21105 source-line:275   %_84.i.3.i.i = icmp ult i64 %own.i.3.i.i, %_60.1.i.i, !dbg !13562
+LL:21106 source-line:275   br i1 %_84.i.3.i.i, label %bb24.i.3.i.i, label %panic20.i.i.i, !dbg !13562
+LL:21109 source-line:275   %427 = getelementptr inbounds nuw float, ptr %_60.0.i.i, i64 %own.i.3.i.i, !dbg !13562
+LL:21110 source-line:275   %_82.i.32324.i.i = load i32, ptr %427, align 4, !dbg !13562, !noalias !12170, !noundef !12
+LL:21111 source-line:276   %_86.i.3.i.i = icmp ult i64 %partner.i.3.i.i, %_60.1.i.i, !dbg !12323
+LL:21112 source-line:276   br i1 %_86.i.3.i.i, label %bb26.i.3.i.i, label %panic22.i.i.i, !dbg !12323
+LL:21115 source-line:276   %428 = getelementptr inbounds nuw float, ptr %_60.0.i.i, i64 %partner.i.3.i.i, !dbg !12323
+LL:21116 source-line:276   %_85.i.32325.i.i = load i32, ptr %428, align 4, !dbg !12323, !noalias !12170, !noundef !12
+LL:21117 source-line:277   %_88.i.3.i.i = icmp ult i64 %partner.i.3.i.i, %_58.1.i.i, !dbg !12324
+LL:21118 source-line:277   br i1 %_88.i.3.i.i, label %bb28.i.3.i.i, label %panic24.i.i.i, !dbg !12324
+LL:21121 source-line:277   %429 = getelementptr inbounds nuw float, ptr %_58.0.i.i, i64 %partner.i.3.i.i, !dbg !12324
+LL:21122 source-line:277   %_87.i.32326.i.i = load i32, ptr %429, align 4, !dbg !12324, !noalias !12170, !noundef !12
+LL:21123 source-line:271   %_67.i.4.i.i = load i32, ptr %49, align 4, !dbg !12305, !alias.scope !12151, !noalias !12170, !noundef !12
+LL:21125 source-line:271   %_65.i.4.i.i = and i32 %_66.i.4.i.i, %_52.i.i, !dbg !12313
+LL:21126 source-line:271   %_64.i.4.i.i = zext i32 %_65.i.4.i.i to i64, !dbg !12314
+LL:21127 source-line:271   %_63.i.4.i.i = shl nuw nsw i64 %_64.i.4.i.i, 3, !dbg !12314
+LL:21128 source-line:271   %own.i.4.i.i = or disjoint i64 %_63.i.4.i.i, 4, !dbg !12314
+LL:21129 source-line:273   %_75.i.4.i.i = load i32, ptr %50, align 4, !dbg !12315, !alias.scope !12151, !noalias !12170, !noundef !12
+LL:21131 source-line:273   %_73.i.4.i.i = and i32 %_74.i.4.i.i, %_52.i.i, !dbg !12319
+LL:21132 source-line:273   %_72.i.4.i.i = zext i32 %_73.i.4.i.i to i64, !dbg !12320
+LL:21133 source-line:273   %_71.i.4.i.i = shl nuw nsw i64 %_72.i.4.i.i, 3, !dbg !12320
+LL:21134 source-line:273   %partner.i.4.i.i = or disjoint i64 %_71.i.4.i.i, 4, !dbg !12320
+LL:21135 source-line:274   %_80.i.4.i.i = icmp ult i64 %own.i.4.i.i, %_58.1.i.i, !dbg !12321
+LL:21136 source-line:274   br i1 %_80.i.4.i.i, label %bb22.i.4.i.i, label %panic18.i.i.i, !dbg !12321
+LL:21139 source-line:274   %430 = getelementptr inbounds nuw float, ptr %_58.0.i.i, i64 %own.i.4.i.i, !dbg !12321
+LL:21140 source-line:274   %_78.i.42327.i.i = load i32, ptr %430, align 4, !dbg !12321, !noalias !12170, !noundef !12
+LL:21141 source-line:275   %_84.i.4.i.i = icmp ult i64 %own.i.4.i.i, %_60.1.i.i, !dbg !13562
+LL:21142 source-line:275   br i1 %_84.i.4.i.i, label %bb24.i.4.i.i, label %panic20.i.i.i, !dbg !13562
+LL:21145 source-line:275   %431 = getelementptr inbounds nuw float, ptr %_60.0.i.i, i64 %own.i.4.i.i, !dbg !13562
+LL:21146 source-line:275   %_82.i.42328.i.i = load i32, ptr %431, align 4, !dbg !13562, !noalias !12170, !noundef !12
+LL:21147 source-line:276   %_86.i.4.i.i = icmp ult i64 %partner.i.4.i.i, %_60.1.i.i, !dbg !12323
+LL:21148 source-line:276   br i1 %_86.i.4.i.i, label %bb26.i.4.i.i, label %panic22.i.i.i, !dbg !12323
+LL:21151 source-line:276   %432 = getelementptr inbounds nuw float, ptr %_60.0.i.i, i64 %partner.i.4.i.i, !dbg !12323
+LL:21152 source-line:276   %_85.i.42329.i.i = load i32, ptr %432, align 4, !dbg !12323, !noalias !12170, !noundef !12
+LL:21153 source-line:277   %_88.i.4.i.i = icmp ult i64 %partner.i.4.i.i, %_58.1.i.i, !dbg !12324
+LL:21154 source-line:277   br i1 %_88.i.4.i.i, label %bb28.i.4.i.i, label %panic24.i.i.i, !dbg !12324
+LL:21157 source-line:277   %433 = getelementptr inbounds nuw float, ptr %_58.0.i.i, i64 %partner.i.4.i.i, !dbg !12324
+LL:21158 source-line:277   %_87.i.42330.i.i = load i32, ptr %433, align 4, !dbg !12324, !noalias !12170, !noundef !12
+LL:21159 source-line:271   %_67.i.5.i.i = load i32, ptr %51, align 4, !dbg !12305, !alias.scope !12151, !noalias !12170, !noundef !12
+LL:21161 source-line:271   %_65.i.5.i.i = and i32 %_66.i.5.i.i, %_52.i.i, !dbg !12313
+LL:21162 source-line:271   %_64.i.5.i.i = zext i32 %_65.i.5.i.i to i64, !dbg !12314
+LL:21163 source-line:271   %_63.i.5.i.i = shl nuw nsw i64 %_64.i.5.i.i, 3, !dbg !12314
+LL:21164 source-line:271   %own.i.5.i.i = or disjoint i64 %_63.i.5.i.i, 5, !dbg !12314
+LL:21165 source-line:273   %_75.i.5.i.i = load i32, ptr %52, align 4, !dbg !12315, !alias.scope !12151, !noalias !12170, !noundef !12
+LL:21167 source-line:273   %_73.i.5.i.i = and i32 %_74.i.5.i.i, %_52.i.i, !dbg !12319
+LL:21168 source-line:273   %_72.i.5.i.i = zext i32 %_73.i.5.i.i to i64, !dbg !12320
+LL:21169 source-line:273   %_71.i.5.i.i = shl nuw nsw i64 %_72.i.5.i.i, 3, !dbg !12320
+LL:21170 source-line:273   %partner.i.5.i.i = or disjoint i64 %_71.i.5.i.i, 5, !dbg !12320
+LL:21171 source-line:274   %_80.i.5.i.i = icmp ult i64 %own.i.5.i.i, %_58.1.i.i, !dbg !12321
+LL:21172 source-line:274   br i1 %_80.i.5.i.i, label %bb22.i.5.i.i, label %panic18.i.i.i, !dbg !12321
+LL:21175 source-line:274   %434 = getelementptr inbounds nuw float, ptr %_58.0.i.i, i64 %own.i.5.i.i, !dbg !12321
+LL:21176 source-line:274   %_78.i.52331.i.i = load i32, ptr %434, align 4, !dbg !12321, !noalias !12170, !noundef !12
+LL:21177 source-line:275   %_84.i.5.i.i = icmp ult i64 %own.i.5.i.i, %_60.1.i.i, !dbg !13562
+LL:21178 source-line:275   br i1 %_84.i.5.i.i, label %bb24.i.5.i.i, label %panic20.i.i.i, !dbg !13562
+LL:21181 source-line:275   %435 = getelementptr inbounds nuw float, ptr %_60.0.i.i, i64 %own.i.5.i.i, !dbg !13562
+LL:21182 source-line:275   %_82.i.52332.i.i = load i32, ptr %435, align 4, !dbg !13562, !noalias !12170, !noundef !12
+LL:21183 source-line:276   %_86.i.5.i.i = icmp ult i64 %partner.i.5.i.i, %_60.1.i.i, !dbg !12323
+LL:21184 source-line:276   br i1 %_86.i.5.i.i, label %bb26.i.5.i.i, label %panic22.i.i.i, !dbg !12323
+LL:21187 source-line:276   %436 = getelementptr inbounds nuw float, ptr %_60.0.i.i, i64 %partner.i.5.i.i, !dbg !12323
+LL:21188 source-line:276   %_85.i.52333.i.i = load i32, ptr %436, align 4, !dbg !12323, !noalias !12170, !noundef !12
+LL:21189 source-line:277   %_88.i.5.i.i = icmp ult i64 %partner.i.5.i.i, %_58.1.i.i, !dbg !12324
+LL:21190 source-line:277   br i1 %_88.i.5.i.i, label %bb28.i.5.i.i, label %panic24.i.i.i, !dbg !12324
+LL:21193 source-line:277   %437 = getelementptr inbounds nuw float, ptr %_58.0.i.i, i64 %partner.i.5.i.i, !dbg !12324
+LL:21194 source-line:277   %_87.i.52334.i.i = load i32, ptr %437, align 4, !dbg !12324, !noalias !12170, !noundef !12
+LL:21195 source-line:271   %_67.i.6.i.i = load i32, ptr %53, align 4, !dbg !12305, !alias.scope !12151, !noalias !12170, !noundef !12
+LL:21197 source-line:271   %_65.i.6.i.i = and i32 %_66.i.6.i.i, %_52.i.i, !dbg !12313
+LL:21198 source-line:271   %_64.i.6.i.i = zext i32 %_65.i.6.i.i to i64, !dbg !12314
+LL:21199 source-line:271   %_63.i.6.i.i = shl nuw nsw i64 %_64.i.6.i.i, 3, !dbg !12314
+LL:21200 source-line:271   %own.i.6.i.i = or disjoint i64 %_63.i.6.i.i, 6, !dbg !12314
+LL:21201 source-line:273   %_75.i.6.i.i = load i32, ptr %54, align 4, !dbg !12315, !alias.scope !12151, !noalias !12170, !noundef !12
+LL:21203 source-line:273   %_73.i.6.i.i = and i32 %_74.i.6.i.i, %_52.i.i, !dbg !12319
+LL:21204 source-line:273   %_72.i.6.i.i = zext i32 %_73.i.6.i.i to i64, !dbg !12320
+LL:21205 source-line:273   %_71.i.6.i.i = shl nuw nsw i64 %_72.i.6.i.i, 3, !dbg !12320
+LL:21206 source-line:273   %partner.i.6.i.i = or disjoint i64 %_71.i.6.i.i, 6, !dbg !12320
+LL:21207 source-line:274   %_80.i.6.i.i = icmp ult i64 %own.i.6.i.i, %_58.1.i.i, !dbg !12321
+LL:21208 source-line:274   br i1 %_80.i.6.i.i, label %bb22.i.6.i.i, label %panic18.i.i.i, !dbg !12321
+LL:21211 source-line:274   %438 = getelementptr inbounds nuw float, ptr %_58.0.i.i, i64 %own.i.6.i.i, !dbg !12321
+LL:21212 source-line:274   %_78.i.62335.i.i = load i32, ptr %438, align 4, !dbg !12321, !noalias !12170, !noundef !12
+LL:21213 source-line:275   %_84.i.6.i.i = icmp ult i64 %own.i.6.i.i, %_60.1.i.i, !dbg !13562
+LL:21214 source-line:275   br i1 %_84.i.6.i.i, label %bb24.i.6.i.i, label %panic20.i.i.i, !dbg !13562
+LL:21217 source-line:275   %439 = getelementptr inbounds nuw float, ptr %_60.0.i.i, i64 %own.i.6.i.i, !dbg !13562
+LL:21218 source-line:275   %_82.i.62336.i.i = load i32, ptr %439, align 4, !dbg !13562, !noalias !12170, !noundef !12
+LL:21219 source-line:276   %_86.i.6.i.i = icmp ult i64 %partner.i.6.i.i, %_60.1.i.i, !dbg !12323
+LL:21220 source-line:276   br i1 %_86.i.6.i.i, label %bb26.i.6.i.i, label %panic22.i.i.i, !dbg !12323
+LL:21223 source-line:276   %440 = getelementptr inbounds nuw float, ptr %_60.0.i.i, i64 %partner.i.6.i.i, !dbg !12323
+LL:21224 source-line:276   %_85.i.62337.i.i = load i32, ptr %440, align 4, !dbg !12323, !noalias !12170, !noundef !12
+LL:21225 source-line:277   %_88.i.6.i.i = icmp ult i64 %partner.i.6.i.i, %_58.1.i.i, !dbg !12324
+LL:21226 source-line:277   br i1 %_88.i.6.i.i, label %bb28.i.6.i.i, label %panic24.i.i.i, !dbg !12324
+LL:21229 source-line:277   %441 = getelementptr inbounds nuw float, ptr %_58.0.i.i, i64 %partner.i.6.i.i, !dbg !12324
+LL:21230 source-line:277   %_87.i.62338.i.i = load i32, ptr %441, align 4, !dbg !12324, !noalias !12170, !noundef !12
+LL:21231 source-line:271   %_67.i.7.i.i = load i32, ptr %55, align 4, !dbg !12305, !alias.scope !12151, !noalias !12170, !noundef !12
+LL:21233 source-line:271   %_65.i.7.i.i = and i32 %_66.i.7.i.i, %_52.i.i, !dbg !12313
+LL:21234 source-line:271   %_64.i.7.i.i = zext i32 %_65.i.7.i.i to i64, !dbg !12314
+LL:21235 source-line:271   %_63.i.7.i.i = shl nuw nsw i64 %_64.i.7.i.i, 3, !dbg !12314
+LL:21236 source-line:271   %own.i.7.i.i = or disjoint i64 %_63.i.7.i.i, 7, !dbg !12314
+LL:21237 source-line:273   %_75.i.7.i.i = load i32, ptr %56, align 4, !dbg !12315, !alias.scope !12151, !noalias !12170, !noundef !12
+LL:21239 source-line:273   %_73.i.7.i.i = and i32 %_74.i.7.i.i, %_52.i.i, !dbg !12319
+LL:21240 source-line:273   %_72.i.7.i.i = zext i32 %_73.i.7.i.i to i64, !dbg !12320
+LL:21241 source-line:273   %_71.i.7.i.i = shl nuw nsw i64 %_72.i.7.i.i, 3, !dbg !12320
+LL:21242 source-line:273   %partner.i.7.i.i = or disjoint i64 %_71.i.7.i.i, 7, !dbg !12320
+LL:21243 source-line:274   %_80.i.7.i.i = icmp ult i64 %own.i.7.i.i, %_58.1.i.i, !dbg !12321
+LL:21244 source-line:274   br i1 %_80.i.7.i.i, label %bb22.i.7.i.i, label %panic18.i.i.i, !dbg !12321
+LL:21247 source-line:274   %442 = getelementptr inbounds nuw float, ptr %_58.0.i.i, i64 %own.i.7.i.i, !dbg !12321
+LL:21248 source-line:274   %_78.i.72339.i.i = load i32, ptr %442, align 4, !dbg !12321, !noalias !12170, !noundef !12
+LL:21249 source-line:275   %_84.i.7.i.i = icmp ult i64 %own.i.7.i.i, %_60.1.i.i, !dbg !13562
+LL:21250 source-line:275   br i1 %_84.i.7.i.i, label %bb24.i.7.i.i, label %panic20.i.i.i, !dbg !13562
+LL:21253 source-line:275   %443 = getelementptr inbounds nuw float, ptr %_60.0.i.i, i64 %own.i.7.i.i, !dbg !13562
+LL:21254 source-line:275   %_82.i.72340.i.i = load i32, ptr %443, align 4, !dbg !13562, !noalias !12170, !noundef !12
+LL:21255 source-line:276   %_86.i.7.i.i = icmp ult i64 %partner.i.7.i.i, %_60.1.i.i, !dbg !12323
+LL:21256 source-line:276   br i1 %_86.i.7.i.i, label %bb26.i.7.i.i, label %panic22.i.i.i, !dbg !12323
+LL:21259 source-line:277   %_88.i.7.i.i = icmp ult i64 %partner.i.7.i.i, %_58.1.i.i, !dbg !12324
+LL:21260 source-line:277   br i1 %_88.i.7.i.i, label %_RINvNtCshmZ46FhrXRY_4math7fast_db9fast_exp2NtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8ECsdOTRa1MFkeb_13gate_expander.exit163.i.i, label %panic24.i.i.i, !dbg !12324
+LL:21901 source-line:271   %_67.i.i66.i = load i32, ptr %_45.i24.i, align 4, !dbg !14227, !alias.scope !14073, !noalias !14092, !noundef !12
+LL:21903 source-line:271   %_65.i.i68.i = and i32 %_66.i.i67.i, %_52.i29.i, !dbg !14235
+LL:21904 source-line:271   %_64.i.i69.i = zext i32 %_65.i.i68.i to i64, !dbg !14236
+LL:21905 source-line:271   %_63.i.i70.i = shl nuw nsw i64 %_64.i.i69.i, 3, !dbg !14236
+LL:21906 source-line:273   %_75.i.i71.i = load i32, ptr %_50.i27.i, align 4, !dbg !14237, !alias.scope !14073, !noalias !14092, !noundef !12
+LL:21908 source-line:273   %_73.i.i73.i = and i32 %_74.i.i72.i, %_52.i29.i, !dbg !14241
+LL:21909 source-line:273   %_72.i.i74.i = zext i32 %_73.i.i73.i to i64, !dbg !14242
+LL:21910 source-line:273   %_71.i.i75.i = shl nuw nsw i64 %_72.i.i74.i, 3, !dbg !14242
+LL:21911 source-line:274   %_80.i.i76.i = icmp ult i64 %_63.i.i70.i, %_58.1.i23.i, !dbg !14243
+LL:21912 source-line:274   br i1 %_80.i.i76.i, label %bb22.i.i79.i, label %panic18.i.i77.i, !dbg !14243
+LL:21915 source-line:276   %611 = getelementptr inbounds nuw float, ptr %_60.0.i25.i, i64 %partner.i.7.i220.i, !dbg !14245
+LL:21916 source-line:276   %_85.i.72164.i.i = load i32, ptr %611, align 4, !dbg !14245, !noalias !14092, !noundef !12
+LL:21917 source-line:277   %612 = getelementptr inbounds nuw float, ptr %_58.0.i22.i, i64 %partner.i.7.i220.i, !dbg !14246
+LL:21918 source-line:277   %_87.i.72165.i.i = load i32, ptr %612, align 4, !dbg !14246, !noalias !14092, !noundef !12
+LL:22229 source-line:271   %own.i.lcssa.i78.i = phi i64 [ %_63.i.i70.i, %bb63.i.i64.i ], [ %own.i.1.i94.i, %bb28.i.i88.i ], [ %own.i.2.i114.i, %bb28.i.1.i108.i ], [ %own.i.3.i134.i, %bb28.i.2.i128.i ], [ %own.i.4.i154.i, %bb28.i.3.i148.i ], [ %own.i.5.i174.i, %bb28.i.4.i168.i ], [ %own.i.6.i194.i, %bb28.i.5.i188.i ], [ %own.i.7.i214.i, %bb28.i.6.i208.i ], !dbg !14236
+LL:22231 source-line:274   tail call void @_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check(i64 noundef %own.i.lcssa.i78.i, i64 noundef %_58.1.i23.i, ptr noalias noundef readonly align 8 captures(address, read_provenance) dereferenceable(24) @alloc_b53d553f9945f7702333f7af20204159) #24, !dbg !14243, !noalias !14092
+LL:22232 source-line:274   unreachable, !dbg !14243
+LL:22235 source-line:274   %849 = getelementptr inbounds nuw float, ptr %_58.0.i22.i, i64 %_63.i.i70.i, !dbg !14243
+LL:22236 source-line:274   %_78.i2134.i.i = load i32, ptr %849, align 4, !dbg !14243, !noalias !14092, !noundef !12
+LL:22237 source-line:275   %_84.i.i80.i = icmp ult i64 %_63.i.i70.i, %_60.1.i26.i, !dbg !15226
+LL:22238 source-line:275   br i1 %_84.i.i80.i, label %bb24.i.i82.i, label %panic20.i.i81.i, !dbg !15226
+LL:22241 source-line:271   %own.i.lcssa1712.i.i = phi i64 [ %_63.i.i70.i, %bb22.i.i79.i ], [ %own.i.1.i94.i, %bb22.i.1.i102.i ], [ %own.i.2.i114.i, %bb22.i.2.i122.i ], [ %own.i.3.i134.i, %bb22.i.3.i142.i ], [ %own.i.4.i154.i, %bb22.i.4.i162.i ], [ %own.i.5.i174.i, %bb22.i.5.i182.i ], [ %own.i.6.i194.i, %bb22.i.6.i202.i ], [ %own.i.7.i214.i, %bb22.i.7.i222.i ], !dbg !14236
+LL:22243 source-line:275   tail call void @_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check(i64 noundef %own.i.lcssa1712.i.i, i64 noundef %_60.1.i26.i, ptr noalias noundef readonly align 8 captures(address, read_provenance) dereferenceable(24) @alloc_30bf8a301493a607abcc78dbf93977e0) #24, !dbg !15226, !noalias !14092
+LL:22244 source-line:275   unreachable, !dbg !15226
+LL:22247 source-line:275   %850 = getelementptr inbounds nuw float, ptr %_60.0.i25.i, i64 %_63.i.i70.i, !dbg !15226
+LL:22248 source-line:275   %_82.i2135.i.i = load i32, ptr %850, align 4, !dbg !15226, !noalias !14092, !noundef !12
+LL:22249 source-line:276   %_86.i.i83.i = icmp ult i64 %_71.i.i75.i, %_60.1.i26.i, !dbg !14245
+LL:22250 source-line:276   br i1 %_86.i.i83.i, label %bb26.i.i85.i, label %panic22.i.i84.i, !dbg !14245
+LL:22253 source-line:273   %partner.i.lcssa1709.i.i = phi i64 [ %_71.i.i75.i, %bb24.i.i82.i ], [ %partner.i.1.i100.i, %bb24.i.1.i104.i ], [ %partner.i.2.i120.i, %bb24.i.2.i124.i ], [ %partner.i.3.i140.i, %bb24.i.3.i144.i ], [ %partner.i.4.i160.i, %bb24.i.4.i164.i ], [ %partner.i.5.i180.i, %bb24.i.5.i184.i ], [ %partner.i.6.i200.i, %bb24.i.6.i204.i ], [ %partner.i.7.i220.i, %bb24.i.7.i224.i ], !dbg !14242
+LL:22255 source-line:276   tail call void @_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check(i64 noundef %partner.i.lcssa1709.i.i, i64 noundef %_60.1.i26.i, ptr noalias noundef readonly align 8 captures(address, read_provenance) dereferenceable(24) @alloc_5833dd3f10f38ea96ec24c6054ff083c) #24, !dbg !14245, !noalias !14092
+LL:22256 source-line:276   unreachable, !dbg !14245
+LL:22259 source-line:276   %851 = getelementptr inbounds nuw float, ptr %_60.0.i25.i, i64 %_71.i.i75.i, !dbg !14245
+LL:22260 source-line:276   %_85.i2136.i.i = load i32, ptr %851, align 4, !dbg !14245, !noalias !14092, !noundef !12
+LL:22261 source-line:277   %_88.i.i86.i = icmp ult i64 %_71.i.i75.i, %_58.1.i23.i, !dbg !14246
+LL:22262 source-line:277   br i1 %_88.i.i86.i, label %bb28.i.i88.i, label %panic24.i.i87.i, !dbg !14246
+LL:22265 source-line:273   %partner.i.lcssa1710.i.i = phi i64 [ %_71.i.i75.i, %bb26.i.i85.i ], [ %partner.i.1.i100.i, %bb26.i.1.i106.i ], [ %partner.i.2.i120.i, %bb26.i.2.i126.i ], [ %partner.i.3.i140.i, %bb26.i.3.i146.i ], [ %partner.i.4.i160.i, %bb26.i.4.i166.i ], [ %partner.i.5.i180.i, %bb26.i.5.i186.i ], [ %partner.i.6.i200.i, %bb26.i.6.i206.i ], [ %partner.i.7.i220.i, %bb26.i.7.i226.i ], !dbg !14242
+LL:22267 source-line:277   tail call void @_RNvNtCs4NRVxsYgnAr_4core9panicking18panic_bounds_check(i64 noundef %partner.i.lcssa1710.i.i, i64 noundef %_58.1.i23.i, ptr noalias noundef readonly align 8 captures(address, read_provenance) dereferenceable(24) @alloc_c5ae5decb60097d7e1183cb43cae6b3f) #24, !dbg !14246, !noalias !14092
+LL:22268 source-line:277   unreachable, !dbg !14246
+LL:22271 source-line:277   %852 = getelementptr inbounds nuw float, ptr %_58.0.i22.i, i64 %_71.i.i75.i, !dbg !14246
+LL:22272 source-line:277   %_87.i2137.i.i = load i32, ptr %852, align 4, !dbg !14246, !noalias !14092, !noundef !12
+LL:22273 source-line:271   %_67.i.1.i89.i = load i32, ptr %594, align 4, !dbg !14227, !alias.scope !14073, !noalias !14092, !noundef !12
+LL:22275 source-line:271   %_65.i.1.i91.i = and i32 %_66.i.1.i90.i, %_52.i29.i, !dbg !14235
+LL:22276 source-line:271   %_64.i.1.i92.i = zext i32 %_65.i.1.i91.i to i64, !dbg !14236
+LL:22277 source-line:271   %_63.i.1.i93.i = shl nuw nsw i64 %_64.i.1.i92.i, 3, !dbg !14236
+LL:22278 source-line:271   %own.i.1.i94.i = or disjoint i64 %_63.i.1.i93.i, 1, !dbg !14236
+LL:22279 source-line:273   %_75.i.1.i95.i = load i32, ptr %595, align 4, !dbg !14237, !alias.scope !14073, !noalias !14092, !noundef !12
+LL:22281 source-line:273   %_73.i.1.i97.i = and i32 %_74.i.1.i96.i, %_52.i29.i, !dbg !14241
+LL:22282 source-line:273   %_72.i.1.i98.i = zext i32 %_73.i.1.i97.i to i64, !dbg !14242
+LL:22283 source-line:273   %_71.i.1.i99.i = shl nuw nsw i64 %_72.i.1.i98.i, 3, !dbg !14242
+LL:22284 source-line:273   %partner.i.1.i100.i = or disjoint i64 %_71.i.1.i99.i, 1, !dbg !14242
+LL:22285 source-line:274   %_80.i.1.i101.i = icmp ult i64 %own.i.1.i94.i, %_58.1.i23.i, !dbg !14243
+LL:22286 source-line:274   br i1 %_80.i.1.i101.i, label %bb22.i.1.i102.i, label %panic18.i.i77.i, !dbg !14243
+LL:22289 source-line:274   %853 = getelementptr inbounds nuw float, ptr %_58.0.i22.i, i64 %own.i.1.i94.i, !dbg !14243
+LL:22290 source-line:274   %_78.i.12138.i.i = load i32, ptr %853, align 4, !dbg !14243, !noalias !14092, !noundef !12
+LL:22291 source-line:275   %_84.i.1.i103.i = icmp ult i64 %own.i.1.i94.i, %_60.1.i26.i, !dbg !15226
+LL:22292 source-line:275   br i1 %_84.i.1.i103.i, label %bb24.i.1.i104.i, label %panic20.i.i81.i, !dbg !15226
+LL:22295 source-line:275   %854 = getelementptr inbounds nuw float, ptr %_60.0.i25.i, i64 %own.i.1.i94.i, !dbg !15226
+LL:22296 source-line:275   %_82.i.12139.i.i = load i32, ptr %854, align 4, !dbg !15226, !noalias !14092, !noundef !12
+LL:22297 source-line:276   %_86.i.1.i105.i = icmp ult i64 %partner.i.1.i100.i, %_60.1.i26.i, !dbg !14245
+LL:22298 source-line:276   br i1 %_86.i.1.i105.i, label %bb26.i.1.i106.i, label %panic22.i.i84.i, !dbg !14245
+LL:22301 source-line:276   %855 = getelementptr inbounds nuw float, ptr %_60.0.i25.i, i64 %partner.i.1.i100.i, !dbg !14245
+LL:22302 source-line:276   %_85.i.12140.i.i = load i32, ptr %855, align 4, !dbg !14245, !noalias !14092, !noundef !12
+LL:22303 source-line:277   %_88.i.1.i107.i = icmp ult i64 %partner.i.1.i100.i, %_58.1.i23.i, !dbg !14246
+LL:22304 source-line:277   br i1 %_88.i.1.i107.i, label %bb28.i.1.i108.i, label %panic24.i.i87.i, !dbg !14246
+LL:22307 source-line:277   %856 = getelementptr inbounds nuw float, ptr %_58.0.i22.i, i64 %partner.i.1.i100.i, !dbg !14246
+LL:22308 source-line:277   %_87.i.12141.i.i = load i32, ptr %856, align 4, !dbg !14246, !noalias !14092, !noundef !12
+LL:22309 source-line:271   %_67.i.2.i109.i = load i32, ptr %596, align 4, !dbg !14227, !alias.scope !14073, !noalias !14092, !noundef !12
+LL:22311 source-line:271   %_65.i.2.i111.i = and i32 %_66.i.2.i110.i, %_52.i29.i, !dbg !14235
+LL:22312 source-line:271   %_64.i.2.i112.i = zext i32 %_65.i.2.i111.i to i64, !dbg !14236
+LL:22313 source-line:271   %_63.i.2.i113.i = shl nuw nsw i64 %_64.i.2.i112.i, 3, !dbg !14236
+LL:22314 source-line:271   %own.i.2.i114.i = or disjoint i64 %_63.i.2.i113.i, 2, !dbg !14236
+LL:22315 source-line:273   %_75.i.2.i115.i = load i32, ptr %597, align 4, !dbg !14237, !alias.scope !14073, !noalias !14092, !noundef !12
+LL:22317 source-line:273   %_73.i.2.i117.i = and i32 %_74.i.2.i116.i, %_52.i29.i, !dbg !14241
+LL:22318 source-line:273   %_72.i.2.i118.i = zext i32 %_73.i.2.i117.i to i64, !dbg !14242
+LL:22319 source-line:273   %_71.i.2.i119.i = shl nuw nsw i64 %_72.i.2.i118.i, 3, !dbg !14242
+LL:22320 source-line:273   %partner.i.2.i120.i = or disjoint i64 %_71.i.2.i119.i, 2, !dbg !14242
+LL:22321 source-line:274   %_80.i.2.i121.i = icmp ult i64 %own.i.2.i114.i, %_58.1.i23.i, !dbg !14243
+LL:22322 source-line:274   br i1 %_80.i.2.i121.i, label %bb22.i.2.i122.i, label %panic18.i.i77.i, !dbg !14243
+LL:22325 source-line:274   %857 = getelementptr inbounds nuw float, ptr %_58.0.i22.i, i64 %own.i.2.i114.i, !dbg !14243
+LL:22326 source-line:274   %_78.i.22142.i.i = load i32, ptr %857, align 4, !dbg !14243, !noalias !14092, !noundef !12
+LL:22327 source-line:275   %_84.i.2.i123.i = icmp ult i64 %own.i.2.i114.i, %_60.1.i26.i, !dbg !15226
+LL:22328 source-line:275   br i1 %_84.i.2.i123.i, label %bb24.i.2.i124.i, label %panic20.i.i81.i, !dbg !15226
+LL:22331 source-line:275   %858 = getelementptr inbounds nuw float, ptr %_60.0.i25.i, i64 %own.i.2.i114.i, !dbg !15226
+LL:22332 source-line:275   %_82.i.22143.i.i = load i32, ptr %858, align 4, !dbg !15226, !noalias !14092, !noundef !12
+LL:22333 source-line:276   %_86.i.2.i125.i = icmp ult i64 %partner.i.2.i120.i, %_60.1.i26.i, !dbg !14245
+LL:22334 source-line:276   br i1 %_86.i.2.i125.i, label %bb26.i.2.i126.i, label %panic22.i.i84.i, !dbg !14245
+LL:22337 source-line:276   %859 = getelementptr inbounds nuw float, ptr %_60.0.i25.i, i64 %partner.i.2.i120.i, !dbg !14245
+LL:22338 source-line:276   %_85.i.22144.i.i = load i32, ptr %859, align 4, !dbg !14245, !noalias !14092, !noundef !12
+LL:22339 source-line:277   %_88.i.2.i127.i = icmp ult i64 %partner.i.2.i120.i, %_58.1.i23.i, !dbg !14246
+LL:22340 source-line:277   br i1 %_88.i.2.i127.i, label %bb28.i.2.i128.i, label %panic24.i.i87.i, !dbg !14246
+LL:22343 source-line:277   %860 = getelementptr inbounds nuw float, ptr %_58.0.i22.i, i64 %partner.i.2.i120.i, !dbg !14246
+LL:22344 source-line:277   %_87.i.22145.i.i = load i32, ptr %860, align 4, !dbg !14246, !noalias !14092, !noundef !12
+LL:22345 source-line:271   %_67.i.3.i129.i = load i32, ptr %598, align 4, !dbg !14227, !alias.scope !14073, !noalias !14092, !noundef !12
+LL:22347 source-line:271   %_65.i.3.i131.i = and i32 %_66.i.3.i130.i, %_52.i29.i, !dbg !14235
+LL:22348 source-line:271   %_64.i.3.i132.i = zext i32 %_65.i.3.i131.i to i64, !dbg !14236
+LL:22349 source-line:271   %_63.i.3.i133.i = shl nuw nsw i64 %_64.i.3.i132.i, 3, !dbg !14236
+LL:22350 source-line:271   %own.i.3.i134.i = or disjoint i64 %_63.i.3.i133.i, 3, !dbg !14236
+LL:22351 source-line:273   %_75.i.3.i135.i = load i32, ptr %599, align 4, !dbg !14237, !alias.scope !14073, !noalias !14092, !noundef !12
+LL:22353 source-line:273   %_73.i.3.i137.i = and i32 %_74.i.3.i136.i, %_52.i29.i, !dbg !14241
+LL:22354 source-line:273   %_72.i.3.i138.i = zext i32 %_73.i.3.i137.i to i64, !dbg !14242
+LL:22355 source-line:273   %_71.i.3.i139.i = shl nuw nsw i64 %_72.i.3.i138.i, 3, !dbg !14242
+LL:22356 source-line:273   %partner.i.3.i140.i = or disjoint i64 %_71.i.3.i139.i, 3, !dbg !14242
+LL:22357 source-line:274   %_80.i.3.i141.i = icmp ult i64 %own.i.3.i134.i, %_58.1.i23.i, !dbg !14243
+LL:22358 source-line:274   br i1 %_80.i.3.i141.i, label %bb22.i.3.i142.i, label %panic18.i.i77.i, !dbg !14243
+LL:22361 source-line:274   %861 = getelementptr inbounds nuw float, ptr %_58.0.i22.i, i64 %own.i.3.i134.i, !dbg !14243
+LL:22362 source-line:274   %_78.i.32146.i.i = load i32, ptr %861, align 4, !dbg !14243, !noalias !14092, !noundef !12
+LL:22363 source-line:275   %_84.i.3.i143.i = icmp ult i64 %own.i.3.i134.i, %_60.1.i26.i, !dbg !15226
+LL:22364 source-line:275   br i1 %_84.i.3.i143.i, label %bb24.i.3.i144.i, label %panic20.i.i81.i, !dbg !15226
+LL:22367 source-line:275   %862 = getelementptr inbounds nuw float, ptr %_60.0.i25.i, i64 %own.i.3.i134.i, !dbg !15226
+LL:22368 source-line:275   %_82.i.32147.i.i = load i32, ptr %862, align 4, !dbg !15226, !noalias !14092, !noundef !12
+LL:22369 source-line:276   %_86.i.3.i145.i = icmp ult i64 %partner.i.3.i140.i, %_60.1.i26.i, !dbg !14245
+LL:22370 source-line:276   br i1 %_86.i.3.i145.i, label %bb26.i.3.i146.i, label %panic22.i.i84.i, !dbg !14245
+LL:22373 source-line:276   %863 = getelementptr inbounds nuw float, ptr %_60.0.i25.i, i64 %partner.i.3.i140.i, !dbg !14245
+LL:22374 source-line:276   %_85.i.32148.i.i = load i32, ptr %863, align 4, !dbg !14245, !noalias !14092, !noundef !12
+LL:22375 source-line:277   %_88.i.3.i147.i = icmp ult i64 %partner.i.3.i140.i, %_58.1.i23.i, !dbg !14246
+LL:22376 source-line:277   br i1 %_88.i.3.i147.i, label %bb28.i.3.i148.i, label %panic24.i.i87.i, !dbg !14246
+LL:22379 source-line:277   %864 = getelementptr inbounds nuw float, ptr %_58.0.i22.i, i64 %partner.i.3.i140.i, !dbg !14246
+LL:22380 source-line:277   %_87.i.32149.i.i = load i32, ptr %864, align 4, !dbg !14246, !noalias !14092, !noundef !12
+LL:22381 source-line:271   %_67.i.4.i149.i = load i32, ptr %600, align 4, !dbg !14227, !alias.scope !14073, !noalias !14092, !noundef !12
+LL:22383 source-line:271   %_65.i.4.i151.i = and i32 %_66.i.4.i150.i, %_52.i29.i, !dbg !14235
+LL:22384 source-line:271   %_64.i.4.i152.i = zext i32 %_65.i.4.i151.i to i64, !dbg !14236
+LL:22385 source-line:271   %_63.i.4.i153.i = shl nuw nsw i64 %_64.i.4.i152.i, 3, !dbg !14236
+LL:22386 source-line:271   %own.i.4.i154.i = or disjoint i64 %_63.i.4.i153.i, 4, !dbg !14236
+LL:22387 source-line:273   %_75.i.4.i155.i = load i32, ptr %601, align 4, !dbg !14237, !alias.scope !14073, !noalias !14092, !noundef !12
+LL:22389 source-line:273   %_73.i.4.i157.i = and i32 %_74.i.4.i156.i, %_52.i29.i, !dbg !14241
+LL:22390 source-line:273   %_72.i.4.i158.i = zext i32 %_73.i.4.i157.i to i64, !dbg !14242
+LL:22391 source-line:273   %_71.i.4.i159.i = shl nuw nsw i64 %_72.i.4.i158.i, 3, !dbg !14242
+LL:22392 source-line:273   %partner.i.4.i160.i = or disjoint i64 %_71.i.4.i159.i, 4, !dbg !14242
+LL:22393 source-line:274   %_80.i.4.i161.i = icmp ult i64 %own.i.4.i154.i, %_58.1.i23.i, !dbg !14243
+LL:22394 source-line:274   br i1 %_80.i.4.i161.i, label %bb22.i.4.i162.i, label %panic18.i.i77.i, !dbg !14243
+LL:22397 source-line:274   %865 = getelementptr inbounds nuw float, ptr %_58.0.i22.i, i64 %own.i.4.i154.i, !dbg !14243
+LL:22398 source-line:274   %_78.i.42150.i.i = load i32, ptr %865, align 4, !dbg !14243, !noalias !14092, !noundef !12
+LL:22399 source-line:275   %_84.i.4.i163.i = icmp ult i64 %own.i.4.i154.i, %_60.1.i26.i, !dbg !15226
+LL:22400 source-line:275   br i1 %_84.i.4.i163.i, label %bb24.i.4.i164.i, label %panic20.i.i81.i, !dbg !15226
+LL:22403 source-line:275   %866 = getelementptr inbounds nuw float, ptr %_60.0.i25.i, i64 %own.i.4.i154.i, !dbg !15226
+LL:22404 source-line:275   %_82.i.42151.i.i = load i32, ptr %866, align 4, !dbg !15226, !noalias !14092, !noundef !12
+LL:22405 source-line:276   %_86.i.4.i165.i = icmp ult i64 %partner.i.4.i160.i, %_60.1.i26.i, !dbg !14245
+LL:22406 source-line:276   br i1 %_86.i.4.i165.i, label %bb26.i.4.i166.i, label %panic22.i.i84.i, !dbg !14245
+LL:22409 source-line:276   %867 = getelementptr inbounds nuw float, ptr %_60.0.i25.i, i64 %partner.i.4.i160.i, !dbg !14245
+LL:22410 source-line:276   %_85.i.42152.i.i = load i32, ptr %867, align 4, !dbg !14245, !noalias !14092, !noundef !12
+LL:22411 source-line:277   %_88.i.4.i167.i = icmp ult i64 %partner.i.4.i160.i, %_58.1.i23.i, !dbg !14246
+LL:22412 source-line:277   br i1 %_88.i.4.i167.i, label %bb28.i.4.i168.i, label %panic24.i.i87.i, !dbg !14246
+LL:22415 source-line:277   %868 = getelementptr inbounds nuw float, ptr %_58.0.i22.i, i64 %partner.i.4.i160.i, !dbg !14246
+LL:22416 source-line:277   %_87.i.42153.i.i = load i32, ptr %868, align 4, !dbg !14246, !noalias !14092, !noundef !12
+LL:22417 source-line:271   %_67.i.5.i169.i = load i32, ptr %602, align 4, !dbg !14227, !alias.scope !14073, !noalias !14092, !noundef !12
+LL:22419 source-line:271   %_65.i.5.i171.i = and i32 %_66.i.5.i170.i, %_52.i29.i, !dbg !14235
+LL:22420 source-line:271   %_64.i.5.i172.i = zext i32 %_65.i.5.i171.i to i64, !dbg !14236
+LL:22421 source-line:271   %_63.i.5.i173.i = shl nuw nsw i64 %_64.i.5.i172.i, 3, !dbg !14236
+LL:22422 source-line:271   %own.i.5.i174.i = or disjoint i64 %_63.i.5.i173.i, 5, !dbg !14236
+LL:22423 source-line:273   %_75.i.5.i175.i = load i32, ptr %603, align 4, !dbg !14237, !alias.scope !14073, !noalias !14092, !noundef !12
+LL:22425 source-line:273   %_73.i.5.i177.i = and i32 %_74.i.5.i176.i, %_52.i29.i, !dbg !14241
+LL:22426 source-line:273   %_72.i.5.i178.i = zext i32 %_73.i.5.i177.i to i64, !dbg !14242
+LL:22427 source-line:273   %_71.i.5.i179.i = shl nuw nsw i64 %_72.i.5.i178.i, 3, !dbg !14242
+LL:22428 source-line:273   %partner.i.5.i180.i = or disjoint i64 %_71.i.5.i179.i, 5, !dbg !14242
+LL:22429 source-line:274   %_80.i.5.i181.i = icmp ult i64 %own.i.5.i174.i, %_58.1.i23.i, !dbg !14243
+LL:22430 source-line:274   br i1 %_80.i.5.i181.i, label %bb22.i.5.i182.i, label %panic18.i.i77.i, !dbg !14243
+LL:22433 source-line:274   %869 = getelementptr inbounds nuw float, ptr %_58.0.i22.i, i64 %own.i.5.i174.i, !dbg !14243
+LL:22434 source-line:274   %_78.i.52154.i.i = load i32, ptr %869, align 4, !dbg !14243, !noalias !14092, !noundef !12
+LL:22435 source-line:275   %_84.i.5.i183.i = icmp ult i64 %own.i.5.i174.i, %_60.1.i26.i, !dbg !15226
+LL:22436 source-line:275   br i1 %_84.i.5.i183.i, label %bb24.i.5.i184.i, label %panic20.i.i81.i, !dbg !15226
+LL:22439 source-line:275   %870 = getelementptr inbounds nuw float, ptr %_60.0.i25.i, i64 %own.i.5.i174.i, !dbg !15226
+LL:22440 source-line:275   %_82.i.52155.i.i = load i32, ptr %870, align 4, !dbg !15226, !noalias !14092, !noundef !12
+LL:22441 source-line:276   %_86.i.5.i185.i = icmp ult i64 %partner.i.5.i180.i, %_60.1.i26.i, !dbg !14245
+LL:22442 source-line:276   br i1 %_86.i.5.i185.i, label %bb26.i.5.i186.i, label %panic22.i.i84.i, !dbg !14245
+LL:22445 source-line:276   %871 = getelementptr inbounds nuw float, ptr %_60.0.i25.i, i64 %partner.i.5.i180.i, !dbg !14245
+LL:22446 source-line:276   %_85.i.52156.i.i = load i32, ptr %871, align 4, !dbg !14245, !noalias !14092, !noundef !12
+LL:22447 source-line:277   %_88.i.5.i187.i = icmp ult i64 %partner.i.5.i180.i, %_58.1.i23.i, !dbg !14246
+LL:22448 source-line:277   br i1 %_88.i.5.i187.i, label %bb28.i.5.i188.i, label %panic24.i.i87.i, !dbg !14246
+LL:22451 source-line:277   %872 = getelementptr inbounds nuw float, ptr %_58.0.i22.i, i64 %partner.i.5.i180.i, !dbg !14246
+LL:22452 source-line:277   %_87.i.52157.i.i = load i32, ptr %872, align 4, !dbg !14246, !noalias !14092, !noundef !12
+LL:22453 source-line:271   %_67.i.6.i189.i = load i32, ptr %604, align 4, !dbg !14227, !alias.scope !14073, !noalias !14092, !noundef !12
+LL:22455 source-line:271   %_65.i.6.i191.i = and i32 %_66.i.6.i190.i, %_52.i29.i, !dbg !14235
+LL:22456 source-line:271   %_64.i.6.i192.i = zext i32 %_65.i.6.i191.i to i64, !dbg !14236
+LL:22457 source-line:271   %_63.i.6.i193.i = shl nuw nsw i64 %_64.i.6.i192.i, 3, !dbg !14236
+LL:22458 source-line:271   %own.i.6.i194.i = or disjoint i64 %_63.i.6.i193.i, 6, !dbg !14236
+LL:22459 source-line:273   %_75.i.6.i195.i = load i32, ptr %605, align 4, !dbg !14237, !alias.scope !14073, !noalias !14092, !noundef !12
+LL:22461 source-line:273   %_73.i.6.i197.i = and i32 %_74.i.6.i196.i, %_52.i29.i, !dbg !14241
+LL:22462 source-line:273   %_72.i.6.i198.i = zext i32 %_73.i.6.i197.i to i64, !dbg !14242
+LL:22463 source-line:273   %_71.i.6.i199.i = shl nuw nsw i64 %_72.i.6.i198.i, 3, !dbg !14242
+LL:22464 source-line:273   %partner.i.6.i200.i = or disjoint i64 %_71.i.6.i199.i, 6, !dbg !14242
+LL:22465 source-line:274   %_80.i.6.i201.i = icmp ult i64 %own.i.6.i194.i, %_58.1.i23.i, !dbg !14243
+LL:22466 source-line:274   br i1 %_80.i.6.i201.i, label %bb22.i.6.i202.i, label %panic18.i.i77.i, !dbg !14243
+LL:22469 source-line:274   %873 = getelementptr inbounds nuw float, ptr %_58.0.i22.i, i64 %own.i.6.i194.i, !dbg !14243
+LL:22470 source-line:274   %_78.i.62158.i.i = load i32, ptr %873, align 4, !dbg !14243, !noalias !14092, !noundef !12
+LL:22471 source-line:275   %_84.i.6.i203.i = icmp ult i64 %own.i.6.i194.i, %_60.1.i26.i, !dbg !15226
+LL:22472 source-line:275   br i1 %_84.i.6.i203.i, label %bb24.i.6.i204.i, label %panic20.i.i81.i, !dbg !15226
+LL:22475 source-line:275   %874 = getelementptr inbounds nuw float, ptr %_60.0.i25.i, i64 %own.i.6.i194.i, !dbg !15226
+LL:22476 source-line:275   %_82.i.62159.i.i = load i32, ptr %874, align 4, !dbg !15226, !noalias !14092, !noundef !12
+LL:22477 source-line:276   %_86.i.6.i205.i = icmp ult i64 %partner.i.6.i200.i, %_60.1.i26.i, !dbg !14245
+LL:22478 source-line:276   br i1 %_86.i.6.i205.i, label %bb26.i.6.i206.i, label %panic22.i.i84.i, !dbg !14245
+LL:22481 source-line:276   %875 = getelementptr inbounds nuw float, ptr %_60.0.i25.i, i64 %partner.i.6.i200.i, !dbg !14245
+LL:22482 source-line:276   %_85.i.62160.i.i = load i32, ptr %875, align 4, !dbg !14245, !noalias !14092, !noundef !12
+LL:22483 source-line:277   %_88.i.6.i207.i = icmp ult i64 %partner.i.6.i200.i, %_58.1.i23.i, !dbg !14246
+LL:22484 source-line:277   br i1 %_88.i.6.i207.i, label %bb28.i.6.i208.i, label %panic24.i.i87.i, !dbg !14246
+LL:22487 source-line:277   %876 = getelementptr inbounds nuw float, ptr %_58.0.i22.i, i64 %partner.i.6.i200.i, !dbg !14246
+LL:22488 source-line:277   %_87.i.62161.i.i = load i32, ptr %876, align 4, !dbg !14246, !noalias !14092, !noundef !12
+LL:22489 source-line:271   %_67.i.7.i209.i = load i32, ptr %606, align 4, !dbg !14227, !alias.scope !14073, !noalias !14092, !noundef !12
+LL:22491 source-line:271   %_65.i.7.i211.i = and i32 %_66.i.7.i210.i, %_52.i29.i, !dbg !14235
+LL:22492 source-line:271   %_64.i.7.i212.i = zext i32 %_65.i.7.i211.i to i64, !dbg !14236
+LL:22493 source-line:271   %_63.i.7.i213.i = shl nuw nsw i64 %_64.i.7.i212.i, 3, !dbg !14236
+LL:22494 source-line:271   %own.i.7.i214.i = or disjoint i64 %_63.i.7.i213.i, 7, !dbg !14236
+LL:22495 source-line:273   %_75.i.7.i215.i = load i32, ptr %607, align 4, !dbg !14237, !alias.scope !14073, !noalias !14092, !noundef !12
+LL:22497 source-line:273   %_73.i.7.i217.i = and i32 %_74.i.7.i216.i, %_52.i29.i, !dbg !14241
+LL:22498 source-line:273   %_72.i.7.i218.i = zext i32 %_73.i.7.i217.i to i64, !dbg !14242
+LL:22499 source-line:273   %_71.i.7.i219.i = shl nuw nsw i64 %_72.i.7.i218.i, 3, !dbg !14242
+LL:22500 source-line:273   %partner.i.7.i220.i = or disjoint i64 %_71.i.7.i219.i, 7, !dbg !14242
+LL:22501 source-line:274   %_80.i.7.i221.i = icmp ult i64 %own.i.7.i214.i, %_58.1.i23.i, !dbg !14243
+LL:22502 source-line:274   br i1 %_80.i.7.i221.i, label %bb22.i.7.i222.i, label %panic18.i.i77.i, !dbg !14243
+LL:22505 source-line:274   %877 = getelementptr inbounds nuw float, ptr %_58.0.i22.i, i64 %own.i.7.i214.i, !dbg !14243
+LL:22506 source-line:274   %_78.i.72162.i.i = load i32, ptr %877, align 4, !dbg !14243, !noalias !14092, !noundef !12
+LL:22507 source-line:275   %_84.i.7.i223.i = icmp ult i64 %own.i.7.i214.i, %_60.1.i26.i, !dbg !15226
+LL:22508 source-line:275   br i1 %_84.i.7.i223.i, label %bb24.i.7.i224.i, label %panic20.i.i81.i, !dbg !15226
+LL:22511 source-line:275   %878 = getelementptr inbounds nuw float, ptr %_60.0.i25.i, i64 %own.i.7.i214.i, !dbg !15226
+LL:22512 source-line:275   %_82.i.72163.i.i = load i32, ptr %878, align 4, !dbg !15226, !noalias !14092, !noundef !12
+LL:22513 source-line:276   %_86.i.7.i225.i = icmp ult i64 %partner.i.7.i220.i, %_60.1.i26.i, !dbg !14245
+LL:22514 source-line:276   br i1 %_86.i.7.i225.i, label %bb26.i.7.i226.i, label %panic22.i.i84.i, !dbg !14245
+LL:22517 source-line:277   %_88.i.7.i227.i = icmp ult i64 %partner.i.7.i220.i, %_58.1.i23.i, !dbg !14246
+LL:22518 source-line:277   br i1 %_88.i.7.i227.i, label %_RINvNtCshmZ46FhrXRY_4math7fast_db9fast_exp2NtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8ECsdOTRa1MFkeb_13gate_expander.exit133.i.i, label %panic24.i.i87.i, !dbg !14246
+Actual gather load candidates (value loads; source assignments are excluded):
+LL:20516   %_85.i.72341.i.i = load i32, ptr %82, align 4, !dbg !12323, !noalias !12170, !noundef !12
+LL:20518   %_87.i.72342.i.i = load i32, ptr %83, align 4, !dbg !12324, !noalias !12170, !noundef !12
+LL:20978   %_78.i2311.i.i = load i32, ptr %414, align 4, !dbg !12321, !noalias !12170, !noundef !12
+LL:20990   %_82.i2312.i.i = load i32, ptr %415, align 4, !dbg !13562, !noalias !12170, !noundef !12
+LL:21002   %_85.i2313.i.i = load i32, ptr %416, align 4, !dbg !12323, !noalias !12170, !noundef !12
+LL:21014   %_87.i2314.i.i = load i32, ptr %417, align 4, !dbg !12324, !noalias !12170, !noundef !12
+LL:21032   %_78.i.12315.i.i = load i32, ptr %418, align 4, !dbg !12321, !noalias !12170, !noundef !12
+LL:21038   %_82.i.12316.i.i = load i32, ptr %419, align 4, !dbg !13562, !noalias !12170, !noundef !12
+LL:21044   %_85.i.12317.i.i = load i32, ptr %420, align 4, !dbg !12323, !noalias !12170, !noundef !12
+LL:21050   %_87.i.12318.i.i = load i32, ptr %421, align 4, !dbg !12324, !noalias !12170, !noundef !12
+LL:21068   %_78.i.22319.i.i = load i32, ptr %422, align 4, !dbg !12321, !noalias !12170, !noundef !12
+LL:21074   %_82.i.22320.i.i = load i32, ptr %423, align 4, !dbg !13562, !noalias !12170, !noundef !12
+LL:21080   %_85.i.22321.i.i = load i32, ptr %424, align 4, !dbg !12323, !noalias !12170, !noundef !12
+LL:21086   %_87.i.22322.i.i = load i32, ptr %425, align 4, !dbg !12324, !noalias !12170, !noundef !12
+LL:21104   %_78.i.32323.i.i = load i32, ptr %426, align 4, !dbg !12321, !noalias !12170, !noundef !12
+LL:21110   %_82.i.32324.i.i = load i32, ptr %427, align 4, !dbg !13562, !noalias !12170, !noundef !12
+LL:21116   %_85.i.32325.i.i = load i32, ptr %428, align 4, !dbg !12323, !noalias !12170, !noundef !12
+LL:21122   %_87.i.32326.i.i = load i32, ptr %429, align 4, !dbg !12324, !noalias !12170, !noundef !12
+LL:21140   %_78.i.42327.i.i = load i32, ptr %430, align 4, !dbg !12321, !noalias !12170, !noundef !12
+LL:21146   %_82.i.42328.i.i = load i32, ptr %431, align 4, !dbg !13562, !noalias !12170, !noundef !12
+LL:21152   %_85.i.42329.i.i = load i32, ptr %432, align 4, !dbg !12323, !noalias !12170, !noundef !12
+LL:21158   %_87.i.42330.i.i = load i32, ptr %433, align 4, !dbg !12324, !noalias !12170, !noundef !12
+LL:21176   %_78.i.52331.i.i = load i32, ptr %434, align 4, !dbg !12321, !noalias !12170, !noundef !12
+LL:21182   %_82.i.52332.i.i = load i32, ptr %435, align 4, !dbg !13562, !noalias !12170, !noundef !12
+LL:21188   %_85.i.52333.i.i = load i32, ptr %436, align 4, !dbg !12323, !noalias !12170, !noundef !12
+LL:21194   %_87.i.52334.i.i = load i32, ptr %437, align 4, !dbg !12324, !noalias !12170, !noundef !12
+LL:21212   %_78.i.62335.i.i = load i32, ptr %438, align 4, !dbg !12321, !noalias !12170, !noundef !12
+LL:21218   %_82.i.62336.i.i = load i32, ptr %439, align 4, !dbg !13562, !noalias !12170, !noundef !12
+LL:21224   %_85.i.62337.i.i = load i32, ptr %440, align 4, !dbg !12323, !noalias !12170, !noundef !12
+LL:21230   %_87.i.62338.i.i = load i32, ptr %441, align 4, !dbg !12324, !noalias !12170, !noundef !12
+LL:21248   %_78.i.72339.i.i = load i32, ptr %442, align 4, !dbg !12321, !noalias !12170, !noundef !12
+LL:21254   %_82.i.72340.i.i = load i32, ptr %443, align 4, !dbg !13562, !noalias !12170, !noundef !12
+LL:21916   %_85.i.72164.i.i = load i32, ptr %611, align 4, !dbg !14245, !noalias !14092, !noundef !12
+LL:21918   %_87.i.72165.i.i = load i32, ptr %612, align 4, !dbg !14246, !noalias !14092, !noundef !12
+LL:22236   %_78.i2134.i.i = load i32, ptr %849, align 4, !dbg !14243, !noalias !14092, !noundef !12
+LL:22248   %_82.i2135.i.i = load i32, ptr %850, align 4, !dbg !15226, !noalias !14092, !noundef !12
+LL:22260   %_85.i2136.i.i = load i32, ptr %851, align 4, !dbg !14245, !noalias !14092, !noundef !12
+LL:22272   %_87.i2137.i.i = load i32, ptr %852, align 4, !dbg !14246, !noalias !14092, !noundef !12
+LL:22290   %_78.i.12138.i.i = load i32, ptr %853, align 4, !dbg !14243, !noalias !14092, !noundef !12
+LL:22296   %_82.i.12139.i.i = load i32, ptr %854, align 4, !dbg !15226, !noalias !14092, !noundef !12
+LL:22302   %_85.i.12140.i.i = load i32, ptr %855, align 4, !dbg !14245, !noalias !14092, !noundef !12
+LL:22308   %_87.i.12141.i.i = load i32, ptr %856, align 4, !dbg !14246, !noalias !14092, !noundef !12
+LL:22326   %_78.i.22142.i.i = load i32, ptr %857, align 4, !dbg !14243, !noalias !14092, !noundef !12
+LL:22332   %_82.i.22143.i.i = load i32, ptr %858, align 4, !dbg !15226, !noalias !14092, !noundef !12
+LL:22338   %_85.i.22144.i.i = load i32, ptr %859, align 4, !dbg !14245, !noalias !14092, !noundef !12
+LL:22344   %_87.i.22145.i.i = load i32, ptr %860, align 4, !dbg !14246, !noalias !14092, !noundef !12
+LL:22362   %_78.i.32146.i.i = load i32, ptr %861, align 4, !dbg !14243, !noalias !14092, !noundef !12
+LL:22368   %_82.i.32147.i.i = load i32, ptr %862, align 4, !dbg !15226, !noalias !14092, !noundef !12
+LL:22374   %_85.i.32148.i.i = load i32, ptr %863, align 4, !dbg !14245, !noalias !14092, !noundef !12
+LL:22380   %_87.i.32149.i.i = load i32, ptr %864, align 4, !dbg !14246, !noalias !14092, !noundef !12
+LL:22398   %_78.i.42150.i.i = load i32, ptr %865, align 4, !dbg !14243, !noalias !14092, !noundef !12
+LL:22404   %_82.i.42151.i.i = load i32, ptr %866, align 4, !dbg !15226, !noalias !14092, !noundef !12
+LL:22410   %_85.i.42152.i.i = load i32, ptr %867, align 4, !dbg !14245, !noalias !14092, !noundef !12
+LL:22416   %_87.i.42153.i.i = load i32, ptr %868, align 4, !dbg !14246, !noalias !14092, !noundef !12
+LL:22434   %_78.i.52154.i.i = load i32, ptr %869, align 4, !dbg !14243, !noalias !14092, !noundef !12
+LL:22440   %_82.i.52155.i.i = load i32, ptr %870, align 4, !dbg !15226, !noalias !14092, !noundef !12
+LL:22446   %_85.i.52156.i.i = load i32, ptr %871, align 4, !dbg !14245, !noalias !14092, !noundef !12
+LL:22452   %_87.i.52157.i.i = load i32, ptr %872, align 4, !dbg !14246, !noalias !14092, !noundef !12
+LL:22470   %_78.i.62158.i.i = load i32, ptr %873, align 4, !dbg !14243, !noalias !14092, !noundef !12
+LL:22476   %_82.i.62159.i.i = load i32, ptr %874, align 4, !dbg !15226, !noalias !14092, !noundef !12
+LL:22482   %_85.i.62160.i.i = load i32, ptr %875, align 4, !dbg !14245, !noalias !14092, !noundef !12
+LL:22488   %_87.i.62161.i.i = load i32, ptr %876, align 4, !dbg !14246, !noalias !14092, !noundef !12
+LL:22506   %_78.i.72162.i.i = load i32, ptr %877, align 4, !dbg !14243, !noalias !14092, !noundef !12
+LL:22512   %_82.i.72163.i.i = load i32, ptr %878, align 4, !dbg !15226, !noalias !14092, !noundef !12
+
