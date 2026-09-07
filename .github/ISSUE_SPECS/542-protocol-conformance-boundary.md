@@ -302,3 +302,19 @@ lists, formatting and scope/diff checks all pass at pre-commit candidate
 `cbfbc70cd972ffbb2d7c7d7c80a62d7acdb44845`. Root found and corrected one evidence-only sentence
 that had conflated the one-test synthetic children with the live test census; no gate or source
 result changed. Root commits this exact tranche before Astra low attempt-three review.
+
+## Astra low attempt 3 FAIL; mandatory rescope
+
+Astra low reviewed exact attempt-three checkpoint
+`57fb9ca0f9ffe9d1ade8c42d2a557d4d6358386e` and returned FAIL. The clean fixture and all ordinary
+gates pass, but the correction moved the preexisting generic sort-error row onto an earlier engine
+TOML dependency-sort failure. The next row also targets TOML dependency sorting, leaving the
+independent workspace manifest/name `gate_sort_lines` status path without a red control. A scratch
+counter-mutant that changes that helper to swallow a failing sort status passes the complete
+fixture suite. The exact mutant and exit are preserved under `artifacts/issue542-attempt3-review/`.
+
+This is the third attempt and no further #542 implementation is authorized. Root preserves this
+failed checkpoint and opens a new bounded successor for one workspace-sort status injection that
+runs after TOML extraction succeeds, while retaining the separate TOML sort controls. #542 remains
+open and undelivered until the successor carries the already accepted product source through
+review, required qualification, merge, GitHub synchronization and cleanup.
