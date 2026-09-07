@@ -391,3 +391,19 @@ candidate and owns any necessary pin/current-consumer changes. Actual PR-head re
 merge, GitHub synchronization and clean delivered-worktree removal remain. #444 retains Concurrent
 RT4, and neither this source verdict nor the earlier descriptive capture establishes a measured
 speedup or closes broad RT4.
+
+## Post-source-PASS delivery qualification finding
+
+The CI-shaped workspace debug command passed every preceding package and #470's 47 library plus
+nine allocation tests, then failed one CAPI resource-lifecycle equality. The actual report carries
+`graph_session_plus_plan_bytes = graph_incremental_plan_bytes = 228_476` and
+`graph_metadata_bytes = 52_575`; the frozen single-plan fixture still expects 227_148 and 51_247.
+The exact +1_328 delta is 83 emitted runtime ops times the accepted conservative 16-byte per-op
+reservation. No PCM, ABI, cap, ownership or render assertion failed.
+
+This is a stale delivery-side numeric consumer of the accepted resource model, not a source-PASS
+reversal or authority for lane A to edit `crates/capi/tests/resource_lifecycle.rs`. Preserve the
+failed command and actual/expected values. Lane B owns qualification/pinning and must reconcile
+the CAPI frozen report together with the ordinary AudioWorklet resource/current-consumer check,
+with an independently justified exact value and one-below behavior before #470 opens a PR. No
+blanket repin, timing run or unrelated fixture change is authorized.
