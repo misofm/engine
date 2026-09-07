@@ -231,3 +231,36 @@ three sequential tests omit most frozen discriminators. The complete verdict is
 `docs/audits/576-attempt1-review.md`. Attempt 2 must correct only those findings
 inside the existing exact paths; it may not widen protocol, graph, engine, builtin,
 manifest, artifact or lane B #575 ownership.
+
+## Attempt 2 implementation record
+
+Attempt 2 stages the endpoint outcome queue before calling generic `collect`. A missing or
+out-of-order Applied outcome therefore returns `Empty` or `StaleTicket` while generic ledger
+credit remains occupied. During healthy cancellation, Applied outcomes are reconciled first; a
+no-outcome ticket is collected only while generic cancellation is active and must be Canceled.
+The control owner retains staged metadata across every refusal.
+
+Preparation computes checked generic and outcome queue projections before allocating either
+endpoint queue, enforces aggregate retained and largest-allocation caps, then composes the host
+report with separate host and endpoint retained fields. The composed bytes are checked once after
+host preparation without counting host queue storage twice.
+
+The endpoint suite adds separate control/render rendezvous, singleton claim and FIFO late
+two-ticket coverage, invalid matrix and full-capacity atomic refusal, exact/one-below resource
+caps, outcome staging and stale collection, and cancellation. The existing nine-track fixture
+retains its prepared bank/scalar lowering and pairing-disabled contract; no paired dispatch or
+runtime source changed. A private test-only post-graph fault seam remains inside this module.
+
+### Attempt 2 gate record
+
+The focused endpoint suite is green at 10 tests, including a private source unit test proving the
+post-graph sticky fault keeps the ticket outstanding and refuses a second render. The allocator
+audit reports zero allocation and free events across repeated healthy render and cancellation
+boundaries. Five source mutations were run and restored: second claim, early post-claim future
+application, partial prefix, credit release before outcome validation, and post-graph success
+labeling. Each was rejected by its named focused assertion; exact outputs and line locations are
+in `docs/audits/576-prepared-builtin-batch-endpoint.md`.
+
+The endpoint retained projection includes checked inline control and prepared-render owner sizes,
+and the largest-allocation projection covers those sizes as well as queue backings before endpoint
+allocation.

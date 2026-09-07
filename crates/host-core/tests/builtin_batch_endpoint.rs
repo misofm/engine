@@ -7,13 +7,16 @@ use builtins::{BuiltinLaneSelector, Matrix2x2};
 use builtins_compiler::{TrackControlRecord, TrackFaderRecord};
 use host_core::{
     BuiltinBatch, BuiltinBatchAdmissionError, BuiltinBatchRecord, BuiltinBatchRenderReport,
-    HostPrepareCaps, HostShapePolicy, prepare_builtin_batch_endpoint,
+    HostPrepareCaps, HostShapePolicy, SourceSubmission, prepare_builtin_batch_endpoint,
 };
 use protocol::{CoreTerminalDisposition, SampleTime, SessionRevision};
+use std::sync::mpsc::sync_channel;
 
 const REVISION: SessionRevision = SessionRevision(42);
 const QUANTUM: usize = 128;
 const SESSION: &str = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
+
+fn assert_send<T: Send>() {}
 
 fn caps() -> HostPrepareCaps {
     HostPrepareCaps {
@@ -43,11 +46,26 @@ fn endpoint() -> (
     host_core::StartedBuiltinBatchRender,
     host_core::BuiltinBatchResources,
 ) {
+    endpoint_with_capacity(4)
+}
+
+fn endpoint_with_capacity(
+    capacity: usize,
+) -> (
+    host_core::BuiltinBatchControl,
+    host_core::StartedBuiltinBatchRender,
+    host_core::BuiltinBatchResources,
+) {
     let compiled = host_core::compile_host_session(SESSION, &caps()).expect("compile fixture");
-    prepare_builtin_batch_endpoint(&compiled, &caps(), REVISION, NonZeroUsize::new(4).unwrap())
-        .expect("prepared endpoint")
-        .start()
-        .unwrap_or_else(|_| panic!("started endpoint"))
+    prepare_builtin_batch_endpoint(
+        &compiled,
+        &caps(),
+        REVISION,
+        NonZeroUsize::new(capacity).unwrap(),
+    )
+    .expect("prepared endpoint")
+    .start()
+    .unwrap_or_else(|_| panic!("started endpoint"))
 }
 
 fn render_block(
@@ -61,9 +79,82 @@ fn render_block(
 }
 
 #[test]
+fn prepared_and_control_halves_have_transferable_ownership() {
+    assert_send::<host_core::PreparedBuiltinBatchEndpoint>();
+    assert_send::<host_core::PreparedBuiltinBatchRender>();
+    assert_send::<host_core::BuiltinBatchControl>();
+}
+
+#[test]
+fn repeated_render_and_cancellation_boundaries_are_allocation_free() {
+    use engine::realtime::audit;
+
+    let (mut control, mut render, _) = endpoint_with_capacity(2);
+    let batch = BuiltinBatch::new(
+        REVISION,
+        SampleTime(0),
+        &[BuiltinBatchRecord::Fader {
+            track_index: 0,
+            record: TrackFaderRecord::Mute {
+                lanes: BuiltinLaneSelector::Both,
+                muted: true,
+                smoothing_samples: 0,
+            },
+        }],
+    )
+    .unwrap();
+    let ticket = control.try_publish(batch).expect("ticket");
+    audit::warm_up();
+    audit::reset();
+    let report = audit::in_render_scope(|| render_block(&mut render, 0));
+    assert!(report.applied.is_some());
+    let first = audit::snapshot();
+    assert_eq!(first.allocations, 0);
+    assert_eq!(first.deallocations, 0);
+    control.collect(ticket).expect("collect");
+    audit::reset();
+    let token = control.begin_cancel().expect("cancel");
+    let cancel = audit::in_render_scope(|| render_block(&mut render, QUANTUM as u64));
+    assert!(cancel.cancellation_only);
+    let second = audit::snapshot();
+    assert_eq!(second.allocations, 0);
+    assert_eq!(second.deallocations, 0);
+    control
+        .poll_cancel_boundary(token)
+        .expect("cancel poll")
+        .expect("cancel complete");
+}
+
+#[test]
 fn batch_applies_one_fifo_ticket_at_a_late_boundary_and_reconciles() {
     let (mut control, mut render, resources) = endpoint();
     assert!(resources.retained_bytes > resources.delivery.retained_payload_bytes);
+    assert_eq!(
+        resources.endpoint_retained_bytes,
+        resources
+            .delivery
+            .retained_payload_bytes
+            .checked_add(resources.outcome.retained_payload_bytes)
+            .and_then(|bytes| {
+                bytes.checked_add(
+                    u64::try_from(resources.control_inline_bytes).expect("control inline bytes")
+                        + u64::try_from(resources.render_inline_bytes)
+                            .expect("render inline bytes"),
+                )
+            })
+            .expect("endpoint resource sum")
+    );
+    assert_eq!(
+        resources.retained_bytes,
+        resources
+            .host_retained_bytes
+            .checked_add(resources.endpoint_retained_bytes)
+            .expect("composed resource sum")
+    );
+    assert!(
+        resources.host.effect_bank_scratch_bytes > 0,
+        "fixture retains an actual bank lane"
+    );
     let batch = BuiltinBatch::new(
         REVISION,
         SampleTime(0),
@@ -77,15 +168,352 @@ fn batch_applies_one_fifo_ticket_at_a_late_boundary_and_reconciles() {
         }],
     )
     .unwrap();
+    assert!(render_block(&mut render, 0).applied.is_none());
     let ticket = control.try_publish(batch).expect("admitted batch");
-    assert!(render_block(&mut render, 0).applied.is_some());
+    let applied = render_block(&mut render, QUANTUM as u64);
+    assert!(applied.applied.is_some());
     let completion = control.collect(ticket).expect("collected batch");
     assert_eq!(completion.ticket, ticket);
     assert_eq!(completion.disposition, CoreTerminalDisposition::Applied);
     assert_eq!(completion.applied_prefix, 1);
-    assert_eq!(completion.actual_sample, Some(SampleTime(0)));
-    assert!(!completion.late);
+    assert_eq!(completion.actual_sample, Some(SampleTime(QUANTUM as u64)));
+    assert!(completion.late);
     assert_eq!(control.outstanding(), 0);
+    assert_eq!(
+        control.collect(ticket),
+        Err(protocol::DeliveryError::StaleTicket)
+    );
+}
+
+#[test]
+fn outcome_is_staged_before_credit_release_and_fifo_late_pair_is_exact() {
+    let (mut control, mut render, _) = endpoint_with_capacity(2);
+    let first_batch = BuiltinBatch::new(
+        REVISION,
+        SampleTime(0),
+        &[BuiltinBatchRecord::Fader {
+            track_index: 0,
+            record: TrackFaderRecord::Mute {
+                lanes: BuiltinLaneSelector::Both,
+                muted: true,
+                smoothing_samples: 8,
+            },
+        }],
+    )
+    .unwrap();
+    let second_batch = BuiltinBatch::new(
+        REVISION,
+        SampleTime(QUANTUM as u64),
+        &[BuiltinBatchRecord::Matrix {
+            track_index: 1,
+            record: TrackControlRecord {
+                matrix: Matrix2x2 {
+                    ll: 0.7,
+                    lr: 0.1,
+                    rl: -0.2,
+                    rr: 0.8,
+                },
+                smoothing_samples: 4,
+            },
+        }],
+    )
+    .unwrap();
+    let first = control.try_publish(first_batch).expect("first ticket");
+    let second = control.try_publish(second_batch).expect("second ticket");
+    assert_eq!(control.outstanding(), 2);
+    assert_eq!(control.collect(first), Err(protocol::DeliveryError::Empty));
+    assert_eq!(control.outstanding(), 2);
+    assert!(render_block(&mut render, 0).applied.is_some());
+    assert!(render_block(&mut render, QUANTUM as u64).applied.is_some());
+    assert_eq!(
+        control.collect(second),
+        Err(protocol::DeliveryError::StaleTicket)
+    );
+    assert_eq!(control.outstanding(), 2);
+    let first_completion = control.collect(first).expect("first terminal");
+    assert_eq!(first_completion.actual_sample, Some(SampleTime(0)));
+    let second_completion = control.collect(second).expect("second terminal");
+    assert_eq!(
+        second_completion.actual_sample,
+        Some(SampleTime(QUANTUM as u64))
+    );
+    assert!(!second_completion.late);
+}
+
+#[test]
+fn invalid_and_saturated_publication_are_atomic_and_resources_have_exact_caps() {
+    let (mut control, mut render, resources) = endpoint_with_capacity(1);
+    let valid = BuiltinBatch::new(
+        REVISION,
+        SampleTime(0),
+        &[BuiltinBatchRecord::Fader {
+            track_index: 0,
+            record: TrackFaderRecord::FaderDb {
+                lanes: BuiltinLaneSelector::Left,
+                db: -6.0,
+                smoothing_samples: 4,
+            },
+        }],
+    )
+    .unwrap();
+    let invalid = BuiltinBatch::new(
+        REVISION,
+        SampleTime(0),
+        &[BuiltinBatchRecord::Matrix {
+            track_index: 0,
+            record: TrackControlRecord {
+                matrix: Matrix2x2 {
+                    ll: f32::NAN,
+                    lr: 0.0,
+                    rl: 0.0,
+                    rr: 1.0,
+                },
+                smoothing_samples: 0,
+            },
+        }],
+    )
+    .unwrap();
+    assert!(matches!(
+        control.try_publish(invalid),
+        Err(BuiltinBatchAdmissionError::Invalid {
+            reason: host_core::BuiltinBatchAdmissionReason::InvalidValue,
+            ..
+        })
+    ));
+    let wrong_revision = BuiltinBatch::new(
+        SessionRevision(7),
+        SampleTime(0),
+        &[BuiltinBatchRecord::Fader {
+            track_index: 0,
+            record: TrackFaderRecord::Mute {
+                lanes: BuiltinLaneSelector::Both,
+                muted: false,
+                smoothing_samples: 0,
+            },
+        }],
+    )
+    .unwrap();
+    assert!(matches!(
+        control.try_publish(wrong_revision),
+        Err(BuiltinBatchAdmissionError::Invalid {
+            reason: host_core::BuiltinBatchAdmissionReason::WrongRevision,
+            ..
+        })
+    ));
+    let misaligned = BuiltinBatch::new(
+        REVISION,
+        SampleTime(1),
+        &[BuiltinBatchRecord::Fader {
+            track_index: 0,
+            record: TrackFaderRecord::Mute {
+                lanes: BuiltinLaneSelector::Both,
+                muted: false,
+                smoothing_samples: 0,
+            },
+        }],
+    )
+    .unwrap();
+    assert!(matches!(
+        control.try_publish(misaligned),
+        Err(BuiltinBatchAdmissionError::Invalid {
+            reason: host_core::BuiltinBatchAdmissionReason::MisalignedSample,
+            ..
+        })
+    ));
+    let overflow = BuiltinBatch::new(
+        REVISION,
+        SampleTime(u64::MAX - (QUANTUM as u64 - 1)),
+        &[BuiltinBatchRecord::Fader {
+            track_index: 0,
+            record: TrackFaderRecord::Mute {
+                lanes: BuiltinLaneSelector::Both,
+                muted: false,
+                smoothing_samples: 0,
+            },
+        }],
+    )
+    .unwrap();
+    assert!(matches!(
+        control.try_publish(overflow),
+        Err(BuiltinBatchAdmissionError::Invalid {
+            reason: host_core::BuiltinBatchAdmissionReason::SampleOverflow,
+            ..
+        })
+    ));
+    assert_eq!(control.outstanding(), 0);
+    let ticket = control.try_publish(valid).expect("valid ticket");
+    let saturated = BuiltinBatch::new(
+        REVISION,
+        SampleTime(QUANTUM as u64),
+        &[BuiltinBatchRecord::Fader {
+            track_index: 0,
+            record: TrackFaderRecord::Mute {
+                lanes: BuiltinLaneSelector::Right,
+                muted: false,
+                smoothing_samples: 0,
+            },
+        }],
+    )
+    .unwrap();
+    assert!(matches!(
+        control.try_publish(saturated),
+        Err(BuiltinBatchAdmissionError::Delivery { batch, error: protocol::DeliveryError::Full })
+            if batch == saturated
+    ));
+    assert_eq!(control.outstanding(), 1);
+    assert!(render_block(&mut render, 0).applied.is_some());
+    control.collect(ticket).expect("valid collection");
+
+    let compiled = host_core::compile_host_session(SESSION, &caps()).expect("compile fixture");
+    let mut exact = caps();
+    exact.maximum_builtin_retained_bytes = resources.retained_bytes;
+    exact.maximum_named_allocation_bytes = resources.largest_allocation_bytes;
+    prepare_builtin_batch_endpoint(&compiled, &exact, REVISION, NonZeroUsize::new(1).unwrap())
+        .expect("exact resource caps");
+    exact.maximum_builtin_retained_bytes -= 1;
+    assert!(matches!(
+        prepare_builtin_batch_endpoint(&compiled, &exact, REVISION, NonZeroUsize::new(1).unwrap()),
+        Err(host_core::BuiltinBatchPrepareError::ResourceLimit)
+    ));
+    let mut largest_below = caps();
+    largest_below.maximum_builtin_retained_bytes = u64::MAX;
+    largest_below.maximum_named_allocation_bytes = resources
+        .delivery
+        .largest_allocation_bytes
+        .max(resources.outcome.largest_allocation_bytes)
+        - 1;
+    assert!(matches!(
+        prepare_builtin_batch_endpoint(
+            &compiled,
+            &largest_below,
+            REVISION,
+            NonZeroUsize::new(1).unwrap()
+        ),
+        Err(host_core::BuiltinBatchPrepareError::ResourceLimit)
+    ));
+}
+
+#[test]
+fn separate_control_and_render_threads_preserve_single_claim() {
+    let compiled = host_core::compile_host_session(SESSION, &caps()).expect("compile fixture");
+    let prepared =
+        prepare_builtin_batch_endpoint(&compiled, &caps(), REVISION, NonZeroUsize::new(2).unwrap())
+            .expect("prepared endpoint");
+    let (control_tx, control_rx) = sync_channel(1);
+    let (step_tx, step_rx) = sync_channel(0);
+    let (report_tx, report_rx) = sync_channel(1);
+    std::thread::scope(|scope| {
+        scope.spawn(move || {
+            let (control, mut render, _) = prepared
+                .start()
+                .unwrap_or_else(|_| panic!("started endpoint"));
+            control_tx.send(control).expect("control handoff");
+            for step in 0..2 {
+                step_rx.recv().expect("render step");
+                report_tx
+                    .send(render_block(&mut render, step * QUANTUM as u64))
+                    .expect("render report");
+            }
+        });
+        let mut control = control_rx.recv().expect("control owner");
+        let first = BuiltinBatch::new(
+            REVISION,
+            SampleTime(0),
+            &[BuiltinBatchRecord::Fader {
+                track_index: 0,
+                record: TrackFaderRecord::Mute {
+                    lanes: BuiltinLaneSelector::Both,
+                    muted: true,
+                    smoothing_samples: 0,
+                },
+            }],
+        )
+        .unwrap();
+        let second = BuiltinBatch::new(
+            REVISION,
+            SampleTime(0),
+            &[BuiltinBatchRecord::Fader {
+                track_index: 1,
+                record: TrackFaderRecord::Mute {
+                    lanes: BuiltinLaneSelector::Both,
+                    muted: false,
+                    smoothing_samples: 0,
+                },
+            }],
+        )
+        .unwrap();
+        let first_ticket = control.try_publish(first).expect("first publish");
+        let second_ticket = control.try_publish(second).expect("second publish");
+        step_tx.send(()).expect("first step");
+        let first_report = report_rx.recv().expect("first report");
+        assert!(first_report.applied.is_some());
+        assert_eq!(control.outstanding(), 2);
+        control.collect(first_ticket).expect("first collect");
+        step_tx.send(()).expect("second step");
+        let second_report = report_rx.recv().expect("second report");
+        assert!(second_report.applied.is_some());
+        control.collect(second_ticket).expect("second collect");
+    });
+}
+
+#[test]
+fn endpoint_drives_nonzero_pcm_through_the_prepared_bank_and_scalar_plan() {
+    let (mut control, mut render, resources) = endpoint();
+    assert!(resources.host.effect_bank_scratch_bytes > 0);
+    let left = [0.25_f32; QUANTUM];
+    let right = [-0.5_f32; QUANTUM];
+    control
+        .sources()
+        .submit(
+            b"fixture-source",
+            SourceSubmission {
+                generation: 1,
+                start_frame: 0,
+                sample_rate_hz: 48_000,
+                planes: &[&left, &right],
+                frames: QUANTUM as u32,
+                end_of_region: false,
+            },
+        )
+        .expect("source block");
+    let batch = BuiltinBatch::new(
+        REVISION,
+        SampleTime(0),
+        &[
+            BuiltinBatchRecord::Fader {
+                track_index: 0,
+                record: TrackFaderRecord::FaderDb {
+                    lanes: BuiltinLaneSelector::Left,
+                    db: -6.0,
+                    smoothing_samples: 16,
+                },
+            },
+            BuiltinBatchRecord::Matrix {
+                track_index: 1,
+                record: TrackControlRecord {
+                    matrix: Matrix2x2 {
+                        ll: 0.7,
+                        lr: 0.2,
+                        rl: -0.1,
+                        rr: 0.8,
+                    },
+                    smoothing_samples: 16,
+                },
+            },
+        ],
+    )
+    .expect("batch");
+    let ticket = control.try_publish(batch).expect("publish");
+    let mut samples = [0.0_f32; QUANTUM * 2];
+    let report = render
+        .render(&mut samples, 2, QUANTUM, QUANTUM, SampleTime(0))
+        .expect("render");
+    assert!(report.applied.is_some());
+    assert!(samples.iter().any(|sample| sample.to_bits() != 0));
+    assert_eq!(
+        control.collect(ticket).expect("collect").disposition,
+        CoreTerminalDisposition::Applied
+    );
 }
 
 #[test]
@@ -170,4 +598,62 @@ fn cancellation_before_claim_is_render_only_and_releases_after_collection() {
     assert_eq!(completion.actual_sample, None);
     assert_eq!(completion.acknowledged_sample, Some(SampleTime(0)));
     assert_eq!(control.outstanding(), 0);
+}
+
+#[test]
+fn cancellation_reconciles_applied_and_future_frontier_dispositions() {
+    let (mut control, mut render, _) = endpoint_with_capacity(2);
+    let applied_batch = BuiltinBatch::new(
+        REVISION,
+        SampleTime(0),
+        &[BuiltinBatchRecord::Fader {
+            track_index: 0,
+            record: TrackFaderRecord::Mute {
+                lanes: BuiltinLaneSelector::Both,
+                muted: true,
+                smoothing_samples: 0,
+            },
+        }],
+    )
+    .unwrap();
+    let future_batch = BuiltinBatch::new(
+        REVISION,
+        SampleTime((QUANTUM * 2) as u64),
+        &[BuiltinBatchRecord::Fader {
+            track_index: 1,
+            record: TrackFaderRecord::Mute {
+                lanes: BuiltinLaneSelector::Left,
+                muted: true,
+                smoothing_samples: 0,
+            },
+        }],
+    )
+    .unwrap();
+    let applied_ticket = control.try_publish(applied_batch).expect("applied ticket");
+    let canceled_ticket = control.try_publish(future_batch).expect("future ticket");
+    assert!(render_block(&mut render, 0).applied.is_some());
+    let token = control.begin_cancel().expect("cancel begun");
+    let boundary = render_block(&mut render, QUANTUM as u64);
+    assert!(boundary.cancellation_only);
+    let complete = control
+        .poll_cancel_boundary(token)
+        .expect("cancel poll")
+        .expect("cancel complete");
+    assert_eq!(complete.frontier, Some(canceled_ticket.serial));
+    assert_eq!(
+        control
+            .collect(applied_ticket)
+            .expect("applied collection")
+            .disposition,
+        CoreTerminalDisposition::Applied
+    );
+    let canceled = control
+        .collect(canceled_ticket)
+        .expect("canceled collection");
+    assert_eq!(canceled.disposition, CoreTerminalDisposition::Canceled);
+    assert_eq!(canceled.actual_sample, None);
+    assert_eq!(
+        canceled.acknowledged_sample,
+        Some(SampleTime(QUANTUM as u64))
+    );
 }
