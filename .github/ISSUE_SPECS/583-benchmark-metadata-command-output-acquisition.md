@@ -78,3 +78,9 @@ Astra LOW returned **FAIL** at exact pushed head `d4f9120ec0ea0b9d0d9c7b445accdc
 Attempt 1 fails because conformance tests the shared optional-text result through `command_allow_empty` but does not directly exercise production's final `workspace_dirty` conversion. Attempt 2 must factor only that existing conversion into a narrow helper used by `Metadata::gather` and assert successful empty or whitespace maps to `"false"`, successful nonempty maps to `"true"`, and unavailable maps to `"unknown"`. The existing synthetic record oracle stays unchanged. No other product or path change is authorized.
 
 Astra LOW independently passed the full debug suites (40/39), focused release suites (12/5/3), strict affected Clippy/rustdoc, format/diff, workspace and bench policy/mutation checks. Complete release `bench-support` fails identically on candidate and exact base with observed counters `(2,1,1,48)` against expected `(3,2,1,64)`; this pre-existing allocator failure remains outside #583. Delivery review is blocked until the bounded attempt-2 correction receives source PASS.
+
+## Attempt 2 correction checkpoint
+
+Luna HIGH completed the sole attempt-1 correction at source `9ed73fa5ebe030007a45ae41fc5c417e49c039c7`. Only `tools/bench/src/conformance.rs` changed. `Metadata::gather` now passes the existing `command_allow_empty` result through a private `workspace_dirty` conversion. The same conversion is directly tested for empty and whitespace-only success → `"false"`, nonempty success → `"true"`, and unavailable → `"unknown"`. Command acquisition, the synthetic record oracle and all other source remain unchanged.
+
+Focused conformance debug and release each pass 4 tests, complete `bench` debug passes 40 tests, and strict bench Clippy, formatting and diff checks pass. No benchmark ran and no manifest, lock, policy, evidence, artifact or #580 path changed. Astra LOW attempt-2 adversarial review remains pending before delivery.
