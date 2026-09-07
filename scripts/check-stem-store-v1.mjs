@@ -538,9 +538,11 @@ async function runProvenanceSelfTest() {
   ]
 
   for (const mutation of mutations) {
-    const temporary = await mkdtemp(join(tmpdir(), "miso-stem-store-provenance-"))
+    const temporaryRoot = await mkdtemp(join(tmpdir(), "miso-stem-store-provenance-"))
+    const temporary = join(temporaryRoot, "stem-store")
     try {
       await cp(runtime, temporary, { recursive: true })
+      await cp(join(host, "web/hex-lower.js"), join(temporaryRoot, "hex-lower.js"))
       await mutation.mutate(temporary)
       await assert.rejects(
         validateSourceProvenance(temporary),
@@ -548,7 +550,7 @@ async function runProvenanceSelfTest() {
       )
       process.stdout.write(`RED: provenance ${mutation.name}\n`)
     } finally {
-      await rm(temporary, { recursive: true, force: true })
+      await rm(temporaryRoot, { recursive: true, force: true })
     }
   }
 }
