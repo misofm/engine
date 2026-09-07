@@ -1,0 +1,54 @@
+# Share benchmark metadata command-output acquisition
+
+Status: proposed numbered TOOL9 child of audit #349 and lane-B handoff #560, based on delivered main `735197b1bc94006eeb1c42ad447ab02bf61696d5` after #578 / PR #581 and successful post-main qualification `34163575770`. This continues one of the eight original partial findings; it does not start an original open finding. Sol HIGH coordinates and owns checkpoints, GitHub synchronization and delivery. Luna HIGH implements. Astra LOW performs every scope, source and exact-head/current-base verification assignment under the user's latest routing. No audio verification or artifact qualification is indicated.
+
+## Smallest closable outcome
+
+Make `bench-support::sysinfo` the single authority for executing an explicitly supplied metadata command and interpreting successful UTF-8 stdout. Replace the private duplicate acquisition bodies in the protocol and conformance benchmark modules with that authority while preserving their different subject policies and record projections.
+
+The shared operation accepts a program and explicit argument slice and returns trimmed successful UTF-8 text while retaining successful empty output as a distinct value. Spawn failure, nonzero exit and invalid UTF-8 remain unavailable. Protocol continues to map unavailable or empty text to `"unknown"`. Conformance continues to map unavailable commit/status commands to `"unknown"`, successful empty `git status --porcelain` to `"false"`, and successful nonempty status to `"true"`.
+
+This slice consolidates acquisition only. It does not merge metadata structs, schemas, record formatters or subject-specific fallback policy. TOOL9 remains partial afterward.
+
+## Frozen semantics
+
+- Run the requested program exactly once with the requested arguments and capture its output.
+- A zero exit with valid UTF-8 returns trimmed text, including `Some("")` for empty or whitespace-only stdout.
+- Spawn failure, nonzero exit and invalid UTF-8 return `None`; plausible stdout on a failing command does not become metadata.
+- Stderr is neither metadata nor a fallback input.
+- Protocol retains its existing empty/error `"unknown"` policy and exact metadata field spelling, escaping, numeric defaults and record projection.
+- Conformance retains the semantic distinction between a clean empty workspace and command failure, plus its existing commit, dirty, incomplete-metadata and missing-field projections.
+- Metadata collection remains control-plane benchmark scaffolding. No timed workload, benchmark result, performance claim or runtime behavior changes.
+
+## Exact ownership
+
+Allowed implementation and focused-test paths:
+
+- `tools/bench-support/src/sysinfo.rs`
+- `tools/bench/src/protocol.rs`
+- `tools/bench/src/conformance.rs`
+- this numbered spec and bounded evidence under `docs/audits/` or `artifacts/issue*`
+
+Excluded paths include every crate or host runtime, DSP/effect/graph/bank/session/control implementation, other benchmark consumer, schema, timing loop, workload/corpus, manifest, lockfile, policy, workflow, SDK, browser, generated artifact and artifact pin.
+
+Lane A #580 owns the frozen builtin endpoint/test/spec/evidence chain, cap preflight and bitwise PCM proof. This child must not edit or depend on those paths. #543/#555 precedes delivered #558/#552; #542's accepted work remains delivered through #567 without a fourth #542 attempt. Historical verdict provenance is unchanged.
+
+## Objective gates
+
+1. **Shared result law.** Deterministically exercise successful text with surrounding whitespace, successful empty output, whitespace-only success, nonzero exit with plausible stdout, spawn failure and invalid UTF-8. The shared result distinguishes successful empty from every failure class.
+2. **Protocol projection.** Prove successful nonempty text is trimmed and retained, while successful empty, whitespace-only and every failure class map to exactly `"unknown"`. Preserve the existing synthetic protocol JSON record's field names, values, escaping and missing-data/numeric-default behavior.
+3. **Conformance projection.** Prove clean successful empty status maps to `"false"`, successful nonempty status maps to `"true"`, and failed/unavailable status maps to `"unknown"`. Preserve commit acquisition and the existing synthetic conformance record, incomplete-metadata and missing-field projections exactly.
+4. **Single acquisition authority.** Remove both private `Command::new(...).output()` acquisition bodies from protocol and conformance. Each consumer retains only its subject-specific conversion from the shared optional text. No second process wrapper or generic command framework is introduced.
+5. **Proportional quality.** Existing and focused `bench-support` and `bench` tests pass in debug and release; affected strict Clippy/rustdoc, formatting, diff and applicable workspace/bench policies pass. Compile the supported native and Wasm targets only if the affected packages currently participate in those target gates. No benchmark or browser run receives credit.
+
+## Stop and split triggers
+
+Stop before widening this child if it needs a generic process abstraction, stderr capture, environment/current-directory control, timeout or streaming support, a schema/record change, another consumer migration, a manifest/lock change, a policy/workflow change, benchmark timing, a fixture corpus, host/runtime code or any audio/artifact work. Preserve the checkpoint and brief the independent outcome instead.
+
+The slice is one small shared acquisition operation plus two existing consumer conversions. A coherent passing implementation tranche pauses for the root exact-path checkpoint before more work. Each attempt receives one Luna HIGH implementation pass and one Astra LOW adversarial verdict. After three failed attempts, preserve evidence and rescope without weakening gates.
+
+## Preliminary residual audit
+
+Astra LOW reviewed current main `735197b1bc94006eeb1c42ad447ab02bf61696d5` after #578. Protocol and conformance still each spawn a metadata command, require success and valid UTF-8, and trim stdout; `bench-support::sysinfo` already owns the delivered #557 command acquisition law. The only intentional consumer difference is empty-output policy, especially clean `git status --porcelain` in conformance.
+
+This TOOL9 slice is smaller than IO5 live-state publication, host activation, lifecycle/clock, graph/bank/effect/parameter rollout or segment execution, and smaller than TOOL11's remaining declarative-rule contract. It is disjoint from active lane-A #580. Astra LOW returned conditional PASS for this product shape and is sufficient for all review. Activation still requires matching numbered local/GitHub identity, an exact pushed brief, current-base and ownership checks, and an Astra LOW scope verdict. No implementation is authorized by this preliminary audit alone.
