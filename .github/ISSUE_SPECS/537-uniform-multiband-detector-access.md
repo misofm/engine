@@ -78,3 +78,11 @@ The first status0 invocation selected0 tests/17filtered and is retained as compi
 ## Attempt 1 oracle discrimination correction
 
 Root found the original eight-word periodic fixture made all W8 rows identical and W4 rows repeat, weakening wrapped-row discrimination. Luna xhigh replaced it with distinct row/lane bit patterns, explicit +0/-0 words and pairwise row-distinctness assertions. The actual prepared-callsite witness now covers both mixed channel directions. Same fully-qualified focused test passed1/0,status0 at sourcedbdc6847ab29ebeafeb84e04752559b0b95936c30d7170764464db43d88c1932. Prior capture is retained honestly, not credited for discriminating W8 wrap. No mutation or public/candidate qualification has run yet.
+
+## Attempt 1 failed mechanism gate — implementation paused
+
+The single frozen mutation changed actual uniform access `if uniform` to `if false`, but the fully-qualified fixture still passed1/0,status0. This is a FAILED negative-control gate, not evidence of correct mechanism coverage. Root identified that the test-only counter increments from classification before the branch, so it records intent rather than executed access. The passing mutant source SHA13ca418cc782a7ad47e154969f55e4d154022dbac1c99e87fc56be40a7bab6df and exact patch/command/output/status are retained. No assertion was weakened.
+
+Luna prepared a second observability patch but did not execute it; its explicitly unrun patch is retained separately and is not accepted implementation or mutation evidence. Root stopped further source/public-fixture work. Original source was restored byte-for-byte to SHA dbdc6847ab29ebeafeb84e04752559b0b95936c30d7170764464db43d88c1932, and the one actual restored focused invocation passed1/0,status0. A prior restored invocation used a nonexistent worktree path and started no command/capture. No second mutation ran.
+
+The useful source checkpoint remains buildable, but this attempt lacks the required discriminating actual-route control and remaining public transition/allocation/candidate qualification. One consolidated Astra medium attempt1 verdict is now required before a revision. Do not relabel a further mutation as the original frozen run or reset the attempt counter.

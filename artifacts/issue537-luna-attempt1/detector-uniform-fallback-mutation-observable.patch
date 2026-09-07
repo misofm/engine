@@ -1,0 +1,30 @@
+diff --git a/crates/multiband-compressor/src/lib.rs b/crates/multiband-compressor/src/lib.rs
+index e37df684..cacf2e99 100644
+--- a/crates/multiband-compressor/src/lib.rs
++++ b/crates/multiband-compressor/src/lib.rs
+@@ -899,20 +899,14 @@ fn detector_tap<L: Lane, const W: usize>(
+     ring_len: usize,
+     uniform: bool,
+ ) -> L {
+-    #[cfg(test)]
+-    {
+-        use core::sync::atomic::Ordering;
+-        let counter = if uniform {
+-            &DETECTOR_UNIFORM_CALLS
+-        } else {
+-            &DETECTOR_RAGGED_CALLS
+-        };
+-        counter.fetch_add(1, Ordering::Relaxed);
+-    }
+-    if uniform {
++    if false {
++        #[cfg(test)]
++        DETECTOR_UNIFORM_CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+         let row = wrap(cursor + offsets[0], ring_len);
+         return L::load(&ring[row * W..]);
+     }
++    #[cfg(test)]
++    DETECTOR_RAGGED_CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+     let mut values = [0.0f32; 8];
+     for track in 0..W {
+         values[track] = ring[wrap(cursor + offsets[track], ring_len) * W + track];
