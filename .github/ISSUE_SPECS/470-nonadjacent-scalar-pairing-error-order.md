@@ -327,3 +327,29 @@ This remains an attempt-2 checkpoint rather than source PASS. Split-specific ram
 physical-conflict/overlap and selection-mutation gates plus proportional release/static/supported-
 target qualification remain. Lane B still owns artifact qualification and pinning after source
 freeze.
+
+## Luna attempt 2 final behavior checkpoint
+
+Pushed source `d58a59d4` completes the remaining directed behavior proofs in the authorized
+`crates/builtins-compiler/src/lib.rs` test module without changing production code. An actual
+selected track-A nonadjacent split is compared call by call with independently prepared separate
+owners while the fader ramps at `F_A`, the matrix ramps and is retargeted at `M_A`, and a valid
+matrix-ramp prefix followed by an invalid record fails then retries. Exact final PCM, captured
+post-matrix words, fader/matrix state, queue-drain counts and fused/fallback dispatch match. The
+failure capture proves the pending fader is completed before return and the retry consumes the
+retained matrix tail exactly once.
+
+Two directed selection cases complete the bounded eligibility evidence. A two-candidate production
+fixture selects the deterministic first interval, leaves the later candidate on its original
+separate owners and matches both tracks' captured PCM/state to a fully separate reference. A
+session-output physical-buffer conflict declines before owner transfer while an otherwise identical
+non-output control selects; the declined graph matches separate-owner output and state. These cases
+join the already green direct/aliased observer, nonunity-send, connected-sidechain and Concurrent
+declines rather than duplicate them.
+
+Luna ran the complete test-support builtins-compiler library suite (47 passed), the allocation
+tracker (9 passed), a warning-free test-support check, formatting and diff check. Root independently
+audited the one-file exact-path diff and reproduced the complete 47-test library suite. This is a
+green source checkpoint, not attempt-2 PASS. Root must integrate current delivered main, run the
+proportional debug/release/static/supported-target gates, coordinate artifact qualification with
+lane B after source acceptance, and obtain the required Astra LOW exact-head adversarial verdict.
