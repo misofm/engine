@@ -31,6 +31,7 @@ const tests = [
 const budgetsEnabled = process.argv.includes("--budgets")
 let skippedBudgetAsserts = 0
 
+await runOperatorPathSelfTest(root)
 await staticChecks(root)
 for (const test of tests) {
   skippedBudgetAsserts += runNode(join(host, "tests", test), false, budgetsEnabled)
@@ -103,6 +104,18 @@ async function staticChecks(repository) {
       assert.doesNotMatch(text, /miso-stems-v1|FileSystemFileHandle|\bOPFS\b/)
     }
   }
+}
+
+async function runOperatorPathSelfTest(repository) {
+  const runner = join(repository, "scripts/operator/run-stem-store-browser-evals.cjs")
+  const result = spawnSync(process.execPath, [runner, "--path-self-test"], {
+    cwd: repository,
+    encoding: "utf8",
+  })
+  if (result.status !== 0) {
+    throw new Error(`operator path self-test failed:\n${result.stderr ?? ""}`)
+  }
+  process.stdout.write(result.stdout ?? "")
 }
 
 function assertPumpHasNoNetwork(text) {
