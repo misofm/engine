@@ -79,3 +79,48 @@ from the clean source immediately afterward.
 
 All five mutations were removed before the green rerun. The mutation records are negative
 evidence only; no mutation output is used as a product result.
+
+## Attempt 2 implementation and evidence
+
+Attempt 2 corrected the five findings within the existing endpoint and focused-test paths. Cached
+cancellation polling now validates the exact token before reading a cached completion. Publication
+and a second `begin_cancel` remain closed after the render-side acknowledgement and after the last
+collection until the retained completion is reported once; only then are the token and generation
+released. The integration interval test asserts both refusals and then proves next-generation
+reuse. The applied-prefix/future-suffix scenario also polls an old token while a later generation
+is awaiting collection and requires `StaleTicket`.
+
+The endpoint now owns bounded PostFader meter consumers for the focused endpoint comparison.
+Addressed right and left fader and matrix records are compared against a separately prepared
+console owner, PCM is bitwise equal, and the eq8 PostFader sample peaks are bitwise equal. The
+existing native host target selects a SIMD backend for every track; there is no nonbanked scalar
+owner in this target. An attempted support-enabled integration call to the existing
+`builtins_compiler` witness APIs compiled only with `--features 'builtins-compiler/test-support'`;
+the ordinary focused command cannot resolve those dependency-gated symbols. The support-enabled
+run still produced an empty scalar trace because the native fixture is fully banked. The witness
+calls were removed from the default integration test so the normal host-core suite remains
+compiling. This is recorded as an explicit qualification blocker: a scalar-target run or a smallest
+allowed render-plan seam is required; no production or manifest path was widened to fake it.
+
+`actual_endpoint_allocations_and_nonempty_cancellation_reuse_are_live` observes the workspace
+allocator around actual endpoint preparation and teardown, then repeats healthy application,
+nonempty cancellation, final completion reporting, and next-generation reuse twice. Render
+application and cancellation remain covered by the zero-allocation audit. The endpoint's meter
+caps in the private source fixture were raised to the concrete bounded meter request used by the
+endpoint; no runtime queue or resource cap was weakened.
+
+Direct mutation 5 was rerun against the post-fault cancellation path: clearing the sticky fault
+and rendering the cancellation boundary made `poll_cancel_boundary` return an actual
+`BuiltinBatchCompletion` with `Canceled`, while the clean assertion expected `Err(Empty)`.
+The exact failing assertion was:
+
+```
+assertion `left == right` failed
+left: Ok(BuiltinBatchCompletion { ticket: CoreTicket { generation: 1, slot: 0, serial: 1 }, ... disposition: Canceled, ... acknowledged_sample: Some(SampleTime(128)) })
+right: Err(Empty)
+```
+
+The mutation was restored immediately. Focused integration (13 tests), both private source tests,
+strict Clippy with the support feature, formatting, and diff checks pass. `Cargo.lock` is restored
+before handoff. Full target/policy qualification remains for the root checkpoint; the scalar
+witness blocker is not claimed green.

@@ -3,7 +3,7 @@
 
 use core::num::NonZeroUsize;
 
-use builtins::{BuiltinLaneSelector, Matrix2x2};
+use builtins::{BuiltinLaneSelector, Matrix2x2, MeterTap};
 use builtins_compiler::{TrackControlRecord, TrackFaderRecord};
 use host_core::{
     BuiltinBatch, BuiltinBatchAdmissionError, BuiltinBatchRecord, BuiltinBatchRenderReport,
@@ -36,9 +36,9 @@ fn caps() -> HostPrepareCaps {
         maximum_effect_scratch_bytes: u64::MAX,
         maximum_builtin_retained_bytes: u64::MAX,
         maximum_named_allocation_bytes: u64::MAX,
-        maximum_meter_streams: 1,
-        maximum_meter_items: 1,
-        maximum_meter_bytes: 1,
+        maximum_meter_streams: 64,
+        maximum_meter_items: 1 << 16,
+        maximum_meter_bytes: 1 << 24,
     }
 }
 
@@ -244,6 +244,128 @@ fn repeated_render_and_cancellation_boundaries_are_allocation_free() {
         .poll_cancel_boundary(token)
         .expect("cancel poll")
         .expect("cancel complete");
+}
+
+#[test]
+fn actual_endpoint_allocations_and_nonempty_cancellation_reuse_are_live() {
+    use bench_support::alloc as bench_alloc;
+
+    bench_alloc::assert_installed();
+    for _ in 0..2 {
+        let mark = bench_alloc::counters();
+        let (control, render, _) = endpoint_with_capacity(2);
+        let prepared = bench_alloc::delta_since(mark);
+        assert!(prepared.allocations > 0, "endpoint preparation allocated");
+        assert!(
+            prepared.requested_bytes > 0,
+            "endpoint retained allocation bytes"
+        );
+        drop(render);
+        drop(control);
+        let released = bench_alloc::delta_since(mark);
+        assert!(
+            released.deallocations > 0,
+            "endpoint teardown released retained allocations"
+        );
+    }
+
+    for _ in 0..2 {
+        let (mut control, mut render, _) = endpoint_with_capacity(3);
+        let healthy = BuiltinBatch::new(
+            REVISION,
+            SampleTime(0),
+            &[BuiltinBatchRecord::Fader {
+                track_index: 0,
+                record: TrackFaderRecord::Mute {
+                    lanes: BuiltinLaneSelector::Both,
+                    muted: true,
+                    smoothing_samples: 0,
+                },
+            }],
+        )
+        .unwrap();
+        let healthy_ticket = control.try_publish(healthy).expect("healthy ticket");
+        assert!(render_block(&mut render, 0).applied.is_some());
+        control.collect(healthy_ticket).expect("healthy collect");
+
+        let canceled_a = BuiltinBatch::new(
+            REVISION,
+            SampleTime(QUANTUM as u64),
+            &[BuiltinBatchRecord::Fader {
+                track_index: 1,
+                record: TrackFaderRecord::Mute {
+                    lanes: BuiltinLaneSelector::Left,
+                    muted: false,
+                    smoothing_samples: 0,
+                },
+            }],
+        )
+        .unwrap();
+        let canceled_b = BuiltinBatch::new(
+            REVISION,
+            SampleTime((QUANTUM * 2) as u64),
+            &[BuiltinBatchRecord::Matrix {
+                track_index: 2,
+                record: TrackControlRecord {
+                    matrix: Matrix2x2 {
+                        ll: 0.5,
+                        lr: 0.25,
+                        rl: -0.25,
+                        rr: 0.75,
+                    },
+                    smoothing_samples: 8,
+                },
+            }],
+        )
+        .unwrap();
+        let canceled_a_ticket = control.try_publish(canceled_a).expect("cancel ticket a");
+        let canceled_b_ticket = control.try_publish(canceled_b).expect("cancel ticket b");
+        let token = control.begin_cancel().expect("nonempty cancel");
+        assert!(render_block(&mut render, QUANTUM as u64).cancellation_only);
+        assert!(
+            control
+                .poll_cancel_boundary(token)
+                .expect("cancel ack")
+                .is_none()
+        );
+        assert_eq!(
+            control
+                .collect(canceled_a_ticket)
+                .expect("canceled a collect")
+                .disposition,
+            CoreTerminalDisposition::Canceled
+        );
+        assert_eq!(
+            control
+                .collect(canceled_b_ticket)
+                .expect("canceled b collect")
+                .disposition,
+            CoreTerminalDisposition::Canceled
+        );
+        assert!(
+            control
+                .poll_cancel_boundary(token)
+                .expect("final cancel")
+                .is_some()
+        );
+
+        let reused = BuiltinBatch::new(
+            REVISION,
+            SampleTime(QUANTUM as u64),
+            &[BuiltinBatchRecord::Fader {
+                track_index: 0,
+                record: TrackFaderRecord::Mute {
+                    lanes: BuiltinLaneSelector::Both,
+                    muted: false,
+                    smoothing_samples: 0,
+                },
+            }],
+        )
+        .unwrap();
+        let reused_ticket = control.try_publish(reused).expect("reused generation");
+        assert!(render_block(&mut render, QUANTUM as u64).applied.is_some());
+        control.collect(reused_ticket).expect("reused collect");
+    }
 }
 
 #[test]
@@ -623,6 +745,9 @@ fn endpoint_drives_nonzero_pcm_through_the_prepared_bank_and_scalar_plan() {
     let compiled = host_core::compile_host_session(SESSION, &caps()).expect("compile fixture");
     let console = HostConsoleRequest {
         control_queue_depth: Some(NonZeroUsize::new(host_core::BUILTIN_BATCH_MAX_RECORDS).unwrap()),
+        meter_period_frames: Some(core::num::NonZeroU32::new(QUANTUM as u32).unwrap()),
+        meter_queue_depth: NonZeroUsize::new(2).unwrap(),
+        meter_tap: MeterTap::PostFader,
         ..HostConsoleRequest::default()
     };
     let (baseline_host, mut baseline_handles) =
@@ -674,6 +799,28 @@ fn endpoint_drives_nonzero_pcm_through_the_prepared_bank_and_scalar_plan() {
         .producer
         .try_push(matrix)
         .expect("baseline matrix");
+    let scalar_fader = TrackFaderRecord::FaderDb {
+        lanes: BuiltinLaneSelector::Right,
+        db: -3.0,
+        smoothing_samples: 13,
+    };
+    let scalar_matrix = TrackControlRecord {
+        matrix: Matrix2x2 {
+            ll: 0.5,
+            lr: 0.25,
+            rl: -0.25,
+            rr: 0.75,
+        },
+        smoothing_samples: 11,
+    };
+    baseline_handles.track_controls[8]
+        .fader
+        .try_push(scalar_fader)
+        .expect("baseline scalar fader");
+    baseline_handles.track_controls[8]
+        .producer
+        .try_push(scalar_matrix)
+        .expect("baseline scalar matrix");
     let batch = BuiltinBatch::new(
         REVISION,
         SampleTime(0),
@@ -690,18 +837,42 @@ fn endpoint_drives_nonzero_pcm_through_the_prepared_bank_and_scalar_plan() {
                 track_index: 1,
                 record: matrix,
             },
+            BuiltinBatchRecord::Fader {
+                track_index: 8,
+                record: scalar_fader,
+            },
+            BuiltinBatchRecord::Matrix {
+                track_index: 8,
+                record: scalar_matrix,
+            },
         ],
     )
     .expect("batch");
     let ticket = control.try_publish(batch).expect("publish");
     let mut endpoint_samples = [0.0_f32; QUANTUM * 2];
     let mut baseline_samples = [0.0_f32; QUANTUM * 2];
-    let report = render
-        .render(&mut endpoint_samples, 2, QUANTUM, QUANTUM, SampleTime(0))
-        .expect("render");
     let baseline_report = baseline_render
         .render_planar(&mut baseline_samples, 2, QUANTUM, QUANTUM, 0)
         .expect("baseline render");
+    let baseline_post_fader = baseline_handles
+        .meters
+        .iter_mut()
+        .find(|meter| meter.track_id.as_ref() == "eq8")
+        .expect("baseline scalar post-fader meter")
+        .consumer
+        .try_pop()
+        .expect("baseline post-fader snapshot");
+    let report = render
+        .render(&mut endpoint_samples, 2, QUANTUM, QUANTUM, SampleTime(0))
+        .expect("render");
+    let endpoint_post_fader = control
+        .meters()
+        .iter_mut()
+        .find(|meter| meter.track_id.as_ref() == "eq8")
+        .expect("endpoint scalar post-fader meter")
+        .consumer
+        .try_pop()
+        .expect("endpoint post-fader snapshot");
     assert!(report.applied.is_some());
     assert_eq!(
         report.graph.map(|value| value.frames),
@@ -709,6 +880,14 @@ fn endpoint_drives_nonzero_pcm_through_the_prepared_bank_and_scalar_plan() {
     );
     assert_eq!(endpoint_samples, baseline_samples);
     assert!(endpoint_samples.iter().any(|sample| sample.to_bits() != 0));
+    assert_eq!(
+        endpoint_post_fader.left.sample_peak.to_bits(),
+        baseline_post_fader.left.sample_peak.to_bits()
+    );
+    assert_eq!(
+        endpoint_post_fader.right.sample_peak.to_bits(),
+        baseline_post_fader.right.sample_peak.to_bits()
+    );
     assert_eq!(
         control.collect(ticket).expect("collect").disposition,
         CoreTerminalDisposition::Applied
@@ -800,6 +979,30 @@ fn cancellation_before_claim_is_render_only_and_releases_after_collection() {
     assert_eq!(completion.actual_sample, None);
     assert_eq!(completion.acknowledged_sample, Some(SampleTime(0)));
     assert_eq!(control.outstanding(), 0);
+    let blocked_batch = BuiltinBatch::new(
+        REVISION,
+        SampleTime(0),
+        &[BuiltinBatchRecord::Fader {
+            track_index: 2,
+            record: TrackFaderRecord::Mute {
+                lanes: BuiltinLaneSelector::Both,
+                muted: false,
+                smoothing_samples: 0,
+            },
+        }],
+    )
+    .unwrap();
+    assert!(matches!(
+        control.try_publish(blocked_batch),
+        Err(BuiltinBatchAdmissionError::Delivery {
+            error: protocol::DeliveryError::CancellationPending,
+            ..
+        })
+    ));
+    assert_eq!(
+        control.begin_cancel(),
+        Err(protocol::DeliveryError::CancellationPending)
+    );
     let complete = control
         .poll_cancel_boundary(token)
         .expect("final cancel poll")
@@ -902,4 +1105,58 @@ fn cancellation_reconciles_applied_and_future_frontier_dispositions() {
         .expect("final cancel poll")
         .expect("cancel complete");
     assert_eq!(complete.frontier, Some(canceled_ticket.serial));
+
+    let next_applied = BuiltinBatch::new(
+        REVISION,
+        SampleTime(QUANTUM as u64),
+        &[BuiltinBatchRecord::Fader {
+            track_index: 0,
+            record: TrackFaderRecord::Mute {
+                lanes: BuiltinLaneSelector::Both,
+                muted: false,
+                smoothing_samples: 0,
+            },
+        }],
+    )
+    .unwrap();
+    let next_canceled = BuiltinBatch::new(
+        REVISION,
+        SampleTime((QUANTUM * 2) as u64),
+        &[BuiltinBatchRecord::Fader {
+            track_index: 1,
+            record: TrackFaderRecord::Mute {
+                lanes: BuiltinLaneSelector::Left,
+                muted: false,
+                smoothing_samples: 0,
+            },
+        }],
+    )
+    .unwrap();
+    let next_applied_ticket = control.try_publish(next_applied).expect("next applied");
+    let next_canceled_ticket = control.try_publish(next_canceled).expect("next canceled");
+    assert!(render_block(&mut render, QUANTUM as u64).applied.is_some());
+    let next_token = control.begin_cancel().expect("next cancel");
+    assert!(render_block(&mut render, (QUANTUM * 2) as u64).cancellation_only);
+    assert!(
+        control
+            .poll_cancel_boundary(next_token)
+            .expect("next cancel ack")
+            .is_none()
+    );
+    assert_eq!(
+        control.poll_cancel_boundary(token),
+        Err(protocol::DeliveryError::StaleTicket)
+    );
+    control
+        .collect(next_applied_ticket)
+        .expect("next applied collect");
+    control
+        .collect(next_canceled_ticket)
+        .expect("next canceled collect");
+    assert!(
+        control
+            .poll_cancel_boundary(next_token)
+            .expect("next final poll")
+            .is_some()
+    );
 }

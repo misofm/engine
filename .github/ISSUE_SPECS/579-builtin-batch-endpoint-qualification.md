@@ -206,3 +206,26 @@ the exact allowed paths cannot read the private `StartedRenderSession` plan, and
 scratch row plus PCM equality do not prove post-render paired dispatch counts. A smallest
 test-only accessor in `render_session.rs` or a rebriefed successor is required before claiming
 this gate.
+
+## Attempt 2 implementation record
+
+Attempt 2 corrected cached-token identity, retained cancellation completion gating, actual
+allocation/reuse observation, and PostFader endpoint comparison in the exact endpoint/test paths.
+The endpoint rejects publication and another cancellation from the last collection through the
+single retained completion report, then permits next-generation reuse. The focused integration
+suite passes 13 tests; the private sticky-fault and post-claim tests pass; strict Clippy,
+formatting, and diff checks pass with `builtins-compiler/test-support` selected.
+
+Endpoint and separately prepared console PCM and eq8 PostFader peaks match bitwise. The native
+x86-64-v3 target banks every fixture track, so it has no nonbanked scalar owner. The existing
+`builtins_compiler` witness APIs are dependency-feature gated: they are unavailable to the normal
+host-core integration command and, when the support feature is selected, the native fixture still
+reports an empty scalar trace. The calls therefore cannot persist within the exact frozen paths
+without a manifest or render-plan seam. A scalar-target execution or a smallest allowed seam is
+required for the explicitly nonbanked scalar target/ramp gate; this attempt does not claim it.
+Full target/policy and GitHub synchronization remain root-owned.
+
+Mutation 5 was changed to clear the sticky post-graph fault and render the cancellation boundary.
+The clean `Err(Empty)` collection assertion then failed with an actual `Ok(BuiltinBatchCompletion
+{ disposition: Canceled, acknowledged_sample: Some(SampleTime(128)), .. })`; the mutation was
+restored. Cargo.lock was restored after the gates.

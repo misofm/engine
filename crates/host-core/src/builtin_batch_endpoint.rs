@@ -5,9 +5,11 @@
 //! owner claims at most one batch, copies its complete contents into the already prepared builtin
 //! queues, and only finishes the ticket after the graph has rendered the block.
 
-use core::num::NonZeroUsize;
+use core::num::{NonZeroU32, NonZeroUsize};
 
-use builtins_compiler::{TrackControlProducer, TrackControlRecord, TrackFaderRecord};
+use builtins_compiler::{
+    MeterConsumer, TrackControlProducer, TrackControlRecord, TrackFaderRecord,
+};
 use engine::realtime::{
     Producer, QueueGeneration, RenderError, bounded_spsc, bounded_spsc_retained_payload,
 };
@@ -233,11 +235,13 @@ pub struct BuiltinBatchControl {
     quantum: u32,
     track_count: u32,
     sources: SourceControlSet,
+    meters: Vec<MeterConsumer>,
     report: HostPrepareReport,
     outstanding: usize,
     staged_outcome: Option<BuiltinBatchOutcome>,
     cancellation_started: bool,
     cancel_complete: Option<CoreCancelComplete>,
+    cancel_token: Option<CoreCancelToken>,
     cancel_completion_reported: bool,
     last_collected: Option<CoreTicket>,
 }
@@ -249,6 +253,12 @@ impl BuiltinBatchControl {
         &mut self,
         batch: BuiltinBatch,
     ) -> Result<CoreTicket, BuiltinBatchAdmissionError> {
+        if self.cancellation_started || self.cancel_complete.is_some() {
+            return Err(BuiltinBatchAdmissionError::Delivery {
+                batch,
+                error: DeliveryError::CancellationPending,
+            });
+        }
         if batch.revision != self.revision {
             return Err(BuiltinBatchAdmissionError::Invalid {
                 batch,
@@ -310,9 +320,13 @@ impl BuiltinBatchControl {
 
     /// Begin ordered cancellation of all accepted batches.
     pub fn begin_cancel(&mut self) -> Result<CoreCancelToken, DeliveryError> {
+        if self.cancellation_started || self.cancel_complete.is_some() {
+            return Err(DeliveryError::CancellationPending);
+        }
         let token = self.delivery.begin_cancel()?;
         self.cancellation_started = true;
         self.cancel_complete = None;
+        self.cancel_token = Some(token);
         self.cancel_completion_reported = false;
         Ok(token)
     }
@@ -322,6 +336,9 @@ impl BuiltinBatchControl {
         &mut self,
         token: CoreCancelToken,
     ) -> Result<Option<CoreCancelComplete>, DeliveryError> {
+        if self.cancel_token != Some(token) {
+            return Err(DeliveryError::StaleTicket);
+        }
         if let Some(complete) = self.cancel_complete {
             if self.outstanding != 0 {
                 return Ok(None);
@@ -330,17 +347,16 @@ impl BuiltinBatchControl {
                 return Err(DeliveryError::StaleTicket);
             }
             self.cancel_completion_reported = true;
+            self.cancellation_started = false;
+            self.cancel_complete = None;
+            self.cancel_token = None;
             return Ok(Some(complete));
         }
         let complete = self.delivery.poll_cancel_boundary(token)?;
         if let Some(complete) = complete {
             self.cancel_complete = Some(complete);
-            if self.outstanding == 0 {
-                self.cancellation_started = false;
-            }
         }
         if self.outstanding == 0 {
-            self.cancel_completion_reported = true;
             Ok(complete)
         } else {
             Ok(None)
@@ -396,6 +412,11 @@ impl BuiltinBatchControl {
     /// Borrow the existing host source control set retained by this endpoint.
     pub fn sources(&mut self) -> &mut SourceControlSet {
         &mut self.sources
+    }
+
+    /// Borrow the endpoint's per-track PostFader observers for host telemetry.
+    pub fn meters(&mut self) -> &mut [MeterConsumer] {
+        &mut self.meters
     }
 
     /// Address-free host preparation report.
@@ -756,6 +777,9 @@ pub fn prepare_builtin_batch_endpoint(
     }
     let console = HostConsoleRequest {
         control_queue_depth: Some(NonZeroUsize::new(BUILTIN_BATCH_MAX_RECORDS).unwrap()),
+        meter_period_frames: Some(NonZeroU32::new(compiled.quantum().0).unwrap()),
+        meter_queue_depth: NonZeroUsize::new(2).unwrap(),
+        meter_tap: builtins::MeterTap::PostFader,
         ..HostConsoleRequest::default()
     };
     let (host, handles) = prepare_host_runtime_with_console(compiled, caps, &console)
@@ -784,6 +808,7 @@ pub fn prepare_builtin_batch_endpoint(
     Ok(PreparedBuiltinBatchEndpoint {
         control: delivery,
         outcomes: outcome_consumer,
+        meters: handles.meters,
         host,
         render: PreparedBuiltinBatchRender {
             delivery: render_delivery,
@@ -821,6 +846,7 @@ pub fn prepare_builtin_batch_endpoint(
 pub struct PreparedBuiltinBatchEndpoint {
     control: DeliveryCoreControl<BuiltinBatch>,
     outcomes: engine::realtime::Consumer<BuiltinBatchOutcome>,
+    meters: Vec<MeterConsumer>,
     host: PreparedHost,
     render: PreparedBuiltinBatchRender,
     revision: SessionRevision,
@@ -845,6 +871,7 @@ impl PreparedBuiltinBatchEndpoint {
         let Self {
             control,
             outcomes: control_outcomes,
+            meters,
             host,
             render,
             revision,
@@ -859,6 +886,7 @@ impl PreparedBuiltinBatchEndpoint {
                     Self {
                         control,
                         outcomes: control_outcomes,
+                        meters,
                         host,
                         render,
                         revision,
@@ -902,11 +930,13 @@ impl PreparedBuiltinBatchEndpoint {
             quantum,
             track_count,
             sources,
+            meters,
             report,
             outstanding: 0,
             staged_outcome: None,
             cancellation_started: false,
             cancel_complete: None,
+            cancel_token: None,
             cancel_completion_reported: false,
             last_collected: None,
         };
@@ -969,9 +999,9 @@ mod tests {
             maximum_effect_scratch_bytes: u64::MAX,
             maximum_builtin_retained_bytes: u64::MAX,
             maximum_named_allocation_bytes: u64::MAX,
-            maximum_meter_streams: 1,
-            maximum_meter_items: 1,
-            maximum_meter_bytes: 1,
+            maximum_meter_streams: 64,
+            maximum_meter_items: 1 << 16,
+            maximum_meter_bytes: 1 << 24,
         }
     }
 
