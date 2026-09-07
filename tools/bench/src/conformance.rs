@@ -353,6 +353,7 @@ fn parse_rounds() -> u8 {
 mod tests {
     use super::{Metadata, Round, escape, json_record, percentile_nearest_rank};
     use bench_support::sysinfo::HostToolchainFacts;
+    use std::env;
 
     #[test]
     fn percentile_is_nearest_rank_and_escape_is_json_safe() {
@@ -399,7 +400,12 @@ mod tests {
             0x1234,
             &metadata,
         );
-        assert!(record.contains("\"timestamp_epoch_seconds\":1700000000,\"git_commit\":\"deadbeef\",\"workspace_dirty\":\"false\",\"cpu_model\":\"Conformance CPU\",\"architecture\":\"x86_64\",\"physical_cores\":\"8\",\"logical_cores\":\"unknown\",\"os\":\"linux\",\"kernel\":\"Linux-test\",\"power_source\":\"AC\",\"governor_or_power_mode\":\"\",\"compiler\":\"rustc test 1.0\",\"llvm_version\":\"LLVM test\",\"cargo_profile\":\"release\",\"opt_level\":\"2\",\"lto\":\"thin\",\"codegen_units\":\"16\",\"target_triple\":\"x86_64-test\",\"target_cpu\":\"native\",\"compile_target_features\":\"avx2-µ\"") );
+        let expected_metadata = format!(
+            "\"timestamp_epoch_seconds\":1700000000,\"git_commit\":\"deadbeef\",\"workspace_dirty\":\"false\",\"cpu_model\":\"Conformance CPU\",\"architecture\":\"{}\",\"physical_cores\":\"8\",\"logical_cores\":\"unknown\",\"os\":\"{}\",\"kernel\":\"Linux-test\",\"power_source\":\"AC\",\"governor_or_power_mode\":\"\",\"compiler\":\"rustc test 1.0\",\"llvm_version\":\"LLVM test\",\"cargo_profile\":\"release\",\"opt_level\":\"2\",\"lto\":\"thin\",\"codegen_units\":\"16\",\"target_triple\":\"x86_64-test\",\"target_cpu\":\"native\",\"compile_target_features\":\"avx2-µ\"",
+            env::consts::ARCH,
+            env::consts::OS,
+        );
+        assert!(record.contains(&expected_metadata));
         assert!(record.contains("\"background_load_note\":\"quiet\",\"metadata_incomplete\":true,\"missing_metadata\":[\"logical_cores\"]"));
     }
 }

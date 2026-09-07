@@ -217,12 +217,17 @@ struct CommandOutput {
 
 enum SourceValue {
     Value(String),
-    Unavailable,
+    Absent,
+    NonUnicode,
 }
 
 impl SourceValue {
     fn from_snapshot(snapshot: &crate::metadata::Metadata, name: &'static str) -> Self {
-        snapshot.var(name).map_or(Self::Unavailable, Self::Value)
+        match snapshot.var(name) {
+            Ok(value) => Self::Value(value),
+            Err(std::env::VarError::NotPresent) => Self::Absent,
+            Err(std::env::VarError::NotUnicode(_)) => Self::NonUnicode,
+        }
     }
 }
 
@@ -230,6 +235,7 @@ impl SourceValue {
 mod tests {
     use super::{
         CommandOutput, HostToolchainFacts, SourceValue, Sources, count_cores, physical_core_count,
+        source_variable,
     };
     use std::collections::BTreeMap;
 
@@ -314,18 +320,18 @@ mod tests {
             kernel: None,
             logical_cores: None,
             environment: env([
-                ("MISO_ENGINE_BENCH_POWER_SOURCE", SourceValue::Unavailable),
+                ("MISO_ENGINE_BENCH_POWER_SOURCE", SourceValue::Absent),
                 (
                     "MISO_ENGINE_BENCH_GOVERNOR_OR_POWER_MODE",
                     SourceValue::Value("".into()),
                 ),
                 ("MISO_ENGINE_BENCH_OPT_LEVEL", SourceValue::Value("".into())),
-                ("MISO_ENGINE_BENCH_LTO", SourceValue::Unavailable),
+                ("MISO_ENGINE_BENCH_LTO", SourceValue::NonUnicode),
                 (
                     "MISO_ENGINE_BENCH_CODEGEN_UNITS",
                     SourceValue::Value("valid".into()),
                 ),
-                ("MISO_ENGINE_BENCH_TARGET_CPU", SourceValue::Unavailable),
+                ("MISO_ENGINE_BENCH_TARGET_CPU", SourceValue::Absent),
                 (
                     "MISO_ENGINE_BENCH_TARGET_FEATURES",
                     SourceValue::Value("unicode-µ".into()),
@@ -347,6 +353,49 @@ mod tests {
         assert_eq!(facts.opt_level, "unknown");
         assert_eq!(facts.target_cpu, "unknown");
         assert_eq!(facts.compile_target_features, "unicode-µ");
+    }
+
+    #[test]
+    fn absent_non_unicode_and_empty_environment_values_are_independently_injectable() {
+        let mut sources = populated_sources();
+        sources.governor = None;
+        sources.environment = env([
+            ("MISO_ENGINE_BENCH_POWER_SOURCE", SourceValue::Absent),
+            (
+                "MISO_ENGINE_BENCH_GOVERNOR_OR_POWER_MODE",
+                SourceValue::NonUnicode,
+            ),
+            (
+                "MISO_ENGINE_BENCH_OPT_LEVEL",
+                SourceValue::Value(String::new()),
+            ),
+            ("MISO_ENGINE_BENCH_LTO", SourceValue::Value("thin".into())),
+        ]);
+        assert_eq!(
+            source_variable(&sources.environment, "MISO_ENGINE_BENCH_POWER_SOURCE"),
+            "unknown"
+        );
+        assert_eq!(
+            source_variable(
+                &sources.environment,
+                "MISO_ENGINE_BENCH_GOVERNOR_OR_POWER_MODE"
+            ),
+            "unknown"
+        );
+        assert_eq!(
+            source_variable(&sources.environment, "MISO_ENGINE_BENCH_OPT_LEVEL"),
+            "unknown"
+        );
+        assert_eq!(
+            source_variable(&sources.environment, "MISO_ENGINE_BENCH_LTO"),
+            "thin"
+        );
+
+        let facts = HostToolchainFacts::from_sources(sources);
+        assert_eq!(facts.power_source, "unknown");
+        assert_eq!(facts.governor_or_power_mode, "unknown");
+        assert_eq!(facts.opt_level, "unknown");
+        assert_eq!(facts.lto, "thin");
     }
 
     #[test]

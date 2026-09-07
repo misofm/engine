@@ -430,6 +430,7 @@ mod tests {
     };
     use bench_support::sysinfo::HostToolchainFacts;
     use session::{canonical_session_json, parse_session_json};
+    use std::env;
 
     #[test]
     fn representative_fixture_has_the_frozen_workload_and_stable_bytes() {
@@ -515,7 +516,12 @@ mod tests {
             },
             &metadata,
         );
-        assert!(record.contains("\"timestamp_epoch_seconds\":1700000000,\"cpu_model\":\"Session CPU\",\"architecture\":\"x86_64\",\"physical_cores\":\"8\",\"logical_cores\":\"unknown\",\"os\":\"linux\",\"kernel\":\"Linux-test\",\"power_source\":\"AC\",\"governor_or_power_mode\":\"\",\"rustc_version\":\"rustc test 1.0\",\"llvm_version\":\"LLVM test\",\"cargo_profile\":\"release\",\"opt_level\":\"2\",\"lto\":\"thin\",\"codegen_units\":\"16\",\"target_triple\":\"x86_64-test\",\"target_cpu\":\"native\",\"compile_target_features\":\"avx2-µ\",\"runtime_or_browser\":\"wasm-🌐\"") );
+        let expected_metadata = format!(
+            "\"timestamp_epoch_seconds\":1700000000,\"cpu_model\":\"Session CPU\",\"architecture\":\"{}\",\"physical_cores\":\"8\",\"logical_cores\":\"unknown\",\"os\":\"{}\",\"kernel\":\"Linux-test\",\"power_source\":\"AC\",\"governor_or_power_mode\":\"\",\"rustc_version\":\"rustc test 1.0\",\"llvm_version\":\"LLVM test\",\"cargo_profile\":\"release\",\"opt_level\":\"2\",\"lto\":\"thin\",\"codegen_units\":\"16\",\"target_triple\":\"x86_64-test\",\"target_cpu\":\"native\",\"compile_target_features\":\"avx2-µ\",\"runtime_or_browser\":\"wasm-🌐\"",
+            env::consts::ARCH,
+            env::consts::OS,
+        );
+        assert!(record.contains(&expected_metadata));
         assert!(record.contains("\"background_load_note\":\"quiet\",\"metadata_incomplete\":true,\"missing_metadata\":[\"logical_cores\"]"));
     }
 }
