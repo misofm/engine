@@ -15,6 +15,15 @@ pub use runtime::{
     test_only_prepare_bank_chain_inputs, test_only_reset_bank_chain_construction_facts,
 };
 
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub use runtime::{
+    TestOnlyFailedBufferCapture, TestOnlySelectedSplitFader, test_only_arm_failed_buffer_capture,
+    test_only_completion_disabled, test_only_failed_buffer_capture,
+    test_only_reset_selected_split_fader, test_only_selected_split_fader,
+    test_only_set_completion_disabled,
+};
+
 use core::cell::Cell;
 use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet};
@@ -1638,10 +1647,24 @@ impl PreparedPlanExecutor for GraphExecutor {
         }
         for unit in 0..runtime.units.len() {
             if let Err(error) = runtime.execute(unit, time.absolute_sample) {
+                #[cfg(any(test, feature = "test-support"))]
+                if !runtime::test_only_completion_disabled() {
+                    runtime.complete_pending(time.absolute_sample);
+                }
+                #[cfg(any(test, feature = "test-support"))]
+                runtime.test_only_capture_failed_buffer();
+                #[cfg(not(any(test, feature = "test-support")))]
                 runtime.complete_pending(time.absolute_sample);
                 return Err(error);
             }
             if let Err(error) = runtime.observe_unit(unit, time.absolute_sample) {
+                #[cfg(any(test, feature = "test-support"))]
+                if !runtime::test_only_completion_disabled() {
+                    runtime.complete_pending(time.absolute_sample);
+                }
+                #[cfg(any(test, feature = "test-support"))]
+                runtime.test_only_capture_failed_buffer();
+                #[cfg(not(any(test, feature = "test-support")))]
                 runtime.complete_pending(time.absolute_sample);
                 return Err(error);
             }

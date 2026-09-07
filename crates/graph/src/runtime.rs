@@ -43,6 +43,111 @@ use engine::realtime::{ArenaLease, ArenaLeaseSetBuilder, RenderError};
 /// The arena reserves buffer zero as the always-zero silence slot, so every executor buffer is
 /// offset by one.
 pub(crate) const ARENA_BASE: u32 = 1;
+
+/// A bounded, render-local witness for the private post-fader buffer at a failed render boundary.
+///
+/// This exists only for the split-owner qualification fixture. The capture is copied into fixed
+/// storage on the render thread and read after the call returns; it is not a production diagnostic
+/// or an observer path.
+#[cfg(any(test, feature = "test-support"))]
+const TEST_ONLY_FAILED_BUFFER_CAPACITY: usize = 128;
+
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TestOnlyFailedBufferCapture {
+    pub captured: bool,
+    pub overflow: bool,
+    pub frames: usize,
+    pub left: [u32; TEST_ONLY_FAILED_BUFFER_CAPACITY],
+    pub right: [u32; TEST_ONLY_FAILED_BUFFER_CAPACITY],
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Default for TestOnlyFailedBufferCapture {
+    fn default() -> Self {
+        Self {
+            captured: false,
+            overflow: false,
+            frames: 0,
+            left: [0; TEST_ONLY_FAILED_BUFFER_CAPACITY],
+            right: [0; TEST_ONLY_FAILED_BUFFER_CAPACITY],
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static TEST_ONLY_FAILED_BUFFER_TARGET: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+    static TEST_ONLY_FAILED_BUFFER: std::cell::Cell<TestOnlyFailedBufferCapture> =
+        const { std::cell::Cell::new(TestOnlyFailedBufferCapture {
+            captured: false,
+            overflow: false,
+            frames: 0,
+            left: [0; TEST_ONLY_FAILED_BUFFER_CAPACITY],
+            right: [0; TEST_ONLY_FAILED_BUFFER_CAPACITY],
+        }) };
+    static TEST_ONLY_COMPLETION_DISABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn test_only_arm_failed_buffer_capture(buffer: u32) {
+    TEST_ONLY_FAILED_BUFFER_TARGET.with(|target| target.set(Some(buffer)));
+    TEST_ONLY_FAILED_BUFFER.with(|capture| capture.set(TestOnlyFailedBufferCapture::default()));
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[must_use]
+#[doc(hidden)]
+pub fn test_only_failed_buffer_capture() -> TestOnlyFailedBufferCapture {
+    TEST_ONLY_FAILED_BUFFER.with(std::cell::Cell::get)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn test_only_set_completion_disabled(disabled: bool) {
+    TEST_ONLY_COMPLETION_DISABLED.with(|value| value.set(disabled));
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[must_use]
+#[doc(hidden)]
+pub fn test_only_completion_disabled() -> bool {
+    TEST_ONLY_COMPLETION_DISABLED.with(std::cell::Cell::get)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TestOnlySelectedSplitFader {
+    pub node: GraphNodeId,
+    pub buffer: u32,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static TEST_ONLY_SELECTED_SPLIT_FADER:
+        std::cell::RefCell<Option<TestOnlySelectedSplitFader>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn test_only_reset_selected_split_fader() {
+    TEST_ONLY_SELECTED_SPLIT_FADER.with(|selected| *selected.borrow_mut() = None);
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[must_use]
+#[doc(hidden)]
+pub fn test_only_selected_split_fader() -> Option<TestOnlySelectedSplitFader> {
+    TEST_ONLY_SELECTED_SPLIT_FADER.with(|selected| selected.borrow().clone())
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn test_only_record_selected_split_fader(node: GraphNodeId, buffer: u32) {
+    TEST_ONLY_SELECTED_SPLIT_FADER.with(|selected| {
+        *selected.borrow_mut() = Some(TestOnlySelectedSplitFader { node, buffer });
+    });
+}
 use effect_contract::{
     BypassShunt, ChannelSymmetryWitness, EffectControlLane, EffectProcessBlock, ObservationLane,
     ObservationSample, PreparedAutomationSpan, PreparedNativeEffect,
@@ -1024,6 +1129,27 @@ impl Runtime {
     /// The audio of one buffer, shared.
     pub(crate) fn buffer(&self, buffer: u32) -> (&[f32], &[f32]) {
         self.lease.read_stereo(buffer)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn test_only_capture_failed_buffer(&self) {
+        let Some(buffer) = TEST_ONLY_FAILED_BUFFER_TARGET.with(std::cell::Cell::get) else {
+            return;
+        };
+        let (left, right) = self.buffer(ARENA_BASE + buffer);
+        let mut capture = TestOnlyFailedBufferCapture::default();
+        capture.captured = true;
+        capture.frames = left.len();
+        capture.overflow = left.len() > TEST_ONLY_FAILED_BUFFER_CAPACITY;
+        for (index, sample) in left
+            .iter()
+            .take(TEST_ONLY_FAILED_BUFFER_CAPACITY)
+            .enumerate()
+        {
+            capture.left[index] = sample.to_bits();
+            capture.right[index] = right[index].to_bits();
+        }
+        TEST_ONLY_FAILED_BUFFER.with(|value| value.set(capture));
     }
 
     /// Runs unit `index`. Every producer this unit reads precedes it in `units`, or was written
@@ -2140,6 +2266,8 @@ pub(crate) fn build_sequential(
     parts: RuntimeParts,
     frames: usize,
 ) -> Runtime {
+    #[cfg(any(test, feature = "test-support"))]
+    test_only_reset_selected_split_fader();
     let mut parts = parts;
     // The arena reserves buffer 0 as the always-zero silence slot, so a coloured buffer `b` is
     // arena buffer `b + ARENA_BASE`.
@@ -2350,6 +2478,11 @@ pub(crate) fn build_sequential(
             };
             match factory(fader_owner, matrix_owner) {
                 Ok(owner) => {
+                    #[cfg(any(test, feature = "test-support"))]
+                    test_only_record_selected_split_fader(
+                        fader_node.clone(),
+                        program.ops[fader].output.0,
+                    );
                     let pair = split_pairs.len();
                     split_pairs.push(owner);
                     parts.split_pairs.insert(
