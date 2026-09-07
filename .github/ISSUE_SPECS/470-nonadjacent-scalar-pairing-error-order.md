@@ -166,3 +166,38 @@ full invalid `F_A/F_B/M_A/M_B` and retry table, intervening observer error, ramp
 selection mutation proofs, complete decline/conflict/overlap matrix, resource charging,
 allocation/free/off-render ownership evidence, release gates and target/artifact qualification
 remain. No benchmark or artifact qualification ran, and no performance claim is made.
+
+## Luna attempt 1 boundary and resource checkpoint
+
+Pushed head `ee158ab9` adds a second coherent tranche in three already authorized paths:
+`builtins-compiler/src/lib.rs`, `builtins-compiler/tests/allocation_tracker.rs` and
+`graph-compiler/src/lib.rs`. The new discriminating reference graphs explicitly disable the split
+factory; preparation assertions require one selected split owner for the candidate and zero for the
+separate reference. The invalid `F_A`, `F_B`, `M_A` and `M_B` table compares first error, queue
+prefix/tail, retained state and retry behavior. An observer on intervening `M_A` proves the pending
+`F_B` fader is completed before error return, its later matrix command remains queued, and retry
+matches separate-owner PCM/state before settled fusion resumes.
+
+The retained resource estimate now reserves the larger of the adjacent and split outer-owner
+layouts for every possible scalar pair. Independent allocation tracking proves a selected split
+render allocates and frees nothing, then releases its original owners and outer exactly once off
+render. The checked allowance covers two possible split outers while the adjacent accounting
+fixture retains its smaller selected outer; the measured layout relationship is asserted without
+hard-coding platform byte sizes.
+
+Luna and root reproduced `cargo test --locked -p builtins-compiler --lib` (42 passed),
+`cargo test --locked -p builtins-compiler --features test-support --test allocation_tracker`
+(8 passed) and `cargo test --locked -p graph-compiler --lib` (65 passed). Graph's existing 58-test
+suite, format and diff checks also pass. Root rejected and corrected one self-comparison in the
+initial test draft before this checkpoint: the separate references had accidentally enabled the
+same split factory. The pushed tests now fail that regression through explicit preparation
+witnesses.
+
+This remains attempt 1 without source PASS. The production graph-compiler fixture proves the real
+level-major `F_A,F_B,M_A,M_B` ordering under a scalar registry, but that artifact's current buffer
+coloring does not expose an in-place fader/matrix output pair and therefore cannot select the split
+owner. The existing builtins prepared harness still supplies the live same-buffer selection proof.
+Before review, root must resolve this applicability contradiction against the issue's claimed
+production same-buffer population rather than relabel the harness as production. Ramping and
+retarget boundary assertions, the complete physical-conflict/overlap decline table, failure-path
+allocation evidence, release/static/target gates and lane-B artifact qualification also remain.
