@@ -1,0 +1,18 @@
+{
+  "argv": [
+    "codex",
+    "exec",
+    "-m",
+    "gpt-6-astra",
+    "-c",
+    "model_reasoning_effort=\"medium\"",
+    "-s",
+    "danger-full-access",
+    "-C",
+    "/home/bl/misofm/engine-gate-detector-access",
+    "-o",
+    "/tmp/issue534-astra-medium-workflow-unsandboxed.md",
+    "-"
+  ],
+  "reason": "Environment bubblewrap cannot create loopback namespace; task remains explicitly read-only under already authorized full-access environment."
+}

@@ -1,0 +1,67 @@
+{
+  "claim": "Actual linked production caller captures only; instruction/access conclusions await Astra medium review. No timing or published artifact identity claim.",
+  "modules": {
+    "scalar": {
+      "path": "/tmp/issue534-web-scalar/wasm32-unknown-unknown/release/host_web.wasm",
+      "bytes": 24441956,
+      "sha256": "508a78cf7e088c31d820b0776cf331786d76f0aa5a86db31fe3592817272ac83",
+      "disassembly_sha256": "80733f318077f0d9aa90d20802a1e4faf5b45be9cc1c8776920f6050ba0f4f57"
+    },
+    "simd128": {
+      "path": "/tmp/issue534-web-simd128/wasm32-unknown-unknown/release/host_web.wasm",
+      "bytes": 23374428,
+      "sha256": "d1746597003ecc6b92fe2d7939a204c5007ec5cc8f17ccd7e4b28359b71e683d",
+      "disassembly_sha256": "7c036760ce7f1d9e6442808b6c2d68871efbb1584be421318b979491790487ba"
+    }
+  },
+  "extracts": [
+    {
+      "path": "scalar-prepared-gate-func-802.wat.txt",
+      "original": "/tmp/issue534-root-lowering/decode-scalar.stdout",
+      "first_line": 508639,
+      "last_line": 513375,
+      "header": "113d7c func[802] <_RNvXs_Cs8g1hiCeso0T_13gate_expanderINtB4_12PreparedGatefKb0_ENtCs7ywmIn0v2f9_15effect_contract20PreparedNativeEffect7processB4_>:",
+      "sha256": "be2239989498973697182ccdd503c922d4411f7a213cfd6c5ebc6c60bcb98004"
+    },
+    {
+      "path": "scalar-prepared-gate-func-807.wat.txt",
+      "original": "/tmp/issue534-root-lowering/decode-scalar.stdout",
+      "first_line": 514351,
+      "last_line": 520764,
+      "header": "117001 func[807] <_RNvXs_Cs8g1hiCeso0T_13gate_expanderINtB4_12PreparedGatefKb1_ENtCs7ywmIn0v2f9_15effect_contract20PreparedNativeEffect7processB4_>:",
+      "sha256": "0d4d49d327b6abc3660f9098975b71bab4d34ecb3e20b221efa839aa11aa566e"
+    },
+    {
+      "path": "simd128-prepared-gate-func-859.wat.txt",
+      "original": "/tmp/issue534-root-lowering/decode-simd128.stdout",
+      "first_line": 444925,
+      "last_line": 449701,
+      "header": "0f7934 func[859] <_RNvXs_Cs8g1hiCeso0T_13gate_expanderINtB4_12PreparedGatefKb0_ENtCs7ywmIn0v2f9_15effect_contract20PreparedNativeEffect7processB4_>:",
+      "sha256": "e203f2f6f6cbee5b2ae3746ac1dfc34f0d6f7e923647d00f1b441d1b849e0f67"
+    },
+    {
+      "path": "simd128-prepared-gate-func-864.wat.txt",
+      "original": "/tmp/issue534-root-lowering/decode-simd128.stdout",
+      "first_line": 450990,
+      "last_line": 457283,
+      "header": "0fb290 func[864] <_RNvXs_Cs8g1hiCeso0T_13gate_expanderINtB4_12PreparedGatefKb1_ENtCs7ywmIn0v2f9_15effect_contract20PreparedNativeEffect7processB4_>:",
+      "sha256": "f540bba54a54de6ee5069bc6d08a3db4c64747888148e45a7a8ba54134750ac9"
+    },
+    {
+      "path": "simd128-prepared-gate-func-865.wat.txt",
+      "original": "/tmp/issue534-root-lowering/decode-simd128.stdout",
+      "first_line": 457284,
+      "last_line": 462600,
+      "header": "0fef00 func[865] <_RNvXsd_Cs8g1hiCeso0T_13gate_expanderINtB5_12PreparedGateNtNtCshTO37R3KJUo_4wide6f32x4_5f32x4Kb0_ENtCs7ywmIn0v2f9_15effect_contract24PreparedNativeEffectBank12process_bank>:",
+      "sha256": "9616cf6f52b58080429b2146875b430859cbfe2565be9e2c22af0a39960fc796"
+    },
+    {
+      "path": "simd128-prepared-gate-func-872.wat.txt",
+      "original": "/tmp/issue534-root-lowering/decode-simd128.stdout",
+      "first_line": 463898,
+      "last_line": 463903,
+      "header": "102dc0 func[872] <_RNvYINtCs8g1hiCeso0T_13gate_expander12PreparedGateNtNtCshTO37R3KJUo_4wide6f32x4_5f32x4Kb0_ENtCs7ywmIn0v2f9_15effect_contract24PreparedNativeEffectBank17process_bank_monoB5_>:",
+      "sha256": "7ef74405bc947288373094607b241482cdca33d12af9388a987df5f110729bf4"
+    }
+  ]
+}

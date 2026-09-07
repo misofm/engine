@@ -154,3 +154,7 @@ Luna xhigh repaired the linked-equal consumed partner mapping and the same priva
 ## Attempt2 public identity fixture checkpoint
 
 The existing scalar/W8 identity test retains its equal profile and adds one non-palindromic lookahead profile under all three link modes. identity debug/release each pass3 tests; unchanged state debug/release each pass8. All captures include actual identity/state source hashes. Only identity.rs changes in this tranche. Existing state-suite PASS is regression evidence; it does not by itself establish a populated equal/unequal reclassification transition. That precise state-coverage attribution remains to be resolved within the frozen bounded case before final review. Mutation, lowering and remaining proportional gates are pending.
+
+## Actual production Wasm inspection capture
+
+Astra medium identified existing host-web linked production callers, avoiding a new corpus or callsite-wiring change. Root scalar/simd128 release builds and actual wasm-objdump metadata/disassembly all exit0. Exact source/toolchain/command/module/output identities and complete identified PreparedGate function extracts are retained in artifacts/issue534-production-wasm; full originals remain at recorded /tmp paths. Captured modules are unstripped inspection objects, not delivery artifact identities. Conditional access conclusions await the final Astra medium review. The original corpus wrapper is explicitly fallback-only evidence. A preliminary verifier sandbox failure is preserved and receives no verification credit.

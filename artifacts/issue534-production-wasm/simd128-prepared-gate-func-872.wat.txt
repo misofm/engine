@@ -1,0 +1,6 @@
+102dc0 func[872] <_RNvYINtCs8g1hiCeso0T_13gate_expander12PreparedGateNtNtCshTO37R3KJUo_4wide6f32x4_5f32x4Kb0_ENtCs7ywmIn0v2f9_15effect_contract24PreparedNativeEffectBank17process_bank_monoB5_>:
+ 102dc1: 20 00                      | local.get 0
+ 102dc3: 20 01                      | local.get 1
+ 102dc5: 20 02                      | local.get 2
+ 102dc7: 10 e1 86 80 80 00          | call 865 <_RNvXsd_Cs8g1hiCeso0T_13gate_expanderINtB5_12PreparedGateNtNtCshTO37R3KJUo_4wide6f32x4_5f32x4Kb0_ENtCs7ywmIn0v2f9_15effect_contract24PreparedNativeEffectBank12process_bank>
+ 102dcd: 0b                         | end

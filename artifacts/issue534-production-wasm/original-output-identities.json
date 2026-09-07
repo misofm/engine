@@ -1,0 +1,197 @@
+{
+  "decoder-version.status": {
+    "path": "/tmp/issue534-root-lowering/decoder-version.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  "metadata-scalar.stderr": {
+    "path": "/tmp/issue534-root-lowering/metadata-scalar.stderr",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "decode-simd128.command.json": {
+    "path": "/tmp/issue534-root-lowering/decode-simd128.command.json",
+    "bytes": 2099,
+    "sha256": "09b848902d8e82426b9d7a335b12b83cddc80209cb2a86168505b493b87b6eef"
+  },
+  "simd128-prepared-gate-func-859.wat.txt": {
+    "path": "/tmp/issue534-root-lowering/simd128-prepared-gate-func-859.wat.txt",
+    "bytes": 326301,
+    "sha256": "e203f2f6f6cbee5b2ae3746ac1dfc34f0d6f7e923647d00f1b441d1b849e0f67"
+  },
+  "decode-scalar.stderr": {
+    "path": "/tmp/issue534-root-lowering/decode-scalar.stderr",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "scalar-prepared-gate-func-807.wat.txt": {
+    "path": "/tmp/issue534-root-lowering/scalar-prepared-gate-func-807.wat.txt",
+    "bytes": 617342,
+    "sha256": "0d4d49d327b6abc3660f9098975b71bab4d34ecb3e20b221efa839aa11aa566e"
+  },
+  "metadata-simd128.status": {
+    "path": "/tmp/issue534-root-lowering/metadata-simd128.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  "simd128-prepared-gate-func-864.wat.txt": {
+    "path": "/tmp/issue534-root-lowering/simd128-prepared-gate-func-864.wat.txt",
+    "bytes": 602864,
+    "sha256": "f540bba54a54de6ee5069bc6d08a3db4c64747888148e45a7a8ba54134750ac9"
+  },
+  "host-web-simd128.command.json": {
+    "path": "/tmp/issue534-root-lowering/host-web-simd128.command.json",
+    "bytes": 2227,
+    "sha256": "d041aa232283f56437439dc82d6e55d4de141c018ddc5fa515bea39535234be5"
+  },
+  "decode-scalar.command.json": {
+    "path": "/tmp/issue534-root-lowering/decode-scalar.command.json",
+    "bytes": 2098,
+    "sha256": "602b3739ff9b733efedb1acaccbe1dc31a84b00d85a90a1bb846948fbe79c724"
+  },
+  "metadata-simd128.stdout": {
+    "path": "/tmp/issue534-root-lowering/metadata-simd128.stdout",
+    "bytes": 1594300,
+    "sha256": "837884e0e5d579561656313fc8f8129d4a026ad7cdeedfc8cf24120e0bf6b41a"
+  },
+  "metadata-simd128.stderr": {
+    "path": "/tmp/issue534-root-lowering/metadata-simd128.stderr",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "decode-scalar.stdout": {
+    "path": "/tmp/issue534-root-lowering/decode-scalar.stdout",
+    "bytes": 90908983,
+    "sha256": "80733f318077f0d9aa90d20802a1e4faf5b45be9cc1c8776920f6050ba0f4f57"
+  },
+  "metadata-scalar.status": {
+    "path": "/tmp/issue534-root-lowering/metadata-scalar.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  "scalar-prepared-gate-func-802.wat.txt": {
+    "path": "/tmp/issue534-root-lowering/scalar-prepared-gate-func-802.wat.txt",
+    "bytes": 327589,
+    "sha256": "be2239989498973697182ccdd503c922d4411f7a213cfd6c5ebc6c60bcb98004"
+  },
+  "decode-simd128.stdout": {
+    "path": "/tmp/issue534-root-lowering/decode-simd128.stdout",
+    "bytes": 78337063,
+    "sha256": "7c036760ce7f1d9e6442808b6c2d68871efbb1584be421318b979491790487ba"
+  },
+  "decoder-version.stdout": {
+    "path": "/tmp/issue534-root-lowering/decoder-version.stdout",
+    "bytes": 7,
+    "sha256": "989e2e78e20053890f21593eef0061d5b45d51bbfbf53fe28b68a43a1818d324"
+  },
+  "metadata-simd128.command.json": {
+    "path": "/tmp/issue534-root-lowering/metadata-simd128.command.json",
+    "bytes": 2099,
+    "sha256": "b06bfa386e3bb4f798720925db840da66c551cc4228d2466c491ec56d3c3d80c"
+  },
+  "metadata-scalar.stdout": {
+    "path": "/tmp/issue534-root-lowering/metadata-scalar.stdout",
+    "bytes": 1514202,
+    "sha256": "cbe6e511866a5d60f1cc4ef6e4737cd3f30467ec392535d59e6499413c592426"
+  },
+  "production-wasm-identity.json": {
+    "path": "/tmp/issue534-root-lowering/production-wasm-identity.json",
+    "bytes": 3599,
+    "sha256": "cddde77fca6c65b2cebc4aa3fae3bd904972b13197a25daa7ee2a1163345ef21"
+  },
+  "decode-simd128.stderr": {
+    "path": "/tmp/issue534-root-lowering/decode-simd128.stderr",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "decoder-version.command.json": {
+    "path": "/tmp/issue534-root-lowering/decoder-version.command.json",
+    "bytes": 2028,
+    "sha256": "8a02a89b4c28aa0e1b8dc8920959bdbd2051cc60eb3f519d03487b4c209fe212"
+  },
+  "simd128-prepared-gate-func-872.wat.txt": {
+    "path": "/tmp/issue534-root-lowering/simd128-prepared-gate-func-872.wat.txt",
+    "bytes": 607,
+    "sha256": "7ef74405bc947288373094607b241482cdca33d12af9388a987df5f110729bf4"
+  },
+  "host-web-scalar.status": {
+    "path": "/tmp/issue534-root-lowering/host-web-scalar.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  "host-web-scalar.stderr": {
+    "path": "/tmp/issue534-root-lowering/host-web-scalar.stderr",
+    "bytes": 3639,
+    "sha256": "9e1118bbc5f2a3c1b44898f02ac6a560abad057ce2376ebbff8b4cd68ff71b1a"
+  },
+  "decode-simd128.status": {
+    "path": "/tmp/issue534-root-lowering/decode-simd128.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  "rustc-version.status": {
+    "path": "/tmp/issue534-root-lowering/rustc-version.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  "host-web-scalar.command.json": {
+    "path": "/tmp/issue534-root-lowering/host-web-scalar.command.json",
+    "bytes": 2226,
+    "sha256": "0c0959e3a7fb6e569e965bec2fe8b2bd6b160bcf345db9d63ba0d72f920ee321"
+  },
+  "decode-scalar.status": {
+    "path": "/tmp/issue534-root-lowering/decode-scalar.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  "decoder-version.stderr": {
+    "path": "/tmp/issue534-root-lowering/decoder-version.stderr",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "host-web-simd128.status": {
+    "path": "/tmp/issue534-root-lowering/host-web-simd128.status",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  "rustc-version.stdout": {
+    "path": "/tmp/issue534-root-lowering/rustc-version.stdout",
+    "bytes": 196,
+    "sha256": "b2bdf493bcf6d1dc55181a0efc2774b6d9cf7bf5c8dcc5bed592c994b2ad38c4"
+  },
+  "rustc-version.command.json": {
+    "path": "/tmp/issue534-root-lowering/rustc-version.command.json",
+    "bytes": 2015,
+    "sha256": "dc2dd5df839b7defa65af06c4b11d3043421f40d6e4fa1f2e7e85af75cc10f91"
+  },
+  "simd128-prepared-gate-func-865.wat.txt": {
+    "path": "/tmp/issue534-root-lowering/simd128-prepared-gate-func-865.wat.txt",
+    "bytes": 435683,
+    "sha256": "9616cf6f52b58080429b2146875b430859cbfe2565be9e2c22af0a39960fc796"
+  },
+  "rustc-version.stderr": {
+    "path": "/tmp/issue534-root-lowering/rustc-version.stderr",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "host-web-scalar.stdout": {
+    "path": "/tmp/issue534-root-lowering/host-web-scalar.stdout",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "host-web-simd128.stderr": {
+    "path": "/tmp/issue534-root-lowering/host-web-simd128.stderr",
+    "bytes": 3639,
+    "sha256": "0dd63935606d2c53b5d8c458f4579706eccb4d0273d9262070354db8f7596dd2"
+  },
+  "host-web-simd128.stdout": {
+    "path": "/tmp/issue534-root-lowering/host-web-simd128.stdout",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "metadata-scalar.command.json": {
+    "path": "/tmp/issue534-root-lowering/metadata-scalar.command.json",
+    "bytes": 2098,
+    "sha256": "8dd7ae1224c442d1bb5185c9cd0ef19d618d28eb143d8c44ece9708afd9f4580"
+  }
+}
