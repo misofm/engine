@@ -155,6 +155,26 @@ impl<P: ControlProvider> ControllerAutomationDelivery<P> {
             .process_b1b_btlv_with_delivery_context(input, scratch, Some(&mut context))
     }
 
+    /// Process one complete command frame into caller-owned output through this facade's
+    /// delivery context. Structural session commands are refused before planning or commit.
+    pub fn process_command_frame_into(
+        &mut self,
+        input: &[u8],
+        scratch: &mut DecodeScratch<'_>,
+        output: &mut [u8],
+    ) -> Result<usize, crate::CommandFrameProcessError> {
+        let mut context = DeliveryContext {
+            state: &mut self.delivery,
+        };
+        self.controller
+            .process_command_frame_into_with_delivery_context(
+                input,
+                scratch,
+                output,
+                Some(&mut context),
+            )
+    }
+
     /// Hand off the next admitted batch to the render half when its fixed capability set supports
     /// every record in the batch.
     pub fn try_handoff_next(&mut self) -> Result<HandoffResult, DeliveryError> {
@@ -606,6 +626,100 @@ mod tests {
             .finish_applied(ticket, count)
             .expect("finish applied");
         facade.collect_terminal(ticket).expect("collect terminal");
+        assert_eq!(facade.outstanding(), 0);
+    }
+
+    #[test]
+    fn caller_buffer_frame_ingress_reserves_and_replays_through_facade() {
+        let (mut facade, _, _) = facade(8, &[(ParameterHandle(7), AutomationKind::Point)]);
+        let revision = facade.session().revision();
+        let records = [AutomationRecord {
+            kind: AutomationKind::Point,
+            handle: ParameterHandle(7),
+            start: SampleTime(1),
+            end: SampleTime(1),
+            start_value: 0.5,
+            end_value: 0.5,
+        }];
+        let encoded = encoded_enqueue(1, revision, &records);
+        let mut scratch_fields = [0_u16; 32];
+        let mut short = [0_u8; 2047];
+        assert!(matches!(
+            facade.process_command_frame_into(
+                &encoded,
+                &mut DecodeScratch::new(&mut scratch_fields),
+                &mut short,
+            ),
+            Err(CommandFrameProcessError::OutputReservationTooSmall { required: 2048 })
+        ));
+        assert_eq!(facade.outstanding(), 0);
+
+        let mut output = [0_u8; 2048];
+        let written = facade
+            .process_command_frame_into(
+                &encoded,
+                &mut DecodeScratch::new(&mut scratch_fields),
+                &mut output,
+            )
+            .expect("caller-buffer admission");
+        assert_eq!(facade.outstanding(), 1);
+        let response = output[..written].to_vec();
+        let mut one_below = vec![0_u8; written - 1];
+        assert!(matches!(
+            facade.process_command_frame_into(
+                &encoded,
+                &mut DecodeScratch::new(&mut scratch_fields),
+                &mut one_below,
+            ),
+            Err(CommandFrameProcessError::Encode(EncodeError::OutputTooSmall { required }))
+                if required == written
+        ));
+        assert_eq!(facade.outstanding(), 1);
+
+        output.fill(0xa5);
+        let replay_written = facade
+            .process_command_frame_into(
+                &encoded,
+                &mut DecodeScratch::new(&mut scratch_fields),
+                &mut output,
+            )
+            .expect("caller-buffer replay");
+        assert_eq!(&output[..replay_written], response.as_slice());
+        assert_eq!(facade.outstanding(), 1);
+    }
+
+    #[test]
+    fn caller_buffer_facade_refuses_structural_commands_before_planning() {
+        let (mut facade, _, _) = facade(8, &[(ParameterHandle(7), AutomationKind::Point)]);
+        let revision = facade.session().revision();
+        let edits = [SessionEdit::SetSessionId {
+            session_id: session::StableId::parse("caller-buffer-refused").unwrap(),
+        }];
+        let encoded = encoded_command(
+            1,
+            ExpectedRevision::Exact(revision),
+            CommandPayload::SessionTransactionApply(&edits),
+        );
+        let mut output = [0_u8; 2048];
+        let written = facade
+            .process_command_frame_into(
+                &encoded,
+                &mut DecodeScratch::new(&mut [0_u16; 32]),
+                &mut output,
+            )
+            .expect("structural refusal response");
+        let decoded = ProtocolCodec::default()
+            .decode_typed_response(
+                &output[..written],
+                &mut DecodeScratch::new(&mut [0_u16; 32]),
+            )
+            .unwrap();
+        let header = match decoded {
+            DecodedTypedResponseFrame::NonOk { header, .. } => header,
+            DecodedTypedResponseFrame::Success { .. } => panic!("structural command succeeded"),
+        };
+        assert_eq!(header.status, StatusCode::Unavailable);
+        assert_eq!(facade.session().revision(), revision);
         assert_eq!(facade.outstanding(), 0);
     }
 

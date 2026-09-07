@@ -1730,6 +1730,16 @@ impl<P: ControlProvider> ProtocolController<P> {
         scratch: &mut DecodeScratch<'_>,
         output: &mut [u8],
     ) -> Result<usize, CommandFrameProcessError> {
+        self.process_command_frame_into_with_delivery_context(input, scratch, output, None)
+    }
+
+    pub(crate) fn process_command_frame_into_with_delivery_context(
+        &mut self,
+        input: &[u8],
+        scratch: &mut DecodeScratch<'_>,
+        output: &mut [u8],
+        context: Option<&mut DeliveryContext<'_>>,
+    ) -> Result<usize, CommandFrameProcessError> {
         if self.structural_generation.load(Ordering::Acquire) & 1 != 0 {
             return Err(CommandFrameProcessError::PreparedCommandOutstanding);
         }
@@ -1737,9 +1747,12 @@ impl<P: ControlProvider> ProtocolController<P> {
             .codec
             .decode_command_header(input)
             .map_err(CommandFrameProcessError::Uncorrelatable)?;
+        if context.is_some() && header.message_id == MessageId::SessionTransactionApply {
+            return self.process_command_frame_into_legacy(input, scratch, output, context);
+        }
         match self.plan_structural_command(input, scratch, output.len(), header)? {
             StructuralCommandDisposition::Legacy => {
-                self.process_command_frame_into_legacy(input, scratch, output)
+                self.process_command_frame_into_legacy(input, scratch, output, context)
             }
             StructuralCommandDisposition::Immediate {
                 replay_plan,
@@ -2122,7 +2135,7 @@ impl<P: ControlProvider> ProtocolController<P> {
         PREPARED_IMMEDIATE_CALLS.with(|calls| calls.set(calls.get().saturating_add(1)));
         let capacity = output_capacity.min(self.replay.config().max_response_bytes);
         let mut bytes = vec![0_u8; capacity];
-        let written = self.process_command_frame_into_legacy(input, scratch, &mut bytes)?;
+        let written = self.process_command_frame_into_legacy(input, scratch, &mut bytes, None)?;
         bytes.truncate(written);
         Ok(PreparedCommandFrame::Immediate(
             PreparedImmediateCommandFrame { bytes },
@@ -2197,6 +2210,7 @@ impl<P: ControlProvider> ProtocolController<P> {
         input: &[u8],
         scratch: &mut DecodeScratch<'_>,
         output: &mut [u8],
+        context: Option<&mut DeliveryContext<'_>>,
     ) -> Result<usize, CommandFrameProcessError> {
         let header = self
             .codec
@@ -2238,7 +2252,7 @@ impl<P: ControlProvider> ProtocolController<P> {
         #[cfg(test)]
         TYPED_COMMAND_DECODES.with(|decodes| decodes.set(decodes.get().saturating_add(1)));
         let outcome = match self.codec.decode_typed_command(input, scratch) {
-            Ok(decoded) => self.execute_decoded_command(header, decoded.payload),
+            Ok(decoded) => self.execute_decoded_command(header, decoded.payload, context),
             Err(error) => self.non_ok(error.status(), None),
         };
         let (written, _, _) = self
@@ -2286,6 +2300,7 @@ impl<P: ControlProvider> ProtocolController<P> {
         &mut self,
         header: CommandHeader,
         payload: DecodedCommandPayload<'_>,
+        context: Option<&mut DeliveryContext<'_>>,
     ) -> Outcome {
         let command = match payload {
             DecodedCommandPayload::CapabilitiesGet => ControlCommand::CapabilitiesGet,
@@ -2296,12 +2311,15 @@ impl<P: ControlProvider> ProtocolController<P> {
                 }
             }
             DecodedCommandPayload::SessionTransactionApply(edits) => {
-                return self.execute(&ControllerRequest {
-                    request_id: header.request_id,
-                    expected_revision: header.expected_revision,
-                    canonical_bytes: &[],
-                    command: ControlCommand::SessionTransactionApply { edits: &edits },
-                });
+                return self.execute_with_delivery_context(
+                    &ControllerRequest {
+                        request_id: header.request_id,
+                        expected_revision: header.expected_revision,
+                        canonical_bytes: &[],
+                        command: ControlCommand::SessionTransactionApply { edits: &edits },
+                    },
+                    context,
+                );
             }
             DecodedCommandPayload::ParameterMetadataGet(request) => {
                 ControlCommand::ParameterMetadataGet { request }
