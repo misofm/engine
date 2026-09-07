@@ -541,6 +541,18 @@ vocabulary checks, browser expected-resource comparator with its 26 red mutation
 check, formatting and diff checks all returned zero. This was a consistency rerun after applying
 reviewed lineage, not a second qualification or timing run.
 
-The remaining delivery gate is one Astra LOW adversarial review of the exact final pushed branch
-against `origin/main`, followed by the required pull-request qualification and post-main run. #444
-continues to own `Concurrent` RT-4 behavior, and this issue makes no performance claim.
+## Final Astra LOW source verdict
+
+Astra LOW returned **PASS** on exact clean pushed head `93a45188` against `origin/main`. Seven
+nonadjacent behavior tests, nine allocation/resource tests, four CAPI lifecycle tests including the
+exact and one-below caps, the production selection and metadata-overflow fixtures, and the realtime
+policy's 42 regions across 12 files passed. The raw-Wasm oracle, checksum/results/matrix identity,
+and evidence checksum manifest also passed; all 75 gzip files decompressed identically to their
+preserved originals.
+
+The reviewer found the accepted attempt-2 selection, original execution/error order, observer
+completion, queue/state preservation, bounded ownership and resource charging intact. Native
+`+1,328/+2,656`, independently derived Wasm `+80`, SDK/three-browser evidence, preserved setup
+failures and post-pin consistency agree. #444 continues to own `Concurrent` RT-4 behavior, and
+this issue makes no performance claim. Required pull-request qualification, merged delivery and
+post-main qualification remain.
