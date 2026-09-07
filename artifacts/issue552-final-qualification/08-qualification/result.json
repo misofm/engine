@@ -1,0 +1,17 @@
+{
+  "name": "08-qualification",
+  "argv": [
+    "npm",
+    "run",
+    "qualify",
+    "--",
+    "--artifacts",
+    "/tmp/issue555-postpin-artifact",
+    "--browser",
+    "chromium",
+    "--check-matrix",
+    "--self-test-mutations"
+  ],
+  "cwd": "/home/bl/misofm/engine-js-hex-recovery/hosts/host-web/qualification",
+  "status": 1
+}

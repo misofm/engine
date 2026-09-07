@@ -1,0 +1,10 @@
+{
+  "name": "07-session-identities",
+  "argv": [
+    "npm",
+    "run",
+    "session-identities"
+  ],
+  "cwd": "/home/bl/misofm/engine-js-hex-recovery/hosts/host-web/qualification",
+  "status": 0
+}

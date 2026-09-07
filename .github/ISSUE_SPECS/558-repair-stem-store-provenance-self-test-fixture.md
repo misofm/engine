@@ -125,3 +125,17 @@ Actual Luna HIGH source d33ce9d9c7aeffd05c57f714ccff543093ce11d9 is pushed. Only
 Actual SolXHIGH returned PASS for558attempt1 at98dc4149, confirming exactlysixchangedlines, byte-identical productionvalidator/allparentproduct/provenance, sixattributableRED cases plus23priorcontrols, all16recordedstatuses0, and all86losslessrecords. Fullverdict and actualmodelprovenance are in artifacts/issue558-review.
 
 User requested safe stop for two fresh agents. This is accepted tooling source, not delivered product. Next owner may integrate the reviewed558checkpoint into552, preserve552three-attemptFAILhistory, complete543/555artifactprerequisites and all552finalgates, then reviewanddeliver the combinedcandidate. Do not merge558standalone ahead of unfinished552product.
+
+## Combined final qualification checkpoint
+
+Actual Luna HIGH completed the full #552 parent sequence on the integrated candidate
+`3881591d307c7b00e1cc7dfb431b3abf26874717`. The self-test executed and attributed all six
+provenance negative cases, the ordinary checker passed, every artifact and package gate passed, and
+the committed diff census confirmed this issue still owns only the six fixture-topology lines in
+`scripts/check-stem-store-v1.mjs`. The initial browser dependency preflight failure and the one
+successful spec-authorized retry against pinned Playwright `1.62.1` are both preserved; no source,
+dependency, lock, pin, or artifact changed. Complete evidence is in
+`artifacts/issue552-final-qualification`.
+
+Independent Astra LOW review, required PR qualification, merge, GitHub synchronization, and
+successful post-main qualification remain before coordinated #558/#552 closure.

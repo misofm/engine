@@ -409,3 +409,27 @@ the first failure. Under the user's revised verification routing, Astra LOW perf
 adversarial final review. Historical Sol XHIGH findings above retain their actual provenance and are
 not relabeled. Root owns every commit, push, GitHub update, artifact decision, PR, merge, closure,
 post-main qualification, and clean worktree removal.
+
+## Final qualification checkpoint — PASS pending Astra LOW review
+
+Actual Luna HIGH completed the frozen combined #552/#558 qualification at
+`3881591d307c7b00e1cc7dfb431b3abf26874717`. The delivered artifact contained exactly six files;
+all hashes matched, including the pinned Wasm digest. Direct helper/adaptor vectors, ordinary and
+self-test stem-store gates, strict SDK types, SDK headless, npm package closure, Node session
+identities, Chromium qualification, workspace policy, both committed-base diff checks, exact path
+census, and the full semantic census passed.
+
+The first Chromium invocation stopped before its workload because Playwright was absent from the
+isolated worktree. That failure is preserved. Root then used the brief's explicit environment
+provisioning allowance: current-main package and lock bytes matched, the existing installed package
+was pinned Playwright `1.62.1`, and only a temporary untracked `node_modules` symlink was added. The
+same command passed on its single retry using Chromium `151.0.7922.34`; the symlink was removed and
+the worktree returned clean at the same HEAD. No package install, source edit, repin, or artifact
+change occurred.
+
+The semantic census found exactly the three approved raw unprefixed byte encoders:
+`engine::hex_lower`, SDK `hexLower`, and host-web `hexLower`. All other hits were the already-allowed
+decorated diagnostics/repin renderers, uppercase Unicode escaping, a fixed-width FNV word, or fixed
+test literals. The lossless evidence is in `artifacts/issue552-final-qualification`. Closure remains
+pending independent Astra LOW PASS, required PR qualification, merge, GitHub synchronization, and
+successful post-main qualification.

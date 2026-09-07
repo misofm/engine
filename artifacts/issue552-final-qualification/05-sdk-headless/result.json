@@ -1,0 +1,10 @@
+{
+  "name": "05-sdk-headless",
+  "argv": [
+    "bash",
+    "scripts/check-sdk-headless.sh",
+    "/tmp/issue555-postpin-artifact"
+  ],
+  "cwd": "/home/bl/misofm/engine-js-hex-recovery",
+  "status": 0
+}

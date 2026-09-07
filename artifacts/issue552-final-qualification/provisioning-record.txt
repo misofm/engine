@@ -1,0 +1,25 @@
+Issue #552/#558 final qualification dependency provisioning record
+
+Decision owner: root
+Decision: provision one temporary symlink to the already-installed, byte-identical pinned
+qualification dependency directory; do not install or update packages. This is environment
+provisioning only and does not alter source/product attempt accounting.
+
+Target symlink:
+  /home/bl/misofm/engine-js-hex-recovery/hosts/host-web/qualification/node_modules
+Source directory:
+  /home/bl/misofm/engine/hosts/host-web/qualification/node_modules
+Resolved target:
+  /home/bl/misofm/engine/hosts/host-web/qualification/node_modules
+
+Repository/package identity hashes (target checkout and source checkout):
+  qualification/package.json 81a76f3233a35f3d387981087a4172fdafe81cee2be6f43417d1a3b3fbfebd6d
+  qualification/package-lock.json 37bfedc97da4e4377a45a0d88f2351263b77e160cde109620d23eaa9952ab069
+
+Installed dependency identity hashes (via target symlink):
+  playwright/package.json ca170ec143a88ed3043ac953eb3b2377b2b97304104f4e1e23316684ce2c35af
+  playwright-core/package.json 07c47543631fef9508760365dee9fbe958c562093ec8d122543949ed231f233f
+  playwright version 1.62.1
+  playwright-core version 1.62.1
+
+The initial gate-8 missing-playwright failure is preserved in 08-qualification/.

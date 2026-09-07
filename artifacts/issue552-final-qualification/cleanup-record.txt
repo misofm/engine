@@ -1,0 +1,5 @@
+Cleanup command (authorized temporary provisioning only):
+  argv: ["bash", "-lc", "test -L hosts/host-web/qualification/node_modules && test \"$(readlink hosts/host-web/qualification/node_modules)\" = /home/bl/engine/hosts/host-web/qualification/node_modules && unlink hosts/host-web/qualification/node_modules; test ! -e hosts/host-web/qualification/node_modules; git rev-parse HEAD; git status --short --branch; git diff --check"]
+  cwd: /home/bl/misofm/engine-js-hex-recovery
+  status: 0
+  output: HEAD=3881591d307c7b00e1cc7dfb431b3abf26874717; status clean; diff-check clean
