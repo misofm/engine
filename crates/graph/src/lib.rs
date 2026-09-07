@@ -2836,6 +2836,68 @@ mod tests {
     }
 
     #[test]
+    fn borrowed_sorted_bind_validation_preserves_set_semantics() {
+        // Caller order and duplicate/unsorted plan requirements retain the old set semantics.
+        let (mut plan, mut bindings, _) = binding_plan();
+        let output = plan
+            .required_bindings
+            .iter()
+            .find(|node| matches!(node, GraphNodeId::Output { .. }))
+            .cloned()
+            .expect("output");
+        let input = plan
+            .required_bindings
+            .iter()
+            .find(|node| matches!(node, GraphNodeId::TrackStage { .. }))
+            .cloned()
+            .expect("input");
+        plan.required_bindings = vec![output.clone(), input.clone(), output];
+        bindings.nodes.reverse();
+        match plan.bind(bindings) {
+            Ok(_) => {}
+            Err(failure) => panic!("set-equivalent binding rejected: {}", failure.code),
+        }
+
+        // A duplicated requirement for a bank-excluded member is filtered before set comparison.
+        let (mut bank_plan, bank_bindings, _) = four_track_builtin_plan(57_001, true, false);
+        let excluded = bank_plan.builtin_banks[0].members[0].clone();
+        bank_plan
+            .required_bindings
+            .extend([excluded.clone(), excluded]);
+        let bound = bank_plan
+            .bind(bank_bindings)
+            .unwrap_or_else(|failure| panic!("bank-excluded duplicate rejected: {}", failure.code));
+        assert_eq!(
+            render_three_blocks(bound).0.map(f32::to_bits),
+            [10.0, -15.0, 20.0, -30.0, 30.0, -45.0].map(f32::to_bits)
+        );
+
+        // Equal observer values split across plan and caller ownership reject and return both.
+        let (mut plan, mut bindings, input) = binding_plan();
+        let order = Arc::new(AtomicU64::new(0));
+        plan.observers.push(GraphNodeObserverBinding::new(
+            input.clone(),
+            7,
+            Box::new(W4OrderObserver {
+                lane: 0,
+                order: Arc::clone(&order),
+            }),
+        ));
+        bindings.observers.push(GraphNodeObserverBinding::new(
+            input,
+            7,
+            Box::new(W4OrderObserver { lane: 0, order }),
+        ));
+        let failure = match plan.bind(bindings) {
+            Ok(_) => panic!("value-equal split observers accepted"),
+            Err(failure) => failure,
+        };
+        assert_eq!(failure.code, "graph.plan.observer");
+        assert_eq!(failure.plan.observers.len(), 1);
+        assert_eq!(failure.bindings.observers.len(), 1);
+    }
+
+    #[test]
     fn binding_coverage_preserves_validation_and_ownership() {
         let assert_ok = |result: Result<PreparedRenderPlan, GraphBindFailure>| match result {
             Ok(_) => {}
