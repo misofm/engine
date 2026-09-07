@@ -1,0 +1,19 @@
+{
+  "argv": [
+    "/home/bl/.local/bin/codex",
+    "exec",
+    "-C",
+    "/home/bl/misofm/engine-native-runner-process-boundary",
+    "-s",
+    "danger-full-access",
+    "-m",
+    "gpt-5.6-sol",
+    "-c",
+    "model_reasoning_effort=\"xhigh\"",
+    "-o",
+    "/tmp/issue349-partials/547-sol-xhigh-attempt1.md",
+    "-"
+  ],
+  "cwd": "/home/bl/misofm/engine-native-runner-process-boundary",
+  "prompt": "/tmp/issue349-partials/547-review-prompt.md"
+}

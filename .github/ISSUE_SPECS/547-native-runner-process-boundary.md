@@ -25,3 +25,7 @@ Only the new integration test changes source; production/CLI/audio/fixtures/pins
 ## Coordinator terminal evidence correction
 
 Sol high confirmed the focused-green implementation and identified mislabeled original direct metadata probes: their command JSON said stat although they were composite probes. Original captures remain unchanged. The coordinator added truthful read-only accepted-file/partial-absence and rejected-final/partial-absence captures, plus untracked-source diff check, without repeating process workloads or source changes. These supplements and the terminal coordinator report are preserved in artifacts/issue547-coordinator. Actual Sol xhigh verification was launched by root, not the coordinator; final review must include this evidence correction.
+
+## Attempt1 Sol xhigh verdict and attempt2 evidence submission
+
+Sol xhigh froze review at b331b87b and returned FAIL solely for inaccurate direct-metadata command descriptions; all implementation and gates passed. Before that verdict returned, Sol high had already supplied truthful separate read-only file/absence probes and root pushed63e1acf4 documenting the originals as mislabeled and preserving them. The FAIL remains preserved. Submit those already-pushed corrections as bounded attempt2 evidence for Sol xhigh assessment; no source revision or Cargo/process workload rerun is needed or authorized. Final review must assess artifacts/issue547-coordinator and the corrected issue record, not only the earlier b331b87b snapshot.
