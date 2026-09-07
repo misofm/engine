@@ -1,0 +1,766 @@
+//! Prepared, typed delivery of bounded fader and matrix batches to a live host console.
+//!
+//! The endpoint owns the host preparation transaction and keeps the raw builtin producers inside
+//! the render owner. Control publishes one fixed batch through a generic delivery core; the render
+//! owner claims at most one batch, copies its complete contents into the already prepared builtin
+//! queues, and only finishes the ticket after the graph has rendered the block.
+
+use core::num::NonZeroUsize;
+
+use builtins_compiler::{TrackControlProducer, TrackControlRecord, TrackFaderRecord};
+use engine::realtime::{
+    Producer, QueueGeneration, RenderError, bounded_spsc, bounded_spsc_retained_payload,
+};
+use protocol::{
+    CoreCancelComplete, CoreCancelToken, CoreCompletion, CoreTerminalDisposition, CoreTicket,
+    DeliveryCoreControl, DeliveryCoreRender, DeliveryError, DeliveryResourceReport,
+    PreparedDelivery, SampleTime, SessionRevision,
+};
+
+use crate::diagnostics::PrepareDiagnostics;
+use crate::prepare::{
+    HostConsoleRequest, HostPrepareCaps, HostPrepareReport, PreparedHost,
+    prepare_host_runtime_with_console,
+};
+use crate::render_session::StartedRenderSession;
+use crate::source::SourceControlSet;
+
+/// The maximum number of records in one prepared builtin batch.
+pub const BUILTIN_BATCH_MAX_RECORDS: usize = 256;
+
+/// One addressed live fader or matrix operation.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BuiltinBatchRecord {
+    /// Retarget one track's fader or mute stage.
+    Fader {
+        /// Canonical normalized track index from the prepared host.
+        track_index: u32,
+        /// The existing typed fader/mute record.
+        record: TrackFaderRecord,
+    },
+    /// Retarget one track's matrix stage.
+    Matrix {
+        /// Canonical normalized track index from the prepared host.
+        track_index: u32,
+        /// The existing typed matrix record.
+        record: TrackControlRecord,
+    },
+}
+
+/// A fixed, copyable batch admitted by [`BuiltinBatchControl`].
+///
+/// Slots after `record_count` are ignored and remain `None`. The fixed backing array makes the
+/// render claim bounded and keeps publication independent of the caller's slice lifetime.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BuiltinBatch {
+    /// Exact prepared session revision.
+    pub revision: SessionRevision,
+    /// Requested absolute first sample of the block.
+    pub requested_sample: SampleTime,
+    record_count: u16,
+    records: [Option<BuiltinBatchRecord>; BUILTIN_BATCH_MAX_RECORDS],
+}
+
+/// Batch construction failure, retaining no borrowed input.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BuiltinBatchBuildError {
+    /// A batch must contain at least one record and at most 256 records.
+    RecordCount,
+}
+
+impl BuiltinBatch {
+    /// Build a fixed batch by copying the supplied records.
+    pub fn new(
+        revision: SessionRevision,
+        requested_sample: SampleTime,
+        records: &[BuiltinBatchRecord],
+    ) -> Result<Self, BuiltinBatchBuildError> {
+        if records.is_empty() || records.len() > BUILTIN_BATCH_MAX_RECORDS {
+            return Err(BuiltinBatchBuildError::RecordCount);
+        }
+        let mut slots = [None; BUILTIN_BATCH_MAX_RECORDS];
+        for (slot, record) in slots.iter_mut().zip(records.iter().copied()) {
+            *slot = Some(record);
+        }
+        Ok(Self {
+            revision,
+            requested_sample,
+            record_count: records.len() as u16,
+            records: slots,
+        })
+    }
+
+    /// Number of addressed records.
+    #[must_use]
+    pub const fn record_count(self) -> u16 {
+        self.record_count
+    }
+
+    /// Borrow the initialized record prefix.
+    pub fn records(&self) -> impl Iterator<Item = &BuiltinBatchRecord> {
+        self.records[..usize::from(self.record_count)]
+            .iter()
+            .filter_map(Option::as_ref)
+    }
+}
+
+/// Why control-side batch admission refused an owned batch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BuiltinBatchAdmissionReason {
+    /// The revision differs from the prepared session.
+    WrongRevision,
+    /// The requested sample is not aligned to the prepared quantum.
+    MisalignedSample,
+    /// A track index is outside the prepared normalized track set.
+    TrackIndex,
+    /// A fader value or matrix coefficient is outside its declared finite domain.
+    InvalidValue,
+    /// The requested sample cannot contain one complete prepared quantum.
+    SampleOverflow,
+}
+
+/// Typed admission refusal. The original fixed batch is returned unchanged.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BuiltinBatchAdmissionError {
+    /// Endpoint envelope or record validation failed.
+    Invalid {
+        /// The caller-owned batch that was not published.
+        batch: BuiltinBatch,
+        /// The first deterministic validation reason.
+        reason: BuiltinBatchAdmissionReason,
+    },
+    /// The bounded generic delivery service refused publication.
+    Delivery {
+        /// The caller-owned batch that was not published.
+        batch: BuiltinBatch,
+        /// The bounded delivery refusal.
+        error: DeliveryError,
+    },
+}
+
+/// An applied batch's requested/actual sample association.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BuiltinBatchApplication {
+    /// Delivery ticket associated with this application.
+    pub ticket: CoreTicket,
+    /// Requested batch sample.
+    pub requested_sample: SampleTime,
+    /// First render boundary that consumed the batch.
+    pub actual_sample: SampleTime,
+    /// Whether the requested sample was already behind the boundary.
+    pub late: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct BuiltinBatchOutcome {
+    ticket: CoreTicket,
+    requested_sample: SampleTime,
+    actual_sample: SampleTime,
+}
+
+/// One fully reconciled endpoint ticket.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BuiltinBatchCompletion {
+    /// The generic ticket.
+    pub ticket: CoreTicket,
+    /// The complete retained batch.
+    pub batch: BuiltinBatch,
+    /// Applied or canceled terminal disposition.
+    pub disposition: CoreTerminalDisposition,
+    /// Number of records injected before the terminal state.
+    pub applied_prefix: u16,
+    /// Number of records that remained unapplied.
+    pub remaining_count: u16,
+    /// Requested sample from the batch header.
+    pub requested_sample: SampleTime,
+    /// Actual application sample for Applied, or None for Canceled.
+    pub actual_sample: Option<SampleTime>,
+    /// Applied batches whose requested sample was late.
+    pub late: bool,
+    /// Cancellation boundary sample for canceled batches.
+    pub acknowledged_sample: Option<SampleTime>,
+}
+
+/// The endpoint's retained resource projection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BuiltinBatchResources {
+    /// Unchanged host preparation report, including actual live-console queues.
+    pub host: HostPrepareReport,
+    /// Generic typed delivery storage.
+    pub delivery: DeliveryResourceReport,
+    /// Endpoint outcome queue storage.
+    pub outcome: DeliveryResourceReport,
+    /// Combined endpoint retained bytes, including host preparation.
+    pub retained_bytes: u64,
+    /// Largest retained endpoint allocation.
+    pub largest_allocation_bytes: u64,
+    /// Inline control owner size.
+    pub control_inline_bytes: usize,
+    /// Inline prepared render owner size.
+    pub render_inline_bytes: usize,
+}
+
+/// Endpoint construction failure before any owner is published.
+#[derive(Debug)]
+pub enum BuiltinBatchPrepareError {
+    /// Existing host preparation rejected the session.
+    Host(PrepareDiagnostics),
+    /// Generic or outcome queue preparation failed.
+    Delivery(protocol::ProtocolQueueError),
+    /// The endpoint's composed retained report exceeded the host's builtin cap.
+    ResourceLimit,
+}
+
+/// Control-side owner of typed batch admission, cancellation and terminal collection.
+pub struct BuiltinBatchControl {
+    delivery: DeliveryCoreControl<BuiltinBatch>,
+    outcomes: engine::realtime::Consumer<BuiltinBatchOutcome>,
+    revision: SessionRevision,
+    quantum: u32,
+    track_count: u32,
+    sources: SourceControlSet,
+    report: HostPrepareReport,
+    outstanding: usize,
+}
+
+impl BuiltinBatchControl {
+    /// Validate the complete batch and publish it atomically into the bounded delivery core.
+    #[allow(clippy::result_large_err)]
+    pub fn try_publish(
+        &mut self,
+        batch: BuiltinBatch,
+    ) -> Result<CoreTicket, BuiltinBatchAdmissionError> {
+        if batch.revision != self.revision {
+            return Err(BuiltinBatchAdmissionError::Invalid {
+                batch,
+                reason: BuiltinBatchAdmissionReason::WrongRevision,
+            });
+        }
+        if !batch
+            .requested_sample
+            .0
+            .is_multiple_of(u64::from(self.quantum))
+        {
+            return Err(BuiltinBatchAdmissionError::Invalid {
+                batch,
+                reason: BuiltinBatchAdmissionReason::MisalignedSample,
+            });
+        }
+        if batch
+            .requested_sample
+            .0
+            .checked_add(u64::from(self.quantum))
+            .is_none()
+        {
+            return Err(BuiltinBatchAdmissionError::Invalid {
+                batch,
+                reason: BuiltinBatchAdmissionReason::SampleOverflow,
+            });
+        }
+        for record in batch.records() {
+            let (track_index, valid) = match *record {
+                BuiltinBatchRecord::Fader {
+                    track_index,
+                    record,
+                } => (track_index, valid_fader(record)),
+                BuiltinBatchRecord::Matrix {
+                    track_index,
+                    record,
+                } => (track_index, valid_matrix(record)),
+            };
+            if track_index >= self.track_count {
+                return Err(BuiltinBatchAdmissionError::Invalid {
+                    batch,
+                    reason: BuiltinBatchAdmissionReason::TrackIndex,
+                });
+            }
+            if !valid {
+                return Err(BuiltinBatchAdmissionError::Invalid {
+                    batch,
+                    reason: BuiltinBatchAdmissionReason::InvalidValue,
+                });
+            }
+        }
+        let ticket = self
+            .delivery
+            .try_publish(batch, batch.record_count)
+            .map_err(|error| BuiltinBatchAdmissionError::Delivery { batch, error })?;
+        self.outstanding = self.outstanding.saturating_add(1);
+        Ok(ticket)
+    }
+
+    /// Begin ordered cancellation of all accepted batches.
+    pub fn begin_cancel(&mut self) -> Result<CoreCancelToken, DeliveryError> {
+        self.delivery.begin_cancel()
+    }
+
+    /// Poll cancellation until the render boundary has acknowledged and all terminals are ready.
+    pub fn poll_cancel_boundary(
+        &mut self,
+        token: CoreCancelToken,
+    ) -> Result<Option<CoreCancelComplete>, DeliveryError> {
+        self.delivery.poll_cancel_boundary(token)
+    }
+
+    /// Reconcile one terminal and release its generic credit only after outcome reconciliation.
+    pub fn collect(&mut self, ticket: CoreTicket) -> Result<BuiltinBatchCompletion, DeliveryError> {
+        let completion = self.delivery.collect(ticket)?;
+        let outcome = if completion.disposition == CoreTerminalDisposition::Applied {
+            let outcome = self.outcomes.try_pop().map_err(|_| DeliveryError::Empty)?;
+            if outcome.ticket != ticket {
+                return Err(DeliveryError::StaleTicket);
+            }
+            Some(outcome)
+        } else {
+            None
+        };
+        self.outstanding = self.outstanding.saturating_sub(1);
+        Ok(completion_from_core(completion, outcome))
+    }
+
+    /// Number of accepted tickets still awaiting collection.
+    #[must_use]
+    pub fn outstanding(&self) -> usize {
+        self.outstanding
+    }
+
+    /// Borrow the existing host source control set retained by this endpoint.
+    pub fn sources(&mut self) -> &mut SourceControlSet {
+        &mut self.sources
+    }
+
+    /// Address-free host preparation report.
+    #[must_use]
+    pub const fn report(&self) -> HostPrepareReport {
+        self.report
+    }
+}
+
+/// Transferable endpoint render owner before thread-affine FP attestation.
+pub struct PreparedBuiltinBatchRender {
+    delivery: DeliveryCoreRender<BuiltinBatch>,
+    outcomes: Producer<BuiltinBatchOutcome>,
+    track_controls: Vec<TrackControlProducer>,
+    pending: Option<(CoreTicket, BuiltinBatch)>,
+    quantum: u32,
+    output_channels: usize,
+}
+
+/// Thread-affine render owner with private raw builtin producers.
+pub struct StartedBuiltinBatchRender {
+    plan: StartedRenderSession,
+    delivery: DeliveryCoreRender<BuiltinBatch>,
+    outcomes: Producer<BuiltinBatchOutcome>,
+    track_controls: Vec<TrackControlProducer>,
+    pending: Option<(CoreTicket, BuiltinBatch)>,
+    quantum: u32,
+    output_channels: usize,
+    fault: Option<BuiltinBatchRenderError>,
+}
+
+/// Result of one healthy endpoint render boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BuiltinBatchRenderReport {
+    /// The underlying graph report when a PCM block was rendered.
+    pub graph: Option<engine::realtime::RenderReport>,
+    /// True when this was a cancellation-only boundary and the graph was untouched.
+    pub cancellation_only: bool,
+    /// The ticket claimed and applied at this boundary, if any.
+    pub applied: Option<BuiltinBatchApplication>,
+}
+
+/// Sticky endpoint render failure. Once present, no later block injects or advances time.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BuiltinBatchRenderError {
+    /// The output envelope is not the prepared two-channel quantum.
+    InvalidShape,
+    /// The endpoint was called at a sample other than its next required sample.
+    DiscontinuousTime {
+        /// Next required contiguous sample.
+        expected: u64,
+    },
+    /// A generic delivery operation failed after ownership had been claimed.
+    Delivery(DeliveryError),
+    /// A raw prepared builtin queue could not accept the complete claimed batch.
+    QueueOverflow,
+    /// The graph rejected the prepared output envelope.
+    Graph(RenderError),
+    /// A prior valid render encountered an irreversible application uncertainty.
+    Fault,
+}
+
+impl StartedBuiltinBatchRender {
+    /// Render one prepared planar block and service cancellation before any builtin injection.
+    pub fn render(
+        &mut self,
+        samples: &mut [f32],
+        channels: usize,
+        frames: usize,
+        plane_stride: usize,
+        first: SampleTime,
+    ) -> Result<BuiltinBatchRenderReport, BuiltinBatchRenderError> {
+        if let Some(fault) = self.fault {
+            return Err(fault);
+        }
+        let expected = self.plan.next_absolute_sample();
+        if first.0 != expected {
+            return Err(BuiltinBatchRenderError::DiscontinuousTime { expected });
+        }
+        if channels != self.output_channels
+            || frames != self.quantum as usize
+            || plane_stride < frames
+            || channels
+                .checked_sub(1)
+                .and_then(|last| last.checked_mul(plane_stride))
+                .and_then(|offset| offset.checked_add(frames))
+                .is_none_or(|required| required > samples.len())
+        {
+            return Err(BuiltinBatchRenderError::InvalidShape);
+        }
+        if first.0.checked_add(u64::from(self.quantum)).is_none() {
+            return Err(BuiltinBatchRenderError::Graph(RenderError::TimeOverflow));
+        }
+        match self.delivery.cancel_boundary(first) {
+            Ok(()) => {
+                self.pending = None;
+                return Ok(BuiltinBatchRenderReport {
+                    graph: None,
+                    cancellation_only: true,
+                    applied: None,
+                });
+            }
+            Err(DeliveryError::Empty) => {}
+            Err(error) => return self.sticky(BuiltinBatchRenderError::Delivery(error)),
+        }
+        if self.pending.is_none() {
+            match self.delivery.begin() {
+                Ok((ticket, batch)) => self.pending = Some((ticket, batch)),
+                Err(DeliveryError::Empty) => {}
+                Err(error) => return self.sticky(BuiltinBatchRenderError::Delivery(error)),
+            }
+        }
+        let apply = self
+            .pending
+            .filter(|(_, batch)| batch.requested_sample.0 <= first.0);
+        if let Some((ticket, batch)) = apply
+            && let Err(error) = self.inject(ticket, batch)
+        {
+            return self.sticky(error);
+        }
+        let graph = match self
+            .plan
+            .render_planar(samples, channels, frames, plane_stride, first.0)
+        {
+            Ok(report) => report,
+            Err(error) => return self.sticky(BuiltinBatchRenderError::Graph(error)),
+        };
+        let applied = if let Some((ticket, batch)) = apply {
+            if let Err(error) = self.delivery.mark_progress(ticket, batch.record_count) {
+                return self.sticky(BuiltinBatchRenderError::Delivery(error));
+            }
+            if self
+                .outcomes
+                .try_push(BuiltinBatchOutcome {
+                    ticket,
+                    requested_sample: batch.requested_sample,
+                    actual_sample: first,
+                })
+                .is_err()
+            {
+                return self.sticky(BuiltinBatchRenderError::QueueOverflow);
+            }
+            if let Err(error) = self.delivery.finish(ticket, batch.record_count) {
+                return self.sticky(BuiltinBatchRenderError::Delivery(error));
+            }
+            self.pending = None;
+            Some(BuiltinBatchApplication {
+                ticket,
+                requested_sample: batch.requested_sample,
+                actual_sample: first,
+                late: batch.requested_sample.0 < first.0,
+            })
+        } else {
+            None
+        };
+        Ok(BuiltinBatchRenderReport {
+            graph: Some(graph),
+            cancellation_only: false,
+            applied,
+        })
+    }
+
+    fn sticky<T>(&mut self, error: BuiltinBatchRenderError) -> Result<T, BuiltinBatchRenderError> {
+        self.fault = Some(error);
+        Err(error)
+    }
+
+    fn inject(
+        &mut self,
+        _ticket: CoreTicket,
+        batch: BuiltinBatch,
+    ) -> Result<(), BuiltinBatchRenderError> {
+        for record in batch.records() {
+            let (track_index, push) = match *record {
+                BuiltinBatchRecord::Fader {
+                    track_index,
+                    record,
+                } => (track_index, RawPush::Fader(record)),
+                BuiltinBatchRecord::Matrix {
+                    track_index,
+                    record,
+                } => (track_index, RawPush::Matrix(record)),
+            };
+            let Some(control) = self.track_controls.get_mut(track_index as usize) else {
+                return Err(BuiltinBatchRenderError::Fault);
+            };
+            match push {
+                RawPush::Fader(record) => control
+                    .fader
+                    .try_push(record)
+                    .map_err(|_| BuiltinBatchRenderError::QueueOverflow)?,
+                RawPush::Matrix(record) => control
+                    .producer
+                    .try_push(record)
+                    .map_err(|_| BuiltinBatchRenderError::QueueOverflow)?,
+            }
+        }
+        Ok(())
+    }
+
+    /// Return all render storage for control-thread teardown after render quiescence.
+    pub fn stop(self) -> StoppedBuiltinBatchRender {
+        let Self {
+            plan,
+            delivery,
+            outcomes,
+            track_controls,
+            pending,
+            quantum: _,
+            output_channels: _,
+            fault,
+        } = self;
+        StoppedBuiltinBatchRender {
+            plan: plan.stop(),
+            delivery,
+            outcomes,
+            track_controls,
+            pending,
+            fault,
+        }
+    }
+}
+
+/// Render storage returned by [`StartedBuiltinBatchRender::stop`]. Drop this on a control thread.
+#[allow(
+    dead_code,
+    reason = "fields are intentionally retained together for off-render teardown"
+)]
+pub struct StoppedBuiltinBatchRender {
+    plan: engine::realtime::PreparedRenderPlan,
+    delivery: DeliveryCoreRender<BuiltinBatch>,
+    outcomes: Producer<BuiltinBatchOutcome>,
+    track_controls: Vec<TrackControlProducer>,
+    pending: Option<(CoreTicket, BuiltinBatch)>,
+    fault: Option<BuiltinBatchRenderError>,
+}
+
+enum RawPush {
+    Fader(TrackFaderRecord),
+    Matrix(TrackControlRecord),
+}
+
+/// Prepare the host, console channels, typed delivery core and outcome storage as one transaction.
+pub fn prepare_builtin_batch_endpoint(
+    compiled: &session::CompiledSession,
+    caps: &HostPrepareCaps,
+    revision: SessionRevision,
+    ticket_capacity: NonZeroUsize,
+) -> Result<PreparedBuiltinBatchEndpoint, BuiltinBatchPrepareError> {
+    let console = HostConsoleRequest {
+        control_queue_depth: Some(NonZeroUsize::new(BUILTIN_BATCH_MAX_RECORDS).unwrap()),
+        ..HostConsoleRequest::default()
+    };
+    let (host, handles) = prepare_host_runtime_with_console(compiled, caps, &console)
+        .map_err(BuiltinBatchPrepareError::Host)?;
+    let host_report = host.report;
+    let (delivery, render_delivery) = PreparedDelivery::<BuiltinBatch>::prepare(ticket_capacity)
+        .map_err(BuiltinBatchPrepareError::Delivery)?;
+    let (outcome_producer, outcome_consumer) = bounded_spsc(ticket_capacity, QueueGeneration(17))
+        .map_err(|_| {
+        BuiltinBatchPrepareError::Delivery(protocol::ProtocolQueueError::CapacityOverflow)
+    })?;
+    let delivery_report = PreparedDelivery::<BuiltinBatch>::resource_report(ticket_capacity)
+        .map_err(BuiltinBatchPrepareError::Delivery)?;
+    let outcome_layout = bounded_spsc_retained_payload::<BuiltinBatchOutcome>(ticket_capacity)
+        .map_err(|_| {
+            BuiltinBatchPrepareError::Delivery(protocol::ProtocolQueueError::CapacityOverflow)
+        })?;
+    let outcome_report = DeliveryResourceReport {
+        retained_payload_bytes: u64::try_from(outcome_layout.total_bytes().unwrap_or(usize::MAX))
+            .map_err(|_| {
+            BuiltinBatchPrepareError::Delivery(protocol::ProtocolQueueError::CapacityOverflow)
+        })?,
+        largest_allocation_bytes: u64::try_from(outcome_layout.largest_allocation_bytes())
+            .map_err(|_| {
+                BuiltinBatchPrepareError::Delivery(protocol::ProtocolQueueError::CapacityOverflow)
+            })?,
+    };
+    let retained_bytes = host_report
+        .builtin_retained_payload_bytes
+        .checked_add(delivery_report.retained_payload_bytes)
+        .and_then(|value| value.checked_add(outcome_report.retained_payload_bytes))
+        .ok_or(BuiltinBatchPrepareError::ResourceLimit)?;
+    if retained_bytes > caps.maximum_builtin_retained_bytes {
+        return Err(BuiltinBatchPrepareError::ResourceLimit);
+    }
+    let largest = host_report
+        .largest_engine_allocation_bytes
+        .max(delivery_report.largest_allocation_bytes)
+        .max(outcome_report.largest_allocation_bytes);
+    let track_count = u32::try_from(compiled.normalized_model().tracks.len())
+        .map_err(|_| BuiltinBatchPrepareError::ResourceLimit)?;
+    Ok(PreparedBuiltinBatchEndpoint {
+        control: delivery,
+        outcomes: outcome_consumer,
+        host,
+        render: PreparedBuiltinBatchRender {
+            delivery: render_delivery,
+            outcomes: outcome_producer,
+            track_controls: handles.track_controls,
+            pending: None,
+            quantum: compiled.quantum().0,
+            output_channels: usize::from(compiled.output_shape().channels),
+        },
+        revision,
+        quantum: compiled.quantum().0,
+        track_count,
+        resources: BuiltinBatchResources {
+            host: host_report,
+            delivery: delivery_report,
+            outcome: outcome_report,
+            retained_bytes,
+            largest_allocation_bytes: largest,
+            control_inline_bytes: core::mem::size_of::<BuiltinBatchControl>(),
+            render_inline_bytes: core::mem::size_of::<PreparedBuiltinBatchRender>(),
+        },
+    })
+}
+
+/// Prepared endpoint awaiting render-thread FP attestation and control/render split.
+pub struct PreparedBuiltinBatchEndpoint {
+    control: DeliveryCoreControl<BuiltinBatch>,
+    outcomes: engine::realtime::Consumer<BuiltinBatchOutcome>,
+    host: PreparedHost,
+    render: PreparedBuiltinBatchRender,
+    revision: SessionRevision,
+    quantum: u32,
+    track_count: u32,
+    resources: BuiltinBatchResources,
+}
+
+impl PreparedBuiltinBatchEndpoint {
+    /// Start the endpoint on the render thread and return the control owner to its caller.
+    #[allow(clippy::result_large_err)]
+    pub fn start(
+        self,
+    ) -> Result<
+        (
+            BuiltinBatchControl,
+            StartedBuiltinBatchRender,
+            BuiltinBatchResources,
+        ),
+        (Self, lane::fpenv::FpEnvironmentRejection),
+    > {
+        let Self {
+            control,
+            outcomes: control_outcomes,
+            host,
+            render,
+            revision,
+            quantum,
+            track_count,
+            resources,
+        } = self;
+        let (started, sources, report) = match host.start_render_session() {
+            Ok(value) => value,
+            Err((host, error)) => {
+                return Err((
+                    Self {
+                        control,
+                        outcomes: control_outcomes,
+                        host,
+                        render,
+                        revision,
+                        quantum,
+                        track_count,
+                        resources,
+                    },
+                    error,
+                ));
+            }
+        };
+        let PreparedBuiltinBatchRender {
+            delivery,
+            outcomes: render_outcomes,
+            track_controls,
+            pending,
+            quantum: render_quantum,
+            output_channels,
+        } = render;
+        debug_assert_eq!(render_quantum, quantum);
+        let render = StartedBuiltinBatchRender {
+            plan: started,
+            delivery,
+            outcomes: render_outcomes,
+            track_controls,
+            pending,
+            quantum,
+            output_channels,
+            fault: None,
+        };
+        let control = BuiltinBatchControl {
+            delivery: control,
+            outcomes: control_outcomes,
+            revision,
+            quantum,
+            track_count,
+            sources,
+            report,
+            outstanding: 0,
+        };
+        Ok((control, render, resources))
+    }
+}
+
+fn valid_fader(record: TrackFaderRecord) -> bool {
+    match record {
+        TrackFaderRecord::FaderDb {
+            db,
+            smoothing_samples: _,
+            lanes: _,
+        } => db.is_finite() && (-144.0..=24.0).contains(&db),
+        TrackFaderRecord::Mute { .. } => true,
+    }
+}
+
+fn valid_matrix(record: TrackControlRecord) -> bool {
+    record.matrix.checked().is_ok()
+}
+
+fn completion_from_core(
+    completion: CoreCompletion<BuiltinBatch>,
+    outcome: Option<BuiltinBatchOutcome>,
+) -> BuiltinBatchCompletion {
+    let applied = outcome.map(|value| value.actual_sample);
+    BuiltinBatchCompletion {
+        ticket: completion.ticket,
+        batch: completion.payload,
+        disposition: completion.disposition,
+        applied_prefix: completion.applied_prefix,
+        remaining_count: completion.remaining_count,
+        requested_sample: completion.payload.requested_sample,
+        actual_sample: applied,
+        late: outcome.is_some_and(|value| value.requested_sample.0 < value.actual_sample.0),
+        acknowledged_sample: completion.acknowledged_sample,
+    }
+}

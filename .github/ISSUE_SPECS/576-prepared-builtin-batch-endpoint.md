@@ -189,6 +189,16 @@ logging, callbacks, reclamation, model/controller access or producer-refill loop
    suites, strict Clippy/rustdoc, formatting, workspace and host policy gates, and
    supported native plus Wasm scalar/simd128 compilation.
 
+## Attempt 1 evidence
+
+The host-core-only endpoint and private producer ownership are implemented in the
+allowed source paths. Its fixed typed batches validate atomically, claim one FIFO
+ticket per render block, retain future work, report actual/late application after
+graph completion, and service cancellation before any builtin or graph work. The
+focused endpoint suite passes 3 tests, the full host-core test-support target is
+green, and strict host-core Clippy is green. Details are in
+`docs/audits/576-prepared-builtin-batch-endpoint.md`.
+
 No benchmark or performance claim is authorized. Artifact qualification is lane B's
 responsibility: this source slice must first reach a frozen reviewed checkpoint. Lane
 B then decides whether consumer/artifact qualification is required and owns every pin
