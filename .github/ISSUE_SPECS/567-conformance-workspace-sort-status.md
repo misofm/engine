@@ -64,3 +64,14 @@ quoted-shell probes. The candidate's in-suite causal control plus Astra's indepe
 `artifacts/issue567-review/direct-countermutant` capture supply the gate. This is an attribution
 correction only; no product or fixture-source revision is required. Root commits the correction and
 review evidence, then Astra low checks the exact verdict-bearing head before PR creation.
+
+## Astra low exact-head delivery review PASS
+
+Astra low reviewed exact pushed head
+`7932d1b9115a56f22357b6fe54184c1e7aa3d679` and returned PASS with no blocker. The
+fixture source is byte-identical to the accepted `6d72e9fc` checkpoint; the four non-credit probes
+remain preserved and explicitly denied provenance credit, while Astra's independent causal proof
+supplies acceptance. Shell syntax, the complete hermetic fixture, production checker, base-to-head
+and working diff checks pass independently, and both workspace-sort and module counter-mutants are
+rejected with status 1. Local and remote branch heads match and the worktree was clean. Required PR
+qualification, merge, synchronized #567/#542/#560 state, post-main qualification and cleanup remain.
