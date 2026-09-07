@@ -49,6 +49,17 @@ expect_failure_with_path() {
 new_case baseline
 check >/dev/null
 
+# #557: a subject cannot grow a direct common host probe after delegation.
+new_case shared-subject-direct-common-probe
+printf '\nfn shared_probe() { let _ = std::fs::read("/proc/cpuinfo"); }\n' \
+    >>"$case_root/tools/bench/src/session.rs"
+expect_failure shared-subject-direct-common-probe
+
+# #557: each subject must retain an explicit delegation to the shared collector.
+new_case shared-subject-missing-delegation
+sed -i '/HostToolchainFacts::gather()/d' "$case_root/tools/bench/src/conformance.rs"
+expect_failure shared-subject-missing-delegation
+
 for required_root in crates hosts sidecars; do
     new_case "missing-$required_root"
     rm -rf "$case_root/$required_root"

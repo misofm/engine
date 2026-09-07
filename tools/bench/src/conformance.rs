@@ -2,9 +2,9 @@
 
 use bench_support::json::escape;
 use bench_support::stats::per_mille as percentile_nearest_rank;
-use bench_support::sysinfo::physical_core_count;
+use bench_support::sysinfo::HostToolchainFacts;
 use std::{
-    env, fs,
+    env,
     hint::black_box,
     process::Command,
     time::{Instant, SystemTime, UNIX_EPOCH},
@@ -199,7 +199,6 @@ struct Metadata {
 
 impl Metadata {
     fn gather() -> Self {
-        let compiler_verbose = command(&["rustc", "-Vv"]);
         let git_commit = command(&["git", "rev-parse", "HEAD"]);
         let workspace_dirty = command_allow_empty(&["git", "status", "--porcelain"]).map_or_else(
             || "unknown".to_owned(),
@@ -211,32 +210,49 @@ impl Metadata {
                 }
             },
         );
-        let cpu_model = fs::read_to_string("/proc/cpuinfo")
-            .ok()
+        let facts = HostToolchainFacts::gather();
+        Self::from_facts(
+            facts,
+            git_commit,
+            workspace_dirty,
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock is after Unix epoch")
+                .as_secs(),
+        )
+    }
+
+    fn from_facts(
+        facts: HostToolchainFacts,
+        git_commit: String,
+        workspace_dirty: String,
+        timestamp_epoch_seconds: u64,
+    ) -> Self {
+        let cpu_model = facts
+            .raw_cpuinfo
+            .as_deref()
             .and_then(|text| {
                 text.lines()
                     .find_map(|line| line.strip_prefix("model name\t: ").map(str::to_owned))
             })
             .unwrap_or_else(|| "unknown".to_owned());
-        let physical_cores = physical_core_count();
-        let logical_cores = std::thread::available_parallelism()
-            .map(|value| value.get().to_string())
-            .unwrap_or_else(|_| "unknown".to_owned());
-        let kernel = command(&["uname", "-r"]);
-        let power_source = variable("MISO_ENGINE_BENCH_POWER_SOURCE");
-        let governor_or_power_mode =
-            fs::read_to_string("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor")
-                .map(|text| text.trim().to_owned())
-                .unwrap_or_else(|_| variable("MISO_ENGINE_BENCH_GOVERNOR_OR_POWER_MODE"));
-        let compiler = command(&["rustc", "-V"]);
-        let llvm_version = field(&compiler_verbose, "LLVM version: ");
-        let target_triple = field(&compiler_verbose, "host: ");
-        let opt_level = variable("MISO_ENGINE_BENCH_OPT_LEVEL");
-        let lto = variable("MISO_ENGINE_BENCH_LTO");
-        let codegen_units = variable("MISO_ENGINE_BENCH_CODEGEN_UNITS");
-        let target_cpu = variable("MISO_ENGINE_BENCH_TARGET_CPU");
-        let compile_target_features = variable("MISO_ENGINE_BENCH_TARGET_FEATURES");
-        let background_load_note = variable("MISO_ENGINE_BENCH_BACKGROUND_LOAD_NOTE");
+        let HostToolchainFacts {
+            physical_cores,
+            logical_cores,
+            kernel,
+            power_source,
+            governor_or_power_mode,
+            rustc_version: compiler,
+            llvm_version,
+            opt_level,
+            lto,
+            codegen_units,
+            target_triple,
+            target_cpu,
+            compile_target_features,
+            background_load_note,
+            ..
+        } = facts;
         let fields = [
             ("git_commit", &git_commit),
             ("workspace_dirty", &workspace_dirty),
@@ -262,10 +278,7 @@ impl Metadata {
             .map(|(name, _)| (*name).to_owned())
             .collect();
         Self {
-            timestamp_epoch_seconds: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("clock is after Unix epoch")
-                .as_secs(),
+            timestamp_epoch_seconds,
             git_commit,
             workspace_dirty,
             cpu_model,
@@ -288,14 +301,6 @@ impl Metadata {
     }
 }
 
-fn variable(name: &str) -> String {
-    bench_support::metadata::Metadata::gather()
-        .var(name)
-        .ok()
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "unknown".to_owned())
-}
-
 fn command(args: &[&str]) -> String {
     command_allow_empty(args)
         .filter(|value| !value.is_empty())
@@ -308,12 +313,6 @@ fn command_allow_empty(args: &[&str]) -> Option<String> {
         return None;
     }
     Some(String::from_utf8(output.stdout).ok()?.trim().to_owned())
-}
-
-fn field(text: &str, prefix: &str) -> String {
-    text.lines()
-        .find_map(|line| line.strip_prefix(prefix).map(str::to_owned))
-        .unwrap_or_else(|| "unknown".to_owned())
 }
 
 fn json_string_array(values: &[String]) -> String {
@@ -352,7 +351,8 @@ fn parse_rounds() -> u8 {
 
 #[cfg(test)]
 mod tests {
-    use super::{escape, percentile_nearest_rank};
+    use super::{Metadata, Round, escape, json_record, percentile_nearest_rank};
+    use bench_support::sysinfo::HostToolchainFacts;
 
     #[test]
     fn percentile_is_nearest_rank_and_escape_is_json_safe() {
@@ -360,5 +360,46 @@ mod tests {
         assert_eq!(percentile_nearest_rank(&values, 500), 500);
         assert_eq!(percentile_nearest_rank(&values, 999), 999);
         assert_eq!(escape("\"\\\n\u{0001}"), "\\\"\\\\\\n\\u0001");
+    }
+
+    #[test]
+    fn shared_host_toolchain_facts_preserve_conformance_projection() {
+        let facts = HostToolchainFacts {
+            raw_cpuinfo: Some("model name : Session CPU\nmodel name\t: Conformance CPU\n".into()),
+            physical_cores: "8".into(),
+            logical_cores: "unknown".into(),
+            kernel: "Linux-test".into(),
+            power_source: "AC".into(),
+            governor_or_power_mode: String::new(),
+            rustc_version: "rustc test 1.0".into(),
+            llvm_version: "LLVM test".into(),
+            target_triple: "x86_64-test".into(),
+            opt_level: "2".into(),
+            lto: "thin".into(),
+            codegen_units: "16".into(),
+            target_cpu: "native".into(),
+            compile_target_features: "avx2-µ".into(),
+            background_load_note: "quiet".into(),
+        };
+        let metadata =
+            Metadata::from_facts(facts, "deadbeef".into(), "false".into(), 1_700_000_000);
+        assert_eq!(metadata.cpu_model, "Conformance CPU");
+        assert_eq!(metadata.compiler, "rustc test 1.0");
+        assert_eq!(metadata.governor_or_power_mode, "");
+        assert_eq!(metadata.missing_metadata, vec!["logical_cores"]);
+        assert_eq!(metadata.workspace_dirty, "false");
+        let record = json_record(
+            "conformance_test",
+            1,
+            2,
+            &Round {
+                durations: vec![10, 20],
+                total: 30,
+            },
+            0x1234,
+            &metadata,
+        );
+        assert!(record.contains("\"timestamp_epoch_seconds\":1700000000,\"git_commit\":\"deadbeef\",\"workspace_dirty\":\"false\",\"cpu_model\":\"Conformance CPU\",\"architecture\":\"x86_64\",\"physical_cores\":\"8\",\"logical_cores\":\"unknown\",\"os\":\"linux\",\"kernel\":\"Linux-test\",\"power_source\":\"AC\",\"governor_or_power_mode\":\"\",\"compiler\":\"rustc test 1.0\",\"llvm_version\":\"LLVM test\",\"cargo_profile\":\"release\",\"opt_level\":\"2\",\"lto\":\"thin\",\"codegen_units\":\"16\",\"target_triple\":\"x86_64-test\",\"target_cpu\":\"native\",\"compile_target_features\":\"avx2-µ\"") );
+        assert!(record.contains("\"background_load_note\":\"quiet\",\"metadata_incomplete\":true,\"missing_metadata\":[\"logical_cores\"]"));
     }
 }
