@@ -1,0 +1,13 @@
+utc=2026-09-07T21:18:34Z
+cwd=/home/bl/misofm/engine-io5-delivery-frame-into
+head=cf7629a02863103b339d429f42e7608bf76fc79b
+upstream=cf7629a02863103b339d429f42e7608bf76fc79b
+status:
+?? artifacts/issue578-artifact-identity/
+identities:
+f64b913327e36384b7e6bcac38eddd3cca3342dcb3ee057d188048ed0f139953  .github/ISSUE_SPECS/578-controller-delivery-frame-into.md
+541c03a82a2eedf770452f59fcda1acd4bce325c5563b16faff0bb0e43470e39  crates/protocol/src/controller.rs
+97af18a85e47049ccac77dc6121fba3aaf47a49872f0fa5b3e99dcad2fd0b0cb  crates/protocol/src/controller_delivery.rs
+3d89ad8379657917dd9bb1c927359e8aeeef2aecb7e5dd166536a6feeef84908  crates/host-core/tests/scalar_point_endpoint.rs
+92db9698cc062bd5ccc0a90f0ee43f051d77ce7e52f785ce9718fae3f400b753  Cargo.lock
+cc22bd35f453e3db50df3613d7506c91e3ed8b700e94fc49960a127c61a76a1e  hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256

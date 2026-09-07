@@ -1,0 +1,1 @@
+bash scripts/sdk-package.sh check /tmp/issue578-artifact-cf7629a0

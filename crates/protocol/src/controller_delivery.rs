@@ -155,6 +155,26 @@ impl<P: ControlProvider> ControllerAutomationDelivery<P> {
             .process_b1b_btlv_with_delivery_context(input, scratch, Some(&mut context))
     }
 
+    /// Process one complete command frame into caller-owned output through this facade's
+    /// delivery context. Structural session commands are refused before planning or commit.
+    pub fn process_command_frame_into(
+        &mut self,
+        input: &[u8],
+        scratch: &mut DecodeScratch<'_>,
+        output: &mut [u8],
+    ) -> Result<usize, crate::CommandFrameProcessError> {
+        let mut context = DeliveryContext {
+            state: &mut self.delivery,
+        };
+        self.controller
+            .process_command_frame_into_with_delivery_context(
+                input,
+                scratch,
+                output,
+                Some(&mut context),
+            )
+    }
+
     /// Hand off the next admitted batch to the render half when its fixed capability set supports
     /// every record in the batch.
     pub fn try_handoff_next(&mut self) -> Result<HandoffResult, DeliveryError> {
@@ -554,6 +574,36 @@ mod tests {
         )
     }
 
+    fn process_frame<P: ControlProvider>(
+        facade: &mut ControllerAutomationDelivery<P>,
+        input: &[u8],
+    ) -> Vec<u8> {
+        let mut output = vec![0_u8; 2048];
+        let written = facade
+            .process_command_frame_into(
+                input,
+                &mut DecodeScratch::new(&mut [0_u16; 32]),
+                &mut output,
+            )
+            .expect("complete facade command frame");
+        output.truncate(written);
+        output
+    }
+
+    fn frame_header(frame: &[u8]) -> ResponseHeader {
+        match ProtocolCodec::default()
+            .decode_typed_response(frame, &mut DecodeScratch::new(&mut [0_u16; 32]))
+            .expect("typed facade response")
+        {
+            DecodedTypedResponseFrame::Success { header, .. }
+            | DecodedTypedResponseFrame::NonOk { header, .. } => header,
+        }
+    }
+
+    fn frame_status(frame: &[u8]) -> StatusCode {
+        frame_header(frame).status
+    }
+
     fn decode_event<'a>(codec: &ProtocolCodec, frame: &'a [u8]) -> DecodedTypedEventFrame<'a> {
         codec
             .decode_typed_event(frame, &mut DecodeScratch::new(&mut [0_u16; 32]))
@@ -606,6 +656,472 @@ mod tests {
             .finish_applied(ticket, count)
             .expect("finish applied");
         facade.collect_terminal(ticket).expect("collect terminal");
+        assert_eq!(facade.outstanding(), 0);
+    }
+
+    #[test]
+    fn caller_buffer_frame_ingress_reserves_and_replays_through_facade() {
+        crate::controller::reset_typed_command_decodes();
+        let (mut facade, _, canceled) = facade(8, &[(ParameterHandle(7), AutomationKind::Point)]);
+        let revision = facade.session().revision();
+        let snapshot = facade.session().canonical_snapshot().to_owned();
+        let queue_before = facade.automation_status();
+        let event_before = facade.controller.queues().report(QueueKind::ReliableEvent);
+        let transport_before = facade.controller.provider().transport;
+        let records = [AutomationRecord {
+            kind: AutomationKind::Point,
+            handle: ParameterHandle(7),
+            start: SampleTime(1),
+            end: SampleTime(1),
+            start_value: 0.5,
+            end_value: 0.5,
+        }];
+        let encoded = encoded_enqueue(1, revision, &records);
+        let mut scratch_fields = [0_u16; 32];
+        let mut zero = [];
+        assert!(matches!(
+            facade.process_command_frame_into(
+                &encoded,
+                &mut DecodeScratch::new(&mut scratch_fields),
+                &mut zero,
+            ),
+            Err(CommandFrameProcessError::OutputReservationTooSmall { required: 2048 })
+        ));
+        assert_eq!(facade.session().canonical_snapshot(), snapshot);
+        assert_eq!(facade.session().revision(), revision);
+        assert_eq!(facade.automation_status(), queue_before);
+        assert_eq!(facade.outstanding(), 0);
+        assert_eq!(canceled.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            facade.controller.queues().report(QueueKind::ReliableEvent),
+            event_before
+        );
+        assert_eq!(facade.controller.provider().transport, transport_before);
+        assert_eq!(crate::controller::typed_command_decodes(), 0);
+        assert_eq!(facade.controller.replay().len(), 0);
+
+        let mut short = [0_u8; 2047];
+        assert!(matches!(
+            facade.process_command_frame_into(
+                &encoded,
+                &mut DecodeScratch::new(&mut scratch_fields),
+                &mut short,
+            ),
+            Err(CommandFrameProcessError::OutputReservationTooSmall { required: 2048 })
+        ));
+        assert_eq!(facade.session().canonical_snapshot(), snapshot);
+        assert_eq!(facade.session().revision(), revision);
+        assert_eq!(facade.automation_status(), queue_before);
+        assert_eq!(facade.outstanding(), 0);
+        assert_eq!(canceled.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            facade.controller.queues().report(QueueKind::ReliableEvent),
+            event_before
+        );
+        assert_eq!(facade.controller.provider().transport, transport_before);
+        assert_eq!(crate::controller::typed_command_decodes(), 0);
+        assert_eq!(facade.controller.replay().len(), 0);
+
+        let mut output = [0_u8; 2048];
+        let written = facade
+            .process_command_frame_into(
+                &encoded,
+                &mut DecodeScratch::new(&mut scratch_fields),
+                &mut output,
+            )
+            .expect("caller-buffer admission");
+        assert_eq!(facade.outstanding(), 1);
+        let response = output[..written].to_vec();
+        let mut one_below = vec![0_u8; written - 1];
+        assert!(matches!(
+            facade.process_command_frame_into(
+                &encoded,
+                &mut DecodeScratch::new(&mut scratch_fields),
+                &mut one_below,
+            ),
+            Err(CommandFrameProcessError::Encode(EncodeError::OutputTooSmall { required }))
+                if required == written
+        ));
+        assert_eq!(facade.outstanding(), 1);
+        assert_eq!(facade.session().canonical_snapshot(), snapshot);
+        assert_eq!(facade.session().revision(), revision);
+        assert_eq!(facade.automation_status().occupancy, 1);
+        assert_eq!(canceled.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            facade.controller.queues().report(QueueKind::ReliableEvent),
+            event_before
+        );
+        assert_eq!(facade.controller.provider().transport, transport_before);
+        assert_eq!(crate::controller::typed_command_decodes(), 1);
+        assert_eq!(facade.controller.replay().len(), 1);
+
+        let mut exact = vec![0xa5_u8; written];
+        let replay_written = facade
+            .process_command_frame_into(
+                &encoded,
+                &mut DecodeScratch::new(&mut scratch_fields),
+                &mut exact,
+            )
+            .expect("caller-buffer replay");
+        assert_eq!(&exact[..replay_written], response.as_slice());
+        assert_eq!(facade.outstanding(), 1);
+        assert_eq!(facade.session().canonical_snapshot(), snapshot);
+        assert_eq!(facade.session().revision(), revision);
+        assert_eq!(facade.automation_status().occupancy, 1);
+        assert_eq!(canceled.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            facade.controller.queues().report(QueueKind::ReliableEvent),
+            event_before
+        );
+        assert_eq!(facade.controller.provider().transport, transport_before);
+        assert_eq!(crate::controller::typed_command_decodes(), 1);
+        assert_eq!(facade.controller.replay().len(), 1);
+    }
+
+    #[test]
+    fn caller_buffer_correlatable_payload_preserves_identity_and_precedence() {
+        crate::controller::reset_typed_command_decodes();
+        let (mut facade, _, canceled) = facade(8, &[(ParameterHandle(7), AutomationKind::Point)]);
+        let revision = facade.session().revision();
+        let records = [AutomationRecord {
+            kind: AutomationKind::Point,
+            handle: ParameterHandle(7),
+            start: SampleTime(1),
+            end: SampleTime(1),
+            start_value: 0.5,
+            end_value: 0.5,
+        }];
+        let mut malformed = encoded_enqueue(1, revision, &records);
+        malformed[24..32].copy_from_slice(&99_u64.to_le_bytes());
+        malformed[crate::OUTER_HEADER_BYTES + 8] = 0;
+        let snapshot = facade.session().canonical_snapshot().to_owned();
+        let queue_before = facade.automation_status();
+        let event_before = facade.controller.queues().report(QueueKind::ReliableEvent);
+        let transport_before = facade.controller.provider().transport;
+        let mut short = [];
+        assert!(matches!(
+            facade.process_command_frame_into(
+                &malformed,
+                &mut DecodeScratch::new(&mut [0_u16; 32]),
+                &mut short,
+            ),
+            Err(CommandFrameProcessError::OutputReservationTooSmall { required: 2048 })
+        ));
+        assert_eq!(facade.session().canonical_snapshot(), snapshot);
+        assert_eq!(facade.session().revision(), revision);
+        assert_eq!(facade.automation_status(), queue_before);
+        assert_eq!(facade.outstanding(), 0);
+        assert_eq!(canceled.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            facade.controller.queues().report(QueueKind::ReliableEvent),
+            event_before
+        );
+        assert_eq!(facade.controller.provider().transport, transport_before);
+        assert_eq!(crate::controller::typed_command_decodes(), 0);
+        assert_eq!(facade.controller.replay().len(), 0);
+
+        let mut output = [0_u8; 2048];
+        let written = facade
+            .process_command_frame_into(
+                &malformed,
+                &mut DecodeScratch::new(&mut [0_u16; 32]),
+                &mut output,
+            )
+            .expect("correlatable malformed payload response");
+        let response = output[..written].to_vec();
+        let header = frame_header(&response);
+        assert_eq!(header.request_id, RequestId::new(99).unwrap());
+        assert_eq!(header.message_id, MessageId::AutomationEnqueue);
+        assert_eq!(header.revision, revision);
+        assert_eq!(header.status, StatusCode::MalformedFrame);
+        assert_eq!(facade.session().canonical_snapshot(), snapshot);
+        assert_eq!(facade.session().revision(), revision);
+        assert_eq!(facade.automation_status(), queue_before);
+        assert_eq!(facade.outstanding(), 0);
+        assert_eq!(canceled.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            facade.controller.queues().report(QueueKind::ReliableEvent),
+            event_before
+        );
+        assert_eq!(facade.controller.provider().transport, transport_before);
+        assert_eq!(crate::controller::typed_command_decodes(), 1);
+        assert_eq!(facade.controller.replay().len(), 1);
+
+        let mut replay = vec![0xa5_u8; response.len()];
+        let replay_written = facade
+            .process_command_frame_into(
+                &malformed,
+                &mut DecodeScratch::new(&mut [0_u16; 32]),
+                &mut replay,
+            )
+            .expect("exact malformed response replay");
+        assert_eq!(&replay[..replay_written], response.as_slice());
+        assert_eq!(facade.outstanding(), 0);
+        assert_eq!(canceled.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            facade.controller.queues().report(QueueKind::ReliableEvent),
+            event_before
+        );
+        assert_eq!(facade.controller.provider().transport, transport_before);
+        assert_eq!(crate::controller::typed_command_decodes(), 1);
+        assert_eq!(facade.controller.replay().len(), 1);
+    }
+
+    #[test]
+    fn caller_buffer_pending_cancel_refuses_non_locate_transport_without_effects() {
+        let (mut facade, mut render, canceled) =
+            facade(8, &[(ParameterHandle(7), AutomationKind::Point)]);
+        let revision = facade.session().revision();
+        let point = [AutomationRecord {
+            kind: AutomationKind::Point,
+            handle: ParameterHandle(7),
+            start: SampleTime(1),
+            end: SampleTime(1),
+            start_value: 0.5,
+            end_value: 0.5,
+        }];
+        assert_eq!(
+            frame_status(&process_frame(
+                &mut facade,
+                &encoded_enqueue(1, revision, &point),
+            )),
+            StatusCode::Ok
+        );
+        let before = process_frame(
+            &mut facade,
+            &encoded_command(2, ExpectedRevision::Any, CommandPayload::TransportGet),
+        );
+        let snapshot = facade.session().canonical_snapshot().to_owned();
+        let token = facade
+            .begin_cancel(AutomationCancellationReason::EndpointShutdown)
+            .unwrap();
+        let queue_pending = facade.automation_status();
+        let event_pending = facade.controller.queues().report(QueueKind::ReliableEvent);
+        let transport_pending = facade.controller.provider().transport;
+        let blocked = process_frame(
+            &mut facade,
+            &encoded_command(
+                3,
+                ExpectedRevision::Exact(revision),
+                CommandPayload::TransportSet(TransportSetRequest {
+                    state: TransportState::Playing,
+                    position: None,
+                }),
+            ),
+        );
+        assert_eq!(frame_status(&blocked), StatusCode::Unavailable);
+        let after = process_frame(
+            &mut facade,
+            &encoded_command(4, ExpectedRevision::Any, CommandPayload::TransportGet),
+        );
+        let decode_transport = |frame: &[u8]| {
+            let DecodedTypedResponseFrame::Success { payload, .. } = ProtocolCodec::default()
+                .decode_typed_response(frame, &mut DecodeScratch::new(&mut [0_u16; 32]))
+                .expect("transport response")
+            else {
+                panic!("transport get must succeed")
+            };
+            let DecodedSuccessResponsePayload::TransportGetSnapshot(value) = payload else {
+                panic!("wrong transport payload")
+            };
+            value
+        };
+        assert_eq!(decode_transport(&before), decode_transport(&after));
+        assert_eq!(facade.session().canonical_snapshot(), snapshot);
+        assert_eq!(facade.session().revision(), revision);
+        assert_eq!(facade.automation_status(), queue_pending);
+        assert_eq!(facade.outstanding(), 1);
+        assert_eq!(canceled.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            facade.controller.queues().report(QueueKind::ReliableEvent),
+            event_pending
+        );
+        assert_eq!(facade.controller.provider().transport, transport_pending);
+        assert!(facade.poll_cancel_boundary(token).unwrap().is_none());
+        assert!(render.begin_boundary(SampleTime(77)).is_none());
+        let complete = facade.poll_cancel_boundary(token).unwrap().unwrap();
+        assert_eq!(
+            (complete.canceled_records, complete.canceled_events),
+            (1, 1)
+        );
+        assert_eq!(canceled.load(Ordering::Relaxed), 1);
+        assert_eq!(facade.outstanding(), 0);
+    }
+
+    #[test]
+    fn caller_buffer_facade_refuses_structural_commands_before_planning() {
+        let (mut facade, _, _) = facade(8, &[(ParameterHandle(7), AutomationKind::Point)]);
+        let revision = facade.session().revision();
+        let edits = [SessionEdit::SetSessionId {
+            session_id: session::StableId::parse("caller-buffer-refused").unwrap(),
+        }];
+        let encoded = encoded_command(
+            1,
+            ExpectedRevision::Exact(revision),
+            CommandPayload::SessionTransactionApply(&edits),
+        );
+        let mut output = [0_u8; 2048];
+        let written = facade
+            .process_command_frame_into(
+                &encoded,
+                &mut DecodeScratch::new(&mut [0_u16; 32]),
+                &mut output,
+            )
+            .expect("structural refusal response");
+        let decoded = ProtocolCodec::default()
+            .decode_typed_response(
+                &output[..written],
+                &mut DecodeScratch::new(&mut [0_u16; 32]),
+            )
+            .unwrap();
+        let header = match decoded {
+            DecodedTypedResponseFrame::NonOk { header, .. } => header,
+            DecodedTypedResponseFrame::Success { .. } => panic!("structural command succeeded"),
+        };
+        assert_eq!(header.status, StatusCode::Unavailable);
+        assert_eq!(facade.session().revision(), revision);
+        assert_eq!(facade.outstanding(), 0);
+    }
+
+    #[test]
+    fn caller_buffer_frame_rejections_saturate_and_cancel_whole_unsupported_batches() {
+        let (mut primary, mut render, canceled) =
+            facade(8, &[(ParameterHandle(7), AutomationKind::Point)]);
+        let revision = primary.session().revision();
+        let point = |request_id, revision, handle, sample, value| {
+            let records = [AutomationRecord {
+                kind: AutomationKind::Point,
+                handle: ParameterHandle(handle),
+                start: SampleTime(sample),
+                end: SampleTime(sample),
+                start_value: value,
+                end_value: value,
+            }];
+            encoded_enqueue(request_id, revision, &records)
+        };
+
+        assert_eq!(
+            frame_status(&process_frame(
+                &mut primary,
+                &point(1, SessionRevision(revision.0 + 1), 7, 1, 0.5),
+            )),
+            StatusCode::RevisionConflict
+        );
+        assert_eq!(
+            frame_status(&process_frame(&mut primary, &point(2, revision, 7, 1, 2.0))),
+            StatusCode::InvalidField
+        );
+        assert_eq!(
+            frame_status(&process_frame(
+                &mut primary,
+                &point(3, revision, 99, 1, 0.5)
+            )),
+            StatusCode::NotFound
+        );
+        assert_eq!(
+            frame_status(&process_frame(&mut primary, &point(4, revision, 7, 1, 0.5))),
+            StatusCode::Ok
+        );
+        assert_eq!(
+            frame_status(&process_frame(&mut primary, &point(5, revision, 7, 2, 0.5))),
+            StatusCode::Ok
+        );
+        assert_eq!(
+            frame_status(&process_frame(&mut primary, &point(6, revision, 7, 3, 0.5))),
+            StatusCode::Backpressure
+        );
+        assert_eq!(primary.outstanding(), 2);
+        assert_eq!(primary.automation_status().occupancy, 2);
+
+        let (mut unsupported, mut unsupported_render, unsupported_canceled) =
+            facade(8, &[(ParameterHandle(7), AutomationKind::Point)]);
+        let unsupported_records = [AutomationRecord {
+            kind: AutomationKind::Linear,
+            handle: ParameterHandle(7),
+            start: SampleTime(1),
+            end: SampleTime(2),
+            start_value: 0.5,
+            end_value: 0.75,
+        }];
+        assert_eq!(
+            frame_status(&process_frame(
+                &mut unsupported,
+                &encoded_enqueue(1, revision, &unsupported_records),
+            )),
+            StatusCode::Ok
+        );
+        assert_eq!(
+            frame_status(&process_frame(
+                &mut unsupported,
+                &point(2, revision, 7, 3, 0.5),
+            )),
+            StatusCode::Ok
+        );
+        assert_eq!(
+            unsupported.try_handoff_next().unwrap(),
+            HandoffResult::PendingUnsupported
+        );
+        let token = unsupported
+            .begin_cancel(AutomationCancellationReason::EndpointShutdown)
+            .unwrap();
+        assert!(unsupported.poll_cancel_boundary(token).unwrap().is_none());
+        assert!(unsupported_render.begin_boundary(SampleTime(77)).is_none());
+        let complete = unsupported.poll_cancel_boundary(token).unwrap().unwrap();
+        assert_eq!(
+            (complete.canceled_records, complete.canceled_events),
+            (2, 2)
+        );
+        assert_eq!(unsupported_canceled.load(Ordering::Relaxed), 2);
+        assert_eq!(unsupported.outstanding(), 0);
+        assert_eq!(canceled.load(Ordering::Relaxed), 0);
+        assert!(render.begin_boundary(SampleTime(0)).is_none());
+    }
+
+    #[test]
+    fn caller_buffer_frame_limits_remain_unavailable_without_model_effects() {
+        let (mut facade, _, _) = facade(8, &[(ParameterHandle(7), AutomationKind::Point)]);
+        let revision = facade.session().revision();
+        let state = ParameterStateRequest { handles: vec![7] };
+        assert_eq!(
+            frame_status(&process_frame(
+                &mut facade,
+                &encoded_command(
+                    1,
+                    ExpectedRevision::Any,
+                    CommandPayload::ParameterStateGet(&state),
+                ),
+            )),
+            StatusCode::Unavailable
+        );
+        let edits = [SessionEdit::SetSessionId {
+            session_id: session::StableId::parse("caller-buffer-frame-refused").unwrap(),
+        }];
+        assert_eq!(
+            frame_status(&process_frame(
+                &mut facade,
+                &encoded_command(
+                    2,
+                    ExpectedRevision::Exact(revision),
+                    CommandPayload::SessionTransactionApply(&edits),
+                ),
+            )),
+            StatusCode::Unavailable
+        );
+        assert_eq!(
+            frame_status(&process_frame(
+                &mut facade,
+                &encoded_command(
+                    3,
+                    ExpectedRevision::Exact(revision),
+                    CommandPayload::TransportSet(TransportSetRequest {
+                        state: TransportState::Playing,
+                        position: Some(SampleTime(9)),
+                    }),
+                ),
+            )),
+            StatusCode::Unavailable
+        );
+        assert_eq!(facade.session().revision(), revision);
         assert_eq!(facade.outstanding(), 0);
     }
 

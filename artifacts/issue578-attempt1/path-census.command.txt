@@ -1,0 +1,1 @@
+expected=".github/ISSUE_SPECS/578-controller-delivery-frame-into.md\ncrates/host-core/tests/scalar_point_endpoint.rs\ncrates/protocol/src/controller.rs\ncrates/protocol/src/controller_delivery.rs"; actual="$(git diff --name-only 254b9d86d720da8463739a407b055b4a7596f001...HEAD | sort)"; printf "expected:\\n%sactual:\\n%s" "$expected" "$actual"; test "$actual" = "$expected"
