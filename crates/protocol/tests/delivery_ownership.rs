@@ -4,7 +4,10 @@
 
 use core::{alloc::Layout, cell::Cell, num::NonZeroUsize};
 use std::alloc::{GlobalAlloc, System};
-use std::sync::Barrier;
+use std::sync::{
+    Arc, Barrier,
+    atomic::{AtomicBool, Ordering},
+};
 
 use protocol::*;
 
@@ -217,6 +220,323 @@ fn prepared_heaps_free_off_thread_and_realtime_owner_operations_are_zero_zero() 
             .unwrap()
     });
     assert!(teardown.1 > 0);
+}
+
+#[test]
+fn generic_boundary_cancel_reports_zero_partial_and_full_without_releasing_credits_early() {
+    for (logical_count, applied_prefix) in [(1_u16, 0_u16), (3, 1), (2, 2)] {
+        let (mut control, mut render) =
+            PreparedDelivery::<u32>::prepare(NonZeroUsize::new(2).unwrap()).unwrap();
+        let ticket = control.try_publish(17, logical_count).unwrap();
+        if applied_prefix != 0 {
+            assert_eq!(render.begin().unwrap(), (ticket, 17));
+            render.mark_progress(ticket, applied_prefix).unwrap();
+            if applied_prefix == logical_count {
+                render.finish(ticket, applied_prefix).unwrap();
+            }
+        }
+        let token = control.begin_cancel().unwrap();
+        assert_eq!(control.poll_cancel_boundary(token).unwrap(), None);
+        let (_, render_counts) = measured(|| render.cancel_boundary(SampleTime(91)).unwrap());
+        assert_eq!((render_counts.0, render_counts.1), (0, 0));
+        let complete = control.poll_cancel_boundary(token).unwrap().unwrap();
+        assert_eq!(complete.acknowledged_sample, SampleTime(91));
+        assert_eq!(
+            control.try_publish(19, 1),
+            Err(DeliveryError::CancellationPending)
+        );
+        let result = control.collect(ticket).unwrap();
+        assert_eq!(result.applied_prefix, applied_prefix);
+        assert_eq!(result.remaining_count, logical_count - applied_prefix);
+        assert_eq!(
+            result.disposition,
+            if applied_prefix == logical_count {
+                CoreTerminalDisposition::Applied
+            } else {
+                CoreTerminalDisposition::Canceled
+            }
+        );
+        assert_eq!(
+            result.acknowledged_sample,
+            if applied_prefix == logical_count {
+                None
+            } else {
+                Some(SampleTime(91))
+            }
+        );
+        let next = control.try_publish(18, 1).unwrap();
+        assert_ne!(next.generation, ticket.generation);
+    }
+}
+
+#[test]
+fn generic_boundary_cancel_has_independent_request_capacity_and_exact_frontier() {
+    let (mut control, mut render) =
+        PreparedDelivery::<u32>::prepare(NonZeroUsize::new(2).unwrap()).unwrap();
+    let first = control.try_publish(1, 1).unwrap();
+    let second = control.try_publish(2, 1).unwrap();
+    assert_eq!(control.try_publish(3, 1), Err(DeliveryError::Full));
+    let token = control.begin_cancel().unwrap();
+    assert_eq!(
+        control.try_publish(4, 1),
+        Err(DeliveryError::CancellationPending)
+    );
+    render.cancel_boundary(SampleTime(12)).unwrap();
+    assert_eq!(
+        control
+            .poll_cancel_boundary(token)
+            .unwrap()
+            .unwrap()
+            .frontier,
+        Some(second.serial)
+    );
+    assert_eq!(control.collect(first).unwrap().remaining_count, 1);
+    assert_eq!(control.collect(second).unwrap().remaining_count, 1);
+    assert_eq!(
+        control.poll_cancel_boundary(token),
+        Err(DeliveryError::StaleTicket)
+    );
+    let replacement = control.try_publish(5, 1).unwrap();
+    assert!(replacement.serial > second.serial);
+}
+
+#[test]
+fn generic_boundary_cancel_uses_separate_threads_and_holds_credit_after_ack() {
+    let (mut control, mut render) =
+        PreparedDelivery::<u32>::prepare(NonZeroUsize::new(2).unwrap()).unwrap();
+    let first = control.try_publish(1, 1).unwrap();
+    let second = control.try_publish(2, 1).unwrap();
+    let ready = Barrier::new(2);
+    let go = Barrier::new(2);
+    let acknowledged = Barrier::new(2);
+    let collected = Barrier::new(2);
+    std::thread::scope(|scope| {
+        let render_thread = scope.spawn(|| {
+            ready.wait();
+            go.wait();
+            let (_, counts) = measured(|| render.cancel_boundary(SampleTime(33)).unwrap());
+            assert_eq!((counts.0, counts.1), (0, 0));
+            acknowledged.wait();
+            collected.wait();
+        });
+        let token = control.begin_cancel().unwrap();
+        ready.wait();
+        go.wait();
+        acknowledged.wait();
+        assert!(control.poll_cancel_boundary(token).unwrap().is_some());
+        assert_eq!(
+            control.try_publish(3, 1),
+            Err(DeliveryError::CancellationPending)
+        );
+        control.collect(first).unwrap();
+        control.collect(second).unwrap();
+        collected.wait();
+        render_thread.join().unwrap();
+    });
+    assert!(control.try_publish(4, 1).is_ok());
+}
+
+#[test]
+fn generic_boundary_cancel_thread_schedule_covers_zero_partial_and_full_application() {
+    for (case, prefix, expect_applied) in [(0_u16, 0_u16, false), (1, 1, false), (3, 3, true)] {
+        let (mut control, mut render) =
+            PreparedDelivery::<u32>::prepare(NonZeroUsize::new(2).unwrap()).unwrap();
+        let first = control.try_publish(10, 3).unwrap();
+        let second = control.try_publish(20, 2).unwrap();
+        std::thread::scope(|scope| {
+            let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+            let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+            let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
+            let render_thread = scope.spawn(move || {
+                let setup = (|| {
+                    if prefix != 0 {
+                        if render.begin()? != (first, 10) {
+                            return Err(DeliveryError::StaleTicket);
+                        }
+                        render.mark_progress(first, prefix)?;
+                        if prefix == 3 {
+                            render.finish(first, prefix)?;
+                        }
+                    }
+                    Ok(())
+                })();
+                if ready_tx.send(setup).is_err() {
+                    return;
+                }
+                if setup.is_err() || release_rx.recv().is_err() {
+                    return;
+                }
+                let (result, counts) =
+                    measured(|| render.cancel_boundary(SampleTime(200 + u64::from(case))));
+                let _ = done_tx.send((result, counts));
+            });
+            assert_eq!(ready_rx.recv().unwrap(), Ok(()));
+            let token = control.begin_cancel().unwrap();
+            assert_eq!(control.poll_cancel_boundary(token).unwrap(), None);
+            release_tx.send(()).unwrap();
+            let (boundary_result, counts) = done_rx.recv().unwrap();
+            assert_eq!(boundary_result, Ok(()));
+            assert_eq!((counts.0, counts.1), (0, 0));
+            let complete = control.poll_cancel_boundary(token).unwrap().unwrap();
+            assert_eq!(complete.frontier, Some(second.serial));
+            assert_eq!(
+                complete.acknowledged_sample,
+                SampleTime(200 + u64::from(case))
+            );
+            assert_eq!(
+                control.try_publish(30, 1),
+                Err(DeliveryError::CancellationPending)
+            );
+            let first_result = control.collect(first).unwrap();
+            assert_eq!(first_result.applied_prefix, prefix);
+            assert_eq!(first_result.remaining_count, 3 - prefix);
+            assert_eq!(
+                first_result.disposition,
+                if expect_applied {
+                    CoreTerminalDisposition::Applied
+                } else {
+                    CoreTerminalDisposition::Canceled
+                }
+            );
+            assert_eq!(
+                first_result.acknowledged_sample,
+                if expect_applied {
+                    None
+                } else {
+                    Some(SampleTime(200 + u64::from(case)))
+                }
+            );
+            assert_eq!(
+                control.try_publish(31, 1),
+                Err(DeliveryError::CancellationPending)
+            );
+            let second_result = control.collect(second).unwrap();
+            assert_eq!(
+                (
+                    second_result.disposition,
+                    second_result.applied_prefix,
+                    second_result.remaining_count,
+                    second_result.acknowledged_sample,
+                ),
+                (
+                    CoreTerminalDisposition::Canceled,
+                    0,
+                    2,
+                    Some(SampleTime(200 + u64::from(case))),
+                )
+            );
+            render_thread.join().unwrap();
+        });
+        assert!(control.try_publish(32, 1).is_ok());
+    }
+}
+
+#[test]
+fn generic_boundary_cancel_scope_drops_release_on_control_failure() {
+    let render_exited = Arc::new(AtomicBool::new(false));
+    let render_exited_in_thread = Arc::clone(&render_exited);
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        std::thread::scope(|scope| {
+            let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+            let (_release_tx, release_rx) = std::sync::mpsc::sync_channel::<()>(0);
+            scope.spawn(move || {
+                ready_tx.send(()).unwrap();
+                let received = release_rx.recv();
+                render_exited_in_thread.store(received.is_err(), Ordering::SeqCst);
+            });
+            ready_rx.recv().unwrap();
+            panic!("forced pre-release control failure");
+        });
+    }));
+    assert!(caught.is_err());
+    assert!(render_exited.load(Ordering::SeqCst));
+}
+
+#[test]
+fn generic_preparation_report_matches_allocation_and_repeated_reuse_stays_zero_alloc() {
+    let capacity = NonZeroUsize::new(2).unwrap();
+    let report = PreparedDelivery::<u32>::resource_report(capacity).unwrap();
+    let ((control, render), counts) =
+        measured(|| PreparedDelivery::<u32>::prepare(capacity).unwrap());
+    assert_eq!(counts.1, 0);
+    assert_eq!(counts.2, report.retained_payload_bytes);
+    assert_eq!(counts.3, report.largest_allocation_bytes);
+    let teardown = std::thread::scope(|scope| {
+        scope
+            .spawn(move || measured(|| drop((control, render))).1)
+            .join()
+            .unwrap()
+    });
+    assert!(teardown.1 > 0);
+
+    let (mut control, mut render) = PreparedDelivery::<u32>::prepare(capacity).unwrap();
+    for cycle in 0..16_u64 {
+        let ticket = control.try_publish(cycle as u32, 1).unwrap();
+        let token = control.begin_cancel().unwrap();
+        let (_, counts) = measured(|| render.cancel_boundary(SampleTime(500 + cycle)).unwrap());
+        assert_eq!((counts.0, counts.1), (0, 0));
+        let complete = control.poll_cancel_boundary(token).unwrap().unwrap();
+        assert_eq!(complete.acknowledged_sample, SampleTime(500 + cycle));
+        let completion = control.collect(ticket).unwrap();
+        assert_eq!(completion.disposition, CoreTerminalDisposition::Canceled);
+    }
+}
+
+#[test]
+fn staged_automation_remains_non_applicable_while_cancel_races_boundary() {
+    let (mut control, mut render) = PreparedAutomationDelivery::prepare(config(), 41).unwrap();
+    control.try_admit(SampleTime(0), batch(1)).unwrap();
+    let unsupported = PreparedDeliveryCapabilities::new(&[ParameterHandle(99)]).unwrap();
+    assert!(matches!(
+        control.try_handoff_next(&unsupported).unwrap(),
+        HandoffResult::PendingUnsupported
+    ));
+    let ready = Barrier::new(2);
+    let go = Barrier::new(2);
+    let token = control
+        .begin_cancel(
+            AutomationCancellationReason::EndpointShutdown,
+            SessionRevision(4),
+        )
+        .unwrap();
+    std::thread::scope(|scope| {
+        let render_thread = scope.spawn(|| {
+            ready.wait();
+            go.wait();
+            assert!(render.begin_boundary(SampleTime(77)).is_none());
+        });
+        ready.wait();
+        go.wait();
+        render_thread.join().unwrap();
+    });
+    let done = control.poll_cancel_boundary(token).unwrap().unwrap();
+    assert_eq!((done.canceled_events, done.canceled_records), (1, 1));
+}
+
+#[test]
+fn generic_invalid_prefix_and_resource_overflow_preserve_cancellation_ownership() {
+    let (mut control, mut render) =
+        PreparedDelivery::<u32>::prepare(NonZeroUsize::new(1).unwrap()).unwrap();
+    let ticket = control.try_publish(9, 3).unwrap();
+    assert_eq!(render.begin().unwrap(), (ticket, 9));
+    render.mark_progress(ticket, 2).unwrap();
+    assert_eq!(
+        render.mark_progress(ticket, 1),
+        Err(DeliveryError::InvalidPrefix)
+    );
+    assert_eq!(render.finish(ticket, 1), Err(DeliveryError::InvalidPrefix));
+    let token = control.begin_cancel().unwrap();
+    render.cancel_boundary(SampleTime(88)).unwrap();
+    assert!(control.poll_cancel_boundary(token).unwrap().is_some());
+    let completion = control.collect(ticket).unwrap();
+    assert_eq!(
+        (completion.applied_prefix, completion.remaining_count),
+        (2, 1)
+    );
+    assert_eq!(completion.disposition, CoreTerminalDisposition::Canceled);
+    assert!(
+        PreparedDelivery::<u32>::resource_report(NonZeroUsize::new(usize::MAX).unwrap()).is_err()
+    );
 }
 
 #[derive(Clone, Copy)]
