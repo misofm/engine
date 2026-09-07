@@ -30,16 +30,18 @@ const repository = resolve(__dirname, "../..")
 const operatorHtml = join(repository, "scripts/operator/stem-store-eval.html")
 const stemStoreModule = join(repository, "hosts/host-web/web/stem-store/index.js")
 const fixtureBytes = 16 * 1024 * 1024
-const expected = createHash("sha256")
-for (let offset = 0; offset < fixtureBytes; offset += 64 * 1024) {
-  const size = Math.min(64 * 1024, fixtureBytes - offset)
-  const chunk = Buffer.allocUnsafe(size)
-  for (let index = 0; index < size; index += 1) {
-    chunk[index] = ((offset + index) * 31) & 0xff
+function prepareFixtureDigest() {
+  const expected = createHash("sha256")
+  for (let offset = 0; offset < fixtureBytes; offset += 64 * 1024) {
+    const size = Math.min(64 * 1024, fixtureBytes - offset)
+    const chunk = Buffer.allocUnsafe(size)
+    for (let index = 0; index < size; index += 1) {
+      chunk[index] = ((offset + index) * 31) & 0xff
+    }
+    expected.update(chunk)
   }
-  expected.update(chunk)
+  return expected.digest("hex")
 }
-const digest = expected.digest("hex")
 
 const mime = {
   ".html": "text/html; charset=utf-8",
@@ -110,7 +112,7 @@ async function pathSelfTest() {
   }
 }
 
-async function probe(browserType) {
+async function probe(browserType, digest) {
   const browser = await browserType.launch({ headless: true })
   const page = await browser.newPage()
   const { server, port } = await listen()
@@ -325,6 +327,7 @@ async function main() {
     await pathSelfTest()
     return
   }
+  const digest = prepareFixtureDigest()
   const { chromium, firefox, webkit } = require("playwright")
   const types = { chromium, firefox, webkit }
   const requested = process.argv.slice(2)
@@ -333,7 +336,7 @@ async function main() {
   for (const leg of legs) {
     if (!(leg in types)) throw new Error(`unknown browser leg: ${leg}`)
     try {
-      report[leg] = await probe(types[leg])
+      report[leg] = await probe(types[leg], digest)
     } catch (error) {
       report[leg] = {
         error: { name: error?.name, message: error?.message },
