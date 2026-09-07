@@ -1,0 +1,1 @@
+git diff --check origin/main...HEAD && git status --short --branch && git rev-parse HEAD @{upstream} origin/main && sha256sum hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256
