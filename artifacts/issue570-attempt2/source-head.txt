@@ -1,0 +1,4 @@
+source_head=5879b6892c15405f304bd099e550448280606d14
+initial_utc=2026-09-07T17:45:22Z
+initial_cwd=/home/bl/misofm/engine-cp4-borrowed-sorted-bind
+initial_status=## codex/cp4-borrowed-sorted-bind...origin/codex/cp4-borrowed-sorted-bind
