@@ -49,3 +49,9 @@ Astra LOW returned **FAIL** at exact pushed head `00bfaf031a383db8b654ee8a1f180c
 Attempt 1 fails because the fixed record test constructs already-projected `Metadata`; it cannot detect broken compiler-line/LLVM/host extraction, CPU/OS composition or environment sentinel/missing-field handling. Attempt 2 may add only a narrow production-used projection seam with deterministic raw command and environment inputs, assert those outputs including absent and sentinel cases, and retain the record oracle. No other change is authorized.
 
 During review, main advanced disjointly through #580 / PR #582 to `defa979cbf0bf86b4ebba2f52b0647eb01b9ff29`. That delta changes neither bench nor bench-support. Final delivery still requires integration and exact current-base review after source PASS.
+
+## Attempt 2 correction checkpoint
+
+Luna HIGH completed the sole correction at source `90981e71578f27fd26db700b725bf6fbf7bce03f`, changing only `tools/bench/src/graph.rs`. Production `metadata()` now gathers raw command/environment inputs and delegates to a narrow `RawMetadata` projection. Deterministic tests exercise first compiler line, LLVM/host extraction, CPU and OS composition, accepted/sentinel/absent environment values and missing-field order. The attempt-1 command and fixed record oracles remain.
+
+Focused graph debug/release each pass 6 tests, complete bench debug passes 43 tests, and strict bench Clippy/rustdoc, format/diff checks pass. No benchmark or excluded path changed. Astra LOW attempt-2 review and later current-main integration remain pending.
