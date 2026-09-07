@@ -142,3 +142,17 @@ the source changes its bytes. After merge and successful post-main qualification
 root synchronizes and closes #587 and updates #444/#559/#560. Closing #587 advances
 RT4 but does not close #444 or RT4: one concrete lifecycle publication/cancellation
 operation remains required.
+
+## Attempt 1 review
+
+Luna HIGH source checkpoint `0b84ecbce4a4bd31aefa9bfb2e12810027ca1cfc`
+correctly selects `BetweenRenderCalls` only for the prepared endpoint while preserving
+raw `Concurrent` preparation. Astra LOW returned **FAIL** with two attempts remaining.
+The selected-pair fixture covers only one block, uses cumulative witness values, does
+not compare paired/reference state or exact record/member counts, and uses the private
+native constructor. Attempt 2 must extend that fixture across the frozen immediate,
+ramping, settled, retarget, mute, and unmute schedule; capture owner-specific witness
+snapshots/deltas; assert exact drains/members and applicable state; and exercise the
+public native constructor. Existing PostFader tests already prove genuine bank/scalar
+decline and need no duplicate fixture. Full verdict:
+`docs/audits/587-attempt1-review.md`.
