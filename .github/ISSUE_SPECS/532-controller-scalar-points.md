@@ -81,3 +81,7 @@ The real session/compiler/provider fixture resolves actual makeup handles and ex
 ### Group1 completion checkpoint
 
 `group1-complete-debug` passes one focused test on test SHA256 `a78ea2567fb09c47cd16fbe0bd0da247e57cd8755d2207be0d7d5a1a14a15a18` (the raw command manifest is authoritative). Warmed asymmetric signals compare bitwise against independent Point-span processing and differ from a no-event reference. Sample3 applies in block1; sample128 remains pending until block2, then native current/target readback agrees with the independent reference. Exact replay does not create a second outstanding batch. Caller clock publication uses actual endpoint next_sample128/256 before nonzero past-time refusal. Groups2/3 and consolidated review remain pending.
+
+### Group2 checkpoint
+
+`group2-focused-debug-clock-fixed` passes the real two-record/prefix1 cancellation fixture. The controller observes the actual endpoint boundary at sample128, publishes one encoded cancellation event for one remaining record, accounts one applied record and one provider canceled record, releases outstanding/resident ownership, and admits/renders replacement work. Native makeup current/target values retain the correct applied prefix. The initial passing fixture omitted clock publication after the cancellation render; final captured source publishes actual next_sample256 before further typed commands/replacement admission. Earlier evidence remains preserved. Group3 and consolidated review remain pending.

@@ -18,7 +18,8 @@ use host_core::{
 use protocol::{
     AutomationBatchError, AutomationBatchSlot, AutomationCancellationReason,
     AutomationEnqueueError, AutomationKind, AutomationRecord, ControlCommand, ControlProvider,
-    ControllerRequest, ControllerRetainedCapacity, DecodeScratch, DecodedSuccessResponsePayload,
+    ControllerRequest, ControllerRetainedCapacity, CounterId, CountersRequest, DecodeScratch,
+    DecodedEventPayload, DecodedSuccessResponsePayload, DecodedTypedEventFrame,
     DecodedTypedResponseFrame, DeliveryError, ExpectedRevision, HandoffResult,
     ParameterChannel as ProtocolParameterChannel, ParameterHandle, ParameterMetadataRequest,
     ParameterStateRequest, PreparedAutomationDelivery, ProtocolCodec, ProtocolControllerConfig,
@@ -1753,5 +1754,192 @@ fn controller_points_drive_real_asymmetric_pcm_replay_and_clock_refusal() {
         },
     });
     assert_eq!(state.status, StatusCode::Unavailable);
+    drop(render.stop());
+}
+
+#[test]
+fn controller_cancellation_keeps_real_prefix_event_credit_and_native_state() {
+    let mut fixture = real_controller_fixture();
+    let revision = fixture.session.revision();
+    let handles = fixture.handles;
+    let processor = fixture.effects.entries[0].processor.as_mut();
+    warm_real(processor);
+    let (mut controller, render, _) = prepare_controller_scalar_point_endpoint(
+        processor,
+        handles,
+        fixture.session,
+        controller_queue_config(),
+        fixture.provider,
+        controller_replay_config(),
+        ProtocolCodec::default(),
+        controller_config(),
+        ControllerRetainedCapacity {
+            meter_handles: 0,
+            counter_ids: 0,
+        },
+    )
+    .expect("combined cancellation preparation");
+    let batch = real_batch(
+        revision,
+        10,
+        handles,
+        &[(handles[0], 3, 6.0), (handles[1], 200, -6.0)],
+    );
+    let response = controller.process(controller_enqueue(
+        revision,
+        10,
+        b"cancel-two-records",
+        batch,
+    ));
+    assert_eq!(response.status, StatusCode::Ok);
+    let ticket = match controller.try_handoff_next().unwrap() {
+        HandoffResult::HandedOff(ticket) => ticket,
+        other => panic!("expected Point handoff, got {other:?}"),
+    };
+    let mut render = render.start().unwrap_or_else(|_| panic!("render start"));
+    let initial = render.snapshot().unwrap();
+    let mut left = signal(128, 0x0532_2001, 0.69);
+    let mut right = signal(128, 0x0532_2002, 0.57);
+    render
+        .render(&mut left, &mut right, SampleTime(0))
+        .expect("prefix render");
+    let prefix = render.snapshot().unwrap();
+    assert_eq!(prefix.applied, 1);
+    assert_eq!(prefix.pending.unwrap().1, 1);
+    assert_eq!(prefix.pending.unwrap().3, Some(SampleTime(200)));
+    assert_eq!(prefix.next_sample, SampleTime(128));
+    assert_eq!(prefix.state[0].target_value.to_bits(), 6.0_f32.to_bits());
+    assert_state_bits(prefix.state[1], initial.state[1]);
+
+    fixture
+        .clock
+        .0
+        .store(prefix.next_sample.0, Ordering::Release);
+    let token = controller
+        .begin_cancel(AutomationCancellationReason::EndpointShutdown)
+        .unwrap();
+    let mut next_left = signal(128, 0x0532_2003, 0.69);
+    let mut next_right = signal(128, 0x0532_2004, 0.57);
+    render
+        .render(&mut next_left, &mut next_right, prefix.next_sample)
+        .expect("cancellation boundary render");
+    let canceled = render.snapshot().unwrap();
+    assert_eq!(canceled.applied, 1);
+    assert_eq!(canceled.pending, None);
+    assert_eq!(canceled.next_sample, SampleTime(256));
+    assert_state_bits(canceled.state[0], prefix.state[0]);
+    assert_state_bits(canceled.state[1], prefix.state[1]);
+    fixture
+        .clock
+        .0
+        .store(canceled.next_sample.0, Ordering::Release);
+    let complete = controller.poll_cancel_boundary(token).unwrap().unwrap();
+    assert_eq!(
+        (
+            complete.applied_records,
+            complete.canceled_records,
+            complete.canceled_events,
+            complete.effective_sample,
+        ),
+        (1, 1, 1, SampleTime(128))
+    );
+    assert_eq!(controller.outstanding(), 0);
+    assert_eq!(controller.resident_automation(), 0);
+    assert_eq!(
+        controller.collect_terminal(ticket),
+        Err(DeliveryError::StaleTicket)
+    );
+
+    let mut encoded = vec![0_u8; 4_096];
+    let encoded_len = controller
+        .dequeue_reliable_event_frame_into(&mut encoded)
+        .unwrap()
+        .expect("one encoded cancellation event");
+    let event = ProtocolCodec::default()
+        .decode_typed_event(
+            &encoded[..encoded_len],
+            &mut DecodeScratch::new(&mut [0_u16; 64]),
+        )
+        .expect("decode cancellation event");
+    assert!(matches!(
+        event,
+        DecodedTypedEventFrame {
+            payload: DecodedEventPayload::AutomationCanceled(value),
+            ..
+        } if value.origin_request_id == RequestId::new(10).unwrap()
+            && value.canceled_records == 1
+            && value.effective_sample == Some(SampleTime(128))
+            && value.reason == AutomationCancellationReason::EndpointShutdown
+    ));
+    assert!(
+        controller
+            .dequeue_reliable_event_frame_into(&mut encoded)
+            .unwrap()
+            .is_none()
+    );
+
+    let counters = controller.process(ControllerRequest {
+        request_id: RequestId::new(11).unwrap(),
+        expected_revision: ExpectedRevision::Exact(revision),
+        canonical_bytes: b"canceled-counter",
+        command: ControlCommand::CountersGet {
+            request: CountersRequest {
+                all: true,
+                ids: Vec::new(),
+            },
+        },
+    });
+    assert_eq!(counters.status, StatusCode::Ok);
+    let decoded = ProtocolCodec::default()
+        .decode_typed_response(&counters.frame, &mut DecodeScratch::new(&mut [0_u16; 64]))
+        .expect("decode canceled counter");
+    let DecodedTypedResponseFrame::Success {
+        payload: DecodedSuccessResponsePayload::CounterSnapshot(snapshot),
+        ..
+    } = decoded
+    else {
+        panic!("expected counter snapshot");
+    };
+    assert_eq!(
+        snapshot
+            .values
+            .iter()
+            .find(|value| value.id == CounterId::CanceledAutomation)
+            .map(|value| value.value),
+        Some(1)
+    );
+
+    let replacement = controller.process(controller_enqueue(
+        revision,
+        12,
+        b"after-cancel",
+        real_batch(revision, 12, handles, &[(handles[0], 300, 2.0)]),
+    ));
+    assert_eq!(replacement.status, StatusCode::Ok);
+    let replacement_ticket = match controller.try_handoff_next().unwrap() {
+        HandoffResult::HandedOff(ticket) => ticket,
+        other => panic!("expected replacement handoff, got {other:?}"),
+    };
+    let mut replacement_left = signal(128, 0x0532_2005, 0.69);
+    let mut replacement_right = signal(128, 0x0532_2006, 0.57);
+    render
+        .render(
+            &mut replacement_left,
+            &mut replacement_right,
+            SampleTime(256),
+        )
+        .expect("replacement render");
+    fixture
+        .clock
+        .0
+        .store(render.snapshot().unwrap().next_sample.0, Ordering::Release);
+    assert_eq!(
+        controller
+            .collect_terminal(replacement_ticket)
+            .unwrap()
+            .applied_prefix,
+        1
+    );
+    assert_eq!(controller.outstanding(), 0);
     drop(render.stop());
 }
