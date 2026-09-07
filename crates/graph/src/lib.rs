@@ -1230,8 +1230,7 @@ impl PreparedGraphPlan {
             supplied.sort_unstable();
             supplied.dedup();
 
-            let mut builtin_bank_members =
-                Vec::with_capacity(self.builtin_bank_members().count());
+            let mut builtin_bank_members = Vec::with_capacity(self.builtin_bank_members().count());
             builtin_bank_members.extend(self.builtin_bank_members());
             builtin_bank_members.sort_unstable();
             builtin_bank_members.dedup();
