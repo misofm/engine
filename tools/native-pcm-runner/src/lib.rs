@@ -1570,7 +1570,7 @@ mod tests {
     }
 
     fn hex_digest(digest: [u8; 32]) -> String {
-        engine::hex_lower(&digest)
+        bench_support::digest::hex(&digest)
     }
 
     #[derive(Default)]

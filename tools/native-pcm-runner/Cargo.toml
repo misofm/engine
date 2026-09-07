@@ -16,7 +16,7 @@ source.workspace = true
 sha2.workspace = true
 
 [dev-dependencies]
-engine.workspace = true
+bench-support.workspace = true
 serde_json = "=1.0.151"
 
 [lints]
