@@ -690,6 +690,7 @@ fn ramps_are_stationary(ramps: &[LinearRamp]) -> bool {
         .all(|ramp| ramp.remaining == 0 && ramp.current.to_bits() == ramp.target.to_bits())
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum StationaryDispatch {
     Runtime,
@@ -1717,6 +1718,7 @@ fn limiter_block<L: Lane>(
 }
 
 #[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 #[inline(always)]
 fn limiter_block_runtime_oracle<L: Lane>(
     left_io: &mut [f32],
