@@ -47,3 +47,20 @@ normal dependency/API absence, live extracted-test census/lists, formatting and 
 checks pass at pre-commit candidate `c0a00b4296ced4e8709ff882e57ead5ec9b2d3b0`. No product,
 production checker, shared helper, dependency, lockfile, Wasm, benchmark or prior evidence byte
 changed. Root commits and pushes this tranche before Astra low review.
+
+## Astra low attempt 1 PASS with evidence attribution correction
+
+Astra low reviewed exact source/evidence checkpoint
+`6d72e9fcb6f16708b548621ab0fec4116cacae5c` and returned PASS for source and independently
+verified objective gates. The manifest-path discriminator, separate TOML controls, full fixture
+suite and production checker pass. Astra independently applied exactly one swallowed-status
+mutation within scratch `gate_sort_lines`; the suite failed at the intended workspace-sort
+diagnostic after the TOML controls succeeded.
+
+The review found that the worker's `sort-status-countermutant-direct` and
+`sort-status-countermutant-verified` raw outputs do not exactly match their recorded commands. They
+are preserved and denied exact-command credit, as are the two already documented ineffective
+quoted-shell probes. The candidate's in-suite causal control plus Astra's independent
+`artifacts/issue567-review/direct-countermutant` capture supply the gate. This is an attribution
+correction only; no product or fixture-source revision is required. Root commits the correction and
+review evidence, then Astra low checks the exact verdict-bearing head before PR creation.

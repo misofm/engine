@@ -23,11 +23,16 @@ the overall result.
 
 The workspace `sort` discriminator targets manifest-path input and fails after all earlier TOML
 dependency sorts delegate successfully. The existing TOML dependency-sort controls remain
-separate. The direct counter-mutant proof in `sort-status-countermutant-verified.{meta,raw.gz}`
-mutates only the scratch `gate_sort_lines` branch from `else rc=$?` to `else rc=0`; the candidate
-suite exits 1 with the causal `wrong conformance diagnostic ... no workspace library names found`.
+separate. The candidate's in-suite counter-mutant mutates only the scratch `gate_sort_lines`
+branch from `else rc=$?` to `else rc=0` and requires the causal wrong-diagnostic failure. Astra LOW
+independently reproduced that direct mutation and exit under `artifacts/issue567-review/`; that
+review capture is the exact-command evidence for the external counter-mutant gate.
 
 The earlier `sort-status-countermutant.{meta,raw.gz}` and
 `sort-status-countermutant-corrected.{meta,raw.gz}` probes are retained as non-credit diagnostics:
 nested shell quoting left the mutation ineffective and the suite exited 0. They do not contribute
-to the verdict. The internal candidate control and the direct proof both use the exact mutation.
+to the verdict. The later `sort-status-countermutant-direct` and
+`sort-status-countermutant-verified` pairs are also non-credit for exact command provenance: their
+raw output ordering and missing final diagnostic line do not match their recorded command. They
+remain preserved without alteration. The internal candidate control and Astra's independent review
+proof supply acceptance.

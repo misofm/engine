@@ -1,0 +1,44 @@
+[
+  {
+    "command": "git rev-parse HEAD origin/main",
+    "utc": "2026-09-07T15:55:16.035774+00:00",
+    "exit": 0,
+    "log": "check-0.log.gz"
+  },
+  {
+    "command": "bash -n scripts/test-conformance-boundaries.sh",
+    "utc": "2026-09-07T15:55:16.038653+00:00",
+    "exit": 0,
+    "log": "check-1.log.gz"
+  },
+  {
+    "command": "bash scripts/test-conformance-boundaries.sh",
+    "utc": "2026-09-07T15:55:16.041516+00:00",
+    "exit": 0,
+    "log": "check-2.log.gz"
+  },
+  {
+    "command": "bash scripts/check-conformance-boundaries.sh",
+    "utc": "2026-09-07T15:56:01.745552+00:00",
+    "exit": 0,
+    "log": "check-3.log.gz"
+  },
+  {
+    "command": "git diff --check origin/main...HEAD",
+    "utc": "2026-09-07T15:56:02.289967+00:00",
+    "exit": 0,
+    "log": "check-4.log.gz"
+  },
+  {
+    "command": "git diff --check",
+    "utc": "2026-09-07T15:56:02.318720+00:00",
+    "exit": 0,
+    "log": "check-5.log.gz"
+  },
+  {
+    "command": "git diff --name-only 546e003d8bddd42c291dd6617f324ef42782c95b HEAD",
+    "utc": "2026-09-07T15:56:02.326215+00:00",
+    "exit": 0,
+    "log": "check-6.log.gz"
+  }
+]
