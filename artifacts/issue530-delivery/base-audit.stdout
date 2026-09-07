@@ -1,0 +1,12 @@
+{
+  "head": "efcb3c221ba8d2f316269ece1db3a7646878055e",
+  "current_main": "301a57c6fb9982025b6fb0a49f3d35843c3e6f60",
+  "source_changes": [
+    "crates/protocol/src/controller.rs",
+    "crates/protocol/src/controller_delivery.rs",
+    "crates/protocol/src/delivery.rs",
+    "crates/protocol/src/lib.rs",
+    "crates/protocol/tests/delivery_ownership.rs"
+  ],
+  "evidence_file_count": 224
+}

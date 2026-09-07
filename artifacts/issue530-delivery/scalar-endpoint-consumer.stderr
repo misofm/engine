@@ -1,0 +1,38 @@
+   Compiling bytemuck v1.25.2
+   Compiling engine v0.1.0 (/home/bl/misofm/engine-controller-delivery/crates/engine)
+   Compiling typenum v1.20.1
+   Compiling cpufeatures v0.3.0
+   Compiling safe_arch v1.2.0
+   Compiling session v0.1.0 (/home/bl/misofm/engine-controller-delivery/crates/session)
+   Compiling wide v1.6.1
+   Compiling hybrid-array v0.4.14
+   Compiling block-buffer v0.12.1
+   Compiling crypto-common v0.2.2
+   Compiling protocol v0.1.0 (/home/bl/misofm/engine-controller-delivery/crates/protocol)
+   Compiling digest v0.11.3
+   Compiling sha2 v0.11.0
+   Compiling bench-support v0.1.0 (/home/bl/misofm/engine-controller-delivery/tools/bench-support)
+   Compiling lane v0.1.0 (/home/bl/misofm/engine-controller-delivery/crates/lane)
+   Compiling math v0.1.0 (/home/bl/misofm/engine-controller-delivery/crates/math)
+   Compiling effect-contract v0.1.0 (/home/bl/misofm/engine-controller-delivery/crates/effect-contract)
+   Compiling effect-runtime v0.1.0 (/home/bl/misofm/engine-controller-delivery/crates/effect-runtime)
+   Compiling rack v0.1.0 (/home/bl/misofm/engine-controller-delivery/crates/rack)
+   Compiling soft-clip v0.1.0 (/home/bl/misofm/engine-controller-delivery/crates/soft-clip)
+   Compiling delay v0.1.0 (/home/bl/misofm/engine-controller-delivery/crates/delay)
+   Compiling builtins v0.1.0 (/home/bl/misofm/engine-controller-delivery/crates/builtins)
+   Compiling gate-expander v0.1.0 (/home/bl/misofm/engine-controller-delivery/crates/gate-expander)
+   Compiling transient-shaper v0.1.0 (/home/bl/misofm/engine-controller-delivery/crates/transient-shaper)
+   Compiling parametric-eq v0.1.0 (/home/bl/misofm/engine-controller-delivery/crates/parametric-eq)
+   Compiling true-peak-limiter v0.1.0 (/home/bl/misofm/engine-controller-delivery/crates/true-peak-limiter)
+   Compiling multiband-compressor v0.1.0 (/home/bl/misofm/engine-controller-delivery/crates/multiband-compressor)
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-controller-delivery/crates/compressor)
+   Compiling graph v0.1.0 (/home/bl/misofm/engine-controller-delivery/crates/graph)
+   Compiling rack-compiler v0.1.0 (/home/bl/misofm/engine-controller-delivery/crates/rack-compiler)
+   Compiling effect-package v0.1.0 (/home/bl/misofm/engine-controller-delivery/crates/effect-package)
+   Compiling builtins-compiler v0.1.0 (/home/bl/misofm/engine-controller-delivery/crates/builtins-compiler)
+   Compiling source v0.1.0 (/home/bl/misofm/engine-controller-delivery/crates/source)
+   Compiling effect-compiler v0.1.0 (/home/bl/misofm/engine-controller-delivery/crates/effect-compiler)
+   Compiling graph-compiler v0.1.0 (/home/bl/misofm/engine-controller-delivery/crates/graph-compiler)
+   Compiling host-core v0.1.0 (/home/bl/misofm/engine-controller-delivery/crates/host-core)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.98s
+     Running tests/scalar_point_endpoint.rs (/tmp/issue530-target/debug/deps/scalar_point_endpoint-fb9af70fce4ccb65)

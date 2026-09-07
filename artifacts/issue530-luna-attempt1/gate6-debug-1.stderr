@@ -1,0 +1,34 @@
+   Compiling protocol v0.1.0 (/home/bl/misofm/engine-controller-delivery/crates/protocol)
+error[E0433]: cannot find `SessionStore` in `session`
+   --> crates/protocol/tests/delivery_ownership.rs:140:14
+    |
+140 |     session::SessionStore::new(
+    |              ^^^^^^^^^^^^ could not find `SessionStore` in `session`
+    |
+help: a struct with a similar name exists
+    |
+140 -     session::SessionStore::new(
+140 +     session::SessionModel::new(
+    |
+
+error[E0425]: cannot find type `SessionStore` in crate `session`
+   --> crates/protocol/tests/delivery_ownership.rs:138:34
+    |
+138 | fn fixture_session() -> session::SessionStore {
+    |                                  ^^^^^^^^^^^^
+    |
+   ::: crates/session/src/model.rs:52:1
+    |
+ 52 | pub struct SessionModel {
+    | ----------------------- similarly named struct `SessionModel` defined here
+    |
+help: a struct with a similar name exists
+    |
+138 - fn fixture_session() -> session::SessionStore {
+138 + fn fixture_session() -> session::SessionModel {
+    |
+
+Some errors have detailed explanations: E0425, E0433.
+For more information about an error, try `rustc --explain E0425`.
+error: could not compile `protocol` (test "delivery_ownership") due to 2 previous errors
+warning: build failed, waiting for other jobs to finish...

@@ -1,0 +1,7 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on build directory
+   Compiling protocol v0.1.0 (/home/bl/misofm/engine-controller-delivery/crates/protocol)
+    Finished `release` profile [optimized + debuginfo] target(s) in 42.00s
+     Running tests/delivery_ownership.rs (/tmp/issue530-target/release/deps/delivery_ownership-e637aa2edf2406c0)

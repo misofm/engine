@@ -1,0 +1,108 @@
+   Compiling protocol v0.1.0 (/home/bl/misofm/engine-controller-delivery/crates/protocol)
+warning: unused import: `canonical_session_json`
+   --> crates/protocol/src/controller_delivery.rs:201:32
+    |
+201 |     use session::{CompileCaps, canonical_session_json, parse_session_json};
+    |                                ^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+error[E0308]: mismatched types
+   --> crates/protocol/src/controller_delivery.rs:518:17
+    |
+518 |                 ..batch(revision, 2, 7, 3)
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `AutomationRecord`, found `RangeTo<AutomationBatchSlot>`
+    |
+    = note: expected struct `queue::AutomationRecord`
+               found struct `RangeTo<queue::AutomationBatchSlot>`
+
+error[E0223]: ambiguous associated type
+   --> crates/protocol/src/controller_delivery.rs:605:13
+    |
+605 |             DecodedTypedEventFrame::Success { .. } => 0,
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+help: if there were a trait named `Example` with associated type `Success` implemented for `typed_frame::DecodedTypedEventFrame<'_>`, you could use the fully-qualified path
+    |
+605 -             DecodedTypedEventFrame::Success { .. } => 0,
+605 +             <typed_frame::DecodedTypedEventFrame<'_> as Example>::Success { .. } => 0,
+    |
+
+error[E0223]: ambiguous associated type
+   --> crates/protocol/src/controller_delivery.rs:606:13
+    |
+606 |             DecodedTypedEventFrame::Event { payload, .. } => match payload {
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+help: if there were a trait named `Example` with associated type `Event` implemented for `typed_frame::DecodedTypedEventFrame<'_>`, you could use the fully-qualified path
+    |
+606 -             DecodedTypedEventFrame::Event { payload, .. } => match payload {
+606 +             <typed_frame::DecodedTypedEventFrame<'_> as Example>::Event { payload, .. } => match payload {
+    |
+
+error[E0618]: expected function, found `controller_delivery::ControllerAutomationDelivery<FixtureProvider>`
+   --> crates/protocol/src/controller_delivery.rs:614:32
+    |
+390 | /     fn facade(
+391 | |         reliable_events: usize,
+392 | |         capabilities: &[(ParameterHandle, AutomationKind)],
+393 | |     ) -> (
+...   |
+396 | |         Arc<AtomicU64>,
+397 | |     ) {
+    | |_____- this function of the same name is available here, but it's shadowed by the local binding
+...
+563 |           let (mut facade, mut render, canceled) = facade(8, &[(ParameterHandle(7), AutomationKind::Point)]);
+    |                ---------- `facade` has type `controller_delivery::ControllerAutomationDelivery<FixtureProvider>`
+...
+614 |           let (mut full, _, _) = facade(1, &[(ParameterHandle(7), AutomationKind::Point)]);
+    |                                  ^^^^^^---------------------------------------------------
+    |                                  |
+    |                                  call expression requires function
+
+error[E0499]: cannot borrow `*render` as mutable more than once at a time
+   --> crates/protocol/src/controller_delivery.rs:457:9
+    |
+456 |         let pending = render.begin_boundary(SampleTime(0)).unwrap();
+    |                       ------ first mutable borrow occurs here
+457 |         render.mark_applied(ticket, pending.records.len() as u16).unwrap();
+    |         ^^^^^^                      --------------- first borrow later used here
+    |         |
+    |         second mutable borrow occurs here
+
+error[E0499]: cannot borrow `*render` as mutable more than once at a time
+   --> crates/protocol/src/controller_delivery.rs:458:9
+    |
+456 |         let pending = render.begin_boundary(SampleTime(0)).unwrap();
+    |                       ------ first mutable borrow occurs here
+457 |         render.mark_applied(ticket, pending.records.len() as u16).unwrap();
+458 |         render.finish_applied(ticket, pending.records.len() as u16).unwrap();
+    |         ^^^^^^                        --------------- first borrow later used here
+    |         |
+    |         second mutable borrow occurs here
+
+error[E0499]: cannot borrow `render` as mutable more than once at a time
+   --> crates/protocol/src/controller_delivery.rs:537:9
+    |
+536 |         let pending = render.begin_boundary(SampleTime(0)).unwrap();
+    |                       ------ first mutable borrow occurs here
+537 |         render.mark_applied(ticket, pending.records.len() as u16).unwrap();
+    |         ^^^^^^                      --------------- first borrow later used here
+    |         |
+    |         second mutable borrow occurs here
+
+error[E0499]: cannot borrow `render` as mutable more than once at a time
+   --> crates/protocol/src/controller_delivery.rs:538:9
+    |
+536 |         let pending = render.begin_boundary(SampleTime(0)).unwrap();
+    |                       ------ first mutable borrow occurs here
+537 |         render.mark_applied(ticket, pending.records.len() as u16).unwrap();
+538 |         render.finish_applied(ticket, pending.records.len() as u16).unwrap();
+    |         ^^^^^^                        --------------- first borrow later used here
+    |         |
+    |         second mutable borrow occurs here
+
+Some errors have detailed explanations: E0223, E0308, E0499, E0618.
+For more information about an error, try `rustc --explain E0223`.
+warning: `protocol` (lib test) generated 1 warning
+error: could not compile `protocol` (lib test) due to 8 previous errors; 1 warning emitted

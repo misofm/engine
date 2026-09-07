@@ -1,0 +1,26 @@
+   Compiling protocol v0.1.0 (/home/bl/misofm/engine-controller-delivery/crates/protocol)
+error[E0502]: cannot borrow `frame` as mutable because it is also borrowed as immutable
+   --> crates/protocol/src/controller_delivery.rs:586:65
+    |
+585 |         let event_one = decode_event(&ProtocolCodec::default(), &frame[..first]);
+    |                                                                  ----- immutable borrow occurs here
+586 |         let second = endpoint.dequeue_reliable_event_frame_into(&mut frame).unwrap().unwrap();
+    |                                                                 ^^^^^^^^^^ mutable borrow occurs here
+...
+595 |         assert_eq!([sequence(event_one), sequence(event_two), sequence(event_three)], [1, 2, 3]);
+    |                              --------- immutable borrow later used here
+
+error[E0502]: cannot borrow `frame` as mutable because it is also borrowed as immutable
+   --> crates/protocol/src/controller_delivery.rs:588:64
+    |
+585 |         let event_one = decode_event(&ProtocolCodec::default(), &frame[..first]);
+    |                                                                  ----- immutable borrow occurs here
+...
+588 |         let third = endpoint.dequeue_reliable_event_frame_into(&mut frame).unwrap().unwrap();
+    |                                                                ^^^^^^^^^^ mutable borrow occurs here
+...
+595 |         assert_eq!([sequence(event_one), sequence(event_two), sequence(event_three)], [1, 2, 3]);
+    |                              --------- immutable borrow later used here
+
+For more information about this error, try `rustc --explain E0502`.
+error: could not compile `protocol` (lib test) due to 2 previous errors

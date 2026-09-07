@@ -20,6 +20,7 @@ std::thread_local! {
 
 #[cfg(any(test, feature = "test-support"))]
 use crate::TransportState;
+use crate::delivery::{DeliveryContext, PreparedDeliveryCapabilities};
 use crate::{
     AutomationBatchError, AutomationBatchSlot, AutomationCanceled, AutomationCancellationReason,
     AutomationEnqueueError, AutomationEnqueued, Backpressure, BackpressureQueueKind, Capabilities,
@@ -1545,6 +1546,14 @@ impl<P: ControlProvider> ProtocolController<P> {
 
     /// Process one logical request with exact-byte replay and no renderer call.
     pub fn process(&mut self, request: ControllerRequest<'_>) -> ControllerResponse {
+        self.process_with_delivery_context(request, None)
+    }
+
+    pub(crate) fn process_with_delivery_context(
+        &mut self,
+        request: ControllerRequest<'_>,
+        context: Option<&mut DeliveryContext<'_>>,
+    ) -> ControllerResponse {
         let message_id = request.command.message_id();
         if self.structural_generation.load(Ordering::Acquire) & 1 != 0 {
             return self.compatibility_response(
@@ -1583,7 +1592,7 @@ impl<P: ControlProvider> ProtocolController<P> {
             }
             ReplayDecision::Execute => {}
         }
-        let outcome = self.execute(&request);
+        let outcome = self.execute_with_delivery_context(&request, context);
         let response = self.compatibility_response(message_id, request.request_id, outcome);
         match self.replay.complete(
             request.request_id,
@@ -2575,6 +2584,66 @@ impl<P: ControlProvider> ProtocolController<P> {
         &self.telemetry_configuration
     }
 
+    pub(crate) fn delivery_try_handoff_next(
+        &mut self,
+        state: &mut crate::delivery::AutomationDeliveryState,
+        capabilities: &PreparedDeliveryCapabilities,
+    ) -> Result<crate::HandoffResult, crate::DeliveryError> {
+        state.try_handoff_next(&mut self.queues, capabilities)
+    }
+
+    pub(crate) fn delivery_collect_terminal(
+        &mut self,
+        state: &mut crate::delivery::AutomationDeliveryState,
+        ticket: crate::DeliveryTicket,
+    ) -> Result<crate::TerminalAutomation, crate::DeliveryError> {
+        state.collect_terminal(&mut self.queues, ticket)
+    }
+
+    pub(crate) fn delivery_begin_cancel(
+        &mut self,
+        state: &mut crate::delivery::AutomationDeliveryState,
+        reason: AutomationCancellationReason,
+    ) -> Result<crate::CancelToken, crate::DeliveryError> {
+        state.begin_cancel(
+            &mut self.queues,
+            self.next_reliable_event_sequence,
+            reason,
+            self.session.revision(),
+        )
+    }
+
+    pub(crate) fn delivery_poll_cancel_boundary(
+        &mut self,
+        state: &mut crate::delivery::AutomationDeliveryState,
+        token: crate::CancelToken,
+    ) -> Result<Option<crate::CancelComplete>, crate::DeliveryError> {
+        let complete = state.poll_cancel_boundary(
+            &mut self.queues,
+            &mut self.next_reliable_event_sequence,
+            token,
+        )?;
+        if let Some(complete) = complete {
+            self.provider
+                .record_canceled_automation(complete.canceled_records);
+        }
+        Ok(complete)
+    }
+
+    pub(crate) fn delivery_outstanding(
+        &self,
+        state: &crate::delivery::AutomationDeliveryState,
+    ) -> usize {
+        state.outstanding(&self.queues)
+    }
+
+    pub(crate) fn delivery_resident_automation(
+        &self,
+        state: &crate::delivery::AutomationDeliveryState,
+    ) -> u64 {
+        state.resident_automation(&self.queues)
+    }
+
     /// Stage one mock/control-only meter batch for explicitly configured lossy event egress.
     /// This does not create production meters or touch a render plan.
     pub fn stage_meter_batch_event(
@@ -2964,6 +3033,14 @@ impl<P: ControlProvider> ProtocolController<P> {
     }
 
     fn execute(&mut self, request: &ControllerRequest<'_>) -> Outcome {
+        self.execute_with_delivery_context(request, None)
+    }
+
+    fn execute_with_delivery_context(
+        &mut self,
+        request: &ControllerRequest<'_>,
+        mut delivery: Option<&mut DeliveryContext<'_>>,
+    ) -> Outcome {
         let features = self.config.provider_features;
         let enabled = match request.command {
             ControlCommand::SessionTransactionApply { .. } => {
@@ -2989,6 +3066,22 @@ impl<P: ControlProvider> ProtocolController<P> {
             && expected != self.session.revision()
         {
             return self.non_ok(StatusCode::RevisionConflict, None);
+        }
+        if let Some(context) = delivery.as_ref() {
+            match request.command {
+                ControlCommand::SessionTransactionApply { .. }
+                | ControlCommand::ParameterStateGet { .. }
+                | ControlCommand::TransportSet {
+                    request:
+                        TransportSetRequest {
+                            position: Some(_), ..
+                        },
+                } => return self.non_ok(StatusCode::Unavailable, None),
+                ControlCommand::TransportSet { .. } if context.cancellation_pending() => {
+                    return self.non_ok(StatusCode::Unavailable, None);
+                }
+                _ => {}
+            }
         }
         match &request.command {
             ControlCommand::CapabilitiesGet => {
@@ -3105,6 +3198,11 @@ impl<P: ControlProvider> ProtocolController<P> {
                 Err(error) => self.non_ok(status_for_parameter(error), None),
             },
             ControlCommand::AutomationEnqueue { batch } => {
+                if delivery.is_some()
+                    && let Err(error) = batch.validate_records()
+                {
+                    return self.non_ok(status_for_automation(error), None);
+                }
                 if batch.revision != self.session.revision() {
                     return self.non_ok(StatusCode::RevisionConflict, None);
                 }
@@ -3112,7 +3210,14 @@ impl<P: ControlProvider> ProtocolController<P> {
                     return self.non_ok(error, None);
                 }
                 let current_sample = self.provider.current_sample();
-                match self.queues.try_enqueue_automation(current_sample, *batch) {
+                let result = if let Some(context) = delivery.as_mut() {
+                    context
+                        .state
+                        .try_admit(&mut self.queues, current_sample, *batch)
+                } else {
+                    self.queues.try_enqueue_automation(current_sample, *batch)
+                };
+                match result {
                     Ok(()) => {
                         let report = self.queues.report(crate::QueueKind::Automation);
                         self.ok(Body::AutomationEnqueued(AutomationEnqueued {

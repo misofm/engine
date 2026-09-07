@@ -1,0 +1,41 @@
+{
+  "argv": [
+    "cargo",
+    "fmt",
+    "--all"
+  ],
+  "cwd": "/home/bl/misofm/engine-controller-delivery",
+  "head": "8b1061e4c8882bc0cc0a0056654e001921b6e1a2",
+  "status": " M crates/protocol/src/controller.rs\n M crates/protocol/src/controller_delivery.rs\n M crates/protocol/src/delivery.rs\n M crates/protocol/src/lib.rs\n M crates/protocol/tests/delivery_ownership.rs\n",
+  "env": {
+    "PATH": "/home/bl/.cargo/bin:/home/bl/.cargo/bin:/home/bl/.local/bin:/home/bl/.codex/packages/standalone/releases/0.153.4-x86_64-unknown-linux-musl/codex-path:/home/bl/.codex1/tmp/arg0/codex-arg032GUSu:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin",
+    "RUSTFLAGS": null,
+    "CARGO_TARGET_DIR": "/tmp/issue530-target"
+  },
+  "source": {
+    "crates/protocol/src/controller.rs": {
+      "sha256": "b1b8af91f2b962145c4658cf533fa81789fd005424a4ebe97acfa1a4f0bb99df",
+      "git_blob": "126272b8882f8129b6366b8e19310e675d4c7c7a"
+    },
+    "crates/protocol/src/controller_delivery.rs": {
+      "sha256": "8425aef38d1fc90818a228fd7b30ed7fc9b74ac8dad3a75524ca3c5ece221e6e",
+      "git_blob": "d5e5fd6cb077e76dd38607723890d4b57cb4e46b"
+    },
+    "crates/protocol/src/delivery.rs": {
+      "sha256": "0c711032042aad905fc2111319488a7680ff6e2d1063bd0a8760d2e805e6cd8d",
+      "git_blob": "bd66a50ab4c47633e8c9849bed1baee122873fad"
+    },
+    "crates/protocol/src/lib.rs": {
+      "sha256": "6d53a61a0aaa07196c35d3b07af1ab0ac33945e8aad28efd824136fccde862d7",
+      "git_blob": "e20e85380a5196a26b3978ee68566a2c6699e0c0"
+    },
+    "crates/protocol/tests/delivery_ownership.rs": {
+      "sha256": "6078378080a52980a576c158b42370e4f43dd05a10f183b0efcccf62c5e4e4e5",
+      "git_blob": "8f9a4bcd9ea7a248378e46d1d8ed990ab630aab5"
+    },
+    "Cargo.lock": {
+      "sha256": "ef85bfaac8b4df80b651fa89e5e9a67bfef141b58076bdaac513044161b0b853",
+      "git_blob": "1b74fb016a04a090d2d1d37ea15fd2917fb85491"
+    }
+  }
+}

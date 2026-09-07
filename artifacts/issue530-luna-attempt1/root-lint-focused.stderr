@@ -1,0 +1,9 @@
+   Compiling protocol v0.1.0 (/home/bl/misofm/engine-controller-delivery/crates/protocol)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.02s
+     Running unittests src/lib.rs (/tmp/issue530-target/debug/deps/protocol-97573f98c299f6ae)
+     Running unittests src/bin/protocol_wasm_golden.rs (/tmp/issue530-target/debug/deps/protocol_wasm_golden-1e187e3d9276a091)
+     Running tests/conformance_corpus.rs (/tmp/issue530-target/debug/deps/conformance_corpus-16438980f60ac1ae)
+     Running tests/controller_response_api.rs (/tmp/issue530-target/debug/deps/controller_response_api-a0f8e19a4dab4745)
+     Running tests/delivery_ownership.rs (/tmp/issue530-target/debug/deps/delivery_ownership-a943d9f963f74fd2)
+     Running tests/mutation_million.rs (/tmp/issue530-target/debug/deps/mutation_million-e49767a312e1c8c4)
+     Running tests/session_edit_builtins_rack.rs (/tmp/issue530-target/debug/deps/session_edit_builtins_rack-a96dafd91e4713cf)

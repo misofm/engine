@@ -466,6 +466,29 @@ struct CancelAck {
 
 pub struct PreparedAutomationDelivery;
 
+/// The concrete ownership state shared by the standalone delivery owner and the controller
+/// facade. Queue storage and the reliable-event sequence remain owned by their caller.
+pub(crate) struct AutomationDeliveryState {
+    core: DeliveryCoreControl<AutomationBatchSlot>,
+    owners: Box<[Option<AdmissionOwner>]>,
+    next_order: u64,
+    next_generation: u64,
+    barrier_producer: Producer<BoundaryMessage>,
+    ack_consumer: Consumer<CancelAck>,
+    cancel: Option<CancelState>,
+    staged: Option<DeliveryTicket>,
+}
+
+pub(crate) struct DeliveryContext<'a> {
+    pub(crate) state: &'a mut AutomationDeliveryState,
+}
+
+impl DeliveryContext<'_> {
+    pub(crate) fn cancellation_pending(&self) -> bool {
+        self.state.cancel.is_some()
+    }
+}
+
 fn cancellation_headroom(total: usize, sequence: u64) -> Result<(u64, u64), DeliveryError> {
     let total = u64::try_from(total).map_err(|_| DeliveryError::SequenceOverflow)?;
     let next_sequence = sequence
@@ -532,6 +555,21 @@ impl PreparedAutomationDelivery {
         }
         let _ = Self::resource_report_for_config(config)?;
         let queues = ProtocolQueues::prepare(config)?;
+        let (state, render) = Self::prepare_state_and_render(config)?;
+        Ok((
+            AutomationDeliveryControl {
+                queues,
+                state,
+                sequence: initial_reliable_event_sequence,
+            },
+            render,
+        ))
+    }
+
+    pub(crate) fn prepare_state_and_render(
+        config: ProtocolQueueConfig,
+    ) -> Result<(AutomationDeliveryState, AutomationDeliveryRender), crate::ProtocolQueueError>
+    {
         let (mut core, render_core) =
             PreparedDelivery::<AutomationBatchSlot>::prepare(config.automation_batch_slots)?;
         core.generation = 1;
@@ -539,13 +577,11 @@ impl PreparedAutomationDelivery {
         let (barrier_producer, barrier_consumer) = bounded_spsc(one, QueueGeneration(1))?;
         let (ack_producer, ack_consumer) = bounded_spsc(one, QueueGeneration(1))?;
         Ok((
-            AutomationDeliveryControl {
-                queues,
+            AutomationDeliveryState {
                 core,
                 owners: vec![None; config.automation_batch_slots.get()].into_boxed_slice(),
                 next_order: 1,
                 next_generation: 1,
-                sequence: initial_reliable_event_sequence,
                 barrier_producer,
                 ack_consumer,
                 cancel: None,
@@ -564,35 +600,29 @@ impl PreparedAutomationDelivery {
 
 pub struct AutomationDeliveryControl {
     queues: ProtocolQueues,
-    core: DeliveryCoreControl<AutomationBatchSlot>,
-    owners: Box<[Option<AdmissionOwner>]>,
-    next_order: u64,
-    next_generation: u64,
+    state: AutomationDeliveryState,
     sequence: u64,
-    barrier_producer: Producer<BoundaryMessage>,
-    ack_consumer: Consumer<CancelAck>,
-    cancel: Option<CancelState>,
-    staged: Option<DeliveryTicket>,
 }
 
-impl AutomationDeliveryControl {
+impl AutomationDeliveryState {
     #[allow(clippy::result_large_err)]
-    pub fn try_admit(
+    pub(crate) fn try_admit(
         &mut self,
+        queues: &mut ProtocolQueues,
         current_sample: SampleTime,
         batch: AutomationBatchSlot,
     ) -> Result<(), AutomationEnqueueError> {
-        let resident = usize::try_from(self.queues.report(QueueKind::Automation).occupancy)
-            .unwrap_or(usize::MAX);
+        let resident =
+            usize::try_from(queues.report(QueueKind::Automation).occupancy).unwrap_or(usize::MAX);
         if self.cancel.is_some()
             || self.core.outstanding().saturating_add(resident) >= self.owners.len()
         {
             return Err(AutomationEnqueueError::Full {
                 batch,
-                report: self.queues.report(QueueKind::Automation),
+                report: queues.report(QueueKind::Automation),
             });
         }
-        self.queues.try_enqueue_automation(current_sample, batch)
+        queues.try_enqueue_automation(current_sample, batch)
     }
 
     fn own(&mut self, batch: AutomationBatchSlot) -> Result<DeliveryTicket, DeliveryError> {
@@ -610,8 +640,9 @@ impl AutomationDeliveryControl {
         Ok(ticket)
     }
 
-    pub fn try_handoff_next(
+    pub(crate) fn try_handoff_next(
         &mut self,
+        queues: &mut ProtocolQueues,
         capabilities: &PreparedDeliveryCapabilities,
     ) -> Result<HandoffResult, DeliveryError> {
         if self.cancel.is_some() {
@@ -632,7 +663,7 @@ impl AutomationDeliveryControl {
         if self.core.serial == u64::MAX || self.next_order == u64::MAX {
             return Err(DeliveryError::SequenceOverflow);
         }
-        let batch = match self.queues.try_dequeue_automation_retaining_admission() {
+        let batch = match queues.try_dequeue_automation_retaining_admission() {
             Ok(v) => v,
             Err(_) => return Ok(HandoffResult::Empty),
         };
@@ -646,7 +677,7 @@ impl AutomationDeliveryControl {
         Ok(HandoffResult::HandedOff(ticket))
     }
 
-    fn reconcile(&mut self) -> Result<(), DeliveryError> {
+    fn reconcile(&mut self, _queues: &mut ProtocolQueues) -> Result<(), DeliveryError> {
         loop {
             match self.core.poll_terminal() {
                 Ok(terminal) => {
@@ -670,14 +701,15 @@ impl AutomationDeliveryControl {
         }
     }
 
-    pub fn collect_terminal(
+    pub(crate) fn collect_terminal(
         &mut self,
+        queues: &mut ProtocolQueues,
         ticket: DeliveryTicket,
     ) -> Result<TerminalAutomation, DeliveryError> {
         if self.cancel.is_some() {
             return Err(DeliveryError::CancellationPending);
         }
-        self.reconcile()?;
+        self.reconcile(queues)?;
         let owner = self
             .owners
             .get(ticket.slot)
@@ -688,7 +720,7 @@ impl AutomationDeliveryControl {
         if owner.applied_prefix != batch.len {
             return Err(DeliveryError::Empty);
         }
-        self.release(ticket, batch);
+        self.release(queues, ticket, batch);
         Ok(TerminalAutomation {
             ticket,
             request_id: batch.request_id,
@@ -698,32 +730,39 @@ impl AutomationDeliveryControl {
         })
     }
 
-    fn release(&mut self, ticket: DeliveryTicket, batch: AutomationBatchSlot) {
+    fn release(
+        &mut self,
+        queues: &mut ProtocolQueues,
+        ticket: DeliveryTicket,
+        batch: AutomationBatchSlot,
+    ) {
         let owner = self.owners[ticket.slot]
             .take()
             .expect("ticket owns admission");
         debug_assert_eq!(owner.ticket, ticket);
         self.core.release(ticket).expect("same core owns payload");
-        self.queues.release_automation_admission(&batch);
+        queues.release_automation_admission(&batch);
     }
 
-    pub fn begin_cancel(
+    pub(crate) fn begin_cancel(
         &mut self,
+        queues: &mut ProtocolQueues,
+        sequence: u64,
         reason: AutomationCancellationReason,
         revision: SessionRevision,
     ) -> Result<CancelToken, DeliveryError> {
         if self.cancel.is_some() {
             return Err(DeliveryError::CancellationPending);
         }
-        self.reconcile()?;
-        let queued = usize::try_from(self.queues.report(QueueKind::Automation).occupancy)
-            .unwrap_or(usize::MAX);
+        self.reconcile(queues)?;
+        let queued =
+            usize::try_from(queues.report(QueueKind::Automation).occupancy).unwrap_or(usize::MAX);
         let total = self
             .core
             .outstanding()
             .checked_add(queued)
             .ok_or(DeliveryError::SequenceOverflow)?;
-        let _ = cancellation_headroom(total, self.sequence)?;
+        let _ = cancellation_headroom(total, sequence)?;
         self.next_order
             .checked_add(u64::try_from(queued).map_err(|_| DeliveryError::SequenceOverflow)?)
             .ok_or(DeliveryError::SequenceOverflow)?;
@@ -731,8 +770,7 @@ impl AutomationDeliveryControl {
             .next_generation
             .checked_add(1)
             .ok_or(DeliveryError::SequenceOverflow)?;
-        let reservations = self
-            .queues
+        let reservations = queues
             .reserve_reliable_events(total)
             .map_err(DeliveryError::ReliableFull)?;
         let token = CancelToken {
@@ -749,10 +787,10 @@ impl AutomationDeliveryControl {
             .try_push(BoundaryMessage::Cancel { token, frontier })
             .is_err()
         {
-            self.queues.release_reliable_events(reservations);
+            queues.release_reliable_events(reservations);
             return Err(DeliveryError::Full);
         }
-        while let Ok(batch) = self.queues.try_dequeue_automation_retaining_admission() {
+        while let Ok(batch) = queues.try_dequeue_automation_retaining_admission() {
             // Queue count, core credit and both identity counters were prevalidated.
             self.own(batch)
                 .expect("prevalidated cancellation ownership");
@@ -769,8 +807,10 @@ impl AutomationDeliveryControl {
         Ok(token)
     }
 
-    pub fn poll_cancel_boundary(
+    pub(crate) fn poll_cancel_boundary(
         &mut self,
+        queues: &mut ProtocolQueues,
+        sequence: &mut u64,
         token: CancelToken,
     ) -> Result<Option<CancelComplete>, DeliveryError> {
         let state = self.cancel.as_mut().ok_or(DeliveryError::StaleTicket)?;
@@ -788,7 +828,7 @@ impl AutomationDeliveryControl {
             state.effective_sample = Some(ack.effective_sample);
             state.barrier_seen = true;
         }
-        self.reconcile()?;
+        self.reconcile(queues)?;
         if self
             .owners
             .iter()
@@ -823,16 +863,15 @@ impl AutomationDeliveryControl {
                 let state = self.cancel.as_mut().unwrap();
                 let event = ReliableSlot::automation_canceled(
                     state.revision,
-                    self.sequence,
+                    *sequence,
                     batch.request_id,
                     remaining,
                     state.reason,
-                    self.queues.report(QueueKind::Automation).generation.0,
+                    queues.report(QueueKind::Automation).generation.0,
                     Some(sample),
                 );
-                self.queues
-                    .commit_reserved_reliable_event(state.reservations.as_mut().unwrap(), event);
-                self.sequence += 1;
+                queues.commit_reserved_reliable_event(state.reservations.as_mut().unwrap(), event);
+                *sequence += 1;
                 published = published
                     .checked_add(1)
                     .expect("frozen ticket population is representable");
@@ -840,13 +879,12 @@ impl AutomationDeliveryControl {
                     .checked_add(u64::from(remaining))
                     .expect("prevalidated frozen record total");
             }
-            self.release(owner.ticket, batch);
+            self.release(queues, owner.ticket, batch);
         }
         let mut state = self.cancel.take().unwrap();
-        self.queues
-            .release_reliable_events(state.reservations.take().unwrap());
+        queues.release_reliable_events(state.reservations.take().unwrap());
         self.staged = None;
-        self.queues.reset_automation_ordering_after_cancellation();
+        queues.reset_automation_ordering_after_cancellation();
         self.core.generation = self.next_generation;
         Ok(Some(CancelComplete {
             generation: token.generation,
@@ -857,6 +895,58 @@ impl AutomationDeliveryControl {
         }))
     }
 
+    pub(crate) fn outstanding(&self, queues: &ProtocolQueues) -> usize {
+        self.core.outstanding().saturating_add(
+            usize::try_from(queues.report(QueueKind::Automation).occupancy).unwrap_or(usize::MAX),
+        )
+    }
+    pub(crate) fn resident_automation(&self, queues: &ProtocolQueues) -> u64 {
+        queues.report(QueueKind::Automation).occupancy
+    }
+}
+
+impl AutomationDeliveryControl {
+    #[allow(clippy::result_large_err)]
+    pub fn try_admit(
+        &mut self,
+        current_sample: SampleTime,
+        batch: AutomationBatchSlot,
+    ) -> Result<(), AutomationEnqueueError> {
+        self.state
+            .try_admit(&mut self.queues, current_sample, batch)
+    }
+
+    pub fn try_handoff_next(
+        &mut self,
+        capabilities: &PreparedDeliveryCapabilities,
+    ) -> Result<HandoffResult, DeliveryError> {
+        self.state.try_handoff_next(&mut self.queues, capabilities)
+    }
+
+    pub fn collect_terminal(
+        &mut self,
+        ticket: DeliveryTicket,
+    ) -> Result<TerminalAutomation, DeliveryError> {
+        self.state.collect_terminal(&mut self.queues, ticket)
+    }
+
+    pub fn begin_cancel(
+        &mut self,
+        reason: AutomationCancellationReason,
+        revision: SessionRevision,
+    ) -> Result<CancelToken, DeliveryError> {
+        self.state
+            .begin_cancel(&mut self.queues, self.sequence, reason, revision)
+    }
+
+    pub fn poll_cancel_boundary(
+        &mut self,
+        token: CancelToken,
+    ) -> Result<Option<CancelComplete>, DeliveryError> {
+        self.state
+            .poll_cancel_boundary(&mut self.queues, &mut self.sequence, token)
+    }
+
     pub fn try_dequeue_event(&mut self) -> Result<ReliableSlot, QueueEmpty> {
         self.queues.try_dequeue_event()
     }
@@ -864,13 +954,10 @@ impl AutomationDeliveryControl {
         &self.queues
     }
     pub fn outstanding(&self) -> usize {
-        self.core.outstanding().saturating_add(
-            usize::try_from(self.queues.report(QueueKind::Automation).occupancy)
-                .unwrap_or(usize::MAX),
-        )
+        self.state.outstanding(&self.queues)
     }
     pub fn resident_automation(&self) -> u64 {
-        self.queues.report(QueueKind::Automation).occupancy
+        self.state.resident_automation(&self.queues)
     }
 }
 

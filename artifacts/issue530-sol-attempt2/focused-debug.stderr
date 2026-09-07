@@ -1,0 +1,15 @@
+   Compiling protocol v0.1.0 (/home/bl/misofm/engine-controller-delivery/crates/protocol)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.07s
+     Running unittests src/lib.rs (/tmp/issue530-target/debug/deps/protocol-8d85afa28ae00720)
+
+thread 'controller_delivery::tests::fixed_revision_refuses_structural_locate_and_state_without_model_change' (436575) panicked at crates/protocol/src/controller_delivery.rs:1052:9:
+assertion `left == right` failed
+  left: ReplayExpired
+ right: Unavailable
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'controller_delivery::tests::one_controller_queue_and_sequence_cover_transport_cancel_and_short_retry' (436576) panicked at crates/protocol/src/controller_delivery.rs:843:9:
+assertion `left == right` failed
+  left: ReplayExpired
+ right: Unavailable
+error: test failed, to rerun pass `-p protocol --lib`

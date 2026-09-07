@@ -1,0 +1,34 @@
+   Compiling protocol v0.1.0 (/home/bl/misofm/engine-controller-delivery/crates/protocol)
+error[E0277]: `typed_frame::DecodedEventPayload<'_>` doesn't implement `Debug`
+   --> crates/protocol/src/controller_delivery.rs:673:54
+    |
+673 |             other => panic!("unexpected first event: {other:?}"),
+    |                                                      ^^^^^^^^^ `typed_frame::DecodedEventPayload<'_>` cannot be formatted using `{:?}` because it doesn't implement `Debug`
+    |
+    = help: the trait `Debug` is not implemented for `typed_frame::DecodedEventPayload<'_>`
+    = note: add `#[derive(Debug)]` to `typed_frame::DecodedEventPayload<'_>` or manually `impl Debug for typed_frame::DecodedEventPayload<'_>`
+help: consider annotating `typed_frame::DecodedEventPayload<'_>` with `#[derive(Debug)]`
+   --> crates/protocol/src/typed_frame.rs:170:1
+    |
+170 + #[derive(Debug)]
+171 | pub enum DecodedEventPayload<'a> {
+    |
+
+error[E0277]: `typed_frame::DecodedEventPayload<'_>` doesn't implement `Debug`
+   --> crates/protocol/src/controller_delivery.rs:680:61
+    |
+680 |             other => panic!("unexpected cancellation event: {other:?}"),
+    |                                                             ^^^^^^^^^ `typed_frame::DecodedEventPayload<'_>` cannot be formatted using `{:?}` because it doesn't implement `Debug`
+    |
+    = help: the trait `Debug` is not implemented for `typed_frame::DecodedEventPayload<'_>`
+    = note: add `#[derive(Debug)]` to `typed_frame::DecodedEventPayload<'_>` or manually `impl Debug for typed_frame::DecodedEventPayload<'_>`
+help: consider annotating `typed_frame::DecodedEventPayload<'_>` with `#[derive(Debug)]`
+   --> crates/protocol/src/typed_frame.rs:170:1
+    |
+170 + #[derive(Debug)]
+171 | pub enum DecodedEventPayload<'a> {
+    |
+
+For more information about this error, try `rustc --explain E0277`.
+error: could not compile `protocol` (lib test) due to 2 previous errors
+warning: build failed, waiting for other jobs to finish...
