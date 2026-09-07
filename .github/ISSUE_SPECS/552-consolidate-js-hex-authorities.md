@@ -389,3 +389,23 @@ This checkpoint is intentionally failed but buildable: product vectors, types an
 Actual Sol XHIGH confirms FAIL atc3cdb929. Only the primary mutation completed; helper mutation failedENOENT before validation, remainingfour did notrun, gate5notrun. No other concrete source defect was found. The combined line-prefixed command evidence deviated from required separate stdout/stderr/status; successor captures must comply exactly. Actual LunaHIGH provenance and all19 packedrecords were verified, and invalidSolattempt2 remains separate preserved history. Full verdict and SolHIGHrescope are in artifacts/issue552-attempt3-review.
 
 Implementation under552 is stopped. A new numbered tooling issue may change only checker temporary-fixture topology; product, validator, provenance and pins stay frozen. After that reviewed prerequisite and543/555 qualification are integrated, all original final gates and full acceptance remain mandatory. The tooling successor and552 must not merge product bytes before those gates; coordinated delivery may close both only when each issue's complete contract is satisfied.
+
+## Final qualification activation after #558 and #555
+
+Root integrated the reviewed #558 tooling checkpoint and delivered `main` at
+`65faf528bf49c3cfc6cac1fc5d5b026aeca9a55b` in merge checkpoint
+`010546f23be751c5c1b6fb7f7f994276f2984602`. The integration was conflict-free. The cumulative
+product diff against current `main` remains limited to the ten claimed #552/#558 paths plus these
+issue specs and preserved evidence. No fourth #552 product repair is authorized or present.
+
+The final qualification input is the already-delivered exact-six-file directory
+`/tmp/issue555-postpin-artifact`. Its Wasm member is pinned at
+`6452f0db237da1d57b3594e7d95dd53a089a604d5b0791ea8b3533c5930c5a1c`; qualification must
+recheck all six names and hashes before running and must not regenerate or repin any member.
+
+Actual Luna HIGH runs the frozen final gates and preserves exact argv, cwd, status, pre-command Git
+identity, relevant source identities, and separate raw stdout/stderr for every command, stopping at
+the first failure. Under the user's revised verification routing, Astra LOW performs the independent
+adversarial final review. Historical Sol XHIGH findings above retain their actual provenance and are
+not relabeled. Root owns every commit, push, GitHub update, artifact decision, PR, merge, closure,
+post-main qualification, and clean worktree removal.

@@ -99,6 +99,23 @@ close the matching GitHub issue, and only then update audit #349 CP-20 to delive
 
 The historical `/tmp/issue537-delivery/artifact` remains evidence only and is never a final input.
 
+## Parent-line integration and final verification routing
+
+Root integrated this reviewed tooling checkpoint into the #552 recovery branch together with
+delivered `main` at `65faf528bf49c3cfc6cac1fc5d5b026aeca9a55b`; the resulting pushed merge checkpoint is
+`010546f23be751c5c1b6fb7f7f994276f2984602`. The merge was conflict-free. Relative to current
+`main`, this issue still changes only the six fixture-staging lines in
+`scripts/check-stem-store-v1.mjs`; all parent product, validator, provenance, pins, and artifacts
+remain frozen.
+
+The combined #558/#552 final qualification uses the delivered exact-six-file directory
+`/tmp/issue555-postpin-artifact` and must verify its names and hashes before any gate. Actual Luna
+HIGH runs the frozen gate sequence. Under the user's revised verification routing, Astra LOW
+performs the independent final adversarial review. The historical Sol XHIGH PASS above remains the
+accepted source-review provenance and is not relabeled. Coordinated delivery may close both issues
+only after the complete parent gates, Astra LOW PASS, required PR qualification, merge, GitHub
+synchronization, and successful post-main qualification.
+
 ## Attempt1 source and evidence checkpoint
 
 Actual Luna HIGH source d33ce9d9c7aeffd05c57f714ccff543093ce11d9 is pushed. Only scripts/check-stem-store-v1.mjs changed: six lines stage the primary directory with its parent-relative helper and clean the temporary root in finally. The complete --self-test ledger returned0, including all six attributable provenance RED cases and prior controls. The exact changed-path/diff gate returned0. Separate raw stdout/stderr/status/argv/cwd/source identities, actual model invocation and Sol HIGH coordination evidence are retained losslessly in artifacts/issue558-attempt1. No product/validator/provenance/pin changes occurred. Sol XHIGH review remains pending; no delivery is claimed before parent final qualification.
