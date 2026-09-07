@@ -1,0 +1,419 @@
+# Attempt2 native release lowering selected callers
+
+LLVM: /tmp/issue534-luna2-native-target/release/deps/gate_expander-a68433203a7e3c7a.ll (3995559 bytes, 6cc506e70472ed0c81f66c76edb94da175d3376fd181ee29bbed17a6c51093cf)
+ASM: /tmp/issue534-luna2-native-target/release/deps/gate_expander-a68433203a7e3c7a.s (2015972 bytes, 47bba1981af552981ef1b8f3d99688dc660001225ffeaedc3f80d8ded3bcb04e)
+
+Source access lines: kernel.rs:236-269 (DualMono 236-241, LinkedEqual 248-256, LinkedUnequal 263-269).
+Assignments into taps and bounds-only loads are excluded; the report lists only load instructions whose direct debug location is one of those source access lines.
+
+## process-scalar-disconnected
+- symbol: `_RNvXs_CsdOTRa1MFkeb_13gate_expanderINtB4_12PreparedGatefKb0_ENtCsfGpaX3jkkqY_15effect_contract20PreparedNativeEffect7processB4_`
+- LLVM lines: 13932-16994 (3063 lines), extract `process-scalar-disconnected.ll`
+- ASM lines: 27114-33661 (6548 lines), extract `process-scalar-disconnected.s`
+- source-mapped load counts in complete LLVM body: 236=5, 237=5, 251=5, 252=5, 266=5, 267=5, 268=5, 269=5
+- selected LLVM load evidence:
+  LL:14520 source-line:266 %_79.i.us.us.us.i.i = load float, ptr %141, align 4, !dbg !6548, !alias.scope !6534, !noalias !6549, !noundef !12
+  LL:14522 source-line:267 %_83.i.us.us.us.i.i = load float, ptr %142, align 4, !dbg !6550, !alias.scope !6536, !noalias !6551, !noundef !12
+  LL:14532 source-line:268 %_86.i.us.us.us.i.i = load float, ptr %143, align 4, !dbg !6552, !alias.scope !6536, !noalias !6551, !noundef !12
+  LL:14534 source-line:269 %_88.i.us.us.us.i.i = load float, ptr %144, align 4, !dbg !6553, !alias.scope !6534, !noalias !6549, !noundef !12
+  LL:14543 source-line:251 %left_own16.i.us.us.us.i.i = load float, ptr %145, align 4, !dbg !6558, !alias.scope !6534, !noalias !6549, !noundef !12
+  LL:14545 source-line:252 %right_own18.i.us.us.us.i.i = load float, ptr %146, align 4, !dbg !6557, !alias.scope !6536, !noalias !6551, !noundef !12
+  LL:14932 source-line:236 %left_own.i.us.us.us.i.i = load float, ptr %177, align 4, !dbg !7022, !alias.scope !6534, !noalias !6549, !noundef !12
+  LL:14934 source-line:237 %right_own.i.us.us.us.i.i = load float, ptr %178, align 4, !dbg !7021, !alias.scope !6536, !noalias !6551, !noundef !12
+  LL:15005 source-line:266 %_79.i.us.i.i = load float, ptr %180, align 4, !dbg !6548, !alias.scope !6534, !noalias !6549, !noundef !12
+  LL:15015 source-line:267 %_83.i.us.i.i = load float, ptr %181, align 4, !dbg !6550, !alias.scope !6536, !noalias !6551, !noundef !12
+  LL:15017 source-line:268 %_86.i.us.i.i = load float, ptr %182, align 4, !dbg !6552, !alias.scope !6536, !noalias !6551, !noundef !12
+  LL:15019 source-line:269 %_88.i.us.i.i = load float, ptr %183, align 4, !dbg !6553, !alias.scope !6534, !noalias !6549, !noundef !12
+  LL:15028 source-line:251 %left_own16.i.us.i.i = load float, ptr %184, align 4, !dbg !6558, !alias.scope !6534, !noalias !6549, !noundef !12
+  LL:15030 source-line:252 %right_own18.i.us.i.i = load float, ptr %185, align 4, !dbg !6557, !alias.scope !6536, !noalias !6551, !noundef !12
+  LL:15417 source-line:236 %left_own.i.us.i.i = load float, ptr %216, align 4, !dbg !7022, !alias.scope !6534, !noalias !6549, !noundef !12
+  LL:15419 source-line:237 %right_own.i.us.i.i = load float, ptr %217, align 4, !dbg !7021, !alias.scope !6536, !noalias !6551, !noundef !12
+  LL:15931 source-line:266 %_79.i.us.us.us.i72.i = load float, ptr %289, align 4, !dbg !7493, !alias.scope !7479, !noalias !7494, !noundef !12
+  LL:15933 source-line:267 %_83.i.us.us.us.i76.i = load float, ptr %290, align 4, !dbg !7495, !alias.scope !7481, !noalias !7496, !noundef !12
+  LL:15943 source-line:268 %_86.i.us.us.us.i83.i = load float, ptr %291, align 4, !dbg !7497, !alias.scope !7481, !noalias !7496, !noundef !12
+  LL:15945 source-line:269 %_88.i.us.us.us.i84.i = load float, ptr %292, align 4, !dbg !7498, !alias.scope !7479, !noalias !7494, !noundef !12
+  LL:15954 source-line:251 %left_own16.i.us.us.us.i168.i = load float, ptr %293, align 4, !dbg !7503, !alias.scope !7479, !noalias !7494, !noundef !12
+  LL:15956 source-line:252 %right_own18.i.us.us.us.i169.i = load float, ptr %294, align 4, !dbg !7502, !alias.scope !7481, !noalias !7496, !noundef !12
+  LL:16191 source-line:236 %left_own.i.us.us.us.i176.i = load float, ptr %315, align 4, !dbg !7871, !alias.scope !7479, !noalias !7494, !noundef !12
+  LL:16193 source-line:237 %right_own.i.us.us.us.i177.i = load float, ptr %316, align 4, !dbg !7870, !alias.scope !7481, !noalias !7496, !noundef !12
+  LL:16268 source-line:266 %_79.i.us.i221.i = load float, ptr %318, align 4, !dbg !7493, !alias.scope !7479, !noalias !7494, !noundef !12
+  LL:16278 source-line:267 %_83.i.us.i224.i = load float, ptr %319, align 4, !dbg !7495, !alias.scope !7481, !noalias !7496, !noundef !12
+  LL:16280 source-line:268 %_86.i.us.i229.i = load float, ptr %320, align 4, !dbg !7497, !alias.scope !7481, !noalias !7496, !noundef !12
+  LL:16282 source-line:269 %_88.i.us.i230.i = load float, ptr %321, align 4, !dbg !7498, !alias.scope !7479, !noalias !7494, !noundef !12
+  LL:16291 source-line:251 %left_own16.i.us.i310.i = load float, ptr %322, align 4, !dbg !7503, !alias.scope !7479, !noalias !7494, !noundef !12
+  LL:16293 source-line:252 %right_own18.i.us.i311.i = load float, ptr %323, align 4, !dbg !7502, !alias.scope !7481, !noalias !7496, !noundef !12
+  LL:16528 source-line:236 %left_own.i.us.i316.i = load float, ptr %344, align 4, !dbg !7871, !alias.scope !7479, !noalias !7494, !noundef !12
+  LL:16530 source-line:237 %right_own.i.us.i317.i = load float, ptr %345, align 4, !dbg !7870, !alias.scope !7481, !noalias !7496, !noundef !12
+  LL:16661 source-line:236 %left_own.i.i.i = load float, ptr %347, align 4, !dbg !7871, !alias.scope !7479, !noalias !7494, !noundef !12
+  LL:16663 source-line:237 %right_own.i.i.i = load float, ptr %348, align 4, !dbg !7870, !alias.scope !7481, !noalias !7496, !noundef !12
+  LL:16687 source-line:251 %left_own16.i.i.i = load float, ptr %349, align 4, !dbg !7503, !alias.scope !7479, !noalias !7494, !noundef !12
+  LL:16689 source-line:252 %right_own18.i.i.i = load float, ptr %350, align 4, !dbg !7502, !alias.scope !7481, !noalias !7496, !noundef !12
+  LL:16703 source-line:266 %_79.i.i.i = load float, ptr %351, align 4, !dbg !7493, !alias.scope !7479, !noalias !7494, !noundef !12
+  LL:16715 source-line:267 %_83.i.i.i = load float, ptr %352, align 4, !dbg !7495, !alias.scope !7481, !noalias !7496, !noundef !12
+  LL:16737 source-line:268 %_86.i.i.i = load float, ptr %353, align 4, !dbg !7497, !alias.scope !7481, !noalias !7496, !noundef !12
+  LL:16739 source-line:269 %_88.i.i.i = load float, ptr %354, align 4, !dbg !7498, !alias.scope !7479, !noalias !7494, !noundef !12
+
+## process-scalar-connected
+- symbol: `_RNvXs_CsdOTRa1MFkeb_13gate_expanderINtB4_12PreparedGatefKb1_ENtCsfGpaX3jkkqY_15effect_contract20PreparedNativeEffect7processB4_`
+- LLVM lines: 17737-18167 (431 lines), extract `process-scalar-connected.ll`
+- ASM lines: 34756-35566 (811 lines), extract `process-scalar-connected.s`
+- source-mapped load counts in complete LLVM body: 
+- selected LLVM load evidence:
+
+## run-block-scalar-connected
+- symbol: `_RNvMCsdOTRa1MFkeb_13gate_expanderINtB2_12PreparedGatefKb1_E9run_blockB2_`
+- LLVM lines: 4695-10887 (6193 lines), extract `run-block-scalar-connected.ll`
+- ASM lines: 8982-22770 (13789 lines), extract `run-block-scalar-connected.s`
+- source-mapped load counts in complete LLVM body: 236=12, 237=12, 251=12, 252=12, 266=12, 267=12, 268=12, 269=12
+- selected LLVM load evidence:
+  LL:5031 source-line:266 %_79.i.us.us.us.us.us.us.us.i = load float, ptr %127, align 4, !dbg !2859, !alias.scope !2843, !noalias !2865, !noundef !12
+  LL:5037 source-line:267 %_83.i.us.us.us.us.us.us.us.i = load float, ptr %128, align 4, !dbg !2866, !alias.scope !2845, !noalias !2867, !noundef !12
+  LL:5047 source-line:268 %_86.i.us.us.us.us.us.us.us.i = load float, ptr %129, align 4, !dbg !2868, !alias.scope !2845, !noalias !2867, !noundef !12
+  LL:5049 source-line:269 %_88.i.us.us.us.us.us.us.us.i = load float, ptr %130, align 4, !dbg !2869, !alias.scope !2843, !noalias !2865, !noundef !12
+  LL:5058 source-line:251 %left_own16.i.us.us.us.us.us.us.us.i = load float, ptr %131, align 4, !dbg !2880, !alias.scope !2843, !noalias !2865, !noundef !12
+  LL:5060 source-line:252 %right_own18.i.us.us.us.us.us.us.us.i = load float, ptr %132, align 4, !dbg !2873, !alias.scope !2845, !noalias !2867, !noundef !12
+  LL:5447 source-line:236 %left_own.i.us.us.us.us.us.us.us.i = load float, ptr %163, align 4, !dbg !3436, !alias.scope !2843, !noalias !2865, !noundef !12
+  LL:5449 source-line:237 %right_own.i.us.us.us.us.us.us.us.i = load float, ptr %164, align 4, !dbg !3429, !alias.scope !2845, !noalias !2867, !noundef !12
+  LL:5534 source-line:266 %_79.i.us.us.us.us.us.i = load float, ptr %166, align 4, !dbg !2859, !alias.scope !2843, !noalias !2865, !noundef !12
+  LL:5544 source-line:267 %_83.i.us.us.us.us.us.i = load float, ptr %167, align 4, !dbg !2866, !alias.scope !2845, !noalias !2867, !noundef !12
+  LL:5546 source-line:268 %_86.i.us.us.us.us.us.i = load float, ptr %168, align 4, !dbg !2868, !alias.scope !2845, !noalias !2867, !noundef !12
+  LL:5548 source-line:269 %_88.i.us.us.us.us.us.i = load float, ptr %169, align 4, !dbg !2869, !alias.scope !2843, !noalias !2865, !noundef !12
+  LL:5557 source-line:251 %left_own16.i.us.us.us.us.us.i = load float, ptr %170, align 4, !dbg !2880, !alias.scope !2843, !noalias !2865, !noundef !12
+  LL:5559 source-line:252 %right_own18.i.us.us.us.us.us.i = load float, ptr %171, align 4, !dbg !2873, !alias.scope !2845, !noalias !2867, !noundef !12
+  LL:5946 source-line:236 %left_own.i.us.us.us.us.us.i = load float, ptr %202, align 4, !dbg !3436, !alias.scope !2843, !noalias !2865, !noundef !12
+  LL:5948 source-line:237 %right_own.i.us.us.us.us.us.i = load float, ptr %203, align 4, !dbg !3429, !alias.scope !2845, !noalias !2867, !noundef !12
+  LL:6031 source-line:266 %_79.i.us.us.us.i = load float, ptr %205, align 4, !dbg !2859, !alias.scope !2843, !noalias !2865, !noundef !12
+  LL:6037 source-line:267 %_83.i.us.us.us.i = load float, ptr %206, align 4, !dbg !2866, !alias.scope !2845, !noalias !2867, !noundef !12
+  LL:6047 source-line:268 %_86.i.us.us.us.i = load float, ptr %207, align 4, !dbg !2868, !alias.scope !2845, !noalias !2867, !noundef !12
+  LL:6049 source-line:269 %_88.i.us.us.us.i = load float, ptr %208, align 4, !dbg !2869, !alias.scope !2843, !noalias !2865, !noundef !12
+  LL:6058 source-line:251 %left_own16.i.us.us.us.i = load float, ptr %209, align 4, !dbg !2880, !alias.scope !2843, !noalias !2865, !noundef !12
+  LL:6060 source-line:252 %right_own18.i.us.us.us.i = load float, ptr %210, align 4, !dbg !2873, !alias.scope !2845, !noalias !2867, !noundef !12
+  LL:6447 source-line:236 %left_own.i.us.us.us.i = load float, ptr %241, align 4, !dbg !3436, !alias.scope !2843, !noalias !2865, !noundef !12
+  LL:6449 source-line:237 %right_own.i.us.us.us.i = load float, ptr %242, align 4, !dbg !3429, !alias.scope !2845, !noalias !2867, !noundef !12
+  LL:6532 source-line:266 %_79.i.us.us.i = load float, ptr %244, align 4, !dbg !2859, !alias.scope !2843, !noalias !2865, !noundef !12
+  LL:6538 source-line:267 %_83.i.us.us.i = load float, ptr %245, align 4, !dbg !2866, !alias.scope !2845, !noalias !2867, !noundef !12
+  LL:6548 source-line:268 %_86.i.us.us.i = load float, ptr %246, align 4, !dbg !2868, !alias.scope !2845, !noalias !2867, !noundef !12
+  LL:6550 source-line:269 %_88.i.us.us.i = load float, ptr %247, align 4, !dbg !2869, !alias.scope !2843, !noalias !2865, !noundef !12
+  LL:6559 source-line:251 %left_own16.i.us.us.i = load float, ptr %248, align 4, !dbg !2880, !alias.scope !2843, !noalias !2865, !noundef !12
+  LL:6561 source-line:252 %right_own18.i.us.us.i = load float, ptr %249, align 4, !dbg !2873, !alias.scope !2845, !noalias !2867, !noundef !12
+  LL:6948 source-line:236 %left_own.i.us.us.i = load float, ptr %280, align 4, !dbg !3436, !alias.scope !2843, !noalias !2865, !noundef !12
+  LL:6950 source-line:237 %right_own.i.us.us.i = load float, ptr %281, align 4, !dbg !3429, !alias.scope !2845, !noalias !2867, !noundef !12
+  LL:7045 source-line:266 %_79.i.us.i = load float, ptr %283, align 4, !dbg !2859, !alias.scope !2843, !noalias !2865, !noundef !12
+  LL:7051 source-line:267 %_83.i.us.i = load float, ptr %284, align 4, !dbg !2866, !alias.scope !2845, !noalias !2867, !noundef !12
+  LL:7061 source-line:268 %_86.i.us.i = load float, ptr %285, align 4, !dbg !2868, !alias.scope !2845, !noalias !2867, !noundef !12
+  LL:7063 source-line:269 %_88.i.us.i = load float, ptr %286, align 4, !dbg !2869, !alias.scope !2843, !noalias !2865, !noundef !12
+  LL:7072 source-line:251 %left_own16.i.us.i = load float, ptr %287, align 4, !dbg !2880, !alias.scope !2843, !noalias !2865, !noundef !12
+  LL:7074 source-line:252 %right_own18.i.us.i = load float, ptr %288, align 4, !dbg !2873, !alias.scope !2845, !noalias !2867, !noundef !12
+  LL:7461 source-line:236 %left_own.i.us.i = load float, ptr %319, align 4, !dbg !3436, !alias.scope !2843, !noalias !2865, !noundef !12
+  LL:7463 source-line:237 %right_own.i.us.i = load float, ptr %320, align 4, !dbg !3429, !alias.scope !2845, !noalias !2867, !noundef !12
+  LL:8084 source-line:266 %_79.i.us.us.us.us.us.us.us.i90 = load float, ptr %401, align 4, !dbg !4104, !alias.scope !4090, !noalias !4105, !noundef !12
+  LL:8090 source-line:267 %_83.i.us.us.us.us.us.us.us.i94 = load float, ptr %402, align 4, !dbg !4106, !alias.scope !4092, !noalias !4107, !noundef !12
+  LL:8100 source-line:268 %_86.i.us.us.us.us.us.us.us.i101 = load float, ptr %403, align 4, !dbg !4108, !alias.scope !4092, !noalias !4107, !noundef !12
+  LL:8102 source-line:269 %_88.i.us.us.us.us.us.us.us.i102 = load float, ptr %404, align 4, !dbg !4109, !alias.scope !4090, !noalias !4105, !noundef !12
+  LL:8111 source-line:251 %left_own16.i.us.us.us.us.us.us.us.i200 = load float, ptr %405, align 4, !dbg !4114, !alias.scope !4090, !noalias !4105, !noundef !12
+  LL:8113 source-line:252 %right_own18.i.us.us.us.us.us.us.us.i201 = load float, ptr %406, align 4, !dbg !4113, !alias.scope !4092, !noalias !4107, !noundef !12
+  LL:8388 source-line:236 %left_own.i.us.us.us.us.us.us.us.i208 = load float, ptr %429, align 4, !dbg !4568, !alias.scope !4090, !noalias !4105, !noundef !12
+  LL:8390 source-line:237 %right_own.i.us.us.us.us.us.us.us.i209 = load float, ptr %430, align 4, !dbg !4567, !alias.scope !4092, !noalias !4107, !noundef !12
+  LL:8469 source-line:266 %_79.i.us.us.us.us.us.i257 = load float, ptr %432, align 4, !dbg !4104, !alias.scope !4090, !noalias !4105, !noundef !12
+  LL:8479 source-line:267 %_83.i.us.us.us.us.us.i260 = load float, ptr %433, align 4, !dbg !4106, !alias.scope !4092, !noalias !4107, !noundef !12
+  LL:8481 source-line:268 %_86.i.us.us.us.us.us.i265 = load float, ptr %434, align 4, !dbg !4108, !alias.scope !4092, !noalias !4107, !noundef !12
+  LL:8483 source-line:269 %_88.i.us.us.us.us.us.i266 = load float, ptr %435, align 4, !dbg !4109, !alias.scope !4090, !noalias !4105, !noundef !12
+  LL:8492 source-line:251 %left_own16.i.us.us.us.us.us.i360 = load float, ptr %436, align 4, !dbg !4114, !alias.scope !4090, !noalias !4105, !noundef !12
+  LL:8494 source-line:252 %right_own18.i.us.us.us.us.us.i361 = load float, ptr %437, align 4, !dbg !4113, !alias.scope !4092, !noalias !4107, !noundef !12
+  LL:8769 source-line:236 %left_own.i.us.us.us.us.us.i366 = load float, ptr %460, align 4, !dbg !4568, !alias.scope !4090, !noalias !4105, !noundef !12
+  LL:8771 source-line:237 %right_own.i.us.us.us.us.us.i367 = load float, ptr %461, align 4, !dbg !4567, !alias.scope !4092, !noalias !4107, !noundef !12
+  LL:8850 source-line:266 %_79.i.us.us.us.us.i409 = load float, ptr %463, align 4, !dbg !4104, !alias.scope !4090, !noalias !4105, !noundef !12
+  LL:8856 source-line:267 %_83.i.us.us.us.us.i412 = load float, ptr %464, align 4, !dbg !4106, !alias.scope !4092, !noalias !4107, !noundef !12
+  LL:8866 source-line:268 %_86.i.us.us.us.us.i417 = load float, ptr %465, align 4, !dbg !4108, !alias.scope !4092, !noalias !4107, !noundef !12
+  LL:8868 source-line:269 %_88.i.us.us.us.us.i418 = load float, ptr %466, align 4, !dbg !4109, !alias.scope !4090, !noalias !4105, !noundef !12
+  LL:8877 source-line:251 %left_own16.i.us.us.us.us.i512 = load float, ptr %467, align 4, !dbg !4114, !alias.scope !4090, !noalias !4105, !noundef !12
+  LL:8879 source-line:252 %right_own18.i.us.us.us.us.i513 = load float, ptr %468, align 4, !dbg !4113, !alias.scope !4092, !noalias !4107, !noundef !12
+  LL:9154 source-line:236 %left_own.i.us.us.us.us.i518 = load float, ptr %491, align 4, !dbg !4568, !alias.scope !4090, !noalias !4105, !noundef !12
+  LL:9156 source-line:237 %right_own.i.us.us.us.us.i519 = load float, ptr %492, align 4, !dbg !4567, !alias.scope !4092, !noalias !4107, !noundef !12
+  LL:9243 source-line:266 %_79.i.us.us.us.i565 = load float, ptr %494, align 4, !dbg !4104, !alias.scope !4090, !noalias !4105, !noundef !12
+  LL:9249 source-line:267 %_83.i.us.us.us.i568 = load float, ptr %495, align 4, !dbg !4106, !alias.scope !4092, !noalias !4107, !noundef !12
+  LL:9259 source-line:268 %_86.i.us.us.us.i573 = load float, ptr %496, align 4, !dbg !4108, !alias.scope !4092, !noalias !4107, !noundef !12
+  LL:9261 source-line:269 %_88.i.us.us.us.i574 = load float, ptr %497, align 4, !dbg !4109, !alias.scope !4090, !noalias !4105, !noundef !12
+  LL:9270 source-line:251 %left_own16.i.us.us.us.i668 = load float, ptr %498, align 4, !dbg !4114, !alias.scope !4090, !noalias !4105, !noundef !12
+  LL:9272 source-line:252 %right_own18.i.us.us.us.i669 = load float, ptr %499, align 4, !dbg !4113, !alias.scope !4092, !noalias !4107, !noundef !12
+  LL:9547 source-line:236 %left_own.i.us.us.us.i674 = load float, ptr %522, align 4, !dbg !4568, !alias.scope !4090, !noalias !4105, !noundef !12
+  LL:9549 source-line:237 %right_own.i.us.us.us.i675 = load float, ptr %523, align 4, !dbg !4567, !alias.scope !4092, !noalias !4107, !noundef !12
+  LL:9636 source-line:266 %_79.i.us.us.i719 = load float, ptr %525, align 4, !dbg !4104, !alias.scope !4090, !noalias !4105, !noundef !12
+  LL:9642 source-line:267 %_83.i.us.us.i722 = load float, ptr %526, align 4, !dbg !4106, !alias.scope !4092, !noalias !4107, !noundef !12
+  LL:9652 source-line:268 %_86.i.us.us.i727 = load float, ptr %527, align 4, !dbg !4108, !alias.scope !4092, !noalias !4107, !noundef !12
+  LL:9654 source-line:269 %_88.i.us.us.i728 = load float, ptr %528, align 4, !dbg !4109, !alias.scope !4090, !noalias !4105, !noundef !12
+  LL:9663 source-line:251 %left_own16.i.us.us.i822 = load float, ptr %529, align 4, !dbg !4114, !alias.scope !4090, !noalias !4105, !noundef !12
+  LL:9665 source-line:252 %right_own18.i.us.us.i823 = load float, ptr %530, align 4, !dbg !4113, !alias.scope !4092, !noalias !4107, !noundef !12
+  LL:9940 source-line:236 %left_own.i.us.us.i828 = load float, ptr %553, align 4, !dbg !4568, !alias.scope !4090, !noalias !4105, !noundef !12
+  LL:9942 source-line:237 %right_own.i.us.us.i829 = load float, ptr %554, align 4, !dbg !4567, !alias.scope !4092, !noalias !4107, !noundef !12
+  LL:10041 source-line:266 %_79.i.us.i878 = load float, ptr %556, align 4, !dbg !4104, !alias.scope !4090, !noalias !4105, !noundef !12
+  LL:10047 source-line:267 %_83.i.us.i881 = load float, ptr %557, align 4, !dbg !4106, !alias.scope !4092, !noalias !4107, !noundef !12
+  LL:10057 source-line:268 %_86.i.us.i886 = load float, ptr %558, align 4, !dbg !4108, !alias.scope !4092, !noalias !4107, !noundef !12
+  LL:10059 source-line:269 %_88.i.us.i887 = load float, ptr %559, align 4, !dbg !4109, !alias.scope !4090, !noalias !4105, !noundef !12
+  LL:10068 source-line:251 %left_own16.i.us.i981 = load float, ptr %560, align 4, !dbg !4114, !alias.scope !4090, !noalias !4105, !noundef !12
+  LL:10070 source-line:252 %right_own18.i.us.i982 = load float, ptr %561, align 4, !dbg !4113, !alias.scope !4092, !noalias !4107, !noundef !12
+  LL:10345 source-line:236 %left_own.i.us.i987 = load float, ptr %584, align 4, !dbg !4568, !alias.scope !4090, !noalias !4105, !noundef !12
+  LL:10347 source-line:237 %right_own.i.us.i988 = load float, ptr %585, align 4, !dbg !4567, !alias.scope !4092, !noalias !4107, !noundef !12
+  LL:10530 source-line:236 %left_own.i.i = load float, ptr %587, align 4, !dbg !4568, !alias.scope !4090, !noalias !4105, !noundef !12
+  LL:10532 source-line:237 %right_own.i.i = load float, ptr %588, align 4, !dbg !4567, !alias.scope !4092, !noalias !4107, !noundef !12
+  LL:10556 source-line:251 %left_own16.i.i = load float, ptr %589, align 4, !dbg !4114, !alias.scope !4090, !noalias !4105, !noundef !12
+  LL:10558 source-line:252 %right_own18.i.i = load float, ptr %590, align 4, !dbg !4113, !alias.scope !4092, !noalias !4107, !noundef !12
+  LL:10572 source-line:266 %_79.i.i = load float, ptr %591, align 4, !dbg !4104, !alias.scope !4090, !noalias !4105, !noundef !12
+  LL:10584 source-line:267 %_83.i.i = load float, ptr %592, align 4, !dbg !4106, !alias.scope !4092, !noalias !4107, !noundef !12
+  LL:10606 source-line:268 %_86.i.i = load float, ptr %593, align 4, !dbg !4108, !alias.scope !4092, !noalias !4107, !noundef !12
+  LL:10608 source-line:269 %_88.i.i = load float, ptr %594, align 4, !dbg !4109, !alias.scope !4090, !noalias !4105, !noundef !12
+
+## process-bank-w4
+- symbol: `_RNvXsd_CsdOTRa1MFkeb_13gate_expanderINtB5_12PreparedGateNtNtCsdw0XaoyMD7p_4wide6f32x4_5f32x4Kb0_ENtCsfGpaX3jkkqY_15effect_contract24PreparedNativeEffectBank12process_bank`
+- LLVM lines: 18179-21108 (2930 lines), extract `process-bank-w4.ll`
+- ASM lines: 35688-40615 (4928 lines), extract `process-bank-w4.s`
+- source-mapped load counts in complete LLVM body: 236=8, 237=8, 248=6, 251=8, 252=8, 263=10, 266=8, 267=8, 268=8, 269=8
+- selected LLVM load evidence:
+  LL:18541 source-line:236 %left_own.i.i.i = load float, ptr %76, align 4, !dbg !8752, !alias.scope !8736, !noalias !8757, !noundef !12
+  LL:18543 source-line:237 %right_own.i.i.i = load float, ptr %77, align 4, !dbg !8753, !alias.scope !8738, !noalias !8758, !noundef !12
+  LL:18565 source-line:236 %left_own.i.1.i.i = load float, ptr %78, align 4, !dbg !8752, !alias.scope !8736, !noalias !8757, !noundef !12
+  LL:18567 source-line:237 %right_own.i.1.i.i = load float, ptr %79, align 4, !dbg !8753, !alias.scope !8738, !noalias !8758, !noundef !12
+  LL:18589 source-line:236 %left_own.i.2.i.i = load float, ptr %80, align 4, !dbg !8752, !alias.scope !8736, !noalias !8757, !noundef !12
+  LL:18591 source-line:237 %right_own.i.2.i.i = load float, ptr %81, align 4, !dbg !8753, !alias.scope !8738, !noalias !8758, !noundef !12
+  LL:18613 source-line:236 %left_own.i.3.i.i = load float, ptr %82, align 4, !dbg !8752, !alias.scope !8736, !noalias !8757, !noundef !12
+  LL:18615 source-line:237 %right_own.i.3.i.i = load float, ptr %83, align 4, !dbg !8753, !alias.scope !8738, !noalias !8758, !noundef !12
+  LL:18636 source-line:251 %left_own16.i.i.i = load float, ptr %84, align 4, !dbg !8751, !alias.scope !8736, !noalias !8757, !noundef !12
+  LL:18638 source-line:252 %right_own18.i.i.i = load float, ptr %85, align 4, !dbg !8770, !alias.scope !8738, !noalias !8758, !noundef !12
+  LL:18639 source-line:248 %_43.i.1.i.i = load i32, ptr %45, align 4, !dbg !8773, !alias.scope !8742, !noalias !8743, !noundef !12
+  LL:18660 source-line:251 %left_own16.i.1.i.i = load float, ptr %86, align 4, !dbg !8751, !alias.scope !8736, !noalias !8757, !noundef !12
+  LL:18662 source-line:252 %right_own18.i.1.i.i = load float, ptr %87, align 4, !dbg !8770, !alias.scope !8738, !noalias !8758, !noundef !12
+  LL:18663 source-line:248 %_43.i.2.i.i = load i32, ptr %47, align 4, !dbg !8773, !alias.scope !8742, !noalias !8743, !noundef !12
+  LL:18684 source-line:251 %left_own16.i.2.i.i = load float, ptr %88, align 4, !dbg !8751, !alias.scope !8736, !noalias !8757, !noundef !12
+  LL:18686 source-line:252 %right_own18.i.2.i.i = load float, ptr %89, align 4, !dbg !8770, !alias.scope !8738, !noalias !8758, !noundef !12
+  LL:18687 source-line:248 %_43.i.3.i.i = load i32, ptr %49, align 4, !dbg !8773, !alias.scope !8742, !noalias !8743, !noundef !12
+  LL:18708 source-line:251 %left_own16.i.3.i.i = load float, ptr %90, align 4, !dbg !8751, !alias.scope !8736, !noalias !8757, !noundef !12
+  LL:18710 source-line:252 %right_own18.i.3.i.i = load float, ptr %91, align 4, !dbg !8770, !alias.scope !8738, !noalias !8758, !noundef !12
+  LL:18721 source-line:266 %_79.i.i.i = load float, ptr %92, align 4, !dbg !8750, !alias.scope !8736, !noalias !8757, !noundef !12
+  LL:18733 source-line:267 %_83.i.i.i = load float, ptr %93, align 4, !dbg !8782, !alias.scope !8738, !noalias !8758, !noundef !12
+  LL:18745 source-line:268 %_86.i.i.i = load float, ptr %94, align 4, !dbg !8783, !alias.scope !8738, !noalias !8758, !noundef !12
+  LL:18757 source-line:269 %_88.i.i.i = load float, ptr %95, align 4, !dbg !8785, !alias.scope !8736, !noalias !8757, !noundef !12
+  LL:18758 source-line:263 %_68.i.1.i.i = load i32, ptr %45, align 4, !dbg !8786, !alias.scope !8742, !noalias !8743, !noundef !12
+  LL:18775 source-line:266 %_79.i.1.i.i = load float, ptr %96, align 4, !dbg !8750, !alias.scope !8736, !noalias !8757, !noundef !12
+  LL:18781 source-line:267 %_83.i.1.i.i = load float, ptr %97, align 4, !dbg !8782, !alias.scope !8738, !noalias !8758, !noundef !12
+  LL:18787 source-line:268 %_86.i.1.i.i = load float, ptr %98, align 4, !dbg !8783, !alias.scope !8738, !noalias !8758, !noundef !12
+  LL:18793 source-line:269 %_88.i.1.i.i = load float, ptr %99, align 4, !dbg !8785, !alias.scope !8736, !noalias !8757, !noundef !12
+  LL:18794 source-line:263 %_68.i.2.i.i = load i32, ptr %47, align 4, !dbg !8786, !alias.scope !8742, !noalias !8743, !noundef !12
+  LL:18811 source-line:266 %_79.i.2.i.i = load float, ptr %100, align 4, !dbg !8750, !alias.scope !8736, !noalias !8757, !noundef !12
+  LL:18817 source-line:267 %_83.i.2.i.i = load float, ptr %101, align 4, !dbg !8782, !alias.scope !8738, !noalias !8758, !noundef !12
+  LL:18823 source-line:268 %_86.i.2.i.i = load float, ptr %102, align 4, !dbg !8783, !alias.scope !8738, !noalias !8758, !noundef !12
+  LL:18829 source-line:269 %_88.i.2.i.i = load float, ptr %103, align 4, !dbg !8785, !alias.scope !8736, !noalias !8757, !noundef !12
+  LL:18830 source-line:263 %_68.i.3.i.i = load i32, ptr %49, align 4, !dbg !8786, !alias.scope !8742, !noalias !8743, !noundef !12
+  LL:18847 source-line:266 %_79.i.3.i.i = load float, ptr %104, align 4, !dbg !8750, !alias.scope !8736, !noalias !8757, !noundef !12
+  LL:18853 source-line:267 %_83.i.3.i.i = load float, ptr %105, align 4, !dbg !8782, !alias.scope !8738, !noalias !8758, !noundef !12
+  LL:18863 source-line:268 %_86.i.3.i.i = load float, ptr %106, align 4, !dbg !8783, !alias.scope !8738, !noalias !8758, !noundef !12
+  LL:18865 source-line:269 %_88.i.3.i.i = load float, ptr %107, align 4, !dbg !8785, !alias.scope !8736, !noalias !8757, !noundef !12
+  LL:19052 source-line:263 %_7.i787.i.i = load <4 x float>, ptr %24, align 16, !dbg !9259, !alias.scope !9261, !noalias !9264
+  LL:19277 source-line:263 %_7.i739.i.i = load <4 x float>, ptr %_38.i.i, align 16, !dbg !9820, !alias.scope !9822, !noalias !9825
+  LL:20035 source-line:236 %left_own.i.i278.i = load float, ptr %616, align 4, !dbg !10794, !alias.scope !10778, !noalias !10799, !noundef !12
+  LL:20037 source-line:237 %right_own.i.i279.i = load float, ptr %617, align 4, !dbg !10795, !alias.scope !10780, !noalias !10800, !noundef !12
+  LL:20059 source-line:236 %left_own.i.1.i296.i = load float, ptr %618, align 4, !dbg !10794, !alias.scope !10778, !noalias !10799, !noundef !12
+  LL:20061 source-line:237 %right_own.i.1.i297.i = load float, ptr %619, align 4, !dbg !10795, !alias.scope !10780, !noalias !10800, !noundef !12
+  LL:20083 source-line:236 %left_own.i.2.i314.i = load float, ptr %620, align 4, !dbg !10794, !alias.scope !10778, !noalias !10799, !noundef !12
+  LL:20085 source-line:237 %right_own.i.2.i315.i = load float, ptr %621, align 4, !dbg !10795, !alias.scope !10780, !noalias !10800, !noundef !12
+  LL:20107 source-line:236 %left_own.i.3.i332.i = load float, ptr %622, align 4, !dbg !10794, !alias.scope !10778, !noalias !10799, !noundef !12
+  LL:20109 source-line:237 %right_own.i.3.i333.i = load float, ptr %623, align 4, !dbg !10795, !alias.scope !10780, !noalias !10800, !noundef !12
+  LL:20130 source-line:251 %left_own16.i.i215.i = load float, ptr %624, align 4, !dbg !10793, !alias.scope !10778, !noalias !10799, !noundef !12
+  LL:20132 source-line:252 %right_own18.i.i216.i = load float, ptr %625, align 4, !dbg !10812, !alias.scope !10780, !noalias !10800, !noundef !12
+  LL:20133 source-line:248 %_43.i.1.i217.i = load i32, ptr %607, align 4, !dbg !10815, !alias.scope !10784, !noalias !10785, !noundef !12
+  LL:20154 source-line:251 %left_own16.i.1.i233.i = load float, ptr %626, align 4, !dbg !10793, !alias.scope !10778, !noalias !10799, !noundef !12
+  LL:20156 source-line:252 %right_own18.i.1.i234.i = load float, ptr %627, align 4, !dbg !10812, !alias.scope !10780, !noalias !10800, !noundef !12
+  LL:20157 source-line:248 %_43.i.2.i235.i = load i32, ptr %609, align 4, !dbg !10815, !alias.scope !10784, !noalias !10785, !noundef !12
+  LL:20178 source-line:251 %left_own16.i.2.i251.i = load float, ptr %628, align 4, !dbg !10793, !alias.scope !10778, !noalias !10799, !noundef !12
+  LL:20180 source-line:252 %right_own18.i.2.i252.i = load float, ptr %629, align 4, !dbg !10812, !alias.scope !10780, !noalias !10800, !noundef !12
+  LL:20181 source-line:248 %_43.i.3.i253.i = load i32, ptr %611, align 4, !dbg !10815, !alias.scope !10784, !noalias !10785, !noundef !12
+  LL:20202 source-line:251 %left_own16.i.3.i269.i = load float, ptr %630, align 4, !dbg !10793, !alias.scope !10778, !noalias !10799, !noundef !12
+  LL:20204 source-line:252 %right_own18.i.3.i270.i = load float, ptr %631, align 4, !dbg !10812, !alias.scope !10780, !noalias !10800, !noundef !12
+  LL:20215 source-line:266 %_79.i.i91.i = load float, ptr %632, align 4, !dbg !10792, !alias.scope !10778, !noalias !10799, !noundef !12
+  LL:20227 source-line:267 %_83.i.i95.i = load float, ptr %633, align 4, !dbg !10824, !alias.scope !10780, !noalias !10800, !noundef !12
+  LL:20239 source-line:268 %_86.i.i99.i = load float, ptr %634, align 4, !dbg !10825, !alias.scope !10780, !noalias !10800, !noundef !12
+  LL:20251 source-line:269 %_88.i.i103.i = load float, ptr %635, align 4, !dbg !10827, !alias.scope !10778, !noalias !10799, !noundef !12
+  LL:20252 source-line:263 %_68.i.1.i104.i = load i32, ptr %607, align 4, !dbg !10828, !alias.scope !10784, !noalias !10785, !noundef !12
+  LL:20269 source-line:266 %_79.i.1.i118.i = load float, ptr %636, align 4, !dbg !10792, !alias.scope !10778, !noalias !10799, !noundef !12
+  LL:20275 source-line:267 %_83.i.1.i121.i = load float, ptr %637, align 4, !dbg !10824, !alias.scope !10780, !noalias !10800, !noundef !12
+  LL:20281 source-line:268 %_86.i.1.i124.i = load float, ptr %638, align 4, !dbg !10825, !alias.scope !10780, !noalias !10800, !noundef !12
+  LL:20287 source-line:269 %_88.i.1.i127.i = load float, ptr %639, align 4, !dbg !10827, !alias.scope !10778, !noalias !10799, !noundef !12
+  LL:20288 source-line:263 %_68.i.2.i128.i = load i32, ptr %609, align 4, !dbg !10828, !alias.scope !10784, !noalias !10785, !noundef !12
+  LL:20305 source-line:266 %_79.i.2.i142.i = load float, ptr %640, align 4, !dbg !10792, !alias.scope !10778, !noalias !10799, !noundef !12
+  LL:20311 source-line:267 %_83.i.2.i145.i = load float, ptr %641, align 4, !dbg !10824, !alias.scope !10780, !noalias !10800, !noundef !12
+  LL:20317 source-line:268 %_86.i.2.i148.i = load float, ptr %642, align 4, !dbg !10825, !alias.scope !10780, !noalias !10800, !noundef !12
+  LL:20323 source-line:269 %_88.i.2.i151.i = load float, ptr %643, align 4, !dbg !10827, !alias.scope !10778, !noalias !10799, !noundef !12
+  LL:20324 source-line:263 %_68.i.3.i152.i = load i32, ptr %611, align 4, !dbg !10828, !alias.scope !10784, !noalias !10785, !noundef !12
+  LL:20341 source-line:266 %_79.i.3.i166.i = load float, ptr %644, align 4, !dbg !10792, !alias.scope !10778, !noalias !10799, !noundef !12
+  LL:20347 source-line:267 %_83.i.3.i169.i = load float, ptr %645, align 4, !dbg !10824, !alias.scope !10780, !noalias !10800, !noundef !12
+  LL:20357 source-line:268 %_86.i.3.i174.i = load float, ptr %646, align 4, !dbg !10825, !alias.scope !10780, !noalias !10800, !noundef !12
+  LL:20359 source-line:269 %_88.i.3.i175.i = load float, ptr %647, align 4, !dbg !10827, !alias.scope !10778, !noalias !10799, !noundef !12
+  LL:20473 source-line:263 %_7.i747.i.i = load <4 x float>, ptr %578, align 16, !dbg !11124, !alias.scope !11126, !noalias !11129
+  LL:20625 source-line:263 %_7.i715.i.i = load <4 x float>, ptr %_38.i33.i, align 16, !dbg !11595, !alias.scope !11597, !noalias !11600
+
+## process-bank-w8
+- symbol: `_RNvXse_CsdOTRa1MFkeb_13gate_expanderINtB5_12PreparedGateNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8Kb0_ENtCsfGpaX3jkkqY_15effect_contract24PreparedNativeEffectBank12process_bank`
+- LLVM lines: 21962-25682 (3721 lines), extract `process-bank-w8.ll`
+- ASM lines: 41966-48108 (6143 lines), extract `process-bank-w8.s`
+- source-mapped load counts in complete LLVM body: 236=16, 237=16, 248=14, 251=16, 252=16, 263=18, 266=16, 267=16, 268=16, 269=16
+- selected LLVM load evidence:
+  LL:22361 source-line:236 %left_own.i.i.i = load float, ptr %84, align 4, !dbg !12854, !alias.scope !12838, !noalias !12859, !noundef !12
+  LL:22363 source-line:237 %right_own.i.i.i = load float, ptr %85, align 4, !dbg !12855, !alias.scope !12840, !noalias !12860, !noundef !12
+  LL:22385 source-line:236 %left_own.i.1.i.i = load float, ptr %86, align 4, !dbg !12854, !alias.scope !12838, !noalias !12859, !noundef !12
+  LL:22387 source-line:237 %right_own.i.1.i.i = load float, ptr %87, align 4, !dbg !12855, !alias.scope !12840, !noalias !12860, !noundef !12
+  LL:22409 source-line:236 %left_own.i.2.i.i = load float, ptr %88, align 4, !dbg !12854, !alias.scope !12838, !noalias !12859, !noundef !12
+  LL:22411 source-line:237 %right_own.i.2.i.i = load float, ptr %89, align 4, !dbg !12855, !alias.scope !12840, !noalias !12860, !noundef !12
+  LL:22433 source-line:236 %left_own.i.3.i.i = load float, ptr %90, align 4, !dbg !12854, !alias.scope !12838, !noalias !12859, !noundef !12
+  LL:22435 source-line:237 %right_own.i.3.i.i = load float, ptr %91, align 4, !dbg !12855, !alias.scope !12840, !noalias !12860, !noundef !12
+  LL:22457 source-line:236 %left_own.i.4.i.i = load float, ptr %92, align 4, !dbg !12854, !alias.scope !12838, !noalias !12859, !noundef !12
+  LL:22459 source-line:237 %right_own.i.4.i.i = load float, ptr %93, align 4, !dbg !12855, !alias.scope !12840, !noalias !12860, !noundef !12
+  LL:22481 source-line:236 %left_own.i.5.i.i = load float, ptr %94, align 4, !dbg !12854, !alias.scope !12838, !noalias !12859, !noundef !12
+  LL:22483 source-line:237 %right_own.i.5.i.i = load float, ptr %95, align 4, !dbg !12855, !alias.scope !12840, !noalias !12860, !noundef !12
+  LL:22505 source-line:236 %left_own.i.6.i.i = load float, ptr %96, align 4, !dbg !12854, !alias.scope !12838, !noalias !12859, !noundef !12
+  LL:22507 source-line:237 %right_own.i.6.i.i = load float, ptr %97, align 4, !dbg !12855, !alias.scope !12840, !noalias !12860, !noundef !12
+  LL:22529 source-line:236 %left_own.i.7.i.i = load float, ptr %98, align 4, !dbg !12854, !alias.scope !12838, !noalias !12859, !noundef !12
+  LL:22531 source-line:237 %right_own.i.7.i.i = load float, ptr %99, align 4, !dbg !12855, !alias.scope !12840, !noalias !12860, !noundef !12
+  LL:22552 source-line:251 %left_own16.i.i.i = load float, ptr %100, align 4, !dbg !12853, !alias.scope !12838, !noalias !12859, !noundef !12
+  LL:22554 source-line:252 %right_own18.i.i.i = load float, ptr %101, align 4, !dbg !12872, !alias.scope !12840, !noalias !12860, !noundef !12
+  LL:22555 source-line:248 %_43.i.1.i.i = load i32, ptr %45, align 4, !dbg !12875, !alias.scope !12844, !noalias !12845, !noundef !12
+  LL:22576 source-line:251 %left_own16.i.1.i.i = load float, ptr %102, align 4, !dbg !12853, !alias.scope !12838, !noalias !12859, !noundef !12
+  LL:22578 source-line:252 %right_own18.i.1.i.i = load float, ptr %103, align 4, !dbg !12872, !alias.scope !12840, !noalias !12860, !noundef !12
+  LL:22579 source-line:248 %_43.i.2.i.i = load i32, ptr %47, align 4, !dbg !12875, !alias.scope !12844, !noalias !12845, !noundef !12
+  LL:22600 source-line:251 %left_own16.i.2.i.i = load float, ptr %104, align 4, !dbg !12853, !alias.scope !12838, !noalias !12859, !noundef !12
+  LL:22602 source-line:252 %right_own18.i.2.i.i = load float, ptr %105, align 4, !dbg !12872, !alias.scope !12840, !noalias !12860, !noundef !12
+  LL:22603 source-line:248 %_43.i.3.i.i = load i32, ptr %49, align 4, !dbg !12875, !alias.scope !12844, !noalias !12845, !noundef !12
+  LL:22624 source-line:251 %left_own16.i.3.i.i = load float, ptr %106, align 4, !dbg !12853, !alias.scope !12838, !noalias !12859, !noundef !12
+  LL:22626 source-line:252 %right_own18.i.3.i.i = load float, ptr %107, align 4, !dbg !12872, !alias.scope !12840, !noalias !12860, !noundef !12
+  LL:22627 source-line:248 %_43.i.4.i.i = load i32, ptr %51, align 4, !dbg !12875, !alias.scope !12844, !noalias !12845, !noundef !12
+  LL:22648 source-line:251 %left_own16.i.4.i.i = load float, ptr %108, align 4, !dbg !12853, !alias.scope !12838, !noalias !12859, !noundef !12
+  LL:22650 source-line:252 %right_own18.i.4.i.i = load float, ptr %109, align 4, !dbg !12872, !alias.scope !12840, !noalias !12860, !noundef !12
+  LL:22651 source-line:248 %_43.i.5.i.i = load i32, ptr %53, align 4, !dbg !12875, !alias.scope !12844, !noalias !12845, !noundef !12
+  LL:22672 source-line:251 %left_own16.i.5.i.i = load float, ptr %110, align 4, !dbg !12853, !alias.scope !12838, !noalias !12859, !noundef !12
+  LL:22674 source-line:252 %right_own18.i.5.i.i = load float, ptr %111, align 4, !dbg !12872, !alias.scope !12840, !noalias !12860, !noundef !12
+  LL:22675 source-line:248 %_43.i.6.i.i = load i32, ptr %55, align 4, !dbg !12875, !alias.scope !12844, !noalias !12845, !noundef !12
+  LL:22696 source-line:251 %left_own16.i.6.i.i = load float, ptr %112, align 4, !dbg !12853, !alias.scope !12838, !noalias !12859, !noundef !12
+  LL:22698 source-line:252 %right_own18.i.6.i.i = load float, ptr %113, align 4, !dbg !12872, !alias.scope !12840, !noalias !12860, !noundef !12
+  LL:22699 source-line:248 %_43.i.7.i.i = load i32, ptr %57, align 4, !dbg !12875, !alias.scope !12844, !noalias !12845, !noundef !12
+  LL:22720 source-line:251 %left_own16.i.7.i.i = load float, ptr %114, align 4, !dbg !12853, !alias.scope !12838, !noalias !12859, !noundef !12
+  LL:22722 source-line:252 %right_own18.i.7.i.i = load float, ptr %115, align 4, !dbg !12872, !alias.scope !12840, !noalias !12860, !noundef !12
+  LL:22733 source-line:266 %_79.i.i.i = load float, ptr %116, align 4, !dbg !12852, !alias.scope !12838, !noalias !12859, !noundef !12
+  LL:22745 source-line:267 %_83.i.i.i = load float, ptr %117, align 4, !dbg !12884, !alias.scope !12840, !noalias !12860, !noundef !12
+  LL:22757 source-line:268 %_86.i.i.i = load float, ptr %118, align 4, !dbg !12885, !alias.scope !12840, !noalias !12860, !noundef !12
+  LL:22769 source-line:269 %_88.i.i.i = load float, ptr %119, align 4, !dbg !12887, !alias.scope !12838, !noalias !12859, !noundef !12
+  LL:22770 source-line:263 %_68.i.1.i.i = load i32, ptr %45, align 4, !dbg !12888, !alias.scope !12844, !noalias !12845, !noundef !12
+  LL:22787 source-line:266 %_79.i.1.i.i = load float, ptr %120, align 4, !dbg !12852, !alias.scope !12838, !noalias !12859, !noundef !12
+  LL:22793 source-line:267 %_83.i.1.i.i = load float, ptr %121, align 4, !dbg !12884, !alias.scope !12840, !noalias !12860, !noundef !12
+  LL:22799 source-line:268 %_86.i.1.i.i = load float, ptr %122, align 4, !dbg !12885, !alias.scope !12840, !noalias !12860, !noundef !12
+  LL:22805 source-line:269 %_88.i.1.i.i = load float, ptr %123, align 4, !dbg !12887, !alias.scope !12838, !noalias !12859, !noundef !12
+  LL:22806 source-line:263 %_68.i.2.i.i = load i32, ptr %47, align 4, !dbg !12888, !alias.scope !12844, !noalias !12845, !noundef !12
+  LL:22823 source-line:266 %_79.i.2.i.i = load float, ptr %124, align 4, !dbg !12852, !alias.scope !12838, !noalias !12859, !noundef !12
+  LL:22829 source-line:267 %_83.i.2.i.i = load float, ptr %125, align 4, !dbg !12884, !alias.scope !12840, !noalias !12860, !noundef !12
+  LL:22835 source-line:268 %_86.i.2.i.i = load float, ptr %126, align 4, !dbg !12885, !alias.scope !12840, !noalias !12860, !noundef !12
+  LL:22841 source-line:269 %_88.i.2.i.i = load float, ptr %127, align 4, !dbg !12887, !alias.scope !12838, !noalias !12859, !noundef !12
+  LL:22842 source-line:263 %_68.i.3.i.i = load i32, ptr %49, align 4, !dbg !12888, !alias.scope !12844, !noalias !12845, !noundef !12
+  LL:22859 source-line:266 %_79.i.3.i.i = load float, ptr %128, align 4, !dbg !12852, !alias.scope !12838, !noalias !12859, !noundef !12
+  LL:22865 source-line:267 %_83.i.3.i.i = load float, ptr %129, align 4, !dbg !12884, !alias.scope !12840, !noalias !12860, !noundef !12
+  LL:22871 source-line:268 %_86.i.3.i.i = load float, ptr %130, align 4, !dbg !12885, !alias.scope !12840, !noalias !12860, !noundef !12
+  LL:22877 source-line:269 %_88.i.3.i.i = load float, ptr %131, align 4, !dbg !12887, !alias.scope !12838, !noalias !12859, !noundef !12
+  LL:22878 source-line:263 %_68.i.4.i.i = load i32, ptr %51, align 4, !dbg !12888, !alias.scope !12844, !noalias !12845, !noundef !12
+  LL:22895 source-line:266 %_79.i.4.i.i = load float, ptr %132, align 4, !dbg !12852, !alias.scope !12838, !noalias !12859, !noundef !12
+  LL:22901 source-line:267 %_83.i.4.i.i = load float, ptr %133, align 4, !dbg !12884, !alias.scope !12840, !noalias !12860, !noundef !12
+  LL:22907 source-line:268 %_86.i.4.i.i = load float, ptr %134, align 4, !dbg !12885, !alias.scope !12840, !noalias !12860, !noundef !12
+  LL:22913 source-line:269 %_88.i.4.i.i = load float, ptr %135, align 4, !dbg !12887, !alias.scope !12838, !noalias !12859, !noundef !12
+  LL:22914 source-line:263 %_68.i.5.i.i = load i32, ptr %53, align 4, !dbg !12888, !alias.scope !12844, !noalias !12845, !noundef !12
+  LL:22931 source-line:266 %_79.i.5.i.i = load float, ptr %136, align 4, !dbg !12852, !alias.scope !12838, !noalias !12859, !noundef !12
+  LL:22937 source-line:267 %_83.i.5.i.i = load float, ptr %137, align 4, !dbg !12884, !alias.scope !12840, !noalias !12860, !noundef !12
+  LL:22943 source-line:268 %_86.i.5.i.i = load float, ptr %138, align 4, !dbg !12885, !alias.scope !12840, !noalias !12860, !noundef !12
+  LL:22949 source-line:269 %_88.i.5.i.i = load float, ptr %139, align 4, !dbg !12887, !alias.scope !12838, !noalias !12859, !noundef !12
+  LL:22950 source-line:263 %_68.i.6.i.i = load i32, ptr %55, align 4, !dbg !12888, !alias.scope !12844, !noalias !12845, !noundef !12
+  LL:22967 source-line:266 %_79.i.6.i.i = load float, ptr %140, align 4, !dbg !12852, !alias.scope !12838, !noalias !12859, !noundef !12
+  LL:22973 source-line:267 %_83.i.6.i.i = load float, ptr %141, align 4, !dbg !12884, !alias.scope !12840, !noalias !12860, !noundef !12
+  LL:22979 source-line:268 %_86.i.6.i.i = load float, ptr %142, align 4, !dbg !12885, !alias.scope !12840, !noalias !12860, !noundef !12
+  LL:22985 source-line:269 %_88.i.6.i.i = load float, ptr %143, align 4, !dbg !12887, !alias.scope !12838, !noalias !12859, !noundef !12
+  LL:22986 source-line:263 %_68.i.7.i.i = load i32, ptr %57, align 4, !dbg !12888, !alias.scope !12844, !noalias !12845, !noundef !12
+  LL:23003 source-line:266 %_79.i.7.i.i = load float, ptr %144, align 4, !dbg !12852, !alias.scope !12838, !noalias !12859, !noundef !12
+  LL:23009 source-line:267 %_83.i.7.i.i = load float, ptr %145, align 4, !dbg !12884, !alias.scope !12840, !noalias !12860, !noundef !12
+  LL:23019 source-line:268 %_86.i.7.i.i = load float, ptr %146, align 4, !dbg !12885, !alias.scope !12840, !noalias !12860, !noundef !12
+  LL:23021 source-line:269 %_88.i.7.i.i = load float, ptr %147, align 4, !dbg !12887, !alias.scope !12838, !noalias !12859, !noundef !12
+  LL:23223 source-line:263 %_7.i783.i.i = load <8 x float>, ptr %24, align 32, !dbg !13347, !alias.scope !13349, !noalias !13352
+  LL:23444 source-line:263 %_7.i735.i.i = load <8 x float>, ptr %_38.i.i, align 32, !dbg !13902, !alias.scope !13904, !noalias !13907
+  LL:24263 source-line:236 %left_own.i.i465.i = load float, ptr %675, align 4, !dbg !14849, !alias.scope !14833, !noalias !14854, !noundef !12
+  LL:24265 source-line:237 %right_own.i.i466.i = load float, ptr %676, align 4, !dbg !14850, !alias.scope !14835, !noalias !14855, !noundef !12
+  LL:24287 source-line:236 %left_own.i.1.i483.i = load float, ptr %677, align 4, !dbg !14849, !alias.scope !14833, !noalias !14854, !noundef !12
+  LL:24289 source-line:237 %right_own.i.1.i484.i = load float, ptr %678, align 4, !dbg !14850, !alias.scope !14835, !noalias !14855, !noundef !12
+  LL:24311 source-line:236 %left_own.i.2.i501.i = load float, ptr %679, align 4, !dbg !14849, !alias.scope !14833, !noalias !14854, !noundef !12
+  LL:24313 source-line:237 %right_own.i.2.i502.i = load float, ptr %680, align 4, !dbg !14850, !alias.scope !14835, !noalias !14855, !noundef !12
+  LL:24335 source-line:236 %left_own.i.3.i519.i = load float, ptr %681, align 4, !dbg !14849, !alias.scope !14833, !noalias !14854, !noundef !12
+  LL:24337 source-line:237 %right_own.i.3.i520.i = load float, ptr %682, align 4, !dbg !14850, !alias.scope !14835, !noalias !14855, !noundef !12
+  LL:24359 source-line:236 %left_own.i.4.i537.i = load float, ptr %683, align 4, !dbg !14849, !alias.scope !14833, !noalias !14854, !noundef !12
+  LL:24361 source-line:237 %right_own.i.4.i538.i = load float, ptr %684, align 4, !dbg !14850, !alias.scope !14835, !noalias !14855, !noundef !12
+  LL:24383 source-line:236 %left_own.i.5.i555.i = load float, ptr %685, align 4, !dbg !14849, !alias.scope !14833, !noalias !14854, !noundef !12
+  LL:24385 source-line:237 %right_own.i.5.i556.i = load float, ptr %686, align 4, !dbg !14850, !alias.scope !14835, !noalias !14855, !noundef !12
+  LL:24407 source-line:236 %left_own.i.6.i573.i = load float, ptr %687, align 4, !dbg !14849, !alias.scope !14833, !noalias !14854, !noundef !12
+  LL:24409 source-line:237 %right_own.i.6.i574.i = load float, ptr %688, align 4, !dbg !14850, !alias.scope !14835, !noalias !14855, !noundef !12
+  LL:24431 source-line:236 %left_own.i.7.i591.i = load float, ptr %689, align 4, !dbg !14849, !alias.scope !14833, !noalias !14854, !noundef !12
+  LL:24433 source-line:237 %right_own.i.7.i592.i = load float, ptr %690, align 4, !dbg !14850, !alias.scope !14835, !noalias !14855, !noundef !12
+  LL:24454 source-line:251 %left_own16.i.i330.i = load float, ptr %691, align 4, !dbg !14848, !alias.scope !14833, !noalias !14854, !noundef !12
+  LL:24456 source-line:252 %right_own18.i.i331.i = load float, ptr %692, align 4, !dbg !14867, !alias.scope !14835, !noalias !14855, !noundef !12
+  LL:24457 source-line:248 %_43.i.1.i332.i = load i32, ptr %658, align 4, !dbg !14870, !alias.scope !14839, !noalias !14840, !noundef !12
+  LL:24478 source-line:251 %left_own16.i.1.i348.i = load float, ptr %693, align 4, !dbg !14848, !alias.scope !14833, !noalias !14854, !noundef !12
+  LL:24480 source-line:252 %right_own18.i.1.i349.i = load float, ptr %694, align 4, !dbg !14867, !alias.scope !14835, !noalias !14855, !noundef !12
+  LL:24481 source-line:248 %_43.i.2.i350.i = load i32, ptr %660, align 4, !dbg !14870, !alias.scope !14839, !noalias !14840, !noundef !12
+  LL:24502 source-line:251 %left_own16.i.2.i366.i = load float, ptr %695, align 4, !dbg !14848, !alias.scope !14833, !noalias !14854, !noundef !12
+  LL:24504 source-line:252 %right_own18.i.2.i367.i = load float, ptr %696, align 4, !dbg !14867, !alias.scope !14835, !noalias !14855, !noundef !12
+  LL:24505 source-line:248 %_43.i.3.i368.i = load i32, ptr %662, align 4, !dbg !14870, !alias.scope !14839, !noalias !14840, !noundef !12
+  LL:24526 source-line:251 %left_own16.i.3.i384.i = load float, ptr %697, align 4, !dbg !14848, !alias.scope !14833, !noalias !14854, !noundef !12
+  LL:24528 source-line:252 %right_own18.i.3.i385.i = load float, ptr %698, align 4, !dbg !14867, !alias.scope !14835, !noalias !14855, !noundef !12
+  LL:24529 source-line:248 %_43.i.4.i386.i = load i32, ptr %664, align 4, !dbg !14870, !alias.scope !14839, !noalias !14840, !noundef !12
+  LL:24550 source-line:251 %left_own16.i.4.i402.i = load float, ptr %699, align 4, !dbg !14848, !alias.scope !14833, !noalias !14854, !noundef !12
+  LL:24552 source-line:252 %right_own18.i.4.i403.i = load float, ptr %700, align 4, !dbg !14867, !alias.scope !14835, !noalias !14855, !noundef !12
+  LL:24553 source-line:248 %_43.i.5.i404.i = load i32, ptr %666, align 4, !dbg !14870, !alias.scope !14839, !noalias !14840, !noundef !12
+  LL:24574 source-line:251 %left_own16.i.5.i420.i = load float, ptr %701, align 4, !dbg !14848, !alias.scope !14833, !noalias !14854, !noundef !12
+  LL:24576 source-line:252 %right_own18.i.5.i421.i = load float, ptr %702, align 4, !dbg !14867, !alias.scope !14835, !noalias !14855, !noundef !12
+  LL:24577 source-line:248 %_43.i.6.i422.i = load i32, ptr %668, align 4, !dbg !14870, !alias.scope !14839, !noalias !14840, !noundef !12
+  LL:24598 source-line:251 %left_own16.i.6.i438.i = load float, ptr %703, align 4, !dbg !14848, !alias.scope !14833, !noalias !14854, !noundef !12
+  LL:24600 source-line:252 %right_own18.i.6.i439.i = load float, ptr %704, align 4, !dbg !14867, !alias.scope !14835, !noalias !14855, !noundef !12
+  LL:24601 source-line:248 %_43.i.7.i440.i = load i32, ptr %670, align 4, !dbg !14870, !alias.scope !14839, !noalias !14840, !noundef !12
+  LL:24622 source-line:251 %left_own16.i.7.i456.i = load float, ptr %705, align 4, !dbg !14848, !alias.scope !14833, !noalias !14854, !noundef !12
+  LL:24624 source-line:252 %right_own18.i.7.i457.i = load float, ptr %706, align 4, !dbg !14867, !alias.scope !14835, !noalias !14855, !noundef !12
+  LL:24635 source-line:266 %_79.i.i91.i = load float, ptr %707, align 4, !dbg !14847, !alias.scope !14833, !noalias !14854, !noundef !12
+  LL:24647 source-line:267 %_83.i.i95.i = load float, ptr %708, align 4, !dbg !14879, !alias.scope !14835, !noalias !14855, !noundef !12
+  LL:24659 source-line:268 %_86.i.i99.i = load float, ptr %709, align 4, !dbg !14880, !alias.scope !14835, !noalias !14855, !noundef !12
+  LL:24671 source-line:269 %_88.i.i103.i = load float, ptr %710, align 4, !dbg !14882, !alias.scope !14833, !noalias !14854, !noundef !12
+  LL:24672 source-line:263 %_68.i.1.i104.i = load i32, ptr %658, align 4, !dbg !14883, !alias.scope !14839, !noalias !14840, !noundef !12
+  LL:24689 source-line:266 %_79.i.1.i118.i = load float, ptr %711, align 4, !dbg !14847, !alias.scope !14833, !noalias !14854, !noundef !12
+  LL:24695 source-line:267 %_83.i.1.i121.i = load float, ptr %712, align 4, !dbg !14879, !alias.scope !14835, !noalias !14855, !noundef !12
+  LL:24701 source-line:268 %_86.i.1.i124.i = load float, ptr %713, align 4, !dbg !14880, !alias.scope !14835, !noalias !14855, !noundef !12
+  LL:24707 source-line:269 %_88.i.1.i127.i = load float, ptr %714, align 4, !dbg !14882, !alias.scope !14833, !noalias !14854, !noundef !12
+  LL:24708 source-line:263 %_68.i.2.i128.i = load i32, ptr %660, align 4, !dbg !14883, !alias.scope !14839, !noalias !14840, !noundef !12
+  LL:24725 source-line:266 %_79.i.2.i142.i = load float, ptr %715, align 4, !dbg !14847, !alias.scope !14833, !noalias !14854, !noundef !12
+  LL:24731 source-line:267 %_83.i.2.i145.i = load float, ptr %716, align 4, !dbg !14879, !alias.scope !14835, !noalias !14855, !noundef !12
+  LL:24737 source-line:268 %_86.i.2.i148.i = load float, ptr %717, align 4, !dbg !14880, !alias.scope !14835, !noalias !14855, !noundef !12
+  LL:24743 source-line:269 %_88.i.2.i151.i = load float, ptr %718, align 4, !dbg !14882, !alias.scope !14833, !noalias !14854, !noundef !12
+  LL:24744 source-line:263 %_68.i.3.i152.i = load i32, ptr %662, align 4, !dbg !14883, !alias.scope !14839, !noalias !14840, !noundef !12
+  LL:24761 source-line:266 %_79.i.3.i166.i = load float, ptr %719, align 4, !dbg !14847, !alias.scope !14833, !noalias !14854, !noundef !12
+  LL:24767 source-line:267 %_83.i.3.i169.i = load float, ptr %720, align 4, !dbg !14879, !alias.scope !14835, !noalias !14855, !noundef !12
+  LL:24773 source-line:268 %_86.i.3.i172.i = load float, ptr %721, align 4, !dbg !14880, !alias.scope !14835, !noalias !14855, !noundef !12
+  LL:24779 source-line:269 %_88.i.3.i175.i = load float, ptr %722, align 4, !dbg !14882, !alias.scope !14833, !noalias !14854, !noundef !12
+  LL:24780 source-line:263 %_68.i.4.i176.i = load i32, ptr %664, align 4, !dbg !14883, !alias.scope !14839, !noalias !14840, !noundef !12
+  LL:24797 source-line:266 %_79.i.4.i190.i = load float, ptr %723, align 4, !dbg !14847, !alias.scope !14833, !noalias !14854, !noundef !12
+  LL:24803 source-line:267 %_83.i.4.i193.i = load float, ptr %724, align 4, !dbg !14879, !alias.scope !14835, !noalias !14855, !noundef !12
+  LL:24809 source-line:268 %_86.i.4.i196.i = load float, ptr %725, align 4, !dbg !14880, !alias.scope !14835, !noalias !14855, !noundef !12
+  LL:24815 source-line:269 %_88.i.4.i199.i = load float, ptr %726, align 4, !dbg !14882, !alias.scope !14833, !noalias !14854, !noundef !12
+  LL:24816 source-line:263 %_68.i.5.i200.i = load i32, ptr %666, align 4, !dbg !14883, !alias.scope !14839, !noalias !14840, !noundef !12
+  LL:24833 source-line:266 %_79.i.5.i214.i = load float, ptr %727, align 4, !dbg !14847, !alias.scope !14833, !noalias !14854, !noundef !12
+  LL:24839 source-line:267 %_83.i.5.i217.i = load float, ptr %728, align 4, !dbg !14879, !alias.scope !14835, !noalias !14855, !noundef !12
+  LL:24845 source-line:268 %_86.i.5.i220.i = load float, ptr %729, align 4, !dbg !14880, !alias.scope !14835, !noalias !14855, !noundef !12
+  LL:24851 source-line:269 %_88.i.5.i223.i = load float, ptr %730, align 4, !dbg !14882, !alias.scope !14833, !noalias !14854, !noundef !12
+  LL:24852 source-line:263 %_68.i.6.i224.i = load i32, ptr %668, align 4, !dbg !14883, !alias.scope !14839, !noalias !14840, !noundef !12
+  LL:24869 source-line:266 %_79.i.6.i238.i = load float, ptr %731, align 4, !dbg !14847, !alias.scope !14833, !noalias !14854, !noundef !12
+  LL:24875 source-line:267 %_83.i.6.i241.i = load float, ptr %732, align 4, !dbg !14879, !alias.scope !14835, !noalias !14855, !noundef !12
+  LL:24881 source-line:268 %_86.i.6.i244.i = load float, ptr %733, align 4, !dbg !14880, !alias.scope !14835, !noalias !14855, !noundef !12
+  LL:24887 source-line:269 %_88.i.6.i247.i = load float, ptr %734, align 4, !dbg !14882, !alias.scope !14833, !noalias !14854, !noundef !12
+  LL:24888 source-line:263 %_68.i.7.i248.i = load i32, ptr %670, align 4, !dbg !14883, !alias.scope !14839, !noalias !14840, !noundef !12
+  LL:24905 source-line:266 %_79.i.7.i262.i = load float, ptr %735, align 4, !dbg !14847, !alias.scope !14833, !noalias !14854, !noundef !12
+  LL:24911 source-line:267 %_83.i.7.i265.i = load float, ptr %736, align 4, !dbg !14879, !alias.scope !14835, !noalias !14855, !noundef !12
+  LL:24921 source-line:268 %_86.i.7.i270.i = load float, ptr %737, align 4, !dbg !14880, !alias.scope !14835, !noalias !14855, !noundef !12
+  LL:24923 source-line:269 %_88.i.7.i271.i = load float, ptr %738, align 4, !dbg !14882, !alias.scope !14833, !noalias !14854, !noundef !12
+  LL:25053 source-line:263 %_7.i743.i.i = load <8 x float>, ptr %629, align 32, !dbg !15173, !alias.scope !15175, !noalias !15178
+  LL:25203 source-line:263 %_7.i711.i.i = load <8 x float>, ptr %_38.i33.i, align 32, !dbg !15638, !alias.scope !15640, !noalias !15643
+

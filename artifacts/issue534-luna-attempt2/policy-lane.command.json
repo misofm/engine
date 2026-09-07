@@ -1,0 +1,45 @@
+{
+  "argv": [
+    "bash",
+    "scripts/check-lane-policy.sh"
+  ],
+  "cwd": "/home/bl/misofm/engine-gate-detector-access",
+  "head": "8b74e9508a88e7159cb88766ee5b4c9998780275",
+  "branch": "codex/gate-detector-access",
+  "status": "",
+  "env": {
+    "PATH": "/home/bl/.cargo/bin:/home/bl/.cargo/bin:/home/bl/.local/bin:/home/bl/.codex/packages/standalone/releases/0.153.4-x86_64-unknown-linux-musl/codex-path:/home/bl/.codex1/tmp/arg0/codex-arg032GUSu:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin",
+    "RUSTFLAGS": null,
+    "CARGO_TARGET_DIR": "/tmp/issue534-luna2-target"
+  },
+  "source": {
+    "crates/gate-expander/src/kernel.rs": {
+      "sha256": "0cc1b0115f8878559c1b492174d1e2e906a83b3858bcee4587750f9a3c21a8bd",
+      "git_blob": "28fe7f6cab3699261eefb9b9bf7351f4a3f40b09"
+    },
+    "crates/gate-expander/src/lib.rs": {
+      "sha256": "24e31168d4488da30a8c519971b4af7c1e723e8485bdcdf67127c45054ce64a1",
+      "git_blob": "814980fa9cd4d6c3b0c1b80aa7c30b15add1a226"
+    },
+    "crates/gate-expander/tests/identity.rs": {
+      "sha256": "36baa96332ba8e5e2d81639046cd430bbfe4f500a23242f6eb5d646c92b88aa1",
+      "git_blob": "75218554cdc6b4a2746676e26840e3803a413307"
+    },
+    "crates/gate-expander/tests/state.rs": {
+      "sha256": "786702191ed9cc3e682dffb113712498b461b8d83b51b558ae23fa2dc8443645",
+      "git_blob": "358788b81dde97a341974ca28b1c6bd6116cee9b"
+    },
+    "Cargo.lock": {
+      "sha256": "ef85bfaac8b4df80b651fa89e5e9a67bfef141b58076bdaac513044161b0b853",
+      "git_blob": "1b74fb016a04a090d2d1d37ea15fd2917fb85491"
+    },
+    ".cargo/config.toml": {
+      "sha256": "03b0fbd88c069abb0a8fbdca5921ba6a9899298291fe087977b509a29ebb7d0e",
+      "git_blob": "de2180972c37406f1f16913901bd1d4fc2e660e3"
+    },
+    "rust-toolchain.toml": {
+      "sha256": "85a45cac04c296adac076f8f0609ca8f4c8ca658957f1f24cbd1e054b6cc44e0",
+      "git_blob": "6b6739839ba23906921aeb4c268d275dcc459fb6"
+    }
+  }
+}
