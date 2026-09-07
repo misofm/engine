@@ -5,11 +5,9 @@
 //! owner claims at most one batch, copies its complete contents into the already prepared builtin
 //! queues, and only finishes the ticket after the graph has rendered the block.
 
-use core::num::{NonZeroU32, NonZeroUsize};
+use core::num::NonZeroUsize;
 
-use builtins_compiler::{
-    MeterConsumer, TrackControlProducer, TrackControlRecord, TrackFaderRecord,
-};
+use builtins_compiler::{TrackControlProducer, TrackControlRecord, TrackFaderRecord};
 use engine::realtime::{
     Producer, QueueGeneration, RenderError, bounded_spsc, bounded_spsc_retained_payload,
 };
@@ -20,12 +18,13 @@ use protocol::{
 };
 
 use crate::diagnostics::PrepareDiagnostics;
-use crate::prepare::{
-    HostConsoleRequest, HostPrepareCaps, HostPrepareReport, PreparedHost,
-    prepare_host_runtime_with_console,
-};
+#[cfg(not(test))]
+use crate::prepare::prepare_host_runtime_with_console;
+use crate::prepare::{HostConsoleRequest, HostPrepareCaps, HostPrepareReport, PreparedHost};
 use crate::render_session::StartedRenderSession;
 use crate::source::SourceControlSet;
+#[cfg(test)]
+use graph_compiler::Backend;
 
 /// The maximum number of records in one prepared builtin batch.
 pub const BUILTIN_BATCH_MAX_RECORDS: usize = 256;
@@ -235,7 +234,8 @@ pub struct BuiltinBatchControl {
     quantum: u32,
     track_count: u32,
     sources: SourceControlSet,
-    meters: Vec<MeterConsumer>,
+    #[cfg(test)]
+    meters: Vec<builtins_compiler::MeterConsumer>,
     report: HostPrepareReport,
     outstanding: usize,
     staged_outcome: Option<BuiltinBatchOutcome>,
@@ -343,24 +343,30 @@ impl BuiltinBatchControl {
             if self.outstanding != 0 {
                 return Ok(None);
             }
-            if self.cancel_completion_reported {
-                return Err(DeliveryError::StaleTicket);
-            }
-            self.cancel_completion_reported = true;
-            self.cancellation_started = false;
-            self.cancel_complete = None;
-            self.cancel_token = None;
-            return Ok(Some(complete));
+            return self.finalize_cancel_completion(complete);
         }
         let complete = self.delivery.poll_cancel_boundary(token)?;
         if let Some(complete) = complete {
             self.cancel_complete = Some(complete);
+            if self.outstanding == 0 {
+                return self.finalize_cancel_completion(complete);
+            }
         }
-        if self.outstanding == 0 {
-            Ok(complete)
-        } else {
-            Ok(None)
+        Ok(None)
+    }
+
+    fn finalize_cancel_completion(
+        &mut self,
+        complete: CoreCancelComplete,
+    ) -> Result<Option<CoreCancelComplete>, DeliveryError> {
+        if self.cancel_completion_reported {
+            return Err(DeliveryError::StaleTicket);
         }
+        self.cancel_completion_reported = true;
+        self.cancellation_started = false;
+        self.cancel_complete = None;
+        self.cancel_token = None;
+        Ok(Some(complete))
     }
 
     /// Reconcile one terminal and release its generic credit only after outcome reconciliation.
@@ -397,9 +403,6 @@ impl BuiltinBatchControl {
         };
         self.outstanding = self.outstanding.saturating_sub(1);
         self.last_collected = Some(ticket);
-        if self.outstanding == 0 {
-            self.cancellation_started = false;
-        }
         Ok(completion_from_core(completion, outcome))
     }
 
@@ -412,11 +415,6 @@ impl BuiltinBatchControl {
     /// Borrow the existing host source control set retained by this endpoint.
     pub fn sources(&mut self) -> &mut SourceControlSet {
         &mut self.sources
-    }
-
-    /// Borrow the endpoint's per-track PostFader observers for host telemetry.
-    pub fn meters(&mut self) -> &mut [MeterConsumer] {
-        &mut self.meters
     }
 
     /// Address-free host preparation report.
@@ -737,6 +735,37 @@ fn outcome_resource_report(
     })
 }
 
+struct PreparedEndpointQueues {
+    control: DeliveryCoreControl<BuiltinBatch>,
+    render: DeliveryCoreRender<BuiltinBatch>,
+    outcomes: engine::realtime::Consumer<BuiltinBatchOutcome>,
+    outcome_producer: Producer<BuiltinBatchOutcome>,
+    delivery_report: DeliveryResourceReport,
+    outcome_report: DeliveryResourceReport,
+}
+
+fn prepare_endpoint_queues(
+    ticket_capacity: NonZeroUsize,
+) -> Result<PreparedEndpointQueues, BuiltinBatchPrepareError> {
+    let delivery_report = PreparedDelivery::<BuiltinBatch>::resource_report(ticket_capacity)
+        .map_err(BuiltinBatchPrepareError::Delivery)?;
+    let outcome_report = outcome_resource_report(ticket_capacity)?;
+    let (control, render) = PreparedDelivery::<BuiltinBatch>::prepare(ticket_capacity)
+        .map_err(BuiltinBatchPrepareError::Delivery)?;
+    let (outcome_producer, outcomes) =
+        bounded_spsc(ticket_capacity, QueueGeneration(17)).map_err(|_| {
+            BuiltinBatchPrepareError::Delivery(protocol::ProtocolQueueError::CapacityOverflow)
+        })?;
+    Ok(PreparedEndpointQueues {
+        control,
+        render,
+        outcomes,
+        outcome_producer,
+        delivery_report,
+        outcome_report,
+    })
+}
+
 /// Prepare the host, console channels, typed delivery core and outcome storage as one transaction.
 pub fn prepare_builtin_batch_endpoint(
     compiled: &session::CompiledSession,
@@ -744,11 +773,47 @@ pub fn prepare_builtin_batch_endpoint(
     revision: SessionRevision,
     ticket_capacity: NonZeroUsize,
 ) -> Result<PreparedBuiltinBatchEndpoint, BuiltinBatchPrepareError> {
+    prepare_builtin_batch_endpoint_with_backend(
+        compiled,
+        caps,
+        revision,
+        ticket_capacity,
+        graph_compiler::Backend::current(),
+        false,
+    )
+}
+
+#[cfg(test)]
+fn prepare_builtin_batch_endpoint_for_test(
+    compiled: &session::CompiledSession,
+    caps: &HostPrepareCaps,
+    revision: SessionRevision,
+    ticket_capacity: NonZeroUsize,
+    backend: Backend,
+) -> Result<PreparedBuiltinBatchEndpoint, BuiltinBatchPrepareError> {
+    prepare_builtin_batch_endpoint_with_backend(
+        compiled,
+        caps,
+        revision,
+        ticket_capacity,
+        backend,
+        true,
+    )
+}
+
+fn prepare_builtin_batch_endpoint_with_backend(
+    compiled: &session::CompiledSession,
+    caps: &HostPrepareCaps,
+    revision: SessionRevision,
+    ticket_capacity: NonZeroUsize,
+    backend: graph_compiler::Backend,
+    test_meters: bool,
+) -> Result<PreparedBuiltinBatchEndpoint, BuiltinBatchPrepareError> {
     // Project endpoint storage before asking host preparation to allocate anything.  This makes
     // the endpoint's own aggregate and largest-allocation caps fail atomically.
-    let delivery_report = PreparedDelivery::<BuiltinBatch>::resource_report(ticket_capacity)
-        .map_err(BuiltinBatchPrepareError::Delivery)?;
-    let outcome_report = outcome_resource_report(ticket_capacity)?;
+    let queues = prepare_endpoint_queues(ticket_capacity)?;
+    let delivery_report = queues.delivery_report;
+    let outcome_report = queues.outcome_report;
     let endpoint_retained_bytes = delivery_report
         .retained_payload_bytes
         .checked_add(outcome_report.retained_payload_bytes)
@@ -777,20 +842,38 @@ pub fn prepare_builtin_batch_endpoint(
     }
     let console = HostConsoleRequest {
         control_queue_depth: Some(NonZeroUsize::new(BUILTIN_BATCH_MAX_RECORDS).unwrap()),
-        meter_period_frames: Some(NonZeroU32::new(compiled.quantum().0).unwrap()),
-        meter_queue_depth: NonZeroUsize::new(2).unwrap(),
-        meter_tap: builtins::MeterTap::PostFader,
         ..HostConsoleRequest::default()
     };
-    let (host, handles) = prepare_host_runtime_with_console(compiled, caps, &console)
-        .map_err(BuiltinBatchPrepareError::Host)?;
+    #[cfg(test)]
+    let console = if test_meters {
+        HostConsoleRequest {
+            meter_period_frames: Some(core::num::NonZeroU32::new(compiled.quantum().0).unwrap()),
+            meter_queue_depth: NonZeroUsize::new(2).unwrap(),
+            meter_tap: builtins::MeterTap::PostFader,
+            ..console
+        }
+    } else {
+        console
+    };
+    #[cfg(test)]
+    let host_result = crate::prepare::prepare_host_runtime_with_console_backend(
+        compiled, caps, &console, backend,
+    );
+    #[cfg(not(test))]
+    let host_result = {
+        let _ = backend;
+        let _ = test_meters;
+        prepare_host_runtime_with_console(compiled, caps, &console)
+    };
+    let (host, handles) = host_result.map_err(BuiltinBatchPrepareError::Host)?;
     let host_report = host.report;
-    let (delivery, render_delivery) = PreparedDelivery::<BuiltinBatch>::prepare(ticket_capacity)
-        .map_err(BuiltinBatchPrepareError::Delivery)?;
-    let (outcome_producer, outcome_consumer) = bounded_spsc(ticket_capacity, QueueGeneration(17))
-        .map_err(|_| {
-        BuiltinBatchPrepareError::Delivery(protocol::ProtocolQueueError::CapacityOverflow)
-    })?;
+    let PreparedEndpointQueues {
+        control: delivery,
+        render: render_delivery,
+        outcomes: outcome_consumer,
+        outcome_producer,
+        ..
+    } = queues;
     let retained_bytes = host_report
         .builtin_retained_payload_bytes
         .checked_add(endpoint_retained_bytes)
@@ -808,7 +891,12 @@ pub fn prepare_builtin_batch_endpoint(
     Ok(PreparedBuiltinBatchEndpoint {
         control: delivery,
         outcomes: outcome_consumer,
-        meters: handles.meters,
+        #[cfg(test)]
+        meters: if test_meters {
+            handles.meters
+        } else {
+            Vec::new()
+        },
         host,
         render: PreparedBuiltinBatchRender {
             delivery: render_delivery,
@@ -846,7 +934,8 @@ pub fn prepare_builtin_batch_endpoint(
 pub struct PreparedBuiltinBatchEndpoint {
     control: DeliveryCoreControl<BuiltinBatch>,
     outcomes: engine::realtime::Consumer<BuiltinBatchOutcome>,
-    meters: Vec<MeterConsumer>,
+    #[cfg(test)]
+    meters: Vec<builtins_compiler::MeterConsumer>,
     host: PreparedHost,
     render: PreparedBuiltinBatchRender,
     revision: SessionRevision,
@@ -871,6 +960,7 @@ impl PreparedBuiltinBatchEndpoint {
         let Self {
             control,
             outcomes: control_outcomes,
+            #[cfg(test)]
             meters,
             host,
             render,
@@ -886,6 +976,7 @@ impl PreparedBuiltinBatchEndpoint {
                     Self {
                         control,
                         outcomes: control_outcomes,
+                        #[cfg(test)]
                         meters,
                         host,
                         render,
@@ -930,6 +1021,7 @@ impl PreparedBuiltinBatchEndpoint {
             quantum,
             track_count,
             sources,
+            #[cfg(test)]
             meters,
             report,
             outstanding: 0,
@@ -999,9 +1091,9 @@ mod tests {
             maximum_effect_scratch_bytes: u64::MAX,
             maximum_builtin_retained_bytes: u64::MAX,
             maximum_named_allocation_bytes: u64::MAX,
-            maximum_meter_streams: 64,
-            maximum_meter_items: 1 << 16,
-            maximum_meter_bytes: 1 << 24,
+            maximum_meter_streams: 1,
+            maximum_meter_items: 1,
+            maximum_meter_bytes: 1,
         }
     }
 
@@ -1047,6 +1139,282 @@ mod tests {
         assert_eq!(control.poll_cancel_boundary(cancel), Ok(None));
         assert_eq!(control.collect(ticket), Err(DeliveryError::Empty));
         assert_eq!(control.outstanding(), 1);
+    }
+
+    #[test]
+    fn forced_scalar_and_native_bank_match_with_state_and_post_fader_witnesses() {
+        use builtins::{BuiltinLaneSelector, Matrix2x2, MeterTap};
+        use builtins_compiler::{
+            test_only_fader_matrix_witness, test_only_reset_fader_matrix_witness,
+            test_only_scalar_state_trace,
+        };
+
+        let document = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
+        let mut meter_caps = caps();
+        meter_caps.maximum_meter_streams = 64;
+        meter_caps.maximum_meter_items = 1 << 16;
+        meter_caps.maximum_meter_bytes = 1 << 24;
+        let compiled = crate::compile_host_session(document, &meter_caps).expect("compile fixture");
+        let console = HostConsoleRequest {
+            control_queue_depth: Some(NonZeroUsize::new(BUILTIN_BATCH_MAX_RECORDS).unwrap()),
+            meter_period_frames: Some(core::num::NonZeroU32::new(128).unwrap()),
+            meter_queue_depth: NonZeroUsize::new(2).unwrap(),
+            meter_tap: MeterTap::PostFader,
+            ..HostConsoleRequest::default()
+        };
+        let batch = BuiltinBatch::new(
+            SessionRevision(42),
+            SampleTime(0),
+            &[
+                BuiltinBatchRecord::Fader {
+                    track_index: 0,
+                    record: TrackFaderRecord::FaderDb {
+                        lanes: BuiltinLaneSelector::Left,
+                        db: -6.0,
+                        smoothing_samples: 16,
+                    },
+                },
+                BuiltinBatchRecord::Matrix {
+                    track_index: 8,
+                    record: TrackControlRecord {
+                        matrix: Matrix2x2 {
+                            ll: 0.5,
+                            lr: 0.25,
+                            rl: -0.25,
+                            rr: 0.75,
+                        },
+                        smoothing_samples: 11,
+                    },
+                },
+                BuiltinBatchRecord::Fader {
+                    track_index: 8,
+                    record: TrackFaderRecord::FaderDb {
+                        lanes: BuiltinLaneSelector::Right,
+                        db: -3.0,
+                        smoothing_samples: 13,
+                    },
+                },
+            ],
+        )
+        .expect("batch");
+        let source_left = [0.25_f32; 128];
+        let source_right = [-0.5_f32; 128];
+        let submission = crate::SourceSubmission {
+            generation: 1,
+            start_frame: 0,
+            sample_rate_hz: 48_000,
+            planes: &[&source_left, &source_right],
+            frames: 128,
+            end_of_region: false,
+        };
+
+        let prepare_console = |backend| {
+            crate::prepare::prepare_host_runtime_with_console_backend(
+                &compiled,
+                &meter_caps,
+                &console,
+                backend,
+            )
+            .expect("prepare console")
+        };
+        let (bank_host, mut bank_handles) = prepare_console(Backend::current());
+        let (mut bank_render, mut bank_sources, _) =
+            bank_host.start_render_session().expect("bank start");
+        let (scalar_host, mut scalar_handles) = prepare_console(Backend::Scalar);
+        let (mut scalar_render, mut scalar_sources, _) =
+            scalar_host.start_render_session().expect("scalar start");
+        let (mut bank_control, mut bank_endpoint_render, _) =
+            prepare_builtin_batch_endpoint_for_test(
+                &compiled,
+                &meter_caps,
+                SessionRevision(42),
+                NonZeroUsize::new(2).unwrap(),
+                Backend::current(),
+            )
+            .expect("bank endpoint")
+            .start()
+            .unwrap_or_else(|_| panic!("bank endpoint start"));
+        let (mut scalar_control, mut scalar_endpoint_render, _) =
+            prepare_builtin_batch_endpoint_for_test(
+                &compiled,
+                &meter_caps,
+                SessionRevision(42),
+                NonZeroUsize::new(2).unwrap(),
+                Backend::Scalar,
+            )
+            .expect("scalar endpoint")
+            .start()
+            .unwrap_or_else(|_| panic!("scalar endpoint start"));
+        bank_sources
+            .submit(b"fixture-source", submission)
+            .expect("bank source");
+        scalar_sources
+            .submit(b"fixture-source", submission)
+            .expect("scalar source");
+        bank_control
+            .sources()
+            .submit(b"fixture-source", submission)
+            .expect("bank endpoint source");
+        scalar_control
+            .sources()
+            .submit(b"fixture-source", submission)
+            .expect("scalar endpoint source");
+        for handles in [&mut bank_handles, &mut scalar_handles] {
+            handles.track_controls[0]
+                .fader
+                .try_push(TrackFaderRecord::FaderDb {
+                    lanes: BuiltinLaneSelector::Left,
+                    db: -6.0,
+                    smoothing_samples: 16,
+                })
+                .expect("fader");
+            handles.track_controls[8]
+                .producer
+                .try_push(TrackControlRecord {
+                    matrix: Matrix2x2 {
+                        ll: 0.5,
+                        lr: 0.25,
+                        rl: -0.25,
+                        rr: 0.75,
+                    },
+                    smoothing_samples: 11,
+                })
+                .expect("matrix");
+            handles.track_controls[8]
+                .fader
+                .try_push(TrackFaderRecord::FaderDb {
+                    lanes: BuiltinLaneSelector::Right,
+                    db: -3.0,
+                    smoothing_samples: 13,
+                })
+                .expect("scalar fader");
+        }
+        let bank_ticket = bank_control.try_publish(batch).expect("bank ticket");
+        let scalar_ticket = scalar_control.try_publish(batch).expect("scalar ticket");
+        let mut bank_reference = [0.0_f32; 256];
+        let mut scalar_reference = [0.0_f32; 256];
+        let mut bank_endpoint = [0.0_f32; 256];
+        let mut scalar_endpoint = [0.0_f32; 256];
+        test_only_reset_fader_matrix_witness();
+        bank_render
+            .render_planar(&mut bank_reference, 2, 128, 128, 0)
+            .expect("bank reference render");
+        let bank_reference_witness = test_only_fader_matrix_witness();
+        test_only_reset_fader_matrix_witness();
+        bank_endpoint_render
+            .render(&mut bank_endpoint, 2, 128, 128, SampleTime(0))
+            .expect("bank endpoint render");
+        let bank_endpoint_witness = test_only_fader_matrix_witness();
+        test_only_reset_fader_matrix_witness();
+        scalar_render
+            .render_planar(&mut scalar_reference, 2, 128, 128, 0)
+            .expect("scalar reference render");
+        let scalar_reference_state = test_only_scalar_state_trace();
+        let scalar_reference_witness = test_only_fader_matrix_witness();
+        test_only_reset_fader_matrix_witness();
+        scalar_endpoint_render
+            .render(&mut scalar_endpoint, 2, 128, 128, SampleTime(0))
+            .expect("scalar endpoint render");
+        let scalar_endpoint_state = test_only_scalar_state_trace();
+        let scalar_endpoint_witness = test_only_fader_matrix_witness();
+        assert_eq!(bank_reference, bank_endpoint);
+        assert_eq!(scalar_reference, scalar_endpoint);
+        assert!(scalar_endpoint_state.fader_len > 0);
+        assert!(scalar_endpoint_state.matrix_len > 0);
+        assert_eq!(scalar_endpoint_state, scalar_reference_state);
+        assert_eq!(bank_endpoint_witness, bank_reference_witness);
+        assert_eq!(scalar_endpoint_witness, scalar_reference_witness);
+        assert_eq!(bank_endpoint_witness.process_calls, 0);
+        assert_eq!(bank_endpoint_witness.factory_calls, 0);
+        assert_eq!(bank_endpoint_witness.fused_calls, 0);
+        assert_eq!(bank_endpoint_witness.fallback_calls, 0);
+        assert_eq!(bank_endpoint_witness.process_members, 0);
+        assert_eq!(bank_endpoint_witness.factory_members, 0);
+        assert_eq!(scalar_endpoint_witness.process_calls, 0);
+        assert_eq!(scalar_endpoint_witness.factory_calls, 0);
+        assert_eq!(scalar_endpoint_witness.fused_calls, 0);
+        assert_eq!(scalar_endpoint_witness.fallback_calls, 0);
+        assert_eq!(scalar_endpoint_witness.process_members, 0);
+        assert_eq!(scalar_endpoint_witness.factory_members, 0);
+        let bank_peak = bank_handles
+            .meters
+            .iter_mut()
+            .find(|meter| meter.track_id.as_ref() == "eq8")
+            .expect("bank reference meter")
+            .consumer
+            .try_pop()
+            .expect("bank reference snapshot");
+        let scalar_peak = scalar_handles
+            .meters
+            .iter_mut()
+            .find(|meter| meter.track_id.as_ref() == "eq8")
+            .expect("scalar reference meter")
+            .consumer
+            .try_pop()
+            .expect("scalar reference snapshot");
+        let bank_endpoint_peak = bank_control
+            .meters
+            .iter_mut()
+            .find(|meter| meter.track_id.as_ref() == "eq8")
+            .expect("bank endpoint meter")
+            .consumer
+            .try_pop()
+            .expect("bank endpoint snapshot");
+        let scalar_endpoint_peak = scalar_control
+            .meters
+            .iter_mut()
+            .find(|meter| meter.track_id.as_ref() == "eq8")
+            .expect("scalar endpoint meter")
+            .consumer
+            .try_pop()
+            .expect("scalar endpoint snapshot");
+        assert_eq!(
+            bank_peak.left.sample_peak.to_bits(),
+            bank_endpoint_peak.left.sample_peak.to_bits()
+        );
+        assert_eq!(
+            scalar_peak.left.sample_peak.to_bits(),
+            scalar_endpoint_peak.left.sample_peak.to_bits()
+        );
+        assert_eq!(
+            bank_peak.right.sample_peak.to_bits(),
+            bank_endpoint_peak.right.sample_peak.to_bits()
+        );
+        assert_eq!(
+            scalar_peak.right.sample_peak.to_bits(),
+            scalar_endpoint_peak.right.sample_peak.to_bits()
+        );
+        bank_control.collect(bank_ticket).expect("bank collect");
+        scalar_control
+            .collect(scalar_ticket)
+            .expect("scalar collect");
+    }
+
+    #[test]
+    fn endpoint_queue_retention_matches_layout_and_reclaims_off_render() {
+        use bench_support::alloc as bench_alloc;
+
+        bench_alloc::assert_installed();
+        let warm = Box::new([0_u8; 64]);
+        std::hint::black_box(&warm);
+        drop(warm);
+        let capacity = NonZeroUsize::new(2).unwrap();
+        let thread_mark = bench_alloc::current_thread_counters();
+        let queues = prepare_endpoint_queues(capacity).expect("queue preparation");
+        let thread_live = bench_alloc::current_thread_delta_since(thread_mark);
+        let expected_bytes = queues
+            .delivery_report
+            .retained_payload_bytes
+            .saturating_add(queues.outcome_report.retained_payload_bytes);
+        assert_eq!(thread_live.deallocations, 0);
+        assert_eq!(thread_live.reallocations, 0);
+        assert_eq!(thread_live.requested_bytes, expected_bytes);
+        assert!(thread_live.allocations > 0);
+        let allocations = thread_live.allocations;
+        drop(queues);
+        let thread_released = bench_alloc::current_thread_delta_since(thread_mark);
+        assert_eq!(thread_released.allocations, allocations);
+        assert_eq!(thread_released.deallocations, allocations);
     }
 
     #[test]

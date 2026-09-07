@@ -124,3 +124,45 @@ The mutation was restored immediately. Focused integration (13 tests), both priv
 strict Clippy with the support feature, formatting, and diff checks pass. `Cargo.lock` is restored
 before handoff. Full target/policy qualification remains for the root checkpoint; the scalar
 witness blocker is not claimed green.
+
+## Attempt 3 final implementation and evidence
+
+Attempt 3 closed the remaining cancellation, backend, telemetry, and retention findings within the
+amended scope. Empty cancellation and the all-Applied-collected-before-acknowledgement case now
+share one exact-once finalization path. The path clears the retained token only when the completion
+is returned, so publication reopens after that return and every later poll is stale. The new
+integration test covers both populations and next-generation reuse.
+
+Mandatory production PostFader preparation and the public endpoint meter accessor were removed.
+The production endpoint again requests only its bounded control queues, so the existing low-meter-cap
+constructor behavior is preserved. PostFader consumers remain only in the private unit preparation
+used by the final audio evidence.
+
+The amended crate-private test seam selects `Backend::current()` for the native bank and
+`Backend::Scalar` for a forced scalar endpoint while production remains pinned to
+`Backend::current()`. The private unit test prepares matching ordinary-console references and
+endpoints, submits identical source and addressed records (including track 8 right fader target,
+ramp, and matrix), and compares PCM arrays, scalar fader/matrix state traces, and both PostFader
+sample peaks bitwise. The existing builtins-compiler witness is reset/read on the render thread;
+all paired factory/process/fused/fallback/member counters remain zero for both endpoint forms.
+
+Endpoint queue construction is factored through `prepare_endpoint_queues`. After warming the
+current-thread allocator, the retention test observes the actual queue allocations while owners
+remain live: requested bytes equal the two independent retained layout reports, with zero
+current-thread frees and reallocations. Dropping the queue owner off render reclaims exactly the
+same allocation count. Largest allocation remains checked independently through each layout's
+largest row; it is not inferred from allocator byte totals.
+
+Accepted mutation evidence remains preserved for mutations 1–4. Mutation 5 was rerun against the
+clean final source by clearing the sticky post-graph fault and rendering the cancellation boundary.
+The clean `Err(Empty)` assertion failed with:
+
+```
+left: Ok(BuiltinBatchCompletion { ... disposition: Canceled, ... acknowledged_sample: Some(SampleTime(128)) })
+right: Err(Empty)
+```
+
+The mutation was restored. Final proportional debug all-target host-core tests (14 unit tests,
+14 endpoint integration tests and the complete host-core integration suite), strict Clippy,
+formatting, and diff checks pass. Cargo.lock is restored before handoff. Release, rustdoc, target,
+policy, and routing checks remain root-owned final gates.

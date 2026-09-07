@@ -3,7 +3,7 @@
 
 use core::num::NonZeroUsize;
 
-use builtins::{BuiltinLaneSelector, Matrix2x2, MeterTap};
+use builtins::{BuiltinLaneSelector, Matrix2x2};
 use builtins_compiler::{TrackControlRecord, TrackFaderRecord};
 use host_core::{
     BuiltinBatch, BuiltinBatchAdmissionError, BuiltinBatchRecord, BuiltinBatchRenderReport,
@@ -36,9 +36,9 @@ fn caps() -> HostPrepareCaps {
         maximum_effect_scratch_bytes: u64::MAX,
         maximum_builtin_retained_bytes: u64::MAX,
         maximum_named_allocation_bytes: u64::MAX,
-        maximum_meter_streams: 64,
-        maximum_meter_items: 1 << 16,
-        maximum_meter_bytes: 1 << 24,
+        maximum_meter_streams: 1,
+        maximum_meter_items: 1,
+        maximum_meter_bytes: 1,
     }
 }
 
@@ -745,9 +745,6 @@ fn endpoint_drives_nonzero_pcm_through_the_prepared_bank_and_scalar_plan() {
     let compiled = host_core::compile_host_session(SESSION, &caps()).expect("compile fixture");
     let console = HostConsoleRequest {
         control_queue_depth: Some(NonZeroUsize::new(host_core::BUILTIN_BATCH_MAX_RECORDS).unwrap()),
-        meter_period_frames: Some(core::num::NonZeroU32::new(QUANTUM as u32).unwrap()),
-        meter_queue_depth: NonZeroUsize::new(2).unwrap(),
-        meter_tap: MeterTap::PostFader,
         ..HostConsoleRequest::default()
     };
     let (baseline_host, mut baseline_handles) =
@@ -854,25 +851,9 @@ fn endpoint_drives_nonzero_pcm_through_the_prepared_bank_and_scalar_plan() {
     let baseline_report = baseline_render
         .render_planar(&mut baseline_samples, 2, QUANTUM, QUANTUM, 0)
         .expect("baseline render");
-    let baseline_post_fader = baseline_handles
-        .meters
-        .iter_mut()
-        .find(|meter| meter.track_id.as_ref() == "eq8")
-        .expect("baseline scalar post-fader meter")
-        .consumer
-        .try_pop()
-        .expect("baseline post-fader snapshot");
     let report = render
         .render(&mut endpoint_samples, 2, QUANTUM, QUANTUM, SampleTime(0))
         .expect("render");
-    let endpoint_post_fader = control
-        .meters()
-        .iter_mut()
-        .find(|meter| meter.track_id.as_ref() == "eq8")
-        .expect("endpoint scalar post-fader meter")
-        .consumer
-        .try_pop()
-        .expect("endpoint post-fader snapshot");
     assert!(report.applied.is_some());
     assert_eq!(
         report.graph.map(|value| value.frames),
@@ -880,14 +861,6 @@ fn endpoint_drives_nonzero_pcm_through_the_prepared_bank_and_scalar_plan() {
     );
     assert_eq!(endpoint_samples, baseline_samples);
     assert!(endpoint_samples.iter().any(|sample| sample.to_bits() != 0));
-    assert_eq!(
-        endpoint_post_fader.left.sample_peak.to_bits(),
-        baseline_post_fader.left.sample_peak.to_bits()
-    );
-    assert_eq!(
-        endpoint_post_fader.right.sample_peak.to_bits(),
-        baseline_post_fader.right.sample_peak.to_bits()
-    );
     assert_eq!(
         control.collect(ticket).expect("collect").disposition,
         CoreTerminalDisposition::Applied
@@ -1041,6 +1014,70 @@ fn cancellation_before_claim_is_render_only_and_releases_after_collection() {
         control.poll_cancel_boundary(token),
         Err(protocol::DeliveryError::StaleTicket)
     );
+}
+
+#[test]
+fn empty_and_precollected_cancellation_finalize_once_and_reopen_publication() {
+    let (mut control, mut render, _) = endpoint();
+    let empty_token = control.begin_cancel().expect("empty cancel");
+    assert!(render_block(&mut render, 0).cancellation_only);
+    assert!(
+        control
+            .poll_cancel_boundary(empty_token)
+            .expect("empty completion")
+            .is_some()
+    );
+    assert_eq!(
+        control.poll_cancel_boundary(empty_token),
+        Err(protocol::DeliveryError::StaleTicket)
+    );
+    let first = BuiltinBatch::new(
+        REVISION,
+        SampleTime(0),
+        &[BuiltinBatchRecord::Fader {
+            track_index: 0,
+            record: TrackFaderRecord::Mute {
+                lanes: BuiltinLaneSelector::Both,
+                muted: true,
+                smoothing_samples: 0,
+            },
+        }],
+    )
+    .unwrap();
+    let first_ticket = control.try_publish(first).expect("reopened publication");
+    assert!(render_block(&mut render, 0).applied.is_some());
+    control.collect(first_ticket).expect("first collect");
+
+    let precollected_token = control.begin_cancel().expect("precollected cancel");
+    assert!(render_block(&mut render, QUANTUM as u64).cancellation_only);
+    assert!(
+        control
+            .poll_cancel_boundary(precollected_token)
+            .expect("precollected completion")
+            .is_some()
+    );
+    assert_eq!(
+        control.poll_cancel_boundary(precollected_token),
+        Err(protocol::DeliveryError::StaleTicket)
+    );
+    let second = BuiltinBatch::new(
+        REVISION,
+        SampleTime(QUANTUM as u64),
+        &[BuiltinBatchRecord::Fader {
+            track_index: 0,
+            record: TrackFaderRecord::Mute {
+                lanes: BuiltinLaneSelector::Both,
+                muted: false,
+                smoothing_samples: 0,
+            },
+        }],
+    )
+    .unwrap();
+    let second_ticket = control
+        .try_publish(second)
+        .expect("second reopened publication");
+    assert!(render_block(&mut render, QUANTUM as u64).applied.is_some());
+    control.collect(second_ticket).expect("second collect");
 }
 
 #[test]

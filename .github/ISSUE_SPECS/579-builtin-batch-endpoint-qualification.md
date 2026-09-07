@@ -264,3 +264,28 @@ amendment in `crates/host-core/Cargo.toml` recorded above, keep production pinne
 finalization, and finish actual-retention plus native-bank/forced-scalar evidence. No
 other path or product expansion is authorized. A third FAIL hard-stops #579; gates may
 not be weakened.
+
+## Attempt 3 final implementation record
+
+The final amended pass unifies immediate and cached cancellation completion through one exact-once
+finalizer. Empty and already-collected cancellation each return one completion, then reopen
+publication; subsequent polling is stale. Production PostFader preparation and the public endpoint
+meter accessor were removed, preserving low-meter-cap constructors. A private unit-only meter
+setup remains for evidence.
+
+The crate-private `cfg(test)` backend seam prepares both native `Backend::current()` and forced
+`Backend::Scalar` endpoints; production remains pinned to `Backend::current()`. Matching ordinary
+console references and endpoints receive identical source and target/ramp/matrix records. PCM,
+scalar state traces, and PostFader peaks match bitwise, and the builtins-compiler witness reports
+zero paired factory/process/fused/fallback/member execution. The existing dev dependency alone
+selects `builtins-compiler/test-support`.
+
+Actual queue preparation is factored into `prepare_endpoint_queues`. Current-thread allocator
+measurement observes exact retained layout bytes with zero frees/reallocations while owners live,
+then exact allocation-count reclamation after off-render drop. The final mutation record clears
+the sticky fault and observes false `Canceled` success, failing the clean `Err(Empty)` assertion;
+the mutation is restored.
+
+Final proportional host-core tests, strict Clippy, formatting, and diff checks pass. Cargo.lock is
+restored. Root must complete release/rustdoc/target/policy/routing checks and the final review
+synchronization; this is the final #579 attempt and no fourth pass is authorized.
