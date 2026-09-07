@@ -119,6 +119,8 @@ Allowed implementation paths:
 - existing/new focused tests under `crates/conformance/tests/`
 - `scripts/check-protocol-wasm-parity.sh`
 - `scripts/check-conformance-boundaries.sh`
+- `scripts/test-conformance-boundaries.sh`, only for the hermetic fixture and focused mutations
+  required to exercise this issue's guarded protocol test-child contract
 - only directly stale location/provenance text in `docs/CONTROL_PROTOCOL_CONFORMANCE.md`,
   `docs/derivations/241-schema-repins.md` and `docs/derivations/274-parity-repin.md`
 - this numbered decision/evidence record, owned by root
@@ -159,6 +161,7 @@ retained:
    mismatch rebuilds and the corpus-count panic rebuild. Record compiler/interpreter statuses and
    actual artifact identities.
 6. `bash scripts/check-conformance-boundaries.sh`,
+   `bash scripts/test-conformance-boundaries.sh`,
    `bash scripts/check-protocol-control-policy.sh` and
    `bash scripts/check-workspace-policy.sh` pass. The boundary checker must reject a focused
    temporary counterexample that restores one forbidden default protocol fixture export/source;
@@ -265,3 +268,24 @@ token predicate and byte-exact restoration rather than compilable Rust. The pres
 control supplies the proper Rust export mutation against byte-identical current `lib.rs` and
 boundary-checker content. No compile-success claim is made for either deliberate mutation. Root
 commits this verdict, then Astra low checks the exact verdict-bearing head before PR creation.
+
+## Required-qualification failure; bounded attempt 3
+
+PR #566 opened at exact reviewed head `fc6798e426ffc34407e0280add664a38c763bdcb`. Required
+qualification run `34137274043` reproduced a failure in `bash scripts/test-conformance-boundaries.sh`:
+the production checker passed, then the hermetic mutation fixture failed because its synthetic
+protocol crate did not create `controller.rs`, `message_wire.rs`, `session_wire.rs` and their exact
+guarded test children. Root reproduced the same exit locally. This is a fixture integration defect;
+the accepted product source and production checker behavior are unchanged. Root canceled the
+already-failed run and closed PR #566 while correcting it, avoiding further CI work on a known-red
+head.
+
+Attempt 3 is limited to `scripts/test-conformance-boundaries.sh`. Luna high must extend the
+hermetic clean fixture with the three exact parent guards and test-child files required by the
+checker, retain every existing fail-open/status mutation, and add focused red mutations for a
+missing child, a missing/changed parent guard, and a forbidden conformance use outside the three
+exact child paths. Required gates are the hermetic fixture suite, the production checker, shell
+syntax, the three focused red controls with exact restoration, and the existing protocol/default
+dependency and extracted-test checks. No product, corpus, Wasm, dependency, benchmark or unrelated
+policy change is authorized. Root checkpoints before Astra low attempt-three review; no fourth
+implementation attempt is permitted without rescoping.
