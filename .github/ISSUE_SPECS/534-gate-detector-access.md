@@ -205,3 +205,6 @@ Conditions:
 4. Generated candidate/hash records must identify the actual qualified source/output. No numerical, corpus, resource-expectation, policy, CI or matrix changes are authorized. Any further discrepancy requires concrete assessment.
 
 Source PASS remains unchanged. This ruling grants neither passing artifact qualification nor PR/merge approval. Review was read-only; the worktree remains clean.
+## Exact approved artifact-pin checkpoint
+
+Luna xhigh updated only the artifact pin to the builder-observed e70a4311da3f053ea77fc0ec7ac00348d534dfb2919e05591fefed515988802d with its newline preserved. Root verified the exact value. DSP/build source remains unchanged; ordinary verified rebuild and artifact qualification are pending, and the pin alone receives no qualification credit.
