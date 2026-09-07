@@ -56,3 +56,9 @@ Shared-helper debug/release tests pass 3 tests each, session debug/release pass 
 Astra LOW returned **PASS** at exact pushed review head and upstream `a737700f23fc3783b8c0902516ac08bd4c041a1e`, source `47a43a24db18c42cfb8637867da263cb6c95a0ba`, and current main/merge-base `6984c61aea0a56ea03071a2480c0806aef4b7740`. The shared helper preserves exact bytes; tests cover empty arrays and elements, order, duplicates, escaping, controls and Unicode. Both production callers use it, both duplicate bodies are gone, and the existing record oracles are unchanged.
 
 Independent full debug bench-support/bench tests pass 43 bench tests, release JSON tests pass 7 tests, release session/conformance tests pass 3 and 4 tests, and strict Clippy/rustdoc, formatting/diff, workspace policy, bench policy and mutation gates pass. The tree is clean and pushed, GitHub identity matches, and only the three authorized files plus this spec changed. There is no #587 overlap or excluded-path drift; the unrelated release allocator disposition remains untouched. No correction or current-main integration is presently needed. Astra LOW is sufficient; final exact-head delivery review remains required before PR authorization.
+
+## Final exact-head delivery verdict
+
+Astra LOW returned **PASS** at exact pushed head and upstream `ad2fc9e91dc75c7fc21a54e670ce40a5b6093d1c`, with current remote main and merge-base `6984c61aea0a56ea03071a2480c0806aef4b7740`. Only the accurate source-verdict record changed after the accepted review; source remains identical to `47a43a24db18c42cfb8637867da263cb6c95a0ba`. The worktree is clean, diff checks pass, GitHub #588 has exact open title/body identity, and #587 ownership remains disjoint.
+
+The proportional checks remain applicable, no artifact work is needed, and Astra LOW is sufficient. Root may open the PR after confirming that this final-verdict record is the only additional change and current main has not advanced.
