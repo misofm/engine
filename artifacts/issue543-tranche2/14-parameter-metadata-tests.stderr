@@ -1,0 +1,16 @@
+   Compiling graph v0.1.0 (/home/bl/misofm/engine-shared-hex-authority/crates/graph)
+   Compiling effect-package v0.1.0 (/home/bl/misofm/engine-shared-hex-authority/crates/effect-package)
+   Compiling effect-compiler v0.1.0 (/home/bl/misofm/engine-shared-hex-authority/crates/effect-compiler)
+   Compiling builtins-compiler v0.1.0 (/home/bl/misofm/engine-shared-hex-authority/crates/builtins-compiler)
+   Compiling source v0.1.0 (/home/bl/misofm/engine-shared-hex-authority/crates/source)
+   Compiling graph-compiler v0.1.0 (/home/bl/misofm/engine-shared-hex-authority/crates/graph-compiler)
+   Compiling host-core v0.1.0 (/home/bl/misofm/engine-shared-hex-authority/crates/host-core)
+   Compiling host-web v0.1.0 (/home/bl/misofm/engine-shared-hex-authority/hosts/host-web)
+   Compiling parameter-metadata v0.1.0 (/home/bl/misofm/engine-shared-hex-authority/tools/parameter-metadata)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.39s
+     Running unittests src/lib.rs (/tmp/issue543-target/debug/deps/parameter_metadata-066e058c2a6ec5cf)
+     Running unittests src/main.rs (/tmp/issue543-target/debug/deps/parameter_metadata-99504ac6c53ce51b)
+     Running unittests src/bin/lattice_oracle.rs (/tmp/issue543-target/debug/deps/parameter_metadata_lattice_oracle-38014e4fa8535cc8)
+     Running tests/abi_layout.rs (/tmp/issue543-target/debug/deps/abi_layout-f27704b1d287ea8b)
+     Running tests/round_trip.rs (/tmp/issue543-target/debug/deps/round_trip-9e77ae07e9c81ce2)
+   Doc-tests parameter_metadata

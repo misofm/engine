@@ -1570,7 +1570,7 @@ mod tests {
     }
 
     fn hex_digest(digest: [u8; 32]) -> String {
-        digest.iter().map(|byte| format!("{byte:02x}")).collect()
+        engine::hex_lower(&digest)
     }
 
     #[derive(Default)]

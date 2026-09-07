@@ -1,0 +1,5 @@
+   Compiling host-core v0.1.0 (/home/bl/misofm/engine-shared-hex-authority/crates/host-core)
+   Compiling host-web v0.1.0 (/home/bl/misofm/engine-shared-hex-authority/hosts/host-web)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.18s
+     Running unittests src/lib.rs (/tmp/issue543-target/debug/deps/host_web-d49e4309cd1e89bc)
+     Running tests/boot_transient_budget.rs (/tmp/issue543-target/debug/deps/boot_transient_budget-226051ca250db60d)

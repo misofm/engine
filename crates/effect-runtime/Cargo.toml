@@ -19,6 +19,7 @@ math = { workspace = true, features = ["lane"] }
 # proves the two agree bit for bit, which is what makes "one law" true across the `std`/`no_std`
 # boundary that stops them being one function. Dev-only: no production edge is created.
 effect-contract.workspace = true
+engine.workspace = true
 sha2.workspace = true
 
 [lints]

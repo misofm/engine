@@ -1,0 +1,9 @@
+
+running 4 tests
+test print_digests ... ignored, re-pinning helper
+test the_corpus_is_nan_free ... ok
+test every_case_has_a_wide_output_spread ... ok
+test the_corpus_matches_its_pins ... ok
+
+test result: ok. 3 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.51s
+

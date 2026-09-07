@@ -132,3 +132,11 @@ The new engine::hex_lower uses one lowercase nibble table and exact two-characte
 This is a recoverable implementation checkpoint, not whole-attempt verification or delivery. Remaining consumer census/adapters, affected/workspace gates and Sol xhigh review remain. Root will integrate this checkpoint into #542 before protocol test extraction. No runtime performance claim.
 
 Root corrected the first checkpoint prose immediately after comparing the raw formatting statuses: the initial check was 1, not 0. This correction preserves the failure record and does not rerun or change source.
+
+## Attempt 1 remaining-consumer checkpoint
+
+Luna high delegated the remaining current in-scope byte encoders, except rack_fixture owned by pending #545 retirement. The exact tranche touches20 files (25 insertions/83 deletions), including four approved engine dependency entries in Cargo.lock. Protocol and rack_fixture sources are unchanged. Existing hashing ownership, word-oriented formats, decorated/uppercase/integer emitters and parsers remain distinct; pins are unchanged.
+
+All18 captured records returned0: before/after census; formatting/diff; explicit non-locked bench-support digest test for the approved lock update; locked graph/compiler, math lane identity/determinism, runtime determinism, native runner, wasm-gates, effect-package, effect-compiler, stem-hasher, selected host-web native tests/example build, parameter-metadata tests/lattice build; final checkpoint inspection. Exact commands/environment/pre-command source hashes and raw results are under artifacts/issue543-tranche2. Source implementation is paused.
+
+This focused-green checkpoint precedes #545 integration and final workspace gates. It is not final census acceptance or CP20 closure; Sol xhigh review and remote qualification/merge remain. No benchmark or repinning occurred.

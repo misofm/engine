@@ -169,12 +169,7 @@ impl Report {
 /// Lowercase hexadecimal of a digest.
 #[must_use]
 pub fn hex(bytes: &[u8; 32]) -> String {
-    use fmt::Write as _;
-    let mut text = String::with_capacity(64);
-    for byte in bytes {
-        let _ = write!(text, "{byte:02x}");
-    }
-    text
+    bench_support::digest::hex(bytes)
 }
 
 /// The widths a case is compared at: every width for a case with a lane instantiation, the scalar

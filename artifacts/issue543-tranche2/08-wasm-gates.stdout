@@ -1,0 +1,34 @@
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 7 tests
+test g5_delegated_cases_use_the_owning_crates_pins ... ok
+test g5_case_digests_are_distinct ... ok
+test g5_idle_ramped_svf_equals_the_plain_svf ... ok
+test g5_fma_case_is_unfused_and_the_case_is_not_vacuous ... ok
+test g5_no_case_is_vacuously_zero ... ok
+test g5_lane_corpus_is_finite ... ok
+test g5_native_digests_match_pins ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.78s
+
+
+running 2 tests
+test x86::g6_the_guard_is_an_identity_for_a_caller_who_never_set_ftz ... ok
+test x86::g6_full_wasm_gate_corpus_is_canonical_under_caller_ftz ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 43.92s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

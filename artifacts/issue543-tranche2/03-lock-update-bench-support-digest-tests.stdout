@@ -1,0 +1,10 @@
+
+running 5 tests
+test digest::tests::hex_encodes_empty_leading_zero_and_each_nibble ... ok
+test digest::tests::every_update_is_counted_and_a_one_shot_digest_is_not ... ok
+test digest::tests::matches_the_published_vectors ... ok
+test digest::tests::incremental_updates_match_a_one_shot_digest ... ok
+test digest::tests::snapshot_does_not_consume_the_sink ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.00s
+

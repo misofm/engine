@@ -1,0 +1,31 @@
+
+running 3 tests
+test tests::cli_is_closed_and_raw_shape_is_exact ... ok
+test tests::raw_length_is_total_and_output_is_canonical ... ok
+test tests::wave_depth_set_rejects_integer_pcm32_but_accepts_float32 ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 8 tests
+test vector_matrix_covers_integer_boundaries_and_float_edge_bits ... ok
+test stdout_mode_keeps_canonical_bytes_and_identity_separate ... ok
+test pcm16_mono_boundary_pin_matches_library_and_cli ... ok
+test pcm24_mono_boundary_pin_matches_library_and_cli ... ok
+test f32_mono_edge_bit_pin_matches_library_and_cli ... ok
+test f32_stereo_edge_bit_pin_matches_library_cli_and_engine_wave_parser ... ok
+test pcm16_stereo_boundary_pin_matches_library_cli_and_engine_wave_parser ... ok
+test pcm24_stereo_boundary_pin_matches_library_cli_and_engine_wave_parser ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
