@@ -1,0 +1,9 @@
+{
+  "comparison_base": "e5b86cf315487fcc602db420dc1a6121f1ac4837",
+  "all_byte_identical": true,
+  "sha256": {
+    "fixtures/rack/issue038-v1/MANIFEST.tsv": "2d6b8c4b11bb00a17185d7777300194bf53ab30d86cf581a55886f07c5273985",
+    "fixtures/rack/issue038-v1/workloads.toml": "1f67ed9960e5a6728f02442b65af70704957d5f6056865d8b44555637273188d",
+    "scripts/check-rack-benchmark-fixture.sh": "483fd69c805b0d3c37c1bc3ce93420313808e1d9aeada3a8180abcfe50bf4d70"
+  }
+}

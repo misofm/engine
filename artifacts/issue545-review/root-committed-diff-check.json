@@ -1,0 +1,28 @@
+[
+  {
+    "argv": [
+      "git",
+      "diff",
+      "--check",
+      "e5b86cf315487fcc602db420dc1a6121f1ac4837...HEAD"
+    ],
+    "head": "1210348cd1e51fe297f792bc69f756516f806410",
+    "cwd": "/home/bl/misofm/engine-tooling-orphan-cleanup",
+    "status": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  {
+    "argv": [
+      "git",
+      "diff",
+      "--check",
+      "1ce8fd3cb623f8dfe4cf306a01f539a96e8b92ca...HEAD"
+    ],
+    "head": "1210348cd1e51fe297f792bc69f756516f806410",
+    "cwd": "/home/bl/misofm/engine-tooling-orphan-cleanup",
+    "status": 0,
+    "stdout": "",
+    "stderr": ""
+  }
+]
