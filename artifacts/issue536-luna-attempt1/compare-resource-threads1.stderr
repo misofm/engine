@@ -1,0 +1,69 @@
+   Compiling bytemuck v1.25.2
+   Compiling engine v0.1.0 (/home/bl/misofm/engine-scalar-allocation-isolation/crates/engine)
+   Compiling version_check v0.9.5
+   Compiling lexical-util v1.0.7
+   Compiling proc-macro2 v1.0.107
+   Compiling cfg-if v1.0.4
+   Compiling unicode-ident v1.0.24
+   Compiling libc v0.2.189
+   Compiling quote v1.0.47
+   Compiling syn v1.0.109
+   Compiling typenum v1.20.1
+   Compiling once_cell v1.21.4
+   Compiling autocfg v1.5.1
+   Compiling smallvec v1.15.2
+   Compiling decoded-char v0.1.1
+   Compiling utf8-decode v1.0.1
+   Compiling locspan v0.8.2
+   Compiling cpufeatures v0.3.0
+   Compiling safe_arch v1.2.0
+   Compiling smallstr v0.3.1
+   Compiling ahash v0.7.8
+   Compiling proc-macro-error-attr v1.0.4
+   Compiling proc-macro-error v1.0.4
+   Compiling indexmap v1.9.3
+   Compiling wide v1.6.1
+   Compiling lexical-write-integer v1.0.6
+   Compiling lexical-parse-integer v1.0.6
+   Compiling lexical-parse-float v1.0.6
+   Compiling lexical-write-float v1.0.6
+   Compiling hybrid-array v0.4.14
+   Compiling lexical-core v1.0.6
+   Compiling getrandom v0.2.17
+   Compiling lexical v7.0.5
+   Compiling json-number v0.4.10
+   Compiling hashbrown v0.12.3
+   Compiling block-buffer v0.12.1
+   Compiling crypto-common v0.2.2
+   Compiling digest v0.11.3
+   Compiling sha2 v0.11.0
+   Compiling locspan-derive v0.6.0
+   Compiling bench-support v0.1.0 (/home/bl/misofm/engine-scalar-allocation-isolation/tools/bench-support)
+   Compiling json-syntax v0.12.5
+   Compiling session v0.1.0 (/home/bl/misofm/engine-scalar-allocation-isolation/crates/session)
+   Compiling protocol v0.1.0 (/home/bl/misofm/engine-scalar-allocation-isolation/crates/protocol)
+   Compiling lane v0.1.0 (/home/bl/misofm/engine-scalar-allocation-isolation/crates/lane)
+   Compiling math v0.1.0 (/home/bl/misofm/engine-scalar-allocation-isolation/crates/math)
+   Compiling effect-contract v0.1.0 (/home/bl/misofm/engine-scalar-allocation-isolation/crates/effect-contract)
+   Compiling effect-runtime v0.1.0 (/home/bl/misofm/engine-scalar-allocation-isolation/crates/effect-runtime)
+   Compiling rack v0.1.0 (/home/bl/misofm/engine-scalar-allocation-isolation/crates/rack)
+   Compiling multiband-compressor v0.1.0 (/home/bl/misofm/engine-scalar-allocation-isolation/crates/multiband-compressor)
+   Compiling parametric-eq v0.1.0 (/home/bl/misofm/engine-scalar-allocation-isolation/crates/parametric-eq)
+   Compiling transient-shaper v0.1.0 (/home/bl/misofm/engine-scalar-allocation-isolation/crates/transient-shaper)
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-scalar-allocation-isolation/crates/compressor)
+   Compiling gate-expander v0.1.0 (/home/bl/misofm/engine-scalar-allocation-isolation/crates/gate-expander)
+   Compiling delay v0.1.0 (/home/bl/misofm/engine-scalar-allocation-isolation/crates/delay)
+   Compiling true-peak-limiter v0.1.0 (/home/bl/misofm/engine-scalar-allocation-isolation/crates/true-peak-limiter)
+   Compiling soft-clip v0.1.0 (/home/bl/misofm/engine-scalar-allocation-isolation/crates/soft-clip)
+   Compiling builtins v0.1.0 (/home/bl/misofm/engine-scalar-allocation-isolation/crates/builtins)
+   Compiling graph v0.1.0 (/home/bl/misofm/engine-scalar-allocation-isolation/crates/graph)
+   Compiling rack-compiler v0.1.0 (/home/bl/misofm/engine-scalar-allocation-isolation/crates/rack-compiler)
+   Compiling effect-package v0.1.0 (/home/bl/misofm/engine-scalar-allocation-isolation/crates/effect-package)
+   Compiling effect-compiler v0.1.0 (/home/bl/misofm/engine-scalar-allocation-isolation/crates/effect-compiler)
+   Compiling builtins-compiler v0.1.0 (/home/bl/misofm/engine-scalar-allocation-isolation/crates/builtins-compiler)
+   Compiling source v0.1.0 (/home/bl/misofm/engine-scalar-allocation-isolation/crates/source)
+   Compiling graph-compiler v0.1.0 (/home/bl/misofm/engine-scalar-allocation-isolation/crates/graph-compiler)
+   Compiling host-core v0.1.0 (/home/bl/misofm/engine-scalar-allocation-isolation/crates/host-core)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.19s
+     Running tests/scalar_point_endpoint.rs (/tmp/issue536-luna1-target/debug/deps/scalar_point_endpoint-fb9af70fce4ccb65)
+scalar Point preparation diagnostics: direct global=Counters { allocations: 27, deallocations: 0, reallocations: 0, requested_bytes: 102496 } thread=AuditSnapshot { allocations: 27, deallocations: 0, locks: 0, feature_detection: 0, logs: 0, file_io: 0, network_io: 0, syscalls: 0, panic_unwinds: 0 }; wrapped global=Counters { allocations: 27, deallocations: 0, reallocations: 0, requested_bytes: 102496 } thread=AuditSnapshot { allocations: 27, deallocations: 0, locks: 0, feature_detection: 0, logs: 0, file_io: 0, network_io: 0, syscalls: 0, panic_unwinds: 0 }; foreign global=Counters { allocations: 1, deallocations: 2, reallocations: 0, requested_bytes: 4096 } thread=AuditSnapshot { allocations: 0, deallocations: 0, locks: 0, feature_detection: 0, logs: 0, file_io: 0, network_io: 0, syscalls: 0, panic_unwinds: 0 }
