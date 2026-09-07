@@ -1,0 +1,9 @@
+source_head=5879b6892c15405f304bd099e550448280606d14
+source_path=crates/graph/src/lib.rs
+source_sha256=a15ad61452fccd32c7d7ec772bcbced25e323ac659f4dd86cc32e8f55eab0f8c
+bind_local_BTreeSet_mentions=0
+bind_local_dot_clone_calls=0
+bind_local_GraphNodeId_clone_mentions=0
+bind_local_Vec_with_capacity_calls=5
+btreeset_construction_absent=true
+clone_calls_absent=true

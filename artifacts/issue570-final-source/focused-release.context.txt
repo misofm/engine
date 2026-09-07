@@ -1,0 +1,9 @@
+utc=2026-09-07T17:53:14Z
+cwd=/home/bl/misofm/engine-cp4-borrowed-sorted-bind
+head=f347ec06b58b004749633ba602b599f4011aa7c1
+status=## codex/cp4-borrowed-sorted-bind...origin/codex/cp4-borrowed-sorted-bind
+?? artifacts/issue570-final-source/
+graph_lib_git_hash=84b79468208432ce10b91e87203a2217a535cbc5
+graph_lib_sha256=67fca95df25a4dcf5519e59a152336a9df4aa8c96fa76e329b50e7a642267b4d
+graph_spec_git_hash=6ab8301ef9c876f95a7caa47434d8640b526256f
+graph_spec_sha256=ea61d2ff28ac813b4cef8eb76b33068186a4533b13b0bce2456162c0d6c676fe
