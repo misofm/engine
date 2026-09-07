@@ -1,0 +1,5 @@
+path=hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256
+expected_digest=6452f0db237da1d57b3594e7d95dd53a089a604d5b0791ea8b3533c5930c5a1c
+bytes=65
+sha256=1f432cfe1c599519f13a92390f3f302360498f174918a92e1f12f3ea9b282a8e
+suffix=single LF (0x0a)

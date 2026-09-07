@@ -150,3 +150,9 @@ Astra MEDIUM returned PASS for clean pushed evidence head `eb1d89afd9aec686fcbd2
 Native ABI/static, shipped Wasm object policy, resources, three PCM/native parity digests, 26 red controls, hermetic mutations, Chromium `151.0.7922.34`, Firefox `153.0`, WebKit `26.5`, 36 browser mutations, artifact-set/lineage controls and the exact three-file scratch overlay all passed independent review. Repository product/config bytes remain frozen and the earlier stops remain candid. The full verdict is `artifacts/issue555-astra-review/astra-medium-pre-pin.md`.
 
 Root now authorizes Luna XHIGH to edit only `hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256` to the approved candidate digest plus LF. Root must checkpoint that exact-path tranche before the ordinary no-bypass post-pin build.
+
+## Root decision after post-pin output-directory precondition stop
+
+The single pin edit was checkpointed and pushed at `7c156032`. Luna XHIGH verified its exact 65 bytes but invoked the ordinary builder while `/tmp/issue555-postpin-artifact` was absent, despite the builder's documented requirement for an existing empty non-symlink directory. The builder returned two with exactly `output must be an existing non-symlink directory`; no build or later comparison ran and repository bytes remained clean.
+
+Root preserves this progress-only invocation error and ends that agent's assignment. A fresh Luna HIGH replacement must create the exact missing directory, prove it is empty and not a symlink, then invoke the ordinary no-bypass builder once. It may proceed to the six-file byte comparison and proportional pin/artifact policy checks only if the builder returns zero. No prior qualification gate is repeated.
