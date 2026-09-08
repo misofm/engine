@@ -106,7 +106,7 @@ pub fn publish_controller_scalar_point_snapshot<P: ControlProvider>(
     controller: &mut ControllerAutomationDelivery<P>,
     handles: [ParameterHandle; 2],
     snapshot: &ScalarPointSnapshot,
-) -> Result<(), &'static str> {
+) -> Result<(), ControllerAutomationPrepareError> {
     let records = handles.map(|handle| ParameterStateRecord {
         handle: handle.0,
         flags: 1,

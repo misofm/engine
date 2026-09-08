@@ -23,6 +23,12 @@ pub enum ControllerAutomationPrepareError {
     ReplayCache(crate::ReplayCacheError),
     /// Eager controller-owned retained storage could not be allocated.
     ControllerResource(ControllerResourceAllocationError),
+    /// The scalar opt-in preparation received a zero or duplicate handle.
+    InvalidScalarStateBindings,
+    /// The ordinary preparation has no scalar publication slot.
+    ScalarStateDisabled,
+    /// A scalar publication contained mismatched handles, flags, or values.
+    InvalidScalarStatePublication,
 }
 
 impl From<ProtocolQueueError> for ControllerAutomationPrepareError {
@@ -133,6 +139,9 @@ impl<P: ControlProvider> ControllerAutomationDelivery<P> {
         ),
         ControllerAutomationPrepareError,
     > {
+        if handles[0].0 == 0 || handles[1].0 == 0 || handles[0] == handles[1] {
+            return Err(ControllerAutomationPrepareError::InvalidScalarStateBindings);
+        }
         Self::prepare_inner(
             session,
             queues,
@@ -200,10 +209,13 @@ impl<P: ControlProvider> ControllerAutomationDelivery<P> {
         &mut self,
         observed_sample: SampleTime,
         records: [ParameterStateRecord; 2],
-    ) -> Result<(), &'static str> {
-        let slot = self.scalar_state.as_mut().ok_or("scalar state disabled")?;
+    ) -> Result<(), ControllerAutomationPrepareError> {
+        let slot = self
+            .scalar_state
+            .as_mut()
+            .ok_or(ControllerAutomationPrepareError::ScalarStateDisabled)?;
         slot.publish(observed_sample, records)
-            .map_err(|_| "invalid scalar state publication")
+            .map_err(|_| ControllerAutomationPrepareError::InvalidScalarStatePublication)
     }
 
     /// Process one trusted typed command and its matching canonical request bytes.
@@ -590,6 +602,57 @@ mod tests {
             }],
         )
         .unwrap()
+    }
+
+    #[test]
+    fn scalar_opt_in_rejects_invalid_bindings_and_reports_typed_publication_errors() {
+        for handles in [
+            [ParameterHandle(0), ParameterHandle(8)],
+            [ParameterHandle(7), ParameterHandle(7)],
+        ] {
+            let (provider, _) = FixtureProvider::new(SampleTime(0));
+            let capabilities = PreparedDeliveryCapabilities::new_exact(&[
+                (ParameterHandle(7), AutomationKind::Point),
+                (ParameterHandle(8), AutomationKind::Point),
+            ])
+            .unwrap();
+            let result = ControllerAutomationDelivery::prepare_scalar_point_state(
+                session(),
+                queue_config(2),
+                provider,
+                replay(),
+                ProtocolCodec::default(),
+                ProtocolControllerConfig::default(),
+                ControllerRetainedCapacity {
+                    meter_handles: 0,
+                    counter_ids: 0,
+                },
+                capabilities,
+                handles,
+            );
+            assert!(matches!(
+                result,
+                Err(ControllerAutomationPrepareError::InvalidScalarStateBindings)
+            ));
+        }
+
+        let (mut ordinary, _, _) = facade(2, &[(ParameterHandle(7), AutomationKind::Point)]);
+        let records = [
+            ParameterStateRecord {
+                handle: 7,
+                flags: 1,
+                value: 0.0,
+            },
+            ParameterStateRecord {
+                handle: 8,
+                flags: 1,
+                value: 0.0,
+            },
+        ];
+        assert_eq!(
+            ordinary.publish_scalar_point_state(SampleTime(0), records),
+            Err(ControllerAutomationPrepareError::ScalarStateDisabled)
+        );
     }
 
     fn mixed_batch(revision: SessionRevision, request_id: u64) -> AutomationBatchSlot {
