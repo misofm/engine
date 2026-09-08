@@ -37,3 +37,18 @@ After source PASS, amend this spec with reviewed exact release commands, environ
 Each variant runs exactly once with one internal warmup and two measured rounds. PASS requires statuses 0, exact record population and two-round equality, cross-variant graph/diagnostic identity, all four zero64 counters equal, fewer candidate allocation calls and requested bytes for both prepared corpora, positive crossed-small savings, and more saved calls in banks64 than crossed-small. Report exact counts/deltas only. Full streams remain temporary through Astra review; commit no `.ll`, assembly, compiler output, raw record, target, object, archive, or binary.
 
 Astra LOW passes measurement evidence and the compact decision record before PR review, required CI, guarded merge, post-main qualification, GitHub synchronization, closure, and clean delivered-worktree removal. This issue can qualify only #648's prepared-effect handoff allocation reduction; CP1's schedule, PDC, cycle, reduction, and buffer identities remain open.
+
+## Astra LOW initial scope review — FAIL; bounded amendment
+
+Astra reviewed exact clean branch/upstream `265c7afb576667bef57a9fcc69e45161f96c8827`,
+live main `4acfa4a1c25248e47bdd6bc14e34c9cb6ac43447`, inherited harness
+`7add1d74`, and synchronized tracker `3037aaa0`. GitHub #654 matches; #652 is closed,
+and #653/#654 are disjoint.
+
+The residual/bound-node correction is sound and minimal, but the inherited Python
+validator accepts integers above the Rust emitter's `u64` domain. This amendment
+adds `scripts/check-prepared-effect-allocation-records.py` to attempt 1 only for
+that range correction and synthetic boundary controls: counter fields accept 0 and
+`18446744073709551615`; they reject -1, booleans, and
+`18446744073709551616`. All other validator behavior remains frozen. No
+implementation or measurement is authorized until Astra passes this amended scope.
