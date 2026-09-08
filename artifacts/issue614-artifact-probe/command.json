@@ -1,0 +1,14 @@
+{
+  "argv": [
+    "bash",
+    "scripts/build-web-audioworklet.sh",
+    "/tmp/issue614-audioworklet-Xn3Deq"
+  ],
+  "cwd": "/home/bl/misofm/engine-cp8-automation-smoothing-validity",
+  "head": "0c715de9fbdf0b3873c707e10c52095fad750287",
+  "main": "9e113be98cf31c1eaf4297b0a031518244b71c33",
+  "output_directory": "/tmp/issue614-audioworklet-Xn3Deq",
+  "repin_environment": "absent",
+  "strip_environment": "absent"
+}
+

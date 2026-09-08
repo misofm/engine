@@ -124,3 +124,24 @@ passed independently. Prior full-suite, diagnostic and canonical-wire results re
 Scope, lock, GitHub synchronization, tracker `c3075a17c67f95f612af3888a795d5b47564b9c6`
 and #539 disjointness pass. Root may perform artifact applicability and qualification; this verdict
 does not authorize a pin change or merge.
+
+## Ordinary AudioWorklet artifact probe — DRIFT
+
+Root ran exactly one ordinary no-bypass `scripts/build-web-audioworklet.sh` invocation at clean,
+pushed source-accepted head `0c715de9fbdf0b3873c707e10c52095fad750287`. Compilation succeeded,
+then the unchanged builder exited 1 before copying any output: observed simd128 Wasm SHA-256
+`e338adae98454d0a365c0ef281aa6b3dcb24d5dc0a36427f917566682e0ff27b` differs from delivered pin
+`39ebe7cd3f71f34ab11260f27fa1eaad281dd61642c50d9ed6210e703d95dd55`. The scratch output census
+is zero and the builder's temporary module was removed. Complete streams, command/context, inputs,
+canonical delivered manifest, comparison, source diff and checksum manifest are preserved under
+`artifacts/issue614-artifact-probe/`.
+
+This candidate also differs from #539's independently observed limiter candidate `7e242eb8…`;
+neither qualifies the other. No retry, overlay build, static/resource/hermetic/browser gate, repin,
+consumer update, source edit, benchmark or timing workload occurred. Retained #587 qualification
+does not apply. Per the issue's anticipated drift rule and the repository's artifact-promotion split
+boundary, #614 source waits on one separately numbered lane-B qualification/pinning successor.
+#539 becomes a passive dependent while that successor and #614 occupy the two active slots. The
+successor must freeze this exact source, reproduce the candidate using only a scratch pin overlay,
+pass existing static/resource/hermetic/SDK/three-browser gates, obtain Astra LOW review, then
+authorize narrowly recorded pin/qualification-lineage updates and post-pin proof before delivery.
