@@ -14,7 +14,7 @@ use crate::{
 };
 use crate::{ControlProvider, ParameterStateRecord, PreparedDeliveryCapabilities, SampleTime};
 
-/// Preparation failed before the facade became visible to its caller.
+/// Preparation or scalar publication failed before a usable facade/result became visible.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ControllerAutomationPrepareError {
     /// The configured queue/storage layout is not representable.
@@ -608,6 +608,7 @@ mod tests {
     fn scalar_opt_in_rejects_invalid_bindings_and_reports_typed_publication_errors() {
         for handles in [
             [ParameterHandle(0), ParameterHandle(8)],
+            [ParameterHandle(7), ParameterHandle(0)],
             [ParameterHandle(7), ParameterHandle(7)],
         ] {
             let (provider, _) = FixtureProvider::new(SampleTime(0));
