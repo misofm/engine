@@ -1,0 +1,8 @@
+
+running 3 tests
+test tests::detector_chunk_active_window_matches_old_shape_scalar ... ok
+test tests::detector_chunk_active_window_matches_old_shape_w4 ... ok
+test tests::detector_chunk_active_window_matches_old_shape_w8 ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.00s
+

@@ -1,0 +1,52 @@
+   Compiling bytemuck v1.25.2
+   Compiling engine v0.1.0 (/home/bl/misofm/engine-limiter-detector-bounds/crates/engine)
+   Compiling typenum v1.20.1
+   Compiling cfg-if v1.0.4
+   Compiling wide v1.6.1
+   Compiling hybrid-array v0.4.14
+   Compiling crypto-common v0.2.2
+   Compiling block-buffer v0.12.1
+   Compiling digest v0.11.3
+   Compiling sha2 v0.11.0
+   Compiling lane v0.1.0 (/home/bl/misofm/engine-limiter-detector-bounds/crates/lane)
+   Compiling math v0.1.0 (/home/bl/misofm/engine-limiter-detector-bounds/crates/math)
+   Compiling effect-contract v0.1.0 (/home/bl/misofm/engine-limiter-detector-bounds/crates/effect-contract)
+   Compiling effect-runtime v0.1.0 (/home/bl/misofm/engine-limiter-detector-bounds/crates/effect-runtime)
+   Compiling true-peak-limiter v0.1.0 (/home/bl/misofm/engine-limiter-detector-bounds/crates/true-peak-limiter)
+   Compiling delay v0.1.0 (/home/bl/misofm/engine-limiter-detector-bounds/crates/delay)
+   Compiling parametric-eq v0.1.0 (/home/bl/misofm/engine-limiter-detector-bounds/crates/parametric-eq)
+   Compiling multiband-compressor v0.1.0 (/home/bl/misofm/engine-limiter-detector-bounds/crates/multiband-compressor)
+   Compiling builtins v0.1.0 (/home/bl/misofm/engine-limiter-detector-bounds/crates/builtins)
+   Compiling gate-expander v0.1.0 (/home/bl/misofm/engine-limiter-detector-bounds/crates/gate-expander)
+   Compiling soft-clip v0.1.0 (/home/bl/misofm/engine-limiter-detector-bounds/crates/soft-clip)
+   Compiling transient-shaper v0.1.0 (/home/bl/misofm/engine-limiter-detector-bounds/crates/transient-shaper)
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-limiter-detector-bounds/crates/compressor)
+   Compiling wasm-gate-corpus v0.1.0 (/home/bl/misofm/engine-limiter-detector-bounds/tools/wasm-gate-corpus)
+   Compiling wasm-gate-guest v0.1.0 (/home/bl/misofm/engine-limiter-detector-bounds/tools/wasm-gate-guest)
+    Finished `release` profile [optimized + debuginfo] target(s) in 19.26s
+   Compiling bytemuck v1.25.2
+   Compiling engine v0.1.0 (/home/bl/misofm/engine-limiter-detector-bounds/crates/engine)
+   Compiling typenum v1.20.1
+   Compiling cfg-if v1.0.4
+   Compiling wide v1.6.1
+   Compiling hybrid-array v0.4.14
+   Compiling block-buffer v0.12.1
+   Compiling crypto-common v0.2.2
+   Compiling digest v0.11.3
+   Compiling sha2 v0.11.0
+   Compiling lane v0.1.0 (/home/bl/misofm/engine-limiter-detector-bounds/crates/lane)
+   Compiling math v0.1.0 (/home/bl/misofm/engine-limiter-detector-bounds/crates/math)
+   Compiling effect-contract v0.1.0 (/home/bl/misofm/engine-limiter-detector-bounds/crates/effect-contract)
+   Compiling effect-runtime v0.1.0 (/home/bl/misofm/engine-limiter-detector-bounds/crates/effect-runtime)
+   Compiling delay v0.1.0 (/home/bl/misofm/engine-limiter-detector-bounds/crates/delay)
+   Compiling true-peak-limiter v0.1.0 (/home/bl/misofm/engine-limiter-detector-bounds/crates/true-peak-limiter)
+   Compiling parametric-eq v0.1.0 (/home/bl/misofm/engine-limiter-detector-bounds/crates/parametric-eq)
+   Compiling soft-clip v0.1.0 (/home/bl/misofm/engine-limiter-detector-bounds/crates/soft-clip)
+   Compiling gate-expander v0.1.0 (/home/bl/misofm/engine-limiter-detector-bounds/crates/gate-expander)
+   Compiling transient-shaper v0.1.0 (/home/bl/misofm/engine-limiter-detector-bounds/crates/transient-shaper)
+   Compiling builtins v0.1.0 (/home/bl/misofm/engine-limiter-detector-bounds/crates/builtins)
+   Compiling compressor v0.1.0 (/home/bl/misofm/engine-limiter-detector-bounds/crates/compressor)
+   Compiling multiband-compressor v0.1.0 (/home/bl/misofm/engine-limiter-detector-bounds/crates/multiband-compressor)
+   Compiling wasm-gate-corpus v0.1.0 (/home/bl/misofm/engine-limiter-detector-bounds/tools/wasm-gate-corpus)
+   Compiling wasm-gate-guest v0.1.0 (/home/bl/misofm/engine-limiter-detector-bounds/tools/wasm-gate-guest)
+    Finished `release` profile [optimized + debuginfo] target(s) in 14.17s

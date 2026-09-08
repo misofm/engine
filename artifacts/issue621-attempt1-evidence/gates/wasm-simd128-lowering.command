@@ -1,0 +1,1 @@
+env PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/issue621-attempt1-wasm-simd128-target RUSTFLAGS='-C target-feature=+simd128' cargo rustc --locked --release --target wasm32-unknown-unknown -p true-peak-limiter --lib -- --emit=asm,llvm-ir

@@ -1,0 +1,2 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.06s
+     Running unittests src/lib.rs (/tmp/issue621-attempt1-gates-target/debug/deps/true_peak_limiter-959b445e4a84b0cb)
