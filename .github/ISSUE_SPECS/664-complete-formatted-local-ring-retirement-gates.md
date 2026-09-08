@@ -147,3 +147,45 @@ pushed. The self-excluding manifest under
 No compiler payload or artifact work ran. Attempt 1 is **FAIL** pending Astra LOW
 review of the direct realtime-policy count dependency; no policy edit or further
 gate is authorized yet.
+
+## Attempt 1 review and attempt 2 brief
+
+Astra LOW returned **ATTEMPT-1 FAIL** at exact product checkpoint `6f5c0948` and
+record `7359264f`. The inherited product delta, successful gates, realtime-policy
+failure, absence of later gates, and manifest all verify. The 41-region result is
+a direct policy dependency of deleting a marked implementation, so a separate
+issue is unnecessary.
+
+Attempt 2 freezes every product byte and owns only:
+
+- `scripts/check-realtime-policy.sh`: change the marked-region floor and error
+  from 42 to 41 and update its comment to explain the complete `LocalRing`
+  removal; keep the 12-file floor and all discovery/scanning/error behavior;
+- `scripts/test-realtime-policy.sh`: remove exactly the second synthetic SPSC
+  `pop()` region so the fixture mirrors the remaining single shared-SPSC region,
+  update its count comment and expected diagnostic from 42 to 41, and preserve
+  the existing drop-region mutation so the valid fixture has 41 regions and the
+  mutant has 40;
+- this spec and compact evidence records.
+
+After fresh Astra LOW scope PASS, Hypatia alone may use the fresh paths
+`/tmp/issue664-attempt2-source-evidence`,
+`/tmp/issue664-attempt2-wasm-realtime`, and
+`/tmp/issue664-attempt2-wasm-simd`. Prove exact clean head/upstream, fresh
+absence/non-symlink state, frozen product hashes, and capture-control statuses 0
+and 1. Apply only the two policy files above, inspect their exact diff, then run
+once in order:
+
+1. `bash -n scripts/check-realtime-policy.sh scripts/test-realtime-policy.sh`;
+2. `bash scripts/check-realtime-policy.sh`;
+3. `bash scripts/test-realtime-policy.sh`;
+4. `bash scripts/check-wasm-realtime-atomics.sh /tmp/issue664-attempt2-wasm-realtime`;
+5. `bash scripts/test-wasm-realtime-atomics.sh`;
+6. `CARGO_TARGET_DIR=/tmp/issue664-attempt2-wasm-simd RUSTFLAGS='-C target-feature=+simd128' cargo check --locked --target wasm32-unknown-unknown -p target-smoke`;
+7. working and branch-wide diff checks, exact product freeze and policy-delta
+   census, owned-path/payload census, and a verified self-excluding manifest.
+
+Retain attempt 1's behavior, strict-Clippy, format and workspace evidence because
+the product is frozen and the two scripts do not change those surfaces. Stop on
+the first unexpected failure without correction or retry. Artifact work remains
+blocked, and all #659 recovery state remains held.
