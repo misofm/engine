@@ -218,3 +218,14 @@ and forced-scalar quiescence, zero render allocation/free, independent Arc/resou
 `stop()` off-render reclamation. All five required direct behavior mutations failed their intended
 assertions and were restored. The known generated `Cargo.lock` ordering drift was restored. Full
 record: `docs/audits/594-terminal-shutdown-attempt2.md`.
+
+## Attempt 2 review
+
+Astra LOW returned **FAIL** at exact pushed evidence head `edb73387`; one implementation attempt
+remains. Both production races and the principal lifecycle/ownership/quiescence behavior are accepted.
+Attempt 3 is limited to three evidence corrections: make mutation five reach a valid-sample direct
+graph/PCM/state/process discriminator; require exact independently observed Arc allocation and isolate
+its retention through control drop and `stop()` until stopped-owner off-render drop; and make the
+intent-before-message rendezvous failure-safe so an early assertion cannot hang scope join. Debug and
+release each pass 20 integration plus nine unit tests, with strict Clippy, rustdoc, formatting, and
+diff checks. Full verdict: `docs/audits/594-attempt2-review.md`.

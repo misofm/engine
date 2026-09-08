@@ -69,8 +69,9 @@ was restored before the next mutation.
 4. `try_publish` temporarily allowed `ShutdownAcknowledged`. The stale-token/admission test failed its
    permanent post-completion refusal assertion.
 5. `StartedBuiltinBatchRender::render` temporarily disabled the terminal early return. The selected
-   pair test's repeated quiescent call failed with `DiscontinuousTime { expected: 768 }`, proving graph
-   execution was attempted.
+   pair test's repeated call failed with `DiscontinuousTime { expected: 768 }`. This proves only that
+   normal validation resumed; it does not reach graph execution and is insufficient for the frozen
+   graph/PCM/state/process discriminator. Attempt 3 must replace this mutation evidence.
 
 Focused commands respectively targeted
 `shutdown_rejects_stale_token_before_and_after_completion`,
