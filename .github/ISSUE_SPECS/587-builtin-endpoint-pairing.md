@@ -182,3 +182,17 @@ and frozen-path behavior is preserved. Independent full host-core debug/release,
 strict Clippy/rustdoc, formatting/diff, workspace/host policies, CI routing, native,
 and Wasm checks pass. Two attempts were used. Full verdict:
 `docs/audits/587-attempt2-review.md`.
+
+## Artifact qualification and review
+
+Integrated source head `ab3766caef34bcb035d7394224b0ccff1ea0be2d` produced AudioWorklet
+candidate `39ebe7cd3f71f34ab11260f27fa1eaad281dd61642c50d9ed6210e703d95dd55`.
+Lane B qualified and pinned that candidate at exact commit
+`71c085ec18d7a8604c3e8d12ae11fe831737da5b`; the commit was cherry-picked onto this
+delivery branch as `096e304b0585bfdcae1839aa3df1e878e4cc9e3d`. Pre/post six-file
+identity, static/object/ABI/resource/native-PCM checks and 26 mutations, SDK 11/11,
+Chromium 151, Firefox 153, WebKit 26.5, matrix generation, evidence leak, and
+checksums pass. Astra LOW independently reviewed and reran the proportional gates and
+returned **PASS**. Full evidence is under
+`artifacts/issue587-artifact-qualification/`; review:
+`docs/audits/587-artifact-review.md`.
