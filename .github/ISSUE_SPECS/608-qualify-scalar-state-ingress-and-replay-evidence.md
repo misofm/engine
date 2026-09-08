@@ -2,7 +2,7 @@
 
 Status: active qualification successor to stopped IO5 child #605 under audit #349 and lane-B handoff #560. It inherits #605's pushed implementation through stop record `b2c2d120` and exact accepted production correction `b5c1a3182f9aea176016d08797a31ed667f5e47c`; final fixture correction `c14cc8b20ecaf9acba02a9b3ae3d75bc9e38dfdd` remains preserved but failed review. #605 consumed three implementation attempts, is closed, and receives no fourth correction. This successor advances the same original partial finding and starts no original open finding.
 
-Sol HIGH coordinates and owns checkpoints, GitHub synchronization, delivery, and any later AudioWorklet artifact qualification/pinning. Luna HIGH or XHIGH implements. Astra LOW performs every scope, source, artifact-applicability, and exact-head/current-base verification. Lane-A #607 is the only other active issue and owns disjoint RT5 preflight/evidence paths.
+Sol HIGH coordinates and owns checkpoints, GitHub synchronization, delivery, and any later AudioWorklet artifact qualification/pinning. Luna HIGH or XHIGH implements. Astra LOW performs every scope, source, artifact-applicability, and exact-head/current-base verification. Lane-A #610 is the only other active issue and owns disjoint RT5 environment-vocabulary documentation/evidence paths.
 
 ## Smallest closable outcome
 
@@ -21,7 +21,7 @@ Allowed implementation paths are:
 - `crates/host-core/tests/scalar_point_endpoint.rs`
 - this numbered spec and bounded issue evidence
 
-Exclude all production Rust, every other test, `Cargo.toml`, `Cargo.lock`, protocol wire/schema/queue/delivery code, providers, other host endpoints, C ABI/browser/SDK/generated surfaces, graph/session/compiler/effects/banks/segments, policies/workflows, #607 paths/evidence, AudioWorklet artifacts/pins, and benchmarks. If a production defect prevents these tests, stop and amend or rebrief before editing source.
+Exclude all production Rust, every other test, `Cargo.toml`, `Cargo.lock`, protocol wire/schema/queue/delivery code, providers, other host endpoints, C ABI/browser/SDK/generated surfaces, graph/session/compiler/effects/banks/segments, policies/workflows, #610 documentation/evidence paths, AudioWorklet artifacts/pins, and benchmarks. If a production defect prevents these tests, stop and amend or rebrief before editing source.
 
 ## Objective gates
 
@@ -35,11 +35,11 @@ Exclude all production Rust, every other test, `Cargo.toml`, `Cargo.lock`, proto
 
 Push and synchronize this numbered brief, #560, and GitHub before implementation. Astra LOW must pass exact clean scope/current-base/path ownership. Luna performs one coherent fixture pass and pauses for root checkpointing. Astra LOW reviews the exact pushed test source against all three remaining obligations. Up to three attempts remain available to this successor, but each attempt is one bounded fixture pass and one verdict; do not weaken gates.
 
-Only after source PASS may root run the ordinary six-file AudioWorklet identity probe. Byte identity permits retained-artifact qualification with existing attribution; drift requires separately authorized scratch qualification before any pin or generated-consumer change. Recheck current main, #607 disjointness, exact reviewed head/base/merge-base, required PR qualification, guarded merge, post-main qualification, GitHub closure, and clean worktree removal. A post-delivery Astra LOW residual audit determines the next IO5 obligation or closure.
+Only after source PASS may root run the ordinary six-file AudioWorklet identity probe. Byte identity permits retained-artifact qualification with existing attribution; drift requires separately authorized scratch qualification before any pin or generated-consumer change. Recheck current main, #610 disjointness, exact reviewed head/base/merge-base, required PR qualification, guarded merge, post-main qualification, GitHub closure, and clean worktree removal. A post-delivery Astra LOW residual audit determines the next IO5 obligation or closure.
 
 ## Stop and split triggers
 
-Stop before changing production code, introducing a fixture framework, editing another test, widening to automatic clock/lifecycle publication, activating a host, adding graph/bank/effect/parameter/segment support, altering wire/schema/replay semantics, touching #607, or running artifact/browser/timed work before source PASS. Preserve the inherited implementation and candid evidence rather than disguising another #605 attempt.
+Stop before changing production code, introducing a fixture framework, editing another test, widening to automatic clock/lifecycle publication, activating a host, adding graph/bank/effect/parameter/segment support, altering wire/schema/replay semantics, touching #610, or running artifact/browser/timed work before source PASS. Preserve the inherited implementation and candid evidence rather than disguising another #605 attempt.
 
 ## Inherited evidence
 
@@ -86,3 +86,12 @@ caller-buffer cached malformed response, exact replay, changed-byte reuse preced
 retained-hit preservation. Publication and automation/resource/event/credit state stay unchanged
 in both cases. No implementation attempt was consumed. Implementation remains unauthorized pending
 exact-head Astra LOW confirmation of this bounded wording correction.
+
+
+## Current lane-A coordination
+
+#607 stopped after PR #609 failed the required environment/marker vocabulary gate; its accepted
+capture is preserved and will not be rerun. Active replacement #610 owns only the 20 missing rows in
+`docs/ENGINE_ENV_VOCABULARY.md` plus its spec/evidence. #608/#610 are the two active issue slots and
+their paths are disjoint. Historical #607 scope statements above remain accurate for their recorded
+checkpoints.
