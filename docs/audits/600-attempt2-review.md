@@ -10,7 +10,8 @@ One implementation attempt remains. Final preflight and timing are not authorize
 
 Attempt 2 correctly separated untimed render tests from the timing helper, moved buffer validation
 outside the timed closure, used checked counters and exact elapsed values, added a useful
-capacity-one queue-drain witness, corrected the encoded Rust flags and inherited-profile handling,
+queue-drain witness (the reviewed draft used capacity 16), corrected the encoded Rust flags and
+inherited-profile handling,
 changed to the repository cwd, preserved explicitly handled raw failures, added source/binary
 identity cases and reached five synthetic launches. Safe subject, validator/lifecycle, strict
 Clippy/rustdoc/format/diff, policy, and unchanged #238/#496 tests pass.

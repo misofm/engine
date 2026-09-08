@@ -1,4 +1,4 @@
-# Measure sustained input-trim record traffic on the delivered RT5 path
+# Prepare sustained input-trim workload for RT5 measurement
 
 GitHub: https://github.com/misofm/engine/issues/600
 
@@ -235,3 +235,110 @@ remaining runner repair and capture promotion must move to a separate tooling su
 attempt 3, rebrief #600 to a smallest closable subject/untimed-runtime proof and remove the
 known-defective new runner paths from its delivered delta. Do not use the remaining attempt as a
 second runner correction.
+
+## Authoritative attempt 3 rebrief
+
+This section supersedes the original measurement/runner outcome above for attempt 3 and delivery.
+The earlier scope and two failed reviews remain immutable history. The runner defect survived its one
+bounded correction, so #600 no longer owns timing, capture, preflight, validation or promotion.
+
+The smallest closable capability is one reproducible, entirely untimed `bench input-symmetry`
+qualification subject proving that the real prepared W8 plan processes the intended sustained input
+trim queue traffic. #600 closes only this workload capability. RT5 remains partial for a later
+numbered tooling successor that will own strict prelaunch validation, runner durability, record
+validation, exactly one authorized capture, honest accounting and RT5 closure. Create that issue only
+after #600 closes and releases this lane slot.
+
+### Exact attempt 3 paths
+
+Retain and modify only:
+
+- `tools/bench/src/input_symmetry.rs`;
+- the existing subject registration in `tools/bench/src/main.rs`;
+- this renamed numbered spec;
+- `docs/audits/600-attempt3-review.md` and final review records;
+- `artifacts/issue600-input-symmetry/attempt3/` for untimed qualification and mutation evidence;
+- concise #559/#560 handoff status under root ownership.
+
+Delete the four new `scripts/*input-symmetry*` files from #600's delivered delta. Their failed
+versions remain preserved in Git history and the attempt reviews. Do not replace them, edit an
+existing runner, or add another harness. No runtime, dependency, manifest, lockfile, fixture,
+existing benchmark, policy, workflow, browser/SDK/ABI, pin or matrix change is authorized.
+
+### Untimed qualification contract
+
+Remove `bench_support::timing`, every timer/helper, elapsed or nanosecond field, timing marker and
+performance metadata from the subject. The command must never observe a clock or emit a performance
+claim. Its concise deterministic qualification result identifies issue, workload, source fixture,
+backend, counts and frozen digests only.
+
+Retain 48 kHz, q128, native W8, eight populated/addressable tracks, immediate publication of eight
+`TrimDb { lanes: BuiltinLaneSelector::Both, ... }` records before every render, alternating -6 dB
+and -12 dB targets, and 256-sample smoothing. Use checked arithmetic throughout. Each of two
+independently prepared owners executes 512 untimed preparation blocks, excluded from phase counts and
+digests, then two 4,096-block qualification phases. This is 8,704 render calls per owner and 17,408
+total. Preserve each owner's absolute-sample and alternation continuity. Call them qualification
+phases, never measured rounds.
+
+The production qualification must prove all publishes succeed, each boundary render succeeds, no
+accepted record remains pending after the final tested boundary, output is nonzero, and the two
+owners produce the exact reviewed phase digests. Capacity/refill drain probes must run on separate
+representative witness owners so they do not add records to the frozen ride. The witness queue
+capacity and inference must be stated accurately; the attempt-2 draft used capacity 16, not one.
+
+Replace the disconnected arithmetic-only oracle. On a separate representative prepared runtime
+owner, compare per-block PCM and exposed state/report observations for an alternating trim sequence
+against an independently calculated trim-ramp expectation derived from the delivered update rule and
+the deterministic source words. The expected calculation must not call the runtime setter/kernel
+under test. Cover successive retargets before the prior 256-sample ramp settles, at least three
+boundaries, both channels, nonzero samples, target alternation and continuing nonstationarity. A
+no-record owner must differ on the same connected assertion. If current public surfaces cannot
+connect the independent expectation to actual runtime PCM/state without a runtime edit, stop; that is
+a scope blocker.
+
+Freeze complete qualification-phase digest constants only after the connected oracle passes. Record
+their provenance: exact source commit/tree, Rust toolchain, target/backend, debug/release profile,
+fixture hash, deterministic PCM generation and qualifying command. A digest is a regression
+discriminator, not independent DSP evidence, and cannot be obtained merely by accepting the current
+implementation's output. Debug and release must match their separately recorded reviewed constants
+or a documented exact shared constant.
+
+Render remains allocation/free, lock, syscall, I/O and logging free. The untimed qualification must
+prove zero current-thread allocations, reallocations and deallocations and zero realtime audit
+violations across representative traffic renders, with all publication and evidence collection
+outside render.
+
+### Required direct mutation and durable evidence
+
+After positive constants and assertions are frozen, temporarily suppress the actual production
+input `try_push` operation while leaving attempted schedule/count reporting intact. Run the unchanged
+focused traffic/output assertion and require a nonzero result at its direct accepted-traffic or
+connected PCM/digest mismatch. Restore the source immediately. Preserve under the attempt-3 artifact
+directory: the exact mutation diff, command, exit status, direct diagnostic, pre/post source hashes,
+clean restoration diff, restored debug/release results, qualification output and a checksum manifest.
+No permanent suppression mode, alternate test branch or caught synthetic assertion is accepted.
+
+### Attempt 3 gates and closure
+
+Before source PASS, run the new subject tests and untimed qualification command in debug and release;
+W8 population/addressability, checked counts, separate drain/no-pending witnesses, connected
+per-block ramp oracle, independent owners, reviewed constants, nonzero PCM and no-record
+discriminator; zero render allocation/free/realtime violations; the restored direct mutation; the
+unchanged #238/#496 symmetry and input-liveness tests in debug and release; strict bench Clippy and
+rustdoc; formatting/diff; and workspace/realtime/builtins/graph/lane policies.
+
+Astra LOW reviews the exact pushed attempt-3 source/evidence. A FAIL consumes the last attempt and
+requires a new bounded successor, with no retry. On PASS, integrate current main, recheck #598
+disjointness, obtain Astra LOW exact-head PASS, run required PR qualification, merge, require
+successful post-main qualification, synchronize and close #600, and remove its clean delivered
+worktree. Do not mark RT5 delivered or start an original open finding. Only after #600 cleanup may
+root create the promised tooling/capture successor in the released lane slot.
+
+## Astra LOW circuit-breaker rebrief recommendation
+
+Astra LOW approved this split in read-only review of exact pre-amendment head
+`87b9521e36f3467c151b2152116ca847f189c7a5`. The review requires the retitled subject-only
+capability, deletion of the four known-defective new scripts, zero timing surface, a connected
+independent runtime ramp oracle, separate drain witnesses, reviewed digest provenance, durable real
+mutation evidence, and explicit retention of RT5 measurement. This amended brief must itself receive
+formal Astra LOW PASS before Luna begins the sole remaining implementation attempt.
