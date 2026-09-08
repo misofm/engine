@@ -6,7 +6,7 @@ Parent: #636. Superseded implementation parent: #633. Audit parent: #560 CP1. Co
 
 #636 preserved a technically sound prepared-effect ownership implementation and a causal bitwise correct-versus-crossed PCM oracle, but reached its three-attempt hard stop because its release-integration execution lacked contemporaneous command, environment, status, preflight and execution-head records. Retrospective executor testimony cannot repair that provenance gap.
 
-This successor owns one release-integration qualification and, if it passes, delivery of the already frozen source. It permits no source, test, manifest, dependency, lock, profile, policy, workflow or artifact change. Sol HIGH coordinates the issue, checkpoints, GitHub, artifact exclusion and delivery. One Luna HIGH or XHIGH executor runs the single frozen command. Astra LOW reviews scope, evidence, exact head, CI and delivery.
+This successor owns one release-integration qualification and, if it passes, delivery of the already frozen source. It permits no source, test, manifest, dependency, lock, profile, policy, workflow or artifact change. Sol HIGH coordinates the issue, checkpoints, GitHub, artifact exclusion and delivery. Hypatia, the Luna HIGH agent `issue583_luna_impl`, is the sole executor for the single frozen command. Astra LOW reviews scope, evidence, exact head, CI and delivery.
 
 ## Smallest closable slice
 
