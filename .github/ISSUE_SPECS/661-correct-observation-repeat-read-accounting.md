@@ -86,6 +86,18 @@ the deterministic repeated-read/final-gap control above and requires it to share
 the production-test accounting helper. No implementation attempt was authorized
 or consumed by that review.
 
+## Corrected scope authorization
+
+Astra LOW returned **SCOPE PASS** at exact clean pushed head
+`c40cef20349b4458f2fc80f8e89aebf87d5061a3`, delivered main
+`561c4345614c295d99dd6315f668a060ca8f3531`, and tracker
+`8222ec80b2252e6b343ef274dd718728ef2d5c8c`. GitHub matches and the attempt-1
+evidence path is absent. Hypatia is authorized for the one-file attempt above:
+preserve all existing safety/order assertions, count only strict sequence
+advances, compute missed windows before acknowledgment, and run the amended gate
+sequence once with complete retained records. Stop at the first failure without
+correction or retry.
+
 ## Review and dependency release
 
 Astra LOW reviews the exact source checkpoint. Any correction consumes the next
