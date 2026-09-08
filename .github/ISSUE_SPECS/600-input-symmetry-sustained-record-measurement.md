@@ -218,3 +218,20 @@ checks are incomplete; runner persistence/status/cwd behavior is inaccurate; and
 miss source/binary and post-workload publication failures. Full verdict:
 `docs/audits/600-attempt1-review.md`. Attempt 2 stays inside the six implementation paths and focused
 records. No capture, final preflight, runtime change or path expansion is authorized.
+
+## Attempt 2 review and runner circuit breaker
+
+Correction checkpoint `000de31e30bacaabb68576be958a26b50fcaad21` received Astra LOW **FAIL**;
+one implementation attempt remains and timing is not authorized. Untimed/timed separation, checked
+arithmetic, capacity-one drain evidence, build flags/profile isolation, cwd, explicit raw failure
+preservation, source/binary cases and five-launch accounting improved. Runtime ramp/nonstationarity
+proof remains disconnected and self-derived; durable restored mutation evidence is absent; actual
+two-round timing markers disagree with the one-invocation claim; strict seal validation remains
+post-launch; backend and seal numeric types remain permissive; and failure dispositions still invent
+validator/scratch/timing facts. Full verdict: `docs/audits/600-attempt2-review.md`.
+
+The benchmark-runner defect survived its one bounded correction. Under the frozen circuit breaker,
+remaining runner repair and capture promotion must move to a separate tooling successor. Before
+attempt 3, rebrief #600 to a smallest closable subject/untimed-runtime proof and remove the
+known-defective new runner paths from its delivered delta. Do not use the remaining attempt as a
+second runner correction.
