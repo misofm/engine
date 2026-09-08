@@ -311,12 +311,13 @@ outside render.
 ### Required direct mutation and durable evidence
 
 After positive constants and assertions are frozen, temporarily suppress the actual production
-input `try_push` operation while leaving attempted schedule/count reporting intact. Run the unchanged
-focused traffic/output assertion and require a nonzero result at its direct accepted-traffic or
-connected PCM/digest mismatch. Restore the source immediately. Preserve under the attempt-3 artifact
-directory: the exact mutation diff, command, exit status, direct diagnostic, pre/post source hashes,
-clean restoration diff, restored debug/release results, qualification output and a checksum manifest.
-No permanent suppression mode, alternate test branch or caught synthetic assertion is accepted.
+input `try_push` operation while preserving the reported attempted and accepted schedule/count
+values. Run the unchanged frozen connected PCM/output-digest assertion and require its direct
+nonzero mismatch; a counter mismatch may be additional evidence but cannot satisfy this gate.
+Restore the source immediately. Preserve under the attempt-3 artifact directory: the exact mutation
+diff, command, exit status, direct PCM/digest diagnostic, pre/post source hashes, clean restoration
+diff, restored debug/release results, qualification output and a checksum manifest. No permanent
+suppression mode, alternate test branch or caught synthetic assertion is accepted.
 
 ### Attempt 3 gates and closure
 
@@ -342,3 +343,9 @@ capability, deletion of the four known-defective new scripts, zero timing surfac
 independent runtime ramp oracle, separate drain witnesses, reviewed digest provenance, durable real
 mutation evidence, and explicit retention of RT5 measurement. This amended brief must itself receive
 formal Astra LOW PASS before Luna begins the sole remaining implementation attempt.
+
+The first formal review of amended head `7af0d2f2e7bace1e4c7d701a168f3592e49f2d25` accepted every
+other rebrief term but rejected an `accepted-traffic or PCM/digest` mutation escape. The corrected
+gate above preserves both attempted and accepted reported counts while suppressing actual pushes and
+requires the unchanged connected PCM/output digest itself to fail. This scope correction consumes no
+implementation attempt and requires exact-head rereview.
