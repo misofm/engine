@@ -83,3 +83,26 @@ remote #615/#560 match. The scratch lineage overlay is correctly conditional on 
 five-file identity and limited to candidate/digest plus generated matrix, with all browser rows and
 resources frozen. One specified scratch qualification is authorized. Repository pin/lineage edits,
 retries and #539's distinct candidate remain unauthorized.
+
+## Astra LOW scratch candidate qualification — PASS
+
+Astra LOW returned **PASS** for the single authorized qualification at frozen source
+`0c715de9fbdf0b3873c707e10c52095fad750287`; no command was retried. The one scratch-overlay
+builder invocation emitted exactly six files. Candidate Wasm SHA-256 is
+`e338adae98454d0a365c0ef281aa6b3dcb24d5dc0a36427f917566682e0ff27b`; the other five files match
+the delivered #587/#608 manifest exactly: ABI `40f6fe2e…`, declaration `445254e7…`, host JavaScript
+`21c8947d…`, worklet JavaScript `225bc060…`, and metadata `6eac2cb3…`.
+
+Every recorded command exited zero: matrix generation/check, shipped static/realtime checks,
+expected resources/native witness and 26 red mutations, hermetic worklet policies/mutations, both
+locked npm installs, SDK package gate with 11 tests, and exactly one all-browser qualification with
+matrix and self-test mutations. Chromium 151.0.7922.34, Firefox 153.0 and WebKit 26.5 passed. The
+final scratch diff is exactly the provisional pin, two results lineage fields and generated matrix
+lineage paragraph; browser rows, versions, gates and resource values are unchanged.
+
+Root copied the bounded raw command/context/stream/status, overlay, identity, six-hash and
+orchestration evidence to `artifacts/issue615-scratch-qualification/`. Generated six-file outputs
+and Cargo build caches remain outside Git; their exact hashes are retained. The repository manifest
+covers all 55 retained files and verifies. Astra's PASS authorizes root to preserve this evidence
+and Luna HIGH/XHIGH to make the conditional three-file repository promotion. It does not itself
+authorize merge or #539's different candidate.
