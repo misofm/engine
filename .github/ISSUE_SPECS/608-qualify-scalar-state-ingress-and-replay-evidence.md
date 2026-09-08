@@ -8,7 +8,7 @@ Sol HIGH coordinates and owns checkpoints, GitHub synchronization, delivery, and
 
 Complete only the three finite evidence obligations left by Astra LOW's final #605 verdict:
 
-1. Prove successful Left-only and Right-only subsets through typed, B1b and caller-buffer StateGet ingress against the same published page. Prove reversed two-handle order succeeds and is preserved through typed ingress. At each encoded ingress boundary, mutate an otherwise valid request to reversed handle bytes and prove the frozen canonical wire decoder rejects it as malformed without side effects.
+1. Prove successful Left-only and Right-only subsets through typed, B1b and caller-buffer StateGet ingress against the same published page. Prove reversed two-handle order succeeds and is preserved through typed ingress. At each encoded ingress boundary, mutate an otherwise valid request to reversed handle bytes and prove the frozen canonical wire decoder rejects it as malformed while preserving that boundary's existing replay behavior and all publication/automation/resource/event/credit state.
 2. For every rejected publication, including nonfinite/invalid values in either record, immediately encode the accepted page again and compare its state-page payload bytes bit-for-bit with the pre-rejection accepted payload. Prove identical republication has the same encoded payload before any replacement.
 3. After publication changes, prove retained StateGet replay succeeds into an output buffer of the exact cached-response length, a one-byte-short buffer refuses without consuming the cached response, and malformed/reused changed bytes preserve the delivered replay/error precedence.
 
@@ -25,7 +25,7 @@ Exclude all production Rust, every other test, `Cargo.toml`, `Cargo.lock`, proto
 
 ## Objective gates
 
-1. **Ingress projections at their frozen boundaries.** One published asymmetric page is queried through typed, B1b and caller-buffer paths. Every path proves Left-only and Right-only requests with exact observed sample, record order, flags and value bits. Typed ingress also proves successful reversed `[Right, Left]` order. B1b and caller-buffer each receive a byte-mutated reversed request derived from a valid encoded frame and must return the existing malformed-frame result without changing the published page, replay cache, or automation/resource/event/credit state. This preserves the wire contract's bounded, sorted, unique, nonzero handle rule instead of widening production semantics. Existing unknown/unpublished cases remain green. No second decoder, controller, provider, queue or ledger is introduced.
+1. **Ingress projections at their frozen boundaries.** One published asymmetric page is queried through typed, B1b and caller-buffer paths. Every path proves Left-only and Right-only requests with exact observed sample, record order, flags and value bits. Typed ingress also proves successful reversed `[Right, Left]` order. B1b and caller-buffer each receive a byte-mutated reversed request derived from a valid encoded frame and must return the existing malformed-frame result. B1b proves decode failure before replay admission. Caller-buffer uses a new correlatable request with sufficient output capacity, proves that the malformed non-OK response is cached and returned byte-identically on exact replay, proves changed-byte reuse precedence, and proves unrelated retained hits remain byte-identical. Neither boundary may change the published page or automation/resource/event/credit state. This preserves the wire contract's bounded, sorted, unique, nonzero handle rule and each ingress path's frozen replay semantics. Existing unknown/unpublished cases remain green. No second decoder, controller, provider, queue or ledger is introduced.
 2. **Encoded preservation after refusal.** Capture the encoded state-page payload bytes, excluding request-specific frame identity fields through an explicit parser/offset already authoritative in the fixture. After each independently discriminated invalid publication—wrong/reversed/zero/duplicate handles, invalid flags, and nonfinite value in record one and record two—issue a fresh StateGet and require bit-identical payload bytes. Re-publish the identical valid snapshot and require the same payload bytes before testing a later valid replacement. Decoded equality alone receives no credit.
 3. **Cached replay output contract.** Cache one successful StateGet response, change the live publication, and replay the original exact request. First use a one-byte-short caller buffer and require the existing output-reservation refusal without replay loss; then use the exact cached-response length and require the original response bytes. Exercise a changed-byte reuse of the same request ID and the existing malformed outer/correlatable payload precedence without changing the retained hit.
 4. **No side effects.** Before and after every qualification group, assert outstanding and resident automation counts, queue report fields, reliable-event availability/sequence behavior, and terminal credit remain unchanged. State reads and rejected/idempotent publications may not acknowledge, drop, admit, hand off, collect or cancel automation.
@@ -67,7 +67,22 @@ was consumed, no test or source changed, and production remains frozen.
 
 The corrected first gate above preserves successful reverse order only for typed ingress. B1b and
 caller-buffer must instead prove that a byte-mutated reversed request is rejected at the canonical
-wire boundary without side effects, while both successful single-handle subsets remain required
-through all three ingress paths. The prior Astra LOW PASS is retained as historical evidence but
-does not authorize implementation against this amendment. A fresh exact-head Astra LOW scope PASS
-is required.
+wire boundary, while both successful single-handle subsets remain required through all three
+ingress paths. The prior Astra LOW PASS is retained as historical evidence but does not authorize
+implementation against this amendment. A fresh exact-head Astra LOW scope PASS is required.
+
+## Astra LOW corrected-scope review 1
+
+Astra LOW returned **FAIL** at exact clean head/upstream
+`d574d878481609208b782d8757fc16d6d26d8b65`, tracker
+`0413f9b7070bd658133ee667d27a9e74065c0b6c`, and main/merge-base `6fe8676e`. The ordering correction
+was accepted, and the reviewer acknowledged that the earlier all-ingress reversed-success demand
+was wrong. One boundary distinction remained: malformed B1b decoding returns before replay
+admission, while a sufficiently provisioned caller-buffer request caches its correlatable malformed
+non-OK response through `replay.complete`.
+
+The first gate now freezes those distinct delivered behaviors: unchanged B1b replay state;
+caller-buffer cached malformed response, exact replay, changed-byte reuse precedence, and unrelated
+retained-hit preservation. Publication and automation/resource/event/credit state stay unchanged
+in both cases. No implementation attempt was consumed. Implementation remains unauthorized pending
+exact-head Astra LOW confirmation of this bounded wording correction.
