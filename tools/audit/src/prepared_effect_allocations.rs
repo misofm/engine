@@ -3,11 +3,12 @@
 use bench_support::alloc as bench_alloc;
 use conformance::DualAccumulatorDelayFactory;
 use effect_compiler::{EffectCompileCaps, EffectPreparedSession, prepare_native_session_effects};
-use effect_contract::NativeEffectRegistry;
+use effect_contract::{EffectQuality as PreparedEffectQuality, NativeEffectRegistry};
 use graph::{GraphCompileCaps, GraphDiagnosticSet};
 use graph_compiler::{Backend, GraphCompileRequest, GraphCompiler};
 use session::{
-    CompileCaps, EffectIdentity, EffectQuality, LinkMode, StableId, compile_session,
+    CompileCaps, EffectIdentity, EffectQuality as SessionEffectQuality, LinkMode, StableId,
+    compile_session,
     parse_session_json,
 };
 use sha2::{Digest, Sha256};
@@ -122,7 +123,7 @@ fn fixture_session(corpus: Corpus) -> session::CompiledSession {
     template.dynamic.effects.clear();
     template.simd2.effects.clear();
     if corpus.with_effects() {
-        let effect = |id: &str, quality: EffectQuality| session::Effect {
+        let effect = |id: &str, quality: SessionEffectQuality| session::Effect {
             id: StableId::parse(id).expect("effect slot id"),
             identity: EffectIdentity::Native {
                 effect_id: StableId::parse("conformance.delay").expect("effect id"),
@@ -135,13 +136,15 @@ fn fixture_session(corpus: Corpus) -> session::CompiledSession {
         };
         match corpus {
             Corpus::CrossedSmall => {
-                template.simd1.effects = vec![effect("slot1", EffectQuality::Draft)];
-                template.dynamic.effects = vec![effect("slot0", EffectQuality::Normal)];
+                template.simd1.effects =
+                    vec![effect("slot1", SessionEffectQuality::Draft)];
+                template.dynamic.effects =
+                    vec![effect("slot0", SessionEffectQuality::Normal)];
             }
             Corpus::Banks64 => {
                 template.simd1.effects = vec![
-                    effect("slot0", EffectQuality::Normal),
-                    effect("slot1", EffectQuality::Normal),
+                    effect("slot0", SessionEffectQuality::Normal),
+                    effect("slot1", SessionEffectQuality::Normal),
                 ];
             }
             Corpus::Zero64 => unreachable!(),
@@ -157,7 +160,7 @@ fn fixture_session(corpus: Corpus) -> session::CompiledSession {
             track.dynamic.effects.reverse();
         }
         if matches!(corpus, Corpus::Banks64) && index == corpus.tracks() - 1 {
-            track.simd1.effects[1].quality = EffectQuality::Draft;
+            track.simd1.effects[1].quality = SessionEffectQuality::Draft;
         }
         model.tracks.push(track);
     }
@@ -370,27 +373,49 @@ mod tests {
     }
 
     #[test]
+    fn positive_allocator_control_is_non_elidable() {
+        positive_allocator_control();
+    }
+
+    #[test]
     fn crossed_small_proves_reversed_distinct_prepared_programs() {
         let effects = prepared(Corpus::CrossedSmall);
         assert_eq!(effects.entries.len(), 8);
-        let first = &effects.entries[0];
-        let last = &effects.entries[7];
-        assert_ne!(
-            (first.track_id.as_str(), first.rack, first.effect_id.as_str()),
-            (last.track_id.as_str(), last.rack, last.effect_id.as_str())
-        );
-        assert!(effects.entries.windows(2).any(|pair| {
-            pair[0].track_id > pair[1].track_id
-                || (pair[0].track_id == pair[1].track_id && pair[0].rack > pair[1].rack)
-        }));
+        let actual: Vec<_> = effects
+            .entries
+            .iter()
+            .map(|entry| {
+                (
+                    entry.track_id.as_str().to_owned(),
+                    entry.rack,
+                    entry.effect_id.clone(),
+                    entry.metadata.program_key().quality,
+                )
+            })
+            .collect();
+        let expected = vec![
+            ("track-3".to_owned(), effect_compiler::EffectRack::Dynamic, "slot0".to_owned(), PreparedEffectQuality::Normal),
+            ("track-3".to_owned(), effect_compiler::EffectRack::Simd1, "slot1".to_owned(), PreparedEffectQuality::Draft),
+            ("track-2".to_owned(), effect_compiler::EffectRack::Dynamic, "slot0".to_owned(), PreparedEffectQuality::Normal),
+            ("track-2".to_owned(), effect_compiler::EffectRack::Simd1, "slot1".to_owned(), PreparedEffectQuality::Draft),
+            ("track-1".to_owned(), effect_compiler::EffectRack::Dynamic, "slot0".to_owned(), PreparedEffectQuality::Normal),
+            ("track-1".to_owned(), effect_compiler::EffectRack::Simd1, "slot1".to_owned(), PreparedEffectQuality::Draft),
+            ("track-0".to_owned(), effect_compiler::EffectRack::Dynamic, "slot0".to_owned(), PreparedEffectQuality::Normal),
+            ("track-0".to_owned(), effect_compiler::EffectRack::Simd1, "slot1".to_owned(), PreparedEffectQuality::Draft),
+        ];
+        assert_eq!(actual, expected);
         let programs: std::collections::BTreeSet<_> = effects
             .entries
             .iter()
             .map(|entry| entry.metadata.program_key())
             .collect();
         assert!(programs.len() >= 2);
-        assert!(programs.iter().any(|program| program.quality == EffectQuality::Draft));
-        assert!(programs.iter().any(|program| program.quality == EffectQuality::Normal));
+        assert!(programs
+            .iter()
+            .any(|program| program.quality == PreparedEffectQuality::Draft));
+        assert!(programs
+            .iter()
+            .any(|program| program.quality == PreparedEffectQuality::Normal));
         assert_eq!(
             effects
                 .entries
@@ -415,24 +440,85 @@ mod tests {
         assert_eq!(effects.entries.len(), 128);
         assert_eq!(
             effects.entries[0].metadata.program_key().quality,
-            EffectQuality::Normal
+            PreparedEffectQuality::Normal
+        );
+        assert_eq!(
+            effects
+                .entries
+                .iter()
+                .filter(|entry| entry.metadata.program_key().quality == PreparedEffectQuality::Draft)
+                .count(),
+            1
         );
         assert_eq!(
             effects.entries.last().expect("heterogeneous entry").metadata.program_key().quality,
-            EffectQuality::Draft
+            PreparedEffectQuality::Draft
         );
-        let artifact = GraphCompiler::compile(GraphCompileRequest {
+        assert_eq!(graph_compiler::Backend::current(), graph_compiler::Backend::Simd8);
+        assert_eq!(
+            effects
+                .entries
+                .iter()
+                .filter(|entry| entry.track_id == "track-63")
+                .map(|entry| entry.effect_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["slot0", "slot1"]
+        );
+        let artifact = match GraphCompiler::compile(GraphCompileRequest {
             plan_id: 99,
             effects,
             caps: graph_caps(),
             dispatch: Backend::current(),
-        })
-        .expect("banks64 graph");
+        }) {
+            Ok(value) => value,
+            Err(_) => panic!("banks64 graph"),
+        };
         let report = &artifact.report.rack_cohorts;
-        assert!(report.plan.groups.iter().any(|group| group.is_full()));
-        assert!(!report.plan.scalar.is_empty());
-        assert!(report.bound_slots.iter().any(|slot| !slot.members.is_empty()));
-        assert!(report.chains.len() >= 64);
+        assert_eq!(report.plan.groups.iter().filter(|group| group.is_full()).count(), 7);
+        assert_eq!(report.plan.scalar, Vec::<graph_compiler::RackChainId>::new());
+        let mut expected_banked = Vec::new();
+        for group in 0..7 {
+            let members: Vec<_> = (group * 8..group * 8 + 8)
+                .map(|track| format!("track-{track}"))
+                .collect();
+            let actual = report.plan.groups[group]
+                .members
+                .iter()
+                .map(|member| member.as_ref().expect("full member").track_id.clone())
+                .collect::<Vec<_>>();
+            assert_eq!(actual, members);
+            expected_banked.extend(members);
+        }
+        let scalar: Vec<_> = report
+            .chains
+            .values()
+            .flatten()
+            .filter(|node| !report.bound_slots.iter().any(|slot| slot.members.contains(node)))
+            .map(|node| (node.track_id.as_str().to_owned(), node.effect_id.as_str().to_owned()))
+            .collect();
+        let expected_scalar: Vec<_> = (56..64)
+            .flat_map(|track| {
+                [
+                    (format!("track-{track}"), "slot0".to_owned()),
+                    (format!("track-{track}"), "slot1".to_owned()),
+                ]
+            })
+            .collect();
+        assert_eq!(scalar, expected_scalar);
+        assert_eq!(report.bound_slots.len(), 14);
+        for (index, bound) in report.bound_slots.iter().enumerate() {
+            let slot = index % 2;
+            let group = index / 2;
+            let expected: Vec<_> = (group * 8..group * 8 + 8)
+                .map(|track| graph::EffectNodeId {
+                    track_id: graph::StableGraphId::parse(&format!("track-{track}")).unwrap(),
+                    rack: graph::RackId::Simd1,
+                    effect_id: graph::StableGraphId::parse(&format!("slot{slot}")).unwrap(),
+                })
+                .collect();
+            assert_eq!(bound.members, expected);
+        }
+        assert_eq!(expected_banked.len(), 56);
         drop(artifact);
     }
 }

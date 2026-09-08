@@ -93,3 +93,26 @@ preserving attempt-1 records unchanged. Run the full premeasurement gate sequenc
 once in order and stop on the first failure without correction or rerun. No official
 measurement or counterfactual is authorized before a pushed source checkpoint and
 fresh Astra PASS.
+
+## Attempt 2 source gate — FAIL; final attempt 3 bounded
+
+Luna HIGH preserved attempt-1 evidence, changed only the audit subject, and stopped
+correctly when focused gate 1 returned 101 at exact base `e0eda053`. Three focused
+tests passed. Both structural corpus tests failed because the conformance delay
+factory rejects Draft quality during preparation. No later gate, audit-subject
+invocation, counterfactual, or measurement ran; complete attempt-2 command/status
+streams remain temporary under `/tmp/issue652-attempt2-source-evidence`.
+
+Astra LOW returned attempt 2 **FAIL** and authorized final attempt 3. Replace Draft
+with the supported bypass dimension and assert the actual prepared program keys
+differ. `crossed-small` must use the same slot ID in SIMD1 and Dynamic across tracks
+and assert its complete reversed tuple sequence. `banks64` must locate the sole
+heterogeneous member by exact `track-63`/SIMD1/`slot1`, replace numeric group-index
+assumptions with independently derived lexicographic chain identities, and on this
+pinned Simd8 platform assert seven full normal cohorts, the exact residual scalar
+set including track 63, and both slots' bound-node associations.
+
+Attempt 3 retains the accepted compile interval, measured-result identity and
+allocator-control changes. Run the premeasurement gates once in order with fresh
+retained evidence and stop on the first failure. Any failure exhausts #652; there
+is no fourth correction, weakened corpus, official measurement, or counterfactual.
