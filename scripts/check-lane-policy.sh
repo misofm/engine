@@ -41,7 +41,7 @@ decode_rule_field() {
 }
 
 rule_index=0
-while IFS=$'\t' read -r kind id_encoded scan_encoded pattern_encoded glob_encoded \
+while IFS='|' read -r kind id_encoded scan_encoded pattern_encoded glob_encoded \
     root1_encoded root2_encoded root3_encoded root4_encoded exclude_description_encoded \
     exclude_regex_encoded failure_encoded extra; do
     [[ -n "$kind" && -z "$extra" ]] || fail "lane source rule loader output is invalid"

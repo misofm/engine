@@ -102,7 +102,7 @@ def main() -> int:
             rule.get("exclude_regex", ""),
             rule["failure_diagnostic"],
         ]
-        output.append("RULE\t" + "\t".join(encoded(field) for field in fields))
+        output.append("RULE|" + "|".join(encoded(field) for field in fields))
 
     if len(seen) != len(EXPECTED_IDS):
         return fail("rule population is invalid")

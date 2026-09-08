@@ -111,13 +111,35 @@ expect_failure() {
     }
 }
 
+expect_failure_with_diagnostic() {
+    local name="$1" expected="$2" edit="$3"
+    local root="$scratch_root/diagnostic-$name" output
+    create_valid_fixture "$root"
+    eval "$edit"
+    if output="$(bash "$policy_script" "$root" 2>&1)"; then
+        printf 'lane diagnostic mutation unexpectedly passed: %s\n' "$name" >&2
+        exit 1
+    fi
+    printf '%s\n' "$output" | rg -qF "lane policy failure: $expected" || {
+        printf 'lane diagnostic mutation had wrong output: %s\n%s\n' "$name" "$output" >&2
+        exit 1
+    }
+}
+
 valid_root="$scratch_root/valid root"
 create_valid_fixture "$valid_root"
 bash "$policy_script" "$valid_root" >/dev/null
 (cd "$scratch_root" && bash "$policy_script" "valid root" >/dev/null)
 
+exemption_root="$scratch_root/all-exemptions"
+create_valid_fixture "$exemption_root"
+mkdir -p "$exemption_root/crates/dsp-reference/src" "$exemption_root/tools/wasm-gates/tests"
+printf '%s\n' 'let y = a.mul_add(b, c);' >"$exemption_root/crates/dsp-reference/src/oracle.rs"
+printf '%s\n' 'let y = a.mul_add(b, c);' >"$exemption_root/tools/wasm-gates/tests/g5_native_corpus.rs"
+bash "$policy_script" "$exemption_root" >/dev/null
+
 expect_loader_failure() {
-    local name="$1" edit="$2"
+    local name="$1" expected="$2" edit="$3"
     local root="$scratch_root/loader-$name" policy="$scratch_root/loader-$name.toml" output
     create_valid_fixture "$root"
     cp "$script_directory/policies/lane-source.toml" "$policy"
@@ -130,22 +152,26 @@ expect_loader_failure() {
         printf 'lane loader mutation lacked policy diagnostic: %s\n%s\n' "$name" "$output" >&2
         exit 1
     }
+    printf '%s\n' "$output" | rg -qF "$expected" || {
+        printf 'lane loader mutation had wrong diagnostic: %s\n%s\n' "$name" "$output" >&2
+        exit 1
+    }
 }
 
-expect_loader_failure missing-policy 'rm -f "$policy"'
-expect_loader_failure malformed-policy 'printf "%s\n" "version = [" >"$policy"'
-expect_loader_failure unknown-field 'sed -i "2a unknown = true" "$policy"'
-expect_loader_failure missing-required-field 'sed -i "/scan_description =/d" "$policy"'
-expect_loader_failure empty-rule-population 'sed -i "/^\[\[rules\]\]/,\$d" "$policy"'
-expect_loader_failure duplicate-or-wrong-order \
+expect_loader_failure missing-policy 'lane rule policy invalid' 'rm -f "$policy"'
+expect_loader_failure malformed-policy 'lane rule policy invalid' 'printf "%s\n" "version = [" >"$policy"'
+expect_loader_failure unknown-field 'unknown or missing top-level fields' 'sed -i "2a unknown = true" "$policy"'
+expect_loader_failure missing-required-field 'missing a required field' 'sed -i "/scan_description =/d" "$policy"'
+expect_loader_failure empty-rule-population 'exactly four rules' 'sed -i "/^\[\[rules\]\]/,\$c rules = []" "$policy"'
+expect_loader_failure duplicate-or-wrong-order 'wrong or duplicate id' \
     'sed -i "0,/id = '\''fusion'\''/s//id = '\''relaxed'\''/" "$policy"'
-expect_loader_failure empty-root \
-    'sed -i "0,/roots =/s//roots = []/" "$policy"'
-expect_loader_failure invalid-regex \
-    'sed -i "0,/exclude_regex =/s//exclude_regex = '\''['\''/" "$policy"'
+expect_loader_failure empty-root 'invalid roots' \
+    'sed -i "0,/^roots =/s|^roots =.*|roots = [\"\"]|" "$policy"'
+expect_loader_failure invalid-regex 'invalid exclude_regex' \
+    'sed -i "0,/^exclude_regex =/s|^exclude_regex =.*|exclude_regex = '\''['\''|" "$policy"'
 
 invalid_loader="$scratch_root/invalid-loader"
-printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\\n" invalid-loader-output' >"$invalid_loader"
+printf '%s\n' '#!/usr/bin/env python3' 'print("invalid-loader-output")' >"$invalid_loader"
 chmod +x "$invalid_loader"
 invalid_root="$scratch_root/invalid-loader-root"
 create_valid_fixture "$invalid_root"
@@ -154,6 +180,75 @@ if output="$(LANE_RULE_LOADER="$invalid_loader" bash "$policy_script" "$invalid_
     exit 1
 fi
 printf '%s\n' "$output" | rg -qF 'lane policy failure:'
+
+expect_loader_status_failure() {
+    local name="$1" mode="$2"
+    local root="$scratch_root/status-$name" loader="$scratch_root/status-$name-loader" output
+    create_valid_fixture "$root"
+    case "$mode" in
+        malformed)
+            printf '%s\n' '#!/usr/bin/env python3' 'print("malformed-loader-output")' >"$loader"
+            ;;
+        complete)
+            printf '%s\n' '#!/usr/bin/env python3' 'import subprocess, sys' \
+                "result = subprocess.run([sys.executable, \"$script_directory/lib/gate-rules.py\", sys.argv[1]], capture_output=True, text=True)" \
+                'sys.stdout.write(result.stdout)' 'sys.stderr.write(result.stderr)' \
+                'raise SystemExit(7)' >"$loader"
+            ;;
+        partial)
+            printf '%s\n' '#!/usr/bin/env python3' 'import subprocess, sys' \
+                "result = subprocess.run([sys.executable, \"$script_directory/lib/gate-rules.py\", sys.argv[1]], capture_output=True, text=True)" \
+                'sys.stdout.write(result.stdout.splitlines(keepends=True)[0])' \
+                'raise SystemExit(7)' >"$loader"
+            ;;
+        *) printf 'unknown loader status test: %s\n' "$mode" >&2; exit 1 ;;
+    esac
+    chmod +x "$loader"
+    if output="$(LANE_RULE_LOADER="$loader" bash "$policy_script" "$root" 2>&1)"; then
+        printf 'lane loader status mutation unexpectedly passed: %s\n' "$name" >&2
+        exit 1
+    fi
+    printf '%s\n' "$output" | rg -qF 'lane policy failure:' || exit 1
+    if [[ "$mode" == malformed ]]; then
+        printf '%s\n' "$output" | rg -qF 'loader output is invalid' || exit 1
+    else
+        printf '%s\n' "$output" | rg -qF 'lane source rule loader failed' || exit 1
+    fi
+}
+
+expect_loader_status_failure status-zero-malformed malformed
+expect_loader_status_failure nonzero-complete complete
+expect_loader_status_failure nonzero-partial partial
+
+prove_loader_status_mutant() {
+    local mutant_dir="$scratch_root/mutant-loader-status" loader="$scratch_root/mutant-loader-status.sh" output
+    mkdir -p "$mutant_dir/lib" "$mutant_dir/policies"
+    cp "$policy_script" "$mutant_dir/check.sh"
+    cp "$script_directory/lib/gate-rules.py" "$mutant_dir/lib/gate-rules.py"
+    cp "$script_directory/policies/lane-source.toml" "$mutant_dir/policies/lane-source.toml"
+    ln -s "$script_directory/lib/gate.sh" "$mutant_dir/lib/gate.sh"
+    sed -i '0,/loader_status=\$?/s//loader_status=0/' "$mutant_dir/check.sh"
+    printf '%s\n' '#!/usr/bin/env python3' 'import subprocess, sys' \
+        "result = subprocess.run([sys.executable, \"$script_directory/lib/gate-rules.py\", sys.argv[1]], capture_output=True, text=True)" \
+        'sys.stdout.write(result.stdout)' 'raise SystemExit(7)' >"$loader"
+    chmod +x "$loader"
+    set +e
+    output="$(if output="$(LANE_RULE_LOADER="$loader" bash "$mutant_dir/check.sh" "$valid_root" 2>&1)"; then
+        printf 'lane loader status counter-mutant unexpectedly passed\n'
+        exit 1
+    else
+        printf '%s\n' "$output"
+        exit 0
+    fi)"
+    status=$?
+    set -e
+    [[ $status == 1 ]] && printf '%s\n' "$output" | rg -qF 'counter-mutant unexpectedly passed' || {
+        printf 'lane loader status counter-mutant did not reach its assertion\n%s\n' "$output" >&2
+        exit 1
+    }
+}
+
+prove_loader_status_mutant
 
 four_line_root="$scratch_root/marker-four-lines"
 create_valid_fixture "$four_line_root"
@@ -196,6 +291,32 @@ expect_failure unmarked-std-mul-add \
     'printf "%s\n" "fn f(a: f32) -> f32 { f32::mul_add(a, a, a) }" >>"$root/crates/lane/src/lib.rs"'
 expect_failure new-runtime-detection \
     'printf "%s\n" "let _ = is_x86_feature_detected!(\"avx2\");" >>"$root/crates/compressor/src/lib.rs"'
+expect_failure_with_diagnostic fusion-diagnostic \
+    'fused multiply-add and the SIMD vocabulary belong to crates/lane (D3, D4)' \
+    'printf "%s\n" "let y = a.mul_add(b, c);" >>"$root/crates/compressor/src/lib.rs"'
+expect_failure_with_diagnostic relaxed-diagnostic \
+    'relaxed SIMD is forbidden on every target (D3)' \
+    'printf "%s\n" "let y = f32x4_relaxed_madd(a, b, c);" >>"$root/crates/compressor/src/lib.rs"'
+expect_failure_with_diagnostic architecture-diagnostic \
+    'raw architecture intrinsics belong to crates/lane/src/{softfma,fpenv}.rs' \
+    'printf "%s\n" "use core::arch::x86_64::_mm256_add_ps;" >>"$root/tools/audit/src/realtime.rs"'
+expect_failure_with_diagnostic detection-diagnostic \
+    'runtime SIMD detection is forbidden outside the enumerated legacy sites (D4)' \
+    'printf "%s\n" "let _ = is_x86_feature_detected!(\"avx2\");" >>"$root/crates/compressor/src/lib.rs"'
+
+competing_root="$scratch_root/diagnostic-competing"
+create_valid_fixture "$competing_root"
+printf '%s\n' 'let y = a.mul_add(b, c);' >>"$competing_root/crates/compressor/src/lib.rs"
+printf '%s\n' 'let y = f32x4_relaxed_madd(a, b, c);' >>"$competing_root/crates/compressor/src/lib.rs"
+if output="$(bash "$policy_script" "$competing_root" 2>&1)"; then
+    printf 'lane competing-rule mutation unexpectedly passed\n' >&2
+    exit 1
+fi
+printf '%s\n' "$output" | rg -qF 'lane policy failure: fused multiply-add and the SIMD vocabulary belong to crates/lane (D3, D4)'
+if printf '%s\n' "$output" | rg -qF 'relaxed SIMD is forbidden'; then
+    printf 'lane competing-rule mutation did not stop at first rule\n' >&2
+    exit 1
+fi
 expect_failure unpinned-wide-requirement \
     'sed -i "s/=1.6.1/^1.6/" "$root/Cargo.toml"'
 expect_failure unpinned-wide-lock \
