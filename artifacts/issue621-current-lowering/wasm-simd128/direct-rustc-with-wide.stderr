@@ -1,0 +1,8 @@
+error: extern location for lane does not exist: /tmp/issue621-wasm-simd128-obj-target/wasm32-unknown-unknown/release/deps/liblane-0c4265b5665c8cae6.rlib
+  --> crates/true-peak-limiter/src/corpus.rs:28:5
+   |
+28 | use lane::Lane;
+   |     ^^^^
+
+error: aborting due to 1 previous error
+

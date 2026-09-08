@@ -1,0 +1,405 @@
+{
+  "artifact_files": {
+    "README.md": {
+      "bytes": 7624,
+      "sha256": "8fdcafa302a593c0b7d375809313c256b4a2acd8170e4cb5d5e346d0480a7b9b"
+    },
+    "native/cargo.status": {
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "native/cargo.stderr": {
+      "bytes": 747,
+      "sha256": "5394cc5f3dffb8f91ea9ad9926bae7d3c33fb75d64b61da7d5b5282937bbf04a"
+    },
+    "native/cargo.stdout": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "native/true_peak_limiter-61bcf0f0b2475b36.ll": {
+      "bytes": 8305644,
+      "sha256": "9f079efd01aa805f09a19c77e5d041f547014d6396e9d42d9e63085adf54ad2a"
+    },
+    "native/true_peak_limiter-61bcf0f0b2475b36.s": {
+      "bytes": 3992992,
+      "sha256": "6fdd01bd181e8c1f7e5c921c3fabb81a391e5884091665db43fa5d2d1a60bda0"
+    },
+    "selected/extract.status": {
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "selected/extract.stderr": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "selected/extract.stdout": {
+      "bytes": 14480,
+      "sha256": "f6dea9587b5dba76a13f77ea35574f9eeb3034ce7de76f1095d3f4235cd1ef1d"
+    },
+    "selected/manifest.json": {
+      "bytes": 14480,
+      "sha256": "f6dea9587b5dba76a13f77ea35574f9eeb3034ce7de76f1095d3f4235cd1ef1d"
+    },
+    "selected/native-scalar-core.ll": {
+      "bytes": 634112,
+      "sha256": "33206e2a9da826192605364a5a4f95635afeb3283ec33a08ccbc53abc0550391"
+    },
+    "selected/native-scalar-core.s": {
+      "bytes": 247725,
+      "sha256": "1d70be3ac3b71a40e810809d7e573a13cead2f849dedb664cdb7cf1b345e7882"
+    },
+    "selected/native-scalar-process.ll": {
+      "bytes": 3394,
+      "sha256": "0fd94f6752164fe54917542aa002be6be6e705e994483eadfe3cc3027ef85eb3"
+    },
+    "selected/native-scalar-process.s": {
+      "bytes": 2258,
+      "sha256": "a44b6316335b6344640f6869092bbac33b5831cd8aa457618804e8b19c25f404"
+    },
+    "selected/native-w8-core.ll": {
+      "bytes": 720711,
+      "sha256": "d8234a2e94a10cfec18f7ec296655d38629b142bb137c40762cc361be02e36c3"
+    },
+    "selected/native-w8-core.s": {
+      "bytes": 272347,
+      "sha256": "53172c91e32b6615df24b1b1d81a198a5309b600ca6428c9aa74d2347a5fd60d"
+    },
+    "selected/native-w8-process-bank-inner.ll": {
+      "bytes": 435231,
+      "sha256": "a572bc46ad4970f15b8c0ba4695823cf9426d66419317df940b645c5704d3d94"
+    },
+    "selected/native-w8-process-bank-inner.s": {
+      "bytes": 149147,
+      "sha256": "e6318358bcd5c8409561bf139c6711b99a3c663c4b9476ecd8eb9abe80a4833c"
+    },
+    "selected/native-w8-process-bank-mono.ll": {
+      "bytes": 1052,
+      "sha256": "51d9bef40cc0ecbfba5d07f52aa3565606b86c3fe00d2006c98798d8fd058b0c"
+    },
+    "selected/native-w8-process-bank-mono.s": {
+      "bytes": 1069,
+      "sha256": "7bda0c03a119d4eee58ff27a1d90bd701f7b70adc22b94302dccdd27ae05d3ae"
+    },
+    "selected/native-w8-process-bank.ll": {
+      "bytes": 21959,
+      "sha256": "d7491775108cdc8f1b5c27336881b5bb1dc12be155b3ad17a5192fb4ac4de01d"
+    },
+    "selected/native-w8-process-bank.s": {
+      "bytes": 11149,
+      "sha256": "fa31442d61eecc7cf94b36a98ba40c994a156d76f6ef4f68893a51b39fe230da"
+    },
+    "selected/wasm-scalar-scalar-core.ll": {
+      "bytes": 676911,
+      "sha256": "5aeac5e92f63632dec4ce9d650ee40f4a4517a33caf32e42cdf6b76a62487c8b"
+    },
+    "selected/wasm-scalar-scalar-core.s": {
+      "bytes": 297079,
+      "sha256": "a40d02527c83d0259b61c5e6f8b0f25412f114d94e061daabceff16211ad3f2c"
+    },
+    "selected/wasm-scalar-scalar-process.ll": {
+      "bytes": 3408,
+      "sha256": "fef47eae1196a956832b509dcba1c1ed8f4c8d587edebf553062b334a79f36e4"
+    },
+    "selected/wasm-scalar-scalar-process.s": {
+      "bytes": 2050,
+      "sha256": "d1356e163368c29586e4e194a6b1e2655a58f0b4cb02721f45824d1b87fef66d"
+    },
+    "selected/wasm-simd128-scalar-core.ll": {
+      "bytes": 682866,
+      "sha256": "ed3ca37530a5feb87ede01a6e58c6b570144296f2f59b9c60da30d7ae2d7a9ef"
+    },
+    "selected/wasm-simd128-scalar-core.s": {
+      "bytes": 296838,
+      "sha256": "2bfa8b9672d7c6dc0a93cbbd9dbd9e6bf5270e422f33152e241f90886b0f2b88"
+    },
+    "selected/wasm-simd128-scalar-process.ll": {
+      "bytes": 3411,
+      "sha256": "93d604a377668e3a62c0b80209c5099b42ddc04577bb767a76f16a195e8a0418"
+    },
+    "selected/wasm-simd128-scalar-process.s": {
+      "bytes": 1954,
+      "sha256": "61900d0c6e2507c880d2086331dd5dcc993a7ea43a2ebf3e51fd0aa2c005e7dc"
+    },
+    "selected/wasm-simd128-w4-core-mono.ll": {
+      "bytes": 413932,
+      "sha256": "f01c1fcfb96ca1df976a67efad8c15aadaa2ad802a5f369b43df6b0a9260cbf1"
+    },
+    "selected/wasm-simd128-w4-core-mono.s": {
+      "bytes": 172053,
+      "sha256": "6f1dc72fabd34036e6c72eaa01ef9b947701e3267e214dfe8329a8f26510ed92"
+    },
+    "selected/wasm-simd128-w4-core.ll": {
+      "bytes": 723443,
+      "sha256": "29e91f00d7c11908071eb337715169de301f51b127e1db5020ec13c5733f7c7a"
+    },
+    "selected/wasm-simd128-w4-core.s": {
+      "bytes": 335920,
+      "sha256": "68070443bfaa79cd5745a1ae2d9dd19b74907f80577ec95ef0907f5709dbae5e"
+    },
+    "selected/wasm-simd128-w4-process-bank-mono.ll": {
+      "bytes": 12918,
+      "sha256": "32efefe4c77aa533fc148d4e656feef237668325d455b5813d505c8abd608b26"
+    },
+    "selected/wasm-simd128-w4-process-bank-mono.s": {
+      "bytes": 6208,
+      "sha256": "6715886b964a2d6ce3949c72cabe66c112c66038d03cbbd8647bd9d215ba7db7"
+    },
+    "selected/wasm-simd128-w4-process-bank.ll": {
+      "bytes": 13351,
+      "sha256": "b81db5a4e907b39132cb4137a014be78eb5f5222caa83f3ddf99a2d8283cd950"
+    },
+    "selected/wasm-simd128-w4-process-bank.s": {
+      "bytes": 6261,
+      "sha256": "833868c2183582a0cc06646fa77acc209aeba0fd2218bccb5384a19b6ef727be"
+    },
+    "wasm-scalar/cargo.status": {
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "wasm-scalar/cargo.stderr": {
+      "bytes": 717,
+      "sha256": "8afdcfc220e1acef5f15528e111cdb165abb5d2e842ae13328587d6f6e1dcc0f"
+    },
+    "wasm-scalar/cargo.stdout": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "wasm-scalar/direct-rustc.status": {
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "wasm-scalar/direct-rustc.stderr": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "wasm-scalar/direct-rustc.stdout": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "wasm-scalar/direct-wasm-objdump.status": {
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "wasm-scalar/direct-wasm-objdump.stderr": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "wasm-scalar/direct-wasm-objdump.txt": {
+      "bytes": 6124987,
+      "sha256": "9d1d869690ab7d9ff1e4c8fd98713b9e45a15acb673ee49b4877c5d5d9e36577"
+    },
+    "wasm-scalar/object-cargo.status": {
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "wasm-scalar/object-cargo.stderr": {
+      "bytes": 717,
+      "sha256": "5ae599df4340bdf08f6972f69c191d0c4cea4ef5373c61d744fd768d773e6c75"
+    },
+    "wasm-scalar/object-cargo.stdout": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "wasm-scalar/object-nolto-cargo.status": {
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "wasm-scalar/object-nolto-cargo.stderr": {
+      "bytes": 717,
+      "sha256": "3b165cb7ad16caa097d1fe4b1fde69389f975a30c844831d45508126c925e8e5"
+    },
+    "wasm-scalar/object-nolto-cargo.stdout": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "wasm-scalar/true_peak_limiter-13565f343cd208d0.ll": {
+      "bytes": 2239211,
+      "sha256": "a452840f01d7dd3fd5105be3d086942342391823d84ca1219df2a4228e1bfde4"
+    },
+    "wasm-scalar/true_peak_limiter-13565f343cd208d0.s": {
+      "bytes": 1066576,
+      "sha256": "0b2d5a0d2ef2597a3e8e87d157c81260c9c395c032e84ac0b5cf3f911f2154b0"
+    },
+    "wasm-scalar/wasm-objdump.status": {
+      "bytes": 2,
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    "wasm-scalar/wasm-objdump.stderr": {
+      "bytes": 32,
+      "sha256": "88bc2fbdd3b642d1d04beb486c8b79a0623df57746b22ce4e60a980af04ce4d3"
+    },
+    "wasm-scalar/wasm-objdump.txt": {
+      "bytes": 1,
+      "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+    },
+    "wasm-simd128/cargo.status": {
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "wasm-simd128/cargo.stderr": {
+      "bytes": 717,
+      "sha256": "4744043fb5a91c5cef1bf4a822402331c673b191d780f787cc77f0004afef054"
+    },
+    "wasm-simd128/cargo.stdout": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "wasm-simd128/direct-rustc-with-wide.status": {
+      "bytes": 2,
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    "wasm-simd128/direct-rustc-with-wide.stderr": {
+      "bytes": 285,
+      "sha256": "0c891cf63dd27ce1465711f1fbc2ce85cde9a86bddeee4da0520e7eefbb85f1e"
+    },
+    "wasm-simd128/direct-rustc-with-wide.stdout": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "wasm-simd128/direct-rustc.status": {
+      "bytes": 2,
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    "wasm-simd128/direct-rustc.stderr": {
+      "bytes": 285,
+      "sha256": "0c891cf63dd27ce1465711f1fbc2ce85cde9a86bddeee4da0520e7eefbb85f1e"
+    },
+    "wasm-simd128/direct-rustc.stdout": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "wasm-simd128/direct-wasm-objdump.status": {
+      "bytes": 2,
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    "wasm-simd128/direct-wasm-objdump.stderr": {
+      "bytes": 63,
+      "sha256": "4231d5c0f723ce0e5517f8e5208bbac1a2f3f0a2b3034c9f6970371dc17c19f3"
+    },
+    "wasm-simd128/direct-wasm-objdump.txt": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "wasm-simd128/object-cargo.status": {
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "wasm-simd128/object-cargo.stderr": {
+      "bytes": 717,
+      "sha256": "cb0e440ef286be6c84ea4ccbcf599abf9066fa7ee7b42dccab02102ffff61e33"
+    },
+    "wasm-simd128/object-cargo.stdout": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "wasm-simd128/object-nobitcode-cargo.status": {
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "wasm-simd128/object-nobitcode-cargo.stderr": {
+      "bytes": 717,
+      "sha256": "dd3bcef476df1a283bd6a39e753a0ede3a8f8e4cada919f60983eda918dd53b2"
+    },
+    "wasm-simd128/object-nobitcode-cargo.stdout": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "wasm-simd128/object-nolto-cargo.status": {
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "wasm-simd128/object-nolto-cargo.stderr": {
+      "bytes": 717,
+      "sha256": "22d3b3efa3bf53e8d347466d2cda3d1c1c977d0f5fc82ddec3b0fbf1ad74c0a6"
+    },
+    "wasm-simd128/object-nolto-cargo.stdout": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "wasm-simd128/true_peak_limiter-c44b6d723c91aa0c.ll": {
+      "bytes": 5192843,
+      "sha256": "a8507cfb4b95d7788f03cdf9cc366b87c079e9d6618d7d86e40fc4dda58f1452"
+    },
+    "wasm-simd128/true_peak_limiter-c44b6d723c91aa0c.s": {
+      "bytes": 2551511,
+      "sha256": "fb8f70679bc702f99a0da651fa36555f761df1d244412d59f5db6fbc38569b0e"
+    },
+    "wasm-simd128/wasm-objdump.status": {
+      "bytes": 2,
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    "wasm-simd128/wasm-objdump.stderr": {
+      "bytes": 32,
+      "sha256": "88bc2fbdd3b642d1d04beb486c8b79a0623df57746b22ce4e60a980af04ce4d3"
+    },
+    "wasm-simd128/wasm-objdump.txt": {
+      "bytes": 1,
+      "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+    }
+  },
+  "branch": "codex/limiter-detector-chunk-bounds",
+  "capture": "current-source untimed compile/disassembly",
+  "captured_at_utc": "2026-09-08",
+  "head": "c46e7bc8f1e0ecb9b62b31d78f6d5c68558913ef",
+  "issue": 621,
+  "preserved_attempt_statuses": {
+    "native/cargo.status": 0,
+    "selected/extract.status": 0,
+    "wasm-scalar/cargo.status": 0,
+    "wasm-scalar/direct-rustc.status": 0,
+    "wasm-scalar/direct-wasm-objdump.status": 0,
+    "wasm-scalar/object-cargo.status": 0,
+    "wasm-scalar/object-nolto-cargo.status": 0,
+    "wasm-scalar/wasm-objdump.status": 1,
+    "wasm-simd128/cargo.status": 0,
+    "wasm-simd128/direct-rustc-with-wide.status": 1,
+    "wasm-simd128/direct-rustc.status": 1,
+    "wasm-simd128/direct-wasm-objdump.status": 1,
+    "wasm-simd128/object-cargo.status": 0,
+    "wasm-simd128/object-nobitcode-cargo.status": 0,
+    "wasm-simd128/object-nolto-cargo.status": 0,
+    "wasm-simd128/wasm-objdump.status": 1
+  },
+  "primary_command_statuses": {
+    "native-cargo": 0,
+    "wasm-scalar-cargo": 0,
+    "wasm-scalar-direct-rustc": 0,
+    "wasm-scalar-direct-wasm-objdump": 0,
+    "wasm-simd128-cargo": 0
+  },
+  "primary_commands": [
+    "env PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/issue621-native-target cargo rustc --locked --release -p true-peak-limiter --lib -- --emit=asm,llvm-ir",
+    "env PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/issue621-wasm-scalar-target RUSTFLAGS='-C target-feature=-simd128' cargo rustc --locked --release --target wasm32-unknown-unknown -p true-peak-limiter --lib -- --emit=asm,llvm-ir",
+    "env PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/issue621-wasm-simd128-target RUSTFLAGS='-C target-feature=+simd128' cargo rustc --locked --release --target wasm32-unknown-unknown -p true-peak-limiter --lib -- --emit=asm,llvm-ir",
+    "env PATH=/home/bl/.cargo/bin:$PATH rustc crates/true-peak-limiter/src/lib.rs --crate-name true_peak_limiter --crate-type lib --edition=2024 --target wasm32-unknown-unknown -C opt-level=3 -C debuginfo=2 -C codegen-units=1 -C lto=off -C target-feature=-simd128 -L dependency=/tmp/issue621-wasm-scalar-obj-target/wasm32-unknown-unknown/release/deps --extern effect_contract=/tmp/issue621-wasm-scalar-obj-target/wasm32-unknown-unknown/release/deps/libeffect_contract-13358b8752b643d2.rlib --extern effect_runtime=/tmp/issue621-wasm-scalar-obj-target/wasm32-unknown-unknown/release/deps/libeffect_runtime-7c0cdc7ee97647a2.rlib --extern lane=/tmp/issue621-wasm-scalar-obj-target/wasm32-unknown-unknown/release/deps/liblane-9bf4d776919e7431.rlib --extern math=/tmp/issue621-wasm-scalar-obj-target/wasm32-unknown-unknown/release/deps/libmath-17ed6f76bb3aff34.rlib --emit=obj=/tmp/issue621-wasm-scalar-direct.o",
+    "wasm-objdump -x -d /tmp/issue621-wasm-scalar-direct.o"
+  ],
+  "scope": [
+    "no source/spec/manifest/lock/dependency/host/lane/math/workflow edits",
+    "no benchmark or timing",
+    "no artifact promotion"
+  ],
+  "source_identity": {
+    ".cargo/config.toml": "03b0fbd88c069abb0a8fbdca5921ba6a9899298291fe087977b509a29ebb7d0e",
+    "Cargo.lock": "92db9698cc062bd5ccc0a90f0ee43f051d77ce7e52f785ce9718fae3f400b753",
+    "Cargo.toml": "471660ddca768e90ec87550807e140b4754454509f6f5f59986a80764b53effb",
+    "crates/true-peak-limiter/src/lib.rs": "677a5596a305039ddbed39d634cde80e90bf99d39439896b1d58a4a539d73b55",
+    "rust-toolchain.toml": "85a45cac04c296adac076f8f0609ca8f4c8ca658957f1f24cbd1e054b6cc44e0"
+  },
+  "temporary_target_dirs": [
+    "/tmp/issue621-native-target",
+    "/tmp/issue621-wasm-scalar-target",
+    "/tmp/issue621-wasm-simd128-target",
+    "/tmp/issue621-wasm-scalar-obj-target",
+    "/tmp/issue621-wasm-simd128-obj-target"
+  ],
+  "toolchain": {
+    "cargo": "cargo 1.97.1 (c980f4866 2026-06-30)",
+    "llvm": "22.1.6",
+    "native_target_features": "+avx2,+fma from .cargo/config.toml",
+    "release_profile": "lto=fat, codegen-units=1 from Cargo.toml",
+    "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+    "wasm_objdump": "1.0.34"
+  },
+  "worktree": "/home/bl/misofm/engine-limiter-detector-bounds"
+}
