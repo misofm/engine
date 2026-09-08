@@ -377,18 +377,23 @@ fn shutdown_render_is_allocation_free_and_stop_reclaims_lifecycle_off_render() {
 
     bench_alloc::assert_installed();
     let (_, _, resources) = endpoint_with_capacity(1);
+    let warm_arc = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));
+    drop(warm_arc);
     let lifecycle_mark = bench_alloc::current_thread_counters();
     let lifecycle = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));
     let lifecycle_delta = bench_alloc::current_thread_delta_since(lifecycle_mark);
-    assert!(lifecycle_delta.allocations >= 1);
-    assert!(lifecycle_delta.deallocations <= lifecycle_delta.allocations);
+    assert_eq!(lifecycle_delta.allocations, 1);
+    assert_eq!(lifecycle_delta.deallocations, 0);
+    assert_eq!(lifecycle_delta.reallocations, 0);
     assert!(
-        lifecycle_delta.requested_bytes >= resources.lifecycle_heap_bytes,
-        "independent Arc allocation covers the endpoint report"
+        lifecycle_delta.requested_bytes == resources.lifecycle_heap_bytes,
+        "independent Arc allocation matches the endpoint report"
     );
     drop(lifecycle);
     let lifecycle_freed = bench_alloc::current_thread_delta_since(lifecycle_mark);
-    assert_eq!(lifecycle_freed.deallocations, lifecycle_freed.allocations);
+    assert_eq!(lifecycle_freed.allocations, 1);
+    assert_eq!(lifecycle_freed.reallocations, 0);
+    assert_eq!(lifecycle_freed.deallocations, 1);
 
     let (mut control, mut render, _) = endpoint_with_capacity(1);
     audit::warm_up();
@@ -426,7 +431,7 @@ fn shutdown_render_is_allocation_free_and_stop_reclaims_lifecycle_off_render() {
             2,
             QUANTUM,
             QUANTUM,
-            SampleTime(QUANTUM as u64),
+            SampleTime(0),
         )
     })
     .expect("repeated shutdown render");

@@ -2106,7 +2106,7 @@ mod tests {
                     2,
                     128,
                     128,
-                    SampleTime(shutdown_sample + 128),
+                    SampleTime(shutdown_sample),
                 )
                 .expect("repeated quiescent render");
             assert_eq!(repeated, acknowledgment);
@@ -2161,6 +2161,52 @@ mod tests {
         let thread_released = bench_alloc::current_thread_delta_since(thread_mark);
         assert_eq!(thread_released.allocations, allocations);
         assert_eq!(thread_released.deallocations, allocations);
+    }
+
+    #[test]
+    fn lifecycle_arc_survives_control_drop_and_stop_until_off_render_drop() {
+        use bench_support::alloc as bench_alloc;
+        use std::sync::Arc;
+
+        bench_alloc::assert_installed();
+        let document = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
+        let compiled = crate::compile_host_session(document, &caps()).expect("compile fixture");
+        let (control, render, _) = prepare_builtin_batch_endpoint(
+            &compiled,
+            &caps(),
+            SessionRevision(42),
+            NonZeroUsize::new(1).unwrap(),
+        )
+        .expect("prepare")
+        .start()
+        .unwrap_or_else(|_| panic!("start"));
+        assert_eq!(Arc::strong_count(&render.lifecycle), 2);
+        drop(control);
+        assert_eq!(Arc::strong_count(&render.lifecycle), 1);
+
+        let stopped = render.stop();
+        let StoppedBuiltinBatchRender {
+            plan,
+            delivery,
+            outcomes,
+            track_controls,
+            pending,
+            lifecycle,
+            fault,
+        } = stopped;
+        assert_eq!(Arc::strong_count(&lifecycle), 1);
+        drop(plan);
+        drop(delivery);
+        drop(outcomes);
+        drop(track_controls);
+        let _ = pending;
+        let _ = fault;
+        let mark = bench_alloc::current_thread_counters();
+        drop(lifecycle);
+        let delta = bench_alloc::current_thread_delta_since(mark);
+        assert_eq!(delta.allocations, 0);
+        assert_eq!(delta.reallocations, 0);
+        assert_eq!(delta.deallocations, 1);
     }
 
     #[test]
@@ -2252,10 +2298,10 @@ mod tests {
         .start()
         .unwrap_or_else(|_| panic!("start"));
 
-        let (intent_tx, intent_rx) = sync_channel(0);
-        let (release_tx, release_rx) = sync_channel(0);
-        control.hold_before_generic_begin_for_test(intent_tx, release_rx);
         let returned_control = std::thread::scope(|scope| {
+            let (intent_tx, intent_rx) = sync_channel(0);
+            let (release_tx, release_rx) = sync_channel(0);
+            control.hold_before_generic_begin_for_test(intent_tx, release_rx);
             let begin = scope.spawn(move || {
                 let result = control.begin_cancel();
                 (control, result)
@@ -2304,6 +2350,58 @@ mod tests {
         assert!(
             render
                 .render(&mut samples, 2, 128, 128, SampleTime(128))
+                .expect("retry boundary")
+                .cancellation_only
+        );
+        assert!(
+            control
+                .poll_cancel_boundary(retry)
+                .expect("retry poll")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn dropped_prepublication_release_rolls_back_without_hanging() {
+        use std::sync::mpsc::sync_channel;
+
+        let document = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
+        let compiled = crate::compile_host_session(document, &caps()).expect("compile fixture");
+        let (mut control, mut render, _) = prepare_builtin_batch_endpoint(
+            &compiled,
+            &caps(),
+            SessionRevision(42),
+            NonZeroUsize::new(1).unwrap(),
+        )
+        .expect("prepare")
+        .start()
+        .unwrap_or_else(|_| panic!("start"));
+
+        let (returned_control, result) = std::thread::scope(|scope| {
+            let (intent_tx, intent_rx) = sync_channel(0);
+            let (release_tx, release_rx) = sync_channel(0);
+            control.hold_before_generic_begin_for_test(intent_tx, release_rx);
+            let begin = scope.spawn(move || {
+                let result = control.begin_cancel();
+                (control, result)
+            });
+            intent_rx.recv().expect("intent rendezvous");
+            drop(release_tx);
+            begin.join().expect("begin worker join")
+        });
+        control = returned_control;
+        assert_eq!(result, Err(DeliveryError::Empty));
+        assert_eq!(control.lifecycle_state(), Ok(LifecycleState::Idle));
+        assert!(!control.cancellation_started);
+        assert_eq!(control.cancel_complete, None);
+        assert_eq!(control.cancel_token, None);
+        assert!(!control.cancel_completion_reported);
+
+        let retry = control.begin_cancel().expect("retry after dropped release");
+        let mut samples = [0.0_f32; 256];
+        assert!(
+            render
+                .render(&mut samples, 2, 128, 128, SampleTime(0))
                 .expect("retry boundary")
                 .cancellation_only
         );
