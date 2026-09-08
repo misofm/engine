@@ -44,3 +44,22 @@ Only after preflight PASS, Luna runs exactly once and in order, stopping on firs
 Preserve compact commands, actual statuses, streams, identities and stop state. Root checkpoints the exact-path evidence before further work. Astra LOW performs a no-rerun final evidence and exact-head/current-main review. Only after PASS may root open one PR, require repository `qualification`, verify live main immediately before guarded exact-head merge, verify merge parents and post-main qualification, synchronize and close this issue and #621, update #559/#560, and remove clean delivered predecessor/successor worktrees while preserving branches and upstream evidence.
 
 Attempt 1 alone is initially authorized after Astra LOW scope PASS. A failure receives no retry until Astra LOW records its evidence and explicitly briefs any lawful next attempt. No gate may be weakened.
+
+## Astra LOW scope review — PASS
+
+Astra LOW passed exact clean pushed head
+`6b59637a70340105f5c11b9a6a335e4aed1bd129` against live main `30680709`.
+Local and GitHub #621/#627/#628/#630 records synchronize; #627/#628 are closed
+without delivery and #621/#630 are the two active slots. The predecessor records,
+accepted source/promotion/output and retained install remain frozen.
+
+Root created the canonical five-field sole-executor lease at
+`/tmp/misofm-engine-issue630-attempt1-execution.lock/owner.txt`, SHA-256
+`dc84cbe3e36e8200643671d77cae6d0191b92da4fd5790f4515c0d6dfb661cc6`.
+It names only `/root/issue610_luna_xhigh`, this reviewed head and the exact scope
+spelling in the brief. Luna reads and parses this file as the sole authority.
+
+Luna XHIGH may now perform the read-only installed-state/output preflight and,
+only after PASS, the six named delivery checks once in order. It stops on first
+failure. No installation, predecessor qualification work, product edit, PR or
+merge is authorized before Astra LOW reviews the resulting evidence.
