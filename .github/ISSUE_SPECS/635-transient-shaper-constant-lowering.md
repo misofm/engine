@@ -158,3 +158,30 @@ The corrected evidence narrows the possible residual to individually mapped
 `DB_PER_OCTAVE`, `OCTAVES_PER_DB`, clamp, and selected `FLOOR` occurrences in
 the identified caller/loop bodies. Suggested Astra verdict: **CORRECTED
 EVIDENCE READY FOR ADVERSARIAL REVIEW; do not authorize stage 2 yet**.
+
+### Attempt 2 Astra verdict and final correction
+
+Astra LOW returned **FAIL** at exact clean pushed correction head
+`764ba327ceba0a5070c7aadb55bbf980216339e4`. Integrity, unchanged raw
+captures and payload identities, the corrected configuration hash, issue
+synchronization and narrow path ownership pass. Three pool-to-source mappings
+remain wrong:
+
+- native W8 `.LCPI5_3` is `0x1e3ce508`; `FLOOR` (`0x322bcc77`) is
+  `.LCPI5_4`, so the 10030/11256 FLOOR annotations are invalid;
+- native scalar `.LCPI6_23/.24` are `+/-18`, not `+/-24`;
+- native scalar `.LCPI6_26/.27` are `-126/+127` math-lowering range
+  constants, not FX4 clamps.
+
+Attempt 3 is the final #635 correction. It may only repair or remove those
+mappings from the existing verified payloads, exclude math constants, narrow
+the residual to the independently established `DB_PER_OCTAVE` and
+`OCTAVES_PER_DB` cases, refresh retained-evidence hashes, and preserve both
+prior FAIL verdicts plus all original capture bytes and identities. It may not
+compile, retry, edit product/tests/dependencies, run audio or timing, perform
+artifact work, open a PR, or merge.
+
+Regardless of the attempt-3 verdict, #635 owns no source implementation. On
+PASS it closes as the evidence/applicability slice and a separately numbered
+successor may brief the two octave-conversion constants. On FAIL it reaches
+the hard stop and must be respecified without weakening the evidence gates.
