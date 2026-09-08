@@ -62,3 +62,31 @@ Astra LOW returned **PASS** at exact clean pushed feature head
 is clean, and #621/#622 ownership is disjoint. Luna HIGH/XHIGH may begin the bounded first
 implementation pass in the four named source/test paths and issue evidence. Artifact applicability
 remains a separate root-owned decision after source PASS.
+
+## Luna HIGH attempt 1 checkpoint
+
+Luna HIGH changed exactly the four authorized source/test paths, and root checkpointed the coherent
+tranche as `fece7a2ccf5796da71a29168cd865b921bb0679f`. `host-core` now publicly re-exports
+`engine::LAUNCH_SAMPLE_RATES`; the host-owned raw array, unreachable `AnyLaunchRate` membership
+test, and dead `host.sample_rate.unsupported` outcome are removed. The two repository test consumers
+use the typed canonical entries. Focused coverage now sends all four canonical rates through
+`prepare_host_session`, keeps otherwise-valid adjacent-rate session diagnostics, and asserts ring
+rejection under both AnyLaunchRate and Exact policies while retaining the existing Exact rate and
+quantum mismatch cases.
+
+Luna reported focused host-core prepare debug/release 13 passed and 1 ignored per profile; complete
+host-core debug/release suites and doctests passed; parameter-metadata ABI layout debug passed 7/7;
+strict affected Clippy, formatting, diff, workspace, host-core and realtime policies passed. The live
+Rust scan found neither removed spelling and `Cargo.lock` is unchanged. A release-profile
+parameter-metadata ABI-layout command was attempted twice and failed during Cargo duplicate-output/
+crate resolution with E0463 for `effect_compiler`/`host_core`; it did not reach the test. This
+failure is preserved as reported and is not waived or classified as baseline. Astra LOW must
+independently review the exact pushed source, rerun only the proportional gates needed for its
+verdict, and decide whether that release failure is attributable to the tranche.
+
+Final SHA-256 values are `0bf7982674c44d07a62d54626f88b6e776ea1a3c8cfa91a5e5a5cb5f7c6bc341`
+for `crates/host-core/src/lib.rs`, `6a2befa5c5e6d7551943b080ce3667b20ff6e19d676c44f74d6f5c596852fc7e`
+for `crates/host-core/src/prepare.rs`, `171b9ff9a7bb889ddad47ad9dad09c54a4ce35b78d9003ddba86aff5475d828b`
+for `crates/host-core/tests/prepare.rs`, and `a4edd2cf03e0e894b9da06ee6722e846fed12b22ace13eed8b8616991a85b917`
+for `tools/parameter-metadata/tests/abi_layout.rs`. This is implementation evidence, not source or
+artifact acceptance.
