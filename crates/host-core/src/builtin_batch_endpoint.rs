@@ -6,6 +6,8 @@
 //! queues, and only finishes the ticket after the graph has rendered the block.
 
 use core::num::NonZeroUsize;
+use core::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Arc;
 
 use builtins_compiler::{TrackControlProducer, TrackControlRecord, TrackFaderRecord};
 use engine::realtime::{
@@ -194,11 +196,15 @@ pub struct BuiltinBatchResources {
     pub outcome: DeliveryResourceReport,
     /// Retained bytes reported by existing host preparation.
     pub host_builtin_retained_payload_bytes: u64,
-    /// Retained heap bytes added by the generic delivery and endpoint outcome queues.
+    /// Retained heap bytes added by the generic delivery, outcome queues, and lifecycle handshake.
     pub endpoint_retained_heap_bytes: u64,
+    /// The one prepared lifecycle handshake allocation charged to this endpoint.
+    pub lifecycle_heap_bytes: u64,
+    /// The two inline lifecycle handles retained by the control and render owners.
+    pub lifecycle_inline_handle_bytes: u64,
     /// Checked host-plus-endpoint retained heap composition.
     pub composed_retained_heap_bytes: u64,
-    /// Largest endpoint-owned retained heap allocation.
+    /// Largest endpoint-owned retained heap allocation, including the lifecycle handshake.
     pub largest_endpoint_heap_allocation_bytes: u64,
     /// Largest retained heap allocation reported by the unchanged host preparation.
     pub largest_host_engine_allocation_bytes: u64,
@@ -227,6 +233,60 @@ pub enum BuiltinBatchPrepareError {
     ResourceLimit,
 }
 
+/// The endpoint-local lifecycle states shared by its control and render owners.
+///
+/// The generic cancellation message carries only its token and frontier, so this small prepared
+/// handshake is the endpoint's bounded intent/classification channel.  Values are deliberately
+/// private to keep the state machine an implementation detail of the endpoint.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LifecycleState {
+    Idle = 0,
+    OrdinaryPending = 1,
+    ShutdownPending = 2,
+    ShutdownAcknowledged = 3,
+}
+
+const LIFECYCLE_FAULT: u8 = u8::MAX;
+
+impl LifecycleState {
+    fn from_byte(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::Idle),
+            1 => Some(Self::OrdinaryPending),
+            2 => Some(Self::ShutdownPending),
+            3 => Some(Self::ShutdownAcknowledged),
+            _ => None,
+        }
+    }
+}
+
+/// A terminal endpoint shutdown completion.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BuiltinBatchShutdownComplete {
+    /// The exact cancellation token accepted by [`BuiltinBatchControl::begin_shutdown`].
+    pub token: CoreCancelToken,
+    /// The frozen publication frontier captured by the generic delivery core.
+    pub frontier: Option<u64>,
+    /// The exact valid render boundary that acknowledged shutdown.
+    pub acknowledged_sample: SampleTime,
+}
+
+/// A typed refusal from the terminal shutdown API.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BuiltinBatchShutdownError {
+    /// The endpoint is already serving a reusable cancellation boundary.
+    CancellationPending,
+    /// Terminal shutdown was already accepted or completed.
+    ShutdownPending,
+    /// The supplied token does not identify the active shutdown.
+    StaleTicket,
+    /// The generic delivery core rejected publication or polling.
+    Delivery(DeliveryError),
+    /// A sticky render fault prevents terminal certification.
+    Fault,
+}
+
 /// Control-side owner of typed batch admission, cancellation and terminal collection.
 pub struct BuiltinBatchControl {
     delivery: DeliveryCoreControl<BuiltinBatch>,
@@ -245,6 +305,13 @@ pub struct BuiltinBatchControl {
     cancel_token: Option<CoreCancelToken>,
     cancel_completion_reported: bool,
     last_collected: Option<CoreTicket>,
+    lifecycle: Arc<AtomicU8>,
+    #[cfg(test)]
+    generic_begin_hold_sender: Option<std::sync::mpsc::SyncSender<()>>,
+    #[cfg(test)]
+    generic_begin_release_receiver: Option<std::sync::mpsc::Receiver<()>>,
+    #[cfg(test)]
+    fail_next_generic_begin: bool,
 }
 
 impl BuiltinBatchControl {
@@ -254,7 +321,10 @@ impl BuiltinBatchControl {
         &mut self,
         batch: BuiltinBatch,
     ) -> Result<CoreTicket, BuiltinBatchAdmissionError> {
-        if self.cancellation_started || self.cancel_complete.is_some() {
+        if self.cancellation_started
+            || self.cancel_complete.is_some()
+            || self.lifecycle.load(Ordering::Acquire) != LifecycleState::Idle as u8
+        {
             return Err(BuiltinBatchAdmissionError::Delivery {
                 batch,
                 error: DeliveryError::CancellationPending,
@@ -321,10 +391,21 @@ impl BuiltinBatchControl {
 
     /// Begin ordered cancellation of all accepted batches.
     pub fn begin_cancel(&mut self) -> Result<CoreCancelToken, DeliveryError> {
-        if self.cancellation_started || self.cancel_complete.is_some() {
+        if self.cancellation_started
+            || self.cancel_complete.is_some()
+            || self.lifecycle.load(Ordering::Acquire) != LifecycleState::Idle as u8
+        {
             return Err(DeliveryError::CancellationPending);
         }
-        let token = self.delivery.begin_cancel()?;
+        self.lifecycle
+            .store(LifecycleState::OrdinaryPending as u8, Ordering::Release);
+        let token = match self.begin_generic_cancel() {
+            Ok(token) => token,
+            Err(error) => {
+                self.rollback_begin_cancel();
+                return Err(error);
+            }
+        };
         self.cancellation_started = true;
         self.cancel_complete = None;
         self.cancel_token = Some(token);
@@ -341,7 +422,9 @@ impl BuiltinBatchControl {
             return Err(DeliveryError::StaleTicket);
         }
         if let Some(complete) = self.cancel_complete {
-            if self.outstanding != 0 {
+            if self.outstanding != 0
+                || self.lifecycle.load(Ordering::Acquire) != LifecycleState::Idle as u8
+            {
                 return Ok(None);
             }
             return self.finalize_cancel_completion(complete);
@@ -349,7 +432,9 @@ impl BuiltinBatchControl {
         let complete = self.delivery.poll_cancel_boundary(token)?;
         if let Some(complete) = complete {
             self.cancel_complete = Some(complete);
-            if self.outstanding == 0 {
+            if self.outstanding == 0
+                && self.lifecycle.load(Ordering::Acquire) == LifecycleState::Idle as u8
+            {
                 return self.finalize_cancel_completion(complete);
             }
         }
@@ -413,6 +498,131 @@ impl BuiltinBatchControl {
         self.outstanding
     }
 
+    fn lifecycle_state(&self) -> Result<LifecycleState, BuiltinBatchShutdownError> {
+        LifecycleState::from_byte(self.lifecycle.load(Ordering::Acquire))
+            .ok_or(BuiltinBatchShutdownError::Fault)
+    }
+
+    /// Begin terminal shutdown using one reserved generic cancellation boundary.
+    ///
+    /// Admission closes before the generic boundary message is published.  If that publication
+    /// fails, the endpoint returns to the reusable idle state without retaining any cancellation
+    /// fields from the failed attempt.
+    pub fn begin_shutdown(&mut self) -> Result<CoreCancelToken, BuiltinBatchShutdownError> {
+        match self.lifecycle_state()? {
+            LifecycleState::Idle => {
+                if self.cancellation_started || self.cancel_complete.is_some() {
+                    return Err(BuiltinBatchShutdownError::CancellationPending);
+                }
+            }
+            LifecycleState::OrdinaryPending => {
+                return Err(BuiltinBatchShutdownError::CancellationPending);
+            }
+            LifecycleState::ShutdownPending | LifecycleState::ShutdownAcknowledged => {
+                return Err(BuiltinBatchShutdownError::ShutdownPending);
+            }
+        }
+        self.lifecycle
+            .store(LifecycleState::ShutdownPending as u8, Ordering::Release);
+        let token = match self.begin_generic_cancel() {
+            Ok(token) => token,
+            Err(error) => {
+                self.rollback_begin_cancel();
+                return Err(BuiltinBatchShutdownError::Delivery(error));
+            }
+        };
+        self.cancellation_started = true;
+        self.cancel_complete = None;
+        self.cancel_token = Some(token);
+        self.cancel_completion_reported = false;
+        Ok(token)
+    }
+
+    fn begin_generic_cancel(&mut self) -> Result<CoreCancelToken, DeliveryError> {
+        #[cfg(test)]
+        {
+            if let Some(sender) = self.generic_begin_hold_sender.take() {
+                let _ = sender.send(());
+                if let Some(receiver) = self.generic_begin_release_receiver.take()
+                    && receiver.recv().is_err()
+                {
+                    return Err(DeliveryError::Empty);
+                }
+            }
+            if self.fail_next_generic_begin {
+                self.fail_next_generic_begin = false;
+                return Err(DeliveryError::Full);
+            }
+        }
+        self.delivery.begin_cancel()
+    }
+
+    fn rollback_begin_cancel(&mut self) {
+        self.lifecycle
+            .store(LifecycleState::Idle as u8, Ordering::Release);
+        self.cancellation_started = false;
+        self.cancel_complete = None;
+        self.cancel_token = None;
+        self.cancel_completion_reported = false;
+    }
+
+    #[cfg(test)]
+    fn hold_before_generic_begin_for_test(
+        &mut self,
+        sender: std::sync::mpsc::SyncSender<()>,
+        receiver: std::sync::mpsc::Receiver<()>,
+    ) {
+        self.generic_begin_hold_sender = Some(sender);
+        self.generic_begin_release_receiver = Some(receiver);
+    }
+
+    #[cfg(test)]
+    fn fail_next_generic_begin_for_test(&mut self) {
+        self.fail_next_generic_begin = true;
+    }
+
+    /// Poll terminal shutdown until render acknowledgement and all accepted terminals exist.
+    pub fn poll_shutdown(
+        &mut self,
+        token: CoreCancelToken,
+    ) -> Result<Option<BuiltinBatchShutdownComplete>, BuiltinBatchShutdownError> {
+        if self.cancel_token != Some(token) {
+            return Err(BuiltinBatchShutdownError::StaleTicket);
+        }
+        match self.lifecycle_state()? {
+            LifecycleState::ShutdownPending | LifecycleState::ShutdownAcknowledged => {}
+            LifecycleState::OrdinaryPending => {
+                return Err(BuiltinBatchShutdownError::CancellationPending);
+            }
+            LifecycleState::Idle => return Err(BuiltinBatchShutdownError::StaleTicket),
+        }
+        if self.cancel_completion_reported {
+            return Err(BuiltinBatchShutdownError::StaleTicket);
+        }
+        if self.cancel_complete.is_none() {
+            let complete = self
+                .delivery
+                .poll_cancel_boundary(token)
+                .map_err(BuiltinBatchShutdownError::Delivery)?;
+            if let Some(complete) = complete {
+                self.cancel_complete = Some(complete);
+            }
+        }
+        if self.lifecycle_state()? != LifecycleState::ShutdownAcknowledged
+            || self.cancel_complete.is_none()
+            || self.outstanding != 0
+        {
+            return Ok(None);
+        }
+        let complete = self.cancel_complete.expect("checked above");
+        self.cancel_completion_reported = true;
+        Ok(Some(BuiltinBatchShutdownComplete {
+            token: complete.token,
+            frontier: complete.frontier,
+            acknowledged_sample: complete.acknowledged_sample,
+        }))
+    }
+
     /// Borrow the existing host source control set retained by this endpoint.
     pub fn sources(&mut self) -> &mut SourceControlSet {
         &mut self.sources
@@ -433,6 +643,7 @@ pub struct PreparedBuiltinBatchRender {
     pending: Option<(CoreTicket, BuiltinBatch)>,
     quantum: u32,
     output_channels: usize,
+    lifecycle: Arc<AtomicU8>,
 }
 
 /// Thread-affine render owner with private raw builtin producers.
@@ -457,6 +668,7 @@ pub struct StartedBuiltinBatchRender {
     pending: Option<(CoreTicket, BuiltinBatch)>,
     quantum: u32,
     output_channels: usize,
+    lifecycle: Arc<AtomicU8>,
     fault: Option<BuiltinBatchRenderError>,
     #[cfg(test)]
     fail_after_graph: bool,
@@ -464,6 +676,10 @@ pub struct StartedBuiltinBatchRender {
     claim_hold_sender: Option<std::sync::mpsc::SyncSender<()>>,
     #[cfg(test)]
     claim_release_receiver: Option<std::sync::mpsc::Receiver<()>>,
+    #[cfg(test)]
+    classification_hold_sender: Option<std::sync::mpsc::SyncSender<()>>,
+    #[cfg(test)]
+    classification_release_receiver: Option<std::sync::mpsc::Receiver<()>>,
 }
 
 /// Result of one healthy endpoint render boundary.
@@ -473,6 +689,8 @@ pub struct BuiltinBatchRenderReport {
     pub graph: Option<engine::realtime::RenderReport>,
     /// True when this was a cancellation-only boundary and the graph was untouched.
     pub cancellation_only: bool,
+    /// True when this boundary permanently quiesced the endpoint for terminal shutdown.
+    pub shutdown: bool,
     /// The ticket claimed and applied at this boundary, if any.
     pub applied: Option<BuiltinBatchApplication>,
 }
@@ -514,6 +732,16 @@ impl StartedBuiltinBatchRender {
         self.claim_release_receiver = Some(receiver);
     }
 
+    #[cfg(test)]
+    fn hold_before_lifecycle_classification_for_test(
+        &mut self,
+        sender: std::sync::mpsc::SyncSender<()>,
+        receiver: std::sync::mpsc::Receiver<()>,
+    ) {
+        self.classification_hold_sender = Some(sender);
+        self.classification_release_receiver = Some(receiver);
+    }
+
     /// Render one prepared planar block and service cancellation before any builtin injection.
     pub fn render(
         &mut self,
@@ -525,6 +753,18 @@ impl StartedBuiltinBatchRender {
     ) -> Result<BuiltinBatchRenderReport, BuiltinBatchRenderError> {
         if let Some(fault) = self.fault {
             return Err(fault);
+        }
+        let Some(lifecycle) = LifecycleState::from_byte(self.lifecycle.load(Ordering::Acquire))
+        else {
+            return self.sticky(BuiltinBatchRenderError::Fault);
+        };
+        if lifecycle == LifecycleState::ShutdownAcknowledged {
+            return Ok(BuiltinBatchRenderReport {
+                graph: None,
+                cancellation_only: true,
+                shutdown: true,
+                applied: None,
+            });
         }
         let expected = self.plan.next_absolute_sample();
         if first.0 != expected {
@@ -547,13 +787,46 @@ impl StartedBuiltinBatchRender {
         match self.delivery.cancel_boundary(first) {
             Ok(()) => {
                 self.pending = None;
+                #[cfg(test)]
+                if let Some(sender) = self.classification_hold_sender.take() {
+                    let _ = sender.send(());
+                    if let Some(receiver) = self.classification_release_receiver.take()
+                        && receiver.recv().is_err()
+                    {
+                        return self.sticky(BuiltinBatchRenderError::Fault);
+                    }
+                }
+                let Some(state) = LifecycleState::from_byte(self.lifecycle.load(Ordering::Acquire))
+                else {
+                    return self.sticky(BuiltinBatchRenderError::Fault);
+                };
+                let next = match state {
+                    LifecycleState::OrdinaryPending => LifecycleState::Idle,
+                    LifecycleState::ShutdownPending => LifecycleState::ShutdownAcknowledged,
+                    LifecycleState::Idle | LifecycleState::ShutdownAcknowledged => {
+                        return self.sticky(BuiltinBatchRenderError::Fault);
+                    }
+                };
+                if self
+                    .lifecycle
+                    .compare_exchange(state as u8, next as u8, Ordering::AcqRel, Ordering::Acquire)
+                    .is_err()
+                {
+                    return self.sticky(BuiltinBatchRenderError::Fault);
+                }
                 return Ok(BuiltinBatchRenderReport {
                     graph: None,
                     cancellation_only: true,
+                    shutdown: next == LifecycleState::ShutdownAcknowledged,
                     applied: None,
                 });
             }
-            Err(DeliveryError::Empty) => {}
+            Err(DeliveryError::Empty) => {
+                // A control owner publishes the lifecycle intent before the generic boundary
+                // message.  A valid render call may therefore win this race and observe an empty
+                // cancellation queue.  Continue with the ordinary block; the next boundary will
+                // consume the message once publication becomes visible.
+            }
             Err(error) => return self.sticky(BuiltinBatchRenderError::Delivery(error)),
         }
         if self.pending.is_none() {
@@ -626,11 +899,17 @@ impl StartedBuiltinBatchRender {
         Ok(BuiltinBatchRenderReport {
             graph: Some(graph),
             cancellation_only: false,
+            shutdown: false,
             applied,
         })
     }
 
     fn sticky<T>(&mut self, error: BuiltinBatchRenderError) -> Result<T, BuiltinBatchRenderError> {
+        // Keep the existing one-byte prepared handshake as the ownership signal for a render
+        // fault.  The four valid lifecycle values remain unchanged; an invalid byte is already
+        // classified as Fault by the control owner, which prevents shutdown from certifying a
+        // boundary after irreversible render uncertainty.
+        self.lifecycle.store(LIFECYCLE_FAULT, Ordering::Release);
         self.fault = Some(error);
         Err(error)
     }
@@ -678,6 +957,7 @@ impl StartedBuiltinBatchRender {
             pending,
             quantum: _,
             output_channels: _,
+            lifecycle,
             fault,
             #[cfg(test)]
                 fail_after_graph: _,
@@ -685,6 +965,10 @@ impl StartedBuiltinBatchRender {
                 claim_hold_sender: _,
             #[cfg(test)]
                 claim_release_receiver: _,
+            #[cfg(test)]
+                classification_hold_sender: _,
+            #[cfg(test)]
+                classification_release_receiver: _,
         } = self;
         StoppedBuiltinBatchRender {
             plan: plan.stop(),
@@ -692,6 +976,7 @@ impl StartedBuiltinBatchRender {
             outcomes,
             track_controls,
             pending,
+            lifecycle,
             fault,
         }
     }
@@ -708,6 +993,7 @@ pub struct StoppedBuiltinBatchRender {
     outcomes: Producer<BuiltinBatchOutcome>,
     track_controls: Vec<TrackControlProducer>,
     pending: Option<(CoreTicket, BuiltinBatch)>,
+    lifecycle: Arc<AtomicU8>,
     fault: Option<BuiltinBatchRenderError>,
 }
 
@@ -750,6 +1036,21 @@ fn endpoint_queue_reports(
         .map_err(BuiltinBatchPrepareError::Delivery)?;
     let outcome_report = outcome_resource_report(ticket_capacity)?;
     Ok((delivery_report, outcome_report))
+}
+
+fn lifecycle_heap_bytes() -> Result<u64, BuiltinBatchPrepareError> {
+    // std::sync::Arc stores two atomic reference counts beside the prepared AtomicU8.  Keep this
+    // explicit and checked so the cap preflight accounts for the one allocation before host
+    // preparation can allocate anything.
+    u64::try_from(
+        core::alloc::Layout::new::<(
+            core::sync::atomic::AtomicUsize,
+            core::sync::atomic::AtomicUsize,
+            AtomicU8,
+        )>()
+        .size(),
+    )
+    .map_err(|_| BuiltinBatchPrepareError::ResourceLimit)
 }
 
 fn prepare_endpoint_queues(
@@ -841,6 +1142,13 @@ fn prepare_builtin_batch_endpoint_with_backend(
         .retained_payload_bytes
         .checked_add(outcome_report.retained_payload_bytes)
         .ok_or(BuiltinBatchPrepareError::ResourceLimit)?;
+    let lifecycle_bytes = lifecycle_heap_bytes()?;
+    let lifecycle_inline_handle_bytes = u64::try_from(
+        core::mem::size_of::<Arc<AtomicU8>>()
+            .checked_mul(2)
+            .ok_or(BuiltinBatchPrepareError::ResourceLimit)?,
+    )
+    .map_err(|_| BuiltinBatchPrepareError::ResourceLimit)?;
     let control_inline_bytes = u64::try_from(core::mem::size_of::<BuiltinBatchControl>())
         .map_err(|_| BuiltinBatchPrepareError::ResourceLimit)?;
     let prepared_render_inline_bytes =
@@ -858,8 +1166,12 @@ fn prepare_builtin_batch_endpoint_with_backend(
     let largest_inline_owner = control_inline_bytes
         .max(prepared_render_inline_bytes)
         .max(started_render_inline_bytes);
-    if endpoint_retained_bytes > caps.maximum_builtin_retained_bytes
-        || endpoint_largest > caps.maximum_named_allocation_bytes
+    let endpoint_with_lifecycle = endpoint_retained_bytes
+        .checked_add(lifecycle_bytes)
+        .ok_or(BuiltinBatchPrepareError::ResourceLimit)?;
+    let largest_with_lifecycle = endpoint_largest.max(lifecycle_bytes);
+    if endpoint_with_lifecycle > caps.maximum_builtin_retained_bytes
+        || largest_with_lifecycle > caps.maximum_named_allocation_bytes
     {
         return Err(BuiltinBatchPrepareError::ResourceLimit);
     }
@@ -892,11 +1204,11 @@ fn prepare_builtin_batch_endpoint_with_backend(
     } = queues;
     let retained_bytes = host_report
         .builtin_retained_payload_bytes
-        .checked_add(endpoint_retained_bytes)
+        .checked_add(endpoint_with_lifecycle)
         .ok_or(BuiltinBatchPrepareError::ResourceLimit)?;
     let largest = host_report
         .largest_engine_allocation_bytes
-        .max(endpoint_largest);
+        .max(largest_with_lifecycle);
     if retained_bytes > caps.maximum_builtin_retained_bytes
         || largest > caps.maximum_named_allocation_bytes
     {
@@ -904,6 +1216,7 @@ fn prepare_builtin_batch_endpoint_with_backend(
     }
     let track_count = u32::try_from(compiled.normalized_model().tracks.len())
         .map_err(|_| BuiltinBatchPrepareError::ResourceLimit)?;
+    let lifecycle = Arc::new(AtomicU8::new(LifecycleState::Idle as u8));
     Ok(PreparedBuiltinBatchEndpoint {
         control: delivery,
         outcomes: outcome_consumer,
@@ -914,6 +1227,7 @@ fn prepare_builtin_batch_endpoint_with_backend(
             Vec::new()
         },
         host,
+        lifecycle: Arc::clone(&lifecycle),
         render: PreparedBuiltinBatchRender {
             delivery: render_delivery,
             outcomes: outcome_producer,
@@ -921,6 +1235,7 @@ fn prepare_builtin_batch_endpoint_with_backend(
             pending: None,
             quantum: compiled.quantum().0,
             output_channels: usize::from(compiled.output_shape().channels),
+            lifecycle: Arc::clone(&lifecycle),
         },
         revision,
         quantum: compiled.quantum().0,
@@ -930,9 +1245,11 @@ fn prepare_builtin_batch_endpoint_with_backend(
             delivery: delivery_report,
             outcome: outcome_report,
             host_builtin_retained_payload_bytes: host_report.builtin_retained_payload_bytes,
-            endpoint_retained_heap_bytes: endpoint_retained_bytes,
+            endpoint_retained_heap_bytes: endpoint_with_lifecycle,
+            lifecycle_heap_bytes: lifecycle_bytes,
+            lifecycle_inline_handle_bytes,
             composed_retained_heap_bytes: retained_bytes,
-            largest_endpoint_heap_allocation_bytes: endpoint_largest,
+            largest_endpoint_heap_allocation_bytes: largest_with_lifecycle,
             largest_host_engine_allocation_bytes: host_report.largest_engine_allocation_bytes,
             largest_composed_heap_allocation_bytes: largest,
             inline_owner_bytes,
@@ -954,6 +1271,7 @@ pub struct PreparedBuiltinBatchEndpoint {
     meters: Vec<builtins_compiler::MeterConsumer>,
     host: PreparedHost,
     render: PreparedBuiltinBatchRender,
+    lifecycle: Arc<AtomicU8>,
     revision: SessionRevision,
     quantum: u32,
     track_count: u32,
@@ -980,6 +1298,7 @@ impl PreparedBuiltinBatchEndpoint {
             meters,
             host,
             render,
+            lifecycle,
             revision,
             quantum,
             track_count,
@@ -996,6 +1315,7 @@ impl PreparedBuiltinBatchEndpoint {
                         meters,
                         host,
                         render,
+                        lifecycle,
                         revision,
                         quantum,
                         track_count,
@@ -1012,6 +1332,7 @@ impl PreparedBuiltinBatchEndpoint {
             pending,
             quantum: render_quantum,
             output_channels,
+            lifecycle: render_lifecycle,
         } = render;
         debug_assert_eq!(render_quantum, quantum);
         let render = StartedBuiltinBatchRender {
@@ -1022,6 +1343,7 @@ impl PreparedBuiltinBatchEndpoint {
             pending,
             quantum,
             output_channels,
+            lifecycle: render_lifecycle,
             fault: None,
             #[cfg(test)]
             fail_after_graph: false,
@@ -1029,6 +1351,10 @@ impl PreparedBuiltinBatchEndpoint {
             claim_hold_sender: None,
             #[cfg(test)]
             claim_release_receiver: None,
+            #[cfg(test)]
+            classification_hold_sender: None,
+            #[cfg(test)]
+            classification_release_receiver: None,
         };
         let control = BuiltinBatchControl {
             delivery: control,
@@ -1037,6 +1363,7 @@ impl PreparedBuiltinBatchEndpoint {
             quantum,
             track_count,
             sources,
+            lifecycle,
             #[cfg(test)]
             meters,
             report,
@@ -1047,6 +1374,12 @@ impl PreparedBuiltinBatchEndpoint {
             cancel_token: None,
             cancel_completion_reported: false,
             last_collected: None,
+            #[cfg(test)]
+            generic_begin_hold_sender: None,
+            #[cfg(test)]
+            generic_begin_release_receiver: None,
+            #[cfg(test)]
+            fail_next_generic_begin: false,
         };
         Ok((control, render, resources))
     }
@@ -1151,8 +1484,11 @@ mod tests {
             render.render(&mut samples, 2, 128, 128, SampleTime(0)),
             Err(BuiltinBatchRenderError::Fault)
         );
-        let cancel = control.begin_cancel().expect("cancel after fault");
-        assert_eq!(control.poll_cancel_boundary(cancel), Ok(None));
+        assert_eq!(
+            control.begin_cancel(),
+            Err(DeliveryError::CancellationPending),
+            "sticky render fault retains endpoint ownership"
+        );
         assert_eq!(control.collect(ticket), Err(DeliveryError::Empty));
         assert_eq!(control.outstanding(), 1);
     }
@@ -1591,6 +1927,7 @@ mod tests {
             );
             let source_left = [0.25_f32; 128];
             let source_right = [-0.5_f32; 128];
+            let mut last_ticket = None;
             for (block, records) in schedule.iter().enumerate() {
                 let submission = crate::SourceSubmission {
                     generation: 1,
@@ -1632,6 +1969,7 @@ mod tests {
                 )
                 .expect("batch");
                 let ticket = control.try_publish(batch).expect("ticket");
+                last_ticket = Some(ticket);
                 let mut reference_output = [0.0_f32; 256];
                 let mut endpoint_output = [0.0_f32; 256];
                 test_only_reset_fader_matrix_witness();
@@ -1718,6 +2056,64 @@ mod tests {
                 control.collect(ticket).expect("collect");
                 assert_eq!(control.outstanding(), 0);
             }
+            let shutdown_sample = (schedule.len() as u64) * 128;
+            let plan_time_before = render.plan.next_absolute_sample();
+            let state_before = test_only_scalar_state_trace();
+            let witness_before = test_only_fader_matrix_witness();
+            let shutdown = control.begin_shutdown().expect("shutdown begin");
+            assert_eq!(control.poll_shutdown(shutdown), Ok(None));
+            let mut shutdown_output = [f32::from_bits(0x3f4a_7c15); 256];
+            let shutdown_bits = shutdown_output
+                .iter()
+                .map(|sample| sample.to_bits())
+                .collect::<Vec<_>>();
+            let acknowledgment = render
+                .render(
+                    &mut shutdown_output,
+                    2,
+                    128,
+                    128,
+                    SampleTime(shutdown_sample),
+                )
+                .expect("shutdown acknowledgement");
+            assert!(acknowledgment.shutdown);
+            assert!(acknowledgment.cancellation_only);
+            assert!(acknowledgment.graph.is_none());
+            assert_eq!(
+                shutdown_output
+                    .iter()
+                    .map(|sample| sample.to_bits())
+                    .collect::<Vec<_>>(),
+                shutdown_bits,
+                "shutdown acknowledgement leaves caller PCM untouched"
+            );
+            assert_eq!(render.plan.next_absolute_sample(), plan_time_before);
+            assert_eq!(test_only_scalar_state_trace(), state_before);
+            assert_eq!(test_only_fader_matrix_witness(), witness_before);
+            assert_eq!(
+                control.poll_shutdown(shutdown),
+                Ok(Some(BuiltinBatchShutdownComplete {
+                    token: shutdown,
+                    frontier: last_ticket.map(|ticket| ticket.serial),
+                    acknowledged_sample: SampleTime(shutdown_sample),
+                }))
+            );
+            let repeated_bits = [f32::from_bits(0x3f11_22aa); 256];
+            let mut repeated_output = repeated_bits;
+            let repeated = render
+                .render(
+                    &mut repeated_output,
+                    2,
+                    128,
+                    128,
+                    SampleTime(shutdown_sample),
+                )
+                .expect("repeated quiescent render");
+            assert_eq!(repeated, acknowledgment);
+            assert_eq!(repeated_output, repeated_bits);
+            assert_eq!(render.plan.next_absolute_sample(), plan_time_before);
+            assert_eq!(test_only_scalar_state_trace(), state_before);
+            assert_eq!(test_only_fader_matrix_witness(), witness_before);
             (selection,)
         };
 
@@ -1765,6 +2161,52 @@ mod tests {
         let thread_released = bench_alloc::current_thread_delta_since(thread_mark);
         assert_eq!(thread_released.allocations, allocations);
         assert_eq!(thread_released.deallocations, allocations);
+    }
+
+    #[test]
+    fn lifecycle_arc_survives_control_drop_and_stop_until_off_render_drop() {
+        use bench_support::alloc as bench_alloc;
+        use std::sync::Arc;
+
+        bench_alloc::assert_installed();
+        let document = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
+        let compiled = crate::compile_host_session(document, &caps()).expect("compile fixture");
+        let (control, render, _) = prepare_builtin_batch_endpoint(
+            &compiled,
+            &caps(),
+            SessionRevision(42),
+            NonZeroUsize::new(1).unwrap(),
+        )
+        .expect("prepare")
+        .start()
+        .unwrap_or_else(|_| panic!("start"));
+        assert_eq!(Arc::strong_count(&render.lifecycle), 2);
+        drop(control);
+        assert_eq!(Arc::strong_count(&render.lifecycle), 1);
+
+        let stopped = render.stop();
+        let StoppedBuiltinBatchRender {
+            plan,
+            delivery,
+            outcomes,
+            track_controls,
+            pending,
+            lifecycle,
+            fault,
+        } = stopped;
+        assert_eq!(Arc::strong_count(&lifecycle), 1);
+        drop(plan);
+        drop(delivery);
+        drop(outcomes);
+        drop(track_controls);
+        let _ = pending;
+        let _ = fault;
+        let mark = bench_alloc::current_thread_counters();
+        drop(lifecycle);
+        let delta = bench_alloc::current_thread_delta_since(mark);
+        assert_eq!(delta.allocations, 0);
+        assert_eq!(delta.reallocations, 0);
+        assert_eq!(delta.deallocations, 1);
     }
 
     #[test]
@@ -1838,5 +2280,250 @@ mod tests {
             assert!(second_completion.late);
             render_thread.join().expect("render join");
         });
+    }
+
+    #[test]
+    fn pending_lifecycle_intent_renders_normally_and_failed_begin_rolls_back() {
+        use std::sync::mpsc::sync_channel;
+
+        let document = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
+        let compiled = crate::compile_host_session(document, &caps()).expect("compile fixture");
+        let (mut control, mut render, _) = prepare_builtin_batch_endpoint(
+            &compiled,
+            &caps(),
+            SessionRevision(42),
+            NonZeroUsize::new(1).unwrap(),
+        )
+        .expect("prepare")
+        .start()
+        .unwrap_or_else(|_| panic!("start"));
+
+        let returned_control = std::thread::scope(|scope| {
+            let (intent_tx, intent_rx) = sync_channel(0);
+            let (release_tx, release_rx) = sync_channel(0);
+            control.hold_before_generic_begin_for_test(intent_tx, release_rx);
+            let begin = scope.spawn(move || {
+                let result = control.begin_cancel();
+                (control, result)
+            });
+            intent_rx.recv().expect("intent rendezvous");
+            let mut samples = [0.0_f32; 256];
+            let report = render
+                .render(&mut samples, 2, 128, 128, SampleTime(0))
+                .expect("pending intent remains renderable");
+            assert!(report.graph.is_some());
+            assert!(!report.cancellation_only);
+            release_tx.send(()).expect("publish release");
+            let (mut control, token) = begin.join().expect("begin join");
+            let token = token.expect("published ordinary token");
+            let boundary = render
+                .render(&mut samples, 2, 128, 128, SampleTime(128))
+                .expect("ordinary boundary");
+            assert!(boundary.cancellation_only);
+            assert!(!boundary.shutdown);
+            assert_eq!(
+                control.poll_cancel_boundary(token),
+                Ok(Some(CoreCancelComplete {
+                    token,
+                    frontier: None,
+                    acknowledged_sample: SampleTime(128),
+                }))
+            );
+            control
+        });
+        control = returned_control;
+
+        control.fail_next_generic_begin_for_test();
+        assert_eq!(
+            control.begin_cancel(),
+            Err(DeliveryError::Full),
+            "the injected publication failure is surfaced"
+        );
+        assert_eq!(control.lifecycle_state(), Ok(LifecycleState::Idle));
+        assert!(!control.cancellation_started);
+        assert_eq!(control.cancel_complete, None);
+        assert_eq!(control.cancel_token, None);
+        assert!(!control.cancel_completion_reported);
+
+        let retry = control.begin_cancel().expect("retry after rollback");
+        let mut samples = [0.0_f32; 256];
+        assert!(
+            render
+                .render(&mut samples, 2, 128, 128, SampleTime(128))
+                .expect("retry boundary")
+                .cancellation_only
+        );
+        assert!(
+            control
+                .poll_cancel_boundary(retry)
+                .expect("retry poll")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn dropped_prepublication_release_rolls_back_without_hanging() {
+        use std::sync::mpsc::sync_channel;
+
+        let document = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
+        let compiled = crate::compile_host_session(document, &caps()).expect("compile fixture");
+        let (mut control, mut render, _) = prepare_builtin_batch_endpoint(
+            &compiled,
+            &caps(),
+            SessionRevision(42),
+            NonZeroUsize::new(1).unwrap(),
+        )
+        .expect("prepare")
+        .start()
+        .unwrap_or_else(|_| panic!("start"));
+
+        let (returned_control, result) = std::thread::scope(|scope| {
+            let (intent_tx, intent_rx) = sync_channel(0);
+            let (release_tx, release_rx) = sync_channel(0);
+            control.hold_before_generic_begin_for_test(intent_tx, release_rx);
+            let begin = scope.spawn(move || {
+                let result = control.begin_cancel();
+                (control, result)
+            });
+            intent_rx.recv().expect("intent rendezvous");
+            drop(release_tx);
+            begin.join().expect("begin worker join")
+        });
+        control = returned_control;
+        assert_eq!(result, Err(DeliveryError::Empty));
+        assert_eq!(control.lifecycle_state(), Ok(LifecycleState::Idle));
+        assert!(!control.cancellation_started);
+        assert_eq!(control.cancel_complete, None);
+        assert_eq!(control.cancel_token, None);
+        assert!(!control.cancel_completion_reported);
+
+        let retry = control.begin_cancel().expect("retry after dropped release");
+        let mut samples = [0.0_f32; 256];
+        assert!(
+            render
+                .render(&mut samples, 2, 128, 128, SampleTime(0))
+                .expect("retry boundary")
+                .cancellation_only
+        );
+        assert!(
+            control
+                .poll_cancel_boundary(retry)
+                .expect("retry poll")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn ordinary_ack_before_classification_cannot_be_overtaken_by_shutdown() {
+        use std::sync::mpsc::sync_channel;
+
+        let document = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
+        let compiled = crate::compile_host_session(document, &caps()).expect("compile fixture");
+        std::thread::scope(|scope| {
+            let (control_tx, control_rx) = sync_channel(1);
+            let (step_tx, step_rx) = sync_channel(0);
+            let (report_tx, report_rx) = sync_channel(2);
+            let (classified_tx, classified_rx) = sync_channel(0);
+            let (release_tx, release_rx) = sync_channel(0);
+            let render_thread = scope.spawn(move || {
+                let (control, mut render, _) = prepare_builtin_batch_endpoint(
+                    &compiled,
+                    &caps(),
+                    SessionRevision(42),
+                    NonZeroUsize::new(1).unwrap(),
+                )
+                .expect("prepare")
+                .start()
+                .unwrap_or_else(|_| panic!("start"));
+                render.hold_before_lifecycle_classification_for_test(classified_tx, release_rx);
+                control_tx.send(control).expect("control handoff");
+                for first in [0_u64, 0_u64] {
+                    step_rx.recv().expect("render step");
+                    let mut samples = [0.0_f32; 256];
+                    report_tx
+                        .send(render.render(&mut samples, 2, 128, 128, SampleTime(first)))
+                        .expect("render report");
+                }
+            });
+            let mut control = control_rx.recv().expect("control owner");
+            let ordinary = control.begin_cancel().expect("ordinary begin");
+            step_tx.send(()).expect("ordinary step");
+            classified_rx.recv().expect("classification rendezvous");
+            assert_eq!(control.poll_cancel_boundary(ordinary), Ok(None));
+            assert_eq!(
+                control.begin_shutdown(),
+                Err(BuiltinBatchShutdownError::CancellationPending)
+            );
+            release_tx.send(()).expect("classification release");
+            let ordinary_report = report_rx
+                .recv()
+                .expect("ordinary report")
+                .expect("ordinary render");
+            assert!(ordinary_report.cancellation_only);
+            assert_eq!(
+                control
+                    .poll_cancel_boundary(ordinary)
+                    .expect("ordinary final poll")
+                    .expect("ordinary completion")
+                    .token,
+                ordinary
+            );
+
+            let shutdown = control.begin_shutdown().expect("shutdown begin");
+            step_tx.send(()).expect("shutdown step");
+            let shutdown_report = report_rx
+                .recv()
+                .expect("shutdown report")
+                .expect("shutdown render");
+            assert!(shutdown_report.shutdown);
+            let complete = control
+                .poll_shutdown(shutdown)
+                .expect("shutdown poll")
+                .expect("shutdown complete");
+            assert_eq!(complete.token, shutdown);
+            render_thread.join().expect("render join");
+        });
+    }
+
+    #[test]
+    fn sticky_render_fault_refuses_shutdown_and_retains_ticket_ownership() {
+        let document = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
+        let compiled = crate::compile_host_session(document, &caps()).expect("compile fixture");
+        let (mut control, mut render, _) = prepare_builtin_batch_endpoint(
+            &compiled,
+            &caps(),
+            SessionRevision(42),
+            NonZeroUsize::new(1).unwrap(),
+        )
+        .expect("prepare")
+        .start()
+        .unwrap_or_else(|_| panic!("start"));
+        let batch = BuiltinBatch::new(
+            SessionRevision(42),
+            SampleTime(0),
+            &[BuiltinBatchRecord::Fader {
+                track_index: 0,
+                record: TrackFaderRecord::Mute {
+                    lanes: BuiltinLaneSelector::Both,
+                    muted: true,
+                    smoothing_samples: 0,
+                },
+            }],
+        )
+        .expect("batch");
+        let ticket = control.try_publish(batch).expect("publish");
+        render.inject_post_graph_fault_for_test();
+        let mut samples = [0.0_f32; 256];
+        assert_eq!(
+            render.render(&mut samples, 2, 128, 128, SampleTime(0)),
+            Err(BuiltinBatchRenderError::Fault)
+        );
+        assert_eq!(
+            control.begin_shutdown(),
+            Err(BuiltinBatchShutdownError::Fault)
+        );
+        assert_eq!(control.outstanding(), 1);
+        assert_eq!(control.collect(ticket), Err(DeliveryError::Empty));
+        assert_eq!(control.outstanding(), 1);
     }
 }
