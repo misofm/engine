@@ -243,3 +243,30 @@ The substantial emitted-code expansion remains an **unmeasured tradeoff**. No ne
 This PASS accepts the bounded source/evidence slice. Ordinary native ABI, published-artifact and browser qualification on final source, exact PR-head/current-base review, required CI, merge, GitHub synchronization and eventual worktree removal remain pending.
 
 Review was read-only: no edits, builds, tests, mutations, benchmarks, captures, Git/GitHub writes, agents or report-file writes.
+
+## Resume after the global partial-finding barrier
+
+All eight partial findings across audit lanes A and B are delivered. Lane-B #608 merged as
+`9e113be98cf31c1eaf4297b0a031518244b71c33`, and post-main qualification `34199226167`
+completed SUCCESS at that exact merge. The #559 tracker records the cleared barrier.
+
+Resume from accepted attempt-2 source `82a42b5221a0a40d165bbb04b33f113ad5329b01` and clean pushed
+evidence head `620887208cc1d1c4120e98cefbb988f4265e4833`; do not restart or relabel the accepted
+optimization. Attempt 1 remains FAIL and counted, and attempt 2 remains PASS. The exact production
+and test ownership remains `crates/true-peak-limiter/src/lib.rs`,
+`crates/true-peak-limiter/tests/allocation.rs`, and
+`crates/true-peak-limiter/tests/mono_collapse.rs`, plus this spec and bounded final evidence.
+
+Per the user's current model routing, Astra LOW performs every scope, integration, artifact-
+applicability and delivery verification that would otherwise use Sol HIGH/XHIGH. Integrate current
+main and run proportional limiter, focused debug/release transition, private-oracle,
+allocation/liveness, deterministic corpus, strict Clippy/format, realtime/lane/workspace policy,
+supported host-web scalar/SIMD lowering and native ABI gates. Historical lowering evidence remains
+attributed to its original source; no rebuilt identity, benchmark, speedup or timing claim is
+authorized.
+
+Lane B owns the ordinary six-file AudioWorklet qualification at the frozen integrated source.
+Byte identity permits retained attribution. Drift requires a separately recorded artifact decision
+and the existing static/resource/hermetic/three-browser gates before any pin or consumer update.
+Lane A may not independently repin. Astra LOW exact clean resume-scope PASS is required before the
+integration tranche begins, followed by exact integrated-head/current-base PASS before PR delivery.
