@@ -3,4 +3,6 @@ requested output path was absent. The builder's retained stderr is:
 
 output must be an existing non-symlink directory
 
-The command was not retried. No post-pin identity or downstream gate was run.
+The command was not retried. The wrapper did not retain a numeric exit status;
+the observed result was nonzero. No post-pin identity or downstream gate was
+run.
