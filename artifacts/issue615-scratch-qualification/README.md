@@ -21,6 +21,11 @@ generated matrix lineage paragraph. Browser rows, versions, gates, resource valu
 expectations are unchanged. Raw command records, streams, statuses, overlay diffs, hashes and the
 qualification orchestration script are adjacent.
 
+The two complete final/second overlay captures are stored as deterministic `.gz` files. Their raw
+diff context contains single-space blank lines, so keeping them uncompressed makes Git's outer
+`diff --check` interpret captured evidence as repository trailing whitespace. Compression is
+lossless and does not alter the captured bytes.
+
 The generated six output files and Cargo build caches are intentionally omitted from committed
 evidence; `six-file.sha256` and `identity.json` preserve their exact identities. The repository
 checksum manifest covers every retained evidence file except itself.

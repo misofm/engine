@@ -130,3 +130,20 @@ declaration `445254e7…`, host JavaScript `21c8947d…`, worklet JavaScript `22
 six-file manifests and their empty comparison are preserved under `artifacts/issue615-postpin/`.
 No generated output or build target is committed. Astra LOW must run the bounded post-pin gates and
 review exact pushed head/current main before PR delivery.
+
+## Initial post-pin exact-head review — FAIL
+
+Astra LOW returned **FAIL** at exact clean pushed head
+`5cf6f9f690924115e4d5be7a9b93b553841382c7` only for evidence packaging. Static/object/ABI,
+resources/native witness and 26 mutations, hermetic checks, locked SDK install/package with 11
+tests, matrix check and formatting each passed once. The reviewer stopped before the remaining
+workspace/effect-runtime policy gates because outer `git diff --check origin/main...HEAD` found
+single-space context lines inside the two raw captured overlay diffs. Frozen ancestry, exact
+three-file promotion, unchanged results/resources, six post-pin hashes, 13/55/11-entry evidence
+manifests, lock/source invariance and absence of committed binaries/caches all passed.
+
+Root losslessly compressed only `final-overlay.diff` and `second-overlay.diff` with deterministic
+gzip and refreshed the scratch-evidence manifest. Original capture bytes decompress unchanged; no
+qualification command was rerun. Attempted source/artifact behavior remains accepted. Astra LOW
+must verify the corrected packaging, run only the policy gates that stopped before execution, and
+confirm exact head/current main before PR creation.
