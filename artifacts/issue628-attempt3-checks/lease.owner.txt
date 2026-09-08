@@ -1,0 +1,5 @@
+issue=628
+attempt=3-final
+owner=/root/issue583_luna_impl
+authorized_head=d9fd058c62767a0a6f5a9063b9111bc8833d58c7
+scope=sdk-installed-state-preflight,sdk-check,matrix-check,cargo-fmt,diff-hygiene,workspace-policy,effect-runtime-policy
