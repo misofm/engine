@@ -398,3 +398,19 @@ observed digest and empty census. No retry, qualification, browser, pin/lineage/
 edit, benchmark, timing or capture occurred. Retained attribution does not apply. A separately
 numbered lane-B successor must qualify this exact candidate and conditionally promote only the pin
 and two generated lineage surfaces before #539 can enter PR delivery.
+
+## Initial packaging and artifact-record review — FAIL
+
+Astra LOW returned **FAIL** at exact clean pushed head
+`c815f355a82e0c0bb00dd62375e6f9b7d4f639d1` only because the artifact README incorrectly labeled
+the invocation unauthorized while this spec recorded the explicit lane-B authorization. The 32-file
+lossless packaging, branch-wide diff check, all 13 decision checksums, raw build status/streams,
+observed digest, zero-output census, limiter identities and attempt accounting otherwise passed.
+
+The provenance ruling follows the recorded control flow: Astra LOW authorized one fresh ordinary
+build after integrated-source PASS; the first worker turn stopped before launch; root restored the
+clean pushed tree and explicitly authorized the still-unused build; the resumed worker rechecked
+HEAD/upstream and launched it once. The unauthorized label was an evidence-authoring error. Root
+corrected only that README and its checksum entry. No raw command, stream, status, digest, source,
+builder or qualification changed, and the build was not repeated. Corrected Astra LOW review is
+pending before the artifact successor may open.
