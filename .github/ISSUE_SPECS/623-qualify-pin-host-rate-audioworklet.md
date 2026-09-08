@@ -23,18 +23,19 @@ Create one isolated scratch checkout from the frozen source. It may first differ
 
 Compare the five non-Wasm files byte-for-byte with the delivered #619/PR #620 files and record all six hashes. Preserve exact argv, cwd, source/toolchain/config/input hashes, overlay diff, full streams/status, output census, comparison, and checksum manifest. Any non-Wasm difference stops for rescope.
 
-After exact candidate and five-file identity are established, the scratch checkout may also change only `hosts/host-web/qualification/results.json` fields `candidateCommit` and `wasmSha256`, then regenerate only `hosts/host-web/BROWSER_DEPLOYMENT_MATRIX.md` with the unchanged generator. Prove this overlay separately. Freeze all browser result rows, browser version floors, gate vocabulary, and resource values. These lineage changes are temporary qualification inputs, not repository edits.
+After exact candidate and five-file identity are established, the scratch checkout may also change only `hosts/host-web/qualification/results.json`: set `candidateCommit` exactly to `ca5a8b492a41ba85b3e90d8dedb2b49b787f2f00` and `wasmSha256` exactly to `ac71c64033b0cfc637cf14edcacaa6ed1b3bbf7093a5caa641ef84adea7e88e3`, then regenerate only `hosts/host-web/BROWSER_DEPLOYMENT_MATRIX.md` with the unchanged generator. Prove this overlay separately. Freeze all browser result rows, browser version floors, gate vocabulary, and resource values. These lineage changes are temporary qualification inputs, not repository edits.
 
 ## Qualification gates
 
 On that exact six-file candidate and scratch source, run the unchanged repository gates once:
 
 1. Shipped Wasm ABI/export/import/memory/realtime-callgraph/SIMD/static/metadata/vocabulary/resource checks with `scripts/check-web-audioworklet.sh`.
-2. Hermetic host/worklet policy and mutation checks with an isolated `CARGO_TARGET_DIR` through `scripts/test-web-audioworklet.sh`.
-3. Applicable SDK package/generated-surface checks, using locked installs only.
-4. Install only locked browser qualification dependencies with `npm ci --ignore-scripts`.
-5. Run exactly one Chromium, Firefox, and WebKit qualification against the candidate with matrix checking and self-test mutations. Preserve actual versions, AudioWorklet boot/control/observation/stall, native-corpus PCM identity, lineage, resources, and mutation outcomes.
-6. Verify the qualification output changes only candidate source/digest lineage. Browser outcome rows, version floors, gate vocabulary, and resource limits remain byte-equivalent except for generated lineage text.
+2. Run `python3 -B scripts/check-browser-expected-resources.py --artifacts <candidate-directory>` as a separate resource gate. Require native-witness agreement and all 26 red mutations; the shipped-artifact gate does not subsume this check.
+3. Hermetic host/worklet policy and mutation checks with an isolated `CARGO_TARGET_DIR` through `scripts/test-web-audioworklet.sh`.
+4. Applicable SDK package/generated-surface checks, using locked installs only.
+5. Install only locked browser qualification dependencies with `npm ci --ignore-scripts`.
+6. Run exactly one Chromium, Firefox, and WebKit qualification against the candidate with matrix checking and self-test mutations. Preserve actual versions, AudioWorklet boot/control/observation/stall, native-corpus PCM identity, lineage, resources, and mutation outcomes.
+7. Verify the qualification output changes only candidate source/digest lineage. Browser outcome rows, version floors, gate vocabulary, and resource limits remain byte-equivalent except for generated lineage text.
 
 Astra LOW must return scratch-candidate PASS over complete checksum-verified evidence before any repository pin or lineage edit.
 
@@ -43,14 +44,27 @@ Astra LOW must return scratch-candidate PASS over complete checksum-verified evi
 After candidate PASS, Luna HIGH/XHIGH may change only:
 
 - `hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256` to the approved candidate plus LF;
-- `hosts/host-web/qualification/results.json` only for `candidateCommit` and `wasmSha256`;
+- `hosts/host-web/qualification/results.json` only to set `candidateCommit` to `ca5a8b492a41ba85b3e90d8dedb2b49b787f2f00` and `wasmSha256` to `ac71c64033b0cfc637cf14edcacaa6ed1b3bbf7093a5caa641ef84adea7e88e3`;
 - `hosts/host-web/BROWSER_DEPLOYMENT_MATRIX.md` only through the unchanged generator, yielding matching lineage text;
 - this numbered spec/evidence as root-owned records.
 
 No Rust, JS/TS, ABI, metadata, browser result row, version floor, resource expectation, dependency, lockfile, toolchain/config, script, policy, workflow, corpus, fixture, DSP, session, SDK surface, or #621 file may change.
 
-Root checkpoints the exact promotion before further work. Run one ordinary no-bypass post-pin build from the clean pushed repository head and require exact six-file identity with the qualified scratch candidate. Run the proportional static/resource/hermetic/SDK, matrix, formatting/diff, workspace and effect-runtime gates without repeating successful browser qualification. Astra LOW then reviews exact pushed head/current main, frozen-source ancestry, evidence checksums, exact three-file promotion, unchanged rows/resources, pin/lineage, and post-pin identity.
+Root checkpoints the exact promotion before further work. Run one ordinary no-bypass post-pin build from the clean pushed repository head and require exact six-file identity with the qualified scratch candidate. Run the proportional static gate; the separate expected-resource/native-witness gate with all 26 red mutations; hermetic/SDK, matrix, formatting/diff, workspace and effect-runtime gates; and do not repeat successful browser qualification. Astra LOW then reviews exact pushed head/current main, frozen-source ancestry, evidence checksums, exact three-file promotion, unchanged rows/resources, pin/lineage, and post-pin identity.
 
 Open one PR only after exact-head/current-main Astra LOW PASS. Require the repository `qualification` check, verify live main immediately before guarded exact-head merge, verify merge parents and post-main qualification, synchronize and close #622/#623, update #559/#560, and remove the clean delivered #622/#623 worktrees while retaining branches/history/evidence.
 
 One scratch qualification and one Luna promotion attempt are initially authorized after scope and candidate PASS respectively. A candidate mismatch or substantive gate failure stops for reviewed rescope; do not retry builds, browsers, or timed work to obtain a green result. The repository three-attempt limit remains binding.
+
+## Astra LOW initial scope review — FAIL
+
+Astra LOW returned **FAIL** at exact clean pushed head
+`3b6b1f9b28101e7d4bd851f387ca3fc3e6130478`, live main
+`cf9e079cd5ef80d1c7284e9edd0ffcc90b0db335`, and synchronized tracker
+`c0c7ead3a3a7c3fe62d8be9d360d7799a3af764b`. All 19 parent probe checksums, status 1, candidate
+digest, zero-output census, ancestry, compiled-input identity, one-build design, promotion boundary,
+delivery controls, and #621 disjointness passed. The brief omitted the independent browser expected-
+resources/native-witness gate with its 26 red mutations and did not fix the two scratch/promoted
+lineage fields to exact values. Those requirements are now explicit above, including post-pin
+resource verification. No scratch qualification or repository promotion was authorized by this
+verdict.
