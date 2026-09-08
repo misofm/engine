@@ -214,3 +214,19 @@ resource/native, hermetic and three-browser workloads do not repeat because the 
 bytes, browser rows and numeric resources are frozen. Git retains compact identities, commands,
 statuses and conclusions only. Astra LOW must pass this brief before editing and must separately pass
 the pushed promotion checkpoint and final post-pin record before PR delivery.
+
+## Stage 3 Astra LOW scope review — PASS
+
+Astra passed the promotion scope at exact clean branch/upstream head
+`d39c2e9e2ec0a2ec39450bce08848f57e27afd73`. Hypatia alone may apply the exact reviewed
+three-path diff, verify byte equality with the scratch diff, and pause for root's exact-path
+checkpoint commit and push. Post-pin execution remains unauthorized until Astra reviews that
+checkpoint.
+
+Resource, hermetic and browser workloads may remain unrerun only if the later ordinary builder
+produces six files byte-identical to the reviewed candidate and source, gate scripts, dependencies,
+browser rows and resource/PCM expectations remain frozen. At checkpoint review the proposed output
+and evidence paths must both be absent, including dangling symlinks, before single-creation use; the
+output must start empty. The post-pin record must include named executor, head/upstream/cwd,
+toolchain/environment, exact commands, separate streams and statuses, and must stop before static
+checking if any six-file comparison fails.
