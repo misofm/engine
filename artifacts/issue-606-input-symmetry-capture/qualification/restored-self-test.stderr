@@ -1,0 +1,1 @@
+Expected nonzero child, marker, validator, publication, persistence, disposition, identity, overwrite, and dangling-path scenarios emitted their recovery diagnostics; the restored self-test process returned zero.

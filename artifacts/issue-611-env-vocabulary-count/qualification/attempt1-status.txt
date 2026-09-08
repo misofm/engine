@@ -1,0 +1,15 @@
+Issue 611 Luna XHIGH implementation and root checkpoint
+
+Changed:
+- scripts/test-env-vocabulary.sh: COUNT and COUNT_TR expected full-output population 114 -> 134
+
+Root reproduced:
+- bash scripts/check-env-vocabulary.sh: status 0, 134 names
+- bash scripts/test-env-vocabulary.sh: status 0
+
+Luna XHIGH also reported status 0 for:
+- check/test DSP research and builtins listening docs gates
+- git diff --check
+- issue607 capture and repository-root checksum manifests
+
+No build, preflight, prepared executable, runner, capture, retry, resume, or timing ran.

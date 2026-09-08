@@ -1,0 +1,1 @@
+Expected failure cases retained their diagnostics and recovery evidence; the unchanged guarded stub matrix returned zero.

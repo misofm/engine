@@ -1,0 +1,2 @@
+Compile-only release recipe completed with status 0 outside protected final artifact paths.
+Cargo emitted normal compile progress and finished: `Finished release profile [optimized + debuginfo] target(s) in 48.57s`.

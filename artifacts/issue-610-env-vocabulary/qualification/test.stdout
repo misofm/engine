@@ -1,0 +1,2 @@
+Git listing assertion: mode=error checker_status=1 partial_required=none
+Git listing assertion: mode=full checker_status=1 partial_required=scripts/check-env-vocabulary.sh

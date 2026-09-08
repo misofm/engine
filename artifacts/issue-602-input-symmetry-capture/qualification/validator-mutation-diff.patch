@@ -1,0 +1,5 @@
+--- /tmp/issue602-validator-before.py
++++ scripts/input-symmetry-capture-validator.py
+@@ -77 +77 @@
+-    if integer(record["schema_version"], "schema_version") != 1 or integer(record["issue"], "issue") != 602 or record["kind"] != "input_symmetry_capture":
++    if integer(record["schema_version"], "schema_version") != 1 or integer(record["issue"], "issue") != 601 or record["kind"] != "input_symmetry_capture":

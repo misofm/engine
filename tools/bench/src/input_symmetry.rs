@@ -14,7 +14,9 @@ use builtins_compiler::{
 use effect_compiler::{
     EffectCompileCaps, launch_native_effect_registry, prepare_native_session_effects,
 };
-use engine::realtime::{PlanarBufferMut, PreparedRenderPlan, RenderIo, RenderReport, RenderTime};
+use engine::realtime::{
+    PlanarBufferMut, PreparedRenderPlan, RenderError, RenderIo, RenderReport, RenderTime,
+};
 use graph::{
     GraphBindingBlock, GraphCompileCaps, GraphNodeBinding, GraphNodeId, GraphRuntimeBindings,
     GraphRuntimeProcessor, TrackStage,
@@ -24,18 +26,19 @@ use lane::Backend;
 use session::{CompileCaps, compile_session, parse_session_json};
 use std::num::NonZeroUsize;
 
-const SAMPLE_RATE_HZ: u32 = 48_000;
-const QUANTUM: usize = 128;
-const TRACKS: usize = 8;
-const RECORDS_PER_BLOCK: usize = 8;
-const QUEUE_CAPACITY: usize = 16;
-const PREPARATION_BLOCKS: u64 = 512;
-const QUALIFICATION_BLOCKS: u64 = 4096;
-const QUALIFICATION_PHASES: usize = 2;
-const SMOOTHING_SAMPLES: u32 = 256;
-const PLAN_ID: u64 = 600;
-const FIXTURE_ID: &str = "fixtures/session/v1/parametric-eq-bank-console.json";
-const FIXTURE: &str = include_str!("../../../fixtures/session/v1/parametric-eq-bank-console.json");
+pub(crate) const SAMPLE_RATE_HZ: u32 = 48_000;
+pub(crate) const QUANTUM: usize = 128;
+pub(crate) const TRACKS: usize = 8;
+pub(crate) const RECORDS_PER_BLOCK: usize = 8;
+pub(crate) const QUEUE_CAPACITY: usize = 16;
+pub(crate) const PREPARATION_BLOCKS: u64 = 512;
+pub(crate) const QUALIFICATION_BLOCKS: u64 = 4096;
+pub(crate) const QUALIFICATION_PHASES: usize = 2;
+pub(crate) const SMOOTHING_SAMPLES: u32 = 256;
+pub(crate) const PLAN_ID: u64 = 600;
+pub(crate) const FIXTURE_ID: &str = "fixtures/session/v1/parametric-eq-bank-console.json";
+pub(crate) const FIXTURE: &str =
+    include_str!("../../../fixtures/session/v1/parametric-eq-bank-console.json");
 
 // Filled from the connected independent oracle and then frozen in the qualification evidence.
 const REVIEWED_PHASE_DIGESTS: [&str; QUALIFICATION_PHASES] = [
@@ -72,7 +75,7 @@ impl GraphRuntimeProcessor for Identity {
     }
 }
 
-struct Owner {
+pub(crate) struct Owner {
     plan: PreparedRenderPlan,
     output: Box<[f32]>,
     controls: Vec<TrackControlProducer>,
@@ -89,18 +92,18 @@ struct Owner {
 }
 
 #[derive(Debug, Eq, PartialEq)]
-struct PhaseResult {
-    attempted: u64,
-    accepted: u64,
-    rendered: u64,
-    render_errors: u64,
-    output_words: u64,
-    nonzero_samples: u64,
-    digest: String,
+pub(crate) struct PhaseResult {
+    pub(crate) attempted: u64,
+    pub(crate) accepted: u64,
+    pub(crate) rendered: u64,
+    pub(crate) render_errors: u64,
+    pub(crate) output_words: u64,
+    pub(crate) nonzero_samples: u64,
+    pub(crate) digest: String,
 }
 
 impl Owner {
-    fn prepare() -> Self {
+    pub(crate) fn prepare() -> Self {
         let model = parse_session_json(FIXTURE).expect("issue 600 fixture parses");
         assert_eq!(model.sample_rate_hz, SAMPLE_RATE_HZ);
         assert_eq!(model.quantum_frames as usize, QUANTUM);
@@ -173,7 +176,7 @@ impl Owner {
         owner
     }
 
-    fn publish(&mut self) {
+    pub(crate) fn publish(&mut self) {
         let db = if self.block_index.is_multiple_of(2) {
             -6.0
         } else {
@@ -198,10 +201,23 @@ impl Owner {
         }
     }
 
-    fn render(&mut self) -> RenderReport {
+    pub(crate) fn render(&mut self) -> RenderReport {
+        self.render_observed(|plan, io, time| (0, plan.render(io, time)))
+            .1
+    }
+
+    pub(crate) fn render_observed<F>(&mut self, observe: F) -> (u64, RenderReport)
+    where
+        F: FnOnce(
+            &mut PreparedRenderPlan,
+            RenderIo<'_>,
+            RenderTime,
+        ) -> (u64, Result<RenderReport, RenderError>),
+    {
         let output = PlanarBufferMut::try_new(&mut self.output, 2, QUANTUM, QUANTUM)
             .expect("prepared output buffer");
-        let result = self.plan.render(
+        let (elapsed, result) = observe(
+            &mut self.plan,
             RenderIo {
                 input: None,
                 output,
@@ -232,10 +248,10 @@ impl Owner {
                 .checked_add((QUANTUM * 2) as u64)
                 .expect("word overflow");
         }
-        report
+        (elapsed, report)
     }
 
-    fn absorb(&mut self) {
+    pub(crate) fn absorb(&mut self) {
         for byte in self
             .output
             .iter()
@@ -245,14 +261,14 @@ impl Owner {
         }
     }
 
-    fn warmup(&mut self) {
+    pub(crate) fn warmup(&mut self) {
         for _ in 0..PREPARATION_BLOCKS {
             self.publish();
             self.render();
         }
     }
 
-    fn begin_phase(&mut self) {
+    pub(crate) fn begin_phase(&mut self) {
         self.active = true;
         self.attempted = 0;
         self.accepted = 0;
@@ -263,19 +279,16 @@ impl Owner {
         self.phase_digest = Sha256Sink::new();
     }
 
-    fn qualification_phase(&mut self, phase: usize) -> PhaseResult {
-        self.begin_phase();
-        for _ in 0..QUALIFICATION_BLOCKS {
-            self.publish();
-            self.render();
-            self.absorb();
-            let block_nonzero = self.output.iter().filter(|value| **value != 0.0).count() as u64;
-            self.nonzero_samples = self
-                .nonzero_samples
-                .checked_add(block_nonzero)
-                .expect("nonzero sample overflow");
-        }
-        let result = PhaseResult {
+    pub(crate) fn observe_nonzero(&mut self) {
+        let count = self.output.iter().filter(|value| **value != 0.0).count() as u64;
+        self.nonzero_samples = self
+            .nonzero_samples
+            .checked_add(count)
+            .expect("nonzero sample overflow");
+    }
+
+    pub(crate) fn phase_snapshot(&self) -> PhaseResult {
+        PhaseResult {
             attempted: self.attempted,
             accepted: self.accepted,
             rendered: self.rendered,
@@ -283,7 +296,18 @@ impl Owner {
             output_words: self.output_words,
             nonzero_samples: self.nonzero_samples,
             digest: self.phase_digest.snapshot_hex(),
-        };
+        }
+    }
+
+    pub(crate) fn qualification_phase(&mut self, phase: usize) -> PhaseResult {
+        self.begin_phase();
+        for _ in 0..QUALIFICATION_BLOCKS {
+            self.publish();
+            self.render();
+            self.absorb();
+            self.observe_nonzero();
+        }
+        let result = self.phase_snapshot();
         assert_eq!(
             result.attempted,
             QUALIFICATION_BLOCKS * RECORDS_PER_BLOCK as u64
