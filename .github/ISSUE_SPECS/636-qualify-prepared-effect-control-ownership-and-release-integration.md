@@ -162,3 +162,56 @@ already-pushed formatting correction, the disposition of contemporaneous
 provenance if any exists, and demonstrably unexecuted checks. Completed workloads
 must not be repeated, another release target must not be chosen, and terminal
 summaries alone must not be promoted into exact command/status claims.
+
+## Attempt 3 final verdict — FAIL; hard stop
+
+Astra LOW authorized only rustfmt check, diff hygiene and workspace policy at
+clean pushed `018c10b4b5c50c1f0f4b30883ba9156575211aaa`. Luna ran them once in
+that order; all three status files contain 0 and workspace policy reports
+`workspace policy: ok`. The temporary bundle nevertheless omitted standalone
+argv records, so the record claims only these bounded observed outcomes. The
+tree remained unchanged.
+
+Attempt 3 cannot replace the required release-integration gate, whose concurrent
+attempt-2 terminal stream still lacks contemporaneous command, environment,
+status, preflight and execution-head records. Astra LOW therefore returned final
+**FAIL**. The technically sound source oracle remains preserved, but #636 has
+reached its three-attempt ceiling. No fourth execution, reconstructed provenance
+or weakened gate is permitted.
+
+An untracked packager briefly copied full logs into gzip files under `artifacts/`.
+Root removed that untracked directory after verifying the review copies remain in
+`/tmp`; no full or compressed compiler/test stream entered Git. The successor may
+retain only compact commands, identities, statuses, hashes and test totals.
+
+#636 closes as superseded after this record is pushed and GitHub is synchronized.
+Its active slot transfers directly to a separately numbered release-integration
+qualification successor with frozen formatted source, no source edits, one named
+executor, one fresh predeclared absent target, and one fully recorded command-
+local-unwind release `track_delay` invocation.
+
+## Executor provenance reconciliation and final attempt 3 PASS
+
+After the no-credit record above was pushed, the Luna XHIGH executor supplied its
+exact command strings and numeric statuses from preserved records. Astra LOW ruled
+that this later executor provenance plus the byte-identical logs permits a
+documentation-only correction; the earlier caution remains preserved rather than
+silently rewritten. The compact record at `artifacts/issue636-attempt2-3/`
+distinguishes executor testimony from contemporaneous streams, identifies the
+focused uncommitted content later committed unchanged as `bbc96fb7`, and identifies
+the remaining attempt-2 execution at that clean commit. It makes no reconstructed
+raw-preflight claim.
+
+Attempt 2 remains **FAIL** because rustfmt returned 1 after the focused oracle,
+one-shot command-local unwind release integration, debug/release libraries and
+strict Clippy returned 0. Attempt 3 changed only the two formatter layouts in that
+diagnostic, reran none of the completed workloads, and passed rustfmt, workspace
+policy and diff hygiene. Astra LOW returned final source **PASS** at exact clean
+pushed `74108ec994a7647dedd6149df5de8550134228a5`. The causal correct-versus-crossed
+PCM oracle is sound and inherited production code is unchanged. Attempts 1 and 2
+remain FAIL; no additional source correction or release command is authorized.
+
+Before PR creation, Astra LOW must review the exact clean evidence/documentation
+head against current main, verify the inherited #633 production ancestry and
+scope, and classify artifact applicability separately. The command-local unwind
+result grants release-test qualification only and no shipped-artifact credit.
