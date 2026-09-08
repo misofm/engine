@@ -103,11 +103,19 @@ output, returned status 2 because this successor worktree lacks
 formatting, diff hygiene, workspace policy, and effect-runtime policy did not run.
 No product or prior evidence changed.
 
-Attempt 1 is **FAIL**. A bounded attempt-2 scope may use the existing locked SDK
-dependency state already created during the accepted #627 first scratch sequence,
-provided Astra LOW first proves that checkout's SDK/package/lock bytes equal this
-branch and the dependency state is the same retained install. It may then run the
-SDK check there against the preserved six-file output and, only on success, run
-the five remaining branch-local checks once. No install, builder, artifact/static/
-resource/hermetic/browser repeat, product edit, or retry is authorized before
-Astra LOW scope PASS.
+Attempt 1 is **FAIL**. Astra LOW reviewed its clean pushed evidence at
+`b7aa314a5073333acf8688b04038372fbdade7a4`: all eight checksums, lease,
+status 2, missing-dependency diagnostic, empty stdout, stop, and unchanged
+product state verify. Retained #627 SDK qualification is supporting evidence but
+does not replace the successor's expressly required delivery check.
+
+The corrected bounded attempt-2 scope may first verify unchanged SDK package
+manifests and lockfiles, then perform exactly one `npm ci --ignore-scripts` in
+this successor worktree's `sdk/` under a refreshed sole-executor lease. On
+success it may run the SDK check once against the preserved six-file output,
+followed once by matrix `--check`, Cargo formatting, branch diff hygiene,
+workspace policy, and effect-runtime policy. Stop on first failure. This single
+locked SDK install is the only exception to the successor's no-install boundary;
+reusing another worktree's dependency directory receives no credit. No builder,
+artifact/static/resource/hermetic/browser repeat, other install, product edit,
+PR, or merge is authorized before Astra LOW exact-head scope PASS.
