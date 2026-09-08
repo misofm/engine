@@ -78,3 +78,19 @@ delivery issues; only #666 executes artifact work. Required exact-head/current-
 main review, PR qualification, guarded merge, post-main qualification, GitHub
 synchronization, and clean delivered-worktree removal apply to both issues in
 dependency order.
+
+## Probe authorization
+
+Astra LOW returned **SCOPE PASS** at exact clean pushed head/upstream
+`1826766f974158a6f25882ad96d17782c2333b70`, current main/merge-base
+`1bcce704ca12d531cbdaec4b641acca302543426`, and tracker
+`75af15c0b2e050092de9660f256e401de0efe638`. GitHub #666 matches; only this
+brief differs from frozen source `e9c48b47`; both temporary paths are absent
+including symlinks; builder inspection confirms repin mode exits before artifact
+copying.
+
+Hypatia alone is authorized, after immediate identity/freshness and capture-
+control preflight, to run the single command exactly once with the required
+65-byte digest, empty-output, clean-tree, unchanged-pin, and verified-manifest
+checks. Stop on failure or concurrent drift. No retry, ordinary build, candidate,
+pin edit, SDK/browser qualification, or PR is authorized.
