@@ -52,3 +52,36 @@ After source PASS, the executor creates the matched counterfactual and runs the 
 Deallocation/reallocation counts are reported exactly but are not independently interpreted as live memory. The final record states observed counts and deltas without extrapolation, timing, percentage, peak-memory or 15–20k claims. Unstable counts, semantic drift, zero-control drift, missing reduction, a counterfactual build failure, or a harness/validator defect after one bounded correction stops the measurement and requires candid disposition; never weaken the gates or rerun for a favorable number.
 
 Astra LOW must pass the measurement evidence and compact decision record before ordinary exact-head/current-main PR review. The durable harness and validator may then deliver through required `qualification`, guarded merge and post-main success. This issue closes only the allocation qualification for #648’s prepared-effect handoff. CP1 remains open for schedule, PDC, cycle, reduction and buffer identities.
+
+## Astra LOW implementation-scope review — PASS
+
+Astra passed exact clean branch/upstream head
+`da0a8f6b2b95ecb5a2a30d8c414b5fcab690eb6c` against candidate main
+`4acfa4a1c25248e47bdd6bc14e34c9cb6ac43447` and synchronized tracker `c094ea14`.
+GitHub #650 is open with matching number, title and body; the branch delta is only this spec. #649
+remains disjoint.
+
+Hypatia's attempt 1 owns only the three named harness/dispatcher/validator paths. The positive control
+must exercise the installed allocator; only compilation may fall inside counter boundaries; corpus,
+program and bank identities must be frozen before measurement. The validator must also reject
+duplicate JSON keys, invalid numeric types or ranges, and trailing records. Unit and synthetic tests
+must not launch an official counted corpus.
+
+Run these pre-measurement gates once in order and stop on the first failure:
+
+```text
+cargo test --locked -p audit prepared_effect_allocations -- --test-threads=1
+python3 -B scripts/check-prepared-effect-allocation-records.py --self-test
+cargo test --locked -p audit
+cargo build --locked -p audit
+cargo clippy --locked -p audit --all-targets -- -D warnings
+cargo fmt --all --check
+git diff --check
+bash scripts/check-workspace-policy.sh
+bash scripts/check-bench-policy.sh
+```
+
+Root checkpoints and pushes the exact three-path source tranche before Astra source review. No
+official count, counterfactual worktree, production/dependency edit, timing, compiler payload or
+artifact work is authorized. Exact measurement commands, environment and fresh paths require a
+pushed post-source-PASS amendment and separate Astra review.
