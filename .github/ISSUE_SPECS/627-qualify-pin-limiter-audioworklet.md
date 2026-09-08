@@ -51,22 +51,7 @@ Open one PR only after Astra LOW exact-head/current-main PASS. Require repositor
 
 One applicability probe and, conditionally, one scratch qualification plus one Luna promotion attempt are initially authorized only after their preceding Astra LOW PASS. A candidate mismatch beyond the expected Wasm digest, substantive gate failure, or tooling defect stops for reviewed rescope; do not rerun builds or browsers to obtain a green result. The repository three-attempt rule remains binding.
 
-## Astra LOW initial scope review — FAIL
-
-Astra LOW returned **FAIL** at exact clean pushed brief
-`8961928817faf566084850285c8d4438cfda2695`, live main
-`30680709c58f0be99e09d006d8d661c1ce96324d`, parent #621 head `dc14ca85`, and
-tracker `454e621f`. Title/body synchronization, ancestry, frozen source, delivered
-pin/lineage, two-slot ownership, the bounded stage sequence, five-file identity,
-qualification gates, compact evidence, and delivery controls passed. The brief's
-model-routing sentence allowed Luna HIGH/XHIGH only to perform the conditional
-repository promotion, contradicting the intended Luna execution of the probe and
-scratch stages after separate Astra LOW authorization. The sentence above now
-permits Luna to execute each stage only after its preceding Astra LOW PASS. No
-probe, qualification, promotion, or other artifact command ran under this failed
-review.
-
-## Astra LOW scope review — PASS
+## Astra LOW initial scope review — PASS
 
 Astra LOW passed exact clean pushed brief
 `8961928817faf566084850285c8d4438cfda2695` against live main and merge-base
@@ -83,19 +68,48 @@ Exactly one ordinary no-bypass applicability build is authorized from frozen
 retry. A pin mismatch requires a separate Astra LOW review before scratch
 qualification. Promotion, PR, and merge remain unauthorized.
 
-## Astra LOW corrected scope review — PASS
+This initial review accepted root's stated artifact-qualification ownership and
+authorized root to launch that exact one-shot operation. It is distinct from
+the later routing review below.
 
-Astra LOW returned controlling **PASS** at exact clean pushed head
+## Astra LOW later routing review — FAIL
+
+A separate Astra LOW review then returned **FAIL** at the same exact brief
+`8961928817faf566084850285c8d4438cfda2695`, live main `30680709`, parent #621
+head `dc14ca85`, and tracker `454e621f`. Scope substance passed, but the brief
+allowed Luna HIGH/XHIGH only to perform conditional repository promotion rather
+than all later execution stages. Commit `da1f64ac3f05badce2a249b226fb520ba2ffcd4e`
+corrected the routing sentence. No operation was launched on the authority of
+this failed review.
+
+## Astra LOW corrected routing review — PASS
+
+Astra LOW returned **PASS** at exact clean pushed head
 `da1f64ac3f05badce2a249b226fb520ba2ffcd4e`, live main
 `30680709c58f0be99e09d006d8d661c1ce96324d`, and unchanged tracker
 `454e621f832affa4239ea89508b97adc088864a3`. The corrected routing sentence
-resolves the blocker: Luna HIGH/XHIGH may execute each probe, qualification, and
-promotion stage only after the preceding Astra LOW verdict separately authorizes
-that stage. The inherited PASS at the uncorrected `89619288` brief does not
-override the later adversarial FAIL; this corrected-head verdict is the fresh
-authorization.
+assigns probe, qualification, and promotion execution to Luna HIGH/XHIGH after
+each preceding Astra LOW authorization. It does not erase the distinct initial
+PASS or authorize a second probe.
 
-Exactly one ordinary no-bypass applicability probe may now run from frozen
-source `dc14ca856e10cb5ad7f6fdacb0ea9322342a9251`, preserving complete compact
-evidence and allowing no retry. Scratch qualification and repository promotion
-remain unauthorized pending separate Astra LOW reviews.
+Root launched the sole applicability probe under the initial PASS before seeing
+the concurrent routing FAIL/correction. It ran once from frozen `dc14ca85` and
+was not retried. Every subsequent qualification or promotion execution belongs
+to Luna HIGH/XHIGH. Scratch qualification and repository promotion remain
+unauthorized pending separate Astra LOW reviews.
+
+## Astra LOW mismatch-evidence review — documentation FAIL
+
+Astra LOW reviewed clean pushed evidence head
+`e440d62b1aa781c43c3b7e5f83a92e405720d77b` against main `30680709` and frozen
+source `dc14ca85`. All 16 manifest entries and input hashes verify. The one
+no-bypass invocation completed compilation, exited 1 solely on the pin mismatch,
+published zero files, and left source clean. Delivered digest is `ac71c640…` and
+candidate digest is `63ef81c105d50aed41164aa3c6c6f8853a314b99d642e209e7cc3aefe3bdbca1`.
+
+The evidence is technically valid and root execution does not invalidate its
+bytes. Review failed only because this spec and the evidence README had not
+recorded the distinct review chronology and executor attribution. This
+documentation-only correction changes no raw probe byte. Astra LOW confirmation
+is required before one Luna scratch qualification can be authorized; no probe
+rerun is permitted.

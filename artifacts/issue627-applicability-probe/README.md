@@ -1,8 +1,16 @@
 # Issue 627 applicability probe
 
-This directory preserves the single ordinary no-bypass AudioWorklet build
-authorized by Astra LOW after the scope PASS. The build ran from detached,
-clean source `dc14ca856e10cb5ad7f6fdacb0ea9322342a9251` and was not retried.
+This directory preserves the single ordinary no-bypass AudioWorklet build that
+root/Sol launched under Astra LOW's initial scope PASS and root's explicit
+artifact-qualification ownership. It ran from detached, clean source
+`dc14ca856e10cb5ad7f6fdacb0ea9322342a9251` and was not retried.
+
+A distinct concurrent Astra LOW review then failed the brief's execution-model
+routing and assigned subsequent execution stages to Luna HIGH/XHIGH. Root had
+already launched this one probe before seeing that correction. The corrected
+Luna authorization does not describe this probe's executor and does not permit
+a second probe. All scratch qualification and promotion execution belongs to
+Luna after its preceding Astra LOW authorization.
 
 The unchanged builder completed Cargo's release build, then exited 1 at its
 artifact pin comparison. It reported delivered pin
@@ -20,6 +28,7 @@ the tool versions, and `input-sha256.txt` bind the probe to its source,
 toolchain, configuration, builder, delivered artifact records, and frozen
 limiter implementation. `sha256sums.txt` covers every other retained file.
 
-This record establishes a candidate mismatch only. It does not qualify the
-candidate or authorize a scratch build, browser run, pin edit, or promotion.
-Astra LOW must independently review it first.
+This record establishes a candidate mismatch only. Astra LOW accepted its raw
+bytes and result while requiring the chronology correction above. It does not
+qualify the candidate or authorize a scratch build, browser run, pin edit, or
+promotion; a documentation-only Astra LOW confirmation remains required.
