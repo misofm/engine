@@ -95,3 +95,17 @@ capture is preserved and will not be rerun. Active replacement #610 owns only th
 `docs/ENGINE_ENV_VOCABULARY.md` plus its spec/evidence. #608/#610 are the two active issue slots and
 their paths are disjoint. Historical #607 scope statements above remain accurate for their recorded
 checkpoints.
+
+## Astra LOW final scope confirmation
+
+Astra LOW returned **PASS** at exact clean feature head/upstream
+`afd897596d8cc1e361bca126f6aebb2281dc1861`, main/merge-base
+`6fe8676e1537bc2c952ac87ee2fe31c545438474`, and synchronized tracker
+`8f8bd132381b577347febac38795613ea0e031f7`. GitHub #608 matched; #607 was closed and #610 open
+with disjoint documentation ownership. The second corrected ingress/replay gate and the other two
+residual gates are approved. No implementation attempt was consumed before this verdict.
+
+Tracker head `f835f685fb1aafbd94cdbd3f1c3b81582a8c3479` subsequently recorded only #610's Astra LOW scope
+authorization and preserves the same disjoint ownership. Luna HIGH/XHIGH attempt 1 may edit only
+`crates/host-core/tests/scalar_point_endpoint.rs`; production, other tests, #610 paths and artifacts
+remain frozen. Artifact probing remains deferred until source PASS.
