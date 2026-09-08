@@ -27,3 +27,22 @@ The correction must retain qualification's static route/result table and require
 Before implementation, Astra LOW must verify the two failure logs, unchanged product tree, current-main applicability, exact workflow insertion point, locked-fetch sufficiency, #635/#636 ownership and that no rerun is disguised as implementation evidence. Luna then makes one workflow-only tranche. Proportional local checks are YAML/diff hygiene plus existing qualification router/static-expectation policy and any directly applicable workflow-policy test; do not run product tests, builds, benchmarks, artifact builders or compiler captures locally.
 
 Astra must review the exact clean pushed source before a PR. Required PR qualification must pass at the exact reviewed head. Merge only under a fresh guarded Astra review with unchanged main/head and verify exact parents. The first new post-main qualification must pass without manual rerun. Then synchronize and close this issue and #635, and remove their clean delivered worktrees. If the dependency miss recurs, preserve it and stop; no further CI retry or gate weakening is allowed.
+
+## Astra LOW scope review — PASS
+
+Astra LOW passed exact clean pushed brief
+`81c010820c66ecc38cf503151e60692c6e8bc903` against main
+`d47b62ba0dfcaf5c1525510aaa7789fa8e0acb94`. The failed-job rerun reproduced the
+same uncached `wasi` dependency under the checker's locked, offline, all-target
+Cargo graph; the artifact download recovered. Host Clippy does not establish that
+all locked cross-target dependency sources are locally available.
+
+One Luna workflow-only tranche may add unconditional `cargo fetch --locked` in
+the existing lint/policy job immediately after pinned toolchain setup and before
+offline inspections. Do not add a target restriction. A fetch failure must fail
+the job. Keep the offline checker, cache keys/settings, router/verdict, manifests,
+lock and product bytes unchanged. Run only YAML parsing, diff hygiene, the existing
+qualification router/static-expectation policy, and directly applicable mutation
+tests locally. Exact-head Astra review, required PR CI, guarded merge and the first
+new post-main qualification all remain mandatory; do not rerun failed run
+`34250520726` again.
