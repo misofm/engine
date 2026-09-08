@@ -111,6 +111,21 @@ review is pending.
 ## Corrected Astra LOW scope review — PASS
 
 Astra LOW returned **PASS** at exact clean pushed head
+`f712caef0b6da4310a86b1bad1aab4bab3588acb`, live main `77368243` and tracker
+`b33a5692`. The corrected contract requires exactly one forwarding entry and arithmetic kernel, a
+direct call between them, zero counted vector/scalar arithmetic in the entry, and the unchanged
+kernel scalarization budget. Its independent scalar-wrapper negative closes the initial scope gap.
+
+All 28 retained #617 evidence hashes and the six preserved output hashes verify. Independent
+disassembly confirms wrapper 770 is 0/0 and directly calls collapsed core 756 at 440/0, distinct
+from dual core 755 at 880/0. #559/#560/#619 and the two-slot/path holds are synchronized. Luna HIGH
+or XHIGH may perform the single bounded tooling implementation attempt. No candidate static run,
+qualification continuation, builder, pin/lineage edit, PR or merge is authorized before Astra LOW
+source PASS.
+
+## Corrected Astra LOW scope review — PASS
+
+Astra LOW returned **PASS** at exact clean pushed head
 `f712caef0b6da4310a86b1bad1aab4bab3588acb`, main `77368243`, tracker `b33a5692`. Both trackers
 record #617 stopped, #539 passive and #619 active. Preserved candidate/evidence hashes and branch-
 wide diff hygiene pass.
