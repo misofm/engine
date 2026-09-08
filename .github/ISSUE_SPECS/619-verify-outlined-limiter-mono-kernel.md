@@ -198,3 +198,20 @@ five non-Wasm files retain their delivered CP8 hashes. The 13-entry checksum-ver
 `artifacts/issue619-postpin/`; generated outputs and build targets remain outside Git. No retry,
 browser, benchmark or timing ran. Astra LOW post-pin static/resource/hermetic/SDK and exact-head/
 current-main review remain required before PR delivery.
+
+## Initial post-pin review — FAIL; bounded environment continuation
+
+Astra LOW returned **FAIL** at exact clean pushed head
+`4691529d601d66ec56bfe56b8119ab79e19d0854`, live main/merge-base `77368243`. The 13-entry
+post-pin record, single builder invocation, exact six-file identity, accepted limiter/tooling bytes
+and frozen browser/resource rows pass. Post-pin static, resource/native-witness with 26 mutations,
+and hermetic gates each passed once. The SDK checker then refused with status 2 because
+`sdk/node_modules` was absent; later matrix, formatting, diff and policy gates did not run.
+
+The 20-entry checksum-verified stop record is under
+`artifacts/issue619-postpin-review-attempt1/`. This is an environment-preparation failure, with no
+source or artifact defect and no implementation revision. One bounded continuation is authorized:
+run locked `npm ci --ignore-scripts` in `sdk/` once, rerun only the refused SDK gate once, then run
+the previously unexecuted matrix, formatting/diff, workspace and effect-runtime policy checks.
+Do not repeat static, resource, hermetic, builder, browser qualification or any successful command.
+Astra LOW must review the combined record and exact current head before PR delivery.
