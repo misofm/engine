@@ -2,7 +2,7 @@
 
 ## Status
 
-Final evidence PASS; pending exact-head PR review. This is the evidence-first lane-A child for audit #559 finding FX4, based on delivered main `62045f40048ec230298fe0fd3935da3333f90b83`. It occupies the second active issue slot beside disjoint lane-B #633.
+Final evidence PASS; pending exact-head PR review. This is the evidence-first lane-A child for audit #559 finding FX4, based on delivered main `62045f40048ec230298fe0fd3935da3333f90b83`. It occupies one active issue slot beside disjoint lane-B qualification successor #636; #633 is closed as superseded.
 
 ## Problem
 
