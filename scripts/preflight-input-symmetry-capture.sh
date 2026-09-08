@@ -77,7 +77,12 @@ seal="$root/input-symmetry-capture.seal.json"
 mkdir -p "$qualification" "$prepared"
 
 export CARGO_TARGET_DIR="$repo/$prepared/target"
-export CARGO_ENCODED_RUSTFLAGS=$'-Ctarget-feature=+avx2,+fma\x1f-Copt-level=3\x1f-Clto=fat\x1f-Ccodegen-units=1\x1f-Cpanic=abort\x1f-Cdebuginfo=1'
+# Cargo's committed [profile.release] supplies opt-level=3, lto=fat,
+# codegen-units=1, panic=abort, and debug=1.  Only the pinned x86-64-v3
+# target features belong in the global Rust flags; applying LTO globally also
+# reaches Cargo build dependencies and conflicts with Cargo's embed-bitcode
+# handling.
+export CARGO_ENCODED_RUSTFLAGS=$'-Ctarget-feature=+avx2,+fma'
 cargo build --locked --release -p bench --bin bench
 binary="$CARGO_TARGET_DIR/release/bench"
 [[ -x "$binary" ]] || { echo "release binary missing" >&2; exit 1; }
