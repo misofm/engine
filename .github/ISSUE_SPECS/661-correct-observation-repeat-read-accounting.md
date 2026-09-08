@@ -109,3 +109,19 @@ removal.
 Only delivered #661 may release #659's final gate plan. #659 then reruns its
 release engine/target-smoke coverage and previously unexecuted gates under a fresh
 reviewed final-attempt scope; no #659 failure is rewritten.
+
+## Attempt 1 result
+
+Hypatia produced the one-file source checkpoint `27769c0d`. The deterministic
+control, debug and release stress tests, full debug and release `engine` plus
+`target-smoke` suites, and strict Clippy returned 0. Gate 7,
+`cargo fmt --all -- --check`, returned 1 because rustfmt requires the new import
+list to be reordered. The attempt stopped there; gates 8-11 did not run. An
+initial capture-wrapper invocation failed before Cargo because its evidence
+directory had not yet been created; the corrected evidence run then retained
+complete records for gates 1-7. The 23-file ordered `SHA256SUMS` manifest at
+`/tmp/issue661-attempt1-source-evidence` hashes to
+`b7eb1536a010b5c5b7aaf32b54fac919444406c1a545c7cf4f92f1c159f75b08`.
+No compiler payload or generated build output entered Git. Attempt 1 is FAIL;
+formatting correction and remaining gates require fresh Astra LOW attempt-2
+scope review.
