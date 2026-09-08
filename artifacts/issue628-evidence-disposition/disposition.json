@@ -1,0 +1,242 @@
+{
+  "issue": 628,
+  "kind": "documentation-evidence-disposition",
+  "execution": "none",
+  "feature_head": "06ce28d7588df0012a06022d5cc58341a236adc7",
+  "promotion_commit": "0bb5a820be33a49393386617358ec1db2fe7577d",
+  "obligations": {
+    "three_promoted_files_equal_accepted_scratch_overlay": {
+      "pass": true,
+      "accepted_overlay_record": "artifacts/issue627-scratch-qualification/final-overlay.diff.gz",
+      "accepted_overlay_sha256": "db8485f00051ba90bc1c3ac5e625565454a6140c9278d1e5f9a20a81e2445241",
+      "promotion_diff_sha256": "db8485f00051ba90bc1c3ac5e625565454a6140c9278d1e5f9a20a81e2445241",
+      "files": {
+        "hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256": "2469cf8aba762205e925851b5f30d53e62a8c9e808af364bab1c02bd87840068",
+        "hosts/host-web/qualification/results.json": "74aab52d69274942e1e9fc48e7e06f5831e4f850ff4d04c28c52328760311cf3",
+        "hosts/host-web/BROWSER_DEPLOYMENT_MATRIX.md": "48a6c1d1b91aa36b85831fa998ba6f2519b1382909751a27385fc79491feb666"
+      },
+      "diff_bytes": 2596
+    },
+    "final_postpin_six_files_equal_accepted_candidate": {
+      "pass": true,
+      "accepted_record": "artifacts/issue627-scratch-qualification/six-file.sha256",
+      "final_record": "artifacts/issue627-postpin-attempt3/02-output.sha256",
+      "accepted_hashes": {
+        "miso-engine-v1-abi-layout.json": "40f6fe2e23e1b47500011c14871750a75922ab194136add8b387a4b40eb56919",
+        "miso-engine-v1-audio-worklet-host.d.ts": "445254e7c6ddf3330bdf20cafa8cacec4d0e2489805f72a833859db52bc038cf",
+        "miso-engine-v1-audio-worklet-host.js": "21c8947d8aad2d1d9a23e553c2c7b983dbd5a622aabfbab9a41c622d1a50229a",
+        "miso-engine-v1-audio-worklet.js": "225bc06043ed6e2c62a38d63f1c2015b40480d673e3a53109c938eba481556cb",
+        "miso-engine-v1-audio-worklet.simd128.wasm": "63ef81c105d50aed41164aa3c6c6f8853a314b99d642e209e7cc3aefe3bdbca1",
+        "miso-engine-v1-parameter-metadata.json": "6eac2cb3e30931b6c01b10c63af4eedd2d59337274565a129c7a3f328a09938d"
+      },
+      "final_hashes": {
+        "miso-engine-v1-abi-layout.json": "40f6fe2e23e1b47500011c14871750a75922ab194136add8b387a4b40eb56919",
+        "miso-engine-v1-audio-worklet-host.d.ts": "445254e7c6ddf3330bdf20cafa8cacec4d0e2489805f72a833859db52bc038cf",
+        "miso-engine-v1-audio-worklet-host.js": "21c8947d8aad2d1d9a23e553c2c7b983dbd5a622aabfbab9a41c622d1a50229a",
+        "miso-engine-v1-audio-worklet.js": "225bc06043ed6e2c62a38d63f1c2015b40480d673e3a53109c938eba481556cb",
+        "miso-engine-v1-audio-worklet.simd128.wasm": "63ef81c105d50aed41164aa3c6c6f8853a314b99d642e209e7cc3aefe3bdbca1",
+        "miso-engine-v1-parameter-metadata.json": "6eac2cb3e30931b6c01b10c63af4eedd2d59337274565a129c7a3f328a09938d"
+      }
+    },
+    "accepted_gates_consumed_exact_output_and_overlay": {
+      "pass": true,
+      "command_record": "artifacts/issue627-scratch-qualification/commands.json",
+      "stages": [
+        "00-toolchain",
+        "01-build",
+        "02-matrix-generate",
+        "03-static",
+        "04-resources",
+        "05-hermetic",
+        "06-sdk-install",
+        "07-sdk",
+        "08-browser-install",
+        "09-browsers",
+        "10-matrix-check"
+      ],
+      "output_link_records": [
+        {
+          "name": "01-build",
+          "cwd": "/home/bl/misofm/engine-issue627-scratch",
+          "output_arg": true,
+          "status": 0,
+          "head": "dc14ca856e10cb5ad7f6fdacb0ea9322342a9251"
+        },
+        {
+          "name": "03-static",
+          "cwd": "/home/bl/misofm/engine-issue627-scratch",
+          "output_arg": true,
+          "status": 0,
+          "head": "dc14ca856e10cb5ad7f6fdacb0ea9322342a9251"
+        },
+        {
+          "name": "04-resources",
+          "cwd": "/home/bl/misofm/engine-issue627-scratch",
+          "output_arg": true,
+          "status": 0,
+          "head": "dc14ca856e10cb5ad7f6fdacb0ea9322342a9251"
+        },
+        {
+          "name": "06-sdk-install",
+          "cwd": "/home/bl/misofm/engine-issue627-scratch",
+          "output_arg": false,
+          "status": 0,
+          "head": "dc14ca856e10cb5ad7f6fdacb0ea9322342a9251"
+        },
+        {
+          "name": "07-sdk",
+          "cwd": "/home/bl/misofm/engine-issue627-scratch",
+          "output_arg": true,
+          "status": 0,
+          "head": "dc14ca856e10cb5ad7f6fdacb0ea9322342a9251"
+        },
+        {
+          "name": "09-browsers",
+          "cwd": "/home/bl/misofm/engine-issue627-scratch",
+          "output_arg": true,
+          "status": 0,
+          "head": "dc14ca856e10cb5ad7f6fdacb0ea9322342a9251"
+        }
+      ],
+      "overlay_record": "artifacts/issue627-scratch-qualification/final-proof.json",
+      "overlay_files": [
+        "hosts/host-web/BROWSER_DEPLOYMENT_MATRIX.md",
+        "hosts/host-web/qualification/results.json",
+        "hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256"
+      ],
+      "qualified_output": "/tmp/issue627-qualified-output",
+      "scratch_cwd": "/home/bl/misofm/engine-issue627-scratch"
+    },
+    "duplicate_records_segregated_noncredit": {
+      "pass": true,
+      "attempt2_record": "artifacts/issue627-scratch-qualification/attempt-2-disposition.json",
+      "attempt2_duplicate_records": [
+        "build.command.txt",
+        "build.status",
+        "build.stdout",
+        "build.stderr",
+        "build-output-files.txt",
+        "build-output.sha256",
+        "input-sha256-before-build.txt",
+        "output-context.txt",
+        "overlay-status-after.txt",
+        "scratch-status-before.txt",
+        "scratch-status-after-build.txt"
+      ],
+      "attempt2_duplicate_paths": {
+        "cwd": "/home/bl/misofm/engine-issue627-scratch-qualification",
+        "output": "/tmp/issue627-scratch-output-050242"
+      },
+      "attempt3_record": "artifacts/issue627-postpin-attempt3/attempt-3-failure.json",
+      "attempt3_duplicate_checks": [
+        {
+          "logical": "static",
+          "records": [
+            "03-static",
+            "03-check-web"
+          ],
+          "both_recorded_status_zero": true
+        },
+        {
+          "logical": "expected-resources",
+          "records": [
+            "04-resources",
+            "04-expected-resources"
+          ],
+          "both_recorded_status_zero": true
+        },
+        {
+          "logical": "hermetic",
+          "records": [
+            "05-hermetic",
+            "05-test-web"
+          ],
+          "luna_status_zero": true,
+          "other_numeric_status_retained": false
+        }
+      ],
+      "credit": "duplicate command sets receive no new qualification credit"
+    },
+    "no_frozen_product_changes_after_promotion": {
+      "pass": true,
+      "changed_paths_after_promotion": [
+        ".github/ISSUE_SPECS/627-qualify-pin-limiter-audioworklet.md",
+        ".github/ISSUE_SPECS/628-complete-limiter-audioworklet-delivery.md",
+        ".github/ISSUE_SPECS/629-duplicate-limiter-audioworklet-delivery.md",
+        "artifacts/issue627-postpin-attempt3/00-preflight.command.txt",
+        "artifacts/issue627-postpin-attempt3/00-preflight.output-state.txt",
+        "artifacts/issue627-postpin-attempt3/00-preflight.status",
+        "artifacts/issue627-postpin-attempt3/00-preflight.stderr",
+        "artifacts/issue627-postpin-attempt3/00-preflight.stdout",
+        "artifacts/issue627-postpin-attempt3/01-build.command.txt",
+        "artifacts/issue627-postpin-attempt3/01-build.status",
+        "artifacts/issue627-postpin-attempt3/01-build.stderr",
+        "artifacts/issue627-postpin-attempt3/01-build.stdout",
+        "artifacts/issue627-postpin-attempt3/02-output-files.txt",
+        "artifacts/issue627-postpin-attempt3/02-output-identity.command.txt",
+        "artifacts/issue627-postpin-attempt3/02-output-identity.status",
+        "artifacts/issue627-postpin-attempt3/02-output-identity.stderr",
+        "artifacts/issue627-postpin-attempt3/02-output-identity.stdout",
+        "artifacts/issue627-postpin-attempt3/02-output.sha256",
+        "artifacts/issue627-postpin-attempt3/03-check-web.status",
+        "artifacts/issue627-postpin-attempt3/03-check-web.stderr",
+        "artifacts/issue627-postpin-attempt3/03-check-web.stdout",
+        "artifacts/issue627-postpin-attempt3/03-static.command.txt",
+        "artifacts/issue627-postpin-attempt3/03-static.status",
+        "artifacts/issue627-postpin-attempt3/03-static.stderr",
+        "artifacts/issue627-postpin-attempt3/03-static.stdout",
+        "artifacts/issue627-postpin-attempt3/04-expected-resources.status",
+        "artifacts/issue627-postpin-attempt3/04-expected-resources.stderr",
+        "artifacts/issue627-postpin-attempt3/04-expected-resources.stdout",
+        "artifacts/issue627-postpin-attempt3/04-resources.command.txt",
+        "artifacts/issue627-postpin-attempt3/04-resources.status",
+        "artifacts/issue627-postpin-attempt3/04-resources.stderr",
+        "artifacts/issue627-postpin-attempt3/04-resources.stdout",
+        "artifacts/issue627-postpin-attempt3/05-hermetic.command.txt",
+        "artifacts/issue627-postpin-attempt3/05-hermetic.stderr",
+        "artifacts/issue627-postpin-attempt3/05-hermetic.stdout",
+        "artifacts/issue627-postpin-attempt3/05-test-web.status",
+        "artifacts/issue627-postpin-attempt3/05-test-web.stderr",
+        "artifacts/issue627-postpin-attempt3/05-test-web.stdout",
+        "artifacts/issue627-postpin-attempt3/README.md",
+        "artifacts/issue627-postpin-attempt3/attempt-3-failure.json",
+        "artifacts/issue627-postpin-attempt3/attribution.txt",
+        "artifacts/issue627-postpin-attempt3/sha256sums.txt",
+        "artifacts/issue627-postpin-attempt3/source-head.txt",
+        "artifacts/issue627-postpin-attempt3/source-status.txt",
+        "artifacts/issue627-postpin/01-build.command.txt",
+        "artifacts/issue627-postpin/01-build.failure.txt",
+        "artifacts/issue627-postpin/01-build.output-files.txt",
+        "artifacts/issue627-postpin/01-build.output.sha256",
+        "artifacts/issue627-postpin/01-build.stderr",
+        "artifacts/issue627-postpin/01-build.stdout",
+        "artifacts/issue627-postpin/02-identity-census.command.txt",
+        "artifacts/issue627-postpin/02-identity-census.failure.txt",
+        "artifacts/issue627-postpin/02-identity-census.stderr",
+        "artifacts/issue627-postpin/README.md",
+        "artifacts/issue627-postpin/observed-result.json",
+        "artifacts/issue627-postpin/sha256sums.txt"
+      ],
+      "non_document_evidence_paths": [],
+      "limiter_source_sha256_at_promotion": "32ab4abf975b32d47c85a748e617e74c9547b22e1b585f0d36713be439a62908",
+      "limiter_source_sha256_at_head": "32ab4abf975b32d47c85a748e617e74c9547b22e1b585f0d36713be439a62908",
+      "promoted_files_unchanged": true,
+      "frozen_scope_rule": "all post-promotion paths are issue specs or artifacts evidence; no product/source/dependency/script/workflow/test/ABI/SDK/#621 path changed"
+    }
+  },
+  "preserved_verdicts": {
+    "issue627_attempt1": "FAIL",
+    "issue627_attempt2": "accepted for promotion purposes without relabeling attempt 1",
+    "issue627_attempt3": "FAIL and hard stop",
+    "duplicate_records": "non-credit"
+  },
+  "source_records": [
+    "artifacts/issue627-scratch-qualification/commands.json",
+    "artifacts/issue627-scratch-qualification/final-proof.json",
+    "artifacts/issue627-scratch-qualification/final-overlay.diff.gz",
+    "artifacts/issue627-scratch-qualification/six-file.sha256",
+    "artifacts/issue627-scratch-qualification/attempt-2-disposition.json",
+    "artifacts/issue627-postpin-attempt3/02-output.sha256",
+    "artifacts/issue627-postpin-attempt3/attempt-3-failure.json"
+  ]
+}
