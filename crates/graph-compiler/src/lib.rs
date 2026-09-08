@@ -263,13 +263,14 @@ mod schedule;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::banks::bind_rack_banks;
+    use crate::banks::bind_rack_banks_indexed;
     use crate::canonical::{
         canonical_parts, edge_text, edge_text_len, hex_sha256, node_text, node_text_len,
         write_canonical,
     };
     use crate::ids::{
-        gid, port, rack_id, route_destination_node, route_source_node, stages, track_node,
+        PreparedEffectIndex, gid, port, prepared_effect_node, rack_id, route_destination_node,
+        route_source_node, stages, track_node,
     };
     use crate::pdc::timings;
     use crate::schedule::{
@@ -285,6 +286,24 @@ mod tests {
     /// value, which was unreachable before without feature injection.
     fn host_dispatch() -> Backend {
         Backend::current()
+    }
+
+    fn indexed_effect_ids(
+        prepared: &EffectPreparedSession,
+    ) -> (PreparedEffectIndex<'_>, Vec<Option<EffectNodeId>>) {
+        let (index, _) = PreparedEffectIndex::from_entries(&prepared.entries);
+        let nodes = prepared
+            .entries
+            .iter()
+            .map(|entry| {
+                Some(EffectNodeId {
+                    track_id: gid(&entry.track_id),
+                    rack: rack_id(entry.rack),
+                    effect_id: gid(&entry.effect_id),
+                })
+            })
+            .collect();
+        (index, nodes)
     }
 
     fn literal_bank_slot_reservation_bytes(bank_count: u64, lanes: u64) -> u64 {
@@ -319,12 +338,12 @@ mod tests {
     use conformance::DualAccumulatorDelayFactory;
     use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
     use effect_compiler::{
-        EffectCompileCaps, EffectPreparedSession, launch_native_effect_registry,
-        prepare_native_session_effects,
+        EffectCompileCaps, EffectPreparedSession, EffectRack, attach_effect_console,
+        launch_native_effect_registry, prepare_native_session_effects,
     };
     use effect_contract::{
-        EffectPrepareError, EffectProcessBlock, NativeEffectFactory, NativeEffectRegistry,
-        PrepareEffectBankRequest, PrepareEffectRequest, PreparedNativeEffect,
+        EffectControlRecord, EffectPrepareError, EffectProcessBlock, NativeEffectFactory,
+        NativeEffectRegistry, PrepareEffectBankRequest, PrepareEffectRequest, PreparedNativeEffect,
         PreparedNativeEffectBank, ProcessReport, StatePayloadOutput,
     };
     use engine::realtime::{PlanarBufferMut, RenderIo, RenderTime, audit};
@@ -908,6 +927,111 @@ mod tests {
                     },
                 )
                 .expect("render");
+                pcm
+            })
+            .collect()
+    }
+
+    fn cross_index_input_binding(node: &GraphNodeId) -> Box<dyn GraphRuntimeProcessor> {
+        let GraphNodeId::TrackStage {
+            track_id,
+            stage: TrackStage::Input,
+        } = node
+        else {
+            return Box::new(IdentityBinding);
+        };
+        let index = track_id
+            .as_str()
+            .strip_prefix("cross")
+            .and_then(|value| value.parse::<u32>().ok())
+            .expect("cross-index fixture track id");
+        Box::new(DelayImpulseBinding {
+            left: 0.2 + index as f32,
+            right: -0.3 - index as f32,
+        })
+    }
+
+    fn render_cross_index_blocks(
+        artifact: PreparedGraphArtifact,
+        mut producers: Vec<effect_compiler::EffectControlProducer>,
+        blocks: u64,
+        command_target: bool,
+    ) -> Vec<Vec<f32>> {
+        if command_target {
+            {
+                let producer = producers
+                    .iter_mut()
+                    .find(|producer| {
+                        producer.track_id.as_ref() == "cross1"
+                            && producer.rack == EffectRack::Dynamic
+                            && producer.effect_index == 1
+                    })
+                    .expect("dynamic slot-1 control producer");
+                for channel in [
+                    effect_contract::ParameterChannel::Left,
+                    effect_contract::ParameterChannel::Right,
+                ] {
+                    producer
+                        .producer
+                        .try_push(EffectControlRecord::Parameter {
+                            parameter_index: 0,
+                            channel,
+                            value: 0.0,
+                        })
+                        .expect("control queue has room");
+                }
+            }
+            let decoy = producers
+                .iter_mut()
+                .find(|producer| {
+                    producer.track_id.as_ref() == "cross0"
+                        && producer.rack == EffectRack::Simd1
+                        && producer.effect_index == 0
+                })
+                .expect("simd1 slot-0 control producer");
+            for channel in [
+                effect_contract::ParameterChannel::Left,
+                effect_contract::ParameterChannel::Right,
+            ] {
+                decoy
+                    .producer
+                    .try_push(EffectControlRecord::Parameter {
+                        parameter_index: 0,
+                        channel,
+                        value: 2.0,
+                    })
+                    .expect("decoy control queue has room");
+            }
+        }
+        let graph = artifact.graph;
+        let envelope = graph.envelope;
+        let frames = envelope.quantum.0 as usize;
+        let nodes = graph
+            .required_bindings
+            .iter()
+            .map(|node| GraphNodeBinding::new(node.clone(), cross_index_input_binding(node)))
+            .collect();
+        let mut plan = graph
+            .bind(GraphRuntimeBindings {
+                envelope,
+                nodes,
+                observers: Vec::new(),
+            })
+            .unwrap_or_else(|failure| panic!("cross-index bind: {}", failure.code));
+        (0..blocks)
+            .map(|block| {
+                let mut pcm = vec![0.0_f32; frames * 2];
+                plan.render(
+                    RenderIo {
+                        input: None,
+                        output: PlanarBufferMut::try_new(&mut pcm, 2, frames, frames)
+                            .expect("cross-index output"),
+                    },
+                    RenderTime {
+                        absolute_sample: block * frames as u64,
+                    },
+                )
+                .expect("cross-index render");
                 pcm
             })
             .collect()
@@ -2879,6 +3003,98 @@ mod tests {
         (registry, effects)
     }
 
+    /// Two independently named tracks deliberately put the same two-slot program in different
+    /// racks. The effect ids are reverse-alphabetical relative to each rack's session order, so a
+    /// prepared-entry permutation can only be resolved by the production `(track, rack, effect)`
+    /// handoff. The fixture's expected metadata below is a separate ownership table.
+    fn cross_index_effect_fixture() -> EffectPreparedSession {
+        let mut model = parse_session_json(SESSION_FIXTURE).expect("fixture");
+        let base_track = model.tracks[0].clone();
+        let base_route = model.routes[0].clone();
+        model.automation.clear();
+        model.tracks = (0..2)
+            .map(|index| {
+                let mut track = base_track.clone();
+                track.id = StableId::parse(&format!("cross{index}")).expect("track id");
+                track.simd1.effects.clear();
+                track.dynamic.effects.clear();
+                let effects = (0..2)
+                    .map(|slot| {
+                        let mut effect = base_track.dynamic.effects[0].clone();
+                        effect.id =
+                            StableId::parse(&format!("chain{}", 1 - slot)).expect("effect id");
+                        effect.identity = EffectIdentity::Native {
+                            effect_id: StableId::parse("conformance.delay").expect("effect id"),
+                        };
+                        effect.params = vec![EffectParam {
+                            parameter_id: 1,
+                            channel: ParameterChannel::Both,
+                            unit: ParameterUnit::Linear,
+                            value: 0.8 + index as f32 * 0.17 + slot as f32 * 0.11,
+                        }];
+                        effect
+                    })
+                    .collect::<Vec<_>>();
+                if index == 0 {
+                    track.simd1.effects = effects;
+                } else {
+                    track.dynamic.effects = effects;
+                }
+                track
+            })
+            .collect();
+        model.routes = model
+            .tracks
+            .iter()
+            .enumerate()
+            .map(|(index, track)| {
+                let mut route = base_route.clone();
+                route.id = StableId::parse(&format!("cross-route{index}")).expect("route id");
+                route.source = RouteSource::Track {
+                    track_id: track.id.clone(),
+                    tap: SendTap::PostMatrix,
+                };
+                route
+            })
+            .collect();
+        let session = compile_session(
+            &model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("compiled fixture");
+        let registry = NativeEffectRegistry::new([
+            Box::new(DualAccumulatorDelayFactory::correct()) as Box<dyn NativeEffectFactory>,
+        ])
+        .expect("registry");
+        prepare_native_session_effects(
+            &session,
+            &registry,
+            EffectCompileCaps {
+                maximum_total_state_bytes: 1 << 20,
+                maximum_scratch_bytes: 1 << 20,
+                maximum_automation_spans_per_block: 32,
+            },
+        )
+        .expect("effects")
+    }
+
+    fn cross_index_metadata_latency(track: &str, rack: EffectRack, effect: &str) -> u64 {
+        match (track, rack, effect) {
+            ("cross0", EffectRack::Simd1, "chain0") => 11,
+            ("cross0", EffectRack::Simd1, "chain1") => 17,
+            ("cross1", EffectRack::Dynamic, "chain0") => 23,
+            ("cross1", EffectRack::Dynamic, "chain1") => 29,
+            _ => panic!("unexpected cross-index ownership"),
+        }
+    }
+
     fn compile_chain_fixture(effects: EffectPreparedSession) -> PreparedGraphArtifact {
         GraphCompiler::compile(GraphCompileRequest {
             plan_id: 4242,
@@ -3075,6 +3291,9 @@ mod tests {
         let baseline = compile_chain_fixture(effects);
 
         let (_r2, mut shuffled) = rack_chain_fixture(lanes, 2, |_| 2);
+        let _producers =
+            attach_effect_console(&mut shuffled, NonZeroUsize::new(4).expect("control queue"))
+                .expect("controls attach to every prepared effect");
         let mut state = 0x2545_f491_4f6c_dd1d_u64;
         for index in (1..shuffled.entries.len()).rev() {
             state ^= state << 13;
@@ -3098,6 +3317,379 @@ mod tests {
             GraphCompiler::sha256(&candidate.graph, &candidate.report),
             GraphCompiler::sha256(&baseline.graph, &baseline.report)
         );
+        // This is the causal wrong-result control: the expected ownership table is written from
+        // the session declarations, then attached to each prepared entry before the candidate
+        // permutation. A zip-by-entry implementation swaps these four metadata rows and the
+        // live control lane below, while the indexed production handoff preserves both.
+        let mut declared = cross_index_effect_fixture();
+        for entry in &mut declared.entries {
+            entry.metadata.latency = LatencySamples(cross_index_metadata_latency(
+                &entry.track_id,
+                entry.rack,
+                &entry.effect_id,
+            ));
+            entry.metadata.tail = TailSamples::Finite(entry.metadata.latency.0 + 1);
+        }
+        let mut candidate = declared;
+        let mut baseline = cross_index_effect_fixture();
+        for entry in &mut baseline.entries {
+            entry.metadata.latency = LatencySamples(cross_index_metadata_latency(
+                &entry.track_id,
+                entry.rack,
+                &entry.effect_id,
+            ));
+            entry.metadata.tail = TailSamples::Finite(entry.metadata.latency.0 + 1);
+        }
+        let baseline_producers =
+            attach_effect_console(&mut baseline, NonZeroUsize::new(8).expect("control queue"))
+                .expect("baseline controls attach");
+        let candidate_producers =
+            attach_effect_console(&mut candidate, NonZeroUsize::new(8).expect("control queue"))
+                .expect("candidate controls attach");
+        candidate.entries.reverse();
+        let baseline = GraphCompiler::compile(GraphCompileRequest {
+            plan_id: 6_330,
+            effects: baseline,
+            caps: integration_caps(),
+            dispatch: Backend::Scalar,
+        })
+        .unwrap_or_else(|failure| {
+            panic!("baseline cross-index compile: {:?}", failure.diagnostics)
+        });
+        let candidate = GraphCompiler::compile(GraphCompileRequest {
+            plan_id: 6_331,
+            effects: candidate,
+            caps: integration_caps(),
+            dispatch: Backend::Scalar,
+        })
+        .unwrap_or_else(|failure| {
+            panic!("reordered cross-index compile: {:?}", failure.diagnostics)
+        });
+        assert_eq!(
+            baseline.report.output_latency, candidate.report.output_latency,
+            "metadata ownership must survive prepared-entry reordering"
+        );
+        assert_eq!(
+            baseline.report.output_tail, candidate.report.output_tail,
+            "tail ownership must survive prepared-entry reordering"
+        );
+        let baseline_evidence = GraphCompiler::evidence(&baseline.graph, &baseline.report);
+        let candidate_evidence = GraphCompiler::evidence(&candidate.graph, &candidate.report);
+        assert_eq!(
+            baseline_evidence.canonical_bytes,
+            candidate_evidence.canonical_bytes
+        );
+        let canonical =
+            core::str::from_utf8(&baseline_evidence.canonical_bytes).expect("canonical");
+        for (track, rack, effect, latency) in [
+            ("cross0", "simd1", "chain0", 11),
+            ("cross0", "simd1", "chain1", 17),
+            ("cross1", "dynamic", "chain0", 23),
+            ("cross1", "dynamic", "chain1", 29),
+        ] {
+            let needle = format!(
+                "node\teffect:{track}:{rack}:{effect}\teffect\t{latency}\tfinite:{}",
+                latency + 1
+            );
+            assert!(
+                canonical.lines().any(|line| line == needle),
+                "missing {needle}"
+            );
+        }
+        let baseline_pcm = render_cross_index_blocks(baseline, baseline_producers, 4, true);
+        let candidate_pcm = render_cross_index_blocks(candidate, candidate_producers, 4, true);
+        assert_pcm_bits_equal(
+            &baseline_pcm,
+            &candidate_pcm,
+            "processor and control ownership after prepared-entry reordering",
+        );
+        assert!(
+            baseline_pcm.iter().flatten().any(|sample| *sample != 0.0),
+            "cross-index control fixture rendered audio"
+        );
+
+        // A deliberate processor crossing must change the rendered result. This is the
+        // wrong-association control missing from the earlier attempt: entries retain their owner
+        // keys, but their processor payloads are crossed between track/rack/slot identities.
+        let mut crossed_processor = cross_index_effect_fixture();
+        for entry in &mut crossed_processor.entries {
+            entry.metadata.latency = LatencySamples(cross_index_metadata_latency(
+                &entry.track_id,
+                entry.rack,
+                &entry.effect_id,
+            ));
+            entry.metadata.tail = TailSamples::Finite(entry.metadata.latency.0 + 1);
+        }
+        let crossed_processor_producers = attach_effect_console(
+            &mut crossed_processor,
+            NonZeroUsize::new(8).expect("control queue"),
+        )
+        .expect("crossed processor controls attach");
+        let first = crossed_processor
+            .entries
+            .iter()
+            .position(|entry| {
+                entry.track_id == "cross0"
+                    && entry.rack == EffectRack::Simd1
+                    && entry.effect_id == "chain0"
+            })
+            .expect("first crossed processor");
+        let second = crossed_processor
+            .entries
+            .iter()
+            .position(|entry| {
+                entry.track_id == "cross1"
+                    && entry.rack == EffectRack::Dynamic
+                    && entry.effect_id == "chain1"
+            })
+            .expect("second crossed processor");
+        assert!(first < second, "crossed processor fixture order");
+        let (before, after) = crossed_processor.entries.split_at_mut(second);
+        std::mem::swap(&mut before[first].processor, &mut after[0].processor);
+        let crossed_processor = GraphCompiler::compile(GraphCompileRequest {
+            plan_id: 6_333,
+            effects: crossed_processor,
+            caps: integration_caps(),
+            dispatch: Backend::Scalar,
+        })
+        .unwrap_or_else(|failure| panic!("crossed processor compile: {:?}", failure.diagnostics));
+        let crossed_processor_pcm =
+            render_cross_index_blocks(crossed_processor, crossed_processor_producers, 4, true);
+        assert!(
+            baseline_pcm
+                .iter()
+                .zip(&crossed_processor_pcm)
+                .any(|(left, right)| left
+                    .iter()
+                    .zip(right)
+                    .any(|(left, right)| left.to_bits() != right.to_bits())),
+            "crossing processor payloads must change an association-sensitive result"
+        );
+
+        // Swapping only the retained control consumers proves the intended target independently:
+        // the same producer command is sent to cross1/dynamic/slot1, and a crossed consumer must
+        // therefore alter the output rather than merely proving that some control was drained.
+        let mut crossed_control = cross_index_effect_fixture();
+        for entry in &mut crossed_control.entries {
+            entry.metadata.latency = LatencySamples(cross_index_metadata_latency(
+                &entry.track_id,
+                entry.rack,
+                &entry.effect_id,
+            ));
+            entry.metadata.tail = TailSamples::Finite(entry.metadata.latency.0 + 1);
+        }
+        let crossed_control_producers = attach_effect_console(
+            &mut crossed_control,
+            NonZeroUsize::new(8).expect("control queue"),
+        )
+        .expect("crossed control attach");
+        // Keep the crossed consumers tied to the two owners that receive the commands below:
+        // target is cross1/dynamic/slot 1 (chain0), and decoy is cross0/simd1/slot 0
+        // (chain1). Swapping any other consumers would not exercise the command's live target.
+        let target_owner = ("cross1", EffectRack::Dynamic, "chain0");
+        let decoy_owner = ("cross0", EffectRack::Simd1, "chain1");
+        let target_entry = crossed_control
+            .entries
+            .iter()
+            .position(|entry| {
+                entry.track_id == target_owner.0
+                    && entry.rack == target_owner.1
+                    && entry.effect_id == target_owner.2
+            })
+            .expect("crossed control target owner");
+        let decoy_entry = crossed_control
+            .entries
+            .iter()
+            .position(|entry| {
+                entry.track_id == decoy_owner.0
+                    && entry.rack == decoy_owner.1
+                    && entry.effect_id == decoy_owner.2
+            })
+            .expect("crossed control decoy owner");
+        assert_ne!(
+            target_entry, decoy_entry,
+            "crossed control owners are distinct"
+        );
+        if target_entry < decoy_entry {
+            let (before, after) = crossed_control.entries.split_at_mut(decoy_entry);
+            std::mem::swap(&mut before[target_entry].control, &mut after[0].control);
+        } else {
+            let (before, after) = crossed_control.entries.split_at_mut(target_entry);
+            std::mem::swap(&mut before[decoy_entry].control, &mut after[0].control);
+        }
+        let crossed_control = GraphCompiler::compile(GraphCompileRequest {
+            plan_id: 6_334,
+            effects: crossed_control,
+            caps: integration_caps(),
+            dispatch: Backend::Scalar,
+        })
+        .unwrap_or_else(|failure| panic!("crossed control compile: {:?}", failure.diagnostics));
+        let target = crossed_control_producers
+            .iter()
+            .find(|producer| {
+                producer.track_id.as_ref() == "cross1"
+                    && producer.rack == EffectRack::Dynamic
+                    && producer.effect_index == 1
+            })
+            .expect("independent control target");
+        let decoy = crossed_control_producers
+            .iter()
+            .find(|producer| {
+                producer.track_id.as_ref() == "cross0"
+                    && producer.rack == EffectRack::Simd1
+                    && producer.effect_index == 0
+            })
+            .expect("independent control decoy");
+        assert_eq!(target.effect_id.as_ref(), "chain0");
+        assert_eq!(target.track_id.as_ref(), "cross1");
+        assert_eq!(target.rack, EffectRack::Dynamic);
+        assert_eq!(decoy.effect_id.as_ref(), "chain1");
+        assert_ne!(target.effect_id, decoy.effect_id);
+        assert_ne!(target.effect_index, decoy.effect_index);
+        let crossed_control_pcm =
+            render_cross_index_blocks(crossed_control, crossed_control_producers, 4, true);
+        assert!(
+            baseline_pcm
+                .iter()
+                .zip(&crossed_control_pcm)
+                .any(|(left, right)| {
+                    left.iter()
+                        .zip(right)
+                        .any(|(left, right)| left.to_bits() != right.to_bits())
+                }),
+            "crossing control consumers for target {:?} and decoy {:?} must change PCM",
+            target_owner,
+            decoy_owner
+        );
+
+        // Routed sidechains remain associated with their destination and cannot silently enter a
+        // homogeneous bank; the destination is an ownership witness independent of node IDs.
+        let sidechain = compile_bank_only(&accepted_compressor_graph_fixture(), 6_332);
+        assert!(
+            sidechain
+                .report
+                .rack_cohorts
+                .scalar_in(RackLocation::Simd1)
+                .iter()
+                .any(|member| member.track_id.as_str() == "eq8")
+        );
+        assert!(
+            sidechain
+                .report
+                .rack_cohorts
+                .bound_slots_in(RackLocation::Simd1)
+                .all(|slot| slot
+                    .members
+                    .iter()
+                    .all(|member| member.track_id.as_str() != "eq8"))
+        );
+        let sidechain_destination = GraphNodeId::Effect(EffectNodeId {
+            track_id: gid("eq8"),
+            rack: RackId::Simd1,
+            effect_id: gid("compressor"),
+        });
+        let sidechain_edge = sidechain
+            .graph
+            .spec
+            .edges
+            .iter()
+            .find(|edge| {
+                matches!(
+                    &edge.id,
+                    GraphEdgeId::EffectSidechain { effect, port }
+                        if effect.track_id.as_str() == "eq8"
+                            && effect.rack == RackId::Simd1
+                            && effect.effect_id.as_str() == "compressor"
+                            && port == "sidechain-in"
+                )
+            })
+            .expect("routed sidechain edge");
+        assert_eq!(sidechain_edge.destination.node, sidechain_destination);
+        assert_eq!(
+            sidechain_edge.destination.kind,
+            GraphPortKind::SidechainInput
+        );
+        assert_eq!(
+            sidechain_edge.destination.effect_port.as_deref(),
+            Some("sidechain-in")
+        );
+        assert_eq!(
+            sidechain_edge.source.node,
+            GraphNodeId::TrackStage {
+                track_id: gid("eq0"),
+                stage: TrackStage::PostMatrix,
+            }
+        );
+
+        // The same production handoff is checked at both bank shapes: a homogeneous two-slot
+        // program retains every session slot in order, while a depth mismatch leaves only the
+        // shared slot bankable and keeps the heterogeneous members scalar.
+        if let Some(width) = BankWidth::for_backend(host_dispatch()) {
+            let lanes = width.lanes() as usize;
+            let (_registry, homogeneous) = rack_chain_fixture(lanes, 2, |_| 2);
+            let homogeneous = compile_chain_fixture(homogeneous);
+            let bound: Vec<_> = homogeneous
+                .report
+                .rack_cohorts
+                .bound_slots_in(RackLocation::Simd1)
+                .collect();
+            assert_eq!(bound.len(), 2);
+            assert!(bound.iter().enumerate().all(|(slot, bound)| {
+                bound.slot == slot
+                    && bound.members.iter().all(|member| {
+                        member.effect_id.as_str() == format!("chain{}", 1 - slot).as_str()
+                    })
+            }));
+            let (_registry, heterogeneous) = rack_chain_fixture(lanes, 2, |index| 1 + index % 2);
+            let heterogeneous = compile_chain_fixture(heterogeneous);
+            assert_eq!(
+                heterogeneous
+                    .report
+                    .rack_cohorts
+                    .bound_slots_in(RackLocation::Simd1)
+                    .count(),
+                1
+            );
+            assert_eq!(
+                heterogeneous
+                    .report
+                    .rack_cohorts
+                    .scalar_in(RackLocation::Simd1)
+                    .len(),
+                lanes / 2
+            );
+            let heterogeneous_bound: Vec<_> = heterogeneous
+                .report
+                .rack_cohorts
+                .bound_slots_in(RackLocation::Simd1)
+                .collect();
+            assert_eq!(heterogeneous_bound[0].slot, 0);
+            assert!(
+                heterogeneous_bound[0]
+                    .members
+                    .iter()
+                    .enumerate()
+                    .all(|(index, member)| {
+                        member.track_id.as_str() == format!("bank{index:02}").as_str()
+                            && member.effect_id.as_str() == "chain1"
+                    })
+            );
+            let scalar_members: Vec<_> = heterogeneous
+                .report
+                .rack_cohorts
+                .scalar_in(RackLocation::Simd1)
+                .into_iter()
+                .collect();
+            assert!(scalar_members.iter().all(|member| {
+                member
+                    .track_id
+                    .as_str()
+                    .strip_prefix("bank")
+                    .and_then(|index| index.parse::<usize>().ok())
+                    .is_some_and(|index| index % 2 == 1)
+                    && member.effect_id.as_str() == "chain0"
+            }));
+        }
     }
 
     /// #99 F3: chains of different depth are bucketed by their first slot's level, and a shorter
@@ -3408,29 +4000,13 @@ mod tests {
                 },
             )
             .expect("reprepare effects");
-            let ids = rebound
-                .entries
-                .iter()
-                .map(|entry| {
-                    (
-                        (
-                            entry.track_id.clone(),
-                            rack_id(entry.rack),
-                            entry.effect_id.clone(),
-                        ),
-                        EffectNodeId {
-                            track_id: gid(&entry.track_id),
-                            rack: rack_id(entry.rack),
-                            effect_id: gid(&entry.effect_id),
-                        },
-                    )
-                })
-                .collect();
+            let (prepared_index, ids) = indexed_effect_ids(&rebound);
             let lanes = BankWidth::for_backend(dispatch)
                 .expect("vector backend")
                 .lanes() as usize;
-            let (banks, report) = bind_rack_banks(
+            let (banks, report) = bind_rack_banks_indexed(
                 &rebound,
+                &prepared_index,
                 &ids,
                 &dependency_levels,
                 dispatch,
@@ -3458,26 +4034,6 @@ mod tests {
             );
         }
 
-        let ids_for = |prepared: &EffectPreparedSession| {
-            prepared
-                .entries
-                .iter()
-                .map(|entry| {
-                    (
-                        (
-                            entry.track_id.clone(),
-                            rack_id(entry.rack),
-                            entry.effect_id.clone(),
-                        ),
-                        EffectNodeId {
-                            track_id: gid(&entry.track_id),
-                            rack: rack_id(entry.rack),
-                            effect_id: gid(&entry.effect_id),
-                        },
-                    )
-                })
-                .collect::<BTreeMap<_, _>>()
-        };
         let eight = Backend::Simd8;
         let mut connected_fallback = prepare_native_session_effects(
             &session,
@@ -3493,9 +4049,10 @@ mod tests {
             id: effect_contract::PortId::new("sidechain").expect("static port"),
             required: false,
         };
-        let connected_ids = ids_for(&connected_fallback);
-        let connected_banks = bind_rack_banks(
+        let (connected_index, connected_ids) = indexed_effect_ids(&connected_fallback);
+        let connected_banks = bind_rack_banks_indexed(
             &connected_fallback,
+            &connected_index,
             &connected_ids,
             &dependency_levels,
             eight,
@@ -3526,9 +4083,13 @@ mod tests {
             },
         )
         .expect("reprepare same-wave fallback");
-        let same_wave_ids = ids_for(&same_wave);
-        let first_id =
-            same_wave_ids[&("bank0".to_owned(), RackId::Simd1, "bank-delay".to_owned())].clone();
+        let (same_wave_index, same_wave_ids) = indexed_effect_ids(&same_wave);
+        let first_slot = same_wave_index
+            .get("bank0", RackId::Simd1, "bank-delay")
+            .expect("first effect");
+        let first_id = prepared_effect_node(&same_wave_ids, first_slot)
+            .expect("first effect node")
+            .clone();
         let first = GraphNodeId::Effect(first_id.clone());
         let mut incompatible_levels = dependency_levels.clone();
         for level in &mut incompatible_levels {
@@ -3537,8 +4098,9 @@ mod tests {
         // F12: a bank never crosses a dependency level. Before #96 the whole chunk holding a
         // level-incompatible member was dropped; the planner now partitions by level *before*
         // chunking, so the member itself never banks while its level-compatible peers still do.
-        let (split_banks, split_report) = bind_rack_banks(
+        let (split_banks, split_report) = bind_rack_banks_indexed(
             &same_wave,
+            &same_wave_index,
             &same_wave_ids,
             &incompatible_levels,
             eight,
@@ -3592,9 +4154,10 @@ mod tests {
             },
         )
         .expect("prepare scalar ownership");
-        let rejected_ids = ids_for(&rejected);
-        let error = match bind_rack_banks(
+        let (rejected_index, rejected_ids) = indexed_effect_ids(&rejected);
+        let error = match bind_rack_banks_indexed(
             &rejected,
+            &rejected_index,
             &rejected_ids,
             &dependency_levels,
             eight,

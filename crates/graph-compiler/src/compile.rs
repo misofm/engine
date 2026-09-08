@@ -9,15 +9,16 @@
 //! here (#99 F5); see [`GraphCompiler::evidence`].
 
 use super::*;
-use crate::banks::{bind_rack_banks, checked_add_effect_banks, effect_bank_resource};
+use crate::banks::{bind_rack_banks_indexed, checked_add_effect_banks, effect_bank_resource};
 use crate::canonical::{
     Sha256Writer, canonical_parts, dot, hex_digest, hex_sha256, reductions_of, write_canonical,
 };
 use crate::estimate::{estimate_fits_platform, resource_estimate};
 use crate::ids::{
-    add_main_edge, add_node, add_route_destination_edge, add_route_source_edge, diag, effect_path,
-    failure, gid, into_effects, port, ports_for, rack_id, route_destination_node,
-    route_source_node, route_transform, sidechain_matches, stages, track_node,
+    PreparedEffectIndex, add_main_edge, add_node, add_route_destination_edge,
+    add_route_source_edge, diag, effect_path, failure, gid, into_effects, port, ports_for,
+    prepared_effect_node, route_destination_node, route_source_node, route_transform,
+    sidechain_matches, stages, track_node,
 };
 use crate::pdc::timings;
 use crate::schedule::{buffer_assignments, cycle_witnesses, topo};
@@ -175,18 +176,11 @@ impl GraphCompiler {
             return Err(failure(effects, diagnostics));
         }
 
-        let mut prepared = BTreeMap::<(String, RackId, String), usize>::new();
-        for (index, entry) in effects.entries.iter().enumerate() {
-            let key = (
-                entry.track_id.clone(),
-                rack_id(entry.rack),
-                entry.effect_id.clone(),
-            );
-            if prepared.insert(key, index).is_some() {
-                diagnostics.push(diag("graph.effect.duplicate_prepared", "$.effects"));
-            }
+        let (prepared, duplicate_prepared) = PreparedEffectIndex::from_entries(&effects.entries);
+        for _ in 0..duplicate_prepared {
+            diagnostics.push(diag("graph.effect.duplicate_prepared", "$.effects"));
         }
-        let mut declared = BTreeSet::new();
+        let mut declared = BTreeSet::<(&str, RackId, &str)>::new();
         for track in &model.tracks {
             for (rack, values) in [
                 (RackId::Simd1, &track.simd1.effects),
@@ -194,20 +188,16 @@ impl GraphCompiler {
                 (RackId::Simd2, &track.simd2.effects),
             ] {
                 for effect in values {
-                    let key = (
-                        track.id.as_str().to_owned(),
-                        rack,
-                        effect.id.as_str().to_owned(),
-                    );
-                    declared.insert(key.clone());
-                    let Some(index) = prepared.get(&key).copied() else {
+                    let key = (track.id.as_str(), rack, effect.id.as_str());
+                    declared.insert(key);
+                    let Some(slot) = prepared.get(key.0, key.1, key.2) else {
                         diagnostics.push(diag(
                             "graph.effect.missing_prepared",
                             &effect_path(track.id.as_str(), rack, effect.id.as_str()),
                         ));
                         continue;
                     };
-                    if !sidechain_matches(&effect.sidechain, &effects.entries[index]) {
+                    if !sidechain_matches(&effect.sidechain, &effects.entries[slot.index()]) {
                         diagnostics.push(diag(
                             "graph.effect.metadata_mismatch",
                             &effect_path(track.id.as_str(), rack, effect.id.as_str()),
@@ -216,7 +206,7 @@ impl GraphCompiler {
                 }
             }
         }
-        for key in prepared.keys() {
+        for key in prepared.iter() {
             if !declared.contains(key) {
                 diagnostics.push(diag("graph.effect.unexpected_prepared", "$.effects"));
             }
@@ -229,7 +219,7 @@ impl GraphCompiler {
         let mut edges = Vec::new();
         let mut node_latency = BTreeMap::new();
         let mut node_tail = BTreeMap::new();
-        let mut effect_ids = BTreeMap::new();
+        let mut effect_ids = vec![None; effects.entries.len()];
         let mut route_transforms = Vec::new();
         for track in &model.tracks {
             for stage in stages() {
@@ -280,11 +270,10 @@ impl GraphCompiler {
                         effect_id: gid(effect.id.as_str()),
                     };
                     let node = GraphNodeId::Effect(id.clone());
-                    let index = prepared[&(
-                        track.id.as_str().to_owned(),
-                        rack,
-                        effect.id.as_str().to_owned(),
-                    )];
+                    let slot = prepared
+                        .get(track.id.as_str(), rack, effect.id.as_str())
+                        .expect("validated prepared effect");
+                    let index = slot.index();
                     let metadata = effects.entries[index].metadata;
                     add_node(
                         &mut nodes,
@@ -301,14 +290,7 @@ impl GraphCompiler {
                         effect_path(track.id.as_str(), rack, effect.id.as_str()),
                     );
                     preceding = node.clone();
-                    effect_ids.insert(
-                        (
-                            track.id.as_str().to_owned(),
-                            rack,
-                            effect.id.as_str().to_owned(),
-                        ),
-                        id,
-                    );
+                    effect_ids[index] = Some(id);
                 }
                 let end = track_node(track.id.as_str(), boundary);
                 add_main_edge(
@@ -391,12 +373,12 @@ impl GraphCompiler {
                         continue;
                     };
                     let source = route_source_node(&sidechain.source);
-                    let key = (
-                        track.id.as_str().to_owned(),
-                        rack,
-                        effect.id.as_str().to_owned(),
-                    );
-                    let id = effect_ids[&key].clone();
+                    let slot = prepared
+                        .get(track.id.as_str(), rack, effect.id.as_str())
+                        .expect("validated prepared effect");
+                    let id = prepared_effect_node(&effect_ids, slot)
+                        .expect("prepared effect node assigned")
+                        .clone();
                     let destination = GraphNodeId::Effect(id.clone());
                     edges.push(GraphEdge {
                         id: GraphEdgeId::EffectSidechain {
@@ -477,11 +459,17 @@ impl GraphCompiler {
                 pool_classes.conjoin(track, witness);
             }
         }
-        let (banks, rack_cohorts) =
-            match bind_rack_banks(&effects, &effect_ids, &levels, dispatch, &pool_classes) {
-                Ok(value) => value,
-                Err(diagnostic) => return Err(failure(effects, vec![diagnostic])),
-            };
+        let (banks, rack_cohorts) = match bind_rack_banks_indexed(
+            &effects,
+            &prepared,
+            &effect_ids,
+            &levels,
+            dispatch,
+            &pool_classes,
+        ) {
+            Ok(value) => value,
+            Err(diagnostic) => return Err(failure(effects, vec![diagnostic])),
+        };
         // Issue #210 phase 2. Only tracks that actually declared a delay appear, in normalized
         // track order: an undelayed session produces an empty vector, and every downstream
         // consumer -- the estimate term, the lowering, the runtime's line vector -- is then

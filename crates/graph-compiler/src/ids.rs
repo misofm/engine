@@ -2,6 +2,62 @@
 
 use super::*;
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) struct PreparedEffectSlot(usize);
+
+impl PreparedEffectSlot {
+    pub(crate) const fn index(self) -> usize {
+        self.0
+    }
+}
+
+pub(crate) struct PreparedEffectIndex<'a> {
+    by_key: BTreeMap<(&'a str, RackId, &'a str), PreparedEffectSlot>,
+}
+
+impl<'a> PreparedEffectIndex<'a> {
+    pub(crate) fn from_entries(entries: &'a [EffectPreparedEntry]) -> (Self, usize) {
+        let mut by_key = BTreeMap::new();
+        let mut duplicates = 0;
+        for (index, entry) in entries.iter().enumerate() {
+            if by_key
+                .insert(
+                    (
+                        entry.track_id.as_str(),
+                        rack_id(entry.rack),
+                        entry.effect_id.as_str(),
+                    ),
+                    PreparedEffectSlot(index),
+                )
+                .is_some()
+            {
+                duplicates += 1;
+            }
+        }
+        (Self { by_key }, duplicates)
+    }
+
+    pub(crate) fn get(
+        &self,
+        track_id: &str,
+        rack: RackId,
+        effect_id: &str,
+    ) -> Option<PreparedEffectSlot> {
+        self.by_key.get(&(track_id, rack, effect_id)).copied()
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &(&'a str, RackId, &'a str)> {
+        self.by_key.keys()
+    }
+}
+
+pub(crate) fn prepared_effect_node(
+    nodes: &[Option<EffectNodeId>],
+    slot: PreparedEffectSlot,
+) -> Option<&EffectNodeId> {
+    nodes.get(slot.0).and_then(Option::as_ref)
+}
+
 pub(crate) fn ports_for(nodes: &[GraphNode], edges: &[GraphEdge]) -> Vec<GraphPortId> {
     let mut ports = Vec::new();
     for node in nodes {
@@ -229,7 +285,7 @@ pub(crate) fn route_transform(gain_db: f32, matrix: &ChannelMatrix) -> Option<Ro
 /// [`graph::GraphEffectControlBinding`].
 pub(crate) fn into_effects(
     entries: Vec<EffectPreparedEntry>,
-    ids: &BTreeMap<(String, RackId, String), EffectNodeId>,
+    ids: &[Option<EffectNodeId>],
 ) -> (
     Vec<GraphPreparedEffect>,
     Vec<graph::GraphEffectControlBinding>,
@@ -238,13 +294,11 @@ pub(crate) fn into_effects(
     let mut effects = Vec::with_capacity(entries.len());
     let mut controls = Vec::new();
     let mut observations = Vec::new();
-    for entry in entries {
-        let key = (
-            entry.track_id.clone(),
-            rack_id(entry.rack),
-            entry.effect_id.clone(),
-        );
-        let node = ids[&key].clone();
+    for (index, entry) in entries.into_iter().enumerate() {
+        let node = ids[index]
+            .as_ref()
+            .expect("prepared effect node assigned")
+            .clone();
         if let Some(control) = entry.control {
             controls.push(graph::GraphEffectControlBinding {
                 node: node.clone(),
