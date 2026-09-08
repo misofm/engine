@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
 
-use engine::realtime::{ObservationWindow, observation_slot};
+use engine::realtime::{observation_slot, ObservationReader, ObservationWindow};
 
 /// One million windows, which is the eval's number.
 const WINDOWS: u64 = 1_000_000;
@@ -40,6 +40,67 @@ fn consistent(observed: ObservationWindow) -> bool {
     observed == window(observed.sequence)
 }
 
+#[derive(Default)]
+struct ReadAccounting {
+    reads: u64,
+    torn: u64,
+    regressions: u64,
+    advances: u64,
+    newest: u64,
+    missed_total: u64,
+}
+
+fn account_read(
+    reader: &ObservationReader,
+    observed: ObservationWindow,
+    accounting: &mut ReadAccounting,
+) {
+    accounting.reads += 1;
+    if !consistent(observed) {
+        accounting.torn += 1;
+    }
+    if observed.sequence < accounting.newest {
+        accounting.regressions += 1;
+    }
+    if observed.sequence > accounting.newest {
+        accounting.missed_total += reader.missed_windows(observed.sequence);
+        accounting.advances += 1;
+        accounting.newest = observed.sequence;
+        reader.acknowledge(observed.sequence);
+    }
+}
+
+#[test]
+fn repeat_reads_and_final_gap_have_exact_accounting() {
+    let (publisher, reader) = observation_slot();
+    let mut accounting = ReadAccounting::default();
+
+    publisher.publish(window(1));
+    for _ in 0..3 {
+        account_read(
+            &reader,
+            reader.read().expect("repeated first window"),
+            &mut accounting,
+        );
+    }
+    assert_eq!(accounting.advances, 1);
+    assert_eq!(accounting.missed_total, 0);
+
+    publisher.publish(window(4));
+    account_read(
+        &reader,
+        reader.read().expect("final gapped window"),
+        &mut accounting,
+    );
+    assert_eq!(accounting.advances, 2);
+    assert_eq!(accounting.missed_total, 2);
+    assert_eq!(
+        accounting.advances + accounting.missed_total,
+        accounting.newest
+    );
+    assert_eq!(accounting.newest, 4);
+}
+
 #[test]
 fn a_million_windows_are_read_whole_and_in_order() {
     let (publisher, reader) = observation_slot();
@@ -58,54 +119,34 @@ fn a_million_windows_are_read_whole_and_in_order() {
     });
 
     barrier.wait();
-    let mut reads = 0_u64;
-    let mut torn = 0_u64;
-    let mut regressions = 0_u64;
-    let mut newest = 0_u64;
-    let mut missed_total = 0_u64;
+    let mut accounting = ReadAccounting::default();
     while !done.load(Ordering::Acquire) {
         if let Some(observed) = reader.read() {
-            reads += 1;
-            if !consistent(observed) {
-                torn += 1;
-            }
-            if observed.sequence < newest {
-                regressions += 1;
-            }
-            if observed.sequence > newest {
-                missed_total += reader.missed_windows(observed.sequence);
-                newest = observed.sequence;
-                reader.acknowledge(observed.sequence);
-            }
+            account_read(&reader, observed, &mut accounting);
         }
     }
     if let Some(observed) = reader.read() {
-        reads += 1;
-        if !consistent(observed) {
-            torn += 1;
-        }
-        if observed.sequence < newest {
-            regressions += 1;
-        }
-        newest = newest.max(observed.sequence);
-        reader.acknowledge(observed.sequence);
+        account_read(&reader, observed, &mut accounting);
     }
     let writer_view = writer.join().expect("writer");
 
-    assert_eq!(torn, 0, "{torn} of {reads} reads were torn");
-    assert_eq!(regressions, 0, "a conflating cell never goes backwards");
-    assert!(reads > 0, "the reader observed nothing at all");
     assert_eq!(
-        newest, WINDOWS,
+        accounting.torn, 0,
+        "{} of {} reads were torn",
+        accounting.torn, accounting.reads
+    );
+    assert_eq!(
+        accounting.regressions, 0,
+        "a conflating cell never goes backwards"
+    );
+    assert!(accounting.reads > 0, "the reader observed nothing at all");
+    assert_eq!(
+        accounting.newest, WINDOWS,
         "the reader ends on the newest window, not on a queued backlog"
     );
     assert!(
-        reads <= WINDOWS,
-        "a conflating cell cannot produce more reads than writes"
-    );
-    assert!(
-        missed_total > 0 || reads == WINDOWS,
-        "either the reader kept up exactly, or the windows it missed were counted"
+        accounting.advances + accounting.missed_total == accounting.newest,
+        "every skipped publication is counted before acknowledgment"
     );
     assert!(
         writer_view <= WINDOWS,
