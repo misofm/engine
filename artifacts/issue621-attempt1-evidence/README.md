@@ -26,8 +26,10 @@ for every command recorded here.
 
 ## Gate results
 
-Every command below exited 0. Its exact command, stdout, stderr, and one-line
-status are retained beside it under `gates/`.
+Every command below exited 0. Its exact command, one-line status, and ordinary
+stdout/stderr are retained beside it under `gates/`; six test stdout streams
+whose whitespace is significant remain byte-for-byte in the deterministic raw
+archive.
 
 ```text
 full-suite: env PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/issue621-attempt1-gates-target cargo test --locked -p true-peak-limiter
@@ -79,18 +81,20 @@ input-window guard in that loop:
 
 The remaining checks visible around these bodies are caller frame/ring accesses,
 the W8/W4 lane-width controls, and the outer chunk/span controls. They are
-separate from the detector loop's input window. The selected bodies retain the
-same detector arithmetic operation sequence, peak store, and single post-loop
-twelve-word history writeback shape. This evidence makes no historical
+separate from the detector loop's input window. The inspected selected bodies
+showed the same detector arithmetic operation sequence, peak store, and single
+post-loop twelve-word history writeback shape. This evidence makes no historical
 comparison-count, cycle, throughput, speedup, or sound-quality claim.
 
 ## Wasm and host portability inspection
 
 The complete limiter native, Wasm scalar, and Wasm SIMD128 LLVM/assembly outputs
-are retained under `lowering/{native,wasm-scalar,wasm-simd128}/`; selected full
-function bodies and hashes are under `lowering/selected/`. The scalar limiter
-assembly has zero `v128.`/`f32x4.` opcode matches and the SIMD128 limiter assembly
-has 4,671. The existing host-web builds were portability and inspection legs
+were inspected, then removed from durable delivery under tracker ruling
+`80f6e715`. Their original paths, sizes, and hashes remain in `provenance.json`;
+the focused line-addressed evidence remains in `lowering-map-excerpts.txt` with
+raw-source and raw-excerpt hashes in its companion JSON. The scalar limiter
+assembly had zero `v128.`/`f32x4.` opcode matches and the SIMD128 limiter assembly
+had 4,671. The existing host-web builds were portability and inspection legs
 only; they were not artifact promotion, qualification, browser, benchmark, or
 pin work.
 
@@ -98,8 +102,8 @@ The scalar host module is 24,678,565 bytes, SHA-256
 `1f002b131c3e572d25e3ecf51b7e6506db5685b8298e69f1aaf995cadc9fae5a`; the SIMD
 module is 23,721,592 bytes, SHA-256
 `1ecca3833b874d4b6a64e939d8c8b48f741889dbaa26e7e6b86f5d00ce19fdc7`. Selected
-ABI export rosters and complete `miso_engine_web_v1_render` function bodies are
-retained under `lowering/host-web-selected/`. The full objdump outputs were
+ABI export rosters and focused `miso_engine_web_v1_render` extracts are retained
+under `lowering/host-web-selected/`. The full objdump outputs were
 preserved at `/tmp/issue621-attempt1-host-web-raw/` and their paths, sizes, and
 hashes are recorded in `provenance.json`; they are intentionally not duplicated
 in this bounded repository evidence tree. The scalar host disassembly had zero
@@ -107,16 +111,28 @@ SIMD opcode matches; the SIMD host disassembly had 44,076.
 
 ## Completeness and hygiene
 
-- `lowering/selected/manifest.json` records the complete selected function
-  intervals, source locations, byte counts, and hashes.
+- `lowering/selected/manifest.json` records the original complete selected
+  function intervals, source locations, byte counts, and hashes.
+- `lowering-map-excerpts.json` records the surviving focused excerpts, original
+  line ranges, full-source identities, and raw excerpt hashes.
 - Gate stdout/stderr and status files are retained for every command above;
   failed compiler/disassembly attempts are not hidden (none of the required
   gates failed).
-- `git diff --check` exited 0. The worktree has only this uncommitted evidence
-  directory; the source checkpoint remains unchanged.
+- The recorded `git diff --check` exited 0; the source checkpoint remains
+  unchanged.
 - No `target/` directory, Cargo registry, dependency tree, secret, token, or
   generated source was copied into this evidence directory.
 
-## Lossless delivery packaging
+## Durable delivery form
 
-Raw compiler, disassembler, and command-output files that contain tool-emitted trailing whitespace are stored byte-for-byte as members of `raw-emitted-output.tar.gz`. `raw-emitted-output.members.json` records every logical path, uncompressed size, and uncompressed SHA-256. Paths and line numbers elsewhere in this record refer to those logical archive-member paths when the plain file is absent. Review a member with `tar -xOzf raw-emitted-output.tar.gz <logical-path>`; no captured byte was normalized or discarded. The archive uses deterministic zeroed ownership and timestamps.
+Tracker ruling `80f6e715` excludes full compiler IR and redundant assembly from
+default-branch evidence. `provenance.json` preserves every retired file's
+logical path, uncompressed byte count, and SHA-256. The focused display excerpts
+strip line endings and trailing horizontal whitespace; the companion JSON's raw
+excerpt hashes remain authoritative. Original paths and line numbers in this
+record refer to the capture identities in the selected and excerpt manifests.
+
+The six raw test stdout streams are stored byte-for-byte in
+`raw-emitted-output.tar.gz`; `raw-emitted-output.members.json` records their
+logical paths, sizes, and hashes. The archive uses deterministic zeroed
+ownership and timestamps.

@@ -1,0 +1,736 @@
+===== native-scalar-window | lowering/selected/native-scalar-core.s =====
+----- original lines 680-720 -----
+000680: 	je	.LBB36_336
+000681: .LBB36_72:
+000682: 	.loc	8 0 20 is_stmt 0
+000683: 	movq	%rsi, 96(%rsp)
+000684: .Ltmp9961:
+000685: 	.loc	4 2584 13 is_stmt 1
+000686: 	cmpq	$1, %rax
+000687: 	movq	%rax, 960(%rsp)
+000688: 	movq	%rax, %rsi
+000689: 	adcq	$0, %rsi
+000690: 	cmpq	$32, %rsi
+000691: 	movl	$32, %eax
+000692: 	cmovaeq	%rax, %rsi
+000693: 	movq	%rsi, 616(%rsp)
+000694: .Ltmp9962:
+000695: 	.loc	1 1815 51
+000696: 	movq	%rcx, %rsi
+000697: 	subq	%rdi, %rsi
+000698: .Ltmp9963:
+000699: 	.loc	10 1078 5
+000700: 	cmpq	$32, %rsi
+000701: 	cmovaeq	%rax, %rsi
+000702: .Ltmp9964:
+000703: 	.loc	1 1820 35
+000704: 	addq	%rdi, %rsi
+000705: .Ltmp9965:
+000706: 	.loc	4 1050 16
+000707: 	jb	.LBB36_489
+000708: 	cmpq	%r15, %rsi
+000709: 	ja	.LBB36_489
+000710: .Ltmp9966:
+000711: 	.loc	4 0 16 is_stmt 0
+000712: 	movq	%rdx, 144(%rsp)
+000713: .Ltmp9967:
+000714: 	.loc	1 1759 23 is_stmt 1
+000715: 	vmovss	1240(%rsp), %xmm0
+000716: 	vmovss	%xmm0, 48(%rsp)
+000717: 	vmovss	1244(%rsp), %xmm7
+000718: 	vmovss	1248(%rsp), %xmm12
+000719: 	vmovss	1252(%rsp), %xmm13
+000720: 	vmovss	1256(%rsp), %xmm15
+
+===== native-scalar-loop-entry | lowering/selected/native-scalar-core.s =====
+----- original lines 845-878 -----
+000845: 	vmovss	%xmm1, 448(%rsp)
+000846: 	vmovss	768(%r12), %xmm1
+000847: 	vmovss	%xmm1, 632(%rsp)
+000848: 	vmovss	772(%r12), %xmm1
+000849: 	vmovss	%xmm1, 728(%rsp)
+000850: 	movq	1168(%rsp), %rdx
+000851: 	movq	616(%rsp), %r9
+000852: 	vmovss	48(%rsp), %xmm1
+000853: 	.p2align	4
+000854: .LBB36_77:
+000855: .Ltmp9973:
+000856: 	.loc	52 51 9 is_stmt 1
+000857: 	vmovss	(%rdx,%rax,4), %xmm7
+000858: .Ltmp9974:
+000859: 	.loc	52 71 9
+000860: 	vmulss	624(%rsp), %xmm7, %xmm3
+000861: .Ltmp9975:
+000862: 	.loc	52 61 9
+000863: 	vaddss	%xmm5, %xmm3, %xmm3
+000864: .Ltmp9976:
+000865: 	.loc	52 71 9
+000866: 	vmulss	248(%rsp), %xmm7, %xmm4
+000867: .Ltmp9977:
+000868: 	.loc	52 61 9
+000869: 	vaddss	%xmm5, %xmm4, %xmm4
+000870: .Ltmp9978:
+000871: 	.loc	52 71 9
+000872: 	vmulss	488(%rsp), %xmm7, %xmm8
+000873: 	vmovss	%xmm7, 48(%rsp)
+000874: .Ltmp9979:
+000875: 	.loc	52 61 9
+000876: 	vaddss	%xmm5, %xmm8, %xmm8
+000877: 	vmovss	%xmm1, 64(%rsp)
+000878: .Ltmp9980:
+
+===== native-scalar-loop-exit | lowering/selected/native-scalar-core.s =====
+----- original lines 1185-1228 -----
+001185: 	vmovaps	%xmm1, %xmm8
+001186: 	vmovss	48(%rsp), %xmm1
+001187: .Ltmp10078:
+001188: 	.loc	52 161 24
+001189: 	vmaxss	%xmm2, %xmm0, %xmm0
+001190: .Ltmp10079:
+001191: 	.loc	52 56 9
+001192: 	vmovss	%xmm0, 2648(%rsp,%rax,4)
+001193: .Ltmp10080:
+001194: 	.loc	11 308 13
+001195: 	incq	%rax
+001196: 	vmovss	%xmm10, 16(%rsp)
+001197: 	vmovss	%xmm14, 40(%rsp)
+001198: 	vmovss	%xmm9, 368(%rsp)
+001199: 	vmovss	%xmm11, 256(%rsp)
+001200: 	vmovss	%xmm8, 176(%rsp)
+001201: 	vmovaps	%xmm3, 704(%rsp)
+001202: 	vmovss	%xmm15, 36(%rsp)
+001203: 	vmovaps	%xmm13, %xmm2
+001204: 	vmovaps	%xmm12, %xmm6
+001205: 	vmovss	64(%rsp), %xmm0
+001206: 	vmovaps	%xmm0, %xmm7
+001207: .Ltmp10081:
+001208: 	.loc	11 304 12
+001209: 	cmpq	%rax, %r9
+001210: 	jne	.LBB36_77
+001211: .Ltmp10082:
+001212: .LBB36_78:
+001213: 	.loc	1 1764 5
+001214: 	vmovss	%xmm1, 1240(%rsp)
+001215: 	vmovss	%xmm7, 1244(%rsp)
+001216: 	vmovss	%xmm12, 1248(%rsp)
+001217: 	vmovss	%xmm13, 1252(%rsp)
+001218: 	vmovss	%xmm15, 1256(%rsp)
+001219: 	vmovss	%xmm3, 1260(%rsp)
+001220: 	vmovss	%xmm8, 1264(%rsp)
+001221: 	vmovss	%xmm11, 1268(%rsp)
+001222: 	vmovss	%xmm9, 1272(%rsp)
+001223: 	vmovss	%xmm14, 1276(%rsp)
+001224: 	vmovss	%xmm10, 1280(%rsp)
+001225: 	vmovss	%xmm4, 1284(%rsp)
+001226: .Ltmp10083:
+001227: 	.loc	5 438 16
+001228: 	cmpq	136(%rsp), %rsi
+
+===== native-w8-dual-window | lowering/selected/native-w8-core.s =====
+----- original lines 545-585 -----
+000545: 	movq	%rax, %rcx
+000546: 	adcq	$0, %rcx
+000547: 	cmpq	$32, %rcx
+000548: 	movl	$32, %eax
+000549: 	cmovaeq	%rax, %rcx
+000550: 	movq	%rcx, 2560(%rsp)
+000551: .Ltmp7233:
+000552: 	.loc	1 1815 51
+000553: 	movq	%rdx, %rsi
+000554: 	subq	%r11, %rsi
+000555: .Ltmp7234:
+000556: 	.loc	10 1078 5
+000557: 	cmpq	$32, %rsi
+000558: 	cmovaeq	%rax, %rsi
+000559: .Ltmp7235:
+000560: 	.loc	1 1816 27
+000561: 	leaq	(,%r11,8), %rax
+000562: .Ltmp7236:
+000563: 	.loc	1 1820 35
+000564: 	addq	%r11, %rsi
+000565: 	shlq	$3, %rsi
+000566: .Ltmp7237:
+000567: 	.loc	4 1050 16
+000568: 	cmpq	%rax, %rsi
+000569: 	jb	.LBB34_623
+000570: 	cmpq	%rbx, %rsi
+000571: 	ja	.LBB34_623
+000572: .Ltmp7238:
+000573: 	.loc	4 0 16 is_stmt 0
+000574: 	movq	2560(%rsp), %rcx
+000575: 	shll	$5, %ecx
+000576: .Ltmp7239:
+000577: 	.loc	1 1759 23 is_stmt 1
+000578: 	vmovaps	7712(%rsp), %ymm9
+000579: 	vmovaps	7744(%rsp), %ymm2
+000580: 	vmovaps	7776(%rsp), %ymm4
+000581: 	vmovaps	7808(%rsp), %ymm8
+000582: 	vmovaps	7840(%rsp), %ymm5
+000583: 	vmovaps	7872(%rsp), %ymm13
+000584: 	vmovaps	7904(%rsp), %ymm12
+000585: 	vmovaps	7936(%rsp), %ymm3
+
+===== native-w8-dual-loop-entry | lowering/selected/native-w8-core.s =====
+----- original lines 700-728 -----
+000700: 	vmovaps	1408(%r12), %ymm1
+000701: 	vmovaps	%ymm1, 2304(%rsp)
+000702: 	vmovaps	1440(%r12), %ymm1
+000703: 	vmovaps	%ymm1, 2272(%rsp)
+000704: 	vmovaps	1472(%r12), %ymm1
+000705: 	vmovaps	%ymm1, 2496(%rsp)
+000706: 	vmovaps	1504(%r12), %ymm1
+000707: 	vmovaps	%ymm1, 2464(%rsp)
+000708: 	.p2align	4
+000709: .LBB34_268:
+000710: .Ltmp7245:
+000711: 	.loc	12 551 14 is_stmt 1
+000712: 	vmovups	(%r15,%rdx), %ymm4
+000713: .Ltmp7246:
+000714: 	.loc	29 283 14
+000715: 	vmulps	480(%rsp), %ymm4, %ymm1
+000716: .Ltmp7247:
+000717: 	.loc	29 48 14
+000718: 	vaddps	%ymm7, %ymm1, %ymm1
+000719: .Ltmp7248:
+000720: 	.loc	29 283 14
+000721: 	vmulps	96(%rsp), %ymm4, %ymm3
+000722: .Ltmp7249:
+000723: 	.loc	29 48 14
+000724: 	vaddps	%ymm7, %ymm3, %ymm3
+000725: .Ltmp7250:
+000726: 	.loc	29 283 14
+000727: 	vmulps	192(%rsp), %ymm4, %ymm6
+000728: .Ltmp7251:
+
+===== native-w8-dual-loop-exit | lowering/selected/native-w8-core.s =====
+----- original lines 1038-1080 -----
+001038: 	vmovaps	448(%rsp), %ymm4
+001039: .Ltmp7349:
+001040: 	.loc	29 233 14
+001041: 	vmaxps	%ymm2, %ymm0, %ymm0
+001042: .Ltmp7350:
+001043: 	.loc	29 82 19
+001044: 	vandps	%ymm11, %ymm10, %ymm2
+001045: .Ltmp7351:
+001046: 	.loc	29 233 14
+001047: 	vmaxps	%ymm2, %ymm0, %ymm0
+001048: .Ltmp7352:
+001049: 	.loc	12 551 14
+001050: 	vmovups	%ymm0, 10216(%rsp,%rdx)
+001051: .Ltmp7353:
+001052: 	.loc	11 304 12
+001053: 	addq	$32, %rdx
+001054: 	vmovaps	%ymm4, %ymm0
+001055: 	vmovaps	%ymm1, 384(%rsp)
+001056: 	vmovaps	%ymm14, %ymm10
+001057: 	vmovaps	%ymm6, %ymm2
+001058: 	vmovaps	%ymm3, %ymm11
+001059: 	cmpq	%rdx, %rcx
+001060: 	jne	.LBB34_268
+001061: .Ltmp7354:
+001062: .LBB34_269:
+001063: 	.loc	1 1764 5
+001064: 	vmovaps	%ymm9, 7712(%rsp)
+001065: 	vmovaps	%ymm4, 7744(%rsp)
+001066: 	vmovaps	32(%rsp), %ymm0
+001067: 	vmovaps	%ymm0, 7776(%rsp)
+001068: 	vmovaps	%ymm8, 7808(%rsp)
+001069: 	vmovaps	%ymm5, 7840(%rsp)
+001070: 	vmovaps	%ymm13, 7872(%rsp)
+001071: 	vmovaps	%ymm12, 7904(%rsp)
+001072: 	vmovaps	%ymm3, 7936(%rsp)
+001073: 	vmovaps	%ymm6, 7968(%rsp)
+001074: 	vmovaps	%ymm14, 8000(%rsp)
+001075: 	vmovaps	%ymm1, 8032(%rsp)
+001076: 	vmovaps	%ymm15, 8064(%rsp)
+001077: .Ltmp7355:
+001078: 	.loc	5 438 16
+001079: 	cmpq	88(%rsp), %rsi
+001080: 	ja	.LBB34_624
+
+===== native-w8-mono-window | lowering/selected/native-w8-process-bank-inner.s =====
+----- original lines 710-752 -----
+000710: 	vmovaps	768(%rsp), %ymm0
+000711: 	vmovaps	288(%rsp), %ymm13
+000712: 	je	.LBB1_301
+000713: .LBB1_73:
+000714: .Ltmp1410:
+000715: 	.loc	4 2584 13
+000716: 	cmpq	$1, %r11
+000717: 	movq	%r11, %rax
+000718: 	adcq	$0, %rax
+000719: 	cmpq	$32, %rax
+000720: 	cmovaeq	%r9, %rax
+000721: 	movq	%rax, 1792(%rsp)
+000722: 	movq	8(%rsp), %rsi
+000723: .Ltmp1411:
+000724: 	.loc	1 3260 51
+000725: 	subq	%r14, %rsi
+000726: .Ltmp1412:
+000727: 	.loc	10 1078 5
+000728: 	cmpq	$32, %rsi
+000729: 	cmovaeq	%r9, %rsi
+000730: .Ltmp1413:
+000731: 	.loc	1 3261 27
+000732: 	leaq	(,%r14,8), %rdi
+000733: .Ltmp1414:
+000734: 	.loc	1 3265 35
+000735: 	addq	%r14, %rsi
+000736: 	shlq	$3, %rsi
+000737: .Ltmp1415:
+000738: 	.loc	4 1050 16
+000739: 	cmpq	%rdi, %rsi
+000740: 	jb	.LBB1_378
+000741: 	cmpq	%r15, %rsi
+000742: 	ja	.LBB1_378
+000743: .Ltmp1416:
+000744: 	.loc	4 0 16 is_stmt 0
+000745: 	vmovaps	%ymm0, 768(%rsp)
+000746: 	vmovaps	%ymm9, %ymm8
+000747: .Ltmp1417:
+000748: 	.loc	11 304 12 is_stmt 1
+000749: 	cmpq	%r14, 8(%rsp)
+000750: 	vmovaps	%ymm6, 448(%rsp)
+000751: 	vmovaps	%ymm3, 384(%rsp)
+000752: 	jne	.LBB1_77
+
+===== native-w8-mono-loop-entry | lowering/selected/native-w8-process-bank-inner.s =====
+----- original lines 860-888 -----
+000860: 	vmovaps	1408(%r13), %ymm1
+000861: 	vmovaps	%ymm1, 2016(%rsp)
+000862: 	vmovaps	1440(%r13), %ymm1
+000863: 	vmovaps	%ymm1, 1984(%rsp)
+000864: 	vmovaps	1472(%r13), %ymm1
+000865: 	vmovaps	%ymm1, 1952(%rsp)
+000866: 	vmovaps	1504(%r13), %ymm1
+000867: 	vmovaps	%ymm1, 1920(%rsp)
+000868: 	vmovaps	960(%rsp), %ymm3
+000869: 	vmovaps	%ymm8, %ymm12
+000870: 	vmovaps	768(%rsp), %ymm6
+000871: 	.p2align	4
+000872: .LBB1_78:
+000873: 	vmovaps	%ymm10, 128(%rsp)
+000874: 	vmovaps	%ymm3, %ymm7
+000875: .Ltmp1420:
+000876: 	.loc	12 551 14 is_stmt 1
+000877: 	vmovups	(%r10,%rcx), %ymm3
+000878: .Ltmp1421:
+000879: 	.loc	29 283 14
+000880: 	vmulps	416(%rsp), %ymm3, %ymm1
+000881: 	vxorps	%xmm8, %xmm8, %xmm8
+000882: .Ltmp1422:
+000883: 	.loc	29 48 14
+000884: 	vaddps	%ymm1, %ymm8, %ymm1
+000885: .Ltmp1423:
+000886: 	.loc	29 283 14
+000887: 	vmulps	320(%rsp), %ymm3, %ymm4
+000888: .Ltmp1424:
+
+===== native-w8-mono-loop-exit | lowering/selected/native-w8-process-bank-inner.s =====
+----- original lines 1198-1248 -----
+001198: .Ltmp1523:
+001199: 	.loc	29 82 19
+001200: 	vandps	%ymm5, %ymm13, %ymm5
+001201: .Ltmp1524:
+001202: 	.loc	29 233 14
+001203: 	vmaxps	%ymm5, %ymm0, %ymm0
+001204: .Ltmp1525:
+001205: 	.loc	29 82 19
+001206: 	vandps	%ymm13, %ymm10, %ymm5
+001207: .Ltmp1526:
+001208: 	.loc	29 233 14
+001209: 	vmaxps	%ymm5, %ymm0, %ymm0
+001210: .Ltmp1527:
+001211: 	.loc	12 551 14
+001212: 	vmovups	%ymm0, 4320(%rsp,%rcx)
+001213: .Ltmp1528:
+001214: 	.loc	11 304 12
+001215: 	addq	$32, %rcx
+001216: 	vmovaps	%ymm7, %ymm13
+001217: 	vmovaps	%ymm14, %ymm10
+001218: 	vmovaps	%ymm11, %ymm9
+001219: 	vmovaps	%ymm15, %ymm5
+001220: 	vmovaps	%ymm1, %ymm0
+001221: 	cmpq	%rcx, %rax
+001222: 	jne	.LBB1_78
+001223: .Ltmp1529:
+001224: .LBB1_79:
+001225: 	.loc	11 0 12 is_stmt 0
+001226: 	vmovaps	%ymm7, 288(%rsp)
+001227: 	vmovaps	%ymm6, 768(%rsp)
+001228: 	vmovaps	%ymm3, 960(%rsp)
+001229: 	vmovaps	%ymm12, %ymm9
+001230: 	vmovaps	448(%rsp), %ymm6
+001231: 	vmovaps	384(%rsp), %ymm10
+001232: 	.loc	1 1764 5 is_stmt 1
+001233: 	vmovaps	%ymm1, 1216(%rsp)
+001234: 	vmovaps	%ymm15, 1248(%rsp)
+001235: 	vmovaps	%ymm11, 1280(%rsp)
+001236: 	vmovaps	%ymm14, 1312(%rsp)
+001237: 	vmovaps	%ymm4, 1344(%rsp)
+001238: .Ltmp1530:
+001239: 	.loc	11 304 12
+001240: 	cmpq	%r14, 8(%rsp)
+001241: 	vmovaps	1824(%rsp), %ymm13
+001242: .Ltmp1531:
+001243: 	.loc	3 900 12
+001244: 	je	.LBB1_71
+001245: .Ltmp1532:
+001246: 	.loc	3 0 12 is_stmt 0
+001247: 	movq	%r14, 608(%rsp)
+001248: 	movq	%r11, 96(%rsp)
+
+===== wasm-scalar-window | lowering/selected/wasm-scalar-scalar-core.s =====
+----- original lines 1355-1410 -----
+001355: 	i32.add
+001356: 	local.set	24
+001357: 	local.get	8
+001358: 	i32.const	-1
+001359: 	i32.add
+001360: 	local.set	25
+001361: 	local.get	3
+001362: 	local.set	26
+001363: 	local.get	1
+001364: 	local.set	27
+001365: 	local.get	5
+001366: 	local.set	28
+001367: 	i32.const	0
+001368: 	local.set	29
+001369: .Ltmp1274:
+001370: .LBB22_88:
+001371: 	.loc	14 1815 51
+001372: 	block
+001373: 	loop
+001374: 	local.get	5
+001375: 	local.get	29
+001376: 	i32.sub
+001377: 	local.tee	8
+001378: 	i32.const	32
+001379: 	local.get	8
+001380: 	i32.const	32
+001381: .Ltmp1275:
+001382: 	.loc	9 1077 12
+001383: 	i32.lt_u
+001384: 	i32.select
+001385: .Ltmp1276:
+001386: 	.loc	14 1820 35
+001387: 	local.tee	8
+001388: 	local.get	29
+001389: 	i32.add
+001390: 	local.tee	11
+001391: 	local.get	8
+001392: 	i32.lt_u
+001393: .Ltmp1277:
+001394: 	.loc	13 1050 16
+001395: 	br_if   	18
+001396: 	local.get	11
+001397: 	local.get	2
+001398: 	i32.gt_u
+001399: 	br_if   	18
+001400: .Ltmp1278:
+001401: 	.loc	13 0 16 is_stmt 0
+001402: 	local.get	28
+001403: 	i32.const	1
+001404: 	local.get	28
+001405: 	i32.const	1
+001406: 	i32.gt_u
+001407: 	i32.select
+001408: 	local.tee	8
+001409: 	i32.const	32
+001410: 	local.get	8
+
+===== wasm-scalar-loop-entry | lowering/selected/wasm-scalar-scalar-core.s =====
+----- original lines 1635-1668 -----
+001635: 	local.set	96
+001636: 	local.get	37
+001637: 	local.set	97
+001638: 	local.get	38
+001639: 	local.set	98
+001640: 	local.get	39
+001641: 	local.set	99
+001642: 	local.get	40
+001643: 	local.set	100
+001644: .LBB22_93:
+001645: 	loop
+001646: 	local.get	41
+001647: 	local.set	40
+001648: 	local.get	8
+001649: 	local.get	96
+001650: .Ltmp1284:
+001651: 	.loc	38 103 24 is_stmt 1
+001652: 	local.tee	35
+001653: 	f32.abs
+001654: .Ltmp1285:
+001655: 	.loc	38 51 9
+001656: 	local.tee	96
+001657: 	local.get	10
+001658: 	f32.load	0
+001659: .Ltmp1286:
+001660: 	.loc	38 71 9
+001661: 	local.tee	41
+001662: 	local.get	90
+001663: 	f32.mul
+001664: 	f32.const	0x0p0
+001665: .Ltmp1287:
+001666: 	.loc	38 61 9
+001667: 	f32.add
+001668: .Ltmp1288:
+
+===== wasm-scalar-loop-exit | lowering/selected/wasm-scalar-scalar-core.s =====
+----- original lines 2085-2160 -----
+002085: 	f32.mul
+002086: .Ltmp1387:
+002087: 	.loc	38 61 9
+002088: 	f32.add
+002089: .Ltmp1388:
+002090: 	.loc	38 103 24
+002091: 	f32.abs
+002092: .Ltmp1389:
+002093: 	.loc	38 161 24
+002094: 	local.tee	92
+002095: 	local.get	91
+002096: 	local.get	92
+002097: 	f32.gt
+002098: 	f32.select
+002099: .Ltmp1390:
+002100: 	.loc	38 56 9
+002101: 	f32.store	0
+002102: 	local.get	8
+002103: 	i32.const	4
+002104: .Ltmp1391:
+002105: 	.loc	33 304 12
+002106: 	i32.add
+002107: 	local.set	8
+002108: 	local.get	10
+002109: 	i32.const	4
+002110: 	i32.add
+002111: 	local.set	10
+002112: 	local.get	31
+002113: 	local.set	91
+002114: 	local.get	32
+002115: 	local.set	92
+002116: 	local.get	33
+002117: 	local.set	93
+002118: 	local.get	34
+002119: 	local.set	94
+002120: 	local.get	35
+002121: 	local.set	95
+002122: 	local.get	36
+002123: 	local.set	96
+002124: 	local.get	37
+002125: 	local.set	97
+002126: 	local.get	38
+002127: 	local.set	98
+002128: 	local.get	39
+002129: 	local.set	99
+002130: 	local.get	40
+002131: 	local.set	100
+002132: 	local.get	9
+002133: 	i32.const	-1
+002134: 	i32.add
+002135: 	local.tee	9
+002136: 	br_if   	0
+002137: .LBB22_94:
+002138: 	end_loop
+002139: 	end_block
+002140: .Ltmp1392:
+002141: 	.loc	14 1764 5
+002142: 	local.get	6
+002143: 	local.get	42
+002144: 	f32.store	276
+002145: 	local.get	6
+002146: 	local.get	31
+002147: 	f32.store	272
+002148: 	local.get	6
+002149: 	local.get	32
+002150: 	f32.store	268
+002151: 	local.get	6
+002152: 	local.get	33
+002153: 	f32.store	264
+002154: 	local.get	6
+002155: 	local.get	34
+002156: 	f32.store	260
+002157: 	local.get	6
+002158: 	local.get	35
+002159: 	f32.store	256
+002160: 	local.get	6
+
+===== wasm-w4-window | lowering/selected/wasm-simd128-w4-core.s =====
+----- original lines 1330-1390 -----
+001330: 	i32.const	1
+001331: .Ltmp1637:
+001332: 	.loc	14 1800 19
+001333: 	i32.and
+001334: 	v128.select
+001335: 	local.set	26
+001336: 	local.get	3
+001337: 	local.set	27
+001338: 	local.get	1
+001339: 	local.set	28
+001340: 	local.get	5
+001341: 	local.set	29
+001342: 	i32.const	0
+001343: 	local.set	30
+001344: .LBB26_88:
+001345: .Ltmp1638:
+001346: 	.loc	14 1815 51
+001347: 	block
+001348: 	loop
+001349: 	local.get	5
+001350: 	local.get	30
+001351: 	i32.sub
+001352: 	local.tee	9
+001353: 	i32.const	32
+001354: 	local.get	9
+001355: 	i32.const	32
+001356: .Ltmp1639:
+001357: 	.loc	9 1077 12
+001358: 	i32.lt_u
+001359: 	i32.select
+001360: .Ltmp1640:
+001361: 	.loc	14 1820 35
+001362: 	local.get	30
+001363: 	i32.add
+001364: 	i32.const	2
+001365: 	i32.shl
+001366: 	local.tee	12
+001367: 	local.get	30
+001368: 	i32.const	2
+001369: .Ltmp1641:
+001370: 	.loc	14 1816 27
+001371: 	i32.shl
+001372: .Ltmp1642:
+001373: 	.loc	13 1050 16
+001374: 	local.tee	8
+001375: 	i32.lt_u
+001376: 	br_if   	5
+001377: 	local.get	12
+001378: 	local.get	2
+001379: 	i32.gt_u
+001380: 	br_if   	5
+001381: .Ltmp1643:
+001382: 	.loc	13 0 16 is_stmt 0
+001383: 	local.get	29
+001384: 	i32.const	1
+001385: 	local.get	29
+001386: 	i32.const	1
+001387: 	i32.gt_u
+001388: 	i32.select
+001389: 	local.tee	9
+001390: 	i32.const	32
+
+===== wasm-w4-loop-entry | lowering/selected/wasm-simd128-w4-core.s =====
+----- original lines 1615-1648 -----
+001615: 	local.get	36
+001616: 	local.set	95
+001617: 	local.get	37
+001618: 	local.set	96
+001619: 	local.get	38
+001620: 	local.set	97
+001621: 	local.get	39
+001622: 	local.set	98
+001623: 	local.get	24
+001624: 	local.set	99
+001625: .LBB26_93:
+001626: 	loop
+001627: 	local.get	40
+001628: 	local.set	24
+001629: .Ltmp1649:
+001630: 	.loc	1 551 14 is_stmt 1
+001631: 	local.get	9
+001632: 	local.get	86
+001633: 	local.get	11
+001634: 	v128.load	0:p2align=2
+001635: .Ltmp1650:
+001636: 	.file	42 "/rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452" "library/core/src/../../stdarch/crates/core_arch/src/wasm32/simd128.rs"
+001637: 	.loc	42 3867 14
+001638: 	local.tee	40
+001639: 	f32x4.mul
+001640: .Ltmp1651:
+001641: 	.loc	42 3845 14
+001642: 	v128.const	0x0p0, 0x0p0, 0x0p0, 0x0p0
+001643: .Ltmp1652:
+001644: 	.loc	42 3845 14 is_stmt 0
+001645: 	local.tee	100
+001646: 	f32x4.add
+001647: .Ltmp1653:
+001648: 	.loc	42 3867 14 is_stmt 1
+
+===== wasm-w4-loop-exit | lowering/selected/wasm-simd128-w4-core.s =====
+----- original lines 2045-2120 -----
+002045: .Ltmp1750:
+002046: 	.loc	42 3812 14
+002047: 	f32x4.abs
+002048: .Ltmp1751:
+002049: 	.loc	42 3812 14 is_stmt 0
+002050: 	local.get	22
+002051: 	f32x4.abs
+002052: .Ltmp1752:
+002053: 	.loc	42 3928 9 is_stmt 1
+002054: 	f32x4.pmax
+002055: 	f32x4.pmax
+002056: 	f32x4.pmax
+002057: 	f32x4.pmax
+002058: .Ltmp1753:
+002059: 	.loc	1 551 14
+002060: 	v128.store	0:p2align=2
+002061: 	local.get	9
+002062: 	i32.const	16
+002063: .Ltmp1754:
+002064: 	.loc	33 304 12
+002065: 	i32.add
+002066: 	local.set	9
+002067: 	local.get	11
+002068: 	i32.const	16
+002069: 	i32.add
+002070: 	local.set	11
+002071: 	local.get	32
+002072: 	local.set	90
+002073: 	local.get	33
+002074: 	local.set	91
+002075: 	local.get	34
+002076: 	local.set	92
+002077: 	local.get	35
+002078: 	local.set	93
+002079: 	local.get	22
+002080: 	local.set	94
+002081: 	local.get	36
+002082: 	local.set	95
+002083: 	local.get	37
+002084: 	local.set	96
+002085: 	local.get	38
+002086: 	local.set	97
+002087: 	local.get	39
+002088: 	local.set	98
+002089: 	local.get	24
+002090: 	local.set	99
+002091: 	local.get	10
+002092: 	i32.const	-1
+002093: 	i32.add
+002094: 	local.tee	10
+002095: 	br_if   	0
+002096: .LBB26_94:
+002097: 	end_loop
+002098: 	end_block
+002099: .Ltmp1755:
+002100: 	.loc	14 1764 5
+002101: 	local.get	6
+002102: 	local.get	41
+002103: 	v128.store	2512
+002104: 	local.get	6
+002105: 	local.get	32
+002106: 	v128.store	2496
+002107: 	local.get	6
+002108: 	local.get	33
+002109: 	v128.store	2480
+002110: 	local.get	6
+002111: 	local.get	34
+002112: 	v128.store	2464
+002113: 	local.get	6
+002114: 	local.get	35
+002115: 	v128.store	2448
+002116: 	local.get	6
+002117: 	local.get	22
+002118: 	v128.store	2432
+002119: 	local.get	6
+002120: 	local.get	36

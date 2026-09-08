@@ -1,8 +1,8 @@
 {
   "artifact_files": {
     "README.md": {
-      "bytes": 9103,
-      "sha256": "b4aa5fbaa69ad07069e5efbc1587631f4c3904e8b00b0e8258b41273a7589ea5"
+      "bytes": 9599,
+      "sha256": "ce3b81258603e9510f56003ee83fcda10b7e682354b1433b07c9e152d50cfff1"
     },
     "corpus/wasm-gates.jsonl": {
       "bytes": 515,
@@ -380,14 +380,6 @@
       "bytes": 0,
       "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     },
-    "lowering/native/true_peak_limiter-61bcf0f0b2475b36.ll": {
-      "bytes": 8398979,
-      "sha256": "cea17e7527a795f25612e95bcb5bb92d91cadaef929dfb2e3628c2c86c3e94eb"
-    },
-    "lowering/native/true_peak_limiter-61bcf0f0b2475b36.s": {
-      "bytes": 3961556,
-      "sha256": "b9d25e64b27b17992fd43d05aff4a88b710dd2223b6157beb8f71aaf4d1b1fd5"
-    },
     "lowering/selected/extract.status": {
       "bytes": 2,
       "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
@@ -401,104 +393,24 @@
       "sha256": "7d7baa4ba7e9e2b45ef75191ec2c772c295e6108698dc0e883e478f49536700b"
     },
     "lowering/selected/manifest.json": {
-      "bytes": 14480,
-      "sha256": "7d7baa4ba7e9e2b45ef75191ec2c772c295e6108698dc0e883e478f49536700b"
+      "bytes": 14849,
+      "sha256": "6e25820d05aaa60bbbeb2befbc512ee7ca9cfd4c2c5ef19f4f062ba6045b2677"
     },
-    "lowering/selected/native-scalar-core.ll": {
-      "bytes": 680384,
-      "sha256": "0e5dd42423c13577b138a26c2aac5d62db4a0044fd21ea86ff3b96365979c52a"
+    "lowering-map-excerpts.json": {
+      "bytes": 7756,
+      "sha256": "600c736c64a5f9d24bba67addac7ae95d6ea425458e2ddcf51174acf7016c8f1"
     },
-    "lowering/selected/native-scalar-core.s": {
-      "bytes": 242830,
-      "sha256": "49c76223538bea3aeb9884b0538af6d50bcd82e7851f66450e02c05a6e64222d"
-    },
-    "lowering/selected/native-scalar-process.ll": {
-      "bytes": 3394,
-      "sha256": "8685479ba1ddd712bfafecc276d4744255fc9a8c452088a511cce7c2873af8d6"
-    },
-    "lowering/selected/native-scalar-process.s": {
-      "bytes": 2258,
-      "sha256": "9be80d0fa2379c84c0f0e5559d443537f3ecca97e4882ebc35052ee5844d4914"
-    },
-    "lowering/selected/native-w8-core.ll": {
-      "bytes": 721020,
-      "sha256": "18de804624c50be0a21f4b9facf00cb0d9098f9ef8e72bfd25fb553d7608edce"
-    },
-    "lowering/selected/native-w8-core.s": {
-      "bytes": 265340,
-      "sha256": "f7108f66c5ec874f7c0badcd28dc7f6ef85d7d23fcfa057b9e1e2494de121892"
-    },
-    "lowering/selected/native-w8-process-bank-inner.ll": {
-      "bytes": 433025,
-      "sha256": "7d50292a2cb19b8bb88b7f8af81a7004bb8dab145efde10d98adf74fb0fbc9d5"
-    },
-    "lowering/selected/native-w8-process-bank-inner.s": {
-      "bytes": 142572,
-      "sha256": "8c59a21c2d4779b553c19cdcd5ec21bf05c36f21c8827acbb09773fa87a88196"
-    },
-    "lowering/selected/native-w8-process-bank-mono.ll": {
-      "bytes": 1052,
-      "sha256": "92ad4f1b676fe9c4d245eec84e759d9fa68772a987e6d48a2ea32556d933b329"
-    },
-    "lowering/selected/native-w8-process-bank-mono.s": {
-      "bytes": 1069,
-      "sha256": "d47f4ab842bead074b7cbb6493d57d467c654b666fce418a8aeed8f5d907c91f"
-    },
-    "lowering/selected/native-w8-process-bank.ll": {
-      "bytes": 21959,
-      "sha256": "ff6b1da38227dc8cbcd6867d00d259de4f5f7566ddc8d76ad66436cd9a28a606"
-    },
-    "lowering/selected/native-w8-process-bank.s": {
-      "bytes": 11149,
-      "sha256": "430fccfd066295b5c93af21dff8fc97b86802fa4037fcadf5033636daca1d51e"
-    },
-    "lowering/selected/wasm-scalar-scalar-core.ll": {
-      "bytes": 715178,
-      "sha256": "08f3cfa3426f376e06765016e26e1c6d4a8d7bf92311b9e4fbacacf43ee6d0e5"
-    },
-    "lowering/selected/wasm-scalar-scalar-process.ll": {
-      "bytes": 3408,
-      "sha256": "0b3b7467981a6abc0b1bece67d6e7c585b52249503874b9ce4239cd2334c23b0"
-    },
-    "lowering/selected/wasm-simd128-scalar-core.ll": {
-      "bytes": 721825,
-      "sha256": "73f24b433789566992fbc6cb54c13a16b1d08f04d3574d7027d650a70b69cc60"
-    },
-    "lowering/selected/wasm-simd128-scalar-process.ll": {
-      "bytes": 3411,
-      "sha256": "82a4577f0184ea3a8395981cfef7fab0d2e5c60c65a35266139285f6a332658b"
-    },
-    "lowering/selected/wasm-simd128-w4-core-mono.ll": {
-      "bytes": 417361,
-      "sha256": "b65384b04da16895f5cc3058c48b1425301bc063f501908b226ef10966ff2e48"
-    },
-    "lowering/selected/wasm-simd128-w4-core.ll": {
-      "bytes": 730834,
-      "sha256": "adb892ee21fb4cae02239fdcd6250c99fc24c3c47301ba74128ccab55f2de3c1"
-    },
-    "lowering/selected/wasm-simd128-w4-process-bank-mono.ll": {
-      "bytes": 12918,
-      "sha256": "3cdebca4636037bb39dc7165f84f10828264cb0254f8709102aca1518f73af99"
-    },
-    "lowering/selected/wasm-simd128-w4-process-bank.ll": {
-      "bytes": 13351,
-      "sha256": "ae4c959ded960d696a17642246e59682722bf326bc63a135a569ba3c27b3ca5b"
-    },
-    "lowering/wasm-scalar/true_peak_limiter-13565f343cd208d0.ll": {
-      "bytes": 2285983,
-      "sha256": "1af4e6ed7ff6dbd14e9253903c5f504b846188ede9f0dd23e082a5895f5765c2"
-    },
-    "lowering/wasm-simd128/true_peak_limiter-c44b6d723c91aa0c.ll": {
-      "bytes": 5261918,
-      "sha256": "4cd8baa07a2ff56a9e1a41228162ed6e1856275cfde5aef2d44a5bc51c8a37d8"
+    "lowering-map-excerpts.txt": {
+      "bytes": 18888,
+      "sha256": "737979756786af8e0c88b69c23ee6eedc6837eca0c0108bc71bcaac9060226fb"
     },
     "raw-emitted-output.members.json": {
-      "bytes": 3043,
-      "sha256": "1f69e7964fd683d4920916c787870957da64e5bb9bcc47dfa619a96eb54e0261"
+      "bytes": 1198,
+      "sha256": "1a265a45d881aa417068214ce18a4e7f6db389cea5f9288c72b3052407e991ac"
     },
     "raw-emitted-output.tar.gz": {
-      "bytes": 484712,
-      "sha256": "49008d3f3e968c67addd9b8657453b12ced4396e1a875cce239e9350c6f1336f"
+      "bytes": 1663,
+      "sha256": "b8dcb386c6191f8964d6cb777a21c844aa084ef08a31afdcde4c5f60b5f7d7de"
     }
   },
   "attempt": 1,
@@ -701,7 +613,151 @@
   "lossless_packaging": {
     "archive": "raw-emitted-output.tar.gz",
     "members_manifest": "raw-emitted-output.members.json",
-    "reason": "preserve tool-emitted bytes while allowing branch-wide Git diff hygiene",
-    "member_count": 16
+    "reason": "preserve six test stdout streams byte-for-byte after full compiler output was retired under tracker ruling 80f6e715",
+    "member_count": 6
+  },
+  "durable_compaction": {
+    "tracker_head": "80f6e7159f1a7b4df055d43a6a7f75d66ec082e6",
+    "policy": "retain command/toolchain/source identities, hashes, and minimal relevant derived excerpts; omit full compiler IR and redundant assembly from delivery",
+    "excerpt_file": "lowering-map-excerpts.txt",
+    "excerpt_manifest": "lowering-map-excerpts.json",
+    "retired_full_capture_files": {
+      "lowering/native/true_peak_limiter-61bcf0f0b2475b36.ll": {
+        "bytes": 8398979,
+        "sha256": "cea17e7527a795f25612e95bcb5bb92d91cadaef929dfb2e3628c2c86c3e94eb"
+      },
+      "lowering/native/true_peak_limiter-61bcf0f0b2475b36.s": {
+        "bytes": 3961556,
+        "sha256": "b9d25e64b27b17992fd43d05aff4a88b710dd2223b6157beb8f71aaf4d1b1fd5"
+      },
+      "lowering/selected/native-scalar-core.ll": {
+        "bytes": 680384,
+        "sha256": "0e5dd42423c13577b138a26c2aac5d62db4a0044fd21ea86ff3b96365979c52a"
+      },
+      "lowering/selected/native-scalar-core.s": {
+        "bytes": 242830,
+        "sha256": "49c76223538bea3aeb9884b0538af6d50bcd82e7851f66450e02c05a6e64222d"
+      },
+      "lowering/selected/native-scalar-process.ll": {
+        "bytes": 3394,
+        "sha256": "8685479ba1ddd712bfafecc276d4744255fc9a8c452088a511cce7c2873af8d6"
+      },
+      "lowering/selected/native-scalar-process.s": {
+        "bytes": 2258,
+        "sha256": "9be80d0fa2379c84c0f0e5559d443537f3ecca97e4882ebc35052ee5844d4914"
+      },
+      "lowering/selected/native-w8-core.ll": {
+        "bytes": 721020,
+        "sha256": "18de804624c50be0a21f4b9facf00cb0d9098f9ef8e72bfd25fb553d7608edce"
+      },
+      "lowering/selected/native-w8-core.s": {
+        "bytes": 265340,
+        "sha256": "f7108f66c5ec874f7c0badcd28dc7f6ef85d7d23fcfa057b9e1e2494de121892"
+      },
+      "lowering/selected/native-w8-process-bank-inner.ll": {
+        "bytes": 433025,
+        "sha256": "7d50292a2cb19b8bb88b7f8af81a7004bb8dab145efde10d98adf74fb0fbc9d5"
+      },
+      "lowering/selected/native-w8-process-bank-inner.s": {
+        "bytes": 142572,
+        "sha256": "8c59a21c2d4779b553c19cdcd5ec21bf05c36f21c8827acbb09773fa87a88196"
+      },
+      "lowering/selected/native-w8-process-bank-mono.ll": {
+        "bytes": 1052,
+        "sha256": "92ad4f1b676fe9c4d245eec84e759d9fa68772a987e6d48a2ea32556d933b329"
+      },
+      "lowering/selected/native-w8-process-bank-mono.s": {
+        "bytes": 1069,
+        "sha256": "d47f4ab842bead074b7cbb6493d57d467c654b666fce418a8aeed8f5d907c91f"
+      },
+      "lowering/selected/native-w8-process-bank.ll": {
+        "bytes": 21959,
+        "sha256": "ff6b1da38227dc8cbcd6867d00d259de4f5f7566ddc8d76ad66436cd9a28a606"
+      },
+      "lowering/selected/native-w8-process-bank.s": {
+        "bytes": 11149,
+        "sha256": "430fccfd066295b5c93af21dff8fc97b86802fa4037fcadf5033636daca1d51e"
+      },
+      "lowering/selected/wasm-scalar-scalar-core.ll": {
+        "bytes": 715178,
+        "sha256": "08f3cfa3426f376e06765016e26e1c6d4a8d7bf92311b9e4fbacacf43ee6d0e5"
+      },
+      "lowering/selected/wasm-scalar-scalar-process.ll": {
+        "bytes": 3408,
+        "sha256": "0b3b7467981a6abc0b1bece67d6e7c585b52249503874b9ce4239cd2334c23b0"
+      },
+      "lowering/selected/wasm-simd128-scalar-core.ll": {
+        "bytes": 721825,
+        "sha256": "73f24b433789566992fbc6cb54c13a16b1d08f04d3574d7027d650a70b69cc60"
+      },
+      "lowering/selected/wasm-simd128-scalar-process.ll": {
+        "bytes": 3411,
+        "sha256": "82a4577f0184ea3a8395981cfef7fab0d2e5c60c65a35266139285f6a332658b"
+      },
+      "lowering/selected/wasm-simd128-w4-core-mono.ll": {
+        "bytes": 417361,
+        "sha256": "b65384b04da16895f5cc3058c48b1425301bc063f501908b226ef10966ff2e48"
+      },
+      "lowering/selected/wasm-simd128-w4-core.ll": {
+        "bytes": 730834,
+        "sha256": "adb892ee21fb4cae02239fdcd6250c99fc24c3c47301ba74128ccab55f2de3c1"
+      },
+      "lowering/selected/wasm-simd128-w4-process-bank-mono.ll": {
+        "bytes": 12918,
+        "sha256": "3cdebca4636037bb39dc7165f84f10828264cb0254f8709102aca1518f73af99"
+      },
+      "lowering/selected/wasm-simd128-w4-process-bank.ll": {
+        "bytes": 13351,
+        "sha256": "ae4c959ded960d696a17642246e59682722bf326bc63a135a569ba3c27b3ca5b"
+      },
+      "lowering/wasm-scalar/true_peak_limiter-13565f343cd208d0.ll": {
+        "bytes": 2285983,
+        "sha256": "1af4e6ed7ff6dbd14e9253903c5f504b846188ede9f0dd23e082a5895f5765c2"
+      },
+      "lowering/wasm-simd128/true_peak_limiter-c44b6d723c91aa0c.ll": {
+        "bytes": 5261918,
+        "sha256": "4cd8baa07a2ff56a9e1a41228162ed6e1856275cfde5aef2d44a5bc51c8a37d8"
+      },
+      "lowering/selected/wasm-scalar-scalar-core.s": {
+        "bytes": 288342,
+        "sha256": "9283ef201b39f1b93eb67a32d12c1430b83073c379404c251a90f38421f1ede8"
+      },
+      "lowering/selected/wasm-scalar-scalar-process.s": {
+        "bytes": 2050,
+        "sha256": "b1183c33fbd7af7dacb61b18c8a574adc98dc2082cea5ccf4fefcfe159abe62f"
+      },
+      "lowering/selected/wasm-simd128-scalar-core.s": {
+        "bytes": 288111,
+        "sha256": "75085e647d7e49916137484b3de66b6ebc1d2dd777d72f2084821c4168fdfe0e"
+      },
+      "lowering/selected/wasm-simd128-scalar-process.s": {
+        "bytes": 1954,
+        "sha256": "df77d08c4e86cc93fc1e0ba98f701fe802cdb35b17c7fc8f08134d82712d204e"
+      },
+      "lowering/selected/wasm-simd128-w4-core-mono.s": {
+        "bytes": 167613,
+        "sha256": "055c01cb4473258c4b0b960ce0799e4b98bcd2244445eae647796bddbec4e180"
+      },
+      "lowering/selected/wasm-simd128-w4-core.s": {
+        "bytes": 326328,
+        "sha256": "6634ae9eb8cf187977e5737d41933d013316f6e58daf0810e52e19e4a8dd2b6e"
+      },
+      "lowering/selected/wasm-simd128-w4-process-bank-mono.s": {
+        "bytes": 6208,
+        "sha256": "e800db30873f2c91714a3d8e7f1bb1581e2ee19f8c02be938bddb3294ef3baf5"
+      },
+      "lowering/selected/wasm-simd128-w4-process-bank.s": {
+        "bytes": 6261,
+        "sha256": "27f35a4af022331e16023c51ae8fa08e6621cb01962663a56e739f8ac440deb7"
+      },
+      "lowering/wasm-scalar/true_peak_limiter-13565f343cd208d0.s": {
+        "bytes": 1058211,
+        "sha256": "f032be87150eb1808a41fc34d09ed680eecfd0e9bc713bc35fecef73b09c1087"
+      },
+      "lowering/wasm-simd128/true_peak_limiter-c44b6d723c91aa0c.s": {
+        "bytes": 2533528,
+        "sha256": "6ec0a2257f7b0337e1f4733a41e7804bb68a1eb07bee24fd13587f1704cf1222"
+      }
+    }
   }
 }

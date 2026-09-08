@@ -20,7 +20,7 @@ This is the single Astra LOW-authorized, untimed current-source compile/disassem
 
 ## Exact primary capture commands
 
-Each command exited 0. `cargo.stdout`, `cargo.stderr`, and `cargo.status` are retained in the corresponding directory. `--emit=asm,llvm-ir` retains the complete current release lowering for symbol selection and review.
+Each command exited 0. `cargo.stdout`, `cargo.stderr`, and `cargo.status` are retained in the corresponding directory. `--emit=asm,llvm-ir` produced the complete current release lowering used for symbol selection and review. The full compiler output was subsequently removed from durable delivery under tracker ruling `80f6e715`; its original byte counts and SHA-256 identities remain in `provenance.json`.
 
 ```sh
 env PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/issue621-native-target cargo rustc --locked --release -p true-peak-limiter --lib -- --emit=asm,llvm-ir
@@ -30,23 +30,23 @@ env PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/issue621-wasm-scalar-ta
 env PATH=/home/bl/.cargo/bin:$PATH CARGO_TARGET_DIR=/tmp/issue621-wasm-simd128-target RUSTFLAGS='-C target-feature=+simd128' cargo rustc --locked --release --target wasm32-unknown-unknown -p true-peak-limiter --lib -- --emit=asm,llvm-ir
 ```
 
-The retained complete files are:
+The full files used for the review were:
 
 - `native/true_peak_limiter-61bcf0f0b2475b36.ll` and `.s`
 - `wasm-scalar/true_peak_limiter-13565f343cd208d0.ll` and `.s`
 - `wasm-simd128/true_peak_limiter-c44b6d723c91aa0c.ll` and `.s`
 
-The selected complete function intervals and their source line ranges/hashes are recorded in `selected/manifest.json`; the selected `.ll` and `.s` files are complete function bodies, not snippets.
+Their selected complete function intervals and original source line ranges/hashes remain recorded in `selected/manifest.json`. The focused, line-addressed assembly excerpts that support the lowering map are retained in `lowering-map-excerpts.txt`; `lowering-map-excerpts.json` records each logical source, original line range, full-source identity, and raw excerpt hash.
 
 ## Wasm object/disassembly note
 
-Cargo's release `--emit=obj` output in this configuration is LLVM bitcode rather than a WebAssembly object. The attempted `wasm-objdump` checks on those retained files therefore exited 1 with `bad magic value`; their Cargo invocations exited 0 and the output/status/stderr files are retained under `wasm-scalar/` and `wasm-simd128/` for audit. Additional no-LTO/no-embed-bitcode attempts are likewise retained and are not credited as disassembly.
+Cargo's release `--emit=obj` output in this configuration is LLVM bitcode rather than a WebAssembly object. The attempted `wasm-objdump` checks on those temporary outputs therefore exited 1 with `bad magic value`; their Cargo command output, status, and stderr remain under `wasm-scalar/` and `wasm-simd128/` for audit. Additional no-LTO/no-embed-bitcode attempt records likewise remain and are not credited as disassembly.
 
-A direct scalar `rustc` object capture, using already-built repository dependency rlibs and the same release optimization intent, exited 0; `wasm-objdump -x -d /tmp/issue621-wasm-scalar-direct.o` also exited 0. Its complete disassembly is retained as `wasm-scalar/direct-wasm-objdump.txt`, and it contains no `v128.` or `f32x4.` instructions. The direct SIMD rustc attempt could not resolve the lane rlib in the temporary dependency directory and exited 1; its output and stderr are retained under `wasm-simd128/`. SIMD portability is credited from the successful Cargo SIMD release leg and its complete `.s`/LLVM output: the SIMD assembly contains 4,752 `v128.`/`f32x4.` opcode occurrences, while the scalar assembly contains none.
+A direct scalar `rustc` object capture, using already-built repository dependency rlibs and the same release optimization intent, exited 0; `wasm-objdump -x -d /tmp/issue621-wasm-scalar-direct.o` also exited 0. Its complete disassembly was inspected and contained no `v128.` or `f32x4.` instructions; the durable record retains its original size and SHA-256 rather than the full disassembly. The direct SIMD rustc attempt could not resolve the lane rlib in the temporary dependency directory and exited 1; its two small raw stderr streams remain losslessly archived. SIMD portability is credited from the successful Cargo SIMD release leg and the inspected compiler output: the SIMD assembly contained 4,752 `v128.`/`f32x4.` opcode occurrences, while the scalar assembly contained none.
 
 ## Current source-to-lowering map
 
-The source shape under capture is `lib.rs:1750-1765`: `detector_chunk` computes `base = (chunk + frame) * width`, loads `L::load(&io[base..])`, stores the detector result to `peaks[frame * width..]`, and writes the twelve-word history back once after the frame loop. The following locations are in the retained selected assembly bodies. They separate the repeated loop-internal input slice check from loop termination, chunk/tail controls, arithmetic/store, and post-loop history writeback.
+The source shape under capture is `lib.rs:1750-1765`: `detector_chunk` computes `base = (chunk + frame) * width`, loads `L::load(&io[base..])`, stores the detector result to `peaks[frame * width..]`, and writes the twelve-word history back once after the frame loop. The following locations refer to the original selected assembly identities recorded in the manifests and reproduced by original line number in `lowering-map-excerpts.txt`. They separate the repeated loop-internal input slice check from loop termination, chunk/tail controls, arithmetic/store, and post-loop history writeback.
 
 | Current path | Repeated input window check inside frame loop | Frame loop backedge | Separate chunk/tail control | Arithmetic/store and history writeback |
 |---|---|---|---|---|
@@ -60,11 +60,13 @@ The native scalar and native W8 bodies are the supported native premise. The sca
 
 ## Completeness and hygiene
 
-- Full compiler output, status and stderr are retained for all three primary legs and all object/disassembly attempts.
-- `selected/manifest.json` records every selected function's source file, line interval, byte count and SHA-256; `selected/extract.status` is 0.
+- Commands, exit statuses, ordinary stdout/stderr, toolchain identity, source identity, and original full-output hashes remain for all three primary legs and every object/disassembly attempt. Full compiler IR and assembly are omitted from durable delivery under tracker ruling `80f6e715`.
+- `selected/manifest.json` records every selected function's original source file, line interval, byte count, and SHA-256; `selected/extract.status` is 0. `lowering-map-excerpts.json` makes the surviving derived excerpts independently traceable to those raw identities.
 - The artifact tree contains no `target/` directory, Cargo registry/dependency tree, private key, token, password, or unrelated generated source. Temporary targets and the direct scalar object remain under `/tmp` and are not repository changes.
-- The worktree remains at the authorized HEAD with only this uncommitted `artifacts/issue621-current-lowering/` directory added.
+- This capture remains tied to the authorized source HEAD; later evidence-only and integration commits do not change that identity.
 
-## Lossless delivery packaging
+## Durable delivery form
 
-Raw compiler, disassembler, and command-output files that contain tool-emitted trailing whitespace are stored byte-for-byte as members of `raw-emitted-output.tar.gz`. `raw-emitted-output.members.json` records every logical path, uncompressed size, and uncompressed SHA-256. Paths and line numbers elsewhere in this record refer to those logical archive-member paths when the plain file is absent. Review a member with `tar -xOzf raw-emitted-output.tar.gz <logical-path>`; no captured byte was normalized or discarded. The archive uses deterministic zeroed ownership and timestamps.
+Tracker ruling `80f6e715` excludes full compiler IR and redundant assembly from default-branch evidence. `provenance.json` preserves every retired file's logical path, uncompressed byte count, and SHA-256. `lowering-map-excerpts.txt` contains only the assembly lines needed for this review, with original line numbers; its companion JSON preserves each raw excerpt hash. The display form removes line endings and trailing horizontal whitespace, so the recorded raw hashes remain authoritative.
+
+The two small failed auxiliary stderr streams are stored byte-for-byte in `raw-emitted-output.tar.gz`. `raw-emitted-output.members.json` records their logical paths, sizes, and hashes. The archive uses deterministic zeroed ownership and timestamps.

@@ -11,56 +11,6 @@
   },
   "members": [
     {
-      "path": "selected/wasm-scalar-scalar-core.s",
-      "bytes": 297079,
-      "sha256": "a40d02527c83d0259b61c5e6f8b0f25412f114d94e061daabceff16211ad3f2c"
-    },
-    {
-      "path": "selected/wasm-scalar-scalar-process.s",
-      "bytes": 2050,
-      "sha256": "d1356e163368c29586e4e194a6b1e2655a58f0b4cb02721f45824d1b87fef66d"
-    },
-    {
-      "path": "selected/wasm-simd128-scalar-core.s",
-      "bytes": 296838,
-      "sha256": "2bfa8b9672d7c6dc0a93cbbd9dbd9e6bf5270e422f33152e241f90886b0f2b88"
-    },
-    {
-      "path": "selected/wasm-simd128-scalar-process.s",
-      "bytes": 1954,
-      "sha256": "61900d0c6e2507c880d2086331dd5dcc993a7ea43a2ebf3e51fd0aa2c005e7dc"
-    },
-    {
-      "path": "selected/wasm-simd128-w4-core-mono.s",
-      "bytes": 172053,
-      "sha256": "6f1dc72fabd34036e6c72eaa01ef9b947701e3267e214dfe8329a8f26510ed92"
-    },
-    {
-      "path": "selected/wasm-simd128-w4-core.s",
-      "bytes": 335920,
-      "sha256": "68070443bfaa79cd5745a1ae2d9dd19b74907f80577ec95ef0907f5709dbae5e"
-    },
-    {
-      "path": "selected/wasm-simd128-w4-process-bank-mono.s",
-      "bytes": 6208,
-      "sha256": "6715886b964a2d6ce3949c72cabe66c112c66038d03cbbd8647bd9d215ba7db7"
-    },
-    {
-      "path": "selected/wasm-simd128-w4-process-bank.s",
-      "bytes": 6261,
-      "sha256": "833868c2183582a0cc06646fa77acc209aeba0fd2218bccb5384a19b6ef727be"
-    },
-    {
-      "path": "wasm-scalar/direct-wasm-objdump.txt",
-      "bytes": 6124987,
-      "sha256": "9d1d869690ab7d9ff1e4c8fd98713b9e45a15acb673ee49b4877c5d5d9e36577"
-    },
-    {
-      "path": "wasm-scalar/true_peak_limiter-13565f343cd208d0.s",
-      "bytes": 1066576,
-      "sha256": "0b2d5a0d2ef2597a3e8e87d157c81260c9c395c032e84ac0b5cf3f911f2154b0"
-    },
-    {
       "path": "wasm-simd128/direct-rustc-with-wide.stderr",
       "bytes": 285,
       "sha256": "0c891cf63dd27ce1465711f1fbc2ce85cde9a86bddeee4da0520e7eefbb85f1e"
@@ -69,11 +19,6 @@
       "path": "wasm-simd128/direct-rustc.stderr",
       "bytes": 285,
       "sha256": "0c891cf63dd27ce1465711f1fbc2ce85cde9a86bddeee4da0520e7eefbb85f1e"
-    },
-    {
-      "path": "wasm-simd128/true_peak_limiter-c44b6d723c91aa0c.s",
-      "bytes": 2551511,
-      "sha256": "fb8f70679bc702f99a0da651fa36555f761df1d244412d59f5db6fbc38569b0e"
     }
   ]
 }

@@ -39,56 +39,6 @@
       "path": "gates/mono-release.stdout",
       "bytes": 237,
       "sha256": "0cd1f82274f2410fd118a58de7ed55b1af094480e421f0acbff417e2dd2e4eae"
-    },
-    {
-      "path": "lowering/selected/wasm-scalar-scalar-core.s",
-      "bytes": 288342,
-      "sha256": "9283ef201b39f1b93eb67a32d12c1430b83073c379404c251a90f38421f1ede8"
-    },
-    {
-      "path": "lowering/selected/wasm-scalar-scalar-process.s",
-      "bytes": 2050,
-      "sha256": "b1183c33fbd7af7dacb61b18c8a574adc98dc2082cea5ccf4fefcfe159abe62f"
-    },
-    {
-      "path": "lowering/selected/wasm-simd128-scalar-core.s",
-      "bytes": 288111,
-      "sha256": "75085e647d7e49916137484b3de66b6ebc1d2dd777d72f2084821c4168fdfe0e"
-    },
-    {
-      "path": "lowering/selected/wasm-simd128-scalar-process.s",
-      "bytes": 1954,
-      "sha256": "df77d08c4e86cc93fc1e0ba98f701fe802cdb35b17c7fc8f08134d82712d204e"
-    },
-    {
-      "path": "lowering/selected/wasm-simd128-w4-core-mono.s",
-      "bytes": 167613,
-      "sha256": "055c01cb4473258c4b0b960ce0799e4b98bcd2244445eae647796bddbec4e180"
-    },
-    {
-      "path": "lowering/selected/wasm-simd128-w4-core.s",
-      "bytes": 326328,
-      "sha256": "6634ae9eb8cf187977e5737d41933d013316f6e58daf0810e52e19e4a8dd2b6e"
-    },
-    {
-      "path": "lowering/selected/wasm-simd128-w4-process-bank-mono.s",
-      "bytes": 6208,
-      "sha256": "e800db30873f2c91714a3d8e7f1bb1581e2ee19f8c02be938bddb3294ef3baf5"
-    },
-    {
-      "path": "lowering/selected/wasm-simd128-w4-process-bank.s",
-      "bytes": 6261,
-      "sha256": "27f35a4af022331e16023c51ae8fa08e6621cb01962663a56e739f8ac440deb7"
-    },
-    {
-      "path": "lowering/wasm-scalar/true_peak_limiter-13565f343cd208d0.s",
-      "bytes": 1058211,
-      "sha256": "f032be87150eb1808a41fc34d09ed680eecfd0e9bc713bc35fecef73b09c1087"
-    },
-    {
-      "path": "lowering/wasm-simd128/true_peak_limiter-c44b6d723c91aa0c.s",
-      "bytes": 2533528,
-      "sha256": "6ec0a2257f7b0337e1f4733a41e7804bb68a1eb07bee24fd13587f1704cf1222"
     }
   ]
 }

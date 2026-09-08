@@ -390,5 +390,10 @@
       "bytes": 167613,
       "sha256": "055c01cb4473258c4b0b960ce0799e4b98bcd2244445eae647796bddbec4e180"
     }
-  ]
+  ],
+  "durable_storage": {
+    "raw_capture_files": "omitted under tracker ruling 80f6e715; original source paths, byte counts, and SHA-256 identities remain in provenance.json",
+    "derived_excerpts": "../../lowering-map-excerpts.json",
+    "display_transformation": "line endings and trailing horizontal whitespace removed; raw excerpt hashes remain authoritative"
+  }
 }
