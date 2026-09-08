@@ -1,0 +1,1 @@
+/home/bl/misofm/engine-issue623-host-rate-artifact

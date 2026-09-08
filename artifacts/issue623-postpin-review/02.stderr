@@ -1,0 +1,24 @@
+FAIL miso_engine_web_v1_render: the render closure reaches allocation or drop glue:
+  _ZN8dlmalloc4free17h0E
+FAIL miso_engine_web_v1_render: unexpected trap owner in the render closure:
+  render_next
+FAIL miso_engine_web_v1_render: unexpected trap owner in the render closure:
+  render_next
+FAIL miso_engine_web_v1_render: the render closure reaches allocation or drop glue:
+  _ZN8dlmalloc4free17h0E
+FAIL miso_engine_web_v1_render: the render closure reaches allocation or drop glue:
+  _ZN8dlmalloc4free17h0E
+FAIL roster partly: vector=100 scalar=40 budget=10.0 (ceiling 0.1 x vector, slack 8). This kernel moved arithmetic out of the vector family. The budget is scale free in the vector count, so a genuine op-count reduction never trips it and lowering the ceiling is never the fix.
+FAIL roster absent: 0 arithmetic-carrying kernels match 'no_such' (expected exactly one). A kernel that vanished, was renamed, or stopped carrying f32x4 arithmetic is a de-vectorisation, not a roster edit.
+FAIL roster ambiguous: 2 arithmetic-carrying kernels match 'render_next' (expected exactly one). A kernel that vanished, was renamed, or stopped carrying f32x4 arithmetic is a de-vectorisation, not a roster edit.
+FAIL roster soft-clip: vector=25 scalar=9 budget=8.0 (ceiling 0.1 x vector, slack 8). This kernel moved arithmetic out of the vector family. The budget is scale free in the vector count, so a genuine op-count reduction never trips it and lowering the ceiling is never the fix.
+FAIL roster true-peak-limiter f32x4 collapsed entry: 0 functions match 'true_peak_limiter.*27PreparedTruePeakLimiterBank.*4wide6f32x4.*17process_bank_mono' (expected exactly one)
+FAIL roster true-peak-limiter f32x4 collapsed entry: 2 functions match 'true_peak_limiter.*27PreparedTruePeakLimiterBank.*4wide6f32x4.*17process_bank_mono' (expected exactly one)
+FAIL roster true-peak-limiter f32x4 collapsed kernel: 0 arithmetic-carrying functions match 'true_peak_limiter.*11LimiterCore.*4wide6f32x4.*18process_block_mono' (expected exactly one)
+FAIL roster true-peak-limiter f32x4 collapsed kernel: 2 arithmetic-carrying functions match 'true_peak_limiter.*11LimiterCore.*4wide6f32x4.*18process_block_mono' (expected exactly one)
+FAIL roster true-peak-limiter f32x4 collapsed: entry true_peak_limiter27PreparedTruePeakLimiterBank4wide6f32x417process_bank_mono does not directly call selected kernel true_peak_limiter11LimiterCore4wide6f32x418process_block_mono
+FAIL roster true-peak-limiter f32x4 collapsed entry true_peak_limiter27PreparedTruePeakLimiterBank4wide6f32x417process_bank_mono: forwarding entry carries counted arithmetic vector=0 scalar=1; expected 0/0
+FAIL roster true-peak-limiter f32x4 collapsed: vector=25 scalar=9 budget=8.0 (ceiling 0.1 x vector, slack 8). The selected kernel moved arithmetic out of the vector family.
+FAIL kernel render_next: vector=3 scalar=3 (a vector instantiation must use strictly more vector than scalar arithmetic)
+FAIL kernel count: 1 arithmetic-carrying functions match 'render_next|write_lane_words' < 2. If a wave moved the kernels, update the pattern and RAISE the floor.
+FAIL kernel count: 1 arithmetic-carrying functions match 'render_next' < 2. If a wave moved the kernels, update the pattern and RAISE the floor.

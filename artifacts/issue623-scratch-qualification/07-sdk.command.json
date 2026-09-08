@@ -1,0 +1,16 @@
+{
+  "name": "07-sdk",
+  "argv": [
+    "bash",
+    "scripts/sdk-package.sh",
+    "check",
+    "/tmp/issue623-qualified-output"
+  ],
+  "cwd": "/home/bl/misofm/engine-issue623-artifact-scratch",
+  "head": "ca5a8b492a41ba85b3e90d8dedb2b49b787f2f00",
+  "start": "2026-09-08T11:18:04.084870+00:00",
+  "env": {
+    "PATH": "/home/bl/.cargo/bin:/home/bl/.local/bin:/home/bl/.codex/packages/standalone/releases/0.153.4-x86_64-unknown-linux-musl/codex-path:/home/bl/.codex1/tmp/arg0/codex-arg0a6UL79:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin",
+    "CARGO_TARGET_DIR": "/tmp/issue623-qualification-target"
+  }
+}

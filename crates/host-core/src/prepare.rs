@@ -34,9 +34,6 @@ use source::{
 use crate::diagnostics::{PrepareDiagnostics, PrepareRejection, diagnostic_lines};
 use crate::source::{ControlSourceBuilder, SourceControlSet};
 
-/// The launch sample-rate set (issue 032). A host that does not pin one rate accepts these four.
-pub const LAUNCH_SAMPLE_RATES_HZ: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
-
 /// The longest producer-thread stall the default source ring hides without an underrun.
 pub const SOURCE_STALL_TOLERANCE_MS: u32 = 100;
 
@@ -66,7 +63,8 @@ pub const fn default_source_ring_frames(sample_rate_hz: u32, quantum_frames: u32
 /// browser host is handed a fixed `AudioContext` rate and quantum and must reject anything else.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HostShapePolicy {
-    /// Accept any rate in [`LAUNCH_SAMPLE_RATES_HZ`], and whatever quantum the session declares.
+    /// Accept any rate already validated by the session compiler, and whatever quantum the
+    /// session declares.
     AnyLaunchRate,
     /// Accept exactly this rate and quantum, and reject every other session.
     Exact {
@@ -129,11 +127,7 @@ impl HostPrepareCaps {
     /// calls it again, and the check is pure, so calling it twice is free and cannot disagree.
     pub fn validate_shape(&self, compiled: &CompiledSession) -> Result<(), PrepareDiagnostics> {
         match self.shape {
-            HostShapePolicy::AnyLaunchRate => {
-                if !LAUNCH_SAMPLE_RATES_HZ.contains(&compiled.sample_rate().0) {
-                    return Err(shape("host.sample_rate.unsupported"));
-                }
-            }
+            HostShapePolicy::AnyLaunchRate => {}
             HostShapePolicy::Exact {
                 sample_rate_hz,
                 quantum_frames,

@@ -7,7 +7,7 @@
 use builtins::{MeterMetricSet, MeterTap};
 use host_core::{
     HostConsoleRequest, HostMeterRequest, HostPrepareCaps, HostPrepareReport, HostShapePolicy,
-    LAUNCH_SAMPLE_RATES_HZ, PrepareRejection, SOURCE_STALL_TOLERANCE_MS, SourceControlError,
+    LAUNCH_SAMPLE_RATES, PrepareRejection, SOURCE_STALL_TOLERANCE_MS, SourceControlError,
     SourceSubmission, compile_host_session, control_table_bytes, default_source_ring_frames,
     diagnostic_lines, prepare_host_runtime,
     prepare_host_runtime_with_selected_meters_between_render_calls, prepare_host_session,
@@ -423,6 +423,20 @@ fn shape_policy_pins_rate_and_quantum() {
             .as_bytes(),
         b"host.source.ring_frames\t$\n"
     );
+    let exact_bad_ring = HostPrepareCaps {
+        shape: HostShapePolicy::Exact {
+            sample_rate_hz: 48_000,
+            quantum_frames: 128,
+        },
+        ..bad_ring
+    };
+    assert_eq!(
+        prepare_host_session(SESSION, &exact_bad_ring)
+            .map(|_| ())
+            .expect_err("exact policy ring is not a quantum multiple")
+            .as_bytes(),
+        b"host.source.ring_frames\t$\n"
+    );
 
     let compiled = compile_host_session(SESSION, &caps()).expect("compiled");
     assert!(caps().validate_shape(&compiled).is_ok());
@@ -436,12 +450,16 @@ fn shape_policy_pins_rate_and_quantum() {
 fn session_validation_owns_the_launch_rate_set() {
     const RATE: &str = "\"sample_rate_hz\": 48000";
     let at = |rate: u32| SESSION.replace(RATE, &format!("\"sample_rate_hz\": {rate}"));
-    for rate in LAUNCH_SAMPLE_RATES_HZ {
-        assert!(compile_host_session(&at(rate), &caps()).is_ok(), "{rate}");
+    for rate in LAUNCH_SAMPLE_RATES {
+        let rate = rate.0;
+        assert!(
+            prepare_host_session(&at(rate), &caps()).is_ok(),
+            "AnyLaunchRate must accept canonical rate {rate}"
+        );
     }
-    for rate in LAUNCH_SAMPLE_RATES_HZ
+    for rate in LAUNCH_SAMPLE_RATES
         .into_iter()
-        .flat_map(|rate| [rate - 1, rate + 1])
+        .flat_map(|rate| [rate.0 - 1, rate.0 + 1])
         .chain([1, 8_000, 22_050, 32_000, 176_400, 192_000])
     {
         let failure = compile_host_session(&at(rate), &caps()).expect_err("unsupported rate");
@@ -458,7 +476,8 @@ fn session_validation_owns_the_launch_rate_set() {
 /// quantum from the boot brief.
 #[test]
 fn default_ring_derivation_covers_the_stall_and_two_in_flight_quanta() {
-    for rate in LAUNCH_SAMPLE_RATES_HZ {
+    for rate in LAUNCH_SAMPLE_RATES {
+        let rate = rate.0;
         for quantum in [64_u32, 127, 128, 4_096] {
             let frames = default_source_ring_frames(rate, quantum);
             assert_ne!(frames, 0);
