@@ -173,9 +173,21 @@ def baseline() -> str:
     )
 
 
+def boundary_records() -> str:
+    rows = [json.loads(line) for line in baseline().splitlines()]
+    for row in rows:
+        if row["corpus"] == "zero64":
+            row["allocations"] = 0
+            row["deallocations"] = MAX_U64
+            row["reallocations"] = 0
+            row["requested_bytes"] = MAX_U64
+    return "".join(json.dumps(row, separators=(",", ":")) + "\n" for row in rows)
+
+
 def self_test() -> None:
     good = baseline()
     validate(good)
+    validate(boundary_records())
     mutations = [
         ("wrong-schema", good.replace('"variant":"candidate"', '"wrong":"candidate"', 1)),
         ("wrong-key-order", good.replace('{"variant":', '{"corpus":', 1)),

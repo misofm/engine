@@ -3,7 +3,7 @@
 use bench_support::alloc as bench_alloc;
 use conformance::DualAccumulatorDelayFactory;
 use effect_compiler::{prepare_native_session_effects, EffectCompileCaps, EffectPreparedSession};
-use effect_contract::{EffectQuality as PreparedEffectQuality, NativeEffectRegistry};
+use effect_contract::NativeEffectRegistry;
 use graph::{GraphCompileCaps, GraphDiagnosticSet};
 use graph_compiler::{Backend, GraphCompileRequest, GraphCompiler};
 use session::{
@@ -344,6 +344,7 @@ pub(crate) fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use effect_contract::EffectQuality as PreparedEffectQuality;
 
     #[test]
     fn variant_parser_is_strict() {

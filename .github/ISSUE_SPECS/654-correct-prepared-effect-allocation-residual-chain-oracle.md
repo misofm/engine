@@ -85,3 +85,19 @@ not change it, attempt 2 runs the amended validator self-test, strict Clippy,
 rustfmt, diff, workspace policy and bench policy once in that order. Stop on the
 first failure without correction or retry. No official measurement or
 counterfactual is authorized before a pushed checkpoint and fresh Astra PASS.
+
+## Attempt 2 formatting gate — FAIL; final attempt 3 bounded
+
+At exact checkpoint `1987417b`, Luna HIGH moved the test-only import and added
+internally consistent zero/`u64::MAX` success controls. The validator self-test and
+strict Clippy passed. `cargo fmt --all --check` then returned 1 for import ordering
+and one assertion layout, and execution stopped. Diff and policy gates, the audit
+subject, counterfactual and measurements did not run.
+
+Astra LOW returned attempt 2 **FAIL** and confirmed the validator boundary records
+are valid across both variants and rounds. Those validator and Clippy results carry
+forward. Final attempt 3 may apply only rustfmt's exact reported changes and then
+run `cargo fmt --all --check`, `git diff --check`, workspace policy and bench policy
+once in that order with fresh retained evidence. It must not rerun tests, build,
+validator or Clippy, make a semantic change, or execute an official variant. Any
+failure exhausts #654 with no fourth correction.
