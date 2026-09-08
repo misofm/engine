@@ -1,0 +1,68 @@
+{
+  "issue": 627,
+  "attempt": 3,
+  "status": "FAIL",
+  "builder": {
+    "invocations": 1,
+    "head": "0bb5a820be33a49393386617358ec1db2fe7577d",
+    "status": 0,
+    "six_file_identity": true
+  },
+  "duplicate_checks": [
+    {
+      "logical": "static",
+      "records": [
+        "03-static",
+        "03-check-web"
+      ],
+      "both_recorded_status_zero": true
+    },
+    {
+      "logical": "expected-resources",
+      "records": [
+        "04-resources",
+        "04-expected-resources"
+      ],
+      "both_recorded_status_zero": true
+    },
+    {
+      "logical": "hermetic",
+      "records": [
+        "05-hermetic",
+        "05-test-web"
+      ],
+      "luna_status_zero": true,
+      "other_numeric_status_retained": false
+    }
+  ],
+  "attribution": {
+    "luna": [
+      "03-check-web",
+      "04-expected-resources",
+      "05-test-web"
+    ],
+    "other_executor": [
+      "03-static",
+      "04-resources",
+      "05-hermetic"
+    ],
+    "luna_observed_existing_builder_pids": [
+      1092505,
+      1092509
+    ]
+  },
+  "not_run": [
+    "sdk-package",
+    "matrix-check",
+    "cargo-fmt",
+    "branch-diff-hygiene",
+    "workspace-policy",
+    "effect-runtime-policy",
+    "npm-install",
+    "browser-qualification"
+  ],
+  "further_attempt_authorized": false,
+  "limits": [
+    "process PIDs and relative execution timing are authored coordinator observations, not retained raw process telemetry"
+  ]
+}
