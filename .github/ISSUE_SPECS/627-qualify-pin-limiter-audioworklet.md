@@ -336,3 +336,20 @@ inference. No rerun is authorized to reconstruct it.
 The bounded final-attempt shape otherwise passed review. Astra LOW must confirm
 the clean pushed provenance correction before authorizing it; no command is
 authorized by this failed verdict.
+
+## Astra LOW final-attempt scope review — PASS
+
+Astra LOW passed exact clean pushed provenance head
+`2690a775539512a9aa0caf7ae0ef8509d52f5665` against live main `30680709`.
+All 11 post-pin failure manifest entries verify. The record now states exactly
+that no numeric status was retained; exact stderr, empty stdout, and absent
+output establish the argument-preflight failure. It remains failed and
+non-credit, no downstream qualification ran, and the detached promotion
+checkout is clean at `0bb5a820be33a49393386617358ec1db2fe7577d`.
+
+Luna HIGH's final attempt 3 is authorized. It must first create and prove one
+existing empty non-symlink external output directory, then invoke the no-bypass
+builder once from the promotion head, verify exact six-file identity, and run
+the bounded post-pin checks once. Installs and browsers remain forbidden. Stop
+on any failure and preserve both attempts without relabeling. No PR or merge is
+authorized.
