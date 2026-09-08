@@ -94,3 +94,15 @@ both clean delivered worktrees while retaining branches/history.
 
 This issue has one scratch-qualification pass and one conditional repository-edit attempt. It does
 not create another #539 implementation attempt and carries no benchmark, timing or speedup claim.
+
+## Corrected Astra LOW scope review — PASS
+
+Astra LOW returned **PASS** at exact clean pushed head
+`c7df878e3c9eacb930730bc78636669baffd294d`, live main/merge-base `77368243`. The authoritative
+parent `d7feb897`, parent record `42494ef7` and frozen compiled source `d63bc437` are ancestors and
+compiled inputs are unchanged. Exactly one #617 spec remains and local/GitHub titles and bodies
+match. The separate expected-resource command now explicitly owns its native witness and 26 red
+mutations. Diff hygiene, two-slot ownership, permanent non-credit/no-rerun boundary, one scratch
+build, conditional overlays, six-file checks, qualification gates, three-file promotion and
+delivery limits pass. One specified detached scratch qualification is authorized. Repository
+pin/lineage edits, PR and merge remain unauthorized until candidate PASS.
