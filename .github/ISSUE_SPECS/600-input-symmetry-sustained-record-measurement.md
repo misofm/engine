@@ -18,16 +18,22 @@ policy paths.
 ## Smallest closable outcome
 
 Add a narrow native benchmark subject for one genuine W8 prepared-plan input-trim automation ride.
-Before every rendered block it must successfully enqueue one `TrackInputRecord::TrimDb` with
-`ChannelSelection::Both` for each of eight populated tracks. Targets alternate deterministically
-between -6 dB and -12 dB, with `smoothing_samples = 256`, at 48 kHz and q128. Every render therefore
-drains eight accepted records while the trim remains nonstationary.
+Immediately before every corresponding render call it must successfully enqueue one
+`TrackInputRecord::TrimDb` with `BuiltinLaneSelector::Both` for each of eight populated tracks.
+These queue records carry no sample timestamp, and `BuiltinBankProcessor::begin_block` does not use
+`first_sample`; the eight records are drained at that render call's block boundary while the harness
+records the absolute render sample. Targets alternate deterministically between -6 dB and -12 dB,
+with `smoothing_samples = 256`, at 48 kHz and q128. Every render therefore drains eight accepted
+records while the trim remains nonstationary.
 
 Time only the prepared plan's render call. Record publication, deterministic PCM refill, output
 hashing and evidence collection happen outside the measured interval. There is no baseline arm and
-no before/after claim. One runner process performs one warmup phase of 512 blocks over the two
-independently prepared round states, followed by measured rounds 1 and 2 of exactly 4,096 blocks
-each. The run reports the current delivered-plan render cost under this exact workload.
+no before/after claim. One runner process performs one interleaved warmup phase of 512 blocks per
+independently prepared owner, 1,024 total warmup render calls, followed by measured rounds 1 and 2 of
+exactly 4,096 blocks per owner. Each owner maintains its own absolute-sample and target-alternation
+continuity, both begin measurement in equivalent state, and warmup output is excluded from measured
+hashes and traffic counts. The run reports the current delivered-plan render cost under this exact
+workload.
 
 ## Frozen interpretation and accounting
 
@@ -61,7 +67,8 @@ Allowed implementation paths:
 - `scripts/input-symmetry-benchmark-validator.py` (new);
 - this numbered spec;
 - focused review records under `docs/audits/`;
-- `artifacts/issue600-input-symmetry/` after the one authorized capture;
+- `artifacts/issue600-input-symmetry/` for separately named protected preflight, untimed and capture
+  records;
 - concise #559/#560 handoff status under root ownership.
 
 Reuse `bench-support` timing, statistics, metadata, digest and allocation facilities; current
@@ -83,11 +90,12 @@ native dispatch is W8 and all eight tracks are populated in the same eligible ba
 existing source mapping and deterministic nonzero PCM. Preallocate every record, input/output buffer,
 hash buffer and evidence counter needed before any render audit or timed interval.
 
-For each block, outside timing, publish exactly eight records for that block's absolute sample; every
-push must return success. Alternate the same per-block target for all tracks between -6 dB and -12 dB
-and keep `smoothing_samples = 256`. Refill deterministic PCM outside timing. Time the render call
-only, then hash the completed output outside timing. Maintain checked counts for attempted and
-accepted records, rendered blocks, render errors and output words.
+For each block, outside timing, publish exactly eight records immediately before its render call;
+every push must return success. Record the render call's absolute sample without treating it as queue
+admission metadata. Alternate the same per-block target for all tracks between -6 dB and -12 dB and
+keep `smoothing_samples = 256`. Refill deterministic PCM outside timing. Time the render call only,
+then hash the completed output outside timing. Maintain checked counts for attempted and accepted
+records, rendered blocks, render errors and output words.
 
 Before timing is ever authorized, an untimed proof must establish:
 
@@ -133,7 +141,9 @@ The preflight and harness self-test must exercise invalid arguments, valid and i
 two-round completeness/order, fixture/source/binary identity mismatch, child failure propagation,
 raw-output preservation, transactional accepted output and overwrite refusal using untimed stubs.
 They must prove zero real benchmark-process, workload and timing invocations. Freeze the validator,
-workload and runner hashes in the preflight seal before the capture.
+workload and runner hashes in the final preflight seal before the capture. Untimed source/harness
+review writes its own protected filenames and does not create or overwrite that final seal or the
+capture namespace.
 
 ## Workflow and objective gates
 
@@ -141,7 +151,7 @@ workload and runner hashes in the preflight seal before the capture.
 2. Luna HIGH/XHIGH implements one coherent attempt. Root checkpoints each green exact-path tranche
    before more implementation. Astra LOW reviews the source and untimed harness evidence. At most
    three implementation attempts are allowed.
-3. Before timing, pass the new subject unit tests, validator/runner lifecycle self-test, preflight,
+3. Before timing, pass the new subject unit tests and validator/runner lifecycle self-test,
    strict Clippy and rustdoc for tools/bench, formatting/diff checks, workspace/realtime/builtins/
    graph/lane policy gates, and the unchanged focused #238/#496 tests in debug and release. Record
    exact commands/statuses and restored mutation evidence.
@@ -149,7 +159,9 @@ workload and runner hashes in the preflight seal before the capture.
    `bash scripts/test-input-symmetry-benchmark.sh`,
    `bash scripts/preflight-input-symmetry-benchmark.sh`, then exactly once
    `bash scripts/run-input-symmetry-benchmark.sh`. The final command launches one benchmark process,
-   with one internal warmup phase and two measured rounds. Do not tune or retry.
+   with one internal warmup phase and two measured rounds. The first command revalidates the untimed
+   harness without touching the final preflight/capture names; the second creates the sole final
+   candidate seal; the third consumes it once. Do not tune or retry.
 5. Astra LOW validates raw/accepted bytes, record schema, traffic/output discriminators, timing
    finiteness, metadata, statuses, hashes, invocation counts and the honest accounting statement. A
    valid descriptive result passes regardless of its magnitude because this issue sets no budget.
@@ -172,3 +184,14 @@ and #431's timing authority is consumed. The retained measurement remains applic
 real input-record path. Astra LOW recommends this benchmark-only successor and rejects a
 source-based inapplicability closure; a documentation-only disposition would require an explicit
 owner ruling withdrawing #559's measurement request.
+
+## Astra LOW scope review 1
+
+Exact pushed brief `f9daa49eb9a1f57b78c67effcf27057c4fb8bdc7` received **FAIL** before any
+implementation attempt. The overall benchmark-only shape is accepted, but the brief used the wrong
+selector name and implied timestamped queue admission, left 512 warmup blocks ambiguous across two
+owners, and reserved the artifact namespace only after capture despite required pre-capture
+evidence. This correction uses `BuiltinLaneSelector::Both`, freezes immediate pre-render publication
+and boundary drain semantics, requires 512 warmup blocks per owner with explicit continuity and
+exclusion, and separates protected untimed/final-preflight/capture filenames. Formal rereview is
+required before Luna implementation.
