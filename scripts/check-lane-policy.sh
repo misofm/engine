@@ -41,9 +41,12 @@ decode_rule_field() {
 }
 
 rule_index=0
-while IFS='|' read -r kind id_encoded scan_encoded pattern_encoded glob_encoded \
-    root1_encoded root2_encoded root3_encoded root4_encoded exclude_description_encoded \
-    exclude_regex_encoded failure_encoded extra; do
+while IFS= read -r record; do
+    separator_count="${record//[^|]/}"
+    [[ ${#separator_count} == 11 ]] || fail "lane source rule loader output is invalid"
+    IFS='|' read -r kind id_encoded scan_encoded pattern_encoded glob_encoded \
+        root1_encoded root2_encoded root3_encoded root4_encoded exclude_description_encoded \
+        exclude_regex_encoded failure_encoded extra <<<"$record"
     [[ -n "$kind" && -z "$extra" ]] || fail "lane source rule loader output is invalid"
     [[ "$kind" == RULE ]] || fail "lane source rule loader output is invalid"
     rule_index=$((rule_index + 1))
@@ -60,7 +63,7 @@ while IFS='|' read -r kind id_encoded scan_encoded pattern_encoded glob_encoded 
     exclude_description="$(decode_rule_field "$exclude_description_encoded")"
     exclude_regex="$(decode_rule_field "$exclude_regex_encoded")"
     failure_diagnostic="$(decode_rule_field "$failure_encoded")"
-    [[ -n "$id" && -n "$scan_description" && -n "$pattern" && -n "$glob" ]] ||
+    [[ -n "$id" && -n "$scan_description" && -n "$pattern" && -n "$glob" && -n "$failure_diagnostic" ]] ||
         fail "lane source rule loader output is invalid"
     [[ -n "${roots[0]}" && -n "${roots[1]}" && -n "${roots[2]}" && -n "${roots[3]}" ]] ||
         fail "lane source rule loader output is invalid"
@@ -69,7 +72,9 @@ while IFS='|' read -r kind id_encoded scan_encoded pattern_encoded glob_encoded 
         *) fail "lane source rule loader output is invalid" ;;
     esac
     raw_matches="$(gate_scan_collect "$scan_description" "$pattern" "$glob" "${roots[@]}")" || exit $?
-    if [[ -n "$exclude_regex" ]]; then
+    if [[ -n "$exclude_description" || -n "$exclude_regex" ]]; then
+        [[ -n "$exclude_description" && -n "$exclude_regex" ]] ||
+            fail "lane source rule loader output is invalid"
         matches="$(gate_filter_exclude "$exclude_description" "$exclude_regex" "$raw_matches")" || exit $?
     else
         matches="$raw_matches"

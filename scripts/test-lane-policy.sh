@@ -136,6 +136,7 @@ create_valid_fixture "$exemption_root"
 mkdir -p "$exemption_root/crates/dsp-reference/src" "$exemption_root/tools/wasm-gates/tests"
 printf '%s\n' 'let y = a.mul_add(b, c);' >"$exemption_root/crates/dsp-reference/src/oracle.rs"
 printf '%s\n' 'let y = a.mul_add(b, c);' >"$exemption_root/tools/wasm-gates/tests/g5_native_corpus.rs"
+printf '%s\n' 'pub fn detect() { let _ = is_x86_feature_detected!("avx2"); }' >>"$exemption_root/crates/lane/src/lib.rs"
 bash "$policy_script" "$exemption_root" >/dev/null
 
 expect_loader_failure() {
@@ -201,6 +202,16 @@ expect_loader_status_failure() {
                 'sys.stdout.write(result.stdout.splitlines(keepends=True)[0])' \
                 'raise SystemExit(7)' >"$loader"
             ;;
+        short)
+            printf '%s\n' '#!/usr/bin/env python3' 'import subprocess, sys' \
+                "result = subprocess.run([sys.executable, \"$script_directory/lib/gate-rules.py\", sys.argv[1]], capture_output=True, text=True)" \
+                'sys.stdout.write("|".join(result.stdout.splitlines()[0].split("|")[:-1]) + "\\n")' >"$loader"
+            ;;
+        extra)
+            printf '%s\n' '#!/usr/bin/env python3' 'import subprocess, sys' \
+                "result = subprocess.run([sys.executable, \"$script_directory/lib/gate-rules.py\", sys.argv[1]], capture_output=True, text=True)" \
+                'sys.stdout.write(result.stdout.splitlines()[0] + "|extra\\n")' >"$loader"
+            ;;
         *) printf 'unknown loader status test: %s\n' "$mode" >&2; exit 1 ;;
     esac
     chmod +x "$loader"
@@ -209,7 +220,7 @@ expect_loader_status_failure() {
         exit 1
     fi
     printf '%s\n' "$output" | rg -qF 'lane policy failure:' || exit 1
-    if [[ "$mode" == malformed ]]; then
+    if [[ "$mode" == malformed || "$mode" == short || "$mode" == extra ]]; then
         printf '%s\n' "$output" | rg -qF 'loader output is invalid' || exit 1
     else
         printf '%s\n' "$output" | rg -qF 'lane source rule loader failed' || exit 1
@@ -219,6 +230,8 @@ expect_loader_status_failure() {
 expect_loader_status_failure status-zero-malformed malformed
 expect_loader_status_failure nonzero-complete complete
 expect_loader_status_failure nonzero-partial partial
+expect_loader_status_failure status-zero-short short
+expect_loader_status_failure status-zero-extra extra
 
 prove_loader_status_mutant() {
     local mutant_dir="$scratch_root/mutant-loader-status" loader="$scratch_root/mutant-loader-status.sh" output
@@ -277,6 +290,12 @@ expect_failure arch-in-second-lane-file \
 # The #146 exemption is the file `fpenv.rs`, not the lane crate: a third file does not inherit it.
 expect_failure arch-in-a-third-lane-file \
     'printf "%s\n" "use core::arch::asm;" >"$root/crates/lane/src/fpenv_extra.rs"'
+expect_failure fusion-in-adjacent-audit-file \
+    'mkdir -p "$root/tools/audit/src"; printf "%s\n" "let y = a.mul_add(b, c);" >"$root/tools/audit/src/unfused_fma_extra.rs"'
+expect_failure fusion-in-adjacent-g5-file \
+    'mkdir -p "$root/tools/wasm-gates/tests"; printf "%s\n" "let y = a.mul_add(b, c);" >"$root/tools/wasm-gates/tests/g5_native_corpus_extra.rs"'
+expect_failure detection-in-adjacent-lane-file \
+    'printf "%s\n" "pub fn detect() { let _ = is_x86_feature_detected!(\"avx2\"); }" >>"$root/crates/lane/src/scalar.rs"'
 # #84 phase A: the legacy `core/arch` exemption is gone entirely, so an intrinsic there -- the
 # very file the exemption used to name -- is now a failure like any other.
 expect_failure deleted-core-arch-has-no-exemption \
@@ -303,6 +322,22 @@ expect_failure_with_diagnostic architecture-diagnostic \
 expect_failure_with_diagnostic detection-diagnostic \
     'runtime SIMD detection is forbidden outside the enumerated legacy sites (D4)' \
     'printf "%s\n" "let _ = is_x86_feature_detected!(\"avx2\");" >>"$root/crates/compressor/src/lib.rs"'
+
+ordered_relaxed_root="$scratch_root/diagnostic-relaxed-before-architecture"
+create_valid_fixture "$ordered_relaxed_root"
+printf '%s\n' 'let y = f32x4_relaxed_madd(a, b, c);' >>"$ordered_relaxed_root/crates/compressor/src/lib.rs"
+printf '%s\n' 'use core::arch::x86_64::_mm256_add_ps;' >>"$ordered_relaxed_root/crates/compressor/src/lib.rs"
+if output="$(bash "$policy_script" "$ordered_relaxed_root" 2>&1)"; then exit 1; fi
+printf '%s\n' "$output" | rg -qF 'lane policy failure: relaxed SIMD is forbidden on every target (D3)'
+if printf '%s\n' "$output" | rg -qF 'raw architecture intrinsics belong'; then exit 1; fi
+
+ordered_architecture_root="$scratch_root/diagnostic-architecture-before-detection"
+create_valid_fixture "$ordered_architecture_root"
+printf '%s\n' 'use core::arch::x86_64::_mm256_add_ps;' >>"$ordered_architecture_root/crates/compressor/src/lib.rs"
+printf '%s\n' 'let _ = is_x86_feature_detected!("avx2");' >>"$ordered_architecture_root/crates/compressor/src/lib.rs"
+if output="$(bash "$policy_script" "$ordered_architecture_root" 2>&1)"; then exit 1; fi
+printf '%s\n' "$output" | rg -qF 'lane policy failure: raw architecture intrinsics belong to crates/lane/src/{softfma,fpenv}.rs'
+if printf '%s\n' "$output" | rg -qF 'runtime SIMD detection is forbidden'; then exit 1; fi
 
 competing_root="$scratch_root/diagnostic-competing"
 create_valid_fixture "$competing_root"
