@@ -115,39 +115,47 @@ frozen. No audit variant, counterfactual, or official count has run.
 ## Frozen measurement amendment
 
 Hypatia, Luna HIGH agent `issue583_luna_impl`, is the sole measurement executor.
-Astra LOW must pass this amendment before any path below is created. Candidate
-worktree/head is exactly:
+Astra LOW must pass this amendment before any path below is created. The frozen
+measurement-source commit is exactly
+`785838403d02e383ba12553a3464d492e60a5cd5`; its only difference from source-PASS
+commit `2c20a8af...` is this issue spec. Both measured worktrees are detached from
+that same commit, so the amendment's later documentation-only commit cannot change
+the measured code. The coordinator worktree remains separate.
 
 ```text
-/home/bl/misofm/engine-cp1-allocation-residual-oracle
-2c20a8af7fa0eed9eb687e37cb009492c295f0a4
+/tmp/issue654-candidate-source
+785838403d02e383ba12553a3464d492e60a5cd5
 ```
 
-Require all four paths absent, including dangling symlinks, before creating any of
+Require all five paths absent, including dangling symlinks, before creating any of
 them:
 
 ```text
 /tmp/issue654-measurement-evidence
+/tmp/issue654-candidate-source
 /tmp/issue654-candidate-target
 /tmp/issue654-counterfactual-target
 /tmp/issue654-counterfactual-source
 ```
 
-Create the evidence directory and record/read/hash exact cwd, full candidate HEAD
-and upstream equality, empty candidate porcelain including untracked files,
-`rustc -Vv`, `cargo -V`, installed target, literal commands/environment, and all
-path-absence results. Any producer, readback, hash, identity, cleanliness, target,
-or absence failure stops before worktree creation.
+Create the evidence directory and record/read/hash exact coordinator cwd, its full
+HEAD/upstream equality, the frozen measurement-source commit, empty coordinator
+porcelain including untracked files, `rustc -Vv`, `cargo -V`, literal
+commands/environment, absence of concurrent Cargo/rustc work, and all path-absence
+results. Any producer, readback, hash, identity, cleanliness, concurrency, or
+absence failure stops before worktree creation.
 
-Create the counterfactual once with:
+Create both source worktrees once with:
 
 ```text
-git worktree add --detach /tmp/issue654-counterfactual-source 2c20a8af7fa0eed9eb687e37cb009492c295f0a4
+git worktree add --detach /tmp/issue654-candidate-source 785838403d02e383ba12553a3464d492e60a5cd5
+git worktree add --detach /tmp/issue654-counterfactual-source 785838403d02e383ba12553a3464d492e60a5cd5
 git -C /tmp/issue654-counterfactual-source restore --source=d98646db47bc603c32431d999cd08f43a0168043 -- crates/graph-compiler/src/compile.rs crates/graph-compiler/src/ids.rs crates/graph-compiler/src/banks.rs
 ```
 
-Require detached HEAD `2c20a8af...`, no untracked files, and porcelain containing
-exactly those three modified paths. Their candidate and restored SHA-256 values are:
+Require both detached HEADs equal `78583840...`, empty candidate porcelain, no
+untracked files, and counterfactual porcelain containing exactly those three
+modified paths. Their candidate and restored SHA-256 values are:
 
 ```text
 path                                         candidate                                                         restored baseline
@@ -161,12 +169,13 @@ porcelain is restricted to these paths, every other tracked source, harness,
 validator, dependency and toolchain byte remains identical. Stop if the
 counterfactual needs any additional edit.
 
-Run exactly once in candidate-then-counterfactual order, with separate complete
-stdout, stderr and numeric status records:
+Run exactly once from the respective detached source worktrees in
+candidate-then-counterfactual order, with separate complete stdout, stderr and
+numeric status records:
 
 ```text
-LC_ALL=C LANG=C TZ=UTC CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/issue654-candidate-target cargo run --locked --release -p audit -- prepared-effect-allocations --variant candidate
-LC_ALL=C LANG=C TZ=UTC CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/issue654-counterfactual-target cargo run --locked --release -p audit -- prepared-effect-allocations --variant counterfactual
+(cd /tmp/issue654-candidate-source && LC_ALL=C LANG=C TZ=UTC CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/issue654-candidate-target cargo run --locked --release -p audit -- prepared-effect-allocations --variant candidate)
+(cd /tmp/issue654-counterfactual-source && LC_ALL=C LANG=C TZ=UTC CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/issue654-counterfactual-target cargo run --locked --release -p audit -- prepared-effect-allocations --variant counterfactual)
 ```
 
 Each command contains its single internal warmup and two measured rounds per corpus.
@@ -175,10 +184,10 @@ or concurrent Cargo/rustc use. Do not retry, reorder, clean a target, or inspect
 counts before both commands finish. Concatenate candidate stdout followed by
 counterfactual stdout once to
 `/tmp/issue654-measurement-evidence/combined.jsonl`, then run exactly once from the
-candidate worktree:
+detached candidate-source worktree:
 
 ```text
-python3 -B scripts/check-prepared-effect-allocation-records.py /tmp/issue654-measurement-evidence/combined.jsonl
+(cd /tmp/issue654-candidate-source && python3 -B scripts/check-prepared-effect-allocation-records.py /tmp/issue654-measurement-evidence/combined.jsonl)
 ```
 
 Preserve all temporary records, streams, targets and the counterfactual worktree
