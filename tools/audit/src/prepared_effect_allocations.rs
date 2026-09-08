@@ -559,11 +559,23 @@ mod tests {
             })
             .collect();
         scalar.sort();
-        let mut expected_scalar: Vec<_> = (56..64)
-            .flat_map(|track| {
+        let bypassed_chain = graph_compiler::RackChainId {
+            track_id: "track-63".to_owned(),
+            rack: graph::RackId::Simd1,
+        };
+        let mut expected_scalar_chains: Vec<_> = normal_chains
+            .iter()
+            .skip(7 * 8)
+            .cloned()
+            .chain(std::iter::once(bypassed_chain))
+            .collect();
+        expected_scalar_chains.sort();
+        let mut expected_scalar: Vec<_> = expected_scalar_chains
+            .iter()
+            .flat_map(|chain| {
                 [
-                    (format!("track-{track}"), "slot0".to_owned()),
-                    (format!("track-{track}"), "slot1".to_owned()),
+                    (chain.track_id.clone(), "slot0".to_owned()),
+                    (chain.track_id.clone(), "slot1".to_owned()),
                 ]
             })
             .collect();

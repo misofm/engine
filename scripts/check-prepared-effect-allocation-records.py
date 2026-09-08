@@ -22,6 +22,7 @@ KEYS = (
 )
 CORPORA = ("zero64", "crossed-small", "banks64")
 VARIANTS = ("candidate", "counterfactual")
+MAX_U64 = 2**64 - 1
 
 
 class RecordError(ValueError):
@@ -76,7 +77,7 @@ def validate(text: str) -> None:
                     or any(char not in "0123456789abcdef" for char in value)
                 ):
                     raise RecordError(f"invalid {key}")
-            elif type(value) is not int or value < 0:
+            elif type(value) is not int or not 0 <= value <= MAX_U64:
                 raise RecordError(f"invalid counter {key}")
         key = (variant, corpus, round_number)
         if key in seen:
@@ -188,6 +189,14 @@ def self_test() -> None:
         ("duplicate-json-key", good.replace('"round":1', '"round":1,"round":1', 1)),
         ("wrong-type", good.replace('"allocations":10', '"allocations":"10"', 1)),
         ("negative-range", good.replace('"requested_bytes":100', '"requested_bytes":-1', 1)),
+        (
+            "boolean-type",
+            good.replace('"allocations":10', '"allocations":true', 1),
+        ),
+        (
+            "upper-range",
+            good.replace('"requested_bytes":100', '"requested_bytes":18446744073709551616', 1),
+        ),
     ]
     for name, mutated in mutations:
         try:
@@ -206,7 +215,7 @@ def main() -> int:
         if args.path is not None:
             parser.error("--self-test takes no path")
         self_test()
-        print("prepared-effect allocation record self-test passed (12 mutations)")
+        print("prepared-effect allocation record self-test passed (14 mutations)")
         return 0
     if args.path is None:
         parser.error("record JSONL path is required")

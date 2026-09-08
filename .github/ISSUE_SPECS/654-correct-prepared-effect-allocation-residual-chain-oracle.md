@@ -63,3 +63,25 @@ boundary mutations. Run the prescribed gates once in order with retained evidenc
 and stop on the first failure without correction or rerun. Root checkpoints and
 pushes before fresh Astra source review. No official measurement or counterfactual
 execution is authorized.
+
+## Attempt 1 source gates — FAIL; attempt 2 bounded
+
+Luna HIGH changed only the audit subject and validator at exact authorization
+`ad43fbbc`. Retained source evidence records focused tests 5/5 PASS, validator
+self-test 14 mutations PASS, full audit tests 41 PASS, and audit build PASS with an
+unused-import warning. Strict Clippy then returned 101 for the test-only
+`PreparedEffectQuality` import, and the executor stopped. Gates 6 through 9 and all
+audit-subject, counterfactual and measurement work remained unrun.
+
+Astra LOW returned attempt 1 **FAIL** while confirming that the residual oracle now
+derives the lexicographic normal tail plus fixed bypassed chain independently of
+the report, including independent bound associations. Attempt 2 may only move or
+conditionally compile the test-only import and add successful boundary controls
+that prove `u64::MAX` is accepted using otherwise valid, internally consistent
+records. Preserve overflow, boolean and negative rejection and all other behavior.
+
+Because Rust behavior and build already passed and the import-only correction does
+not change it, attempt 2 runs the amended validator self-test, strict Clippy,
+rustfmt, diff, workspace policy and bench policy once in that order. Stop on the
+first failure without correction or retry. No official measurement or
+counterfactual is authorized before a pushed checkpoint and fresh Astra PASS.
