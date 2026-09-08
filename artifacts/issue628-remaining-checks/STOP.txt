@@ -1,0 +1,2 @@
+FAIL: first authorized SDK check status 2; sdk/node_modules missing.
+Stop rule applied. No retry or npm install. Remaining checks not run.

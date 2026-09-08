@@ -1,0 +1,1 @@
+bash scripts/sdk-package.sh check /tmp/issue627-postpin-attempt3-output-20260908
