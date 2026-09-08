@@ -34,4 +34,3 @@ cover the blocking contract gaps.
 
 Issue #602 already consumed its one bounded runner correction. Its remaining general attempt count
 does not authorize another runner correction. Repair and promotion must move to a numbered successor.
-
