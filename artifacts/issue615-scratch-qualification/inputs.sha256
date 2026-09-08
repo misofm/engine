@@ -1,0 +1,11 @@
+92db9698cc062bd5ccc0a90f0ee43f051d77ce7e52f785ce9718fae3f400b753  Cargo.lock
+471660ddca768e90ec87550807e140b4754454509f6f5f59986a80764b53effb  Cargo.toml
+85a45cac04c296adac076f8f0609ca8f4c8ca658957f1f24cbd1e054b6cc44e0  rust-toolchain.toml
+03b0fbd88c069abb0a8fbdca5921ba6a9899298291fe087977b509a29ebb7d0e  .cargo/config.toml
+44a7f72fc27f93906472c7f8061e6492194949d7b2a3f6e45c53dfdbc689075d  scripts/build-web-audioworklet.sh
+9079d272d76a9d0015b815e7ccf0c439a8398d2e581f24ca250ea83c9b553b87  crates/effect-contract/src/lib.rs
+9768d59e21fcad4bff665f9d45111519bb7dec70cbe326b5a3c8b59b8b110ae6  crates/effect-package/src/wire.rs
+225bc06043ed6e2c62a38d63f1c2015b40480d673e3a53109c938eba481556cb  hosts/host-web/web/miso-engine-v1-audio-worklet.js
+21c8947d8aad2d1d9a23e553c2c7b983dbd5a622aabfbab9a41c622d1a50229a  hosts/host-web/web/miso-engine-v1-audio-worklet-host.js
+445254e7c6ddf3330bdf20cafa8cacec4d0e2489805f72a833859db52bc038cf  hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts
+30bf7a392109ac635e04f219577ce8b04a7fdfb5de260ced084cbf5f5214f07f  hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256
