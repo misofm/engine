@@ -159,3 +159,22 @@ Nash alone may make the bounded matrix/excerpts/verdict corrections: exact Wasm
 scalar clamp sites and stack support, count-one classification, loop-entry versus
 per-iteration labels, and folded-operand bits/sites. No rerun, compiler, source,
 timing, payload or artifact work is authorized. Any failure exhausts #653.
+
+## Final attempt evidence verdict
+
+Nash changed only the authorized matrix, excerpts and verdict at clean pushed
+`d2dc17833ae00b704e7ef7fe949a263ab8397bf0`; the original identity/hash
+evidence remained unchanged. Astra LOW independently verified all four shapes and
+returned final attempt 3 **PASS**.
+
+The proven repeated materializations are native AVX2 W8 `-1` and emitted folded
+`-3`, twice per frame, plus Wasm scalar `-1`, `+1` and emitted folded `-3`, twice
+per frame. Native scalar uses one-load register reuse and Wasm W4 uses one
+materialization/local reuse. Wasm scalar even `±2/3` are explicit one-count stack
+operands, and all odd folded `±1/3` values are distinct one-count exclusions.
+
+This establishes a separately reviewable source-placement hypothesis only. A
+successor must supply unchanged source thresholds/divisor to both calls while
+preserving the original divide/subtract operations. Explicit `-3` arithmetic,
+reciprocal substitution, speedup claims and artifact work remain unauthorized.
+Exact-head/current-main delivery review is required before an evidence-only PR.

@@ -24,3 +24,9 @@ duplicate materialization while preserving the existing arithmetic operations an
 order; that is a source-ownership hypothesis for a separately reviewed XHIGH
 issue. This record does not move expressions, change division, claim speed, or
 authorize implementation.
+
+Astra LOW independently verified this matrix at clean pushed
+`d2dc17833ae00b704e7ef7fe949a263ab8397bf0` and returned **PASS**. Any source
+successor must supply unchanged threshold/divisor values to both calls while
+preserving the existing divide/subtract operations; it may not introduce explicit
+`-3` arithmetic or reciprocal substitution.
