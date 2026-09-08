@@ -106,3 +106,25 @@ mutations. Diff hygiene, two-slot ownership, permanent non-credit/no-rerun bound
 build, conditional overlays, six-file checks, qualification gates, three-file promotion and
 delivery limits pass. One specified detached scratch qualification is authorized. Repository
 pin/lineage edits, PR and merge remain unauthorized until candidate PASS.
+
+## Scratch qualification — FAIL and stop
+
+Astra LOW ran the single authorized scratch qualification at frozen source `d63bc437`. Toolchain
+capture, the one provisional-pin builder and matrix generation exited zero. The build independently
+reproduced candidate `f80b6392b1ea7141aaac639d08094f88982febb883c4d08c3f1114418093e664`,
+emitted exactly six files, and preserved all five delivered non-Wasm hashes. The scratch overlay is
+exactly the provisional pin, two lineage fields and generated matrix paragraph; browser rows and
+resources are unchanged.
+
+The unchanged static gate then exited 1 because its collapsed true-peak-limiter f32x4 roster found
+zero arithmetic-carrying kernels matching the required `process_bank_mono` pattern instead of one.
+Per the issue stop rule, resource/native-witness mutations, hermetic, SDK, dependency installs,
+browsers and final matrix check did not run. No browser or qualification credit applies. The build
+must not be retried and repository pin/lineage promotion remains unauthorized.
+
+The 29 retained top-level files under `artifacts/issue617-scratch-qualification/` contain 28
+checksum-verified bounded evidence entries; generated outputs and target caches remain outside Git.
+#617 stops at this substantive classifier failure. A separately numbered tooling successor must
+diagnose and correct only the discriminating static kernel-roster rule against the preserved
+candidate, then establish how the stopped qualification may resume without repeating the one
+builder invocation. No pin, lineage, source, browser, PR or merge action is authorized here.

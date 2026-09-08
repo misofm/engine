@@ -1,0 +1,15 @@
+{
+  "name": "03-static",
+  "argv": [
+    "bash",
+    "scripts/check-web-audioworklet.sh",
+    "/tmp/issue617-scratch-qualification/output"
+  ],
+  "cwd": "/home/bl/misofm/engine-issue617-artifact-scratch",
+  "head": "d63bc437e948d6284b1b6cbe459f0b46c4ed6566",
+  "start": "2026-09-08T09:38:41.344046+00:00",
+  "env": {
+    "PATH": "/home/bl/.codex/packages/standalone/releases/0.153.4-x86_64-unknown-linux-musl/codex-path:/home/bl/.cargo/bin:/home/bl/.local/bin:/home/bl/.codex1/tmp/arg0/codex-arg0a6UL79:/home/bl/.codex/packages/standalone/releases/0.153.4-x86_64-unknown-linux-musl/codex-path:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin",
+    "CARGO_TARGET_DIR": "/tmp/issue617-scratch-qualification/target"
+  }
+}
