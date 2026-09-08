@@ -117,3 +117,26 @@ this stage. Any stage-2 brief must name the exact candidate set and require
 post-change lowering for the same four target shapes, with explicit spill/
 reload accounting and no timing or projected savings claim. The current
 stage-1 tree is evidence/spec-only and has no product change.
+
+### Attempt 1 Astra verdict
+
+Astra LOW returned **FAIL** at exact clean pushed evidence head
+`b8cce3c455f11ee79012548f94d86260db398d55`. All six temporary compiler
+payload sizes and hashes, the single-run provenance, issue synchronization and
+evidence-only path ownership verify. The retained attribution does not yet
+support its candidate-wide conclusion:
+
+- `capture-plan.md` records a malformed 63-character `.cargo/config.toml` hash,
+  while `preflight.md` incorrectly says all 11 hashes matched;
+- physical native excerpt locations are inaccurate, including `.LBB5_90` and
+  the cited `.LCPI5_4` broadcast;
+- Wasm `0x1.815182p2` is `DB_PER_OCTAVE`, not a math-kernel constant;
+- average-link, zero and spill conclusions exceed their precise retained maps.
+
+Attempt 2 may only correct the minimal excerpts, mappings, hash and preflight
+wording from the existing verified payloads. It must preserve the original
+commands, raw streams, statuses, payload identities and attempt-1 FAIL; narrow
+every conclusion to individually proven caller/loop cases; and distinguish FX4
+constants from math-kernel constants. No compilation, retry, source/test edit,
+audio, timing, artifact work, PR or merge is authorized. Astra LOW must review
+the corrected evidence before any stage-2 amendment.
