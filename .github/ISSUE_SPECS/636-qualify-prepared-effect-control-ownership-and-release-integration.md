@@ -64,3 +64,26 @@ actual status and complete diagnostic. No retry, alternate invocation, manifest
 repair, production change, allocation measurement, artifact or compiler capture
 is authorized. A recurring pre-test collision moves to a separate tooling
 disposition and receives no test credit.
+
+## Attempt 1 source/evidence review — FAIL
+
+Astra LOW reviewed exact clean pushed checkpoint
+`10cdc31ce384e7c156597d95cd6b53db4fbf1172`. Production, Cargo manifests,
+`Cargo.lock` and all inherited processor/sidechain/bank controls remain unchanged.
+The focused debug test and diff hygiene passed, but the live-control oracle still
+does not satisfy the causal gate: the change assigns different target/decoy
+parameter values, then asserts only that the crossed render contains a nonzero
+sample. It never compares crossed PCM with correctly attached PCM or an
+independently derived exact result.
+
+The predeclared release integration command ran exactly once after the target-
+absence preflight and stopped before tests at duplicate `effect-package` outputs
+and E0463 missing `effect_compiler`. No retry or later gate ran. The result receives
+no test credit and must move to a separately numbered tooling issue; it may not be
+called a baseline defect without evidence.
+
+Attempt 2 is limited to the literal bitwise correct-versus-crossed PCM divergence
+assertion, using identical deterministic input and commands with separately
+identified owners. Preserve production and all accepted controls. The tooling
+split and remaining-gate command set must be recorded before Luna continues. No
+release integration retry is authorized in #636.
