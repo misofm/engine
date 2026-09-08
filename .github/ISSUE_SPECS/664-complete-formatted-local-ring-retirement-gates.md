@@ -189,3 +189,19 @@ Retain attempt 1's behavior, strict-Clippy, format and workspace evidence becaus
 the product is frozen and the two scripts do not change those surfaces. Stop on
 the first unexpected failure without correction or retry. Artifact work remains
 blocked, and all #659 recovery state remains held.
+
+## Attempt 2 authorization
+
+Astra LOW returned **ATTEMPT-2 SCOPE PASS** at exact clean pushed head/upstream
+`277d99e09ef007613e2175afc4c16dd378ca0152`, current main
+`6f4a1b1c893ce04fbe8001e9d175702eba9a9d78`, and tracker
+`a8a47a3ff369d97c10c21746c7bb13760d91c664`. GitHub #664 matches, product
+bytes are frozen, and all three fresh paths are absent including symlinks.
+
+Hypatia alone is authorized to apply the exact two-script recalibration, preserve
+the 12-file floor and the discriminating 41-to-40 mutation, and execute the seven
+stages once after identity/freshness/capture controls. Attribute carried behavior
+and Clippy evidence to #659 attempt 3, and carried format/workspace evidence to
+#664 attempt 1. Stop on first unexpected failure. No product correction,
+artifact/pin action, retry, or cleanup is authorized; #659 recovery state remains
+held.
