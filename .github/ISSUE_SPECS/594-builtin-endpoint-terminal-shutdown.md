@@ -253,3 +253,20 @@ with strict Clippy, rustdoc, workspace/host/realtime/CI-routing policies and mut
 scalar, and Wasm simd128 checks. Full verdict: `docs/audits/594-attempt3-review.md`. Delivery remains
 pending current-main integration, exact-head Astra LOW review, lane-B artifact disposition, required
 CI, merge, post-main CI, and GitHub synchronization.
+
+## Integrated head and artifact disposition
+
+The accepted attempt-3 source was merged with current main `be17e3293fa7fabb425d1b7eb6edd20bd13c6867`
+at checkpoint `cb4e4bed4f84ca5c76a0dd02384c235f2836ff24`. Astra LOW returned **PASS** on
+that exact integrated source head: the incoming #593/#596 benchmark-metadata changes are disjoint,
+the accepted endpoint source/tests and `Cargo.lock` are unchanged, and independent endpoint tests
+pass 11 unit plus 20 integration cases.
+
+Lane B then rebuilt the shipped six-file AudioWorklet artifact. Both the repin probe and ordinary
+six-file build passed, every shipped file remained byte-identical to the canonical #587 artifact,
+and the candidate digest remained the pinned
+`39ebe7cd3f71f34ab11260f27fa1eaad281dd61642c50d9ed6210e703d95dd55`. No pin,
+qualification result, deployment matrix, source, or consumer changed, so full qualification was
+correctly skipped. Durable evidence is in `artifacts/issue594-artifact-qualification/`; the artifact
+checkpoint was incorporated as `a1a2f89b`. Final exact combined-head Astra LOW review, required PR
+qualification, merge, post-main qualification, and GitHub synchronization remain pending.
