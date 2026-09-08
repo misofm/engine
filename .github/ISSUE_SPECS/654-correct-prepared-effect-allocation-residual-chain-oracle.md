@@ -101,3 +101,90 @@ run `cargo fmt --all --check`, `git diff --check`, workspace policy and bench po
 once in that order with fresh retained evidence. It must not rerun tests, build,
 validator or Clippy, make a semantic change, or execute an official variant. Any
 failure exhausts #654 with no fourth correction.
+
+## Final source qualification — PASS
+
+Final attempt 3 changed only rustfmt's exact previously reported import ordering
+and assertion layout. At pushed clean branch/upstream
+`2c20a8af7fa0eed9eb687e37cb009492c295f0a4`, Astra LOW verified the retained
+three-attempt chain: focused tests 5/5, full audit 41, build, strict validator
+boundaries/mutations and Clippy passed; final fmt, diff, workspace and bench-policy
+statuses are zero. Attempts 1/2 remain FAIL. The source and validator are now
+frozen. No audit variant, counterfactual, or official count has run.
+
+## Frozen measurement amendment
+
+Hypatia, Luna HIGH agent `issue583_luna_impl`, is the sole measurement executor.
+Astra LOW must pass this amendment before any path below is created. Candidate
+worktree/head is exactly:
+
+```text
+/home/bl/misofm/engine-cp1-allocation-residual-oracle
+2c20a8af7fa0eed9eb687e37cb009492c295f0a4
+```
+
+Require all four paths absent, including dangling symlinks, before creating any of
+them:
+
+```text
+/tmp/issue654-measurement-evidence
+/tmp/issue654-candidate-target
+/tmp/issue654-counterfactual-target
+/tmp/issue654-counterfactual-source
+```
+
+Create the evidence directory and record/read/hash exact cwd, full candidate HEAD
+and upstream equality, empty candidate porcelain including untracked files,
+`rustc -Vv`, `cargo -V`, installed target, literal commands/environment, and all
+path-absence results. Any producer, readback, hash, identity, cleanliness, target,
+or absence failure stops before worktree creation.
+
+Create the counterfactual once with:
+
+```text
+git worktree add --detach /tmp/issue654-counterfactual-source 2c20a8af7fa0eed9eb687e37cb009492c295f0a4
+git -C /tmp/issue654-counterfactual-source restore --source=d98646db47bc603c32431d999cd08f43a0168043 -- crates/graph-compiler/src/compile.rs crates/graph-compiler/src/ids.rs crates/graph-compiler/src/banks.rs
+```
+
+Require detached HEAD `2c20a8af...`, no untracked files, and porcelain containing
+exactly those three modified paths. Their candidate and restored SHA-256 values are:
+
+```text
+path                                         candidate                                                         restored baseline
+crates/graph-compiler/src/compile.rs          109949399f4da4fc44078eb3121dbc6939bc5f635ba34c7789883d7a377f6c53  ecfe271b944f63d921a1ec64d6e74512d4e259435bb02104997491122fcabb26
+crates/graph-compiler/src/ids.rs              5c6ade8f0887bec4a0c39d4413929bb526cf1d822d7e66c6835961751d0ede58  08a5a2265f31061acbc33737438bf1d27c08c9f5c7010bca82825e61eaf1d115
+crates/graph-compiler/src/banks.rs            981b0fa269401ef1f985e4eeffc4580b1bc66c2e0bd87f4333e8486444ef0f4b  997ccfda181b6ffa01472d380e1e4c777eaceaceeefb158f9ddbb58af9216475
+```
+
+Because the detached worktree starts at the exact candidate commit and its complete
+porcelain is restricted to these paths, every other tracked source, harness,
+validator, dependency and toolchain byte remains identical. Stop if the
+counterfactual needs any additional edit.
+
+Run exactly once in candidate-then-counterfactual order, with separate complete
+stdout, stderr and numeric status records:
+
+```text
+LC_ALL=C LANG=C TZ=UTC CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/issue654-candidate-target cargo run --locked --release -p audit -- prepared-effect-allocations --variant candidate
+LC_ALL=C LANG=C TZ=UTC CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/issue654-counterfactual-target cargo run --locked --release -p audit -- prepared-effect-allocations --variant counterfactual
+```
+
+Each command contains its single internal warmup and two measured rounds per corpus.
+Stop on nonzero status, unexpected stdout population, identity change, tree change,
+or concurrent Cargo/rustc use. Do not retry, reorder, clean a target, or inspect
+counts before both commands finish. Concatenate candidate stdout followed by
+counterfactual stdout once to
+`/tmp/issue654-measurement-evidence/combined.jsonl`, then run exactly once from the
+candidate worktree:
+
+```text
+python3 -B scripts/check-prepared-effect-allocation-records.py /tmp/issue654-measurement-evidence/combined.jsonl
+```
+
+Preserve all temporary records, streams, targets and the counterfactual worktree
+through Astra review. The compact decision record may contain only exact
+source/toolchain/command/status/hashes, graph and diagnostic identities, per-corpus
+counters/deltas, validator status and conclusion. No raw stream, JSONL, target,
+`.ll`, assembly, object, archive, library, binary, or generated compiler output may
+enter Git. No timing, percentage, historical-count comparison, extrapolation,
+optimization, or source repair is authorized.
