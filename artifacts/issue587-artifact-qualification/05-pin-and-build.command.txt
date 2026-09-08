@@ -1,0 +1,1 @@
+mkdir -p /tmp/issue587-artifact-ab3766ca; printf '%s\n' 39ebe7cd3f71f34ab11260f27fa1eaad281dd61642c50d9ed6210e703d95dd55 > hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256; bash scripts/build-web-audioworklet.sh /tmp/issue587-artifact-ab3766ca
