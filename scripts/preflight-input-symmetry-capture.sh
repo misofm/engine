@@ -4,7 +4,7 @@ set -euo pipefail
 if (($#)); then echo "usage: $0" >&2; exit 2; fi
 repo=$(git rev-parse --show-toplevel)
 cd "$repo"
-for name in RUSTFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_TARGET_DIR CARGO_BUILD_TARGET CARGO_BUILD_RUSTC RUSTC RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER RUSTDOC RUSTDOCFLAGS CARGO_PROFILE_RELEASE_CODEGEN_UNITS CARGO_PROFILE_RELEASE_LTO CARGO_PROFILE_RELEASE_OPT_LEVEL CARGO_PROFILE_RELEASE_DEBUG CARGO_PROFILE_RELEASE_PANIC CARGO_PROFILE_RELEASE_STRIP CARGO_PROFILE_RELEASE_INCREMENTAL CARGO_PROFILE_RELEASE_RPATH; do
+for name in RUSTFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_TARGET_DIR CARGO_BUILD_TARGET CARGO_BUILD_RUSTC CARGO_BUILD_RUSTFLAGS RUSTC RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER RUSTDOC RUSTDOCFLAGS CARGO_PROFILE_RELEASE_CODEGEN_UNITS CARGO_PROFILE_RELEASE_LTO CARGO_PROFILE_RELEASE_OPT_LEVEL CARGO_PROFILE_RELEASE_DEBUG CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS CARGO_PROFILE_RELEASE_PANIC CARGO_PROFILE_RELEASE_STRIP CARGO_PROFILE_RELEASE_INCREMENTAL CARGO_PROFILE_RELEASE_RPATH; do
   [[ -z "${!name-}" ]] || { echo "refusing inherited $name" >&2; exit 1; }
 done
 [[ -n "${MISO_ENGINE_603_EXPECTED_HEAD-}" && "$(git rev-parse HEAD)" == "$MISO_ENGINE_603_EXPECTED_HEAD" ]] || { echo "exact approved candidate head required" >&2; exit 1; }
@@ -17,7 +17,8 @@ prepared="$root/prepared-release"
 seal="$root/input-symmetry-capture.seal.json"
 [[ ! -e "$seal" && ! -L "$seal" && ! -e "$root/input-symmetry-capture.jsonl" && ! -L "$root/input-symmetry-capture.jsonl" ]] || { echo "protected output already exists" >&2; exit 1; }
 [[ ! -L "$root" && ! -L "$qualification" && ! -L "$prepared" ]] || { echo "artifact paths may not be symlinks" >&2; exit 1; }
-[[ ! -e "$qualification" && ! -L "$qualification" && ! -e "$prepared" && ! -L "$prepared" ]] || { echo "prepared or qualification directory already exists" >&2; exit 1; }
+[[ ! -e "$qualification" || -d "$qualification" ]] || { echo "qualification path must be a directory" >&2; exit 1; }
+[[ ! -e "$prepared" && ! -L "$prepared" ]] || { echo "prepared directory already exists" >&2; exit 1; }
 mkdir -p "$qualification" "$prepared"
 
 export CARGO_TARGET_DIR="$repo/$prepared/target"
@@ -71,5 +72,10 @@ with open(os.environ["SEAL"] + ".scratch", "x", encoding="utf-8") as handle:
     json.dump(seal, handle, sort_keys=True, separators=(",", ":")); handle.write("\n")
 PY
 python3 scripts/input-symmetry-capture-validator.py --seal-only "$seal.scratch" >/dev/null
-ln -- "$seal.scratch" "$seal" && rm -- "$seal.scratch"; trap - EXIT
+if ! ln -- "$seal.scratch" "$seal"; then
+  echo "seal publication failed; scratch retained at $seal.scratch" >&2
+  exit 1
+fi
+rm -- "$seal.scratch"
+trap - EXIT
 echo "READY #603 preflight seal: $seal"

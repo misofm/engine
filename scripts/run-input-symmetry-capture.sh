@@ -121,6 +121,7 @@ if ((child_status == 0)); then
   set -e
   if ((validator_status == 0)) && [[ "$marker_status" == PASS ]]; then
     if [[ "$self_test_fault" == publication ]]; then
+      ln -s -- "$root/no-such-accepted-target" "$accepted"
       accepted_status=publication_failed
     else
       set +e
@@ -153,6 +154,9 @@ if [[ "$self_test_fault" == persistence ]]; then
   echo "injected disposition persistence failure" >"$disposition.tmp"
   echo "FAIL: disposition persistence failed; recovery retained at $raw" >&2
   exit 1
+fi
+if [[ "$self_test_fault" == disposition ]]; then
+  ln -s -- "$root/no-such-disposition-target" "$disposition"
 fi
 if ! ln -- "$disposition.tmp" "$disposition"; then
   echo "FAIL: disposition publication failed; recovery retained at $raw" >&2

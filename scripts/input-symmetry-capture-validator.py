@@ -77,7 +77,7 @@ def git_identity(value, label):
 
 def validate_record(record, expected_round, seal):
     exact_keys(record, RECORD_KEYS, "record")
-    if integer(record["schema_version"], "schema_version") != 1 or integer(record["issue"], "issue") != 603 or record["kind"] != "input_symmetry_capture":
+    if integer(record["schema_version"], "schema_version") != 1 or integer(record["issue"], "issue") != 602 or record["kind"] != "input_symmetry_capture":
         raise ValueError("record identity mismatch")
     if integer(record["round"], "round", 1) != expected_round:
         raise ValueError("round order mismatch")

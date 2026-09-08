@@ -1,0 +1,11 @@
+#603 bounded correction qualification
+record identity: tooling seal/disposition issue 603; frozen Rust capture records issue 602
+mutation_command: replace validator record issue gate 602 -> 601; run bash scripts/test-input-symmetry-capture.sh
+mutation_status: 1 (expected nonzero)
+mutation_diagnostic: FAIL: record identity mismatch
+restored_self_test_status: 0
+final capture/preflight: not run
+real workload/timing: not run
+root checkpoint audit: FAIL pending Astra LOW adversarial rereview
+remaining concerns: duplicate-round and nonfinite record cases are absent; the accepted-publication fault creates a symlink and manually sets publication_failed without executing the actual no-clobber link; several failure scenarios suppress rather than assert the runner exit status; and the promised every record/seal identity-mismatch matrix is incomplete
+authorization: this is the sole bounded correction; no further #603 implementation, final preflight, real capture entry, or timing unless Astra LOW returns PASS

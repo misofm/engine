@@ -8,6 +8,11 @@ ledger="$tmp/stub-invocations"; : >"$ledger"; export MISO_ENGINE_603_STUB_LEDGER
 if python3 "$repo/scripts/input-symmetry-capture-validator.py" >/dev/null 2>&1; then exit 1; fi
 if bash "$repo/scripts/preflight-input-symmetry-capture.sh" unexpected >/dev/null 2>&1; then exit 1; fi
 if bash "$repo/scripts/run-input-symmetry-capture.sh" unexpected >/dev/null 2>&1; then exit 1; fi
+for name in RUSTFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_TARGET_DIR CARGO_BUILD_TARGET CARGO_BUILD_RUSTC CARGO_BUILD_RUSTFLAGS RUSTC RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER RUSTDOC RUSTDOCFLAGS CARGO_PROFILE_RELEASE_CODEGEN_UNITS CARGO_PROFILE_RELEASE_LTO CARGO_PROFILE_RELEASE_OPT_LEVEL CARGO_PROFILE_RELEASE_DEBUG CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS CARGO_PROFILE_RELEASE_PANIC CARGO_PROFILE_RELEASE_STRIP CARGO_PROFILE_RELEASE_INCREMENTAL CARGO_PROFILE_RELEASE_RPATH; do
+  env_log="$tmp/preflight-$name.log"
+  if env "$name=controlled-test-value" bash "$repo/scripts/preflight-input-symmetry-capture.sh" >"$env_log" 2>&1; then exit 1; fi
+  grep -q "refusing inherited $name" "$env_log"
+done
 python3 - "$tmp" "$repo/scripts/input-symmetry-capture-validator.py" <<'PY'
 import json, pathlib, subprocess, sys
 root=pathlib.Path(sys.argv[1]); validator=sys.argv[2]
@@ -16,7 +21,7 @@ seal={"schema_version":1,"issue":603,"kind":"input_symmetry_capture_seal","statu
 keys=("cpu_model","governor_or_power_mode","rust_version","llvm_version","target_features","profile","background_load_note","measurement_control","cpu_affinity")
 metadata={k:None for k in keys}; metadata.update(target_triple=seal["target_triple"],candidate_commit=seal["candidate_commit"],rust_version=seal["compiler"]); missing=sorted(k for k,v in metadata.items() if v is None)
 def rec(n):
- r={"schema_version":1,"issue":603,"kind":"input_symmetry_capture","round":n,"fixture_id":"fixtures/session/v1/parametric-eq-bank-console.json","fixture_sha256":seal["fixture_sha256"],"sample_rate_hz":48000,"quantum_frames":128,"lane_width":8,"track_count":8,"records_per_block":8,"target_pair_db":[-6.0,-12.0],"smoothing_samples":256,"preparation_blocks_per_owner":512,"measured_blocks_per_owner":4096,"owners":2,"render_denominator":8192,"attempted_records":65536,"accepted_records":65536,"successful_renders":8192,"render_errors":0,"output_words":2097152,"nonzero_samples":1,"owner_digests":[digest,digest],"elapsed_ns":8192,"nanoseconds_per_plan_render":1,"source_commit":seal["candidate_commit"],"source_tree":seal["candidate_tree"],"binary_sha256":seal["binary_sha256"],"source_sha256":seal["source_sha256"],"argv":seal["argv"],"cwd":seal["cwd"],"compiler":seal["compiler"],"target_triple":seal["target_triple"],"effective_build_flags":seal["effective_build_flags"],"backend":"Simd8","os":"linux",**metadata,"missing_metadata":missing,"descriptive_only":True}; return r
+ r={"schema_version":1,"issue":602,"kind":"input_symmetry_capture","round":n,"fixture_id":"fixtures/session/v1/parametric-eq-bank-console.json","fixture_sha256":seal["fixture_sha256"],"sample_rate_hz":48000,"quantum_frames":128,"lane_width":8,"track_count":8,"records_per_block":8,"target_pair_db":[-6.0,-12.0],"smoothing_samples":256,"preparation_blocks_per_owner":512,"measured_blocks_per_owner":4096,"owners":2,"render_denominator":8192,"attempted_records":65536,"accepted_records":65536,"successful_renders":8192,"render_errors":0,"output_words":2097152,"nonzero_samples":1,"owner_digests":[digest,digest],"elapsed_ns":8192,"nanoseconds_per_plan_render":1,"source_commit":seal["candidate_commit"],"source_tree":seal["candidate_tree"],"binary_sha256":seal["binary_sha256"],"source_sha256":seal["source_sha256"],"argv":seal["argv"],"cwd":seal["cwd"],"compiler":seal["compiler"],"target_triple":seal["target_triple"],"effective_build_flags":seal["effective_build_flags"],"backend":"Simd8","os":"linux",**metadata,"missing_metadata":missing,"descriptive_only":True}; return r
 (root/"seal.json").write_text(json.dumps(seal,separators=(",",":"))+"\n"); (root/"records.jsonl").write_text("\n".join(json.dumps(rec(n),separators=(",",":")) for n in (1,2))+"\n")
 
 def check(path, lines):
@@ -25,7 +30,7 @@ def check_seal(obj, name):
  p=root/name; p.write_text(json.dumps(obj)+"\n"); assert subprocess.run([sys.executable,validator,"--seal-only",str(p)],capture_output=True).returncode != 0
 lines=(root/"records.jsonl").read_text().splitlines(); check(root/"duplicate.jsonl",[lines[0][:-1]+',"round":1}',lines[1]])
 a=json.loads(lines[0]); a["backend"]=True; check(root/"numeric.jsonl",[json.dumps(a),lines[1]])
-a=json.loads(lines[0]); a["round"]=2; check(root/"reordered.jsonl",[json.dumps(a),lines[1]])
+a=json.loads(lines[0]); a["round"]=2; b=json.loads(lines[1]); b["round"]=1; check(root/"reordered.jsonl",[json.dumps(a),json.dumps(b)])
 a=json.loads(lines[0]); a["target_pair_db"]= [-6,-12.0]; check(root/"pair-type.jsonl",[json.dumps(a),lines[1]])
 bad=json.loads((root/"seal.json").read_text()); del bad["status"]; check_seal(bad,"seal-missing.json")
 bad=json.loads((root/"seal.json").read_text()); bad["issue"]=True; check_seal(bad,"seal-type.json")
@@ -38,6 +43,7 @@ for key, value, name in (("schema_version", True, "record-schema-bool"), ("round
 b=dict(a); del b["round"]; check(root/"record-missing-key.jsonl", [json.dumps(b), lines[1]])
 b=dict(a); b["unknown_key"]=1; check(root/"record-extra-key.jsonl", [json.dumps(b), lines[1]])
 check(root/"record-extra-line.jsonl", [lines[0], lines[1], lines[1]])
+check(root/"record-missing-second.jsonl", [lines[0]])
 for key, value, name in (("target_pair_db", [-6, -12.0], "seal-pair-type"), ("smoothing_samples", True, "seal-smoothing-type"), ("owners", 3, "seal-owners-range")):
  b=json.loads((root/"seal.json").read_text()); b[key]=value; check_seal(b,name)
 PY
@@ -114,19 +120,28 @@ EOF_MARKER
 import hashlib, json, pathlib, sys
 p,b=map(pathlib.Path,sys.argv[1:]); s=json.loads(p.read_text()); s["binary_sha256"]=hashlib.sha256(b.read_bytes()).hexdigest(); s["argv"]=str(b.resolve())+" input-symmetry-capture"; p.write_text(json.dumps(s,separators=(",", ":"))+"\n")
 PY_MARKER
-  if MISO_ENGINE_603_SELF_TEST=1 MISO_ENGINE_603_ROOT="$marker_root" MISO_ENGINE_603_VALID_RECORDS="$tmp/records.jsonl" MISO_ENGINE_603_MARKER_MODE="$mode" bash scripts/run-input-symmetry-capture.sh >/dev/null 2>&1; then exit 1; fi
+  python3 - "$tmp/success-records.jsonl" "$marker_root/input-symmetry-capture.seal.json" "$marker_root/marker-records.jsonl" <<'PY_MARKER_RECORDS'
+import json, pathlib, sys
+source, seal_path, output = map(pathlib.Path, sys.argv[1:]); seal=json.loads(seal_path.read_text()); rows=[]
+for line in source.read_text().splitlines():
+    row=json.loads(line); row.update(binary_sha256=seal["binary_sha256"], argv=seal["argv"]); rows.append(json.dumps(row,separators=(",", ":")))
+output.write_text("\n".join(rows)+"\n")
+PY_MARKER_RECORDS
+  if MISO_ENGINE_603_SELF_TEST=1 MISO_ENGINE_603_ROOT="$marker_root" MISO_ENGINE_603_VALID_RECORDS="$marker_root/marker-records.jsonl" MISO_ENGINE_603_MARKER_MODE="$mode" bash scripts/run-input-symmetry-capture.sh >/dev/null 2>&1; then exit 1; fi
   grep -q '"runner_status":"FAIL"' "$marker_root/disposition.json"
+  grep -q '"validator_status":"0"' "$marker_root/disposition.json"
+  grep -q '"marker_status":"FAIL"' "$marker_root/disposition.json"
   [[ ! -e "$marker_root/input-symmetry-capture.jsonl" ]]
 done
 # Child failures at each observed marker prefix report 0, 8192, or 16384 calls.
-for prefix in 0 1 2; do
+for prefix in 0 8192 16384; do
   fail_root="$tmp/child-$prefix-$RANDOM"; cp -a "$success_root" "$fail_root"; rm -rf "$fail_root/raw" "$fail_root/disposition.json" "$fail_root/.capture-reservation" "$fail_root/input-symmetry-capture.jsonl"
   cat >"$fail_root/prepared-release/bench" <<'EOF_CHILD'
 #!/usr/bin/env bash
 echo "child-prefix-${MISO_ENGINE_603_CHILD_PREFIX-}" >>"$MISO_ENGINE_603_STUB_LEDGER"
 case "${MISO_ENGINE_603_CHILD_PREFIX-}" in
-  1) echo 'MISO_ENGINE_CAPTURE_PHASE capture_started' >&2;;
-  2) echo 'MISO_ENGINE_CAPTURE_PHASE capture_started' >&2; echo 'MISO_ENGINE_CAPTURE_PHASE round_1_complete' >&2; echo 'MISO_ENGINE_CAPTURE_PHASE round_2_complete' >&2;;
+  8192) echo 'MISO_ENGINE_CAPTURE_PHASE capture_started' >&2; echo 'MISO_ENGINE_CAPTURE_PHASE round_1_complete' >&2;;
+  16384) echo 'MISO_ENGINE_CAPTURE_PHASE capture_started' >&2; echo 'MISO_ENGINE_CAPTURE_PHASE round_1_complete' >&2; echo 'MISO_ENGINE_CAPTURE_PHASE round_2_complete' >&2;;
 esac
 exit 7
 EOF_CHILD
@@ -137,7 +152,7 @@ p,b=map(pathlib.Path,sys.argv[1:]); s=json.loads(p.read_text()); s["binary_sha25
 PY_CHILD
   MISO_ENGINE_603_SELF_TEST=1 MISO_ENGINE_603_ROOT="$fail_root" MISO_ENGINE_603_CHILD_PREFIX="$prefix" bash scripts/run-input-symmetry-capture.sh >/dev/null 2>&1 || true
   grep -q '"child_status":7' "$fail_root/disposition.json"
-  expected_calls=$(( prefix == 2 ? 16384 : 0 )); python3 - "$fail_root/disposition.json" "$expected_calls" <<'PY_EXPECTED'
+  expected_calls="$prefix"; python3 - "$fail_root/disposition.json" "$expected_calls" <<'PY_EXPECTED'
 import json, sys
 assert json.loads(open(sys.argv[1], encoding="utf-8").read())["timed_render_calls"] == int(sys.argv[2])
 PY_EXPECTED
@@ -153,11 +168,17 @@ for identity in candidate_commit candidate_tree binary_sha256 fixture_sha256 sou
   python3 - "$identity_root/input-symmetry-capture.seal.json" "$identity" <<'PYID'
 import json, pathlib, sys
 p=pathlib.Path(sys.argv[1]); key=sys.argv[2]; s=json.loads(p.read_text())
+binary=p.parent/"prepared-release/bench"; s["binary_sha256"]=__import__("hashlib").sha256(binary.read_bytes()).hexdigest(); s["argv"]=str(binary.resolve())+" input-symmetry-capture"
 s[key]=(("0"*40) if key in ("candidate_commit","candidate_tree") else (("0"*64) if key.endswith("sha256") else "identity-mismatch"))
 p.write_text(json.dumps(s,separators=(",",":"))+"\n")
 PYID
-  MISO_ENGINE_603_SELF_TEST=1 MISO_ENGINE_603_ROOT="$identity_root" bash scripts/run-input-symmetry-capture.sh >/dev/null 2>&1 || true
+  if MISO_ENGINE_603_SELF_TEST=1 MISO_ENGINE_603_ROOT="$identity_root" bash scripts/run-input-symmetry-capture.sh >"$identity_root/runner.log" 2>&1; then exit 1; fi
   grep -q '"child_status":"not_run"' "$identity_root/disposition.json"
+  if [[ "$identity" == effective_build_flags ]]; then
+    grep -q 'invalid prelaunch seal' "$identity_root/runner.log"
+  else
+    grep -q 'candidate identity changed' "$identity_root/runner.log"
+  fi
 done
 [[ "$(wc -l <"$ledger")" == "$ledger_before" ]] || { echo "identity mismatch reached synthetic child" >&2; exit 1; }
 # A successful child with malformed output exercises validator failure and raw validator logs.
@@ -200,6 +221,7 @@ records=pathlib.Path(sys.argv[1]).read_text().splitlines(); seal=json.loads(path
 PY5
 MISO_ENGINE_603_SELF_TEST=1 MISO_ENGINE_603_SELF_TEST_FAULT=publication MISO_ENGINE_603_ROOT="$publication_root" MISO_ENGINE_603_VALID_RECORDS="$tmp/pub-records.jsonl" bash scripts/run-input-symmetry-capture.sh >/dev/null 2>&1 || true
 grep -q '"accepted_status":"publication_failed"' "$publication_root/disposition.json"
+[[ -L "$publication_root/input-symmetry-capture.jsonl" ]]
 # A post-workload disposition persistence failure retains the accepted bytes and recovery files.
 persistence_root="$tmp/persistence-failure"; mkdir -p "$persistence_root/prepared-release"
 cp "$publication_root/input-symmetry-capture.seal.json" "$persistence_root/input-symmetry-capture.seal.json"
@@ -214,7 +236,21 @@ lines=pathlib.Path(sys.argv[1]).read_text().splitlines(); argv=str(pathlib.Path(
 PY7
 MISO_ENGINE_603_SELF_TEST=1 MISO_ENGINE_603_SELF_TEST_FAULT=persistence MISO_ENGINE_603_ROOT="$persistence_root" MISO_ENGINE_603_VALID_RECORDS="$tmp/persist-records.jsonl" bash scripts/run-input-symmetry-capture.sh >/dev/null 2>&1 || true
 [[ -f "$persistence_root/input-symmetry-capture.jsonl" && -f "$persistence_root/disposition.json.tmp" ]]
+# Fault the actual disposition no-clobber publication after workload completion.
+disposition_root="$tmp/disposition-failure"; mkdir -p "$disposition_root/prepared-release"
+cp "$publication_root/input-symmetry-capture.seal.json" "$disposition_root/input-symmetry-capture.seal.json"
+cp "$publication_root/prepared-release/bench" "$disposition_root/prepared-release/bench"
+python3 - "$disposition_root/input-symmetry-capture.seal.json" "$disposition_root/prepared-release/bench" "$tmp/pub-records.jsonl" <<'PY_DISPOSITION'
+import hashlib, json, pathlib, sys
+p,b,records=map(pathlib.Path,sys.argv[1:]); s=json.loads(p.read_text()); s["binary_sha256"]=hashlib.sha256(b.read_bytes()).hexdigest(); s["argv"]=str(b.resolve())+" input-symmetry-capture"; p.write_text(json.dumps(s,separators=(",", ":"))+"\n")
+rows=[]
+for line in records.read_text().splitlines():
+ r=json.loads(line); r["binary_sha256"]=s["binary_sha256"]; r["argv"]=s["argv"]; rows.append(json.dumps(r,separators=(",", ":")))
+(records.parent/"disposition-records.jsonl").write_text("\n".join(rows)+"\n")
+PY_DISPOSITION
+if MISO_ENGINE_603_SELF_TEST=1 MISO_ENGINE_603_SELF_TEST_FAULT=disposition MISO_ENGINE_603_ROOT="$disposition_root" MISO_ENGINE_603_VALID_RECORDS="$tmp/disposition-records.jsonl" bash scripts/run-input-symmetry-capture.sh >/dev/null 2>&1; then exit 1; fi
+[[ -L "$disposition_root/disposition.json" && -f "$disposition_root/disposition.json.tmp" ]]
 [[ ! -e "$repo/artifacts/issue-603-input-symmetry-capture/input-symmetry-capture.seal.json" && ! -e "$repo/artifacts/issue-603-input-symmetry-capture/input-symmetry-capture.jsonl" ]] || { echo "self-test touched final namespace" >&2; exit 1; }
-[[ "$(wc -l <"$ledger")" == 14 ]] || { echo "unexpected stub invocation count" >&2; exit 1; }
+[[ "$(wc -l <"$ledger")" == 15 ]] || { echo "unexpected stub invocation count" >&2; exit 1; }
 [[ ! -s "$sentinel" ]] || { echo "real workload/timing sentinel was touched" >&2; exit 1; }
 echo "PASS: #603 validator mutations and durable zero-real-workload sentinel"
