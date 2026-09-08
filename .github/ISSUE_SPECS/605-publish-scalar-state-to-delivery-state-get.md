@@ -67,3 +67,9 @@ This correction narrows the allocation claim to the inline publication slot and 
 ## Numbered scope verdict 2
 
 Astra LOW returned **FAIL** at exact clean head/upstream `28d3692841c0278c1e9748a65db0d6e3efbe6d20`. The allocation, sticky-fault, provider exclusion, feature SHA and tracker state were corrected, but the opening status and several live ownership references still named stopped #603 instead of active replacement #606. This correction changes current path ownership and live merge checks to #606 while preserving #603 only as historical failure provenance. Luna remains unauthorized until Astra LOW confirms this exact correction.
+
+## Corrected numbered scope PASS
+
+Astra LOW returned **PASS** at exact clean head/upstream `f50253ab6a7e03b371f922e81b46f148ef0ae23b`, current main/merge-base `6fe8676e1537bc2c952ac87ee2fe31c545438474`, and pushed tracker `11d3241724f317d530190f44c2ab5bd92e1010d4`. GitHub #605 matches this spec, all current coordination/exclusion/merge-check references name active #606, and #603 remains only historical. The allocation, sticky-fault and provider-exclusion corrections are accepted; the fixed inline two-record design is sound and disjoint from #606.
+
+Luna HIGH or XHIGH attempt 1 is authorized within the four listed source/test paths plus this spec/evidence. `crates/host-core/src/control_provider.rs`, #606 paths and artifact work remain excluded. Root may perform the ordinary artifact identity probe only after Astra LOW source PASS.
