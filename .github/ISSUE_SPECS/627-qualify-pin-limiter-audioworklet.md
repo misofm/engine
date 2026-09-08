@@ -82,3 +82,20 @@ Exactly one ordinary no-bypass applicability build is authorized from frozen
 `dc14ca856e10cb5ad7f6fdacb0ea9322342a9251`, with complete evidence and no
 retry. A pin mismatch requires a separate Astra LOW review before scratch
 qualification. Promotion, PR, and merge remain unauthorized.
+
+## Astra LOW corrected scope review — PASS
+
+Astra LOW returned controlling **PASS** at exact clean pushed head
+`da1f64ac3f05badce2a249b226fb520ba2ffcd4e`, live main
+`30680709c58f0be99e09d006d8d661c1ce96324d`, and unchanged tracker
+`454e621f832affa4239ea89508b97adc088864a3`. The corrected routing sentence
+resolves the blocker: Luna HIGH/XHIGH may execute each probe, qualification, and
+promotion stage only after the preceding Astra LOW verdict separately authorizes
+that stage. The inherited PASS at the uncorrected `89619288` brief does not
+override the later adversarial FAIL; this corrected-head verdict is the fresh
+authorization.
+
+Exactly one ordinary no-bypass applicability probe may now run from frozen
+source `dc14ca856e10cb5ad7f6fdacb0ea9322342a9251`, preserving complete compact
+evidence and allowing no retry. Scratch qualification and repository promotion
+remain unauthorized pending separate Astra LOW reviews.
