@@ -2,7 +2,6 @@
 
 use engine::{EngineVersion, QuantumFrames, SampleRateHz};
 use lane::Backend;
-use std::num::NonZeroUsize;
 
 /// A portable bootstrap result with the canonical smoke sample rate and render quantum.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -28,20 +27,9 @@ pub fn target_smoke() -> TargetSmoke {
     }
 }
 
-/// Exercise the browser single-owner queue path without shared memory or atomics.
-#[must_use]
-pub fn local_realtime_ring_smoke(value: u32) -> bool {
-    let mut ring = engine::realtime::LocalRing::new(
-        NonZeroUsize::new(1).expect("one-slot smoke ring"),
-        engine::realtime::QueueGeneration(1),
-    )
-    .expect("valid smoke ring");
-    ring.try_push(value).is_ok() && ring.try_pop() == Ok(value)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{local_realtime_ring_smoke, target_smoke};
+    use super::target_smoke;
 
     #[test]
     fn smoke_values_are_canonical() {
@@ -95,10 +83,5 @@ mod tests {
             lane::Backend::Scalar,
             "every other target is the scalar fallback"
         );
-    }
-
-    #[test]
-    fn local_realtime_ring_round_trips() {
-        assert!(local_realtime_ring_smoke(42));
     }
 }

@@ -28,8 +28,8 @@ create_fixture() {
         "$root/tools/native-pcm-runner/src" \
         "$root/tools/bench/src" \
         "$root/sidecars"
-    # The marked file set mirrors the real tree after #371 (RT-16/IO-14): twelve files and
-    # forty-two regions across crates/ and hosts/, so the floors in the gate and the discovery
+    # The marked file set mirrors the real tree after #371 (RT-16/IO-14) and #664's complete
+    # LocalRing removal: twelve files and forty-one regions across crates/ and hosts/, so the floors in the gate and the discovery
     # walk are exercised against the same shape the gate sees on main. Column-zero markers and
     # indented markers (as in the real `impl`-block regions) both appear.
     printf '%s\n' \
@@ -43,9 +43,6 @@ create_fixture() {
         'struct Allowed;' \
         '// REALTIME_POLICY_BEGIN' \
         'fn push() {}' \
-        '// REALTIME_POLICY_END' \
-        '// REALTIME_POLICY_BEGIN' \
-        'fn pop() {}' \
         '// REALTIME_POLICY_END' \
         >"$root/crates/engine/src/realtime/spsc.rs"
     printf '%s\n' \
@@ -416,7 +413,7 @@ expect_failure no-marked-files-uses-floor 'expected at least twelve marked realt
     'find "$root/crates" "$root/hosts" "$root/tools" -name "*.rs" -type f -exec sed -i "/REALTIME_POLICY/d" {} +'
 # Deleting one marked region of a multi-region file leaves every marker matched and trips the
 # region floor.
-expect_failure marked-region-count-floor 'expected at least forty-two marked realtime regions' \
+expect_failure marked-region-count-floor 'expected at least forty-one marked realtime regions' \
     'drop_first_marked_region "$root/crates/rack/src/lib.rs"'
 # The unmatched-marker check reaches files outside the old root too: the region keeps its
 # BEGIN and loses its END, so the per-file count check, not the floors, must red.

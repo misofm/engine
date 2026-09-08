@@ -66,12 +66,13 @@ while IFS= read -r source; do
 done <<<"$marked_files"
 fi
 
-# The floors are the tree's own counts when #371 landed the last marker: twelve files and
-# forty-two regions. Deleting a marker to silence the gate now fails here -- the file leaves
-# the discovered set or a region leaves the marked set -- instead of passing with less
-# coverage. Raising a floor is part of the change that adds a marker.
+# The floors are the tree's own counts after #664's complete LocalRing removal: twelve files
+# and forty-one regions. The removed wrapper was one marked region with no live caller, so the
+# region floor follows that deliberate deletion. Deleting any other marker to silence the gate
+# still fails here -- the file leaves the discovered set or a region leaves the marked set --
+# instead of passing with less coverage. Raising a floor is part of the change that adds a marker.
 [[ "$marked_file_count" -ge 12 ]] || fail "expected at least twelve marked realtime files"
-[[ "$marker_count" -ge 42 ]] || fail "expected at least forty-two marked realtime regions"
+[[ "$marker_count" -ge 41 ]] || fail "expected at least forty-one marked realtime regions"
 
 gate_scan_forbidden 'marked realtime forbidden-body predicate' \
     'Vec::|vec!|Box::|String::|\.to_vec\(|\.collect\(|Arc::clone|Rc::clone|drop\(|Mutex|RwLock|Condvar|mpsc|sync_channel|thread::|sleep\(|yield_now|spin_loop|std::fs|std::net|std::process|println!|eprintln!|format!|log::|tracing::|async[[:space:]]|\.await|File::|Tcp|Udp|\.expect\(|\.unwrap\(|panic!\(|unreachable!\(|todo!\(|unimplemented!\(' '' "$scratch_file" || exit $?

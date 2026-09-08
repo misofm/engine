@@ -35,8 +35,8 @@ pub use plan_exchange::{
     plan_exchange_resource_report,
 };
 pub use spsc::{
-    Consumer, LocalRing, Producer, QueueEmpty, QueueFull, QueueGeneration, SpscError,
-    SpscRetainedPayload, bounded_spsc, bounded_spsc_move, bounded_spsc_retained_payload,
+    Consumer, Producer, QueueEmpty, QueueFull, QueueGeneration, SpscError, SpscRetainedPayload,
+    bounded_spsc, bounded_spsc_move, bounded_spsc_retained_payload,
 };
 
 #[cfg(test)]
@@ -183,22 +183,6 @@ mod tests {
             .expect_err("full queue returns move-only item");
         assert_eq!(full.value.0, 9);
         assert_eq!(consumer.try_pop().expect("single consumer transfer").0, 7);
-    }
-
-    #[test]
-    fn local_ring_supports_capacity_one_and_wraparound() {
-        let mut ring = LocalRing::new(NonZeroUsize::new(1).expect("one"), QueueGeneration(4))
-            .expect("local ring");
-        assert_eq!(ring.capacity(), 1);
-        assert_eq!(ring.generation(), QueueGeneration(4));
-        ring.try_push(7_u32).expect("push");
-        assert!(matches!(ring.try_push(8), Err(QueueFull { value: 8, .. })));
-        assert_eq!(ring.try_pop().expect("pop"), 7);
-        assert!(ring.try_pop().is_err());
-        ring.try_push(9).expect("wrapped push");
-        assert_eq!(ring.try_pop().expect("wrapped pop"), 9);
-        assert_eq!(ring.full_count(), 1);
-        assert_eq!(ring.empty_count(), 1);
     }
 
     fn prepared(id: u64) -> PreparedRenderPlan {
