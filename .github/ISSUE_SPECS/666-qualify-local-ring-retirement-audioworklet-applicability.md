@@ -129,3 +129,15 @@ is needed. #666 and #664 may proceed to combined exact-head/current-main PR
 readiness, required qualification, guarded merge, post-main qualification, and
 GitHub synchronization. Hold all temporary and inherited evidence until final
 delivery cleanup review.
+
+## Combined PR readiness
+
+Astra LOW returned **PR-READINESS PASS** for #664/#666 at exact clean pushed
+head/upstream `8ddeadcfff342f2e966d5f04aee460b4541e85fc`, live main/merge-base
+`1bcce704ca12d531cbdaec4b641acca302543426`, and tracker
+`eb7cf145d5d8b6329f8d4b33594253862e159c8c`. The exact seven-path scope,
+branch diff, synchronized issue bodies, reviewed source, and unchanged-pin
+applicability all pass. One combined PR may proceed after documentation-only
+exact-head confirmation, then required qualification and guarded live-head/main
+review. Hold all inherited and probe evidence through post-main success and
+cleanup review.
