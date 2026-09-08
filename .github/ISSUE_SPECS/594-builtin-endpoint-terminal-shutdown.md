@@ -178,3 +178,20 @@ source/artifact-head PASS, push once, run required PR qualification, merge, and 
 post-main qualification. Then synchronize and close #594 and #444, mark RT4 delivered in #559/#560,
 verify remote state, and remove every clean delivered #594 worktree. RT5 remains the next partial
 barrier; original open findings remain unauthorized until all partials are complete.
+
+## Astra LOW scope review
+
+The initial scope checkpoint `37ffd52f` failed because it authorized no communication mechanism for
+terminal intent and ambiguously rejected repeated pending polls. Corrected checkpoint `48b99418`
+authorized a charged atomic flag but failed a concrete generation race: a shutdown begin could attach
+its one-bit intent to an ordinary cancellation whose generic acknowledgement was already visible while
+render had not returned. These were scope corrections and consumed no implementation attempts.
+
+Astra LOW returned **PASS** on pushed checkpoint
+`6d857c6038beb8243454ad462b05c0eca6e964ef`. The four-state handshake prevents ordinary completion
+and admission reopening until render classifies the acknowledged boundary as `Idle`; shutdown must
+therefore consume its own cancellation message and publish `ShutdownAcknowledged`. The deterministic
+post-ack/pre-classification rendezvous and fifth mutation discriminate the race. Exact paths,
+preallocated resource charging, realtime behavior, terminal reconciliation, fault retention,
+teardown, closure disposition, and lane-B disjointness are approved. Luna HIGH/XHIGH attempt 1 may
+begin.
