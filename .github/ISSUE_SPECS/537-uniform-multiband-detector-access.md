@@ -49,7 +49,7 @@ No implementation acceptance or speedup claim. No edits, builds, benchmarks, Git
 
 ## Unchanged native baseline checkpoint — Luna xhigh
 
-One native release capture passed at69acb3cb with unchanged multiband source SHA1058d6043d38c80f5ee3f61e794b5e35a8a4b35bf447661ed077c46739879779, pinned Rust1.97.1/LLVM22.1.6, fatLTO/codegen1/debug1 and configured AVX2/FMA. Full metadata/output identities and six complete scalar/W4/W8 compiler extracts are retained under artifacts/issue537-baseline. Root independently verified all selected files against exact original line ranges, sizes and hashes.
+One native release capture passed at69acb3cb with unchanged multiband source SHA1058d6043d38c80f5ee3f61e794b5e35a8a4b35bf447661ed077c46739879779, pinned Rust1.97.1/LLVM22.1.6, fatLTO/codegen1/debug1 and configured AVX2/FMA. Full metadata/output identities and six historically complete scalar/W4/W8 compiler extract ranges are recorded under artifacts/issue537-baseline; issue #625 removed the selected LLVM payloads from current main while the selected assembly remains. Root independently verified all selected identities against exact original line ranges, sizes and hashes.
 
 The report identifies surviving per-lane wrapped addressing/checks and scalar-load/pin assembly in native W8 (selected ASM6246–6566 and6673–6752), with analogous W4 emitted-only evidence. Scalar W1 naturally has no cross-lane packing opportunity. Source arrays/debug locations alone are not credited; no machine-address or runtime speedup claim is made. No source rewrite has occurred. Bounded Astra review of surviving work is required before implementation.
 
@@ -57,7 +57,7 @@ The report identifies surviving per-lane wrapped addressing/checks and scalar-lo
 
 **PASS — bounded baseline decision: authorize Luna xhigh attempt 1’s first compact tranche.**
 
-Verified clean, pushed `ce3fb612` against live main `375a86c`; #537 is OPEN with exact matching title/body. Source SHA matches `1058d604…39879779`. Retained original LLVM/ASM sizes and hashes match; capture status is 0 under the pinned release configuration. Post-main `34083008320` is **SUCCESS**.
+Verified clean, pushed `ce3fb612` against live main `375a86c`; #537 is OPEN with exact matching title/body. Source SHA matches `1058d604…39879779`. Recorded original LLVM/ASM sizes and hashes match; capture status is 0 under the pinned release configuration. Post-main `34083008320` is **SUCCESS**.
 
 Native W8 instructions confirm surviving per-lane offset loads, wrap/index calculations, bounds checks, and `vmovd`/`vpinsrd` packing with `vinserti128`. No uniform-offset arm bypasses this work. W4 corroborates the mechanism **as emitted-only evidence**; W1 offers no cross-lane packing opportunity.
 
@@ -139,9 +139,9 @@ All remaining local gates passed on source13d0580b: full suite42passed/0failed/2
 
 A direct attempt to execute non-executable check-realtime-policy.sh failed before spawning a child (implementation agent reported PermissionError13); its metadata/empty streams and absent child status are preserved. The canonical bash invocation passed separately. No numeric child exit status is invented for a process that never started.
 
-Root captured comparable native release compiler outputs and both linked host-web scalar/simd128 release modules successfully. Complete selected native scalar/W4/W8 bodies and actual Wasm scalar func761, SIMD-module scalar func811 and supported SIMD4 bank func813 are retained with original-output identities and command/status records. Root verified every selected byte range/hash against its original decoder/compiler output. Emitted W8 Wasm/mono wrappers are not credited as supported dispatch; inspection modules are not published artifact identities.
+Root captured comparable native release compiler outputs and both linked host-web scalar/simd128 release modules successfully. Complete selected native scalar/W4/W8 assembly bodies and actual Wasm scalar func761, SIMD-module scalar func811 and supported SIMD4 bank func813 remain with original-output identities and command/status records. The selected native LLVM payloads were historical and issue #625 removed them from current main; root verified every selected byte range/hash against its original decoder/compiler output and retains the original LLVM ranges in metadata. Emitted W8 Wasm/mono wrappers are not credited as supported dispatch; inspection modules are not published artifact identities.
 
-Native W8 candidate selected ASM6317–6366 shows the uniform condition, safe row-length guards and contiguous vector loads bypassing the ragged arm at LBB40_176; original low/high index-CSE narrowing remains. These are inspection pointers, not consolidated acceptance or a net speedup claim. Candidate conditional access and preserved semantics await one consolidated Astra medium attempt2 review. Full original outputs remain at manifest paths under /tmp; no source changed after13d0580b.
+Native W8 candidate selected ASM6317–6366 shows the uniform condition, safe row-length guards and contiguous vector loads bypassing the ragged arm at LBB40_176; original low/high index-CSE narrowing remains. These are inspection pointers, not consolidated acceptance or a net speedup claim. Candidate conditional access and preserved semantics await one consolidated Astra medium attempt2 review. Full original output identities remain at manifest paths under /tmp; selected LLVM payloads are removed from current main by issue #625, while surviving assembly remains; no source changed after13d0580b.
 
 ## Consolidated attempt 2 verdict — Astra medium
 

@@ -1,3 +1,4 @@
+# LLVM payloads are unavailable on current main after issue #625; historical identities remain in the manifest.
 # Attempt2 native release lowering selected callers
 
 LLVM: /tmp/issue534-luna2-native-target/release/deps/gate_expander-a68433203a7e3c7a.ll (3995559 bytes, 6cc506e70472ed0c81f66c76edb94da175d3376fd181ee29bbed17a6c51093cf)

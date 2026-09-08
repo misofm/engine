@@ -81,18 +81,20 @@
   },
   {
     "path": "README.md",
-    "bytes": 1915,
-    "sha256": "eb5c70ada3b712367c2aaacb76b1beda4ccb22e5c6ce36718460821ae9d234af"
+    "bytes": 2052,
+    "sha256": "054fa0efcd7a63ab5ffc23db504701fd854e8991982eaa9fd2a4c3378fbb6303"
   },
   {
     "path": "baseline/original-output-identity.json",
-    "bytes": 438,
-    "sha256": "5d02af00b88deee1dc7b01950861f3be2ef4d69f8ed300e719eefa90d3dbae51"
+    "bytes": 585,
+    "sha256": "73b5241694c1ae5e43f98eb1c9bf9c0b82addb159c9629887b095c6077c51d6a"
   },
   {
     "path": "baseline/process-callers.ll",
     "bytes": 546968,
-    "sha256": "f2a0949534f3850b15a691eee6fdade89dff126c6aec6347bc36426da3b30126"
+    "sha256": "f2a0949534f3850b15a691eee6fdade89dff126c6aec6347bc36426da3b30126",
+    "current_main_present": false,
+    "retention_note": "historical LLVM capture identity only; payload removed from current main by issue #625"
   },
   {
     "path": "baseline/source-mapping.txt",
@@ -101,13 +103,15 @@
   },
   {
     "path": "candidate/original-output-identity.json",
-    "bytes": 440,
-    "sha256": "d5336cc70d5db1858d63e0f39b706e62fe8bf3613b0ec4bee82f11c8eb0a957d"
+    "bytes": 587,
+    "sha256": "530b354f8e94668c9e42bada2513c42bc9bd6b7904230d1cf8c84ac67b3f90da"
   },
   {
     "path": "candidate/process-callers.ll",
     "bytes": 582045,
-    "sha256": "53e8747d2c8b85056426f6b99a79a9071b4e11afcf6697e217f33e17d4602f81"
+    "sha256": "53e8747d2c8b85056426f6b99a79a9071b4e11afcf6697e217f33e17d4602f81",
+    "current_main_present": false,
+    "retention_note": "historical LLVM capture identity only; payload removed from current main by issue #625"
   },
   {
     "path": "candidate/source-mapping.txt",

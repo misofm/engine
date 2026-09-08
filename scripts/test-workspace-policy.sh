@@ -101,6 +101,34 @@ expect_failure_with_message() {
     fi
 }
 
+expect_git_failure_with_message() {
+    local fixture_name="$1" expected_substring="$2"
+    local fixture_root="$scratch_root/$fixture_name"
+    shift 2
+    create_valid_fixture "$fixture_root"
+    "$@" "$fixture_root"
+
+    local output
+    if output="$(bash "$policy_script" "$fixture_root" 2>&1)"; then
+        printf 'git policy mutation unexpectedly passed: %s\n' "$fixture_name" >&2
+        exit 1
+    fi
+    if [[ "$output" != *"$expected_substring"* ]]; then
+        printf 'git policy mutation %s failed for the wrong reason (expected to contain %q): %s\n' \
+            "$fixture_name" "$expected_substring" "$output" >&2
+        exit 1
+    fi
+}
+
+expect_git_success() {
+    local fixture_name="$1"
+    local fixture_root="$scratch_root/$fixture_name"
+    shift
+    create_valid_fixture "$fixture_root"
+    "$@" "$fixture_root"
+    bash "$policy_script" "$fixture_root" >/dev/null
+}
+
 # The miso-engine- prefix convention was retired by the prefix-strip rename
 # (docs/rulings/prefix-strip-inventory.md). A package that reintroduces it must still fail --
 # this is the regression the gate exists to catch now that the prefix is no longer required.
@@ -400,6 +428,39 @@ mutate_root_cachedir_tag() {
     printf 'Signature: 8a477f597d28d172789f06886806bc55\n' >"$root/CACHEDIR.TAG"
 }
 
+# Issue #625: the fallback path must reject an artifact LLVM capture, and the Git index path must
+# reject one even when the repository's ignore rule is bypassed with `git add --force`.
+mutate_artifact_llvm() {
+    local root="$1"
+    mkdir -p "$root/artifacts/probe"
+    printf '%s\n' '; synthetic LLVM IR capture' >"$root/artifacts/probe/full.ll"
+}
+
+mutate_force_added_artifact_llvm() {
+    local root="$1"
+    mkdir -p "$root/artifacts/probe"
+    printf '%s\n' '; synthetic LLVM IR capture' >"$root/artifacts/probe/full.ll"
+    printf '%s\n' 'artifacts/**/*.ll' >"$root/.gitignore"
+    git -C "$root" init -q
+    git -C "$root" add .
+    git -C "$root" add --force artifacts/probe/full.ll
+}
+
+mutate_allowed_artifact_assembly() {
+    local root="$1"
+    mkdir -p "$root/artifacts/probe"
+    printf '%s\n' 'synthetic assembly evidence' >"$root/artifacts/probe/full.s"
+    git -C "$root" init -q
+    git -C "$root" add .
+}
+
+mutate_allowed_non_artifact_llvm() {
+    local root="$1"
+    printf '%s\n' '; synthetic non-artifact LLVM fixture' >"$root/fixture.ll"
+    git -C "$root" init -q
+    git -C "$root" add .
+}
+
 expect_failure package-prefix mutate_package_prefix
 expect_failure package-prefix-underscore-form mutate_package_prefix_underscore_form
 expect_failure directory-mismatch mutate_directory_mismatch
@@ -429,6 +490,12 @@ expect_failure_with_message nested-manifest-dependency \
     'retired delivery-codec Cargo identity is forbidden' mutate_nested_manifest_dependency
 expect_failure_with_message deep-retired-stub-directory \
     'retired delivery-codec directory remains' mutate_deep_retired_stub_directory
+expect_failure_with_message artifact-llvm-fallback \
+    'tracked LLVM IR artifact is forbidden' mutate_artifact_llvm
+expect_git_failure_with_message artifact-llvm-force-added \
+    'tracked LLVM IR artifact is forbidden' mutate_force_added_artifact_llvm
+expect_git_success artifact-assembly-allowed mutate_allowed_artifact_assembly
+expect_git_success non-artifact-llvm-allowed mutate_allowed_non_artifact_llvm
 
 mutate_missing_license() {
     local root="$1"
@@ -528,7 +595,12 @@ assert_fault_rejected() {
         printf '%s\n' '{"name":"fixture","license":"Apache-2.0"}' >"$root/sdk/package.json"
         printf '%s\n' '{"packages":{"":{"license":"Apache-2.0"}}}' >"$root/sdk/package-lock.json"
     }
-    case "$name" in git-list*|git-classify-valid) git -C "$root" init -q; git -C "$root" add .;; esac
+    case "$name" in
+        git-list*|git-classify-valid)
+            git -C "$root" init -q
+            git -C "$root" add .
+            ;;
+    esac
     make_fault_shim "$shim" "$tool" "$match" "$occurrence" "$mode" "$name"
     output="$(WORKSPACE_FAULT_STATE="$shim/state" PATH="$shim:$PATH" \
         bash "$policy_script" "$root" 2>&1)" && rc=0 || rc=$?
@@ -597,6 +669,7 @@ fault_cases=(
  'manifest-filter-empty|awk|-F/|1|empty|tracked Cargo manifest filter failed'
  'manifest-sort|sort|cargo-path-filter.out|1|complete|tracked Cargo manifest sort failed'
  'manifest-sort-empty|sort|cargo-path-filter.out|1|empty|tracked Cargo manifest sort failed'
+ 'artifact-scan-clean|rg|^artifacts/.*\.ll$|1|clean|artifact LLVM path scan failed'
  'comment-strip|awk|in_string=0; out=|2|complete|comment stripping crates/library/Cargo.toml failed'
  'comment-strip-empty|awk|in_string=0; out=|2|empty|comment stripping crates/library/Cargo.toml failed'
  'retired-scan|rg|strip-comments.out|1|clean|retired identity scan Cargo.toml failed'

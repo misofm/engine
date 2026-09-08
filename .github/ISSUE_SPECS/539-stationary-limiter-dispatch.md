@@ -64,7 +64,7 @@ Root adopts all four baseline clarifications above. Capture actual scalar proces
 
 ## Single unchanged native baseline checkpoint — Luna xhigh
 
-One cargo rustc --locked --release -p true-peak-limiter --lib -- --emit=asm,llvm-ir capture returned0 atc97c1944. Source SHA d945d98c8799457f7567485b63daf87aa78e9eb52ff7174f7678fbbc77984689 remains unchanged. Metadata retains actual cargo argv, toolchain/config/source and selected environment; it is not a captured verbose rustc invocation. Ten complete scalar/W8 caller/core IR/ASM excerpts and full-output identities are retained. Root verified every selected byte range/size/hash.
+One cargo rustc --locked --release -p true-peak-limiter --lib -- --emit=asm,llvm-ir capture returned0 atc97c1944. Source SHA d945d98c8799457f7567485b63daf87aa78e9eb52ff7174f7678fbbc77984689 remains unchanged. Metadata retains actual cargo argv, toolchain/config/source and selected environment; it is not a captured verbose rustc invocation. Ten historically mapped scalar/W8 caller/core LLVM identities and surviving ASM excerpts remain recorded with full-output identities; issue #625 removed the selected LLVM payloads from current main. Root verified every selected byte range/size/hash.
 
 Worker preparation was interrupted after the successful capture/extraction without a final branch-mapping report. No second capture or source edit ran. No stationary residual is claimed by this checkpoint; Astra medium must independently map the retained compiler dataflow and decide whether a useful reachable residual survives, including effective provenance limits. The finite baseline gate and no-change option remain unchanged.
 
@@ -74,7 +74,7 @@ Worker preparation was interrupted after the successful capture/extraction witho
 
 Verified clean, pushed HEAD `a57c8a7f7f89ef51c9d188aa6e4f1f711360cd3d` against live main `32a4c2058f2c01dea78af32affab660dbc17cae0`. [#539](https://github.com/misofm/engine/issues/539) remains OPEN with exact title/body synchronization. Source and captured configuration hashes match; no production changes separate this checkpoint from the base. Post-main qualification `34089134766` completed SUCCESS.
 
-I independently verified both full original compiler-output hashes and all ten selected intervals, sizes and hashes. The successful capture is at `c97c1944`, status 0. The interrupted worker report supplies no mapping evidence; the findings below come from the retained compiler output.
+I independently verified both full original compiler-output hashes and all ten historical selected intervals, sizes and hashes. The successful capture is at `c97c1944`, status 0. The interrupted worker report supplies no mapping evidence; the findings below come from the recorded compiler-output identities and surviving assembly excerpts.
 
 **Provenance is sufficient for this bounded decision.** Captured Cargo argv, Rust `1.97.1`/LLVM `22.1.6`, configuration and source identities are consistent. The retained Cargo fingerprint records `["-C","target-feature=+avx2,+fma"]`; actual function attributes include AVX2/FMA, and the module identifies the pinned compiler and optimized compilation. Its profile fingerprint matches the retained #537 baseline/candidate captures under the unchanged release configuration.
 
@@ -143,7 +143,7 @@ Frozen source: lib.rs SHA08ea2bfaa5eb83e996e61bced7c9de5e64f5a4a23b932716ce92dbb
 
 Full affected suite42passed/0failed/1descriptiveignored. Privateoldbehavior/path release selector passed1; releaseallocation/monobinaries eachpassed2. Existing native/scalarWasm/simd128 corpus passed139cases/349comparisons/0mismatch each with unchangedpins. Realtime/lane/workspace/environmentvocabulary policies passed. Root initially invoked nonexistent check-env-policy.sh; actualbashchild returned127, retained; corrected existing check-env-vocabulary.sh returned0. No policy/source change fixed that command-name error. No ignoredbenchmark was run.
 
-Comparable native crate release and actuallinked scalar/simd128host-web builds passed. Thirty-two complete native root/callee IR/ASM intervals and eight complete supportedWasm wrapper/core bodies are retained with originalsizes/hashes and exactcommand/status. W8mono nowoutlines into process_bank_inner; rootincludedthatcallee and allreachabledefinedlimiterhelpers ratherthancreditingthewrapperalone. All selectedintervals were independently verified. The candidateclassification/loopmechanism and code-size tradeoff still require consolidatedAstra medium attempt1 review; no speedup or sourceacceptance yet. Source remains frozen615787e9.
+Comparable native crate release and actuallinked scalar/simd128host-web builds passed. Thirty-two complete native root/callee assembly intervals and eight complete supportedWasm wrapper/core bodies remain with original sizes/hashes and exact command/status; the selected native LLVM intervals were historical and issue #625 removed those payloads from current main while retaining their identities/ranges. W8mono now outlines into process_bank_inner; root included that callee and all reachable defined limiter helpers rather than crediting the wrapper alone. All selected intervals were independently verified. The candidateclassification/loopmechanism and code-size tradeoff still require consolidatedAstra medium attempt1 review; no speedup or sourceacceptance yet. Source remains frozen615787e9.
 
 User nowrequires completedmergedlocalworktreesremoved afterrequiredsync with clean/pushedevidencepreserved; apply this to539atdelivery. Independent documentation/cleanupissue540 records nine oldworktreesremoved/~31.8GiB reclaimed. Active539worktree and allrawcandidateevidence remain.
 
@@ -159,7 +159,7 @@ Verified identity and provenance:
 - [#539](https://github.com/misofm/engine/issues/539) is OPEN with matching title and byte-exact local/GitHub body.
 - Frozen `lib.rs` SHA is `08ea2bfa…7be09d90`; allocation SHA is `7825d307…ca0ea920`, both matching the supplied full hashes and captured final gates.
 - Only `lib.rs` and `tests/allocation.rs` changed under the limiter crate. `mono_collapse.rs` is unchanged.
-- Both original native outputs, linked Wasm modules and decoder outputs match recorded identities. All **32 native intervals and eight Wasm intervals** match their originals and hashes. **95 attempt capture files** match their retained raw counterparts.
+- Both original native outputs, linked Wasm modules and decoder outputs match recorded identities. All **32 native intervals and eight Wasm intervals** match their historical recorded ranges and hashes; the selected native LLVM payloads are removed from current main while the surviving assembly remains. **95 attempt capture files** match their retained raw counterparts.
 
 The blocking finding is **missing full-state equality at disengagement**.
 
@@ -176,11 +176,11 @@ The rest of attempt 1 withstands review:
 - **Negative control:** pristine SHA `5b25b033…defce28d` reconstructs to mutant `768f1aba…513a1465` through exactly four stationary-callsite const substitutions. The retained failure is the same W8 dual-per-lane block-1 specialization assertion, observing Runtime instead of Stationary, after PCM/state/silent-state equality. Later mutant cases are not credited. The first restored invocation reused the mutant binary; its stderr shows no compilation. The subsequent restored invocation compiled and passed. Final source differs from pristine only by the recorded test-only enum annotation and private-oracle lint allowance.
 - **Allocation:** the existing thread-local allocator now demonstrates positive allocate/free liveness and measures mono rendering in addition to the original paths. W8 availability is required by the allocation fixture; the passing result is not an early-return skip.
 
-Candidate lowering supports the intended mechanism. References below use selected-file lines:
+Candidate lowering supports the intended mechanism. References below use historical LLVM ranges and surviving selected-assembly lines:
 
 | Path | Candidate evidence |
 |---|---|
-| W8 dual | `process-core-w8.ll:335` defines the stationary predicate; its dispatch uses are at 470/478, outside frame loops. Assembly tests `%dl` at 443/5895. Stationary per-lane backedge 2824 returns to `.LBB34_264`; stationary uniform backedge 7921 returns to `.LBB34_513`, without revisiting stationary classification. |
+| W8 dual | Historical `process-core-w8.ll:335` defines the stationary predicate; its dispatch uses are at 470/478, outside frame loops. Assembly tests `%dl` at 443/5895. Stationary per-lane backedge 2824 returns to `.LBB34_264`; stationary uniform backedge 7921 returns to `.LBB34_513`, without revisiting stationary classification. |
 | W8 mono | The wrapper reaches `outlined-07`, the actual `process_bank_inner<true>` body. Admission tests at assembly 605/3320 select separate bodies. Stationary per-lane backedge 1884 returns to `.LBB1_81`; stationary uniform backedge 5923 returns to `.LBB1_293`. |
 | Scalar dual/uniform | The predicate’s IR uses are confined to block dispatch. The stationary uniform loop returns to `.LBB36_538` at assembly 7974; ramping has its separate recurrence path. No scalar mono or valid scalar per-lane claim is made. |
 

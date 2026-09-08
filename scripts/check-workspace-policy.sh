@@ -205,6 +205,9 @@ tracked_paths() {
     capture normalize-paths sed 's|^\./||' "$lines"
     (( CAPTURE_STATUS == 0 )) || execution_failure 'tracked-path normalization' "$CAPTURE_STATUS" "$CAPTURE_OUT" "$CAPTURE_ERR"
     local normalized="$CAPTURE_OUT"
+    # Keep the complete normalized producer output before narrowing it to Cargo manifests. This is
+    # the authoritative tracked-or-untracked path set for artifact bans and the manifest policy.
+    TRACKED_ALL_PATHS_OUT="$normalized"
     capture cargo-path-filter awk -F/ '$NF == "Cargo.toml"' "$normalized"
     (( CAPTURE_STATUS == 0 )) || execution_failure 'tracked Cargo manifest filter' "$CAPTURE_STATUS" "$CAPTURE_OUT" "$CAPTURE_ERR"
     capture tracked-path-sort env LC_ALL=C sort "$CAPTURE_OUT"
@@ -241,6 +244,12 @@ retired_delivery_codec_pattern='\b(flac-decoder|stem-publisher|catalog-migrate|f
 # identifiers, which is everything this scan cares about.
 tracked_paths
 tracked_manifest_paths="$TRACKED_PATHS_OUT"
+capture artifact-llvm-scan rg -n '^artifacts/.*\.ll$' "$TRACKED_ALL_PATHS_OUT"
+case "$CAPTURE_STATUS" in
+  0) fail "tracked LLVM IR artifact is forbidden: $(<"$CAPTURE_OUT")" ;;
+  1) ;;
+  *) execution_failure 'artifact LLVM path scan' "$CAPTURE_STATUS" "$CAPTURE_OUT" "$CAPTURE_ERR" ;;
+esac
 while IFS= read -r manifest_path; do
     [[ -z "$manifest_path" ]] && continue
     [[ -f "$manifest_path" ]] || continue
