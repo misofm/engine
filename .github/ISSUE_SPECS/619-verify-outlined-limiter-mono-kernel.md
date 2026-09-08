@@ -137,3 +137,23 @@ failure, but the specific diagnostic and nonzero verdict are correct; no correct
 The single tooling attempt is accepted. Astra LOW may now run exactly one repaired static invocation
 against the preserved #617 six-file output and, only after it passes, the previously unexecuted
 qualification stages. No builder, repository pin/lineage edit, PR or merge is authorized.
+
+## Resumed candidate qualification checkpoint
+
+At source-accepted head `794d0dddf17370098f832607766819f73fc77d26`, Astra LOW used the
+preserved #617 six-file output without invoking the builder. Its identity remained candidate
+`f80b6392…` plus the five delivered non-Wasm hashes, and the detached scratch diff remained exactly
+the provisional pin, two results lineage fields and generated matrix lineage.
+
+The repaired static invocation passed once. It found exactly one 0/0 collapsed limiter forwarding
+entry directly calling the unique 440-vector/0-scalar mono core, retained dual core 880/0 and kept
+all other roster rows within their existing budgets. The previously unexecuted resource/native-
+witness stage and all 26 red mutations, hermetic gate, locked SDK install and 11 SDK tests, locked
+browser install, one all-browser qualification and final matrix check each passed once. Chromium
+151.0.7922.34, Firefox 153.0 and WebKit 26.5 passed. No command was retried.
+
+The 39-entry checksum manifest and bounded command/context/stream/status/overlay evidence are under
+`artifacts/issue619-resumed-qualification/`; build targets and the preserved generated candidate stay
+outside Git. No builder, repository pin/lineage edit, source change, benchmark or timing ran. Astra
+LOW must review the complete combined #617/#619 candidate record before Luna may promote the three
+repository lineage surfaces.
