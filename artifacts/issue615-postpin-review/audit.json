@@ -1,0 +1,19 @@
+{
+  "head": "5cf6f9f690924115e4d5be7a9b93b553841382c7\n5cf6f9f690924115e4d5be7a9b93b553841382c7\n9e113be98cf31c1eaf4297b0a031518244b71c33\n",
+  "merge_base": "9e113be98cf31c1eaf4297b0a031518244b71c33\n",
+  "source_diff": "",
+  "checksums": {
+    "issue614-artifact-probe": {
+      "status": 0,
+      "count": 13
+    },
+    "issue615-scratch-qualification": {
+      "status": 0,
+      "count": 55
+    },
+    "issue615-postpin": {
+      "status": 0,
+      "count": 11
+    }
+  }
+}

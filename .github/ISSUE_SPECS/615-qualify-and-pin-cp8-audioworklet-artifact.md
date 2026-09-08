@@ -147,3 +147,21 @@ gzip and refreshed the scratch-evidence manifest. Original capture bytes decompr
 qualification command was rerun. Attempted source/artifact behavior remains accepted. Astra LOW
 must verify the corrected packaging, run only the policy gates that stopped before execution, and
 confirm exact head/current main before PR creation.
+
+## Corrected post-pin exact-head review — PASS
+
+Astra LOW returned **PASS** at exact clean pushed head
+`911f82a828d767b7e3bd1675dd791aeb85f377f9` against live main/merge-base
+`9e113be98cf31c1eaf4297b0a031518244b71c33` and tracker
+`d7e60beba32ec20bef5b5dfd3120180ea3b5d73a`. Both deterministic gzip captures decompress
+byte-for-byte to the prior raw SHA-256 `b4b5ea5e…`; the corrected 55-entry scratch manifest and
+branch diff hygiene pass. Only packaging, its manifest and accurate documentation changed.
+
+The reviewer ran exactly the previously unexecuted workspace and effect-runtime policies plus the
+corrected outer diff check; all exited zero. No successful builder, browser, static, resource,
+hermetic, SDK, install, matrix or formatting gate was repeated. Frozen-source ancestry and all prior
+source/artifact acceptance remain applicable. Root preserved the combined initial/continuation raw
+review evidence under `artifacts/issue615-postpin-review/`; its manifest covers 55 retained files.
+The initial failed diff stdout is losslessly gzipped because it contains the triggering literal
+single-space lines. #615 is PR-ready after this evidence checkpoint and unchanged-main confirmation;
+merge still requires CI and final checked head/base review.

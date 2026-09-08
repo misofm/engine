@@ -1,0 +1,34 @@
+[
+  {
+    "argv": [
+      "git",
+      "diff",
+      "--check",
+      "origin/main...HEAD"
+    ],
+    "cwd": "/home/bl/misofm/engine-cp8-web-artifact-qualification",
+    "head": "911f82a828d767b7e3bd1675dd791aeb85f377f9",
+    "start": "2026-09-08T08:39:30.379316+00:00",
+    "status": 0
+  },
+  {
+    "argv": [
+      "bash",
+      "scripts/check-workspace-policy.sh"
+    ],
+    "cwd": "/home/bl/misofm/engine-cp8-web-artifact-qualification",
+    "head": "911f82a828d767b7e3bd1675dd791aeb85f377f9",
+    "start": "2026-09-08T08:39:30.388709+00:00",
+    "status": 0
+  },
+  {
+    "argv": [
+      "bash",
+      "scripts/check-effect-runtime-policy.sh"
+    ],
+    "cwd": "/home/bl/misofm/engine-cp8-web-artifact-qualification",
+    "head": "911f82a828d767b7e3bd1675dd791aeb85f377f9",
+    "start": "2026-09-08T08:39:31.295312+00:00",
+    "status": 0
+  }
+]
