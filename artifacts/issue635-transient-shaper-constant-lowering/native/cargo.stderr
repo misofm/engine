@@ -1,0 +1,10 @@
+   Compiling bytemuck v1.25.2
+   Compiling engine v0.1.0 (/home/bl/misofm/engine-transient-shaper-constant-lowering/crates/engine)
+   Compiling safe_arch v1.2.0
+   Compiling wide v1.6.1
+   Compiling lane v0.1.0 (/home/bl/misofm/engine-transient-shaper-constant-lowering/crates/lane)
+   Compiling math v0.1.0 (/home/bl/misofm/engine-transient-shaper-constant-lowering/crates/math)
+   Compiling effect-runtime v0.1.0 (/home/bl/misofm/engine-transient-shaper-constant-lowering/crates/effect-runtime)
+   Compiling effect-contract v0.1.0 (/home/bl/misofm/engine-transient-shaper-constant-lowering/crates/effect-contract)
+   Compiling transient-shaper v0.1.0 (/home/bl/misofm/engine-transient-shaper-constant-lowering/crates/transient-shaper)
+    Finished `release` profile [optimized + debuginfo] target(s) in 6.96s
