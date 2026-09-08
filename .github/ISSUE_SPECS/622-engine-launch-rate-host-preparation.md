@@ -30,12 +30,24 @@ Do not change `engine` or `session`, add a dependency, add a conversion helper o
 ## Objective gates
 
 1. Before implementation, push and synchronize this brief and the #559/#560 coordination records, then obtain Astra LOW exact-clean scope PASS.
-2. Prove the invariant from production code: all `CompiledSession` constructors remain behind session validation, and unsupported launch rates still fail with the exact field-local session diagnostic `sample_rate.unsupported_at_launch\t$.sample_rate_hz` before host-shape validation.
+2. Prove the invariant from production code: all `CompiledSession` constructors remain behind session validation. With otherwise-valid sessions and generous compile caps, unsupported launch rates must still fail with the exact field-local session diagnostic `sample_rate.unsupported_at_launch\t$.sample_rate_hz` before host-shape validation; this issue makes no diagnostic-precedence claim over earlier estimation or cap failures.
 3. Exercise every canonical `engine::LAUNCH_SAMPLE_RATES` entry through `AnyLaunchRate`. Exercise adjacent unsupported rates through the public compile/prepare boundary. Preserve exact-rate and wrong-rate/quantum `Exact` cases and valid/invalid source-ring cases under both policies.
-4. Require a repository scan to find no remaining `LAUNCH_SAMPLE_RATES_HZ` or `host.sample_rate.unsupported` spelling. Require the canonical engine constant to have a single literal definition and both affected test consumers to use its typed entries.
+4. Require a live Rust production/test-consumer scan to find no remaining `LAUNCH_SAMPLE_RATES_HZ` or `host.sample_rate.unsupported` spelling, excluding historical specs and evidence that must remain intact. Require the canonical engine constant to have a single literal definition and both affected test consumers to use its typed entries.
 5. Run focused and complete debug/release `host-core` tests, the affected `parameter-metadata` ABI-layout test, strict affected Clippy, workspace formatting/diff checks, workspace policy, and relevant host/realtime policies. No benchmark or timing invocation is authorized.
 6. Root checkpoints each coherent green tranche before more implementation. Astra LOW adversarially reviews the exact pushed source/evidence head and again after any current-main integration.
-7. Root records AudioWorklet artifact applicability after source PASS. Because this is host preparation and test-only metadata use, expected disposition is N/A with a source-dependency proof; any actual six-file source dependency or byte drift requires a separately numbered lane-B qualification issue before pinning.
+7. Root makes and records an AudioWorklet artifact-applicability decision after source PASS. `host-web` directly depends on `host-core`, so artifact neutrality must not be presumed from the source shape. Any authorized identity probe and any drift qualification/pinning successor remain separate from implementation and lane-B/root-owned.
 8. Open one PR only after exact-head/current-main Astra LOW PASS. Require the repository `qualification` check, verify live main immediately before guarded exact-head merge, verify merge parents and post-main qualification, synchronize #560/#622, and remove the clean delivered worktree.
 
 One Luna implementation pass is initially authorized after scope PASS. A substantive finding receives at most the remaining attempts under the repository's three-attempt rule. Gates may not be weakened and no fourth retry is allowed.
+
+## Astra LOW initial scope review — FAIL
+
+Astra LOW returned **FAIL** at exact clean pushed head
+`4a10788e1b75f3e9960bce55235d54aaff27e487`, live main
+`cf9e079cd5ef80d1c7284e9edd0ffcc90b0db335`, and tracker
+`1351a37c8b495d8fb54d7be57cbc604943b6c882`. The bounded implementation and path ownership were
+sound, but the brief incorrectly presumed artifact N/A despite `host-web`'s direct `host-core`
+dependency, applied the removal scan to historical records, and did not isolate the rate diagnostic
+from earlier estimation/cap failures. The three objective gates above now require an explicit
+post-source artifact decision, a live Rust consumer scan that preserves history, and otherwise-valid
+sessions with generous caps. No implementation or artifact action was authorized by this verdict.
