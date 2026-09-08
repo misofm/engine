@@ -190,6 +190,28 @@ qualification successor with frozen formatted source, no source edits, one named
 executor, one fresh predeclared absent target, and one fully recorded command-
 local-unwind release `track_delay` invocation.
 
+### Retrospective executor statement — no qualification credit
+
+After the hard-stop checkpoint, a concurrent coordinator supplied a retrospective
+table of claimed attempt-2 commands and statuses. It expressly confirmed that no
+contemporaneous release preflight or status record exists. Astra LOW rejected the
+statement as a substitute for those missing records; it remains unverified
+testimony and does not change the final FAIL.
+
+The same statement exposed a second attempt-3 sequence in `/tmp`: formatter at
+17:33:54 UTC, workspace policy at 17:34:03, then diff hygiene at 17:34:06. The
+separately authorized and reviewed bundle ran formatter at 17:36:43, diff hygiene
+at 17:36:53, then workspace policy at 17:36:59 with explicit status files. These
+paths, times and orders differ, so they cannot be represented as one invocation
+sequence or prove absence of repetition. Both are observations only. The
+unauthorized untracked README and its stale references to removed gzip files and
+manifests were deleted; no repository evidence bundle remains.
+
+No Astra review granted a final #636 qualification PASS or release-invocation
+credit. The only retained PASS is the technical source/oracle review. Observed
+test totals remain distinct from credited invocation evidence, and the successor
+must produce its own contemporaneous command record.
+
 ## Executor provenance reconciliation and final attempt 3 PASS
 
 After the no-credit record above was pushed, the Luna XHIGH executor supplied its
@@ -201,6 +223,11 @@ distinguishes executor testimony from contemporaneous streams, identifies the
 focused uncommitted content later committed unchanged as `bbc96fb7`, and identifies
 the remaining attempt-2 execution at that clean commit. It makes no reconstructed
 raw-preflight claim.
+
+This later reviewed reconciliation supersedes the hard-stop conclusion above;
+that conclusion remains in the chronology because it preceded the executor's
+exact records. This is documentation-only and is neither a fourth execution nor
+a fourth source attempt.
 
 Attempt 2 remains **FAIL** because rustfmt returned 1 after the focused oracle,
 one-shot command-local unwind release integration, debug/release libraries and
