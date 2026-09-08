@@ -1,6 +1,6 @@
 8cbd89213530e726a71d870aed76c81f7a855fdfa6b7c3af99a06eec983a3387  artifacts/issue-602-input-symmetry-capture/qualification/attempt1-status.txt
 29507dcdc9e826fd89528b493eca80681da38cf62384f5c62b175c8beea2c568  artifacts/issue-602-input-symmetry-capture/qualification/validator-mutation-command.txt
-b1cbe505c22b3fd64a6f48acdcc4d00f4fccbc7d15a14b7f2e57dfeb48e8f22a  artifacts/issue-602-input-symmetry-capture/qualification/validator-mutation-diff.patch
+a798bccba98313569767f8f6dbb990656ed7a9304e5d6d6bed7becc3f8b4a18f  artifacts/issue-602-input-symmetry-capture/qualification/validator-mutation-diff.patch
 611b28e4afab63a7d3752d2835923ff30b0187db2e812bec8f52bed8debb3613  artifacts/issue-602-input-symmetry-capture/qualification/validator-mutation-source-post.sha256
 ada7a0da7ca7f119bec06c1c69c9748e2394d2ef8291de1e33597b3f87601408  artifacts/issue-602-input-symmetry-capture/qualification/validator-mutation-source-pre.sha256
 ada7a0da7ca7f119bec06c1c69c9748e2394d2ef8291de1e33597b3f87601408  artifacts/issue-602-input-symmetry-capture/qualification/validator-mutation-source-restored.sha256
