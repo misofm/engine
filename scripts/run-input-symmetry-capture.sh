@@ -4,12 +4,12 @@ set -euo pipefail
 if (($#)); then echo "usage: $0" >&2; exit 2; fi
 repo=$(git rev-parse --show-toplevel)
 cd "$repo"
-if [[ -n "${MISO_ENGINE_603_ROOT-}" && "${MISO_ENGINE_603_SELF_TEST-}" != 1 ]]; then
+if [[ -n "${MISO_ENGINE_606_ROOT-}" && "${MISO_ENGINE_606_SELF_TEST-}" != 1 ]]; then
   echo "artifact-root override is self-test-only" >&2; exit 2
 fi
 self_test_fault=
-if [[ "${MISO_ENGINE_603_SELF_TEST-}" == 1 ]]; then self_test_fault="${MISO_ENGINE_603_SELF_TEST_FAULT-}"; fi
-root=${MISO_ENGINE_603_ROOT:-"$repo/artifacts/issue-603-input-symmetry-capture"}
+if [[ "${MISO_ENGINE_606_SELF_TEST-}" == 1 ]]; then self_test_fault="${MISO_ENGINE_606_SELF_TEST_FAULT-}"; fi
+root=${MISO_ENGINE_606_ROOT:-"$repo/artifacts/issue-606-input-symmetry-capture"}
 seal="$root/input-symmetry-capture.seal.json"
 prepared="$root/prepared-release/bench"
 raw="$root/raw"
@@ -25,7 +25,7 @@ write_prelaunch_failure() {
   python3 - "$disposition.tmp" <<'PY'
 import json, sys
 with open(sys.argv[1], "x", encoding="utf-8") as handle:
-    json.dump({"schema_version":1,"issue":603,"runner_status":"FAIL","child_status":"not_run","validator_status":"not_run","accepted_status":"not_attempted","workload_process_invocations":0,"capture_started_markers":0,"round_completion_markers":0,"timed_render_calls":0,"recovery_path":"raw"}, handle, separators=(",", ":")); handle.write("\n")
+    json.dump({"schema_version":1,"issue":606,"runner_status":"FAIL","child_status":"not_run","validator_status":"not_run","accepted_status":"not_attempted","workload_process_invocations":0,"capture_started_markers":0,"round_completion_markers":0,"timed_render_calls":0,"recovery_path":"raw"}, handle, separators=(",", ":")); handle.write("\n")
 PY
   if ! ln -- "$disposition.tmp" "$disposition"; then
     echo "FAIL: prelaunch disposition publication failed; recovery retained at $raw" >&2
@@ -82,6 +82,19 @@ export MISO_ENGINE_BENCH_CANDIDATE_COMMIT="$candidate_commit"
 export MISO_ENGINE_BENCH_PROFILE=release
 export MISO_ENGINE_BENCH_TARGET_FEATURES="$effective_build_flags"
 
+publish_accepted() {
+  local publish_status
+  set +e
+  ln -- "$raw/stdout.jsonl" "$accepted"
+  publish_status=$?
+  set -e
+  if ((publish_status == 0)); then
+    accepted_status=published
+  else
+    accepted_status=publication_failed
+  fi
+}
+
 set +e
 (cd "$cwd" && "$prepared" input-symmetry-capture >"$raw/stdout.jsonl" 2>"$raw/stderr.log")
 child_status=$?
@@ -121,15 +134,10 @@ if ((child_status == 0)); then
   set -e
   if ((validator_status == 0)) && [[ "$marker_status" == PASS ]]; then
     if [[ "$self_test_fault" == publication ]]; then
-      ln -s -- "$root/no-such-accepted-target" "$accepted"
-      accepted_status=publication_failed
-    else
-      set +e
-      ln -- "$raw/stdout.jsonl" "$accepted"
-      publish_status=$?
-      set -e
-      if ((publish_status == 0)); then accepted_status=published; else accepted_status=publication_failed; fi
+      # Create the collision, then run the exact production hard-link helper.
+      printf '%s\n' accepted-publication-collision >"$accepted"
     fi
+    publish_accepted
   else
     accepted_status=rejected
   fi
@@ -142,7 +150,7 @@ if [[ -f "$accepted" ]]; then accepted_hash=$(sha256sum "$accepted" | cut -d' ' 
 python3 - "$disposition.tmp" "$child_status" "$validator_status" "$accepted_status" "$stdout_hash" "$stderr_hash" "$stdout_bytes" "$stderr_bytes" "$validator_hash_value" "$validator_bytes" "$validator_err_hash" "$validator_err_bytes" "$accepted_hash" "$accepted_bytes" "$started" "$rounds" "$timed_calls" "$marker_status" <<'PY'
 import json, sys
 path, child, validator, accepted, sh, eh, sb, eb, vh, vb, veh, ve_bytes, ah, ab, started, rounds, calls, markers = sys.argv[1:]
-record={"schema_version":1,"issue":603,"runner_status":"PASS" if child == "0" and validator == "0" and accepted == "published" and markers == "PASS" else "FAIL",
+record={"schema_version":1,"issue":606,"runner_status":"PASS" if child == "0" and validator == "0" and accepted == "published" and markers == "PASS" else "FAIL",
  "child_status":int(child),"validator_status":validator,"accepted_status":accepted,"workload_process_invocations":1,
  "capture_started_markers":int(started),"round_completion_markers":int(rounds),"timed_render_calls":int(calls),
  "marker_status":markers,

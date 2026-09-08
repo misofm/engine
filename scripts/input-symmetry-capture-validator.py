@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Strict, side-effect free validator for the #603 seal and two capture records."""
+"""Strict, side-effect free validator for the #606 seal and frozen #602 records."""
 from __future__ import annotations
 
 import json
+import math
 import pathlib
 import sys
 
@@ -43,11 +44,22 @@ def pairs(pairs_list):
 
 def read_json(path: pathlib.Path):
     with path.open(encoding="utf-8") as handle:
-        return json.load(handle, object_pairs_hook=pairs, parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)))
+        return json.load(
+            handle,
+            object_pairs_hook=pairs,
+            parse_constant=lambda value: (_ for _ in ()).throw(ValueError(f"non-finite JSON constant: {value}")),
+        )
 
 
 def exact_keys(obj, expected, label):
     if not isinstance(obj, dict) or set(obj) != expected:
+        if isinstance(obj, dict):
+            missing = sorted(expected - set(obj))
+            extra = sorted(set(obj) - expected)
+            if missing:
+                raise ValueError(f"{label}: missing key {missing[0]}")
+            if extra:
+                raise ValueError(f"{label}: unexpected key {extra[0]}")
         raise ValueError(f"{label}: exact key set required")
 
 
@@ -77,12 +89,16 @@ def git_identity(value, label):
 
 def validate_record(record, expected_round, seal):
     exact_keys(record, RECORD_KEYS, "record")
-    if integer(record["schema_version"], "schema_version") != 1 or integer(record["issue"], "issue") != 602 or record["kind"] != "input_symmetry_capture":
-        raise ValueError("record identity mismatch")
+    if integer(record["schema_version"], "schema_version") != 1:
+        raise ValueError("schema_version: unexpected value")
+    if integer(record["issue"], "issue") != 602:
+        raise ValueError("issue: frozen record identity must be 602")
+    if record["kind"] != "input_symmetry_capture":
+        raise ValueError("kind: unexpected value")
     if integer(record["round"], "round", 1) != expected_round:
-        raise ValueError("round order mismatch")
+        raise ValueError("round: order/value mismatch")
     if record["fixture_id"] != "fixtures/session/v1/parametric-eq-bank-console.json":
-        raise ValueError("fixture identity mismatch")
+        raise ValueError("fixture_id: unexpected value")
     for key in ("fixture_sha256", "binary_sha256", "source_sha256"):
         digest(record[key], key)
     for key in ("source_commit", "source_tree"):
@@ -97,19 +113,22 @@ def validate_record(record, expected_round, seal):
             raise ValueError(f"{key}: unexpected value")
     pair = record["target_pair_db"]
     if (not isinstance(pair, list) or len(pair) != 2
-            or any(isinstance(value, bool) or not isinstance(value, float) for value in pair)
-            or pair != seal["target_pair_db"] or record["backend"] != "Simd8"):
-        raise ValueError("workload identity mismatch")
+            or any(isinstance(value, bool) or not isinstance(value, float) or not math.isfinite(value) for value in pair)):
+        raise ValueError("target_pair_db: finite two-element float list required")
+    if pair != seal["target_pair_db"]:
+        raise ValueError("target_pair_db: record/seal workload mismatch")
+    if record["backend"] != "Simd8":
+        raise ValueError("backend: unexpected value")
     if not isinstance(record["owner_digests"], list) or record["owner_digests"] != [DIGEST, DIGEST]:
-        raise ValueError("reviewed owner digest mismatch")
+        raise ValueError("owner_digests: reviewed digest mismatch")
     for key in ("elapsed_ns", "nanoseconds_per_plan_render"):
         integer(record[key], key, 1)
     if record["elapsed_ns"] // 8192 != record["nanoseconds_per_plan_render"]:
-        raise ValueError("timing denominator mismatch")
+        raise ValueError("nanoseconds_per_plan_render: timing denominator mismatch")
     for key in ("argv", "cwd", "compiler", "target_triple", "effective_build_flags", "os"):
         string(record[key], key)
     if record["effective_build_flags"] != "-C target-feature=+avx2,+fma -C opt-level=3 -C lto=fat -C codegen-units=1 -C panic=abort -C debug=1":
-        raise ValueError("effective release settings mismatch")
+        raise ValueError("effective_build_flags: release settings mismatch")
     for key in ("cpu_model", "governor_or_power_mode", "rust_version", "llvm_version", "target_features",
                 "profile", "background_load_note", "measurement_control", "cpu_affinity", "candidate_commit"):
         if record[key] is not None and not isinstance(record[key], str):
@@ -118,44 +137,52 @@ def validate_record(record, expected_round, seal):
             or any(not isinstance(item, str) for item in record["missing_metadata"])
             or sorted(record["missing_metadata"]) != record["missing_metadata"]
             or len(set(record["missing_metadata"])) != len(record["missing_metadata"])):
-        raise ValueError("missing metadata must be sorted")
+        raise ValueError("missing_metadata: sorted unique list required")
     allowed_missing = {"cpu_model", "governor_or_power_mode", "rust_version", "llvm_version", "target_triple",
                        "target_features", "profile", "background_load_note", "measurement_control", "cpu_affinity", "candidate_commit"}
     if any(not isinstance(item, str) or item not in allowed_missing for item in record["missing_metadata"]):
-        raise ValueError("unknown missing metadata")
+        raise ValueError("missing_metadata: unknown field")
     metadata_keys = ("cpu_model", "governor_or_power_mode", "rust_version", "llvm_version", "target_triple",
                      "target_features", "profile", "background_load_note", "measurement_control", "cpu_affinity", "candidate_commit")
     if {key for key in metadata_keys if record[key] is None} != set(record["missing_metadata"]):
-        raise ValueError("missing metadata does not match null fields")
+        raise ValueError("missing_metadata: does not match null fields")
     nonzero = integer(record["nonzero_samples"], "nonzero_samples", 1)
     if record["descriptive_only"] is not True or nonzero > record["output_words"]:
-        raise ValueError("nonzero descriptive PCM required")
+        raise ValueError("descriptive_only/nonzero_samples: nonzero descriptive PCM required")
     for record_key, seal_key in (("source_commit", "candidate_commit"), ("source_tree", "candidate_tree"),
                                  ("binary_sha256", "binary_sha256"), ("fixture_sha256", "fixture_sha256"),
                                  ("source_sha256", "source_sha256"), ("argv", "argv"), ("cwd", "cwd"),
                                  ("compiler", "compiler"), ("effective_build_flags", "effective_build_flags"),
                                  ("target_triple", "target_triple")):
         if record[record_key] != seal[seal_key]:
-            raise ValueError(f"record/seal identity mismatch: {record_key}")
+            raise ValueError(f"{record_key}: record/seal identity mismatch")
     for record_key, seal_key in (("target_triple", "target_triple"), ("candidate_commit", "candidate_commit"),
                                  ("rust_version", "compiler")):
         if record[record_key] != seal[seal_key]:
-            raise ValueError(f"record/seal metadata mismatch: {record_key}")
+            raise ValueError(f"{record_key}: record/seal metadata mismatch")
     for record_key, seal_key in (("sample_rate_hz", "sample_rate_hz"), ("quantum_frames", "quantum_frames"),
                                  ("lane_width", "lane_width"), ("track_count", "track_count"),
                                  ("records_per_block", "records_per_block"),
                                  ("preparation_blocks_per_owner", "preparation_blocks_per_owner"),
                                  ("measured_blocks_per_owner", "measured_blocks_per_owner")):
         if record[record_key] != seal[seal_key]:
-            raise ValueError(f"record/seal workload mismatch: {record_key}")
+            raise ValueError(f"{record_key}: record/seal workload mismatch")
     if record["smoothing_samples"] != seal["smoothing_samples"] or record["owners"] != seal["owners"]:
-        raise ValueError("record/seal workload mismatch: smoothing or owners")
+        if record["smoothing_samples"] != seal["smoothing_samples"]:
+            raise ValueError("smoothing_samples: record/seal workload mismatch")
+        raise ValueError("owners: record/seal workload mismatch")
 
 
 def validate_seal(seal):
     exact_keys(seal, SEAL_KEYS, "seal")
-    if (integer(seal["schema_version"], "schema_version"), integer(seal["issue"], "issue"), seal["kind"], seal["status"]) != (1, 603, "input_symmetry_capture_seal", "READY"):
-        raise ValueError("seal identity/status mismatch")
+    if integer(seal["schema_version"], "schema_version") != 1:
+        raise ValueError("schema_version: unexpected value")
+    if integer(seal["issue"], "issue") != 606:
+        raise ValueError("issue: tooling seal identity must be 606")
+    if seal["kind"] != "input_symmetry_capture_seal":
+        raise ValueError("kind: unexpected value")
+    if seal["status"] != "READY":
+        raise ValueError("status: seal must be READY")
     for key in ("binary_sha256", "fixture_sha256", "source_sha256", "timed_source_sha256", "untimed_source_sha256", "dispatcher_sha256",
                 "validator_sha256", "runner_sha256", "preflight_sha256", "cargo_lock_sha256"):
         digest(seal[key], key)
@@ -164,23 +191,25 @@ def validate_seal(seal):
     for key in ("argv", "cwd", "compiler", "target_triple", "effective_build_flags"):
         string(seal[key], key)
     if seal["effective_build_flags"] != "-C target-feature=+avx2,+fma -C opt-level=3 -C lto=fat -C codegen-units=1 -C panic=abort -C debug=1":
-        raise ValueError("seal effective release settings mismatch")
+        raise ValueError("effective_build_flags: seal release settings mismatch")
     for key, expected in (("sample_rate_hz", 48000), ("quantum_frames", 128), ("lane_width", 8), ("track_count", 8),
                           ("records_per_block", 8), ("preparation_blocks_per_owner", 512), ("measured_blocks_per_owner", 4096),
                           ("expected_records", 2), ("expected_attempted_records", 65536),
                           ("expected_renders_per_round", 8192), ("expected_rounds", 2),
                           ("expected_timed_render_calls", 16384), ("expected_workload_processes", 1)):
         if integer(seal[key], f"seal {key}") != expected:
-            raise ValueError(f"seal {key}: unexpected value")
+            raise ValueError(f"{key}: seal unexpected value")
     pair = seal["target_pair_db"]
     if (not isinstance(pair, list) or len(pair) != 2
             or any(isinstance(value, bool) or not isinstance(value, float) for value in pair)
-            or pair != [-6.0, -12.0]):
-        raise ValueError("seal target pair mismatch")
+            or any(not math.isfinite(value) for value in pair)):
+        raise ValueError("target_pair_db: finite two-element float list required")
+    if pair != [-6.0, -12.0]:
+        raise ValueError("target_pair_db: seal unexpected value")
     if integer(seal["smoothing_samples"], "seal smoothing_samples") != 256:
-        raise ValueError("seal smoothing mismatch")
+        raise ValueError("smoothing_samples: seal unexpected value")
     if integer(seal["owners"], "seal owners") != 2:
-        raise ValueError("seal owners mismatch")
+        raise ValueError("owners: seal unexpected value")
 
 
 def validate(seal_path, records_path):
@@ -190,7 +219,15 @@ def validate(seal_path, records_path):
     if len(lines) != 2 or any(not line.strip() for line in lines):
         raise ValueError("exactly two nonblank JSON lines required")
     for index, line in enumerate(lines, 1):
-        validate_record(json.loads(line, object_pairs_hook=pairs, parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value))), index, seal)
+        validate_record(
+            json.loads(
+                line,
+                object_pairs_hook=pairs,
+                parse_constant=lambda value: (_ for _ in ()).throw(ValueError(f"non-finite JSON constant: {value}")),
+            ),
+            index,
+            seal,
+        )
     return True
 
 
@@ -201,7 +238,7 @@ def main(argv):
         except (OSError, ValueError, json.JSONDecodeError) as error:
             print(f"FAIL: {error}", file=sys.stderr)
             return 1
-        print("PASS: #603 seal")
+        print("PASS: #606 seal")
         return 0
     if len(argv) != 3:
         print("usage: input-symmetry-capture-validator.py SEAL RECORDS | --seal-only SEAL", file=sys.stderr)
@@ -211,7 +248,7 @@ def main(argv):
     except (OSError, ValueError, json.JSONDecodeError) as error:
         print(f"FAIL: {error}", file=sys.stderr)
         return 1
-    print("PASS: #603 seal and two capture records")
+    print("PASS: #606 seal and frozen #602 records")
     return 0
 
 
