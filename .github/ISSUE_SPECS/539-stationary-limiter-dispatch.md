@@ -419,3 +419,11 @@ must establish actual six-file identity and all required static/resource/hermeti
 gates. Root corrected only the attribution and authorization wording at `8d67c22a`; no raw command,
 stream, status, digest, source, builder or qualification changed. Corrected Astra LOW exact-head
 review is pending before any successor may open.
+
+## Conservative observation record correction
+
+Astra LOW found at current head `8d67c22a` that the spec's conservative non-credit disposition and
+the artifact README still disagreed. Root restored the README's conservative wording and refreshed
+only its checksum entry. The raw command, full streams/status, digest, census and every compiled
+input remain byte-identical; no builder or qualification ran. Astra LOW exact-head review is
+pending.
