@@ -49,4 +49,71 @@ Any implementation must preserve bit-identical PCM and state, operation order, s
 
 ## Attempt record
 
-Attempt 1 is pending. The pre-issue Astra LOW review selected this single-effect evidence-first shape at base `62045f40048ec230298fe0fd3935da3333f90b83`, found no applicable retained current lowering, and confirmed it is disjoint from #633 and lane-B artifact authority.
+Attempt 1 stage-1 capture is complete at frozen HEAD
+`186e6b3080b040d4a6e7c25b1516762224297381`. The exact required base object
+`62045f40048ec230298fe0fd3935da3333f90b83`, direct merge-base check, locked
+metadata, toolchain, targets, inspection tools, source hashes, and empty
+tracked diff all passed before compilation. The local symbolic `base/main` ref
+was absent in this worktree; the required commit object and exact merge-base
+were used without substituting another ref.
+
+The three planned commands ran once and returned status 0: one native release
+capture containing scalar and AVX2 W8 monomorphizations, one Wasm scalar
+capture with `-C target-feature=-simd128`, and one Wasm simd128 W4 capture with
+`-C target-feature=+simd128`. They emitted assembly and LLVM IR into isolated
+`/tmp/issue635-transient-*` directories. No audio, timing, benchmark, retry,
+installation, source/test/manifest/lock/generated-resource edit, or payload
+promotion occurred. Raw stdout, stderr, and status are retained under
+`artifacts/issue635-transient-shaper-constant-lowering/`; only selected
+excerpts, hashes, and the manifest are retained in the repository.
+
+The caller map is attributable in the emitted LLVM:
+
+- native scalar `PreparedNativeEffect::process` calls `Shaper<f32, 1>::process_block`;
+- native AVX2 W8 `PreparedTransientShaperBank::process_bank` calls
+  `Shaper<wide::f32x8, 8>::process_block`, and its mono entry is present;
+- Wasm scalar `PreparedNativeEffect::process` calls `Shaper<f32, 1>::process_block`;
+- Wasm simd128 W4 `PreparedTransientShaperBank::process_bank` calls
+  `Shaper<wide::f32x4, 4>::process_block`, and its mono entry is present.
+
+Each selected body contains both the ramping prefix and stationary suffix
+loop. Native W8 uses `.LBB5_90`/`.LBB5_56` for the ramping frame path and
+`.LBB5_93` for the stationary frame path, with explicit backedges. Native
+scalar uses `.LBB6_38` and `.LBB6_51` in the ramping path and `.LBB6_148` in
+the stationary path. Wasm scalar uses `.LBB6_5` and `.LBB6_32`; Wasm simd128
+W4 uses `.LBB4_5` and `.LBB4_128`. The link-mode specializations are inside
+these `process_block` bodies; no caller was inferred from source spelling
+alone.
+
+### Candidate disposition
+
+| Candidate | Native scalar | Native AVX2 W8 | Wasm scalar | Wasm simd128 W4 | Residual interpretation |
+| --- | --- | --- | --- | --- | --- |
+| `FLOOR` | folded scalar memory operands in frame | repeated `vbroadcastss` in both frame loops | repeated `f32.const` in frame loop | repeated `v128.const` in frame loop | Actionable residual candidate in W8 and both Wasm shapes; scalar is folded-load materialization. |
+| `DB_PER_OCTAVE` | folded scalar memory operand | repeated `vbroadcastss` | repeated scalar constant operand | repeated vector constant operand | Same residual pattern; no arithmetic change is implied. |
+| `+/-CONTRAST_LIMIT_DB` | folded `vminss`/`vmaxss` operands | repeated broadcasts | repeated scalar constants | repeated vector constants | Actionable loop materialization in vector/Wasm bodies. |
+| `+/-SHAPE_LIMIT_DB` | folded `vminss`/`vmaxss` operands | repeated broadcasts | repeated scalar constants | repeated vector constants | Actionable loop materialization in vector/Wasm bodies. |
+| `OCTAVES_PER_DB` | folded scalar multiply operand | repeated `vbroadcastss` | repeated scalar constant operand | repeated vector constant operand | Actionable loop materialization in vector/Wasm bodies. |
+| `0.5` average-link factor | folded scalar multiply operand | repeated broadcast in average-link body | repeated `f32.const` | repeated vector constant | Actionable only in the average-link specialization; dual-mono/maximum do not use it. |
+| `zero` identity/clamp value | zeroing idiom or folded scalar zero | repeated zeroing/materialization in frame paths | repeated `f32.const 0` | repeated zero vector/zeroing idiom | Candidate is present in loop bodies, but any change must preserve signed-zero selection. |
+| bypass mask | loop-entry materialization before prefix/tail | loop-entry materialization before prefix/tail | loop-entry local | loop-entry vector local | No per-frame residual observed. |
+| prepared coefficient lanes | loop-entry loads, then scalar state use | loop-entry vector packing plus stack reloads in frame | loop-entry locals/loads | loop-entry vector locals/loads | State traffic/spill-reload classification, not a constant-splat residual. |
+
+The native scalar backend therefore folds several source constants as scalar
+memory operands, while AVX2 W8 and both Wasm shapes retain repeated constant
+materialization in actual ramping and stationary frame loops. The evidence
+does not establish a projected cycle saving or justify a source rewrite. A
+real residual exists for a narrowly bounded constant-hoisting review, subject
+to preserving the link specializations, signed-zero identity, state traffic,
+and scalar/W4/W8 bit behavior.
+
+### Stage-1 disposition proposed for Astra
+
+Suggested Astra LOW verdict: **ACTIONABLE RESIDUAL, stage-2 amendment
+required**. The evidence is sufficient to authorize only a bounded follow-up
+scope for loop-invariant constant materialization in
+`crates/transient-shaper/src/lib.rs`; it does not authorize implementation in
+this stage. Any stage-2 brief must name the exact candidate set and require
+post-change lowering for the same four target shapes, with explicit spill/
+reload accounting and no timing or projected savings claim. The current
+stage-1 tree is evidence/spec-only and has no product change.
