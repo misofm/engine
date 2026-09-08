@@ -23,6 +23,14 @@ Create one isolated scratch checkout from the frozen source. The scratch checkou
 
 Preserve exact argv, cwd, source/toolchain/config/input hashes, overlay diff, full streams/status, output census, six-file hashes and checksum manifest. Compare the five non-Wasm outputs byte-for-byte to the delivered #587/#608 manifest; record any mismatch and stop for rescope.
 
+After that exact candidate and five-file identity are established, the scratch checkout may also
+change only `hosts/host-web/qualification/results.json`'s `candidateCommit` and `wasmSha256` to
+the frozen source and candidate, then regenerate only
+`hosts/host-web/BROWSER_DEPLOYMENT_MATRIX.md` with the unchanged generator. Prove this second
+scratch overlay separately and freeze every browser result row, version floor, gate and resource
+value. These temporary lineage files allow `run.mjs --check-matrix` to validate the candidate
+before browser launch; they are qualification inputs, not repository delivery edits.
+
 ## Qualification gates
 
 On that exact six-file candidate and scratch source, run the repository's existing gates without changing them:
@@ -52,3 +60,14 @@ Root checkpoints the exact edit before further work. Run one ordinary no-bypass 
 Open one PR only after that PASS. Require the repository's `qualification` check, verify live main immediately before exact-head merge, verify merge parents and post-main qualification, then synchronize and close this issue and #614. Update #560 and #559 so #539 can resume, and remove clean delivered worktrees while retaining branches/history.
 
 One scratch qualification and one Luna repository-edit attempt are authorized. A candidate mismatch or substantive gate failure stops for a reviewed rescope; do not retry browser or build workloads to obtain a green result. The repository three-attempt limit remains binding.
+
+## Initial Astra LOW scope review — FAIL
+
+Astra LOW returned **FAIL** at clean pushed head
+`30efe9ebbe02f88825da3d3eb91b7ba2f5f2fcff`. The one-pin scratch rule could not satisfy
+`run.mjs --check-matrix`, which validates retained old lineage before browser launch, and four
+probe evidence files had one extra EOF blank line. The probe's 13 checksums, status 1, empty output,
+observed digest, frozen ancestry and unchanged compiled inputs otherwise passed. Root has added only
+the scratch lineage-overlay rule above, removed the four extra blank lines and refreshed the
+evidence checksum manifest. Raw build stdout/stderr/status and all substantive probe content remain
+unchanged. Scratch qualification remains unauthorized until Astra LOW passes the corrected head.

@@ -23,4 +23,3 @@ benchmark, timing workload, source edit or workflow edit occurred in this probe.
 artifact-promotion successor must reproduce the candidate from this frozen source with only a
 scratch pin overlay, run the existing static/resource/hermetic/SDK/three-browser gates, and obtain
 Astra LOW PASS before any repository pin or consumer metadata changes.
-
