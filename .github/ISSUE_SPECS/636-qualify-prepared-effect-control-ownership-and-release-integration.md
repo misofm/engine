@@ -87,3 +87,14 @@ assertion, using identical deterministic input and commands with separately
 identified owners. Preserve production and all accepted controls. The tooling
 split and remaining-gate command set must be recorded before Luna continues. No
 release integration retry is authorized in #636.
+
+## Coordination pause
+
+#636 is queued after attempt 1 and does not consume an active issue slot. #635's
+post-main qualification reproduced an offline dependency-cache miss after its
+single authorized failed-job rerun, so a bounded qualification-cache preparation
+issue must occupy the available slot beside #635 until main is green. #636 retains
+its exact attempt-2 test authorization but Luna may not edit or run remaining
+gates while queued. After #635 delivery releases its slot, create the separately
+numbered graph-compiler release-collision tooling issue required above, synchronize
+the two-slot ownership, and only then resume #636 attempt 2.
