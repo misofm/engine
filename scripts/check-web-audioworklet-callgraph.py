@@ -43,6 +43,12 @@ Modes
        arithmetic, each using strictly more vector than scalar `f32` arithmetic. `K` is a
        **ratchet**: when a wave adds kernels, raise it. It never drops.
 
+    The collapsed true-peak limiter is a forwarding entry plus a distinct arithmetic kernel. The
+    roster therefore requires exactly one `PreparedTruePeakLimiterBank<f32x4>::process_bank_mono`
+    entry, exactly one arithmetic-bearing `LimiterCore<f32x4>::process_block_mono` kernel, and a
+    direct call between them. The entry must carry no counted vector or scalar arithmetic; the
+    kernel receives the same dominance, scalar-budget and slack checks as every other row.
+
     ### Why this replaced the raw `--simd-floor N` total (issue #163 phase 0e)
 
     The old gate asserted "at least N `f32x4.{mul,add,sub}` instructions in the whole module", most
@@ -111,7 +117,7 @@ KERNEL_SCALAR = re.compile(r"^f32\.(mul|add|sub|div)$")
 # (soft-clip, 25 vector operations -> ~100 scalar), so the slack cannot hide a scalarisation.
 SCALAR_SLACK = 8
 
-# The named kernel bodies of the shipped effect library, with each one's scalar budget.
+# The named arithmetic kernel bodies of the shipped effect library, with each one's scalar budget.
 #
 # Each row is `(label, name pattern, scalar-to-vector ceiling)`. The pattern must match exactly one
 # arithmetic-carrying kernel in the artifact; two matches or none is a failure, because a roster
@@ -146,7 +152,7 @@ SCALAR_SLACK = 8
 # assertion this note replaces. What is asserted is that no kernel's arithmetic migrates out of
 # the vector family.
 #
-# ## What mono-collapse M2 did to this roster, and why the answer is three more rows
+# ## What mono-collapse M2 did to this roster, and why the limiter has a forwarding rule
 #
 # The collapse gave the compressor, the true-peak limiter and the parametric EQ a **second** block
 # body each: a one-plane variant a bank chain runs when every lane of its cohort is
@@ -155,12 +161,14 @@ SCALAR_SLACK = 8
 # it is designed to -- "two matches is a failure" is not a nuisance here, it is the rule noticing
 # that the artifact grew a kernel.
 #
-# The fix is to name the new kernels, not to loosen the patterns. Each row below pins a specific
-# body: the v0 mangling carries a length prefix (`12process_bank` against `17process_bank_mono`,
-# `13process_block` against `18process_block_mono`), so a dual and a collapsed pattern cannot drift
-# onto each other. The collapsed bodies are held to the same shape rule as the dual ones, which is
-# the point: a one-plane body that de-vectorised would be a collapse that made the browser *slower*
-# while still rendering the right bits, and no digest gate in the tree could see it.
+# The fix is to name the new kernels, not to loosen the patterns. The compressor and EQ rows below
+# pin their arithmetic bodies directly: the v0 mangling carries a length prefix (`12process_bank`
+# against `17process_bank_mono`, `13process_block` against `18process_block_mono`), so a dual and a
+# collapsed pattern cannot drift onto each other. The limiter's collapsed entry is different: LLVM
+# outlines its arithmetic into `LimiterCore::process_block_mono`, so its entry/kernel identity and
+# direct edge are checked by `check_limiter_forwarding` below. Both forms receive the same shape
+# rule, which is the point: a one-plane body that de-vectorised would be a collapse that made the
+# browser slower while still rendering the right bits, and no digest gate in the tree could see it.
 #
 # **The separation is itself a requirement, and it was measured.** M2 first wrote the two bodies as
 # one function behind a `mono: bool`, and the shipped *dual* path got slower -- the
@@ -190,12 +198,6 @@ KERNEL_ROSTER: tuple[tuple[str, str, float], ...] = (
         0.10,
     ),
     (
-        "true-peak-limiter f32x4 collapsed",
-        r"true_peak_limiter.*27PreparedTruePeakLimiterBank.*4wide6f32x4"
-        r".*17process_bank_mono",
-        0.10,
-    ),
-    (
         "parametric-eq f32x4 dual",
         r"parametric_eq.*4wide6f32x4.*12process_bank",
         0.10,
@@ -207,6 +209,17 @@ KERNEL_ROSTER: tuple[tuple[str, str, float], ...] = (
     ),
     ("soft-clip f32x4", r"soft_clip.*4wide6f32x4", 0.10),
 )
+
+LIMITER_MONO_ENTRY_PATTERN = (
+    r"true_peak_limiter.*27PreparedTruePeakLimiterBank.*4wide6f32x4"
+    r".*17process_bank_mono"
+)
+LIMITER_MONO_KERNEL_PATTERN = (
+    r"true_peak_limiter.*11LimiterCore.*4wide6f32x4"
+    r".*18process_block_mono"
+)
+LIMITER_MONO_LABEL = "true-peak-limiter f32x4 collapsed"
+LIMITER_MONO_CEILING = 0.10
 
 
 class Function:
@@ -394,6 +407,77 @@ def check_kernel_shape(
     return failures
 
 
+def check_limiter_forwarding(functions: dict[int, Function]) -> int:
+    """Check the collapsed limiter's zero-arithmetic entry and direct arithmetic kernel edge."""
+    failures = 0
+    entry_re = re.compile(LIMITER_MONO_ENTRY_PATTERN)
+    entries = [function for function in functions.values() if entry_re.search(function.name)]
+    if len(entries) != 1:
+        failures += 1
+        print(
+            f"FAIL roster {LIMITER_MONO_LABEL} entry: {len(entries)} functions match "
+            f"{LIMITER_MONO_ENTRY_PATTERN!r} (expected exactly one)",
+            file=sys.stderr,
+        )
+
+    kernels = kernel_arithmetic(functions, LIMITER_MONO_KERNEL_PATTERN)
+    if len(kernels) != 1:
+        failures += 1
+        print(
+            f"FAIL roster {LIMITER_MONO_LABEL} kernel: {len(kernels)} arithmetic-carrying "
+            f"functions match {LIMITER_MONO_KERNEL_PATTERN!r} (expected exactly one)",
+            file=sys.stderr,
+        )
+
+    if len(entries) != 1 or len(kernels) != 1:
+        return failures
+
+    entry = entries[0]
+    kernel, vector, scalar = kernels[0]
+    if kernel.index not in entry.calls:
+        failures += 1
+        print(
+            f"FAIL roster {LIMITER_MONO_LABEL}: entry {entry.name} does not directly call "
+            f"selected kernel {kernel.name}",
+            file=sys.stderr,
+        )
+
+    entry_vector = sum(1 for opcode in entry.opcodes if KERNEL_VECTOR.match(opcode))
+    entry_scalar = sum(1 for opcode in entry.opcodes if KERNEL_SCALAR.match(opcode))
+    if entry_vector or entry_scalar:
+        failures += 1
+        print(
+            f"FAIL roster {LIMITER_MONO_LABEL} entry {entry.name}: forwarding entry carries "
+            f"counted arithmetic vector={entry_vector} scalar={entry_scalar}; expected 0/0",
+            file=sys.stderr,
+        )
+
+    if vector <= scalar:
+        failures += 1
+        print(
+            f"FAIL kernel {kernel.name}: vector={vector} scalar={scalar} "
+            "(a vector instantiation must use strictly more vector than scalar arithmetic)",
+            file=sys.stderr,
+        )
+    budget = max(LIMITER_MONO_CEILING * vector, float(SCALAR_SLACK))
+    verdict = "ok"
+    if scalar > budget:
+        failures += 1
+        verdict = "FAIL"
+        print(
+            f"FAIL roster {LIMITER_MONO_LABEL}: vector={vector} scalar={scalar} "
+            f"budget={budget:.1f} (ceiling {LIMITER_MONO_CEILING:g} x vector, slack "
+            f"{SCALAR_SLACK}). The selected kernel moved arithmetic out of the vector family.",
+            file=sys.stderr,
+        )
+    print(
+        f"  roster {verdict:4s} entry=0/0 direct={'yes' if kernel.index in entry.calls else 'no'} "
+        f"vector={vector} scalar={scalar} budget={budget:.1f} "
+        f"ceiling={LIMITER_MONO_CEILING:g} {LIMITER_MONO_LABEL}"
+    )
+    return failures
+
+
 VALID_SHAPE = """\
 000010 func[0] <miso_engine_web_v1_render>:
  000011: 10 01                      | call 1 <render_next>
@@ -417,6 +501,40 @@ def synthetic_kernel(name: str, vector: int, scalar: int, index: int = 0) -> str
     for _ in range(scalar):
         lines.append(" 000002: 94                         | f32.mul")
     lines.append(" 000003: 0b                         | end")
+    return "\n".join(lines) + "\n"
+
+
+SELF_TEST_LIMITER_ENTRY = (
+    "true_peak_limiter27PreparedTruePeakLimiterBank4wide6f32x417process_bank_mono"
+)
+SELF_TEST_LIMITER_KERNEL = "true_peak_limiter11LimiterCore4wide6f32x418process_block_mono"
+
+
+def synthetic_limiter(
+    *,
+    entry_name: str = SELF_TEST_LIMITER_ENTRY,
+    kernel_name: str = SELF_TEST_LIMITER_KERNEL,
+    direct: bool = True,
+    entry_vector: int = 0,
+    entry_scalar: int = 0,
+    kernel_vector: int = 25,
+    kernel_scalar: int = 0,
+) -> str:
+    """Build an entry/kernel pair for the independent forwarding-rule controls."""
+    lines = [f"000010 func[1] <{entry_name}>:"]
+    if direct:
+        lines.append(f" 000011: 10 02                      | call 2 <{kernel_name}>")
+    for _ in range(entry_vector):
+        lines.append(" 000012: fd e6 01                   | f32x4.mul")
+    for _ in range(entry_scalar):
+        lines.append(" 000013: 94                         | f32.mul")
+    lines.append(" 000014: 0b                         | end")
+    lines.append(f"000020 func[2] <{kernel_name}>:")
+    for _ in range(kernel_vector):
+        lines.append(" 000021: fd e6 01                   | f32x4.mul")
+    for _ in range(kernel_scalar):
+        lines.append(" 000022: 94                         | f32.mul")
+    lines.append(" 000023: 0b                         | end")
     return "\n".join(lines) + "\n"
 
 
@@ -580,6 +698,49 @@ def self_test() -> int:
         == 1,
     )
 
+    # (c6) the collapsed limiter is an exact entry -> arithmetic-kernel pair. Each mutation below
+    # is independent so a broad name match or an indirect edge cannot accidentally satisfy the rule.
+    expect(
+        "(c6) forwarding entry and kernel pass",
+        check_limiter_forwarding(parse(synthetic_limiter())) == 0,
+    )
+    expect(
+        "(c6a) forwarding entry absent",
+        check_limiter_forwarding(parse(synthetic_limiter(entry_name="other_forwarding"))) == 1,
+    )
+    ambiguous_entry = synthetic_limiter() + (
+        f"000030 func[3] <{SELF_TEST_LIMITER_ENTRY}>:\n"
+        " 000031: 10 02                      | call 2 <kernel>\n"
+        " 000032: 0b                         | end\n"
+    )
+    expect(
+        "(c6b) forwarding entry ambiguous",
+        check_limiter_forwarding(parse(ambiguous_entry)) == 1,
+    )
+    expect(
+        "(c6c) arithmetic kernel absent",
+        check_limiter_forwarding(parse(synthetic_limiter(kernel_name="other_kernel"))) == 1,
+    )
+    ambiguous_kernel = synthetic_limiter() + synthetic_kernel(
+        SELF_TEST_LIMITER_KERNEL, vector=25, scalar=0, index=3
+    )
+    expect(
+        "(c6d) arithmetic kernel ambiguous",
+        check_limiter_forwarding(parse(ambiguous_kernel)) == 1,
+    )
+    expect(
+        "(c6e) forwarding entry must directly call kernel",
+        check_limiter_forwarding(parse(synthetic_limiter(direct=False))) == 1,
+    )
+    expect(
+        "(c6f) forwarding entry scalar arithmetic",
+        check_limiter_forwarding(parse(synthetic_limiter(entry_scalar=1))) == 1,
+    )
+    expect(
+        "(c6g) selected kernel scalar budget",
+        check_limiter_forwarding(parse(synthetic_limiter(kernel_scalar=SCALAR_SLACK + 1))) == 1,
+    )
+
     # (d) a kernel whose scalar arithmetic reaches its vector arithmetic fails (de-vectorisation).
     scalarized = VALID_SHAPE.replace(
         " 000024: 0b                         | end",
@@ -655,6 +816,7 @@ def main() -> int:
         if args.kernel_pattern is None or args.kernel_min is None:
             parser.error("--kernel-shape requires --kernel-pattern and --kernel-min")
         failures += check_kernel_shape(functions, args.kernel_pattern, args.kernel_min)
+        failures += check_limiter_forwarding(functions)
     return 1 if failures else 0
 
 

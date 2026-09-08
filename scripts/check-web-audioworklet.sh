@@ -248,14 +248,13 @@ fi
 # measured on this artifact, and why four times the measured ratio is the right multiple are
 # documented in `KERNEL_ROSTER` in `check-web-audioworklet-callgraph.py`.
 #
-# The roster is eleven rows since mono-collapse M2, not eight: the compressor, the true-peak
-# limiter and the parametric EQ each ship a **second** block body, the one-plane variant a collapsed
-# bank chain runs. All three survive monomorphisation as their own symbols, so the eight-row roster
-# failed with "two matches" on those patterns -- the rule noticing that the artifact grew a kernel,
-# which is what it is for. Naming the new bodies rather than loosening the patterns is what keeps
-# the collapsed kernels held to the same shape rule as the dual ones, and that matters here more
-# than anywhere: a one-plane body that de-vectorised would make the browser slower while still
-# rendering exactly the right bits, and not one digest gate in this tree could see it.
+# The arithmetic roster retains the compressor and parametric-EQ collapsed bodies as separate
+# kernels. LLVM may outline the collapsed true-peak limiter's arithmetic into a distinct
+# `LimiterCore<f32x4>::process_block_mono`, leaving `PreparedTruePeakLimiterBank<f32x4>::process_bank_mono`
+# as a zero-arithmetic forwarding entry. The Python gate requires exactly one of each, a direct call,
+# and zero counted vector/scalar arithmetic in the entry before applying the unchanged kernel shape
+# budget. This keeps the outlined form held to the same vector contract without treating the wrapper
+# as an arithmetic kernel or accepting indirect reachability.
 #
 # The *separation* of the two bodies is a requirement and not an accident, and it was measured: M2
 # first wrote them as one function behind a `bool`, and the shipped dual path got slower on a
@@ -265,7 +264,7 @@ fi
 #
 #   * **Stronger.** The old total was one number for the whole module, so one kernel could
 #     scalarise completely while another grew and the gate stayed green. The roster is per kernel
-#     and requires presence, so scalarising any single one of the eight is red on its own. The
+#     and requires presence, so scalarising any single named kernel is red on its own. The
 #     roster budget also catches *partial* scalarisation that the pre-existing "vector strictly
 #     dominates scalar" rule waves through -- a kernel at 100 vector / 40 scalar dominates and is
 #     still a third scalarised; self-test case (c1) is exactly that shape.
