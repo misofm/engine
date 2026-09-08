@@ -106,3 +106,15 @@ and Cargo build caches remain outside Git; their exact hashes are retained. The 
 covers all 55 retained files and verifies. Astra's PASS authorizes root to preserve this evidence
 and Luna HIGH/XHIGH to make the conditional three-file repository promotion. It does not itself
 authorize merge or #539's different candidate.
+
+## Luna HIGH repository promotion checkpoint
+
+Luna HIGH changed exactly the three conditionally authorized files, and root checkpointed/pushed
+the tranche as `09a86c3e3dc3cad67afb16cef874c6ef9740d985`. The pin is the approved
+`e338adae98454d0a365c0ef281aa6b3dcb24d5dc0a36427f917566682e0ff27b` plus LF;
+`results.json` changes only `candidateCommit` to frozen source `0c715de9…` and `wasmSha256`; the
+unchanged generator changes only the matrix lineage paragraph. All three files match the qualified
+scratch overlay byte-for-byte. Browser rows, versions, gates, resources and every other result are
+unchanged. Matrix `--check`, exact pin spelling, formatting and diff checks pass; `Cargo.lock` is
+unchanged. No build, browser, install, benchmark or timing command ran in this tranche. Root must
+now run the single ordinary post-pin build and exact six-file comparison before Astra review.
