@@ -2,13 +2,13 @@
 
 use bench_support::alloc as bench_alloc;
 use conformance::DualAccumulatorDelayFactory;
-use effect_compiler::{prepare_native_session_effects, EffectCompileCaps, EffectPreparedSession};
+use effect_compiler::{EffectCompileCaps, EffectPreparedSession, prepare_native_session_effects};
 use effect_contract::NativeEffectRegistry;
 use graph::{GraphCompileCaps, GraphDiagnosticSet};
 use graph_compiler::{Backend, GraphCompileRequest, GraphCompiler};
 use session::{
-    compile_session, parse_session_json, CompileCaps, EffectIdentity,
-    EffectQuality as SessionEffectQuality, LinkMode, StableId,
+    CompileCaps, EffectIdentity, EffectQuality as SessionEffectQuality, LinkMode, StableId,
+    compile_session, parse_session_json,
 };
 use sha2::{Digest, Sha256};
 use std::hint::black_box;
@@ -453,9 +453,11 @@ mod tests {
             .map(|entry| entry.metadata.program_key())
             .collect();
         assert_eq!(programs.len(), 2);
-        assert!(programs
-            .iter()
-            .all(|program| program.quality == PreparedEffectQuality::Normal));
+        assert!(
+            programs
+                .iter()
+                .all(|program| program.quality == PreparedEffectQuality::Normal)
+        );
         assert!(programs.iter().any(|program| program.bypass));
         assert!(programs.iter().any(|program| !program.bypass));
         assert_eq!(actual.len(), expected.len());
