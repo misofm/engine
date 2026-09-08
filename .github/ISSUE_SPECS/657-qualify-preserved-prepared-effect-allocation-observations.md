@@ -64,3 +64,68 @@ executor testimony retain their stated limits. No workload/validator/Cargo run,
 record reconstruction, new path, concatenation, cleanup or source edit is
 authorized. Any unresolved inconsistency stops; Astra independently reviews the
 result before limited credit.
+
+## Preserved-observation evidence — PASS (limited)
+
+Hypatia completed the authorized read-only reconciliation without writing. Astra
+LOW independently reviewed exact clean branch/upstream
+`03f4f9703138e385c978e746ca8916ffb0af3d10` and returned **EVIDENCE PASS** for the
+limited frozen-corpus claim below. #654's measurement procedure remains FAIL.
+
+The detached candidate and counterfactual sources are both exact
+`785838403d02e383ba12553a3464d492e60a5cd5`. The candidate is clean. The
+counterfactual differs only in the three specified graph-compiler files. Toolchain
+identity is rustc 1.97.1 commit `8bab26f4f68e0e26f0bb7960be334d5b520ea452`,
+LLVM 22.1.6, host `x86_64-unknown-linux-gnu`, and cargo 1.97.1 commit
+`c980f4866`. The candidate, counterfactual, and validator commands and environments
+are exactly the literal commands in #654's frozen amendment; recorded statuses are
+0, 0, and 0.
+
+Exact source SHA-256 identities:
+
+| Path | Candidate | Counterfactual |
+|---|---|---|
+| `compile.rs` | `109949399f4da4fc44078eb3121dbc6939bc5f635ba34c7789883d7a377f6c53` | `ecfe271b944f63d921a1ec64d6e74512d4e259435bb02104997491122fcabb26` |
+| `ids.rs` | `5c6ade8f0887bec4a0c39d4413929bb526cf1d822d7e66c6835961751d0ede58` | `08a5a2265f31061acbc33737438bf1d27c08c9f5c7010bca82825e61eaf1d115` |
+| `banks.rs` | `981b0fa269401ef1f985e4eeffc4580b1bc66c2e0bd87f4333e8486444ef0f4b` | `997ccfda181b6ffa01472d380e1e4c777eaceaceeefb158f9ddbb58af9216475` |
+
+Anchored stream SHA-256 identities are candidate stdout
+`3a410c69d08ca61ccf347a5a615be7b14794f4611c00ee47cd62be4d1b885b48`, candidate
+stderr `6c44fbd2c2a93e6d8f0b064f7660975b1ddd10479f027b4abc265e6e8e2bd389`,
+counterfactual stdout
+`f6afaabd1b277a78ca4b6f52e94acdf07e909fb90839a2070f1e017ce9e19fad`,
+counterfactual stderr
+`f13c885206d06eef4a892b05d01541b131581c1ec736759105b7f9117a6057d2`, and combined
+JSONL `15029acf4832042852bd4d8bd64a7297478436951e398e4b0c122470aa1d171f`. Read-only
+comparison proved the combined bytes equal candidate stdout immediately followed by
+counterfactual stdout, with six records from each variant.
+
+Both internal rounds match exactly. All diagnostic identities are
+`47bbd81f757f46e0e8108fd525f4deacfb71a2182c3465ab7975390a924957c2`.
+Exact counters and counterfactual-minus-candidate deltas are:
+
+| Corpus / variant | Allocations | Deallocations | Reallocations | Requested bytes | Graph SHA-256 |
+|---|---:|---:|---:|---:|---|
+| zero64 candidate | 20,527 | 15,913 | 233 | 3,001,967 | `e585f5f04deb5e8e520327279e07219a5c5be4c873cdb97530b1169f18bd553e` |
+| zero64 counterfactual | 20,527 | 15,913 | 233 | 3,001,967 | `e585f5f04deb5e8e520327279e07219a5c5be4c873cdb97530b1169f18bd553e` |
+| zero64 delta | 0 | 0 | 0 | 0 | equal |
+| crossed-small candidate | 2,257 | 1,752 | 50 | 276,599 | `d1e23bbacbc343691ee1c86d31b1847edc2af2a86e081990e01f26110a844ff1` |
+| crossed-small counterfactual | 2,371 | 1,866 | 50 | 279,687 | `d1e23bbacbc343691ee1c86d31b1847edc2af2a86e081990e01f26110a844ff1` |
+| crossed-small delta | 114 | 114 | 0 | 3,088 | equal |
+| banks64 candidate | 35,738 | 27,916 | 355 | 5,075,495 | `cebd8ba7421bd00b6f93640ac0837b3812af6353557e141563c84fc542de18b9` |
+| banks64 counterfactual | 37,564 | 29,742 | 355 | 5,132,635 | `cebd8ba7421bd00b6f93640ac0837b3812af6353557e141563c84fc542de18b9` |
+| banks64 delta | 1,826 | 1,826 | 0 | 57,140 | equal |
+
+This proves only that the frozen candidate observations preserve semantic and
+diagnostic identities, leave all four zero64 counters unchanged, and reduce
+allocation calls/requested bytes by 114/3,088 for crossed-small and 1,826/57,140
+for banks64 relative to the exact three-file counterfactual.
+
+The initial self-matching concurrency failure, continued execution, corrected
+population check and missing retained failed-check status remain explicit. Root's
+transcript observation and executor testimony retain their limited authority.
+Preflight/setup/status/population/summary/validator metadata without prior hash
+anchors is supported by current contents and mtime chronology, not proven
+immutable. Absent extra logs do not independently prove once-only execution. This
+record makes no timing, peak/live-memory, percentage, historical-count, broader
+corpus or procedural-PASS claim.
