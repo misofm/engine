@@ -75,3 +75,21 @@ any change or first gate failure.
 Exactly one Luna HIGH sequence of those previously unexecuted checks is now
 authorized. Builder, static, resource, hermetic, install, browser, artifact-
 output, promotion, PR, and merge execution remain forbidden.
+
+## Astra LOW evidence-disposition review — PASS
+
+Astra LOW passed exact clean pushed head
+`82dbb0d49a3d24cfb8ef057a0c03c8d5c6ba4c94`. The two-entry manifest verifies.
+Promotion diff exactly equals the decompressed accepted overlay at 2,596 bytes
+and SHA-256 `db8485f0…`; promoted files remain unchanged; accepted scratch and
+final-builder records match all six hashes. Eleven numbered scratch statuses and
+source/output linkage verify independently of duplicate records. No product drift
+or alteration of #627 failure records exists; #628/#629 synchronize and branch
+diff hygiene passes.
+
+Luna may run only the six remaining checks once: SDK package without install,
+matrix `--check`, formatting, diff hygiene, workspace policy, and effect-runtime
+policy. Root must first create an atomic external single-executor lease naming the
+exact executor and head; Luna verifies it before every command, and no other agent
+may execute while it exists. Stop on failure. No builder, static/resource/hermetic
+repeat, install, browser, output generation, or product edit is authorized.
