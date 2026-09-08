@@ -48,3 +48,13 @@ No capture script, validator, runner, Rust source, fixture, Cargo file, policy, 
 The accepted capture remains anchored to source commit `3b632cdb68105e2023b08ac90b4e2baa99bafa53`, raw/accepted SHA-256 `59257eb092f197b616cbaa20ec713ed8b4e10446c29941e8a1d7d23c96db89ca`, and results 7,226/7,219 ns per plan render. Those values are descriptive only. No preflight, prepared build, runner, capture, retry, resume, or timing is authorized.
 
 One Luna XHIGH implementation pass and no correction are authorized. A substantive documentation or policy defect stops and splits again. No original open #559 finding may start until this successor and lane B's remaining partials are delivered.
+
+## Astra LOW scope review
+
+Astra LOW returned **PASS** at exact clean pushed brief
+`94143e96728ac4bb09ab7cb2c3c35b31d4737e25`, with live #559/#560 synchronization and disjoint
+#608 ownership. The reviewer accepted the exact 20-row documentation-only scope and capture
+immutability. The implementation must state that `MISO_ENGINE_CAPTURE_PHASE` is emitted on stderr and
+parsed by the runner, and that `MISO_ENGINE_CAPTURE_TARGET` is exported by the runner but currently
+has no reader. Luna XHIGH may perform the sole documentation pass. No preflight, build, runner,
+capture, retry, resume, or timing is authorized.
