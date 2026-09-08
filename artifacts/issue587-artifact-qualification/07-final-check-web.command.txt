@@ -1,0 +1,1 @@
+bash scripts/check-web-audioworklet.sh /tmp/issue587-artifact-ab3766ca
