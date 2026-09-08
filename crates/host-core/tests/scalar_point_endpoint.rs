@@ -366,6 +366,10 @@ fn decode_state_page(frame: &[u8]) -> ParameterStatePage {
     }
 }
 
+fn state_page_payload(frame: &[u8]) -> &[u8] {
+    &frame[protocol::OUTER_HEADER_BYTES..]
+}
+
 fn process_real(
     effect: &mut dyn PreparedNativeEffect,
     left: &mut [f32],
@@ -2036,16 +2040,32 @@ fn run_controller_points_drive_real_asymmetric_pcm_replay_and_clock_refusal(
             snapshot.state[0].current_value.to_bits() != snapshot.state[0].target_value.to_bits(),
         ) * 2)
     );
+    assert_eq!(
+        page.records[1].flags,
+        1 | (u32::from(
+            snapshot.state[1].current_value.to_bits() != snapshot.state[1].target_value.to_bits(),
+        ) * 2)
+    );
+    let accepted_state_payload = state_page_payload(&state_frame).to_vec();
+    let left_frame = process_controller_ingress(
+        &mut controller,
+        &encoded_state_get(revision, 112, &[handles[0].0]),
+        ingress,
+    );
+    let left_page = decode_state_page(&left_frame);
+    assert_eq!(left_page.observed_sample, page.observed_sample);
+    assert_eq!(left_page.records.as_slice(), &page.records[..1]);
     let subset_frame = process_controller_ingress(
         &mut controller,
-        &encoded_state_get(revision, 112, &[handles[1].0]),
+        &encoded_state_get(revision, 113, &[handles[1].0]),
         ingress,
     );
     let subset_page = decode_state_page(&subset_frame);
+    assert_eq!(subset_page.observed_sample, page.observed_sample);
     assert_eq!(subset_page.records.len(), 1);
     assert_eq!(subset_page.records[0], page.records[1]);
     let typed = controller.process(ControllerRequest {
-        request_id: RequestId::new(113).unwrap(),
+        request_id: RequestId::new(114).unwrap(),
         expected_revision: ExpectedRevision::Exact(revision),
         canonical_bytes: b"typed-state-reversed",
         command: ControlCommand::ParameterStateGet {
@@ -2064,8 +2084,84 @@ fn run_controller_points_drive_real_asymmetric_pcm_replay_and_clock_refusal(
             .collect::<Vec<_>>(),
         vec![handles[1].0, handles[0].0]
     );
+    assert_eq!(typed_page.observed_sample, page.observed_sample);
+    assert_eq!(typed_page.records[0], page.records[1]);
+    assert_eq!(typed_page.records[1], page.records[0]);
+    let typed_left = controller.process(ControllerRequest {
+        request_id: RequestId::new(115).unwrap(),
+        expected_revision: ExpectedRevision::Exact(revision),
+        canonical_bytes: b"typed-state-left",
+        command: ControlCommand::ParameterStateGet {
+            request: ParameterStateRequest {
+                handles: vec![handles[0].0],
+            },
+        },
+    });
+    assert_eq!(typed_left.status, StatusCode::Ok);
+    let typed_left_page = decode_state_page(&typed_left.frame);
+    assert_eq!(typed_left_page.observed_sample, page.observed_sample);
+    assert_eq!(typed_left_page.records.as_slice(), &page.records[..1]);
+    let typed_right = controller.process(ControllerRequest {
+        request_id: RequestId::new(116).unwrap(),
+        expected_revision: ExpectedRevision::Exact(revision),
+        canonical_bytes: b"typed-state-right",
+        command: ControlCommand::ParameterStateGet {
+            request: ParameterStateRequest {
+                handles: vec![handles[1].0],
+            },
+        },
+    });
+    assert_eq!(typed_right.status, StatusCode::Ok);
+    let typed_right_page = decode_state_page(&typed_right.frame);
+    assert_eq!(typed_right_page.observed_sample, page.observed_sample);
+    assert_eq!(typed_right_page.records.as_slice(), &page.records[1..]);
+    let mut reversed_request = encoded_state_get(revision, 117, &[handles[0].0, handles[1].0]);
+    let first_handle_offset = protocol::OUTER_HEADER_BYTES + 8;
+    let second_handle_offset = first_handle_offset + 4;
+    let (before_second_handle, second_handle) = reversed_request.split_at_mut(second_handle_offset);
+    before_second_handle[first_handle_offset..second_handle_offset]
+        .swap_with_slice(&mut second_handle[..4]);
+    let reversed_response = if matches!(ingress, ControllerIngress::CallerBuffer) {
+        let response = process_controller_ingress(&mut controller, &reversed_request, ingress);
+        assert_eq!(response_status(&response), StatusCode::MalformedFrame);
+        Some(response)
+    } else {
+        assert_eq!(
+            controller
+                .process_b1b_btlv(&reversed_request, &mut DecodeScratch::new(&mut [0_u16; 64]),)
+                .unwrap_err(),
+            protocol::DecodeError::InvalidTlv
+        );
+        None
+    };
+    let reversed_recovery = process_controller_ingress(
+        &mut controller,
+        &encoded_state_get(revision, 117, &[handles[0].0, handles[1].0]),
+        ingress,
+    );
+    if matches!(ingress, ControllerIngress::B1b) {
+        assert_eq!(
+            state_page_payload(&reversed_recovery),
+            accepted_state_payload
+        );
+    } else {
+        assert_eq!(
+            response_status(&reversed_recovery),
+            StatusCode::RequestIdReuse
+        );
+        assert_eq!(
+            process_controller_ingress(&mut controller, &reversed_request, ingress),
+            reversed_response.expect("caller malformed replay")
+        );
+        let caller_recovery = process_controller_ingress(
+            &mut controller,
+            &encoded_state_get(revision, 129, &[handles[0].0, handles[1].0]),
+            ingress,
+        );
+        assert_eq!(state_page_payload(&caller_recovery), accepted_state_payload);
+    }
     let unknown = controller.process(ControllerRequest {
-        request_id: RequestId::new(114).unwrap(),
+        request_id: RequestId::new(130).unwrap(),
         expected_revision: ExpectedRevision::Exact(revision),
         canonical_bytes: b"typed-state-unknown",
         command: ControlCommand::ParameterStateGet {
@@ -2075,7 +2171,7 @@ fn run_controller_points_drive_real_asymmetric_pcm_replay_and_clock_refusal(
     assert_eq!(unknown.status, StatusCode::NotFound);
     let unknown_frame = process_controller_ingress(
         &mut controller,
-        &encoded_state_get(revision, 115, &[99]),
+        &encoded_state_get(revision, 131, &[99]),
         ingress,
     );
     assert_eq!(response_status(&unknown_frame), StatusCode::NotFound);
@@ -2099,10 +2195,11 @@ fn run_controller_points_drive_real_asymmetric_pcm_replay_and_clock_refusal(
     );
     let after_reversed = process_controller_ingress(
         &mut controller,
-        &encoded_state_get(revision, 116, &[handles[0].0, handles[1].0]),
+        &encoded_state_get(revision, 132, &[handles[0].0, handles[1].0]),
         ingress,
     );
     assert_eq!(decode_state_page(&after_reversed), page);
+    assert_eq!(state_page_payload(&after_reversed), accepted_state_payload);
     assert_eq!(
         controller.publish_scalar_point_state(
             snapshot.observed_sample,
@@ -2119,10 +2216,14 @@ fn run_controller_points_drive_real_asymmetric_pcm_replay_and_clock_refusal(
     );
     let after_zero_handle = process_controller_ingress(
         &mut controller,
-        &encoded_state_get(revision, 117, &[handles[0].0, handles[1].0]),
+        &encoded_state_get(revision, 133, &[handles[0].0, handles[1].0]),
         ingress,
     );
     assert_eq!(decode_state_page(&after_zero_handle), page);
+    assert_eq!(
+        state_page_payload(&after_zero_handle),
+        accepted_state_payload
+    );
     assert_eq!(
         controller.publish_scalar_point_state(
             snapshot.observed_sample,
@@ -2132,10 +2233,14 @@ fn run_controller_points_drive_real_asymmetric_pcm_replay_and_clock_refusal(
     );
     let after_duplicate_handle = process_controller_ingress(
         &mut controller,
-        &encoded_state_get(revision, 118, &[handles[0].0, handles[1].0]),
+        &encoded_state_get(revision, 134, &[handles[0].0, handles[1].0]),
         ingress,
     );
     assert_eq!(decode_state_page(&after_duplicate_handle), page);
+    assert_eq!(
+        state_page_payload(&after_duplicate_handle),
+        accepted_state_payload
+    );
     assert_eq!(
         controller.publish_scalar_point_state(
             snapshot.observed_sample,
@@ -2152,10 +2257,11 @@ fn run_controller_points_drive_real_asymmetric_pcm_replay_and_clock_refusal(
     );
     let after_flags = process_controller_ingress(
         &mut controller,
-        &encoded_state_get(revision, 119, &[handles[0].0, handles[1].0]),
+        &encoded_state_get(revision, 135, &[handles[0].0, handles[1].0]),
         ingress,
     );
     assert_eq!(decode_state_page(&after_flags), page);
+    assert_eq!(state_page_payload(&after_flags), accepted_state_payload);
     assert_eq!(
         controller.publish_scalar_point_state(
             snapshot.observed_sample,
@@ -2172,10 +2278,35 @@ fn run_controller_points_drive_real_asymmetric_pcm_replay_and_clock_refusal(
     );
     let after_rejection = process_controller_ingress(
         &mut controller,
-        &encoded_state_get(revision, 120, &[handles[0].0, handles[1].0]),
+        &encoded_state_get(revision, 136, &[handles[0].0, handles[1].0]),
         ingress,
     );
     assert_eq!(decode_state_page(&after_rejection), page);
+    assert_eq!(state_page_payload(&after_rejection), accepted_state_payload);
+    assert_eq!(
+        controller.publish_scalar_point_state(
+            snapshot.observed_sample,
+            [
+                page.records[0],
+                protocol::ParameterStateRecord {
+                    handle: handles[1].0,
+                    flags: page.records[1].flags,
+                    value: f32::INFINITY,
+                },
+            ],
+        ),
+        Err(ControllerAutomationPrepareError::InvalidScalarStatePublication)
+    );
+    let after_second_rejection = process_controller_ingress(
+        &mut controller,
+        &encoded_state_get(revision, 137, &[handles[0].0, handles[1].0]),
+        ingress,
+    );
+    assert_eq!(decode_state_page(&after_second_rejection), page);
+    assert_eq!(
+        state_page_payload(&after_second_rejection),
+        accepted_state_payload
+    );
     controller
         .publish_scalar_point_state(
             snapshot.observed_sample,
@@ -2195,10 +2326,18 @@ fn run_controller_points_drive_real_asymmetric_pcm_replay_and_clock_refusal(
         .unwrap();
     let after_identical = process_controller_ingress(
         &mut controller,
-        &encoded_state_get(revision, 121, &[handles[0].0, handles[1].0]),
+        &encoded_state_get(revision, 138, &[handles[0].0, handles[1].0]),
         ingress,
     );
     assert_eq!(decode_state_page(&after_identical), page);
+    assert_eq!(state_page_payload(&after_identical), accepted_state_payload);
+    let cached_state_request = encoded_state_get(revision, 140, &[handles[0].0, handles[1].0]);
+    let cached_state_frame =
+        process_controller_ingress(&mut controller, &cached_state_request, ingress);
+    assert_eq!(
+        state_page_payload(&cached_state_frame),
+        accepted_state_payload
+    );
     let mut replacement = snapshot;
     replacement.observed_sample = SampleTime(snapshot.observed_sample.0 + 7);
     replacement.state[0].current_value = 2.0;
@@ -2208,7 +2347,7 @@ fn run_controller_points_drive_real_asymmetric_pcm_replay_and_clock_refusal(
     publish_controller_scalar_point_snapshot(&mut controller, handles, &replacement).unwrap();
     let replaced = process_controller_ingress(
         &mut controller,
-        &encoded_state_get(revision, 122, &[handles[0].0, handles[1].0]),
+        &encoded_state_get(revision, 141, &[handles[0].0, handles[1].0]),
         ingress,
     );
     let replaced_page = decode_state_page(&replaced);
@@ -2220,18 +2359,81 @@ fn run_controller_points_drive_real_asymmetric_pcm_replay_and_clock_refusal(
         (-3.0_f32).to_bits()
     );
     assert_eq!(replaced_page.records[1].flags, 3);
-    assert_eq!(
-        process_controller_ingress(&mut controller, &state_request, ingress),
-        state_frame
-    );
-    assert_eq!(
-        response_status(&process_controller_ingress(
-            &mut controller,
-            &encoded_state_get(revision, 111, &[handles[0].0]),
-            ingress,
-        )),
-        StatusCode::RequestIdReuse
-    );
+    if matches!(ingress, ControllerIngress::CallerBuffer) {
+        let mut short = vec![0_u8; cached_state_frame.len() - 1];
+        let short_result = controller.process_command_frame_into(
+            &cached_state_request,
+            &mut DecodeScratch::new(&mut [0_u16; 64]),
+            &mut short,
+        );
+        assert!(matches!(
+            short_result,
+            Err(protocol::CommandFrameProcessError::Encode(
+                protocol::EncodeError::OutputTooSmall { required }
+            )) if required == cached_state_frame.len()
+        ));
+        let mut exact = vec![0_u8; cached_state_frame.len()];
+        let written = controller
+            .process_command_frame_into(
+                &cached_state_request,
+                &mut DecodeScratch::new(&mut [0_u16; 64]),
+                &mut exact,
+            )
+            .unwrap();
+        assert_eq!(&exact[..written], cached_state_frame.as_slice());
+
+        let malformed_outer = cached_state_request[..cached_state_request.len() - 1].to_vec();
+        let mut malformed_output = vec![0_u8; 2_048];
+        assert!(matches!(
+            controller.process_command_frame_into(
+                &malformed_outer,
+                &mut DecodeScratch::new(&mut [0_u16; 64]),
+                &mut malformed_output,
+            ),
+            Err(protocol::CommandFrameProcessError::Uncorrelatable(
+                protocol::DecodeError::BadPayloadLength
+            ))
+        ));
+        assert_eq!(
+            process_controller_ingress(&mut controller, &cached_state_request, ingress),
+            cached_state_frame
+        );
+
+        let mut malformed_correlatable =
+            encoded_state_get(revision, 142, &[handles[0].0, handles[1].0]);
+        let (before_second_handle, second_handle) =
+            malformed_correlatable.split_at_mut(second_handle_offset);
+        before_second_handle[first_handle_offset..second_handle_offset]
+            .swap_with_slice(&mut second_handle[..4]);
+        assert_eq!(
+            response_status(&process_controller_frame(
+                &mut controller,
+                &malformed_correlatable,
+            )),
+            StatusCode::MalformedFrame
+        );
+        assert_eq!(
+            process_controller_ingress(&mut controller, &cached_state_request, ingress),
+            cached_state_frame
+        );
+        assert_eq!(
+            response_status(&process_controller_ingress(
+                &mut controller,
+                &encoded_state_get(revision, 140, &[handles[0].0]),
+                ingress,
+            )),
+            StatusCode::RequestIdReuse
+        );
+        assert_eq!(
+            process_controller_ingress(&mut controller, &cached_state_request, ingress),
+            cached_state_frame
+        );
+    } else {
+        assert_eq!(
+            process_controller_ingress(&mut controller, &cached_state_request, ingress),
+            cached_state_frame
+        );
+    }
     assert_eq!(
         (
             controller.outstanding(),
