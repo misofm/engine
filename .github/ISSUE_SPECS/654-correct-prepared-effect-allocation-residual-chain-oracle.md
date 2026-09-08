@@ -197,3 +197,20 @@ counters/deltas, validator status and conclusion. No raw stream, JSONL, target,
 `.ll`, assembly, object, archive, library, binary, or generated compiler output may
 enter Git. No timing, percentage, historical-count comparison, extrapolation,
 optimization, or source repair is authorized.
+
+## Astra LOW measurement-scope review — PASS
+
+Astra passed exact clean coordinator branch/upstream
+`6c193061495a7ba3b990ef3d188a4538ef8a10d8` and synchronized GitHub #654. Frozen
+measurement source `785838403d02e383ba12553a3464d492e60a5cd5` differs from the
+source-PASS commit only in this spec; all five paths are absent, all six candidate/
+baseline hashes match, and counterfactual restoration is limited to the named three
+compiler files.
+
+Hypatia alone may run the exact recorded setup, candidate invocation,
+counterfactual invocation and validator once in order. Retain the complete inherited
+Cargo/Rust environment, identities, streams and numeric statuses, and preserve the
+intentional three-file overlay when checking counterfactual drift. Stop on the first
+failed precondition, command or unexpected state without repair, retry, target
+cleanup or extra measurement. Do not inspect counts before both variants finish.
+Only compact Astra-approved evidence may enter Git.
