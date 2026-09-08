@@ -215,3 +215,18 @@ run locked `npm ci --ignore-scripts` in `sdk/` once, rerun only the refused SDK 
 the previously unexecuted matrix, formatting/diff, workspace and effect-runtime policy checks.
 Do not repeat static, resource, hermetic, builder, browser qualification or any successful command.
 Astra LOW must review the combined record and exact current head before PR delivery.
+
+## Post-pin continuation — PASS
+
+Astra LOW returned **PASS** at exact clean pushed head
+`64ef94fa4a3fd538700a913ab5a8baab17ab4291`, live main/merge-base `77368243`. The bounded
+continuation ran locked SDK install, SDK package with 11 tests, matrix, formatting, diff, workspace
+policy and effect-runtime policy exactly once; all seven passed. The prior SDK preflight refusal and
+its 20-entry manifest remain preserved and non-credit. Earlier static/resource/hermetic and browser
+PASS records remain applicable and were not repeated.
+
+The 34-entry continuation record is under
+`artifacts/issue619-postpin-review-continuation/`. Source, lockfiles, pin/lineage, limiter bytes,
+browser rows/resources and the qualified output are unchanged. After this evidence is pushed,
+Astra LOW must perform a no-rerun exact-head/current-main confirmation before root opens one PR.
+Merge remains unauthorized pending required CI and a later checked head/base review.

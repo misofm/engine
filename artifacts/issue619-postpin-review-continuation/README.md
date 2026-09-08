@@ -1,0 +1,3 @@
+# Issue619 post-pin continuation — PASS
+
+Head 64ef94fa4a3fd538700a913ab5a8baab17ab4291; live main/merge-base 773682433ef451b89e5359fa8f722e1016c64fb3. Prior 20-entry attempt1 manifest verifies; its SDK preflight status2 remains non-credit. Seven authorized continuation commands all exited zero once: locked SDK install, SDK package, matrix, formatting, diff, workspace and effect-runtime policies. No builder/browser/static/resource/hermetic repeated. Final tracked worktree clean, manifests/locks/source unchanged. Combined qualification PASS permits PR after evidence checkpoint/current-main confirmation, not merge. Exclude target/ from repository evidence.
