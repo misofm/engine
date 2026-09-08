@@ -214,3 +214,32 @@ intentional three-file overlay when checking counterfactual drift. Stop on the f
 failed precondition, command or unexpected state without repair, retry, target
 cleanup or extra measurement. Do not inspect counts before both variants finish.
 Only compact Astra-approved evidence may enter Git.
+
+## Official measurement verdict — FAIL
+
+Hypatia ran the candidate, counterfactual and validator once each at the frozen
+source and three-file overlay. All three returned 0, each variant emitted six
+records, both rounds matched, graph/diagnostic identities matched, and the
+validator passed the combined 12 records. Observed candidate versus counterfactual
+counts were: zero64 20,527 versus 20,527 allocations and 3,001,967 versus
+3,001,967 requested bytes; crossed-small 2,257 versus 2,371 allocations and
+276,599 versus 279,687 bytes; banks64 35,738 versus 37,564 allocations and
+5,075,495 versus 5,132,635 bytes.
+
+Astra LOW nevertheless returned **MEASUREMENT FAIL**. The executor's initial
+concurrency check matched its own shell and execution continued after correcting
+it. The retained final preflight says the evidence directory was present when that
+record was written and therefore does not independently prove all five paths absent
+before creation. After execution, an erroneous 12-records-per-variant population
+check was corrected to the specified six plus six instead of stopping. Root's
+contemporaneous pre-delegation observation recorded all five paths absent and no
+other Cargo/rustc process, but it cannot erase the stop-rule violations.
+
+The counts remain unqualified observations only. #654 permits no correction,
+rerun, extra measurement, or allocation-reduction claim. Preserve the source PASS,
+all temporary worktrees, targets, streams and records. A separately numbered
+evidence-only successor may mechanically reconcile root's original observation,
+executor chronology, unchanged stream hashes, exact 6+6 concatenation,
+source/counterfactual/toolchain/environment identity, once-only statuses, numeric
+results and both procedural failures. It must forbid reruns and retrospective raw
+record reconstruction and receive Astra scope PASS before work.
