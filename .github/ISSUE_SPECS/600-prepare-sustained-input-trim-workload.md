@@ -349,3 +349,10 @@ other rebrief term but rejected an `accepted-traffic or PCM/digest` mutation esc
 gate above preserves both attempted and accepted reported counts while suppressing actual pushes and
 requires the unchanged connected PCM/output digest itself to fail. This scope correction consumes no
 implementation attempt and requires exact-head rereview.
+
+Astra LOW returned **PASS** on corrected exact scope
+`00c1743ac8f9de684dd002df2cc605a1355a6dfd`. The restored mutation must preserve reported
+attempted/accepted counts and fail the unchanged connected PCM/output digest. All previously accepted
+subject-only, zero-timing, script-deletion, durable-evidence and deferred-RT5-closure terms remain in
+force. One implementation attempt remains; Luna HIGH/XHIGH attempt 3 may begin. No timing or capture
+is authorized.
