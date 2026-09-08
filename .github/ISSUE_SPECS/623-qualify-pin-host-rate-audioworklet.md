@@ -96,3 +96,27 @@ manifest entries verify; branch diff hygiene passes; local/GitHub #559/#560/#622
 and all substantive scope corrections remain satisfied. Exactly one frozen-source scratch
 qualification sequence is authorized. It must stop without retry on any failure. Repository
 promotion remains unauthorized until Astra LOW returns candidate PASS.
+
+## Astra LOW scratch candidate qualification — PASS
+
+Astra LOW returned **PASS** for the single authorized qualification at frozen source
+`ca5a8b492a41ba85b3e90d8dedb2b49b787f2f00`; no command was retried. The one scratch-overlay
+builder invocation exited zero and emitted exactly six files. Candidate Wasm SHA-256 is
+`ac71c64033b0cfc637cf14edcacaa6ed1b3bbf7093a5caa641ef84adea7e88e3`. The five non-Wasm files
+match delivered #619/PR #620 exactly: ABI `40f6fe2e…`, declaration `445254e7…`, host JavaScript
+`21c8947d…`, worklet JavaScript `225bc060…`, and parameter metadata `6eac2cb3…`.
+
+Every subsequent command exited zero: matrix generation, shipped static/realtime checks, the
+separate expected-resources/native-witness gate and all 26 red mutations, hermetic worklet gates,
+locked SDK install and 11/11 package tests, locked browser install, one all-browser qualification,
+and final matrix check. Chromium 151.0.7922.34, Firefox 153.0, and WebKit 26.5 passed. Browser rows,
+versions, gate vocabulary, and resources are unchanged; the scratch diff is exactly the provisional
+pin and authorized exact lineage fields plus generated matrix lineage.
+
+Root verified and pushed the 55-entry checksum manifest and 56-file retained record under
+`artifacts/issue623-scratch-qualification/` at evidence checkpoint `a14ececb`. Raw streams/statuses
+and deterministic compressed overlays are preserved. The detached scratch worktree remains at
+`/home/bl/misofm/engine-issue623-artifact-scratch` and the six-file output at
+`/tmp/issue623-qualified-output` for exact promotion/post-pin comparison. Candidate PASS authorizes
+Luna HIGH/XHIGH to make only the conditional three-file repository promotion. It does not authorize
+PR or merge.
