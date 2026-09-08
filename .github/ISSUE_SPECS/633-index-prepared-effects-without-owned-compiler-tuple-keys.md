@@ -114,3 +114,29 @@ sidechain destination and port, and assert heterogeneous bank members and progra
 order. Preserve both failed attempts. Run each authorized gate at most once, stop
 at its first failure, and do not perform allocation qualification, artifact work,
 timing, manifest/dependency repair, or broader refactoring.
+
+## Attempt 3 source review — FAIL; hard stop
+
+Astra LOW reviewed exact clean pushed checkpoint
+`9469b827ef6ab5b0f00b5ce2c8051f92fca9e64c`. The processor-crossing oracle now
+compares rendered PCM and the exact routed-sidechain source, destination and port
+plus heterogeneous bank membership/program assertions materially improve the
+coverage. Production remains frozen and coherent; the review identified no
+production defect, public-boundary change, dependency change or lock drift.
+
+The live-control wrong-association oracle remains insufficient. After deliberately
+crossing control consumers, it asserts only that the rendered PCM contains a
+nonzero sample. It does not compare that output with correctly attached controls
+or an independently derived expected result, so it does not prove that the wrong
+control attachment is observable. The release `track_delay` leg stopped once at
+the known Cargo duplicate-`effect-package` output collision and E0463; it receives
+no credit, was not retried in this attempt, and its baseline/tooling cause remains
+unverified.
+
+This is the third failed implementation attempt. The hard stop forbids another
+correction or weakened gate in #633. Preserve every pushed source, test and verdict
+checkpoint. #633 is superseded by a new narrowly bounded qualification successor
+that inherits the frozen production implementation and owns only the missing
+independent control-ownership discriminator plus release integration evidence.
+Allocation qualification and artifact work remain unauthorized until that
+successor passes its own brief/review workflow.
