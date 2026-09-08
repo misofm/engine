@@ -366,3 +366,28 @@ benchmark, timing/capture, AudioWorklet builder, browser, pin or consumer update
 Astra LOW must review this exact pushed integrated source/evidence head before root's one fresh
 ordinary six-file artifact decision. The earlier `7e242e…` observation remains unqualified and may
 not be reused. No PR or merge authorization exists yet.
+
+## Branch-wide evidence packaging correction
+
+Root's post-review delivery audit found that branch-wide `git diff --check origin/main...HEAD`
+reported whitespace in 32 historical raw evidence captures. The accepted integrated-source PASS,
+merge parents/order, limiter bytes, attempt accounting and gate results are unchanged; this is an
+evidence-packaging correction only.
+
+Root losslessly compressed only the 32 flagged captures with deterministic `gzip -n -9`. The
+pre-compression raw SHA-256, archive SHA-256, raw/archive byte counts and current `.gz` paths are
+recorded in `artifacts/issue539-evidence-packaging/manifest.tsv`. Every archive passes `gzip -t`,
+and all 32 decompressed identities match the original bytes. Historical verdicts, paths embedded in
+raw transcripts, attempt attribution, source and product behavior remain unchanged. Astra LOW must
+review this exact packaging correction and rerun only the failed branch-wide diff check before the
+ordinary artifact decision is authorized.
+
+While that review stop was active, a background helper launched one ordinary no-bypass builder at
+the pre-correction clean head `d63bc437` without root authorization. It observed combined-source
+digest `f80b6392b1ea7141aaac639d08094f88982febb883c4d08c3f1114418093e664` against delivered pin
+`e338adae…`, exited 1 before copying output, and restored the clean committed worktree while the
+packaging correction was in progress. Root detected the race, waited for the process to finish and
+reapplied the 32-file lossless correction. The invocation is preserved candidly under
+`artifacts/issue539-cp8-artifact-decision/`, receives no qualification or decision credit, and will
+not be rerun. Astra LOW must rule whether its observation is usable only to identify a separately
+numbered qualification successor; no pin, lineage, consumer, PR or merge action is authorized.

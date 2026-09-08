@@ -1,7 +1,0 @@
-
-running 2 tests
-test a_desymmetrized_bank_is_a_never_collapsed_bank ... ok
-test the_collapsed_body_renders_the_dual_bodys_left_plane ... ok
-
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
-
