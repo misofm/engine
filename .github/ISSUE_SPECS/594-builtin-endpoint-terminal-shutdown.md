@@ -241,3 +241,15 @@ Restored mutation five now calls the unchanged valid sample, reaches graph execu
 changed render report/advanced clock. Debug integration 20/20, unit 11/11, release integration 20/20,
 strict Clippy, rustdoc, formatting, and diff checks pass; `Cargo.lock` is unchanged. Full record:
 `docs/audits/594-terminal-shutdown-attempt3.md`.
+
+## Attempt 3 review
+
+Astra LOW returned **PASS** at exact evidence head `9e9ea3c6`. All three attempts were used; zero
+remain. Exact Arc accounting/retention, failure-safe and dropped-release rendezvous behavior, and the
+valid-sample graph-execution mutation now directly discriminate their claims. The previously accepted
+lifecycle, ownership, paired-bank/forced-scalar quiescence, fault, cap, realtime, and mutations one
+through four remain intact. Independent debug and release each pass 20 integration plus 11 unit tests,
+with strict Clippy, rustdoc, workspace/host/realtime/CI-routing policies and mutations, native, Wasm
+scalar, and Wasm simd128 checks. Full verdict: `docs/audits/594-attempt3-review.md`. Delivery remains
+pending current-main integration, exact-head Astra LOW review, lane-B artifact disposition, required
+CI, merge, post-main CI, and GitHub synchronization.
