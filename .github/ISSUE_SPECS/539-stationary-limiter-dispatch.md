@@ -369,10 +369,10 @@ not be reused. No PR or merge authorization exists yet.
 
 ## Branch-wide evidence packaging correction
 
-Root's post-review delivery audit found that branch-wide `git diff --check origin/main...HEAD`
-reported whitespace in 32 historical raw evidence captures. The accepted integrated-source PASS,
-merge parents/order, limiter bytes, attempt accounting and gate results are unchanged; this is an
-evidence-packaging correction only.
+Astra LOW's integrated-head review found no source defect but returned **FAIL** for evidence hygiene
+and withheld artifact authorization because branch-wide `git diff --check origin/main...HEAD`
+reported whitespace in 32 historical raw evidence captures. Merge parents/order, limiter bytes,
+attempt accounting and gate results are unchanged; this is an evidence-packaging correction only.
 
 Root losslessly compressed only the 32 flagged captures with deterministic `gzip -n -9`. The
 pre-compression raw SHA-256, archive SHA-256, raw/archive byte counts and current `.gz` paths are
@@ -380,24 +380,28 @@ recorded in `artifacts/issue539-evidence-packaging/manifest.tsv`. Every archive 
 and all 32 decompressed identities match the original bytes. Historical verdicts, paths embedded in
 raw transcripts, attempt attribution, source and product behavior remain unchanged. Astra LOW must
 review this exact packaging correction and rerun only the failed branch-wide diff check before PR
-delivery. The correction changes no compiled input, so the authorized ordinary artifact decision
-from the preceding clean source head remains attributable.
+delivery. The background builder invocation was unauthorized and receives no qualification credit;
+unchanged compiled inputs preserve only the provenance of its reported digest.
 
-## Combined-source ordinary artifact decision — drift
+## Unauthorized combined-source artifact observation — retained without qualification credit
 
-At exact clean pushed integrated head `d63bc437e948d6284b1b6cbe459f0b46c4ed6566`, Astra LOW acting
-for lane B ran exactly one fresh ordinary no-bypass `scripts/build-web-audioworklet.sh` invocation.
-Compilation succeeded, then the builder correctly exited 1 at its pin guard: combined-source Wasm
-SHA-256 `f80b6392b1ea7141aaac639d08094f88982febb883c4d08c3f1114418093e664` differs from delivered
-CP8 pin `e338adae98454d0a365c0ef281aa6b3dcb24d5dc0a36427f917566682e0ff27b`. The output directory
-contains zero files because the guard precedes publication and removes its temporary module.
+At exact clean pushed integrated head `d63bc437e948d6284b1b6cbe459f0b46c4ed6566`, a background
+helper launched one ordinary no-bypass `scripts/build-web-audioworklet.sh` invocation after the
+review FAIL had withheld artifact authorization. Compilation succeeded, then the builder exited 1
+at its pin guard: combined-source Wasm SHA-256
+`f80b6392b1ea7141aaac639d08094f88982febb883c4d08c3f1114418093e664` differs from delivered CP8
+pin `e338adae98454d0a365c0ef281aa6b3dcb24d5dc0a36427f917566682e0ff27b`. The output directory
+contains zero files because the guard precedes publication and removes its temporary module. The
+helper restored the clean committed worktree while root's packaging correction was in progress;
+root detected the race, waited for the helper to finish and reapplied the lossless correction.
 
 The 13-file checksum-verified record under `artifacts/issue539-cp8-artifact-decision/` preserves
 exact argv, source/main and toolchain/input identities, full streams/status, delivered manifest,
 observed digest and empty census. No retry, qualification, browser, pin/lineage/consumer/source
-edit, benchmark, timing or capture occurred. Retained attribution does not apply. A separately
-numbered lane-B successor must qualify this exact candidate and conditionally promote only the pin
-and two generated lineage surfaces before #539 can enter PR delivery.
+edit, benchmark, timing or capture occurred. Retained attribution does not apply. Subject to
+corrected-record review and a separately approved numbered scope, the observed digest may serve only
+as the expected candidate for one scratch qualification. No pin, lineage, PR or merge authorization
+follows.
 
 ## Initial packaging and artifact-record review — FAIL
 
