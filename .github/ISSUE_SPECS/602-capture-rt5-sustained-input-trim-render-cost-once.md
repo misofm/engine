@@ -201,3 +201,18 @@ publication, bookkeeping and hashing remain outside the timed closure; and every
 failure consumes capture authority and requires a successor. Luna HIGH/XHIGH implementation may
 begin. Final preflight, the real timed entry and capture remain unauthorized pending Astra LOW
 source/harness PASS.
+
+## Attempt 1 adversarial verdict
+
+Attempt 1 and its single bounded runner correction are preserved at
+`68950adf1a1f2458431f64d9a5fc84766e182d45`. Astra LOW returned **FAIL**. The timing seam is narrow
+and #600 remains untimed, but the runner can publish PASS with missing lifecycle markers; the
+self-test omits required record and successful-lifecycle cases; no-clobber publication failures can
+fall through to READY/PASS; preflight leaves build-affecting Cargo environment inputs uncontrolled;
+and strict validation does not freeze or bound the full workload identity. A stub-only reproduction
+published valid records as PASS with zero lifecycle markers and zero reported timed calls. No final
+preflight, real capture entry, or timer ran.
+
+The issue's sole runner correction is consumed. Issue #602 stops without capture, and repair and
+promotion move to a numbered successor. The detailed review is
+`docs/audits/602-attempt1-review.md`.
