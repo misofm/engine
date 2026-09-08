@@ -2,7 +2,7 @@
 
 ## Status
 
-Open. This is the evidence-first lane-A child for audit #559 finding FX4, based on delivered main `62045f40048ec230298fe0fd3935da3333f90b83`. It occupies the second active issue slot beside disjoint lane-B #633.
+Final evidence PASS; pending exact-head PR review. This is the evidence-first lane-A child for audit #559 finding FX4, based on delivered main `62045f40048ec230298fe0fd3935da3333f90b83`. It occupies the second active issue slot beside disjoint lane-B #633.
 
 ## Problem
 
@@ -204,3 +204,19 @@ retained evidence manifest, `git diff --check` passed, and no product/source,
 test, dependency, generated payload, or full compiler-output path was changed.
 Suggested final Astra verdict: **FINAL CORRECTED EVIDENCE READY FOR REVIEW; no
 source implementation authorized**.
+
+### Attempt 3 Astra verdict
+
+Astra LOW returned **PASS** at exact clean pushed head
+`b2a5e9577c34e41ed29c24002a8914d88e78fef1`. The independent review verified
+the retained native and Wasm instruction locations, both constant identities,
+caller/loop attribution, evidence integrity, unchanged raw captures, preserved
+attempt-1/2 FAIL records, exact GitHub synchronization, and absence of source
+change or recapture.
+
+The definitive disposition is **ACTIONABLE RESIDUAL**, limited to
+`DB_PER_OCTAVE` and `OCTAVES_PER_DB`. #635 may close as the delivered evidence/
+applicability slice after exact-head review, required CI and post-main delivery.
+It establishes no speedup and authorizes no source implementation. A separately
+numbered successor must own any transient-shaper source work under fresh Luna
+XHIGH implementation and Astra LOW scope/source reviews.
