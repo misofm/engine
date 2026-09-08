@@ -210,3 +210,24 @@ run one SDK check followed by matrix `--check`, formatting, diff hygiene,
 workspace policy, and effect-runtime policy once. Record actual statuses and
 stop first failure. No install or other excluded workload is authorized; no PR
 or merge may proceed before Astra LOW final evidence review.
+
+## Astra LOW final attempt review — FAIL; hard stop
+
+Astra LOW failed attempt 3 at exact clean pushed head
+`28e1041944da9140e1a9374af58009793436fbd8` against live main `30680709`.
+All four manifest entries verify and only spec/evidence changed. The retained
+lease exactly matches the spec-recorded SHA and authorized executor/head. Luna
+stopped because its incompatible expected text rejected the added attempt field
+and scope spelling; this is not evidence of a conflicting owner. No installed-
+state preflight, SDK, matrix, formatting, diff, workspace, or effect-runtime
+check ran or receives credit.
+
+#628 is exhausted under the repository three-attempt rule. No fourth execution,
+retry, weakened gate, PR, or merge is authorized. The accepted promotion remains
+inherited and unmerged; no revert repairs this coordination failure. A separately
+numbered successor may brief only installed-state verification and the six
+unexecuted delivery checks, with one authoritative lease byte representation
+agreed before execution. It must preserve this refusal distinctly from an actual
+lease-integrity failure, reuse the retained install/output/qualification/
+promotion, and forbid install, build, static/resource/hermetic, and browser
+repetition.
