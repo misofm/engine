@@ -45,13 +45,14 @@ must distinguish reusable cancellation from terminal shutdown. `begin_shutdown` 
 once, returns or retains the existing opaque `CoreCancelToken`, and permanently changes admission to
 a typed refusal before publishing the boundary message. If generic cancellation is already pending,
 shutdown refuses without changing that cancellation; if terminal shutdown has begun or completed,
-duplicate begin/poll calls return the specified stale/terminal error and cannot create another
-boundary message or completion.
+duplicate begin calls return the specified terminal error and cannot create another boundary message
+or completion.
 
-`poll_shutdown` validates the exact token. Before render acknowledgement it returns Pending. After
-acknowledgement but while any accepted terminal is uncollected it remains Pending. Only after exact
-terminal collection does it return one completion containing the matched token, frozen frontier, and
-acknowledged sample. Completion is not inferred from `outstanding == 0` alone and cannot precede the
+`poll_shutdown` validates the exact token. Repeated correctly tokened polls before render
+acknowledgement return Pending. After acknowledgement but while any accepted terminal is uncollected,
+repeated correctly tokened polls remain Pending. Only after exact terminal collection does one poll
+return one completion containing the matched token, frozen frontier, and acknowledged sample; later
+polls fail as stale. Completion is not inferred from `outstanding == 0` alone and cannot precede the
 generic acknowledgement. Ordinary `begin_cancel`/`poll_cancel_boundary` retains its existing
 reusable behavior and reopens admission after its matched completion.
 
@@ -80,11 +81,23 @@ Allowed implementation paths:
 
 Do not edit protocol, engine, graph, builtins, builtins-compiler, other host-core modules,
 `crates/host-core/Cargo.toml`, `Cargo.lock`, hosts, C ABI, browser, SDK, artifacts, policies,
-workflows, or lane B #593 paths. Reuse the existing generic cancellation storage; no new queue,
-ledger, heap allocation, manifest dependency, target-handle mapping, generation clear, plan exchange,
-or public raw producer is authorized. Any added inline endpoint state must be reported truthfully by
-the existing inline-owner resource fields. If a new retained heap allocation or generic delivery
-change appears necessary, stop and rebrief rather than widening this child.
+workflows, or lane B #593 paths. Reuse the existing generic cancellation storage. One prepared shared
+`Arc<AtomicBool>` terminal-intent discriminator is authorized because the generic cancellation
+payload intentionally carries only its token and frontier. Allocate it during endpoint preparation,
+clone it once into the control/render owners, and charge its exact allocation plus both inline handles
+through the existing endpoint resource report before host preparation. Prove checked overflow,
+exact-cap acceptance, one-below-cap refusal before any allocation, positive lifetime accounting, and
+off-render final reclamation.
+
+`begin_shutdown` stores terminal intent with Release ordering before publishing the generic
+cancellation message. If generic `begin_cancel` fails for any reason, it restores the discriminator
+and every control lifecycle field before returning the error. Render may load the discriminator with
+Acquire ordering only after `cancel_boundary(first)` successfully consumes and acknowledges the
+matching generic message; observing the flag without a cancellation message can never quiesce render.
+The flag stays set after successful shutdown. No new queue, ledger, other heap allocation, protocol
+payload, manifest dependency, target-handle mapping, generation clear, plan exchange, or public raw
+producer is authorized. If this one atomic discriminator is insufficient, stop and rebrief rather
+than widening this child.
 
 Direct red mutations may temporarily change one named shutdown predicate/order in the endpoint
 module, run its focused discriminator, and restore the source. Mutations are never staged or
@@ -111,8 +124,9 @@ committed.
 5. Preserve the complete #576/#579/#580/#587 endpoint suite: admission/cutoff/late behavior,
    cancellation, sticky fault, resource caps, allocator lifetime, selected bank/scalar pairing,
    PostFader observations, exact decline behavior, and bitwise reference equivalence.
-6. Run the positive allocation/free audit plus repeated shutdown acknowledgement and terminal
-   quiescent calls with zero allocations/frees. Stop only after render quiescence; prove the returned
+6. Run the positive allocation/free audit plus exact/one-below resource-cap preparation and repeated
+   shutdown acknowledgement and terminal quiescent calls with zero allocations/frees. Stop only
+   after render quiescence; prove the returned
    owner keeps all coupled storage alive until off-render drop and that teardown releases it there.
 7. Run and restore four behavioral red mutations: publish completion before render acknowledgement;
    publish before final ticket collection; reopen admission after shutdown; permit graph execution
