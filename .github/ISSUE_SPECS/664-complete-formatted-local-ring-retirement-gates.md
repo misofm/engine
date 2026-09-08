@@ -110,3 +110,20 @@ Then use exact-head/current-main PR readiness, required qualification, guarded
 merge-parent review, post-main qualification, GitHub synchronization, and clean
 delivered-worktree removal. #659 evidence and worktree remain held until this
 successor's source review explicitly releases them.
+
+## Scope authorization
+
+Astra LOW returned **SCOPE PASS** at exact clean pushed head/upstream
+`900f51f00492850e0c594e5b85b62642c6c835ba`, current main
+`6f4a1b1c893ce04fbe8001e9d175702eba9a9d78`, and tracker
+`6d4aba09734c208df8e1d6cb4cbcc7948512ce64`. GitHub #664 matches; #659 is
+closed, #663 is open and documentation-only, all four declared temporary paths
+are absent including symlinks, and this branch contains only the brief.
+
+Hypatia alone is authorized for one bounded attempt: import exactly the three
+#659 product files, apply only the two prescribed formatting changes, prove that
+exact difference before carrying the four successful gates, and run the listed
+gates once with capture controls and complete records. Branch-wide whitespace
+must check both uncommitted changes and `origin/main...HEAD`; tracker changes
+remain root-owned. Stop on first unexpected failure. No artifact or pin action is
+authorized, and all #659 recovery state remains held through source review.
