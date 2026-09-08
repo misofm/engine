@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
 
-use engine::realtime::{observation_slot, ObservationReader, ObservationWindow};
+use engine::realtime::{ObservationReader, ObservationWindow, observation_slot};
 
 /// One million windows, which is the eval's number.
 const WINDOWS: u64 = 1_000_000;
