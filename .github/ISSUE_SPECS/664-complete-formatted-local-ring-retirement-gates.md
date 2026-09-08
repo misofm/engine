@@ -127,3 +127,23 @@ gates once with capture controls and complete records. Branch-wide whitespace
 must check both uncommitted changes and `origin/main...HEAD`; tracker changes
 remain root-owned. Stop on first unexpected failure. No artifact or pin action is
 authorized, and all #659 recovery state remains held through source review.
+
+## Attempt 1 result
+
+Hypatia's preflight proved exact identities, four fresh absent/non-symlink paths,
+and capture-control statuses 0 and 1. The three inherited product files plus only
+the two authorized format hunks have formatting-delta hash
+`8be2b7753c3b468b3e05b43f3ca23979ec694f0147fdca1b3fd2888a4564cd5c`.
+Format, full working/branch diff and census, and workspace policy returned 0.
+Realtime policy returned 1 because removing `LocalRing` also removes one genuine
+marked realtime region: the delivered tree has 41 regions in 12 files while the
+policy floor still requires 42. Gates 5-9 did not run; no correction or retry
+occurred, and no Wasm or Cargo target path was created.
+
+Product source checkpoint `6f5c094895551b9f259f0ba503d0d8b5ed9fb3c6` is clean and
+pushed. The self-excluding manifest under
+`/tmp/issue664-attempt1-source-evidence` verifies and hashes to
+`744d8ba24b72cff27fb2efb6a332d3ddedfdfee1aca791b5a7462829b98fe83b`.
+No compiler payload or artifact work ran. Attempt 1 is **FAIL** pending Astra LOW
+review of the direct realtime-policy count dependency; no policy edit or further
+gate is authorized yet.
