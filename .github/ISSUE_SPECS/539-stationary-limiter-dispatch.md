@@ -338,3 +338,31 @@ source and attempt accounting, rerun proportional integrated-source gates, and o
 PASS. Lane B must then make one fresh ordinary six-file decision from the combined source. Byte
 identity permits retained attribution; drift moves qualification/pinning to one separately numbered
 successor. No benchmark, timing/capture or speedup claim is authorized.
+
+## Current-main integration — green checkpoint
+
+Astra LOW returned integration-scope **PASS** at exact clean pushed head
+`2fd796597693a78577c2e5ee931404068a1ef067` against live main
+`773682433ef451b89e5359fa8f722e1016c64fb3`, merge-base `9e113be9`, and tracker
+`3249703d`. The branch deltas had no overlapping paths and the read-only merge preview had no
+conflicts. Historical #552/#558 and #542 order, the accepted attempt accounting, path ownership,
+and the stale status of candidate `7e242e…` all passed.
+
+Luna HIGH then performed the authorized history-preserving integration without conflicts. Root
+checkpointed and pushed merge `110dc525ea33742c00bd97a54fa7c60b8738f2af`, whose parents are
+exactly `2fd79659` then `77368243`. The accepted limiter files remain byte-identical at SHA-256
+`677a5596…` for `src/lib.rs`, `7825d307…` for `tests/allocation.rs`, and `1f42a58d…` for
+`tests/mono_collapse.rs`. Attempt 1 remains FAIL and attempt 2 remains PASS; integration is not a
+new optimization attempt.
+
+The locked full limiter suite passed 42 tests with its one descriptive benchmark ignored. Focused
+mono debug/release, private selector, allocation/liveness, determinism, strict Clippy/format,
+realtime/lane/workspace/environment policies, native ABI and Wasm realtime-atomics passed. Native,
+scalar Wasm and SIMD128 Wasm each passed 139 corpus cases and 349 comparisons with zero mismatches.
+Scalar and SIMD128 host-web release builds passed, with vector opcodes absent/present respectively.
+The bounded record and checksum manifest are under `artifacts/issue539-cp8-integration/`; no
+benchmark, timing/capture, AudioWorklet builder, browser, pin or consumer update occurred.
+
+Astra LOW must review this exact pushed integrated source/evidence head before root's one fresh
+ordinary six-file artifact decision. The earlier `7e242e…` observation remains unqualified and may
+not be reused. No PR or merge authorization exists yet.
