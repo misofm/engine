@@ -63,3 +63,30 @@ Luna XHIGH may now perform the read-only installed-state/output preflight and,
 only after PASS, the six named delivery checks once in order. It stops on first
 failure. No installation, predecessor qualification work, product edit, PR or
 merge is authorized before Astra LOW reviews the resulting evidence.
+
+## Attempt 1 evidence review — procedural FAIL
+
+The sole executor completed the preflight and all six checks once; their retained
+status records are zero, the SDK suite reports 11/11, and the evidence checkpoint
+is `ddfcf86d75b365df05a4e58e2a8985a4dcd74784`. Astra LOW verified every retained
+manifest and summary hash without rerunning a command. The attempt nevertheless
+fails because the lease authorized reviewed head `6b59637a` while the executor
+ran from its documentation-only child `4c729144`. The preflight proved that
+parent relationship instead of enforcing `HEAD == authorized_head`.
+
+Preserve this procedural FAIL and the earlier registry-based no-execution
+observation in chronological order. Do not relabel the attempt, edit its records,
+or rerun any preflight, SDK, matrix, formatting, diff, workspace, or effect-runtime
+check. Attempt 2 owns only a compact documentation/evidence disposition from
+existing Git objects and attempt-1 records. It must identify the exact paths and
+bytes changed from `6b59637a` through execution head `4c729144`, prove that no
+product, dependency, lock, script, workflow, promotion, result, resource, ABI,
+SDK surface, source, or retained six-file output input changed, and state the
+limited technical applicability of the already-retained zero-status results.
+It must not claim attempt-1 PASS or execute a product gate.
+
+Luna HIGH may prepare that disposition as one exact-path evidence tranche. Root
+must checkpoint and push it immediately. Astra LOW then performs a no-rerun
+adversarial review and decides whether the unchanged-input proof is sufficient
+for delivery. No PR, merge, issue closure, or further command is authorized
+before that review.
