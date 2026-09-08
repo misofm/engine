@@ -188,11 +188,13 @@ fn retained_endpoint_report_matches_independent_concrete_layout_oracle() {
     assert_eq!(resources.outcome.largest_allocation_bytes, outcome_largest);
     assert_eq!(
         resources.endpoint_retained_heap_bytes,
-        delivery_bytes + outcome_bytes
+        delivery_bytes + outcome_bytes + resources.lifecycle_heap_bytes
     );
     assert_eq!(
         resources.largest_endpoint_heap_allocation_bytes,
-        delivery_largest.max(outcome_largest)
+        delivery_largest
+            .max(outcome_largest)
+            .max(resources.lifecycle_heap_bytes)
     );
 }
 
@@ -378,6 +380,7 @@ fn batch_applies_one_fifo_ticket_at_a_late_boundary_and_reconciles() {
             .delivery
             .retained_payload_bytes
             .checked_add(resources.outcome.retained_payload_bytes)
+            .and_then(|bytes| bytes.checked_add(resources.lifecycle_heap_bytes))
             .expect("endpoint resource sum")
     );
     assert_eq!(
@@ -1244,5 +1247,130 @@ fn cancellation_reconciles_applied_and_future_frontier_dispositions() {
             .poll_cancel_boundary(next_token)
             .expect("next final poll")
             .is_some()
+    );
+}
+
+#[test]
+fn terminal_shutdown_acknowledges_once_then_quiesces_and_reconciles() {
+    let (mut control, mut render, resources) = endpoint_with_capacity(2);
+    assert!(resources.lifecycle_heap_bytes > 0);
+    assert_eq!(
+        resources.lifecycle_inline_handle_bytes,
+        (core::mem::size_of::<std::sync::Arc<std::sync::atomic::AtomicU8>>() * 2) as u64
+    );
+
+    let applied_batch = BuiltinBatch::new(
+        REVISION,
+        SampleTime(0),
+        &[BuiltinBatchRecord::Fader {
+            track_index: 0,
+            record: TrackFaderRecord::Mute {
+                lanes: BuiltinLaneSelector::Both,
+                muted: true,
+                smoothing_samples: 0,
+            },
+        }],
+    )
+    .unwrap();
+    let future_batch = BuiltinBatch::new(
+        REVISION,
+        SampleTime((QUANTUM * 2) as u64),
+        &[BuiltinBatchRecord::Matrix {
+            track_index: 1,
+            record: TrackControlRecord {
+                matrix: Matrix2x2 {
+                    ll: 0.5,
+                    lr: 0.25,
+                    rl: -0.25,
+                    rr: 0.75,
+                },
+                smoothing_samples: 4,
+            },
+        }],
+    )
+    .unwrap();
+    let applied_ticket = control.try_publish(applied_batch).expect("applied ticket");
+    let future_ticket = control.try_publish(future_batch).expect("future ticket");
+    assert!(render_block(&mut render, 0).applied.is_some());
+
+    let token = control.begin_shutdown().expect("shutdown token");
+    assert!(matches!(
+        control.try_publish(future_batch),
+        Err(BuiltinBatchAdmissionError::Delivery {
+            error: protocol::DeliveryError::CancellationPending,
+            ..
+        })
+    ));
+    assert_eq!(control.poll_shutdown(token), Ok(None));
+
+    let acknowledgement = render_block(&mut render, QUANTUM as u64);
+    assert!(acknowledgement.cancellation_only);
+    assert!(acknowledgement.shutdown);
+    assert!(acknowledgement.graph.is_none());
+    assert!(acknowledgement.applied.is_none());
+    assert_eq!(control.poll_shutdown(token), Ok(None));
+
+    let applied = control.collect(applied_ticket).expect("applied collection");
+    assert_eq!(applied.disposition, CoreTerminalDisposition::Applied);
+    let canceled = control.collect(future_ticket).expect("canceled collection");
+    assert_eq!(canceled.disposition, CoreTerminalDisposition::Canceled);
+    assert_eq!(canceled.applied_prefix, 0);
+    assert_eq!(canceled.remaining_count, 1);
+    assert_eq!(
+        canceled.acknowledged_sample,
+        Some(SampleTime(QUANTUM as u64))
+    );
+
+    let complete = control
+        .poll_shutdown(token)
+        .expect("shutdown poll")
+        .expect("shutdown completion");
+    assert_eq!(complete.token, token);
+    assert_eq!(complete.frontier, Some(future_ticket.serial));
+    assert_eq!(complete.acknowledged_sample, SampleTime(QUANTUM as u64));
+    assert_eq!(
+        control.poll_shutdown(token),
+        Err(host_core::BuiltinBatchShutdownError::StaleTicket)
+    );
+    assert_eq!(
+        control.begin_shutdown(),
+        Err(host_core::BuiltinBatchShutdownError::ShutdownPending)
+    );
+
+    let mut invalid = [0.0_f32; 1];
+    let later = render.render(&mut invalid, 1, 1, 1, SampleTime(99));
+    assert!(
+        later.expect("quiescent render").shutdown,
+        "terminal render remains stable even for an invalid later shape"
+    );
+}
+
+#[test]
+fn ordinary_cancel_remains_reusable_before_terminal_shutdown() {
+    let (mut control, mut render, _) = endpoint_with_capacity(1);
+    let ordinary = control.begin_cancel().expect("ordinary cancel");
+    assert_eq!(
+        control.begin_shutdown(),
+        Err(host_core::BuiltinBatchShutdownError::CancellationPending)
+    );
+    assert!(render_block(&mut render, 0).cancellation_only);
+    assert_eq!(
+        control.poll_cancel_boundary(ordinary),
+        Ok(Some(protocol::CoreCancelComplete {
+            token: ordinary,
+            frontier: None,
+            acknowledged_sample: SampleTime(0),
+        }))
+    );
+
+    let terminal = control.begin_shutdown().expect("terminal shutdown");
+    assert!(render_block(&mut render, 0).shutdown);
+    assert_eq!(
+        control.poll_shutdown(terminal),
+        Ok(Some(host_core::BuiltinBatchShutdownComplete {
+            token: terminal,
+            frontier: None,
+            acknowledged_sample: SampleTime(0),
+        }))
     );
 }

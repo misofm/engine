@@ -6,6 +6,8 @@
 //! queues, and only finishes the ticket after the graph has rendered the block.
 
 use core::num::NonZeroUsize;
+use core::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Arc;
 
 use builtins_compiler::{TrackControlProducer, TrackControlRecord, TrackFaderRecord};
 use engine::realtime::{
@@ -194,11 +196,15 @@ pub struct BuiltinBatchResources {
     pub outcome: DeliveryResourceReport,
     /// Retained bytes reported by existing host preparation.
     pub host_builtin_retained_payload_bytes: u64,
-    /// Retained heap bytes added by the generic delivery and endpoint outcome queues.
+    /// Retained heap bytes added by the generic delivery, outcome queues, and lifecycle handshake.
     pub endpoint_retained_heap_bytes: u64,
+    /// The one prepared lifecycle handshake allocation charged to this endpoint.
+    pub lifecycle_heap_bytes: u64,
+    /// The two inline lifecycle handles retained by the control and render owners.
+    pub lifecycle_inline_handle_bytes: u64,
     /// Checked host-plus-endpoint retained heap composition.
     pub composed_retained_heap_bytes: u64,
-    /// Largest endpoint-owned retained heap allocation.
+    /// Largest endpoint-owned retained heap allocation, including the lifecycle handshake.
     pub largest_endpoint_heap_allocation_bytes: u64,
     /// Largest retained heap allocation reported by the unchanged host preparation.
     pub largest_host_engine_allocation_bytes: u64,
@@ -227,6 +233,58 @@ pub enum BuiltinBatchPrepareError {
     ResourceLimit,
 }
 
+/// The endpoint-local lifecycle states shared by its control and render owners.
+///
+/// The generic cancellation message carries only its token and frontier, so this small prepared
+/// handshake is the endpoint's bounded intent/classification channel.  Values are deliberately
+/// private to keep the state machine an implementation detail of the endpoint.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LifecycleState {
+    Idle = 0,
+    OrdinaryPending = 1,
+    ShutdownPending = 2,
+    ShutdownAcknowledged = 3,
+}
+
+impl LifecycleState {
+    fn from_byte(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::Idle),
+            1 => Some(Self::OrdinaryPending),
+            2 => Some(Self::ShutdownPending),
+            3 => Some(Self::ShutdownAcknowledged),
+            _ => None,
+        }
+    }
+}
+
+/// A terminal endpoint shutdown completion.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BuiltinBatchShutdownComplete {
+    /// The exact cancellation token accepted by [`BuiltinBatchControl::begin_shutdown`].
+    pub token: CoreCancelToken,
+    /// The frozen publication frontier captured by the generic delivery core.
+    pub frontier: Option<u64>,
+    /// The exact valid render boundary that acknowledged shutdown.
+    pub acknowledged_sample: SampleTime,
+}
+
+/// A typed refusal from the terminal shutdown API.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BuiltinBatchShutdownError {
+    /// The endpoint is already serving a reusable cancellation boundary.
+    CancellationPending,
+    /// Terminal shutdown was already accepted or completed.
+    ShutdownPending,
+    /// The supplied token does not identify the active shutdown.
+    StaleTicket,
+    /// The generic delivery core rejected publication or polling.
+    Delivery(DeliveryError),
+    /// A sticky render fault prevents terminal certification.
+    Fault,
+}
+
 /// Control-side owner of typed batch admission, cancellation and terminal collection.
 pub struct BuiltinBatchControl {
     delivery: DeliveryCoreControl<BuiltinBatch>,
@@ -245,6 +303,7 @@ pub struct BuiltinBatchControl {
     cancel_token: Option<CoreCancelToken>,
     cancel_completion_reported: bool,
     last_collected: Option<CoreTicket>,
+    lifecycle: Arc<AtomicU8>,
 }
 
 impl BuiltinBatchControl {
@@ -254,7 +313,10 @@ impl BuiltinBatchControl {
         &mut self,
         batch: BuiltinBatch,
     ) -> Result<CoreTicket, BuiltinBatchAdmissionError> {
-        if self.cancellation_started || self.cancel_complete.is_some() {
+        if self.cancellation_started
+            || self.cancel_complete.is_some()
+            || self.lifecycle.load(Ordering::Acquire) != LifecycleState::Idle as u8
+        {
             return Err(BuiltinBatchAdmissionError::Delivery {
                 batch,
                 error: DeliveryError::CancellationPending,
@@ -321,10 +383,22 @@ impl BuiltinBatchControl {
 
     /// Begin ordered cancellation of all accepted batches.
     pub fn begin_cancel(&mut self) -> Result<CoreCancelToken, DeliveryError> {
-        if self.cancellation_started || self.cancel_complete.is_some() {
+        if self.cancellation_started
+            || self.cancel_complete.is_some()
+            || self.lifecycle.load(Ordering::Acquire) != LifecycleState::Idle as u8
+        {
             return Err(DeliveryError::CancellationPending);
         }
-        let token = self.delivery.begin_cancel()?;
+        self.lifecycle
+            .store(LifecycleState::OrdinaryPending as u8, Ordering::Release);
+        let token = match self.delivery.begin_cancel() {
+            Ok(token) => token,
+            Err(error) => {
+                self.lifecycle
+                    .store(LifecycleState::Idle as u8, Ordering::Release);
+                return Err(error);
+            }
+        };
         self.cancellation_started = true;
         self.cancel_complete = None;
         self.cancel_token = Some(token);
@@ -341,7 +415,9 @@ impl BuiltinBatchControl {
             return Err(DeliveryError::StaleTicket);
         }
         if let Some(complete) = self.cancel_complete {
-            if self.outstanding != 0 {
+            if self.outstanding != 0
+                || self.lifecycle.load(Ordering::Acquire) != LifecycleState::Idle as u8
+            {
                 return Ok(None);
             }
             return self.finalize_cancel_completion(complete);
@@ -349,7 +425,9 @@ impl BuiltinBatchControl {
         let complete = self.delivery.poll_cancel_boundary(token)?;
         if let Some(complete) = complete {
             self.cancel_complete = Some(complete);
-            if self.outstanding == 0 {
+            if self.outstanding == 0
+                && self.lifecycle.load(Ordering::Acquire) == LifecycleState::Idle as u8
+            {
                 return self.finalize_cancel_completion(complete);
             }
         }
@@ -413,6 +491,85 @@ impl BuiltinBatchControl {
         self.outstanding
     }
 
+    fn lifecycle_state(&self) -> Result<LifecycleState, BuiltinBatchShutdownError> {
+        LifecycleState::from_byte(self.lifecycle.load(Ordering::Acquire))
+            .ok_or(BuiltinBatchShutdownError::Fault)
+    }
+
+    /// Begin terminal shutdown using one reserved generic cancellation boundary.
+    ///
+    /// Admission closes before the generic boundary message is published.  If that publication
+    /// fails, the endpoint returns to the reusable idle state without retaining any cancellation
+    /// fields from the failed attempt.
+    pub fn begin_shutdown(&mut self) -> Result<CoreCancelToken, BuiltinBatchShutdownError> {
+        match self.lifecycle_state()? {
+            LifecycleState::Idle => {}
+            LifecycleState::OrdinaryPending => {
+                return Err(BuiltinBatchShutdownError::CancellationPending);
+            }
+            LifecycleState::ShutdownPending | LifecycleState::ShutdownAcknowledged => {
+                return Err(BuiltinBatchShutdownError::ShutdownPending);
+            }
+        }
+        self.lifecycle
+            .store(LifecycleState::ShutdownPending as u8, Ordering::Release);
+        let token = match self.delivery.begin_cancel() {
+            Ok(token) => token,
+            Err(error) => {
+                self.lifecycle
+                    .store(LifecycleState::Idle as u8, Ordering::Release);
+                return Err(BuiltinBatchShutdownError::Delivery(error));
+            }
+        };
+        self.cancellation_started = true;
+        self.cancel_complete = None;
+        self.cancel_token = Some(token);
+        self.cancel_completion_reported = false;
+        Ok(token)
+    }
+
+    /// Poll terminal shutdown until render acknowledgement and all accepted terminals exist.
+    pub fn poll_shutdown(
+        &mut self,
+        token: CoreCancelToken,
+    ) -> Result<Option<BuiltinBatchShutdownComplete>, BuiltinBatchShutdownError> {
+        if self.cancel_token != Some(token) {
+            return Err(BuiltinBatchShutdownError::StaleTicket);
+        }
+        match self.lifecycle_state()? {
+            LifecycleState::ShutdownPending | LifecycleState::ShutdownAcknowledged => {}
+            LifecycleState::OrdinaryPending => {
+                return Err(BuiltinBatchShutdownError::CancellationPending);
+            }
+            LifecycleState::Idle => return Err(BuiltinBatchShutdownError::StaleTicket),
+        }
+        if self.cancel_completion_reported {
+            return Err(BuiltinBatchShutdownError::StaleTicket);
+        }
+        if self.cancel_complete.is_none() {
+            let complete = self
+                .delivery
+                .poll_cancel_boundary(token)
+                .map_err(BuiltinBatchShutdownError::Delivery)?;
+            if let Some(complete) = complete {
+                self.cancel_complete = Some(complete);
+            }
+        }
+        if self.lifecycle_state()? != LifecycleState::ShutdownAcknowledged
+            || self.cancel_complete.is_none()
+            || self.outstanding != 0
+        {
+            return Ok(None);
+        }
+        let complete = self.cancel_complete.expect("checked above");
+        self.cancel_completion_reported = true;
+        Ok(Some(BuiltinBatchShutdownComplete {
+            token: complete.token,
+            frontier: complete.frontier,
+            acknowledged_sample: complete.acknowledged_sample,
+        }))
+    }
+
     /// Borrow the existing host source control set retained by this endpoint.
     pub fn sources(&mut self) -> &mut SourceControlSet {
         &mut self.sources
@@ -433,6 +590,7 @@ pub struct PreparedBuiltinBatchRender {
     pending: Option<(CoreTicket, BuiltinBatch)>,
     quantum: u32,
     output_channels: usize,
+    lifecycle: Arc<AtomicU8>,
 }
 
 /// Thread-affine render owner with private raw builtin producers.
@@ -457,6 +615,7 @@ pub struct StartedBuiltinBatchRender {
     pending: Option<(CoreTicket, BuiltinBatch)>,
     quantum: u32,
     output_channels: usize,
+    lifecycle: Arc<AtomicU8>,
     fault: Option<BuiltinBatchRenderError>,
     #[cfg(test)]
     fail_after_graph: bool,
@@ -473,6 +632,8 @@ pub struct BuiltinBatchRenderReport {
     pub graph: Option<engine::realtime::RenderReport>,
     /// True when this was a cancellation-only boundary and the graph was untouched.
     pub cancellation_only: bool,
+    /// True when this boundary permanently quiesced the endpoint for terminal shutdown.
+    pub shutdown: bool,
     /// The ticket claimed and applied at this boundary, if any.
     pub applied: Option<BuiltinBatchApplication>,
 }
@@ -526,6 +687,18 @@ impl StartedBuiltinBatchRender {
         if let Some(fault) = self.fault {
             return Err(fault);
         }
+        let Some(lifecycle) = LifecycleState::from_byte(self.lifecycle.load(Ordering::Acquire))
+        else {
+            return self.sticky(BuiltinBatchRenderError::Fault);
+        };
+        if lifecycle == LifecycleState::ShutdownAcknowledged {
+            return Ok(BuiltinBatchRenderReport {
+                graph: None,
+                cancellation_only: true,
+                shutdown: true,
+                applied: None,
+            });
+        }
         let expected = self.plan.next_absolute_sample();
         if first.0 != expected {
             return Err(BuiltinBatchRenderError::DiscontinuousTime { expected });
@@ -547,13 +720,36 @@ impl StartedBuiltinBatchRender {
         match self.delivery.cancel_boundary(first) {
             Ok(()) => {
                 self.pending = None;
+                let Some(state) = LifecycleState::from_byte(self.lifecycle.load(Ordering::Acquire))
+                else {
+                    return self.sticky(BuiltinBatchRenderError::Fault);
+                };
+                let next = match state {
+                    LifecycleState::OrdinaryPending => LifecycleState::Idle,
+                    LifecycleState::ShutdownPending => LifecycleState::ShutdownAcknowledged,
+                    LifecycleState::Idle | LifecycleState::ShutdownAcknowledged => {
+                        return self.sticky(BuiltinBatchRenderError::Fault);
+                    }
+                };
+                if self
+                    .lifecycle
+                    .compare_exchange(state as u8, next as u8, Ordering::AcqRel, Ordering::Acquire)
+                    .is_err()
+                {
+                    return self.sticky(BuiltinBatchRenderError::Fault);
+                }
                 return Ok(BuiltinBatchRenderReport {
                     graph: None,
                     cancellation_only: true,
+                    shutdown: next == LifecycleState::ShutdownAcknowledged,
                     applied: None,
                 });
             }
-            Err(DeliveryError::Empty) => {}
+            Err(DeliveryError::Empty) => {
+                if lifecycle != LifecycleState::Idle {
+                    return self.sticky(BuiltinBatchRenderError::Fault);
+                }
+            }
             Err(error) => return self.sticky(BuiltinBatchRenderError::Delivery(error)),
         }
         if self.pending.is_none() {
@@ -626,6 +822,7 @@ impl StartedBuiltinBatchRender {
         Ok(BuiltinBatchRenderReport {
             graph: Some(graph),
             cancellation_only: false,
+            shutdown: false,
             applied,
         })
     }
@@ -678,6 +875,7 @@ impl StartedBuiltinBatchRender {
             pending,
             quantum: _,
             output_channels: _,
+            lifecycle,
             fault,
             #[cfg(test)]
                 fail_after_graph: _,
@@ -692,6 +890,7 @@ impl StartedBuiltinBatchRender {
             outcomes,
             track_controls,
             pending,
+            lifecycle,
             fault,
         }
     }
@@ -708,6 +907,7 @@ pub struct StoppedBuiltinBatchRender {
     outcomes: Producer<BuiltinBatchOutcome>,
     track_controls: Vec<TrackControlProducer>,
     pending: Option<(CoreTicket, BuiltinBatch)>,
+    lifecycle: Arc<AtomicU8>,
     fault: Option<BuiltinBatchRenderError>,
 }
 
@@ -750,6 +950,21 @@ fn endpoint_queue_reports(
         .map_err(BuiltinBatchPrepareError::Delivery)?;
     let outcome_report = outcome_resource_report(ticket_capacity)?;
     Ok((delivery_report, outcome_report))
+}
+
+fn lifecycle_heap_bytes() -> Result<u64, BuiltinBatchPrepareError> {
+    // std::sync::Arc stores two atomic reference counts beside the prepared AtomicU8.  Keep this
+    // explicit and checked so the cap preflight accounts for the one allocation before host
+    // preparation can allocate anything.
+    u64::try_from(
+        core::alloc::Layout::new::<(
+            core::sync::atomic::AtomicUsize,
+            core::sync::atomic::AtomicUsize,
+            AtomicU8,
+        )>()
+        .size(),
+    )
+    .map_err(|_| BuiltinBatchPrepareError::ResourceLimit)
 }
 
 fn prepare_endpoint_queues(
@@ -841,6 +1056,13 @@ fn prepare_builtin_batch_endpoint_with_backend(
         .retained_payload_bytes
         .checked_add(outcome_report.retained_payload_bytes)
         .ok_or(BuiltinBatchPrepareError::ResourceLimit)?;
+    let lifecycle_bytes = lifecycle_heap_bytes()?;
+    let lifecycle_inline_handle_bytes = u64::try_from(
+        core::mem::size_of::<Arc<AtomicU8>>()
+            .checked_mul(2)
+            .ok_or(BuiltinBatchPrepareError::ResourceLimit)?,
+    )
+    .map_err(|_| BuiltinBatchPrepareError::ResourceLimit)?;
     let control_inline_bytes = u64::try_from(core::mem::size_of::<BuiltinBatchControl>())
         .map_err(|_| BuiltinBatchPrepareError::ResourceLimit)?;
     let prepared_render_inline_bytes =
@@ -858,8 +1080,12 @@ fn prepare_builtin_batch_endpoint_with_backend(
     let largest_inline_owner = control_inline_bytes
         .max(prepared_render_inline_bytes)
         .max(started_render_inline_bytes);
-    if endpoint_retained_bytes > caps.maximum_builtin_retained_bytes
-        || endpoint_largest > caps.maximum_named_allocation_bytes
+    let endpoint_with_lifecycle = endpoint_retained_bytes
+        .checked_add(lifecycle_bytes)
+        .ok_or(BuiltinBatchPrepareError::ResourceLimit)?;
+    let largest_with_lifecycle = endpoint_largest.max(lifecycle_bytes);
+    if endpoint_with_lifecycle > caps.maximum_builtin_retained_bytes
+        || largest_with_lifecycle > caps.maximum_named_allocation_bytes
     {
         return Err(BuiltinBatchPrepareError::ResourceLimit);
     }
@@ -892,11 +1118,11 @@ fn prepare_builtin_batch_endpoint_with_backend(
     } = queues;
     let retained_bytes = host_report
         .builtin_retained_payload_bytes
-        .checked_add(endpoint_retained_bytes)
+        .checked_add(endpoint_with_lifecycle)
         .ok_or(BuiltinBatchPrepareError::ResourceLimit)?;
     let largest = host_report
         .largest_engine_allocation_bytes
-        .max(endpoint_largest);
+        .max(largest_with_lifecycle);
     if retained_bytes > caps.maximum_builtin_retained_bytes
         || largest > caps.maximum_named_allocation_bytes
     {
@@ -904,6 +1130,7 @@ fn prepare_builtin_batch_endpoint_with_backend(
     }
     let track_count = u32::try_from(compiled.normalized_model().tracks.len())
         .map_err(|_| BuiltinBatchPrepareError::ResourceLimit)?;
+    let lifecycle = Arc::new(AtomicU8::new(LifecycleState::Idle as u8));
     Ok(PreparedBuiltinBatchEndpoint {
         control: delivery,
         outcomes: outcome_consumer,
@@ -914,6 +1141,7 @@ fn prepare_builtin_batch_endpoint_with_backend(
             Vec::new()
         },
         host,
+        lifecycle: Arc::clone(&lifecycle),
         render: PreparedBuiltinBatchRender {
             delivery: render_delivery,
             outcomes: outcome_producer,
@@ -921,6 +1149,7 @@ fn prepare_builtin_batch_endpoint_with_backend(
             pending: None,
             quantum: compiled.quantum().0,
             output_channels: usize::from(compiled.output_shape().channels),
+            lifecycle: Arc::clone(&lifecycle),
         },
         revision,
         quantum: compiled.quantum().0,
@@ -930,9 +1159,11 @@ fn prepare_builtin_batch_endpoint_with_backend(
             delivery: delivery_report,
             outcome: outcome_report,
             host_builtin_retained_payload_bytes: host_report.builtin_retained_payload_bytes,
-            endpoint_retained_heap_bytes: endpoint_retained_bytes,
+            endpoint_retained_heap_bytes: endpoint_with_lifecycle,
+            lifecycle_heap_bytes: lifecycle_bytes,
+            lifecycle_inline_handle_bytes,
             composed_retained_heap_bytes: retained_bytes,
-            largest_endpoint_heap_allocation_bytes: endpoint_largest,
+            largest_endpoint_heap_allocation_bytes: largest_with_lifecycle,
             largest_host_engine_allocation_bytes: host_report.largest_engine_allocation_bytes,
             largest_composed_heap_allocation_bytes: largest,
             inline_owner_bytes,
@@ -954,6 +1185,7 @@ pub struct PreparedBuiltinBatchEndpoint {
     meters: Vec<builtins_compiler::MeterConsumer>,
     host: PreparedHost,
     render: PreparedBuiltinBatchRender,
+    lifecycle: Arc<AtomicU8>,
     revision: SessionRevision,
     quantum: u32,
     track_count: u32,
@@ -980,6 +1212,7 @@ impl PreparedBuiltinBatchEndpoint {
             meters,
             host,
             render,
+            lifecycle,
             revision,
             quantum,
             track_count,
@@ -996,6 +1229,7 @@ impl PreparedBuiltinBatchEndpoint {
                         meters,
                         host,
                         render,
+                        lifecycle,
                         revision,
                         quantum,
                         track_count,
@@ -1012,6 +1246,7 @@ impl PreparedBuiltinBatchEndpoint {
             pending,
             quantum: render_quantum,
             output_channels,
+            lifecycle: render_lifecycle,
         } = render;
         debug_assert_eq!(render_quantum, quantum);
         let render = StartedBuiltinBatchRender {
@@ -1022,6 +1257,7 @@ impl PreparedBuiltinBatchEndpoint {
             pending,
             quantum,
             output_channels,
+            lifecycle: render_lifecycle,
             fault: None,
             #[cfg(test)]
             fail_after_graph: false,
@@ -1037,6 +1273,7 @@ impl PreparedBuiltinBatchEndpoint {
             quantum,
             track_count,
             sources,
+            lifecycle,
             #[cfg(test)]
             meters,
             report,
