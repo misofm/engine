@@ -94,3 +94,22 @@ control preflight, to run the single command exactly once with the required
 65-byte digest, empty-output, clean-tree, unchanged-pin, and verified-manifest
 checks. Stop on failure or concurrent drift. No retry, ordinary build, candidate,
 pin edit, SDK/browser qualification, or PR is authorized.
+
+## Probe result
+
+At exact clean head/upstream `4a92bd8aa0a678ec11e1f4f84bb8acb24395f1ab`,
+Hypatia verified main/merge-base `1bcce704`, frozen source identity, fresh paths,
+pin shape, toolchains, and capture-control statuses 0 and 1. The single authorized
+repin-report builder invocation returned 0. Stdout was exactly 65 bytes containing
+digest
+`580e3cb4cd11e996598103f27b02d94559f6ef7ad57ef22732d18c0b4f98be10`
+plus LF, byte-equal to the delivered pin. The output directory remained empty and
+the repository tree and pin remained unchanged; no competing Cargo/rustc process
+was present.
+
+The self-excluding manifest under `/tmp/issue666-repin-evidence` verifies and
+hashes to
+`df937f1bad0fa06747ebca74b781074e69a5db8a46b915a8c1462693d715c307`.
+Full streams remain temporary and no compiler or generated artifact payload
+entered Git. Astra LOW same-hash applicability review is pending; no ordinary
+builder, candidate, pin, SDK/browser, PR, or cleanup action is authorized yet.
