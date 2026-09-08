@@ -10,6 +10,12 @@ static checks, the separate expected-resource/native-witness gate and mutations,
 hermetic checks, locked SDK and browser installs, SDK checks, one Chromium/
 Firefox/WebKit qualification, and the final matrix check all exited zero.
 
+Before that sequence, its local runner preflight detected the runner's own
+newly created precondition records in the scratch status and aborted. Those
+generated precondition files were removed before execution. The preflight did
+not invoke the artifact builder or any qualification gate, so the numbered
+sequence remains each material command's first invocation.
+
 A concurrency race also launched a later builder-only invocation from
 `/home/bl/misofm/engine-issue627-scratch-qualification` while the first sequence
 was already running. It emitted the same six hashes. Root stopped that executor
