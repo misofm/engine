@@ -265,3 +265,21 @@ exactly the original three-file repository promotion for approved candidate
 `63ef81c105d50aed41164aa3c6c6f8853a314b99d642e209e7cc3aefe3bdbca1`. No
 build, gate, install, or browser execution is authorized until root checkpoints
 that promotion.
+
+## Luna HIGH repository promotion checkpoint
+
+The exact three-file promotion is clean and pushed at
+`0bb5a820be33a49393386617358ec1db2fe7577d`. The pin is candidate
+`63ef81c105d50aed41164aa3c6c6f8853a314b99d642e209e7cc3aefe3bdbca1` plus
+LF. `results.json` changes only `candidateCommit` to frozen `dc14ca85` and
+`wasmSha256` to that digest. The unchanged generator changes only matrix lineage.
+All three files match the accepted first scratch overlay byte-for-byte; browser
+rows, versions, gates, resources, and every other result field remain unchanged.
+No build, gate, install, browser, test, benchmark, timing, compiler, or network
+command ran during promotion.
+
+The checkpoint releases the brief's post-pin verification stage. Exactly one
+ordinary no-bypass build from the clean pushed repository head and the bounded
+static/resource/hermetic/SDK/matrix/policy gates may run under Astra LOW; the
+successful scratch browser qualification must not repeat. PR and merge remain
+unauthorized pending Astra LOW post-pin and exact-head/current-main PASS.
