@@ -1,0 +1,202 @@
+[
+  {
+    "name": "00-toolchain",
+    "argv": [
+      "rustc",
+      "-vV"
+    ],
+    "cwd": "/home/bl/misofm/engine-issue623-artifact-scratch",
+    "head": "ca5a8b492a41ba85b3e90d8dedb2b49b787f2f00",
+    "start": "2026-09-08T11:15:25.608811+00:00",
+    "env": {
+      "PATH": "/home/bl/.cargo/bin:/home/bl/.local/bin:/home/bl/.codex/packages/standalone/releases/0.153.4-x86_64-unknown-linux-musl/codex-path:/home/bl/.codex1/tmp/arg0/codex-arg0a6UL79:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin",
+      "CARGO_TARGET_DIR": "/tmp/issue623-qualification-target"
+    },
+    "status": 0,
+    "end": "2026-09-08T11:15:25.643618+00:00"
+  },
+  {
+    "name": "01-build",
+    "argv": [
+      "bash",
+      "scripts/build-web-audioworklet.sh",
+      "/tmp/issue623-qualified-output"
+    ],
+    "cwd": "/home/bl/misofm/engine-issue623-artifact-scratch",
+    "head": "ca5a8b492a41ba85b3e90d8dedb2b49b787f2f00",
+    "start": "2026-09-08T11:15:25.660912+00:00",
+    "env": {
+      "PATH": "/home/bl/.cargo/bin:/home/bl/.local/bin:/home/bl/.codex/packages/standalone/releases/0.153.4-x86_64-unknown-linux-musl/codex-path:/home/bl/.codex1/tmp/arg0/codex-arg0a6UL79:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin",
+      "CARGO_TARGET_DIR": "/tmp/issue623-qualification-target"
+    },
+    "status": 0,
+    "end": "2026-09-08T11:16:28.492246+00:00"
+  },
+  {
+    "name": "02-matrix-generate",
+    "argv": [
+      "node",
+      "hosts/host-web/qualification/generate-matrix.mjs"
+    ],
+    "cwd": "/home/bl/misofm/engine-issue623-artifact-scratch",
+    "head": "ca5a8b492a41ba85b3e90d8dedb2b49b787f2f00",
+    "start": "2026-09-08T11:16:28.506142+00:00",
+    "env": {
+      "PATH": "/home/bl/.cargo/bin:/home/bl/.local/bin:/home/bl/.codex/packages/standalone/releases/0.153.4-x86_64-unknown-linux-musl/codex-path:/home/bl/.codex1/tmp/arg0/codex-arg0a6UL79:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin",
+      "CARGO_TARGET_DIR": "/tmp/issue623-qualification-target"
+    },
+    "status": 0,
+    "end": "2026-09-08T11:16:28.536526+00:00"
+  },
+  {
+    "name": "03-static",
+    "argv": [
+      "bash",
+      "scripts/check-web-audioworklet.sh",
+      "/tmp/issue623-qualified-output"
+    ],
+    "cwd": "/home/bl/misofm/engine-issue623-artifact-scratch",
+    "head": "ca5a8b492a41ba85b3e90d8dedb2b49b787f2f00",
+    "start": "2026-09-08T11:16:28.554683+00:00",
+    "env": {
+      "PATH": "/home/bl/.cargo/bin:/home/bl/.local/bin:/home/bl/.codex/packages/standalone/releases/0.153.4-x86_64-unknown-linux-musl/codex-path:/home/bl/.codex1/tmp/arg0/codex-arg0a6UL79:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin",
+      "CARGO_TARGET_DIR": "/tmp/issue623-qualification-target"
+    },
+    "status": 0,
+    "end": "2026-09-08T11:17:13.052880+00:00"
+  },
+  {
+    "name": "04-resources",
+    "argv": [
+      "python3",
+      "-B",
+      "scripts/check-browser-expected-resources.py",
+      "--artifacts",
+      "/tmp/issue623-qualified-output"
+    ],
+    "cwd": "/home/bl/misofm/engine-issue623-artifact-scratch",
+    "head": "ca5a8b492a41ba85b3e90d8dedb2b49b787f2f00",
+    "start": "2026-09-08T11:17:13.056840+00:00",
+    "env": {
+      "PATH": "/home/bl/.cargo/bin:/home/bl/.local/bin:/home/bl/.codex/packages/standalone/releases/0.153.4-x86_64-unknown-linux-musl/codex-path:/home/bl/.codex1/tmp/arg0/codex-arg0a6UL79:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin",
+      "CARGO_TARGET_DIR": "/tmp/issue623-qualification-target"
+    },
+    "status": 0,
+    "end": "2026-09-08T11:17:51.510396+00:00"
+  },
+  {
+    "name": "05-hermetic",
+    "argv": [
+      "bash",
+      "scripts/test-web-audioworklet.sh"
+    ],
+    "cwd": "/home/bl/misofm/engine-issue623-artifact-scratch",
+    "head": "ca5a8b492a41ba85b3e90d8dedb2b49b787f2f00",
+    "start": "2026-09-08T11:17:51.514977+00:00",
+    "env": {
+      "PATH": "/home/bl/.cargo/bin:/home/bl/.local/bin:/home/bl/.codex/packages/standalone/releases/0.153.4-x86_64-unknown-linux-musl/codex-path:/home/bl/.codex1/tmp/arg0/codex-arg0a6UL79:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin",
+      "CARGO_TARGET_DIR": "/tmp/issue623-hermetic-target"
+    },
+    "status": 0,
+    "end": "2026-09-08T11:18:03.531940+00:00"
+  },
+  {
+    "name": "06-sdk-install",
+    "argv": [
+      "npm",
+      "--prefix",
+      "sdk",
+      "ci",
+      "--ignore-scripts"
+    ],
+    "cwd": "/home/bl/misofm/engine-issue623-artifact-scratch",
+    "head": "ca5a8b492a41ba85b3e90d8dedb2b49b787f2f00",
+    "start": "2026-09-08T11:18:03.536000+00:00",
+    "env": {
+      "PATH": "/home/bl/.cargo/bin:/home/bl/.local/bin:/home/bl/.codex/packages/standalone/releases/0.153.4-x86_64-unknown-linux-musl/codex-path:/home/bl/.codex1/tmp/arg0/codex-arg0a6UL79:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin",
+      "CARGO_TARGET_DIR": "/tmp/issue623-qualification-target"
+    },
+    "status": 0,
+    "end": "2026-09-08T11:18:04.081893+00:00"
+  },
+  {
+    "name": "07-sdk",
+    "argv": [
+      "bash",
+      "scripts/sdk-package.sh",
+      "check",
+      "/tmp/issue623-qualified-output"
+    ],
+    "cwd": "/home/bl/misofm/engine-issue623-artifact-scratch",
+    "head": "ca5a8b492a41ba85b3e90d8dedb2b49b787f2f00",
+    "start": "2026-09-08T11:18:04.084870+00:00",
+    "env": {
+      "PATH": "/home/bl/.cargo/bin:/home/bl/.local/bin:/home/bl/.codex/packages/standalone/releases/0.153.4-x86_64-unknown-linux-musl/codex-path:/home/bl/.codex1/tmp/arg0/codex-arg0a6UL79:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin",
+      "CARGO_TARGET_DIR": "/tmp/issue623-qualification-target"
+    },
+    "status": 0,
+    "end": "2026-09-08T11:18:49.206574+00:00"
+  },
+  {
+    "name": "08-browser-install",
+    "argv": [
+      "npm",
+      "--prefix",
+      "hosts/host-web/qualification",
+      "ci",
+      "--ignore-scripts"
+    ],
+    "cwd": "/home/bl/misofm/engine-issue623-artifact-scratch",
+    "head": "ca5a8b492a41ba85b3e90d8dedb2b49b787f2f00",
+    "start": "2026-09-08T11:18:49.209092+00:00",
+    "env": {
+      "PATH": "/home/bl/.cargo/bin:/home/bl/.local/bin:/home/bl/.codex/packages/standalone/releases/0.153.4-x86_64-unknown-linux-musl/codex-path:/home/bl/.codex1/tmp/arg0/codex-arg0a6UL79:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin",
+      "CARGO_TARGET_DIR": "/tmp/issue623-qualification-target"
+    },
+    "status": 0,
+    "end": "2026-09-08T11:18:49.652352+00:00"
+  },
+  {
+    "name": "09-browsers",
+    "argv": [
+      "npm",
+      "--prefix",
+      "hosts/host-web/qualification",
+      "run",
+      "qualify",
+      "--",
+      "--artifacts",
+      "/tmp/issue623-qualified-output",
+      "--browser",
+      "all",
+      "--check-matrix",
+      "--self-test-mutations"
+    ],
+    "cwd": "/home/bl/misofm/engine-issue623-artifact-scratch",
+    "head": "ca5a8b492a41ba85b3e90d8dedb2b49b787f2f00",
+    "start": "2026-09-08T11:18:49.655822+00:00",
+    "env": {
+      "PATH": "/home/bl/.cargo/bin:/home/bl/.local/bin:/home/bl/.codex/packages/standalone/releases/0.153.4-x86_64-unknown-linux-musl/codex-path:/home/bl/.codex1/tmp/arg0/codex-arg0a6UL79:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin",
+      "CARGO_TARGET_DIR": "/tmp/issue623-qualification-target"
+    },
+    "status": 0,
+    "end": "2026-09-08T11:18:55.534882+00:00"
+  },
+  {
+    "name": "10-matrix-check",
+    "argv": [
+      "node",
+      "hosts/host-web/qualification/generate-matrix.mjs",
+      "--check"
+    ],
+    "cwd": "/home/bl/misofm/engine-issue623-artifact-scratch",
+    "head": "ca5a8b492a41ba85b3e90d8dedb2b49b787f2f00",
+    "start": "2026-09-08T11:18:55.537599+00:00",
+    "env": {
+      "PATH": "/home/bl/.cargo/bin:/home/bl/.local/bin:/home/bl/.codex/packages/standalone/releases/0.153.4-x86_64-unknown-linux-musl/codex-path:/home/bl/.codex1/tmp/arg0/codex-arg0a6UL79:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin",
+      "CARGO_TARGET_DIR": "/tmp/issue623-qualification-target"
+    },
+    "status": 0,
+    "end": "2026-09-08T11:18:55.570704+00:00"
+  }
+]

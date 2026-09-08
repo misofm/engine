@@ -1,0 +1,13 @@
+{
+  "argv": [
+    "bash",
+    "scripts/test-web-audioworklet.sh"
+  ],
+  "cwd": "/home/bl/misofm/engine-issue623-host-rate-artifact",
+  "head": "e362ac1b32f681e30e29c44d4052e69b5cc3ceb1",
+  "start": "2026-09-08T11:29:20.559601+00:00",
+  "env": {
+    "PATH": "/home/bl/.cargo/bin:/home/bl/.local/bin:/home/bl/.codex/packages/standalone/releases/0.153.4-x86_64-unknown-linux-musl/codex-path:/home/bl/.codex1/tmp/arg0/codex-arg0a6UL79:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin",
+    "CARGO_TARGET_DIR": "/tmp/issue623-postpin-review-target"
+  }
+}
