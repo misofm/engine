@@ -39,7 +39,7 @@ use crate::{
     DiagnosticEvent, DiagnosticsPage, DiagnosticsRequest, EncodeError, EventPayload,
     ExpectedRevision, MessageId, MeterBatch, MeterRecord, NonOkResponse, ParameterAutomationRate,
     ParameterDescriptor, ParameterDomain, ParameterHandle, ParameterMetadataPage,
-    ParameterMetadataRequest, ParameterStatePage, ParameterStateRequest,
+    ParameterMetadataRequest, ParameterStatePage, ParameterStateRecord, ParameterStateRequest,
     PreparedSessionTransaction, ProtocolCodec, ProtocolQueues, QueueReport, ReliablePayload,
     ReliableSlot, RequestId, SampleTime, SessionCommitted, SessionEdit, SessionRevision,
     SessionSnapshot, SessionStore, SessionStoreError, StatusCode, SuccessResponsePayload,
@@ -613,6 +613,59 @@ pub trait ControlProvider {
         &mut self,
         configuration: TelemetryConfiguration,
     ) -> TelemetryConfiguration;
+}
+
+/// One allocation-free, delivery-owned scalar state publication slot.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ScalarStateSlot {
+    handles: [ParameterHandle; 2],
+    published: Option<(SampleTime, [ParameterStateRecord; 2])>,
+}
+
+impl ScalarStateSlot {
+    pub(crate) const fn new(handles: [ParameterHandle; 2]) -> Self {
+        Self {
+            handles,
+            published: None,
+        }
+    }
+
+    pub(crate) fn publish(
+        &mut self,
+        observed_sample: SampleTime,
+        records: [ParameterStateRecord; 2],
+    ) -> Result<(), ()> {
+        if records[0].handle != self.handles[0].0 || records[1].handle != self.handles[1].0 {
+            return Err(());
+        }
+        if records.iter().any(|record| {
+            record.handle == 0
+                || record.flags & !3 != 0
+                || record.flags & 1 == 0
+                || !record.value.is_finite()
+        }) {
+            return Err(());
+        }
+        self.published = Some((observed_sample, records));
+        Ok(())
+    }
+
+    fn page(&self, request: &ParameterStateRequest) -> Result<ParameterStatePage, StatusCode> {
+        let Some((observed_sample, records)) = self.published else {
+            return Err(StatusCode::Unavailable);
+        };
+        let mut result = Vec::with_capacity(request.handles.len());
+        for handle in &request.handles {
+            let Some(record) = records.iter().find(|record| record.handle == *handle) else {
+                return Err(StatusCode::NotFound);
+            };
+            result.push(*record);
+        }
+        Ok(ParameterStatePage {
+            observed_sample: observed_sample.0,
+            records: result,
+        })
+    }
 }
 
 /// Typed bounded provider fixture failure; providers never return raw BTLV payload bytes.
@@ -1564,6 +1617,15 @@ impl<P: ControlProvider> ProtocolController<P> {
         request: ControllerRequest<'_>,
         context: Option<&mut DeliveryContext<'_>>,
     ) -> ControllerResponse {
+        self.process_with_delivery_context_and_scalar_state(request, context, None)
+    }
+
+    pub(crate) fn process_with_delivery_context_and_scalar_state(
+        &mut self,
+        request: ControllerRequest<'_>,
+        context: Option<&mut DeliveryContext<'_>>,
+        scalar_state: Option<&ScalarStateSlot>,
+    ) -> ControllerResponse {
         let message_id = request.command.message_id();
         if self.structural_generation.load(Ordering::Acquire) & 1 != 0 {
             return self.compatibility_response(
@@ -1602,7 +1664,7 @@ impl<P: ControlProvider> ProtocolController<P> {
             }
             ReplayDecision::Execute => {}
         }
-        let outcome = self.execute_with_delivery_context(&request, context);
+        let outcome = self.execute_with_delivery_context(&request, context, scalar_state);
         let response = self.compatibility_response(message_id, request.request_id, outcome);
         match self.replay.complete(
             request.request_id,
@@ -1661,6 +1723,16 @@ impl<P: ControlProvider> ProtocolController<P> {
         scratch: &mut DecodeScratch<'_>,
         context: Option<&mut DeliveryContext<'_>>,
     ) -> Result<ControllerResponse, DecodeError> {
+        self.process_b1b_btlv_with_delivery_context_and_scalar_state(input, scratch, context, None)
+    }
+
+    pub(crate) fn process_b1b_btlv_with_delivery_context_and_scalar_state(
+        &mut self,
+        input: &[u8],
+        scratch: &mut DecodeScratch<'_>,
+        context: Option<&mut DeliveryContext<'_>>,
+        scalar_state: Option<&ScalarStateSlot>,
+    ) -> Result<ControllerResponse, DecodeError> {
         let codec = self.codec;
         let decoded = codec.decode_typed_command_limited(
             input,
@@ -1677,7 +1749,7 @@ impl<P: ControlProvider> ProtocolController<P> {
                 }
             }
             DecodedCommandPayload::SessionTransactionApply(edits) => {
-                return Ok(self.process_with_delivery_context(
+                return Ok(self.process_with_delivery_context_and_scalar_state(
                     ControllerRequest {
                         request_id: header.request_id,
                         expected_revision: header.expected_revision,
@@ -1685,6 +1757,7 @@ impl<P: ControlProvider> ProtocolController<P> {
                         command: ControlCommand::SessionTransactionApply { edits: &edits },
                     },
                     context,
+                    scalar_state,
                 ));
             }
             DecodedCommandPayload::ParameterMetadataGet(request) => {
@@ -1714,7 +1787,7 @@ impl<P: ControlProvider> ProtocolController<P> {
                 ControlCommand::DiagnosticsGet { request }
             }
         };
-        Ok(self.process_with_delivery_context(
+        Ok(self.process_with_delivery_context_and_scalar_state(
             ControllerRequest {
                 request_id: header.request_id,
                 expected_revision: header.expected_revision,
@@ -1722,6 +1795,7 @@ impl<P: ControlProvider> ProtocolController<P> {
                 command,
             },
             context,
+            scalar_state,
         ))
     }
 
@@ -1750,6 +1824,19 @@ impl<P: ControlProvider> ProtocolController<P> {
         output: &mut [u8],
         context: Option<&mut DeliveryContext<'_>>,
     ) -> Result<usize, CommandFrameProcessError> {
+        self.process_command_frame_into_with_delivery_context_and_scalar_state(
+            input, scratch, output, context, None,
+        )
+    }
+
+    pub(crate) fn process_command_frame_into_with_delivery_context_and_scalar_state(
+        &mut self,
+        input: &[u8],
+        scratch: &mut DecodeScratch<'_>,
+        output: &mut [u8],
+        context: Option<&mut DeliveryContext<'_>>,
+        scalar_state: Option<&ScalarStateSlot>,
+    ) -> Result<usize, CommandFrameProcessError> {
         if self.structural_generation.load(Ordering::Acquire) & 1 != 0 {
             return Err(CommandFrameProcessError::PreparedCommandOutstanding);
         }
@@ -1758,12 +1845,22 @@ impl<P: ControlProvider> ProtocolController<P> {
             .decode_command_header(input)
             .map_err(CommandFrameProcessError::Uncorrelatable)?;
         if context.is_some() && header.message_id == MessageId::SessionTransactionApply {
-            return self.process_command_frame_into_legacy(input, scratch, output, context);
+            return self.process_command_frame_into_legacy(
+                input,
+                scratch,
+                output,
+                context,
+                scalar_state,
+            );
         }
         match self.plan_structural_command(input, scratch, output.len(), header)? {
-            StructuralCommandDisposition::Legacy => {
-                self.process_command_frame_into_legacy(input, scratch, output, context)
-            }
+            StructuralCommandDisposition::Legacy => self.process_command_frame_into_legacy(
+                input,
+                scratch,
+                output,
+                context,
+                scalar_state,
+            ),
             StructuralCommandDisposition::Immediate {
                 replay_plan,
                 outcome,
@@ -2145,7 +2242,8 @@ impl<P: ControlProvider> ProtocolController<P> {
         PREPARED_IMMEDIATE_CALLS.with(|calls| calls.set(calls.get().saturating_add(1)));
         let capacity = output_capacity.min(self.replay.config().max_response_bytes);
         let mut bytes = vec![0_u8; capacity];
-        let written = self.process_command_frame_into_legacy(input, scratch, &mut bytes, None)?;
+        let written =
+            self.process_command_frame_into_legacy(input, scratch, &mut bytes, None, None)?;
         bytes.truncate(written);
         Ok(PreparedCommandFrame::Immediate(
             PreparedImmediateCommandFrame { bytes },
@@ -2221,6 +2319,7 @@ impl<P: ControlProvider> ProtocolController<P> {
         scratch: &mut DecodeScratch<'_>,
         output: &mut [u8],
         context: Option<&mut DeliveryContext<'_>>,
+        scalar_state: Option<&ScalarStateSlot>,
     ) -> Result<usize, CommandFrameProcessError> {
         let header = self
             .codec
@@ -2262,7 +2361,9 @@ impl<P: ControlProvider> ProtocolController<P> {
         #[cfg(test)]
         TYPED_COMMAND_DECODES.with(|decodes| decodes.set(decodes.get().saturating_add(1)));
         let outcome = match self.codec.decode_typed_command(input, scratch) {
-            Ok(decoded) => self.execute_decoded_command(header, decoded.payload, context),
+            Ok(decoded) => {
+                self.execute_decoded_command(header, decoded.payload, context, scalar_state)
+            }
             Err(error) => self.non_ok(error.status(), None),
         };
         let (written, _, _) = self
@@ -2311,6 +2412,7 @@ impl<P: ControlProvider> ProtocolController<P> {
         header: CommandHeader,
         payload: DecodedCommandPayload<'_>,
         context: Option<&mut DeliveryContext<'_>>,
+        scalar_state: Option<&ScalarStateSlot>,
     ) -> Outcome {
         let command = match payload {
             DecodedCommandPayload::CapabilitiesGet => ControlCommand::CapabilitiesGet,
@@ -2329,6 +2431,7 @@ impl<P: ControlProvider> ProtocolController<P> {
                         command: ControlCommand::SessionTransactionApply { edits: &edits },
                     },
                     context,
+                    scalar_state,
                 );
             }
             DecodedCommandPayload::ParameterMetadataGet(request) => {
@@ -2369,6 +2472,7 @@ impl<P: ControlProvider> ProtocolController<P> {
                 command,
             },
             context,
+            scalar_state,
         )
     }
 
@@ -3082,6 +3186,7 @@ impl<P: ControlProvider> ProtocolController<P> {
         &mut self,
         request: &ControllerRequest<'_>,
         mut delivery: Option<&mut DeliveryContext<'_>>,
+        scalar_state: Option<&ScalarStateSlot>,
     ) -> Outcome {
         let features = self.config.provider_features;
         let enabled = match request.command {
@@ -3111,9 +3216,13 @@ impl<P: ControlProvider> ProtocolController<P> {
         }
         if let Some(context) = delivery.as_ref() {
             match request.command {
-                ControlCommand::SessionTransactionApply { .. }
-                | ControlCommand::ParameterStateGet { .. }
-                | ControlCommand::TransportSet {
+                ControlCommand::SessionTransactionApply { .. } => {
+                    return self.non_ok(StatusCode::Unavailable, None);
+                }
+                ControlCommand::ParameterStateGet { .. } if scalar_state.is_none() => {
+                    return self.non_ok(StatusCode::Unavailable, None);
+                }
+                ControlCommand::TransportSet {
                     request:
                         TransportSetRequest {
                             position: Some(_), ..
@@ -3235,10 +3344,19 @@ impl<P: ControlProvider> ProtocolController<P> {
             },
             ControlCommand::ParameterStateGet {
                 request: parameter_request,
-            } => match self.provider.parameter_state(parameter_request) {
-                Ok(page) => self.ok(Body::ParameterState(page)),
-                Err(error) => self.non_ok(status_for_parameter(error), None),
-            },
+            } => {
+                if let Some(slot) = scalar_state {
+                    match slot.page(parameter_request) {
+                        Ok(page) => self.ok(Body::ParameterState(page)),
+                        Err(status) => self.non_ok(status, None),
+                    }
+                } else {
+                    match self.provider.parameter_state(parameter_request) {
+                        Ok(page) => self.ok(Body::ParameterState(page)),
+                        Err(error) => self.non_ok(status_for_parameter(error), None),
+                    }
+                }
+            }
             ControlCommand::AutomationEnqueue { batch } => {
                 if delivery.is_some()
                     && let Err(error) = batch.validate_records()

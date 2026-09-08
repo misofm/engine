@@ -2,6 +2,7 @@
 
 use core::mem::size_of;
 
+use crate::controller::ScalarStateSlot;
 use crate::delivery::{AutomationDeliveryState, DeliveryContext, PreparedAutomationDelivery};
 use crate::{
     AutomationCancellationReason, AutomationDeliveryRender, CancelComplete, CancelToken,
@@ -11,9 +12,9 @@ use crate::{
     ProtocolControllerConfig, ProtocolQueueConfig, ProtocolQueueError, ProtocolQueues, QueueKind,
     QueueReport, ReplayCache, ReplayCacheConfig, SessionStore, TerminalAutomation,
 };
-use crate::{ControlProvider, PreparedDeliveryCapabilities};
+use crate::{ControlProvider, ParameterStateRecord, PreparedDeliveryCapabilities, SampleTime};
 
-/// Preparation failed before the facade became visible to its caller.
+/// Preparation or scalar publication failed before a usable facade/result became visible.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ControllerAutomationPrepareError {
     /// The configured queue/storage layout is not representable.
@@ -22,6 +23,12 @@ pub enum ControllerAutomationPrepareError {
     ReplayCache(crate::ReplayCacheError),
     /// Eager controller-owned retained storage could not be allocated.
     ControllerResource(ControllerResourceAllocationError),
+    /// The scalar opt-in preparation received a zero or duplicate handle.
+    InvalidScalarStateBindings,
+    /// The ordinary preparation has no scalar publication slot.
+    ScalarStateDisabled,
+    /// A scalar publication contained mismatched handles, flags, or values.
+    InvalidScalarStatePublication,
 }
 
 impl From<ProtocolQueueError> for ControllerAutomationPrepareError {
@@ -76,6 +83,7 @@ pub struct ControllerAutomationDelivery<P: ControlProvider> {
     controller: ProtocolController<P>,
     delivery: AutomationDeliveryState,
     capabilities: PreparedDeliveryCapabilities,
+    scalar_state: Option<ScalarStateSlot>,
 }
 
 impl<P: ControlProvider> ControllerAutomationDelivery<P> {
@@ -90,6 +98,74 @@ impl<P: ControlProvider> ControllerAutomationDelivery<P> {
         config: ProtocolControllerConfig,
         retained: ControllerRetainedCapacity,
         capabilities: PreparedDeliveryCapabilities,
+    ) -> Result<
+        (
+            Self,
+            AutomationDeliveryRender,
+            ControllerAutomationResources,
+        ),
+        ControllerAutomationPrepareError,
+    > {
+        Self::prepare_inner(
+            session,
+            queues,
+            provider,
+            replay,
+            codec,
+            config,
+            retained,
+            capabilities,
+            None,
+        )
+    }
+
+    /// Prepare the controller with the opt-in fixed two-record scalar state publication slot.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_scalar_point_state(
+        session: SessionStore,
+        queues: ProtocolQueueConfig,
+        provider: P,
+        replay: ReplayCacheConfig,
+        codec: ProtocolCodec,
+        config: ProtocolControllerConfig,
+        retained: ControllerRetainedCapacity,
+        capabilities: PreparedDeliveryCapabilities,
+        handles: [crate::ParameterHandle; 2],
+    ) -> Result<
+        (
+            Self,
+            AutomationDeliveryRender,
+            ControllerAutomationResources,
+        ),
+        ControllerAutomationPrepareError,
+    > {
+        if handles[0].0 == 0 || handles[1].0 == 0 || handles[0] == handles[1] {
+            return Err(ControllerAutomationPrepareError::InvalidScalarStateBindings);
+        }
+        Self::prepare_inner(
+            session,
+            queues,
+            provider,
+            replay,
+            codec,
+            config,
+            retained,
+            capabilities,
+            Some(handles),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_inner(
+        session: SessionStore,
+        queues: ProtocolQueueConfig,
+        provider: P,
+        replay: ReplayCacheConfig,
+        codec: ProtocolCodec,
+        config: ProtocolControllerConfig,
+        retained: ControllerRetainedCapacity,
+        capabilities: PreparedDeliveryCapabilities,
+        scalar_handles: Option<[crate::ParameterHandle; 2]>,
     ) -> Result<
         (
             Self,
@@ -121,10 +197,25 @@ impl<P: ControlProvider> ControllerAutomationDelivery<P> {
                 controller,
                 delivery,
                 capabilities,
+                scalar_state: scalar_handles.map(ScalarStateSlot::new),
             },
             render,
             resources,
         ))
+    }
+
+    /// Atomically publish one complete scalar state page at a host-established quiescent point.
+    pub fn publish_scalar_point_state(
+        &mut self,
+        observed_sample: SampleTime,
+        records: [ParameterStateRecord; 2],
+    ) -> Result<(), ControllerAutomationPrepareError> {
+        let slot = self
+            .scalar_state
+            .as_mut()
+            .ok_or(ControllerAutomationPrepareError::ScalarStateDisabled)?;
+        slot.publish(observed_sample, records)
+            .map_err(|_| ControllerAutomationPrepareError::InvalidScalarStatePublication)
     }
 
     /// Process one trusted typed command and its matching canonical request bytes.
@@ -139,7 +230,11 @@ impl<P: ControlProvider> ControllerAutomationDelivery<P> {
             state: &mut self.delivery,
         };
         self.controller
-            .process_with_delivery_context(request, Some(&mut context))
+            .process_with_delivery_context_and_scalar_state(
+                request,
+                Some(&mut context),
+                self.scalar_state.as_ref(),
+            )
     }
 
     /// Decode one B1b BTLV command and dispatch it through this facade's delivery context.
@@ -152,7 +247,12 @@ impl<P: ControlProvider> ControllerAutomationDelivery<P> {
             state: &mut self.delivery,
         };
         self.controller
-            .process_b1b_btlv_with_delivery_context(input, scratch, Some(&mut context))
+            .process_b1b_btlv_with_delivery_context_and_scalar_state(
+                input,
+                scratch,
+                Some(&mut context),
+                self.scalar_state.as_ref(),
+            )
     }
 
     /// Process one complete command frame into caller-owned output through this facade's
@@ -167,11 +267,12 @@ impl<P: ControlProvider> ControllerAutomationDelivery<P> {
             state: &mut self.delivery,
         };
         self.controller
-            .process_command_frame_into_with_delivery_context(
+            .process_command_frame_into_with_delivery_context_and_scalar_state(
                 input,
                 scratch,
                 output,
                 Some(&mut context),
+                self.scalar_state.as_ref(),
             )
     }
 
@@ -501,6 +602,58 @@ mod tests {
             }],
         )
         .unwrap()
+    }
+
+    #[test]
+    fn scalar_opt_in_rejects_invalid_bindings_and_reports_typed_publication_errors() {
+        for handles in [
+            [ParameterHandle(0), ParameterHandle(8)],
+            [ParameterHandle(7), ParameterHandle(0)],
+            [ParameterHandle(7), ParameterHandle(7)],
+        ] {
+            let (provider, _) = FixtureProvider::new(SampleTime(0));
+            let capabilities = PreparedDeliveryCapabilities::new_exact(&[
+                (ParameterHandle(7), AutomationKind::Point),
+                (ParameterHandle(8), AutomationKind::Point),
+            ])
+            .unwrap();
+            let result = ControllerAutomationDelivery::prepare_scalar_point_state(
+                session(),
+                queue_config(2),
+                provider,
+                replay(),
+                ProtocolCodec::default(),
+                ProtocolControllerConfig::default(),
+                ControllerRetainedCapacity {
+                    meter_handles: 0,
+                    counter_ids: 0,
+                },
+                capabilities,
+                handles,
+            );
+            assert!(matches!(
+                result,
+                Err(ControllerAutomationPrepareError::InvalidScalarStateBindings)
+            ));
+        }
+
+        let (mut ordinary, _, _) = facade(2, &[(ParameterHandle(7), AutomationKind::Point)]);
+        let records = [
+            ParameterStateRecord {
+                handle: 7,
+                flags: 1,
+                value: 0.0,
+            },
+            ParameterStateRecord {
+                handle: 8,
+                flags: 1,
+                value: 0.0,
+            },
+        ];
+        assert_eq!(
+            ordinary.publish_scalar_point_state(SampleTime(0), records),
+            Err(ControllerAutomationPrepareError::ScalarStateDisabled)
+        );
     }
 
     fn mixed_batch(revision: SessionRevision, request_id: u64) -> AutomationBatchSlot {
