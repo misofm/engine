@@ -18,7 +18,7 @@
 //! * the **document's own structure**, so a schema key cannot be dropped silently.
 
 use effect_compiler::launch_native_effect_registry;
-use host_core::LAUNCH_SAMPLE_RATES_HZ;
+use host_core::LAUNCH_SAMPLE_RATES;
 use host_web::{
     AudioWorkletEngineHost, COMMAND_EFFECT_PARAM, COMMAND_REASON_UNKNOWN_EFFECT,
     COMMAND_REASON_UNKNOWN_PARAMETER, COMMAND_REASON_UNKNOWN_RACK, COMMAND_REASON_UNKNOWN_TRACK,
@@ -246,7 +246,8 @@ fn the_published_source_ring_rule_reproduces_the_engine_derivation() {
         "the published tolerance is the engine's constant"
     );
 
-    for rate in LAUNCH_SAMPLE_RATES_HZ {
+    for rate in LAUNCH_SAMPLE_RATES {
+        let rate = rate.0;
         for quantum in [1_u32, 2, 32, 64, 127, 128, 129, 256, 480, 1024] {
             let stall_frames = u64::from(rate) * tolerance_ms / 1_000;
             let quanta =
