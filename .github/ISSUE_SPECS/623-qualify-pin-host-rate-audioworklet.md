@@ -68,3 +68,19 @@ resources/native-witness gate with its 26 red mutations and did not fix the two 
 lineage fields to exact values. Those requirements are now explicit above, including post-pin
 resource verification. No scratch qualification or repository promotion was authorized by this
 verdict.
+
+## Astra LOW corrected scope review — packaging FAIL
+
+Astra LOW confirmed both substantive corrections at exact clean pushed head
+`2103c0e990517f9332792e3febe2bf3b22552c2c`, live main
+`cf9e079cd5ef80d1c7284e9edd0ffcc90b0db335`, and synchronized tracker
+`51a0ad8b6540ce979ab997121334f92a8a569467`. Local/GitHub coordination, exact lineage values, the
+separate resource/native-witness gate with 26 mutations, post-pin repetition, and #621
+disjointness passed. Authorization remained blocked because branch-wide `git diff --check` treated
+intentional whitespace in the raw inherited `source-main.diff` capture as patch errors.
+
+Root losslessly compressed only that capture with deterministic gzip. It decompresses byte-for-byte
+to SHA-256 `af126a437c16e903e78219a255cfe1a26698155f3e10d424ec7255db010eaa8b`; the README, separate raw-
+identity record, and evidence manifest are refreshed. No qualification input, raw evidence content,
+source, artifact, pin, or lineage changed. Corrected-head Astra LOW confirmation remains required
+before any scratch execution.

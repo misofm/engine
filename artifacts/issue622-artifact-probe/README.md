@@ -7,6 +7,10 @@ Exactly one ordinary `bash scripts/build-web-audioworklet.sh
 `ca5a8b49`, whose accepted production source is `fece7a2c`; live main and merge-base were
 `cf9e079c`. No repin or strip override was supplied. The exact command, cwd, full streams, status,
 source identities, frozen inputs, delivered web baseline, and empty output census are retained here.
+The raw source-to-main diff is stored as deterministic `source-main.diff.gz` so its intentionally
+whitespace-bearing context does not trip the repository's outer diff-hygiene gate. It decompresses
+to SHA-256 `af126a437c16e903e78219a255cfe1a26698155f3e10d424ec7255db010eaa8b`, recorded separately in
+`source-main.diff.sha256`; packaging did not alter the captured bytes.
 
 Compilation succeeded. The unchanged builder exited 1 because the observed simd128 Wasm SHA-256
 `ac71c64033b0cfc637cf14edcacaa6ed1b3bbf7093a5caa641ef84adea7e88e3` differs from delivered pin
