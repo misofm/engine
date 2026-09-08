@@ -1,24 +1,22 @@
 # Selected lowering excerpts
 
-These excerpts are copied as compact claim-supporting records from the
-payloads named in `payload-manifest.md`. Line numbers are physical lines in
-the temporary payload. No complete compiler payload is retained.
+These are compact excerpts from the temporary payloads named in
+`payload-manifest.md`. Every physical line reference below was checked against
+the retained payload in `/tmp`; complete `.s` and `.ll` payloads remain
+outside the repository.
 
-## Caller map
-
-The LLVM caller edges establish the stationary/ramping loop entry points for
-the production callers:
+## Caller and link-mode map
 
 ```text
-native .ll:9455  define ... Shaper<f32,1>::process_block
-native .ll:5611  define ... Shaper<wide::f32x8,8>::process_block
-native .ll:21295 call ... Shaper<f32,1>::process_block       ; PreparedNativeEffect::process
-native .ll:21315 define ... PreparedTransientShaperBank<wide::f32x8,8>::process_bank
-native .ll:21384 call ... Shaper<wide::f32x8,8>::process_block
-native .ll:22846 define ... PreparedTransientShaperBank<wide::f32x8,8>::process_bank_mono
+native .ll:9455   define ... Shaper<f32,1>::process_block
+native .ll:5611   define ... Shaper<wide::f32x8,8>::process_block
+native .ll:21295  call ... Shaper<f32,1>::process_block       ; public scalar process
+native .ll:21315  define ... PreparedTransientShaperBank<wide::f32x8,8>::process_bank
+native .ll:21384  call ... Shaper<wide::f32x8,8>::process_block
+native .ll:22846  define ... PreparedTransientShaperBank<wide::f32x8,8>::process_bank_mono
 
 wasm-scalar .ll:44468 define ... Shaper<f32,1>::process_block
-wasm-scalar .ll:56006 call ... Shaper<f32,1>::process_block ; PreparedNativeEffect::process
+wasm-scalar .ll:56006 call ... Shaper<f32,1>::process_block ; public scalar process
 
 wasm-simd128 .ll:448   define ... Shaper<wide::f32x4,4>::process_block
 wasm-simd128 .ll:24145 define ... PreparedTransientShaperBank<wide::f32x4,4>::process_bank
@@ -26,177 +24,114 @@ wasm-simd128 .ll:24214 call ... Shaper<wide::f32x4,4>::process_block
 wasm-simd128 .ll:25418 define ... PreparedTransientShaperBank<wide::f32x4,4>::process_bank_mono
 ```
 
-The corpus also instantiates scalar/W4/W8 `process_block` bodies, but the
-public scalar process edge and the bank edges above are the caller evidence
-used for the target conclusions.
-
-The monomorphized `process_block` entry has the link-mode dispatch before the
-loop lowering. For example, the native W8 LLVM body starts at line 5611 and
-contains:
-
-```text
-%_9 = load i32, ptr %self+1428
-switch i32 %_9, label %default.unreachable [ i32 1, label %bb4
-                                                i32 2, label %bb3
-                                                i32 3, label %bb2 ]
-bb4: %spec.select = select ... <8 x float> splat (float 1.0) ...
-```
-
-The Wasm W4 body has the corresponding switch at `.ll:448` over the link
-mode and begins its selected branch with the bypass mask. Thus the link modes
-are actual callers/branches into the same ramping and stationary frame-loop
-families, rather than an assumption based only on the Rust `match`.
+The native W8 LLVM body at `.ll:5611` and Wasm W4 body at `.ll:448` each
+load link mode and switch over `1`, `2`, and `3` before the loop body. This
+ties the three link specializations to the same `process_block` loop families.
 
 ## Native AVX2 W8
 
-```text
-.s:9535  .loc 1 495 ... vmovaps ...              ; locals/envelopes copied
-.s:9553  vbroadcastss .LCPI5_1, %ymm4
-.s:9554  vmovups %ymm4, 352(%rsp)                ; entry invariant (abs mask)
-.s:9560  vbroadcastsd .LCPI5_6, %ymm0
-.s:9563  vbroadcastsd .LCPI5_7, %ymm0
-.s:9566  vbroadcastss .LCPI5_19, %ymm0
-.s:9568  vbroadcastss .LCPI5_25, %ymm0        ; loop-entry zero
-.s:9570  jmp .LBB5_56
-.s:9573  .LBB5_90:                              ; ramping frame body
-.s:9600  vbroadcastss .LCPI5_3, %ymm5
-.s:9640  vbroadcastss .LCPI5_4, %ymm0
-.s:9647  vbroadcastss .LCPI5_5, %ymm8
-.s:9656  vbroadcastss .LCPI5_8, %ymm13
-.s:9658  vbroadcastss .LCPI5_2, %ymm9
-.s:9661  vbroadcastss .LCPI5_9, %ymm14
-.s:9663  vbroadcastss .LCPI5_10, %ymm14
-.s:9665  vbroadcastss .LCPI5_11, %ymm15
-.s:9671  vbroadcastss .LCPI5_12, %ymm15
-.s:9678  vbroadcastss .LCPI5_13, %ymm15
-.s:9695  vbroadcastss .LCPI5_20, %ymm15
-.s:9697  vbroadcastss .LCPI5_0, %ymm3
-.s:9711  vbroadcastss .LCPI5_22, %ymm8
-.s:9713  vbroadcastss .LCPI5_23, %ymm8
-.s:9715  vbroadcastss .LCPI5_24, %ymm8
-.s:9722  vbroadcastss .LCPI5_26, %ymm8
-.s:9724  vbroadcastss .LCPI5_27, %ymm8
-.s:9726  vbroadcastss .LCPI5_28, %ymm4
-.s:9728  vbroadcastss .LCPI5_29, %ymm8
-.s:9730  vbroadcastss .LCPI5_30, %ymm8
-.s:10735 cmpq %r9, %r10; je .LBB5_91
-.s:10736 .LBB5_56: incq %r10; ... ; next ramp frame
+The W8 function starts at `.s:9521-9524`. Its ramping-prefix setup is at
+`.s:9958-9975`, and the ramping frame body begins at `.LBB5_90` (`.s:9980`).
+Mapped FX4 constants inside that body are:
 
-.s:11180 vbroadcastss .LCPI5_1, %ymm0; stationary setup
-.s:11184 vbroadcastsd .LCPI5_6, %ymm0
-.s:11186 vbroadcastsd .LCPI5_7, %ymm0
-.s:11188 vbroadcastss .LCPI5_19, %ymm0
-.s:11190 vbroadcastss .LCPI5_25, %ymm0
-.s:11198 .LBB5_93:                              ; stationary frame body
-.s:11214 vbroadcastss .LCPI5_3, %ymm5
-.s:11222 vbroadcastss .LCPI5_4, %ymm5
-.s:11225 vbroadcastss .LCPI5_5, %ymm5
-.s:11234 vbroadcastss .LCPI5_8, %ymm5
-.s:11236 vbroadcastss .LCPI5_2, %ymm0
-.s:11239 vbroadcastss .LCPI5_9, %ymm5
-.s:11241 vbroadcastss .LCPI5_10, %ymm5
-.s:11243 vbroadcastss .LCPI5_11, %ymm5
-.s:11915 jne .LBB5_93                           ; stationary backedge
+```text
+.s:10030 vbroadcastss .LCPI5_3,  %ymm5  ; FLOOR
+.s:10093 vbroadcastss .LCPI5_2,  %ymm9  ; 0.5 constant occurrence (link branch not retained)
+.s:10211 vbroadcastss .LCPI5_22, %ymm8  ; DB_PER_OCTAVE
+.s:10215 vbroadcastss .LCPI5_23, %ymm8  ; +24
+.s:10219 vbroadcastss .LCPI5_24, %ymm8  ; -24
+.s:10242 vbroadcastss .LCPI5_26, %ymm8  ; +18
+.s:10246 vbroadcastss .LCPI5_27, %ymm8  ; -18
+.s:10250 vbroadcastss .LCPI5_28, %ymm4  ; OCTAVES_PER_DB
+.s:10740 cmpq %r9,%r10; je .LBB5_91
+.s:10742 .LBB5_56                 ; next ramp frame
 ```
 
-The pool mapping is fixed by the source bit patterns: `.LCPI5_4` is `FLOOR`
-(`0x322bcc77`), `.LCPI5_22` is `DB_PER_OCTAVE` (`0x40c0a8c1`),
-`.LCPI5_23/.24` are `+/-24`, `.LCPI5_26/.27` are `+/-18`, `.LCPI5_28` is
-`OCTAVES_PER_DB`, and `.LCPI5_25` is zero. The W8 ramping and stationary
-frame bodies therefore re-broadcast these candidates in the loop. The
-parameter/coefficient vectors copied before `.LBB5_93` are loop-entry
-materialization; they are loaded from stack slots in the body rather than
-recomputed from source splats.
+The stationary suffix begins at `.LBB5_91` (`.s:11081`); current-state and
+coefficient packing occupy `.s:11096-11177`, with loop-entry constants at
+`.s:11180-11191`. The stationary frame loop is `.LBB5_93` at `.s:11198`:
+
+```text
+.s:11256 vbroadcastss .LCPI5_3,  %ymm5  ; FLOOR in stationary body
+.s:11493 vbroadcastss .LCPI5_22, %ymm7  ; DB_PER_OCTAVE
+.s:11497 vbroadcastss .LCPI5_23, %ymm9  ; +24
+.s:11508 vbroadcastss .LCPI5_24, %ymm2  ; -24
+.s:11601 vbroadcastss .LCPI5_26, %ymm15 ; +18
+.s:11615 vbroadcastss .LCPI5_27, %ymm3  ; -18
+.s:11626 vbroadcastss .LCPI5_28, %ymm1  ; OCTAVES_PER_DB
+.s:11913 addq $32,%r9; decq %rax
+.s:11915 jne .LBB5_93             ; stationary backedge
+```
+
+The pool mapping is verified from `.s:9441-9514` and source bit patterns:
+`.LCPI5_3` is `FLOOR` (`0x322bcc77`), `.LCPI5_22` is `DB_PER_OCTAVE`
+(`0x40c0a8c1`), `.LCPI5_23/.24` are `+/-24`, `.LCPI5_26/.27` are `+/-18`,
+and `.LCPI5_28` is `OCTAVES_PER_DB`. `.LCPI5_2` is `0.5`, but its link-mode
+branch attribution is not retained. No average-link or spill/reload conclusion
+is retained: the shown stack traffic is not individually mapped to a constant
+candidate.
 
 ## Native scalar
 
-```text
-.s:17527 .LBB6_38:                            ; scalar frame body
-.s:17534 vbroadcastss .LCPI6_0, %xmm4          ; abs mask in frame
-.s:17573 vmovss .LCPI6_2, %xmm13
-.s:17611 vmovss .LCPI6_3, %xmm4                ; FLOOR
-.s:17649 vmulss .LCPI6_1, %xmm7, %xmm8
-.s:17754 vmulss .LCPI6_19, %xmm4, %xmm4
-.s:17757 vmovss .LCPI6_20, %xmm7
-.s:17771 vmaxss .LCPI6_21, %xmm4, %xmm4
-.s:17794 vminss .LCPI6_23, %xmm4, %xmm4
-.s:17797 vmaxss .LCPI6_24, %xmm4, %xmm14
-.s:17800 vmulss .LCPI6_25, %xmm14, %xmm4
-.s:17803 vmaxss .LCPI6_26, %xmm4, %xmm4
-.s:17806 vminss .LCPI6_27, %xmm4, %xmm4
-.s:18214 .LBB6_46:                            ; next ramp prefix/control path
-.s:18459 incq %r13; cmpq %r13,%r9; je .LBB6_145
+The scalar `process_block` starts at `.s:17044-17047`. A mapped scalar frame
+body is `.LBB6_38` at `.s:17527`; its folded scalar operands include:
 
-.s:21310 .LBB6_145:                            ; stationary suffix entry
-.s:21327-.21347 loads current scalar state/ramps
-.s:21349 vbroadcastss .LCPI6_0, %xmm10
-.s:21350 vmovss .LCPI6_2, %xmm14
-.s:21351 vmovss .LCPI6_1, %xmm15
-.s:21357 jmp .LBB6_148
-.s:21478 .LBB6_148:                            ; stationary frame body
-.s:21480 vmovss (...,%r13,4), %xmm5
-.s:21482 vandps %xmm5,%xmm10,%xmm4
-.s:22121 vminss .LCPI6_27, %xmm5, %xmm5
-.s:22134 jbe .LBB6_147
-.s:21468 incq %r13; cmpq %r13,88(%rsp); je .LBB6_156
+```text
+.s:17611 vmovss .LCPI6_3,  %xmm4          ; FLOOR
+.s:17754 vmulss .LCPI6_19, %xmm4, %xmm4    ; DB_PER_OCTAVE
+.s:17794 vminss .LCPI6_23, %xmm4, %xmm4    ; +24 clamp operand
+.s:17797 vmaxss .LCPI6_24, %xmm4, %xmm14   ; -24 clamp operand
+.s:17800 vmulss .LCPI6_25, %xmm14, %xmm4   ; OCTAVES_PER_DB
+.s:17803 vmaxss .LCPI6_26, %xmm4, %xmm4    ; +18 clamp operand
+.s:17806 vminss .LCPI6_27, %xmm4, %xmm4    ; -18 clamp operand
 ```
 
-Native scalar uses folded scalar memory operands for several constants
-(`vmovss`/`vmulss`/`vminss` directly from `.LCPI6_*`) instead of vector
-broadcasts. The loop-entry loads at `.LBB6_145` are current state and
-coefficient materialization. The repeated frame operations remain present in
-the stationary suffix and ramping body; whether a scalar constant is loaded
-from the pool or held in a register is a backend choice, not a source-level
-residual by itself.
+The scalar ramp/control path reaches `.LBB6_46` at `.s:18214` and its frame
+count boundary is `.s:18457-18464`. The stationary suffix entry is
+`.LBB6_145` at `.s:21310`; scalar current-state loads are `.s:21324-21347`
+and the selected frame path begins at `.LBB6_148` (`.s:21478`). Its mapped
+clamp/multiply operands are `.s:22115-22121`. The retained native-scalar
+conclusion is limited to folded operands in these individually located frame
+paths; no scalar spill/reload or average-link conclusion is retained.
 
 ## Wasm scalar
 
+The scalar `process_block` symbol begins at `.s:146920`. The ramping parameter
+loop is `.LBB6_5` at `.s:147170-147173`. The stationary frame loop is
+`.LBB6_32` at `.s:148650-148653`, with its backedge at `.s:149738-149756`.
+Mapped FX4 constants in that stationary body are:
+
 ```text
-.s:146920 _...ShaperfKj1_E13process_block...    ; scalar public body
-.s:148650 .LBB6_32: loop                      ; stationary frame loop
-.s:148654 local.get 6; f32.load 0              ; frame input
-.s:148665 f32.const 0x0p0                      ; zero candidate in body
-.s:149346 f32.const -0x1.0000fep23             ; math kernel constant
-.s:149497 f32.const 0x1.815182p2               ; math kernel constant
-.s:149507 f32.const 0x1.8p4                    ; +24 clamp
-.s:149518 f32.const -0x1.8p4                   ; -24 clamp
-.s:149739 local.get 7; i32.const 4; i32.add
-.s:149752 local.tee 8; br_if 0
-.s:149754 .LBB6_33: end_loop
+.s:149497 f32.const 0x1.815182p2   ; DB_PER_OCTAVE
+.s:149507 f32.const 0x1.8p4         ; +CONTRAST_LIMIT_DB (+24)
+.s:149518 f32.const -0x1.8p4        ; -CONTRAST_LIMIT_DB (-24)
+.s:149561 f32.const 0x1.2p4         ; +SHAPE_LIMIT_DB (+18)
+.s:149569 f32.const -0x1.2p4        ; -SHAPE_LIMIT_DB (-18)
+.s:149577 f32.const 0x1.542a5ap-3   ; OCTAVES_PER_DB
+.s:149754-149756 .LBB6_33 end_loop
 ```
 
-The scalar Wasm body uses scalar `f32.const` operands in the frame loop. The
-LLVM/assembly also shows the same loop-entry load pattern for the current
-parameter state before `.LBB6_32`; no audio path was executed.
+The nearby `0x1.815182p2` is `DB_PER_OCTAVE`, not a math-kernel constant.
+Other constants are omitted unless mapped to an FX4 candidate. No average-
+link, zero-hoisting, or spill conclusion is retained from this excerpt.
 
 ## Wasm simd128 W4
 
-```text
-.s:1312 .LBB4_5: loop                         ; ramping prefix
-.s:2718 .loc ... input v128.load
-.s:2729 v128.const 0x1.fcp6, ...              ; math kernel
-.s:2737 v128.const -0x1.2p4, ...
-.s:2741 v128.const 0x1.2p4, ...
-.s:2746 v128.const -0x1.8p4, ...              ; -24 clamp
-.s:2750 v128.const 0x1.8p4, ...               ; +24 clamp
-.s:2758 v128.const 0x1.5798eep-27, ...
-.s:3780 local.set 6; local.get 7; i32.const -1; i32.add; br_if 0
-.s:3790 .LBB4_126: end_loop
+The W4 ramping loop is `.LBB4_5` at `.s:1312-1316`, with its backedge at
+`.s:3775-3791`. The mapped vector constants in that body are
+`DB_PER_OCTAVE` at `.s:3076-3078` and `OCTAVES_PER_DB` at `.s:3123-3126`.
+The stationary loop is `.LBB4_128` at `.s:3958-3963`; selected mapped values
+inside its body are:
 
-.s:3958 .LBB4_128: loop                      ; stationary suffix
-.s:3963 v128.load 0
-.s:3970 v128.const 0x1.fcp6, ...
-.s:3978 v128.const -0x1.2p4, ...
-.s:3982 v128.const 0x1.2p4, ...
-.s:3987 v128.const -0x1.8p4, ...
-.s:3991 v128.const 0x1.8p4, ...
-.s:3995 v128.const 0x1p-126, ...
-.s:3999 v128.const 0x1.5798eep-27, ...
-.s:4950 local.get 6; i32.const 16; i32.add
-.s:4963 local.tee 7; br_if 0
-.s:4964 .LBB4_129: end_loop
+```text
+.s:4286 v128.const 0x1.815182p2, ...       ; DB_PER_OCTAVE
+.s:4333-4336 v128.const 0x1.542a5ap-3, ... ; OCTAVES_PER_DB
+.s:4950-4963 pointer/count updates; br_if 0
+.s:4964-4965 .LBB4_129 end_loop
 ```
 
-Wasm SIMD emits vector constants in both loop bodies. The W4 parameter and
-coefficient locals loaded before `.LBB4_128` are loop-entry materialization;
-the frame constants shown inside that loop are repeated broadcasts/constants.
+The `+/-24` and `+/-18` vector constants occur in the same families
+(`.s:2737-2750` and `.s:3978-3991`), but the temporary assembly contains
+multiple inlined math paths; they are not claimed as individually attributable
+here. The retained W4 conclusion is limited to the individually mapped
+`DB_PER_OCTAVE` and `OCTAVES_PER_DB` vector constants in both loop families.

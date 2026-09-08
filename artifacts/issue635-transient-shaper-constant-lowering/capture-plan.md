@@ -28,7 +28,7 @@ be retained here.
 | `crates/effect-runtime/src/envelope.rs` | `48ce3f99338ef1b7c22280bc743878ad6ff3747c0e10bbdd8606b7a3ddc0ef19` |
 | `Cargo.toml` | `471660ddca768e90ec87550807e140b4754454509f6f5f59986a80764b53effb` |
 | `Cargo.lock` | `92db9698cc062bd5ccc0a90f0ee43f051d77ce7e52f785ce9718fae3f400b753` |
-| `.cargo/config.toml` | `03b0fbd88c069abb0a8fbdca5921ba6a989929829fe087977b509a29ebb7d0e` |
+| `.cargo/config.toml` | `03b0fbd88c069abb0a8fbdca5921ba6a9899298291fe087977b509a29ebb7d0e` |
 | `rust-toolchain.toml` | `85a45cac04c296adac076f8f0609ca8f4c8ca658957f1f24cbd1e054b6cc44e0` |
 
 ## Toolchain and target configuration
@@ -105,4 +105,3 @@ toolchain version, installed target list, required disassembly tools, and
 unused temporary target paths. A missing prerequisite stops the sequence with
 the recorded status and no compilation. A failed primary target likewise stops
 immediately; no successful-target retry or alternate flag is permitted.
-

@@ -89,34 +89,29 @@ alone.
 
 | Candidate | Native scalar | Native AVX2 W8 | Wasm scalar | Wasm simd128 W4 | Residual interpretation |
 | --- | --- | --- | --- | --- | --- |
-| `FLOOR` | folded scalar memory operands in frame | repeated `vbroadcastss` in both frame loops | repeated `f32.const` in frame loop | repeated `v128.const` in frame loop | Actionable residual candidate in W8 and both Wasm shapes; scalar is folded-load materialization. |
-| `DB_PER_OCTAVE` | folded scalar memory operand | repeated `vbroadcastss` | repeated scalar constant operand | repeated vector constant operand | Same residual pattern; no arithmetic change is implied. |
-| `+/-CONTRAST_LIMIT_DB` | folded `vminss`/`vmaxss` operands | repeated broadcasts | repeated scalar constants | repeated vector constants | Actionable loop materialization in vector/Wasm bodies. |
-| `+/-SHAPE_LIMIT_DB` | folded `vminss`/`vmaxss` operands | repeated broadcasts | repeated scalar constants | repeated vector constants | Actionable loop materialization in vector/Wasm bodies. |
-| `OCTAVES_PER_DB` | folded scalar multiply operand | repeated `vbroadcastss` | repeated scalar constant operand | repeated vector constant operand | Actionable loop materialization in vector/Wasm bodies. |
-| `0.5` average-link factor | folded scalar multiply operand | repeated broadcast in average-link body | repeated `f32.const` | repeated vector constant | Actionable only in the average-link specialization; dual-mono/maximum do not use it. |
-| `zero` identity/clamp value | zeroing idiom or folded scalar zero | repeated zeroing/materialization in frame paths | repeated `f32.const 0` | repeated zero vector/zeroing idiom | Candidate is present in loop bodies, but any change must preserve signed-zero selection. |
-| bypass mask | loop-entry materialization before prefix/tail | loop-entry materialization before prefix/tail | loop-entry local | loop-entry vector local | No per-frame residual observed. |
-| prepared coefficient lanes | loop-entry loads, then scalar state use | loop-entry vector packing plus stack reloads in frame | loop-entry locals/loads | loop-entry vector locals/loads | State traffic/spill-reload classification, not a constant-splat residual. |
+| `FLOOR` | folded `vmovss` operand in the mapped scalar frame path | repeated `vbroadcastss` at `.s:10030` and `.s:11256` | not individually mapped in retained excerpt | not individually mapped in retained excerpt | Only the native scalar/W8 cases are dispositioned. |
+| `DB_PER_OCTAVE` | folded `vmulss` operand at `.s:17754` | repeated `vbroadcastss` at `.s:10211` and `.s:11493` | repeated `f32.const` at `.s:149497` | repeated `v128.const` at `.s:3076` and `.s:4286` | Individually mapped in all four cases; no projected saving is claimed. |
+| `+/-CONTRAST_LIMIT_DB` | folded `vminss`/`vmaxss` operands at `.s:17794-17797` | repeated broadcasts at `.s:10215-10219` and `.s:11497-11508` | repeated scalar constants at `.s:149507-149518` | not individually attributable because of multiple inlined math paths | W8, scalar, and Wasm-scalar cases are mapped. |
+| `+/-SHAPE_LIMIT_DB` | folded `vmaxss`/`vminss` operands at `.s:17803-17806` | repeated broadcasts at `.s:10242-10246` and `.s:11601-11615` | repeated scalar constants at `.s:149561-149569` | not individually attributable because of multiple inlined math paths | W8, scalar, and Wasm-scalar cases are mapped. |
+| `OCTAVES_PER_DB` | folded `vmulss` operand at `.s:17800` | repeated `vbroadcastss` at `.s:10250` and `.s:11626` | repeated `f32.const` at `.s:149577` | repeated `v128.const` at `.s:3124` and `.s:4334` | Individually mapped in all four cases. |
+| `0.5` average-link factor | no retained link-branch attribution | one W8 constant occurrence only; branch attribution is not independently retained | no retained attribution | no retained attribution | No average-link residual conclusion. |
+| `zero`, bypass, and prepared coefficient lanes | not dispositioned as constants | not dispositioned; stack traffic is not treated as spill evidence | not dispositioned | not dispositioned | Removed from the residual claim because the retained maps do not prove candidate-specific behavior. |
 
-The native scalar backend therefore folds several source constants as scalar
-memory operands, while AVX2 W8 and both Wasm shapes retain repeated constant
-materialization in actual ramping and stationary frame loops. The evidence
-does not establish a projected cycle saving or justify a source rewrite. A
-real residual exists for a narrowly bounded constant-hoisting review, subject
-to preserving the link specializations, signed-zero identity, state traffic,
-and scalar/W4/W8 bit behavior.
+The corrected evidence supports a bounded lowering question for the mapped
+`DB_PER_OCTAVE`, `OCTAVES_PER_DB`, clamp, and (where individually mapped)
+`FLOOR` occurrences. It does not support candidate-wide claims for average
+link, zero, bypass, or coefficient spill/reload behavior. It establishes no
+projected cycle saving and does not justify a source rewrite by itself.
 
 ### Stage-1 disposition proposed for Astra
 
-Suggested Astra LOW verdict: **ACTIONABLE RESIDUAL, stage-2 amendment
-required**. The evidence is sufficient to authorize only a bounded follow-up
-scope for loop-invariant constant materialization in
-`crates/transient-shaper/src/lib.rs`; it does not authorize implementation in
-this stage. Any stage-2 brief must name the exact candidate set and require
-post-change lowering for the same four target shapes, with explicit spill/
-reload accounting and no timing or projected savings claim. The current
-stage-1 tree is evidence/spec-only and has no product change.
+Suggested Astra LOW verdict: **CORRECTED EVIDENCE READY FOR ADVERSARIAL
+REVIEW; do not authorize stage 2 yet**. The retained tranche now supports only
+the individually mapped caller/loop cases above. Astra should decide whether
+those cases warrant a bounded stage-2 amendment; no implementation is
+authorized here. Any amendment must name the exact candidate/target cases and
+require comparable lowering with no unsupported spill, average-link, zero, or
+projected-savings claim. The current tree remains evidence/spec-only.
 
 ### Attempt 1 Astra verdict
 
@@ -140,3 +135,26 @@ every conclusion to individually proven caller/loop cases; and distinguish FX4
 constants from math-kernel constants. No compilation, retry, source/test edit,
 audio, timing, artifact work, PR or merge is authorized. Astra LOW must review
 the corrected evidence before any stage-2 amendment.
+
+### Attempt 2 correction record
+
+Attempt 2 was authorized by tracker commit `768b9ffe` at clean pushed HEAD
+`f83be00394d2d2786498cfa2c42b779af0b8a3fa`. It performed no compilation,
+retry, source/test edit, audio execution, timing, installation, artifact
+promotion, PR/GitHub action, commit, or push. It changed only this issue record
+and the existing evidence files.
+
+The correction fixes the `.cargo/config.toml` SHA-256 to
+`03b0fbd88c069abb0a8fbdca5921ba6a9899298291fe087977b509a29ebb7d0e`, makes
+preflight wording candid about the superseded malformed spelling, and replaces
+the prior physical excerpt references with checked locations from the same
+payload identities. `DB_PER_OCTAVE` is explicitly mapped as the
+`0x1.815182p2`/`0x40c0a8c1` constant; nearby math-kernel constants are
+excluded. Average-link, zero, bypass, and coefficient spill/reload conclusions
+are removed or qualified where the retained maps do not prove
+candidate-specific behavior.
+
+The corrected evidence narrows the possible residual to individually mapped
+`DB_PER_OCTAVE`, `OCTAVES_PER_DB`, clamp, and selected `FLOOR` occurrences in
+the identified caller/loop bodies. Suggested Astra verdict: **CORRECTED
+EVIDENCE READY FOR ADVERSARIAL REVIEW; do not authorize stage 2 yet**.

@@ -14,3 +14,5 @@ capture records in each target directory.
 The full payloads are not evidence artifacts. `capture-plan.md` freezes the
 exact commands, flags, source hashes, toolchain, and expected status before
 the first command; `preflight.md` records all prerequisite statuses.
+`evidence-integrity.sha256` hashes the retained spec, manifest, excerpts, and
+raw command streams/statuses after the attempt-2 correction.
