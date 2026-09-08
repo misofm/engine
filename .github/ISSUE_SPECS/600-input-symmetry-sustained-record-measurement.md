@@ -205,3 +205,16 @@ exclusion, and separates untimed, final-preflight and capture namespaces. The li
 local spec match; current main remains the inspected base; #598 ownership is disjoint. Luna HIGH or
 XHIGH attempt 1 may implement the benchmark and untimed harness. Timing remains unauthorized until
 the later source/harness review passes.
+
+## Attempt 1 review
+
+Implementation checkpoint `c735e5d5172b446fdc6c515784a24f70eeeed982` received Astra LOW
+**FAIL**; two attempts remain and timing is not authorized. Safe validator/lifecycle, strict Clippy,
+rustdoc, formatting/diff, and unchanged #238/#496 gates pass, but the real preflight build flags are
+invalid; untimed proof calls the timing helper and the timer includes buffer construction; exact
+drain/pending/ramp-state and independent digest witnesses are missing; the required restored source
+mutation was replaced by a permanent suppression mode; validator type/duplicate-key/metadata/seal
+checks are incomplete; runner persistence/status/cwd behavior is inaccurate; and lifecycle tests
+miss source/binary and post-workload publication failures. Full verdict:
+`docs/audits/600-attempt1-review.md`. Attempt 2 stays inside the six implementation paths and focused
+records. No capture, final preflight, runtime change or path expansion is authorized.
