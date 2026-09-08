@@ -1,0 +1,1 @@
+env CARGO_TARGET_DIR=/tmp/issue627-postpin-attempt3-hermetic-target-20260908a bash scripts/test-web-audioworklet.sh

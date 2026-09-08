@@ -1,0 +1,8 @@
+head=0bb5a820be33a49393386617358ec1db2fe7577d
+cwd=/home/bl/misofm/engine-issue627-postpin
+output=/tmp/issue627-postpin-attempt3-output-20260908
+mkdir -p /tmp/issue627-postpin-attempt3-output-20260908
+test -d /tmp/issue627-postpin-attempt3-output-20260908
+! test -L /tmp/issue627-postpin-attempt3-output-20260908
+test -z "$(find /tmp/issue627-postpin-attempt3-output-20260908 -mindepth 1 -maxdepth 1 -print -quit)"
+repin=unset
