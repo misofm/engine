@@ -113,3 +113,22 @@ recorded the distinct review chronology and executor attribution. This
 documentation-only correction changes no raw probe byte. Astra LOW confirmation
 is required before one Luna scratch qualification can be authorized; no probe
 rerun is permitted.
+
+## Astra LOW corrected mismatch-evidence review — PASS
+
+Astra LOW returned **PASS** at exact clean pushed head
+`573d2420f4140cb181931a9bc5330a9f2afa6491`, frozen source `dc14ca85`, tree
+`5817dc4710f089a869d6849a85e7478ac71051f4`, and live main `30680709`. All 16
+manifest entries and frozen input hashes verify. The recorded invocation
+explicitly unsets the repin bypass; compilation succeeded before exit 1 solely
+for delivered `ac71c640…` versus candidate `63ef81c105d50aed41164aa3c6c6f8853a314b99d642e209e7cc3aefe3bdbca1`.
+The detached source remains clean and the output remains empty. Scope, diff
+hygiene, GitHub synchronization, and corrected chronology pass.
+
+The record proves one invocation without a retry but is not independent process-
+count telemetry. Its cwd and external paths are context rather than durable
+artifacts, and the candidate digest is builder-reported because no rejected Wasm
+was published. Exactly one Luna HIGH/XHIGH detached scratch qualification is now
+authorized to reproduce and independently hash the candidate bytes, prove all
+five non-Wasm outputs, and run the brief's remaining gates. Repository promotion
+remains unauthorized pending Astra LOW candidate PASS.
