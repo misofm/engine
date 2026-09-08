@@ -18,9 +18,15 @@ artifact qualification/pinning. This native tools-only issue cannot change or pi
 
 Reuse the frozen Rust `input-symmetry-capture` entry unchanged. Tooling seals/dispositions use issue
 606 while the unchanged Rust records retain issue 602. Repair, qualify, preflight, and run that entry
-exactly once. Implementation may change only the four `scripts/input-symmetry-capture-*` files and
-focused `artifacts/issue-606-input-symmetry-capture/` evidence. This spec, focused `docs/audits/`
-records, and concise #559/#560 handoff status are root-owned.
+exactly once. Implementation may change only:
+
+- `scripts/input-symmetry-capture-validator.py`;
+- `scripts/preflight-input-symmetry-capture.sh`;
+- `scripts/run-input-symmetry-capture.sh`;
+- `scripts/test-input-symmetry-capture.sh`; and
+- focused `artifacts/issue-606-input-symmetry-capture/` evidence.
+
+This spec, focused `docs/audits/` records, and concise #559/#560 handoff status are root-owned.
 
 No Rust source, fixture, manifest, lockfile, runtime crate, policy, workflow, existing issue-602/603
 artifact, browser/SDK/ABI source, shipped artifact, or pin may change. One implementation pass and no
@@ -30,8 +36,9 @@ new successor.
 ## Exact repair gates
 
 1. **Build environment:** preflight rejects before any build every present variable whose name is
-   `RUSTFLAGS`, `RUSTC`, `RUSTC_WRAPPER`, `RUSTC_WORKSPACE_WRAPPER`, `RUSTDOC`, `RUSTDOCFLAGS`, or
-   `CARGO_INCREMENTAL`, or begins `CARGO_BUILD_`, `CARGO_TARGET_`, or `CARGO_PROFILE_RELEASE_`.
+   `RUSTFLAGS`, `RUSTC`, `RUSTC_WRAPPER`, `RUSTC_WORKSPACE_WRAPPER`, `RUSTDOC`, `RUSTDOCFLAGS`,
+   `CARGO_ENCODED_RUSTFLAGS`, or `CARGO_INCREMENTAL`, or begins `CARGO_BUILD_`, `CARGO_TARGET_`, or
+   `CARGO_PROFILE_RELEASE_`.
    This covers target-specific rustflags, package/build-override profile inputs, split debuginfo,
    debug assertions, overflow checks, compiler wrappers, target dir, and all previously named inputs.
    A stub-only loop proves representative exact and wildcard-family variables receive their specific
