@@ -46,3 +46,22 @@ qualification router/static-expectation policy, and directly applicable mutation
 tests locally. Exact-head Astra review, required PR CI, guarded merge and the first
 new post-main qualification all remain mandatory; do not rerun failed run
 `34250520726` again.
+
+## Attempt 1 source review — PASS
+
+Astra LOW passed exact clean pushed implementation
+`a4128e2e5dce13c25d0dee1c6293045a187b7f99` against unchanged live main
+`d47b62ba0dfcaf5c1525510aaa7789fa8e0acb94`. The implementation is exactly two
+workflow lines: unconditional `cargo fetch --locked` after the lint/policy job's
+pinned toolchain and apt setup. Ordinary step failure stops the job. The later
+offline gates, route/static-result/verdict logic, cache configuration, manifests,
+lockfile and product remain unchanged.
+
+PyYAML parsing, the CI path-routing checker and mutation suite, and diff hygiene
+passed. A supplemental ad hoc placement parser raised `ValueError` because its own
+job-block parsing was incorrect; it receives no evidence credit and was not
+retried. Direct review establishes the required placement, so that auxiliary
+failure does not invalidate the accepted change. No product build, artifact,
+benchmark or compiler capture ran. Final clean documentation-head/current-main
+review, required PR qualification, guarded merge and first new post-main
+qualification remain pending.
