@@ -3483,27 +3483,37 @@ mod tests {
             NonZeroUsize::new(8).expect("control queue"),
         )
         .expect("crossed control attach");
-        let first = crossed_control
+        // Keep the crossed consumers tied to the two owners that receive the commands below:
+        // target is cross1/dynamic/slot 1 (chain0), and decoy is cross0/simd1/slot 0
+        // (chain1). Swapping any other consumers would not exercise the command's live target.
+        let target_owner = ("cross1", EffectRack::Dynamic, "chain0");
+        let decoy_owner = ("cross0", EffectRack::Simd1, "chain1");
+        let target_entry = crossed_control
             .entries
             .iter()
             .position(|entry| {
-                entry.track_id == "cross0"
-                    && entry.rack == EffectRack::Simd1
-                    && entry.effect_id == "chain0"
+                entry.track_id == target_owner.0
+                    && entry.rack == target_owner.1
+                    && entry.effect_id == target_owner.2
             })
-            .expect("first crossed control");
-        let second = crossed_control
+            .expect("crossed control target owner");
+        let decoy_entry = crossed_control
             .entries
             .iter()
             .position(|entry| {
-                entry.track_id == "cross1"
-                    && entry.rack == EffectRack::Dynamic
-                    && entry.effect_id == "chain1"
+                entry.track_id == decoy_owner.0
+                    && entry.rack == decoy_owner.1
+                    && entry.effect_id == decoy_owner.2
             })
-            .expect("second crossed control");
-        assert!(first < second, "crossed control fixture order");
-        let (before, after) = crossed_control.entries.split_at_mut(second);
-        std::mem::swap(&mut before[first].control, &mut after[0].control);
+            .expect("crossed control decoy owner");
+        assert_ne!(target_entry, decoy_entry, "crossed control owners are distinct");
+        if target_entry < decoy_entry {
+            let (before, after) = crossed_control.entries.split_at_mut(decoy_entry);
+            std::mem::swap(&mut before[target_entry].control, &mut after[0].control);
+        } else {
+            let (before, after) = crossed_control.entries.split_at_mut(target_entry);
+            std::mem::swap(&mut before[decoy_entry].control, &mut after[0].control);
+        }
         let crossed_control = GraphCompiler::compile(GraphCompileRequest {
             plan_id: 6_334,
             effects: crossed_control,
@@ -3536,11 +3546,14 @@ mod tests {
         let crossed_control_pcm =
             render_cross_index_blocks(crossed_control, crossed_control_producers, 4, true);
         assert!(
-            crossed_control_pcm
-                .iter()
-                .flatten()
-                .any(|sample| *sample != 0.0),
-            "crossed-control fixture rendered audio"
+            baseline_pcm.iter().zip(&crossed_control_pcm).any(|(left, right)| {
+                left.iter()
+                    .zip(right)
+                    .any(|(left, right)| left.to_bits() != right.to_bits())
+            }),
+            "crossing control consumers for target {:?} and decoy {:?} must change PCM",
+            target_owner,
+            decoy_owner
         );
 
         // Routed sidechains remain associated with their destination and cannot silently enter a
