@@ -64,3 +64,7 @@ The native scalar and native W8 bodies are the supported native premise. The sca
 - `selected/manifest.json` records every selected function's source file, line interval, byte count and SHA-256; `selected/extract.status` is 0.
 - The artifact tree contains no `target/` directory, Cargo registry/dependency tree, private key, token, password, or unrelated generated source. Temporary targets and the direct scalar object remain under `/tmp` and are not repository changes.
 - The worktree remains at the authorized HEAD with only this uncommitted `artifacts/issue621-current-lowering/` directory added.
+
+## Lossless delivery packaging
+
+Raw compiler, disassembler, and command-output files that contain tool-emitted trailing whitespace are stored byte-for-byte as members of `raw-emitted-output.tar.gz`. `raw-emitted-output.members.json` records every logical path, uncompressed size, and uncompressed SHA-256. Paths and line numbers elsewhere in this record refer to those logical archive-member paths when the plain file is absent. Review a member with `tar -xOzf raw-emitted-output.tar.gz <logical-path>`; no captured byte was normalized or discarded. The archive uses deterministic zeroed ownership and timestamps.

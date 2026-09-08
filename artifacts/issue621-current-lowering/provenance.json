@@ -1,8 +1,8 @@
 {
   "artifact_files": {
     "README.md": {
-      "bytes": 7624,
-      "sha256": "8fdcafa302a593c0b7d375809313c256b4a2acd8170e4cb5d5e346d0480a7b9b"
+      "bytes": 8239,
+      "sha256": "bcde429a545c170d3df210e40e968322533b1efb8f412fb89860cb07b8c3bd37"
     },
     "native/cargo.status": {
       "bytes": 2,
@@ -23,6 +23,14 @@
     "native/true_peak_limiter-61bcf0f0b2475b36.s": {
       "bytes": 3992992,
       "sha256": "6fdd01bd181e8c1f7e5c921c3fabb81a391e5884091665db43fa5d2d1a60bda0"
+    },
+    "raw-emitted-output.members.json": {
+      "bytes": 2507,
+      "sha256": "323662dc52ce44f73b7261bf81eff9d91a7807460975deeb3d78f6fb357c1e56"
+    },
+    "raw-emitted-output.tar.gz": {
+      "bytes": 884431,
+      "sha256": "98ebd89b77dc1b4166c91c92b0918f31bdb2ddc3fc1bb97c12ab3fa02959cc06"
     },
     "selected/extract.status": {
       "bytes": 2,
@@ -92,65 +100,33 @@
       "bytes": 676911,
       "sha256": "5aeac5e92f63632dec4ce9d650ee40f4a4517a33caf32e42cdf6b76a62487c8b"
     },
-    "selected/wasm-scalar-scalar-core.s": {
-      "bytes": 297079,
-      "sha256": "a40d02527c83d0259b61c5e6f8b0f25412f114d94e061daabceff16211ad3f2c"
-    },
     "selected/wasm-scalar-scalar-process.ll": {
       "bytes": 3408,
       "sha256": "fef47eae1196a956832b509dcba1c1ed8f4c8d587edebf553062b334a79f36e4"
-    },
-    "selected/wasm-scalar-scalar-process.s": {
-      "bytes": 2050,
-      "sha256": "d1356e163368c29586e4e194a6b1e2655a58f0b4cb02721f45824d1b87fef66d"
     },
     "selected/wasm-simd128-scalar-core.ll": {
       "bytes": 682866,
       "sha256": "ed3ca37530a5feb87ede01a6e58c6b570144296f2f59b9c60da30d7ae2d7a9ef"
     },
-    "selected/wasm-simd128-scalar-core.s": {
-      "bytes": 296838,
-      "sha256": "2bfa8b9672d7c6dc0a93cbbd9dbd9e6bf5270e422f33152e241f90886b0f2b88"
-    },
     "selected/wasm-simd128-scalar-process.ll": {
       "bytes": 3411,
       "sha256": "93d604a377668e3a62c0b80209c5099b42ddc04577bb767a76f16a195e8a0418"
-    },
-    "selected/wasm-simd128-scalar-process.s": {
-      "bytes": 1954,
-      "sha256": "61900d0c6e2507c880d2086331dd5dcc993a7ea43a2ebf3e51fd0aa2c005e7dc"
     },
     "selected/wasm-simd128-w4-core-mono.ll": {
       "bytes": 413932,
       "sha256": "f01c1fcfb96ca1df976a67efad8c15aadaa2ad802a5f369b43df6b0a9260cbf1"
     },
-    "selected/wasm-simd128-w4-core-mono.s": {
-      "bytes": 172053,
-      "sha256": "6f1dc72fabd34036e6c72eaa01ef9b947701e3267e214dfe8329a8f26510ed92"
-    },
     "selected/wasm-simd128-w4-core.ll": {
       "bytes": 723443,
       "sha256": "29e91f00d7c11908071eb337715169de301f51b127e1db5020ec13c5733f7c7a"
-    },
-    "selected/wasm-simd128-w4-core.s": {
-      "bytes": 335920,
-      "sha256": "68070443bfaa79cd5745a1ae2d9dd19b74907f80577ec95ef0907f5709dbae5e"
     },
     "selected/wasm-simd128-w4-process-bank-mono.ll": {
       "bytes": 12918,
       "sha256": "32efefe4c77aa533fc148d4e656feef237668325d455b5813d505c8abd608b26"
     },
-    "selected/wasm-simd128-w4-process-bank-mono.s": {
-      "bytes": 6208,
-      "sha256": "6715886b964a2d6ce3949c72cabe66c112c66038d03cbbd8647bd9d215ba7db7"
-    },
     "selected/wasm-simd128-w4-process-bank.ll": {
       "bytes": 13351,
       "sha256": "b81db5a4e907b39132cb4137a014be78eb5f5222caa83f3ddf99a2d8283cd950"
-    },
-    "selected/wasm-simd128-w4-process-bank.s": {
-      "bytes": 6261,
-      "sha256": "833868c2183582a0cc06646fa77acc209aeba0fd2218bccb5384a19b6ef727be"
     },
     "wasm-scalar/cargo.status": {
       "bytes": 2,
@@ -184,10 +160,6 @@
       "bytes": 0,
       "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     },
-    "wasm-scalar/direct-wasm-objdump.txt": {
-      "bytes": 6124987,
-      "sha256": "9d1d869690ab7d9ff1e4c8fd98713b9e45a15acb673ee49b4877c5d5d9e36577"
-    },
     "wasm-scalar/object-cargo.status": {
       "bytes": 2,
       "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
@@ -215,10 +187,6 @@
     "wasm-scalar/true_peak_limiter-13565f343cd208d0.ll": {
       "bytes": 2239211,
       "sha256": "a452840f01d7dd3fd5105be3d086942342391823d84ca1219df2a4228e1bfde4"
-    },
-    "wasm-scalar/true_peak_limiter-13565f343cd208d0.s": {
-      "bytes": 1066576,
-      "sha256": "0b2d5a0d2ef2597a3e8e87d157c81260c9c395c032e84ac0b5cf3f911f2154b0"
     },
     "wasm-scalar/wasm-objdump.status": {
       "bytes": 2,
@@ -248,10 +216,6 @@
       "bytes": 2,
       "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
     },
-    "wasm-simd128/direct-rustc-with-wide.stderr": {
-      "bytes": 285,
-      "sha256": "0c891cf63dd27ce1465711f1fbc2ce85cde9a86bddeee4da0520e7eefbb85f1e"
-    },
     "wasm-simd128/direct-rustc-with-wide.stdout": {
       "bytes": 0,
       "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
@@ -259,10 +223,6 @@
     "wasm-simd128/direct-rustc.status": {
       "bytes": 2,
       "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
-    },
-    "wasm-simd128/direct-rustc.stderr": {
-      "bytes": 285,
-      "sha256": "0c891cf63dd27ce1465711f1fbc2ce85cde9a86bddeee4da0520e7eefbb85f1e"
     },
     "wasm-simd128/direct-rustc.stdout": {
       "bytes": 0,
@@ -319,10 +279,6 @@
     "wasm-simd128/true_peak_limiter-c44b6d723c91aa0c.ll": {
       "bytes": 5192843,
       "sha256": "a8507cfb4b95d7788f03cdf9cc366b87c079e9d6618d7d86e40fc4dda58f1452"
-    },
-    "wasm-simd128/true_peak_limiter-c44b6d723c91aa0c.s": {
-      "bytes": 2551511,
-      "sha256": "fb8f70679bc702f99a0da651fa36555f761df1d244412d59f5db6fbc38569b0e"
     },
     "wasm-simd128/wasm-objdump.status": {
       "bytes": 2,
@@ -401,5 +357,11 @@
     "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
     "wasm_objdump": "1.0.34"
   },
-  "worktree": "/home/bl/misofm/engine-limiter-detector-bounds"
+  "worktree": "/home/bl/misofm/engine-limiter-detector-bounds",
+  "lossless_packaging": {
+    "archive": "raw-emitted-output.tar.gz",
+    "members_manifest": "raw-emitted-output.members.json",
+    "reason": "preserve tool-emitted bytes while allowing branch-wide Git diff hygiene",
+    "member_count": 13
+  }
 }

@@ -116,3 +116,7 @@ SIMD opcode matches; the SIMD host disassembly had 44,076.
   directory; the source checkpoint remains unchanged.
 - No `target/` directory, Cargo registry, dependency tree, secret, token, or
   generated source was copied into this evidence directory.
+
+## Lossless delivery packaging
+
+Raw compiler, disassembler, and command-output files that contain tool-emitted trailing whitespace are stored byte-for-byte as members of `raw-emitted-output.tar.gz`. `raw-emitted-output.members.json` records every logical path, uncompressed size, and uncompressed SHA-256. Paths and line numbers elsewhere in this record refer to those logical archive-member paths when the plain file is absent. Review a member with `tar -xOzf raw-emitted-output.tar.gz <logical-path>`; no captured byte was normalized or discarded. The archive uses deterministic zeroed ownership and timestamps.

@@ -1,8 +1,8 @@
 {
   "artifact_files": {
     "README.md": {
-      "bytes": 8488,
-      "sha256": "fa4e8ad942ef839f862f455dc3aa6d09d4e47ad50d93e4ee969368be4500dd9a"
+      "bytes": 9103,
+      "sha256": "b4aa5fbaa69ad07069e5efbc1587631f4c3904e8b00b0e8258b41273a7589ea5"
     },
     "corpus/wasm-gates.jsonl": {
       "bytes": 515,
@@ -31,10 +31,6 @@
     "gates/allocation-release.stderr": {
       "bytes": 298,
       "sha256": "f18a2b437d5e7d753a3c1db40fdf8f1ec9de1d8341db1282987e5438c24eb526"
-    },
-    "gates/allocation-release.stdout": {
-      "bytes": 226,
-      "sha256": "beb888e6107b96ae6ac33927ffb52d1f607fafa65ca33cea90eea206d399e271"
     },
     "gates/clippy.command": {
       "bytes": 175,
@@ -112,10 +108,6 @@
       "bytes": 191,
       "sha256": "d047d00718896ff0cbf740855422b53005f32fa3d1e59a556f52c481b7dbe040"
     },
-    "gates/focused-debug.stdout": {
-      "bytes": 325,
-      "sha256": "c18fa245d94cb56e1e36b201fd2b88ad13935df0cfee8b64999cd0cc90ef40dd"
-    },
     "gates/focused-release.command": {
       "bytes": 192,
       "sha256": "925233feb22445f312be0cef479729c2c0d4159fdf738568b838c32f2a006865"
@@ -128,10 +120,6 @@
       "bytes": 2554,
       "sha256": "d73d6f4d4da0f5ab2db5c58c33053c1f2517436522c501f5c74a09bda25dc09a"
     },
-    "gates/focused-release.stdout": {
-      "bytes": 325,
-      "sha256": "c18fa245d94cb56e1e36b201fd2b88ad13935df0cfee8b64999cd0cc90ef40dd"
-    },
     "gates/full-suite.command": {
       "bytes": 129,
       "sha256": "f651bde2992647e8cc1629052f68854d31e20975ac26e63ceae886aa07ed1288"
@@ -143,10 +131,6 @@
     "gates/full-suite.stderr": {
       "bytes": 3349,
       "sha256": "c8ad8e922a0254813b2ea51c4c6f16d78cfed22eda7d3deb374e9c045ef08a08"
-    },
-    "gates/full-suite.stdout": {
-      "bytes": 4183,
-      "sha256": "4fd4836efcb4e44299abdc62d6f71dfe33cf8ed3279900e7382d5bf690771020"
     },
     "gates/git-diff-check.command": {
       "bytes": 17,
@@ -224,10 +208,6 @@
       "bytes": 189,
       "sha256": "69c9b9586c2839159f6c8b19d4470ecfddfb1bac9e5c4077d5ed2a5811db7715"
     },
-    "gates/mono-debug.stdout": {
-      "bytes": 237,
-      "sha256": "65ea8d3b27b85f68b0338acce4765c9be5970a1f6ae394dad971cd291886f7f9"
-    },
     "gates/mono-release.command": {
       "bytes": 160,
       "sha256": "f422da169b2396e135a34a7c3ce8d6f51a16c88fb38feee46e1e242e9addd4a2"
@@ -239,10 +219,6 @@
     "gates/mono-release.stderr": {
       "bytes": 304,
       "sha256": "bdb10e1b6d840c04b86bb7fdc7592534ca4a832f808cd28316f1463ae3606ba8"
-    },
-    "gates/mono-release.stdout": {
-      "bytes": 237,
-      "sha256": "0cd1f82274f2410fd118a58de7ed55b1af094480e421f0acbff417e2dd2e4eae"
     },
     "gates/native-lowering.command": {
       "bytes": 169,
@@ -480,81 +456,49 @@
       "bytes": 715178,
       "sha256": "08f3cfa3426f376e06765016e26e1c6d4a8d7bf92311b9e4fbacacf43ee6d0e5"
     },
-    "lowering/selected/wasm-scalar-scalar-core.s": {
-      "bytes": 288342,
-      "sha256": "9283ef201b39f1b93eb67a32d12c1430b83073c379404c251a90f38421f1ede8"
-    },
     "lowering/selected/wasm-scalar-scalar-process.ll": {
       "bytes": 3408,
       "sha256": "0b3b7467981a6abc0b1bece67d6e7c585b52249503874b9ce4239cd2334c23b0"
-    },
-    "lowering/selected/wasm-scalar-scalar-process.s": {
-      "bytes": 2050,
-      "sha256": "b1183c33fbd7af7dacb61b18c8a574adc98dc2082cea5ccf4fefcfe159abe62f"
     },
     "lowering/selected/wasm-simd128-scalar-core.ll": {
       "bytes": 721825,
       "sha256": "73f24b433789566992fbc6cb54c13a16b1d08f04d3574d7027d650a70b69cc60"
     },
-    "lowering/selected/wasm-simd128-scalar-core.s": {
-      "bytes": 288111,
-      "sha256": "75085e647d7e49916137484b3de66b6ebc1d2dd777d72f2084821c4168fdfe0e"
-    },
     "lowering/selected/wasm-simd128-scalar-process.ll": {
       "bytes": 3411,
       "sha256": "82a4577f0184ea3a8395981cfef7fab0d2e5c60c65a35266139285f6a332658b"
-    },
-    "lowering/selected/wasm-simd128-scalar-process.s": {
-      "bytes": 1954,
-      "sha256": "df77d08c4e86cc93fc1e0ba98f701fe802cdb35b17c7fc8f08134d82712d204e"
     },
     "lowering/selected/wasm-simd128-w4-core-mono.ll": {
       "bytes": 417361,
       "sha256": "b65384b04da16895f5cc3058c48b1425301bc063f501908b226ef10966ff2e48"
     },
-    "lowering/selected/wasm-simd128-w4-core-mono.s": {
-      "bytes": 167613,
-      "sha256": "055c01cb4473258c4b0b960ce0799e4b98bcd2244445eae647796bddbec4e180"
-    },
     "lowering/selected/wasm-simd128-w4-core.ll": {
       "bytes": 730834,
       "sha256": "adb892ee21fb4cae02239fdcd6250c99fc24c3c47301ba74128ccab55f2de3c1"
-    },
-    "lowering/selected/wasm-simd128-w4-core.s": {
-      "bytes": 326328,
-      "sha256": "6634ae9eb8cf187977e5737d41933d013316f6e58daf0810e52e19e4a8dd2b6e"
     },
     "lowering/selected/wasm-simd128-w4-process-bank-mono.ll": {
       "bytes": 12918,
       "sha256": "3cdebca4636037bb39dc7165f84f10828264cb0254f8709102aca1518f73af99"
     },
-    "lowering/selected/wasm-simd128-w4-process-bank-mono.s": {
-      "bytes": 6208,
-      "sha256": "e800db30873f2c91714a3d8e7f1bb1581e2ee19f8c02be938bddb3294ef3baf5"
-    },
     "lowering/selected/wasm-simd128-w4-process-bank.ll": {
       "bytes": 13351,
       "sha256": "ae4c959ded960d696a17642246e59682722bf326bc63a135a569ba3c27b3ca5b"
-    },
-    "lowering/selected/wasm-simd128-w4-process-bank.s": {
-      "bytes": 6261,
-      "sha256": "27f35a4af022331e16023c51ae8fa08e6621cb01962663a56e739f8ac440deb7"
     },
     "lowering/wasm-scalar/true_peak_limiter-13565f343cd208d0.ll": {
       "bytes": 2285983,
       "sha256": "1af4e6ed7ff6dbd14e9253903c5f504b846188ede9f0dd23e082a5895f5765c2"
     },
-    "lowering/wasm-scalar/true_peak_limiter-13565f343cd208d0.s": {
-      "bytes": 1058211,
-      "sha256": "f032be87150eb1808a41fc34d09ed680eecfd0e9bc713bc35fecef73b09c1087"
-    },
     "lowering/wasm-simd128/true_peak_limiter-c44b6d723c91aa0c.ll": {
       "bytes": 5261918,
       "sha256": "4cd8baa07a2ff56a9e1a41228162ed6e1856275cfde5aef2d44a5bc51c8a37d8"
     },
-    "lowering/wasm-simd128/true_peak_limiter-c44b6d723c91aa0c.s": {
-      "bytes": 2533528,
-      "sha256": "6ec0a2257f7b0337e1f4733a41e7804bb68a1eb07bee24fd13587f1704cf1222"
+    "raw-emitted-output.members.json": {
+      "bytes": 3043,
+      "sha256": "1f69e7964fd683d4920916c787870957da64e5bb9bcc47dfa619a96eb54e0261"
+    },
+    "raw-emitted-output.tar.gz": {
+      "bytes": 484712,
+      "sha256": "49008d3f3e968c67addd9b8657453b12ced4396e1a875cce239e9350c6f1336f"
     }
   },
   "attempt": 1,
@@ -753,5 +697,11 @@
   "schema_version": 1,
   "source_sha256": "32ab4abf975b32d47c85a748e617e74c9547b22e1b585f0d36713be439a62908",
   "tranche": 2,
-  "worktree": "/home/bl/misofm/engine-limiter-detector-bounds"
+  "worktree": "/home/bl/misofm/engine-limiter-detector-bounds",
+  "lossless_packaging": {
+    "archive": "raw-emitted-output.tar.gz",
+    "members_manifest": "raw-emitted-output.members.json",
+    "reason": "preserve tool-emitted bytes while allowing branch-wide Git diff hygiene",
+    "member_count": 16
+  }
 }
