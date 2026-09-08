@@ -6,7 +6,7 @@ Parent: #621 (lane A, FX2). Coordination: #559/#560. Predecessor: delivered #625
 
 This is the separately numbered lane-B artifact successor required by #621. The accepted limiter access change is frozen at `crates/true-peak-limiter/src/lib.rs` SHA-256 `32ab4abf975b32d47c85a748e617e74c9547b22e1b585f0d36713be439a62908`. #621 integrated delivered main `30680709c58f0be99e09d006d8d661c1ce96324d` and passed Astra LOW review at merge checkpoint `77e9c7d7536916f045a8aa9c66aea86b5c2fe0c2`; its synchronized record head is `dc14ca856e10cb5ad7f6fdacb0ea9322342a9251`. The delivered AudioWorklet Wasm pin is `ac71c64033b0cfc637cf14edcacaa6ed1b3bbf7093a5caa641ef84adea7e88e3`, attributed to #623 source `ca5a8b492a41ba85b3e90d8dedb2b49b787f2f00`.
 
-#621 remains the one launch-critical implementation issue. This successor occupies the second issue slot and exclusively owns the artifact applicability decision, qualification, pin, lineage, and evidence. Sol HIGH coordinates and owns checkpoints, artifact qualification/pinning decisions, GitHub synchronization, and delivery. Astra LOW performs every scope, candidate, promotion, post-pin, exact-head, and delivery review. Luna HIGH or XHIGH may perform only a conditionally authorized repository promotion. No compiler capture, benchmark, timing workload, DSP edit, or new `.ll` artifact is allowed.
+#621 remains the one launch-critical implementation issue. This successor occupies the second issue slot and exclusively owns the artifact applicability decision, qualification, pin, lineage, and evidence. Sol HIGH coordinates and owns checkpoints, artifact qualification/pinning decisions, GitHub synchronization, and delivery. Astra LOW performs every scope, probe, candidate, promotion, post-pin, exact-head, and delivery review. Luna HIGH or XHIGH executes each probe, qualification, and repository-promotion stage only after the preceding Astra LOW verdict separately authorizes that stage. No compiler capture, benchmark, timing workload, DSP edit, or new `.ll` artifact is allowed.
 
 ## Smallest closable outcome
 
@@ -50,6 +50,21 @@ Root checkpoints the exact promotion before further work. Run one ordinary no-by
 Open one PR only after Astra LOW exact-head/current-main PASS. Require repository `qualification`, verify live main immediately before a guarded exact-head merge, verify exact merge parents and post-main qualification, synchronize and close this successor and #621, update #559/#560, and remove clean delivered and detached worktrees while retaining branches/history/evidence.
 
 One applicability probe and, conditionally, one scratch qualification plus one Luna promotion attempt are initially authorized only after their preceding Astra LOW PASS. A candidate mismatch beyond the expected Wasm digest, substantive gate failure, or tooling defect stops for reviewed rescope; do not rerun builds or browsers to obtain a green result. The repository three-attempt rule remains binding.
+
+## Astra LOW initial scope review — FAIL
+
+Astra LOW returned **FAIL** at exact clean pushed brief
+`8961928817faf566084850285c8d4438cfda2695`, live main
+`30680709c58f0be99e09d006d8d661c1ce96324d`, parent #621 head `dc14ca85`, and
+tracker `454e621f`. Title/body synchronization, ancestry, frozen source, delivered
+pin/lineage, two-slot ownership, the bounded stage sequence, five-file identity,
+qualification gates, compact evidence, and delivery controls passed. The brief's
+model-routing sentence allowed Luna HIGH/XHIGH only to perform the conditional
+repository promotion, contradicting the intended Luna execution of the probe and
+scratch stages after separate Astra LOW authorization. The sentence above now
+permits Luna to execute each stage only after its preceding Astra LOW PASS. No
+probe, qualification, promotion, or other artifact command ran under this failed
+review.
 
 ## Astra LOW scope review — PASS
 
