@@ -45,4 +45,3 @@ Do not share any other descriptor predicate. Do not change enum definitions, enu
 8. Open one PR only after the reviewed branch is ready. Require the repository's `qualification` check to succeed, verify live main immediately before guarded exact-head merge, verify merge parents and post-main qualification, synchronize #560 and this issue, then remove the clean delivered worktree.
 
 One Luna implementation pass is initially authorized. A substantive finding receives at most the remaining attempts under the repository's three-attempt rule. No gate may be weakened and no fourth disguised retry is allowed.
-
