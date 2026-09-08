@@ -1,0 +1,80 @@
+# Qualify `LocalRing` retirement AudioWorklet applicability
+
+Parent/delivery peer: #664
+Audit parent: #560
+Coordination: #559
+Frozen feature source: `e9c48b47cb2584ccaa3e74f35ce63cb71dc5f763`
+Delivered artifact pin: `580e3cb4cd11e996598103f27b02d94559f6ef7ad57ef22732d18c0b4f98be10`
+
+## Problem
+
+#664 has SOURCE PASS for removing the unused `engine::realtime::LocalRing`
+wrapper, its tests/re-export, and the smoke-only target-smoke API, plus the direct
+realtime-policy inventory recalibration. `target-smoke` and the policy scripts do
+not enter the shipped AudioWorklet, but `host-web` directly depends on the changed
+`engine` crate. An unused generic is expected not to reach the final link; that
+expectation is not artifact byte-identity evidence.
+
+This issue owns one exact-source identity probe. It does not own #664 product
+source, artifact qualification, promotion, pin edits, browser runs, SDK runs, or
+delivery.
+
+## Frozen scope
+
+Hypatia, Luna HIGH agent `issue583_luna_impl`, is the sole executor after Astra
+LOW returns scope PASS. Run exactly one repin-report builder invocation at the
+clean pushed issue head derived from frozen #664 source. Before execution, record:
+
+- executor/time, cwd, head/upstream, frozen feature source, current main and
+  merge-base;
+- Rust/Cargo versions and the exact artifact pin including newline shape;
+- literal command and environment;
+- clean tree and unchanged #664 product/policy paths;
+- absence, including dangling symlinks, of
+  `/tmp/issue666-repin-output` and `/tmp/issue666-repin-evidence`.
+
+Exercise the evidence capture wrapper with harmless status-0 and expected
+status-1 controls and independently read them back. Create the output directory
+once as an empty non-symlink directory and the evidence directory once without
+overwrite. Then run exactly once:
+
+```text
+MISO_ENGINE_WEB_AUDIOWORKLET_REPIN=1 bash scripts/build-web-audioworklet.sh /tmp/issue666-repin-output
+```
+
+Retain separate complete stdout/stderr, numeric status, timestamps, exact
+identity/environment, postflight tree/output census, current pin, and hashes in a
+self-excluding verified manifest whose hash is recorded separately. Require:
+
+- status 0;
+- stdout is exactly one lowercase 64-hex digest plus LF;
+- the output directory remains empty, as repin-report mode exits before copying
+  the six-file artifact set;
+- repository paths and the committed pin remain unchanged.
+
+Stop on any changed precondition, capture-control failure, nonzero status,
+malformed output, nonempty output directory, tree drift, or concurrent activity.
+Do not retry, run the ordinary builder, keep or inspect its temporary Cargo
+target, create a six-file candidate, invoke static/resource/browser/SDK gates,
+edit the pin, or change source.
+
+## Decision and delivery
+
+If the observed digest equals the delivered pin, Astra LOW decides whether the
+unchanged builder/copied inputs and prior qualified artifact identity support an
+unchanged-pin applicability PASS. If it differs, this probe establishes drift
+only. Candidate assembly, static/resource/ABI/native-PCM checks, browser/SDK
+qualification, pin promotion, and post-pin reconstruction require a pushed scope
+amendment and fresh Astra LOW PASS; no automatic repin is authorized.
+
+Root records only compact command/source/toolchain/pin/digest/status/census/hash
+evidence. Full streams and generated build output stay temporary. No compiler
+dump, `.ll`, assembly, object, archive, binary, `rlib`, `rmeta`, Cargo target,
+benchmark, timing, allocation, or performance claim enters Git.
+
+#664 remains the product delivery owner and cannot enter PR readiness until this
+artifact dependency is delivered. #664 and #666 are the two active, overlapping
+delivery issues; only #666 executes artifact work. Required exact-head/current-
+main review, PR qualification, guarded merge, post-main qualification, GitHub
+synchronization, and clean delivered-worktree removal apply to both issues in
+dependency order.
