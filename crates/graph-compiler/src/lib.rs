@@ -967,10 +967,19 @@ mod tests {
                             && producer.effect_index == 1
                     })
                     .expect("dynamic slot-1 control producer");
-                producer
-                    .producer
-                    .try_push(EffectControlRecord::Bypass(true))
-                    .expect("control queue has room");
+                for channel in [
+                    effect_contract::ParameterChannel::Left,
+                    effect_contract::ParameterChannel::Right,
+                ] {
+                    producer
+                        .producer
+                        .try_push(EffectControlRecord::Parameter {
+                            parameter_index: 0,
+                            channel,
+                            value: 0.0,
+                        })
+                        .expect("control queue has room");
+                }
             }
             let decoy = producers
                 .iter_mut()
@@ -989,7 +998,7 @@ mod tests {
                     .try_push(EffectControlRecord::Parameter {
                         parameter_index: 0,
                         channel,
-                        value: 0.0,
+                        value: 2.0,
                     })
                     .expect("decoy control queue has room");
             }
