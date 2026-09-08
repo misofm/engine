@@ -107,3 +107,9 @@ build dependencies; no preflight, prepared executable, capture entry, or timer r
 preserving the issue-606 lifecycle/artifact namespace and issue-602 Rust record identity. #605/#607
 are the two active issue slots. Lane B retains exclusive shipped artifact qualification/pinning
 authority. Historical #606 review statements above remain accurate for the checkpoints they describe.
+
+## Attempt 3 implementation checkpoint
+
+Luna HIGH delivered final correction `c14cc8b2` within `crates/protocol/src/controller_delivery.rs` and `crates/host-core/tests/scalar_point_endpoint.rs`. The error documentation now covers preparation and publication failures. The compact fixture adds the second-zero constructor case; typed unpublished state; successful subset and reverse-order reads across typed, B1b and caller-buffer ingress; immediate accepted-page readback after each invalid publication and identical republication; real sticky-fault snapshot refusal with preserved published state; cancellation record/time preservation; exact caller output and retained replay/error precedence; explicit ownership/event invariants; and locally live allocation counting.
+
+Luna reported protocol library tests passing 161/161 and scalar endpoint tests passing 10/10 in debug and release, with strict affected Clippy, formatting and diff checks passing. `Cargo.lock` is restored and only the two authorized paths are committed. No artifact, browser, listening or timed work ran. This is the third and final attempt; Astra LOW source PASS is required to continue, and FAIL must stop #605 without a fourth attempt.
