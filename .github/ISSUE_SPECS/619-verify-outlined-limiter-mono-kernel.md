@@ -157,3 +157,16 @@ The 39-entry checksum manifest and bounded command/context/stream/status/overlay
 outside Git. No builder, repository pin/lineage edit, source change, benchmark or timing ran. Astra
 LOW must review the complete combined #617/#619 candidate record before Luna may promote the three
 repository lineage surfaces.
+
+## Candidate evidence review — PASS
+
+Astra LOW returned **PASS** at exact clean pushed head
+`ffb19e9be887d4feca09ad9dd3d6fdaef5ec7655`, live main `77368243`. All 28 inherited #617 and
+39 new #619 manifest entries verify. The record proves one repaired static invocation plus seven
+previously unexecuted commands, all status 0, with no builder or retry. Candidate `f80b6392…`, the
+five delivered non-Wasm identities, exact scratch overlay, browser versions and frozen rows/resources
+remain supported; no cache or generated output was committed.
+
+Luna HIGH/XHIGH may now copy exactly the three qualified pin/lineage surfaces into the feature
+worktree while leaving both reviewed scripts unchanged. Root must checkpoint that promotion before
+the one ordinary post-pin build and proportional gates. PR and merge remain unauthorized.
