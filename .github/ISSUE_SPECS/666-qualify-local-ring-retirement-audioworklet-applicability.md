@@ -113,3 +113,19 @@ hashes to
 Full streams remain temporary and no compiler or generated artifact payload
 entered Git. Astra LOW same-hash applicability review is pending; no ordinary
 builder, candidate, pin, SDK/browser, PR, or cleanup action is authorized yet.
+
+## Applicability verdict
+
+Astra LOW returned **PROBE PASS / UNCHANGED-PIN APPLICABILITY PASS** at exact
+clean probe source `4a92bd8aa0a678ec11e1f4f84bb8acb24395f1ab` and compact
+record head `d1495c46b803f1d2377ccd4392beabd9e05dad97`. The one-shot command,
+65-byte same-pin digest, empty output, unchanged tree/pin, and all 13 manifest
+entries verify. The builder and copied host-web files are unchanged from main.
+
+Matching Wasm identity plus unchanged copied inputs carries the prior qualified
+six-file, browser, and SDK evidence with its original attribution; this probe
+supplies no new browser/SDK execution credit. No ordinary builder or pin change
+is needed. #666 and #664 may proceed to combined exact-head/current-main PR
+readiness, required qualification, guarded merge, post-main qualification, and
+GitHub synchronization. Hold all temporary and inherited evidence until final
+delivery cleanup review.
