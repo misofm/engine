@@ -205,3 +205,21 @@ and Clippy evidence to #659 attempt 3, and carried format/workspace evidence to
 #664 attempt 1. Stop on first unexpected failure. No product correction,
 artifact/pin action, retry, or cleanup is authorized; #659 recovery state remains
 held.
+
+## Attempt 2 result
+
+Hypatia verified the exact head, frozen hashes, fresh absent/non-symlink paths,
+and capture-control statuses 0 and 1. Source checkpoint
+`403fdbc4fcc1c3062894b3c4d9760671b64905ab` changes only the two authorized
+policy scripts. Shell syntax, realtime policy (41 regions in 12 files), the full
+realtime mutation suite, Wasm realtime atomics check (three objects), Wasm
+mutation suite (directed cases and two causal mutants), SIMD Wasm cargo check,
+and final diff/product-freeze/policy-delta/payload census each returned 0 once.
+
+The self-excluding manifest under
+`/tmp/issue664-attempt2-source-evidence` verifies and hashes to
+`ba6842e9f63b85aae58ebc3a136a8c13a9bfd1e4620d5e10059c8f401b370a62`.
+Behavior and strict-Clippy evidence remains attributed to #659 attempt 3; format
+and workspace evidence remains attributed to #664 attempt 1. No product,
+artifact, pin, tracker, or unrelated change occurred. Exact-source Astra LOW
+review is pending.
