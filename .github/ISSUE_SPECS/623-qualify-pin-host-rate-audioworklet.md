@@ -84,3 +84,15 @@ to SHA-256 `af126a437c16e903e78219a255cfe1a26698155f3e10d424ec7255db010eaa8b`; t
 identity record, and evidence manifest are refreshed. No qualification input, raw evidence content,
 source, artifact, pin, or lineage changed. Corrected-head Astra LOW confirmation remains required
 before any scratch execution.
+
+## Astra LOW corrected scope review — PASS
+
+Astra LOW returned **PASS** at exact clean pushed head
+`f9c4e92dca0a5d9232ebd15e169170f74a995f65`, live main
+`cf9e079cd5ef80d1c7284e9edd0ffcc90b0db335`, and synchronized tracker
+`a078948a6b27ed108c48d3075078b9860e77ded6`. Deterministic gzip reproduces the original raw capture
+at SHA-256 `af126a437c16e903e78219a255cfe1a26698155f3e10d424ec7255db010eaa8b`; all 20 parent probe
+manifest entries verify; branch diff hygiene passes; local/GitHub #559/#560/#622/#623 bodies match;
+and all substantive scope corrections remain satisfied. Exactly one frozen-source scratch
+qualification sequence is authorized. It must stop without retry on any failure. Repository
+promotion remains unauthorized until Astra LOW returns candidate PASS.
