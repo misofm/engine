@@ -145,3 +145,24 @@ controlling proposal is the corrected scope above: one locked
 `npm ci --ignore-scripts` and one SDK check in this successor worktree, followed
 by the five remaining checks under one refreshed lease. No execution is
 authorized until Astra LOW confirms this corrected head.
+
+## Astra LOW corrected attempt 2 scope review — PASS
+
+Astra LOW passed exact clean pushed head
+`522c614df35f8b44007d7ae2853f27ad8e4add40` against live main `30680709`.
+The old execution authorization remains attributed but explicitly superseded.
+Attempt 1 stays failed.
+
+Root created refreshed atomic lease
+`/tmp/misofm-engine-issue628-attempt2-execution.lock/owner.txt`, SHA-256
+`d402a2b21981f7e4fc1cd901d8824c405ae2a228d2e53811039257a91f66588c`.
+It names only `/root/issue583_luna_impl`, attempt 2, the accepted scope head, and
+the exact locked-install/remaining-check command set. Luna verifies it before
+every command; no other executor may run while it exists.
+
+One Luna HIGH sequence is authorized: verify manifests/locks; run one
+`npm ci --ignore-scripts` in this successor's `sdk/`; run one SDK check against
+the preserved output; then matrix `--check`, Cargo formatting, diff hygiene,
+workspace policy, and effect-runtime policy once. Stop on first failure. No
+other install, builder, static/resource/hermetic/browser repeat, product edit,
+PR, or merge is authorized.
