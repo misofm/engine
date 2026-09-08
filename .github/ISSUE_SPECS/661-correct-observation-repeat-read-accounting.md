@@ -153,3 +153,18 @@ the formatting-only change does not rerun them. Use the fresh absent
 `/tmp/issue661-attempt2-source-evidence` path and create a manifest that excludes
 itself, recording the manifest hash separately. No production edit, artifact,
 compiler payload, correction, or retry is authorized.
+
+## Attempt 2 result
+
+Hypatia applied only the authorized import ordering at source checkpoint
+`7fa851db196ca5e5eab84a41c688a801bc7effa8`. Format, diff/owned-path
+census, workspace policy, realtime policy (42 marked regions in 12 files), and
+the realtime policy mutation suite each returned 0 in one run. The fresh
+17-entry manifest excludes itself, verifies completely from its evidence
+directory, and hashes to
+`075e44bec52f2abcd27eb46178091addfde696a2d3ce0bf6222e4eb1157bdae0`;
+its full streams remain under `/tmp/issue661-attempt2-source-evidence`. Combined
+with the retained attempt-1 behavior, full-suite, and strict-Clippy passes, all
+authorized source gates are green. No production source, compiler payload,
+artifact, lockfile, or unrelated path changed. Exact-source Astra LOW review is
+pending before delivery qualification.
