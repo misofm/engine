@@ -147,3 +147,19 @@ diff. The builder was not rerun. Full command/context/streams/status, inputs, cl
 status, both manifests, raw comparison and corrected normalized comparison are retained under
 `artifacts/issue623-postpin/`. No browser or other qualification gate ran. Astra LOW must perform
 the bounded post-pin gates and exact-head/current-main review before PR delivery.
+
+## Astra LOW post-pin review — PASS
+
+Astra LOW returned **PASS** for exact pushed reviewed head
+`e362ac1b32f681e30e29c44d4052e69b5cc3ceb1` against live main/merge-base
+`cf9e079cd5ef80d1c7284e9edd0ffcc90b0db335`. The 55-entry scratch and 24-entry post-pin manifests
+verify, all six actual outputs match the qualified candidate, and the preserved raw hash comparison
+fails only on directory prefixes while the basename-normalized comparison correctly passes.
+
+All eleven post-pin commands exited zero once: shipped static; separate expected-resources/native-
+witness with 26 mutations; hermetic; the needed locked SDK install; SDK package 11/11; matrix;
+formatting; diff; workspace, effect-runtime, and host-core policies. The promotion is exactly three
+files. Source, locks, browser rows, resources, and prior browser qualification remain unchanged; no
+builder or browser reran. Root verified and pushed the 48-entry review manifest and 49-file retained
+record under `artifacts/issue623-postpin-review/` at `4d299441`. Final exact-head/current-main PR
+confirmation remains required. Merge is not yet authorized.
