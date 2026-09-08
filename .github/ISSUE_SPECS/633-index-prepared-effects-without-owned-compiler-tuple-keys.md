@@ -57,3 +57,28 @@ diagnostic order/paths, transactional failure ownership, canonical graph and
 semantic identities, and lowering regressions. No public graph/session/runtime
 API, dependency, artifact, scheduling/PDC, timing or allocation claim is allowed.
 Allocation measurement remains a separately numbered successor after source PASS.
+
+## Attempt 1 source review — FAIL
+
+Astra LOW reviewed exact clean pushed source
+`ff64e8ef4794d1a2bc1db2c20b234687ec3bb8c3`. The production index mapping is
+coherent and preserves the prior borrowed-key diagnostic traversal; no product
+defect was identified. The attempt fails its explicit causal-test gate.
+
+The association fixture constructs both returned nodes and expected IDs from the
+same entries, so it cannot reject a processor/metadata pair attached to the wrong
+node. Its metadata/processor comparison has the same blind spot, and control node
+IDs do not prove control-channel ownership. It lacks intentional cross-track,
+cross-rack and cross-slot swaps plus routed-sidechain and bank association
+witnesses through production compilation.
+
+Attempt 2 is limited to those discriminating test controls and any strictly
+necessary correction inside the already authorized four paths. Use identities
+whose wrong association changes an asserted processor result, metadata/control
+ownership, sidechain destination, or bank slot/program order. Preserve the
+attempt-1 source and verdict. The reported release `track_delay` command stopped
+before tests at a Cargo duplicate `effect-package` output collision; it receives
+no credit and must be preserved candidly. Run its corrected focused release leg
+with a fresh isolated Cargo target, then complete proportional full-suite, strict
+Clippy and policy evidence. No manifest/dependency repair, allocation measurement,
+artifact work, timing or public/scheduling change is authorized.
