@@ -114,3 +114,19 @@ Astra LOW passed #641's corrected stage-1 brief at exact clean pushed
 release integration command with a conditional command-local `panic=unwind`
 variant. Credit is release-test-only; #636 remains paused and owns no command
 execution until #641's evidence receives an Astra disposition.
+
+#641 attempt 1 is preserved as procedural FAIL because a concurrent executor ran
+an extra zero-credit baseline. Its documentation-only attempt 2 passed Astra LOW
+at exact clean pushed `228a4693`: the original independent sequence qualifies the
+command-local unwind recipe for release tests, while making no shipped-profile or
+Cargo-internals claim. After #641 closes, #636 attempt 2 may make only the already
+authorized bitwise correct-versus-crossed PCM assertion. After that edit and a
+fresh absence preflight, it may run this release integration command exactly once:
+
+```text
+CARGO_TARGET_DIR=/tmp/issue636-attempt2-release-unwind CARGO_PROFILE_RELEASE_PANIC=unwind cargo test --locked --release -p graph-compiler --test track_delay
+```
+
+Preserve status and complete streams and stop on failure. No retry, alternate
+recipe, shipped-artifact credit, product/manifest/dependency/lock change,
+allocation measurement or artifact work is authorized.
