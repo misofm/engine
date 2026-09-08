@@ -48,3 +48,18 @@ the committed release profile supplies opt-level 3, fat LTO, one codegen unit, a
 info while only `+avx2,+fma` is injected globally. The raw compiler log is preserved with this review
 record. One final preflight is authorized after an evidence-only exact-head check; capture remains
 locked pending separate seal PASS. No protected preflight, runner, capture entry, or timer ran.
+
+The evidence-only follow-up returned **PASS** at exact clean head
+`3b632cdb68105e2023b08ac90b4e2baa99bafa53`; all 27 checksums verified directly from Git blobs and
+the preserved raw compile log matched the reviewer's original bytes. Root then ran the final
+preflight exactly once. Astra LOW passed the strict READY seal, exact candidate/tree/hash/profile/
+workload identity, and prepared executable SHA-256
+`74da9ae5c249fb94fd9c9c6306cbcbf30eded280513e793c369e99bb8ebb3a89` before authorizing capture.
+
+Root invoked the runner exactly once. Astra LOW returned final capture **PASS**. Raw and accepted
+JSONL are byte-identical, 4,244 bytes, SHA-256
+`59257eb092f197b616cbaa20ec713ed8b4e10446c29941e8a1d7d23c96db89ca`. Both ordered rounds completed
+8,192 successful renders with zero errors and matching reviewed owner digests. The descriptive
+results are 7,226 and 7,219 ns per plan render. One start plus two completion markers prove one
+workload process and 16,384 timed calls. No retry or resume occurred, and no magnitude gate or
+performance-improvement claim applies.
