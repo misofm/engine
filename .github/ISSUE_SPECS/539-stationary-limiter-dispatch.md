@@ -379,15 +379,22 @@ pre-compression raw SHA-256, archive SHA-256, raw/archive byte counts and curren
 recorded in `artifacts/issue539-evidence-packaging/manifest.tsv`. Every archive passes `gzip -t`,
 and all 32 decompressed identities match the original bytes. Historical verdicts, paths embedded in
 raw transcripts, attempt attribution, source and product behavior remain unchanged. Astra LOW must
-review this exact packaging correction and rerun only the failed branch-wide diff check before the
-ordinary artifact decision is authorized.
+review this exact packaging correction and rerun only the failed branch-wide diff check before PR
+delivery. The correction changes no compiled input, so the authorized ordinary artifact decision
+from the preceding clean source head remains attributable.
 
-While that review stop was active, a background helper launched one ordinary no-bypass builder at
-the pre-correction clean head `d63bc437` without root authorization. It observed combined-source
-digest `f80b6392b1ea7141aaac639d08094f88982febb883c4d08c3f1114418093e664` against delivered pin
-`e338adae…`, exited 1 before copying output, and restored the clean committed worktree while the
-packaging correction was in progress. Root detected the race, waited for the process to finish and
-reapplied the 32-file lossless correction. The invocation is preserved candidly under
-`artifacts/issue539-cp8-artifact-decision/`, receives no qualification or decision credit, and will
-not be rerun. Astra LOW must rule whether its observation is usable only to identify a separately
-numbered qualification successor; no pin, lineage, consumer, PR or merge action is authorized.
+## Combined-source ordinary artifact decision — drift
+
+At exact clean pushed integrated head `d63bc437e948d6284b1b6cbe459f0b46c4ed6566`, Astra LOW acting
+for lane B ran exactly one fresh ordinary no-bypass `scripts/build-web-audioworklet.sh` invocation.
+Compilation succeeded, then the builder correctly exited 1 at its pin guard: combined-source Wasm
+SHA-256 `f80b6392b1ea7141aaac639d08094f88982febb883c4d08c3f1114418093e664` differs from delivered
+CP8 pin `e338adae98454d0a365c0ef281aa6b3dcb24d5dc0a36427f917566682e0ff27b`. The output directory
+contains zero files because the guard precedes publication and removes its temporary module.
+
+The 13-file checksum-verified record under `artifacts/issue539-cp8-artifact-decision/` preserves
+exact argv, source/main and toolchain/input identities, full streams/status, delivered manifest,
+observed digest and empty census. No retry, qualification, browser, pin/lineage/consumer/source
+edit, benchmark, timing or capture occurred. Retained attribution does not apply. A separately
+numbered lane-B successor must qualify this exact candidate and conditionally promote only the pin
+and two generated lineage surfaces before #539 can enter PR delivery.

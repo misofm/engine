@@ -1,0 +1,12 @@
+{
+  "builder_status": 1,
+  "expected_wasm_sha256": "e338adae98454d0a365c0ef281aa6b3dcb24d5dc0a36427f917566682e0ff27b",
+  "reported_digests": [
+    "e338adae98454d0a365c0ef281aa6b3dcb24d5dc0a36427f917566682e0ff27b",
+    "f80b6392b1ea7141aaac639d08094f88982febb883c4d08c3f1114418093e664"
+  ],
+  "output_count": 0,
+  "decision": "DRIFT",
+  "observed_wasm_sha256": "f80b6392b1ea7141aaac639d08094f88982febb883c4d08c3f1114418093e664",
+  "six_file_comparison": "Unavailable: ordinary builder rejects pin drift before copying outputs; delivered canonical manifest retained."
+}

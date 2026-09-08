@@ -1,0 +1,14 @@
+{
+  "argv": [
+    "bash",
+    "scripts/build-web-audioworklet.sh",
+    "/tmp/issue539-cp8-audioworklet-gag64pvk"
+  ],
+  "cwd": "/home/bl/misofm/engine-limiter-stationary-dispatch",
+  "head": "d63bc437e948d6284b1b6cbe459f0b46c4ed6566",
+  "main": "773682433ef451b89e5359fa8f722e1016c64fb3",
+  "output_directory": "/tmp/issue539-cp8-audioworklet-gag64pvk",
+  "repin_environment": "absent",
+  "strip_environment": "absent",
+  "pre_status": "clean"
+}
