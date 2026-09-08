@@ -100,8 +100,11 @@ numbered graph-compiler release-collision tooling issue required above, synchron
 the two-slot ownership, and only then resume #636 attempt 2.
 
 #635 and #638 are delivered and closed after successful post-main qualification
-`34253818700`. Tooling peer #641 is open from main `e6b2f154` and owns the frozen
-unqualified-versus-explicit-native release integration probes. #636 again occupies
-one active slot beside #641, but its attempt-2 edit and remaining gates stay paused
-until #641 records an Astra-reviewed command disposition. No release command may
-run from this worktree in the meantime.
+`34253818700`. Tooling peer #641 is open from main `e6b2f154`. Astra LOW rejected
+its initial unqualified-versus-explicit-native brief before execution because the
+explicit target did not discriminate the retained same-target profile collision.
+The corrected brief compares exact detached main with a command-local release-test
+`panic=unwind` variant and preserves unexpected changes; it awaits fresh Astra LOW
+scope review. #636 occupies one active slot beside #641, but its attempt-2 edit and
+remaining gates stay paused until #641 records an Astra-reviewed command
+disposition. No release command may run from this worktree in the meantime.
