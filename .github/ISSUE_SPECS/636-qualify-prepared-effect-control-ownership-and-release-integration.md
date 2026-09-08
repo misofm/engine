@@ -242,3 +242,7 @@ Before PR creation, Astra LOW must review the exact clean evidence/documentation
 head against current main, verify the inherited #633 production ancestry and
 scope, and classify artifact applicability separately. The command-local unwind
 result grants release-test qualification only and no shipped-artifact credit.
+
+Successor #642 is open with this frozen source and owns the single contemporaneously
+recorded release-integration qualification plus delivery after PASS. #636 and #642
+must not be counted as simultaneous active slots; the slot transfers when #636 closes.
