@@ -71,12 +71,6 @@ impl Corpus {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct Identity {
-    graph: String,
-    diagnostic: String,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct Counters {
     allocations: u64,
@@ -128,12 +122,12 @@ fn fixture_session(corpus: Corpus) -> session::CompiledSession {
     template.dynamic.effects.clear();
     template.simd2.effects.clear();
     if corpus.with_effects() {
-        let effect = |id: &str| session::Effect {
+        let effect = |id: &str, quality: EffectQuality| session::Effect {
             id: StableId::parse(id).expect("effect slot id"),
             identity: EffectIdentity::Native {
                 effect_id: StableId::parse("conformance.delay").expect("effect id"),
             },
-            quality: EffectQuality::Normal,
+            quality,
             bypass: false,
             link_mode: LinkMode::DualMono,
             params: Vec::new(),
@@ -141,11 +135,14 @@ fn fixture_session(corpus: Corpus) -> session::CompiledSession {
         };
         match corpus {
             Corpus::CrossedSmall => {
-                template.simd1.effects = vec![effect("slot1")];
-                template.dynamic.effects = vec![effect("slot0")];
+                template.simd1.effects = vec![effect("slot1", EffectQuality::Draft)];
+                template.dynamic.effects = vec![effect("slot0", EffectQuality::Normal)];
             }
             Corpus::Banks64 => {
-                template.simd1.effects = vec![effect("slot0"), effect("slot1")];
+                template.simd1.effects = vec![
+                    effect("slot0", EffectQuality::Normal),
+                    effect("slot1", EffectQuality::Normal),
+                ];
             }
             Corpus::Zero64 => unreachable!(),
         }
@@ -158,6 +155,9 @@ fn fixture_session(corpus: Corpus) -> session::CompiledSession {
         if matches!(corpus, Corpus::CrossedSmall) && index % 2 == 1 {
             track.simd1.effects.reverse();
             track.dynamic.effects.reverse();
+        }
+        if matches!(corpus, Corpus::Banks64) && index == corpus.tracks() - 1 {
+            track.simd1.effects[1].quality = EffectQuality::Draft;
         }
         model.tracks.push(track);
     }
@@ -209,57 +209,70 @@ fn diagnostic_hash(diagnostics: &GraphDiagnosticSet) -> String {
         .collect()
 }
 
-fn identity(corpus: Corpus) -> Identity {
-    let valid = match GraphCompiler::compile(GraphCompileRequest {
-        plan_id: 1,
-        effects: prepared(corpus),
-        caps: graph_caps(),
-        dispatch: Backend::Scalar,
-    }) {
-        Ok(value) => value,
-        Err(_) => panic!("issue-650 valid graph"),
-    };
-    let graph = GraphCompiler::sha256(&valid.graph, &valid.report);
-    drop(valid);
-
+fn diagnostic_identity(corpus: Corpus) -> String {
     let mut caps = graph_caps();
     caps.maximum_nodes = 0;
     let invalid = match GraphCompiler::compile(GraphCompileRequest {
         plan_id: 2,
         effects: prepared(corpus),
         caps,
-        dispatch: Backend::Scalar,
+        dispatch: dispatch(corpus),
     }) {
         Ok(_) => panic!("issue-650 invalid twin unexpectedly compiled"),
         Err(value) => value,
     };
     let diagnostic = diagnostic_hash(&invalid.diagnostics);
     drop(invalid);
-    Identity { graph, diagnostic }
+    diagnostic
 }
 
-fn measure(corpus: Corpus) -> Counters {
+const fn dispatch(corpus: Corpus) -> Backend {
+    match corpus {
+        Corpus::Banks64 => Backend::current(),
+        Corpus::Zero64 | Corpus::CrossedSmall => Backend::Scalar,
+    }
+}
+
+struct Measurement {
+    counters: Counters,
+    graph: String,
+}
+
+fn positive_allocator_control() {
     bench_alloc::assert_installed();
-    let control = Box::new([0_u8; 64]);
-    black_box(&control);
-    drop(control);
     let mark = bench_alloc::current_thread_counters();
-    let artifact = match GraphCompiler::compile(GraphCompileRequest {
+    let allocation = Box::new([0_u8; 64]);
+    black_box(&allocation);
+    let delta = bench_alloc::current_thread_delta_since(mark);
+    assert!(delta.allocations > 0);
+    assert!(delta.requested_bytes >= 64);
+    drop(allocation);
+}
+
+fn measure(corpus: Corpus) -> Measurement {
+    let effects = prepared(corpus);
+    let request = GraphCompileRequest {
         plan_id: 7,
-        effects: prepared(corpus),
+        effects,
         caps: graph_caps(),
-        dispatch: Backend::Scalar,
-    }) {
+        dispatch: dispatch(corpus),
+    };
+    let mark = bench_alloc::current_thread_counters();
+    let artifact = match GraphCompiler::compile(request) {
         Ok(value) => value,
         Err(_) => panic!("issue-650 measured graph"),
     };
     let delta = bench_alloc::current_thread_delta_since(mark);
+    let graph = GraphCompiler::sha256(&artifact.graph, &artifact.report);
     drop(artifact);
-    Counters {
-        allocations: delta.allocations,
-        deallocations: delta.deallocations,
-        reallocations: delta.reallocations,
-        requested_bytes: delta.requested_bytes,
+    Measurement {
+        counters: Counters {
+            allocations: delta.allocations,
+            deallocations: delta.deallocations,
+            reallocations: delta.reallocations,
+            requested_bytes: delta.requested_bytes,
+        },
+        graph,
     }
 }
 
@@ -282,14 +295,21 @@ fn parse_variant() -> Result<Variant, String> {
     Ok(variant)
 }
 
-fn emit(variant: Variant, corpus: Corpus, round: u8, identity: &Identity, counters: Counters) {
+fn emit(
+    variant: Variant,
+    corpus: Corpus,
+    round: u8,
+    graph: &str,
+    diagnostic: &str,
+    counters: Counters,
+) {
     println!(
         "{{\"variant\":\"{}\",\"corpus\":\"{}\",\"round\":{},\"graph_sha256\":\"{}\",\"diagnostic_sha256\":\"{}\",\"allocations\":{},\"deallocations\":{},\"reallocations\":{},\"requested_bytes\":{}}}",
         variant.text(),
         corpus.name(),
         round,
-        identity.graph,
-        identity.diagnostic,
+        graph,
+        diagnostic,
         counters.allocations,
         counters.deallocations,
         counters.reallocations,
@@ -306,11 +326,20 @@ pub(crate) fn main() {
         }
     };
     bench_alloc::assert_installed();
+    positive_allocator_control();
     for corpus in Corpus::all() {
-        let identity = identity(corpus);
+        let diagnostic = diagnostic_identity(corpus);
         black_box(measure(corpus));
         for round in ROUNDS {
-            emit(variant, corpus, round, &identity, measure(corpus));
+            let measurement = measure(corpus);
+            emit(
+                variant,
+                corpus,
+                round,
+                &measurement.graph,
+                &diagnostic,
+                measurement.counters,
+            );
         }
     }
 }
@@ -338,5 +367,72 @@ mod tests {
         assert!(!Corpus::Zero64.with_effects());
         assert!(Corpus::CrossedSmall.with_effects());
         assert!(Corpus::Banks64.with_effects());
+    }
+
+    #[test]
+    fn crossed_small_proves_reversed_distinct_prepared_programs() {
+        let effects = prepared(Corpus::CrossedSmall);
+        assert_eq!(effects.entries.len(), 8);
+        let first = &effects.entries[0];
+        let last = &effects.entries[7];
+        assert_ne!(
+            (first.track_id.as_str(), first.rack, first.effect_id.as_str()),
+            (last.track_id.as_str(), last.rack, last.effect_id.as_str())
+        );
+        assert!(effects.entries.windows(2).any(|pair| {
+            pair[0].track_id > pair[1].track_id
+                || (pair[0].track_id == pair[1].track_id && pair[0].rack > pair[1].rack)
+        }));
+        let programs: std::collections::BTreeSet<_> = effects
+            .entries
+            .iter()
+            .map(|entry| entry.metadata.program_key())
+            .collect();
+        assert!(programs.len() >= 2);
+        assert!(programs.iter().any(|program| program.quality == EffectQuality::Draft));
+        assert!(programs.iter().any(|program| program.quality == EffectQuality::Normal));
+        assert_eq!(
+            effects
+                .entries
+                .iter()
+                .filter(|entry| entry.effect_id == "slot0")
+                .count(),
+            4
+        );
+        assert_eq!(
+            effects
+                .entries
+                .iter()
+                .filter(|entry| entry.effect_id == "slot1")
+                .count(),
+            4
+        );
+    }
+
+    #[test]
+    fn banks64_proves_current_backend_cohort_and_heterogeneous_fallback() {
+        let effects = prepared(Corpus::Banks64);
+        assert_eq!(effects.entries.len(), 128);
+        assert_eq!(
+            effects.entries[0].metadata.program_key().quality,
+            EffectQuality::Normal
+        );
+        assert_eq!(
+            effects.entries.last().expect("heterogeneous entry").metadata.program_key().quality,
+            EffectQuality::Draft
+        );
+        let artifact = GraphCompiler::compile(GraphCompileRequest {
+            plan_id: 99,
+            effects,
+            caps: graph_caps(),
+            dispatch: Backend::current(),
+        })
+        .expect("banks64 graph");
+        let report = &artifact.report.rack_cohorts;
+        assert!(report.plan.groups.iter().any(|group| group.is_full()));
+        assert!(!report.plan.scalar.is_empty());
+        assert!(report.bound_slots.iter().any(|slot| !slot.members.is_empty()));
+        assert!(report.chains.len() >= 64);
+        drop(artifact);
     }
 }

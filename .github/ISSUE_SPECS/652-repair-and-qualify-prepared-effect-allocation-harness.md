@@ -67,3 +67,29 @@ gates once with fresh retained command/status evidence and stops on the first
 failure without correction or rerun. Root checkpoints and pushes before a fresh
 Astra source review. No official count, counterfactual, production, allocator,
 dependency, timing, or compiler-payload action is authorized.
+
+## Attempt 1 source gate — FAIL; attempt 2 bounded
+
+Luna HIGH changed only `prepared_effect_allocations.rs`, created fresh retained
+evidence under `/tmp/issue652-attempt1-source-evidence`, and stopped correctly when
+the first focused Rust gate returned 101 at authorized head `35d89e90`. The source
+compared session quality values with `effect_contract::EffectQuality` and used
+`Result::expect` where `GraphCompileFailure` has no `Debug` implementation. No later
+gate, audit-subject invocation, counterfactual, or measurement ran.
+
+Astra LOW returned attempt 1 **FAIL** and found additional structural corrections
+needed. The heterogeneous entry must be located by exact `track-63`/rack/slot
+identity because lexicographic prepared-entry ordering does not put numeric track
+63 last. Bank tests must assert exact homogeneous groups, bound-slot associations,
+scalar members, and the deliberately heterogeneous member. `crossed-small` must
+repeat slot IDs across both tracks and racks and assert its exact reversed prepared
+identity sequence. A focused positive-control test must exercise the asserted
+allocator delta without invoking official rounds. Astra found the repaired compile
+boundary, separately counted allocator control, and measured-result identity design
+substantively sound.
+
+Attempt 2 may correct only those defects within the existing three source paths,
+preserving attempt-1 records unchanged. Run the full premeasurement gate sequence
+once in order and stop on the first failure without correction or rerun. No official
+measurement or counterfactual is authorized before a pushed source checkpoint and
+fresh Astra PASS.
