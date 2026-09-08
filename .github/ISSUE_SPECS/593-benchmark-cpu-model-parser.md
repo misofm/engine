@@ -37,3 +37,9 @@ One Luna HIGH attempt receives one Astra LOW adversarial verdict and pauses at t
 Astra LOW reviewed current main `566810a9f249f26d96edc4d65b22bd9b7c649976`. Conformance and protocol both select the first line beginning with exact prefix `"model name\t: "`, preserve its suffix verbatim, and project unavailable/unmatched input to `"unknown"`. Percentile algorithms, six-field summaries, command acquisition, environment fallback and JSON string-array assembly already use delivered shared authorities. Rack ASCII validation, builtins control-character rejection, interchange failure policy and schema-specific field assembly remain intentional differences.
 
 TOOL11 and IO5 require broader contracts. #587 / PR #592 and its source/artifact worktrees are active but disjoint. Astra LOW is sufficient for all review. Activation requires exact local/GitHub numbered identity, a pushed clean brief, current-base and ownership checks, and Astra LOW scope PASS.
+
+## Numbered current-base scope review
+
+Astra LOW returned **PASS** for exact brief and upstream `d1171ba7c8badc18ab2904a34915530cb30412e2`, with current main and merge-base `566810a9f249f26d96edc4d65b22bd9b7c649976`. The clean tree's sole delta is this spec, diff checks pass, GitHub #593 has exact open identity, and base qualification `34171818628` succeeded. #560 activation and #559/#587/PR #592 ownership are disjoint.
+
+The parser is a concrete duplicate. Three-file ownership and the exact-prefix, first-match, suffix and unchanged-record gates preserve behavior and existing acquisition; session and graph remain excluded. No correction is required; Astra LOW is sufficient. Luna HIGH attempt 1 may begin from this exact brief/base and must pause at its first focused-green checkpoint. No audio, browser, artifact or timed benchmark work is authorized.
