@@ -2,14 +2,13 @@
 
 use bench_support::alloc as bench_alloc;
 use conformance::DualAccumulatorDelayFactory;
-use effect_compiler::{EffectCompileCaps, EffectPreparedSession, prepare_native_session_effects};
+use effect_compiler::{prepare_native_session_effects, EffectCompileCaps, EffectPreparedSession};
 use effect_contract::{EffectQuality as PreparedEffectQuality, NativeEffectRegistry};
 use graph::{GraphCompileCaps, GraphDiagnosticSet};
 use graph_compiler::{Backend, GraphCompileRequest, GraphCompiler};
 use session::{
-    CompileCaps, EffectIdentity, EffectQuality as SessionEffectQuality, LinkMode, StableId,
-    compile_session,
-    parse_session_json,
+    compile_session, parse_session_json, CompileCaps, EffectIdentity,
+    EffectQuality as SessionEffectQuality, LinkMode, StableId,
 };
 use sha2::{Digest, Sha256};
 use std::hint::black_box;
@@ -123,29 +122,24 @@ fn fixture_session(corpus: Corpus) -> session::CompiledSession {
     template.dynamic.effects.clear();
     template.simd2.effects.clear();
     if corpus.with_effects() {
-        let effect = |id: &str, quality: SessionEffectQuality| session::Effect {
+        let effect = |id: &str, bypass: bool| session::Effect {
             id: StableId::parse(id).expect("effect slot id"),
             identity: EffectIdentity::Native {
                 effect_id: StableId::parse("conformance.delay").expect("effect id"),
             },
-            quality,
-            bypass: false,
+            quality: SessionEffectQuality::Normal,
+            bypass,
             link_mode: LinkMode::DualMono,
             params: Vec::new(),
             sidechain: session::SidechainDeclaration::None,
         };
         match corpus {
             Corpus::CrossedSmall => {
-                template.simd1.effects =
-                    vec![effect("slot1", SessionEffectQuality::Draft)];
-                template.dynamic.effects =
-                    vec![effect("slot0", SessionEffectQuality::Normal)];
+                template.simd1.effects = vec![effect("shared-slot", false)];
+                template.dynamic.effects = vec![effect("shared-slot", true)];
             }
             Corpus::Banks64 => {
-                template.simd1.effects = vec![
-                    effect("slot0", SessionEffectQuality::Normal),
-                    effect("slot1", SessionEffectQuality::Normal),
-                ];
+                template.simd1.effects = vec![effect("slot0", false), effect("slot1", false)];
             }
             Corpus::Zero64 => unreachable!(),
         }
@@ -160,7 +154,7 @@ fn fixture_session(corpus: Corpus) -> session::CompiledSession {
             track.dynamic.effects.reverse();
         }
         if matches!(corpus, Corpus::Banks64) && index == corpus.tracks() - 1 {
-            track.simd1.effects[1].quality = SessionEffectQuality::Draft;
+            track.simd1.effects[1].bypass = true;
         }
         model.tracks.push(track);
     }
@@ -389,48 +383,91 @@ mod tests {
                     entry.track_id.as_str().to_owned(),
                     entry.rack,
                     entry.effect_id.clone(),
-                    entry.metadata.program_key().quality,
+                    entry.metadata.program_key(),
                 )
             })
             .collect();
         let expected = vec![
-            ("track-3".to_owned(), effect_compiler::EffectRack::Dynamic, "slot0".to_owned(), PreparedEffectQuality::Normal),
-            ("track-3".to_owned(), effect_compiler::EffectRack::Simd1, "slot1".to_owned(), PreparedEffectQuality::Draft),
-            ("track-2".to_owned(), effect_compiler::EffectRack::Dynamic, "slot0".to_owned(), PreparedEffectQuality::Normal),
-            ("track-2".to_owned(), effect_compiler::EffectRack::Simd1, "slot1".to_owned(), PreparedEffectQuality::Draft),
-            ("track-1".to_owned(), effect_compiler::EffectRack::Dynamic, "slot0".to_owned(), PreparedEffectQuality::Normal),
-            ("track-1".to_owned(), effect_compiler::EffectRack::Simd1, "slot1".to_owned(), PreparedEffectQuality::Draft),
-            ("track-0".to_owned(), effect_compiler::EffectRack::Dynamic, "slot0".to_owned(), PreparedEffectQuality::Normal),
-            ("track-0".to_owned(), effect_compiler::EffectRack::Simd1, "slot1".to_owned(), PreparedEffectQuality::Draft),
+            (
+                "track-3".to_owned(),
+                effect_compiler::EffectRack::Dynamic,
+                "shared-slot".to_owned(),
+                true,
+            ),
+            (
+                "track-3".to_owned(),
+                effect_compiler::EffectRack::Simd1,
+                "shared-slot".to_owned(),
+                false,
+            ),
+            (
+                "track-2".to_owned(),
+                effect_compiler::EffectRack::Dynamic,
+                "shared-slot".to_owned(),
+                true,
+            ),
+            (
+                "track-2".to_owned(),
+                effect_compiler::EffectRack::Simd1,
+                "shared-slot".to_owned(),
+                false,
+            ),
+            (
+                "track-1".to_owned(),
+                effect_compiler::EffectRack::Dynamic,
+                "shared-slot".to_owned(),
+                true,
+            ),
+            (
+                "track-1".to_owned(),
+                effect_compiler::EffectRack::Simd1,
+                "shared-slot".to_owned(),
+                false,
+            ),
+            (
+                "track-0".to_owned(),
+                effect_compiler::EffectRack::Dynamic,
+                "shared-slot".to_owned(),
+                true,
+            ),
+            (
+                "track-0".to_owned(),
+                effect_compiler::EffectRack::Simd1,
+                "shared-slot".to_owned(),
+                false,
+            ),
         ];
-        assert_eq!(actual, expected);
+        assert_eq!(
+            actual
+                .iter()
+                .map(|(track, rack, effect, key)| {
+                    (track.clone(), *rack, effect.clone(), key.bypass)
+                })
+                .collect::<Vec<_>>(),
+            expected
+        );
         let programs: std::collections::BTreeSet<_> = effects
             .entries
             .iter()
             .map(|entry| entry.metadata.program_key())
             .collect();
-        assert!(programs.len() >= 2);
+        assert_eq!(programs.len(), 2);
         assert!(programs
             .iter()
-            .any(|program| program.quality == PreparedEffectQuality::Draft));
-        assert!(programs
-            .iter()
-            .any(|program| program.quality == PreparedEffectQuality::Normal));
+            .all(|program| program.quality == PreparedEffectQuality::Normal));
+        assert!(programs.iter().any(|program| program.bypass));
+        assert!(programs.iter().any(|program| !program.bypass));
+        assert_eq!(actual.len(), expected.len());
+        assert!(actual.iter().all(|(_, _, effect, key)| {
+            *effect == "shared-slot" && key.effect_id.as_str() == "conformance.delay"
+        }));
         assert_eq!(
             effects
                 .entries
                 .iter()
-                .filter(|entry| entry.effect_id == "slot0")
+                .filter(|entry| entry.effect_id == "shared-slot")
                 .count(),
-            4
-        );
-        assert_eq!(
-            effects
-                .entries
-                .iter()
-                .filter(|entry| entry.effect_id == "slot1")
-                .count(),
-            4
+            8
         );
     }
 
@@ -439,22 +476,21 @@ mod tests {
         let effects = prepared(Corpus::Banks64);
         assert_eq!(effects.entries.len(), 128);
         assert_eq!(
-            effects.entries[0].metadata.program_key().quality,
-            PreparedEffectQuality::Normal
+            graph_compiler::Backend::current(),
+            graph_compiler::Backend::Simd8
         );
-        assert_eq!(
-            effects
-                .entries
-                .iter()
-                .filter(|entry| entry.metadata.program_key().quality == PreparedEffectQuality::Draft)
-                .count(),
-            1
-        );
-        assert_eq!(
-            effects.entries.last().expect("heterogeneous entry").metadata.program_key().quality,
-            PreparedEffectQuality::Draft
-        );
-        assert_eq!(graph_compiler::Backend::current(), graph_compiler::Backend::Simd8);
+        let bypassed: Vec<_> = effects
+            .entries
+            .iter()
+            .filter(|entry| entry.metadata.program_key().bypass)
+            .collect();
+        assert_eq!(bypassed.len(), 1);
+        assert_eq!(bypassed[0].track_id.as_str(), "track-63");
+        assert_eq!(bypassed[0].rack, effect_compiler::EffectRack::Simd1);
+        assert_eq!(bypassed[0].effect_id.as_str(), "slot1");
+        assert!(effects.entries.iter().all(|entry| {
+            entry.metadata.program_key().quality == PreparedEffectQuality::Normal
+        }));
         assert_eq!(
             effects
                 .entries
@@ -474,29 +510,56 @@ mod tests {
             Err(_) => panic!("banks64 graph"),
         };
         let report = &artifact.report.rack_cohorts;
-        assert_eq!(report.plan.groups.iter().filter(|group| group.is_full()).count(), 7);
-        assert_eq!(report.plan.scalar, Vec::<graph_compiler::RackChainId>::new());
-        let mut expected_banked = Vec::new();
-        for group in 0..7 {
-            let members: Vec<_> = (group * 8..group * 8 + 8)
-                .map(|track| format!("track-{track}"))
-                .collect();
-            let actual = report.plan.groups[group]
-                .members
-                .iter()
-                .map(|member| member.as_ref().expect("full member").track_id.clone())
-                .collect::<Vec<_>>();
-            assert_eq!(actual, members);
-            expected_banked.extend(members);
-        }
-        let scalar: Vec<_> = report
+        let mut normal_chains: Vec<_> = (0..63)
+            .map(|track| graph_compiler::RackChainId {
+                track_id: format!("track-{track}"),
+                rack: graph::RackId::Simd1,
+            })
+            .collect();
+        normal_chains.sort();
+        let expected_full_groups: std::collections::BTreeSet<Vec<_>> = normal_chains
+            .chunks(8)
+            .take(7)
+            .map(|group| group.iter().map(|chain| chain.track_id.clone()).collect())
+            .collect();
+        assert_eq!(expected_full_groups.len(), 7);
+        let actual_full_groups: std::collections::BTreeSet<Vec<_>> = report
+            .plan
+            .groups
+            .iter()
+            .filter(|group| group.is_full())
+            .map(|group| {
+                let mut members: Vec<_> = group
+                    .members
+                    .iter()
+                    .map(|member| member.as_ref().expect("full member").track_id.clone())
+                    .collect();
+                members.sort();
+                members
+            })
+            .collect();
+        assert_eq!(actual_full_groups, expected_full_groups);
+        assert_eq!(actual_full_groups.len(), 7);
+        let mut scalar: Vec<_> = report
             .chains
             .values()
             .flatten()
-            .filter(|node| !report.bound_slots.iter().any(|slot| slot.members.contains(node)))
-            .map(|node| (node.track_id.as_str().to_owned(), node.effect_id.as_str().to_owned()))
+            .filter(|node| {
+                !report
+                    .bound_slots
+                    .iter()
+                    .any(|slot| slot.members.contains(node))
+            })
+            .filter(|node| node.rack == graph::RackId::Simd1)
+            .map(|node| {
+                (
+                    node.track_id.as_str().to_owned(),
+                    node.effect_id.as_str().to_owned(),
+                )
+            })
             .collect();
-        let expected_scalar: Vec<_> = (56..64)
+        scalar.sort();
+        let mut expected_scalar: Vec<_> = (56..64)
             .flat_map(|track| {
                 [
                     (format!("track-{track}"), "slot0".to_owned()),
@@ -504,21 +567,38 @@ mod tests {
                 ]
             })
             .collect();
+        expected_scalar.sort();
         assert_eq!(scalar, expected_scalar);
         assert_eq!(report.bound_slots.len(), 14);
-        for (index, bound) in report.bound_slots.iter().enumerate() {
-            let slot = index % 2;
-            let group = index / 2;
-            let expected: Vec<_> = (group * 8..group * 8 + 8)
-                .map(|track| graph::EffectNodeId {
-                    track_id: graph::StableGraphId::parse(&format!("track-{track}")).unwrap(),
-                    rack: graph::RackId::Simd1,
-                    effect_id: graph::StableGraphId::parse(&format!("slot{slot}")).unwrap(),
-                })
-                .collect();
-            assert_eq!(bound.members, expected);
+        let mut expected_bound = std::collections::BTreeSet::new();
+        for tracks in &expected_full_groups {
+            for slot in 0..2 {
+                let members = tracks
+                    .iter()
+                    .map(|track| graph::EffectNodeId {
+                        track_id: graph::StableGraphId::parse(track).expect("track id"),
+                        rack: graph::RackId::Simd1,
+                        effect_id: graph::StableGraphId::parse(&format!("slot{slot}"))
+                            .expect("slot id"),
+                    })
+                    .collect::<Vec<_>>();
+                expected_bound.insert((tracks.clone(), slot, members));
+            }
         }
-        assert_eq!(expected_banked.len(), 56);
+        let mut actual_bound = std::collections::BTreeSet::new();
+        for bound in &report.bound_slots {
+            let group = &report.plan.groups[bound.group];
+            let mut tracks: Vec<_> = group
+                .members
+                .iter()
+                .map(|member| member.as_ref().expect("bound group").track_id.clone())
+                .collect();
+            tracks.sort();
+            let mut members = bound.members.clone();
+            members.sort();
+            actual_bound.insert((tracks, bound.slot, members));
+        }
+        assert_eq!(actual_bound, expected_bound);
         drop(artifact);
     }
 }

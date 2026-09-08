@@ -116,3 +116,24 @@ Attempt 3 retains the accepted compile interval, measured-result identity and
 allocator-control changes. Run the premeasurement gates once in order with fresh
 retained evidence and stop on the first failure. Any failure exhausts #652; there
 is no fourth correction, weakened corpus, official measurement, or counterfactual.
+
+## Final attempt 3 source gate — FAIL; hard stop
+
+Luna HIGH preserved attempts 1/2 and changed only the audit subject. Focused gate 1
+returned 101 at exact base `8efa2093`; four of five tests passed, including the
+cross-rack reversed-program and allocator-control tests. The bank test's numeric
+residual oracle expected tracks 56 through 63, while deterministic lexicographic
+grouping leaves `track-6`, `track-60` through `track-63`, and `track-7` through
+`track-9`. The executor stopped immediately. No later gate, audit-subject
+invocation, counterfactual, or measurement ran; attempt-3 evidence remains under
+`/tmp/issue652-attempt3-source-evidence`.
+
+Astra LOW returned final attempt 3 **FAIL**. #652 is exhausted and permits no
+fourth correction or execution. The compiling, explicitly test-failing source is a
+candid checkpoint only. Its four passing focused tests grant no harness
+qualification, allocation-reduction credit, or official-variant authorization.
+A separately numbered successor must derive residual chains from the independently
+sorted normal-chain set after seven full groups plus the fixed heterogeneous chain,
+expand those identities to both exact slot nodes, and recheck bound-slot/program
+assertions for the same numeric-order assumption while preserving the otherwise
+accepted controls and measurement boundary.
