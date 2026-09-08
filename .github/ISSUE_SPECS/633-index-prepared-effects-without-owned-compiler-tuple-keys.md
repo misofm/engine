@@ -8,7 +8,7 @@ CP1 observes that the graph compiler repeatedly carries heap-owned string identi
 
 This issue owns the smallest useful compiler-private correction. It replaces those owned tuple handoffs with an index-aligned prepared-effect identity representation and borrowed validation lookups. It preserves the public `StableGraphId`/`GraphNodeId` model, canonical graph bytes, deterministic ordering and diagnostics. It does not claim the whole CP1 front half: schedule, cycle, PDC, reduction and buffer passes still use owned graph identities and require a separate architecture slice.
 
-Sol HIGH coordinates the stateless record, GitHub, checkpoints and delivery. Luna HIGH or XHIGH implements. Astra LOW performs every scope, source, evidence, exact-head, CI and delivery review. This is the sole active issue slot at opening; the second slot remains free for an explicitly disjoint qualification successor.
+Sol HIGH coordinates the stateless record, GitHub, checkpoints and delivery. Luna HIGH or XHIGH implements. Astra LOW performs every scope, source, evidence, exact-head, CI and delivery review. Documentation-only lane-A #632 and this issue occupy the two active slots with disjoint ownership; a qualification successor waits until #632 releases its slot.
 
 ## Smallest closable product slice
 
