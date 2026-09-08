@@ -247,6 +247,8 @@ enum LifecycleState {
     ShutdownAcknowledged = 3,
 }
 
+const LIFECYCLE_FAULT: u8 = u8::MAX;
+
 impl LifecycleState {
     fn from_byte(value: u8) -> Option<Self> {
         match value {
@@ -304,6 +306,12 @@ pub struct BuiltinBatchControl {
     cancel_completion_reported: bool,
     last_collected: Option<CoreTicket>,
     lifecycle: Arc<AtomicU8>,
+    #[cfg(test)]
+    generic_begin_hold_sender: Option<std::sync::mpsc::SyncSender<()>>,
+    #[cfg(test)]
+    generic_begin_release_receiver: Option<std::sync::mpsc::Receiver<()>>,
+    #[cfg(test)]
+    fail_next_generic_begin: bool,
 }
 
 impl BuiltinBatchControl {
@@ -391,11 +399,10 @@ impl BuiltinBatchControl {
         }
         self.lifecycle
             .store(LifecycleState::OrdinaryPending as u8, Ordering::Release);
-        let token = match self.delivery.begin_cancel() {
+        let token = match self.begin_generic_cancel() {
             Ok(token) => token,
             Err(error) => {
-                self.lifecycle
-                    .store(LifecycleState::Idle as u8, Ordering::Release);
+                self.rollback_begin_cancel();
                 return Err(error);
             }
         };
@@ -503,7 +510,11 @@ impl BuiltinBatchControl {
     /// fields from the failed attempt.
     pub fn begin_shutdown(&mut self) -> Result<CoreCancelToken, BuiltinBatchShutdownError> {
         match self.lifecycle_state()? {
-            LifecycleState::Idle => {}
+            LifecycleState::Idle => {
+                if self.cancellation_started || self.cancel_complete.is_some() {
+                    return Err(BuiltinBatchShutdownError::CancellationPending);
+                }
+            }
             LifecycleState::OrdinaryPending => {
                 return Err(BuiltinBatchShutdownError::CancellationPending);
             }
@@ -513,11 +524,10 @@ impl BuiltinBatchControl {
         }
         self.lifecycle
             .store(LifecycleState::ShutdownPending as u8, Ordering::Release);
-        let token = match self.delivery.begin_cancel() {
+        let token = match self.begin_generic_cancel() {
             Ok(token) => token,
             Err(error) => {
-                self.lifecycle
-                    .store(LifecycleState::Idle as u8, Ordering::Release);
+                self.rollback_begin_cancel();
                 return Err(BuiltinBatchShutdownError::Delivery(error));
             }
         };
@@ -526,6 +536,49 @@ impl BuiltinBatchControl {
         self.cancel_token = Some(token);
         self.cancel_completion_reported = false;
         Ok(token)
+    }
+
+    fn begin_generic_cancel(&mut self) -> Result<CoreCancelToken, DeliveryError> {
+        #[cfg(test)]
+        {
+            if let Some(sender) = self.generic_begin_hold_sender.take() {
+                let _ = sender.send(());
+                if let Some(receiver) = self.generic_begin_release_receiver.take()
+                    && receiver.recv().is_err()
+                {
+                    return Err(DeliveryError::Empty);
+                }
+            }
+            if self.fail_next_generic_begin {
+                self.fail_next_generic_begin = false;
+                return Err(DeliveryError::Full);
+            }
+        }
+        self.delivery.begin_cancel()
+    }
+
+    fn rollback_begin_cancel(&mut self) {
+        self.lifecycle
+            .store(LifecycleState::Idle as u8, Ordering::Release);
+        self.cancellation_started = false;
+        self.cancel_complete = None;
+        self.cancel_token = None;
+        self.cancel_completion_reported = false;
+    }
+
+    #[cfg(test)]
+    fn hold_before_generic_begin_for_test(
+        &mut self,
+        sender: std::sync::mpsc::SyncSender<()>,
+        receiver: std::sync::mpsc::Receiver<()>,
+    ) {
+        self.generic_begin_hold_sender = Some(sender);
+        self.generic_begin_release_receiver = Some(receiver);
+    }
+
+    #[cfg(test)]
+    fn fail_next_generic_begin_for_test(&mut self) {
+        self.fail_next_generic_begin = true;
     }
 
     /// Poll terminal shutdown until render acknowledgement and all accepted terminals exist.
@@ -623,6 +676,10 @@ pub struct StartedBuiltinBatchRender {
     claim_hold_sender: Option<std::sync::mpsc::SyncSender<()>>,
     #[cfg(test)]
     claim_release_receiver: Option<std::sync::mpsc::Receiver<()>>,
+    #[cfg(test)]
+    classification_hold_sender: Option<std::sync::mpsc::SyncSender<()>>,
+    #[cfg(test)]
+    classification_release_receiver: Option<std::sync::mpsc::Receiver<()>>,
 }
 
 /// Result of one healthy endpoint render boundary.
@@ -675,6 +732,16 @@ impl StartedBuiltinBatchRender {
         self.claim_release_receiver = Some(receiver);
     }
 
+    #[cfg(test)]
+    fn hold_before_lifecycle_classification_for_test(
+        &mut self,
+        sender: std::sync::mpsc::SyncSender<()>,
+        receiver: std::sync::mpsc::Receiver<()>,
+    ) {
+        self.classification_hold_sender = Some(sender);
+        self.classification_release_receiver = Some(receiver);
+    }
+
     /// Render one prepared planar block and service cancellation before any builtin injection.
     pub fn render(
         &mut self,
@@ -720,6 +787,15 @@ impl StartedBuiltinBatchRender {
         match self.delivery.cancel_boundary(first) {
             Ok(()) => {
                 self.pending = None;
+                #[cfg(test)]
+                if let Some(sender) = self.classification_hold_sender.take() {
+                    let _ = sender.send(());
+                    if let Some(receiver) = self.classification_release_receiver.take()
+                        && receiver.recv().is_err()
+                    {
+                        return self.sticky(BuiltinBatchRenderError::Fault);
+                    }
+                }
                 let Some(state) = LifecycleState::from_byte(self.lifecycle.load(Ordering::Acquire))
                 else {
                     return self.sticky(BuiltinBatchRenderError::Fault);
@@ -746,9 +822,10 @@ impl StartedBuiltinBatchRender {
                 });
             }
             Err(DeliveryError::Empty) => {
-                if lifecycle != LifecycleState::Idle {
-                    return self.sticky(BuiltinBatchRenderError::Fault);
-                }
+                // A control owner publishes the lifecycle intent before the generic boundary
+                // message.  A valid render call may therefore win this race and observe an empty
+                // cancellation queue.  Continue with the ordinary block; the next boundary will
+                // consume the message once publication becomes visible.
             }
             Err(error) => return self.sticky(BuiltinBatchRenderError::Delivery(error)),
         }
@@ -828,6 +905,11 @@ impl StartedBuiltinBatchRender {
     }
 
     fn sticky<T>(&mut self, error: BuiltinBatchRenderError) -> Result<T, BuiltinBatchRenderError> {
+        // Keep the existing one-byte prepared handshake as the ownership signal for a render
+        // fault.  The four valid lifecycle values remain unchanged; an invalid byte is already
+        // classified as Fault by the control owner, which prevents shutdown from certifying a
+        // boundary after irreversible render uncertainty.
+        self.lifecycle.store(LIFECYCLE_FAULT, Ordering::Release);
         self.fault = Some(error);
         Err(error)
     }
@@ -883,6 +965,10 @@ impl StartedBuiltinBatchRender {
                 claim_hold_sender: _,
             #[cfg(test)]
                 claim_release_receiver: _,
+            #[cfg(test)]
+                classification_hold_sender: _,
+            #[cfg(test)]
+                classification_release_receiver: _,
         } = self;
         StoppedBuiltinBatchRender {
             plan: plan.stop(),
@@ -1265,6 +1351,10 @@ impl PreparedBuiltinBatchEndpoint {
             claim_hold_sender: None,
             #[cfg(test)]
             claim_release_receiver: None,
+            #[cfg(test)]
+            classification_hold_sender: None,
+            #[cfg(test)]
+            classification_release_receiver: None,
         };
         let control = BuiltinBatchControl {
             delivery: control,
@@ -1284,6 +1374,12 @@ impl PreparedBuiltinBatchEndpoint {
             cancel_token: None,
             cancel_completion_reported: false,
             last_collected: None,
+            #[cfg(test)]
+            generic_begin_hold_sender: None,
+            #[cfg(test)]
+            generic_begin_release_receiver: None,
+            #[cfg(test)]
+            fail_next_generic_begin: false,
         };
         Ok((control, render, resources))
     }
@@ -1388,8 +1484,11 @@ mod tests {
             render.render(&mut samples, 2, 128, 128, SampleTime(0)),
             Err(BuiltinBatchRenderError::Fault)
         );
-        let cancel = control.begin_cancel().expect("cancel after fault");
-        assert_eq!(control.poll_cancel_boundary(cancel), Ok(None));
+        assert_eq!(
+            control.begin_cancel(),
+            Err(DeliveryError::CancellationPending),
+            "sticky render fault retains endpoint ownership"
+        );
         assert_eq!(control.collect(ticket), Err(DeliveryError::Empty));
         assert_eq!(control.outstanding(), 1);
     }
@@ -2075,5 +2174,198 @@ mod tests {
             assert!(second_completion.late);
             render_thread.join().expect("render join");
         });
+    }
+
+    #[test]
+    fn pending_lifecycle_intent_renders_normally_and_failed_begin_rolls_back() {
+        use std::sync::mpsc::sync_channel;
+
+        let document = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
+        let compiled = crate::compile_host_session(document, &caps()).expect("compile fixture");
+        let (mut control, mut render, _) = prepare_builtin_batch_endpoint(
+            &compiled,
+            &caps(),
+            SessionRevision(42),
+            NonZeroUsize::new(1).unwrap(),
+        )
+        .expect("prepare")
+        .start()
+        .unwrap_or_else(|_| panic!("start"));
+
+        let (intent_tx, intent_rx) = sync_channel(0);
+        let (release_tx, release_rx) = sync_channel(0);
+        control.hold_before_generic_begin_for_test(intent_tx, release_rx);
+        let returned_control = std::thread::scope(|scope| {
+            let begin = scope.spawn(move || {
+                let result = control.begin_cancel();
+                (control, result)
+            });
+            intent_rx.recv().expect("intent rendezvous");
+            let mut samples = [0.0_f32; 256];
+            let report = render
+                .render(&mut samples, 2, 128, 128, SampleTime(0))
+                .expect("pending intent remains renderable");
+            assert!(report.graph.is_some());
+            assert!(!report.cancellation_only);
+            release_tx.send(()).expect("publish release");
+            let (mut control, token) = begin.join().expect("begin join");
+            let token = token.expect("published ordinary token");
+            let boundary = render
+                .render(&mut samples, 2, 128, 128, SampleTime(128))
+                .expect("ordinary boundary");
+            assert!(boundary.cancellation_only);
+            assert!(!boundary.shutdown);
+            assert_eq!(
+                control.poll_cancel_boundary(token),
+                Ok(Some(CoreCancelComplete {
+                    token,
+                    frontier: None,
+                    acknowledged_sample: SampleTime(128),
+                }))
+            );
+            control
+        });
+        control = returned_control;
+
+        control.fail_next_generic_begin_for_test();
+        assert_eq!(
+            control.begin_cancel(),
+            Err(DeliveryError::Full),
+            "the injected publication failure is surfaced"
+        );
+        assert_eq!(control.lifecycle_state(), Ok(LifecycleState::Idle));
+        assert!(!control.cancellation_started);
+        assert_eq!(control.cancel_complete, None);
+        assert_eq!(control.cancel_token, None);
+        assert!(!control.cancel_completion_reported);
+
+        let retry = control.begin_cancel().expect("retry after rollback");
+        let mut samples = [0.0_f32; 256];
+        assert!(
+            render
+                .render(&mut samples, 2, 128, 128, SampleTime(128))
+                .expect("retry boundary")
+                .cancellation_only
+        );
+        assert!(
+            control
+                .poll_cancel_boundary(retry)
+                .expect("retry poll")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn ordinary_ack_before_classification_cannot_be_overtaken_by_shutdown() {
+        use std::sync::mpsc::sync_channel;
+
+        let document = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
+        let compiled = crate::compile_host_session(document, &caps()).expect("compile fixture");
+        std::thread::scope(|scope| {
+            let (control_tx, control_rx) = sync_channel(1);
+            let (step_tx, step_rx) = sync_channel(0);
+            let (report_tx, report_rx) = sync_channel(2);
+            let (classified_tx, classified_rx) = sync_channel(0);
+            let (release_tx, release_rx) = sync_channel(0);
+            let render_thread = scope.spawn(move || {
+                let (control, mut render, _) = prepare_builtin_batch_endpoint(
+                    &compiled,
+                    &caps(),
+                    SessionRevision(42),
+                    NonZeroUsize::new(1).unwrap(),
+                )
+                .expect("prepare")
+                .start()
+                .unwrap_or_else(|_| panic!("start"));
+                render.hold_before_lifecycle_classification_for_test(classified_tx, release_rx);
+                control_tx.send(control).expect("control handoff");
+                for first in [0_u64, 0_u64] {
+                    step_rx.recv().expect("render step");
+                    let mut samples = [0.0_f32; 256];
+                    report_tx
+                        .send(render.render(&mut samples, 2, 128, 128, SampleTime(first)))
+                        .expect("render report");
+                }
+            });
+            let mut control = control_rx.recv().expect("control owner");
+            let ordinary = control.begin_cancel().expect("ordinary begin");
+            step_tx.send(()).expect("ordinary step");
+            classified_rx.recv().expect("classification rendezvous");
+            assert_eq!(control.poll_cancel_boundary(ordinary), Ok(None));
+            assert_eq!(
+                control.begin_shutdown(),
+                Err(BuiltinBatchShutdownError::CancellationPending)
+            );
+            release_tx.send(()).expect("classification release");
+            let ordinary_report = report_rx
+                .recv()
+                .expect("ordinary report")
+                .expect("ordinary render");
+            assert!(ordinary_report.cancellation_only);
+            assert_eq!(
+                control
+                    .poll_cancel_boundary(ordinary)
+                    .expect("ordinary final poll")
+                    .expect("ordinary completion")
+                    .token,
+                ordinary
+            );
+
+            let shutdown = control.begin_shutdown().expect("shutdown begin");
+            step_tx.send(()).expect("shutdown step");
+            let shutdown_report = report_rx
+                .recv()
+                .expect("shutdown report")
+                .expect("shutdown render");
+            assert!(shutdown_report.shutdown);
+            let complete = control
+                .poll_shutdown(shutdown)
+                .expect("shutdown poll")
+                .expect("shutdown complete");
+            assert_eq!(complete.token, shutdown);
+            render_thread.join().expect("render join");
+        });
+    }
+
+    #[test]
+    fn sticky_render_fault_refuses_shutdown_and_retains_ticket_ownership() {
+        let document = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
+        let compiled = crate::compile_host_session(document, &caps()).expect("compile fixture");
+        let (mut control, mut render, _) = prepare_builtin_batch_endpoint(
+            &compiled,
+            &caps(),
+            SessionRevision(42),
+            NonZeroUsize::new(1).unwrap(),
+        )
+        .expect("prepare")
+        .start()
+        .unwrap_or_else(|_| panic!("start"));
+        let batch = BuiltinBatch::new(
+            SessionRevision(42),
+            SampleTime(0),
+            &[BuiltinBatchRecord::Fader {
+                track_index: 0,
+                record: TrackFaderRecord::Mute {
+                    lanes: BuiltinLaneSelector::Both,
+                    muted: true,
+                    smoothing_samples: 0,
+                },
+            }],
+        )
+        .expect("batch");
+        let ticket = control.try_publish(batch).expect("publish");
+        render.inject_post_graph_fault_for_test();
+        let mut samples = [0.0_f32; 256];
+        assert_eq!(
+            render.render(&mut samples, 2, 128, 128, SampleTime(0)),
+            Err(BuiltinBatchRenderError::Fault)
+        );
+        assert_eq!(
+            control.begin_shutdown(),
+            Err(BuiltinBatchShutdownError::Fault)
+        );
+        assert_eq!(control.outstanding(), 1);
+        assert_eq!(control.collect(ticket), Err(DeliveryError::Empty));
+        assert_eq!(control.outstanding(), 1);
     }
 }

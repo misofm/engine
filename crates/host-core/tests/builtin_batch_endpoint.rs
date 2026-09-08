@@ -1374,3 +1374,58 @@ fn ordinary_cancel_remains_reusable_before_terminal_shutdown() {
         }))
     );
 }
+
+#[test]
+fn shutdown_cannot_overtake_cached_ordinary_ack_after_final_collection() {
+    let (mut control, mut render, _) = endpoint_with_capacity(2);
+    let batch = BuiltinBatch::new(
+        REVISION,
+        SampleTime(0),
+        &[BuiltinBatchRecord::Fader {
+            track_index: 0,
+            record: TrackFaderRecord::Mute {
+                lanes: BuiltinLaneSelector::Both,
+                muted: true,
+                smoothing_samples: 0,
+            },
+        }],
+    )
+    .unwrap();
+    let ticket = control.try_publish(batch).expect("publish");
+    assert!(render_block(&mut render, 0).applied.is_some());
+
+    let ordinary = control.begin_cancel().expect("ordinary cancel");
+    assert!(render_block(&mut render, QUANTUM as u64).cancellation_only);
+    assert_eq!(control.poll_cancel_boundary(ordinary), Ok(None));
+    assert_eq!(control.outstanding(), 1);
+    assert_eq!(
+        control
+            .collect(ticket)
+            .expect("final ordinary collection")
+            .disposition,
+        CoreTerminalDisposition::Applied
+    );
+    assert_eq!(control.outstanding(), 0);
+    assert_eq!(
+        control.begin_shutdown(),
+        Err(host_core::BuiltinBatchShutdownError::CancellationPending),
+        "cached ordinary acknowledgement still owns the lifecycle"
+    );
+    assert!(
+        control
+            .poll_cancel_boundary(ordinary)
+            .expect("ordinary final poll")
+            .is_some()
+    );
+
+    let terminal = control.begin_shutdown().expect("terminal shutdown");
+    let shutdown = render_block(&mut render, QUANTUM as u64);
+    assert!(shutdown.shutdown);
+    let complete = control
+        .poll_shutdown(terminal)
+        .expect("terminal poll")
+        .expect("terminal complete");
+    assert_eq!(complete.token, terminal);
+    assert_eq!(complete.frontier, None);
+    assert_eq!(complete.acknowledged_sample, SampleTime(QUANTUM as u64));
+}
