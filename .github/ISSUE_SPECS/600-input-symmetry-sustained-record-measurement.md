@@ -195,3 +195,13 @@ evidence. This correction uses `BuiltinLaneSelector::Both`, freezes immediate pr
 and boundary drain semantics, requires 512 warmup blocks per owner with explicit continuity and
 exclusion, and separates protected untimed/final-preflight/capture filenames. Formal rereview is
 required before Luna implementation.
+
+## Astra LOW scope review 2
+
+Astra LOW returned **PASS** on exact pushed head
+`b5fbabaa541240d65b714d358d9a16209be7b832`. The corrected brief now matches the actual selector
+and queue-boundary contract, freezes 512 warmup blocks per owner with explicit continuity and
+exclusion, and separates untimed, final-preflight and capture namespaces. The live GitHub issue and
+local spec match; current main remains the inspected base; #598 ownership is disjoint. Luna HIGH or
+XHIGH attempt 1 may implement the benchmark and untimed harness. Timing remains unauthorized until
+the later source/harness review passes.
