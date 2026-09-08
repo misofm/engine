@@ -229,6 +229,26 @@ PASS remains required before promotion can be considered.
 
 ## Astra LOW attempt 2 evidence-disposition review — PASS
 
+Astra LOW passed exact clean pushed disposition head
+`40ecd3db63d8b0e6f728217a41a5502287359029` against live main `30680709`.
+All 91 checksums verify; raw attempt-1 records are unchanged. The eleven numbered
+records agree on frozen source, paths, timestamps, successful statuses, and
+their six-file output. Normalized comparison proves the five non-Wasm files are
+the delivered identities and the candidate Wasm is `63ef81c105…`. The duplicate
+builder remains non-credit, proof limits are candid, and diff hygiene passes.
+
+The existing candidate qualification is accepted for promotion purposes without
+relabeling attempt 1, which remains failed. Exactly one Luna HIGH promotion is
+authorized: set the artifact pin to exact candidate
+`63ef81c105d50aed41164aa3c6c6f8853a314b99d642e209e7cc3aefe3bdbca1` plus LF,
+set only `results.json` candidateCommit to exact `dc14ca856e10cb5ad7f6fdacb0ea9322342a9251`
+and wasmSha256 to that digest, and regenerate only matching matrix lineage.
+Every other row, resource, and source byte remains frozen. No build, gate,
+install, or browser execution is authorized until the promotion checkpoint;
+post-pin verification follows separately.
+
+## Astra LOW attempt 2 evidence-disposition review — PASS
+
 Astra LOW returned **PASS** at exact clean pushed head
 `40ecd3db63d8b0e6f728217a41a5502287359029`. All 91 manifest entries verify.
 The eleven numbered records consistently bind frozen `dc14ca85`, the first
