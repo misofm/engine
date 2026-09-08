@@ -159,3 +159,58 @@ Hypatia alone may refresh identities and run those four commands once in order f
 scratch, appending records. Changed state, concurrent activity or the first failure stops execution.
 No existing record or path may be overwritten, deleted or recreated; no completed stage may repeat;
 repository promotion remains unauthorized.
+
+## Stage 2 scratch candidate Astra LOW review — PASS
+
+Astra passed the scratch candidate at exact authorization branch head
+`fa8aafab18dc8103b7292438c071723d6b2b6eac`, while retaining execution attempt 1 as procedural
+FAIL. All carried commands and the four attempt-2 continuation commands have status 0. The candidate
+remains `580e3cb4cd11e996598103f27b02d94559f6ef7ad57ef22732d18c0b4f98be10`; exactly six output
+identities and all five non-Wasm #627 byte comparisons remain exact; the scratch retains exactly the
+three authorized overlays. The resource witness explicitly reports 26 red mutations. The all-browser
+command requested mutation proofs and reports PASS for Chromium `151.0.7922.34`, Firefox `153.0`
+and WebKit `26.5`; its terse stdout does not itself enumerate aggregate gate-cell or mutation totals.
+Matrix and diff checks passed.
+
+Preserve a record-labeling error: `13-pre-continuation-record.txt` records main
+`e6b2f1541c344d04eb68d4b8e3fafb72b591fe74` as `upstream`, while independent Git inspection
+confirms the feature branch upstream was the exact authorization head `fa8aafab...`. The raw record
+remains unchanged. This caveat does not alter candidate identity or the command results.
+
+## Stage 3: exact repository promotion brief
+
+Hypatia alone may copy the qualified scratch values into exactly these branch paths:
+
+- `hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256`: candidate digest plus LF;
+- `hosts/host-web/qualification/results.json`: only `candidateCommit` becomes
+  `70899de287c23b70c17b3e41a5b2921801ae8052` and `wasmSha256` becomes the candidate digest;
+- `hosts/host-web/BROWSER_DEPLOYMENT_MATRIX.md`: regenerate with the unchanged generator so only
+  the matching candidate/artifact lineage sentence changes.
+
+Before editing, require a clean branch whose HEAD equals upstream and require its three old values to
+match the qualified scratch base. After copying, require the branch diff to be byte-identical to the
+reviewed scratch three-path diff, `results.json` to differ in only the two named fields, all browser
+rows and numeric resources to remain unchanged, and `git diff --check` to pass. No source, fixtures,
+PCM expectations, generated artifact bytes or other documentation may change. Root then commits and
+pushes exactly those three paths as one checkpoint; Astra LOW reviews that checkpoint before any
+post-pin execution.
+
+After Astra passes the exact promotion checkpoint, Hypatia may create fresh non-symlink paths
+`/tmp/issue644-promotion-output` and `/tmp/issue644-promotion-evidence` once and run these commands
+once in order, stopping on the first failure and preserving complete temporary records:
+
+```text
+env -u MISO_ENGINE_WEB_AUDIOWORKLET_REPIN bash scripts/build-web-audioworklet.sh /tmp/issue644-promotion-output
+bash scripts/check-web-audioworklet.sh /tmp/issue644-promotion-output
+npm --prefix sdk ci --ignore-scripts
+bash scripts/sdk-package.sh check /tmp/issue644-promotion-output
+node hosts/host-web/qualification/generate-matrix.mjs --check
+git diff --check
+```
+
+Immediately after the builder, require exactly six canonical files and byte-compare every file with
+the reviewed `/tmp/issue644-qualified-output`; any identity difference stops. The already reviewed
+resource/native, hermetic and three-browser workloads do not repeat because the promoted candidate
+bytes, browser rows and numeric resources are frozen. Git retains compact identities, commands,
+statuses and conclusions only. Astra LOW must pass this brief before editing and must separately pass
+the pushed promotion checkpoint and final post-pin record before PR delivery.
