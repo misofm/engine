@@ -89,29 +89,23 @@ alone.
 
 | Candidate | Native scalar | Native AVX2 W8 | Wasm scalar | Wasm simd128 W4 | Residual interpretation |
 | --- | --- | --- | --- | --- | --- |
-| `FLOOR` | folded `vmovss` operand in the mapped scalar frame path | repeated `vbroadcastss` at `.s:10030` and `.s:11256` | not individually mapped in retained excerpt | not individually mapped in retained excerpt | Only the native scalar/W8 cases are dispositioned. |
 | `DB_PER_OCTAVE` | folded `vmulss` operand at `.s:17754` | repeated `vbroadcastss` at `.s:10211` and `.s:11493` | repeated `f32.const` at `.s:149497` | repeated `v128.const` at `.s:3076` and `.s:4286` | Individually mapped in all four cases; no projected saving is claimed. |
-| `+/-CONTRAST_LIMIT_DB` | folded `vminss`/`vmaxss` operands at `.s:17794-17797` | repeated broadcasts at `.s:10215-10219` and `.s:11497-11508` | repeated scalar constants at `.s:149507-149518` | not individually attributable because of multiple inlined math paths | W8, scalar, and Wasm-scalar cases are mapped. |
-| `+/-SHAPE_LIMIT_DB` | folded `vmaxss`/`vminss` operands at `.s:17803-17806` | repeated broadcasts at `.s:10242-10246` and `.s:11601-11615` | repeated scalar constants at `.s:149561-149569` | not individually attributable because of multiple inlined math paths | W8, scalar, and Wasm-scalar cases are mapped. |
 | `OCTAVES_PER_DB` | folded `vmulss` operand at `.s:17800` | repeated `vbroadcastss` at `.s:10250` and `.s:11626` | repeated `f32.const` at `.s:149577` | repeated `v128.const` at `.s:3124` and `.s:4334` | Individually mapped in all four cases. |
-| `0.5` average-link factor | no retained link-branch attribution | one W8 constant occurrence only; branch attribution is not independently retained | no retained attribution | no retained attribution | No average-link residual conclusion. |
-| `zero`, bypass, and prepared coefficient lanes | not dispositioned as constants | not dispositioned; stack traffic is not treated as spill evidence | not dispositioned | not dispositioned | Removed from the residual claim because the retained maps do not prove candidate-specific behavior. |
 
-The corrected evidence supports a bounded lowering question for the mapped
-`DB_PER_OCTAVE`, `OCTAVES_PER_DB`, clamp, and (where individually mapped)
-`FLOOR` occurrences. It does not support candidate-wide claims for average
-link, zero, bypass, or coefficient spill/reload behavior. It establishes no
-projected cycle saving and does not justify a source rewrite by itself.
+Only `DB_PER_OCTAVE` and `OCTAVES_PER_DB` are retained: each is independently
+mapped in caller-reachable ramping and stationary frame-loop cases for native
+scalar, native AVX2 W8, Wasm scalar, and Wasm simd128 W4. Every other candidate
+is omitted because the retained payload maps do not prove its identity or
+caller/loop behavior. No projected cycle saving or source rewrite is claimed.
 
 ### Stage-1 disposition proposed for Astra
 
-Suggested Astra LOW verdict: **CORRECTED EVIDENCE READY FOR ADVERSARIAL
-REVIEW; do not authorize stage 2 yet**. The retained tranche now supports only
-the individually mapped caller/loop cases above. Astra should decide whether
-those cases warrant a bounded stage-2 amendment; no implementation is
-authorized here. Any amendment must name the exact candidate/target cases and
-require comparable lowering with no unsupported spill, average-link, zero, or
-projected-savings claim. The current tree remains evidence/spec-only.
+Suggested Astra LOW verdict: **FINAL CORRECTED EVIDENCE READY FOR REVIEW; no
+source implementation authorized**. The retained tranche contains only the
+independently mapped `DB_PER_OCTAVE` and `OCTAVES_PER_DB` caller/loop cases
+listed above. Astra must decide applicability from those exact maps; this
+record authorizes no stage-2 or source work. The current tree remains
+evidence/spec-only.
 
 ### Attempt 1 Astra verdict
 
@@ -185,3 +179,28 @@ Regardless of the attempt-3 verdict, #635 owns no source implementation. On
 PASS it closes as the evidence/applicability slice and a separately numbered
 successor may brief the two octave-conversion constants. On FAIL it reaches
 the hard stop and must be respecified without weakening the evidence gates.
+
+### Attempt 3 final correction record
+
+Attempt 3 was authorized by tracker commit `7bd282f1` at exact clean pushed
+HEAD `202f75b321a66609a5f4360e9f0db9083b58954d`. It performed no compilation,
+retry, source/test/dependency edit, audio execution, timing, installation,
+artifact work, GitHub action, commit, or push. It changed only this issue
+record and the existing issue-635 evidence files, preserving both prior FAIL
+records, all original raw streams/statuses, and all payload identities.
+
+The retained native W8 excerpts now identify `.LCPI5_3` as `0x1e3ce508` and
+`FLOOR` as `.LCPI5_4` (`0x322bcc77`), while omitting both from the candidate
+residual. The native scalar excerpts identify `.LCPI6_23/.24` as `+/-18` and
+`.LCPI6_26/.27` as `-126/+127` math-lowering range constants; those uncertain
+or non-candidate mappings are omitted. The candidate table, selected excerpts,
+and conclusion retain only independently proven `DB_PER_OCTAVE` and
+`OCTAVES_PER_DB` cases across the four requested targets. Evidence-integrity
+hashes were refreshed after these documentation-only changes.
+
+Validation completed without a compiler invocation: physical excerpt locations
+were checked against the existing payload bytes, `sha256sum -c` passed for the
+retained evidence manifest, `git diff --check` passed, and no product/source,
+test, dependency, generated payload, or full compiler-output path was changed.
+Suggested final Astra verdict: **FINAL CORRECTED EVIDENCE READY FOR REVIEW; no
+source implementation authorized**.
