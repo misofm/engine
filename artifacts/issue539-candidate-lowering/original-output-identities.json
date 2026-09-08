@@ -1,7 +1,9 @@
 {
   "/tmp/issue539-candidate-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.ll": {
     "bytes": 8305679,
-    "sha256": "f952ecffa2164fdffdfec14b13377ff7473ef5753fc8ff8cdb777b2c41f52088"
+    "sha256": "f952ecffa2164fdffdfec14b13377ff7473ef5753fc8ff8cdb777b2c41f52088",
+    "current_main_present": false,
+    "retention_note": "historical LLVM capture identity only; payload removed from current main by issue #625"
   },
   "/tmp/issue539-candidate-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.s": {
     "bytes": 3993017,

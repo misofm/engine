@@ -32,14 +32,14 @@ Capture files are `/tmp/issue534-luna2/native-lowering.command.json`, `.stdout`,
 `1.97.1-x86_64-unknown-linux-gnu`. The repository config supplies the approved x86-64-v3
 features (`+avx2,+fma`); no extra ISA flag was supplied.
 
-The original compiler outputs are retained and immutable at:
+The original compiler output identities below are historical and immutable; issue #625 removed the `.ll` payload from current main while retaining its size/hash and the surviving assembly:
 
 - `/tmp/issue534-luna2-native-target/release/deps/gate_expander-a68433203a7e3c7a.ll`, 3,995,559 bytes, SHA-256 `6cc506e70472ed0c81f66c76edb94da175d3376fd181ee29bbed17a6c51093cf`
 - `/tmp/issue534-luna2-native-target/release/deps/gate_expander-a68433203a7e3c7a.s`, 2,015,972 bytes, SHA-256 `47bba1981af552981ef1b8f3d99688dc660001225ffeaedc3f80d8ded3bcb04e`
 
 Complete selected caller bodies, extracted by the existing baseline technique, are listed in
-`/tmp/issue534-luna2/native-selected/manifest.txt` and include both LLVM and assembly for each
-body:
+`/tmp/issue534-luna2/native-selected/manifest.txt` and include historical LLVM identities and
+surviving assembly for each body:
 
 | production body | LLVM lines in original | ASM lines in original | extract SHA-256 (LLVM / ASM) |
 |---|---:|---:|---|

@@ -92,7 +92,9 @@
   {
     "path": "baseline/process-callers.ll",
     "bytes": 546968,
-    "sha256": "f2a0949534f3850b15a691eee6fdade89dff126c6aec6347bc36426da3b30126"
+    "sha256": "f2a0949534f3850b15a691eee6fdade89dff126c6aec6347bc36426da3b30126",
+    "current_main_present": false,
+    "retention_note": "historical LLVM capture identity only; payload removed from current main by issue #625"
   },
   {
     "path": "baseline/source-mapping.txt",
@@ -107,7 +109,9 @@
   {
     "path": "candidate/process-callers.ll",
     "bytes": 582045,
-    "sha256": "53e8747d2c8b85056426f6b99a79a9071b4e11afcf6697e217f33e17d4602f81"
+    "sha256": "53e8747d2c8b85056426f6b99a79a9071b4e11afcf6697e217f33e17d4602f81",
+    "current_main_present": false,
+    "retention_note": "historical LLVM capture identity only; payload removed from current main by issue #625"
   },
   {
     "path": "candidate/source-mapping.txt",

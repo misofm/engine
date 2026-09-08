@@ -48,9 +48,9 @@ Captured source/config identities are recorded in the metadata JSON. Their SHA-2
 | `.cargo/config.toml` | `03b0fbd88c069abb0a8fbdca5921ba6a9899298291fe087977b509a29ebb7d0e` | `de2180972c37406f1f16913901bd1d4fc2e660e3` |
 | `rust-toolchain.toml` | `85a45cac04c296adac076f8f0609ca8f4c8ca658957f1f24cbd1e054b6cc44e0` | `6b6739839ba23906921aeb4c268d275dcc459fb6` |
 
-## Original compiler outputs
+## Historical compiler output identities
 
-The compiler emitted these original files into the isolated target. The original files are retained and were not rewritten after selection.
+The compiler emitted these files into the isolated target. Issue #625 removed the `.ll` payloads from current main; the original sizes/hashes and selected line ranges remain as historical identities, while the `.s` payload remains in the repository.
 
 | output | bytes | SHA-256 |
 | --- | ---: | --- |
@@ -61,7 +61,7 @@ The compiler emitted these original files into the isolated target. The original
 
 Selection was performed from the exact original files by `/tmp/issue537-extract-selected.py`; it selects one exact emitted function for each caller and writes complete bodies through the closing `}` / `.size`. The manifest is `/tmp/issue537-baseline/selected/manifest.json` (SHA-256 `33915ded27438ae4b44f0fb878504e6fde7951886f5650aaec46559d32eed30f`). The static extraction's generated stdout was the manifest path and six label/range/hash lines; no compiler or source command was rerun for selection. Complete output identities are:
 
-| actual caller | kind | original line range | selected file | bytes | SHA-256 |
+| actual caller | kind | original line range | selected file or historical identity | bytes | SHA-256 |
 | --- | --- | ---: | --- | ---: | --- |
 | `PreparedMultibandCompressor::process` (W1 scalar) | LLVM | 8663–15496 | `selected/process-scalar.ll` | 587,244 | `8e6b7fd64e1763224c029fa6ae714242c6a4470671de8913d8db9eabff384f60` |
 | same | ASM | 11837–21863 | `selected/process-scalar.s` | 209,072 | `8181969f634aafbed2a3b1169bcea931c04af1be32526e703a57d4e715ea2caa` |

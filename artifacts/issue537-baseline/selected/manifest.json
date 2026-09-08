@@ -13,7 +13,9 @@
       ],
       "bytes": 587244,
       "sha256": "8e6b7fd64e1763224c029fa6ae714242c6a4470671de8913d8db9eabff384f60",
-      "symbol": "_RNvXs6_Cs5xZ4lC6BZIV_20multiband_compressorNtB5_27PreparedMultibandCompressorNtCsfGpaX3jkkqY_15effect_contract20PreparedNativeEffect7process"
+      "symbol": "_RNvXs6_Cs5xZ4lC6BZIV_20multiband_compressorNtB5_27PreparedMultibandCompressorNtCsfGpaX3jkkqY_15effect_contract20PreparedNativeEffect7process",
+      "current_main_present": false,
+      "retention_note": "historical LLVM capture identity only; payload removed from current main by issue #625"
     },
     {
       "label": "process-scalar",
@@ -39,7 +41,9 @@
       ],
       "bytes": 1041654,
       "sha256": "1931a3e6fde94d99e7ac3d36db808d9c216e7a09cde84bb269ef865abe1966df",
-      "symbol": "_RNvXs7_Cs5xZ4lC6BZIV_20multiband_compressorINtB5_31PreparedMultibandCompressorBankNtNtCsdw0XaoyMD7p_4wide6f32x4_5f32x4Kj4_ENtCsfGpaX3jkkqY_15effect_contract24PreparedNativeEffectBank12process_bankB5_"
+      "symbol": "_RNvXs7_Cs5xZ4lC6BZIV_20multiband_compressorINtB5_31PreparedMultibandCompressorBankNtNtCsdw0XaoyMD7p_4wide6f32x4_5f32x4Kj4_ENtCsfGpaX3jkkqY_15effect_contract24PreparedNativeEffectBank12process_bankB5_",
+      "current_main_present": false,
+      "retention_note": "historical LLVM capture identity only; payload removed from current main by issue #625"
     },
     {
       "label": "process-bank-w4",
@@ -65,7 +69,9 @@
       ],
       "bytes": 1443613,
       "sha256": "85a76cc379781eb06a9cd60aa6cbd4dea9fbd4c8a1a6f9353119336b4a724184",
-      "symbol": "_RNvXs7_Cs5xZ4lC6BZIV_20multiband_compressorINtB5_31PreparedMultibandCompressorBankNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8Kj8_ENtCsfGpaX3jkkqY_15effect_contract24PreparedNativeEffectBank12process_bankB5_"
+      "symbol": "_RNvXs7_Cs5xZ4lC6BZIV_20multiband_compressorINtB5_31PreparedMultibandCompressorBankNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8Kj8_ENtCsfGpaX3jkkqY_15effect_contract24PreparedNativeEffectBank12process_bankB5_",
+      "current_main_present": false,
+      "retention_note": "historical LLVM capture identity only; payload removed from current main by issue #625"
     },
     {
       "label": "process-bank-w8",
@@ -80,5 +86,6 @@
       "sha256": "469cffe1c27f52ff3af46fbb0849eec660b9b0ef2ec4356ffa2ae937a87d5b25",
       "symbol": "_RNvXs7_Cs5xZ4lC6BZIV_20multiband_compressorINtB5_31PreparedMultibandCompressorBankNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8Kj8_ENtCsfGpaX3jkkqY_15effect_contract24PreparedNativeEffectBank12process_bankB5_"
     }
-  ]
+  ],
+  "llvm_payload_retention": "historical LLVM capture identity only; payload removed from current main by issue #625"
 }

@@ -1,7 +1,9 @@
 {
   "/tmp/issue537-candidate-target/release/deps/multiband_compressor-524a987dfea296bf.ll": {
     "bytes": 8166976,
-    "sha256": "7091c15cb327c9fc36f1fc8bec5f05e60cb3c5b5565bb685a6173ff86ae295b0"
+    "sha256": "7091c15cb327c9fc36f1fc8bec5f05e60cb3c5b5565bb685a6173ff86ae295b0",
+    "current_main_present": false,
+    "retention_note": "historical LLVM capture identity only; payload removed from current main by issue #625"
   },
   "/tmp/issue537-candidate-target/release/deps/multiband_compressor-524a987dfea296bf.s": {
     "bytes": 2151871,

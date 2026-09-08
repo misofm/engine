@@ -1,4 +1,5 @@
 Production caller/source mapping for issue #534 baseline
+# The LLVM payload is historical metadata only and is unavailable on current main after issue #625.
 IR: /tmp/issue534-baseline-target/release/deps/gate_expander-a68433203a7e3c7a.ll sha256=70d9633d05b0f040c4f8d60e5b4b1ee99de184264fb05ce39aa30b93023ea911
 Source gather lines: kernel.rs:271-277; assignment lines are not counted as executed loads.
 

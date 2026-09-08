@@ -48,6 +48,8 @@ are retained at:
 | `/tmp/issue534-baseline-target/release/deps/gate_expander-a68433203a7e3c7a.ll` | 3,680,496 | `70d9633d05b0f040c4f8d60e5b4b1ee99de184264fb05ce39aa30b93023ea911` |
 | `/tmp/issue534-baseline-target/release/deps/gate_expander-a68433203a7e3c7a.s` | 1,927,109 | `c49178247fb551f89d6f4c5b46e8b2a7416fd2e00801146c4624341624dc300f` |
 
+The LLVM payload is a historical capture identity only: issue #625 removed the selected `.ll` files from current main. The original byte size/hash, source mapping and conclusion remain; the selected assembly and text records remain available.
+
 One preliminary capture-helper invocation failed before writing metadata because its Git status
 argument was malformed; no cargo/rustc process ran and no compiler output was produced. The
 corrected, recorded invocation above is the only compiler capture and completed successfully.
