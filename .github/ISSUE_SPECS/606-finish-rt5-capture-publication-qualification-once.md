@@ -110,3 +110,14 @@ paths, complete build-environment rejection including `CARGO_ENCODED_RUSTFLAGS`,
 fault paths, explicit failure statuses, full record/seal mutations, truthful recovery, and the guarded
 publication-only probe. Luna XHIGH may begin the sole implementation pass. No runner correction,
 final preflight, or capture is authorized by this scope approval.
+
+## Attempt 1 Astra LOW verdict
+
+Astra LOW returned **FAIL** on exact pushed implementation head
+`b148ffc079ce0ed51e205fc188e6dd0648fa3aa3`. The exact preflight
+`CARGO_ENCODED_RUSTFLAGS` apply `-C lto=fat` to Cargo build dependencies and build scripts; a
+compile-only review exited 101 because Cargo's `-C embed-bitcode=no` is incompatible with `-C lto`.
+The stub publication lifecycle and all 19 checksum-manifest entries passed, and the reviewer found no
+acceptance hole in the redundant record/seal comparisons. No prepared executable, final preflight,
+capture entry, or timer ran. Because this issue authorized no runner correction, issue 606 stops and
+splits to a narrow build-recipe successor.
