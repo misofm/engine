@@ -1,0 +1,98 @@
+{
+  "issue": 627,
+  "kind": "attempt-2-evidence-disposition",
+  "execution": "none",
+  "attempt_1": {
+    "status": "FAIL",
+    "preserved": true,
+    "failure": "A separately recorded scratch builder invocation violated the exactly-one-builder rule; its identical output does not earn qualification credit."
+  },
+  "first_numbered_sequence": {
+    "record": "commands.json",
+    "record_sha256": "e5ef562f62ae1e6f1e45856adc105cf360ea960aa22da301aba2e3e384d332ab",
+    "source_head": "dc14ca856e10cb5ad7f6fdacb0ea9322342a9251",
+    "cwd": "/home/bl/misofm/engine-issue627-scratch",
+    "output_dir": "/tmp/issue627-qualified-output",
+    "stages": [
+      "00-toolchain",
+      "01-build",
+      "02-matrix-generate",
+      "03-static",
+      "04-resources",
+      "05-hermetic",
+      "06-sdk-install",
+      "07-sdk",
+      "08-browser-install",
+      "09-browsers",
+      "10-matrix-check"
+    ],
+    "status": "all eleven recorded statuses are zero",
+    "recorded_window": {
+      "start": "2026-09-08T13:18:23.463944+00:00",
+      "end": "2026-09-08T13:21:54.508183+00:00"
+    },
+    "ownership_basis": [
+      "Every numbered command records the frozen source head and the scratch cwd.",
+      "The numbered build records /tmp/issue627-qualified-output, and six-file.sha256 records that same path.",
+      "identity.json and final-proof.json record the six output identities and complete qualification projection.",
+      "The numbered command records include the matrix, resource, hermetic, SDK, install, browser, and final matrix stages."
+    ],
+    "qualification_credit": "technical evidence owned by the numbered sequence; attempt-1 procedural FAIL remains in force"
+  },
+  "duplicate_builder": {
+    "credit": "none",
+    "reason": "build-only duplicate is excluded by the exactly-one-builder rule",
+    "record_files": [
+      "build.command.txt",
+      "build.status",
+      "build.stdout",
+      "build.stderr",
+      "build-output-files.txt",
+      "build-output.sha256",
+      "input-sha256-before-build.txt",
+      "output-context.txt",
+      "overlay-status-after.txt",
+      "scratch-status-before.txt",
+      "scratch-status-after-build.txt"
+    ],
+    "cwd": "/home/bl/misofm/engine-issue627-scratch-qualification",
+    "output_dir": "/tmp/issue627-scratch-output-050242",
+    "command_record": "cwd=/home/bl/misofm/engine-issue627-scratch-qualification; env -u MISO_ENGINE_WEB_AUDIOWORKLET_REPIN bash scripts/build-web-audioworklet.sh /tmp/issue627-scratch-output-050242; repin=unset",
+    "status": 0,
+    "downstream_gate_records": [],
+    "hash_record": "build-output.sha256",
+    "hashes_equal_to_first_sequence": true,
+    "six_file_hashes": {
+      "miso-engine-v1-abi-layout.json": "40f6fe2e23e1b47500011c14871750a75922ab194136add8b387a4b40eb56919",
+      "miso-engine-v1-audio-worklet-host.d.ts": "445254e7c6ddf3330bdf20cafa8cacec4d0e2489805f72a833859db52bc038cf",
+      "miso-engine-v1-audio-worklet-host.js": "21c8947d8aad2d1d9a23e553c2c7b983dbd5a622aabfbab9a41c622d1a50229a",
+      "miso-engine-v1-audio-worklet.js": "225bc06043ed6e2c62a38d63f1c2015b40480d673e3a53109c938eba481556cb",
+      "miso-engine-v1-audio-worklet.simd128.wasm": "63ef81c105d50aed41164aa3c6c6f8853a314b99d642e209e7cc3aefe3bdbca1",
+      "miso-engine-v1-parameter-metadata.json": "6eac2cb3e30931b6c01b10c63af4eedd2d59337274565a129c7a3f328a09938d"
+    }
+  },
+  "preflight": {
+    "record": "README.md",
+    "execution": "runner preflight only",
+    "reason": "the runner detected its own newly created precondition files in scratch status",
+    "builder_invoked": false,
+    "qualification_gate_invoked": false,
+    "generated_files_removed_before_numbered_sequence": true,
+    "credit": "none",
+    "separate_from_attempt_1_builder_records": true
+  },
+  "limits_of_proof": [
+    "The retained duplicate build record has no durable timestamp, so this disposition cannot prove its relative launch order or overlap with the numbered sequence.",
+    "The records establish paths, commands, statuses, timestamps, and identical hashes; they do not identify an operating-system process owner beyond those recorded paths.",
+    "No attempt-1 PASS is inferred or relabeled, and no new qualification execution is claimed."
+  ],
+  "source_evidence": [
+    "commands.json",
+    "identity.json",
+    "final-proof.json",
+    "six-file.sha256",
+    "build.command.txt",
+    "build-output.sha256",
+    "README.md"
+  ]
+}
