@@ -41,3 +41,9 @@ Activation requires exact local/GitHub numbered identity, a pushed clean brief, 
 Astra LOW returned **PASS** for exact clean brief and upstream `813771980691f9cc5f5227057eeb57d73f0e5251`, with current main and merge-base `2119544764dd351b130b6fe262162bc5b9cb2d24`. The sole delta is this spec, diff checks pass, GitHub #596 has exact open identity/body, and base qualification `34173840466` succeeded. The one-file effect-contract tooling ownership is disjoint from #559/#594.
 
 The brief preserves the shared lookup law, intentionally local quote substitution, six production call sites and complete record format. No correction is required; Astra LOW is sufficient, and no audio, browser, artifact or timed benchmark qualification is indicated. Luna HIGH or XHIGH attempt 1 may begin after this verdict-only continuation is pushed and synchronized, and must pause at the first focused-green checkpoint.
+
+## Attempt 1 implementation checkpoint
+
+Luna HIGH delivered source checkpoint `79977f9594ab3a47440c8a01a3da00060596a3bc`, changing only `tools/bench/src/effect_contract.rs`. Production metadata now composes `Metadata::gather().nonempty_or_unknown(name)` with the unchanged local double-quote-to-single-quote projection. A pure deterministic projection test covers whitespace, Unicode and multiple quotes. The six production callers, their order, record schema and format remain unchanged.
+
+Focused bench-support metadata debug/release tests pass 2 tests each, the effect-contract debug/release test passes, and the complete bench debug suite passes 44 tests. Strict affected Clippy/rustdoc, formatting/diff, workspace policy, bench policy and its mutation suite pass. Cargo's generated lockfile ordering churn was restored, leaving only the authorized one-file source delta. No timed benchmark, audio, browser or artifact work ran. Astra LOW attempt-1 source review remains pending.
