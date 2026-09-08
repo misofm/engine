@@ -188,11 +188,13 @@ fn retained_endpoint_report_matches_independent_concrete_layout_oracle() {
     assert_eq!(resources.outcome.largest_allocation_bytes, outcome_largest);
     assert_eq!(
         resources.endpoint_retained_heap_bytes,
-        delivery_bytes + outcome_bytes
+        delivery_bytes + outcome_bytes + resources.lifecycle_heap_bytes
     );
     assert_eq!(
         resources.largest_endpoint_heap_allocation_bytes,
-        delivery_largest.max(outcome_largest)
+        delivery_largest
+            .max(outcome_largest)
+            .max(resources.lifecycle_heap_bytes)
     );
 }
 
@@ -369,6 +371,91 @@ fn actual_endpoint_allocations_and_nonempty_cancellation_reuse_are_live() {
 }
 
 #[test]
+fn shutdown_render_is_allocation_free_and_stop_reclaims_lifecycle_off_render() {
+    use bench_support::alloc as bench_alloc;
+    use engine::realtime::audit;
+
+    bench_alloc::assert_installed();
+    let (_, _, resources) = endpoint_with_capacity(1);
+    let warm_arc = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));
+    drop(warm_arc);
+    let lifecycle_mark = bench_alloc::current_thread_counters();
+    let lifecycle = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));
+    let lifecycle_delta = bench_alloc::current_thread_delta_since(lifecycle_mark);
+    assert_eq!(lifecycle_delta.allocations, 1);
+    assert_eq!(lifecycle_delta.deallocations, 0);
+    assert_eq!(lifecycle_delta.reallocations, 0);
+    assert!(
+        lifecycle_delta.requested_bytes == resources.lifecycle_heap_bytes,
+        "independent Arc allocation matches the endpoint report"
+    );
+    drop(lifecycle);
+    let lifecycle_freed = bench_alloc::current_thread_delta_since(lifecycle_mark);
+    assert_eq!(lifecycle_freed.allocations, 1);
+    assert_eq!(lifecycle_freed.reallocations, 0);
+    assert_eq!(lifecycle_freed.deallocations, 1);
+
+    let (mut control, mut render, _) = endpoint_with_capacity(1);
+    audit::warm_up();
+    let token = control.begin_shutdown().expect("shutdown token");
+    audit::reset();
+    let mut acknowledgment_output = [f32::from_bits(0x3f42_4242); 256];
+    let acknowledgment = audit::in_render_scope(|| {
+        render.render(
+            &mut acknowledgment_output,
+            2,
+            QUANTUM,
+            QUANTUM,
+            SampleTime(0),
+        )
+    })
+    .expect("shutdown acknowledgement");
+    assert!(acknowledgment.shutdown);
+    let acknowledgment_audit = audit::snapshot();
+    assert_eq!(acknowledgment_audit.allocations, 0);
+    assert_eq!(acknowledgment_audit.deallocations, 0);
+    assert_eq!(
+        control.poll_shutdown(token),
+        Ok(Some(host_core::BuiltinBatchShutdownComplete {
+            token,
+            frontier: None,
+            acknowledged_sample: SampleTime(0),
+        }))
+    );
+
+    let repeated_before = acknowledgment_output;
+    audit::reset();
+    let repeated = audit::in_render_scope(|| {
+        render.render(
+            &mut acknowledgment_output,
+            2,
+            QUANTUM,
+            QUANTUM,
+            SampleTime(0),
+        )
+    })
+    .expect("repeated shutdown render");
+    assert_eq!(repeated, acknowledgment);
+    assert_eq!(acknowledgment_output, repeated_before);
+    let repeated_audit = audit::snapshot();
+    assert_eq!(repeated_audit.allocations, 0);
+    assert_eq!(repeated_audit.deallocations, 0);
+
+    let mark = bench_alloc::current_thread_counters();
+    drop(control);
+    let after_control = bench_alloc::current_thread_delta_since(mark);
+    let stopped = render.stop();
+    let before_stopped_drop = bench_alloc::current_thread_delta_since(mark);
+    drop(stopped);
+    let after_stopped_drop = bench_alloc::current_thread_delta_since(mark);
+    assert!(
+        after_stopped_drop.deallocations > before_stopped_drop.deallocations
+            || after_stopped_drop.deallocations > after_control.deallocations,
+        "stop owner releases retained Arc/endpoint storage off render"
+    );
+}
+
+#[test]
 fn batch_applies_one_fifo_ticket_at_a_late_boundary_and_reconciles() {
     let (mut control, mut render, resources) = endpoint();
     assert!(resources.composed_retained_heap_bytes > resources.delivery.retained_payload_bytes);
@@ -378,6 +465,7 @@ fn batch_applies_one_fifo_ticket_at_a_late_boundary_and_reconciles() {
             .delivery
             .retained_payload_bytes
             .checked_add(resources.outcome.retained_payload_bytes)
+            .and_then(|bytes| bytes.checked_add(resources.lifecycle_heap_bytes))
             .expect("endpoint resource sum")
     );
     assert_eq!(
@@ -1245,4 +1333,395 @@ fn cancellation_reconciles_applied_and_future_frontier_dispositions() {
             .expect("next final poll")
             .is_some()
     );
+}
+
+#[test]
+fn terminal_shutdown_acknowledges_once_then_quiesces_and_reconciles() {
+    let (mut control, mut render, resources) = endpoint_with_capacity(2);
+    assert!(resources.lifecycle_heap_bytes > 0);
+    assert_eq!(
+        resources.lifecycle_inline_handle_bytes,
+        (core::mem::size_of::<std::sync::Arc<std::sync::atomic::AtomicU8>>() * 2) as u64
+    );
+
+    let applied_batch = BuiltinBatch::new(
+        REVISION,
+        SampleTime(0),
+        &[BuiltinBatchRecord::Fader {
+            track_index: 0,
+            record: TrackFaderRecord::Mute {
+                lanes: BuiltinLaneSelector::Both,
+                muted: true,
+                smoothing_samples: 0,
+            },
+        }],
+    )
+    .unwrap();
+    let future_batch = BuiltinBatch::new(
+        REVISION,
+        SampleTime((QUANTUM * 2) as u64),
+        &[BuiltinBatchRecord::Matrix {
+            track_index: 1,
+            record: TrackControlRecord {
+                matrix: Matrix2x2 {
+                    ll: 0.5,
+                    lr: 0.25,
+                    rl: -0.25,
+                    rr: 0.75,
+                },
+                smoothing_samples: 4,
+            },
+        }],
+    )
+    .unwrap();
+    let applied_ticket = control.try_publish(applied_batch).expect("applied ticket");
+    let future_ticket = control.try_publish(future_batch).expect("future ticket");
+    assert!(render_block(&mut render, 0).applied.is_some());
+
+    let token = control.begin_shutdown().expect("shutdown token");
+    assert!(matches!(
+        control.try_publish(future_batch),
+        Err(BuiltinBatchAdmissionError::Delivery {
+            error: protocol::DeliveryError::CancellationPending,
+            ..
+        })
+    ));
+    assert_eq!(control.poll_shutdown(token), Ok(None));
+
+    let acknowledgement = render_block(&mut render, QUANTUM as u64);
+    assert!(acknowledgement.cancellation_only);
+    assert!(acknowledgement.shutdown);
+    assert!(acknowledgement.graph.is_none());
+    assert!(acknowledgement.applied.is_none());
+    assert_eq!(control.poll_shutdown(token), Ok(None));
+
+    let applied = control.collect(applied_ticket).expect("applied collection");
+    assert_eq!(applied.disposition, CoreTerminalDisposition::Applied);
+    let canceled = control.collect(future_ticket).expect("canceled collection");
+    assert_eq!(canceled.disposition, CoreTerminalDisposition::Canceled);
+    assert_eq!(canceled.applied_prefix, 0);
+    assert_eq!(canceled.remaining_count, 1);
+    assert_eq!(
+        canceled.acknowledged_sample,
+        Some(SampleTime(QUANTUM as u64))
+    );
+
+    let complete = control
+        .poll_shutdown(token)
+        .expect("shutdown poll")
+        .expect("shutdown completion");
+    assert_eq!(complete.token, token);
+    assert_eq!(complete.frontier, Some(future_ticket.serial));
+    assert_eq!(complete.acknowledged_sample, SampleTime(QUANTUM as u64));
+    assert_eq!(
+        control.poll_shutdown(token),
+        Err(host_core::BuiltinBatchShutdownError::StaleTicket)
+    );
+    assert_eq!(
+        control.begin_shutdown(),
+        Err(host_core::BuiltinBatchShutdownError::ShutdownPending)
+    );
+
+    let mut invalid = [0.0_f32; 1];
+    let later = render.render(&mut invalid, 1, 1, 1, SampleTime(99));
+    assert!(
+        later.expect("quiescent render").shutdown,
+        "terminal render remains stable even for an invalid later shape"
+    );
+}
+
+#[test]
+fn ordinary_cancel_remains_reusable_before_terminal_shutdown() {
+    let (mut control, mut render, _) = endpoint_with_capacity(1);
+    let ordinary = control.begin_cancel().expect("ordinary cancel");
+    assert_eq!(
+        control.begin_shutdown(),
+        Err(host_core::BuiltinBatchShutdownError::CancellationPending)
+    );
+    assert!(render_block(&mut render, 0).cancellation_only);
+    assert_eq!(
+        control.poll_cancel_boundary(ordinary),
+        Ok(Some(protocol::CoreCancelComplete {
+            token: ordinary,
+            frontier: None,
+            acknowledged_sample: SampleTime(0),
+        }))
+    );
+
+    let terminal = control.begin_shutdown().expect("terminal shutdown");
+    assert!(render_block(&mut render, 0).shutdown);
+    assert_eq!(
+        control.poll_shutdown(terminal),
+        Ok(Some(host_core::BuiltinBatchShutdownComplete {
+            token: terminal,
+            frontier: None,
+            acknowledged_sample: SampleTime(0),
+        }))
+    );
+}
+
+#[test]
+fn shutdown_reconciles_applied_claimed_future_and_queued_ownership_exactly() {
+    let (mut control, mut render, _) = endpoint_with_capacity(4);
+    let applied_batch = BuiltinBatch::new(
+        REVISION,
+        SampleTime(0),
+        &[
+            BuiltinBatchRecord::Fader {
+                track_index: 0,
+                record: TrackFaderRecord::Mute {
+                    lanes: BuiltinLaneSelector::Both,
+                    muted: true,
+                    smoothing_samples: 0,
+                },
+            },
+            BuiltinBatchRecord::Matrix {
+                track_index: 0,
+                record: TrackControlRecord {
+                    matrix: Matrix2x2 {
+                        ll: 1.0,
+                        lr: 0.0,
+                        rl: 0.0,
+                        rr: 1.0,
+                    },
+                    smoothing_samples: 0,
+                },
+            },
+        ],
+    )
+    .unwrap();
+    let claimed_future_batch = BuiltinBatch::new(
+        REVISION,
+        SampleTime((QUANTUM * 2) as u64),
+        &[
+            BuiltinBatchRecord::Fader {
+                track_index: 1,
+                record: TrackFaderRecord::FaderDb {
+                    lanes: BuiltinLaneSelector::Left,
+                    db: -6.0,
+                    smoothing_samples: 32,
+                },
+            },
+            BuiltinBatchRecord::Matrix {
+                track_index: 1,
+                record: TrackControlRecord {
+                    matrix: Matrix2x2 {
+                        ll: 0.5,
+                        lr: 0.25,
+                        rl: -0.25,
+                        rr: 0.75,
+                    },
+                    smoothing_samples: 16,
+                },
+            },
+        ],
+    )
+    .unwrap();
+    let queued_batch = BuiltinBatch::new(
+        REVISION,
+        SampleTime((QUANTUM * 4) as u64),
+        &[BuiltinBatchRecord::Fader {
+            track_index: 2,
+            record: TrackFaderRecord::Mute {
+                lanes: BuiltinLaneSelector::Right,
+                muted: false,
+                smoothing_samples: 0,
+            },
+        }],
+    )
+    .unwrap();
+    let applied_ticket = control.try_publish(applied_batch).expect("applied ticket");
+    let claimed_ticket = control
+        .try_publish(claimed_future_batch)
+        .expect("claimed future ticket");
+    let queued_ticket = control.try_publish(queued_batch).expect("queued ticket");
+    assert_eq!(control.outstanding(), 3);
+
+    assert!(render_block(&mut render, 0).applied.is_some());
+    assert!(render_block(&mut render, QUANTUM as u64).applied.is_none());
+
+    let token = control.begin_shutdown().expect("shutdown token");
+    assert_eq!(
+        control.poll_shutdown(token),
+        Ok(None),
+        "acknowledgement cannot precede the boundary"
+    );
+    let acknowledgment = render_block(&mut render, (QUANTUM * 2) as u64);
+    assert!(acknowledgment.shutdown);
+    assert!(acknowledgment.graph.is_none());
+    assert_eq!(
+        control.poll_shutdown(token),
+        Ok(None),
+        "acknowledgement is cached while terminal ownership remains"
+    );
+
+    let applied = control.collect(applied_ticket).expect("applied collection");
+    assert_eq!(applied.disposition, CoreTerminalDisposition::Applied);
+    assert_eq!(applied.applied_prefix, 2);
+    assert_eq!(applied.remaining_count, 0);
+    assert_eq!(applied.requested_sample, SampleTime(0));
+    assert_eq!(applied.actual_sample, Some(SampleTime(0)));
+    assert_eq!(applied.acknowledged_sample, None);
+
+    let claimed = control.collect(claimed_ticket).expect("claimed collection");
+    assert_eq!(claimed.disposition, CoreTerminalDisposition::Canceled);
+    assert_eq!(claimed.applied_prefix, 0);
+    assert_eq!(claimed.remaining_count, 2);
+    assert_eq!(claimed.requested_sample, SampleTime((QUANTUM * 2) as u64));
+    assert_eq!(claimed.actual_sample, None);
+    assert_eq!(
+        claimed.acknowledged_sample,
+        Some(SampleTime((QUANTUM * 2) as u64))
+    );
+
+    let queued = control.collect(queued_ticket).expect("queued collection");
+    assert_eq!(queued.disposition, CoreTerminalDisposition::Canceled);
+    assert_eq!(queued.applied_prefix, 0);
+    assert_eq!(queued.remaining_count, 1);
+    assert_eq!(queued.requested_sample, SampleTime((QUANTUM * 4) as u64));
+    assert_eq!(queued.actual_sample, None);
+    assert_eq!(
+        queued.acknowledged_sample,
+        Some(SampleTime((QUANTUM * 2) as u64))
+    );
+    assert_eq!(control.outstanding(), 0);
+
+    let complete = control
+        .poll_shutdown(token)
+        .expect("shutdown poll")
+        .expect("shutdown completion");
+    assert_eq!(complete.token, token);
+    assert_eq!(complete.frontier, Some(queued_ticket.serial));
+    assert_eq!(
+        complete.acknowledged_sample,
+        SampleTime((QUANTUM * 2) as u64)
+    );
+    assert_eq!(
+        control.poll_shutdown(token),
+        Err(host_core::BuiltinBatchShutdownError::StaleTicket)
+    );
+    assert_eq!(
+        control.begin_shutdown(),
+        Err(host_core::BuiltinBatchShutdownError::ShutdownPending)
+    );
+}
+
+#[test]
+fn shutdown_rejects_stale_token_before_and_after_completion() {
+    let (mut control, mut render, _) = endpoint_with_capacity(1);
+    let ordinary = control.begin_cancel().expect("ordinary token");
+    assert_eq!(
+        control.poll_shutdown(ordinary),
+        Err(host_core::BuiltinBatchShutdownError::CancellationPending)
+    );
+    assert!(render_block(&mut render, 0).cancellation_only);
+    assert!(
+        control
+            .poll_cancel_boundary(ordinary)
+            .expect("ordinary poll")
+            .is_some()
+    );
+
+    let shutdown = control.begin_shutdown().expect("shutdown token");
+    assert_eq!(control.poll_shutdown(shutdown), Ok(None));
+    assert_eq!(
+        control.poll_shutdown(ordinary),
+        Err(host_core::BuiltinBatchShutdownError::StaleTicket)
+    );
+    assert_eq!(
+        control.begin_shutdown(),
+        Err(host_core::BuiltinBatchShutdownError::ShutdownPending)
+    );
+    assert!(render_block(&mut render, 0).shutdown);
+    assert_eq!(
+        control.poll_shutdown(shutdown),
+        Ok(Some(host_core::BuiltinBatchShutdownComplete {
+            token: shutdown,
+            frontier: None,
+            acknowledged_sample: SampleTime(0),
+        }))
+    );
+    assert_eq!(
+        control.poll_shutdown(shutdown),
+        Err(host_core::BuiltinBatchShutdownError::StaleTicket)
+    );
+    let admission_probe = BuiltinBatch::new(
+        REVISION,
+        SampleTime(0),
+        &[BuiltinBatchRecord::Fader {
+            track_index: 0,
+            record: TrackFaderRecord::Mute {
+                lanes: BuiltinLaneSelector::Both,
+                muted: false,
+                smoothing_samples: 0,
+            },
+        }],
+    )
+    .unwrap();
+    assert!(matches!(
+        control.try_publish(admission_probe),
+        Err(BuiltinBatchAdmissionError::Delivery {
+            error: protocol::DeliveryError::CancellationPending,
+            ..
+        })
+    ));
+    assert_eq!(
+        control.poll_shutdown(ordinary),
+        Err(host_core::BuiltinBatchShutdownError::StaleTicket)
+    );
+}
+
+#[test]
+fn shutdown_cannot_overtake_cached_ordinary_ack_after_final_collection() {
+    let (mut control, mut render, _) = endpoint_with_capacity(2);
+    let batch = BuiltinBatch::new(
+        REVISION,
+        SampleTime(0),
+        &[BuiltinBatchRecord::Fader {
+            track_index: 0,
+            record: TrackFaderRecord::Mute {
+                lanes: BuiltinLaneSelector::Both,
+                muted: true,
+                smoothing_samples: 0,
+            },
+        }],
+    )
+    .unwrap();
+    let ticket = control.try_publish(batch).expect("publish");
+    assert!(render_block(&mut render, 0).applied.is_some());
+
+    let ordinary = control.begin_cancel().expect("ordinary cancel");
+    assert!(render_block(&mut render, QUANTUM as u64).cancellation_only);
+    assert_eq!(control.poll_cancel_boundary(ordinary), Ok(None));
+    assert_eq!(control.outstanding(), 1);
+    assert_eq!(
+        control
+            .collect(ticket)
+            .expect("final ordinary collection")
+            .disposition,
+        CoreTerminalDisposition::Applied
+    );
+    assert_eq!(control.outstanding(), 0);
+    assert_eq!(
+        control.begin_shutdown(),
+        Err(host_core::BuiltinBatchShutdownError::CancellationPending),
+        "cached ordinary acknowledgement still owns the lifecycle"
+    );
+    assert!(
+        control
+            .poll_cancel_boundary(ordinary)
+            .expect("ordinary final poll")
+            .is_some()
+    );
+
+    let terminal = control.begin_shutdown().expect("terminal shutdown");
+    let shutdown = render_block(&mut render, QUANTUM as u64);
+    assert!(shutdown.shutdown);
+    let complete = control
+        .poll_shutdown(terminal)
+        .expect("terminal poll")
+        .expect("terminal complete");
+    assert_eq!(complete.token, terminal);
+    assert_eq!(complete.frontier, None);
+    assert_eq!(complete.acknowledged_sample, SampleTime(QUANTUM as u64));
 }

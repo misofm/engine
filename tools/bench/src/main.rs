@@ -21,6 +21,8 @@ mod effect_interchange;
 mod floor;
 #[cfg(not(target_arch = "wasm32"))]
 mod graph;
+#[cfg(not(target_arch = "wasm32"))]
+mod input_symmetry;
 mod protocol;
 #[cfg(not(target_arch = "wasm32"))]
 mod rack;
@@ -37,6 +39,7 @@ const SUBJECTS: &[&str] = &[
     "effect-contract",
     "effect-interchange",
     "graph",
+    "input-symmetry",
     "protocol",
     "rack",
     "session",
@@ -51,6 +54,7 @@ fn run_subject(subject: &str) {
         "effect-contract" => effect_contract::main(),
         "effect-interchange" => effect_interchange::main(),
         "graph" => graph::main(),
+        "input-symmetry" => input_symmetry::main(),
         "protocol" => protocol::main(),
         "rack" => rack::main(),
         "session" => session::main(),

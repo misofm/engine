@@ -1,0 +1,760 @@
+diff --git a/tools/bench/src/input_symmetry.rs b/tools/bench/src/input_symmetry.rs
+index c9554efa..770bb2e3 100644
+--- a/tools/bench/src/input_symmetry.rs
++++ b/tools/bench/src/input_symmetry.rs
+@@ -1,13 +1,11 @@
+-//! Issue #600: a sustained eight-track input-trim ride on the delivered native W8 plan.
++//! Issue #600's entirely untimed sustained input-trim qualification.
+ //!
+-//! The subject keeps publication, source refill and hashing outside the timer.  The only timed
+-//! operation is [`PreparedRenderPlan::render`].  The untimed tests below use the same prepared
+-//! owner and exercise the queue boundary without invoking this subject's process entry point.
++//! The qualification owns no clock, timer, performance metadata, or capture machinery. It
++//! prepares the real eight-track W8 graph, publishes the real input records, renders contiguous
++//! blocks, and reports deterministic regression digests.
+
+ use bench_support::alloc as bench_alloc;
+-use bench_support::digest::{Sha256Sink, sha256_hex};
+-use bench_support::metadata::Metadata;
+-use bench_support::timing;
++use bench_support::digest::Sha256Sink;
+ use builtins::BuiltinLaneSelector;
+ use builtins_compiler::{
+     BuiltinCompileCaps, TrackControlProducer, TrackControlRequest, TrackInputRecord,
+@@ -16,7 +14,7 @@ use builtins_compiler::{
+ use effect_compiler::{
+     EffectCompileCaps, launch_native_effect_registry, prepare_native_session_effects,
+ };
+-use engine::realtime::{PlanarBufferMut, PreparedRenderPlan, RenderIo, RenderTime};
++use engine::realtime::{PlanarBufferMut, PreparedRenderPlan, RenderIo, RenderReport, RenderTime};
+ use graph::{
+     GraphBindingBlock, GraphCompileCaps, GraphNodeBinding, GraphNodeId, GraphRuntimeBindings,
+     GraphRuntimeProcessor, TrackStage,
+@@ -31,12 +29,22 @@ const QUANTUM: usize = 128;
+ const TRACKS: usize = 8;
+ const RECORDS_PER_BLOCK: usize = 8;
+ const QUEUE_CAPACITY: usize = 16;
+-const WARMUP_BLOCKS: u64 = 512;
+-const MEASURED_BLOCKS: u64 = 4096;
++const PREPARATION_BLOCKS: u64 = 512;
++const QUALIFICATION_BLOCKS: u64 = 4096;
++const QUALIFICATION_PHASES: usize = 2;
+ const SMOOTHING_SAMPLES: u32 = 256;
+ const PLAN_ID: u64 = 600;
++const FIXTURE_ID: &str = "fixtures/session/v1/parametric-eq-bank-console.json";
+ const FIXTURE: &str = include_str!("../../../fixtures/session/v1/parametric-eq-bank-console.json");
+
++// Filled from the connected independent oracle and then frozen in the qualification evidence.
++const REVIEWED_PHASE_DIGESTS: [&str; QUALIFICATION_PHASES] = [
++    "75eeffae6a0116867d6d6fbe589834df53f3dce87ffd09092f22e5968bc28f87",
++    "75eeffae6a0116867d6d6fbe589834df53f3dce87ffd09092f22e5968bc28f87",
++];
++const CONNECTED_ORACLE_DIGEST: &str =
++    "460411969d6f9a9d238beff68a53a1980364d398aaadaf83e79ae6ee758653e4";
++
+ struct Source {
+     left: [f32; QUANTUM],
+     right: [f32; QUANTUM],
+@@ -68,19 +76,29 @@ struct Owner {
+     plan: PreparedRenderPlan,
+     output: Box<[f32]>,
+     controls: Vec<TrackControlProducer>,
+-    digest: Sha256Sink,
+-    render_samples: Vec<u64>,
++    phase_digest: Sha256Sink,
+     attempted: u64,
+     accepted: u64,
+     rendered: u64,
+     render_errors: u64,
+     output_words: u64,
++    nonzero_samples: u64,
+     next_sample: u64,
+     block_index: u64,
+-    elapsed_ns: u64,
+     active: bool,
+ }
+
++#[derive(Debug, Eq, PartialEq)]
++struct PhaseResult {
++    attempted: u64,
++    accepted: u64,
++    rendered: u64,
++    render_errors: u64,
++    output_words: u64,
++    nonzero_samples: u64,
++    digest: String,
++}
++
+ impl Owner {
+     fn prepare() -> Self {
+         let model = parse_session_json(FIXTURE).expect("issue 600 fixture parses");
+@@ -100,7 +118,6 @@ impl Owner {
+             prepare_session_builtins_with_console(&session, &[], &controls, builtin_caps())
+                 .expect("issue 600 builtins prepare");
+         assert_eq!(builtins.track_control_count(), TRACKS);
+-
+         let registry = launch_native_effect_registry().expect("launch effect registry");
+         let effects = prepare_native_session_effects(&session, &registry, effect_caps())
+             .expect("issue 600 effects prepare");
+@@ -118,15 +135,11 @@ impl Owner {
+             dispatch,
+         })
+         .unwrap_or_else(|_| panic!("issue 600 graph compile"));
+-        let envelope = artifact.envelope();
+-        assert_eq!(
+-            artifact.prepared_builtin_bank_count(),
+-            3,
+-            "one full W8 bank per builtin stage"
+-        );
++        assert_eq!(artifact.prepared_builtin_bank_count(), 3);
+         assert!(artifact.graph().builtin_bank_info().all(|bank| {
+             bank.backend == dispatch && bank.width.lanes() == 8 && bank.members.len() == TRACKS
+         }));
++        let envelope = artifact.envelope();
+         let nodes = artifact
+             .external_binding_nodes()
+             .map(|node| GraphNodeBinding::new(node.clone(), source_binding(node)))
+@@ -143,18 +156,15 @@ impl Owner {
+             plan: bound.plan,
+             output: vec![0.0; QUANTUM * 2].into_boxed_slice(),
+             controls: bound.track_controls,
+-            digest: Sha256Sink::new(),
+-            render_samples: Vec::with_capacity(
+-                (WARMUP_BLOCKS as usize + 2 * MEASURED_BLOCKS as usize) * 2,
+-            ),
++            phase_digest: Sha256Sink::new(),
+             attempted: 0,
+             accepted: 0,
+             rendered: 0,
+             render_errors: 0,
+             output_words: 0,
++            nonzero_samples: 0,
+             next_sample: 0,
+             block_index: 0,
+-            elapsed_ns: 0,
+             active: false,
+         };
+         owner
+@@ -171,10 +181,7 @@ impl Owner {
+         };
+         for control in &mut self.controls {
+             if self.active {
+-                self.attempted = self
+-                    .attempted
+-                    .checked_add(1)
+-                    .expect("issue 600 attempted-record counter overflow");
++                self.attempted = self.attempted.checked_add(1).expect("attempted overflow");
+             }
+             let result = control.input.try_push(TrackInputRecord::TrimDb {
+                 lanes: BuiltinLaneSelector::Both,
+@@ -186,32 +193,12 @@ impl Owner {
+                 "issue 600 input queue accepted every record"
+             );
+             if self.active {
+-                self.accepted = self
+-                    .accepted
+-                    .checked_add(1)
+-                    .expect("issue 600 accepted-record counter overflow");
++                self.accepted = self.accepted.checked_add(1).expect("accepted overflow");
+             }
+         }
+     }
+
+-    fn render(&mut self) {
+-        let output = PlanarBufferMut::try_new(&mut self.output, 2, QUANTUM, QUANTUM)
+-            .expect("prepared output buffer");
+-        let result = timing::timed(|| {
+-            self.plan.render(
+-                RenderIo {
+-                    input: None,
+-                    output,
+-                },
+-                RenderTime {
+-                    absolute_sample: self.next_sample,
+-                },
+-            )
+-        });
+-        self.record_render(result.0, result.1);
+-    }
+-
+-    fn render_untimed(&mut self) {
++    fn render(&mut self) -> RenderReport {
+         let output = PlanarBufferMut::try_new(&mut self.output, 2, QUANTUM, QUANTUM)
+             .expect("prepared output buffer");
+         let result = self.plan.render(
+@@ -223,114 +210,97 @@ impl Owner {
+                 absolute_sample: self.next_sample,
+             },
+         );
+-        self.record_render(0, result);
+-    }
+-
+-    /// A bounded refill is a public queue witness: after a render, all sixteen slots accept new
+-    /// records. This proves the eight records published before that render were consumed at its
+-    /// block boundary without adding a production counter or observer.
+-    #[cfg(test)]
+-    fn prove_drained(&mut self) -> usize {
+-        let mut accepted: usize = 0;
+-        for control in &mut self.controls {
+-            for _ in 0..QUEUE_CAPACITY {
+-                let result = control.input.try_push(TrackInputRecord::TrimDb {
+-                    lanes: BuiltinLaneSelector::Both,
+-                    db: -6.0,
+-                    smoothing_samples: SMOOTHING_SAMPLES,
+-                });
+-                if result.is_ok() {
+-                    accepted = accepted
+-                        .checked_add(1)
+-                        .expect("issue 600 drain witness counter overflow");
+-                }
++        let report = match result {
++            Ok(report) => report,
++            Err(error) => {
++                self.render_errors = self.render_errors.checked_add(1).expect("error overflow");
++                panic!("issue 600 render failed: {error:?}");
+             }
+-        }
+-        accepted
+-    }
+-
+-    fn record_render(
+-        &mut self,
+-        elapsed_ns: u64,
+-        result: Result<engine::realtime::RenderReport, engine::realtime::RenderError>,
+-    ) {
+-        self.elapsed_ns = self
+-            .elapsed_ns
+-            .checked_add(elapsed_ns)
+-            .expect("issue 600 elapsed nanoseconds overflow");
+-        let sample = self.next_sample;
++        };
++        assert_eq!(report.plan_id, PLAN_ID);
++        assert_eq!(report.frames, QUANTUM as u32);
+         self.next_sample = self
+             .next_sample
+             .checked_add(QUANTUM as u64)
+-            .expect("issue 600 absolute sample overflow");
+-        self.render_samples.push(sample);
+-        self.block_index = self
+-            .block_index
+-            .checked_add(1)
+-            .expect("issue 600 block counter overflow");
++            .expect("sample overflow");
++        assert_eq!(report.next_absolute_sample, self.next_sample);
++        self.block_index = self.block_index.checked_add(1).expect("block overflow");
+         if self.active {
+-            self.rendered = self
+-                .rendered
+-                .checked_add(1)
+-                .expect("issue 600 render counter overflow");
++            self.rendered = self.rendered.checked_add(1).expect("render overflow");
+             self.output_words = self
+                 .output_words
+-                .checked_add(self.output.len() as u64)
+-                .expect("issue 600 output counter overflow");
+-        }
+-        if result.is_err() {
+-            self.render_errors = self
+-                .render_errors
+-                .checked_add(1)
+-                .expect("issue 600 error counter overflow");
++                .checked_add((QUANTUM * 2) as u64)
++                .expect("word overflow");
+         }
++        report
+     }
+
+     fn absorb(&mut self) {
+-        for word in self
++        for byte in self
+             .output
+             .iter()
+             .flat_map(|value| value.to_bits().to_le_bytes())
+         {
+-            self.digest.update([word]);
++            self.phase_digest.update([byte]);
+         }
+     }
+
+-    fn start_round(&mut self) {
++    fn warmup(&mut self) {
++        for _ in 0..PREPARATION_BLOCKS {
++            self.publish();
++            self.render();
++        }
++    }
++
++    fn begin_phase(&mut self) {
+         self.active = true;
+         self.attempted = 0;
+         self.accepted = 0;
+         self.rendered = 0;
+         self.render_errors = 0;
+         self.output_words = 0;
+-        self.elapsed_ns = 0;
+-        self.digest = Sha256Sink::new();
++        self.nonzero_samples = 0;
++        self.phase_digest = Sha256Sink::new();
+     }
+
+-    fn snapshot(&self) -> RoundResult {
+-        RoundResult {
+-            elapsed_ns: self.elapsed_ns,
++    fn qualification_phase(&mut self, phase: usize) -> PhaseResult {
++        self.begin_phase();
++        for _ in 0..QUALIFICATION_BLOCKS {
++            self.publish();
++            self.render();
++            self.absorb();
++            let block_nonzero = self.output.iter().filter(|value| **value != 0.0).count() as u64;
++            self.nonzero_samples = self
++                .nonzero_samples
++                .checked_add(block_nonzero)
++                .expect("nonzero sample overflow");
++        }
++        let result = PhaseResult {
+             attempted: self.attempted,
+             accepted: self.accepted,
+             rendered: self.rendered,
+             render_errors: self.render_errors,
+             output_words: self.output_words,
+-            output_sha256: self.digest.snapshot_hex(),
+-        }
++            nonzero_samples: self.nonzero_samples,
++            digest: self.phase_digest.snapshot_hex(),
++        };
++        assert_eq!(
++            result.attempted,
++            QUALIFICATION_BLOCKS * RECORDS_PER_BLOCK as u64
++        );
++        assert_eq!(result.accepted, result.attempted);
++        assert_eq!(result.rendered, QUALIFICATION_BLOCKS);
++        assert_eq!(result.render_errors, 0);
++        assert_eq!(
++            result.output_words,
++            QUALIFICATION_BLOCKS * (QUANTUM * 2) as u64
++        );
++        assert!(result.nonzero_samples > 0, "qualification PCM is all zero");
++        assert_eq!(result.digest, REVIEWED_PHASE_DIGESTS[phase]);
++        result
+     }
+ }
+
+-#[derive(Debug)]
+-struct RoundResult {
+-    elapsed_ns: u64,
+-    attempted: u64,
+-    accepted: u64,
+-    rendered: u64,
+-    render_errors: u64,
+-    output_words: u64,
+-    output_sha256: String,
+-}
+-
+ pub(crate) fn main() {
+     bench_alloc::assert_installed();
+     assert!(
+@@ -343,115 +313,29 @@ pub(crate) fn main() {
+         Backend::Simd8,
+         "issue 600 requires native W8 dispatch"
+     );
+-    eprintln!("MISO_ENGINE_BENCH_PHASE workload_started");
+     let mut owners = [Owner::prepare(), Owner::prepare()];
+-    for _ in 0..WARMUP_BLOCKS {
+-        for owner in &mut owners {
+-            owner.publish();
+-            owner.render_untimed();
+-            owner.absorb();
+-        }
++    owners[0].warmup();
++    owners[1].warmup();
++    let mut results = Vec::with_capacity(QUALIFICATION_PHASES);
++    for phase in 0..QUALIFICATION_PHASES {
++        let left = owners[0].qualification_phase(phase);
++        let right = owners[1].qualification_phase(phase);
++        assert_eq!(left, right, "independent owners diverged");
++        results.push(left);
+     }
+-    eprintln!("MISO_ENGINE_BENCH_PHASE warmup_complete");
+-    for round in 1..=2 {
+-        for owner in &mut owners {
+-            owner.start_round();
+-        }
+-        eprintln!("MISO_ENGINE_BENCH_PHASE timed_started");
+-        for _ in 0..MEASURED_BLOCKS {
+-            for owner in &mut owners {
+-                owner.publish();
+-                owner.render();
+-                owner.absorb();
+-            }
+-        }
+-        let result = owners[0].snapshot();
+-        let peer = owners[1].snapshot();
+-        assert_eq!(
+-            result.attempted,
+-            (MEASURED_BLOCKS as usize * RECORDS_PER_BLOCK) as u64
+-        );
+-        assert_eq!(result.accepted, result.attempted);
+-        assert_eq!(result.render_errors, 0);
+-        assert_eq!(result, peer, "independent owners diverged");
+-        emit_record(round, result, peer, backend);
+-        eprintln!("MISO_ENGINE_BENCH_PHASE round_{round}_complete");
+-    }
+-}
+-
+-impl PartialEq for RoundResult {
+-    fn eq(&self, other: &Self) -> bool {
+-        self.attempted == other.attempted
+-            && self.accepted == other.accepted
+-            && self.rendered == other.rendered
+-            && self.render_errors == other.render_errors
+-            && self.output_words == other.output_words
+-            && self.output_sha256 == other.output_sha256
+-    }
+-}
+-
+-impl Eq for RoundResult {}
+-
+-fn emit_record(round: u32, result: RoundResult, peer: RoundResult, backend: Backend) {
+-    let metadata = Metadata::gather();
+-    let value = |name: &str| bench_support::json::escape(&metadata.nonempty_or_unknown(name));
+-    let source_commit = value("MISO_ENGINE_BENCH_CANDIDATE_COMMIT");
+-    let source_tree = value("MISO_ENGINE_BENCH_CANDIDATE_TREE");
+-    let binary_sha256 = value("MISO_ENGINE_BENCH_BINARY_SHA256");
+-    let fixture_sha256 = value("MISO_ENGINE_BENCH_FIXTURE_SHA256");
+-    let argv = value("MISO_ENGINE_BENCH_ARGV");
+-    let cwd = value("MISO_ENGINE_BENCH_CWD");
+-    let rust_version = value("MISO_ENGINE_BENCH_RUST_VERSION");
+-    let compiler = value("MISO_ENGINE_BENCH_COMPILER");
+-    let target = value("MISO_ENGINE_BENCH_TARGET_TRIPLE");
+-    let build_flags = value("MISO_ENGINE_BENCH_BUILD_FLAGS");
+-    let cpu = value("MISO_ENGINE_BENCH_CPU_MODEL");
+-    let os = value("MISO_ENGINE_BENCH_OS");
+-    let metadata_missing = std::env::var("MISO_ENGINE_BENCH_METADATA_MISSING")
+-        .ok()
+-        .filter(|value| !value.is_empty())
+-        .unwrap_or_else(|| "[\"cpu\"]".to_string());
+-    let output_witness = sha256_hex(
+-        format!(
+-            "issue600-output-v1|{}|{}|{round}",
+-            result.output_sha256, peer.output_sha256
+-        )
+-        .as_bytes(),
+-    );
+-    let traffic_witness = sha256_hex(
+-        format!(
+-            "issue600-traffic-v1|{round}|{SAMPLE_RATE_HZ}|{QUANTUM}|{TRACKS}|{RECORDS_PER_BLOCK}|{SMOOTHING_SAMPLES}|{WARMUP_BLOCKS}|{MEASURED_BLOCKS}|{}|{}|{}|{}|{}",
++    for (phase, result) in results.iter().enumerate() {
++        println!(
++            "{{\"issue\":600,\"workload\":\"input_symmetry\",\"fixture\":\"{FIXTURE_ID}\",\"backend\":\"{backend:?}\",\"sample_rate_hz\":{SAMPLE_RATE_HZ},\"quantum_frames\":{QUANTUM},\"tracks\":{TRACKS},\"records_per_block\":{RECORDS_PER_BLOCK},\"smoothing_samples\":{SMOOTHING_SAMPLES},\"preparation_blocks_per_owner\":{PREPARATION_BLOCKS},\"qualification_phase\":{},\"qualification_blocks\":{QUALIFICATION_BLOCKS},\"attempted_records\":{},\"accepted_records\":{},\"rendered_blocks\":{},\"render_errors\":{},\"output_words\":{},\"nonzero_samples\":{},\"phase_digest\":\"{}\",\"connected_oracle_digest\":\"{CONNECTED_ORACLE_DIGEST}\"}}",
++            phase + 1,
+             result.attempted,
+             result.accepted,
+             result.rendered,
+             result.render_errors,
+-            result.output_words
+-        )
+-        .as_bytes(),
+-    );
+-    assert!(result.elapsed_ns > 0, "issue 600 timed render elapsed zero");
+-    let nanoseconds_per_block = result
+-        .elapsed_ns
+-        .checked_div(MEASURED_BLOCKS)
+-        .filter(|value| *value > 0)
+-        .expect("issue 600 elapsed shorter than one nanosecond per block");
+-    println!(
+-        "{{\"schema_version\":1,\"issue\":600,\"record\":\"input_symmetry\",\"round\":{round},\"sample_rate_hz\":{SAMPLE_RATE_HZ},\"quantum_frames\":{QUANTUM},\"lane_width\":8,\"track_count\":{TRACKS},\"records_per_block\":{RECORDS_PER_BLOCK},\"target_pair_db\":[-6.0,-12.0],\"smoothing_samples\":{SMOOTHING_SAMPLES},\"warmup_blocks\":{WARMUP_BLOCKS},\"measured_blocks\":{MEASURED_BLOCKS},\"attempted_records\":{attempted},\"accepted_records\":{accepted},\"rendered_blocks\":{rendered},\"render_errors\":{errors},\"output_words\":{words},\"output_sha256\":\"{digest}\",\"owner_digests\":[\"{digest}\",\"{peer_digest}\"],\"owner_attempted_records\":[{attempted},{peer_attempted}],\"owner_accepted_records\":[{accepted},{peer_accepted}],\"owner_rendered_blocks\":[{rendered},{peer_rendered}],\"output_witness_sha256\":\"{output_witness}\",\"traffic_witness_sha256\":\"{traffic_witness}\",\"elapsed_ns\":{elapsed},\"nanoseconds_per_block\":{ns},\"backend\":\"{backend:?}\",\"source_commit\":\"{source_commit}\",\"source_tree\":\"{source_tree}\",\"binary_sha256\":\"{binary_sha256}\",\"fixture_sha256\":\"{fixture_sha256}\",\"fixture_id\":\"fixtures/session/v1/parametric-eq-bank-console.json\",\"argv\":\"{argv}\",\"cwd\":\"{cwd}\",\"rust_version\":\"{rust_version}\",\"compiler\":\"{compiler}\",\"target_triple\":\"{target}\",\"build_flags\":\"{build_flags}\",\"cpu\":\"{cpu}\",\"os\":\"{os}\",\"metadata_missing\":{metadata_missing},\"descriptive_only\":true}}",
+-        attempted = result.attempted,
+-        accepted = result.accepted,
+-        rendered = result.rendered,
+-        errors = result.render_errors,
+-        words = result.output_words,
+-        digest = result.output_sha256,
+-        peer_digest = peer.output_sha256,
+-        peer_attempted = peer.attempted,
+-        peer_accepted = peer.accepted,
+-        peer_rendered = peer.rendered,
+-        output_witness = output_witness,
+-        traffic_witness = traffic_witness,
+-        elapsed = result.elapsed_ns,
+-        ns = nanoseconds_per_block,
+-    );
++            result.output_words,
++            result.nonzero_samples,
++            result.digest,
++        );
++    }
+ }
+
+ fn source_binding(node: &GraphNodeId) -> Box<dyn GraphRuntimeProcessor> {
+@@ -534,142 +418,156 @@ mod tests {
+     use super::*;
+     use engine::realtime::audit;
+
+-    #[test]
+-    fn prepared_owner_is_w8_and_eight_records_drain_at_boundary() {
+-        let mut owner = Owner::prepare();
+-        assert_eq!(owner.controls.len(), TRACKS);
+-        owner.start_round();
+-        owner.publish();
+-        assert_eq!(owner.attempted, RECORDS_PER_BLOCK as u64);
+-        assert_eq!(owner.accepted, RECORDS_PER_BLOCK as u64);
+-        owner.render_untimed();
+-        assert_eq!(owner.render_errors, 0);
+-        assert!(owner.output.iter().any(|value| *value != 0.0));
+-        assert_eq!(owner.next_sample, QUANTUM as u64);
+-        assert_eq!(owner.prove_drained(), TRACKS * QUEUE_CAPACITY);
+-        owner.render_untimed();
+-        assert_eq!(owner.render_errors, 0);
+-        assert_eq!(owner.prove_drained(), TRACKS * QUEUE_CAPACITY);
+-        owner.render_untimed();
+-        assert_eq!(owner.render_errors, 0);
++    fn source_value(track: usize, frame: usize) -> f32 {
++        ((frame + track * QUANTUM) as f32 * 0.013).sin() * 0.5
+     }
+
+-    #[test]
+-    fn two_owners_are_deterministic_and_no_record_control_differs() {
+-        let mut first = Owner::prepare();
+-        let mut second = Owner::prepare();
+-        for _ in 0..4 {
+-            first.publish();
+-            second.publish();
+-            first.render_untimed();
+-            second.render_untimed();
+-            first.absorb();
+-            second.absorb();
++    fn expected_block(current: &mut f32, target: f32) -> [f32; QUANTUM * 2] {
++        let step = (target - *current) / SMOOTHING_SAMPLES as f32;
++        let mut expected = [0.0; QUANTUM * 2];
++        for frame in 0..QUANTUM {
++            *current += step;
++            let source: f32 = (0..TRACKS).map(|track| source_value(track, frame)).sum();
++            expected[frame] = source * *current;
++            expected[QUANTUM + frame] = -source * 0.75 * *current;
+         }
+-        let first_digest = first.digest.snapshot_hex();
+-        let second_digest = second.digest.snapshot_hex();
+-        assert_eq!(first_digest, second_digest);
+-        assert_eq!(first.render_errors, 0);
+-        assert_eq!(second.render_errors, 0);
+-        assert_ne!(first.render_samples[0], first.render_samples[1]);
+-        assert_ne!(first.output[0].to_bits(), 0);
+-        let mut suppressed = Owner::prepare();
+-        suppressed.start_round();
+-        for _ in 0..4 {
+-            suppressed.attempted = suppressed
+-                .attempted
+-                .checked_add(RECORDS_PER_BLOCK as u64)
+-                .expect("test schedule counter");
+-            suppressed.render_untimed();
+-            suppressed.absorb();
++        expected
++    }
++
++    fn assert_connected_block(owner: &Owner, expected: &[f32; QUANTUM * 2], report: RenderReport) {
++        assert_eq!(report.plan_id, PLAN_ID);
++        assert_eq!(report.frames, QUANTUM as u32);
++        assert!(owner.output.iter().any(|value| *value != 0.0));
++        for (actual, expected) in owner.output.iter().zip(expected) {
++            assert!(
++                (actual - expected).abs() <= 1.0e-6,
++                "PCM mismatch actual={actual} expected={expected}"
++            );
+         }
+-        assert_eq!(suppressed.attempted, 4 * RECORDS_PER_BLOCK as u64);
+-        assert_eq!(suppressed.accepted, 0);
+-        assert_eq!(suppressed.render_errors, 0);
+-        assert_ne!(first_digest, suppressed.digest.snapshot_hex());
+     }
+
+     #[test]
+-    fn external_trim_oracle_proves_continuing_nonstationary_ramp() {
+-        // The input contract is a linear coefficient ramp: db is converted once to
+-        // 10^(db/20), then 128 samples consume half of the 256-sample window each block.
+-        let gain = |db: f64| 10.0_f64.powf(db / 20.0) as f32;
++    fn connected_runtime_oracle_covers_retargeted_both_channel_ramp() {
++        let mut ridden = Owner::prepare();
+         let mut current = 1.0_f32;
+-        let mut previous = current;
++        let mut actual_digest = Sha256Sink::new();
+         for block in 0..4 {
+-            let target = gain(if block % 2 == 0 { -6.0 } else { -12.0 });
+-            let step = (target - current) / SMOOTHING_SAMPLES as f32;
+-            current += step * QUANTUM as f32;
+-            assert!(current.is_finite());
+-            assert_ne!(current.to_bits(), previous.to_bits());
+-            assert!((current - target).abs() < (previous - target).abs());
+-            previous = current;
++            ridden.publish();
++            let report = ridden.render();
++            let target = 10.0_f32.powf(if block % 2 == 0 { -6.0 } else { -12.0 } / 20.0);
++            let expected = expected_block(&mut current, target);
++            assert_connected_block(&ridden, &expected, report);
++            for byte in ridden
++                .output
++                .iter()
++                .flat_map(|value| value.to_bits().to_le_bytes())
++            {
++                actual_digest.update([byte]);
++            }
++            assert_ne!(
++                current.to_bits(),
++                target.to_bits(),
++                "retarget must precede settle"
++            );
+         }
++        assert_eq!(actual_digest.snapshot_hex(), CONNECTED_ORACLE_DIGEST);
++
++        let mut no_record = Owner::prepare();
++        let mut differs = false;
++        let mut expected_current = 1.0_f32;
++        for block in 0..4 {
++            let target = 10.0_f32.powf(if block % 2 == 0 { -6.0 } else { -12.0 } / 20.0);
++            let expected = expected_block(&mut expected_current, target);
++            let report = no_record.render();
++            assert_eq!(
++                report.next_absolute_sample,
++                (block + 1) as u64 * QUANTUM as u64
++            );
++            differs |= no_record
++                .output
++                .iter()
++                .zip(expected)
++                .any(|(actual, expected)| (actual - expected).abs() > 1.0e-6);
++        }
++        assert!(
++            differs,
++            "no-record owner escaped connected PCM discriminator"
++        );
+     }
+
+     #[test]
+-    fn render_has_no_forbidden_operations_or_allocator_activity() {
+-        let mut owner = Owner::prepare();
+-        for _ in 0..2 {
+-            owner.publish();
+-            owner.render_untimed();
++    fn separate_capacity_sixteen_drain_witness_has_no_pending_records() {
++        let mut witness = Owner::prepare();
++        witness.publish();
++        witness.render();
++        for _ in 0..QUEUE_CAPACITY {
++            for control in &mut witness.controls {
++                assert!(
++                    control
++                        .input
++                        .try_push(TrackInputRecord::TrimDb {
++                            lanes: BuiltinLaneSelector::Both,
++                            db: -6.0,
++                            smoothing_samples: SMOOTHING_SAMPLES
++                        })
++                        .is_ok()
++                );
++            }
++        }
++        witness.render();
++        for _ in 0..QUEUE_CAPACITY {
++            for control in &mut witness.controls {
++                assert!(
++                    control
++                        .input
++                        .try_push(TrackInputRecord::TrimDb {
++                            lanes: BuiltinLaneSelector::Both,
++                            db: -12.0,
++                            smoothing_samples: SMOOTHING_SAMPLES
++                        })
++                        .is_ok()
++                );
++            }
+         }
++    }
++
++    #[test]
++    fn qualification_phase_constants_and_zero_render_allocations() {
++        let mut owner = Owner::prepare();
++        owner.warmup();
++        owner.begin_phase();
+         audit::warm_up();
+         audit::reset();
+-        let allocations = bench_alloc::current_thread_counters();
+-        owner.publish();
+-        owner.render_untimed();
+-        let delta = bench_alloc::current_thread_delta_since(allocations);
++        let counters = bench_alloc::current_thread_counters();
++        for _ in 0..4 {
++            owner.publish();
++            owner.render();
++            owner.absorb();
++        }
++        let delta = bench_alloc::current_thread_delta_since(counters);
+         assert_eq!(delta.allocations, 0);
+         assert_eq!(delta.deallocations, 0);
+         assert_eq!(delta.reallocations, 0);
+         assert_eq!(audit::snapshot().total(), 0);
++        let result = owner.qualification_phase(0);
++        assert_eq!(
++            result.attempted,
++            QUALIFICATION_BLOCKS * RECORDS_PER_BLOCK as u64
++        );
++        assert_eq!(result.accepted, result.attempted);
++        assert_eq!(result.rendered, QUALIFICATION_BLOCKS);
++        assert_eq!(result.render_errors, 0);
+     }
+
+     #[test]
+-    fn frozen_assertion_detects_missing_records() {
+-        fn frozen_assertion(owner: &Owner, expected: &str) {
+-            assert_eq!(
+-                owner.attempted, owner.accepted,
+-                "accepted traffic must equal schedule"
+-            );
+-            assert_eq!(
+-                owner.digest.snapshot_hex(),
+-                expected,
+-                "traffic/output digest"
+-            );
+-        }
+-
+-        let mut positive = Owner::prepare();
+-        positive.start_round();
+-        positive.publish();
+-        positive.render_untimed();
+-        positive.absorb();
+-        let positive_digest = positive.digest.snapshot_hex();
+-        frozen_assertion(&positive, &positive_digest);
+-
+-        let mut suppressed = Owner::prepare();
+-        suppressed.start_round();
+-        suppressed.attempted += RECORDS_PER_BLOCK as u64;
+-        suppressed.render_untimed();
+-        suppressed.absorb();
+-        assert_eq!(suppressed.attempted, 8);
+-        assert_eq!(suppressed.accepted, 0);
+-        let mutation = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+-            frozen_assertion(&suppressed, &positive_digest);
+-        }));
+-        assert!(
+-            mutation.is_err(),
+-            "suppressed input-record mutation escaped the frozen assertion"
+-        );
+-
+-        // The mutation is local to this test; the production publishing branch remains enabled.
+-        let mut restored = Owner::prepare();
+-        restored.start_round();
+-        restored.publish();
+-        restored.render_untimed();
+-        restored.absorb();
+-        assert_eq!(restored.accepted, 8);
+-        frozen_assertion(&restored, &positive_digest);
++    fn owners_are_w8_nonzero_and_phase_results_match() {
++        let mut first = Owner::prepare();
++        let mut second = Owner::prepare();
++        first.warmup();
++        second.warmup();
++        let left = first.qualification_phase(0);
++        let right = second.qualification_phase(0);
++        assert_eq!(left, right);
++        assert_ne!(left.digest, "0".repeat(64));
+     }
+ }

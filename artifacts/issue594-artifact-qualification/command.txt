@@ -1,0 +1,4 @@
+MISO_ENGINE_WEB_AUDIOWORKLET_REPIN=1 bash scripts/build-web-audioworklet.sh /tmp/issue594-artifact-probe.VydLJj/build
+bash scripts/build-web-audioworklet.sh /tmp/issue594-artifact-probe-full.ykS29r/build
+sha256sum /tmp/issue594-artifact-probe-full.ykS29r/build/* | sort
+find /tmp/issue594-artifact-probe-full.ykS29r/build -maxdepth 1 -type f -printf '%f\n' | sort

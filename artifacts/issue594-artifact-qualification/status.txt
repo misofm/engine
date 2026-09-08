@@ -1,0 +1,6 @@
+repin_probe=0
+ordinary_six_file_build=0
+six_file_inventory=0
+six_file_byte_identity=0
+pin_changed=0
+full_qualification_required=0

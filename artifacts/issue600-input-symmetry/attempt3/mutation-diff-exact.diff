@@ -1,0 +1,10 @@
+--- tools/bench/src/input_symmetry.rs (restored)
++++ tools/bench/src/input_symmetry.rs (temporary mutation)
+@@
+-            let result = control.input.try_push(TrackInputRecord::TrimDb {
+-                lanes: BuiltinLaneSelector::Both,
+-                db,
+-                smoothing_samples: SMOOTHING_SAMPLES,
+-            });
++            // TEMPORARY ATTEMPT-3 MUTATION: preserve reported admission while suppressing push.
++            let result = Ok::<(), ()>(());
