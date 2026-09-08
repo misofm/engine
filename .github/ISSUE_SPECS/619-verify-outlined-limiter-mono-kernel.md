@@ -122,3 +122,18 @@ from dual core 755 at 880/0. #559/#560/#619 and the two-slot/path holds are sync
 or XHIGH may perform the single bounded tooling implementation attempt. No candidate static run,
 qualification continuation, builder, pin/lineage edit, PR or merge is authorized before Astra LOW
 source PASS.
+
+## Tooling attempt 1 source review — PASS
+
+Luna HIGH changed only the two authorized checker/comment scripts at exact clean pushed head
+`fc77a5c6218b84b6ffa73b6ca335e15d1d4dc531`. Astra LOW returned **PASS** there against live main
+`77368243`. The checker requires exact-one entry and arithmetic kernel, zero counted wrapper
+arithmetic and a direct call, while retaining existing dominance, ceiling, slack and all other
+roster rules. Its seven new independent red controls and all prior controls pass; Python/shell
+syntax, diff hygiene, workspace and realtime policies also pass.
+
+The minor summary text still prints `entry=0/0` after an already reported wrapper-arithmetic
+failure, but the specific diagnostic and nonzero verdict are correct; no correction is required.
+The single tooling attempt is accepted. Astra LOW may now run exactly one repaired static invocation
+against the preserved #617 six-file output and, only after it passes, the previously unexecuted
+qualification stages. No builder, repository pin/lineage edit, PR or merge is authorized.
