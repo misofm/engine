@@ -120,7 +120,7 @@ reusing another worktree's dependency directory receives no credit. No builder,
 artifact/static/resource/hermetic/browser repeat, other install, product edit,
 PR, or merge is authorized before Astra LOW exact-head scope PASS.
 
-## Astra LOW attempt 2 scope review — PASS
+## Astra LOW prior attempt 2 scope review — PASS; authorization superseded
 
 Astra LOW passed exact clean pushed head
 `b8b872362f13decc2ce02b88dbd5258aa661c710`. Attempt 1 remains failed. Its
@@ -136,3 +136,12 @@ the preserved six-file output, then only on success run matrix check, formatting
 diff hygiene, workspace policy and effect-runtime policy once on this branch.
 Stop on failure. No install or artifact/static/resource/hermetic/browser repeat is
 authorized.
+
+No command ran under that review. A later Astra LOW review found that source and
+lock equality plus retained install records do not establish the present
+filesystem dependency state strongly enough for successor delivery. Its old-
+scratch/no-install execution authorization is therefore superseded. The sole
+controlling proposal is the corrected scope above: one locked
+`npm ci --ignore-scripts` and one SDK check in this successor worktree, followed
+by the five remaining checks under one refreshed lease. No execution is
+authorized until Astra LOW confirms this corrected head.
