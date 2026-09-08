@@ -60,8 +60,10 @@ second overlay and freeze every browser result row, version floor, gate and reso
 
 Run each existing qualification gate once against that exact candidate:
 
-1. shipped Wasm ABI/export/import/memory/realtime-callgraph/SIMD/static/metadata/vocabulary checks;
-2. expected resources/native witness and all red mutation checks;
+1. shipped Wasm ABI/export/import/memory/realtime-callgraph/SIMD/static/metadata/vocabulary checks
+   with `bash scripts/check-web-audioworklet.sh <candidate-directory>`;
+2. expected resources/native witness and all 26 red mutations with
+   `python3 -B scripts/check-browser-expected-resources.py --artifacts <candidate-directory>`;
 3. hermetic host/worklet policy and mutation checks with an isolated Cargo target;
 4. locked SDK package/generated-surface checks;
 5. locked browser dependencies installed with `npm ci --ignore-scripts`;
