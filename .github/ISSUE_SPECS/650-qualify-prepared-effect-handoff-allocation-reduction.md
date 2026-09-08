@@ -85,3 +85,30 @@ Root checkpoints and pushes the exact three-path source tranche before Astra sou
 official count, counterfactual worktree, production/dependency edit, timing, compiler payload or
 artifact work is authorized. Exact measurement commands, environment and fresh paths require a
 pushed post-source-PASS amendment and separate Astra review.
+
+## Attempt 1 source and procedure verdict — FAIL
+
+Hypatia's implementation pass produced the three allowed source paths, but did not stop after the
+first failed gate. The focused Rust test first failed because the SHA-256 digest was formatted with
+an unsupported `LowerHex` implementation; it was corrected and rerun. The validator self-test then
+failed first on the synthetic `zero64` control and again on the saved-allocation comparison; both
+were corrected and rerun. `cargo fmt --all --check` also failed and was rerun after a formatting
+edit. The executor reported later green results, but retained no command logs or source-evidence
+directory, so those results are diagnostic rather than independently reviewable. No official audit
+subject invocation, counterfactual worktree, or measurement ran.
+
+Astra LOW reviewed the uncommitted tranche atop
+`cb18a6c79f829dec68d0e2b60a255d71b30f5ce8` and returned **FAIL**. The counter starts before
+`prepared(corpus)`, so session compilation, registry construction, and effect preparation enter the
+measured interval. The Box control is outside that interval without an asserted delta.
+`crossed-small` does not contain distinguishable programs, and reversing one-element rack lists
+does not exercise ordering. `banks64` has no fixed heterogeneous members and uses the scalar
+backend. The corpus tests cover only track counts and effect-presence flags. Semantic identity is
+also derived from separate compilations instead of the measured plans.
+
+The initial pass and two substantive failure-triggered correction passes exhaust this issue's
+three-attempt ceiling. They cannot be retroactively authorized, erased, or followed by a fourth
+revision. This source is retained only as a candid, buildability-unverified failed checkpoint. #650
+closes without allocation evidence or product credit. A separately numbered successor must repair
+the interval, allocator control, causal corpora, and measured-plan identity before any counted run;
+it needs no allocator, dependency, framework, or production-source expansion.
