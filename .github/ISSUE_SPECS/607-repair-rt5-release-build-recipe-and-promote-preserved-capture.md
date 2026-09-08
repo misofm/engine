@@ -75,3 +75,13 @@ browser/SDK, manifest/lockfile, build input, generated consumer, artifact, pin, 
 `39ebe7cd3f71f34ab11260f27fa1eaad281dd61642c50d9ed6210e703d95dd55` with its existing
 qualification attribution. No artifact build or pin change ran; #608's later artifact gate is
 separate.
+
+## Pull-request qualification verdict
+
+PR #609 required qualification run `34195043020` failed the environment/marker vocabulary gate at
+exact reviewed head `20a9265cd705fe33d76657a37ce44c43fc1e7997`. The gate listed 20 identifiers used
+by the inherited capture scripts but absent from `docs/ENGINE_ENV_VOCABULARY.md`. Astra LOW
+independently confirmed the source/table mismatch and returned **PASS to stop / FAIL to correct within
+#607**. The missing central vocabulary rows are outside this issue's exact ownership, and its sole
+implementation pass has no correction allowance. PR #609 is closed without merge. The accepted
+capture remains preserved and must not be rerun; a vocabulary-only successor inherits it unchanged.
