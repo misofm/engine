@@ -106,3 +106,40 @@ or compiler payloads.
 Stage 2 is not repository promotion. Astra LOW candidate PASS is required before any branch pin,
 `results.json`, or matrix edit. Promotion, post-pin rebuild, PR creation and merge remain separately
 unauthorized.
+
+## Stage 2 execution attempt 1 — procedural FAIL
+
+The first scratch-worktree setup command exited 128 at `2026-09-08T18:08:06Z`. Its stderr records
+the invalid reference `70899de287c23b70c17c17b3e41a5b2921801ae8052`, while
+`01-worktree-record.txt` inaccurately records the intended reference
+`70899de287c23b70c17b3e41a5b2921801ae8052`. The raw files remain unchanged in
+`/tmp/issue644-qualification-evidence`. A corrected worktree command using the intended reference
+then exited 0 at `2026-09-08T18:08:26Z`. Continuing after the first failure violated the stage's
+stop-on-first-failure rule, so attempt 1 cannot receive qualification credit.
+
+The preserved records nevertheless establish that the corrected detached worktree is at exact
+source `70899de287c23b70c17b3e41a5b2921801ae8052` and that these later commands each ran once and
+exited 0: the ordinary builder, matrix generation, static AudioWorklet gate, expected-resource/native
+witness gate with 26 mutations, hermetic AudioWorklet gate, locked SDK install, and SDK package
+check. The builder produced exactly six canonical files. Their Wasm digest is the expected candidate
+`580e3cb4cd11e996598103f27b02d94559f6ef7ad57ef22732d18c0b4f98be10`; the other five files are
+byte-identical to the #627 authority. The scratch tree contains exactly the three expected lineage
+overlays: artifact pin, the two `results.json` identity fields, and the generated matrix lineage.
+These observations preserve useful evidence but do not convert attempt 1 to PASS.
+
+The following four commands demonstrably did not run:
+
+```text
+npm --prefix hosts/host-web/qualification ci --ignore-scripts
+npm --prefix hosts/host-web/qualification run qualify -- --artifacts /tmp/issue644-qualified-output --browser all --check-matrix --self-test-mutations
+node hosts/host-web/qualification/generate-matrix.mjs --check
+git diff --check
+```
+
+Attempt 2 is a bounded evidence-disposition and continuation review. Astra LOW must inspect the
+preserved scratch tree, candidate output and raw records, retain attempt 1 as FAIL, and decide whether
+the successful completed stages remain usable. Only if Astra passes that disposition may Hypatia run
+the four never-run commands above, once each and in order, appending new records without deleting,
+rewriting or recreating any existing path. No completed builder or gate may be repeated. A failure
+stops the continuation. Repository promotion remains outside this authorization and requires a
+separate Astra review after candidate qualification.
