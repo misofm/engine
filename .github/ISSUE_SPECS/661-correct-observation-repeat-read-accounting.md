@@ -180,3 +180,13 @@ and manifest defect remain preserved. Proceed to exact-head/current-main PR
 readiness, required qualification, guarded merge review, and successful post-main
 qualification. No artifact qualification is indicated for this test-only change;
 retain temporary evidence through delivery cleanup review.
+
+## PR readiness
+
+The first readiness review returned documentation-only FAIL for trailing spaces in
+the two spec metadata lines. Checkpoint `6aa0f382c8a90a7c9c109e1e54f3f4860f3d5331`
+removes only those spaces and passes branch-wide `git diff --check` against exact
+unchanged main `561c4345614c295d99dd6315f668a060ca8f3531`. Astra LOW then
+returned **PR-READINESS PASS** at those heads with prior SOURCE PASS intact.
+PR #662 is open for required exact-head qualification; merge remains gated by a
+fresh guarded head/current-main review and successful post-main qualification.
