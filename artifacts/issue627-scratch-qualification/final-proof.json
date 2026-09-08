@@ -1,0 +1,29 @@
+{
+  "source": "dc14ca856e10cb5ad7f6fdacb0ea9322342a9251",
+  "candidate": "63ef81c105d50aed41164aa3c6c6f8853a314b99d642e209e7cc3aefe3bdbca1",
+  "first_overlay_files": [
+    "hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256"
+  ],
+  "final_overlay_files": [
+    "hosts/host-web/BROWSER_DEPLOYMENT_MATRIX.md",
+    "hosts/host-web/qualification/results.json",
+    "hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256"
+  ],
+  "six_files": [
+    "miso-engine-v1-abi-layout.json",
+    "miso-engine-v1-audio-worklet-host.d.ts",
+    "miso-engine-v1-audio-worklet-host.js",
+    "miso-engine-v1-audio-worklet.js",
+    "miso-engine-v1-audio-worklet.simd128.wasm",
+    "miso-engine-v1-parameter-metadata.json"
+  ],
+  "non_wasm_identical": true,
+  "matrix_rows": [
+    "| chromium | 151.0.7922.34 | simd128 supported | pass | pass | pass | pass | pass | pass |",
+    "| firefox | 153.0 | simd128 supported | pass | pass | pass | pass | pass | pass |",
+    "| webkit | 26.5 | simd128 supported | pass | pass | pass | pass | pass | pass |"
+  ],
+  "results_non_lineage_equal": true,
+  "matrix_frozen_non_lineage_equal": true,
+  "scratch_status_clean_except_authorized": true
+}

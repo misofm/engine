@@ -149,3 +149,25 @@ was published. Exactly one Luna HIGH/XHIGH detached scratch qualification is now
 authorized to reproduce and independently hash the candidate bytes, prove all
 five non-Wasm outputs, and run the brief's remaining gates. Repository promotion
 remains unauthorized pending Astra LOW candidate PASS.
+
+## Scratch candidate attempt 1 — execution complete; procedural review required
+
+The first detached scratch sequence ran from frozen `dc14ca85`. Its builder
+emitted exactly six files; independent hashing confirms candidate Wasm
+`63ef81c105d50aed41164aa3c6c6f8853a314b99d642e209e7cc3aefe3bdbca1` and
+byte-identical #623 hashes for all five non-Wasm outputs. Matrix generation, the
+static gate, separate expected-resource/native-witness mutations, hermetic gate,
+locked SDK and browser installs, SDK checks, one Chromium/Firefox/WebKit
+qualification, and final matrix check each exited zero. The scratch diff is
+exactly the pin, two lineage fields, and generated matrix lineage; rows, versions,
+gates, and resources remain frozen.
+
+A concurrency race launched a later builder-only invocation in a second detached
+checkout while the first sequence was already running. It emitted the same six
+hashes and was stopped before any downstream matrix, static, resource, hermetic,
+SDK, install, or browser command. This was not a retry made after observing a
+result, but it exceeds the brief's exactly-one scratch-builder rule. Both records
+are preserved together and distinguished in the evidence README; no action was
+hidden or rerun. Candidate PASS is not claimed. Astra LOW must rule on both the
+technical evidence and this procedural breach. Repository promotion and every
+further workload remain unauthorized.
