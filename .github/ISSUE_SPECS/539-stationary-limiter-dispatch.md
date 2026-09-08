@@ -270,3 +270,23 @@ Byte identity permits retained attribution. Drift requires a separately recorded
 and the existing static/resource/hermetic/three-browser gates before any pin or consumer update.
 Lane A may not independently repin. Astra LOW exact clean resume-scope PASS is required before the
 integration tranche begins, followed by exact integrated-head/current-base PASS before PR delivery.
+
+## Current-main integration checkpoint
+
+Astra LOW returned resume-scope PASS at exact clean pushed head `979f79ccaa17c70e97df626724d02cf4289ea702`
+against main `9e113be98cf31c1eaf4297b0a031518244b71c33`, with the cleared barrier and preserved
+attempt accounting verified. Luna XHIGH merged that main with no conflicts and without changing the
+three accepted limiter production/test files. Root audited and pushed merge checkpoint
+`3c8a6440e49ce16ceee121d00272172fbba5c5c2`; its merge-base is current main.
+
+The full limiter suite passed 42 tests with one descriptive benchmark ignored. Focused mono debug
+and release each passed two tests; the release private selector passed one; release allocation and
+determinism each passed two. Strict affected Clippy, formatting, realtime/lane/workspace/environment
+policies, native ABI, Wasm realtime atomics, supported host-web scalar/SIMD builds and inspection,
+and the 139-case/349-comparison deterministic corpus all pass. Bounded records are under
+`artifacts/issue539-integration/`.
+
+The accepted file identities remain `677a5596…73b55` for `lib.rs`, `7825d307…0ea920` for
+`allocation.rs`, and `1f42a58d…b2dd6d` for `mono_collapse.rs`. No benchmark, timing/capture,
+AudioWorklet builder, browser qualification, pin or consumer change ran. Astra LOW integrated-head
+review and lane-B artifact qualification remain pending before PR delivery.
