@@ -130,3 +130,35 @@ CARGO_TARGET_DIR=/tmp/issue636-attempt2-release-unwind CARGO_PROFILE_RELEASE_PAN
 Preserve status and complete streams and stop on failure. No retry, alternate
 recipe, shipped-artifact credit, product/manifest/dependency/lock change,
 allocation measurement or artifact work is authorized.
+
+## Attempt 2 source PASS; evidence/procedure FAIL
+
+The test-only correction is clean and pushed at
+`bbc96fb758bd7b7784496da44b995a4e3e64d1a9`. It names the commanded target as
+`cross1`/dynamic/slot 1/`chain0`, names the decoy as
+`cross0`/simd1/slot 0/`chain1`, swaps those two consumers, and requires bitwise
+PCM divergence from the correctly attached baseline under the same deterministic
+input and commands. Luna's separately recorded exact focused command returned 0
+with 1/1 selected test passing. Astra LOW passed the source and oracle.
+
+A concurrent sequence then populated the predeclared release target before
+Astra's execution preflight. Its retained terminal summaries observed 8/8 release
+`track_delay` tests, 65/65 debug library tests, 65/65 release library tests, and
+Clippy reaching `Finished`; the release log is 4,537 bytes with SHA-256
+`f27b62e8532edff0153ab9b69ff54e4d84c518817067c7c509ccb748bbb5c993`.
+Those observations receive no command-pass credit because exact argv/environment,
+shell statuses, fresh-target preflight and execution-head records are missing.
+They must not be reconstructed from the terminal summaries.
+
+The next retained gate, rustfmt check, reported two formatting differences and
+ended attempt 2 as **FAIL**. No later gate receives credit. A concurrent executor
+then applied exactly those two formatting changes without altering semantics;
+root preserved that coherent change at clean pushed
+`74108ec994a7647dedd6149df5de8550134228a5`. The populated release target and
+temporary logs remain untouched. No compiler stream or build artifact is tracked.
+
+Attempt 3 requires a fresh Astra LOW scope verdict. It may address only the
+already-pushed formatting correction, the disposition of contemporaneous
+provenance if any exists, and demonstrably unexecuted checks. Completed workloads
+must not be repeated, another release target must not be chosen, and terminal
+summaries alone must not be promoted into exact command/status claims.
