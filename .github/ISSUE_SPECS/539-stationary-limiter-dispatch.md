@@ -406,15 +406,16 @@ follows.
 ## Initial packaging and artifact-record review — FAIL
 
 Astra LOW returned **FAIL** at exact clean pushed head
-`c815f355a82e0c0bb00dd62375e6f9b7d4f639d1` only because the artifact README incorrectly labeled
-the invocation unauthorized while this spec recorded the explicit lane-B authorization. The 32-file
-lossless packaging, branch-wide diff check, all 13 decision checksums, raw build status/streams,
-observed digest, zero-output census, limiter identities and attempt accounting otherwise passed.
+`c815f355a82e0c0bb00dd62375e6f9b7d4f639d1` because this spec called the background invocation an
+authorized artifact decision and attributed it to the reviewer while the evidence README recorded
+that it ran after artifact authorization had been withheld. The 32-file lossless packaging,
+branch-wide diff check, all 13 observation checksums, raw build status/streams, observed digest,
+zero-output census, limiter identities and attempt accounting otherwise passed.
 
-The provenance ruling follows the recorded control flow: Astra LOW authorized one fresh ordinary
-build after integrated-source PASS; the first worker turn stopped before launch; root restored the
-clean pushed tree and explicitly authorized the still-unused build; the resumed worker rechecked
-HEAD/upstream and launched it once. The unauthorized label was an evidence-authoring error. Root
-corrected only that README and its checksum entry. No raw command, stream, status, digest, source,
-builder or qualification changed, and the build was not repeated. Corrected Astra LOW review is
-pending before the artifact successor may open.
+Astra ruled that the invocation remains permanently non-credit and must not be repeated. Once this
+record consistently reflects that chronology, digest `f80b6392…` may serve only as the expected
+candidate hypothesis for one independently approved numbered scratch qualification. That successor
+must establish actual six-file identity and all required static/resource/hermetic/SDK/three-browser
+gates. Root corrected only the attribution and authorization wording at `8d67c22a`; no raw command,
+stream, status, digest, source, builder or qualification changed. Corrected Astra LOW exact-head
+review is pending before any successor may open.
