@@ -116,6 +116,45 @@ create_valid_fixture "$valid_root"
 bash "$policy_script" "$valid_root" >/dev/null
 (cd "$scratch_root" && bash "$policy_script" "valid root" >/dev/null)
 
+expect_loader_failure() {
+    local name="$1" edit="$2"
+    local root="$scratch_root/loader-$name" policy="$scratch_root/loader-$name.toml" output
+    create_valid_fixture "$root"
+    cp "$script_directory/policies/lane-source.toml" "$policy"
+    eval "$edit"
+    if output="$(LANE_POLICY_FILE="$policy" bash "$policy_script" "$root" 2>&1)"; then
+        printf 'lane loader mutation unexpectedly passed: %s\n' "$name" >&2
+        exit 1
+    fi
+    printf '%s\n' "$output" | rg -qF 'lane policy failure:' || {
+        printf 'lane loader mutation lacked policy diagnostic: %s\n%s\n' "$name" "$output" >&2
+        exit 1
+    }
+}
+
+expect_loader_failure missing-policy 'rm -f "$policy"'
+expect_loader_failure malformed-policy 'printf "%s\n" "version = [" >"$policy"'
+expect_loader_failure unknown-field 'sed -i "2a unknown = true" "$policy"'
+expect_loader_failure missing-required-field 'sed -i "/scan_description =/d" "$policy"'
+expect_loader_failure empty-rule-population 'sed -i "/^\[\[rules\]\]/,\$d" "$policy"'
+expect_loader_failure duplicate-or-wrong-order \
+    'sed -i "0,/id = '\''fusion'\''/s//id = '\''relaxed'\''/" "$policy"'
+expect_loader_failure empty-root \
+    'sed -i "0,/roots =/s//roots = []/" "$policy"'
+expect_loader_failure invalid-regex \
+    'sed -i "0,/exclude_regex =/s//exclude_regex = '\''['\''/" "$policy"'
+
+invalid_loader="$scratch_root/invalid-loader"
+printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\\n" invalid-loader-output' >"$invalid_loader"
+chmod +x "$invalid_loader"
+invalid_root="$scratch_root/invalid-loader-root"
+create_valid_fixture "$invalid_root"
+if output="$(LANE_RULE_LOADER="$invalid_loader" bash "$policy_script" "$invalid_root" 2>&1)"; then
+    printf 'lane loader mutation unexpectedly passed: invalid-output\n' >&2
+    exit 1
+fi
+printf '%s\n' "$output" | rg -qF 'lane policy failure:'
+
 four_line_root="$scratch_root/marker-four-lines"
 create_valid_fixture "$four_line_root"
 sed -i '/LANE-OP-OK(mul_add)/a\        // one\n        // two\n        // three' "$four_line_root/crates/lane/src/scalar.rs"
@@ -233,7 +272,10 @@ done
 prove_lane_mutant_rejected() {
   local name="$1" edit="$2" tool="$3" mode="$4"
   local mutant_dir="$scratch_root/mutant-$name" output status
-  mkdir -p "$mutant_dir/lib"; cp "$policy_script" "$mutant_dir/check.sh"
+  mkdir -p "$mutant_dir/lib" "$mutant_dir/policies"
+  cp "$policy_script" "$mutant_dir/check.sh"
+  cp "$script_directory/lib/gate-rules.py" "$mutant_dir/lib/gate-rules.py"
+  cp "$script_directory/policies/lane-source.toml" "$mutant_dir/policies/lane-source.toml"
   ln -s "$script_directory/lib/gate.sh" "$mutant_dir/lib/gate.sh"
   sed -i "$edit" "$mutant_dir/check.sh"
   set +e

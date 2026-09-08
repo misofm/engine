@@ -19,69 +19,67 @@ fail() {
     exit 1
 }
 
-lane_source='^crates/lane/src/'
-lane_tests='^crates/lane/tests/'
-# `crates/dsp-reference` is the workspace's oracle/twin crate: it is a dev dependency
-# only, never links into an engine, host or artifact, and its whole job is to reproduce a frozen
-# operation order -- including its single roundings -- independently of the lane crate. It is
-# exempt here for the same structural reason `clippy.toml`'s `disallowed-methods` (formerly `scripts/check-math-policy.sh`) exempts it: matching
-# the platform is the point, not a leak of it. The exemption is the crate, not a wildcard: a
-# render path cannot reach it, because nothing in `crates/` or `hosts/` depends on it.
-oracle_crate='^crates/dsp-reference/'
-lane_softfma='^crates/lane/src/softfma\.rs:'
-# Issue #146: the canonical floating-point environment. `core::arch::asm!` is the only way to reach
-# AArch64's FPCR -- there is no stable intrinsic for it -- so this second lane file is named here
-# for the same reason `softfma.rs` is, and for nothing else.
-lane_fpenv='^crates/lane/src/fpenv\.rs:'
-# #84 phase A deleted `crates/engine/src/arch/` and its runtime detection, so the two
-# temporary exemptions that stood here are gone: there is no legacy kernel file and no second
-# backend enum left to exempt.
-#
-# Issue #163 phase 2 made the numeric contract unfused everywhere, which leaves exactly two places
-# that must still be able to *compute* a fused multiply-add in order to prove the contract is not
-# one: the audit that justified the change (its bounds are measured against the arm it replaced)
-# and gate G5's native leg (its `lane_fma` case would pass vacuously without a fused reference to
-# contrast against). Both are evidence code on no render path.
-#
-# This is not a second, looser roster: `scripts/check-unfused-seal.sh` registers the same two files
-# with an exact per-file call count, checks the registry in both directions, and requires an
-# `UNFUSED-SEAL-EXEMPT` marker within six lines of every call. Naming them here keeps this policy's
-# question ("does fused arithmetic live outside the lane crate?") answerable while that seal owns
-# the harder question ("how many fused calls exist at all, and are they the ones we admitted?").
-fused_evidence='^tools/audit/src/unfused_fma\.rs:|^tools/wasm-gates/tests/g5_native_corpus\.rs:'
-
-fusion_raw="$(gate_scan_collect 'fusion source scan' 'mul_add|_mm256_fmadd|_mm256_fmsub|_mm256_fnmadd|_mm_fmadd|vfmaq|vfmsq|wide::' '*.rs' crates hosts tools sidecars)" || exit $?
-fusion_matches="$(gate_filter_exclude 'fusion source exclusions' "$lane_source|$lane_tests|$oracle_crate|$fused_evidence" "$fusion_raw")" || exit $?
-[[ -z "$fusion_matches" ]] || {
-    printf '%s\n' "$fusion_matches" >&2
-    fail "fused multiply-add and the SIMD vocabulary belong to crates/lane (D3, D4)"
+policy_file="${LANE_POLICY_FILE:-$script_directory/policies/lane-source.toml}"
+rule_loader="${LANE_RULE_LOADER:-$script_directory/lib/gate-rules.py}"
+if rule_output="$(python3 "$rule_loader" "$policy_file" 2>&1)"; then
+    loader_status=0
+else
+    loader_status=$?
+fi
+[[ $loader_status == 0 ]] || {
+    printf '%s\n' "$rule_output" >&2
+    fail "lane source rule loader failed"
 }
 
-# Relaxed SIMD is forbidden everywhere, the lane crate included: correctness must never depend on
-# an instruction whose rounding the runtime is free to choose (D3). Only instruction and intrinsic
-# names are scanned -- `crates/effect-package` carries `"relaxed-simd"` as a *capability
-# string* describing what a third-party Wasm package declares, which is data, not engine code.
-relaxed_matches="$(gate_scan_collect 'relaxed SIMD source scan' 'f32x4_relaxed|f64x2_relaxed|relaxed_madd|relaxed_nmadd|relaxed_dot|i8x16_relaxed' '*.rs' crates hosts tools sidecars)" || exit $?
-[[ -z "$relaxed_matches" ]] || {
-    printf '%s\n' "$relaxed_matches" >&2
-    fail "relaxed SIMD is forbidden on every target (D3)"
+decode_rule_field() {
+    local encoded="$1" decoded
+    if decoded="$(printf '%s' "$encoded" | base64 --decode 2>&1)"; then
+        printf '%s' "$decoded"
+    else
+        fail "lane source rule loader output is invalid"
+    fi
 }
 
-architecture_raw="$(gate_scan_collect 'architecture source scan' '(core|std)::arch::' '*.rs' crates hosts tools sidecars)" || exit $?
-architecture_matches="$(gate_filter_exclude 'architecture source exclusions' "$lane_softfma|$lane_fpenv" "$architecture_raw")" || exit $?
-[[ -z "$architecture_matches" ]] || {
-    printf '%s\n' "$architecture_matches" >&2
-    fail "raw architecture intrinsics belong to crates/lane/src/{softfma,fpenv}.rs"
-}
-
-# Runtime SIMD dispatch is gone (D4, revision 4): the ISA is pinned at compile time and attested
-# once at boot. `Backend::current()` is a constant, so a new detection site is a regression.
-detection_raw="$(gate_scan_collect 'detection source scan' 'is_x86_feature_detected|is_aarch64_feature_detected' '*.rs' crates hosts tools sidecars)" || exit $?
-detection_matches="$(gate_filter_exclude 'detection source exclusions' '^crates/lane/src/backend\.rs:|^crates/lane/src/lib\.rs:' "$detection_raw")" || exit $?
-[[ -z "$detection_matches" ]] || {
-    printf '%s\n' "$detection_matches" >&2
-    fail "runtime SIMD detection is forbidden outside the enumerated legacy sites (D4)"
-}
+rule_index=0
+while IFS=$'\t' read -r kind id_encoded scan_encoded pattern_encoded glob_encoded \
+    root1_encoded root2_encoded root3_encoded root4_encoded exclude_description_encoded \
+    exclude_regex_encoded failure_encoded extra; do
+    [[ -n "$kind" && -z "$extra" ]] || fail "lane source rule loader output is invalid"
+    [[ "$kind" == RULE ]] || fail "lane source rule loader output is invalid"
+    rule_index=$((rule_index + 1))
+    id="$(decode_rule_field "$id_encoded")"
+    scan_description="$(decode_rule_field "$scan_encoded")"
+    pattern="$(decode_rule_field "$pattern_encoded")"
+    glob="$(decode_rule_field "$glob_encoded")"
+    roots=(
+        "$(decode_rule_field "$root1_encoded")"
+        "$(decode_rule_field "$root2_encoded")"
+        "$(decode_rule_field "$root3_encoded")"
+        "$(decode_rule_field "$root4_encoded")"
+    )
+    exclude_description="$(decode_rule_field "$exclude_description_encoded")"
+    exclude_regex="$(decode_rule_field "$exclude_regex_encoded")"
+    failure_diagnostic="$(decode_rule_field "$failure_encoded")"
+    [[ -n "$id" && -n "$scan_description" && -n "$pattern" && -n "$glob" ]] ||
+        fail "lane source rule loader output is invalid"
+    [[ -n "${roots[0]}" && -n "${roots[1]}" && -n "${roots[2]}" && -n "${roots[3]}" ]] ||
+        fail "lane source rule loader output is invalid"
+    case "$rule_index:$id" in
+        1:fusion|2:relaxed|3:architecture|4:detection) ;;
+        *) fail "lane source rule loader output is invalid" ;;
+    esac
+    raw_matches="$(gate_scan_collect "$scan_description" "$pattern" "$glob" "${roots[@]}")" || exit $?
+    if [[ -n "$exclude_regex" ]]; then
+        matches="$(gate_filter_exclude "$exclude_description" "$exclude_regex" "$raw_matches")" || exit $?
+    else
+        matches="$raw_matches"
+    fi
+    [[ -z "$matches" ]] || {
+        printf '%s\n' "$matches" >&2
+        fail "$failure_diagnostic"
+    }
+done <<<"$rule_output"
+[[ $rule_index == 4 ]] || fail "lane source rule loader output is invalid"
 
 # Inside the lane crate, a `wide` or `std` float method whose meaning differs per target may only
 # be called with an explicit `LANE-OP-OK` marker on it or in the three lines above it. `max`,
