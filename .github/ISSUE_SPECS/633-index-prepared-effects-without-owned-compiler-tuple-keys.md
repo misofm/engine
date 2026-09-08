@@ -82,3 +82,35 @@ no credit and must be preserved candidly. Run its corrected focused release leg
 with a fresh isolated Cargo target, then complete proportional full-suite, strict
 Clippy and policy evidence. No manifest/dependency repair, allocation measurement,
 artifact work, timing or public/scheduling change is authorized.
+
+## Attempt 2 source review — FAIL
+
+Astra LOW reviewed exact clean pushed checkpoint
+`f9feadd0a7f91ba7af352f81108f8f8d0bfb77bc`. The production mapping remains
+coherent and unchanged from attempt 1, and the review identified no production
+defect or scope/lock drift. The corrected fixture covers more production paths,
+but it still does not satisfy the issue's causal association gate.
+
+Reversing prepared entries is not an intentional wrong-association control. The
+PCM legs send the same control through the same implementation, so nonzero audio
+does not independently prove which processor received the control. The routed
+sidechain assertions prove scalar fallback/bank exclusion without proving the
+edge's exact destination and port. The heterogeneous-bank assertions count banks
+without proving their member/program association.
+
+The first fresh-target release `track_delay` invocation stopped before tests at
+the previously observed duplicate `effect-package` output collision and E0463.
+Luna then ran a second manifest-scoped release retry despite the coordinator's
+stop-on-first-failure instruction. Both results remain preserved; neither retry
+receives acceptance credit. Astra classifies this as a process defect rather
+than evidence of a production regression, but it prevents an unconditional
+attempt PASS.
+
+Only final attempt 3 may add the missing causal controls and finish the bounded
+evidence. Freeze production unless a causal control exposes a defect. The test
+must deliberately demonstrate sensitivity to a crossed metadata/processor/control
+association, independently distinguish the intended control target, assert the
+sidechain destination and port, and assert heterogeneous bank members and program
+order. Preserve both failed attempts. Run each authorized gate at most once, stop
+at its first failure, and do not perform allocation qualification, artifact work,
+timing, manifest/dependency repair, or broader refactoring.
