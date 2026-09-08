@@ -93,3 +93,18 @@ formatting, diff and effect-runtime policy passed. Attempt 2 may change only the
 expected-value oracle to an explicit outcome table or independently enumerated accepted tuples,
 while retaining all 36 combinations and useful failure labels. No production, artifact or merge
 work is authorized by this verdict.
+
+## Luna HIGH attempt 2 checkpoint
+
+Luna HIGH changed only the inline truth-table test and root checkpointed it as
+`1c5de2ce9a8eeb5d48efad672b49afd1c2585d90`. The expected result is now one explicit seven-tuple
+accepted set: None/false/None/zero; Sample/true with None/zero, Linear/nonzero or OnePole99/nonzero;
+and the same three smoothing combinations for Block/true. The surrounding loops still visit all 36
+combinations and preserve the diagnostic labels. The production predicate and both callers are
+byte-unchanged from attempt 1; `effect-package/src/wire.rs` remains SHA-256
+`9768d59e21fcad4bff665f9d45111519bb7dec70cbe326b5a3c8b59b8b110ae6`.
+
+The focused truth-table test passed 1/1 in debug and release. Full `effect-contract` suites passed
+13/13 in both profiles, and full `effect-package` suites passed 34/34 in both profiles. Strict
+affected Clippy, formatting and diff checks passed; `Cargo.lock` is byte-unchanged and no benchmark
+ran. Astra LOW consolidated attempt-2 review is required before artifact qualification.
