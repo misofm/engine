@@ -35,18 +35,20 @@ Exact implementation ownership is limited to:
 - this issue's spec and bounded evidence.
 
 Represent the collapsed limiter as an entry pattern plus a distinct arithmetic-kernel pattern. The
-gate must require exactly one entry and exactly one arithmetic-bearing kernel, and require the entry
-to directly call that kernel. Apply the existing vector-dominance, scalar-ratio ceiling and slack to
-the arithmetic-bearing kernel. All other roster rows retain their current exact-one behavior and
-budgets. Do not lower a floor/ceiling, remove a roster row, accept indirect reachability, or special-
-case the candidate digest.
+gate must require exactly one entry and exactly one arithmetic-bearing kernel, require the entry to
+directly call that kernel, and require the forwarding entry itself to contain zero counted
+`f32x4.{mul,add,sub,div}` and `f32.{mul,add,sub,div}` operations. Apply the existing vector-
+dominance, scalar-ratio ceiling and slack to the arithmetic-bearing kernel. All other roster rows
+retain their current exact-one behavior and budgets. Do not lower a floor/ceiling, remove a roster
+row, accept indirect reachability, or special-case the candidate digest.
 
 Add independent synthetic negative controls proving failure when the entry is absent or ambiguous,
 the arithmetic kernel is absent or ambiguous, the entry does not directly call the selected kernel,
-and the selected kernel crosses its scalarization budget. Preserve the existing vanished/ambiguous,
-partial scalarization, degree-reduction and slack controls. Run the checker self-test, Python compile,
-format/diff/policy gates and the repaired static gate once against the preserved #617 candidate.
-Astra LOW source review must PASS before qualification resumes.
+the forwarding entry contains scalar arithmetic, and the selected kernel crosses its scalarization
+budget. Preserve the existing vanished/ambiguous, partial scalarization, degree-reduction and slack
+controls. Before source review run only the checker self-test, Python compile and proportional
+format/diff/policy gates. Astra LOW source review must PASS before the preserved candidate is read by
+the repaired static gate.
 
 ## Resume without rebuilding the candidate
 
@@ -57,9 +59,10 @@ external path if needed; do not invoke the builder again.
 
 After source PASS, create an isolated scratch checkout containing only the reviewed tooling change
 plus provisional candidate pin, `results.json` lineage (`candidateCommit=d63bc437…`,
-`wasmSha256=f80b6392…`) and generated matrix lineage. Prove that overlay. Run the repaired static
-gate once against the preserved six-file output, then run only the #617 qualification stages that
-never executed: resource/native-witness and all 26 red mutations, hermetic checks, locked SDK,
+`wasmSha256=f80b6392…`) and generated matrix lineage. Prove that overlay. Run exactly one repaired
+static-gate invocation against the preserved six-file output. This is the successor's sole candidate
+static run, not a retry within #617. If it passes, run only the #617 qualification stages that never
+executed: resource/native-witness and all 26 red mutations, hermetic checks, locked SDK,
 locked dependency installs, one all-browser Chromium/Firefox/WebKit run with matrix/self-test
 mutations, and final matrix/diff checks. Preserve exact commands, streams/status, versions,
 identities, overlays and checksum manifest. No browser or gate retry is allowed.
@@ -89,3 +92,18 @@ update #559/#560 and remove clean delivered worktrees while retaining branches/h
 One tooling implementation attempt and one resumed qualification pass are authorized after scope
 PASS. A substantive failure stops for reviewed rescope. This issue does not add a #539 product
 implementation attempt or weaken the static SIMD gate.
+
+## Initial Astra LOW scope review — FAIL
+
+Astra LOW returned **FAIL** at exact clean pushed head
+`e0597993a4381d815d9d36d102a6d58f3100c06b`, main `77368243`. The bounded correction and all
+preserved #617 identities were sound, but #559/#560 coordination was stale, the proposed kernel-only
+budget allowed scalar arithmetic to escape into the forwarding wrapper, and the brief ambiguously
+requested two repaired candidate static runs.
+
+The corrected scope requires zero counted vector or scalar arithmetic in the forwarding entry, adds
+an independent scalar-wrapper negative, and permits no candidate static run before source PASS. The
+sole repaired candidate static invocation occurs afterward and is distinct from stopped #617. #560
+now records #617 stopped/#619 active; #559 receives the same handoff in its next tracker checkpoint.
+No builder, static gate, browser, implementation or pin/lineage edit ran. Corrected Astra LOW scope
+review is pending.
