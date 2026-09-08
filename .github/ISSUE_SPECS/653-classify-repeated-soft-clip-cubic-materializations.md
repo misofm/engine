@@ -118,10 +118,11 @@ failures. No compiler, source, timing or artifact work is authorized.
 
 ## Attempt 1 FAIL and bounded attempt 2
 
-Luna's identity and literal six-file hash check passed at clean pushed
-`d95f63235ee48397a32f250b22acdea5a67cb193`, and the proposed identical
-threshold/divisor repeats remained a plausible hypothesis. Astra LOW returned
-**FAIL** because the matrix again omitted Wasm scalar even-clamp assembly sites:
+Luna's identity and literal six-file hash check ran and passed at clean pushed
+authorization `67d243d8594f4b49fde97154e88df521bb0f855a`; the proposed evidence
+was subsequently checkpointed at `d95f63235ee48397a32f250b22acdea5a67cb193`,
+and the identical threshold/divisor repeats remained a plausible hypothesis. Astra
+LOW returned **FAIL** because the matrix again omitted Wasm scalar even-clamp sites:
 line 4614 materializes `+2/3` as `f32.const 0x1.555556p-1`, and line 4615
 materializes `-2/3` as `f32.const -0x1.555556p-1` within `.LBB11_22`.
 
@@ -135,3 +136,12 @@ loop-entry count separately from per-iteration count and give every folded odd
 extend the applicability conclusion beyond supplying unchanged values once to both
 helper calls. No new hash run, compiler, source, timing, payload or artifact work
 is authorized. Fresh Astra LOW scope PASS is required before Luna edits.
+
+The first attempt-2 scope review returned **FAIL** at clean pushed
+`0a80a6c81f3c3239c08807fca6210f7190250bbc` because it incorrectly said the
+identity/hash check ran at the later evidence checkpoint rather than authorization
+`67d243d8594f4b49fde97154e88df521bb0f855a`. This final attempt-3 brief
+corrects only that provenance distinction. The original identity evidence stays
+unchanged, no check reruns, and the bounded matrix/excerpts/verdict edits above
+remain the only executable work after a fresh Astra LOW PASS. Any failure exhausts
+#653; no fourth attempt.
