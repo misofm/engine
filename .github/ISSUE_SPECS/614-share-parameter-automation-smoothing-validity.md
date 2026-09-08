@@ -56,3 +56,22 @@ blank line; that byte was removed, `git diff --check` passes, and the local body
 #614 byte-for-byte. The reviewer confirmed the exact duplicate law, complete 36-case domain, both
 production callers, frozen wire gates, bounded ownership and disjoint open #539. Luna HIGH/XHIGH
 attempt 1 is authorized within the two named source files, their inline tests and issue evidence.
+
+## Luna HIGH attempt 1 checkpoint
+
+Luna HIGH changed only the two authorized production files and root checkpointed the exact tranche
+as `42eba392f3975c19017534e9a871f67451d7e620`. `effect-contract` now owns public pure
+`parameter_automation_smoothing_valid`; typed `parameter_valid` and borrowed
+`parameter_semantics_valid` call it at the former duplicated condition without moving surrounding
+validation. Its inline test enumerates all 36 combinations using sample lengths zero and seven.
+Existing `effect-package` fixtures exercise valid Sample/Block/None inputs, bad smoothing, bad
+automation, typed/borrowed differential parity, exact layout/identity, diagnostics and offsets.
+
+Debug and release test suites each passed 13/13 for `effect-contract` and 34/34 for
+`effect-package`; strict affected Clippy, workspace format check and `git diff --check` passed.
+`Cargo.lock` is byte-unchanged and no benchmark ran. Final source SHA-256 is
+`5ec9da71329c0a0c3a03324621ba557e7f6bb02403cc553699000c7b68544cf8` for
+`effect-contract/src/lib.rs` and
+`9768d59e21fcad4bff665f9d45111519bb7dec70cbe326b5a3c8b59b8b110ae6` for
+`effect-package/src/wire.rs`. This is implementation evidence, not source acceptance; Astra LOW
+must adversarially review the exact pushed source/evidence head.
