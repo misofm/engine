@@ -1927,6 +1927,7 @@ mod tests {
             );
             let source_left = [0.25_f32; 128];
             let source_right = [-0.5_f32; 128];
+            let mut last_ticket = None;
             for (block, records) in schedule.iter().enumerate() {
                 let submission = crate::SourceSubmission {
                     generation: 1,
@@ -1968,6 +1969,7 @@ mod tests {
                 )
                 .expect("batch");
                 let ticket = control.try_publish(batch).expect("ticket");
+                last_ticket = Some(ticket);
                 let mut reference_output = [0.0_f32; 256];
                 let mut endpoint_output = [0.0_f32; 256];
                 test_only_reset_fader_matrix_witness();
@@ -2054,6 +2056,64 @@ mod tests {
                 control.collect(ticket).expect("collect");
                 assert_eq!(control.outstanding(), 0);
             }
+            let shutdown_sample = (schedule.len() as u64) * 128;
+            let plan_time_before = render.plan.next_absolute_sample();
+            let state_before = test_only_scalar_state_trace();
+            let witness_before = test_only_fader_matrix_witness();
+            let shutdown = control.begin_shutdown().expect("shutdown begin");
+            assert_eq!(control.poll_shutdown(shutdown), Ok(None));
+            let mut shutdown_output = [f32::from_bits(0x3f4a_7c15); 256];
+            let shutdown_bits = shutdown_output
+                .iter()
+                .map(|sample| sample.to_bits())
+                .collect::<Vec<_>>();
+            let acknowledgment = render
+                .render(
+                    &mut shutdown_output,
+                    2,
+                    128,
+                    128,
+                    SampleTime(shutdown_sample),
+                )
+                .expect("shutdown acknowledgement");
+            assert!(acknowledgment.shutdown);
+            assert!(acknowledgment.cancellation_only);
+            assert!(acknowledgment.graph.is_none());
+            assert_eq!(
+                shutdown_output
+                    .iter()
+                    .map(|sample| sample.to_bits())
+                    .collect::<Vec<_>>(),
+                shutdown_bits,
+                "shutdown acknowledgement leaves caller PCM untouched"
+            );
+            assert_eq!(render.plan.next_absolute_sample(), plan_time_before);
+            assert_eq!(test_only_scalar_state_trace(), state_before);
+            assert_eq!(test_only_fader_matrix_witness(), witness_before);
+            assert_eq!(
+                control.poll_shutdown(shutdown),
+                Ok(Some(BuiltinBatchShutdownComplete {
+                    token: shutdown,
+                    frontier: last_ticket.map(|ticket| ticket.serial),
+                    acknowledged_sample: SampleTime(shutdown_sample),
+                }))
+            );
+            let repeated_bits = [f32::from_bits(0x3f11_22aa); 256];
+            let mut repeated_output = repeated_bits;
+            let repeated = render
+                .render(
+                    &mut repeated_output,
+                    2,
+                    128,
+                    128,
+                    SampleTime(shutdown_sample + 128),
+                )
+                .expect("repeated quiescent render");
+            assert_eq!(repeated, acknowledgment);
+            assert_eq!(repeated_output, repeated_bits);
+            assert_eq!(render.plan.next_absolute_sample(), plan_time_before);
+            assert_eq!(test_only_scalar_state_trace(), state_before);
+            assert_eq!(test_only_fader_matrix_witness(), witness_before);
             (selection,)
         };
 
