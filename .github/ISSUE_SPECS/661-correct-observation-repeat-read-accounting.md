@@ -119,9 +119,37 @@ control, debug and release stress tests, full debug and release `engine` plus
 list to be reordered. The attempt stopped there; gates 8-11 did not run. An
 initial capture-wrapper invocation failed before Cargo because its evidence
 directory had not yet been created; the corrected evidence run then retained
-complete records for gates 1-7. The 23-file ordered `SHA256SUMS` manifest at
-`/tmp/issue661-attempt1-source-evidence` hashes to
+complete records for gates 1-7. The 23-line `SHA256SUMS` file at
+`/tmp/issue661-attempt1-source-evidence` incorrectly includes itself because the
+shell opened it before enumerating inputs. Its external hash is
 `b7eb1536a010b5c5b7aaf32b54fac919444406c1a545c7cf4f92f1c159f75b08`.
+The other 22 entries verify, but the self-entry does not; preserve the file
+unchanged and do not describe it as a verified manifest.
 No compiler payload or generated build output entered Git. Attempt 1 is FAIL;
 formatting correction and remaining gates require fresh Astra LOW attempt-2
 scope review.
+
+## Attempt 1 review and attempt 2 authorization
+
+Astra LOW returned **ATTEMPT-1 FAIL** and bounded **ATTEMPT-2 SCOPE PASS** at
+clean record head `04823cfa7841b7db6e9c8e472fdbebf076c2d699` and source
+checkpoint `27769c0df137f967302c99a6c39ffc184565c584`. The accounting
+repair is sound: equal reads do not advance, every advance including the final
+read counts gaps before acknowledgment, the deterministic control discriminates
+repeats and the final gap, and the existing torn/regression/latest/writer gates
+remain.
+
+Attempt 2 owns only rustfmt's exact import-order correction in the same test file,
+then runs once, stopping at the first failure:
+
+1. `cargo fmt --all -- --check`;
+2. `git diff --check` and owned-path/payload census;
+3. `bash scripts/check-workspace-policy.sh`;
+4. `bash scripts/check-realtime-policy.sh`;
+5. `bash scripts/test-realtime-policy.sh`.
+
+Retain attempt 1's successful behavioral, full-suite, and strict-Clippy evidence;
+the formatting-only change does not rerun them. Use the fresh absent
+`/tmp/issue661-attempt2-source-evidence` path and create a manifest that excludes
+itself, recording the manifest hash separately. No production edit, artifact,
+compiler payload, correction, or retry is authorized.
