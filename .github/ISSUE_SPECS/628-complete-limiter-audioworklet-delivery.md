@@ -52,3 +52,26 @@ retained-evidence acceptance, and permits only checks never completed afterward.
 Luna HIGH/XHIGH may now create the documentation/evidence disposition only. No
 build, gate, install, browser, output generation, promotion edit, PR, or merge is
 authorized.
+
+## Astra LOW evidence review — PASS; single executor leased
+
+Astra LOW passed exact clean pushed evidence head
+`82dbb0d49a3d24cfb8ef057a0c03c8d5c6ba4c94` against live main `30680709`.
+The manifest and all five mechanical obligations verify: the 2,596-byte scratch
+overlay equals the promotion diff; all three promoted files and six normalized
+output identities match; retained commands bind the accepted gates to that
+output and overlay; duplicate records remain non-credit; and the post-promotion
+path audit preserves every frozen product byte and #627 FAIL.
+
+Root created atomic external execution lease
+`/tmp/misofm-engine-issue628-execution.lock/owner.txt` with SHA-256
+`086714a9b12f97dde9a9f4818244e7b3bd9b67c8a7fb33a40feed70f9720ecc8`.
+It names `/root/issue583_luna_impl`, this accepted evidence head, and only the
+SDK, matrix-check, Cargo-format, diff-hygiene, workspace-policy, and effect-
+runtime-policy scope. No other executor may run an issue command while that
+lease exists. Luna HIGH must verify the lease before each command and stop on
+any change or first gate failure.
+
+Exactly one Luna HIGH sequence of those previously unexecuted checks is now
+authorized. Builder, static, resource, hermetic, install, browser, artifact-
+output, promotion, PR, and merge execution remain forbidden.
