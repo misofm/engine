@@ -10,6 +10,7 @@
 
 use bench_support::alloc as bench_alloc;
 use bench_support::json::escape;
+use bench_support::sysinfo::parse_cpu_model;
 use std::{cell::Cell, env, fs, time::Instant};
 
 use protocol::{
@@ -1435,15 +1436,9 @@ struct Metadata {
 
 impl Metadata {
     fn gather() -> Self {
+        let cpuinfo = fs::read_to_string("/proc/cpuinfo").ok();
         Self {
-            cpu: fs::read_to_string("/proc/cpuinfo")
-                .ok()
-                .and_then(|contents| {
-                    contents
-                        .lines()
-                        .find_map(|line| line.strip_prefix("model name\t: ").map(str::to_owned))
-                })
-                .unwrap_or_else(|| "unknown".to_owned()),
+            cpu: parse_cpu_model(cpuinfo.as_deref()).unwrap_or_else(|| "unknown".to_owned()),
             governor: fs::read_to_string("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor")
                 .map(|value| value.trim().to_owned())
                 .unwrap_or_else(|_| "unknown".to_owned()),
