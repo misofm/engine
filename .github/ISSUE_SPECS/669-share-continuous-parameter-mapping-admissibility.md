@@ -12,8 +12,9 @@ the next smallest closable CP8 product slice; the rest of the descriptor-law
 duplication remains open under #560.
 
 Sol HIGH coordinates the issue, documentation, checkpoints, GitHub
-synchronization, and artifact qualification/pinning. Luna HIGH or XHIGH
-implements. Per the current user routing, Astra LOW performs every scope,
+synchronization, and artifact qualification/pinning. The sole implementation
+executor is Luna HIGH `/root/issue583_luna_impl`. Per the current user routing,
+Astra LOW performs every scope,
 implementation, exact-head, integration, artifact-applicability, and delivery
 verification that would otherwise use Sol HIGH/XHIGH. Lane-A #668 owns only its
 limiter evidence spec and compact lowering evidence. Its product and artifact
@@ -68,10 +69,19 @@ stop and return for rescope.
 4. Preserve wire diagnostic phase, code, parameter index, record index, byte
    offset, rejection precedence, and canonical encoded bytes. No parser or
    validation reordering may occur.
-5. Run focused and full affected-crate tests in debug and release, strict
-   affected Clippy, workspace formatting and diff checks, and proportional
-   descriptor/wire policy gates. No benchmark or timing invocation is
-   authorized; this issue makes no performance claim.
+5. After the source and independent tests are complete, run these literal gates
+   once in this order from the worktree root, with
+   `CARGO_TARGET_DIR=/tmp/issue669-attempt1-target` for every Cargo command:
+   `cargo test --locked -p effect-contract`; `cargo test --locked -p
+   effect-package`; `cargo test --locked --release -p effect-contract`; `cargo
+   test --locked --release -p effect-package`; `cargo clippy --locked -p
+   effect-contract -p effect-package --all-targets --all-features -- -D
+   warnings`; `cargo fmt --all -- --check`; `bash
+   scripts/check-effect-runtime-policy.sh`; `bash
+   scripts/check-effect-package-v1.sh`; `bash
+   scripts/check-effect-descriptor-v1.sh`; `bash
+   scripts/check-workspace-policy.sh`; `git diff --check`. No benchmark or
+   timing invocation is authorized; this issue makes no performance claim.
 6. Root checkpoints each coherent green tranche before more implementation.
    Astra LOW reviews the exact pushed source/evidence head and again after any
    current-main integration.
@@ -89,3 +99,47 @@ stop and return for rescope.
 One Luna implementation pass is initially authorized. A substantive finding
 receives at most the remaining attempts under the repository's three-attempt
 rule. No gate may be weakened and no fourth disguised retry is allowed.
+
+## Attempt 1 execution and evidence contract
+
+Implementation remains unauthorized until Astra LOW passes this corrected
+scope. If it passes, only Luna HIGH `/root/issue583_luna_impl` may implement
+attempt 1.
+
+Before editing, Luna must verify exact clean HEAD/upstream, merge-base and live
+`origin/main`, working directory, `rustc --version`, `cargo --version`, and the
+two frozen source-input hashes. It must record the value or explicit unset state
+of `CARGO_TARGET_DIR`, `RUSTFLAGS`, `RUSTDOCFLAGS`, `CARGO_ENCODED_RUSTFLAGS`,
+`CC`, `CFLAGS`, and `SOURCE_DATE_EPOCH`, then export only the declared
+`CARGO_TARGET_DIR` for the gate sequence. The fresh paths
+`/tmp/issue669-attempt1-evidence`, `/tmp/issue669-attempt1-target`,
+`/tmp/issue669-attempt1-manifest-verify.stdout`, and
+`/tmp/issue669-attempt1-manifest-verify.status` must all be absent and must not
+be symlinks before Luna creates the two directories. Evidence capture must first
+prove a harmless success command returns numeric status 0 and a harmless failure
+command returns numeric status 1, with both values independently read back from
+their status files.
+
+Record each ordered gate's exact command, stdout, stderr, and numeric exit status
+in separate files under the evidence directory. Stop at the first unexpected
+status or prerequisite failure. Do not correct, retry, or continue into another
+gate; report the preserved state for the next Astra-reviewed attempt. After all
+expected-success gates pass, write and verify a deterministic SHA-256 manifest
+covering every regular evidence file except the manifest itself. Capture the
+verification output and numeric status in the two declared sibling paths so the
+manifest remains self-excluding while covering every file inside the evidence
+directory. Commit no target output, full compiler stream, `.ll`, `.s`, or
+temporary capture file.
+
+## Astra LOW initial scope review — FAIL
+
+Astra LOW returned **SCOPE FAIL** against initial brief
+`283c821f78b24b96b99e925c56a8dd62955298fa`, main
+`7d16d9c9752c9ac2d31e69008fe075df86ce3c26`, and tracker
+`fd8dfc77619a9cde6a9e1f5417290faed80e9eca`. The semantic slice, helper
+preconditions, independent truth table, caller parity, diagnostics, artifact
+separation, GitHub synchronization, and #668 disjointness passed. The brief had
+not named one sole Luna executor, frozen literal gate commands, or specified
+fresh-path and lossless status/stream/manifest evidence controls. This revision
+adds only those execution terms. No implementation attempt was authorized or
+consumed.
