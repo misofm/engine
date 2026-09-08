@@ -14,7 +14,7 @@ use host_core::{
     ScalarPointCancelBoundaryError, ScalarPointFault, ScalarPointFaultCause,
     ScalarPointFaultProgress, ScalarPointNativeOperation, ScalarPointRenderError,
     SessionControlProvider, prepare_controller_scalar_point_endpoint,
-    prepare_scalar_point_endpoint,
+    prepare_scalar_point_endpoint, publish_controller_scalar_point_snapshot,
 };
 use protocol::{
     AutomationBatchError, AutomationBatchSlot, AutomationCancellationReason, AutomationEnqueue,
@@ -278,6 +278,25 @@ fn encoded_controller_enqueue(
             &mut bytes,
         )
         .expect("encoded BTLV automation enqueue");
+    bytes.truncate(length);
+    bytes
+}
+
+fn encoded_state_get(revision: SessionRevision, request_id: u64, handles: &[u32]) -> Vec<u8> {
+    let request = ParameterStateRequest {
+        handles: handles.to_vec(),
+    };
+    let mut bytes = vec![0_u8; 4_096];
+    let length = ProtocolCodec::default()
+        .encode_command_frame_into(
+            &TypedCommandFrame {
+                request_id: RequestId::new(request_id).unwrap(),
+                expected_revision: ExpectedRevision::Exact(revision),
+                payload: CommandPayload::ParameterStateGet(&request),
+            },
+            &mut bytes,
+        )
+        .expect("encoded BTLV parameter state request");
     bytes.truncate(length);
     bytes
 }
@@ -1930,17 +1949,61 @@ fn run_controller_points_drive_real_asymmetric_pcm_replay_and_clock_refusal(
     );
     assert_eq!(response_status(&past), StatusCode::TimeInPast);
     assert_eq!(controller.outstanding(), 0);
-    let state = controller.process(ControllerRequest {
-        request_id: RequestId::new(101).unwrap(),
-        expected_revision: ExpectedRevision::Exact(revision),
-        canonical_bytes: b"state-get",
-        command: ControlCommand::ParameterStateGet {
-            request: ParameterStateRequest {
-                handles: vec![handles[0].0, handles[1].0],
-            },
-        },
-    });
-    assert_eq!(state.status, StatusCode::Unavailable);
+    publish_controller_scalar_point_snapshot(&mut controller, handles, &snapshot)
+        .expect("publish quiescent scalar snapshot");
+    let state_frame = process_controller_ingress(
+        &mut controller,
+        &encoded_state_get(revision, 101, &[handles[0].0, handles[1].0]),
+        ingress,
+    );
+    let decoded = ProtocolCodec::default()
+        .decode_typed_response(&state_frame, &mut DecodeScratch::new(&mut [0_u16; 64]))
+        .expect("decode published state response");
+    match decoded {
+        DecodedTypedResponseFrame::Success {
+            payload: DecodedSuccessResponsePayload::ParameterState(page),
+            ..
+        } => {
+            assert_eq!(page.observed_sample, snapshot.observed_sample.0);
+            assert_eq!(page.records.len(), 2);
+            assert_eq!(page.records[0].handle, handles[0].0);
+            assert_eq!(page.records[1].handle, handles[1].0);
+            assert_eq!(
+                page.records[0].value.to_bits(),
+                snapshot.state[0].current_value.to_bits()
+            );
+            assert_eq!(
+                page.records[1].value.to_bits(),
+                snapshot.state[1].current_value.to_bits()
+            );
+            assert_eq!(
+                page.records[0].flags,
+                1 | (u32::from(
+                    snapshot.state[0].current_value.to_bits()
+                        != snapshot.state[0].target_value.to_bits(),
+                ) * 2)
+            );
+        }
+        _ => panic!("expected published state page"),
+    }
+    assert_eq!(
+        controller.publish_scalar_point_state(
+            SampleTime(snapshot.observed_sample.0 + 1),
+            [
+                protocol::ParameterStateRecord {
+                    handle: handles[1].0,
+                    flags: 1,
+                    value: 11.0,
+                },
+                protocol::ParameterStateRecord {
+                    handle: handles[0].0,
+                    flags: 1,
+                    value: 12.0,
+                },
+            ],
+        ),
+        Err("invalid scalar state publication")
+    );
     drop(render.stop());
 }
 

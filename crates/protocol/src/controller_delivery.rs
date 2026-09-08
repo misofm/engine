@@ -2,6 +2,7 @@
 
 use core::mem::size_of;
 
+use crate::controller::ScalarStateSlot;
 use crate::delivery::{AutomationDeliveryState, DeliveryContext, PreparedAutomationDelivery};
 use crate::{
     AutomationCancellationReason, AutomationDeliveryRender, CancelComplete, CancelToken,
@@ -11,7 +12,7 @@ use crate::{
     ProtocolControllerConfig, ProtocolQueueConfig, ProtocolQueueError, ProtocolQueues, QueueKind,
     QueueReport, ReplayCache, ReplayCacheConfig, SessionStore, TerminalAutomation,
 };
-use crate::{ControlProvider, PreparedDeliveryCapabilities};
+use crate::{ControlProvider, ParameterStateRecord, PreparedDeliveryCapabilities, SampleTime};
 
 /// Preparation failed before the facade became visible to its caller.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -76,6 +77,7 @@ pub struct ControllerAutomationDelivery<P: ControlProvider> {
     controller: ProtocolController<P>,
     delivery: AutomationDeliveryState,
     capabilities: PreparedDeliveryCapabilities,
+    scalar_state: Option<ScalarStateSlot>,
 }
 
 impl<P: ControlProvider> ControllerAutomationDelivery<P> {
@@ -90,6 +92,71 @@ impl<P: ControlProvider> ControllerAutomationDelivery<P> {
         config: ProtocolControllerConfig,
         retained: ControllerRetainedCapacity,
         capabilities: PreparedDeliveryCapabilities,
+    ) -> Result<
+        (
+            Self,
+            AutomationDeliveryRender,
+            ControllerAutomationResources,
+        ),
+        ControllerAutomationPrepareError,
+    > {
+        Self::prepare_inner(
+            session,
+            queues,
+            provider,
+            replay,
+            codec,
+            config,
+            retained,
+            capabilities,
+            None,
+        )
+    }
+
+    /// Prepare the controller with the opt-in fixed two-record scalar state publication slot.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_scalar_point_state(
+        session: SessionStore,
+        queues: ProtocolQueueConfig,
+        provider: P,
+        replay: ReplayCacheConfig,
+        codec: ProtocolCodec,
+        config: ProtocolControllerConfig,
+        retained: ControllerRetainedCapacity,
+        capabilities: PreparedDeliveryCapabilities,
+        handles: [crate::ParameterHandle; 2],
+    ) -> Result<
+        (
+            Self,
+            AutomationDeliveryRender,
+            ControllerAutomationResources,
+        ),
+        ControllerAutomationPrepareError,
+    > {
+        Self::prepare_inner(
+            session,
+            queues,
+            provider,
+            replay,
+            codec,
+            config,
+            retained,
+            capabilities,
+            Some(handles),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_inner(
+        session: SessionStore,
+        queues: ProtocolQueueConfig,
+        provider: P,
+        replay: ReplayCacheConfig,
+        codec: ProtocolCodec,
+        config: ProtocolControllerConfig,
+        retained: ControllerRetainedCapacity,
+        capabilities: PreparedDeliveryCapabilities,
+        scalar_handles: Option<[crate::ParameterHandle; 2]>,
     ) -> Result<
         (
             Self,
@@ -121,10 +188,22 @@ impl<P: ControlProvider> ControllerAutomationDelivery<P> {
                 controller,
                 delivery,
                 capabilities,
+                scalar_state: scalar_handles.map(ScalarStateSlot::new),
             },
             render,
             resources,
         ))
+    }
+
+    /// Atomically publish one complete scalar state page at a host-established quiescent point.
+    pub fn publish_scalar_point_state(
+        &mut self,
+        observed_sample: SampleTime,
+        records: [ParameterStateRecord; 2],
+    ) -> Result<(), &'static str> {
+        let slot = self.scalar_state.as_mut().ok_or("scalar state disabled")?;
+        slot.publish(observed_sample, records)
+            .map_err(|_| "invalid scalar state publication")
     }
 
     /// Process one trusted typed command and its matching canonical request bytes.
@@ -139,7 +218,11 @@ impl<P: ControlProvider> ControllerAutomationDelivery<P> {
             state: &mut self.delivery,
         };
         self.controller
-            .process_with_delivery_context(request, Some(&mut context))
+            .process_with_delivery_context_and_scalar_state(
+                request,
+                Some(&mut context),
+                self.scalar_state.as_ref(),
+            )
     }
 
     /// Decode one B1b BTLV command and dispatch it through this facade's delivery context.
@@ -152,7 +235,12 @@ impl<P: ControlProvider> ControllerAutomationDelivery<P> {
             state: &mut self.delivery,
         };
         self.controller
-            .process_b1b_btlv_with_delivery_context(input, scratch, Some(&mut context))
+            .process_b1b_btlv_with_delivery_context_and_scalar_state(
+                input,
+                scratch,
+                Some(&mut context),
+                self.scalar_state.as_ref(),
+            )
     }
 
     /// Process one complete command frame into caller-owned output through this facade's
@@ -167,11 +255,12 @@ impl<P: ControlProvider> ControllerAutomationDelivery<P> {
             state: &mut self.delivery,
         };
         self.controller
-            .process_command_frame_into_with_delivery_context(
+            .process_command_frame_into_with_delivery_context_and_scalar_state(
                 input,
                 scratch,
                 output,
                 Some(&mut context),
+                self.scalar_state.as_ref(),
             )
     }
 
