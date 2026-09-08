@@ -220,3 +220,26 @@ applicability slice after exact-head review, required CI and post-main delivery.
 It establishes no speedup and authorizes no source implementation. A separately
 numbered successor must own any transient-shaper source work under fresh Luna
 XHIGH implementation and Astra LOW scope/source reviews.
+
+### Merge and post-main qualification disposition
+
+PR #637 merged the reviewed evidence head `72b3908cc9b3bfbe7fc7410abf5c22adc63c573f`
+to main as `d47b62ba0dfcaf5c1525510aaa7789fa8e0acb94`, with the expected previous-main
+and reviewed-head parents. Required PR qualification run `34249662644` passed.
+
+Post-main qualification run `34250520726` did not pass. Attempt 1 failed because
+the lint/policy job reached `cargo tree --locked --offline --target all` without
+the locked `wasi v0.11.1+wasi-snapshot-preview1` package in its runner cache, and
+because an AudioWorklet consumer received an intermediary artifact-service HTTP
+403. Astra LOW classified both as infrastructure failures and authorized exactly
+one failed-job retry. The CLI reported that the run could not be rerun while the
+Actions API created attempt 2 at the unchanged merge; both observations are
+preserved. Attempt 2 cleared the artifact download and reproduced the same
+offline `wasi` cache miss, so the aggregate verdict failed again. No third retry
+or dispatch is authorized.
+
+#635 is reopened and remains pending delivery. Issue #638 owns the bounded locked-
+dependency preparation needed before the offline audit. Its successful
+descendant-main qualification must verify unchanged #635 evidence ancestry; it
+does not retroactively make failed run `34250520726` successful. #636 is queued
+and has no execution authority while #635/#638 occupy the two active slots.
