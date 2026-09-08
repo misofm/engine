@@ -353,3 +353,18 @@ builder once from the promotion head, verify exact six-file identity, and run
 the bounded post-pin checks once. Installs and browsers remain forbidden. Stop
 on any failure and preserve both attempts without relabeling. No PR or merge is
 authorized.
+
+## Astra LOW corrected final-attempt scope review — PASS
+
+Astra LOW returned **PASS** at exact clean pushed head
+`2690a775539512a9aa0caf7ae0ef8509d52f5665` and synchronized tracker
+`70aeef2fff5b99f62aa7b6b462fcceb9780f7a3b`. All 11 post-pin failure manifest
+entries verify. The invented numeric status is removed; exact records candidly
+preserve only the observed preflight failure. Promotion remains unchanged.
+
+Final attempt 3 may prove one newly created empty, existing, non-symlink output
+directory, invoke the no-bypass builder exactly once from detached promotion
+`0bb5a820`, compare all six files, and run each bounded post-pin check once. No
+install or browser may repeat. Execution stops and preserves evidence on any
+failure. No fourth attempt, retry, or further rescope is available if attempt 3
+fails.
