@@ -170,3 +170,16 @@ remain supported; no cache or generated output was committed.
 Luna HIGH/XHIGH may now copy exactly the three qualified pin/lineage surfaces into the feature
 worktree while leaving both reviewed scripts unchanged. Root must checkpoint that promotion before
 the one ordinary post-pin build and proportional gates. PR and merge remain unauthorized.
+
+## Astra LOW combined candidate review — PASS
+
+Astra LOW returned **PASS** at exact clean pushed head
+`ffb19e9be887d4feca09ad9dd3d6fdaef5ec7655`, live main/merge-base `77368243`. All 28 #617 and 39
+#619 evidence hashes, preserved candidate bytes and five-file non-Wasm identity verify. Eight unique
+resumed commands match their raw streams; no builder repeated.
+
+The sole repaired static run proves the 0/0 wrapper's direct edge to the 440/0 kernel with unchanged
+budgets. Resource/native-witness and 26 mutations, hermetic, 11 SDK tests, Chromium
+151.0.7922.34, Firefox 153.0, WebKit 26.5 and matrix checks pass. Scratch changes are exactly the
+pin, two results lineage fields and generated matrix lineage; browser rows/resources are frozen.
+Luna XHIGH may now promote only those three repository surfaces. PR/merge remain unauthorized.
