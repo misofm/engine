@@ -90,3 +90,23 @@ for `crates/host-core/src/prepare.rs`, `171b9ff9a7bb889ddad47ad9dad09c54a4ce35b7
 for `crates/host-core/tests/prepare.rs`, and `a4edd2cf03e0e894b9da06ee6722e846fed12b22ace13eed8b8616991a85b917`
 for `tools/parameter-metadata/tests/abi_layout.rs`. This is implementation evidence, not source or
 artifact acceptance.
+
+## Astra LOW attempt 1 source review — PASS
+
+Astra LOW returned **PASS** at exact clean pushed evidence head
+`c2a40c49422d5122b7d467df028a3ab62f9e54e9`, source
+`fece7a2ccf5796da71a29168cd865b921bb0679f`, live main/merge-base
+`cf9e079cd5ef80d1c7284e9edd0ffcc90b0db335`, and synchronized tracker
+`78bdc087b85503348e8cb952f7371028e69ec4f3`. The reviewer confirmed the private-field and sole-
+constructor `CompiledSession` invariant, canonical typed re-export, removed live Rust spellings,
+unchanged reachable Exact/ring diagnostics and order, discriminating tests, four-path scope, lock,
+issue synchronization, and #621 disjointness.
+
+Independent host-core debug and release suites each passed 82 tests with 2 ignored, including
+doctests; focused prepare debug passed 13 with 1 ignored; metadata ABI layout debug passed 7/7;
+strict affected Clippy, formatting, diff, host-core, workspace and realtime policies passed. The
+release metadata command failed with status 101 in separate fresh targets on both this head and exact
+main, with the same duplicate-output collisions and E0463 `effect_compiler` resolution failure at
+`graph-compiler/src/lib.rs:12`. This is independently reproduced pre-existing infrastructure failure,
+not a successful gate and not a #622 correction. Source is accepted. Root may make the separately
+owned artifact-applicability decision; no artifact, PR or merge action is authorized by this verdict.
