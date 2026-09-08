@@ -114,6 +114,23 @@ documentation-only correction changes no raw probe byte. Astra LOW confirmation
 is required before one Luna scratch qualification can be authorized; no probe
 rerun is permitted.
 
+## Astra LOW mismatch-evidence confirmation — PASS
+
+Astra LOW accepted the candidate mismatch at exact clean pushed head
+`573d2420f4140cb181931a9bc5330a9f2afa6491`, live main `30680709`, and
+synchronized tracker `7343ed73cbc834149f07d316a1e802ad65fc6076`.
+Only the spec, evidence README, and its manifest hash changed after `e440d62b`;
+all raw probe bytes remain unchanged. All 16 checksums, issue bodies, executor
+chronology, and diff hygiene pass.
+
+Candidate Wasm SHA-256 is frozen as
+`63ef81c105d50aed41164aa3c6c6f8853a314b99d642e209e7cc3aefe3bdbca1`.
+Exactly one Luna HIGH scratch qualification is authorized from frozen source
+`dc14ca856e10cb5ad7f6fdacb0ea9322342a9251` under the overlay sequence and
+stop-without-retry gates above. The applicability probe must not be repeated.
+Repository promotion remains unauthorized until Astra LOW returns candidate
+PASS.
+
 ## Astra LOW corrected mismatch-evidence review — PASS
 
 Astra LOW returned **PASS** at exact clean pushed head
