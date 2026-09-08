@@ -33,3 +33,27 @@ Run focused graph-compiler tests in debug and release, full graph-compiler tests
 There is no current graph-compiler transient allocation counter; `GraphResourceEstimate` measures retained storage and render allocator tests do not measure compilation. After source PASS, create a separately numbered qualification/tooling successor with a fixed representative compile corpus and scoped counting allocator. That successor must measure the removed handoff allocations without introducing a generic benchmark framework, and it must preserve raw count/status/source identities. This issue remains open until that qualification and ordinary exact-head/current-main review, required PR qualification, guarded merge, post-main qualification and GitHub synchronization are complete.
 
 CP1 remains open after this bounded delivery for its schedule/PDC/front-half identity remainder. Record the exact residual rather than extending this issue.
+
+## Astra LOW scope review — PASS
+
+Astra LOW passed exact clean pushed brief
+`f84469fab324f73034414d41a80f3fa5f14b46c4` against delivered main
+`d98646db47bc603c32431d999cd08f43a0168043`. The repeated owned tuple
+construction remains present in validation and node/sidechain lookup in
+`compile.rs`, `ids.rs::into_effects`, and bank attachment in `banks.rs`. #632 is
+documentation-only and disjoint; #632/#633 occupy the two active slots.
+
+Luna HIGH/XHIGH attempt 1 may edit production only in
+`src/{compile,ids,banks}.rs`. Any `lib.rs` edit must be test-only, and focused
+tests must stay in existing graph-compiler modules/files. Prepared-entry order
+must remain independent of session traversal and bank slot order; differently
+ordered collections may not be silently zipped.
+
+Wrong-result controls must deliberately cross indices between tracks, racks and
+slots with distinguishable processor, metadata and control identities, then
+assert association-sensitive results. Routed-sidechain destinations and
+homogeneous/heterogeneous bank membership/program order are mandatory. Preserve
+diagnostic order/paths, transactional failure ownership, canonical graph and
+semantic identities, and lowering regressions. No public graph/session/runtime
+API, dependency, artifact, scheduling/PDC, timing or allocation claim is allowed.
+Allocation measurement remains a separately numbered successor after source PASS.
