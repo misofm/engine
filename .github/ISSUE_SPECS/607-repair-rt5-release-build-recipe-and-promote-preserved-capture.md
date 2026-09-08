@@ -67,3 +67,11 @@ performance-improvement claim applies.
 After capture acceptance, lane-B #605 stopped at its third attempt and #608 inherited its disjoint
 IO5 test-only qualification. Live delivery coordination therefore uses #607/#608 as the two active
 issue slots. Historical #605 scope-review statements above remain accurate for those checkpoints.
+
+Lane-B Astra LOW returned artifact-applicability **PASS / N/A** at exact pushed head
+`8bb2a2e763103030af258a69eecae5bd2374850b`. The native benchmark/capture paths have no dependency
+edge into the six-file AudioWorklet builder or consumers, and the delivery delta changes no runtime,
+browser/SDK, manifest/lockfile, build input, generated consumer, artifact, pin, or matrix. Retain pin
+`39ebe7cd3f71f34ab11260f27fa1eaad281dd61642c50d9ed6210e703d95dd55` with its existing
+qualification attribution. No artifact build or pin change ran; #608's later artifact gate is
+separate.
