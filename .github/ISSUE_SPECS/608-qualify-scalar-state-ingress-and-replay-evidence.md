@@ -109,3 +109,17 @@ Tracker head `f835f685fb1aafbd94cdbd3f1c3b81582a8c3479` subsequently recorded on
 authorization and preserves the same disjoint ownership. Luna HIGH/XHIGH attempt 1 may edit only
 `crates/host-core/tests/scalar_point_endpoint.rs`; production, other tests, #610 paths and artifacts
 remain frozen. Artifact probing remains deferred until source PASS.
+
+## Luna attempt 1 checkpoint
+
+Luna HIGH attempt 1 is pushed at source `0820c8a7ba785e5834694f1a5663dd7b2b835d46` from authorization
+head `4e33fcee`. The only implementation change is
+`crates/host-core/tests/scalar_point_endpoint.rs`. It adds both successful subsets across all three
+ingress paths, typed reverse ordering, the distinct B1b/caller-buffer malformed replay behavior,
+encoded state-page payload preservation after every refused publication including record two,
+idempotent republication, and cached-response output/replay precedence after replacement.
+
+Focused and full scalar endpoint debug tests pass; scalar endpoint release passes 10/10; protocol
+passes 161/161; strict affected Clippy, formatting and diff checks pass. `Cargo.lock` is
+byte-identical. Production, #610 and artifacts remain untouched. Astra LOW source review is
+pending; artifact probing remains unauthorized.
