@@ -230,3 +230,31 @@ and evidence paths must both be absent, including dangling symlinks, before sing
 output must start empty. The post-pin record must include named executor, head/upstream/cwd,
 toolchain/environment, exact commands, separate streams and statuses, and must stop before static
 checking if any six-file comparison fails.
+
+## Stage 3 promotion and post-pin Astra LOW review — PASS
+
+The exact three-path promotion was committed and pushed at
+`4601367a01ff94f4c70486a70f607e2b535bcfc2`. Astra verified that only those paths changed from
+the authorization parent and that each is byte-identical to the reviewed scratch overlay: candidate
+pin plus LF, the two `results.json` lineage fields, and the generated matrix lineage sentence.
+Source, gate scripts, dependencies, browser rows, resources and PCM expectations remained frozen.
+
+At that exact clean branch/upstream head, Hypatia created the two fresh temporary paths once and ran
+the post-pin sequence once. The builder, six-file identity check, static gate, locked SDK install,
+SDK package check, matrix check and diff check all exited 0. SDK packaging passed 11/11 tests. The
+new build was byte-identical to the reviewed candidate in all six files:
+
+| File | SHA-256 |
+| --- | --- |
+| `miso-engine-v1-abi-layout.json` | `40f6fe2e23e1b47500011c14871750a75922ab194136add8b387a4b40eb56919` |
+| `miso-engine-v1-audio-worklet-host.d.ts` | `445254e7c6ddf3330bdf20cafa8cacec4d0e2489805f72a833859db52bc038cf` |
+| `miso-engine-v1-audio-worklet-host.js` | `21c8947d8aad2d1d9a23e553c2c7b983dbd5a622aabfbab9a41c622d1a50229a` |
+| `miso-engine-v1-audio-worklet.js` | `225bc06043ed6e2c62a38d63f1c2015b40480d673e3a53109c938eba481556cb` |
+| `miso-engine-v1-audio-worklet.simd128.wasm` | `580e3cb4cd11e996598103f27b02d94559f6ef7ad57ef22732d18c0b4f98be10` |
+| `miso-engine-v1-parameter-metadata.json` | `6eac2cb3e30931b6c01b10c63af4eedd2d59337274565a129c7a3f328a09938d` |
+
+Astra's final post-pin verdict is PASS. Stage-2 execution attempt 1 remains procedural FAIL and the
+earlier record-label/OS-account attribution caveats remain part of the decision record. Full streams
+and generated candidates remain temporary under `/tmp`; none entered Git. This resolves #642's
+artifact-qualification blocker. #642/#644 may enter exact-head/current-main PR-readiness review;
+#644 closes only after merged delivery, required post-main success and GitHub synchronization.
