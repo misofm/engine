@@ -119,3 +119,20 @@ locked SDK install is the only exception to the successor's no-install boundary;
 reusing another worktree's dependency directory receives no credit. No builder,
 artifact/static/resource/hermetic/browser repeat, other install, product edit,
 PR, or merge is authorized before Astra LOW exact-head scope PASS.
+
+## Astra LOW attempt 2 scope review — PASS
+
+Astra LOW passed exact clean pushed head
+`b8b872362f13decc2ce02b88dbd5258aa661c710`. Attempt 1 remains failed. Its
+manifest and status 2 verify; no later command or install ran. The accepted #627
+scratch checkout retains its locked dependency state, and all 70 inspected
+tracked SDK/check-script/Cargo/config/toolchain files match this branch. Filesystem
+presence alone does not prove immutable installation history; the retained install
+records supply that provenance. Root independently confirms live GitHub sync.
+
+Under a fresh atomic single-executor lease, Luna may verify that provenance and
+source equality, run the SDK check once from the accepted scratch checkout against
+the preserved six-file output, then only on success run matrix check, formatting,
+diff hygiene, workspace policy and effect-runtime policy once on this branch.
+Stop on failure. No install or artifact/static/resource/hermetic/browser repeat is
+authorized.
