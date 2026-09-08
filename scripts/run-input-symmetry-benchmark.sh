@@ -35,7 +35,8 @@ for path in "$raw" "$accepted" "$stdout_log" "$stderr_log" "$validator_stderr" "
     [[ ! -e "$path" && ! -L "$path" ]] || fail "refusing protected output: $path"
 done
 scratch=$(mktemp -d "$artifact_directory/.run.XXXXXX")
-cleanup() { rm -rf -- "$scratch"; }
+preserve_scratch=0
+cleanup() { [[ "$preserve_scratch" == 1 ]] || rm -rf -- "$scratch"; }
 trap cleanup EXIT
 hash_file() { sha256sum "$1" | awk '{print $1}'; }
 seal_field() { python3 - "$seal" "$1" <<'PY'
@@ -61,6 +62,9 @@ source_sha256=$(sha256sum "$subject" "$dispatcher" | sha256sum | awk '{print $1}
 [[ "$(hash_file "$runner")" == "$(seal_field runner_sha256)" ]] || fail 'runner identity mismatch'
 [[ "$(hash_file "$preflight")" == "$(seal_field preflight_sha256)" ]] || fail 'preflight identity mismatch'
 [[ "$(seal_field status)" == READY ]] || fail 'preflight seal is not READY'
+claimed_cwd=$(seal_field cwd) || fail 'preflight cwd missing'
+[[ -d "$claimed_cwd" && ! -L "$claimed_cwd" ]] || fail 'claimed cwd unavailable'
+[[ "$(seal_field argv)" == "$binary input-symmetry" ]] || fail 'argv identity mismatch'
 [[ "$(set -o pipefail; python3 - "$seal" <<'PY'
 import json, pathlib, sys
 value = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'))
@@ -71,7 +75,7 @@ PY
 if (set -o noclobber; : >"$disposition"); then :; else fail 'invocation reservation unavailable'; fi
 publish_disposition() {
     local status=$1 reason=$2 runner_status=$3 child_status=${4:-null} validator_status=${5:-null}
-    python3 - "$disposition" "$status" "$reason" "$runner_status" "$child_status" "$validator_status" "$raw" "$accepted" "$stdout_log" "$stderr_log" "$validator_stderr" "$candidate_commit" "$candidate_tree" <<'PY'
+    python3 - "$disposition" "$status" "$reason" "$runner_status" "$child_status" "$validator_status" "$raw" "$accepted" "$stdout_log" "$stderr_log" "$validator_stderr" "$candidate_commit" "$candidate_tree" "$scratch" <<'PY'
 import hashlib, json, pathlib, sys
 destination = pathlib.Path(sys.argv[1])
 def artifact(path):
@@ -81,14 +85,23 @@ def artifact(path):
     return {"sha256": hashlib.sha256(item.read_bytes()).hexdigest(), "bytes": item.stat().st_size}
 def integer_or_null(value):
     return None if value == "null" else int(value)
+def phase_counts(path):
+    try:
+        lines = pathlib.Path(path).read_text(encoding='utf-8').splitlines()
+    except OSError:
+        lines = []
+    names = ('workload_started', 'warmup_complete', 'timed_started', 'round_1_complete', 'round_2_complete')
+    return {name: sum(line == 'MISO_ENGINE_BENCH_PHASE ' + name for line in lines) for name in names}
+phases = phase_counts(sys.argv[10])
 value = {
     "schema_version": 1, "issue": 600, "kind": "input_symmetry_benchmark_disposition",
     "status": sys.argv[2], "reason": sys.argv[3], "runner_status": int(sys.argv[4]),
     "child_status": integer_or_null(sys.argv[5]), "validator_status": integer_or_null(sys.argv[6]),
     "preflight_invocations": 1, "runner_invocations": 1,
     "workload_invocations": 1 if sys.argv[5] != "null" else 0,
-    "timed_benchmark_invocations": 1 if sys.argv[5] == "0" else 0,
+    "timed_benchmark_invocations": phases["timed_started"], "phases": phases,
     "candidate_commit": sys.argv[12], "candidate_tree": sys.argv[13],
+    "preserved_scratch": sys.argv[14] if pathlib.Path(sys.argv[14]).is_dir() else None,
     "raw_stdout": artifact(sys.argv[7]), "stdout": artifact(sys.argv[9]),
     "raw_stderr": artifact(sys.argv[10]),
     "validator_stderr": artifact(sys.argv[11]), "accepted": artifact(sys.argv[8]),
@@ -108,8 +121,8 @@ env \
     MISO_ENGINE_BENCH_CANDIDATE_TREE="$candidate_tree" \
     MISO_ENGINE_BENCH_BINARY_SHA256="$(seal_field binary_sha256)" \
     MISO_ENGINE_BENCH_FIXTURE_SHA256="$(seal_field fixture_sha256)" \
-    MISO_ENGINE_BENCH_ARGV="$binary input-symmetry" \
-    MISO_ENGINE_BENCH_CWD="$repository_root" \
+    MISO_ENGINE_BENCH_ARGV="$(seal_field argv)" \
+    MISO_ENGINE_BENCH_CWD="$claimed_cwd" \
     MISO_ENGINE_BENCH_RUST_VERSION="$(seal_field rust_version)" \
     MISO_ENGINE_BENCH_COMPILER="$(seal_field compiler)" \
     MISO_ENGINE_BENCH_TARGET_TRIPLE="$(seal_field target_triple)" \
@@ -117,14 +130,28 @@ env \
     MISO_ENGINE_BENCH_CPU_MODEL="$cpu_model" \
     MISO_ENGINE_BENCH_OS="${MISO_ENGINE_BENCH_OS:-$(uname -s 2>/dev/null || printf unknown)}" \
     MISO_ENGINE_BENCH_METADATA_MISSING="$metadata_missing" \
-    "$binary" input-symmetry >"$scratch/stdout" 2>"$scratch/stderr"
+    bash -c 'cd "$1" && exec "$2" input-symmetry' bash "$claimed_cwd" "$binary" \
+    >"$scratch/stdout" 2>"$scratch/stderr"
 child_status=$?
 set -e
-mv -n -- "$scratch/stdout" "$stdout_log"
-mv -n -- "$scratch/stderr" "$stderr_log"
-cp -- "$stdout_log" "$raw"
+if ! mv -n -- "$scratch/stdout" "$stdout_log"; then
+    preserve_scratch=1
+    publish_disposition FAIL post_workload_persistence 1 "$child_status" "$child_status"
+    exit 1
+fi
+if ! mv -n -- "$scratch/stderr" "$stderr_log"; then
+    preserve_scratch=1
+    publish_disposition FAIL post_workload_persistence 1 "$child_status" "$child_status"
+    exit 1
+fi
+if ! cp -- "$stdout_log" "$raw"; then
+    preserve_scratch=1
+    publish_disposition FAIL post_workload_persistence 1 "$child_status" "$child_status"
+    printf 'Issue-600 input-symmetry runner failure: raw evidence persistence failed; scratch preserved at %s\n' "$scratch" >&2
+    exit 1
+fi
 if ((child_status != 0)); then
-    publish_disposition FAIL child_failed 1 "$child_status" null
+    publish_disposition FAIL child_failed "$child_status" "$child_status" null
     printf 'Issue-600 input-symmetry runner: child failed (status=%s)\n' "$child_status" >&2
     exit "$child_status"
 fi
@@ -132,15 +159,28 @@ set +e
 python3 -I -B "$validator" "$raw" "$seal" >"$scratch/validator.stdout" 2>"$scratch/validator.stderr"
 validator_status=$?
 set -e
-mv -n -- "$scratch/validator.stderr" "$validator_stderr"
+if ! mv -n -- "$scratch/validator.stderr" "$validator_stderr"; then
+    preserve_scratch=1
+    publish_disposition FAIL post_workload_persistence 1 "$child_status" "$validator_status"
+    exit 1
+fi
 if ((validator_status != 0)); then
     publish_disposition FAIL validator_rejected 1 "$child_status" "$validator_status"
     cat "$validator_stderr" >&2
     exit 1
 fi
 temporary_accepted=$(mktemp "$artifact_directory/.accepted.XXXXXX")
-cp -- "$raw" "$temporary_accepted"
-ln -- "$temporary_accepted" "$accepted" || { rm -f -- "$temporary_accepted"; publish_disposition FAIL accepted_publication 1 "$child_status" 0; exit 1; }
+if ! cp -- "$raw" "$temporary_accepted"; then
+    preserve_scratch=1
+    publish_disposition FAIL post_workload_persistence 1 "$child_status" 0
+    exit 1
+fi
+if ! ln -- "$temporary_accepted" "$accepted"; then
+    preserve_scratch=1
+    publish_disposition FAIL accepted_publication 1 "$child_status" 0
+    printf 'Issue-600 input-symmetry runner failure: accepted publication failed; scratch preserved at %s\n' "$scratch" >&2
+    exit 1
+fi
 rm -f -- "$temporary_accepted"
 publish_disposition PASS accepted 0 "$child_status" 0
 printf 'Issue-600 input-symmetry runner: PASS (runner/workload/timed=1/1/1)\n'

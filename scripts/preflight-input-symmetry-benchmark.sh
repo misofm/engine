@@ -20,9 +20,13 @@ for tool in awk cargo cp git mktemp mv python3 rustc sha256sum stat; do
     command -v "$tool" >/dev/null 2>&1 || fail "required tool unavailable: $tool"
 done
 for override in RUSTFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_BUILD_RUSTFLAGS CARGO_BUILD_TARGET \
-    CARGO_INCREMENTAL CARGO_BUILD_INCREMENTAL RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER; do
+    CARGO_INCREMENTAL CARGO_BUILD_INCREMENTAL RUSTC RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER \
+    CARGO_BUILD_RUSTC CARGO_BUILD_RUSTC_WRAPPER CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER; do
     [[ ! -v "$override" ]] || fail "incompatible build environment: $override"
 done
+while IFS= read -r override; do
+    [[ "$override" == CARGO_PROFILE_* ]] && fail "incompatible build environment: $override"
+done < <(compgen -e)
 [[ ! -e "$artifact_directory" || -d "$artifact_directory" ]] || fail 'artifact namespace is not a directory'
 [[ ! -e "$prepared_directory" || -d "$prepared_directory" ]] || fail 'prepared namespace is not a directory'
 mkdir -p "$artifact_directory" "$prepared_directory"
@@ -43,12 +47,16 @@ target_triple=$(rustc -vV | awk '$1 == "host:" { print $2; found=1 } END { if (!
 [[ "$target_triple" == x86_64-unknown-linux-gnu ]] || fail "unsupported target: $target_triple"
 rust_version=$(rustc -Vv | awk 'NR == 1 { print }')
 compiler=$(rustc -V)
-build_flags='-Ctarget-feature=+avx2,+fma;release;opt-level=3;lto=fat;codegen-units=1;panic=abort'
+build_flags='-Ctarget-feature=+avx2,+fma;release;opt-level=3;lto=fat;codegen-units=1;panic=abort;debug=1;debug-assertions=false;overflow-checks=false;incremental=false;rpath=false;strip=none;split-debuginfo=off'
 rm -rf -- "$build_directory"
 mkdir -p "$build_directory"
 if ! (cd "$repository_root" && CARGO_TARGET_DIR="$build_directory" CARGO_INCREMENTAL=0 \
-    CARGO_PROFILE_RELEASE_LTO=fat CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
-    CARGO_PROFILE_RELEASE_PANIC=abort CARGO_ENCODED_RUSTFLAGS=$'\037-Ctarget-feature=+avx2,+fma' \
+    CARGO_PROFILE_RELEASE_OPT_LEVEL=3 CARGO_PROFILE_RELEASE_LTO=fat \
+    CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 CARGO_PROFILE_RELEASE_PANIC=abort \
+    CARGO_PROFILE_RELEASE_DEBUG=1 CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=false \
+    CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=false CARGO_PROFILE_RELEASE_INCREMENTAL=false \
+    CARGO_PROFILE_RELEASE_RPATH=false CARGO_PROFILE_RELEASE_STRIP=none \
+    CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO=off CARGO_ENCODED_RUSTFLAGS='-Ctarget-feature=+avx2,+fma' \
     cargo build --locked --release -p bench --target "$target_triple" >/dev/null); then
     fail 'isolated release build failed'
 fi
@@ -71,7 +79,7 @@ lock_sha256=$(hash_file "$repository_root/Cargo.lock")
 cwd="$repository_root"
 python3 - "$seal" "$candidate_commit" "$candidate_tree" "$binary_sha256" "$fixture_sha256" \
     "$source_sha256" "$validator_sha256" "$runner_sha256" "$preflight_sha256" "$lock_sha256" \
-    "$target_triple" "$rust_version" "$compiler" "$build_flags" "$cwd" <<'PY'
+    "$target_triple" "$rust_version" "$compiler" "$build_flags" "$cwd" "$binary" <<'PY'
 import json, pathlib, sys
 path = pathlib.Path(sys.argv[1])
 value = {
@@ -80,7 +88,8 @@ value = {
     "fixture_sha256": sys.argv[5], "source_sha256": sys.argv[6], "validator_sha256": sys.argv[7],
     "runner_sha256": sys.argv[8], "preflight_sha256": sys.argv[9], "cargo_lock_sha256": sys.argv[10],
     "target_triple": sys.argv[11], "rust_version": sys.argv[12], "compiler": sys.argv[13],
-    "build_flags": sys.argv[14], "cwd": sys.argv[15], "warmup_blocks": 512, "measured_blocks": 4096,
+    "build_flags": sys.argv[14], "cwd": sys.argv[15], "argv": sys.argv[16] + " input-symmetry",
+    "warmup_blocks": 512, "measured_blocks": 4096,
     "records_required": 2, "preflight_invocations": 1, "runner_invocations": 0,
     "workload_invocations": 0, "timed_benchmark_invocations": 0,
 }

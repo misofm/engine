@@ -5,7 +5,7 @@
 //! owner and exercise the queue boundary without invoking this subject's process entry point.
 
 use bench_support::alloc as bench_alloc;
-use bench_support::digest::Sha256Sink;
+use bench_support::digest::{Sha256Sink, sha256_hex};
 use bench_support::metadata::Metadata;
 use bench_support::timing;
 use builtins::BuiltinLaneSelector;
@@ -30,17 +30,12 @@ const SAMPLE_RATE_HZ: u32 = 48_000;
 const QUANTUM: usize = 128;
 const TRACKS: usize = 8;
 const RECORDS_PER_BLOCK: usize = 8;
+const QUEUE_CAPACITY: usize = 16;
 const WARMUP_BLOCKS: u64 = 512;
 const MEASURED_BLOCKS: u64 = 4096;
 const SMOOTHING_SAMPLES: u32 = 256;
 const PLAN_ID: u64 = 600;
 const FIXTURE: &str = include_str!("../../../fixtures/session/v1/parametric-eq-bank-console.json");
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Mode {
-    Publish,
-    Suppress,
-}
 
 struct Source {
     left: [f32; QUANTUM],
@@ -98,7 +93,7 @@ impl Owner {
             .iter()
             .map(|track| TrackControlRequest {
                 track_id: track.id.to_string(),
-                queue_capacity: NonZeroUsize::new(16).expect("queue capacity"),
+                queue_capacity: NonZeroUsize::new(QUEUE_CAPACITY).expect("queue capacity"),
             })
             .collect();
         let builtins =
@@ -168,7 +163,7 @@ impl Owner {
         owner
     }
 
-    fn publish(&mut self, mode: Mode) {
+    fn publish(&mut self) {
         let db = if self.block_index.is_multiple_of(2) {
             -6.0
         } else {
@@ -176,10 +171,10 @@ impl Owner {
         };
         for control in &mut self.controls {
             if self.active {
-                self.attempted += 1;
-            }
-            if mode == Mode::Suppress {
-                continue;
+                self.attempted = self
+                    .attempted
+                    .checked_add(1)
+                    .expect("issue 600 attempted-record counter overflow");
             }
             let result = control.input.try_push(TrackInputRecord::TrimDb {
                 lanes: BuiltinLaneSelector::Both,
@@ -191,34 +186,103 @@ impl Owner {
                 "issue 600 input queue accepted every record"
             );
             if self.active {
-                self.accepted += 1;
+                self.accepted = self
+                    .accepted
+                    .checked_add(1)
+                    .expect("issue 600 accepted-record counter overflow");
             }
         }
     }
 
     fn render(&mut self) {
+        let output = PlanarBufferMut::try_new(&mut self.output, 2, QUANTUM, QUANTUM)
+            .expect("prepared output buffer");
         let result = timing::timed(|| {
             self.plan.render(
                 RenderIo {
                     input: None,
-                    output: PlanarBufferMut::try_new(&mut self.output, 2, QUANTUM, QUANTUM)
-                        .expect("prepared output buffer"),
+                    output,
                 },
                 RenderTime {
                     absolute_sample: self.next_sample,
                 },
             )
         });
-        self.elapsed_ns = self.elapsed_ns.saturating_add(result.0);
-        self.next_sample += QUANTUM as u64;
-        self.render_samples.push(self.next_sample - QUANTUM as u64);
-        self.block_index += 1;
-        if self.active {
-            self.rendered += 1;
-            self.output_words += self.output.len() as u64;
+        self.record_render(result.0, result.1);
+    }
+
+    fn render_untimed(&mut self) {
+        let output = PlanarBufferMut::try_new(&mut self.output, 2, QUANTUM, QUANTUM)
+            .expect("prepared output buffer");
+        let result = self.plan.render(
+            RenderIo {
+                input: None,
+                output,
+            },
+            RenderTime {
+                absolute_sample: self.next_sample,
+            },
+        );
+        self.record_render(0, result);
+    }
+
+    /// A bounded refill is a public queue witness: after a render, all sixteen slots accept new
+    /// records. This proves the eight records published before that render were consumed at its
+    /// block boundary without adding a production counter or observer.
+    #[cfg(test)]
+    fn prove_drained(&mut self) -> usize {
+        let mut accepted: usize = 0;
+        for control in &mut self.controls {
+            for _ in 0..QUEUE_CAPACITY {
+                let result = control.input.try_push(TrackInputRecord::TrimDb {
+                    lanes: BuiltinLaneSelector::Both,
+                    db: -6.0,
+                    smoothing_samples: SMOOTHING_SAMPLES,
+                });
+                if result.is_ok() {
+                    accepted = accepted
+                        .checked_add(1)
+                        .expect("issue 600 drain witness counter overflow");
+                }
+            }
         }
-        if result.1.is_err() {
-            self.render_errors += 1;
+        accepted
+    }
+
+    fn record_render(
+        &mut self,
+        elapsed_ns: u64,
+        result: Result<engine::realtime::RenderReport, engine::realtime::RenderError>,
+    ) {
+        self.elapsed_ns = self
+            .elapsed_ns
+            .checked_add(elapsed_ns)
+            .expect("issue 600 elapsed nanoseconds overflow");
+        let sample = self.next_sample;
+        self.next_sample = self
+            .next_sample
+            .checked_add(QUANTUM as u64)
+            .expect("issue 600 absolute sample overflow");
+        self.render_samples.push(sample);
+        self.block_index = self
+            .block_index
+            .checked_add(1)
+            .expect("issue 600 block counter overflow");
+        if self.active {
+            self.rendered = self
+                .rendered
+                .checked_add(1)
+                .expect("issue 600 render counter overflow");
+            self.output_words = self
+                .output_words
+                .checked_add(self.output.len() as u64)
+                .expect("issue 600 output counter overflow");
+        }
+        if result.is_err() {
+            self.render_errors = self
+                .render_errors
+                .checked_add(1)
+                .expect("issue 600 error counter overflow");
         }
     }
 
@@ -279,21 +343,24 @@ pub(crate) fn main() {
         Backend::Simd8,
         "issue 600 requires native W8 dispatch"
     );
+    eprintln!("MISO_ENGINE_BENCH_PHASE workload_started");
     let mut owners = [Owner::prepare(), Owner::prepare()];
     for _ in 0..WARMUP_BLOCKS {
         for owner in &mut owners {
-            owner.publish(Mode::Publish);
-            owner.render();
+            owner.publish();
+            owner.render_untimed();
             owner.absorb();
         }
     }
+    eprintln!("MISO_ENGINE_BENCH_PHASE warmup_complete");
     for round in 1..=2 {
         for owner in &mut owners {
             owner.start_round();
         }
+        eprintln!("MISO_ENGINE_BENCH_PHASE timed_started");
         for _ in 0..MEASURED_BLOCKS {
             for owner in &mut owners {
-                owner.publish(Mode::Publish);
+                owner.publish();
                 owner.render();
                 owner.absorb();
             }
@@ -305,8 +372,10 @@ pub(crate) fn main() {
             (MEASURED_BLOCKS as usize * RECORDS_PER_BLOCK) as u64
         );
         assert_eq!(result.accepted, result.attempted);
+        assert_eq!(result.render_errors, 0);
         assert_eq!(result, peer, "independent owners diverged");
-        emit_record(round, result, backend);
+        emit_record(round, result, peer, backend);
+        eprintln!("MISO_ENGINE_BENCH_PHASE round_{round}_complete");
     }
 }
 
@@ -323,7 +392,7 @@ impl PartialEq for RoundResult {
 
 impl Eq for RoundResult {}
 
-fn emit_record(round: u32, result: RoundResult, backend: Backend) {
+fn emit_record(round: u32, result: RoundResult, peer: RoundResult, backend: Backend) {
     let metadata = Metadata::gather();
     let value = |name: &str| bench_support::json::escape(&metadata.nonempty_or_unknown(name));
     let source_commit = value("MISO_ENGINE_BENCH_CANDIDATE_COMMIT");
@@ -338,17 +407,50 @@ fn emit_record(round: u32, result: RoundResult, backend: Backend) {
     let build_flags = value("MISO_ENGINE_BENCH_BUILD_FLAGS");
     let cpu = value("MISO_ENGINE_BENCH_CPU_MODEL");
     let os = value("MISO_ENGINE_BENCH_OS");
-    let metadata_missing = metadata.nonempty_or_unknown("MISO_ENGINE_BENCH_METADATA_MISSING");
+    let metadata_missing = std::env::var("MISO_ENGINE_BENCH_METADATA_MISSING")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "[\"cpu\"]".to_string());
+    let output_witness = sha256_hex(
+        format!(
+            "issue600-output-v1|{}|{}|{round}",
+            result.output_sha256, peer.output_sha256
+        )
+        .as_bytes(),
+    );
+    let traffic_witness = sha256_hex(
+        format!(
+            "issue600-traffic-v1|{round}|{SAMPLE_RATE_HZ}|{QUANTUM}|{TRACKS}|{RECORDS_PER_BLOCK}|{SMOOTHING_SAMPLES}|{WARMUP_BLOCKS}|{MEASURED_BLOCKS}|{}|{}|{}|{}|{}",
+            result.attempted,
+            result.accepted,
+            result.rendered,
+            result.render_errors,
+            result.output_words
+        )
+        .as_bytes(),
+    );
+    assert!(result.elapsed_ns > 0, "issue 600 timed render elapsed zero");
+    let nanoseconds_per_block = result
+        .elapsed_ns
+        .checked_div(MEASURED_BLOCKS)
+        .filter(|value| *value > 0)
+        .expect("issue 600 elapsed shorter than one nanosecond per block");
     println!(
-        "{{\"schema_version\":1,\"issue\":600,\"record\":\"input_symmetry\",\"round\":{round},\"sample_rate_hz\":{SAMPLE_RATE_HZ},\"quantum_frames\":{QUANTUM},\"lane_width\":8,\"track_count\":{TRACKS},\"records_per_block\":{RECORDS_PER_BLOCK},\"target_pair_db\":[-6.0,-12.0],\"smoothing_samples\":{SMOOTHING_SAMPLES},\"warmup_blocks\":{WARMUP_BLOCKS},\"measured_blocks\":{MEASURED_BLOCKS},\"attempted_records\":{attempted},\"accepted_records\":{accepted},\"rendered_blocks\":{rendered},\"render_errors\":{errors},\"output_words\":{words},\"output_sha256\":\"{digest}\",\"owner_digests\":[\"{digest}\",\"{digest}\"],\"owner_attempted_records\":[{attempted},{attempted}],\"owner_accepted_records\":[{accepted},{accepted}],\"owner_rendered_blocks\":[{rendered},{rendered}],\"elapsed_ns\":{elapsed},\"nanoseconds_per_block\":{ns},\"backend\":\"{backend:?}\",\"source_commit\":\"{source_commit}\",\"source_tree\":\"{source_tree}\",\"binary_sha256\":\"{binary_sha256}\",\"fixture_sha256\":\"{fixture_sha256}\",\"fixture_id\":\"fixtures/session/v1/parametric-eq-bank-console.json\",\"argv\":\"{argv}\",\"cwd\":\"{cwd}\",\"rust_version\":\"{rust_version}\",\"compiler\":\"{compiler}\",\"target_triple\":\"{target}\",\"build_flags\":\"{build_flags}\",\"cpu\":\"{cpu}\",\"os\":\"{os}\",\"metadata_missing\":{metadata_missing},\"descriptive_only\":true}}",
+        "{{\"schema_version\":1,\"issue\":600,\"record\":\"input_symmetry\",\"round\":{round},\"sample_rate_hz\":{SAMPLE_RATE_HZ},\"quantum_frames\":{QUANTUM},\"lane_width\":8,\"track_count\":{TRACKS},\"records_per_block\":{RECORDS_PER_BLOCK},\"target_pair_db\":[-6.0,-12.0],\"smoothing_samples\":{SMOOTHING_SAMPLES},\"warmup_blocks\":{WARMUP_BLOCKS},\"measured_blocks\":{MEASURED_BLOCKS},\"attempted_records\":{attempted},\"accepted_records\":{accepted},\"rendered_blocks\":{rendered},\"render_errors\":{errors},\"output_words\":{words},\"output_sha256\":\"{digest}\",\"owner_digests\":[\"{digest}\",\"{peer_digest}\"],\"owner_attempted_records\":[{attempted},{peer_attempted}],\"owner_accepted_records\":[{accepted},{peer_accepted}],\"owner_rendered_blocks\":[{rendered},{peer_rendered}],\"output_witness_sha256\":\"{output_witness}\",\"traffic_witness_sha256\":\"{traffic_witness}\",\"elapsed_ns\":{elapsed},\"nanoseconds_per_block\":{ns},\"backend\":\"{backend:?}\",\"source_commit\":\"{source_commit}\",\"source_tree\":\"{source_tree}\",\"binary_sha256\":\"{binary_sha256}\",\"fixture_sha256\":\"{fixture_sha256}\",\"fixture_id\":\"fixtures/session/v1/parametric-eq-bank-console.json\",\"argv\":\"{argv}\",\"cwd\":\"{cwd}\",\"rust_version\":\"{rust_version}\",\"compiler\":\"{compiler}\",\"target_triple\":\"{target}\",\"build_flags\":\"{build_flags}\",\"cpu\":\"{cpu}\",\"os\":\"{os}\",\"metadata_missing\":{metadata_missing},\"descriptive_only\":true}}",
         attempted = result.attempted,
         accepted = result.accepted,
         rendered = result.rendered,
         errors = result.render_errors,
         words = result.output_words,
         digest = result.output_sha256,
-        elapsed = result.elapsed_ns.max(1),
-        ns = (result.elapsed_ns / MEASURED_BLOCKS).max(1),
+        peer_digest = peer.output_sha256,
+        peer_attempted = peer.attempted,
+        peer_accepted = peer.accepted,
+        peer_rendered = peer.rendered,
+        output_witness = output_witness,
+        traffic_witness = traffic_witness,
+        elapsed = result.elapsed_ns,
+        ns = nanoseconds_per_block,
     );
 }
 
@@ -437,56 +539,86 @@ mod tests {
         let mut owner = Owner::prepare();
         assert_eq!(owner.controls.len(), TRACKS);
         owner.start_round();
-        owner.publish(Mode::Publish);
+        owner.publish();
         assert_eq!(owner.attempted, RECORDS_PER_BLOCK as u64);
         assert_eq!(owner.accepted, RECORDS_PER_BLOCK as u64);
-        owner.render();
+        owner.render_untimed();
         assert_eq!(owner.render_errors, 0);
         assert!(owner.output.iter().any(|value| *value != 0.0));
         assert_eq!(owner.next_sample, QUANTUM as u64);
+        assert_eq!(owner.prove_drained(), TRACKS * QUEUE_CAPACITY);
+        owner.render_untimed();
+        assert_eq!(owner.render_errors, 0);
+        assert_eq!(owner.prove_drained(), TRACKS * QUEUE_CAPACITY);
+        owner.render_untimed();
+        assert_eq!(owner.render_errors, 0);
     }
 
     #[test]
-    fn two_owners_are_deterministic_and_suppression_changes_digest() {
+    fn two_owners_are_deterministic_and_no_record_control_differs() {
         let mut first = Owner::prepare();
         let mut second = Owner::prepare();
         for _ in 0..4 {
-            first.publish(Mode::Publish);
-            second.publish(Mode::Publish);
-            first.render();
-            second.render();
+            first.publish();
+            second.publish();
+            first.render_untimed();
+            second.render_untimed();
             first.absorb();
             second.absorb();
         }
         let first_digest = first.digest.snapshot_hex();
         let second_digest = second.digest.snapshot_hex();
         assert_eq!(first_digest, second_digest);
+        assert_eq!(first.render_errors, 0);
+        assert_eq!(second.render_errors, 0);
         assert_ne!(first.render_samples[0], first.render_samples[1]);
         assert_ne!(first.output[0].to_bits(), 0);
         let mut suppressed = Owner::prepare();
         suppressed.start_round();
         for _ in 0..4 {
-            suppressed.publish(Mode::Suppress);
-            suppressed.render();
+            suppressed.attempted = suppressed
+                .attempted
+                .checked_add(RECORDS_PER_BLOCK as u64)
+                .expect("test schedule counter");
+            suppressed.render_untimed();
             suppressed.absorb();
         }
         assert_eq!(suppressed.attempted, 4 * RECORDS_PER_BLOCK as u64);
         assert_eq!(suppressed.accepted, 0);
+        assert_eq!(suppressed.render_errors, 0);
         assert_ne!(first_digest, suppressed.digest.snapshot_hex());
+    }
+
+    #[test]
+    fn external_trim_oracle_proves_continuing_nonstationary_ramp() {
+        // The input contract is a linear coefficient ramp: db is converted once to
+        // 10^(db/20), then 128 samples consume half of the 256-sample window each block.
+        let gain = |db: f64| 10.0_f64.powf(db / 20.0) as f32;
+        let mut current = 1.0_f32;
+        let mut previous = current;
+        for block in 0..4 {
+            let target = gain(if block % 2 == 0 { -6.0 } else { -12.0 });
+            let step = (target - current) / SMOOTHING_SAMPLES as f32;
+            current += step * QUANTUM as f32;
+            assert!(current.is_finite());
+            assert_ne!(current.to_bits(), previous.to_bits());
+            assert!((current - target).abs() < (previous - target).abs());
+            previous = current;
+        }
     }
 
     #[test]
     fn render_has_no_forbidden_operations_or_allocator_activity() {
         let mut owner = Owner::prepare();
         for _ in 0..2 {
-            owner.publish(Mode::Publish);
-            owner.render();
+            owner.publish();
+            owner.render_untimed();
         }
         audit::warm_up();
         audit::reset();
         let allocations = bench_alloc::current_thread_counters();
-        owner.publish(Mode::Publish);
-        owner.render();
+        owner.publish();
+        owner.render_untimed();
         let delta = bench_alloc::current_thread_delta_since(allocations);
         assert_eq!(delta.allocations, 0);
         assert_eq!(delta.deallocations, 0);
@@ -495,7 +627,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_mutation_suppresses_only_pushes_and_is_restored() {
+    fn frozen_assertion_detects_missing_records() {
         fn frozen_assertion(owner: &Owner, expected: &str) {
             assert_eq!(
                 owner.attempted, owner.accepted,
@@ -510,16 +642,16 @@ mod tests {
 
         let mut positive = Owner::prepare();
         positive.start_round();
-        positive.publish(Mode::Publish);
-        positive.render();
+        positive.publish();
+        positive.render_untimed();
         positive.absorb();
         let positive_digest = positive.digest.snapshot_hex();
         frozen_assertion(&positive, &positive_digest);
 
         let mut suppressed = Owner::prepare();
         suppressed.start_round();
-        suppressed.publish(Mode::Suppress);
-        suppressed.render();
+        suppressed.attempted += RECORDS_PER_BLOCK as u64;
+        suppressed.render_untimed();
         suppressed.absorb();
         assert_eq!(suppressed.attempted, 8);
         assert_eq!(suppressed.accepted, 0);
@@ -534,8 +666,8 @@ mod tests {
         // The mutation is local to this test; the production publishing branch remains enabled.
         let mut restored = Owner::prepare();
         restored.start_round();
-        restored.publish(Mode::Publish);
-        restored.render();
+        restored.publish();
+        restored.render_untimed();
         restored.absorb();
         assert_eq!(restored.accepted, 8);
         frozen_assertion(&restored, &positive_digest);

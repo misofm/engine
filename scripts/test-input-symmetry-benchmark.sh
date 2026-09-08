@@ -37,6 +37,7 @@ EOF
 cat >"$template/bin/cargo" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+[[ "${CARGO_ENCODED_RUSTFLAGS:-}" == '-Ctarget-feature=+avx2,+fma' ]] || exit 75
 mkdir -p "$CARGO_TARGET_DIR/x86_64-unknown-linux-gnu/release"
 cp "$MISO_ENGINE_TEST_FAKE_BENCH" "$CARGO_TARGET_DIR/x86_64-unknown-linux-gnu/release/bench"
 chmod 0755 "$CARGO_TARGET_DIR/x86_64-unknown-linux-gnu/release/bench"
@@ -50,6 +51,8 @@ pathlib.Path(os.environ['MISO_ENGINE_TEST_LAUNCH_LOG']).open('a', encoding='utf-
 if os.environ.get('MISO_ENGINE_TEST_CHILD_MODE') == 'fail':
     print('synthetic child failure', file=sys.stderr)
     raise SystemExit(71)
+for phase in ('workload_started', 'warmup_complete', 'timed_started', 'round_1_complete', 'round_2_complete'):
+    print('MISO_ENGINE_BENCH_PHASE ' + phase, file=sys.stderr)
 record = {
  'schema_version': 1, 'issue': 600, 'record': 'input_symmetry', 'round': 1, 'sample_rate_hz': 48000,
  'quantum_frames': 128, 'lane_width': 8, 'track_count': 8, 'records_per_block': 8,
@@ -58,7 +61,8 @@ record = {
  'rendered_blocks': 4096, 'render_errors': 0, 'output_words': 1048576,
  'output_sha256': '1' * 64, 'owner_digests': ['1' * 64, '1' * 64],
  'owner_attempted_records': [32768, 32768], 'owner_accepted_records': [32768, 32768],
- 'owner_rendered_blocks': [4096, 4096], 'elapsed_ns': 409600, 'nanoseconds_per_block': 100,
+ 'owner_rendered_blocks': [4096, 4096], 'output_witness_sha256': '', 'traffic_witness_sha256': '',
+ 'elapsed_ns': 409600, 'nanoseconds_per_block': 100,
  'backend': 'Simd8', 'source_commit': os.environ['MISO_ENGINE_BENCH_CANDIDATE_COMMIT'],
  'source_tree': os.environ['MISO_ENGINE_BENCH_CANDIDATE_TREE'],
  'binary_sha256': os.environ['MISO_ENGINE_BENCH_BINARY_SHA256'],
@@ -69,12 +73,18 @@ record = {
  'compiler': os.environ['MISO_ENGINE_BENCH_COMPILER'],
  'target_triple': os.environ['MISO_ENGINE_BENCH_TARGET_TRIPLE'],
  'build_flags': os.environ['MISO_ENGINE_BENCH_BUILD_FLAGS'], 'cpu': 'unknown', 'os': 'linux',
- 'metadata_missing': [], 'descriptive_only': True,
+ 'metadata_missing': ['cpu'], 'descriptive_only': True,
 }
+import hashlib
+record['output_witness_sha256'] = hashlib.sha256(f"issue600-output-v1|{'1' * 64}|{'1' * 64}|1".encode()).hexdigest()
+record['traffic_witness_sha256'] = hashlib.sha256(b'issue600-traffic-v1|1|48000|128|8|8|256|512|4096|32768|32768|4096|0|1048576').hexdigest()
 if os.environ.get('MISO_ENGINE_TEST_CHILD_MODE') == 'invalid':
     record.pop('accepted_records')
 print(json.dumps(record, sort_keys=True))
-print(json.dumps(dict(record, round=2), sort_keys=True))
+record['round'] = 2
+record['output_witness_sha256'] = hashlib.sha256(f"issue600-output-v1|{'1' * 64}|{'1' * 64}|2".encode()).hexdigest()
+record['traffic_witness_sha256'] = hashlib.sha256(b'issue600-traffic-v1|2|48000|128|8|8|256|512|4096|32768|32768|4096|0|1048576').hexdigest()
+print(json.dumps(record, sort_keys=True))
 PY
 chmod 0755 "$template/bin/git" "$template/bin/rustc" "$template/bin/cargo" "$template/fake-bench.py"
 
@@ -86,6 +96,11 @@ set +e
 invalid_status=$?
 set -e
 [[ "$invalid_status" == 2 ]] || { printf 'preflight invalid-argument test failed\n' >&2; exit 1; }
+set +e
+CARGO_PROFILE_RELEASE_LTO=inherited PATH="$case_root/bin:$PATH" bash "$case_root/scripts/preflight-input-symmetry-benchmark.sh" >/dev/null 2>&1
+profile_status=$?
+set -e
+[[ "$profile_status" == 1 ]] || { printf 'inherited profile override escaped\n' >&2; exit 1; }
 PATH="$case_root/bin:$PATH" MISO_ENGINE_TEST_FAKE_BENCH="$case_root/fake-bench.py" \
     bash "$case_root/scripts/preflight-input-symmetry-benchmark.sh" >/dev/null
 seal="$case_root/artifacts/issue600-input-symmetry/input-symmetry-benchmark.preflight.json"
@@ -124,6 +139,14 @@ set -e
 [[ "$failure_status" == 71 ]] || { printf 'child failure propagation escaped\n' >&2; exit 1; }
 [[ -f "$case_root/artifacts/issue600-input-symmetry/input-symmetry-benchmark.raw.jsonl" ]]
 [[ ! -e "$case_root/artifacts/issue600-input-symmetry/input-symmetry-benchmark.jsonl" ]]
+python3 - "$case_root/artifacts/issue600-input-symmetry/input-symmetry-benchmark.disposition.json" <<'PY'
+import json, pathlib, sys
+value = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'))
+assert value['status'] == 'FAIL' and value['reason'] == 'child_failed'
+assert value['child_status'] == 71 and value['runner_status'] == 71
+assert value['workload_invocations'] == 1 and value['timed_benchmark_invocations'] == 0
+PY
+[[ "$(wc -l <"$launch_log" | tr -d ' ')" == 1 ]]
 
 case_root="$scratch/case-invalid"
 cp -a "$template" "$case_root"
@@ -139,6 +162,14 @@ set -e
 [[ -f "$case_root/artifacts/issue600-input-symmetry/input-symmetry-benchmark.raw.jsonl" ]]
 [[ -f "$case_root/artifacts/issue600-input-symmetry/input-symmetry-benchmark.validator.stderr" ]]
 [[ ! -e "$case_root/artifacts/issue600-input-symmetry/input-symmetry-benchmark.jsonl" ]]
+python3 - "$case_root/artifacts/issue600-input-symmetry/input-symmetry-benchmark.disposition.json" <<'PY'
+import json, pathlib, sys
+value = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'))
+assert value['status'] == 'FAIL' and value['reason'] == 'validator_rejected'
+assert value['child_status'] == 0 and value['runner_status'] == 1 and value['validator_status'] == 1
+assert value['workload_invocations'] == 1 and value['timed_benchmark_invocations'] == 1
+PY
+[[ "$(wc -l <"$launch_log" | tr -d ' ')" == 1 ]]
 
 case_root="$scratch/case-identity"
 cp -a "$template" "$case_root"
@@ -153,4 +184,87 @@ identity_status=$?
 set -e
 [[ "$identity_status" == 1 ]] || { printf 'fixture identity mismatch escaped\n' >&2; exit 1; }
 [[ ! -e "$launch_log" ]]
-printf 'Issue-600 input-symmetry lifecycle self-test passed (real_subject/workload/timing=0/0/0; synthetic_child=2)\n'
+
+case_root="$scratch/case-source"
+cp -a "$template" "$case_root"
+launch_log="$case_root/launch.log"
+PATH="$case_root/bin:$PATH" MISO_ENGINE_TEST_FAKE_BENCH="$case_root/fake-bench.py" \
+    bash "$case_root/scripts/preflight-input-symmetry-benchmark.sh" >/dev/null
+printf 'source mutation\n' >>"$case_root/tools/bench/src/input_symmetry.rs"
+set +e
+MISO_ENGINE_TEST_LAUNCH_LOG="$launch_log" PATH="$case_root/bin:$PATH" \
+    bash "$case_root/scripts/run-input-symmetry-benchmark.sh" >/dev/null 2>&1
+source_status=$?
+set -e
+[[ "$source_status" == 1 && ! -e "$launch_log" ]] || { printf 'source identity mismatch escaped\n' >&2; exit 1; }
+
+case_root="$scratch/case-binary"
+cp -a "$template" "$case_root"
+launch_log="$case_root/launch.log"
+PATH="$case_root/bin:$PATH" MISO_ENGINE_TEST_FAKE_BENCH="$case_root/fake-bench.py" \
+    bash "$case_root/scripts/preflight-input-symmetry-benchmark.sh" >/dev/null
+printf 'binary mutation\n' >>"$case_root/target/issue600-input-symmetry/bench"
+set +e
+MISO_ENGINE_TEST_LAUNCH_LOG="$launch_log" PATH="$case_root/bin:$PATH" \
+    bash "$case_root/scripts/run-input-symmetry-benchmark.sh" >/dev/null 2>&1
+binary_status=$?
+set -e
+[[ "$binary_status" == 1 && ! -e "$launch_log" ]] || { printf 'binary identity mismatch escaped\n' >&2; exit 1; }
+
+case_root="$scratch/case-persistence"
+cp -a "$template" "$case_root"
+launch_log="$case_root/launch.log"
+PATH="$case_root/bin:$PATH" MISO_ENGINE_TEST_FAKE_BENCH="$case_root/fake-bench.py" \
+    bash "$case_root/scripts/preflight-input-symmetry-benchmark.sh" >/dev/null
+cat >"$case_root/bin/cp" <<'EOF'
+#!/usr/bin/env bash
+for argument in "$@"; do
+  if [[ "${MISO_ENGINE_TEST_PERSIST_FAIL:-0}" == 1 && "$argument" == *raw.jsonl ]]; then exit 73; fi
+done
+exec /usr/bin/cp "$@"
+EOF
+chmod 0755 "$case_root/bin/cp"
+set +e
+MISO_ENGINE_TEST_LAUNCH_LOG="$launch_log" MISO_ENGINE_TEST_PERSIST_FAIL=1 PATH="$case_root/bin:$PATH" \
+    bash "$case_root/scripts/run-input-symmetry-benchmark.sh" >/dev/null 2>&1
+persistence_status=$?
+set -e
+persist_disposition="$case_root/artifacts/issue600-input-symmetry/input-symmetry-benchmark.disposition.json"
+[[ "$persistence_status" == 1 ]]
+python3 - "$persist_disposition" <<'PY'
+import json, pathlib, sys
+value = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'))
+assert value['status'] == 'FAIL' and value['reason'] == 'post_workload_persistence'
+assert value['child_status'] == 0 and value['runner_status'] == 1
+assert value['preserved_scratch'] is not None and pathlib.Path(value['preserved_scratch']).is_dir()
+PY
+[[ "$(wc -l <"$launch_log" | tr -d ' ')" == 1 ]]
+
+case_root="$scratch/case-publication"
+cp -a "$template" "$case_root"
+launch_log="$case_root/launch.log"
+PATH="$case_root/bin:$PATH" MISO_ENGINE_TEST_FAKE_BENCH="$case_root/fake-bench.py" \
+    bash "$case_root/scripts/preflight-input-symmetry-benchmark.sh" >/dev/null
+cat >"$case_root/bin/ln" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${MISO_ENGINE_TEST_PUBLICATION_FAIL:-0}" == 1 ]]; then exit 74; fi
+exec /usr/bin/ln "$@"
+EOF
+chmod 0755 "$case_root/bin/ln"
+set +e
+MISO_ENGINE_TEST_LAUNCH_LOG="$launch_log" MISO_ENGINE_TEST_PUBLICATION_FAIL=1 PATH="$case_root/bin:$PATH" \
+    bash "$case_root/scripts/run-input-symmetry-benchmark.sh" >/dev/null 2>&1
+publication_status=$?
+set -e
+publication_disposition="$case_root/artifacts/issue600-input-symmetry/input-symmetry-benchmark.disposition.json"
+[[ "$publication_status" == 1 ]]
+python3 - "$publication_disposition" <<'PY'
+import json, pathlib, sys
+value = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'))
+assert value['status'] == 'FAIL' and value['reason'] == 'accepted_publication'
+assert value['child_status'] == 0 and value['runner_status'] == 1
+assert value['raw_stdout'] is not None and value['accepted'] is None
+assert value['preserved_scratch'] is not None and pathlib.Path(value['preserved_scratch']).is_dir()
+PY
+[[ "$(wc -l <"$launch_log" | tr -d ' ')" == 1 ]]
+printf 'Issue-600 input-symmetry lifecycle self-test passed (real_subject/workload/timing=0/0/0; synthetic_child=5)\n'
