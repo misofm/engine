@@ -56,7 +56,7 @@ The W8 body and scalar bodies are the supported caller evidence.
 
 The source access implementation is `kernel.rs:229-272`: DualMono loads two own words and
 writes `[LL,LL,RR,RR]`; LinkedEqual loads two own words and writes `[LL,RR,RR,LL]`; LinkedUnequal
-loads four words and writes `[left(iL),right(iL),right(iR),left(iR)]`. In complete LLVM bodies,
+loads four words and writes `[left(iL),right(iL),right(iR),left(iR)]`. In the historically complete LLVM bodies,
 source-debug-location counts for each of source lines 236, 237, 251, 252, 266, 267, 268, and
 269 are respectively 5 each in scalar disconnected, 12 each in connected `run_block`, 8 each in
 W4, and 16 each in W8. Tap-index address arithmetic at lines 248 and 263 and stores into `taps`

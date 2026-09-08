@@ -2,7 +2,7 @@
 
 Verified clean, pushed HEAD `a57c8a7f7f89ef51c9d188aa6e4f1f711360cd3d` against live main `32a4c2058f2c01dea78af32affab660dbc17cae0`. [#539](https://github.com/misofm/engine/issues/539) remains OPEN with exact title/body synchronization. Source and captured configuration hashes match; no production changes separate this checkpoint from the base. Post-main qualification `34089134766` completed SUCCESS.
 
-I independently verified both full original compiler-output hashes and all ten selected intervals, sizes and hashes. The successful capture is at `c97c1944`, status 0. The interrupted worker report supplies no mapping evidence; the findings below come from the retained compiler output.
+I independently verified both full original compiler-output hashes and all ten historical selected intervals, sizes and hashes. The successful capture is at `c97c1944`, status 0. The interrupted worker report supplies no mapping evidence; the findings below come from the recorded compiler-output identities and surviving assembly excerpts.
 
 **Provenance is sufficient for this bounded decision.** Captured Cargo argv, Rust `1.97.1`/LLVM `22.1.6`, configuration and source identities are consistent. The retained Cargo fingerprint records `["-C","target-feature=+avx2,+fma"]`; actual function attributes include AVX2/FMA, and the module identifies the pinned compiler and optimized compilation. Its profile fingerprint matches the retained #537 baseline/candidate captures under the unchanged release configuration.
 

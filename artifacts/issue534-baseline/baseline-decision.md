@@ -58,8 +58,9 @@ corrected, recorded invocation above is the only compiler capture and completed 
 
 `gate_block` and `run_segment` are `#[inline(always)]`; neither has a standalone emitted function
 definition in this LTO output. LLVM debug metadata names their monomorphizations, but those names
-are not treated as hot symbols. The selected complete caller extracts and manifest are under
-`/tmp/issue534-baseline/selected/`.
+are not treated as hot symbols. The historical complete caller extract ranges and manifest identity
+are recorded under `/tmp/issue534-baseline/selected/`; issue #625 removed the selected LLVM
+payloads from current main while the selected assembly remains.
 
 The real production boundary mapping is:
 
