@@ -44,3 +44,15 @@ Stop before changing production code, introducing a fixture framework, editing a
 ## Inherited evidence
 
 Astra LOW's #605 final verdict at exact reviewed head `4a63daf087ce4c11374401036f4af4d23c697553` accepted second-zero validation, typed unpublished behavior, real sticky-fault refusal with retained state/time, cancellation record/time preservation, delivery ownership/event assertions, typed error documentation and live allocation counting. Protocol 161/161, scalar endpoint 10/10 and diff checks passed with no lock drift. It rejected only the all-ingress subset/order matrix, second-record invalid plus encoded-byte preservation, and exact cached-replay output/precedence evidence listed above. Those accepted controls remain regressions and must not be rewritten merely to restate them.
+
+## Astra LOW scope review
+
+Astra LOW returned **PASS** at exact clean head/upstream
+`6d395f054ef78a4c84ce004a727b3642c947d701`, with main/merge-base
+`6fe8676e1537bc2c952ac87ee2fe31c545438474`, tracker `6bff8180c5a7c923f6e836942e635f42318aef09`
+and current #607 coordination head `20a9265cd705fe33d76657a37ce44c43fc1e7997`. The reviewer confirmed
+that this qualification-only successor preserves #605's three failed attempts, freezes production
+and artifacts, owns only the scalar endpoint fixture plus spec/evidence, and discriminates exactly
+the three residual obligations without a new framework. Luna HIGH/XHIGH attempt 1 is authorized
+within that exact scope. A production defect requires a stop and rebrief; artifact work remains
+deferred until source PASS.
