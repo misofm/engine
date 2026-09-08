@@ -226,3 +226,22 @@ chronology that the retained evidence cannot prove.
 No build, gate, install, browser, output generation, pin, lineage, or promotion
 execution is authorized. A separate Astra LOW attempt-2 evidence-disposition
 PASS remains required before promotion can be considered.
+
+## Astra LOW attempt 2 evidence-disposition review — PASS
+
+Astra LOW returned **PASS** at exact clean pushed head
+`40ecd3db63d8b0e6f728217a41a5502287359029`. All 91 manifest entries verify.
+The eleven numbered records consistently bind frozen `dc14ca85`, the first
+scratch checkout and `/tmp/issue627-qualified-output`; all statuses are zero and
+none refers to the duplicate checkout or output. Normalized comparison proves
+the five non-Wasm files unchanged and only the expected Wasm digest changed.
+GitHub/spec synchronization passes.
+
+The first sequence independently supports candidate qualification. The retained
+records cannot prove duplicate chronology or independent process count, but no
+such claim supplies technical credit: the duplicate remains separately preserved
+and receives none. Attempt 1 remains **FAIL**. Luna HIGH/XHIGH may now make
+exactly the original three-file repository promotion for approved candidate
+`63ef81c105d50aed41164aa3c6c6f8853a314b99d642e209e7cc3aefe3bdbca1`. No
+build, gate, install, or browser execution is authorized until root checkpoints
+that promotion.
