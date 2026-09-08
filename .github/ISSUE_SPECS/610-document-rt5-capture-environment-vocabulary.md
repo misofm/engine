@@ -43,7 +43,7 @@ No capture script, validator, runner, Rust source, fixture, Cargo file, policy, 
 2. Luna XHIGH adds the 20 exact rows in the document's existing schema and style, with no duplicate or broader invented vocabulary. Root commits and pushes the exact tranche.
 3. Astra LOW reviews every description against actual source use and confirms no existing row changed semantically. Run `bash scripts/check-env-vocabulary.sh`, `bash scripts/test-env-vocabulary.sh`, the docs/research gates, formatting/diff, and focused checksum verification of the inherited capture evidence. No capture executable or timing path receives credit.
 4. Rebase or merge current main if needed, recheck #608 disjointness, and obtain Astra LOW exact integrated-head PASS. Lane B confirms the inherited PASS/N/A artifact disposition remains applicable.
-5. Push the branch, refresh PR #609 only if GitHub permits a clean successor identity; otherwise open one new PR. Require successful qualification, guarded merge, successful post-main qualification, issue/handoff synchronization and clean delivered-worktree removal.
+5. Push the branch and open one new PR; PR #609 remains closed with its failed run and old branch identity. Require successful qualification, guarded merge, successful post-main qualification, issue/handoff synchronization and clean delivered-worktree removal.
 
 The accepted capture remains anchored to source commit `3b632cdb68105e2023b08ac90b4e2baa99bafa53`, raw/accepted SHA-256 `59257eb092f197b616cbaa20ec713ed8b4e10446c29941e8a1d7d23c96db89ca`, and results 7,226/7,219 ns per plan render. Those values are descriptive only. No preflight, prepared build, runner, capture, retry, resume, or timing is authorized.
 
