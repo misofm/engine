@@ -183,3 +183,18 @@ budgets. Resource/native-witness and 26 mutations, hermetic, 11 SDK tests, Chrom
 151.0.7922.34, Firefox 153.0, WebKit 26.5 and matrix checks pass. Scratch changes are exactly the
 pin, two results lineage fields and generated matrix lineage; browser rows/resources are frozen.
 Luna XHIGH may now promote only those three repository surfaces. PR/merge remain unauthorized.
+
+## Conditional promotion and ordinary post-pin build
+
+The qualified pin and lineage surfaces are checkpointed at `8577f1aa4e2f723929137a978703581ea25da483`.
+Their diff is exactly the pin, `candidateCommit`/`wasmSha256`, and generated matrix lineage; every
+browser row, version, gate and resource remains byte-stable, and the two reviewed checker scripts
+are unchanged.
+
+Root ran the single authorized ordinary no-bypass post-pin builder at that exact clean pushed head.
+It continued under one process after the initial output yield, exited zero and emitted exactly six
+files. Every output byte-matches the preserved qualified candidate: Wasm is `f80b6392…`, and the
+five non-Wasm files retain their delivered CP8 hashes. The 13-entry checksum-verified record is under
+`artifacts/issue619-postpin/`; generated outputs and build targets remain outside Git. No retry,
+browser, benchmark or timing ran. Astra LOW post-pin static/resource/hermetic/SDK and exact-head/
+current-main review remain required before PR delivery.
