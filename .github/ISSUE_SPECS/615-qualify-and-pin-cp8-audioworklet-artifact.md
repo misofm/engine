@@ -71,3 +71,15 @@ observed digest, frozen ancestry and unchanged compiled inputs otherwise passed.
 the scratch lineage-overlay rule above, removed the four extra blank lines and refreshed the
 evidence checksum manifest. Raw build stdout/stderr/status and all substantive probe content remain
 unchanged. Scratch qualification remains unauthorized until Astra LOW passes the corrected head.
+
+## Corrected Astra LOW scope review — PASS
+
+Astra LOW returned **PASS** at exact clean pushed head
+`c5dc394d7df23db40e099fe828ee6fc70e249bb0`, current main
+`9e113be98cf31c1eaf4297b0a031518244b71c33`, and synchronized tracker
+`3113cfe9ba95155082e68a3e9a1745806af855e0`. Only the intended corrections changed. All 13 probe
+evidence checksums pass, raw build streams/status remain unchanged, diff hygiene passes, and local/
+remote #615/#560 match. The scratch lineage overlay is correctly conditional on exact candidate and
+five-file identity and limited to candidate/digest plus generated matrix, with all browser rows and
+resources frozen. One specified scratch qualification is authorized. Repository pin/lineage edits,
+retries and #539's distinct candidate remain unauthorized.
