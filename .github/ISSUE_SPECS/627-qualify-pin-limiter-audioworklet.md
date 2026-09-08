@@ -354,6 +354,31 @@ the bounded post-pin checks once. Installs and browsers remain forbidden. Stop
 on any failure and preserve both attempts without relabeling. No PR or merge is
 authorized.
 
+## Astra LOW final attempt review — FAIL; hard stop
+
+Astra LOW failed attempt 3 at exact clean pushed head
+`ff678dee5a1c3e9b0fa2d456f009f99b39ca7ed7`, live main `30680709`, and
+promotion source `0bb5a820be33a49393386617358ec1db2fe7577d`. All 39 checksums
+verify. Preflight, build, and output-identity statuses are zero; exactly six
+actual files byte-match the accepted candidate, and detached source is clean.
+
+The numbered static/resource records report success, but concurrent duplicate
+records prevent exact-once procedural acceptance. The numbered hermetic record
+is partial without a fabricated status; the concurrent zero-status hermetic
+record is non-credit because executor attribution is unresolved. No retained
+record completes SDK, matrix, formatting, workspace, or effect-runtime stages.
+The evidence-only delta and diff hygiene pass.
+
+The repository three-attempt hard stop is now binding. No further #627 workload,
+retry, gate weakening, PR, or merge is authorized. The qualified three-file
+promotion remains on this unmerged branch for successor inheritance and is
+explicitly not delivery-approved; reverting it would add churn without repairing
+provenance. A separately numbered post-pin evidence-disposition and delivery-
+completion successor must first classify the retained completed, partial, and
+unexecuted gates without execution, then authorize only necessary remaining work
+under one executor. Preserve the accepted candidate/browser qualification,
+successful six-file post-pin identity, every failed record, and full history.
+
 ## Astra LOW corrected final-attempt scope review — PASS
 
 Astra LOW returned **PASS** at exact clean pushed head
@@ -368,3 +393,21 @@ directory, invoke the no-bypass builder exactly once from detached promotion
 install or browser may repeat. Execution stops and preserves evidence on any
 failure. No fourth attempt, retry, or further rescope is available if attempt 3
 fails.
+
+## Final attempt 3 post-pin proof — FAIL
+
+Final attempt 3 passed the explicit output-directory preflight, ran the ordinary
+no-bypass builder once from detached `0bb5a820`, and reproduced the exact accepted
+six-file candidate. A coordination race then launched overlapping copies of the
+static, expected-resource, and hermetic checks. Luna's records are
+`03-check-web`, `04-expected-resources`, and `05-test-web`; the other executor's
+records are `03-static`, `04-resources`, and `05-hermetic`. Completed results are
+green, but duplicate execution violates the final-attempt each-once gate and
+receives no delivery credit.
+
+Execution stopped before SDK, matrix, formatting, branch-diff, workspace-policy,
+or effect-runtime checks. No install or browser ran. Both record sets are candidly
+preserved and attribution limits are stated. Attempt 3 is **FAIL**. Under the hard
+stop, no fourth attempt, retry, or further rescope is authorized. The promoted
+branch must not open a PR or merge; #627 and parent #621 remain open pending an
+owner decision outside this exhausted workflow.
