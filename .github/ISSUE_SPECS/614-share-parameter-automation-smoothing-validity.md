@@ -141,7 +141,7 @@ neither qualifies the other. No retry, overlay build, static/resource/hermetic/b
 consumer update, source edit, benchmark or timing workload occurred. Retained #587 qualification
 does not apply. Per the issue's anticipated drift rule and the repository's artifact-promotion split
 boundary, #614 source waits on one separately numbered lane-B qualification/pinning successor.
-#539 becomes a passive dependent while that successor and #614 occupy the two active slots. The
-successor must freeze this exact source, reproduce the candidate using only a scratch pin overlay,
+#615 is that successor. #539 becomes a passive dependent while #615 and #614 occupy the two active
+slots. #615 must freeze this exact source, reproduce the candidate using only a scratch pin overlay,
 pass existing static/resource/hermetic/SDK/three-browser gates, obtain Astra LOW review, then
 authorize narrowly recorded pin/qualification-lineage updates and post-pin proof before delivery.
