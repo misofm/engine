@@ -1,0 +1,3 @@
+   Compiling bench v0.1.0 (/home/bl/misofm/engine-rt5-input-symmetry/tools/bench)
+    Finished `release` profile [optimized + debuginfo] target(s) in 33.95s
+     Running `target/release/bench input-symmetry`

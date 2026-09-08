@@ -1,0 +1,10 @@
+
+running 1 test
+test input_symmetry::tests::connected_runtime_oracle_covers_retargeted_both_channel_ramp ... FAILED
+
+failures:
+
+failures:
+    input_symmetry::tests::connected_runtime_oracle_covers_retargeted_both_channel_ramp
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 47 filtered out; finished in 0.02s

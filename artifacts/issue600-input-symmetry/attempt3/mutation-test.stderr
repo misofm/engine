@@ -1,0 +1,23 @@
+   Compiling bench v0.1.0 (/home/bl/misofm/engine-rt5-input-symmetry/tools/bench)
+warning: unused variable: `db`
+   --> tools/bench/src/input_symmetry.rs:177:13
+    |
+177 |         let db = if self.block_index.is_multiple_of(2) {
+    |             ^^ help: if this is intentional, prefix it with an underscore: `_db`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `control`
+   --> tools/bench/src/input_symmetry.rs:182:13
+    |
+182 |         for control in &mut self.controls {
+    |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_control`
+
+warning: `bench` (bin "bench" test) generated 2 warnings (run `cargo fix --bin "bench" -p bench --tests` to apply 2 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.77s
+     Running unittests src/main.rs (target/debug/deps/bench-fb836c551c64f36f)
+
+thread 'input_symmetry::tests::connected_runtime_oracle_covers_retargeted_both_channel_ramp' (3858201) panicked at tools/bench/src/input_symmetry.rs:439:13:
+PCM mismatch actual=-0.10918501 expected=-0.10897227
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+error: test failed, to rerun pass `-p bench --bin bench`
