@@ -40,3 +40,27 @@ No full compiler output or `.ll`/`.s` capture, artifact generation/pinning, benc
 Before Luna work, Astra LOW must pass current applicability, inherited-source integrity, exact test-only scope, the causal oracle design, the single release-integration command, and disjoint ownership from #635. Luna then makes one coherent test tranche and runs each authorized focused/full debug/release library, release integration, strict affected Clippy, rustfmt, workspace policy and diff-hygiene gate at most once, stopping at the first failure. Root checkpoints the exact tranche before Astra review.
 
 Astra must adversarially verify that the oracle independently distinguishes correct from crossed live-control ownership; that all inherited association and contract coverage remains valid; that the release integration result is attributable; and that production, lock, dependency and artifact paths are unchanged. The ordinary three-attempt rule applies afresh to this successor. PASS permits a separately numbered transient-allocation qualification issue when a slot is free; it does not itself make an allocation or performance claim.
+
+## Astra LOW scope review — PASS
+
+Astra LOW passed exact clean pushed brief
+`b1b9eb63ab4e93711bf47436814a9868265c7d73` against live main
+`62045f40048ec230298fe0fd3935da3333f90b83`. #633 is closed with its source and
+three failed attempts preserved. #635 now identifies #636 as its disjoint peer
+and #633 as closed, so #635/#636 are the two synchronized active slots.
+
+Luna attempt 1 may edit only the existing association fixture or an adjacent test
+helper in `crates/graph-compiler/src/lib.rs`. Production and every inherited
+processor, sidechain, bank, deterministic, diagnostic and canonical-identity
+control remain frozen. The new oracle must compare correct and crossed live-
+control ownership or use an independent exact result that visibly rejects the
+wrong target.
+
+After rechecking that `/tmp/issue636-release-track-delay-34982484` is absent, Luna
+may run the literal release-integration command in this brief exactly once. Run
+each other authorized focused/full library, Clippy, formatting, workspace-policy
+and diff-hygiene gate at most once and stop at the first failure. Preserve the
+actual status and complete diagnostic. No retry, alternate invocation, manifest
+repair, production change, allocation measurement, artifact or compiler capture
+is authorized. A recurring pre-test collision moves to a separate tooling
+disposition and receives no test credit.
