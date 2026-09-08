@@ -58,3 +58,13 @@ immutability. The implementation must state that `MISO_ENGINE_CAPTURE_PHASE` is 
 parsed by the runner, and that `MISO_ENGINE_CAPTURE_TARGET` is exported by the runner but currently
 has no reader. Luna XHIGH may perform the sole documentation pass. No preflight, build, runner,
 capture, retry, resume, or timing is authorized.
+
+## Attempt 1 Astra LOW verdict
+
+Luna XHIGH added exactly 20 accurate rows and the checker reports 134 unique names. Docs/research,
+diff, and inherited capture checksum gates pass. The unchanged mutation suite fails because
+`scripts/test-env-vocabulary.sh:222-223` hard-code the previous count 114 for the `COUNT` and
+`COUNT_TR` full-output fault assertions. Astra LOW returned **PASS to stop / FAIL to correct within
+#610**: the rows are correct, but the test script is outside this issue's ownership and the sole pass
+has no correction allowance. Preserve the documentation and candid failure; a two-expectation
+successor inherits all accepted source/capture evidence and authorizes no workload execution.
