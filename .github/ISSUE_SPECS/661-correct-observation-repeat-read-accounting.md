@@ -168,3 +168,15 @@ with the retained attempt-1 behavior, full-suite, and strict-Clippy passes, all
 authorized source gates are green. No production source, compiler payload,
 artifact, lockfile, or unrelated path changed. Exact-source Astra LOW review is
 pending before delivery qualification.
+
+## Source verdict
+
+Astra LOW returned **SOURCE PASS** at exact clean pushed record head
+`eefbad4f42e493417c449fb4c05f4189637c2da8` and product source
+`7fa851db196ca5e5eab84a41c688a801bc7effa8`. Only import ordering changed
+after the reviewed accounting repair; all attempt-2 evidence verifies, prior
+behavior/full-suite/Clippy evidence remains applicable, and the attempt-1 failure
+and manifest defect remain preserved. Proceed to exact-head/current-main PR
+readiness, required qualification, guarded merge review, and successful post-main
+qualification. No artifact qualification is indicated for this test-only change;
+retain temporary evidence through delivery cleanup review.
