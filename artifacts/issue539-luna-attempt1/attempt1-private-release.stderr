@@ -1,0 +1,23 @@
+    Blocking waiting for file lock on package cache
+   Compiling bytemuck v1.25.2
+   Compiling typenum v1.20.1
+   Compiling engine v0.1.0 (/home/bl/misofm/engine-limiter-stationary-dispatch/crates/engine)
+   Compiling cfg-if v1.0.4
+   Compiling cpufeatures v0.3.0
+   Compiling dsp-reference v0.1.0 (/home/bl/misofm/engine-limiter-stationary-dispatch/crates/dsp-reference)
+   Compiling safe_arch v1.2.0
+   Compiling wide v1.6.1
+   Compiling hybrid-array v0.4.14
+   Compiling crypto-common v0.2.2
+   Compiling block-buffer v0.12.1
+   Compiling digest v0.11.3
+   Compiling sha2 v0.11.0
+   Compiling bench-support v0.1.0 (/home/bl/misofm/engine-limiter-stationary-dispatch/tools/bench-support)
+   Compiling lane v0.1.0 (/home/bl/misofm/engine-limiter-stationary-dispatch/crates/lane)
+   Compiling math v0.1.0 (/home/bl/misofm/engine-limiter-stationary-dispatch/crates/math)
+   Compiling effect-contract v0.1.0 (/home/bl/misofm/engine-limiter-stationary-dispatch/crates/effect-contract)
+   Compiling effect-runtime v0.1.0 (/home/bl/misofm/engine-limiter-stationary-dispatch/crates/effect-runtime)
+   Compiling conformance v0.1.0 (/home/bl/misofm/engine-limiter-stationary-dispatch/crates/conformance)
+   Compiling true-peak-limiter v0.1.0 (/home/bl/misofm/engine-limiter-stationary-dispatch/crates/true-peak-limiter)
+    Finished `release` profile [optimized + debuginfo] target(s) in 18.16s
+     Running unittests src/lib.rs (/tmp/issue539-luna2-target/release/deps/true_peak_limiter-71541abd5d9a6e4d)

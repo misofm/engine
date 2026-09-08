@@ -91,6 +91,29 @@ fn measure(operation: impl FnOnce()) -> (u64, u64) {
     (ALLOCATIONS.get(), DEALLOCATIONS.get())
 }
 
+#[test]
+fn the_own_thread_allocator_observes_an_allocate_and_free() {
+    let (allocations, deallocations) = measure(|| {
+        let mut bytes = Vec::with_capacity(64);
+        bytes.extend_from_slice(&[0xA5; 64]);
+        std::hint::black_box(&bytes);
+        drop(bytes);
+    });
+
+    assert!(
+        allocations > 0,
+        "positive allocator control did not allocate"
+    );
+    assert!(
+        deallocations > 0,
+        "positive allocator control did not deallocate"
+    );
+    assert_eq!(
+        allocations, deallocations,
+        "positive allocator control leaked"
+    );
+}
+
 fn values() -> [InitialParameterValue; 6] {
     core::array::from_fn(|index| InitialParameterValue {
         parameter_index: (index / 2) as u32,
@@ -251,5 +274,67 @@ fn the_render_path_allocates_nothing() {
         (allocations, deallocations),
         (0, 0),
         "bank render path allocated"
+    );
+
+    let mut mono_bank = TruePeakLimiterFactory
+        .bind_homogeneous_bank(PrepareEffectBankRequest {
+            backend: Backend::Simd8,
+            width: BankWidth::Eight,
+            requests: &requests,
+        })
+        .expect("mono bank binding")
+        .expect("mono bank available");
+    let mut mono_left = vec![0.0_f32; 128 * 8];
+    let mut mono_right = vec![0.0_f32; 128 * 8];
+    mono_bank.process_bank_mono(
+        EffectBankProcessBlock::new(
+            &mut mono_left,
+            &mut mono_right,
+            None,
+            128,
+            BankWidth::Eight,
+            0,
+            &spans,
+            &offsets,
+            128,
+        )
+        .expect("mono bank block"),
+    );
+
+    let (allocations, deallocations) = measure(|| {
+        for block in 0..100 {
+            for (index, sample) in mono_left.iter_mut().enumerate() {
+                *sample = if block % 20 == 19 {
+                    3.0e38
+                } else {
+                    ((index % 23) as f32 - 11.0) * 0.2
+                };
+            }
+            mono_right.copy_from_slice(&mono_left);
+            let spans = automation(block);
+            mono_bank.process_bank_mono(
+                EffectBankProcessBlock::new(
+                    &mut mono_left,
+                    &mut mono_right,
+                    None,
+                    128,
+                    BankWidth::Eight,
+                    (block * 128) as u64,
+                    &spans,
+                    &offsets,
+                    128,
+                )
+                .expect("mono bank block"),
+            );
+            if block % 33 == 32 {
+                mono_bank.reset(ResetKind::DiscontinuityKeepParameters);
+            }
+        }
+        mono_bank.reset(ResetKind::FullToDefaults);
+    });
+    assert_eq!(
+        (allocations, deallocations),
+        (0, 0),
+        "mono bank render path allocated"
     );
 }

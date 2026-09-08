@@ -1,0 +1,12 @@
+miso_engine_web_v1_render: closure=8 traps=5 trap_owners=['_RNvMs2_NtNtCsd50TmRYst6h_6engine8realtime4planNtB5_18PreparedRenderPlan12render_inner'] entries=['_RNvNtNtCsdkdt1aaAg1T_4core5slice5index16slice_index_fail']
+kernel shape: f32x4_arith=9245 kernels=13 pattern='4wide6f32x[48]'
+  roster ok   vector=2560 scalar=20 budget=256.0 ceiling=0.1 multiband-compressor f32x8
+  roster ok   vector=1280 scalar=20 budget=128.0 ceiling=0.1 multiband-compressor f32x4
+  roster ok   vector=786 scalar=72 budget=298.7 ceiling=0.38 transient-shaper f32x4
+  roster ok   vector=180 scalar=8 budget=34.2 ceiling=0.19 gate-expander f32x4
+  roster ok   vector=267 scalar=0 budget=26.7 ceiling=0.1 compressor f32x4 dual
+  roster ok   vector=138 scalar=0 budget=13.8 ceiling=0.1 compressor f32x4 collapsed
+  roster ok   vector=880 scalar=0 budget=88.0 ceiling=0.1 true-peak-limiter f32x4 dual
+  roster ok   vector=168 scalar=0 budget=16.8 ceiling=0.1 parametric-eq f32x4 dual
+  roster ok   vector=84 scalar=0 budget=8.4 ceiling=0.1 parametric-eq f32x4 collapsed
+  roster ok   vector=25 scalar=0 budget=8.0 ceiling=0.1 soft-clip f32x4

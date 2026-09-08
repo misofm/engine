@@ -1,0 +1,15 @@
+{
+  "argv": [
+    "git",
+    "diff",
+    "--check",
+    "origin/main...HEAD"
+  ],
+  "cwd": "/home/bl/misofm/engine-issue619-limiter-roster",
+  "head": "64ef94fa4a3fd538700a913ab5a8baab17ab4291",
+  "start": "2026-09-08T10:16:55.839415+00:00",
+  "env": {
+    "PATH": "/home/bl/.cargo/bin:/home/bl/.local/bin:/home/bl/.codex/packages/standalone/releases/0.153.4-x86_64-unknown-linux-musl/codex-path:/home/bl/.codex1/tmp/arg0/codex-arg0a6UL79:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin",
+    "CARGO_TARGET_DIR": "/tmp/issue619-postpin-review-continuation/target"
+  }
+}

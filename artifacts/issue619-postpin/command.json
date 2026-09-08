@@ -1,0 +1,13 @@
+{
+  "argv": [
+    "bash",
+    "scripts/build-web-audioworklet.sh",
+    "/tmp/issue619-post-pin-output-8577f1aa"
+  ],
+  "cwd": "/home/bl/misofm/engine-issue619-limiter-roster",
+  "head": "8577f1aa4e2f723929137a978703581ea25da483",
+  "output_directory": "/tmp/issue619-post-pin-output-8577f1aa",
+  "repin_environment": "absent",
+  "strip_environment": "absent",
+  "invocation_count": 1
+}

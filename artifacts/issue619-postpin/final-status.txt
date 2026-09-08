@@ -1,0 +1,5 @@
+PASS
+builder_invocations=1
+builder_status=0
+output_files=6
+comparison_mismatches=0

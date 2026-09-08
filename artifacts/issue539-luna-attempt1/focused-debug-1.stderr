@@ -1,0 +1,69 @@
+   Compiling bytemuck v1.25.2
+   Compiling typenum v1.20.1
+   Compiling engine v0.1.0 (/home/bl/misofm/engine-limiter-stationary-dispatch/crates/engine)
+   Compiling cpufeatures v0.3.0
+   Compiling cfg-if v1.0.4
+   Compiling dsp-reference v0.1.0 (/home/bl/misofm/engine-limiter-stationary-dispatch/crates/dsp-reference)
+   Compiling safe_arch v1.2.0
+   Compiling wide v1.6.1
+   Compiling hybrid-array v0.4.14
+   Compiling block-buffer v0.12.1
+   Compiling crypto-common v0.2.2
+   Compiling digest v0.11.3
+   Compiling sha2 v0.11.0
+   Compiling bench-support v0.1.0 (/home/bl/misofm/engine-limiter-stationary-dispatch/tools/bench-support)
+   Compiling lane v0.1.0 (/home/bl/misofm/engine-limiter-stationary-dispatch/crates/lane)
+   Compiling math v0.1.0 (/home/bl/misofm/engine-limiter-stationary-dispatch/crates/math)
+   Compiling effect-contract v0.1.0 (/home/bl/misofm/engine-limiter-stationary-dispatch/crates/effect-contract)
+   Compiling effect-runtime v0.1.0 (/home/bl/misofm/engine-limiter-stationary-dispatch/crates/effect-runtime)
+   Compiling conformance v0.1.0 (/home/bl/misofm/engine-limiter-stationary-dispatch/crates/conformance)
+   Compiling true-peak-limiter v0.1.0 (/home/bl/misofm/engine-limiter-stationary-dispatch/crates/true-peak-limiter)
+error: `StationaryDispatch` is forbidden as the type of a const generic parameter
+   --> crates/true-peak-limiter/src/lib.rs:714:32
+    |
+714 | fn ramp_values<const DISPATCH: StationaryDispatch, L: Lane>(
+    |                                ^^^^^^^^^^^^^^^^^^
+    |
+    = note: the only supported types are integers, `bool`, and `char`
+
+error: `StationaryDispatch` is forbidden as the type of a const generic parameter
+   --> crates/true-peak-limiter/src/lib.rs:772:37
+    |
+772 | fn observe_dispatch<const DISPATCH: StationaryDispatch>(route: DispatchRoute) {
+    |                                     ^^^^^^^^^^^^^^^^^^
+    |
+    = note: the only supported types are integers, `bool`, and `char`
+
+error: `StationaryDispatch` is forbidden as the type of a const generic parameter
+    --> crates/true-peak-limiter/src/lib.rs:1767:43
+     |
+1767 | fn limiter_block_per_lane<const DISPATCH: StationaryDispatch, L: Lane>(
+     |                                           ^^^^^^^^^^^^^^^^^^
+     |
+     = note: the only supported types are integers, `bool`, and `char`
+
+error: `StationaryDispatch` is forbidden as the type of a const generic parameter
+    --> crates/true-peak-limiter/src/lib.rs:1918:42
+     |
+1918 | fn limiter_block_uniform<const DISPATCH: StationaryDispatch, L: Lane>(
+     |                                          ^^^^^^^^^^^^^^^^^^
+     |
+     = note: the only supported types are integers, `bool`, and `char`
+
+error: `StationaryDispatch` is forbidden as the type of a const generic parameter
+    --> crates/true-peak-limiter/src/lib.rs:3228:48
+     |
+3228 | fn limiter_block_per_lane_mono<const DISPATCH: StationaryDispatch, L: Lane>(
+     |                                                ^^^^^^^^^^^^^^^^^^
+     |
+     = note: the only supported types are integers, `bool`, and `char`
+
+error: `StationaryDispatch` is forbidden as the type of a const generic parameter
+    --> crates/true-peak-limiter/src/lib.rs:3308:47
+     |
+3308 | fn limiter_block_uniform_mono<const DISPATCH: StationaryDispatch, L: Lane>(
+     |                                               ^^^^^^^^^^^^^^^^^^
+     |
+     = note: the only supported types are integers, `bool`, and `char`
+
+error: could not compile `true-peak-limiter` (lib test) due to 6 previous errors

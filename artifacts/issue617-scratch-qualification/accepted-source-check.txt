@@ -1,0 +1,1 @@
+Frozen HEAD clean; all three accepted limiter SHA256 identities match authorized spec.

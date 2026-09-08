@@ -1,0 +1,422 @@
+{
+  "source_llvm": "/tmp/issue539-candidate-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.ll",
+  "source_asm": "/tmp/issue539-candidate-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.s",
+  "functions": [
+    {
+      "label": "process-scalar",
+      "kind": "llvm",
+      "path": "/tmp/issue539-root-lowering/native-selected/process-scalar.ll",
+      "original": "/tmp/issue539-candidate-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.ll",
+      "lines": [
+        43565,
+        43601
+      ],
+      "bytes": 3394,
+      "sha256": "0fd94f6752164fe54917542aa002be6be6e705e994483eadfe3cc3027ef85eb3",
+      "symbol": "_RNvXsd_CsdvPQf9CMsz3_17true_peak_limiterNtB5_23PreparedTruePeakLimiterNtCsfGpaX3jkkqY_15effect_contract20PreparedNativeEffect7process"
+    },
+    {
+      "label": "process-scalar",
+      "kind": "asm",
+      "path": "/tmp/issue539-root-lowering/native-selected/process-scalar.s",
+      "original": "/tmp/issue539-candidate-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.s",
+      "lines": [
+        69093,
+        69187
+      ],
+      "bytes": 2258,
+      "sha256": "3b7549109c0fcff6d0b8da0c7e446b7a2dc06331f2565b5b2ab323c2b791582f",
+      "symbol": "_RNvXsd_CsdvPQf9CMsz3_17true_peak_limiterNtB5_23PreparedTruePeakLimiterNtCsfGpaX3jkkqY_15effect_contract20PreparedNativeEffect7process"
+    },
+    {
+      "label": "process-core-scalar",
+      "kind": "llvm",
+      "path": "/tmp/issue539-root-lowering/native-selected/process-core-scalar.ll",
+      "original": "/tmp/issue539-candidate-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.ll",
+      "lines": [
+        33738,
+        41288
+      ],
+      "bytes": 634112,
+      "sha256": "64baf0bc69434db9f523b2bed18a139fae48218fde22132bf3180c6993237c8c",
+      "symbol": "_RNvMs9_CsdvPQf9CMsz3_17true_peak_limiterINtB5_11LimiterCorefE13process_blockB5_"
+    },
+    {
+      "label": "process-core-scalar",
+      "kind": "asm",
+      "path": "/tmp/issue539-root-lowering/native-selected/process-core-scalar.s",
+      "original": "/tmp/issue539-candidate-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.s",
+      "lines": [
+        53364,
+        65789
+      ],
+      "bytes": 247725,
+      "sha256": "51422419300ed51874c10f562912694747fd9088713169ee004f8472de76b77d",
+      "symbol": "_RNvMs9_CsdvPQf9CMsz3_17true_peak_limiterINtB5_11LimiterCorefE13process_blockB5_"
+    },
+    {
+      "label": "process-bank-w8",
+      "kind": "llvm",
+      "path": "/tmp/issue539-root-lowering/native-selected/process-bank-w8.ll",
+      "original": "/tmp/issue539-candidate-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.ll",
+      "lines": [
+        44597,
+        44851
+      ],
+      "bytes": 21959,
+      "sha256": "1a05ce5b4a2c6db12e41938c338d2d0906250c72fa8622c404f91d9be7b37cf3",
+      "symbol": "_RNvXse_CsdvPQf9CMsz3_17true_peak_limiterINtB5_27PreparedTruePeakLimiterBankNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8ENtCsfGpaX3jkkqY_15effect_contract24PreparedNativeEffectBank12process_bankB5_"
+    },
+    {
+      "label": "process-bank-w8",
+      "kind": "asm",
+      "path": "/tmp/issue539-root-lowering/native-selected/process-bank-w8.s",
+      "original": "/tmp/issue539-candidate-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.s",
+      "lines": [
+        70703,
+        71207
+      ],
+      "bytes": 11149,
+      "sha256": "3cb674a4f6de4e8416b1859da2944233833e802e513b677b9545ab45bc04811a",
+      "symbol": "_RNvXse_CsdvPQf9CMsz3_17true_peak_limiterINtB5_27PreparedTruePeakLimiterBankNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8ENtCsfGpaX3jkkqY_15effect_contract24PreparedNativeEffectBank12process_bankB5_"
+    },
+    {
+      "label": "process-bank-mono-w8",
+      "kind": "llvm",
+      "path": "/tmp/issue539-root-lowering/native-selected/process-bank-mono-w8.ll",
+      "original": "/tmp/issue539-candidate-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.ll",
+      "lines": [
+        44855,
+        44860
+      ],
+      "bytes": 1052,
+      "sha256": "51d9bef40cc0ecbfba5d07f52aa3565606b86c3fe00d2006c98798d8fd058b0c",
+      "symbol": "_RNvXse_CsdvPQf9CMsz3_17true_peak_limiterINtB5_27PreparedTruePeakLimiterBankNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8ENtCsfGpaX3jkkqY_15effect_contract24PreparedNativeEffectBank17process_bank_monoB5_"
+    },
+    {
+      "label": "process-bank-mono-w8",
+      "kind": "asm",
+      "path": "/tmp/issue539-root-lowering/native-selected/process-bank-mono-w8.s",
+      "original": "/tmp/issue539-candidate-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.s",
+      "lines": [
+        71213,
+        71232
+      ],
+      "bytes": 1069,
+      "sha256": "0a6dc2d7267e721c59c8485dbdab9ee9a3e56e01a93692184fa7d38919b98ff2",
+      "symbol": "_RNvXse_CsdvPQf9CMsz3_17true_peak_limiterINtB5_27PreparedTruePeakLimiterBankNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8ENtCsfGpaX3jkkqY_15effect_contract24PreparedNativeEffectBank17process_bank_monoB5_"
+    },
+    {
+      "label": "process-core-w8",
+      "kind": "llvm",
+      "path": "/tmp/issue539-root-lowering/native-selected/process-core-w8.ll",
+      "original": "/tmp/issue539-candidate-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.ll",
+      "lines": [
+        25515,
+        33542
+      ],
+      "bytes": 720711,
+      "sha256": "cd8744de65208d8a9ad8bff14216022457bf324432affcfecf76916c9e49082e",
+      "symbol": "_RNvMs9_CsdvPQf9CMsz3_17true_peak_limiterINtB5_11LimiterCoreNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8E13process_blockB5_"
+    },
+    {
+      "label": "process-core-w8",
+      "kind": "asm",
+      "path": "/tmp/issue539-root-lowering/native-selected/process-core-w8.s",
+      "original": "/tmp/issue539-candidate-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.s",
+      "lines": [
+        39614,
+        53091
+      ],
+      "bytes": 272347,
+      "sha256": "ce807f3de63cadac6958e32a46a95de50d1a56b179c2b9aefb41673e7e23a416",
+      "symbol": "_RNvMs9_CsdvPQf9CMsz3_17true_peak_limiterINtB5_11LimiterCoreNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8E13process_blockB5_"
+    },
+    {
+      "label": "outlined-01",
+      "kind": "llvm",
+      "path": "/tmp/issue539-root-lowering/native-selected/outlined-01.ll",
+      "original": "/tmp/issue539-candidate-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.ll",
+      "lines": [
+        10392,
+        10758
+      ],
+      "bytes": 21255,
+      "sha256": "f9ea323a4a0f6f157efff2ec377cb5c8692598e3041d904cd9301bde876e791f",
+      "symbol": "_RNvCsdvPQf9CMsz3_17true_peak_limiter16apply_automation"
+    },
+    {
+      "label": "outlined-01",
+      "kind": "asm",
+      "path": "/tmp/issue539-root-lowering/native-selected/outlined-01.s",
+      "original": "/tmp/issue539-candidate-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.s",
+      "lines": [
+        16286,
+        16811
+      ],
+      "bytes": 10640,
+      "sha256": "23cfc9a33484bd06b7df80048d112f9511f44247904959aa53e84eb6ff073815",
+      "symbol": "_RNvCsdvPQf9CMsz3_17true_peak_limiter16apply_automation"
+    },
+    {
+      "label": "outlined-02",
+      "kind": "llvm",
+      "path": "/tmp/issue539-root-lowering/native-selected/outlined-02.ll",
+      "original": "/tmp/issue539-candidate-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.ll",
+      "lines": [
+        15601,
+        16019
+      ],
+      "bytes": 35284,
+      "sha256": "4550f2b5e0518b605c5cab92a69abf1769112b2ceed65fffd8e43f771117b792",
+      "symbol": "_RNvMs5_CsdvPQf9CMsz3_17true_peak_limiterINtB5_10HotChannelfE4loadB5_"
+    },
+    {
+      "label": "outlined-02",
+      "kind": "asm",
+      "path": "/tmp/issue539-root-lowering/native-selected/outlined-02.s",
+      "original": "/tmp/issue539-candidate-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.s",
+      "lines": [
+        24290,
+        24742
+      ],
+      "bytes": 9808,
+      "sha256": "b6a6e2b3525dad7c50ba00fc80dd0f9d3b6411a4ea0598fcc02d2d74e305fde0",
+      "symbol": "_RNvMs5_CsdvPQf9CMsz3_17true_peak_limiterINtB5_10HotChannelfE4loadB5_"
+    },
+    {
+      "label": "outlined-03",
+      "kind": "llvm",
+      "path": "/tmp/issue539-root-lowering/native-selected/outlined-03.ll",
+      "original": "/tmp/issue539-candidate-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.ll",
+      "lines": [
+        16023,
+        16542
+      ],
+      "bytes": 42694,
+      "sha256": "87cdfcc6742defb4aedf7616c0b0b32aece815ebd2eb5209dc114c937eea4016",
+      "symbol": "_RNvMs5_CsdvPQf9CMsz3_17true_peak_limiterINtB5_10HotChannelfE5storeB5_"
+    },
+    {
+      "label": "outlined-03",
+      "kind": "asm",
+      "path": "/tmp/issue539-root-lowering/native-selected/outlined-03.s",
+      "original": "/tmp/issue539-candidate-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.s",
+      "lines": [
+        24752,
+        25271
+      ],
+      "bytes": 9056,
+      "sha256": "0bd0dac7628d47b01b0fd61ba1bce88f11793ba8812c31b3879836e2e0e74f77",
+      "symbol": "_RNvMs5_CsdvPQf9CMsz3_17true_peak_limiterINtB5_10HotChannelfE5storeB5_"
+    },
+    {
+      "label": "outlined-04",
+      "kind": "llvm",
+      "path": "/tmp/issue539-root-lowering/native-selected/outlined-04.ll",
+      "original": "/tmp/issue539-candidate-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.ll",
+      "lines": [
+        16780,
+        16893
+      ],
+      "bytes": 7819,
+      "sha256": "c07a069cd8cff81042085bb6d4d6a30b701bab380bc8834acca26b727659ea70",
+      "symbol": "_RNvMs6_CsdvPQf9CMsz3_17true_peak_limiterINtB5_10UniformHotfE3newB5_"
+    },
+    {
+      "label": "outlined-04",
+      "kind": "asm",
+      "path": "/tmp/issue539-root-lowering/native-selected/outlined-04.s",
+      "original": "/tmp/issue539-candidate-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.s",
+      "lines": [
+        25582,
+        25710
+      ],
+      "bytes": 3023,
+      "sha256": "189eee06e2b6e297e63c7de24e8d396db5de5faecd610845a12ced4448520339",
+      "symbol": "_RNvMs6_CsdvPQf9CMsz3_17true_peak_limiterINtB5_10UniformHotfE3newB5_"
+    },
+    {
+      "label": "outlined-05",
+      "kind": "llvm",
+      "path": "/tmp/issue539-root-lowering/native-selected/outlined-05.ll",
+      "original": "/tmp/issue539-candidate-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.ll",
+      "lines": [
+        11918,
+        12108
+      ],
+      "bytes": 11882,
+      "sha256": "dba088cc8412eee885f59b59af1cd175ba6945a7dab23e49f24a682288b05075",
+      "symbol": "_RNvMs2_CsdvPQf9CMsz3_17true_peak_limiterNtB5_12ChannelState17is_at_silent_rest"
+    },
+    {
+      "label": "outlined-05",
+      "kind": "asm",
+      "path": "/tmp/issue539-root-lowering/native-selected/outlined-05.s",
+      "original": "/tmp/issue539-candidate-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.s",
+      "lines": [
+        18680,
+        18978
+      ],
+      "bytes": 4955,
+      "sha256": "30267c9ca3d891b3b5a17e16358692be310461a74ef3de1364e85af1fb5437f0",
+      "symbol": "_RNvMs2_CsdvPQf9CMsz3_17true_peak_limiterNtB5_12ChannelState17is_at_silent_rest"
+    },
+    {
+      "label": "outlined-06",
+      "kind": "llvm",
+      "path": "/tmp/issue539-root-lowering/native-selected/outlined-06.ll",
+      "original": "/tmp/issue539-candidate-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.ll",
+      "lines": [
+        12112,
+        12284
+      ],
+      "bytes": 12215,
+      "sha256": "afe9aa6b0f2f5845f2a7f270fb390eb72f59a4acef9682994918914b95323484",
+      "symbol": "_RNvMs2_CsdvPQf9CMsz3_17true_peak_limiterNtB5_12ChannelState17reset_to_defaults"
+    },
+    {
+      "label": "outlined-06",
+      "kind": "asm",
+      "path": "/tmp/issue539-root-lowering/native-selected/outlined-06.s",
+      "original": "/tmp/issue539-candidate-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.s",
+      "lines": [
+        19003,
+        19348
+      ],
+      "bytes": 7526,
+      "sha256": "0eae3c25a9807b06cef3a3e41c5a131ebeb37009f829d1e3413a45d653991e98",
+      "symbol": "_RNvMs2_CsdvPQf9CMsz3_17true_peak_limiterNtB5_12ChannelState17reset_to_defaults"
+    },
+    {
+      "label": "outlined-07",
+      "kind": "llvm",
+      "path": "/tmp/issue539-root-lowering/native-selected/outlined-07.ll",
+      "original": "/tmp/issue539-candidate-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.ll",
+      "lines": [
+        4671,
+        9208
+      ],
+      "bytes": 435231,
+      "sha256": "b22a2ee2481b222b55d1466c09c716fee3a2bacc2db511fb22f652755299b5fc",
+      "symbol": "_RINvMsf_CsdvPQf9CMsz3_17true_peak_limiterINtB6_27PreparedTruePeakLimiterBankNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8E18process_bank_innerKb1_EB6_"
+    },
+    {
+      "label": "outlined-07",
+      "kind": "asm",
+      "path": "/tmp/issue539-root-lowering/native-selected/outlined-07.s",
+      "original": "/tmp/issue539-candidate-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.s",
+      "lines": [
+        7125,
+        14454
+      ],
+      "bytes": 149147,
+      "sha256": "a586a3baed33c31b0ae0b61c2af4aec9d7b6fff83d576e089409540e72e72ba7",
+      "symbol": "_RINvMsf_CsdvPQf9CMsz3_17true_peak_limiterINtB6_27PreparedTruePeakLimiterBankNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8E18process_bank_innerKb1_EB6_"
+    },
+    {
+      "label": "outlined-08",
+      "kind": "llvm",
+      "path": "/tmp/issue539-root-lowering/native-selected/outlined-08.ll",
+      "original": "/tmp/issue539-candidate-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.ll",
+      "lines": [
+        14147,
+        14994
+      ],
+      "bytes": 94277,
+      "sha256": "124611455c5f282664206af9434825b8c99bf76de79eb13cc7af7e3236aef0cd",
+      "symbol": "_RNvMs5_CsdvPQf9CMsz3_17true_peak_limiterINtB5_10HotChannelNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8E4loadB5_"
+    },
+    {
+      "label": "outlined-08",
+      "kind": "asm",
+      "path": "/tmp/issue539-root-lowering/native-selected/outlined-08.s",
+      "original": "/tmp/issue539-candidate-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.s",
+      "lines": [
+        22039,
+        23448
+      ],
+      "bytes": 30400,
+      "sha256": "7b3c35a4950cec8ec91f0e74a28f714d7c579724d3b449528b15aa5185eae397",
+      "symbol": "_RNvMs5_CsdvPQf9CMsz3_17true_peak_limiterINtB5_10HotChannelNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8E4loadB5_"
+    },
+    {
+      "label": "outlined-09",
+      "kind": "llvm",
+      "path": "/tmp/issue539-root-lowering/native-selected/outlined-09.ll",
+      "original": "/tmp/issue539-candidate-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.ll",
+      "lines": [
+        14998,
+        15597
+      ],
+      "bytes": 55286,
+      "sha256": "e56ffe6822ab41539277759851a50403068c4e676f3fc179283de8f607aeb4a3",
+      "symbol": "_RNvMs5_CsdvPQf9CMsz3_17true_peak_limiterINtB5_10HotChannelNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8E5storeB5_"
+    },
+    {
+      "label": "outlined-09",
+      "kind": "asm",
+      "path": "/tmp/issue539-root-lowering/native-selected/outlined-09.s",
+      "original": "/tmp/issue539-candidate-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.s",
+      "lines": [
+        23458,
+        24284
+      ],
+      "bytes": 16068,
+      "sha256": "da4eccee96f46360564af9b54bba9b12cc0e0ed8ea26e51d2935e140ebb6878e",
+      "symbol": "_RNvMs5_CsdvPQf9CMsz3_17true_peak_limiterINtB5_10HotChannelNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8E5storeB5_"
+    },
+    {
+      "label": "outlined-10",
+      "kind": "llvm",
+      "path": "/tmp/issue539-root-lowering/native-selected/outlined-10.ll",
+      "original": "/tmp/issue539-candidate-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.ll",
+      "lines": [
+        16663,
+        16776
+      ],
+      "bytes": 8113,
+      "sha256": "13335cde90a34918d4e1c01935692de05fa7cc988c16c88d3b61e4baaca418c9",
+      "symbol": "_RNvMs6_CsdvPQf9CMsz3_17true_peak_limiterINtB5_10UniformHotNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8E3newB5_"
+    },
+    {
+      "label": "outlined-10",
+      "kind": "asm",
+      "path": "/tmp/issue539-root-lowering/native-selected/outlined-10.s",
+      "original": "/tmp/issue539-candidate-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.s",
+      "lines": [
+        25429,
+        25576
+      ],
+      "bytes": 3466,
+      "sha256": "6e0a79b831ad45b634befef1cb21655b58b02c4da50a0370fae8360c49f76006",
+      "symbol": "_RNvMs6_CsdvPQf9CMsz3_17true_peak_limiterINtB5_10UniformHotNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8E3newB5_"
+    },
+    {
+      "label": "outlined-11",
+      "kind": "llvm",
+      "path": "/tmp/issue539-root-lowering/native-selected/outlined-11.ll",
+      "original": "/tmp/issue539-candidate-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.ll",
+      "lines": [
+        11535,
+        11657
+      ],
+      "bytes": 11126,
+      "sha256": "06966ac7f101bdcbe1f11b9408e1b65ca92c2c7ed79e5a5de75983cb9aec5bf5",
+      "symbol": "_RNvMs2_CsdvPQf9CMsz3_17true_peak_limiterNtB5_12ChannelState13clear_runtime"
+    },
+    {
+      "label": "outlined-11",
+      "kind": "asm",
+      "path": "/tmp/issue539-root-lowering/native-selected/outlined-11.s",
+      "original": "/tmp/issue539-candidate-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.s",
+      "lines": [
+        18131,
+        18331
+      ],
+      "bytes": 3410,
+      "sha256": "f4aebb1037824c1c46c772ea9c55a670f9cb8b06816b4ffba2714f02a5d3efa6",
+      "symbol": "_RNvMs2_CsdvPQf9CMsz3_17true_peak_limiterNtB5_12ChannelState13clear_runtime"
+    }
+  ]
+}

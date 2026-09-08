@@ -1,0 +1,29 @@
+Completed the bounded attempt-1 tranche; stopped for root checkpoint. No commit/push performed.
+
+Changes:
+
+- [`tests/allocation.rs`](/home/bl/misofm/engine-limiter-stationary-dispatch/crates/true-peak-limiter/tests/allocation.rs)
+  - Added same-thread positive allocator allocate/free liveness control.
+  - Added measured `process_bank_mono` prepared-path coverage.
+  - SHA-256: `7825d30723192724a0cab7165953eeb00860e5dad66dc6b7d74333d1ca0ea920`
+  - Git blob: `f61cefe50807e4994388f50c9c92c357389d0d44`
+
+- [`src/lib.rs`](/home/bl/misofm/engine-limiter-stationary-dispatch/crates/true-peak-limiter/src/lib.rs)
+  - Added authorized `cfg(test)` placement and narrow Clippy allowance for the private oracle.
+  - No DSP/algorithm changes.
+  - Final SHA-256: `08ea2bfaa5eb83e996e61bced7c9de5e64f5a4a23b932716ce92dbbd7be09d90`
+  - Git blob: `dda39328b3bdf2ca3352f4ba57b4e7e22318cb02`
+
+`mono_collapse.rs` was unchanged; its existing dual/mono and disengagement coverage was sufficient.
+
+Results:
+
+- Allocation: 2 passed, status 0.
+- Mono collapse: 2 passed, status 0; native W8 executed, not skipped.
+- Strict Clippy: status 0 with the requested command.
+- `cargo fmt --all`: status 0.
+- Retained failed Clippy capture: status 101, fixed by the authorized test-only lint placement.
+
+Capture helper: `/tmp/issue539-luna2-capture.py`. It now includes all changed files in its source manifest. Artifacts are under `/tmp/issue539-luna2/` with labels `attempt1-luna3-*`, each retaining command JSON, stdout, stderr, and numeric status.
+
+Full suite, benchmarks, mutations, candidate builds, release/policy/corpus gates were not run.

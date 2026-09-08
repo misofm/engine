@@ -1,0 +1,10 @@
+{
+  "/tmp/issue539-baseline-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.ll": {
+    "bytes": 5639902,
+    "sha256": "7a5e51556857b079fc8311d1d4c513c18c512a0cc4af14aa4e5d13416d8c5a34"
+  },
+  "/tmp/issue539-baseline-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.s": {
+    "bytes": 2677152,
+    "sha256": "62c22a115b7d95e7d10574b782b79a0a0dfce69994bd8b3a24079a08d369a9b0"
+  }
+}

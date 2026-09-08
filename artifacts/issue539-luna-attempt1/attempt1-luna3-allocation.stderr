@@ -1,0 +1,12 @@
+   Compiling true-peak-limiter v0.1.0 (/home/bl/misofm/engine-limiter-stationary-dispatch/crates/true-peak-limiter)
+warning: enum `StationaryDispatch` is never used
+   --> crates/true-peak-limiter/src/lib.rs:694:6
+    |
+694 | enum StationaryDispatch {
+    |      ^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `true-peak-limiter` (lib) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.96s
+     Running tests/allocation.rs (/tmp/issue539-luna2-target/debug/deps/allocation-73edab74ea9dd7c3)

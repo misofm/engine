@@ -1,0 +1,13 @@
+{
+  "head": "794d0dddf17370098f832607766819f73fc77d26",
+  "source": "d63bc437e948d6284b1b6cbe459f0b46c4ed6566",
+  "files": {
+    "miso-engine-v1-abi-layout.json": "40f6fe2e23e1b47500011c14871750a75922ab194136add8b387a4b40eb56919",
+    "miso-engine-v1-audio-worklet.simd128.wasm": "f80b6392b1ea7141aaac639d08094f88982febb883c4d08c3f1114418093e664",
+    "miso-engine-v1-parameter-metadata.json": "6eac2cb3e30931b6c01b10c63af4eedd2d59337274565a129c7a3f328a09938d",
+    "miso-engine-v1-audio-worklet-host.d.ts": "445254e7c6ddf3330bdf20cafa8cacec4d0e2489805f72a833859db52bc038cf",
+    "miso-engine-v1-audio-worklet.js": "225bc06043ed6e2c62a38d63f1c2015b40480d673e3a53109c938eba481556cb",
+    "miso-engine-v1-audio-worklet-host.js": "21c8947d8aad2d1d9a23e553c2c7b983dbd5a622aabfbab9a41c622d1a50229a"
+  },
+  "manifest_entries": 28
+}

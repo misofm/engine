@@ -1,0 +1,1 @@
+FAIL roster true-peak-limiter f32x4 collapsed: 0 arithmetic-carrying kernels match 'true_peak_limiter.*27PreparedTruePeakLimiterBank.*4wide6f32x4.*17process_bank_mono' (expected exactly one). A kernel that vanished, was renamed, or stopped carrying f32x4 arithmetic is a de-vectorisation, not a roster edit.

@@ -1,0 +1,136 @@
+{
+  "source_llvm": "/tmp/issue539-baseline-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.ll",
+  "source_asm": "/tmp/issue539-baseline-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.s",
+  "functions": [
+    {
+      "label": "process-scalar",
+      "kind": "llvm",
+      "path": "/tmp/issue539-baseline/selected/process-scalar.ll",
+      "original": "/tmp/issue539-baseline-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.ll",
+      "lines": [
+        24085,
+        24121
+      ],
+      "bytes": 3401,
+      "sha256": "56f5c71fd9a650d47a18410b0239546c8930ad9f322509fa97a54d91f7a67bc8",
+      "symbol": "_RNvXsd_CsdvPQf9CMsz3_17true_peak_limiterNtB5_23PreparedTruePeakLimiterNtCsfGpaX3jkkqY_15effect_contract20PreparedNativeEffect7process"
+    },
+    {
+      "label": "process-scalar",
+      "kind": "asm",
+      "path": "/tmp/issue539-baseline/selected/process-scalar.s",
+      "original": "/tmp/issue539-baseline-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.s",
+      "lines": [
+        37328,
+        37422
+      ],
+      "bytes": 2266,
+      "sha256": "b8e06055262fe8fbfd8739966896a5e641741d53c5690d0d6cb516c18e8e5b53",
+      "symbol": "_RNvXsd_CsdvPQf9CMsz3_17true_peak_limiterNtB5_23PreparedTruePeakLimiterNtCsfGpaX3jkkqY_15effect_contract20PreparedNativeEffect7process"
+    },
+    {
+      "label": "process-core-scalar",
+      "kind": "llvm",
+      "path": "/tmp/issue539-baseline/selected/process-core-scalar.ll",
+      "original": "/tmp/issue539-baseline-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.ll",
+      "lines": [
+        17496,
+        21808
+      ],
+      "bytes": 346968,
+      "sha256": "8bd1d14c7624bd7a134eab102d4b68fac5c2026542fd61eec59364f71f628d59",
+      "symbol": "_RNvMs9_CsdvPQf9CMsz3_17true_peak_limiterINtB5_11LimiterCorefE13process_blockB5_"
+    },
+    {
+      "label": "process-core-scalar",
+      "kind": "asm",
+      "path": "/tmp/issue539-baseline/selected/process-core-scalar.s",
+      "original": "/tmp/issue539-baseline-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.s",
+      "lines": [
+        26764,
+        34023
+      ],
+      "bytes": 141962,
+      "sha256": "ee0be9992acf71f7744b00fc686b1d8381a9e5b60c75d3f09c7568c7423f5e40",
+      "symbol": "_RNvMs9_CsdvPQf9CMsz3_17true_peak_limiterINtB5_11LimiterCorefE13process_blockB5_"
+    },
+    {
+      "label": "process-bank-w8",
+      "kind": "llvm",
+      "path": "/tmp/issue539-baseline/selected/process-bank-w8.ll",
+      "original": "/tmp/issue539-baseline-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.ll",
+      "lines": [
+        27754,
+        28008
+      ],
+      "bytes": 21978,
+      "sha256": "1f889bb0173a444432dc1f0ab0eb3c64a0dbbaf07b4a311266ce66ef524c1be6",
+      "symbol": "_RNvXse_CsdvPQf9CMsz3_17true_peak_limiterINtB5_27PreparedTruePeakLimiterBankNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8ENtCsfGpaX3jkkqY_15effect_contract24PreparedNativeEffectBank12process_bankB5_"
+    },
+    {
+      "label": "process-bank-w8",
+      "kind": "asm",
+      "path": "/tmp/issue539-baseline/selected/process-bank-w8.s",
+      "original": "/tmp/issue539-baseline-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.s",
+      "lines": [
+        43086,
+        43590
+      ],
+      "bytes": 11204,
+      "sha256": "2224a4c18bb194ef256ab008641b82400ee7017f5630c6c201615569df0fd4ba",
+      "symbol": "_RNvXse_CsdvPQf9CMsz3_17true_peak_limiterINtB5_27PreparedTruePeakLimiterBankNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8ENtCsfGpaX3jkkqY_15effect_contract24PreparedNativeEffectBank12process_bankB5_"
+    },
+    {
+      "label": "process-bank-mono-w8",
+      "kind": "llvm",
+      "path": "/tmp/issue539-baseline/selected/process-bank-mono-w8.ll",
+      "original": "/tmp/issue539-baseline-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.ll",
+      "lines": [
+        28012,
+        30731
+      ],
+      "bytes": 262790,
+      "sha256": "02ea676eff0e299d03dcc2e4d188c616a7087ddc3867331c2d2855e09c936a77",
+      "symbol": "_RNvXse_CsdvPQf9CMsz3_17true_peak_limiterINtB5_27PreparedTruePeakLimiterBankNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8ENtCsfGpaX3jkkqY_15effect_contract24PreparedNativeEffectBank17process_bank_monoB5_"
+    },
+    {
+      "label": "process-bank-mono-w8",
+      "kind": "asm",
+      "path": "/tmp/issue539-baseline/selected/process-bank-mono-w8.s",
+      "original": "/tmp/issue539-baseline-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.s",
+      "lines": [
+        43612,
+        47960
+      ],
+      "bytes": 87703,
+      "sha256": "b187b654bf2bacb9d529f6b61c0d6db3cee8d9e00cc4ca6f7acb31bfd5facd5b",
+      "symbol": "_RNvXse_CsdvPQf9CMsz3_17true_peak_limiterINtB5_27PreparedTruePeakLimiterBankNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8ENtCsfGpaX3jkkqY_15effect_contract24PreparedNativeEffectBank17process_bank_monoB5_"
+    },
+    {
+      "label": "process-core-w8",
+      "kind": "llvm",
+      "path": "/tmp/issue539-baseline/selected/process-core-w8.ll",
+      "original": "/tmp/issue539-baseline-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.ll",
+      "lines": [
+        12834,
+        17300
+      ],
+      "bytes": 388559,
+      "sha256": "389b36d10152fa51550b4cfc1f6dd26a99e8c69527c68e7fe5fb46d1ed8da3a9",
+      "symbol": "_RNvMs9_CsdvPQf9CMsz3_17true_peak_limiterINtB5_11LimiterCoreNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8E13process_blockB5_"
+    },
+    {
+      "label": "process-core-w8",
+      "kind": "asm",
+      "path": "/tmp/issue539-baseline/selected/process-core-w8.s",
+      "original": "/tmp/issue539-baseline-target/release/deps/true_peak_limiter-61bcf0f0b2475b36.s",
+      "lines": [
+        19098,
+        26490
+      ],
+      "bytes": 148115,
+      "sha256": "b002b5a9dea10fd48c4abe7d3857eb4b80164b70a46df56c6ce8bf4891d10936",
+      "symbol": "_RNvMs9_CsdvPQf9CMsz3_17true_peak_limiterINtB5_11LimiterCoreNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8E13process_blockB5_"
+    }
+  ]
+}

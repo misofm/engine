@@ -1,0 +1,89 @@
+SDK artifact builder output-directory and single-directory contract passed
+sdk assets are the engine's current output
+sdk generated modules are current
+sdk generated surface is the engine's current output
+staged 6 Engine V1 artifacts and package manifest
+TAP version 13
+# Subtest: enginectl session build
+    # Subtest: help and version are independent of stdin and the engine
+    ok 1 - help and version are independent of stdin and the engine
+      ---
+      duration_ms: 149.284915
+      type: 'test'
+      ...
+    # Subtest: an early-closing stdout consumer is clean cancellation
+    ok 2 - an early-closing stdout consumer is clean cancellation
+      ---
+      duration_ms: 33.851193
+      type: 'test'
+      ...
+    # Subtest: stdin to stdout is raw canonical JSON
+    ok 3 - stdin to stdout is raw canonical JSON
+      ---
+      duration_ms: 210.033888
+      type: 'test'
+      ...
+    # Subtest: retired --stems is unknown and publishes no output
+    ok 4 - retired --stems is unknown and publishes no output
+      ---
+      duration_ms: 37.163346
+      type: 'test'
+      ...
+    # Subtest: request input refusal precedes a retired stems-only output preflight
+    ok 5 - request input refusal precedes a retired stems-only output preflight
+      ---
+      duration_ms: 41.341055
+      type: 'test'
+      ...
+    # Subtest: rich mapping equals the direct builder and entity permutations are canonical
+    ok 6 - rich mapping equals the direct builder and entity permutations are canonical
+      ---
+      duration_ms: 229.646895
+      type: 'test'
+      ...
+    # Subtest: file output is published before its matching receipt
+    ok 7 - file output is published before its matching receipt
+      ---
+      duration_ms: 321.346089
+      type: 'test'
+      ...
+    # Subtest: a post-publication stdout failure reports effect applied exactly once
+    ok 8 - a post-publication stdout failure reports effect applied exactly once
+      ---
+      duration_ms: 113.626099
+      type: 'test'
+      ...
+    # Subtest: usage and request refusals are structured and create no output
+    ok 9 - usage and request refusals are structured and create no output
+      ---
+      duration_ms: 515.729401
+      type: 'test'
+      ...
+    # Subtest: a missing packaged Wasm asset is internal, not a session refusal
+    ok 10 - a missing packaged Wasm asset is internal, not a session refusal
+      ---
+      duration_ms: 55.228253
+      type: 'test'
+      ...
+    # Subtest: an engine graph refusal preserves its ordered diagnostics
+    ok 11 - an engine graph refusal preserves its ordered diagnostics
+      ---
+      duration_ms: 93.296499
+      type: 'test'
+      ...
+    1..11
+ok 1 - enginectl session build
+  ---
+  duration_ms: 1802.536051
+  type: 'suite'
+  ...
+1..1
+# tests 11
+# suites 1
+# pass 11
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 1862.528736
+SDK publishable-tarball gate passed

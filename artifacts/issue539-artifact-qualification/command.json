@@ -1,0 +1,13 @@
+{
+  "argv": [
+    "bash",
+    "scripts/build-web-audioworklet.sh",
+    "/tmp/issue539-audioworklet-probe-4txudrdv"
+  ],
+  "cwd": "/home/bl/misofm/engine-limiter-stationary-dispatch",
+  "head": "e8d1f2461f07806df307dcdc138f7e26edf07361",
+  "main": "9e113be98cf31c1eaf4297b0a031518244b71c33",
+  "output_directory": "/tmp/issue539-audioworklet-probe-4txudrdv",
+  "repin_environment": "absent",
+  "strip_environment": "absent"
+}

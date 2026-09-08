@@ -1,0 +1,46 @@
+{
+  "argv": [
+    "wasm-objdump",
+    "-x",
+    "/tmp/issue539-web-scalar/wasm32-unknown-unknown/release/host_web.wasm"
+  ],
+  "cwd": "/home/bl/misofm/engine-limiter-stationary-dispatch",
+  "head": "615787e92a209d7146110f7920bb9c09d7f93a3d",
+  "branch": "codex/limiter-stationary-dispatch",
+  "status": "",
+  "env": {
+    "PATH": "/home/bl/.cargo/bin:/home/bl/.codex/packages/standalone/releases/0.153.4-x86_64-unknown-linux-musl/codex-path:/home/bl/.cargo/bin:/home/bl/.local/bin:/home/bl/.codex1/tmp/arg0/codex-arg032GUSu:/home/bl/.codex/packages/standalone/releases/0.153.4-x86_64-unknown-linux-musl/codex-path:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin",
+    "RUSTFLAGS": null,
+    "CARGO_TARGET_DIR": "/tmp/issue539-root-lowering-target"
+  },
+  "source": {
+    "crates/true-peak-limiter/src/lib.rs": {
+      "sha256": "08ea2bfaa5eb83e996e61bced7c9de5e64f5a4a23b932716ce92dbbd7be09d90",
+      "git_blob": "dda39328b3bdf2ca3352f4ba57b4e7e22318cb02"
+    },
+    "crates/true-peak-limiter/tests/mono_collapse.rs": {
+      "sha256": "39256c5322d0469213998d46b7e4cbc1f0f93bc761f30c6785d87d89457652b5",
+      "git_blob": "471c37f8b45e3a2d90d8f201192410462b51df2d"
+    },
+    "crates/true-peak-limiter/tests/allocation.rs": {
+      "sha256": "7825d30723192724a0cab7165953eeb00860e5dad66dc6b7d74333d1ca0ea920",
+      "git_blob": "f61cefe50807e4994388f50c9c92c357389d0d44"
+    },
+    "Cargo.toml": {
+      "sha256": "471660ddca768e90ec87550807e140b4754454509f6f5f59986a80764b53effb",
+      "git_blob": "23944595dc9167dbb5a3a2ced7234dfdbadf3d0d"
+    },
+    "Cargo.lock": {
+      "sha256": "ef85bfaac8b4df80b651fa89e5e9a67bfef141b58076bdaac513044161b0b853",
+      "git_blob": "1b74fb016a04a090d2d1d37ea15fd2917fb85491"
+    },
+    ".cargo/config.toml": {
+      "sha256": "03b0fbd88c069abb0a8fbdca5921ba6a9899298291fe087977b509a29ebb7d0e",
+      "git_blob": "de2180972c37406f1f16913901bd1d4fc2e660e3"
+    },
+    "rust-toolchain.toml": {
+      "sha256": "85a45cac04c296adac076f8f0609ca8f4c8ca658957f1f24cbd1e054b6cc44e0",
+      "git_blob": "6b6739839ba23906921aeb4c268d275dcc459fb6"
+    }
+  }
+}

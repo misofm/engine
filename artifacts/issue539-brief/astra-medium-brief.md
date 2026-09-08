@@ -1,0 +1,26 @@
+**PASS — baseline-only scope review for #539.** One untimed native baseline capture is authorized. No implementation, timing, or projected gain is authorized.
+
+Verified read-only:
+
+- Clean, pushed HEAD `918efad74e90b7b2d2786359886765e1ed9a9d74`, directly parented by live default-branch main `32a4c2058f2c01dea78af32affab660dbc17cae0`. Production source/configuration is unchanged from that base. The local `main` ref is stale; use the verified remote SHA.
+- [GitHub #539](https://github.com/misofm/engine/issues/539) is OPEN, titled **“Specialize stationary limiter dispatch without changing DSP”**, with a byte-exact match to the numbered local body.
+- [#537](https://github.com/misofm/engine/issues/537) is CLOSED; [PR #538](https://github.com/misofm/engine/pull/538) is MERGED with the stated merge SHA and expected parents. Run `34088692973` and its `qualification` verdict succeeded. Post-main run `34089134766` remained in progress at the final check.
+- Current inventory is **260 numbered local specs / 354 remote issues**, with no missing local-number identities; #534/#536/#537 are CLOSED. The recorded 259/353 inventory predates #539. This verifies number coverage, not universal historical title/body equality.
+- Read applicable root AGENTS, the numbered brief, retained unnumbered prebrief, current limiter seams, inherited #016 wave-2 amendment/#090 pointer, contract, and #537 capture methodology. User routing overrides the guide’s older model assignments: Luna high/xhigh implementation; Astra medium audio verification.
+
+The FX1 scope is appropriately small and conditional. Source conditionals occur at `lib.rs:1701`, `1890`, `3086`, and `3197`: dual per-lane/uniform and mono per-lane/uniform. Stationary admission requires zero remaining updates and bit-equal current/target; dual checks four ramp sets, mono the left pair under existing collapse eligibility. Existing silent-rest admission is a separate mechanism. **None of these source facts proves a surviving machine branch.**
+
+The inherited DSP contract is sufficient for a dispatch-only change: preserve the current windowed, quantized gain law; coefficient design and exact ramp endpoints; separately rounded Annex-2 tap arithmetic; ordered maxima; latency, signed-zero bypass, state restoration, mono disengagement, and nonfinite recovery. The superseded step/hold law supplies no authority. FX2 detector access remains a separate successor.
+
+Record these narrow clarifications with the baseline instructions:
+
+1. **Caller coverage is not an eight-cell requirement.** Capture scalar production `process` and supported W8 `process_bank` / `process_bank_mono`, including any outlined callees. Map all four bodies through W8. Scalar is dual-only and its valid one-lane state is uniform; do not manufacture scalar mono/per-lane probes or credit unreachable code.
+2. **Correct the cursor wording:** L/R history, prefix and phase state are independent; the current engine shares one main/ring cursor pair across the bank. Preserve that arrangement.
+3. **Preserve effective compiler provenance.** Reuse the existing capture approach with Rust `1.97.1`, `--locked --release`, isolated target, fat LTO/codegen-units=1 and existing `+avx2,+fma` configuration. Record effective environment overrides and compiler invocation; do not add `target-cpu`. Retain complete mapped IR/ASM and original identities/ranges. Distinguish crate production lowering from a final linked native artifact.
+4. The brief conditionally permits allocator-liveness work but omits `tests/allocation.rs` from its path list. Resolve that narrowly **only if implementation proceeds**; the existing allocator is already thread-local. No allocator rewrite is warranted.
+
+The finite conditional gates are feasible using existing private and integration machinery: populated PCM/full-state comparison with the old unspecialized behavior, a ramp ending within a block followed by a stationary block, all four supported routes, and one discriminating fallback-only negative control. Classification counters alone are insufficient. Preserve existing arithmetic, state, mono, allocation and corpus gates; identify actual W8 execution. Later native/Wasm and ordinary artifact qualification remain conditional delivery obligations.
+
+After the **single capture**, root checkpoints and pushes the evidence; Astra then decides whether a useful, reachable residual survives. Partial survival narrows the implementation. Compiler-eliminated or unprovable residual yields **no change**, not another optimization premise. Maximum **three implementation attempts** remains binding.
+
+No edits, builds, tests, benchmarks, captures, Git/GitHub writes, agents, or report-file writes were performed.

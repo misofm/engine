@@ -15,7 +15,7 @@ use effect_contract::{
     AutomationSpanKind, BankWidth, EffectBankProcessBlock, EffectQuality, InitialParameterValue,
     LinkMode, NativeEffectFactory, ParameterChannel, PrepareEffectBankRequest, PrepareEffectLimits,
     PrepareEffectRequest, PreparedAutomationSpan, PreparedNativeEffectBank, PreparedPorts,
-    PreparedSidechainPort,
+    PreparedSidechainPort, StatePayloadOutput, StatePayloadSizes,
 };
 use lane::Backend;
 use true_peak_limiter::{
@@ -26,6 +26,76 @@ use true_peak_limiter::{
 /// collapsed-run samples before anything is compared.
 const BLOCKS: usize = 24;
 const FRAMES: usize = 128;
+
+type LanePayload = (Vec<u8>, Vec<u8>, Vec<u8>);
+
+fn snapshots(bank: &dyn PreparedNativeEffectBank, lanes: usize) -> Vec<LanePayload> {
+    let sizes = bank.metadata().program_key.state_sizes;
+    (0..lanes)
+        .map(|track| {
+            let mut common = vec![0_u8; sizes.common_bytes as usize];
+            let mut left = vec![0_u8; sizes.left_bytes as usize];
+            let mut right = vec![0_u8; sizes.right_bytes as usize];
+            bank.snapshot_track_state_payload(
+                track as u32,
+                StatePayloadOutput::new(
+                    &mut common,
+                    &mut left,
+                    &mut right,
+                    StatePayloadSizes {
+                        common_bytes: sizes.common_bytes,
+                        left_bytes: sizes.left_bytes,
+                        right_bytes: sizes.right_bytes,
+                    },
+                )
+                .expect("state output"),
+            )
+            .expect("snapshot");
+            (common, left, right)
+        })
+        .collect()
+}
+
+fn has_nonzero_word(bytes: &[u8]) -> bool {
+    bytes
+        .chunks_exact(4)
+        .any(|word| u32::from_le_bytes(word.try_into().expect("four-byte word")) != 0)
+}
+
+fn has_non_one_word(bytes: &[u8]) -> bool {
+    bytes.chunks_exact(4).any(|word| {
+        u32::from_le_bytes(word.try_into().expect("four-byte word")) != 1.0_f32.to_bits()
+    })
+}
+
+/// The complete payload equality below is the state contract. These narrower checks only prove
+/// that the fixture populated detector history and both ring families before that comparison.
+fn assert_populated_history_and_rings(payloads: &[LanePayload], label: &str) {
+    const HISTORY_START: usize = 15 * 4;
+    const MAIN_RING_START: usize = 27 * 4;
+    const REQUIRED_RING_START: usize = (27 + 486) * 4;
+    const BOX_RING_START: usize = (27 + 486 + 481) * 4;
+    for (track, (_, left, right)) in payloads.iter().enumerate() {
+        for (channel_name, channel) in [("left", left), ("right", right)] {
+            assert!(
+                has_nonzero_word(&channel[HISTORY_START..MAIN_RING_START]),
+                "{label}: track {track} {channel_name} history is empty"
+            );
+            assert!(
+                has_nonzero_word(&channel[MAIN_RING_START..REQUIRED_RING_START]),
+                "{label}: track {track} {channel_name} main ring is empty"
+            );
+            assert!(
+                has_non_one_word(&channel[REQUIRED_RING_START..BOX_RING_START]),
+                "{label}: track {track} {channel_name} required-gain ring is all one"
+            );
+            assert!(
+                has_non_one_word(&channel[BOX_RING_START..]),
+                "{label}: track {track} {channel_name} box ring is all one"
+            );
+        }
+    }
+}
 
 fn native_bank() -> Option<(BankWidth, Backend)> {
     let backend = Backend::current();
@@ -256,6 +326,13 @@ fn a_desymmetrized_bank_is_a_never_collapsed_bank() {
         let collapsed_half = step < BLOCKS / 2;
         if step == BLOCKS / 2 {
             mixed.desymmetrize_channels();
+            let mixed_state = snapshots(mixed.as_ref(), lanes);
+            let never_state = snapshots(never.as_ref(), lanes);
+            assert_populated_history_and_rings(&never_state, "at mono disengage");
+            assert_eq!(
+                mixed_state, never_state,
+                "complete state at mono disengage before the resumed dual block"
+            );
         }
         let mut never_left = block(step, lanes);
         let mut never_right = never_left.clone();
@@ -307,6 +384,13 @@ fn a_desymmetrized_bank_is_a_never_collapsed_bank() {
                     mixed_word.to_bits(),
                     never_word.to_bits(),
                     "block {step} word {word}: the right plane after the disengage"
+                );
+            }
+            if step == BLOCKS / 2 {
+                assert_eq!(
+                    snapshots(mixed.as_ref(), lanes),
+                    snapshots(never.as_ref(), lanes),
+                    "complete state after the first resumed dual block"
                 );
             }
         }

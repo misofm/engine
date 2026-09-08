@@ -1,0 +1,70 @@
+{
+  "argv": [
+    "cargo",
+    "test",
+    "--locked",
+    "--release",
+    "-p",
+    "true-peak-limiter",
+    "--test",
+    "mono_collapse",
+    "--all-features"
+  ],
+  "cwd": "/home/bl/misofm/engine-limiter-stationary-dispatch",
+  "head": "a9601322d7defc71ded2a0a82d6c82f4d0f672d5",
+  "branch": "codex/limiter-stationary-dispatch",
+  "status": " M crates/true-peak-limiter/src/lib.rs\n",
+  "env": {
+    "PATH": "/home/bl/.cargo/bin:/home/bl/.codex/packages/standalone/releases/0.153.4-x86_64-unknown-linux-musl/codex-path:/home/bl/.local/bin:/home/bl/.codex1/tmp/arg0/codex-arg0ppXICq:/home/bl/.codex/packages/standalone/releases/0.153.4-x86_64-unknown-linux-musl/codex-path:/home/bl/.codex/packages/standalone/releases/0.153.4-x86_64-unknown-linux-musl/codex-path:/home/bl/.cargo/bin:/home/bl/.local/bin:/home/bl/.codex1/tmp/arg0/codex-arg032GUSu:/home/bl/.codex/packages/standalone/releases/0.153.4-x86_64-unknown-linux-musl/codex-path:/home/bl/.local/bin:/home/bl/.local/bin:/home/bl/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin",
+    "RUSTFLAGS": null,
+    "CARGO_TARGET_DIR": "/tmp/issue539-luna2-target"
+  },
+  "toolchain": {
+    "rustc": {
+      "status": 0,
+      "output": "rustc 1.97.1 (8bab26f4f 2026-07-14)\nbinary: rustc\ncommit-hash: 8bab26f4f68e0e26f0bb7960be334d5b520ea452\ncommit-date: 2026-07-14\nhost: x86_64-unknown-linux-gnu\nrelease: 1.97.1\nLLVM version: 22.1.6\n"
+    },
+    "cargo": {
+      "status": 0,
+      "output": "cargo 1.97.1 (c980f4866 2026-06-30)\n"
+    },
+    "rustup_toolchain": {
+      "status": 0,
+      "output": "1.97.1-x86_64-unknown-linux-gnu (overridden by '/home/bl/misofm/engine-limiter-stationary-dispatch/rust-toolchain.toml')\n"
+    }
+  },
+  "source": {
+    "crates/true-peak-limiter/src/lib.rs": {
+      "sha256": "677a5596a305039ddbed39d634cde80e90bf99d39439896b1d58a4a539d73b55",
+      "git_blob": "efbb0251cf2ab006cc901dafeed2e64a5688e7eb"
+    },
+    "crates/true-peak-limiter/tests/allocation.rs": {
+      "sha256": "7825d30723192724a0cab7165953eeb00860e5dad66dc6b7d74333d1ca0ea920",
+      "git_blob": "f61cefe50807e4994388f50c9c92c357389d0d44"
+    },
+    "crates/true-peak-limiter/tests/mono_collapse.rs": {
+      "sha256": "1f42a58d6f71232a3af6a0a72717ae57bcf1acc0391a9384eb07e21bfbb2dd6d",
+      "git_blob": "a41629b70ce08b8ca7c99882325fecec6a1db8c2"
+    },
+    "crates/true-peak-limiter/Cargo.toml": {
+      "sha256": "68f83b8bfef41ff2a9be371c0bfe03bfbf2fd96896a8ae7c6f23fd2028282e92",
+      "git_blob": "f7d9707737dfa02447ec4240bc07243663e319cf"
+    },
+    "Cargo.toml": {
+      "sha256": "471660ddca768e90ec87550807e140b4754454509f6f5f59986a80764b53effb",
+      "git_blob": "23944595dc9167dbb5a3a2ced7234dfdbadf3d0d"
+    },
+    "Cargo.lock": {
+      "sha256": "ef85bfaac8b4df80b651fa89e5e9a67bfef141b58076bdaac513044161b0b853",
+      "git_blob": "1b74fb016a04a090d2d1d37ea15fd2917fb85491"
+    },
+    ".cargo/config.toml": {
+      "sha256": "03b0fbd88c069abb0a8fbdca5921ba6a9899298291fe087977b509a29ebb7d0e",
+      "git_blob": "de2180972c37406f1f16913901bd1d4fc2e660e3"
+    },
+    "rust-toolchain.toml": {
+      "sha256": "85a45cac04c296adac076f8f0609ca8f4c8ca658957f1f24cbd1e054b6cc44e0",
+      "git_blob": "6b6739839ba23906921aeb4c268d275dcc459fb6"
+    }
+  }
+}
