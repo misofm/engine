@@ -4,12 +4,12 @@ set -euo pipefail
 if (($#)); then echo "usage: $0" >&2; exit 2; fi
 repo=$(git rev-parse --show-toplevel)
 cd "$repo"
-if [[ -n "${MISO_ENGINE_602_ROOT-}" && "${MISO_ENGINE_602_SELF_TEST-}" != 1 ]]; then
+if [[ -n "${MISO_ENGINE_603_ROOT-}" && "${MISO_ENGINE_603_SELF_TEST-}" != 1 ]]; then
   echo "artifact-root override is self-test-only" >&2; exit 2
 fi
 self_test_fault=
-if [[ "${MISO_ENGINE_602_SELF_TEST-}" == 1 ]]; then self_test_fault="${MISO_ENGINE_602_SELF_TEST_FAULT-}"; fi
-root=${MISO_ENGINE_602_ROOT:-"$repo/artifacts/issue-602-input-symmetry-capture"}
+if [[ "${MISO_ENGINE_603_SELF_TEST-}" == 1 ]]; then self_test_fault="${MISO_ENGINE_603_SELF_TEST_FAULT-}"; fi
+root=${MISO_ENGINE_603_ROOT:-"$repo/artifacts/issue-603-input-symmetry-capture"}
 seal="$root/input-symmetry-capture.seal.json"
 prepared="$root/prepared-release/bench"
 raw="$root/raw"
@@ -25,9 +25,13 @@ write_prelaunch_failure() {
   python3 - "$disposition.tmp" <<'PY'
 import json, sys
 with open(sys.argv[1], "x", encoding="utf-8") as handle:
-    json.dump({"schema_version":1,"issue":602,"runner_status":"FAIL","child_status":"not_run","validator_status":"not_run","accepted_status":"not_attempted","workload_process_invocations":0,"capture_started_markers":0,"round_completion_markers":0,"timed_render_calls":0,"recovery_path":"raw"}, handle, separators=(",", ":")); handle.write("\n")
+    json.dump({"schema_version":1,"issue":603,"runner_status":"FAIL","child_status":"not_run","validator_status":"not_run","accepted_status":"not_attempted","workload_process_invocations":0,"capture_started_markers":0,"round_completion_markers":0,"timed_render_calls":0,"recovery_path":"raw"}, handle, separators=(",", ":")); handle.write("\n")
 PY
-  ln -- "$disposition.tmp" "$disposition" && rm -- "$disposition.tmp"
+  if ! ln -- "$disposition.tmp" "$disposition"; then
+    echo "FAIL: prelaunch disposition publication failed; recovery retained at $raw" >&2
+    return 1
+  fi
+  rm -- "$disposition.tmp"
 }
 if ! python3 scripts/input-symmetry-capture-validator.py --seal-only "$seal" >"$raw/validator.stdout" 2>"$raw/validator.stderr"; then
   write_prelaunch_failure; echo "FAIL: invalid prelaunch seal; evidence retained at $raw" >&2; exit 1
@@ -88,17 +92,39 @@ stdout_bytes=$(wc -c <"$raw/stdout.jsonl")
 stderr_bytes=$(wc -c <"$raw/stderr.log")
 validator_status=not_run
 accepted_status=not_attempted
+marker_status=not_run
+started=0
+rounds=0
+timed_calls=0
+if [[ -f "$raw/stderr.log" ]]; then
+  IFS=$'\t' read -r marker_status started rounds timed_calls < <(python3 - "$raw/stderr.log" <<'PY'
+import sys
+lines = [line.rstrip("\n") for line in open(sys.argv[1], encoding="utf-8")]
+markers = [line for line in lines if line.startswith("MISO_ENGINE_CAPTURE_PHASE")]
+expected = ["MISO_ENGINE_CAPTURE_PHASE capture_started", "MISO_ENGINE_CAPTURE_PHASE round_1_complete", "MISO_ENGINE_CAPTURE_PHASE round_2_complete"]
+prefix = 0
+for actual, wanted in zip(markers, expected):
+    if actual != wanted:
+        break
+    prefix += 1
+started = sum(line == expected[0] for line in markers)
+rounds = sum(line in expected[1:] for line in markers)
+status = "PASS" if markers == expected else "FAIL"
+print(status, started, rounds, max(0, prefix - 1) * 8192, sep="\t")
+PY
+  )
+fi
 if ((child_status == 0)); then
   set +e
   python3 scripts/input-symmetry-capture-validator.py "$seal" "$raw/stdout.jsonl" >"$raw/validator.stdout" 2>"$raw/validator.stderr"
   validator_status=$?
   set -e
-  if ((validator_status == 0)); then
+  if ((validator_status == 0)) && [[ "$marker_status" == PASS ]]; then
     if [[ "$self_test_fault" == publication ]]; then
       accepted_status=publication_failed
     else
       set +e
-      ln "$raw/stdout.jsonl" "$accepted"
+      ln -- "$raw/stdout.jsonl" "$accepted"
       publish_status=$?
       set -e
       if ((publish_status == 0)); then accepted_status=published; else accepted_status=publication_failed; fi
@@ -112,15 +138,13 @@ if [[ -f "$raw/validator.stdout" ]]; then validator_hash_value=$(sha256sum "$raw
 if [[ -f "$raw/validator.stderr" ]]; then validator_err_hash=$(sha256sum "$raw/validator.stderr" | cut -d' ' -f1); validator_err_bytes=$(wc -c <"$raw/validator.stderr"); fi
 accepted_hash=missing; accepted_bytes=0
 if [[ -f "$accepted" ]]; then accepted_hash=$(sha256sum "$accepted" | cut -d' ' -f1); accepted_bytes=$(wc -c <"$accepted"); fi
-started=$(grep -c '^MISO_ENGINE_CAPTURE_PHASE capture_started$' "$raw/stderr.log" || true)
-rounds=$(grep -c '^MISO_ENGINE_CAPTURE_PHASE round_[12]_complete$' "$raw/stderr.log" || true)
-timed_calls=$((rounds * 8192))
-python3 - "$disposition.tmp" "$child_status" "$validator_status" "$accepted_status" "$stdout_hash" "$stderr_hash" "$stdout_bytes" "$stderr_bytes" "$validator_hash_value" "$validator_bytes" "$validator_err_hash" "$validator_err_bytes" "$accepted_hash" "$accepted_bytes" "$started" "$rounds" "$timed_calls" <<'PY'
+python3 - "$disposition.tmp" "$child_status" "$validator_status" "$accepted_status" "$stdout_hash" "$stderr_hash" "$stdout_bytes" "$stderr_bytes" "$validator_hash_value" "$validator_bytes" "$validator_err_hash" "$validator_err_bytes" "$accepted_hash" "$accepted_bytes" "$started" "$rounds" "$timed_calls" "$marker_status" <<'PY'
 import json, sys
-path, child, validator, accepted, sh, eh, sb, eb, vh, vb, veh, ve_bytes, ah, ab, started, rounds, calls = sys.argv[1:]
-record={"schema_version":1,"issue":602,"runner_status":"PASS" if child == "0" and validator == "0" and accepted == "published" else "FAIL",
+path, child, validator, accepted, sh, eh, sb, eb, vh, vb, veh, ve_bytes, ah, ab, started, rounds, calls, markers = sys.argv[1:]
+record={"schema_version":1,"issue":603,"runner_status":"PASS" if child == "0" and validator == "0" and accepted == "published" and markers == "PASS" else "FAIL",
  "child_status":int(child),"validator_status":validator,"accepted_status":accepted,"workload_process_invocations":1,
  "capture_started_markers":int(started),"round_completion_markers":int(rounds),"timed_render_calls":int(calls),
+ "marker_status":markers,
  "raw_stdout_sha256":sh,"raw_stderr_sha256":eh,"validator_stdout_sha256":vh,"validator_stderr_sha256":veh,"accepted_output_sha256":ah,
  "raw_stdout_bytes":int(sb),"raw_stderr_bytes":int(eb),"validator_stdout_bytes":int(vb),"validator_stderr_bytes":int(ve_bytes),"accepted_output_bytes":int(ab),"recovery_path":"raw"}
 with open(path,"x",encoding="utf-8") as f: json.dump(record,f,sort_keys=True,separators=(",",":")); f.write("\n")
@@ -130,5 +154,9 @@ if [[ "$self_test_fault" == persistence ]]; then
   echo "FAIL: disposition persistence failed; recovery retained at $raw" >&2
   exit 1
 fi
-ln -- "$disposition.tmp" "$disposition" && rm -- "$disposition.tmp"
+if ! ln -- "$disposition.tmp" "$disposition"; then
+  echo "FAIL: disposition publication failed; recovery retained at $raw" >&2
+  exit 1
+fi
+rm -- "$disposition.tmp"
 if [[ "$accepted_status" == published ]]; then echo "PASS: accepted capture published"; else echo "FAIL: capture retained at $raw" >&2; exit 1; fi

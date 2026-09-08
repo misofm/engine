@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Strict, side-effect free validator for the #602 seal and two capture records."""
+"""Strict, side-effect free validator for the #603 seal and two capture records."""
 from __future__ import annotations
 
 import json
@@ -27,7 +27,9 @@ SEAL_KEYS = {
     "quantum_frames", "lane_width", "track_count", "records_per_block", "preparation_blocks_per_owner",
     "measured_blocks_per_owner", "expected_records", "expected_attempted_records", "expected_renders_per_round", "expected_rounds",
     "expected_timed_render_calls", "expected_workload_processes",
+    "target_pair_db", "smoothing_samples", "owners",
 }
+U64_MAX = (1 << 64) - 1
 
 
 def pairs(pairs_list):
@@ -50,7 +52,7 @@ def exact_keys(obj, expected, label):
 
 
 def integer(value, label, minimum=0):
-    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum or value > U64_MAX:
         raise ValueError(f"{label}: strict nonnegative integer required")
     return value
 
@@ -75,7 +77,7 @@ def git_identity(value, label):
 
 def validate_record(record, expected_round, seal):
     exact_keys(record, RECORD_KEYS, "record")
-    if integer(record["schema_version"], "schema_version") != 1 or integer(record["issue"], "issue") != 602 or record["kind"] != "input_symmetry_capture":
+    if integer(record["schema_version"], "schema_version") != 1 or integer(record["issue"], "issue") != 603 or record["kind"] != "input_symmetry_capture":
         raise ValueError("record identity mismatch")
     if integer(record["round"], "round", 1) != expected_round:
         raise ValueError("round order mismatch")
@@ -96,7 +98,7 @@ def validate_record(record, expected_round, seal):
     pair = record["target_pair_db"]
     if (not isinstance(pair, list) or len(pair) != 2
             or any(isinstance(value, bool) or not isinstance(value, float) for value in pair)
-            or pair != [-6.0, -12.0] or record["backend"] != "Simd8"):
+            or pair != seal["target_pair_db"] or record["backend"] != "Simd8"):
         raise ValueError("workload identity mismatch")
     if not isinstance(record["owner_digests"], list) or record["owner_digests"] != [DIGEST, DIGEST]:
         raise ValueError("reviewed owner digest mismatch")
@@ -114,7 +116,8 @@ def validate_record(record, expected_round, seal):
             raise ValueError(f"{key}: string or null required")
     if (not isinstance(record["missing_metadata"], list)
             or any(not isinstance(item, str) for item in record["missing_metadata"])
-            or sorted(record["missing_metadata"]) != record["missing_metadata"]):
+            or sorted(record["missing_metadata"]) != record["missing_metadata"]
+            or len(set(record["missing_metadata"])) != len(record["missing_metadata"])):
         raise ValueError("missing metadata must be sorted")
     allowed_missing = {"cpu_model", "governor_or_power_mode", "rust_version", "llvm_version", "target_triple",
                        "target_features", "profile", "background_load_note", "measurement_control", "cpu_affinity", "candidate_commit"}
@@ -124,7 +127,8 @@ def validate_record(record, expected_round, seal):
                      "target_features", "profile", "background_load_note", "measurement_control", "cpu_affinity", "candidate_commit")
     if {key for key in metadata_keys if record[key] is None} != set(record["missing_metadata"]):
         raise ValueError("missing metadata does not match null fields")
-    if record["descriptive_only"] is not True or integer(record["nonzero_samples"], "nonzero_samples", 1) <= 0:
+    nonzero = integer(record["nonzero_samples"], "nonzero_samples", 1)
+    if record["descriptive_only"] is not True or nonzero > record["output_words"]:
         raise ValueError("nonzero descriptive PCM required")
     for record_key, seal_key in (("source_commit", "candidate_commit"), ("source_tree", "candidate_tree"),
                                  ("binary_sha256", "binary_sha256"), ("fixture_sha256", "fixture_sha256"),
@@ -144,11 +148,13 @@ def validate_record(record, expected_round, seal):
                                  ("measured_blocks_per_owner", "measured_blocks_per_owner")):
         if record[record_key] != seal[seal_key]:
             raise ValueError(f"record/seal workload mismatch: {record_key}")
+    if record["smoothing_samples"] != seal["smoothing_samples"] or record["owners"] != seal["owners"]:
+        raise ValueError("record/seal workload mismatch: smoothing or owners")
 
 
 def validate_seal(seal):
     exact_keys(seal, SEAL_KEYS, "seal")
-    if (integer(seal["schema_version"], "schema_version"), integer(seal["issue"], "issue"), seal["kind"], seal["status"]) != (1, 602, "input_symmetry_capture_seal", "READY"):
+    if (integer(seal["schema_version"], "schema_version"), integer(seal["issue"], "issue"), seal["kind"], seal["status"]) != (1, 603, "input_symmetry_capture_seal", "READY"):
         raise ValueError("seal identity/status mismatch")
     for key in ("binary_sha256", "fixture_sha256", "source_sha256", "timed_source_sha256", "untimed_source_sha256", "dispatcher_sha256",
                 "validator_sha256", "runner_sha256", "preflight_sha256", "cargo_lock_sha256"):
@@ -166,6 +172,15 @@ def validate_seal(seal):
                           ("expected_timed_render_calls", 16384), ("expected_workload_processes", 1)):
         if integer(seal[key], f"seal {key}") != expected:
             raise ValueError(f"seal {key}: unexpected value")
+    pair = seal["target_pair_db"]
+    if (not isinstance(pair, list) or len(pair) != 2
+            or any(isinstance(value, bool) or not isinstance(value, float) for value in pair)
+            or pair != [-6.0, -12.0]):
+        raise ValueError("seal target pair mismatch")
+    if integer(seal["smoothing_samples"], "seal smoothing_samples") != 256:
+        raise ValueError("seal smoothing mismatch")
+    if integer(seal["owners"], "seal owners") != 2:
+        raise ValueError("seal owners mismatch")
 
 
 def validate(seal_path, records_path):
@@ -175,7 +190,7 @@ def validate(seal_path, records_path):
     if len(lines) != 2 or any(not line.strip() for line in lines):
         raise ValueError("exactly two nonblank JSON lines required")
     for index, line in enumerate(lines, 1):
-        validate_record(json.loads(line, object_pairs_hook=pairs), index, seal)
+        validate_record(json.loads(line, object_pairs_hook=pairs, parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value))), index, seal)
     return True
 
 
@@ -186,7 +201,7 @@ def main(argv):
         except (OSError, ValueError, json.JSONDecodeError) as error:
             print(f"FAIL: {error}", file=sys.stderr)
             return 1
-        print("PASS: #602 seal")
+        print("PASS: #603 seal")
         return 0
     if len(argv) != 3:
         print("usage: input-symmetry-capture-validator.py SEAL RECORDS | --seal-only SEAL", file=sys.stderr)
@@ -196,7 +211,7 @@ def main(argv):
     except (OSError, ValueError, json.JSONDecodeError) as error:
         print(f"FAIL: {error}", file=sys.stderr)
         return 1
-    print("PASS: #602 seal and two capture records")
+    print("PASS: #603 seal and two capture records")
     return 0
 
 

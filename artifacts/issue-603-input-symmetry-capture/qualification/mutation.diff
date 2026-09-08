@@ -1,0 +1,5 @@
+--- artifacts/issue-603-input-symmetry-capture/qualification/validator-pre-mutation.py
++++ scripts/input-symmetry-capture-validator.py
+@@ -80 +80 @@
+-    if integer(record["schema_version"], "schema_version") != 1 or integer(record["issue"], "issue") != 603 or record["kind"] != "input_symmetry_capture":
++    if integer(record["schema_version"], "schema_version") != 1 or integer(record["issue"], "issue") != 604 or record["kind"] != "input_symmetry_capture":

@@ -1,0 +1,10 @@
+#603 attempt 1 untimed qualification
+mutation_command: replace validator record issue gate 603 -> 604; run bash scripts/test-input-symmetry-capture.sh
+mutation_status: 1 (expected nonzero)
+mutation_diagnostic: FAIL: record identity mismatch
+restored_self_test_status: 0
+final capture/preflight: not run
+real workload/timing: not run
+root checkpoint audit: FAIL pending Astra LOW adversarial review
+blocking findings: validator/synthetic records require issue 603 while the frozen Rust entry emits issue 602; preflight refuses the committed issue-603 qualification directory; preflight seal publication retains the rejected `ln && rm` fallthrough; build-environment override cases are not exercised; record missing/duplicate/reordered coverage remains incomplete; identity-mismatch fixtures can fail first on copied-root argv; and the 8,192-call completed prefix is not exercised.
+authorization: no correction, final preflight, real capture entry, or timing until the exact pushed attempt receives Astra LOW review
