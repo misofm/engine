@@ -1,0 +1,6 @@
+The sole post-pin builder invocation stopped before compilation because the
+requested output path was absent. The builder's retained stderr is:
+
+output must be an existing non-symlink directory
+
+The command was not retried. No post-pin identity or downstream gate was run.

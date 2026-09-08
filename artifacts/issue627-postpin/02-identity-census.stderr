@@ -1,0 +1,2 @@
+find: ‘/tmp/issue627-postpin-output’: No such file or directory
+sha256sum: '/tmp/issue627-postpin-output/*': No such file or directory

@@ -1,0 +1,3 @@
+The first post-build identity census could not inspect the required output:
+the output directory was absent. Its raw diagnostics are retained. The census
+was not retried, and no post-pin command followed it.

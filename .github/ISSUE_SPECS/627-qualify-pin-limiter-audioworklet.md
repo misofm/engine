@@ -300,3 +300,23 @@ ordinary no-bypass build from the clean pushed repository head and the bounded
 static/resource/hermetic/SDK/matrix/policy gates may run under Astra LOW; the
 successful scratch browser qualification must not repeat. PR and merge remain
 unauthorized pending Astra LOW post-pin and exact-head/current-main PASS.
+
+## Post-pin proof preflight — FAIL
+
+The first authorized post-pin builder invocation at detached promotion commit
+`0bb5a820` failed before compilation because the executor passed the absent path
+`/tmp/issue627-postpin-output` instead of first creating the required empty
+directory. The unchanged builder emitted only `output must be an existing non-
+symlink directory`; stdout and output records are empty, the path remains absent,
+and no downstream gate ran. Luna detected the prior attempt and correctly refused
+to retry. The retained builder status is 1. A subsequent identity census only
+recorded the absent output and did not invoke a build or gate.
+
+This supplies no post-pin artifact credit. No command, retry, PR, or merge is
+authorized. To remain within the repository three-attempt limit, any corrected
+post-pin proof is the final attempt 3 and requires Astra LOW scope PASS first.
+That scope must require an explicit preflight proving a newly created empty,
+existing, non-symlink output directory; one no-bypass builder invocation; exact
+six-file comparison; and the already bounded post-pin checks. It must stop on
+any failure, forbid package installs and browser qualification, and preserve the
+failed invocation without relabeling it.
