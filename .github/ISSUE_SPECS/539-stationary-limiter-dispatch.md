@@ -322,3 +322,19 @@ run, benchmark, timing/capture, source, workflow, consumer or pin change occurre
 PASS does not apply. A separately numbered lane-B artifact decision must qualify one scratch
 candidate through the existing static/resource/hermetic/SDK/three-browser gates before any pin or
 consumer update and before #539 can enter PR delivery.
+
+## CP8 delivery supersedes the standalone artifact observation
+
+Lane-B #614/#615 delivered the shared automation/smoothing predicate and its independently qualified
+AudioWorklet artifact through PR #616. The PR merged as
+`773682433ef451b89e5359fa8f722e1016c64fb3`; required PR qualification `34206114765`, PR fuzz
+`34206114764`, post-main qualification `34206874821`, and post-main fuzz `34206874694` all
+completed SUCCESS. GitHub #614/#615 are closed and the tracker releases their two slots.
+
+The CP8 change is a compiled dependency of the AudioWorklet, so #539's earlier standalone observed
+digest `7e242eb8…` is stale and receives no promotion or artifact credit. Resume #539 by integrating
+exact current main `773682433ef451b89e5359fa8f722e1016c64fb3` while preserving the accepted limiter
+source and attempt accounting, rerun proportional integrated-source gates, and obtain Astra LOW
+PASS. Lane B must then make one fresh ordinary six-file decision from the combined source. Byte
+identity permits retained attribution; drift moves qualification/pinning to one separately numbered
+successor. No benchmark, timing/capture or speedup claim is authorized.
