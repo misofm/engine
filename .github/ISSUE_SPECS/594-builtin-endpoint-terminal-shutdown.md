@@ -82,22 +82,35 @@ Allowed implementation paths:
 Do not edit protocol, engine, graph, builtins, builtins-compiler, other host-core modules,
 `crates/host-core/Cargo.toml`, `Cargo.lock`, hosts, C ABI, browser, SDK, artifacts, policies,
 workflows, or lane B #593 paths. Reuse the existing generic cancellation storage. One prepared shared
-`Arc<AtomicBool>` terminal-intent discriminator is authorized because the generic cancellation
-payload intentionally carries only its token and frontier. Allocate it during endpoint preparation,
-clone it once into the control/render owners, and charge its exact allocation plus both inline handles
-through the existing endpoint resource report before host preparation. Prove checked overflow,
-exact-cap acceptance, one-below-cap refusal before any allocation, positive lifetime accounting, and
-off-render final reclamation.
+`Arc<AtomicU8>` lifecycle handshake is authorized because the generic cancellation payload
+intentionally carries only its token and frontier. Allocate it during endpoint preparation, clone it
+once into the control/render owners, and charge its exact allocation plus both inline handles through
+the existing endpoint resource report before host preparation. Prove checked overflow, exact-cap
+acceptance, one-below-cap refusal before any allocation, positive lifetime accounting, and off-render
+final reclamation.
 
-`begin_shutdown` stores terminal intent with Release ordering before publishing the generic
-cancellation message. If generic `begin_cancel` fails for any reason, it restores the discriminator
-and every control lifecycle field before returning the error. Render may load the discriminator with
-Acquire ordering only after `cancel_boundary(first)` successfully consumes and acknowledges the
-matching generic message; observing the flag without a cancellation message can never quiesce render.
-The flag stays set after successful shutdown. No new queue, ledger, other heap allocation, protocol
-payload, manifest dependency, target-handle mapping, generation clear, plan exchange, or public raw
-producer is authorized. If this one atomic discriminator is insufficient, stop and rebrief rather
-than widening this child.
+Freeze four internal states: `Idle`, `OrdinaryPending`, `ShutdownPending`, and
+`ShutdownAcknowledged`. Control `begin_cancel` changes `Idle -> OrdinaryPending` before publishing
+the generic cancellation message; `begin_shutdown` changes `Idle -> ShutdownPending`. If generic
+`begin_cancel` fails for any reason, the initiating method restores `Idle` and every control lifecycle
+field before returning the error. Use acquire/release ordering for every state transition.
+
+After `cancel_boundary(first)` succeeds, render must classify that exact boundary before returning:
+`OrdinaryPending -> Idle` returns the existing reusable cancellation-only report, while
+`ShutdownPending -> ShutdownAcknowledged` returns the terminal shutdown report and permanently
+quiesces this render owner. Any other state is an endpoint lifecycle fault. Control may observe the
+generic acknowledgement before render completes this transition, so ordinary
+`poll_cancel_boundary` must retain its cached generic completion and return Pending until it observes
+`Idle`; it cannot finalize/reopen admission earlier. Therefore a new shutdown begin cannot overtake an
+ordinary boundary whose generic acknowledgement has been published but whose endpoint classification
+is still in progress. `poll_shutdown` likewise requires `ShutdownAcknowledged` in addition to its
+matched cached generic completion and exact ticket reconciliation.
+
+The handshake stays `ShutdownAcknowledged` after successful shutdown. Observing any state without a
+successfully consumed generic cancellation message can never quiesce render. No new queue, ledger,
+other heap allocation, protocol payload, manifest dependency, target-handle mapping, generation
+clear, plan exchange, or public raw producer is authorized. If this four-state handshake is
+insufficient, stop and rebrief rather than widening this child.
 
 Direct red mutations may temporarily change one named shutdown predicate/order in the endpoint
 module, run its focused discriminator, and restore the source. Mutations are never staged or
@@ -109,6 +122,10 @@ committed.
    and acknowledgement. Prove shutdown cannot complete before the render boundary; after the exact
    acknowledgement but before final terminal collection it still cannot complete; after collection
    it returns the matching token, frontier, and acknowledged sample exactly once.
+   Add a separate rendezvous after an ordinary generic acknowledgement is published but before
+   endpoint lifecycle classification: a concurrent shutdown begin must refuse until the ordinary
+   render call reaches `Idle`, then its own message must be consumed and acknowledged at the next
+   boundary without stranding or attaching terminal intent to the prior cancellation.
 2. Exercise applied-but-uncollected, claimed-future, and queued tickets together. Prove exact Applied
    versus Canceled dispositions, record counts, prefixes, requested/application/acknowledged samples,
    collection order, outstanding counts, credit reuse, and no duplicate terminal. Explicitly answer
@@ -126,12 +143,13 @@ committed.
    PostFader observations, exact decline behavior, and bitwise reference equivalence.
 6. Run the positive allocation/free audit plus exact/one-below resource-cap preparation and repeated
    shutdown acknowledgement and terminal quiescent calls with zero allocations/frees. Stop only
-   after render quiescence; prove the returned
-   owner keeps all coupled storage alive until off-render drop and that teardown releases it there.
-7. Run and restore four behavioral red mutations: publish completion before render acknowledgement;
-   publish before final ticket collection; reopen admission after shutdown; permit graph execution
-   after acknowledgement. Each must fail the assertion that directly proves the altered behavior,
-   and the final worktree must be clean.
+   after render quiescence; prove the returned owner keeps all coupled storage alive until off-render
+   drop and that teardown releases it there.
+7. Run and restore five behavioral red mutations: publish completion before render acknowledgement;
+   publish before final ticket collection; finalize ordinary cancellation before lifecycle
+   classification; reopen admission after shutdown; permit graph execution after acknowledgement.
+   Each must fail the assertion that directly proves the altered behavior, and the final worktree
+   must be clean.
 8. Pass focused host-core tests in debug and release, strict Clippy and rustdoc, formatting and diff
    checks, workspace/host/realtime/CI-routing policies, native x86-64-v3 compilation, and Wasm
    scalar/simd128 compilation. Record exact commands, statuses, mutation output, and restored-tree
