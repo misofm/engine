@@ -146,3 +146,17 @@ with no lock drift. Production remains frozen.
 
 After this verdict is recorded upstream, root may run exactly one ordinary six-file artifact
 identity probe. The verdict authorizes no pin change, browser qualification or PR.
+
+## Root-owned AudioWorklet identity probe
+
+After the source verdict and tracker records were pushed, root ran the ordinary no-bypass builder
+exactly once at clean head `6366c304627f28ae8e27d3b9e5f7acce3860225a`. It exited zero and emitted
+exactly six files. Every SHA-256 is byte-identical to the canonical delivered #587 manifest: ABI
+layout `40f6fe2e…`, host declaration `445254e7…`, host JavaScript `21c8947d…`, AudioWorklet
+JavaScript `225bc060…`, simd128 Wasm `39ebe7cd…`, and parameter metadata `6eac2cb3…`. The Wasm
+matches the repository pin, and the copied web sources match their repository inputs.
+
+The command, status, complete compiler stderr, file census, hashes and exact manifest comparison
+are preserved in `artifacts/issue608-attempt1/`. No repin/bypass environment, retry, second build,
+browser run, pin change or generated-consumer change occurred. Astra LOW artifact review is pending;
+the probe alone does not authorize PR or delivery.
