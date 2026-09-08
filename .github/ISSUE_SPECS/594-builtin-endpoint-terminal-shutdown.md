@@ -229,3 +229,15 @@ its retention through control drop and `stop()` until stopped-owner off-render d
 intent-before-message rendezvous failure-safe so an early assertion cannot hang scope join. Debug and
 release each pass 20 integration plus nine unit tests, with strict Clippy, rustdoc, formatting, and
 diff checks. Full verdict: `docs/audits/594-attempt2-review.md`.
+
+## Attempt 3 implementation
+
+Luna HIGH corrected only the three attempt-2 evidence blockers; root checkpointed the exact two-file
+tranche as `d49fe6fa`. Thread-scoped counters now prove the independent Arc allocation and reported
+bytes exactly, while a private unit test isolates real lifecycle ownership across control drop and
+`render.stop()` through the final off-render deallocation. Both success and dropped-release
+intent-before-publication rendezvous paths are failure-safe and prove rollback without hanging.
+Restored mutation five now calls the unchanged valid sample, reaches graph execution, and fails on the
+changed render report/advanced clock. Debug integration 20/20, unit 11/11, release integration 20/20,
+strict Clippy, rustdoc, formatting, and diff checks pass; `Cargo.lock` is unchanged. Full record:
+`docs/audits/594-terminal-shutdown-attempt3.md`.
