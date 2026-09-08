@@ -2261,19 +2261,16 @@ mod automation_smoothing_validity_tests {
                     SmoothingRule::OnePole99,
                 ] {
                     for smoothing_samples in [0, 7] {
-                        let expected_automation = match automation_rate {
-                            AutomationRate::None => {
-                                !automatable && smoothing == SmoothingRule::None
-                            }
-                            AutomationRate::Sample | AutomationRate::Block => automatable,
-                        };
-                        let expected_smoothing = match smoothing {
-                            SmoothingRule::None => smoothing_samples == 0,
-                            SmoothingRule::Linear | SmoothingRule::OnePole99 => {
-                                smoothing_samples != 0
-                            }
-                        };
-                        let expected = expected_automation && expected_smoothing;
+                        let expected = matches!(
+                            (automation_rate, automatable, smoothing, smoothing_samples),
+                            (AutomationRate::None, false, SmoothingRule::None, 0)
+                                | (AutomationRate::Sample, true, SmoothingRule::None, 0)
+                                | (AutomationRate::Sample, true, SmoothingRule::Linear, 1..)
+                                | (AutomationRate::Sample, true, SmoothingRule::OnePole99, 1..)
+                                | (AutomationRate::Block, true, SmoothingRule::None, 0)
+                                | (AutomationRate::Block, true, SmoothingRule::Linear, 1..)
+                                | (AutomationRate::Block, true, SmoothingRule::OnePole99, 1..)
+                        );
                         assert_eq!(
                             parameter_automation_smoothing_valid(
                                 automation_rate,
