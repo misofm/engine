@@ -1,7 +1,7 @@
 # Correct observation stress accounting for repeated reads
 
-Parent: #560  
-Dependency consumer: #659  
+Parent: #560
+Dependency consumer: #659
 Baseline: `561c4345614c295d99dd6315f668a060ca8f3531`
 
 ## Problem
