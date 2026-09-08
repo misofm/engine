@@ -51,3 +51,14 @@ dependency, applied the removal scan to historical records, and did not isolate 
 from earlier estimation/cap failures. The three objective gates above now require an explicit
 post-source artifact decision, a live Rust consumer scan that preserves history, and otherwise-valid
 sessions with generous caps. No implementation or artifact action was authorized by this verdict.
+
+## Astra LOW corrected scope review — PASS
+
+Astra LOW returned **PASS** at exact clean pushed feature head
+`f007e4623e1f0e6f4eee0977ee063fcee7c78b39`, live main/merge-base
+`cf9e079cd5ef80d1c7284e9edd0ffcc90b0db335`, and exact clean pushed tracker
+`fc5c161c4bf5a5b3b3a9b7bb0aa102c82a810510`. The three substantive corrections pass, the stale
+#559 active-slot sentence is corrected, local/GitHub #559/#560/#622 bodies match, the feature tree
+is clean, and #621/#622 ownership is disjoint. Luna HIGH/XHIGH may begin the bounded first
+implementation pass in the four named source/test paths and issue evidence. Artifact applicability
+remains a separate root-owned decision after source PASS.
