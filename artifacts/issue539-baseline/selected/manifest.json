@@ -13,7 +13,9 @@
       ],
       "bytes": 3401,
       "sha256": "56f5c71fd9a650d47a18410b0239546c8930ad9f322509fa97a54d91f7a67bc8",
-      "symbol": "_RNvXsd_CsdvPQf9CMsz3_17true_peak_limiterNtB5_23PreparedTruePeakLimiterNtCsfGpaX3jkkqY_15effect_contract20PreparedNativeEffect7process"
+      "symbol": "_RNvXsd_CsdvPQf9CMsz3_17true_peak_limiterNtB5_23PreparedTruePeakLimiterNtCsfGpaX3jkkqY_15effect_contract20PreparedNativeEffect7process",
+      "current_main_present": false,
+      "retention_note": "historical LLVM capture identity only; payload removed from current main by issue #625"
     },
     {
       "label": "process-scalar",
@@ -39,7 +41,9 @@
       ],
       "bytes": 346968,
       "sha256": "8bd1d14c7624bd7a134eab102d4b68fac5c2026542fd61eec59364f71f628d59",
-      "symbol": "_RNvMs9_CsdvPQf9CMsz3_17true_peak_limiterINtB5_11LimiterCorefE13process_blockB5_"
+      "symbol": "_RNvMs9_CsdvPQf9CMsz3_17true_peak_limiterINtB5_11LimiterCorefE13process_blockB5_",
+      "current_main_present": false,
+      "retention_note": "historical LLVM capture identity only; payload removed from current main by issue #625"
     },
     {
       "label": "process-core-scalar",
@@ -65,7 +69,9 @@
       ],
       "bytes": 21978,
       "sha256": "1f889bb0173a444432dc1f0ab0eb3c64a0dbbaf07b4a311266ce66ef524c1be6",
-      "symbol": "_RNvXse_CsdvPQf9CMsz3_17true_peak_limiterINtB5_27PreparedTruePeakLimiterBankNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8ENtCsfGpaX3jkkqY_15effect_contract24PreparedNativeEffectBank12process_bankB5_"
+      "symbol": "_RNvXse_CsdvPQf9CMsz3_17true_peak_limiterINtB5_27PreparedTruePeakLimiterBankNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8ENtCsfGpaX3jkkqY_15effect_contract24PreparedNativeEffectBank12process_bankB5_",
+      "current_main_present": false,
+      "retention_note": "historical LLVM capture identity only; payload removed from current main by issue #625"
     },
     {
       "label": "process-bank-w8",
@@ -91,7 +97,9 @@
       ],
       "bytes": 262790,
       "sha256": "02ea676eff0e299d03dcc2e4d188c616a7087ddc3867331c2d2855e09c936a77",
-      "symbol": "_RNvXse_CsdvPQf9CMsz3_17true_peak_limiterINtB5_27PreparedTruePeakLimiterBankNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8ENtCsfGpaX3jkkqY_15effect_contract24PreparedNativeEffectBank17process_bank_monoB5_"
+      "symbol": "_RNvXse_CsdvPQf9CMsz3_17true_peak_limiterINtB5_27PreparedTruePeakLimiterBankNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8ENtCsfGpaX3jkkqY_15effect_contract24PreparedNativeEffectBank17process_bank_monoB5_",
+      "current_main_present": false,
+      "retention_note": "historical LLVM capture identity only; payload removed from current main by issue #625"
     },
     {
       "label": "process-bank-mono-w8",
@@ -117,7 +125,9 @@
       ],
       "bytes": 388559,
       "sha256": "389b36d10152fa51550b4cfc1f6dd26a99e8c69527c68e7fe5fb46d1ed8da3a9",
-      "symbol": "_RNvMs9_CsdvPQf9CMsz3_17true_peak_limiterINtB5_11LimiterCoreNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8E13process_blockB5_"
+      "symbol": "_RNvMs9_CsdvPQf9CMsz3_17true_peak_limiterINtB5_11LimiterCoreNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8E13process_blockB5_",
+      "current_main_present": false,
+      "retention_note": "historical LLVM capture identity only; payload removed from current main by issue #625"
     },
     {
       "label": "process-core-w8",
@@ -132,5 +142,6 @@
       "sha256": "b002b5a9dea10fd48c4abe7d3857eb4b80164b70a46df56c6ce8bf4891d10936",
       "symbol": "_RNvMs9_CsdvPQf9CMsz3_17true_peak_limiterINtB5_11LimiterCoreNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8E13process_blockB5_"
     }
-  ]
+  ],
+  "llvm_payload_retention": "historical LLVM capture identity only; payload removed from current main by issue #625"
 }

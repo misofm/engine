@@ -48,29 +48,29 @@ Captured source/config identities are recorded in the metadata JSON. Their SHA-2
 | `.cargo/config.toml` | `03b0fbd88c069abb0a8fbdca5921ba6a9899298291fe087977b509a29ebb7d0e` | `de2180972c37406f1f16913901bd1d4fc2e660e3` |
 | `rust-toolchain.toml` | `85a45cac04c296adac076f8f0609ca8f4c8ca658957f1f24cbd1e054b6cc44e0` | `6b6739839ba23906921aeb4c268d275dcc459fb6` |
 
-## Original compiler outputs
+## Historical compiler output identities
 
-The compiler emitted these original files into the isolated target. The original files are retained and were not rewritten after selection.
+The compiler emitted these files into the isolated target. Issue #625 removed the `.ll` payloads from current main; the original sizes/hashes and selected line ranges remain as historical identities, while the `.s` payload remains in the repository.
 
 | output | bytes | SHA-256 |
 | --- | ---: | --- |
 | `/tmp/issue537-baseline-target/release/deps/multiband_compressor-524a987dfea296bf.ll` | 7,688,799 | `fbc3e01eac068449ab3589bd33e74a155dc60c14ab46a22070cb971284be12dd` |
 | `/tmp/issue537-baseline-target/release/deps/multiband_compressor-524a987dfea296bf.s` | 1,986,754 | `70745fbb77d26f4f7d2ca6031f3542c3e39e6d01d584e0964274aeee58ffa6e0` |
 
-## Complete selected production callers
+## Selected production caller identities
 
-Selection was performed from the exact original files by `/tmp/issue537-extract-selected.py`; it selects one exact emitted function for each caller and writes complete bodies through the closing `}` / `.size`. The manifest is `/tmp/issue537-baseline/selected/manifest.json` (SHA-256 `33915ded27438ae4b44f0fb878504e6fde7951886f5650aaec46559d32eed30f`). The static extraction's generated stdout was the manifest path and six label/range/hash lines; no compiler or source command was rerun for selection. Complete output identities are:
+Selection was performed from the exact original files by `/tmp/issue537-extract-selected.py`; it selected one exact emitted function for each caller and wrote complete bodies through the closing `}` / `.size`. The manifest is `/tmp/issue537-baseline/selected/manifest.json` (SHA-256 `33915ded27438ae4b44f0fb878504e6fde7951886f5650aaec46559d32eed30f`). The static extraction's generated stdout was the manifest path and six label/range/hash lines; no compiler or source command was rerun for selection. Historical output identities are:
 
-| actual caller | kind | original line range | selected file | bytes | SHA-256 |
+| actual caller | kind | original line range | selected assembly file or historical LLVM identity | bytes | SHA-256 |
 | --- | --- | ---: | --- | ---: | --- |
-| `PreparedMultibandCompressor::process` (W1 scalar) | LLVM | 8663–15496 | `selected/process-scalar.ll` | 587,244 | `8e6b7fd64e1763224c029fa6ae714242c6a4470671de8913d8db9eabff384f60` |
+| `PreparedMultibandCompressor::process` (W1 scalar) | LLVM | 8663–15496 | historical identity `selected/process-scalar.ll` | 587,244 | `8e6b7fd64e1763224c029fa6ae714242c6a4470671de8913d8db9eabff384f60` |
 | same | ASM | 11837–21863 | `selected/process-scalar.s` | 209,072 | `8181969f634aafbed2a3b1169bcea931c04af1be32526e703a57d4e715ea2caa` |
-| `PreparedMultibandCompressorBank<wide::f32x4, 4>::process_bank` (W4) | LLVM | 15508–26383 | `selected/process-bank-w4.ll` | 1,041,654 | `1931a3e6fde94d99e7ac3d36db808d9c216e7a09cde84bb269ef865abe1966df` |
+| `PreparedMultibandCompressorBank<wide::f32x4, 4>::process_bank` (W4) | LLVM | 15508–26383 | historical identity `selected/process-bank-w4.ll` | 1,041,654 | `1931a3e6fde94d99e7ac3d36db808d9c216e7a09cde84bb269ef865abe1966df` |
 | same | ASM | 21981–35088 | `selected/process-bank-w4.s` | 274,477 | `4f509883f16d9391c9ea2cb5264f33a6cb48ab50e81525631cafb4b610b1cfe2` |
-| `PreparedMultibandCompressorBank<wide::f32x8, 8>::process_bank` (W8) | LLVM | 27169–41879 | `selected/process-bank-w8.ll` | 1,443,613 | `85a76cc379781eb06a9cd60aa6cbd4dea9fbd4c8a1a6f9353119336b4a724184` |
+| `PreparedMultibandCompressorBank<wide::f32x8, 8>::process_bank` (W8) | LLVM | 27169–41879 | historical identity `selected/process-bank-w8.ll` | 1,443,613 | `85a76cc379781eb06a9cd60aa6cbd4dea9fbd4c8a1a6f9353119336b4a724184` |
 | same | ASM | 36331–55203 | `selected/process-bank-w8.s` | 383,220 | `469cffe1c27f52ff3af46fbb0849eec660b9b0ef2ec4356ffa2ae937a87d5b25` |
 
-W4 is an emitted generic instantiation in this native release artifact; it is not evidence of a native W4 dispatch target. W8 is the supported native AVX2 bank instantiation. W1 is the scalar prepared production caller. There is no separate `detector_tap` symbol in these selected LLVM callers: the `#[inline(always)]` helper is inlined, so the selected complete callers are the relevant production evidence.
+W4 is an emitted generic instantiation in this native release artifact; it is not evidence of a native W4 dispatch target. W8 is the supported native AVX2 bank instantiation. W1 is the scalar prepared production caller. There is no separate `detector_tap` symbol in these historical LLVM caller identities: the `#[inline(always)]` helper is inlined, so the selected complete callers remain the relevant production evidence.
 
 ## Access and packing observations
 

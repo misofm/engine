@@ -2,7 +2,9 @@
   {
     "original_path": "/tmp/475-luna1-target-baseline.G0nm9N/release/deps/compressor-4b5374e0681f5134.ll",
     "bytes": 2788938,
-    "sha256": "7b4c3adec692b6be12d757d16fe42e1b136e0b5b7099e3165e0334659d27c22e"
+    "sha256": "7b4c3adec692b6be12d757d16fe42e1b136e0b5b7099e3165e0334659d27c22e",
+    "current_main_present": false,
+    "retention_note": "historical LLVM capture identity only; payload removed from current main by issue #625"
   },
   {
     "original_path": "/tmp/475-luna1-target-baseline.G0nm9N/release/deps/compressor-4b5374e0681f5134.s",

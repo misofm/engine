@@ -12,6 +12,10 @@
 *.swp
 *.swo
 
+# Full compiler LLVM IR captures are reproducible investigation outputs and do not belong in the
+# repository artifact tree. Historical assembly and bounded text excerpts remain trackable.
+artifacts/**/*.ll
+
 # Cargo target-dir spill at the repository root. `CARGO_TARGET_DIR=.` (or a stray `--target-dir .`)
 # writes these next to `Cargo.toml` instead of under `target/`; 235 such files had been committed
 # to `main` before #104 phase D removed them. Nothing in the tree references these paths: every

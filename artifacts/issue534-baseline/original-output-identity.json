@@ -4,7 +4,9 @@
     {
       "path": "/tmp/issue534-baseline-target/release/deps/gate_expander-a68433203a7e3c7a.ll",
       "bytes": 3680496,
-      "sha256": "70d9633d05b0f040c4f8d60e5b4b1ee99de184264fb05ce39aa30b93023ea911"
+      "sha256": "70d9633d05b0f040c4f8d60e5b4b1ee99de184264fb05ce39aa30b93023ea911",
+      "current_main_present": false,
+      "retention_note": "historical LLVM capture identity only; payload removed from current main by issue #625"
     },
     {
       "path": "/tmp/issue534-baseline-target/release/deps/gate_expander-a68433203a7e3c7a.s",
@@ -26,7 +28,9 @@
     {
       "path": "selected/process-bank-w4.ll",
       "bytes": 203342,
-      "sha256": "02a2cf2b8e56a5e54c014876a17bd533e9623b10fcb74bc2d781231af5d0ddd9"
+      "sha256": "02a2cf2b8e56a5e54c014876a17bd533e9623b10fcb74bc2d781231af5d0ddd9",
+      "current_main_present": false,
+      "retention_note": "historical LLVM capture identity only; payload removed from current main by issue #625"
     },
     {
       "path": "selected/process-bank-w4.s",
@@ -36,7 +40,9 @@
     {
       "path": "selected/process-bank-w8.ll",
       "bytes": 231040,
-      "sha256": "d5b0e4f8efc0ca3f3a996035de01539ab9d3476408f7b8d02b51965dc926fb5c"
+      "sha256": "d5b0e4f8efc0ca3f3a996035de01539ab9d3476408f7b8d02b51965dc926fb5c",
+      "current_main_present": false,
+      "retention_note": "historical LLVM capture identity only; payload removed from current main by issue #625"
     },
     {
       "path": "selected/process-bank-w8.s",
@@ -46,7 +52,9 @@
     {
       "path": "selected/process-scalar-connected.ll",
       "bytes": 34175,
-      "sha256": "525caddb4e0edbc892ece7202d5d55db4a7cf47423781bd4060047ba0a3aa7cb"
+      "sha256": "525caddb4e0edbc892ece7202d5d55db4a7cf47423781bd4060047ba0a3aa7cb",
+      "current_main_present": false,
+      "retention_note": "historical LLVM capture identity only; payload removed from current main by issue #625"
     },
     {
       "path": "selected/process-scalar-connected.s",
@@ -56,7 +64,9 @@
     {
       "path": "selected/process-scalar-disconnected.ll",
       "bytes": 232641,
-      "sha256": "89f77a786de6e3636054d8f04474226e544fb4da14937aa57c2dd6e514de8f6b"
+      "sha256": "89f77a786de6e3636054d8f04474226e544fb4da14937aa57c2dd6e514de8f6b",
+      "current_main_present": false,
+      "retention_note": "historical LLVM capture identity only; payload removed from current main by issue #625"
     },
     {
       "path": "selected/process-scalar-disconnected.s",
@@ -66,7 +76,9 @@
     {
       "path": "selected/run-block-scalar-connected.ll",
       "bytes": 494705,
-      "sha256": "c583aaae90babbf048c501b75d538a4ee75169382e28657fa45ef3b0973058e5"
+      "sha256": "c583aaae90babbf048c501b75d538a4ee75169382e28657fa45ef3b0973058e5",
+      "current_main_present": false,
+      "retention_note": "historical LLVM capture identity only; payload removed from current main by issue #625"
     },
     {
       "path": "selected/run-block-scalar-connected.s",
