@@ -189,3 +189,24 @@ and stop immediately on failure. No new install, builder, static/resource/
 hermetic/browser repeat, product edit, PR, or merge is authorized. If installed-
 state verification fails, stop for final disposition without improvising an
 install. Astra LOW exact-head scope PASS is required before any command.
+
+## Astra LOW final-attempt scope review — PASS
+
+Astra LOW passed exact clean pushed head
+`d9fd058c62767a0a6f5a9063b9111bc8833d58c7` against live main `30680709`.
+Attempt 3 is final. Root created refreshed atomic lease
+`/tmp/misofm-engine-issue628-attempt3-execution.lock/owner.txt`, SHA-256
+`4e2f77c1b0d56ef852688dcc3715055f6a690d04e1fd1c5aabe7747f8f44b386`,
+naming only `/root/issue583_luna_impl`, this scope head, and the final command
+set. No other executor may run while it exists.
+
+Preflight must run from repository root and prove exact HEAD/lease;
+`sdk/package.json` and `sdk/package-lock.json` byte identity at install-authorized
+commit `522c614d` and current HEAD; installed `.package-lock.json` consistency
+while allowing platform-inapplicable optional packages; installed package
+name/version agreement; required SDK executables within this worktree; clean
+tracked state; and the preserved six-file hashes. If preflight passes, Luna may
+run one SDK check followed by matrix `--check`, formatting, diff hygiene,
+workspace policy, and effect-runtime policy once. Record actual statuses and
+stop first failure. No install or other excluded workload is authorized; no PR
+or merge may proceed before Astra LOW final evidence review.
