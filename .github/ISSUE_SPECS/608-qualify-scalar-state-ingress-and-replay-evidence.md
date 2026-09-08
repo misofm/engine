@@ -1,6 +1,6 @@
 # Qualify scalar StateGet ingress and replay evidence
 
-Status: proposed qualification successor to stopped IO5 child #605 under audit #349 and lane-B handoff #560. It inherits #605's pushed implementation through stop record `b2c2d120` and exact accepted production correction `b5c1a3182f9aea176016d08797a31ed667f5e47c`; final fixture correction `c14cc8b20ecaf9acba02a9b3ae3d75bc9e38dfdd` remains preserved but failed review. #605 consumed three implementation attempts, is closed, and receives no fourth correction. This successor advances the same original partial finding and starts no original open finding.
+Status: active qualification successor to stopped IO5 child #605 under audit #349 and lane-B handoff #560. It inherits #605's pushed implementation through stop record `b2c2d120` and exact accepted production correction `b5c1a3182f9aea176016d08797a31ed667f5e47c`; final fixture correction `c14cc8b20ecaf9acba02a9b3ae3d75bc9e38dfdd` remains preserved but failed review. #605 consumed three implementation attempts, is closed, and receives no fourth correction. This successor advances the same original partial finding and starts no original open finding.
 
 Sol HIGH coordinates and owns checkpoints, GitHub synchronization, delivery, and any later AudioWorklet artifact qualification/pinning. Luna HIGH or XHIGH implements. Astra LOW performs every scope, source, artifact-applicability, and exact-head/current-base verification. Lane-A #607 is the only other active issue and owns disjoint RT5 preflight/evidence paths.
 
@@ -8,7 +8,7 @@ Sol HIGH coordinates and owns checkpoints, GitHub synchronization, delivery, and
 
 Complete only the three finite evidence obligations left by Astra LOW's final #605 verdict:
 
-1. Prove successful single-handle subsets and reversed two-handle order through each of typed, B1b and caller-buffer StateGet ingress against the same published page.
+1. Prove successful Left-only and Right-only subsets through typed, B1b and caller-buffer StateGet ingress against the same published page. Prove reversed two-handle order succeeds and is preserved through typed ingress. At each encoded ingress boundary, mutate an otherwise valid request to reversed handle bytes and prove the frozen canonical wire decoder rejects it as malformed without side effects.
 2. For every rejected publication, including nonfinite/invalid values in either record, immediately encode the accepted page again and compare its state-page payload bytes bit-for-bit with the pre-rejection accepted payload. Prove identical republication has the same encoded payload before any replacement.
 3. After publication changes, prove retained StateGet replay succeeds into an output buffer of the exact cached-response length, a one-byte-short buffer refuses without consuming the cached response, and malformed/reused changed bytes preserve the delivered replay/error precedence.
 
@@ -25,7 +25,7 @@ Exclude all production Rust, every other test, `Cargo.toml`, `Cargo.lock`, proto
 
 ## Objective gates
 
-1. **All ingress projections.** One published asymmetric page is queried through typed, B1b and caller-buffer paths. Each path proves Left-only, Right-only and reversed `[Right, Left]` requests with exact observed sample, record order, flags and value bits. Existing unknown/unpublished cases remain green. No second decoder, controller, provider, queue or ledger is introduced.
+1. **Ingress projections at their frozen boundaries.** One published asymmetric page is queried through typed, B1b and caller-buffer paths. Every path proves Left-only and Right-only requests with exact observed sample, record order, flags and value bits. Typed ingress also proves successful reversed `[Right, Left]` order. B1b and caller-buffer each receive a byte-mutated reversed request derived from a valid encoded frame and must return the existing malformed-frame result without changing the published page, replay cache, or automation/resource/event/credit state. This preserves the wire contract's bounded, sorted, unique, nonzero handle rule instead of widening production semantics. Existing unknown/unpublished cases remain green. No second decoder, controller, provider, queue or ledger is introduced.
 2. **Encoded preservation after refusal.** Capture the encoded state-page payload bytes, excluding request-specific frame identity fields through an explicit parser/offset already authoritative in the fixture. After each independently discriminated invalid publication—wrong/reversed/zero/duplicate handles, invalid flags, and nonfinite value in record one and record two—issue a fresh StateGet and require bit-identical payload bytes. Re-publish the identical valid snapshot and require the same payload bytes before testing a later valid replacement. Decoded equality alone receives no credit.
 3. **Cached replay output contract.** Cache one successful StateGet response, change the live publication, and replay the original exact request. First use a one-byte-short caller buffer and require the existing output-reservation refusal without replay loss; then use the exact cached-response length and require the original response bytes. Exercise a changed-byte reuse of the same request ID and the existing malformed outer/correlatable payload precedence without changing the retained hit.
 4. **No side effects.** Before and after every qualification group, assert outstanding and resident automation counts, queue report fields, reliable-event availability/sequence behavior, and terminal credit remain unchanged. State reads and rejected/idempotent publications may not acknowledge, drop, admit, hand off, collect or cancel automation.
@@ -56,3 +56,18 @@ and artifacts, owns only the scalar endpoint fixture plus spec/evidence, and dis
 the three residual obligations without a new framework. Luna HIGH/XHIGH attempt 1 is authorized
 within that exact scope. A production defect requires a stop and rebrief; artifact work remains
 deferred until source PASS.
+
+## Pre-implementation scope correction
+
+Luna stopped before editing at clean head `8589cbb895ada9c86416d7e2b5bf8bfc6c865d45` after finding that
+the initial wording required an impossible successful encoded reverse order. The authoritative
+`message_wire::check_handles` rejects zero, duplicate and non-increasing handles during both encode
+and decode; `ParameterStateRequest` documents the same sorted contract. No implementation attempt
+was consumed, no test or source changed, and production remains frozen.
+
+The corrected first gate above preserves successful reverse order only for typed ingress. B1b and
+caller-buffer must instead prove that a byte-mutated reversed request is rejected at the canonical
+wire boundary without side effects, while both successful single-handle subsets remain required
+through all three ingress paths. The prior Astra LOW PASS is retained as historical evidence but
+does not authorize implementation against this amendment. A fresh exact-head Astra LOW scope PASS
+is required.
