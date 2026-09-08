@@ -3506,7 +3506,10 @@ mod tests {
                     && entry.effect_id == decoy_owner.2
             })
             .expect("crossed control decoy owner");
-        assert_ne!(target_entry, decoy_entry, "crossed control owners are distinct");
+        assert_ne!(
+            target_entry, decoy_entry,
+            "crossed control owners are distinct"
+        );
         if target_entry < decoy_entry {
             let (before, after) = crossed_control.entries.split_at_mut(decoy_entry);
             std::mem::swap(&mut before[target_entry].control, &mut after[0].control);
@@ -3546,11 +3549,14 @@ mod tests {
         let crossed_control_pcm =
             render_cross_index_blocks(crossed_control, crossed_control_producers, 4, true);
         assert!(
-            baseline_pcm.iter().zip(&crossed_control_pcm).any(|(left, right)| {
-                left.iter()
-                    .zip(right)
-                    .any(|(left, right)| left.to_bits() != right.to_bits())
-            }),
+            baseline_pcm
+                .iter()
+                .zip(&crossed_control_pcm)
+                .any(|(left, right)| {
+                    left.iter()
+                        .zip(right)
+                        .any(|(left, right)| left.to_bits() != right.to_bits())
+                }),
             "crossing control consumers for target {:?} and decoy {:?} must change PCM",
             target_owner,
             decoy_owner
