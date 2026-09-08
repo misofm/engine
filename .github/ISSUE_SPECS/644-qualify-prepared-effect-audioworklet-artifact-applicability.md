@@ -10,10 +10,10 @@ Sol HIGH coordinates scope, checkpoints, GitHub, artifact qualification and pin 
 
 ## Stage 1: one identity probe
 
-At exact clean/upstream feature head, record executor/time, cwd/head/upstream/status, toolchain, current pin, literal command/environment and absence of both predeclared paths including dangling symlinks. Create `/tmp/issue643-repin-output` once as an empty non-symlink directory and `/tmp/issue643-repin-evidence` once without overwrite. Then run exactly once:
+At exact clean/upstream feature head, record executor/time, cwd/head/upstream/status, toolchain, current pin, literal command/environment and absence of both predeclared paths including dangling symlinks. Create `/tmp/issue644-repin-output` once as an empty non-symlink directory and `/tmp/issue644-repin-evidence` once without overwrite. Then run exactly once:
 
 ```text
-MISO_ENGINE_WEB_AUDIOWORKLET_REPIN=1 bash scripts/build-web-audioworklet.sh /tmp/issue643-repin-output
+MISO_ENGINE_WEB_AUDIOWORKLET_REPIN=1 bash scripts/build-web-audioworklet.sh /tmp/issue644-repin-output
 ```
 
 Capture separate complete stdout/stderr and numeric status contemporaneously, postflight tree/output census, current pin, and hashes. Stop on changed preconditions, nonzero status, missing single lowercase 64-hex stdout, nonempty output directory, tree drift or concurrent activity. Do not retry, run the ordinary builder, keep a Cargo target, edit the pin, build a six-file candidate, invoke browser/SDK/static qualification, or delete evidence before Astra review.
