@@ -108,3 +108,9 @@ The corrected brief compares exact detached main with a command-local release-te
 scope review. #636 occupies one active slot beside #641, but its attempt-2 edit and
 remaining gates stay paused until #641 records an Astra-reviewed command
 disposition. No release command may run from this worktree in the meantime.
+
+Astra LOW passed #641's corrected stage-1 brief at exact clean pushed
+`3231d410`. One Luna executor is authorized to compare the frozen-main ordinary
+release integration command with a conditional command-local `panic=unwind`
+variant. Credit is release-test-only; #636 remains paused and owns no command
+execution until #641's evidence receives an Astra disposition.
