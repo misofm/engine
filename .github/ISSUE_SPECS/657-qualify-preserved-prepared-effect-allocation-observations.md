@@ -46,3 +46,21 @@ Astra LOW independently reads the same preserved inputs and the analyst report. 
 If Astra cannot bridge the two candid procedural defects from the immutable streams, chronology and root observation, close this issue without qualification credit. If Astra passes, root records only compact source/toolchain/command/status/hashes, graph/diagnostic identities, exact counters/deltas, defects and limited conclusion in this spec. Full streams, JSONL, targets and compiler/build output stay temporary and never enter Git.
 
 After evidence PASS, ordinary exact-head/current-main review, required CI, guarded merge, successful post-main qualification, GitHub/tracker synchronization and clean delivered-worktree removal are required. Temporary #654 inputs may be removed only after Astra explicitly releases them and the compact evidence is upstream. This closes only the prepared-effect allocation qualification slice; CP1 schedule, PDC, cycle, reduction and buffer identities remain open.
+
+## Astra LOW evidence-scope review — PASS
+
+Astra passed exact clean branch/upstream
+`d76ceef28aa42017f659c636a56405eda0d1b560`, live main
+`8c6984bc243dc507a137e6f836924b85f1db3658`, synchronized tracker `0c35123a`, and
+matching GitHub #657. #654 is closed; #656/#657 are disjoint; all five preserved
+paths exist as non-symlink directories.
+
+One root-named Luna HIGH analyst may perform only the listed read-only census,
+hashing, Git inspection and JSON comparisons and report without writing. Mtimes are
+supporting chronology rather than immutability proof. Compare preserved hashes to
+contemporaneous anchors where available, name every unanchored file, and do not
+infer once-only execution merely from absent extra logs. Root's transcript and the
+executor testimony retain their stated limits. No workload/validator/Cargo run,
+record reconstruction, new path, concatenation, cleanup or source edit is
+authorized. Any unresolved inconsistency stops; Astra independently reviews the
+result before limited credit.
