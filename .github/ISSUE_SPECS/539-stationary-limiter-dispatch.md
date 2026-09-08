@@ -281,12 +281,27 @@ three accepted limiter production/test files. Root audited and pushed merge chec
 
 The full limiter suite passed 42 tests with one descriptive benchmark ignored. Focused mono debug
 and release each passed two tests; the release private selector passed one; release allocation and
-determinism each passed two. Strict affected Clippy, formatting, realtime/lane/workspace/environment
+debug determinism each passed two. Strict affected Clippy, formatting, realtime/lane/workspace/environment
 policies, native ABI, Wasm realtime atomics, supported host-web scalar/SIMD builds and inspection,
-and the 139-case/349-comparison deterministic corpus all pass. Bounded records are under
+and all three 139-case/349-comparison Wasm-gate corpus legs pass. Bounded records are under
 `artifacts/issue539-integration/`.
 
 The accepted file identities remain `677a5596…73b55` for `lib.rs`, `7825d307…0ea920` for
 `allocation.rs`, and `1f42a58d…b2dd6d` for `mono_collapse.rs`. No benchmark, timing/capture,
 AudioWorklet builder, browser qualification, pin or consumer change ran. Astra LOW integrated-head
 review and lane-B artifact qualification remain pending before PR delivery.
+
+## Astra LOW integrated-head review
+
+Astra LOW returned **PASS** at exact clean pushed head
+`3a644e99a048ac0c43484275b6225f41a73a372a`, with current main/merge-base
+`9e113be98cf31c1eaf4297b0a031518244b71c33`. The merge parents, all three accepted limiter file
+identities, all 21 recorded gate statuses, raw test counts, source/module hashes, scalar/SIMD
+inspection, native ABI checks and the three Wasm corpus legs verify. Attempt 1 remains FAIL and
+attempt 2 remains PASS; no speedup is established.
+
+The review corrected two evidence-only attributions above and in the integration README:
+determinism ran in debug, and 139 cases/349 comparisons belongs specifically to each of the three
+Wasm-gate legs rather than the limiter-suite output. Source and test results are unchanged. Lane-B
+ordinary six-file artifact qualification may begin; drift still requires the separately recorded
+decision before any pin or consumer update.

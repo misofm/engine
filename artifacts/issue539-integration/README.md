@@ -37,7 +37,8 @@ git diff --cached --check
 git diff --check
 ```
 
-All listed commands returned zero. The full limiter suite and the Wasm gate
-reported the existing 139-case/349-comparison corpus with zero mismatches.
+All listed commands returned zero. The full limiter suite passed 42 tests with
+one descriptive benchmark ignored. Each of the three Wasm-gate legs reported
+the existing 139-case/349-comparison corpus with zero mismatches.
 No benchmark, timing/capture, AudioWorklet builder, browser qualification, pin
 change, commit, or push was performed.
