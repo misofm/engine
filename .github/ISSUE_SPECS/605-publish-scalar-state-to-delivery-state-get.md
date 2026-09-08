@@ -1,6 +1,6 @@
 # Publish scalar makeup state to delivery StateGet
 
-Status: proposed IO5 child of audit #349 and lane-B handoff #560, based on delivered main `6fe8676e1537bc2c952ac87ee2fe31c545438474` after #598 / PR #604 and successful post-main qualification `34189229062`. This advances the last lane-B original partial finding; it does not start an original open finding. Lane-A #606 is the only other active issue and owns disjoint native capture scripts/evidence. Sol HIGH coordinates, owns checkpoints, GitHub synchronization, delivery, and any AudioWorklet artifact qualification/pinning. Luna HIGH or XHIGH implements. Astra LOW performs every scope, source, artifact-applicability, and exact-head/current-base verification.
+Status: proposed IO5 child of audit #349 and lane-B handoff #560, based on delivered main `6fe8676e1537bc2c952ac87ee2fe31c545438474` after #598 / PR #604 and successful post-main qualification `34189229062`. This advances the last lane-B original partial finding; it does not start an original open finding. Lane-A #607 is the only other active issue and owns disjoint native capture preflight/evidence paths. Sol HIGH coordinates, owns checkpoints, GitHub synchronization, delivery, and any AudioWorklet artifact qualification/pinning. Luna HIGH or XHIGH implements. Astra LOW performs every scope, source, artifact-applicability, and exact-head/current-base verification.
 
 ## Smallest closable outcome
 
@@ -30,7 +30,7 @@ Allowed production and test paths are:
 - `crates/host-core/tests/scalar_point_endpoint.rs`
 - this numbered spec and bounded issue evidence
 
-Exclude `crates/host-core/src/control_provider.rs`, delivery-core/queue/wire/schema changes, other host-core endpoints/providers, C ABI and browser hosts, SDK/generated surfaces, graph/session/compiler/effect implementations, banks, other effects or parameters, segment execution, manifests/lockfiles, policies/workflows, #606 capture paths/evidence, AudioWorklet artifacts/pins, and timed benchmarks. The `ParameterStatePage` wire schema and flag values are frozen.
+Exclude `crates/host-core/src/control_provider.rs`, delivery-core/queue/wire/schema changes, other host-core endpoints/providers, C ABI and browser hosts, SDK/generated surfaces, graph/session/compiler/effect implementations, banks, other effects or parameters, segment execution, manifests/lockfiles, policies/workflows, #607 capture preflight/evidence paths, AudioWorklet artifacts/pins, and timed benchmarks. The `ParameterStatePage` wire schema and flag values are frozen.
 
 ## Objective gates
 
@@ -46,17 +46,17 @@ Exclude `crates/host-core/src/control_provider.rs`, delivery-core/queue/wire/sch
 
 After source PASS, root runs the ordinary six-file AudioWorklet identity probe against the current delivered pin. Byte identity permits retained-artifact qualification with the existing attribution. Any drift requires a separately authorized scratch build/ABI/resources/PCM and browser qualification before root changes a pin or generated consumer. Luna and lane A must not generate, pin, or qualify the shipped artifact.
 
-Root records each coherent checkpoint, pushes promptly, and synchronizes this spec and GitHub issue. Astra LOW must pass the exact pushed source and final decision-record head against current main before PR creation. Recheck live head/base/merge-base, #606 path ownership, required PR qualification, guarded merge, post-main qualification, GitHub closure, and clean worktree removal. IO5 remains partial after this child until a post-delivery Astra LOW residual audit determines the next bounded obligation or closure.
+Root records each coherent checkpoint, pushes promptly, and synchronizes this spec and GitHub issue. Astra LOW must pass the exact pushed source and final decision-record head against current main before PR creation. Recheck live head/base/merge-base, #607 path ownership, required PR qualification, guarded merge, post-main qualification, GitHub closure, and clean worktree removal. IO5 remains partial after this child until a post-delivery Astra LOW residual audit determines the next bounded obligation or closure.
 
 ## Stop and split triggers
 
-Stop before adding automatic render clocks, a mailbox/lock/atomic snapshot transport, host/CAPI/browser activation, arbitrary provider mutation, a generic parameter-state framework, more than two handles, graph/bank/effect/parameter expansion, automation segments, structural session mutation, another queue/ledger/codec, schema changes, benchmark machinery, or #606 paths. Preserve a useful checkpoint and brief a separate successor. One Luna HIGH or XHIGH attempt receives one Astra LOW adversarial verdict; after three failed attempts, stop and rebrief without weakening gates.
+Stop before adding automatic render clocks, a mailbox/lock/atomic snapshot transport, host/CAPI/browser activation, arbitrary provider mutation, a generic parameter-state framework, more than two handles, graph/bank/effect/parameter expansion, automation segments, structural session mutation, another queue/ledger/codec, schema changes, benchmark machinery, or #607 paths. Preserve a useful checkpoint and brief a separate successor. One Luna HIGH or XHIGH attempt receives one Astra LOW adversarial verdict; after three failed attempts, stop and rebrief without weakening gates.
 
 ## Preliminary residual audit
 
 Astra LOW returned **PASS** on delivered main `6fe8676e1537bc2c952ac87ee2fe31c545438474`. `ScalarPointSnapshot` already carries actual Left/Right current/target state plus distinct observed and next samples; `SessionControlProvider` still answers from its prepared state catalog and current sample source; and the delivery-context controller branch explicitly refuses StateGet. #575 and #578 already deliver B1b and complete caller-buffer ingress, so older documentation calling framed ingress unavailable is historical rather than a remaining implementation requirement.
 
-Explicit two-handle quiescent publication is the smallest useful successor. Host activation spans resource and lifecycle contracts; automatic publication requires synchronization; graph/bank/effect/parameter/segment rollout adds separate execution semantics. This child is disjoint from #606, advances original partial IO5, and starts no original open finding. Preserve #370's deferral attribution, #460 ownership, #524/#528/#530/#532 execution lineage, #575/#578 ingress, and the #542 to #567 plus #552/#558 delivery order. Exact numbered current-base scope review remains required before implementation.
+Explicit two-handle quiescent publication is the smallest useful successor. Host activation spans resource and lifecycle contracts; automatic publication requires synchronization; graph/bank/effect/parameter/segment rollout adds separate execution semantics. This child is disjoint from #607, advances original partial IO5, and starts no original open finding. Preserve #370's deferral attribution, #460 ownership, #524/#528/#530/#532 execution lineage, #575/#578 ingress, and the #542 to #567 plus #552/#558 delivery order. Exact numbered current-base scope review remains required before implementation.
 
 ## Numbered scope verdict 1
 
@@ -97,3 +97,13 @@ Luna reported protocol library tests passing 161/161, scalar endpoint tests pass
 Astra LOW returned **FAIL** at exact clean head/upstream `4be3d9358845e122f1135b77639ce3d12c90ab74`, correction `b5c1a3182f9aea176016d08797a31ed667f5e47c`, and base `6fe8676e1537bc2c952ac87ee2fe31c545438474`. Public binding validation and typed publication errors are fixed; replacement tests discriminate observed versus next sample, both flag outcomes and encoded replay; the linked allocator counter is live. Remaining gaps are finite: direct second-zero preparation, successful single-handle subset/reverse reads across all three ingress modes, typed unpublished behavior, immediate encoded readback after every invalid publication and identical republication, a real sticky-fault refusal with unchanged publication, cancellation record preservation, exact one-below/exact caller output, retained replay/error precedence, and explicit delivery ownership/event invariants.
 
 Protocol 161/161 and scalar endpoint 9/9 debug/release, formatting and diff checks passed; locked runs left no lockfile drift. `ControllerAutomationPrepareError` is accepted as the typed surface, but its documentation must cover preparation and publication failures. Attempt 3 is authorized only for these finite fixture/documentation corrections within the same paths. It is the final attempt; failure must stop and rebrief without a fourth attempt. Artifact work remains locked until source PASS.
+
+
+## Current lane-A coordination
+
+#606 stopped after Astra LOW found its exact globally injected LTO recipe could not compile Cargo
+build dependencies; no preflight, prepared executable, capture entry, or timer ran. Active replacement
+#607 owns only the disjoint RT5 preflight build recipe and focused qualification/review evidence while
+preserving the issue-606 lifecycle/artifact namespace and issue-602 Rust record identity. #605/#607
+are the two active issue slots. Lane B retains exclusive shipped artifact qualification/pinning
+authority. Historical #606 review statements above remain accurate for the checkpoints they describe.
