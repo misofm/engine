@@ -1,0 +1,11 @@
+{
+  "argv": [
+    "git",
+    "diff",
+    "--check",
+    "origin/main...HEAD"
+  ],
+  "cwd": "/home/bl/misofm/engine-cp8-web-artifact-qualification",
+  "head": "911f82a828d767b7e3bd1675dd791aeb85f377f9",
+  "start": "2026-09-08T08:39:30.379316+00:00"
+}

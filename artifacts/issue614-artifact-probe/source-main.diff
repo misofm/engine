@@ -1,0 +1,136 @@
+diff --git a/crates/effect-contract/src/lib.rs b/crates/effect-contract/src/lib.rs
+index 3e87af9c..6ed172dd 100644
+--- a/crates/effect-contract/src/lib.rs
++++ b/crates/effect-contract/src/lib.rs
+@@ -180,6 +180,26 @@ impl ObservationTapId {
+     }
+ }
+ scalar_enum!(SmoothingRule {None=1,Linear=2,OnePole99=3});
++
++/// Returns whether a parameter's automation and smoothing parts form a valid combination.
++#[must_use]
++pub fn parameter_automation_smoothing_valid(
++    automation_rate: AutomationRate,
++    automatable: bool,
++    smoothing: SmoothingRule,
++    smoothing_samples: u32,
++) -> bool {
++    let automation_valid = match automation_rate {
++        AutomationRate::None => !automatable && smoothing == SmoothingRule::None,
++        AutomationRate::Sample | AutomationRate::Block => automatable,
++    };
++    let smoothing_valid = match smoothing {
++        SmoothingRule::None => smoothing_samples == 0,
++        SmoothingRule::Linear | SmoothingRule::OnePole99 => smoothing_samples != 0,
++    };
++    automation_valid && smoothing_valid
++}
++
+ scalar_enum!(PortRole {MainInput=1,MainOutput=2,SidechainInput=3});
+ pub type PortKind = PortRole;
+ scalar_enum!(PortLayout {DualMonoPlanar=1});
+@@ -515,14 +535,12 @@ fn parameter_valid(p: &ParameterDescriptor) -> bool {
+     {
+         return false;
+     }
+-    if p.automation_rate == AutomationRate::None {
+-        if p.automatable || p.smoothing != SmoothingRule::None {
+-            return false;
+-        }
+-    } else if !p.automatable {
+-        return false;
+-    }
+-    if (p.smoothing == SmoothingRule::None) != (p.smoothing_samples == 0) {
++    if !parameter_automation_smoothing_valid(
++        p.automation_rate,
++        p.automatable,
++        p.smoothing,
++        p.smoothing_samples,
++    ) {
+         return false;
+     }
+     match p.domain {
+@@ -2224,3 +2242,48 @@ mod bank_width_tests {
+         }
+     }
+ }
++
++#[cfg(test)]
++mod automation_smoothing_validity_tests {
++    use super::{AutomationRate, SmoothingRule, parameter_automation_smoothing_valid};
++
++    #[test]
++    fn exhaustive_automation_smoothing_truth_table() {
++        for automation_rate in [
++            AutomationRate::Sample,
++            AutomationRate::Block,
++            AutomationRate::None,
++        ] {
++            for automatable in [false, true] {
++                for smoothing in [
++                    SmoothingRule::None,
++                    SmoothingRule::Linear,
++                    SmoothingRule::OnePole99,
++                ] {
++                    for smoothing_samples in [0, 7] {
++                        let expected = matches!(
++                            (automation_rate, automatable, smoothing, smoothing_samples),
++                            (AutomationRate::None, false, SmoothingRule::None, 0)
++                                | (AutomationRate::Sample, true, SmoothingRule::None, 0)
++                                | (AutomationRate::Sample, true, SmoothingRule::Linear, 1..)
++                                | (AutomationRate::Sample, true, SmoothingRule::OnePole99, 1..)
++                                | (AutomationRate::Block, true, SmoothingRule::None, 0)
++                                | (AutomationRate::Block, true, SmoothingRule::Linear, 1..)
++                                | (AutomationRate::Block, true, SmoothingRule::OnePole99, 1..)
++                        );
++                        assert_eq!(
++                            parameter_automation_smoothing_valid(
++                                automation_rate,
++                                automatable,
++                                smoothing,
++                                smoothing_samples,
++                            ),
++                            expected,
++                            "{automation_rate:?}, {automatable}, {smoothing:?}, {smoothing_samples}"
++                        );
++                    }
++                }
++            }
++        }
++    }
++}
+diff --git a/crates/effect-package/src/wire.rs b/crates/effect-package/src/wire.rs
+index 62c1eabc..b6fafb10 100644
+--- a/crates/effect-package/src/wire.rs
++++ b/crates/effect-package/src/wire.rs
+@@ -7,7 +7,8 @@ use effect_contract::{
+     LinkModeSet, ObservationCadence, ObservationChannels, ObservationCost, ObservationFold,
+     ObservationKind, ParameterChannelPolicy, ParameterDomain, ParameterLattice, ParameterMapping,
+     ParameterUnit, PortDescriptor, PortLayout, PortRole, SmoothingRule, StepLadder, StepUnit,
+-    TailSamples, default_parameter_lattice, validate_descriptor, validate_parameter_lattice_parts,
++    TailSamples, default_parameter_lattice, parameter_automation_smoothing_valid,
++    validate_descriptor, validate_parameter_lattice_parts,
+ };
+ use engine::{
+     LAUNCH_SAMPLE_RATES, SampleRateHz, is_extended_compatibility_sample_rate, is_launch_sample_rate,
+@@ -1310,14 +1311,12 @@ fn parameter_semantics_valid(
+     {
+         return false;
+     }
+-    if parameter.automation_rate == AutomationRate::None {
+-        if parameter.automatable || parameter.smoothing != SmoothingRule::None {
+-            return false;
+-        }
+-    } else if !parameter.automatable {
+-        return false;
+-    }
+-    if (parameter.smoothing == SmoothingRule::None) != (parameter.smoothing_samples == 0) {
++    if !parameter_automation_smoothing_valid(
++        parameter.automation_rate,
++        parameter.automatable,
++        parameter.smoothing,
++        parameter.smoothing_samples,
++    ) {
+         return false;
+     }
+     match parameter.domain {

@@ -7,7 +7,8 @@ use effect_contract::{
     LinkModeSet, ObservationCadence, ObservationChannels, ObservationCost, ObservationFold,
     ObservationKind, ParameterChannelPolicy, ParameterDomain, ParameterLattice, ParameterMapping,
     ParameterUnit, PortDescriptor, PortLayout, PortRole, SmoothingRule, StepLadder, StepUnit,
-    TailSamples, default_parameter_lattice, validate_descriptor, validate_parameter_lattice_parts,
+    TailSamples, default_parameter_lattice, parameter_automation_smoothing_valid,
+    validate_descriptor, validate_parameter_lattice_parts,
 };
 use engine::{
     LAUNCH_SAMPLE_RATES, SampleRateHz, is_extended_compatibility_sample_rate, is_launch_sample_rate,
@@ -1310,14 +1311,12 @@ fn parameter_semantics_valid(
     {
         return false;
     }
-    if parameter.automation_rate == AutomationRate::None {
-        if parameter.automatable || parameter.smoothing != SmoothingRule::None {
-            return false;
-        }
-    } else if !parameter.automatable {
-        return false;
-    }
-    if (parameter.smoothing == SmoothingRule::None) != (parameter.smoothing_samples == 0) {
+    if !parameter_automation_smoothing_valid(
+        parameter.automation_rate,
+        parameter.automatable,
+        parameter.smoothing,
+        parameter.smoothing_samples,
+    ) {
         return false;
     }
     match parameter.domain {

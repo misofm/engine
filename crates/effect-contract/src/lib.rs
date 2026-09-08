@@ -180,6 +180,26 @@ impl ObservationTapId {
     }
 }
 scalar_enum!(SmoothingRule {None=1,Linear=2,OnePole99=3});
+
+/// Returns whether a parameter's automation and smoothing parts form a valid combination.
+#[must_use]
+pub fn parameter_automation_smoothing_valid(
+    automation_rate: AutomationRate,
+    automatable: bool,
+    smoothing: SmoothingRule,
+    smoothing_samples: u32,
+) -> bool {
+    let automation_valid = match automation_rate {
+        AutomationRate::None => !automatable && smoothing == SmoothingRule::None,
+        AutomationRate::Sample | AutomationRate::Block => automatable,
+    };
+    let smoothing_valid = match smoothing {
+        SmoothingRule::None => smoothing_samples == 0,
+        SmoothingRule::Linear | SmoothingRule::OnePole99 => smoothing_samples != 0,
+    };
+    automation_valid && smoothing_valid
+}
+
 scalar_enum!(PortRole {MainInput=1,MainOutput=2,SidechainInput=3});
 pub type PortKind = PortRole;
 scalar_enum!(PortLayout {DualMonoPlanar=1});
@@ -515,14 +535,12 @@ fn parameter_valid(p: &ParameterDescriptor) -> bool {
     {
         return false;
     }
-    if p.automation_rate == AutomationRate::None {
-        if p.automatable || p.smoothing != SmoothingRule::None {
-            return false;
-        }
-    } else if !p.automatable {
-        return false;
-    }
-    if (p.smoothing == SmoothingRule::None) != (p.smoothing_samples == 0) {
+    if !parameter_automation_smoothing_valid(
+        p.automation_rate,
+        p.automatable,
+        p.smoothing,
+        p.smoothing_samples,
+    ) {
         return false;
     }
     match p.domain {
@@ -2219,6 +2237,51 @@ mod bank_width_tests {
                         u32::try_from(backend.width()).expect("width"),
                         width.lanes()
                     );
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod automation_smoothing_validity_tests {
+    use super::{AutomationRate, SmoothingRule, parameter_automation_smoothing_valid};
+
+    #[test]
+    fn exhaustive_automation_smoothing_truth_table() {
+        for automation_rate in [
+            AutomationRate::Sample,
+            AutomationRate::Block,
+            AutomationRate::None,
+        ] {
+            for automatable in [false, true] {
+                for smoothing in [
+                    SmoothingRule::None,
+                    SmoothingRule::Linear,
+                    SmoothingRule::OnePole99,
+                ] {
+                    for smoothing_samples in [0, 7] {
+                        let expected = matches!(
+                            (automation_rate, automatable, smoothing, smoothing_samples),
+                            (AutomationRate::None, false, SmoothingRule::None, 0)
+                                | (AutomationRate::Sample, true, SmoothingRule::None, 0)
+                                | (AutomationRate::Sample, true, SmoothingRule::Linear, 1..)
+                                | (AutomationRate::Sample, true, SmoothingRule::OnePole99, 1..)
+                                | (AutomationRate::Block, true, SmoothingRule::None, 0)
+                                | (AutomationRate::Block, true, SmoothingRule::Linear, 1..)
+                                | (AutomationRate::Block, true, SmoothingRule::OnePole99, 1..)
+                        );
+                        assert_eq!(
+                            parameter_automation_smoothing_valid(
+                                automation_rate,
+                                automatable,
+                                smoothing,
+                                smoothing_samples,
+                            ),
+                            expected,
+                            "{automation_rate:?}, {automatable}, {smoothing:?}, {smoothing_samples}"
+                        );
+                    }
                 }
             }
         }

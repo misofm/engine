@@ -1,0 +1,16 @@
+{
+  "final-overlay.diff": {
+    "lossless": true,
+    "mtime_zero": true,
+    "raw_sha256": "b4b5ea5eb85e097e346216ece99b21c574725866396ae101dbc50bdfbae2886f"
+  },
+  "second-overlay.diff": {
+    "lossless": true,
+    "mtime_zero": true,
+    "raw_sha256": "b4b5ea5eb85e097e346216ece99b21c574725866396ae101dbc50bdfbae2886f"
+  },
+  "manifest_entries": 55,
+  "615_body_exact": true,
+  "560_body_exact": true,
+  "tracker": "d7e60beba32ec20bef5b5dfd3120180ea3b5d73a\nd7e60beba32ec20bef5b5dfd3120180ea3b5d73a\n"
+}
