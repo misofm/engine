@@ -61,3 +61,9 @@ Current main advanced disjointly through #587 / PR #592 to `e16cea23e05a69c00f9d
 Root merged current `origin/main` `e16cea23e05a69c00f9d2826670c95514b4c259d` without conflict, producing pushed integration head `f8dc0126810a535bc62fb52be126951d3f1ffb76` with that exact merge-base. The #587 delivery changes only its documented host, browser and artifact paths and remains disjoint from the three-file TOOL9 source change.
 
 On the integrated head, the complete bench debug suite passes 43 tests; the focused release sysinfo, conformance and protocol suites pass 13, 4 and 5 tests. Strict affected Clippy and rustdoc, formatting and diff checks, workspace policy, bench policy and its mutation suite all pass. Cargo's dependency-order rewrite was restored, leaving the tree clean and the lockfile unchanged. No timed benchmark, browser, audio or artifact qualification ran. Astra LOW final exact-head/current-base review remains required before PR authorization.
+
+## Final exact-head/current-base verdict
+
+Astra LOW returned **PASS** at exact pushed head and upstream `8801ff3d3f8da7b5a8c050588a04dc2f4c2d7bf9`, with current remote main and merge-base `e16cea23e05a69c00f9d2826670c95514b4c259d`. The accepted source remains `48985bf87e78df010172496ab68e53cdd86b41be`; only the three authorized tooling files and this spec differ from main. Parser semantics, caller-local acquisition and record oracles remain preserved, the worktree is clean, and GitHub #593 has exact open title/body identity.
+
+Independent debug bench-support/bench tests pass 45 and 43 tests; focused release sysinfo/conformance/protocol tests pass 13, 4 and 5 tests; and strict Clippy/rustdoc, formatting/diff, workspace policy, bench policy and mutation gates pass. Astra LOW is sufficient. No artifact, audio or browser qualification is indicated. Root may open the PR after binding this verdict-only continuation to its exact pushed head.
