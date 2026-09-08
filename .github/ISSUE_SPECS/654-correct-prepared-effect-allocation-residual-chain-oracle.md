@@ -52,3 +52,14 @@ that range correction and synthetic boundary controls: counter fields accept 0 a
 `18446744073709551615`; they reject -1, booleans, and
 `18446744073709551616`. All other validator behavior remains frozen. No
 implementation or measurement is authorized until Astra passes this amended scope.
+
+## Astra LOW amended-scope review — PASS
+
+Astra passed exact clean branch/upstream
+`c7061b3018b4bb0c3946d684770b759cdbd53065`; GitHub #654 is open and matches.
+One Luna HIGH/XHIGH implementation pass may change only the independently sorted
+residual/bound-membership oracle and the validator's stated `u64` range check and
+boundary mutations. Run the prescribed gates once in order with retained evidence
+and stop on the first failure without correction or rerun. Root checkpoints and
+pushes before fresh Astra source review. No official measurement or counterfactual
+execution is authorized.
