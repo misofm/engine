@@ -32,7 +32,7 @@ Exclude `scripts/lib/gate.sh`, every other policy/check/test script, workflow fi
 
 ## Stop and split triggers
 
-Stop before adding another rule kind or policy consumer, migrating another gate, introducing arbitrary expressions or `eval`, adding dependencies, changing a ban/exemption/diagnostic/order, editing `gate.sh`, replacing an approved bespoke wrapper, or touching marker/dependency/pin/membership/product/audio/browser/artifact paths. Preserve the checkpoint and brief a separate successor if these four rules cannot be moved within the frozen five implementation/test paths.
+Stop before adding another rule kind or policy consumer, migrating another gate, introducing arbitrary expressions or `eval`, adding dependencies, changing a ban/exemption/diagnostic/order, editing `gate.sh`, replacing an approved bespoke wrapper, or touching marker/dependency/pin/membership/product/audio/browser/artifact paths. Preserve the checkpoint and brief a separate successor if these four rules cannot be moved within the frozen four implementation/test paths.
 
 One Luna HIGH or XHIGH attempt receives one Astra LOW adversarial verdict and pauses at the first coherent focused-green tranche for root checkpointing. After three failed attempts, preserve evidence and rebrief without weakening gates. Historical #306/#403 child attribution, #543/#555 → #558/#552 and #542 → #567 delivery order, and all earlier verdict provenance remain unchanged.
 
@@ -41,3 +41,9 @@ One Luna HIGH or XHIGH attempt receives one Astra LOW adversarial verdict and pa
 Astra LOW reviewed delivered main `be17e3293fa7fabb425d1b7eb6edd20bd13c6867`. `scripts/check-lane-policy.sh` currently embeds four repeated scan/filter/reject rule shapes at the fusion, relaxed-SIMD, architecture and detection sites. Durable #306/#403 closure records state that checked producers, extraction, status propagation and mutation coverage are delivered while declarative policy TOML/runner step two remains excluded. The former temporary reconciliation path is unavailable, but the committed records preserve that disposition.
 
 This issue advances only that excluded step. TOOL11 remains partial after this child until Astra LOW performs a post-delivery residual audit; this brief does not predeclare closure. Activation requires exact local/GitHub numbered identity, a pushed clean brief, current-base and ownership checks, and Astra LOW scope PASS before implementation.
+
+## Numbered current-base scope review
+
+Astra LOW returned **PASS** for exact clean brief and upstream `57a76b6c9a8af09ae4279c8a91a2109f272609d9`, with current remote main and merge-base `be17e3293fa7fabb425d1b7eb6edd20bd13c6867`. The sole delta is this spec, diff checks pass, GitHub #598 has exact open identity/body, and base qualification `34175470011` succeeded. The four-rule extraction, standard-library TOML loader, lossless no-`eval` output, reuse of checked primitives and adversarial loader/status/counter-mutant gates are sufficiently bounded and disjoint from #594.
+
+No blocking correction is required. The review identified and this continuation corrects one editorial path-count statement: exact ownership freezes four implementation/test paths plus this spec/evidence. Astra LOW is sufficient and no artifact, audio, browser or timed benchmark qualification applies. Luna HIGH or XHIGH attempt 1 may begin after Astra LOW binds this correction-and-verdict-only continuation to its exact pushed head.
