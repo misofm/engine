@@ -356,3 +356,19 @@ attempted/accepted counts and fail the unchanged connected PCM/output digest. Al
 subject-only, zero-timing, script-deletion, durable-evidence and deferred-RT5-closure terms remain in
 force. One implementation attempt remains; Luna HIGH/XHIGH attempt 3 may begin. No timing or capture
 is authorized.
+
+## Attempt 3 review
+
+Luna HIGH's exact pushed implementation checkpoint
+`8b08b724ff224f8b3aa4b78a10ea2b2f116c0a8b` received Astra LOW **PASS**. The two W8 owners complete
+17,408 untimed renders with exact checked traffic/render/output counts, nonzero PCM, matching
+debug/release phase digests, connected independent both-channel ramp evidence, a complete separate
+capacity-16 drain witness, and zero representative render allocation/realtime violations. The
+restored push-suppression mutation preserved admission reporting and failed the unchanged PCM oracle
+with exit 101; source restoration hashes match and all 27 evidence checksums verify. The four failed
+runner scripts are removed. Full verdict: `docs/audits/600-attempt3-review.md`.
+
+This PASS authorizes delivery of the untimed #600 capability through exact-head review, required PR
+qualification, merge and post-main qualification. RT5 remains partial. Timing, capture, validation,
+preflight and runner repair remain reserved for a separate numbered tooling successor created only
+after #600 closes and releases this lane slot.
