@@ -118,3 +118,15 @@ scratch overlay byte-for-byte. Browser rows, versions, gates, resources and ever
 unchanged. Matrix `--check`, exact pin spelling, formatting and diff checks pass; `Cargo.lock` is
 unchanged. No build, browser, install, benchmark or timing command ran in this tranche. Root must
 now run the single ordinary post-pin build and exact six-file comparison before Astra review.
+
+## Ordinary post-pin build — PASS
+
+Root ran exactly one ordinary no-bypass builder invocation at clean, pushed promotion evidence head
+`5bf40ad03b4ba1c422eb721529ceb88eef30b7c8`. The process exceeded its initial output yield but
+continued under the same PID; root polled it and did not launch another builder. It exited zero and
+published exactly six files. Every file matches the qualified scratch candidate: ABI `40f6fe2e…`,
+declaration `445254e7…`, host JavaScript `21c8947d…`, worklet JavaScript `225bc060…`, metadata
+`6eac2cb3…`, and Wasm `e338adae…`. Full streams/status, exact argv/context, input hashes, both
+six-file manifests and their empty comparison are preserved under `artifacts/issue615-postpin/`.
+No generated output or build target is committed. Astra LOW must run the bounded post-pin gates and
+review exact pushed head/current main before PR delivery.

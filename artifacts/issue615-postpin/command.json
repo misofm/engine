@@ -1,0 +1,13 @@
+{
+  "argv": [
+    "bash",
+    "scripts/build-web-audioworklet.sh",
+    "/tmp/issue615-postpin-WRNbKj"
+  ],
+  "cwd": "/home/bl/misofm/engine-cp8-web-artifact-qualification",
+  "head": "5bf40ad03b4ba1c422eb721529ceb88eef30b7c8",
+  "output_directory": "/tmp/issue615-postpin-WRNbKj",
+  "repin_environment": "absent",
+  "strip_environment": "absent",
+  "invocation_count": 1
+}
