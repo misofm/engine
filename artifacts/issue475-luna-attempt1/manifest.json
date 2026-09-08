@@ -81,13 +81,13 @@
   },
   {
     "path": "README.md",
-    "bytes": 1915,
-    "sha256": "eb5c70ada3b712367c2aaacb76b1beda4ccb22e5c6ce36718460821ae9d234af"
+    "bytes": 2031,
+    "sha256": "c5e9437b0fa1ce7b1c39485258b41bbd011440364300411d610f9c2e8fd62b54"
   },
   {
     "path": "baseline/original-output-identity.json",
-    "bytes": 438,
-    "sha256": "5d02af00b88deee1dc7b01950861f3be2ef4d69f8ed300e719eefa90d3dbae51"
+    "bytes": 585,
+    "sha256": "73b5241694c1ae5e43f98eb1c9bf9c0b82addb159c9629887b095c6077c51d6a"
   },
   {
     "path": "baseline/process-callers.ll",
@@ -103,8 +103,8 @@
   },
   {
     "path": "candidate/original-output-identity.json",
-    "bytes": 440,
-    "sha256": "d5336cc70d5db1858d63e0f39b706e62fe8bf3613b0ec4bee82f11c8eb0a957d"
+    "bytes": 587,
+    "sha256": "530b354f8e94668c9e42bada2513c42bc9bd6b7904230d1cf8c84ac67b3f90da"
   },
   {
     "path": "candidate/process-callers.ll",

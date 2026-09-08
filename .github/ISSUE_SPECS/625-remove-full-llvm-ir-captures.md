@@ -68,3 +68,20 @@ The workspace policy and its existing mutation suite are the accepted prevention
 ### 2026-09-08 — #621 compaction PASS; dependency released
 
 Astra LOW passed #621's compact evidence at exact pushed checkpoint `3d1e92678f4999dff6834d800dc006ef785b6287`. It verified that no added full/selected `.ll` or redundant full `.s` survives, both small remaining archives contain only eight documented non-IR diagnostic/test streams, 27 bounded excerpts reproduce from the recorded original hashes and line ranges, and the frozen limiter source remains unchanged. #621 records the verdict at synchronized head `d727f7e51794d031c6e9ef5e0fd5716938fa46ac` and explicitly releases its historical #539 read dependency. The last #625 implementation blocker is clear; Luna HIGH may begin the single authorized tranche.
+
+### 2026-09-08 — Luna HIGH implementation checkpoint
+
+The implementation checkpoint removes all 39 tracked `artifacts/**/*.ll` paths. Comparing the
+checkpoint's parent tree with the current index gives exactly 39 deleted paths totaling
+13,345,253 bytes; the current index census is empty. The 37 historical `.s` files remain, with
+4,189,861 bytes. Metadata and decision records identify the removed LLVM payloads as historical
+identities, retain their original sizes/hashes/ranges and conclusions, and identify surviving
+assembly/text records where applicable. No source, Cargo manifest, lockfile, pin, or product artifact
+was changed.
+
+The workspace policy now checks the Git index in a real worktree and fails closed on an index
+listing error. Its mutation suite rejects a force-added artifact `.ll`, accepts an artifact `.s`
+and a non-artifact `.ll`, and preserves the synthetic-tree fallback. `bash -n` passes for both
+affected scripts; the real workspace policy and complete mutation suite pass; `git diff --check`
+passes. The mutation suite's expected directed-fault diagnostics remain in its bounded output.
+No compiler, benchmark, browser, or artifact-builder command was run for this tranche.

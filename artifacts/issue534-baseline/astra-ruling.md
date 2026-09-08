@@ -1,5 +1,9 @@
 # Astra independent pre-edit lowering decision — #534
 
+The `.ll` filenames cited below are historical capture identities. Issue #625 removed those
+payloads from current main; the source mapping, hashes, and surviving assembly remain the basis
+of this ruling.
+
 Decision (a): both candidate access cases survive in identifiable supported native production lowering. Root may checkpoint this ruling and authorize the already frozen one coherent Luna implementation pass addressing both, subject to candidate correctness/mechanism/lowering review. This is not implementation acceptance or measured speedup.
 
 Reviewed clean pushed baseline package `bbe00047df22796f93bcf381b43a626a32d98f0d`, captured source `867bbfd327f5fb0c2f57769a50da2aa26a013774` (gate source unchanged from deliveredfe58709c), decision/manifest, complete selected LLVM/ASM callers and original artifacts. Independently verified original LLVM SHA25670d9633d05b0f040c4f8d60e5b4b1ee99de184264fb05ce39aa30b93023ea911 and ASM SHA256c49178247fb551f89d6f4c5b46e8b2a7416fd2e00801146c4624341624dc300f. The successful normal-release compiler capture is status0, Rust1.97.1/LLVM22.1.6, repository profile fatLTO/codegen1/debug1 and native configuration. No supplemental build, runtime test or timing was needed for this review. The disclosed malformed metadata-helper attempt preceded compiler launch and receives no evidence credit.
