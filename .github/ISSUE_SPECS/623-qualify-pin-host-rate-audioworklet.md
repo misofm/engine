@@ -120,3 +120,30 @@ and deterministic compressed overlays are preserved. The detached scratch worktr
 `/tmp/issue623-qualified-output` for exact promotion/post-pin comparison. Candidate PASS authorizes
 Luna HIGH/XHIGH to make only the conditional three-file repository promotion. It does not authorize
 PR or merge.
+
+## Luna HIGH repository promotion checkpoint
+
+Luna HIGH changed exactly the three conditionally authorized repository files, and root checkpointed
+and pushed the tranche as `6fdbb377`. The pin is the qualified candidate plus LF;
+`results.json` changes only `candidateCommit` to exact frozen source `ca5a8b49…` and `wasmSha256`
+to the qualified digest; the unchanged generator changes only the matrix lineage text. All three
+files match the qualified scratch overlay byte-for-byte. Browser rows, versions, gates, resources,
+and every other result remain unchanged. Matrix generation/check, generator syntax, exact lineage,
+formatting/diff, scope, and lock checks passed. No build, qualification gate, browser, install,
+benchmark, or timing command ran in the promotion tranche.
+
+## Ordinary post-pin build — PASS
+
+Root ran exactly one ordinary no-bypass builder invocation at clean, pushed promotion head
+`6fdbb377`. It exited zero and published exactly six files. Their basename-normalized SHA-256
+manifest matches the qualified scratch candidate exactly: ABI `40f6fe2e…`, declaration
+`445254e7…`, host JavaScript `21c8947d…`, worklet JavaScript `225bc060…`, parameter metadata
+`6eac2cb3…`, and Wasm `ac71c640…`.
+
+The initial raw hash-manifest diff retained different absolute directory prefixes and therefore
+returned status 1 despite identical hashes and basenames. Root preserved that comparison, then
+normalized only the paths in the already captured manifests and obtained status 0 with an empty
+diff. The builder was not rerun. Full command/context/streams/status, inputs, clean before/after
+status, both manifests, raw comparison and corrected normalized comparison are retained under
+`artifacts/issue623-postpin/`. No browser or other qualification gate ran. Astra LOW must perform
+the bounded post-pin gates and exact-head/current-main review before PR delivery.
