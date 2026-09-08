@@ -35,3 +35,11 @@ Astra LOW adversarially reviews each implementation attempt. Maximum three imple
 ## DSP and research authority
 
 This is access-only. Preserve the delivered limiter equations and update rules recorded in `.github/ISSUE_SPECS/539-stationary-limiter-dispatch.md`, the issue #90 wave-2 amendment in `.github/ISSUE_SPECS/BRIEFS/016-true-peak-limiter.md`, `.github/ISSUE_SPECS/090-audit-miso-engine-true-peak-limiter.md`, `docs/EFFECT_CONTRACT_V1.md`, and the current source. ITU-R BS.1770-5 remains authority only for the frozen Annex-2 detector coefficients/estimator; the existing repository research record covers gain separation, state, numerical behavior and listening evidence. This issue changes no sound-quality claim and schedules no new listening.
+
+## Decision record
+
+### 2026-09-08 — Astra LOW scope PASS; one current-source capture authorized
+
+Astra LOW passed the scope at clean pushed head `8f2b03ca1c14334facc6c584955715659f8037c3`. The retained #539 lowering establishes only a historical residual: scalar `process-core-scalar.ll:752-758`, W8 dual `process-core-w8.ll:761-767`, and W8 mono `outlined-07.ll:611-617` each contain slice-start and remaining-length checks revisited by the detector-loop backedge. Those checks are distinct from loop termination and detector arithmetic, but they do not prove the audit's historical “eight comparisons” wording.
+
+The retained captures identify source commit `615787e92a209d7146110f7920bb9c09d7f93a3d`, limiter source hash beginning `08ea2bfa`, and older dependency provenance. They therefore cannot prove a residual in delivered main `cf9e079cd5ef80d1c7284e9edd0ffcc90b0db335` and cannot support a no-change closure. Astra LOW authorizes exactly one bounded, untimed current-source compile/disassembly capture using the pinned toolchain and existing release configuration. It must preserve complete output and provenance, cover supported scalar and W8 detector callers plus the required Wasm portability evidence, and separately map loop-internal bounds branches/backedges from entry, chunk and tail checks. No source edit, benchmark or timing is authorized until Astra LOW reviews that capture and records a current residual PASS.
