@@ -52,3 +52,13 @@ This PASS qualifies release-test integration only. It preserves #636's final
 FAIL and makes no shipped-profile, compiler-artifact, Cargo-root-cause,
 performance or allocation claim. Exact-head/current-main PR-readiness review is
 required before PR creation.
+
+## Artifact applicability pause
+
+Astra LOW passed source and release-test continuity but rejected PR readiness at
+`690e0517` because `host-web -> host-core -> graph-compiler` places the changed
+production compiler bytes in the shipped AudioWorklet dependency closure. Artifact
+child #644 owns one official repin-report identity probe and any separately reviewed
+qualification/pin work if the digest moves. #642 remains the paused delivery peer
+and does not consume a third active slot; lane-A #643 and lane-B #644 are the two
+active issues. No PR is authorized before #644's reviewed disposition.
