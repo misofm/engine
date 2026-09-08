@@ -2,7 +2,7 @@
 
 ## Status
 
-Open. This is the documentation-only lane-A child for audit #559 finding FX3. It is based on delivered main `d98646db47bc603c32431d999cd08f43a0168043` after the eight-partial barrier and FX1/FX2 delivery. Companion coordination issue: #560.
+Ready for Astra LOW review. This is the documentation-only lane-A child for audit #559 finding FX3. It is based on delivered main `d98646db47bc603c32431d999cd08f43a0168043` after the eight-partial barrier and FX1/FX2 delivery. Companion coordination issue: #560.
 
 ## Problem and current evidence
 
@@ -42,4 +42,36 @@ No build, test, benchmark, artifact qualification, browser run, or audio listeni
 
 ## Attempt record
 
-Attempt 1 is pending. The pre-issue Astra LOW scope review passed this bounded documentation-only shape against main `d98646db47bc603c32431d999cd08f43a0168043` and found no lane-B path overlap.
+Attempt 1 records the standing owner disposition without changing its arithmetic.
+The pre-issue Astra LOW scope review passed this bounded documentation-only shape
+against main `d98646db47bc603c32431d999cd08f43a0168043` and found no lane-B
+path overlap.
+
+At that base, exact source inspection found the two division sites at lines 1413
+and 1656. The exact-unity regression explains that `Wb = 97` makes
+`97 * (1 / 97)` differ from exact `1.0` in `f32`, so the current division is an
+observable bit contract. The adopted floor ruling says reciprocal substitution
+moves rendered bits, is outside class-A authority, and requires derived tolerance
+plus listening qualification before benchmarking. It expressly instructs the
+optimization loop to flag the candidate and stop.
+
+The owner disposition is therefore **defer and preserve division**. FX3 is fully
+disposed for this class-A audit; no optimization or speedup is claimed. Any future
+proposal must be a separately numbered class-B issue rather than reopening this
+implementation round.
+
+The documentation gate ran against this branch before the evidence checkpoint:
+
+- both division sites and the exact-unity commentary were present;
+- the class-B rule and its limiter reciprocal table row were present;
+- `git diff --exit-code d98646db --` over limiter source and the floor ruling
+  returned zero;
+- `git diff --name-only d98646db` named only this issue spec;
+- `git diff --check` returned zero;
+- the unchanged limiter source SHA-256 was
+  `32ab4abf975b32d47c85a748e617e74c9547b22e1b585f0d36713be439a62908`;
+- the unchanged ruling SHA-256 was
+  `36010df13d28a913847d44d12dc12b2d6090ac21cd8743a5a01577a455078c89`.
+
+No build, test, benchmark, artifact, browser, listening or product command ran.
+Astra LOW exact-head review remains required before PR creation.
