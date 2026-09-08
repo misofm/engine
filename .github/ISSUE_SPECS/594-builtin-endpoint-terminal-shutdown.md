@@ -268,5 +268,12 @@ and the candidate digest remained the pinned
 `39ebe7cd3f71f34ab11260f27fa1eaad281dd61642c50d9ed6210e703d95dd55`. No pin,
 qualification result, deployment matrix, source, or consumer changed, so full qualification was
 correctly skipped. Durable evidence is in `artifacts/issue594-artifact-qualification/`; the artifact
-checkpoint was incorporated as `a1a2f89b`. Final exact combined-head Astra LOW review, required PR
-qualification, merge, post-main qualification, and GitHub synchronization remain pending.
+checkpoint was incorporated as `a1a2f89b`.
+
+Astra LOW returned **PASS** on exact pushed combined head
+`b37ba7a46cd708782ff58068d58959f63a8699cb`. Independent `control-provider` endpoint tests pass
+11 unit plus 20 integration cases; the artifact manifest passes 14/14, all four compressed streams
+match their plain originals, and all six retained build outputs match the recorded hashes, canonical
+#587 hashes, inventory, and current pin. The final worktree is clean and diff checks pass. Full
+verdict: `docs/audits/594-final-review.md`. Required PR qualification, merge, post-main
+qualification, and GitHub synchronization remain pending.
