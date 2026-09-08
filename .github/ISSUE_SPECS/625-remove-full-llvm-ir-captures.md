@@ -95,21 +95,3 @@ Astra LOW reviewed exact pushed checkpoint `1b550c15672b1f27a455757d37c649b1312a
 Luna HIGH corrected only the authorized historical issue/evidence records in commits `1f768917`, `3b39ab14` and `e91bbb28`. Astra LOW passed exact clean pushed head `e91bbb28b659eb4f0b40c0c31b5ca09c8de1ba12` against unchanged live main `7af655071f528f5cfcfbec3fa6de3a306d79a30a`. All 25 #475 manifest rows are now consistent: 23 present files match their recorded sizes/hashes and only the two explicitly removed `.ll` files are absent. The corrected records distinguish historical LLVM identities from surviving assembly while preserving every accepted conclusion and original capture hash.
 
 Changed JSON, exact correction scope and diff hygiene pass. The cumulative deletion remains 39 files / 13,345,253 bytes with zero tracked artifact `.ll`; the already accepted policy and `.gitignore` bytes are unchanged. GitHub #475/#534/#537/#539/#625 match their local records. No gate was rerun for the evidence-only correction. Root may record this verdict and request one documentation-only exact-head/current-main PR-readiness confirmation; merge is not yet authorized.
-
-### 2026-09-08 — Astra LOW attempt-1 review PASS
-
-Astra LOW passed the attempt-1 review revision at exact clean pushed head
-`e91bbb28b659eb4f0b40c0c31b5ca09c8de1ba12` against live main
-`7af655071f528f5cfcfbec3fa6de3a306d79a30a`. The prior #534 blocker is
-corrected, and the bounded wording audit now distinguishes historical LLVM
-identities/ranges from surviving assembly/text across the #475/#534/#537/#539
-records without restoring payloads or changing their accepted technical
-conclusions. Their numbered issue bodies and #625 match GitHub.
-
-The implementation and policy identities are unchanged from the reviewed
-checkpoint: exactly 39 `.ll` files / 13,345,253 bytes are deleted, all 37 `.s`
-files / 4,189,861 bytes remain unchanged, the fail-closed index policy and its
-complete mutation suite pass, and branch-wide diff hygiene passes. This remains
-implementation attempt 1. Root may proceed to a documentation-only exact-head/current-main
-confirmation and then open one PR; required CI and guarded live-head/base review
-remain mandatory before merge.
