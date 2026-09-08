@@ -70,3 +70,25 @@ rewrite, reconstruct, recapture, or rerun them.
 
 No implementation, compiler capture, benchmark, artifact qualification, pin
 change, retained-state cleanup, or fourth paired-helper attempt is authorized.
+
+## Scope verdict and decision record — 2026-09-08
+
+- **Documentation attempt 1 — SCOPE PASS.** At feature head
+  `64d8dfb180e6251122f5d21e7ca01a76df816cc7`, delivered `main`
+  `6f4a1b1c893ce04fbe8001e9d175702eba9a9d78`, and tracker head
+  `bd183f2a9470327b063265942d2b87e5b4234d58`, this remains a documentation-only
+  disposition with no product-source change.
+- **Decision:** close the soft-clip FX4 lowering investigation as **deferred
+  optimization**, not an eliminated residual. #647/#649/#651 are failed
+  qualifications with no inherited gate credit. #653 verified repeated native
+  AVX2 W8 `-1` and emitted `-3`, and Wasm scalar `-3`, `-1`, and `+1`; native
+  scalar and Wasm SIMD128 W4 reused one materialization. #656 was behaviorally
+  valid but lowering-neutral. #660 did not complete an authorized qualification
+  and ended at the procedural hard stop. Delivered product source is unchanged.
+- No timing, improvement, projected-saving, regression, or budget-miss claim is
+  established. Implementation requires a genuinely new weekly/performance issue
+  with a measured budget or owner-approved justification; the paired helper must
+  not restart as a renamed fourth attempt. True-peak-limiter FX4 remains separate.
+  #663 and #664 occupy the two active slots, with #664 and Lane B retaining
+  LocalRing/AudioWorklet ownership. All failed worktrees, branches, and temporary
+  evidence remain preserved.
