@@ -247,6 +247,23 @@ Every other row, resource, and source byte remains frozen. No build, gate,
 install, or browser execution is authorized until the promotion checkpoint;
 post-pin verification follows separately.
 
+## Astra LOW promotion review — PASS
+
+Astra LOW passed exact clean pushed promotion head
+`0bb5a820be33a49393386617358ec1db2fe7577d` against live main `30680709`.
+Exactly three files changed from accepted record head `8c31927c`; each is
+byte-identical to the qualified scratch overlay. The pin is candidate plus LF,
+results change only the approved two lineage fields, and the matrix changes only
+matching lineage. Source, evidence, browser rows, versions, gates, resources,
+and diff hygiene remain frozen.
+
+Exactly one Luna HIGH ordinary no-bypass post-pin build is authorized from this
+clean pushed head into a new empty external directory, followed once by exact
+six-file comparison and the specified static, resource-mutation, hermetic, SDK,
+matrix, formatting/diff, workspace, and effect-runtime checks. Stop without
+retry on failure. Browser qualification and browser/package installation must
+not be repeated. PR and merge remain unauthorized pending post-pin review.
+
 ## Astra LOW attempt 2 evidence-disposition review — PASS
 
 Astra LOW returned **PASS** at exact clean pushed head
