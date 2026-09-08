@@ -1,0 +1,102 @@
+# Classify repeated soft-clip cubic materializations
+
+GitHub: https://github.com/misofm/engine/issues/653
+
+Parent: #651. Audit parent: #559 FX4. Coordination: #560. Base:
+`4acfa4a1c25248e47bdd6bc14e34c9cb6ac43447`.
+
+## Smallest closable slice
+
+#651 correctly decoded native odd clamp pools but failed its final review because
+it omitted Wasm-scalar even clamp materialization and called target-specific clamp
+folding the FX4 residual. This successor asks only which identical emitted values
+are materialized more than once within a single production frame-loop iteration
+across the even and odd `cubic` calls.
+
+The result is one compact repetition matrix for native scalar, native AVX2 W8,
+Wasm scalar and Wasm SIMD128 W4. One row per actual emitted value must state exact
+even/odd sites and repeat count. One-time, reused-local, loop-entry and algebraically
+different folded operands must be listed explicitly as exclusions. If Astra LOW
+verifies a source-owned repeated value that can move across the two calls without
+changing any arithmetic operation, open a separate Luna XHIGH implementation issue.
+Otherwise close FX4's soft-clip slice as no-change applicability.
+
+## Exact ownership
+
+This issue owns only:
+
+- `.github/ISSUE_SPECS/653-classify-repeated-soft-clip-cubic-materializations.md`;
+- `artifacts/issue653-soft-clip-cubic-repetition/` for one compact input identity,
+  repetition matrix, claim-specific excerpts and verdict;
+- #559/#560 coordination records.
+
+It owns no Rust/test source, manifest, dependency, lock, workflow, full compiler
+output, timing, benchmark, generated resource, AudioWorklet artifact or pin. Lane B
+retains exclusive artifact authority. #652 is the disjoint active lane-B issue and
+owns only its prepared-effect allocation-audit paths.
+
+## Frozen inputs and fail-closed start
+
+The sole Luna HIGH analyst uses the six unchanged #649 payloads at their existing
+paths and hashes recorded by #651:
+
+```text
+a7ff9346a898cdb04c7bd88bc715d142c0c7c330a984a96147afca3368a01e30  /tmp/issue649-softclip-native/release/deps/soft_clip-4402e1e642a34f0e.s
+594ad47fec545981dc59d7c9da9797ca81def108b2a02d19de8a7c5bf653af6a  /tmp/issue649-softclip-native/release/deps/soft_clip-4402e1e642a34f0e.ll
+efe9909785bcdd2049eb48600fc5eadffbcffe5f51fc60d134ba9c01b8cace47  /tmp/issue649-softclip-wasm-scalar/wasm32-unknown-unknown/release/deps/soft_clip-c6dc6570cab48744.s
+abd8b091cdcf02a0de6a651a5e9ef454d1938d974eee6dc77be090a521276b1f  /tmp/issue649-softclip-wasm-scalar/wasm32-unknown-unknown/release/deps/soft_clip-c6dc6570cab48744.ll
+d16176c43ade071630235a24972a2e35595c6cc420d1ad6beb764fa988024b8e  /tmp/issue649-softclip-wasm-simd128/wasm32-unknown-unknown/release/deps/soft_clip-22a3f78411ddffba.s
+c35dd592367274ca00d96fdcf2c0289fa000e338249189b7b7ad984c1248a281  /tmp/issue649-softclip-wasm-simd128/wasm32-unknown-unknown/release/deps/soft_clip-22a3f78411ddffba.ll
+```
+
+Before interpretation, record exact cwd, branch, full HEAD/upstream/current-remote
+equality and a clean tracked/untracked porcelain result directly in the owned
+compact identity file. Run one literal `sha256sum -c` using the six lines above and
+record its complete output/status. Any dirty identity, missing input, non-regular
+file or hash mismatch stops. Do not create a bespoke `/tmp` preflight framework,
+rerun a compiler, modify a payload or reconstruct prior mappings.
+
+## Repetition and applicability gates
+
+For each production shape, map the frame loop and both source calls at
+`crates/soft-clip/src/kernel.rs:199` and `:201`, then classify actual emitted
+values associated with `-1`, `+1`, divisor `3`, `-2/3`, `+2/3` and any compiler-
+folded `-3`, `-1/3`, `+1/3`:
+
+- Count a repetition only when the same actual value has separate materialization
+  instructions/sites during one loop iteration. A pool entry alone is not work.
+- A register/local loaded once and reused by both calls counts once. A value moved
+  before the loop counts as loop-entry, not per-frame repetition.
+- `±2/3` and folded `±1/3` are different emitted values. Their target-dependent
+  relationship is an exclusion, not the repeated-splat result.
+- For native values, include pool labels, raw IEEE-754 bits and exact load/broadcast
+  lines. For Wasm, include exact `f32.const`/`v128.const` and local-use lines.
+- Confirm each repeat is within the loop boundaries and is used by the named even
+  or odd call. Preserve enough raw lines for Astra LOW to reproduce every count.
+- Separately state whether the repeated values originate in the two invocations of
+  the same source helper and could be supplied once to both calls without moving,
+  deleting, reordering or reassociating arithmetic. This is applicability only,
+  never a speedup or compiler-optimality claim.
+
+Do not propose moving the half-scale operation, reciprocal substitution or any
+class-B arithmetic. Do not infer one target from another or inherit #647/#649/#651
+tables. No timing, cycle, projected-savings or artifact claim is permitted.
+
+## Workflow and stop rules
+
+1. Astra LOW reviews the clean pushed brief, six live hashes, disjoint ownership
+   and exact repetition definition.
+2. After PASS, one named Luna HIGH analyst performs the literal identity/hash check
+   once and writes one compact repetition matrix/excerpt tranche. Stop on failure.
+3. Root checkpoints and pushes that exact-path tranche, then Astra LOW independently
+   verifies every count and the applicability conclusion.
+4. Up to three total attempts are permitted. Each correction is documentation-only,
+   separately scoped and re-reviewed; no compiler recapture or source change may be
+   used to repair evidence. Attempt 3 failure is a hard stop.
+5. PASS closes this evidence issue and either records no-change applicability or
+   opens one separately numbered Luna XHIGH source issue for only the verified
+   repeats. Any evidence-only merge still requires exact-head/current-main review,
+   required PR CI, guarded exact-parent merge, post-main qualification, tracker and
+   GitHub synchronization, and clean delivered-worktree removal.
+
+No source implementation or lane-B artifact work is authorized by #653.
