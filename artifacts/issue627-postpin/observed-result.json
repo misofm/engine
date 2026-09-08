@@ -4,10 +4,9 @@
   "output": "/tmp/issue627-postpin-output",
   "output_existed_at_invocation": false,
   "stderr": "output must be an existing non-symlink directory",
-  "numeric_exit_status_retained": true,
+  "numeric_exit_status_retained": false,
   "compilation_started": false,
   "downstream_commands_run": false,
   "retried": false,
-  "exit_status": 1,
   "identity_census_after_failure": true
 }

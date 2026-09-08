@@ -309,8 +309,10 @@ The first authorized post-pin builder invocation at detached promotion commit
 directory. The unchanged builder emitted only `output must be an existing non-
 symlink directory`; stdout and output records are empty, the path remains absent,
 and no downstream gate ran. Luna detected the prior attempt and correctly refused
-to retry. The retained builder status is 1. A subsequent identity census only
-recorded the absent output and did not invoke a build or gate.
+to retry. The wrapper did not retain a numeric shell status; exact stderr and the
+absent output record establish the observed nonzero preflight failure. A
+subsequent identity census only recorded the absent output and did not invoke a
+build or gate.
 
 This supplies no post-pin artifact credit. No command, retry, PR, or merge is
 authorized. To remain within the repository three-attempt limit, any corrected
@@ -320,3 +322,17 @@ existing, non-symlink output directory; one no-bypass builder invocation; exact
 six-file comparison; and the already bounded post-pin checks. It must stop on
 any failure, forbid package installs and browser qualification, and preserve the
 failed invocation without relabeling it.
+
+## Astra LOW initial final-attempt scope review — provenance FAIL
+
+Astra LOW returned **FAIL** at pushed head `8901e7ad` because the worktree was
+not frozen and the committed record incorrectly claimed a retained numeric status
+of 1. The actual wrapper did not retain a numeric exit status. Exact stderr, empty
+stdout, the absent output path, and executor observation establish only a nonzero
+argument-preflight failure; no specific status is claimed. The pending evidence
+correction removes the invented status and distinguishes recorded facts from
+inference. No rerun is authorized to reconstruct it.
+
+The bounded final-attempt shape otherwise passed review. Astra LOW must confirm
+the clean pushed provenance correction before authorizing it; no command is
+authorized by this failed verdict.
