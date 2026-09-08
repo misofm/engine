@@ -206,3 +206,15 @@ paired bank/forced-scalar state and PCM, shutdown realtime/lifetime/resource, an
 mutation gates are missing. Independent debug integration 16/16, endpoint unit 6/6, strict Clippy,
 formatting, and diff checks passed; release was not claimed. Full verdict:
 `docs/audits/594-attempt1-review.md`.
+
+## Attempt 2 implementation
+
+Luna HIGH corrected both attempt-1 races and root checkpointed the coherent source as `1a99a968`.
+The complete attempt-2 evidence checkpoint is `c59b961d`. Debug integration 20/20, endpoint unit 9/9,
+release integration 20/20, strict Clippy, rustdoc, formatting, and diff checks pass. Deterministic
+intent-before-message/rollback and post-ack/pre-classification rendezvous tests pass, along with exact
+combined ticket ownership, sticky-fault retention, stale/duplicate lifecycle calls, native paired-bank
+and forced-scalar quiescence, zero render allocation/free, independent Arc/resource caps, and
+`stop()` off-render reclamation. All five required direct behavior mutations failed their intended
+assertions and were restored. The known generated `Cargo.lock` ordering drift was restored. Full
+record: `docs/audits/594-terminal-shutdown-attempt2.md`.
