@@ -1,0 +1,114 @@
+# Exact repetition excerpts
+
+## Native AVX2 W8
+
+Pool bits from `soft_clip-4402e1e642a34f0e.s`:
+
+```text
+3185 .LCPI14_3: .long 0xbf800000
+3187 .LCPI14_4: .long 0x3f800000
+3189 .LCPI14_5: .long 0xc0400000
+3191 .LCPI14_6: .long 3207244459       # 0xbf2aaaab
+3193 .LCPI14_7: .long 1059760811       # 0x3f2aaaab
+3197 .LCPI14_9: .long 0xbeaaaaab
+3199 .LCPI14_10: .long 0x3eaaaaab
+3269 vbroadcastss .LCPI14_4(%rip), %ymm5
+3819 .LBB14_119:
+3967 .loc 28 199 0
+3968 vbroadcastss .LCPI14_3(%rip), %ymm4
+3972 vbroadcastss .LCPI14_5(%rip), %ymm7
+3976 vbroadcastss .LCPI14_6(%rip), %ymm6
+3978 vbroadcastss .LCPI14_7(%rip), %ymm4
+4013 vbroadcastss .LCPI14_3(%rip), %ymm4
+4023 vbroadcastss .LCPI14_5(%rip), %ymm7
+4055 vmulps %ymm3, %ymm9, %ymm0
+4056 vbroadcastss .LCPI14_9(%rip), %ymm1
+4058 vbroadcastss .LCPI14_10(%rip), %ymm1
+```
+
+The branch back to the same frame loop is `.s:4151` (`.LBB14_119`). The `+1`
+broadcast at `.s:3269` is loop-entry, so its per-iteration count is zero. Thus
+only the `-1` and folded `-3` broadcasts are identical separate sites across calls.
+
+## Native scalar
+
+```text
+5681 .LBB18_33:
+5870 vmovss .LCPI18_20(%rip), %xmm6
+5871 vmovss .LCPI18_18(%rip), %xmm4
+5872 vmovss .LCPI18_17(%rip), %xmm0
+5933 vbroadcastss .LCPI18_19(%rip), %xmm1
+5938 vbroadcastss .LCPI18_21(%rip), %xmm1
+5979 .loc 28 201 65
+5993 vdivss %xmm0, %xmm5, %xmm5
+6011 vmulss %xmm7, %xmm5, %xmm5
+6013 vbroadcastss .LCPI18_23(%rip), %xmm0
+6017 vbroadcastss .LCPI18_24(%rip), %xmm0
+```
+
+The `+1/-1/-3` values are one-load/register-reuse exclusions. The even source
+clamps and odd folded clamps differ.
+
+## Wasm scalar
+
+```text
+4470 .LBB11_22:
+4608 .loc 2 101 24
+4609 local.get 10
+4610 local.get 6
+4611 i32.add
+4612 local.tee 33
+4613 f32.const 0x0p0
+4614 f32.const 0x1.555556p-1    # +2/3, bits 0x3f2aaaab; even stack operand
+4615 f32.const -0x1.555556p-1   # -2/3, bits 0xbf2aaaab; even stack operand
+4616 local.get 12
+4617 local.get 20
+4626 local.tee 6
+4627 f32.load 116
+4778 .loc 27 199 0
+4785 f32.const -0x1.8p1
+4789 f32.const -0x1p0
+4793 f32.const 0x1p0
+4884 f32.const 0x1.555556p-2    # folded odd +1/3, bits 0x3eaaaaab
+4885 f32.const -0x1.555556p-2   # folded odd -1/3, bits 0xbeaaaaab
+4901 f32.const -0x1.8p1
+4908 f32.const 0x1p-1
+4911 f32.const -0x1p0
+4917 f32.const 0x1p0
+```
+
+The `.s:4614-4615` values are pushed before the interpolation work in
+`.LBB11_22` and consumed once by the even clamp select; they are per-frame
+materializations, not loop-entry values. LLVM `.ll:2410-2417` records the same
+even source clamp operands. LLVM `.ll:2477-2492` records odd input half, output
+half and folded `-1/3,+1/3`. The repeated actual assembly immediates are
+therefore `-1,+1,-3` only; the even clamp values each count one.
+
+## Wasm SIMD128 W4
+
+```text
+5585 .LBB13_71:
+5872 .loc 28 199 0
+5873 v128.const 171,170,42,63 ...
+5874 local.tee 62
+5875 v128.const 171,170,42,191 ...
+5876 local.tee 63
+5883 v128.const -0x1.8p1 ...
+5884 local.tee 64
+5888 v128.const -0x1p0 ...
+5889 local.tee 65
+5893 v128.const 0x1p0 ...
+5894 local.tee 66
+5999 .loc 35 3867 14
+6000 local.get 62
+6001 local.get 63
+6018 local.get 64
+6026 local.get 65
+6034 local.get 66
+6039 local.get 61
+6040 f32x4.mul
+```
+
+Each value is materialized once and then reused by local. LLVM `.ll:2667-2669`
+and `.ll:2740-2744` retain the `±2/3` byte constants; `.ll:2757-2758` places
+the half multiply after the odd selects.
