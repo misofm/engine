@@ -223,3 +223,31 @@ Behavior and strict-Clippy evidence remains attributed to #659 attempt 3; format
 and workspace evidence remains attributed to #664 attempt 1. No product,
 artifact, pin, tracker, or unrelated change occurred. Exact-source Astra LOW
 review is pending.
+
+## Source verdict and artifact applicability
+
+Astra LOW returned **SOURCE PASS** at exact clean pushed source checkpoint
+`403fdbc4fcc1c3062894b3c4d9760671b64905ab` and compact record head
+`9ed5dca70ee32b67eb22f3fdde004888cd302d6f`. The two-script recalibration is
+exact and justified, its 41-to-40 mutation remains discriminating, all seven
+attempt-2 stages and the 30-entry manifest verify, and product bytes remain
+frozen. Evidence attribution is:
+
+- #659 attempt 3: census, debug/release behavior, and strict Clippy;
+- #664 attempt 1: formatting, workspace policy, and inherited-source proof;
+- #664 attempt 2: policy, mutations, Wasm, and final scope checks.
+
+Root's separate artifact-applicability ruling is **identity probe required**.
+`target-smoke` and the changed policy scripts are outside the shipped
+AudioWorklet dependency, but `host-web` directly depends on the changed `engine`
+crate. The removed public generic is expected to be uninstantiated in that final
+link, yet source-shape reasoning does not prove artifact byte identity. After a
+slot is free, open a stateless bounded issue for one exact-source repin-report
+probe. A same digest may support an unchanged-pin disposition after Astra LOW
+review; drift requires separately reviewed qualification and promotion. #664 PR
+readiness remains blocked until that artifact dependency is delivered. No probe,
+pin edit, artifact build, or cleanup is authorized here.
+
+#659's temporary evidence remains required for inherited gate attribution through
+#664 delivery. Its clean pushed worktree may be removed after synchronized compact
+records preserve the attribution outside it; retain its branch and history.
