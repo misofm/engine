@@ -144,6 +144,19 @@ pub type AutomationKind = AutomationSpanKind;
 scalar_enum!(ParameterChannelPolicy {Shared=1,PerLane=2});
 scalar_enum!(StepSize {Xs=1,Sm=2,Md=3,Lg=4,Xl=5});
 scalar_enum!(StepUnit {Absolute=1,Cents=2,Ratio=3,Index=4});
+
+/// Whether a continuous parameter's mapping is admissible for its finite minimum.
+///
+/// Callers validate the minimum's finiteness and canonical zero spelling before applying this
+/// mapping rule. A stepped mapping belongs to Boolean and Enumeration parameters instead.
+#[must_use]
+pub const fn continuous_mapping_admissible(mapping: ParameterMapping, minimum: f32) -> bool {
+    match mapping {
+        ParameterMapping::Linear | ParameterMapping::Exponential => true,
+        ParameterMapping::Logarithmic => minimum > 0.0,
+        ParameterMapping::Stepped => false,
+    }
+}
 // Issue #143 D1: the declared observation menu. Each vocabulary is a `scalar_enum!` for the same
 // reason the parameter vocabularies are -- the descriptor wire, the C inspect surface and the
 // browser metadata all carry the raw `u32`, and `from_raw` is the single place a foreign value is
@@ -553,13 +566,7 @@ fn parameter_valid(p: &ParameterDescriptor) -> bool {
                     && a < b
                     && parameter_value_valid(p, p.default_value)
                     && p.enum_choices.is_empty()
-                    && matches!(
-                        p.mapping,
-                        ParameterMapping::Linear
-                            | ParameterMapping::Logarithmic
-                            | ParameterMapping::Exponential
-                    )
-                    && (p.mapping != ParameterMapping::Logarithmic || a > 0.0)
+                    && continuous_mapping_admissible(p.mapping, a)
             }
             _ => false,
         },
@@ -2284,6 +2291,71 @@ mod automation_smoothing_validity_tests {
                     }
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod continuous_mapping_validity_tests {
+    use super::{
+        AutomationRate, ParameterChannelPolicy, ParameterDescriptor, ParameterDomain,
+        ParameterMapping, ParameterUnit, SmoothingRule, continuous_mapping_admissible,
+        default_parameter_lattice, parameter_valid,
+    };
+
+    const BASE: ParameterDescriptor = ParameterDescriptor {
+        id: super::ParameterId(1),
+        display_name: "Gain",
+        display_unit: "dB",
+        unit: ParameterUnit::Db,
+        domain: ParameterDomain::Continuous,
+        minimum: Some(-1.0),
+        maximum: Some(1.0),
+        default_value: 0.0,
+        mapping: ParameterMapping::Linear,
+        automation_rate: AutomationRate::Sample,
+        channel_policy: ParameterChannelPolicy::PerLane,
+        smoothing: SmoothingRule::Linear,
+        smoothing_samples: 1,
+        readable: false,
+        automatable: true,
+        enum_choices: &[],
+        lattice: default_parameter_lattice(
+            ParameterUnit::Db,
+            ParameterDomain::Continuous,
+            ParameterMapping::Linear,
+        ),
+    };
+
+    #[test]
+    fn continuous_mapping_minimum_truth_table_is_explicit() {
+        let minima = [-1.0, -0.0, 0.0, f32::MIN_POSITIVE, 1.0];
+        let cases = [
+            (ParameterMapping::Linear, [true, true, true, true, true]),
+            (
+                ParameterMapping::Logarithmic,
+                [false, false, false, true, true],
+            ),
+            (ParameterMapping::Exponential, [true, true, true, true, true]),
+            (ParameterMapping::Stepped, [false, false, false, false, false]),
+        ];
+
+        for (mapping, expected) in cases {
+            for (minimum, expected) in minima.into_iter().zip(expected) {
+                assert_eq!(
+                    continuous_mapping_admissible(mapping, minimum),
+                    expected,
+                    "{mapping:?} minimum {minimum:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn typed_validator_rejects_noncanonical_minimum_before_mapping_rule() {
+        for minimum in [f32::NAN, -0.0] {
+            let parameter = ParameterDescriptor { minimum: Some(minimum), ..BASE };
+            assert!(!parameter_valid(&parameter), "minimum {minimum:?}");
         }
     }
 }

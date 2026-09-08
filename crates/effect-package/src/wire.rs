@@ -7,8 +7,8 @@ use effect_contract::{
     LinkModeSet, ObservationCadence, ObservationChannels, ObservationCost, ObservationFold,
     ObservationKind, ParameterChannelPolicy, ParameterDomain, ParameterLattice, ParameterMapping,
     ParameterUnit, PortDescriptor, PortLayout, PortRole, SmoothingRule, StepLadder, StepUnit,
-    TailSamples, default_parameter_lattice, parameter_automation_smoothing_valid,
-    validate_descriptor, validate_parameter_lattice_parts,
+    TailSamples, continuous_mapping_admissible, default_parameter_lattice,
+    parameter_automation_smoothing_valid, validate_descriptor, validate_parameter_lattice_parts,
 };
 use engine::{
     LAUNCH_SAMPLE_RATES, SampleRateHz, is_extended_compatibility_sample_rate, is_launch_sample_rate,
@@ -1327,13 +1327,7 @@ fn parameter_semantics_valid(
                     && minimum < maximum
                     && parameter_value_valid(view, parameter, parameter.default_value)
                     && parameter.choice_count == 0
-                    && matches!(
-                        parameter.mapping,
-                        ParameterMapping::Linear
-                            | ParameterMapping::Logarithmic
-                            | ParameterMapping::Exponential
-                    )
-                    && (parameter.mapping != ParameterMapping::Logarithmic || minimum > 0.0)
+                    && continuous_mapping_admissible(parameter.mapping, minimum)
             }
             _ => false,
         },
@@ -3222,6 +3216,40 @@ mod tests {
         let choice_text = read_u32(&bytes, choice + 4) as usize;
         bytes[choice_text] = b'G';
         assert_mismatch(&bytes, (choice + 4) as u32, 0);
+    }
+
+    #[test]
+    fn borrowed_continuous_mapping_minimum_truth_table_preserves_preconditions() {
+        let minima = [-1.0, -0.0, 0.0, f32::MIN_POSITIVE, 0.25];
+        let cases = [
+            (ParameterMapping::Linear, [true, false, true, true, true]),
+            (
+                ParameterMapping::Logarithmic,
+                [false, false, false, true, true],
+            ),
+            (
+                ParameterMapping::Exponential,
+                [true, false, true, true, true],
+            ),
+            (ParameterMapping::Stepped, [false, false, false, false, false]),
+        ];
+
+        for (mapping, expected) in cases {
+            for (minimum, expected) in minima.into_iter().zip(expected) {
+                let mut bytes = encode(&DESCRIPTOR);
+                let record = HEADER_BYTES;
+                write_u32(&mut bytes, record + 12, mapping as u32);
+                write_u32(&mut bytes, record + 36, minimum.to_bits());
+                write_u32(&mut bytes, record + 40, 1.0f32.to_bits());
+                write_u32(&mut bytes, record + 44, 0.5f32.to_bits());
+                let view = semantic_test_view(&bytes);
+                assert_eq!(
+                    parameter_semantics_valid(view, view.parameter(0)),
+                    expected,
+                    "{mapping:?} minimum {minimum:?}"
+                );
+            }
+        }
     }
 
     #[test]

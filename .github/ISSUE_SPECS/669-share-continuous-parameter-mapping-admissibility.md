@@ -159,3 +159,41 @@ stop, semantic scope, and #668 disjointness.
 Only Luna HIGH `/root/issue583_luna_impl` is authorized for attempt 1 within the
 two named source files and their inline tests. No artifact execution, pin change,
 compiler-payload commit, PR, or merge is authorized by this verdict.
+
+## Luna HIGH attempt 1 checkpoint — FAIL
+
+Luna HIGH changed only the two authorized source files. `effect-contract` now
+owns pure public `continuous_mapping_admissible`; both typed and borrowed
+validators call it at the former duplicated condition. Inline tests add an
+explicit four-mapping/five-minimum helper table plus typed and borrowed
+canonical-minimum coverage. Root preserved the buildable source unchanged for
+review.
+
+The first four ordered debug/release test commands and strict affected Clippy
+each returned 0. `effect-contract` reported 15 unit tests and four integration
+groups of 12, 7, 9, and 0 passing in both profiles. `effect-package` reported 35
+unit tests and integration groups of 6, 2, 1, 5 with one ignored, 3, 2, 15, and 0
+passing in both profiles. Gate 6, `cargo fmt --all -- --check`, returned 1 with
+three formatting diffs in the new truth-table tests. Luna stopped; policy gates
+7–11 did not run, and no correction or retry occurred.
+
+Attempt-1 temporary evidence remains at
+`/tmp/issue669-attempt1-evidence` with target output at
+`/tmp/issue669-attempt1-target`. The reported manifest verification returned 0,
+but root's read-only audit found the final `09-manifest-record.txt` no longer
+matches its manifest entry because its completion/status lines were appended
+after hashing. The nominal manifest SHA-256 is
+`2af5733ac496836d93bbc5b084124deca41892760ab0830fd177a881f00e15a9`;
+it is not valid final-state evidence. The preflight record also captured the two
+source modifications rather than a clean pre-edit porcelain state. These
+evidence defects confer no credit and must not be repaired or recaptured as
+attempt 1.
+
+Frozen pre-edit hashes were `9079d272d76a9d0015b815e7ccf0c439a8398d2e581f24ca250ea83c9b553b87`
+for `effect-contract/src/lib.rs` and
+`9768d59e21fcad4bff665f9d45111519bb7dec70cbe326b5a3c8b59b8b110ae6`
+for `effect-package/src/wire.rs`. Failed-checkpoint hashes are
+`dfe5ba9b47e65998e997f7485e6b8bccbab666cc02c2e1b0f5a6036d0509d8b1`
+and `a9284433c1ee5a802cd99bbcdd911d48d8c099c6627774f397541a69d81a57e0`
+respectively. Attempt 1 is consumed. Astra LOW must review this failure record
+and source before any bounded attempt-2 correction is authorized.
