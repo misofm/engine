@@ -1,0 +1,141 @@
+{
+  "clean_tracked_tree": true,
+  "git": {
+    "branch": "codex/limiter-delivery-canonical-lease",
+    "expected_head": "4c729144a60a3b471bf5adab382365dd4ecb44f8",
+    "head": "4c729144a60a3b471bf5adab382365dd4ecb44f8",
+    "head_commit_changed_paths": [
+      "M\t.github/ISSUE_SPECS/630-complete-limiter-delivery-checks-with-one-canonical-lease.md"
+    ],
+    "parent": "6b59637a70340105f5c11b9a6a335e4aed1bd129",
+    "reviewed_parent": "6b59637a70340105f5c11b9a6a335e4aed1bd129",
+    "tracked_status": "",
+    "upstream": "origin/codex/limiter-delivery-canonical-lease"
+  },
+  "lease": {
+    "bytes": 226,
+    "fields": {
+      "attempt": "1",
+      "authorized_head": "6b59637a70340105f5c11b9a6a335e4aed1bd129",
+      "issue": "630",
+      "owner": "/root/issue610_luna_xhigh",
+      "scope": "installed-state-preflight,sdk-check,matrix-check,cargo-fmt,diff-hygiene,workspace-policy,effect-runtime-policy"
+    },
+    "path": "/tmp/misofm-engine-issue630-attempt1-execution.lock/owner.txt",
+    "sha256": "dc84cbe3e36e8200643671d77cae6d0191b92da4fd5790f4515c0d6dfb661cc6"
+  },
+  "preserved_output": {
+    "accepted_hashes": {
+      "miso-engine-v1-abi-layout.json": "40f6fe2e23e1b47500011c14871750a75922ab194136add8b387a4b40eb56919",
+      "miso-engine-v1-audio-worklet-host.d.ts": "445254e7c6ddf3330bdf20cafa8cacec4d0e2489805f72a833859db52bc038cf",
+      "miso-engine-v1-audio-worklet-host.js": "21c8947d8aad2d1d9a23e553c2c7b983dbd5a622aabfbab9a41c622d1a50229a",
+      "miso-engine-v1-audio-worklet.js": "225bc06043ed6e2c62a38d63f1c2015b40480d673e3a53109c938eba481556cb",
+      "miso-engine-v1-audio-worklet.simd128.wasm": "63ef81c105d50aed41164aa3c6c6f8853a314b99d642e209e7cc3aefe3bdbca1",
+      "miso-engine-v1-parameter-metadata.json": "6eac2cb3e30931b6c01b10c63af4eedd2d59337274565a129c7a3f328a09938d"
+    },
+    "accepted_record": "/home/bl/misofm/engine-limiter-audioworklet-delivery/artifacts/issue627-scratch-qualification/six-file.sha256",
+    "actual_hashes": {
+      "miso-engine-v1-abi-layout.json": "40f6fe2e23e1b47500011c14871750a75922ab194136add8b387a4b40eb56919",
+      "miso-engine-v1-audio-worklet-host.d.ts": "445254e7c6ddf3330bdf20cafa8cacec4d0e2489805f72a833859db52bc038cf",
+      "miso-engine-v1-audio-worklet-host.js": "21c8947d8aad2d1d9a23e553c2c7b983dbd5a622aabfbab9a41c622d1a50229a",
+      "miso-engine-v1-audio-worklet.js": "225bc06043ed6e2c62a38d63f1c2015b40480d673e3a53109c938eba481556cb",
+      "miso-engine-v1-audio-worklet.simd128.wasm": "63ef81c105d50aed41164aa3c6c6f8853a314b99d642e209e7cc3aefe3bdbca1",
+      "miso-engine-v1-parameter-metadata.json": "6eac2cb3e30931b6c01b10c63af4eedd2d59337274565a129c7a3f328a09938d"
+    },
+    "file_count": 6,
+    "final_attempt_record": "/home/bl/misofm/engine-limiter-audioworklet-delivery/artifacts/issue627-postpin-attempt3/02-output.sha256",
+    "final_hashes": {
+      "miso-engine-v1-abi-layout.json": "40f6fe2e23e1b47500011c14871750a75922ab194136add8b387a4b40eb56919",
+      "miso-engine-v1-audio-worklet-host.d.ts": "445254e7c6ddf3330bdf20cafa8cacec4d0e2489805f72a833859db52bc038cf",
+      "miso-engine-v1-audio-worklet-host.js": "21c8947d8aad2d1d9a23e553c2c7b983dbd5a622aabfbab9a41c622d1a50229a",
+      "miso-engine-v1-audio-worklet.js": "225bc06043ed6e2c62a38d63f1c2015b40480d673e3a53109c938eba481556cb",
+      "miso-engine-v1-audio-worklet.simd128.wasm": "63ef81c105d50aed41164aa3c6c6f8853a314b99d642e209e7cc3aefe3bdbca1",
+      "miso-engine-v1-parameter-metadata.json": "6eac2cb3e30931b6c01b10c63af4eedd2d59337274565a129c7a3f328a09938d"
+    },
+    "is_directory": true,
+    "is_symlink": false,
+    "path": "/tmp/issue627-postpin-attempt3-output-20260908"
+  },
+  "required_executables": {
+    "node": {
+      "executable": true,
+      "path": "/usr/local/bin/node"
+    },
+    "npm": {
+      "executable": true,
+      "path": "/usr/local/bin/npm"
+    },
+    "sdk/node_modules/.bin/esbuild": {
+      "executable": true,
+      "exists": true,
+      "resolved": "/home/bl/misofm/engine-limiter-audioworklet-delivery/sdk/node_modules/esbuild/bin/esbuild",
+      "symlink": true
+    },
+    "sdk/node_modules/.bin/tsc": {
+      "executable": true,
+      "exists": true,
+      "resolved": "/home/bl/misofm/engine-limiter-audioworklet-delivery/sdk/node_modules/typescript/bin/tsc",
+      "symlink": true
+    },
+    "sdk/node_modules/.bin/tsserver": {
+      "executable": true,
+      "exists": true,
+      "resolved": "/home/bl/misofm/engine-limiter-audioworklet-delivery/sdk/node_modules/typescript/bin/tsserver",
+      "symlink": true
+    }
+  },
+  "sdk_manifests": {
+    "install_authorized_commit": "522c614df35f8b44007d7ae2853f27ad8e4add40",
+    "installed_lock_sha256": "128fe2ffe05c3ab1b34d05efc4b3bdf68b404b1a46ccdcc6d95f986ea4d0daee",
+    "installed_metadata_mismatches": [],
+    "installed_package_count": 5,
+    "lock_package_count": 30,
+    "lockfile_version": 3,
+    "missing_applicable_optional": [],
+    "missing_non_optional": [],
+    "missing_platform_inapplicable_optional": [
+      "node_modules/@esbuild/aix-ppc64",
+      "node_modules/@esbuild/android-arm",
+      "node_modules/@esbuild/android-arm64",
+      "node_modules/@esbuild/android-x64",
+      "node_modules/@esbuild/darwin-arm64",
+      "node_modules/@esbuild/darwin-x64",
+      "node_modules/@esbuild/freebsd-arm64",
+      "node_modules/@esbuild/freebsd-x64",
+      "node_modules/@esbuild/linux-arm",
+      "node_modules/@esbuild/linux-arm64",
+      "node_modules/@esbuild/linux-ia32",
+      "node_modules/@esbuild/linux-loong64",
+      "node_modules/@esbuild/linux-mips64el",
+      "node_modules/@esbuild/linux-ppc64",
+      "node_modules/@esbuild/linux-riscv64",
+      "node_modules/@esbuild/linux-s390x",
+      "node_modules/@esbuild/netbsd-arm64",
+      "node_modules/@esbuild/netbsd-x64",
+      "node_modules/@esbuild/openbsd-arm64",
+      "node_modules/@esbuild/openbsd-x64",
+      "node_modules/@esbuild/openharmony-arm64",
+      "node_modules/@esbuild/sunos-x64",
+      "node_modules/@esbuild/win32-arm64",
+      "node_modules/@esbuild/win32-ia32",
+      "node_modules/@esbuild/win32-x64"
+    ],
+    "package_hashes": {
+      "sdk/package-lock.json": {
+        "byte_equal": true,
+        "bytes": 15830,
+        "current_sha256": "dee524dd698d40dbcc99fced7e55e651fd5d96b0957a2ddb1cd59c7c486c03d4",
+        "install_commit_sha256": "dee524dd698d40dbcc99fced7e55e651fd5d96b0957a2ddb1cd59c7c486c03d4"
+      },
+      "sdk/package.json": {
+        "byte_equal": true,
+        "bytes": 1640,
+        "current_sha256": "62641970eb223ab6c81b97a077e44c3b9d1aa2179513df2f00d235a5546509c0",
+        "install_commit_sha256": "62641970eb223ab6c81b97a077e44c3b9d1aa2179513df2f00d235a5546509c0"
+      }
+    },
+    "package_name": "@misofm/engine",
+    "package_version": "0.2.1"
+  },
+  "status": "PASS"
+}

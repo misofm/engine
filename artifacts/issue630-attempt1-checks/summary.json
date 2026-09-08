@@ -1,0 +1,109 @@
+{
+  "attempt": 1,
+  "checks": [
+    {
+      "command": "bash scripts/sdk-package.sh check /tmp/issue627-postpin-attempt3-output-20260908",
+      "invocations": 1,
+      "lease_record": "01.lease.owner.txt",
+      "lease_sha256": "dc84cbe3e36e8200643671d77cae6d0191b92da4fd5790f4515c0d6dfb661cc6",
+      "lease_sha256_record": "01.lease.sha256",
+      "status": 0,
+      "stderr": "01.stderr",
+      "stderr_sha256": "befaa72b25ccf5329f9f4657af59002d0d2acfd30e81fca05f742570e846fe67",
+      "stdout": "01.stdout",
+      "stdout_sha256": "33fa6bee93c5386b1d90ae91006e2b1ae68290c35523b8dd598ab81c37f1cccc",
+      "step": 1
+    },
+    {
+      "command": "node hosts/host-web/qualification/generate-matrix.mjs --check",
+      "invocations": 1,
+      "lease_record": "02.lease.owner.txt",
+      "lease_sha256": "dc84cbe3e36e8200643671d77cae6d0191b92da4fd5790f4515c0d6dfb661cc6",
+      "lease_sha256_record": "02.lease.sha256",
+      "status": 0,
+      "stderr": "02.stderr",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout": "02.stdout",
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "step": 2
+    },
+    {
+      "command": "cargo fmt --all --check",
+      "invocations": 1,
+      "lease_record": "03.lease.owner.txt",
+      "lease_sha256": "dc84cbe3e36e8200643671d77cae6d0191b92da4fd5790f4515c0d6dfb661cc6",
+      "lease_sha256_record": "03.lease.sha256",
+      "status": 0,
+      "stderr": "03.stderr",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout": "03.stdout",
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "step": 3
+    },
+    {
+      "command": "git diff --check origin/main...HEAD",
+      "invocations": 1,
+      "lease_record": "04.lease.owner.txt",
+      "lease_sha256": "dc84cbe3e36e8200643671d77cae6d0191b92da4fd5790f4515c0d6dfb661cc6",
+      "lease_sha256_record": "04.lease.sha256",
+      "status": 0,
+      "stderr": "04.stderr",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout": "04.stdout",
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "step": 4
+    },
+    {
+      "command": "bash scripts/check-workspace-policy.sh",
+      "invocations": 1,
+      "lease_record": "05.lease.owner.txt",
+      "lease_sha256": "dc84cbe3e36e8200643671d77cae6d0191b92da4fd5790f4515c0d6dfb661cc6",
+      "lease_sha256_record": "05.lease.sha256",
+      "status": 0,
+      "stderr": "05.stderr",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout": "05.stdout",
+      "stdout_sha256": "8261c11a9ad607004e800b131ad999fbad0194619b971b30aa45a6ba10eeb880",
+      "step": 5
+    },
+    {
+      "command": "bash scripts/check-effect-runtime-policy.sh",
+      "invocations": 1,
+      "lease_record": "06.lease.owner.txt",
+      "lease_sha256": "dc84cbe3e36e8200643671d77cae6d0191b92da4fd5790f4515c0d6dfb661cc6",
+      "lease_sha256_record": "06.lease.sha256",
+      "status": 0,
+      "stderr": "06.stderr",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout": "06.stdout",
+      "stdout_sha256": "94a0298c066b72368f13058fa440e71f630e736c29f7deea73d96686cd55ea2a",
+      "step": 6
+    }
+  ],
+  "evidence_directory": "/home/bl/misofm/engine-limiter-audioworklet-delivery/artifacts/issue630-attempt1-checks",
+  "execution": "single canonical lease, one invocation per check",
+  "head": "4c729144a60a3b471bf5adab382365dd4ecb44f8",
+  "issue": 630,
+  "lease": {
+    "fields_file": "00-lease.owner.txt",
+    "path": "/tmp/misofm-engine-issue630-attempt1-execution.lock/owner.txt",
+    "sha256": "dc84cbe3e36e8200643671d77cae6d0191b92da4fd5790f4515c0d6dfb661cc6"
+  },
+  "preflight": {
+    "command": "python3 artifacts/issue630-attempt1-checks/00-preflight.py",
+    "status": 0,
+    "stderr": "00-preflight.stderr",
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "stdout": "00-preflight.stdout",
+    "stdout_sha256": "79aebdeae8758626baaf34b5994ca7783122a0e60648785d1bb5b875457b4334"
+  },
+  "prohibitions_observed": [
+    "no npm/install",
+    "no build/artifact/static/resource/hermetic/browser work",
+    "no benchmark/timing/compiler capture",
+    "no product edit",
+    "no commit or push"
+  ],
+  "reviewed_parent": "6b59637a70340105f5c11b9a6a335e4aed1bd129",
+  "status": "PASS"
+}
