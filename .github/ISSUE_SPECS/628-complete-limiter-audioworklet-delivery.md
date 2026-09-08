@@ -166,3 +166,26 @@ the preserved output; then matrix `--check`, Cargo formatting, diff hygiene,
 workspace policy, and effect-runtime policy once. Stop on first failure. No
 other install, builder, static/resource/hermetic/browser repeat, product edit,
 PR, or merge is authorized.
+
+## Astra LOW attempt 2 review — FAIL; final scope proposed
+
+Astra LOW failed attempt 2 at exact clean pushed head
+`958d43c2f75a8e460e1b28d243dc35cace11d9ee` against live main `30680709`.
+All 14 checksums verify. The before-hash file is empty and status 0 does not
+establish a successful capture; raw path errors were not retained. The wrapper
+incorrectly continued to one successful `npm ci --ignore-scripts`. No SDK or
+later delivery check ran or receives credit, and tracked product state is clean.
+The attempt remains failed and no fictitious before-install record may be
+reconstructed.
+
+The proposed final attempt 3 reuses that retained successful install only after
+a correct read-only repository-root preflight verifies package/lock bytes
+against the authorized Git commit, installed dependency lock/package identities,
+required SDK executables, a clean tracked tree, and a refreshed sole-executor
+lease. If and only if preflight passes, Luna may run one SDK check against the
+preserved output, then matrix `--check`, Cargo formatting, branch diff hygiene,
+workspace policy, and effect-runtime policy once. Capture every actual status
+and stop immediately on failure. No new install, builder, static/resource/
+hermetic/browser repeat, product edit, PR, or merge is authorized. If installed-
+state verification fails, stop for final disposition without improvising an
+install. Astra LOW exact-head scope PASS is required before any command.
