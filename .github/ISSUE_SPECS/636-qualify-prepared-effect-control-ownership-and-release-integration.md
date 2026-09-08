@@ -212,37 +212,6 @@ credit. The only retained PASS is the technical source/oracle review. Observed
 test totals remain distinct from credited invocation evidence, and the successor
 must produce its own contemporaneous command record.
 
-## Executor provenance reconciliation and final attempt 3 PASS
-
-After the no-credit record above was pushed, the Luna XHIGH executor supplied its
-exact command strings and numeric statuses from preserved records. Astra LOW ruled
-that this later executor provenance plus the byte-identical logs permits a
-documentation-only correction; the earlier caution remains preserved rather than
-silently rewritten. The compact record at `artifacts/issue636-attempt2-3/`
-distinguishes executor testimony from contemporaneous streams, identifies the
-focused uncommitted content later committed unchanged as `bbc96fb7`, and identifies
-the remaining attempt-2 execution at that clean commit. It makes no reconstructed
-raw-preflight claim.
-
-This later reviewed reconciliation supersedes the hard-stop conclusion above;
-that conclusion remains in the chronology because it preceded the executor's
-exact records. This is documentation-only and is neither a fourth execution nor
-a fourth source attempt.
-
-Attempt 2 remains **FAIL** because rustfmt returned 1 after the focused oracle,
-one-shot command-local unwind release integration, debug/release libraries and
-strict Clippy returned 0. Attempt 3 changed only the two formatter layouts in that
-diagnostic, reran none of the completed workloads, and passed rustfmt, workspace
-policy and diff hygiene. Astra LOW returned final source **PASS** at exact clean
-pushed `74108ec994a7647dedd6149df5de8550134228a5`. The causal correct-versus-crossed
-PCM oracle is sound and inherited production code is unchanged. Attempts 1 and 2
-remain FAIL; no additional source correction or release command is authorized.
-
-Before PR creation, Astra LOW must review the exact clean evidence/documentation
-head against current main, verify the inherited #633 production ancestry and
-scope, and classify artifact applicability separately. The command-local unwind
-result grants release-test qualification only and no shipped-artifact credit.
-
 Successor #642 is open with this frozen source and owns the single contemporaneously
 recorded release-integration qualification plus delivery after PASS. #636 and #642
 must not be counted as simultaneous active slots; the slot transfers when #636 closes.
