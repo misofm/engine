@@ -18,7 +18,20 @@ The control-ownership oracle must use the same deterministic graph/input and the
 
 The existing accepted processor-payload crossing, exact sidechain source/destination/port, homogeneous/heterogeneous bank membership/program order, repeated compilation, canonical graph/semantic identity and diagnostic fixtures must remain intact.
 
-Separately, qualify the release `track_delay` integration leg with one predeclared command in a fresh isolated Cargo target. Before execution, Astra must review the exact package/target/feature/profile invocation and determine whether it avoids the previously colliding workspace artifact shape without changing manifests or dependencies. Run it once and stop on failure; no retry, alternate command, or manifest repair is allowed. If it still stops before tests, preserve the command/status/diagnostic and split the runner/tooling defect without weakening the control-ownership gate.
+Separately, qualify the release `track_delay` integration leg with this one
+predeclared command after verifying that its target path does not already exist:
+
+```text
+CARGO_TARGET_DIR=/tmp/issue636-release-track-delay-34982484 cargo test --locked --release -p graph-compiler --test track_delay
+```
+
+Before execution, Astra must review this exact package/target/profile invocation
+and determine whether it can discriminate the previously colliding workspace
+artifact shape without changing manifests or dependencies. No features or target
+triple are added. Run it once and stop on failure; no retry, alternate command, or
+manifest repair is allowed. If it still stops before tests, preserve the command,
+status and diagnostic and split the runner/tooling defect without weakening the
+control-ownership gate.
 
 No full compiler output or `.ll`/`.s` capture, artifact generation/pinning, benchmark, timing, allocation measurement, dependency/manifest/lock change, public API change, scheduling/PDC work, or broader refactor belongs here. Allocation qualification remains a later separately numbered successor after this issue passes and a slot is free.
 
