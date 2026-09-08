@@ -93,3 +93,21 @@ policy. Root must first create an atomic external single-executor lease naming t
 exact executor and head; Luna verifies it before every command, and no other agent
 may execute while it exists. Stop on failure. No builder, static/resource/hermetic
 repeat, install, browser, output generation, or product edit is authorized.
+
+## Remaining-check attempt 1 — FAIL
+
+The atomic lease named one executor and exact evidence head. The first authorized
+command, `bash scripts/sdk-package.sh check` against the preserved six-file
+output, returned status 2 because this successor worktree lacks
+`sdk/node_modules`. The no-install rule was preserved. Execution stopped; matrix,
+formatting, diff hygiene, workspace policy, and effect-runtime policy did not run.
+No product or prior evidence changed.
+
+Attempt 1 is **FAIL**. A bounded attempt-2 scope may use the existing locked SDK
+dependency state already created during the accepted #627 first scratch sequence,
+provided Astra LOW first proves that checkout's SDK/package/lock bytes equal this
+branch and the dependency state is the same retained install. It may then run the
+SDK check there against the preserved six-file output and, only on success, run
+the five remaining branch-local checks once. No install, builder, artifact/static/
+resource/hermetic/browser repeat, product edit, or retry is authorized before
+Astra LOW scope PASS.
