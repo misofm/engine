@@ -251,3 +251,19 @@ pin edit, artifact build, or cleanup is authorized here.
 #659's temporary evidence remains required for inherited gate attribution through
 #664 delivery. Its clean pushed worktree may be removed after synchronized compact
 records preserve the attribution outside it; retain its branch and history.
+
+## Artifact dependency result
+
+#666's one-shot repin-report probe at exact #664 source returned the delivered
+Wasm digest `580e3cb4cd11e996598103f27b02d94559f6ef7ad57ef22732d18c0b4f98be10`.
+Astra LOW returned **PROBE PASS / UNCHANGED-PIN APPLICABILITY PASS** at probe
+source `4a92bd8a` and final compact record `649a65db`. The empty output, unchanged
+tree/pin, verified manifest, unchanged builder, and unchanged copied host-web
+inputs support carrying the prior qualified six-file/browser/SDK evidence with
+its original attribution. No ordinary builder, new browser/SDK execution, pin
+edit, or artifact promotion is required.
+
+#664 and #666 now share the combined source/evidence history and may enter one
+exact-head/current-main PR readiness review. Required qualification, guarded
+merge-parent review, successful post-main qualification, synchronized closure,
+and final cleanup review remain mandatory.
