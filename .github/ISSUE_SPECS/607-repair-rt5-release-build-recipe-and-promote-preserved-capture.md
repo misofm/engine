@@ -27,3 +27,14 @@ The repaired build must obtain `lto = "fat"`, `codegen-units = 1`, `panic = "abo
 6. Integrate current main, recheck #605 disjointness, obtain Astra LOW exact integrated-head PASS, push, run required PR qualification, merge, require successful post-main qualification, synchronize this issue and #559/#560, verify remote states, and remove clean stopped/delivered worktrees. Lane B supplies artifact qualification/pinning applicability.
 
 One Luna XHIGH implementation pass and no correction are authorized. Any substantive defect stops this issue and requires a new successor. No original open #559 finding may start until this successor and lane B's remaining partials are delivered.
+
+## Astra LOW corrected scope review
+
+Astra LOW returned **PASS** at exact clean brief/upstream
+`4bfb3a25865bfb72257975b33ae4f615b00be905`, with synchronized handoff head
+`69117bf82e02bcfc5c87b0f9a840279349686d49` and #605 coordination head
+`6f5005d37af9bc8d51484b8e26b464127dcc4337`. Live #559/#560/#605 identify #605/#607 as the
+two disjoint active issues and #606 as stopped. The reviewer accepted the single-script profile-
+derived build repair, preserved issue-606 tooling/artifact identity, frozen issue-602 record identity,
+compile-only proof, and successive source/seal/capture review gates. Luna XHIGH may begin the sole
+implementation pass. Final preflight and timing remain unauthorized.
