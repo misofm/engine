@@ -114,3 +114,41 @@ Diff hygiene and workspace policy pass; #625 post-main qualification
 brief the separately numbered lane-B AudioWorklet applicability/qualification
 successor in the free second slot. No artifact execution is authorized before
 that issue receives Astra LOW scope PASS.
+
+### 2026-09-08 — Artifact successor #627 exhausted its hard stop
+
+Lane-B successor #627 qualified candidate Wasm `63ef81c1…` technically, but its
+first scratch attempt failed the exactly-one-builder gate after a concurrent
+duplicate. A documentation-only attempt 2 preserved the independent first
+sequence and received Astra LOW PASS; the exact three-file promotion was
+checkpointed but not delivered. The first post-pin invocation then failed argument
+preflight, and final attempt 3 suffered concurrent duplicate static/resource/
+hermetic executions. Astra LOW returned final **FAIL** at `26633c15`; #627's
+synchronized hard-stop record is `6e90818e`.
+
+No PR or merge is authorized. #621's accepted source remains frozen at SHA-256
+`32ab4abf975b32d47c85a748e617e74c9547b22e1b585f0d36713be439a62908`, but it
+cannot deliver while its required artifact successor is blocked. #621 and #627
+remain open and all associated branches/worktrees are retained pending an owner
+decision outside #627's exhausted workflow.
+
+### 2026-09-08 — #628 inherits bounded delivery completion
+
+#627 is closed as superseded without claiming delivery. Bounded successor #628
+is open at clean pushed brief `c5d8c553`, inheriting exact #627 record head
+`6e90818e` and its accepted but unmerged promotion. It prohibits every artifact
+build and static/resource/hermetic/install/browser repeat. Only retained byte-
+identity disposition and the delivery checks that never ran may proceed after
+Astra LOW scope and evidence PASS. #621/#628 are the two active slots; #621's
+frozen source and open state are unchanged.
+
+### 2026-09-08 — #630 owns the remaining delivery checks
+
+#628 exhausted all three attempts before any delivery check ran and is closed as
+superseded without a delivery claim at hard-stop record `feb8063e`. Its accepted
+retained-byte disposition, one successful SDK dependency install and every
+failure remain preserved. Successor #630 is open at clean pushed brief
+`e1a24bc0`, owning only one canonical execution lease, read-only installed-state/
+output preflight and the six never-run checks. It forbids install, artifact/
+static/resource/hermetic/browser repetition and product edits. #621/#630 are the
+two active slots; #621's accepted source remains frozen and unchanged.

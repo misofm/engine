@@ -428,3 +428,13 @@ or rescope is authorized within this workflow. The existing promotion must not
 open a PR or merge, and no further promotion is authorized. #621 and #627 remain
 open; retain their branch and worktrees as blocked evidence pending an owner
 decision outside this exhausted workflow.
+
+## Superseded by #628
+
+GitHub #627 is closed as superseded, without a delivery claim. New bounded issue
+#628 inherits the preserved branch head `6e90818e`, the accepted but unmerged
+three-file promotion, the valid first qualification and post-pin six-file
+identity, and every failed-attempt record. It forbids all artifact, static,
+resource, hermetic, install, and browser repeats. Its independent workflow may
+only prove the retained byte-identity chain and execute the delivery checks that
+never ran before required PR CI. #621 remains open.
