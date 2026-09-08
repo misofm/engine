@@ -212,3 +212,17 @@ evidence PASS is separately required before the existing candidate can authorize
 the original exact three-file repository promotion. This rescope preserves the
 failed exactly-one gate as history; it does not claim attempt 1 passed or hide the
 concurrent invocation.
+
+## Astra LOW attempt 2 disposition-scope review — PASS
+
+Astra LOW passed the no-execution disposition scope at exact clean pushed head
+`2b9d3abed51b77f40202bc719ecc2c0659c2948a`. Attempt 1 remains failed and
+promotion remains blocked. Luna HIGH may revise only documentation/evidence to
+establish the first sequence's independently recorded chronology and output
+ownership and segregate the later duplicate builder as non-credit. Every raw
+record must remain, and the revision must distinguish recorded facts from
+chronology that the retained evidence cannot prove.
+
+No build, gate, install, browser, output generation, pin, lineage, or promotion
+execution is authorized. A separate Astra LOW attempt-2 evidence-disposition
+PASS remains required before promotion can be considered.
