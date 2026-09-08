@@ -69,3 +69,30 @@ Lane-B issue #623 and #621 currently fill the two active slots; #622 is passive.
 PR #624 merged as `7af655071f528f5cfcfbec3fa6de3a306d79a30a` with exact parents `cf9e079c` and reviewed #623 head `516a42e6`; post-main qualification run `34222236748` succeeded and #622/#623 are closed. #621 integrated that main without conflict at clean pushed head `34773b573a924a7fea28ed8a153fa4ef01b4870b`. Astra LOW verified its parents are prior #621 PASS head `ac1c81a3` and live main `7af65507`, each parent's files remain byte-identical, the current pin/lineage comes solely from #623, all #621 manifests still verify, branch-wide diff hygiene passes, and the frozen limiter source hash remains `32ab4abf…`.
 
 Tracker `80f6e715` records the owner's durable-evidence ruling: full compiler `.ll` captures do not belong on the default branch. Before an artifact successor or PR, #621 must remove full raw IR and redundant full assembly while retaining the exact command/toolchain/source identities, raw hashes and minimal relevant derived excerpts with accurate provenance. This compaction needs no build or gate rerun and requires Astra LOW review. Only after that PASS may root brief the separately numbered lane-B artifact successor in the freed second slot; no artifact probe or qualification is authorized before its scope PASS.
+
+### 2026-09-08 — Astra LOW durable-compaction PASS; historical IR dependency released
+
+Astra LOW passed exact clean pushed checkpoint
+`3d1e92678f4999dff6834d800dc006ef785b6287`. The compaction changes only
+`artifacts/issue621-current-lowering/**` and
+`artifacts/issue621-attempt1-evidence/**`. It retires 35 baseline and 34
+candidate full/raw compiler files, while preserving their original paths, byte
+counts and SHA-256 identities. All 27 focused line-addressed excerpt sections
+independently reconstruct from parent-history Git blobs or archive members and
+match their recorded source and raw-excerpt hashes. The two remaining baseline
+archive members are failed auxiliary stderr streams; the six candidate members
+are test stdout streams. All eight match prior bytes and use deterministic
+archive order, ownership and timestamps.
+
+The updated manifests, checksum files, provenance and READMEs verify;
+branch-wide diff hygiene passes; no `.ll`, `.s`, target/dependency or secret
+payload remains in the two evidence trees; and the accepted limiter source is
+still frozen at SHA-256
+`32ab4abf975b32d47c85a748e617e74c9547b22e1b585f0d36713be439a62908`.
+This preserves the prior reviewed bounds-removal finding under tracker ruling
+`80f6e715`. #621 has finished reading historical #539 compiler evidence and
+explicitly releases that dependency, so lane B may begin the already scoped
+#625 cleanup. Because #621/#625 now occupy both active issue slots, #621's
+separately numbered AudioWorklet artifact successor waits until #625 delivers
+and releases lane B. No artifact probe, build or qualification is authorized
+before that successor receives Astra LOW scope PASS.
