@@ -107,3 +107,16 @@ sole repaired candidate static invocation occurs afterward and is distinct from 
 now records #617 stopped/#619 active; #559 receives the same handoff in its next tracker checkpoint.
 No builder, static gate, browser, implementation or pin/lineage edit ran. Corrected Astra LOW scope
 review is pending.
+
+## Corrected Astra LOW scope review — PASS
+
+Astra LOW returned **PASS** at exact clean pushed head
+`f712caef0b6da4310a86b1bad1aab4bab3588acb`, main `77368243`, tracker `b33a5692`. Both trackers
+record #617 stopped, #539 passive and #619 active. Preserved candidate/evidence hashes and branch-
+wide diff hygiene pass.
+
+Luna XHIGH may implement only the bounded entry/kernel direct-call roster rule and synthetic
+controls, including zero counted arithmetic in the forwarding entry and the independent scalar-
+wrapper negative. Existing budgets and all other roster behavior remain frozen. Before source PASS,
+only checker self-tests, Python compile and proportional hygiene/policy checks may run. The
+preserved candidate, static gate, builder and browsers remain untouched.
