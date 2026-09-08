@@ -90,3 +90,35 @@ must checkpoint and push it immediately. Astra LOW then performs a no-rerun
 adversarial review and decides whether the unchanged-input proof is sufficient
 for delivery. No PR, merge, issue closure, or further command is authorized
 before that review.
+
+## Astra LOW attempt 2 evidence review — PASS
+
+Astra LOW passed exact clean pushed disposition head
+`2374536847b48d26bbed8e5e2522ce9ad3648917` against live main `30680709`.
+Both manifests verify. Git objects prove that reviewed head `6b59637a` and
+execution head `4c729144` differ only in this issue spec; product, dependency,
+script, promotion, resource and preserved-output identities are unchanged.
+
+Attempt 1 remains procedural **FAIL** because execution used a documentation-
+only child of the lease-authorized head. Attempt 2 accepts the retained results
+for delivery applicability through independently verified unchanged inputs; it
+neither relabels attempt 1 nor authorizes reruns.
+
+No further issue-command execution is needed. After this synchronized decision
+record, Astra LOW performs one no-rerun exact-head/current-main review. PR
+creation remains blocked until that PASS.
+
+## Attempt 2 evidence disposition — PASS
+
+Astra LOW passed the no-rerun disposition at exact clean pushed head
+`2374536847b48d26bbed8e5e2522ce9ad3648917` against main `30680709`. The
+two-entry disposition manifest and all 46 preserved attempt-1 manifest entries
+verify. Git objects prove that only this #630 issue spec changed between the
+reviewed lease head and the execution head; the accepted source, promotion and
+six-file output identities therefore remain applicable to the retained zero-
+status results. Attempt 1 remains a procedural FAIL, and its recorded invocation
+counts are retained-record claims rather than independent process telemetry.
+
+The evidence disposition is complete. No workload rerun is permitted. Root may
+align documentation and coordination records, then Astra LOW must review the
+exact clean pushed documentation head against live main before a PR is opened.
