@@ -160,3 +160,17 @@ The command, status, complete compiler stderr, file census, hashes and exact man
 are preserved in `artifacts/issue608-attempt1/`. No repin/bypass environment, retry, second build,
 browser run, pin change or generated-consumer change occurred. Astra LOW artifact review is pending;
 the probe alone does not authorize PR or delivery.
+
+## Astra LOW artifact identity review
+
+Astra LOW returned **PASS** at exact clean evidence head/upstream
+`ed1090d02d5d2fc2fec594cb93ed374074f5c57e`, main/merge-base `6fe8676e`, and tracker
+`97088f2c285db1aa110acebee137c318484ec2f3`. The reviewer verified all ten evidence checksums, both
+zero status records, complete compiler stderr, the six-file census and hashes, empty comparison
+diff, unchanged repository source copies, and unchanged pin. The evidence records exactly one
+ordinary no-bypass builder invocation at `6366c304`; no repeat or repin-mode invocation occurred.
+
+All six files match delivered #587 byte-for-byte. Its static/resource/SDK/browser qualification
+applies with original candidate `ab3766caef34bcb035d7394224b0ccff1ea0be2d` and browser attribution
+unchanged; this issue claims no new browser run. No pin or generated-consumer change is authorized.
+Root may proceed to final exact-head/current-base PR-readiness review.
