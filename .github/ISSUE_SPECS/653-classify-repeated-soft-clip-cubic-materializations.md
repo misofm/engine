@@ -145,3 +145,17 @@ corrects only that provenance distinction. The original identity evidence stays
 unchanged, no check reruns, and the bounded matrix/excerpts/verdict edits above
 remain the only executable work after a fresh Astra LOW PASS. Any failure exhausts
 #653; no fourth attempt.
+
+## Astra LOW final-attempt scope verdict
+
+Astra LOW returned **PASS** at exact clean pushed final brief
+`73dd0e882eb85fddaf88293e1fa14b485e2a9016`, live main
+`4acfa4a1c25248e47bdd6bc14e34c9cb6ac43447` and synchronized tracker
+`ef0032871cfceedc0b34a8071a5aa21daef210a8`. Execution at `67d243d8` and
+evidence checkpoint `d95f6323` are correctly distinguished; the original identity
+record is unchanged.
+
+Nash alone may make the bounded matrix/excerpts/verdict corrections: exact Wasm
+scalar clamp sites and stack support, count-one classification, loop-entry versus
+per-iteration labels, and folded-operand bits/sites. No rerun, compiler, source,
+timing, payload or artifact work is authorized. Any failure exhausts #653.
