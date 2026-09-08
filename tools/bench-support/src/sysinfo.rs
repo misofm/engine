@@ -107,6 +107,14 @@ pub fn physical_core_count() -> String {
         .map_or_else(|| "unknown".to_owned(), |text| count_cores(&text))
 }
 
+/// Return the first CPU model suffix using the exact `/proc/cpuinfo` prefix.
+#[must_use]
+pub fn parse_cpu_model(cpuinfo: Option<&str>) -> Option<String> {
+    cpuinfo?
+        .lines()
+        .find_map(|line| line.strip_prefix("model name\t: ").map(str::to_owned))
+}
+
 /// Run one explicitly supplied metadata command and return its trimmed UTF-8 stdout.
 ///
 /// Successful empty or whitespace-only stdout is returned as `Some("")`; spawn failure,
@@ -221,8 +229,8 @@ impl SourceValue {
 #[cfg(test)]
 mod tests {
     use super::{
-        HostToolchainFacts, SourceValue, Sources, command_output, count_cores, physical_core_count,
-        source_variable,
+        HostToolchainFacts, SourceValue, Sources, command_output, count_cores, parse_cpu_model,
+        physical_core_count, source_variable,
     };
     use std::collections::BTreeMap;
 
@@ -417,6 +425,30 @@ mod tests {
         let facts = HostToolchainFacts::from_sources(sources);
         assert_eq!(facts.raw_cpuinfo, None);
         assert_eq!(facts.governor_or_power_mode, "fallback");
+    }
+
+    #[test]
+    fn cpu_model_parser_preserves_exact_first_suffix() {
+        assert_eq!(parse_cpu_model(None), None);
+        assert_eq!(parse_cpu_model(Some("")), None);
+        assert_eq!(parse_cpu_model(Some("model name : wrong spacing")), None);
+        assert_eq!(
+            parse_cpu_model(Some("model name : wrong spacing\nmodel name\t: exact")),
+            Some("exact".to_owned())
+        );
+        assert_eq!(
+            parse_cpu_model(Some("model name\t: first\nmodel name\t: second")),
+            Some("first".to_owned())
+        );
+        assert_eq!(parse_cpu_model(Some("model name\t: ")), Some(String::new()));
+        assert_eq!(
+            parse_cpu_model(Some("model name\t: trailing  \n")),
+            Some("trailing  ".to_owned())
+        );
+        assert_eq!(
+            parse_cpu_model(Some("model name\t: CPU µ音")),
+            Some("CPU µ音".to_owned())
+        );
     }
 
     #[test]

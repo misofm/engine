@@ -2,7 +2,7 @@
 
 use bench_support::json::{escape, json_string_array};
 use bench_support::stats::per_mille as percentile_nearest_rank;
-use bench_support::sysinfo::HostToolchainFacts;
+use bench_support::sysinfo::{HostToolchainFacts, parse_cpu_model};
 use std::{
     env,
     hint::black_box,
@@ -219,14 +219,8 @@ impl Metadata {
         workspace_dirty: String,
         timestamp_epoch_seconds: u64,
     ) -> Self {
-        let cpu_model = facts
-            .raw_cpuinfo
-            .as_deref()
-            .and_then(|text| {
-                text.lines()
-                    .find_map(|line| line.strip_prefix("model name\t: ").map(str::to_owned))
-            })
-            .unwrap_or_else(|| "unknown".to_owned());
+        let cpu_model =
+            parse_cpu_model(facts.raw_cpuinfo.as_deref()).unwrap_or_else(|| "unknown".to_owned());
         let HostToolchainFacts {
             physical_cores,
             logical_cores,
