@@ -50,3 +50,20 @@ After source PASS, amend this spec with Astra-reviewed exact measurement command
 Run each release variant once with one internal warmup and two measured rounds; preserve full temporary streams only through review. PASS requires status 0, exact population, exact two-round determinism, cross-variant graph and diagnostic identity, equality of all four `zero64` counters, fewer candidate allocation calls and requested bytes in both prepared corpora, positive crossed-small savings, and more saved allocation calls in `banks64` than crossed-small. Report exact counts and deltas only. Commit no `.ll`, assembly, compiler stream, target directory, object, archive, binary, or raw measurement output.
 
 Astra LOW must pass measurement evidence and the compact decision record before PR review, required CI, guarded merge, post-main qualification, GitHub synchronization, closure, and clean worktree removal. This successor can close only the allocation qualification for #648's prepared-effect handoff; CP1's schedule, PDC, cycle, reduction, and buffer identities remain open.
+
+## Astra LOW implementation-scope review — PASS
+
+Astra passed exact clean branch/upstream head
+`641a6dc57077e3cd7df1ea1241e353727ef8db47`, live main
+`4acfa4a1c25248e47bdd6bc14e34c9cb6ac43447`, inherited failed source
+`819c6ef6`, and synchronized tracker `996d24e0`. GitHub #652 matches this issue;
+#650 is closed, and #651/#652 are the two disjoint active slots.
+
+One root-designated Luna HIGH or XHIGH executor may perform implementation attempt
+1 in `prepared_effect_allocations.rs`, the dispatcher only if necessary, and the
+strict validator. Structural tests must prove actual prepared program identities
+and bank membership rather than labels or counts. The executor runs the listed
+gates once with fresh retained command/status evidence and stops on the first
+failure without correction or rerun. Root checkpoints and pushes before a fresh
+Astra source review. No official count, counterfactual, production, allocator,
+dependency, timing, or compiler-payload action is authorized.
