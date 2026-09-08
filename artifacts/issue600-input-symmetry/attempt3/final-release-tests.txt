@@ -1,0 +1,11 @@
+   Compiling bench v0.1.0 (/home/bl/misofm/engine-rt5-input-symmetry/tools/bench)
+    Finished `release` profile [optimized + debuginfo] target(s) in 37.02s
+     Running unittests src/main.rs (target/release/deps/bench-9f3c9e46c5ddd398)
+
+running 4 tests
+test input_symmetry::tests::separate_capacity_sixteen_drain_witness_has_no_pending_records ... ok
+test input_symmetry::tests::connected_runtime_oracle_covers_retargeted_both_channel_ramp ... ok
+test input_symmetry::tests::qualification_phase_constants_and_zero_render_allocations ... ok
+test input_symmetry::tests::owners_are_w8_nonzero_and_phase_results_match ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 44 filtered out; finished in 0.09s

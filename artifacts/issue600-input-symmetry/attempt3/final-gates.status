@@ -1,0 +1,13 @@
+cargo test --locked -p bench input_symmetry -- --nocapture: 0
+cargo test --locked --release -p bench input_symmetry -- --nocapture: 0
+cargo run --locked -p bench -- input-symmetry: 0
+cargo run --locked --release -p bench -- input-symmetry: 0
+cargo clippy --locked -p bench --all-targets --all-features -- -D warnings: 0
+cargo doc --locked -p bench --no-deps: 0
+cargo fmt --all -- --check: 0
+git diff --check: 0
+scripts/check-workspace-policy.sh: 0
+scripts/check-realtime-policy.sh: 0
+scripts/check-builtins-policy.sh: 0
+scripts/check-graph-policy.sh: 0
+scripts/check-lane-policy.sh: 0

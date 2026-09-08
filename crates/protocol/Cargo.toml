@@ -17,5 +17,8 @@ test-support = []
 engine.workspace = true
 session.workspace = true
 
+[dev-dependencies]
+conformance.workspace = true
+
 [lints]
 workspace = true

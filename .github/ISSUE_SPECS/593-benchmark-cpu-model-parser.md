@@ -1,0 +1,69 @@
+# Share exact-prefix benchmark CPU-model parsing
+
+Status: proposed numbered TOOL9 child of audit #349 and lane-B handoff #560, based on delivered main `566810a9f249f26d96edc4d65b22bd9b7c649976` after #590 / PR #591 and successful post-main qualification `34171818628`. This advances an original partial finding, not an original open finding. Sol HIGH coordinates and owns checkpoints, GitHub synchronization and delivery. Luna HIGH implements. Astra LOW performs every scope, source and exact-head/current-base verification. No audio, browser or artifact qualification is indicated.
+
+## Smallest closable outcome
+
+Move the identical pure `/proc/cpuinfo` model-line parser used by conformance and protocol benchmarks into `bench_support::sysinfo`. Migrate only those two production callers. Preserve the exact prefix `"model name\t: "`, first-match selection and suffix bytes, including an empty suffix, trailing whitespace and Unicode. Unavailable input or no exact-prefix match remains exactly `"unknown"` in each caller.
+
+Preserve acquisition: protocol continues to read only its current CPU source and must not call `HostToolchainFacts::gather()` or acquire unrelated facts. Session's trimmed colon-based parser and graph's shell extraction are intentionally distinct and excluded. This removes one concrete parsing-law duplicate; TOOL9 still requires a closure audit afterward.
+
+## Exact ownership
+
+Allowed implementation paths are:
+
+- `tools/bench-support/src/sysinfo.rs`
+- `tools/bench/src/conformance.rs`
+- `tools/bench/src/protocol.rs`
+- this numbered spec and bounded issue evidence
+
+Exclude acquisition changes, every other consumer/parser/metadata policy, schemas, JSON, statistics, numeric parsing, timing/workloads/corpora, manifests/lockfiles, policies/workflows, runtime/host/DSP/session/control code, SDK/browser code, generated artifacts and pins. Active lane-A #587 / PR #592 owns its documented host-core source and AudioWorklet qualification paths; there is no overlap.
+
+## Objective gates
+
+1. The shared pure parser covers unavailable and empty input; unmatched or differently spaced prefixes; an exact match; first of multiple matches; empty suffix; and retained trailing whitespace and Unicode.
+2. Conformance and protocol production callers both use the shared parser and their duplicate parser bodies disappear. Protocol acquisition remains local and unchanged; conformance retains its existing `HostToolchainFacts` acquisition.
+3. Existing conformance and protocol record oracles pass unchanged, proving no schema, sentinel or field drift.
+4. Focused bench-support/conformance/protocol tests pass in debug and release; complete affected bench debug and proportional release tests pass. Strict affected Clippy/rustdoc, formatting/diff, workspace policy, bench policy and its mutation suite pass. Preserve the unrelated release allocator disposition. No timed benchmark, browser or artifact run receives credit.
+
+## Stop and split triggers
+
+Stop before normalizing broader CPU formats, changing acquisition, migrating another consumer, changing a schema/sentinel, introducing a generic parser framework, or touching a manifest/lock, policy/workflow, workload/timing, runtime/audio/browser/artifact path. Preserve the checkpoint and brief a separate successor if the exact duplicate cannot be removed within the three source files.
+
+One Luna HIGH attempt receives one Astra LOW adversarial verdict and pauses at the first coherent focused-green tranche for root checkpointing. After three failed attempts, preserve evidence and rebrief without weakening gates. Historical #543/#555 → #558/#552 and #542 → #567 delivery order and verdict provenance remain unchanged.
+
+## Preliminary residual audit
+
+Astra LOW reviewed current main `566810a9f249f26d96edc4d65b22bd9b7c649976`. Conformance and protocol both select the first line beginning with exact prefix `"model name\t: "`, preserve its suffix verbatim, and project unavailable/unmatched input to `"unknown"`. Percentile algorithms, six-field summaries, command acquisition, environment fallback and JSON string-array assembly already use delivered shared authorities. Rack ASCII validation, builtins control-character rejection, interchange failure policy and schema-specific field assembly remain intentional differences.
+
+TOOL11 and IO5 require broader contracts. #587 / PR #592 and its source/artifact worktrees are active but disjoint. Astra LOW is sufficient for all review. Activation requires exact local/GitHub numbered identity, a pushed clean brief, current-base and ownership checks, and Astra LOW scope PASS.
+
+## Numbered current-base scope review
+
+Astra LOW returned **PASS** for exact brief and upstream `d1171ba7c8badc18ab2904a34915530cb30412e2`, with current main and merge-base `566810a9f249f26d96edc4d65b22bd9b7c649976`. The clean tree's sole delta is this spec, diff checks pass, GitHub #593 has exact open identity, and base qualification `34171818628` succeeded. #560 activation and #559/#587/PR #592 ownership are disjoint.
+
+The parser is a concrete duplicate. Three-file ownership and the exact-prefix, first-match, suffix and unchanged-record gates preserve behavior and existing acquisition; session and graph remain excluded. No correction is required; Astra LOW is sufficient. Luna HIGH attempt 1 may begin from this exact brief/base and must pause at its first focused-green checkpoint. No audio, browser, artifact or timed benchmark work is authorized.
+
+## Attempt 1 implementation checkpoint
+
+Luna HIGH delivered source checkpoint `48985bf87e78df010172496ab68e53cdd86b41be`, changing exactly the three authorized tooling files. `bench_support::sysinfo::parse_cpu_model` owns the pure exact-prefix parser; conformance delegates its existing `HostToolchainFacts::raw_cpuinfo`, while protocol still performs only its local `/proc/cpuinfo` read before delegating. Tests cover unavailable and empty input, mismatched spacing, exact and first-of-multiple matches, empty suffix, retained trailing whitespace and Unicode.
+
+Focused bench-support debug/release tests pass 1 test each, affected conformance/protocol debug/release tests pass 5 tests each, and complete bench debug passes 43 tests. Strict affected Clippy/rustdoc, formatting/diff, workspace policy, bench policy and mutation gates pass. A transient lockfile reorder was restored; only the three authorized paths remain in the source diff. Existing record oracles remain unchanged. No timed benchmark, browser or artifact work ran. Astra LOW attempt-1 adversarial source review remains pending.
+
+## Attempt 1 source verdict
+
+Astra LOW returned **PASS** at exact pushed review head and upstream `f0fa7795aa2f4622af13e0e07f12e3b73ead0c7a`, source `48985bf87e78df010172496ab68e53cdd86b41be`, and merge-base `566810a9f249f26d96edc4d65b22bd9b7c649976`. Parser tests cover every required match and suffix case; both callers preserve acquisition and fallback behavior, and record oracles remain unchanged. Independent debug bench-support/bench tests pass 45 and 43 tests, release sysinfo/conformance/protocol tests pass 13, 4 and 5 tests, and strict Clippy/rustdoc, formatting/diff, workspace policy, bench policy and mutation gates pass.
+
+Current main advanced disjointly through #587 / PR #592 to `e16cea23e05a69c00f9d2826670c95514b4c259d`; #587 is closed and its delta does not touch bench or bench-support. No source correction is needed and Astra LOW is sufficient. Current-main integration and final exact-head review remain required before PR authorization; no artifact work is indicated.
+
+## Integrated current-base qualification
+
+Root merged current `origin/main` `e16cea23e05a69c00f9d2826670c95514b4c259d` without conflict, producing pushed integration head `f8dc0126810a535bc62fb52be126951d3f1ffb76` with that exact merge-base. The #587 delivery changes only its documented host, browser and artifact paths and remains disjoint from the three-file TOOL9 source change.
+
+On the integrated head, the complete bench debug suite passes 43 tests; the focused release sysinfo, conformance and protocol suites pass 13, 4 and 5 tests. Strict affected Clippy and rustdoc, formatting and diff checks, workspace policy, bench policy and its mutation suite all pass. Cargo's dependency-order rewrite was restored, leaving the tree clean and the lockfile unchanged. No timed benchmark, browser, audio or artifact qualification ran. Astra LOW final exact-head/current-base review remains required before PR authorization.
+
+## Final exact-head/current-base verdict
+
+Astra LOW returned **PASS** at exact pushed head and upstream `8801ff3d3f8da7b5a8c050588a04dc2f4c2d7bf9`, with current remote main and merge-base `e16cea23e05a69c00f9d2826670c95514b4c259d`. The accepted source remains `48985bf87e78df010172496ab68e53cdd86b41be`; only the three authorized tooling files and this spec differ from main. Parser semantics, caller-local acquisition and record oracles remain preserved, the worktree is clean, and GitHub #593 has exact open title/body identity.
+
+Independent debug bench-support/bench tests pass 45 and 43 tests; focused release sysinfo/conformance/protocol tests pass 13, 4 and 5 tests; and strict Clippy/rustdoc, formatting/diff, workspace policy, bench policy and mutation gates pass. Astra LOW is sufficient. No artifact, audio or browser qualification is indicated. Root may open the PR after binding this verdict-only continuation to its exact pushed head.

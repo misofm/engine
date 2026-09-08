@@ -1,0 +1,15 @@
+capture_utc=2026-09-07T15:06:49Z
+cwd=/home/bl/misofm/engine-protocol-conformance-boundary
+head=f9c279075d22fb66640df4d7cb669f7e82c62f47
+status_begin
+?? artifacts/issue542-final-qualification/
+status_end
+source_hashes_begin
+92db9698cc062bd5ccc0a90f0ee43f051d77ce7e52f785ce9718fae3f400b753  Cargo.lock
+9f8dda584f89803a1e67856d6f2b7f2e2eb338a136186e28c99545c389cf2b10  crates/protocol/src/lib.rs
+b3d406ed2df9497604498b4980510ecbb4baca2dd9c7e488b96f52834242962c  crates/conformance/src/main.rs
+3ccb339c5e9f119966a13234c0c79383907998c568166f414821a0738891489e  crates/conformance/src/protocol_corpus.rs
+f60c4bee8d1124498b3c67d3a93da40235e47709c1daa3131d27b33bbba66b97  scripts/check-protocol-wasm-parity.sh
+source_hashes_end
+command=scalar=/tmp/issue542-final-target/issue005-wasm-scalar/wasm32-unknown-unknown/release/conformance.wasm; simd=/tmp/issue542-final-target/issue005-wasm-simd128/wasm32-unknown-unknown/release/conformance.wasm; test -f "$scalar"; test -f "$simd"; sha256sum "$scalar" "$simd"; stat -c "size=%s path=%n" "$scalar" "$simd"; wasm-objdump -x "$scalar" | rg -- "-> \\\"main\\\""; wasm-objdump -x "$simd" | rg -- "-> \\\"main\\\""; scalar_result=$(wasm-interp "$scalar" -r main -a i32:0 -a i32:0); simd_result=$(wasm-interp "$simd" -r main -a i32:0 -a i32:0); printf "scalar_interpreter=%s\\nsimd128_interpreter=%s\\n" "$scalar_result" "$simd_result"; [[ "$scalar_result" == *"=> i32:0" ]]; [[ "$simd_result" == *"=> i32:0" ]]
+exit=0

@@ -333,12 +333,11 @@ fn benchmark() {
 }
 
 fn metadata(name: &str) -> String {
-    bench_support::metadata::Metadata::gather()
-        .var(name)
-        .ok()
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| "unknown".to_owned())
-        .replace('"', "'")
+    project_metadata(bench_support::metadata::Metadata::gather().nonempty_or_unknown(name))
+}
+
+fn project_metadata(value: String) -> String {
+    value.replace('"', "'")
 }
 
 pub(crate) fn main() {
@@ -362,5 +361,18 @@ pub(crate) fn main() {
             );
             std::process::exit(2);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::project_metadata;
+
+    #[test]
+    fn metadata_projection_replaces_quotes_without_changing_other_bytes() {
+        assert_eq!(
+            project_metadata(" \tµ\"quoted\"  \n".to_owned()),
+            " \tµ'quoted'  \n"
+        );
     }
 }

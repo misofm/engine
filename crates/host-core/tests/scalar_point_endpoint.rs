@@ -14,19 +14,20 @@ use host_core::{
     ScalarPointCancelBoundaryError, ScalarPointFault, ScalarPointFaultCause,
     ScalarPointFaultProgress, ScalarPointNativeOperation, ScalarPointRenderError,
     SessionControlProvider, prepare_controller_scalar_point_endpoint,
-    prepare_scalar_point_endpoint,
+    prepare_scalar_point_endpoint, publish_controller_scalar_point_snapshot,
 };
 use protocol::{
-    AutomationBatchError, AutomationBatchSlot, AutomationCancellationReason,
-    AutomationEnqueueError, AutomationKind, AutomationRecord, ControlCommand, ControlProvider,
-    ControllerAutomationDelivery, ControllerRequest, ControllerRetainedCapacity, CounterId,
-    CountersRequest, DecodeScratch, DecodedEventPayload, DecodedSuccessResponsePayload,
-    DecodedTypedEventFrame, DecodedTypedResponseFrame, DeliveryError, ExpectedRevision,
-    HandoffResult, ParameterChannel as ProtocolParameterChannel, ParameterHandle,
-    ParameterMetadataRequest, ParameterStateRequest, PreparedAutomationDelivery,
+    AutomationBatchError, AutomationBatchSlot, AutomationCancellationReason, AutomationEnqueue,
+    AutomationEnqueueError, AutomationKind, AutomationRecord, CommandPayload, ControlCommand,
+    ControlProvider, ControllerAutomationDelivery, ControllerAutomationPrepareError,
+    ControllerRequest, ControllerRetainedCapacity, CounterId, CountersRequest, DecodeScratch,
+    DecodedEventPayload, DecodedSuccessResponsePayload, DecodedTypedEventFrame,
+    DecodedTypedResponseFrame, DeliveryError, ExpectedRevision, HandoffResult,
+    ParameterChannel as ProtocolParameterChannel, ParameterHandle, ParameterMetadataRequest,
+    ParameterStatePage, ParameterStateRequest, PreparedAutomationDelivery,
     PreparedDeliveryCapabilities, ProtocolCodec, ProtocolControllerConfig, ProtocolQueueConfig,
     ProviderFeatures, ReliablePayload, ReplayCacheConfig, RequestId, SampleTime, SessionRevision,
-    StatusCode,
+    StatusCode, TypedCommandFrame,
 };
 use std::sync::{
     Arc,
@@ -52,6 +53,7 @@ fn config() -> ProtocolQueueConfig {
 #[derive(Clone, Copy, Debug)]
 struct PreparationAllocationDiagnostic {
     global: bench_support::alloc::Counters,
+    current_thread: bench_support::alloc::Counters,
     thread_audit: engine::realtime::audit::AuditSnapshot,
 }
 
@@ -62,6 +64,7 @@ fn measure_preparation<T>(prepare: impl FnOnce() -> T) -> (T, PreparationAllocat
     audit::warm_up();
     audit::reset();
     let global_mark = bench_alloc::counters();
+    let current_thread_mark = bench_alloc::current_thread_counters();
     let (value, thread_audit) = audit::in_render_scope(|| {
         let value = prepare();
         (value, audit::snapshot())
@@ -70,12 +73,14 @@ fn measure_preparation<T>(prepare: impl FnOnce() -> T) -> (T, PreparationAllocat
         value,
         PreparationAllocationDiagnostic {
             global: bench_alloc::delta_since(global_mark),
+            current_thread: bench_alloc::current_thread_delta_since(current_thread_mark),
             thread_audit,
         },
     )
 }
 
 fn foreign_thread_allocation_probe() -> (
+    bench_support::alloc::Counters,
     bench_support::alloc::Counters,
     engine::realtime::audit::AuditSnapshot,
 ) {
@@ -105,14 +110,23 @@ fn foreign_thread_allocation_probe() -> (
     audit::warm_up();
     audit::reset();
     let global_mark = bench_alloc::counters();
+    let current_thread_mark = bench_alloc::current_thread_counters();
     let thread_audit = audit::in_render_scope(|| {
         start.wait();
         finished.wait();
         audit::snapshot()
     });
     let global = bench_alloc::delta_since(global_mark);
+    let current_thread = bench_alloc::current_thread_delta_since(current_thread_mark);
     worker.join().expect("foreign allocation probe worker");
-    (global, thread_audit)
+    (global, current_thread, thread_audit)
+}
+
+fn assert_global_dominates_current_thread(diagnostic: PreparationAllocationDiagnostic) {
+    assert!(diagnostic.global.allocations >= diagnostic.current_thread.allocations);
+    assert!(diagnostic.global.deallocations >= diagnostic.current_thread.deallocations);
+    assert!(diagnostic.global.reallocations >= diagnostic.current_thread.reallocations);
+    assert!(diagnostic.global.requested_bytes >= diagnostic.current_thread.requested_bytes);
 }
 
 const REAL_SESSION: &str =
@@ -237,26 +251,11 @@ fn real_controller_fixture() -> RealControllerFixture {
     }
 }
 
-fn controller_enqueue<'a>(
+fn encoded_controller_enqueue(
     revision: SessionRevision,
     request_id: u64,
-    canonical_bytes: &'a [u8],
-    batch: AutomationBatchSlot,
-) -> ControllerRequest<'a> {
-    ControllerRequest {
-        request_id: RequestId::new(request_id).unwrap(),
-        expected_revision: ExpectedRevision::Exact(revision),
-        canonical_bytes,
-        command: ControlCommand::AutomationEnqueue { batch },
-    }
-}
-
-fn real_batch(
-    revision: SessionRevision,
-    request_id: u64,
-    handles: [ParameterHandle; 2],
     records: &[(ParameterHandle, u64, f32)],
-) -> AutomationBatchSlot {
+) -> Vec<u8> {
     let records: Vec<_> = records
         .iter()
         .map(|&(handle, sample, value)| AutomationRecord {
@@ -268,12 +267,107 @@ fn real_batch(
             end_value: value,
         })
         .collect();
-    assert!(
-        records
-            .iter()
-            .all(|record| handles.contains(&record.handle))
-    );
-    AutomationBatchSlot::new(revision, RequestId::new(request_id).unwrap(), &records).unwrap()
+    let codec = ProtocolCodec::default();
+    let mut bytes = vec![0_u8; 4_096];
+    let length = codec
+        .encode_command_frame_into(
+            &TypedCommandFrame {
+                request_id: RequestId::new(request_id).unwrap(),
+                expected_revision: ExpectedRevision::Exact(revision),
+                payload: CommandPayload::AutomationEnqueue(AutomationEnqueue { records: &records }),
+            },
+            &mut bytes,
+        )
+        .expect("encoded BTLV automation enqueue");
+    bytes.truncate(length);
+    bytes
+}
+
+fn encoded_state_get(revision: SessionRevision, request_id: u64, handles: &[u32]) -> Vec<u8> {
+    let request = ParameterStateRequest {
+        handles: handles.to_vec(),
+    };
+    let mut bytes = vec![0_u8; 4_096];
+    let length = ProtocolCodec::default()
+        .encode_command_frame_into(
+            &TypedCommandFrame {
+                request_id: RequestId::new(request_id).unwrap(),
+                expected_revision: ExpectedRevision::Exact(revision),
+                payload: CommandPayload::ParameterStateGet(&request),
+            },
+            &mut bytes,
+        )
+        .expect("encoded BTLV parameter state request");
+    bytes.truncate(length);
+    bytes
+}
+
+fn process_controller_frame<P: ControlProvider>(
+    controller: &mut ControllerAutomationDelivery<P>,
+    input: &[u8],
+) -> Vec<u8> {
+    let mut output = vec![0_u8; 2_048];
+    let written = controller
+        .process_command_frame_into(
+            input,
+            &mut DecodeScratch::new(&mut [0_u16; 64]),
+            &mut output,
+        )
+        .expect("complete caller-buffer command frame");
+    output.truncate(written);
+    output
+}
+
+#[derive(Clone, Copy)]
+enum ControllerIngress {
+    CallerBuffer,
+    B1b,
+}
+
+fn process_controller_ingress<P: ControlProvider>(
+    controller: &mut ControllerAutomationDelivery<P>,
+    input: &[u8],
+    ingress: ControllerIngress,
+) -> Vec<u8> {
+    match ingress {
+        ControllerIngress::CallerBuffer => process_controller_frame(controller, input),
+        ControllerIngress::B1b => {
+            controller
+                .process_b1b_btlv(input, &mut DecodeScratch::new(&mut [0_u16; 64]))
+                .expect("complete B1b command frame")
+                .frame
+        }
+    }
+}
+
+fn response_status(frame: &[u8]) -> StatusCode {
+    match ProtocolCodec::default()
+        .decode_typed_response(frame, &mut DecodeScratch::new(&mut [0_u16; 64]))
+        .expect("typed response frame")
+    {
+        DecodedTypedResponseFrame::Success { header, .. }
+        | DecodedTypedResponseFrame::NonOk { header, .. } => header.status,
+    }
+}
+
+fn decode_state_page(frame: &[u8]) -> ParameterStatePage {
+    match ProtocolCodec::default()
+        .decode_typed_response(frame, &mut DecodeScratch::new(&mut [0_u16; 64]))
+        .expect("typed state response")
+    {
+        DecodedTypedResponseFrame::Success {
+            payload: DecodedSuccessResponsePayload::ParameterState(page),
+            ..
+        } => page,
+        _ => panic!(
+            "expected successful parameter state response: {:?}",
+            response_status(frame)
+        ),
+    }
+}
+
+fn state_page_payload(frame: &[u8]) -> &[u8] {
+    &frame[protocol::OUTER_HEADER_BYTES..]
 }
 
 fn process_real(
@@ -1430,13 +1524,17 @@ fn preparation_resources_and_success_path_are_bounded() {
     warm(&mut *fx);
     let ((mut control, render, resources), endpoint_diagnostic) =
         measure_preparation(|| prepare_scalar_point_endpoint(&mut *fx, REV, H, cfg, 1).unwrap());
-    let (foreign_global, foreign_thread_audit) = foreign_thread_allocation_probe();
+    let (foreign_global, foreign_current_thread, foreign_thread_audit) =
+        foreign_thread_allocation_probe();
     eprintln!(
-        "scalar Point preparation diagnostics: direct global={direct_global:?} thread={direct_thread:?}; wrapped global={wrapped_global:?} thread={wrapped_thread:?}; foreign global={foreign_global:?} thread={foreign_thread_audit:?}",
+        "scalar Point preparation diagnostics: direct global={direct_global:?} current={direct_current:?} thread={direct_thread:?}; wrapped global={wrapped_global:?} current={wrapped_current:?} thread={wrapped_thread:?}; foreign global={foreign_global:?} current={foreign_current:?} thread={foreign_thread_audit:?}",
         direct_global = direct_diagnostic.global,
+        direct_current = direct_diagnostic.current_thread,
         direct_thread = direct_diagnostic.thread_audit,
         wrapped_global = endpoint_diagnostic.global,
+        wrapped_current = endpoint_diagnostic.current_thread,
         wrapped_thread = endpoint_diagnostic.thread_audit,
+        foreign_current = foreign_current_thread,
     );
     assert!(
         foreign_global.allocations > 0,
@@ -1455,17 +1553,18 @@ fn preparation_resources_and_success_path_are_bounded() {
         "foreign free moved measured-thread deallocation audit"
     );
     assert_eq!(
-        endpoint_diagnostic.global.allocations,
-        direct_diagnostic.global.allocations
+        foreign_current_thread,
+        bench_support::alloc::Counters::default(),
+        "foreign allocation moved measured-thread allocator counters"
     );
     assert_eq!(
-        endpoint_diagnostic.global.requested_bytes,
-        direct_diagnostic.global.requested_bytes
+        endpoint_diagnostic.current_thread,
+        direct_diagnostic.current_thread
     );
-    assert_eq!(direct_diagnostic.global.reallocations, 0);
-    assert_eq!(endpoint_diagnostic.global.reallocations, 0);
-    assert_eq!(direct_diagnostic.global.deallocations, 0);
-    assert_eq!(endpoint_diagnostic.global.deallocations, 0);
+    assert_eq!(direct_diagnostic.current_thread.reallocations, 0);
+    assert_eq!(direct_diagnostic.current_thread.deallocations, 0);
+    assert_global_dominates_current_thread(direct_diagnostic);
+    assert_global_dominates_current_thread(endpoint_diagnostic);
     assert_eq!(resources.delivery, expected_delivery);
     assert!(resources.delivery.retained_payload_bytes > 0);
     assert!(resources.delivery.largest_allocation_bytes > 0);
@@ -1604,6 +1703,14 @@ fn preparation_resources_and_success_path_are_bounded() {
 
 #[test]
 fn controller_points_drive_real_asymmetric_pcm_replay_and_clock_refusal() {
+    for ingress in [ControllerIngress::CallerBuffer, ControllerIngress::B1b] {
+        run_controller_points_drive_real_asymmetric_pcm_replay_and_clock_refusal(ingress);
+    }
+}
+
+fn run_controller_points_drive_real_asymmetric_pcm_replay_and_clock_refusal(
+    ingress: ControllerIngress,
+) {
     let mut fixture = real_controller_fixture();
     let revision = fixture.session.revision();
     let handles = fixture.handles;
@@ -1663,12 +1770,11 @@ fn controller_points_drive_real_asymmetric_pcm_replay_and_clock_refusal() {
     );
 
     let records = [(handles[0], 3, 6.0), (handles[1], 128, -6.0)];
-    let batch = real_batch(revision, 1, handles, &records);
-    let canonical = b"typed-enqueue-left-right";
-    let response = controller.process(controller_enqueue(revision, 1, canonical, batch));
-    assert_eq!(response.status, StatusCode::Ok);
+    let encoded = encoded_controller_enqueue(revision, 1, &records);
+    let response = process_controller_ingress(&mut controller, &encoded, ingress);
+    assert_eq!(response_status(&response), StatusCode::Ok);
     let decoded = ProtocolCodec::default()
-        .decode_typed_response(&response.frame, &mut DecodeScratch::new(&mut [0_u16; 64]))
+        .decode_typed_response(&response, &mut DecodeScratch::new(&mut [0_u16; 64]))
         .expect("decode typed enqueue response");
     assert!(matches!(
         decoded,
@@ -1677,13 +1783,45 @@ fn controller_points_drive_real_asymmetric_pcm_replay_and_clock_refusal() {
             ..
         } if accepted.accepted_records == 2
     ));
-    let replay = controller.process(controller_enqueue(
+    let replay = process_controller_ingress(&mut controller, &encoded, ingress);
+    assert_eq!(replay, response);
+    let changed = encoded_controller_enqueue(
         revision,
         1,
-        canonical,
-        real_batch(revision, 1, handles, &records),
+        &[(handles[0], 3, 5.0), (handles[1], 128, -6.0)],
+    );
+    assert_eq!(
+        response_status(&process_controller_ingress(
+            &mut controller,
+            &changed,
+            ingress,
+        )),
+        StatusCode::RequestIdReuse
+    );
+    assert_eq!(controller.outstanding(), 1);
+    let malformed_outer = encoded[..encoded.len() - 1].to_vec();
+    let mut outer_output = vec![0_u8; 2_048];
+    assert!(matches!(
+        controller.process_command_frame_into(
+            &malformed_outer,
+            &mut DecodeScratch::new(&mut [0_u16; 64]),
+            &mut outer_output,
+        ),
+        Err(protocol::CommandFrameProcessError::Uncorrelatable(
+            protocol::DecodeError::BadPayloadLength
+        ))
     ));
-    assert_eq!(replay, response);
+    let mut malformed_payload = encoded.clone();
+    malformed_payload[24..32].copy_from_slice(&99_u64.to_le_bytes());
+    malformed_payload[protocol::OUTER_HEADER_BYTES + 8] = 0;
+    assert_eq!(
+        response_status(&process_controller_frame(
+            &mut controller,
+            &malformed_payload
+        )),
+        StatusCode::MalformedFrame
+    );
+    assert_eq!(controller.outstanding(), 1);
     let ticket = match controller.try_handoff_next().unwrap() {
         HandoffResult::HandedOff(ticket) => ticket,
         other => panic!("expected Point handoff, got {other:?}"),
@@ -1825,30 +1963,561 @@ fn controller_points_drive_real_asymmetric_pcm_replay_and_clock_refusal() {
         .clock
         .0
         .store(snapshot.next_sample.0, Ordering::Release);
-    let past = controller.process(controller_enqueue(
-        revision,
-        2,
-        b"typed-past",
-        real_batch(revision, 2, handles, &[(handles[0], 200, 1.0)]),
-    ));
-    assert_eq!(past.status, StatusCode::TimeInPast);
+    let past = process_controller_ingress(
+        &mut controller,
+        &encoded_controller_enqueue(revision, 100, &[(handles[0], 200, 1.0)]),
+        ingress,
+    );
+    assert_eq!(response_status(&past), StatusCode::TimeInPast);
     assert_eq!(controller.outstanding(), 0);
-    let state = controller.process(ControllerRequest {
-        request_id: RequestId::new(3).unwrap(),
+    let delivery_before_publication = (
+        controller.outstanding(),
+        controller.resident_automation(),
+        controller.automation_status(),
+    );
+    let typed_unpublished = controller.process(ControllerRequest {
+        request_id: RequestId::new(108).unwrap(),
         expected_revision: ExpectedRevision::Exact(revision),
-        canonical_bytes: b"state-get",
+        canonical_bytes: b"typed-unpublished",
         command: ControlCommand::ParameterStateGet {
             request: ParameterStateRequest {
                 handles: vec![handles[0].0, handles[1].0],
             },
         },
     });
-    assert_eq!(state.status, StatusCode::Unavailable);
+    assert_eq!(typed_unpublished.status, StatusCode::Unavailable);
+    if matches!(ingress, ControllerIngress::CallerBuffer) {
+        let short_request = encoded_state_get(revision, 109, &[handles[0].0, handles[1].0]);
+        for capacity in [0, 2_047] {
+            let mut output = vec![0_u8; capacity];
+            assert!(matches!(
+                controller.process_command_frame_into(
+                    &short_request,
+                    &mut DecodeScratch::new(&mut [0_u16; 64]),
+                    &mut output,
+                ),
+                Err(protocol::CommandFrameProcessError::OutputReservationTooSmall { .. })
+            ));
+        }
+        let mut exact = vec![0_u8; 2_048];
+        let written = controller
+            .process_command_frame_into(
+                &short_request,
+                &mut DecodeScratch::new(&mut [0_u16; 64]),
+                &mut exact,
+            )
+            .unwrap();
+        assert_eq!(response_status(&exact[..written]), StatusCode::Unavailable);
+    }
+    let unpublished_request = encoded_state_get(revision, 110, &[handles[0].0, handles[1].0]);
+    let unpublished = process_controller_ingress(&mut controller, &unpublished_request, ingress);
+    assert_eq!(response_status(&unpublished), StatusCode::Unavailable);
+    let publication_allocations = bench_support::alloc::current_thread_counters();
+    publish_controller_scalar_point_snapshot(&mut controller, handles, &snapshot)
+        .expect("publish quiescent scalar snapshot");
+    let publication_delta =
+        bench_support::alloc::current_thread_delta_since(publication_allocations);
+    assert_eq!(publication_delta.allocations, 0);
+    assert_eq!(publication_delta.reallocations, 0);
+    let state_request = encoded_state_get(revision, 111, &[handles[0].0, handles[1].0]);
+    let state_frame = process_controller_ingress(&mut controller, &state_request, ingress);
+    let page = decode_state_page(&state_frame);
+    assert_eq!(page.observed_sample, snapshot.observed_sample.0);
+    assert_eq!(page.records.len(), 2);
+    assert_eq!(page.records[0].handle, handles[0].0);
+    assert_eq!(page.records[1].handle, handles[1].0);
+    assert_eq!(
+        page.records[0].value.to_bits(),
+        snapshot.state[0].current_value.to_bits()
+    );
+    assert_eq!(
+        page.records[1].value.to_bits(),
+        snapshot.state[1].current_value.to_bits()
+    );
+    assert_eq!(
+        page.records[0].flags,
+        1 | (u32::from(
+            snapshot.state[0].current_value.to_bits() != snapshot.state[0].target_value.to_bits(),
+        ) * 2)
+    );
+    assert_eq!(
+        page.records[1].flags,
+        1 | (u32::from(
+            snapshot.state[1].current_value.to_bits() != snapshot.state[1].target_value.to_bits(),
+        ) * 2)
+    );
+    let accepted_state_payload = state_page_payload(&state_frame).to_vec();
+    let left_frame = process_controller_ingress(
+        &mut controller,
+        &encoded_state_get(revision, 112, &[handles[0].0]),
+        ingress,
+    );
+    let left_page = decode_state_page(&left_frame);
+    assert_eq!(left_page.observed_sample, page.observed_sample);
+    assert_eq!(left_page.records.as_slice(), &page.records[..1]);
+    let subset_frame = process_controller_ingress(
+        &mut controller,
+        &encoded_state_get(revision, 113, &[handles[1].0]),
+        ingress,
+    );
+    let subset_page = decode_state_page(&subset_frame);
+    assert_eq!(subset_page.observed_sample, page.observed_sample);
+    assert_eq!(subset_page.records.len(), 1);
+    assert_eq!(subset_page.records[0], page.records[1]);
+    let typed = controller.process(ControllerRequest {
+        request_id: RequestId::new(114).unwrap(),
+        expected_revision: ExpectedRevision::Exact(revision),
+        canonical_bytes: b"typed-state-reversed",
+        command: ControlCommand::ParameterStateGet {
+            request: ParameterStateRequest {
+                handles: vec![handles[1].0, handles[0].0],
+            },
+        },
+    });
+    assert_eq!(typed.status, StatusCode::Ok);
+    let typed_page = decode_state_page(&typed.frame);
+    assert_eq!(
+        typed_page
+            .records
+            .iter()
+            .map(|record| record.handle)
+            .collect::<Vec<_>>(),
+        vec![handles[1].0, handles[0].0]
+    );
+    assert_eq!(typed_page.observed_sample, page.observed_sample);
+    assert_eq!(typed_page.records[0], page.records[1]);
+    assert_eq!(typed_page.records[1], page.records[0]);
+    let typed_left = controller.process(ControllerRequest {
+        request_id: RequestId::new(115).unwrap(),
+        expected_revision: ExpectedRevision::Exact(revision),
+        canonical_bytes: b"typed-state-left",
+        command: ControlCommand::ParameterStateGet {
+            request: ParameterStateRequest {
+                handles: vec![handles[0].0],
+            },
+        },
+    });
+    assert_eq!(typed_left.status, StatusCode::Ok);
+    let typed_left_page = decode_state_page(&typed_left.frame);
+    assert_eq!(typed_left_page.observed_sample, page.observed_sample);
+    assert_eq!(typed_left_page.records.as_slice(), &page.records[..1]);
+    let typed_right = controller.process(ControllerRequest {
+        request_id: RequestId::new(116).unwrap(),
+        expected_revision: ExpectedRevision::Exact(revision),
+        canonical_bytes: b"typed-state-right",
+        command: ControlCommand::ParameterStateGet {
+            request: ParameterStateRequest {
+                handles: vec![handles[1].0],
+            },
+        },
+    });
+    assert_eq!(typed_right.status, StatusCode::Ok);
+    let typed_right_page = decode_state_page(&typed_right.frame);
+    assert_eq!(typed_right_page.observed_sample, page.observed_sample);
+    assert_eq!(typed_right_page.records.as_slice(), &page.records[1..]);
+    let mut reversed_request = encoded_state_get(revision, 117, &[handles[0].0, handles[1].0]);
+    let first_handle_offset = protocol::OUTER_HEADER_BYTES + 8;
+    let second_handle_offset = first_handle_offset + 4;
+    let (before_second_handle, second_handle) = reversed_request.split_at_mut(second_handle_offset);
+    before_second_handle[first_handle_offset..second_handle_offset]
+        .swap_with_slice(&mut second_handle[..4]);
+    let reversed_response = if matches!(ingress, ControllerIngress::CallerBuffer) {
+        let response = process_controller_ingress(&mut controller, &reversed_request, ingress);
+        assert_eq!(response_status(&response), StatusCode::MalformedFrame);
+        Some(response)
+    } else {
+        assert_eq!(
+            controller
+                .process_b1b_btlv(&reversed_request, &mut DecodeScratch::new(&mut [0_u16; 64]),)
+                .unwrap_err(),
+            protocol::DecodeError::InvalidTlv
+        );
+        None
+    };
+    let reversed_recovery = process_controller_ingress(
+        &mut controller,
+        &encoded_state_get(revision, 117, &[handles[0].0, handles[1].0]),
+        ingress,
+    );
+    if matches!(ingress, ControllerIngress::B1b) {
+        assert_eq!(
+            state_page_payload(&reversed_recovery),
+            accepted_state_payload
+        );
+    } else {
+        assert_eq!(
+            response_status(&reversed_recovery),
+            StatusCode::RequestIdReuse
+        );
+        assert_eq!(
+            process_controller_ingress(&mut controller, &reversed_request, ingress),
+            reversed_response.expect("caller malformed replay")
+        );
+        let caller_recovery = process_controller_ingress(
+            &mut controller,
+            &encoded_state_get(revision, 129, &[handles[0].0, handles[1].0]),
+            ingress,
+        );
+        assert_eq!(state_page_payload(&caller_recovery), accepted_state_payload);
+    }
+    let unknown = controller.process(ControllerRequest {
+        request_id: RequestId::new(130).unwrap(),
+        expected_revision: ExpectedRevision::Exact(revision),
+        canonical_bytes: b"typed-state-unknown",
+        command: ControlCommand::ParameterStateGet {
+            request: ParameterStateRequest { handles: vec![99] },
+        },
+    });
+    assert_eq!(unknown.status, StatusCode::NotFound);
+    let unknown_frame = process_controller_ingress(
+        &mut controller,
+        &encoded_state_get(revision, 131, &[99]),
+        ingress,
+    );
+    assert_eq!(response_status(&unknown_frame), StatusCode::NotFound);
+    assert_eq!(
+        controller.publish_scalar_point_state(
+            SampleTime(snapshot.observed_sample.0 + 1),
+            [
+                protocol::ParameterStateRecord {
+                    handle: handles[1].0,
+                    flags: 1,
+                    value: 11.0,
+                },
+                protocol::ParameterStateRecord {
+                    handle: handles[0].0,
+                    flags: 1,
+                    value: 12.0,
+                },
+            ],
+        ),
+        Err(ControllerAutomationPrepareError::InvalidScalarStatePublication)
+    );
+    let after_reversed = process_controller_ingress(
+        &mut controller,
+        &encoded_state_get(revision, 132, &[handles[0].0, handles[1].0]),
+        ingress,
+    );
+    assert_eq!(decode_state_page(&after_reversed), page);
+    assert_eq!(state_page_payload(&after_reversed), accepted_state_payload);
+    assert_eq!(
+        controller.publish_scalar_point_state(
+            snapshot.observed_sample,
+            [
+                protocol::ParameterStateRecord {
+                    handle: 0,
+                    flags: 1,
+                    value: 1.0,
+                },
+                page.records[1],
+            ],
+        ),
+        Err(ControllerAutomationPrepareError::InvalidScalarStatePublication)
+    );
+    let after_zero_handle = process_controller_ingress(
+        &mut controller,
+        &encoded_state_get(revision, 133, &[handles[0].0, handles[1].0]),
+        ingress,
+    );
+    assert_eq!(decode_state_page(&after_zero_handle), page);
+    assert_eq!(
+        state_page_payload(&after_zero_handle),
+        accepted_state_payload
+    );
+    assert_eq!(
+        controller.publish_scalar_point_state(
+            snapshot.observed_sample,
+            [page.records[0], page.records[0]],
+        ),
+        Err(ControllerAutomationPrepareError::InvalidScalarStatePublication)
+    );
+    let after_duplicate_handle = process_controller_ingress(
+        &mut controller,
+        &encoded_state_get(revision, 134, &[handles[0].0, handles[1].0]),
+        ingress,
+    );
+    assert_eq!(decode_state_page(&after_duplicate_handle), page);
+    assert_eq!(
+        state_page_payload(&after_duplicate_handle),
+        accepted_state_payload
+    );
+    assert_eq!(
+        controller.publish_scalar_point_state(
+            snapshot.observed_sample,
+            [
+                protocol::ParameterStateRecord {
+                    handle: handles[0].0,
+                    flags: 4,
+                    value: 1.0,
+                },
+                page.records[1],
+            ],
+        ),
+        Err(ControllerAutomationPrepareError::InvalidScalarStatePublication)
+    );
+    let after_flags = process_controller_ingress(
+        &mut controller,
+        &encoded_state_get(revision, 135, &[handles[0].0, handles[1].0]),
+        ingress,
+    );
+    assert_eq!(decode_state_page(&after_flags), page);
+    assert_eq!(state_page_payload(&after_flags), accepted_state_payload);
+    assert_eq!(
+        controller.publish_scalar_point_state(
+            snapshot.observed_sample,
+            [
+                protocol::ParameterStateRecord {
+                    handle: handles[0].0,
+                    flags: 1,
+                    value: f32::NAN,
+                },
+                page.records[1],
+            ],
+        ),
+        Err(ControllerAutomationPrepareError::InvalidScalarStatePublication)
+    );
+    let after_rejection = process_controller_ingress(
+        &mut controller,
+        &encoded_state_get(revision, 136, &[handles[0].0, handles[1].0]),
+        ingress,
+    );
+    assert_eq!(decode_state_page(&after_rejection), page);
+    assert_eq!(state_page_payload(&after_rejection), accepted_state_payload);
+    assert_eq!(
+        controller.publish_scalar_point_state(
+            snapshot.observed_sample,
+            [
+                page.records[0],
+                protocol::ParameterStateRecord {
+                    handle: handles[1].0,
+                    flags: page.records[1].flags,
+                    value: f32::INFINITY,
+                },
+            ],
+        ),
+        Err(ControllerAutomationPrepareError::InvalidScalarStatePublication)
+    );
+    let after_second_rejection = process_controller_ingress(
+        &mut controller,
+        &encoded_state_get(revision, 137, &[handles[0].0, handles[1].0]),
+        ingress,
+    );
+    assert_eq!(decode_state_page(&after_second_rejection), page);
+    assert_eq!(
+        state_page_payload(&after_second_rejection),
+        accepted_state_payload
+    );
+    controller
+        .publish_scalar_point_state(
+            snapshot.observed_sample,
+            [
+                protocol::ParameterStateRecord {
+                    handle: handles[0].0,
+                    flags: page.records[0].flags,
+                    value: page.records[0].value,
+                },
+                protocol::ParameterStateRecord {
+                    handle: handles[1].0,
+                    flags: page.records[1].flags,
+                    value: page.records[1].value,
+                },
+            ],
+        )
+        .unwrap();
+    let after_identical = process_controller_ingress(
+        &mut controller,
+        &encoded_state_get(revision, 138, &[handles[0].0, handles[1].0]),
+        ingress,
+    );
+    assert_eq!(decode_state_page(&after_identical), page);
+    assert_eq!(state_page_payload(&after_identical), accepted_state_payload);
+    let cached_state_request = encoded_state_get(revision, 140, &[handles[0].0, handles[1].0]);
+    let cached_state_frame =
+        process_controller_ingress(&mut controller, &cached_state_request, ingress);
+    assert_eq!(
+        state_page_payload(&cached_state_frame),
+        accepted_state_payload
+    );
+    let mut replacement = snapshot;
+    replacement.observed_sample = SampleTime(snapshot.observed_sample.0 + 7);
+    replacement.state[0].current_value = 2.0;
+    replacement.state[0].target_value = 2.0;
+    replacement.state[1].current_value = -3.0;
+    replacement.state[1].target_value = -4.0;
+    publish_controller_scalar_point_snapshot(&mut controller, handles, &replacement).unwrap();
+    let replaced = process_controller_ingress(
+        &mut controller,
+        &encoded_state_get(revision, 141, &[handles[0].0, handles[1].0]),
+        ingress,
+    );
+    let replaced_page = decode_state_page(&replaced);
+    assert_eq!(replaced_page.observed_sample, replacement.observed_sample.0);
+    assert_eq!(replaced_page.records[0].value.to_bits(), 2.0_f32.to_bits());
+    assert_eq!(replaced_page.records[0].flags, 1);
+    assert_eq!(
+        replaced_page.records[1].value.to_bits(),
+        (-3.0_f32).to_bits()
+    );
+    assert_eq!(replaced_page.records[1].flags, 3);
+    if matches!(ingress, ControllerIngress::CallerBuffer) {
+        let mut short = vec![0_u8; cached_state_frame.len() - 1];
+        let short_result = controller.process_command_frame_into(
+            &cached_state_request,
+            &mut DecodeScratch::new(&mut [0_u16; 64]),
+            &mut short,
+        );
+        assert!(matches!(
+            short_result,
+            Err(protocol::CommandFrameProcessError::Encode(
+                protocol::EncodeError::OutputTooSmall { required }
+            )) if required == cached_state_frame.len()
+        ));
+        let mut exact = vec![0_u8; cached_state_frame.len()];
+        let written = controller
+            .process_command_frame_into(
+                &cached_state_request,
+                &mut DecodeScratch::new(&mut [0_u16; 64]),
+                &mut exact,
+            )
+            .unwrap();
+        assert_eq!(&exact[..written], cached_state_frame.as_slice());
+
+        let malformed_outer = cached_state_request[..cached_state_request.len() - 1].to_vec();
+        let mut malformed_output = vec![0_u8; 2_048];
+        assert!(matches!(
+            controller.process_command_frame_into(
+                &malformed_outer,
+                &mut DecodeScratch::new(&mut [0_u16; 64]),
+                &mut malformed_output,
+            ),
+            Err(protocol::CommandFrameProcessError::Uncorrelatable(
+                protocol::DecodeError::BadPayloadLength
+            ))
+        ));
+        assert_eq!(
+            process_controller_ingress(&mut controller, &cached_state_request, ingress),
+            cached_state_frame
+        );
+
+        let mut malformed_correlatable =
+            encoded_state_get(revision, 142, &[handles[0].0, handles[1].0]);
+        let (before_second_handle, second_handle) =
+            malformed_correlatable.split_at_mut(second_handle_offset);
+        before_second_handle[first_handle_offset..second_handle_offset]
+            .swap_with_slice(&mut second_handle[..4]);
+        assert_eq!(
+            response_status(&process_controller_frame(
+                &mut controller,
+                &malformed_correlatable,
+            )),
+            StatusCode::MalformedFrame
+        );
+        assert_eq!(
+            process_controller_ingress(&mut controller, &cached_state_request, ingress),
+            cached_state_frame
+        );
+        assert_eq!(
+            response_status(&process_controller_ingress(
+                &mut controller,
+                &encoded_state_get(revision, 140, &[handles[0].0]),
+                ingress,
+            )),
+            StatusCode::RequestIdReuse
+        );
+        assert_eq!(
+            process_controller_ingress(&mut controller, &cached_state_request, ingress),
+            cached_state_frame
+        );
+    } else {
+        assert_eq!(
+            process_controller_ingress(&mut controller, &cached_state_request, ingress),
+            cached_state_frame
+        );
+    }
+    assert_eq!(
+        (
+            controller.outstanding(),
+            controller.resident_automation(),
+            controller.automation_status(),
+        ),
+        delivery_before_publication
+    );
+    assert!(
+        controller
+            .dequeue_reliable_event_frame_into(&mut [0_u8; 64])
+            .unwrap()
+            .is_none()
+    );
+    drop(render.stop());
+}
+
+#[test]
+fn controller_publication_survives_real_sticky_snapshot_fault() {
+    let fixture = real_controller_fixture();
+    let handles = fixture.handles;
+    let revision = fixture.session.revision();
+    let mut failing = FailingAccessEffect::read_failure();
+    let mut queues = controller_queue_config();
+    queues.quantum_frames = NonZeroUsize::new(16).unwrap();
+    let (mut controller, render, _) = prepare_controller_scalar_point_endpoint(
+        &mut failing,
+        handles,
+        fixture.session,
+        queues,
+        fixture.provider,
+        controller_replay_config(),
+        ProtocolCodec::default(),
+        controller_config(),
+        ControllerRetainedCapacity {
+            meter_handles: 0,
+            counter_ids: 0,
+        },
+    )
+    .expect("combined sticky-fault preparation");
+    let mut render = render.start().unwrap_or_else(|_| panic!("render start"));
+    let published = render.snapshot().unwrap();
+    publish_controller_scalar_point_snapshot(&mut controller, handles, &published).unwrap();
+    let mut left = signal(16, 0x0532_3001, 0.69);
+    let mut right = signal(16, 0x0532_3002, 0.57);
+    render
+        .render(&mut left, &mut right, SampleTime(0))
+        .expect("fault fixture render");
+    let fault = render.snapshot().unwrap_err();
+    assert_eq!(render.snapshot(), Err(fault));
+    let response = controller.process(ControllerRequest {
+        request_id: RequestId::new(1).unwrap(),
+        expected_revision: ExpectedRevision::Exact(revision),
+        canonical_bytes: b"sticky-fault-state",
+        command: ControlCommand::ParameterStateGet {
+            request: ParameterStateRequest {
+                handles: vec![handles[0].0, handles[1].0],
+            },
+        },
+    });
+    assert_eq!(response.status, StatusCode::Ok);
+    let page = decode_state_page(&response.frame);
+    assert_eq!(page.observed_sample, published.observed_sample.0);
+    assert_eq!(
+        page.records[0].value.to_bits(),
+        published.state[0].current_value.to_bits()
+    );
+    assert_eq!(
+        page.records[1].value.to_bits(),
+        published.state[1].current_value.to_bits()
+    );
     drop(render.stop());
 }
 
 #[test]
 fn controller_cancellation_keeps_real_prefix_event_credit_and_native_state() {
+    for ingress in [ControllerIngress::CallerBuffer, ControllerIngress::B1b] {
+        run_controller_cancellation_keeps_real_prefix_event_credit_and_native_state(ingress);
+    }
+}
+
+fn run_controller_cancellation_keeps_real_prefix_event_credit_and_native_state(
+    ingress: ControllerIngress,
+) {
     let mut fixture = real_controller_fixture();
     let revision = fixture.session.revision();
     let handles = fixture.handles;
@@ -1869,19 +2538,16 @@ fn controller_cancellation_keeps_real_prefix_event_credit_and_native_state() {
         },
     )
     .expect("combined cancellation preparation");
-    let batch = real_batch(
-        revision,
-        10,
-        handles,
-        &[(handles[0], 3, 6.0), (handles[1], 200, -6.0)],
+    let response = process_controller_ingress(
+        &mut controller,
+        &encoded_controller_enqueue(
+            revision,
+            10,
+            &[(handles[0], 3, 6.0), (handles[1], 200, -6.0)],
+        ),
+        ingress,
     );
-    let response = controller.process(controller_enqueue(
-        revision,
-        10,
-        b"cancel-two-records",
-        batch,
-    ));
-    assert_eq!(response.status, StatusCode::Ok);
+    assert_eq!(response_status(&response), StatusCode::Ok);
     let ticket = match controller.try_handoff_next().unwrap() {
         HandoffResult::HandedOff(ticket) => ticket,
         other => panic!("expected Point handoff, got {other:?}"),
@@ -1900,6 +2566,7 @@ fn controller_cancellation_keeps_real_prefix_event_credit_and_native_state() {
     assert_eq!(prefix.next_sample, SampleTime(128));
     assert_eq!(prefix.state[0].target_value.to_bits(), 6.0_f32.to_bits());
     assert_state_bits(prefix.state[1], initial.state[1]);
+    publish_controller_scalar_point_snapshot(&mut controller, handles, &prefix).unwrap();
 
     fixture
         .clock
@@ -1935,6 +2602,39 @@ fn controller_cancellation_keeps_real_prefix_event_credit_and_native_state() {
     );
     assert_eq!(controller.outstanding(), 0);
     assert_eq!(controller.resident_automation(), 0);
+    let after_cancel = controller.process(ControllerRequest {
+        request_id: RequestId::new(13).unwrap(),
+        expected_revision: ExpectedRevision::Exact(revision),
+        canonical_bytes: b"published-after-cancel",
+        command: ControlCommand::ParameterStateGet {
+            request: ParameterStateRequest {
+                handles: vec![handles[0].0, handles[1].0],
+            },
+        },
+    });
+    assert_eq!(after_cancel.status, StatusCode::Ok);
+    let after_cancel_page = decode_state_page(&after_cancel.frame);
+    assert_eq!(after_cancel_page.observed_sample, prefix.observed_sample.0);
+    assert_eq!(
+        after_cancel_page.records[0].value.to_bits(),
+        prefix.state[0].current_value.to_bits()
+    );
+    assert_eq!(
+        after_cancel_page.records[1].value.to_bits(),
+        prefix.state[1].current_value.to_bits()
+    );
+    assert_eq!(
+        after_cancel_page.records[0].flags,
+        1 | (u32::from(
+            prefix.state[0].current_value.to_bits() != prefix.state[0].target_value.to_bits(),
+        ) * 2)
+    );
+    assert_eq!(
+        after_cancel_page.records[1].flags,
+        1 | (u32::from(
+            prefix.state[1].current_value.to_bits() != prefix.state[1].target_value.to_bits(),
+        ) * 2)
+    );
     assert_eq!(
         controller.collect_terminal(ticket),
         Err(DeliveryError::StaleTicket)
@@ -1969,7 +2669,7 @@ fn controller_cancellation_keeps_real_prefix_event_credit_and_native_state() {
     );
 
     let counters = controller.process(ControllerRequest {
-        request_id: RequestId::new(11).unwrap(),
+        request_id: RequestId::new(14).unwrap(),
         expected_revision: ExpectedRevision::Exact(revision),
         canonical_bytes: b"canceled-counter",
         command: ControlCommand::CountersGet {
@@ -1999,13 +2699,12 @@ fn controller_cancellation_keeps_real_prefix_event_credit_and_native_state() {
         Some(1)
     );
 
-    let replacement = controller.process(controller_enqueue(
-        revision,
-        12,
-        b"after-cancel",
-        real_batch(revision, 12, handles, &[(handles[0], 300, 2.0)]),
-    ));
-    assert_eq!(replacement.status, StatusCode::Ok);
+    let replacement = process_controller_ingress(
+        &mut controller,
+        &encoded_controller_enqueue(revision, 15, &[(handles[0], 300, 2.0)]),
+        ingress,
+    );
+    assert_eq!(response_status(&replacement), StatusCode::Ok);
     let replacement_ticket = match controller.try_handoff_next().unwrap() {
         HandoffResult::HandedOff(ticket) => ticket,
         other => panic!("expected replacement handoff, got {other:?}"),
@@ -2103,29 +2802,33 @@ fn controller_scalar_preflight_rejections_and_single_allocation_authority() {
             .expect("combined preparation")
         });
     eprintln!(
-        "controller scalar Point preparation diagnostics: direct global={direct_global:?} thread={direct_thread:?}; wrapped global={wrapped_global:?} thread={wrapped_thread:?}",
+        "controller scalar Point preparation diagnostics: direct global={direct_global:?} current={direct_current:?} thread={direct_thread:?}; wrapped global={wrapped_global:?} current={wrapped_current:?} thread={wrapped_thread:?}",
         direct_global = direct_diagnostic.global,
+        direct_current = direct_diagnostic.current_thread,
         direct_thread = direct_diagnostic.thread_audit,
         wrapped_global = combined_diagnostic.global,
+        wrapped_current = combined_diagnostic.current_thread,
         wrapped_thread = combined_diagnostic.thread_audit,
     );
     let transient_bytes = ("comp0".len() + "comp".len()) as u64;
     assert_eq!(
-        combined_diagnostic.global.allocations,
-        direct_diagnostic.global.allocations + 2
+        combined_diagnostic.current_thread.allocations,
+        direct_diagnostic.current_thread.allocations + 2
     );
     assert_eq!(
-        combined_diagnostic.global.deallocations,
-        direct_diagnostic.global.deallocations + 2
+        combined_diagnostic.current_thread.deallocations,
+        direct_diagnostic.current_thread.deallocations + 2
     );
     assert_eq!(
-        combined_diagnostic.global.reallocations,
-        direct_diagnostic.global.reallocations
+        combined_diagnostic.current_thread.reallocations,
+        direct_diagnostic.current_thread.reallocations
     );
     assert_eq!(
-        combined_diagnostic.global.requested_bytes,
-        direct_diagnostic.global.requested_bytes + transient_bytes
+        combined_diagnostic.current_thread.requested_bytes,
+        direct_diagnostic.current_thread.requested_bytes + transient_bytes
     );
+    assert_global_dominates_current_thread(direct_diagnostic);
+    assert_global_dominates_current_thread(combined_diagnostic);
     assert_eq!(
         resources.controller.queue_and_delivery,
         direct_resources.queue_and_delivery

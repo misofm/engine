@@ -1,0 +1,4 @@
+   Compiling effect-contract v0.1.0 (/home/bl/misofm/engine-shared-hex-authority/crates/effect-contract)
+   Compiling effect-runtime v0.1.0 (/home/bl/misofm/engine-shared-hex-authority/crates/effect-runtime)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.99s
+     Running tests/determinism.rs (/tmp/issue543-target/debug/deps/determinism-3394d9feff25af9d)

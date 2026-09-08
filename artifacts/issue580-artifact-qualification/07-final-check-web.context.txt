@@ -1,0 +1,5 @@
+utc=2026-09-07T22:22:01Z
+cwd=/home/bl/misofm/engine-580-artifact-qualification
+head=517bbf486f84fdfd6d59c42f7683348b55cea781
+pin=29abe2fa838ad4c24cbf19db9ac4185ac95c98d8e4f9e49ed8d668a35e577226
+artifact=/tmp/issue580-artifact-517bbf48

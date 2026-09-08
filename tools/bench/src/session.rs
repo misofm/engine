@@ -1,13 +1,12 @@
 //! Fixed-work descriptive benchmark for issue-004 session control-plane operations.
 
 use bench_support::digest::sha256_hex;
-use bench_support::json::escape;
+use bench_support::json::{escape, json_string_array};
 use bench_support::stats::per_mille as percentile_nearest_rank;
-use bench_support::sysinfo::physical_core_count;
+use bench_support::sysinfo::HostToolchainFacts;
 use std::{
-    env, fs,
+    env,
     hint::black_box,
-    process::Command,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -305,9 +304,26 @@ struct Metadata {
 
 impl Metadata {
     fn gather() -> Self {
-        let compiler_verbose = command(&["rustc", "-Vv"]);
-        let cpu_model = fs::read_to_string("/proc/cpuinfo")
-            .ok()
+        let facts = HostToolchainFacts::gather();
+        let runtime_or_browser = variable("MISO_ENGINE_BENCH_RUNTIME_OR_BROWSER");
+        Self::from_facts(
+            facts,
+            runtime_or_browser,
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("wall clock follows Unix epoch")
+                .as_secs(),
+        )
+    }
+
+    fn from_facts(
+        facts: HostToolchainFacts,
+        runtime_or_browser: String,
+        timestamp_epoch_seconds: u64,
+    ) -> Self {
+        let cpu_model = facts
+            .raw_cpuinfo
+            .as_deref()
             .and_then(|text| {
                 text.lines().find_map(|line| {
                     let (name, value) = line.split_once(':')?;
@@ -315,26 +331,23 @@ impl Metadata {
                 })
             })
             .unwrap_or_else(|| "unknown".to_owned());
-        let physical_cores = physical_core_count();
-        let logical_cores = std::thread::available_parallelism()
-            .map(|value| value.get().to_string())
-            .unwrap_or_else(|_| "unknown".to_owned());
-        let kernel = command(&["uname", "-r"]);
-        let power_source = variable("MISO_ENGINE_BENCH_POWER_SOURCE");
-        let governor_or_power_mode =
-            fs::read_to_string("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor")
-                .map(|text| text.trim().to_owned())
-                .unwrap_or_else(|_| variable("MISO_ENGINE_BENCH_GOVERNOR_OR_POWER_MODE"));
-        let rustc_version = command(&["rustc", "-V"]);
-        let llvm_version = field(&compiler_verbose, "LLVM version: ");
-        let target_triple = field(&compiler_verbose, "host: ");
-        let opt_level = variable("MISO_ENGINE_BENCH_OPT_LEVEL");
-        let lto = variable("MISO_ENGINE_BENCH_LTO");
-        let codegen_units = variable("MISO_ENGINE_BENCH_CODEGEN_UNITS");
-        let target_cpu = variable("MISO_ENGINE_BENCH_TARGET_CPU");
-        let compile_target_features = variable("MISO_ENGINE_BENCH_TARGET_FEATURES");
-        let runtime_or_browser = variable("MISO_ENGINE_BENCH_RUNTIME_OR_BROWSER");
-        let background_load_note = variable("MISO_ENGINE_BENCH_BACKGROUND_LOAD_NOTE");
+        let HostToolchainFacts {
+            physical_cores,
+            logical_cores,
+            kernel,
+            power_source,
+            governor_or_power_mode,
+            rustc_version,
+            llvm_version,
+            opt_level,
+            lto,
+            codegen_units,
+            target_triple,
+            target_cpu,
+            compile_target_features,
+            background_load_note,
+            ..
+        } = facts;
         let fields = [
             ("cpu_model", &cpu_model),
             ("physical_cores", &physical_cores),
@@ -359,10 +372,7 @@ impl Metadata {
             .map(|(name, _)| (*name).to_owned())
             .collect();
         Self {
-            timestamp_epoch_seconds: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("wall clock follows Unix epoch")
-                .as_secs(),
+            timestamp_epoch_seconds,
             cpu_model,
             physical_cores,
             logical_cores,
@@ -385,41 +395,7 @@ impl Metadata {
 }
 
 fn variable(name: &str) -> String {
-    bench_support::metadata::Metadata::gather()
-        .var(name)
-        .ok()
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "unknown".to_owned())
-}
-
-fn command(args: &[&str]) -> String {
-    let Some((program, arguments)) = args.split_first() else {
-        return "unknown".to_owned();
-    };
-    Command::new(program)
-        .args(arguments)
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| String::from_utf8(output.stdout).ok())
-        .map(|output| output.trim().to_owned())
-        .filter(|output| !output.is_empty())
-        .unwrap_or_else(|| "unknown".to_owned())
-}
-
-fn field(text: &str, prefix: &str) -> String {
-    text.lines()
-        .find_map(|line| line.strip_prefix(prefix).map(str::to_owned))
-        .unwrap_or_else(|| "unknown".to_owned())
-}
-
-fn json_string_array(values: &[String]) -> String {
-    let body = values
-        .iter()
-        .map(|value| format!("\"{}\"", escape(value)))
-        .collect::<Vec<_>>()
-        .join(",");
-    format!("[{body}]")
+    bench_support::metadata::Metadata::gather().nonempty_or_unknown(name)
 }
 
 const fn unlimited_caps() -> CompileCaps {
@@ -436,9 +412,12 @@ const fn unlimited_caps() -> CompileCaps {
 #[cfg(test)]
 mod tests {
     use super::{
-        FixtureCounts, TRACK_COUNT, percentile_nearest_rank, representative_fixture, sha256_hex,
+        FixtureCounts, Metadata, Method, Round, TRACK_COUNT, percentile_nearest_rank,
+        representative_fixture, sha256_hex,
     };
+    use bench_support::sysinfo::HostToolchainFacts;
     use session::{canonical_session_json, parse_session_json};
+    use std::env;
 
     #[test]
     fn representative_fixture_has_the_frozen_workload_and_stable_bytes() {
@@ -475,5 +454,61 @@ mod tests {
             sha256_hex(b"abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
+    }
+
+    #[test]
+    fn shared_host_toolchain_facts_preserve_session_projection() {
+        let facts = HostToolchainFacts {
+            raw_cpuinfo: Some("model name : Session CPU\nmodel name\t: Conformance CPU\n".into()),
+            physical_cores: "8".into(),
+            logical_cores: "unknown".into(),
+            kernel: "Linux-test".into(),
+            power_source: "AC".into(),
+            governor_or_power_mode: String::new(),
+            rustc_version: "rustc test 1.0".into(),
+            llvm_version: "LLVM test".into(),
+            target_triple: "x86_64-test".into(),
+            opt_level: "2".into(),
+            lto: "thin".into(),
+            codegen_units: "16".into(),
+            target_cpu: "native".into(),
+            compile_target_features: "avx2-µ".into(),
+            background_load_note: "quiet".into(),
+        };
+        let metadata = Metadata::from_facts(facts, "wasm-🌐".into(), 1_700_000_000);
+        assert_eq!(metadata.cpu_model, "Session CPU");
+        assert_eq!(metadata.governor_or_power_mode, "");
+        assert_eq!(metadata.runtime_or_browser, "wasm-🌐");
+        assert_eq!(metadata.missing_metadata, vec!["logical_cores"]);
+        assert_eq!(metadata.timestamp_epoch_seconds, 1_700_000_000);
+        let record = super::json_record(
+            Method::ParseCanonical,
+            1,
+            &Round {
+                batch_ns_per_operation: vec![10, 20],
+                total_ns: 30,
+            },
+            "fixture",
+            "fixture-sha",
+            FixtureCounts {
+                sources: 1,
+                tracks: 2,
+                submixes: 0,
+                outputs: 1,
+                routes: 2,
+                automation_programs: 2,
+                effects: 2,
+                effect_parameters: 2,
+                automation_segments: 2,
+            },
+            &metadata,
+        );
+        let expected_metadata = format!(
+            "\"timestamp_epoch_seconds\":1700000000,\"cpu_model\":\"Session CPU\",\"architecture\":\"{}\",\"physical_cores\":\"8\",\"logical_cores\":\"unknown\",\"os\":\"{}\",\"kernel\":\"Linux-test\",\"power_source\":\"AC\",\"governor_or_power_mode\":\"\",\"rustc_version\":\"rustc test 1.0\",\"llvm_version\":\"LLVM test\",\"cargo_profile\":\"release\",\"opt_level\":\"2\",\"lto\":\"thin\",\"codegen_units\":\"16\",\"target_triple\":\"x86_64-test\",\"target_cpu\":\"native\",\"compile_target_features\":\"avx2-µ\",\"runtime_or_browser\":\"wasm-🌐\"",
+            env::consts::ARCH,
+            env::consts::OS,
+        );
+        assert!(record.contains(&expected_metadata));
+        assert!(record.contains("\"background_load_note\":\"quiet\",\"metadata_incomplete\":true,\"missing_metadata\":[\"logical_cores\"]"));
     }
 }

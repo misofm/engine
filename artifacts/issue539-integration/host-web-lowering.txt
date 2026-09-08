@@ -1,0 +1,6 @@
+scalar_disassembly_status	0
+scalar_simd_detector	no matching vector opcode
+simd128_disassembly_status	0
+simd128_simd_detector	matching v128/f32x4 opcode present
+scalar_disassembly_stdout	/tmp/issue539-integration/host-web-scalar-disassembly.stdout
+simd128_disassembly_stdout	/tmp/issue539-integration/host-web-simd128-disassembly.stdout

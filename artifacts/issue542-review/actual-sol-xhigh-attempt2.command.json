@@ -1,0 +1,21 @@
+{
+  "argv": [
+    "/home/bl/.local/bin/codex",
+    "exec",
+    "-C",
+    "/home/bl/misofm/engine-protocol-conformance-boundary",
+    "-s",
+    "danger-full-access",
+    "resume",
+    "-m",
+    "gpt-5.6-sol",
+    "-c",
+    "model_reasoning_effort=\"xhigh\"",
+    "-o",
+    "/tmp/issue349-partials/542-actual-sol-xhigh-attempt2.md",
+    "01a07b27-ffb5-7821-a169-0444eb7b80f1",
+    "-"
+  ],
+  "cwd": "/home/bl/misofm/engine-protocol-conformance-boundary",
+  "prompt": "/tmp/issue349-partials/542-attempt2-review-prompt.md"
+}

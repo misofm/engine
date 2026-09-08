@@ -1,0 +1,1 @@
+Restored with apply_patch immediately after the status-101 direct mutation test; source-pre and source-post hashes match exactly.

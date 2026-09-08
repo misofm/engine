@@ -42,7 +42,7 @@ fn case_digest(case: usize) -> [u8; 32] {
 }
 
 fn hex(bytes: &[u8; 32]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    engine::hex_lower(bytes)
 }
 
 /// The structural half of M3: no construct in `src/vendored/` can make one target diverge.

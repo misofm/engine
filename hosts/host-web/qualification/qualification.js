@@ -1,3 +1,5 @@
+import { hexLower } from "../web/hex-lower.js";
+
 const SAMPLE_RATE = 48000;
 const QUANTUM_FRAMES = 128;
 const CORPUS_FRAMES = QUANTUM_FRAMES * 3;
@@ -66,10 +68,6 @@ function bootOptions(
   };
 }
 
-function bytesToHex(bytes) {
-  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-
 async function pcmDigest(pcm, frames) {
   const bytes = new ArrayBuffer(pcm.length * frames * Float32Array.BYTES_PER_ELEMENT);
   const view = new DataView(bytes);
@@ -80,7 +78,7 @@ async function pcmDigest(pcm, frames) {
       offset += Float32Array.BYTES_PER_ELEMENT;
     }
   }
-  return bytesToHex(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)));
+  return hexLower(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)));
 }
 
 function sourcePlanes(blockIndex) {

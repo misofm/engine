@@ -1,0 +1,38 @@
+[
+  {
+    "command": "git rev-parse HEAD origin/main",
+    "utc": "2026-09-07T15:10:49.076820+00:00",
+    "exit": 0,
+    "log": "check-0.log.gz"
+  },
+  {
+    "command": "git diff --check b95c9b7b028ed07cfea2f7669467689c05320c37 859b820bf6820c00f235364a827f9d5814e21a70",
+    "utc": "2026-09-07T15:10:49.079400+00:00",
+    "exit": 0,
+    "log": "check-1.log.gz"
+  },
+  {
+    "command": "bash -n scripts/check-conformance-boundaries.sh scripts/check-protocol-wasm-parity.sh",
+    "utc": "2026-09-07T15:10:49.100182+00:00",
+    "exit": 0,
+    "log": "check-2.log.gz"
+  },
+  {
+    "command": "bash scripts/check-conformance-boundaries.sh",
+    "utc": "2026-09-07T15:10:49.102628+00:00",
+    "exit": 0,
+    "log": "check-3.log.gz"
+  },
+  {
+    "command": "cargo tree --locked -p protocol --edges normal",
+    "utc": "2026-09-07T15:10:49.637010+00:00",
+    "exit": 0,
+    "log": "check-4.log.gz"
+  },
+  {
+    "command": "CARGO_TARGET_DIR=/tmp/issue542-final-target cargo test --locked -p conformance --test conformance_corpus",
+    "utc": "2026-09-07T15:10:49.731674+00:00",
+    "exit": 0,
+    "log": "check-5.log.gz"
+  }
+]

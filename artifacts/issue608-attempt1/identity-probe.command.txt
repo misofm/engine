@@ -1,0 +1,3 @@
+HEAD=6366c304627f28ae8e27d3b9e5f7acce3860225a
+COMMAND=bash scripts/build-web-audioworklet.sh /tmp/issue608-audioworklet-probe-u5NApI
+OUTPUT_DIRECTORY=/tmp/issue608-audioworklet-probe-u5NApI

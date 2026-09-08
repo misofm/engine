@@ -1,0 +1,10 @@
+exact_file_set=PASS
+candidate_wasm_sha256=6452f0db237da1d57b3594e7d95dd53a089a604d5b0791ea8b3533c5930c5a1c
+approved_candidate_wasm_sha256=6452f0db237da1d57b3594e7d95dd53a089a604d5b0791ea8b3533c5930c5a1c
+MATCH	miso-engine-v1-abi-layout.json
+MATCH	miso-engine-v1-audio-worklet-host.d.ts
+MATCH	miso-engine-v1-audio-worklet-host.js
+MATCH	miso-engine-v1-audio-worklet.js
+MATCH	miso-engine-v1-audio-worklet.simd128.wasm
+MATCH	miso-engine-v1-parameter-metadata.json
+all_six_files_byte_identical=PASS

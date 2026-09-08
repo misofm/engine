@@ -34,7 +34,8 @@ use graph::{
     GraphBindingBlock, GraphBuiltinBankResourceEstimate, GraphNodeId, GraphNodeObserverBinding,
     GraphObservationBlock, GraphPreparedBuiltinBank, GraphPreparedBuiltinBankInfo,
     GraphPreparedBuiltinBankProcessor, GraphPreparedSourceSet, GraphRuntimeBindings,
-    GraphRuntimeObserver, GraphRuntimeProcessor, PreparedGraphPlan, StableGraphId, TrackStage,
+    GraphRuntimeObserver, GraphRuntimeProcessor, GraphRuntimeSplitPairProcessor, PreparedGraphPlan,
+    StableGraphId, TrackStage,
 };
 use lane::Backend;
 use rack::{AoSoaScratch, BankSlotKey, RackLocation, RackProgram};
@@ -691,11 +692,60 @@ static FADER_MATRIX_FALLBACK_CALLS: core::sync::atomic::AtomicUsize =
 // a host test can reset and read the counters around one real render without a process-global
 // diagnostic surface or interference from another test thread.
 #[cfg(any(test, feature = "test-support"))]
+const SCALAR_STATE_TRACE_CAPACITY: usize = 8;
+
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[doc(hidden)]
+pub struct TestOnlyScalarStateTrace {
+    pub fader_len: usize,
+    pub fader_overflow: bool,
+    pub fader_owners: [u16; SCALAR_STATE_TRACE_CAPACITY],
+    pub fader_words: [[u32; 14]; SCALAR_STATE_TRACE_CAPACITY],
+    pub matrix_len: usize,
+    pub matrix_overflow: bool,
+    pub matrix_owners: [u16; SCALAR_STATE_TRACE_CAPACITY],
+    pub matrix_words: [[u32; 15]; SCALAR_STATE_TRACE_CAPACITY],
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TestOnlyInitialMatrixTrace {
+    len: usize,
+    owners: [u16; SCALAR_STATE_TRACE_CAPACITY],
+    words: [[u32; 15]; SCALAR_STATE_TRACE_CAPACITY],
+}
+
+#[cfg(any(test, feature = "test-support"))]
+const EMPTY_SCALAR_STATE_TRACE: TestOnlyScalarStateTrace = TestOnlyScalarStateTrace {
+    fader_len: 0,
+    fader_overflow: false,
+    fader_owners: [0; SCALAR_STATE_TRACE_CAPACITY],
+    fader_words: [[0; 14]; SCALAR_STATE_TRACE_CAPACITY],
+    matrix_len: 0,
+    matrix_overflow: false,
+    matrix_owners: [0; SCALAR_STATE_TRACE_CAPACITY],
+    matrix_words: [[0; 15]; SCALAR_STATE_TRACE_CAPACITY],
+};
+
+#[cfg(test)]
+const EMPTY_INITIAL_MATRIX_TRACE: TestOnlyInitialMatrixTrace = TestOnlyInitialMatrixTrace {
+    len: 0,
+    owners: [0; SCALAR_STATE_TRACE_CAPACITY],
+    words: [[0; 15]; SCALAR_STATE_TRACE_CAPACITY],
+};
+
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static FADER_MATRIX_LIVE_WITNESS: std::cell::Cell<[u64; 8]> = const { std::cell::Cell::new([0; 8]) };
     static FADER_MATRIX_OUTPUT_WITNESS: std::cell::Cell<[u32; 2]> = const { std::cell::Cell::new([0; 2]) };
     static SCALAR_FADER_STATE_WITNESS: std::cell::Cell<[u32; 14]> = const { std::cell::Cell::new([0; 14]) };
     static SCALAR_MATRIX_STATE_WITNESS: std::cell::Cell<[u32; 15]> = const { std::cell::Cell::new([0; 15]) };
+    static SCALAR_STATE_TRACE: std::cell::Cell<TestOnlyScalarStateTrace> =
+        const { std::cell::Cell::new(EMPTY_SCALAR_STATE_TRACE) };
+    #[cfg(test)]
+    static SCALAR_INITIAL_MATRIX_TRACE: std::cell::Cell<TestOnlyInitialMatrixTrace> =
+        const { std::cell::Cell::new(EMPTY_INITIAL_MATRIX_TRACE) };
     static SCALAR_OWNER_DROPS: std::cell::Cell<[u64; 3]> = const { std::cell::Cell::new([0; 3]) };
     static SCALAR_OUTER_LIFETIME: std::cell::Cell<[u64; 3]> = const { std::cell::Cell::new([0; 3]) };
 }
@@ -725,6 +775,7 @@ pub fn test_only_reset_fader_matrix_witness() {
     FADER_MATRIX_OUTPUT_WITNESS.with(|value| value.set([0; 2]));
     SCALAR_FADER_STATE_WITNESS.with(|value| value.set([0; 14]));
     SCALAR_MATRIX_STATE_WITNESS.with(|value| value.set([0; 15]));
+    SCALAR_STATE_TRACE.with(|value| value.set(EMPTY_SCALAR_STATE_TRACE));
     SCALAR_OWNER_DROPS.with(|value| value.set([0; 3]));
 }
 
@@ -762,11 +813,93 @@ pub fn test_only_fader_matrix_witness() -> TestOnlyFaderMatrixWitness {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-fn record_scalar_state(fader: &FaderMuteRampBuiltins, matrix: &MatrixBuiltins) {
-    SCALAR_FADER_STATE_WITNESS
-        .with(|value| value.set(builtins::test_support::scalar_fader_words(fader)));
-    SCALAR_MATRIX_STATE_WITNESS
-        .with(|value| value.set(builtins::test_support::scalar_matrix_words(matrix)));
+#[must_use]
+#[doc(hidden)]
+pub fn test_only_scalar_state_trace() -> TestOnlyScalarStateTrace {
+    SCALAR_STATE_TRACE.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn record_initial_matrix_state(owner: u16, matrix: &MatrixBuiltins) {
+    let words = builtins::test_support::scalar_matrix_words(matrix);
+    SCALAR_INITIAL_MATRIX_TRACE.with(|value| {
+        let mut trace = value.get();
+        let index = trace.owners[..trace.len]
+            .iter()
+            .position(|candidate| *candidate == owner)
+            .unwrap_or_else(|| {
+                let index = trace.len;
+                if index < SCALAR_STATE_TRACE_CAPACITY {
+                    trace.len += 1;
+                }
+                index
+            });
+        if index < SCALAR_STATE_TRACE_CAPACITY {
+            trace.owners[index] = owner;
+            trace.words[index] = words;
+            value.set(trace);
+        }
+    });
+}
+
+#[cfg(test)]
+fn initial_matrix_state(owner: u16) -> Option<[u32; 15]> {
+    SCALAR_INITIAL_MATRIX_TRACE.with(|value| {
+        let trace = value.get();
+        trace.owners[..trace.len]
+            .iter()
+            .position(|candidate| *candidate == owner)
+            .map(|index| trace.words[index])
+    })
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn record_scalar_fader_state(owner: u16, fader: &FaderMuteRampBuiltins) {
+    let words = builtins::test_support::scalar_fader_words(fader);
+    SCALAR_FADER_STATE_WITNESS.with(|value| value.set(words));
+    SCALAR_STATE_TRACE.with(|value| {
+        let mut trace = value.get();
+        if trace.fader_len < SCALAR_STATE_TRACE_CAPACITY {
+            trace.fader_owners[trace.fader_len] = owner;
+            trace.fader_words[trace.fader_len] = words;
+            trace.fader_len += 1;
+        } else {
+            trace.fader_overflow = true;
+        }
+        value.set(trace);
+    });
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn record_scalar_matrix_state(owner: u16, matrix: &MatrixBuiltins) {
+    let words = builtins::test_support::scalar_matrix_words(matrix);
+    SCALAR_MATRIX_STATE_WITNESS.with(|value| value.set(words));
+    SCALAR_STATE_TRACE.with(|value| {
+        let mut trace = value.get();
+        if trace.matrix_len < SCALAR_STATE_TRACE_CAPACITY {
+            trace.matrix_owners[trace.matrix_len] = owner;
+            trace.matrix_words[trace.matrix_len] = words;
+            trace.matrix_len += 1;
+        } else {
+            trace.matrix_overflow = true;
+        }
+        value.set(trace);
+    });
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn record_scalar_state(owner: u16, fader: &FaderMuteRampBuiltins, matrix: &MatrixBuiltins) {
+    record_scalar_fader_state(owner, fader);
+    record_scalar_matrix_state(owner, matrix);
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn scalar_owner_id(track_id: &StableGraphId) -> u16 {
+    track_id
+        .as_str()
+        .strip_prefix('t')
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(u16::MAX)
 }
 
 fn drain_fader_controls(
@@ -1495,6 +1628,17 @@ pub fn test_only_scalar_owner_layouts() -> [BuiltinRetainedLayout; 3] {
         layout(core::alloc::Layout::new::<ScalarPairProcessor>()),
     ]
 }
+
+#[cfg(feature = "test-support")]
+#[must_use]
+#[doc(hidden)]
+pub fn test_only_scalar_split_outer_layout() -> BuiltinRetainedLayout {
+    BuiltinRetainedLayout {
+        size_bytes: core::mem::size_of::<ScalarSplitPairProcessor>() as u64,
+        align_bytes: core::mem::align_of::<ScalarSplitPairProcessor>() as u64,
+        allocation_count: 1,
+    }
+}
 #[cfg(any(test, feature = "test-support"))]
 impl Drop for TestPhaseTwoAllocationGuard {
     fn drop(&mut self) {
@@ -1525,6 +1669,14 @@ pub struct PreparedBuiltinsGraphBound {
     pub track_controls: Vec<TrackControlProducer>,
     pub plan: PreparedRenderPlan,
     pub meter_consumers: Vec<MeterConsumer>,
+    /// The selected fixture's private post-fader buffer, expressed as a lowered-program offset.
+    /// This is available only to the failed-render qualification seam.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub test_only_post_fader_buffer: Option<u32>,
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub test_only_post_fader_node: Option<GraphNodeId>,
 }
 
 /// A rejected external binding preserves the opaque artifact and caller-owned bindings.
@@ -1958,6 +2110,12 @@ impl PreparedBuiltinsSession {
                 control,
                 ..
             } = strip;
+            #[cfg(any(test, feature = "test-support"))]
+            let test_only_owner = scalar_owner_id(&graph_id);
+            #[cfg(test)]
+            if control.is_some() {
+                record_initial_matrix_state(test_only_owner, &matrix);
+            }
             let (input_processor, fader_processor, matrix_processor): (
                 Box<dyn GraphRuntimeProcessor>,
                 Box<dyn GraphRuntimeProcessor>,
@@ -1987,6 +2145,8 @@ impl PreparedBuiltinsSession {
                                 .fader
                                 .expect("a strip is banked on all three stages or on none"),
                             control_delivery,
+                            #[cfg(any(test, feature = "test-support"))]
+                            test_only_owner,
                         }),
                         Box::new(ConsoleMatrixProcessor {
                             matrix,
@@ -1994,6 +2154,8 @@ impl PreparedBuiltinsSession {
                                 .matrix
                                 .expect("a strip is banked on all three stages or on none"),
                             control_delivery,
+                            #[cfg(any(test, feature = "test-support"))]
+                            test_only_owner,
                         }),
                     )
                 }
@@ -2064,7 +2226,11 @@ impl PreparedBuiltinsSession {
     ) -> Option<graph::GraphScalarOwnerResourceEstimate> {
         let fader = u64::try_from(core::mem::size_of::<ConsoleFaderProcessor>()).ok()?;
         let matrix = u64::try_from(core::mem::size_of::<ConsoleMatrixProcessor>()).ok()?;
-        let outer = u64::try_from(core::mem::size_of::<ScalarPairProcessor>()).ok()?;
+        let outer = u64::try_from(
+            core::mem::size_of::<ScalarPairProcessor>()
+                .max(core::mem::size_of::<ScalarSplitPairProcessor>()),
+        )
+        .ok()?;
         let banked: std::collections::BTreeSet<_> =
             planned_strip_banks(&self.seal.tracks, dispatch, levels, classes)
                 .into_iter()
@@ -2095,7 +2261,22 @@ impl PreparedBuiltinsSession {
         } else {
             0
         };
-        let total_bytes = owners.checked_add(outer_total)?;
+        // Reserve one bounded table entry for an eligible serialized scalar population even when
+        // a particular graph later declines selection. The table is a distinct allocation; all
+        // runtime and op/unit layout terms are charged by the graph compiler for every graph.
+        let split_runtime = if dispatch == Backend::Scalar
+            && self.control_delivery == BuiltinControlDelivery::BetweenRenderCalls
+            && count != 0
+        {
+            graph::GraphScalarSplitRuntimeResourceEstimate::checked_for(1)?
+        } else {
+            graph::GraphScalarSplitRuntimeResourceEstimate::default()
+        };
+        // This owner term adds only the distinct boxed split table. The containing runtime owner
+        // and the per-op split-slot layout are admitted once by the graph compiler.
+        let total_bytes = owners
+            .checked_add(outer_total)?
+            .checked_add(split_runtime.split_pair_table_bytes)?;
         Some(graph::GraphScalarOwnerResourceEstimate {
             total_bytes,
             largest_allocation_bytes: if count == 0 {
@@ -2104,7 +2285,9 @@ impl PreparedBuiltinsSession {
                 fader
                     .max(matrix)
                     .max(if outer_total == 0 { 0 } else { outer })
+                    .max(split_runtime.split_pair_table_bytes)
             },
+            split_pair_table_bytes: split_runtime.split_pair_table_bytes,
         })
     }
 
@@ -2541,10 +2724,18 @@ impl<R> PreparedBuiltinsGraphArtifact<R> {
             Ok(plan) => plan,
             Err(_) => unreachable!("sealed wrapper prevalidated its complete graph bindings"),
         };
+        #[cfg(feature = "test-support")]
+        let selected_split_fader = graph::test_only_selected_split_fader();
         Ok(PreparedBuiltinsGraphBound {
             track_controls: self.track_controls,
             plan,
             meter_consumers: self.meter_consumers,
+            #[cfg(feature = "test-support")]
+            test_only_post_fader_buffer: selected_split_fader
+                .as_ref()
+                .map(|selected| selected.buffer),
+            #[cfg(feature = "test-support")]
+            test_only_post_fader_node: selected_split_fader.map(|selected| selected.node),
         })
     }
 
@@ -2628,11 +2819,21 @@ impl<R> PreparedBuiltinsGraphArtifact<R> {
         bindings.nodes.append(&mut self.builtin_processors);
         bindings.observers.append(&mut self.builtin_observers);
         match self.graph.bind_with_source_set(bindings, source_set) {
-            Ok(plan) => Ok(PreparedBuiltinsGraphBound {
-                track_controls: self.track_controls,
-                plan,
-                meter_consumers: self.meter_consumers,
-            }),
+            Ok(plan) => {
+                #[cfg(feature = "test-support")]
+                let selected_split_fader = graph::test_only_selected_split_fader();
+                Ok(PreparedBuiltinsGraphBound {
+                    track_controls: self.track_controls,
+                    plan,
+                    meter_consumers: self.meter_consumers,
+                    #[cfg(feature = "test-support")]
+                    test_only_post_fader_buffer: selected_split_fader
+                        .as_ref()
+                        .map(|selected| selected.buffer),
+                    #[cfg(feature = "test-support")]
+                    test_only_post_fader_node: selected_split_fader.map(|selected| selected.node),
+                })
+            }
             Err(failure) => {
                 let mut builtin_processors = Vec::new();
                 let mut external_processors = Vec::new();
@@ -3626,6 +3827,8 @@ struct ConsoleMatrixProcessor {
     matrix: MatrixBuiltins,
     control: Consumer<TrackControlRecord>,
     control_delivery: BuiltinControlDelivery,
+    #[cfg(any(test, feature = "test-support"))]
+    test_only_owner: u16,
 }
 #[cfg(any(test, feature = "test-support"))]
 impl Drop for ConsoleMatrixProcessor {
@@ -3641,17 +3844,13 @@ impl GraphRuntimeProcessor for ConsoleMatrixProcessor {
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
         self.drain_controls().inspect_err(|_| {
             #[cfg(any(test, feature = "test-support"))]
-            SCALAR_MATRIX_STATE_WITNESS.with(|value| {
-                value.set(builtins::test_support::scalar_matrix_words(&self.matrix));
-            });
+            record_scalar_matrix_state(self.test_only_owner, &self.matrix);
         })?;
         let block = DualMonoBlock::new(block.left, block.right, block.first_sample)
             .map_err(render_error)?;
         self.matrix.process(block);
         #[cfg(any(test, feature = "test-support"))]
-        SCALAR_MATRIX_STATE_WITNESS.with(|value| {
-            value.set(builtins::test_support::scalar_matrix_words(&self.matrix));
-        });
+        record_scalar_matrix_state(self.test_only_owner, &self.matrix);
         Ok(())
     }
 }
@@ -3682,6 +3881,8 @@ struct ConsoleFaderProcessor {
     fader: FaderMuteRampBuiltins,
     control: Consumer<TrackFaderRecord>,
     control_delivery: BuiltinControlDelivery,
+    #[cfg(any(test, feature = "test-support"))]
+    test_only_owner: u16,
 }
 #[cfg(any(test, feature = "test-support"))]
 impl Drop for ConsoleFaderProcessor {
@@ -3697,22 +3898,23 @@ impl GraphRuntimeProcessor for ConsoleFaderProcessor {
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
         self.drain_controls().inspect_err(|_| {
             #[cfg(any(test, feature = "test-support"))]
-            SCALAR_FADER_STATE_WITNESS.with(|value| {
-                value.set(builtins::test_support::scalar_fader_words(&self.fader));
-            });
+            record_scalar_fader_state(self.test_only_owner, &self.fader);
         })?;
         let block = DualMonoBlock::new(block.left, block.right, block.first_sample)
             .map_err(render_error)?;
         self.fader.process(block);
         #[cfg(any(test, feature = "test-support"))]
-        SCALAR_FADER_STATE_WITNESS.with(|value| {
-            value.set(builtins::test_support::scalar_fader_words(&self.fader));
-        });
+        record_scalar_fader_state(self.test_only_owner, &self.fader);
         Ok(())
     }
     fn scalar_pair_factory(&self) -> Option<graph::ScalarPairFactory> {
         (self.control_delivery == BuiltinControlDelivery::BetweenRenderCalls)
             .then_some(make_scalar_pair)
+    }
+
+    fn scalar_split_pair_factory(&self) -> Option<graph::ScalarSplitPairFactory> {
+        (self.control_delivery == BuiltinControlDelivery::BetweenRenderCalls)
+            .then_some(make_scalar_split_pair)
     }
 }
 impl ConsoleFaderProcessor {
@@ -3783,7 +3985,11 @@ impl GraphRuntimeProcessor for ScalarPairProcessor {
         } = block;
         self.fader.drain_controls().inspect_err(|_| {
             #[cfg(any(test, feature = "test-support"))]
-            record_scalar_state(&self.fader.fader, &self.matrix.matrix);
+            record_scalar_state(
+                self.fader.test_only_owner,
+                &self.fader.fader,
+                &self.matrix.matrix,
+            );
         })?;
         // Preserve the original fader boundary: its queue is drained before the envelope is
         // checked, and an invalid envelope stops before the later matrix owner consumes anything.
@@ -3796,7 +4002,11 @@ impl GraphRuntimeProcessor for ScalarPairProcessor {
                 // a later matrix command is invalid.
                 self.fader.fader.process(fused_block);
                 #[cfg(any(test, feature = "test-support"))]
-                record_scalar_state(&self.fader.fader, &self.matrix.matrix);
+                record_scalar_state(
+                    self.fader.test_only_owner,
+                    &self.fader.fader,
+                    &self.matrix.matrix,
+                );
                 return Err(error);
             }
             self.fader
@@ -3805,7 +4015,11 @@ impl GraphRuntimeProcessor for ScalarPairProcessor {
         };
         if fused {
             #[cfg(any(test, feature = "test-support"))]
-            record_scalar_state(&self.fader.fader, &self.matrix.matrix);
+            record_scalar_state(
+                self.fader.test_only_owner,
+                &self.fader.fader,
+                &self.matrix.matrix,
+            );
             #[cfg(any(test, feature = "test-support"))]
             FADER_MATRIX_LIVE_WITNESS.with(|value| {
                 let mut counters = value.get();
@@ -3834,7 +4048,11 @@ impl GraphRuntimeProcessor for ScalarPairProcessor {
             DualMonoBlock::new(&mut *left, &mut *right, first_sample).map_err(render_error)?,
         );
         #[cfg(any(test, feature = "test-support"))]
-        record_scalar_state(&self.fader.fader, &self.matrix.matrix);
+        record_scalar_state(
+            self.fader.test_only_owner,
+            &self.fader.fader,
+            &self.matrix.matrix,
+        );
         #[cfg(any(test, feature = "test-support"))]
         FADER_MATRIX_OUTPUT_WITNESS.with(|value| {
             value.set([
@@ -3850,6 +4068,160 @@ type ScalarPairOwners = (
     Box<dyn GraphRuntimeProcessor>,
     Box<dyn GraphRuntimeProcessor>,
 );
+
+/// The split scalar owner keeps the original fader and matrix consumers together while exposing
+/// their two scheduled execution boundaries to the graph runtime.
+struct ScalarSplitPairProcessor {
+    fader: Box<ConsoleFaderProcessor>,
+    matrix: Box<ConsoleMatrixProcessor>,
+    pending_fader: bool,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Drop for ScalarSplitPairProcessor {
+    fn drop(&mut self) {
+        SCALAR_OWNER_DROPS.with(|value| {
+            let mut drops = value.get();
+            drops[2] = drops[2].saturating_add(1);
+            value.set(drops);
+        });
+        SCALAR_OUTER_LIFETIME.with(|value| {
+            let mut lifetime = value.get();
+            lifetime[1] = lifetime[1].checked_sub(1).expect("live scalar split outer");
+            lifetime[2] = lifetime[2].saturating_add(1);
+            value.set(lifetime);
+        });
+    }
+}
+
+impl GraphRuntimeSplitPairProcessor for ScalarSplitPairProcessor {
+    fn begin_fader(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
+        #[cfg(any(test, feature = "test-support"))]
+        FADER_MATRIX_PROCESS_CALLS.fetch_add(1, Ordering::Relaxed);
+        #[cfg(any(test, feature = "test-support"))]
+        FADER_MATRIX_LIVE_WITNESS.with(|value| {
+            let mut counters = value.get();
+            counters[0] = counters[0].saturating_add(1);
+            counters[4] = counters[4].saturating_add(1);
+            value.set(counters);
+        });
+        self.fader.drain_controls().inspect_err(|_| {
+            #[cfg(any(test, feature = "test-support"))]
+            record_scalar_state(
+                self.fader.test_only_owner,
+                &self.fader.fader,
+                &self.matrix.matrix,
+            );
+        })?;
+        let GraphBindingBlock {
+            left,
+            right,
+            first_sample,
+        } = block;
+        // Validate the envelope before recording deferred state. A malformed fader block must
+        // leave the later matrix consumer untouched and cannot leave a completion to run after
+        // the graph has already returned the original error.
+        let block = DualMonoBlock::new(left, right, first_sample).map_err(render_error)?;
+        if self.fader.fader.is_settled() {
+            self.pending_fader = true;
+            #[cfg(any(test, feature = "test-support"))]
+            record_scalar_state(
+                self.fader.test_only_owner,
+                &self.fader.fader,
+                &self.matrix.matrix,
+            );
+            return Ok(());
+        }
+        self.fader.fader.process(block);
+        self.pending_fader = false;
+        #[cfg(any(test, feature = "test-support"))]
+        record_scalar_state(
+            self.fader.test_only_owner,
+            &self.fader.fader,
+            &self.matrix.matrix,
+        );
+        Ok(())
+    }
+
+    fn finish_matrix(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
+        let GraphBindingBlock {
+            left,
+            right,
+            first_sample,
+        } = block;
+        if let Err(error) = self.matrix.drain_controls() {
+            if self.pending_fader {
+                self.fader.fader.process_pending(left, right);
+                self.pending_fader = false;
+            }
+            #[cfg(any(test, feature = "test-support"))]
+            record_scalar_state(
+                self.fader.test_only_owner,
+                &self.fader.fader,
+                &self.matrix.matrix,
+            );
+            return Err(error);
+        }
+        let mut block = DualMonoBlock::new(left, right, first_sample).map_err(render_error)?;
+        if self.pending_fader
+            && self
+                .fader
+                .fader
+                .process_fader_matrix(&mut self.matrix.matrix, &mut block)
+        {
+            self.pending_fader = false;
+            #[cfg(any(test, feature = "test-support"))]
+            FADER_MATRIX_FUSED_CALLS.fetch_add(1, Ordering::Relaxed);
+            #[cfg(any(test, feature = "test-support"))]
+            FADER_MATRIX_LIVE_WITNESS.with(|value| {
+                let mut counters = value.get();
+                counters[1] = counters[1].saturating_add(1);
+                value.set(counters);
+            });
+            #[cfg(any(test, feature = "test-support"))]
+            record_scalar_state(
+                self.fader.test_only_owner,
+                &self.fader.fader,
+                &self.matrix.matrix,
+            );
+            return Ok(());
+        }
+        if self.pending_fader {
+            self.fader.fader.process_pending_block(&mut block);
+            self.pending_fader = false;
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        FADER_MATRIX_FALLBACK_CALLS.fetch_add(1, Ordering::Relaxed);
+        #[cfg(any(test, feature = "test-support"))]
+        FADER_MATRIX_LIVE_WITNESS.with(|value| {
+            let mut counters = value.get();
+            counters[2] = counters[2].saturating_add(1);
+            value.set(counters);
+        });
+        self.matrix.matrix.process(block);
+        #[cfg(any(test, feature = "test-support"))]
+        record_scalar_state(
+            self.fader.test_only_owner,
+            &self.fader.fader,
+            &self.matrix.matrix,
+        );
+        Ok(())
+    }
+
+    fn complete_pending(&mut self, block: GraphBindingBlock<'_>) {
+        if !self.pending_fader {
+            return;
+        }
+        self.fader.fader.process_pending(block.left, block.right);
+        self.pending_fader = false;
+        #[cfg(any(test, feature = "test-support"))]
+        record_scalar_state(
+            self.fader.test_only_owner,
+            &self.fader.fader,
+            &self.matrix.matrix,
+        );
+    }
+}
 
 fn make_scalar_pair(
     fader: Box<dyn GraphRuntimeProcessor>,
@@ -3891,6 +4263,49 @@ fn make_scalar_pair(
         value.set(lifetime);
     });
     Ok(pair)
+}
+
+fn make_scalar_split_pair(
+    fader: Box<dyn GraphRuntimeProcessor>,
+    matrix: Box<dyn GraphRuntimeProcessor>,
+) -> Result<Box<dyn GraphRuntimeSplitPairProcessor>, ScalarPairOwners> {
+    if fader.as_ref().type_id() != core::any::TypeId::of::<ConsoleFaderProcessor>()
+        || matrix.as_ref().type_id() != core::any::TypeId::of::<ConsoleMatrixProcessor>()
+    {
+        return Err((fader, matrix));
+    }
+    let fader = (fader as Box<dyn Any>)
+        .downcast::<ConsoleFaderProcessor>()
+        .unwrap_or_else(|_| unreachable!("type id was checked before ownership transfer"));
+    let matrix = (matrix as Box<dyn Any>)
+        .downcast::<ConsoleMatrixProcessor>()
+        .unwrap_or_else(|_| unreachable!("type id was checked before ownership transfer"));
+    if fader.control_delivery != BuiltinControlDelivery::BetweenRenderCalls
+        || matrix.control_delivery != BuiltinControlDelivery::BetweenRenderCalls
+    {
+        return Err((fader, matrix));
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    FADER_MATRIX_FACTORY_CALLS.fetch_add(1, Ordering::Relaxed);
+    #[cfg(any(test, feature = "test-support"))]
+    FADER_MATRIX_LIVE_WITNESS.with(|value| {
+        let mut counters = value.get();
+        counters[3] = counters[3].saturating_add(1);
+        counters[5] = counters[5].saturating_add(1);
+        value.set(counters);
+    });
+    #[cfg(any(test, feature = "test-support"))]
+    SCALAR_OUTER_LIFETIME.with(|value| {
+        let mut lifetime = value.get();
+        lifetime[0] = lifetime[0].saturating_add(1);
+        lifetime[1] = lifetime[1].saturating_add(1);
+        value.set(lifetime);
+    });
+    Ok(Box::new(ScalarSplitPairProcessor {
+        fader,
+        matrix,
+        pending_fader: false,
+    }))
 }
 struct MeterObserver(MeterAccumulator);
 impl GraphRuntimeObserver for MeterObserver {
@@ -4089,7 +4504,12 @@ pub use tests::test_only_observed_scalar_pair_binding;
 pub use tests::test_only_prepared_unpaired_graph;
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
-pub use tests::{test_only_prepared_pair_graph, test_only_prepared_scalar_pair_graph};
+pub use tests::{
+    test_only_observed_scalar_declined_split_pair_binding,
+    test_only_observed_scalar_split_pair_binding, test_only_prepared_pair_graph,
+    test_only_prepared_scalar_pair_graph, test_only_prepared_scalar_split_pair_graph,
+    test_only_prepared_scalar_split_pair_graph_with_observer_error,
+};
 
 #[cfg(any(test, feature = "test-support"))]
 #[cfg_attr(not(test), allow(dead_code))]
@@ -4874,6 +5294,7 @@ mod tests {
     }
 
     static ALIAS_OBSERVATIONS: AtomicUsize = AtomicUsize::new(0);
+    static INTERVENING_OBSERVER_ERRORS: AtomicUsize = AtomicUsize::new(0);
     thread_local! {
         static ALIAS_CAPTURE: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
     }
@@ -4887,6 +5308,21 @@ mod tests {
                 capture.extend(block.right.iter().map(|sample| sample.to_bits()));
             });
             Ok(())
+        }
+    }
+
+    struct InterveningErrorObserver {
+        fail_once: bool,
+    }
+    impl GraphRuntimeObserver for InterveningErrorObserver {
+        fn observe(&mut self, _block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
+            INTERVENING_OBSERVER_ERRORS.fetch_add(1, Ordering::Relaxed);
+            if self.fail_once {
+                self.fail_once = false;
+                Err(RenderError::InvalidEnvelope)
+            } else {
+                Ok(())
+            }
         }
     }
 
@@ -5021,6 +5457,9 @@ mod tests {
         Alias,
         AliasObserved,
         Sidechain,
+        Nonadjacent,
+        NonadjacentTrackA,
+        NonadjacentOutputConflict,
     }
 
     fn track_graph(n: usize) -> (PreparedGraphPlan, Vec<DependencyLevel>) {
@@ -5093,12 +5532,20 @@ mod tests {
         } else {
             output.clone()
         };
+        let output_track = if matches!(
+            variant,
+            BoundaryVariant::NonadjacentTrackA | BoundaryVariant::NonadjacentOutputConflict
+        ) {
+            n - 1
+        } else {
+            0
+        };
         edges.push(GraphEdge {
             id: GraphEdgeId::TrackMain {
                 target: main_target.clone(),
             },
             source: GraphPortId {
-                node: stage(0, TrackStage::PostMatrix),
+                node: stage(output_track, TrackStage::PostMatrix),
                 kind: GraphPortKind::MainOutput,
                 effect_port: None,
             },
@@ -5582,6 +6029,44 @@ mod tests {
 
     #[cfg(feature = "test-support")]
     #[must_use]
+    pub fn test_only_prepared_scalar_split_pair_graph() -> PreparedBuiltinsGraphBound {
+        prepared_pair_graph_variant(
+            false,
+            false,
+            false,
+            true,
+            None,
+            Backend::Scalar,
+            2,
+            BoundaryVariant::NonadjacentTrackA,
+            1,
+            None,
+        )
+    }
+
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn test_only_prepared_scalar_split_pair_graph_with_observer_error()
+    -> PreparedBuiltinsGraphBound {
+        prepared_pair_graph_variant_observed(
+            false,
+            false,
+            false,
+            true,
+            None,
+            Backend::Scalar,
+            2,
+            BoundaryVariant::NonadjacentTrackA,
+            1,
+            None,
+            false,
+            true,
+        )
+        .0
+    }
+
+    #[cfg(feature = "test-support")]
+    #[must_use]
     pub fn test_only_observed_scalar_pair_binding() -> (
         PreparedBuiltinsGraphBound,
         graph::GraphResourceEstimate,
@@ -5602,6 +6087,73 @@ mod tests {
                 1,
                 None,
                 true,
+                false,
+            );
+        (
+            bound,
+            estimate,
+            scalar_resource,
+            owners.unwrap(),
+            binding.unwrap(),
+        )
+    }
+
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn test_only_observed_scalar_split_pair_binding() -> (
+        PreparedBuiltinsGraphBound,
+        graph::GraphResourceEstimate,
+        graph::GraphScalarOwnerResourceEstimate,
+        TestPhaseTwoAllocationSnapshot,
+        TestPhaseTwoAllocationSnapshot,
+    ) {
+        let (bound, estimate, scalar_resource, owners, binding) =
+            prepared_pair_graph_variant_observed(
+                false,
+                false,
+                false,
+                true,
+                None,
+                Backend::Scalar,
+                2,
+                BoundaryVariant::NonadjacentTrackA,
+                1,
+                None,
+                true,
+                false,
+            );
+        (
+            bound,
+            estimate,
+            scalar_resource,
+            owners.unwrap(),
+            binding.unwrap(),
+        )
+    }
+
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn test_only_observed_scalar_declined_split_pair_binding() -> (
+        PreparedBuiltinsGraphBound,
+        graph::GraphResourceEstimate,
+        graph::GraphScalarOwnerResourceEstimate,
+        TestPhaseTwoAllocationSnapshot,
+        TestPhaseTwoAllocationSnapshot,
+    ) {
+        let (bound, estimate, scalar_resource, owners, binding) =
+            prepared_pair_graph_variant_observed(
+                false,
+                false,
+                false,
+                false,
+                None,
+                Backend::Scalar,
+                2,
+                BoundaryVariant::NonadjacentTrackA,
+                1,
+                None,
+                true,
+                false,
             );
         (
             bound,
@@ -5660,6 +6212,7 @@ mod tests {
             meter_track,
             extra_post_matrix_capture,
             false,
+            false,
         )
         .0
     }
@@ -5677,6 +6230,7 @@ mod tests {
         meter_track: usize,
         extra_post_matrix_capture: Option<(usize, Arc<std::sync::Mutex<Vec<u32>>>)>,
         observe_binding: bool,
+        intervening_observer_error: bool,
     ) -> (
         PreparedBuiltinsGraphBound,
         graph::GraphResourceEstimate,
@@ -5725,13 +6279,29 @@ mod tests {
                 stage,
             };
             let mut schedule = Vec::new();
-            for index in 0..n {
-                schedule.extend([
-                    stage(index, TrackStage::Input),
-                    stage(index, TrackStage::PostInputBuiltins),
-                    stage(index, TrackStage::PostFader),
-                    stage(index, TrackStage::PostMatrix),
-                ]);
+            if matches!(
+                variant,
+                BoundaryVariant::Nonadjacent
+                    | BoundaryVariant::NonadjacentTrackA
+                    | BoundaryVariant::NonadjacentOutputConflict
+            ) {
+                for stage_kind in [
+                    TrackStage::Input,
+                    TrackStage::PostInputBuiltins,
+                    TrackStage::PostFader,
+                    TrackStage::PostMatrix,
+                ] {
+                    schedule.extend((0..n).map(|index| stage(index, stage_kind)));
+                }
+            } else {
+                for index in 0..n {
+                    schedule.extend([
+                        stage(index, TrackStage::Input),
+                        stage(index, TrackStage::PostInputBuiltins),
+                        stage(index, TrackStage::PostFader),
+                        stage(index, TrackStage::PostMatrix),
+                    ]);
+                }
             }
             if matches!(
                 variant,
@@ -5766,12 +6336,22 @@ mod tests {
             graph.dependency_levels = levels.clone();
         }
         if backend == Backend::Scalar && n >= 2 {
+            let selected_index = if matches!(
+                variant,
+                BoundaryVariant::NonadjacentTrackA | BoundaryVariant::NonadjacentOutputConflict
+            ) {
+                0
+            } else {
+                n - 1
+            };
             let fader = GraphNodeId::TrackStage {
-                track_id: StableGraphId::parse(&track_name(n - 1)).expect("selected scalar track"),
+                track_id: StableGraphId::parse(&track_name(selected_index))
+                    .expect("selected scalar track"),
                 stage: TrackStage::PostFader,
             };
             let matrix = GraphNodeId::TrackStage {
-                track_id: StableGraphId::parse(&track_name(n - 1)).expect("selected scalar track"),
+                track_id: StableGraphId::parse(&track_name(selected_index))
+                    .expect("selected scalar track"),
                 stage: TrackStage::PostMatrix,
             };
             let slot = graph
@@ -5779,11 +6359,63 @@ mod tests {
                 .iter()
                 .position(|node| node == &fader)
                 .expect("scheduled scalar fader");
-            assert_eq!(
-                graph.sequential_schedule.get(slot + 1),
-                Some(&matrix),
-                "the actually prepared scalar ops are adjacent"
-            );
+            if matches!(
+                variant,
+                BoundaryVariant::Nonadjacent
+                    | BoundaryVariant::NonadjacentTrackA
+                    | BoundaryVariant::NonadjacentOutputConflict
+            ) {
+                let other_index = if selected_index == 0 { n - 1 } else { 0 };
+                let other_fader = GraphNodeId::TrackStage {
+                    track_id: StableGraphId::parse(&track_name(other_index))
+                        .expect("other scalar track"),
+                    stage: TrackStage::PostFader,
+                };
+                let other_matrix = GraphNodeId::TrackStage {
+                    track_id: StableGraphId::parse(&track_name(other_index))
+                        .expect("other scalar track"),
+                    stage: TrackStage::PostMatrix,
+                };
+                if selected_index == 0 {
+                    assert_eq!(
+                        graph.sequential_schedule.get(slot + 1),
+                        Some(&other_fader),
+                        "production scalar schedule places F_B between A's pair owners"
+                    );
+                    assert_eq!(
+                        graph.sequential_schedule.get(slot + 2),
+                        Some(&matrix),
+                        "production scalar schedule retains A's matrix boundary"
+                    );
+                    assert_eq!(
+                        graph.sequential_schedule.get(slot + 3),
+                        Some(&other_matrix),
+                        "production scalar schedule retains B's matrix after A's pair"
+                    );
+                } else {
+                    assert_eq!(
+                        graph.sequential_schedule.get(slot + 1),
+                        Some(&other_matrix),
+                        "production scalar schedule places the other matrix between pair owners"
+                    );
+                    assert_eq!(
+                        graph.sequential_schedule.get(slot + 2),
+                        Some(&matrix),
+                        "production scalar schedule retains the selected matrix boundary"
+                    );
+                    assert_eq!(
+                        graph.sequential_schedule.get(slot - 1),
+                        Some(&other_fader),
+                        "production scalar schedule retains both fader boundaries"
+                    );
+                }
+            } else {
+                assert_eq!(
+                    graph.sequential_schedule.get(slot + 1),
+                    Some(&matrix),
+                    "the actually prepared scalar ops are adjacent"
+                );
+            }
         }
         let classes = SessionPoolClasses::from_session(&compiled);
         let scalar_resource = builtins
@@ -5793,6 +6425,18 @@ mod tests {
             .estimate
             .checked_add_scalar_owners(scalar_resource)
             .expect("fixture scalar owner estimate");
+        let emitted_op_count = levels.iter().fold(0_u64, |total, level| {
+            total
+                .checked_add(u64::try_from(level.nodes.len()).expect("fixture level fits u64"))
+                .expect("fixture runtime metadata count")
+        });
+        let runtime_resource =
+            graph::GraphRuntimeMetadataResourceEstimate::checked_for(emitted_op_count)
+                .expect("fixture runtime metadata estimate");
+        graph
+            .estimate
+            .checked_add_runtime_metadata(runtime_resource)
+            .expect("fixture runtime metadata estimate fold");
         let owner_observation =
             observe_binding.then(test_only_begin_phase_two_allocation_observation);
         let mut artifact =
@@ -5836,6 +6480,29 @@ mod tests {
                     },
                     0x459a,
                     Box::new(Capture(capture)),
+                ));
+        }
+        if intervening_observer_error {
+            let observer_track = if variant == BoundaryVariant::NonadjacentTrackA {
+                n - 1
+            } else {
+                0
+            };
+            let observer_stage = if variant == BoundaryVariant::NonadjacentTrackA {
+                TrackStage::PostFader
+            } else {
+                TrackStage::PostMatrix
+            };
+            artifact
+                .builtin_observers
+                .push(GraphNodeObserverBinding::new(
+                    GraphNodeId::TrackStage {
+                        track_id: StableGraphId::parse(&track_name(observer_track))
+                            .expect("observer track"),
+                        stage: observer_stage,
+                    },
+                    0x459b,
+                    Box::new(InterveningErrorObserver { fail_once: true }),
                 ));
         }
         let envelope = artifact.graph.envelope;
@@ -5910,6 +6577,58 @@ mod tests {
                 },
             )
             .map(|_| ())
+    }
+
+    #[cfg(feature = "test-support")]
+    fn render_failed_buffer_result(
+        bound: &mut PreparedBuiltinsGraphBound,
+        sample: u64,
+        completion_disabled: bool,
+        target: u32,
+    ) -> (RenderError, graph::TestOnlyFailedBufferCapture) {
+        graph::test_only_arm_failed_buffer_capture(target);
+        graph::test_only_set_completion_disabled(completion_disabled);
+        let mut pcm = vec![0.0_f32; HARNESS_QUANTUM as usize * 2];
+        let error = render_bound_result(bound, sample, &mut pcm)
+            .expect_err("the failed-render fixture must return its injected error");
+        graph::test_only_set_completion_disabled(false);
+        (error, graph::test_only_failed_buffer_capture())
+    }
+
+    #[cfg(feature = "test-support")]
+    fn first_fader_state(trace: TestOnlyScalarStateTrace, owner: u16) -> [u32; 14] {
+        trace.fader_owners[..trace.fader_len]
+            .iter()
+            .position(|candidate| *candidate == owner)
+            .map(|index| trace.fader_words[index])
+            .expect("owner fader state trace")
+    }
+
+    #[cfg(feature = "test-support")]
+    fn last_fader_state(trace: TestOnlyScalarStateTrace, owner: u16) -> [u32; 14] {
+        trace.fader_owners[..trace.fader_len]
+            .iter()
+            .rposition(|candidate| *candidate == owner)
+            .map(|index| trace.fader_words[index])
+            .expect("owner fader state trace")
+    }
+
+    #[cfg(feature = "test-support")]
+    fn first_matrix_state(trace: TestOnlyScalarStateTrace, owner: u16) -> [u32; 15] {
+        trace.matrix_owners[..trace.matrix_len]
+            .iter()
+            .position(|candidate| *candidate == owner)
+            .map(|index| trace.matrix_words[index])
+            .expect("owner matrix state trace")
+    }
+
+    #[cfg(feature = "test-support")]
+    fn last_matrix_state(trace: TestOnlyScalarStateTrace, owner: u16) -> [u32; 15] {
+        trace.matrix_owners[..trace.matrix_len]
+            .iter()
+            .rposition(|candidate| *candidate == owner)
+            .map(|index| trace.matrix_words[index])
+            .expect("owner matrix state trace")
     }
 
     fn render_scalar_pair_and_compare(
@@ -6220,6 +6939,1203 @@ mod tests {
                 .is_some_and(|meter| meter.consumer.try_pop().is_ok()),
             "the declining post-fader observer publishes real data"
         );
+    }
+
+    #[test]
+    fn actual_scalar_nonadjacent_schedule_selects_the_split_owner() {
+        let _guard = PAIR_WITNESS_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let paired_capture = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let separate_capture = Arc::new(std::sync::Mutex::new(Vec::new()));
+        test_only_reset_fader_matrix_witness();
+        let mut paired = prepared_pair_graph_variant(
+            false,
+            false,
+            false,
+            true,
+            Some(Arc::clone(&paired_capture)),
+            Backend::Scalar,
+            2,
+            BoundaryVariant::Nonadjacent,
+            1,
+            None,
+        );
+        let selected = test_only_fader_matrix_witness();
+        assert_eq!((selected.factory_calls, selected.factory_members), (1, 1));
+        let mut separate = prepared_pair_graph_variant(
+            false,
+            false,
+            false,
+            false,
+            Some(Arc::clone(&separate_capture)),
+            Backend::Scalar,
+            2,
+            BoundaryVariant::Nonadjacent,
+            1,
+            None,
+        );
+        let settled = render_scalar_pair_and_compare(
+            &mut paired,
+            &mut separate,
+            &paired_capture,
+            &separate_capture,
+            0,
+            (1, 0),
+        );
+        assert_eq!(settled.factory_calls, 0, "factory runs only at preparation");
+        assert_eq!(
+            settled.fused_calls, 1,
+            "settled split pair uses fused arithmetic"
+        );
+        assert_eq!(settled.fallback_calls, 0);
+    }
+
+    #[test]
+    fn actual_scalar_overlapping_nonadjacent_candidates_select_one_and_keep_the_other_separate() {
+        let _guard = PAIR_WITNESS_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let paired_a = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let paired_b = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let separate_a = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let separate_b = Arc::new(std::sync::Mutex::new(Vec::new()));
+        test_only_reset_fader_matrix_witness();
+        let mut paired = prepared_pair_graph_variant(
+            false,
+            false,
+            false,
+            true,
+            Some(Arc::clone(&paired_b)),
+            Backend::Scalar,
+            2,
+            BoundaryVariant::NonadjacentTrackA,
+            1,
+            Some((0, Arc::clone(&paired_a))),
+        );
+        let selected = graph::test_only_selected_split_fader()
+            .expect("the first overlapping candidate is selected");
+        assert_eq!(
+            selected.node,
+            GraphNodeId::TrackStage {
+                track_id: StableGraphId::parse("t00").expect("track"),
+                stage: TrackStage::PostFader,
+            }
+        );
+        let preparation = test_only_fader_matrix_witness();
+        assert_eq!(
+            (preparation.factory_calls, preparation.factory_members),
+            (1, 1)
+        );
+
+        let mut separate = prepared_pair_graph_variant(
+            false,
+            false,
+            false,
+            false,
+            Some(Arc::clone(&separate_b)),
+            Backend::Scalar,
+            2,
+            BoundaryVariant::NonadjacentTrackA,
+            1,
+            Some((0, Arc::clone(&separate_a))),
+        );
+        test_only_reset_fader_matrix_witness();
+        let paired_output = render_bound(&mut paired, 0);
+        let paired_witness = test_only_fader_matrix_witness();
+        let paired_trace = test_only_scalar_state_trace();
+        test_only_reset_fader_matrix_witness();
+        let separate_output = render_bound(&mut separate, 0);
+        let separate_trace = test_only_scalar_state_trace();
+
+        assert_eq!(
+            paired_output, separate_output,
+            "overlap keeps PCM unchanged"
+        );
+        assert_eq!(
+            std::mem::take(&mut *paired_a.lock().unwrap()),
+            std::mem::take(&mut *separate_a.lock().unwrap()),
+            "the selected first candidate has exact PCM"
+        );
+        assert_eq!(
+            std::mem::take(&mut *paired_b.lock().unwrap()),
+            std::mem::take(&mut *separate_b.lock().unwrap()),
+            "the later overlapping candidate stays a separate owner"
+        );
+        assert_eq!(
+            (paired_witness.process_calls, paired_witness.process_members),
+            (1, 1)
+        );
+        assert_eq!(
+            (paired_witness.fused_calls, paired_witness.fallback_calls),
+            (1, 0)
+        );
+        assert!(paired_trace.fader_owners[..paired_trace.fader_len].contains(&1));
+        assert!(paired_trace.matrix_owners[..paired_trace.matrix_len].contains(&1));
+        assert_eq!(
+            first_fader_state(paired_trace, 1),
+            first_fader_state(separate_trace, 1),
+            "the later overlapping fader keeps its separate state: paired={paired_trace:?}, separate={separate_trace:?}"
+        );
+        assert_eq!(
+            first_matrix_state(paired_trace, 1),
+            first_matrix_state(separate_trace, 1),
+            "the later overlapping matrix keeps its separate state"
+        );
+        assert_eq!(
+            last_fader_state(paired_trace, 1),
+            last_fader_state(separate_trace, 1),
+            "the later overlapping fader reaches the same final state"
+        );
+        assert_eq!(
+            last_matrix_state(paired_trace, 1),
+            last_matrix_state(separate_trace, 1),
+            "the later overlapping matrix reaches the same final state"
+        );
+    }
+
+    #[test]
+    fn actual_scalar_nonadjacent_physical_output_conflict_declines_before_owner_transfer() {
+        let _guard = PAIR_WITNESS_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let declined_capture = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let reference_capture = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        // Keep the otherwise-equivalent candidate live: with t00 observed, the t01 interval is
+        // the only remaining candidate when the output is t00. This proves the conflict fixture
+        // below is declining a real candidate rather than merely finding no pair.
+        test_only_reset_fader_matrix_witness();
+        let eligible = prepared_pair_graph_variant(
+            true,
+            false,
+            false,
+            true,
+            None,
+            Backend::Scalar,
+            2,
+            BoundaryVariant::Nonadjacent,
+            0,
+            None,
+        );
+        let eligible_witness = test_only_fader_matrix_witness();
+        assert_eq!(
+            (
+                eligible_witness.factory_calls,
+                eligible_witness.factory_members
+            ),
+            (1, 1),
+            "the same t01 candidate is eligible when the output buffer is free"
+        );
+        assert_eq!(
+            graph::test_only_selected_split_fader()
+                .expect("eligible t01 candidate")
+                .node,
+            GraphNodeId::TrackStage {
+                track_id: StableGraphId::parse("t01").expect("track"),
+                stage: TrackStage::PostFader,
+            }
+        );
+        drop(eligible);
+
+        test_only_reset_fader_matrix_witness();
+        let mut declined = prepared_pair_graph_variant(
+            true,
+            false,
+            false,
+            true,
+            Some(Arc::clone(&declined_capture)),
+            Backend::Scalar,
+            2,
+            BoundaryVariant::NonadjacentOutputConflict,
+            0,
+            None,
+        );
+        let prepared = test_only_fader_matrix_witness();
+        assert_eq!(
+            (prepared.factory_calls, prepared.factory_members),
+            (0, 0),
+            "the output-buffer conflict declines before moving either owner"
+        );
+        let mut reference = prepared_pair_graph_variant(
+            false,
+            false,
+            false,
+            false,
+            Some(Arc::clone(&reference_capture)),
+            Backend::Scalar,
+            2,
+            BoundaryVariant::NonadjacentOutputConflict,
+            0,
+            None,
+        );
+        test_only_reset_fader_matrix_witness();
+        let declined_output = render_bound(&mut declined, 0);
+        let declined_state = test_only_fader_matrix_witness();
+        test_only_reset_fader_matrix_witness();
+        let reference_output = render_bound(&mut reference, 0);
+        let reference_state = test_only_fader_matrix_witness();
+        assert_eq!(declined_output, reference_output);
+        assert_eq!(
+            std::mem::take(&mut *declined_capture.lock().unwrap()),
+            std::mem::take(&mut *reference_capture.lock().unwrap()),
+            "the declined physical conflict preserves separate-owner PCM"
+        );
+        assert_eq!(
+            declined_state.scalar_fader_words,
+            reference_state.scalar_fader_words
+        );
+        assert_eq!(
+            declined_state.scalar_matrix_words,
+            reference_state.scalar_matrix_words
+        );
+        assert_eq!(
+            (declined_state.process_calls, declined_state.factory_calls),
+            (0, 0)
+        );
+    }
+
+    #[test]
+    fn actual_scalar_nonadjacent_intervening_observer_error_completes_and_retries() {
+        let _guard = PAIR_WITNESS_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let paired_capture = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let separate_capture = Arc::new(std::sync::Mutex::new(Vec::new()));
+        test_only_reset_fader_matrix_witness();
+        let mut paired = prepared_pair_graph_variant_observed(
+            false,
+            false,
+            false,
+            true,
+            Some(Arc::clone(&paired_capture)),
+            Backend::Scalar,
+            2,
+            BoundaryVariant::Nonadjacent,
+            1,
+            None,
+            false,
+            true,
+        )
+        .0;
+        let paired_prepared = test_only_fader_matrix_witness();
+        assert_eq!(
+            (
+                paired_prepared.factory_calls,
+                paired_prepared.factory_members
+            ),
+            (1, 1)
+        );
+        test_only_reset_fader_matrix_witness();
+        let mut separate = prepared_pair_graph_variant_observed(
+            false,
+            false,
+            false,
+            false,
+            Some(Arc::clone(&separate_capture)),
+            Backend::Scalar,
+            2,
+            BoundaryVariant::Nonadjacent,
+            1,
+            None,
+            false,
+            true,
+        )
+        .0;
+        let separate_prepared = test_only_fader_matrix_witness();
+        assert_eq!(
+            (
+                separate_prepared.factory_calls,
+                separate_prepared.factory_members
+            ),
+            (0, 0)
+        );
+        let fader = TrackFaderRecord::FaderDb {
+            lanes: BuiltinLaneSelector::Both,
+            db: -6.0,
+            smoothing_samples: 0,
+        };
+        let matrix = TrackControlRecord {
+            matrix: Matrix2x2 {
+                ll: 0.5,
+                lr: 0.25,
+                rl: -0.25,
+                rr: 0.75,
+            },
+            smoothing_samples: 0,
+        };
+        for bound in [&mut paired, &mut separate] {
+            bound.track_controls[1].fader.try_push(fader).unwrap();
+            bound.track_controls[1].producer.try_push(matrix).unwrap();
+        }
+
+        INTERVENING_OBSERVER_ERRORS.store(0, Ordering::Relaxed);
+        test_only_reset_fader_matrix_witness();
+        let mut paired_pcm = vec![0.0_f32; HARNESS_QUANTUM as usize * 2];
+        let paired_error = render_bound_result(&mut paired, 0, &mut paired_pcm).unwrap_err();
+        let paired_failed = test_only_fader_matrix_witness();
+        assert_eq!(paired_error, RenderError::InvalidEnvelope);
+        assert_eq!(INTERVENING_OBSERVER_ERRORS.load(Ordering::Relaxed), 1);
+        assert_eq!(paired_failed.fader_records_drained, 1);
+        assert_eq!(paired_failed.matrix_records_drained, 0);
+
+        INTERVENING_OBSERVER_ERRORS.store(0, Ordering::Relaxed);
+        test_only_reset_fader_matrix_witness();
+        let mut separate_pcm = vec![0.0_f32; HARNESS_QUANTUM as usize * 2];
+        let separate_error = render_bound_result(&mut separate, 0, &mut separate_pcm).unwrap_err();
+        let separate_failed = test_only_fader_matrix_witness();
+        assert_eq!(separate_error, paired_error);
+        assert_eq!(separate_failed.fader_records_drained, 1);
+        assert_eq!(separate_failed.matrix_records_drained, 0);
+        assert_eq!(
+            paired_failed.scalar_fader_words, separate_failed.scalar_fader_words,
+            "observer error preserves fader state before retry"
+        );
+        assert_eq!(
+            paired_failed.scalar_matrix_words, separate_failed.scalar_matrix_words,
+            "observer error leaves the later matrix command untouched"
+        );
+
+        INTERVENING_OBSERVER_ERRORS.store(0, Ordering::Relaxed);
+        test_only_reset_fader_matrix_witness();
+        paired_pcm.fill(0.0);
+        render_bound_result(&mut paired, HARNESS_QUANTUM as u64, &mut paired_pcm)
+            .expect("paired retry after observer error");
+        let paired_retry = test_only_fader_matrix_witness();
+        INTERVENING_OBSERVER_ERRORS.store(0, Ordering::Relaxed);
+        test_only_reset_fader_matrix_witness();
+        separate_pcm.fill(0.0);
+        render_bound_result(&mut separate, HARNESS_QUANTUM as u64, &mut separate_pcm)
+            .expect("separate retry after observer error");
+        let separate_retry = test_only_fader_matrix_witness();
+        assert_eq!(
+            paired_pcm
+                .iter()
+                .map(|sample| sample.to_bits())
+                .collect::<Vec<_>>(),
+            separate_pcm
+                .iter()
+                .map(|sample| sample.to_bits())
+                .collect::<Vec<_>>(),
+            "retry renders the same PCM after the observer error"
+        );
+        assert_eq!(paired_retry.matrix_records_drained, 1);
+        assert_eq!(
+            paired_retry.scalar_fader_words,
+            separate_retry.scalar_fader_words
+        );
+        assert_eq!(
+            paired_retry.scalar_matrix_words,
+            separate_retry.scalar_matrix_words
+        );
+        assert_eq!(
+            (paired_retry.fused_calls, paired_retry.fallback_calls),
+            (1, 0)
+        );
+        assert_eq!(
+            std::mem::take(&mut *paired_capture.lock().unwrap()),
+            std::mem::take(&mut *separate_capture.lock().unwrap())
+        );
+    }
+
+    #[cfg(all(test, feature = "test-support"))]
+    #[test]
+    fn actual_scalar_nonadjacent_failed_render_materializes_post_fader_before_error() {
+        let _guard = PAIR_WITNESS_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let fader = TrackFaderRecord::FaderDb {
+            lanes: BuiltinLaneSelector::Both,
+            db: -6.0,
+            smoothing_samples: 0,
+        };
+        let matrix = Matrix2x2 {
+            ll: 0.5,
+            lr: 0.25,
+            rl: -0.25,
+            rr: 0.75,
+        };
+        let make_observer_case = |between_render_calls| {
+            let mut bound = prepared_pair_graph_variant_observed(
+                false,
+                false,
+                false,
+                between_render_calls,
+                None,
+                Backend::Scalar,
+                2,
+                BoundaryVariant::NonadjacentTrackA,
+                1,
+                None,
+                false,
+                true,
+            )
+            .0;
+            bound.track_controls[0].fader.try_push(fader).unwrap();
+            bound.track_controls[0]
+                .producer
+                .try_push(TrackControlRecord {
+                    matrix,
+                    smoothing_samples: 0,
+                })
+                .unwrap();
+            bound
+        };
+
+        let mut paired = make_observer_case(true);
+        let mut separate = make_observer_case(false);
+        assert!(matches!(
+            paired.test_only_post_fader_node.as_ref(),
+            Some(GraphNodeId::TrackStage {
+                track_id,
+                stage: TrackStage::PostFader,
+            }) if track_id.as_str() == "t00"
+        ));
+        assert!(separate.test_only_post_fader_node.is_none());
+        let selected_post_fader_buffer = paired
+            .test_only_post_fader_buffer
+            .expect("paired fixture has a selected post-fader buffer");
+        INTERVENING_OBSERVER_ERRORS.store(0, Ordering::Relaxed);
+        test_only_reset_fader_matrix_witness();
+        let (paired_error, paired_capture) =
+            render_failed_buffer_result(&mut paired, 0, false, selected_post_fader_buffer);
+        let paired_failed = test_only_fader_matrix_witness();
+        let paired_trace = test_only_scalar_state_trace();
+        INTERVENING_OBSERVER_ERRORS.store(0, Ordering::Relaxed);
+        test_only_reset_fader_matrix_witness();
+        let (separate_error, separate_capture) =
+            render_failed_buffer_result(&mut separate, 0, false, selected_post_fader_buffer);
+        let separate_failed = test_only_fader_matrix_witness();
+        let separate_trace = test_only_scalar_state_trace();
+        assert!(!paired_trace.fader_overflow && !paired_trace.matrix_overflow);
+        assert!(!separate_trace.fader_overflow && !separate_trace.matrix_overflow);
+        assert_eq!(paired_error, separate_error);
+        assert!(paired_capture.captured && separate_capture.captured);
+        assert!(!paired_capture.overflow && !separate_capture.overflow);
+        assert_eq!(paired_capture, separate_capture);
+        assert_eq!(
+            first_fader_state(paired_trace, 0),
+            first_fader_state(separate_trace, 0),
+            "observer failure preserves t00 fader state at F_A"
+        );
+        assert_eq!(
+            last_fader_state(paired_trace, 0),
+            first_fader_state(separate_trace, 0),
+            "observer failure completes t00 fader state before returning"
+        );
+        let initial_matrix = initial_matrix_state(0).expect("t00 initial matrix state");
+        assert_eq!(
+            first_matrix_state(paired_trace, 0),
+            initial_matrix,
+            "observer failure preserves t00 matrix state at M_A"
+        );
+        assert_eq!(
+            last_matrix_state(paired_trace, 0),
+            initial_matrix,
+            "observer failure preserves t00 matrix state at completion"
+        );
+        assert_eq!(paired_failed.matrix_records_drained, 0);
+        assert_eq!(separate_failed.matrix_records_drained, 0);
+
+        // The same post-fader assertion must discriminate the executor's completion step. With
+        // completion disabled, the split owner leaves its deferred fader output behind while the
+        // separate owner has already materialized it.
+        let mut disabled = make_observer_case(true);
+        INTERVENING_OBSERVER_ERRORS.store(0, Ordering::Relaxed);
+        let (_, disabled_capture) =
+            render_failed_buffer_result(&mut disabled, 0, true, selected_post_fader_buffer);
+        assert_ne!(
+            disabled_capture, separate_capture,
+            "omitting pending completion must fail the post-fader buffer equality"
+        );
+
+        let make_matrix_case = |between_render_calls| {
+            let mut bound = prepared_pair_graph_variant(
+                false,
+                false,
+                false,
+                between_render_calls,
+                None,
+                Backend::Scalar,
+                2,
+                BoundaryVariant::NonadjacentTrackA,
+                1,
+                None,
+            );
+            bound.track_controls[0].fader.try_push(fader).unwrap();
+            bound.track_controls[0]
+                .producer
+                .try_push(TrackControlRecord {
+                    matrix,
+                    smoothing_samples: 0,
+                })
+                .unwrap();
+            bound.track_controls[0]
+                .producer
+                .try_push(TrackControlRecord {
+                    matrix: Matrix2x2 {
+                        ll: f32::NAN,
+                        ..matrix
+                    },
+                    smoothing_samples: 0,
+                })
+                .unwrap();
+            bound
+        };
+        let mut paired = make_matrix_case(true);
+        let mut separate = make_matrix_case(false);
+        assert!(matches!(
+            paired.test_only_post_fader_node.as_ref(),
+            Some(GraphNodeId::TrackStage {
+                track_id,
+                stage: TrackStage::PostFader,
+            }) if track_id.as_str() == "t00"
+        ));
+        assert!(separate.test_only_post_fader_node.is_none());
+        let selected_post_fader_buffer = paired
+            .test_only_post_fader_buffer
+            .expect("paired fixture has a selected post-fader buffer");
+        test_only_reset_fader_matrix_witness();
+        let (paired_error, paired_capture) =
+            render_failed_buffer_result(&mut paired, 0, false, selected_post_fader_buffer);
+        let paired_failed = test_only_fader_matrix_witness();
+        let paired_trace = test_only_scalar_state_trace();
+        test_only_reset_fader_matrix_witness();
+        let (separate_error, separate_capture) =
+            render_failed_buffer_result(&mut separate, 0, false, selected_post_fader_buffer);
+        let separate_failed = test_only_fader_matrix_witness();
+        let separate_trace = test_only_scalar_state_trace();
+        assert!(!paired_trace.fader_overflow && !paired_trace.matrix_overflow);
+        assert!(!separate_trace.fader_overflow && !separate_trace.matrix_overflow);
+        assert_eq!(paired_error, separate_error);
+        assert!(paired_capture.captured && separate_capture.captured);
+        assert_eq!(paired_capture, separate_capture);
+        assert_eq!(
+            first_fader_state(paired_trace, 0),
+            first_fader_state(separate_trace, 0),
+            "matrix failure preserves t00 fader state at F_A"
+        );
+        assert_eq!(
+            last_fader_state(paired_trace, 0),
+            first_fader_state(separate_trace, 0),
+            "matrix failure completes t00 fader state before returning"
+        );
+        let initial_matrix = initial_matrix_state(0).expect("t00 initial matrix state");
+        assert_eq!(
+            first_matrix_state(paired_trace, 0),
+            initial_matrix,
+            "matrix failure preserves t00 matrix state at F_A"
+        );
+        assert_eq!(
+            last_matrix_state(paired_trace, 0),
+            first_matrix_state(separate_trace, 0),
+            "matrix failure preserves t00 matrix state at M_A/error completion"
+        );
+        assert_eq!(paired_failed.fader_records_drained, 1);
+        assert_eq!(paired_failed.matrix_records_drained, 2);
+        assert_eq!(
+            paired_failed.fader_records_drained,
+            separate_failed.fader_records_drained
+        );
+        assert_eq!(
+            paired_failed.matrix_records_drained,
+            separate_failed.matrix_records_drained
+        );
+    }
+
+    #[cfg(all(test, feature = "test-support"))]
+    #[test]
+    fn actual_scalar_nonadjacent_ramp_retarget_and_failed_retry_stay_at_original_boundaries() {
+        let _guard = PAIR_WITNESS_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let matrix_a = Matrix2x2 {
+            ll: 0.5,
+            lr: 0.25,
+            rl: -0.25,
+            rr: 0.75,
+        };
+        let matrix_b = Matrix2x2 {
+            ll: 0.75,
+            lr: -0.5,
+            rl: 0.125,
+            rr: 0.625,
+        };
+
+        // The selected production fixture is t00's genuinely nonadjacent F_A -> F_B -> M_A ->
+        // M_B interval. Keep t00's post-matrix capture separate from the output track so this
+        // assertion observes the paired owner itself as well as the graph's final PCM.
+        let make_pair = || {
+            let paired_capture = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let separate_capture = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let paired = prepared_pair_graph_variant(
+                false,
+                false,
+                false,
+                true,
+                Some(Arc::clone(&paired_capture)),
+                Backend::Scalar,
+                2,
+                BoundaryVariant::NonadjacentTrackA,
+                1,
+                Some((0, Arc::clone(&paired_capture))),
+            );
+            let separate = prepared_pair_graph_variant(
+                false,
+                false,
+                false,
+                false,
+                Some(Arc::clone(&separate_capture)),
+                Backend::Scalar,
+                2,
+                BoundaryVariant::NonadjacentTrackA,
+                1,
+                Some((0, Arc::clone(&separate_capture))),
+            );
+            assert_eq!(
+                (
+                    test_only_fader_matrix_witness().factory_calls,
+                    test_only_fader_matrix_witness().factory_members
+                ),
+                (1, 1),
+                "paired fixture selects the t00 split owner"
+            );
+            test_only_reset_fader_matrix_witness();
+            (paired, separate, paired_capture, separate_capture)
+        };
+
+        let render_and_compare = |paired: &mut PreparedBuiltinsGraphBound,
+                                  separate: &mut PreparedBuiltinsGraphBound,
+                                  paired_capture: &Arc<std::sync::Mutex<Vec<u32>>>,
+                                  separate_capture: &Arc<std::sync::Mutex<Vec<u32>>>,
+                                  sample: u64| {
+            let mut paired_pcm = vec![0.0_f32; HARNESS_QUANTUM as usize * 2];
+            let mut separate_pcm = vec![0.0_f32; HARNESS_QUANTUM as usize * 2];
+            test_only_reset_fader_matrix_witness();
+            render_bound_result(paired, sample, &mut paired_pcm).expect("paired render");
+            let paired_witness = test_only_fader_matrix_witness();
+            let paired_trace = test_only_scalar_state_trace();
+            test_only_reset_fader_matrix_witness();
+            render_bound_result(separate, sample, &mut separate_pcm).expect("separate render");
+            let separate_witness = test_only_fader_matrix_witness();
+            let separate_trace = test_only_scalar_state_trace();
+            assert!(!paired_trace.fader_overflow && !paired_trace.matrix_overflow);
+            assert!(!separate_trace.fader_overflow && !separate_trace.matrix_overflow);
+            assert_eq!(
+                std::mem::take(&mut *paired_capture.lock().unwrap()),
+                std::mem::take(&mut *separate_capture.lock().unwrap()),
+                "paired and separate t00/t01 post-matrix PCM"
+            );
+            assert_eq!(
+                paired_pcm
+                    .iter()
+                    .map(|sample| sample.to_bits())
+                    .collect::<Vec<_>>(),
+                separate_pcm
+                    .iter()
+                    .map(|sample| sample.to_bits())
+                    .collect::<Vec<_>>(),
+                "paired and separate output PCM"
+            );
+            assert_eq!(
+                last_fader_state(paired_trace, 0),
+                last_fader_state(separate_trace, 0),
+                "t00 fader state at its original boundary"
+            );
+            assert_eq!(
+                last_matrix_state(paired_trace, 0),
+                last_matrix_state(separate_trace, 0),
+                "t00 matrix state at its original boundary"
+            );
+            (
+                paired_witness,
+                separate_witness,
+                paired_trace,
+                separate_trace,
+            )
+        };
+
+        // A ramping fader must execute at F_A. The split owner cannot defer this block, so the
+        // matrix boundary uses the original two-stage fallback and leaves no pending fader.
+        let (mut paired, mut separate, paired_capture, separate_capture) = make_pair();
+        for bound in [&mut paired, &mut separate] {
+            bound.track_controls[0]
+                .fader
+                .try_push(TrackFaderRecord::FaderDb {
+                    lanes: BuiltinLaneSelector::Both,
+                    db: -6.0,
+                    smoothing_samples: 3,
+                })
+                .unwrap();
+        }
+        let (paired_ramp, separate_ramp, paired_trace, separate_trace) = render_and_compare(
+            &mut paired,
+            &mut separate,
+            &paired_capture,
+            &separate_capture,
+            0,
+        );
+        assert_eq!(
+            (paired_ramp.process_calls, paired_ramp.process_members),
+            (1, 1)
+        );
+        assert_eq!(
+            (paired_ramp.fused_calls, paired_ramp.fallback_calls),
+            (0, 1)
+        );
+        assert_eq!(
+            (
+                paired_ramp.fader_records_drained,
+                paired_ramp.matrix_records_drained
+            ),
+            (1, 0)
+        );
+        assert_eq!(
+            first_fader_state(paired_trace, 0),
+            last_fader_state(paired_trace, 0),
+            "ramping fader state is materialized at F_A before M_A"
+        );
+        assert_eq!(
+            first_fader_state(paired_trace, 0),
+            first_fader_state(separate_trace, 0)
+        );
+        assert_eq!(
+            paired_ramp.fader_records_drained,
+            separate_ramp.fader_records_drained
+        );
+
+        // A settled fader plus a ramping matrix must defer only the fader and fall back at M_A.
+        let (mut paired, mut separate, paired_capture, separate_capture) = make_pair();
+        for bound in [&mut paired, &mut separate] {
+            bound.track_controls[0]
+                .fader
+                .try_push(TrackFaderRecord::FaderDb {
+                    lanes: BuiltinLaneSelector::Both,
+                    db: -6.0,
+                    smoothing_samples: 0,
+                })
+                .unwrap();
+            bound.track_controls[0]
+                .producer
+                .try_push(TrackControlRecord {
+                    matrix: matrix_a,
+                    smoothing_samples: 96,
+                })
+                .unwrap();
+        }
+        let (paired_matrix_ramp, separate_matrix_ramp, _, _) = render_and_compare(
+            &mut paired,
+            &mut separate,
+            &paired_capture,
+            &separate_capture,
+            0,
+        );
+        assert_eq!(
+            (
+                paired_matrix_ramp.fused_calls,
+                paired_matrix_ramp.fallback_calls
+            ),
+            (0, 1)
+        );
+        assert_eq!(
+            (
+                paired_matrix_ramp.fader_records_drained,
+                paired_matrix_ramp.matrix_records_drained
+            ),
+            (1, 1)
+        );
+        assert_eq!(
+            paired_matrix_ramp.matrix_records_drained,
+            separate_matrix_ramp.matrix_records_drained
+        );
+
+        // Retargeting the matrix while its prior ramp is in flight must still run at M_A. The
+        // second block also proves that the split owner clears its pending flag on success.
+        for bound in [&mut paired, &mut separate] {
+            bound.track_controls[0]
+                .producer
+                .try_push(TrackControlRecord {
+                    matrix: matrix_b,
+                    smoothing_samples: 3,
+                })
+                .unwrap();
+        }
+        let (paired_retarget, separate_retarget, _, _) = render_and_compare(
+            &mut paired,
+            &mut separate,
+            &paired_capture,
+            &separate_capture,
+            HARNESS_QUANTUM as u64,
+        );
+        assert_eq!(
+            (paired_retarget.fused_calls, paired_retarget.fallback_calls),
+            (0, 1)
+        );
+        assert_eq!(
+            paired_retarget.matrix_records_drained,
+            separate_retarget.matrix_records_drained
+        );
+
+        // A failed M_A render must complete the pending fader before returning, retain the matrix
+        // queue tail, and retry exactly once. The valid ramp before the malformed record makes
+        // the failure path exercise both a matrix retarget and the original error boundary.
+        let (mut paired, mut separate, paired_capture, separate_capture) = make_pair();
+        let invalid_matrix = TrackControlRecord {
+            matrix: Matrix2x2 {
+                ll: f32::NAN,
+                ..matrix_a
+            },
+            smoothing_samples: 0,
+        };
+        let matrix_tail = TrackControlRecord {
+            matrix: Matrix2x2::IDENTITY,
+            smoothing_samples: 0,
+        };
+        for bound in [&mut paired, &mut separate] {
+            bound.track_controls[0]
+                .fader
+                .try_push(TrackFaderRecord::FaderDb {
+                    lanes: BuiltinLaneSelector::Both,
+                    db: -6.0,
+                    smoothing_samples: 0,
+                })
+                .unwrap();
+            for record in [
+                TrackControlRecord {
+                    matrix: matrix_a,
+                    smoothing_samples: 96,
+                },
+                invalid_matrix,
+                matrix_tail,
+            ] {
+                bound.track_controls[0].producer.try_push(record).unwrap();
+            }
+        }
+        let selected_buffer = paired
+            .test_only_post_fader_buffer
+            .expect("paired fixture has t00 post-fader buffer");
+        test_only_reset_fader_matrix_witness();
+        let (paired_error, paired_failed_capture) =
+            render_failed_buffer_result(&mut paired, 0, false, selected_buffer);
+        let paired_failed = test_only_fader_matrix_witness();
+        let paired_failed_trace = test_only_scalar_state_trace();
+        test_only_reset_fader_matrix_witness();
+        let (separate_error, separate_failed_capture) =
+            render_failed_buffer_result(&mut separate, 0, false, selected_buffer);
+        let separate_failed = test_only_fader_matrix_witness();
+        let separate_failed_trace = test_only_scalar_state_trace();
+        assert_eq!(paired_error, separate_error);
+        assert_eq!(paired_failed_capture, separate_failed_capture);
+        assert_eq!(
+            (
+                paired_failed.fader_records_drained,
+                paired_failed.matrix_records_drained
+            ),
+            (1, 2)
+        );
+        assert_eq!(
+            (
+                paired_failed.fader_records_drained,
+                paired_failed.matrix_records_drained
+            ),
+            (
+                separate_failed.fader_records_drained,
+                separate_failed.matrix_records_drained
+            )
+        );
+        assert_eq!(
+            last_fader_state(paired_failed_trace, 0),
+            first_fader_state(separate_failed_trace, 0),
+            "failed M_A render completes t00 fader before returning"
+        );
+        assert_eq!(
+            last_matrix_state(paired_failed_trace, 0),
+            last_matrix_state(separate_failed_trace, 0),
+            "failed M_A render retains the valid matrix prefix"
+        );
+
+        let (paired_retry, separate_retry, _, _) = render_and_compare(
+            &mut paired,
+            &mut separate,
+            &paired_capture,
+            &separate_capture,
+            HARNESS_QUANTUM as u64,
+        );
+        assert_eq!(
+            (paired_retry.fused_calls, paired_retry.fallback_calls),
+            (1, 0)
+        );
+        assert_eq!(paired_retry.matrix_records_drained, 1);
+        assert_eq!(
+            (
+                paired_retry.fader_records_drained,
+                paired_retry.matrix_records_drained
+            ),
+            (
+                separate_retry.fader_records_drained,
+                separate_retry.matrix_records_drained
+            ),
+            "retry drains only the retained matrix tail once"
+        );
+    }
+
+    #[test]
+    fn actual_scalar_nonadjacent_invalid_fader_matrix_boundaries_preserve_retry_order() {
+        let _guard = PAIR_WITNESS_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let cases = [
+            ("F_A", 0_usize, true, false),
+            ("F_B", 1_usize, true, false),
+            ("M_A", 0_usize, false, true),
+            ("M_B", 1_usize, false, true),
+        ];
+        for (label, track, invalid_fader, _invalid_matrix) in cases {
+            let paired_capture = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let separate_capture = Arc::new(std::sync::Mutex::new(Vec::new()));
+            test_only_reset_fader_matrix_witness();
+            let mut paired = prepared_pair_graph_variant(
+                false,
+                false,
+                false,
+                true,
+                Some(Arc::clone(&paired_capture)),
+                Backend::Scalar,
+                2,
+                BoundaryVariant::NonadjacentTrackA,
+                1,
+                None,
+            );
+            let paired_prepared = test_only_fader_matrix_witness();
+            assert_eq!(
+                (
+                    paired_prepared.factory_calls,
+                    paired_prepared.factory_members
+                ),
+                (1, 1),
+                "{label} paired preparation selects one split owner"
+            );
+            test_only_reset_fader_matrix_witness();
+            let mut separate = prepared_pair_graph_variant(
+                false,
+                false,
+                false,
+                false,
+                Some(Arc::clone(&separate_capture)),
+                Backend::Scalar,
+                2,
+                BoundaryVariant::NonadjacentTrackA,
+                1,
+                None,
+            );
+            let separate_prepared = test_only_fader_matrix_witness();
+            assert_eq!(
+                (
+                    separate_prepared.factory_calls,
+                    separate_prepared.factory_members
+                ),
+                (0, 0),
+                "{label} reference preparation keeps separate owners"
+            );
+            for bound in [&mut paired, &mut separate] {
+                if invalid_fader {
+                    bound.track_controls[track]
+                        .fader
+                        .try_push(TrackFaderRecord::FaderDb {
+                            lanes: BuiltinLaneSelector::Both,
+                            db: -6.0,
+                            smoothing_samples: 0,
+                        })
+                        .unwrap();
+                    bound.track_controls[track]
+                        .fader
+                        .try_push(TrackFaderRecord::FaderDb {
+                            lanes: BuiltinLaneSelector::Both,
+                            db: f32::NAN,
+                            smoothing_samples: 0,
+                        })
+                        .unwrap();
+                    bound.track_controls[track]
+                        .fader
+                        .try_push(TrackFaderRecord::FaderDb {
+                            lanes: BuiltinLaneSelector::Both,
+                            db: -3.0,
+                            smoothing_samples: 0,
+                        })
+                        .unwrap();
+                } else {
+                    bound.track_controls[track]
+                        .producer
+                        .try_push(TrackControlRecord {
+                            matrix: Matrix2x2::IDENTITY,
+                            smoothing_samples: 0,
+                        })
+                        .unwrap();
+                    bound.track_controls[track]
+                        .producer
+                        .try_push(TrackControlRecord {
+                            matrix: Matrix2x2 {
+                                ll: f32::NAN,
+                                ..Matrix2x2::IDENTITY
+                            },
+                            smoothing_samples: 0,
+                        })
+                        .unwrap();
+                    bound.track_controls[track]
+                        .producer
+                        .try_push(TrackControlRecord {
+                            matrix: Matrix2x2::IDENTITY,
+                            smoothing_samples: 0,
+                        })
+                        .unwrap();
+                }
+            }
+
+            let mut paired_pcm = vec![0.0_f32; HARNESS_QUANTUM as usize * 2];
+            let mut separate_pcm = vec![0.0_f32; HARNESS_QUANTUM as usize * 2];
+            test_only_reset_fader_matrix_witness();
+            let paired_error = render_bound_result(&mut paired, 0, &mut paired_pcm)
+                .expect_err(&format!("{label} paired boundary must fail"));
+            let paired_failed = test_only_fader_matrix_witness();
+            let paired_failed_trace = test_only_scalar_state_trace();
+            test_only_reset_fader_matrix_witness();
+            let separate_error = render_bound_result(&mut separate, 0, &mut separate_pcm)
+                .expect_err(&format!("{label} separate boundary must fail"));
+            let separate_failed = test_only_fader_matrix_witness();
+            let separate_failed_trace = test_only_scalar_state_trace();
+            assert!(
+                !paired_failed_trace.fader_overflow && !paired_failed_trace.matrix_overflow,
+                "{label} paired state trace capacity"
+            );
+            assert!(
+                !separate_failed_trace.fader_overflow && !separate_failed_trace.matrix_overflow,
+                "{label} separate state trace capacity"
+            );
+            assert_eq!(paired_error, separate_error, "{label} error identity");
+            if invalid_fader {
+                assert_eq!(
+                    paired_failed.fader_records_drained, 2,
+                    "{label} fader prefix"
+                );
+                assert_eq!(
+                    paired_failed.matrix_records_drained, 0,
+                    "{label} matrix untouched"
+                );
+            } else {
+                assert_eq!(
+                    paired_failed.fader_records_drained, 0,
+                    "{label} fader untouched"
+                );
+                assert_eq!(
+                    paired_failed.matrix_records_drained, 2,
+                    "{label} matrix prefix"
+                );
+            }
+            assert_eq!(
+                paired_failed.fader_records_drained, separate_failed.fader_records_drained,
+                "{label} fader drain order"
+            );
+            assert_eq!(
+                paired_failed.matrix_records_drained, separate_failed.matrix_records_drained,
+                "{label} matrix drain order"
+            );
+            assert_eq!(
+                first_fader_state(paired_failed_trace, 0),
+                first_fader_state(separate_failed_trace, 0),
+                "{label} t00 fader state at F_A"
+            );
+            assert_eq!(
+                last_fader_state(paired_failed_trace, 0),
+                first_fader_state(separate_failed_trace, 0),
+                "{label} t00 fader state at error/completion"
+            );
+            if !invalid_fader {
+                assert_eq!(
+                    last_matrix_state(paired_failed_trace, 0),
+                    first_matrix_state(separate_failed_trace, 0),
+                    "{label} t00 matrix state at M_A"
+                );
+            }
+
+            let mut paired_retry_pcm = vec![0.0_f32; HARNESS_QUANTUM as usize * 2];
+            let mut separate_retry_pcm = vec![0.0_f32; HARNESS_QUANTUM as usize * 2];
+            test_only_reset_fader_matrix_witness();
+            render_bound_result(&mut paired, HARNESS_QUANTUM as u64, &mut paired_retry_pcm)
+                .expect("paired retry after boundary error");
+            let retry = test_only_fader_matrix_witness();
+            let paired_retry_trace = test_only_scalar_state_trace();
+            test_only_reset_fader_matrix_witness();
+            render_bound_result(
+                &mut separate,
+                HARNESS_QUANTUM as u64,
+                &mut separate_retry_pcm,
+            )
+            .expect("separate retry after boundary error");
+            let separate_retry = test_only_fader_matrix_witness();
+            let separate_retry_trace = test_only_scalar_state_trace();
+            assert!(
+                !paired_retry_trace.fader_overflow && !paired_retry_trace.matrix_overflow,
+                "{label} paired retry state trace capacity"
+            );
+            assert!(
+                !separate_retry_trace.fader_overflow && !separate_retry_trace.matrix_overflow,
+                "{label} separate retry state trace capacity"
+            );
+            assert_eq!(
+                std::mem::take(&mut *paired_capture.lock().unwrap()),
+                std::mem::take(&mut *separate_capture.lock().unwrap()),
+                "{label} retry post-matrix PCM"
+            );
+            assert_eq!(
+                paired_retry_pcm
+                    .iter()
+                    .map(|sample| sample.to_bits())
+                    .collect::<Vec<_>>(),
+                separate_retry_pcm
+                    .iter()
+                    .map(|sample| sample.to_bits())
+                    .collect::<Vec<_>>(),
+                "{label} retry output PCM"
+            );
+            assert_eq!((retry.process_calls, retry.process_members), (1, 1));
+            assert_eq!((retry.fused_calls, retry.fallback_calls), (1, 0));
+            assert_eq!(
+                retry.fader_records_drained, separate_retry.fader_records_drained,
+                "{label} retry fader drain order"
+            );
+            assert_eq!(
+                retry.matrix_records_drained, separate_retry.matrix_records_drained,
+                "{label} retry matrix drain order"
+            );
+            assert_eq!(
+                first_fader_state(paired_retry_trace, 0),
+                first_fader_state(separate_retry_trace, 0),
+                "{label} retry t00 fader state at F_A"
+            );
+            assert_eq!(
+                last_fader_state(paired_retry_trace, 0),
+                first_fader_state(separate_retry_trace, 0),
+                "{label} retry t00 fader state at M_A"
+            );
+            assert_eq!(
+                last_matrix_state(paired_retry_trace, 0),
+                first_matrix_state(separate_retry_trace, 0),
+                "{label} retry t00 matrix state at M_A"
+            );
+            if invalid_fader {
+                assert_eq!(retry.fader_records_drained, 1, "{label} fader tail retry");
+                assert_eq!(
+                    retry.matrix_records_drained, 0,
+                    "{label} matrix remains empty"
+                );
+            } else {
+                assert_eq!(
+                    retry.fader_records_drained, 0,
+                    "{label} fader remains empty"
+                );
+                assert_eq!(retry.matrix_records_drained, 1, "{label} matrix tail retry");
+            }
+        }
     }
 
     #[test]
@@ -7408,11 +9324,15 @@ mod tests {
                 fader: FaderMuteRampBuiltins::new(parameters).expect("fader"),
                 control: fader_rx,
                 control_delivery: fader_delivery,
+                #[cfg(any(test, feature = "test-support"))]
+                test_only_owner: u16::MAX,
             }),
             Box::new(ConsoleMatrixProcessor {
                 matrix,
                 control: matrix_rx,
                 control_delivery: matrix_delivery,
+                #[cfg(any(test, feature = "test-support"))]
+                test_only_owner: u16::MAX,
             }),
             fader_tx,
             matrix_tx,
@@ -7529,6 +9449,196 @@ mod tests {
                 .unwrap();
             assert_eq!(left, [0.0, 0.0], "queued fader state stayed with owner");
         }
+    }
+
+    #[test]
+    fn scalar_split_owner_defers_settled_fader_and_completes_before_matrix_error() {
+        let make = || {
+            scalar_console_owners(
+                BuiltinControlDelivery::BetweenRenderCalls,
+                BuiltinControlDelivery::BetweenRenderCalls,
+            )
+        };
+        let (fader, matrix, _paired_fader, mut paired_matrix) = make();
+        let factory = fader
+            .scalar_split_pair_factory()
+            .expect("exact live fader advertises split owner");
+        let mut split =
+            factory(fader, matrix).unwrap_or_else(|_| panic!("split owner accepts exact owners"));
+        let (separate_fader, separate_matrix, _separate_fader_tx, mut separate_matrix_tx) = make();
+
+        let invalid = TrackControlRecord {
+            matrix: Matrix2x2 {
+                ll: f32::NAN,
+                ..Matrix2x2::IDENTITY
+            },
+            smoothing_samples: 0,
+        };
+        let tail = TrackControlRecord {
+            matrix: Matrix2x2::IDENTITY,
+            smoothing_samples: 0,
+        };
+        paired_matrix.try_push(invalid).unwrap();
+        paired_matrix.try_push(tail).unwrap();
+        separate_matrix_tx.try_push(invalid).unwrap();
+        separate_matrix_tx.try_push(tail).unwrap();
+        let mut paired_left = [0.5_f32, 0.25];
+        let mut paired_right = [-0.25_f32, -0.125];
+        let mut separate_left = paired_left;
+        let mut separate_right = paired_right;
+        split
+            .begin_fader(GraphBindingBlock {
+                left: &mut paired_left,
+                right: &mut paired_right,
+                first_sample: 0,
+            })
+            .unwrap();
+        assert_eq!(paired_left, [0.5, 0.25], "settled fader remains deferred");
+        assert_eq!(paired_right, [-0.25, -0.125]);
+        let mut separate_fader = (separate_fader as Box<dyn Any>)
+            .downcast::<ConsoleFaderProcessor>()
+            .unwrap();
+        let mut separate_matrix = (separate_matrix as Box<dyn Any>)
+            .downcast::<ConsoleMatrixProcessor>()
+            .unwrap();
+        separate_fader
+            .process(GraphBindingBlock {
+                left: &mut separate_left,
+                right: &mut separate_right,
+                first_sample: 0,
+            })
+            .unwrap();
+        let error = split
+            .finish_matrix(GraphBindingBlock {
+                left: &mut paired_left,
+                right: &mut paired_right,
+                first_sample: 0,
+            })
+            .unwrap_err();
+        assert_eq!(error, RenderError::InvalidEnvelope);
+        assert_eq!(
+            paired_left.map(f32::to_bits),
+            separate_left.map(f32::to_bits)
+        );
+        assert_eq!(
+            paired_right.map(f32::to_bits),
+            separate_right.map(f32::to_bits)
+        );
+        separate_matrix
+            .process(GraphBindingBlock {
+                left: &mut separate_left,
+                right: &mut separate_right,
+                first_sample: 0,
+            })
+            .unwrap_err();
+
+        let mut paired_left = [0.75_f32, 0.5];
+        let mut paired_right = [-0.5_f32, -0.25];
+        let mut separate_left = paired_left;
+        let mut separate_right = paired_right;
+        split
+            .begin_fader(GraphBindingBlock {
+                left: &mut paired_left,
+                right: &mut paired_right,
+                first_sample: 64,
+            })
+            .unwrap();
+        split
+            .finish_matrix(GraphBindingBlock {
+                left: &mut paired_left,
+                right: &mut paired_right,
+                first_sample: 64,
+            })
+            .unwrap();
+        separate_fader
+            .process(GraphBindingBlock {
+                left: &mut separate_left,
+                right: &mut separate_right,
+                first_sample: 64,
+            })
+            .unwrap();
+        separate_matrix
+            .process(GraphBindingBlock {
+                left: &mut separate_left,
+                right: &mut separate_right,
+                first_sample: 64,
+            })
+            .unwrap();
+        assert_eq!(
+            paired_left.map(f32::to_bits),
+            separate_left.map(f32::to_bits)
+        );
+        assert_eq!(
+            paired_right.map(f32::to_bits),
+            separate_right.map(f32::to_bits)
+        );
+    }
+
+    #[test]
+    fn scalar_split_invalid_begin_envelope_does_not_arm_pending_or_drain_matrix() {
+        let (fader, matrix, mut fader_tx, mut matrix_tx) = scalar_console_owners(
+            BuiltinControlDelivery::BetweenRenderCalls,
+            BuiltinControlDelivery::BetweenRenderCalls,
+        );
+        let factory = fader
+            .scalar_split_pair_factory()
+            .expect("exact live fader advertises split owner");
+        let mut split =
+            factory(fader, matrix).unwrap_or_else(|_| panic!("split owner accepts exact owners"));
+        fader_tx
+            .try_push(TrackFaderRecord::FaderDb {
+                lanes: BuiltinLaneSelector::Both,
+                db: -9.0,
+                smoothing_samples: 0,
+            })
+            .unwrap();
+        matrix_tx
+            .try_push(TrackControlRecord {
+                matrix: Matrix2x2 {
+                    ll: 0.5,
+                    lr: 0.25,
+                    rl: -0.75,
+                    rr: 0.125,
+                },
+                smoothing_samples: 0,
+            })
+            .unwrap();
+
+        let mut short_left = [0.5_f32];
+        let mut long_right = [-0.25_f32, -0.5];
+        test_only_reset_fader_matrix_witness();
+        assert_eq!(
+            split.begin_fader(GraphBindingBlock {
+                left: &mut short_left,
+                right: &mut long_right,
+                first_sample: 0,
+            }),
+            Err(RenderError::InvalidEnvelope)
+        );
+        assert_eq!(short_left, [0.5]);
+        assert_eq!(long_right, [-0.25, -0.5]);
+        let failed = test_only_fader_matrix_witness();
+        assert_eq!(failed.fader_records_drained, 1);
+        assert_eq!(
+            failed.matrix_records_drained, 0,
+            "the direct invalid envelope must not drain the later matrix owner"
+        );
+
+        // A completion call after the failed begin is the mutation-sensitive part of this seam:
+        // if pending were armed before validation, it would alter this valid buffer.
+        let mut left = [0.5_f32, 0.25];
+        let mut right = [-0.25_f32, -0.5];
+        let before = (left, right);
+        split.complete_pending(GraphBindingBlock {
+            left: &mut left,
+            right: &mut right,
+            first_sample: 0,
+        });
+        assert_eq!(
+            (left, right),
+            before,
+            "invalid begin left no pending completion"
+        );
     }
 
     #[test]
@@ -8183,11 +10293,16 @@ mod tests {
         let classes = SessionPoolClasses::from_session(&compiled);
         let fader = core::mem::size_of::<ConsoleFaderProcessor>() as u64;
         let matrix = core::mem::size_of::<ConsoleMatrixProcessor>() as u64;
-        let outer = core::mem::size_of::<ScalarPairProcessor>() as u64;
+        let pair_outer = core::mem::size_of::<ScalarPairProcessor>() as u64;
+        let split_outer = core::mem::size_of::<ScalarSplitPairProcessor>() as u64;
+        let outer = pair_outer.max(split_outer);
+        assert!(
+            split_outer > pair_outer,
+            "the split owner's pending flag is included in the bounded outer reservation"
+        );
         assert_eq!(
-            outer,
-            2 * core::mem::size_of::<usize>() as u64,
-            "the composite allocation contains exactly the two retained typed boxes"
+            outer, split_outer,
+            "the charged outer covers the larger split owner"
         );
         let fader_fields = core::mem::size_of::<FaderMuteRampBuiltins>()
             + core::mem::size_of::<Consumer<TrackFaderRecord>>()
@@ -8211,10 +10326,16 @@ mod tests {
                 .expect("serialized owners")
                 .graph_scalar_owner_resource(Backend::Scalar, &levels, &classes)
                 .expect("checked scalar estimate");
-        assert_eq!(serialized.total_bytes, 3 * (fader + matrix + outer));
+        let split_table_entry =
+            core::mem::size_of::<Box<dyn GraphRuntimeSplitPairProcessor>>() as u64;
+        assert_eq!(serialized.split_pair_table_bytes, split_table_entry);
+        assert_eq!(
+            serialized.total_bytes,
+            3 * (fader + matrix + outer) + split_table_entry
+        );
         assert_eq!(
             serialized.largest_allocation_bytes,
-            fader.max(matrix).max(outer)
+            fader.max(matrix).max(outer).max(split_table_entry)
         );
 
         let concurrent = prepare_session_builtins_with_console(&compiled, &[], &controls, caps())

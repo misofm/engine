@@ -1,0 +1,6 @@
+bash: line 2: printf: --: invalid option
+printf: usage: printf [-v var] format [arguments]
+bash: line 4: printf: --: invalid option
+printf: usage: printf [-v var] format [arguments]
+bash: line 6: printf: --: invalid option
+printf: usage: printf [-v var] format [arguments]

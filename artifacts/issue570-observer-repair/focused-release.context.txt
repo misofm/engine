@@ -1,0 +1,9 @@
+utc=2026-09-07T18:03:18Z
+cwd=/home/bl/misofm/engine-cp4-borrowed-sorted-bind
+head=6913563c661d9faaffd6c9b25d57fe04a8d37179
+status=## codex/cp4-borrowed-sorted-bind...origin/codex/cp4-borrowed-sorted-bind
+?? artifacts/issue570-observer-repair/
+graph_lib_git_hash=dee444ce55505a2eb988c87ddf707fa709fbd7dd
+graph_lib_sha256=3b1b8c321b1ede404a5a58e78d352179e0651261fe73b75609df2c2fda4b24fb
+graph_spec_git_hash=6ab8301ef9c876f95a7caa47434d8640b526256f
+graph_spec_sha256=ea61d2ff28ac813b4cef8eb76b33068186a4533b13b0bce2456162c0d6c676fe

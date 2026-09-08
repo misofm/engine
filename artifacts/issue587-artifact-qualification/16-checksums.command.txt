@@ -1,0 +1,1 @@
+sha256sum -c artifacts/issue587-artifact-qualification/sha256sums.txt

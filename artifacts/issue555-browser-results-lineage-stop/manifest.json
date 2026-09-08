@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "issue": 555,
+  "stage": "browser-results-lineage-stop",
+  "source_commit": "e4f46fa808e413507d204e81b6a4ebc27254869c",
+  "candidate_wasm_sha256": "6452f0db237da1d57b3594e7d95dd53a089a604d5b0791ea8b3533c5930c5a1c",
+  "capture_source": "/tmp/issue555-browser-ready",
+  "install": {
+    "status": 0,
+    "argv": "install.argv.json",
+    "cwd": "install.cwd",
+    "environment": "install.environment.txt",
+    "stdout": "install.stdout",
+    "stderr": "install.stderr"
+  },
+  "manifest_check": {
+    "status": 0,
+    "before_hashes": "manifests-before.sha256",
+    "after_hashes": "manifests-after.sha256",
+    "before_bytes": "manifests-before.bytes",
+    "after_bytes": "manifests-after.bytes",
+    "unchanged_record": "manifests-unchanged.status",
+    "package_json": {
+      "bytes": 424,
+      "sha256": "81a76f3233a35f3d387981087a4172fdafe81cee2be6f43417d1a3b3fbfebd6d"
+    },
+    "package_lock_json": {
+      "bytes": 1865,
+      "sha256": "37bfedc97da4e4377a45a0d88f2351263b77e160cde109620d23eaa9952ab069"
+    }
+  },
+  "browser_qualification": {
+    "status": 1,
+    "argv": "qualify.argv.json",
+    "cwd": "qualify.cwd",
+    "environment": "qualify.environment.txt",
+    "stdout": "qualify.stdout",
+    "stderr": "qualify.stderr",
+    "started": false,
+    "failure": "matrix: artifact-lineage: checked wasmSha256 differs from the artifact under qualification",
+    "failure_location": "hosts/host-web/qualification/run.mjs:364",
+    "checked_results": {
+      "path": "hosts/host-web/qualification/results.json",
+      "candidateCommit": "62366ba20cab5742aa6e0636f428ec18365104bf",
+      "wasmSha256": "1bc18ab8cfb3e2a3e5a0ebeda185a64551e8398870abb2f3581077da0dfd3a3f",
+      "playwrightVersion": "1.62.1"
+    }
+  },
+  "browsers": {
+    "chromium": {"count": 0, "identity": null},
+    "firefox": {"count": 0, "identity": null},
+    "webkit": {"count": 0, "identity": null},
+    "browser_mutation_controls": 0
+  },
+  "no_tracked_mutation": {
+    "repository": true,
+    "scratch_tracked_bytes": true,
+    "record_matrix": false,
+    "rerun": false
+  },
+  "environment_streams": {
+    "omitted_binary_payloads": [
+      "install.environment.env0",
+      "prehash.environment.env0",
+      "qualify.environment.env0"
+    ],
+    "reason": "NUL-delimited environment streams are binary; readable environment.txt captures are preserved.",
+    "source_bytes_each": 3151,
+    "source_sha256_each": "4e0501db9290b33ca95de73d3644e17525f9c4b9dc0222e76014324a8ce0dc67"
+  },
+  "compressed_streams": [],
+  "representation": "Manifest excludes itself. Every readable payload below is byte-identical to its source capture. git diff --check passed; no raw stream required compression.",
+  "files": [
+    {"path": "install.argv.json", "bytes": 121, "sha256": "ea319010f7e194cfd9118c45b5ee9c15dcb68dbaba1254d45114af66b3e51eaf"},
+    {"path": "install.cwd", "bytes": 30, "sha256": "da0aedaf81bcc2da2a79b1c75704f82f8c3074a22051afee65f08663092b9fc1"},
+    {"path": "install.environment.txt", "bytes": 3151, "sha256": "e686bb03824a5cc5b7369b51bb6ff024f9c4e4b1b4ac156fef8775a0dc97abfd"},
+    {"path": "install.status", "bytes": 2, "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"},
+    {"path": "install.stderr", "bytes": 0, "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},
+    {"path": "install.stdout", "bytes": 76, "sha256": "9479de17585fc16ae8132ff399f71057676541695585071a55124ccc490961e2"},
+    {"path": "manifests-after.bytes", "bytes": 110, "sha256": "1823eeadc5ecafdcd4b5bf9465263c32e6111d0464fd446b77aceb974522028d"},
+    {"path": "manifests-after.sha256", "bytes": 221, "sha256": "650427b7ce8d50612f36e429e9d6e1668df9fc15a001087f0377a961024444c2"},
+    {"path": "manifests-before.bytes", "bytes": 110, "sha256": "1823eeadc5ecafdcd4b5bf9465263c32e6111d0464fd446b77aceb974522028d"},
+    {"path": "manifests-before.sha256", "bytes": 221, "sha256": "650427b7ce8d50612f36e429e9d6e1668df9fc15a001087f0377a961024444c2"},
+    {"path": "manifests-unchanged.status", "bytes": 2, "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"},
+    {"path": "prehash.argv.json", "bytes": 154, "sha256": "72c4c140823778c6e8d0e85ce9bcf0c9ee70c1acf100e614a8b7371590950d4e"},
+    {"path": "prehash.cwd", "bytes": 30, "sha256": "da0aedaf81bcc2da2a79b1c75704f82f8c3074a22051afee65f08663092b9fc1"},
+    {"path": "prehash.environment.txt", "bytes": 3151, "sha256": "e686bb03824a5cc5b7369b51bb6ff024f9c4e4b1b4ac156fef8775a0dc97abfd"},
+    {"path": "prehash.status", "bytes": 2, "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"},
+    {"path": "qualify.argv.json", "bytes": 226, "sha256": "f65647f2d2a26e3c84e2af2ac00a32ccc143777e318a3ad7b3ca74d410faa735"},
+    {"path": "qualify.cwd", "bytes": 30, "sha256": "da0aedaf81bcc2da2a79b1c75704f82f8c3074a22051afee65f08663092b9fc1"},
+    {"path": "qualify.environment.txt", "bytes": 3151, "sha256": "e686bb03824a5cc5b7369b51bb6ff024f9c4e4b1b4ac156fef8775a0dc97abfd"},
+    {"path": "qualify.status", "bytes": 2, "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"},
+    {"path": "qualify.stderr", "bytes": 678, "sha256": "e637f099e1471b644e38539391c5ce12b0312213dbf1419795ea63af923ce11d"},
+    {"path": "qualify.stdout", "bytes": 290, "sha256": "de2812d597e840a53210e2d9a2741a0637943d0abb32310955702640d22a00a6"}
+  ]
+}

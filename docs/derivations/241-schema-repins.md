@@ -81,7 +81,7 @@ range the deleted `start_sample = 1, length_samples = 514` selected. The headers
 their size words. No sample was re-encoded, re-rounded or re-ordered; the file simply starts where
 the region used to.
 
-### 3. Protocol conformance corpus (`crates/protocol/tests/conformance_corpus.rs`)
+### 3. Protocol conformance corpus (`crates/conformance/tests/conformance_corpus.rs`)
 
 Frame count is unchanged at **46**; exactly one frame's bytes move, so the FNV-1a-64 roll over
 `(name, bytes)` moves `0xeb7a_a549_b666_77a8` -> `0xbdeb_b0f8_1c38_ec42`.

@@ -43,6 +43,111 @@ use engine::realtime::{ArenaLease, ArenaLeaseSetBuilder, RenderError};
 /// The arena reserves buffer zero as the always-zero silence slot, so every executor buffer is
 /// offset by one.
 pub(crate) const ARENA_BASE: u32 = 1;
+
+/// A bounded, render-local witness for the private post-fader buffer at a failed render boundary.
+///
+/// This exists only for the split-owner qualification fixture. The capture is copied into fixed
+/// storage on the render thread and read after the call returns; it is not a production diagnostic
+/// or an observer path.
+#[cfg(any(test, feature = "test-support"))]
+const TEST_ONLY_FAILED_BUFFER_CAPACITY: usize = 128;
+
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TestOnlyFailedBufferCapture {
+    pub captured: bool,
+    pub overflow: bool,
+    pub frames: usize,
+    pub left: [u32; TEST_ONLY_FAILED_BUFFER_CAPACITY],
+    pub right: [u32; TEST_ONLY_FAILED_BUFFER_CAPACITY],
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Default for TestOnlyFailedBufferCapture {
+    fn default() -> Self {
+        Self {
+            captured: false,
+            overflow: false,
+            frames: 0,
+            left: [0; TEST_ONLY_FAILED_BUFFER_CAPACITY],
+            right: [0; TEST_ONLY_FAILED_BUFFER_CAPACITY],
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static TEST_ONLY_FAILED_BUFFER_TARGET: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+    static TEST_ONLY_FAILED_BUFFER: std::cell::Cell<TestOnlyFailedBufferCapture> =
+        const { std::cell::Cell::new(TestOnlyFailedBufferCapture {
+            captured: false,
+            overflow: false,
+            frames: 0,
+            left: [0; TEST_ONLY_FAILED_BUFFER_CAPACITY],
+            right: [0; TEST_ONLY_FAILED_BUFFER_CAPACITY],
+        }) };
+    static TEST_ONLY_COMPLETION_DISABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn test_only_arm_failed_buffer_capture(buffer: u32) {
+    TEST_ONLY_FAILED_BUFFER_TARGET.with(|target| target.set(Some(buffer)));
+    TEST_ONLY_FAILED_BUFFER.with(|capture| capture.set(TestOnlyFailedBufferCapture::default()));
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[must_use]
+#[doc(hidden)]
+pub fn test_only_failed_buffer_capture() -> TestOnlyFailedBufferCapture {
+    TEST_ONLY_FAILED_BUFFER.with(std::cell::Cell::get)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn test_only_set_completion_disabled(disabled: bool) {
+    TEST_ONLY_COMPLETION_DISABLED.with(|value| value.set(disabled));
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[must_use]
+#[doc(hidden)]
+pub fn test_only_completion_disabled() -> bool {
+    TEST_ONLY_COMPLETION_DISABLED.with(std::cell::Cell::get)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TestOnlySelectedSplitFader {
+    pub node: GraphNodeId,
+    pub buffer: u32,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static TEST_ONLY_SELECTED_SPLIT_FADER:
+        std::cell::RefCell<Option<TestOnlySelectedSplitFader>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn test_only_reset_selected_split_fader() {
+    TEST_ONLY_SELECTED_SPLIT_FADER.with(|selected| *selected.borrow_mut() = None);
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[must_use]
+#[doc(hidden)]
+pub fn test_only_selected_split_fader() -> Option<TestOnlySelectedSplitFader> {
+    TEST_ONLY_SELECTED_SPLIT_FADER.with(|selected| selected.borrow().clone())
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn test_only_record_selected_split_fader(node: GraphNodeId, buffer: u32) {
+    TEST_ONLY_SELECTED_SPLIT_FADER.with(|selected| {
+        *selected.borrow_mut() = Some(TestOnlySelectedSplitFader { node, buffer });
+    });
+}
 use effect_contract::{
     BypassShunt, ChannelSymmetryWitness, EffectControlLane, EffectProcessBlock, ObservationLane,
     ObservationSample, PreparedAutomationSpan, PreparedNativeEffect,
@@ -53,7 +158,7 @@ use rack::{BankChain, BankMembers, BankPlaneViews, FoldCohort};
 
 use crate::{
     GraphBindingBlock, GraphEdgeId, GraphNodeObserverBinding, GraphObservationBlock,
-    GraphPreparedEffect, GraphRuntimeProcessor,
+    GraphPreparedEffect, GraphRuntimeProcessor, GraphRuntimeSplitPairProcessor,
 };
 
 /// Lane type the block kernels are instantiated at to vectorise **over frames**.
@@ -339,6 +444,18 @@ pub(crate) enum NodeKind {
     BankMember,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum SplitPairRole {
+    Fader,
+    Matrix,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct SplitPairSlot {
+    pub(crate) pair: usize,
+    pub(crate) role: SplitPairRole,
+}
+
 /// One prepared native effect plus everything its live-console channel needs (issue #140 A).
 ///
 /// Sized once, at bind, from the effect's own prepared metadata: the staging window is exactly
@@ -454,8 +571,22 @@ pub(crate) struct RuntimeOp {
     pub(crate) sidechain: Option<u32>,
     pub(crate) output: u32,
     pub(crate) kind: NodeKind,
+    pub(crate) split_pair: Option<SplitPairSlot>,
     /// This node's observers, by handle, followed by the observers of every alias that resolves
     /// to this op's output buffer, in schedule order (`program::Tap`).
+    pub(crate) observers: Box<[GraphNodeObserverBinding]>,
+}
+
+/// Old-layout witness for one executable op before the split-pair slot was added. The graph
+/// estimate derives the inline delta from this mirror and charges the larger op/unit delta once
+/// for the bounded emitted-op population.
+#[allow(dead_code)]
+pub(crate) struct RuntimeOpWithoutSplitPairSlot {
+    pub(crate) inputs: Box<[u32]>,
+    pub(crate) staged: Box<[StagedInput]>,
+    pub(crate) sidechain: Option<u32>,
+    pub(crate) output: u32,
+    pub(crate) kind: NodeKind,
     pub(crate) observers: Box<[GraphNodeObserverBinding]>,
 }
 
@@ -480,6 +611,35 @@ pub(crate) enum RuntimeUnit {
         /// The master buffer a folded lane accumulates into. Meaningless when `fold` is empty.
         master: u32,
     },
+}
+
+#[allow(dead_code)]
+pub(crate) enum RuntimeUnitWithoutSplitPairSlot {
+    Op(RuntimeOpWithoutSplitPairSlot),
+    Bank {
+        members: Box<[RuntimeOpWithoutSplitPairSlot]>,
+        lanes: usize,
+        chain: BankChain,
+        fold: Box<[FoldLane]>,
+        master: u32,
+    },
+}
+
+pub(crate) fn scalar_split_op_layout() -> (u64, u64) {
+    (
+        u64::try_from(
+            core::mem::size_of::<RuntimeOp>()
+                .checked_sub(core::mem::size_of::<RuntimeOpWithoutSplitPairSlot>())
+                .expect("split op slot layout is retained"),
+        )
+        .expect("split op slot layout fits u64"),
+        u64::try_from(
+            core::mem::size_of::<RuntimeUnit>()
+                .checked_sub(core::mem::size_of::<RuntimeUnitWithoutSplitPairSlot>())
+                .expect("split op containing-unit layout is retained"),
+        )
+        .expect("split op containing-unit layout fits u64"),
+    )
 }
 
 impl RuntimeUnit {
@@ -887,6 +1047,7 @@ pub(crate) struct Runtime {
     /// the bytes and the program it had before this feature existed.
     pub(crate) track_delays: Box<[TrackDelayLine]>,
     pub(crate) units: Box<[RuntimeUnit]>,
+    split_pairs: Box<[Box<dyn GraphRuntimeSplitPairProcessor>]>,
     /// One row per unit, in `units` order: the bind-time half of the collapse-eligibility query.
     pub(crate) identity: Box<[UnitIdentity]>,
     /// Scratch for a bank chain's gather-source buffers, sized to the widest bank at bind.
@@ -898,6 +1059,66 @@ pub(crate) struct Runtime {
     /// Lanes whose route and master accumulation this bind folded into their chain's epilogue
     /// (issue #218).
     folds: u64,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TestOnlySplitPairTableWitness {
+    pub allocations: u64,
+    pub entries: u64,
+    pub bytes: u64,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static TEST_ONLY_SPLIT_PAIR_TABLE: std::cell::Cell<TestOnlySplitPairTableWitness> =
+        const { std::cell::Cell::new(TestOnlySplitPairTableWitness { allocations: 0, entries: 0, bytes: 0 }) };
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn test_only_reset_split_pair_table_witness() {
+    TEST_ONLY_SPLIT_PAIR_TABLE.with(|value| {
+        value.set(TestOnlySplitPairTableWitness {
+            allocations: 0,
+            entries: 0,
+            bytes: 0,
+        })
+    });
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[must_use]
+pub fn test_only_split_pair_table_witness() -> TestOnlySplitPairTableWitness {
+    TEST_ONLY_SPLIT_PAIR_TABLE.with(std::cell::Cell::get)
+}
+
+/// Layout witness for the retained [`Runtime`] owner without its split-owner table field. The
+/// runtime resource report charges the difference between this same-field layout and `Runtime`;
+/// the split table itself remains a separate boxed allocation.
+#[allow(dead_code)]
+pub(crate) struct RuntimeWithoutSplitPairTable {
+    lease: ArenaLease,
+    delays: Box<[CompensationDelay]>,
+    track_delays: Box<[TrackDelayLine]>,
+    units: Box<[RuntimeUnit]>,
+    identity: Box<[UnitIdentity]>,
+    bank_inputs: Box<[u32]>,
+    bank_outputs: Box<[u32]>,
+    redirects: u64,
+    folds: u64,
+}
+
+pub(crate) fn scalar_split_runtime_layout() -> (u64, u64) {
+    (
+        u64::try_from(core::mem::size_of::<Box<dyn GraphRuntimeSplitPairProcessor>>())
+            .expect("split table entry fits u64"),
+        u64::try_from(
+            core::mem::size_of::<Runtime>()
+                .checked_sub(core::mem::size_of::<RuntimeWithoutSplitPairTable>())
+                .expect("split runtime field layout is retained"),
+        )
+        .expect("split runtime field layout fits u64"),
+    )
 }
 
 impl Runtime {
@@ -968,16 +1189,37 @@ impl Runtime {
         self.folds
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the prepared runtime constructor keeps its fixed ownership partitions explicit"
+    )]
     pub(crate) fn new(
         lease: ArenaLease,
         delays: Vec<CompensationDelay>,
         track_delays: Vec<TrackDelayLine>,
         units: Vec<RuntimeUnit>,
+        split_pairs: Vec<Box<dyn GraphRuntimeSplitPairProcessor>>,
         identity: Vec<UnitIdentity>,
         redirects: u64,
         folds: u64,
     ) -> Self {
         debug_assert_eq!(identity.len(), units.len());
+        #[cfg(any(test, feature = "test-support"))]
+        if !split_pairs.is_empty() {
+            TEST_ONLY_SPLIT_PAIR_TABLE.with(|value| {
+                let mut witness = value.get();
+                witness.allocations = witness.allocations.saturating_add(1);
+                witness.entries = witness
+                    .entries
+                    .saturating_add(u64::try_from(split_pairs.len()).expect("table length"));
+                witness.bytes = witness.bytes.saturating_add(
+                    u64::try_from(core::mem::size_of::<Box<dyn GraphRuntimeSplitPairProcessor>>())
+                        .expect("table entry size")
+                        .saturating_mul(u64::try_from(split_pairs.len()).expect("table length")),
+                );
+                value.set(witness);
+            });
+        }
         let widest = units
             .iter()
             .map(|unit| match unit {
@@ -991,6 +1233,7 @@ impl Runtime {
             delays: delays.into_boxed_slice(),
             track_delays: track_delays.into_boxed_slice(),
             units: units.into_boxed_slice(),
+            split_pairs: split_pairs.into_boxed_slice(),
             identity: identity.into_boxed_slice(),
             bank_inputs: vec![0; widest].into_boxed_slice(),
             bank_outputs: vec![0; widest].into_boxed_slice(),
@@ -1010,6 +1253,30 @@ impl Runtime {
         self.lease.read_stereo(buffer)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn test_only_capture_failed_buffer(&self) {
+        let Some(buffer) = TEST_ONLY_FAILED_BUFFER_TARGET.with(std::cell::Cell::get) else {
+            return;
+        };
+        let (left, right) = self.buffer(ARENA_BASE + buffer);
+        let mut capture = TestOnlyFailedBufferCapture {
+            captured: true,
+            frames: left.len(),
+            overflow: left.len() > TEST_ONLY_FAILED_BUFFER_CAPACITY,
+            left: [0; TEST_ONLY_FAILED_BUFFER_CAPACITY],
+            right: [0; TEST_ONLY_FAILED_BUFFER_CAPACITY],
+        };
+        for (index, sample) in left
+            .iter()
+            .take(TEST_ONLY_FAILED_BUFFER_CAPACITY)
+            .enumerate()
+        {
+            capture.left[index] = sample.to_bits();
+            capture.right[index] = right[index].to_bits();
+        }
+        TEST_ONLY_FAILED_BUFFER.with(|value| value.set(capture));
+    }
+
     /// Runs unit `index`. Every producer this unit reads precedes it in `units`, or was written
     /// by a strictly earlier wave.
     pub(crate) fn execute(&mut self, index: usize, first_sample: u64) -> Result<(), RenderError> {
@@ -1018,6 +1285,7 @@ impl Runtime {
             delays,
             track_delays,
             units,
+            split_pairs,
             bank_inputs,
             bank_outputs,
             ..
@@ -1025,7 +1293,9 @@ impl Runtime {
         let delays: &mut [CompensationDelay] = delays;
         let track_delays: &mut [TrackDelayLine] = track_delays;
         match &mut units[index] {
-            RuntimeUnit::Op(op) => execute_op(op, lease, delays, track_delays, first_sample),
+            RuntimeUnit::Op(op) => {
+                execute_op(op, lease, delays, track_delays, split_pairs, first_sample)
+            }
             RuntimeUnit::Bank {
                 members,
                 lanes,
@@ -1041,7 +1311,14 @@ impl Runtime {
                     if let Some(source) = bank_gather_source(member) {
                         bank_inputs[lane] = source;
                     } else {
-                        execute_op(member, lease, delays, track_delays, first_sample)?;
+                        execute_op(
+                            member,
+                            lease,
+                            delays,
+                            track_delays,
+                            split_pairs,
+                            first_sample,
+                        )?;
                         bank_inputs[lane] = member.output;
                     }
                 }
@@ -1062,6 +1339,35 @@ impl Runtime {
                     first_sample,
                 )
             }
+        }
+    }
+
+    /// Materializes every pending split fader in original schedule order before a render error
+    /// escapes. The first product slice admits at most one interval, but the walk keeps this
+    /// owner-side contract explicit for later disjoint intervals.
+    pub(crate) fn complete_pending(&mut self, first_sample: u64) {
+        let Self {
+            lease,
+            units,
+            split_pairs,
+            ..
+        } = self;
+        for unit in units.iter_mut() {
+            let RuntimeUnit::Op(op) = unit else {
+                continue;
+            };
+            let Some(slot) = op.split_pair else {
+                continue;
+            };
+            if !matches!(slot.role, SplitPairRole::Fader) {
+                continue;
+            }
+            let (left, right) = lease.write_stereo(op.output);
+            split_pairs[slot.pair].complete_pending(GraphBindingBlock {
+                left,
+                right,
+                first_sample,
+            });
         }
     }
 
@@ -1131,6 +1437,7 @@ fn execute_op(
     lease: &mut ArenaLease,
     delays: &mut [CompensationDelay],
     track_delays: &mut [TrackDelayLine],
+    split_pairs: &mut [Box<dyn GraphRuntimeSplitPairProcessor>],
     first_sample: u64,
 ) -> Result<(), RenderError> {
     let output = op.output;
@@ -1180,10 +1487,21 @@ fn execute_op(
     match &mut op.kind {
         // `TrackDelay` returned above, before the reduction it must not run; it is named here only
         // because the match is exhaustive.
-        NodeKind::TrackDelay { .. }
-        | NodeKind::SourceInput
-        | NodeKind::Identity
-        | NodeKind::BankMember => {}
+        NodeKind::TrackDelay { .. } | NodeKind::SourceInput | NodeKind::BankMember => {}
+        NodeKind::Identity => {
+            if let Some(slot) = op.split_pair {
+                let (out_left, out_right) = lease.write_stereo(output);
+                let block = GraphBindingBlock {
+                    left: out_left,
+                    right: out_right,
+                    first_sample,
+                };
+                return match slot.role {
+                    SplitPairRole::Fader => split_pairs[slot.pair].begin_fader(block),
+                    SplitPairRole::Matrix => split_pairs[slot.pair].finish_matrix(block),
+                };
+            }
+        }
         NodeKind::Route(coefficients) => {
             let (out_left, out_right) = lease.write_stereo(output);
             mix2x2_block::<FrameLane>(out_left, out_right, *coefficients);
@@ -1630,6 +1948,7 @@ pub(crate) struct RuntimeParts {
     /// node. Empty for a plan with no observation capacity, so `node_kind` hands out `None`.
     effect_observations: BTreeMap<crate::EffectNodeId, Box<ObservationLane>>,
     pub(crate) bindings: BTreeMap<GraphNodeId, Option<Box<dyn GraphRuntimeProcessor>>>,
+    pub(crate) split_pairs: BTreeMap<GraphNodeId, SplitPairSlot>,
     pub(crate) observers: BTreeMap<GraphNodeId, Vec<GraphNodeObserverBinding>>,
     pub(crate) source_inputs: std::collections::BTreeSet<GraphNodeId>,
     /// Issue #210 phase 2: declared per-lane input delay, by track input node. Only tracks that
@@ -1696,6 +2015,7 @@ impl RuntimeParts {
                 .into_iter()
                 .map(|binding| (binding.node, binding.processor))
                 .collect(),
+            split_pairs: BTreeMap::new(),
             observers: by_node,
             source_inputs,
             track_delays: track_delays
@@ -1961,6 +2281,60 @@ fn scalar_pair_is_in_place(program: &ExecutionProgram, fader: usize, matrix: usi
         && matrix.in_place)
 }
 
+/// The deferred fader's physical buffer must stay private until its original matrix operation.
+/// Any intervening read, write, delayed staging slot or observer-visible alias declines the split
+/// pair, leaving both original owners in the ordinary scalar path.
+fn scalar_split_interval_is_clear(
+    program: &ExecutionProgram,
+    spec: &GraphSpec,
+    parts: &RuntimeParts,
+    taps: &BTreeMap<u32, Vec<GraphNodeId>>,
+    fader: usize,
+    matrix: usize,
+) -> bool {
+    let buffer = program.ops[fader].output;
+    if program.output == buffer {
+        return false;
+    }
+    let fader_node = &spec.nodes[program.ops[fader].node as usize].id;
+    if parts.observers.contains_key(fader_node)
+        || taps
+            .get(&u32::try_from(fader).expect("op index"))
+            .is_some_and(|aliases| {
+                aliases
+                    .iter()
+                    .any(|alias| parts.observers.contains_key(alias))
+            })
+    {
+        return false;
+    }
+    if spec.edges.iter().any(|edge| {
+        edge.source.node == *fader_node
+            && matches!(
+                edge.id,
+                GraphEdgeId::RouteSource { .. } | GraphEdgeId::EffectSidechain { .. }
+            )
+    }) {
+        return false;
+    }
+    program.ops[fader + 1..matrix].iter().all(|op| {
+        if op.output == buffer {
+            return false;
+        }
+        if program.inputs_of(op).iter().any(|input| {
+            input.buffer == buffer || input.delay.is_some_and(|delay| delay.staging == buffer)
+        }) {
+            return false;
+        }
+        if op.sidechain.is_some_and(|side| {
+            side.buffer == buffer || side.delay.is_some_and(|delay| delay.staging == buffer)
+        }) {
+            return false;
+        }
+        true
+    })
+}
+
 /// Groups the program's ops into units: a bank's members become one unit at the first member's
 /// position, which the level-major schedule proves is after every member's producers (#98 F1).
 ///
@@ -2017,6 +2391,8 @@ pub(crate) fn build_sequential(
     parts: RuntimeParts,
     frames: usize,
 ) -> Runtime {
+    #[cfg(any(test, feature = "test-support"))]
+    test_only_reset_selected_split_fader();
     let mut parts = parts;
     // The arena reserves buffer 0 as the always-zero silence slot, so a coloured buffer `b` is
     // arena buffer `b + ARENA_BASE`.
@@ -2070,6 +2446,7 @@ pub(crate) fn build_sequential(
     .into_iter()
     .filter(|(run, _, _)| !folded_runs.contains(run))
     .collect();
+    let mut split_pairs: Vec<Box<dyn GraphRuntimeSplitPairProcessor>> = Vec::new();
 
     // Serialized scalar fader/matrix pairing is decided while both original owners and the
     // lowered graph are still available.  The schedule is intentionally left untouched: the
@@ -2152,6 +2529,108 @@ pub(crate) fn build_sequential(
             Err((fader, matrix)) => {
                 parts.bindings.insert(first_node.clone(), Some(fader));
                 parts.bindings.insert(second_node.clone(), Some(matrix));
+            }
+        }
+    }
+
+    // Keep the nonadjacent pair at both original schedule positions. A settled fader defers only
+    // its private in-place arithmetic; the owner completes it at the matrix slot or before an
+    // intervening execution/observer error escapes the render call. The first slice admits one
+    // deterministic interval; all later candidates remain on the original separate path.
+    'split: for fader_run in 0..run_units.len() {
+        let (fader_membership, fader_ops) = &run_units[fader_run];
+        if !fader_membership.is_empty() || fader_ops.len() != 1 {
+            continue;
+        }
+        let fader = fader_ops[0];
+        for (matrix_membership, matrix_ops) in run_units.iter().skip(fader_run + 2) {
+            if !matrix_membership.is_empty() || matrix_ops.len() != 1 {
+                continue;
+            }
+            let matrix = matrix_ops[0];
+            if retired.contains(&fader)
+                || retired.contains(&matrix)
+                || program.inputs_of(&program.ops[fader]).is_empty()
+                || !scalar_pair_is_in_place(program, fader, matrix)
+                || redirects
+                    .iter()
+                    .any(|(_, _, consumer)| *consumer == fader || *consumer == matrix)
+                || !chains_into(
+                    program,
+                    spec,
+                    &parts,
+                    &readers,
+                    &first_producer,
+                    &[fader],
+                    &[matrix],
+                )
+                || !scalar_split_interval_is_clear(program, spec, &parts, &taps, fader, matrix)
+            {
+                continue;
+            }
+            let fader_node = &spec.nodes[program.ops[fader].node as usize].id;
+            let matrix_node = &spec.nodes[program.ops[matrix].node as usize].id;
+            let (
+                GraphNodeId::TrackStage {
+                    track_id: fader_track,
+                    stage: TrackStage::PostFader,
+                },
+                GraphNodeId::TrackStage {
+                    track_id: matrix_track,
+                    stage: TrackStage::PostMatrix,
+                },
+            ) = (fader_node, matrix_node)
+            else {
+                continue;
+            };
+            if fader_track != matrix_track {
+                continue;
+            }
+            let Some(Some(fader_owner)) = parts.bindings.remove(fader_node) else {
+                continue;
+            };
+            let Some(Some(matrix_owner)) = parts.bindings.remove(matrix_node) else {
+                parts.bindings.insert(fader_node.clone(), Some(fader_owner));
+                continue;
+            };
+            let Some(factory) = fader_owner.scalar_split_pair_factory() else {
+                parts.bindings.insert(fader_node.clone(), Some(fader_owner));
+                parts
+                    .bindings
+                    .insert(matrix_node.clone(), Some(matrix_owner));
+                continue;
+            };
+            match factory(fader_owner, matrix_owner) {
+                Ok(owner) => {
+                    #[cfg(any(test, feature = "test-support"))]
+                    test_only_record_selected_split_fader(
+                        fader_node.clone(),
+                        program.ops[fader].output.0,
+                    );
+                    let pair = split_pairs.len();
+                    split_pairs.push(owner);
+                    parts.split_pairs.insert(
+                        fader_node.clone(),
+                        SplitPairSlot {
+                            pair,
+                            role: SplitPairRole::Fader,
+                        },
+                    );
+                    parts.split_pairs.insert(
+                        matrix_node.clone(),
+                        SplitPairSlot {
+                            pair,
+                            role: SplitPairRole::Matrix,
+                        },
+                    );
+                    break 'split;
+                }
+                Err((fader_owner, matrix_owner)) => {
+                    parts.bindings.insert(fader_node.clone(), Some(fader_owner));
+                    parts
+                        .bindings
+                        .insert(matrix_node.clone(), Some(matrix_owner));
+                }
             }
         }
     }
@@ -2260,6 +2739,7 @@ pub(crate) fn build_sequential(
         // ops carry and this vector's order are the same walk.
         core::mem::take(&mut parts.track_delay_lines),
         units,
+        split_pairs,
         identity,
         redirects.len() as u64,
         folds,
@@ -3044,6 +3524,7 @@ fn build_op(
     aliases: Option<&[GraphNodeId]>,
 ) -> RuntimeOp {
     let node = spec.nodes[op.node as usize].id.clone();
+    let split_pair = parts.split_pairs.remove(&node);
     let kind = parts.node_kind(&node, op.node);
     let observers = take_observers(
         &mut parts.observers,
@@ -3055,6 +3536,7 @@ fn build_op(
         sidechain,
         output,
         kind,
+        split_pair,
         observers,
     }
 }
@@ -3414,6 +3896,7 @@ mod tests {
             sidechain: None,
             output: ARENA_BASE,
             kind: NodeKind::Bound(Box::new(FaderOwner(Arc::clone(&fader_calls)))),
+            split_pair: None,
             observers: Box::new([]),
         };
         let mut matrix = RuntimeOp {
@@ -3425,6 +3908,7 @@ mod tests {
                 calls: Arc::clone(&matrix_calls),
                 queued: Arc::clone(&queued),
             })),
+            split_pair: None,
             observers: Box::new([]),
         };
         let mut lease = stereo_lease(2, 2);
@@ -3438,9 +3922,9 @@ mod tests {
             .copy_from_slice(&[-0.75, 1.0]);
         lease.write_stereo(ARENA_BASE + 1).0.fill(91.0);
         lease.write_stereo(ARENA_BASE + 1).1.fill(-91.0);
-        execute_op(&mut fader, &mut lease, &mut [], &mut [], 0).expect("earlier fader");
+        execute_op(&mut fader, &mut lease, &mut [], &mut [], &mut [], 0).expect("earlier fader");
         assert_eq!(
-            execute_op(&mut matrix, &mut lease, &mut [], &mut [], 0),
+            execute_op(&mut matrix, &mut lease, &mut [], &mut [], &mut [], 0),
             Err(RenderError::InvalidEnvelope)
         );
         assert_eq!(lease.read_stereo(ARENA_BASE).0, &[0.5, -1.0]);
@@ -3454,6 +3938,60 @@ mod tests {
             1,
             "later failure retains its next record"
         );
+    }
+
+    #[test]
+    fn split_pair_completion_walks_pending_faders_before_error_return() {
+        struct Probe {
+            completions: Arc<AtomicUsize>,
+        }
+        impl GraphRuntimeSplitPairProcessor for Probe {
+            fn begin_fader(&mut self, _: GraphBindingBlock<'_>) -> Result<(), RenderError> {
+                Ok(())
+            }
+            fn finish_matrix(&mut self, _: GraphBindingBlock<'_>) -> Result<(), RenderError> {
+                Ok(())
+            }
+            fn complete_pending(&mut self, block: GraphBindingBlock<'_>) {
+                self.completions.fetch_add(1, Ordering::Relaxed);
+                block.left.fill(0.75);
+                block.right.fill(-0.25);
+            }
+        }
+
+        let completions = Arc::new(AtomicUsize::new(0));
+        let mut runtime = Runtime::new(
+            stereo_lease(2, 2),
+            Vec::new(),
+            Vec::new(),
+            vec![RuntimeUnit::Op(RuntimeOp {
+                inputs: Box::new([]),
+                staged: Box::new([]),
+                sidechain: None,
+                output: ARENA_BASE,
+                kind: NodeKind::Identity,
+                split_pair: Some(SplitPairSlot {
+                    pair: 0,
+                    role: SplitPairRole::Fader,
+                }),
+                observers: Box::new([]),
+            })],
+            vec![Box::new(Probe {
+                completions: Arc::clone(&completions),
+            })],
+            vec![UnitIdentity {
+                banked: false,
+                stages: 1,
+                upstream_of_seam_stages: 0,
+                lane_tracks: Box::new([]),
+            }],
+            0,
+            0,
+        );
+        runtime.complete_pending(11);
+        assert_eq!(completions.load(Ordering::Relaxed), 1);
+        assert_eq!(runtime.buffer(ARENA_BASE).0, &[0.75, 0.75]);
+        assert_eq!(runtime.buffer(ARENA_BASE).1, &[-0.25, -0.25]);
     }
 
     struct DecliningPairOwner(Arc<AtomicUsize>);
@@ -4592,9 +5130,10 @@ mod tests {
                 sidechain: None,
                 output: ARENA_BASE,
                 kind,
+                split_pair: None,
                 observers: Box::new([]),
             };
-            execute_op(&mut op, &mut lease, &mut [], &mut [], 0).expect("op");
+            execute_op(&mut op, &mut lease, &mut [], &mut [], &mut [], 0).expect("op");
             let (left, right) = lease.read_stereo(ARENA_BASE);
             assert!(
                 left.iter().all(|value| *value == expected.0)
@@ -4628,6 +5167,7 @@ mod tests {
                 sidechain,
                 output,
                 kind,
+                split_pair: None,
                 observers: Box::new([]),
             }
         }

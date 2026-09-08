@@ -1,0 +1,19 @@
+issue=600
+base_commit=b4c27c6f330ca6c746a4e089c361b56ccd205ec4
+base_tree=5c3b892d6def37f0dbc3eed2b41c83610cf5874f
+working_source_sha256=e3065e0832789ddc234fa077095a91fb6e203da7bae8852c0191b9572999d1d9
+rust_toolchain=rustc 1.97.1 (8bab26f4f 2026-07-14);binary: rustc;commit-hash: 8bab26f4f68e0e26f0bb7960be334d5b520ea452;commit-date: 2026-07-14;host: x86_64-unknown-linux-gnu;release: 1.97.1;LLVM version: 22.1.6;
+target=x86_64-unknown-linux-gnu
+backend=Simd8
+profiles=debug,release
+profile_digest_policy=debug_and_release_share_reviewed_phase_constants
+fixture_id=fixtures/session/v1/parametric-eq-bank-console.json
+fixture_sha256=fc7d33e3b026576c156ff0b62ef4759e1590c4dfc8a53c5a638a86dc64b42d80
+pcm_generation=per_track_left_sin((frame+track*128)*0.013)*0.5;right=-left*0.75;source_words_are_f32
+qualification_command_debug=cargo run --locked -p bench -- input-symmetry
+qualification_command_release=cargo run --locked --release -p bench -- input-symmetry
+renders_per_owner=512+4096+4096=8704
+renders_total=17408
+phase_digest_1=75eeffae6a0116867d6d6fbe589834df53f3dce87ffd09092f22e5968bc28f87
+phase_digest_2=75eeffae6a0116867d6d6fbe589834df53f3dce87ffd09092f22e5968bc28f87
+connected_oracle_digest=460411969d6f9a9d238beff68a53a1980364d398aaadaf83e79ae6ee758653e4

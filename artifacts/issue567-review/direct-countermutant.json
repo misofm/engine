@@ -1,0 +1,11 @@
+{
+  "command": [
+    "env",
+    "CHECKER=/tmp/issue567-review-mutant-bye58m4r/check-conformance-boundaries.sh",
+    "bash",
+    "scripts/test-conformance-boundaries.sh"
+  ],
+  "utc": "2026-09-07T15:55:46.369634+00:00",
+  "exit": 1,
+  "mutation": "Scratch gate_sort_lines only: else rc=$? -> else rc=0; replacement count asserted 1"
+}

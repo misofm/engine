@@ -1,0 +1,11 @@
+--- a/scripts/input-symmetry-capture-validator.py
++++ b/scripts/input-symmetry-capture-validator.py
+@@ -91,7 +91,7 @@ def validate_record(record, expected_round, seal):
+     exact_keys(record, RECORD_KEYS, "record")
+     if integer(record["schema_version"], "schema_version") != 1:
+         raise ValueError("schema_version: unexpected value")
+-    if integer(record["issue"], "issue") != 602:
++    if integer(record["issue"], "issue") != 601:
+         raise ValueError("issue: frozen record identity must be 602")
+     if record["kind"] != "input_symmetry_capture":
+         raise ValueError("kind: unexpected value")

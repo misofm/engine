@@ -1,0 +1,18 @@
+{
+  "original": {
+    "path": "artifacts/issue545-attempt1/issue545-graph-test.stdout",
+    "name": "issue545-graph-test.stdout",
+    "byte_count": 7324,
+    "sha256": "0a75a02b65d1195378456124bae594f25b72bd35130a55ef6daf3a3354303dc8"
+  },
+  "packed": {
+    "path": "artifacts/issue545-attempt1/issue545-graph-test.stdout.gz",
+    "name": "issue545-graph-test.stdout.gz",
+    "byte_count": 2272,
+    "sha256": "d29c4b5a563c082465b399a22a21111e70bfbda172be2ac41d6dfbde32e70d1a"
+  },
+  "encoding": "gzip",
+  "gzip_options": "-n",
+  "gzip_mtime": 0,
+  "verification_decode_command": "gzip -cd artifacts/issue545-attempt1/issue545-graph-test.stdout.gz > /tmp/issue545/attempt2/issue545-graph-test.stdout && test \"$(wc -c < /tmp/issue545/attempt2/issue545-graph-test.stdout)\" -eq 7324 && test \"$(sha256sum /tmp/issue545/attempt2/issue545-graph-test.stdout | cut -d' ' -f1)\" = \"0a75a02b65d1195378456124bae594f25b72bd35130a55ef6daf3a3354303dc8\""
+}

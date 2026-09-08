@@ -5,7 +5,6 @@
 //! browser-message, and C ABI adapters without retaining any caller pointer.
 
 mod btlv;
-mod conformance;
 mod controller;
 mod controller_delivery;
 mod delivery;
@@ -42,9 +41,7 @@ pub use queue::{
     ReliableEventReservations, ReliableHeader, ReliablePayload, ReliableSlot, TelemetryCounters,
     TelemetryKey, TelemetryRecord,
 };
-pub use session_wire::{
-    DecodedSessionTransaction, SessionTransactionFrame, complete_all_opcode_fixture,
-};
+pub use session_wire::{DecodedSessionTransaction, SessionTransactionFrame};
 pub use typed_frame::{
     CommandPayload, DecodedCommandPayload, DecodedEventPayload, DecodedSuccessResponsePayload,
     DecodedTypedCommandFrame, DecodedTypedEventFrame, DecodedTypedResponseFrame, EventPayload,
@@ -70,9 +67,6 @@ pub const TLV_PREFIX_BYTES: usize = 8;
 pub const AUTOMATION_BATCH_RECORDS: usize = 256;
 /// Exact byte width of a transient automation record.
 pub const AUTOMATION_RECORD_BYTES: usize = 32;
-pub use conformance::{
-    COMPLETE_SCHEMA_HASH, ConformanceDecoder, ConformanceFrame, complete_schema_corpus,
-};
 pub use controller::{
     CommandFrameProcessError, CommittedCommandFrame, ControlCommand, ControlProvider,
     ControllerRequest, ControllerResourceAllocationError, ControllerResponse,
@@ -89,7 +83,8 @@ pub use controller_delivery::{
 };
 pub use delivery::{
     AutomationDeliveryControl, AutomationDeliveryRender, CancelComplete, CancelToken,
-    CoreCompletion, CoreTicket, DeliveryCoreControl, DeliveryCoreRender, DeliveryError,
-    DeliveryResourceReport, DeliveryTicket, HandoffResult, PendingAutomation,
-    PreparedAutomationDelivery, PreparedDelivery, PreparedDeliveryCapabilities, TerminalAutomation,
+    CoreCancelComplete, CoreCancelToken, CoreCompletion, CoreTerminalDisposition, CoreTicket,
+    DeliveryCoreControl, DeliveryCoreRender, DeliveryError, DeliveryResourceReport, DeliveryTicket,
+    HandoffResult, PendingAutomation, PreparedAutomationDelivery, PreparedDelivery,
+    PreparedDeliveryCapabilities, TerminalAutomation,
 };

@@ -39,8 +39,8 @@ use protocol::{
     ControllerRetainedCapacity, DeliveryError, DeliveryTicket, HandoffResult,
     ParameterAutomationRate, ParameterChannel as ProtocolParameterChannel, ParameterDescriptor,
     ParameterDomain as ProtocolParameterDomain, ParameterHandle, ParameterMapping,
-    ParameterProviderError, ParameterUnit as ProtocolParameterUnit, ParameterValueKind,
-    PreparedAutomationDelivery, PreparedDeliveryCapabilities, ProtocolCodec,
+    ParameterProviderError, ParameterStateRecord, ParameterUnit as ProtocolParameterUnit,
+    ParameterValueKind, PreparedAutomationDelivery, PreparedDeliveryCapabilities, ProtocolCodec,
     ProtocolControllerConfig, ProtocolQueueConfig, QueueKind, QueueReport, ReplayCacheConfig,
     SampleTime, SessionRevision, SessionStore,
 };
@@ -99,6 +99,28 @@ pub struct ControllerScalarPointResources {
     pub controller: ControllerAutomationResources,
     /// Actual inline size of the combined scalar render owner.
     pub scalar_render_inline_bytes: usize,
+}
+
+/// Publishes the actual native scalar state at an explicitly quiescent host boundary.
+pub fn publish_controller_scalar_point_snapshot<P: ControlProvider>(
+    controller: &mut ControllerAutomationDelivery<P>,
+    handles: [ParameterHandle; 2],
+    snapshot: &ScalarPointSnapshot,
+) -> Result<(), ControllerAutomationPrepareError> {
+    let records = handles.map(|handle| ParameterStateRecord {
+        handle: handle.0,
+        flags: 1,
+        value: 0.0,
+    });
+    let mut records = records;
+    for (index, record) in records.iter_mut().enumerate() {
+        let state = snapshot.state[index];
+        record.value = state.current_value;
+        if state.current_value.to_bits() != state.target_value.to_bits() {
+            record.flags |= 2;
+        }
+    }
+    controller.publish_scalar_point_state(snapshot.observed_sample, records)
 }
 /// Delivery heap and endpoint inline accounting; excludes borrowed compressor and caller PCM.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1013,17 +1035,19 @@ pub fn prepare_controller_scalar_point_endpoint<'a, P: ControlProvider>(
     }
     let capabilities =
         point_capabilities(handles).map_err(ControllerScalarPointPrepareError::ScalarPoint)?;
-    let (controller, delivery, resources) = ControllerAutomationDelivery::prepare(
-        session,
-        queues,
-        provider,
-        replay,
-        codec,
-        config,
-        retained,
-        capabilities,
-    )
-    .map_err(ControllerScalarPointPrepareError::Controller)?;
+    let (controller, delivery, resources) =
+        ControllerAutomationDelivery::prepare_scalar_point_state(
+            session,
+            queues,
+            provider,
+            replay,
+            codec,
+            config,
+            retained,
+            capabilities,
+            handles,
+        )
+        .map_err(ControllerScalarPointPrepareError::Controller)?;
     let combined_resources = ControllerScalarPointResources {
         controller: resources,
         scalar_render_inline_bytes: core::mem::size_of::<PreparedScalarPointRender<'static>>(),

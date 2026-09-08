@@ -51,6 +51,58 @@ workspace_lib_names() {
     gate_unique_nonempty_lines 'workspace library name aggregation' "$names"
 }
 
+# These are the only protocol source children that may use the dev-only conformance dependency.
+# Keep the mapping explicit: a basename or directory exemption would make an unguarded production
+# module look test-only merely because its path happens to end in `tests.rs`.
+protocol_test_child_paths=(
+    crates/protocol/src/controller/tests.rs
+    crates/protocol/src/message_wire/tests.rs
+    crates/protocol/src/session_wire/tests.rs
+)
+
+protocol_test_child_parent() {
+    case "$1" in
+        crates/protocol/src/controller/tests.rs) printf '%s\n' crates/protocol/src/controller.rs ;;
+        crates/protocol/src/message_wire/tests.rs) printf '%s\n' crates/protocol/src/message_wire.rs ;;
+        crates/protocol/src/session_wire/tests.rs) printf '%s\n' crates/protocol/src/session_wire.rs ;;
+        *) return 1 ;;
+    esac
+}
+
+verify_protocol_test_child_guard() {
+    local child="$1" parent rc
+    parent="$(protocol_test_child_parent "$child")" || {
+        gate_fail "unknown protocol test-child path: $child"
+        return 1
+    }
+    [[ -r "$parent" ]] || {
+        gate_fail "protocol test-child parent is unreadable: $parent"
+        return 1
+    }
+    if awk '
+        $0 == "mod tests;" {
+            module_count++
+            if (previous == "#[cfg(test)]") valid_count++
+        }
+        { previous = $0 }
+        END { exit !(module_count == 1 && valid_count == 1) }
+    ' "$parent"; then
+        return 0
+    else
+        rc=$?
+    fi
+    if [[ "$rc" == 1 ]]; then
+        gate_fail "$parent must contain exactly one literal adjacent '#[cfg(test)]' and 'mod tests;' declaration for $child"
+    else
+        gate_fail "$parent guard verification errored (awk status $rc)"
+    fi
+    return "$rc"
+}
+
+for protocol_test_child in "${protocol_test_child_paths[@]}"; do
+    verify_protocol_test_child_guard "$protocol_test_child" || exit $?
+done
+
 # Manifests carry the package name (hyphens); code carries the crate identifier (underscores).
 # Scoped to `Cargo.toml` and `src/` rather than the whole crate directory: a `tests/MUTATIONS.md`
 # that *names* the harness while recording a red mutation is evidence, not a dependency, and a
@@ -67,8 +119,8 @@ for production in "${production_crates[@]}"; do
     [[ -d "$crate_dir/src" ]] || { printf 'conformance boundary failure: unreadable source root for %s\n' "$production" >&2; exit 1; }
     source_files_raw="$(gate_find_collect "$production source discovery" "$crate_dir/src" -maxdepth 1 -name '*.rs' -type f -readable)" || exit $?
     [[ -n "$source_files_raw" ]] || { printf 'conformance boundary failure: unreadable source root for %s\n' "$production" >&2; exit 1; }
-    manifest_harness="$(gate_scan_collect "$production manifest harness predicate" \
-      '^(dsp-reference|conformance)([[:space:]]|\.workspace)' '' "$manifest")" || exit $?
+    manifest_dependencies="$(gate_toml_dependencies "$manifest" plain-target)" || exit $?
+    manifest_harness="$(printf '%s\n' "$manifest_dependencies" | awk '$0 == "dsp-reference" || $0 == "conformance"')"
     if [[ -n "$manifest_harness" ]]; then
         printf '%s\n' "$manifest_harness" >&2
         printf 'conformance boundary failure: %s must not depend on a harness crate\n' \
@@ -97,6 +149,14 @@ for production in "${production_crates[@]}"; do
     if [[ -n "$harness_pattern" ]]; then
         harness_uses="$(gate_scan_collect "${production} harness use scan" "\\b(${harness_pattern})::" '' "$crate_dir/src")" || exit $?
         filtered_uses="$(gate_filter_exclude "${production} harness comment filter" ':[0-9]+:[[:space:]]*//' "$harness_uses")" || exit $?
+        if [[ "$production" == protocol ]]; then
+            # Protocol's conformance dependency is deliberately dev-only. Exempt only the three
+            # exact child paths whose parent guards were verified above; every other tests.rs
+            # path, including one in another production crate, remains production code here.
+            filtered_uses="$(gate_filter_exclude "${production} controller test-child filter" '^crates/protocol/src/controller/tests[.]rs:' "$filtered_uses")" || exit $?
+            filtered_uses="$(gate_filter_exclude "${production} message-wire test-child filter" '^crates/protocol/src/message_wire/tests[.]rs:' "$filtered_uses")" || exit $?
+            filtered_uses="$(gate_filter_exclude "${production} session-wire test-child filter" '^crates/protocol/src/session_wire/tests[.]rs:' "$filtered_uses")" || exit $?
+        fi
     else
         filtered_uses=''
     fi
@@ -134,11 +194,28 @@ dependency_names() { gate_toml_dependencies "$1" plain-target; }
 # #84 phase A: conformance drives lane-generic effect checks, so the Lane trait is in-boundary.
 # Sorted alphabetically by the *current* (post-prefix-strip) name -- `engine` (formerly `core`,
 # which sorted first under the old miso-engine- prefix) now sorts third, not first.
-expected_conformance=$'dsp-reference\neffect-contract\nengine\nlane'
+expected_conformance=$'dsp-reference\neffect-contract\nengine\nlane\nprotocol\nsession'
 [[ "$(dependency_names crates/conformance/Cargo.toml)" == "$expected_conformance" ]] || {
     printf 'conformance boundary failure: conformance dependencies changed\n' >&2
     exit 1
 }
+
+[[ ! -e crates/protocol/src/conformance.rs ]] || {
+    printf 'conformance boundary failure: stale protocol corpus source still exists\n' >&2
+    exit 1
+}
+[[ ! -e crates/protocol/src/bin/protocol_wasm_golden.rs ]] || {
+    printf 'conformance boundary failure: stale protocol Wasm runner still exists\n' >&2
+    exit 1
+}
+gate_scan_forbidden 'protocol default corpus exports' \
+    'COMPLETE_SCHEMA_HASH|ConformanceDecoder|ConformanceFrame|complete_schema_corpus|complete_all_opcode_fixture' \
+    '' crates/protocol/src/lib.rs || exit $?
+gate_scan_forbidden 'protocol production fixture definition' \
+    '^[[:space:]]*pub fn complete_all_opcode_fixture\b' '' crates/protocol/src/session_wire.rs || exit $?
+gate_scan_forbidden 'protocol inline extracted tests' \
+    '^[[:space:]]*mod[[:space:]]+tests[[:space:]]*\{' '' \
+    crates/protocol/src/controller.rs crates/protocol/src/message_wire.rs crates/protocol/src/session_wire.rs || exit $?
 expected_conformance_bench=$'bench-support\nbuiltins\nbuiltins-compiler\nconformance\nconsole-workload\neffect-compiler\neffect-contract\neffect-package\nengine\nflatbuffers\ngraph\ngraph-compiler\nlane\nprotocol\nrack\nsession\nsha2'
 [[ "$(dependency_names tools/bench/Cargo.toml)" == "$expected_conformance_bench" ]] || {
     printf 'conformance boundary failure: consolidated benchmark dependency union changed\n' >&2

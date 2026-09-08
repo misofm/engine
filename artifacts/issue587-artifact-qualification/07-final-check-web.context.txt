@@ -1,0 +1,5 @@
+utc=2026-09-07T23:52:30Z
+cwd=/home/bl/misofm/engine-587-artifact-qualification
+head=ab3766caef34bcb035d7394224b0ccff1ea0be2d
+pin=39ebe7cd3f71f34ab11260f27fa1eaad281dd61642c50d9ed6210e703d95dd55
+artifact=/tmp/issue587-artifact-ab3766ca

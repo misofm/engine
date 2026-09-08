@@ -1,0 +1,8 @@
+
+> @miso/engine-v1-browser-qualification@0.0.0 session-identities
+> node ./session-identities.mjs
+
+console-session.json: 16640 frames, sha256:8e7350ab6d22bf4a3e9357474ae4622a55d630dfc020f27010a69a72965d51cf
+observation-session.json: 2048 frames, sha256:66e39e41bccc0a57ae90a77b426f4075e81ba877b0653c3aabe0a9e00762769c
+stall-session.json: 5120 frames, sha256:938d3a47555b54df6321fc9e1b40c9581d316870f70fa17be8ea40cc154436d7
+session identities: all qualification documents declare their fed PCM

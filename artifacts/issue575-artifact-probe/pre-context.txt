@@ -1,0 +1,11 @@
+utc=2026-09-07T19:35:02Z
+cwd=/home/bl/misofm/engine-io5-btlv-scalar-ingress
+head=ec992089d1fa1208ceb49ff6ca65e6e2c05bf2ed
+status=## codex/io5-btlv-scalar-ingress...origin/codex/io5-btlv-scalar-ingress
+status=?? artifacts/issue575-artifact-probe/
+20fba6b4433e2689625f5490daf582b917d653d8e29af54147ae00be491d2068  crates/protocol/src/controller.rs
+bdcaadc8c96c9b6c789733932b80ae9c814793d0fa870f1972c869b9d0f8ecd5  crates/protocol/src/controller_delivery.rs
+831a1eaee26339317bd08db116eb8149aafcc4c3385d3e6fa04681b826139601  .github/ISSUE_SPECS/575-btlv-scalar-point-ingress.md
+44a7f72fc27f93906472c7f8061e6492194949d7b2a3f6e45c53dfdbc689075d  scripts/build-web-audioworklet.sh
+cc22bd35f453e3db50df3613d7506c91e3ed8b700e94fc49960a127c61a76a1e  hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256
+pin_value=0d447edfd651bd1292ffbce81ec8923a8b20c063722b7bfacaf073e3fa36c357

@@ -1,0 +1,33 @@
+Issue #552/#558 final qualification — Luna HIGH final report
+
+Repository: /home/bl/misofm/engine-js-hex-recovery
+Final HEAD: 3881591d307c7b00e1cc7dfb431b3abf26874717
+Final worktree: clean (temporary node_modules symlink removed)
+Artifact: /tmp/issue555-postpin-artifact; exactly six regular files; required Wasm SHA-256 verified.
+Initial gate-8 failure is preserved in 08-qualification/ and terminal-report.txt.
+
+Provisioning: root-authorized temporary symlink from
+/home/bl/misofm/engine-js-hex-recovery/hosts/host-web/qualification/node_modules to
+/home/bl/misofm/engine/hosts/host-web/qualification/node_modules. Package/lock and installed
+Playwright identity record: provisioning-record.txt. Symlink removed after qualification.
+
+01 direct: PASS (0)
+02 stem-store: PASS (0)
+03 stem-store --self-test: PASS (0), six provenance RED cases plus prior controls
+04 SDK types: PASS (0)
+05 SDK headless: PASS (0)
+06 SDK package: PASS (0)
+07 session-identities: PASS (0)
+08 qualification initial: FAIL (1), missing playwright; preserved
+08 qualification retry: PASS (0), Chromium 151.0.7922.34
+09 workspace policy: PASS (0)
+10 committed diff/path census: PASS (0), diff checks both bases; current-base exactly 10 product,
+2 issue-spec, and 126 evidence paths; no prohibited current-base Cargo/Rust/ABI/PCM/generated paths
+11 semantic census: PASS (0), complete hit output and classifications in gate-11 records
+
+Semantic classifications: only raw unprefixed byte encoders are engine::hex_lower, SDK hexLower,
+and host-web hexLower. ABI diagnostics, uppercase Unicode escapes, fixed-width FNV words, test
+literal values, and 0x-prefixed Rust diagnostic/repin renderers are exclusions. No char::from_digit
+hits.
+
+PASS: retry gate 8 and gates 9–11 passed; no repository changes remain.

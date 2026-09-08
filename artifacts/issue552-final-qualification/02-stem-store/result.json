@@ -1,0 +1,9 @@
+{
+  "name": "02-stem-store",
+  "argv": [
+    "node",
+    "scripts/check-stem-store-v1.mjs"
+  ],
+  "cwd": "/home/bl/misofm/engine-js-hex-recovery",
+  "status": 0
+}

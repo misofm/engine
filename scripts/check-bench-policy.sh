@@ -167,7 +167,7 @@ sole_owner 'more than one global allocator is registered under tools/' \
 sole_owner_or_delegate 'the JSON string escaper has more than one implementation' \
     "$support/src/json.rs" '^\s*(pub(\([a-z]+\))? )?fn (json_(escape|string|quote)|escape)\('
 sole_owner 'the nearest-rank percentile has more than one implementation' \
-    "$support/src/stats.rs" '^(pub )?fn (percentile|nearest_rank|per_mille|percentile_nearest_rank)'
+    "$support/src/stats.rs" '^(pub )?(struct Percentiles|fn (percentile|nearest_rank|per_mille|percentile_nearest_rank))'
 sole_owner 'the counted SHA-256 sink has more than one implementation' \
     "$support/src/digest.rs" '^(pub )?struct Sha256Sink'
 forbidden_under_tools 'a private SHA-256 initial hash word (H0) or round-constant table (K) reappeared under tools/' \
@@ -246,6 +246,37 @@ actual_environment_readers="$(<"$scratch/actual-environment")"
         <(printf '%s\n' "$actual_environment_readers") >&2 || true
     fail 'a subject bypassed the shared in-process metadata snapshot'
 }
+
+# #557's common host/toolchain acquisition boundary: the two subjects retain their local metadata
+# records and projections, but one shared collector owns every common source probe.
+for subject in tools/bench/src/session.rs tools/bench/src/conformance.rs; do
+    if grep -nF 'HostToolchainFacts::gather()' "$subject" >"$scratch/shared-delegate" 2>"$scratch/shared-delegate.err"; then
+        delegate_status=0
+    else
+        delegate_status=$?
+    fi
+    ((delegate_status == 0)) || fail "shared host/toolchain delegation missing or scan failed for $subject; status $delegate_status; output: $(captured "$scratch/shared-delegate"); stderr: $(captured "$scratch/shared-delegate.err")"
+    for common_pattern in \
+        '/proc/cpuinfo' \
+        '/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor' \
+        'lscpu|CORE,SOCKET' \
+        'available_parallelism' \
+        '\["rustc", "-V' \
+        'Command::new\("rustc"\)' \
+        '\["uname"' \
+        'Command::new\("uname"\)' \
+        'Command::new\("lscpu"\)' \
+        'LLVM version: |host: ' \
+        'MISO_ENGINE_BENCH_(POWER_SOURCE|OPT_LEVEL|LTO|CODEGEN_UNITS|TARGET_CPU|TARGET_FEATURES|BACKGROUND_LOAD_NOTE)'; do
+        if grep -nE "$common_pattern" "$subject" >"$scratch/shared-forbidden" 2>"$scratch/shared-forbidden.err"; then
+            forbidden_status=0
+        else
+            forbidden_status=$?
+        fi
+        ((forbidden_status <= 1)) || fail "shared acquisition scan failed for $subject; pattern $common_pattern; status $forbidden_status; output: $(captured "$scratch/shared-forbidden"); stderr: $(captured "$scratch/shared-forbidden.err")"
+        ((forbidden_status == 0)) && fail "subject retains a common host/toolchain acquisition spelling: $subject (pattern $common_pattern)"
+    done
+done
 
 # The shared harness is test scaffolding. A production package depending on it would put a
 # `#[global_allocator]` and an abort-on-allocation policy into a shipped artifact.

@@ -1,0 +1,3 @@
+   Compiling effect-package v0.1.0 (/home/bl/misofm/engine-shared-hex-authority/crates/effect-package)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.03s
+     Running tests/package_v1_qualification.rs (/tmp/issue543-target/debug/deps/package_v1_qualification-1b46c42f656d0f36)

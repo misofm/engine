@@ -1,0 +1,3 @@
+sed 's#  /tmp/issue608-audioworklet-probe-u5NApI/#  #' artifacts/issue608-attempt1/identity-probe.sha256 > /tmp/issue608-current-six.sha256
+sed 's#  /tmp/issue587-artifact-ab3766ca/#  #' artifacts/issue587-artifact-qualification/05-pin-and-build.sha256 > /tmp/issue608-delivered-six.sha256
+diff -u /tmp/issue608-delivered-six.sha256 /tmp/issue608-current-six.sha256

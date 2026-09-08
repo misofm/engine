@@ -1,0 +1,13 @@
+stage=browser-missing-dependency-stop
+source_commit=e4f46fa808e413507d204e81b6a4ebc27254869c
+cwd=/tmp/issue555-source-e4f46fa8
+status=1
+error=ERR_MODULE_NOT_FOUND: Cannot find package 'playwright' imported from /tmp/issue555-source-e4f46fa8/hosts/host-web/qualification/run.mjs
+browsers.chromium.count=0
+browsers.firefox.count=0
+browsers.webkit.count=0
+browser_execution=none
+mutation_controls=not_run
+repository_mutation=none
+scratch_mutation=none
+rerun=none

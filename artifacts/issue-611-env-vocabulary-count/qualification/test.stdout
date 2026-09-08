@@ -1,0 +1,4 @@
+Git listing assertion: mode=error checker_status=1 partial_required=none
+Git listing assertion: mode=full checker_status=1 partial_required=scripts/check-env-vocabulary.sh
+Git listing mutant assertion: mode=full assertion_status=86 outcome=named-unexpected-success
+env vocabulary mutations: ok

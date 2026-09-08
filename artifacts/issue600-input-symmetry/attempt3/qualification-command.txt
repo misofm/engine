@@ -1,0 +1,3 @@
+cargo run --locked -p bench -- input-symmetry
+cargo run --locked --release -p bench -- input-symmetry
+Both are entirely untimed; outputs are stored in qualification-debug.jsonl and qualification-release.jsonl and compare byte-identically.

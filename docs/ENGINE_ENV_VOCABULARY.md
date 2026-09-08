@@ -38,6 +38,55 @@ assertions stay live, so a width disagreement can never be laundered into a fres
 (master plan §8.3, issue #163 phase 2).
 
 
+## Issue #606 capture harness and preflight controls
+
+`MISO_ENGINE_606_EXPECTED_HEAD` is supplied by the preflight caller and enforces the approved
+candidate. The other names in this table are self-test or stub controls used by the #606 harness;
+they do not control a production capture.
+
+| name | meaning |
+|---|---|
+| `MISO_ENGINE_606_CHILD_PREFIX` | #606 test harness input read by the fake child to choose the emitted marker prefix (`0`, `8192`, or `16384`) before its deliberate failure. |
+| `MISO_ENGINE_606_EXPECTED_HEAD` | preflight caller input: the exact approved Git `HEAD` that `preflight-input-symmetry-capture.sh` must see. |
+| `MISO_ENGINE_606_MARKER_MODE` | #606 test harness input read by the fake child to select a malformed capture-marker sequence. |
+| `MISO_ENGINE_606_PROBE_ROOT` | #606 preflight self-test input: directory where the guarded seal-publication probe writes its probe seal and scratch file. |
+| `MISO_ENGINE_606_ROOT` | #606 capture-runner self-test input: alternate artifact root; production capture refuses this override. |
+| `MISO_ENGINE_606_SELF_TEST` | #606 test harness switch read by preflight or the capture runner to enter their self-test branches. |
+| `MISO_ENGINE_606_SELF_TEST_FAULT` | #606 test harness fault selector read by the preflight or runner self-test to exercise publication, persistence, or disposition failures. |
+| `MISO_ENGINE_606_STUB_LEDGER` | #606 test harness path supplied to fake children, which append their invocations and selected stub events there. |
+| `MISO_ENGINE_606_VALID_RECORDS` | #606 test harness path to frozen valid JSONL records that a fake child reads and copies to stdout for runner validation. |
+
+
+## Input-symmetry capture runner-to-bench metadata
+
+The capture runner exports these sealed candidate fields to its prepared bench child before launch;
+the bench reads them and copies them into each capture record. `MISO_ENGINE_CAPTURE_TARGET` is the
+exception: the runner exports it, but the current capture consumer does not read it.
+
+| name | meaning |
+|---|---|
+| `MISO_ENGINE_CAPTURE_ARGV` | sealed command line for the prepared capture child, read by the bench and recorded as `argv`. |
+| `MISO_ENGINE_CAPTURE_BINARY_SHA256` | sha256 of the prepared capture binary, read by the bench and recorded as the binary identity. |
+| `MISO_ENGINE_CAPTURE_COMMIT` | sealed candidate commit, read by the bench and recorded as `source_commit`. |
+| `MISO_ENGINE_CAPTURE_COMPILER` | sealed `rustc --version` string, read by the bench and recorded as `compiler`. |
+| `MISO_ENGINE_CAPTURE_CWD` | sealed child working directory, read by the bench and recorded as `cwd`. |
+| `MISO_ENGINE_CAPTURE_FIXTURE_SHA256` | sha256 of the sealed capture fixture, read by the bench and recorded as `fixture_sha256`. |
+| `MISO_ENGINE_CAPTURE_FLAGS` | sealed effective build flags, read by the bench and recorded as `effective_build_flags`. |
+| `MISO_ENGINE_CAPTURE_SOURCE_SHA256` | sha256 of the sealed capture sources, read by the bench and recorded as `source_sha256`. |
+| `MISO_ENGINE_CAPTURE_TARGET` | sealed target triple exported by the capture runner; the current capture consumer does not read this name. |
+| `MISO_ENGINE_CAPTURE_TREE` | sealed candidate tree, read by the bench and recorded as `source_tree`. |
+
+
+## Input-symmetry capture phase marker
+
+Written by the capture bench to stderr and parsed by the capture runner. Payloads are
+`capture_started`, `round_1_complete`, and `round_2_complete`.
+
+| name | meaning |
+|---|---|
+| `MISO_ENGINE_CAPTURE_PHASE` | the capture phase marker prefix emitted on stderr by the bench and counted and validated by the runner. |
+
+
 ## Benchmark identities
 
 Set by `scripts/run-*-benchmark.sh` before the single launch; read by the bench binary and copied into its record. Every benchmark subject uses the same names.

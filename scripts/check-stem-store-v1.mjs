@@ -23,6 +23,22 @@ const tests = [
   "stem-store-core-v1.mjs",
   "stem-pump-v1.mjs",
 ]
+const PROVENANCE_FIELDS = [
+  "schema",
+  "artifact",
+  "sha256",
+  "dependencies",
+  "algorithmAuthority",
+  "implementation",
+  "reason",
+]
+const DEPENDENCY_FIELDS = ["artifact", "sha256"]
+const PRIMARY_ARTIFACT = "incremental-sha256.js"
+const PRIMARY_DEPENDENCY = "../hex-lower.js"
+const ALGORITHM_AUTHORITY = "NIST FIPS 180-4, SHA-256"
+const IMPLEMENTATION = "repository-owned independent JavaScript implementation"
+const REASON =
+  "Canonical-PCM stems exceed one-shot digest RAM budgets; SHA-256 remains the schema vocabulary and is verifiable by Sui std::hash::sha2_256. No zero-shipped-code claim is made."
 
 // Wall-clock budget assertions in the stem-store test files (cold-open/verify-open latency, the
 // fallback-write abort deadline) are opt-in via `--budgets`, so this gate stays hermetic and
@@ -31,6 +47,7 @@ const tests = [
 const budgetsEnabled = process.argv.includes("--budgets")
 let skippedBudgetAsserts = 0
 
+await runOperatorPathSelfTest(root)
 await staticChecks(root)
 for (const test of tests) {
   skippedBudgetAsserts += runNode(join(host, "tests", test), false, budgetsEnabled)
@@ -43,14 +60,7 @@ process.stdout.write(
 )
 
 async function staticChecks(repository) {
-  const provenancePath = join(runtime, "incremental-sha256.provenance.json")
-  const provenance = JSON.parse(await readFile(provenancePath, "utf8"))
-  const hasher = await readFile(join(runtime, provenance.artifact))
-  assert.equal(
-    createHash("sha256").update(hasher).digest("hex"),
-    provenance.sha256,
-    "incremental SHA-256 source provenance moved without a re-pin"
-  )
+  await validateSourceProvenance(runtime)
 
   const files = await sourceFiles(runtime)
   const allRuntime = (
@@ -105,6 +115,18 @@ async function staticChecks(repository) {
   }
 }
 
+async function runOperatorPathSelfTest(repository) {
+  const runner = join(repository, "scripts/operator/run-stem-store-browser-evals.cjs")
+  const result = spawnSync(process.execPath, [runner, "--path-self-test"], {
+    cwd: repository,
+    encoding: "utf8",
+  })
+  if (result.status !== 0) {
+    throw new Error(`operator path self-test failed:\n${result.stderr ?? ""}`)
+  }
+  process.stdout.write(result.stdout ?? "")
+}
+
 function assertPumpHasNoNetwork(text) {
   assert.doesNotMatch(
     text,
@@ -114,6 +136,8 @@ function assertPumpHasNoNetwork(text) {
 }
 
 async function runMutationLedger() {
+  await runProvenanceSelfTest()
+
   // STEM_IDENTITY_V1 §4's mandatory open-time length check has four arms.
   // `bytes` is shape-derived and never enters the hash preimage, so these
   // comparisons are all that stand between a lying declaration and a promoted
@@ -391,6 +415,155 @@ async function runMutationLedger() {
     /must stream only from the verified store/
   )
   process.stdout.write("RED: pump network API tripwire\n")
+}
+
+async function validateSourceProvenance(provenanceRoot) {
+  const provenancePath = join(provenanceRoot, "incremental-sha256.provenance.json")
+  const provenance = JSON.parse(await readFile(provenancePath, "utf8"))
+  assert.deepEqual(
+    Object.keys(provenance).sort(),
+    [...PROVENANCE_FIELDS].sort(),
+    "incremental SHA-256 provenance shape changed"
+  )
+  assert.equal(provenance.schema, 1, "incremental SHA-256 provenance schema changed")
+  assert.equal(
+    provenance.artifact,
+    PRIMARY_ARTIFACT,
+    "incremental SHA-256 provenance artifact changed"
+  )
+  assertSha256(provenance.sha256, "incremental SHA-256 source hash")
+  assert.equal(
+    provenance.algorithmAuthority,
+    ALGORITHM_AUTHORITY,
+    "incremental SHA-256 algorithm authority changed"
+  )
+  assert.equal(
+    provenance.implementation,
+    IMPLEMENTATION,
+    "incremental SHA-256 implementation authority changed"
+  )
+  assert.equal(provenance.reason, REASON, "incremental SHA-256 provenance reason changed")
+  assert.ok(Array.isArray(provenance.dependencies), "incremental SHA-256 dependencies are not an array")
+  assert.equal(
+    provenance.dependencies.length,
+    1,
+    "incremental SHA-256 provenance must contain exactly one dependency"
+  )
+  const [dependency] = provenance.dependencies
+  assert.deepEqual(
+    Object.keys(dependency).sort(),
+    [...DEPENDENCY_FIELDS].sort(),
+    "incremental SHA-256 dependency shape changed"
+  )
+  assert.equal(
+    dependency.artifact,
+    PRIMARY_DEPENDENCY,
+    "incremental SHA-256 dependency artifact changed"
+  )
+  assertSha256(dependency.sha256, "incremental SHA-256 dependency hash")
+
+  const hasher = await readFile(join(provenanceRoot, PRIMARY_ARTIFACT))
+  assert.equal(
+    createHash("sha256").update(hasher).digest("hex"),
+    provenance.sha256,
+    "incremental SHA-256 source provenance moved without a re-pin"
+  )
+  const helper = await readFile(join(provenanceRoot, PRIMARY_DEPENDENCY))
+  assert.equal(
+    createHash("sha256").update(helper).digest("hex"),
+    dependency.sha256,
+    "incremental SHA-256 dependency provenance moved without a re-pin"
+  )
+}
+
+function assertSha256(value, label) {
+  assert.equal(typeof value, "string", `${label} must be a string`)
+  assert.match(value, /^[0-9a-f]{64}$/, `${label} must be 64 lowercase hexadecimal characters`)
+}
+
+async function runProvenanceSelfTest() {
+  const mutations = [
+    {
+      name: "primary bytes mutated",
+      mutate: async (temporary) => {
+        const target = join(temporary, PRIMARY_ARTIFACT)
+        await writeFile(target, `${await readFile(target, "utf8")}\n`)
+      },
+      expectedFailure: "incremental SHA-256 source provenance moved without a re-pin",
+    },
+    {
+      name: "helper bytes mutated",
+      mutate: async (temporary) => {
+        const target = join(temporary, PRIMARY_DEPENDENCY)
+        await writeFile(target, `${await readFile(target, "utf8")}\n`)
+      },
+      expectedFailure: "incremental SHA-256 dependency provenance moved without a re-pin",
+    },
+    {
+      name: "dependency roster removed",
+      mutate: async (temporary) => {
+        await mutateProvenance(temporary, (provenance) => {
+          provenance.dependencies = []
+        })
+      },
+      expectedFailure: "incremental SHA-256 provenance must contain exactly one dependency",
+    },
+    {
+      name: "extra dependency",
+      mutate: async (temporary) => {
+        await mutateProvenance(temporary, (provenance) => {
+          provenance.dependencies.push({ artifact: "../extra.js", sha256: "0".repeat(64) })
+        })
+      },
+      expectedFailure: "incremental SHA-256 provenance must contain exactly one dependency",
+    },
+    {
+      name: "renamed dependency",
+      mutate: async (temporary) => {
+        await mutateProvenance(temporary, (provenance) => {
+          provenance.dependencies[0].artifact = "../renamed-hex-lower.js"
+        })
+      },
+      expectedFailure: "incremental SHA-256 dependency artifact changed",
+    },
+    {
+      name: "different well-formed dependency hash",
+      mutate: async (temporary) => {
+        await mutateProvenance(temporary, (provenance) => {
+          provenance.dependencies[0].sha256 = "0".repeat(64)
+        })
+      },
+      expectedFailure: "incremental SHA-256 dependency provenance moved without a re-pin",
+    },
+  ]
+
+  for (const mutation of mutations) {
+    const temporaryRoot = await mkdtemp(join(tmpdir(), "miso-stem-store-provenance-"))
+    const temporary = join(temporaryRoot, "stem-store")
+    try {
+      await cp(runtime, temporary, { recursive: true })
+      await cp(join(host, "web/hex-lower.js"), join(temporaryRoot, "hex-lower.js"))
+      await mutation.mutate(temporary)
+      await assert.rejects(
+        validateSourceProvenance(temporary),
+        new RegExp(escapeRegExp(mutation.expectedFailure))
+      )
+      process.stdout.write(`RED: provenance ${mutation.name}\n`)
+    } finally {
+      await rm(temporaryRoot, { recursive: true, force: true })
+    }
+  }
+}
+
+async function mutateProvenance(provenanceRoot, mutate) {
+  const path = join(provenanceRoot, "incremental-sha256.provenance.json")
+  const provenance = JSON.parse(await readFile(path, "utf8"))
+  mutate(provenance)
+  await writeFile(path, `${JSON.stringify(provenance, null, 2)}\n`)
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 }
 
 function replaceExactlyOnce(source, search, replacement) {

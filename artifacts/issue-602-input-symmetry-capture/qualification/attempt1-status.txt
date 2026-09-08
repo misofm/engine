@@ -1,0 +1,26 @@
+#602 attempt 1 untimed qualification (capture authorization not exercised)
+
+Source base: b5dd80afcaf53e18f38b07bead87f69823acbce0
+Focused debug: cargo test --locked -p bench input_symmetry -- --nocapture — PASS (6 tests)
+Focused release: cargo test --locked --release -p bench input_symmetry -- --nocapture — PASS (6 tests)
+Capture unit tests: cargo test --locked -p bench input_symmetry_capture -- --nocapture — PASS (2 tests)
+Capture unit tests release: cargo test --locked --release -p bench input_symmetry_capture -- --nocapture — PASS (2 tests)
+#238/#496 focused debug/release: builtins lib, builtins input_liveness/input_liveness_mono, host-core input_liveness_console — PASS
+Bench check: cargo check --locked -p bench — PASS
+Bench clippy: cargo clippy --locked -p bench --all-targets --all-features -- -D warnings — PASS
+Validator/lifecycle: bash scripts/test-input-symmetry-capture.sh — PASS; all workload and timing calls were stub-only/zero.
+Shell/Python syntax: bash -n scripts/*.sh (new #602 scripts), python3 -m py_compile validator — PASS
+Final preflight: NOT RUN (Astra source/harness review required).
+Capture runner/timed entry: NOT RUN (root authorization required).
+Cargo.lock: unchanged.
+
+#600 evidence reuse: /home/bl/misofm/engine/artifacts/issue600-input-symmetry/attempt3/checksum-manifest.sha256 (existing reviewed corpus; not copied).
+Rustdoc: RUSTDOCFLAGS='-D warnings' cargo doc --locked -p bench --no-deps — PASS
+Policies: check-workspace, check-realtime, check-builtins, check-graph, check-lane, check-bench — PASS
+Diff/format: cargo fmt --all -- --check and git diff --check — PASS
+Lifecycle matrix as executed: validator duplicate-key/type/order mutations, seal missing/type/extra-key mutations, child failure/raw retention, validator failure streams, overwrite refusal, connected stub invocation ledger (4: child, validator, publication, persistence), durable real-workload/timing sentinel (0) — PASS.
+Checksum manifest is verified from repository root with: sha256sum -c artifacts/issue-602-input-symmetry-capture/qualification/checksum-manifest.sha256 — PASS.
+#602 central harness mutation: `validator-mutation-diff.patch` changes strict issue identity 602 to 601; `validator-mutation-command.txt` records the unchanged lifecycle command, `validator-mutation.status` is nonzero with direct `record identity mismatch`, and `validator-mutation-source-pre.sha256` / `source-post.sha256` / `source-restored.sha256` plus restored self-test status prove immediate restoration.
+Preflight safety: required approved head, clean/untracked refusal, symlink/unsafe prepared-path refusal, scratch-seal cleanup trap, prospective scratch validation, observable no-clobber seal publication, full release settings, exact argv/cwd — implemented (final preflight intentionally not run).
+Runner safety exercised by stubs: strict seal validation precedes extraction, every sealed component hash is rechecked, exact argv/cwd/toolchain/flags are checked, protected dangling paths are refused, outputs are reserved, validator streams are separated, and publication/persistence faults retain recovery evidence.
+Root checkpoint audit: FAIL pending Astra LOW adversarial review. The lifecycle test does not exercise missing, extra, or duplicate-round records despite claiming the complete matrix, and it has no successful lifecycle case. The runner's PASS decision ignores `capture_started` and ordered round-completion markers, so valid JSON with absent or duplicated markers can be published as PASS and timed-call accounting can disagree with successful capture. This is a substantive runner defect after the issue's single bounded correction; no further implementation, preflight, or capture is authorized in #602. Repair/promotion must be split to a successor if Astra confirms the finding.

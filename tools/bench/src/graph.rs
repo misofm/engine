@@ -8,7 +8,6 @@ use graph_compiler::Backend;
 use std::{
     env, fs,
     hint::black_box,
-    process::Command,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -101,6 +100,13 @@ struct Metadata {
     codegen_units: String,
     background_load: String,
     missing: Vec<String>,
+}
+
+struct RawMetadata {
+    rustc_verbose: String,
+    cpu: String,
+    kernel: String,
+    environment: Vec<(String, Option<String>)>,
 }
 
 pub(crate) fn main() {
@@ -471,30 +477,68 @@ fn unlimited_graph_caps() -> GraphCompileCaps {
 }
 
 fn metadata() -> Metadata {
+    let environment = [
+        "MISO_ENGINE_BENCH_GOVERNOR_OR_POWER_MODE",
+        "MISO_ENGINE_BENCH_POWER_SOURCE",
+        "MISO_ENGINE_BENCH_TARGET_FEATURES",
+        "MISO_ENGINE_BENCH_OPT_LEVEL",
+        "MISO_ENGINE_BENCH_LTO",
+        "MISO_ENGINE_BENCH_CODEGEN_UNITS",
+        "MISO_ENGINE_BENCH_BACKGROUND_LOAD_NOTE",
+    ]
+    .into_iter()
+    .map(|name| {
+        (
+            name.to_owned(),
+            bench_support::metadata::Metadata::gather().var(name).ok(),
+        )
+    })
+    .collect();
+    let raw = RawMetadata {
+        rustc_verbose: command("rustc", &["-vV"]),
+        cpu: command(
+            "sh",
+            &["-c", "awk -F: '/model name/{print $2; exit}' /proc/cpuinfo"],
+        ),
+        kernel: command("uname", &["-r"]),
+        environment,
+    };
+    metadata_from_raw(
+        raw,
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_secs(),
+    )
+}
+
+fn metadata_from_raw(raw: RawMetadata, timestamp_epoch_seconds: u64) -> Metadata {
     let mut missing = Vec::new();
-    let value =
-        |name: &str, missing: &mut Vec<String>| match bench_support::metadata::Metadata::gather()
-            .var(name)
+    let value = |name: &str, missing: &mut Vec<String>| match raw
+        .environment
+        .iter()
+        .find(|(candidate, _)| candidate == name)
+        .and_then(|(_, value)| value.as_deref())
+    {
+        Some(value)
+            if !value.is_empty()
+                && !matches!(
+                    value,
+                    "unknown" | "not measured" | "default" | "target-default"
+                ) =>
         {
-            Ok(value)
-                if !value.is_empty()
-                    && !matches!(
-                        value.as_str(),
-                        "unknown" | "not measured" | "default" | "target-default"
-                    ) =>
-            {
-                value
-            }
-            Ok(value) if !value.is_empty() => {
-                missing.push(name.to_owned());
-                value
-            }
-            _ => {
-                missing.push(name.to_owned());
-                "unknown".to_owned()
-            }
-        };
-    let rustc_verbose = command("rustc", &["-vV"]);
+            value.to_owned()
+        }
+        Some(value) if !value.is_empty() => {
+            missing.push(name.to_owned());
+            value.to_owned()
+        }
+        _ => {
+            missing.push(name.to_owned());
+            "unknown".to_owned()
+        }
+    };
+    let rustc_verbose = raw.rustc_verbose;
     let rustc = rustc_verbose.lines().next().unwrap_or("unknown").to_owned();
     let llvm = rustc_verbose
         .lines()
@@ -507,17 +551,9 @@ fn metadata() -> Metadata {
         .unwrap_or("unknown")
         .to_owned();
     Metadata {
-        timestamp_epoch_seconds: SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock")
-            .as_secs(),
-        cpu: command(
-            "sh",
-            &["-c", "awk -F: '/model name/{print $2; exit}' /proc/cpuinfo"],
-        )
-        .trim()
-        .to_owned(),
-        os: format!("{} {}", env::consts::OS, command("uname", &["-r"])),
+        timestamp_epoch_seconds,
+        cpu: raw.cpu,
+        os: format!("{} {}", env::consts::OS, raw.kernel),
         governor_or_power_mode: value("MISO_ENGINE_BENCH_GOVERNOR_OR_POWER_MODE", &mut missing),
         power_source: value("MISO_ENGINE_BENCH_POWER_SOURCE", &mut missing),
         rustc,
@@ -533,15 +569,8 @@ fn metadata() -> Metadata {
 }
 
 fn command(program: &str, arguments: &[&str]) -> String {
-    Command::new(program)
-        .args(arguments)
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| String::from_utf8(output.stdout).ok())
+    bench_support::sysinfo::command_output(program, arguments)
         .unwrap_or_else(|| "unknown".to_owned())
-        .trim()
-        .to_owned()
 }
 
 fn peak_resident_bytes() -> u64 {
@@ -613,5 +642,150 @@ mod tests {
         let evidence = GraphCompiler::evidence(&artifact.graph, &artifact.report);
         assert!(!evidence.canonical_bytes.is_empty());
         assert!(!evidence.dot.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn metadata_command_projection_preserves_graph_policy() {
+        assert_eq!(command("/bin/sh", &["-c", "printf '  text  \\n'"]), "text");
+        assert_eq!(command("/bin/sh", &["-c", "true"]), "");
+        assert_eq!(command("/bin/sh", &["-c", "printf ' \\n\\t'"]), "");
+        assert_eq!(
+            command("/bin/sh", &["-c", "printf plausible; exit 7"]),
+            "unknown"
+        );
+        assert_eq!(
+            command("/definitely/missing/metadata-command", &[]),
+            "unknown"
+        );
+        assert_eq!(command("/bin/sh", &["-c", r"printf '\377'"]), "unknown");
+    }
+
+    #[test]
+    fn raw_metadata_projection_extracts_commands_and_tracks_environment_states() {
+        let metadata = metadata_from_raw(
+            RawMetadata {
+                rustc_verbose: "rustc test 1.0\nLLVM version: LLVM test\nhost: x86_64-test"
+                    .to_owned(),
+                cpu: "Test CPU".to_owned(),
+                kernel: "test-kernel".to_owned(),
+                environment: vec![
+                    (
+                        "MISO_ENGINE_BENCH_GOVERNOR_OR_POWER_MODE".to_owned(),
+                        Some("performance".to_owned()),
+                    ),
+                    (
+                        "MISO_ENGINE_BENCH_POWER_SOURCE".to_owned(),
+                        Some("default".to_owned()),
+                    ),
+                    ("MISO_ENGINE_BENCH_TARGET_FEATURES".to_owned(), None),
+                    (
+                        "MISO_ENGINE_BENCH_OPT_LEVEL".to_owned(),
+                        Some("2".to_owned()),
+                    ),
+                    (
+                        "MISO_ENGINE_BENCH_LTO".to_owned(),
+                        Some("not measured".to_owned()),
+                    ),
+                    (
+                        "MISO_ENGINE_BENCH_CODEGEN_UNITS".to_owned(),
+                        Some("16".to_owned()),
+                    ),
+                    ("MISO_ENGINE_BENCH_BACKGROUND_LOAD_NOTE".to_owned(), None),
+                ],
+            },
+            1_700_000_000,
+        );
+        assert_eq!(metadata.timestamp_epoch_seconds, 1_700_000_000);
+        assert_eq!(metadata.rustc, "rustc test 1.0");
+        assert_eq!(metadata.llvm, "LLVM test");
+        assert_eq!(metadata.target_triple, "x86_64-test");
+        assert_eq!(metadata.cpu, "Test CPU");
+        assert_eq!(metadata.os, format!("{} test-kernel", env::consts::OS));
+        assert_eq!(metadata.governor_or_power_mode, "performance");
+        assert_eq!(metadata.power_source, "default");
+        assert_eq!(metadata.target_features, "unknown");
+        assert_eq!(metadata.opt_level, "2");
+        assert_eq!(metadata.lto, "not measured");
+        assert_eq!(metadata.codegen_units, "16");
+        assert_eq!(metadata.background_load, "unknown");
+        assert_eq!(
+            metadata.missing,
+            vec![
+                "MISO_ENGINE_BENCH_POWER_SOURCE",
+                "MISO_ENGINE_BENCH_TARGET_FEATURES",
+                "MISO_ENGINE_BENCH_LTO",
+                "MISO_ENGINE_BENCH_BACKGROUND_LOAD_NOTE",
+            ]
+        );
+    }
+
+    #[test]
+    fn fixed_metadata_projection_preserves_record_fields() {
+        let fixture = representative_fixture();
+        let metadata = Metadata {
+            timestamp_epoch_seconds: 1_700_000_000,
+            cpu: "Test CPU".to_owned(),
+            os: "linux test-kernel".to_owned(),
+            governor_or_power_mode: "performance".to_owned(),
+            power_source: "AC".to_owned(),
+            rustc: "rustc test 1.0".to_owned(),
+            llvm: "LLVM test".to_owned(),
+            target_triple: "x86_64-test".to_owned(),
+            target_features: "avx2-µ".to_owned(),
+            opt_level: "2".to_owned(),
+            lto: "thin".to_owned(),
+            codegen_units: "16".to_owned(),
+            background_load: "quiet".to_owned(),
+            missing: vec!["target_features".to_owned()],
+        };
+        let sample = Sample {
+            total_ns: 30,
+            effect_prepare_ns: 10,
+            graph_compile_ns: 20,
+            graph_sha256: "deadbeef".to_owned(),
+            canonical_debug_bytes: 64,
+            dot_bytes: 128,
+            estimate: GraphResourceEstimate {
+                logical_nodes: 1,
+                materialized_nodes: 2,
+                edges: 3,
+                schedule_items: 4,
+                dependency_levels: 5,
+                reductions: 6,
+                routes: 7,
+                effects: 8,
+                audio_buffer_samples: 9,
+                total_delay_samples: 10,
+                delay_bytes: 11,
+                graph_metadata_bytes: 12,
+                declared_effect_bytes: 13,
+                effect_bank_count: 14,
+                effect_bank_scratch_bytes: 15,
+                effect_bank_runtime_buffer_bytes: 16,
+                effect_bank_metadata_bytes: 17,
+                builtin_bank_bytes: 18,
+                builtin_bank_scratch_bytes: 19,
+                builtin_bank_count: 20,
+                largest_allocation_bytes: 21,
+                incremental_plan_bytes: 22,
+                session_plus_plan_bytes: 23,
+            },
+        };
+        let record = record(
+            Workload::CanonicalCompile,
+            1,
+            &fixture,
+            &[sample],
+            &metadata,
+        );
+        assert!(record.contains(
+            "\"timestamp_epoch_seconds\":1700000000,\"cpu\":\"Test CPU\",\"os\":\"linux test-kernel\",\"governor_or_power_mode\":\"performance\",\"power_source\":\"AC\",\"rustc\":\"rustc test 1.0\",\"llvm\":\"LLVM test\",\"target_triple\":\"x86_64-test\",\"target_features\":\"avx2-µ\",\"opt_level\":\"2\",\"lto\":\"thin\",\"codegen_units\":\"16\",\"background_load\":\"quiet\""
+        ));
+        assert!(
+            record.contains(
+                "\"metadata_incomplete\":true,\"missing_metadata\":[\"target_features\"]"
+            )
+        );
     }
 }

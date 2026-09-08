@@ -10,19 +10,19 @@
 
 use bench_support::alloc as bench_alloc;
 use bench_support::json::escape;
-use std::{cell::Cell, env, fs, process::Command, time::Instant};
+use bench_support::sysinfo::parse_cpu_model;
+use std::{cell::Cell, env, fs, time::Instant};
 
 use protocol::{
     AutomationEnqueue, AutomationKind, AutomationRecord, Backpressure, BackpressureQueueKind,
-    Capabilities, CapabilityFlags, CommandPayload, ConformanceDecoder, CounterId, CounterSnapshot,
-    CounterValue, DecodeScratch, Diagnostic, DiagnosticSeverity, DiagnosticsPage, EventPayload,
-    ExpectedRevision, MessageId, MeterBatch, MeterComponent, MeterRecord, NonOkResponse,
-    ParameterAutomationRate, ParameterChannel, ParameterDescriptor, ParameterDomain,
-    ParameterMapping, ParameterMetadataPage, ParameterRack, ParameterStatePage,
-    ParameterStateRecord, ParameterUnit, ParameterValueKind, ProtocolCodec, ProtocolVersion,
-    RequestId, SampleTime, SessionEdit, SessionRevision, StatusCode, SuccessResponsePayload,
-    TransactionApplied, TypedCommandFrame, TypedEventFrame, TypedNonOkResponseFrame,
-    TypedSuccessResponseFrame,
+    Capabilities, CapabilityFlags, CommandPayload, CounterId, CounterSnapshot, CounterValue,
+    DecodeScratch, Diagnostic, DiagnosticSeverity, DiagnosticsPage, EventPayload, ExpectedRevision,
+    MessageId, MeterBatch, MeterComponent, MeterRecord, NonOkResponse, ParameterAutomationRate,
+    ParameterChannel, ParameterDescriptor, ParameterDomain, ParameterMapping,
+    ParameterMetadataPage, ParameterRack, ParameterStatePage, ParameterStateRecord, ParameterUnit,
+    ParameterValueKind, ProtocolCodec, ProtocolVersion, RequestId, SampleTime, SessionEdit,
+    SessionRevision, StatusCode, SuccessResponsePayload, TransactionApplied, TypedCommandFrame,
+    TypedEventFrame, TypedNonOkResponseFrame, TypedSuccessResponseFrame,
 };
 use session::StableId;
 
@@ -91,17 +91,6 @@ enum FrameDecoder {
     Response,
     Event,
     Transaction,
-}
-
-impl From<ConformanceDecoder> for FrameDecoder {
-    fn from(value: ConformanceDecoder) -> Self {
-        match value {
-            ConformanceDecoder::Command => Self::Command,
-            ConformanceDecoder::Response => Self::Response,
-            ConformanceDecoder::Event => Self::Event,
-            ConformanceDecoder::Transaction => Self::Transaction,
-        }
-    }
 }
 
 struct WorkFrame {
@@ -1447,15 +1436,9 @@ struct Metadata {
 
 impl Metadata {
     fn gather() -> Self {
+        let cpuinfo = fs::read_to_string("/proc/cpuinfo").ok();
         Self {
-            cpu: fs::read_to_string("/proc/cpuinfo")
-                .ok()
-                .and_then(|contents| {
-                    contents
-                        .lines()
-                        .find_map(|line| line.strip_prefix("model name\t: ").map(str::to_owned))
-                })
-                .unwrap_or_else(|| "unknown".to_owned()),
+            cpu: parse_cpu_model(cpuinfo.as_deref()).unwrap_or_else(|| "unknown".to_owned()),
             governor: fs::read_to_string("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor")
                 .map(|value| value.trim().to_owned())
                 .unwrap_or_else(|_| "unknown".to_owned()),
@@ -1529,23 +1512,13 @@ fn json_record(
 }
 
 fn variable(name: &str) -> String {
-    bench_support::metadata::Metadata::gather()
-        .var(name)
-        .ok()
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "unknown".to_owned())
+    bench_support::metadata::Metadata::gather().nonempty_or_unknown(name)
 }
 fn command(args: &[&str]) -> String {
     let Some((program, rest)) = args.split_first() else {
         return "unknown".to_owned();
     };
-    Command::new(program)
-        .args(rest)
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| String::from_utf8(output.stdout).ok())
-        .map(|output| output.trim().to_owned())
+    bench_support::sysinfo::command_output(program, rest)
         .filter(|output| !output.is_empty())
         .unwrap_or_else(|| "unknown".to_owned())
 }
@@ -1673,5 +1646,22 @@ mod tests {
         ] {
             assert!(record.contains(required), "missing schema field {required}");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn metadata_command_projection_maps_empty_and_failures_to_unknown() {
+        assert_eq!(command(&["/bin/sh", "-c", "printf '  text  \\n'"]), "text");
+        assert_eq!(command(&["/bin/sh", "-c", "true"]), "unknown");
+        assert_eq!(command(&["/bin/sh", "-c", "printf ' \\n\\t'"]), "unknown");
+        assert_eq!(
+            command(&["/bin/sh", "-c", "printf plausible; exit 7"]),
+            "unknown"
+        );
+        assert_eq!(
+            command(&["/definitely/missing/metadata-command"]),
+            "unknown"
+        );
+        assert_eq!(command(&["/bin/sh", "-c", r"printf '\377'"]), "unknown");
     }
 }

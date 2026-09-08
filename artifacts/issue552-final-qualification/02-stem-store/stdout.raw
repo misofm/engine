@@ -1,0 +1,5 @@
+stem-store operator path self-test: PASS
+{"eval":"cold-open-latency","stems":8,"canonicalBytes":2097152,"coldMs":99.811,"warmVerifyMs":46.345,"budgetsMs":{"cold":5000,"warmVerify":2000}}
+stem-store-core-v1: PASS (budget asserts skipped: 3)
+stem-pump-v1: PASS
+stem-store-v1 gate: PASS (budget asserts skipped: 3)

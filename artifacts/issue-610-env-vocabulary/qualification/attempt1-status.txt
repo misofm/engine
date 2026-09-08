@@ -1,0 +1,18 @@
+Issue 610 Luna XHIGH documentation attempt 1
+
+Changed:
+- docs/ENGINE_ENV_VOCABULARY.md: exactly 20 rows; total population 134
+
+PASS:
+- bash scripts/check-env-vocabulary.sh (status 0)
+- bash scripts/check-dsp-research.sh (status 0; dsp research corpus: ok)
+- bash scripts/test-dsp-research.sh (status 0; dsp research mutations: ok)
+- bash scripts/check-builtins-listening.sh (status 0; human evidence pending)
+- git diff --check
+- issue607 capture manifest, repository-root manifest, and restored-validator checksums
+
+FAIL:
+- bash scripts/test-env-vocabulary.sh (status 1)
+- COUNT and COUNT_TR full-output fault assertions expect stale population 114; actual is 134
+
+No build, preflight, runner, capture, retry, resume, or timing ran.

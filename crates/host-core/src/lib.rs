@@ -90,6 +90,8 @@
 //!   the supported hand-off.
 
 #[cfg(feature = "control-provider")]
+pub mod builtin_batch_endpoint;
+#[cfg(feature = "control-provider")]
 pub mod control_provider;
 pub mod diagnostics;
 pub mod prepare;
@@ -152,6 +154,8 @@ pub use effect_compiler::{EffectControlProducer, EffectObservationHandle, Effect
 pub use builtins_compiler::{session_structural_symmetry, track_mono_source};
 pub use effect_contract::{ChannelSymmetryWitness, LiveConsoleRecord, SeamSide, SymmetryEvent};
 
+#[cfg(feature = "control-provider")]
+pub use builtin_batch_endpoint::*;
 #[cfg(feature = "control-provider")]
 pub use scalar_point_endpoint::*;
 

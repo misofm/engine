@@ -1,0 +1,16 @@
+capture_utc=2026-09-07T15:53:03Z
+cwd=/home/bl/misofm/engine-conformance-workspace-sort-status
+head=c0a00b4296ced4e8709ff882e57ead5ec9b2d3b0
+status_begin
+ M scripts/test-conformance-boundaries.sh
+?? artifacts/issue567-attempt1/
+status_end
+source_hashes_begin
+f8f62e28bf0a5e6eed7ec5c5e8273547aac2758da2e01ecca3ccf3540e0f1512  scripts/test-conformance-boundaries.sh
+812cbdbf3b3fa1cd30214f5c42c178152a54db212a81e8d9850c452855ca8766  scripts/check-conformance-boundaries.sh
+bd40a610b4dd391f723bd8b576e2a6415523d934a85806333244d258d09c5783  scripts/lib/gate.sh
+7b62b0a3f9b4df490a9aac4641f34f69067c1f0b9edadd56587b489c6896dd2a  crates/protocol/Cargo.toml
+9f8dda584f89803a1e67856d6f2b7f2e2eb338a136186e28c99545c389cf2b10  crates/protocol/src/lib.rs
+source_hashes_end
+command=CARGO_TARGET_DIR=/tmp/issue567-target cargo check --locked -p protocol; tree=$(CARGO_TARGET_DIR=/tmp/issue567-target cargo tree --locked -p protocol --edges normal); printf "%s\\n" "$tree"; if printf "%s\\n" "$tree" | rg -n "(^|[[:space:]])conformance v|conformance \\("; then exit 1; else test $? -eq 1; fi; if rg -n "COMPLETE_SCHEMA_HASH|ConformanceDecoder|ConformanceFrame|complete_schema_corpus|complete_all_opcode_fixture" crates/protocol/src/lib.rs; then exit 1; else test $? -eq 1; fi
+exit=0
