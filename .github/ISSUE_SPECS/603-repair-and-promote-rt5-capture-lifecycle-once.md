@@ -135,3 +135,16 @@ handoff head `55a197e981f2180f38af15b8f3bb5b6759e49d83` and the matching GitHub 
 completed-prefix semantics for partial marker-derived counts. The worktree was clean, #603 was open
 and synchronized, and its paths were disjoint from #598. Luna HIGH/XHIGH implementation may begin.
 Final preflight and capture remain unauthorized pending their separate Astra LOW reviews.
+
+## Attempt 1 adversarial verdict
+
+Astra LOW returned **FAIL** on exact pushed attempt-1 head
+`475ac5c249a85ab7e72074adf4010f5b5be9c399`. The Rust timing seam remains frozen and unexecuted,
+but the validator rejects its issue-602 records; preflight rejects committed qualification evidence
+and retains a seal-publication fallthrough; build isolation/tests are incomplete; copied identity
+and marker fixtures are masked by unrelated failures; and missing/reordered record plus 8,192-call
+prefix cases are absent. `docs/audits/603-attempt1-review.md` records the exact evidence.
+
+One bounded correction is authorized solely within the four scripts and focused issue-603
+qualification evidence. Final preflight, the real capture entry, and timing remain unauthorized. If
+a substantive runner defect remains after this correction, stop and split repair/promotion again.
