@@ -411,3 +411,20 @@ preserved and attribution limits are stated. Attempt 3 is **FAIL**. Under the ha
 stop, no fourth attempt, retry, or further rescope is authorized. The promoted
 branch must not open a PR or merge; #627 and parent #621 remain open pending an
 owner decision outside this exhausted workflow.
+
+## Astra LOW final attempt 3 review — FAIL
+
+Astra LOW returned **FAIL** at exact clean pushed head
+`26633c15808bfeff6c76fb09921c22314ed1a84d`. All 40 manifest entries verify;
+GitHub synchronization and branch diff hygiene pass. The single no-bypass builder
+and accepted six-file identity are valid, but the duplicate static/resource/
+hermetic record sets violate the explicit each-once requirement. The second
+hermetic invocation has no retained numeric status; attribution and process-count
+limits remain candid. No later required check, install, or browser record exists.
+
+Attempt 1 remains failed. Attempt 2's technical evidence remains valid but does
+not complete delivery. Attempt 3 exhausts the hard stop. No fourth attempt, retry,
+or rescope is authorized within this workflow. The existing promotion must not
+open a PR or merge, and no further promotion is authorized. #621 and #627 remain
+open; retain their branch and worktrees as blocked evidence pending an owner
+decision outside this exhausted workflow.
