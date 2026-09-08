@@ -115,3 +115,23 @@ Nash, Luna HIGH agent `issue638_luna_high`, is the sole analyst. Nash must captu
 clean porcelain before creating any owned evidence file, then run the literal hash
 check and one read-only repetition matrix/excerpt tranche. Preserve predecessor
 failures. No compiler, source, timing or artifact work is authorized.
+
+## Attempt 1 FAIL and bounded attempt 2
+
+Luna's identity and literal six-file hash check passed at clean pushed
+`d95f63235ee48397a32f250b22acdea5a67cb193`, and the proposed identical
+threshold/divisor repeats remained a plausible hypothesis. Astra LOW returned
+**FAIL** because the matrix again omitted Wasm scalar even-clamp assembly sites:
+line 4614 materializes `+2/3` as `f32.const 0x1.555556p-1`, and line 4615
+materializes `-2/3` as `f32.const -0x1.555556p-1` within `.LBB11_22`.
+
+Attempt 2 is documentation-only and preserves the accepted identity/hash evidence
+and unchanged payloads. It may edit only the existing #653 matrix, excerpts and
+verdict plus this issue record. Add the exact 4614-4615 sites and sufficient
+surrounding stack/loop evidence, keep each at count one, and remove the incorrect
+claim that surrounding assembly has no separate clamp constant. Explicitly label
+loop-entry count separately from per-iteration count and give every folded odd
+`±1/3` exclusion its actual bits and site. Do not change the repeat definition or
+extend the applicability conclusion beyond supplying unchanged values once to both
+helper calls. No new hash run, compiler, source, timing, payload or artifact work
+is authorized. Fresh Astra LOW scope PASS is required before Luna edits.
