@@ -1,0 +1,5 @@
+issue=628
+attempt=2
+owner=/root/issue583_luna_impl
+authorized_head=522c614df35f8b44007d7ae2853f27ad8e4add40
+scope=sdk-lock-verify,npm-ci-ignore-scripts,sdk-check,matrix-check,cargo-fmt,diff-hygiene,workspace-policy,effect-runtime-policy
