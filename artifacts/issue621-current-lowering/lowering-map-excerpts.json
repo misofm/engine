@@ -1,0 +1,218 @@
+{
+  "schema_version": 1,
+  "derivation": "original numbered lines with line endings and trailing horizontal whitespace removed for durable display; raw hashes remain authoritative",
+  "sections": [
+    {
+      "label": "native-scalar-entry",
+      "logical_source": "selected/native-scalar-core.s",
+      "original_line_ranges": [
+        [
+          825,
+          870
+        ]
+      ],
+      "raw_source_bytes": 247725,
+      "raw_source_sha256": "1d70be3ac3b71a40e810809d7e573a13cead2f849dedb664cdb7cf1b345e7882",
+      "raw_excerpt_sha256": "2df1e4dc2fb1337322470fe110dbb9745c917d52c99022cfa7be297e33004b22",
+      "derived_display_lines": [
+        2,
+        48
+      ]
+    },
+    {
+      "label": "native-scalar-loop-1",
+      "logical_source": "selected/native-scalar-core.s",
+      "original_line_ranges": [
+        [
+          1198,
+          1238
+        ]
+      ],
+      "raw_source_bytes": 247725,
+      "raw_source_sha256": "1d70be3ac3b71a40e810809d7e573a13cead2f849dedb664cdb7cf1b345e7882",
+      "raw_excerpt_sha256": "3e6d271212cb0a6e7d0655e29575535a1c73001a0100bfa52a1bd3dd62172b2e",
+      "derived_display_lines": [
+        51,
+        92
+      ]
+    },
+    {
+      "label": "native-scalar-loop-2",
+      "logical_source": "selected/native-scalar-core.s",
+      "original_line_ranges": [
+        [
+          1380,
+          1408
+        ],
+        [
+          1758,
+          1782
+        ]
+      ],
+      "raw_source_bytes": 247725,
+      "raw_source_sha256": "1d70be3ac3b71a40e810809d7e573a13cead2f849dedb664cdb7cf1b345e7882",
+      "raw_excerpt_sha256": "eb5399d4be14caf8190716a491e3e30f5b461b3ad26e1dde15c5810eb62a8750",
+      "derived_display_lines": [
+        95,
+        150
+      ]
+    },
+    {
+      "label": "native-w8-dual-entry-1",
+      "logical_source": "selected/native-w8-core.s",
+      "original_line_ranges": [
+        [
+          680,
+          722
+        ]
+      ],
+      "raw_source_bytes": 272347,
+      "raw_source_sha256": "53172c91e32b6615df24b1b1d81a198a5309b600ca6428c9aa74d2347a5fd60d",
+      "raw_excerpt_sha256": "0003028b05d7a98376aa32d7a13e5b14a354bf5f98fa169110509e0316697eca",
+      "derived_display_lines": [
+        153,
+        196
+      ]
+    },
+    {
+      "label": "native-w8-dual-loop-1",
+      "logical_source": "selected/native-w8-core.s",
+      "original_line_ranges": [
+        [
+          1048,
+          1079
+        ]
+      ],
+      "raw_source_bytes": 272347,
+      "raw_source_sha256": "53172c91e32b6615df24b1b1d81a198a5309b600ca6428c9aa74d2347a5fd60d",
+      "raw_excerpt_sha256": "cecb4eb169c06dad878d3cac2ca1ae7ab27731652d60936d4c4a2cf02cbe15cd",
+      "derived_display_lines": [
+        199,
+        231
+      ]
+    },
+    {
+      "label": "native-w8-dual-entry-loop-2",
+      "logical_source": "selected/native-w8-core.s",
+      "original_line_ranges": [
+        [
+          1220,
+          1248
+        ],
+        [
+          1578,
+          1609
+        ]
+      ],
+      "raw_source_bytes": 272347,
+      "raw_source_sha256": "53172c91e32b6615df24b1b1d81a198a5309b600ca6428c9aa74d2347a5fd60d",
+      "raw_excerpt_sha256": "9e15ec95ccfd8cc0573738594872ddc4f442d685971db897d5cb5559aec5fedd",
+      "derived_display_lines": [
+        234,
+        296
+      ]
+    },
+    {
+      "label": "native-w8-mono-entry",
+      "logical_source": "selected/native-w8-process-bank-inner.s",
+      "original_line_ranges": [
+        [
+          860,
+          900
+        ]
+      ],
+      "raw_source_bytes": 149147,
+      "raw_source_sha256": "e6318358bcd5c8409561bf139c6711b99a3c663c4b9476ecd8eb9abe80a4833c",
+      "raw_excerpt_sha256": "eca983511ea580601e80f7fb078fc7a382915d7cb4ce437fe1ac0f2da1a271f8",
+      "derived_display_lines": [
+        299,
+        340
+      ]
+    },
+    {
+      "label": "native-w8-mono-loop",
+      "logical_source": "selected/native-w8-process-bank-inner.s",
+      "original_line_ranges": [
+        [
+          1215,
+          1258
+        ]
+      ],
+      "raw_source_bytes": 149147,
+      "raw_source_sha256": "e6318358bcd5c8409561bf139c6711b99a3c663c4b9476ecd8eb9abe80a4833c",
+      "raw_excerpt_sha256": "bfb8a5a94da72c4d148e56e96ee1803e257a0aba18a76ba9d2b2f4549dd572ed",
+      "derived_display_lines": [
+        343,
+        387
+      ]
+    },
+    {
+      "label": "wasm-scalar-entry",
+      "logical_source": "selected/wasm-scalar-scalar-core.s",
+      "original_line_ranges": [
+        [
+          1618,
+          1668
+        ]
+      ],
+      "raw_source_bytes": 297079,
+      "raw_source_sha256": "a40d02527c83d0259b61c5e6f8b0f25412f114d94e061daabceff16211ad3f2c",
+      "raw_excerpt_sha256": "46d318c03f0405c28878c35d1861d1f7c66eb5721fdcea42e633004b90aa9775",
+      "derived_display_lines": [
+        390,
+        441
+      ]
+    },
+    {
+      "label": "wasm-scalar-loop",
+      "logical_source": "selected/wasm-scalar-scalar-core.s",
+      "original_line_ranges": [
+        [
+          2095,
+          2165
+        ]
+      ],
+      "raw_source_bytes": 297079,
+      "raw_source_sha256": "a40d02527c83d0259b61c5e6f8b0f25412f114d94e061daabceff16211ad3f2c",
+      "raw_excerpt_sha256": "83df333b2746625f41a55b53f6972d8c5db8e06c141ee9588b49f75b8c29df2e",
+      "derived_display_lines": [
+        444,
+        515
+      ]
+    },
+    {
+      "label": "wasm-w4-entry",
+      "logical_source": "selected/wasm-simd128-w4-core.s",
+      "original_line_ranges": [
+        [
+          1598,
+          1665
+        ]
+      ],
+      "raw_source_bytes": 335920,
+      "raw_source_sha256": "68070443bfaa79cd5745a1ae2d9dd19b74907f80577ec95ef0907f5709dbae5e",
+      "raw_excerpt_sha256": "4337c9667250352eebbf78f533aae5ac989213a83d73c9228c6c08f2d13a7a67",
+      "derived_display_lines": [
+        518,
+        586
+      ]
+    },
+    {
+      "label": "wasm-w4-loop",
+      "logical_source": "selected/wasm-simd128-w4-core.s",
+      "original_line_ranges": [
+        [
+          2070,
+          2148
+        ]
+      ],
+      "raw_source_bytes": 335920,
+      "raw_source_sha256": "68070443bfaa79cd5745a1ae2d9dd19b74907f80577ec95ef0907f5709dbae5e",
+      "raw_excerpt_sha256": "14fe575e8e96d07c5fd5c5cfdfaf3ea543f608b8bc1ad3f6a07f0ebea2e29a45",
+      "derived_display_lines": [
+        589,
+        668
+      ]
+    }
+  ]
+}

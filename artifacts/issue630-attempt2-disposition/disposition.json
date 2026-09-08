@@ -1,0 +1,187 @@
+{
+  "issue": 630,
+  "attempt": 2,
+  "kind": "documentation-evidence-disposition",
+  "execution": "none",
+  "current_head": "a0026c59a0c6e2ef82b7845c2b79f24acb27b3af",
+  "reviewed_lease_head": "6b59637a70340105f5c11b9a6a335e4aed1bd129",
+  "execution_head": "4c729144a60a3b471bf5adab382365dd4ecb44f8",
+  "attempt1_evidence_checkpoint": "ddfcf86d75b365df05a4e58e2a8985a4dcd74784",
+  "obligations": {
+    "reviewed_to_execution_exact_paths_and_blobs": {
+      "pass": true,
+      "changed_name_status": [
+        "M\t.github/ISSUE_SPECS/630-complete-limiter-delivery-checks-with-one-canonical-lease.md"
+      ],
+      "path_hashes": {
+        ".github/ISSUE_SPECS/630-complete-limiter-delivery-checks-with-one-canonical-lease.md": {
+          "reviewed": "88ca8496afa9eddc3a44764cf660b3067d24ddccdc1d896c3af9b31cb9a4f7cf",
+          "execution": "673396558b4e5ebcfb617f985b4d96c690527f0ae081104f4cfc84f5e19a2d29"
+        }
+      }
+    },
+    "only_issue_spec_changed": {
+      "pass": true,
+      "changed_paths": [
+        ".github/ISSUE_SPECS/630-complete-limiter-delivery-checks-with-one-canonical-lease.md"
+      ],
+      "non_spec_changes": []
+    },
+    "accepted_identities_unchanged": {
+      "pass": true,
+      "limiter_source_sha256": {
+        "reviewed": "32ab4abf975b32d47c85a748e617e74c9547b22e1b585f0d36713be439a62908",
+        "execution": "32ab4abf975b32d47c85a748e617e74c9547b22e1b585f0d36713be439a62908",
+        "current": "32ab4abf975b32d47c85a748e617e74c9547b22e1b585f0d36713be439a62908"
+      },
+      "promoted_files_sha256_at_execution": {
+        "hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256": "2469cf8aba762205e925851b5f30d53e62a8c9e808af364bab1c02bd87840068",
+        "hosts/host-web/qualification/results.json": "74aab52d69274942e1e9fc48e7e06f5831e4f850ff4d04c28c52328760311cf3",
+        "hosts/host-web/BROWSER_DEPLOYMENT_MATRIX.md": "48a6c1d1b91aa36b85831fa998ba6f2519b1382909751a27385fc79491feb666"
+      },
+      "accepted_six_file_hashes": {
+        "miso-engine-v1-abi-layout.json": "40f6fe2e23e1b47500011c14871750a75922ab194136add8b387a4b40eb56919",
+        "miso-engine-v1-audio-worklet-host.d.ts": "445254e7c6ddf3330bdf20cafa8cacec4d0e2489805f72a833859db52bc038cf",
+        "miso-engine-v1-audio-worklet-host.js": "21c8947d8aad2d1d9a23e553c2c7b983dbd5a622aabfbab9a41c622d1a50229a",
+        "miso-engine-v1-audio-worklet.js": "225bc06043ed6e2c62a38d63f1c2015b40480d673e3a53109c938eba481556cb",
+        "miso-engine-v1-audio-worklet.simd128.wasm": "63ef81c105d50aed41164aa3c6c6f8853a314b99d642e209e7cc3aefe3bdbca1",
+        "miso-engine-v1-parameter-metadata.json": "6eac2cb3e30931b6c01b10c63af4eedd2d59337274565a129c7a3f328a09938d"
+      },
+      "retained_final_six_file_hashes": {
+        "miso-engine-v1-abi-layout.json": "40f6fe2e23e1b47500011c14871750a75922ab194136add8b387a4b40eb56919",
+        "miso-engine-v1-audio-worklet-host.d.ts": "445254e7c6ddf3330bdf20cafa8cacec4d0e2489805f72a833859db52bc038cf",
+        "miso-engine-v1-audio-worklet-host.js": "21c8947d8aad2d1d9a23e553c2c7b983dbd5a622aabfbab9a41c622d1a50229a",
+        "miso-engine-v1-audio-worklet.js": "225bc06043ed6e2c62a38d63f1c2015b40480d673e3a53109c938eba481556cb",
+        "miso-engine-v1-audio-worklet.simd128.wasm": "63ef81c105d50aed41164aa3c6c6f8853a314b99d642e209e7cc3aefe3bdbca1",
+        "miso-engine-v1-parameter-metadata.json": "6eac2cb3e30931b6c01b10c63af4eedd2d59337274565a129c7a3f328a09938d"
+      }
+    },
+    "attempt1_records_integrity": {
+      "pass": true,
+      "statuses": {
+        "00-preflight": "0",
+        "01": "0",
+        "02": "0",
+        "03": "0",
+        "04": "0",
+        "05": "0",
+        "06": "0"
+      },
+      "all_seven_status_zero": true,
+      "manifest_entries": 46,
+      "manifest_all_match": true,
+      "manifest_record": "artifacts/issue630-attempt1-checks/sha256sums.txt",
+      "checks": [
+        {
+          "step": 1,
+          "command": "bash scripts/sdk-package.sh check /tmp/issue627-postpin-attempt3-output-20260908",
+          "status": 0,
+          "invocations": 1
+        },
+        {
+          "step": 2,
+          "command": "node hosts/host-web/qualification/generate-matrix.mjs --check",
+          "status": 0,
+          "invocations": 1
+        },
+        {
+          "step": 3,
+          "command": "cargo fmt --all --check",
+          "status": 0,
+          "invocations": 1
+        },
+        {
+          "step": 4,
+          "command": "git diff --check origin/main...HEAD",
+          "status": 0,
+          "invocations": 1
+        },
+        {
+          "step": 5,
+          "command": "bash scripts/check-workspace-policy.sh",
+          "status": 0,
+          "invocations": 1
+        },
+        {
+          "step": 6,
+          "command": "bash scripts/check-effect-runtime-policy.sh",
+          "status": 0,
+          "invocations": 1
+        }
+      ]
+    },
+    "technical_applicability_without_verdict_relabel": {
+      "pass": true,
+      "attempt1_technical_status": "seven retained statuses zero and retained preflight/check streams",
+      "procedural_verdict": "FAIL: lease authorized reviewed head 6b59637a but execution ran at child 4c729144",
+      "pass_not_claimed": true,
+      "no_command_rerun": true
+    }
+  },
+  "post_execution_current_changes": {
+    "all_document_or_evidence_paths": true,
+    "changed_paths": [
+      ".github/ISSUE_SPECS/630-complete-limiter-delivery-checks-with-one-canonical-lease.md",
+      "artifacts/issue630-attempt1-checks/00-lease.owner.txt",
+      "artifacts/issue630-attempt1-checks/00-lease.sha256",
+      "artifacts/issue630-attempt1-checks/00-preflight.command.txt",
+      "artifacts/issue630-attempt1-checks/00-preflight.py",
+      "artifacts/issue630-attempt1-checks/00-preflight.status",
+      "artifacts/issue630-attempt1-checks/00-preflight.stderr",
+      "artifacts/issue630-attempt1-checks/00-preflight.stdout",
+      "artifacts/issue630-attempt1-checks/01.command.txt",
+      "artifacts/issue630-attempt1-checks/01.lease.owner.txt",
+      "artifacts/issue630-attempt1-checks/01.lease.sha256",
+      "artifacts/issue630-attempt1-checks/01.status",
+      "artifacts/issue630-attempt1-checks/01.stderr",
+      "artifacts/issue630-attempt1-checks/01.stdout",
+      "artifacts/issue630-attempt1-checks/02.command.txt",
+      "artifacts/issue630-attempt1-checks/02.lease.owner.txt",
+      "artifacts/issue630-attempt1-checks/02.lease.sha256",
+      "artifacts/issue630-attempt1-checks/02.status",
+      "artifacts/issue630-attempt1-checks/02.stderr",
+      "artifacts/issue630-attempt1-checks/02.stdout",
+      "artifacts/issue630-attempt1-checks/03.command.txt",
+      "artifacts/issue630-attempt1-checks/03.lease.owner.txt",
+      "artifacts/issue630-attempt1-checks/03.lease.sha256",
+      "artifacts/issue630-attempt1-checks/03.status",
+      "artifacts/issue630-attempt1-checks/03.stderr",
+      "artifacts/issue630-attempt1-checks/03.stdout",
+      "artifacts/issue630-attempt1-checks/04.command.txt",
+      "artifacts/issue630-attempt1-checks/04.lease.owner.txt",
+      "artifacts/issue630-attempt1-checks/04.lease.sha256",
+      "artifacts/issue630-attempt1-checks/04.status",
+      "artifacts/issue630-attempt1-checks/04.stderr",
+      "artifacts/issue630-attempt1-checks/04.stdout",
+      "artifacts/issue630-attempt1-checks/05.command.txt",
+      "artifacts/issue630-attempt1-checks/05.lease.owner.txt",
+      "artifacts/issue630-attempt1-checks/05.lease.sha256",
+      "artifacts/issue630-attempt1-checks/05.status",
+      "artifacts/issue630-attempt1-checks/05.stderr",
+      "artifacts/issue630-attempt1-checks/05.stdout",
+      "artifacts/issue630-attempt1-checks/06.command.txt",
+      "artifacts/issue630-attempt1-checks/06.lease.owner.txt",
+      "artifacts/issue630-attempt1-checks/06.lease.sha256",
+      "artifacts/issue630-attempt1-checks/06.status",
+      "artifacts/issue630-attempt1-checks/06.stderr",
+      "artifacts/issue630-attempt1-checks/06.stdout",
+      "artifacts/issue630-attempt1-checks/README.md",
+      "artifacts/issue630-attempt1-checks/lease-run.py",
+      "artifacts/issue630-attempt1-checks/sha256sums.txt",
+      "artifacts/issue630-attempt1-checks/summary.json"
+    ],
+    "non_product_paths": []
+  },
+  "records_preserved": [
+    "artifacts/issue630-attempt1-checks/summary.json",
+    "artifacts/issue630-attempt1-checks/sha256sums.txt",
+    "artifacts/issue630-attempt1-checks/00-preflight.status",
+    "artifacts/issue630-attempt1-checks/01.status",
+    "artifacts/issue630-attempt1-checks/02.status",
+    "artifacts/issue630-attempt1-checks/03.status",
+    "artifacts/issue630-attempt1-checks/04.status",
+    "artifacts/issue630-attempt1-checks/05.status",
+    "artifacts/issue630-attempt1-checks/06.status"
+  ],
+  "overall": "technical inputs/results unchanged; procedural FAIL preserved; no PASS relabel"
+}

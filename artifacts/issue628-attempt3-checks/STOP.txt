@@ -1,0 +1,2 @@
+FAIL: exact execution lease owner/scope mismatch before preflight.
+Stop rule applied; no authorized command ran.

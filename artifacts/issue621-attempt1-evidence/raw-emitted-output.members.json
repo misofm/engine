@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "archive": "raw-emitted-output.tar.gz",
+  "compression": "gzip",
+  "tar_metadata": {
+    "mtime": 0,
+    "uid": 0,
+    "gid": 0,
+    "mode": "0644",
+    "member_order": "lexicographic"
+  },
+  "members": [
+    {
+      "path": "gates/allocation-release.stdout",
+      "bytes": 226,
+      "sha256": "beb888e6107b96ae6ac33927ffb52d1f607fafa65ca33cea90eea206d399e271"
+    },
+    {
+      "path": "gates/focused-debug.stdout",
+      "bytes": 325,
+      "sha256": "c18fa245d94cb56e1e36b201fd2b88ad13935df0cfee8b64999cd0cc90ef40dd"
+    },
+    {
+      "path": "gates/focused-release.stdout",
+      "bytes": 325,
+      "sha256": "c18fa245d94cb56e1e36b201fd2b88ad13935df0cfee8b64999cd0cc90ef40dd"
+    },
+    {
+      "path": "gates/full-suite.stdout",
+      "bytes": 4183,
+      "sha256": "4fd4836efcb4e44299abdc62d6f71dfe33cf8ed3279900e7382d5bf690771020"
+    },
+    {
+      "path": "gates/mono-debug.stdout",
+      "bytes": 237,
+      "sha256": "65ea8d3b27b85f68b0338acce4765c9be5970a1f6ae394dad971cd291886f7f9"
+    },
+    {
+      "path": "gates/mono-release.stdout",
+      "bytes": 237,
+      "sha256": "0cd1f82274f2410fd118a58de7ed55b1af094480e421f0acbff417e2dd2e4eae"
+    }
+  ]
+}

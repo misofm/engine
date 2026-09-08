@@ -1,0 +1,100 @@
+ - func[74] sig=26 <miso_engine_web_v1_abi_version>
+ - func[75] sig=1 <miso_engine_web_v1_boot>
+ - func[76] sig=26 <miso_engine_web_v1_boot_diagnostic_bytes>
+ - func[77] sig=26 <miso_engine_web_v1_boot_options_ptr>
+ - func[78] sig=26 <miso_engine_web_v1_boot_result>
+ - func[79] sig=9 <miso_engine_web_v1_buffer_capacity>
+ - func[80] sig=9 <miso_engine_web_v1_buffer_ptr>
+ - func[81] sig=1 <miso_engine_web_v1_command_report_ptr>
+ - func[82] sig=9 <miso_engine_web_v1_command_submit>
+ - func[83] sig=1 <miso_engine_web_v1_console_track_count>
+ - func[84] sig=9 <miso_engine_web_v1_console_track_id>
+ - func[85] sig=1 <miso_engine_web_v1_dispose>
+ - func[86] sig=1 <miso_engine_web_v1_document_ptr>
+ - func[87] sig=1 <miso_engine_web_v1_meter_header_ptr>
+ - func[88] sig=9 <miso_engine_web_v1_meter_lease>
+ - func[89] sig=1 <miso_engine_web_v1_meter_poll>
+ - func[90] sig=9 <miso_engine_web_v1_render>
+ - func[91] sig=1 <miso_engine_web_v1_resource_ptr>
+ - func[92] sig=9 <miso_engine_web_v1_source_channels>
+ - func[93] sig=1 <miso_engine_web_v1_source_count>
+ - func[94] sig=27 <miso_engine_web_v1_source_frames>
+ - func[95] sig=9 <miso_engine_web_v1_source_id>
+ - func[96] sig=11 <miso_engine_web_v1_source_seek>
+ - func[97] sig=28 <miso_engine_web_v1_source_submit>
+ - func[98] sig=1 <miso_engine_web_v1_status_ptr>
+ - func[74] <miso_engine_web_v1_abi_version> -> "miso_engine_web_v1_abi_version"
+ - func[75] <miso_engine_web_v1_boot> -> "miso_engine_web_v1_boot"
+ - func[76] <miso_engine_web_v1_boot_diagnostic_bytes> -> "miso_engine_web_v1_boot_diagnostic_bytes"
+ - func[77] <miso_engine_web_v1_boot_options_ptr> -> "miso_engine_web_v1_boot_options_ptr"
+ - func[78] <miso_engine_web_v1_boot_result> -> "miso_engine_web_v1_boot_result"
+ - func[79] <miso_engine_web_v1_buffer_capacity> -> "miso_engine_web_v1_buffer_capacity"
+ - func[80] <miso_engine_web_v1_buffer_ptr> -> "miso_engine_web_v1_buffer_ptr"
+ - func[81] <miso_engine_web_v1_command_report_ptr> -> "miso_engine_web_v1_command_report_ptr"
+ - func[82] <miso_engine_web_v1_command_submit> -> "miso_engine_web_v1_command_submit"
+ - func[83] <miso_engine_web_v1_console_track_count> -> "miso_engine_web_v1_console_track_count"
+ - func[84] <miso_engine_web_v1_console_track_id> -> "miso_engine_web_v1_console_track_id"
+ - func[85] <miso_engine_web_v1_dispose> -> "miso_engine_web_v1_dispose"
+ - func[86] <miso_engine_web_v1_document_ptr> -> "miso_engine_web_v1_document_ptr"
+ - func[87] <miso_engine_web_v1_meter_header_ptr> -> "miso_engine_web_v1_meter_header_ptr"
+ - func[88] <miso_engine_web_v1_meter_lease> -> "miso_engine_web_v1_meter_lease"
+ - func[89] <miso_engine_web_v1_meter_poll> -> "miso_engine_web_v1_meter_poll"
+ - func[90] <miso_engine_web_v1_render> -> "miso_engine_web_v1_render"
+ - func[91] <miso_engine_web_v1_resource_ptr> -> "miso_engine_web_v1_resource_ptr"
+ - func[92] <miso_engine_web_v1_source_channels> -> "miso_engine_web_v1_source_channels"
+ - func[93] <miso_engine_web_v1_source_count> -> "miso_engine_web_v1_source_count"
+ - func[94] <miso_engine_web_v1_source_frames> -> "miso_engine_web_v1_source_frames"
+ - func[95] <miso_engine_web_v1_source_id> -> "miso_engine_web_v1_source_id"
+ - func[96] <miso_engine_web_v1_source_seek> -> "miso_engine_web_v1_source_seek"
+ - func[97] <miso_engine_web_v1_source_submit> -> "miso_engine_web_v1_source_submit"
+ - func[98] <miso_engine_web_v1_status_ptr> -> "miso_engine_web_v1_status_ptr"
+ - func[74] size=6 <miso_engine_web_v1_abi_version>
+ - func[75] size=899 <miso_engine_web_v1_boot>
+ - func[76] size=55 <miso_engine_web_v1_boot_diagnostic_bytes>
+ - func[77] size=48 <miso_engine_web_v1_boot_options_ptr>
+ - func[78] size=56 <miso_engine_web_v1_boot_result>
+ - func[79] size=244 <miso_engine_web_v1_buffer_capacity>
+ - func[80] size=249 <miso_engine_web_v1_buffer_ptr>
+ - func[81] size=76 <miso_engine_web_v1_command_report_ptr>
+ - func[82] size=124 <miso_engine_web_v1_command_submit>
+ - func[83] size=129 <miso_engine_web_v1_console_track_count>
+ - func[84] size=260 <miso_engine_web_v1_console_track_id>
+ - func[85] size=468 <miso_engine_web_v1_dispose>
+ - func[86] size=456 <miso_engine_web_v1_document_ptr>
+ - func[87] size=130 <miso_engine_web_v1_meter_header_ptr>
+ - func[88] size=155 <miso_engine_web_v1_meter_lease>
+ - func[89] size=122 <miso_engine_web_v1_meter_poll>
+ - func[90] size=168 <miso_engine_web_v1_render>
+ - func[91] size=76 <miso_engine_web_v1_resource_ptr>
+ - func[92] size=153 <miso_engine_web_v1_source_channels>
+ - func[93] size=129 <miso_engine_web_v1_source_count>
+ - func[94] size=138 <miso_engine_web_v1_source_frames>
+ - func[95] size=260 <miso_engine_web_v1_source_id>
+ - func[96] size=221 <miso_engine_web_v1_source_seek>
+ - func[97] size=688 <miso_engine_web_v1_source_submit>
+ - func[98] size=76 <miso_engine_web_v1_status_ptr>
+ - func[74] <miso_engine_web_v1_abi_version>
+ - func[75] <miso_engine_web_v1_boot>
+ - func[76] <miso_engine_web_v1_boot_diagnostic_bytes>
+ - func[77] <miso_engine_web_v1_boot_options_ptr>
+ - func[78] <miso_engine_web_v1_boot_result>
+ - func[79] <miso_engine_web_v1_buffer_capacity>
+ - func[80] <miso_engine_web_v1_buffer_ptr>
+ - func[81] <miso_engine_web_v1_command_report_ptr>
+ - func[82] <miso_engine_web_v1_command_submit>
+ - func[83] <miso_engine_web_v1_console_track_count>
+ - func[84] <miso_engine_web_v1_console_track_id>
+ - func[85] <miso_engine_web_v1_dispose>
+ - func[86] <miso_engine_web_v1_document_ptr>
+ - func[87] <miso_engine_web_v1_meter_header_ptr>
+ - func[88] <miso_engine_web_v1_meter_lease>
+ - func[89] <miso_engine_web_v1_meter_poll>
+ - func[90] <miso_engine_web_v1_render>
+ - func[91] <miso_engine_web_v1_resource_ptr>
+ - func[92] <miso_engine_web_v1_source_channels>
+ - func[93] <miso_engine_web_v1_source_count>
+ - func[94] <miso_engine_web_v1_source_frames>
+ - func[95] <miso_engine_web_v1_source_id>
+ - func[96] <miso_engine_web_v1_source_seek>
+ - func[97] <miso_engine_web_v1_source_submit>
+ - func[98] <miso_engine_web_v1_status_ptr>

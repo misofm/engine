@@ -1,0 +1,4 @@
+cwd=/home/bl/misofm/engine-issue627-probe
+env -u MISO_ENGINE_WEB_AUDIOWORKLET_REPIN ./scripts/build-web-audioworklet.sh /tmp/issue627-probe-output-89619288
+stdout=/tmp/issue627-probe-evidence-89619288/build.stdout
+stderr=/tmp/issue627-probe-evidence-89619288/build.stderr

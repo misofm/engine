@@ -1,0 +1,9 @@
+   Compiling bytemuck v1.25.2
+   Compiling engine v0.1.0 (/home/bl/misofm/engine-limiter-detector-bounds/crates/engine)
+   Compiling wide v1.6.1
+   Compiling lane v0.1.0 (/home/bl/misofm/engine-limiter-detector-bounds/crates/lane)
+   Compiling math v0.1.0 (/home/bl/misofm/engine-limiter-detector-bounds/crates/math)
+   Compiling effect-contract v0.1.0 (/home/bl/misofm/engine-limiter-detector-bounds/crates/effect-contract)
+   Compiling effect-runtime v0.1.0 (/home/bl/misofm/engine-limiter-detector-bounds/crates/effect-runtime)
+   Compiling true-peak-limiter v0.1.0 (/home/bl/misofm/engine-limiter-detector-bounds/crates/true-peak-limiter)
+    Finished `release` profile [optimized + debuginfo] target(s) in 6.71s

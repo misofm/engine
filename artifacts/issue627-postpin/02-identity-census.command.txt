@@ -1,0 +1,3 @@
+find /tmp/issue627-postpin-output -maxdepth 1 -type f -printf '%f\\n' | sort > 01-build.output-files.txt
+sha256sum /tmp/issue627-postpin-output/* > 01-build.output.sha256
+compare basenames and SHA-256 values with /tmp/issue627-qualified-output

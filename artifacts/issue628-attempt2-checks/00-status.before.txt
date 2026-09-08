@@ -1,0 +1,2 @@
+?? ../artifacts/issue628-attempt2-checks/00-sdk-manifests.before.sha256
+?? ../artifacts/issue628-attempt2-checks/00-status.before.txt

@@ -1,0 +1,9 @@
+--- artifacts/issue627-scratch-qualification/delivered-output-normalized.sha256	2026-09-08 13:30:31.349616532 +0000
++++ artifacts/issue627-scratch-qualification/candidate-output-normalized.sha256	2026-09-08 13:30:19.343230993 +0000
+@@ -2,5 +2,5 @@
+ 225bc06043ed6e2c62a38d63f1c2015b40480d673e3a53109c938eba481556cb  miso-engine-v1-audio-worklet.js
+ 40f6fe2e23e1b47500011c14871750a75922ab194136add8b387a4b40eb56919  miso-engine-v1-abi-layout.json
+ 445254e7c6ddf3330bdf20cafa8cacec4d0e2489805f72a833859db52bc038cf  miso-engine-v1-audio-worklet-host.d.ts
++63ef81c105d50aed41164aa3c6c6f8853a314b99d642e209e7cc3aefe3bdbca1  miso-engine-v1-audio-worklet.simd128.wasm
+ 6eac2cb3e30931b6c01b10c63af4eedd2d59337274565a129c7a3f328a09938d  miso-engine-v1-parameter-metadata.json
+-ac71c64033b0cfc637cf14edcacaa6ed1b3bbf7093a5caa641ef84adea7e88e3  miso-engine-v1-audio-worklet.simd128.wasm

@@ -1,0 +1,7 @@
+my_sequence=00-preflight,01-build,02-output-identity,03-static,04-resources,05-hermetic-partial
+my_output=/tmp/issue627-postpin-attempt3-output-20260908
+my_scratch=/home/bl/misofm/engine-issue627-postpin
+concurrent_records=03-check-web.*,04-expected-resources.*,05-test-web.*
+concurrent_records_are_noncredit=unresolved executor ownership; preserved without relabeling
+stop_reason=duplicate static/resource executor records made exactly-once attribution unavailable
+downstream_my_sequence=not_started

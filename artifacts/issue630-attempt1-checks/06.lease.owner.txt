@@ -1,0 +1,5 @@
+issue=630
+attempt=1
+owner=/root/issue610_luna_xhigh
+authorized_head=6b59637a70340105f5c11b9a6a335e4aed1bd129
+scope=installed-state-preflight,sdk-check,matrix-check,cargo-fmt,diff-hygiene,workspace-policy,effect-runtime-policy

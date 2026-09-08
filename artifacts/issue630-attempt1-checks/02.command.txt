@@ -1,0 +1,1 @@
+python3 artifacts/issue630-attempt1-checks/lease-run.py --tag 02 -- node hosts/host-web/qualification/generate-matrix.mjs --check

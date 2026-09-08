@@ -1,0 +1,4 @@
+candidate-output-normalized.sha256 generated from build-output.sha256 by basename normalization
+delivered-output-normalized.sha256 copied from artifacts/issue623-postpin/output-normalized.sha256
+diff -u delivered-output-normalized.sha256 candidate-output-normalized.sha256
+diff -u <(grep -v audio-worklet.simd128.wasm delivered-output-normalized.sha256) <(grep -v audio-worklet.simd128.wasm candidate-output-normalized.sha256)

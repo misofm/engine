@@ -1,0 +1,8 @@
+numbered_records=00-toolchain,01-build,02-matrix-generate,03-static,04-resources,05-hermetic,06-sdk-install,07-sdk,08-browser-install,09-browsers,10-matrix-check
+numbered_cwd=/home/bl/misofm/engine-issue627-scratch
+numbered_output=/tmp/issue627-qualified-output
+duplicate_cwd=/home/bl/misofm/engine-issue627-scratch-qualification
+duplicate_output=/tmp/issue627-scratch-output-050242
+numbered_references_duplicate_cwd=no
+numbered_references_duplicate_output=no
+numbered_output_references=/tmp/issue627-qualified-output

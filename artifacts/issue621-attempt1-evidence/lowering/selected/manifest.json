@@ -1,0 +1,399 @@
+{
+  "source": {
+    "native/true_peak_limiter-61bcf0f0b2475b36.ll": {
+      "bytes": 8398979,
+      "sha256": "cea17e7527a795f25612e95bcb5bb92d91cadaef929dfb2e3628c2c86c3e94eb"
+    },
+    "native/true_peak_limiter-61bcf0f0b2475b36.s": {
+      "bytes": 3961556,
+      "sha256": "b9d25e64b27b17992fd43d05aff4a88b710dd2223b6157beb8f71aaf4d1b1fd5"
+    },
+    "wasm-scalar/true_peak_limiter-13565f343cd208d0.ll": {
+      "bytes": 2285983,
+      "sha256": "1af4e6ed7ff6dbd14e9253903c5f504b846188ede9f0dd23e082a5895f5765c2"
+    },
+    "wasm-scalar/true_peak_limiter-13565f343cd208d0.s": {
+      "bytes": 1058211,
+      "sha256": "f032be87150eb1808a41fc34d09ed680eecfd0e9bc713bc35fecef73b09c1087"
+    },
+    "wasm-simd128/true_peak_limiter-c44b6d723c91aa0c.ll": {
+      "bytes": 5261918,
+      "sha256": "4cd8baa07a2ff56a9e1a41228162ed6e1856275cfde5aef2d44a5bc51c8a37d8"
+    },
+    "wasm-simd128/true_peak_limiter-c44b6d723c91aa0c.s": {
+      "bytes": 2533528,
+      "sha256": "6ec0a2257f7b0337e1f4733a41e7804bb68a1eb07bee24fd13587f1704cf1222"
+    }
+  },
+  "functions": [
+    {
+      "target": "native",
+      "label": "scalar-process",
+      "kind": "llvm",
+      "symbol": "_RNvXsd_CsdvPQf9CMsz3_17true_peak_limiterNtB5_23PreparedTruePeakLimiterNtCsfGpaX3jkkqY_15effect_contract20PreparedNativeEffect7process",
+      "source": "native/true_peak_limiter-61bcf0f0b2475b36.ll",
+      "lines": [
+        43295,
+        43331
+      ],
+      "bytes": 3394,
+      "sha256": "8685479ba1ddd712bfafecc276d4744255fc9a8c452088a511cce7c2873af8d6"
+    },
+    {
+      "target": "native",
+      "label": "scalar-process",
+      "kind": "asm",
+      "symbol": "_RNvXsd_CsdvPQf9CMsz3_17true_peak_limiterNtB5_23PreparedTruePeakLimiterNtCsfGpaX3jkkqY_15effect_contract20PreparedNativeEffect7process",
+      "source": "native/true_peak_limiter-61bcf0f0b2475b36.s",
+      "lines": [
+        67941,
+        68035
+      ],
+      "bytes": 2258,
+      "sha256": "9be80d0fa2379c84c0f0e5559d443537f3ecca97e4882ebc35052ee5844d4914"
+    },
+    {
+      "target": "native",
+      "label": "scalar-core",
+      "kind": "llvm",
+      "symbol": "_RNvMs9_CsdvPQf9CMsz3_17true_peak_limiterINtB5_11LimiterCorefE13process_blockB5_",
+      "source": "native/true_peak_limiter-61bcf0f0b2475b36.ll",
+      "lines": [
+        33500,
+        41018
+      ],
+      "bytes": 680384,
+      "sha256": "0e5dd42423c13577b138a26c2aac5d62db4a0044fd21ea86ff3b96365979c52a"
+    },
+    {
+      "target": "native",
+      "label": "scalar-core",
+      "kind": "asm",
+      "symbol": "_RNvMs9_CsdvPQf9CMsz3_17true_peak_limiterINtB5_11LimiterCorefE13process_blockB5_",
+      "source": "native/true_peak_limiter-61bcf0f0b2475b36.s",
+      "lines": [
+        52447,
+        64637
+      ],
+      "bytes": 242830,
+      "sha256": "49c76223538bea3aeb9884b0538af6d50bcd82e7851f66450e02c05a6e64222d"
+    },
+    {
+      "target": "native",
+      "label": "w8-process-bank",
+      "kind": "llvm",
+      "symbol": "_RNvXse_CsdvPQf9CMsz3_17true_peak_limiterINtB5_27PreparedTruePeakLimiterBankNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8ENtCsfGpaX3jkkqY_15effect_contract24PreparedNativeEffectBank12process_bankB5_",
+      "source": "native/true_peak_limiter-61bcf0f0b2475b36.ll",
+      "lines": [
+        44327,
+        44581
+      ],
+      "bytes": 21959,
+      "sha256": "ff6b1da38227dc8cbcd6867d00d259de4f5f7566ddc8d76ad66436cd9a28a606"
+    },
+    {
+      "target": "native",
+      "label": "w8-process-bank",
+      "kind": "asm",
+      "symbol": "_RNvXse_CsdvPQf9CMsz3_17true_peak_limiterINtB5_27PreparedTruePeakLimiterBankNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8ENtCsfGpaX3jkkqY_15effect_contract24PreparedNativeEffectBank12process_bankB5_",
+      "source": "native/true_peak_limiter-61bcf0f0b2475b36.s",
+      "lines": [
+        69551,
+        70055
+      ],
+      "bytes": 11149,
+      "sha256": "430fccfd066295b5c93af21dff8fc97b86802fa4037fcadf5033636daca1d51e"
+    },
+    {
+      "target": "native",
+      "label": "w8-process-bank-mono",
+      "kind": "llvm",
+      "symbol": "_RNvXse_CsdvPQf9CMsz3_17true_peak_limiterINtB5_27PreparedTruePeakLimiterBankNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8ENtCsfGpaX3jkkqY_15effect_contract24PreparedNativeEffectBank17process_bank_monoB5_",
+      "source": "native/true_peak_limiter-61bcf0f0b2475b36.ll",
+      "lines": [
+        44585,
+        44590
+      ],
+      "bytes": 1052,
+      "sha256": "92ad4f1b676fe9c4d245eec84e759d9fa68772a987e6d48a2ea32556d933b329"
+    },
+    {
+      "target": "native",
+      "label": "w8-process-bank-mono",
+      "kind": "asm",
+      "symbol": "_RNvXse_CsdvPQf9CMsz3_17true_peak_limiterINtB5_27PreparedTruePeakLimiterBankNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8ENtCsfGpaX3jkkqY_15effect_contract24PreparedNativeEffectBank17process_bank_monoB5_",
+      "source": "native/true_peak_limiter-61bcf0f0b2475b36.s",
+      "lines": [
+        70061,
+        70080
+      ],
+      "bytes": 1069,
+      "sha256": "d47f4ab842bead074b7cbb6493d57d467c654b666fce418a8aeed8f5d907c91f"
+    },
+    {
+      "target": "native",
+      "label": "w8-process-bank-inner",
+      "kind": "llvm",
+      "symbol": "_RINvMsf_CsdvPQf9CMsz3_17true_peak_limiterINtB6_27PreparedTruePeakLimiterBankNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8E18process_bank_innerKb1_EB6_",
+      "source": "native/true_peak_limiter-61bcf0f0b2475b36.ll",
+      "lines": [
+        4643,
+        9138
+      ],
+      "bytes": 433025,
+      "sha256": "7d50292a2cb19b8bb88b7f8af81a7004bb8dab145efde10d98adf74fb0fbc9d5"
+    },
+    {
+      "target": "native",
+      "label": "w8-process-bank-inner",
+      "kind": "asm",
+      "symbol": "_RINvMsf_CsdvPQf9CMsz3_17true_peak_limiterINtB6_27PreparedTruePeakLimiterBankNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8E18process_bank_innerKb1_EB6_",
+      "source": "native/true_peak_limiter-61bcf0f0b2475b36.s",
+      "lines": [
+        6929,
+        14004
+      ],
+      "bytes": 142572,
+      "sha256": "8c59a21c2d4779b553c19cdcd5ec21bf05c36f21c8827acbb09773fa87a88196"
+    },
+    {
+      "target": "native",
+      "label": "w8-core",
+      "kind": "llvm",
+      "symbol": "_RNvMs9_CsdvPQf9CMsz3_17true_peak_limiterINtB5_11LimiterCoreNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8E13process_blockB5_",
+      "source": "native/true_peak_limiter-61bcf0f0b2475b36.ll",
+      "lines": [
+        25361,
+        33304
+      ],
+      "bytes": 721020,
+      "sha256": "18de804624c50be0a21f4b9facf00cb0d9098f9ef8e72bfd25fb553d7608edce"
+    },
+    {
+      "target": "native",
+      "label": "w8-core",
+      "kind": "asm",
+      "symbol": "_RNvMs9_CsdvPQf9CMsz3_17true_peak_limiterINtB5_11LimiterCoreNtNtCsdw0XaoyMD7p_4wide6f32x8_5f32x8E13process_blockB5_",
+      "source": "native/true_peak_limiter-61bcf0f0b2475b36.s",
+      "lines": [
+        38981,
+        52174
+      ],
+      "bytes": 265340,
+      "sha256": "f7108f66c5ec874f7c0badcd28dc7f6ef85d7d23fcfa057b9e1e2494de121892"
+    },
+    {
+      "target": "wasm-scalar",
+      "label": "scalar-process",
+      "kind": "llvm",
+      "symbol": "_RNvXsd_CsjLJhryqjeDL_17true_peak_limiterNtB5_23PreparedTruePeakLimiterNtCs2mr8MC2dYJN_15effect_contract20PreparedNativeEffect7process",
+      "source": "wasm-scalar/true_peak_limiter-13565f343cd208d0.ll",
+      "lines": [
+        14505,
+        14541
+      ],
+      "bytes": 3408,
+      "sha256": "0b3b7467981a6abc0b1bece67d6e7c585b52249503874b9ce4239cd2334c23b0"
+    },
+    {
+      "target": "wasm-scalar",
+      "label": "scalar-process",
+      "kind": "asm",
+      "symbol": "_RNvXsd_CsjLJhryqjeDL_17true_peak_limiterNtB5_23PreparedTruePeakLimiterNtCs2mr8MC2dYJN_15effect_contract20PreparedNativeEffect7process",
+      "source": "wasm-scalar/true_peak_limiter-13565f343cd208d0.s",
+      "lines": [
+        34213,
+        34326
+      ],
+      "bytes": 2050,
+      "sha256": "b1183c33fbd7af7dacb61b18c8a574adc98dc2082cea5ccf4fefcfe159abe62f"
+    },
+    {
+      "target": "wasm-scalar",
+      "label": "scalar-core",
+      "kind": "llvm",
+      "symbol": "_RNvMs9_CsjLJhryqjeDL_17true_peak_limiterINtB5_11LimiterCorefE13process_blockB5_",
+      "source": "wasm-scalar/true_peak_limiter-13565f343cd208d0.ll",
+      "lines": [
+        4909,
+        12764
+      ],
+      "bytes": 715178,
+      "sha256": "08f3cfa3426f376e06765016e26e1c6d4a8d7bf92311b9e4fbacacf43ee6d0e5"
+    },
+    {
+      "target": "wasm-scalar",
+      "label": "scalar-core",
+      "kind": "asm",
+      "symbol": "_RNvMs9_CsjLJhryqjeDL_17true_peak_limiterINtB5_11LimiterCorefE13process_blockB5_",
+      "source": "wasm-scalar/true_peak_limiter-13565f343cd208d0.s",
+      "lines": [
+        10442,
+        30712
+      ],
+      "bytes": 288342,
+      "sha256": "9283ef201b39f1b93eb67a32d12c1430b83073c379404c251a90f38421f1ede8"
+    },
+    {
+      "target": "wasm-simd128",
+      "label": "scalar-process",
+      "kind": "llvm",
+      "symbol": "_RNvXsd_CsjLJhryqjeDL_17true_peak_limiterNtB5_23PreparedTruePeakLimiterNtCs2mr8MC2dYJN_15effect_contract20PreparedNativeEffect7process",
+      "source": "wasm-simd128/true_peak_limiter-c44b6d723c91aa0c.ll",
+      "lines": [
+        29365,
+        29401
+      ],
+      "bytes": 3411,
+      "sha256": "82a4577f0184ea3a8395981cfef7fab0d2e5c60c65a35266139285f6a332658b"
+    },
+    {
+      "target": "wasm-simd128",
+      "label": "scalar-process",
+      "kind": "asm",
+      "symbol": "_RNvXsd_CsjLJhryqjeDL_17true_peak_limiterNtB5_23PreparedTruePeakLimiterNtCs2mr8MC2dYJN_15effect_contract20PreparedNativeEffect7process",
+      "source": "wasm-simd128/true_peak_limiter-c44b6d723c91aa0c.s",
+      "lines": [
+        71880,
+        71980
+      ],
+      "bytes": 1954,
+      "sha256": "df77d08c4e86cc93fc1e0ba98f701fe802cdb35b17c7fc8f08134d82712d204e"
+    },
+    {
+      "target": "wasm-simd128",
+      "label": "scalar-core",
+      "kind": "llvm",
+      "symbol": "_RNvMs9_CsjLJhryqjeDL_17true_peak_limiterINtB5_11LimiterCorefE13process_blockB5_",
+      "source": "wasm-simd128/true_peak_limiter-c44b6d723c91aa0c.ll",
+      "lines": [
+        19139,
+        26994
+      ],
+      "bytes": 721825,
+      "sha256": "73f24b433789566992fbc6cb54c13a16b1d08f04d3574d7027d650a70b69cc60"
+    },
+    {
+      "target": "wasm-simd128",
+      "label": "scalar-core",
+      "kind": "asm",
+      "symbol": "_RNvMs9_CsjLJhryqjeDL_17true_peak_limiterINtB5_11LimiterCorefE13process_blockB5_",
+      "source": "wasm-simd128/true_peak_limiter-c44b6d723c91aa0c.s",
+      "lines": [
+        46897,
+        67155
+      ],
+      "bytes": 288111,
+      "sha256": "75085e647d7e49916137484b3de66b6ebc1d2dd777d72f2084821c4168fdfe0e"
+    },
+    {
+      "target": "wasm-simd128",
+      "label": "w4-process-bank",
+      "kind": "llvm",
+      "symbol": "_RNvXse_CsjLJhryqjeDL_17true_peak_limiterINtB5_27PreparedTruePeakLimiterBankNtNtCsk6DwtE1d11l_4wide6f32x4_5f32x4ENtCs2mr8MC2dYJN_15effect_contract24PreparedNativeEffectBank12process_bankB5_",
+      "source": "wasm-simd128/true_peak_limiter-c44b6d723c91aa0c.ll",
+      "lines": [
+        29413,
+        29562
+      ],
+      "bytes": 13351,
+      "sha256": "ae4c959ded960d696a17642246e59682722bf326bc63a135a569ba3c27b3ca5b"
+    },
+    {
+      "target": "wasm-simd128",
+      "label": "w4-process-bank",
+      "kind": "asm",
+      "symbol": "_RNvXse_CsjLJhryqjeDL_17true_peak_limiterINtB5_27PreparedTruePeakLimiterBankNtNtCsk6DwtE1d11l_4wide6f32x4_5f32x4ENtCs2mr8MC2dYJN_15effect_contract24PreparedNativeEffectBank12process_bankB5_",
+      "source": "wasm-simd128/true_peak_limiter-c44b6d723c91aa0c.s",
+      "lines": [
+        72003,
+        72377
+      ],
+      "bytes": 6261,
+      "sha256": "27f35a4af022331e16023c51ae8fa08e6621cb01962663a56e739f8ac440deb7"
+    },
+    {
+      "target": "wasm-simd128",
+      "label": "w4-process-bank-mono",
+      "kind": "llvm",
+      "symbol": "_RNvXse_CsjLJhryqjeDL_17true_peak_limiterINtB5_27PreparedTruePeakLimiterBankNtNtCsk6DwtE1d11l_4wide6f32x4_5f32x4ENtCs2mr8MC2dYJN_15effect_contract24PreparedNativeEffectBank17process_bank_monoB5_",
+      "source": "wasm-simd128/true_peak_limiter-c44b6d723c91aa0c.ll",
+      "lines": [
+        29566,
+        29711
+      ],
+      "bytes": 12918,
+      "sha256": "3cdebca4636037bb39dc7165f84f10828264cb0254f8709102aca1518f73af99"
+    },
+    {
+      "target": "wasm-simd128",
+      "label": "w4-process-bank-mono",
+      "kind": "asm",
+      "symbol": "_RNvXse_CsjLJhryqjeDL_17true_peak_limiterINtB5_27PreparedTruePeakLimiterBankNtNtCsk6DwtE1d11l_4wide6f32x4_5f32x4ENtCs2mr8MC2dYJN_15effect_contract24PreparedNativeEffectBank17process_bank_monoB5_",
+      "source": "wasm-simd128/true_peak_limiter-c44b6d723c91aa0c.s",
+      "lines": [
+        72383,
+        72752
+      ],
+      "bytes": 6208,
+      "sha256": "e800db30873f2c91714a3d8e7f1bb1581e2ee19f8c02be938bddb3294ef3baf5"
+    },
+    {
+      "target": "wasm-simd128",
+      "label": "w4-core",
+      "kind": "llvm",
+      "symbol": "_RNvMs9_CsjLJhryqjeDL_17true_peak_limiterINtB5_11LimiterCoreNtNtCsk6DwtE1d11l_4wide6f32x4_5f32x4E13process_blockB5_",
+      "source": "wasm-simd128/true_peak_limiter-c44b6d723c91aa0c.ll",
+      "lines": [
+        6279,
+        14560
+      ],
+      "bytes": 730834,
+      "sha256": "adb892ee21fb4cae02239fdcd6250c99fc24c3c47301ba74128ccab55f2de3c1"
+    },
+    {
+      "target": "wasm-simd128",
+      "label": "w4-core",
+      "kind": "asm",
+      "symbol": "_RNvMs9_CsjLJhryqjeDL_17true_peak_limiterINtB5_11LimiterCoreNtNtCsk6DwtE1d11l_4wide6f32x4_5f32x4E13process_blockB5_",
+      "source": "wasm-simd128/true_peak_limiter-c44b6d723c91aa0c.s",
+      "lines": [
+        13404,
+        35470
+      ],
+      "bytes": 326328,
+      "sha256": "6634ae9eb8cf187977e5737d41933d013316f6e58daf0810e52e19e4a8dd2b6e"
+    },
+    {
+      "target": "wasm-simd128",
+      "label": "w4-core-mono",
+      "kind": "llvm",
+      "symbol": "_RNvMs9_CsjLJhryqjeDL_17true_peak_limiterINtB5_11LimiterCoreNtNtCsk6DwtE1d11l_4wide6f32x4_5f32x4E18process_block_monoB5_",
+      "source": "wasm-simd128/true_peak_limiter-c44b6d723c91aa0c.ll",
+      "lines": [
+        14564,
+        19135
+      ],
+      "bytes": 417361,
+      "sha256": "b65384b04da16895f5cc3058c48b1425301bc063f501908b226ef10966ff2e48"
+    },
+    {
+      "target": "wasm-simd128",
+      "label": "w4-core-mono",
+      "kind": "asm",
+      "symbol": "_RNvMs9_CsjLJhryqjeDL_17true_peak_limiterINtB5_11LimiterCoreNtNtCsk6DwtE1d11l_4wide6f32x4_5f32x4E18process_block_monoB5_",
+      "source": "wasm-simd128/true_peak_limiter-c44b6d723c91aa0c.s",
+      "lines": [
+        35478,
+        46891
+      ],
+      "bytes": 167613,
+      "sha256": "055c01cb4473258c4b0b960ce0799e4b98bcd2244445eae647796bddbec4e180"
+    }
+  ],
+  "durable_storage": {
+    "raw_capture_files": "omitted under tracker ruling 80f6e715; original source paths, byte counts, and SHA-256 identities remain in provenance.json",
+    "derived_excerpts": "../../lowering-map-excerpts.json",
+    "display_transformation": "line endings and trailing horizontal whitespace removed; raw excerpt hashes remain authoritative"
+  }
+}

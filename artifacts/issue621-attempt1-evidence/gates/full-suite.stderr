@@ -1,0 +1,61 @@
+   Compiling version_check v0.9.5
+   Compiling lexical-util v1.0.7
+   Compiling proc-macro2 v1.0.107
+   Compiling libc v0.2.189
+   Compiling quote v1.0.47
+   Compiling cfg-if v1.0.4
+   Compiling unicode-ident v1.0.24
+   Compiling syn v1.0.109
+   Compiling bytemuck v1.25.2
+   Compiling once_cell v1.21.4
+   Compiling autocfg v1.5.1
+   Compiling typenum v1.20.1
+   Compiling engine v0.1.0 (/home/bl/misofm/engine-limiter-detector-bounds/crates/engine)
+   Compiling smallvec v1.15.2
+   Compiling decoded-char v0.1.1
+   Compiling utf8-decode v1.0.1
+   Compiling locspan v0.8.2
+   Compiling cpufeatures v0.3.0
+   Compiling dsp-reference v0.1.0 (/home/bl/misofm/engine-limiter-detector-bounds/crates/dsp-reference)
+   Compiling safe_arch v1.2.0
+   Compiling smallstr v0.3.1
+   Compiling proc-macro-error-attr v1.0.4
+   Compiling ahash v0.7.8
+   Compiling proc-macro-error v1.0.4
+   Compiling indexmap v1.9.3
+   Compiling wide v1.6.1
+   Compiling lexical-parse-integer v1.0.6
+   Compiling lexical-write-integer v1.0.6
+   Compiling lexical-parse-float v1.0.6
+   Compiling hybrid-array v0.4.14
+   Compiling lexical-write-float v1.0.6
+   Compiling lexical-core v1.0.6
+   Compiling lexical v7.0.5
+   Compiling getrandom v0.2.17
+   Compiling json-number v0.4.10
+   Compiling crypto-common v0.2.2
+   Compiling block-buffer v0.12.1
+   Compiling hashbrown v0.12.3
+   Compiling digest v0.11.3
+   Compiling sha2 v0.11.0
+   Compiling locspan-derive v0.6.0
+   Compiling bench-support v0.1.0 (/home/bl/misofm/engine-limiter-detector-bounds/tools/bench-support)
+   Compiling json-syntax v0.12.5
+   Compiling session v0.1.0 (/home/bl/misofm/engine-limiter-detector-bounds/crates/session)
+   Compiling protocol v0.1.0 (/home/bl/misofm/engine-limiter-detector-bounds/crates/protocol)
+   Compiling lane v0.1.0 (/home/bl/misofm/engine-limiter-detector-bounds/crates/lane)
+   Compiling math v0.1.0 (/home/bl/misofm/engine-limiter-detector-bounds/crates/math)
+   Compiling effect-contract v0.1.0 (/home/bl/misofm/engine-limiter-detector-bounds/crates/effect-contract)
+   Compiling effect-runtime v0.1.0 (/home/bl/misofm/engine-limiter-detector-bounds/crates/effect-runtime)
+   Compiling conformance v0.1.0 (/home/bl/misofm/engine-limiter-detector-bounds/crates/conformance)
+   Compiling true-peak-limiter v0.1.0 (/home/bl/misofm/engine-limiter-detector-bounds/crates/true-peak-limiter)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.17s
+     Running unittests src/lib.rs (/tmp/issue621-attempt1-gates-target/debug/deps/true_peak_limiter-959b445e4a84b0cb)
+     Running tests/allocation.rs (/tmp/issue621-attempt1-gates-target/debug/deps/allocation-0ad58cfb2eaf5f6e)
+     Running tests/bench.rs (/tmp/issue621-attempt1-gates-target/debug/deps/bench-ff2e1a03e4ff6961)
+     Running tests/conformance.rs (/tmp/issue621-attempt1-gates-target/debug/deps/conformance-eaf514ffd18738fd)
+     Running tests/determinism.rs (/tmp/issue621-attempt1-gates-target/debug/deps/determinism-cbeee84a72bbab11)
+     Running tests/gain_law.rs (/tmp/issue621-attempt1-gates-target/debug/deps/gain_law-29f96a71de4ba4fe)
+     Running tests/mono_collapse.rs (/tmp/issue621-attempt1-gates-target/debug/deps/mono_collapse-cf9b3f67da6dd2b1)
+     Running tests/observation.rs (/tmp/issue621-attempt1-gates-target/debug/deps/observation-76aba0dd2811e480)
+   Doc-tests true_peak_limiter

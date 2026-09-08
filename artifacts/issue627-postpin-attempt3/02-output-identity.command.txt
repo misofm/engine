@@ -1,0 +1,1 @@
+compare basename census and SHA-256 values with /tmp/issue627-qualified-output

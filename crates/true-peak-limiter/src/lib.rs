@@ -1750,17 +1750,16 @@ fn limiter_block_runtime_oracle<L: Lane>(
 fn detector_chunk<L: Lane>(
     taps: &mut History<L>,
     io: &[f32],
-    chunk: usize,
-    span: usize,
     fir: &[[L; 4]; HISTORY_WORDS],
-    peaks: &mut [f32; DETECTOR_CHUNK * MAXIMUM_WIDTH],
+    peaks: &mut [f32],
 ) {
     let width = L::WIDTH;
+    debug_assert_eq!(io.len(), peaks.len());
+    debug_assert_eq!(io.len() % width, 0);
     let mut history = *taps;
-    for frame in 0..span {
-        let base = (chunk + frame) * width;
-        let x = L::load(&io[base..]);
-        detector_peak(&mut history, x, fir).store(&mut peaks[frame * width..]);
+    for (input, output) in io.chunks_exact(width).zip(peaks.chunks_exact_mut(width)) {
+        let x = L::load(input);
+        detector_peak(&mut history, x, fir).store(output);
     }
     *taps = history;
 }
@@ -1814,21 +1813,19 @@ fn limiter_block_per_lane<const DISPATCH: u8, L: Lane>(
     // single-pass form (the E12 digests are the proof).
     for chunk in (0..frames).step_by(DETECTOR_CHUNK) {
         let span = core::cmp::min(DETECTOR_CHUNK, frames - chunk);
+        let active_base = chunk * width;
+        let active_words = span * width;
         detector_chunk::<L>(
             &mut hot_left.history,
-            left_io,
-            chunk,
-            span,
+            &left_io[active_base..active_base + active_words],
             &coef.fir,
-            &mut peaks_left,
+            &mut peaks_left[..active_words],
         );
         detector_chunk::<L>(
             &mut hot_right.history,
-            right_io,
-            chunk,
-            span,
+            &right_io[active_base..active_base + active_words],
             &coef.fir,
-            &mut peaks_right,
+            &mut peaks_right[..active_words],
         );
 
         for frame in 0..span {
@@ -1968,21 +1965,19 @@ fn limiter_block_uniform<const DISPATCH: u8, L: Lane>(
         // channel's twelve history words are live at a time.
         for chunk in (0..frames).step_by(DETECTOR_CHUNK) {
             let span = core::cmp::min(DETECTOR_CHUNK, frames - chunk);
+            let active_base = chunk * width;
+            let active_words = span * width;
             detector_chunk::<L>(
                 &mut hot_left.history,
-                left_io,
-                chunk,
-                span,
+                &left_io[active_base..active_base + active_words],
                 &coef.fir,
-                &mut peaks_left,
+                &mut peaks_left[..active_words],
             );
             detector_chunk::<L>(
                 &mut hot_right.history,
-                right_io,
-                chunk,
-                span,
+                &right_io[active_base..active_base + active_words],
                 &coef.fir,
-                &mut peaks_right,
+                &mut peaks_right[..active_words],
             );
 
             let mut frame = 0;
@@ -3263,13 +3258,13 @@ fn limiter_block_per_lane_mono<const DISPATCH: u8, L: Lane>(
 
     for chunk in (0..frames).step_by(DETECTOR_CHUNK) {
         let span = core::cmp::min(DETECTOR_CHUNK, frames - chunk);
+        let active_base = chunk * width;
+        let active_words = span * width;
         detector_chunk::<L>(
             &mut hot_left.history,
-            left_io,
-            chunk,
-            span,
+            &left_io[active_base..active_base + active_words],
             &coef.fir,
-            &mut peaks_left,
+            &mut peaks_left[..active_words],
         );
 
         for frame in 0..span {
@@ -3347,13 +3342,13 @@ fn limiter_block_uniform_mono<const DISPATCH: u8, L: Lane>(
 
         for chunk in (0..frames).step_by(DETECTOR_CHUNK) {
             let span = core::cmp::min(DETECTOR_CHUNK, frames - chunk);
+            let active_base = chunk * width;
+            let active_words = span * width;
             detector_chunk::<L>(
                 &mut hot_left.history,
-                left_io,
-                chunk,
-                span,
+                &left_io[active_base..active_base + active_words],
                 &coef.fir,
-                &mut peaks_left,
+                &mut peaks_left[..active_words],
             );
 
             let mut frame = 0;
@@ -3737,6 +3732,189 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The pre-change frame-at-a-time detector shape, retained only as a private test oracle.
+    /// Keeping the full input and absolute chunk offset here makes a wrong active window produce
+    /// a different result instead of letting the candidate compare against its own slice.
+    fn detector_chunk_old_shape<L: Lane>(
+        taps: &mut History<L>,
+        io: &[f32],
+        chunk: usize,
+        span: usize,
+        fir: &[[L; 4]; HISTORY_WORDS],
+        peaks: &mut [f32; DETECTOR_CHUNK * MAXIMUM_WIDTH],
+    ) {
+        let width = L::WIDTH;
+        let mut history = *taps;
+        for frame in 0..span {
+            let base = (chunk + frame) * width;
+            let x = L::load(&io[base..]);
+            detector_peak(&mut history, x, fir).store(&mut peaks[frame * width..]);
+        }
+        *taps = history;
+    }
+
+    fn detector_history_bits<L: Lane>(history: &History<L>) -> Vec<u32> {
+        let words = [
+            history.t0,
+            history.t1,
+            history.t2,
+            history.t3,
+            history.t4,
+            history.t5,
+            history.t6,
+            history.t7,
+            history.t8,
+            history.t9,
+            history.t10,
+            history.t11,
+        ];
+        let mut bits = Vec::with_capacity(HISTORY_WORDS * L::WIDTH);
+        for word in words {
+            let mut lanes = [0.0_f32; MAXIMUM_WIDTH];
+            word.store(&mut lanes);
+            bits.extend(lanes[..L::WIDTH].iter().map(|value| value.to_bits()));
+        }
+        bits
+    }
+
+    fn detector_peak_bits(values: &[f32]) -> Vec<u32> {
+        values.iter().map(|value| value.to_bits()).collect()
+    }
+
+    fn detector_history_seed<L: Lane>() -> History<L> {
+        let word = |tap: usize| {
+            let lanes: [f32; MAXIMUM_WIDTH] =
+                core::array::from_fn(|lane| (tap * MAXIMUM_WIDTH + lane + 1) as f32 * 0.03125);
+            L::load(&lanes)
+        };
+        History {
+            t0: word(0),
+            t1: word(1),
+            t2: word(2),
+            t3: word(3),
+            t4: word(4),
+            t5: word(5),
+            t6: word(6),
+            t7: word(7),
+            t8: word(8),
+            t9: word(9),
+            t10: word(10),
+            t11: word(11),
+        }
+    }
+
+    /// The candidate must match the old shape for an offset full chunk and an offset short tail.
+    /// The sentinel proves that only the active peak prefix is written; the shifted-window arm is
+    /// a wrong-result control for both the peak prefix and all twelve history words.
+    fn detector_chunk_active_window_matches_old_shape<L: Lane>() {
+        const TOTAL_FRAMES: usize = 64;
+        const CHUNK_OFFSET: usize = 5;
+        const SHORT_OFFSET: usize = DETECTOR_CHUNK + 3;
+        const SHORT_SPAN: usize = 7;
+        const SENTINEL: f32 = -12_345.25;
+
+        let coefficients = LimiterCoef::<L>::new(false, false);
+        let mut noise = Noise(0x6210_6100 ^ L::WIDTH as u64);
+        let input: Vec<f32> = (0..TOTAL_FRAMES * L::WIDTH)
+            .map(|_| noise.next() * 0.75)
+            .collect();
+
+        for (chunk, span) in [(CHUNK_OFFSET, DETECTOR_CHUNK), (SHORT_OFFSET, SHORT_SPAN)] {
+            let words = span * L::WIDTH;
+            let mut candidate_history = detector_history_seed::<L>();
+            let mut oracle_history = candidate_history;
+            let mut candidate_peaks = vec![SENTINEL; DETECTOR_CHUNK * MAXIMUM_WIDTH];
+            let mut oracle_peaks = [SENTINEL; DETECTOR_CHUNK * MAXIMUM_WIDTH];
+            let active_base = chunk * L::WIDTH;
+
+            detector_chunk::<L>(
+                &mut candidate_history,
+                &input[active_base..active_base + words],
+                &coefficients.fir,
+                &mut candidate_peaks[..words],
+            );
+            detector_chunk_old_shape::<L>(
+                &mut oracle_history,
+                &input,
+                chunk,
+                span,
+                &coefficients.fir,
+                &mut oracle_peaks,
+            );
+
+            assert_eq!(
+                detector_peak_bits(&candidate_peaks[..words]),
+                detector_peak_bits(&oracle_peaks[..words]),
+                "active peak prefix for width {} chunk {chunk} span {span}",
+                L::WIDTH
+            );
+            assert_eq!(
+                detector_history_bits(&candidate_history),
+                detector_history_bits(&oracle_history),
+                "all twelve history words for width {} chunk {chunk} span {span}",
+                L::WIDTH
+            );
+            assert!(
+                candidate_peaks[..words]
+                    .iter()
+                    .all(|value| value.to_bits() != SENTINEL.to_bits()),
+                "active peak prefix was not populated for width {} chunk {chunk} span {span}",
+                L::WIDTH
+            );
+            assert!(
+                candidate_peaks[words..]
+                    .iter()
+                    .all(|value| value.to_bits() == SENTINEL.to_bits()),
+                "candidate wrote beyond active peak prefix for width {} chunk {chunk} span {span}",
+                L::WIDTH
+            );
+            assert!(
+                oracle_peaks[words..]
+                    .iter()
+                    .all(|value| value.to_bits() == SENTINEL.to_bits()),
+                "oracle wrote beyond active peak prefix for width {} chunk {chunk} span {span}",
+                L::WIDTH
+            );
+
+            let wrong_base = (chunk + 1) * L::WIDTH;
+            let mut wrong_history = detector_history_seed::<L>();
+            let mut wrong_peaks = vec![SENTINEL; DETECTOR_CHUNK * MAXIMUM_WIDTH];
+            detector_chunk::<L>(
+                &mut wrong_history,
+                &input[wrong_base..wrong_base + words],
+                &coefficients.fir,
+                &mut wrong_peaks[..words],
+            );
+            assert_ne!(
+                detector_peak_bits(&candidate_peaks[..words]),
+                detector_peak_bits(&wrong_peaks[..words]),
+                "shifted active input must change peak prefix for width {} chunk {chunk} span {span}",
+                L::WIDTH
+            );
+            assert_ne!(
+                detector_history_bits(&candidate_history),
+                detector_history_bits(&wrong_history),
+                "shifted active input must change history for width {} chunk {chunk} span {span}",
+                L::WIDTH
+            );
+        }
+    }
+
+    #[test]
+    fn detector_chunk_active_window_matches_old_shape_scalar() {
+        detector_chunk_active_window_matches_old_shape::<f32>();
+    }
+
+    #[test]
+    fn detector_chunk_active_window_matches_old_shape_w4() {
+        detector_chunk_active_window_matches_old_shape::<Simd4>();
+    }
+
+    #[test]
+    fn detector_chunk_active_window_matches_old_shape_w8() {
+        detector_chunk_active_window_matches_old_shape::<Simd8>();
     }
 
     /// E3: the declared latency, the guarded ceiling and the bypass bits (contract, unchanged).
