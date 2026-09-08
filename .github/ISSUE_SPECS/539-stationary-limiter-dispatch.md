@@ -305,3 +305,20 @@ determinism ran in debug, and 139 cases/349 comparisons belongs specifically to 
 Wasm-gate legs rather than the limiter-suite output. Source and test results are unchanged. Lane-B
 ordinary six-file artifact qualification may begin; drift still requires the separately recorded
 decision before any pin or consumer update.
+
+## Lane-B ordinary artifact probe: drift
+
+At frozen clean pushed head `e8d1f2461f07806df307dcdc138f7e26edf07361`, Astra LOW acting
+for lane B ran exactly one ordinary no-bypass `scripts/build-web-audioworklet.sh` invocation.
+Compilation succeeded, then the builder correctly exited 1 before publishing files because the
+observed simd128 Wasm SHA-256 `7e242eb8f283bcba2ef5778cd430950fee7df92ef66b6ddaaf2a0a68e5bc7409`
+differs from delivered pin `39ebe7cd3f71f34ab11260f27fa1eaad281dd61642c50d9ed6210e703d95dd55`.
+The scratch output census is zero because the builder checks the pin before copies and removes its
+temporary module on exit.
+
+The exact command, full streams, status, input identities, delivered manifest and checksum-verified
+decision are preserved under `artifacts/issue539-artifact-qualification/`. No retry, repin, browser
+run, benchmark, timing/capture, source, workflow, consumer or pin change occurred. Retained-artifact
+PASS does not apply. A separately numbered lane-B artifact decision must qualify one scratch
+candidate through the existing static/resource/hermetic/SDK/three-browser gates before any pin or
+consumer update and before #539 can enter PR delivery.
