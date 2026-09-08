@@ -98,3 +98,10 @@ its exact attempt-2 test authorization but Luna may not edit or run remaining
 gates while queued. After #635 delivery releases its slot, create the separately
 numbered graph-compiler release-collision tooling issue required above, synchronize
 the two-slot ownership, and only then resume #636 attempt 2.
+
+#635 and #638 are delivered and closed after successful post-main qualification
+`34253818700`. Tooling peer #641 is open from main `e6b2f154` and owns the frozen
+unqualified-versus-explicit-native release integration probes. #636 again occupies
+one active slot beside #641, but its attempt-2 edit and remaining gates stay paused
+until #641 records an Astra-reviewed command disposition. No release command may
+run from this worktree in the meantime.
