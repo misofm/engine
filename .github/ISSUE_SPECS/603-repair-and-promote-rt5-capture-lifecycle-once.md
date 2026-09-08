@@ -148,3 +148,15 @@ prefix cases are absent. `docs/audits/603-attempt1-review.md` records the exact 
 One bounded correction is authorized solely within the four scripts and focused issue-603
 qualification evidence. Final preflight, the real capture entry, and timing remain unauthorized. If
 a substantive runner defect remains after this correction, stop and split repair/promotion again.
+
+## Bounded-correction verdict
+
+The sole correction is preserved at `3a7fa0c6edb516b722949b0238de56b5a45ecaf9`. Astra LOW returned
+**FAIL**: build isolation still omits build-affecting variables; the accepted-publication fault
+bypasses the production link; failure exit statuses are not asserted; required duplicate-round,
+nonfinite, and record/seal identity mutations remain absent; and the claimed failed-publication
+scratch retention is contradicted by the EXIT trap. The detailed review is
+`docs/audits/603-correction-review.md`.
+
+#603 stops without preflight or capture. Its reusable corrections remain pushed, while remaining
+repair and promotion move to another numbered successor.
