@@ -25,3 +25,12 @@ No vocabulary row, checker, capture script, validator, runner, Rust source, fixt
 The accepted capture stays anchored to source commit `3b632cdb68105e2023b08ac90b4e2baa99bafa53`, raw/accepted SHA-256 `59257eb092f197b616cbaa20ec713ed8b4e10446c29941e8a1d7d23c96db89ca`, and descriptive results 7,226/7,219 ns per plan render. No build, preflight, prepared executable, runner, capture, retry, resume, or timing is authorized.
 
 One Luna XHIGH implementation pass and no correction are authorized. Any substantive defect stops and splits again. No original open #559 finding may start until this successor and lane B's remaining partials are delivered.
+
+## Astra LOW scope review
+
+Astra LOW returned **PASS** at exact clean pushed brief
+`9f3898e24319e4e7e1704d16687d32ac0b10ab09`, with synchronized #559/#560/#608 and disjoint active
+#608/#611 ownership. The reviewer confirmed 134 unique vocabulary rows and that changing only the
+two `COUNT`/`COUNT_TR` payloads preserves fault injection, diagnostics, statuses, partial-output
+checks, and counter-mutants. Luna XHIGH may perform the sole two-literal correction. All inherited
+capture bytes and identities remain frozen; no workload execution is authorized.
