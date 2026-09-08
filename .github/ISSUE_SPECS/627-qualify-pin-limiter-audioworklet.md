@@ -50,3 +50,20 @@ Root checkpoints the exact promotion before further work. Run one ordinary no-by
 Open one PR only after Astra LOW exact-head/current-main PASS. Require repository `qualification`, verify live main immediately before a guarded exact-head merge, verify exact merge parents and post-main qualification, synchronize and close this successor and #621, update #559/#560, and remove clean delivered and detached worktrees while retaining branches/history/evidence.
 
 One applicability probe and, conditionally, one scratch qualification plus one Luna promotion attempt are initially authorized only after their preceding Astra LOW PASS. A candidate mismatch beyond the expected Wasm digest, substantive gate failure, or tooling defect stops for reviewed rescope; do not rerun builds or browsers to obtain a green result. The repository three-attempt rule remains binding.
+
+## Astra LOW scope review — PASS
+
+Astra LOW passed exact clean pushed brief
+`8961928817faf566084850285c8d4438cfda2695` against live main and merge-base
+`30680709c58f0be99e09d006d8d661c1ce96324d`, with synchronized tracker
+`454e621f832affa4239ea89508b97adc088864a3`. Local/GitHub #621/#627 and #559/#560
+records match. Frozen source ancestry, limiter SHA-256, delivered #623 pin and
+lineage, the two-slot ownership split, one-shot failure stops, conditional
+static/resource/SDK/three-browser gates, exact three-file promotion boundary,
+post-pin proof, compact evidence and delivery controls all pass. Diff hygiene
+passes, and only this spec was added after frozen parent `dc14ca85`.
+
+Exactly one ordinary no-bypass applicability build is authorized from frozen
+`dc14ca856e10cb5ad7f6fdacb0ea9322342a9251`, with complete evidence and no
+retry. A pin mismatch requires a separate Astra LOW review before scratch
+qualification. Promotion, PR, and merge remain unauthorized.
