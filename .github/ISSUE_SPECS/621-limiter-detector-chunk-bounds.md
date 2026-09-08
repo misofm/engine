@@ -96,3 +96,21 @@ explicitly releases that dependency, so lane B may begin the already scoped
 separately numbered AudioWorklet artifact successor waits until #625 delivers
 and releases lane B. No artifact probe, build or qualification is authorized
 before that successor receives Astra LOW scope PASS.
+
+### 2026-09-08 — Astra LOW post-#625 integration PASS
+
+Astra LOW passed exact clean pushed integration head
+`77e9c7d7536916f045a8aa9c66aea86b5c2fe0c2`. Its parents are synchronized #621
+head `d727f7e51794d031c6e9ef5e0fd5716938fa46ac` first and delivered main
+`30680709c58f0be99e09d006d8d661c1ce96324d` second. The two histories are
+disjoint and match their owning parents byte-for-byte: #621 compact evidence is
+unchanged, while the #625 deletions, policy and historical metadata come exactly
+from main. No artifact pin, lineage or source drift occurred.
+
+The limiter source remains frozen at SHA-256
+`32ab4abf975b32d47c85a748e617e74c9547b22e1b585f0d36713be439a62908`.
+Diff hygiene and workspace policy pass; #625 post-main qualification
+`34228247143` succeeded and that issue is closed/synchronized. Root may now
+brief the separately numbered lane-B AudioWorklet applicability/qualification
+successor in the free second slot. No artifact execution is authorized before
+that issue receives Astra LOW scope PASS.
