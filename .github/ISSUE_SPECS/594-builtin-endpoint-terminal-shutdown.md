@@ -195,3 +195,14 @@ post-ack/pre-classification rendezvous and fifth mutation discriminate the race.
 preallocated resource charging, realtime behavior, terminal reconciliation, fault retention,
 teardown, closure disposition, and lane-B disjointness are approved. Luna HIGH/XHIGH attempt 1 may
 begin.
+
+## Attempt 1 review
+
+Luna HIGH source checkpoint `111c2b0e` received Astra LOW **FAIL** with two implementation attempts
+remaining. The draft's four-state structure is usable, but it treats the legal pending-intent before
+generic-message window as sticky Fault and lets shutdown overwrite a cached, not-yet-finalized
+ordinary endpoint completion. Required deterministic race/rollback, combined ownership, sticky-fault,
+paired bank/forced-scalar state and PCM, shutdown realtime/lifetime/resource, and five restored
+mutation gates are missing. Independent debug integration 16/16, endpoint unit 6/6, strict Clippy,
+formatting, and diff checks passed; release was not claimed. Full verdict:
+`docs/audits/594-attempt1-review.md`.
