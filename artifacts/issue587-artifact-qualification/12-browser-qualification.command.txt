@@ -1,0 +1,1 @@
+npm --prefix hosts/host-web/qualification run qualify -- --artifacts /tmp/issue587-artifact-ab3766ca --record-matrix --candidate-commit ab3766caef34bcb035d7394224b0ccff1ea0be2d --self-test-mutations

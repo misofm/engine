@@ -18,9 +18,10 @@ use protocol::{
 };
 
 use crate::diagnostics::PrepareDiagnostics;
-#[cfg(not(test))]
-use crate::prepare::prepare_host_runtime_with_console;
-use crate::prepare::{HostConsoleRequest, HostPrepareCaps, HostPrepareReport, PreparedHost};
+use crate::prepare::{
+    HostConsoleRequest, HostPrepareCaps, HostPrepareReport, PreparedHost,
+    prepare_host_runtime_between_render_calls_with_backend,
+};
 use crate::render_session::StartedRenderSession;
 use crate::source::SourceControlSet;
 #[cfg(test)]
@@ -796,13 +797,32 @@ fn prepare_builtin_batch_endpoint_for_test(
     ticket_capacity: NonZeroUsize,
     backend: Backend,
 ) -> Result<PreparedBuiltinBatchEndpoint, BuiltinBatchPrepareError> {
-    prepare_builtin_batch_endpoint_with_backend(
+    prepare_builtin_batch_endpoint_for_test_with_meters(
         compiled,
         caps,
         revision,
         ticket_capacity,
         backend,
         true,
+    )
+}
+
+#[cfg(test)]
+fn prepare_builtin_batch_endpoint_for_test_with_meters(
+    compiled: &session::CompiledSession,
+    caps: &HostPrepareCaps,
+    revision: SessionRevision,
+    ticket_capacity: NonZeroUsize,
+    backend: Backend,
+    test_meters: bool,
+) -> Result<PreparedBuiltinBatchEndpoint, BuiltinBatchPrepareError> {
+    prepare_builtin_batch_endpoint_with_backend(
+        compiled,
+        caps,
+        revision,
+        ticket_capacity,
+        backend,
+        test_meters,
     )
 }
 
@@ -858,16 +878,9 @@ fn prepare_builtin_batch_endpoint_with_backend(
     } else {
         console
     };
-    #[cfg(test)]
-    let host_result = crate::prepare::prepare_host_runtime_with_console_backend(
-        compiled, caps, &console, backend,
-    );
-    #[cfg(not(test))]
-    let host_result = {
-        let _ = backend;
-        let _ = test_meters;
-        prepare_host_runtime_with_console(compiled, caps, &console)
-    };
+    let _ = test_meters;
+    let host_result =
+        prepare_host_runtime_between_render_calls_with_backend(compiled, caps, &console, backend);
     let (host, handles) = host_result.map_err(BuiltinBatchPrepareError::Host)?;
     let host_report = host.report;
     let queues = prepare_endpoint_queues(ticket_capacity, delivery_report, outcome_report)?;
@@ -1397,6 +1410,321 @@ mod tests {
         scalar_control
             .collect(scalar_ticket)
             .expect("scalar collect");
+    }
+
+    #[test]
+    fn endpoint_selects_existing_pair_factories_without_observer_barriers() {
+        use builtins::{BuiltinLaneSelector, Matrix2x2};
+        use builtins_compiler::{
+            TestOnlyScalarStateTrace, test_only_fader_matrix_witness,
+            test_only_reset_fader_matrix_witness, test_only_scalar_state_trace,
+        };
+
+        let document = include_str!("../../../fixtures/session/v1/observation-frame-shape.json");
+        let compiled = crate::compile_host_session(document, &caps()).expect("compile fixture");
+        let console = HostConsoleRequest {
+            control_queue_depth: Some(NonZeroUsize::new(BUILTIN_BATCH_MAX_RECORDS).unwrap()),
+            ..HostConsoleRequest::default()
+        };
+        let matrix_a = Matrix2x2 {
+            ll: 0.5,
+            lr: 0.25,
+            rl: -0.25,
+            rr: 0.75,
+        };
+        let matrix_b = Matrix2x2 {
+            ll: 0.75,
+            lr: -0.125,
+            rl: 0.125,
+            rr: 0.5,
+        };
+        let matrix_c = Matrix2x2 {
+            ll: 0.25,
+            lr: 0.375,
+            rl: -0.375,
+            rr: 0.875,
+        };
+        let schedule = [
+            [
+                BuiltinBatchRecord::Fader {
+                    track_index: 2,
+                    record: TrackFaderRecord::FaderDb {
+                        lanes: BuiltinLaneSelector::Both,
+                        db: -6.0,
+                        smoothing_samples: 0,
+                    },
+                },
+                BuiltinBatchRecord::Matrix {
+                    track_index: 2,
+                    record: TrackControlRecord {
+                        matrix: matrix_a,
+                        smoothing_samples: 0,
+                    },
+                },
+            ],
+            [
+                BuiltinBatchRecord::Fader {
+                    track_index: 2,
+                    record: TrackFaderRecord::FaderDb {
+                        lanes: BuiltinLaneSelector::Both,
+                        db: -18.0,
+                        smoothing_samples: 256,
+                    },
+                },
+                BuiltinBatchRecord::Matrix {
+                    track_index: 2,
+                    record: TrackControlRecord {
+                        matrix: matrix_b,
+                        smoothing_samples: 256,
+                    },
+                },
+            ],
+            [
+                BuiltinBatchRecord::Fader {
+                    track_index: 2,
+                    record: TrackFaderRecord::FaderDb {
+                        lanes: BuiltinLaneSelector::Both,
+                        db: -3.0,
+                        smoothing_samples: 128,
+                    },
+                },
+                BuiltinBatchRecord::Matrix {
+                    track_index: 2,
+                    record: TrackControlRecord {
+                        matrix: matrix_c,
+                        smoothing_samples: 128,
+                    },
+                },
+            ],
+            [
+                BuiltinBatchRecord::Fader {
+                    track_index: 2,
+                    record: TrackFaderRecord::FaderDb {
+                        lanes: BuiltinLaneSelector::Both,
+                        db: -3.0,
+                        smoothing_samples: 0,
+                    },
+                },
+                BuiltinBatchRecord::Matrix {
+                    track_index: 2,
+                    record: TrackControlRecord {
+                        matrix: matrix_c,
+                        smoothing_samples: 0,
+                    },
+                },
+            ],
+            [
+                BuiltinBatchRecord::Fader {
+                    track_index: 2,
+                    record: TrackFaderRecord::Mute {
+                        lanes: BuiltinLaneSelector::Both,
+                        muted: true,
+                        smoothing_samples: 128,
+                    },
+                },
+                BuiltinBatchRecord::Matrix {
+                    track_index: 2,
+                    record: TrackControlRecord {
+                        matrix: matrix_c,
+                        smoothing_samples: 128,
+                    },
+                },
+            ],
+            [
+                BuiltinBatchRecord::Fader {
+                    track_index: 2,
+                    record: TrackFaderRecord::Mute {
+                        lanes: BuiltinLaneSelector::Both,
+                        muted: false,
+                        smoothing_samples: 0,
+                    },
+                },
+                BuiltinBatchRecord::Matrix {
+                    track_index: 2,
+                    record: TrackControlRecord {
+                        matrix: matrix_c,
+                        smoothing_samples: 0,
+                    },
+                },
+            ],
+        ];
+        let run = |backend| {
+            let (host, mut handles) = crate::prepare::prepare_host_runtime_with_console_backend(
+                &compiled,
+                &caps(),
+                &console,
+                backend,
+            )
+            .expect("prepare reference");
+            let (mut reference, mut reference_sources, _) =
+                host.start_render_session().expect("reference start");
+            test_only_reset_fader_matrix_witness();
+            let endpoint = if backend == Backend::current() {
+                prepare_builtin_batch_endpoint(
+                    &compiled,
+                    &caps(),
+                    SessionRevision(42),
+                    NonZeroUsize::new(2).unwrap(),
+                )
+            } else {
+                prepare_builtin_batch_endpoint_for_test_with_meters(
+                    &compiled,
+                    &caps(),
+                    SessionRevision(42),
+                    NonZeroUsize::new(2).unwrap(),
+                    backend,
+                    false,
+                )
+            }
+            .expect("endpoint prepare");
+            let (mut control, mut render, _) = endpoint
+                .start()
+                .unwrap_or_else(|_| panic!("endpoint start"));
+            let selection = test_only_fader_matrix_witness();
+            assert!(
+                selection.factory_calls > 0,
+                "pair factory was not selected for {backend:?}: {selection:?}"
+            );
+            assert!(
+                selection.factory_members > 0,
+                "pair factory selected no members for {backend:?}: {selection:?}"
+            );
+            let source_left = [0.25_f32; 128];
+            let source_right = [-0.5_f32; 128];
+            for (block, records) in schedule.iter().enumerate() {
+                let submission = crate::SourceSubmission {
+                    generation: 1,
+                    start_frame: (block as u64) * 128,
+                    sample_rate_hz: 48_000,
+                    planes: &[&source_left, &source_right],
+                    frames: 128,
+                    end_of_region: false,
+                };
+                reference_sources
+                    .submit(b"fixture-source", submission)
+                    .expect("reference source");
+                control
+                    .sources()
+                    .submit(b"fixture-source", submission)
+                    .expect("endpoint source");
+                for record in records {
+                    match *record {
+                        BuiltinBatchRecord::Fader {
+                            track_index,
+                            record,
+                        } => handles.track_controls[track_index as usize]
+                            .fader
+                            .try_push(record)
+                            .expect("reference fader"),
+                        BuiltinBatchRecord::Matrix {
+                            track_index,
+                            record,
+                        } => handles.track_controls[track_index as usize]
+                            .producer
+                            .try_push(record)
+                            .expect("reference matrix"),
+                    }
+                }
+                let batch = BuiltinBatch::new(
+                    SessionRevision(42),
+                    SampleTime((block as u64) * 128),
+                    records,
+                )
+                .expect("batch");
+                let ticket = control.try_publish(batch).expect("ticket");
+                let mut reference_output = [0.0_f32; 256];
+                let mut endpoint_output = [0.0_f32; 256];
+                test_only_reset_fader_matrix_witness();
+                reference
+                    .render_planar(&mut reference_output, 2, 128, 128, (block as u64) * 128)
+                    .expect("reference render");
+                let reference_witness = test_only_fader_matrix_witness();
+                let reference_scalar_state = test_only_scalar_state_trace();
+                test_only_reset_fader_matrix_witness();
+                render
+                    .render(
+                        &mut endpoint_output,
+                        2,
+                        128,
+                        128,
+                        SampleTime((block as u64) * 128),
+                    )
+                    .expect("endpoint render");
+                let endpoint_witness = test_only_fader_matrix_witness();
+                let endpoint_scalar_state = test_only_scalar_state_trace();
+                let bits = |samples: &[f32]| {
+                    samples
+                        .iter()
+                        .map(|sample| sample.to_bits())
+                        .collect::<Vec<_>>()
+                };
+                assert_eq!(
+                    bits(&reference_output),
+                    bits(&endpoint_output),
+                    "PCM mismatch for {backend:?} block {block}"
+                );
+                assert_eq!(
+                    (
+                        reference_witness.fader_records_drained,
+                        reference_witness.matrix_records_drained,
+                    ),
+                    (1, 1),
+                    "reference record drains for {backend:?} block {block}"
+                );
+                assert_eq!(
+                    (
+                        endpoint_witness.fader_records_drained,
+                        endpoint_witness.matrix_records_drained,
+                    ),
+                    (1, 1),
+                    "endpoint record drains for {backend:?} block {block}"
+                );
+                if backend == Backend::Scalar {
+                    assert!(!reference_scalar_state.fader_overflow);
+                    assert!(!reference_scalar_state.matrix_overflow);
+                    assert!(!endpoint_scalar_state.fader_overflow);
+                    assert!(!endpoint_scalar_state.matrix_overflow);
+                    let last_state_for_owner = |trace: TestOnlyScalarStateTrace| {
+                        let fader = trace.fader_owners[..trace.fader_len]
+                            .iter()
+                            .rposition(|owner| *owner == 2)
+                            .map(|index| trace.fader_words[index])
+                            .expect("scalar fader state for t2");
+                        let matrix = trace.matrix_owners[..trace.matrix_len]
+                            .iter()
+                            .rposition(|owner| *owner == 2)
+                            .map(|index| trace.matrix_words[index])
+                            .expect("scalar matrix state for t2");
+                        (fader, matrix)
+                    };
+                    assert_eq!(
+                        last_state_for_owner(endpoint_scalar_state),
+                        last_state_for_owner(reference_scalar_state),
+                        "scalar state for {backend:?} block {block}"
+                    );
+                }
+                assert!(
+                    endpoint_witness.process_calls > 0,
+                    "pair was not processed for {backend:?} block {block}: {endpoint_witness:?}"
+                );
+                assert_eq!(
+                    endpoint_witness.process_members, selection.factory_members,
+                    "pair member accounting for {backend:?} block {block}"
+                );
+                assert_eq!(
+                    endpoint_witness.process_calls, selection.factory_calls,
+                    "pair process accounting for {backend:?} block {block}"
+                );
+                control.collect(ticket).expect("collect");
+                assert_eq!(control.outstanding(), 0);
+            }
+            (selection,)
+        };
+
+        let (bank_selection,) = run(Backend::current());
+        assert!(bank_selection.factory_calls > 0);
+        let (scalar_selection,) = run(Backend::Scalar);
+        assert!(scalar_selection.factory_calls > 0);
     }
 
     #[test]

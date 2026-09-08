@@ -531,14 +531,27 @@ pub fn prepare_host_runtime_between_render_calls(
     caps: &HostPrepareCaps,
     console: &HostConsoleRequest,
 ) -> Result<(PreparedHost, HostConsoleHandles), PrepareDiagnostics> {
-    prepare_host_runtime_with_console_policy(
+    prepare_host_runtime_between_render_calls_with_backend(
         compiled,
         caps,
         console,
-        None,
-        true,
         Backend::current(),
     )
+}
+
+/// Prepare the serialized builtin lowering for an internal endpoint owner.
+///
+/// The endpoint already owns the complete batch claim and injects it only at a render boundary, so
+/// it can select the existing [`BuiltinControlDelivery::BetweenRenderCalls`] lowering without
+/// widening the public concurrent preparation APIs. Production passes [`Backend::current`]; the
+/// test-only endpoint seam passes the scalar backend to compare the same lowering.
+pub(crate) fn prepare_host_runtime_between_render_calls_with_backend(
+    compiled: &CompiledSession,
+    caps: &HostPrepareCaps,
+    console: &HostConsoleRequest,
+    backend: Backend,
+) -> Result<(PreparedHost, HostConsoleHandles), PrepareDiagnostics> {
+    prepare_host_runtime_with_console_policy(compiled, caps, console, None, true, backend)
 }
 
 /// Prepare a serialized host with exactly the caller-selected meter observers.

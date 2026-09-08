@@ -1,0 +1,4 @@
+utc=2026-09-07T23:59:00Z
+cwd=/home/bl/misofm/engine-587-artifact-qualification
+head=ab3766caef34bcb035d7394224b0ccff1ea0be2d
+manifest=artifacts/issue587-artifact-qualification/sha256sums.txt
