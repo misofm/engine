@@ -276,6 +276,8 @@ jobs:
           rustup toolchain install 1.97.1 --profile minimal --component clippy --component rustfmt
           sudo apt-get update
           sudo apt-get install -y ripgrep
+      - name: Hydrate locked Cargo dependencies
+        run: cargo fetch --locked
       # fmt first: the fastest possible first failure.
       - name: Format
         run: cargo fmt --all -- --check
