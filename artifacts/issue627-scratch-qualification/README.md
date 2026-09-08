@@ -31,3 +31,11 @@ The scratch overlay for the completed qualification changes exactly the pin,
 Browser rows, versions, gates, and resource values are unchanged. No repository
 promotion is authorized. Astra LOW must rule on the candidate evidence and the
 procedural breach before further execution.
+
+The two full overlay diffs contain generated Markdown blank-table lines with
+trailing spaces. They are losslessly retained as deterministic gzip files so
+branch-wide diff hygiene does not reinterpret raw evidence bytes as authored
+patch errors. Reproduce either reviewed byte stream with `gzip -cd FILE.gz`.
+
+- `second-overlay.diff`: 2596 bytes, SHA-256 `db8485f00051ba90bc1c3ac5e625565454a6140c9278d1e5f9a20a81e2445241`
+- `final-overlay.diff`: 2596 bytes, SHA-256 `db8485f00051ba90bc1c3ac5e625565454a6140c9278d1e5f9a20a81e2445241`

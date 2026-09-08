@@ -171,3 +171,44 @@ are preserved together and distinguished in the evidence README; no action was
 hidden or rerun. Candidate PASS is not claimed. Astra LOW must rule on both the
 technical evidence and this procedural breach. Repository promotion and every
 further workload remain unauthorized.
+
+## Astra LOW scratch attempt 1 review — FAIL
+
+Astra LOW returned **FAIL** at exact clean pushed head
+`bd7f39e98398c3d3ae3d66ec9ad73a35ed307551`. Repository promotion is not
+authorized. The decisive breach is the later second scratch-builder invocation;
+identical output and concurrency do not satisfy the explicit exactly-one-build
+rule. Branch-wide diff hygiene also exited 2 on trailing spaces inside two raw
+overlay diff captures.
+
+The technical evidence remains useful: all 82 scratch and 16 probe checksums
+verify; numbered stages `00` through `10` succeeded; the six candidate hashes
+independently verify, including Wasm `63ef81c1…`; source/tree and the three-file
+scratch overlay match; results change only the two lineage fields; the resource
+gate reports all 26 red mutations; and Chromium 151.0.7922.34, Firefox 153.0,
+and WebKit 26.5 passed. No builder, gate, install, or browser rerun is authorized
+or needed to repair the procedural breach.
+
+Root losslessly packaged only `second-overlay.diff` and `final-overlay.diff` as
+deterministic gzip files. Their exact original byte counts and SHA-256 identities
+are recorded, decompression reproduces the reviewed bytes, and the evidence
+manifest is refreshed. This changes no qualification result or raw content.
+
+## Attempt 2 disposition scope — review required
+
+Attempt 1 remains failed and must never be relabeled. Attempt 2 is a bounded,
+no-execution disposition of the existing evidence. It may determine whether the
+first complete scratch sequence independently supplies acceptable product
+qualification despite the separately recorded unauthorized concurrent builder.
+The review must prove the first sequence began independently, owns the numbered
+`00`–`10` record and qualified output, and was not altered or selected based on
+the later builder. It must separately preserve and identify the duplicate's
+build-only record and identical hashes. No new or repeated build, gate, install,
+browser, output generation, pin edit, lineage edit, or promotion may occur.
+
+Astra LOW must PASS this corrected packaging and attempt-2 scope before Luna may
+perform any documentation-only evidence revision. A later Astra LOW attempt-2
+evidence PASS is separately required before the existing candidate can authorize
+the original exact three-file repository promotion. This rescope preserves the
+failed exactly-one gate as history; it does not claim attempt 1 passed or hide the
+concurrent invocation.

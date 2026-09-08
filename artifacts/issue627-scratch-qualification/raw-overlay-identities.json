@@ -1,0 +1,18 @@
+{
+  "files": [
+    {
+      "path": "second-overlay.diff",
+      "bytes": 2596,
+      "sha256": "db8485f00051ba90bc1c3ac5e625565454a6140c9278d1e5f9a20a81e2445241",
+      "archive": "second-overlay.diff.gz"
+    },
+    {
+      "path": "final-overlay.diff",
+      "bytes": 2596,
+      "sha256": "db8485f00051ba90bc1c3ac5e625565454a6140c9278d1e5f9a20a81e2445241",
+      "archive": "final-overlay.diff.gz"
+    }
+  ],
+  "gzip_mtime": 0,
+  "extract": "gzip -cd FILE.gz"
+}
