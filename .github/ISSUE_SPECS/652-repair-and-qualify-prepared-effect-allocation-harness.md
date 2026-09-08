@@ -1,0 +1,139 @@
+# Repair and qualify the prepared-effect allocation harness
+
+GitHub: https://github.com/misofm/engine/issues/652
+
+Parent: #560 CP1. Failed predecessor: #650. Product predecessor: #633. Coordination: #559. Candidate source checkpoint: `819c6ef6`. Product main: `4acfa4a1c25248e47bdd6bc14e34c9cb6ac43447`.
+
+#650 preserved a useful but invalid three-path allocation harness after exhausting its three implementation passes. No official measurement ran and #650 earned no product or allocation-reduction credit. This successor repairs that frozen source before any counted execution; it does not widen the allocator, compiler, dependency, benchmark, or production-source boundary.
+
+## Smallest closable slice
+
+Inherit and revise only:
+
+- `tools/audit/src/prepared_effect_allocations.rs`;
+- `tools/audit/src/main.rs` only if dispatcher behavior must be corrected;
+- `scripts/check-prepared-effect-allocation-records.py`;
+- this issue spec and the #559/#560 coordination records.
+
+Attempt 1 must make each compile request a fully prepared owned value before reading the starting counters. The counted interval begins immediately before `GraphCompiler::compile(request)` and ends with the counter read immediately after it returns. Identity must be computed from that measured result after the ending counter read, and the result must be dropped afterward. Fixture construction, session compilation, registries, effect preparation, identity serialization, diagnostics, record construction, formatting, output, and plan destruction remain outside the interval.
+
+Add a separate deterministic allocator positive control outside all official intervals. It must read a start mark, perform a non-elidable heap allocation, read the delta before drop, and assert positive allocation calls and requested bytes. It must not contribute to any emitted corpus counter.
+
+Freeze and structurally test these causal inputs before source review:
+
+1. `zero64`: 64 effect-free tracks with matching graph input and dispatch across variants.
+2. `crossed-small`: repeated effect IDs across tracks and racks, at least two entries whose prepared program identities are demonstrably distinct, and a deterministic nontrivial reversal of prepared-entry order. Its invalid twin and exact ordered diagnostic identity remain unmeasured.
+3. `banks64`: `Backend::current()` with a fixed multi-slot chain that produces at least one homogeneous bank cohort and fixed heterogeneous members/fallback. Tests assert the prepared order, program identities, cohort membership/counts, and relevant graph bank overlay rather than only track counts.
+
+The harness still accepts only `--variant candidate|counterfactual`, performs one warmup and two measured rounds, emits the existing strict JSONL schema, and takes no timing. Both measured rounds must agree exactly on all four counters. The validator keeps exact schema/key order/population, duplicate-key/type/range/trailing-data rejection, semantic and diagnostic equality, zero-control equality, prepared-corpus reductions, and synthetic mutation coverage without launching the audit subject.
+
+## Attempts and premeasurement gates
+
+Luna HIGH or XHIGH implements one coherent attempt. Stop on the first failed gate and return control to root; do not correct or rerun within that turn. Root checkpoints and pushes the exact source, then Astra LOW independently reviews the interval, allocator control, corpus assertions, actual measured-result identity, strict validator, exact heads, and retained gate evidence. No official candidate or counterfactual workload may run before source PASS.
+
+Use fresh absent `/tmp` paths for gate records and capture each command, cwd, full head, toolchain, stdout, stderr, and numeric status. Run these once in order, stopping on failure:
+
+```text
+cargo test --locked -p audit prepared_effect_allocations -- --test-threads=1
+python3 -B scripts/check-prepared-effect-allocation-records.py --self-test
+cargo test --locked -p audit
+cargo build --locked -p audit
+cargo clippy --locked -p audit --all-targets -- -D warnings
+cargo fmt --all --check
+git diff --check
+bash scripts/check-workspace-policy.sh
+bash scripts/check-bench-policy.sh
+```
+
+After source PASS, amend this spec with Astra-reviewed exact measurement commands, environment, heads, hashes, fresh paths, and matched-counterfactual procedure inherited from #650. The counterfactual restores only `crates/graph-compiler/src/compile.rs`, `ids.rs`, and `banks.rs` from `d98646db47bc603c32431d999cd08f43a0168043` into a detached worktree at the exact pushed harness checkpoint. Stop if those three restored files do not compile without edits.
+
+Run each release variant once with one internal warmup and two measured rounds; preserve full temporary streams only through review. PASS requires status 0, exact population, exact two-round determinism, cross-variant graph and diagnostic identity, equality of all four `zero64` counters, fewer candidate allocation calls and requested bytes in both prepared corpora, positive crossed-small savings, and more saved allocation calls in `banks64` than crossed-small. Report exact counts and deltas only. Commit no `.ll`, assembly, compiler stream, target directory, object, archive, binary, or raw measurement output.
+
+Astra LOW must pass measurement evidence and the compact decision record before PR review, required CI, guarded merge, post-main qualification, GitHub synchronization, closure, and clean worktree removal. This successor can close only the allocation qualification for #648's prepared-effect handoff; CP1's schedule, PDC, cycle, reduction, and buffer identities remain open.
+
+## Astra LOW implementation-scope review — PASS
+
+Astra passed exact clean branch/upstream head
+`641a6dc57077e3cd7df1ea1241e353727ef8db47`, live main
+`4acfa4a1c25248e47bdd6bc14e34c9cb6ac43447`, inherited failed source
+`819c6ef6`, and synchronized tracker `996d24e0`. GitHub #652 matches this issue;
+#650 is closed, and #651/#652 are the two disjoint active slots.
+
+One root-designated Luna HIGH or XHIGH executor may perform implementation attempt
+1 in `prepared_effect_allocations.rs`, the dispatcher only if necessary, and the
+strict validator. Structural tests must prove actual prepared program identities
+and bank membership rather than labels or counts. The executor runs the listed
+gates once with fresh retained command/status evidence and stops on the first
+failure without correction or rerun. Root checkpoints and pushes before a fresh
+Astra source review. No official count, counterfactual, production, allocator,
+dependency, timing, or compiler-payload action is authorized.
+
+## Attempt 1 source gate — FAIL; attempt 2 bounded
+
+Luna HIGH changed only `prepared_effect_allocations.rs`, created fresh retained
+evidence under `/tmp/issue652-attempt1-source-evidence`, and stopped correctly when
+the first focused Rust gate returned 101 at authorized head `35d89e90`. The source
+compared session quality values with `effect_contract::EffectQuality` and used
+`Result::expect` where `GraphCompileFailure` has no `Debug` implementation. No later
+gate, audit-subject invocation, counterfactual, or measurement ran.
+
+Astra LOW returned attempt 1 **FAIL** and found additional structural corrections
+needed. The heterogeneous entry must be located by exact `track-63`/rack/slot
+identity because lexicographic prepared-entry ordering does not put numeric track
+63 last. Bank tests must assert exact homogeneous groups, bound-slot associations,
+scalar members, and the deliberately heterogeneous member. `crossed-small` must
+repeat slot IDs across both tracks and racks and assert its exact reversed prepared
+identity sequence. A focused positive-control test must exercise the asserted
+allocator delta without invoking official rounds. Astra found the repaired compile
+boundary, separately counted allocator control, and measured-result identity design
+substantively sound.
+
+Attempt 2 may correct only those defects within the existing three source paths,
+preserving attempt-1 records unchanged. Run the full premeasurement gate sequence
+once in order and stop on the first failure without correction or rerun. No official
+measurement or counterfactual is authorized before a pushed source checkpoint and
+fresh Astra PASS.
+
+## Attempt 2 source gate — FAIL; final attempt 3 bounded
+
+Luna HIGH preserved attempt-1 evidence, changed only the audit subject, and stopped
+correctly when focused gate 1 returned 101 at exact base `e0eda053`. Three focused
+tests passed. Both structural corpus tests failed because the conformance delay
+factory rejects Draft quality during preparation. No later gate, audit-subject
+invocation, counterfactual, or measurement ran; complete attempt-2 command/status
+streams remain temporary under `/tmp/issue652-attempt2-source-evidence`.
+
+Astra LOW returned attempt 2 **FAIL** and authorized final attempt 3. Replace Draft
+with the supported bypass dimension and assert the actual prepared program keys
+differ. `crossed-small` must use the same slot ID in SIMD1 and Dynamic across tracks
+and assert its complete reversed tuple sequence. `banks64` must locate the sole
+heterogeneous member by exact `track-63`/SIMD1/`slot1`, replace numeric group-index
+assumptions with independently derived lexicographic chain identities, and on this
+pinned Simd8 platform assert seven full normal cohorts, the exact residual scalar
+set including track 63, and both slots' bound-node associations.
+
+Attempt 3 retains the accepted compile interval, measured-result identity and
+allocator-control changes. Run the premeasurement gates once in order with fresh
+retained evidence and stop on the first failure. Any failure exhausts #652; there
+is no fourth correction, weakened corpus, official measurement, or counterfactual.
+
+## Final attempt 3 source gate — FAIL; hard stop
+
+Luna HIGH preserved attempts 1/2 and changed only the audit subject. Focused gate 1
+returned 101 at exact base `8efa2093`; four of five tests passed, including the
+cross-rack reversed-program and allocator-control tests. The bank test's numeric
+residual oracle expected tracks 56 through 63, while deterministic lexicographic
+grouping leaves `track-6`, `track-60` through `track-63`, and `track-7` through
+`track-9`. The executor stopped immediately. No later gate, audit-subject
+invocation, counterfactual, or measurement ran; attempt-3 evidence remains under
+`/tmp/issue652-attempt3-source-evidence`.
+
+Astra LOW returned final attempt 3 **FAIL**. #652 is exhausted and permits no
+fourth correction or execution. The compiling, explicitly test-failing source is a
+candid checkpoint only. Its four passing focused tests grant no harness
+qualification, allocation-reduction credit, or official-variant authorization.
+A separately numbered successor must derive residual chains from the independently
+sorted normal-chain set after seven full groups plus the fixed heterogeneous chain,
+expand those identities to both exact slot nodes, and recheck bound-slot/program
+assertions for the same numeric-order assumption while preserving the otherwise
+accepted controls and measurement boundary.
