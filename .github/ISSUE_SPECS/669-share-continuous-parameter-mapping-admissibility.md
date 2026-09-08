@@ -143,3 +143,19 @@ not named one sole Luna executor, frozen literal gate commands, or specified
 fresh-path and lossless status/stream/manifest evidence controls. This revision
 adds only those execution terms. No implementation attempt was authorized or
 consumed.
+
+## Astra LOW corrected scope review — PASS
+
+Astra LOW returned **SCOPE PASS** at exact clean feature HEAD/upstream
+`c8f8154064441cbcd489da13bd8be0e13a1b5bc1`, main/merge-base
+`7d16d9c9752c9ac2d31e69008fe075df86ce3c26`, and clean tracker HEAD/upstream
+`ca761079eb8b4ffaf9350f5f1b8ca63a6682339c`. GitHub #669/#559/#560 bodies
+matched their local specs. The reviewer confirmed the sole Luna executor,
+literal ordered gates and existing policy scripts, fresh-path controls, exact
+context/toolchain/safe-environment/source-hash record, 0/1 capture controls,
+separate streams and statuses, self-excluding verified manifest, first-failure
+stop, semantic scope, and #668 disjointness.
+
+Only Luna HIGH `/root/issue583_luna_impl` is authorized for attempt 1 within the
+two named source files and their inline tests. No artifact execution, pin change,
+compiler-payload commit, PR, or merge is authorized by this verdict.
