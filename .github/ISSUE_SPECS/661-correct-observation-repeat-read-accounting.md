@@ -31,6 +31,15 @@ acknowledging it. Assert the exact accounting identity
 successive reads must not increment `advances`; torn/regression detection,
 wait-free writer behavior, final newest-window proof, and writer-view bound remain.
 
+Use one test-local accounting helper for the stress loop and its final read. Add
+the deterministic control
+`repeat_reads_and_final_gap_have_exact_accounting`: publish sequence 1, record
+multiple reads of that unchanged sequence, then publish sequence 4 and process it
+through the same final-read accounting path. The control must prove that repeats
+leave the advance count at 1, the later read raises it to 2, the known missed
+count is 2, and `advances + missed_total == newest == 4`. Run this control once;
+it is not a stress retry.
+
 No observation implementation, synchronization, ordering, production source,
 public API, benchmark, timing threshold, artifact, manifest, lockfile, workflow,
 or unrelated test change is in scope. Do not loop or retry the stress test to seek
@@ -44,20 +53,22 @@ prove exact clean head/upstream and that
 cwd/head, toolchains, literal argv/environment, separate stdout/stderr and numeric
 status for every command. Run once in order, stopping at the first failure:
 
-1. focused debug stress test by exact name;
-2. focused release stress test by exact name;
-3. `cargo test --locked -p engine -p target-smoke`;
-4. `cargo test --locked --release -p engine -p target-smoke`;
-5. `cargo clippy --locked -p engine -p target-smoke --all-targets --all-features -- -D warnings`;
-6. `cargo fmt --all -- --check`;
-7. `bash scripts/check-workspace-policy.sh`;
-8. `bash scripts/check-realtime-policy.sh`;
-9. `bash scripts/test-realtime-policy.sh`;
-10. `git diff --check` and an owned-path/payload census.
+1. focused debug deterministic control by exact name;
+2. focused debug stress test by exact name;
+3. focused release stress test by exact name;
+4. `cargo test --locked -p engine -p target-smoke`;
+5. `cargo test --locked --release -p engine -p target-smoke`;
+6. `cargo clippy --locked -p engine -p target-smoke --all-targets --all-features -- -D warnings`;
+7. `cargo fmt --all -- --check`;
+8. `bash scripts/check-workspace-policy.sh`;
+9. `bash scripts/check-realtime-policy.sh`;
+10. `bash scripts/test-realtime-policy.sh`;
+11. `git diff --check` and an owned-path/payload census.
 
 The focused commands are:
 
 ```text
+cargo test --locked -p engine --test observation_transport repeat_reads_and_final_gap_have_exact_accounting -- --exact
 cargo test --locked -p engine --test observation_transport a_million_windows_are_read_whole_and_in_order -- --exact
 cargo test --locked --release -p engine --test observation_transport a_million_windows_are_read_whole_and_in_order -- --exact
 ```
@@ -65,6 +76,15 @@ cargo test --locked --release -p engine --test observation_transport a_million_w
 Full streams remain temporary. Git retains only the compact command/status/result
 record and no compiler stream, `.ll`, assembly, object, archive, binary, target
 output, `rlib`, or `rmeta`.
+
+## Initial scope review
+
+Astra LOW returned scope FAIL on the initial brief. The accounting law and
+one-file boundary were sound, but a scheduler-dependent stress run did not prove
+that equal reads or a skipped final publication would occur. This revision adds
+the deterministic repeated-read/final-gap control above and requires it to share
+the production-test accounting helper. No implementation attempt was authorized
+or consumed by that review.
 
 ## Review and dependency release
 
