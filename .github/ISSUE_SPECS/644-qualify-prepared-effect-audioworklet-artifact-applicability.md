@@ -143,3 +143,19 @@ the four never-run commands above, once each and in order, appending new records
 rewriting or recreating any existing path. No completed builder or gate may be repeated. A failure
 stops the continuation. Repository promotion remains outside this authorization and requires a
 separate Astra review after candidate qualification.
+
+## Stage 2 attempt 2 Astra LOW disposition — PASS
+
+Astra reviewed exact clean branch/upstream head
+`4202b17507ebc9076e23816e6c11c0fff52d74a5` and the preserved scratch, output and evidence paths.
+Attempt 1 remains procedural FAIL. The corrected worktree and independently recorded later successes
+may carry forward. Astra verified the expected candidate digest, exactly six outputs, five
+byte-identical non-Wasm files, exactly three permitted scratch overlays, two-field-only JSON lineage,
+unchanged matrix rows, and records ending at the SDK check with browser dependencies absent. Together
+with Hypatia's contemporaneous interruption report, this supports treating the four listed commands
+as unexecuted, though it cannot prove the absence of unrecorded activity absolutely.
+
+Hypatia alone may refresh identities and run those four commands once in order from the preserved
+scratch, appending records. Changed state, concurrent activity or the first failure stops execution.
+No existing record or path may be overwritten, deleted or recreated; no completed stage may repeat;
+repository promotion remains unauthorized.
