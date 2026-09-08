@@ -3,7 +3,7 @@
 //! One cohort former, over whole rack chains: see [`bind_rack_banks`] (#96 F1, #99 F3).
 
 use super::*;
-use crate::ids::{diag, rack_id};
+use crate::ids::{PreparedEffectIndex, diag, prepared_effect_node};
 
 /// The `RackLocation` a graph rack id addresses.
 ///
@@ -64,29 +64,15 @@ pub(crate) fn banks_are_permitted(identity: &session::EffectIdentity) -> bool {
 /// is a path and a sidechain source never raises a chain member's level. A bank may not cross a
 /// dependency level (#96 F12), so chains are bucketed by the level of their *first* slot and the
 /// arithmetic is asserted rather than assumed.
-pub(crate) fn bind_rack_banks(
+pub(crate) fn bind_rack_banks_indexed(
     effects: &EffectPreparedSession,
-    ids: &BTreeMap<(String, RackId, String), EffectNodeId>,
+    prepared: &PreparedEffectIndex<'_>,
+    ids: &[Option<EffectNodeId>],
     levels: &[DependencyLevel],
     dispatch: Backend,
     classes: &SessionPoolClasses,
 ) -> Result<(Vec<graph::GraphPreparedEffectBank>, GraphRackBankReport), GraphDiagnostic> {
     let model = effects.session.normalized_model();
-    let entry_by_key: BTreeMap<(&str, RackId, &str), &EffectPreparedEntry> = effects
-        .entries
-        .iter()
-        .map(|entry| {
-            (
-                (
-                    entry.track_id.as_str(),
-                    rack_id(entry.rack),
-                    entry.effect_id.as_str(),
-                ),
-                entry,
-            )
-        })
-        .collect();
-
     // One chain per (track, bankable rack), in session slot order.
     let mut chains: BTreeMap<RackChainId, Vec<EffectNodeId>> = BTreeMap::new();
     let mut programs: BTreeMap<RackChainId, RackProgram> = BTreeMap::new();
@@ -118,14 +104,13 @@ pub(crate) fn bind_rack_banks(
             let mut slots = Vec::with_capacity(declared.len());
             for effect in declared {
                 let key = (track.id.as_str(), rack, effect.id.as_str());
-                let Some(entry) = entry_by_key.get(&key).copied() else {
+                let Some(slot) = prepared.get(key.0, key.1, key.2) else {
                     return Err(diag("graph.internal.invariant", "$.effects"));
                 };
-                let Some(node) = ids.get(&(
-                    track.id.as_str().to_owned(),
-                    rack,
-                    effect.id.as_str().to_owned(),
-                )) else {
+                let Some(entry) = effects.entries.get(slot.index()) else {
+                    return Err(diag("graph.internal.invariant", "$.effects"));
+                };
+                let Some(node) = prepared_effect_node(ids, slot) else {
                     return Err(diag("graph.internal.invariant", "$.effects"));
                 };
                 nodes.push(node.clone());
@@ -257,7 +242,10 @@ pub(crate) fn bind_rack_banks(
             let entries: Vec<&EffectPreparedEntry> = members
                 .iter()
                 .map(|node| {
-                    entry_by_key[&(node.track_id.as_str(), node.rack, node.effect_id.as_str())]
+                    let slot = prepared
+                        .get(node.track_id.as_str(), node.rack, node.effect_id.as_str())
+                        .expect("prepared effect node has an entry");
+                    &effects.entries[slot.index()]
                 })
                 .collect();
             let requests: Vec<_> = entries

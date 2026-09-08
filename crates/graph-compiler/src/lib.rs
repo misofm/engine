@@ -263,13 +263,14 @@ mod schedule;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::banks::bind_rack_banks;
+    use crate::banks::bind_rack_banks_indexed;
     use crate::canonical::{
         canonical_parts, edge_text, edge_text_len, hex_sha256, node_text, node_text_len,
         write_canonical,
     };
     use crate::ids::{
-        gid, port, rack_id, route_destination_node, route_source_node, stages, track_node,
+        PreparedEffectIndex, gid, into_effects, port, prepared_effect_node, rack_id,
+        route_destination_node, route_source_node, stages, track_node,
     };
     use crate::pdc::timings;
     use crate::schedule::{
@@ -285,6 +286,24 @@ mod tests {
     /// value, which was unreachable before without feature injection.
     fn host_dispatch() -> Backend {
         Backend::current()
+    }
+
+    fn indexed_effect_ids(
+        prepared: &EffectPreparedSession,
+    ) -> (PreparedEffectIndex<'_>, Vec<Option<EffectNodeId>>) {
+        let (index, _) = PreparedEffectIndex::from_entries(&prepared.entries);
+        let nodes = prepared
+            .entries
+            .iter()
+            .map(|entry| {
+                Some(EffectNodeId {
+                    track_id: gid(&entry.track_id),
+                    rack: rack_id(entry.rack),
+                    effect_id: gid(&entry.effect_id),
+                })
+            })
+            .collect();
+        (index, nodes)
     }
 
     fn literal_bank_slot_reservation_bytes(bank_count: u64, lanes: u64) -> u64 {
@@ -319,8 +338,8 @@ mod tests {
     use conformance::DualAccumulatorDelayFactory;
     use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
     use effect_compiler::{
-        EffectCompileCaps, EffectPreparedSession, launch_native_effect_registry,
-        prepare_native_session_effects,
+        EffectCompileCaps, EffectPreparedSession, attach_effect_console,
+        launch_native_effect_registry, prepare_native_session_effects,
     };
     use effect_contract::{
         EffectPrepareError, EffectProcessBlock, NativeEffectFactory, NativeEffectRegistry,
@@ -3075,6 +3094,9 @@ mod tests {
         let baseline = compile_chain_fixture(effects);
 
         let (_r2, mut shuffled) = rack_chain_fixture(lanes, 2, |_| 2);
+        let _producers =
+            attach_effect_console(&mut shuffled, NonZeroUsize::new(4).expect("control queue"))
+                .expect("controls attach to every prepared effect");
         let mut state = 0x2545_f491_4f6c_dd1d_u64;
         for index in (1..shuffled.entries.len()).rev() {
             state ^= state << 13;
@@ -3098,6 +3120,49 @@ mod tests {
             GraphCompiler::sha256(&candidate.graph, &candidate.report),
             GraphCompiler::sha256(&baseline.graph, &baseline.report)
         );
+        let (_r3, mut association_sensitive) = rack_chain_fixture(lanes, 2, |_| 2);
+        let _producers = attach_effect_console(
+            &mut association_sensitive,
+            NonZeroUsize::new(4).expect("queue"),
+        )
+        .expect("controls attach to every prepared effect");
+        association_sensitive.entries.reverse();
+        let nodes = association_sensitive
+            .entries
+            .iter()
+            .map(|entry| {
+                Some(EffectNodeId {
+                    track_id: gid(&entry.track_id),
+                    rack: rack_id(entry.rack),
+                    effect_id: gid(&entry.effect_id),
+                })
+            })
+            .collect::<Vec<_>>();
+        let expected_ids = nodes
+            .iter()
+            .map(|node| node.as_ref().expect("node").clone())
+            .collect::<Vec<_>>();
+        let (bound_effects, bound_controls, _) =
+            into_effects(association_sensitive.entries, &nodes);
+        assert_eq!(
+            bound_effects
+                .iter()
+                .map(|effect| effect.id.clone())
+                .collect::<Vec<_>>(),
+            expected_ids,
+            "reordered entries retain processor identities"
+        );
+        assert_eq!(
+            bound_controls
+                .iter()
+                .map(|control| control.node.clone())
+                .collect::<Vec<_>>(),
+            expected_ids,
+            "reordered entries retain control identities"
+        );
+        assert!(bound_effects.iter().all(|effect| {
+            effect.metadata.program_key() == effect.processor.metadata().program_key()
+        }));
     }
 
     /// #99 F3: chains of different depth are bucketed by their first slot's level, and a shorter
@@ -3408,29 +3473,13 @@ mod tests {
                 },
             )
             .expect("reprepare effects");
-            let ids = rebound
-                .entries
-                .iter()
-                .map(|entry| {
-                    (
-                        (
-                            entry.track_id.clone(),
-                            rack_id(entry.rack),
-                            entry.effect_id.clone(),
-                        ),
-                        EffectNodeId {
-                            track_id: gid(&entry.track_id),
-                            rack: rack_id(entry.rack),
-                            effect_id: gid(&entry.effect_id),
-                        },
-                    )
-                })
-                .collect();
+            let (prepared_index, ids) = indexed_effect_ids(&rebound);
             let lanes = BankWidth::for_backend(dispatch)
                 .expect("vector backend")
                 .lanes() as usize;
-            let (banks, report) = bind_rack_banks(
+            let (banks, report) = bind_rack_banks_indexed(
                 &rebound,
+                &prepared_index,
                 &ids,
                 &dependency_levels,
                 dispatch,
@@ -3458,26 +3507,6 @@ mod tests {
             );
         }
 
-        let ids_for = |prepared: &EffectPreparedSession| {
-            prepared
-                .entries
-                .iter()
-                .map(|entry| {
-                    (
-                        (
-                            entry.track_id.clone(),
-                            rack_id(entry.rack),
-                            entry.effect_id.clone(),
-                        ),
-                        EffectNodeId {
-                            track_id: gid(&entry.track_id),
-                            rack: rack_id(entry.rack),
-                            effect_id: gid(&entry.effect_id),
-                        },
-                    )
-                })
-                .collect::<BTreeMap<_, _>>()
-        };
         let eight = Backend::Simd8;
         let mut connected_fallback = prepare_native_session_effects(
             &session,
@@ -3493,9 +3522,10 @@ mod tests {
             id: effect_contract::PortId::new("sidechain").expect("static port"),
             required: false,
         };
-        let connected_ids = ids_for(&connected_fallback);
-        let connected_banks = bind_rack_banks(
+        let (connected_index, connected_ids) = indexed_effect_ids(&connected_fallback);
+        let connected_banks = bind_rack_banks_indexed(
             &connected_fallback,
+            &connected_index,
             &connected_ids,
             &dependency_levels,
             eight,
@@ -3526,9 +3556,13 @@ mod tests {
             },
         )
         .expect("reprepare same-wave fallback");
-        let same_wave_ids = ids_for(&same_wave);
-        let first_id =
-            same_wave_ids[&("bank0".to_owned(), RackId::Simd1, "bank-delay".to_owned())].clone();
+        let (same_wave_index, same_wave_ids) = indexed_effect_ids(&same_wave);
+        let first_slot = same_wave_index
+            .get("bank0", RackId::Simd1, "bank-delay")
+            .expect("first effect");
+        let first_id = prepared_effect_node(&same_wave_ids, first_slot)
+            .expect("first effect node")
+            .clone();
         let first = GraphNodeId::Effect(first_id.clone());
         let mut incompatible_levels = dependency_levels.clone();
         for level in &mut incompatible_levels {
@@ -3537,8 +3571,9 @@ mod tests {
         // F12: a bank never crosses a dependency level. Before #96 the whole chunk holding a
         // level-incompatible member was dropped; the planner now partitions by level *before*
         // chunking, so the member itself never banks while its level-compatible peers still do.
-        let (split_banks, split_report) = bind_rack_banks(
+        let (split_banks, split_report) = bind_rack_banks_indexed(
             &same_wave,
+            &same_wave_index,
             &same_wave_ids,
             &incompatible_levels,
             eight,
@@ -3592,9 +3627,10 @@ mod tests {
             },
         )
         .expect("prepare scalar ownership");
-        let rejected_ids = ids_for(&rejected);
-        let error = match bind_rack_banks(
+        let (rejected_index, rejected_ids) = indexed_effect_ids(&rejected);
+        let error = match bind_rack_banks_indexed(
             &rejected,
+            &rejected_index,
             &rejected_ids,
             &dependency_levels,
             eight,
