@@ -110,3 +110,21 @@ main, with the same duplicate-output collisions and E0463 `effect_compiler` reso
 `graph-compiler/src/lib.rs:12`. This is independently reproduced pre-existing infrastructure failure,
 not a successful gate and not a #622 correction. Source is accepted. Root may make the separately
 owned artifact-applicability decision; no artifact, PR or merge action is authorized by this verdict.
+
+## Ordinary AudioWorklet artifact probe — DRIFT
+
+Root ran exactly one ordinary no-bypass `scripts/build-web-audioworklet.sh` invocation at clean,
+pushed source-accepted head `ca5a8b49`, whose accepted production source is `fece7a2c`, against live
+main/merge-base `cf9e079c`. Compilation succeeded, then the unchanged builder exited 1 before
+copying output because candidate simd128 Wasm
+`ac71c64033b0cfc637cf14edcacaa6ed1b3bbf7093a5caa641ef84adea7e88e3` differs from delivered pin
+`f80b6392b1ea7141aaac639d08094f88982febb883c4d08c3f1114418093e664`. The scratch output census is
+zero and the builder's temporary module was removed by its exit trap.
+
+Complete checksum-verified probe evidence is under `artifacts/issue622-artifact-probe/`. No retry,
+overlay build, qualification gate, browser/SDK run, repin, consumer update, benchmark, timing
+workload, source edit, workflow edit, or main mutation occurred. Retained qualification does not
+apply. #622 source is passive while one separately numbered lane-B qualification/pinning successor
+reproduces the candidate from this frozen source with only scratch pin/lineage overlays, runs the
+existing static/resource/hermetic/SDK/three-browser gates, obtains Astra LOW review, and conditionally
+promotes only the repository pin and generated qualification lineage before post-pin proof.
