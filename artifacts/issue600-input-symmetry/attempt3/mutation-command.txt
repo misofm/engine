@@ -1,0 +1,1 @@
+cargo test --locked -p bench input_symmetry::tests::connected_runtime_oracle_covers_retargeted_both_channel_ramp -- --nocapture
