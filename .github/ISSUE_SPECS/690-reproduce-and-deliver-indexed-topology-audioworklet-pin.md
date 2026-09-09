@@ -201,3 +201,120 @@ artifact directories, leave target creation to Cargo, and run the five frozen
 commands through its own directly polled persistent handles. No transfer,
 monitor, timeout, interruption, retry, tracked output, or root execution is
 authorized. Final Astra LOW evidence review remains required.
+
+## Attempt-2 evidence verdict — FAIL
+
+Astra LOW returned **EVIDENCE FAIL** at exact clean pushed feature `4ac1fd01`,
+tracker `cfa01b52`, and unchanged main `e4dfe353`. Initial identity and hash
+checks passed, and Luna created the evidence directory followed by the empty
+artifact directory. The sole builder session request then used nonexistent cwd
+`/home/bl/engine-cp1-indexed-topo-reproduction`; process creation failed before
+the builder ran. Recorded `127` is a failure sentinel, not a builder exit status.
+No later gate ran, the artifact directory is empty, and external plus
+source-local targets are absent.
+
+Preserve `/tmp/issue690-attempt2-{evidence,artifact}` unchanged. Its evidence
+directory is mode `0555`; 13 ordinary records are mode `0444`; all 12 manifest
+rows match. `SHA256SUMS` is 1,058 bytes with SHA-256
+`60068527e834c654fb26060688180167145e7db445b325db117c3cf2742112a7`.
+The three false `absence_before_creation` values do not independently prove
+prior absence without the producer transcript, and continuous exclusivity or
+predecessor immutability is not independently proved. Attempt 2 is consumed and
+earns no qualification credit.
+
+## Attempt 3: canonical-cwd Luna reproduction
+
+Attempt 3 is the final attempt and owns only these fresh paths, initially absent
+including dangling symlinks:
+
+```text
+/tmp/issue690-attempt3-artifact
+/tmp/issue690-attempt3-target
+/tmp/issue690-attempt3-evidence
+```
+
+One explicitly named Luna HIGH executor, `/root/issue690_luna_attempt3`, owns
+execution. Fresh Astra LOW SCOPE PASS is required against the exact clean pushed
+rebrief, matching GitHub/tracker bodies, current main and branch identities,
+both preserved failed-attempt namespaces, the six authority hashes, and absence
+of the three attempt-3 paths and relevant processes. The PASS must be recorded,
+pushed, and synchronized before any attempt-3 path is created.
+
+After authorization, Luna must establish all three paths absent in memory,
+exclusively create the evidence directory first, and durably record the
+preceding absence and creation. Luna next exclusively creates the artifact path
+as an empty ordinary non-symlink directory and records that fact. Leave target
+absent for Cargo. Before requesting the builder session, record and require both
+`pwd -P` and `git rev-parse --show-toplevel` to equal exactly
+`/home/bl/misofm/engine-cp1-indexed-topo-reproduction`; recheck clean exact
+HEAD/upstream, tracker identity, and no relevant process. The builder tool call
+must use that literal absolute path as its `workdir`.
+
+Run the same frozen five-command sequence from attempt 2 exactly once, in order.
+Launch each potentially long command directly through a unified persistent
+session, record its session ID, and poll only that handle until it returns an
+actual exit code. A poll timeout triggers another poll of the same handle. Stop
+on the first failure. Do not transfer or interrupt a handle, use a shell timeout,
+start a monitor, retry, or run another command while a handle is live.
+
+Redirect complete streams into the fresh evidence directory and durably record
+exact argv/environment/cwd/head/start/finish/actual status. Require status zero,
+exactly six ordinary artifact files with the frozen SHA-256 values and byte
+equality to `/tmp/issue687-stage2-artifact`, four later status-zero gates, clean
+Git, and absent source-local `target/`. Preserve non-overwriting synchronized
+read-back records and one terminal self-excluding manifest for Astra LOW review.
+Do not mutate any predecessor path, tracked file, compiler capture, generated
+predecessor artifact, or pin. No timing, improvement, or budget claim is in
+scope. A third failure hard-stops this issue under the three-attempt rule.
+
+## Attempt-2 verdict — FAIL
+
+Astra LOW returned **EVIDENCE FAIL** at exact clean pushed issue `4ac1fd01` and
+tracker `cfa01b52`. The named Luna created only the evidence and empty artifact
+directories. Builder process creation failed because its tool call omitted
+`/misofm/` from the requested working directory. The builder was never invoked,
+the Cargo target is absent, the artifact directory is empty, and no gate ran.
+The stored status 127 is a launch-failure marker rather than a builder exit.
+Launch-error SHA-256 is
+`a936507c3107ee8d076d6616aff8d43c6702603ded97b584bf64762c7e77522a`;
+terminal SHA-256 is
+`4808a7a1af640f66670b8a293f47408f90bbffc7b3b79001d5aea1ee0857556d`.
+Attempt 2 is consumed; preserve its namespace unchanged.
+
+## Attempt 3: final exact-working-directory reproduction
+
+Attempt 3 is final and remains owned solely by Luna HIGH executor
+`/root/issue583_luna_impl`. Freeze the execution worktree as:
+
+```text
+/home/bl/misofm/engine-cp1-indexed-topo-reproduction
+```
+
+Before creating a path, the executor must run `pwd -P` in that worktree and
+require the exact line above, then require clean HEAD/upstream, current main,
+frozen ancestry/hashes, no relevant process, and absence including symlinks of:
+
+```text
+/tmp/issue690-attempt3-artifact
+/tmp/issue690-attempt3-target
+/tmp/issue690-attempt3-evidence
+```
+
+Every tool call must pass the exact frozen worktree as its `workdir`. After a
+fresh Astra LOW SCOPE PASS against the exact clean pushed brief, the executor
+exclusively creates evidence and an empty ordinary artifact directory, leaving
+target creation to Cargo. Run the same five frozen commands once with only the
+namespace changed from `attempt2` to `attempt3`.
+
+Use the same executor-owned persistent-session polling, complete external
+records, six-file byte equality, clean-worktree, no-source-target, stop, and
+no-generated-Git-output rules. Do not use an alias, relative path, shortened
+path, or remembered worktree from another issue. An `exec_command` launch error,
+nonzero result, identity mismatch, or output mismatch stops attempt 3 without
+retry.
+
+Astra's external SCOPE PASS against the exact pushed brief is execution
+authority. Do not append or push another authorization commit between that
+review and Luna's preflight. Final Astra evidence review, PR qualification,
+guarded merge, post-main qualification, synchronization, and delivered-worktree
+cleanup remain mandatory.
