@@ -214,3 +214,22 @@ unchanged attempt-1 snapshot. Evidence is preserved at
 `ada45be34b30cb7ed538565f7f2ac8d567df082c70d8f2fdd911654d723c407f` and the
 gate-8 checker hash is
 `0a64a67654798fcbb8e4723cd9f156fc7d6f30e7fe2b14fb3ad6b61b8a46d74b`.
+
+## Source verdict and artifact applicability
+
+Astra LOW returned **SOURCE PASS** at exact clean pushed record
+`5fccfa8714b93e32f9b04f8299b1dad9dfb7542f`, authoritative `origin/main`
+`acd625d72a57f83f50f26279717464744504b4c4`, and synchronized tracker
+`104bfdfd0879493c8f67c3bf18ff9341099dec48`. Exact extraction/prefix,
+frozen hashes, nine ordered tests, corrected matching, reconstructed-copy-only
+formatting, explicit `rg` status handling, and all eight successful direct
+command records independently verify. Debug and release each passed 9 tests;
+Clippy passed with existing configuration warnings. Final checks enforce both
+source hashes, the exact three-path branch scope, and unchanged attempt-1
+evidence. Attempt 1 remains failed without carried credit.
+
+Root records **no artifact applicability**. Every relocated implementation byte
+remains behind `cfg(test)` and the production input is unchanged, so no native or
+Wasm artifact identity receives changed input. No AudioWorklet qualification or
+pin action is required or authorized. Exact-head/current-main PR-readiness review
+is next.
