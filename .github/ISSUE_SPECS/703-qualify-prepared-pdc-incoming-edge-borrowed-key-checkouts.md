@@ -168,7 +168,8 @@ Attempt 2 uses the same prepared checkouts and unchanged twelve gates. Its
 exclusive lease must contain both `source_head` and `candidate_head`, with each
 equal to the exact candidate head selected by fresh SCOPE. It also contains the
 exact `candidate_dir`, `baseline_dir`, and `baseline_head`. The executor first
-reads and verifies the actual lease fields before constructing any check.
+verifies those literal fields without a custom parser or wrapper, then invokes
+direct commands with the recorded absolute paths and heads.
 
 Fresh roots, absent including dangling symlinks before Attempt 2, are:
 
@@ -185,31 +186,3 @@ Astra XHIGH executor captures one fresh baseline and runs all twelve gates once
 in the frozen order. Stop on every preflight, setup, launch, assertion, or gate
 failure. No checkout creation, source edit, inherited credit, retry, artifact,
 PR, or merge is authorized.
-
-## Attempt 1 FAIL — procedural preflight failure
-
-Astra XHIGH authenticated the exact scope and exclusive executor lease. The
-first preflight receipt `call_wdRm...` is recorded in `c833f4` and returned
-actual exit 1 at `18:08:37.518Z` because a custom preflight parser raised
-`KeyError: source_head` against the lease field `candidate_head`. The executor
-stopped immediately: no retry, root, baseline, gate, or source action occurred;
-one attempt was consumed with zero credit and the lease was released. The
-original session and rollout lines govern details not reproduced here.
-
-## Attempt 2 rebrief
-
-Two attempts remain. The prepared candidate and detached baseline checkouts are
-unchanged. After a fresh Astra XHIGH SCOPE PASS, use fresh a2 roots with the
-same five names as Attempt 1, replacing `a1` with `a2`, and require absence
-including dangling symlinks before authorization. Do not use a custom lease
-parser or wrapper: invoke direct commands with the literal absolute candidate
-and baseline paths and heads, preserving each structured launch/completion
-result and poll receipt.
-
-The fresh scope revalidates both checkout paths, exact heads/source bytes, clean
-state, title/body parity, dependencies, and no relevant process. Only after
-that PASS does the executor create the evidence root, capture one fresh
-baseline manifest, and run all twelve gates once in the stated order. Stop at
-the first setup, launch, assertion, or gate failure; do not retry or mutate
-either prepared checkout, source, branch, artifact, or pin. No inherited
-#701/#702 credit applies.
