@@ -92,8 +92,9 @@ def inventory(repo, tree):
         out[path] = (mode.decode(), oid.decode())
     return out
 
-def ignored(path):
-    return any(path == root or path.startswith(root + "/") for root in IGNORED)
+def ignored(path, overlay):
+    return overlay and any(path == root or path.startswith(root + "/")
+                           for root in IGNORED)
 
 def verify(repo, tree, root, overlay=False):
     root = pathlib.Path(root)
@@ -105,10 +106,19 @@ def verify(repo, tree, root, overlay=False):
         while str(p) != ".":
             expected_dirs.add(str(p)); p = p.parent
     actual, dirs = set(), set()
-    for base, names, files in os.walk(root, followlinks=False):
+    if overlay:
+        for name in IGNORED:
+            p = root / name
+            if not p.is_dir() or p.is_symlink():
+                raise RuntimeError("dependency allowance is not a directory")
+    def walk_error(error):
+        raise error
+    for base, names, files in os.walk(root, followlinks=False,
+                                      onerror=walk_error):
         relbase = pathlib.Path(base).relative_to(root).as_posix()
         relbase = "" if relbase == "." else relbase
-        names[:] = [n for n in names if not ignored(f"{relbase}/{n}".strip("/"))]
+        names[:] = [n for n in names
+                    if not ignored(f"{relbase}/{n}".strip("/"), overlay)]
         for name in names:
             rel = f"{relbase}/{name}".strip("/")
             p = root / rel
@@ -116,7 +126,7 @@ def verify(repo, tree, root, overlay=False):
             else: dirs.add(rel)
         for name in files:
             rel = f"{relbase}/{name}".strip("/")
-            if not ignored(rel): actual.add(rel)
+            if not ignored(rel, overlay): actual.add(rel)
     if actual != set(expected): raise RuntimeError("missing or extra tracked path")
     if dirs != expected_dirs: raise RuntimeError("missing or extra directory")
     if (root / ".git").exists() or (root / ".git").is_symlink():
@@ -180,6 +190,14 @@ def self_test():
         for name in OVERLAYS: (export / name).write_text("overlay\n")
         for name in IGNORED:
             p = export / name; p.mkdir(parents=True); (p / "ignored").write_text("ok\n")
+        must_fail(lambda: verify(str(repo), tree, str(export), False))
+        verify(str(repo), tree, str(export), True)
+        subject = export / sorted(IGNORED)[0]
+        (subject / "ignored").unlink(); subject.rmdir(); subject.write_text("bad\n")
+        must_fail(lambda: verify(str(repo), tree, str(export), True))
+        subject.unlink(); subject.symlink_to(export / sorted(IGNORED)[1])
+        must_fail(lambda: verify(str(repo), tree, str(export), True))
+        subject.unlink(); subject.mkdir(); (subject / "ignored").write_text("ok\n")
         verify(str(repo), tree, str(export), True)
     print("PASS self-test")
 
@@ -315,3 +333,12 @@ mode/symlink/overlay self-controls, uses fail-closed archive pipelines with an
 external Git object authority, limits final allowances to the three overlays and
 two named dependency directories, and removes the redundant direct generated
 check because `sdk-package.sh check` owns it. Fresh scope review remains required.
+
+Astra LOW returned a third **SCOPE FAIL** at exact clean feature `40dbdd3d`
+and tracker `7ef99874`. The embedded verifier incorrectly applied dependency
+allowances even in exact mode, could accept a file or symlink at an allowed
+directory name, and let `os.walk` suppress traversal errors. No workload ran.
+This bounded correction makes exact mode allow no ignored path, requires both
+post-install allowances to exist as ordinary non-symlink directories, raises all
+walk errors, and adds negative controls for exact-mode dependency content plus
+file and symlink substitutions. All other scope remains frozen.
