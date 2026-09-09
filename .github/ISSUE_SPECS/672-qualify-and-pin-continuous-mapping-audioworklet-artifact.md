@@ -432,7 +432,7 @@ as a read-only comparator. Its exact fresh paths are:
 - `/tmp/issue672-attempt2-manifest-verify.stdout`
 - `/tmp/issue672-attempt2-manifest-verify.status`
 
-Before creation require all nine absent including dangling symlinks, the feature
+Before creation require all ten listed paths absent including dangling symlinks, the feature
 clean at its pushed authorization head, `origin/main` exactly `acd625d7`, and no
 competing workload. Record all identity, toolchain, environment, source/config/
 pin byte-shape, path-absence, and harmless capture status-0/status-1 controls
@@ -467,3 +467,8 @@ and manifest requirements remain unchanged. Stop on the first failure without
 correction or retry. No repository edit, promotion, post-pin work, PR, or merge
 is authorized until attempt 2 receives fresh Astra LOW scope PASS and then
 pre-pin evidence PASS.
+
+Astra LOW returned attempt-2 **SCOPE FAIL** at exact clean feature `58367843`
+and tracker `647c6479` solely because the brief listed ten fresh paths but said
+all nine must be absent. All ten were absent. This correction synchronizes that
+count; no substantive scope changes and no execution occurred.
