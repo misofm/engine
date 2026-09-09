@@ -54,8 +54,9 @@ checkpoint exists:
 
 ```text
 E1 / Phase 1 detached checkout:
-    /home/bl/misofm/engine-cp1-pdc-artifact-705-a1-probe
-    exact published brief: 5a493f08e6000f7da54ae8ec351a166149c51603
+    /home/bl/misofm/engine-cp1-pdc-artifact-705-a1-probe-final
+    exact containing-brief commit: supplied verbatim in the lease after the
+    final Astra verdict; no self-referential hash is used
 
 Phase 2 overlay branch/worktree, descending from E1:
     branch:   codex/qualify-pdc-artifact-overlay-705
@@ -66,11 +67,16 @@ E2 / Phase 2 detached checkout:
     exact published overlay checkpoint created after Phase 1 PASS
 ```
 
-E1 and E2 are clean detached checkouts with no upstream. The overlay branch is
-clean, pushed, and upstream-equal before Sol prepares E2. No executor creates a
-checkout, branch, or worktree during a lease. The preparation checkout is the
-only place where this spec is edited before the E1 checkpoint; the phase
-checkouts are read-only identities except for ignored outputs.
+E1 and E2 are clean detached checkouts with literal receipt identity
+`upstream=not-applicable-detached`; never invoke `@{upstream}` in either
+detached checkout. The currently existing
+`/home/bl/misofm/engine-cp1-pdc-artifact-705-a1-probe` at `cc2effdc` is
+preserved as a scope-failed, no-attempt, no-authority checkout and is not the
+corrected E1 target. The overlay branch is clean, pushed, and upstream-equal
+before Sol prepares E2. No executor creates a checkout, branch, or worktree
+during a lease. The preparation checkout is the only place where this spec is
+edited before the E1 checkpoint; the phase checkouts are read-only identities
+except for ignored outputs.
 
 Only these tracked paths may change in the overlay: this #705 spec; the pin
 `hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256` only when the
@@ -96,7 +102,9 @@ release marker is written only after terminal acknowledgement. The executor
 checks that no release or revocation exists before every command.
 
 Every shell call uses the exact absolute detached worktree, `login:true`, and
-prints cwd, HEAD, upstream, and status before assertions. Use direct commands
+prints cwd, HEAD, literal `upstream=not-applicable-detached`, and status before
+assertions. Never invoke `@{upstream}` in a detached checkout; upstream parity
+applies only to preparation and overlay branches. Use direct commands
 with real exit propagation; no custom runner, unconditional-success wrapper,
 fabricated status, retry, or polling that hides a result. A preflight, setup,
 launch, assertion, evidence, or qualification failure consumes the attempt even
@@ -127,6 +135,16 @@ Capture full argv, inherited and explicit environment, cwd, head, upstream,
 dirty state, UTC times, stdout, stderr, actual result, persistent-session
 launch, each real poll receipt, and a finite self-excluding manifest. A status
 file containing `0` is never execution authority.
+
+## Corrected scope record
+
+Astra XHIGH SCOPE FAIL at preparation head `cc2effdc` consumed no attempt; all
+other preconditions passed. The existing detached checkout at that head is
+preserved as a failed scope observation with no authority. The corrected
+Attempt 1 E1 path is
+`/home/bl/misofm/engine-cp1-pdc-artifact-705-a1-probe-final`; Sol prepares it
+only after this corrected spec is published and a final Astra scope/lease names
+the containing brief commit verbatim.
 
 ## Phase 1: identity probe on E1
 
@@ -159,20 +177,25 @@ lease, and stop for Astra XHIGH probe-evidence review.
 
 ## Phase 2: overlay and ordinary qualification on E2
 
-Only after Astra PASS and lease release may Sol mutate the overlay branch. Set
+After Phase 1 PASS and lease release, Sol may mutate the overlay branch. Set
 `candidateCommit` to full source-introduction commit
 `a722fb40cf5bb309ac67d09ade6c3943f872ebab` and `wasmSha256` to the observed
 probe digest. Change the pin only when that digest differs. Regenerate matrix
 lineage exactly once during overlay preparation, checkpoint and push the
-overlay, synchronize #705 and the tracker, then obtain fresh synchronized Astra
-XHIGH exact-head SCOPE PASS. Sol prepares E2 at the exact pushed overlay commit;
-the executor never mutates it.
+overlay, synchronize #705 and the tracker, then Sol prepares and verifies E2 at
+the exact pushed overlay commit. Only after E2 identity, clean state, and
+detached receipt facts pass may Astra perform the final synchronized exact-head
+SCOPE PASS and issue the Phase 2 lease. The executor never mutates E2.
 
 Phase 2 uses the qualify evidence/tmp roots, artifact root, qualify target, and
-hermetic target for the same attempt. Before the ordinary builder, record
-artifact and both targets absent including dangling symlinks, then create only
-an empty artifact directory. Use a separate npm cache under qualify tmp. Every
-command below runs once, in order, from absolute E2 with `login:true`, with
+hermetic target for the same attempt. After the Phase 2 lease, exclusively
+create the qualification evidence directory, then the qualification TMPDIR,
+then an empty ordinary artifact directory, in exactly that order. Record each
+creation and the preceding ordinary and dangling-symlink absence checks before
+the next operation; keep both Cargo targets absent until their commands create
+them. Freeze these setup operations and checks in the receipt. Use a separate
+npm cache under qualify tmp. Every command below runs once, in order, from
+absolute E2 with `login:true`, with
 `MISO_ENGINE_WEB_AUDIOWORKLET_REPIN` unset, explicit TMPDIR and target, and
 complete structured receipts; stop at the first failure:
 
