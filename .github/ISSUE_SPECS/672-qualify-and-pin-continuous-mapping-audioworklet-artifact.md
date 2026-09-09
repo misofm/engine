@@ -350,3 +350,15 @@ ran. The verifier logic itself passed review. This correction moves that control
 to the pristine-byte state with only the two dependency directories present,
 then changes the three overlay bytes and retains both overlay PASS plus file and
 symlink rejection controls. No other scope changes.
+
+## Pre-pin scope review — PASS
+
+Astra LOW returned **SCOPE PASS** at exact clean pushed feature
+`4e5e5dc826da38cbc15ca204a13d24ccbaedb762` and tracker
+`aa8a4f57acdfff3ce157d649ee4a7898fa66bb9d`; GitHub #672/#559/#560
+match. The reordered control isolates exact-mode dependency-directory rejection
+while tracked bytes are pristine, and the overlay/file/symlink controls pass.
+Only Luna HIGH `/root/issue583_luna_impl` may execute the frozen pre-pin sequence
+after immediate identity, path-absence, and verifier-control preflight. Stop on
+the first unexpected failure without correction or retry. Repository promotion,
+post-pin build, PR, and merge remain unauthorized pending their separate reviews.
