@@ -236,7 +236,83 @@ remains unauthorized.
 
 ## Luna HIGH attempt 2 result
 
-- Preflight passed at `7c21716a1080205b8525a6bb57c76eb32db4ddc1`; both frozen source hashes matched, attempt-1 evidence verified, and `/tmp/issue671-graph-program-tests-attempt2-evidence` was absent and non-symlink before creation.
+- The executor reported a clean preflight at `7c21716a1080205b8525a6bb57c76eb32db4ddc1`, matching frozen source hashes, verified attempt-1 evidence, and an absent non-symlink attempt-2 path. No contemporaneous clean/freshness record was persisted before directory creation, so those facts remain executor testimony and the missing persistence is an additional failed prerequisite.
 - The literal verifier was read back byte-identically at 1,567 bytes with SHA-256 `4e25cf63b3a4091f41bce9dea54f07ca80a83ba6f1746e85b956e39e499cc63c`.
 - Gates 1–4 passed with numeric status `0` (exact transform, debug tests, release tests, and strict Clippy). Gate 5, `cargo fmt --all -- --check`, stopped the attempt with status `1` because the exact preserved deindent has rustfmt differences. Source and verifier hashes remained unchanged before and after every executed gate.
 - Gates 6–8 were not run because the frozen sequence stops on the first failure. No same-attempt correction or rerun was performed; the self-excluding attempt-2 manifest verifies under `/tmp/issue671-graph-program-tests-attempt2-evidence`.
+
+## Astra LOW attempt-2 verdict and hard final-attempt brief
+
+Astra LOW returned **ATTEMPT-2 FAIL / SOURCE ASSESSMENT PASS** at exact clean
+pushed record `7acc130a55020010f5ba60f98ad43ef8c132efdb`, unchanged main
+`7d16d9c9752c9ac2d31e69008fe075df86ce3c26`, and reconciled tracker
+`395c1de18e3df46b1b9e7add8ef713f588ce11f3`. Verifier identity, stable
+source hashes, gate statuses `0,0,0,0,1`,
+both 61-test passes, the complete format output, and manifest integrity reproduce.
+Clippy returned 0 with existing configuration warnings and is not described as
+warning-free. Attempts 1-2 are consumed. No qualification credit carries.
+
+One hard final formatter-only attempt may be considered. Preserve `program.rs` at
+SHA-256 `2f34607637b4785715d5aa31a787a9f94d6a63ec5ecd9ce2727799406a269b6c`
+and all attempt-1/2 evidence. The frozen complete format output is 4,193 bytes at
+SHA-256 `fe7f37638c78bf16f29e3955fdfca811768f88da642ac117fabbe6a3ed0ed0e5`.
+Apply only these six exact before/after replacements to `program/tests.rs`; the
+last replacement must match exactly twice, producing the seven frozen hunks:
+
+```diff
+-    let fader_index =
+-        node_index(&spec, &stage_node(track, TrackStage::PostFader)).expect("fader");
++    let fader_index = node_index(&spec, &stage_node(track, TrackStage::PostFader)).expect("fader");
+
+-            if &edge.destination.node != id || edge.destination.kind != GraphPortKind::MainInput
+-            {
++            if &edge.destination.node != id || edge.destination.kind != GraphPortKind::MainInput {
+
+-    let mut successor: std::collections::BTreeMap<usize, usize> =
+-        std::collections::BTreeMap::new();
++    let mut successor: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();
+
+-        [single] if single.delay.is_none() && single.buffer != op.output => {
+-            Some(single.buffer.0)
+-        }
++        [single] if single.delay.is_none() && single.buffer != op.output => Some(single.buffer.0),
+
+-                    let staged = Expr::Delayed(
+-                        Box::new(value),
+-                        program.delays[delay.line as usize].samples,
+-                    );
++                    let staged =
++                        Expr::Delayed(Box::new(value), program.delays[delay.line as usize].samples);
+
+-        nodes.extend(track_nodes.into_iter().filter(|candidate| {
+-            !matches!(candidate.id, GraphNodeId::Output { .. }) || index == 0
+-        }));
++        nodes.extend(
++            track_nodes.into_iter().filter(|candidate| {
++                !matches!(candidate.id, GraphNodeId::Output { .. }) || index == 0
++            }),
++        );
+```
+
+Each of the first five before-blocks must occur exactly once; the final block must
+occur exactly twice. The resulting `program/tests.rs` must be exactly 74,216 bytes
+with SHA-256 `a833f25da41f1c44b5d00469713789d9b8edbfeca6dad64b02328d621362de49`.
+This replaces exact-deindent acceptance with exact original deindent followed by
+the seven frozen replacements. Preserve test names/order, literals, assertions,
+module identity, behavior, and the byte-identical production prefix; arbitrary
+whitespace or token normalization is forbidden.
+
+Use fresh absent non-symlink
+`/tmp/issue671-graph-program-tests-attempt3-evidence`. Persist clean identities,
+source hashes, and path absence before source changes. Read back and hash literal
+transform/capture scripts before executing them. Run all eight gates fresh once
+in the original order with an amended gate-1 proof of the exact post-format bytes;
+check the frozen post-format hashes around every gate. Persist commands, complete
+streams, statuses, and a verified self-excluding manifest. Attempt 3 may change
+only `program/tests.rs` and this spec; root owns trackers and commits.
+
+A clean pushed final brief and fresh Astra LOW scope PASS are required before sole
+Luna HIGH `issue671_luna_impl` begins. Any precondition, transform, source-hash,
+or gate failure exhausts #671 without a fourth attempt or renamed retry. No
+production behavior, performance, benchmark, artifact, AudioWorklet, pin, or
+cleanup action is authorized.
