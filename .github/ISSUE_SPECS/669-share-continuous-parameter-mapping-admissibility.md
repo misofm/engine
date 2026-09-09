@@ -389,3 +389,19 @@ Attempt 3 remains unauthorized until this amendment is clean, pushed,
 synchronized, and receives Astra LOW final scope PASS. Any attempt-3 failure
 hard-stops #669; no fourth correction is allowed. No artifact, pin, PR, merge,
 or committed compiler payload is authorized.
+
+## Astra LOW final-attempt scope review — PASS
+
+Astra LOW returned **FINAL-ATTEMPT SCOPE PASS** at exact clean feature
+HEAD/upstream `eb71bb1554cc961e58040beaf3203c51afc287fe`, main/merge-base
+`7d16d9c9752c9ac2d31e69008fe075df86ce3c26`, synchronized #669/#559/#560
+bodies, and all five attempt-3 paths absent including symlinks. The otherwise-
+valid typed fixtures, complete public borrowed coverage, distinct mapping/lattice
+outcomes, exact diagnostics/precedence, independent identity oracle, fresh
+capture controls, and hard-stop rule address the prior blockers.
+
+Only Luna HIGH `/root/issue583_luna_impl` is authorized for the specified inline-
+test and mechanical-formatting changes. Production remains frozen. Run the
+frozen eleven gates once after contemporaneous preflight and controls. Any
+unexpected failure exhausts #669 without correction or retry. No artifact, pin,
+PR, merge, or compiler-payload publication is authorized.
