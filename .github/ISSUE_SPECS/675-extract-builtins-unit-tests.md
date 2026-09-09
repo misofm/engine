@@ -133,3 +133,52 @@ exact extraction: `lib.rs` SHA-256
 `75198efb88ad2c52f31fff37a22135780393a838551933abe697e7646252dfe4` and
 `tests.rs` SHA-256
 `5c2be93ef98b1d890d34e0900407d30f68dd2bf262afca617c235ae3a0139609`.
+
+## Attempt-1 verdict and attempt-2 brief
+
+Astra LOW returned **ATTEMPT-1 FAIL / SOURCE ASSESSMENT PASS** at exact clean
+pushed checkpoint `0742bc172369d40d8a3a5a514bca05d1cbb73053`, authoritative
+`origin/main` `acd625d72a57f83f50f26279717464744504b4c4`, and synchronized
+tracker `576cded546d5d6dc438f769e6b37fe97ab1b5884`. GitHub parity holds.
+The frozen source/prefix/formatted identities, exact extraction, path fence, and
+nine ordered tests agree; formatter status is 0. Gate 1 failed because its
+new-file matcher requires four leading spaces although correctly extracted tests
+begin at column zero. Gates 2-8 are absent. The attempt-1 identities file
+correctly distinguishes authoritative `origin/main` from the primary checkout's
+stale local `main`. Attempt 1 supplies no gate credit.
+
+Attempt 2 is qualification-only. Preserve every attempt-1 evidence byte and
+freeze repository source at:
+
+- `crates/builtins/src/lib.rs` SHA-256
+  `75198efb88ad2c52f31fff37a22135780393a838551933abe697e7646252dfe4`;
+- `crates/builtins/src/tests.rs` SHA-256
+  `5c2be93ef98b1d890d34e0900407d30f68dd2bf262afca617c235ae3a0139609`.
+
+Only this spec may change in Git. Require fresh literal path
+`/tmp/issue-builtins-tests-attempt2-evidence` absent including symlinks before
+creation. Persist clean HEAD/upstream/authoritative `origin/main`, exact Git
+status, frozen source identities, and the attempt-1 directory's deterministic
+path/size/SHA-256 snapshot before qualification. Read back and hash each literal
+script before execution.
+
+Correct the transform proof so its test-name expression permits any leading
+whitespace in both the persisted inline body and formatted extracted file,
+requires exactly nine names, and compares their ordered lists. Preserve the
+exact original reconstruction, prefix/declaration, deindent, formatted-byte, and
+source-hash checks. Format only a fresh reconstructed copy with the pinned
+formatter; do not format repository source again.
+
+Forbidden-construct searches must capture `rg` status explicitly: status 1 is
+the required no-match result, status 0 is a prohibited match, and status 2 or
+higher is a search failure. `! rg` is forbidden because it masks search errors.
+Run all eight original gates fresh once in order with direct literal command,
+separate-stream, and numeric-status records. Stop without correction or rerun on
+any failure. Gate 8 explicitly requires the two frozen source hashes, exact
+three-path branch diff, and unchanged attempt-1 snapshot. No prior gate or review
+credit carries and no recursive evidence ledger is required.
+
+A clean pushed amendment and fresh Astra LOW attempt-2 scope PASS are required
+before sole Luna HIGH `issue675_luna_impl` resumes. Only the spec may change in
+Git. No source formatter, production, artifact, AudioWorklet, pin, timing, or
+performance work is authorized.
