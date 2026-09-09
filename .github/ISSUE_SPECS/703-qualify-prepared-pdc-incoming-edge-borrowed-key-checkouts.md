@@ -148,3 +148,31 @@ Closure requires the artifact peer decision, exact reviewed PR qualification,
 guarded live-head/base merge, post-main qualification, GitHub synchronization,
 and eligible clean-worktree cleanup. CP1 remains partial; no original open
 finding starts before this source qualification and its artifact peer finish.
+
+## Attempt 1 FAIL — procedural preflight failure
+
+Astra XHIGH authenticated the exact scope and exclusive executor lease. The
+first preflight receipt `call_wdRm...` is recorded in `c833f4` and returned
+actual exit 1 at `18:08:37.518Z` because a custom preflight parser raised
+`KeyError: source_head` against the lease field `candidate_head`. The executor
+stopped immediately: no retry, root, baseline, gate, or source action occurred;
+one attempt was consumed with zero credit and the lease was released. The
+original session and rollout lines govern details not reproduced here.
+
+## Attempt 2 rebrief
+
+Two attempts remain. The prepared candidate and detached baseline checkouts are
+unchanged. After a fresh Astra XHIGH SCOPE PASS, use fresh a2 roots with the
+same five names as Attempt 1, replacing `a1` with `a2`, and require absence
+including dangling symlinks before authorization. Do not use a custom lease
+parser or wrapper: invoke direct commands with the literal absolute candidate
+and baseline paths and heads, preserving each structured launch/completion
+result and poll receipt.
+
+The fresh scope revalidates both checkout paths, exact heads/source bytes, clean
+state, title/body parity, dependencies, and no relevant process. Only after
+that PASS does the executor create the evidence root, capture one fresh
+baseline manifest, and run all twelve gates once in the stated order. Stop at
+the first setup, launch, assertion, or gate failure; do not retry or mutate
+either prepared checkout, source, branch, artifact, or pin. No inherited
+#701/#702 credit applies.
