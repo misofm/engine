@@ -211,3 +211,27 @@ reconstruction. Attempts 1 and 2 remain consumed failures. Frozen product
 corrected, separately reviewed #687 artifact-applicability scope. No allocation,
 timing, performance, artifact execution, pin, PR, merge, or delivery authority
 attaches.
+
+## Artifact dependency disposition — blocked
+
+#687 and its bounded successor #688 both exhausted three attempts without a
+qualified ordinary post-pin rebuild. #688's unmerged promotion checkpoint is
+preserved, but its final builder left only four of six files and no durable
+status or streams. Astra LOW returned final FAIL and granted no pin, PR, merge,
+or delivery credit.
+
+The product source remains qualified at `276ffb6097a84088e3b5f4a16892a33bca9e26fb`
+but is undelivered. #685 stays open and CP1 stays partial. The controlling #688
+scope forbids retry or another successor without new owner instruction; do not
+merge either source or pin branch under the current authority.
+
+## Owner-directed #692 delivery dependency
+
+The preceding no-merge conclusion is historical and is superseded by the
+owner's continuing instruction. #687/#688/#690 failures, including #690's three
+consumed attempts, retain no retroactive credit. #692 may deliver only on
+#688's independently verified limited disposition, immutable product/pin bytes,
+Astra XHIGH exact-head review, required PR qualification, guarded merge, and
+post-main qualification. No rerun, product/pin edit, fabricated evidence, or
+performance claim is authorized. #685 remains source-qualified and undelivered
+until #692 merges and post-main qualification passes.

@@ -311,10 +311,10 @@ no command, path, gate, or attempt state.
 
 ## Owner delivery reconciliation
 
-The earlier #690 hard-stop snapshot was incomplete. The five preserved
-builder/gate status files contain the phrase `recorded status zero`; that is a
-recorded field, never an actual command exit or success result. The preserved
-intervals are builder 11:33:18–11:34:53 UTC, gate 1 11:35:02–11:36:07, gate 2
+The earlier #690 hard-stop snapshot was incomplete. The five preserved status
+files each contain `0`; these are recorded status values, not authenticated exit
+results or success evidence. The preserved intervals are builder
+11:33:18–11:34:53 UTC, gate 1 11:35:02–11:36:07, gate 2
 11:36:14–11:37:08, gate 3 11:37:17–11:37:31, and gate 4 11:37:38–11:38:15.
 
 Hard-stop commit `ceafeda5` was recorded at 11:35:24 and GitHub close at

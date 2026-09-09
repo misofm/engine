@@ -50,9 +50,9 @@ makes no timing, allocation, performance, or sound-quality claim.
 no retroactive attempt, artifact, qualification, promotion, or delivery credit.
 The preserved evidence is unchanged.
 
-The five preserved builder/gate status files contain the literal phrase
-`recorded status zero`. This phrase is a recorded field, never an observed
-command exit or success result. The preserved chronology is:
+The five preserved status files each contain `0`; these are recorded status
+values, not authenticated exit results or success evidence. The preserved
+chronology is:
 
 | phase | recorded interval (UTC) |
 | --- | --- |
