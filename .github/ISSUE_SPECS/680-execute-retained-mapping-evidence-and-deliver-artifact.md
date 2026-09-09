@@ -177,6 +177,16 @@ will use
 the exact full SHAs are supplied only by a later synchronized exact-head SCOPE
 PASS. Neither invocation is authorized by this revision brief.
 
+Revision 1 completed without execution while checkpoint `93dbc383` was
+strengthening its authority and manifest contract. Root sealed the resulting
+ordinary file mode `0444`: 31,703 bytes, SHA-256
+`f4c44699e8c3ea108f4d35021dee918adf3030de234658b1520637d389a24e36`.
+No attempt-2 or control path was created. Do not invoke or modify these bytes.
+Astra LOW static review is required. Coordinator inspection already finds that
+the file still defines and enforces `AUTHORIZATION_HEAD=ad042156...`, accepts no
+tracker-head argument, and makes the synthetic status-0 case expect rejection;
+therefore it does not yet satisfy the current revision brief.
+
 The prepared runner must encode complete literal argv/cwd/start/finish/numeric-
 status/separate-stdout/separate-stderr capture, exclusive creation, stop-on-first-
 failure sequencing, and the exact verifier self-test, production, manifest, and
