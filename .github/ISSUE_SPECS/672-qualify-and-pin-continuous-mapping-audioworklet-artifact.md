@@ -480,3 +480,16 @@ paths are absent including symlinks. Only Luna HIGH `/root/issue583_luna_impl`
 may preserve/reconcile attempt 1, use its baseline read-only, and execute the
 fresh candidate and remaining gates once. Stop on first failure. No baseline
 rebuild, promotion, post-pin work, PR, or merge is authorized.
+
+## Pre-pin attempt 2 — FAIL
+
+Luna HIGH ran at exact clean `3c6add6c68a5c47c235b332c35d307d49d0b3dfd`.
+Fresh preflight, attempt-1 reconciliation, verifier identity/self-test, capture
+controls, both candidate exports, and exact 12,195-path verification passed; tar
+hashes matched. The cleanup invoked `unlink` with two operands, returned an error,
+and left both temporary tar streams preserved. Luna stopped immediately. No
+candidate build, overlay, install, browser, later gate, correction, or retry ran;
+the repository remained clean. Preserve all attempt-2 paths unchanged. Attempt 2
+is consumed. Astra LOW failure review and a frozen final-attempt scope are
+required before further execution. No promotion or compiler/generated payload
+commit is authorized.
