@@ -448,3 +448,34 @@ Only Luna HIGH `/root/issue583_luna_impl` may execute this final attempt once
 after fresh preflight. Any failure exhausts #678. No reinstall, rebuild, export,
 copy, lineage regeneration, cleanup, promotion, post-pin work, PR, or merge is
 authorized.
+
+## Final attempt 3 failure and hard stop
+
+Luna HIGH ran final attempt 3 at exact clean authorization `6a19f785`. Fresh
+preflight/reconciliation, capture controls, the initial 12,195-path overlay
+verifier, the Playwright API executable check, all eight remaining gates, and all
+post-gate identity checks returned 0. The browser command selected `all`, matrix
+checking, and mutation self-tests; Chromium 151.0.7922.34, Firefox 153.0, and
+WebKit 26.5 passed. The candidate artifact, tracked source, three overlays,
+preserved target, package manifests/locks, and source-local target absence
+remained exact.
+
+The final frozen overlay verifier returned 1 before manifest generation because
+the authorized SDK package check generated 77 additional files under `sdk/dist/`,
+a root that verifier did not allow. Luna stopped without correction or retry. No
+repository edit, manifest, promotion, or cleanup occurred.
+
+Astra LOW independently returned **ATTEMPT-3 FAIL / #678 EXHAUSTED**. No tracked
+path is missing; independently compared tracked bytes differ only on the three
+authorized lineage surfaces. The failure is an incomplete scope allowance for
+expected SDK output, not demonstrated product corruption. Attempts 1-3 are
+consumed. Close #678 without PRE-PIN PASS, promotion, PR, merge, or CP8 delivery
+credit. No fourth or renamed #678 attempt is permitted.
+
+A smallest evidence-disposition and delivery-completion successor may classify
+and hash the exact 77 SDK outputs against their generating scripts and retained
+records, independently reprove tracked/overlay/candidate/preserved-target
+identities, assess capture completeness, and finalize a new manifest without
+altering predecessor evidence. Carry all eight successful gates without rerun.
+Separate evidence PASS and a separately reviewed promotion/post-pin amendment
+remain mandatory.
