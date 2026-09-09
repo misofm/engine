@@ -357,3 +357,25 @@ created output directory immediately before invocation. Only Luna HIGH
 invocation after the specified fresh preflight. Stop on failure without retry.
 No ordinary build, retained artifact/compiler payload, candidate qualification,
 pin change, browser/SDK execution, commit, or push is authorized.
+
+## Artifact identity probe result — DRIFT
+
+Luna HIGH ran the authorized repin-report command exactly once at clean
+HEAD/upstream `49f4161fc6e4b1f5d2c2107ca36353aebcd89dc4`. It returned status
+0 and exact stdout digest
+`93108e9407f4cd343b644e9e821cfd3ca80c3667983a35db7f2e5c3228934531`
+plus LF. Complete stderr contains normal Cargo compilation progress and no
+builder error. The output directory remained empty and non-symlink, the tree
+remained clean, and the delivered pin remained
+`580e3cb4cd11e996598103f27b02d94559f6ef7ad57ef22732d18c0b4f98be10`.
+The self-excluding evidence manifest verifies with status 0 and SHA-256
+`acf943231631e0caa21761860c6183819cfb7a22978fb26d417fef8cdfb01a48`.
+Root independently reverified the manifest, stream shape, stderr, empty output,
+clean exact head/upstream, and unchanged pin. No artifact, Cargo target, LLVM IR,
+assembly capture, or other compiler payload enters Git.
+
+The candidate identity differs from the delivered pin, so prior artifact
+qualification cannot carry. Do not repin or open a pull request. A separately
+numbered artifact-qualification successor must inherit this source chain after
+one of the two active issue slots (#670/#671) clears. Astra LOW must first review
+this drift disposition.
