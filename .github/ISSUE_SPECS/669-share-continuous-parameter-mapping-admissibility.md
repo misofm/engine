@@ -282,3 +282,32 @@ diagnostic and byte-identity controls, and corrected manifest protocol address
 the attempt-1 blockers. Run the frozen eleven commands once in order and stop at
 the first unexpected failure without correction or retry. Preserve attempt-1
 records unchanged. No artifact, pin, PR, or merge work is authorized.
+
+## Luna HIGH attempt 2 checkpoint — FAIL
+
+Luna recorded the required clean pre-edit state at authorization head
+`2d0300ab4b9092e53d50d66936ca0b5418362aaa`, with the frozen production hashes,
+safe environment fields, preserved attempt-1 paths, absent attempt-2 paths, and
+successful numeric 0/1 capture controls. It changed only inline tests in the
+two owned source files; production helper, callers, and imports remained
+unchanged.
+
+Gate 1, `cargo test --locked -p effect-contract`, returned 0. Gate 2,
+`cargo test --locked -p effect-package`, returned 101 at compile time because
+the new public accepted-case loop inferred its all-literal `minimum` binding as
+ambiguous `{float}` before calling `minimum.to_bits()`. Luna stopped without a
+correction, retry, later gate, manifest, spec edit, commit, or push. Attempt 2 is
+consumed.
+
+The failed evidence remains unchanged under
+`/tmp/issue669-attempt2-evidence` and target output under
+`/tmp/issue669-attempt2-target`. Because the tranche does not compile, root did
+not commit it. Root preserved the exact two-file binary patch at
+`/tmp/issue669-attempt2-failed-source.patch`, SHA-256
+`aaa52b34a78d7a4dab05eb4011c708dd2835bc2430927b1a8f6d4ffeed46ac50`,
+verified that it reapplies cleanly, and restored the branch to the last
+buildable production checkpoint. The failed source-file hashes were
+`2154384ec6caec2b7fa09a11413cd6bb3859eba021f76993c5d3dd3f8a170ffb` and
+`01db0ea4a14c6a070ad6c81d8b6ecbe1a17132c28f9513cffe9b9ec82154341b`.
+Astra LOW must review the failure and rule on the final bounded attempt before
+any test correction occurs.
