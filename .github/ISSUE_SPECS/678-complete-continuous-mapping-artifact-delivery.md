@@ -334,3 +334,107 @@ match and all seven fresh paths are absent including symlinks. Only Luna HIGH
 `/root/issue583_luna_impl` may execute the amended attempt once after fresh
 preflight. Stop at the first failure. No rebuild, export, cleanup, promotion, or
 repetition of completed gates is authorized.
+
+## Attempt 2 failure and final attempt 3
+
+Luna HIGH ran attempt 2 at clean authorization `77626bd2`. Checked-directory
+target census and streamed identity passed with preserved target digest
+`420c7c4db6427802163e3d08deb8022327722fadbc6bb4178f13212506257151`.
+The fresh copy and 12,195-path overlay verification, lineage/artifact/matrix
+checks, capture controls, locked SDK install, locked qualification install, and
+Playwright browser install returned 0. The executor-written postcheck then
+assumed executables under `playwright-core/.local-browsers`, returned 1, and
+stopped. Playwright 1.62.1 actually installed executable Chromium, Firefox, and
+WebKit under `/home/bl/.cache/ms-playwright/`. No resource/PCM, SDK/package, or
+browser qualification gate ran.
+
+Astra LOW independently returned **ATTEMPT-2 FAIL**. Attempt 2 is consumed. The
+wrong-path check is not an installation failure. Preserve all attempt-2 paths and
+bytes. Also preserve these provenance defects: preflight was written after fresh
+path creation; its symlink field contains an unevaluated shell expression;
+command records generally omit actual cwd/start/finish; and the preinstall record
+shows `CARGO_TARGET_DIR` unset. Both target census commands returned 0. Reusable
+observations retain those limitations and supply no downstream qualification
+credit.
+
+Final attempt 3 uses only these fresh paths:
+
+- `/tmp/issue678-attempt3-preflight.txt`;
+- `/tmp/issue678-attempt3-evidence`;
+- `/tmp/issue678-attempt3-target`;
+- `/tmp/issue678-attempt3-manifest-record.txt`;
+- `/tmp/issue678-attempt3-manifest-verify.stdout`;
+- `/tmp/issue678-attempt3-manifest-verify.stderr`;
+- `/tmp/issue678-attempt3-manifest-verify.status`.
+
+Before creating anything, require all seven absent including dangling symlinks,
+the feature clean at its pushed authorization head, current main exact, and no
+process owning the named source/target/artifact/evidence/browser resources.
+Write literal evaluated path existence and symlink results plus exact head/
+upstream/main/merge-base, tool versions, and relevant environment values to the
+fresh external preflight file before creating the evidence directory. Then record
+complete SHA-256/path/type/mode/size censuses
+of every attempt-1/2 and #672 path, candidate artifact, frozen verifier, source,
+configuration, package manifest/lock, installed dependency, and browser cache
+identity. Exercise fresh captured status-0/status-1 controls. Every command gets
+literal argv, actual cwd, start/finish, numeric status, and separate complete
+temporary stdout/stderr.
+
+Do not reinstall, rebuild, export, recopy, regenerate lineage, or mutate any
+preserved path. Reconcile the attempt-2 target/source/artifact/verifier/install
+observations read-only. Run the frozen overlay verifier once against
+`/tmp/issue678-attempt2-candidate-source` with the full repository authority and
+`8708c9b998a484d49ccb17a803e79540ca13fcd6`; require 12,195 paths and only the
+three overlays plus two ordinary dependency roots. Require no source-local
+`target/`, exact candidate hashes, exact package manifests/locks, and preserved
+#672 target digest above.
+
+From `/tmp/issue678-attempt2-candidate-source`, run this exact Playwright API
+check once:
+
+```bash
+node - <<'NODE'
+const fs = require('node:fs');
+const pw = require('./hosts/host-web/qualification/node_modules/playwright');
+const pkg = require('./hosts/host-web/qualification/node_modules/playwright/package.json');
+if (pkg.version !== '1.62.1') process.exit(1);
+for (const [name, browser] of [['chromium', pw.chromium], ['firefox', pw.firefox], ['webkit', pw.webkit]]) {
+  const executable = browser.executablePath();
+  fs.accessSync(executable, fs.constants.X_OK);
+  console.log(`${name}\t${executable}`);
+}
+NODE
+```
+
+Require status 0, exactly one nonempty absolute executable path per named browser,
+each executable at the recorded path, and no preserved-path mutation.
+
+Before the first remaining gate, export and record
+`CARGO_TARGET_DIR=/tmp/issue678-attempt3-target`; every remaining command record
+must repeat that exact environment value. Run only these unexecuted commands once
+from the preserved attempt-2 candidate source, stopping on the first failure:
+
+1. `python3 -B scripts/check-browser-expected-resources.py --artifacts /tmp/issue672-attempt3-candidate-artifact`;
+2. `bash scripts/test-web-audioworklet.sh`;
+3. `python3 -B scripts/check-sdk-deletions.py`;
+4. `python3 -B scripts/check-sdk-deletions.py --self-test`;
+5. `bash scripts/check-sdk-types.sh`;
+6. `bash scripts/check-sdk-headless.sh /tmp/issue672-attempt3-candidate-artifact`;
+7. `bash scripts/sdk-package.sh check /tmp/issue672-attempt3-candidate-artifact`;
+8. `npm --prefix hosts/host-web/qualification run qualify -- --artifacts /tmp/issue672-attempt3-candidate-artifact --browser all --check-matrix --self-test-mutations`.
+
+After each command require feature/source/overlay/artifact/preserved-target/
+package identities unchanged and source-local `target/` absent. Require all
+fresh Cargo output only under the external attempt-3 target. After the last gate,
+run the frozen overlay verifier and all identity checks once more and complete
+their evidence records. Then generate the evidence directory's self-excluding
+manifest exactly as previously scoped. After manifest generation write only the
+four declared external manifest record/verification files;
+require manifest verification status 0 and matching row/check counts.
+
+Stop at the first unexpected failure without correction or retry. Any failure
+exhausts #678; no fourth or renamed attempt is permitted. Repository promotion,
+post-pin work, PR, merge, cleanup, compiler dump, or generated-payload commit
+remains unauthorized pending final PRE-PIN PASS and a separately reviewed
+promotion amendment. Fresh Astra LOW final-attempt scope PASS is required before
+Luna execution.
