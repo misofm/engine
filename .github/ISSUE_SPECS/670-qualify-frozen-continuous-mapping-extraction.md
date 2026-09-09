@@ -344,3 +344,16 @@ incorrect empty-stderr requirement: the unchanged Cargo builder writes normal
 progress to stderr. This correction retains and inspects complete stderr without
 suppressing it, and explicitly checks the created output directory is existing,
 empty, and non-symlink immediately before invocation. No probe ran.
+
+## Corrected artifact-probe scope review — PASS
+
+Astra LOW returned **ARTIFACT-PROBE SCOPE PASS** at exact clean pushed
+HEAD/upstream `bdc8051fd81fb5052e8c131d7841a16b39d2037e`; synchronized tracker
+HEAD/upstream was `395c1de18e3df46b1b9e7add8ef713f588ce11f3` and GitHub
+#670/#559/#560 matched their local specs. Both fresh probe paths were absent,
+including symlinks. The corrected scope preserves complete stderr and checks the
+created output directory immediately before invocation. Only Luna HIGH
+`/root/issue583_luna_impl` is authorized to perform the one declared repin-report
+invocation after the specified fresh preflight. Stop on failure without retry.
+No ordinary build, retained artifact/compiler payload, candidate qualification,
+pin change, browser/SDK execution, commit, or push is authorized.
