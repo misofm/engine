@@ -322,3 +322,70 @@ executes the Attempt 2 probe and qualification and returns a separate verdict;
 Luna HIGH is limited to the post-probe overlay. Any dispatched Attempt 2
 preflight failure consumes it, even before roots or workload; no inherited A1
 credit or artifact authority exists.
+
+## Attempt 2 PROCEDURAL SETUP FAIL — consumed with zero credit
+
+The original executor rollout is
+`/home/bl/.codex1/sessions/2026/09/09/rollout-2026-09-09T14-49-19-01a086a5-0f2a-7c13-8290-187cb9a4d7ed.jsonl`,
+line 2464. Preflight call `call_PHCgadKgMwIz411tmD4YEsUl`, chunk `15d33d`,
+ran from `20:14:25.961Z` through `20:14:26.272Z` with actual exit 0. Setup
+call `call_U3KUSjfokRteAMJKJkGYFTGW`, chunk `5540ec`, ran from
+`20:14:54.295Z` through `20:14:54.513Z` with actual exit 1. The executor
+manually inserted one extra `d` while comparing the spec SHA; the checked-in
+spec bytes matched the lease. Both calls used the correct absolute workdir and
+`login:true`. No directory, builder, session, poll, retry, repository mutation,
+or GitHub mutation followed, and all nine A2 roots remained absent.
+
+Preserve lease SHA-256 `4cce9d1a36fb13d62f277abfd203d1bee6fefb9f4bbfea12ceb231d78eecdf4a`,
+freeze `2de1568a592819f2c3fe41a706afc9ccf111f8e9d5d619125dc97b1c88f23ead`,
+release `defd7e8743209c8cfc7fe7ee743d51d23b227587bba0eaaecffe798a024cb136`,
+failure record `4138bd7a3762f44f4aa9aa9985c45da94cbb5a054be8f92e2b68d3bb644ac4c0`,
+and companion receipt authority unchanged. Attempt 2 is consumed with no probe,
+artifact, qualification, product, or delivery credit.
+
+## Final Attempt 3 rebrief
+
+A1 and A2 are consumed. One attempt remains; any dispatched preflight, setup,
+evidence, workload, or qualification failure hard-stops #705. There is no
+fourth attempt or successor. Preserve both failed checkouts and all predecessor
+records. The active paths are:
+
+```text
+Preparation:
+  /home/bl/misofm/engine-cp1-pdc-artifact-isolated-705
+E1, detached at the newly published containing-brief commit:
+  /home/bl/misofm/engine-cp1-pdc-artifact-705-a3-probe
+Overlay, only after Phase 1 PASS and release:
+  branch codex/qualify-pdc-artifact-overlay-705
+  /home/bl/misofm/engine-cp1-pdc-artifact-overlay-705
+E2, detached at the exact published overlay commit:
+  /home/bl/misofm/engine-cp1-pdc-artifact-705-a3-qualify
+```
+
+Use exactly these fresh roots, all absent including dangling symlinks before E1
+preparation and executor dispatch:
+
+```text
+/tmp/cp1-pdc-artifact-705-a3-probe-evidence
+/tmp/cp1-pdc-artifact-705-a3-probe-tmp
+/tmp/cp1-pdc-artifact-705-a3-probe-output
+/tmp/cp1-pdc-artifact-705-a3-probe-target
+/tmp/cp1-pdc-artifact-705-a3-qualify-evidence
+/tmp/cp1-pdc-artifact-705-a3-qualify-tmp
+/tmp/cp1-pdc-artifact-705-a3-artifact
+/tmp/cp1-pdc-artifact-705-a3-qualify-target
+/tmp/cp1-pdc-artifact-705-a3-hermetic-target
+```
+
+Publish and synchronize this rebrief before root creates E1. Astra XHIGH then
+scopes and executes verification; a separate Astra XHIGH reviewer returns each
+adversarial verdict. Luna HIGH may only prepare the mechanical overlay after
+probe PASS and lease release. Generate identity fields directly from Git and
+file bytes. Parse each lease as data, reject duplicate or missing keys, validate
+hash lengths, and compare computed values to parsed fields. Never manually
+retype hashes, source a lease as shell code, or derive roots by searching this
+spec. Freeze the literal checkout and command paths. Retain the established
+two-phase gates, exact order, real exit propagation, one probe, directory order,
+first-failure stop, and one matrix regeneration during overlay preparation;
+qualification only checks committed lineage. CP1 and original-finding
+accounting remain unchanged after this bounded delivery.
