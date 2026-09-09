@@ -378,3 +378,11 @@ GitHub parity, attempt accounting, evidence limitations, no-artifact ruling, and
 #672 disjointness pass. Root may open one PR closing #671 only; broader RT17
 remains open. Required CI and a fresh guarded head/current-main review precede
 merge.
+
+## Pull request
+
+PR #673 is open from `codex/extract-graph-program-tests` to `main`, closing #671
+only. Required qualification must pass at the final exact head. A fresh Astra LOW
+guarded review of that head and live main is required immediately before merge,
+followed by post-main qualification, GitHub/tracker synchronization, and clean
+delivered-worktree removal.
