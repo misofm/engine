@@ -330,3 +330,36 @@ and must stop permanently at the first failure or identity/path mismatch. No
 retry, predecessor mutation, committed generated output, repository promotion,
 pin change, PR, merge, or delivery is authorized. Success qualifies candidate
 bytes only and requires Astra LOW adversarial evidence review.
+
+## Hard-final attempt 3 verdict — FAIL; #687 hard stop
+
+The named Luna HIGH executor passed its initial in-memory checks, then stopped
+before persistence when `/tmp/issue687-stage2-source` appeared concurrently. It
+created no record and ran no builder, Cargo, Node, npm, browser, or qualification
+command. Another actor created the stage-2 source/artifact/evidence paths and ran
+only the ordinary builder. No relevant process remains. Preserve every path and
+record; do not remove, overwrite, append, repair, reconstruct, or rerun them.
+
+Astra LOW verified the preserved source at exact `c9ccf6ac` with only the three
+scratch overlays. Six candidate files exist: Wasm SHA-256 is
+`31c882af32959c0164ae069b5ba63a5d5e7890b024d07c04bb75afc06e66cd4b`,
+and the other five match the frozen authority. That byte observation receives no
+qualification or promotion credit. The builder lifecycle evidence conflicts:
+`04-gate-01-builder.json` reports completion, while the post-interruption record
+and terminal manifest say status/lifecycle was not established. Preserve both
+without choosing the favorable account or reconstructing provenance. The
+builder record SHA-256 is
+`df10c6fbd9e44fc4f4c2648a0813195989d3f459c179f737e5086f1f2b010ac9`;
+the terminal manifest SHA-256 is
+`6366216e4b4777eeea01e7089151660a93587c14d08979a5f0382761876e9d50`.
+No later static, resource, hermetic, SDK, browser, matrix, or diff qualification
+gate is evidenced.
+
+Astra LOW returned **ATTEMPT-3 FAIL**. Attempts 1–3 are exhausted. #687 is
+hard-stopped with no continuation, builder rerun, evidence repair, promotion,
+pin edit, or disguised fourth attempt. A genuinely new stateless successor may
+only adopt the preserved exact six-file candidate and qualify the never-run
+remaining gates without rebuilding or retroactively passing #687. It requires
+frozen byte/provenance limits, fresh evidence ownership, and Astra LOW scope PASS
+before execution. This failed worktree, branch, scratch source, artifact, targets,
+and evidence must remain preserved.
