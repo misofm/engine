@@ -61,7 +61,7 @@ Run once at the coherent candidate checkpoint:
 6. `cargo fmt --all --check`, `bash scripts/check-graph-policy.sh`, `bash scripts/check-workspace-policy.sh`, and `git diff --check`.
 7. Release library checks for `wasm32-unknown-unknown` with `RUSTFLAGS='-C target-feature=-simd128'` and `RUSTFLAGS='-C target-feature=+simd128'`, using separate external targets. Do not reopen native AArch64 qualification.
 
-Existing library suites supply the transactional caps, sidechain, scalar dispatch, resource boundaries, owner return, and 100-process determinism coverage. No new test or harness is required for this type-and-borrow substitution.
+Existing library suites supply the transactional caps, sidechain, scalar dispatch, resource boundaries, owner return, and 100-repeat in-process determinism coverage. No new test or harness is required for this type-and-borrow substitution.
 
 Astra XHIGH adversarially verifies source/evidence. Reject any scope growth, escaping borrow, textual/address identity, changed counting/arithmetic/diagnostics/caps, failed gate, identity drift, or unsupported allocation/performance claim. After source PASS, Sol may create one separately numbered lane-B AudioWorklet applicability/pin peer in the second slot. Source closure requires that peer's decision, exact reviewed PR qualification, guarded merge, post-main aggregate qualification, GitHub synchronization, and eligible clean-worktree cleanup. Three failed implementation attempts hard-stop without weakened gates or a disguised fourth attempt.
 
