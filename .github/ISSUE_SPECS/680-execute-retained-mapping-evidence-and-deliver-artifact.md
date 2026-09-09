@@ -240,6 +240,16 @@ production invocation is
 `python3 -B /tmp/issue680-attempt2-runner-revision2.py --authorization-head <reviewed-full-feature-sha> --tracker-head <reviewed-full-tracker-sha> --executor-id /root/issue583_luna_impl`.
 The exact heads are supplied only by a later synchronized SCOPE PASS.
 
+The earlier Luna HIGH preparation completed inertly while checkpoint `07c4afc7`
+was transferring the same lease. It exclusively created the sole revision-2
+path; root sealed the ordinary file mode `0444`, 33,524 bytes, SHA-256
+`2f6ec725d4b6d3e74f2587f0114f065a737976ff33a208d8e0e74cab91f193d5`.
+Nothing was invoked and all attempt-2/control paths remain absent. The transferred
+preparer must not overwrite or append to this file. Astra LOW must review these
+exact bytes. Coordinator inspection flags one likely impossible self-reference:
+`validate_lease_rows` requires the supplied tracker commit SHA to occur inside
+both tracker files committed by that same SHA.
+
 The prepared runner must encode complete literal argv/cwd/start/finish/numeric-
 status/separate-stdout/separate-stderr capture, exclusive creation, stop-on-first-
 failure sequencing, and the exact verifier self-test, production, manifest, and
