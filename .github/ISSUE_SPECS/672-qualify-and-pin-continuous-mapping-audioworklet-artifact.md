@@ -378,3 +378,14 @@ Root merged that exact delivered main conflict-free at clean pushed checkpoint
 remain exact. This amendment freezes the integrated checkpoint as candidate and
 the delivered commit as baseline/current main throughout the literal commands.
 Fresh Astra LOW scope PASS is required before execution resumes.
+
+Astra LOW returned integrated-base **SCOPE PASS** at exact clean pushed feature
+`c29329e53e0e094679fdd03cf98bd605cee3b93b` and tracker
+`25a1a3c3a6c70dea0382931a6b626e799b5b00b1`; GitHub bodies match. The
+merge parents, unchanged accepted source hashes, literal baseline/candidate
+exports, verifier authority, and candidate lineage are consistent. All twelve
+paths remain absent including symlinks. Only Luna HIGH
+`/root/issue583_luna_impl` may execute the frozen pre-pin sequence after immediate
+fresh preflight. Stop at any unexpected failure. The earlier precondition stop
+supplies no workload credit; repository promotion and post-pin work remain
+separately gated.
