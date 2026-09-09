@@ -267,3 +267,18 @@ target output, `.ll`, `.s`, or full compiler stream.
 Attempt 2 remains unauthorized until this amendment is clean, pushed,
 synchronized to GitHub and the trackers, and receives fresh Astra LOW scope
 PASS. No artifact, pin, PR, or merge work is included.
+
+## Astra LOW attempt 2 scope review — PASS
+
+Astra LOW returned **ATTEMPT-2 SCOPE PASS** at exact clean feature
+HEAD/upstream `ffaa09ea0a9134a9dd6a247579938dbd9a3c43f5`, against main and
+merge-base `7d16d9c9752c9ac2d31e69008fe075df86ce3c26`. GitHub #669/#559/#560
+matched, and all five declared attempt-2 paths were absent including symlinks.
+
+Only Luna HIGH `/root/issue583_luna_impl` is authorized to repair the inline
+tests and their mechanical formatting. Production helper, callers, and imports
+remain byte-frozen. The independent 36-case public typed/borrowed matrix, exact
+diagnostic and byte-identity controls, and corrected manifest protocol address
+the attempt-1 blockers. Run the frozen eleven commands once in order and stop at
+the first unexpected failure without correction or retry. Preserve attempt-1
+records unchanged. No artifact, pin, PR, or merge work is authorized.
