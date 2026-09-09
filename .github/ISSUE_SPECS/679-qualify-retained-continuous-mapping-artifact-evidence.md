@@ -2974,10 +2974,24 @@ Attempt-3 fresh paths are:
 - `/tmp/issue679-attempt3-verifier-control`.
 
 The external preparation draft is `/tmp/issue679-verifier-attempt3-draft.py`.
-Its content hash and size are reported to Astra LOW for technical DRAFT review;
-the attempt-3 verifier bytes are intentionally not embedded in this spec until
-the separately authorized self-test has completed and Astra LOW has reviewed
-its terminal result.
+At clean feature `9f0a0031aad40428f57d57c832ea3b5f37dfca3d`, Astra LOW
+returned **STATIC DRAFT PASS** for its exact SHA-256
+`d3f0803c1a35fe6bfeb0937c944476edb23c9c223c9404bb3d05d0d18618c27b`,
+size 72,262, and confirmed the retained lowercase gate-7 marker plus the aware
+equal/descending/timezone-free controls. No command ran during that review.
+Luna HIGH `/root/issue583_luna_impl` is now authorized to run only this exact
+isolated self-test once:
+
+```text
+TMPDIR=/tmp/issue679-attempt3-verifier-control python3 -B /tmp/issue679-verifier-attempt3-draft.py --self-test
+```
+
+Immediately before the command, require the draft to be an ordinary non-symlink
+file with the exact hash and size and require the control path absent under both
+`test -e` and `test -L`. Require status 0, a terminal self-test PASS line, exact
+post-run draft identity, and complete control-path cleanup. Do not run production
+or read retained evidence. The attempt-3 verifier bytes remain outside this spec
+until Astra LOW reviews that terminal result.
 
 All seven must be absent including dangling symlinks before preparation and
 again before production. Recheck every attempt-1 and attempt-2 hash. After exact-
