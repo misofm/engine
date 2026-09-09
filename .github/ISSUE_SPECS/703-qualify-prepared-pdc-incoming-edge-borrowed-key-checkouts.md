@@ -187,6 +187,48 @@ in the frozen order. Stop on every preflight, setup, launch, assertion, or gate
 failure. No checkout creation, source edit, inherited credit, retry, artifact,
 PR, or merge is authorized.
 
+## Attempt 2 FAIL and final attempt 3
+
+Astra XHIGH records **Attempt 2 FAIL — command-environment failure; second
+attempt consumed**. The original invocation and result in
+`/home/bl/.codex1/sessions/2026/09/09/rollout-2026-09-09T14-49-19-01a086a5-0f2a-7c13-8290-187cb9a4d7ed.jsonl`
+at line 1518 authenticate chunk `1a03f6`, actual exit 127, with no session or
+poll. Its non-login `PATH` omitted `/home/bl/.cargo/bin`; stderr is
+`env: ‘cargo’: No such file or directory`. The shell ran, but Cargo did not.
+
+Lease read, preflight, evidence creation, and baseline identity setup passed.
+No baseline output, candidate gate, retry, checkout/source/branch mutation, or
+later operation ran. Both prepared checkouts remain clean and every target root
+remains absent. The lease records release. Preserve the 11 data files plus their
+finite self-excluding manifest, whose SHA-256 is
+`4c8db9c28a7845e1dd0b08912f3e2e32d12f4b1dee63bba7e80ea91c4a6ebc6d`.
+The JSON `end` UTC is the later receipt-recording time; the original tool result
+returned at `18:18:51.718Z`. It supports no runtime-duration claim.
+
+Attempt 3 is final. It keeps both prepared checkouts and uses these fresh roots,
+absent including dangling symlinks before authorization:
+
+```text
+/tmp/cp1-pdc-incoming-final-a3-evidence
+/tmp/cp1-pdc-incoming-final-a3-baseline-target
+/tmp/cp1-pdc-incoming-final-a3-candidate-target
+/tmp/cp1-pdc-incoming-final-a3-wasm-scalar-target
+/tmp/cp1-pdc-incoming-final-a3-wasm-simd-target
+```
+
+After fresh Astra XHIGH exact-head SCOPE PASS and an exclusive lease, every
+command invocation uses `login:true`. Preflight directly requires
+`command -v cargo` to return `/home/bl/.cargo/bin/cargo` in both prepared
+directories. Every Cargo stage invokes the literal binary
+`/home/bl/.cargo/bin/cargo` with the unchanged flags and designated target.
+Capture one fresh baseline, then run all twelve gates once in the frozen order.
+
+Preserve complete structured setup, launch, completion, and poll receipts plus
+exact identities, environment, timestamps, and streams. Stop immediately on
+every preflight, setup, launch, assertion, or gate failure. There is no retry or
+fourth attempt. No checkout creation, source edit, inherited credit, artifact,
+PR, or merge is authorized.
+
 ## Attempt 2 FAIL — command-not-found; second attempt consumed
 
 Astra XHIGH authenticated the exact scope and lease. Setup receipt `fee2af`
