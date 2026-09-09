@@ -438,3 +438,13 @@ post-pin work, PR, merge, cleanup, compiler dump, or generated-payload commit
 remains unauthorized pending final PRE-PIN PASS and a separately reviewed
 promotion amendment. Fresh Astra LOW final-attempt scope PASS is required before
 Luna execution.
+
+Astra LOW returned **FINAL-ATTEMPT SCOPE PASS** at exact clean pushed feature
+`5257d5adf85cb64691dcbf2669389914832ddec6`, tracker
+`b9b2d35ce54a332ddda99aea869b90aff2d2c0f6`, and current main
+`df0b9b93636de36a7143da15b83444f280b65e6b`; GitHub #678/#559/#560
+match, #677 is closed, and all seven fresh paths are absent including symlinks.
+Only Luna HIGH `/root/issue583_luna_impl` may execute this final attempt once
+after fresh preflight. Any failure exhausts #678. No reinstall, rebuild, export,
+copy, lineage regeneration, cleanup, promotion, post-pin work, PR, or merge is
+authorized.
