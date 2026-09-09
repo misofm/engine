@@ -104,7 +104,7 @@ literal bytes, SHA-256, invocations, and controls before Luna runs it.
 ## Frozen verifier authorization checkpoint
 
 The exact LF-terminated verifier prepared for Astra LOW review is
-/tmp/issue679-verifier-draft.py, SHA-256
+/tmp/issue679-verifier-d8b374e8df4f8916072a002d58cfbeaa37a05fb34689197631d32a9b5f54944b.py, SHA-256
 d8b374e8df4f8916072a002d58cfbeaa37a05fb34689197631d32a9b5f54944b
 (60,594 bytes). It has not been executed in this preparation tranche. Astra
 must review these literal bytes before Luna runs either control or production
@@ -115,7 +115,7 @@ preserved target through tar and sha256 without writing them.
 The self-test control, run once only after preflight, is exactly:
 
 ```text
-TMPDIR=/tmp/issue679-verifier-control python3 -B /tmp/issue679-verifier-draft.py --self-test
+TMPDIR=/tmp/issue679-verifier-control python3 -B /tmp/issue679-verifier-d8b374e8df4f8916072a002d58cfbeaa37a05fb34689197631d32a9b5f54944b.py --self-test
 ```
 
 It must return 0 and print a self-test PASS line. Passing the self-test does
@@ -123,12 +123,13 @@ not qualify retained evidence. The production invocation, after the self-test
 review, is exactly:
 
 ```text
-python3 -B /tmp/issue679-verifier-draft.py /home/bl/misofm/engine-cp8-mapping-evidence 8708c9b998a484d49ccb17a803e79540ca13fcd6 /tmp/issue672-attempt2-candidate-pristine /tmp/issue678-attempt2-candidate-source /tmp/issue672-attempt3-candidate-artifact /tmp/issue678-attempt3-evidence
+python3 -B /tmp/issue679-verifier-d8b374e8df4f8916072a002d58cfbeaa37a05fb34689197631d32a9b5f54944b.py /home/bl/misofm/engine-cp8-mapping-evidence 8708c9b998a484d49ccb17a803e79540ca13fcd6 /tmp/issue672-attempt2-candidate-pristine /tmp/issue678-attempt2-candidate-source /tmp/issue672-attempt3-candidate-artifact /tmp/issue678-attempt3-evidence
 ```
 
-Require the script to be an ordinary non-symlink file at that path with the
-reviewed SHA-256 before either invocation. The production command must return 0
-and its final PASS line must name all-eight-gates and nine-root-census coverage.
+Require the script to be an ordinary non-symlink file at that path with mode
+`0444`, size 60,594, and the reviewed SHA-256 before either invocation. The
+production command must return 0 and its final PASS line must name all-eight-
+gates and nine-root-census coverage.
 Any missing path, mode/type mismatch, tracked drift, lineage byte mismatch,
 duplicate JSON key, newline mutation, dependency/artifact symlink or special
 entry, 76/78-file SDK tree, command/meta/status mismatch, nonzero retained gate
