@@ -2906,6 +2906,71 @@ if __name__ == "__main__":
         raise SystemExit(1)
 ```
 
+## Attempt 2 result and hard-final attempt 3 amendment
+
+Attempt 2 is **FAIL / consumed** at exact clean feature and external
+authorization head `b70d14905c88497f73c381c4a65b318f2971b1f4`, tracker
+`fdfd41106293a74dffa6e68d3a37964d8c8a63ce`, and main
+`df0b9b93636de36a7143da15b83444f280b65e6b`. The exclusive preflight passed.
+The production verifier ran once from `2026-09-09T05:51:58Z` through
+`2026-09-09T05:52:56Z`, emitted all 77 SDK inventory rows, and returned 1 with
+`FAIL: metadata timestamps are not ordered: /tmp/issue678-attempt3-evidence/05-playwright-api.meta`.
+It stopped before later retained-evidence checks or any manifest action.
+
+Preserve these attempt-2 files byte-for-byte:
+
+- `/tmp/issue679-attempt2-preflight.txt`, SHA-256
+  `1cbee4e23c299cd2b198435298a6fcdbff7ff7eb6374783d80d708456eee77fb`;
+- `/tmp/issue679-attempt2-evidence/00-production.command`, SHA-256
+  `bed75b34e79e91776aca826c0bbfdf835a6ffd8dde6115eab0e3d0d82182c584`;
+- `/tmp/issue679-attempt2-evidence/00-production.meta`, SHA-256
+  `809ce1cb65f3962fdd1e17b556716359b0d1a8db5ace3050677b68244d126425`;
+- `/tmp/issue679-attempt2-evidence/00-production.stdout`, SHA-256
+  `e5a68f0ca762879e483d19bf3f6de9551258cb9ad4b9cc7bcded05dfd1069d04`;
+- `/tmp/issue679-attempt2-evidence/00-production.stderr`, SHA-256
+  `c34d7cd87d7bbad210bfb3f30699db2e60ddbf947a13d45e3f6b52660c88be1e`;
+- `/tmp/issue679-attempt2-evidence/00-production.status`, SHA-256
+  `4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865`,
+  containing numeric 1.
+
+The retained Playwright metadata is immutable at SHA-256
+`52439295e0c22ae71876366d5c47eb07b94d29285f44f89909a3b26a3ecc7a48`.
+Its start and finish are both `2026-09-09T04:20:27Z`; equal second-resolution
+timestamps are compatible with a successful subsecond command. Astra LOW
+confirmed that requiring strictly positive elapsed time is an unsupported
+verifier assumption.
+
+Attempt 3 is the third and final attempt. It may change only timestamp ordering
+to require timezone-aware values and accept `finish >= start`, add synthetic
+equal-time acceptance and descending-time rejection controls, and move the
+isolated self-test control to its fresh attempt-3 path. All malformed, missing,
+status, schema, command, census, and identity checks remain unchanged. Luna HIGH
+may prepare and run the synthetic self-test only at the fresh control path, then
+must seal new content-addressed verifier bytes. Astra LOW exact-hash DRAFT PASS
+is required before those literal bytes enter this spec. Root then freezes an
+external exact feature authorization head in #559/#560 and obtains Astra LOW
+exact-head SCOPE PASS before any retained-evidence command.
+
+Attempt-3 fresh paths are:
+
+- `/tmp/issue679-attempt3-preflight.txt`;
+- `/tmp/issue679-attempt3-evidence`;
+- `/tmp/issue679-attempt3-manifest-record.txt`;
+- `/tmp/issue679-attempt3-manifest-verify.stdout`;
+- `/tmp/issue679-attempt3-manifest-verify.stderr`;
+- `/tmp/issue679-attempt3-manifest-verify.status`;
+- `/tmp/issue679-attempt3-verifier-control`.
+
+All seven must be absent including dangling symlinks before preparation and
+again before production. Recheck every attempt-1 and attempt-2 hash. After exact-
+head SCOPE PASS, run one exclusive preflight, one production verifier, and, only
+after production PASS, one manifest creation and one external verification at
+the fresh paths. Do not repeat the already reviewed synthetic self-test in the
+production tranche. Stop on first failure. No retained gate, builder, package,
+browser, install, Cargo, npm, or Node workload may run; no predecessor or prior-
+attempt byte may change; no cleanup or promotion is authorized. Any attempt-3
+failure exhausts #679 without a fourth or renamed retry.
+
 ## Review, promotion, and delivery
 
 Astra LOW must return EVIDENCE PASS before any repository edit. PASS only means
