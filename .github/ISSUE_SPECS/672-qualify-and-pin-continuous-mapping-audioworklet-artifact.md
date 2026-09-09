@@ -43,6 +43,8 @@ The exact fresh paths are:
 - `/tmp/issue672-candidate-artifact`
 - `/tmp/issue672-candidate-target`
 - `/tmp/issue672-prepin-evidence`
+- `/tmp/issue672-export-verifier.py`
+- `/tmp/issue672-verifier-control`
 - `/tmp/issue672-prepin-manifest-record.txt`
 - `/tmp/issue672-prepin-manifest-verify.stdout`
 - `/tmp/issue672-prepin-manifest-verify.status`
@@ -58,17 +60,152 @@ artifact gates, SDK manifests, qualification manifests/results, and matrix.
 Exercise the capture wrapper with harmless status-0 and expected status-1 controls
 and independently read them back.
 
+The executor must write this literal temporary verifier byte-for-byte to
+`/tmp/issue672-export-verifier.py`, read it back, hash it, and run its self-test
+before either builder. It uses the feature worktree as the Git object authority;
+exports contain no `.git`. No improvised replacement is allowed.
+
+```python
+#!/usr/bin/env python3
+import os, pathlib, stat, subprocess, sys, tempfile
+
+OVERLAYS = {
+    "hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256",
+    "hosts/host-web/qualification/results.json",
+    "hosts/host-web/BROWSER_DEPLOYMENT_MATRIX.md",
+}
+IGNORED = {"sdk/node_modules", "hosts/host-web/qualification/node_modules"}
+
+def git(repo, *args):
+    return subprocess.run(["git", "-C", repo, *args], check=True,
+                          stdout=subprocess.PIPE).stdout
+
+def inventory(repo, tree):
+    out = {}
+    for row in git(repo, "ls-tree", "-rz", "--full-tree", tree).split(b"\0"):
+        if not row: continue
+        meta, raw = row.split(b"\t", 1)
+        mode, kind, oid = meta.split()
+        if kind != b"blob": raise RuntimeError("non-blob tracked entry")
+        path = raw.decode("utf-8")
+        if path in out: raise RuntimeError("duplicate tracked path")
+        out[path] = (mode.decode(), oid.decode())
+    return out
+
+def ignored(path):
+    return any(path == root or path.startswith(root + "/") for root in IGNORED)
+
+def verify(repo, tree, root, overlay=False):
+    root = pathlib.Path(root)
+    if not root.is_dir() or root.is_symlink(): raise RuntimeError("bad root")
+    expected = inventory(repo, tree)
+    expected_dirs = set()
+    for name in expected:
+        p = pathlib.PurePosixPath(name).parent
+        while str(p) != ".":
+            expected_dirs.add(str(p)); p = p.parent
+    actual, dirs = set(), set()
+    for base, names, files in os.walk(root, followlinks=False):
+        relbase = pathlib.Path(base).relative_to(root).as_posix()
+        relbase = "" if relbase == "." else relbase
+        names[:] = [n for n in names if not ignored(f"{relbase}/{n}".strip("/"))]
+        for name in names:
+            rel = f"{relbase}/{name}".strip("/")
+            p = root / rel
+            if p.is_symlink(): actual.add(rel)
+            else: dirs.add(rel)
+        for name in files:
+            rel = f"{relbase}/{name}".strip("/")
+            if not ignored(rel): actual.add(rel)
+    if actual != set(expected): raise RuntimeError("missing or extra tracked path")
+    if dirs != expected_dirs: raise RuntimeError("missing or extra directory")
+    if (root / ".git").exists() or (root / ".git").is_symlink():
+        raise RuntimeError("export contains .git")
+    for name, (mode, oid) in expected.items():
+        p = root / name
+        info = p.lstat()
+        blob = git(repo, "cat-file", "blob", oid)
+        if mode == "120000":
+            if not stat.S_ISLNK(info.st_mode): raise RuntimeError("symlink mode")
+            if os.readlink(p).encode() != blob: raise RuntimeError("symlink target")
+            continue
+        if mode not in {"100644", "100755"} or not stat.S_ISREG(info.st_mode):
+            raise RuntimeError("regular-file mode")
+        executable = bool(info.st_mode & 0o111)
+        if executable != (mode == "100755"): raise RuntimeError("executable mode")
+        if not (overlay and name in OVERLAYS) and p.read_bytes() != blob:
+            raise RuntimeError("regular-file bytes")
+    print(f"PASS paths={len(expected)} overlay={int(overlay)}")
+
+def must_fail(call):
+    try: call()
+    except RuntimeError: return
+    raise RuntimeError("negative control unexpectedly passed")
+
+def self_test():
+    parent = os.environ["TMPDIR"]
+    with tempfile.TemporaryDirectory(dir=parent) as temp:
+        repo = pathlib.Path(temp, "repo"); export = pathlib.Path(temp, "export")
+        repo.mkdir(); subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        paths = sorted(OVERLAYS | {"plain", "bin/run", "link",
+                                  "sdk/package.json",
+                                  "hosts/host-web/qualification/package.json"})
+        for name in paths:
+            p = repo / name; p.parent.mkdir(parents=True, exist_ok=True)
+            if name == "link": p.symlink_to("plain")
+            else: p.write_bytes((name + "\n").encode())
+        (repo / "bin/run").chmod(0o755)
+        subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+        tree = git(str(repo), "write-tree").decode().strip()
+        export.mkdir()
+        subprocess.run(["bash", "-o", "pipefail", "-c",
+                        'git -C "$1" archive --format=tar "$2" | tar -xf - -C "$3"',
+                        "verify-export", str(repo), tree, str(export)], check=True)
+        verify(str(repo), tree, str(export))
+        (export / "plain").write_text("changed\n")
+        must_fail(lambda: verify(str(repo), tree, str(export)))
+        (export / "plain").write_bytes(git(str(repo), "show", f"{tree}:plain"))
+        (export / "plain").unlink()
+        must_fail(lambda: verify(str(repo), tree, str(export)))
+        (export / "plain").write_bytes(git(str(repo), "show", f"{tree}:plain"))
+        (export / "extra").write_text("extra\n")
+        must_fail(lambda: verify(str(repo), tree, str(export))); (export / "extra").unlink()
+        (export / "extra-dir").mkdir()
+        must_fail(lambda: verify(str(repo), tree, str(export))); (export / "extra-dir").rmdir()
+        (export / "bin/run").chmod(0o644)
+        must_fail(lambda: verify(str(repo), tree, str(export))); (export / "bin/run").chmod(0o755)
+        (export / "link").unlink(); (export / "link").symlink_to("wrong")
+        must_fail(lambda: verify(str(repo), tree, str(export)))
+        (export / "link").unlink(); (export / "link").symlink_to("plain")
+        for name in OVERLAYS: (export / name).write_text("overlay\n")
+        for name in IGNORED:
+            p = export / name; p.mkdir(parents=True); (p / "ignored").write_text("ok\n")
+        verify(str(repo), tree, str(export), True)
+    print("PASS self-test")
+
+if sys.argv[1:] == ["--self-test"]: self_test()
+elif len(sys.argv) == 5 and sys.argv[4] in {"exact", "overlay"}:
+    verify(sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4] == "overlay")
+else: raise SystemExit("usage: verifier REPO TREE EXPORT exact|overlay | --self-test")
+```
+
 Run the following sequence once, in order, stopping at the first failed
 precondition or command without correction or retry:
 
-1. Create the evidence directory. Create each source directory, then export with
-   `git archive --format=tar 7d16d9c9752c9ac2d31e69008fe075df86ce3c26 | tar -xf - -C /tmp/issue672-main-source`,
-   and twice with commit `fe6ddb4d1f1aadb254a2cd5e95732652fd457351`
-   into `/tmp/issue672-candidate-pristine` and
-   `/tmp/issue672-candidate-source`. Persist each archive SHA-256 while streaming
-   it and verify the two candidate exports byte-, mode-, and symlink-identical.
-   Persist a literal verifier that checks every entry against `git ls-tree -rz`
-   and `git cat-file`; hash/read back that verifier before running it.
+1. Create the evidence and verifier-control directories. Run exactly
+   `TMPDIR=/tmp/issue672-verifier-control python3 -B /tmp/issue672-export-verifier.py --self-test`
+   and require status 0 with both positive and negative controls passing. Create
+   each source directory, then export with
+   `bash -o pipefail -c 'git archive --format=tar "$1" | tee "$3" | tar -xf - -C "$2"' export-main 7d16d9c9752c9ac2d31e69008fe075df86ce3c26 /tmp/issue672-main-source /tmp/issue672-prepin-evidence/main.tar`,
+   then
+   `bash -o pipefail -c 'git archive --format=tar "$1" | tee "$3" | tar -xf - -C "$2"' export-pristine fe6ddb4d1f1aadb254a2cd5e95732652fd457351 /tmp/issue672-candidate-pristine /tmp/issue672-prepin-evidence/candidate-pristine.tar`,
+   then
+   `bash -o pipefail -c 'git archive --format=tar "$1" | tee "$3" | tar -xf - -C "$2"' export-candidate fe6ddb4d1f1aadb254a2cd5e95732652fd457351 /tmp/issue672-candidate-source /tmp/issue672-prepin-evidence/candidate-source.tar`.
+   Require every pipeline status 0, hash
+   the three retained tar streams, then delete the tar streams after verification.
+   Run the frozen verifier in `exact` mode on all three exports, using
+   `/home/bl/misofm/engine-cp8-mapping-artifact` as REPO and the corresponding
+   literal commit as TREE.
 2. Create `/tmp/issue672-main-artifact` as an empty non-symlink directory. From
    `/tmp/issue672-main-source`, run exactly once:
    `bash scripts/build-web-audioworklet.sh /tmp/issue672-main-artifact`.
@@ -108,7 +245,6 @@ precondition or command without correction or retry:
    `bash scripts/check-web-audioworklet.sh /tmp/issue672-candidate-artifact`;
    `python3 -B scripts/check-browser-expected-resources.py --artifacts /tmp/issue672-candidate-artifact`;
    `bash scripts/test-web-audioworklet.sh`;
-   `bash scripts/check-sdk-generated.sh`;
    `python3 -B scripts/check-sdk-deletions.py`;
    `python3 -B scripts/check-sdk-deletions.py --self-test`;
    `bash scripts/check-sdk-types.sh`;
@@ -118,12 +254,15 @@ precondition or command without correction or retry:
    Chromium, Firefox, and WebKit must each execute and pass every existing gate
    and mutation; `--record-matrix` is forbidden.
 8. Re-run the literal source/overlay verifier, require only the exact three
-   scratch overlays plus ignored dependency directories, and require the feature
+   scratch overlays plus ignored dependency directories using exactly
+   `python3 -B /tmp/issue672-export-verifier.py /home/bl/misofm/engine-cp8-mapping-artifact fe6ddb4d1f1aadb254a2cd5e95732652fd457351 /tmp/issue672-candidate-source overlay`,
+   and require the feature
    repository still clean. Finalize all evidence, write a self-excluding
    `SHA256SUMS`, and place only manifest command/completion, verification output,
    and numeric status in the three named sibling files.
 
-Accepted #670 source tests and policies are inherited and are not rerun: this
+`sdk-package.sh check` already invokes `check-sdk-generated.sh`; the sequence does
+not run that gate separately. Accepted #670 source tests and policies are inherited and are not rerun: this
 issue changes no source. The candidate structural/resource/PCM/SDK/browser gates
 above qualify the artifact boundary.
 
@@ -166,3 +305,13 @@ before use, requires the five files byte-identical, fixes lineage overlays befor
 lineage-sensitive gates, removes redundant source execution, and makes promotion
 a separate reviewed scope boundary. The concurrent tracker checkpoint was
 preserved and GitHub #559/#560 were resynchronized before this correction.
+
+Astra LOW returned a second **SCOPE FAIL** at exact clean feature `d0e1f511`
+and tracker `ccbd655a`. The sole remaining blocker was that step 1 still asked
+the executor to invent the export verifier immediately before use; it also noted
+the duplicated SDK generated check. No export, build, install, or browser command
+ran. This correction freezes the literal verifier and its missing/extra/bytes/
+mode/symlink/overlay self-controls, uses fail-closed archive pipelines with an
+external Git object authority, limits final allowances to the three overlays and
+two named dependency directories, and removes the redundant direct generated
+check because `sdk-package.sh check` owns it. Fresh scope review remains required.
