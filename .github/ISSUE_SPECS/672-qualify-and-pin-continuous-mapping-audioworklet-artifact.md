@@ -21,12 +21,12 @@ The shipped `host-web` depends on `effect-contract`. #670 therefore ran one repi
 
 Sol HIGH coordinates the brief, checkpoints, artifact decision, GitHub synchronization, PR, merge, and cleanup. Luna HIGH `/root/issue583_luna_impl` is the sole executor. Per current user routing, Astra LOW performs scope, pre-pin artifact, exact-head, integration, and delivery review.
 
-The qualification source is the accepted product checkpoint `fe6ddb4d1f1aadb254a2cd5e95732652fd457351`; the successor branch begins at #670 disposition `2cf84f301d6812d3f915a3ade475828d6f425b54`. Product source, tests, Cargo manifests/lock, toolchain/config, ABI, JS/TS, metadata, resource and PCM expectations, browser rows, scripts, workflows, and fixtures are frozen. Before pre-pin PASS, repository pins and lineage files are frozen too.
+The qualification source is integrated product checkpoint `8708c9b998a484d49ccb17a803e79540ca13fcd6`, whose first parent carries the accepted #670 source and whose second parent is delivered #671 main `acd625d72a57f83f50f26279717464744504b4c4`; the successor branch began at #670 disposition `2cf84f301d6812d3f915a3ade475828d6f425b54`. The two accepted product hashes above remain unchanged after integration. Product source, tests, Cargo manifests/lock, toolchain/config, ABI, JS/TS, metadata, resource and PCM expectations, browser rows, scripts, workflows, and fixtures are frozen. Before pre-pin PASS, repository pins and lineage files are frozen too.
 
 After Astra LOW pre-pin PASS, the only product/config edits authorized are:
 
 - `hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256`, changed to the approved candidate digest plus LF;
-- `hosts/host-web/qualification/results.json`, changing only `candidateCommit` to the accepted product checkpoint and `wasmSha256` to the approved digest;
+- `hosts/host-web/qualification/results.json`, changing only `candidateCommit` to integrated product checkpoint `8708c9b998a484d49ccb17a803e79540ca13fcd6` and `wasmSha256` to the approved digest;
 - `hosts/host-web/BROWSER_DEPLOYMENT_MATRIX.md`, regenerated from that otherwise unchanged results document so only the corresponding lineage sentence changes;
 - this numbered issue record.
 
@@ -51,7 +51,7 @@ The exact fresh paths are:
 
 Before creating anything, require every path absent including dangling symlinks,
 the feature tree clean at its pushed authorization head, live main exactly
-`7d16d9c9752c9ac2d31e69008fe075df86ce3c26`, no competing Cargo/rustc/npm or
+`acd625d72a57f83f50f26279717464744504b4c4`, no competing Cargo/rustc/npm or
 browser process, and the two frozen product hashes above. Record exact argv, cwd,
 executor/time, head/upstream, live main and merge-base, pin bytes/length/newline,
 Rust/Cargo/Node/npm versions, the literal value or unset state of Cargo/Rust/CC/
@@ -214,16 +214,16 @@ precondition or command without correction or retry:
    `TMPDIR=/tmp/issue672-verifier-control python3 -B /tmp/issue672-export-verifier.py --self-test`
    and require status 0 with both positive and negative controls passing. Create
    each source directory, then export with
-   `bash -o pipefail -c 'git archive --format=tar "$1" | tee "$3" | tar -xf - -C "$2"' export-main 7d16d9c9752c9ac2d31e69008fe075df86ce3c26 /tmp/issue672-main-source /tmp/issue672-prepin-evidence/main.tar`,
+   `bash -o pipefail -c 'git archive --format=tar "$1" | tee "$3" | tar -xf - -C "$2"' export-main acd625d72a57f83f50f26279717464744504b4c4 /tmp/issue672-main-source /tmp/issue672-prepin-evidence/main.tar`,
    then
-   `bash -o pipefail -c 'git archive --format=tar "$1" | tee "$3" | tar -xf - -C "$2"' export-pristine fe6ddb4d1f1aadb254a2cd5e95732652fd457351 /tmp/issue672-candidate-pristine /tmp/issue672-prepin-evidence/candidate-pristine.tar`,
+   `bash -o pipefail -c 'git archive --format=tar "$1" | tee "$3" | tar -xf - -C "$2"' export-pristine 8708c9b998a484d49ccb17a803e79540ca13fcd6 /tmp/issue672-candidate-pristine /tmp/issue672-prepin-evidence/candidate-pristine.tar`,
    then
-   `bash -o pipefail -c 'git archive --format=tar "$1" | tee "$3" | tar -xf - -C "$2"' export-candidate fe6ddb4d1f1aadb254a2cd5e95732652fd457351 /tmp/issue672-candidate-source /tmp/issue672-prepin-evidence/candidate-source.tar`.
+   `bash -o pipefail -c 'git archive --format=tar "$1" | tee "$3" | tar -xf - -C "$2"' export-candidate 8708c9b998a484d49ccb17a803e79540ca13fcd6 /tmp/issue672-candidate-source /tmp/issue672-prepin-evidence/candidate-source.tar`.
    Require every pipeline status 0, hash
    the three retained tar streams, then delete the tar streams after verification.
    Run the frozen verifier in `exact` mode on all three exports, using
    `/home/bl/misofm/engine-cp8-mapping-artifact` as REPO and the corresponding
-   literal commit as TREE.
+   literal commit as TREE (`acd625d7` for main, `8708c9b9` for both candidates).
 2. Create `/tmp/issue672-main-artifact` as an empty non-symlink directory. From
    `/tmp/issue672-main-source`, run exactly once:
    `bash scripts/build-web-audioworklet.sh /tmp/issue672-main-artifact`.
@@ -273,7 +273,7 @@ precondition or command without correction or retry:
    and mutation; `--record-matrix` is forbidden.
 8. Re-run the literal source/overlay verifier, require only the exact three
    scratch overlays plus ignored dependency directories using exactly
-   `python3 -B /tmp/issue672-export-verifier.py /home/bl/misofm/engine-cp8-mapping-artifact fe6ddb4d1f1aadb254a2cd5e95732652fd457351 /tmp/issue672-candidate-source overlay`,
+   `python3 -B /tmp/issue672-export-verifier.py /home/bl/misofm/engine-cp8-mapping-artifact 8708c9b998a484d49ccb17a803e79540ca13fcd6 /tmp/issue672-candidate-source overlay`,
    and require the feature
    repository still clean. Finalize all evidence, write a self-excluding
    `SHA256SUMS`, and place only manifest command/completion, verification output,
@@ -362,3 +362,19 @@ Only Luna HIGH `/root/issue583_luna_impl` may execute the frozen pre-pin sequenc
 after immediate identity, path-absence, and verifier-control preflight. Stop on
 the first unexpected failure without correction or retry. Repository promotion,
 post-pin build, PR, and merge remain unauthorized pending their separate reviews.
+
+## Delivered-main integration and reauthorization requirement
+
+Luna HIGH stopped at the first authorization precondition on clean
+`d9051b342c4ce2c15b541cf1213f872d59862a92`: #671 had delivered and
+`origin/main` was `acd625d72a57f83f50f26279717464744504b4c4`, not the scoped
+`7d16d9c9`. All twelve #672 paths were absent including dangling symlinks. No
+verifier, export, build, install, browser, or gate command ran, no path was
+created, and no attempt was consumed.
+
+Root merged that exact delivered main conflict-free at clean pushed checkpoint
+`8708c9b998a484d49ccb17a803e79540ca13fcd6`. Its parents are the prior
+#672 authorization and delivered main in that order. The #670 product hashes
+remain exact. This amendment freezes the integrated checkpoint as candidate and
+the delivered commit as baseline/current main throughout the literal commands.
+Fresh Astra LOW scope PASS is required before execution resumes.
