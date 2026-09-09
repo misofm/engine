@@ -93,6 +93,52 @@ If three attempts fail, follow AGENTS.md: preserve evidence, rebrief the bounded
 failure cause, and restart the workflow under the owner's instruction to finish
 the audit. Do not weaken a gate or count an unmerged checkpoint as delivery.
 
+## Attempt-1 evidence verdict — FAIL
+
+Astra LOW returned **EVIDENCE FAIL** at exact clean pushed head `5114dd2c`.
+The persistent session returned exit 143, consistent with SIGTERM, though the
+sender and cause are unproved. Complete stderr records successful host-web Wasm
+compilation without a compiler diagnostic failure; the process terminated after
+four matching files and before ABI-layout and parameter-metadata JSON. No later
+gate ran. Builder record SHA-256 is
+`b35ffd0ab935fe5bcd67b29bdb92729ce9776f975a8bc3182fd01798bdfaa03d`,
+stderr is `0db705ac70725a1282d58a3eeb0668f247bdc5977ce6837d635cd11baaa24e1e`,
+and terminal manifest is
+`c54a61a885866aecf16609c17fb1232a768c0bcf3b297c8fb904ec336de02164`.
+Attempt 1 is consumed. Preserve all issue-690 attempt-1 paths without mutation.
+
+## Attempt 2: root-owned persistent execution
+
+The root coordinator owns artifact execution and pin qualification under the
+original handoff. Luna performs no long-running command in attempt 2. After
+Astra LOW passes this exact pushed amendment, root may use only these fresh,
+initially absent paths:
+
+```text
+/tmp/issue690-attempt2-artifact
+/tmp/issue690-attempt2-target
+/tmp/issue690-attempt2-evidence
+```
+
+Root must recheck exact clean HEAD/upstream, current main, frozen product/pin,
+six authority hashes, all three paths absent including symlinks, and no relevant
+process. It then exclusively creates the paths and a preflight record. Run the
+same ordinary builder and four ordered gates from attempt 1, substituting the
+attempt-2 paths.
+
+Each yielding command must be launched directly by root through
+`exec_command`. If it returns a session ID, root records that ID and polls the
+same live handle with `write_stdin` until an exit code is returned. A polling
+timeout triggers another poll of the same handle. Do not delegate the handle,
+use a shell timeout, interrupt it, start a monitor process, or begin another
+command while it is live. Redirect complete stdout/stderr to the attempt-2
+evidence path and record actual start, finish, and exit status.
+
+Status zero, exactly six ordinary files byte-identical to the authority, four
+status-zero post-build gates, clean Git, and absent source-local `target/` are
+required. Preserve a concise final manifest for Astra LOW review. No predecessor
+path, tracked file, compiler capture, generated artifact, or pin may change.
+
 ## Attempt-1 verdict — PROCEDURAL FAIL
 
 Astra LOW returned SCOPE FAIL before execution because the branch had advanced
