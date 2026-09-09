@@ -366,3 +366,15 @@ identical and all relocated implementation remains exclusively under `cfg(test)`
 ordinary native and Wasm artifact inputs are unchanged. No AudioWorklet command,
 qualification, or pin action is required or authorized. Exact-head/current-main
 PR-readiness review is next.
+
+## PR-readiness verdict
+
+Astra LOW returned **PR-READINESS PASS** at exact clean pushed head
+`fd74bb2e97200adb1a3bbbc94c1ad4dd1da34891`, live main and merge-base
+`7d16d9c9752c9ac2d31e69008fe075df86ce3c26`, and synchronized tracker
+`fbf3aa278a93597f8cb3948b4686d4127e02ceee`. Exactly the three authorized
+paths differ; only this spec changed after SOURCE PASS. Branch-wide whitespace,
+GitHub parity, attempt accounting, evidence limitations, no-artifact ruling, and
+#672 disjointness pass. Root may open one PR closing #671 only; broader RT17
+remains open. Required CI and a fresh guarded head/current-main review precede
+merge.
