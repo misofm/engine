@@ -92,3 +92,67 @@ scratch evidence.
 If three attempts fail, follow AGENTS.md: preserve evidence, rebrief the bounded
 failure cause, and restart the workflow under the owner's instruction to finish
 the audit. Do not weaken a gate or count an unmerged checkpoint as delivery.
+
+## Attempt-1 verdict — PROCEDURAL FAIL
+
+Astra LOW returned SCOPE FAIL before execution because the branch had advanced
+to the sound execution-identity correction `5114dd2c` and the brief did not
+explicitly create the builder's required empty artifact directory. All three
+fresh paths were absent at that review.
+
+A concurrent Luna then created the attempt-1 evidence, artifact, and target
+paths and started the ordinary builder after SCOPE FAIL. The coordinator stopped
+the unauthorized process group. Its persistent session terminated with actual
+status 143, produced four of six candidate files, and ran no later gate. Attempt
+1 is consumed with no qualification or delivery credit. Preserve all three
+paths and records. Key SHA-256 identities are:
+
+```text
+bd64cf95e7162df92bb31ad28d266ad6a97dfc26dda10a3af28b735c68ac5aa8  00-preflight.json
+1448b99c2340b09004f3b6cb792f30da6d8d1268cdff6406fc3ec12480c34eeb  01-path-creation.json
+b35ffd0ab935fe5bcd67b29bdb92729ce9776f975a8bc3182fd01798bdfaa03d  02-builder.json
+c54a61a885866aecf16609c17fb1232a768c0bcf3b297c8fb904ec336de02164  99-terminal-manifest.json
+```
+
+## Attempt 2: corrected fresh reproduction
+
+Attempt 2 owns only these new paths, initially absent including dangling
+symlinks:
+
+```text
+/tmp/issue690-attempt2-artifact
+/tmp/issue690-attempt2-target
+/tmp/issue690-attempt2-evidence
+```
+
+Fresh Astra LOW SCOPE PASS is required against the exact clean pushed rebrief,
+matching GitHub/tracker bodies, current main and branch identities, all preserved
+attempt-1 records, and the three absent attempt-2 paths. No attempt-2 path may be
+created before that PASS is itself recorded and pushed.
+
+One named Luna HIGH executor may then observe all paths absent in memory,
+exclusively create the evidence directory, and durably record the preceding
+absence plus successful exclusive creation. It must next exclusively create
+`/tmp/issue690-attempt2-artifact` as an empty ordinary directory, verify it is
+not a symlink and has no entries, and durably record that result. Leave the
+target absent for Cargo to create. Recheck the exact clean upstream-equal branch
+and absence of relevant processes immediately before dispatch.
+
+Run the same frozen sequence once with only the namespace changed:
+
+```text
+env -u MISO_ENGINE_WEB_AUDIOWORKLET_REPIN CARGO_TARGET_DIR=/tmp/issue690-attempt2-target bash scripts/build-web-audioworklet.sh /tmp/issue690-attempt2-artifact
+CARGO_TARGET_DIR=/tmp/issue690-attempt2-target bash scripts/check-web-audioworklet.sh /tmp/issue690-attempt2-artifact
+CARGO_TARGET_DIR=/tmp/issue690-attempt2-target python3 -B scripts/check-browser-expected-resources.py --artifacts /tmp/issue690-attempt2-artifact
+node hosts/host-web/qualification/generate-matrix.mjs --check
+git diff --check
+```
+
+Every potentially long command uses one persistent unified session and the same
+handle is polled until its actual exit result. No fixed timeout, restart, or
+retry is allowed. Keep exclusive, complete, synchronized, read-back records and
+one terminal self-excluding manifest. Stop permanently at the first nonzero
+status or identity/output mismatch. The original six hashes, byte-equality,
+clean-worktree, no-source-local-target, no-generated-Git-output, Astra evidence
+review, PR/CI/merge/post-main, synchronization, and cleanup requirements remain
+unchanged.
