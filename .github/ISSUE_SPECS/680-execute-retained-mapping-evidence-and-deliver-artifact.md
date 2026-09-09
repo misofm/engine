@@ -305,6 +305,16 @@ command:
 `python3 -B /tmp/issue680-attempt2-launcher.py --feature-head <reviewed-full-feature-sha> --tracker-head <reviewed-full-tracker-sha> --executor-id /root/issue583_luna_impl`.
 No launcher or verifier execution is authorized by this amendment.
 
+The reduced launcher was prepared without execution and root sealed its ordinary
+file mode `0444`: 14,665 bytes, SHA-256
+`588d17821d368880b41dc6f2420449a39f305458b723dace0ba250a5cd817f8b`.
+All attempt-2/control paths remain absent. Astra LOW must review these exact bytes
+before any invocation. Coordinator inspection already finds that
+`append_json(PREFLIGHT, "selftest_capture", self_record)` passes raw `bytes` to
+`json.dumps`, guaranteeing an uncaught `TypeError` after self-test; it also notes
+that `exclusive_bytes` deletes a partial file on write failure despite the
+reduced launcher's preservation rule.
+
 Fresh production paths are:
 
 - `/tmp/issue680-attempt2-preflight.txt`;
