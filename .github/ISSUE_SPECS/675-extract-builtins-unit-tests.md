@@ -182,3 +182,21 @@ A clean pushed amendment and fresh Astra LOW attempt-2 scope PASS are required
 before sole Luna HIGH `issue675_luna_impl` resumes. Only the spec may change in
 Git. No source formatter, production, artifact, AudioWorklet, pin, timing, or
 performance work is authorized.
+
+## Attempt 2 authorization
+
+Astra LOW returned **SCOPE PASS** at exact clean pushed feature
+`f1c75ad23c8257fdc075fc86d1197c2b868f5bb6`, authoritative `origin/main`
+`acd625d72a57f83f50f26279717464744504b4c4`, and synchronized tracker
+`6ac76fa2b5efd70caae8e367d5cefb173a0c8fbd`. GitHub parity, both frozen
+source hashes, preserved attempt-1 evidence, and fresh attempt-2 path absence
+verify. The corrected whitespace-tolerant inventory, explicit `rg` statuses,
+exact reconstruction, eight fresh gates, and final source/path/prior-evidence
+checks adequately address attempt 1. #672 remains disjoint.
+
+Only Luna HIGH `issue675_luna_impl` may run qualification-only attempt 2.
+Preserve source and attempt-1 evidence, format only the reconstructed copy, run
+all eight gates once with direct command/stream/status records, and stop on any
+failure. Only this spec may change in Git; root owns commits and trackers. No
+credit, recursive ledger, source formatter, artifact, AudioWorklet, pin, timing,
+or performance work is authorized.
