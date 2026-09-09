@@ -435,3 +435,27 @@ No compiler IR, assembly, target output, or temporary evidence is committed.
 Astra LOW must review the final failure and define a separately numbered,
 resbriefed successor if the frozen production extraction is to proceed. #669 may
 be closed only as stopped, with no product-delivery credit.
+
+## Astra LOW hard-stop review — PASS
+
+Astra LOW confirmed **ATTEMPT-3 FAIL / HARD STOP** at clean HEAD/upstream
+`784d4ae93eed1a459286691503d10f4a8e40d379` and preserved failed-patch SHA-256
+`442ca1b7ccc1aeac7513977cb39ea2ac93dd7938bbe1436bdb659f2da13c56ef`.
+Gate 1 returned 101 with 14 passing and one failed test; later gates and final
+manifest did not run. Root's separate patch preservation and restoration of the
+buildable checkpoint pass review. All three attempts are exhausted.
+
+The failure is a fixture defect, not evidence against the frozen production
+extraction. `ParameterUnit::Db`'s default arithmetic lattice has precision 1;
+minimum `0.25`, derived maximum `1.25`, and default `0.75` cannot pass its decimal
+spelling rule. Mapping admissibility succeeds, then the independent lattice law
+correctly rejects the descriptor.
+
+A separately numbered successor may qualify the frozen extraction using
+mapping-specific lattice-compatible accepted values while retaining deliberate
+tiny-value later-lattice controls, exact public diagnostic sets, and the complete
+36-case borrowed projection. It may own only inline tests, formatting, and
+compact evidence; helper, callers, imports, and production semantics remain
+frozen. #669 receives no SOURCE PASS or delivery credit and is closed as stopped
+and superseded. All failed evidence, patches, targets, branch history, and this
+clean worktree remain preserved for the successor.
