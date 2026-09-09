@@ -48,18 +48,26 @@ Fresh paths are:
 - `/tmp/issue679-manifest-record.txt`;
 - `/tmp/issue679-manifest-verify.stdout`;
 - `/tmp/issue679-manifest-verify.stderr`;
-- `/tmp/issue679-manifest-verify.status`.
+- `/tmp/issue679-manifest-verify.status`;
+- `/tmp/issue679-verifier-control`.
 
-Require all six absent including dangling symlinks, the feature clean at its
-pushed authorization head, live main exactly
+Require all seven absent including dangling symlinks, the feature clean at the
+exact `AUTHORIZATION_HEAD` supplied and frozen in the final authorization
+record after this verifier's bytes are committed and pushed, live main exactly
 `df0b9b93636de36a7143da15b83444f280b65e6b`, and no writer owning predecessor
-paths. Before creating the evidence directory, write evaluated path existence/
-symlink results, head/upstream/main/merge-base, tool versions, and relevant
-environment values to the external preflight record. Every command must have a
-literal argv, actual cwd, start/finish timestamps, numeric status, and separate
-complete temporary stdout/stderr under the evidence directory.
+paths. `AUTHORIZATION_HEAD` is an external, literal full commit ID; preflight
+must compare it with `git -C /home/bl/misofm/engine-cp8-mapping-evidence rev-parse
+HEAD` and record both values. It must never derive the authorization head from
+this spec, the verifier bytes, a branch name, or any stale predecessor hash.
+Before creating the evidence
+directory, write evaluated path existence/symlink results, head/upstream/main/
+merge-base, tool versions, and relevant environment values to the external
+preflight record. Every command must have a literal argv, actual cwd,
+start/finish timestamps, numeric status, and separate complete temporary
+stdout/stderr under the evidence directory.
 
-First record a complete path/type/mode/size/SHA-256 census of every file under:
+Before any export classification, first record a complete path/type/mode/size/
+SHA-256 census of every file under:
 
 - `/tmp/issue672-attempt3-candidate-artifact`;
 - `/tmp/issue672-attempt2-candidate-pristine`;
@@ -73,6 +81,11 @@ First record a complete path/type/mode/size/SHA-256 census of every file under:
 
 Recompute the preserved generated target streamed identity and require exact
 digest `420c7c4db6427802163e3d08deb8022327722fadbc6bb4178f13212506257151`.
+After all classifications and retained-evidence checks, recompute the same
+nine-root census and preserved-target rows. The verifier must compare the
+serialized initial and final census tuples byte-for-byte and fail before PASS
+if any retained input, type, mode, size, symlink target, file hash, or target
+identity changed.
 Require the candidate artifact's exact six names and hashes from #678. Require
 the source-local Cargo `target/` absent and the feature repository clean.
 
@@ -95,8 +108,9 @@ It must:
    the accepted candidate files and require every other generated output to be
    covered by the successful retained `13-gate7-sdk-package` command/status/
    stdout/stderr and its status-0 postcheck;
-8. self-test rejection of a changed tracked byte, fourth overlay, extra top-level
-   root, 76/78-file SDK tree, SDK symlink, and changed packaged artifact copy.
+8. self-test rejection of a changed tracked byte, an extra overlay file, a
+   separate extra top-level overlay directory, 76/78-file SDK tree, SDK
+   symlink, and changed packaged artifact copy.
 
 No agent may invent the verifier during execution. Astra LOW must review its
 literal bytes, SHA-256, invocations, and controls before Luna runs it.
@@ -104,9 +118,9 @@ literal bytes, SHA-256, invocations, and controls before Luna runs it.
 ## Frozen verifier authorization checkpoint
 
 The exact LF-terminated verifier prepared for Astra LOW review is
-/tmp/issue679-verifier-d8b374e8df4f8916072a002d58cfbeaa37a05fb34689197631d32a9b5f54944b.py, SHA-256
-d8b374e8df4f8916072a002d58cfbeaa37a05fb34689197631d32a9b5f54944b
-(60,594 bytes). It has not been executed in this preparation tranche. Astra
+/tmp/issue679-verifier-fd1e26d16535a4ca570c5a7fdc2d83858eab48d246547a22954fc747b657e7fc.py, SHA-256
+fd1e26d16535a4ca570c5a7fdc2d83858eab48d246547a22954fc747b657e7fc
+(63,444 bytes). It has not been executed in this preparation tranche. Astra
 must review these literal bytes before Luna runs either control or production
 invocation. The verifier is read-only: it only reads Git objects, retained
 exports, retained evidence, and the nine census roots, and streams the
@@ -115,21 +129,32 @@ preserved target through tar and sha256 without writing them.
 The self-test control, run once only after preflight, is exactly:
 
 ```text
-TMPDIR=/tmp/issue679-verifier-control python3 -B /tmp/issue679-verifier-d8b374e8df4f8916072a002d58cfbeaa37a05fb34689197631d32a9b5f54944b.py --self-test
+TMPDIR=/tmp/issue679-verifier-control python3 -B /tmp/issue679-verifier-fd1e26d16535a4ca570c5a7fdc2d83858eab48d246547a22954fc747b657e7fc.py --self-test
 ```
 
-It must return 0 and print a self-test PASS line. Passing the self-test does
-not qualify retained evidence. The production invocation, after the self-test
-review, is exactly:
+Immediately before that command, `/tmp/issue679-verifier-control` must be
+absent under both `test -e` and `test -L`. The verifier then creates that exact
+absolute path itself as a fresh ordinary non-symlink directory with mode 0700,
+passes it explicitly as `dir=` to `tempfile.TemporaryDirectory`, and rejects
+any returned temporary path whose parent is not exactly that directory or
+whose type is not an ordinary directory. It removes the temporary child and
+the control directory in a `finally` path; completion requires the control
+path to be absent under both tests. A pre-existing path, failed creation,
+wrong mode/type, fallback temporary directory, leftover child, or failed
+cleanup is a hard failure. It must return 0 and print a self-test PASS line.
+Passing the self-test does not qualify retained evidence. The production
+invocation, after the self-test review, is exactly:
 
 ```text
-python3 -B /tmp/issue679-verifier-d8b374e8df4f8916072a002d58cfbeaa37a05fb34689197631d32a9b5f54944b.py /home/bl/misofm/engine-cp8-mapping-evidence 8708c9b998a484d49ccb17a803e79540ca13fcd6 /tmp/issue672-attempt2-candidate-pristine /tmp/issue678-attempt2-candidate-source /tmp/issue672-attempt3-candidate-artifact /tmp/issue678-attempt3-evidence
+python3 -B /tmp/issue679-verifier-fd1e26d16535a4ca570c5a7fdc2d83858eab48d246547a22954fc747b657e7fc.py /home/bl/misofm/engine-cp8-mapping-evidence 8708c9b998a484d49ccb17a803e79540ca13fcd6 /tmp/issue672-attempt2-candidate-pristine /tmp/issue678-attempt2-candidate-source /tmp/issue672-attempt3-candidate-artifact /tmp/issue678-attempt3-evidence
 ```
 
 Require the script to be an ordinary non-symlink file at that path with mode
-`0444`, size 60,594, and the reviewed SHA-256 before either invocation. The
-production command must return 0 and its final PASS line must name all-eight-
-gates and nine-root-census coverage.
+`0444`, size 63,444, and the reviewed SHA-256 before either invocation. The
+production preflight supplies the external `AUTHORIZATION_HEAD` literal
+described above; the verifier's own commit/ref table remains independent of
+that authorization value. The production command must return 0 and its final
+PASS line must name all-eight-gates and nine-root-census coverage.
 Any missing path, mode/type mismatch, tracked drift, lineage byte mismatch,
 duplicate JSON key, newline mutation, dependency/artifact symlink or special
 entry, 76/78-file SDK tree, command/meta/status mismatch, nonzero retained gate
@@ -151,6 +176,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import contextlib
 import datetime
 import hashlib
 import json
@@ -191,6 +217,7 @@ ROOT_CENSUS = (
     ("issue678-attempt3-evidence", "/tmp/issue678-attempt3-evidence"),
     ("issue678-attempt3-target", "/tmp/issue678-attempt3-target"),
 )
+SELF_TEST_CONTROL = pathlib.Path("/tmp/issue679-verifier-control")
 PRESERVED_TARGET = pathlib.Path("/tmp/issue672-attempt2-candidate-source/target")
 TARGET_DIGEST = "420c7c4db6427802163e3d08deb8022327722fadbc6bb4178f13212506257151"
 SOURCE_CANDIDATE = pathlib.Path("/tmp/issue678-attempt2-candidate-source")
@@ -773,7 +800,7 @@ def strict_status(path: pathlib.Path, expected: str) -> None:
         raise VerificationError(f"unexpected status in {path}")
 
 
-def parse_meta(path: pathlib.Path, expected_keys: set[str], expected_cwd: str, expected_status: str) -> None:
+def parse_meta(path: pathlib.Path, expected_keys: set[str], expected_cwd: str | None, expected_status: str) -> None:
     meta: dict[str, str] = {}
     for line in strict_text(path, str(path)).splitlines():
         if not line or "=" not in line:
@@ -782,7 +809,7 @@ def parse_meta(path: pathlib.Path, expected_keys: set[str], expected_cwd: str, e
         if key in meta:
             raise VerificationError(f"duplicate metadata key: {path}")
         meta[key] = value
-    if set(meta) != expected_keys or meta.get("cwd") != expected_cwd or meta.get("status") != expected_status:
+    if set(meta) != expected_keys or (expected_cwd is not None and meta.get("cwd") != expected_cwd) or meta.get("status") != expected_status:
         raise VerificationError(f"metadata identity mismatch: {path}")
     if "CARGO_TARGET_DIR" in expected_keys and meta.get("CARGO_TARGET_DIR") != TARGET_ENV:
         raise VerificationError(f"metadata target mismatch: {path}")
@@ -883,7 +910,14 @@ def verify_overlay_records(evidence: pathlib.Path) -> None:
     if not strict_text(evidence / "04-overlay-verifier.stdout", "initial verifier stdout").startswith("PASS paths=12195 overlay=1"):
         raise VerificationError("initial overlay verifier did not report all tracked paths")
     strict_text(evidence / "04-overlay-verifier.stderr", "initial verifier stderr")
-    strict_text(evidence / "04-overlay-verifier.meta", "initial verifier metadata")
+    # The frozen initial record predates cwd emission.  Validate its complete
+    # three-key schema and timestamps, while making no unsupported cwd claim.
+    parse_meta(
+        evidence / "04-overlay-verifier.meta",
+        {"start_utc", "finish_utc", "status"},
+        None,
+        "0",
+    )
     if strict_text(evidence / "15-final-overlay-verifier.command", "final verifier command") != OVERLAY_COMMAND + "\n":
         raise VerificationError("final overlay command mismatch")
     strict_status(evidence / "15-final-overlay-verifier.status", "1")
@@ -975,16 +1009,22 @@ def preserved_target_identity() -> str:
     return value
 
 
-def verify_nine_root_census() -> None:
+def capture_nine_root_census(phase: str) -> tuple[tuple[tuple[str, tuple[str, ...]], ...], tuple[str, ...], str]:
+    roots: list[tuple[str, tuple[str, ...]]] = []
     for label, raw_path in ROOT_CENSUS:
         root = pathlib.Path(raw_path)
-        print(f"ROOT {label} {raw_path}")
-        for row in census_root(root):
+        rows = tuple(census_root(root))
+        roots.append((label, rows))
+        print(f"{phase} ROOT {label} {raw_path}")
+        for row in rows:
             print(row)
-    print(f"PRESERVED_TARGET {PRESERVED_TARGET}")
-    for row in census_root(PRESERVED_TARGET):
+    target_rows = tuple(census_root(PRESERVED_TARGET))
+    print(f"{phase} PRESERVED_TARGET {PRESERVED_TARGET}")
+    for row in target_rows:
         print(row)
-    print(f"PRESERVED_TARGET_TAR_SHA256 {preserved_target_identity()}")
+    target_digest = preserved_target_identity()
+    print(f"{phase} PRESERVED_TARGET_TAR_SHA256 {target_digest}")
+    return tuple(roots), target_rows, target_digest
 
 
 def verify_all(
@@ -1002,6 +1042,7 @@ def verify_all(
 ) -> None:
     if require_authority and ref != AUTHORITY_COMMIT:
         raise VerificationError("wrong authority")
+    initial_census = capture_nine_root_census("INITIAL") if require_authority else None
     verify_export(
         repo, ref, pristine, False, artifact, artifact_hashes,
         evidence, False, dist_expectations, require_authority,
@@ -1013,7 +1054,9 @@ def verify_all(
     verify_candidate_lineage(pristine, candidate, lineage)
     if require_authority:
         verify_retained_evidence(evidence, artifact_hashes)
-        verify_nine_root_census()
+        final_census = capture_nine_root_census("FINAL")
+        if final_census != initial_census:
+            raise VerificationError("retained-input census changed during verification")
     print("PASS authority/pristine/candidate/artifact/all-eight-gates/nine-root-census")
 
 
@@ -1025,9 +1068,41 @@ def assert_reject(action) -> None:
     raise AssertionError("negative control unexpectedly passed")
 
 
+@contextlib.contextmanager
+def exact_self_test_control():
+    if os.path.lexists(SELF_TEST_CONTROL):
+        raise VerificationError(f"self-test control path already exists: {SELF_TEST_CONTROL}")
+    try:
+        SELF_TEST_CONTROL.mkdir(mode=0o700)
+    except OSError as error:
+        raise VerificationError(f"cannot create self-test control path: {SELF_TEST_CONTROL}") from error
+    try:
+        info = SELF_TEST_CONTROL.lstat()
+        if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o700:
+            raise VerificationError("self-test control path is not a fresh 0700 directory")
+        yield SELF_TEST_CONTROL
+    finally:
+        try:
+            entries = list(os.scandir(SELF_TEST_CONTROL))
+        except OSError as error:
+            raise VerificationError("cannot inspect self-test control cleanup") from error
+        if entries:
+            raise VerificationError("self-test control directory was not cleaned")
+        try:
+            SELF_TEST_CONTROL.rmdir()
+        except OSError as error:
+            raise VerificationError("cannot remove self-test control directory") from error
+        if os.path.lexists(SELF_TEST_CONTROL):
+            raise VerificationError("self-test control path remains after cleanup")
+
+
 def synthetic_self_test() -> None:
-    with tempfile.TemporaryDirectory(prefix="issue679-selftest-") as temp:
+    with exact_self_test_control() as control, tempfile.TemporaryDirectory(
+        prefix="run-", dir=str(control)
+    ) as temp:
         base = pathlib.Path(temp)
+        if base.parent != control or base.is_symlink() or not base.is_dir():
+            raise VerificationError("self-test tempfile escaped its literal control directory")
         repo = base / "repo"
         pristine = base / "pristine"
         candidate = base / "candidate"
@@ -1106,12 +1181,18 @@ def synthetic_self_test() -> None:
                                           (NEW_COMMIT, NEW_WASM, NEW_SENTENCE), synthetic_hashes,
                                           synthetic_expectations, False, False))
         (candidate / "plain.txt").write_bytes(b"plain\n")
-        extra_root = candidate / "fourth-overlay"
-        extra_root.write_text("bad\n")
+        extra_file = candidate / "fourth-overlay-file"
+        extra_file.write_text("bad\n")
         assert_reject(lambda: verify_all(repo, commit, pristine, candidate, artifact, evidence,
                                           (NEW_COMMIT, NEW_WASM, NEW_SENTENCE), synthetic_hashes,
                                           synthetic_expectations, False, False))
-        extra_root.unlink()
+        extra_file.unlink()
+        extra_root = candidate / "fourth-overlay-directory"
+        extra_root.mkdir()
+        assert_reject(lambda: verify_all(repo, commit, pristine, candidate, artifact, evidence,
+                                          (NEW_COMMIT, NEW_WASM, NEW_SENTENCE), synthetic_hashes,
+                                          synthetic_expectations, False, False))
+        extra_root.rmdir()
         extra = dist / "generated/extra.js"
         removed = dist / "generated/70.js"
         removed_data = removed.read_bytes()
@@ -1184,7 +1265,7 @@ def synthetic_self_test() -> None:
         )
         if bad_args.returncode == 0:
             raise AssertionError("--self-test accepted positional paths")
-    print("PASS self-test commit/arguments/overlays/76-78/sdk-symlink/artifact-special/JSON")
+    print("PASS self-test commit/arguments/overlay-file/overlay-directory/76-78/sdk-symlink/artifact-special/JSON")
 
 
 def main() -> int:
@@ -1232,7 +1313,6 @@ if __name__ == "__main__":
     except VerificationError as error:
         print(f"FAIL: {error}", file=sys.stderr)
         raise SystemExit(1)
-
 ```
 
 Before any verifier or manifest command, Luna must write a fresh preflight record
@@ -1242,13 +1322,18 @@ to /tmp/issue679-preflight.txt while /tmp/issue679-evidence,
 /tmp/issue679-manifest-verify.status are all absent by evaluated test -e and
 test -L checks. The preflight must record the literal argv, actual cwd, UTC
 start/finish, numeric status, separate complete stdout/stderr, clean feature
-status at authorization head
-d3efe7920869c9127fbd050c8ba543a6d8393571, origin/main at
-df0b9b93636de36a7143da15b83444f280b65e6b, merge-base, tool versions,
+status at the exact external `AUTHORIZATION_HEAD` supplied and frozen only
+after this verifier's bytes are committed and pushed, origin/main at
+`df0b9b93636de36a7143da15b83444f280b65e6b`, merge-base, tool versions,
 relevant environment including unset CARGO_TARGET_DIR, and all seven
-fresh-path evaluations. It must also record complete read-only
-path/type/mode/size/SHA-256 censuses for the nine fixed roots named in the
-verifier and retain only the concise records under the new evidence path.
+fresh-path evaluations. It must compare the supplied full 40-hex
+`AUTHORIZATION_HEAD` literally with `git rev-parse HEAD`, record both, and
+reject any value derived from this spec, the verifier, a branch, or a stale
+predecessor hash. It must also record complete
+read-only path/type/mode/size/SHA-256 censuses for the nine fixed roots named
+in the verifier before classification, retain the exact final census comparison
+and preserved-target identity before PASS, and retain only the concise records
+under the new evidence path.
 
 Every retained command member is checked literally: the eight gate command,
 meta, stdout, stderr, and status files; eight postcheck command, stdout, stderr,
@@ -1260,7 +1345,10 @@ embedded table. Gate 8 output must identify Chromium 151.0.7922.34, Firefox
 all six artifact hashes, all four package manifest hashes, and preserved target
 digest 420c7c4db6427802163e3d08deb8022327722fadbc6bb4178f13212506257151.
 The initial retained overlay verifier must be status 0 for 12,195 tracked paths;
-the final retained verifier must be status 1 with the retained sdk/dist
+its frozen metadata is parsed as exactly `start_utc`, `finish_utc`, and `status=0`
+with ordered timestamps and has no `cwd` field. That missing cwd is an
+independently reviewed retained limitation: this disposition makes no initial
+cwd claim. The final retained verifier must be status 1 with the retained sdk/dist
 population as its failure. The verifier emits sorted inventories for exactly 77
 regular SDK files and all nine roots plus the preserved target identity.
 
