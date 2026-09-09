@@ -249,3 +249,28 @@ formatting, remove the redundant conversion, and compare complete ordered error
 collections. Production and borrowed tests remain frozen. Run the nine commands
 once, preserve attempt-1 evidence, and stop at first failure without correction
 or retry. No artifact, pin, PR, or merge is authorized.
+
+## Luna HIGH attempt 2 checkpoint — PASS pending review
+
+Luna changed only `effect-contract`'s typed inline test module. The redundant
+iterator call is removed, and each of the 36 cases now compares public
+`validate_descriptor` output with a complete ordered literal diagnostic set or
+requires `Ok(())`. Production helper/callers/imports and all borrowed-wire source
+remain byte-unchanged; `effect-package/src/wire.rs` retains SHA-256
+`9a4e833512ab8f70bf4804fc149bfe21e2cb568eb6f53a707c212529e7e66818`.
+The final `effect-contract/src/lib.rs` SHA-256 is
+`be709c2293b108feccfe14b0049c08e32d09ce61188a865dca59fa6cee185f98`.
+
+All nine attempt-2 commands returned 0 once: focused typed tests in debug and
+release, strict affected Clippy, formatting, effect-runtime policy,
+effect-package V1, effect-descriptor V1, workspace policy, and diff hygiene. The
+focused test reported 1 pass in both profiles; attempt-1's unchanged full
+borrowed debug/release results remain applicable.
+
+Evidence is under `/tmp/issue670-attempt2-evidence` with target output under
+`/tmp/issue670-attempt2-target`. Current independent manifest verification passes
+every entry; `SHA256SUMS` has SHA-256
+`4120fd24d202d35f9d5c4b9abbec081b9e58e92d4feb24d0a111765024bde317`, and
+sibling verification status is 0. No temporary evidence, target output, compiler
+payload, artifact, or pin is committed. This is a green implementation checkpoint,
+not SOURCE PASS; Astra LOW must review the exact pushed head.

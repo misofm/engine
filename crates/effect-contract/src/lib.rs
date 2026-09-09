@@ -2374,14 +2374,22 @@ mod continuous_mapping_validity_tests {
         ),
     };
 
-    #[derive(Clone, Copy)]
-    struct TypedExpectation {
-        parameter_invalid: bool,
-        lattice_invalid: bool,
-        descriptor_valid: bool,
+    enum TypedExpectation {
+        Ok,
+        Diagnostics(&'static [(&'static str, DescriptorDiagnosticCode)]),
     }
 
-    fn typed_validation(mapping: ParameterMapping, minimum: f32) -> (bool, bool, bool) {
+    const LATTICE: &[(&str, DescriptorDiagnosticCode)] =
+        &[("parameters", DescriptorDiagnosticCode::Lattice)];
+    const PARAMETER_AND_LATTICE: &[(&str, DescriptorDiagnosticCode)] = &[
+        ("parameters", DescriptorDiagnosticCode::Parameter),
+        ("parameters", DescriptorDiagnosticCode::Lattice),
+    ];
+
+    fn typed_diagnostics(
+        mapping: ParameterMapping,
+        minimum: f32,
+    ) -> Result<(), Vec<(&'static str, DescriptorDiagnosticCode)>> {
         let (maximum, default_value) = if minimum.is_finite() && minimum > 0.0 {
             (
                 if minimum == 1.0 { 2.0 } else { 1.0 },
@@ -2415,18 +2423,13 @@ mod continuous_mapping_validity_tests {
             qualities: &QUALITIES,
             observations: &[],
         }));
-        match validate_descriptor(descriptor) {
-            Ok(()) => (false, false, true),
-            Err(errors) => (
-                errors.errors().iter().any(|error| {
-                    error.path == "parameters" && error.code == DescriptorDiagnosticCode::Parameter
-                }),
-                errors.errors().iter().any(|error| {
-                    error.path == "parameters" && error.code == DescriptorDiagnosticCode::Lattice
-                }),
-                false,
-            ),
-        }
+        validate_descriptor(descriptor).map_err(|errors| {
+            errors
+                .errors()
+                .iter()
+                .map(|error| (error.path, error.code))
+                .collect()
+        })
     }
 
     #[test]
@@ -2446,212 +2449,75 @@ mod continuous_mapping_validity_tests {
             (
                 ParameterMapping::Linear,
                 [
-                    TypedExpectation {
-                        parameter_invalid: false,
-                        lattice_invalid: false,
-                        descriptor_valid: true,
-                    },
-                    TypedExpectation {
-                        parameter_invalid: true,
-                        lattice_invalid: true,
-                        descriptor_valid: false,
-                    },
-                    TypedExpectation {
-                        parameter_invalid: false,
-                        lattice_invalid: false,
-                        descriptor_valid: true,
-                    },
-                    TypedExpectation {
-                        parameter_invalid: false,
-                        lattice_invalid: true,
-                        descriptor_valid: false,
-                    },
-                    TypedExpectation {
-                        parameter_invalid: false,
-                        lattice_invalid: true,
-                        descriptor_valid: false,
-                    },
-                    TypedExpectation {
-                        parameter_invalid: false,
-                        lattice_invalid: false,
-                        descriptor_valid: true,
-                    },
-                    TypedExpectation {
-                        parameter_invalid: true,
-                        lattice_invalid: true,
-                        descriptor_valid: false,
-                    },
-                    TypedExpectation {
-                        parameter_invalid: true,
-                        lattice_invalid: true,
-                        descriptor_valid: false,
-                    },
-                    TypedExpectation {
-                        parameter_invalid: true,
-                        lattice_invalid: true,
-                        descriptor_valid: false,
-                    },
+                    TypedExpectation::Ok,
+                    TypedExpectation::Diagnostics(PARAMETER_AND_LATTICE),
+                    TypedExpectation::Ok,
+                    TypedExpectation::Diagnostics(LATTICE),
+                    TypedExpectation::Diagnostics(LATTICE),
+                    TypedExpectation::Ok,
+                    TypedExpectation::Diagnostics(PARAMETER_AND_LATTICE),
+                    TypedExpectation::Diagnostics(PARAMETER_AND_LATTICE),
+                    TypedExpectation::Diagnostics(PARAMETER_AND_LATTICE),
                 ],
             ),
             (
                 ParameterMapping::Logarithmic,
                 [
-                    TypedExpectation {
-                        parameter_invalid: true,
-                        lattice_invalid: true,
-                        descriptor_valid: false,
-                    },
-                    TypedExpectation {
-                        parameter_invalid: true,
-                        lattice_invalid: true,
-                        descriptor_valid: false,
-                    },
-                    TypedExpectation {
-                        parameter_invalid: true,
-                        lattice_invalid: true,
-                        descriptor_valid: false,
-                    },
-                    TypedExpectation {
-                        parameter_invalid: false,
-                        lattice_invalid: true,
-                        descriptor_valid: false,
-                    },
-                    TypedExpectation {
-                        parameter_invalid: false,
-                        lattice_invalid: true,
-                        descriptor_valid: false,
-                    },
-                    TypedExpectation {
-                        parameter_invalid: false,
-                        lattice_invalid: false,
-                        descriptor_valid: true,
-                    },
-                    TypedExpectation {
-                        parameter_invalid: true,
-                        lattice_invalid: true,
-                        descriptor_valid: false,
-                    },
-                    TypedExpectation {
-                        parameter_invalid: true,
-                        lattice_invalid: true,
-                        descriptor_valid: false,
-                    },
-                    TypedExpectation {
-                        parameter_invalid: true,
-                        lattice_invalid: true,
-                        descriptor_valid: false,
-                    },
+                    TypedExpectation::Diagnostics(PARAMETER_AND_LATTICE),
+                    TypedExpectation::Diagnostics(PARAMETER_AND_LATTICE),
+                    TypedExpectation::Diagnostics(PARAMETER_AND_LATTICE),
+                    TypedExpectation::Diagnostics(LATTICE),
+                    TypedExpectation::Diagnostics(LATTICE),
+                    TypedExpectation::Ok,
+                    TypedExpectation::Diagnostics(PARAMETER_AND_LATTICE),
+                    TypedExpectation::Diagnostics(PARAMETER_AND_LATTICE),
+                    TypedExpectation::Diagnostics(PARAMETER_AND_LATTICE),
                 ],
             ),
             (
                 ParameterMapping::Exponential,
                 [
-                    TypedExpectation {
-                        parameter_invalid: false,
-                        lattice_invalid: false,
-                        descriptor_valid: true,
-                    },
-                    TypedExpectation {
-                        parameter_invalid: true,
-                        lattice_invalid: true,
-                        descriptor_valid: false,
-                    },
-                    TypedExpectation {
-                        parameter_invalid: false,
-                        lattice_invalid: false,
-                        descriptor_valid: true,
-                    },
-                    TypedExpectation {
-                        parameter_invalid: false,
-                        lattice_invalid: true,
-                        descriptor_valid: false,
-                    },
-                    TypedExpectation {
-                        parameter_invalid: false,
-                        lattice_invalid: true,
-                        descriptor_valid: false,
-                    },
-                    TypedExpectation {
-                        parameter_invalid: false,
-                        lattice_invalid: false,
-                        descriptor_valid: true,
-                    },
-                    TypedExpectation {
-                        parameter_invalid: true,
-                        lattice_invalid: true,
-                        descriptor_valid: false,
-                    },
-                    TypedExpectation {
-                        parameter_invalid: true,
-                        lattice_invalid: true,
-                        descriptor_valid: false,
-                    },
-                    TypedExpectation {
-                        parameter_invalid: true,
-                        lattice_invalid: true,
-                        descriptor_valid: false,
-                    },
+                    TypedExpectation::Ok,
+                    TypedExpectation::Diagnostics(PARAMETER_AND_LATTICE),
+                    TypedExpectation::Ok,
+                    TypedExpectation::Diagnostics(LATTICE),
+                    TypedExpectation::Diagnostics(LATTICE),
+                    TypedExpectation::Ok,
+                    TypedExpectation::Diagnostics(PARAMETER_AND_LATTICE),
+                    TypedExpectation::Diagnostics(PARAMETER_AND_LATTICE),
+                    TypedExpectation::Diagnostics(PARAMETER_AND_LATTICE),
                 ],
             ),
             (
                 ParameterMapping::Stepped,
                 [
-                    TypedExpectation {
-                        parameter_invalid: true,
-                        lattice_invalid: true,
-                        descriptor_valid: false,
-                    },
-                    TypedExpectation {
-                        parameter_invalid: true,
-                        lattice_invalid: true,
-                        descriptor_valid: false,
-                    },
-                    TypedExpectation {
-                        parameter_invalid: true,
-                        lattice_invalid: true,
-                        descriptor_valid: false,
-                    },
-                    TypedExpectation {
-                        parameter_invalid: true,
-                        lattice_invalid: true,
-                        descriptor_valid: false,
-                    },
-                    TypedExpectation {
-                        parameter_invalid: true,
-                        lattice_invalid: true,
-                        descriptor_valid: false,
-                    },
-                    TypedExpectation {
-                        parameter_invalid: true,
-                        lattice_invalid: true,
-                        descriptor_valid: false,
-                    },
-                    TypedExpectation {
-                        parameter_invalid: true,
-                        lattice_invalid: true,
-                        descriptor_valid: false,
-                    },
-                    TypedExpectation {
-                        parameter_invalid: true,
-                        lattice_invalid: true,
-                        descriptor_valid: false,
-                    },
-                    TypedExpectation {
-                        parameter_invalid: true,
-                        lattice_invalid: true,
-                        descriptor_valid: false,
-                    },
+                    TypedExpectation::Diagnostics(PARAMETER_AND_LATTICE),
+                    TypedExpectation::Diagnostics(PARAMETER_AND_LATTICE),
+                    TypedExpectation::Diagnostics(PARAMETER_AND_LATTICE),
+                    TypedExpectation::Diagnostics(PARAMETER_AND_LATTICE),
+                    TypedExpectation::Diagnostics(PARAMETER_AND_LATTICE),
+                    TypedExpectation::Diagnostics(PARAMETER_AND_LATTICE),
+                    TypedExpectation::Diagnostics(PARAMETER_AND_LATTICE),
+                    TypedExpectation::Diagnostics(PARAMETER_AND_LATTICE),
+                    TypedExpectation::Diagnostics(PARAMETER_AND_LATTICE),
                 ],
             ),
         ];
 
         for (mapping, expected) in cases {
-            for (minimum, expected) in minima.into_iter().zip(expected.into_iter()) {
-                let (parameter_invalid, lattice_invalid, descriptor_valid) =
-                    typed_validation(mapping, minimum);
-                assert_eq!(parameter_invalid, expected.parameter_invalid);
-                assert_eq!(lattice_invalid, expected.lattice_invalid);
-                assert_eq!(descriptor_valid, expected.descriptor_valid);
+            for (minimum, expected) in minima.into_iter().zip(expected) {
+                match (expected, typed_diagnostics(mapping, minimum)) {
+                    (TypedExpectation::Ok, Ok(())) => {}
+                    (TypedExpectation::Diagnostics(expected), Err(actual)) => {
+                        assert_eq!(actual, expected, "{mapping:?} minimum {minimum:?}");
+                    }
+                    (TypedExpectation::Ok, Err(actual)) => {
+                        panic!("unexpected diagnostics for {mapping:?} {minimum:?}: {actual:?}");
+                    }
+                    (TypedExpectation::Diagnostics(expected), Ok(())) => {
+                        panic!("missing diagnostics for {mapping:?} {minimum:?}: {expected:?}");
+                    }
+                }
             }
         }
     }
