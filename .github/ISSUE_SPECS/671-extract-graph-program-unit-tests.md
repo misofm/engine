@@ -215,3 +215,21 @@ attempt-2 path. Any failed precondition, script error, source drift, or nonzero
 gate stops without correction or retry. Only this spec may change in attempt 2;
 root checkpoints before further work. A clean pushed amendment and fresh Astra
 LOW scope PASS are required before sole Luna HIGH `issue671_luna_impl` resumes.
+
+## Attempt 2 authorization
+
+Astra LOW returned **ATTEMPT-2 SCOPE PASS** at exact clean pushed feature
+`cdcc23521b7e658d75fd17d970c32f80afeabc0d`, unchanged main
+`7d16d9c9752c9ac2d31e69008fe075df86ce3c26`, and synchronized tracker
+`b1a73bdbb4a3a1f2966af31cc1271a40ea140140`. GitHub matches; #670/#671
+remain the two disjoint active slots. Both frozen source hashes match, the
+attempt-1 manifest verifies, and the attempt-2 path is absent including symlinks.
+
+Sole Luna HIGH `issue671_luna_impl` may persist the fresh preflight, write and
+read back/hash the literal verifier, then run all eight gates fresh once in order.
+It must preserve source bytes and attempt-1 evidence, check source hashes before
+and after every command, and change only this spec in Git. No gate credit carries.
+Any failed prerequisite, verifier error, source drift, or nonzero status stops the
+attempt without correction or retry. Preserve complete streams, statuses, and a
+verified self-excluding manifest. All excluded artifact, pin, and cleanup work
+remains unauthorized.
