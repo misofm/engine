@@ -120,3 +120,16 @@ evidence; no recursive ledger is required. Stop on any failure and return the
 coherent tranche to root for checkpoint. Root owns commits and trackers. No
 production, artifact, AudioWorklet, pin, timing, performance, or unrelated path
 change is authorized.
+
+## Attempt 1 result
+
+Luna HIGH stopped at gate 1 (exact transform proof), status **1**, on 2026-09-09.
+The proof's test inventory matcher expected four-space indentation, while the
+deindented module correctly has `#[test]` and test functions at column zero.
+The pinned formatter command passed with status 0. Gates 2–8 were not run and
+no correction or rerun occurred. Evidence is preserved at
+`/tmp/issue-builtins-tests-attempt1-evidence`. The two source paths contain the
+exact extraction: `lib.rs` SHA-256
+`75198efb88ad2c52f31fff37a22135780393a838551933abe697e7646252dfe4` and
+`tests.rs` SHA-256
+`5c2be93ef98b1d890d34e0900407d30f68dd2bf262afca617c235ae3a0139609`.
