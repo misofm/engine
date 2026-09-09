@@ -266,3 +266,56 @@ issue census, and eligible clean delivered-worktree cleanup. #703 remains OPEN
 source PASS until this artifact successor completes. Preserve all failures and
 do not create another successor here. CP1 remains partial until the complete
 source/artifact delivery slice is merged; no original finding starts.
+
+## Attempt 1 PROCEDURAL PREFLIGHT FAIL — consumed with zero credit
+
+The authoritative external Luna session is
+`/home/bl/.codex1/sessions/2026/09/09/rollout-2026-09-09T15-00-29-01a086af-476c-72e3-b3e4-91cc52346125.jsonl`;
+call `call_NEVjgPgzsJX7uaszF2AQHTea` dispatched at `20:01:36Z`. Process
+creation was rejected because the tool cwd omitted `/misofm` and requested
+`/home/bl/engine-cp1-pdc-artifact-705-a1-probe-final`. No shell, assertion,
+root creation, probe, or retry ran. Preserve the lease
+`/tmp/cp1-pdc-artifact-705-a1-phase1.lease` (SHA-256
+`27543acc77dd65d1b4a12c978142b60c42d1c5395ef5bbf1db0e0ec316449a69`), its
+terminal release `/tmp/cp1-pdc-artifact-705-a1-phase1.lease.release` (SHA-256
+`f6f5c0866584d673b7cd3cf338bbe5e05fc3edf87fc8d6c1a876232ebef7c5fd`), and
+failure record SHA-256 `7a776d7212276053f70e4b7c5d67ca0013e28ed262e5f6380316e7224dc3659a`
+byte-for-byte.
+
+The lease froze stale preparation head `2c3df04` and tracker `f561c228` at
+`20:00:34`; the preparation branch advanced to `5b47742` at `20:00:53` during
+review, an additional concurrent-mutation defect. All nine A1 roots were
+absent. This dispatched preflight consumes Attempt 1 under the frozen rule and
+earns no probe, qualification, artifact, product, or delivery credit.
+
+## Attempt 2 rebrief
+
+Two attempts remain with zero inherited credit. Sol prepares the fresh detached
+probe checkout only after this checkpoint is published:
+
+```text
+/home/bl/misofm/engine-cp1-pdc-artifact-705-a2-probe
+```
+
+The exact containing-brief commit is determined after this published checkpoint
+and copied verbatim into the lease. Astra verifies that prepared checkout before
+any lease; detached receipts use literal
+`upstream=not-applicable-detached`, never `@{upstream}`. Use only these fresh
+Attempt 2 roots, all absent including dangling symlinks before preparation:
+
+```text
+/tmp/cp1-pdc-artifact-705-a2-probe-evidence
+/tmp/cp1-pdc-artifact-705-a2-probe-tmp
+/tmp/cp1-pdc-artifact-705-a2-probe-output
+/tmp/cp1-pdc-artifact-705-a2-probe-target
+/tmp/cp1-pdc-artifact-705-a2-qualify-evidence
+/tmp/cp1-pdc-artifact-705-a2-qualify-tmp
+/tmp/cp1-pdc-artifact-705-a2-artifact
+/tmp/cp1-pdc-artifact-705-a2-qualify-target
+/tmp/cp1-pdc-artifact-705-a2-hermetic-target
+```
+
+The unchanged lease discipline, two-phase gates, exact command order, receipt
+requirements, no-mutation rule, and three-attempt hard stop apply. Any
+dispatched Attempt 2 preflight failure consumes it, even before roots or
+workload; no inherited A1 credit or artifact authority exists.
