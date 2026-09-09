@@ -56,3 +56,25 @@ Astra LOW reviews the exact clean pushed brief before implementation. Luna HIGH 
 After source PASS, root determines browser-artifact applicability separately. Any required artifact qualification/pin work must use a separately scoped lane-B checkpoint and temporary outputs, without widening this product slice. Exact-head/current-main review, required PR qualification, guarded merge-parent verification, post-main qualification, issue/tracker synchronization, and clean delivered-worktree removal remain mandatory.
 
 The #683 disposition is delivered and closed. This issue is the sole active implementation slot. #559 owns no overlapping product path. The preserved failed #668 and soft-clip worktrees/evidence remain untouched.
+
+## Astra LOW exact-brief scope review — PASS
+
+Astra LOW passed exact clean pushed feature
+`197a2f74b17b8525547f793eea89c020d4e5456f`, tracker
+`ee402149fb17155fbe5f2b1f5feb536b8a59f588`, and main/merge base
+`e4dfe353ae7e24a1392faa7eed06d5e6ee12f497`. GitHub/spec parity holds and
+#686 is closed as an unstarted duplicate with no credit.
+
+One designated Luna HIGH or XHIGH executor may implement attempt 1 only in
+`schedule.rs::topo`, helpers exclusive to it, and adjacent tests in `schedule.rs`
+or `lib.rs`. Private indices must be assigned in graph-ID order rather than input
+order. Existing boundary behavior is explicit: an empty graph returns
+`Some([])`; duplicate node IDs, dangling endpoints, cycles, and self-loops return
+`None`; parallel edges count independently. Run the brief's gates with fresh
+external targets and command-local unwind for release, stop at the first failure,
+and preserve its evidence for adversarial review.
+
+No cycle/SCC, PDC, buffer, public-ID, generic-interner, measurement, compiler
+capture, artifact, or pin work is authorized. CP1 remains partial, and source
+PASS still requires a separately scoped lane-B browser-artifact applicability
+decision before delivery.
