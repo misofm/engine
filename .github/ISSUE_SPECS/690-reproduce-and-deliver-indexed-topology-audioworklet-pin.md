@@ -10,8 +10,8 @@ the lane to rescope and continue through all audit fixes. This successor owns
 only the missing ordinary post-pin reproduction, final review, and delivery of
 the already source-qualified indexed-topology change.
 
-Use clean pushed branch `codex/adopt-indexed-topology-artifact` at
-`f4703fe6330ca9453ec31540ab25ebb26314dbda`. It contains product commit
+Use successor branch `codex/reproduce-indexed-topology-artifact`, based on
+preserved delivery lineage `f4703fe6330ca9453ec31540ab25ebb26314dbda`. It contains product commit
 `276ffb6097a84088e3b5f4a16892a33bca9e26fb`, exact three-file pin checkpoint
 `2cc6fff5cc21bcca96ebeb106fa3827b47f043fd`, and the preserved decision
 records. The pin names candidate digest
