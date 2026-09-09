@@ -314,3 +314,19 @@ The command block above is corrected only by assigning the existing
 `MISO_ENGINE_WEB_AUDIOWORKLET_REPIN` from the ordinary candidate build. Every
 other frozen command, input, hash, stop rule, output, and ownership boundary is
 unchanged. Fresh Astra LOW scope PASS is required before Luna execution.
+
+## Hard-final stage-2 scope review — PASS
+
+Astra LOW returned **SCOPE PASS** at exact clean pushed brief
+`2a3781d24583778d22c4c9b1ed0b714b34a0c117`, tracker
+`0611cb5ae571457bb3fdc83042d9214b9cfe9502`, unchanged main/source/product,
+and matching GitHub bodies. All five stage-2 paths were absent. The ordinary
+builder unsets repin, all Cargo-bearing gates use external targets, and the
+frozen authority hashes, three scratch overlays, durable records, ordered gates,
+stop rules, and terminal manifest are coherent.
+
+One designated Luna HIGH executor may perform hard-final attempt 3 exactly once
+and must stop permanently at the first failure or identity/path mismatch. No
+retry, predecessor mutation, committed generated output, repository promotion,
+pin change, PR, merge, or delivery is authorized. Success qualifies candidate
+bytes only and requires Astra LOW adversarial evidence review.
