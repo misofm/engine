@@ -308,3 +308,13 @@ The proposed fresh canonical task `/root/issue690_luna_attempt3` completed only
 a read-only readiness check and created no path. The available preserved Luna
 HIGH executor above is bound to final execution; this identity choice changes
 no command, path, gate, or attempt state.
+
+## Owner delivery reconciliation
+
+The earlier #690 hard-stop snapshot was incomplete. Later preserved records
+contain the builder and four ordered gates with actual status 0, and all six
+artifact files are byte-identical to `/tmp/issue687-stage2-artifact`, including
+Wasm `31c882af32959c0164ae069b5ba63a5d5e7890b024d07c04bb75afc06e66cd4b`.
+The terminal manifest and continuous-exclusivity proof remain absent, so the
+procedural limitations are retained. Owner-approved #692 owns delivery
+reconciliation without a rerun.
