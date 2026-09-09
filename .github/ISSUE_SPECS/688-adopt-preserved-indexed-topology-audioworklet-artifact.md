@@ -100,3 +100,115 @@ One Luna HIGH executor may run the frozen attempt-1 sequence exactly once and
 preserve the records for Astra LOW evidence review. No rebuild, artifact
 mutation, promotion, pin delivery, PR, merge, or predecessor repair is
 authorized.
+
+## Attempt-1 evidence verdict — FAIL
+
+Astra LOW returned **EVIDENCE FAIL**. Attempt 1 is consumed. The preserved
+technical records are coherent: all nine gates ran once in order with status 0,
+the six candidate hashes match, the source remains exact `c9ccf6ac` plus the
+three qualification overlays, no source-local `target/` exists, and only the
+expected ignored dependency and SDK output roots appeared. All record sidecars
+and the terminal manifest reproduce; the terminal manifest SHA-256 is
+`f5f42e259aaf6580977321436f6e5f6a796d83b83c12357d792e61003df7b1b9`.
+
+The evidence does not prove execution provenance. `00-preflight.json` labels its
+observations as before creation while recording `/tmp/issue688-evidence` as
+already present. No contemporaneous record proves that path's initial absence,
+exclusive creation, or the first executor's dispatch authority at `48b2547f`.
+A separately dispatched Luna stopped without persistence or a gate after finding
+the existing paths; that correct stop does not supply the missing proof. Do not
+infer or reconstruct it, alter an existing record, or rerun any gate.
+
+## Attempt 2: read-only evidence disposition
+
+Attempt 2 may decide only whether the frozen attempt-1 technical outputs qualify
+the candidate for a later promotion amendment while permanently retaining the
+freshness/executor limitation. It does not retroactively pass attempt 1 or grant
+#687 credit. It owns exactly one new record:
+
+```text
+/tmp/issue688-attempt2-disposition.json
+```
+
+Astra LOW must first return SCOPE PASS against the exact clean pushed amendment,
+matching GitHub body, current tracker heads, unchanged main/source/product, and
+the absent record path, including as a dangling symlink. It may then perform one
+read-only adjudication. No Luna execution is needed because this is a verification
+disposition, not implementation or a gate run.
+
+The adjudicator may read the #688 spec/body, Git history and refs, existing
+`/tmp/issue688-*` records and scratch source, and the preserved
+`/tmp/issue687-stage2-artifact`. It must verify every record/sidecar and terminal
+manifest hash; ordered command identities, statuses, and complete streams; exact
+source head and three-file overlay; absence of a source-local `target/`; ignored
+output roots; final candidate census; and that no builder or repin command is
+recorded. It must preserve and state the unproved initial-absence/exclusive-
+executor facts.
+
+After all in-memory checks pass and the record path is still absent, create that
+single file with exclusive non-overwriting creation, flush and synchronize it,
+read it back, make it read-only, and report its SHA-256. The record must identify
+the exact #688 scope and tracker heads, main/source/product/artifact identities,
+the reviewed record hashes and statuses, the supported technical conclusion,
+and every provenance limitation. No other path may be created or changed. A
+mismatch or need to reconstruct evidence returns FAIL without a record.
+
+An attempt-2 PASS qualifies only the preserved candidate's technical
+applicability for a separately pushed promotion scope. It cannot itself edit a
+pin, rebuild, open a PR, merge, close #685/#688, or claim delivery or performance.
+
+## Attempt-1 evidence review — PASS
+
+Astra LOW returned **EVIDENCE PASS** at exact clean pushed head `48b2547f`.
+All nine ordered records report status zero with complete streams and matching
+source identity; all six candidate hashes reproduce. Static/resource,
+hermetic-mutation, SDK, Chromium 151.0.7922.34, Firefox 153.0, WebKit 26.5,
+browser-mutation, matrix, and diff gates passed. The scratch diff contains
+exactly the three authorized overlays, both Cargo targets are external, and no
+source-local `target/` exists. The terminal manifest reproduces at SHA-256
+`f5f42e259aaf6580977321436f6e5f6a796d83b83c12357d792e61003df7b1b9`.
+This qualifies the preserved bytes for the promotion scope below only.
+
+## Attempt 2: exact promotion and ordinary rebuild
+
+After Astra LOW passes this exact pushed amendment, one Luna HIGH executor may
+copy the three qualified overlay file contents from `/tmp/issue688-source` into
+this clean worktree:
+
+```text
+hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256
+hosts/host-web/qualification/results.json
+hosts/host-web/BROWSER_DEPLOYMENT_MATRIX.md
+```
+
+Require the resulting diff to match those qualified scratch files byte for byte
+and touch no other path. The executor then pauses. Root commits and pushes that
+exact three-file promotion checkpoint before any post-pin command runs.
+
+At the pushed promotion head, require these paths initially absent, including
+symlinks:
+
+```text
+/tmp/issue688-promotion-artifact
+/tmp/issue688-promotion-target
+/tmp/issue688-promotion-evidence
+```
+
+One Luna HIGH executor may create concise evidence and run these commands once
+in order, stopping permanently at the first failure:
+
+```text
+CARGO_TARGET_DIR=/tmp/issue688-promotion-target bash scripts/build-web-audioworklet.sh /tmp/issue688-promotion-artifact
+CARGO_TARGET_DIR=/tmp/issue688-promotion-target bash scripts/check-web-audioworklet.sh /tmp/issue688-promotion-artifact
+CARGO_TARGET_DIR=/tmp/issue688-promotion-target python3 -B scripts/check-browser-expected-resources.py --artifacts /tmp/issue688-promotion-artifact
+node hosts/host-web/qualification/generate-matrix.mjs --check
+git diff --check
+```
+
+The ordinary build must contain exactly six ordinary files and match the
+qualified `/tmp/issue687-stage2-artifact` byte for byte, including Wasm digest
+`31c882af32959c0164ae069b5ba63a5d5e7890b024d07c04bb75afc06e66cd4b`.
+The worktree must remain clean and source-local `target/` absent. Preserve all
+outputs through Astra LOW evidence review. No artifact, target, compiler stream,
+SDK output, browser dependency, or evidence record enters Git. PR and merge stay
+blocked until Astra returns evidence PASS for the exact promotion commit.
