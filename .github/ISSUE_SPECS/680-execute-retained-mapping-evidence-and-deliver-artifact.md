@@ -347,6 +347,27 @@ manifest verification are coherent. This verdict ran nothing and grants no
 execution by itself. A fresh exact feature/tracker/GitHub/path SCOPE PASS must
 supply both full head arguments before the sole Luna executor may invoke it once.
 
+That STATIC PASS is superseded by the controlling independent Astra LOW **DRAFT
+FAIL** on the same exact bytes. Revision 1 fixed the UID assumption, raw-byte
+serialization, partial-write deletion, and discarded pre-production identity,
+but four required lifecycle checks remain: immediately before manifest
+verification it must revalidate exactly the five captures plus `SHA256SUMS` as
+six ordinary non-symlink files; preflight exclusive creation must enter failure
+ownership as soon as it succeeds; manifest creation needs durable
+start/finish/status and successful completion needs a terminal status outside the
+frozen evidence directory; and `TypeError` must enter the same failure path. No
+exact-head SCOPE PASS or execution may rely on the superseded verdict.
+
+Preserve revision 1 unchanged. Only Luna HIGH `/root/issue583_luna_impl` may
+prepare the final bounded inert correction at fresh ordinary
+`/tmp/issue680-attempt2-launcher-revision2.py`, reading only this spec and the two
+sealed reduced-launcher files. It may correct only those four defects and must not
+restore general-runner infrastructure, import, compile, or invoke any launcher or
+verifier, inspect retained evidence, create an attempt-2/control path, edit Git,
+or touch product/promotion files. Root must seal and hash the result and Astra LOW
+must statically review its exact bytes. No further reduced-launcher correction is
+authorized by this record. Attempt 2 remains unconsumed.
+
 Fresh production paths are:
 
 - `/tmp/issue680-attempt2-preflight.txt`;
