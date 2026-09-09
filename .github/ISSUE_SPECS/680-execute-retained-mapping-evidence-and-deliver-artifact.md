@@ -72,20 +72,32 @@ checkpoint advanced the authorization head from `b3dc8bd4`; stdout was empty and
 the exact failed assertion was not captured. No preflight, control, evidence, or
 manifest path was created, and neither the self-test nor production verifier ran,
 so no attempt was consumed. The stale transfer is withdrawn and the sole lease
-returns to `/root/issue583_luna_impl`. All verifier bytes, commands, paths, gates,
-and stop conditions remain unchanged. Fresh Astra LOW exact-head scope review is
+returns to `/root/issue583_luna_impl`. Verifier bytes, invocations, gates, and
+stop conditions remain unchanged. Fresh Astra LOW exact-head scope review is
 mandatory before the executor acts.
+
+After that reconciliation, the superseded executor began its already-issued
+preflight at `2026-09-09T06:28:03Z`. It exclusively created only
+`/tmp/issue680-attempt1-preflight.txt`, then stopped at status 1 when it observed
+the reconciled feature head `1bfb9f26` instead of its stale authorization
+`a7e573aa`. The incomplete 891-byte record has SHA-256
+`87527f86c0b85cd61a281614cee75dd4c9f98514c5c31cfedacb1fe90ae994f3`.
+It contains no finish/status footer; no other fresh path was created, and neither
+verifier invocation ran. Preserve it without treating it as attempt evidence.
+The sole executor uses the replacement paths below. A preflight failure must now
+record its failing assertion and numeric status so another silent stop cannot
+consume a fresh path without a diagnosis.
 
 ## Attempt 1
 
 Fresh production paths are:
 
-- `/tmp/issue680-attempt1-preflight.txt`;
-- `/tmp/issue680-attempt1-evidence`;
-- `/tmp/issue680-attempt1-manifest-record.txt`;
-- `/tmp/issue680-attempt1-manifest-verify.stdout`;
-- `/tmp/issue680-attempt1-manifest-verify.stderr`;
-- `/tmp/issue680-attempt1-manifest-verify.status`.
+- `/tmp/issue680-attempt1b-preflight.txt`;
+- `/tmp/issue680-attempt1b-evidence`;
+- `/tmp/issue680-attempt1b-manifest-record.txt`;
+- `/tmp/issue680-attempt1b-manifest-verify.stdout`;
+- `/tmp/issue680-attempt1b-manifest-verify.stderr`;
+- `/tmp/issue680-attempt1b-manifest-verify.status`.
 
 The isolated control uses `/tmp/issue679-attempt3-verifier-control`, which is an
 inherited but never-created path: #679's status-2 command named a different,
