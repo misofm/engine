@@ -547,3 +547,16 @@ and requires a genuinely rescoped successor under the repository hard stop. No
 repository promotion, post-pin execution, PR, merge, compiler dump, or generated
 payload commit is authorized until this pushed amendment receives Astra LOW
 FINAL-ATTEMPT SCOPE PASS and the completed evidence receives PRE-PIN PASS.
+
+Astra LOW returned **FINAL-ATTEMPT SCOPE PASS** at exact clean pushed feature
+`34cff816268df4243a89c4f0e2f64c7eeb281ad0`, tracker
+`e6dec2b2a8ef99f726141c47ca5d3e731d7fec8b`, and current main
+`df0b9b93636de36a7143da15b83444f280b65e6b`; GitHub bodies match. Merge
+`755f3b70` has the recorded attempt-2 disposition then delivered main as its
+parents, #675 is test-only and leaves artifact inputs unchanged, and all six
+fresh attempt-3 paths are absent including symlinks. Only Luna HIGH
+`/root/issue583_luna_impl` may reverify the retained exports/tars and run the
+unexecuted candidate/downstream sequence once. Do not rebuild exports or the
+baseline, clean tar streams, promote repository pins, or run post-pin work. Any
+unexpected failure exhausts #672; PRE-PIN PASS and a separate promotion scope
+review remain required before repository edits.
