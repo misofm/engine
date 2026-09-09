@@ -143,3 +143,19 @@ determinism comparison on that exact source, then perform a fresh exact-head
 adversarial review. Do not repeat debug/release suites, repair the unrelated
 fixture baseline, or begin artifact qualification before that verdict. Attempt
 1 remains consumed; two attempts remain.
+
+## Attempt 2 source verdict — PASS
+
+Astra LOW reviewed clean pushed feature `f89f81dfe7613fb21b95a0a9124cdccd9351e23a`,
+frozen product `276ffb6097a84088e3b5f4a16892a33bca9e26fb`, unchanged main
+`e4dfe353ae7e24a1392faa7eed06d5e6ee12f497`, and tracker `4a0685f6`.
+Strict `graph-compiler` Clippy with all targets and `-D warnings` passed. A fresh
+fixture build followed by exactly 100 fresh processes produced byte-identical
+fingerprints at SHA-256
+`e5d45be61d5a42407b44221cadb53964fb0b4f802c3f51c279bca42661a8face`.
+
+Astra returned **ATTEMPT-2 SOURCE PASS**. Product and fixture bytes stayed
+frozen; the pre-existing checked-in manifest defect remains separate. Attempt 1
+stays consumed. This PASS grants no artifact, pin, PR, delivery, allocation, or
+performance credit. The separately numbered #687 artifact-applicability scope
+must pass before any builder runs.
