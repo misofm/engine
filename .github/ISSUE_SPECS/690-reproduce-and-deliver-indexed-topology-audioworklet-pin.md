@@ -277,7 +277,7 @@ Do not mutate any predecessor path, tracked file, compiler capture, generated
 predecessor artifact, or pin. No timing, improvement, or budget claim is in
 scope. A third failure hard-stops this issue under the three-attempt rule.
 
-The proposed fresh canonical task `/root/issue690_luna_attempt3` was unavailable
-at dispatch, which returned before preflight or path creation. The available
-preserved Luna HIGH executor above is therefore bound to final execution; this
-identity correction changes no command, path, gate, or attempt state.
+The proposed fresh canonical task `/root/issue690_luna_attempt3` completed only
+a read-only readiness check and created no path. The available preserved Luna
+HIGH executor above is bound to final execution; this identity choice changes
+no command, path, gate, or attempt state.
