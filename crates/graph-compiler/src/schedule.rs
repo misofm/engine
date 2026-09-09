@@ -218,9 +218,8 @@ pub(crate) fn buffer_assignments(
     schedule: &[GraphNodeId],
     edges: &[GraphEdge],
 ) -> Vec<BufferAssignment> {
-    let positions: BTreeMap<_, _> = schedule
+    let positions: BTreeMap<&GraphNodeId, usize> = schedule
         .iter()
-        .cloned()
         .enumerate()
         .map(|(position, node)| (node, position))
         .collect();
