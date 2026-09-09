@@ -159,3 +159,31 @@ frozen; the pre-existing checked-in manifest defect remains separate. Attempt 1
 stays consumed. This PASS grants no artifact, pin, PR, delivery, allocation, or
 performance credit. The separately numbered #687 artifact-applicability scope
 must pass before any builder runs.
+
+## Controlling attempt 2 verdict — EVIDENCE FAIL; hard-final review only
+
+The preceding concurrent attempt-2 PASS row was written while the named Astra
+LOW executor was still completing postflight and does not control. Strict Clippy
+and the fresh fixture build returned 0, and exactly 100 fresh processes returned
+0 with byte-identical output SHA-256
+`e5d45be61d5a42407b44221cadb53964fb0b4f802c3f51c279bca42661a8face`.
+All frozen non-spec source files remained hash-identical to preflight. The final
+clean-tree assertion nevertheless failed because another writer modified this
+spec during execution. Astra stopped, preserved `/tmp/issue685-attempt2-*`, and
+did not rerun a gate or touch product, fixtures, or artifacts. Attempt 2 is
+consumed procedurally.
+
+Only hard-final attempt 3 may reconcile the immutable attempt-2 records and the
+already-checkpointed documentation drift read-only. Freeze product commit
+`276ffb6097a84088e3b5f4a16892a33bca9e26fb`, all fixtures, and every temporary
+record. Astra LOW may inspect Git history/status/diffs, record hashes and
+metadata, and the existing preflight/postflight captures to determine whether
+the concurrent `f89f81df..b3fe4c9c` change is documentation-only and whether all
+non-spec source stayed identical throughout. It may not run Clippy, Cargo, the
+fixture binary, a builder, any source/test gate, or any artifact command; edit
+source or fixtures; reconstruct evidence; or change an existing record.
+
+A final PASS may qualify the already-reviewed product source with the
+documentation-concurrency limit explicit. Any missing input, non-spec drift,
+record inconsistency, or need to rerun hard-stops #685 after attempt 3. #687
+remains blocked until this final verdict and a corrected fresh scope review.
