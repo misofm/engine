@@ -149,6 +149,43 @@ guarded live-head/base merge, post-main qualification, GitHub synchronization,
 and eligible clean-worktree cleanup. CP1 remains partial; no original open
 finding starts before this source qualification and its artifact peer finish.
 
+## Attempt 1 FAIL and attempt 2
+
+Astra XHIGH records **Attempt 1 FAIL — procedural preflight failure; one attempt
+consumed**. Its original rollout is
+`/home/bl/.codex1/sessions/2026/09/09/rollout-2026-09-09T14-49-19-01a086a5-0f2a-7c13-8290-187cb9a4d7ed.jsonl`.
+At line 1414 the preflight accessed lease key `source_head`, while the published
+lease contained `candidate_head`. Line 1417 records chunk `c833f4`, actual exit
+1, and `KeyError: 'source_head'`.
+
+The failure preceded checkout validation and evidence-root creation. No
+baseline, candidate gate, session, poll, retry, repository mutation, or later
+operation ran. Both prepared checkouts remain clean at their exact heads and
+source hashes; all five attempt-1 roots remain absent. Preserve the original
+rollout and released lease. Do not manufacture an empty evidence package.
+
+Attempt 2 uses the same prepared checkouts and unchanged twelve gates. Its
+exclusive lease must contain both `source_head` and `candidate_head`, with each
+equal to the exact candidate head selected by fresh SCOPE. It also contains the
+exact `candidate_dir`, `baseline_dir`, and `baseline_head`. The executor first
+reads and verifies the actual lease fields before constructing any check.
+
+Fresh roots, absent including dangling symlinks before Attempt 2, are:
+
+```text
+/tmp/cp1-pdc-incoming-final-a2-evidence
+/tmp/cp1-pdc-incoming-final-a2-baseline-target
+/tmp/cp1-pdc-incoming-final-a2-candidate-target
+/tmp/cp1-pdc-incoming-final-a2-wasm-scalar-target
+/tmp/cp1-pdc-incoming-final-a2-wasm-simd-target
+```
+
+After a fresh Astra XHIGH exact-head SCOPE PASS and root-published lease, one
+Astra XHIGH executor captures one fresh baseline and runs all twelve gates once
+in the frozen order. Stop on every preflight, setup, launch, assertion, or gate
+failure. No checkout creation, source edit, inherited credit, retry, artifact,
+PR, or merge is authorized.
+
 ## Attempt 1 FAIL — procedural preflight failure
 
 Astra XHIGH authenticated the exact scope and exclusive executor lease. The
