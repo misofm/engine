@@ -164,3 +164,13 @@ byte-identical to the frozen authority, four later status-zero gates, clean Git,
 and absent source-local `target/`. Preserve non-overwriting synchronized records
 and one terminal self-excluding manifest for Astra LOW review. No predecessor
 path, tracked file, compiler capture, generated artifact, or pin may change.
+
+## Attempt-2 scope review — PASS
+
+Astra LOW returned **SCOPE PASS** at exact clean pushed issue `0453b71b`,
+tracker `e7053db4`, and unchanged main. GitHub parity held; all three fresh paths
+were absent, no relevant process was active, and attempt-1 plus six-file
+authority hashes reproduced. Root alone may create the attempt-2 paths and run
+the five frozen commands through directly polled unified sessions. No Luna
+execution, monitor, timeout, interruption, retry, tracked output, or predecessor
+mutation is authorized.
