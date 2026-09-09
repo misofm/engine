@@ -325,3 +325,12 @@ be written afterward. Stop at the first failure without correction or retry. No
 candidate/baseline build, Git export, cleanup, repository promotion, post-pin
 work, PR, or merge is authorized. Fresh Astra LOW attempt-2 scope PASS is
 required before Luna execution.
+
+Astra LOW returned **ATTEMPT-2 SCOPE PASS** at exact clean pushed feature
+`ac11edd2feb48271f391fca7ac46e20121bebce8`, tracker
+`2c572cc65181440ceede513d2b1f9102da8bc606`, and current main
+`df0b9b93636de36a7143da15b83444f280b65e6b`; GitHub #678/#559/#560
+match and all seven fresh paths are absent including symlinks. Only Luna HIGH
+`/root/issue583_luna_impl` may execute the amended attempt once after fresh
+preflight. Stop at the first failure. No rebuild, export, cleanup, promotion, or
+repetition of completed gates is authorized.
