@@ -339,6 +339,14 @@ Its diff against the rejected launcher contains only the five authorized fixes.
 All attempt-2/control paths remain absent. Astra LOW must review these literal
 bytes before any exact-head scope or invocation.
 
+Astra LOW returned **STATIC PASS** on exact launcher SHA-256
+`cdc44e1c02f27b6cf820c81f09821f0d6d29554000fcea477cb083c64068760d`,
+15,089 bytes, mode `0444`. The diff contains only the five authorized fixes;
+exact commands, terminal markers, freshness/live-ref checks, five captures, and
+manifest verification are coherent. This verdict ran nothing and grants no
+execution by itself. A fresh exact feature/tracker/GitHub/path SCOPE PASS must
+supply both full head arguments before the sole Luna executor may invoke it once.
+
 Fresh production paths are:
 
 - `/tmp/issue680-attempt2-preflight.txt`;
