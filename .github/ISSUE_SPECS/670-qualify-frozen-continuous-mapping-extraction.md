@@ -236,3 +236,16 @@ authorized.
 
 Attempt 2 remains unauthorized until this amendment is pushed, synchronized,
 and passes fresh Astra LOW scope review.
+
+## Astra LOW attempt 2 scope review — PASS
+
+Astra LOW returned **ATTEMPT-2 SCOPE PASS** at exact clean HEAD/upstream
+`c1ae10df2416f3e519cacda36fb049504c501d36`. GitHub #670/#559/#560 match and
+all five fresh paths are absent including symlinks. The literal public diagnostic
+order is correct: Parameter precedes Lattice after the validator's final sort.
+
+Only Luna HIGH `/root/issue583_luna_impl` may change the typed test module and its
+formatting, remove the redundant conversion, and compare complete ordered error
+collections. Production and borrowed tests remain frozen. Run the nine commands
+once, preserve attempt-1 evidence, and stop at first failure without correction
+or retry. No artifact, pin, PR, or merge is authorized.
