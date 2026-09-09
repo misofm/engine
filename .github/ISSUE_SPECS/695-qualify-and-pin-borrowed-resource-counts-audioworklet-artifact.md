@@ -7,7 +7,7 @@ final active slot; CP1 remains partial. The source review descendant is
 `7ba374eb21abd364fdf8c51edd7baebcb4beb08d`, with product source checkpoint
 `60ec5cb314e20e018e515927041f6dbe5deb10cf`, main
 `6d217d30478226872fb4e5302b98d967c04dd96b`, and tracker
-`d52d87485c26ab4dcbce2da08d0fbb8af5b45023`.
+`c63edd89934571d04d10caf796ecc535aaf26c9d`.
 
 Sol HIGH coordinates. Astra XHIGH owns scoping and every verification assignment.
 One later explicitly named Luna HIGH executor performs the mechanical artifact
@@ -58,8 +58,15 @@ main, source identity, ownership, preserved predecessors, and all absent roots,
 one named Luna HIGH executor may run exactly one repin probe from the peer source
 worktree. The probe is identity evidence only and pauses for Astra review.
 
-Create an empty ordinary probe-output directory and retain the full lifecycle
-record. Run exactly:
+Before any creation, the named executor must observe all six execution roots
+above absent, including dangling symlinks. Exclusively create the evidence
+directory and durably record the preceding absence observations. Then create
+the designated `...-a1-tmp` path as an ordinary directory and the probe-output
+path as an empty ordinary directory, keeping evidence, tmp, and probe creation
+distinct. Leave the artifact directory, ordinary Cargo target, and hermetic
+Cargo target absent for their commands to create. No target or artifact
+creation beyond the probe command's own target behavior is authorized. Retain
+the complete lifecycle record, then dispatch exactly one probe:
 
 ```text
 (cd /home/bl/misofm/engine-cp1-resource-input-counts-artifact && TMPDIR=/tmp/cp1-resource-input-counts-a1-tmp CARGO_TARGET_DIR=/tmp/cp1-resource-input-counts-a1-target MISO_ENGINE_WEB_AUDIOWORKLET_REPIN=1 bash scripts/build-web-audioworklet.sh /tmp/cp1-resource-input-counts-a1-probe-output)
