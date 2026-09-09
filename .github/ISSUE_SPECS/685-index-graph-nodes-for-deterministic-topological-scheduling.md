@@ -78,3 +78,32 @@ No cycle/SCC, PDC, buffer, public-ID, generic-interner, measurement, compiler
 capture, artifact, or pin work is authorized. CP1 remains partial, and source
 PASS still requires a separately scoped lane-B browser-artifact applicability
 decision before delivery.
+
+## Attempt 1 source/evidence verdict — PASS
+
+Luna HIGH changed exactly `schedule.rs` and adjacent `lib.rs` tests, and root
+checkpointed the clean tranche as pushed commit
+`276ffb6097a84088e3b5f4a16892a33bca9e26fb`. Topological scratch now uses
+graph-ID-ordered dense indices; borrowed IDs resolve edges, integer vectors carry
+degrees/adjacency/levels, and owned `GraphNodeId` values are cloned only into the
+required dependency-level output. Cycle/SCC, PDC, buffer, public graph, artifact,
+and pin paths are unchanged.
+
+All ten ordered gates returned status 0: focused topology, full debug, full
+release with command-local unwind, strict Clippy, rustfmt, diff hygiene, graph
+policy, canonical determinism across 100 fresh processes, workspace policy, and
+workspace-policy mutation tests. Temporary evidence and external targets remain
+under `/tmp/issue685-*` and no generated output entered Git.
+
+Astra LOW returned **SOURCE/EVIDENCE PASS**. It verified graph-ID ordering,
+duplicate/dangling/cycle/self-loop rejection, parallel-edge multiplicity,
+contiguous longest-path levels, permutation invariance, the independent wrong-
+level oracle, and the retained 500-DAG differential. The gate records identify
+the authorization parent rather than hashes of the dirty tested source. Their
+chronology, source mtimes, Luna's contemporaneous exact-path handoff, the
+immediate two-path commit, and root's clean upstream audit adequately link this
+ordinary tranche; independent precommit source-hash linkage is not claimed.
+
+Attempt 1 passes with no correction or second attempt. The verdict grants no
+allocation, timing, performance, artifact, pin, PR, or delivery credit. A
+separately reviewed lane-B browser-artifact applicability issue is required next.
