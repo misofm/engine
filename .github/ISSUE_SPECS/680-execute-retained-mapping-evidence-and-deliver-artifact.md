@@ -580,6 +580,87 @@ correction, retry, verifier invocation, product gate, cleanup, or promotion is
 authorized by this stage. A successful run receives Astra LOW EVIDENCE review
 before the separately scoped three-file promotion.
 
+## Attempt 3 outcome and promotion amendment
+
+The first final-attempt preflight stopped without writes because Luna manually
+mistyped one frozen hash; Astra LOW ruled that a precondition stop because the
+file remained exact and no manifest path existed. A second preflight stopped on
+tracker-only documentation drift, also before writes. Machine extraction then
+validated every frozen row. The sole manifest execution passed: exact 14-row
+`SHA256SUMS` SHA-256
+`fd4b27f861d20a3d5b7d141d53ae788a2ceb7435101a0c8fd13e4e02c7fc837f`,
+1,230 bytes, mode `0444`; exact 14 ordered `OK` rows at external stdout SHA-256
+`debe3bac18e9545abe8729e7ddb53d10f77505cdb6b26fd66e6254a20e702703`,
+362 bytes, mode `0444`; empty stderr SHA-256
+`e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`;
+and status `0` SHA-256
+`9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa`.
+The directory is mode `0555` with exactly 15 ordinary files, each mode `0444`.
+Astra LOW returned **EVIDENCE PASS**. This qualifies the retained artifact and
+does not repair attempt 2's command-record failure or prove a historical no-write
+claim beyond the frozen bytes.
+
+Promotion is now a separate bounded implementation and post-pin verification.
+Before any edit, root must push and synchronize this amendment and Astra LOW must
+return fresh exact-head SCOPE PASS. That review checks clean/upstream feature and
+tracker heads, live current main and merge bases, GitHub #680/#559/#560 parity,
+the immutable manifest identities above, the three preserved candidate overlay
+files, and absence under `test -e` and `test -L` of all fresh post-pin paths:
+
+- `/tmp/issue680-postpin-artifact`;
+- `/tmp/issue680-postpin-build.stdout`;
+- `/tmp/issue680-postpin-build.stderr`;
+- `/tmp/issue680-postpin-build.status`;
+- `/tmp/issue680-postpin-compare.txt`.
+
+Only Luna HIGH `/root/issue583_luna_impl` may implement. It may change exactly:
+
+- `hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256`, replacing
+  the old Wasm digest with
+  `93108e9407f4cd343b644e9e821cfd3ca80c3667983a35db7f2e5c3228934531`;
+- `hosts/host-web/qualification/results.json`, replacing only
+  `candidateCommit` with `8708c9b998a484d49ccb17a803e79540ca13fcd6`
+  and `wasmSha256` with that same new Wasm digest;
+- `hosts/host-web/BROWSER_DEPLOYMENT_MATRIX.md`, regenerated from the edited
+  results by `node hosts/host-web/qualification/generate-matrix.mjs`, with only
+  its candidate/artifact lineage sentence changed.
+
+The resulting full-file SHA-256 values must respectively be
+`a913e6da85d292d48608da542e7b1c76abe97fc31df1760da2cd7a3e692d385d`,
+`d0c07f89799d0f6ab8053a9a97fc84fa79fb7d2d306d921453c75237b6e9bfb8`,
+and `83e98455f1f9868ab264e0e2b89a416240891fb05e415f2af2a633643b0a627b`,
+byte-identical to the qualified candidate overlays. Any other tracked change or
+candidate drift stops before the build.
+
+Luna then creates the fresh empty ordinary post-pin artifact directory and runs
+exactly once from the #680 worktree, with
+`MISO_ENGINE_WEB_AUDIOWORKLET_REPIN` absent:
+
+```text
+bash scripts/build-web-audioworklet.sh /tmp/issue680-postpin-artifact
+```
+
+Complete stdout, stderr, and tool-reported status go to the three fresh build
+captures. Require status 0 and exactly the six candidate filenames. Record the
+one-to-one comparison in the fresh flat compare file and require byte identity
+and these exact SHA-256 values:
+
+```text
+40f6fe2e23e1b47500011c14871750a75922ab194136add8b387a4b40eb56919 miso-engine-v1-abi-layout.json
+445254e7c6ddf3330bdf20cafa8cacec4d0e2489805f72a833859db52bc038cf miso-engine-v1-audio-worklet-host.d.ts
+21c8947d8aad2d1d9a23e553c2c7b983dbd5a622aabfbab9a41c622d1a50229a miso-engine-v1-audio-worklet-host.js
+225bc06043ed6e2c62a38d63f1c2015b40480d673e3a53109c938eba481556cb miso-engine-v1-audio-worklet.js
+93108e9407f4cd343b644e9e821cfd3ca80c3667983a35db7f2e5c3228934531 miso-engine-v1-audio-worklet.simd128.wasm
+6eac2cb3e30931b6c01b10c63af4eedd2d59337274565a129c7a3f328a09938d miso-engine-v1-parameter-metadata.json
+```
+
+The build is ordinary and no-bypass: no repin flag, candidate copy, browser/SDK
+qualification rerun, retry, or correction. On success Luna stops with only the
+three reviewed repository files modified. Root audits and commits that exact
+path set, then Astra LOW reviews the committed head/current main and post-pin
+evidence before PR delivery. Raw captures and all six generated outputs remain
+external and never enter Git.
+
 The complete reviewed verifier bytes follow verbatim:
 
 ```python
