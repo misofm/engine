@@ -187,10 +187,10 @@ def self_test():
         (export / "link").unlink(); (export / "link").symlink_to("wrong")
         must_fail(lambda: verify(str(repo), tree, str(export)))
         (export / "link").unlink(); (export / "link").symlink_to("plain")
-        for name in OVERLAYS: (export / name).write_text("overlay\n")
         for name in IGNORED:
             p = export / name; p.mkdir(parents=True); (p / "ignored").write_text("ok\n")
         must_fail(lambda: verify(str(repo), tree, str(export), False))
+        for name in OVERLAYS: (export / name).write_text("overlay\n")
         verify(str(repo), tree, str(export), True)
         subject = export / sorted(IGNORED)[0]
         (subject / "ignored").unlink(); subject.rmdir(); subject.write_text("bad\n")
@@ -342,3 +342,11 @@ This bounded correction makes exact mode allow no ignored path, requires both
 post-install allowances to exist as ordinary non-symlink directories, raises all
 walk errors, and adds negative controls for exact-mode dependency content plus
 file and symlink substitutions. All other scope remains frozen.
+
+Astra LOW returned a fourth **SCOPE FAIL** at exact clean feature `5144422c`
+and tracker `aaa21c78` because the exact-mode dependency negative control ran
+after overlay bytes changed and was therefore non-discriminating. No workload
+ran. The verifier logic itself passed review. This correction moves that control
+to the pristine-byte state with only the two dependency directories present,
+then changes the three overlay bytes and retains both overlay PASS plus file and
+symlink rejection controls. No other scope changes.
