@@ -76,3 +76,7 @@ Closing this child advances but does not complete CP1. All other owned-string fa
 - All frozen local gates returned actual status `0`; evidence is retained under `/tmp/issue694-evidence` with separate external targets.
 - No test, fixture, artifact, pin, or product-semantics changes were made, and no timing, allocation, or improvement claim is made.
 - Astra XHIGH source/evidence review is pending; no artifact or merge authority exists.
+
+## Astra XHIGH source/evidence verdict
+
+SOURCE/EVIDENCE PASS at exact clean pushed evidence head `6ed4e7e7bddf1cd1c3433d5d0d373f1fb2a349f0`, with source checkpoint `60ec5cb314e20e018e515927041f6dbe5deb10cf` and unchanged main `6d217d30478226872fb4e5302b98d967c04dd96b`. The exact frozen borrowed-key hunk and graph resource-counting semantics are preserved. Baseline and candidate manifests are byte-identical with SHA-256 `aadac13d362410308ea3b7e7068ab68bce10daa1e86b92d9abf2fbfca3a0decb`. Independent 66/66 graph-compiler library tests returned actual exit `0` in session `94679`; all recorded local gates are accepted through the original Luna session attribution. Saved command labels omitted target environment details and abbreviated comparison paths, and zero-valued metadata alone is insufficient, so that evidence limitation is preserved. No artifact, pin, performance, timing, allocation, or improvement claim is made. A separate numbered lane-B AudioWorklet peer is now permitted; source closure and delivery remain pending.
