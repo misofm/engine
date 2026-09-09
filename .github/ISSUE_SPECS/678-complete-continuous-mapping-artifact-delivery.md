@@ -245,3 +245,14 @@ verifier authority/commit/path/mode arguments and exact lineage bytes, requires
 dependency roots absent before their temporary creation, and names complete
 temporary stdout/stderr/status plus self-excluding manifest verification paths.
 Fresh Astra LOW scope PASS remains required.
+
+Astra LOW returned **SCOPE PASS** at exact clean pushed feature
+`89aed0cc8b158ad439d2d0bba45793214f92ed09` and synchronized tracker
+`36976e2ff920b6b5626ad6fc54988aaa145962af`; GitHub #678/#559/#560 match.
+All verifier/source/artifact/target checks and their evidence records must finish
+before manifest generation. Afterward, only the four declared external manifest
+record/verification files may be written; nothing inside the covered evidence
+directory may change. Only Luna HIGH `/root/issue583_luna_impl` may execute the
+frozen sequence once after fresh preflight. Stop at the first unexpected failure
+without correction or retry. Candidate rebuild, repository promotion, post-pin
+work, PR, and merge remain unauthorized.
