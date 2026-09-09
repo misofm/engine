@@ -103,28 +103,46 @@ literal bytes, SHA-256, invocations, and controls before Luna runs it.
 
 ## Frozen verifier authorization checkpoint
 
-Astra LOW returned DRAFT PASS for the following exact LF-terminated verifier at
-SHA-256 `2b40e3dae5425a62e888991ecdd11bd0f63b19cfa826b070a70062183b54cc2d`
-(54,436 bytes). Its built-in self-test returned 0 and ended with
-`PASS self-test CLI/changed-byte/fourth-overlay/extra-root/76-78/sdk-symlink/artifact-dir/dependency-symlink/mode/lineage/traversal`.
-Historical compiled-output hashes are stability anchors rather than reconstructed
-contemporaneous provenance; the evidence verdict must preserve that limitation.
+The exact LF-terminated verifier prepared for Astra LOW review is
+/tmp/issue679-verifier-draft.py, SHA-256
+d8b374e8df4f8916072a002d58cfbeaa37a05fb34689197631d32a9b5f54944b
+(60,594 bytes). It has not been executed in this preparation tranche. Astra
+must review these literal bytes before Luna runs either control or production
+invocation. The verifier is read-only: it only reads Git objects, retained
+exports, retained evidence, and the nine census roots, and streams the
+preserved target through tar and sha256 without writing them.
 
-The only authorized retained-evidence invocation of these bytes is:
+The self-test control, run once only after preflight, is exactly:
 
 ```text
-python3 -B /tmp/issue679-verifier-2b40e3dae5425a62e888991ecdd11bd0f63b19cfa826b070a70062183b54cc2d.py /home/bl/misofm/engine-cp8-mapping-evidence 8708c9b998a484d49ccb17a803e79540ca13fcd6 /tmp/issue672-attempt2-candidate-pristine /tmp/issue672-attempt2-candidate-source /tmp/issue672-attempt3-candidate-artifact /tmp/issue678-attempt3-evidence
+TMPDIR=/tmp/issue679-verifier-control python3 -B /tmp/issue679-verifier-draft.py --self-test
 ```
 
-Before that invocation, require the verifier path to be an ordinary file with
-mode `0444`, size 54,436, and the exact approved SHA-256. The approved bytes are
-included verbatim below so the stateless issue remains the durable authority.
+It must return 0 and print a self-test PASS line. Passing the self-test does
+not qualify retained evidence. The production invocation, after the self-test
+review, is exactly:
+
+```text
+python3 -B /tmp/issue679-verifier-draft.py /home/bl/misofm/engine-cp8-mapping-evidence 8708c9b998a484d49ccb17a803e79540ca13fcd6 /tmp/issue672-attempt2-candidate-pristine /tmp/issue678-attempt2-candidate-source /tmp/issue672-attempt3-candidate-artifact /tmp/issue678-attempt3-evidence
+```
+
+Require the script to be an ordinary non-symlink file at that path with the
+reviewed SHA-256 before either invocation. The production command must return 0
+and its final PASS line must name all-eight-gates and nine-root-census coverage.
+Any missing path, mode/type mismatch, tracked drift, lineage byte mismatch,
+duplicate JSON key, newline mutation, dependency/artifact symlink or special
+entry, 76/78-file SDK tree, command/meta/status mismatch, nonzero retained gate
+or postcheck, missing browser identity, target digest mismatch, or unexplained
+census entry is a hard failure.
+
+The prepared verifier's complete literal coverage is embedded verbatim below.
+No runner may reconstruct, edit, or substitute these bytes.
 
 ```python
 #!/usr/bin/env python3
 """Read-only disposition verifier for the retained #678 export.
 
-CLI: verifier.py REPO COMMIT PRISTINE CANDIDATE ARTIFACT GATE7_EVIDENCE
+CLI: verifier.py REPO COMMIT PRISTINE CANDIDATE ARTIFACT RETAINED_EVIDENCE
      verifier.py --self-test
 """
 
@@ -146,7 +164,7 @@ import tempfile
 
 
 AUTHORITY_COMMIT = "8708c9b998a484d49ccb17a803e79540ca13fcd6"
-FROZEN_AUTHORITY_COMMIT = AUTHORITY_COMMIT
+AUTHORITY_REPO = pathlib.Path("/home/bl/misofm/engine-cp8-mapping-evidence")
 NEW_COMMIT = AUTHORITY_COMMIT
 NEW_WASM = "93108e9407f4cd343b644e9e821cfd3ca80c3667983a35db7f2e5c3228934531"
 OLD_COMMIT = "70899de287c23b70c17b3e41a5b2921801ae8052"
@@ -176,6 +194,7 @@ PRESERVED_TARGET = pathlib.Path("/tmp/issue672-attempt2-candidate-source/target"
 TARGET_DIGEST = "420c7c4db6427802163e3d08deb8022327722fadbc6bb4178f13212506257151"
 SOURCE_CANDIDATE = pathlib.Path("/tmp/issue678-attempt2-candidate-source")
 RETAINED_EVIDENCE = pathlib.Path("/tmp/issue678-attempt3-evidence")
+RETAINED_VERIFIER_CWD = "/home/bl/misofm/engine-cp8-mapping-delivery"
 EXPECTED_TRACKED_COUNT = 12195
 TARGET_ENV = "/tmp/issue678-attempt3-target"
 PACKAGE_MANIFEST_HASHES = {
@@ -229,7 +248,6 @@ ARTIFACT_HASHES = {
     "miso-engine-v1-audio-worklet.simd128.wasm": "93108e9407f4cd343b644e9e821cfd3ca80c3667983a35db7f2e5c3228934531",
     "miso-engine-v1-parameter-metadata.json": "6eac2cb3e30931b6c01b10c63af4eedd2d59337274565a129c7a3f328a09938d",
 }
-FROZEN_ARTIFACT_HASHES = ARTIFACT_HASHES
 # These output SHA-256 values were acquired after the successful retained gate-7
 # package command. They are stability anchors for this disposition, not a claim
 # that this verifier reproduces TypeScript or esbuild output bytes. The adjacent
@@ -314,9 +332,6 @@ DIST_EXPECTATIONS = {
     'sdk/dist/internal/session-json.d.ts': ('typescript-compiler-declaration', '9c619cccd5d2c9578f0906c06d45556ba683a3c59c1ca53839a73a4d0061ac98', 436),
     'sdk/dist/internal/session-json.js': ('typescript-compiler-javascript', '7f4dba589ab98d3e0d6ae8d062ef95f4d74c407c10fedee3212570015c7ea8ee', 436),
 }
-FROZEN_DIST_EXPECTATIONS = DIST_EXPECTATIONS
-TARGET_DIGEST = "420c7c4db6427802163e3d08deb8022327722fadbc6bb4178f13212506257151"
-
 OLD_SENTENCE = (
     "This matrix is generated from the pinned Playwright 1.62.1 headless Linux "
     "qualification run over candidate `70899de287c23b70c17b3e41a5b2921801ae8052` "
@@ -383,7 +398,7 @@ def tracked_inventory(repo: pathlib.Path, ref: str) -> dict[str, tuple[str, str]
         if path in out:
             raise VerificationError("duplicate tracked path")
         out[path] = (mode_text, oid_text)
-    if len(out) != EXPECTED_TRACKED_COUNT and ref == FROZEN_AUTHORITY_COMMIT:
+    if len(out) != EXPECTED_TRACKED_COUNT and ref == AUTHORITY_COMMIT:
         raise VerificationError(f"tracked path count mismatch: {len(out)}")
     return out
 
@@ -512,9 +527,39 @@ def verify_export(
         check_entry_bytes(repo, root, path, mode, oid, compare)
     if overlays:
         verify_dist_and_artifacts(
-            repo, root, artifact_dir, artifact_hashes, emit_inventory,
+            root, artifact_dir, artifact_hashes, emit_inventory,
             dist_expectations, require_authority,
         )
+
+def strict_json(raw: bytes, label: str) -> object:
+    if not raw.endswith(b"\n"):
+        raise VerificationError(f"{label} must have exactly its required final newline")
+
+    def reject_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in pairs:
+            if key in result:
+                raise VerificationError(f"duplicate JSON key in {label}: {key}")
+            result[key] = value
+        return result
+
+    try:
+        return json.loads(raw.decode("utf-8"), object_pairs_hook=reject_duplicates)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise VerificationError(f"invalid JSON in {label}") from error
+
+
+def replace_json_string(raw: bytes, key: str, old: str, new: str) -> bytes:
+    old_literal = json.dumps(old, ensure_ascii=True).encode("ascii")
+    new_literal = json.dumps(new, ensure_ascii=True).encode("ascii")
+    key_literal = re.escape(json.dumps(key, ensure_ascii=True).encode("ascii"))
+    pattern = rb"(?P<prefix>" + key_literal + rb"\s*:\s*)" + re.escape(old_literal)
+    matches = list(re.finditer(pattern, raw))
+    if len(matches) != 1:
+        raise VerificationError(f"expected one JSON field replacement for {key}")
+    match = matches[0]
+    return raw[:match.start()] + match.group("prefix") + new_literal + raw[match.end():]
+
 
 def verify_candidate_lineage(
     pristine: pathlib.Path,
@@ -522,25 +567,36 @@ def verify_candidate_lineage(
     lineage: tuple[str, str, str],
 ) -> None:
     new_commit, new_wasm, new_sentence = lineage
-    if (candidate / PIN).read_bytes() != (new_wasm + "\n").encode():
+    try:
+        pin = (candidate / PIN).read_bytes()
+        pristine_result_bytes = (pristine / RESULTS).read_bytes()
+        candidate_result_bytes = (candidate / RESULTS).read_bytes()
+        pristine_matrix = (pristine / MATRIX).read_bytes()
+        candidate_matrix = (candidate / MATRIX).read_bytes()
+    except OSError as error:
+        raise VerificationError("lineage file cannot be read") from error
+    if pin != (new_wasm + "\n").encode():
         raise VerificationError("pin bytes mismatch")
-    pristine_results = json.loads((pristine / RESULTS).read_text())
-    candidate_results = json.loads((candidate / RESULTS).read_text())
+    pristine_results = strict_json(pristine_result_bytes, RESULTS)
+    candidate_results = strict_json(candidate_result_bytes, RESULTS)
     expected_results = copy.deepcopy(pristine_results)
     expected_results["candidateCommit"] = new_commit
     expected_results["wasmSha256"] = new_wasm
     if candidate_results != expected_results:
         raise VerificationError("results changed beyond the two lineage fields")
-    pristine_matrix = (pristine / MATRIX).read_text()
-    candidate_matrix = (candidate / MATRIX).read_text()
-    if pristine_matrix.count(OLD_SENTENCE) != 1:
+    expected_results_bytes = replace_json_string(
+        replace_json_string(pristine_result_bytes, "candidateCommit", OLD_COMMIT, new_commit),
+        "wasmSha256", OLD_WASM, new_wasm,
+    )
+    if candidate_result_bytes != expected_results_bytes:
+        raise VerificationError("results bytes changed beyond the two lineage fields")
+    if pristine_matrix.count(OLD_SENTENCE.encode()) != 1:
         raise VerificationError("pristine matrix lineage sentence is ambiguous")
-    if candidate_matrix != pristine_matrix.replace(OLD_SENTENCE, new_sentence):
+    if candidate_matrix != pristine_matrix.replace(OLD_SENTENCE.encode(), new_sentence.encode(), 1):
         raise VerificationError("matrix changed beyond lineage sentence")
 
 
 def verify_dist_and_artifacts(
-    repo: pathlib.Path,
     candidate: pathlib.Path,
     artifact_dir: pathlib.Path,
     artifact_hashes: dict[str, str],
@@ -548,30 +604,33 @@ def verify_dist_and_artifacts(
     dist_expectations: dict[str, tuple[str, str, int]],
     require_authority: bool,
 ) -> None:
-    if require_authority and dist_expectations is FROZEN_DIST_EXPECTATIONS:
+    if require_authority and dist_expectations is DIST_EXPECTATIONS:
         verify_taxonomy_sources(candidate)
     dist = candidate / "sdk/dist"
+    ordinary_directory(dist, "sdk/dist")
     regular: list[pathlib.Path] = []
     seen_dirs: set[str] = set()
-    def onerror(error: OSError) -> None:
-        raise error
-    try:
-        for base, names, filenames in os.walk(dist, followlinks=False, onerror=onerror):
-            relbase = pathlib.Path(base).relative_to(dist).as_posix()
-            if relbase != ".":
-                seen_dirs.add(relbase)
-            for name in names:
-                item = pathlib.Path(base) / name
-                if item.is_symlink() or not item.is_dir():
-                    raise VerificationError("sdk/dist contains a symlink or special directory")
-                seen_dirs.add((pathlib.Path(relbase) / name).as_posix().removeprefix("./"))
-            for name in filenames:
-                item = pathlib.Path(base) / name
-                if item.is_symlink() or not stat.S_ISREG(item.lstat().st_mode):
-                    raise VerificationError("sdk/dist contains a symlink or special file")
-                regular.append(item)
-    except OSError as error:
-        raise VerificationError(f"sdk/dist traversal failed: {error}") from error
+
+    def visit(base: pathlib.Path, relbase: str) -> None:
+        try:
+            entries = sorted(os.scandir(base), key=lambda entry: entry.name)
+        except OSError as error:
+            raise VerificationError(f"sdk/dist traversal failed: {base}") from error
+        for entry in entries:
+            rel = f"{relbase}/{entry.name}".strip("/")
+            try:
+                info = entry.stat(follow_symlinks=False)
+            except OSError as error:
+                raise VerificationError(f"sdk/dist entry cannot be stated: {rel}") from error
+            if stat.S_ISDIR(info.st_mode):
+                seen_dirs.add(rel)
+                visit(pathlib.Path(entry.path), rel)
+            elif stat.S_ISREG(info.st_mode):
+                regular.append(pathlib.Path(entry.path))
+            else:
+                raise VerificationError("sdk/dist contains a symlink or special entry")
+
+    visit(dist, "")
     expected_dist_dirs: set[str] = set()
     for dist_path in dist_expectations:
         parent = pathlib.PurePosixPath(dist_path.removeprefix("sdk/dist/")).parent
@@ -581,7 +640,7 @@ def verify_dist_and_artifacts(
     if seen_dirs != expected_dist_dirs:
         raise VerificationError("sdk/dist directory inventory mismatch")
     actual_names = {p.relative_to(candidate).as_posix() for p in regular}
-    if actual_names != set(dist_expectations) or len(actual_names) != 77:
+    if actual_names != set(dist_expectations) or len(actual_names) != len(dist_expectations) or len(actual_names) != 77:
         raise VerificationError("sdk/dist names do not match frozen producer taxonomy")
     for item in sorted(regular, key=lambda p: p.relative_to(candidate).as_posix()):
         raw = item.read_bytes()
@@ -595,7 +654,7 @@ def verify_dist_and_artifacts(
             raise VerificationError(f"sdk/dist bytes mismatch for {rel} ({producer})")
         if emit_inventory:
             print(f"{rel}\t{mode:04o}\t{len(raw)}\t{actual_hash}\t{producer}")
-    if dist_expectations is FROZEN_DIST_EXPECTATIONS:
+    if require_authority and dist_expectations is DIST_EXPECTATIONS:
         direct_copies = {
             dist / "LICENSE": candidate / "LICENSE",
             dist / "NOTICE": candidate / "NOTICE",
@@ -606,11 +665,18 @@ def verify_dist_and_artifacts(
         for packaged, source in direct_copies.items():
             if packaged.read_bytes() != source.read_bytes():
                 raise VerificationError(f"direct staged copy differs: {packaged.relative_to(candidate)}")
-    if not artifact_dir.is_dir() or artifact_dir.is_symlink():
-        raise VerificationError("retained artifact root is not an ordinary directory")
-    artifact_entries = list(artifact_dir.iterdir())
-    if any(p.is_symlink() or not p.is_file() for p in artifact_entries):
-        raise VerificationError("retained artifact root contains a non-regular entry")
+    ordinary_directory(artifact_dir, "retained artifact root")
+    try:
+        artifact_entries = list(artifact_dir.iterdir())
+    except OSError as error:
+        raise VerificationError("retained artifact root cannot be read") from error
+    for entry in artifact_entries:
+        try:
+            info = entry.lstat()
+        except OSError as error:
+            raise VerificationError("retained artifact entry cannot be stated") from error
+        if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+            raise VerificationError("retained artifact root contains a symlink or special entry")
     artifact_names = {p.name for p in artifact_entries}
     if artifact_names != set(artifact_hashes):
         raise VerificationError("retained candidate artifact does not have exactly six files")
@@ -618,15 +684,19 @@ def verify_dist_and_artifacts(
     for name, expected_hash in artifact_hashes.items():
         source = artifact_dir / name
         packaged = assets / name
-        if not packaged.is_file() or packaged.is_symlink():
+        try:
+            packaged_info = packaged.lstat()
+        except OSError as error:
+            raise VerificationError(f"missing packaged artifact: {name}") from error
+        if not stat.S_ISREG(packaged_info.st_mode) or stat.S_ISLNK(packaged_info.st_mode):
             raise VerificationError(f"missing packaged artifact: {name}")
         if hashlib.sha256(source.read_bytes()).hexdigest() != expected_hash:
             raise VerificationError(f"retained artifact hash mismatch: {name}")
         if packaged.read_bytes() != source.read_bytes():
             raise VerificationError(f"packaged artifact differs: {name}")
-    if dist_expectations is FROZEN_DIST_EXPECTATIONS:
+    if require_authority and dist_expectations is DIST_EXPECTATIONS:
         manifest_path = assets / "miso-engine-v1-sdk-manifest.json"
-        manifest = json.loads(manifest_path.read_text())
+        manifest = strict_json(manifest_path.read_bytes(), "sdk manifest")
         expected_manifest = {
             "schema": "miso.sdk.package-assets.v1",
             "abiVersion": 65536,
@@ -646,8 +716,10 @@ def verify_dist_and_artifacts(
 
 def verify_taxonomy_sources(candidate: pathlib.Path) -> None:
     """Cross-check the frozen 77-name table against the SDK's current producers."""
-    package = json.loads((candidate / "sdk/package.json").read_text())
-    tsconfig = json.loads((candidate / "sdk/tsconfig.build.json").read_text())
+    package = strict_json((candidate / "sdk/package.json").read_bytes(), "sdk/package.json")
+    tsconfig = strict_json((candidate / "sdk/tsconfig.build.json").read_bytes(), "sdk/tsconfig.build.json")
+    if not isinstance(package, dict) or not isinstance(tsconfig, dict):
+        raise VerificationError("SDK metadata is not a JSON object")
     options = tsconfig.get("compilerOptions", {})
     if package.get("files") != ["dist"]:
         raise VerificationError("SDK package does not publish only dist")
@@ -674,7 +746,10 @@ def verify_taxonomy_sources(candidate: pathlib.Path) -> None:
     })
     if generated != {name: producer for name, (producer, _, _) in DIST_EXPECTATIONS.items()}:
         raise VerificationError("SDK producer taxonomy differs from authoritative inputs")
-    stage = (candidate / "sdk/codegen/stage-package.mjs").read_text()
+    try:
+        stage = (candidate / "sdk/codegen/stage-package.mjs").read_text(encoding="utf-8")
+    except OSError as error:
+        raise VerificationError("SDK staging script cannot be read") from error
     for marker in (
         "miso-engine-v1-sdk-manifest.json", "miso-engine-v1-pcm-feed-worklet.js",
         "shipped-host.d.ts", "resolve(repoRoot, \"LICENSE\")", "resolve(repoRoot, \"NOTICE\")",
@@ -684,77 +759,231 @@ def verify_taxonomy_sources(candidate: pathlib.Path) -> None:
             raise VerificationError(f"SDK staging producer marker missing: {marker}")
 
 
-def verify_gate7_evidence(
-    evidence: pathlib.Path,
-    artifact_hashes: dict[str, str],
-) -> None:
-    names = (
-        "13-gate7-sdk-package.command",
-        "13-gate7-sdk-package.meta",
-        "13-gate7-sdk-package.stdout",
-        "13-gate7-sdk-package.stderr",
-        "13-gate7-sdk-package.status",
-        "13-gate7-postcheck.command",
-        "13-gate7-postcheck.stdout",
-        "13-gate7-postcheck.stderr",
-        "13-gate7-postcheck.status",
-    )
-    for name in names:
-        item = evidence / name
-        if not item.is_file() or item.is_symlink():
-            raise VerificationError(f"missing gate-7 evidence: {name}")
-    if (evidence / "13-gate7-sdk-package.status").read_text().strip() != "0":
-        raise VerificationError("gate-7 package command was not status 0")
-    if (evidence / "13-gate7-postcheck.status").read_text().strip() != "0":
-        raise VerificationError("gate-7 postcheck was not status 0")
-    command = (evidence / "13-gate7-sdk-package.command").read_text().strip()
-    expected_command = "bash scripts/sdk-package.sh check /tmp/issue672-attempt3-candidate-artifact"
-    if command != expected_command:
-        raise VerificationError("gate-7 command or artifact argument mismatch")
-    post_command = (evidence / "13-gate7-postcheck.command").read_text().strip()
-    if post_command != "CARGO_TARGET_DIR=/tmp/issue678-attempt3-target /tmp/issue678-attempt2-evidence/postcheck.sh":
-        raise VerificationError("gate-7 postcheck command mismatch")
+def strict_text(path: pathlib.Path, label: str) -> str:
+    ordinary_file(path, label)
+    try:
+        return path.read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError) as error:
+        raise VerificationError(f"cannot read {label}: {path}") from error
+
+
+def strict_status(path: pathlib.Path, expected: str) -> None:
+    if strict_text(path, str(path)).splitlines() != [expected]:
+        raise VerificationError(f"unexpected status in {path}")
+
+
+def parse_meta(path: pathlib.Path, expected_keys: set[str], expected_cwd: str, expected_status: str) -> None:
     meta: dict[str, str] = {}
-    for line in (evidence / "13-gate7-sdk-package.meta").read_text().splitlines():
-        if "=" not in line:
-            raise VerificationError("malformed gate-7 metadata")
+    for line in strict_text(path, str(path)).splitlines():
+        if not line or "=" not in line:
+            raise VerificationError(f"malformed metadata: {path}")
         key, value = line.split("=", 1)
         if key in meta:
-            raise VerificationError("duplicate gate-7 metadata key")
+            raise VerificationError(f"duplicate metadata key: {path}")
         meta[key] = value
-    if meta.get("cwd") != "/tmp/issue678-attempt2-candidate-source":
-        raise VerificationError("gate-7 cwd mismatch")
-    if meta.get("CARGO_TARGET_DIR") != "/tmp/issue678-attempt3-target":
-        raise VerificationError("gate-7 target mismatch")
-    if meta.get("status") != "0":
-        raise VerificationError("gate-7 metadata status mismatch")
+    if set(meta) != expected_keys or meta.get("cwd") != expected_cwd or meta.get("status") != expected_status:
+        raise VerificationError(f"metadata identity mismatch: {path}")
+    if "CARGO_TARGET_DIR" in expected_keys and meta.get("CARGO_TARGET_DIR") != TARGET_ENV:
+        raise VerificationError(f"metadata target mismatch: {path}")
     try:
         start = datetime.datetime.fromisoformat(meta["start_utc"].replace("Z", "+00:00"))
         finish = datetime.datetime.fromisoformat(meta["finish_utc"].replace("Z", "+00:00"))
     except (KeyError, ValueError) as error:
-        raise VerificationError("malformed gate-7 timestamps") from error
-    if not start < finish:
-        raise VerificationError("gate-7 timestamps are not ordered")
-    stdout = (evidence / "13-gate7-sdk-package.stdout").read_text()
-    if "SDK publishable-tarball gate passed" not in stdout:
-        raise VerificationError("gate-7 output lacks package success verdict")
-    if "staged 6 Engine V1 artifacts and package manifest" not in stdout:
-        raise VerificationError("gate-7 output lacks artifact staging result")
-    if "SDK generated surface is the engine's current output" not in stdout:
-        raise VerificationError("gate-7 output lacks generated-surface result")
-    post_stdout = (evidence / "13-gate7-postcheck.stdout").read_text()
-    for marker in (
-        "source_target=absent",
-        "artifact_hashes:",
-        "target_identity=",
-    ):
-        if marker not in post_stdout:
-            raise VerificationError(f"gate-7 postcheck lacks {marker}")
+        raise VerificationError(f"malformed metadata timestamps: {path}") from error
+    if start.tzinfo is None or finish.tzinfo is None or not start < finish:
+        raise VerificationError(f"metadata timestamps are not ordered: {path}")
+
+
+def verify_postcheck(evidence: pathlib.Path, prefix: str, artifact_hashes: dict[str, str]) -> None:
+    if strict_text(evidence / f"{prefix}-postcheck.command", "postcheck command") != POSTCHECK_COMMAND + "\n":
+        raise VerificationError(f"postcheck command mismatch: {prefix}")
+    strict_text(evidence / f"{prefix}-postcheck.stdout", "postcheck stdout")
+    strict_text(evidence / f"{prefix}-postcheck.stderr", "postcheck stderr")
+    strict_status(evidence / f"{prefix}-postcheck.status", "0")
+    stdout = strict_text(evidence / f"{prefix}-postcheck.stdout", "postcheck stdout")
+    stderr = strict_text(evidence / f"{prefix}-postcheck.stderr", "postcheck stderr")
+    for marker in ("source_target=absent", "artifact_hashes:", "target_identity=manifests:"):
+        if marker not in stdout:
+            raise VerificationError(f"postcheck lacks {marker}: {prefix}")
     for digest in artifact_hashes.values():
-        if digest not in post_stdout:
-            raise VerificationError(f"gate-7 postcheck lacks artifact identity {digest}")
-    if TARGET_DIGEST not in (evidence / "13-gate7-postcheck.stderr").read_text():
-        raise VerificationError("gate-7 postcheck lacks streamed target identity")
+        if digest not in stdout:
+            raise VerificationError(f"postcheck lacks artifact hash: {prefix}")
+    for path, digest in PACKAGE_MANIFEST_HASHES.items():
+        if f"{digest}  {path}" not in stdout:
+            raise VerificationError(f"postcheck lacks package identity: {prefix}")
+    if TARGET_DIGEST not in stderr:
+        raise VerificationError(f"postcheck lacks preserved target identity: {prefix}")
+
+
+def verify_gate_evidence(evidence: pathlib.Path, artifact_hashes: dict[str, str]) -> None:
+    ordinary_directory(evidence, "retained evidence")
+    for prefix, expected_command in GATE_SPECS:
+        if strict_text(evidence / f"{prefix}.command", "gate command") != expected_command + "\n":
+            raise VerificationError(f"gate command mismatch: {prefix}")
+        strict_text(evidence / f"{prefix}.stdout", "gate stdout")
+        strict_text(evidence / f"{prefix}.stderr", "gate stderr")
+        strict_status(evidence / f"{prefix}.status", "0")
+        parse_meta(
+            evidence / f"{prefix}.meta",
+            {"cwd", "CARGO_TARGET_DIR", "start_utc", "finish_utc", "status"},
+            str(SOURCE_CANDIDATE),
+            "0",
+        )
+        verify_postcheck(evidence, prefix, artifact_hashes)
+    qualification = strict_text(evidence / "14-gate8-qualification.stdout", "gate-8 stdout")
+    for marker in (
+        "session identities: 3 qualification documents declare their fed PCM",
+        "artifact set: the exact 6-file shipped set is pinned",
+        "chromium: all qualification gates passed (151.0.7922.34)",
+        "firefox: all qualification gates passed (153.0)",
+        "webkit: all qualification gates passed (26.5)",
+    ):
+        if marker not in qualification:
+            raise VerificationError(f"gate-8 output lacks {marker}")
+    package_output = strict_text(evidence / "13-gate7-sdk-package.stdout", "gate-7 stdout")
+    for marker in (
+        "staged 6 Engine V1 artifacts and package manifest",
+        "SDK generated surface is the engine's current output",
+    ):
+        if marker not in package_output:
+            raise VerificationError(f"gate-7 output lacks {marker}")
+
+
+def verify_playwright_record(evidence: pathlib.Path) -> None:
+    if strict_text(evidence / "05-playwright-api.command", "Playwright command") != PLAYWRIGHT_COMMAND:
+        raise VerificationError("Playwright API command mismatch")
+    strict_status(evidence / "05-playwright-api.status", "0")
+    parse_meta(
+        evidence / "05-playwright-api.meta",
+        {"cwd", "start_utc", "finish_utc", "status"},
+        str(SOURCE_CANDIDATE),
+        "0",
+    )
+    strict_text(evidence / "05-playwright-api.stderr", "Playwright stderr")
+    rows = strict_text(evidence / "05-playwright-api.stdout", "Playwright stdout").splitlines()
+    if len(rows) != 3:
+        raise VerificationError("Playwright API did not record exactly three browsers")
+    names: set[str] = set()
+    paths: set[str] = set()
+    for row in rows:
+        parts = row.split("\t")
+        if len(parts) != 2 or parts[0] in names or not parts[1] or not pathlib.Path(parts[1]).is_absolute():
+            raise VerificationError("malformed Playwright executable record")
+        names.add(parts[0])
+        paths.add(parts[1])
+    if names != {"chromium", "firefox", "webkit"} or len(paths) != 3:
+        raise VerificationError("Playwright executable identity is incomplete")
+
+
+def verify_overlay_records(evidence: pathlib.Path) -> None:
+    if strict_text(evidence / "04-overlay-verifier.command", "initial verifier command") != OVERLAY_COMMAND + "\n":
+        raise VerificationError("initial overlay command mismatch")
+    strict_status(evidence / "04-overlay-verifier.status", "0")
+    if not strict_text(evidence / "04-overlay-verifier.stdout", "initial verifier stdout").startswith("PASS paths=12195 overlay=1"):
+        raise VerificationError("initial overlay verifier did not report all tracked paths")
+    strict_text(evidence / "04-overlay-verifier.stderr", "initial verifier stderr")
+    strict_text(evidence / "04-overlay-verifier.meta", "initial verifier metadata")
+    if strict_text(evidence / "15-final-overlay-verifier.command", "final verifier command") != OVERLAY_COMMAND + "\n":
+        raise VerificationError("final overlay command mismatch")
+    strict_status(evidence / "15-final-overlay-verifier.status", "1")
+    strict_text(evidence / "15-final-overlay-verifier.stdout", "final verifier stdout")
+    parse_meta(
+        evidence / "15-final-overlay-verifier.meta",
+        {"cwd", "start_utc", "finish_utc", "status"},
+        RETAINED_VERIFIER_CWD,
+        "1",
+    )
+    final_stderr = strict_text(evidence / "15-final-overlay-verifier.stderr", "final verifier stderr")
+    if "missing or extra tracked path" not in final_stderr:
+        raise VerificationError("final verifier failure is not the retained SDK/dist disposition")
+
+
+def verify_retained_evidence(evidence: pathlib.Path, artifact_hashes: dict[str, str]) -> None:
+    verify_playwright_record(evidence)
+    verify_gate_evidence(evidence, artifact_hashes)
+    verify_overlay_records(evidence)
+
+
+def file_sha256(path: pathlib.Path) -> str:
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError as error:
+        raise VerificationError(f"cannot hash file: {path}") from error
+    return digest.hexdigest()
+
+
+def census_root(root: pathlib.Path) -> list[str]:
+    ordinary_directory(root, "census root")
+    rows: list[str] = []
+
+    def visit(base: pathlib.Path, relbase: str) -> None:
+        try:
+            entries = sorted(os.scandir(base), key=lambda entry: entry.name)
+        except OSError as error:
+            raise VerificationError(f"census traversal failed: {base}") from error
+        for entry in entries:
+            rel = f"{relbase}/{entry.name}".strip("/")
+            try:
+                info = entry.stat(follow_symlinks=False)
+            except OSError as error:
+                raise VerificationError(f"census entry cannot be stated: {rel}") from error
+            mode = stat.S_IMODE(info.st_mode)
+            if stat.S_ISDIR(info.st_mode):
+                rows.append(f"d\t{mode:04o}\t{info.st_size}\t-\t{rel}")
+                visit(pathlib.Path(entry.path), rel)
+            elif stat.S_ISREG(info.st_mode):
+                rows.append(f"f\t{mode:04o}\t{info.st_size}\t{file_sha256(pathlib.Path(entry.path))}\t{rel}")
+            elif stat.S_ISLNK(info.st_mode):
+                target = os.fsencode(os.readlink(entry.path))
+                rows.append(f"l\t{mode:04o}\t{info.st_size}\t{hashlib.sha256(target).hexdigest()}\t{rel}")
+            else:
+                raise VerificationError(f"census contains a special entry: {rel}")
+
+    visit(root, "")
+    return rows
+
+
+def preserved_target_identity() -> str:
+    ordinary_directory(PRESERVED_TARGET, "preserved target")
+    command = [
+        "tar", "--sort=name", "--mtime=@0", "--owner=0", "--group=0",
+        "--numeric-owner", "-C", str(PRESERVED_TARGET.parent), "-cf", "-",
+        PRESERVED_TARGET.name,
+    ]
+    try:
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except OSError as error:
+        raise VerificationError("cannot start target identity command") from error
+    digest = hashlib.sha256()
+    assert process.stdout is not None
+    while True:
+        chunk = process.stdout.read(1024 * 1024)
+        if not chunk:
+            break
+        digest.update(chunk)
+    stderr = process.stderr.read() if process.stderr is not None else b""
+    status = process.wait()
+    if status != 0:
+        raise VerificationError(f"target identity command failed: {stderr[:200]!r}")
+    value = digest.hexdigest()
+    if value != TARGET_DIGEST:
+        raise VerificationError(f"preserved target digest mismatch: {value}")
+    return value
+
+
+def verify_nine_root_census() -> None:
+    for label, raw_path in ROOT_CENSUS:
+        root = pathlib.Path(raw_path)
+        print(f"ROOT {label} {raw_path}")
+        for row in census_root(root):
+            print(row)
+    print(f"PRESERVED_TARGET {PRESERVED_TARGET}")
+    for row in census_root(PRESERVED_TARGET):
+        print(row)
+    print(f"PRESERVED_TARGET_TAR_SHA256 {preserved_target_identity()}")
 
 
 def verify_all(
@@ -781,8 +1010,10 @@ def verify_all(
         evidence, emit_inventory, dist_expectations, require_authority,
     )
     verify_candidate_lineage(pristine, candidate, lineage)
-    verify_gate7_evidence(evidence, artifact_hashes)
-    print("PASS authority/pristine/candidate/artifact/gate7")
+    if require_authority:
+        verify_retained_evidence(evidence, artifact_hashes)
+        verify_nine_root_census()
+    print("PASS authority/pristine/candidate/artifact/all-eight-gates/nine-root-census")
 
 
 def assert_reject(action) -> None:
@@ -807,10 +1038,11 @@ def synthetic_self_test() -> None:
         subprocess.run(["git", "init", "-q", str(repo)], check=True)
         tracked = {
             "plain.txt": b"plain\n",
-            PIN: b"old-wasm\n",
-            RESULTS: json.dumps({"candidateCommit": OLD_COMMIT, "wasmSha256": OLD_WASM, "rows": [1]}).encode(),
+            PIN: (OLD_WASM + "\n").encode(),
+            RESULTS: (json.dumps({"candidateCommit": OLD_COMMIT, "wasmSha256": OLD_WASM, "rows": [1]}, indent=2) + "\n").encode(),
             MATRIX: (OLD_SENTENCE + "\n").encode(),
             "sdk/package.json": b"{}\n",
+            "sdk/tsconfig.build.json": b"{}\n",
             "hosts/host-web/qualification/package.json": b"{}\n",
             "link": b"plain.txt",
         }
@@ -822,21 +1054,30 @@ def synthetic_self_test() -> None:
             else:
                 item.write_bytes(data)
         subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
-        ref = git(repo, "write-tree").decode().strip()
-        # write-tree is a tree object; use the same helpers in non-authority mode.
+        tree = git(repo, "write-tree").decode("ascii").strip()
+        env = os.environ | {
+            "GIT_AUTHOR_NAME": "issue679-selftest",
+            "GIT_AUTHOR_EMAIL": "issue679-selftest@example.invalid",
+            "GIT_COMMITTER_NAME": "issue679-selftest",
+            "GIT_COMMITTER_EMAIL": "issue679-selftest@example.invalid",
+        }
+        commit = subprocess.run(
+            ["git", "-C", str(repo), "commit-tree", tree, "-m", "synthetic"],
+            check=True, stdout=subprocess.PIPE, env=env, text=True,
+        ).stdout.strip()
         pristine.mkdir()
         archive = subprocess.run(
-            ["git", "-C", str(repo), "archive", "--format=tar", ref],
+            ["git", "-C", str(repo), "archive", "--format=tar", commit],
             check=True, stdout=subprocess.PIPE,
         ).stdout
         subprocess.run(["tar", "-xf", "-", "-C", str(pristine)], input=archive, check=True)
         shutil.copytree(pristine, candidate, symlinks=True)
         (candidate / PIN).write_bytes((NEW_WASM + "\n").encode())
-        result = json.loads((candidate / RESULTS).read_text())
-        result["candidateCommit"] = NEW_COMMIT
-        result["wasmSha256"] = NEW_WASM
-        (candidate / RESULTS).write_text(json.dumps(result, sort_keys=True).encode().decode())
-        (candidate / MATRIX).write_text((candidate / MATRIX).read_text().replace(OLD_SENTENCE, NEW_SENTENCE))
+        result_bytes = (candidate / RESULTS).read_bytes()
+        result_bytes = replace_json_string(result_bytes, "candidateCommit", OLD_COMMIT, NEW_COMMIT)
+        result_bytes = replace_json_string(result_bytes, "wasmSha256", OLD_WASM, NEW_WASM)
+        (candidate / RESULTS).write_bytes(result_bytes)
+        (candidate / MATRIX).write_bytes((candidate / MATRIX).read_bytes().replace(OLD_SENTENCE.encode(), NEW_SENTENCE.encode(), 1))
         (candidate / "sdk/node_modules").mkdir(parents=True)
         (candidate / "hosts/host-web/qualification/node_modules").mkdir(parents=True)
         dist = candidate / "sdk/dist"
@@ -847,197 +1088,102 @@ def synthetic_self_test() -> None:
             (artifact / name).write_bytes(data)
             (assets / name).write_bytes(data)
         for index in range(71):
-            (dist / f"generated/{index:02d}.js").parent.mkdir(parents=True, exist_ok=True)
-            (dist / f"generated/{index:02d}.js").write_bytes(f"generated-{index}\n".encode())
-        (evidence / "13-gate7-sdk-package.command").write_text(
-            "bash scripts/sdk-package.sh check /tmp/issue672-attempt3-candidate-artifact\n"
-        )
-        (evidence / "13-gate7-sdk-package.meta").write_text(
-            "cwd=/tmp/issue678-attempt2-candidate-source\n"
-            "CARGO_TARGET_DIR=/tmp/issue678-attempt3-target\n"
-            "start_utc=2026-01-01T00:00:00Z\n"
-            "finish_utc=2026-01-01T00:00:01Z\n"
-            "status=0\n"
-        )
-        (evidence / "13-gate7-sdk-package.stdout").write_text(
-            "SDK publishable-tarball gate passed\n"
-            "staged 6 Engine V1 artifacts and package manifest\n"
-            "SDK generated surface is the engine's current output\n"
-        )
-        (evidence / "13-gate7-sdk-package.stderr").write_text("")
-        (evidence / "13-gate7-sdk-package.status").write_text("0\n")
-        (evidence / "13-gate7-postcheck.command").write_text(
-            "CARGO_TARGET_DIR=/tmp/issue678-attempt3-target "
-            "/tmp/issue678-attempt2-evidence/postcheck.sh\n"
-        )
-        (evidence / "13-gate7-postcheck.stdout").write_text(
-            "source_target=absent\nartifact_hashes:\ntarget_identity=\n"
-        )
-        (evidence / "13-gate7-postcheck.stderr").write_text("")
-        (evidence / "13-gate7-postcheck.status").write_text("0\n")
-        synthetic_lineage = (NEW_COMMIT, NEW_WASM, NEW_SENTENCE)
-        synthetic_hashes = {
-            name: hashlib.sha256((artifact / name).read_bytes()).hexdigest()
-            for name in ARTIFACT_NAMES
-        }
-        (evidence / "13-gate7-postcheck.stdout").write_text(
-            "source_target=absent\n"
-            "artifact_hashes:\n"
-            + "\n".join(synthetic_hashes.values())
-            + "\ntarget_identity=\n"
-        )
-        (evidence / "13-gate7-postcheck.stderr").write_text(f"{TARGET_DIGEST}  -\n")
+            item = dist / f"generated/{index:02d}.js"
+            item.parent.mkdir(parents=True, exist_ok=True)
+            item.write_bytes(f"generated-{index}\n".encode())
+        synthetic_hashes = {name: file_sha256(artifact / name) for name in ARTIFACT_NAMES}
         synthetic_expectations = {
             p.relative_to(candidate).as_posix():
-            ("synthetic", hashlib.sha256(p.read_bytes()).hexdigest(), stat.S_IMODE(p.stat().st_mode))
-            for p in (candidate / "sdk/dist").rglob("*")
-            if p.is_file()
+            ("synthetic", file_sha256(p), stat.S_IMODE(p.stat().st_mode))
+            for p in dist.rglob("*") if p.is_file() and not p.is_symlink()
         }
-        global AUTHORITY_COMMIT, ARTIFACT_HASHES, DIST_EXPECTATIONS
-        saved_authority = AUTHORITY_COMMIT
-        saved_artifacts = ARTIFACT_HASHES
-        saved_dist = DIST_EXPECTATIONS
-        saved_argv = sys.argv
-        try:
-            AUTHORITY_COMMIT = ref
-            ARTIFACT_HASHES = synthetic_hashes
-            DIST_EXPECTATIONS = synthetic_expectations
-            sys.argv = [
-                str(pathlib.Path(__file__).resolve()), str(repo), ref,
-                str(pristine), str(candidate), str(artifact), str(evidence),
-            ]
-            if main() != 0:
-                raise AssertionError("CLI self-test returned nonzero")
-        finally:
-            AUTHORITY_COMMIT = saved_authority
-            ARTIFACT_HASHES = saved_artifacts
-            DIST_EXPECTATIONS = saved_dist
-            sys.argv = saved_argv
-        verify_all(repo, ref, pristine, candidate, artifact, evidence,
-                   synthetic_lineage, synthetic_hashes, synthetic_expectations, False, False)
-        package_stdout_path = evidence / "13-gate7-sdk-package.stdout"
-        original_package_stdout = package_stdout_path.read_bytes()
-        package_stdout_path.write_text(
-            original_package_stdout.decode().replace("SDK publishable-tarball gate passed\n", "", 1)
-        )
-        assert_reject(lambda: verify_all(repo, ref, pristine, candidate, artifact, evidence,
-                                          synthetic_lineage, synthetic_hashes, synthetic_expectations, False, False))
-        package_stdout_path.write_bytes(original_package_stdout)
-        post_stdout_path = evidence / "13-gate7-postcheck.stdout"
-        original_post_stdout = post_stdout_path.read_bytes()
-        for marker in (
-            "target_identity=\n",
-            *[f"{digest}\n" for digest in synthetic_hashes.values()],
-        ):
-            current = original_post_stdout.decode()
-            assert marker in current
-            post_stdout_path.write_text(current.replace(marker, "", 1))
-            assert_reject(lambda: verify_all(repo, ref, pristine, candidate, artifact, evidence,
-                                              synthetic_lineage, synthetic_hashes, synthetic_expectations, False, False))
-            post_stdout_path.write_bytes(original_post_stdout)
-        post_stderr_path = evidence / "13-gate7-postcheck.stderr"
-        original_post_stderr = post_stderr_path.read_bytes()
-        post_stderr_path.write_bytes(b"")
-        assert_reject(lambda: verify_all(repo, ref, pristine, candidate, artifact, evidence,
-                                          synthetic_lineage, synthetic_hashes, synthetic_expectations, False, False))
-        post_stderr_path.write_bytes(original_post_stderr)
+        verify_all(repo, commit, pristine, candidate, artifact, evidence,
+                   (NEW_COMMIT, NEW_WASM, NEW_SENTENCE), synthetic_hashes,
+                   synthetic_expectations, False, False)
         (candidate / "plain.txt").write_bytes(b"changed\n")
-        assert_reject(lambda: verify_all(repo, ref, pristine, candidate, artifact, evidence,
-                                          synthetic_lineage, synthetic_hashes, synthetic_expectations, False, False))
+        assert_reject(lambda: verify_all(repo, commit, pristine, candidate, artifact, evidence,
+                                          (NEW_COMMIT, NEW_WASM, NEW_SENTENCE), synthetic_hashes,
+                                          synthetic_expectations, False, False))
         (candidate / "plain.txt").write_bytes(b"plain\n")
-        (candidate / "fourth-overlay").write_text("bad\n")
-        assert_reject(lambda: verify_all(repo, ref, pristine, candidate, artifact, evidence,
-                                          synthetic_lineage, synthetic_hashes, synthetic_expectations, False, False))
-        (candidate / "fourth-overlay").unlink()
-        (candidate / "extra-root").mkdir()
-        assert_reject(lambda: verify_all(repo, ref, pristine, candidate, artifact, evidence,
-                                          synthetic_lineage, synthetic_hashes, synthetic_expectations, False, False))
-        (candidate / "extra-root").rmdir()
-        dist_files = sorted((candidate / "sdk/dist").rglob("*"))
-        dist_files = [p for p in dist_files if p.is_file()]
-        removed = dist_files[-1]
+        extra_root = candidate / "fourth-overlay"
+        extra_root.write_text("bad\n")
+        assert_reject(lambda: verify_all(repo, commit, pristine, candidate, artifact, evidence,
+                                          (NEW_COMMIT, NEW_WASM, NEW_SENTENCE), synthetic_hashes,
+                                          synthetic_expectations, False, False))
+        extra_root.unlink()
+        extra = dist / "generated/extra.js"
+        removed = dist / "generated/70.js"
         removed_data = removed.read_bytes()
         removed.unlink()
-        assert_reject(lambda: verify_all(repo, ref, pristine, candidate, artifact, evidence,
-                                          synthetic_lineage, synthetic_hashes, synthetic_expectations, False, False))
+        assert_reject(lambda: verify_all(repo, commit, pristine, candidate, artifact, evidence,
+                                          (NEW_COMMIT, NEW_WASM, NEW_SENTENCE), synthetic_hashes,
+                                          synthetic_expectations, False, False))
         removed.write_bytes(removed_data)
-        extra = candidate / "sdk/dist/generated/extra.js"
         extra.write_text("extra\n")
-        assert_reject(lambda: verify_all(repo, ref, pristine, candidate, artifact, evidence,
-                                          synthetic_lineage, synthetic_hashes, synthetic_expectations, False, False))
+        assert_reject(lambda: verify_all(repo, commit, pristine, candidate, artifact, evidence,
+                                          (NEW_COMMIT, NEW_WASM, NEW_SENTENCE), synthetic_hashes,
+                                          synthetic_expectations, False, False))
         extra.unlink()
-        symlinked = dist_files[0]
+        symlinked = dist / "generated/00.js"
         symlink_data = symlinked.read_bytes()
         symlinked.unlink()
-        symlinked.symlink_to("assets/" + next(iter(ARTIFACT_NAMES)))
-        assert_reject(lambda: verify_all(repo, ref, pristine, candidate, artifact, evidence,
-                                          synthetic_lineage, synthetic_hashes, synthetic_expectations, False, False))
+        symlinked.symlink_to("../assets/" + next(iter(ARTIFACT_NAMES)))
+        assert_reject(lambda: verify_all(repo, commit, pristine, candidate, artifact, evidence,
+                                          (NEW_COMMIT, NEW_WASM, NEW_SENTENCE), synthetic_hashes,
+                                          synthetic_expectations, False, False))
         symlinked.unlink()
         symlinked.write_bytes(symlink_data)
         packaged = assets / next(iter(ARTIFACT_NAMES))
+        packaged_data = packaged.read_bytes()
         packaged.write_bytes(b"changed artifact\n")
-        assert_reject(lambda: verify_all(repo, ref, pristine, candidate, artifact, evidence,
-                                          synthetic_lineage, synthetic_hashes, synthetic_expectations, False, False))
-        packaged.write_bytes((artifact / packaged.name).read_bytes())
-        artifact_extra_dir = artifact / "extra-dir"
-        artifact_extra_dir.mkdir()
-        assert_reject(lambda: verify_all(repo, ref, pristine, candidate, artifact, evidence,
-                                          synthetic_lineage, synthetic_hashes, synthetic_expectations, False, False))
-        artifact_extra_dir.rmdir()
+        assert_reject(lambda: verify_all(repo, commit, pristine, candidate, artifact, evidence,
+                                          (NEW_COMMIT, NEW_WASM, NEW_SENTENCE), synthetic_hashes,
+                                          synthetic_expectations, False, False))
+        packaged.write_bytes(packaged_data)
+        artifact_extra = artifact / "extra-dir"
+        artifact_extra.mkdir()
+        assert_reject(lambda: verify_all(repo, commit, pristine, candidate, artifact, evidence,
+                                          (NEW_COMMIT, NEW_WASM, NEW_SENTENCE), synthetic_hashes,
+                                          synthetic_expectations, False, False))
+        artifact_extra.rmdir()
         artifact_link = artifact / "extra-link"
         artifact_link.symlink_to(next(iter(ARTIFACT_NAMES)))
-        assert_reject(lambda: verify_all(repo, ref, pristine, candidate, artifact, evidence,
-                                          synthetic_lineage, synthetic_hashes, synthetic_expectations, False, False))
+        assert_reject(lambda: verify_all(repo, commit, pristine, candidate, artifact, evidence,
+                                          (NEW_COMMIT, NEW_WASM, NEW_SENTENCE), synthetic_hashes,
+                                          synthetic_expectations, False, False))
         artifact_link.unlink()
         dependency = candidate / "sdk/node_modules"
         dependency.rmdir()
         dependency.symlink_to(candidate / "hosts/host-web/qualification/node_modules")
-        assert_reject(lambda: verify_all(repo, ref, pristine, candidate, artifact, evidence,
-                                          synthetic_lineage, synthetic_hashes, synthetic_expectations, False, False))
+        assert_reject(lambda: verify_all(repo, commit, pristine, candidate, artifact, evidence,
+                                          (NEW_COMMIT, NEW_WASM, NEW_SENTENCE), synthetic_hashes,
+                                          synthetic_expectations, False, False))
         dependency.unlink()
         dependency.mkdir()
-        mode_file = candidate / "sdk/dist/generated/00.js"
-        original_mode = stat.S_IMODE(mode_file.stat().st_mode)
-        mode_file.chmod(original_mode | 0o111)
-        assert_reject(lambda: verify_all(repo, ref, pristine, candidate, artifact, evidence,
-                                          synthetic_lineage, synthetic_hashes, synthetic_expectations, False, False))
-        mode_file.chmod(original_mode)
         original_results = (candidate / RESULTS).read_bytes()
-        changed_results = json.loads(original_results)
-        changed_results["rows"] = [2]
-        (candidate / RESULTS).write_text(json.dumps(changed_results, sort_keys=True))
-        assert_reject(lambda: verify_all(repo, ref, pristine, candidate, artifact, evidence,
-                                          synthetic_lineage, synthetic_hashes, synthetic_expectations, False, False))
+        duplicate_results = original_results.replace(b'  "rows": [', b'  "rows": [2],\n  "rows": [', 1)
+        (candidate / RESULTS).write_bytes(duplicate_results)
+        assert_reject(lambda: verify_all(repo, commit, pristine, candidate, artifact, evidence,
+                                          (NEW_COMMIT, NEW_WASM, NEW_SENTENCE), synthetic_hashes,
+                                          synthetic_expectations, False, False))
+        (candidate / RESULTS).write_bytes(original_results + b"\n")
+        assert_reject(lambda: verify_all(repo, commit, pristine, candidate, artifact, evidence,
+                                          (NEW_COMMIT, NEW_WASM, NEW_SENTENCE), synthetic_hashes,
+                                          synthetic_expectations, False, False))
         (candidate / RESULTS).write_bytes(original_results)
         original_matrix = (candidate / MATRIX).read_bytes()
         (candidate / MATRIX).write_bytes(original_matrix + b"unexpected\n")
-        assert_reject(lambda: verify_all(repo, ref, pristine, candidate, artifact, evidence,
-                                          synthetic_lineage, synthetic_hashes, synthetic_expectations, False, False))
+        assert_reject(lambda: verify_all(repo, commit, pristine, candidate, artifact, evidence,
+                                          (NEW_COMMIT, NEW_WASM, NEW_SENTENCE), synthetic_hashes,
+                                          synthetic_expectations, False, False))
         (candidate / MATRIX).write_bytes(original_matrix)
-        original_scandir = os.scandir
-        def broken_scandir(*args, **kwargs):
-            raise OSError("synthetic traversal failure")
-        os.scandir = broken_scandir
-        try:
-            assert_reject(lambda: walk_export(candidate, set()))
-        finally:
-            os.scandir = original_scandir
-        command_path = evidence / "13-gate7-sdk-package.command"
-        original_command = command_path.read_bytes()
-        command_path.write_text("placeholder\n")
-        assert_reject(lambda: verify_all(repo, ref, pristine, candidate, artifact, evidence,
-                                          synthetic_lineage, synthetic_hashes, synthetic_expectations, False, False))
-        command_path.write_bytes(original_command)
-        meta_path = evidence / "13-gate7-sdk-package.meta"
-        original_meta = meta_path.read_bytes()
-        meta_path.write_text(original_meta.decode().replace("status=0", "status=1"))
-        assert_reject(lambda: verify_all(repo, ref, pristine, candidate, artifact, evidence,
-                                          synthetic_lineage, synthetic_hashes, synthetic_expectations, False, False))
-        meta_path.write_bytes(original_meta)
-    print(
-        "PASS self-test CLI/changed-byte/fourth-overlay/extra-root/76-78/"
-        "sdk-symlink/artifact-dir/dependency-symlink/mode/lineage/traversal"
-    )
+        bad_args = subprocess.run(
+            [sys.executable, "-B", str(pathlib.Path(__file__).resolve()), "--self-test", "extra"],
+            check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        if bad_args.returncode == 0:
+            raise AssertionError("--self-test accepted positional paths")
+    print("PASS self-test commit/arguments/overlays/76-78/sdk-symlink/artifact-special/JSON")
 
 
 def main() -> int:
@@ -1051,14 +1197,24 @@ def main() -> int:
         synthetic_self_test()
         return 0
     if len(args.paths) != 6:
-        parser.error("REPO COMMIT PRISTINE CANDIDATE ARTIFACT GATE7_EVIDENCE required")
+        parser.error("REPO COMMIT PRISTINE CANDIDATE ARTIFACT RETAINED_EVIDENCE required")
     repo = pathlib.Path(args.paths[0])
     ref = args.paths[1]
     pristine, candidate, artifact, evidence = map(pathlib.Path, args.paths[2:])
     if ref != AUTHORITY_COMMIT:
         raise SystemExit("wrong authority commit")
+    expected_paths = (
+        ("authority repository", repo, AUTHORITY_REPO),
+        ("pristine export", pristine, pathlib.Path("/tmp/issue672-attempt2-candidate-pristine")),
+        ("candidate export", candidate, SOURCE_CANDIDATE),
+        ("candidate artifact", artifact, pathlib.Path("/tmp/issue672-attempt3-candidate-artifact")),
+        ("retained evidence", evidence, RETAINED_EVIDENCE),
+    )
+    for label, actual, expected in expected_paths:
+        if actual.resolve() != expected.resolve():
+            raise SystemExit(f"wrong {label} path")
     # The production constants are checked independently before any inventory is emitted.
-    if set(ARTIFACT_HASHES) != ARTIFACT_NAMES:
+    if set(ARTIFACT_HASHES) != ARTIFACT_NAMES or len(DIST_EXPECTATIONS) != 77:
         raise SystemExit("internal artifact table mismatch")
     artifact_hashes = ARTIFACT_HASHES
     dist_expectations = DIST_EXPECTATIONS
@@ -1075,7 +1231,57 @@ if __name__ == "__main__":
     except VerificationError as error:
         print(f"FAIL: {error}", file=sys.stderr)
         raise SystemExit(1)
+
 ```
+
+Before any verifier or manifest command, Luna must write a fresh preflight record
+to /tmp/issue679-preflight.txt while /tmp/issue679-evidence,
+/tmp/issue679-manifest-record.txt, /tmp/issue679-manifest-verify.stdout,
+/tmp/issue679-manifest-verify.stderr, and
+/tmp/issue679-manifest-verify.status are all absent by evaluated test -e and
+test -L checks. The preflight must record the literal argv, actual cwd, UTC
+start/finish, numeric status, separate complete stdout/stderr, clean feature
+status at authorization head
+d3efe7920869c9127fbd050c8ba543a6d8393571, origin/main at
+df0b9b93636de36a7143da15b83444f280b65e6b, merge-base, tool versions,
+relevant environment including unset CARGO_TARGET_DIR, and all seven
+fresh-path evaluations. It must also record complete read-only
+path/type/mode/size/SHA-256 censuses for the nine fixed roots named in the
+verifier and retain only the concise records under the new evidence path.
+
+Every retained command member is checked literally: the eight gate command,
+meta, stdout, stderr, and status files; eight postcheck command, stdout, stderr,
+and status files; the Playwright API command/meta/stdout/stderr/status; and the
+initial/final overlay verifier records. Gate command argv and fixed
+CARGO_TARGET_DIR=/tmp/issue678-attempt3-target metadata must match the
+embedded table. Gate 8 output must identify Chromium 151.0.7922.34, Firefox
+153.0, and WebKit 26.5. Each postcheck must report source-local target absent,
+all six artifact hashes, all four package manifest hashes, and preserved target
+digest 420c7c4db6427802163e3d08deb8022327722fadbc6bb4178f13212506257151.
+The initial retained overlay verifier must be status 0 for 12,195 tracked paths;
+the final retained verifier must be status 1 with the retained sdk/dist
+population as its failure. The verifier emits sorted inventories for exactly 77
+regular SDK files and all nine roots plus the preserved target identity.
+
+After the production PASS and before any later review, finish all writes in
+/tmp/issue679-evidence and create its self-excluding manifest exactly once
+with this literal command from that directory:
+
+```text
+bash -o pipefail -c 'LC_ALL=C find . -type f ! -name SHA256SUMS -print0 | LC_ALL=C sort -z | xargs -0 sha256sum > SHA256SUMS'
+```
+
+Before it, require SHA256SUMS absent including symlink, the evidence directory
+ordinary and nonempty, and all verifier captures complete. After it, permit no
+write inside the evidence directory. Record the exact command and completion
+time only in /tmp/issue679-manifest-record.txt. Verify exactly once with
+sha256sum -c SHA256SUMS from the evidence directory, writing complete
+stdout, stderr, and numeric status respectively to the three declared external
+manifest paths. Require status 0, an ordinary non-symlink manifest, and an
+independently counted checked-file total equal to the manifest row count. Any
+pipeline, file, count, or status failure is hard failure; no retry, repair, or
+evidence mutation is permitted.
+
 
 Independently inspect `/tmp/issue678-attempt3-evidence` and require:
 
