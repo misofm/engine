@@ -176,3 +176,64 @@ disposition record with durable readback and retained provenance limits.
 The record must also state that the preserved command sequences do not prove an
 exact historical total invocation count. No gate execution, predecessor
 mutation, #687 credit, pin edit, rebuild, PR, merge, or delivery is authorized.
+
+## Attempt-2 disposition — PASS
+
+Astra LOW returned **DISPOSITION PASS** after revalidating the exact issue
+`f0253618`, tracker `0d5368b2`, all record sidecars, nine ordered status-zero
+gates, source and overlay identities, external targets, terminal manifest, and
+six candidate hashes. It created only
+`/tmp/issue688-attempt2-disposition.json`, mode `0444`, size 13,768 bytes, at
+SHA-256 `fe263bf681dca977b924c63683e403ee2d0f48f3d960d902a3e5aa429379dfc5`.
+Attempt 1 remains failed. Initial path absence, exclusive creation, first-
+executor authority, historical immutability, and exact invocation count remain
+unproved. The technical applicability result permits only the separately
+reviewed final promotion attempt below.
+
+## Attempt 3: exact promotion and ordinary rebuild
+
+Attempt 3 is final. After Astra LOW passes this exact pushed scope, one Luna
+HIGH executor may copy the qualified contents of exactly these files from
+`/tmp/issue688-source` into this clean worktree:
+
+```text
+hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256
+hosts/host-web/qualification/results.json
+hosts/host-web/BROWSER_DEPLOYMENT_MATRIX.md
+```
+
+Require all three destination files to match their qualified source bytes and
+the Git diff to touch only those paths. The executor must stop and hand the
+worktree to root. Root commits and pushes that exact tranche before any post-pin
+command. No other tracked content or generated artifact may be copied.
+
+At the clean pushed promotion checkpoint, Astra LOW must verify the three-file
+diff byte-for-byte against `/tmp/issue688-source`, candidate digest
+`31c882af32959c0164ae069b5ba63a5d5e7890b024d07c04bb75afc06e66cd4b`,
+full product identity `276ffb6097a84088e3b5f4a16892a33bca9e26fb`, and initial absence including
+symlinks of:
+
+```text
+/tmp/issue688-attempt3-artifact
+/tmp/issue688-attempt3-target
+/tmp/issue688-attempt3-evidence
+```
+
+Only checkpoint PASS authorizes one Luna HIGH executor to create those paths and
+run these commands once in order, stopping permanently at the first failure:
+
+```text
+CARGO_TARGET_DIR=/tmp/issue688-attempt3-target bash scripts/build-web-audioworklet.sh /tmp/issue688-attempt3-artifact
+CARGO_TARGET_DIR=/tmp/issue688-attempt3-target bash scripts/check-web-audioworklet.sh /tmp/issue688-attempt3-artifact
+CARGO_TARGET_DIR=/tmp/issue688-attempt3-target python3 -B scripts/check-browser-expected-resources.py --artifacts /tmp/issue688-attempt3-artifact
+node hosts/host-web/qualification/generate-matrix.mjs --check
+git diff --check
+```
+
+The ordinary build must contain exactly six ordinary files and match the
+qualified `/tmp/issue687-stage2-artifact` byte for byte. The promotion worktree
+must remain clean and source-local `target/` absent. Persist concise complete
+records in the named evidence path and preserve all outputs through Astra LOW
+review. Commit no artifact, binary, compiler stream, target, SDK output, browser
+dependency, or evidence capture. PR/merge remains blocked until final Astra LOW
+evidence PASS. Any failure hard-stops #688 without retry or successor.
