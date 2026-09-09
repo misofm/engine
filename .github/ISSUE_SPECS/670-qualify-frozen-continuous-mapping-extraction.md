@@ -174,3 +174,65 @@ manifest was produced after the failed gate. Test-checkpoint hashes are
 `effect-package/src/wire.rs`. This compiling, debug/release-green checkpoint is
 preserved unchanged for Astra LOW source/failure review. No artifact, pin, PR,
 merge, compiler payload, or SOURCE PASS is claimed.
+
+## Astra LOW attempt 1 review — FAIL
+
+Astra LOW returned **ATTEMPT-1 FAIL** at exact clean HEAD/upstream
+`7752376e176a6ea151480273410af1e44035dd15`. The four test commands passed and
+strict Clippy stopped only at the redundant `expected.into_iter()` expression.
+Production is unchanged. Both 36-case tables, public borrowed diagnostics,
+tiny-minimum lattice distinction, accepted exact bytes, independent SHA oracle,
+and Float-before-Semantic controls are sound.
+
+One test gap remains: typed validation reduces the public error collection to two
+`.any()` booleans, so a rejected case could carry an unexpected extra diagnostic
+without failing. Attempt 1 is consumed.
+
+## Attempt 2 correction scope
+
+Freeze production and every borrowed-wire test byte at checkpoint `7752376e`.
+Only the typed inline test module and its mechanical formatting may change:
+
+1. replace `.zip(expected.into_iter())` with `.zip(expected)`;
+2. project the complete public typed error collection to ordered literal
+   `(path, DescriptorDiagnosticCode)` pairs and compare it with the exact
+   expected set for every one of the 36 cases; retained accepted cases must
+   still require `validate_descriptor` to return `Ok(())`.
+
+The literal typed sets are: no diagnostics for lattice-valid admissible cases;
+only `("parameters", Lattice)` for the two tiny minima under Linear,
+Logarithmic, or Exponential; and both `("parameters", Parameter)` then
+`("parameters", Lattice)` for nonfinite/negative-zero minima, Logarithmic with
+canonical nonpositive minimum, and every Stepped case. Do not ignore, filter, or
+collapse another diagnostic. If actual public ordering differs, stop rather than
+editing the expected set during the run.
+
+Before edits, preserve attempt-1 paths and use fresh absent/non-symlink paths
+`/tmp/issue670-attempt2-evidence`, `/tmp/issue670-attempt2-target`,
+`/tmp/issue670-attempt2-manifest-record.txt`,
+`/tmp/issue670-attempt2-manifest-verify.stdout`, and
+`/tmp/issue670-attempt2-manifest-verify.status`. Record the same clean exact
+provenance, production/borrowed hashes, safe environment fields, and numeric 0/1
+capture controls.
+
+Run these exact commands once in order, using the attempt-2 target for Cargo:
+
+1. `cargo test --locked -p effect-contract continuous_mapping_validity_tests::`
+2. `cargo test --locked --release -p effect-contract continuous_mapping_validity_tests::`
+3. `cargo clippy --locked -p effect-contract -p effect-package --all-targets --all-features -- -D warnings`
+4. `cargo fmt --all -- --check`
+5. `bash scripts/check-effect-runtime-policy.sh`
+6. `bash scripts/check-effect-package-v1.sh`
+7. `bash scripts/check-effect-descriptor-v1.sh`
+8. `bash scripts/check-workspace-policy.sh`
+9. `git diff --check`
+
+Carry forward the unchanged borrowed debug/release results from attempt 1; do not
+rerun them. Apply the same separate-stream/status, first-failure stop, finalized
+self-excluding manifest, and sibling verification rules as attempt 1. Preserve
+attempt-1 evidence unchanged. No correction, retry, later gate, production edit,
+artifact, pin, PR, merge, `.ll`, `.s`, or compiler-payload publication is
+authorized.
+
+Attempt 2 remains unauthorized until this amendment is pushed, synchronized,
+and passes fresh Astra LOW scope review.
