@@ -676,6 +676,59 @@ fresh external target, metadata record, exact environment, full lifecycle
 captures, source-local-target checks, and post-build tracked-diff check above are
 the sole correction. Fresh exact-head promotion SCOPE PASS remains mandatory.
 
+Promotion scope then passed and Luna produced the exact three reviewed edits,
+checkpointed at `1a46ad393099014c04c36e7d3a5621a0685c1c9c`. The post-pin
+stage is **EVIDENCE FAIL / first promotion-stage attempt consumed procedurally**.
+A competing process had already created the captures and launched the authorized
+build when Luna's own dispatch reached noclobber redirection. Luna's shell wrote
+status 1 and stopped; the competing build later overwrote the standalone status
+with 0 and appended a second finish/status pair to metadata. The metadata lacks
+executor identity, so it cannot establish sole ownership or exactly one builder
+invocation. Do not erase, overwrite, clean, or rerun this evidence.
+
+The preserved technical observation is still bounded: the artifact directory is
+ordinary mode `0700` and contains exactly six ordinary files whose sizes and
+SHA-256 values exactly match the qualified candidate list above. Build stdout is
+empty mode `0600`, SHA-256
+`e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`;
+stderr is 3,789 bytes mode `0600`, SHA-256
+`fae59819c58b289a9aba651e6a1b35dd3eefd64ea6eca0e42e9bc34659ae9a5e`,
+and contains one complete Cargo stream ending in successful release compilation;
+the overwritten status is `0` mode `0664`, SHA-256
+`9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa`;
+metadata is 858 bytes mode `0600`, SHA-256
+`57ad3e24234ff60e9401764e2673daabe45f8a14800534192fbe7411f35e802e`
+and candidly contains both lifecycle endings. The source-local `target/` is
+absent. Astra LOW confirmed the six output hashes but returned POST-PIN EVIDENCE
+FAIL on provenance and forbade both immediate comparison continuation and a
+replacement build.
+
+The second promotion-stage attempt is read-only attribution and comparison of
+those preserved bytes. Before it begins, root pushes and synchronizes this
+amendment and Astra LOW returns exact-head SCOPE PASS. Require the feature and
+tracker clean/upstream-equal, current main and merge bases exact, GitHub parity,
+product commit `1a46ad39` containing only the three authorized file changes,
+all preserved build/evidence identities above unchanged, no build process, the
+source-local `target/` absent, and fresh paths absent under both `test -e` and
+`test -L`:
+
+- `/tmp/issue680-postpin-review-attribution.txt`;
+- `/tmp/issue680-postpin-review-compare.txt`.
+
+Only Luna HIGH `/root/issue583_luna_impl` may execute. It must not invoke Cargo,
+the builder, Node, a browser, an SDK command, or any product gate, and must not
+modify an existing repository or evidence byte. Using machine-extracted expected
+values from this pushed spec, it exclusively creates the attribution record with
+exact heads, paths, hashes, sizes, modes, complete lifecycle fields, stream
+marker counts, `actor=unknown-concurrent-process`, and the explicit limitation
+that exact invocation count and sole-executor provenance are unproved. It then
+exclusively creates the comparison record with the exact six bytewise-ordered
+names, sizes, observed/candidate SHA-256 values, and `cmp` status. Require all six
+statuses 0, exact candidate byte identity, no extra artifact, unchanged source
+and evidence, and both new records mode `0444`. Astra LOW then decides whether
+the technical post-pin byte-identity gate passes with the provenance limitation.
+No PR, merge, cleanup, or further build is authorized by this amendment.
+
 The complete reviewed verifier bytes follow verbatim:
 
 ```python
