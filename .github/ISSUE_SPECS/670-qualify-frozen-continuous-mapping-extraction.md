@@ -148,3 +148,29 @@ literal typed diagnostic sets and all 36 public borrowed outcomes are mandatory.
 Run the eleven gates once under the evidence contract and stop on the first
 unexpected failure without correction or retry. Preserve all #669 history and
 temporary records. No artifact, pin, PR, or merge work is authorized.
+
+## Luna HIGH attempt 1 checkpoint — FAIL
+
+Luna recorded the required clean pre-edit provenance and numeric 0/1 controls at
+authorization head `3d8c1ee025b15a8f0ef412fd8c3fdee2b7fa8c17`, preserved all #669
+records, and changed only the two authorized inline test modules plus their
+mechanical formatting. Production helper, callers, and imports remain frozen.
+
+Both affected crates' full debug and release suites passed once. `effect-contract`
+reported 14 unit tests plus integration groups of 12, 7, 9, and 0 passing in each
+profile. `effect-package` reported 35 unit tests plus integration groups of 6, 2,
+1, 5 with one ignored, 3, 2, 15, and 0 passing in each profile. Strict affected
+Clippy then returned 101 for one `clippy::useless_conversion`: the typed matrix
+called `.into_iter()` on `expected` inside `zip`, although `zip` accepts the array
+directly. Luna stopped before formatting and policy gates 6–11, with no correction
+or retry. Attempt 1 is consumed.
+
+Temporary evidence and target output remain unchanged at
+`/tmp/issue670-attempt1-evidence` and `/tmp/issue670-attempt1-target`; no final
+manifest was produced after the failed gate. Test-checkpoint hashes are
+`1b45ea20a10e283f21b242bfef90779c5148333f705efc43a062b37afeec2688` for
+`effect-contract/src/lib.rs` and
+`9a4e833512ab8f70bf4804fc149bfe21e2cb568eb6f53a707c212529e7e66818` for
+`effect-package/src/wire.rs`. This compiling, debug/release-green checkpoint is
+preserved unchanged for Astra LOW source/failure review. No artifact, pin, PR,
+merge, compiler payload, or SOURCE PASS is claimed.

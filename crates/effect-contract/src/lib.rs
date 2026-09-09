@@ -2298,13 +2298,60 @@ mod automation_smoothing_validity_tests {
 #[cfg(test)]
 mod continuous_mapping_validity_tests {
     use super::{
-        AutomationRate, ParameterChannelPolicy, ParameterDescriptor, ParameterDomain,
-        ParameterMapping, ParameterUnit, SmoothingRule, continuous_mapping_admissible,
-        default_parameter_lattice, parameter_valid,
+        AutomationRate, DescriptorDiagnosticCode, EffectDescriptor, EffectId, EffectQuality,
+        LatencySamples, LinkModeSet, ParameterChannelPolicy, ParameterDescriptor, ParameterDomain,
+        ParameterId, ParameterMapping, ParameterUnit, PortDescriptor, PortId, PortLayout, PortRole,
+        QualityDescriptor, SmoothingRule, StatePayloadSizes, TailSamples,
+        default_parameter_lattice, validate_descriptor,
     };
 
+    const fn quality(sample_rate: u32) -> QualityDescriptor {
+        QualityDescriptor {
+            quality: EffectQuality::Normal,
+            sample_rate,
+            latency: LatencySamples(0),
+            tail: TailSamples::Finite(0),
+            maximum_state: StatePayloadSizes {
+                common_bytes: 0,
+                left_bytes: 0,
+                right_bytes: 0,
+            },
+            scratch_fixed_bytes: 0,
+            scratch_bytes_per_frame: 0,
+        }
+    }
+
+    const fn port_id(value: &'static str) -> PortId {
+        match PortId::new(value) {
+            Ok(id) => id,
+            Err(_) => panic!("valid test port ID"),
+        }
+    }
+
+    static PORTS: [PortDescriptor; 2] = [
+        PortDescriptor {
+            id: port_id("main-in"),
+            role: PortRole::MainInput,
+            required: true,
+            layout: PortLayout::DualMonoPlanar,
+        },
+        PortDescriptor {
+            id: port_id("main-out"),
+            role: PortRole::MainOutput,
+            required: true,
+            layout: PortLayout::DualMonoPlanar,
+        },
+    ];
+
+    static QUALITIES: [QualityDescriptor; 4] = [
+        quality(44_100),
+        quality(48_000),
+        quality(88_200),
+        quality(96_000),
+    ];
+
     const BASE: ParameterDescriptor = ParameterDescriptor {
-        id: super::ParameterId(1),
+        id: ParameterId(1),
         display_name: "Gain",
         display_unit: "dB",
         unit: ParameterUnit::Db,
@@ -2327,35 +2374,285 @@ mod continuous_mapping_validity_tests {
         ),
     };
 
-    #[test]
-    fn continuous_mapping_minimum_truth_table_is_explicit() {
-        let minima = [-1.0, -0.0, 0.0, f32::MIN_POSITIVE, 1.0];
-        let cases = [
-            (ParameterMapping::Linear, [true, true, true, true, true]),
-            (
-                ParameterMapping::Logarithmic,
-                [false, false, false, true, true],
-            ),
-            (ParameterMapping::Exponential, [true, true, true, true, true]),
-            (ParameterMapping::Stepped, [false, false, false, false, false]),
-        ];
+    #[derive(Clone, Copy)]
+    struct TypedExpectation {
+        parameter_invalid: bool,
+        lattice_invalid: bool,
+        descriptor_valid: bool,
+    }
 
-        for (mapping, expected) in cases {
-            for (minimum, expected) in minima.into_iter().zip(expected) {
-                assert_eq!(
-                    continuous_mapping_admissible(mapping, minimum),
-                    expected,
-                    "{mapping:?} minimum {minimum:?}"
-                );
-            }
+    fn typed_validation(mapping: ParameterMapping, minimum: f32) -> (bool, bool, bool) {
+        let (maximum, default_value) = if minimum.is_finite() && minimum > 0.0 {
+            (
+                if minimum == 1.0 { 2.0 } else { 1.0 },
+                if minimum == 1.0 { 1.5 } else { 0.5 },
+            )
+        } else {
+            (1.0, 0.5)
+        };
+        let parameter = ParameterDescriptor {
+            minimum: Some(minimum),
+            maximum: Some(maximum),
+            default_value,
+            mapping,
+            lattice: default_parameter_lattice(
+                ParameterUnit::Db,
+                ParameterDomain::Continuous,
+                mapping,
+            ),
+            ..BASE
+        };
+        let parameters: &'static [ParameterDescriptor; 1] = Box::leak(Box::new([parameter]));
+        let descriptor: &'static EffectDescriptor = Box::leak(Box::new(EffectDescriptor {
+            id: EffectId::new("mapping-test").expect("valid test effect ID"),
+            display_name: "Mapping Test",
+            contract_major: 1,
+            contract_minor: 0,
+            state_layout_version: 1,
+            supported_link_modes: LinkModeSet::DUAL_MONO,
+            parameters,
+            ports: &PORTS,
+            qualities: &QUALITIES,
+            observations: &[],
+        }));
+        match validate_descriptor(descriptor) {
+            Ok(()) => (false, false, true),
+            Err(errors) => (
+                errors.errors().iter().any(|error| {
+                    error.path == "parameters" && error.code == DescriptorDiagnosticCode::Parameter
+                }),
+                errors.errors().iter().any(|error| {
+                    error.path == "parameters" && error.code == DescriptorDiagnosticCode::Lattice
+                }),
+                false,
+            ),
         }
     }
 
     #[test]
-    fn typed_validator_rejects_noncanonical_minimum_before_mapping_rule() {
-        for minimum in [f32::NAN, -0.0] {
-            let parameter = ParameterDescriptor { minimum: Some(minimum), ..BASE };
-            assert!(!parameter_valid(&parameter), "minimum {minimum:?}");
+    fn typed_public_mapping_matrix_has_independent_diagnostics() {
+        let minima: [f32; 9] = [
+            -1.0,
+            -0.0,
+            0.0,
+            f32::from_bits(1),
+            f32::MIN_POSITIVE,
+            1.0,
+            f32::NAN,
+            f32::NEG_INFINITY,
+            f32::INFINITY,
+        ];
+        let cases = [
+            (
+                ParameterMapping::Linear,
+                [
+                    TypedExpectation {
+                        parameter_invalid: false,
+                        lattice_invalid: false,
+                        descriptor_valid: true,
+                    },
+                    TypedExpectation {
+                        parameter_invalid: true,
+                        lattice_invalid: true,
+                        descriptor_valid: false,
+                    },
+                    TypedExpectation {
+                        parameter_invalid: false,
+                        lattice_invalid: false,
+                        descriptor_valid: true,
+                    },
+                    TypedExpectation {
+                        parameter_invalid: false,
+                        lattice_invalid: true,
+                        descriptor_valid: false,
+                    },
+                    TypedExpectation {
+                        parameter_invalid: false,
+                        lattice_invalid: true,
+                        descriptor_valid: false,
+                    },
+                    TypedExpectation {
+                        parameter_invalid: false,
+                        lattice_invalid: false,
+                        descriptor_valid: true,
+                    },
+                    TypedExpectation {
+                        parameter_invalid: true,
+                        lattice_invalid: true,
+                        descriptor_valid: false,
+                    },
+                    TypedExpectation {
+                        parameter_invalid: true,
+                        lattice_invalid: true,
+                        descriptor_valid: false,
+                    },
+                    TypedExpectation {
+                        parameter_invalid: true,
+                        lattice_invalid: true,
+                        descriptor_valid: false,
+                    },
+                ],
+            ),
+            (
+                ParameterMapping::Logarithmic,
+                [
+                    TypedExpectation {
+                        parameter_invalid: true,
+                        lattice_invalid: true,
+                        descriptor_valid: false,
+                    },
+                    TypedExpectation {
+                        parameter_invalid: true,
+                        lattice_invalid: true,
+                        descriptor_valid: false,
+                    },
+                    TypedExpectation {
+                        parameter_invalid: true,
+                        lattice_invalid: true,
+                        descriptor_valid: false,
+                    },
+                    TypedExpectation {
+                        parameter_invalid: false,
+                        lattice_invalid: true,
+                        descriptor_valid: false,
+                    },
+                    TypedExpectation {
+                        parameter_invalid: false,
+                        lattice_invalid: true,
+                        descriptor_valid: false,
+                    },
+                    TypedExpectation {
+                        parameter_invalid: false,
+                        lattice_invalid: false,
+                        descriptor_valid: true,
+                    },
+                    TypedExpectation {
+                        parameter_invalid: true,
+                        lattice_invalid: true,
+                        descriptor_valid: false,
+                    },
+                    TypedExpectation {
+                        parameter_invalid: true,
+                        lattice_invalid: true,
+                        descriptor_valid: false,
+                    },
+                    TypedExpectation {
+                        parameter_invalid: true,
+                        lattice_invalid: true,
+                        descriptor_valid: false,
+                    },
+                ],
+            ),
+            (
+                ParameterMapping::Exponential,
+                [
+                    TypedExpectation {
+                        parameter_invalid: false,
+                        lattice_invalid: false,
+                        descriptor_valid: true,
+                    },
+                    TypedExpectation {
+                        parameter_invalid: true,
+                        lattice_invalid: true,
+                        descriptor_valid: false,
+                    },
+                    TypedExpectation {
+                        parameter_invalid: false,
+                        lattice_invalid: false,
+                        descriptor_valid: true,
+                    },
+                    TypedExpectation {
+                        parameter_invalid: false,
+                        lattice_invalid: true,
+                        descriptor_valid: false,
+                    },
+                    TypedExpectation {
+                        parameter_invalid: false,
+                        lattice_invalid: true,
+                        descriptor_valid: false,
+                    },
+                    TypedExpectation {
+                        parameter_invalid: false,
+                        lattice_invalid: false,
+                        descriptor_valid: true,
+                    },
+                    TypedExpectation {
+                        parameter_invalid: true,
+                        lattice_invalid: true,
+                        descriptor_valid: false,
+                    },
+                    TypedExpectation {
+                        parameter_invalid: true,
+                        lattice_invalid: true,
+                        descriptor_valid: false,
+                    },
+                    TypedExpectation {
+                        parameter_invalid: true,
+                        lattice_invalid: true,
+                        descriptor_valid: false,
+                    },
+                ],
+            ),
+            (
+                ParameterMapping::Stepped,
+                [
+                    TypedExpectation {
+                        parameter_invalid: true,
+                        lattice_invalid: true,
+                        descriptor_valid: false,
+                    },
+                    TypedExpectation {
+                        parameter_invalid: true,
+                        lattice_invalid: true,
+                        descriptor_valid: false,
+                    },
+                    TypedExpectation {
+                        parameter_invalid: true,
+                        lattice_invalid: true,
+                        descriptor_valid: false,
+                    },
+                    TypedExpectation {
+                        parameter_invalid: true,
+                        lattice_invalid: true,
+                        descriptor_valid: false,
+                    },
+                    TypedExpectation {
+                        parameter_invalid: true,
+                        lattice_invalid: true,
+                        descriptor_valid: false,
+                    },
+                    TypedExpectation {
+                        parameter_invalid: true,
+                        lattice_invalid: true,
+                        descriptor_valid: false,
+                    },
+                    TypedExpectation {
+                        parameter_invalid: true,
+                        lattice_invalid: true,
+                        descriptor_valid: false,
+                    },
+                    TypedExpectation {
+                        parameter_invalid: true,
+                        lattice_invalid: true,
+                        descriptor_valid: false,
+                    },
+                    TypedExpectation {
+                        parameter_invalid: true,
+                        lattice_invalid: true,
+                        descriptor_valid: false,
+                    },
+                ],
+            ),
+        ];
+
+        for (mapping, expected) in cases {
+            for (minimum, expected) in minima.into_iter().zip(expected.into_iter()) {
+                let (parameter_invalid, lattice_invalid, descriptor_valid) =
+                    typed_validation(mapping, minimum);
+                assert_eq!(parameter_invalid, expected.parameter_invalid);
+                assert_eq!(lattice_invalid, expected.lattice_invalid);
+                assert_eq!(descriptor_valid, expected.descriptor_valid);
+            }
         }
     }
 }
