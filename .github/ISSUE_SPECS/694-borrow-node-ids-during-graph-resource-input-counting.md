@@ -66,3 +66,13 @@ Existing library suites supply the transactional caps, sidechain, scalar dispatc
 Astra XHIGH adversarially verifies source/evidence. Reject any scope growth, escaping borrow, textual/address identity, changed counting/arithmetic/diagnostics/caps, failed gate, identity drift, or unsupported allocation/performance claim. After source PASS, Sol may create one separately numbered lane-B AudioWorklet applicability/pin peer in the second slot. Source closure requires that peer's decision, exact reviewed PR qualification, guarded merge, post-main aggregate qualification, GitHub synchronization, and eligible clean-worktree cleanup. Three failed implementation attempts hard-stop without weakened gates or a disguised fourth attempt.
 
 Closing this child advances but does not complete CP1. All other owned-string families remain future bounded CP1 work.
+
+## Attempt 1 source checkpoint
+
+- Baseline/reviewed scope head: `c38da118f83ebcb97f17b45bc21a9bd4c88cd879`.
+- Pushed source checkpoint: `60ec5cb314e20e018e515927041f6dbe5deb10cf`.
+- Exact one-hunk borrowed-key substitution only: `BTreeMap<&GraphNodeId, u64>` with `(&node.id, 0_u64)`.
+- Baseline and candidate manifest SHA-256: `aadac13d362410308ea3b7e7068ab68bce10daa1e86b92d9abf2fbfca3a0decb`; manifests were byte-equal.
+- All frozen local gates returned actual status `0`; evidence is retained under `/tmp/issue694-evidence` with separate external targets.
+- No test, fixture, artifact, pin, or product-semantics changes were made, and no timing, allocation, or improvement claim is made.
+- Astra XHIGH source/evidence review is pending; no artifact or merge authority exists.
