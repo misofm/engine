@@ -573,3 +573,31 @@ actual-interference check limited to processes owning #672's source, target,
 dependency, artifact, browser, or evidence resources. Unrelated repository
 formatters/builds are not competing workloads. All prior stop, preservation,
 hard-stop, and promotion boundaries remain unchanged.
+
+## Final attempt 3 failure and hard stop
+
+Luna HIGH ran the final attempt once at exact clean pushed authorization
+`110c9c84788ebf921bdeee09028ccc4c9d6aabe7`. Fresh preflight, retained
+export/tar verification, the candidate pin overlay, and the sole candidate build
+passed. The build produced expected Wasm
+`93108e9407f4cd343b644e9e821cfd3ca80c3667983a35db7f2e5c3228934531`;
+all five non-Wasm files match the immutable baseline, and Wasm validation,
+compact structure summaries, and the static artifact gate passed.
+
+The exact three-overlay proof then failed because the later Cargo-backed
+parameter-metadata step inherited `CARGO_TARGET_DIR` unset and created `target/`
+inside the retained candidate-source export. Its first unexpected path was
+`target/.rustc_info.json`. Luna stopped without correction or retry; dependency
+installation, resource/PCM, SDK, browser, final-verifier, and manifest stages did
+not run. The repository remains clean. Preserve every attempt-3 path and the
+generated target subtree unchanged; no generated payload enters Git.
+
+Astra LOW independently returned **ATTEMPT-3 FAIL / #672 EXHAUSTED**. This is a
+scope/isolation defect missed by scope review, not an unexplained product delta,
+and the reusable results above do not establish PRE-PIN PASS. Attempts 1-3 are
+consumed. Close #672 without promotion, PR, merge, or CP8 delivery credit. A new
+smallest successor may independently classify the generated subtree, reprove
+tracked source/overlay bytes, reuse the accepted candidate without rebuilding,
+freeze an external Cargo target before any remaining Cargo consumer, and run
+only the unexecuted qualification gates after fresh Astra LOW scope review. No
+fourth or renamed #672 attempt is permitted.
