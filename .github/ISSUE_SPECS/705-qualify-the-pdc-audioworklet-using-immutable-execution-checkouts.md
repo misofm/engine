@@ -332,7 +332,11 @@ ran from `20:14:25.961Z` through `20:14:26.272Z` with actual exit 0. Setup
 call `call_U3KUSjfokRteAMJKJkGYFTGW`, chunk `5540ec`, ran from
 `20:14:54.295Z` through `20:14:54.513Z` with actual exit 1. The executor
 manually inserted one extra `d` while comparing the spec SHA; the checked-in
-spec bytes matched the lease. Both calls used the correct absolute workdir and
+spec bytes matched the lease. The actual spec SHA-256 was
+`eacff11868d439bbb44ffc5400dd1dd0dbe8cf3a48fde0d2a63f870a13eba993`; the
+mistyped value was
+`eacff11868d439bbb44ffc5400dd1dd0ddbe8cf3a48fde0d2a63f870a13eba993`. Both
+calls used the correct absolute workdir and
 `login:true`. No directory, builder, session, poll, retry, repository mutation,
 or GitHub mutation followed, and all nine A2 roots remained absent.
 
@@ -340,7 +344,10 @@ Preserve lease SHA-256 `4cce9d1a36fb13d62f277abfd203d1bee6fefb9f4bbfea12ceb231d7
 freeze `2de1568a592819f2c3fe41a706afc9ccf111f8e9d5d619125dc97b1c88f23ead`,
 release `defd7e8743209c8cfc7fe7ee743d51d23b227587bba0eaaecffe798a024cb136`,
 failure record `4138bd7a3762f44f4aa9aa9985c45da94cbb5a054be8f92e2b68d3bb644ac4c0`,
-and companion receipt authority unchanged. Attempt 2 is consumed with no probe,
+and companion receipt authority unchanged; rollout ordinals `2464`–`2474` remain
+preserved. Preparation/E1 stayed at
+`c68f26d705569a514cf1715ec774ea5b2f1864c3`; tracker stayed at
+`63539ac6ba59802436781b25cc3f5fda69c9f40e`. Attempt 2 is consumed with no probe,
 artifact, qualification, product, or delivery credit.
 
 ## Final Attempt 3 rebrief
