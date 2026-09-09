@@ -441,3 +441,94 @@ reviewed briefs, with one adversarial verdict each; A5 is the hard stop. The
 policy provides no execution lease or retroactive credit.
 #705 may reopen after pushed exact issue-body parity is verified. Do not write an
 Attempt 4 execution brief yet.
+
+## Attempt 4 — prospective authority
+
+This section supersedes previous prospective execution paths and the instruction
+to defer an Attempt 4 brief. Attempts 1–3 remain consumed failures with zero
+credit. Both phases below form Attempt 4; review and overlay pauses do not create
+additional attempts. A dispatched preflight, setup, command, receipt, or
+qualification failure stops Attempt 4 immediately. Attempt 5 requires a separate
+reviewed brief; a fifth failure is the mandatory hard stop.
+
+Sol coordinates. Astra XHIGH executes the probe and qualification. A separate
+Astra XHIGH reviewer returns the adversarial evidence verdicts. Luna HIGH performs
+only the mechanical overlay after Phase 1 PASS and lease release.
+
+Before E1 preparation, incorporate delivered main
+`898bdc94b0143288049397629f3afeded384f8c2` without changing #703's source or
+spec. Publish the amended preparation checkpoint and synchronized issue/tracker
+bodies. Root then prepares:
+
+```text
+E1: /home/bl/misofm/engine-cp1-pdc-artifact-705-a4-probe
+Overlay branch: codex/qualify-pdc-artifact-overlay-705-a4
+Overlay worktree: /home/bl/misofm/engine-cp1-pdc-artifact-overlay-705-a4
+E2: /home/bl/misofm/engine-cp1-pdc-artifact-705-a4-qualify
+
+/tmp/cp1-pdc-artifact-705-a4-probe-evidence
+/tmp/cp1-pdc-artifact-705-a4-probe-tmp
+/tmp/cp1-pdc-artifact-705-a4-probe-output
+/tmp/cp1-pdc-artifact-705-a4-probe-target
+/tmp/cp1-pdc-artifact-705-a4-qualify-evidence
+/tmp/cp1-pdc-artifact-705-a4-qualify-tmp
+/tmp/cp1-pdc-artifact-705-a4-artifact
+/tmp/cp1-pdc-artifact-705-a4-qualify-target
+/tmp/cp1-pdc-artifact-705-a4-hermetic-target
+```
+
+E1 is detached at the newly published containing-brief checkpoint. E2 is
+prepared only after the published overlay checkpoint. A separate final scope
+review verifies each prepared checkout before its named execution lease.
+
+**Frozen preflight:** use the exact absolute checkout through the structured tool
+`workdir`, with `login:true`. Record cwd, HEAD, literal
+`upstream=not-applicable-detached`, and status. Generate identities directly from
+Git and file bytes. Parse leases as inert data; reject duplicate/missing required
+keys and malformed identity fields. Compare computed values to parsed authority.
+Never manually retype hashes or source a lease as shell code.
+
+Check only the frozen requirements: lease/release/revocation state; checkout
+identity, detachment and cleanliness; synchronized preparation/tracker/main
+identities; preserved source; exact local/GitHub **body parity** for
+#703/#705/#559/#560; required tools and executable `/home/bl/.cargo/bin/cargo`;
+absence of conflicting work using the assigned checkout/outputs; and required
+path absence, including dangling symlinks. **Do not compare headings with GitHub
+titles or add other assertions during execution.**
+
+Freeze repository and GitHub mutations for each execution lease. Preserve
+original tool receipts with actual exits; no retry, synthetic success, or custom
+workload runner.
+
+**Phase 1:** all nine roots must initially be absent. Create probe evidence,
+probe tmp, then empty probe-output separately. Run once:
+
+```text
+env MISO_ENGINE_WEB_AUDIOWORKLET_REPIN=1 TMPDIR=/tmp/cp1-pdc-artifact-705-a4-probe-tmp CARGO_TARGET_DIR=/tmp/cp1-pdc-artifact-705-a4-probe-target bash scripts/build-web-audioworklet.sh /tmp/cp1-pdc-artifact-705-a4-probe-output
+```
+
+Require actual exit 0, exactly one lowercase digest plus LF, empty probe-output,
+unchanged tracked bytes/HEAD, and absent supplied probe target. The builder's
+temporary Wasm target under TMPDIR is permitted. Seal receipts, release, and
+pause for independent Astra review.
+
+**Overlay and Phase 2:** retain the original authorized overlay fields and
+six-file artifact contract. Set `candidateCommit` from the preserved
+source-introduction identity and `wasmSha256` from the authenticated probe. Change
+the pin only if needed; generate matrix lineage once. Checkpoint, push,
+synchronize, prepare E2, and obtain fresh scope/lease.
+
+Preserve the original ten qualification commands and order, using the literal A4
+paths above. Update the final diff-check baseline to delivered main. Before
+execution, freeze their complete argv/environment in the lease. Review main→E2
+for the preserved #703 source/spec and authorized #705 work; review E1→E2 for
+only the permitted overlay. Existing probe evidence remains preserved; only the
+five Phase 2 roots must still be absent.
+
+Preserve the five non-Wasm hashes, exact six-file checks,
+browser/resource/SDK/mutation gates, receipt requirements, and delivery gates
+unchanged. No compiler captures, generated artifacts, or raw execution output
+enter Git. No original finding starts.
+
+This is preparation scope only. The published brief and actual E1 require final
+read-only Astra XHIGH scope review before any execution lease is issued.
