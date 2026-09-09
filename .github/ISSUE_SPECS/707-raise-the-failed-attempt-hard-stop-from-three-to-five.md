@@ -38,3 +38,7 @@ Scope review passes at clean pushed scope commit `67ff8d84ae0562f662af003d36d3b9
 - Appended this scope review and attempt record to the issue specification.
 
 Review pending.
+
+## Astra XHIGH attempt 1 review — PASS
+
+Astra XHIGH returned **PASS** at exact clean pushed head `628f596477a262adaf39074bab3ef546d1f9f692`. Exactly the three approved paths changed. The policy now permits five total attempts with one adversarial verdict per attempt, preserves binding smaller issue budgets, stops and rescopes after a fifth failure, and forbids a disguised sixth retry. `docs/IMPLEMENTATION_PLAN.md` changes only the prospective general cadence sentence; its historical issue-specific budgets and outcomes remain unchanged. `git diff --check` and `bash scripts/check-workspace-policy.sh` passed. GitHub #707 had exact title/body parity at review time. Required qualification and merge remain pending; #705 stays closed until this policy is delivered.
