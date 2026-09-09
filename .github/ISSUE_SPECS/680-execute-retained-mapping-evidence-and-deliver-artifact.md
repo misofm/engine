@@ -78,26 +78,56 @@ mandatory before the executor acts.
 
 After that reconciliation, the superseded executor began its already-issued
 preflight at `2026-09-09T06:28:03Z`. It exclusively created only
-`/tmp/issue680-attempt1-preflight.txt`, then stopped at status 1 when it observed
-the reconciled feature head `1bfb9f26` instead of its stale authorization
-`a7e573aa`. The incomplete 891-byte record has SHA-256
-`87527f86c0b85cd61a281614cee75dd4c9f98514c5c31cfedacb1fe90ae994f3`.
-It contains no finish/status footer; no other fresh path was created, and neither
-verifier invocation ran. Preserve it without treating it as attempt evidence.
-The sole executor uses the replacement paths below. A preflight failure must now
-record its failing assertion and numeric status so another silent stop cannot
-consume a fresh path without a diagnosis.
+`/tmp/issue680-attempt1-preflight.txt`. The 891-byte partial record has mode
+`0664`, SHA-256
+`87527f86c0b85cd61a281614cee75dd4c9f98514c5c31cfedacb1fe90ae994f3`, and
+records actual feature `1bfb9f26` instead of authorized `a7e573aa`. Execution
+should have stopped at that mismatch. The improvised outer single-quoted shell
+then misparsed its unescaped nested census heredoc and returned status 2. The
+executor reported, but did not capture in the partial file, `import: command not
+found` followed by a syntax error at `roots = (`. No finish/status footer,
+census, or temporary/unlisted file exists. Evidence, manifest, and control paths
+remain absent; neither verifier invocation ran.
 
-## Attempt 1
+Astra LOW returned **ATTEMPT 1 FAIL / consumed**. The exclusive preflight path
+was created and the attempted wrapper ran, so it cannot be relabelled as a
+no-attempt stop or continued through an `attempt1b` path. Preserve the partial
+record byte-for-byte. It receives no qualification credit. Luna XHIGH
+`/root/issue679_luna_verifier` is stopped and has no further #680 authority. Two
+attempts remain.
+
+## Attempt 2 preparation and execution
+
+Only Luna HIGH `/root/issue583_luna_impl` may prepare an external attempt-2
+runner at `/tmp/issue680-attempt2-runner-draft.py`. Preparation may create only
+that ordinary non-symlink draft and must not invoke it, create any attempt-2
+path, read retained evidence, or run a verifier/product command. The runner must
+use direct Python argument arrays and file APIs; shell `eval`, shell `-c`, and
+nested heredocs are forbidden. Before any output creation it must fail closed on
+authorization-head, upstream, main, merge-base, executor lease, verifier,
+preserved-authority, process-owner, and all fresh-path checks. A rejected head or
+path must leave every attempt-2 path absent.
+
+The prepared runner must encode complete literal argv/cwd/start/finish/numeric-
+status/separate-stdout/separate-stderr capture, exclusive creation, stop-on-first-
+failure sequencing, and the exact verifier self-test, production, manifest, and
+manifest-verification commands below. It must provide isolated synthetic controls
+that reject a changed authorization head without output, a pre-existing regular
+path, a dangling symlink, a verifier identity mismatch, and a command mismatch.
+Root must embed or otherwise freeze its exact bytes, SHA-256, size, mode, and
+literal invocations in a pushed synchronized amendment. Astra LOW must review
+the runner's syntax and controls before any isolated runner self-test, then review
+that terminal self-test before fresh exact-head production SCOPE PASS. No
+attempt-2 execution is authorized by this amendment.
 
 Fresh production paths are:
 
-- `/tmp/issue680-attempt1b-preflight.txt`;
-- `/tmp/issue680-attempt1b-evidence`;
-- `/tmp/issue680-attempt1b-manifest-record.txt`;
-- `/tmp/issue680-attempt1b-manifest-verify.stdout`;
-- `/tmp/issue680-attempt1b-manifest-verify.stderr`;
-- `/tmp/issue680-attempt1b-manifest-verify.status`.
+- `/tmp/issue680-attempt2-preflight.txt`;
+- `/tmp/issue680-attempt2-evidence`;
+- `/tmp/issue680-attempt2-manifest-record.txt`;
+- `/tmp/issue680-attempt2-manifest-verify.stdout`;
+- `/tmp/issue680-attempt2-manifest-verify.stderr`;
+- `/tmp/issue680-attempt2-manifest-verify.status`;
 
 The isolated control uses `/tmp/issue679-attempt3-verifier-control`, which is an
 inherited but never-created path: #679's status-2 command named a different,
@@ -120,7 +150,7 @@ preserved #679 worktree available, clean, upstream-equal at hard-stop
 `de542050094f20150f7ec4f106e32f4074798626`, and free of a competing writer.
 It grants no #679 retry and receives no write.
 
-The exact attempt-1 verifier is the ordinary mode-0444 file
+The exact attempt-2 verifier remains the ordinary mode-0444 file
 `/tmp/issue680-verifier-d3f0803c1a35fe6bfeb0937c944476edb23c9c223c9404bb3d05d0d18618c27b.py`,
 72,262 bytes, SHA-256
 `d3f0803c1a35fe6bfeb0937c944476edb23c9c223c9404bb3d05d0d18618c27b`.
@@ -128,7 +158,9 @@ Astra LOW already returned STATIC DRAFT PASS on these exact bytes under #679;
 #680 requires fresh exact-head scope review of the embedded bytes and all paths
 before any command.
 
-After SCOPE PASS, run the isolated self-test exactly once:
+After the separately frozen runner, its reviewed isolated controls, and a fresh
+exact-head production SCOPE PASS, run the isolated verifier self-test exactly
+once:
 
 ```text
 TMPDIR=/tmp/issue679-attempt3-verifier-control python3 -B /tmp/issue680-verifier-d3f0803c1a35fe6bfeb0937c944476edb23c9c223c9404bb3d05d0d18618c27b.py --self-test
@@ -1524,10 +1556,13 @@ worktrees. Failed predecessor worktrees remain until delivery evidence is secure
 
 ## Attempt and acceptance rules
 
-Attempt 1 gets one self-test, one production invocation, and one manifest flow.
-Any failure stops it and requires Astra LOW adversarial review plus a pushed,
-synchronized amendment before attempt 2. After three failed attempts, stop and
-rescope; never weaken a gate or disguise a fourth retry.
+Attempt 1 is consumed by its exclusive partial preflight and receives no credit.
+Attempt 2 gets one reviewed runner-control flow, one verifier self-test, one
+production invocation, and one manifest flow. Any failure stops it and requires
+Astra LOW adversarial review plus a pushed, synchronized amendment before final
+attempt 3. After three failed attempts, stop and rescope; never weaken a gate,
+reuse a consumed path, append an `a`/`b` suffix to avoid counting an attempt, or
+disguise a fourth retry.
 
 Acceptance requires: exact classification of all 77 SDK files; exact tracked,
 overlay, artifact, target, and retained eight-gate identities; immutable manifest
