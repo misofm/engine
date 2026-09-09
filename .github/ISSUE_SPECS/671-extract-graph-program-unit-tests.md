@@ -141,3 +141,77 @@ or retained-state cleanup is authorized.
 - Preflight was clean at `8c9df9b774830bcc25af12800eec2b539bb63041`; original `program.rs` and the ordered 13-test inventory were persisted under `/tmp/issue671-graph-program-tests-evidence` after confirming the path was absent and non-symlink.
 - Gate 1, `python3 /tmp/issue671-graph-program-tests-evidence/exact-transform.py`: status `1` (the persisted proof path contained generated output rather than executable script text, producing a Python `SyntaxError`).
 - Gates 2–8 were not run because the frozen sequence stops on the first failure. No same-attempt correction or rerun was performed.
+
+## Astra LOW attempt-1 verdict and attempt-2 brief
+
+Astra LOW returned **ATTEMPT-1 FAIL / SOURCE ASSESSMENT PASS** at exact clean
+pushed head `711f04c6f2c16cd1121925a1f7663e9e2b0a0e19`, unchanged main
+`7d16d9c9752c9ac2d31e69008fe075df86ce3c26`, and reconciled tracker
+`b54c7bc55e966ffcd13f4d4faf7cc4e07fbc7a0a`. The retained original hash,
+marker, ordered 13-test inventory, exact deindent transform, failed script bytes,
+SyntaxError status, lack of gates 2-8, and self-excluding manifest reproduce.
+Attempt 1 is consumed and supplies no gate credit. Its freshness observation is
+persisted testimony because the present filesystem cannot reconstruct prior
+absence.
+
+Attempt 2 is qualification-only. Preserve the two source files byte for byte at:
+
+- `program.rs` SHA-256
+  `2f34607637b4785715d5aa31a787a9f94d6a63ec5ecd9ce2727799406a269b6c`;
+- `program/tests.rs` SHA-256
+  `64431ae1066d96232ded4200bd82b11f72b1b1dff6995999bda571ec00f552de`.
+
+Preserve every attempt-1 evidence byte. Use only fresh absent non-symlink
+`/tmp/issue671-graph-program-tests-attempt2-evidence`. Persist the absence checks
+before creation. Before any gate, write the following literal script as
+`exact-transform.py`; do not create it by redirecting the output of an execution.
+Read it back, persist its SHA-256 and byte count, and require those bytes to remain
+unchanged through the attempt:
+
+```python
+from hashlib import sha256
+from pathlib import Path
+import re
+
+base = Path("/tmp/issue671-graph-program-tests-evidence/program.rs.base").read_bytes()
+program = Path("crates/graph/src/program.rs").read_bytes()
+tests = Path("crates/graph/src/program/tests.rs").read_bytes()
+marker = b"#[cfg(test)]\nmod tests {\n"
+
+def digest(value: bytes) -> str:
+    return sha256(value).hexdigest()
+
+assert digest(base) == "5d2575c6c4348e13481e33d71d53e797a2d79df628ca2044d4703ffc6885440f"
+assert digest(program) == "2f34607637b4785715d5aa31a787a9f94d6a63ec5ecd9ce2727799406a269b6c"
+assert digest(tests) == "64431ae1066d96232ded4200bd82b11f72b1b1dff6995999bda571ec00f552de"
+assert base.count(marker) == 1
+offset = base.index(marker)
+body = base[offset + len(marker):]
+assert body.endswith(b"}\n")
+body = body[:-2]
+lines = body.splitlines(keepends=True)
+assert all((not line.strip()) or line.startswith(b"    ") for line in lines)
+expected_tests = b"".join(line[4:] if line.strip() else line for line in lines)
+assert program == base[:offset] + b"#[cfg(test)]\nmod tests;\n"
+assert tests == expected_tests
+name_pattern = re.compile(rb"(?m)^\s*#\[test\]\n\s*fn ([a-zA-Z0-9_]+)\(\) \{")
+old_names = name_pattern.findall(body)
+new_names = name_pattern.findall(tests)
+assert old_names == new_names
+assert len(old_names) == 13
+for forbidden in (b"include_str!", b"include_bytes!", b"file!", b"line!", b"#[path"):
+    assert forbidden not in program
+    assert forbidden not in tests
+print("PASS exact-transform")
+print(f"marker_byte_offset={offset}")
+print(f"test_count={len(old_names)}")
+```
+
+The source hashes must be checked before and after every command. Run all eight
+original gates fresh, once and in order, carrying no attempt-1 or review credit.
+Persist the literal script, its frozen identity, commands, separate streams,
+statuses, source identities, and a verified self-excluding manifest under the
+attempt-2 path. Any failed precondition, script error, source drift, or nonzero
+gate stops without correction or retry. Only this spec may change in attempt 2;
+root checkpoints before further work. A clean pushed amendment and fresh Astra
+LOW scope PASS are required before sole Luna HIGH `issue671_luna_impl` resumes.
