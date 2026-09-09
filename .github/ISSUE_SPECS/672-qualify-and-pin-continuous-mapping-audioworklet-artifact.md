@@ -389,3 +389,19 @@ paths remain absent including symlinks. Only Luna HIGH
 fresh preflight. Stop at any unexpected failure. The earlier precondition stop
 supplies no workload credit; repository promotion and post-pin work remain
 separately gated.
+
+## Pre-pin attempt 1 — EVIDENCE FAIL
+
+Luna HIGH passed preflight at clean `9729f0448b11b840e249b7a83ee5a31e0dc17e10`.
+The frozen verifier self-test, all three fail-closed exports, tar hashes/removal,
+and exact export verification passed. The current-main ordinary builder then ran
+exactly once and returned 0 with the exact six-file set and delivered Wasm digest
+`580e3cb4cd11e996598103f27b02d94559f6ef7ad57ef22732d18c0b4f98be10`.
+
+The post-build capture referenced nonexistent `10-main-build.stdout` instead of
+retained `09-main-build.stdout`, causing an uncaptured shell error. Luna stopped
+immediately. No candidate build, overlay, install, later gate, correction, or
+retry ran; the repository remained clean. Preserve `/tmp/issue672-prepin-evidence`
+and `/tmp/issue672-main-artifact` unchanged. Attempt 1 is consumed as an evidence
+failure. Astra LOW must review it before any attempt-2 amendment. No compiler or
+generated artifact payload enters Git, and no promotion is authorized.
