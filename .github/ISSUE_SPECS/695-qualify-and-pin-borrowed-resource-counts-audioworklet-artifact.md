@@ -100,9 +100,11 @@ plus the three explicit assignments in the actual command; the later
 `probe-environment` file is reconstructed and is not authority. The post-probe
 documentation-only head drift is recorded in the transcript: the probe stayed
 at `a0099d2b97995b7978c6ff7614cef46548595f26`, while the later docs checkpoint
-advanced to `6533ac339884c84d9001d86822c7b18aa49c0a0b`. Complete transcript and
-receipt are preserved outside Git under
-`/tmp/cp1-resource-input-counts-a1-evidence/`; its finite self-excluding
+advanced to `6533ac339884c84d9001d86822c7b18aa49c0a0b`. The accepted Phase 1
+evidence files and receipt remain unchanged under
+`/tmp/cp1-resource-input-counts-a1-evidence/`; the original Luna tool
+transcript is preserved at
+`/home/bl/.codex1/sessions/2026/09/09/rollout-2026-09-09T13-38-52-01a08664-8e86-79c1-9360-607968a059c1.jsonl`. Its finite self-excluding
 manifest has SHA-256
 `e3bca0c919a8c2222beab5463ab998d34f96f909123dd685570e685436bdadae`. No failed attempt was
 consumed.
@@ -116,6 +118,13 @@ probe digest in `results.json`; change the pin only when that digest differs
 from the current pin; regenerate only the matrix lineage. Checkpoint the
 qualification-pending overlay candidly, synchronize it, and obtain fresh Astra
 XHIGH exact-head SCOPE PASS before execution.
+
+The named Luna HIGH executor must first record that the artifact directory,
+ordinary Cargo target, and hermetic Cargo target are absent, including dangling
+symlinks. It must then exclusively create
+`/tmp/cp1-resource-input-counts-a1-artifact` as an empty ordinary directory
+before the ordinary builder. The Cargo targets remain absent for their commands
+to create. The Phase 2 scope rejection consumed no execution attempt.
 
 Run one ordinary builder followed by these gates exactly once and in order from
 the artifact worktree. Every command explicitly unsets
