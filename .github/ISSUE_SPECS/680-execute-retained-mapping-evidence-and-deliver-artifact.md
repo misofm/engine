@@ -611,6 +611,8 @@ files, and absence under `test -e` and `test -L` of all fresh post-pin paths:
 - `/tmp/issue680-postpin-build.stdout`;
 - `/tmp/issue680-postpin-build.stderr`;
 - `/tmp/issue680-postpin-build.status`;
+- `/tmp/issue680-postpin-build.meta`;
+- `/tmp/issue680-postpin-target`;
 - `/tmp/issue680-postpin-compare.txt`.
 
 Only Luna HIGH `/root/issue583_luna_impl` may implement. It may change exactly:
@@ -632,16 +634,22 @@ and `83e98455f1f9868ab264e0e2b89a416240891fb05e415f2af2a633643b0a627b`,
 byte-identical to the qualified candidate overlays. Any other tracked change or
 candidate drift stops before the build.
 
-Luna then creates the fresh empty ordinary post-pin artifact directory and runs
-exactly once from the #680 worktree, with
+Luna then requires the source-local `target/` absent, creates the fresh empty
+ordinary post-pin artifact directory, and leaves the fresh external Cargo target
+path absent for Cargo to create. It writes the exact authorization/source heads,
+literal argv/cwd, environment, and UTC start to the fresh build metadata record,
+then runs exactly once from the #680 worktree with
 `MISO_ENGINE_WEB_AUDIOWORKLET_REPIN` absent:
 
 ```text
-bash scripts/build-web-audioworklet.sh /tmp/issue680-postpin-artifact
+CARGO_TARGET_DIR=/tmp/issue680-postpin-target bash scripts/build-web-audioworklet.sh /tmp/issue680-postpin-artifact
 ```
 
 Complete stdout, stderr, and tool-reported status go to the three fresh build
-captures. Require status 0 and exactly the six candidate filenames. Record the
+captures; append only UTC finish and that numeric status to the metadata record.
+Require status 0, the source-local `target/` still absent, the external target
+ordinary and non-symlink, exactly the authorized three-path tracked diff, and
+exactly the six candidate filenames. Record the
 one-to-one comparison in the fresh flat compare file and require byte identity
 and these exact SHA-256 values:
 
@@ -660,6 +668,13 @@ three reviewed repository files modified. Root audits and commits that exact
 path set, then Astra LOW reviews the committed head/current main and post-pin
 evidence before PR delivery. Raw captures and all six generated outputs remain
 external and never enter Git.
+
+Astra LOW returned promotion **SCOPE FAIL** at clean pushed feature `4a18d93b`
+because the native parameter-metadata step otherwise inherited an unspecified
+Cargo target and the build provenance was incomplete. No edit or build ran. The
+fresh external target, metadata record, exact environment, full lifecycle
+captures, source-local-target checks, and post-build tracked-diff check above are
+the sole correction. Fresh exact-head promotion SCOPE PASS remains mandatory.
 
 The complete reviewed verifier bytes follow verbatim:
 
