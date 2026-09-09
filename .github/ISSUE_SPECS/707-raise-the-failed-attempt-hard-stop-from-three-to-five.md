@@ -26,3 +26,15 @@ Raise the repository-wide hard stop to five total attempts while preserving ever
 ## Status
 
 Open for Astra XHIGH scope review.
+
+## Astra XHIGH scope review — PASS
+
+Scope review passes at clean pushed scope commit `67ff8d84ae0562f662af003d36d3b97a4816bf43`. Only these prospective paths change: `AGENTS.md`, `docs/IMPLEMENTATION_PLAN.md`, and `.github/ISSUE_SPECS/707-raise-the-failed-attempt-hard-stop-from-three-to-five.md`. History is preserved. The policy must merge before #705 is reopened.
+
+## Luna HIGH attempt 1
+
+- Updated prospective five-attempt workflow language and the hard-stop paragraph in `AGENTS.md`.
+- Updated the general Review cadence sentence in `docs/IMPLEMENTATION_PLAN.md`, preserving issue-specific historical sentences.
+- Appended this scope review and attempt record to the issue specification.
+
+Review pending.
