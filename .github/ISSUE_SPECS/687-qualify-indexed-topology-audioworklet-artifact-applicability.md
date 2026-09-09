@@ -120,3 +120,76 @@ post-main qualification, GitHub/spec synchronization, closure, and clean removal
 only of delivered worktrees. Preserve all failed worktrees, branches, histories,
 targets, and temporary evidence named by #559/#560, including #668 and the soft-
 clip chain. Do not inspect, rewrite, repair, rerun, or remove them here.
+
+## Controlling stage 1 verdict — EVIDENCE FAIL
+
+The stage-1 invocation is consumed and must never be repeated. Preflight observed
+reviewed head `c07dee0e`, but the branch advanced to `5153ce43` at 09:46:13 UTC,
+before the recorded invocation began at 09:46:45 UTC. Both invocation identity
+records correctly name `5153ce43`; the later drift record incorrectly calls
+`c07dee0e` the invocation head. This violated the reviewed stop rule. The
+preceding fresh-detached-probe rebrief was committed after the invocation and
+cannot reset or authorize another run.
+
+The preserved result is technically coherent but unqualified: status 0, exact
+65-byte lowercase digest stdout, empty output directory, and reproducible record
+manifest. Observed digest
+`31c882af32959c0164ae069b5ba63a5d5e7890b024d07c04bb75afc06e66cd4b`
+differs from delivered pin
+`93108e9407f4cd343b644e9e821cfd3ca80c3667983a35db7f2e5c3228934531`.
+No stage-2 authority attaches.
+
+## Read-only reconciliation attempt
+
+One Astra LOW review may create one new compact, non-overwriting reconciliation
+record under `/tmp/issue687-repin-evidence`. It may inspect existing records,
+reflogs, commit/tree/path hashes, and diffs only. It must establish the exact
+`c07dee0e..5153ce43` chronology and whether every builder/product input—product
+source, builder script, manifests, lockfile, toolchain/environment record, and
+delivered pin—was identical despite the documentation-only merge. It must state
+that the retained records do not independently prove historical immutability or
+the exact total invocation count.
+
+Do not modify an existing record, rerun a builder, run Cargo/rustc, assemble a
+candidate, inspect compiler payloads, qualify browsers/resources/SDKs, or edit a
+pin. A reconciliation PASS may qualify only the limited drift observation and
+authorize a separately amended stage-2 scope; any need to reconstruct evidence
+or rerun the probe hard-stops this issue.
+
+## Stage 1 concurrent execution — PROCEDURAL FAIL; read-only attribution only
+
+Before Astra LOW passed the corrected scope, another actor created
+`/tmp/issue687-repin-output` and `/tmp/issue687-repin-evidence` and invoked the
+repin-report builder once from the artifact worktree. Preserve every record and
+both directories. `/tmp/issue687-repin-source` remains absent. No replacement
+repin invocation, overwrite, repair, reconstruction, append, timestamp change,
+cleanup, or pin action is authorized.
+
+The preserved records report one builder status 0, empty output directory, one
+65-byte lowercase digest line
+`31c882af32959c0164ae069b5ba63a5d5e7890b024d07c04bb75afc06e66cd4b`,
+and delivered pin `93108e9407f4cd343b644e9e821cfd3ca80c3667983a35db7f2e5c3228934531`.
+They do not satisfy the corrected protocol. The preflight was persisted after
+the evidence/output directories existed; it names head `c07dee0e`, while the
+invocation-head/upstream records name later merge `5153ce43`. The builder ran
+from the shared artifact worktree instead of a fresh detached source, and the
+corrected durable-preflight/terminal-manifest lifecycle was not reviewed before
+execution. Later records observe another spec-only drift. Stage 1 is consumed as
+a procedural failure and the digest receives no artifact-qualification or pin
+credit yet.
+
+Attempt 2 owns one read-only attribution review of the existing records and Git
+history. Astra LOW may verify hashes, modes, sizes, mtimes, command/status/stream
+consistency, the exact ancestry and diff among `c07dee0e`, `5153ce43`,
+`c9ccf6ac`, and frozen product `276ffb60`, the absence of non-documentation
+source drift, output emptiness, digest format, current pin, and whether one
+builder invocation is supported. It may not execute Cargo, rustc, a builder, any
+artifact/SDK/browser gate, or any generated binary; create a path; write or
+modify a record; inspect compiler payloads; reconstruct freshness; or infer sole
+executor provenance that the records do not prove.
+
+An attribution PASS may preserve only the observed candidate digest and exact
+limitations for a separately amended stage 2 candidate qualification. It cannot
+make stage 1 pass, transfer prior artifact qualification, or authorize a pin
+edit. A missing/inconsistent record, non-doc source drift, unresolvable head
+identity, or evidence of another invocation closes #687 without candidate use.
