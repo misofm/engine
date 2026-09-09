@@ -291,3 +291,43 @@ SOURCE PASS is complete. PR readiness remains conditional on root's artifact-
 applicability decision and final exact-head/current-main review. Preserve all
 predecessor failures and temporary evidence; this verdict authorizes no artifact
 execution or cleanup by an implementation agent.
+
+## AudioWorklet artifact applicability scope
+
+Root's post-SOURCE-PASS dependency trace shows `host-web` depends on changed
+`effect-contract` through its compiler/runtime graph. The production helper can
+therefore enter the shipped AudioWorklet even though #670 changes descriptor
+validation rather than render arithmetic. Artifact applicability requires one
+exact-source identity probe; no retained-artifact assumption is allowed.
+
+The sole probe executor remains Luna HIGH `/root/issue583_luna_impl` after Astra
+LOW scope PASS. At clean pushed #670 head, record HEAD/upstream, live main and
+merge-base, cwd, Rust/Cargo versions, source hashes, exact 65-byte pin content and
+newline shape, literal environment, clean tree, and unchanged builder/copied
+inputs. Verify absence including dangling symlinks of
+`/tmp/issue670-artifact-probe-output` and
+`/tmp/issue670-artifact-probe-evidence`. Prove harmless capture statuses 0 and 1
+and read both back, then create the output/evidence directories once.
+
+Run exactly once:
+
+`MISO_ENGINE_WEB_AUDIOWORKLET_REPIN=1 bash scripts/build-web-audioworklet.sh /tmp/issue670-artifact-probe-output`
+
+Require status 0, stdout exactly one lowercase 64-hex digest plus LF, empty
+stderr, an empty output directory, unchanged repository/pin, and no competing
+Cargo/rustc process. Capture complete stdout/stderr/status/context/postflight and
+hashes in a finalized self-excluding manifest whose verification status and hash
+are recorded outside the evidence directory. Stop on any failed precondition or
+result without correction or retry.
+
+Do not run the ordinary builder, inspect or retain its temporary Cargo target,
+create a six-file candidate, edit the pin, or invoke static/resource/browser/SDK
+gates. If the digest matches the pin, Astra LOW decides whether prior qualified
+artifact evidence carries. If it differs, this proves drift only; qualification
+and pin promotion require a separately numbered issue when an active slot is
+available. Full build streams and every generated artifact remain temporary. No
+`.ll`, assembly, object, archive, binary, `rlib`, `rmeta`, Cargo target,
+benchmark, timing, allocation, or performance evidence enters Git.
+
+The probe is unauthorized until this pushed amendment and synchronized trackers
+receive Astra LOW scope PASS. Source PASS alone does not authorize execution.
