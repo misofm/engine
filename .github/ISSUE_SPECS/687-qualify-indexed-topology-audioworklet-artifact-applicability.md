@@ -198,8 +198,8 @@ identity, or evidence of another invocation closes #687 without candidate use.
 
 ## Attempt 2 read-only attribution verdict — PASS (limited)
 
-Astra LOW returned **ATTRIBUTION PASS** at exact clean pushed #687 brief
-`266317b6e2c46d7ab9100895c561c6fc234b1d02`, tracker
+Astra LOW returned **ATTRIBUTION PASS** at exact clean pushed #687 scope
+`4a69235fcbda6335a8edcb3fbd1d498aa607888f`, tracker
 `e9f130a00dc7f54fb110fbfb0c34cc381170a034`, and unchanged main. The
 `c07dee0e..5153ce43` merge completed at 09:46:13 UTC before the recorded
 09:46:45–09:47:02 invocation. Both invocation identity records name
@@ -213,6 +213,9 @@ records match their current hashes, sizes, and modes. The records support one
 observed status-0 invocation, one valid 65-byte digest line, and empty output.
 They do not prove historical immutability, sole-executor provenance, or the exact
 total invocation count. Stage 1 remains FAIL and consumed.
+
+The exclusive reconciliation record is 7,952 bytes, mode `0444`, at SHA-256
+`e49d75aca2307b643c5d0f5272c29c92aa2c0bd80aa55455f5f727cc415e58c7`.
 
 The limited observation establishes candidate digest
 `31c882af32959c0164ae069b5ba63a5d5e7890b024d07c04bb75afc06e66cd4b`
