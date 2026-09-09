@@ -144,6 +144,19 @@ pub type AutomationKind = AutomationSpanKind;
 scalar_enum!(ParameterChannelPolicy {Shared=1,PerLane=2});
 scalar_enum!(StepSize {Xs=1,Sm=2,Md=3,Lg=4,Xl=5});
 scalar_enum!(StepUnit {Absolute=1,Cents=2,Ratio=3,Index=4});
+
+/// Whether a continuous parameter's mapping is admissible for its finite minimum.
+///
+/// Callers validate the minimum's finiteness and canonical zero spelling before applying this
+/// mapping rule. A stepped mapping belongs to Boolean and Enumeration parameters instead.
+#[must_use]
+pub const fn continuous_mapping_admissible(mapping: ParameterMapping, minimum: f32) -> bool {
+    match mapping {
+        ParameterMapping::Linear | ParameterMapping::Exponential => true,
+        ParameterMapping::Logarithmic => minimum > 0.0,
+        ParameterMapping::Stepped => false,
+    }
+}
 // Issue #143 D1: the declared observation menu. Each vocabulary is a `scalar_enum!` for the same
 // reason the parameter vocabularies are -- the descriptor wire, the C inspect surface and the
 // browser metadata all carry the raw `u32`, and `from_raw` is the single place a foreign value is
@@ -553,13 +566,7 @@ fn parameter_valid(p: &ParameterDescriptor) -> bool {
                     && a < b
                     && parameter_value_valid(p, p.default_value)
                     && p.enum_choices.is_empty()
-                    && matches!(
-                        p.mapping,
-                        ParameterMapping::Linear
-                            | ParameterMapping::Logarithmic
-                            | ParameterMapping::Exponential
-                    )
-                    && (p.mapping != ParameterMapping::Logarithmic || a > 0.0)
+                    && continuous_mapping_admissible(p.mapping, a)
             }
             _ => false,
         },
@@ -2281,6 +2288,234 @@ mod automation_smoothing_validity_tests {
                             expected,
                             "{automation_rate:?}, {automatable}, {smoothing:?}, {smoothing_samples}"
                         );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod continuous_mapping_validity_tests {
+    use super::{
+        AutomationRate, DescriptorDiagnosticCode, EffectDescriptor, EffectId, EffectQuality,
+        LatencySamples, LinkModeSet, ParameterChannelPolicy, ParameterDescriptor, ParameterDomain,
+        ParameterId, ParameterMapping, ParameterUnit, PortDescriptor, PortId, PortLayout, PortRole,
+        QualityDescriptor, SmoothingRule, StatePayloadSizes, TailSamples,
+        default_parameter_lattice, validate_descriptor,
+    };
+
+    const fn quality(sample_rate: u32) -> QualityDescriptor {
+        QualityDescriptor {
+            quality: EffectQuality::Normal,
+            sample_rate,
+            latency: LatencySamples(0),
+            tail: TailSamples::Finite(0),
+            maximum_state: StatePayloadSizes {
+                common_bytes: 0,
+                left_bytes: 0,
+                right_bytes: 0,
+            },
+            scratch_fixed_bytes: 0,
+            scratch_bytes_per_frame: 0,
+        }
+    }
+
+    const fn port_id(value: &'static str) -> PortId {
+        match PortId::new(value) {
+            Ok(id) => id,
+            Err(_) => panic!("valid test port ID"),
+        }
+    }
+
+    static PORTS: [PortDescriptor; 2] = [
+        PortDescriptor {
+            id: port_id("main-in"),
+            role: PortRole::MainInput,
+            required: true,
+            layout: PortLayout::DualMonoPlanar,
+        },
+        PortDescriptor {
+            id: port_id("main-out"),
+            role: PortRole::MainOutput,
+            required: true,
+            layout: PortLayout::DualMonoPlanar,
+        },
+    ];
+
+    static QUALITIES: [QualityDescriptor; 4] = [
+        quality(44_100),
+        quality(48_000),
+        quality(88_200),
+        quality(96_000),
+    ];
+
+    const BASE: ParameterDescriptor = ParameterDescriptor {
+        id: ParameterId(1),
+        display_name: "Gain",
+        display_unit: "dB",
+        unit: ParameterUnit::Db,
+        domain: ParameterDomain::Continuous,
+        minimum: Some(-1.0),
+        maximum: Some(1.0),
+        default_value: 0.0,
+        mapping: ParameterMapping::Linear,
+        automation_rate: AutomationRate::Sample,
+        channel_policy: ParameterChannelPolicy::PerLane,
+        smoothing: SmoothingRule::Linear,
+        smoothing_samples: 1,
+        readable: false,
+        automatable: true,
+        enum_choices: &[],
+        lattice: default_parameter_lattice(
+            ParameterUnit::Db,
+            ParameterDomain::Continuous,
+            ParameterMapping::Linear,
+        ),
+    };
+
+    enum TypedExpectation {
+        Ok,
+        Diagnostics(&'static [(&'static str, DescriptorDiagnosticCode)]),
+    }
+
+    const LATTICE: &[(&str, DescriptorDiagnosticCode)] =
+        &[("parameters", DescriptorDiagnosticCode::Lattice)];
+    const PARAMETER_AND_LATTICE: &[(&str, DescriptorDiagnosticCode)] = &[
+        ("parameters", DescriptorDiagnosticCode::Parameter),
+        ("parameters", DescriptorDiagnosticCode::Lattice),
+    ];
+
+    fn typed_diagnostics(
+        mapping: ParameterMapping,
+        minimum: f32,
+    ) -> Result<(), Vec<(&'static str, DescriptorDiagnosticCode)>> {
+        let (maximum, default_value) = if minimum.is_finite() && minimum > 0.0 {
+            (
+                if minimum == 1.0 { 2.0 } else { 1.0 },
+                if minimum == 1.0 { 1.5 } else { 0.5 },
+            )
+        } else {
+            (1.0, 0.5)
+        };
+        let parameter = ParameterDescriptor {
+            minimum: Some(minimum),
+            maximum: Some(maximum),
+            default_value,
+            mapping,
+            lattice: default_parameter_lattice(
+                ParameterUnit::Db,
+                ParameterDomain::Continuous,
+                mapping,
+            ),
+            ..BASE
+        };
+        let parameters: &'static [ParameterDescriptor; 1] = Box::leak(Box::new([parameter]));
+        let descriptor: &'static EffectDescriptor = Box::leak(Box::new(EffectDescriptor {
+            id: EffectId::new("mapping-test").expect("valid test effect ID"),
+            display_name: "Mapping Test",
+            contract_major: 1,
+            contract_minor: 0,
+            state_layout_version: 1,
+            supported_link_modes: LinkModeSet::DUAL_MONO,
+            parameters,
+            ports: &PORTS,
+            qualities: &QUALITIES,
+            observations: &[],
+        }));
+        validate_descriptor(descriptor).map_err(|errors| {
+            errors
+                .errors()
+                .iter()
+                .map(|error| (error.path, error.code))
+                .collect()
+        })
+    }
+
+    #[test]
+    fn typed_public_mapping_matrix_has_independent_diagnostics() {
+        let minima: [f32; 9] = [
+            -1.0,
+            -0.0,
+            0.0,
+            f32::from_bits(1),
+            f32::MIN_POSITIVE,
+            1.0,
+            f32::NAN,
+            f32::NEG_INFINITY,
+            f32::INFINITY,
+        ];
+        let cases = [
+            (
+                ParameterMapping::Linear,
+                [
+                    TypedExpectation::Ok,
+                    TypedExpectation::Diagnostics(PARAMETER_AND_LATTICE),
+                    TypedExpectation::Ok,
+                    TypedExpectation::Diagnostics(LATTICE),
+                    TypedExpectation::Diagnostics(LATTICE),
+                    TypedExpectation::Ok,
+                    TypedExpectation::Diagnostics(PARAMETER_AND_LATTICE),
+                    TypedExpectation::Diagnostics(PARAMETER_AND_LATTICE),
+                    TypedExpectation::Diagnostics(PARAMETER_AND_LATTICE),
+                ],
+            ),
+            (
+                ParameterMapping::Logarithmic,
+                [
+                    TypedExpectation::Diagnostics(PARAMETER_AND_LATTICE),
+                    TypedExpectation::Diagnostics(PARAMETER_AND_LATTICE),
+                    TypedExpectation::Diagnostics(PARAMETER_AND_LATTICE),
+                    TypedExpectation::Diagnostics(LATTICE),
+                    TypedExpectation::Diagnostics(LATTICE),
+                    TypedExpectation::Ok,
+                    TypedExpectation::Diagnostics(PARAMETER_AND_LATTICE),
+                    TypedExpectation::Diagnostics(PARAMETER_AND_LATTICE),
+                    TypedExpectation::Diagnostics(PARAMETER_AND_LATTICE),
+                ],
+            ),
+            (
+                ParameterMapping::Exponential,
+                [
+                    TypedExpectation::Ok,
+                    TypedExpectation::Diagnostics(PARAMETER_AND_LATTICE),
+                    TypedExpectation::Ok,
+                    TypedExpectation::Diagnostics(LATTICE),
+                    TypedExpectation::Diagnostics(LATTICE),
+                    TypedExpectation::Ok,
+                    TypedExpectation::Diagnostics(PARAMETER_AND_LATTICE),
+                    TypedExpectation::Diagnostics(PARAMETER_AND_LATTICE),
+                    TypedExpectation::Diagnostics(PARAMETER_AND_LATTICE),
+                ],
+            ),
+            (
+                ParameterMapping::Stepped,
+                [
+                    TypedExpectation::Diagnostics(PARAMETER_AND_LATTICE),
+                    TypedExpectation::Diagnostics(PARAMETER_AND_LATTICE),
+                    TypedExpectation::Diagnostics(PARAMETER_AND_LATTICE),
+                    TypedExpectation::Diagnostics(PARAMETER_AND_LATTICE),
+                    TypedExpectation::Diagnostics(PARAMETER_AND_LATTICE),
+                    TypedExpectation::Diagnostics(PARAMETER_AND_LATTICE),
+                    TypedExpectation::Diagnostics(PARAMETER_AND_LATTICE),
+                    TypedExpectation::Diagnostics(PARAMETER_AND_LATTICE),
+                    TypedExpectation::Diagnostics(PARAMETER_AND_LATTICE),
+                ],
+            ),
+        ];
+
+        for (mapping, expected) in cases {
+            for (minimum, expected) in minima.into_iter().zip(expected) {
+                match (expected, typed_diagnostics(mapping, minimum)) {
+                    (TypedExpectation::Ok, Ok(())) => {}
+                    (TypedExpectation::Diagnostics(expected), Err(actual)) => {
+                        assert_eq!(actual, expected, "{mapping:?} minimum {minimum:?}");
+                    }
+                    (TypedExpectation::Ok, Err(actual)) => {
+                        panic!("unexpected diagnostics for {mapping:?} {minimum:?}: {actual:?}");
+                    }
+                    (TypedExpectation::Diagnostics(expected), Ok(())) => {
+                        panic!("missing diagnostics for {mapping:?} {minimum:?}: {expected:?}");
                     }
                 }
             }

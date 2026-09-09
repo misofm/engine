@@ -7,8 +7,8 @@ use effect_contract::{
     LinkModeSet, ObservationCadence, ObservationChannels, ObservationCost, ObservationFold,
     ObservationKind, ParameterChannelPolicy, ParameterDomain, ParameterLattice, ParameterMapping,
     ParameterUnit, PortDescriptor, PortLayout, PortRole, SmoothingRule, StepLadder, StepUnit,
-    TailSamples, default_parameter_lattice, parameter_automation_smoothing_valid,
-    validate_descriptor, validate_parameter_lattice_parts,
+    TailSamples, continuous_mapping_admissible, default_parameter_lattice,
+    parameter_automation_smoothing_valid, validate_descriptor, validate_parameter_lattice_parts,
 };
 use engine::{
     LAUNCH_SAMPLE_RATES, SampleRateHz, is_extended_compatibility_sample_rate, is_launch_sample_rate,
@@ -1327,13 +1327,7 @@ fn parameter_semantics_valid(
                     && minimum < maximum
                     && parameter_value_valid(view, parameter, parameter.default_value)
                     && parameter.choice_count == 0
-                    && matches!(
-                        parameter.mapping,
-                        ParameterMapping::Linear
-                            | ParameterMapping::Logarithmic
-                            | ParameterMapping::Exponential
-                    )
-                    && (parameter.mapping != ParameterMapping::Logarithmic || minimum > 0.0)
+                    && continuous_mapping_admissible(parameter.mapping, minimum)
             }
             _ => false,
         },
@@ -3222,6 +3216,143 @@ mod tests {
         let choice_text = read_u32(&bytes, choice + 4) as usize;
         bytes[choice_text] = b'G';
         assert_mismatch(&bytes, (choice + 4) as u32, 0);
+    }
+
+    #[test]
+    fn borrowed_public_mapping_matrix_has_exact_outcomes() {
+        use sha2::{Digest, Sha256};
+
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        enum Expected {
+            Accepted,
+            Float,
+            SemanticParameter,
+            SemanticLattice,
+        }
+
+        let minima: [f32; 9] = [
+            -1.0,
+            -0.0,
+            0.0,
+            f32::from_bits(1),
+            f32::MIN_POSITIVE,
+            1.0,
+            f32::NAN,
+            f32::NEG_INFINITY,
+            f32::INFINITY,
+        ];
+        let cases = [
+            (
+                ParameterMapping::Linear,
+                [
+                    Expected::Accepted,
+                    Expected::Float,
+                    Expected::Accepted,
+                    Expected::SemanticLattice,
+                    Expected::SemanticLattice,
+                    Expected::Accepted,
+                    Expected::Float,
+                    Expected::Float,
+                    Expected::Float,
+                ],
+            ),
+            (
+                ParameterMapping::Logarithmic,
+                [
+                    Expected::SemanticParameter,
+                    Expected::Float,
+                    Expected::SemanticParameter,
+                    Expected::SemanticLattice,
+                    Expected::SemanticLattice,
+                    Expected::Accepted,
+                    Expected::Float,
+                    Expected::Float,
+                    Expected::Float,
+                ],
+            ),
+            (
+                ParameterMapping::Exponential,
+                [
+                    Expected::Accepted,
+                    Expected::Float,
+                    Expected::Accepted,
+                    Expected::SemanticLattice,
+                    Expected::SemanticLattice,
+                    Expected::Accepted,
+                    Expected::Float,
+                    Expected::Float,
+                    Expected::Float,
+                ],
+            ),
+            (
+                ParameterMapping::Stepped,
+                [
+                    Expected::SemanticParameter,
+                    Expected::Float,
+                    Expected::SemanticParameter,
+                    Expected::SemanticParameter,
+                    Expected::SemanticParameter,
+                    Expected::SemanticParameter,
+                    Expected::Float,
+                    Expected::Float,
+                    Expected::Float,
+                ],
+            ),
+        ];
+
+        for (mapping, expected) in cases {
+            for (minimum, expected) in minima.into_iter().zip(expected) {
+                let mut bytes = encode(&DESCRIPTOR);
+                let record = HEADER_BYTES;
+                let (maximum, default_value) = if minimum.is_finite() && minimum > 0.0 {
+                    (2.0_f32, 1.5_f32)
+                } else {
+                    (1.0_f32, 0.5_f32)
+                };
+                write_u32(&mut bytes, record + 12, mapping as u32);
+                write_u32(&mut bytes, record + 36, minimum.to_bits());
+                write_u32(&mut bytes, record + 40, maximum.to_bits());
+                write_u32(&mut bytes, record + 44, default_value.to_bits());
+
+                match expected {
+                    Expected::Accepted => {
+                        let verified = verify_effect_descriptor_wire(&bytes, 1 << 20)
+                            .expect("accepted public mapping case");
+                        assert_eq!(verified.as_bytes(), bytes.as_slice());
+                        let mut digest = Sha256::new();
+                        digest.update(IDENTITY_DOMAIN);
+                        digest.update((bytes.len() as u64).to_le_bytes());
+                        digest.update(&bytes);
+                        let expected_identity = digest.finalize();
+                        assert_eq!(verified.identity().as_bytes(), &expected_identity[..]);
+                    }
+                    Expected::Float => {
+                        let error = verify_effect_descriptor_wire(&bytes, 1 << 20)
+                            .expect_err("noncanonical minimum must be Float");
+                        assert_eq!(
+                            (error.code, error.byte_offset, error.record_index),
+                            (Code::Float, (record + 36) as u32, 0)
+                        );
+                    }
+                    Expected::SemanticParameter => {
+                        let error = verify_effect_descriptor_wire(&bytes, 1 << 20)
+                            .expect_err("mapping law must be a semantic error");
+                        assert_eq!(
+                            (error.code, error.byte_offset, error.record_index),
+                            (Code::Semantic, (record + 4) as u32, 0)
+                        );
+                    }
+                    Expected::SemanticLattice => {
+                        let error = verify_effect_descriptor_wire(&bytes, 1 << 20)
+                            .expect_err("decimal lattice spelling must be a later semantic error");
+                        assert_eq!(
+                            (error.code, error.byte_offset, error.record_index),
+                            (Code::Semantic, (record + 72) as u32, 0)
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
