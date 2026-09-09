@@ -400,3 +400,14 @@ carry; no repin or pull request is authorized. After an active issue slot clears
 a separately numbered qualification successor may use this digest only as its
 expected candidate, with fresh scope review and an explicit disposition of this
 incomplete probe record.
+
+## Final disposition
+
+#670 completed its bounded source-qualification purpose: Astra LOW SOURCE PASS
+at `fe6ddb4d` remains valid, and the accepted production/test chain is preserved
+at this clean pushed record head. It cannot deliver independently because the
+shipped AudioWorklet identity drifted and the one diagnostic probe is incomplete
+as qualification evidence. Close #670 as source-qualified and delivery-incomplete,
+with no product-delivery credit, repin, PR, or merge. Its branch, worktree, and
+temporary records remain the immutable input to the separately numbered artifact
+qualification successor; they are not eligible for delivered-worktree cleanup.
