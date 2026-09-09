@@ -164,3 +164,15 @@ unproved pre-creation/exclusive-executor limitation. The stricter adversarial
 verdict above controls: attempt 1 remains failed and the promotion brief that was
 appended with the favorable verdict is withdrawn. Do not rerun a gate or perform
 promotion. Attempt 2 is only the read-only disposition already specified.
+
+## Attempt-2 scope review — PASS
+
+Astra LOW returned **SCOPE PASS** at exact clean pushed issue head `f0253618`,
+tracker `0d5368b2`, and unchanged main/source/product. GitHub parity held and the
+sole disposition path was absent, including as a dangling symlink. Attempt 2 may
+perform only the specified read-only checks, then exclusively create the one
+disposition record with durable readback and retained provenance limits.
+
+The record must also state that the preserved command sequences do not prove an
+exact historical total invocation count. No gate execution, predecessor
+mutation, #687 credit, pin edit, rebuild, PR, merge, or delivery is authorized.
