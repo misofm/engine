@@ -233,3 +233,10 @@ Any failed prerequisite, verifier error, source drift, or nonzero status stops t
 attempt without correction or retry. Preserve complete streams, statuses, and a
 verified self-excluding manifest. All excluded artifact, pin, and cleanup work
 remains unauthorized.
+
+## Luna HIGH attempt 2 result
+
+- Preflight passed at `7c21716a1080205b8525a6bb57c76eb32db4ddc1`; both frozen source hashes matched, attempt-1 evidence verified, and `/tmp/issue671-graph-program-tests-attempt2-evidence` was absent and non-symlink before creation.
+- The literal verifier was read back byte-identically at 1,567 bytes with SHA-256 `4e25cf63b3a4091f41bce9dea54f07ca80a83ba6f1746e85b956e39e499cc63c`.
+- Gates 1–4 passed with numeric status `0` (exact transform, debug tests, release tests, and strict Clippy). Gate 5, `cargo fmt --all -- --check`, stopped the attempt with status `1` because the exact preserved deindent has rustfmt differences. Source and verifier hashes remained unchanged before and after every executed gate.
+- Gates 6–8 were not run because the frozen sequence stops on the first failure. No same-attempt correction or rerun was performed; the self-excluding attempt-2 manifest verifies under `/tmp/issue671-graph-program-tests-attempt2-evidence`.
