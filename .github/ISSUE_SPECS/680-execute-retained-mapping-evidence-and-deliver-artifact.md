@@ -378,6 +378,74 @@ required base64-only self-test capture: revision 2 again passes the raw
 durable only after successful creation, so a creation failure still has no
 external creation record. No exact-head or execution authority attaches.
 
+Astra LOW returned **DRAFT FAIL** on final correction
+`a6cdc89037e365a78d495551101061bb731b10b135025b8d9ad79f7e8511ec10`.
+It confirms the raw-byte regression, incomplete ownership of a partially created
+preflight, non-durable manifest-creation failures, and missing durable terminal
+success. Six-entry ordinary-file revalidation is fixed. The specification permits
+no further reduced-launcher correction, so preserve all three sealed launcher
+files and never invoke them. This preparation did not consume attempt 2.
+
+## Attempt 2 direct execution rebrief
+
+The reduced-launcher shape is stopped. Attempt 2 now uses no generated runner,
+launcher, helper, nested heredoc, or synthetic framework. It invokes the already
+reviewed content-addressed verifier directly and records each phase through
+separate, simple filesystem operations. This is a smaller execution shape, not a
+third launcher correction.
+
+Before anything executable, root must push and synchronize this amendment. Astra
+LOW then performs a fresh exact-head SCOPE review of clean feature/tracker heads,
+live feature/tracker/main refs, both merge bases, GitHub body parity, preserved
+authority `de542050094f20150f7ec4f106e32f4074798626`, exact verifier and old
+attempt-1-preflight identities, absence of every old launcher output, and absence
+under both `test -e` and `test -L` of fresh
+`/tmp/issue680-attempt2-direct-evidence` and
+`/tmp/issue680-attempt2-direct-manifest-{stdout,stderr,status}`. No launcher file
+may be opened for execution.
+
+Only Luna HIGH `/root/issue583_luna_impl` may execute after that SCOPE PASS. It
+must use separate tool calls, stopping on the first failure or unexpected output:
+
+1. Exclusively create ordinary mode-0700 directory
+   `/tmp/issue680-attempt2-direct-evidence`; record the exact full feature,
+   tracker, main, authority, verifier hash/size/mode, executor identity, UTC start,
+   literal argv, and cwd in ordinary flat files using exclusive creation.
+2. Invoke the exact verifier self-test shown below once, with stdout and stderr
+   redirected to fresh ordinary flat files. Persist the tool-reported numeric
+   status and UTC finish in fresh files. Require status 0, empty stderr, and the
+   exact self-test PASS as final nonempty stdout line before continuing.
+3. Recheck all identities and append no existing record; write the second
+   observation to a new flat file. Invoke the exact production verifier shown
+   below once, redirecting stdout/stderr to fresh files, then persist its numeric
+   status and UTC finish in fresh files. Require status 0, empty stderr, and the
+   exact production PASS as final nonempty stdout line.
+4. Require the evidence directory to contain only the explicitly recorded
+   ordinary non-symlink flat files. Create `SHA256SUMS` once over every other file
+   in bytewise path order using lowercase digest, two spaces, and `./filename`.
+   Make the directory and files read-only, then directly run
+   `sha256sum -c SHA256SUMS` once from that directory. Capture its complete stdout,
+   stderr, and numeric status in the three fresh external manifest paths; require
+   status 0, empty stderr, and exact one-to-one `./filename: OK` rows.
+
+Before `SHA256SUMS`, the exact flat set is
+`00-preflight.txt`, `01-selftest.command`, `01-selftest.start`,
+`01-selftest.stdout`, `01-selftest.stderr`, `01-selftest.status`,
+`01-selftest.finish`, `02-preproduction.txt`, `03-production.command`,
+`03-production.start`, `03-production.stdout`, `03-production.stderr`,
+`03-production.status`, and `03-production.finish`. Command files contain the
+literal argv and cwd; start/finish files contain one UTC timestamp; status files
+contain one base-10 integer plus newline; observation files use sorted
+`key=value` rows and must contain no unreviewed prose. `SHA256SUMS` is the
+fifteenth and final internal file. External manifest captures are never included
+in it.
+
+A launch or phase failure consumes attempt 2 and preserves every created byte for
+Astra LOW adversarial review. A complete run receives only EVIDENCE review; it
+does not authorize promotion. Product/build/SDK/package/browser/resource/PCM/
+Cargo/npm/Node gates remain forbidden in this phase. Luna later implements any
+accepted three-file promotion, but Astra LOW owns this verifier review.
+
 Fresh production paths are:
 
 - `/tmp/issue680-attempt2-preflight.txt`;
