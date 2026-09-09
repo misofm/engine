@@ -98,12 +98,15 @@ attempts remain.
 
 ## Attempt 2 preparation and execution
 
-Only Luna HIGH `/root/issue583_luna_impl` may prepare an external attempt-2
-runner at `/tmp/issue680-attempt2-runner-draft.py`. Preparation may create only
-that ordinary non-symlink draft and must not invoke it, create any attempt-2
-path, read retained evidence, or run a verifier/product command. The runner must
-use direct Python argument arrays and file APIs; shell `eval`, shell `-c`, and
-nested heredocs are forbidden. Before any output creation it must fail closed on
+Luna XHIGH `/root/issue679_luna_verifier` alone may prepare an external
+attempt-2 runner at `/tmp/issue680-attempt2-runner-draft.py`. Preparation is not
+attempt execution: it may create only that ordinary non-symlink draft and must
+not invoke it, create any attempt-2 path, read retained evidence, or run a
+verifier/product command. Luna HIGH `/root/issue583_luna_impl` remains the sole
+eventual attempt-2 executor after all runner reviews and a fresh production
+SCOPE PASS; the preparer receives no execution authority. The runner must use
+direct Python argument arrays and file APIs; shell `eval`, shell `-c`, and nested
+heredocs are forbidden. Before any output creation it must fail closed on
 authorization-head, upstream, main, merge-base, executor lease, verifier,
 preserved-authority, process-owner, and all fresh-path checks. A rejected head or
 path must leave every attempt-2 path absent.
