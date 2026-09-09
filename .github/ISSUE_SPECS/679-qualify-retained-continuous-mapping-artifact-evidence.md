@@ -117,14 +117,16 @@ literal bytes, SHA-256, invocations, and controls before Luna runs it.
 
 ## Frozen verifier authorization checkpoint
 
-The exact LF-terminated verifier prepared for Astra LOW review is
+The exact LF-terminated verifier approved by Astra LOW DRAFT PASS is
 /tmp/issue679-verifier-a2929369a705245272e3d60b9a8ecf7d8ec608cf0ff03a50aba04e4c2f72fe38.py, SHA-256
 a2929369a705245272e3d60b9a8ecf7d8ec608cf0ff03a50aba04e4c2f72fe38
-(69,436 bytes). It has not been executed in this preparation tranche. Astra
-must review these literal bytes before Luna runs either control or production
-invocation. The verifier is read-only: it only reads Git objects, retained
-exports, retained evidence, and the nine census roots, and streams the
-preserved target through tar and sha256 without writing them.
+(69,436 bytes). Astra ran the documented isolated self-test once at feature head
+`7bed09183148fda4009bf75534d1d80c1b266b53`; it returned 0, its control
+directory cleanup succeeded, and the verifier hash remained exact. This draft
+approval does not authorize retained-evidence execution. The verifier is read-
+only: it only reads Git objects, retained exports, retained evidence, and the
+nine census roots, and streams the preserved target through tar and sha256
+without writing them.
 
 The self-test control, run once only after preflight, is exactly:
 
