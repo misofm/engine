@@ -90,3 +90,20 @@ head `0fb54a41cec818a85a768b4ea0405747658e9bb5`. It returned **SCOPE PASS** for
 this genuinely different documentation-only slice, subject to a fresh exact-head
 review after the numbered brief and matching GitHub issue are pushed. Both shared
 issue slots were free before creation. No product or evidence command ran.
+
+## Documentation attempt 1 decision/evidence record
+
+Fresh exact-head review returned **SCOPE PASS** for documentation attempt 1 at
+feature `74969c2eec6b064150c5fdb834208b9faf61f6ae`, tracker
+`6aaee31b5e599ef90fc570b4a425d6141cf6969f`, and main
+`8999def5ac8aea06a0082df2b4764878e0b13dc8`; both worktrees were clean and
+upstream-equal. The disposition is deferred optimization: #668 attempts 1, 2,
+and 3 failed with no inherited qualification. Attempt 3's status-zero raw
+captures and working decode provide no mapping or residual credit; limiter FX4
+applicability and any residual remain unresolved, not eliminated or qualified.
+Product source is unchanged. No capture, decode, repair, benchmark, timing,
+cycle, improvement, or budget claim was made, and delivered-optimization
+accounting does not increase. Any future capture or implementation requires a
+genuinely new weekly/performance issue with a measured budget or owner-approved
+justification. The reciprocal substitution remains a separate class-B owner
+ruling. Preserve #668 and all named softclip failed state.
