@@ -3,15 +3,17 @@
 GitHub: https://github.com/misofm/engine/issues/687
 
 Parent/delivery peer: #685. Audit parent: #560 CP1. Coordination: #559.
-Frozen source predecessor: `f3f70e546d5f96b372be828fb02ea7c643ddd788`.
+Frozen source predecessor: `f89f81dfe7613fb21b95a0a9124cdccd9351e23a`
+(product commit `276ffb6097a84088e3b5f4a16892a33bca9e26fb`).
 Current delivered AudioWorklet pin:
 `93108e9407f4cd343b644e9e821cfd3ca80c3667983a35db7f2e5c3228934531`,
 delivered through #680/PR #682 at main `8999def5`.
 
 ## Problem
 
-#685 received Astra LOW SOURCE/EVIDENCE PASS for its bounded topological-
-scheduling implementation. `graph-compiler` is in the shipped
+#685 received Astra LOW ATTEMPT-2 SOURCE PASS for its bounded topological-
+scheduling implementation after attempt 1 failed on a pre-existing stale graph
+fixture manifest. `graph-compiler` is in the shipped
 `host-web -> host-core -> graph-compiler` dependency closure, so source PASS does
 not establish that the currently pinned AudioWorklet artifact represents the
 accepted source. Lane B alone must decide applicability and own any later
@@ -20,6 +22,11 @@ qualification or pin change before #685 can deliver.
 This issue begins with one identity probe. It does not assume drift and does not
 reuse, repair, or rerun #644/#680 artifact evidence. All prior failed and retained
 state remains preserved.
+
+The earlier artifact brief inherited a concurrent, premature attempt-1 PASS and
+granted no execution. This corrected brief relies only on the controlling
+attempt-2 PASS at `f89f81df`, with product frozen at `276ffb60`. No stage-1 path
+exists and no builder has run.
 
 ## Stage 1: one repin-report identity probe
 
