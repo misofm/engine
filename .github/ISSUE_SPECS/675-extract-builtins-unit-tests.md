@@ -200,3 +200,17 @@ all eight gates once with direct command/stream/status records, and stop on any
 failure. Only this spec may change in Git; root owns commits and trackers. No
 credit, recursive ledger, source formatter, artifact, AudioWorklet, pin, timing,
 or performance work is authorized.
+
+## Attempt 2 result
+
+Luna HIGH qualification passed on 2026-09-09. All eight gates ran once in order
+with status **0**. Debug and release `builtins` tests each ran 9 tests with 9
+passed and 0 failed; clippy, format check, diff check, workspace policy, and
+final census passed. The explicit forbidden searches returned `rg` status 1
+(required no-match) for both `lib.rs` and `tests.rs`. Gate 8 confirmed the
+frozen source hashes, exact three-path branch census, clean Git status, and
+unchanged attempt-1 snapshot. Evidence is preserved at
+`/tmp/issue-builtins-tests-attempt2-evidence`; the transform proof hash is
+`ada45be34b30cb7ed538565f7f2ac8d567df082c70d8f2fdd911654d723c407f` and the
+gate-8 checker hash is
+`0a64a67654798fcbb8e4723cd9f156fc7d6f30e7fe2b14fb3ad6b61b8a46d74b`.
