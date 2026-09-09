@@ -472,3 +472,11 @@ Astra LOW returned attempt-2 **SCOPE FAIL** at exact clean feature `58367843`
 and tracker `647c6479` solely because the brief listed ten fresh paths but said
 all nine must be absent. All ten were absent. This correction synchronizes that
 count; no substantive scope changes and no execution occurred.
+
+Astra LOW returned attempt-2 **SCOPE PASS** at exact clean feature
+`e4a9624d8b49f623a1dcc187288eae59dcb2b8c6` and tracker
+`818f655e21e37ad48aa458f0d8145afd67eaa09a`; GitHub matches and all ten
+paths are absent including symlinks. Only Luna HIGH `/root/issue583_luna_impl`
+may preserve/reconcile attempt 1, use its baseline read-only, and execute the
+fresh candidate and remaining gates once. Stop on first failure. No baseline
+rebuild, promotion, post-pin work, PR, or merge is authorized.
