@@ -1574,9 +1574,10 @@ Attempt-2 fresh paths are:
 
 All seven must be absent including dangling symlinks before attempt 2. After
 fresh exact-hash DRAFT and SCOPE authorization, the designated executor shall
-recheck all attempt-1 hashes and repeat the same read-only preflight, isolated
-self-test, production verifier, initial/final census, and manifest protocol
-once at these fresh paths. This preparation performs none of those attempt-2
+recheck all attempt-1 hashes and run the same read-only preflight, production
+verifier, initial/final census, and manifest protocol once at these fresh paths.
+Carry the prior successful attempt-2 control evidence without repeating its
+self-test. This preparation performs none of those attempt-2 production
 executions. Stop on first failure. No retained gate, builder, package, browser,
 install, Cargo, npm, or Node workload may run; no predecessor or attempt-1 byte
 may change; no cleanup or promotion is authorized.
