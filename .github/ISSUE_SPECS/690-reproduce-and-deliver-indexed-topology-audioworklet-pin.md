@@ -39,15 +39,15 @@ After Astra LOW passes this exact pushed scope, one Luna HIGH executor owns thes
 fresh paths, which must first be absent including symlinks:
 
 ```text
-/tmp/issue689-artifact
-/tmp/issue689-target
-/tmp/issue689-evidence
+/tmp/issue690-artifact
+/tmp/issue690-target
+/tmp/issue690-evidence
 ```
 
 At exact clean successor head, run the ordinary builder once:
 
 ```text
-env -u MISO_ENGINE_WEB_AUDIOWORKLET_REPIN CARGO_TARGET_DIR=/tmp/issue689-target bash scripts/build-web-audioworklet.sh /tmp/issue689-artifact
+env -u MISO_ENGINE_WEB_AUDIOWORKLET_REPIN CARGO_TARGET_DIR=/tmp/issue690-target bash scripts/build-web-audioworklet.sh /tmp/issue690-artifact
 ```
 
 The executor must launch this as a persistent unified command session. If the
@@ -58,14 +58,19 @@ poll times out, output is quiet, or more than 60/120 seconds elapse. No shell
 nonzero, its session disappears without a durable exit result, branch identity
 changes, or an explicit gate mismatch occurs.
 
-Keep start time, final exit status, stdout, and stderr only under
-`/tmp/issue689-evidence`. On status zero, require exactly six ordinary output
-files and byte-for-byte equality with the authority above. Then run these gates
-once in order, using persistent sessions for any command that yields:
+Before dispatch, observe all three paths absent in memory, exclusively create
+the evidence directory, and durably record the preceding absence observation
+and successful exclusive creation. Every record must be non-overwriting,
+flushed, synchronized, read back, and covered by one terminal self-excluding
+manifest. Keep start time, final exit status, complete stdout, and complete
+stderr only under `/tmp/issue690-evidence`. On status zero, require exactly six
+ordinary output files and byte-for-byte equality with the authority above. Then
+run these gates once in order, using persistent sessions for any command that
+yields:
 
 ```text
-CARGO_TARGET_DIR=/tmp/issue689-target bash scripts/check-web-audioworklet.sh /tmp/issue689-artifact
-CARGO_TARGET_DIR=/tmp/issue689-target python3 -B scripts/check-browser-expected-resources.py --artifacts /tmp/issue689-artifact
+CARGO_TARGET_DIR=/tmp/issue690-target bash scripts/check-web-audioworklet.sh /tmp/issue690-artifact
+CARGO_TARGET_DIR=/tmp/issue690-target python3 -B scripts/check-browser-expected-resources.py --artifacts /tmp/issue690-artifact
 node hosts/host-web/qualification/generate-matrix.mjs --check
 git diff --check
 ```
