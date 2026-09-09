@@ -461,6 +461,12 @@ than pinned current main `df0b9b93`. No command ran. Root merged current
 `df0b9b93636de36a7143da15b83444f280b65e6b`. Fresh Astra LOW exact-head scope
 review remains mandatory and is the only possible source of execution authority.
 
+The first review of clarified feature `ce64571b` found the direct protocol
+coherent but returned **SCOPE FAIL** because tracker identity advanced from
+requested `e74b17f3` to clean pushed `e5cb4ff3` during inspection. Nothing ran
+and all five fresh paths remain absent. Freeze the final synchronized feature and
+tracker heads, then repeat only the exact-head scope review.
+
 The #680 worktree is the execution cwd and supplies the external authorization
 head. The frozen verifier separately requires
 `/home/bl/misofm/engine-cp8-mapping-evidence` as its read-only Git-object
@@ -1879,7 +1885,7 @@ worktrees. Failed predecessor worktrees remain until delivery evidence is secure
 ## Attempt and acceptance rules
 
 Attempt 1 is consumed by its exclusive partial preflight and receives no credit.
-Attempt 2 gets one reviewed launcher flow, one verifier self-test, one
+Attempt 2 gets one reviewed direct flow, one verifier self-test, one
 production invocation, and one manifest flow. Any failure stops it and requires
 Astra LOW adversarial review plus a pushed, synchronized amendment before final
 attempt 3. After three failed attempts, stop and rescope; never weaken a gate,
