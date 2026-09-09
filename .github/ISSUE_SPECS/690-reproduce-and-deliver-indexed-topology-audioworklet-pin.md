@@ -1,0 +1,89 @@
+# Reproduce and deliver the indexed-topology AudioWorklet pin
+
+## Authority and outcome
+
+Parent implementation: #685. Exhausted predecessors: #687 and #688.
+Coordination: #559 and #560. Audit: #349 CP1.
+
+The owner has explicitly superseded #688's no-successor boundary and directed
+the lane to rescope and continue through all audit fixes. This successor owns
+only the missing ordinary post-pin reproduction, final review, and delivery of
+the already source-qualified indexed-topology change.
+
+Use clean pushed branch `codex/adopt-indexed-topology-artifact` at
+`f4703fe6330ca9453ec31540ab25ebb26314dbda`. It contains product commit
+`276ffb6097a84088e3b5f4a16892a33bca9e26fb`, exact three-file pin checkpoint
+`2cc6fff5cc21bcca96ebeb106fa3827b47f043fd`, and the preserved decision
+records. The pin names candidate digest
+`31c882af32959c0164ae069b5ba63a5d5e7890b024d07c04bb75afc06e66cd4b`
+and qualification results name the full product commit.
+
+The qualified six-file byte authority remains
+`/tmp/issue687-stage2-artifact`:
+
+```text
+40f6fe2e23e1b47500011c14871750a75922ab194136add8b387a4b40eb56919 miso-engine-v1-abi-layout.json
+445254e7c6ddf3330bdf20cafa8cacec4d0e2489805f72a833859db52bc038cf miso-engine-v1-audio-worklet-host.d.ts
+21c8947d8aad2d1d9a23e553c2c7b983dbd5a622aabfbab9a41c622d1a50229a miso-engine-v1-audio-worklet-host.js
+225bc06043ed6e2c62a38d63f1c2015b40480d673e3a53109c938eba481556cb miso-engine-v1-audio-worklet.js
+31c882af32959c0164ae069b5ba63a5d5e7890b024d07c04bb75afc06e66cd4b miso-engine-v1-audio-worklet.simd128.wasm
+6eac2cb3e30931b6c01b10c63af4eedd2d59337274565a129c7a3f328a09938d miso-engine-v1-parameter-metadata.json
+```
+
+Do not mutate any predecessor scratch path or record. They supply byte authority
+and candid history only; they receive no retroactive attempt credit.
+
+## Attempt 1 scope
+
+After Astra LOW passes this exact pushed scope, one Luna HIGH executor owns these
+fresh paths, which must first be absent including symlinks:
+
+```text
+/tmp/issue689-artifact
+/tmp/issue689-target
+/tmp/issue689-evidence
+```
+
+At exact clean successor head, run the ordinary builder once:
+
+```text
+env -u MISO_ENGINE_WEB_AUDIOWORKLET_REPIN CARGO_TARGET_DIR=/tmp/issue689-target bash scripts/build-web-audioworklet.sh /tmp/issue689-artifact
+```
+
+The executor must launch this as a persistent unified command session. If the
+initial call yields a session ID, poll that same handle with `write_stdin` until
+it reports an exit code. Do not interrupt, restart, or declare failure because a
+poll times out, output is quiet, or more than 60/120 seconds elapse. No shell
+`timeout` is allowed. Failure means the persistent command itself exits
+nonzero, its session disappears without a durable exit result, branch identity
+changes, or an explicit gate mismatch occurs.
+
+Keep start time, final exit status, stdout, and stderr only under
+`/tmp/issue689-evidence`. On status zero, require exactly six ordinary output
+files and byte-for-byte equality with the authority above. Then run these gates
+once in order, using persistent sessions for any command that yields:
+
+```text
+CARGO_TARGET_DIR=/tmp/issue689-target bash scripts/check-web-audioworklet.sh /tmp/issue689-artifact
+CARGO_TARGET_DIR=/tmp/issue689-target python3 -B scripts/check-browser-expected-resources.py --artifacts /tmp/issue689-artifact
+node hosts/host-web/qualification/generate-matrix.mjs --check
+git diff --check
+```
+
+The worktree must remain clean and source-local `target/` absent. Persist
+concise statuses and the final six-file census under the evidence path. Commit
+no binary, generated SDK/Wasm artifact, compiler stream, target, browser
+dependency, or evidence capture. No `.ll` or `.s` capture is requested or
+permitted.
+
+Astra LOW adversarially reviews the exact branch, persistent-session result,
+six-file byte equality, ordered gates, worktree cleanliness, and evidence
+limitations. PASS authorizes a PR from the successor branch. The PR must receive
+required `qualification`; after merge, verify post-main `qualification`,
+synchronize and close #685 and this issue, update #349/#559/#560 accounting, and
+remove only clean delivered worktrees. Preserve failed predecessor worktrees and
+scratch evidence.
+
+If three attempts fail, follow AGENTS.md: preserve evidence, rebrief the bounded
+failure cause, and restart the workflow under the owner's instruction to finish
+the audit. Do not weaken a gate or count an unmerged checkpoint as delivery.
