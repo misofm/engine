@@ -16,7 +16,7 @@ let positions: BTreeMap<&GraphNodeId, usize> = schedule
     .collect();
 ```
 
-Sol HIGH coordinates. Astra XHIGH owns scoping and every verification assignment. Luna HIGH owns this non-delicate mechanical implementation. Any change to graph semantics, scheduling, PDC, coloring, aliasing, validation, ownership transfer, or audio/DSP stops and requires rescope; delicate audio/DSP implementation belongs to Astra HIGH.
+Sol HIGH coordinates. Astra XHIGH scopes and verifies. Luna HIGH performs this non-delicate mechanical implementation. Astra HIGH performs delicate audio/DSP implementation. Any change to graph semantics, scheduling, PDC, coloring, aliasing, validation, ownership transfer, or audio/DSP stops and requires rescope.
 
 The dependency order is satisfied and frozen: #543/#555 merge `b20b27d5` precedes #558/#552 merge `b95c9b7b`, which precedes #542/#567 delivery `3ac24f7f`; all are ancestors of current main and #552/#558/#542 are closed.
 
