@@ -2105,3 +2105,39 @@ verification; Astra LOW EVIDENCE PASS; separately reviewed promotion; ordinary
 post-pin six-file byte identity; required PR and post-main qualification success;
 GitHub synchronization and closure; and zero generated/compiler evidence payloads
 in Git.
+
+## Final disposition
+
+The retained-candidate qualification portion passed, but #680 did not deliver
+the product. After Astra LOW's exact-head promotion SCOPE PASS, two Luna contexts
+acted on the same seven fresh post-pin paths. The active Luna wrapper launched
+the exact no-bypass build once and produced all six expected bytes. A stale
+already-issued Luna wrapper reached its noclobber redirect while that build was
+running; the shell refused to overwrite stdout, so it did not launch a second
+build, but it still overwrote the shared status with `1` and appended
+`finish_utc` plus `status=1` to the shared metadata. The active wrapper later
+overwrote status with `0` and appended a second finish/status pair. The compare
+file was never created.
+
+Astra LOW returned **PROMOTION EVIDENCE FAIL** because the lifecycle captures
+lost exclusivity and have mixed provenance. Preserve the entire partial state,
+including metadata SHA-256
+`57ad3e24234ff60e9401764e2673daabe45f8a14800534192fbe7411f35e802e`,
+build-stderr SHA-256
+`fae59819c58b289a9aba651e6a1b35dd3eefd64ea6eca0e42e9bc34659ae9a5e`,
+the six generated files, external target, both immutable executor transcripts,
+and the absent compare result. Do not repair, append, compare, rerun, or delete
+any #680 path.
+
+The exact three pin/lineage edits are preserved in clean pushed commit
+`1a46ad393099014c04c36e7d3a5621a0685c1c9c`; their full-file hashes match the
+qualified overlay, but that commit is **not evidence-approved delivery** and may
+not be merged under #680. Attempt 3's manifest EVIDENCE PASS remains valid; the
+promotion failure does not revoke the retained candidate qualification.
+
+#680 is hard-stopped and closes without product delivery. Any remaining delivery
+must be a new numbered stateless successor from current main, limited to adopting
+the already preserved three-file commit, producing fresh exclusive post-pin
+evidence under new paths, and guarded delivery. It must not rerun verifier,
+browser, SDK, or retained qualification, repair #680 evidence, recreate product
+edits, or call the recovery a continuation of #680's consumed execution.
