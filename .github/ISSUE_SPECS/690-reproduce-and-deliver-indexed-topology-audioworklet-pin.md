@@ -311,10 +311,33 @@ no command, path, gate, or attempt state.
 
 ## Owner delivery reconciliation
 
-The earlier #690 hard-stop snapshot was incomplete. Later preserved records
-contain the builder and four ordered gates with actual status 0, and all six
-artifact files are byte-identical to `/tmp/issue687-stage2-artifact`, including
-Wasm `31c882af32959c0164ae069b5ba63a5d5e7890b024d07c04bb75afc06e66cd4b`.
-The terminal manifest and continuous-exclusivity proof remain absent, so the
-procedural limitations are retained. Owner-approved #692 owns delivery
-reconciliation without a rerun.
+The earlier #690 hard-stop snapshot was incomplete. The five preserved
+builder/gate status files contain the phrase `recorded status zero`; that is a
+recorded field, never an actual command exit or success result. The preserved
+intervals are builder 11:33:18–11:34:53 UTC, gate 1 11:35:02–11:36:07, gate 2
+11:36:14–11:37:08, gate 3 11:37:17–11:37:31, and gate 4 11:37:38–11:38:15.
+
+Hard-stop commit `ceafeda5` was recorded at 11:35:24 and GitHub close at
+11:35:54. Gate 1 therefore finished, and gates 2–4 started and finished, after
+the hard stop and closure. Later records omit the cwd and head for those gates,
+and the branch advanced during gate 1. No manifest, persistent session IDs or
+tool receipts, or attributable invocation proof exists. Preserve these
+limitations and every evidence path unchanged.
+
+The six current attempt-3 artifact files are byte-equal to the authority at
+`/tmp/issue687-stage2-artifact`, with the authority hashes listed above in this
+spec. This is current identity only. The source files equal product
+`276ffb6097a84088e3b5f4a16892a33bca9e26fb`; the three pin/promotion files
+equal `2cc6fff5cc21bcca96ebeb106fa3827b47f043fd`.
+
+#688's independently verified limited disposition is
+`fe263bf681dca977b924c63683e403ee2d0f48f3d960d902a3e5aa429379dfc5`, with
+terminal manifest `f5f42e259aaf6580977321436f6e5f6a796d83b83c12357d792e61003df7b1b9`;
+all 24 referenced records were verified. This supports technical applicability
+with provenance limits and does not declare the predecessor protocol satisfied.
+
+Attempts 1, 2, and 3 remain failed, consumed, and hard-stopped with no
+retroactive credit. Owner-directed #692 now owns documentation/evidence
+reconciliation and delivery with NO rerun. It authorizes no product or pin
+change, terminal-manifest fabrication, timing, allocation, performance, or
+sound-quality claim.
