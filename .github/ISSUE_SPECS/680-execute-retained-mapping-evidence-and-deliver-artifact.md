@@ -87,6 +87,14 @@ argv, cwd, start/finish/status, complete stdout/stderr, heads/upstreams/merge-
 base, tools/environment, the nine-root initial census, all predecessor and
 attempt hashes, verifier identity, and preserved target identity.
 
+The #680 worktree is the execution cwd and supplies the external authorization
+head. The frozen verifier separately requires
+`/home/bl/misofm/engine-cp8-mapping-evidence` as its read-only Git-object
+authority because its reviewed bytes pin that exact absolute path. Require that
+preserved #679 worktree available, clean, upstream-equal at hard-stop
+`de542050094f20150f7ec4f106e32f4074798626`, and free of a competing writer.
+It grants no #679 retry and receives no write.
+
 The exact attempt-1 verifier is the ordinary mode-0444 file
 `/tmp/issue680-verifier-d3f0803c1a35fe6bfeb0937c944476edb23c9c223c9404bb3d05d0d18618c27b.py`,
 72,262 bytes, SHA-256
@@ -105,7 +113,7 @@ Require status 0, terminal PASS, unchanged verifier identity, and complete
 control cleanup. Then run the production verifier exactly once:
 
 ```text
-python3 -B /tmp/issue680-verifier-d3f0803c1a35fe6bfeb0937c944476edb23c9c223c9404bb3d05d0d18618c27b.py /home/bl/misofm/engine-cp8-mapping-final-delivery 8708c9b998a484d49ccb17a803e79540ca13fcd6 /tmp/issue672-attempt2-candidate-pristine /tmp/issue678-attempt2-candidate-source /tmp/issue672-attempt3-candidate-artifact /tmp/issue678-attempt3-evidence
+python3 -B /tmp/issue680-verifier-d3f0803c1a35fe6bfeb0937c944476edb23c9c223c9404bb3d05d0d18618c27b.py /home/bl/misofm/engine-cp8-mapping-evidence 8708c9b998a484d49ccb17a803e79540ca13fcd6 /tmp/issue672-attempt2-candidate-pristine /tmp/issue678-attempt2-candidate-source /tmp/issue672-attempt3-candidate-artifact /tmp/issue678-attempt3-evidence
 ```
 
 Capture command, cwd, timestamps, numeric status, and complete stdout/stderr in
