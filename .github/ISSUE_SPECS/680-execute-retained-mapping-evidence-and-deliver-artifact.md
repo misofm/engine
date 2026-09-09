@@ -332,6 +332,13 @@ execution will use
 `python3 -B /tmp/issue680-attempt2-launcher-revision1.py --feature-head <reviewed-full-feature-sha> --tracker-head <reviewed-full-tracker-sha> --executor-id /root/issue583_luna_impl`.
 No correction or execution command is authorized beyond inert file creation.
 
+The bounded correction completed without execution. Root sealed the ordinary
+file mode `0444`: 15,089 bytes, SHA-256
+`cdc44e1c02f27b6cf820c81f09821f0d6d29554000fcea477cb083c64068760d`.
+Its diff against the rejected launcher contains only the five authorized fixes.
+All attempt-2/control paths remain absent. Astra LOW must review these literal
+bytes before any exact-head scope or invocation.
+
 Fresh production paths are:
 
 - `/tmp/issue680-attempt2-preflight.txt`;
