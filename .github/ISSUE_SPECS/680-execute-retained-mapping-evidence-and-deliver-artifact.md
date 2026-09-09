@@ -93,8 +93,8 @@ Astra LOW returned **ATTEMPT 1 FAIL / consumed**. The exclusive preflight path
 was created and the attempted wrapper ran, so it cannot be relabelled as a
 no-attempt stop or continued through an `attempt1b` path. Preserve the partial
 record byte-for-byte. It receives no qualification credit. Luna XHIGH
-`/root/issue679_luna_verifier` is stopped and has no further #680 authority. Two
-attempts remain.
+`/root/issue679_luna_verifier` is stopped from attempt execution and has no
+production authority. Two attempts remain.
 
 ## Attempt 2 preparation and execution
 
@@ -199,12 +199,16 @@ after stdout, which can deadlock. The explicit executor check, relevant-process
 filter, streamed target digest, final-line PASS check, and most traversal checks
 are retained design credit only, not execution credit.
 
-Only Luna HIGH `/root/issue583_luna_impl` may prepare one bounded correction at
-fresh external `/tmp/issue680-attempt2-runner-revision2.py`. Preparation may read
-only this spec and the two sealed runner drafts. It must not import, compile, or
-invoke any runner or verifier; inspect retained evidence; create an attempt-2 or
-control path; or edit Git. Revision 2 must satisfy every current runner
-requirement and additionally:
+The earlier inert preparation lease to Luna HIGH `/root/issue583_luna_impl` is
+superseded before it created a revision-2 path or process. Luna XHIGH
+`/root/issue679_luna_verifier` alone may prepare one bounded correction at fresh
+external `/tmp/issue680-attempt2-runner-revision2.py`. Preparation may read only
+this spec and the two sealed runner drafts. It must not import, compile, or invoke
+any runner or verifier; inspect retained evidence; create an attempt-2 or control
+path; or edit Git. Luna HIGH `/root/issue583_luna_impl` remains the sole eventual
+attempt-2 executor after later reviews and receives no current preparation or
+execution authority. Revision 2 must satisfy every current runner requirement
+and additionally:
 
 - remove every embedded feature/tracker authorization and require both external
   full lowercase SHA arguments, plus the exact explicit executor claim;
