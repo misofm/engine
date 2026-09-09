@@ -446,6 +446,16 @@ does not authorize promotion. Product/build/SDK/package/browser/resource/PCM/
 Cargo/npm/Node gates remain forbidden in this phase. Luna later implements any
 accepted three-file promotion, but Astra LOW owns this verifier review.
 
+Astra LOW returned **SCOPE FAIL** at feature
+`6ab3295b6e1b3385358a8a4f50206aec731cd5a2` and tracker
+`59d483c6a6288e57ebf897bea5076bd5818a26ec`. Every inspected prerequisite passed
+except the tracker merge base, which was older delivered main `7d16d9c9` rather
+than pinned current main `df0b9b93`. No command ran. Root merged current
+`origin/main` into the clean tracker without conflict and pushed reconciliation
+`345fce5f3a2c0c3789b1ff9412f13a890c49ae40`; its merge base is now exactly
+`df0b9b93636de36a7143da15b83444f280b65e6b`. Fresh Astra LOW exact-head scope
+review remains mandatory and is the only possible source of execution authority.
+
 Fresh production paths are:
 
 - `/tmp/issue680-attempt2-preflight.txt`;
