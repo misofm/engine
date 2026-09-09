@@ -79,6 +79,34 @@ current delivered pin expected by the probe is
 Do not infer qualification, source equivalence, or promotion from a matching
 probe. Stop for Astra XHIGH probe evidence review before Phase 2.
 
+### Phase 1 evidence record
+
+Astra PROBE EVIDENCE PASS reviewed the Phase 1 probe at clean head
+`a0099d2b97995b7978c6ff7614cef46548595f26`. The probe ran once from that head,
+finished before the later docs-only clean/pushed head
+`6533ac339884c84d9001d86822c7b18aa49c0a0b`, exited zero, produced an empty
+output directory, and observed
+`6745de399c56e322303e2da55d69a5cbd538e075f0fd480c6620b1896d566645`. This
+record authorizes the bounded Phase 2 overlay only; it does not qualify an
+ordinary artifact or authorize a performance or sound-quality claim.
+
+The original receipts prove two actual `write_stdin` polls; the saved `polls=3`
+label is imprecise because it counts the initial launch result plus those two
+polls. The
+six-path absence/creation record was written retrospectively, with independent
+Astra scope authority for the pre-setup absence observation. The probe's
+actual environment authority is the captured `pre-probe-environment` record
+plus the three explicit assignments in the actual command; the later
+`probe-environment` file is reconstructed and is not authority. The post-probe
+documentation-only head drift is recorded in the transcript: the probe stayed
+at `a0099d2b97995b7978c6ff7614cef46548595f26`, while the later docs checkpoint
+advanced to `6533ac339884c84d9001d86822c7b18aa49c0a0b`. Complete transcript and
+receipt are preserved outside Git under
+`/tmp/cp1-resource-input-counts-a1-evidence/`; its finite self-excluding
+manifest has SHA-256
+`e3bca0c919a8c2222beab5463ab998d34f96f909123dd685570e685436bdadae`. No failed attempt was
+consumed.
+
 ## Phase 2: provisional lineage and ordinary qualification
 
 After Astra accepts the probe record, make only the bounded provisional overlay.
