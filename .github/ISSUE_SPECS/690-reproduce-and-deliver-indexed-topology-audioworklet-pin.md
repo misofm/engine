@@ -233,7 +233,7 @@ including dangling symlinks:
 /tmp/issue690-attempt3-evidence
 ```
 
-One explicitly named Luna HIGH executor, `/root/issue690_luna_attempt3`, owns
+One explicitly named Luna HIGH executor, `/root/issue583_luna_impl`, owns
 execution. Fresh Astra LOW SCOPE PASS is required against the exact clean pushed
 rebrief, matching GitHub/tracker bodies, current main and branch identities,
 both preserved failed-attempt namespaces, the six authority hashes, and absence
@@ -276,3 +276,8 @@ read-back records and one terminal self-excluding manifest for Astra LOW review.
 Do not mutate any predecessor path, tracked file, compiler capture, generated
 predecessor artifact, or pin. No timing, improvement, or budget claim is in
 scope. A third failure hard-stops this issue under the three-attempt rule.
+
+The proposed fresh canonical task `/root/issue690_luna_attempt3` was unavailable
+at dispatch, which returned before preflight or path creation. The available
+preserved Luna HIGH executor above is therefore bound to final execution; this
+identity correction changes no command, path, gate, or attempt state.
