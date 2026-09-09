@@ -1739,6 +1739,83 @@ mod tests {
         }
     }
 
+    #[test]
+    fn indexed_topo_explicit_controls_preserve_contract() {
+        let nodes = vec![
+            graph_node("z", 0, TailSamples::Finite(0)),
+            graph_node("a", 0, TailSamples::Finite(0)),
+            graph_node("m", 0, TailSamples::Finite(0)),
+            graph_node("b", 0, TailSamples::Finite(0)),
+            graph_node("q", 0, TailSamples::Finite(0)),
+        ];
+        let edges = vec![
+            edge("a-z-1", "a", "z"),
+            edge("m-z", "m", "z"),
+            edge("a-z-2", "a", "z"),
+            edge("b-m", "b", "m"),
+        ];
+        let expected_names: &[(&[&str], u64)] = &[
+            (&["submix:a", "submix:b", "submix:q"], 0),
+            (&["submix:m"], 1),
+            (&["submix:z"], 2),
+        ];
+        let oracle_accepts = |candidate: &[DependencyLevel]| {
+            candidate.len() == expected_names.len()
+                && candidate
+                    .iter()
+                    .zip(expected_names)
+                    .all(|(level, (names, number))| {
+                        level.level == *number
+                            && level.nodes.iter().map(node_text).collect::<Vec<_>>()
+                                == names
+                                    .iter()
+                                    .map(|name| (*name).to_owned())
+                                    .collect::<Vec<_>>()
+                    })
+        };
+
+        let actual = topo(&nodes, &edges).expect("explicit DAG is acyclic");
+        assert!(
+            oracle_accepts(&actual),
+            "independent level oracle rejected topo output"
+        );
+        let mut wrong_result = actual.clone();
+        wrong_result[2].level = 1;
+        assert!(
+            !oracle_accepts(&wrong_result),
+            "independent level oracle accepted an incorrect level"
+        );
+
+        let mut reversed_nodes = nodes.clone();
+        reversed_nodes.reverse();
+        let mut reversed_edges = edges.clone();
+        reversed_edges.reverse();
+        assert_eq!(topo(&reversed_nodes, &reversed_edges), Some(actual.clone()));
+        assert_eq!(topo(&[], &[]), Some(Vec::new()));
+
+        let cycle = [edge("cycle-a-b", "a", "b"), edge("cycle-b-a", "b", "a")];
+        assert_eq!(topo(&nodes, &cycle), None);
+        assert_eq!(topo(&nodes, &[edge("self-loop", "a", "a")]), None);
+        assert_eq!(
+            topo(&nodes, &[edge("dangling-source", "missing", "a")]),
+            None
+        );
+        assert_eq!(
+            topo(&nodes, &[edge("dangling-destination", "a", "missing")]),
+            None
+        );
+        assert_eq!(
+            topo(
+                &[
+                    graph_node("a", 0, TailSamples::Finite(0)),
+                    graph_node("a", 0, TailSamples::Finite(0)),
+                ],
+                &[],
+            ),
+            None
+        );
+    }
+
     fn caps(maximum_finite_tail_samples: u64) -> GraphCompileCaps {
         GraphCompileCaps {
             maximum_nodes: 100,
