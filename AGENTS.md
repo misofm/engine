@@ -69,8 +69,8 @@ Create local Git checkpoint commits frequently at coherent, compiling or otherwi
 1. **Sol briefs** the issue and approves its scope, decision record, and objective gates.
 2. **Terra implements attempt 1** and attaches required evidence.
 3. **Sol adversarially reviews** the implementation against the issue, architecture, realtime rules, portability, and evidence.
-4. If needed, **Sol performs up to two implementation/revision attempts**, each re-reviewed adversarially by Sol.
-5. After three failed attempts total, stop.  Do not weaken gates to declare success.  Rescope/rebrief the issue, then restart the same workflow.
+4. If needed, **Sol performs up to four additional implementation/revision attempts**, for a maximum of five total attempts. Each attempt receives one adversarial verdict.
+5. If attempt five fails, stop. A smaller limit explicitly set by the issue brief remains binding. Preserve the evidence; do not weaken gates to declare success. Rescope/rebrief before starting a newly bounded workflow.
 
 Research delegation should use Terra agents where possible to preserve Sol review capacity.  The workflow records who supplied evidence but never substitutes authority for testable gates.
 
@@ -159,11 +159,11 @@ the work before implementation when any of these are true:
   boundary; or
 - a benchmark-runner defect remains after one bounded correction.
 
-The three-attempt rule is a hard delivery stop, not permission for an issue to consume unlimited
+The five-attempt rule is a hard delivery stop, not permission for an issue to consume unlimited
 sub-rounds.  Each attempt gets one coherent implementation pass and one adversarial verdict.
 Progress-only agent turns do not create extra attempts, but they must be consolidated or reassigned
-when they stop producing commit-ready checkpoints.  After attempt three fails, preserve evidence,
-split or rescope once, and move to the newly bounded issue; never perform a disguised fourth retry.
+when they stop producing commit-ready checkpoints.  After attempt five fails, preserve evidence,
+split or rescope once, and move to the newly bounded issue; never perform a disguised sixth retry.
 
 Benchmarks are descriptive during feature development.  Freeze the workload and validator before
 timing, run exactly one invocation with one warmup and two measured rounds, and do not tune or
