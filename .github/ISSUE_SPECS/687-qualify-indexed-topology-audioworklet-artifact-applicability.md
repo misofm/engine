@@ -195,3 +195,104 @@ limitations for a separately amended stage 2 candidate qualification. It cannot
 make stage 1 pass, transfer prior artifact qualification, or authorize a pin
 edit. A missing/inconsistent record, non-doc source drift, unresolvable head
 identity, or evidence of another invocation closes #687 without candidate use.
+
+## Attempt 2 read-only attribution verdict — PASS (limited)
+
+Astra LOW returned **ATTRIBUTION PASS** at exact clean pushed #687 brief
+`266317b6e2c46d7ab9100895c561c6fc234b1d02`, tracker
+`e9f130a00dc7f54fb110fbfb0c34cc381170a034`, and unchanged main. The
+`c07dee0e..5153ce43` merge completed at 09:46:13 UTC before the recorded
+09:46:45–09:47:02 invocation. Both invocation identity records name
+`5153ce43`; the later drift record's `c07dee0e` invocation claim is wrong. The
+merge changed only #685's spec.
+
+All non-spec tracked inputs, including product source, builder, manifests,
+`Cargo.lock`, and the delivered pin, are byte-identical across the two heads,
+source-qualified `c9ccf6ac`, and product `276ffb60`. All 17 manifest-covered
+records match their current hashes, sizes, and modes. The records support one
+observed status-0 invocation, one valid 65-byte digest line, and empty output.
+They do not prove historical immutability, sole-executor provenance, or the exact
+total invocation count. Stage 1 remains FAIL and consumed.
+
+The limited observation establishes candidate digest
+`31c882af32959c0164ae069b5ba63a5d5e7890b024d07c04bb75afc06e66cd4b`
+for a separately reviewed hard-final candidate qualification only. It grants no
+artifact, pin, PR, merge, delivery, or performance credit.
+
+## Hard-final stage 2: scratch candidate qualification
+
+Stage 2 is attempt 3 and the last attempt in #687. Freeze source
+`c9ccf6acf4030a0b567b5c18cbb0f52126aa16f5`, product
+`276ffb6097a84088e3b5f4a16892a33bca9e26fb`, candidate digest
+`31c882af32959c0164ae069b5ba63a5d5e7890b024d07c04bb75afc06e66cd4b`,
+and current qualified six-file authority
+`/tmp/issue672-attempt3-candidate-artifact`. Preserve the authority read-only and
+require its exact hashes:
+
+```text
+40f6fe2e23e1b47500011c14871750a75922ab194136add8b387a4b40eb56919 miso-engine-v1-abi-layout.json
+445254e7c6ddf3330bdf20cafa8cacec4d0e2489805f72a833859db52bc038cf miso-engine-v1-audio-worklet-host.d.ts
+21c8947d8aad2d1d9a23e553c2c7b983dbd5a622aabfbab9a41c622d1a50229a miso-engine-v1-audio-worklet-host.js
+225bc06043ed6e2c62a38d63f1c2015b40480d673e3a53109c938eba481556cb miso-engine-v1-audio-worklet.js
+93108e9407f4cd343b644e9e821cfd3ca80c3667983a35db7f2e5c3228934531 miso-engine-v1-audio-worklet.simd128.wasm
+6eac2cb3e30931b6c01b10c63af4eedd2d59337274565a129c7a3f328a09938d miso-engine-v1-parameter-metadata.json
+```
+
+One designated Luna HIGH or XHIGH executor may act only after Astra LOW passes
+the exact pushed amendment. Require these fresh paths absent, including dangling
+symlinks, and stop on any mismatch or concurrent Cargo/rustc/builder/browser
+qualification process:
+
+```text
+/tmp/issue687-stage2-source
+/tmp/issue687-stage2-artifact
+/tmp/issue687-stage2-evidence
+/tmp/issue687-stage2-target
+/tmp/issue687-stage2-hermetic-target
+```
+
+Observe all preconditions in memory, exclusively create the evidence directory,
+durably persist/read back/hash a pre-creation record, then create one detached
+source worktree at exact `c9ccf6ac`. Require exact HEAD and clean porcelain.
+Within that scratch worktree only:
+
+1. replace the artifact pin with the candidate digest plus LF;
+2. replace only `candidateCommit` in
+   `hosts/host-web/qualification/results.json` with full product `276ffb60` and
+   `wasmSha256` with the candidate digest; and
+3. run `node hosts/host-web/qualification/generate-matrix.mjs` once, requiring
+   the tracked overlay to contain exactly the pin, those two JSON fields, and
+   the matching generated matrix lineage.
+
+Create the artifact directory once, leave both target paths absent for their
+commands to create, and run these commands once in order. Persist exact argv,
+environment, cwd/head, start/finish, complete streams, numeric status, source
+porcelain, and output census after each; stop permanently at the first failure:
+
+```text
+CARGO_TARGET_DIR=/tmp/issue687-stage2-target bash scripts/build-web-audioworklet.sh /tmp/issue687-stage2-artifact
+bash scripts/check-web-audioworklet.sh /tmp/issue687-stage2-artifact
+python3 -B scripts/check-browser-expected-resources.py --artifacts /tmp/issue687-stage2-artifact
+CARGO_TARGET_DIR=/tmp/issue687-stage2-hermetic-target bash scripts/test-web-audioworklet.sh
+npm --prefix sdk ci --ignore-scripts
+bash scripts/sdk-package.sh check /tmp/issue687-stage2-artifact
+npm --prefix hosts/host-web/qualification ci --ignore-scripts
+npm --prefix hosts/host-web/qualification run qualify -- --artifacts /tmp/issue687-stage2-artifact --browser all --check-matrix --self-test-mutations
+node hosts/host-web/qualification/generate-matrix.mjs --check
+git diff --check
+```
+
+Immediately after the builder, require exactly the six canonical ordinary files.
+The Wasm must have the candidate digest; the other five must be byte-identical to
+the frozen authority and retain the hashes above. The static, expected-resource/
+native-witness, hermetic, SDK-package, all-browser, matrix, and mutation gates
+must pass without retry. Require the final tracked diff to remain exactly the
+three scratch lineage overlays and the source-local `target/` to remain absent.
+
+Every new record is non-overwriting, synchronized, read back, and covered by one
+terminal self-excluding manifest. Preserve scratch source, artifact, targets,
+and records through Astra review. Commit no scratch overlay, artifact, target,
+stream, node_modules, binary, or generated candidate. A PASS qualifies the
+candidate bytes only; repository promotion and a post-pin ordinary rebuild need
+a separately pushed scope amendment and Astra PASS. Failure hard-stops #687
+without retry or a disguised fourth attempt.
