@@ -87,3 +87,13 @@ Any unexpected non-Wasm, resource, PCM, SDK, matrix, browser, or mutation drift 
 Phases 1 and 2 form one attempt; a review pause consumes no attempt. Any execution or evidence failure stops immediately. A later attempt requires fresh numbered roots and fresh Astra XHIGH scope. Three failed attempts hard-stop without weaker gates or a disguised fourth attempt. A status file containing `0` is not authenticated execution evidence.
 
 After final Astra XHIGH evidence PASS, deliver one PR with #698, required aggregate PR qualification, guarded live-head/base merge, post-main aggregate qualification, GitHub body synchronization and closure, #559/#560/#349 accounting, and eligible clean delivered-worktree cleanup. No artifact, pin, source, performance, allocation, timing, or sound-quality claim is delivered before those remote steps.
+
+## Phase 1 probe evidence and provisional overlay
+
+Astra XHIGH returned **PROBE EVIDENCE PASS** at exact clean pushed head `82a40f7193832acdc8fe017f5b7c7dcf1c6d6c7b`. Luna HIGH launched the exact probe once in persistent session `31099`; three actual `write_stdin` polls ended with authenticated exit status 0. Stdout was exactly `3a9de0b07c8242922ff773114ce44306b8bae7c3444b3785cbbe8bd18028cc16` plus LF. The probe-output directory remained empty, the named artifact and Cargo targets remained absent, and tracked bytes stayed unchanged.
+
+All 27 Phase 1 evidence files under `/tmp/cp1-buffer-position-artifact-a1-evidence` match the finite self-excluding manifest with SHA-256 `221da545ff700bcfce0269b7a829b5d2b5c7e5177ba01654a022704060ca0309`. Original receipt authority is `/home/bl/.codex1/sessions/2026/09/09/rollout-2026-09-09T15-00-29-01a086af-476c-72e3-b3e4-91cc52346125.jsonl`.
+
+The review preserves three limits. The saved preflight receipt is a summary, and the original observation mislabeled spec-only `HEAD~1` as the product checkpoint; Git independently establishes product `13ce1c1f`. Preflight/postflight printed command output rather than full numeric tool results, and the postflight wrapper did not propagate every assertion; Astra independently verified the required observable facts while the probe's zero exit is separately authenticated. No continuous write monitoring is claimed. Phase 1 proves digest identity only.
+
+The qualification-pending overlay is checkpointed at `173b701e92f9491af7e9937f738be2ff0a72a418`. It changes only the provisional pin, the two allowed results fields, and regenerated matrix lineage: product candidate `13ce1c1f841d3369b59a3f4c0f2b0a127b3a4166`, Wasm digest `3a9de0b07c8242922ff773114ce44306b8bae7c3444b3785cbbe8bd18028cc16`. No Phase 2 command has run. Fresh Astra XHIGH exact-head scope PASS remains required before Phase 2 execution.
