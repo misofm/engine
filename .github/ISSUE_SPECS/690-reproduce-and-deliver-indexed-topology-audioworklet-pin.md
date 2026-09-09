@@ -176,3 +176,14 @@ fresh path was created and no command ran, so attempt 2 remains unconsumed. This
 amendment supersedes that authorization. A fresh Astra LOW SCOPE PASS against
 the exact clean pushed Luna-owned brief is required and must be recorded and
 pushed before any attempt-2 path is created.
+
+## Attempt-2 Luna-owned scope review — PASS
+
+Astra LOW returned **SCOPE PASS** at exact clean pushed issue `23fbe24e`,
+tracker `c325ae77`, and unchanged main. GitHub parity held; all three fresh paths
+were absent, no relevant process was active, and predecessor/authority hashes
+matched. One root-named Luna HIGH executor may create the evidence and empty
+artifact directories, leave target creation to Cargo, and run the five frozen
+commands through its own directly polled persistent handles. No transfer,
+monitor, timeout, interruption, retry, tracked output, or root execution is
+authorized. Final Astra LOW evidence review remains required.
