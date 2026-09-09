@@ -116,3 +116,22 @@ qualification, a fresh guarded merge review, ordered-parent merge verification,
 post-main qualification, GitHub/tracker synchronization, and removal only of the
 clean delivered worktree. A failed or stopped worktree and its evidence remain
 preserved.
+
+## Attempt 1 authorization
+
+Astra LOW returned **SCOPE PASS** at exact clean pushed feature
+`60e45a40c967ea870211fc63dd2412ef74b8229c`, current main
+`7d16d9c9752c9ac2d31e69008fe075df86ce3c26`, and synchronized tracker
+`536385715043376b440b54b59d9aff9bb3440465`. GitHub #671 matches the
+numbered spec; #670/#671 are the two path-disjoint active slots. The marker and
+EOF wrapper are unique, all 13 tests admit the exact deindent, and no prohibited
+path/include/file/line construct exists.
+
+Sole Luna HIGH executor `issue671_luna_impl` may persist the required clean-source
+preflight, original file, names, and fresh-path observations; perform only the
+exact two-source-path module extraction; append this spec; and execute the eight
+frozen gates once in order with complete streams, statuses, and a verified self-
+excluding manifest. Stop on the first failure. Mechanical formatting may not
+relax the byte-transform gate. Root alone edits trackers and commits. No source
+behavior, API, arithmetic, allocation, scheduling, artifact, AudioWorklet, pin,
+or retained-state cleanup is authorized.
