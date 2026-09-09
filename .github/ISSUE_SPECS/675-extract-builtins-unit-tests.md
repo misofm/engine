@@ -101,3 +101,22 @@ Delivery requires exact-head/current-main PR-readiness review, required PR
 qualification, fresh guarded merge review, ordered-parent verification,
 post-main qualification, GitHub/tracker synchronization, and removal only of a
 clean delivered worktree. Failed/stopped worktrees and evidence stay preserved.
+
+## Attempt 1 authorization
+
+Astra LOW returned **SCOPE PASS** at exact clean pushed feature
+`e02bbb729c1f8cb80506129ef71e6335d26df20c`, current main
+`acd625d72a57f83f50f26279717464744504b4c4`, and synchronized tracker
+`6c4578629ba165b86ab4f3756dea136e41bcaafd`. GitHub parity, #672/#675
+disjointness, the unique marker/EOF, base/prefix/deindent identities, nine ordered
+tests, forbidden-construct absence, formatted hash, and fresh evidence path all
+independently reproduce. This is a separate builtins slice, not a #674 retry.
+
+Only Luna HIGH `issue675_luna_impl` may perform attempt 1: persist clean pre-edit
+evidence, make the exact extraction, capture the pinned formatting transformation,
+enforce the two-source-path fence, and run all eight gates once with explicit
+failure propagation. The direct per-command records are the proportionate
+evidence; no recursive ledger is required. Stop on any failure and return the
+coherent tranche to root for checkpoint. Root owns commits and trackers. No
+production, artifact, AudioWorklet, pin, timing, performance, or unrelated path
+change is authorized.
