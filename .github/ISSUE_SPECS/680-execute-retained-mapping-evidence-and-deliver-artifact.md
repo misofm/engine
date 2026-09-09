@@ -522,6 +522,64 @@ in the three external manifest paths. Require every covered file and the manifes
 ordinary and non-symlink, status 0, empty stderr, exact path sets, 14 manifest
 rows, and 14 verification rows. Preserve every partial record on failure.
 
+## Attempt 2 outcome and final attempt 3
+
+Attempt 2 is **FAIL / consumed procedurally**. The self-test and production
+verifier each returned status 0 with empty stderr and their exact terminal PASS;
+production finished at `2026-09-09T07:44:59Z`. The executor inspected the
+directory before its still-running production shell wrote status and finish, so
+the reported 12-file census was only premature and is not a verifier or manifest
+failure. The independent blocker is that the executor first wrote a deliberately
+wrong commit into `03-production.command` and used `sed` to correct it before the
+actual invocation. The current record matches the exact command that ran, but
+the original bytes were not preserved. Astra LOW therefore returned EVIDENCE
+FAIL and forbade attempt-2 manifest continuation. Do not edit or regenerate any
+of the 14 records and do not rerun either verifier command.
+
+The preserved ordinary non-symlink records now have these exact frozen
+identities (`sha256`, size, mode, filename):
+
+```text
+f444728bb84ceed8a04138c9a4644b2e8b3839395013e8de04b8da787ae87b3d 1227 0600 00-preflight.txt
+69decc61a028ff1292c54eb2149e4163f8052556d7b187033e29069844d07c28 220 0664 01-selftest.command
+d4cfd3928a97e81bddf4dfaca62ac76ce8d600ad14fb292f71c8456ddc4601c5 21 0664 01-selftest.start
+956fa78ddeef67445e050943d660ddcca5e3a6afdb866b6aa368cfd7e0107f57 5417 0664 01-selftest.stdout
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 0664 01-selftest.stderr
+9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa 2 0664 01-selftest.status
+439cbec8c958d497d628c9102862152ca585f9bb7dfbe1dee1b2b65d83137836 21 0664 01-selftest.finish
+38711925e89a88931beadb16e84989425d33bab996d8d6cbefed07933bf9cb95 695 0664 02-preproduction.txt
+81599e29f1f8af8a1b3bccfc7800294d120ef5f65e261b6a21938825091bc785 402 0664 03-production.command
+4a8ab5763668f7194a68bfe9f253ce63350d1c2584c359d47524a2e150f775b1 21 0664 03-production.start
+8447606383a80817feba020b956d5d53c5a5c29502d31def5ad8e7331f6d45ae 9494709 0664 03-production.stdout
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 0664 03-production.stderr
+9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa 2 0664 03-production.status
+6dc6e5a9b8824f03ec85a4616067b6fa16af0cac2fecf7c5d1373d191a550f07 21 0664 03-production.finish
+```
+
+Attempt 3 is the hard final attempt and owns only the never-started manifest
+phase. Before execution, root pushes and synchronizes this amendment and Astra
+LOW returns a fresh exact-head SCOPE PASS. That review must revalidate the exact
+14 identities above, directory mode `0700`, status/PASS/stderr/control facts,
+feature/tracker/main/authority/verifier identities, no competing writer, and
+absence under both `test -e` and `test -L` of `SHA256SUMS` plus fresh external
+paths `/tmp/issue680-attempt3-manifest.stdout`,
+`/tmp/issue680-attempt3-manifest.stderr`, and
+`/tmp/issue680-attempt3-manifest.status`.
+
+Only Luna HIGH `/root/issue583_luna_impl` may then execute. It must use the exact
+14 bytewise-ordered `./filename` arguments in one direct `sha256sum` invocation
+and exclusively create `SHA256SUMS`; any mismatch or failure preserves the
+partial and stops. It then makes the 14 inputs and manifest mode `0444` and the
+directory mode `0555`. From that directory it runs direct
+`sha256sum -c SHA256SUMS` exactly once, redirecting complete stdout/stderr to the
+two fresh external files and recording the tool-reported numeric status in the
+third. Acceptance requires 14 exact manifest rows, 14 exact `./filename: OK`
+rows, status 0, empty stderr, unchanged input hashes, and no extra entry. The
+three external captures become mode `0444`. Any failure exhausts #680; no
+correction, retry, verifier invocation, product gate, cleanup, or promotion is
+authorized by this stage. A successful run receives Astra LOW EVIDENCE review
+before the separately scoped three-file promotion.
+
 The complete reviewed verifier bytes follow verbatim:
 
 ```python
