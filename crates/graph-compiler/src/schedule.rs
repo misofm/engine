@@ -7,62 +7,77 @@ use super::*;
 use crate::ids::port;
 
 pub(crate) fn topo(nodes: &[GraphNode], edges: &[GraphEdge]) -> Option<Vec<DependencyLevel>> {
-    let mut degree: BTreeMap<_, u64> = nodes.iter().map(|node| (node.id.clone(), 0)).collect();
-    let mut successors: BTreeMap<_, Vec<_>> = nodes
-        .iter()
-        .map(|node| (node.id.clone(), Vec::new()))
-        .collect();
-    let mut predecessors: BTreeMap<_, Vec<_>> = nodes
-        .iter()
-        .map(|node| (node.id.clone(), Vec::new()))
-        .collect();
-    for edge in edges {
-        *degree.get_mut(&edge.destination.node)? += 1;
-        successors
-            .get_mut(&edge.source.node)?
-            .push(edge.destination.node.clone());
-        predecessors
-            .get_mut(&edge.destination.node)?
-            .push(edge.source.node.clone());
+    // Dense indices follow GraphNodeId order, so integer ready membership preserves the
+    // existing deterministic tie-break without owning graph identities in scratch state.
+    let mut ordered: Vec<usize> = (0..nodes.len()).collect();
+    ordered.sort_unstable_by(|left, right| nodes[*left].id.cmp(&nodes[*right].id));
+    let mut dense_by_id = BTreeMap::<&GraphNodeId, usize>::new();
+    for (dense, &node_index) in ordered.iter().enumerate() {
+        if dense_by_id.insert(&nodes[node_index].id, dense).is_some() {
+            return None;
+        }
     }
-    let mut ready: BTreeSet<_> = degree
+
+    let mut degree = vec![0_u64; nodes.len()];
+    let mut successors = vec![Vec::<usize>::new(); nodes.len()];
+    let mut predecessors = vec![Vec::<usize>::new(); nodes.len()];
+    for edge in edges {
+        let source = *dense_by_id.get(&edge.source.node)?;
+        let destination = *dense_by_id.get(&edge.destination.node)?;
+        degree[destination] = degree[destination].checked_add(1)?;
+        successors[source].push(destination);
+        predecessors[destination].push(source);
+    }
+    let mut ready: BTreeSet<usize> = degree
         .iter()
-        .filter_map(|(id, degree)| (*degree == 0).then_some(id.clone()))
+        .enumerate()
+        .filter_map(|(dense, degree)| (*degree == 0).then_some(dense))
         .collect();
     let mut processed = 0_usize;
-    let mut levels = BTreeMap::<u64, Vec<GraphNodeId>>::new();
-    let mut node_levels = BTreeMap::new();
+    let mut levels = Vec::<Vec<usize>>::new();
+    let mut node_levels = vec![None::<u64>; nodes.len()];
     while let Some(node) = ready.pop_first() {
-        let level = predecessors[&node]
+        let level = predecessors[node]
             .iter()
-            .filter_map(|predecessor| node_levels.get(predecessor))
-            .copied()
+            .filter_map(|&predecessor| node_levels[predecessor])
             .max()
-            .map_or(0, |value| value + 1);
-        node_levels.insert(node.clone(), level);
-        levels.entry(level).or_default().push(node.clone());
+            .map_or(Some(0), |value| value.checked_add(1))?;
+        let level_index = usize::try_from(level).ok()?;
+        let level_count = level_index.checked_add(1)?;
+        if levels.len() < level_count {
+            levels.resize_with(level_count, Vec::new);
+        }
+        node_levels[node] = Some(level);
+        levels[level_index].push(node);
         processed += 1;
-        for successor in &successors[&node] {
-            let degree = degree.get_mut(successor)?;
-            *degree -= 1;
+        for successor in &successors[node] {
+            let degree = degree.get_mut(*successor)?;
+            *degree = degree.checked_sub(1)?;
             if *degree == 0 {
-                ready.insert(successor.clone());
+                ready.insert(*successor);
             }
         }
     }
     if processed != nodes.len() {
-        None
-    } else {
-        for nodes in levels.values_mut() {
-            nodes.sort();
-        }
-        Some(
-            levels
-                .into_iter()
-                .map(|(level, nodes)| DependencyLevel { level, nodes })
-                .collect(),
-        )
+        return None;
     }
+
+    Some(
+        levels
+            .into_iter()
+            .enumerate()
+            .map(|(level, mut dense_nodes)| {
+                dense_nodes.sort_unstable();
+                DependencyLevel {
+                    level: level as u64,
+                    nodes: dense_nodes
+                        .into_iter()
+                        .map(|dense| nodes[ordered[dense]].id.clone())
+                        .collect(),
+                }
+            })
+            .collect(),
+    )
 }
 #[cfg(test)]
 pub(crate) fn cycle_witness(
