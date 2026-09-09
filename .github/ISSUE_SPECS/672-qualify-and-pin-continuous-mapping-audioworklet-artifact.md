@@ -392,7 +392,10 @@ separately gated.
 
 ## Pre-pin attempt 1 — EVIDENCE FAIL
 
-Luna HIGH passed preflight at clean `9729f0448b11b840e249b7a83ee5a31e0dc17e10`.
+Luna HIGH reported passing preflight at clean `9729f0448b11b840e249b7a83ee5a31e0dc17e10`;
+the retained evidence directory contains no durable preflight/context/control
+record, so that statement retains Luna attribution and is not independent
+contemporaneous evidence.
 The frozen verifier self-test, all three fail-closed exports, tar hashes/removal,
 and exact export verification passed. The current-main ordinary builder then ran
 exactly once and returned 0 with the exact six-file set and delivered Wasm digest
@@ -405,3 +408,62 @@ retry ran; the repository remained clean. Preserve `/tmp/issue672-prepin-evidenc
 and `/tmp/issue672-main-artifact` unchanged. Attempt 1 is consumed as an evidence
 failure. Astra LOW must review it before any attempt-2 amendment. No compiler or
 generated artifact payload enters Git, and no promotion is authorized.
+
+## Attempt 1 review and bounded attempt 2
+
+Astra LOW confirmed **ATTEMPT-1 FAIL** at exact clean pushed
+`1d207c54741c1c963db4d8b8d13bd0184bb31e05`. The baseline command has
+contemporaneous timestamps/status 0 and its current six hashes match the retained
+census, but the failed filename reference, absent failure status/final manifest,
+and absent durable preflight/context/control record consume the attempt. Do not
+reconstruct those records or repeat the successful baseline builder.
+
+Attempt 2 preserves every attempt-1 byte and uses its retained main artifact only
+as a read-only comparator. Its exact fresh paths are:
+
+- `/tmp/issue672-attempt2-candidate-pristine`
+- `/tmp/issue672-attempt2-candidate-source`
+- `/tmp/issue672-attempt2-candidate-artifact`
+- `/tmp/issue672-attempt2-candidate-target`
+- `/tmp/issue672-attempt2-evidence`
+- `/tmp/issue672-attempt2-export-verifier.py`
+- `/tmp/issue672-attempt2-verifier-control`
+- `/tmp/issue672-attempt2-manifest-record.txt`
+- `/tmp/issue672-attempt2-manifest-verify.stdout`
+- `/tmp/issue672-attempt2-manifest-verify.status`
+
+Before creation require all nine absent including dangling symlinks, the feature
+clean at its pushed authorization head, `origin/main` exactly `acd625d7`, and no
+competing workload. Record all identity, toolchain, environment, source/config/
+pin byte-shape, path-absence, and harmless capture status-0/status-1 controls
+required by the original preflight in the fresh evidence directory and read each
+back independently.
+
+Read-only reconcile attempt 1: verify the retained literal verifier hash, its
+self-test/status, three export statuses, all retained export identities against
+Git objects, baseline command/timestamps/status, and these exact six comparator
+hashes; record that attempt 1 has no durable original preflight or final manifest:
+
+- `40f6fe2e23e1b47500011c14871750a75922ab194136add8b387a4b40eb56919` ABI JSON
+- `445254e7c6ddf3330bdf20cafa8cacec4d0e2489805f72a833859db52bc038cf` host d.ts
+- `21c8947d8aad2d1d9a23e553c2c7b983dbd5a622aabfbab9a41c622d1a50229a` host JS
+- `225bc06043ed6e2c62a38d63f1c2015b40480d673e3a53109c938eba481556cb` worklet JS
+- `580e3cb4cd11e996598103f27b02d94559f6ef7ad57ef22732d18c0b4f98be10` Wasm
+- `6eac2cb3e30931b6c01b10c63af4eedd2d59337274565a129c7a3f328a09938d` parameter metadata
+
+Write the identical embedded verifier to the new verifier path, require SHA-256
+`2bd12b45cc916faacbb75cda3ae7df48d228022e121da5288f81e46b566f049c`,
+read it back, and run its self-test with the new control directory. Export
+candidate checkpoint `8708c9b9` twice using the original two literal fail-closed
+candidate archive commands with only the attempt-2 paths substituted. Hash then
+delete both tar streams and verify both exports in exact mode.
+
+Continue original steps 3 through 8 exactly once and in order using only the
+attempt-2 candidate source/artifact/target/evidence/verifier/manifest paths. The
+retained `/tmp/issue672-main-artifact` replaces the original main artifact only
+for exact five-file equality and Wasm delta comparison; no command may mutate it.
+All overlay, dependency, static/resource/PCM/SDK, three-browser, final verifier,
+and manifest requirements remain unchanged. Stop on the first failure without
+correction or retry. No repository edit, promotion, post-pin work, PR, or merge
+is authorized until attempt 2 receives fresh Astra LOW scope PASS and then
+pre-pin evidence PASS.
