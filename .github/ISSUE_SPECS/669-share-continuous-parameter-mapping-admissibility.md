@@ -405,3 +405,33 @@ test and mechanical-formatting changes. Production remains frozen. Run the
 frozen eleven gates once after contemporaneous preflight and controls. Any
 unexpected failure exhausts #669 without correction or retry. No artifact, pin,
 PR, merge, or compiler-payload publication is authorized.
+
+## Luna HIGH final attempt 3 checkpoint — FAIL; hard stop
+
+Luna recorded clean pre-edit provenance and numeric 0/1 controls at authorization
+head `d45c17a12a4263ed4138febe6b6f5198e401849c`, with attempts 1–2 preserved and
+all five attempt-3 paths fresh. Production remained unchanged; only the two
+inline test modules and their formatting changed.
+
+The first frozen command, `cargo test --locked -p effect-contract`, returned 101:
+14 tests passed and `typed_public_mapping_matrix_has_independent_expectations`
+failed for `ParameterMapping::Linear` with minimum `0.25`. The table expected the
+whole descriptor to be valid, but public validation returned an error. Luna
+stopped before the borrowed crate or any later gate. No correction, retry,
+manifest, spec edit, commit, or push occurred. Attempt 3 is consumed and #669 is
+hard-stopped; no fourth attempt is permitted.
+
+Attempt-3 evidence and target output remain unchanged at
+`/tmp/issue669-attempt3-evidence` and `/tmp/issue669-attempt3-target`. Root did
+not commit the red test tranche. Its exact two-file patch is preserved at
+`/tmp/issue669-attempt3-failed-source.patch`, SHA-256
+`442ca1b7ccc1aeac7513977cb39ea2ac93dd7938bbe1436bdb659f2da13c56ef`,
+and was verified to reapply cleanly before root restored the last buildable
+checkpoint. The failed source hashes were
+`433701a2000a0404e440a17a88f07a4f26744c06dcbd9e25ab80002cb1b61872` and
+`25706ef4c5bf72a3c4e3d3d2d731f4d01ec65260c68889873af04536171e84b6`.
+No compiler IR, assembly, target output, or temporary evidence is committed.
+
+Astra LOW must review the final failure and define a separately numbered,
+resbriefed successor if the frozen production extraction is to proceed. #669 may
+be closed only as stopped, with no product-delivery credit.
