@@ -131,3 +131,20 @@ Implementation remains unauthorized until the clean pushed brief and synchronize
 available; subsequent attempts follow the repository's three-attempt rule. After
 SOURCE PASS, root owns artifact applicability and any required qualification/pin
 successor. No artifact, pin, PR, or merge work is included in this brief.
+
+## Astra LOW scope review — PASS
+
+Astra LOW returned **SCOPE PASS** at exact clean feature HEAD/upstream
+`a68e418232d9512a86df4cfd2901ee0ec33a66a3`, main merge-base
+`7d16d9c9752c9ac2d31e69008fe075df86ce3c26`, synchronized #670/#559/#560
+bodies, and all five fresh paths absent including symlinks. Independent source
+inspection confirmed precision-1 dB Linear/Exponential accept the proposed
+ordinary values; logarithmic ratio 1.02/precision 3 accepts `1.0/2.0/1.5`; and
+both tiny positive minima retain the intended later-lattice rejection.
+
+Only Luna HIGH `/root/issue583_luna_impl` is authorized for one qualification-
+only attempt limited to inline tests and formatting with production frozen. The
+literal typed diagnostic sets and all 36 public borrowed outcomes are mandatory.
+Run the eleven gates once under the evidence contract and stop on the first
+unexpected failure without correction or retry. Preserve all #669 history and
+temporary records. No artifact, pin, PR, or merge work is authorized.
