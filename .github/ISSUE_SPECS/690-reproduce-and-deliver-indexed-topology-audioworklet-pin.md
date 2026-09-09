@@ -116,10 +116,11 @@ b35ffd0ab935fe5bcd67b29bdb92729ce9776f975a8bc3182fd01798bdfaa03d  02-builder.jso
 c54a61a885866aecf16609c17fb1232a768c0bcf3b297c8fb904ec336de02164  99-terminal-manifest.json
 ```
 
-## Attempt 2: root-owned persistent reproduction
+## Attempt 2: Luna-owned persistent reproduction
 
-Root owns artifact qualification and the long-lived command. Luna performs no
-attempt-2 execution. This section supersedes the earlier Luna ownership wording.
+One named Luna HIGH executor owns artifact qualification and the long-lived
+commands. The root coordinator owns checkpoints, synchronization, and review
+handoffs but performs no attempt-2 execution.
 Attempt 2 owns only these new paths, initially absent including dangling
 symlinks:
 
@@ -134,11 +135,12 @@ matching GitHub/tracker bodies, current main and branch identities, preserved
 attempt-1 records, six authority hashes, and the three absent paths. No
 attempt-2 path may be created before that PASS is recorded and pushed.
 
-Root must then recheck the same identities and absence of relevant processes,
-exclusively create the evidence directory, and durably record the preceding
-three-path absence plus successful creation. Root next exclusively creates the
-artifact path as an empty ordinary directory, verifies it is not a symlink and
-has no entries, and records that result. Leave the target absent for Cargo.
+The named Luna executor must then recheck the same identities and absence of
+relevant processes, exclusively create the evidence directory, and durably
+record the preceding three-path absence plus successful creation. Luna next
+exclusively creates the artifact path as an empty ordinary directory, verifies
+it is not a symlink and has no entries, and records that result. Leave the target
+absent for Cargo.
 
 Run this frozen sequence once:
 
@@ -150,12 +152,12 @@ node hosts/host-web/qualification/generate-matrix.mjs --check
 git diff --check
 ```
 
-Root launches each potentially long command directly with `exec_command`. When
-it returns a session ID, root records the ID and polls that same handle with
-`write_stdin` until an exit code is returned. A poll timeout triggers another
-poll of the same handle. Do not delegate or interrupt the handle, use a shell
-timeout, start a monitor process, retry a command, or run another command while
-the handle is live.
+The named Luna executor launches each potentially long command directly with
+`exec_command`. When it returns a session ID, Luna records the ID and polls that
+same handle with `write_stdin` until an exit code is returned. A poll timeout
+triggers another poll of the same handle. Do not transfer or interrupt the
+handle, use a shell timeout, start a monitor process, retry a command, or run
+another command while the handle is live.
 
 Redirect complete stdout/stderr to the attempt-2 evidence path and record actual
 start, finish, exit status, exact argv/environment/cwd/head, worktree porcelain,
@@ -165,12 +167,12 @@ and absent source-local `target/`. Preserve non-overwriting synchronized records
 and one terminal self-excluding manifest for Astra LOW review. No predecessor
 path, tracked file, compiler capture, generated artifact, or pin may change.
 
-## Attempt-2 scope review — PASS
+## Attempt-2 scope review — superseded without execution
 
 Astra LOW returned **SCOPE PASS** at exact clean pushed issue `0453b71b`,
-tracker `e7053db4`, and unchanged main. GitHub parity held; all three fresh paths
-were absent, no relevant process was active, and attempt-1 plus six-file
-authority hashes reproduced. Root alone may create the attempt-2 paths and run
-the five frozen commands through directly polled unified sessions. No Luna
-execution, monitor, timeout, interruption, retry, tracked output, or predecessor
-mutation is authorized.
+tracker `e7053db4`, and unchanged main for a root-owned execution brief. That
+executor assignment conflicts with the owner's required Luna HIGH routing. No
+fresh path was created and no command ran, so attempt 2 remains unconsumed. This
+amendment supersedes that authorization. A fresh Astra LOW SCOPE PASS against
+the exact clean pushed Luna-owned brief is required and must be recorded and
+pushed before any attempt-2 path is created.
