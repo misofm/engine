@@ -307,18 +307,22 @@ newline shape, literal environment, clean tree, and unchanged builder/copied
 inputs. Verify absence including dangling symlinks of
 `/tmp/issue670-artifact-probe-output` and
 `/tmp/issue670-artifact-probe-evidence`. Prove harmless capture statuses 0 and 1
-and read both back, then create the output/evidence directories once.
+and read both back, then create the output/evidence directories once. Immediately
+before invocation, verify that the output path is an existing empty non-symlink
+directory.
 
 Run exactly once:
 
 `MISO_ENGINE_WEB_AUDIOWORKLET_REPIN=1 bash scripts/build-web-audioworklet.sh /tmp/issue670-artifact-probe-output`
 
-Require status 0, stdout exactly one lowercase 64-hex digest plus LF, empty
-stderr, an empty output directory, unchanged repository/pin, and no competing
-Cargo/rustc process. Capture complete stdout/stderr/status/context/postflight and
-hashes in a finalized self-excluding manifest whose verification status and hash
-are recorded outside the evidence directory. Stop on any failed precondition or
-result without correction or retry.
+Require status 0, stdout exactly one lowercase 64-hex digest plus LF, an empty
+output directory, unchanged repository/pin, and no competing Cargo/rustc process.
+Retain complete stderr and inspect it for unrelated errors without requiring it
+to be empty or suppressing the unchanged builder's normal Cargo progress. Capture
+complete stdout/stderr/status/context/postflight and hashes in a finalized self-
+excluding manifest whose verification status and hash are recorded outside the
+evidence directory. Stop on any failed precondition or result without correction
+or retry.
 
 Do not run the ordinary builder, inspect or retain its temporary Cargo target,
 create a six-file candidate, edit the pin, or invoke static/resource/browser/SDK
@@ -331,3 +335,12 @@ benchmark, timing, allocation, or performance evidence enters Git.
 
 The probe is unauthorized until this pushed amendment and synchronized trackers
 receive Astra LOW scope PASS. Source PASS alone does not authorize execution.
+
+## Initial artifact-probe scope review — FAIL
+
+Astra LOW returned **ARTIFACT-PROBE SCOPE FAIL** at exact clean HEAD/upstream
+`901c49cab18efdd8326f2382d5c805c6642d2dc2`. The sole blocker was the brief's
+incorrect empty-stderr requirement: the unchanged Cargo builder writes normal
+progress to stderr. This correction retains and inspects complete stderr without
+suppressing it, and explicitly checks the created output directory is existing,
+empty, and non-symlink immediately before invocation. No probe ran.
