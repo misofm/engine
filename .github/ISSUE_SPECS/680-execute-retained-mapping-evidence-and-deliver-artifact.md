@@ -26,7 +26,7 @@ gate.
 
 Sol HIGH coordinates checkpoints, artifact qualification/pinning, GitHub
 synchronization, PR, merge, and cleanup. Luna HIGH
-`/root/issue583_luna_impl` is the sole attempt-1 executor. Astra LOW performs
+`/root/issue679_luna_verifier` is the sole attempt-1 executor. Astra LOW performs
 scope, evidence, promotion, exact-head/current-main, and delivery review. #680
 is lane B's sole active child; #559 owns coordination only.
 
@@ -62,6 +62,16 @@ The preserved target streamed digest is
 The retained gate root is `/tmp/issue678-attempt3-evidence`; all eight gate and
 postcheck statuses previously returned 0, including Chromium 151.0.7922.34,
 Firefox 153.0, WebKit 26.5, matrix/mutation checks, and SDK packaging.
+
+## Executor handoff
+
+The opening scope review named Luna HIGH `/root/issue583_luna_impl`, but that
+executor is absent from the current collaboration tree and created no preflight,
+control, evidence, or manifest path after authorization. The sole attempt-1 lease
+is therefore transferred before execution to available Luna XHIGH
+`/root/issue679_luna_verifier`. The earlier executor is superseded and must not
+run. All verifier bytes, commands, paths, gates, and stop conditions are unchanged;
+fresh Astra LOW exact-head scope review is mandatory before the new executor acts.
 
 ## Attempt 1
 
